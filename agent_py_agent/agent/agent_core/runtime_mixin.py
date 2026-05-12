@@ -11,6 +11,7 @@ from __future__ import annotations
 Facade pattern: delegates to service classes in runtime_services.py.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from .runtime_loop_support import (
@@ -69,6 +70,28 @@ class _RunCompatibilityFields:
     recovery_content_paths: list[str] | None = None
     recovery_next_actions: list[str] | None = None
     on_chunk: object = None
+
+
+# LLM: _current_prompt_scope keeps run() flat while preserving the legacy _current_user_prompt behavior.
+# 函数用途: 在一次 run 内设置当前用户 prompt，退出时恢复旧值或删除临时字段。
+@contextmanager
+def _current_prompt_scope(agent, user_prompt: str):
+    had_current_prompt = hasattr(agent, "_current_user_prompt")
+    previous_current_prompt = getattr(agent, "_current_user_prompt", "")
+    agent._current_user_prompt = user_prompt
+    try:
+        yield
+    finally:
+        _restore_current_prompt(agent, had_current_prompt, previous_current_prompt)
+
+
+# LLM: _restore_current_prompt keeps the context manager below nesting limits.
+# 函数用途: 退出 run 作用域时恢复旧 prompt；旧字段不存在时删除临时字段。
+def _restore_current_prompt(agent, had_current_prompt: bool, previous_current_prompt: str) -> None:
+    if had_current_prompt:
+        agent._current_user_prompt = previous_current_prompt
+    elif hasattr(agent, "_current_user_prompt"):
+        delattr(agent, "_current_user_prompt")
 
 
 # LLM: SimpleAgentRuntimeMixin 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -153,17 +176,18 @@ class SimpleAgentRuntimeMixin:
                 recovery_content_paths, recovery_next_actions, on_chunk
             ),
         )
-        prepared = _prepare_runtime_context(self, user_prompt, params.inject, params.resume_context)
-        loop_result = _execute_runtime_loop(
-            self,
-            _runtime_loop_params(
-                user_prompt,
-                prepared,
-                params,
-            ),
-        )
-        ctx = self._build_finalize_context(_finalize_params(user_prompt, prepared, loop_result, params))
-        return self._get_services().finalization.finalize(ctx)
+        with _current_prompt_scope(self, user_prompt):
+            prepared = _prepare_runtime_context(self, user_prompt, params.inject, params.resume_context)
+            loop_result = _execute_runtime_loop(
+                self,
+                _runtime_loop_params(
+                    user_prompt,
+                    prepared,
+                    params,
+                ),
+            )
+            ctx = self._build_finalize_context(_finalize_params(user_prompt, prepared, loop_result, params))
+            return self._get_services().finalization.finalize(ctx)
 
     # LLM: _build_finalize_context 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 构建finalize上下文所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。

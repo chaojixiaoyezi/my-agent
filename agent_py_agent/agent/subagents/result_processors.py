@@ -28,6 +28,7 @@ from .result_structured import (
     _process_evidence_items,
     _process_structured_output,
     _split_tools_and_skills,
+    merge_actual_tools_for_unparsed,
 )
 
 
@@ -117,6 +118,7 @@ __all__ = [
     "_process_evidence_items",
     "_process_structured_output",
     "_split_tools_and_skills",
+    "merge_actual_tools_for_unparsed",
     "_status_from_structured_output",
     "_verification_from_runner_status",
     "_write_runner_result_files",

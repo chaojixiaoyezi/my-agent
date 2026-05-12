@@ -9,44 +9,13 @@ from typing import Any
 
 from ..models import SubAgentTask
 from .base import _extract_write_dirs
+from .hierarchy_domain_terms import (
+    COORDINATION_ROLE_TOKENS,
+    DOMAIN_STOPWORDS,
+    FORBIDDEN_SCOPE_GENERIC_TERMS,
+)
 from .hierarchy_leaf_targets import LeafTargetDedupeRequest, duplicate_verified_leaf_target_reason
 from .hierarchy_write_policy import inherited_extra_write_roots
-
-_DOMAIN_STOPWORDS = {
-    "agent",
-    "acceptor",
-    "build",
-    "child",
-    "checker",
-    "coordinator",
-    "deliverables",
-    "grand",
-    "grandchild",
-    "html",
-    "implementer",
-    "lead",
-    "leaf",
-    "one",
-    "page",
-    "reporter",
-    "reviewer",
-    "runner",
-    "subagent",
-    "task",
-    "tester",
-    "three",
-    "two",
-    "worker",
-}
-_COORDINATION_ROLE_TOKENS = {
-    "acceptor",
-    "checker",
-    "coordinator",
-    "lead",
-    "reporter",
-    "reviewer",
-    "tester",
-}
 
 
 # LLM: schedule_block_reason keeps guard checks deterministic and side-effect free.
@@ -131,7 +100,7 @@ def _existing_coordination_children(manager: Any, parent: SubAgentTask) -> list[
 # 函数用途: 只给协调/测试/验收类节点做同域去重，避免多个同域 worker 被误挡。
 def _is_coordination_like(item: Any) -> bool:
     text = f"{getattr(item, 'role', '')} {getattr(item, 'agent_name', '')}".lower()
-    return any(token in text for token in _COORDINATION_ROLE_TOKENS)
+    return any(token in text for token in COORDINATION_ROLE_TOKENS)
 
 
 # LLM: _is_leaf_like detects implementation leaves without looking at broad goal prose.
@@ -148,7 +117,7 @@ def _child_domain_tokens(item: Any) -> set[str]:
     label_tokens = _domain_tokens(label_text)
     if label_tokens:
         return label_tokens
-    return _domain_tokens(str(getattr(item, "goal", "")).lower())
+    return _domain_tokens(_goal_domain_text(str(getattr(item, "goal", "")).lower()))
 
 
 # LLM: _domain_tokens removes generic role/path words before duplicate-domain comparison.
@@ -157,8 +126,20 @@ def _domain_tokens(text: str) -> set[str]:
     tokens = re.findall(r"[a-z][a-z0-9]+", text)
     return {
         token for token in tokens
-        if token not in _DOMAIN_STOPWORDS and not _looks_generated_id_token(token)
+        if token not in DOMAIN_STOPWORDS and not _looks_generated_id_token(token)
     }
+
+
+# LLM: _goal_domain_text strips inherited paths before goal fallback domain detection.
+# 函数用途: duplicate-domain 兜底看 goal 时，去掉共享目录、文件名和继承块，避免 `/my-终端应用/...` 变成领域词。
+def _goal_domain_text(text: str) -> str:
+    head = re.split(r"\n\s*继承父级目标/边界|\n\s*父级必需文件/产物名|\n\s*父级禁止文件/反例名", text, maxsplit=1)[0]
+    without_paths = re.sub(r"(?:~|/)[^\s，。；;、)）]+", " ", head)
+    return re.sub(
+        r"\b[A-Za-z0-9][A-Za-z0-9_.-]*\.(?:html?|css|js|json|md|py|txt|ya?ml)\b",
+        " ",
+        without_paths,
+    )
 
 
 # LLM: _looks_generated_id_token prevents run-id fragments from becoming business domains.
@@ -209,7 +190,7 @@ def _is_leaf_without_coordination_role(spec: Any) -> bool:
 # 函数用途: 只在用户/父级写明要四层链路时启用层级约束，普通 root 仍可直接创建 worker。
 def _goal_requires_four_layer_chain(goal: str) -> bool:
     lowered = str(goal or "").lower()
-    return any(token in lowered for token in ("4 层", "四层", "孙孙", "great-grandchild", "root ->"))
+    return any(token in lowered for token in ("4 层", "4层", "四层", "孙孙", "great-grandchild", "root ->", "depth=3"))
 
 
 # LLM: _child_write_root_drift_reason blocks model-invented sibling output paths before child runs exist.
@@ -219,7 +200,7 @@ def _child_write_root_drift_reason(parent: SubAgentTask, request: Any) -> str:
     if not valid_roots:
         return ""
     for spec in request.child_specs:
-        invalid = _invalid_child_write_roots(spec, valid_roots)
+        invalid = _invalid_child_write_roots(spec, valid_roots, _internal_context_roots(parent))
         if invalid:
             return (
                 "child_write_root_drift:"
@@ -232,13 +213,29 @@ def _child_write_root_drift_reason(parent: SubAgentTask, request: Any) -> str:
 
 # LLM: _invalid_child_write_roots compares model-proposed roots against inherited product roots literally.
 # 函数用途: 找出 child goal/extra_write_roots 里不在父级产物根下的本地路径。
-def _invalid_child_write_roots(spec: Any, valid_roots: list[str]) -> list[str]:
+def _invalid_child_write_roots(spec: Any, valid_roots: list[str], internal_roots: list[str] | None = None) -> list[str]:
     invalid: list[str] = []
     for raw in [*getattr(spec, "extra_write_roots", []), *_extract_write_dirs(getattr(spec, "goal", ""))]:
         text = str(raw or "").rstrip("/")
-        if text and not _is_under_any_write_root(text, valid_roots) and text not in invalid:
+        if (
+            text
+            and not _is_under_any_write_root(text, valid_roots)
+            and not _is_under_any_write_root(text, internal_roots or [])
+            and text not in invalid
+        ):
             invalid.append(text)
     return invalid
+
+
+# LLM: _internal_context_roots prevents task/run workspace references from looking like product-root drift.
+# 函数用途: child goal 可以提到父级 task_dir 或 agent workspace 作为上下文，但这些内部目录不能被当成用户产物根漂移。
+def _internal_context_roots(parent: SubAgentTask) -> list[str]:
+    roots: list[str] = []
+    for field_name in ("task_dir", "task_workspace_dir", "agent_run_workspace_dir"):
+        value = str(getattr(parent, field_name, "") or "").rstrip("/")
+        if value and value not in roots:
+            roots.append(value)
+    return roots
 
 
 # LLM: _is_under_any_write_root treats non-existing files/directories as path facts without touching disk.
@@ -284,7 +281,13 @@ def _forbidden_scope_terms(parent: SubAgentTask) -> list[str]:
         return []
     text = str(parent.goal or "").lower()
     terms = re.findall(r"(?:不得|不能|不要)\s*创建\s*([a-zA-Z0-9_-]+)", text)
-    return list(dict.fromkeys(term.strip("_-") for term in terms if term.strip("_-")))
+    return list(
+        dict.fromkeys(
+            term
+            for raw in terms
+            if (term := raw.strip("_-")) and term not in FORBIDDEN_SCOPE_GENERIC_TERMS
+        )
+    )
 
 
 # LLM: _child_scope_text keeps forbidden-scope matching limited to the requested child spec.

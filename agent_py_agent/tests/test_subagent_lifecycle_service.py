@@ -84,6 +84,40 @@ def test_subagent_lifecycle_service_ignores_future_capability_fields(tmp_path) -
     assert loaded.capability_requests[0].requested_commands == ["pwd"]
 
 
+def test_subagent_lifecycle_service_dedupes_equivalent_capability_requests(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(goal="dedupe capability requests", thought="avoid repeats", plan=["record"])
+    params = RecordCapabilityRequestParams(
+        problem="need controlled shell",
+        needed_capability="controlled_exec",
+        capability_type="shell",
+        requested_tools=["controlled_exec"],
+        requested_commands=["python3 -c \"print(1)\"", "rm stale.txt"],
+        path_scope=[str(tmp_path)],
+        output_budget={"stdout_bytes": 4096},
+        risk_level="low",
+    )
+
+    first = manager.record_capability_request(task.id, params)
+    second = manager.record_capability_request(
+        task.id,
+        RecordCapabilityRequestParams(
+            problem="same request in different words",
+            needed_capability="controlled_exec",
+            capability_type="shell",
+            requested_tools=["controlled_exec"],
+            requested_commands=["rm", "python3"],
+            path_scope=[str(tmp_path)],
+            output_budget={"stdout_bytes": 4096},
+            risk_level="low",
+        ),
+    )
+
+    loaded = manager.load(task.id)
+    assert second.id == first.id
+    assert len(loaded.capability_requests) == 1
+
+
 def test_subagent_lifecycle_service_blocks_done_without_evidence(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(goal="service lifecycle", thought="keep API", plan=["record"])

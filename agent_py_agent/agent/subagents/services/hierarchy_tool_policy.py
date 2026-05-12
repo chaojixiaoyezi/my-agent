@@ -17,6 +17,7 @@ _DEFAULT_LEAF_CODING_TOOLS = [
     "write_file",
     "append_file",
     "replace_in_file",
+    "capability_request",
 ]
 _LEAF_ORCHESTRATION_TOOLS = {"schedule_child_subagents", "dispatch_subagents", "subagent_board"}
 _TOOL_NAME_ALIASES = {

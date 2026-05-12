@@ -188,6 +188,9 @@ def test_parse_error_hint_recommends_append_for_truncated_write():
     assert calls[0]["tool"] == "__parse_error__"
     assert result.ok is False
     assert "append_file 分块追加内容" in result.output
+    assert "1500-2000 字符" in result.output
+    assert "不超过 800 字符" in result.output
+    assert "只能输出 1 个 write_file/append_file" in result.output
 
 
 def test_tool_spec_catalog_entry_includes_first_example():

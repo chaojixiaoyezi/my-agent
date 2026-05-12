@@ -16,6 +16,7 @@ from pathlib import Path
 
 from ..capabilities import CapabilitySearchHit
 from ..capability_config import CapabilityConfig
+from .capability_status import is_pending_capability_status
 from .models import CapabilityGrant, CapabilityRequest, SubAgentParsedOutput, SubAgentTask
 from .reports import ActionPlanItem, DueCheckIssue, SubAgentBoardItem
 
@@ -203,6 +204,8 @@ def _status_from_structured_output(parsed: SubAgentParsedOutput) -> str:
 
     status = parsed.status.upper().strip()
     if parsed.capability_requests or parsed.blocked_reason:
+        return "BLOCKED"
+    if is_pending_capability_status(status):
         return "BLOCKED"
     if status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
         return status

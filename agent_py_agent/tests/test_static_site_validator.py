@@ -77,6 +77,33 @@ def test_static_site_check_blocks_common_generated_site_failures(tmp_path):
     assert record.validation_result["placeholder_hits"] == ["order-success.html"]
 
 
+# LLM: R59 shopping E2E generated loginForm/registerForm but JS bound login-form/register-form.
+# 函数用途: 父级静态验收要能发现表单 id 和本地 app.js 绑定目标不一致，避免按钮假可用。
+def test_static_site_check_blocks_missing_validate_form_targets(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "login.html": '<form id="loginForm"><button type="submit">登录</button><script src="app.js"></script>',
+            "app.js": "document.addEventListener('DOMContentLoaded',()=>{validateForm('login-form')});",
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "broken form binding",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["login.html", "app.js"],
+        }
+    )
+
+    assert record.executed is True
+    assert record.passed is False
+    assert "form_binding_hits=1" in record.error
+    assert record.validation_result["form_binding_hits"] == ["validateForm:login-form"]
+
+
 # LLM: test_static_site_check_allows_javascript_template_literals preserves real shop pages.
 # 函数用途: JS 运行时模板字符串可以包含 `${...}`，但不应被当成未替换的 HTML 占位符。
 def test_static_site_check_allows_javascript_template_literals(tmp_path):

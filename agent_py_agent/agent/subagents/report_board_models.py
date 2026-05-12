@@ -36,6 +36,8 @@ class SubAgentBoardItem:
     risk_flags: list[str]
     task_dir: str
     output_json: str
+    agent_name: str = ""
+    role: str = ""
     # LLM: board rows expose task-tree evidence and child state without reading logs.
     evidence_packet_count: int = 0
     finding_count: int = 0

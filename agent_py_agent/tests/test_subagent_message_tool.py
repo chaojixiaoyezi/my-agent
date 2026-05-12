@@ -74,6 +74,34 @@ def test_direct_message_allows_ancestor_to_descendant(tmp_path):
     assert message["scope_root_run_id"] == root.id
 
 
+# LLM: test_direct_message_accepts_bundle_payload covers real runner calls that follow bundle interface rules.
+# 函数用途: 验证 subagent_message 能读取 orchestration bundle 里的 mode/topic/body/target_run_ids，避免模型按 bundle 规范调用时被误判缺字段。
+def test_direct_message_accepts_bundle_payload(tmp_path):
+    agent, manager = _manager_agent(tmp_path)
+    root = manager.create_run(goal="root", thought="coordinate", plan=["split"], role="coordinator")
+    child = _schedule_child(manager, root.id, role="child_coordinator", name="child-lead")
+
+    result = SubagentMessageTool(agent).execute(
+        {
+            "orchestration": {
+                "sender_run_id": root.id,
+                "mode": "direct",
+                "scope": "descendants",
+                "target_run_ids": [child.id],
+                "topic": "authorization_reminder",
+                "body": "controlled_exec 必须等待父级 grant，不能自填授权。",
+                "requires_ack": True,
+            },
+            "filesystem": {"write_root": str(tmp_path)},
+        }
+    )
+
+    assert result.ok is True
+    message = json.loads(Path(json.loads(result.output)["refs"]["target_inboxes"][0]).read_text(encoding="utf-8"))
+    assert message["topic"] == "authorization_reminder"
+    assert message["requires_ack"] is True
+
+
 # LLM: test_direct_message_allows_peers_under_same_parent reserves the future team discussion lane.
 # 函数用途: 同父级 sibling 可以点对点讨论，但不是广播到全树。
 def test_direct_message_allows_peers_under_same_parent(tmp_path):

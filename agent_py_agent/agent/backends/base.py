@@ -232,18 +232,16 @@ class AnthropicCompatibleBackend(HttpBackend):
         }
         if self.stream_enabled:
             return self._generate_stream(payload, headers, on_chunk=on_chunk)
-        obj = self.request_json("/v1/messages", payload, headers)
-        try:
-            parts = obj.get("content", [])
-            text = "".join(
-                part.get("text", "")
-                for part in parts
-                if part.get("type") in (None, "text")
-            )
-            if not text and "completion" in obj:
-                text = obj["completion"]
-        except Exception as exc:
-            raise RuntimeError(f"无法解析 Anthropic-compatible 响应: {obj}") from exc
+        obj: dict[str, Any] = {}
+        text = ""
+        for attempt in range(2):
+            obj = self.request_json("/v1/messages", payload, headers)
+            try:
+                text = _anthropic_text_from_response(obj)
+            except Exception as exc:
+                raise RuntimeError(f"无法解析 Anthropic-compatible 响应: {obj}") from exc
+            if text or attempt > 0 or not _anthropic_has_thinking_without_text(obj):
+                break
         if not text:
             raise RuntimeError(f"Anthropic-compatible 响应没有文本内容: {obj}")
         return ModelResponse(text=text, backend=self.name)
@@ -269,6 +267,29 @@ class AnthropicCompatibleBackend(HttpBackend):
         if not text:
             raise RuntimeError("Anthropic-compatible 流式响应没有文本内容")
         return ModelResponse(text=text, backend=self.name)
+
+
+# LLM: _anthropic_text_from_response extracts only assistant-visible text from messages payloads.
+# 函数用途: 解析 Anthropic-compatible 非流式响应，兼容 content text 和旧 completion 字段。
+def _anthropic_text_from_response(obj: dict[str, Any]) -> str:
+    parts = obj.get("content", [])
+    text = "".join(
+        part.get("text", "")
+        for part in parts
+        if isinstance(part, dict) and part.get("type") in (None, "text")
+    )
+    if not text and "completion" in obj:
+        text = obj["completion"]
+    return str(text or "")
+
+
+# LLM: _anthropic_has_thinking_without_text identifies transient MiniMax/Anthropic-compatible shapes.
+# 函数用途: 模型偶尔只返回 thinking block 时触发一次非流式重试，避免把可恢复空正文直接打成 runner 失败。
+def _anthropic_has_thinking_without_text(obj: dict[str, Any]) -> bool:
+    parts = obj.get("content", [])
+    if not isinstance(parts, list):
+        return False
+    return any(isinstance(part, dict) and "thinking" in part for part in parts)
 
 
 # LLM: get_backend 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。

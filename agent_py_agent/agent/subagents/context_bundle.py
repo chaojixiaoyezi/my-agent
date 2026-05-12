@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .controlled_exec_gateway import controlled_exec_grant_refs
 from .models import SubAgentTask
 from .required_file_terms import forbidden_file_terms_from_text, required_file_terms_from_text
 
@@ -154,13 +155,14 @@ def context_gate_prompt_lines(context_bundle: dict[str, object]) -> list[str]:
     ]
 
 
-# LLM: _permissions separates tool/skill access from task instructions so users do not hand-configure every worker.
-# 函数用途: 汇总子代理授权工具和技能；空列表表示后续策略可自动判断，不代表模型能越权。
+# LLM: _permissions separates tool/skill access and controlled exec grants from task instructions.
+# 函数用途: 汇总子代理授权工具、技能和受控 exec grant refs；空列表表示后续策略可自动判断，不代表模型能越权。
 def _permissions(task: SubAgentTask) -> dict[str, object]:
     return {
         "allowed_tools": list(task.allowed_tools or []),
         "allowed_skills": list(task.allowed_skills or []),
         "capability_grants": [grant.id for grant in task.capability_grants],
+        "controlled_exec_grants": controlled_exec_grant_refs(list(task.capability_grants or [])),
     }
 
 

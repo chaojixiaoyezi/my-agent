@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 
 from ..backends import ModelResponse
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
@@ -14,18 +13,17 @@ from ..tools import ToolExecutionResult
 from ._runtime_params import ToolLoopExecuteParams
 from .parameters import _one_shot_tool_call_key
 from .runner_stage_trace import (
-    RunnerModelStageTraceRequest,
     RunnerToolStageTraceRequest,
-    trace_runner_model_request_failed,
-    trace_runner_model_request_started,
-    trace_runner_model_response_received,
     trace_runner_tool_call_finished,
     trace_runner_tool_call_started,
 )
+from .subagent_attempt_guard import stale_subagent_attempt_result
+from .subagent_dispatch_closeout import subagent_dispatch_limit_response
 from .tool_agent_budget_stage import ToolAgentBudgetStageRequest, maybe_block_tool_agent_budget
 from .tool_call_context_reducer import render_tool_payload_for_live_prompt
 from .tool_context_reducer import render_tool_result_for_live_prompt
 from .tool_loop_completion import ToolRoundCompletionRequest, completion_response_after_tool_round
+from .tool_model_generation import ModelGenerateParams, generate_model_response
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 from .tool_round_execution import (
     ToolCallExecuteParams,
@@ -33,16 +31,6 @@ from .tool_round_execution import (
     ToolRoundExecutionRequest,
     execute_tool_round,
 )
-
-
-# LLM: ModelGenerateParams bundles backend generation inputs for trace and bundle-interface guard.
-# 类用途: 模型生成参数包，集中 agent、运行参数、prompt 和当前工具轮次。
-@dataclass(frozen=True)
-class ModelGenerateParams:
-    agent: object
-    params: ToolLoopExecuteParams
-    prompt: str
-    tool_rounds: int
 
 
 # LLM: _build_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -65,7 +53,7 @@ def _build_prompt(agent, params: ToolLoopExecuteParams) -> str:
 # 函数用途: 构建下一轮 prompt 并调用模型，返回 prompt 和 response 给工具循环使用。
 def _next_model_response(agent, params: ToolLoopExecuteParams, tool_rounds: int):
     prompt = _build_prompt(agent, params)
-    response = _generate_model_response(
+    response = generate_model_response(
         ModelGenerateParams(
             agent=agent,
             params=params,
@@ -86,6 +74,19 @@ def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
     return effective
 
 
+# LLM: _executed_subagent_orchestration gates deterministic limit closeout to subagent workflows.
+# 函数用途: 只有本轮实际碰过子代理编排工具时，工具上限才改用 subagent task.json 事实报告。
+def _executed_subagent_orchestration(params: ToolLoopExecuteParams) -> bool:
+    orchestration_tools = {
+        "create_subagents",
+        "dispatch_subagents",
+        "schedule_child_subagents",
+        "subagent_board",
+        "subagent_message",
+    }
+    return any(str(item or "") in orchestration_tools for item in params.executed_tools or [])
+
+
 # LLM: _duplicate_one_shot_result 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 处理duplicateoneshot结果相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _duplicate_one_shot_result(payload: dict[str, object]) -> ToolExecutionResult:
@@ -96,6 +97,25 @@ def _duplicate_one_shot_result(payload: dict[str, object]) -> ToolExecutionResul
         "本轮已经执行过相同的一次性编排工具调用，系统已阻止重复执行。"
         "请基于前面的工具结果直接给最终回答，不要再次调用同一个工具。",
     )
+
+
+# LLM: _trace_finished_result keeps guard branches short while preserving runner trace symmetry.
+# 函数用途: 工具调用被 guard 提前拦截时，统一写 finished trace 并返回同一个 ToolExecutionResult。
+def _trace_finished_result(
+    trace_request: RunnerToolStageTraceRequest,
+    result: ToolExecutionResult,
+):
+    trace_runner_tool_call_finished(
+        RunnerToolStageTraceRequest(
+            agent=trace_request.agent,
+            params=trace_request.params,
+            tool_rounds=trace_request.tool_rounds,
+            idx=trace_request.idx,
+            payload=trace_request.payload,
+            result=result,
+        )
+    )
+    return result
 
 
 # LLM: ToolLoopService 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -173,8 +193,13 @@ class ToolLoopService:
     # 函数用途: 处理final响应after工具限制相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def _final_response_after_tool_limit(self, params: ToolLoopExecuteParams, tool_rounds: int):
         params.tool_context.append("[tool-system]\n已达到最大工具轮数限制，停止继续调用工具。")
+        if _executed_subagent_orchestration(params):
+            backend = str(getattr(self._agent.backend, "name", "") or "")
+            deterministic = subagent_dispatch_limit_response(self._agent, backend=backend)
+            if deterministic is not None:
+                return _build_prompt(self._agent, params), deterministic
         final_prompt = _build_prompt(self._agent, params)
-        final_response = _generate_model_response(
+        final_response = generate_model_response(
             ModelGenerateParams(
                 agent=self._agent,
                 params=params,
@@ -200,17 +225,10 @@ class ToolLoopService:
         one_shot_key = _one_shot_tool_call_key(payload)
         if one_shot_key and one_shot_key in request.params.one_shot_tool_calls:
             result = _duplicate_one_shot_result(payload)
-            trace_runner_tool_call_finished(
-                RunnerToolStageTraceRequest(
-                    agent=self._agent,
-                    params=request.params,
-                    tool_rounds=request.tool_rounds,
-                    idx=request.idx,
-                    payload=payload,
-                    result=result,
-                )
-            )
-            return result
+            return _trace_finished_result(trace_request, result)
+        stale_result = stale_subagent_attempt_result(self._agent, payload)
+        if stale_result is not None:
+            return _trace_finished_result(trace_request, stale_result)
         budget_result = maybe_block_tool_agent_budget(ToolAgentBudgetStageRequest(self._agent, request, payload))
         if budget_result:
             return budget_result
@@ -320,40 +338,3 @@ def _payload_with_runtime_scope(agent, params: ToolLoopExecuteParams, payload: o
 # 函数用途: 子代理 runner 调用 agent.run(save=False) 时通常不显式传 run_id，这里补当前 runner id。
 def _runtime_run_id(agent, params: ToolLoopExecuteParams) -> str:
     return str(params.run_id or getattr(agent, "_current_subagent_run_id", "") or "")
-
-
-# LLM: _generate_model_response wraps backend calls with refs-only runner stage trace events.
-# 函数用途: 在模型请求前后写 runner 阶段心跳；普通主代理没有 runner id 时不会写 trace。
-def _generate_model_response(request: ModelGenerateParams):
-    trace_runner_model_request_started(
-        RunnerModelStageTraceRequest(
-            agent=request.agent,
-            params=request.params,
-            tool_rounds=request.tool_rounds,
-            prompt=request.prompt,
-        )
-    )
-    try:
-        response = request.agent.backend.generate(
-            request.prompt,
-            on_chunk=request.params.effective_on_chunk,
-        )
-    except Exception as exc:
-        trace_runner_model_request_failed(
-            RunnerModelStageTraceRequest(
-                agent=request.agent,
-                params=request.params,
-                tool_rounds=request.tool_rounds,
-                exc=exc,
-            )
-        )
-        raise
-    trace_runner_model_response_received(
-        RunnerModelStageTraceRequest(
-            agent=request.agent,
-            params=request.params,
-            tool_rounds=request.tool_rounds,
-            response=response,
-        )
-    )
-    return response

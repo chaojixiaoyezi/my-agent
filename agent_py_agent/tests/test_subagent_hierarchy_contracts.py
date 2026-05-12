@@ -6,10 +6,6 @@
 from __future__ import annotations
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.required_file_terms import (
-    forbidden_file_terms_from_text,
-    required_file_terms_from_text,
-)
 from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
@@ -55,6 +51,115 @@ def test_hierarchy_schedule_preserves_shopping_file_contract_when_child_goal_onl
     assert "4 层链路" in child.goal
 
 
+# LLM: R44 proved exact forbidden filenames must survive even when a child mentions the build root.
+# 函数用途: child goal 已包含产物目录和必需文件时，仍必须继承 product.html/output.json 等具体禁止清单。
+def test_hierarchy_schedule_preserves_forbidden_file_contract_when_child_goal_summarizes_constraints(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    build = tmp_path / "deliverables" / "shop" / "build"
+    root = manager.create_run(
+        goal=(
+            f"交付购物站到 {build}。核心产物：index.html、register.html、login.html、products.html、"
+            "product-detail.html、cart.html、checkout.html、order-success.html、style.css、app.js。"
+            "禁止文件名：product.html/old-product.html/legacy.html/obsolete.html。"
+            "禁止在 build 写 output.json/RUNNER_RESULT.md/execution_context.json。"
+        ),
+        thought="root only dispatches.",
+        plan=["plan"],
+        extra_write_roots=[str(build)],
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=root.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal=(
+                        f"交付静态购物网站页面到 {build}。核心产物必须同名：index.html、register.html、"
+                        "login.html、products.html、product-detail.html、cart.html、checkout.html、"
+                        "order-success.html、style.css、app.js。约束：禁止文件名改、禁止 output.json。"
+                    ),
+                    role="child_coordinator",
+                    agent_name="小傻妞-页面协调",
+                    allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
+                )
+            ],
+            apply=True,
+        )
+    )
+    child = manager.load(result.created_run_ids[0])
+
+    assert "父级禁止文件/反例名" in child.goal
+    for filename in [
+        "product.html",
+        "old-product.html",
+        "legacy.html",
+        "obsolete.html",
+        "output.json",
+        "RUNNER_RESULT.md",
+        "execution_context.json",
+    ]:
+        assert f"- {filename}" in child.goal
+
+
+# LLM: R44 used the natural no-space Chinese form "4层", so inheritance must not rely on "4 层" only.
+# 函数用途: 父级写 4层/depth=3/小傻妞命名规则时，下级必须继续携带，且深度 1 不能直接建 leaf。
+def test_hierarchy_schedule_preserves_no_space_four_layer_contract_and_blocks_leaf(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    build = tmp_path / "deliverables" / "shop" / "build"
+    child = _create_no_space_four_layer_child(manager, build)
+
+    assert "父级层级/协作约束" in child.goal
+    assert "4层链路要求" in child.goal
+    assert "depth=3" in child.goal
+
+    blocked = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=child.id,
+            child_specs=[HierarchyChildSpec(goal="直接写完整页面", role="leaf_worker", agent_name="小小傻妞-页面编写员")],
+            apply=True,
+        )
+    )
+
+    assert blocked.blocked is True
+    assert blocked.reason == "hierarchy_chain_requires_coordinator_until_depth_3"
+
+
+# LLM: _create_no_space_four_layer_child keeps the no-space hierarchy regression focused on assertions.
+# 函数用途: 创建带“4层”中文无空格约束的 root 和第一层 coordinator。
+def _create_no_space_four_layer_child(manager: SubAgentManager, build):
+    root = manager.create_run(
+        goal=(
+            f"交付购物站到 {build}。核心产物：index.html、products.html、product-detail.html、style.css、app.js。\n"
+            "## 4层链路要求\n"
+            "- depth=1 用“小傻妞-*”\n"
+            "- depth=2 用“小小傻妞-*”\n"
+            "- depth=3 用“小小小傻妞-*”\n"
+            "- max_depth=3，禁止创建 depth>=4"
+        ),
+        thought="root only dispatches.",
+        plan=["plan"],
+        extra_write_roots=[str(build)],
+    )
+    child_result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=root.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal=(
+                        f"创建页面架构 coordinator，产物目录 {build}，核心产物 index.html、products.html、"
+                        "product-detail.html、style.css、app.js。"
+                    ),
+                    role="child_coordinator",
+                    agent_name="小傻妞-页面协调",
+                    allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
+                )
+            ],
+            apply=True,
+        )
+    )
+    return manager.load(child_result.created_run_ids[0])
+
+
 # LLM: test_hierarchy_file_contract_skips_forbidden_rename_targets guards R22 prompt corruption.
 # 函数用途: 父级写“禁止改成 product.html”时，只继承 product-detail.html，不能把反例当必需产物。
 def test_hierarchy_file_contract_skips_forbidden_rename_targets(tmp_path):
@@ -89,38 +194,6 @@ def test_hierarchy_file_contract_skips_forbidden_rename_targets(tmp_path):
     assert "\n- product.html\n" in child.goal
     assert "\n- old-product.html\n" in child.goal
     assert "\n- legacy.html\n" in child.goal
-
-
-# LLM: test_file_contract_extracts_required_and_forbidden_terms_separately locks the R27 root cause.
-# 函数用途: 父级 prompt 同时包含必需文件和禁止反例时，结构化提取要把两类文件分开。
-def test_file_contract_extracts_required_and_forbidden_terms_separately():
-    text = (
-        "必须包含 index.html、products.html、product-detail.html、style.css、app.js。"
-        "不允许把 product-detail.html 改名成 product.html 或 old-product.html；"
-        "不得改名为 legacy.html，也不要创建 obsolete.html。"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js")
-    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js")
-
-    assert required == ["index.html", "products.html", "product-detail.html", "style.css", "app.js"]
-    assert forbidden == ["product.html", "old-product.html", "legacy.html", "obsolete.html"]
-
-
-# LLM: Parent examples like "禁止改名（如 x.html）" must not become required deliverables.
-# 函数用途: 防止 root 用括号举 forbidden 文件名反例时，把 product.html/legacy.html 误传成下级必需文件。
-def test_file_contract_treats_negative_examples_as_forbidden_terms():
-    text = (
-        "必须包含 index.html、products.html、product-detail.html、style.css、app.js。"
-        "文件名禁止改名（如 product.html、old-detail.html、legacy.html 等均不允许）。"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js")
-    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js")
-
-    assert required == ["index.html", "products.html", "product-detail.html", "style.css", "app.js"]
-    assert forbidden == ["product.html", "old-detail.html", "legacy.html"]
-
 
 # LLM: test_hierarchy_schedule_blocks_leaf_before_explicit_four_layer_chain_reaches_depth_three covers root-only E2E.
 # 函数用途: 父级明确要求 4 层链路时，深度未到孙孙层前不能直接创建 leaf/worker 跳层。

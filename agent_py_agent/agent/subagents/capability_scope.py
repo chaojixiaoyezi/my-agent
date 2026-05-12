@@ -5,10 +5,14 @@ from __future__ import annotations
 
 """Scoped capability routing helpers."""
 
+import shlex
+
 from .model_capabilities import CapabilityRequest
 from .model_task import SubAgentTask
 from .services.lifecycle import RecordCapabilityGrantParams
 from .utils import _merge_list
+
+_DELETE_COMMAND_REQUESTS = frozenset({"rm", "rmdir", "unlink"})
 
 
 # LLM: request_scope_snapshot is refs-only metadata for grant/gap audit records.
@@ -44,10 +48,24 @@ def scoped_constraints(request: CapabilityRequest) -> dict[str, str]:
     return constraints
 
 
-# LLM: grant_command_allowlist prefers explicit command requests and never infers shell from tool names.
-# 函数用途: 生成父级授权给 shell gateway 的命令白名单；没有显式请求时保持空列表。
+# LLM: grant_command_allowlist normalizes model-provided command strings to shell gateway base commands.
+# 函数用途: 生成父级授权给 shell gateway 的命令白名单；完整命令会归一成首个可执行名，删除类命令不进 shell，只能走 task trash。
 def grant_command_allowlist(request: CapabilityRequest) -> list[str]:
-    return list(dict.fromkeys(request.requested_commands))
+    return [
+        item for item in dict.fromkeys(_requested_command_name(item) for item in request.requested_commands)
+        if item and item.lower() not in _DELETE_COMMAND_REQUESTS
+    ]
+
+
+# LLM: existing_delete_trash_grant reuses controlled_exec grants for rm-only follow-up requests.
+# 函数用途: 如果模型误把 rm/rmdir/unlink 当成 shell 白名单缺口，但任务已有 controlled_exec grant，则复用旧 grant 让工具走 task_trash。
+def existing_delete_trash_grant(task: SubAgentTask, request: CapabilityRequest):
+    if not _delete_only_request(request):
+        return None
+    for grant in getattr(task, "capability_grants", []) or []:
+        if _grant_supports_delete_trash(grant, request):
+            return grant
+    return None
 
 
 # LLM: grant_tools merges router hits with explicitly requested tool names for auditable scope.
@@ -111,3 +129,45 @@ def _set_csv_constraint(target: dict[str, str], key: str, values: list[str]) -> 
     cleaned = [value for value in values if value]
     if cleaned:
         target.setdefault(key, ",".join(cleaned))
+
+
+# LLM: _requested_command_name is intentionally syntax-only and never executes or expands commands.
+# 函数用途: 从模型申请的命令字符串中提取 shell gateway 实际检查的可执行名；解析失败时退回第一个空白分隔片段。
+def _requested_command_name(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        parts = text.split()
+    return str(parts[0]).strip() if parts else ""
+
+
+# LLM: _delete_only_request distinguishes trash-routable deletes from normal shell command needs.
+# 函数用途: 只有申请命令全是删除类命令时才触发既有 controlled_exec grant 复用，避免误放行其他 shell。
+def _delete_only_request(request: CapabilityRequest) -> bool:
+    commands = [_requested_command_name(item).lower() for item in request.requested_commands]
+    commands = [item for item in commands if item]
+    return bool(commands) and all(item in _DELETE_COMMAND_REQUESTS for item in commands)
+
+
+# LLM: _grant_supports_delete_trash checks parent-controlled grant scope without widening permissions.
+# 函数用途: 确认已有 grant 明确包含 controlled_exec/shell 和路径范围，且覆盖当前删除申请的 path_scope。
+def _grant_supports_delete_trash(grant, request: CapabilityRequest) -> bool:
+    tools = {str(item).strip() for item in getattr(grant, "tools", []) or []}
+    if "controlled_exec" not in tools and str(getattr(grant, "grant_type", "") or "") != "shell":
+        return False
+    if not getattr(grant, "path_scope", None):
+        return False
+    return _path_scope_covers(getattr(grant, "path_scope", []), request.path_scope)
+
+
+# LLM: _path_scope_covers is exact and conservative; it never turns parent paths into broader roots.
+# 函数用途: 当前申请没写 path_scope 时接受已有任务范围；写了 path_scope 时必须被已有 grant 精确覆盖。
+def _path_scope_covers(grant_scope: list[str], request_scope: list[str]) -> bool:
+    requested = {str(item).strip() for item in request_scope if str(item).strip()}
+    if not requested:
+        return True
+    granted = {str(item).strip() for item in grant_scope if str(item).strip()}
+    return requested.issubset(granted)

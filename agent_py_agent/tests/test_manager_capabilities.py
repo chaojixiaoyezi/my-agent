@@ -220,6 +220,102 @@ class TestCapabilityModels:
         assert request.status == "OPEN"
         assert request.tried == []
 
+    def test_grant_command_allowlist_excludes_delete_commands(self):
+        """删除类命令不能作为 shell 白名单授权，只能走 task trash。"""
+        from agent_py_agent.agent.subagents.capability_scope import grant_command_allowlist
+        from agent_py_agent.agent.subagents.models import CapabilityRequest
+
+        request = CapabilityRequest(
+            id="req_001",
+            from_run_id="run_001",
+            problem="需要受控 shell 和删除替代验证",
+            needed_capability="controlled_exec",
+            requested_commands=["pwd", "rm", "python3", "unlink", "rmdir"],
+        )
+
+        assert grant_command_allowlist(request) == ["pwd", "python3"]
+
+    def test_grant_command_allowlist_normalizes_full_command_strings(self):
+        """模型申请完整 shell 命令时，grant 只下发 shell gateway 会检查的 base command。"""
+        from agent_py_agent.agent.subagents.capability_scope import grant_command_allowlist
+        from agent_py_agent.agent.subagents.models import CapabilityRequest
+
+        request = CapabilityRequest(
+            id="req_001",
+            from_run_id="run_001",
+            problem="需要受控 shell 跑完整命令",
+            needed_capability="controlled_exec",
+            requested_commands=["pwd", "rm sentinel.txt", "python3 -c \"print('x' * 2000)\"", "python3"],
+        )
+
+        assert grant_command_allowlist(request) == ["pwd", "python3"]
+
+    def test_rm_only_request_reuses_existing_controlled_exec_grant(self, tmp_path: Path):
+        """已有 controlled_exec grant 时，裸 rm 追加申请应复用旧 grant，不生成空白 shell grant。"""
+        manager, task, grant, rm_request = _manager_with_rm_reuse_request(tmp_path)
+
+        record = manager._route_capability_request(
+            task=manager.load(task.id),
+            request=rm_request,
+            query="rm stale.txt controlled_exec",
+            hits=[],
+            selected_hits=[],
+            apply=True,
+        )
+        loaded = manager.load(task.id)
+
+        assert record.status == "GRANTED"
+        assert record.grant_id == grant.id
+        assert record.message == "已有 capability grant 覆盖该请求。"
+        assert len(loaded.capability_grants) == 1
+        assert loaded.capability_requests[1].status == "GRANTED"
+
+
+# LLM: _manager_with_rm_reuse_request keeps the rm-only grant reuse regression focused on assertions.
+# 函数用途: 构造已有 controlled_exec grant 和后续 rm-only request，复现 task_trash 复用场景。
+def _manager_with_rm_reuse_request(tmp_path: Path):
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+    from agent_py_agent.agent.subagents.services.lifecycle import (
+        RecordCapabilityGrantParams,
+        RecordCapabilityRequestParams,
+    )
+
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(goal="controlled exec task", thought="trash deletes", plan=["grant"])
+    first_request = manager.record_capability_request(
+        task.id,
+        RecordCapabilityRequestParams(
+            problem="need controlled exec",
+            needed_capability="controlled_exec",
+            capability_type="shell",
+            requested_tools=["controlled_exec"],
+            requested_commands=["pwd", "python3", "rm"],
+            path_scope=[str(tmp_path)],
+        ),
+    )
+    grant = manager.record_capability_grant(
+        task.id,
+        RecordCapabilityGrantParams(
+            request_id=first_request.id,
+            grant_type="shell",
+            tools=["controlled_exec"],
+            command_allowlist=["pwd", "python3"],
+            path_scope=[str(tmp_path)],
+        ),
+    )
+    rm_request = manager.record_capability_request(
+        task.id,
+        RecordCapabilityRequestParams(
+            problem="rm not in shell allowlist",
+            needed_capability="controlled_exec",
+            capability_type="shell",
+            requested_tools=["controlled_exec"],
+            requested_commands=["rm stale.txt"],
+            path_scope=[str(tmp_path)],
+        ),
+    )
+    return manager, task, grant, rm_request
+
 
 class TestCapabilityRoutingDryRun:
     """测试能力路由 dry-run 行为。"""

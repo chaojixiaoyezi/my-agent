@@ -27,6 +27,7 @@ from .result_processors import (
     _build_runner_result,
     _process_structured_output,
     _write_runner_result_files,
+    merge_actual_tools_for_unparsed,
 )
 from .runner_rendering import render_runner_result_markdown
 from .utils import _apply_missing_paths
@@ -132,6 +133,7 @@ class _SubAgentRunnerResultFacade:
                 lessons=proc["lessons"],
                 next_actions=proc["next_actions"],
             )
+        merge_actual_tools_for_unparsed(task, actual_tools, now)
         return _ExtractedOutput(parsed=parsed)
 
     # LLM: _apply_status_and_build_payload 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

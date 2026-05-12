@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .capability_request_identity import find_equivalent_capability_request
 from .models import (
     CapabilityRequest,
     EvidencePacket,
@@ -122,6 +123,10 @@ def _create_capability_requests_from_parsed(task, parsed, now):
             created_at=now,
             reserved=_object_dict(item.get("reserved", {})),
         )
+        if existing := find_equivalent_capability_request(task.capability_requests, request):
+            created_ids.append(existing.id)
+            count += 1
+            continue
         task.capability_requests.append(request)
         created_ids.append(request.id)
         count += 1
@@ -160,6 +165,14 @@ def _merge_task_tools(params: MergeTaskToolsParams):
         )
     params.task.used_tools = _merge_list(params.task.used_tools, params.used_tools)
     return []
+
+
+# LLM: merge_actual_tools_for_unparsed preserves executed tool facts even when result JSON is truncated.
+# 函数用途: 结构化结果解析失败时，仍把 runner loop 实际执行过的授权工具写回 task.used_tools 和证据，供验收与调试读取。
+def merge_actual_tools_for_unparsed(task: SubAgentTask, actual_tools: list[str] | None, now: float) -> list[str]:
+    if actual_tools is None:
+        return []
+    return _merge_task_tools(MergeTaskToolsParams(task, [], [], actual_tools, [], now))
 
 
 # LLM: _process_evidence_items 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

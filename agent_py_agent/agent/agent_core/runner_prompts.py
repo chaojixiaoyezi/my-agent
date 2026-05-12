@@ -30,7 +30,7 @@ _SUBAGENT_RESULT_TEMPLATE = (
     '    {"id": "evpkt-run-id-short", "claim": "可验收声明", "checked_scope": "检查范围", "evidence_refs": ["runner_result.json"], "artifact_refs": ["产物路径或output.json"], "confidence": 0.9}\n'
     "  ],\n"
     '  "capability_requests": [\n'
-    '    {"problem": "缺少什么", "needed_capability": "能力名", "expected_output": "希望得到什么", "tried": [], "evidence": [], "constraints": {}}\n'
+    '    {"problem": "缺少什么", "needed_capability": "能力名", "capability_type": "shell|tool|skill|mcp|network|generic", "expected_output": "希望得到什么", "requested_tools": [], "requested_skills": [], "requested_mcp_tools": [], "requested_commands": ["python3"], "cwd_scope": [], "path_scope": ["任务内需要访问的目录"], "network_scope": [], "output_budget": {"stdout_bytes": 65536, "stderr_bytes": 32768}, "risk_level": "low|medium|high", "tried": [], "evidence": [], "constraints": {}, "fallback_attempted": [], "escalation_target": "parent", "reserved": {}}\n'
     "  ],\n"
     '  "artifacts": [\n'
     '    {"path": "产物路径", "kind": "file|report|log", "summary": "产物说明"}\n'
@@ -124,13 +124,37 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "- 验证文件内容时优先写 validation_method=\"content_check\"、file_path、content_pattern 或 content_equals、match_mode=\"exact\"，不要写 cat 文件命令。",
         "- 写代码和测试后，必须逐条对照验收条件做静态自检，确保实现、测试、README 三者互相一致。",
         "- 写 Python 测试时必须保证从 working_dir 运行能导入被测模块；优先把测试文件和模块放同一目录，或显式处理 import path。",
-        "- 生成长 CSS/JS/HTML 或大段代码时，不要一次性把完整 content 塞进 write_file；先用 write_file 写短骨架，再用 append_file 分块追加。",
+        "- 生成长 CSS/JS/HTML 或大段代码时，不要一次性把完整 content 塞进 write_file；"
+        "先用 write_file 写短骨架，再用 append_file 分块追加；正常分块时单次 content 建议 1500-2000 字符。"
+        "如果出现工具调用解析失败，再降到不超过 800 字符，并且每轮只输出 1 个写入工具调用，"
+        "闭合 [/TOOL_CALL] 后再继续下一块。",
         "- write_file 和 append_file 会在授权 allowed_write_roots 内自动创建父目录；不要因为目标目录尚未创建就标记 BLOCKED。",
         "- 如果最终结果需要列很多 artifacts 或证据，优先用 write_file 写 execution_context.output_json 的短 JSON；"
         "系统会自动把它包成 SUBAGENT_RESULT 收口，避免对话里的长结果块被截断。",
         "- output.json 是内部收口文件名；只能写 execution_context.output_json，"
         "不要在 product_write_roots、deliverables 或用户产物目录里创建 output.json。",
+        "- 需要新工具、skill、MCP、网络或 shell 命令时，写 capability_request；"
+        "必须说明 requested_tools/requested_skills/requested_mcp_tools/requested_commands 和 path_scope/output_budget。",
+        "- 如果 Tool Catalog 里有 capability_request 工具，缺能力时必须先调用该工具记录正式申请；"
+        "不要在产物目录写 capability_request.json，也不要改 execution_context.json 伪造 pending_requests。",
+        "- capability_request 工具返回 OPEN 后，最终结果块写 status=PENDING_CAPABILITY_REQUEST 或 BLOCKED，"
+        "不要继续假装能力已经授权或命令已经执行。",
     ]
+    if context.controlled_exec_grants:
+        lines.append(
+            "- controlled_exec 只能使用 controlled_exec_grants 里的父级 grant；"
+            "不要在工具参数里自填 command_allowlist/path_scope/network_scope。"
+        )
+        lines.append(
+            "- 目标要求 controlled_exec 真实执行时，dry_run/allowed plan 不算完成；"
+            "必须用 apply=true，并在最终 refs 中写出执行 payload 里的 stdout_ref、audit_ref。"
+            "复杂 python 片段优先用 argv 数组，例如 command=[\"python3\",\"-c\",\"print('x' * 2000)\"]，避免 shell 引号歧义。"
+        )
+        lines.append(
+            "- rm/rmdir/unlink 不会进入 command_allowlist，这是安全设计；"
+            "如果 controlled_exec_grants.delete_policy.mode=task_trash，已有 controlled_exec grant 时直接调用 controlled_exec apply=true 执行删除命令，工具会改走 task_trash 并返回 trash_manifest_ref，"
+            "不要为了裸 rm 再提交 capability_request；只有 moved=true 且有 trash_manifest_ref 才能把删除验收写成 PASS。"
+        )
     lines.extend(_current_role_template_lines(context))
     if "leaf" in str(context.role or "").lower():
         lines.append("- 叶子节点重点是交付产物和测试文件；父级验收器负责运行命令、判定通过和触发 rescue。")
@@ -155,10 +179,15 @@ def _coordinator_execution_contract_lines() -> list[str]:
             "如果直接写业务产物被工具层拒绝，立刻创建救援 worker/writer/leaf_worker。",
             "- 正确动作是调用 schedule_child_subagents 创建 worker/writer/leaf_worker，"
             "把目标路径、文件名、验收条件原样传给下一层，然后用 dispatch_subagents 推进直接 child。",
+            "- 如果缺口只属于未来 child/leaf 的执行能力，例如 leaf 才需要 controlled_exec、shell、网络或某个 skill，"
+            "coordinator/lead 不要替后代提前提交 capability_request 后停止；先创建并 dispatch 对应 child，"
+            "由真正需要该能力的 runner 正式申请，父级再 route grant 并继续推进。",
             "- 给 child 写 goal 时，不要要求它在产物目录写 output.json；"
             "如需结构化汇报，只能要求它写自己的 execution_context.output_json。",
             "- coordinator/lead 可以继续创建 coordinator/child_coordinator/grandchild_coordinator 作为下一层领导节点；"
             "需要多层协作时不要误以为只能创建 worker；父级要求 4 层链路时，深度未到孙孙层前先创建下一层 coordinator。",
+            "- 如果父级目标或验收条件点名需要 tester、bug_finder、acceptor、reviewer、找错、测试或验收角色，"
+            "必须创建真实 child run，并把 role/agent_name 写成对应角色；只在 goal、summary 或 evidence 里提到这些词不算角色覆盖。",
             '- schedule_child_subagents 的参数必须放在顶层，例如 {"tool":"schedule_child_subagents","apply":true,"children":[...]}；'
             '不要包成 {"orchestration": {...}}，长目标请分多次调用，每次 1-2 个 child。',
             "- 不要让 worker/writer 代写 coordinator 自己的协调证据；需要共享时引用 artifact_refs/evidence_refs。",

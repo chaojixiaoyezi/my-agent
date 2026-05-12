@@ -150,6 +150,7 @@ def test_quality_role_contracts_use_template_defaults(tmp_path):
         "write_file",
         "append_file",
         "replace_in_file",
+        "capability_request",
     ]
     assert "write_file" in tester.allowed_tools
     assert "write_file" in acceptor.allowed_tools
@@ -185,6 +186,9 @@ def test_role_template_index_is_compact_catalog_metadata():
 
     assert "worker" in index
     assert "执行子代理" in index
+    assert "适用=" in index
+    assert "不适用=" in index
+    assert "已有明确目标" in index
     assert "模板位置" in index
     assert "你是执行子代理" not in index
     assert "write_file" not in index

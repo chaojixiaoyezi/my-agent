@@ -563,3 +563,295 @@
 - 已补测试：`test_tool_agent_budget_ignores_calls_without_run_id`、`test_tool_agent_budget_blocks_after_per_agent_window_limit`、`test_tool_agent_budget_is_scoped_per_run_id`、`test_tool_agent_budget_prunes_calls_outside_window`、`test_tool_loop_enforces_per_agent_tool_budget_for_run_id`。
 - 设计边界：受控 `exec` / shell 读写能力后续应走目录受限网关，常用读写命令可以在工作目录内低摩擦使用，但危险命令、越界路径和大输出必须继续被网关拦住。主代理长存活应由 gateway/daemon/supervisor 承接，不能因为一次任务完成或无人应答就自动挂掉。
 - 下一步：设计并实现受控 shell/exec 网关的子代理授权面：工作目录限制、trash 替代 `rm`、输出大小上限、长日志读取分片、工具/skill 申请上报和审计记录。
+
+## 2026-05-11 Stage7 R43 controlled exec grant bridge
+- 中文说明：补上受控 exec 的功能框架桥：子代理不能靠自己在工具参数里写 `command_allowlist` 就获得 shell 权限，必须由父级 `CapabilityGrant` 编译成 shell gateway 请求。
+- 已实现：新增 `subagents/controlled_exec_gateway.py`，提供 `ControlledExecRequest`、`ControlledExecPlan` 和 `plan_controlled_exec()`。它只相信父级 grant 的命令白名单、路径范围、网络范围和输出预算；没有父级 path scope 会阻断；`rm` / `rmdir` / `unlink` 会转成 `use_task_trash` 提示，不进入 shell 执行。
+- 已保留：真实执行仍走现有 `shell_gateway_execution.execute_shell_command()`；本片只做 grant -> shell gateway 的规划层，不新增裸 shell 工具，也不把它自动暴露给所有子代理。
+- 已补测试：`test_controlled_exec_uses_parent_grant_scope`、`test_controlled_exec_rejects_command_not_in_parent_grant`、`test_controlled_exec_requires_parent_path_scope`、`test_controlled_exec_routes_delete_to_task_trash`、`test_controlled_exec_uses_parent_network_scope`。
+- 下一步：把这个 plan 层接到 capability route / runner context 的可见提示里，让父级 grant 后可以生成可审计的 controlled exec 入口；随后再做真实执行工具包装和输出/trace 审计联调。
+
+## 2026-05-11 Stage7 R44 controlled exec tool apply/trash v1
+- 中文说明：在 R43 的 grant bridge 上继续推进 1-5 步：runner context/context bundle 现在会显式暴露 `controlled_exec_grants`；工具 catalog 也注册了 `controlled_exec`，但它只能读取父级写进 `write_boundary` 的 grant，不能相信模型参数里的 allowlist/path_scope。
+- 已实现：`tooling/controlled_exec.py` 提供 registry-aware 工具包装。`apply=false` 返回 dry-run plan；`apply=true` 且 shell gateway 检查通过时，复用 `shell_gateway_execution.execute_shell_command()` 执行 argv，并返回 bounded stdout/stderr preview、bytes、truncated 标记和 refs。
+- 已实现：`rm` / `rmdir` / `unlink` 继续不进入 shell。`apply=true` 时改走 `task_trash.move_to_task_trash()`，把文件移动到 task-local trash 并写 manifest。
+- 已实现：runner prompt 的 `capability_requests` 模板补齐 `capability_type`、`requested_tools`、`requested_skills`、`requested_mcp_tools`、`requested_commands`、`path_scope`、`network_scope`、`output_budget` 和 `reserved`，方便子代理缺工具/skill/MCP/shell 时结构化上报。
+- 已补测试：`test_build_execution_context_exposes_controlled_exec_grant_refs`、`test_context_bundle_exposes_controlled_exec_grant_refs`、`test_controlled_exec_tool_plans_from_write_boundary_grant`、`test_controlled_exec_tool_rejects_self_authored_scope`、`test_controlled_exec_tool_apply_runs_with_bounded_audit_refs`、`test_controlled_exec_tool_apply_keeps_large_stdout_externalized`、`test_controlled_exec_tool_apply_routes_delete_to_task_trash`、`test_runner_prompt_describes_scoped_capability_request_loop`。
+- 下一步：把受控 exec 接入真实 E2E runner 观察链路，验证主代理只通过子代理/孙代理创建和使用该工具；随后再设计 MCP/tool/skill 申请审批、长日志分片读取和网络工具能力包。
+
+## 2026-05-11 Stage7 R45 controlled exec root-only E2E hardening
+- 中文说明：第一轮真实受控 exec E2E 按 root-only 原则跑，外层只启动主代理；root 先错误创建 leaf 被层级 guard 拦住，随后自修为 root -> `小傻妞` -> `小小傻妞` -> `小小小傻妞` 四层链路。
+- 新发现：leaf 输出 `status=PENDING_CAPABILITY_REQUEST` 但没有填写 `capability_requests` 数组时，旧状态机把它推进到等待验收，后续验收又可能被错误放行；这会让“还没拿到工具授权”的子代理看起来已经完成。
+- 已修正：runner/parser 会从 `pending_steps` 兜底生成可路由 capability request；状态机把 pending capability/tool/skill/shell/MCP 状态固定为 `BLOCKED`；acceptance findings 新增 `no_pending_structured_status`，阻止这种输出被验收通过。
+- 已补测试：`test_subagent_runner_parse_recovers_pending_capability_request`、`test_record_runner_result_recovers_pending_capability_request`、`test_record_runner_result_pending_capability_stays_blocked`、`test_pending_capability_output_blocks_acceptance`。
+- 下一步：用干净 controlled exec R2 复测父级是否能把兜底生成的能力申请路由成 grant，并让 leaf 真正调用 `controlled_exec` 执行 `pwd` / bounded `python3` 输出 / trash 删除。
+
+## 2026-05-11 Stage7 R46 controlled exec delegation-contract hardening
+- 中文说明：R2 真实 root-only 复测跑到了四层，并验证 broadcast/direct 消息和 coordinator 写产物边界都能生效；但 root 原始目标里的 `controlled_exec` 申请、命令范围、输出预算和 trash 验收要求在多层派工中被缩水，leaf 最后只用 `write_file` 伪造了验收文件。
+- 已修正：`hierarchy_context.py` 把 `controlled_exec`、`capability_request`、`requested_tools`、`requested_commands`、`path_scope`、`output_budget`、`task_trash`、`stdout_ref/audit_ref/trash_manifest_ref`、`grant` 识别为不能丢的能力/工具/安全合同，并在 child goal 继承块里原样传给下层。
+- 已修正：验收层新增 `controlled_exec_contract_satisfied`，只要 goal/acceptance 声明了 controlled_exec，就必须看到真实 `controlled_exec` 工具记录和 stdout/audit/trash refs，否则 P0 阻断，防止只写同名 refs 文件就算完成。
+- 已补测试：`test_hierarchy_schedule_keeps_controlled_exec_contract_for_leaf`、`test_controlled_exec_goal_requires_actual_tool_and_refs`。
+- 下一步：用干净 controlled exec R3 复测：leaf 应先看到完整 capability contract；没有 grant 时上抛 capability request，父级 route/grant 后再真实调用 `controlled_exec`。
+
+## 2026-05-11 Stage7 R47 formal capability request tool
+- 中文说明：R4 真实 root-only 复测跑出四层，但 leaf 没有正式申请能力的工具，只能写 `capability_request.json` 或改 `execution_context.json` 伪造 pending_requests；系统层不会把这些文件当成 OPEN request。
+- 已修正：新增 `capability_request` orchestration tool，runner 只能为当前 run 写正式 `CapabilityRequest`，不能替 sibling 或无关 run_id 越权申请；返回值带 `request_id`、`status=OPEN` 和 `next_action=route_capability_request`。
+- 已接入：SimpleAgent 工具表、内置角色模板、leaf 默认工具策略都暴露 `capability_request`；runner contract 明确禁止在产物目录写 `capability_request.json` 或改 `execution_context.json` 伪造申请。
+- 已修正：runner result 状态机遇到已有 OPEN `capability_requests` 时保持 `BLOCKED/UNVERIFIED/failure_type=capability_request`，不再被 `AWAITING_ACCEPTANCE` 收口误清理；只有父级 route/grant 后才进入下一次真实重跑。
+- 已补测试：`test_capability_request_tool_records_open_request`、`test_capability_request_tool_blocks_cross_run_writes`、`test_capability_request_tool_is_registered_for_simple_agent`、`test_capability_request_tool_is_available_to_role_and_leaf_defaults`、`test_record_runner_result_keeps_tool_created_open_request_blocked`。
+- 下一步：用干净 controlled exec R5 复测：leaf 应先调用正式 `capability_request` 工具，父级 follow-up route 后生成 grant，再重跑 leaf 使用真实 `controlled_exec` 产出 stdout/audit/trash refs。
+
+## 2026-05-11 Stage7 R48 controlled exec R5 real-test fixes
+- 中文说明：R5 真实 root-only 复测确认正式 `capability_request -> route/grant -> controlled_exec` 链路已经跑通到 depth=3 leaf；leaf 真实执行了 `pwd`、bounded `python3` 输出外置，并把删除测试导向 task trash。
+- 新发现：模型把命名规则里的 `*` 原样写成 `小小小傻妞-*-*`；capability grant 报告里仍展示 `rm` 进入 `command_allowlist`，虽然执行层实际不会让它进 shell。
+- 已修正：层级 agent name helper 会识别星号占位符后缀，改用 role 兜底生成可读名字，避免用户看到模板占位符。
+- 已修正：父级 grant 的 shell command allowlist 会过滤 `rm/rmdir/unlink`；删除类请求只保留在 request scope 里用于审计和 task trash 替代，不再作为 shell 授权展示。
+- 已修正：`dispatch_subagents` 的直接 child 进度摘要新增 `ready_for_parent_acceptance` / `summarize_direct_children_refs`。当所有直接 child 都已等待验收或完成时，工具返回会明确要求父 runner 只汇总 run_id、状态、产物 refs 和阻塞项，不要反复 `read_file/read_artifact` 打开子产物正文。
+- 已记录：上层 coordinator 在 R5 汇总阶段反复读 child evidence，prompt 膨胀到约 92K 后仍未自然收口；单代理 10 分钟 50 次工具预算已有，下一轮要验证新的 refs-first 收口提示是否能减少重复读取。
+- 已补测试：`test_hierarchy_schedule_repairs_literal_lineage_wildcard_names`、`test_grant_command_allowlist_excludes_delete_commands`、`test_dispatch_payload_tells_runner_to_summarize_ready_children`。
+- 下一步：用干净 controlled exec R6 复测：名字不再带 `*`，grant shell 白名单不含删除命令，task trash 替代仍可用；随后优先做上层验收的 refs-first evidence summary，减少重复读取和上下文膨胀。
+
+## 2026-05-11 Stage7 R49 controlled exec R6 grant-boundary bridge
+- 中文说明：R6 真实 root-only 复测跑到 root -> `小傻妞-协调员-001` -> `小小傻妞-协调员-002` -> `小小小傻妞-叶子测试员-003` 四层；leaf 正式 `capability_request`，父级成功 route/grant，且 shell 白名单只含 `pwd`，不含 `rm`。
+- 新发现：父级 route 生成的是 `capability_type=tool` 的 grant，`task.capability_grants` 能看到授权，但 `write_boundary.controlled_exec_grants` 为空，导致 `controlled_exec` 工具拒绝执行。大白话：授权单有了，但没放进执行工具真正检查的口袋。
+- 已修正：`controlled_exec_grant_refs()` 现在把显式包含 `controlled_exec` 且有 command/path scope 的 tool grant 也编译为受控 exec 边界；工具层仍只信父级注入的 `write_boundary`，不信模型自填 allowlist。
+- 新发现：leaf 已用正式工具写入 OPEN capability request，但最终 `[SUBAGENT_RESULT]` 被截断缺闭合标记时，旧状态会显示 `structured_output_parse_error`，掩盖真正的“等待父级 route”状态。
+- 已修正：runner result 状态机在解析失败但已有 OPEN capability request 时，优先保持 `BLOCKED/UNVERIFIED/failure_type=capability_request`，并提示 `route_capability_request`；没有能力申请的截断结果仍按 parse error 处理。
+- 已补测试：`test_controlled_exec_refs_include_controlled_exec_tool_grants`、`test_parse_error_with_tool_created_open_request_stays_capability_blocked`。
+- 下一步：用干净 controlled exec R7 复测：leaf 应拿到 `write_boundary.controlled_exec_grants`，真实执行 `pwd`，并把 `rm` 导向 task trash 生成 manifest；同时继续观察上层是否能 refs-first 收口。
+
+## 2026-05-11 Stage7 R50 controlled exec R7 four-layer guard
+- 中文说明：R7 真实 root-only 复测启动后，root 创建了 `小傻妞-r07-d1`，但 depth=1 coordinator 直接尝试创建 depth=2 `leaf_worker`，违反本轮必须四层、depth=3 才是 leaf 的合同。观察者停止本轮，避免外层替它补节点。
+- 新发现：层级 guard 只识别“4 层”，没有识别真实中文 prompt 里常见的“4层”和 `depth=3`，导致四层合同漏判。
+- 已修正：四层合同检测新增 `4层` 和 `depth=3`；父级明确要求四层/孙孙/depth=3 时，depth<2 的节点不能直接创建 leaf/worker，必须先继续创建 coordinator。
+- 新发现：child goal 里提到 runtime `task_dir` 时会被 `child_write_root_drift` 当成用户产物根漂移反复阻断。
+- 已修正：写根漂移检查会忽略父级内部上下文根（`task_dir`、`task_workspace_dir`、`agent_run_workspace_dir`）；用户产物根漂移仍继续阻断。
+- 已补测试：`test_hierarchy_schedule_blocks_leaf_when_four_layer_token_has_no_space`、`test_hierarchy_schedule_allows_internal_task_dir_context_with_product_root`，并更新 `test_hierarchy_schedule_keeps_controlled_exec_contract_for_leaf` 先验证提前 leaf 被阻断，再按 depth=3 创建 leaf。
+- 下一步：用干净 controlled exec R8 复测四层链路和 controlled_exec grant/write_boundary/trash 全链路。
+
+## 2026-05-11 Stage7 R51 controlled exec R8 fake-child recovery hardening
+- 中文说明：R8 真实 root-only 复测确认 R50 的四层 guard 已生效：depth=1 没有直接创建 leaf，而是创建了 depth=2 coordinator。但 depth=2 明确目标要求创建 depth=3 leaf_worker，却没有真实创建 child，只在结果里伪造 child run id 和完成状态。
+- 新发现：如果 coordinator 的目标是创建下级，系统必须核对真实 `task.child_ids`，不能只信 runner 结果块里的 `child_run_ids`。
+- 已修正：acceptance finding 新增 `required_child_spawned`；当 goal/acceptance 明确要求创建下级、leaf_worker 或 depth child 时，真实 `task.child_ids` 为空会 P0 阻断验收。
+- 新发现：child 最新 `acceptance_review.json` 已经 REJECT 时，runner-context direct child payload 仍可能把 `AWAITING_ACCEPTANCE` child 当成可汇总对象，导致上层反复读报告而不进入 recovery。
+- 已修正：`orchestration_progress_payload.py` 会读取 direct child 的最新 acceptance review；若 decision 是 REJECT，就把 run 放入 `rejected_acceptance_run_ids` / `recovery_run_ids`，并提示 `inspect_or_rescue_direct_children`。
+- 已补测试：`test_required_child_goal_without_child_ids_blocks_acceptance`、`test_dispatch_payload_treats_rejected_child_as_recovery`；相关验收/调度 focused suite 45 条通过。
+- 下一步：用干净 controlled exec R9 复测：如果 depth=2 仍不创建 leaf，上级应直接看到 recovery；如果它正确创建 depth=3 leaf，则继续验证 capability request -> grant -> controlled_exec -> task trash refs 全链路。
+
+## 2026-05-11 Stage7 R52 controlled exec R9 apply/trash semantics
+- 中文说明：R9 真实 root-only 复测跑通四层真实创建，并跑到 leaf 正式 capability request、父级 grant、leaf 多次调用 `controlled_exec`。这说明 R51 的 fake-child 修复有效，R49/R50 的 grant/write_boundary/四层 guard 也继续生效。
+- 新发现：leaf 使用 `apply="full"` 表达真实执行，但 controlled_exec 只认布尔 true，导致执行仍是 dry-run，最终 `stdout_ref=null`、`trash_manifest_ref=null`。
+- 已修正：controlled_exec 的 apply 参数现在接受 `apply/execute/run/full` 这类模型常见执行意图词。
+- 新发现：`rm` 的 dry-run 返回 `allowed=false/action=use_task_trash` 时，工具整体 `ok=false`，模型误以为需要继续申请裸 `rm/mv` 权限。
+- 已修正：delete-to-trash dry-run 现在是有效工具计划：工具调用 `ok=true`，payload 仍保留 `allowed=false/action=use_task_trash/trash_hint`，明确“不走 shell 删除，走 task trash 替代”。
+- 已增强：blocked child recovery hint 明确要求先按 refs/suggested tool call 推进，不要反复 `read_file/read_artifact` 打开 child 产物正文。
+- 已补测试：`test_controlled_exec_tool_apply_full_routes_delete_without_rm_shell_grant`、`test_controlled_exec_tool_dry_run_delete_is_valid_trash_plan`，相关 focused suite 47 条通过。
+- 下一步：用干净 controlled exec R10 复测：`apply="full"` 应真实执行，`rm sentinel.txt` 应走 task trash，不再新增裸 `rm/mv` capability request。
+
+## 2026-05-11 Stage7 R53 controlled exec R10 acceptance evidence scan
+- 中文说明：R10 真实 root-only 复测完整创建 root -> 子 -> 孙 -> 孙孙四层；leaf 正式申请 capability，父级 grant 只给 `pwd/python3`，随后 leaf 真实执行 `controlled_exec`：`pwd` 和 `python3` stdout 外置，`rm sentinel.txt` 被 task trash 接管并写 manifest。
+- 新发现：leaf 的验收文本里“真实创建 leaf_worker”被 `required_child_spawned` 误判成 leaf 还要创建下级，导致 `task.child_ids=[]` 被错误拒绝。
+- 已修正：`required_child_spawned` 对 leaf/self 任务不再把“创建 leaf_worker”当作下级创建合同；明确“创建下级/创建直接下级/create depth=/spawn depth=”仍继续硬拦截。
+- 新发现：controlled_exec 真实 refs 写在 task/deliverables 的 `controlled_exec_refs.json`、`controlled_exec_test_results.md` 和工具输出 artifact 中，但验收只看 `output.json`，误报缺少 stdout/audit/trash refs。
+- 已修正：controlled_exec 验收现在会在 task_dir 和 `allowed_write_roots` 中按固定小文件名查找 refs/summary，最多两层、单文件 64KB，不读取大日志；现场复算 R10 已通过 `child_required=False` 和 `controlled_exec_contract_satisfied=True`。
+- 已补测试：`test_leaf_self_creation_text_does_not_require_child_ids`、`test_controlled_exec_contract_reads_deliverable_refs`，相关 focused tests 通过。
+- 下一步：用干净 controlled exec R11 复测完整链路：验收层应接受真实 controlled_exec/trash 证据；继续观察父级是否还会在 REJECT/READY 状态下反复读取 child 正文。
+
+## 2026-05-11 Stage7 R54 controlled exec R11 cwd trash fix
+- 中文说明：R11 真实 root-only 复测跑通四层，leaf 正式申请 capability、父级 grant 干净、`pwd/python3` 真实 controlled_exec 执行成功。
+- 新发现：leaf 在 deliverables 目录写了 `sentinel.txt`，随后用 `cwd=deliverables` 执行 `controlled_exec rm sentinel.txt`，但删除分支把相对路径按 task_dir 解析，导致 task trash 找不到文件并返回 `source_missing`。
+- 已修正：controlled exec 删除计划会把相对删除目标按命令 `cwd` 解析；task trash 的 source allowed roots 接受父级 grant 的 `path_scope`，因此授权产物目录里的文件可以被移动到当前 run 的 task-local trash。
+- 已补测试：`test_controlled_exec_tool_routes_relative_delete_from_command_cwd`，并回归 4 条 controlled_exec trash focused tests。
+- 已记录：root 首次把内部 `.../subagents/tasks/你的run_id` 占位路径写进 child goal 时触发 write-root guard，但 root 能自修并继续创建 child；暂不放宽 guard。
+- 下一步：用干净 controlled exec R12 复测：`rm sentinel.txt` 应移动真实 deliverables 文件到 task-local trash，并产生 manifest；随后看验收和上层 refs-first 收口是否自然完成。
+
+## 2026-05-12 Stage7 R55 controlled exec R12-R14 capability loop hardening
+- 中文说明：R12/R13/R14 继续做真实 root-only 受控 exec E2E，均由 root 逐层创建到 `小小小傻妞-*` leaf，外层没有直接替下级创建或补产物。
+- 已确认：R12 的 leaf 已能真实执行 `pwd`、大输出和 `rm -> task_trash`；但上层 coordinator 验收之前只看自己，没有接收子树 delegated evidence。
+- 已修正：controlled_exec 验收现在会沿真实 `task.child_ids` 子树读取少量 child `task.json/output.json`，接受下级 leaf 的真实工具事实；仍不相信普通 summary 文案。
+- 已修正：能力 grant 的 command allowlist 会把模型申请的完整命令（如 `python3 -c ...`）归一成 shell gateway 实际检查的 base command（如 `python3`），并继续禁止 `rm/rmdir/unlink` 进入 shell 白名单。
+- 已修正：能力申请新增 scope 去重，工具调用写出的 request 和结构化结果里的同义 request 不再各生成一份；`rm` only 追加申请在已有 controlled_exec grant 覆盖时复用旧 grant，不生成空白 shell grant。
+- 已修正：runner 结构化结果截断或 repair API 超时时，系统仍会把 runner loop 真实执行过的 `actual_tools` 合并进 `task.used_tools` 和证据摘要；坏 JSON 仍保持失败，不会被当作完成。
+- 已补充：runner prompt 明确说明 `rm/rmdir/unlink` 不进入 command_allowlist 是安全设计，已有 controlled_exec grant 时应直接调用 `controlled_exec apply=true`，工具会走 task_trash 并返回 `trash_manifest_ref`，不要再次申请裸 rm。
+- 已补测试：`test_controlled_exec_contract_accepts_descendant_tool_evidence`、`test_grant_command_allowlist_normalizes_full_command_strings`、`test_subagent_lifecycle_service_dedupes_equivalent_capability_requests`、`test_record_runner_result_dedupes_parsed_request_against_tool_request`、`test_parse_error_still_records_actual_tool_facts`、`test_rm_only_request_reuses_existing_controlled_exec_grant`、`test_controlled_exec_tool_accepts_duplicate_equivalent_grants_without_grant_id`。
+- 下一步：跑干净 R15 真实链路，重点看 leaf 是否不再重复申请 capability，是否直接用 controlled_exec 完成 `rm -> task_trash`，以及上层是否能基于 refs-first delegated evidence 自然收口。
+
+## 2026-05-12 Stage7 R56 controlled exec R15 hierarchy-scope hardening
+- 中文说明：R15 真实 root-only 复测没有继续到 leaf，而是在 depth=1 创建 depth=2 时被 `forbidden_child_scope:depth` 卡住；这是父级“不要创建 depth>=4”的文字被当成禁止创建 `depth` 领域任务。
+- 已修正：层级 scope guard 的 forbidden scope 提取会过滤 `depth/layer/level` 和通用角色词，只把 `arithmetic/text` 这类真实 sibling 领域当作禁止项；因此“禁止超过深度”不再误伤正常 depth=2/depth=3 派工。
+- 已保留：真正的“不得创建 arithmetic 相关任务”仍会被挡住，隐式 text -> arithmetic 串线也继续被 domain mismatch 拦截。
+- 已补测试：`test_hierarchy_schedule_allows_depth_limit_text_without_scope_block`、`test_hierarchy_schedule_blocks_forbidden_sibling_scope`、`test_hierarchy_schedule_blocks_implicit_domain_mismatch`。
+- 下一步：跑干净 R16 真实链路，验证 depth=1 能继续创建 depth=2，再观察 capability 去重、controlled_exec、task_trash 和 delegated evidence 是否自然收口。
+
+## 2026-05-12 Stage7 R57 controlled exec R16 artifact-ref acceptance hardening
+- 中文说明：R16 真实 root-only 复测确认 R56 修复有效，四层链路真实创建成功；leaf 正式申请并拿到 controlled_exec grant，真实调用了 controlled_exec，`rm sentinel.txt` 走 task-local trash。
+- 新发现：leaf 的 refs JSON 使用 `command_results.*.artifact_ref` 指向受控工具输出 artifact，stdout/audit refs 存在于 artifact 内容中；旧验收只看 refs 文件本身，不跟随这个明确小文件引用，导致误拒。
+- 已修正：controlled_exec 验收会从 output/refs 文本中提取显式 `/memory_archive/artifacts/tool_outputs/controlled_exec-*.json` 引用，在 64KB 上限内读取小 artifact，补齐 stdout/audit refs；不做广泛目录扫描，不读取大日志。
+- 已补测试：`test_controlled_exec_contract_follows_small_tool_output_artifact_refs`，并回归 controlled_exec acceptance focused tests 5 条。
+- 下一步：跑干净 R17 真实链路，验证 leaf 验收能接受 artifact_ref 形状；随后重点观察上层 coordinator 是否能自然 refs-first 收口。
+
+## 2026-05-12 Stage7 R58 controlled exec R17-R18 runner robustness
+- 中文说明：R17 因 Minimax API read timeout 未覆盖业务逻辑；R18 跑到四层和 controlled_exec leaf，但暴露三类真实问题：Python `-c` 中引用内分号被 shell gateway 误挡、空泛 pending capability 生成无用第二 grant、leaf 把 dry-run/trash-plan 误写成 PASS。
+- 已修正：shell gateway 改为用 `shlex` punctuation token 阻断未引用 shell 操作符；引用内 Python 分号不再被误判，未引用 `;` 仍会挡。
+- 已修正：pending capability 兜底只有在能推出具体工具或命令时才生成 request；纯空泛 `PENDING_CAPABILITY_REQUEST` 不再生成无工具/无命令的 generic grant。
+- 已增强：controlled_exec prompt 和工具示例明确要求真实任务必须 `apply=true`，最终 refs 写 stdout_ref/audit_ref；删除只有 `moved=true` 且有 `trash_manifest_ref` 才能 PASS；复杂 Python 命令建议用 argv 数组。
+- 已补测试：`test_shell_gateway_allows_quoted_python_statement_separators`、`test_subagent_runner_parse_ignores_empty_pending_capability_request`、`test_runner_prompt_tells_controlled_exec_leaf_to_apply_and_report_refs`，并回归相关 pending capability / shell gateway focused tests。
+- 下一步：跑干净 R19 真实链路，确认不再出现空泛第二 grant，Python 大输出可执行，leaf 更稳定地产出 stdout/audit/trash refs。
+
+## 2026-05-12 Stage7 R59 controlled exec R19 delete-policy context
+- 中文说明：R19 真实 root-only 复测确认 R58 两个修复有效：没有空泛第二 grant，`python3 -c "print('x' * 2000)"` 能执行并外置 stdout。但 leaf 仍把“rm 不在 command_allowlist”理解成“无法测试 rm”，没有调用 controlled_exec 去走 task_trash。
+- 已修正：`controlled_exec_grant_refs()` 在 grant ref 中增加结构化 `delete_policy`，明确 `rm/rmdir/unlink` 通过 `task_trash` 执行、无需进入 command_allowlist，完成条件是 `moved=true` 和 `trash_manifest_ref`。
+- 已增强：runner prompt 直接引用 `controlled_exec_grants.delete_policy.mode=task_trash`，要求已有 grant 时直接 `controlled_exec apply=true` 跑删除命令，不要把 allowlist 缺 rm 当成矛盾。
+- 已补测试：`test_controlled_exec_refs_include_controlled_exec_tool_grants`、`test_runner_prompt_tells_controlled_exec_leaf_to_apply_and_report_refs`。
+- 下一步：跑干净 R20 真实链路，验证 leaf 是否能按 structured delete_policy 生成非空 trash manifest。
+
+## 2026-05-12 Role selection planning note
+- 中文说明：后续要把“每类角色怎么用”做成正式角色选择策略，让 root 和所有 coordinator/lead 派工角色在合适时机选择角色，而不是凭感觉创建 worker。
+- 目标：主代理常驻只需要知道角色索引、适用场景和选择规则；一旦进入派工，再按需展开模板详情。这样既能让派工更聪明，也不会在普通聊天/简单任务中浪费 prompt。
+- 初始角色意图：worker/writer 负责真实产物；researcher 负责查资料和整理事实；tester 负责运行或设计验证；bug_finder 负责找错和风险扫描；acceptor 负责最终验收建议；coordinator/lead 负责拆分、广播、纠偏、接管和汇总，不默认亲自写业务产物。
+- 下一步：在 R15/R16 后把角色选择策略落到 `role_templates` 的索引/详情提示里，并补角色选择单测，确保每个模板都能在合适任务中被选中。
+
+## 2026-05-12 Stage7 R60 controlled exec R20-R22 and role-selection index
+- 中文说明：R20 发现 root/coordinator 会替未来 leaf 提前申请 controlled_exec，导致树还没长出来就停在能力申请；R21 验证四层链路恢复，但发现执行 payload 里 `dry_run` 标记错误、argv Python 分号仍被误挡；R22 最终跑通 root-only 四层真实 E2E。
+- 已修正：coordinator runner contract 和内置 coordinator 模板明确，后代专属能力由真正执行的 child/leaf 申请，coordinator 不要提前申请后停止。
+- 已修正：shell gateway 的执行层现在把真实执行 decision/audit 标记为 `dry_run=false`；argv list 命令不再按 shell 字符串扫描分号，仍保留白名单、cwd、path scope 和网络 scope 检查。
+- 已验证：R22 四层全部 `DONE/VERIFIED`，leaf 真实执行 `pwd`、`python3` 大输出和 `rm sentinel.txt -> task_trash`；refs 写到 `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r22/controlled_exec_refs.json`，trash manifest 非空。
+- 已落地角色规划第一片：`role_template_index_text()` 现在把每个角色的 `适用/不适用` 场景放进轻量索引；主代理和 coordinator 常驻看索引，真正派工时才展开完整模板详情。这样每类角色什么时候用有机器可见规则，又不会让普通任务加载全部模板正文。
+- 已补测试：`test_shell_gateway_execute_marks_decision_as_not_dry_run`、`test_shell_gateway_allows_argv_python_statement_separators`、`test_role_template_index_is_compact_catalog_metadata`，并回归 controlled_exec / shell gateway / role template focused tests。
+- 下一步：继续把角色选择从“可见索引”推进成“选择策略”：让 root/coordinator 在创建 child 前先按任务类型选 coordinator/worker/writer/researcher/tester/bug_finder/acceptor，并用真实 E2E 覆盖每种模板是否能被正确选中和执行。
+
+## 2026-05-12 Role selection strategy doc
+- 中文说明：把“每类角色什么时候用”单独写成 `docs/modules/subagent/08-role-selection-strategy.md`，让主代理、coordinator、lead 的派工规则有文档锚点。
+- 已明确：常驻只加载角色 id、中文名、适用/不适用、能力标签和模板位置；默认工具、完整 prompt 和输出合同只在真正派工时按需展开。
+- 已明确：coordinator/lead 负责拆分、广播、纠偏、接管和汇总；worker/writer 负责真实产物；researcher 负责事实源；tester/bug_finder/acceptor 是横向 QA 角色，可以一次检查多个 worker，不要求一一对应。
+- 下一步：把策略文档里的选择规则做成小型 `role_selection` 决策包，并补单测和真实 E2E，验证每个内置角色都能被正确选择、创建、执行和验收。
+
+## 2026-05-12 Stage7 R41 complete shopping E2E required-file fix
+- 中文说明：R41 按完整购物网站目标启动 root-only 真实测试，但在 depth=1/2 目标里发现 `product.html` 和 `output.json` 被放进 `父级必需文件/产物名`，虽然它们在 root prompt 中是明确禁止项。
+- 已修正：`required_file_terms.py` 现在能识别裸禁止写法，例如 `不允许 product.html/old-product.html/legacy.html`、`不允许在 build 目录写 output.json`，并把这些放进 forbidden files；斜杠分隔的文件反例也会按列表处理。
+- 已补测试：`test_file_contract_treats_bare_negative_targets_as_forbidden_terms`，并回归 required/forbidden file-contract 与 context bundle 相关测试。
+- 下一步：干净启动 R42，继续完整购物网站 E2E；重点确认 required_files 只剩 10 个用户产物，forbidden_files 单独包含 `product.html/output.json/RUNNER_RESULT.md/execution_context.json`，然后让 tester/bug_finder/acceptor 跑完整流程验收。
+
+## 2026-05-12 Stage7 R42 complete shopping E2E forbidden-label fix
+- 中文说明：R42 确认 R41 的第一层 handoff 已干净，但 child 转述成 `禁止文件名：product.html/old-product.html/...` 后，depth=2 又把 forbidden 文件放回 `父级必需文件/产物名`。
+- 已修正：`required_file_terms.py` 现在把 `禁止文件名：...`、`禁止文件：...` 这类中文标签也识别为 forbidden list；多层代理换一种说法时，下层仍能保持 required/forbidden 分离。
+- 已补测试：`test_file_contract_treats_forbidden_filename_label_as_forbidden_terms`，并回归 bare negative / negative example / required-forbidden split 相关测试。
+- 下一步：干净启动 R43，继续完整购物网站 E2E；重点观察 root -> 子 -> 孙 -> 孙孙 全链路 required_files 是否始终只有 10 个用户产物，并进入真实页面产出与验收。
+
+## 2026-05-12 Stage7 R43 workflow auto-interference fix
+- 中文说明：R43 启动后发现 root 下面直接出现 producer/critic/repair 三个 workflow children，而不是 root 自己创建 `小傻妞-*` 再逐层向下派工。
+- 已修正：顶层 `dispatch_subagents(apply=true, workflow_mode=auto)` 遇到 active root/coordinator 时也会强制 `workflow_mode=off`；不再只有 `execute_runners=true` 时才保护 root/coordinator。
+- 已补测试：`test_top_level_apply_dispatch_does_not_spawn_workflow_for_active_root_coordinator`，并回归顶层/runner-context workflow-off 调度测试。
+- 下一步：干净启动 R44，继续完整购物网站 E2E；预期 root 下不再自动出现 producer/critic/repair，而是由 root 自己创建 `小傻妞-*`，再由下层继续创建孙/孙孙。
+
+## 2026-05-12 Stage7 R44 hierarchy contract inheritance fix
+- 中文说明：R44 证明 R43 的 workflow 干扰已消失，root 能自己创建 `小傻妞-页面协调`；但 child 总结目标时丢了具体 forbidden 文件名和 `4层/depth=3` 链路规则，导致 depth=2 leaf 提前写页面。
+- 已修正：`goal_carries_parent_scope()` 现在必须同时确认 required files、forbidden files、层级合同和能力合同都没有缺项，才允许跳过父级继承块。
+- 已修正：层级合同提取现在识别 `4层` 无空格写法、`depth=1/2/3`、`max_depth` 和 `小傻妞` 命名规则；下层如果没携带这些锚点，会自动补入“父级层级/协作约束”。
+- 已补测试：`test_hierarchy_schedule_preserves_forbidden_file_contract_when_child_goal_summarizes_constraints`、`test_hierarchy_schedule_preserves_no_space_four_layer_contract_and_blocks_leaf`。
+- 下一步：干净启动 R45，继续完整购物网站 E2E；重点看 forbidden_files 是否每层都保留，且真实写代码节点是否只出现在 depth=3 `小小小傻妞-*`。
+
+## 2026-05-12 Stage7 R45 root seed raw-contract fix
+- 中文说明：R45 发现 root seed 在创建时就被主代理摘要缩水：root goal 只剩“禁止写内部文件”，没有 `product.html/output.json/RUNNER_RESULT.md` 等具体 forbidden 名字，导致 root context bundle 的 `forbidden_files=[]`。
+- 已修正：运行循环会临时暴露当前原始用户 prompt 给工具层；显式 root/coordinator 的 `create_subagents` 会从原始 prompt 抽取 required files、forbidden files 和 4层/depth/小傻妞命名合同，若模型写的 root goal 漏项，就追加 compact 继承块。
+- 已修正：`_create_tasks()` 现在使用 `_create_run_params()` 生成后的 `run_params.goal`，避免前面补好的 root 合同被原始未增强 goal 覆盖。
+- 已补测试：`test_explicit_coordinator_seed_inherits_raw_user_file_and_hierarchy_contract`，并回归 create_subagents、coordinator seed、hierarchy contract、context bundle 文件合同测试。
+- 下一步：干净启动 R46 完整购物网站 E2E；先确认 root 自己的 context bundle 已有 required_files 和 forbidden_files，再观察 `小傻妞-* -> 小小傻妞-* -> 小小小傻妞-*` 是否按四层链路写出完整购物网站。
+
+## 2026-05-12 Stage7 R46 root seed forbidden-block parser fix
+- 中文说明：R46 证明 root seed 补块已经写进 root goal，但补块标签 `用户原始禁止文件/反例名（禁止创建...）：...` 没被文件解析器当成 forbidden 标签，导致 `product.html/output.json` 仍进入 required_files。
+- 已修正：`required_file_terms.py` 新增负向 label 识别，支持 `禁止文件/反例名（...）：`、`forbidden_files...:` 这类带解释括号的机器补块；这些文件进入 forbidden_files，并从 required_files 排除。
+- 已补测试：`test_file_contract_treats_root_seed_forbidden_inheritance_block_as_forbidden_terms`，并回归 hierarchy/create/coordinator/context bundle 相关 tests。
+- 下一步：干净启动 R47 完整购物网站 E2E；第一检查点要求 root required_files 正好 10 个用户产物、forbidden_files 正好包含 forbidden/internal 文件。
+
+## 2026-05-12 Stage7 R47 inherited forbidden bullet fix
+- 中文说明：R47 的 root 合同已正确分离，但 child/grandchild 的继承块用“父级禁止文件/反例名：”标题加 bullet 列表，解析时每个 bullet 独立处理，导致 forbidden 文件同时进入 required_files。
+- 已修正：`required_file_terms.py` 的分段逻辑会把负向标题状态带到后续 bullet 行，直到遇到非 bullet 段；`父级禁止文件/反例名：\n- product.html` 现在只进入 forbidden_files。
+- 已保留：`父级必需文件/产物名：\n- index.html` 仍正常进入 required_files，不受负向标题状态影响。
+- 已补测试：`test_file_contract_carries_negative_header_into_bulleted_forbidden_terms`，并回归 hierarchy/create/coordinator/context bundle 相关 tests。
+- 下一步：干净启动 R48 完整购物网站 E2E；目标是 root、depth=1、depth=2 都保持 required/forbidden 分离，再让 depth=3 leaf 真正写出购物网站。
+
+## 2026-05-12 Stage7 R48 thinking-only backend retry fix
+- 中文说明：R48 root 合同已干净，但 MiniMax 的 Anthropic-compatible 接口偶发只返回 `thinking` 内容块、没有 `text` 内容块，旧 backend 直接抛错，导致 root 变 `BLOCKED`。
+- 已修正：Anthropic-compatible 非流式 backend 如果遇到 thinking-only 且无 text，会自动重试一次；普通空 content 仍然抛错，不会把坏响应伪装成成功。
+- 已补测试：`test_generate_retries_once_on_thinking_without_text`，并回归正常 non-stream 和 no-text backend tests。
+- 下一步：干净启动 R49 完整购物网站 E2E；继续观察 root -> 小傻妞 -> 小小傻妞 -> 小小小傻妞 是否能跑到真实写文件和 QA 验收。
+
+## 2026-05-12 Stage7 R49 positive no-rename label fix
+- 中文说明：R49 发现 `必须文件（禁止改名）：index.html...` 被当成 forbidden label，导致 10 个必需文件全进 forbidden_files，required_files 为空。
+- 已修正：负向 label 识别收窄为真正负向标题，例如 `禁止：`、`禁止文件名：`、`禁止文件/反例名：`、`forbidden_files:`；`必须文件（禁止改名）：...` 仍按 required files 处理。
+- 已补测试：`test_file_contract_keeps_required_files_when_positive_label_says_no_rename`，并回归 hierarchy/create/coordinator/context bundle/backend 相关 tests。
+- 下一步：干净启动 R50 完整购物网站 E2E；目标是 root 合同稳定后继续推进到 depth=3 写文件和 QA 验收。
+
+## 2026-05-12 Stage7 R50 acceptance-check forbidden fix
+- 中文说明：R50 的 root goal 自身能分清 required/forbidden，但 acceptance_checks 里的 `无 forbidden_files(...)`、`无内部文件污染(...)` 又把 forbidden 文件塞进 required_files。
+- 已修正：文件契约解析器现在把 `无/no/without + forbidden_files/内部文件污染/文件污染` 识别为负向语境；验收项中出现的 `product.html/output.json` 只进入 forbidden_files。
+- 已补测试：`test_file_contract_treats_no_forbidden_files_acceptance_as_forbidden_terms`，并回归 hierarchy/create/coordinator/context bundle/backend 相关 tests。
+- 下一步：干净启动 R51 完整购物网站 E2E；如果合同干净，就继续跑到 depth=3 leaf 写站点和 QA 验收。
+
+## 2026-05-12 Stage7 R51 location-rule and parenthesized-label fix
+- 中文说明：R51 root 能自己创建 `小傻妞-协调者`，但文件合同又暴露两种自然语言漂移：`禁止 style.css/app.js 放进子目录` 被误解成禁止创建 `style.css/app.js`，`禁止文件名（product.html/...）` 这种括号标签没有被识别成 forbidden list。
+- 已修正：`required_file_terms.py` 现在能区分“禁止某文件放进子目录”这类位置约束和“禁止创建某文件”这类文件名反例；位置约束不会把必需资源塞进 `forbidden_files`。
+- 已修正：负向标签现在支持括号边界，例如 `禁止文件名（...）`、`禁止内部文件（...）`，不再只支持冒号。
+- 已补测试：`test_file_contract_keeps_required_files_when_forbidden_location_mentions_them`、`test_file_contract_treats_parenthesized_forbidden_labels_as_forbidden_terms`，并回归 hierarchy/create/coordinator/context bundle/backend 相关 tests。
+- 下一步：干净启动 R52 完整购物网站 E2E；目标是 root/depth=1 合同都干净后，继续推进到 depth=2/depth=3，让叶子节点真实写站点并由 tester/bug_finder/acceptor 验收。
+
+## 2026-05-12 Stage7 R52 short no-write fix
+- 中文说明：R52 已跑到 root -> `小傻妞-depth1-coord` -> `小小傻妞-depth2-coord`，并验证 coordinator 不能直接写 `.gitkeep` 到业务产物目录；但 machine forbidden_files 漏了 `output.json/RUNNER_RESULT.md`，因为 root 把禁止项总结成了“不写output.json/RUNNER_RESULT.md”。
+- 已修正：文件契约解析器现在识别 `不写/不创建/不生成/不产出/不包含` 这类短否定动词，支持中文和文件名紧贴的写法，例如 `不写output.json`。
+- 已修正：文件名边界和斜杠列表归一化改成 ASCII 边界，`RUNNER_RESULT.md等` 这种后面接中文的文件名也能正常从列表里抽取。
+- 已补测试：`test_file_contract_treats_no_write_short_negative_as_forbidden_terms`，并回归 hierarchy/create/coordinator/context bundle/backend 相关 tests。
+- 下一步：干净启动 R53 完整购物网站 E2E；要求 root/depth=1/depth=2 的 `forbidden_files` 都包含 7 个 forbidden/internal 文件，然后继续让 depth=3 写站点并跑 QA。
+
+## 2026-05-12 Stage7 R53 duplicate-domain path fix
+- 中文说明：R53 的 root/depth=1 文件合同已稳定成 10 required + 7 forbidden，但 depth=1 创建两个 depth=2 coordinator 时被 `duplicate_child_domain:模型助手` 错挡；原因是两个 child goal 都包含 `/Users/example/my-终端应用/...`，去重 guard 把路径里的 `模型助手` 当成任务领域。
+- 已修正：duplicate-domain 兜底从 goal 提取领域词前，会先去掉绝对路径、文件名和继承块，并过滤 `users/模型助手/code/shop/tests/css/js` 这类路径或脚手架词。
+- 已保留：checkout/quality 这种真正同父级重复领域仍会被阻断；domain mismatch 保护也没有放松。
+- 已补测试：`test_hierarchy_schedule_duplicate_domain_ignores_shared_filesystem_paths`，并回归 duplicate guard 与 domain mismatch 相关 tests。
+- 下一步：干净启动 R54 完整购物网站 E2E；目标是 depth=1 能创建不同职责的 depth=2 节点，并继续推进到 depth=3 真实产出和 QA。
+
+## 2026-05-12 Stage7 R54 plain forbidden-list fix
+- 中文说明：R54 root 合同仍干净，但 depth=1 goal 用了“禁止创建文件（forbidden_files）：”下一行直接列 `product.html/...`，不是 bullet 列表，导致 7 个 forbidden 又进入 required_files。
+- 已修正：负向 label 现在识别 `禁止创建文件...`；负向标题后如果下一行是纯文件列表，也会带着负向语境解析，并在该行后重置，避免污染后续普通说明。
+- 已补测试：`test_file_contract_carries_negative_header_into_plain_file_list_line`，并回归 hierarchy/create/context bundle 相关 tests。
+- 下一步：干净启动 R55 完整购物网站 E2E；目标是 root/depth=1/depth=2 都保持 10 required + 7 forbidden，再让 depth=3 开始写站点文件。
+
+## 2026-05-12 Stage7 R55 long write tool-call fix
+- 中文说明：R55 已跑通 root -> `小傻妞-1` -> `小小傻妞-1` -> `小小小傻妞-1` 四层链路，且四层 context bundle 都保持 10 required + 7 forbidden。新的真实问题出现在 depth=3 写站点：叶子节点把较长 `app.js` 塞进单个 `write_file` JSON，连续丢失 `[/TOOL_CALL]` 结束标记。
+- 已修正：runner 合约、write/append 工具说明、parse-error 修复提示统一成“两档策略”：正常分块建议 1500-2000 字符，避免初期测试被过小阈值拖慢；出现工具调用解析失败后，再降级到 800 字符以内且每轮只输出 1 个写入工具调用。
+- 已补测试：`test_runner_prompt_tells_leaf_to_chunk_long_file_writes`、`test_parse_error_hint_recommends_append_for_truncated_write`。
+- 下一步：干净启动 R56 完整购物网站 E2E；目标是 depth=3 用分块 write/append 写出 10 个文件，然后由父链路推进 tester / bug_finder / acceptor 做真实验收。
+
+## 2026-05-12 Stage7 R56 leaf acceptance and depth-domain fix
+- 中文说明：R56 真实跑到 root -> `小傻妞-前端总协调` -> `小小傻妞-前端协调A` -> `小小小傻妞-首页注册样式写手`，叶子真实写出 `index.html/register.html/style.css/app.js`。这证明长写恢复比 R55 更稳，但又暴露两个控制面误伤。
+- 已修正：duplicate-domain 去重不再把 `depth/layer/level` 当成业务领域，避免中文 A/B coordinator 都提到 `depth=3` 时被误挡成重复。
+- 已修正：`leaf_worker` 不再因为继承父级“创建 depth=3 worker”文字而被要求继续创建下级；最终叶子写文件后可进入正常验收。
+- 已补测试：`test_hierarchy_schedule_duplicate_domain_ignores_depth_markers`、`test_leaf_inherited_parent_depth_constraints_do_not_require_child_ids`，并回归原有 duplicate-domain 和 required-child 保护测试。
+- 下一步：干净启动 R57 完整购物网站 E2E；目标是让多个 depth=2 中文 coordinator 正常并行分片，depth=3 叶子写完后验收不再误拒，继续补齐剩余 6 个页面并推进 QA 验收。
+
+## 2026-05-12 Stage7 R57 bracket forbidden-label fix
+- 中文说明：R57 在 root 合同第一检查点发现 `【禁止文件名】product.html/...` 没有冒号，导致 product/legacy 反例进入 `required_files`。
+- 已修正：文件契约解析器现在把 `】` / `]` 也当作 negative label 边界，支持 `【禁止文件名】...`、`【禁止内部文件】...` 这类中文标题格式。
+- 已补测试：`test_file_contract_treats_bracket_forbidden_labels_as_forbidden_terms`，并回归 forbidden label、positive no-rename、plain forbidden list 测试。
+- 下一步：干净启动 R58 完整购物网站 E2E；先确认 root required/forbidden 分离，再继续跑四层链路和 QA。
+
+## 2026-05-12 Stage7 R58 sentence-period required-file fix
+- 中文说明：R58 的 root forbidden_files 已稳定，但 required_files 漏了最后一个 `app.js`，因为任务文本写成 `style.css, app.js.`，句末英文句号被旧文件名边界误判成“还有后缀”。
+- 已修正：文件名提取允许句末标点，不再漏掉 `app.js.` 这种自然句子；同时仍然不会把 `app.js.map` 截断成 `app.js`。
+- 已补测试：`test_file_contract_keeps_required_filename_before_sentence_period`，并回归 bracket forbidden label、forbidden filename、location-rule 测试。
+- 下一步：干净启动 R59 完整购物网站 E2E；目标是 root 合同稳定为 10 required + 7 forbidden 后，继续跑 root -> 小傻妞 -> 小小傻妞 -> 小小小傻妞，并推进到真实写完 10 个购物站文件和 QA 验收。
+
+## 2026-05-12 Stage7 R59 hierarchy-first correction
+- 中文说明：购物网站不是本阶段目标本身，只是复杂测试载荷。核心目标是确认 root 只启动第一层、子代理继续启动孙代理、孙代理继续启动孙孙代理，以及合同继承、路径、权限、角色覆盖、恢复、日志和父级验收都稳定。
+- R59 结果：四层链路真实跑通并由 leaf 写出 10 个购物站文件，但 QA 角色覆盖和静态验收暴露了框架问题，所以不能按“购物站文件存在”就算完成。
+- 已修正：`禁止创建：...` 不再污染 descendant required_files；点名 tester / bug_finder / acceptor 时，验收会扫描真实后代角色，缺角色 P0 阻断；`static_site_check` 能发现本地 JS 的 `validateForm('id')` 指向不存在的 form id。
+- 下一步：干净启动 R60。评价标准优先看子代理链路和验收控制是否正确，而不是人工优化购物网站本身。
+
+## 2026-05-12 Stage7 R60 hierarchy truth and timeout guard
+- 中文说明：R60 再次跑通四层并写出 10 个购物站文件，静态站点检查通过；但真实 task.json 显示 root 是 `TIMEOUT/UNVERIFIED`、一个孙孙 leaf 是 `BLOCKED/FAILED`，且没有真实 tester / bug_finder / acceptor。最终自然语言报告却把 root/QA 说成成功，这是本轮最重要问题。
+- 已修正：工具轮数到上限时，如果本轮执行过 subagent 编排工具，最终答复改为从 task.json 生成的确定性事实报告，列出 role/name/depth/status/blocking run ids，不再让模型自由总结失败链路。
+- 已修正：runner timeout 后的旧 daemon thread 不能继续执行工具；工具入口会检查 `_current_subagent_attempt_id`，attempt 已 abandon 或不再 active 时直接阻断 read/write/dispatch/message。
+- 已修正：`subagent_board` 输出补充真实 `root_id/parent_id/depth/agent_name/role/child_count/child_status_counts/latest_summary/blocker_count/output_json`，减少模型误读和虚构角色名。
+- 已修正：coordinator prompt 明确要求点名 tester / bug_finder / acceptor / reviewer / 找错 / 测试 / 验收时必须创建真实角色 run，summary/evidence 里提到不算覆盖。
+- 已补测试：`test_stale_attempt_guard_blocks_abandoned_runner_tools`、`test_dispatch_limit_response_uses_persisted_task_state`，并回归 board tool/rendering 与层级 schedule focused tests。
+- 下一步：干净启动 R61。目标不是优化购物网站，而是验证：超时旧线程不再继续写，工具上限报告严格按 task.json，root/coordinator 能主动创建真实 QA 角色，或者系统明确保持 incomplete 而不是假完成。

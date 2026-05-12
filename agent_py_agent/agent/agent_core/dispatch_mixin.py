@@ -17,6 +17,10 @@ from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..subagent import DispatchReport
 from .dispatch_acceptance_records import make_acceptance_records
+from .dispatch_capability_followup import (
+    PostRunnerCapabilityFollowupParams,
+    run_post_runner_capability_followup,
+)
 from .dispatch_facade import _DispatchFacadeMixin, _DispatchFailureMixin
 from .dispatch_mixin_helpers import (
     DispatchRunnerStageRequest,
@@ -243,6 +247,7 @@ class SimpleAgentDispatchMixin(
             ctx.runner_instruction, ctx.max_runners = _planner_dispatch_overrides(params, records)
 
         records = run_dispatch_runner_stage(request=DispatchRunnerStageRequest(self, ctx, params, records))
+        records = run_post_runner_capability_followup(PostRunnerCapabilityFollowupParams(self, ctx, params, records))
         ctx.records = records
         records = self._finalize_dispatch(_dispatch_finalize_params(params, records))
         return self._build_and_write_report(records, params.apply)

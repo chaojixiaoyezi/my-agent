@@ -147,6 +147,7 @@ def build_subagent_message_spec() -> ToolSpec:
 # LLM: _message_request normalizes model params while keeping current runner as the default sender.
 # 函数用途: 校验消息参数，返回统一 bundle；缺主题、正文或 direct 目标时直接报错。
 def _message_request(agent: object, params: dict[str, object]) -> SubagentMessageRequest | ToolExecutionResult:
+    params = _message_params(params)
     sender_run_id = str(params.get("sender_run_id") or current_subagent_run_id(agent)).strip()
     mode = str(params.get("mode") or "direct").strip().lower()
     scope = str(params.get("scope") or "descendants").strip().lower()
@@ -173,6 +174,19 @@ def _message_request(agent: object, params: dict[str, object]) -> SubagentMessag
         urgency=str(params.get("urgency") or "normal").strip().lower(),
         requires_ack=_bool_param(params.get("requires_ack"), default=False),
     )
+
+
+# LLM: _message_params accepts both legacy flat calls and new bundle-shaped orchestration calls.
+# 函数用途: 把模型传入的 subagent_message 参数归一成一层字典；top-level 字段优先，bundle 字段补齐缺省。
+def _message_params(params: dict[str, object]) -> dict[str, object]:
+    orchestration = params.get("orchestration")
+    if not isinstance(orchestration, dict):
+        return dict(params)
+    normalized = dict(orchestration)
+    for key, value in params.items():
+        if key not in {"orchestration", "filesystem"}:
+            normalized[key] = value
+    return normalized
 
 
 # LLM: _direct_targets verifies that direct messages only flow from an ancestor to descendants.

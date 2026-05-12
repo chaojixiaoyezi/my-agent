@@ -17,6 +17,7 @@ from typing import Any
 
 from ..log_analysis.capabilities import SECURITY_TOOL_NAMES
 from .artifact import ReadArtifactTool
+from .controlled_exec import ControlledExecTool
 from .filesystem import (
     AppendFileTool,
     ListFilesTool,
@@ -99,6 +100,7 @@ class ToolRegistry:
         self.register(FetchUrlTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
         self.register(HttpRequestTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
         self.register(ShellTool(self.workspace_root, default_timeout=params.shell_tool_timeout))
+        self.register(ControlledExecTool())
         from ..log_analysis.tools import (
             SecurityHuntIpTool,
             SecurityQueryTool,

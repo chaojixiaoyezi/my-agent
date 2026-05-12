@@ -344,6 +344,56 @@ def test_build_execution_context_grants_list(mock_manager, tmp_path):
     assert context.grants[0]["skills"] == ["skill_new"]
 
 
+def test_build_execution_context_exposes_controlled_exec_grant_refs(mock_manager, tmp_path):
+    """受控 exec 授权必须把父级边界带进 runner context，不能让子代理自己补授权。"""
+    sample_task = make_task(tmp_path)
+    workspace = tmp_path / "workspace"
+    grant = CapabilityGrant(
+        id="grant-shell-1",
+        request_id="req-shell-1",
+        grant_to_run_id="run-456",
+        grant_type="shell",
+        tools=["controlled_exec"],
+        command_allowlist=["python3", "pwd"],
+        path_scope=[str(workspace)],
+        network_scope=["api.example.com"],
+        output_budget={"max_stdout_bytes": 1024, "max_stderr_bytes": 256},
+        reason="需要读取任务目录内命令输出",
+        constraints={"delete_policy": "trash_only"},
+        expires_after_task=True,
+        created_at=123456.0,
+    )
+    sample_task.capability_grants = [grant]
+    mock_manager._tasks[sample_task.id] = sample_task
+
+    context = mock_manager.build_execution_context(sample_task.id)
+
+    assert "controlled_exec" in context.allowed_tools
+    assert context.grants[0]["grant_type"] == "shell"
+    assert context.grants[0]["command_allowlist"] == ["python3", "pwd"]
+    assert context.controlled_exec_grants == [
+        {
+            "grant_id": "grant-shell-1",
+            "request_id": "req-shell-1",
+            "run_id": "run-456",
+            "command_allowlist": ["python3", "pwd"],
+            "path_scope": [str(workspace)],
+            "network_scope": ["api.example.com"],
+            "output_budget": {"max_stdout_bytes": 1024, "max_stderr_bytes": 256},
+            "risk_level": "",
+            "constraints": {"delete_policy": "trash_only"},
+            "delete_policy": {
+                "mode": "task_trash",
+                "commands": ["rm", "rmdir", "unlink"],
+                "requires_apply": True,
+                "command_allowlist_required": False,
+                "completion_requires": ["moved=true", "trash_manifest_ref"],
+            },
+        }
+    ]
+    assert context.write_boundary["controlled_exec_grants"] == context.controlled_exec_grants
+
+
 def test_build_execution_context_multiple_grants(mock_manager, tmp_path):
     """测试多条授权记录。"""
     sample_task = make_task(tmp_path)

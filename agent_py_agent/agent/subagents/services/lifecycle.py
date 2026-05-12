@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...memory_routing import load_routes, match_routes, resolve_required_paths
+from ..capability_request_identity import find_equivalent_capability_request
 from ..models import (
     CapabilityGap,
     CapabilityGrant,
@@ -151,6 +152,8 @@ class SubAgentLifecycleService:
         params: RecordCapabilityRequestParams,
     ) -> CapabilityRequest:
         task = self.manager.load(run_id)
+        if existing := find_equivalent_capability_request(task.capability_requests, params):
+            return existing
         request = build_capability_request(run_id, params)
         task.capability_requests.append(request)
         task.updated_at = time.time()

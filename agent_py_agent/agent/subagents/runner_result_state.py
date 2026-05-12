@@ -11,6 +11,7 @@ runner 写回状态的分支比较多，单独放这里，manager mixin 只负�
 
 from dataclasses import dataclass
 
+from .capability_status import is_pending_capability_status
 from .policies import _status_from_structured_output, _verification_from_runner_status
 
 _RUNNER_FAILURE_STATUSES = {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}
@@ -87,7 +88,11 @@ def _apply_status_fields(task, status_context, parsed) -> None:
     if parsed.found and not parsed.ok:
         task.status = status.upper() if status else "BLOCKED"
         task.verification_status = verification_status.upper() if verification_status else "UNVERIFIED"
-        task.failure_type = failure_type or "structured_output_parse_error"
+        if _has_open_capability_requests(task):
+            task.failure_type = failure_type or "capability_request"
+            _append_open_request_blocker(task)
+        else:
+            task.failure_type = failure_type or "structured_output_parse_error"
         return
     if status:
         task.status = status.upper()
@@ -103,8 +108,19 @@ def _apply_structured_failure_state(task, current_failure_type: str, parsed) -> 
     if current_failure_type:
         task.failure_type = current_failure_type
         return
+    if is_pending_capability_status(str(getattr(parsed, "status", "") or "")):
+        task.failure_type = "capability_request"
+        return
     if parsed.capability_requests or parsed.blocked_reason:
         task.failure_type = "capability_request"
+        return
+    if _should_resolve_stale_capability_requests(task):
+        _resolve_stale_capability_requests(task)
+    if _has_open_capability_requests(task):
+        task.status = "BLOCKED"
+        task.verification_status = "UNVERIFIED"
+        task.failure_type = "capability_request"
+        _append_open_request_blocker(task)
         return
     if task.status in _RUNNER_FAILURE_STATUSES:
         task.failure_type = task.failure_type or task.status.lower()
@@ -112,6 +128,26 @@ def _apply_structured_failure_state(task, current_failure_type: str, parsed) -> 
     task.failure_type = ""
     task.blockers = []
     _resolve_stale_capability_requests(task)
+
+
+# LLM: _should_resolve_stale_capability_requests allows successful retries to clear their old blocker.
+# 函数用途: 只有旧状态本来就是 capability_request 阻塞时，才把 OPEN 请求视为 stale 并解除。
+def _should_resolve_stale_capability_requests(task) -> bool:
+    return str(getattr(task, "failure_type", "") or "") == "capability_request"
+
+
+# LLM: _has_open_capability_requests protects tool-created requests from accidental success cleanup.
+# 函数用途: 判断任务是否已有 OPEN 能力申请；这种情况下 runner 不能进入等待验收或完成态。
+def _has_open_capability_requests(task) -> bool:
+    return any(getattr(request, "status", "") == "OPEN" for request in getattr(task, "capability_requests", []) or [])
+
+
+# LLM: _append_open_request_blocker gives parent recovery a stable reason without duplicating blockers.
+# 函数用途: 给已有 OPEN 能力申请补一条 blocker，避免看板只看到 BLOCKED 但不知道下一步。
+def _append_open_request_blocker(task) -> None:
+    blocker = "已有 OPEN capability_request，等待父级 route_capability_request。"
+    if blocker not in getattr(task, "blockers", []):
+        task.blockers.append(blocker)
 
 
 # LLM: _resolve_stale_capability_requests marks old OPEN requests inactive once the runner has current evidence.

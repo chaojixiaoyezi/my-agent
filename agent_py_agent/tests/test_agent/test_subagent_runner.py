@@ -129,6 +129,46 @@ def test_subagent_runner_parses_structured_output():
         assert "Runner Lessons" in debrief
 
 
+def test_subagent_runner_parse_recovers_pending_capability_request():
+    """LLM: Pending capability status with pending_steps should recover a parent-routable request."""
+    text = """[SUBAGENT_RESULT]
+{
+  "status": "PENDING_CAPABILITY_REQUEST",
+  "summary": "需要申请 controlled_exec",
+  "pending_steps": [
+    {"action": "request_controlled_exec_grant", "status": "in_progress"},
+    {"action": "execute_pwd", "status": "pending"},
+    {"action": "execute_python3_large_output", "status": "pending"},
+    {"action": "execute_rm_sentinel", "status": "pending"}
+  ],
+  "capability_requests": []
+}
+[/SUBAGENT_RESULT]"""
+
+    parsed = parse_subagent_runner_output(text)
+
+    assert len(parsed.capability_requests) == 1
+    request = parsed.capability_requests[0]
+    assert request["needed_capability"] == "controlled_exec"
+    assert request["requested_tools"] == ["controlled_exec"]
+    assert request["requested_commands"] == ["pwd", "python3", "rm"]
+
+
+def test_subagent_runner_parse_ignores_empty_pending_capability_request():
+    """空泛 PENDING_CAPABILITY_REQUEST 不应生成无工具/无命令的 capability request。"""
+    text = """[SUBAGENT_RESULT]
+{
+  "status": "PENDING_CAPABILITY_REQUEST",
+  "summary": "",
+  "capability_requests": []
+}
+[/SUBAGENT_RESULT]"""
+
+    parsed = parse_subagent_runner_output(text)
+
+    assert parsed.capability_requests == []
+
+
 def test_subagent_runner_enforces_write_boundary_at_tool_layer():
     """LLM: Verifies the tool layer blocks writes outside allowed_write_roots."""
     with tempfile.TemporaryDirectory() as td:

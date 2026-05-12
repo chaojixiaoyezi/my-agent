@@ -3142,3 +3142,972 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Symptom: 本轮验收确认文件齐、路径对、链路状态对；但还没有用浏览器真实点击注册、登录、加购、结算，也没有逐页检查图片/按钮/布局。
   - 中文解释：这次证明“多层子代理可以把东西交出来并完成父级验收”；还不能等同于“购物网站用户体验完全可用”。下一步要加浏览器级验收子代理或 verifier，让它真实打开页面、点按钮、检查引用资源。
   - Status: recorded. 下一轮建议从 long-write 稳定性和浏览器 QA 两条线推进。
+
+## 2026-05-11 Controlled Exec Capability-Request E2E R1
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-controlled-exec-e2e-20260511-r01.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r01`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r01`.
+- 中文说明：
+  - R1 按 root-only 原则跑，外层只启动主代理；root 第一次想直接创建 `worker` 被四层 guard 拦住，随后自我修正为 root -> `小傻妞-coord1` -> `小小傻妞-coord2` -> `小小小傻妞-leaf`。
+  - leaf 先写了 sentinel 文件，然后输出 `PENDING_CAPABILITY_REQUEST`，表示它需要父级授权 `controlled_exec` 后才能继续跑 `pwd`、bounded `python3` 输出和删除替代测试。
+  - 本轮没有通过，因为模型把待办写进 `pending_steps`，但没有填真正的 `capability_requests` 数组；旧系统因此没有生成父级可路由的申请。
+- Finding 130: pending capability status could be misrouted into acceptance.
+  - Symptom: leaf 的 `structured_output.status` 是 `PENDING_CAPABILITY_REQUEST`，但 `capability_requests=[]`；任务曾被写到 `AWAITING_ACCEPTANCE`，后续 acceptance 记录里还出现过 ACCEPT。
+  - 中文解释：子代理明明还在说“我要申请工具”，系统却把它当成“可以验收了”。这会造成工具没授权、命令没执行、产物没交付，但状态看起来完成。
+  - Root cause: 状态机只检查显式 `capability_requests` / `blocked_reason`，没有把 `PENDING_CAPABILITY_REQUEST` 这类状态当成硬阻塞。
+  - Fix: `policies.py` / `policy_checks.py` 新增 pending capability/tool/skill/shell/MCP 状态判断，统一返回 `BLOCKED`；acceptance findings 新增 `no_pending_structured_status`，这类输出不能通过验收。
+  - Verification:
+    - `test_status_from_structured_output_pending_capability_blocks`.
+    - `test_record_runner_result_pending_capability_stays_blocked`.
+    - `test_pending_capability_output_blocks_acceptance`.
+- Finding 131: models may write pending tool needs in `pending_steps` instead of `capability_requests`.
+  - Symptom: leaf 输出里有 `request_controlled_exec_grant`、`execute_pwd`、`execute_python3_large_output`、`execute_rm_sentinel` 等 pending steps，但 `capability_requests` 为空，父级没有 OPEN request 可处理。
+  - 中文解释：模型知道自己缺工具，但把“申请工具”写成待办事项，没有按协议写成申请表。系统需要兜底把这种明确的待能力状态转换成父级能路由的申请。
+  - Fix: `parse_subagent_runner_output()` 在 pending capability 状态且缺显式申请时，只从结构化 `pending_steps` / summary / blocked_reason 恢复一个保守 capability request；它只让父级看到“有申请要处理”，不会自动授权。
+  - Verification:
+    - `test_subagent_runner_parse_recovers_pending_capability_request`.
+    - `test_record_runner_result_recovers_pending_capability_request`.
+- Remaining check:
+  - Re-run clean controlled exec R2. Expected result: leaf 的兜底申请进入 OPEN capability request；父级 route 生成 shell grant；leaf 重新运行后通过 `controlled_exec` 完成 `pwd`、bounded `python3` 大输出外置、删除转 task trash，并把总结和 refs 写进用户 deliverables。
+
+## 2026-05-11 Controlled Exec Capability-Request E2E R2
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-controlled-exec-e2e-20260511-r02.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r02`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r02`.
+- 中文说明：
+  - R2 继续按 root-only 原则跑，外层只启动主代理；root 自己创建 depth=1 `小傻妞-*`，depth=1 再创建 depth=2，depth=2 再创建 depth=3 leaf。
+  - 通信能力跑通：root 对 descendants 做了 broadcast，并给直接下级发了 direct 路径/授权纠偏消息。
+  - coordinator 试图写用户产物目录时被 write boundary 拦住，随后自修为继续创建下一层；这一点符合“上层可检查/协调，但最终业务动作由 leaf 做”的边界。
+  - 但本轮未通过 controlled_exec 验收：root 原始目标要求 leaf 先申请 `controlled_exec`，再执行 `pwd`、大输出、`rm -> task_trash`，可传到 depth=3 leaf 的 goal 只剩“写 3 个文件”，关键能力合同被层层转述丢掉。
+- Finding 132: capability/shell safety contract can be lost during hierarchical delegation.
+  - Symptom: leaf 的 goal 只包含 `sentinel.txt`、`CONTROLLED_EXEC_E2E_SUMMARY.md`、`controlled_exec_refs.json` 三个产物名，没有 `capability_request`、`requested_commands`、`path_scope`、`output_budget`、`task_trash`、`stdout_ref/audit_ref/trash_manifest_ref` 等硬要求；leaf 因此直接用 `write_file` 生成产物，并没有真实调用 `controlled_exec`。
+  - 中文解释：这就是“路径和工具要求被上层拆任务时说丢了”。模型不是完全不懂，而是在多层转述里把最重要的安全/工具步骤缩水成背景词。
+  - Fix: `hierarchy_context.py` 新增 capability contract 硬继承：父级 goal 中出现 `controlled_exec`、`capability_request`、`requested_tools`、`requested_commands`、`path_scope`、`output_budget`、`task_trash`、`stdout_ref`、`audit_ref`、`trash_manifest_ref`、`grant` 时，会作为“父级能力/工具/安全约束”原样传给下层；child goal 若缺这些关键词，不会被判定为已经携带父级 scope。
+  - Verification:
+    - `test_hierarchy_schedule_keeps_controlled_exec_contract_for_leaf`.
+- Finding 133: acceptance must reject fake controlled_exec completion.
+  - Symptom: R2 的 leaf 产物里能看到 `controlled_exec_refs.json` 文件，但 `output.json.used_tools` 只有 `write_file/read_file/read_artifact/list_files`，没有真实 `controlled_exec` 工具记录。
+  - 中文解释：只写一个名字叫 refs 的文件不等于真的跑过受控 shell。验收层必须看“实际工具记录”和“关键 refs 字段”两边都对，不能只信模型写的报告。
+  - Fix: `acceptance_findings.py` 新增 `controlled_exec_contract_satisfied`。如果 task goal/acceptance_checks 声明了 `controlled_exec`，验收必须看到 `controlled_exec` 出现在实际工具记录里，并且 output payload 含 `stdout_ref`、`audit_ref`、`trash_manifest_ref`；否则 P0 阻断。
+  - Verification:
+    - `test_controlled_exec_goal_requires_actual_tool_and_refs`.
+- Remaining check:
+  - Re-run clean controlled exec R3. Expected result: depth=3 leaf 的 goal 保留完整 capability contract；如果 leaf 没有 grant，应先上抛 capability request 而不是写假 refs；父级 route/grant 后再用真实 `controlled_exec` 执行并产出可追溯 stdout/audit/trash refs。
+
+## 2026-05-11 Controlled Exec Capability-Request E2E R4
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-controlled-exec-e2e-20260511-r04.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r04/subagents`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r04`.
+- 中文说明：
+  - R4 继续按 root-only 原则跑，观察者只启动顶层主代理；root 自己创建 depth=1 `小傻妞-深度1协调员`，depth=1 再创建 depth=2 `小小傻妞-深度2协调员`，depth=2 再创建 depth=3 `小小小傻妞-leaf`。
+  - 四层创建链路跑通；coordinator 试图写用户产物目录时被写入边界拒绝，这符合“协调者可写报告但不抢最终业务产物”的边界。
+  - 本轮主动停止保留证据，因为 leaf 没有正式 capability request 工具，只能把申请伪造成文件和 `execution_context.json` 修改；验收层正确拒绝了 fake controlled_exec 完成。
+- Finding 134: leaf had no formal model-callable capability request lane.
+  - Symptom: leaf 写了 `capability_request.json`，还尝试编辑自己的 `execution_context.json` 加 `pending_requests`，但 `task.capability_requests` 仍为空，父级没有 OPEN request 可以 route/grant/rerun。
+  - 中文解释：模型知道要申请工具，但它只能“写一个看起来像申请的文件”。系统层不认这个文件，所以父级不会真正授权，也不会稳定重跑。
+  - Fix: 新增 `capability_request` orchestration tool。runner 只能给当前 run 写正式 `CapabilityRequest`，不能指定 sibling/其他分支 run_id；成功后返回 `request_id`、`status=OPEN` 和 `next_action=route_capability_request`。所有内置角色模板、leaf 自动工具策略和 SimpleAgent 工具表都会暴露该工具。
+  - Verification:
+    - `test_capability_request_tool_records_open_request`.
+    - `test_capability_request_tool_blocks_cross_run_writes`.
+    - `test_capability_request_tool_is_registered_for_simple_agent`.
+    - `test_capability_request_tool_is_available_to_role_and_leaf_defaults`.
+- Finding 135: tool-created OPEN requests could be cleaned up by an `AWAITING_ACCEPTANCE` result.
+  - Symptom: 如果 runner 调用正式工具写入 OPEN request 后，又在最终结果块里写 `AWAITING_ACCEPTANCE` 且不重复填 `capability_requests`，旧状态机会把 OPEN request 当成 stale request 清掉。
+  - 中文解释：这会让“正式申请”刚写进去就被自己的收口结果清掉，最后还是变成“看起来可验收，实际上没授权”。
+  - Fix: runner result 状态机现在检测已有 OPEN `capability_requests`。只要还有 OPEN request，就保持 `BLOCKED/UNVERIFIED/failure_type=capability_request`，并补一条 `route_capability_request` blocker；只有父级 route 后状态变为 `GRANTED`，后续成功重跑才可收口。
+  - Verification:
+    - `test_record_runner_result_keeps_tool_created_open_request_blocked`.
+- Finding 136: formal tool prompt needed to forbid fake request files.
+  - Symptom: R4 中 leaf 自发创建 `capability_request.json` / `controlled_exec_refs.json`，这类文件名容易让父级或人误以为能力已经被系统处理。
+  - 中文解释：能力申请必须走系统工具，不是靠产物目录里的同名文件。否则用户产物也会被系统内部文件污染。
+  - Fix: runner contract 明确写入：Tool Catalog 有 `capability_request` 时，缺能力必须先调用该工具；不要在产物目录写 `capability_request.json`，不要改 `execution_context.json` 伪造 `pending_requests`；工具返回 OPEN 后最终状态写 `PENDING_CAPABILITY_REQUEST` 或 `BLOCKED`。
+  - Verification:
+    - Focused prompt/工具注册回归通过。
+- Remaining check:
+  - Re-run clean controlled exec R5. Expected result: leaf 看到缺 `controlled_exec` 时先调用正式 `capability_request` 工具；父级 follow-up route 生成 grant 后重跑 leaf；第二轮 leaf 使用真实 `controlled_exec` 完成 `pwd`、bounded `python3` 输出外置和 task trash refs。
+
+## 2026-05-11 Controlled Exec Capability-Request E2E R5
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-controlled-exec-e2e-20260511-r05.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r05/subagents`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r05`.
+- 中文说明：
+  - R5 继续按 root-only 原则跑，观察者只启动顶层主代理；root 创建 depth=1 `小傻妞-1`，depth=1 创建 depth=2 `小小傻妞-1`，depth=2 创建 depth=3 leaf。
+  - depth=3 leaf 这次没有再伪造 `capability_request.json`；它正式调用 `capability_request` 工具申请 `controlled_exec`，父级 route 后生成 grant，leaf 随后真实调用 `controlled_exec`。
+  - leaf 成功写出用户产物目录里的 `sentinel.txt`、`CONTROLLED_EXEC_E2E_SUMMARY.md` 和 `controlled_exec_refs.json`；大 stdout 被外置并记录 `stdout_ref`，`rm` 被 `task_trash` 路径拦截，没有直接进 shell 删除。
+  - 本轮由观察者停止，因为 depth=1 coordinator 在验收/汇总阶段反复读 artifact 和报告，prompt 膨胀到约 92K，仍未自然收口；这轮作为 runaway 验收链路证据保留。
+- Finding 137: literal lineage wildcard names leaked into real agent names.
+  - Symptom: depth=3 leaf 的名字变成 `小小小傻妞-*-*`。
+  - 中文解释：提示里的 `小小小傻妞-*` 是命名格式，星号应该被模型换成专业后缀或短 ID，不应该原样出现在 agent 名字里。
+  - Fix: 层级调度器现在识别 agent_name 后缀里的 `*` 占位符；如果模型原样传入，就用 role 作为兜底后缀，避免用户看到模板占位符。
+  - Verification:
+    - `test_hierarchy_schedule_repairs_literal_lineage_wildcard_names`.
+- Finding 138: delete commands were still displayed as shell-granted commands.
+  - Symptom: leaf 申请了 `requested_commands=["pwd","python3","rm"]`，grant 的 `command_allowlist` 里也出现 `rm`，虽然 controlled_exec gateway 实际把 `rm` 重定向到 `task_trash`。
+  - 中文解释：行为层已经没有真删文件，但授权记录写着 `rm` 被允许，会误导父级、用户和后续 LLM，以为子代理拿到了裸删除权限。
+  - Fix: capability grant 的 shell command allowlist 会过滤 `rm/rmdir/unlink`；这些删除类请求仍保留在 request scope 里作为“想要做删除替代测试”的事实，但不会进入 shell 白名单，只能由 controlled_exec 的 task trash 分支处理。
+  - Verification:
+    - `test_grant_command_allowlist_excludes_delete_commands`.
+- Finding 139: formal capability request and parent route now work in a real 4-level run.
+  - Symptom: R4 中 leaf 只能写假文件；R5 中 leaf 正式调用 `capability_request`，父级生成 grant，leaf 第二轮用 `controlled_exec` 执行 `pwd` 和 bounded `python3` 输出，并生成 refs。
+  - 中文解释：这说明“下级发现缺工具 -> 正式申请 -> 父级授权 -> 下级拿 grant 再执行”的主链路已经从模拟进入真实模型链路。
+  - Status: passed for the leaf capability path.
+  - Remaining risk: grant 报告和最终 refs 仍要更清楚地区分 “shell command allowlist” 和 “delete-to-trash request”。
+- Finding 140: coordinators can over-read child evidence during upward verification.
+  - Symptom: depth=1 coordinator 在 child/leaf 已进入 `AWAITING_ACCEPTANCE` 后，反复 `read_file` / `read_artifact` / `list_files`，prompt 从约 45K 增长到约 92K，仍未自然汇报完成。
+  - 中文解释：多层验收不应该每层都把下层产物重新读一遍；更好的做法是每层交一个短的 evidence summary/ref packet，上层主要读摘要和 refs，需要时再抽样打开正文。
+  - Status: recorded. 当前已有单代理滚动工具预算（默认 10 分钟 50 次），但本轮在观察者提前停止时尚未触发；后续需要把“接近预算/上下文膨胀时的自检收口提示”和“refs-first 层层摘要”继续做强。
+- Finding 141: long write payloads still create parse-recovery churn.
+  - Symptom: leaf 和 coordinator 都出现过 `工具调用缺少结束标记 [/TOOL_CALL]`，主要发生在一次性写较长 Markdown/JSON 时。
+  - 中文解释：模型能自修为短写入或 append，但每次都会多烧轮次；复杂项目里这会拖慢速度，也会增加上下文。
+  - Status: recorded. 现有完整 JSON 缺结束标记恢复已能减少一类浪费；真正内容半截断仍需要后续 bounded write helper 或草稿 artifact apply。
+- Remaining check:
+  - Re-run clean controlled exec R6. Expected result: depth=3 名字不再带 `*`；grant 的 `command_allowlist` 不含 `rm/rmdir/unlink`；leaf 仍可通过 controlled_exec 的 task trash 分支验证删除替代；上层 coordinator 应在较少读取轮次内用 evidence summary/refs 收口，不能继续无限读子节点产物。
+
+## 2026-05-11 Controlled Exec Capability-Request E2E R6
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-controlled-exec-e2e-20260511-r06.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r06/subagents`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r06`.
+- 中文说明：
+  - R6 继续按 root-only 原则跑，观察者只启动顶层主代理；root 创建 depth=1 `小傻妞-协调员-001`，depth=1 创建 depth=2 `小小傻妞-协调员-002`，depth=2 创建 depth=3 `小小小傻妞-叶子测试员-003`。
+  - root 和中间 coordinator 起初多次传错 role / write root / path_scope，被层级 guard 拦住后能自己读错误原因并改正，最终创建 leaf。
+  - leaf 正式调用 `capability_request`，父级 route 后生成 grant；grant 的 shell `command_allowlist` 只含 `pwd`，没有 `rm`，说明删除命令过滤已经生效。
+  - 本轮主动停止保留证据，因为 grant 已生成但没有进入 `write_boundary.controlled_exec_grants`，导致 `controlled_exec` 工具拒绝执行；继续跑只会重复申请能力。
+- Finding 142: controlled_exec tool grants were visible as capability grants but not executable boundary grants.
+  - Symptom: `task.capability_grants` 里有 `capgrant-1778518485-94c9c4dc`，且 `allowed_tools` 包含 `controlled_exec`；但 `execution_context.write_boundary.controlled_exec_grants=[]`，叶子调用 `controlled_exec` 时返回 `controlled_exec requires parent grant in write_boundary.controlled_exec_grants`。
+  - 中文解释：授权单已经开出来了，模型也看到了“有 grant”，但真正执行工具检查的安全口袋里没有这张授权，所以工具拒绝。这个不是提示词问题，是 grant 桥接漏了一种真实形态。
+  - Root cause: 模型把 `capability_type` 写成 `tool`，父级 route 生成的是 tool grant；旧 `controlled_exec_grant_refs()` 只接受 `grant_type=="shell"`，没有把显式包含 `controlled_exec`、命令白名单和路径范围的 tool grant 编译成执行边界。
+  - Fix: `controlled_exec_grant_refs()` 现在接受两类 grant：`shell` grant，以及显式包含 `controlled_exec` 且有 command/path scope 的 tool grant。工具层仍只读取父级注入的 refs，不信模型参数里的自填授权。
+  - Verification:
+    - `test_controlled_exec_refs_include_controlled_exec_tool_grants`.
+- Finding 143: truncated pending capability result was labeled as structured output parse error.
+  - Symptom: leaf 已通过正式 `capability_request` 工具写入 OPEN request，并输出 `PENDING_CAPABILITY_REQUEST`，但模型最后的 `[SUBAGENT_RESULT]` 缺少闭合标记，任务一度被标成 `failure_type=structured_output_parse_error`。
+  - 中文解释：子代理已经正确“举手申请工具”了，哪怕最终 JSON 块半截断，也不应该把主要状态说成“格式错”；父级真正需要处理的是“去授权/重跑”。
+  - Root cause: runner result 状态机在 `parsed.found and not parsed.ok` 分支里直接写 `structured_output_parse_error`，没有先检查工具已经写入的 OPEN `capability_requests`。
+  - Fix: 解析失败但已有 OPEN capability request 时，状态保持 `BLOCKED/UNVERIFIED/failure_type=capability_request`，并补 `route_capability_request` blocker；真正没有能力申请的截断结果仍保留 parse error。
+  - Verification:
+    - `test_parse_error_with_tool_created_open_request_stays_capability_blocked`.
+- Remaining check:
+  - Re-run clean controlled exec R7. Expected result: leaf 拿到 `write_boundary.controlled_exec_grants` 后能用 `controlled_exec` 执行 `pwd`；`rm` 不进入 shell 白名单，但仍通过 task trash 分支返回 manifest；上层继续用 refs-first 汇总，不展开大正文。
+
+## 2026-05-11 Controlled Exec Capability-Request E2E R7
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-controlled-exec-e2e-20260511-r07.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r07/subagents`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r07`.
+- 中文说明：
+  - R7 按 root-only 原则启动，root 创建 depth=1 `小傻妞-r07-d1`，但 depth=1 后续创建了 depth=2 `小小傻妞-r07-d2` 且角色是 `leaf_worker`。
+  - 这轮主动停止：它已经违反“root -> 子 -> 孙 -> 孙孙，depth=3 才是 leaf”的四层合同，外层不能替它补孙孙节点。
+- Finding 144: four-layer contract detection missed compact Chinese `4层`.
+  - Symptom: 父级目标写的是“4层链路”，没有写成带空格的“4 层”；层级 guard 没识别，于是允许 depth=1 coordinator 直接创建 depth=2 leaf_worker。
+  - 中文解释：模型没完全乱来，但系统应该识别“4层”和“4 层”是同一个意思。否则真实中文 prompt 里一少个空格，就能跳过一层。
+  - Root cause: `_goal_requires_four_layer_chain()` 只检测 `"4 层"`、`"四层"`、`"孙孙"` 等 token，漏了 `"4层"` 和 `depth=3`。
+  - Fix: 四层合同检测新增 `"4层"` 和 `"depth=3"`；只在父级明确要求四层/孙孙/depth=3 时启用，不影响普通任务 root 直接创建 worker。
+  - Verification:
+    - `test_hierarchy_schedule_blocks_leaf_when_four_layer_token_has_no_space`.
+- Finding 145: write-root drift guard treated internal task_dir mentions as product drift.
+  - Symptom: depth=1 coordinator 在 child goal 里提到 runtime `task_dir`，调度器反复返回 `child_write_root_drift`，要求只写用户 deliverables 根。
+  - 中文解释：task_dir 是子代理自己的内部工作区，用来放哨兵、日志、临时文件；它不是用户最终产物目录。描述 task_dir 不应该被当成“把用户产物写歪了”。
+  - Root cause: `_invalid_child_write_roots()` 对 goal 中提取到的所有绝对路径都按用户 product root 校验，没有把 parent `task_dir` / `task_workspace_dir` / `agent_run_workspace_dir` 这类内部上下文路径排除。
+  - Fix: 写根漂移检查现在忽略父级内部上下文根；仍会阻断 `/Users/example`、`Downloads`、错误 sibling output 这类真实 product root 漂移。
+  - Verification:
+    - `test_hierarchy_schedule_allows_internal_task_dir_context_with_product_root`.
+- Remaining check:
+  - Re-run clean controlled exec R8. Expected result: depth=1 不能直接创建 depth=2 leaf；必须先创建 depth=2 coordinator，再由 depth=2 创建 depth=3 leaf。随后继续验证 R6/R7 的 controlled_exec grant/write_boundary/trash 链路。
+
+## 2026-05-11 Controlled Exec Capability-Request E2E R8
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-controlled-exec-e2e-20260511-r08.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r08/subagents`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r08`.
+- 中文说明：
+  - R8 继续按 root-only 原则启动，观察者只启动主代理；root 创建 depth=1 `小傻妞-测试协调员`，depth=1 创建 depth=2 `小小傻妞-链路协调员`。
+  - R7 的四层 guard 已生效：depth=1 没有再直接创建 leaf，而是创建了 depth=2 coordinator。
+  - 本轮主动停止：depth=2 明确目标是创建 depth=3 leaf_worker，但它没有调用 `schedule_child_subagents` 创建任何真实 child，却在结果块中伪造 `child_run_ids`、产物 refs 和“四层链路完成”；独立验收拒绝了它，但上级仍反复读报告/文件，没有触发接管或重派。
+- Finding 146: coordinator could claim child completion without a real child run.
+  - Symptom: `subagent-1778519832-cf540a98` 的 `task.child_ids=[]`，但 `runner_response.md` 里写了 `child_run_ids=["subagent-1778519705-8afacd8f"]` 和 `child_status=completed`；这个 run id 不存在于当前 runtime。
+  - 中文解释：模型“嘴上说创建了孩子”，但系统状态里没有孩子。这类结果不能靠后面的 controlled_exec 验收才顺手挡住，必须有单独的 child 创建硬检查。
+  - Root cause: acceptance 只检查 evidence/artifact/capability/controlled_exec 等合同，没有把“任务目标要求创建下级”与真实 `task.child_ids` 对齐。
+  - Fix: `required_child_spawned` 验收 finding 会在 goal/acceptance 明确要求创建下级、leaf_worker 或 depth child 时要求真实 `task.child_ids` 非空；口头 `child_run_ids` 不再算数。
+  - Verification:
+    - `test_required_child_goal_without_child_ids_blocks_acceptance`.
+- Finding 147: rejected child acceptance was still surfaced as ready-to-summarize progress.
+  - Symptom: depth=2 的 `acceptance_review.json` 已经 `decision=REJECT`，但父级 runner-context `direct_children` 仍可能把 `AWAITING_ACCEPTANCE/NEEDS_ACCEPTANCE` 的 child 当成可 refs-first 汇总的对象，导致上级开始反复读报告，而不是进入 recovery。
+  - 中文解释：验收拒绝以后，父级应该看到“要救援/重派”，不是“可以总结”。否则上层会一直读被拒绝的假报告，烧 token，也救不回来。
+  - Root cause: `orchestration_progress_payload.py` 只按 child status 判断 direct child 是否 ready，没有读取 child-local 最新 `acceptance_review.json` 的 REJECT 结果。
+  - Fix: direct child progress payload 现在会读取 child `reports/acceptance_review.json`；若最新 decision 是 `REJECT`，该 run 进入 `rejected_acceptance_run_ids` 和 `recovery_run_ids`，`next_action=inspect_or_rescue_direct_children`。
+  - Verification:
+    - `test_dispatch_payload_treats_rejected_child_as_recovery`.
+- Remaining check:
+  - Re-run clean controlled exec R9. Expected result: depth=2 若不创建 leaf 会被 `required_child_spawned` 明确拒绝，父级 dispatch payload 会提示 recovery；更理想情况是 depth=2 正确创建 depth=3 leaf，并继续跑 capability request -> grant -> controlled_exec -> trash refs 全链路。
+
+## 2026-05-11 Controlled Exec Capability-Request E2E R9
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-controlled-exec-e2e-20260511-r09.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r09/subagents`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r09`.
+- 中文说明：
+  - R9 继续按 root-only 原则启动，root -> `小傻妞-coord` -> `小小傻妞-coord` -> `小小小傻妞-leaf` 四层链路真实创建成功。
+  - R8 的假 child 问题没有复现：depth=2 真实调用 `schedule_child_subagents` 创建了 depth=3 leaf。
+  - leaf 正式提交 `capability_request`，父级 route 生成 shell grant；grant 的 shell 白名单只有 `pwd/python3`，没有 `rm/rmdir/unlink`。
+  - leaf 后续真实调用了 `controlled_exec` 多次，但本轮最终停在 `BLOCKED/failure_type=capability_request`：删除测试被模型理解成还要申请 `rm/mv` 权限，上级看到 child BLOCKED 后又开始反复读 artifact/file，没有接管收口。
+- Finding 148: controlled_exec apply string `full` was treated as dry-run.
+  - Symptom: leaf 报告里写“apply=\"full\" 仍返回 dry_run 是 gateway 行为”，`controlled_exec_refs.json.stdout_ref=null`，`trash_manifest_ref=null`；trace 显示调用了 `controlled_exec`，但真实执行意图没有被 bool parser 识别。
+  - 中文解释：模型不是只会写布尔 true；它会写 `full/apply/execute/run` 这类自然语言值。工具只认 true，会让真实执行静悄悄变成 dry-run，模型误以为系统不支持。
+  - Root cause: `controlled_exec` 工具的 `_bool_value()` 只把 `1/true/yes/y` 当成 true。
+  - Fix: `_bool_value()` 现在也接受 `apply/execute/run/full`。
+  - Verification:
+    - `test_controlled_exec_tool_apply_full_routes_delete_without_rm_shell_grant`.
+- Finding 149: delete-to-trash dry-run looked like a hard failed tool call.
+  - Symptom: `rm sentinel.txt` 的 dry-run 返回 `allowed=false/action=use_task_trash`，但工具调用整体 `ok=false`；模型于是继续申请 `controlled_exec rm 权限` 和 `mv`。
+  - 中文解释：删除不能进 shell 是对的，但“会走 trash 替代”应该是一个有效计划，不应该像错误一样返回。否则模型会去申请我们本来就不想给的裸删除命令。
+  - Root cause: `execute_controlled_exec_tool()` 对所有 dry-run 都用 `plan.allowed` 当工具成功状态；`use_task_trash` 计划的 `allowed=false` 被误解为失败。
+  - Fix: dry-run 计划如果 `action=use_task_trash`，工具调用 `ok=true`，payload 仍明确 `allowed=false/action=use_task_trash/trash_hint`，表示“不允许 shell 删除，但允许 trash 替代流程”。
+  - Verification:
+    - `test_controlled_exec_tool_dry_run_delete_is_valid_trash_plan`.
+- Finding 150: blocked child recovery hint still allowed parent over-reading.
+  - Symptom: depth=3 leaf 变为 `BLOCKED/failure_type=capability_request` 后，depth=2 coordinator 调用了 `dispatch_subagents`，随后继续多轮 `read_artifact/read_file/list_files`，prompt 从约 43K 增长到 59K+，没有直接 route/retry/rescue。
+  - 中文解释：上级看到孩子阻塞时，应该先按工具返回的 recovery refs 和 suggested tool call 推进；反复打开下级正文会烧 token，也不解决阻塞。
+  - Fix: `direct_children.recovery_hint` 增加明确提示：恢复动作前不要反复 `read_file/read_artifact` 打开 child 产物正文；先按 refs 和建议工具调用推进。
+  - Verification:
+    - `test_dispatch_payload_treats_rejected_child_as_recovery` 覆盖 hint 文案。
+- Remaining check:
+  - Re-run clean controlled exec R10. Expected result: `apply="full"` 会真实执行；`rm sentinel.txt` 应走 task trash，不再新增裸 `rm/mv` capability request；blocked child 时父级应减少正文读取并优先 dispatch/recovery。
+
+## 2026-05-11 Controlled Exec Capability-Request E2E R10
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-controlled-exec-e2e-20260511-r10.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r10/subagents`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r10`.
+- 中文说明：
+  - R10 继续按 root-only 原则启动，观察者只启动主代理；root -> `小傻妞-exec-coord-1` -> `小小傻妞-exec-lead-1` -> `小小小傻妞-leaf-1` 四层链路真实创建成功。
+  - leaf 正式调用 `capability_request`，父级 grant 的 shell 白名单只有 `pwd/python3`，没有 `rm/rmdir/unlink`；随后 leaf 真实调用三次 `controlled_exec`。
+  - `pwd` 和 `python3 -c "print('x' * 2000)"` 真实执行并写出 stdout artifact；`rm sentinel.txt` 没进 shell，返回 `mode=task_trash/action=move_to_task_trash` 并生成 trash manifest。
+  - 本轮主动停止保留证据，因为 leaf 真实工作已经完成，但验收层误判两个 P0，导致父级继续反复读 leaf 产物。
+- Finding 151: leaf self-creation wording triggered the child-spawn hard gate.
+  - Symptom: leaf 的 goal/验收条件里有“真实创建 leaf_worker 并执行测试”，`required_child_spawned` 把它误解为 leaf 还要创建下级，于是因 `task.child_ids=[]` 拒绝验收。
+  - 中文解释：这里的“创建 leaf_worker”是说这条 leaf run 本身必须真实存在，不是让 leaf 再生一个孩子。
+  - Fix: `required_child_spawned` 收窄判定：`创建 leaf_worker` 只对非 leaf/self 任务触发；`创建下级`、`创建直接下级`、`create/spawn depth=` 等明确下级合同仍继续硬拦截。
+  - Verification:
+    - `test_leaf_self_creation_text_does_not_require_child_ids`.
+- Finding 152: controlled_exec acceptance only looked at output.json and missed real refs.
+  - Symptom: leaf 的 `output.json` 只记录了实际工具名，没有 `stdout_ref/audit_ref/trash_manifest_ref`；真实 refs 写在用户 deliverables 的 `controlled_exec_refs.json` / `controlled_exec_test_results.md` 和工具输出 artifact 里，验收却报“缺少真实 controlled_exec 工具记录或 refs”。
+  - 中文解释：真实工具已经跑了，但验收只看一个旧口袋，没看最终交付 refs，所以误杀。
+  - Fix: `acceptance_controlled_exec_findings.py` 现在在 task_dir 和 `allowed_write_roots` 内只扫描固定小文件名（`controlled_exec_refs.json`、`CONTROLLED_EXEC_E2E_SUMMARY.md`、`controlled_exec_test_results.md`），最多两层、单文件 64KB，既能找到真实 refs，又不会读大日志。
+  - Verification:
+    - `test_controlled_exec_contract_reads_deliverable_refs`.
+    - R10 现场复算：`child_required=False`，`controlled_exec_contract_satisfied=True`。
+- Finding 153: report wording can overstate stdout truncation.
+  - Symptom: leaf 的人工 Markdown 报告写 `stdout_truncated=true`，但真实工具输出是 `stdout_truncated=false` 且 `stdout_ref` 存在；按验收合同这仍然满足“大输出外置或可追溯”，但报告口径不精确。
+  - 中文解释：这不是功能失败，但说明后续报告模板要更偏向“引用真实工具 payload 字段”，不要手填结论。
+  - Status: recorded. 后续可以把 controlled_exec summary 生成做成工具/模板，从真实 payload 自动提取字段。
+- Finding 154: parent still over-reads rejected child evidence.
+  - Symptom: 验收 REJECT 后，depth=2 coordinator 多轮 `read_artifact/read_file/list_files`，prompt 从约 46K 增长到 66K+，没有直接按 rejection/recovery refs 收口。
+  - 中文解释：孩子被验收拒绝后，上级应该直接进入救援或重派，不应该继续翻正文。
+  - Status: recorded. R51/R52 已有 recovery hint，下一步要继续让父级在 `REJECT` 时更强地优先 rescue/route，而不是读取正文。
+- Remaining check:
+  - Re-run clean controlled exec R11. Expected result: leaf 真实 controlled_exec/trash 证据可以被验收层识别，不再被 `required_child_spawned` 和 controlled_exec refs 误杀；上层仍需继续观察是否能少读正文并自然收口。
+
+## 2026-05-11 Controlled Exec Capability-Request E2E R11
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-controlled-exec-e2e-20260511-r11.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r11/subagents`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r11`.
+- 中文说明：
+  - R11 继续按 root-only 原则启动，root 一开始把 `.../subagents/tasks/你的run_id` 这种内部占位路径写进 child goal，被写根漂移 guard 拦了一次；root 随后自己修正并创建 depth=1。
+  - 最终四层链路跑通：root -> `小傻妞-coord-r11` -> `小小傻妞-coord-r11` -> `小小小傻妞-leaf-r11`。
+  - leaf 正式申请 capability；父级 route 后 grant 的 shell 白名单只有 `pwd/python3`，没有 `rm`；leaf 真实执行了 `pwd` 和 `python3`，stdout 有 artifact refs。
+  - 本轮主动停止：leaf 执行 `controlled_exec rm sentinel.txt` 时，工具把相对路径按 task_dir 解析，没按 `cwd=deliverables` 解析，导致 task trash 报 `source_missing`。
+- Finding 155: task-trash delete path ignored the command cwd.
+  - Symptom: `sentinel.txt` 真实位于 `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r11/sentinel.txt`，leaf 调用 `controlled_exec` 参数是 `command="rm sentinel.txt"`、`cwd=deliverables`。工具返回的 trash source 却是 `.../subagents/subagent-.../sentinel.txt`，最终 `moved=false/reason=source_missing`。
+  - 中文解释：删除分支提前绕过了 shell gateway，所以没有沿用 shell 命令的 cwd 解析。相对路径应该按命令 cwd 找，而不是默认按 task_dir 找。
+  - Fix: `controlled_exec_gateway._delete_source_path()` 会把相对删除目标按 `request.cwd` 解析成绝对路径；`task_trash._allowed_roots()` 现在接受父级 grant 的 `path_scope` 作为合法来源根，把授权产物目录里的文件移动到 task-local trash，而不是只允许 task_dir 内部文件。
+  - Verification:
+    - `test_controlled_exec_tool_routes_relative_delete_from_command_cwd`.
+    - 相关 controlled_exec trash focused tests 4 条通过。
+- Finding 156: internal placeholder paths can still trigger a recoverable write-root guard block.
+  - Symptom: root 首次 child goal 写了 `.../subagents/tasks/你的run_id`，被 `child_write_root_drift` 拦截；随后 root 自己重写 goal 并成功创建 child。
+  - 中文解释：这是可恢复的提示词/guard 摩擦，不是主链路失败。后续可以继续让 guard 更明确区分“内部 task workspace 占位说明”和“用户产物根漂移”。
+  - Status: recorded. 当前先不放宽，因为模型已能自修，且 write-root guard 对保护用户产物根仍重要。
+- Remaining check:
+  - Re-run clean controlled exec R12. Expected result: `rm sentinel.txt` with `cwd=deliverables` should move the real deliverables file into task-local trash and write manifest; acceptance should recognize refs without false rejection.
+
+## 2026-05-12 Controlled Exec Capability-Request E2E R12-R14
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - R12 runtime: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r12/subagents`.
+  - R13 runtime: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r13/subagents`.
+  - R14 runtime: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r14/subagents`.
+- 中文说明：
+  - R12/R13/R14 都继续按 root-only 原则启动，外层只启动 root，后续由 root -> 子 -> 孙 -> 孙孙逐层创建。
+  - R12 真实四层链路跑通，leaf 执行了 `pwd`、大输出和 `rm -> task_trash`，但上层 coordinator 被验收误杀。
+  - R13 验证出父级授权如果收到 `python3 -c ...` 这种完整命令，必须归一成 shell gateway 实际检查的 `python3`。
+  - R14 验证出命令归一已生效，但 leaf 重复申请 capability，又把 `rm` 单独申请成 OPEN/GRANTED 空白 grant，导致流程卡住；同时结果块被截断时，runner loop 真实执行过的 `controlled_exec` 没有稳定写入 `task.used_tools`。
+- Finding 157: coordinator acceptance did not count delegated controlled_exec evidence.
+  - Symptom: R12 的 leaf 已真实执行 `controlled_exec` 并写出 refs，但 depth=1/depth=2 coordinator 的 `controlled_exec_contract_satisfied` 仍失败。
+  - 中文解释：协调者本身不应该亲自跑 shell；它派 leaf 跑了，并且 child subtree 有真实工具记录和 refs，就应该能通过 delegated evidence 验收。
+  - Root cause: controlled_exec 验收只看当前 task 的 `used_tools` 和当前 output，没有沿真实 `task.child_ids` 子树查 leaf 的小型 `task.json/output.json`。
+  - Fix: `acceptance_controlled_exec_findings.py` 沿当前任务的 `child_ids` 精确读取少量 child `task.json/output.json`，只相信 persisted `used_tools` / `structured_output.actual_tools`，不相信 summary 文案。
+  - Verification:
+    - `test_controlled_exec_contract_accepts_descendant_tool_evidence`.
+    - `test_controlled_exec_contract_rejects_refs_without_tool_evidence`.
+- Finding 158: full shell command strings created unusable command allowlists.
+  - Symptom: R13 leaf 申请 `python3 -c "print(...)"` 后，grant 的 `command_allowlist` 包含完整字符串而不是 `python3`；shell gateway 检查 base command `python3`，于是大输出执行被拒绝。
+  - 中文解释：模型经常把“想跑的完整命令”写进申请。授权层不能原样当命令名，要抽出真正可执行程序名。
+  - Fix: `grant_command_allowlist()` 现在用 `shlex.split()` 提取首个可执行名，并继续过滤 `rm/rmdir/unlink`。
+  - Verification:
+    - `test_grant_command_allowlist_normalizes_full_command_strings`.
+- Finding 159: duplicate capability requests/grants made the leaf ask for bare rm again.
+  - Symptom: R14 中 leaf 先后出现两个等价 `pwd/python3/rm` GRANTED request，再出现一个 `rm` only request；父级路由给了一个空 `command_allowlist=[]` 的 grant，leaf 仍 BLOCKED。
+  - 中文解释：同一个申请被工具调用和结构化结果重复记录，会让 runner context 里出现多个等价 grant；模型看到 `rm` 不在白名单，又误以为要继续申请裸 rm。
+  - Root cause: capability request 缺少 scope 去重；route 层没有识别“已有 controlled_exec grant 时，rm 应走 task_trash 而不是新 shell grant”；runner prompt 对这条安全规则不够明确。
+  - Fix:
+    - 新增 `capability_request_identity.py`，按 capability/tool/skill/MCP/命令/path/network/output budget 生成请求签名，工具申请和结构化结果重复时复用旧 request。
+    - `manager_capabilities.py` 遇到 rm/rmdir/unlink only request 且已有 controlled_exec grant 覆盖 path scope 时，标记该请求由已有 grant 覆盖，不新增空 grant，并触发下一轮 rerun。
+    - `controlled_exec` 工具遇到多个等价 grant 时可当成一个 grant 使用；runner prompt 明确说明 `rm/rmdir/unlink` 不进 shell 白名单是设计，已有 grant 时直接调用 `controlled_exec apply=true`，工具会返回 `task_trash/trash_manifest_ref`。
+  - Verification:
+    - `test_subagent_lifecycle_service_dedupes_equivalent_capability_requests`.
+    - `test_record_runner_result_dedupes_parsed_request_against_tool_request`.
+    - `test_rm_only_request_reuses_existing_controlled_exec_grant`.
+    - `test_controlled_exec_tool_accepts_duplicate_equivalent_grants_without_grant_id`.
+- Finding 160: truncated structured result lost actual tool facts.
+  - Symptom: R14 的 runner response 已经包含 `controlled_exec` 证据，但 `[SUBAGENT_RESULT]` 被截断、修复模型调用超时，最终 `task.used_tools` 只剩 `write_file/capability_request`，实际工具事实只能在 `output.structured_output.actual_tools` 里看到。
+  - 中文解释：模型输出格式坏了，不应该把工具层已经真实记录到的事实也丢掉。否则验收、恢复和父级判断会越来越依赖不稳定文本。
+  - Fix: runner result 解析失败时也会把 runner loop `actual_tools` 合并进 `task.used_tools` 和证据摘要；结构化结果失败仍保持失败，不把坏 JSON 当完成。
+  - Verification:
+    - `test_parse_error_still_records_actual_tool_facts`.
+- Role-planning note:
+  - 后续要把“每类角色什么时候使用”做成正式选择策略，而不是只靠模板名称。root 和所有 coordinator/lead 这类派工角色都应知道：何时派 worker/writer 产出、何时派 researcher 查资料、何时派 tester 跑验证、何时派 bug_finder 找茬、何时派 acceptor 做最终验收、何时自己只写协调报告。
+  - 这个策略要保持渐进式加载：主代理平时只知道角色索引和选择规则；真正派工时再读取模板详情，避免不派工也把全部模板细节塞进 prompt。
+- Remaining check:
+  - Re-run clean controlled exec R15. Expected result: capability request 不重复，`python3 -c ...` grant 归一为 `python3`，`rm` 不再单独卡住，leaf 应通过 `controlled_exec apply=true` 进入 task trash 并写 `trash_manifest_ref`。
+
+## 2026-05-12 Controlled Exec Capability-Request E2E R15
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r15/subagents`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r15`.
+- 中文说明：
+  - R15 继续按 root-only 原则启动，外层只创建 root；root 创建了 depth=1 `小傻妞-A`，并由该子代理自己尝试创建 depth=2 `小小傻妞-A`。
+  - 本轮在 depth=1 处主动停止：`schedule_child_subagents` 返回 `blocked=true/reason=forbidden_child_scope:depth`，导致 `小傻妞-A` 进入 `BLOCKED/capability_request_pending`。
+  - 这次不是模型没申请权限；父级已经写了 GRANTED capability request，但底层 scope guard 把“不要创建 depth>=4”误解析成“禁止创建任何包含 depth 的 child”。
+- Finding 161: depth limit text was parsed as a forbidden business scope.
+  - Symptom: parent goal 包含“不要创建 depth>=4 的下级”，child spec 正常写“构建 depth=2 coordinator，继续创建 depth=3 leaf_worker”时被 `forbidden_child_scope:depth` 拦截。
+  - 中文解释：`depth` 是层级数字说明，不是业务领域名。禁止创建 `arithmetic` 这类 sibling 任务要挡，但不能因为 goal 里有 `depth=2` 就挡住正常孙代理。
+  - Root cause: `_forbidden_scope_terms()` 的正则会从“不要创建 depth>=4”提取出 `depth`，并把它当成禁止领域词；后续 child goal 里出现 `depth=2/depth=3` 就误命中。
+  - Fix: forbidden scope 提取会过滤通用层级/角色词（如 `depth/layer/level/child/worker/...`），只保留真正的业务领域词；原有 `不得创建 arithmetic` 的保护仍继续生效。
+  - Verification:
+    - `test_hierarchy_schedule_allows_depth_limit_text_without_scope_block`.
+    - `test_hierarchy_schedule_blocks_forbidden_sibling_scope`.
+    - `test_hierarchy_schedule_blocks_implicit_domain_mismatch`.
+- Remaining check:
+  - Re-run clean controlled exec R16. Expected result: depth=1 可以创建 depth=2 coordinator，不再被 `forbidden_child_scope:depth` 卡住；随后继续观察 leaf 是否能完成 capability_request -> controlled_exec -> task_trash -> delegated evidence 收口。
+
+## 2026-05-12 Controlled Exec Capability-Request E2E R16
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r16/subagents`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r16`.
+- 中文说明：
+  - R16 继续按 root-only 原则启动；root -> `小傻妞-1` -> `小小傻妞-1` -> `小小小傻妞-1` 四层链路真实创建成功。
+  - R15 的 `forbidden_child_scope:depth` 已消失，depth=1 能正常创建 depth=2，depth=2 能正常创建 depth=3 leaf。
+  - leaf 正式申请 `controlled_exec` capability，父级 grant 成功，shell 白名单只有 `pwd/python3`，没有 `rm/rmdir/unlink`；leaf 随后真实调用 `controlled_exec`，并把 `rm sentinel.txt` 移入 task-local trash。
+  - 本轮主动停止：leaf 的 `controlled_exec_refs.json` 只写了 `command_results.*.artifact_ref`，stdout/audit refs 存在于受控工具输出 artifact 里；验收器没有顺着这个小 artifact ref 再读一层，导致误拒。
+- Finding 162: controlled_exec acceptance missed stdout/audit refs behind small tool-output artifact refs.
+  - Symptom: leaf 的 `output.json.used_tools` 已包含 `controlled_exec`，受控工具 artifact 中有 `stdout_ref/audit_ref`，交付目录中有 `trash_manifest_ref`；但 `controlled_exec_contract_satisfied` 仍 REJECT，提示缺少 stdout/audit/trash refs。
+  - 中文解释：leaf 没把 stdout/audit refs 直接抄到顶层 refs JSON，而是写了一个指向 controlled_exec tool output 的 `artifact_ref`。这是一种合理 refs-first 写法，验收器应该能精确读取这个小 artifact，而不是要求模型手抄所有字段。
+  - Root cause: `acceptance_controlled_exec_findings.py` 只扫 `output.json`、task/deliverables 下固定小文件名，没有跟随这些文件里明确出现的 `/memory_archive/artifacts/tool_outputs/controlled_exec-*.json` 小文件引用。
+  - Fix: controlled_exec 验收现在会从 output/refs 文本中提取显式 controlled_exec tool-output artifact 路径，按 64KB 小文件上限精确读取，不做目录 glob 或大日志扫描；从 artifact 内容中补齐 `stdout_ref/audit_ref`。
+  - Verification:
+    - `test_controlled_exec_contract_follows_small_tool_output_artifact_refs`.
+    - controlled_exec acceptance focused tests 5 条通过。
+- Remaining check:
+  - Re-run clean controlled exec R17. Expected result: R16 这类 artifact_ref 形状应能通过 leaf 验收；继续观察上级 coordinator 是否能 refs-first delegated evidence 自然收口，或是否还会反复读取 child 正文。
+
+## 2026-05-12 Controlled Exec Capability-Request E2E R17
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r17/subagents`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r17`.
+- 中文说明：
+  - R17 启动后 root 成功创建了 depth=1 `小傻妞-coordinator`，但 root 随后的模型调用遇到 `api.minimaxi.com` read timeout，root 进入 `BLOCKED/runner_error`。
+  - 本轮没有进入 controlled_exec 逻辑验收，因此不能用于判断 R57 修复是否有效。
+- Finding 163: real E2E can be interrupted by model API read timeout before logic coverage.
+  - Symptom: root blocker 记录 `网络请求失败: 无法连接模型接口 api.minimaxi.com ... The read operation timed out`。
+  - 中文解释：这类失败是外部模型接口/网络波动，不能算功能失败，但真实 E2E 需要记录并重跑；以后可以把这种错误单独归类为 retryable infrastructure issue。
+  - Status: recorded. 本轮停止后重跑 R18。
+- Remaining check:
+  - Re-run clean controlled exec R18. Expected result: 重新覆盖 R16/R57 逻辑修复，不把 R17 timeout 当成业务结论。
+
+## 2026-05-12 Controlled Exec Capability-Request E2E R18
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r18/subagents`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r18`.
+- 中文说明：
+  - R18 真实创建 root -> `小傻妞-depth1-coord` -> `小小傻妞-depth2-coord` -> `小小小傻妞-depth3-leaf` 四层链路。
+  - leaf 正式申请 controlled_exec，父级 grant 成功，shell 白名单仍只有 `pwd/python3`，没有 `rm`。
+  - 本轮主动停止：leaf 真实调用了 controlled_exec，但最终报告把 dry-run/blocked 结果写成 PASS，且又生成了一个空泛 `needed_capability=capability` 的第二 capability request/grant。
+- Finding 164: shell gateway blocked quoted Python `-c` scripts because it scanned raw semicolons.
+  - Symptom: leaf 调用 `python3 -c "import sys; ..."` 被 `blocked_shell_metacharacter` 拦截；但该分号位于已引用的 Python 代码参数中，并不会作为 shell 操作符执行。
+  - 中文解释：我们执行命令用的是 argv / `shell=False`，不是把整串交给 shell。真正危险的是未引用的 `; | > <` 这类 shell 操作符；Python 字符串里的分号应该允许，否则子代理很难跑小脚本或大输出测试。
+  - Fix: shell gateway 使用 `shlex` punctuation token 识别未引用 shell 操作符；`python3 -c "print(1); print('x' * 2000)"` 这类引用内分号不再被误挡，未引用 `python -m pytest; rm -rf /` 仍会阻断。
+  - Verification:
+    - `test_shell_gateway_allows_quoted_python_statement_separators`.
+    - `test_shell_gateway_dry_run_blocks_shell_metacharacters`.
+- Finding 165: empty fallback pending capability created a useless second grant.
+  - Symptom: leaf 已有正式 `controlled_exec` request/grant 后，又因 `PENDING_CAPABILITY_REQUEST` 但没有具体 pending_steps 被系统兜底成 `needed_capability=capability`、requested_tools/commands 全空的 request；父级 route 后生成一个空 `command_allowlist=[]` grant。
+  - 中文解释：这种“空泛 capability”没有可执行信息，只会污染 runner context，让后续 controlled_exec 面对多个 grant 更容易卡住。
+  - Fix: pending capability 兜底只在能从 summary/pending_steps 推出具体工具或命令时生成 request；纯空泛 `PENDING_CAPABILITY_REQUEST` 不再生成无工具/无命令的 generic request，任务仍保持 BLOCKED 供父级看见。
+  - Verification:
+    - `test_subagent_runner_parse_ignores_empty_pending_capability_request`.
+    - `test_record_runner_result_pending_capability_stays_blocked`.
+- Finding 166: leaf can still overclaim dry-run/trash-plan results as PASS.
+  - Symptom: R18 的 report 写 `controlled_exec pwd dry_run=true` 为 PASS、`rm blocked_task_trash` 为 PASS，但 task trash manifest 为空，sentinel 仍在 task_dir；这说明 leaf 没有等到 moved=true/trash_manifest_ref 就宣称成功。
+  - 中文解释：工具给出“可以走 trash 的计划”和“已经移入 trash”不是一回事。以后所有 leaf prompt 和验收都要继续强调：dry-run/allowed plan 不算完成，只有执行 payload 的 stdout_ref/audit_ref、trash payload 的 moved=true/trash_manifest_ref 才算完成。
+  - Fix: runner prompt 的 controlled_exec grant 段已加硬约束：目标要求真实 controlled_exec 时必须 `apply=true`，最终 refs 必须写 stdout_ref/audit_ref；删除只有 `moved=true` 且有 `trash_manifest_ref` 才能写 PASS；复杂 Python 命令优先用 argv 数组避免 shell 引号歧义。工具示例也改成 apply=true。
+  - Verification:
+    - `test_runner_prompt_tells_controlled_exec_leaf_to_apply_and_report_refs`.
+- Remaining check:
+  - Re-run clean controlled exec R19. Expected result: 不再生成空 generic capability request；quoted Python 大输出不被误挡；leaf 更可能使用 apply=true 并报告真实 stdout/audit/trash refs。
+
+## 2026-05-12 Controlled Exec Capability-Request E2E R19
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r19/subagents`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r19`.
+- 中文说明：
+  - R19 真实创建 root -> `小傻妞-e2e-coord` -> `小小傻妞-e2e-coord` -> `小小小傻妞-e2e-worker` 四层链路。
+  - R18 的两个修复有效：没有再生成空泛 generic capability request；quoted Python 大输出通过 controlled_exec 成功执行，stdout 外置到 artifact。
+  - 本轮主动停止：leaf 仍把“rm 不在 command_allowlist”理解成“rm 无法执行”，没有调用 `controlled_exec apply=true` 去触发 task_trash，因此缺少 `trash_manifest_ref`。
+- Finding 167: model needs structured delete policy, not only prose, to understand rm-to-trash.
+  - Symptom: prompt 已写“rm/rmdir/unlink 不进 command_allowlist 是安全设计，已有 grant 时直接 controlled_exec apply=true”，但 leaf 仍报告“设计矛盾：rm 不在 allowlist，所以无法测试 rm”。
+  - 中文解释：模型看到 grant JSON 里 `command_allowlist=["pwd","python3"]` 后，更相信这个结构化字段；单靠提示词说“rm 会走 trash”容易被它忽略。需要把 delete-to-trash 也作为结构化 grant 上下文字段给模型。
+  - Fix: `controlled_exec_grant_refs()` 增加 `delete_policy`：`mode=task_trash`、`commands=["rm","rmdir","unlink"]`、`command_allowlist_required=false`、`completion_requires=["moved=true","trash_manifest_ref"]`。runner prompt 同步引用 `controlled_exec_grants.delete_policy.mode=task_trash`，让 leaf 知道 rm 不需要进入 command_allowlist，也不能用 dry-run/plan 当完成。
+  - Verification:
+    - `test_controlled_exec_refs_include_controlled_exec_tool_grants`.
+    - `test_runner_prompt_tells_controlled_exec_leaf_to_apply_and_report_refs`.
+- Remaining check:
+  - Re-run clean controlled exec R20. Expected result: leaf 能看到 structured `delete_policy` 并调用 `controlled_exec apply=true` 执行 `rm sentinel.txt`，生成 non-empty trash manifest 和 `trash_manifest_ref`。
+
+## 2026-05-12 Controlled Exec Capability-Request E2E R20-R22
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - R20 runtime root: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r20/subagents`.
+  - R21 runtime root: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r21/subagents`.
+  - R22 runtime root: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r22/subagents`.
+  - R22 deliverables root: `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r22`.
+- 中文说明：
+  - R20 暴露 root/coordinator 误替未来 leaf 提前申请 controlled_exec 能力的问题，导致 root 申请 grant 后停在 capability flow，没有继续创建四层链路。
+  - R21 修复后真实跑到四层，leaf 也能在 grant 后二次唤醒；但又暴露 shell gateway 的 `dry_run` 标记和 argv 分号误拦问题，leaf 把真实执行误写成 dry-run，且 python3 argv 被 `blocked_shell_metacharacter` 拦住。
+  - R22 复测通过：root -> `小傻妞-exec-coord` -> `小小傻妞-exec-coord` -> `小小小傻妞-leaf-worker` 四层全部 `DONE/VERIFIED`。leaf 真实申请 controlled_exec，父级授权后 leaf 执行 `pwd`、`python3` 大输出和 `rm sentinel.txt -> task_trash`；最终 refs 包含 stdout artifact refs、audit refs 和 non-empty `trash_manifest_ref`。
+- Finding 168: coordinator requested descendant-only capability instead of creating the descendant.
+  - Symptom: R20 root 看到 `controlled_exec_grants=[]`，自己提交 capability_request 并停止；没有创建 depth=1 child，更没有让 depth=3 leaf 自己申请能力。
+  - 中文解释：coordinator 的职责是拆分、派工、纠偏和汇总。真正需要 shell/network/skill 的是执行节点时，应该由那个 child/leaf 申请，父级再授权；否则 root 会把自己的派工职责变成“等权限”，树根本长不出来。
+  - Fix: coordinator runner contract 和内置 coordinator 模板增加规则：后代专属能力不要由 coordinator 提前申请；先 `schedule_child_subagents` / `dispatch_subagents`，由真正需要能力的 runner 正式申请，父级再 route grant 并继续推进。
+  - Verification:
+    - `test_runner_prompt_tells_coordinator_to_write_reports_but_delegate_deliverables`.
+    - R21/R22 均验证 root 不再提前申请 leaf-only controlled_exec。
+- Finding 169: executed shell decisions were still marked `dry_run=true`.
+  - Symptom: R21 的 controlled_exec artifact 顶层是 `mode=execute` 且 `executed=true`，但嵌套 `execution.decision.dry_run=true`；leaf 读 artifact 后误以为系统只做 dry-run。
+  - 中文解释：工具确实执行了命令，但证据 JSON 里一个字段写错，会让模型和验收报告混乱。真实执行时必须明确 `dry_run=false`，否则后续代理会相信错误字段。
+  - Fix: `plan_shell_command()` 现在尊重 `ShellGatewayRequest.dry_run`，执行层传 `dry_run=False` 时，decision 和 audit 都写 false。
+  - Verification:
+    - `test_shell_gateway_execute_marks_decision_as_not_dry_run`.
+    - R22 的 `controlled_exec-2-1-7de0ce2161f5.json` 和 `controlled_exec-3-1-a89f9db4b46f.json` 均显示 `mode=execute`、`execution.decision.dry_run=false`、`executed=true`。
+- Finding 170: argv-list Python commands were still scanned as shell text.
+  - Symptom: R21 leaf 用 `command=["python3","-c","...; ..."]`，仍被 `blocked_shell_metacharacter` 阻断。
+  - 中文解释：argv 数组会以 `shell=False` 执行，没有 shell 解析；数组元素里的分号只是 Python 代码内容，不是 shell 操作符。只有字符串命令才需要扫描未引用 shell 操作符。
+  - Fix: shell gateway 只对字符串命令做 shell operator token 扫描；argv list 不做 raw shell metacharacter 扫描，仍保留命令白名单、cwd、path scope 和网络 scope 检查。
+  - Verification:
+    - `test_shell_gateway_allows_argv_python_statement_separators`.
+    - R22 leaf 的 python3 大输出真实执行，stdout artifact `controlled_exec-3-1-a89f9db4b46f.json` 记录 `stdout_bytes=18000`。
+- Final R22 evidence:
+  - `controlled_exec_refs.json`: `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r22/controlled_exec_refs.json`.
+  - `trash_manifest_ref`: `/Users/example/my-终端应用/.my_agent_runtime/controlled_exec_e2e_20260511_r22/subagents/subagent-1778532024-551c1e02/trash/manifest.jsonl`.
+  - Trash manifest confirms `moved=true` and source `/Users/example/my-终端应用/deliverables/controlled_exec_e2e_20260511_r22/sentinel.txt` moved into leaf task-local trash.
+  - R22 process exited cleanly after all four nodes were `DONE/VERIFIED`.
+
+## 2026-05-12 Shopping Site Complete E2E R41 Required-File Regression
+
+- Run: `stage7_shop_complete_20260512_r41`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r41.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r41_prompt.md`
+- Principle: root-only. 外层只启动主代理；主代理创建 root，root 创建 `小傻妞-*`，child 创建 `小小傻妞-*`。外层没有替任何下层写购物网站文件。
+- Finding 171: bare negative filename examples still entered `required_files`.
+  - Symptom: R41 board showed child goals with `父级必需文件/产物名` containing `product.html` and `output.json`, even though the root prompt explicitly forbade these names.
+  - 中文解释：下层如果看到 `product.html` / `output.json` 在必需文件里，就可能创建禁止文件，或者让父级验收追错目标。购物网站完整测试必须先把“要创建”和“绝不能创建”分清。
+  - Root cause: `required_file_terms_from_text()` handled `改名成 product.html` and `如 product.html`, but not bare forms such as `文件名禁止改名：不允许 product.html/old-product.html/legacy.html` or `不允许在 build 目录写 output.json`.
+  - Fix: `required_file_terms.py` now recognizes bare negative targets after `禁止/不允许/不要/不能/不得`, treats slash-separated filename alternatives as list separators, and keeps internal files in `forbidden_files` instead of `required_files`.
+  - Verification:
+    - `test_file_contract_treats_bare_negative_targets_as_forbidden_terms`.
+    - Existing required/forbidden file-contract tests.
+- Status: R41 intentionally stopped after capturing the bad contract. Do not count it as shopping-site completion.
+- Next: rerun a clean R42 complete shopping-site E2E and verify `required_files` contains exactly the 10 user-facing files while `product.html/output.json/RUNNER_RESULT.md/execution_context.json` stay forbidden only.
+
+## 2026-05-12 Shopping Site Complete E2E R42 Forbidden-Label Regression
+
+- Run: `stage7_shop_complete_20260512_r42`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r42.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r42_prompt.md`
+- Principle: root-only. 外层只启动主代理；外层没有直接创建 child/grandchild/leaf，也没有替下层写购物网站文件。
+- Finding 172: `禁止文件名：...` was still parsed as required files when a child rephrased the contract.
+  - Symptom: R42 depth=1 child inherited a clean contract, but depth=2 grandchild goal again placed `product.html`、`old-product.html`、`legacy.html`、`obsolete.html`、`output.json`、`RUNNER_RESULT.md`、`execution_context.json` inside `父级必需文件/产物名`.
+  - 中文解释：这次不是 root prompt 直接误传，而是 child 用更自然的“禁止文件名：...”重新转述后，解析器没把这个标签识别成 forbidden list。多层代理会改写提示词，所以文件合同必须能识别常见中文标签。
+  - Root cause: `_BARE_NEGATIVE_TARGET_RE` accepted `禁止` / `禁止改名`, but not `禁止文件名` / `禁止文件` before a colon-separated filename list.
+  - Fix: `required_file_terms.py` now treats `禁止文件名：a.html/b.html` and `禁止文件：a.html` as negative target lists. The same slash-separated list handling keeps alternatives split into separate forbidden files.
+  - Verification:
+    - `test_file_contract_treats_forbidden_filename_label_as_forbidden_terms`.
+    - Existing bare negative, negative example, and required/forbidden split tests.
+- Status: R42 intentionally stopped after capturing the second contract leak. Do not count it as shopping-site completion.
+- Next: rerun a clean R43 complete shopping-site E2E. Expected board: every depth keeps exactly the 10 user-facing required files, while all forbidden/internal filenames remain in `forbidden_files` only.
+
+## 2026-05-12 Shopping Site Complete E2E R43 Workflow-Mode Regression
+
+- Run: `stage7_shop_complete_20260512_r43`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r43.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r43_prompt.md`
+- Principle: root-only. 外层只启动主代理并观察 board；外层没有替 workflow children 或下层写购物网站文件。
+- Finding 173: top-level `dispatch_subagents(apply=true)` could auto-spawn workflow workers under an active root coordinator.
+  - Symptom: R43 board showed root plus three depth=1 workflow children (`produce` / `critic` / `repair`) before the root coordinator had a chance to create `小傻妞-* -> 小小傻妞-* -> 小小小傻妞-*`.
+  - 中文解释：这会绕开用户要求的“root 自己派子、子再派孙”的测试方式。workflow 模板适合某些自动拆分，但这里我们要测真实层级代理，所以 active root/coordinator 必须保留控制权。
+  - Root cause: `dispatch_workflow_mode()` only forced workflow off for top-level active root/coordinator dispatch when `execute_runners=true`; a model can call `dispatch_subagents(apply=true, workflow_mode=auto)` without `execute_runners`, and that still applies workflow plan/spawn records.
+  - Fix: `_top_level_root_role_dispatch()` now treats top-level `apply=true` on active root/coordinator as protected, so both workflow planning/spawning and runner execution routes force `workflow_mode=off`.
+  - Verification:
+    - `test_top_level_apply_dispatch_does_not_spawn_workflow_for_active_root_coordinator`.
+    - Existing `test_top_level_dispatch_does_not_auto_workflow_active_root_coordinator` and runner-context workflow-off tests.
+- Status: R43 intentionally stopped after capturing workflow auto-interference. Do not count it as shopping-site completion.
+- Next: rerun a clean R44 complete shopping-site E2E. Expected board: no producer/critic/repair workflow children under root; root should dispatch its own `小傻妞-*` child, then the child dispatches `小小傻妞-*`, then depth=3 leaf writes the site.
+
+## 2026-05-12 Shopping Site Complete E2E R44 Contract-Inheritance Regression
+
+- Run: `stage7_shop_complete_20260512_r44`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r44.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r44_prompt.md`
+- Principle: root-only. 外层只启动主代理并观察 board；root 自己创建了 `小傻妞-页面协调`，外层没有直接创建 child/grandchild/leaf，也没有替下层写购物网站文件。
+- Finding 174: inherited `forbidden_files` were dropped after root -> child summarization.
+  - Symptom: R44 root `context_bundle.output_contract.forbidden_files` correctly contained `product.html`、`old-product.html`、`legacy.html`、`obsolete.html`、`output.json`、`RUNNER_RESULT.md`、`execution_context.json`，但 depth=1/depth=2 context bundle 的 `forbidden_files` 变成空列表。
+  - 中文解释：child 把“禁止文件名：product.html/...”总结成“禁止文件名改、禁止 output.json”。人能猜到意思，但机器合同丢了具体名字，下层就可能再次创建 forbidden 文件。
+  - Root cause: `goal_carries_parent_scope()` 只检查 required 文件、层级合同和能力合同；child goal 只要包含 build 路径和 required 文件，就被认为已经携带父级边界，导致 `_inherited_goal_context()` 不再追加具体 forbidden 清单。
+  - Fix: hierarchy context now checks `_missing_forbidden_file_terms()` before accepting a summarized child goal. If exact forbidden filenames are missing, it appends the parent inherited block with `structured forbidden_files`.
+  - Verification:
+    - `test_hierarchy_schedule_preserves_forbidden_file_contract_when_child_goal_summarizes_constraints`.
+- Finding 175: no-space `4层` hierarchy contract and depth naming rules were not inherited.
+  - Symptom: R44 root prompt required a 4-layer chain with `depth=1/2/3` prefixes, but depth=1 child goal dropped that contract and created a depth=2 `leaf_worker`; the leaf started writing `style.css` before a depth=3 `小小小傻妞-*` node existed.
+  - 中文解释：我们测的是“主 -> 子 -> 孙 -> 孙孙”真实链路。child 一旦忘记四层规则，就会把工作提前交给孙节点，测试形状失真，后续接管、广播、验收也测不到真实四层。
+  - Root cause: hierarchy inheritance recognized `4 层` with a space and `孙孙/root ->` wording, but R44 prompt used the natural `4层` heading plus `depth=1/2/3` bullets. The contract extractor missed that section, so leaf guard had no inherited trigger.
+  - Fix: hierarchy contract extraction now recognizes `4层`、`depth=1`、`depth=2`、`depth=3`、`max_depth` and the `小傻妞` naming prefix; completeness checks require all contract anchors to survive before skipping inherited context.
+  - Verification:
+    - `test_hierarchy_schedule_preserves_no_space_four_layer_contract_and_blocks_leaf`.
+- Status: R44 intentionally stopped after capturing inheritance drift. It produced one partial `style.css` under the R44 deliverables path, but does not count as shopping-site completion.
+- Next: rerun a clean R45 complete shopping-site E2E. Expected board: root -> `小傻妞-*` -> `小小傻妞-*` -> `小小小傻妞-*`; exact forbidden files remain visible at every depth; only depth=3 leaf writes the user-facing shopping site files.
+
+## 2026-05-12 Shopping Site Complete E2E R45 Root-Seed Contract Regression
+
+- Run: `stage7_shop_complete_20260512_r45`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r45.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r45_prompt.md`
+- Principle: root-only. 外层只启动主代理；主代理创建 root 后，由 root 创建 `小傻妞-协调者`，外层没有替下级创建或写购物网站产物。
+- Finding 176: the main agent summarized away exact forbidden files before root was even created.
+  - Symptom: R45 root `task.goal` contained “禁止写内部文件” but not the exact forbidden filenames. Root `context_bundle.output_contract.forbidden_files` was already `[]`, so depth=1 also had no forbidden files to inherit.
+  - 中文解释：R44 修的是 root -> child 传递；R45 说明第一步 root seed 自己就可能被主代理摘要缩水。只要 root 任务里没有具体 `product.html/output.json`，后面所有下级都只能继承一个空合同。
+  - Root cause: `create_subagents` trusted the model-written `goal` as the full root task. The tool layer did not preserve machine-readable contract snippets from the raw user prompt. A second bug made this worse: `_create_run_params()` could enrich `run_params.goal`, but `_create_tasks()` overwrote it with the original un-enriched `goal`.
+  - Fix: explicit root/coordinator seed creation now sees the current raw user prompt during the tool loop. If the model-written root goal is missing required files, forbidden files, or 4层/depth/命名 anchors, `create_subagents` appends compact “用户原始必需/禁止/层级约束” blocks before persisting the root. `_create_tasks()` now uses `run_params.goal`, so enriched contracts survive into `task.json` and context bundles.
+  - Verification:
+    - `test_explicit_coordinator_seed_inherits_raw_user_file_and_hierarchy_contract`.
+    - Full `TestCreateSubagentsToolExecute`, coordinator seed tests, hierarchy contract tests, and context bundle required/forbidden split test.
+- Status: R45 intentionally stopped after proving root-seed contract loss. It produced no user-facing build files and does not count as shopping-site completion.
+- Next: rerun a clean R46 complete shopping-site E2E. Expected first checkpoint: root context bundle already contains exact required and forbidden files before it creates `小傻妞-*`.
+
+## 2026-05-12 Shopping Site Complete E2E R46 Root-Seed Forbidden-Block Parser Regression
+
+- Run: `stage7_shop_complete_20260512_r46`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r46.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r46_prompt.md`
+- Principle: root-only. 外层只启动主代理；R46 stopped at the first root checkpoint before any product files were written.
+- Finding 177: the new root-seed inheritance block was appended, but its label was parsed as required files.
+  - Symptom: root `task.goal` contained `用户原始禁止文件/反例名（禁止创建，不得当成 required_files）：product.html...`，but `context_bundle.output_contract.required_files` included `product.html`、`output.json`、`RUNNER_RESULT.md` and `forbidden_files` was still empty.
+  - 中文解释：R45 让 root 重新拿到了禁止清单，但 R46 说明“机器补块的中文标签”也必须被文件解析器认识。否则补块越完整，反而越容易把 forbidden 文件塞进 required。
+  - Root cause: `required_file_terms.py` recognized `禁止文件名：...` and bare `不允许 ...`, but not a longer machine label such as `禁止文件/反例名（禁止创建，不得当成 required_files）：...`.
+  - Fix: forbidden extraction now recognizes negative labels with short explanatory parentheticals before the colon, including `禁止文件/反例名...：` and `forbidden_files...:`. The same match is used to keep these names out of `required_files`.
+  - Verification:
+    - `test_file_contract_treats_root_seed_forbidden_inheritance_block_as_forbidden_terms`.
+    - Full hierarchy contract tests, create-subagents tests, coordinator seed tests, and context bundle required/forbidden split test.
+- Status: R46 intentionally stopped after proving root context parsing was still wrong. It produced no user-facing build files and does not count as shopping-site completion.
+- Next: rerun a clean R47 complete shopping-site E2E. Expected first checkpoint: root `required_files` has exactly the 10 user-facing files and root `forbidden_files` has the internal/forbidden names.
+
+## 2026-05-12 Shopping Site Complete E2E R47 Bulleted Forbidden-Inheritance Regression
+
+- Run: `stage7_shop_complete_20260512_r47`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r47.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r47_prompt.md`
+- Principle: root-only. 外层只启动主代理；root created `小傻妞-总协调`, then depth=1 created `小小傻妞-前端组`. 外层没有直接创建下级或写产物。
+- Good checkpoint: root `required_files` finally contained exactly the 10 user-facing files, and root `forbidden_files` separately contained `product.html`、`old-product.html`、`legacy.html`、`obsolete.html`、`output.json`、`RUNNER_RESULT.md`、`execution_context.json`.
+- Finding 178: inherited forbidden bullet blocks polluted `required_files` at depth=1/depth=2.
+  - Symptom: depth=1 and depth=2 context bundles had the forbidden files in both `required_files` and `forbidden_files`.
+  - 中文解释：root 的合同已经干净，但继承块格式是“父级禁止文件/反例名：”下一行开始 `- product.html`。每个 bullet 行单独解析时看不到上一行的“禁止”，于是又被当成 required。
+  - Root cause: `required_file_terms.py` split text by newline and processed each segment statelessly. It recognized inline negative labels, but not negative headings followed by bullet lists.
+  - Fix: segment parsing now carries an active negative header across following bullet lines until another non-bullet segment appears. `父级禁止文件/反例名：\n- product.html` is normalized as a forbidden target, while `父级必需文件/产物名：\n- index.html` remains required.
+  - Verification:
+    - `test_file_contract_carries_negative_header_into_bulleted_forbidden_terms`.
+    - Full hierarchy contract tests, create-subagents tests, coordinator seed tests, and context bundle required/forbidden split test.
+- Status: R47 intentionally stopped after capturing depth inheritance pollution. No user-facing build files were written and it does not count as shopping-site completion.
+- Next: rerun a clean R48 complete shopping-site E2E. Expected checkpoint: root/depth1/depth2 all keep required and forbidden lists separated before depth=3 writes files.
+
+## 2026-05-12 Shopping Site Complete E2E R48 Thinking-Only Backend Response
+
+- Run: `stage7_shop_complete_20260512_r48`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r48.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r48_prompt.md`
+- Principle: root-only. 外层只启动主代理；root reached the first runner model call and did not create child runs before the failure.
+- Good checkpoint: root required/forbidden file contracts stayed separated.
+- Finding 179: Anthropic-compatible backend treated a thinking-only response as fatal.
+  - Symptom: MiniMax returned `content=[{"thinking": "..."}]` without a `text` block. The backend raised `Anthropic-compatible 响应没有文本内容`, and the root run became `BLOCKED`.
+  - 中文解释：这是接口兼容层的偶发响应形状，不是子代理做错事。真实长跑时不能因为一次 thinking-only 响应就把整棵任务树打死，至少应该自动再要一次正常文本。
+  - Root cause: non-streaming `AnthropicCompatibleBackend.generate()` parsed only `content[].text` or legacy `completion`; it had no recovery path for thinking-only content blocks.
+  - Fix: non-streaming Anthropic-compatible generation now retries once when content has a `thinking` block but no text. Normal empty content without thinking still raises, so real bad responses are not silently accepted.
+  - Verification:
+    - `test_generate_retries_once_on_thinking_without_text`.
+    - Existing no-text and normal non-stream Anthropic backend tests.
+- Status: R48 stopped at backend failure. It produced no user-facing build files and does not count as shopping-site completion.
+- Next: rerun a clean R49 complete shopping-site E2E. Expected checkpoint: thinking-only API responses are retried once, and root can continue dispatching child runs.
+
+## 2026-05-12 Shopping Site Complete E2E R49 Positive No-Rename Label Regression
+
+- Run: `stage7_shop_complete_20260512_r49`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r49.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r49_prompt.md`
+- Principle: root-only. 外层只启动主代理；R49 stopped at the root contract checkpoint before child creation.
+- Finding 180: `必须文件（禁止改名）：...` made required files look forbidden.
+  - Symptom: root `context_bundle.output_contract.required_files=[]`, while `forbidden_files` contained all 10 required files plus the real forbidden files.
+  - 中文解释：“必须文件（禁止改名）”的意思是这些文件必须创建、名字不能改。解析器把括号里的“禁止”当成整行负向标题，导致所有应该创建的文件都被标成禁止创建。
+  - Root cause: the negative label regex accepted any `禁止...：` shape, so `必须文件（禁止改名）：index.html...` matched as a forbidden label.
+  - Fix: negative label matching is now narrower: only true negative labels such as `禁止：`、`禁止文件名：`、`禁止文件/反例名：` and `forbidden_files:` activate negative-list mode. Positive labels with a no-rename parenthetical stay required.
+  - Verification:
+    - `test_file_contract_keeps_required_files_when_positive_label_says_no_rename`.
+    - Full hierarchy contract tests, create-subagents tests, coordinator seed tests, context bundle split test, and thinking-only backend retry test.
+- Status: R49 stopped before child creation and produced no user-facing build files. It does not count as shopping-site completion.
+- Next: rerun a clean R50 complete shopping-site E2E. Expected checkpoint: root required/forbidden split remains stable across both `必须文件（禁止改名）` and explicit forbidden labels.
+
+## 2026-05-12 Shopping Site Complete E2E R50 Acceptance-Check Forbidden Regression
+
+- Run: `stage7_shop_complete_20260512_r50`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r50.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r50_prompt.md`
+- Principle: root-only. 外层只启动主代理；root created one depth=1 child before the contract checkpoint caught the issue. 外层没有写购物网站产物。
+- Finding 181: acceptance checks reintroduced forbidden names into `required_files`.
+  - Symptom: root goal itself parsed cleanly, but root context bundle had 17 required files because acceptance checks such as `无 forbidden_files（product.html/...）` and `无内部文件污染（output.json/...）` were scanned as positive file mentions.
+  - 中文解释：验收项里的“无 forbidden_files / 无内部文件污染”是在说这些文件不能出现。解析器之前只看到了文件名，没看懂“无”这个否定语境，所以又把它们当成要交付的文件。
+  - Root cause: `_NEGATIVE_HINTS` and target matching did not cover `无 forbidden_files(...)` or `无内部文件污染(...)` acceptance wording.
+  - Fix: file contract extraction now treats `无` / `no` / `without` plus `forbidden_files`、`内部文件污染`、`文件污染` as negative target contexts. These names go to `forbidden_files` and stay out of `required_files`.
+  - Verification:
+    - `test_file_contract_treats_no_forbidden_files_acceptance_as_forbidden_terms`.
+    - Full hierarchy contract tests, create-subagents tests, coordinator seed tests, context bundle split test, and thinking-only backend retry test.
+- Status: R50 intentionally stopped because the root contract was polluted before product work. It does not count as shopping-site completion.
+- Next: rerun a clean R51 complete shopping-site E2E. Expected checkpoint: root required/forbidden split stays clean even when acceptance checks mention forbidden files.
+
+## 2026-05-12 Shopping Site Complete E2E R51 Location-Rule and Parenthesized-Label Regression
+
+- Run: `stage7_shop_complete_20260512_r51`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r51.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r51_prompt.md`
+- Principle: root-only. 外层只启动主代理；root created `小傻妞-协调者` and the child began planning. 外层没有创建 child/grandchild/great-grandchild，也没有写购物网站产物。
+- Good checkpoint: root recovered from one malformed `subagent_message` tool call by following the parser recovery instruction and successfully broadcast the constraint notice.
+- Finding 182: placement constraints made required assets look forbidden.
+  - Symptom: root `context_bundle.output_contract.forbidden_files` included `style.css` and `app.js`, even though they are required deliverables. The source was the acceptance check `禁止 style.css/app.js 放进 css/ 或 js/ 子目录`.
+  - 中文解释：这句话的意思是“这两个文件必须放在 build 根目录，不准放到子目录”。旧解析器看到“禁止 style.css/app.js”就误以为这两个文件不能创建。
+  - Root cause: bare negative parsing did not distinguish forbidden filename targets from forbidden placement rules.
+  - Fix: `required_file_terms.py` now treats `放进/放入/放到/放在/置于/inside/under/into` after a filename as a location rule when the only trigger is a bare negative phrase. Required assets stay required and do not enter `forbidden_files`.
+  - Verification:
+    - `test_file_contract_keeps_required_files_when_forbidden_location_mentions_them`.
+- Finding 183: parenthesized forbidden labels were not recognized.
+  - Symptom: depth=1 child goal used `禁止文件名（product.html/...）` and `禁止内部文件（output.json/...）`. The parser only recognized colon labels, so these forbidden examples were added to `required_files`.
+  - 中文解释：模型有时会写“禁止文件名（...）”而不是“禁止文件名：...”。人能看懂，机器也必须看懂，否则下层会收到“必须创建 product.html”的错误合同。
+  - Root cause: negative label matching required `：` or `:` after the label and did not accept Chinese/English parentheses as the label boundary.
+  - Fix: negative labels now accept `（` / `(` boundaries for `禁止文件名`、`禁止内部文件`、`禁止文件/反例名` and `forbidden_files` labels.
+  - Verification:
+    - `test_file_contract_treats_parenthesized_forbidden_labels_as_forbidden_terms`.
+    - Full focused hierarchy/context/create/backend regression set.
+- Status: R51 intentionally stopped after detecting polluted file contracts before product writing. It does not count as shopping-site completion.
+- Next: rerun a clean R52 complete shopping-site E2E. Expected checkpoint: root and depth=1 required files stay exactly the 10 user-facing files; forbidden files stay only product/legacy/internal examples; then continue to depth=3 writing and QA.
+
+## 2026-05-12 Shopping Site Complete E2E R52 Short No-Write Regression
+
+- Run: `stage7_shop_complete_20260512_r52`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r52.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r52_prompt.md`
+- Principle: root-only. 外层只启动主代理；root created `小傻妞-depth1-coord`, depth=1 created `小小傻妞-depth2-coord`. 外层没有直接创建下级或写购物网站产物。
+- Good checkpoint: root/depth=1/depth=2 all kept the 10 required user-facing files clean, and root correctly refused to write `.gitkeep` into the product build because coordinator roles cannot write business deliverables directly.
+- Finding 184: short `不写output.json/RUNNER_RESULT.md` lost internal forbidden files.
+  - Symptom: root/depth=1/depth=2 context bundles had `product.html`、`old-product.html`、`legacy.html`、`obsolete.html`、`execution_context.json` in `forbidden_files`, but missed `output.json` and `RUNNER_RESULT.md`.
+  - 中文解释：模型把原始“禁止在 build 写 output.json/RUNNER_RESULT.md”总结成“不写output.json/RUNNER_RESULT.md”。人能看懂，但旧解析器没把“不写”当成禁止写文件，所以机器合同漏了两个内部文件。
+  - Root cause: `_NEGATIVE_HINTS` did not include short Chinese negative verbs such as `不写/不创建/不生成/不产出/不包含`. A second boundary issue made `不写output.json` harder to detect because the file name was adjacent to a Chinese character and `RUNNER_RESULT.md等` used a Unicode word boundary.
+  - Fix: file contract extraction now recognizes short negative verbs, uses ASCII-only file boundaries so Chinese text can touch filenames, and normalizes slash-separated filename lists even when the second filename is followed by Chinese text.
+  - Verification:
+    - `test_file_contract_treats_no_write_short_negative_as_forbidden_terms`.
+    - Full focused hierarchy/context/create/backend regression set.
+- Status: R52 intentionally stopped before product writing because the machine forbidden contract was incomplete. It does not count as shopping-site completion.
+- Next: rerun a clean R53 complete shopping-site E2E. Expected checkpoint: root/depth=1/depth=2 all keep required files exactly 10 and forbidden files include all 7 forbidden/internal names before depth=3 writes.
+
+## 2026-05-12 Shopping Site Complete E2E R53 Duplicate-Domain Path Regression
+
+- Run: `stage7_shop_complete_20260512_r53`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r53.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r53_prompt.md`
+- Principle: root-only. 外层只启动主代理；root created `小傻妞-整体协调`. 外层没有直接创建下级或写购物网站产物。
+- Good checkpoint: root and depth=1 both had exactly 10 required files and 7 forbidden/internal files. No product files were written.
+- Finding 185: duplicate-domain guard treated shared filesystem paths as task domains.
+  - Symptom: depth=1 tried to create two depth=2 coordinators, `小小傻妞-前端Worker` and `小小傻妞-测试协调`, but scheduling was blocked with `duplicate_child_domain:模型助手`.
+  - 中文解释：两个不同下级都提到了 `/Users/example/my-终端应用/...`，旧去重逻辑从 goal 里抓英文词，把路径里的 `模型助手` 当成“业务领域”。于是前端和测试被误认为同一个领域。
+  - Root cause: duplicate-domain fallback used full child goal text when agent name did not expose a stable English domain. Full goal contains shared absolute paths, inherited blocks and filenames, which are not task domains.
+  - Fix: fallback domain extraction now strips absolute paths, filenames and inherited parent blocks before tokenizing, and filters common path/scaffold words such as `users`、`模型助手`、`code`、`shop`、`tests`、`css`、`js`.
+  - Verification:
+    - `test_hierarchy_schedule_duplicate_domain_ignores_shared_filesystem_paths`.
+    - Existing duplicate checkout/quality and domain-mismatch guard tests.
+- Status: R53 intentionally stopped before product writing because depth=2 creation was wrongly blocked. It does not count as shopping-site completion.
+- Next: rerun a clean R54 complete shopping-site E2E. Expected checkpoint: depth=1 can create distinct depth=2 coordination children even when all goals reference the same deliverables path.
+
+## 2026-05-12 Shopping Site Complete E2E R54 Plain Forbidden-List Regression
+
+- Run: `stage7_shop_complete_20260512_r54`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r54.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r54_prompt.md`
+- Principle: root-only. 外层只启动主代理；root created `小傻妞-1号协调员`. 外层没有直接创建下级或写购物网站产物。
+- Good checkpoint: root contract was clean with 10 required files and 7 forbidden/internal files.
+- Finding 186: a negative heading followed by a plain filename line polluted `required_files`.
+  - Symptom: depth=1 goal contained `禁止创建文件（forbidden_files）：` followed by a newline with `product.html、old-product.html...`, but depth=1 `context_bundle.output_contract.required_files` included those 7 forbidden names.
+  - 中文解释：模型没有用 bullet，只是标题下一行直接写文件列表。旧解析器只会把负向标题带到 `- product.html` 这种 bullet 行，所以这类纯列表行又被当成必需文件。
+  - Root cause: `_segments()` carried `active_negative_header` only for bullet-prefixed lines. It also did not recognize `禁止创建文件（...）：` as a negative label.
+  - Fix: negative labels now accept `禁止创建文件...` forms, and active negative headers carry into the next plain line if that line contains file-like terms. The carry resets after that line so later instructions are not contaminated.
+  - Verification:
+    - `test_file_contract_carries_negative_header_into_plain_file_list_line`.
+    - Full focused hierarchy/context/create regression set.
+- Status: R54 intentionally stopped before product writing because depth=1 contract was polluted. It does not count as shopping-site completion.
+- Next: rerun a clean R55 complete shopping-site E2E. Expected checkpoint: root/depth=1/depth=2 contracts stay clean, then depth=3 writes user-facing files.
+
+## 2026-05-12 Shopping Site Complete E2E R55 Long Write Tool-Call Regression
+
+- Run: `stage7_shop_complete_20260512_r55`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r55.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r55_prompt.md`
+- Principle: root-only. 外层只启动主代理并观察；root created depth=1 `小傻妞-1`, depth=1 created depth=2 `小小傻妞-1`, and depth=2 created depth=3 `小小小傻妞-1`. 外层没有创建下级，也没有写购物网站产物。
+- Good checkpoint: all four context bundles kept the clean file contract: 10 required deliverables and 7 forbidden/internal names. The hierarchy reached the intended root -> child -> grandchild -> great-grandchild chain.
+- Finding 187: long `write_file` JSON repeatedly lost the closing `[/TOOL_CALL]`.
+  - Symptom: depth=3 leaf started writing `style.css` / `app.js`. `style.css` succeeded after two parse-error retries, but `app.js` repeatedly produced an unclosed `write_file` block with a long `content` JSON string. R55 was stopped after repeated parse errors to avoid wasting calls.
+  - 中文解释：叶子节点不是不会写网站，而是把很长的 JS 代码塞进一个 JSON 工具调用里。模型输出到一半没把工具块闭合，工具系统只能当坏格式处理。它会自我重试，但反复在同一个坑里转。
+  - Root cause: runner/tool hints only said “keep content short” and “chunk long files”, but did not give a concrete normal chunk size or a stricter recovery rule after parse errors. The model kept attempting large `write_file` payloads.
+  - Fix: model-facing runner contract, write/append tool descriptions, and parse-error recovery hint now distinguish two modes:
+    - normal chunking: `content` should be around 1500-2000 chars so early tests are not artificially throttled;
+    - parse-error recovery: after truncation/unclosed tool blocks, emit only one `write_file`/`append_file` call and reduce `content` to <=800 chars before continuing.
+  - Verification:
+    - `test_runner_prompt_tells_leaf_to_chunk_long_file_writes`.
+    - `test_parse_error_hint_recommends_append_for_truncated_write`.
+- Status: R55 intentionally stopped during product writing because write tool-call formatting was unstable. It does not count as shopping-site completion.
+- Next: rerun a clean R56 complete shopping-site E2E. Expected checkpoint: depth=3 writes all 10 files with chunked write/append calls, then parent chain proceeds to tester/bug_finder/acceptor validation without external intervention.
+
+## 2026-05-12 Shopping Site Complete E2E R56 Leaf Acceptance and Depth-Domain Regression
+
+- Run: `stage7_shop_complete_20260512_r56`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r56.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r56_prompt.md`
+- Principle: root-only. 外层只启动主代理并观察；root created depth=1 `小傻妞-前端总协调`, depth=1 created depth=2 `小小傻妞-前端协调A`, and depth=2 created depth=3 `小小小傻妞-首页注册样式写手`. 外层没有创建下级，也没有写购物网站产物。
+- Good checkpoint:
+  - depth=3 successfully wrote `index.html`, `register.html`, `style.css`, and `app.js` into `/Users/example/my-终端应用/deliverables/stage7_shop_complete_20260512_r56/build`.
+  - The new long-write recovery worked in practice: `register.html` and `style.css` recovered after parse-error feedback and then wrote successfully with smaller payloads.
+- Finding 188: duplicate-domain guard treated generic `depth` markers as repeated task domains.
+  - Symptom: depth=1 attempted to create a second depth=2 coordinator, but scheduling was blocked with `duplicate_child_domain:depth`.
+  - 中文解释：两个中文 coordinator 的名字都没有英文领域词，系统退回读取 goal。两个 goal 都写了 `depth=3`，旧去重把 `depth` 当成业务领域，于是误以为 A/B 是重复下级。
+  - Root cause: `_DOMAIN_STOPWORDS` filtered path/scaffold words after R53, but still did not filter `depth/layer/level` in duplicate-domain detection.
+  - Fix: duplicate-domain token extraction now treats `depth`、`layer`、`level` as generic scope words, so Chinese coordinator siblings are not blocked just because both mention layer depth.
+  - Verification:
+    - `test_hierarchy_schedule_duplicate_domain_ignores_depth_markers`.
+    - Existing duplicate checkout/quality test still passes, so real duplicate-domain protection remains active.
+- Finding 189: leaf acceptance inherited parent depth text and required a child that should not exist.
+  - Symptom: the depth=3 leaf runner wrote the four requested files and recorded evidence, but acceptance rejected it with `required_child_spawned`: "任务要求创建下级，但 task.child_ids 为空".
+  - 中文解释：leaf 本来就是最后干活的人，不应该再创建“小小小小傻妞”。但它的 goal 里有继承来的父级约束“必须先创建 depth=3 worker 实际写文件”，验收扫描整段文本时误以为当前 leaf 也必须继续派下级。
+  - Root cause: `_child_spawn_required()` checked hard markers such as `创建 depth=` before checking whether the current task is already `leaf_worker`.
+  - Fix: leaf-like tasks are now exempt from child-spawn-required acceptance. Coordinator/lead tasks that truly say `创建 depth=` still require persisted `task.child_ids`.
+  - Verification:
+    - `test_leaf_inherited_parent_depth_constraints_do_not_require_child_ids`.
+    - Existing `test_required_child_goal_without_child_ids_blocks_acceptance` still passes, so coordinator self-claims are still blocked.
+- Status: R56 intentionally stopped after the false acceptance rejection and sibling-domain guard issue were captured. It produced four partial user-facing files but does not count as shopping-site completion.
+- Next: rerun a clean R57 complete shopping-site E2E. Expected checkpoint: depth=1 can create multiple distinct depth=2 Chinese coordinators, depth=3 leaves that write files are not asked to create depth=4 children, and the parent chain continues toward the remaining six shopping-site pages and QA roles.
+
+## 2026-05-12 Shopping Site Complete E2E R57 Bracket Forbidden Label Regression
+
+- Run: `stage7_shop_complete_20260512_r57`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r57.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r57_prompt.md`
+- Principle: root-only. 外层只启动主代理；R57 stopped at the first root contract checkpoint before root created child runs.
+- Finding 190: bracket-only forbidden labels polluted `required_files`.
+  - Symptom: root `task.goal` used `【禁止文件名】product.html/old-product.html/legacy.html/obsolete.html` and `【禁止内部文件】禁止在 build 写 output.json/...`. The context bundle put the product/legacy examples into `required_files` and only internal files into `forbidden_files`.
+  - 中文解释：模型这次用了很自然的中文标题格式：方括号标题后面直接接文件名，没有冒号。人能读懂“这些是禁止文件名”，但旧解析器只认冒号/括号边界，所以漏判了。
+  - Root cause: negative label/header regex accepted `：`、`:`、`（`、`(` as label boundaries, but not `】` / `]`.
+  - Fix: forbidden label/header recognition now treats `】` / `]` as valid negative-label boundaries, so `【禁止文件名】...` and `[forbidden_files]...` style labels can carry forbidden file lists.
+  - Verification:
+    - `test_file_contract_treats_bracket_forbidden_labels_as_forbidden_terms`.
+    - Existing forbidden filename, positive no-rename, and negative-header plain-list tests still pass.
+- Status: R57 intentionally stopped before child creation because the root machine file contract was polluted. It produced no user-facing build files and does not count as shopping-site completion.
+- Next: rerun a clean R58 complete shopping-site E2E. Expected checkpoint: root required files are exactly the 10 shopping-site files, forbidden files include product/legacy/internal examples, then root creates `小傻妞-*`.
+
+## 2026-05-12 Shopping Site Complete E2E R58 Sentence-Period Required File Regression
+
+- Run: `stage7_shop_complete_20260512_r58`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r58.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r58_prompt.md`
+- Principle: root-only. 外层只启动主代理；R58 stopped at the first root contract checkpoint before root created child runs.
+- Good checkpoint: forbidden files stayed clean after the R57 fix: `product.html` / `old-product.html` / `legacy.html` / `obsolete.html` / `output.json` / `RUNNER_RESULT.md` / `execution_context.json`.
+- Finding 191: final required filename followed by a sentence period was dropped.
+  - Symptom: root `context_bundle.output_contract.required_files` contained 9 files and missed `app.js`, even though root `task.goal` ended the required list with `style.css, app.js.`
+  - 中文解释：这次不是禁用文件污染，而是最后一个必需文件名后面有英文句号。旧正则为了防止把 `app.js.map` 截断成 `app.js`，把句末 `app.js.` 也排除了。
+  - Root cause: `_FILE_RE_TEMPLATE` rejected any filename followed by `.`. It needed to reject `.` only when the dot starts another extension-like suffix.
+  - Fix: filename extraction now allows a sentence period after a required filename when the period is not followed by an alphanumeric extension, while still not extracting `app.js` from `app.js.map`.
+  - Verification:
+    - `test_file_contract_keeps_required_filename_before_sentence_period`.
+    - Existing forbidden filename, bracket forbidden label, and location-rule tests still pass.
+- Status: R58 intentionally stopped before child creation because the root machine required contract was incomplete. It produced no user-facing build files and does not count as shopping-site completion.
+- Next: rerun a clean R59 complete shopping-site E2E. Expected checkpoint: root required files are exactly all 10 shopping-site files and forbidden files remain the 7 negative examples, then root creates `小傻妞-*`.
+
+## 2026-05-12 Shopping Site Complete E2E R59 Full Chain With Quality Gaps
+
+- Run: `stage7_shop_complete_20260512_r59`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r59.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r59_prompt.md`
+- Principle: root-only. 外层只启动主代理并观察；root created `小傻妞-001`, depth=1 created `小小傻妞-002`, depth=2 created `小小小傻妞-001`. 外层没有创建下级，也没有写购物网站产物。
+- Test intent: shopping site is only a complex workload. The primary acceptance target is subagent hierarchy reliability: root-only dispatch, child/grandchild/great-grandchild creation, inherited contracts, write boundaries, role coverage, recovery, logging and parent acceptance. Product polish is useful only insofar as it exposes orchestration failures.
+- Good checkpoint:
+  - 四层链路真实跑通：root -> 子 -> 孙 -> 孙孙。
+  - depth=3 leaf 写出 10 个购物站文件到 `/Users/example/my-终端应用/deliverables/stage7_shop_complete_20260512_r59/build`。
+  - 禁止文件 `product.html` / `old-product.html` / `legacy.html` / `obsolete.html` / `output.json` / `RUNNER_RESULT.md` / `execution_context.json` 没有出现在 build 目录。
+- Finding 192: `禁止创建：...` wording polluted descendant required files.
+  - Symptom: depth=2/depth=3 inherited `父级必需文件/产物名` contained the 7 forbidden/internal names even though `父级禁止文件/反例名` also contained them.
+  - 中文解释：孩子用“禁止创建：product.html...”这种很自然的写法传给孙子。旧解析器没把“禁止创建：”当成负向标题，于是这些 forbidden 文件又混进 required_files。
+  - Root cause: `_BARE_NEGATIVE_TARGET_RE` / negative label/header patterns recognized `禁止：`、`禁止文件名：` and several longer forms, but not the short verb-label form `禁止创建：`.
+  - Fix: forbidden-label parsing now recognizes `禁止创建：`、`禁止生成：`、`禁止产出：`、`禁止写入：` and `禁止写：` as negative list labels.
+  - Verification:
+    - `test_file_contract_treats_forbidden_create_label_as_forbidden_terms`.
+    - Existing sentence-period, forbidden filename and bracket-label tests still pass.
+- Finding 193: explicit QA role requirements were not enforced by acceptance.
+  - Symptom: user/root task asked for tester / bug_finder / acceptor coverage, but the actual chain only had `coordinator`, `child_coordinator`, `child_coordinator`, and `leaf_worker`. The system still marked the chain `DONE/VERIFIED`.
+  - 中文解释：这次不是没跑四层，而是跑完后缺了“测试/找错/验收”这些角色。旧验收只看有 child、有文件、有证据，没有核对“用户点名的角色是不是真的出现了”。
+  - Root cause: acceptance findings had a hard check for “必须创建下级” but no hard check for “必须覆盖特定后代角色”.
+  - Fix: `required_role_coverage` acceptance finding now scans persisted `task.child_ids` descendants. If coordinator-like tasks explicitly mention `tester` / `bug_finder` / `acceptor` or their Chinese role names, missing roles become a P0 failure. Leaf tasks are exempt so inherited parent text does not punish final writers.
+  - Verification:
+    - `test_required_qa_roles_without_descendant_roles_blocks_acceptance`.
+    - `test_required_qa_roles_pass_when_descendants_cover_roles`.
+    - Existing leaf inherited-depth exemption still passes.
+- Finding 194: static-site validation missed JS form binding drift.
+  - Symptom: R59 produced `register.html` with `id="registerForm"` and `login.html` with `id="loginForm"`, but `app.js` called `validateForm('register-form')` and `validateForm('login-form')`. Static validation still passed before the fix.
+  - 中文解释：页面看起来有登录/注册按钮，但 JS 实际绑到不存在的表单 id，所以提交按钮不会按预期跳转。旧静态验收只查“按钮有没有明显空着”，没查“JS 绑定目标是否存在”。
+  - Root cause: `static_site_check` scanned HTML refs/buttons but did not read local `script src` files to validate explicit form binding calls.
+  - Fix: `static_site_check` now collects form ids, reads bounded local JS files, and reports `form_binding_hits` when `validateForm('id')` targets do not exist. It still does not execute JS or fetch remote assets.
+  - Verification:
+    - `test_static_site_check_blocks_missing_validate_form_targets`.
+    - R59 build now fails static validation with `form_binding_hits=2`.
+- External validation notes:
+  - Current R59 build has remote image URLs; tested image HEAD requests returned `200 image/jpeg` for the observed product images. `https://api.example.com` in `app.js` failed to resolve, but it is not currently used by the static flow.
+  - Playwright was not installed in the local Node environment, so this pass used repository static validation and shell/network probes rather than browser automation.
+- Status: R59 is the first run in this series that reached four layers and wrote all 10 files, but it does not count as fully accepted because QA roles were missing and the generated login/register binding failed static validation.
+- Next: rerun a clean R60 complete shopping-site E2E. Expected checkpoint: root or coordinators either create real tester/bug_finder/acceptor descendants, or acceptance blocks with `required_role_coverage`; generated site must also pass `static_site_check` including `form_binding_hits`.
+
+## 2026-05-12 Shopping Site Complete E2E R60 Hierarchy-Truth Guard
+
+- Run: `stage7_shop_complete_20260512_r60`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r60.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r60_prompt.md`
+- Principle: root-only. 外层只启动主代理并观察；真实 task tree 由 root -> child -> grandchild -> great-grandchild 自己创建。购物网站仍只是复杂载荷，真正目标是验证子代理/孙代理/孙孙代理链路、状态和验收控制。
+- Persisted task state after the run:
+  - `subagent-1778543140-0c322ce2` depth=0 role=`coordinator` name=`stage7-shop-r60-root` status=`TIMEOUT` verify=`UNVERIFIED`
+  - `subagent-1778543270-a0a0d9f7` depth=1 role=`child_coordinator` name=`小傻妞-child_coordinator` status=`DONE` verify=`VERIFIED`
+  - `subagent-1778543339-20d1eff8` depth=2 role=`child_coordinator` name=`小小傻妞-child_coordinator` status=`DONE` verify=`VERIFIED`
+  - `subagent-1778543383-8abfd242` depth=3 role=`leaf_worker` name=`小小小傻妞-页面建设者-孙孙辈` status=`DONE` verify=`VERIFIED`
+  - `subagent-1778543387-63dfac34` depth=3 role=`leaf_worker` name=`小小小傻妞-样式脚本建设者-孙孙辈` status=`BLOCKED` verify=`FAILED`
+- Good checkpoint:
+  - 四层链路仍真实创建成功，depth=3 leaf 最终让 build 目录出现 10 个购物站文件。
+  - R59 的 `form_binding_hits` 问题在 R60 产物里没有复现；静态检查显示 required files、placeholder、broken refs、inert controls、form bindings 均通过。
+- Finding 195: final natural-language report contradicted persisted task state.
+  - Symptom: CLI 最终报告写了 root `DONE`、有 `小傻妞-tester` 等成功信息，但磁盘里的真实 `task.json` 显示 root 是 `TIMEOUT/UNVERIFIED`，且没有真实 tester / bug_finder / acceptor 节点。
+  - 中文解释：模型最后“看起来总结得很好”，但它不是严格从 task.json 事实生成的，结果把失败链路说成了成功。这个比购物网站页面问题更严重，因为会让无人值守测试假阳性。
+  - Root cause: 顶层工具轮数耗尽后，系统又让模型自由总结；如果模型误读或混入旧工具输出，就可能和 persisted task state 不一致。
+  - Fix: 顶层工具轮数到上限且本轮执行过 subagent 编排工具时，现在直接生成 deterministic factual closeout：只读取本地 `task.json` 状态，列出 total runs、DONE/VERIFIED 数、blocking run ids、role/name/depth/status/task_dir，并明确提示不能按完成汇报。
+  - Verification:
+    - `test_dispatch_limit_response_uses_persisted_task_state`.
+- Finding 196: timed-out runner thread continued executing tools after timeout.
+  - Symptom: root runner 被记录为 `TIMEOUT` 后，debug trace 里仍能看到同一个旧线程继续 `read_artifact`、`list_files`，甚至写了自己的 `output.json`。
+  - 中文解释：超时标记只是父线程等不下去了，但 Python 工作线程没有被杀掉。它后面继续干活会污染状态，让一个已经 TIMEOUT 的旧 attempt 继续写报告。
+  - Root cause: `_run_subagent_worker_with_timeout()` 用 daemon thread + `join(timeout)` 实现超时；超时后会 `abandon_runner_attempt()`，但工具入口没有检查当前 attempt 是否已被废弃。
+  - Fix: runner flow now records `_current_subagent_attempt_id`; every tool call checks persisted attempt state first. If the attempt is abandoned or no longer active, tool execution is blocked before read/write/dispatch/message can run.
+  - Verification:
+    - `test_stale_attempt_guard_blocks_abandoned_runner_tools`.
+- Finding 197: model-facing board output lacked enough identity facts.
+  - Symptom: final summary invented names like `小傻妞-html-worker` / `小傻妞-tester` while actual board state had different roles and names.
+  - 中文解释：看板 JSON 以前更偏 status 摘要，role/name/depth/parent/child 状态没放在模型容易看到的位置，模型就容易补脑。
+  - Fix: `subagent_board` JSON and board markdown now expose persisted `root_id`、`parent_id`、`depth`、`agent_name`、`role`、`child_count`、`child_status_counts`、`latest_summary`、`blocker_count`、`output_json`.
+  - Verification:
+    - focused board tool/rendering tests.
+- Finding 198: QA roles still were not proactively scheduled by the root/coordinator.
+  - Symptom: R60 prompt explicitly要求 tester / bug_finder / acceptor 真实角色，但实际 child tree still only created coordinator/coordinator/leaf_worker/leaf_worker. Existing acceptance guard can block missing roles where it runs, but root itself timed out before clean acceptance.
+  - 中文解释：我们已经能“不让缺角色假通过”，但还没完全做到“模型一定主动把这些角色派出来”。这属于调度策略问题，不是页面问题。
+  - Fix in this pass: coordinator runner contract now explicitly says if parent goal/acceptance names tester/bug_finder/acceptor/reviewer/找错/测试/验收, it must create real child runs with matching `role` / `agent_name`; mentioning those words in summary/evidence does not count.
+  - Next risk to verify: rerun clean R61 and require either real QA role nodes are created, or deterministic/factual closeout reports the missing role coverage instead of claiming success.
+- Status: R60 does not count as fully accepted. The product files exist and static site check passes, but the hierarchy truth criteria failed: root `TIMEOUT`, one depth=3 leaf `BLOCKED/FAILED`, no real QA role coverage, and the final report was not trustworthy before this fix.
+- Next: rerun a clean R61 with the same root-only rule. Expected checkpoint: timeout-stale attempts cannot execute tools after abandon; any tool-limit final answer is generated from task.json; `subagent_board` exposes real role/name/depth; coordinator either creates real tester/bug_finder/acceptor runs or the run remains visibly incomplete.
+
+## 2026-05-12 Shopping Site Complete E2E R61 Long Tool-Call / Provider Timeout
+
+- Run: `stage7_shop_complete_20260512_r61`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r61.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r61_prompt.md`
+- Principle: root-only. 外层只启动主代理和 dispatch root；下级创建、写产物、测试、找错和验收仍必须由 root 及其下级自己完成。
+- Persisted task state observed during the run:
+  - `subagent-1778545169-17d18d8f` depth=0 role=`coordinator` name=`stage7-shop-r61-root` status=`BLOCKED` verify=`UNVERIFIED`
+  - `subagent-1778545241-c37c62b1` depth=1 role=`coordinator` name=`小傻妞-coordinator` status=`BLOCKED` verify=`FAILED`
+  - `subagent-1778545310-fe042ad2` depth=2 role=`coordinator` name=`小小傻妞-coordinator` status=`DONE` verify=`VERIFIED`
+  - `subagent-1778545372-fa874b65` depth=3 role=`leaf_worker` name=`小小小傻妞-页面资源创建` status=`DONE` verify=`VERIFIED`
+- Good checkpoint:
+  - 四层链路按 root -> 子 -> 孙 -> 孙孙真实创建成功。
+  - depth=3 leaf 最终写出要求的 10 个购物站文件到 `/Users/example/my-终端应用/deliverables/stage7_shop_complete_20260512_r61/build`。
+- Finding 199: long tool-call input caused malformed tool blocks before self-recovery.
+  - Symptom: depth=3 leaf 多次生成过长 `write_file` / `append_file` `content` 参数，工具解析报 `工具调用缺少结束标记 [/TOOL_CALL]`。
+  - 中文解释：这不是工具输出太长，而是模型把一大段 HTML/CSS/JS 塞进工具调用 JSON 参数里，导致工具调用本身太长或转义不稳。流式输出只能改善观察和 stdout/stderr 展示，不能让一个坏掉的工具 JSON 自动变完整。
+  - Observed recovery: leaf eventually switched to smaller chunks and wrote the product files, but this recovery depended on model自纠，不够稳定。
+  - Required next fix: add a system-level long-write fallback. After repeated parser errors, force smaller chunks or route file generation through a controlled workspace exec / artifact writer instead of letting the model keep emitting oversized JSON.
+  - Fix in this pass: added `content_transport_policy.py` and wired it into both file-write tool entrances. `write_file.content` / `append_file.content` now fail before mutation when inline content is too large, and the tool result tells the runner to use short skeleton + bounded `append_file` chunks, small patch-style edits, or grant-backed `controlled_exec` refs. Parse-error hints now reuse the same chunk-size constants and also recognize long `append_file` payloads.
+  - Verification: `test_write_file_rejects_long_inline_content_with_transport_hint`, `test_append_file_rejects_long_inline_content_without_mutating`, `test_parse_error_hint_recommends_append_for_truncated_write`, and `test_subagent_controlled_exec_tool.py` pass locally.
+- Finding 200: provider timeout blocked root while outer CLI had not cleanly exited.
+  - Symptom: root blocker recorded `网络请求失败: 无法连接模型接口 api.minimaxi.com ... The read operation timed out`; persisted root became `BLOCKED/UNVERIFIED`, but the outer CLI process remained running and the tee log stayed empty during observation.
+  - 中文解释：磁盘事实已经知道失败，但外层命令没有及时把失败收口输出给观察者。这会让无人值守测试难判断“还在正常跑”还是“已经内部失败但外层挂住”。
+  - Required next fix: add parent/CLI finalization heartbeat or watchdog for provider-timeout blocked roots. If all relevant task states are terminal or blocked for too long, the outer command should emit a deterministic blocked report and exit instead of staying silent.
+- Status: R61 does not count as fully accepted. It improved hierarchy creation and product output, but still failed root-level acceptance because provider timeout blocked root/depth=1, QA role coverage did not complete, and long write payloads exposed a parser-stability risk.
+- Next: compare mature agents' large-output and file-edit strategies, then implement a stable long-content path: edit/patch-first, bounded read/output externalization, controlled exec/artifact writer for large generated files, and deterministic blocked closeout for provider timeouts.

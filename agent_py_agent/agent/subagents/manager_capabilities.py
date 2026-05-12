@@ -3,12 +3,18 @@
 
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
+from .capability_route_dispatch import (
+    CapabilityNoHitsParams,
+    ExistingCapabilityGrantParams,
+    WouldCapabilityGrantParams,
+    route_capability_no_hits,
+    route_existing_capability_grant,
+    route_would_capability_grant,
+)
 from .capability_route_helpers import (
     RouteCapabilityApplyParams,
     RouteCapabilityGrantParams,
@@ -16,15 +22,12 @@ from .capability_route_helpers import (
     _route_capability_grant,
 )
 from .capability_route_service import (
-    WouldGrantRecordParams,
     build_capability_route_report,
-    build_would_gap_record,
-    build_would_grant_record,
     extract_selected_hits_data,
-    record_capability_route_gap,
     write_capability_route_report_files,
 )
 from .capability_scope import (
+    existing_delete_trash_grant,
     scoped_grant_params,
 )
 from .models import CapabilityRequest, SubAgentCapabilityRouteOptions, SubAgentTask
@@ -47,36 +50,9 @@ def _iter_open_capability_requests(tasks):
     )
 
 
-# LLM: CapabilityNoHitsParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存能力nohits参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
-@dataclass(frozen=True)
-class CapabilityNoHitsParams:
-
-    task: SubAgentTask
-    request: CapabilityRequest
-    query: str
-    hits: list
-    apply: bool
-
-
 # LLM: SubAgentCapabilityMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 类用途: 拆分subagent能力混入流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 class SubAgentCapabilityMixin:
-    # LLM: _route_capability_no_hits 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 处理route能力nohits相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
-    def _route_capability_no_hits(self, params: CapabilityNoHitsParams):
-        now = time.time()
-        if not params.apply:
-            return build_would_gap_record(params.task, params.request, query=params.query, hits=params.hits, created_at=now)
-        return record_capability_route_gap(
-            self,
-            params.task,
-            params.request,
-            query=params.query,
-            hits=params.hits,
-            created_at=now,
-        )
-
     # LLM: route_capability_requests 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
     # 函数用途: 处理route能力requests相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
     def route_capability_requests(
@@ -136,13 +112,6 @@ class SubAgentCapabilityMixin:
         write_capability_route_report_files(self, report, apply=options.apply)
         return report
 
-    # LLM: _extract_selected_hits_data 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 处理extractselectedhitsdata相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
-    def _extract_selected_hits_data(
-        self,
-        selected_hits: list[CapabilitySearchHit],
-    ) -> tuple[list[dict[str, str]], list[str], list[str], list[str]]:
-        return extract_selected_hits_data(selected_hits)
     # LLM: _route_capability_apply 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
     # 函数用途: 处理route能力应用相关的数据流，连接当前职责的前后步骤；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
     def _route_capability_apply(
@@ -195,27 +164,21 @@ class SubAgentCapabilityMixin:
         selected_hits: list[CapabilitySearchHit],
         apply: bool,
     ) -> CapabilityRouteRecord:
-        selected_cards, granted_skills, granted_tools, reasons = self._extract_selected_hits_data(
-            selected_hits
-        )
+        selected_cards, granted_skills, granted_tools, reasons = extract_selected_hits_data(selected_hits)
+        if existing_grant := existing_delete_trash_grant(task, request):
+            return route_existing_capability_grant(
+                self,
+                ExistingCapabilityGrantParams(task, request, query, hits, apply, existing_grant),
+            )
         if not selected_hits:
-            return self._route_capability_no_hits(
+            return route_capability_no_hits(
+                self,
                 CapabilityNoHitsParams(task, request, query, hits, apply)
             )
         if not apply:
-            now = time.time()
-            # LLM: 记录构造留在能力路由服务里，本混入只维持门面职责。
-            return build_would_grant_record(
-                WouldGrantRecordParams(
-                    task=task,
-                    request=request,
-                    query=query,
-                    hits=hits,
-                    granted_skills=granted_skills,
-                    granted_tools=granted_tools,
-                    selected_cards=selected_cards,
-                    reasons=reasons,
-                    created_at=now,
+            return route_would_capability_grant(
+                WouldCapabilityGrantParams(
+                    task, request, query, hits, granted_skills, granted_tools, selected_cards, reasons
                 )
             )
         return self._route_capability_apply(
@@ -231,7 +194,6 @@ class SubAgentCapabilityMixin:
                 reasons=reasons,
             )
         )
-
 
 # LLM: _capability_route_options 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 函数用途: 处理能力route选项相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。

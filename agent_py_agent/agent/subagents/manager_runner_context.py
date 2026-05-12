@@ -24,6 +24,7 @@ from .context_bundle import (
     render_context_bundle_markdown,
     validate_context_bundle,
 )
+from .controlled_exec_gateway import controlled_exec_grant_refs
 from .models import SubAgentExecutionContext
 from .parsing import (
     _dict_list,
@@ -76,8 +77,8 @@ if TYPE_CHECKING:
 # LLM: SubAgentRunnerContextMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 类用途: 拆分subagent执行器上下文混入流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 class SubAgentRunnerContextMixin:
-    # LLM: _extract_granted_caps 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 处理extractgrantedcaps相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
+    # LLM: _extract_granted_caps keeps grant scope auditable; controlled exec callers depend on these fields.
+    # 函数用途: 汇总父级 grant 的技能、工具和 shell/MCP/path/network/output scope，供 runner context 和审计展示读取。
     def _extract_granted_caps(self, task: SubAgentTask) -> tuple[list[str], list[str], list[dict[str, object]]]:
         """Extract skills, tools, and grants from capability grants."""
         granted_skills: list[str] = []
@@ -90,22 +91,31 @@ class SubAgentRunnerContextMixin:
                 {
                     "id": grant.id,
                     "request_id": grant.request_id,
+                    "grant_type": grant.grant_type,
                     "skills": grant.skills,
                     "tools": grant.tools,
+                    "mcp_tools": grant.mcp_tools,
+                    "command_allowlist": grant.command_allowlist,
                     "reason": grant.reason,
                     "constraints": grant.constraints,
+                    "path_scope": grant.path_scope,
+                    "network_scope": grant.network_scope,
+                    "output_budget": grant.output_budget,
+                    "risk_level": grant.risk_level,
                     "expires_after_task": grant.expires_after_task,
+                    "expires_at": grant.expires_at,
                     "created_at": grant.created_at,
                 }
             )
         return granted_skills, granted_tools, grants
 
-    # LLM: _build_write_boundary 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 构建boundary所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
+    # LLM: _build_write_boundary carries filesystem plus controlled exec grant refs into tool execution.
+    # 函数用途: 构建写入边界和受控 exec 授权边界；工具层只能从这里读取父级授权，不能让模型自填。
     def _build_write_boundary(self, task: SubAgentTask) -> dict[str, object]:
         """Build write boundary configuration dict."""
         report_roots = _task_report_write_roots(task)
         product_roots = task_product_write_roots(task, report_roots)
+        controlled_exec_grants = controlled_exec_grant_refs(list(task.capability_grants or []))
         return {
             "task_dir": task.task_dir,
             "role": task.role,
@@ -121,6 +131,7 @@ class SubAgentRunnerContextMixin:
             "test_checklist_file": task.test_checklist_file,
             "bugs_file": task.bugs_file,
             "skill_usage_file": task.skill_usage_file,
+            "controlled_exec_grants": controlled_exec_grants,
             # LLM: runners may write task-local skill candidates, not global memory.
             "skill_sparks_file": task.skill_sparks_file,
             "handoff_file": task.handoff_file,
@@ -163,13 +174,15 @@ class SubAgentRunnerContextMixin:
         allowed_tools: list[str],
         grants: list[dict[str, object]],
         max_cards: int,
-    ) -> SubAgentExecutionContext:
+        ) -> SubAgentExecutionContext:
+        controlled_exec_grants = controlled_exec_grant_refs(list(task.capability_grants or []))
         return SubAgentExecutionContext(
             **_execution_context_task_fields(task),
             allowed_skills=allowed_skills,
             allowed_tools=allowed_tools,
             granted_cards=_dedupe_granted_cards(task.capability_grants, max_cards=max_cards),
             grants=grants,
+            controlled_exec_grants=controlled_exec_grants,
             acceptance_checks=task.acceptance_checks,
             evidence=[asdict(item) for item in task.evidence],
             quality_contract=task.quality_contract,

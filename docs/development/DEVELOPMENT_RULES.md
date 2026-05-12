@@ -124,6 +124,12 @@ before changing code.
   `open(..., "w")` directly.
 - The write boundary enforces: workspace root containment, no path traversal, no
   system path writes.  See `FILE_WRITING_RULES.md` for the full policy.
+- Subagent shell/exec access must go through `controlled_exec`, and `controlled_exec`
+  must read authority from `write_boundary.controlled_exec_grants`.  Do not add
+  product interfaces where a child agent can self-authorize `command_allowlist`,
+  `path_scope`, `network_scope`, or output budget from its own tool params.
+- Delete-like child-agent operations must route to task-local trash.  Do not expose
+  `rm`/`rmdir`/`unlink` as direct shell execution for subagents.
 
 ---
 
@@ -251,6 +257,28 @@ do_write()
   instead of direct `rm`, bounded output capture, and audit records. Directory
   permission can make read/write commands low-friction, but it must not bypass
   path containment, output-size guards, or tool/skill request escalation.
+- Subagent exec requests must be grant-backed. The model may request a command,
+  cwd, or output intent, but parent `CapabilityGrant` must supply the actual
+  command allowlist, path scope, network scope, and output budget before the
+  request reaches shell execution. Do not let tool parameters become self-issued
+  authorization.
+- Large generated file bodies must not travel as one giant tool-call JSON
+  argument. `write_file` / `append_file` content goes through
+  `content_transport_policy.py`; if it exceeds the inline limit, the caller must
+  use a short skeleton plus bounded `append_file` chunks, a small
+  `replace_in_file`/patch edit, or a grant-backed `controlled_exec` path that
+  writes inside the allowed workspace and returns only refs/audit metadata.
+  Streaming stdout/stderr can improve observability, but it is not a fix for an
+  oversized or malformed tool-call JSON block.
+- New write-like tools must reuse `content_transport_policy.py` or document a
+  reviewed exception. Do not create a second hardcoded chunk-size or parse-error
+  hint in a separate module.
+- Model-facing tool descriptions are product contracts, not casual comments.
+  If a rule is shared by more than one tool or prompt, put it behind a named
+  helper/policy function and reference that helper from the tool spec, parser
+  hint, and runner prompt. Avoid copying long Chinese/English guidance strings
+  into each tool class; duplicated prose drifts and makes later model-behavior
+  fixes unreliable.
 
 ## 11.2 Real E2E Findings Ledger
 
@@ -276,6 +304,13 @@ do_write()
   coordination, writing, or research, not a one-off action like checking one
   button. Include Chinese fields (`name_zh`, `summary_zh`, `use_when_zh`,
   `output_contract_zh`) so humans and LLMs can both read it.
+- Role selection guidance is part of the delegation contract. Root and
+  coordinator/lead prompts should keep a short index of when to use each broad
+  role, then load details only when dispatching. Worker/writer produce real
+  artifacts; researcher gathers facts; tester verifies behavior; bug_finder
+  searches for defects and counterexamples; acceptor prepares final acceptance
+  recommendations; coordinator/lead splits, broadcasts, corrects, rescues, and
+  summarizes refs without defaulting to writing final product artifacts.
 - Empty user-facing subagent tool config means automatic policy. Keep
   `subagent_allowed_tools=[]` as “role/template/task decides tools”, not “no
   tools”. Only use a non-empty global list for deliberately restricted test

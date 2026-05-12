@@ -15,6 +15,14 @@ from ._filesystem_helpers import (
     _text_param,
 )
 from ._filesystem_read import FileSystemTool
+from .content_transport_policy import (
+    InlineContentPolicyRequest,
+    append_chunk_use_case,
+    append_file_content_parameter_detail,
+    check_inline_write_content,
+    long_content_avoidance_rule,
+    write_file_content_parameter_detail,
+)
 from .models import BaseTool, ToolExecutionResult, ToolSpec
 
 
@@ -36,7 +44,7 @@ class WriteFileTool(FileSystemTool):
             ],
             avoid_when=[
                 "只想补几行内容时别整文件重写，优先 append_file 或后续更细粒度编辑工具",
-                "内容很长、CSS/JS/HTML 很大或容易被模型输出截断时，先写短骨架再用 append_file 分块追加",
+                long_content_avoidance_rule(),
             ],
             keywords=["写文件", "生成代码", "创建文件", "覆盖", "save file", "write"],
             parameters={
@@ -45,7 +53,7 @@ class WriteFileTool(FileSystemTool):
             },
             parameter_details={
                 "path": "相对工作区的目标文件路径；缺失父目录会自动创建。",
-                "content": "会直接成为文件的新内容；原文件存在时会被整体覆盖。长文件请保持短骨架，后续用 append_file 分块补齐。",
+                "content": write_file_content_parameter_detail(),
             },
             examples=[
                 '{"tool": "write_file", "path": "src/demo.py", "content": "print(\\"hello\\")\\n"}',
@@ -63,6 +71,16 @@ class WriteFileTool(FileSystemTool):
                 max_chars=_MAX_WRITE_TEXT_CHARS,
                 allow_empty=True,
             )
+            content_policy = check_inline_write_content(
+                InlineContentPolicyRequest(
+                    tool_name="write_file",
+                    field_name="content",
+                    content=content,
+                    path=raw_path,
+                )
+            )
+            if not content_policy.allowed:
+                return ToolExecutionResult("write_file", False, content_policy.message)
             target = self.resolve_path(raw_path)
         except ValueError as exc:
             return ToolExecutionResult("write_file", False, str(exc))
@@ -91,7 +109,7 @@ class AppendFileTool(FileSystemTool):
             use_cases=[
                 "往日志、Markdown、结果汇总文件后面追加一段内容",
                 "在不覆盖原文件的前提下补充说明",
-                "把较长的 CSS/JS/HTML 或代码文件分块追加，避免单次工具调用过长被截断",
+                append_chunk_use_case(),
             ],
             avoid_when=[
                 "需要精确修改文件中间某一段时，不要拿它硬凑",
@@ -103,7 +121,7 @@ class AppendFileTool(FileSystemTool):
             },
             parameter_details={
                 "path": "相对工作区的目标文件路径；缺失父目录会自动创建。",
-                "content": "会直接拼接到文件尾部，不会替换已有内容。",
+                "content": append_file_content_parameter_detail(),
             },
             examples=[
                 '{"tool": "append_file", "path": "RUNLOG.md", "content": "\\n- 新增一条记录"}',
@@ -121,6 +139,16 @@ class AppendFileTool(FileSystemTool):
                 max_chars=_MAX_WRITE_TEXT_CHARS,
                 allow_empty=True,
             )
+            content_policy = check_inline_write_content(
+                InlineContentPolicyRequest(
+                    tool_name="append_file",
+                    field_name="content",
+                    content=content,
+                    path=raw_path,
+                )
+            )
+            if not content_policy.allowed:
+                return ToolExecutionResult("append_file", False, content_policy.message)
             target = self.resolve_path(raw_path)
         except ValueError as exc:
             return ToolExecutionResult("append_file", False, str(exc))

@@ -6,6 +6,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent_py_agent.agent.tooling.content_transport_policy import (
+    MAX_INLINE_WRITE_CONTENT_CHARS,
+    append_file_content_parameter_detail,
+    write_file_content_parameter_detail,
+)
+
 
 class TestWriteFileTool:
     """测试 WriteFileTool 文件写入。"""
@@ -27,6 +33,19 @@ class TestWriteFileTool:
         assert "new_file.txt" in result.output
         assert (workspace / "new_file.txt").exists()
         assert (workspace / "new_file.txt").read_text() == "Hello, World!"
+
+    # LLM: Tool specs should reuse the central content transport contract, not hardcoded prose.
+    # 函数用途: 验证 write_file 给模型看的 content 说明来自统一策略，后续改限制只改一处。
+    def test_write_file_content_detail_uses_transport_policy(self, tmp_path: Path):
+        from agent_py_agent.agent.tooling.filesystem_write import WriteFileTool
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        tool = WriteFileTool(workspace)
+
+        assert tool.spec.parameter_details["content"] == write_file_content_parameter_detail()
+        assert str(MAX_INLINE_WRITE_CONTENT_CHARS) in tool.spec.parameter_details["content"]
 
     def test_write_file_creates_parent_dirs(self, tmp_path: Path):
         """写入时自动创建父目录。"""
@@ -110,6 +129,27 @@ class TestWriteFileTool:
         assert result.ok is False
         assert "过长" in result.output
 
+    # LLM: Large generated files must not travel as one giant JSON tool parameter.
+    # 函数用途: 验证 write_file 拒绝过长 inline content，并提示模型改用分块/受控内容传输。
+    def test_write_file_rejects_long_inline_content_with_transport_hint(self, tmp_path: Path):
+        from agent_py_agent.agent.tooling.filesystem_write import WriteFileTool
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        target = workspace / "site" / "style.css"
+
+        tool = WriteFileTool(workspace)
+        result = tool.execute({
+            "path": "site/style.css",
+            "content": "A" * (MAX_INLINE_WRITE_CONTENT_CHARS + 1),
+        })
+
+        assert result.ok is False
+        assert "inline content 过长" in result.output
+        assert "append_file 分块追加" in result.output
+        assert "controlled_exec" in result.output
+        assert not target.exists()
+
     def test_write_file_missing_path(self, tmp_path: Path):
         """缺少路径参数。"""
         from agent_py_agent.agent.tooling.filesystem_write import WriteFileTool
@@ -158,6 +198,19 @@ class TestAppendFileTool:
         content = existing.read_text()
         assert "Line 1" in content
         assert "Line 2" in content
+
+    # LLM: Append-file spec text should stay in lockstep with the central content policy.
+    # 函数用途: 验证 append_file 的模型说明复用统一策略，避免和 write_file 分叉。
+    def test_append_file_content_detail_uses_transport_policy(self, tmp_path: Path):
+        from agent_py_agent.agent.tooling.filesystem_write import AppendFileTool
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        tool = AppendFileTool(workspace)
+
+        assert tool.spec.parameter_details["content"] == append_file_content_parameter_detail()
+        assert str(MAX_INLINE_WRITE_CONTENT_CHARS) in tool.spec.parameter_details["content"]
 
     def test_append_file_creates_new_file(self, tmp_path: Path):
         """追加到不存在的文件应创建。"""
@@ -223,6 +276,27 @@ class TestAppendFileTool:
 
         assert result.ok is False
         assert "过长" in result.output
+
+    # LLM: Append chunks should stay bounded so the parser never has to carry huge file bodies.
+    # 函数用途: 验证 append_file 也使用统一长内容策略，并且失败时不改动已有文件。
+    def test_append_file_rejects_long_inline_content_without_mutating(self, tmp_path: Path):
+        from agent_py_agent.agent.tooling.filesystem_write import AppendFileTool
+
+        workspace = tmp_path / "workspace"
+        existing = workspace / "site" / "app.js"
+        existing.parent.mkdir(parents=True)
+        existing.write_text("const ok = true;\n", encoding="utf-8")
+
+        tool = AppendFileTool(workspace)
+        result = tool.execute({
+            "path": "site/app.js",
+            "content": "B" * (MAX_INLINE_WRITE_CONTENT_CHARS + 1),
+        })
+
+        assert result.ok is False
+        assert "inline content 过长" in result.output
+        assert "每块 content" in result.output
+        assert existing.read_text(encoding="utf-8") == "const ok = true;\n"
 
     def test_append_file_empty_content(self, tmp_path: Path):
         """追加空内容。"""
