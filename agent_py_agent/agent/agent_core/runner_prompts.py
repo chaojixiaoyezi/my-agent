@@ -140,27 +140,50 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "- capability_request 工具返回 OPEN 后，最终结果块写 status=PENDING_CAPABILITY_REQUEST 或 BLOCKED，"
         "不要继续假装能力已经授权或命令已经执行。",
     ]
-    if context.controlled_exec_grants:
-        lines.append(
-            "- controlled_exec 只能使用 controlled_exec_grants 里的父级 grant；"
-            "不要在工具参数里自填 command_allowlist/path_scope/network_scope。"
-        )
-        lines.append(
-            "- 目标要求 controlled_exec 真实执行时，dry_run/allowed plan 不算完成；"
-            "必须用 apply=true，并在最终 refs 中写出执行 payload 里的 stdout_ref、audit_ref。"
-            "复杂 python 片段优先用 argv 数组，例如 command=[\"python3\",\"-c\",\"print('x' * 2000)\"]，避免 shell 引号歧义。"
-        )
-        lines.append(
-            "- rm/rmdir/unlink 不会进入 command_allowlist，这是安全设计；"
-            "如果 controlled_exec_grants.delete_policy.mode=task_trash，已有 controlled_exec grant 时直接调用 controlled_exec apply=true 执行删除命令，工具会改走 task_trash 并返回 trash_manifest_ref，"
-            "不要为了裸 rm 再提交 capability_request；只有 moved=true 且有 trash_manifest_ref 才能把删除验收写成 PASS。"
-        )
+    lines.extend(_controlled_exec_contract_lines(context))
     lines.extend(_current_role_template_lines(context))
     if "leaf" in str(context.role or "").lower():
         lines.append("- 叶子节点重点是交付产物和测试文件；父级验收器负责运行命令、判定通过和触发 rescue。")
+    lines.extend(_root_execution_contract_lines(context))
     if _is_coordinator_context(context):
         lines.extend(_coordinator_execution_contract_lines())
     return lines
+
+
+# LLM: _controlled_exec_contract_lines isolates grant-specific runner guidance from the base prompt builder.
+# 函数用途: 当前 runner 拿到 controlled_exec grant 时，追加真实执行、refs 和 task trash 规则。
+def _controlled_exec_contract_lines(context: SubAgentExecutionContext) -> list[str]:
+    if not context.controlled_exec_grants:
+        return []
+    return [
+        "- controlled_exec 只能使用 controlled_exec_grants 里的父级 grant；"
+        "不要在工具参数里自填 command_allowlist/path_scope/network_scope。",
+        "- 目标要求 controlled_exec 真实执行时，dry_run/allowed plan 不算完成；"
+        "必须用 apply=true，并在最终 refs 中写出执行 payload 里的 stdout_ref、audit_ref。"
+        "复杂 python 片段优先用 argv 数组，例如 command=[\"python3\",\"-c\",\"print('x' * 2000)\"]，避免 shell 引号歧义。",
+        "- rm/rmdir/unlink 不会进入 command_allowlist，这是安全设计；"
+        "如果 controlled_exec_grants.delete_policy.mode=task_trash，已有 controlled_exec grant 时直接调用 controlled_exec apply=true 执行删除命令，工具会改走 task_trash 并返回 trash_manifest_ref，"
+        "不要为了裸 rm 再提交 capability_request；只有 moved=true 且有 trash_manifest_ref 才能把删除验收写成 PASS。",
+    ]
+
+
+# LLM: _root_execution_contract_lines keeps root-only policy text out of the base contract body.
+# 函数用途: 只在 root runner prompt 中追加能力决策规则，普通子代理不读取这段。
+def _root_execution_contract_lines(context: SubAgentExecutionContext) -> list[str]:
+    if not _is_root_context(context):
+        return []
+    return [
+        "- root 不走 capability_request；root 当前不应缺能力。"
+        "遇到任务内普通缺口时创建/调度下级或做策略决策；遇到系统/自毁/越权红线时记录阻止原因，等待未来 root policy，不要写 OPEN 能力申请。"
+    ]
+
+
+# LLM: _is_root_context keeps root-only instructions out of ordinary child prompts.
+# 函数用途: 判断当前 runner 是否为 root，避免普通子代理拿到 root 专用能力规则。
+def _is_root_context(context: SubAgentExecutionContext) -> bool:
+    parent_id = str(context.parent_id or "").strip()
+    root_id = str(context.root_id or "").strip()
+    return not parent_id and (not root_id or root_id == context.run_id or context.depth == 0)
 
 
 # LLM: _coordinator_execution_contract_lines keeps delegation policy readable and under size limits.

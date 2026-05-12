@@ -126,6 +126,28 @@ def test_runner_prompt_tells_coordinator_to_write_reports_but_delegate_deliverab
     assert "scope=peers" in prompt
 
 
+# LLM: test_runner_prompt_tells_root_not_to_request_capability keeps root as the decision node.
+# 函数用途: root 没有上级，提示词不能引导 root 提交 capability_request 卡住自己。
+def test_runner_prompt_tells_root_not_to_request_capability():
+    context = SubAgentExecutionContext(
+        run_id="root-1",
+        generated_at=1.0,
+        goal="协调购物网站开发",
+        thought="",
+        plan=[],
+        role="coordinator",
+        depth=0,
+        parent_id="",
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "capability_request"],
+        acceptance_checks=["由下级完成实现和 QA"],
+    )
+
+    prompt = _build_subagent_runner_prompt(context)
+
+    assert "root 不走 capability_request" in prompt
+    assert "root 当前不应缺能力" in prompt
+
+
 def test_runner_prompt_keeps_role_template_details_out_of_leaf_prompt():
     """非派工节点不用加载完整角色模板细节，避免每个 leaf prompt 变厚。"""
     context = SubAgentExecutionContext(

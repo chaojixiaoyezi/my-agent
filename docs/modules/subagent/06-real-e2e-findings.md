@@ -4489,3 +4489,37 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Focused guard tests passed after the change.
 - Next:
   - Run a clean R76 with the same root-only rule. Expected behavior: root/coordinators can use board/dispatch refs to create QA/repair/acceptance children without product-body reads or duplicate-domain blocks.
+
+### Result: R76 Exposed Root Capability Request Drift
+
+- Discovered at: 2026-05-12 during R76 clean root-only shopping-site run.
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - The outer observer only watched the seeded root/coordinator and did not directly edit product files.
+  - Root and descendants were responsible for child creation, repair, QA, and cleanup.
+- Observed behavior:
+  - `duplicate_child_domain` no longer hard-blocked QA-like children, and delegating parents could read orchestration refs while product-body reads stayed blocked.
+  - Root saw forbidden files in the product build and called `capability_request` for delete/cleanup authority.
+  - Because root has no parent, that OPEN request had no real authority path and could stall the run instead of making a root-level decision.
+- 中文解释：
+  - root 是最高节点，不能“找上级申请能力”。下级可以向上级申请；root 只能做策略判断。
+  - 当前阶段先不做复杂 root policy，所以短期规则是：root 不写 `capability_request`。普通任务内问题就调度下级或记录策略决定；真正危险的系统/自毁/越权操作先阻止并记录，后续单独做 root policy 或用户确认。
+- Root cause:
+  - `capability_request` 工具只验证 run_id 是否等于当前 runner，没有验证该 run 是否有 parent。
+  - Runner prompt 也没有明确告诉 depth=0/root 不要走 child capability lane。
+- Fix:
+  - `capability_request` now rejects root runs with a model-facing error: `root run 不走 capability_request`.
+  - Non-root child/grandchild runs can still submit scoped OPEN capability requests to their parent.
+  - Root runner prompt now says root currently should not lack capability, should create/route lower agents or record policy blocks instead.
+- Borrowed lesson:
+  - OpenClaw keeps execution authority at the exec policy boundary (`security`, `ask`, `allowlist`, approval decisions).
+  - Hermes exposes dangerous-command approval/yolo/user config as a top-level policy, not as a child asking a nonexistent parent.
+  - my-agent should keep child capability requests for child-to-parent escalation, and design root policy separately later.
+- Verification:
+  - `test_capability_request_tool_blocks_root_run_requests`
+  - `test_capability_request_tool_records_open_request`
+  - `test_capability_request_tool_blocks_cross_run_writes`
+  - `test_runner_prompt_tells_root_not_to_request_capability`
+  - Focused capability request and prompt-contract tests passed after the fix.
+- Next:
+  - Start clean R77. Expected behavior: if root hits cleanup/delete/tool gaps, it should not create OPEN capability requests; it should use child routing, refs-only advice, or policy-block reporting until a dedicated root policy exists.

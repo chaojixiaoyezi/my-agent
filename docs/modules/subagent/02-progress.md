@@ -958,3 +958,11 @@
 - 对标结论：Hermes/OpenClaw 更像把硬安全放在工具执行、cwd/path、危险命令、自毁/系统路径上；规划顺序、QA 波次、repair 策略交给 LLM/模板/验收事实。我们也按这个方向收窄 guard。
 - 已补测试：`test_hierarchy_schedule_warns_duplicate_coordinator_domains`、`test_delegating_parent_can_read_orchestration_artifact_before_acceptor_done`，并回归 duplicate guard 和 body-read guard focused tests。
 - 下一步：干净启动 R76。预期 root/coordinator 能读取看板/dispatch refs，创建 tester/bug_finder/acceptor 或 repair 子代理，不再被同域 QA/重复目录卡住。
+
+## 2026-05-12 R76: root no longer writes capability requests
+- 中文说明：R76 暴露一个更基础的问题：root 没有上级，却能调用 `capability_request` 写 OPEN 请求，结果像“自己给自己请假”，会把 root 卡进等待授权流程。
+- 已修正：`capability_request` 工具现在拒绝 root run；只有有 parent 的非 root runner 才能写 OPEN 能力申请。root 遇到任务目录内普通缺口应调度下级或做策略决策；遇到系统/自毁/越权红线先记录阻止，未来再接 root policy/user confirmation，不再伪装成向父级申请。
+- Prompt 同步：depth=0/root runner prompt 明确写入 `root 不走 capability_request` 和 `root 当前不应缺能力`，减少模型先走错路。
+- 对标结论：OpenClaw 的 exec policy 按 `security/ask/allowlist/approval` 在执行边界决策，Hermes 也把危险命令审批放在用户/配置策略层；两者都不是让最上层 agent 生成一条“等上级授权”的内部工单。我们按这个思路把 root 从 child capability 流程里拿出来。
+- 已补测试：`test_capability_request_tool_blocks_root_run_requests`、`test_runner_prompt_tells_root_not_to_request_capability`，并回归 capability request tool 和 prompt contract focused tests。
+- 下一步：继续干净 R77，重点观察 root 遇到删除/清理/缺工具时是否改为调度下级、记录策略阻止或走未来 root-policy 口子，而不是 OPEN capability request。
