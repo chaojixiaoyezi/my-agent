@@ -33,30 +33,49 @@ RETRYABLE_RUNNER_FAILURE_TYPES = {
 _RUNNER_CHILD_FINAL_STATUSES = {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
 
 
-# LLM: role phase ordering keeps QA and acceptance runners from racing ahead of implementation runners.
-# 函数用途: 给 runner 角色分配执行阶段顺序；coordinator 先拆任务，worker 先产出，tester/找错随后检查，acceptor 最后验收。
+# LLM: role phase ordering trusts role/name identity before broad inherited goal prose.
+# 函数用途: 给 runner 角色分配执行阶段；coordinator 先拆任务，worker 产出，tester/找错随后检查，acceptor 最后验收。
 def _runner_role_phase_priority(task: SubAgentTask) -> int:
 
     role = str(getattr(task, "role", "") or "").strip().lower().replace("-", "_")
-    text = f"{role} {getattr(task, 'agent_name', '')} {getattr(task, 'goal', '')}".lower().replace("-", "_")
+    identity_text = f"{role} {getattr(task, 'agent_name', '')}".lower().replace("-", "_")
+    full_text = f"{identity_text} {getattr(task, 'goal', '')}".lower().replace("-", "_")
     if not role:
-        return 10
-    if "accept" in text or any(token in text for token in {"acceptor", "verifier", "verification"}):
+        return _runner_text_phase_priority(full_text)
+    if "coordinator" in role or role in {"lead", "planner", "dispatcher"}:
+        return _runner_text_phase_priority(identity_text, default=0)
+    if "accept" in identity_text or any(token in identity_text for token in {"acceptor", "verifier", "verification"}):
         return 30
     if (
-        "quality" in text
-        or "test" in text
-        or "bug" in text
-        or "review" in text
-        or "critic" in text
-        or any(token in text for token in {"qa", "checker", "auditor"})
+        "quality" in identity_text
+        or "test" in identity_text
+        or "bug" in identity_text
+        or "review" in identity_text
+        or "critic" in identity_text
+        or any(token in identity_text for token in {"qa", "checker", "auditor"})
     ):
         return 20
-    if "coordinator" in role or role in {"lead", "planner", "dispatcher"}:
-        return 0
     if "worker" in role or role in {"general", "writer", "coder", "researcher", "reporter"}:
         return 10
-    return 10
+    return _runner_text_phase_priority(full_text)
+
+
+# LLM: _runner_text_phase_priority is a fallback for vague roles, not the main source for coordinators.
+# 函数用途: 身份字段不够明确时，从文本里保守推断 runner 阶段，避免继承的父级 QA 合同污染 coordinator。
+def _runner_text_phase_priority(text: str, *, default: int = 10) -> int:
+    normalized = str(text or "").lower().replace("-", "_")
+    if "accept" in normalized or any(token in normalized for token in {"acceptor", "verifier", "verification"}):
+        return 30
+    if (
+        "quality" in normalized
+        or "test" in normalized
+        or "bug" in normalized
+        or "review" in normalized
+        or "critic" in normalized
+        or any(token in normalized for token in {"qa", "checker", "auditor"})
+    ):
+        return 20
+    return default
 
 
 # LLM: _runner_max_attempts 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

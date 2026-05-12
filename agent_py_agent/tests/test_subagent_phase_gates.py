@@ -78,6 +78,24 @@ def test_runner_candidates_defer_quality_until_producers_finish():
     assert [task.id for task in selected] == ["auth", "catalog"]
 
 
+# LLM: test_runner_phase_ignores_inherited_qa_contract_for_plain_coordinator covers Stage7 R63.
+# 函数用途: coordinator 的父级 goal 里有 tester/bug_finder/acceptor 要求时，仍先跑 coordinator，不让 QA 抢跑。
+def test_runner_phase_ignores_inherited_qa_contract_for_plain_coordinator():
+    inherited_contract = (
+        "父级要求至少创建 tester / bug_finder / acceptor；"
+        "当前 coordinator 先创建下一层 worker，不要自己做 QA。"
+    )
+    tasks = [
+        _runner_task("qa-test", "tester", "小傻妞-tester", "test build when ready"),
+        _runner_task("qa-bug", "bug_finder", "小傻妞-bug_finder", "find bugs when ready"),
+        _runner_task("coord", "coordinator", "小傻妞-coord", inherited_contract),
+    ]
+
+    selected = _dispatch_runner_candidates(tasks, max_runners=4)
+
+    assert [task.id for task in selected] == ["coord"]
+
+
 # LLM: test_progress_payload_surfaces_blocked_children covers parent recovery after a child fails.
 # 函数用途: 直接 child 已失败/阻塞时，dispatch payload 必须给出可执行 run_ids，而不是假装没有下一步。
 def test_progress_payload_surfaces_blocked_children():

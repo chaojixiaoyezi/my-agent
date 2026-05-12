@@ -872,3 +872,12 @@
 - 已记录：R62 还暴露 root 误把已有但 `PLANNING` 的 QA child 当成缺失而重复创建 QA、长内容写入仍会多次自救、外层 CLI 观察仍可能沉默等待。这些保留到下一轮真实 E2E 和 closeout/watchdog 优化。
 - 已补测试：`test_search_text_accepts_filesystem_bundle_path`、`test_parent_with_unfinished_descendant_blocks_acceptance`、`test_parent_with_verified_descendants_passes_descendant_health`，并回归 filesystem / acceptance / QA scheduler focused tests。
 - 下一步：重新跑干净 R63；预期任何 QA 后代未健康收口时 root 不能假绿，scoped search 只能搜 build 目录，最终 closeout 要尽量从 persisted task facts 汇报而不是沉默等待。
+
+## 2026-05-12 R63-R65 follow-up: QA phase gates
+- 中文说明：R63/R64/R65 真实 E2E 证明 QA 自动补派会创建真实 tester/bug_finder/acceptor，但也暴露了新问题：QA 在 build 还是空目录时就创建或执行，会认真报告“没有产物”，造成空转和假失败。
+- 已修正：runner dispatch 阶段排序现在优先看 `role/agent_name` 身份，不再因为 coordinator goal 继承了 tester/bug_finder/acceptor 字样，就把 coordinator 误判成 QA 阶段；同一批候选里先跑 coordinator/worker，再跑 tester/bug_finder，最后跑 acceptor。
+- 已修正：有产物根的父任务，在 worker/writer/leaf_worker 没有进入 `AWAITING_ACCEPTANCE`、`NEEDS_ACCEPTANCE` 或 `DONE/VERIFIED` 前，不自动补派 QA；模型显式创建 QA child 也会被 `qa_before_implementation_ready` 阻断。
+- 已记录设计原则：大型任务里 QA 要按 work 批次和依赖组运行。全部 work 完成时跑整体验证；部分关联 work 完成时只跑局部 QA；单个 work 默认进入 `ready_for_batch_qa`，除非它是独立交付单元或阻塞后续。
+- 已补测试：`test_runner_phase_ignores_inherited_qa_contract_for_plain_coordinator`、`test_hierarchy_schedule_blocks_qa_before_implementation_ready`、`test_hierarchy_schedule_defers_auto_qa_until_implementation_ready`、`test_hierarchy_schedule_auto_qa_after_implementation_ready` 等 focused tests 已通过。
+- R66 结果：QA 不再提前自动补派，但 root 在未调用工具、未创建 child 的情况下把“需要 schedule_child_subagents”写成 `AWAITING_ACCEPTANCE`，随后被验收拒绝为 `acceptance_failed`。这说明 QA 阶段门生效了，但还需要下一片把“需要派工的 coordinator 不能只分析就提交验收”交给 LLM 继续规划或重试，而不是把调度策略写死。
+- 下一步：做 LLM-assisted QA orchestration：让 LLM 读取 work 状态、依赖组、产物 refs 和风险提示后提出 QA/repair/acceptance plan；系统只做边界校验，例如不允许空产物 QA、不允许跳过失败 child、不允许越权广播。

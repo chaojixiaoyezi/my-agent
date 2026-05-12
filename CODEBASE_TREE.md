@@ -890,7 +890,7 @@ docs/
 - `agent_py_agent/agent/subagents/models.py`: SubAgentTask 新增 `attributes: dict[str, object]` 字段
   - 用于存储动态超时、拆分信息等运行时属性
 
-- `agent_py_agent/agent/agent_core/runner_dispatch.py`: runner 候选选择、重试和角色阶段排序；coordinator/worker/tester/bug_finder/acceptor 会按“先拆/先做/再测/再验收”的阶段顺序进入 `max_runners`，并且同一轮只放行当前最低阶段，避免 QA/test/review/acceptance 抢在 producer/coordinator 前面运行；dispatch record 会保留 runner 创建的 child 状态摘要、未完成 child ids 和 partial-success 标记。
+- `agent_py_agent/agent/agent_core/runner_dispatch.py`: runner 候选选择、重试和角色阶段排序；coordinator/worker/tester/bug_finder/acceptor 会按“先拆/先做/再测/再验收”的阶段顺序进入 `max_runners`，并且同一轮只放行当前最低阶段，避免 QA/test/review/acceptance 抢在 producer/coordinator 前面运行；阶段判断优先信任 `role` / `agent_name`，只有身份不明确时才读 goal，避免继承的父级 QA 合同污染 coordinator；dispatch record 会保留 runner 创建的 child 状态摘要、未完成 child ids 和 partial-success 标记。
 - `agent_py_agent/agent/agent_core/runner_gate.py`: 集中计算 runner timeout；`off/none/disabled/0` 表示不限制，`auto` 表示按动态 timeout 配置计算，固定数字表示秒数。
   - 支持从任务 attributes 读取动态超时。
 
@@ -1011,9 +1011,9 @@ docs/
 - `agent_py_agent/agent/subagents/services/hierarchy_role_identity.py`: 从 scheduler 拆出的角色 identity 兜底策略，根据 `agent_name` / `goal` 恢复模型漏填的 researcher/tester/acceptor/bug_finder/writer/worker 等角色。
 - `agent_py_agent/agent/subagents/services/hierarchy_scheduled_role.py`: 从 scheduler 拆出的下一层 role 推断策略，把 child/general/worker 这类模型模糊角色修正成 coordinator 或 leaf_worker。
 - `agent_py_agent/agent/subagents/services/qa_role_contract.py`: tester / bug_finder / acceptor 角色合同识别 helper；调度器和验收发现共用它来判断父任务是否要求真实 QA 后代、某个 persisted child 是否真正覆盖 QA 角色。
-- `agent_py_agent/agent/subagents/services/hierarchy_qa_scheduler.py`: 调度阶段 QA 补派 helper；根据父任务合同、本轮 specs 和已存在后代计算缺失 tester/bug_finder/acceptor，并返回 scheduler-neutral child spec，避免核心 scheduler 继续变胖。
+- `agent_py_agent/agent/subagents/services/hierarchy_qa_scheduler.py`: 调度阶段 QA 补派 helper；根据父任务合同、本轮 specs 和已存在后代计算缺失 tester/bug_finder/acceptor，并返回 scheduler-neutral child spec，避免核心 scheduler 继续变胖；有产物根的父任务会等 worker/writer/leaf_worker 进入可验收或完成状态后才自动补派 QA。
 - `agent_py_agent/agent/subagents/services/hierarchy_context.py`: 层级派工的父级上下文继承层；保留产物路径、文件合同、层级合同，以及 `controlled_exec` / capability request / path_scope / output_budget / task_trash / refs 等不能丢的能力安全合同。
-- `agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py`: 从 scheduler 中拆出的层级 scope guard，集中处理空计划、深度/数量限制、禁止 sibling 领域、同批混建 coordinator/leaf、root 已有 coordinator 后直建 leaf/worker、child 写入根漂移、domain mismatch、同父级 coordinator 领域去重和已验证 leaf 具体目标文件去重；forbidden scope 会过滤 depth/layer/level/child/worker 这类层级或角色词，避免“不要创建 depth>=4”误挡正常孙代理；去重会过滤 generated id 片段、`run/id/ref/refs/qa` 等结构词和泛化编号词，goal 兜底会先剥离绝对路径、文件名、继承块以及 `users/claude/code/shop/tests/css/js` 等路径脚手架词，避免误挡 recovery checker siblings、自动 QA children 或共享 `/Users/.../my-claude-code/...` 的不同 child。
+- `agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py`: 从 scheduler 中拆出的层级 scope guard，集中处理空计划、深度/数量限制、禁止 sibling 领域、同批混建 coordinator/leaf、root 已有 coordinator 后直建 leaf/worker、QA 早于实现完成、child 写入根漂移、domain mismatch、同父级 coordinator 领域去重和已验证 leaf 具体目标文件去重；forbidden scope 会过滤 depth/layer/level/child/worker 这类层级或角色词，避免“不要创建 depth>=4”误挡正常孙代理；去重会过滤 generated id 片段、`run/id/ref/refs/qa` 等结构词和泛化编号词，goal 兜底会先剥离绝对路径、文件名、继承块以及 `users/claude/code/shop/tests/css/js` 等路径脚手架词，避免误挡 recovery checker siblings、自动 QA children 或共享 `/Users/.../my-claude-code/...` 的不同 child。
 - `agent_py_agent/agent/subagents/services/hierarchy_leaf_targets.py`: 从 scope guard 拆出的已验证 leaf 目标文件去重 helper；只读 direct child 元数据和 `output.json.artifacts` 路径引用，不读取 artifact 正文。
 - `agent_py_agent/agent/subagents/services/hierarchy_context.py`: 层级目标继承 helper；把父级 required/forbidden 文件合同、4层/depth/命名合同和能力安全合同补进下级 goal，防止模型总结时把关键边界缩水。
 - `agent_py_agent/agent/subagents/services/hierarchy_write_policy.py`: 层级写入根策略，区分 task-local 报告写入和最终产品写入；coordinator/researcher/tester/bug_finder/acceptor 可保留产品路径上下文但不继承产品写入根。

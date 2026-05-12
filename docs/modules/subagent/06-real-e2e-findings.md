@@ -98,6 +98,7 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Small Fixed Retest：主节点单入口 1/2/4 小树复测通过。外层只启动 root，root 创建 2 child，child 创建 4 leaf，4 个 leaf 真实写出算法文件并通过父级 Python smoke test；leaf 写工具缺失和旧 failure/capability 状态残留已修复。还剩一个验收噪音：某 leaf 的 acceptance plan 因“空测试命令”进入 `request_human`，需要后续让空测试命令降级成 inspect-only 或生成可执行检查。
 - Debug Trace：子代理调试日志改成正式 `subagent_debug_trace_level` 开关。默认 0 不写；1-5 只写内部 runtime 的 refs-only JSONL，用于后续多层真实测试定位谁创建、谁运行、谁收束，不污染 deliverables。
 - Stage7 R34：购物站 10 个文件真实落到用户产物目录，但 root/部分 child 的 `output.json` 缺 evidence packet，导致严格验收失败；同时 dispatch 工具缺少“只剩重复记账，不要再调度”的明确提示。现在 output.json 自动收口会从已存在报告/产物路径补最小证据包，dispatch_subagents 会返回 `dispatch_terminal` 让父模型停下来汇报 blockers。
+- Stage7 R63-R66：QA 自动补派曾让 tester / bug_finder / acceptor 在空 build 上提前空转。现在调度会等 worker/writer/leaf_worker 到可测试状态后再补 QA；R66 进一步发现 root 可能只写“下一步应该派工”但没真正创建 child，这会被验收拦住，后续要交给 LLM-assisted orchestration 继续规划和重试。
 
 ## 2026-05-09 Real 3-Subagent Parallel E2E
 
@@ -4172,3 +4173,55 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Status: remaining observation gap. Do not overread this single sample as a proven timeout bug; next slice should add or verify a parent/CLI blocked-closeout watchdog that reports persisted terminal facts without relying on model prose.
 - Status: R62 does not count as fully accepted. It proved QA auto-scheduling can fire and the four-layer chain can write all 10 files, but it also exposed a parent false-green and scoped filesystem bundle bug. Both critical code issues are fixed locally; duplicate QA interpretation, long-write efficiency, and outer CLI closeout remain next E2E targets.
 - Next: rerun a clean root-only R63 after the focused tests and strict checks. Expected checkpoint: if any QA child remains PLANNING/BLOCKED/FAILED, root acceptance must fail with `descendant_health`; scoped read/search must stay inside the requested build path; final closeout should report persisted task truth instead of silent waiting.
+
+## 2026-05-12 Shopping Site Complete E2E R63-R66 QA Phase Gates
+
+- Runs:
+  - `stage7_shop_complete_20260512_r63`
+  - `stage7_shop_complete_20260512_r64`
+  - `stage7_shop_complete_20260512_r65`
+  - `stage7_shop_complete_20260512_r66`
+- Principle: root-only. 外层只启动 root 并观察；root、child、grandchild 必须逐级创建下层，外层不直接替下级派工、写产物或测试。
+
+### Finding 209: QA Roles Ran Before Implementation Was Testable
+
+- Discovered at: 2026-05-12 during R63-R65 shopping-site E2E runs.
+- Symptom:
+  - tester / bug_finder / acceptor could be created while the build directory was still empty.
+  - QA children reported missing files and empty build problems before any worker/leaf had produced real deliverables.
+- 中文解释：
+  - QA 小傻妞不能一开始就站在空目录旁边等，也不能看到空目录就把它当产品失败。它应该在有 work 产物、或者某个 work group 到达可测试状态后再出现。
+- Root cause:
+  - The auto QA scheduler and explicit child-creation guard only checked whether the parent requested QA roles.
+  - They did not require a direct implementation child to reach `AWAITING_ACCEPTANCE` / `NEEDS_ACCEPTANCE` / `DONE` / `VERIFIED` before QA was created or dispatched.
+  - Runner dispatch phase sorting also used broad inherited goal text, so coordinator nodes could be misclassified as QA-like because the parent prompt mentioned tester / bug_finder / acceptor.
+- Fix:
+  - Runner dispatch now prioritizes persisted identity (`role` and `agent_name`) before broad inherited goal prose.
+  - QA auto-fill is deferred until a product-root parent has a ready implementation child.
+  - Explicit attempts to create tester / bug_finder / acceptor before a ready worker/writer/leaf_worker are blocked with `qa_before_implementation_ready`.
+  - Role strategy docs now define batch QA, partial QA, single-work QA, QA failure, QA tool failure, and worker workspace retention.
+- Verification:
+  - `test_runner_phase_ignores_inherited_qa_contract_for_plain_coordinator`
+  - `test_hierarchy_schedule_blocks_qa_before_implementation_ready`
+  - `test_hierarchy_schedule_allows_qa_after_implementation_ready`
+  - `test_hierarchy_schedule_defers_auto_qa_until_implementation_ready`
+  - `test_hierarchy_schedule_auto_qa_after_implementation_ready`
+- Status: solved for empty-build QA creation/execution at the scheduler and guard boundary.
+- Remaining risk:
+  - The system still needs an LLM-assisted QA plan that can choose group-level QA vs whole-product QA based on work refs and dependency groups, instead of relying only on a fixed role list.
+
+### Finding 210: Coordinator Can Submit Analysis Without Creating Required Children
+
+- Discovered at: 2026-05-12 during R66.
+- Symptom:
+  - After QA was deferred correctly, the root/coordinator produced an `output.json` with `status=AWAITING_ACCEPTANCE`, `tool_rounds=0`, and `next_action=schedule_child_subagents...`.
+  - No child runs were created, so formal acceptance rejected it as `acceptance_failed`.
+- 中文解释：
+  - 系统已经不让 QA 提前空转了，但 root 这次又走到另一个边界：它只分析了“下一步应该派工”，却没有真正派工，然后把自己送去验收。验收能挡住假完成，但更好的行为是让它继续派工或输出一个受控的 LLM QA/repair/acceptance 计划。
+- Root cause:
+  - The runner can parse a model answer as structured completion even when the answer is actually a plan to call tools next.
+  - Existing acceptance correctly catches missing child creation, but the recovery loop does not yet turn that into a continued dispatch attempt.
+- Status: detected and recorded, not fully solved in this slice.
+- Next:
+  - Add an LLM-assisted orchestration decision step: when a coordinator says the next action is child creation but has no child refs or tool calls, keep it in planning/dispatch recovery rather than treating it as ready for acceptance.
+  - Keep system logic as a guardrail, not as a hardcoded workflow: LLM proposes QA/repair/acceptance plan; guards reject impossible actions such as empty-product QA, skipped failed descendants, or out-of-scope broadcast.

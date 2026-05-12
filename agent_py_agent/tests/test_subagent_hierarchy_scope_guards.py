@@ -118,6 +118,93 @@ def test_hierarchy_schedule_forbidden_scope_ignores_parent_thought(tmp_path):
     assert len(result.created_run_ids) == 1
 
 
+# LLM: test_hierarchy_schedule_blocks_qa_only_before_implementation covers Stage7 R64.
+# 函数用途: 有产物根的父任务不能在没有 worker/leaf child 时只创建 QA 子任务。
+def test_hierarchy_schedule_blocks_qa_before_implementation_ready(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    build = tmp_path / "deliverables" / "shop" / "build"
+    root = manager.create_run(
+        goal=f"交付购物网站到 {build}，需要 tester / bug_finder / acceptor。",
+        thought="root",
+        plan=["root"],
+        extra_write_roots=[str(build)],
+        role="coordinator",
+    )
+    parent = manager.create_run(
+        goal=f"继续创建 depth=3 leaf 写购物网站到 {build}，之后再做 QA。",
+        thought="coord",
+        plan=["plan"],
+        parent_id=root.id,
+        root_id=root.id,
+        depth=2,
+        role="coordinator",
+        extra_write_roots=[str(build)],
+        allowed_tools=["schedule_child_subagents"],
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[
+                HierarchyChildSpec(goal="检查购物流程", role="tester", agent_name="小小小傻妞-tester"),
+                HierarchyChildSpec(goal="找坏链接和坏按钮", role="bug_finder", agent_name="小小小傻妞-bug_finder"),
+            ],
+            apply=True,
+            max_depth=3,
+        )
+    )
+
+    assert result.blocked is True
+    assert result.reason.startswith("qa_before_implementation_ready")
+    assert manager.load(parent.id).child_ids == []
+
+
+# LLM: test_hierarchy_schedule_allows_qa_after_implementation_child keeps normal QA follow-up possible.
+# 函数用途: 父节点已有实现 child 后，可以继续创建 tester/bug_finder/acceptor 检查产物。
+def test_hierarchy_schedule_allows_qa_after_implementation_ready(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    build = tmp_path / "deliverables" / "shop" / "build"
+    root = manager.create_run(goal="root", thought="root", plan=["root"], extra_write_roots=[str(build)])
+    parent = manager.create_run(
+        goal=f"交付购物网站到 {build}，之后做 QA。",
+        thought="coord",
+        plan=["plan"],
+        parent_id=root.id,
+        root_id=root.id,
+        depth=2,
+        role="coordinator",
+        extra_write_roots=[str(build)],
+        allowed_tools=["schedule_child_subagents"],
+    )
+    manager.create_run(
+        goal=f"写购物网站文件到 {build}",
+        thought="leaf",
+        plan=["write"],
+        parent_id=parent.id,
+        root_id=root.id,
+        depth=3,
+        role="leaf_worker",
+        agent_name="小小小傻妞-leaf",
+        extra_write_roots=[str(build)],
+    )
+    child = manager.load(manager.load(parent.id).child_ids[0])
+    child.status = "AWAITING_ACCEPTANCE"
+    child.verification_status = "NEEDS_ACCEPTANCE"
+    manager.save(child)
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[HierarchyChildSpec(goal="检查购物流程", role="tester", agent_name="小小小傻妞-tester")],
+            apply=True,
+            max_depth=3,
+        )
+    )
+
+    assert result.blocked is False
+    assert len(result.created_run_ids) == 1
+
+
 # LLM: test_hierarchy_schedule_blocks_implicit_domain_mismatch catches coordinator sibling drift.
 # 函数用途: 即使 parent 没写“不得创建”，text-lead 也不能误创建 arithmetic leaf。
 def test_hierarchy_schedule_blocks_implicit_domain_mismatch(tmp_path):
