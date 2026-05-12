@@ -4249,6 +4249,10 @@ This document is append-only. Record every real subagent E2E issue found during 
   - A short clean rerun immediately showed another internal-ref wording: `必须按真实 task.json 阻塞汇报`.
   - The positive deliverable detector now requires an actual delivery verb such as `交付` / `创建` / `写入` / `包含`; plain `必须按真实 task.json 汇报` is treated as a state reference, not a required artifact.
   - The R68 prompt now extracts only the 10 user product files as `required_files`.
+- R69 precheck:
+  - Another inherited context phrase put `禁止创建 depth>=4` before `task.json 里的状态`, so the nearby `创建` still made `task.json` look like a required product file.
+  - Internal state wording directly after the filename, such as `里的` / `refs` / `阻塞` / `汇报` / `状态`, now wins over earlier broad delivery verbs. 中文解释：`task.json 里的状态` 是读取状态，不是让孩子创建 `task.json`。
+  - The R69 root prompt now extracts only the 10 shopping-site product files as `required_files`.
 
 ### Finding 212: Inherited QA Goal Over-Bound Intermediate Coordinators
 

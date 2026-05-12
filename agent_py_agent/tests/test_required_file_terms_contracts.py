@@ -483,3 +483,17 @@ def test_file_contract_ignores_internal_state_file_references_without_deliverabl
     required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
 
     assert required == ["index.html", "style.css", "app.js"]
+
+
+# LLM: inherited hierarchy clauses can mention "禁止创建" before task.json without making it a deliverable.
+# 函数用途: 防止 R69 里 `禁止创建 depth>=4 ... task.json 里的状态` 被窗口内“创建”误判成正向交付。
+def test_file_contract_ignores_task_json_inside_hierarchy_state_clause():
+    text = (
+        "必须包含完全命名的文件：index.html、style.css、app.js。\n"
+        "用户原始层级/命名约束（必须原样遵守）：禁止创建 depth>=4 的下级 / "
+        "只有所有真实 task.json 里的 root/child 链路、角色覆盖和验收状态一致时，才能说完整通过"
+    )
+
+    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
+
+    assert required == ["index.html", "style.css", "app.js"]

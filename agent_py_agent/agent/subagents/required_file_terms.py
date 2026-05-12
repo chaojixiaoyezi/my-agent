@@ -204,14 +204,16 @@ def _is_location_rule_source(segment: str, start: int) -> bool:
     return bool(_LOCATION_TARGET_RE.search(after))
 
 
-# LLM: _is_internal_context_reference keeps state refs out of deliverable contracts.
-# 函数用途: task.json/execution_context.json 在“读取状态/refs”语境里只是内部引用，不是下级要创建的产物。
+# LLM: _is_internal_context_reference gives adjacent state-ref wording priority over distant create/write verbs.
+# 函数用途: task.json/execution_context.json 在“里的状态/refs/阻塞汇报”等语境里只是内部引用，不是下级要创建的产物。
 def _is_internal_context_reference(segment: str, match: re.Match[str]) -> bool:
     filename = match.group(1).lower()
     if filename not in _INTERNAL_REF_FILES:
         return False
     before = segment[max(0, match.start() - 48) : match.start()].lower()
     after = segment[match.end() : match.end() + 48].lower()
+    if any(hint in after[:24] for hint in ("里的", "里", "refs", "阻塞", "汇报", "状态")):
+        return True
     if any(hint in before for hint in _POSITIVE_DELIVERABLE_HINTS):
         return False
     return any(hint in before or hint in after for hint in _INTERNAL_REF_HINTS)
