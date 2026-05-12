@@ -68,15 +68,33 @@ def test_delegating_parent_can_read_runtime_metadata_before_acceptor_done():
     assert result is None
 
 
-# LLM: read_artifact guard prevents parents from expanding large child/dispatch artifacts too early.
-# 函数用途: 验收完成前 read_artifact 正文读取也被阻断，避免 root 上下文反向膨胀。
+# LLM: orchestration artifacts are refs-only status packets, so parent recovery may read them.
+# 函数用途: 委托期允许读取 dispatch/subagent_board 小摘要 artifact，避免父级被迫盲目恢复。
+def test_delegating_parent_can_read_orchestration_artifact_before_acceptor_done():
+    tasks = {"root": _task("root", identity="coordinator", children=["worker"]), "worker": _task("worker")}
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_agent(tasks),
+            user_prompt="请让子代理先做，最后按验收标准收口。",
+            payload={
+                "tool": "read_artifact",
+                "artifact_ref": "/tmp/workspace/memory_archive/artifacts/tool_outputs/dispatch_subagents-1-abc.json",
+            },
+        )
+    )
+
+    assert result is None
+
+
+# LLM: non-orchestration artifacts still stay blocked until acceptor completes.
+# 函数用途: 验收完成前不允许父级读取普通大 artifact 正文，避免 root 上下文反向膨胀。
 def test_delegating_parent_cannot_read_artifact_body_before_acceptor_done():
     tasks = {"root": _task("root", identity="coordinator", children=["worker"]), "worker": _task("worker")}
     result = maybe_block_delegating_body_read(
         DelegatingBodyReadGuardRequest(
             agent=_agent(tasks),
             user_prompt="请让子代理先做，最后按验收标准收口。",
-            payload={"tool": "read_artifact", "artifact_ref": "dispatch_subagents-1-abc"},
+            payload={"tool": "read_artifact", "artifact_ref": "child-output-full-body-1-abc.json"},
         )
     )
 

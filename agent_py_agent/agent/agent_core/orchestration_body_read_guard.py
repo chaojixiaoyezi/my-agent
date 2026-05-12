@@ -13,6 +13,13 @@ from ..tools import ToolExecutionResult
 from .runner_context import current_subagent_run_id
 
 _BODY_READ_TOOLS = {"read_file", "read_artifact"}
+_ORCHESTRATION_ARTIFACT_PREFIXES = (
+    "dispatch_subagents-",
+    "subagent_board-",
+    "subagents_due_check-",
+    "subagents_plan_actions-",
+    "subagents_apply_actions-",
+)
 _METADATA_FILE_NAMES = {
     "ACCEPTANCE.md",
     "HANDOFF.md",
@@ -56,6 +63,8 @@ def maybe_block_delegating_body_read(request: DelegatingBodyReadGuardRequest) ->
     if _has_completed_acceptor(request.agent, parent):
         return None
     if tool == "read_file" and _is_runtime_metadata_read(request.agent, request.payload):
+        return None
+    if tool == "read_artifact" and _is_orchestration_artifact_read(request.payload):
         return None
     return ToolExecutionResult(tool, False, _blocked_message(tool, parent))
 
@@ -134,6 +143,16 @@ def _is_runtime_metadata_read(agent: object, payload: dict[str, Any]) -> bool:
     if path is None or path.name not in _METADATA_FILE_NAMES:
         return False
     return _looks_like_runtime_path(path)
+
+
+# LLM: _is_orchestration_artifact_read lets parents read small refs/status artifacts while blocking product bodies.
+# 函数用途: 委托期允许 dispatch/subagent_board 等编排摘要 artifact，避免父级恢复时只能盲目派工。
+def _is_orchestration_artifact_read(payload: dict[str, Any]) -> bool:
+    raw = str(payload.get("artifact_ref") or payload.get("ref") or "").strip()
+    if not raw:
+        return False
+    name = Path(raw).name
+    return any(name.startswith(prefix) for prefix in _ORCHESTRATION_ARTIFACT_PREFIXES)
 
 
 # LLM: _user_authorized_parent_body_read recognizes explicit current-run user override phrases.

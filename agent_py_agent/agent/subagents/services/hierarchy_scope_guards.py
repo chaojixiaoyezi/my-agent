@@ -39,31 +39,16 @@ def schedule_block_reason(parent: SubAgentTask, request: Any) -> str:
     return _forbidden_child_scope_reason(parent, request) or _domain_mismatch_reason(parent, request)
 
 
-# LLM: duplicate_child_domain_reason blocks repeated coordinator domains under the same parent.
-# 函数用途: 阻止同一个父节点重复创建 checkout/quality 这类同域 coordinator，避免真实 E2E 扇出膨胀。
-def duplicate_child_domain_reason(manager: Any, parent: SubAgentTask, request: Any) -> str:
-    qa_phase_reason = _qa_before_implementation_reason(manager, parent, request)
-    if qa_phase_reason:
-        return qa_phase_reason
-    seen_domains: list[set[str]] = []
-    for child in _existing_coordination_children(manager, parent):
-        seen_domains.append(_child_domain_tokens(child))
-    for spec in request.child_specs:
-        if not _is_coordination_like(spec):
-            continue
-        domains = _child_domain_tokens(spec)
-        duplicate = _first_overlapping_domain(domains, seen_domains)
-        if duplicate:
-            return f"duplicate_child_domain:{duplicate}"
-        if domains:
-            seen_domains.append(domains)
-    return ""
+# LLM: qa_phase_block_reason keeps empty QA fanout from burning model calls with nothing to inspect.
+# 函数用途: 只阻断“没有实现产物却创建 QA”的红线；重复 coordinator 这类协作风险降级为 warning。
+def qa_phase_block_reason(manager: Any, parent: SubAgentTask, request: Any) -> str:
+    return _qa_before_implementation_reason(manager, parent, request)
 
 
 # LLM: schedule_warnings reports soft coordination risks while allowing the parent LLM to decide.
 # 函数用途: 返回重复文件目标等可审计风险；不在底层阻断调度，避免修复/协作写同一文件时卡死。
 def schedule_warnings(manager: Any, parent: SubAgentTask, request: Any) -> list[str]:
-    return duplicate_verified_leaf_target_warnings(
+    warnings = duplicate_verified_leaf_target_warnings(
         LeafTargetDedupeRequest(
             manager=manager,
             parent=parent,
@@ -71,6 +56,29 @@ def schedule_warnings(manager: Any, parent: SubAgentTask, request: Any) -> list[
             leaf_like=_is_leaf_like,
         )
     )
+    warnings.extend(duplicate_child_domain_warnings(manager, parent, request))
+    return warnings
+
+
+# LLM: duplicate_child_domain_warnings audits repeated coordinator domains without stopping execution.
+# 函数用途: 同父级重复创建 checkout/quality 等 coordinator 时写 warning，让上级 LLM 自己决定合并、继续或修正。
+def duplicate_child_domain_warnings(manager: Any, parent: SubAgentTask, request: Any) -> list[str]:
+    warnings: list[str] = []
+    seen_domains: list[set[str]] = []
+    emitted: set[str] = set()
+    for child in _existing_coordination_children(manager, parent):
+        seen_domains.append(_child_domain_tokens(child))
+    for spec in request.child_specs:
+        if not _is_coordination_like(spec):
+            continue
+        domains = _child_domain_tokens(spec)
+        duplicate = _first_overlapping_domain(domains, seen_domains)
+        if duplicate and duplicate not in emitted:
+            warnings.append(f"duplicate_child_domain:{duplicate}")
+            emitted.add(duplicate)
+        if domains:
+            seen_domains.append(domains)
+    return warnings
 
 
 # LLM: _qa_before_implementation_reason keeps QA creation from becoming the only next layer.

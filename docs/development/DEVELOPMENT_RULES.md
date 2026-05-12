@@ -131,6 +131,31 @@ before changing code.
 - Delete-like child-agent operations must route to task-local trash.  Do not expose
   `rm`/`rmdir`/`unlink` as direct shell execution for subagents.
 
+## 7.1 Guard Boundary / 守卫边界
+
+- Guards are safety rails, not project managers.  They may hard-block red-line
+  risks such as writing outside authorized roots, path traversal, system directory
+  deletion, unapproved shell authority, recursive self-destruction, and operations
+  that make my-agent unable to boot or recover.
+- Guards should not hardcode normal workflow preferences.  Duplicate coordinator
+  domains, multiple QA/review agents inspecting the same deliverable root, repeated
+  repair workers, and shared product files should be warnings/audit facts unless
+  they cross a real write/safety boundary.
+- Follow the 长期助手/通道运行时 split: execution/tool/path/self-termination
+  safety belongs in the hard guard layer; planning order, QA wave timing, repair
+  strategy, and role selection belong to LLM role templates, workflow templates,
+  refs-only advice, and final acceptance checks.
+- Parent/root agents that delegated work should stay refs-only by default, but
+  may read orchestration artifacts such as dispatch summaries, subagent boards,
+  due-check reports, status refs, and acceptance/test refs.  Product bodies and
+  large child artifact bodies stay blocked until a real acceptor finishes or the
+  current user prompt explicitly asks the parent to inspect or accept the work.
+- Cleanup is allowed inside authorized workspaces when it matches the task:
+  temporary files, task trash, generated artifacts, task-local memory, drafts,
+  templates, tools, and skills may be removed.  The hard line is uninstalling or
+  disabling my-agent itself.  If a user asks to uninstall my-agent, explain manual
+  steps; do not execute the uninstall or delete required runtime/core files.
+
 ---
 
 ## 8. Comments and Docstrings / 注释和 docstring
