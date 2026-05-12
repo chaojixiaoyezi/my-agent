@@ -901,3 +901,19 @@
 - 已修正：QA role coverage 只读取当前节点自己的 direct goal / acceptance，遇到 `继承父级目标/边界`、`父级层级/协作约束` 等继承块就停止，避免每个中间 coordinator 都背父级全局 QA 硬义务。
 - 已补测试：`test_file_contract_treats_markdown_forbidden_heading_as_negative_scope`、`test_file_contract_ignores_internal_state_file_references_without_deliverable_label`、`test_file_contract_ignores_task_json_inside_hierarchy_state_clause`、`test_explicit_coordinator_seed_repairs_wrong_lineage_summary_from_raw_prompt`、`test_inherited_parent_qa_contract_does_not_bind_intermediate_coordinator`；并用 R68/R69 prompt 验证 required_files 只剩 10 个用户交付文件。
 - 下一步：干净启动 R68；预期 required_files 只保留 10 个交付文件，命名合同保留 `小小小傻妞-*`，中间 coordinator 不再因继承 QA 文字被误判失败，正确父级仍要通过 `quality_advice` 主动选择 QA 波次。
+
+## 2026-05-12 R70 follow-up: reduce hardcoded hierarchy forcing
+- 中文说明：R70 干净复测确认 R69 的 `task.json` 误传已修掉：child context bundle 里的 `required_files` 只剩 10 个购物站交付文件，`task.json` 只作为内部状态引用出现。
+- 新发现：root 和 depth=1 coordinator 都尝试创建 worker/writer 分支时，被 `hierarchy_chain_requires_coordinator_until_depth_3` 阻断；这把“至少覆盖一条 4 层链路”误做成“所有 depth<3 都必须是 coordinator”，和 root 可按任务同时派 2/3/4 层分支的设计冲突。
+- 已修正：调度阶段不再硬性要求四层链路中的每一层都是 coordinator，也不再因为 root 已有 coordinator child 就禁止 root 直接派 worker/leaf。调度只保留红线：空计划、max_depth、max_children、同批混建 coordinator/显式 leaf、产物根漂移、禁止 sibling 领域、QA 空转和重复已完成产物。
+- 验收口径：是否满足“至少一条 4 层链路”、是否跳过失败 child、是否缺 QA 角色，交给 acceptance/descendant health/role coverage 读取真实 `task.json` 后判断，而不是在 schedule 阶段替 LLM 固定流程。
+- 已补测试：`test_hierarchy_schedule_preserves_no_space_four_layer_contract_without_forcing_coord_chain`、`test_root_with_coordinators_can_still_create_direct_leaf`，并调整 controlled_exec 继承测试，确认直接 implementation child 仍能继承 controlled_exec/task_trash 等硬合同。
+- 下一步：跑 focused tests 后重新启动 R71；预期 root 能按自己的策略创建 coordinator/worker 混合分支，真正的失败只在验收阶段按事实汇报。
+
+## 2026-05-12 R71 real E2E: production chain succeeds, missing QA is blocked by acceptance
+- 中文说明：R71 在同一个购物站任务上验证了“少写死流程”的方向：root -> `小傻妞-商品协调员` -> `小小傻妞-商品协调员` -> `小小小傻妞-文件写入员` 这条 4 层真实链路跑通，leaf worker 自己写出了 10 个必需文件。
+- 产物结果：`index.html`、`register.html`、`login.html`、`products.html`、`product-detail.html`、`cart.html`、`checkout.html`、`order-success.html`、`style.css`、`app.js` 全部出现在 `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_complete_20260512_r71/build`，且没有 `product.html/old-product.html/legacy.html/obsolete.html/output.json/RUNNER_RESULT.md/execution_context.json` 等禁止产物污染 build。
+- 恢复能力：leaf 写较长 `products.html/app.js` 时出现过 `__parse_error__`，随后按“短骨架/短内容重试”恢复并继续写入，说明长工具参数恢复路径有效，但后续仍应继续优化大内容写入的外置/分块提示。
+- 验收结果：root 最终被标记为 `BLOCKED/FAILED acceptance_failed`，原因是缺少用户点名 QA 角色 `tester, bug_finder, acceptor`；这次失败是正确失败，不是系统误挡。生产链路完成不等于整体完成，QA/找错/验收必须由真实 task 事实证明。
+- 架构结论：调度层不再替 LLM 硬编码“每一层必须 coordinator”，但 acceptance gate 必须继续硬守底线；流程选择给 LLM/模板，完成判定看真实 `task.json`、角色覆盖、子树健康和 evidence。
+- 下一步：增强 `quality_advice` / root closeout prompt，让 root 在生产 child 已完成后主动按 advice 创建 tester、bug_finder、acceptor；不建议恢复调度时自动补派 QA，避免又变成死流程。

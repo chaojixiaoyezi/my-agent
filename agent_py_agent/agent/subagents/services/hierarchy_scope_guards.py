@@ -19,8 +19,8 @@ from .hierarchy_write_policy import inherited_extra_write_roots
 from .qa_role_contract import qa_role_identity_roles
 
 
-# LLM: schedule_block_reason keeps guard checks deterministic and side-effect free.
-# 函数用途: 判断本轮层级调度是否因深度、数量、空计划或领域越界被阻断。
+# LLM: schedule_block_reason keeps only red-line dispatch guards; workflow shape is left to LLM/templates.
+# 函数用途: 判断本轮层级调度是否因深度、数量、空计划、越权写入或领域越界被阻断，不固定每层必须是 coordinator。
 def schedule_block_reason(parent: SubAgentTask, request: Any) -> str:
     if not request.child_specs:
         return "no_child_specs"
@@ -31,9 +31,6 @@ def schedule_block_reason(parent: SubAgentTask, request: Any) -> str:
     mixed_reason = _mixed_coordinator_leaf_reason(request.child_specs)
     if mixed_reason:
         return mixed_reason
-    chain_reason = _hierarchy_chain_leaf_reason(parent, request.child_specs)
-    if chain_reason:
-        return chain_reason
     drift_reason = _child_write_root_drift_reason(parent, request)
     if drift_reason:
         return drift_reason
@@ -46,9 +43,6 @@ def duplicate_child_domain_reason(manager: Any, parent: SubAgentTask, request: A
     qa_phase_reason = _qa_before_implementation_reason(manager, parent, request)
     if qa_phase_reason:
         return qa_phase_reason
-    bypass_reason = _root_leaf_bypass_reason(manager, parent, request)
-    if bypass_reason:
-        return bypass_reason
     leaf_reason = duplicate_verified_leaf_target_reason(
         LeafTargetDedupeRequest(
             manager=manager,
@@ -118,18 +112,6 @@ def _implementation_child_ready(child: Any) -> bool:
     status = str(getattr(child, "status", "") or "").upper()
     verification = str(getattr(child, "verification_status", "") or "").upper()
     return status in {"AWAITING_ACCEPTANCE", "DONE"} or verification in {"NEEDS_ACCEPTANCE", "VERIFIED"}
-
-
-# LLM: _root_leaf_bypass_reason preserves coordinator ownership once a root has delegated domains.
-# 函数用途: root 已经创建 coordinator 后，阻断它继续直接创建 leaf/worker，避免绕开子代理领导层。
-def _root_leaf_bypass_reason(manager: Any, parent: SubAgentTask, request: Any) -> str:
-    if int(parent.depth or 0) != 0:
-        return ""
-    if not any(_is_leaf_like(spec) for spec in request.child_specs):
-        return ""
-    if _existing_coordination_children(manager, parent):
-        return "root_leaf_bypass_existing_coordinators:dispatch or repair direct coordinator children first"
-    return ""
 
 
 # LLM: _existing_coordination_children reads only lightweight child task metadata.
@@ -214,33 +196,6 @@ def _mixed_coordinator_leaf_reason(child_specs: list[Any]) -> str:
     has_coordinator = any(_child_has_role_token(spec, {"coordinator", "lead"}) for spec in child_specs)
     has_leaf = any(_child_has_role_token(spec, {"leaf", "leaf_worker", "leaf-worker"}) for spec in child_specs)
     return "mixed_coordinator_leaf_children" if has_coordinator and has_leaf else ""
-
-
-# LLM: _hierarchy_chain_leaf_reason enforces explicit multi-layer test contracts without hardcoding all tasks.
-# 函数用途: 父级明确要求 4 层链路时，深度不足的节点不能直接创建 leaf/worker 跳过孙孙层。
-def _hierarchy_chain_leaf_reason(parent: SubAgentTask, child_specs: list[Any]) -> str:
-    if int(parent.depth or 0) >= 2:
-        return ""
-    if not _goal_requires_four_layer_chain(parent.goal):
-        return ""
-    if any(_is_leaf_without_coordination_role(spec) for spec in child_specs):
-        return "hierarchy_chain_requires_coordinator_until_depth_3"
-    return ""
-
-
-# LLM: Four-layer enforcement must honor an explicit coordinator role even when the display name says writer.
-# 函数用途: 判断候选 child 是否真的在跳层创建执行叶子；明确 coordinator/lead/tester 等协调角色优先于名字里的 writer。
-def _is_leaf_without_coordination_role(spec: Any) -> bool:
-    if _is_coordination_like(spec):
-        return False
-    return _is_leaf_like(spec)
-
-
-# LLM: _goal_requires_four_layer_chain detects explicit root->child->grandchild->great-grandchild requests.
-# 函数用途: 只在用户/父级写明要四层链路时启用层级约束，普通 root 仍可直接创建 worker。
-def _goal_requires_four_layer_chain(goal: str) -> bool:
-    lowered = str(goal or "").lower()
-    return any(token in lowered for token in ("4 层", "4层", "四层", "孙孙", "great-grandchild", "root ->", "depth=3"))
 
 
 # LLM: _child_write_root_drift_reason blocks model-invented sibling output paths before child runs exist.

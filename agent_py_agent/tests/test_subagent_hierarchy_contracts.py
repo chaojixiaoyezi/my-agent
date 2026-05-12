@@ -101,9 +101,9 @@ def test_hierarchy_schedule_preserves_forbidden_file_contract_when_child_goal_su
         assert f"- {filename}" in child.goal
 
 
-# LLM: R44 used the natural no-space Chinese form "4层", so inheritance must not rely on "4 层" only.
-# 函数用途: 父级写 4层/depth=3/小傻妞命名规则时，下级必须继续携带，且深度 1 不能直接建 leaf。
-def test_hierarchy_schedule_preserves_no_space_four_layer_contract_and_blocks_leaf(tmp_path):
+# LLM: R70 showed schedule-time chain forcing over-constrained otherwise valid implementation children.
+# 函数用途: 父级写 4层/depth=3/小傻妞命名规则时，下级必须继续携带；调度阶段不再硬挡 worker/leaf，最终链路交给验收判断。
+def test_hierarchy_schedule_preserves_no_space_four_layer_contract_without_forcing_coord_chain(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
     child = _create_no_space_four_layer_child(manager, build)
@@ -112,7 +112,7 @@ def test_hierarchy_schedule_preserves_no_space_four_layer_contract_and_blocks_le
     assert "4层链路要求" in child.goal
     assert "depth=3" in child.goal
 
-    blocked = manager.schedule_child_runs(
+    result = manager.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=child.id,
             child_specs=[HierarchyChildSpec(goal="直接写完整页面", role="leaf_worker", agent_name="小小傻妞-页面编写员")],
@@ -120,8 +120,10 @@ def test_hierarchy_schedule_preserves_no_space_four_layer_contract_and_blocks_le
         )
     )
 
-    assert blocked.blocked is True
-    assert blocked.reason == "hierarchy_chain_requires_coordinator_until_depth_3"
+    assert result.blocked is False
+    leaf = manager.load(result.created_run_ids[0])
+    assert "4层链路要求" in leaf.goal
+    assert "小小小傻妞-*" in leaf.goal
 
 
 # LLM: _create_no_space_four_layer_child keeps the no-space hierarchy regression focused on assertions.
@@ -213,7 +215,7 @@ def test_hierarchy_schedule_blocks_leaf_before_explicit_four_layer_chain_reaches
     )
     child = manager.load(child_result.created_run_ids[0])
 
-    blocked = manager.schedule_child_runs(
+    result = manager.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=child.id,
             child_specs=[HierarchyChildSpec(goal="直接写页面", role="worker", agent_name="page-worker")],
@@ -221,9 +223,8 @@ def test_hierarchy_schedule_blocks_leaf_before_explicit_four_layer_chain_reaches
         )
     )
 
-    assert blocked.blocked is True
-    assert blocked.reason == "hierarchy_chain_requires_coordinator_until_depth_3"
-    assert manager.load(child.id).child_ids == []
+    assert result.blocked is False
+    assert manager.load(child.id).child_ids == result.created_run_ids
 
 
 # LLM: Coordinator names can include writer/domain words without becoming leaf workers.
