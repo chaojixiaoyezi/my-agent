@@ -4245,6 +4245,10 @@ This document is append-only. Record every real subagent E2E issue found during 
   - `test_file_contract_treats_markdown_forbidden_heading_as_negative_scope`
   - `test_file_contract_ignores_internal_state_file_references_without_deliverable_label`
   - `test_explicit_coordinator_seed_repairs_wrong_lineage_summary_from_raw_prompt`
+- R68 precheck:
+  - A short clean rerun immediately showed another internal-ref wording: `必须按真实 task.json 阻塞汇报`.
+  - The positive deliverable detector now requires an actual delivery verb such as `交付` / `创建` / `写入` / `包含`; plain `必须按真实 task.json 汇报` is treated as a state reference, not a required artifact.
+  - The R68 prompt now extracts only the 10 user product files as `required_files`.
 
 ### Finding 212: Inherited QA Goal Over-Bound Intermediate Coordinators
 
