@@ -20,10 +20,18 @@ from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
 
 
 # LLM: _agent_with_current_run builds the minimal facade CapabilityRequestTool needs.
-# 函数用途: 创建真实 SubAgentManager 和当前 run_id，避免测试依赖完整模型后端。
+# 函数用途: 创建真实 SubAgentManager 和非 root 当前 run_id，避免测试依赖完整模型后端。
 def _agent_with_current_run(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
-    task = manager.create_run(goal="need controlled exec", thought="ask parent", plan=["request"])
+    parent = manager.create_run(goal="root", thought="decide", plan=["delegate"])
+    task = manager.create_run(
+        goal="need controlled exec",
+        thought="ask parent",
+        plan=["request"],
+        parent_id=parent.id,
+        root_id=parent.id,
+        depth=1,
+    )
     return SimpleNamespace(subagents=manager, _current_subagent_run_id=task.id), manager, task
 
 
@@ -78,6 +86,26 @@ def test_capability_request_tool_blocks_cross_run_writes(tmp_path):
     assert result.ok is False
     assert "只能为当前 runner" in result.output
     assert manager.load(other.id).capability_requests == []
+
+
+# LLM: test_capability_request_tool_blocks_root_run_requests prevents root from waiting on a parent.
+# 函数用途: root 没有上级，不能写 OPEN capability_request 把自己卡住；root 策略以后单独实现。
+def test_capability_request_tool_blocks_root_run_requests(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    root = manager.create_run(goal="root owns decisions", thought="decide", plan=["delegate"])
+    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id=root.id)
+
+    result = CapabilityRequestTool(agent).execute(
+        {
+            "problem": "root 想删除任务目录里的临时文件。",
+            "needed_capability": "delete_file",
+            "requested_tools": ["delete_file"],
+        }
+    )
+
+    assert result.ok is False
+    assert "root run 不走 capability_request" in result.output
+    assert manager.load(root.id).capability_requests == []
 
 
 # LLM: test_capability_request_tool_is_registered_for_simple_agent proves runners can see the tool.

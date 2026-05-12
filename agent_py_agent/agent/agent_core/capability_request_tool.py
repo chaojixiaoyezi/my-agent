@@ -97,10 +97,28 @@ def _capability_request_input(agent: object, params: dict[str, object]) -> Capab
     run_id = explicit_run_id or current_run_id
     if not run_id:
         return _capability_error("缺少 run_id；runner 内会自动使用当前 run id。")
+    if _is_root_run(agent, run_id):
+        return _capability_error("root run 不走 capability_request；root 当前不应缺能力，遇到安全红线应记录为策略阻止或等待未来 root policy。")
     problem = str(normalized.get("problem") or "").strip()
     if not problem:
         return _capability_error("缺少 problem；必须说明当前被什么能力缺口阻塞。")
     return CapabilityRequestToolInput(run_id=run_id, params=_record_params(normalized, problem))
+
+
+# LLM: _is_root_run prevents top-level orchestrators from waiting on nonexistent parents.
+# 函数用途: 判断当前 run 是否为 root；root 不写 capability_request，避免自己卡在等待上级授权。
+def _is_root_run(agent: object, run_id: str) -> bool:
+    manager = getattr(agent, "subagents", None)
+    if manager is None or not hasattr(manager, "load"):
+        return False
+    try:
+        task = manager.load(run_id)
+    except FileNotFoundError:
+        return False
+    parent_id = str(getattr(task, "parent_id", "") or "").strip()
+    root_id = str(getattr(task, "root_id", "") or "").strip()
+    depth = int(getattr(task, "depth", 0) or 0)
+    return not parent_id and (not root_id or root_id == run_id or depth == 0)
 
 
 # LLM: _record_params converts a normalized tool payload into the lifecycle request bundle.
