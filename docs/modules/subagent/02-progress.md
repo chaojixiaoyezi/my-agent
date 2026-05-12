@@ -864,3 +864,11 @@
 - 已修正：duplicate-domain 去重过滤 `run/id/ref/refs/qa` 等结构词，避免自动 QA child 因共享父级 ref 被误判成同域重复。
 - 已补测试：长内容恢复、provider timeout、QA 自动补派、QA 去重和原有角色覆盖验收 focused tests 已通过。
 - 下一步：重新跑干净真实 E2E，继续用购物网站作为复杂载荷，验证 root-only 下是否能真实创建并完成 tester / bug_finder / acceptor，而不是只在最终验收阶段发现缺席。
+
+## 2026-05-12 R62 follow-up: scoped filesystem bundles and descendant health
+- 中文说明：R62 真实 E2E 证明 QA 自动补派已经能触发，四层链路也能写出 10 个购物网站文件；但同时发现两个关键问题：读/search 工具没吃 `filesystem.path` bundle，父级在 QA 后代仍未完成/失败时仍可能 `DONE/VERIFIED`。
+- 已修正：文件读取工具现在同时接受顶层参数和 `filesystem.*` bundle 参数；`search_text` 不会因为模型按 bundle 格式传 path 就退回全工作区搜索。
+- 已修正：新增 `descendant_health` 父级验收门。父任务有真实 `child_ids` 时，会沿后代 `task.json` 有界扫描；只要后代仍 `PLANNING`、未验收、失败、阻塞或缺失，父级就会 P0 拒绝验收。
+- 已记录：R62 还暴露 root 误把已有但 `PLANNING` 的 QA child 当成缺失而重复创建 QA、长内容写入仍会多次自救、外层 CLI 观察仍可能沉默等待。这些保留到下一轮真实 E2E 和 closeout/watchdog 优化。
+- 已补测试：`test_search_text_accepts_filesystem_bundle_path`、`test_parent_with_unfinished_descendant_blocks_acceptance`、`test_parent_with_verified_descendants_passes_descendant_health`，并回归 filesystem / acceptance / QA scheduler focused tests。
+- 下一步：重新跑干净 R63；预期任何 QA 后代未健康收口时 root 不能假绿，scoped search 只能搜 build 目录，最终 closeout 要尽量从 persisted task facts 汇报而不是沉默等待。

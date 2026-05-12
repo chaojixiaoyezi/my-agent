@@ -12,7 +12,10 @@ from ._filesystem_helpers import (
     _MAX_SEARCH_LINE_CHARS,
     _MAX_SEARCH_QUERY_CHARS,
     _bool_param,
+    _bundled_filesystem_param,
     _int_param,
+    _is_under_any_root,
+    _normalized_workspace_roots,
     _optional_path,
     _required_path,
     _text_param,
@@ -131,8 +134,8 @@ class ListFilesTool(FileSystemTool):
     # 函数用途: 执行 ListFilesTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
-            raw_path = _optional_path(params.get("path"), default=".")
-            recursive = _bool_param(params.get("recursive"), default=False)
+            raw_path = _optional_path(_bundled_filesystem_param(params, "path", "."), default=".")
+            recursive = _bool_param(_bundled_filesystem_param(params, "recursive", False), default=False)
             target = self.resolve_path(raw_path)
         except ValueError as exc:
             return ToolExecutionResult("list_files", False, str(exc))
@@ -193,7 +196,7 @@ class ReadFileTool(FileSystemTool):
     # 函数用途: 执行 ReadFileTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
-            raw_path = _required_path(params.get("path"))
+            raw_path = _required_path(_bundled_filesystem_param(params, "path"))
             target = self.resolve_path(raw_path)
         except ValueError as exc:
             return ToolExecutionResult("read_file", False, str(exc))
@@ -211,8 +214,13 @@ class ReadFileTool(FileSystemTool):
             return ToolExecutionResult("read_file", False, "文件不是有效 UTF-8 文本，无法读取。")
         lines = content.splitlines()
         try:
-            start_line = _int_param(params.get("start_line"), name="start_line", default=1, min_value=1)
-            end_line = _int_param(params.get("end_line"), name="end_line", default=max(len(lines), 1), min_value=1)
+            start_line = _int_param(_bundled_filesystem_param(params, "start_line"), name="start_line", default=1, min_value=1)
+            end_line = _int_param(
+                _bundled_filesystem_param(params, "end_line"),
+                name="end_line",
+                default=max(len(lines), 1),
+                min_value=1,
+            )
         except ValueError as exc:
             return ToolExecutionResult("read_file", False, str(exc))
         if end_line < start_line:
@@ -264,8 +272,13 @@ class SearchTextTool(FileSystemTool):
     # 函数用途: 执行 SearchTextTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
-            query = _text_param(params.get("query"), name="query", max_chars=_MAX_SEARCH_QUERY_CHARS, strip=True)
-            raw_path = _optional_path(params.get("path"), default=".")
+            query = _text_param(
+                _bundled_filesystem_param(params, "query"),
+                name="query",
+                max_chars=_MAX_SEARCH_QUERY_CHARS,
+                strip=True,
+            )
+            raw_path = _optional_path(_bundled_filesystem_param(params, "path", "."), default=".")
             target = self.resolve_path(raw_path)
         except ValueError as exc:
             return ToolExecutionResult("search_text", False, str(exc))
@@ -337,26 +350,3 @@ class SearchTextTool(FileSystemTool):
     # 函数用途: 完成 工具系统 中的 item_relative_path 步骤，并保持调用方依赖的数据形状。
     def _item_relative_path(self, item: Path, safe_item: Path) -> str:
         return self.display_path(safe_item if safe_item.is_absolute() else item)
-
-
-# LLM: _normalized_workspace_roots 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 解析并去重工作区根目录，保留第一个主工作区。
-def _normalized_workspace_roots(primary: Path, roots: list[Path] | None) -> list[Path]:
-    resolved: list[Path] = []
-    for raw in [primary, *(roots or [])]:
-        path = Path(raw).resolve()
-        if path not in resolved:
-            resolved.append(path)
-    return resolved
-
-
-# LLM: _is_under_any_root 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 判断 is_under_any_root 是否满足安全或状态条件。
-def _is_under_any_root(path: Path, roots: list[Path]) -> bool:
-    for root in roots:
-        try:
-            path.relative_to(root)
-            return True
-        except ValueError:
-            continue
-    return False

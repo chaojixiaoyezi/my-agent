@@ -18,6 +18,7 @@ from ..execution_report import TestExecutionReport, load_test_execution_report
 from ..reports import AcceptanceReviewFinding
 from .acceptance_artifacts import artifact_exists
 from .acceptance_controlled_exec_findings import controlled_exec_contract_finding
+from .acceptance_descendant_health import descendant_health_finding
 from .acceptance_evidence_findings import build_evidence_findings
 from .acceptance_role_coverage import required_role_coverage_finding
 
@@ -116,12 +117,13 @@ class SubAgentAcceptanceFindingService:
         ))
         return findings
 
-    # LLM: _findings_output_content 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-    # 函数用途: 读取或查询findingsoutput内容需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
+    # LLM: _findings_output_content keeps output, child-spawn, descendant-health and role-coverage gates together.
+    # 函数用途: 汇总 output.json、真实 child、所有后代健康状态、QA 角色覆盖和测试结果，决定父级能否被验收。
     def _findings_output_content(self, task: SubAgentTask, output: dict, created_at: float) -> list[AcceptanceReviewFinding]:
         findings: list[AcceptanceReviewFinding] = []
         findings.append(_pending_structured_status_finding(task, output, created_at))
         findings.append(_required_child_spawn_finding(task, created_at))
+        findings.append(descendant_health_finding(task, created_at))
         findings.append(required_role_coverage_finding(task, created_at))
         findings.append(controlled_exec_contract_finding(task, output, created_at))
         blockers = [item for item in _string_list(output.get("blockers", [])) if item.strip()]
