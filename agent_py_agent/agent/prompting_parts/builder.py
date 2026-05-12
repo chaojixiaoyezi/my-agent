@@ -45,6 +45,7 @@ class PromptBuildRequest:
     inject: list[str] | None = None
     prompt_files: list[str] | None = None
     tools: ToolSections | None = None
+    system_prompt_override: str | None = None
 
 
 # LLM: PromptBuilder is a Prompt 构造 boundary object; coordinate field or method changes with callers, docs, and focused tests.
@@ -86,6 +87,7 @@ class PromptBuilder:
         inject: list[str] | None = None,
         prompt_files: list[str] | None = None,
         tools: ToolSections | None = None,
+        system_prompt_override: str | None = None,
     ) -> str:
         """拼出完整 prompt。
 
@@ -93,8 +95,16 @@ class PromptBuilder:
         - `tool_catalog_section`：常驻的工具目录，告诉模型'你手里有什么工具'
         - `tool_recommendations_section`：按当前任务筛出来的少量候选详情，告诉模型'这次大概率该用谁'"""
 
-        request = request or PromptBuildRequest(user_prompt, memories or [], inject, prompt_files, tools)
+        request = request or PromptBuildRequest(
+            user_prompt,
+            memories or [],
+            inject,
+            prompt_files,
+            tools,
+            system_prompt_override,
+        )
         _tools = request.tools or ToolSections()
+        system_prompt = request.system_prompt_override or self.config.system_prompt
         memory_text = "\n".join(
             f"- [{m.kind}] {m.role}: {m.content}" for m in request.memories
         ) or "（无相关记忆）"
@@ -104,7 +114,7 @@ class PromptBuilder:
         default_tools = "# Tools\n（当前未启用工具）"
         default_recommendations = "# Recommended Tools\n（当前无候选工具详情）"
         return (
-            f"# System\n{self.config.system_prompt}\n\n"
+            f"# System\n{system_prompt}\n\n"
             f"# Related Memory\n{memory_text}\n\n"
             f"# Dynamic Prompt Files\n{dynamic or '（无）'}\n\n"
             f"# Runtime Injection\n{injected or '（无）'}\n\n"

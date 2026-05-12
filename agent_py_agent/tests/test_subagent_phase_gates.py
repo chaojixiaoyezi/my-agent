@@ -31,6 +31,9 @@ def _runner_task(run_id: str, role: str, agent_name: str = "", goal: str = ""):
         capability_gaps=[],
         failure_type="",
         runner_attempts=0,
+        workflow_parent_run_id="",
+        workflow_phase_id="",
+        workflow_depends_on=[],
     )
 
 
@@ -94,6 +97,32 @@ def test_runner_phase_ignores_inherited_qa_contract_for_plain_coordinator():
     selected = _dispatch_runner_candidates(tasks, max_runners=4)
 
     assert [task.id for task in selected] == ["coord"]
+
+
+# LLM: workflow phase dependencies must be respected before broad role ordering.
+# 函数用途: producer/critic/repair 同时存在时，只能先跑无依赖的 produce，不能让 repair 空转抢跑。
+def test_runner_candidates_wait_for_workflow_depends_on_refs():
+    produce = _runner_task("produce", "worker", "小小傻妞-produce")
+    critic = _runner_task("critic", "review", "小小傻妞-critic")
+    repair = _runner_task("repair", "worker", "小小傻妞-repair")
+    for task, phase, deps in [
+        (produce, "produce", []),
+        (critic, "critic", ["produce"]),
+        (repair, "repair", ["critic"]),
+    ]:
+        task.workflow_parent_run_id = "parent-workflow"
+        task.workflow_phase_id = phase
+        task.workflow_depends_on = deps
+
+    selected = _dispatch_runner_candidates([repair, critic, produce], max_runners=4)
+
+    assert [task.id for task in selected] == ["produce"]
+
+    produce.status = "AWAITING_ACCEPTANCE"
+    produce.verification_status = "NEEDS_ACCEPTANCE"
+    selected = _dispatch_runner_candidates([repair, critic, produce], max_runners=4)
+
+    assert [task.id for task in selected] == ["critic"]
 
 
 # LLM: test_progress_payload_surfaces_blocked_children covers parent recovery after a child fails.

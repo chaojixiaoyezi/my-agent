@@ -97,6 +97,16 @@ class TestBuildBasic:
         assert "# System" in result
         assert config.system_prompt in result
 
+    def test_build_uses_system_prompt_override(self, tmp_path):
+        """LLM: subagent runner turns can replace parent/root system identity without mutating config."""
+        config = AgentConfig(system_prompt="root system prompt")
+        builder = PromptBuilder(config, tmp_path)
+
+        result = builder.build("hello", [], system_prompt_override="subagent system prompt")
+
+        assert "# System\nsubagent system prompt" in result
+        assert "root system prompt" not in result
+
     def test_build_no_memories(self, tmp_path):
         config = AgentConfig()
         builder = PromptBuilder(config, tmp_path)

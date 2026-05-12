@@ -63,6 +63,7 @@ class _RunCompatibilityFields:
     run_id: str | None = None
     task_id: str | None = None
     task_attributes: dict | None = None
+    system_prompt_override: str | None = None
     source: str | None = None
     recovery_snapshot: bool | None = None
     resume_context: bool | None = None
@@ -150,44 +151,40 @@ class SimpleAgentRuntimeMixin:
         user_prompt: str,
         *,
         params: RunParams = None,
-        inject: list[str] | None = None,
-        prompt_files: list[str] | None = None,
-        save: bool | None = None,
-        allowed_tools: list[str] | None = None,
-        granted_capabilities: list[str] | None = None,
-        write_boundary: dict[str, object] | None = None,
-        request_id: str | None = None,
-        run_id: str | None = None,
-        task_id: str | None = None,
-        task_attributes: dict | None = None,
-        source: str | None = None,
-        recovery_snapshot: bool | None = None,
-        resume_context: bool | None = None,
-        recovery_task_refs: list[str] | None = None,
-        recovery_content_paths: list[str] | None = None,
+        inject: list[str] | None = None, prompt_files: list[str] | None = None, save: bool | None = None,
+        allowed_tools: list[str] | None = None, granted_capabilities: list[str] | None = None,
+        write_boundary: dict[str, object] | None = None, request_id: str | None = None,
+        run_id: str | None = None, task_id: str | None = None, task_attributes: dict | None = None,
+        system_prompt_override: str | None = None, source: str | None = None,
+        recovery_snapshot: bool | None = None, resume_context: bool | None = None,
+        recovery_task_refs: list[str] | None = None, recovery_content_paths: list[str] | None = None,
         recovery_next_actions: list[str] | None = None,
         on_chunk: object = None,
     ):
         params = _run_params_from_compat(
             params,
             _RunCompatibilityFields(
-                inject, prompt_files, save, allowed_tools, granted_capabilities, write_boundary, request_id, run_id,
-                task_id, task_attributes, source, recovery_snapshot, resume_context, recovery_task_refs,
-                recovery_content_paths, recovery_next_actions, on_chunk
+                inject=inject,
+                prompt_files=prompt_files,
+                save=save,
+                allowed_tools=allowed_tools,
+                granted_capabilities=granted_capabilities,
+                write_boundary=write_boundary,
+                request_id=request_id,
+                run_id=run_id,
+                task_id=task_id,
+                task_attributes=task_attributes,
+                system_prompt_override=system_prompt_override,
+                source=source,
+                recovery_snapshot=recovery_snapshot,
+                resume_context=resume_context,
+                recovery_task_refs=recovery_task_refs,
+                recovery_content_paths=recovery_content_paths,
+                recovery_next_actions=recovery_next_actions,
+                on_chunk=on_chunk,
             ),
         )
-        with _current_prompt_scope(self, user_prompt):
-            prepared = _prepare_runtime_context(self, user_prompt, params.inject, params.resume_context)
-            loop_result = _execute_runtime_loop(
-                self,
-                _runtime_loop_params(
-                    user_prompt,
-                    prepared,
-                    params,
-                ),
-            )
-            ctx = self._build_finalize_context(_finalize_params(user_prompt, prepared, loop_result, params))
-            return self._get_services().finalization.finalize(ctx)
+        return _run_with_params(self, user_prompt, params)
 
     # LLM: _build_finalize_context 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 构建finalize上下文所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
@@ -245,6 +242,7 @@ def _run_params_from_compat(params: RunParams, fields: _RunCompatibilityFields) 
         run_id=fields.run_id,
         task_id=fields.task_id,
         task_attributes=fields.task_attributes,
+        system_prompt_override=fields.system_prompt_override,
         source=fields.source,
         recovery_snapshot=fields.recovery_snapshot,
         resume_context=fields.resume_context,
@@ -253,3 +251,16 @@ def _run_params_from_compat(params: RunParams, fields: _RunCompatibilityFields) 
         recovery_next_actions=fields.recovery_next_actions,
         on_chunk=fields.on_chunk,
     )
+
+
+# LLM: _run_with_params keeps the public run() compatibility shim under code-size limits.
+# 函数用途: 执行已归一化的 RunParams，串接准备上下文、工具循环和 finalization。
+def _run_with_params(agent, user_prompt: str, params: RunParams):
+    with _current_prompt_scope(agent, user_prompt):
+        prepared = _prepare_runtime_context(agent, user_prompt, params.inject, params.resume_context)
+        loop_result = _execute_runtime_loop(
+            agent,
+            _runtime_loop_params(user_prompt, prepared, params),
+        )
+        ctx = agent._build_finalize_context(_finalize_params(user_prompt, prepared, loop_result, params))
+        return agent._get_services().finalization.finalize(ctx)

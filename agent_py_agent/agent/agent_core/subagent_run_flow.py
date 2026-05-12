@@ -119,6 +119,8 @@ def _run_and_finalize_subagent(agent, bundle: SubagentModelTurnBundle):
 # 函数用途: 推进子代理模型turn的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _run_subagent_model_turn(agent, prompt: str, context):
     # LLM: 单次模型调用与尝试次数、通道探测记账分离，便于独立重试。
+    from .runner_identity_prompt import subagent_runner_system_prompt
+
     return agent.run(
         prompt,
         save=False,
@@ -126,6 +128,7 @@ def _run_subagent_model_turn(agent, prompt: str, context):
         write_boundary=context.write_boundary,
         run_id=context.run_id,
         task_id=context.root_id or context.run_id,
+        system_prompt_override=subagent_runner_system_prompt(context),
         source="subagent_run_model_turn",
         recovery_snapshot=False,
     )

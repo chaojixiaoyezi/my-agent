@@ -23,6 +23,7 @@ def test_create_subagents_tool_spec_uses_template_index_not_full_prompt():
     assert "模板位置" in role_detail
     assert "worker" in role_detail
     assert "你是执行子代理" not in role_detail
+    assert "不同工作切片不要用 count" in spec.parameter_details["count"]
 
 class TestSubagentBoardToolExecute:
     """测试 SubagentBoardTool.execute() 方法。"""

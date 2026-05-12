@@ -10,6 +10,7 @@ import json
 import tempfile
 from pathlib import Path
 
+from agent_py_agent.agent.backend import BaseBackend, ModelResponse
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagent import parse_subagent_runner_output
@@ -23,6 +24,40 @@ from .backends import (
     RepairingSubagentBackend,
     StructuredSubagentBackend,
 )
+
+
+class PromptCaptureAcceptedBackend(BaseBackend):
+    """测试用后端：记录真实 prompt，返回可验收的短结果。"""
+
+    name = "prompt_capture_accepted_backend"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.prompts.append(prompt)
+        return ModelResponse(
+            text=(
+                "[SUBAGENT_RESULT]\n"
+                "{\n"
+                '  "status": "AWAITING_ACCEPTANCE",\n'
+                '  "summary": "done",\n'
+                '  "used_tools": [],\n'
+                '  "used_skills": [],\n'
+                '  "evidence_packets": [{"id":"evpkt-prompt","claim":"done","checked_scope":"prompt","evidence_refs":["runner_result.json"],"artifact_refs":["output.json"],"confidence":0.9}],\n'
+                '  "capability_requests": [],\n'
+                '  "artifacts": [],\n'
+                '  "tests": [],\n'
+                '  "patches": [],\n'
+                '  "lessons": [],\n'
+                '  "next_actions": [],\n'
+                '  "blocked_reason": "",\n'
+                '  "failure_type": ""\n'
+                "}\n"
+                "[/SUBAGENT_RESULT]"
+            ),
+            backend=self.name,
+        )
 
 
 def test_subagent_runner_dry_run_and_execute():
@@ -65,6 +100,34 @@ def test_subagent_runner_dry_run_and_execute():
         assert "write_file [filesystem]" not in prompt
         assert "echo 后端" in response
         _assert_subagent_recovery_snapshot(root, task.id, loaded.status_file)
+
+
+def test_subagent_runner_uses_child_system_prompt_not_parent_root_identity():
+    """LLM: 子代理模型回合必须隔离父级 system prompt，避免 child 误认自己是 root。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(
+            model_backend="echo",
+            subagent_workspace="subs",
+            system_prompt="你是 my-agent 的真实 E2E root 节点。",
+        )
+        agent = SimpleAgent(cfg, root)
+        backend = PromptCaptureAcceptedBackend()
+        agent.backend = backend
+        task = agent.subagents.create_run(
+            goal="写一个短报告",
+            thought="只需要返回结构化结果。",
+            plan=["执行", "等待验收"],
+            agent_name="小傻妞-report",
+            role="worker",
+        )
+
+        agent.run_subagent(task.id, dry_run=False, probe=False)
+
+        assert backend.prompts
+        assert "你是 my-agent 的真实 E2E root 节点" not in backend.prompts[0]
+        assert "你是 my-agent 的子代理 runner" in backend.prompts[0]
+        assert "小傻妞-report" in backend.prompts[0]
 
 
 def _assert_subagent_recovery_snapshot(root: Path, run_id: str, status_file: str) -> None:

@@ -32,6 +32,10 @@ from .tool_loop_recovery import (
     runtime_run_id,
     without_tool_call_after_limit,
 )
+from .tool_loop_response_decision import (
+    ToolLoopResponseDecisionRequest,
+    tool_loop_response_decision,
+)
 from .tool_model_generation import ModelGenerateParams, generate_model_response
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 from .tool_round_execution import (
@@ -50,6 +54,7 @@ def _build_prompt(agent, params: ToolLoopExecuteParams) -> str:
         params.memories,
         inject=params.runtime_injections,
         prompt_files=params.prompt_files,
+        system_prompt_override=params.system_prompt_override,
         tools=ToolSections(
             tool_catalog_section=params.tool_catalog_section,
             tool_recommendations_section=params.tool_recommendations_section,
@@ -142,16 +147,21 @@ class ToolLoopService:
         final_prompt = ""
         final_response = None
         tool_rounds = params.tool_rounds
+        reserved_record_repairs = 0
 
         while True:
             final_prompt, response = _next_model_response(self._agent, params, tool_rounds)
             final_response = response
-
-            if not self._agent.config.enable_tools:
-                break
-
-            calls = self._agent.tools.parse_tool_calls(response.text)
-            if not calls:
+            decision = tool_loop_response_decision(
+                ToolLoopResponseDecisionRequest(
+                    self._agent, params, response, reserved_record_repairs
+                )
+            )
+            reserved_record_repairs = decision.reserved_record_repairs
+            if decision.action == "continue":
+                continue
+            if decision.action == "break":
+                final_response = decision.response
                 break
 
             if self._tool_round_limit_reached(params, tool_rounds):
@@ -166,8 +176,8 @@ class ToolLoopService:
                     self._agent,
                     params,
                     tool_rounds,
-                    response,
-                    calls,
+                    decision.response,
+                    decision.calls,
                     self._execute_one_tool_call,
                     self._record_tool_call,
                 )

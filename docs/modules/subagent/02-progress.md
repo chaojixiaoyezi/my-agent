@@ -986,3 +986,22 @@
 - 额外观察：外置 artifact 的 scoped id 提示开始生效，模型已能用 `subagent-...:2-1` 这类 scoped call id 读取摘要；委托期 body-read guard 也成功拦截了父级在 acceptor 完成前读正文。
 - 已补测试：`test_hierarchy_schedule_advances_from_parent_lineage_prefix`、`test_qa_role_tasks_do_not_inherit_their_own_required_role_contract`、`test_dispatch_payload_tells_runner_to_continue_unfinished_children`。
 - 下一步：干净启动 R79。预期 QA 三角色能被父级验收闭环，`AWAITING_ACCEPTANCE/NEEDS_ACCEPTANCE` 不再被误读成“同名 QA 缺失”，runner-context dispatch 不再凭 `workflow_mode=auto` 生成额外 generic workers。
+
+## 2026-05-12 R84: runner identity isolation and workflow dependency gate
+- 中文说明：R84 确认 workflow child 命名、父级读 metadata 和工具伪造防线已经生效，但真实 debug trace 发现子代理 runner 仍继承 root 的 system prompt，auto workflow 的 repair phase 也可能抢在 critic 前面跑。
+- 已确认：root 用多次 `create_subagents count=1` 创建 4 个 `小傻妞-worker`，没有再出现 `count=2` 同目标重复；workflow phase child 名字已按 lineage 变成 `小小傻妞-produce/critic/repair`；购物站 `index.html/styles.css/app.js` 真实落盘。
+- 已修正：新增 `system_prompt_override` 运行参数链路，`PromptBuilder` 可按单轮覆盖 system prompt；子代理 runner 通过 `runner_identity_prompt.py` 拿到专属身份提示，不再继承 root / 主代理全局身份。
+- 已修正：`runner_dispatch.py` 把 workflow `workflow_depends_on` 判断抽到 `runner_workflow_dependencies.py`，在角色阶段排序前先按 refs 检查依赖；`repair` 必须等对应 upstream phase 到等待验收或已验收后才可进入候选。
+- 已修正：为了保持 code-size 清零，runner 身份 prompt 和 workflow dependency gate 都拆成小模块；`runtime_mixin.run` 公开参数保持兼容，但压缩签名避免函数接近软阈值。
+- 已补测试：`test_build_uses_system_prompt_override`、`test_subagent_runner_uses_child_system_prompt_not_parent_root_identity`、`test_runner_candidates_wait_for_workflow_depends_on_refs`，并回归 tool-loop、body-read guard、orchestration tools 和 workflow child naming focused tests。
+- 下一步：干净启动 R85，配置里把 `max_tool_rounds` 提到 20-25，验证子代理身份 prompt、workflow 依赖顺序和长 CSS/JS 分块恢复都能在真实 root-only 测试里成立。
+
+## 2026-05-12 R85: leaf artifact-read capability gap
+- 中文说明：R85 用更高 `max_tool_rounds` 复测真实购物站，确认子代理身份 prompt 已隔离，长 JS 也能从超长 `write_file` 恢复到小块 `append_file`；同时发现 leaf writer 拿不到 `read_artifact`，所以遇到外置工具输出包装文件时会反复用 `read_file` 读 JSON 包装。
+- 已确认：root 只创建 depth=1 `小傻妞-shop-coordinator`，后续由它创建 `小小傻妞-shop-html/css/js/data-worker`；child runner prompt 已显示“你是 my-agent 的子代理 runner”，不再继承 root 身份。
+- 新问题根因：内置 worker 模板默认包含 `read_artifact`，但层级调度的 `_DEFAULT_LEAF_CODING_TOOLS` 又单独维护了一份 leaf 写产物工具包，漏掉了 `read_artifact`。真实模型收到“请改用 read_artifact”的工具提示后，实际 allowed tools 里没有这个工具，于是进入重复 `read_file` 的无效恢复。
+- 已修正：`hierarchy_tool_policy.py` 的 leaf 写产物默认工具包补齐 `read_artifact`；自动推断 leaf 工具和模型显式传 `write/read/list` 工具两条路径都会带上它。
+- 已补测试：`test_hierarchy_schedule_infers_leaf_write_tools_from_explicit_deliverables` 和 `test_hierarchy_schedule_normalizes_model_write_alias_for_leaf_tasks` 现在都断言 leaf writer 带 `read_artifact`；修复前这两个断言会失败，修复后通过。
+- R86 短链路已复测：root 创建 `小傻妞-r86-coordinator`，coordinator 创建 `小小傻妞-r86-leaf-worker` 和一个 acceptor；leaf 的 `execution_context.json` / `task.json` 里真实出现 `read_artifact`，并写出 `/Users/example/my-终端应用/deliverables/stage7_r86_artifact_tool/build/proof.txt`，内容包含 `r86-read-artifact-tool-ok`。
+- R86 剩余范围：这轮是短链路确认，不是完整购物站，也没有制造大外置 read artifact 给 leaf 必须读取；下一轮长 E2E 要继续观察 leaf 遇到 wrapper JSON 时是否会改用 scoped `read_artifact`。
+- 下一步：回到完整购物站链路，重点压 `root -> coordinator -> leaf -> QA/acceptor` 的完整收口，并继续减少父级读正文和大文件整块工具参数。

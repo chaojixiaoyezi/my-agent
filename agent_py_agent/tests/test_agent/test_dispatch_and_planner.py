@@ -548,6 +548,7 @@ def test_subagent_dispatch_workflow_auto_mode_spawns_worker_children():
             goal="Fix API bug and add regression tests",
             thought="让 workflow 自动派出 implementation/tests worker。",
             plan=["等待自动派工"],
+            agent_name="小傻妞-api-parent",
         )
 
         router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
@@ -568,4 +569,5 @@ def test_subagent_dispatch_workflow_auto_mode_spawns_worker_children():
         assert len(children) == 3
         assert {child.workflow_phase_id for child in children} == {"design_contract", "implementation", "tests"}
         assert all(child.parent_id == loaded.id for child in children)
+        assert all(child.agent_name.startswith("小小傻妞-") for child in children)
         assert any(child.workflow_depends_on == ["design_contract"] for child in children if child.workflow_phase_id in {"implementation", "tests"})

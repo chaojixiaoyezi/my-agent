@@ -4624,3 +4624,247 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Focused role-template / prompt-contract tests passed locally.
 - Next:
   - Run clean R81 quickly, with a 2-3 minute first checkpoint: root should create children that keep lineage names but receive coordinator/worker/tester template tools. If build artifacts do not appear or children block again, stop fast, record, and patch instead of waiting a long time.
+
+### Result: R81 Confirmed Role Resolution, Exposed Fake Tool Transcript Spoofing
+
+- Discovered at: 2026-05-12 during R81 clean shopping-site root-only run.
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Prompt and config:
+    - `/Users/example/my-终端应用/stage7_shop_complete_20260512_r81_prompt.md`
+    - `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r81.yaml`
+  - Run log:
+    - `/Users/example/my-终端应用/stage7_shop_complete_20260512_r81_run.log`
+  - The outer observer only started the root-level command and inspected filesystem facts after stopping the run.
+- Observed behavior:
+  - The good news: persisted child tasks with `role=child_coordinator` now received coordinator-capable tools such as `schedule_child_subagents`, `dispatch_subagents`, `subagent_board`, `subagent_message`, read tools, report write tools, and `capability_request`.
+  - The bad news: the model wrote fake `[tool-record]` / `[tool-output-record]` blocks into its own assistant text and invented run ids such as `child-1`, `child-2`, and `child-1-grandchild-1`.
+  - It also claimed shopping-site files existed and printed fake file contents, while a direct filesystem check showed the build directory was empty.
+  - Actual persisted `data/subagents/*/task.json` only showed two `PLANNING` child coordinator tasks; no real grandchildren/leaves had written product files.
+- 中文解释：
+  - R80 的“模板没套上，孩子没工具”已经修住了。
+  - R81 新暴露的问题更危险：模型不是没工具，而是在回复里自己假装工具已经返回成功，还编了假的 run id 和假的文件内容。
+  - 这类内容不能靠“再提醒模型”解决，系统必须把 `[tool-record]` / `[tool-output-record]` 当成系统保留标记。只有工具循环真实执行完工具后，系统才能写这些记录；模型自己写的一律不可信。
+- Root cause:
+  - `_tool_loop_service.py` used `[tool-record ...]` / `[tool-output-record ...]` as live prompt transcript markers, but the tool loop did not reject assistant responses that copied or fabricated those markers.
+  - When the model fabricated the same markers, later prompt context could keep referring to fake run ids or fake outputs as if they were real.
+  - The final answer path did not hard-block a spoof-only response that had no executable `[TOOL_CALL]`.
+- Fix:
+  - Added `tool_reserved_record_guard.py`.
+  - The tool loop now detects model-written reserved tool transcript markers.
+  - If the same response also contains real `[TOOL_CALL]` blocks, the system executes only those real tool calls and omits the fake transcript from the next live prompt.
+  - If the response contains reserved markers but no real tool calls, the system gives one correction turn.
+  - If the model repeats spoof-only reserved markers, the run returns a deterministic blocked message and does not treat the result as complete.
+- Borrowed lesson:
+  - 长期助手 keeps internal history in structured message roles: assistant messages carry `tool_calls`, and real tool results are appended as `role=tool` with `tool_call_id`; this means model prose is never the authority for whether a tool actually ran.
+  - 长期助手 also persists large tool results out of context and leaves a bounded preview plus path/ref, which matches our existing tool-output externalization direction.
+  - 通道运行时 has text sanitation for leaked tool tags and downgraded `[Tool Result ...]` text, and also marks some external events as untrusted. The useful part for my-agent is: if tool-looking syntax appears in assistant-visible prose, treat it as display/noise unless it came from the runtime tool channel.
+  - Our best-fit method is therefore: keep `[TOOL_CALL]` as the only model-authored request lane for the current text protocol; keep `[tool-record]` / `[tool-output-record]` as system-only runtime transcript markers; keep task/fs refs as the source of truth; and later move more of this toward structured tool-call objects when provider adapters are ready.
+- Verification:
+  - `test_tool_loop_ignores_model_written_reserved_tool_records_after_real_call`
+  - `test_tool_loop_repairs_spoof_only_reserved_tool_record_once`
+  - `test_tool_loop_blocks_repeated_spoof_only_reserved_tool_records`
+  - Focused tool-loop tests passed locally.
+- Remaining gap before R82:
+  - Streaming stdout could still show the model's fake text before the full response was validated, because chunks arrived before the tool loop inspected the complete response. The trusted product state was still the filesystem, task refs, and system-written tool records.
+  - R82 should rerun clean with the same root-only rule and stop early if the model again tries to spoof records.
+
+### Result: R82 Exposed Same-Turn Streaming Tool Transcript Spoofing
+
+- Discovered at: 2026-05-12 during R82 clean shopping-site root-only run.
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Prompt and config:
+    - `/Users/example/my-终端应用/stage7_shop_complete_20260512_r82_prompt.md`
+    - `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r82.yaml`
+  - Run log:
+    - `/Users/example/my-终端应用/stage7_shop_complete_20260512_r82_run.log`
+- Observed behavior:
+  - The model streamed a single long assistant response that contained a real `[TOOL_CALL]`, then immediately continued with fake `[tool-record]` / `[tool-output-record]` blocks, fake created run ids, and more fake tool calls.
+  - Because the text-protocol tool loop waited for the full model response before parsing, the fake transcript appeared in the stream before any tool execution could prove or reject it.
+  - After interrupting early, direct filesystem checks showed only two real `read_file` tool-output artifacts. No shopping-site build directory and no real subagent task files existed.
+- 中文解释：
+  - R81 修的是“完整回复结束后，别信模型自己写的工具结果”。
+  - R82 发现更早的问题：模型边说边演，一边吐真实工具调用，一边继续假装工具已经成功。
+  - 最优方向不是等它演完再检查，而是看到第一个完整工具调用闭合后，本轮模型输出就应该停在这里，系统马上执行真实工具；后面的自述、假回执、第二个工具调用都不进控制流。
+- Root cause:
+  - The text tool protocol allowed multiple tool-looking sections in one assistant response.
+  - `_tool_loop_service.py` parsed all complete `[TOOL_CALL]` blocks after generation finished, so post-boundary fake or extra calls could be executed in the same round.
+  - The streaming callback forwarded chunks as they arrived, so fake post-call text could become visible before the guard saw the complete response.
+- Borrowed lesson:
+  - 长期助手' structured message history treats model output as either assistant text or assistant tool-call objects, then appends real tool results separately as tool-role messages. A model cannot prove a tool result by writing prose.
+  - 通道运行时 sanitizes leaked tool tags and tool-result-looking text before it becomes assistant-visible text.
+  - Our current best-fit method, while keeping the text protocol, is a hard tool-call boundary: first complete tool call wins; later same-turn text is hidden and ignored. Long-term, provider adapters should move toward native structured tool calls where possible.
+- Fix:
+  - Added `tool_stream_boundary.py`.
+  - `generate_model_response()` now wraps streaming chunks with a boundary filter. After the first complete `[TOOL_CALL]...[/TOOL_CALL]` or `[SUBAGENT_CALL]...[/SUBAGENT_CALL]`, later chunks are not forwarded to the user.
+  - The returned `ModelResponse` is also cut at the same boundary before parsing, so only the first complete tool call can execute in that model turn.
+  - A short `[tool-system]` note is added to the next prompt explaining that post-boundary text was ignored.
+  - Missing closing-marker recovery is preserved: if there is no complete closing marker, the existing parser can still recover a complete JSON payload when safe.
+- Verification:
+  - `test_tool_loop_cuts_streaming_response_after_first_complete_tool_call`
+  - `test_tool_loop_ignores_model_written_reserved_tool_records_after_real_call`
+  - `test_tool_loop_repairs_spoof_only_reserved_tool_record_once`
+  - `test_tool_loop_blocks_repeated_spoof_only_reserved_tool_records`
+  - Focused tool-loop and parser-contract tests passed locally.
+- Next:
+  - Run clean R83. Expected behavior: root creates real tasks or executes one tool at a time; fake same-turn tool transcript text should not be displayed or executed. If the model still fabricates paths/run ids in ordinary prose, record that separately as a planner/truth-source issue rather than a tool-loop execution issue.
+
+### Result: R83 Confirmed Tool Boundary, Exposed Workflow Naming And Metadata Guard Gaps
+
+- Discovered at: 2026-05-12 during R83 clean shopping-site root-only run.
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Prompt and config:
+    - `/Users/example/my-终端应用/stage7_shop_complete_20260512_r83_prompt.md`
+    - `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r83.yaml`
+  - Run log:
+    - `/Users/example/my-终端应用/stage7_shop_complete_20260512_r83_run.log`
+- Observed behavior:
+  - The R82 tool-boundary fix held: streamed model turns did not execute post-boundary fake tool-output records, and real tool calls proceeded one turn at a time.
+  - Root created two real first-layer tasks and dispatched them.
+  - One runner wrote real files:
+    - `/Users/example/my-终端应用/deliverables/stage7_shop_complete_20260512_r83/build/index.html`
+    - `/Users/example/my-终端应用/deliverables/stage7_shop_complete_20260512_r83/build/data/products.json`
+  - Workflow auto-mode spawned workflow phase children under each worker, but those phase children copied the parent display name `小傻妞-worker` instead of advancing to `小小傻妞-*`.
+  - After workflow children existed, the parent runner's `read_file` checks on product files were correctly blocked by refs-only delegation guard, but reading its own task-local `output.json` was also blocked. That metadata read should be allowed.
+- 中文解释：
+  - 好消息：工具“边调用边伪造”这条大坑挡住了，产物文件也确实落盘了。
+  - 新问题有两个：自动 workflow 派出来的孙节点名字没升层级；另外 guard 太粗，把“读自己的 output.json 这种运行元数据”也当成“读业务正文”拦了。
+  - 这两个都不是靠提示词能稳定解决的，应该在底层统一修。
+- Fix:
+  - Workflow-created phase children now use the same hierarchy naming helper as manual scheduled children. A parent named `小傻妞-api-parent` will create workflow children named `小小傻妞-*`.
+  - Delegating body-read guard now treats task-local runtime metadata files such as `output.json` and `runner_result.json` as allowed metadata when they are under the active runner's own `task_dir`.
+  - Business deliverable body reads are still blocked until acceptor completion or explicit user override.
+- Verification:
+  - `test_subagent_dispatch_workflow_auto_mode_spawns_worker_children`
+  - `test_delegating_parent_can_read_own_task_output_metadata_before_acceptor_done`
+  - Full `test_orchestration_body_read_guard.py`
+  - Focused tool-loop/parser tests stayed green.
+- Remaining gap:
+  - Root's first `create_subagents count=2` gave both children the same broad goal, so one child duplicated structure work instead of getting the intended "styles/app.js" slice. This points to a planning/tool-contract gap: when `count>1`, either the model should use explicit child specs, or the tool should nudge/block ambiguous multi-count split for coding tasks.
+- Next:
+  - Run R84 after the fixes. Expected behavior: workflow children should be named `小小傻妞-*`, parent runners can read their own metadata, product-body reads remain guarded, and the next issue to tackle is the ambiguous `create_subagents count=2` split that produced duplicate worker scopes.
+
+### Result: R84 Confirmed Naming/Metadata Fixes, Exposed Runner Identity And Workflow Dependency Gaps
+
+- Discovered at: 2026-05-12 during R84 clean shopping-site root-only run.
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Prompt and config:
+    - `/Users/example/my-终端应用/stage7_shop_complete_20260512_r84_prompt.md`
+    - `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r84.yaml`
+  - Run log:
+    - `/Users/example/my-终端应用/stage7_shop_complete_20260512_r84_run.log`
+  - The outer observer only started/stopped the root command and inspected persisted facts; lower agents were created and run by the root/parent chain.
+- Observed behavior:
+  - Root created four first-level `小傻妞-worker` tasks through separate `create_subagents count=1` calls, so the previous ambiguous `count=2` duplicate-scope problem did not recur.
+  - Workflow children used the fixed lineage names: `小小傻妞-produce`, `小小傻妞-critic`, and `小小傻妞-repair`.
+  - Real product files were written:
+    - `/Users/example/my-终端应用/deliverables/stage7_shop_complete_20260512_r84/build/index.html`
+    - `/Users/example/my-终端应用/deliverables/stage7_shop_complete_20260512_r84/build/css/styles.css`
+    - `/Users/example/my-终端应用/deliverables/stage7_shop_complete_20260512_r84/build/js/app.js`
+  - Runner debug traces showed child runner prompts still started with the root test config system prompt: `你是 my-agent 的真实 E2E root 节点。`
+  - Workflow auto-mode created `produce / critic / repair` at the same time. Because `repair` is also a worker-like role, dispatch could run it before `critic` finished.
+  - One CSS writer hit `write_file.content` inline limit at 15853 chars while the test config allowed only `max_tool_rounds=8`, so it received the right recovery hint but ran out of tool turns before chunking with `append_file`.
+- 中文解释：
+  - 好的地方：名字升层、metadata guard、真实写文件都比 R83 稳了；root 也没有再一次性用 `count=2` 生成两个同目标 worker。
+  - 新问题有三个：孩子 runner 还穿着 root 的“身份外套”；自动 workflow 的 repair 可能抢在 critic 前面跑；真实大 CSS/JS 场景下 8 轮工具太紧，模型还没来得及按提示分块。
+- Root cause:
+  - `PromptBuilder` 只能读取全局 `config.system_prompt`，subagent runner 没有自己的 system prompt override，所以测试用 root 身份 prompt 被继承到下级 runner。
+  - `runner_dispatch.py` 只按角色阶段排序，没有先检查 workflow child 的 `workflow_depends_on` refs 是否已经完成。
+  - Long-content recovery exists, but E2E config used a tight round budget that made recovery evidence harder to observe.
+- Borrowed lesson:
+  - 长期助手 keeps subagents on independent iteration budgets and separates tool-call history from assistant prose; this supports our direction of per-run prompt identity plus per-run budget rather than one shared parent prompt/budget.
+  - 通道运行时's tool-tag sanitation reinforces the same boundary: model-visible text should not become trusted runtime state, and child session identity should come from runtime context, not copied parent prose.
+- Fix:
+  - Added `system_prompt_override` through `PromptBuildRequest`, `PromptBuilder.build()`, `RunParams`, runtime loop params, and `ToolLoopExecuteParams`.
+  - Added `runner_identity_prompt.py` with `subagent_runner_system_prompt(context)` so a child runner receives an explicit identity prompt: it is a subagent runner, knows its run id/name/role, and must not treat parent/root system prompt as its own identity.
+  - `subagent_run_flow.py` now calls `agent.run(..., system_prompt_override=...)` for runner model turns, without mutating shared config.
+  - `runner_dispatch.py` now filters workflow candidates through `workflow_depends_on` before role phase sorting. A dependent phase runs only after the upstream phase is persisted as `AWAITING_ACCEPTANCE` / `DONE` or verification reaches `NEEDS_ACCEPTANCE` / `VERIFIED`.
+- Verification:
+  - `test_build_uses_system_prompt_override`
+  - `test_subagent_runner_uses_child_system_prompt_not_parent_root_identity`
+  - `test_runner_candidates_wait_for_workflow_depends_on_refs`
+- Remaining gap:
+  - R85 should rerun with `max_tool_rounds` raised to 20-25 so long-content recovery can be observed under realistic CSS/JS output.
+  - The observer should still only start/stop/inspect; all lower creation and execution must come from the root/parent chain.
+- Next:
+  - Run clean R85. Expected behavior: child runner prompt starts with child identity, workflow `critic` waits for `produce`, `repair` waits for `critic`, and long CSS/JS writes recover through bounded append chunks instead of stopping at the first inline content limit.
+
+### Result: R85 Confirmed Runner Identity, Exposed Leaf Artifact Tool Gap
+
+- Discovered at: 2026-05-12 during R85 clean shopping-site root-only run.
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Prompt and config:
+    - `/Users/example/my-终端应用/stage7_shop_complete_20260512_r85_prompt.md`
+    - `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r85.yaml`
+  - Run log:
+    - `/Users/example/my-终端应用/stage7_shop_complete_20260512_r85_run.log`
+  - The outer observer only started/stopped the root command and inspected persisted facts; lower agents were created by the root/parent chain.
+- Observed behavior:
+  - Root created one first-layer coordinator: `小傻妞-shop-coordinator`.
+  - The coordinator created leaf workers such as `小小傻妞-shop-html-worker`, `小小傻妞-shop-css-worker`, `小小傻妞-shop-js-worker`, and `小小傻妞-shop-data-worker`.
+  - Child runner prompts started with child identity, for example: `你是 my-agent 的子代理 runner，不是顶层 root 主代理。`
+  - Real files were written under `/Users/example/my-终端应用/deliverables/stage7_shop_complete_20260512_r85/build/`, including `index.html`, `styles.css`, and `app.js`.
+  - The JS leaf first hit the inline `write_file.content` limit, then recovered by writing a smaller file and using `append_file` chunks. This confirms the higher `max_tool_rounds` made long-write recovery observable.
+  - The same JS leaf then tried to read an externalized tool-output wrapper JSON with `read_file`. The tool correctly told it to use `read_artifact`, but its allowed tools did not include `read_artifact`, so it repeated invalid `read_file` attempts.
+- 中文解释：
+  - 好消息：孩子不再穿 root 的身份外套；长 JS 写入也不是一撞上限就死，模型开始能分块续写。
+  - 新问题：叶子代理明明被提示“用 read_artifact 读外置输出”，但它手里没有 `read_artifact` 这个工具，就像导航告诉你走高速，车上却没有上高速的权限卡。
+- Root cause:
+  - Role templates already include `read_artifact` for worker/read tools.
+  - The hierarchy scheduler has a narrower `_DEFAULT_LEAF_CODING_TOOLS` fallback for product-writing leaves, and that fallback omitted `read_artifact`.
+  - Scheduled leaf tasks therefore lost the artifact-read capability even when the broader template catalog expected it.
+- Fix:
+  - Added `read_artifact` to `_DEFAULT_LEAF_CODING_TOOLS` in `hierarchy_tool_policy.py`.
+  - Both automatic leaf write-tool inference and explicit model-provided write/read/list aliases now receive `read_artifact`.
+- Verification:
+  - Added red-green coverage to:
+    - `test_hierarchy_schedule_infers_leaf_write_tools_from_explicit_deliverables`
+    - `test_hierarchy_schedule_normalizes_model_write_alias_for_leaf_tasks`
+  - Before the fix these assertions failed because leaf allowed tools lacked `read_artifact`; after the fix they pass.
+- Remaining gap:
+  - R85 did not fully exercise workflow `produce -> critic -> repair` in the live run because the coordinator chose direct leaf workers rather than auto workflow phases for the simple slices. Unit tests cover dependency gating, but the next real E2E should include a scoped workflow case.
+- Next:
+  - Run short R86. Expected behavior: leaf writer allowed tools include `read_artifact`; when it sees an externalized tool-output wrapper, it uses a scoped artifact ref instead of repeatedly calling `read_file` on the wrapper JSON.
+
+### Result: R86 Confirmed Leaf Artifact Tool Reaches Runtime Context
+
+- Discovered at: 2026-05-12 during R86 short root-only hierarchy run.
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Prompt and config:
+    - `/Users/example/my-终端应用/stage7_r86_artifact_tool_prompt.md`
+    - `/Users/example/my-终端应用/.my-agent-stage7-r86-artifact-tool.yaml`
+  - Run log:
+    - `/Users/example/my-终端应用/stage7_r86_artifact_tool_run.log`
+  - The test intentionally stayed small: root creates a coordinator, coordinator creates a leaf writer, and leaf writes one proof file.
+- Observed behavior:
+  - Root created `subagent-1778608823-2809eed2` named `小傻妞-r86-coordinator`.
+  - The coordinator created `subagent-1778608839-163716e2` named `小小傻妞-r86-leaf-worker`.
+  - The coordinator also created `subagent-1778608890-1eeb66a0` named `小小傻妞-r86-acceptor`; this was an LLM-chosen extra QA step, not an outer observer action.
+  - The leaf `execution_context.json` and `task.json` both included `read_artifact` in `allowed_tools`.
+  - The leaf wrote `/Users/example/my-终端应用/deliverables/stage7_r86_artifact_tool/build/proof.txt`.
+  - The proof file contains `r86-read-artifact-tool-ok`.
+  - The run ended with `total_runs=3` and `done_verified=3`.
+- 中文解释：
+  - 这次短测不是完整购物网站，它只确认一件核心事：我们修的 `read_artifact` 没有只停留在代码默认值里，而是真的进入了 leaf worker 的运行上下文。
+  - 大白话：叶子代理现在“手里真的有这张卡”了；以后遇到外置工具输出时，它有机会按提示走 `read_artifact`，不会天然卡死在 `read_file` 包装 JSON。
+- Verification facts:
+  - `execution_context.json` for `subagent-1778608839-163716e2` contains:
+    - `list_files`
+    - `read_file`
+    - `search_text`
+    - `read_artifact`
+    - `write_file`
+    - `append_file`
+    - `replace_in_file`
+    - `capability_request`
+  - The product file exists and contains the required signature.
+- Remaining gap:
+  - R86 did not force a large externalized read artifact inside the leaf run, so it confirmed tool propagation but not the full wrapper-read recovery path.
+  - A later full shopping-site run should still watch for the exact R85 failure mode: model sees a tool-output wrapper JSON and should choose scoped `read_artifact` instead of repeated `read_file`.
+- Next:
+  - Resume full shopping-site E2E with the same root-only observer rule, but keep the checkpoint shorter: stop once a new systemic issue is visible, patch it, and rerun instead of spending a long test window on a known failure mode.
