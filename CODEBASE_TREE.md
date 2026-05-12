@@ -1004,6 +1004,7 @@ docs/
 - `agent_py_agent/agent/subagents/execution_executor.py`: `content_check` 支持 `content_pattern` 包含匹配，也支持 `content_equals` / `expected_content` + `match_mode=exact`，用于严格验证文件内容没有额外字符；`static_site_check` 用于机器验收购物站这类静态产物的页面存在性、坏链接、占位符和明显失效控件。
 - `agent_py_agent/agent/agent_core/_tool_loop_service.py`: 主代理和 subagent 共用的工具循环；到达 `max_tool_rounds` 后给模型一次收口机会，如果模型仍吐工具调用，返回确定性停止说明而不是把新 `[TOOL_CALL]` 当最终回答；执行真实工具前会检查 per-run 工具预算，预算触发时只拦截当前 run 的工具并给模型自检/上报提示。
 - `agent_py_agent/agent/agent_core/orchestration_tools.py`: 顶层 `create_subagents` / `subagent_board` 工具入口；显式 root/coordinator seed 会从当前原始用户 prompt 补回模型摘要漏掉的 required/forbidden 文件合同和 4层/depth 命名约束，并以增强后的 `CreateRunParams.goal` 创建 root。
+- `agent_py_agent/agent/agent_core/orchestration_root_contract.py`: root/coordinator seed 合同修复 helper；从原始用户 prompt 提取 required/forbidden 文件和精确层级命名合同，避免自然语言摘要把机器合同改写或漏传。
 - `agent_py_agent/agent/agent_core/subagent_finalize_helpers.py`: 子代理 runner 收尾持久化 helper；coordinator 已真实创建并验收 child 时可合成等待父级验收的收口，同时会阻断“没工具调用、没 child refs，只说下一步要 schedule_child_subagents”的假完成，转成 `BLOCKED / needs_child_creation` 让 LLM 继续派工。
 - `agent_py_agent/agent/backends/base.py`: Anthropic-compatible 非流式响应解析会在 thinking-only/no-text 内容块时重试一次，避免真实 E2E 被可恢复的厂商响应形状直接打成 runner 失败；普通空响应仍报错。
 - `agent_py_agent/agent/agent_core/tool_agent_budget.py` / `tool_agent_budget_stage.py`: 单个代理滚动工具预算 helper 和工具循环集成层；默认按 `run_id` 做 10 分钟 50 次限制，没有 `run_id` 的主代理普通聊天不受限，且不做任务树或单次对话的全局预算。

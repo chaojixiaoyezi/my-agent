@@ -24,6 +24,13 @@ QA_ROLE_MARKERS = {
     "acceptor": ("acceptor", "验收子代理", "验收代理", "验收角色", "验收员", "由acceptor", "由 acceptor"),
 }
 QA_ROLE_ORDER = ("tester", "bug_finder", "acceptor")
+_INHERITED_CONTRACT_MARKERS = (
+    "继承父级目标/边界",
+    "父级层级/协作约束",
+    "父级能力/工具/安全约束",
+    "相关父级片段",
+    "父级摘要",
+)
 
 
 # LLM: qa_roles_required_by_task extracts requested QA roles from stable parent contracts only.
@@ -37,9 +44,19 @@ def qa_roles_required_by_task(task) -> list[str]:
 # LLM: qa_role_contract_text avoids trusting output summaries when determining role requirements.
 # 函数用途: 只合并任务目标和验收条件，用来判断“要求过什么”，不读取模型自称完成的输出。
 def qa_role_contract_text(task) -> str:
-    values = [str(getattr(task, "goal", "") or "")]
-    values.extend(str(item) for item in getattr(task, "acceptance_checks", []) or [])
+    values = [_direct_role_contract_text(str(getattr(task, "goal", "") or ""))]
+    values.extend(_direct_role_contract_text(str(item)) for item in getattr(task, "acceptance_checks", []) or [])
     return " ".join(values).lower()
+
+
+# LLM: _direct_role_contract_text limits QA obligations to the current node's own goal.
+# 函数用途: 继承块里的 tester/bug_finder/acceptor 是父级背景，不应让每个中间 coordinator 都背同一套 QA 硬义务。
+def _direct_role_contract_text(text: str) -> str:
+    value = str(text or "")
+    positions = [index for marker in _INHERITED_CONTRACT_MARKERS if (index := value.find(marker)) >= 0]
+    if not positions:
+        return value
+    return value[: min(positions)]
 
 
 # LLM: qa_roles_from_text returns roles in deterministic dependency order for scheduling and reports.

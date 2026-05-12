@@ -891,3 +891,11 @@
 - 已修正：把 R66 的“只分析不派工却提交验收”转成 runner recovery 红线。如果 coordinator 没工具调用、没 child refs，却说下一步要 `schedule_child_subagents`，收尾会改成 `BLOCKED / needs_child_creation`，让 LLM 继续派工。
 - 已补测试：`test_subagent_runner_blocks_analysis_only_coordinator_without_children`。
 - 下一步：做一轮真实 root-only E2E 复测，确认主节点看到 `quality_advice` 后能自己选择 QA 波次，并且遇到 `needs_child_creation` 会继续 schedule，而不是停在验收失败。
+
+## 2026-05-12 R67 follow-up: reduce hardcoded contract misfires
+- 中文说明：R67 继续证明“流程硬写死”会误伤：自然语言继承块把 `小小小傻妞-*` 漂移成了 `小小的傻妞-*`；`## 禁止文件` 里的反例进入了 required_files；中间 coordinator 因继承父级 QA 目标，被验收器硬性要求自己创建 tester/bug_finder/acceptor。
+- 已修正：层级命名合同不再只看 `depth=3` 这类宽锚点；如果父级合同有 `小小小傻妞-*` / `小小小小傻妞-*` 精确前缀，子级摘要必须包含同样前缀，否则系统补回原始合同。
+- 已修正：文件契约解析器识别 `## 禁止文件` 这种 Markdown 负向标题；`task.json 里的状态`、`execution_context.json refs` 这类内部引用不会当成用户产物。
+- 已修正：QA role coverage 只读取当前节点自己的 direct goal / acceptance，遇到 `继承父级目标/边界`、`父级层级/协作约束` 等继承块就停止，避免每个中间 coordinator 都背父级全局 QA 硬义务。
+- 已补测试：`test_file_contract_treats_markdown_forbidden_heading_as_negative_scope`、`test_file_contract_ignores_internal_state_file_references_without_deliverable_label`、`test_explicit_coordinator_seed_repairs_wrong_lineage_summary_from_raw_prompt`、`test_inherited_parent_qa_contract_does_not_bind_intermediate_coordinator`。
+- 下一步：干净启动 R68；预期 required_files 只保留 10 个交付文件，命名合同保留 `小小小傻妞-*`，中间 coordinator 不再因继承 QA 文字被误判失败，正确父级仍要通过 `quality_advice` 主动选择 QA 波次。

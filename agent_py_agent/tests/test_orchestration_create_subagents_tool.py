@@ -258,3 +258,40 @@ class TestCreateSubagentsToolCoordinatorSeed:
         assert "RUNNER_RESULT.md" in params.goal
         assert "用户原始层级/命名约束" in params.goal
         assert "depth=3" in params.goal
+
+    def test_explicit_coordinator_seed_repairs_wrong_lineage_summary_from_raw_prompt(self):
+        """模型写错层级前缀时，root seed 必须保留用户原始精确命名合同。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent._current_user_prompt = (
+            "命名必须按层级规则：depth=1 用“小傻妞-*”，"
+            "depth=2 用“小小傻妞-*”，depth=3 用“小小小傻妞-*”。"
+            "本轮 max_depth=3，禁止创建 depth>=4，禁止创建“小小小小傻妞-*”节点。"
+        )
+
+        mock_task = MagicMock()
+        mock_task.id = "root_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/root_001"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": (
+                "层级要求：depth=1 用“小傻妞-*”，depth=2 用“小小傻妞-*”，"
+                "depth=3 用“小小的傻妞-*”；本轮 max_depth=3，禁止创建“小小小傻妞-*”节点。"
+            ),
+            "role": "coordinator",
+        })
+
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert result.ok is True
+        assert "用户原始层级/命名约束" in params.goal
+        assert "小小小傻妞-*" in params.goal
+        assert "小小小小傻妞-*" in params.goal

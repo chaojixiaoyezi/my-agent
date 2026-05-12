@@ -44,7 +44,8 @@ _NEGATIVE_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 _NEGATIVE_HEADER_RE = re.compile(
-    r"(?:禁止(?:创建|生成|产出|写入|写)?\s*[：:]|禁止(?:创建)?(?:文件名|内部文件|文件/反例名|文件|反例名)"
+    r"(?:#+\s*禁止(?:创建)?(?:文件名|内部文件|文件/反例名|文件|反例名)\s*$|"
+    r"禁止(?:创建|生成|产出|写入|写)?\s*[：:]|禁止(?:创建)?(?:文件名|内部文件|文件/反例名|文件|反例名)"
     r"[^。；;\n]{0,96}[：:（(】\]]|forbidden(?:_files)?[^。；;\n]{0,96}[：:（(】\]])\s*$",
     re.IGNORECASE,
 )
@@ -52,6 +53,34 @@ _NEGATIVE_CHAIN_CONNECTOR_RE = re.compile(r"^(?:[\s,，、/]*|[\s,，、/]*(?:�
 _BULLET_PREFIX_RE = re.compile(r"^[-*]\s*")
 _LOCATION_TARGET_RE = re.compile(r"(?:放进|放入|放到|放在|置于|移入|inside|under|into)", re.IGNORECASE)
 _FILE_LIKE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9]{1,6}")
+_INTERNAL_REF_FILES = frozenset({"task.json", "execution_context.json", "runner_result.md", "runner_result.json"})
+_INTERNAL_REF_HINTS = (
+    "真实",
+    "里的",
+    "里",
+    "状态",
+    "refs",
+    "引用",
+    "读取",
+    "报告",
+    "run",
+    "root",
+    "child",
+)
+_POSITIVE_DELIVERABLE_HINTS = (
+    "必须",
+    "交付",
+    "产出",
+    "创建",
+    "生成",
+    "写入",
+    "写 ",
+    "required",
+    "deliver",
+    "create",
+    "generate",
+    "write",
+)
 
 
 # LLM: required_file_terms_from_text returns positive deliverable filenames only.
@@ -92,7 +121,7 @@ def _positive_terms(segment: str, pattern: re.Pattern[str]) -> list[str]:
         connector = segment[last_end : match.start()]
         direct_negative = _is_negative_target(segment, match.start())
         chained_negative = negative_chain_active and _is_negative_chain_connector(connector)
-        if not direct_negative and not chained_negative:
+        if not direct_negative and not chained_negative and not _is_internal_context_reference(segment, match):
             values.append(match.group(1))
         negative_chain_active = direct_negative or chained_negative
         last_end = match.end()
@@ -173,6 +202,19 @@ def _is_negative_target(segment: str, start: int) -> bool:
 def _is_location_rule_source(segment: str, start: int) -> bool:
     after = segment[start:]
     return bool(_LOCATION_TARGET_RE.search(after))
+
+
+# LLM: _is_internal_context_reference keeps state refs out of deliverable contracts.
+# 函数用途: task.json/execution_context.json 在“读取状态/refs”语境里只是内部引用，不是下级要创建的产物。
+def _is_internal_context_reference(segment: str, match: re.Match[str]) -> bool:
+    filename = match.group(1).lower()
+    if filename not in _INTERNAL_REF_FILES:
+        return False
+    before = segment[max(0, match.start() - 48) : match.start()].lower()
+    after = segment[match.end() : match.end() + 48].lower()
+    if any(hint in before for hint in _POSITIVE_DELIVERABLE_HINTS):
+        return False
+    return any(hint in before or hint in after for hint in _INTERNAL_REF_HINTS)
 
 
 # LLM: _is_negative_chain_connector extends one forbidden target across sibling alternatives.
