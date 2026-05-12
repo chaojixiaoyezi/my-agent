@@ -13,8 +13,8 @@ from .qa_role_contract import qa_role_identity_roles, qa_roles_required_by_task
 _QA_SCAN_MAX_NODES = 64
 
 
-# LLM: RequiredQaChildSpec is a scheduler-neutral shape for auto-created QA child tasks.
-# 类用途: 保存自动补派 QA 子任务所需字段，避免 helper 反向 import hierarchy scheduler dataclass。
+# LLM: RequiredQaChildSpec is a scheduler-neutral shape for LLM-suggested QA child tasks.
+# 类用途: 保存候选 QA 子任务所需字段，作为 quality_advice 输出给模型参考。
 @dataclass(frozen=True)
 class RequiredQaChildSpec:
     goal: str
@@ -23,21 +23,52 @@ class RequiredQaChildSpec:
     acceptance_checks: list[str] = field(default_factory=list)
 
 
-# LLM: required_qa_child_specs computes missing QA children without mutating the parent or request.
-# 函数用途: 对比父任务合同、本轮 child specs 和已存在后代，返回还需要自动补派的 QA 子任务。
-def required_qa_child_specs(
+# LLM: QaOrchestrationAdvice is a refs-only decision packet for the model, not an execution order.
+# 类用途: 告诉 LLM 当前 QA/验收/返修的可选方向和红线，让模型自己按上下文选择下一步。
+@dataclass(frozen=True)
+class QaOrchestrationAdvice:
+    phase: str
+    llm_next_step: str
+    guardrails: list[str] = field(default_factory=list)
+    suggested_roles: list[str] = field(default_factory=list)
+    suggested_children: list[RequiredQaChildSpec] = field(default_factory=list)
+
+
+# LLM: qa_orchestration_advice exposes quality planning facts without creating child runs.
+# 函数用途: 根据父任务合同、现有 QA 子任务和实现进度生成给 LLM 的 QA 决策包；不自动补派任何子代理。
+def qa_orchestration_advice(
     *,
     manager: Any,
     parent: SubAgentTask,
     specs: list[Any],
-) -> list[RequiredQaChildSpec]:
+) -> QaOrchestrationAdvice | None:
+    missing = _missing_required_qa_roles(manager, parent, specs)
+    if not missing:
+        return None
     if _qa_autofill_deferred_until_implementation_ready(manager, parent):
-        return []
-    return [_qa_role_child_spec(parent, role) for role in _missing_required_qa_roles(manager, parent, specs)]
+        return QaOrchestrationAdvice(
+            phase="implementation_first",
+            llm_next_step=(
+                "先创建或继续 dispatch worker/writer/leaf_worker，等至少一个实现节点有可测试产物后，"
+                "再由 LLM 选择局部 QA、整体验证或 repair/acceptance 组合。"
+            ),
+            guardrails=_quality_guardrails(),
+            suggested_roles=missing,
+        )
+    return QaOrchestrationAdvice(
+        phase="quality_wave_ready",
+        llm_next_step=(
+            "根据 ready work refs、依赖组和风险，选择 tester/bug_finder/acceptor 的数量、scope 和顺序；"
+            "系统只校验红线，不固定工作流。"
+        ),
+        guardrails=_quality_guardrails(),
+        suggested_roles=missing,
+        suggested_children=[_qa_role_child_spec(parent, role) for role in missing],
+    )
 
 
 # LLM: _qa_autofill_deferred_until_implementation_ready prevents empty-build QA children.
-# 函数用途: 有产物根的父任务先等 worker/leaf 有可验收状态，再自动补派 tester/bug_finder/acceptor。
+# 函数用途: 有产物根的父任务先等 worker/leaf 有可验收状态，再建议 tester/bug_finder/acceptor。
 def _qa_autofill_deferred_until_implementation_ready(manager: Any, parent: SubAgentTask) -> bool:
     if not inherited_extra_write_roots(parent):
         return False
@@ -142,3 +173,14 @@ def _qa_role_zh(role: str) -> str:
         "bug_finder": "找茬子代理",
         "acceptor": "验收子代理",
     }.get(role, role)
+
+
+# LLM: _quality_guardrails keeps system behavior as boundaries rather than a rigid workflow.
+# 函数用途: 返回给模型看的 QA 红线：挡明显不成立的动作，具体流程留给 LLM 和 workflow。
+def _quality_guardrails() -> list[str]:
+    return [
+        "没有可测试产物或 ready work refs 时，不要创建/执行 QA。",
+        "QA 失败、QA 工具失败、产品失败必须分开记录。",
+        "QA 通过只表示对应 scope 可进入验收，不代表整个父任务自动完成。",
+        "repair 必须基于失败 refs，不能覆盖无关产物。",
+    ]

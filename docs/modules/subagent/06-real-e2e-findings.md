@@ -98,7 +98,7 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Small Fixed Retest：主节点单入口 1/2/4 小树复测通过。外层只启动 root，root 创建 2 child，child 创建 4 leaf，4 个 leaf 真实写出算法文件并通过父级 Python smoke test；leaf 写工具缺失和旧 failure/capability 状态残留已修复。还剩一个验收噪音：某 leaf 的 acceptance plan 因“空测试命令”进入 `request_human`，需要后续让空测试命令降级成 inspect-only 或生成可执行检查。
 - Debug Trace：子代理调试日志改成正式 `subagent_debug_trace_level` 开关。默认 0 不写；1-5 只写内部 runtime 的 refs-only JSONL，用于后续多层真实测试定位谁创建、谁运行、谁收束，不污染 deliverables。
 - Stage7 R34：购物站 10 个文件真实落到用户产物目录，但 root/部分 child 的 `output.json` 缺 evidence packet，导致严格验收失败；同时 dispatch 工具缺少“只剩重复记账，不要再调度”的明确提示。现在 output.json 自动收口会从已存在报告/产物路径补最小证据包，dispatch_subagents 会返回 `dispatch_terminal` 让父模型停下来汇报 blockers。
-- Stage7 R63-R66：QA 自动补派曾让 tester / bug_finder / acceptor 在空 build 上提前空转。现在调度会等 worker/writer/leaf_worker 到可测试状态后再补 QA；R66 进一步发现 root 可能只写“下一步应该派工”但没真正创建 child，这会被验收拦住，后续要交给 LLM-assisted orchestration 继续规划和重试。
+- Stage7 R63-R67：QA 自动补派曾让 tester / bug_finder / acceptor 在空 build 上提前空转。现在系统只保留“空产物不准 QA”等红线，并把缺失 QA 角色、候选 child spec 和下一步提示写成 `quality_advice` 交给 LLM 选择；R66 进一步发现 root 可能只写“下一步应该派工”但没真正创建 child，已增加 `needs_child_creation` 收尾红线，后续要真实复测它是否会继续 schedule。
 
 ## 2026-05-09 Real 3-Subagent Parallel E2E
 
@@ -4128,7 +4128,7 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Symptom: R59/R60 showed the same pattern: prompts asked for tester / bug_finder / acceptor, but the tree could still spend most of its budget creating coordinators and workers before acceptance finally noticed missing QA coverage.
   - 中文解释：以前系统能“最后发现没派测试/找错/验收”，但不能“在派工时就帮主代理补上”。这样真实跑大任务时容易浪费很多轮，最后才发现质量角色缺席。
   - Fix: added `qa_role_contract.py` as the shared role-detection source. `hierarchy_scheduler.py` now checks parent goal/acceptance before guards run, compares requested specs plus persisted descendants, and appends missing tester/bug_finder/acceptor child specs exactly once. `acceptance_role_coverage.py` now reuses the same contract helper, so scheduling and final acceptance do not drift. Scope guard domain stopwords now ignore structural `run/id/ref/refs/qa` terms so auto-created QA children do not collide just because they mention the same parent ref.
-  - Verification: `test_hierarchy_schedule_auto_adds_required_qa_roles_from_parent_contract`, `test_hierarchy_schedule_avoids_duplicate_required_qa_roles`, and existing role-coverage tests pass locally.
+  - Verification at that time: QA auto-scheduling tests and existing role-coverage tests passed locally. R67 later replaced automatic QA child creation with `quality_advice`.
   - Remaining risk: this is deterministic scheduling support, not a guarantee that each QA child will finish real testing under provider timeouts. The next real E2E still needs to verify root-only creation plus real tester/bug_finder/acceptor completion.
 
 ## 2026-05-12 Shopping Site Complete E2E R62 QA Scheduling and Parent False-Green
@@ -4205,8 +4205,8 @@ This document is append-only. Record every real subagent E2E issue found during 
   - `test_hierarchy_schedule_blocks_qa_before_implementation_ready`
   - `test_hierarchy_schedule_allows_qa_after_implementation_ready`
   - `test_hierarchy_schedule_defers_auto_qa_until_implementation_ready`
-  - `test_hierarchy_schedule_auto_qa_after_implementation_ready`
-- Status: solved for empty-build QA creation/execution at the scheduler and guard boundary.
+  - `test_hierarchy_schedule_quality_advice_after_implementation_ready`
+- Status: solved for empty-build QA creation/execution at the guard boundary. R67 changed the positive path from automatic QA creation to LLM-facing `quality_advice`, so missing QA roles become model-visible suggestions instead of hardcoded child creation.
 - Remaining risk:
   - The system still needs an LLM-assisted QA plan that can choose group-level QA vs whole-product QA based on work refs and dependency groups, instead of relying only on a fixed role list.
 
@@ -4221,7 +4221,7 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Root cause:
   - The runner can parse a model answer as structured completion even when the answer is actually a plan to call tools next.
   - Existing acceptance correctly catches missing child creation, but the recovery loop does not yet turn that into a continued dispatch attempt.
-- Status: detected and recorded, not fully solved in this slice.
+- Status: fixed at runner finalization boundary. A coordinator that has no executed tools and no direct child refs cannot mark itself awaiting acceptance when its structured result says the next action is `schedule_child_subagents`; it becomes `BLOCKED / needs_child_creation`.
 - Next:
-  - Add an LLM-assisted orchestration decision step: when a coordinator says the next action is child creation but has no child refs or tool calls, keep it in planning/dispatch recovery rather than treating it as ready for acceptance.
+  - Rerun a real root-only E2E to verify the model reads `needs_child_creation` and `quality_advice`, then calls `schedule_child_subagents` again instead of stopping at acceptance failure.
   - Keep system logic as a guardrail, not as a hardcoded workflow: LLM proposes QA/repair/acceptance plan; guards reject impossible actions such as empty-product QA, skipped failed descendants, or out-of-scope broadcast.

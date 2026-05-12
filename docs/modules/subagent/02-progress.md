@@ -860,7 +860,7 @@
 - 中文说明：R61 暴露三类框架问题：长 `write_file/append_file` 工具调用会让 JSON 块损坏；provider timeout 缺少明确错误边界；tester / bug_finder / acceptor 以前主要靠 prompt 和最终验收，调度时不会主动补派。
 - 已修正：长内容失败后会进入 `long_content_recovery_mode`，下一轮强制短骨架、小块 append 或受控 exec refs，不再让模型重复输出同一个巨大 JSON 参数。
 - 已修正：模型接口请求/流式超时会抛 `ProviderTimeoutError`；子代理 runner 记录 `failure_type=provider_timeout`，CLI 输出可读 handoff 和非 0 退出。
-- 已修正：新增 `qa_role_contract.py` 和 `hierarchy_qa_scheduler.py`。父任务明确点名 tester / bug_finder / acceptor 时，层级调度会比较本轮 specs 和已存在后代，自动补齐缺失 QA child；最终验收也复用同一套角色识别规则。
+- 当时已修正：新增 `qa_role_contract.py` 和 `hierarchy_qa_scheduler.py`。父任务明确点名 tester / bug_finder / acceptor 时，层级调度会比较本轮 specs 和已存在后代，并提示缺失 QA 角色；最终验收也复用同一套角色识别规则。R67 后，缺失 QA 不再由系统自动创建，而是通过 `quality_advice` 交给 LLM 决策。
 - 已修正：duplicate-domain 去重过滤 `run/id/ref/refs/qa` 等结构词，避免自动 QA child 因共享父级 ref 被误判成同域重复。
 - 已补测试：长内容恢复、provider timeout、QA 自动补派、QA 去重和原有角色覆盖验收 focused tests 已通过。
 - 下一步：重新跑干净真实 E2E，继续用购物网站作为复杂载荷，验证 root-only 下是否能真实创建并完成 tester / bug_finder / acceptor，而不是只在最终验收阶段发现缺席。
@@ -878,6 +878,16 @@
 - 已修正：runner dispatch 阶段排序现在优先看 `role/agent_name` 身份，不再因为 coordinator goal 继承了 tester/bug_finder/acceptor 字样，就把 coordinator 误判成 QA 阶段；同一批候选里先跑 coordinator/worker，再跑 tester/bug_finder，最后跑 acceptor。
 - 已修正：有产物根的父任务，在 worker/writer/leaf_worker 没有进入 `AWAITING_ACCEPTANCE`、`NEEDS_ACCEPTANCE` 或 `DONE/VERIFIED` 前，不自动补派 QA；模型显式创建 QA child 也会被 `qa_before_implementation_ready` 阻断。
 - 已记录设计原则：大型任务里 QA 要按 work 批次和依赖组运行。全部 work 完成时跑整体验证；部分关联 work 完成时只跑局部 QA；单个 work 默认进入 `ready_for_batch_qa`，除非它是独立交付单元或阻塞后续。
-- 已补测试：`test_runner_phase_ignores_inherited_qa_contract_for_plain_coordinator`、`test_hierarchy_schedule_blocks_qa_before_implementation_ready`、`test_hierarchy_schedule_defers_auto_qa_until_implementation_ready`、`test_hierarchy_schedule_auto_qa_after_implementation_ready` 等 focused tests 已通过。
+- 已补测试：`test_runner_phase_ignores_inherited_qa_contract_for_plain_coordinator`、`test_hierarchy_schedule_blocks_qa_before_implementation_ready`、`test_hierarchy_schedule_defers_auto_qa_until_implementation_ready`、`test_hierarchy_schedule_quality_advice_after_implementation_ready` 等 focused tests 已通过。
 - R66 结果：QA 不再提前自动补派，但 root 在未调用工具、未创建 child 的情况下把“需要 schedule_child_subagents”写成 `AWAITING_ACCEPTANCE`，随后被验收拒绝为 `acceptance_failed`。这说明 QA 阶段门生效了，但还需要下一片把“需要派工的 coordinator 不能只分析就提交验收”交给 LLM 继续规划或重试，而不是把调度策略写死。
 - 下一步：做 LLM-assisted QA orchestration：让 LLM 读取 work 状态、依赖组、产物 refs 和风险提示后提出 QA/repair/acceptance plan；系统只做边界校验，例如不允许空产物 QA、不允许跳过失败 child、不允许越权广播。
+
+## 2026-05-12 R67 follow-up: QA advice instead of hardcoded QA creation
+- 中文说明：根据“不要把流程写死，尽量让 LLM 介入”的开发原则，QA 调度从“系统自动补 tester/bug_finder/acceptor child”改成“系统输出 `quality_advice`，LLM 自己选择 scope、数量、顺序和 repair/acceptance 组合”。
+- 已修正：`HierarchyScheduleResult` 新增 `quality_advice`；`hierarchy_qa_scheduler.py` 生成 `implementation_first` 或 `quality_wave_ready` 决策包，包含候选 QA roles、候选 child spec 和红线，但不直接创建 child。
+- 已修正：`schedule_child_subagents` 在没有传 `children` 时不再只报错；它会走 scheduler，返回 `no_child_specs + quality_advice`，让模型能先看建议再决定下一次如何派工。
+- 保留红线：有产物根但没有 ready worker/writer/leaf_worker 时，显式创建 QA 仍会被 `qa_before_implementation_ready` 阻断；这只是安全边界，不是业务流程。
+- 已补测试：`test_hierarchy_schedule_advises_required_qa_roles_without_auto_creation`、`test_hierarchy_schedule_quality_advice_after_implementation_ready`、`test_runner_context_schedule_without_children_returns_quality_advice`。
+- 已修正：把 R66 的“只分析不派工却提交验收”转成 runner recovery 红线。如果 coordinator 没工具调用、没 child refs，却说下一步要 `schedule_child_subagents`，收尾会改成 `BLOCKED / needs_child_creation`，让 LLM 继续派工。
+- 已补测试：`test_subagent_runner_blocks_analysis_only_coordinator_without_children`。
+- 下一步：做一轮真实 root-only E2E 复测，确认主节点看到 `quality_advice` 后能自己选择 QA 波次，并且遇到 `needs_child_creation` 会继续 schedule，而不是停在验收失败。

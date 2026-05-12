@@ -38,3 +38,40 @@ def test_runner_context_schedule_bare_lineage_name_returns_payload_not_index_err
     assert result.ok is True
     assert payload["created_run_ids"]
     assert agent.subagents.load(payload["created_run_ids"][0]).agent_name == "小小傻妞-coordinator"
+
+
+# LLM: schedule_child_subagents without children can return LLM advice instead of forcing a fixed flow.
+# 函数用途: worker 已可测试但模型还没决定 QA 波次时，工具返回 quality_advice，让 LLM 选择 tester/bug_finder/acceptor。
+def test_runner_context_schedule_without_children_returns_quality_advice(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    build = tmp_path / "deliverables" / "shop" / "build"
+    root = agent.subagents.create_run(
+        goal="购物网站需要 tester / bug_finder / acceptor，但由 LLM 决定 QA scope。",
+        thought="root",
+        plan=["root"],
+        role="coordinator",
+        extra_write_roots=[str(build)],
+    )
+    worker = agent.subagents.create_run(
+        goal=f"实现购物网站到 {build}",
+        thought="work",
+        plan=["write"],
+        parent_id=root.id,
+        root_id=root.id,
+        role="worker",
+        extra_write_roots=[str(build)],
+    )
+    worker.status = "AWAITING_ACCEPTANCE"
+    worker.verification_status = "NEEDS_ACCEPTANCE"
+    agent.subagents.save(worker)
+    agent._current_subagent_run_id = root.id
+
+    result = ScheduleChildSubagentsTool(agent).execute({"orchestration": {"apply": True}})
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["blocked"] is True
+    assert payload["reason"] == "no_child_specs"
+    assert payload["quality_advice"]["phase"] == "quality_wave_ready"
+    assert set(payload["quality_advice"]["suggested_roles"]) == {"tester", "bug_finder", "acceptor"}
+    assert payload["created_run_ids"] == []

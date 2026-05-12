@@ -134,6 +134,8 @@ def _schedule_payload_json(result: HierarchyScheduleResult) -> str:
         "planned_count": result.planned_count,
         "items": [_schedule_item_payload(item) for item in result.items],
     }
+    if result.quality_advice is not None:
+        payload["quality_advice"] = _quality_advice_payload(result.quality_advice)
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
@@ -153,13 +155,38 @@ def _schedule_item_payload(item) -> dict[str, object]:
     }
 
 
+# LLM: _quality_advice_payload makes QA planning visible without materializing a fixed workflow.
+# 函数用途: 把服务层 quality_advice 转成模型可读 JSON，提示候选角色和红线，实际派工仍由 LLM 决定。
+def _quality_advice_payload(advice) -> dict[str, object]:
+    return {
+        "phase": advice.phase,
+        "llm_next_step": advice.llm_next_step,
+        "guardrails": list(advice.guardrails),
+        "suggested_roles": list(advice.suggested_roles),
+        "suggested_children": [_quality_child_payload(item) for item in advice.suggested_children],
+    }
+
+
+# LLM: _quality_child_payload keeps suggested QA specs refs-only and safe for prompt reuse.
+# 函数用途: 输出候选 QA child 的最小字段，LLM 可复制后按 scope/work_group_id 自行调整。
+def _quality_child_payload(item) -> dict[str, object]:
+    return {
+        "goal": item.goal,
+        "agent_name": item.agent_name,
+        "role": item.role,
+        "acceptance_checks": list(item.acceptance_checks),
+    }
+
+
 # LLM: _hierarchy_child_specs parses the model-provided children list into strict schedule bundles.
 # 函数用途: 解析 schedule_child_subagents.children，支持 JSON 字符串或对象列表并拒绝空 goal。
 def _hierarchy_child_specs(params: dict[str, object]) -> list[HierarchyChildSpec] | ToolExecutionResult:
-    raw_children = params.get("children") or params.get("child_specs")
+    raw_children = params.get("children") if "children" in params else params.get("child_specs")
+    if raw_children is None:
+        return []
     children = _json_list_param(raw_children)
     if not children:
-        return _schedule_error("缺少必填参数 children。")
+        return []
     specs: list[HierarchyChildSpec] = []
     for raw in children:
         spec = _hierarchy_child_spec(raw)
