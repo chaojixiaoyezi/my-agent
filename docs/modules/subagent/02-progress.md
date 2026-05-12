@@ -917,3 +917,13 @@
 - 验收结果：root 最终被标记为 `BLOCKED/FAILED acceptance_failed`，原因是缺少用户点名 QA 角色 `tester, bug_finder, acceptor`；这次失败是正确失败，不是系统误挡。生产链路完成不等于整体完成，QA/找错/验收必须由真实 task 事实证明。
 - 架构结论：调度层不再替 LLM 硬编码“每一层必须 coordinator”，但 acceptance gate 必须继续硬守底线；流程选择给 LLM/模板，完成判定看真实 `task.json`、角色覆盖、子树健康和 evidence。
 - 下一步：增强 `quality_advice` / root closeout prompt，让 root 在生产 child 已完成后主动按 advice 创建 tester、bug_finder、acceptor；不建议恢复调度时自动补派 QA，避免又变成死流程。
+
+## 2026-05-12 R72: QA advice reads descendant implementation readiness
+- 中文说明：R71 暴露的下一层问题是 root 通过 coordinator 链路完成 leaf 后，QA 阶段门和 advice 仍只看直接 child；这会让 root 即使主动查询 `quality_advice`，也可能被误导为还要先实现。
+- 已修正：`hierarchy_scope_guards.py` 和 `hierarchy_qa_scheduler.py` 都改为扫描父任务子树里的 ready implementation descendants；只要后代 worker/writer/leaf_worker 已进入 `AWAITING_ACCEPTANCE`、`NEEDS_ACCEPTANCE` 或 `DONE/VERIFIED`，父级就可以进入 QA advice/QA 创建阶段。
+- Prompt 同步：coordinator runner prompt 明确写入：生产 child/leaf 已完成但父级仍缺 tester/bug_finder/acceptor 时，不要直接输出最终 `SUBAGENT_RESULT`，先调用 `schedule_child_subagents` 获取或执行 `quality_advice`，再由 LLM 选择 QA 数量、scope、顺序和 repair 策略。
+- 保持边界：系统仍不自动创建固定 QA child；调度层只提供事实和候选，真正的 tester/bug_finder/acceptor 数量与顺序仍由 LLM/模板/workflow 决定。
+- 已补测试：`test_hierarchy_schedule_allows_qa_after_implementation_descendant_ready`、`test_hierarchy_schedule_quality_advice_after_implementation_descendant_ready`，并更新 coordinator prompt contract。
+- 真实 R72 结果：同一个 root-only 购物站 E2E 中，depth=2 coordinator 在 4 个 leaf worker 产出后真实创建并推进了 `tester`、`bug_finder`、`acceptor` 三类 QA 子代理，证明后代实现 readiness 已被 LLM 看见并用于后续派工。
+- 真实阻塞：tester 发现 `checkout.html` 到 `order-success.html` 的流程断点；bug_finder 发现低优先级拼写问题；acceptor 给出通过判断但与 tester 冲突。父级最终按验收事实阻塞，root 因最终 `SUBAGENT_RESULT` 缺结束标记进入 `structured_output_parse_error`。这是正确暴露问题，不是调度阶段误挡。
+- 下一步：做 LLM 引导的 repair wave / QA disagreement handling。大白话：QA 说“不通过”时，父级应该先让修复 worker 改具体文件，再让 tester/acceptor 复测；不要靠硬编码自动改，也不要让 acceptor 的单方通过盖掉 tester 的失败证据。
