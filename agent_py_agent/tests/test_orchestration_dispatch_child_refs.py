@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -241,6 +242,68 @@ def test_dispatch_payload_treats_rejected_child_as_recovery(tmp_path: Path):
     assert direct["ready_for_parent_acceptance"] is False
     assert direct["next_action"] == "inspect_or_rescue_direct_children"
     assert "不要反复 read_file/read_artifact" in direct["recovery_hint"]
+
+
+# LLM: QA self-reported failures should guide repair without forcing an automatic workflow.
+# 函数用途: tester 自己报告流程缺失时，dispatch payload 要返回 repair advice，而不是让父级直接收口。
+def test_dispatch_payload_surfaces_qa_repair_advice_from_direct_child(tmp_path: Path):
+    tester_dir = tmp_path / "tester"
+    tester_dir.mkdir()
+    (tester_dir / "output.json").write_text(
+        json.dumps({
+            "structured_output": {"summary": "checkout.html 缺少到 order-success.html 的链接，流程断裂。"},
+            "acceptance": ["checkout.html 到 order-success.html 链接缺失"],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    payload = _dispatch_payload_with_direct_children([
+        SimpleNamespace(
+            id="tester-1",
+            parent_id="root",
+            role="tester",
+            agent_name="小傻妞-tester",
+            status="AWAITING_ACCEPTANCE",
+            verification_status="NEEDS_ACCEPTANCE",
+            task_dir=str(tester_dir),
+        )
+    ])
+
+    direct = payload["direct_children"]
+    assert direct["needs_repair_wave"] is True
+    assert direct["next_action"] == "create_repair_child_from_qa_refs"
+    assert direct["ready_for_parent_acceptance"] is False
+    assert direct["qa_repair_advice"]["failed_or_conflicting_qa_run_ids"] == ["tester-1"]
+    assert direct["qa_repair_advice"]["suggested_tool_call"]["children"][0]["role"] == "worker"
+
+
+# LLM: QA repair advice must scan descendants so upper coordinators see lower tester failures.
+# 函数用途: root 的直接 child 是 coordinator 时，孙级 tester 的失败也应作为 refs-first repair 建议返回。
+def test_dispatch_payload_surfaces_qa_repair_advice_from_descendant(tmp_path: Path):
+    tester_dir = tmp_path / "tester"
+    tester_dir.mkdir()
+    (tester_dir / "output.json").write_text(
+        json.dumps({"structured_output": {"summary": "发现缺陷：按钮没有效果。"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    payload = _dispatch_payload_with_direct_children([
+        SimpleNamespace(id="coord-1", parent_id="root", role="coordinator", agent_name="小傻妞-coord", status="AWAITING_ACCEPTANCE"),
+        SimpleNamespace(
+            id="tester-2",
+            parent_id="coord-1",
+            role="tester",
+            agent_name="小小傻妞-tester",
+            status="AWAITING_ACCEPTANCE",
+            verification_status="NEEDS_ACCEPTANCE",
+            task_dir=str(tester_dir),
+        ),
+    ])
+
+    direct = payload["direct_children"]
+    assert direct["needs_repair_wave"] is True
+    assert direct["qa_repair_advice"]["failed_or_conflicting_qa_run_ids"] == ["tester-2"]
+    assert "tester-2" in direct["qa_repair_advice"]["suggested_tool_call"]["children"][0]["goal"]
 
 
 # LLM: test_scoped_runner_tasks_honors_include_run_ids protects exact child dispatch waves.

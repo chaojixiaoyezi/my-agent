@@ -927,3 +927,10 @@
 - 真实 R72 结果：同一个 root-only 购物站 E2E 中，depth=2 coordinator 在 4 个 leaf worker 产出后真实创建并推进了 `tester`、`bug_finder`、`acceptor` 三类 QA 子代理，证明后代实现 readiness 已被 LLM 看见并用于后续派工。
 - 真实阻塞：tester 发现 `checkout.html` 到 `order-success.html` 的流程断点；bug_finder 发现低优先级拼写问题；acceptor 给出通过判断但与 tester 冲突。父级最终按验收事实阻塞，root 因最终 `SUBAGENT_RESULT` 缺结束标记进入 `structured_output_parse_error`。这是正确暴露问题，不是调度阶段误挡。
 - 下一步：做 LLM 引导的 repair wave / QA disagreement handling。大白话：QA 说“不通过”时，父级应该先让修复 worker 改具体文件，再让 tester/acceptor 复测；不要靠硬编码自动改，也不要让 acceptor 的单方通过盖掉 tester 的失败证据。
+
+## 2026-05-12 R73: QA repair advice without hardcoded repair workflow
+- 中文说明：R72 证明 QA 三角色能被创建，但也暴露 tester/acceptor 结论冲突。新的处理不是写死“失败就自动修”，而是在 dispatch payload 里给父级 LLM 一个 `qa_repair_advice`，让它基于失败 refs 自己安排修复和复测。
+- 已实现：新增 `orchestration_quality_payload.py`，runner-context dispatch 会扫描当前父节点后代 QA 任务的小型 `output.json` 摘要和状态；只要 tester/bug_finder/acceptor 报告失败、缺陷、缺失、断裂或状态失败，就返回 `needs_repair_wave=true`、失败 QA run ids、短摘要 refs 和可编辑的 `schedule_child_subagents` repair worker 建议。
+- 保持边界：系统只给 advice 和 guardrail，不直接创建 repair worker、不自动改文件、不让 acceptor 单方覆盖 tester 失败；父级 LLM 仍要决定修复哪个文件、派谁修、何时重新跑 tester/acceptor。
+- Prompt 同步：coordinator prompt 增加 `qa_repair_advice / needs_repair_wave` 处理要求，提醒模型不要直接最终验收，应先按失败 QA refs 创建 scoped repair worker 并复测。
+- 下一步：用 R73/R74 真实 E2E 验证 root-only 链路能在 QA 失败后自己创建 repair worker，修完 `checkout.html -> order-success.html` 断点，再重新推进 tester/acceptor。
