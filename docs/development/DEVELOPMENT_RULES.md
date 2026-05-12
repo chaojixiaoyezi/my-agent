@@ -237,6 +237,25 @@ do_write()
   artifacts. Reporter/checker roles may collect ids, summaries, status, and
   evidence refs, but they should not auto-read cold bodies or promote facts
   into main memory without an explicit gate.
+- When a parent/root agent has delegated work to child agents, it must stay
+  refs-only until a real acceptor finishes or the current user prompt explicitly
+  authorizes parent inspection, for example "you inspect/accept it yourself".
+  Parent agents may read hot runtime metadata (`task.json`, status reports,
+  acceptance/test refs, handoff/takeover packets), but must not read product
+  bodies or externalized artifact bodies as a substitute for tester,
+  bug_finder, acceptor, repair, and retest children.
+- Do not turn workflow preferences into hardcoded product behavior. The durable
+  hard red line is self-system destruction risk: when the user asks agents to
+  uninstall or break the agent system itself, delete system directories, remove
+  required runtime/config files, or make the toolchain unrecoverable, require
+  explicit safety handling. Normal cleanup is allowed: agents may delete their
+  own temporary files, task trash, stale generated artifacts, or test
+  directories inside the authorized workspace when that matches the task. For
+  normal user work, prefer user intent, LLM planning, role templates, scoped
+  permissions, audit logs, and acceptance facts over rigid scheduler rules. If
+  users explicitly authorize a parent/root agent to inspect or accept work
+  itself, that current-run instruction should override the default delegation
+  preference while still staying inside filesystem/tool boundaries.
 - For remote CI pushes, use the strict remote-submit profile before pushing:
   focused tests for touched areas, full pytest when feasible, ruff, doc sync,
   strict code-size, and `git diff --check`. If not pushing remote, use the

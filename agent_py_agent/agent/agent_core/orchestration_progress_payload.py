@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ..subagents.services.hierarchy_qa_scheduler import qa_orchestration_advice
 from .orchestration_quality_payload import quality_repair_advice_payload
 from .runner_context import current_subagent_run_id
 
@@ -21,6 +22,7 @@ def direct_children_progress_payload(agent) -> dict[str, object]:
         return {}
     payload = _progress_payload(parent_run_id, direct_children)
     payload["direct_children"].update(quality_repair_advice_payload(agent, parent_run_id))
+    _attach_quality_advice(agent, parent_run_id, payload["direct_children"])
     _attach_direct_child_next_action(payload["direct_children"])
     return payload
 
@@ -49,6 +51,10 @@ def _attach_direct_child_next_action(children: dict[str, object]) -> None:
         return
     if children["needs_recovery"]:
         children.update(_recovery_dispatch_payload(children["recovery_run_ids"]))
+        return
+    if children.get("quality_advice"):
+        children["ready_for_parent_acceptance"] = False
+        children.update(_quality_wave_payload(children["quality_advice"]))
         return
     if children["ready_for_parent_acceptance"]:
         children.update(_closeout_payload())
@@ -95,6 +101,23 @@ def _closeout_payload() -> dict[str, object]:
     }
 
 
+# LLM: _quality_wave_payload points coordinators to QA child creation before they reread artifacts.
+# 函数用途: 已有可验收实现但缺 tester/bug_finder/acceptor 时，返回 refs-first QA 波次建议。
+def _quality_wave_payload(advice: dict[str, object]) -> dict[str, object]:
+    return {
+        "next_action": "create_quality_children_from_ready_refs",
+        "suggested_tool_call": {
+            "tool": "schedule_child_subagents",
+            "apply": True,
+            "children": list(advice.get("suggested_children") or []),
+        },
+        "quality_hint": (
+            "父任务还缺真实 QA 角色；先按 suggested_tool_call 创建 tester/bug_finder/acceptor，"
+            "不要反复 read_file/read_artifact 读取产物正文来替代 QA 子代理。"
+        ),
+    }
+
+
 # LLM: _dispatch_tool_call keeps suggested dispatch calls structurally identical across progress states.
 # 函数用途: 生成建议模型复制的 dispatch_subagents 工具参数。
 def _dispatch_tool_call(run_ids: list[str]) -> dict[str, object]:
@@ -104,6 +127,41 @@ def _dispatch_tool_call(run_ids: list[str]) -> dict[str, object]:
         "execute_runners": True,
         "run_ids": run_ids,
         "workflow_mode": "auto",
+    }
+
+
+# LLM: _attach_quality_advice exposes missing QA roles through dispatch, not only schedule dry-runs.
+# 函数用途: 让父 runner 在实现 child ready 后直接看到 QA 缺口和候选 child specs，避免自己读正文猜验收流程。
+def _attach_quality_advice(agent, parent_run_id: str, children: dict[str, object]) -> None:
+    if children.get("needs_more_dispatch") or children.get("needs_recovery") or children.get("needs_repair_wave"):
+        return
+    try:
+        parent = agent.subagents.load(parent_run_id)
+    except Exception:
+        return
+    advice = qa_orchestration_advice(manager=agent.subagents, parent=parent, specs=[])
+    if advice is None or advice.phase != "quality_wave_ready":
+        return
+    children["quality_advice"] = _quality_advice_payload(advice)
+
+
+# LLM: _quality_advice_payload keeps QA suggestions compact and copyable for the next tool call.
+# 函数用途: 把 QA advice dataclass 转成模型可读 JSON，不读取任何业务产物正文。
+def _quality_advice_payload(advice) -> dict[str, object]:
+    return {
+        "phase": advice.phase,
+        "llm_next_step": advice.llm_next_step,
+        "guardrails": list(advice.guardrails),
+        "suggested_roles": list(advice.suggested_roles),
+        "suggested_children": [
+            {
+                "goal": item.goal,
+                "agent_name": item.agent_name,
+                "role": item.role,
+                "acceptance_checks": list(item.acceptance_checks),
+            }
+            for item in advice.suggested_children
+        ],
     }
 
 

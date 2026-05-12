@@ -4376,3 +4376,77 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Verification planned:
   - Unit tests cover direct QA child failure and descendant QA failure.
   - Next real R73/R74 should check that the root-only chain creates a scoped repair worker after tester reports the checkout/order-success flow break.
+
+### Result: R73 Preflight Exposed Hard Duplicate Target Guard And Root Over-Reading
+
+- Discovered at: 2026-05-12 during R73 clean root-only shopping-site run.
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`
+  - Product root was intentionally not pre-created by the outer observer; root/runtime created `.my_agent_runtime` and `deliverables/.../build` after the run started.
+  - Outer observer only seeded root and watched logs/status.
+- Observed behavior:
+  - Root created `stage7-shop-r73-root`, which created `小傻妞-1`, which created `小小傻妞-1`.
+  - `小小傻妞-1` wrote the required shopping-site files and finished `DONE / VERIFIED`.
+  - The build directory reached the 10 required product files.
+  - The chain did not yet create a depth=3 `小小小傻妞-*` run, and no real tester/bug_finder/acceptor had been created before the preflight was stopped.
+  - A later schedule attempt returned `duplicate_leaf_target:app.js`.
+  - Root then repeatedly called `read_file/read_artifact/subagent_board/subagent_message`; prompt size climbed from roughly 40k chars to over 90k chars.
+- 中文解释：
+  - 这轮证明“目录让 root 建”是对的：运行后系统自己建出了 runtime/product 目录。
+  - 也证明两个设计问题：第一，底层不该因为同一个文件被写过就直接拦住，因为修复和共享文件很常见；第二，root 不该为了验收把孩子写的文件一页页读回来，否则多层子代理就失去节省上下文的意义。
+- Root cause:
+  - `duplicate_leaf_target` originally protected against accidental duplicate leaf ownership, but it had grown into a hard workflow decision.
+  - `dispatch_subagents` had QA advice on schedule calls, but runner-context dispatch did not show missing QA roles when implementation descendants were ready. Root lacked a clear "create QA now" next action, so it tried to inspect product bodies itself.
+- Fix:
+  - Duplicate leaf targets now produce `scheduling_warnings` instead of blocking scheduling. The warning is audit-only and tells the parent to coordinate ownership.
+  - Runner-context dispatch now attaches `quality_advice` and `next_action=create_quality_children_from_ready_refs` when parent contracts require tester/bug_finder/acceptor and ready implementation descendants exist.
+  - The payload explicitly tells parent runners not to substitute repeated `read_file/read_artifact` body reads for real QA subagents.
+- Borrowed lesson:
+  - 长期助手 delegate returns compact child summaries, tool traces, token counts, and status instead of handing full child transcripts back to the parent.
+  - 通道运行时 separates context injection/cache/guard behavior so continuation turns can avoid reloading bootstrap context and can inspect prompt-cache health.
+  - For our subagent tree, the matching long-term rule is refs-first parent control: parent sees ids, status, advice, warnings, and short summaries; children and QA agents own detailed reads.
+- Verification:
+  - `test_hierarchy_schedule_warns_duplicate_verified_leaf_targets`.
+  - `test_dispatch_payload_suggests_quality_wave_before_closeout`.
+  - Focused duplicate/dispatch/schedule/QA tests passed locally.
+- Next:
+  - R74 should restart from a clean `/Users/example/my-终端应用` task directory and verify root creates QA roles from dispatch advice instead of growing its own context with product body reads.
+
+### Result: R74 Exposed Delegating Parent Body-Read Drift
+
+- Discovered at: 2026-05-12 during R74 clean root-only shopping-site run.
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - The outer observer cleaned the task directory but did not pre-create deliverables/runtime roots.
+  - The outer observer only seeded root and watched logs/status; root and descendants created lower runs and product files.
+- Observed behavior:
+  - Root created `stage7-shop-r74-root`.
+  - Root created depth=1 `小傻妞-总协调员`; that coordinator created four depth=2 leaf workers: `小小傻妞-前端布局`, `小小傻妞-商品模块`, `小小傻妞-交易流程`, and `小小傻妞-样式脚本`.
+  - Product files reached the required set, including `order-success.html`.
+  - The required depth=3 `小小小傻妞-*` branch was still missing; R74 therefore did not satisfy the 4-layer stress-test contract.
+  - The depth=2 transaction leaf became too large: it repeatedly read/appended/wrote checkout/order pages and grew from about 24k prompt chars to about 94k.
+  - Root also grew from about 33k to more than 100k prompt chars after it started calling `read_artifact`, `read_file`, `list_files`, and `subagent_board` to inspect child/product details itself.
+- 中文解释：
+  - 这一轮说明“只是给 root 提示不要读正文”不够。root 一旦派了子代理干活，在验收子代理没有完成之前，就不应该自己一页页读产物正文。否则多层派工省上下文的初衷会失效。
+  - 但用户可以明确授权例外：如果用户说“子代理做完你自己验收 / 你亲自看一下”，主代理可以临时读正文做最后验收。这是当前 run 的显式授权，不是长期默认放开。
+- Root cause:
+  - Dispatch payload still left enough room for root to use `read_artifact` / `read_file` as a self-QA substitute after child acceptance failed or QA was missing.
+  - Externalized orchestration outputs still included a convenient `read_artifact_hint`, which nudged the model to expand big dispatch records back into live prompt.
+  - There was no tool-loop guard that distinguishes “delegating parent in progress” from “final parent acceptance after acceptor finished”.
+- Fix:
+  - Added `orchestration_body_read_guard.py`.
+  - While a current runner has delegated children and no completed `acceptor` descendant, `read_file` on product/body files and `read_artifact` body reads are blocked with `delegating_body_read_blocked=true`.
+  - Runtime metadata reads such as `task.json`, `status_report.json`, `test_execution.json`, acceptance reports, handoff files, and takeover packets remain allowed.
+  - Explicit user override phrases such as “你自己做一下验收” or “你亲自看一下” temporarily allow parent body reads for the current prompt; generic text like “验收标准” does not unlock the guard.
+  - Added `tool_context_orchestration_summary.py`; externalized dispatch/schedule/read-artifact orchestration outputs now keep compact `next_action`, run ids, status counts, and suggested tool calls in live prompt without pushing `read_artifact_hint`.
+- Verification:
+  - `test_delegating_parent_cannot_read_product_body_before_acceptor_done`.
+  - `test_delegating_parent_can_read_runtime_metadata_before_acceptor_done`.
+  - `test_delegating_parent_cannot_read_artifact_body_before_acceptor_done`.
+  - `test_completed_acceptor_allows_final_parent_body_read`.
+  - `test_user_can_explicitly_authorize_parent_body_read_for_acceptance`.
+  - `test_generic_acceptance_criteria_does_not_authorize_parent_body_read`.
+  - `test_dispatch_externalized_result_keeps_compact_next_action_without_read_hint`.
+  - `test_read_artifact_dispatch_content_is_summarized_for_live_prompt`.
+- Next:
+  - Restart a clean R75 after focused verification. Expected behavior: root should create QA/repair/acceptance children from refs and only perform body inspection after a real acceptor completes or the user explicitly authorizes parent inspection.

@@ -28,21 +28,34 @@ class LeafTargetDedupeRequest:
     leaf_like: Callable[[Any], bool]
 
 
-# LLM: duplicate_verified_leaf_target_reason blocks rerunning the same finished leaf output.
-# 函数用途: 同父级已有 DONE/VERIFIED leaf 写过同一目标文件时，阻断重复 leaf 创建。
-def duplicate_verified_leaf_target_reason(request: LeafTargetDedupeRequest) -> str:
+# LLM: duplicate_verified_leaf_target_warnings audits repeated output targets without blocking collaboration.
+# 函数用途: 同父级已有 DONE/VERIFIED leaf 写过同一目标文件时，返回审计提示；不阻断后续修复或协作写入。
+def duplicate_verified_leaf_target_warnings(request: LeafTargetDedupeRequest) -> list[str]:
     seen_targets = _completed_leaf_targets(request)
     if not seen_targets:
-        return ""
+        return []
+    warnings: list[str] = []
     for spec in request.schedule_request.child_specs:
-        if not request.leaf_like(spec):
-            continue
-        if _is_explicit_repair_leaf(spec):
-            continue
-        duplicate = _first_overlapping_target(_child_target_tokens(spec), seen_targets)
-        if duplicate:
-            return f"duplicate_leaf_target:{duplicate}"
-    return ""
+        warning = _duplicate_target_warning(spec, seen_targets, request.leaf_like)
+        if warning and warning not in warnings:
+            warnings.append(warning)
+    return warnings
+
+
+# LLM: duplicate_verified_leaf_target_reason preserves the legacy query shape for tests and callers.
+# 函数用途: 兼容旧调用方需要单个原因字符串的场景；调度主路径只把它作为 warning 使用。
+def duplicate_verified_leaf_target_reason(request: LeafTargetDedupeRequest) -> str:
+    warnings = duplicate_verified_leaf_target_warnings(request)
+    return warnings[0] if warnings else ""
+
+
+# LLM: _duplicate_target_warning keeps the public warning collector shallow for size guards.
+# 函数用途: 判断一个待建 leaf 是否重复已完成产物；修复类 leaf 和非 leaf 不返回 warning。
+def _duplicate_target_warning(item: Any, seen_targets: list[set[str]], leaf_like: Callable[[Any], bool]) -> str:
+    if not leaf_like(item) or _is_explicit_repair_leaf(item):
+        return ""
+    duplicate = _first_overlapping_target(_child_target_tokens(item), seen_targets)
+    return f"duplicate_leaf_target:{duplicate}" if duplicate else ""
 
 
 # LLM: _completed_leaf_targets reads only direct child metadata and output artifact path refs.

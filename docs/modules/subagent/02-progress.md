@@ -933,4 +933,19 @@
 - 已实现：新增 `orchestration_quality_payload.py`，runner-context dispatch 会扫描当前父节点后代 QA 任务的小型 `output.json` 摘要和状态；只要 tester/bug_finder/acceptor 报告失败、缺陷、缺失、断裂或状态失败，就返回 `needs_repair_wave=true`、失败 QA run ids、短摘要 refs 和可编辑的 `schedule_child_subagents` repair worker 建议。
 - 保持边界：系统只给 advice 和 guardrail，不直接创建 repair worker、不自动改文件、不让 acceptor 单方覆盖 tester 失败；父级 LLM 仍要决定修复哪个文件、派谁修、何时重新跑 tester/acceptor。
 - Prompt 同步：coordinator prompt 增加 `qa_repair_advice / needs_repair_wave` 处理要求，提醒模型不要直接最终验收，应先按失败 QA refs 创建 scoped repair worker 并复测。
-- 下一步：用 R73/R74 真实 E2E 验证 root-only 链路能在 QA 失败后自己创建 repair worker，修完 `checkout.html -> order-success.html` 断点，再重新推进 tester/acceptor。
+- R73 预检新发现：`duplicate_leaf_target:<file>` 这种底层硬阻断仍会误伤真实协作。理论上它能防两个普通 worker 撞同一文件，但真实项目里共享 `style.css/app.js`、QA 后 repair、父级接管都可能合法触碰同一文件；只要写入根可审计，就不应在调度层硬挡。
+- 已修正：重复 leaf 目标从 hard block 改为 `scheduling_warnings`。调度会继续创建任务，同时在工具返回里提示父级协调 ownership、看板和消息；真正的安全边界保留在写入根、深度、数量、领域越界和工具执行层。
+- R73 预检还发现 root 越跑越重：production child 已 ready 且父级仍缺 QA 角色时，dispatch payload 只提示可收口，root 便开始反复 `read_file/read_artifact` 自己验产物，prompt 从 4 万多字符涨到 9 万多字符。大白话：我们省上下文的初衷被破坏了，父级把孩子的细节又搬回自己脑子里。
+- 已修正：runner-context `dispatch_subagents` 现在也会暴露 `quality_advice`。如果父任务点名 tester/bug_finder/acceptor，且实现后代已经 ready，payload 会返回 `next_action=create_quality_children_from_ready_refs`、候选 QA children 和“不要反复读正文替代 QA”的提示。root 应按 refs 创建 QA 子代理，而不是自己吞正文。
+- 对标结论：长期助手 的 delegate 返回 summary、api_calls、tool_trace 和 token 统计；通道运行时 的 context-engine 会跳过重复 bootstrap、记录 prompt cache/usage，并用 context guard 控制窗口。我们应该学习“父级看摘要/refs/状态，不看孩子正文”的方向，而不是靠越来越多硬规则卡工作流。
+- 已补测试：`test_hierarchy_schedule_warns_duplicate_verified_leaf_targets`、`test_dispatch_payload_suggests_quality_wave_before_closeout`，并回归 duplicate guard、dispatch child refs、schedule child tool 和 QA scheduler focused tests。
+- 下一步：重跑干净 R74。预期 root 不再被 duplicate target 卡住，也不再靠反复读正文自验；应在 production ready 后按 dispatch 返回的 `quality_advice` 创建 tester/bug_finder/acceptor，再进入 QA repair/retest 链路。
+
+## 2026-05-12 R74: delegating parent refs-only guard
+- 中文说明：R74 真实复测证明，仅靠 prompt 让 root “不要读正文”不够。root 已有下级时仍会通过 `read_artifact/read_file` 自己翻孩子或产物正文，prompt 从约 3.3 万字符涨到 10 万以上；最重的交易 leaf 也因为任务过大和反复整文件读取涨到 9 万多字符。
+- R74 事实：root 创建了 depth=1 `小傻妞-总协调员`，该 coordinator 创建了四个 depth=2 leaf worker，并写出购物站 10 个产物文件；但没有创建要求中的 depth=3 `小小小傻妞-*` 链路，QA/验收链也没有完整收口，所以这轮不能算通过。
+- 已修正：新增 `orchestration_body_read_guard.py`，工具循环在执行 `read_file/read_artifact` 前检查当前 runner 是否已经委托 child。只要有 child 且子树里还没有完成的 `acceptor`，父级默认保持 refs-only，不能主动读取产物正文或大 artifact 正文。
+- 保留口子：如果用户明确说“子代理做完你自己验收 / 你亲自看一下 / 主代理亲自检查”，当前 run 临时放行父级读正文；普通“验收标准”“主代理观察入口”不会误触发。
+- 已修正：新增 `tool_context_orchestration_summary.py`。调度类大输出外置后，live prompt 保留 `next_action`、run ids、状态计数和 suggested tool call，不再默认给模型 `read_artifact_hint` 去展开大 dispatch artifact。
+- 已补测试：`test_orchestration_body_read_guard.py` 覆盖委托期阻断、运行元数据放行、acceptor 完成后放行、用户显式 override 和泛化验收文字不误放；`test_tool_context_reducer.py` 覆盖 externalized dispatch/read_artifact 的 compact orchestration summary。
+- 下一步：跑 focused verification 后干净启动 R75。预期 root 只看 refs/状态/advice，按建议创建 QA/repair/acceptance 子代理；只有 acceptor 完成或用户明确授权时，root 才做最后正文检查。
