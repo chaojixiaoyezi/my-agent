@@ -16,6 +16,7 @@ from .hierarchy_domain_terms import (
 )
 from .hierarchy_leaf_targets import LeafTargetDedupeRequest, duplicate_verified_leaf_target_reason
 from .hierarchy_write_policy import inherited_extra_write_roots
+from .qa_role_contract import qa_role_identity_roles
 
 
 # LLM: schedule_block_reason keeps guard checks deterministic and side-effect free.
@@ -42,6 +43,9 @@ def schedule_block_reason(parent: SubAgentTask, request: Any) -> str:
 # LLM: duplicate_child_domain_reason blocks repeated coordinator domains under the same parent.
 # 函数用途: 阻止同一个父节点重复创建 checkout/quality 这类同域 coordinator，避免真实 E2E 扇出膨胀。
 def duplicate_child_domain_reason(manager: Any, parent: SubAgentTask, request: Any) -> str:
+    qa_phase_reason = _qa_before_implementation_reason(manager, parent, request)
+    if qa_phase_reason:
+        return qa_phase_reason
     bypass_reason = _root_leaf_bypass_reason(manager, parent, request)
     if bypass_reason:
         return bypass_reason
@@ -68,6 +72,52 @@ def duplicate_child_domain_reason(manager: Any, parent: SubAgentTask, request: A
         if domains:
             seen_domains.append(domains)
     return ""
+
+
+# LLM: _qa_before_implementation_reason keeps QA creation from becoming the only next layer.
+# 函数用途: 交付型父任务还没有 worker/leaf child 时，阻断纯 tester/bug_finder/acceptor 批次，要求先创建实现节点。
+def _qa_before_implementation_reason(manager: Any, parent: SubAgentTask, request: Any) -> str:
+    if not _parent_has_product_root(parent):
+        return ""
+    if not request.child_specs or not any(_is_qa_like(spec) for spec in request.child_specs):
+        return ""
+    if _ready_implementation_children(manager, parent):
+        return ""
+    return "qa_before_implementation_ready:create and finish worker/writer/leaf_worker before QA children"
+
+
+# LLM: _parent_has_product_root uses explicit write roots as the stable signal for deliverable work.
+# 函数用途: 判断父任务是否是有产物根的交付任务；没有产物根的研究/检查任务不受 QA 阶段门限制。
+def _parent_has_product_root(parent: SubAgentTask) -> bool:
+    return bool(inherited_extra_write_roots(parent))
+
+
+# LLM: _is_qa_like checks explicit role/name identity, not broad inherited goal prose.
+# 函数用途: 判断 child spec 是否是 tester、bug_finder 或 acceptor 这类 QA 角色。
+def _is_qa_like(item: Any) -> bool:
+    return bool(qa_role_identity_roles(role=str(getattr(item, "role", "")), agent_name=str(getattr(item, "agent_name", ""))))
+
+
+# LLM: _ready_implementation_children reads only direct child identity and persisted status.
+# 函数用途: 判断父节点下是否已有 worker/writer/leaf/coder 子任务进入可验收或完成状态；否则不允许提前创建 QA。
+def _ready_implementation_children(manager: Any, parent: SubAgentTask) -> list[Any]:
+    children: list[Any] = []
+    for child_id in parent.child_ids:
+        try:
+            child = manager.load(child_id)
+        except (FileNotFoundError, OSError, ValueError, TypeError):
+            continue
+        if _is_leaf_like(child) and _implementation_child_ready(child):
+            children.append(child)
+    return children
+
+
+# LLM: _implementation_child_ready keeps QA creation behind an actual implementation checkpoint.
+# 函数用途: worker/leaf 至少等待验收或已完成时，QA 子任务才有真实产物/证据可检查。
+def _implementation_child_ready(child: Any) -> bool:
+    status = str(getattr(child, "status", "") or "").upper()
+    verification = str(getattr(child, "verification_status", "") or "").upper()
+    return status in {"AWAITING_ACCEPTANCE", "DONE"} or verification in {"NEEDS_ACCEPTANCE", "VERIFIED"}
 
 
 # LLM: _root_leaf_bypass_reason preserves coordinator ownership once a root has delegated domains.

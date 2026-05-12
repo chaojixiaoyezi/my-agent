@@ -26,13 +26,30 @@
 
 ## 派工顺序
 
+这些不是硬编码流程，只是 LLM 的默认判断顺序。真正执行时，主代理和 coordinator 应该先读取当前任务、已有 child 状态、产物 refs、用户约束和 workflow 提示，再决定要不要偏离默认顺序。代码层只负责挡明显危险或不成立的动作。
+
 1. 先判断任务是不是单点小任务；如果是，root 可以直接派 `worker` / `writer`。
 2. 如果任务需要多人、多文件、多阶段或用户明确要求多层，就先派 `coordinator` / `lead`。
-3. 产出型工作先派 `worker` / `writer`，不要先派 `tester` 或 `acceptor`。
+3. 产出型工作先派 `worker` / `writer` / `leaf_worker`，不要先创建或执行 `tester`、`bug_finder`、`acceptor` 空转。
 4. 事实不足时先派 `researcher`，再把研究结论交给 worker/writer。
 5. 产物出来后，可以让一个 `tester` 检查多个 worker 的结果。
 6. 风险较高或用户要求严格时，加一个或多个 `bug_finder` 找问题；它们可以横向检查多个产物。
 7. 测试和找错都收口后，再派 `acceptor` 做最终验收建议；最终状态仍由父级 gate 决定。
+
+## QA 阶段门
+
+大白话：QA 小傻妞不是一开始就站在那里等，也不是看到空目录就认真报错。它应该在有东西可测时出现，或者至少在某个 work 批次已经到“可测试/可验收”状态后再跑。
+
+这里的“阶段门”只是一条红线，不是固定剧本。系统只判断“现在有没有可测对象、QA 有没有越权、父级有没有跳过失败 child”；至于派一个 QA 还是多个 QA、按局部 work group 测还是整体验证、失败后回原 worker 还是新建 repair worker，优先交给 LLM 根据上下文和 workflow 判断。
+
+- 全部 work 都结束：创建或激活一组 tester / bug_finder；它们通过后再创建或激活 acceptor。
+- 部分关联 work 结束：只给这组关联 work 建 QA，QA 结果绑定 `work_group_id`、产物 refs 和测试 refs；通过表示这组可集成，不代表整个父任务完成。
+- 单个 work 结束：默认进入 `ready_for_batch_qa`；只有它是独立交付单元或阻塞后续工作时，才立即派 QA。
+- QA 通过：work 不删除、不污染长期 memory，进入 `QA_PASSED` 或 `AWAITING_ACCEPTANCE`，保留 workspace、artifact refs、test refs，等待 acceptor 或父级 gate。
+- QA 不通过：work 进入 `NEEDS_REPAIR`，优先让原 worker 修或派 repair worker；QA report 必须带失败 refs，不能只写自然语言。
+- QA 自己失败：不等于产品失败。要区分 `QA_TOOL_FAILED` / `QA_BLOCKED` 和 `PRODUCT_FAILED`；前者重跑或替换 QA，后者才返修 work。
+- worker runner 可以结束，但 task workspace 不能删；后续 QA、repair、acceptor 都必须能从 refs 接上。
+- 大型并行任务要引入 `work_group_id` / `dependency_group` / `qa_scope`，让一个 QA 检查一组相关 work，而不是扫全局或和 worker 一一对应。
 
 ## 派工角色必须知道的边界
 

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..models import SubAgentTask
+from .hierarchy_write_policy import inherited_extra_write_roots
 from .qa_role_contract import qa_role_identity_roles, qa_roles_required_by_task
 
 _QA_SCAN_MAX_NODES = 64
@@ -30,7 +31,17 @@ def required_qa_child_specs(
     parent: SubAgentTask,
     specs: list[Any],
 ) -> list[RequiredQaChildSpec]:
+    if _qa_autofill_deferred_until_implementation_ready(manager, parent):
+        return []
     return [_qa_role_child_spec(parent, role) for role in _missing_required_qa_roles(manager, parent, specs)]
+
+
+# LLM: _qa_autofill_deferred_until_implementation_ready prevents empty-build QA children.
+# 函数用途: 有产物根的父任务先等 worker/leaf 有可验收状态，再自动补派 tester/bug_finder/acceptor。
+def _qa_autofill_deferred_until_implementation_ready(manager: Any, parent: SubAgentTask) -> bool:
+    if not inherited_extra_write_roots(parent):
+        return False
+    return not _has_ready_implementation_child(manager, parent)
 
 
 # LLM: _missing_required_qa_roles compares parent contract, current request, and persisted descendants.
@@ -71,6 +82,28 @@ def _existing_descendant_qa_roles(manager: Any, parent: SubAgentTask) -> set[str
         roles.update(qa_role_identity_roles(role=child.role, agent_name=child.agent_name))
         queue.extend(child_id for child_id in child.child_ids if child_id not in seen)
     return roles
+
+
+# LLM: _has_ready_implementation_child checks direct implementation children without reading artifacts.
+# 函数用途: 判断父节点是否已有 worker/writer/leaf 子任务进入可验收/已完成状态，作为 QA 自动补派阶段门。
+def _has_ready_implementation_child(manager: Any, parent: SubAgentTask) -> bool:
+    for child_id in parent.child_ids:
+        child = _load_child_for_qa_scan(manager, str(child_id))
+        if child is not None and _is_ready_implementation_child(child):
+            return True
+    return False
+
+
+# LLM: _is_ready_implementation_child keeps the QA phase gate based on persisted role and status.
+# 函数用途: worker/leaf 子任务至少等待验收或已验证完成，才算 QA 可以开始。
+def _is_ready_implementation_child(child: SubAgentTask) -> bool:
+    identity = f"{child.role} {child.agent_name}".lower().replace("-", "_")
+    implementation = any(token in identity for token in {"worker", "writer", "coder", "leaf"})
+    if not implementation:
+        return False
+    status = str(child.status or "").upper()
+    verification = str(child.verification_status or "").upper()
+    return status in {"AWAITING_ACCEPTANCE", "DONE"} or verification in {"NEEDS_ACCEPTANCE", "VERIFIED"}
 
 
 # LLM: _load_child_for_qa_scan keeps auto-scheduling tolerant of missing or stale task refs.
