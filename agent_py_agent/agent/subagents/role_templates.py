@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .role_template_resolution import resolve_role_template_id
+
 READ_ONLY_TOOLS = ["list_files", "read_file", "search_text", "read_artifact"]
 WORKER_READ_TOOLS = ["list_files", "read_file", "search_text", "read_artifact"]
 WORKER_WRITE_TOOLS = ["write_file", "append_file", "replace_in_file"]
@@ -107,6 +109,18 @@ def template_for_role(
     return load_role_template_store(user_template_dir=user_template_dir).get(role)
 
 
+# LLM: role_template_id_for_role maps natural runtime role names onto external template ids.
+# 函数用途: 从模板目录中查找最匹配的角色模板；child_coordinator、qa_tester、用户自定义前后缀角色都不能落成空模板。
+def role_template_id_for_role(
+    role: str,
+    user_template_dir: str | Path | Iterable[str | Path] | None = None,
+    *,
+    fallback: str | None = None,
+) -> str:
+    store = load_role_template_store(user_template_dir=user_template_dir)
+    return resolve_role_template_id(store, role, fallback=fallback)
+
+
 # LLM: role_template_index_text renders the lightweight catalog main agents can keep in prompt.
 # 函数用途: 输出角色模板索引，只包含 id、中文名、摘要、能力标签和模板位置；不展开完整 prompt 细节。
 def role_template_index_text(
@@ -162,7 +176,8 @@ def _selected_templates(
         return store.all()[:limit]
     selected: list[RoleTemplate] = []
     for role in roles:
-        template = store.get(role)
+        template_id = resolve_role_template_id(store, role)
+        template = store.get(template_id)
         if template is not None:
             selected.append(template)
     return selected[:limit]

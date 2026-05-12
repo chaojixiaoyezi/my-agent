@@ -7,7 +7,7 @@ from dataclasses import replace
 from typing import Any
 
 from .quality_models import QualityContract
-from .role_templates import RoleTemplate, template_for_role
+from .role_templates import RoleTemplate, role_template_id_for_role, template_for_role
 
 REPORTER_ROLE = "reporter"
 CHECKER_ROLE = "checker"
@@ -53,12 +53,36 @@ def normalize_subagent_role(role: str) -> str:
 def apply_role_contract_to_create_params(params: Any, role_template_dirs: object = None):
     original_role = str(getattr(params, "role", "") or "general")
     contract_role = normalize_subagent_role(original_role)
-    stored_role = contract_role if bool(getattr(params, "normalize_role", True)) else original_role
-    template = template_for_role(contract_role, role_template_dirs)
-    checks = _acceptance_checks_for_role(contract_role, getattr(params, "acceptance_checks", None), template)
-    tools = _allowed_tools_for_role(contract_role, getattr(params, "allowed_tools", None), template)
-    quality_contract = _quality_contract_for_role(contract_role, getattr(params, "quality_contract", None), template)
+    template_role = role_template_id_for_role(
+        contract_role,
+        role_template_dirs,
+        fallback=_fallback_template_role(contract_role),
+    )
+    stored_role = _stored_role(original_role, contract_role, template_role, getattr(params, "normalize_role", True))
+    effective_role = template_role or contract_role
+    template = template_for_role(template_role, role_template_dirs) if template_role else None
+    checks = _acceptance_checks_for_role(effective_role, getattr(params, "acceptance_checks", None), template)
+    tools = _allowed_tools_for_role(effective_role, getattr(params, "allowed_tools", None), template)
+    quality_contract = _quality_contract_for_role(effective_role, getattr(params, "quality_contract", None), template)
     return replace(params, role=stored_role, acceptance_checks=checks, allowed_tools=tools, quality_contract=quality_contract)
+
+
+# LLM: _fallback_template_role prevents unknown LLM-created roles from becoming empty agents.
+# 函数用途: reporter/checker 用专属旧契约；其他未命中模板的自由角色至少套 worker 模板获得基础读写能力。
+def _fallback_template_role(role: str) -> str | None:
+    if role in {"", "general", REPORTER_ROLE, CHECKER_ROLE}:
+        return None
+    return "worker"
+
+
+# LLM: _stored_role preserves hierarchy subtype names while applying their matched template contracts.
+# 函数用途: child_coordinator/leaf_worker 这类角色仍保留在任务树里，但工具和验收按匹配到的模板生成。
+def _stored_role(original_role: str, contract_role: str, template_role: str, normalize_role: object) -> str:
+    if not bool(normalize_role):
+        return original_role
+    if template_role and contract_role != template_role:
+        return contract_role
+    return contract_role
 
 
 # LLM: _acceptance_checks_for_role appends stable role-specific gates exactly once.
@@ -86,9 +110,11 @@ def _allowed_tools_for_role(
 ) -> list[str] | None:
     if tools not in (None, []):
         explicit = [str(item) for item in _list_value(tools) if item not in (None, "")]
-        if template and not template.can_write:
+        if role == CHECKER_ROLE or (template and not template.can_write):
             return _without_write_tools(explicit)
         return explicit
+    if role == CHECKER_ROLE:
+        return list(CHECKER_READ_ONLY_TOOLS)
     if template:
         return list(template.default_tools)
     if role == CHECKER_ROLE:

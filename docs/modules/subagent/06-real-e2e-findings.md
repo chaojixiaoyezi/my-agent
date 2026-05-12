@@ -4590,3 +4590,37 @@ This document is append-only. Record every real subagent E2E issue found during 
   - R78 was intentionally stopped after it entered generic-worker runaway; the product files and logs were preserved for review.
 - Next:
   - Run clean R79. Expected behavior: QA roles close out as QA outputs, not as parents missing their own child roles; parent/coordinator should summarize refs or explicitly create repair children without spawning generic workflow workers.
+
+### Result: R80 Exposed Natural Role Names Creating Empty Agents
+
+- Discovered at: 2026-05-12 during R80 clean shopping-site root-only run.
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - The outer observer seeded one root/coordinator and watched trace logs; lower agents were created only by the root/parent runners.
+  - The prompt required a shopping-site build, 4-level hierarchy, and role-template-based delegation.
+- Observed behavior:
+  - Root created three child runs with `role=child_coordinator`.
+  - Built-in templates only include canonical ids such as `coordinator`, `worker`, `tester`, `bug_finder`, `acceptor`, `researcher`, `writer`.
+  - `child_coordinator` was mentioned in prompt/spec text, but runtime role contracts did not resolve it to the `coordinator` template.
+  - The child runs ended with `allowed_tools=[]`, then calls like `directory_tree` and `capability_request` were rejected as unauthorized.
+- 中文解释：
+  - 这不是用户该管的事。用户最多会说“记得测试/验收”，不会给几十个子代理逐个指定模板。
+  - 正确做法是：系统把模板目录交给 LLM 做选择，同时落盘前再兜底解析。LLM 写了 `child_coordinator`、`qa_tester`、`slide_ppt_polisher_lead` 这种自然名字，也要能找到对应模板，不能变成“啥工具都没有”的代理。
+- Root cause:
+  - Role template catalog already existed, but runtime role matching was mostly exact id lookup plus a small alias table.
+  - The prompt/spec contract encouraged hierarchy-specific subtype names while the code only recognized canonical template ids.
+  - Unknown roles did not fall back to any broad template, so a typo or natural subtype could become an empty agent.
+- Fix:
+  - Added `role_template_id_for_role()`, which loads the active built-in/user template store and resolves natural role names by exact id first, then underscore-token matching. Examples: `child_coordinator -> coordinator`, `qa_tester -> tester`, `slide_ppt_polisher_lead -> ppt_polisher`.
+  - `apply_role_contract_to_create_params()` now applies the matched template's tools, acceptance checks, and quality contract while preserving useful stored role names such as `child_coordinator` or `leaf_worker` in the task tree.
+  - Unknown LLM-created roles now fall back to the broad `worker` template instead of creating `allowed_tools=[]`.
+  - `checker/reviewer` remains read-only even if inherited parent tools include write tools.
+  - `leaf_worker` keeps the slim leaf prompt and does not load the full worker template detail, so large leaf swarms do not get heavier prompts.
+- Verification:
+  - `test_natural_hierarchy_role_names_resolve_to_template_ids`
+  - `test_create_run_uses_template_defaults_after_natural_role_resolution`
+  - `test_unknown_llm_role_falls_back_to_worker_template`
+  - `test_user_template_role_can_be_selected_from_natural_name`
+  - Focused role-template / prompt-contract tests passed locally.
+- Next:
+  - Run clean R81 quickly, with a 2-3 minute first checkpoint: root should create children that keep lineage names but receive coordinator/worker/tester template tools. If build artifacts do not appear or children block again, stop fast, record, and patch instead of waiting a long time.
