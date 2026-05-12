@@ -4358,3 +4358,21 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Add an LLM-guided repair wave after QA disagreement: parent should read tester/bug_finder/acceptor evidence refs, create a repair worker for specific failed files, then rerun tester/acceptor.
   - Keep this as advice/template/workflow behavior plus acceptance guardrails, not as another hardcoded scheduler workflow.
   - Improve root final structured-output robustness so a blocked root can still emit a valid concise `SUBAGENT_RESULT` with refs.
+
+### Follow-up: R73 Adds QA Repair Advice Instead Of Automatic Repair
+
+- Implemented at: 2026-05-12 after R72.
+- Change:
+  - Added `orchestration_quality_payload.py`.
+  - Runner-context `dispatch_subagents` now scans descendant QA task status and small `output.json` summaries for failed/missing/broken signals.
+  - If QA reports a failure or disagreement, payload returns `direct_children.qa_repair_advice`, `needs_repair_wave=true`, failed QA run ids, output refs, and a suggested repair child tool call.
+- 中文解释：
+  - 这不是“系统看到失败就自动修”。它只是把 tester/bug_finder/acceptor 的失败证据摆到父级模型面前，并给一份可改的 repair worker 建议。真正是否修、修哪里、修完怎么复测，还是让 LLM 和后续 workflow 决定。
+- Boundaries:
+  - Does not create child runs.
+  - Does not read product artifact bodies.
+  - Does not let an acceptor pass override a tester failure.
+  - Turns `ready_for_parent_acceptance` back to false while repair advice is present.
+- Verification planned:
+  - Unit tests cover direct QA child failure and descendant QA failure.
+  - Next real R73/R74 should check that the root-only chain creates a scoped repair worker after tester reports the checkout/order-success flow break.

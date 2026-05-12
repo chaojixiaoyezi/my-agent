@@ -117,6 +117,8 @@ def test_runner_prompt_tells_coordinator_to_write_reports_but_delegate_deliverab
     assert "不要直接输出最终 SUBAGENT_RESULT" in prompt
     assert "quality_advice" in prompt
     assert "ready refs" in prompt
+    assert "qa_repair_advice" in prompt
+    assert "失败 QA refs" in prompt
     assert "模板详情" in prompt
     assert "你是找茬子代理" in prompt
     assert "subagent_message" in prompt

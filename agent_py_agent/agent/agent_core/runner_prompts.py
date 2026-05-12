@@ -200,6 +200,8 @@ def _coordinator_execution_contract_lines() -> list[str]:
             "- 创建 leaf 后使用 dispatch_subagents(apply=true, execute_runners=true) 推进直接 child，并汇总 leaf 的产物 refs。",
             "- 多个 child 同轮 dispatch 时不要写子任务专属 runner_instruction；需要专属补充就按单个 run_id 分多次 dispatch。",
             "- dispatch_subagents 返回 child test_failed 或 followup_action=plan_rescue 时，不要宣称完成；先汇报失败 refs 或安排修复。",
+            "- dispatch_subagents 返回 direct_children.qa_repair_advice 或 needs_repair_wave 时，不要直接最终验收；"
+            "先按失败 QA refs 创建 scoped repair worker，修复后再让 tester/acceptor 复测。",
             "- 少数下属需要不同纠偏、路径修正或需求变更时，用 subagent_message mode=direct scope=descendants 发给具体 run_id；"
             "大量下属需要同一通知时，用 mode=broadcast scope=descendants 写 scoped shared board。"
             "平级讨论只能用 mode=direct scope=peers，不能广播到兄弟分支的子孙。"

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .orchestration_quality_payload import quality_repair_advice_payload
 from .runner_context import current_subagent_run_id
 
 
@@ -19,6 +20,7 @@ def direct_children_progress_payload(agent) -> dict[str, object]:
     if direct_children is None:
         return {}
     payload = _progress_payload(parent_run_id, direct_children)
+    payload["direct_children"].update(quality_repair_advice_payload(agent, parent_run_id))
     _attach_direct_child_next_action(payload["direct_children"])
     return payload
 
@@ -38,6 +40,10 @@ def _direct_children(agent, parent_run_id: str) -> list | None:
 # LLM: _attach_direct_child_next_action centralizes model-facing progress guidance.
 # 函数用途: 根据 child 状态把继续调度、恢复或收口建议补进直接 child payload。
 def _attach_direct_child_next_action(children: dict[str, object]) -> None:
+    if children.get("needs_repair_wave"):
+        children["ready_for_parent_acceptance"] = False
+        children["next_action"] = "create_repair_child_from_qa_refs"
+        return
     if children["needs_more_dispatch"]:
         children.update(_continue_dispatch_payload(children["unfinished_run_ids"]))
         return
