@@ -90,6 +90,77 @@ class AcceptedSubagentBackend(BaseBackend):
         )
 
 
+# LLM: CapabilityThenAcceptedBackend simulates a worker that needs one parent grant before finishing.
+# 类用途: 第一轮返回 controlled_exec 能力申请，第二轮看到父级 grant 后返回可验收结果，用于测试 dispatch 内部闭环。
+class CapabilityThenAcceptedBackend(BaseBackend):
+    """测试用后端：先申请 controlled_exec，授权后完成。"""
+
+    name = "capability_then_accepted_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        assert "[SUBAGENT_RESULT]" in prompt
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(text=_controlled_exec_request_result(), backend=self.name)
+        assert "controlled_exec_grants" in prompt
+        return ModelResponse(text=_controlled_exec_done_result(), backend=self.name)
+
+
+# LLM: _controlled_exec_request_result keeps the capability backend class compact.
+# 函数用途: 返回一个结构化 BLOCKED 结果，包含 shell/tool/path/output budget 申请字段。
+def _controlled_exec_request_result() -> str:
+    return (
+        "[SUBAGENT_RESULT]\n"
+        "{\n"
+        '  "status": "BLOCKED",\n'
+        '  "summary": "需要父级授权 controlled_exec 后继续。",\n'
+        '  "used_tools": ["write_file"],\n'
+        '  "used_skills": [],\n'
+        '  "evidence": [{"kind": "note", "summary": "已写 sentinel，等待 shell grant", "ok": true}],\n'
+        '  "evidence_packets": [],\n'
+        '  "capability_requests": [\n'
+        '    {"problem": "需要受控 shell 验证 pwd 和 trash 行为", "needed_capability": "controlled_exec", "capability_type": "shell", "expected_output": "stdout/audit/trash refs", "requested_tools": ["controlled_exec"], "requested_commands": ["pwd", "rm"], "path_scope": ["."], "output_budget": {"stdout_bytes": 2048, "stderr_bytes": 1024}, "risk_level": "low"}\n'
+        "  ],\n"
+        '  "artifacts": [],\n'
+        '  "tests": [],\n'
+        '  "patches": [],\n'
+        '  "lessons": [],\n'
+        '  "next_actions": ["route_capability_request", "rerun_subagent_after_grant"],\n'
+        '  "blocked_reason": "缺少 controlled_exec grant",\n'
+        '  "failure_type": "capability_request"\n'
+        "}\n"
+        "[/SUBAGENT_RESULT]"
+    )
+
+
+# LLM: _controlled_exec_done_result includes the refs required by controlled_exec acceptance.
+# 函数用途: 返回授权后完成的结构化结果，明确记录 used_tools 和 stdout/audit/trash refs。
+def _controlled_exec_done_result() -> str:
+    return (
+        "[SUBAGENT_RESULT]\n"
+        "{\n"
+        '  "status": "AWAITING_ACCEPTANCE",\n'
+        '  "summary": "controlled_exec 已通过父级 grant 执行。stdout_ref=stdout.log audit_ref=audit.jsonl trash_manifest_ref=trash_manifest.jsonl",\n'
+        '  "used_tools": ["controlled_exec"],\n'
+        '  "used_skills": [],\n'
+        '  "evidence": [{"kind": "command", "summary": "controlled_exec pwd/rm smoke passed", "ok": true}],\n'
+        '  "evidence_packets": [{"id": "evpkt-controlled-exec", "claim": "受控 shell 已完成", "checked_scope": "controlled_exec dispatch", "evidence_refs": ["stdout_ref=stdout.log", "audit_ref=audit.jsonl", "trash_manifest_ref=trash_manifest.jsonl"], "artifact_refs": ["output.json"], "confidence": 0.9}],\n'
+        '  "capability_requests": [],\n'
+        '  "artifacts": [],\n'
+        '  "tests": [{"name": "controlled-exec-smoke", "ok": true, "summary": "refs present"}],\n'
+        '  "patches": [],\n'
+        '  "lessons": [],\n'
+        '  "next_actions": [],\n'
+        '  "blocked_reason": "",\n'
+        '  "failure_type": ""\n'
+        "}\n"
+        "[/SUBAGENT_RESULT]"
+    )
+
+
 class BoundaryWriteSubagentBackend(BaseBackend):
     """测试用后端：先尝试越界写文件，再根据工具拦截结果收口。"""
 

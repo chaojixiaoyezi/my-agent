@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .agent_core import (
     AgentRunResult,
+    CapabilityRequestTool,
     CreateSubagentsTool,
     DispatchSubagentsTool,
     ScheduleChildSubagentsTool,
@@ -193,6 +194,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
 # 函数用途: 把创建子代理、看板和 dispatch 编排工具注册到主代理工具表。
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CreateSubagentsTool(agent))
+    agent.tools.register(CapabilityRequestTool(agent))
     agent.tools.register(SubagentBoardTool(agent))
     agent.tools.register(SubagentMessageTool(agent))
     agent.tools.register(DispatchSubagentsTool(agent))
@@ -201,6 +203,7 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
 
 __all__ = [
     "AgentRunResult",
+    "CapabilityRequestTool",
     "CODING_SUBAGENT_TOOLS",
     "CreateSubagentsTool",
     "DispatchSubagentsTool",

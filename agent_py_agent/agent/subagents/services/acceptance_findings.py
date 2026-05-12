@@ -13,121 +13,16 @@ SubAgentManager 通过 facade 方法委托到这里。
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..capability_status import is_pending_capability_status
 from ..execution_report import TestExecutionReport, load_test_execution_report
 from ..reports import AcceptanceReviewFinding
+from .acceptance_artifacts import artifact_exists
+from .acceptance_controlled_exec_findings import controlled_exec_contract_finding
 from .acceptance_evidence_findings import build_evidence_findings
+from .acceptance_role_coverage import required_role_coverage_finding
 
 if TYPE_CHECKING:
     from ..models import SubAgentTask
-
-
-# LLM: _artifact_exists 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 处理产物exists相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
-def _artifact_exists(manager: Any, task: SubAgentTask, raw_path: str) -> bool:
-    """Check if a runner-reported local artifact actually exists.
-
-    Artifact paths may be relative to the task directory or workspace root.
-    Since subagent workspace is typically `<root>/.my_agent/subagents`,
-    we also try looking in `<root>`.
-    """
-    text = raw_path.strip()
-    if not text or "://" in text:
-        return True
-    path = Path(text).expanduser()
-    candidates = [path] if path.is_absolute() else []
-    roots = _artifact_roots(manager, task)
-    if not path.is_absolute():
-        candidates.extend(
-            [
-                root / path
-                for root in roots
-            ]
-        )
-    if any(candidate.exists() for candidate in candidates):
-        return True
-    if not path.is_absolute():
-        return _path_suffix_exists(path, roots)
-    if _absolute_path_inside_roots(path, roots):
-        return _absolute_path_suffix_exists(path, roots)
-    return False
-
-
-# LLM: _artifact_roots includes both runtime and user workspace roots for relative artifact recovery.
-# 函数用途: 支持 .my_agent_runtime/<case>/subagents 布局下，runner 只写 leaf_outputs/... 也能找到真实产物。
-def _artifact_roots(manager: Any, task: SubAgentTask) -> list[Path]:
-    roots = [Path(task.task_dir), Path(manager.workspace), Path(manager.workspace).parent]
-    workspace_root = getattr(manager, "workspace_root", None)
-    if workspace_root:
-        roots.append(Path(workspace_root))
-    roots.extend(Path(item) for item in (getattr(manager, "workspace_roots", None) or []))
-    roots.extend(Path(item) for item in (getattr(task, "allowed_write_roots", None) or []))
-    runtime_root = _runtime_project_root(Path(manager.workspace))
-    if runtime_root is not None:
-        roots.append(runtime_root)
-    return list(dict.fromkeys(root.resolve() for root in roots))
-
-
-# LLM: _runtime_project_root recovers the user project root from hidden runtime subagent workspaces.
-# 函数用途: 从 <project>/.my_agent_runtime/<case>/subagents 或 <project>/.my_agent/subagents 推回 project。
-def _runtime_project_root(workspace: Path) -> Path | None:
-    parts = workspace.resolve().parts
-    index = _runtime_marker_index(parts)
-    return Path(*parts[:index]) if index > 0 else None
-
-
-# LLM: _runtime_marker_index keeps runtime root detection shallow for code-size guards.
-# 函数用途: 返回隐藏 runtime 标记所在下标；找不到时返回 -1。
-def _runtime_marker_index(parts: tuple[str, ...]) -> int:
-    for marker in (".my_agent_runtime", ".my_agent"):
-        try:
-            return parts.index(marker)
-        except ValueError:
-            continue
-    return -1
-
-
-# LLM: _path_suffix_exists recovers model-reported relative artifacts from nested task output dirs.
-# 函数用途: 当 runner 少写了外层任务目录时，在安全候选根目录内按路径后缀查找真实文件。
-def _path_suffix_exists(relative_path: Path, roots: list[Path]) -> bool:
-    parts = relative_path.parts
-    if not parts:
-        return False
-    return any(
-        _path_has_suffix(item, parts)
-        for root in roots
-        if root.exists() and root.is_dir()
-        for item in root.rglob(parts[-1])
-    )
-
-
-# LLM: _absolute_path_inside_roots avoids repairing arbitrary outside-system paths.
-# 函数用途: 只有模型报告的绝对路径位于允许 workspace/write root 下，才尝试按后缀找真实 artifact。
-def _absolute_path_inside_roots(path: Path, roots: list[Path]) -> bool:
-    resolved = path.resolve()
-    for root in roots:
-        try:
-            resolved.relative_to(root)
-        except ValueError:
-            continue
-        return True
-    return False
-
-
-# LLM: _absolute_path_suffix_exists repairs model typos in case ids while staying inside allowed roots.
-# 函数用途: 绝对路径不存在但后缀足够具体时，在允许根目录内按尾部路径片段查找真实文件。
-def _absolute_path_suffix_exists(path: Path, roots: list[Path]) -> bool:
-    parts = path.parts
-    max_depth = min(6, len(parts))
-    return any(
-        _path_suffix_exists(Path(*parts[-depth:]), roots)
-        for depth in range(max_depth, 2, -1)
-    )
-
-
-# LLM: _path_has_suffix keeps nested artifact recovery shallow enough for strict size guards.
-# 函数用途: 判断真实文件路径是否以 runner 报告的相对路径片段结尾。
-def _path_has_suffix(path: Path, parts: tuple[str, ...]) -> bool:
-    return len(path.parts) >= len(parts) and path.parts[-len(parts):] == parts
 
 
 # LLM: _dict_list 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -156,7 +51,7 @@ class SubAgentAcceptanceFindingService:
         """
         if hasattr(self.manager, "_artifact_exists"):
             return self.manager._artifact_exists(task, raw_path)
-        return _artifact_exists(self.manager, task, raw_path)
+        return artifact_exists(self.manager, task, raw_path)
 
     # LLM: _findings_basic_state 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
     # 函数用途: 读取或查询findingsbasic状态需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
@@ -225,6 +120,10 @@ class SubAgentAcceptanceFindingService:
     # 函数用途: 读取或查询findingsoutput内容需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def _findings_output_content(self, task: SubAgentTask, output: dict, created_at: float) -> list[AcceptanceReviewFinding]:
         findings: list[AcceptanceReviewFinding] = []
+        findings.append(_pending_structured_status_finding(task, output, created_at))
+        findings.append(_required_child_spawn_finding(task, created_at))
+        findings.append(required_role_coverage_finding(task, created_at))
+        findings.append(controlled_exec_contract_finding(task, output, created_at))
         blockers = [item for item in _string_list(output.get("blockers", [])) if item.strip()]
         findings.append(AcceptanceReviewFinding(
             name="no_output_blockers", ok=not blockers, severity="P1",
@@ -330,6 +229,90 @@ def _string_list(value: object) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value if item not in (None, "")]
     return [str(value)]
+
+
+# LLM: _pending_structured_status_finding prevents half-finished capability requests from being accepted.
+# 函数用途: 检查 output.json 的 structured_output.status；仍在等待能力/工具时返回 P1 失败。
+def _pending_structured_status_finding(task, output: dict, created_at: float) -> AcceptanceReviewFinding:
+    status = _structured_status(output)
+    pending = is_pending_capability_status(status)
+    return AcceptanceReviewFinding(
+        name="no_pending_structured_status",
+        ok=not pending,
+        severity="P1",
+        message="structured_output.status 没有等待能力申请。"
+        if not pending else f"structured_output.status 仍在等待能力申请: {status}",
+        evidence_path=task.output_json,
+        created_at=created_at,
+    )
+
+
+# LLM: _structured_status reads only compact output metadata instead of trusting free-form summaries.
+# 函数用途: 从 output.json 中提取结构化状态；没有结构化块时返回空字符串以保持旧任务兼容。
+def _structured_status(output: dict) -> str:
+    structured = output.get("structured_output")
+    if isinstance(structured, dict):
+        return str(structured.get("status") or "")
+    return ""
+
+
+# LLM: _required_child_spawn_finding blocks coordinator self-claims when no child run exists.
+# 函数用途: 任务目标明确要求创建下级时，必须看到真实 task.child_ids，不能只在结果里口头声明。
+def _required_child_spawn_finding(task, created_at: float) -> AcceptanceReviewFinding:
+    required = _child_spawn_required(task)
+    child_ids = _task_child_ids(task)
+    ok = (not required) or bool(child_ids)
+    return AcceptanceReviewFinding(
+        name="required_child_spawned",
+        ok=ok,
+        severity="P0",
+        message=_required_child_spawn_message(required, child_ids),
+        evidence_path=getattr(task, "output_json", ""),
+        created_at=created_at,
+    )
+
+
+# LLM: _child_spawn_required keeps the hard check scoped to explicit delegation goals.
+# 函数用途: 从 goal/acceptance 文本识别“必须创建下级”的任务，避免普通 coordinator 被误伤。
+def _child_spawn_required(task) -> bool:
+    text = " ".join([str(getattr(task, "goal", "") or ""), *[str(item) for item in getattr(task, "acceptance_checks", []) or []]])
+    text = text.lower()
+    role = str(getattr(task, "role", "") or "").lower()
+    agent_name = str(getattr(task, "agent_name", "") or "").lower()
+    leaf_self = role == "leaf_worker" or "leaf" in agent_name
+    if leaf_self:
+        return False
+    hard_markers = (
+        "create depth=",
+        "spawn depth=",
+        "创建 depth=",
+        "创建depth=",
+        "创建下级",
+        "创建直接下级",
+        "创建 child",
+    )
+    if any(marker in text for marker in hard_markers):
+        return True
+    return (not leaf_self) and "创建 leaf_worker" in text
+
+
+# LLM: _task_child_ids normalizes persisted child ids without trusting model output refs.
+# 函数用途: 只读取任务状态里的真实 child_ids；异常类型按空列表处理。
+def _task_child_ids(task) -> list[str]:
+    value = getattr(task, "child_ids", [])
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    return [str(item) for item in value if item]
+
+
+# LLM: _required_child_spawn_message keeps acceptance text precise for parent recovery models.
+# 函数用途: 生成下级创建合同的验收提示，帮助上级直接接管或重派。
+def _required_child_spawn_message(required: bool, child_ids: list[str]) -> str:
+    if not required:
+        return "当前任务未声明必须创建下级。"
+    if child_ids:
+        return f"任务要求创建下级，已记录 {len(child_ids)} 个真实 child run。"
+    return "任务要求创建下级，但 task.child_ids 为空；不能只在输出里声称完成。"
 
 
 # LLM: _existing_test_execution_report lets normal acceptance trust machine facts over worker test claims.

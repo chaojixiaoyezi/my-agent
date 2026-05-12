@@ -33,6 +33,17 @@ def subagent_dispatch_completion_response(request: DispatchCompletionRequest) ->
     return ModelResponse(text=_dispatch_completion_text(tasks), backend=request.backend)
 
 
+# LLM: subagent_dispatch_limit_response prevents final user reports from inventing subagent status.
+# 函数用途: 顶层工具轮数耗尽时，直接按 task.json 生成事实状态报告，不再让模型自由总结失败链路。
+def subagent_dispatch_limit_response(agent, *, backend: str) -> ModelResponse | None:
+    if _inside_subagent_runner(agent):
+        return None
+    tasks = _subagent_tasks(agent)
+    if not tasks:
+        return None
+    return ModelResponse(text=_dispatch_limit_text(tasks), backend=backend)
+
+
 # LLM: _inside_subagent_runner keeps runner closeout controlled by output.json only.
 # 函数用途: 判断当前是否处在某个子代理 runner 内；runner 内不能用顶层 dispatch 收口替代 output.json 契约。
 def _inside_subagent_runner(agent) -> bool:
@@ -78,6 +89,41 @@ def _dispatch_completion_text(tasks: list[object]) -> str:
     return "\n".join(lines)
 
 
+# LLM: _dispatch_limit_text is a refs-first factual report for incomplete or failed subagent trees.
+# 函数用途: 工具轮数到顶时输出真实状态、阻塞 run_id 和引用路径，避免模型把 TIMEOUT/BLOCKED 说成完成。
+def _dispatch_limit_text(tasks: list[object]) -> str:
+    rows = _task_status_rows(tasks)
+    blockers = _blocking_task_ids(tasks)
+    lines = [
+        "已达到最大工具轮数限制，系统根据本地 subagent task.json 直接生成状态报告，未让模型继续自由总结。",
+        "",
+        "结论：子代理链路尚未完整通过，不能按完成汇报。" if blockers else "结论：未发现阻塞状态，但本轮是工具上限收口，请按下方真实状态复核。",
+        "",
+        f"- total_runs: {len(tasks)}",
+        f"- done_verified: {_done_verified_count(tasks)}",
+        f"- blocking_run_ids: {', '.join(blockers) if blockers else '(none)'}",
+        "",
+        "## Persisted Task State",
+        "",
+    ]
+    lines.extend(rows[:24])
+    refs = _output_refs(tasks)
+    if refs:
+        lines.extend(["", "## Output Refs", ""])
+        lines.extend(f"- {ref}" for ref in refs[:12])
+    if blockers:
+        lines.extend(
+            [
+                "",
+                "## Required Next Action",
+                "",
+                "- 先读取 blocking_run_ids 的 runner_result、failure_handoff、acceptance_review，再由父级接管、重试或重派。",
+                "- 不要把本轮说成完成；页面产物存在不等于子代理层级、角色覆盖和验收链路已经通过。",
+            ]
+        )
+    return "\n".join(lines)
+
+
 # LLM: _dispatch_completion_header renders stable counters without touching output bodies.
 # 函数用途: 生成本地收尾回答的固定头部，帮助用户快速定位总数和 root 节点。
 def _dispatch_completion_header(tasks: list[object]) -> list[str]:
@@ -89,6 +135,67 @@ def _dispatch_completion_header(tasks: list[object]) -> list[str]:
         f"- done_verified: {len(tasks)}",
         f"- root_run_ids: {', '.join(roots) if roots else '(none)'}",
     ]
+
+
+# LLM: _task_status_rows renders short task facts from persisted fields only.
+# 函数用途: 汇总每个子代理真实 id、role、name、depth、status 和 task_dir，不读取大日志正文。
+def _task_status_rows(tasks: list[object]) -> list[str]:
+    lines: list[str] = []
+    for task in sorted(tasks, key=_task_sort_key):
+        task_id = str(getattr(task, "id", "") or "")
+        status = str(getattr(task, "status", "") or "UNKNOWN")
+        verification = str(getattr(task, "verification_status", "") or "UNKNOWN")
+        role = str(getattr(task, "role", "") or "")
+        name = str(getattr(task, "agent_name", "") or "")
+        depth = str(getattr(task, "depth", "") or 0)
+        parent = str(getattr(task, "parent_id", "") or "")
+        child_count = len(getattr(task, "child_ids", []) or [])
+        task_dir = str(getattr(task, "task_dir", "") or "")
+        lines.append(
+            f"- `{task_id}` depth={depth} role={role or 'unknown'} name={name or 'unnamed'} "
+            f"status={status}/{verification} parent={parent or '(root)'} children={child_count} task_dir={task_dir}"
+        )
+    return lines
+
+
+# LLM: _task_sort_key keeps factual reports stable across filesystem ordering.
+# 函数用途: 按 depth、创建时间和 id 排序，便于对比 E2E 日志。
+def _task_sort_key(task: object) -> tuple[int, float, str]:
+    try:
+        depth = int(getattr(task, "depth", 0) or 0)
+    except (TypeError, ValueError):
+        depth = 0
+    try:
+        created = float(getattr(task, "created_at", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        created = 0.0
+    return depth, created, str(getattr(task, "id", "") or "")
+
+
+# LLM: _done_verified_count counts only persisted DONE + VERIFIED rows.
+# 函数用途: 给确定性报告提供严格完成数，不能把 AWAITING_ACCEPTANCE 或模型自述算完成。
+def _done_verified_count(tasks: list[object]) -> int:
+    return sum(
+        1
+        for task in tasks
+        if str(getattr(task, "status", "") or "") == "DONE"
+        and str(getattr(task, "verification_status", "") or "") == "VERIFIED"
+    )
+
+
+# LLM: _blocking_task_ids identifies run ids that make the whole hierarchy not complete.
+# 函数用途: 找出 BLOCKED/FAILED/TIMEOUT/CHANNEL_ERROR 或验收失败节点，供父级恢复使用。
+def _blocking_task_ids(tasks: list[object]) -> list[str]:
+    blockers: list[str] = []
+    for task in tasks:
+        status = str(getattr(task, "status", "") or "").upper()
+        verification = str(getattr(task, "verification_status", "") or "").upper()
+        task_id = str(getattr(task, "id", "") or "")
+        if status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"} or (
+            status == "DONE" and verification != "VERIFIED"
+        ):
+            blockers.append(task_id)
+    return [item for item in blockers if item]
 
 
 # LLM: _root_task_ids extracts top-level subagent ids for deterministic final summaries.

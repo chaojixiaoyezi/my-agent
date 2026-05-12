@@ -202,6 +202,47 @@ def test_dispatch_payload_tells_runner_to_continue_unfinished_children():
     assert direct["suggested_tool_call"]["run_ids"] == ["child-a", "child-b"]
 
 
+# LLM: test_dispatch_payload_tells_runner_to_summarize_ready_children covers R5 over-read prevention.
+# 函数用途: 直接孩子都等待验收或完成时，父 runner 应收口汇总 refs，不该反复读取子产物正文。
+def test_dispatch_payload_tells_runner_to_summarize_ready_children():
+    payload = _dispatch_payload_with_direct_children([
+        SimpleNamespace(id="child-a", parent_id="root", status="AWAITING_ACCEPTANCE"),
+        SimpleNamespace(id="child-b", parent_id="root", status="DONE"),
+    ])
+
+    direct = payload["direct_children"]
+    assert direct["ready_for_parent_acceptance"] is True
+    assert direct["next_action"] == "summarize_direct_children_refs"
+    assert "不要反复 read_file/read_artifact" in direct["closeout_hint"]
+
+
+# LLM: test_dispatch_payload_treats_rejected_child_as_recovery protects R8 parent rescue flow.
+# 函数用途: child 最新验收已 REJECT 时，父 runner 不能再把它当成可收口结果反复读文件。
+def test_dispatch_payload_treats_rejected_child_as_recovery(tmp_path: Path):
+    reports_dir = tmp_path / "child-a" / "reports"
+    reports_dir.mkdir(parents=True)
+    (reports_dir / "acceptance_review.json").write_text(
+        '{"decision": "REJECT", "message": "missing child"}',
+        encoding="utf-8",
+    )
+    payload = _dispatch_payload_with_direct_children([
+        SimpleNamespace(
+            id="child-a",
+            parent_id="root",
+            status="AWAITING_ACCEPTANCE",
+            verification_status="NEEDS_ACCEPTANCE",
+            reports_dir=str(reports_dir),
+        )
+    ])
+
+    direct = payload["direct_children"]
+    assert direct["needs_recovery"] is True
+    assert direct["rejected_acceptance_run_ids"] == ["child-a"]
+    assert direct["ready_for_parent_acceptance"] is False
+    assert direct["next_action"] == "inspect_or_rescue_direct_children"
+    assert "不要反复 read_file/read_artifact" in direct["recovery_hint"]
+
+
 # LLM: test_scoped_runner_tasks_honors_include_run_ids protects exact child dispatch waves.
 # 函数用途: 父 runner 指定 run_ids 时，调度候选只能包含这些直接孩子，并按指定顺序执行。
 def test_scoped_runner_tasks_honors_include_run_ids_order():

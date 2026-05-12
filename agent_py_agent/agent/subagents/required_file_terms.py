@@ -5,15 +5,53 @@ from __future__ import annotations
 
 import re
 
-_FILE_RE_TEMPLATE = r"(?<![\w./-])([A-Za-z0-9][A-Za-z0-9_.-]*\.(?:{exts}))(?![\w.-])"
-_NEGATIVE_HINTS = ("禁止", "不允许", "不要", "不能", "不得", "勿", "do not", "don't", "must not", "not ")
+_FILE_RE_TEMPLATE = (
+    r"(?<![A-Za-z0-9_./-])([A-Za-z0-9][A-Za-z0-9_.-]*\.(?:{exts}))(?![A-Za-z0-9_-]|\.[A-Za-z0-9])"
+)
+_NEGATIVE_HINTS = (
+    "禁止",
+    "不允许",
+    "不要",
+    "不能",
+    "不得",
+    "不写",
+    "不创建",
+    "不生成",
+    "不产出",
+    "不包含",
+    "勿",
+    "无",
+    "do not",
+    "don't",
+    "must not",
+    "not ",
+    "no ",
+    "without",
+)
 # LLM: Negative examples may be introduced by “如/例如/比如”, not only by rename/create verbs.
 # 函数用途: 识别禁止说明里的示例前缀，避免反例文件名进入 required_files。
 _NEGATIVE_TARGET_RE = re.compile(
-    r"(?:改成|改为|改名成|改名为|重命名为|命名为|叫做|叫|创建|生成|包含|产出|写入|如|例如|比如|to|as|create|generate|include|write)\s*[（(]?\s*$",
+    r"(?:改成|改为|改名成|改名为|重命名为|命名为|叫做|叫|创建|生成|包含|产出|写入|写|如|例如|比如|forbidden_files|内部文件污染|文件污染|污染|to|as|create|generate|include|write)\s*[（(]?\s*$",
+    re.IGNORECASE,
+)
+_BARE_NEGATIVE_TARGET_RE = re.compile(
+    r"(?:^|[\s：:，,、])(?:禁止(?:改名|文件名|文件|创建|生成|产出|写入|写)?|不允许|不要|不能|不得|勿|do not|don't|must not)\s*[：:]?\s*$",
+    re.IGNORECASE,
+)
+_NEGATIVE_LABEL_RE = re.compile(
+    r"(?:禁止(?:创建|生成|产出|写入|写)?\s*[：:]|禁止(?:创建)?(?:文件名|内部文件|文件/反例名|文件|反例名)"
+    r"[^。；;\n]{0,96}[：:（(】\]]|forbidden(?:_files)?[^。；;\n]{0,96}[：:（(】\]])\s*$",
+    re.IGNORECASE,
+)
+_NEGATIVE_HEADER_RE = re.compile(
+    r"(?:禁止(?:创建|生成|产出|写入|写)?\s*[：:]|禁止(?:创建)?(?:文件名|内部文件|文件/反例名|文件|反例名)"
+    r"[^。；;\n]{0,96}[：:（(】\]]|forbidden(?:_files)?[^。；;\n]{0,96}[：:（(】\]])\s*$",
     re.IGNORECASE,
 )
 _NEGATIVE_CHAIN_CONNECTOR_RE = re.compile(r"^(?:[\s,，、/]*|[\s,，、/]*(?:或|或者|or)[\s,，、/]*)$", re.IGNORECASE)
+_BULLET_PREFIX_RE = re.compile(r"^[-*]\s*")
+_LOCATION_TARGET_RE = re.compile(r"(?:放进|放入|放到|放在|置于|移入|inside|under|into)", re.IGNORECASE)
+_FILE_LIKE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9]{1,6}")
 
 
 # LLM: required_file_terms_from_text returns positive deliverable filenames only.
@@ -81,7 +119,38 @@ def _forbidden_terms(segment: str, pattern: re.Pattern[str]) -> list[str]:
 # LLM: _segments limits semantic checks to local task lines and clauses.
 # 函数用途: 把长任务拆成短片段，防止一个否定词影响后面无关的必需文件名。
 def _segments(text: str) -> list[str]:
-    return [item.strip() for item in re.split(r"[\n。；;]+", str(text or "")) if item.strip()]
+    normalized = _normalize_file_list_separators(str(text or ""))
+    segments: list[str] = []
+    active_negative_header = ""
+    for raw in re.split(r"[\n。；;]+", normalized):
+        item = raw.strip()
+        if not item:
+            active_negative_header = ""
+            continue
+        if _NEGATIVE_HEADER_RE.search(item):
+            active_negative_header = item
+            segments.append(item)
+            continue
+        if active_negative_header and _BULLET_PREFIX_RE.match(item):
+            segments.append(f"{active_negative_header} {_BULLET_PREFIX_RE.sub('', item)}")
+            continue
+        if active_negative_header and _FILE_LIKE_RE.search(item):
+            segments.append(f"{active_negative_header} {item}")
+            active_negative_header = ""
+            continue
+        active_negative_header = ""
+        segments.append(item)
+    return segments
+
+
+# LLM: _normalize_file_list_separators keeps slash-separated filename alternatives parseable.
+# 函数用途: 把 `product.html/old.html` 这种文件名列表里的斜杠当分隔符，不影响普通路径分隔。
+def _normalize_file_list_separators(text: str) -> str:
+    return re.sub(
+        r"(\.[A-Za-z0-9]{1,6})/(?=[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9]{1,6}(?![A-Za-z0-9_.-]))",
+        r"\1、",
+        text,
+    )
 
 
 # LLM: _is_negative_target detects filenames used as forbidden alternatives.
@@ -90,7 +159,20 @@ def _is_negative_target(segment: str, start: int) -> bool:
     before = segment[:start].lower()
     if not any(hint in before for hint in _NEGATIVE_HINTS):
         return False
-    return bool(_NEGATIVE_TARGET_RE.search(before[-48:]))
+    window = before[-64:]
+    label_window = before[-128:]
+    target_negative = bool(_NEGATIVE_TARGET_RE.search(window) or _NEGATIVE_LABEL_RE.search(label_window))
+    bare_negative = bool(_BARE_NEGATIVE_TARGET_RE.search(window))
+    if bare_negative and not target_negative and _is_location_rule_source(segment, start):
+        return False
+    return target_negative or bare_negative
+
+
+# LLM: _is_location_rule_source keeps "do not place style.css under css/" from forbidding style.css itself.
+# 函数用途: 识别“禁止 A.css 放进子目录”这种位置约束，避免把必须产物 A.css 误当禁止文件。
+def _is_location_rule_source(segment: str, start: int) -> bool:
+    after = segment[start:]
+    return bool(_LOCATION_TARGET_RE.search(after))
 
 
 # LLM: _is_negative_chain_connector extends one forbidden target across sibling alternatives.

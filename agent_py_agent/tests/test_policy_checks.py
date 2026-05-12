@@ -71,6 +71,16 @@ def test_status_from_structured_output_unknown_becomes_awaiting():
     assert _status_from_structured_output(parsed) == "AWAITING_ACCEPTANCE"
 
 
+def test_status_from_structured_output_pending_capability_blocks():
+    """测试模型只写 pending capability 状态时也不能进入验收。"""
+    parsed = SubAgentParsedOutput(
+        status="PENDING_CAPABILITY_REQUEST",
+        capability_requests=[],
+        blocked_reason="",
+    )
+    assert _status_from_structured_output(parsed) == "BLOCKED"
+
+
 def test_status_from_structured_output_strips_whitespace():
     """测试状态值去除空白。"""
     parsed = SubAgentParsedOutput(status="  done  ", capability_requests=[], blocked_reason="")

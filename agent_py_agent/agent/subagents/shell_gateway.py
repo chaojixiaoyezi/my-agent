@@ -9,7 +9,7 @@ import shlex
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-_BLOCKED_CHARS = frozenset({"|", "&", ";", ">", "<", "`", "$"})
+_BLOCKED_SHELL_OPERATOR_TOKENS = frozenset({"|", "&", ";", ">", "<", "$"})
 _BLOCKED_COMMANDS = frozenset({
     "rm",
     "rmdir",
@@ -74,7 +74,7 @@ def plan_shell_command(request: ShellGatewayRequest) -> ShellGatewayDecision:
     budget = _normalize_output_budget(request.output_budget)
     return ShellGatewayDecision(
         allowed=allowed,
-        dry_run=True,
+        dry_run=bool(request.dry_run),
         would_execute=allowed,
         executable=executable,
         argv=argv,
@@ -88,7 +88,7 @@ def plan_shell_command(request: ShellGatewayRequest) -> ShellGatewayDecision:
             "workspace_root": str(workspace),
             "allowed_roots": [str(root) for root in roots],
             "network_allowlist": list(request.network_allowlist),
-            "dry_run": True,
+            "dry_run": bool(request.dry_run),
         },
     )
 
@@ -127,10 +127,9 @@ def _collect_blockers(check: _BlockerCheck) -> list[str]:
 # LLM: _command_policy_blockers blocks shell syntax and requires explicit parent allowlist grants.
 # 函数用途: 校验命令字符串安全、危险命令和授权白名单。
 def _command_policy_blockers(request: ShellGatewayRequest, argv: list[str]) -> list[str]:
-    raw = " ".join(request.command) if isinstance(request.command, list) else request.command
     if not argv:
         return ["empty_command"]
-    if any(char in raw for char in _BLOCKED_CHARS):
+    if isinstance(request.command, str) and _has_shell_operator_token(request.command):
         return ["blocked_shell_metacharacter"]
     executable = _command_name(argv[0])
     if executable in _BLOCKED_COMMANDS:
@@ -142,6 +141,23 @@ def _command_policy_blockers(request: ShellGatewayRequest, argv: list[str]) -> l
     if executable not in allowed and str(argv[0]) not in allowed:
         return [f"command_not_granted:{executable}"]
     return []
+
+
+# LLM: _has_shell_operator_token blocks unquoted shell separators without rejecting Python code strings.
+# 函数用途: 用 shlex punctuation tokens 识别未引用的 shell 操作符；`python -c "a;b"` 这种引号内分号仍允许。
+def _has_shell_operator_token(raw: str) -> bool:
+    try:
+        lexer = shlex.shlex(str(raw or ""), posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return True
+    for token in tokens:
+        if token in _BLOCKED_SHELL_OPERATOR_TOKENS:
+            return True
+        if token and set(token).issubset(_BLOCKED_SHELL_OPERATOR_TOKENS):
+            return True
+    return False
 
 
 # LLM: _cwd_policy_blockers keeps subprocess cwd inside workspace-local allowed roots.

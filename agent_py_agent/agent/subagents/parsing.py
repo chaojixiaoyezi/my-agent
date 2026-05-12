@@ -13,6 +13,7 @@ Human version:
 import json
 
 from .models import SubAgentParsedOutput
+from .parsing_capability_requests import capability_requests_from_payload
 from .parsing_partial import extract_partial_subagent_result_text
 from .parsing_values import (
     _dict_list as _dict_list,
@@ -230,7 +231,7 @@ def _parsed_output_from_payload(payload: dict[str, object]) -> SubAgentParsedOut
         # LLM: 可追溯声明包与旧证据备注分开解析，避免语义互相污染。
         evidence_packets=_dict_list(payload.get("evidence_packets", [])),
         findings=_dict_list(payload.get("findings", [])),
-        capability_requests=_dict_list(payload.get("capability_requests", [])),
+        capability_requests=capability_requests_from_payload(payload),
         artifacts=_dict_list(payload.get("artifacts", [])),
         tests=_dict_list(payload.get("tests", [])),
         patches=_dict_list(payload.get("patches", [])),

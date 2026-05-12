@@ -101,15 +101,14 @@ def _resolve_trash_dir(task: Path, trash_dir: str | Path) -> Path:
     return path if _is_relative_to(path, task) else task / "trash"
 
 
-# LLM: _allowed_roots normalizes optional extra roots but never allows paths outside the task by default.
-# 函数用途: 归一化允许被移入 trash 的源路径根目录，默认只允许 task_dir。
+# LLM: _allowed_roots normalizes parent-granted source roots and defaults to task-local only when absent.
+# 函数用途: 归一化允许被移入 trash 的源路径根目录；有父级授权根时可从授权产物目录移入 task-local trash。
 def _allowed_roots(task: Path, roots: list[str | Path]) -> list[Path]:
     resolved = []
     for raw in roots:
         candidate = Path(raw).expanduser()
         path = candidate.resolve() if candidate.is_absolute() else (task / candidate).resolve()
-        if _is_relative_to(path, task):
-            resolved.append(path)
+        resolved.append(path)
     return resolved or [task]
 
 

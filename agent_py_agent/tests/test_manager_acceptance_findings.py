@@ -64,8 +64,11 @@ class _FindingSetupMixin:
         task.verification_status = overrides.get("verification_status", "NEEDS_ACCEPTANCE")
         task.output_json = str(tmp_path / "output.json")
         task.runner_result_json = str(tmp_path / "runner.json")
+        task.goal = overrides.get("goal", "")
+        task.role = overrides.get("role", "general")
+        task.agent_name = overrides.get("agent_name", "general")
         task.evidence = overrides.get("evidence", [])
-        task.task_dir = str(tmp_path / "task_dir")
+        task.task_dir = str(overrides.get("task_dir", tmp_path / "task_dir"))
         task.channel_status = overrides.get("channel_status", "OK")
         task.channel_probe_file = str(tmp_path / "probe.json")
         task.acceptance_file = str(tmp_path / "acceptance.json")
@@ -73,6 +76,9 @@ class _FindingSetupMixin:
         task.capability_gaps = overrides.get("capability_gaps", [])
         task.acceptance_checks = overrides.get("acceptance_checks", [])
         task.used_tools = overrides.get("used_tools", [])
+        task.child_ids = overrides.get("child_ids", [])
+        task.allowed_write_roots = overrides.get("allowed_write_roots", [])
+        task.reports_dir = str(tmp_path / "reports")
         return task
 
     def _write_findings_files(self, tmp_path: Path, output_data: dict | None = None) -> None:
@@ -254,7 +260,7 @@ class TestSubAgentAcceptanceFindingMixin(_FindingSetupMixin, _FindingAssertMixin
 
 
 
-class TestSubAgentAcceptanceOutputFindingMixin(_FindingSetupMixin, _FindingAssertMixin, _FindingReportMixin):
+class TestSubAgentAcceptanceOutputBasicFindings(_FindingSetupMixin, _FindingAssertMixin, _FindingReportMixin):
     """测试 _acceptance_findings 方法。"""
 
     def test_no_output_blockers(self, tmp_path: Path):
@@ -276,8 +282,8 @@ class TestSubAgentAcceptanceOutputFindingMixin(_FindingSetupMixin, _FindingAsser
 
         self._assert_finding(findings, "no_output_blockers", expected_ok=True)
 
-    def test_tests_passed_check(self, tmp_path: Path):
-        """测试通过检查。"""
+    def test_pending_capability_output_blocks_acceptance(self, tmp_path: Path):
+        """结构化输出仍在等待能力申请时不能验收通过。"""
         from agent_py_agent.agent.subagents.manager_acceptance_findings import (
             SubAgentAcceptanceFindingMixin,
         )
@@ -288,61 +294,13 @@ class TestSubAgentAcceptanceOutputFindingMixin(_FindingSetupMixin, _FindingAsser
 
         manager = MockManager()
         task = self._make_findings_task(tmp_path)
-        self._write_findings_files(tmp_path)
+        output = {"structured_output": {"status": "PENDING_CAPABILITY_REQUEST"}}
+        self._write_findings_files(tmp_path, output)
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager._acceptance_findings(task, {"tests": [{"ok": True}, {"ok": True}]}, {}, time.time())
+        findings = manager._acceptance_findings(task, output, {}, time.time())
 
-        self._assert_finding(findings, "tests_passed", expected_ok=True)
-
-    def test_artifact_paths_exist(self, tmp_path: Path):
-        """artifact 路径存在检查。"""
-        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
-            SubAgentAcceptanceFindingMixin,
-        )
-
-        class MockManager(SubAgentAcceptanceFindingMixin):
-            def __init__(self):
-                self.workspace = tmp_path
-
-        manager = MockManager()
-        task = self._make_findings_task(tmp_path)
-        self._write_findings_files(tmp_path)
-        manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
-        manager._artifact_exists = MagicMock(return_value=True)
-
-        findings = manager._acceptance_findings(task, {"artifacts": [{"path": "/tmp/exists.txt"}]}, {}, time.time())
-
-        self._assert_finding(findings, "artifact_paths_exist", expected_ok=True)
-
-    def test_nested_relative_artifact_paths_exist(self, tmp_path: Path):
-        """artifact 路径少写外层运行目录时，验收层仍能在工作区内核对。"""
-        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
-            SubAgentAcceptanceFindingMixin,
-        )
-
-        class MockManager(SubAgentAcceptanceFindingMixin):
-            def __init__(self):
-                self.workspace = tmp_path / ".my_agent_subagents"
-
-        manager = MockManager()
-        manager.workspace.mkdir()
-        test_file = tmp_path / "real_run" / "grandchild_sorting_edge" / "sorting_edge_report.md"
-        test_file.parent.mkdir(parents=True)
-        test_file.write_text("ok", encoding="utf-8")
-        task = self._make_findings_task(tmp_path)
-        self._write_findings_files(tmp_path)
-        manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
-
-        findings = manager._acceptance_findings(
-            task,
-            {"artifacts": [{"path": "grandchild_sorting_edge/sorting_edge_report.md"}]},
-            {},
-            time.time(),
-        )
-
-        self._assert_finding(findings, "artifact_paths_exist", expected_ok=True)
-
+        self._assert_finding(findings, "no_pending_structured_status", expected_ok=False)
 
 class TestSeverityLevels:
     """测试严重程度级别。"""

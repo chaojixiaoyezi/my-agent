@@ -8,7 +8,7 @@
   "handles_multiple_targets": true,
   "use_when_zh": ["需要生成或优化一组文本产物。"],
   "do_not_use_when_zh": ["只要客观验收或找错时不要用写作角色。"],
-  "default_tools": ["list_files", "read_file", "search_text", "read_artifact", "write_file", "append_file", "replace_in_file"],
+  "default_tools": ["list_files", "read_file", "search_text", "read_artifact", "write_file", "append_file", "replace_in_file", "capability_request"],
   "can_write": true,
   "can_accept": false,
   "output_contract": {"type": "draft_or_revision"},

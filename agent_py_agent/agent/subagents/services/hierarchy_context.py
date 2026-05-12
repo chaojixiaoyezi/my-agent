@@ -53,7 +53,11 @@ def goal_carries_parent_scope(parent: SubAgentTask, goal: str) -> bool:
         return True
     if _missing_relevant_file_terms(parent.goal, goal):
         return False
+    if _missing_forbidden_file_terms(parent.goal, goal):
+        return False
     if _missing_hierarchy_contract_terms(parent.goal, goal):
+        return False
+    if _missing_capability_contract_terms(parent.goal, goal):
         return False
     roots = [str(item or "").rstrip("/") for item in parent.allowed_write_roots]
     return bool(goal and any(root and root in goal for root in roots))
@@ -69,6 +73,16 @@ def _missing_relevant_file_terms(relevant: str, goal: str) -> bool:
     return any(term.lower() not in lowered for term in terms)
 
 
+# LLM: _missing_forbidden_file_terms keeps negative file contracts from vanishing during summarization.
+# 函数用途: child goal 只写“禁止改名”但漏掉具体 product.html/output.json 反例时，强制追加父级继承块。
+def _missing_forbidden_file_terms(relevant: str, goal: str) -> bool:
+    terms = _forbidden_file_terms(relevant)
+    if not terms:
+        return False
+    lowered = str(goal or "").lower()
+    return any(term.lower() not in lowered for term in terms)
+
+
 # LLM: _missing_hierarchy_contract_terms keeps explicit depth-chain requirements alive across delegation.
 # 函数用途: 父级要求 4 层链路/孙孙节点时，child goal 不能只带路径就丢掉这类协作约束。
 def _missing_hierarchy_contract_terms(parent_goal: str, goal: str) -> bool:
@@ -76,7 +90,18 @@ def _missing_hierarchy_contract_terms(parent_goal: str, goal: str) -> bool:
     if not contracts:
         return False
     lowered = str(goal or "").lower()
-    return not any(_segment_anchor(segment) in lowered for segment in contracts)
+    anchors = {_segment_anchor(segment) for segment in contracts}
+    return any(anchor and anchor not in lowered for anchor in anchors)
+
+
+# LLM: _missing_capability_contract_terms prevents delegated agents from dropping tool grants.
+# 函数用途: 父级写明 controlled_exec、capability_request、trash 或 refs 时，child goal 必须继续携带这些硬约束。
+def _missing_capability_contract_terms(parent_goal: str, goal: str) -> bool:
+    required = _capability_contract_terms(parent_goal)
+    if not required:
+        return False
+    lowered = str(goal or "").lower()
+    return any(term not in lowered for term in required)
 
 
 # LLM: _file_terms extracts explicit filenames from compact parent context.
@@ -145,6 +170,10 @@ def _inherited_goal_context(
     if hierarchy_contracts:
         lines.append("父级层级/协作约束（必须原样遵守）：")
         lines.extend(f"- {item}" for item in hierarchy_contracts)
+    capability_contracts = _capability_contract_segments(parent.goal)
+    if capability_contracts:
+        lines.append("父级能力/工具/安全约束（必须原样遵守，不能改名或缩水）：")
+        lines.extend(f"- {item}" for item in capability_contracts)
     relevant = relevant_parent_context(parent.goal, child_goal)
     if relevant:
         lines.extend(["相关父级片段：", relevant])
@@ -177,7 +206,21 @@ def _parent_goal_segments(text: str) -> list[str]:
 # LLM: _hierarchy_contract_segments extracts delegation-shape constraints without copying whole parent goals.
 # 函数用途: 保留 4 层链路、命名和层层创建规则；这些不是业务 sibling 目标，不能被相关性筛掉。
 def _hierarchy_contract_segments(text: str) -> list[str]:
-    keywords = ("4 层", "四层", "孙孙", "great-grandchild", "root ->", "命名统一", "层层")
+    keywords = (
+        "4 层",
+        "4层",
+        "四层",
+        "孙孙",
+        "great-grandchild",
+        "root ->",
+        "depth=1",
+        "depth=2",
+        "depth=3",
+        "max_depth",
+        "小傻妞",
+        "命名统一",
+        "层层",
+    )
     return [
         clip_parent_context(segment, limit=500)
         for segment in _parent_goal_segments(text)
@@ -185,11 +228,62 @@ def _hierarchy_contract_segments(text: str) -> list[str]:
     ]
 
 
+# LLM: _capability_contract_segments extracts non-droppable tool/shell safety requirements.
+# 函数用途: 把 controlled_exec 授权、命令范围、输出外置和 trash 行为作为硬继承合同传给下层。
+def _capability_contract_segments(text: str) -> list[str]:
+    keywords = _capability_contract_keywords()
+    return [
+        clip_parent_context(segment, limit=500)
+        for segment in _parent_goal_segments(text)
+        if any(keyword in segment.lower() for keyword in keywords)
+    ]
+
+
+# LLM: _capability_contract_terms returns stable anchors for goal completeness checks.
+# 函数用途: 提取父级能力合同关键词，判断 child goal 是否已经完整携带。
+def _capability_contract_terms(text: str) -> list[str]:
+    lowered = str(text or "").lower()
+    return [keyword for keyword in _capability_contract_keywords() if keyword in lowered]
+
+
+# LLM: _capability_contract_keywords centralizes hard delegation terms for future tool gateways.
+# 函数用途: 集中维护不能在层级转述中丢失的能力/工具/安全字段名。
+def _capability_contract_keywords() -> tuple[str, ...]:
+    return (
+        "controlled_exec",
+        "capability_request",
+        "requested_tools",
+        "requested_commands",
+        "path_scope",
+        "output_budget",
+        "task_trash",
+        "move_to_task_trash",
+        "stdout_ref",
+        "audit_ref",
+        "trash_manifest_ref",
+        "grant",
+    )
+
+
 # LLM: _segment_anchor gives contract presence checks a stable short token.
 # 函数用途: 用短关键字判断 child goal 是否已经携带同类层级合同，避免重复追加。
 def _segment_anchor(segment: str) -> str:
     lowered = segment.lower()
-    for anchor in ("孙孙", "great-grandchild", "root ->", "4 层", "四层", "命名统一", "层层"):
+    for anchor in (
+        "孙孙",
+        "great-grandchild",
+        "root ->",
+        "4 层",
+        "4层",
+        "四层",
+        "depth=1",
+        "depth=2",
+        "depth=3",
+        "max_depth",
+        "小傻妞",
+        "命名统一",
+        "层层",
+    ):
         if anchor.lower() in lowered:
             return anchor.lower()
     return lowered[:24]

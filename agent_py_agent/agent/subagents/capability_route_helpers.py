@@ -132,9 +132,17 @@ def _route_capability_grant(*, params: RouteCapabilityGrantParams) -> Capability
             "constraints": dict(grant.constraints),
         },
         grant_id=grant.id,
-        message="已生成 capability grant。",
+        message=_grant_route_message(grant, request),
         created_at=now,
     )
+
+
+# LLM: _grant_route_message distinguishes new grants from existing-grant coverage in reports.
+# 函数用途: 生成能力路由记录文案；复用旧 grant 时避免让日志误以为又生成了一个授权。
+def _grant_route_message(grant, request: CapabilityRequest) -> str:
+    if getattr(grant, "request_id", "") == request.id:
+        return "已生成 capability grant。"
+    return "已有 capability grant 覆盖该请求。"
 
 
 # LLM: _mark_capability_request_status 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

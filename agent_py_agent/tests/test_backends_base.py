@@ -264,6 +264,24 @@ class TestAnthropicCompatibleBackend:
         assert resp.text == "fallback text"
 
     @patch("urllib.request.urlopen")
+    def test_generate_retries_once_on_thinking_without_text(self, mock_urlopen):
+        first = MagicMock()
+        first.read.return_value = b'{"content": [{"thinking": "I should continue"}]}'
+        first.__enter__ = MagicMock(return_value=first)
+        first.__exit__ = MagicMock(return_value=False)
+        second = MagicMock()
+        second.read.return_value = b'{"content": [{"type": "text", "text": "after retry"}]}'
+        second.__enter__ = MagicMock(return_value=second)
+        second.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.side_effect = [first, second]
+
+        backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3", stream_enabled=False))
+        resp = backend.generate("test")
+
+        assert resp.text == "after retry"
+        assert mock_urlopen.call_count == 2
+
+    @patch("urllib.request.urlopen")
     def test_generate_no_text_raises(self, mock_urlopen):
         mock_response = MagicMock()
         mock_response.read.return_value = b'{"content": []}'

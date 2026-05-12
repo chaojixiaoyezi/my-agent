@@ -82,8 +82,10 @@ def _run_and_finalize_subagent(agent, bundle: SubagentModelTurnBundle):
     task_for_attrs = agent.subagents.load(options.run_id)
     previous_task_attributes = getattr(agent, "_current_task_attributes", None)
     previous_subagent_run_id = getattr(agent, "_current_subagent_run_id", "")
+    previous_subagent_attempt_id = getattr(agent, "_current_subagent_attempt_id", "")
     agent._current_task_attributes = task_for_attrs.attributes
     agent._current_subagent_run_id = options.run_id
+    agent._current_subagent_attempt_id = bundle.active_attempt_id
 
     try:
         result = _run_subagent_model_turn(agent, bundle.prompt, bundle.context)
@@ -100,6 +102,7 @@ def _run_and_finalize_subagent(agent, bundle: SubagentModelTurnBundle):
     finally:
         agent._current_task_attributes = previous_task_attributes
         agent._current_subagent_run_id = previous_subagent_run_id
+        agent._current_subagent_attempt_id = previous_subagent_attempt_id
 
     return agent._finalize_subagent_run(
         SubagentFinalizeParams(

@@ -85,46 +85,79 @@ def _to_board_item(
     include_child_status_counts: bool = True,
 ) -> SubAgentBoardItem:
     """Convert a task to a board item."""
+    counts = _board_open_counts(task)
+    child_counts = _board_child_counts(
+        manager,
+        task,
+        task_index=task_index,
+        include_child_status_counts=include_child_status_counts,
+    )
+    return SubAgentBoardItem(**_board_item_payload(task, counts, child_counts))
+
+
+# LLM: _board_open_counts keeps capability counters reusable across board payloads.
+# 函数用途: 统计 OPEN capability request/gap 数量，供 risk flags 和 board item 共用。
+def _board_open_counts(task: SubAgentTask) -> tuple[int, int]:
     open_request_count = sum(1 for item in task.capability_requests if item.status == "OPEN")
     open_gap_count = sum(1 for item in task.capability_gaps if item.status == "OPEN")
-    flags = _build_risk_flags(task, open_request_count, open_gap_count)
-    # LLM: child status counts let parents inspect the task tree without reading every work log.
-    child_status_counts = (
-        _child_status_counts(manager, task, task_index=task_index)
-        if include_child_status_counts
-        else {}
-    )
-    return SubAgentBoardItem(
-        id=task.id,
-        root_id=task.root_id,
-        parent_id=task.parent_id,
-        depth=task.depth,
-        status=task.status,
-        verification_status=task.verification_status,
-        channel_status=task.channel_status,
-        owner=task.owner,
-        supervisor=task.supervisor,
-        final_owner=task.final_owner,
-        goal=task.goal,
-        updated_at=task.updated_at,
-        heartbeat_at=task.heartbeat_at,
-        evidence_count=len(task.evidence),
-        evidence_packet_count=len(task.evidence_packets),
-        finding_count=len(task.findings),
-        open_request_count=open_request_count,
-        open_gap_count=open_gap_count,
-        child_count=len(task.child_ids),
-        child_status_counts=child_status_counts,
-        progress=max(0.0, min(1.0, float(task.progress or 0.0))),
-        current_step=task.current_step,
-        latest_summary=task.latest_summary,
-        blocker_count=len(task.blockers),
-        takeover_by=task.takeover_by,
-        locked_file_count=len(task.locked_files),
-        risk_flags=flags,
-        task_dir=task.task_dir,
-        output_json=task.output_json,
-    )
+    return open_request_count, open_gap_count
+
+
+# LLM: _board_child_counts keeps optional child status expansion isolated from item construction.
+# 函数用途: 根据 board 选项决定是否统计直接 child 状态；默认保持 refs-only 摘要。
+def _board_child_counts(
+    manager: Any,
+    task: SubAgentTask,
+    *,
+    task_index: dict[str, SubAgentTask] | None,
+    include_child_status_counts: bool,
+) -> dict[str, int]:
+    if not include_child_status_counts:
+        return {}
+    return _child_status_counts(manager, task, task_index=task_index)
+
+
+# LLM: _board_item_payload maps SubAgentTask fields into the stable board item schema.
+# 函数用途: 集中维护看板字段映射，避免 _to_board_item 继续膨胀。
+def _board_item_payload(
+    task: SubAgentTask,
+    counts: tuple[int, int],
+    child_status_counts: dict[str, int],
+) -> dict[str, object]:
+    open_request_count, open_gap_count = counts
+    return {
+        "id": task.id,
+        "root_id": task.root_id,
+        "parent_id": task.parent_id,
+        "depth": task.depth,
+        "agent_name": task.agent_name,
+        "role": task.role,
+        "status": task.status,
+        "verification_status": task.verification_status,
+        "channel_status": task.channel_status,
+        "owner": task.owner,
+        "supervisor": task.supervisor,
+        "final_owner": task.final_owner,
+        "goal": task.goal,
+        "updated_at": task.updated_at,
+        "heartbeat_at": task.heartbeat_at,
+        "evidence_count": len(task.evidence),
+        "evidence_packet_count": len(task.evidence_packets),
+        "finding_count": len(task.findings),
+        "open_request_count": open_request_count,
+        "open_gap_count": open_gap_count,
+        "child_count": len(task.child_ids),
+        "child_status_counts": child_status_counts,
+        "progress": max(0.0, min(1.0, float(task.progress or 0.0))),
+        "current_step": task.current_step,
+        "latest_summary": task.latest_summary,
+        "blocker_count": len(task.blockers),
+        "takeover_by": task.takeover_by,
+        "locked_file_count": len(task.locked_files),
+        "risk_flags": _build_risk_flags(task, open_request_count, open_gap_count),
+        "task_dir": task.task_dir,
+        "output_json": task.output_json,
+    }
 
 
 # LLM: _child_status_counts 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。

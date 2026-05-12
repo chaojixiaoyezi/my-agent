@@ -68,6 +68,51 @@ def test_shell_gateway_dry_run_blocks_shell_metacharacters(tmp_path) -> None:
     assert "blocked_shell_metacharacter" in decision.blockers
 
 
+def test_shell_gateway_allows_quoted_python_statement_separators(tmp_path) -> None:
+    decision = plan_shell_command(
+        ShellGatewayRequest(
+            command="python3 -c \"print(1); print('x' * 2000)\"",
+            workspace_root=tmp_path,
+            cwd=tmp_path,
+            allowed_roots=[tmp_path],
+            command_allowlist=["python3"],
+        )
+    )
+
+    assert decision.allowed is True
+    assert decision.executable == "python3"
+
+
+def test_shell_gateway_allows_argv_python_statement_separators(tmp_path) -> None:
+    decision = plan_shell_command(
+        ShellGatewayRequest(
+            command=["python3", "-c", "print(1); print('x' * 2000)"],
+            workspace_root=tmp_path,
+            cwd=tmp_path,
+            allowed_roots=[tmp_path],
+            command_allowlist=["python3"],
+        )
+    )
+
+    assert decision.allowed is True
+    assert decision.executable == "python3"
+
+
+def test_shell_gateway_execute_marks_decision_as_not_dry_run(tmp_path) -> None:
+    result = execute_shell_command(
+        ShellGatewayRequest(
+            command="pwd",
+            workspace_root=tmp_path,
+            command_allowlist=["pwd"],
+            dry_run=False,
+        )
+    )
+
+    assert result.executed is True
+    assert result.decision.dry_run is False
+    assert result.decision.audit["dry_run"] is False
+
+
 def test_shell_gateway_dry_run_blocks_cwd_escape(tmp_path) -> None:
     outside = tmp_path.parent
 

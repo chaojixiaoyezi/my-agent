@@ -41,6 +41,8 @@ class SubAgentExecutionContext:
     allowed_tools: list[str] = field(default_factory=list)
     granted_cards: list[dict[str, str]] = field(default_factory=list)
     grants: list[dict[str, object]] = field(default_factory=list)
+    # LLM: controlled_exec_grants are parent-supplied scope refs; runners cannot mint these locally.
+    controlled_exec_grants: list[dict[str, object]] = field(default_factory=list)
     acceptance_checks: list[str] = field(default_factory=list)
     evidence: list[dict[str, object]] = field(default_factory=list)
     quality_contract: QualityContract = field(default_factory=QualityContract)

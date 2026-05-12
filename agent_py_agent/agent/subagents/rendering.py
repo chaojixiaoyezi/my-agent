@@ -334,14 +334,16 @@ def _list_or_none(items: list[str]) -> list[str]:
 # 函数用途: 渲染或汇总看板line的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _render_board_line(item: SubAgentBoardItem) -> str:
     flags = ",".join(item.risk_flags) if item.risk_flags else "ok"
+    children = ",".join(f"{key}:{value}" for key, value in sorted(item.child_status_counts.items())) or "none"
     goal = item.goal.replace("\n", " ")[:100]
     # LLM: compact board lines surface task-tree status for parent triage.
     return (
-        f"- `{item.id}` status={item.status} verify={item.verification_status} "
+        f"- `{item.id}` role={item.role or 'unknown'} name={item.agent_name or 'unnamed'} "
+        f"status={item.status} verify={item.verification_status} "
         f"channel={item.channel_status} "
         f"depth={item.depth} owner={item.owner or 'none'} final={item.final_owner or 'none'} "
         f"progress={item.progress:.0%} evidence={item.evidence_count} "
         f"packets={item.evidence_packet_count} findings={item.finding_count} "
-        f"children={item.child_count} blockers={item.blocker_count} "
+        f"children={item.child_count} child_status={children} blockers={item.blocker_count} "
         f"requests={item.open_request_count} gaps={item.open_gap_count} flags={flags} :: {goal}"
     )

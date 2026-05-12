@@ -30,6 +30,7 @@ class StaticSiteCheckResult:
     placeholder_hits: list[str] = field(default_factory=list)
     broken_local_refs: list[str] = field(default_factory=list)
     inert_control_hits: list[str] = field(default_factory=list)
+    form_binding_hits: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     # LLM: ok is the single pass/fail boolean consumed by parent acceptance.
@@ -41,6 +42,7 @@ class StaticSiteCheckResult:
             or self.placeholder_hits
             or self.broken_local_refs
             or self.inert_control_hits
+            or self.form_binding_hits
         )
 
     # LLM: to_dict keeps result serialization stable and bounded for reports.
@@ -54,6 +56,7 @@ class StaticSiteCheckResult:
             "placeholder_hits": self.placeholder_hits,
             "broken_local_refs": self.broken_local_refs,
             "inert_control_hits": self.inert_control_hits,
+            "form_binding_hits": self.form_binding_hits,
             "warnings": self.warnings,
         }
 
@@ -69,6 +72,7 @@ class StaticSiteHTMLParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.refs: list[tuple[str, str]] = []
         self.controls: list[dict[str, object]] = []
+        self.form_ids: list[str] = []
         self._current_control: dict[str, object] | None = None
 
     # LLM: handle_starttag records href/src/action refs and simple clickable controls.
@@ -78,6 +82,8 @@ class StaticSiteHTMLParser(HTMLParser):
         for ref_attr in ("href", "src", "action"):
             if attr_map.get(ref_attr):
                 self.refs.append((ref_attr, attr_map[ref_attr]))
+        if tag == "form" and attr_map.get("id"):
+            self.form_ids.append(attr_map["id"])
         if tag in {"button", "a"}:
             self._current_control = {
                 "tag": tag,
@@ -138,16 +144,26 @@ def _scan_site(test: dict[str, Any], site_root: Path) -> StaticSiteCheckResult:
     check_refs = test.get("check_local_refs", True) is not False
     check_placeholders = test.get("forbid_placeholders", True) is not False
     check_controls = test.get("check_inert_controls", True) is not False
+    check_forms = test.get("check_form_bindings", True) is not False
+    form_ids: set[str] = set()
+    script_refs: list[Path] = []
+    script_texts: list[str] = []
     for path in html_files:
         text = path.read_text(encoding="utf-8", errors="replace")
         if check_placeholders and _has_visible_template_placeholder(text):
             result.placeholder_hits.append(_rel(path, site_root))
         parser = StaticSiteHTMLParser()
         parser.feed(text)
+        form_ids.update(parser.form_ids)
+        script_refs.extend(_local_script_refs(parser.refs, path, site_root))
+        script_texts.append(text)
         if check_refs:
             result.broken_local_refs.extend(_broken_refs(parser.refs, path, site_root))
         if check_controls:
             result.inert_control_hits.extend(_inert_controls(parser.controls, path, text, site_root))
+    if check_forms:
+        script_texts.extend(_small_text(path) for path in _unique_paths(script_refs))
+        result.form_binding_hits.extend(_form_binding_hits(form_ids, "\n".join(script_texts)))
     return result
 
 
@@ -196,6 +212,57 @@ def _local_ref_target(ref: str, html_file: Path, site_root: Path) -> Path | None
     if candidate.is_dir():
         candidate = candidate / "index.html"
     return candidate if _inside(candidate, site_root) else None
+
+
+# LLM: _local_script_refs reuses ref resolution but only returns local JavaScript files.
+# 函数用途: 收集站点内 script src，用于检查表单绑定目标是否真实存在。
+def _local_script_refs(refs: list[tuple[str, str]], html_file: Path, site_root: Path) -> list[Path]:
+    paths: list[Path] = []
+    for attr, ref in refs:
+        if attr != "src":
+            continue
+        target = _local_ref_target(ref, html_file, site_root)
+        if target is not None and target.suffix.lower() == ".js" and target.exists():
+            paths.append(target)
+    return paths
+
+
+# LLM: _unique_paths avoids repeated reads for shared app.js across many pages.
+# 函数用途: 保持脚本读取顺序稳定并去重，减少验收时的重复 I/O。
+def _unique_paths(paths: list[Path]) -> list[Path]:
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(resolved)
+    return unique
+
+
+# LLM: _small_text keeps local JS scans bounded and failure-tolerant.
+# 函数用途: 读取小型本地脚本；过大或无法读取时返回空串，避免验收撑爆上下文。
+def _small_text(path: Path, max_bytes: int = 262144) -> str:
+    try:
+        if path.stat().st_size > max_bytes:
+            return ""
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+_VALIDATE_FORM_CALL_RE = re.compile(r"validateForm\(\s*['\"]([^'\"]+)['\"]\s*\)")
+
+
+# LLM: _form_binding_hits catches generated JS bound to non-existent form ids.
+# 函数用途: 检查 `validateForm('id')` 目标是否存在，防止登录/注册提交按钮假可用。
+def _form_binding_hits(form_ids: set[str], script_text: str) -> list[str]:
+    hits: list[str] = []
+    for form_id in sorted(set(_VALIDATE_FORM_CALL_RE.findall(script_text or ""))):
+        if form_id not in form_ids:
+            hits.append(f"validateForm:{form_id}")
+    return hits
 
 
 # LLM: _inert_controls finds obvious clickable controls with no target or event handler.
@@ -253,6 +320,8 @@ def _failure_summary(result: StaticSiteCheckResult) -> str:
         parts.append(f"broken_local_refs={len(result.broken_local_refs)}")
     if result.inert_control_hits:
         parts.append(f"inert_control_hits={len(result.inert_control_hits)}")
+    if result.form_binding_hits:
+        parts.append(f"form_binding_hits={len(result.form_binding_hits)}")
     return "; ".join(parts)
 
 

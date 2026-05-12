@@ -11,6 +11,7 @@ from agent_py_agent.agent.subagents.context_bundle import (
     validate_context_bundle,
 )
 from agent_py_agent.agent.subagents.manager import SubAgentManager
+from agent_py_agent.agent.subagents.models import CapabilityGrant
 
 
 def test_context_bundle_v1_captures_task_handoff_fields(tmp_path) -> None:
@@ -52,6 +53,54 @@ def test_context_bundle_v1_captures_task_handoff_fields(tmp_path) -> None:
     assert "task.goal" in bundle.source_refs["goal"]
     assert "task.acceptance_checks" in bundle.source_refs["acceptance_checks"]
     assert set(REQUIRED_CONTEXT_BUNDLE_FIELDS).issubset(payload)
+
+
+def test_context_bundle_exposes_controlled_exec_grant_refs(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="分析任务目录日志",
+        thought="需要父级授权后才能跑 shell。",
+        plan=["读取日志", "汇总结论"],
+        role="worker",
+    )
+    task.capability_grants = [
+        CapabilityGrant(
+            id="grant-shell-1",
+            request_id="req-shell-1",
+            grant_to_run_id=task.id,
+            grant_type="shell",
+            tools=["controlled_exec"],
+            command_allowlist=["pwd", "python3"],
+            path_scope=[str(tmp_path / "workspace")],
+            network_scope=["api.example.com"],
+            output_budget={"max_stdout_bytes": 4096},
+            constraints={"delete_policy": "trash_only"},
+        )
+    ]
+    manager.save(task)
+
+    bundle = build_context_bundle(manager.load(task.id))
+
+    assert bundle.permissions["controlled_exec_grants"] == [
+        {
+            "grant_id": "grant-shell-1",
+            "request_id": "req-shell-1",
+            "run_id": task.id,
+            "command_allowlist": ["pwd", "python3"],
+            "path_scope": [str(tmp_path / "workspace")],
+            "network_scope": ["api.example.com"],
+            "output_budget": {"max_stdout_bytes": 4096},
+            "risk_level": "",
+            "constraints": {"delete_policy": "trash_only"},
+            "delete_policy": {
+                "mode": "task_trash",
+                "commands": ["rm", "rmdir", "unlink"],
+                "requires_apply": True,
+                "command_allowlist_required": False,
+                "completion_requires": ["moved=true", "trash_manifest_ref"],
+            },
+        }
+    ]
 
 
 # LLM: test_context_bundle_output_contract_separates_required_and_forbidden_files covers prompt drift.
@@ -155,6 +204,41 @@ def test_runner_prompt_includes_context_gate_status(tmp_path) -> None:
     assert "## Context Bundle Gate" in prompt
     assert "Context Gate: PASS" in prompt
     assert "context_bundle.json" in prompt
+
+
+def test_runner_prompt_describes_scoped_capability_request_loop(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
+
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="需要在授权后运行任务目录命令",
+        thought="缺 shell 时要上抛 scope，不要自授权。",
+        plan=["先申请能力", "再引用结果"],
+    )
+    task.acceptance_checks = ["缺工具时写 capability_request"]
+    task.allowed_tools = ["controlled_exec"]
+    task.capability_grants = [
+        CapabilityGrant(
+            id="grant-shell-1",
+            request_id="req-shell-1",
+            grant_to_run_id=task.id,
+            grant_type="shell",
+            tools=["controlled_exec"],
+            command_allowlist=["pwd"],
+            path_scope=[str(tmp_path)],
+        )
+    ]
+    manager.save(task)
+    context = manager.write_execution_context(task.id)
+
+    prompt = _build_subagent_runner_prompt(context)
+
+    assert '"capability_type": "shell|tool|skill|mcp|network|generic"' in prompt
+    assert '"requested_commands": ["python3"]' in prompt
+    assert '"requested_mcp_tools": []' in prompt
+    assert '"path_scope": ["任务内需要访问的目录"]' in prompt
+    assert '"output_budget": {"stdout_bytes": 65536, "stderr_bytes": 32768}' in prompt
+    assert "controlled_exec 只能使用 controlled_exec_grants 里的父级 grant" in prompt
 
 
 def test_context_bundle_is_mirrored_into_agent_run_workspace(tmp_path) -> None:

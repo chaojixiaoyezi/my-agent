@@ -20,13 +20,13 @@ from .json_repair import load_tool_block_json
 from .models import BaseTool, ToolExecutionResult
 from .parse_error_hint import parse_error_message
 from .parser import parse_xmlish_tool_calls
+from .registry_tool_dispatch import AuthorizedToolDispatchRequest, execute_authorized_tool
 from .write_boundary import validate_write_boundary
 
 _MAX_TOOL_PAYLOAD_FIELDS = 64
 _MAX_TOOL_FIELD_NAME_CHARS = 128
 _MAX_TOOL_NAME_CHARS = 128
 _MAX_PARSE_ERROR_RAW_CHARS = 1000
-_MAX_EXCEPTION_MESSAGE_CHARS = 500
 _MODEL_WRAPPER_PARAM_KEYS = {
     "api",
     "filesystem",
@@ -131,10 +131,15 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
     if boundary_error:
         return ToolExecutionResult(tool_name, False, boundary_error)
 
-    try:
-        return tool.execute(tool_params)
-    except Exception as exc:
-        return ToolExecutionResult(tool_name, False, _format_tool_exception(exc))
+    return execute_authorized_tool(
+        AuthorizedToolDispatchRequest(
+            tool_name=tool_name,
+            tool=tool,
+            tool_params=tool_params,
+            workspace_root=call.workspace_root,
+            write_boundary=call.write_boundary,
+        )
+    )
 
 
 # LLM: _registry_auth_error 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -340,17 +345,6 @@ def _tool_name(value: object) -> str:
     if any(ord(char) < 32 for char in name):
         raise ValueError("tool 字段包含不支持的控制字符")
     return name
-
-
-# LLM: _format_tool_exception 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 把 format_tool_exception 转成人或模型可读的展示文本。
-def _format_tool_exception(exc: Exception) -> str:
-    if isinstance(exc, ValueError):
-        message = _truncate(str(exc), _MAX_EXCEPTION_MESSAGE_CHARS)
-        return f"工具执行失败: {message or exc.__class__.__name__}"
-    if isinstance(exc, (OSError, UnicodeError)):
-        return f"工具执行失败: {exc.__class__.__name__}；请检查路径、权限或文件编码。"
-    return f"工具执行失败: {exc.__class__.__name__}；请检查参数后重试。"
 
 
 # LLM: _truncate 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。

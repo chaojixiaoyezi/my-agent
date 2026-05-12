@@ -47,6 +47,39 @@ def test_runner_prompt_tells_leaf_to_chunk_long_file_writes():
     assert "长 CSS/JS/HTML" in prompt
     assert "write_file 写短骨架" in prompt
     assert "append_file 分块追加" in prompt
+    assert "1500-2000 字符" in prompt
+    assert "不超过 800 字符" in prompt
+    assert "每轮只输出 1 个写入工具调用" in prompt
+
+
+def test_runner_prompt_tells_controlled_exec_leaf_to_apply_and_report_refs():
+    context = SubAgentExecutionContext(
+        run_id="leaf-exec",
+        generated_at=1.0,
+        goal="用 controlled_exec 执行 pwd、python3 大输出、rm sentinel.txt",
+        thought="",
+        plan=[],
+        role="leaf_worker",
+        allowed_tools=["controlled_exec", "write_file"],
+        controlled_exec_grants=[
+            {
+                "grant_id": "grant-1",
+                "command_allowlist": ["pwd", "python3"],
+                "path_scope": ["/tmp/work"],
+            }
+        ],
+        acceptance_checks=["必须报告 stdout_ref、audit_ref、trash_manifest_ref"],
+    )
+
+    prompt = _build_subagent_runner_prompt(context)
+
+    assert "dry_run/allowed plan 不算完成" in prompt
+    assert "apply=true" in prompt
+    assert "stdout_ref、audit_ref" in prompt
+    assert "command=[\"python3\",\"-c\"" in prompt
+    assert "delete_policy.mode=task_trash" in prompt
+    assert "moved=true" in prompt
+    assert "trash_manifest_ref" in prompt
 
 
 def test_runner_prompt_tells_coordinator_to_write_reports_but_delegate_deliverables():
@@ -71,6 +104,8 @@ def test_runner_prompt_tells_coordinator_to_write_reports_but_delegate_deliverab
     assert "不要误以为只能创建 worker" in prompt
     assert "不要包成" in prompt
     assert "创建 worker/writer/leaf_worker" in prompt
+    assert "不要替后代提前提交 capability_request" in prompt
+    assert "由真正需要该能力的 runner 正式申请" in prompt
     assert "不要让 worker/writer 代写 coordinator 自己的协调证据" in prompt
     assert "原样传递父级指定的文件名" in prompt
     assert "mixed_coordinator_leaf_children" in prompt

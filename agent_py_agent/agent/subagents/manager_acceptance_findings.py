@@ -39,5 +39,6 @@ class SubAgentAcceptanceFindingMixin:
     # LLM: _artifact_exists 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
     # 函数用途: 处理产物exists相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def _artifact_exists(self, task, raw_path: str) -> bool:
-        from .services.acceptance_findings import _artifact_exists as _check
+        from .services.acceptance_artifacts import artifact_exists as _check
+
         return _check(self, task, raw_path)

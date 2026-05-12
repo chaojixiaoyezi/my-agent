@@ -75,7 +75,7 @@ def dispatch_workflow_mode(agent, params: dict[str, object], parser) -> str:
 def _top_level_root_role_dispatch(agent, params: dict[str, object]) -> bool:
     if current_subagent_run_id(agent):
         return False
-    if not _bool_param(params.get("execute_runners"), default=False):
+    if not _bool_param(params.get("apply"), default=False):
         return False
     requested_mode = str(params.get("workflow_mode") or agent.config.subagent_workflow_mode or "").strip().lower()
     if requested_mode not in {"plan", "auto", "manual"}:

@@ -89,6 +89,86 @@ def test_hierarchy_schedule_allows_generic_numbered_checker_siblings(tmp_path):
     assert len(result.created_run_ids) == 2
 
 
+# LLM: R53 showed duplicate-domain guard must ignore shared workspace paths in child goals.
+# 函数用途: 两个不同 coordinator 都提到 `/Users/.../my-claude-code/...` 时，不能把路径里的 claude 当成重复领域。
+def test_hierarchy_schedule_duplicate_domain_ignores_shared_filesystem_paths(tmp_path):
+    manager = SubAgentManager(tmp_path)
+    root = manager.create_run(goal="shopping root", thought="orchestrate", plan=["plan"])
+    child = manager.create_run(
+        goal="coordinate shopping site",
+        thought="coordinate",
+        plan=["split"],
+        parent_id=root.id,
+        root_id=root.id,
+        depth=1,
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=child.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal=(
+                        "在 /Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_complete/build "
+                        "交付静态购物网站 HTML/CSS/JS。"
+                    ),
+                    role="coordinator",
+                    agent_name="小小傻妞-前端Worker",
+                ),
+                HierarchyChildSpec(
+                    goal=(
+                        "协调测试子代理，为购物网站 demo 创建验收测试。测试文件写到 "
+                        "/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_complete/build/tests/。"
+                    ),
+                    role="coordinator",
+                    agent_name="小小傻妞-测试协调",
+                ),
+            ],
+            apply=True,
+        )
+    )
+
+    assert result.blocked is False
+    assert len(result.created_run_ids) == 2
+
+
+# LLM: R56 showed Chinese coordinator names can fall back to goal text containing only generic depth words.
+# 函数用途: 两个中文 coordinator 的 goal 都写 depth=3 时，不能把 depth 当成重复业务域。
+def test_hierarchy_schedule_duplicate_domain_ignores_depth_markers(tmp_path):
+    manager = SubAgentManager(tmp_path)
+    root = manager.create_run(goal="shopping root", thought="orchestrate", plan=["plan"])
+    child = manager.create_run(
+        goal="coordinate shopping site",
+        thought="coordinate",
+        plan=["split"],
+        parent_id=root.id,
+        root_id=root.id,
+        depth=1,
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=child.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="创建 depth=3 孙孙节点完成 index.html/register.html/style.css/app.js。",
+                    role="child_coordinator",
+                    agent_name="小小傻妞-前端协调A",
+                ),
+                HierarchyChildSpec(
+                    goal="创建 depth=3 孙孙节点完成 login.html/cart.html/checkout.html。",
+                    role="child_coordinator",
+                    agent_name="小小傻妞-前端协调B",
+                ),
+            ],
+            apply=True,
+        )
+    )
+
+    assert result.blocked is False
+    assert len(result.created_run_ids) == 2
+
+
 # LLM: test_hierarchy_schedule_blocks_duplicate_verified_leaf_targets covers R11 duplicate auth leaf creation.
 # 函数用途: 同父级已有 DONE/VERIFIED leaf 写出 register/login 后，不能再派同一文件的 leaf。
 def test_hierarchy_schedule_blocks_duplicate_verified_leaf_targets(tmp_path):

@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from .runner_context import current_subagent_run_id
 
 
@@ -12,49 +15,90 @@ def direct_children_progress_payload(agent) -> dict[str, object]:
     parent_run_id = current_subagent_run_id(agent)
     if not parent_run_id:
         return {}
+    direct_children = _direct_children(agent, parent_run_id)
+    if direct_children is None:
+        return {}
+    payload = _progress_payload(parent_run_id, direct_children)
+    _attach_direct_child_next_action(payload["direct_children"])
+    return payload
+
+
+# LLM: _direct_children keeps list_runs exception handling out of the payload builder.
+# 函数用途: 读取当前 runner 的直接 child；读取失败时返回 None 让调用方保持空 payload。
+def _direct_children(agent, parent_run_id: str) -> list | None:
     try:
-        direct_children = [
+        return [
             item for item in agent.subagents.list_runs()
             if str(getattr(item, "parent_id", "")) == parent_run_id
         ]
     except Exception:
-        return {}
-    payload = _progress_payload(parent_run_id, direct_children)
-    if payload["direct_children"]["needs_more_dispatch"]:
-        payload["direct_children"].update({
-            "next_action": "continue_dispatch_direct_children",
-            "suggested_tool_call": {
-                "tool": "dispatch_subagents",
-                "apply": True,
-                "execute_runners": True,
-                "run_ids": payload["direct_children"]["unfinished_run_ids"],
-                "workflow_mode": "auto",
-            },
-            "continue_hint": (
-                "仍有直接 child 处于 PLANNING/RUNNING；这通常是限速或串行调度造成的。"
-                "继续调用 dispatch_subagents，不要把 PLANNING 直接判为失败。"
-            ),
-        })
-    elif payload["direct_children"]["needs_recovery"]:
-        payload["direct_children"].update({
-            "next_action": "inspect_or_rescue_direct_children",
-            "suggested_tool_call": {
-                "tool": "dispatch_subagents",
-                "apply": True,
-                "execute_runners": True,
-                "run_ids": payload["direct_children"]["recovery_run_ids"],
-                "workflow_mode": "auto",
-            },
-            "suggested_recovery_child_tool_call": _recovery_child_tool_call(
-                payload["direct_children"]["recovery_run_ids"]
-            ),
-            "recovery_hint": (
-                "有直接 child 已 BLOCKED/FAILED/TIMEOUT；先用这些 run_ids 尝试受控重试。"
-                "如果仍不可重试，按 suggested_recovery_child_tool_call 创建恢复 child。"
-                "恢复 child 默认可以是 worker；只有确实需要继续拆多层时，父节点才改成 coordinator。"
-            ),
-        })
-    return payload
+        return None
+
+
+# LLM: _attach_direct_child_next_action centralizes model-facing progress guidance.
+# 函数用途: 根据 child 状态把继续调度、恢复或收口建议补进直接 child payload。
+def _attach_direct_child_next_action(children: dict[str, object]) -> None:
+    if children["needs_more_dispatch"]:
+        children.update(_continue_dispatch_payload(children["unfinished_run_ids"]))
+        return
+    if children["needs_recovery"]:
+        children.update(_recovery_dispatch_payload(children["recovery_run_ids"]))
+        return
+    if children["ready_for_parent_acceptance"]:
+        children.update(_closeout_payload())
+
+
+# LLM: _continue_dispatch_payload describes the safe next dispatch without expanding child artifacts.
+# 函数用途: 生成仍有 PLANNING/RUNNING child 时的继续调度提示。
+def _continue_dispatch_payload(run_ids: list[str]) -> dict[str, object]:
+    return {
+        "next_action": "continue_dispatch_direct_children",
+        "suggested_tool_call": _dispatch_tool_call(run_ids),
+        "continue_hint": (
+            "仍有直接 child 处于 PLANNING/RUNNING；这通常是限速或串行调度造成的。"
+            "继续调用 dispatch_subagents，不要把 PLANNING 直接判为失败。"
+        ),
+    }
+
+
+# LLM: _recovery_dispatch_payload keeps failed-child recovery refs-first and bounded.
+# 函数用途: 生成 BLOCKED/FAILED/TIMEOUT child 的重试或恢复 child 建议。
+def _recovery_dispatch_payload(run_ids: list[str]) -> dict[str, object]:
+    return {
+        "next_action": "inspect_or_rescue_direct_children",
+        "suggested_tool_call": _dispatch_tool_call(run_ids),
+        "suggested_recovery_child_tool_call": _recovery_child_tool_call(run_ids),
+        "recovery_hint": (
+            "有直接 child 已 BLOCKED/FAILED/TIMEOUT；先用这些 run_ids 尝试受控重试。"
+            "如果仍不可重试，按 suggested_recovery_child_tool_call 创建恢复 child。"
+            "恢复 child 默认可以是 worker；只有确实需要继续拆多层时，父节点才改成 coordinator。"
+            "在执行恢复动作前不要反复 read_file/read_artifact 打开 child 产物正文；先按 refs 和建议工具调用推进。"
+        ),
+    }
+
+
+# LLM: _closeout_payload tells parent runners to summarize refs rather than rereading bodies.
+# 函数用途: 生成所有 child 可验收时的 refs-first 收口提示。
+def _closeout_payload() -> dict[str, object]:
+    return {
+        "next_action": "summarize_direct_children_refs",
+        "closeout_hint": (
+            "所有直接 child 已等待验收或完成；不要反复 read_file/read_artifact 读取子产物正文。"
+            "请只汇总 child run_id、状态、产物 refs 和阻塞项，写入自己的 output.json 或最终结果块后等待父级验收。"
+        ),
+    }
+
+
+# LLM: _dispatch_tool_call keeps suggested dispatch calls structurally identical across progress states.
+# 函数用途: 生成建议模型复制的 dispatch_subagents 工具参数。
+def _dispatch_tool_call(run_ids: list[str]) -> dict[str, object]:
+    return {
+        "tool": "dispatch_subagents",
+        "apply": True,
+        "execute_runners": True,
+        "run_ids": run_ids,
+        "workflow_mode": "auto",
+    }
 
 
 # LLM: _progress_payload folds task statuses without expanding child artifacts.
@@ -64,15 +108,19 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
     planning_ids: list[str] = []
     running_ids: list[str] = []
     recovery_ids: list[str] = []
+    rejected_ids: list[str] = []
     for item in direct_children:
         status = str(getattr(item, "status", "") or "UNKNOWN").upper()
+        item_id = str(getattr(item, "id", "") or "")
         by_status[status] = by_status.get(status, 0) + 1
         if status == "PLANNING":
-            planning_ids.append(str(getattr(item, "id", "")))
+            planning_ids.append(item_id)
         if status == "RUNNING":
-            running_ids.append(str(getattr(item, "id", "")))
-        if status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
-            recovery_ids.append(str(getattr(item, "id", "")))
+            running_ids.append(item_id)
+        if _latest_acceptance_rejected(item):
+            rejected_ids.append(item_id)
+        if status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"} or item_id in rejected_ids:
+            recovery_ids.append(item_id)
     unfinished_ids = [item for item in [*planning_ids, *running_ids] if item]
     recovery_ids = [item for item in recovery_ids if item]
     return {
@@ -83,9 +131,11 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
             "planning_run_ids": [item for item in planning_ids if item],
             "running_run_ids": [item for item in running_ids if item],
             "recovery_run_ids": recovery_ids,
+            "rejected_acceptance_run_ids": [item for item in rejected_ids if item],
             "unfinished_run_ids": unfinished_ids,
             "needs_more_dispatch": bool(unfinished_ids),
             "needs_recovery": bool(recovery_ids),
+            "ready_for_parent_acceptance": bool(direct_children) and not unfinished_ids and not recovery_ids,
         }
     }
 
@@ -117,3 +167,19 @@ def _recovery_child_tool_call(recovery_run_ids: list[str]) -> dict[str, object]:
             }
         ],
     }
+
+
+# LLM: _latest_acceptance_rejected makes rejected child acceptance visible as recovery work.
+# 函数用途: 读取 child 本地验收报告；如果最新验收为 REJECT，父级 dispatch payload 不再提示直接收口。
+def _latest_acceptance_rejected(item) -> bool:
+    reports_dir = str(getattr(item, "reports_dir", "") or "")
+    if not reports_dir:
+        return False
+    path = Path(reports_dir) / "acceptance_review.json"
+    if not path.exists():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return str(payload.get("decision") or "").upper() == "REJECT"

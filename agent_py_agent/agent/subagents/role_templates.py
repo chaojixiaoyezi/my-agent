@@ -13,7 +13,8 @@ READ_ONLY_TOOLS = ["list_files", "read_file", "search_text", "read_artifact"]
 WORKER_READ_TOOLS = ["list_files", "read_file", "search_text", "read_artifact"]
 WORKER_WRITE_TOOLS = ["write_file", "append_file", "replace_in_file"]
 REPORT_WRITE_TOOLS = ["write_file", "append_file", "replace_in_file"]
-ROLE_BASE_TOOLS = [*READ_ONLY_TOOLS, *REPORT_WRITE_TOOLS]
+CAPABILITY_REQUEST_TOOL = "capability_request"
+ROLE_BASE_TOOLS = [*READ_ONLY_TOOLS, *REPORT_WRITE_TOOLS, CAPABILITY_REQUEST_TOOL]
 COORDINATOR_TOOLS = [
     "schedule_child_subagents",
     "dispatch_subagents",
@@ -117,6 +118,8 @@ def role_template_index_text(
     lines = [
         (
             f"- {item.id}: {item.name_zh}；{item.summary_zh}；"
+            f"适用={_compact_role_rules(item.use_when_zh)}；"
+            f"不适用={_compact_role_rules(item.do_not_use_when_zh)}；"
             f"能力={_capability_tags(item)}；模板位置={item.source_path}"
         )
         for item in store.all()[:limit]
@@ -178,6 +181,13 @@ def _capability_tags(item: RoleTemplate) -> str:
     if item.can_accept:
         tags.append("accept")
     return ",".join(tags) or "read_only"
+
+
+# LLM: _compact_role_rules keeps role-selection hints useful without loading full prompts.
+# 函数用途: 将角色适用/不适用场景压成一行，给主代理和派工类角色做轻量选择依据。
+def _compact_role_rules(items: list[str], *, max_chars: int = 80) -> str:
+    text = "；".join(item.strip() for item in items if item.strip()) or "未设置"
+    return text if len(text) <= max_chars else text[:max_chars].rstrip() + "..."
 
 
 # LLM: _detail_lines renders one full role template for active delegation prompts.
