@@ -216,6 +216,33 @@ class TestCreateSubagentsToolCoordinatorSeed:
         assert result.ok is True
         assert params.workflow_mode == "off"
 
+    def test_explicit_coordinator_seed_without_name_gets_lineage_prefix(self):
+        """模型没传 agent_name 时，第一层 root/coordinator 也必须有小傻妞前缀。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "off"
+
+        mock_task = MagicMock()
+        mock_task.id = "root_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/root_001"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": "创建 root/coordinator 并让它继续派工。",
+            "role": "coordinator",
+        })
+
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert result.ok is True
+        assert params.agent_name == "小傻妞-coordinator"
+
     def test_explicit_coordinator_seed_inherits_raw_user_file_and_hierarchy_contract(self):
         """主代理摘要 root goal 时，工具层要补回原始用户 prompt 的硬合同。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool

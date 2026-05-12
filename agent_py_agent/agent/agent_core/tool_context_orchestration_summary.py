@@ -140,6 +140,9 @@ def _archive_pointer_lines(archive_record: dict[str, object], *, include_read_hi
     lines = [
         f"- output_path: {archive_record.get('output_path', '')}",
         f"- output_artifact_ref: {archive_record.get('artifact_ref', '')}",
+        f"- output_call_id: {archive_record.get('call_id') or archive_record.get('id', '')}",
+        f"- output_scoped_call_id: {archive_record.get('scoped_call_id', '')}",
+        "- artifact_ref_policy: prefer output_scoped_call_id for read_artifact; avoid copying long paths or hashes.",
         f"- output_hash: {archive_record.get('output_hash', '')}",
         f"- output_size_bytes: {archive_record.get('output_size_bytes', 0)}",
     ]

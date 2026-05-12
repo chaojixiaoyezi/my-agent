@@ -152,9 +152,9 @@ before changing code.
   current user prompt explicitly asks the parent to inspect or accept the work.
 - Root runs do not write `capability_request`.  A root has no parent to ask, so
   ordinary task-local capability gaps must be handled by creating/routing lower
-  agents or by root policy decisions.  True red-line operations should be recorded
-  as policy blocks or deferred to a future root policy/user confirmation path, not
-  as OPEN child capability requests.
+  agents, using existing tools, or reporting that the requested action is not
+  currently supported.  Root self-termination/uninstall policy is a future
+  design topic and must not be modeled as an OPEN child capability request.
 - Cleanup is allowed inside authorized workspaces when it matches the task:
   temporary files, task trash, generated artifacts, task-local memory, drafts,
   templates, tools, and skills may be removed.  The hard line is uninstalling or
