@@ -450,6 +450,7 @@ def test_hierarchy_schedule_keeps_controlled_exec_contract_for_leaf(tmp_path):
     assert "stdout_ref" in leaf.goal
 
 
+
 # LLM: _controlled_exec_contract_root centralizes the long parent contract text for inheritance tests.
 # 函数用途: 创建要求 controlled_exec/capability_request/task_trash refs 的 root 任务。
 def _controlled_exec_contract_root(manager: SubAgentManager, deliverables):

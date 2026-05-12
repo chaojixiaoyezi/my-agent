@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from agent_py_agent.agent.backend import BaseBackend, ModelResponse
+from agent_py_agent.agent.backends.errors import ProviderTimeoutError
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagents.manager import SubAgentManager
@@ -65,6 +66,15 @@ class _FailingTraceBackend(BaseBackend):
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         raise RuntimeError("trace backend failed")
+
+
+# LLM: _ProviderTimeoutBackend lets runner tests exercise timeout classification without sleeping.
+# 类用途: 测试模型接口超时时，子代理失败类型和 trace 都能稳定记录。
+class _ProviderTimeoutBackend(BaseBackend):
+    name = "provider_timeout_backend"
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        raise ProviderTimeoutError("模型接口请求超时: request_timeout=17s")
 
 
 def test_subagent_debug_trace_is_off_by_default(tmp_path):
@@ -387,6 +397,37 @@ def test_subagent_debug_trace_records_runner_model_request_failure(tmp_path):
     failed = next(record for record in records if record["event_type"] == "runner_model_request_failed")
     assert failed["error_type"] == "RuntimeError"
     assert "trace backend failed" in failed["error_preview"]
+
+
+# LLM: provider timeouts should become recoverable runner facts instead of generic runner_error.
+# 函数用途: 确认子代理模型接口超时会写成 provider_timeout，方便父级接管和后续调度。
+def test_subagent_run_failure_classifies_provider_timeout(tmp_path):
+    cfg = AgentConfig(
+        enable_tools=True,
+        model_backend="echo",
+        subagent_workspace="subs",
+        subagent_debug_trace_level=3,
+    )
+    agent = SimpleAgent(cfg, tmp_path)
+    agent.backend = _ProviderTimeoutBackend()
+    task = agent.subagents.create_run(
+        goal="observe provider timeout",
+        thought="模型接口会超时。",
+        plan=["call model"],
+        allowed_tools=[],
+    )
+
+    result = agent.run_subagent(task.id, dry_run=False, probe=False)
+    recorded = agent.subagents.load(task.id)
+
+    assert not result.ok
+    assert recorded.failure_type == "provider_timeout"
+    assert "模型接口请求超时" in result.message
+    failed = next(
+        record for record in _trace_records(tmp_path / "subs")
+        if record["event_type"] == "runner_model_request_failed"
+    )
+    assert failed["error_type"] == "ProviderTimeoutError"
 
 
 def _read_debug_detail(path_text: str) -> str:

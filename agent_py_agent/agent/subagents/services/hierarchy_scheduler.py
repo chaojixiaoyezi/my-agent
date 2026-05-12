@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..debug_trace import trace_hierarchy_schedule
@@ -13,7 +13,8 @@ from .base import CreateRunParams
 from .hierarchy_acceptance import scheduled_child_acceptance_checks
 from .hierarchy_agent_names import scheduled_child_agent_name
 from .hierarchy_context import inherited_hierarchy_thought, scheduled_child_goal
-from .hierarchy_role_identity import role_from_child_spec_identity
+from .hierarchy_qa_scheduler import RequiredQaChildSpec, required_qa_child_specs
+from .hierarchy_scheduled_role import scheduled_child_role
 from .hierarchy_scope_guards import duplicate_child_domain_reason, schedule_block_reason
 from .hierarchy_tool_policy import (
     LeafWriteIntentRequest,
@@ -111,6 +112,7 @@ class SubAgentHierarchyScheduler:
     # 函数用途: dry-run 或真正创建下一层 run；超过深度/数量限制时只返回 blocked。
     def schedule_children(self, request: HierarchyScheduleRequest) -> HierarchyScheduleResult:
         parent = self.manager.load(request.parent_run_id)
+        request = _request_with_required_qa_roles(self.manager, parent, request)
         # LLM: generic guards run first; duplicate-domain guard needs persisted sibling metadata.
         reason = schedule_block_reason(parent, request) or duplicate_child_domain_reason(
             self.manager,
@@ -184,6 +186,33 @@ def _apply_result(
     )
 
 
+# LLM: _request_with_required_qa_roles turns explicit QA contracts into real child specs before guards run.
+# 函数用途: 父任务点名 tester/bug_finder/acceptor 时，补齐模型漏派的 QA 子任务；已有或本轮已请求的角色不会重复创建。
+def _request_with_required_qa_roles(
+    manager: Any,
+    parent: SubAgentTask,
+    request: HierarchyScheduleRequest,
+) -> HierarchyScheduleRequest:
+    qa_specs = required_qa_child_specs(manager=manager, parent=parent, specs=request.child_specs)
+    if not qa_specs:
+        return request
+    return replace(
+        request,
+        child_specs=[*request.child_specs, *[_hierarchy_child_spec_from_qa_spec(item) for item in qa_specs]]
+    )
+
+
+# LLM: _hierarchy_child_spec_from_qa_spec adapts scheduler-neutral QA specs into the public bundle.
+# 函数用途: 把 QA helper 返回的轻量规格转成 `HierarchyChildSpec`，避免 helper 反向依赖 scheduler 类型。
+def _hierarchy_child_spec_from_qa_spec(spec: RequiredQaChildSpec) -> HierarchyChildSpec:
+    return HierarchyChildSpec(
+        goal=spec.goal,
+        agent_name=spec.agent_name,
+        role=spec.role,
+        acceptance_checks=list(spec.acceptance_checks),
+    )
+
+
 # LLM: _create_child converts one spec into CreateRunParams while preserving declared product paths.
 # 函数用途: 复用现有 create_run 路径创建子任务；child spec 自己写出的产物路径会成为候选根，最终授权仍由角色策略裁决。
 def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) -> SubAgentTask:
@@ -195,7 +224,7 @@ def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) 
         )
     )
     role_probe_goal = scheduled_child_goal(parent, spec, write_roots=requested_write_roots)
-    role = _scheduled_child_role(parent, spec, requested_write_roots, goal=role_probe_goal)
+    role = scheduled_child_role(parent, spec, requested_write_roots, goal=role_probe_goal)
     extra_write_roots = scheduled_child_extra_write_roots(
         ScheduledWriteRootRequest(
             role=role,
@@ -271,32 +300,6 @@ def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParam
     )
 
 
-# LLM: _scheduled_child_role repairs common model slips while preserving concrete product-write intent.
-# 函数用途: 带层级调度权限的 child 即使有报告写入工具，也按协调任务推断；只有明确写业务产物才归一为 leaf_worker。
-def _scheduled_child_role(
-    parent: SubAgentTask,
-    spec: HierarchyChildSpec,
-    extra_write_roots: list[str] | None = None,
-    *,
-    goal: str | None = None,
-) -> str:
-    role = role_from_child_spec_identity(spec)
-    if role not in {"worker", "general", "child"}:
-        return role
-    if should_infer_leaf_coding_tools(
-        LeafWriteIntentRequest(spec=spec, extra_write_roots=extra_write_roots or [], goal=goal)
-    ):
-        return "leaf_worker"
-    tools = set(spec.allowed_tools or [])
-    if "schedule_child_subagents" not in tools and "dispatch_subagents" not in tools:
-        return role
-    depth = int(parent.depth or 0) + 1
-    if depth == 1:
-        return "child_coordinator"
-    if depth == 2:
-        return "grandchild_coordinator"
-    return "coordinator"
-
 # LLM: _planned_items mirrors created item shape while keeping run_id empty in dry-runs.
 # 函数用途: 生成预览条目，调用方无需猜测 root/depth/parent。
 def _planned_items(parent: SubAgentTask, request: HierarchyScheduleRequest) -> list[HierarchyScheduledItem]:
@@ -306,7 +309,7 @@ def _planned_items(parent: SubAgentTask, request: HierarchyScheduleRequest) -> l
             parent_id=parent.id,
             root_id=parent.root_id or parent.id,
             depth=parent.depth + 1,
-            role=_scheduled_child_role(
+            role=scheduled_child_role(
                 parent,
                 spec,
                 requested_child_write_roots(

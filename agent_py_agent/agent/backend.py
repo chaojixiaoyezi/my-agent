@@ -18,7 +18,10 @@ from .backends import (  # noqa: F401
     HttpBackend,
     ModelResponse,
     OpenAICompatibleBackend,
+    ProviderTimeoutError,
     get_backend,
+    is_provider_timeout_error,
+    provider_timeout_report,
 )
 
 __all__ = [
@@ -29,5 +32,8 @@ __all__ = [
     "HttpBackend",
     "ModelResponse",
     "OpenAICompatibleBackend",
+    "ProviderTimeoutError",
     "get_backend",
+    "is_provider_timeout_error",
+    "provider_timeout_report",
 ]

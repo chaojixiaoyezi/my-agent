@@ -4111,3 +4111,21 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Required next fix: add parent/CLI finalization heartbeat or watchdog for provider-timeout blocked roots. If all relevant task states are terminal or blocked for too long, the outer command should emit a deterministic blocked report and exit instead of staying silent.
 - Status: R61 does not count as fully accepted. It improved hierarchy creation and product output, but still failed root-level acceptance because provider timeout blocked root/depth=1, QA role coverage did not complete, and long write payloads exposed a parser-stability risk.
 - Next: compare mature agents' large-output and file-edit strategies, then implement a stable long-content path: edit/patch-first, bounded read/output externalization, controlled exec/artifact writer for large generated files, and deterministic blocked closeout for provider timeouts.
+
+## 2026-05-12 R61 Follow-up Fixes: Long Content Recovery and Provider Timeout Typing
+
+- Finding 201: long write fallback existed as prose but not as next-turn policy.
+  - Symptom: after long `write_file` / `append_file` parser errors, the next model turn only saw an ordinary tool error. It could still retry the same oversized JSON block.
+  - Fix: added `content_recovery_mode.py`; `_tool_loop_service.py` now appends `long_content_recovery_mode` after truncated write parse errors or inline write rejections. The recovery mode requires one write tool call per turn, short skeleton first, then `append_file` chunks no larger than the recovery limit.
+  - Verification: `test_tool_loop_enters_long_content_recovery_after_truncated_write_parse_error`, `test_tool_loop_enters_long_content_recovery_after_inline_write_rejection`, and related filesystem/parser tests pass locally.
+- Finding 202: provider timeout was not a typed failure boundary.
+  - Symptom: provider read timeouts surfaced as generic runtime/network errors, so the CLI and runner recovery path could not reliably distinguish API timeout from arbitrary code failure.
+  - Fix: added `ProviderTimeoutError`; HTTP JSON and streaming requests raise it on socket/urllib timeouts, subagent runner failure records `failure_type=provider_timeout`, and `my-agent run` prints a compact `[provider_timeout]` handoff with a nonzero exit instead of exposing a traceback.
+  - Verification: `test_request_json_timeout_raises_provider_timeout`, `test_request_stream_timeout_raises_provider_timeout`, `test_subagent_run_failure_classifies_provider_timeout`, and `test_cmd_run_reports_provider_timeout` pass locally.
+  - Remaining risk: this is a typed/friendly closeout slice. It does not yet implement a full parent-level “all descendants terminal, synthesize final blocked report” watchdog for every dispatch path; that remains a later autonomous closeout enhancement.
+- Finding 203: explicit QA roles were acceptance-only, not scheduler-assisted.
+  - Symptom: R59/R60 showed the same pattern: prompts asked for tester / bug_finder / acceptor, but the tree could still spend most of its budget creating coordinators and workers before acceptance finally noticed missing QA coverage.
+  - 中文解释：以前系统能“最后发现没派测试/找错/验收”，但不能“在派工时就帮主代理补上”。这样真实跑大任务时容易浪费很多轮，最后才发现质量角色缺席。
+  - Fix: added `qa_role_contract.py` as the shared role-detection source. `hierarchy_scheduler.py` now checks parent goal/acceptance before guards run, compares requested specs plus persisted descendants, and appends missing tester/bug_finder/acceptor child specs exactly once. `acceptance_role_coverage.py` now reuses the same contract helper, so scheduling and final acceptance do not drift. Scope guard domain stopwords now ignore structural `run/id/ref/refs/qa` terms so auto-created QA children do not collide just because they mention the same parent ref.
+  - Verification: `test_hierarchy_schedule_auto_adds_required_qa_roles_from_parent_contract`, `test_hierarchy_schedule_avoids_duplicate_required_qa_roles`, and existing role-coverage tests pass locally.
+  - Remaining risk: this is deterministic scheduling support, not a guarantee that each QA child will finish real testing under provider timeouts. The next real E2E still needs to verify root-only creation plus real tester/bug_finder/acceptor completion.

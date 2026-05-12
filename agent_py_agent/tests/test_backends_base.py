@@ -17,6 +17,7 @@ from agent_py_agent.agent.backends.base import (
     OpenAICompatibleBackend,
     get_backend,
 )
+from agent_py_agent.agent.backends.errors import ProviderTimeoutError
 
 _DEFAULT_OPTIONS = BackendOptions(
     api_base="https://api.example.com",
@@ -144,11 +145,32 @@ class TestHttpBackendRequestJson:
         with pytest.raises(RuntimeError, match="HTTP 400"):
             backend.request_json("/path", {}, {})
 
+    # LLM: provider socket timeouts must be typed so CLI and runner recovery can classify them.
+    # 函数用途: 模拟模型 HTTP 请求卡到 timeout，确认不再只是普通 RuntimeError。
+    @patch("urllib.request.urlopen")
+    def test_request_json_timeout_raises_provider_timeout(self, mock_urlopen):
+        mock_urlopen.side_effect = TimeoutError("timed out")
+
+        backend = HttpBackend(_options(api_key="test-key", request_timeout=17))
+
+        with pytest.raises(ProviderTimeoutError, match="17s"):
+            backend.request_json("/path", {}, {})
+
 
 class TestHttpBackendRequestStream:
     def test_request_stream_missing_api_key(self):
         backend = HttpBackend(_options(api_key=""))
         with pytest.raises(ValueError, match="api_key 为空"):
+            backend.request_stream("/path", {}, {})
+
+    # LLM: streaming provider timeouts need the same typed boundary as non-streaming calls.
+    # 函数用途: 流式接口超时时也抛 ProviderTimeoutError，避免 runner/CLI 判断分叉。
+    @patch("urllib.request.urlopen")
+    def test_request_stream_timeout_raises_provider_timeout(self, mock_urlopen):
+        mock_urlopen.side_effect = TimeoutError("timed out")
+        backend = HttpBackend(_options(api_key="test-key", request_timeout=19))
+
+        with pytest.raises(ProviderTimeoutError, match="19s"):
             backend.request_stream("/path", {}, {})
 
 

@@ -24,6 +24,7 @@ from agent_py_agent.agent.memory_archive.runtime.turn_archiver import (
     archive_run_turn,
 )
 from agent_py_agent.agent.memory_archive.schema import RUNTIME_MEMORY_SCHEMA_VERSION
+from agent_py_agent.agent.tooling.content_transport_policy import RECOVERY_WRITE_CHUNK_CHARS
 from agent_py_agent.agent.tooling.models import ToolExecutionResult
 
 
@@ -143,6 +144,70 @@ def test_tool_call_record_summarizes_large_payload_for_live_prompt(tmp_path: Pat
     assert "path: shop/cart.html" in live_context
     assert "large text omitted" in live_context
     assert huge_html not in live_context
+
+
+# LLM: parse-error recovery mode must survive payload summarization and guide the next model turn.
+# 函数用途: 验证长 write_file 工具块被截断后，工具循环会追加稳定降级策略，而不只是一条错误文本。
+def test_tool_loop_enters_long_content_recovery_after_truncated_write_parse_error(
+    tmp_path: Path,
+) -> None:
+    service = ToolLoopService(SimpleNamespace(root=tmp_path))
+    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
+    payload = {
+        "tool": "__parse_error__",
+        "error": "工具调用缺少结束标记 [/TOOL_CALL]",
+        "raw": '{"tool":"write_file","path":"site/app.js","content":"const data = ',
+    }
+    output = (
+        "工具调用缺少结束标记 [/TOOL_CALL]。如果上一轮是 write_file/append_file 且 "
+        "content 太长，不要重复输出完整 content；必须先用 write_file 写短骨架，再用 "
+        f"append_file 分块追加内容；content 降到不超过 {RECOVERY_WRITE_CHUNK_CHARS} 字符。"
+    )
+
+    service._record_tool_call(
+        ToolCallRecordParams(
+            params=params,
+            tool_rounds=2,
+            idx=1,
+            payload=payload,
+            result=ToolExecutionResult("__parse_error__", False, output),
+        )
+    )
+
+    live_context = "\n".join(params.tool_context)
+    assert "long_content_recovery_mode" in live_context
+    assert "write_file 写短骨架" in live_context
+    assert "append_file 分块追加" in live_context
+    assert f"不超过 {RECOVERY_WRITE_CHUNK_CHARS} 字符" in live_context
+    assert "site/app.js" in live_context
+
+
+# LLM: write-tool rejections should trigger the same reusable recovery mode as parser failures.
+# 函数用途: 验证 inline content 被硬上限拒绝后，下一轮 prompt 会明确要求小块追加，避免模型原样重试。
+def test_tool_loop_enters_long_content_recovery_after_inline_write_rejection(
+    tmp_path: Path,
+) -> None:
+    service = ToolLoopService(SimpleNamespace(root=tmp_path))
+    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
+    output = (
+        "write_file.content inline content 过长：9000 字符，最多 4000 字符。 path=site/app.css\n"
+        "请先用 write_file 写短骨架，再用 append_file 分块追加。"
+    )
+
+    service._record_tool_call(
+        ToolCallRecordParams(
+            params=params,
+            tool_rounds=3,
+            idx=1,
+            payload={"tool": "write_file", "path": "site/app.css", "content": "A" * 9000},
+            result=ToolExecutionResult("write_file", False, output),
+        )
+    )
+
+    live_context = "\n".join(params.tool_context)
+    assert "long_content_recovery_mode" in live_context
+    assert "只输出 1 个 write_file 或 append_file 工具调用" in live_context
+    assert "site/app.css" in live_context
 
 
 def test_render_tool_payload_keeps_small_payload_readable() -> None:

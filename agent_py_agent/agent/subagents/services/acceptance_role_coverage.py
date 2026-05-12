@@ -8,27 +8,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..reports import AcceptanceReviewFinding
-from ..role_contracts import normalize_subagent_role
 
-_ROLE_COVERAGE_MARKERS = {
-    "tester": ("tester", "测试子代理", "测试代理", "测试角色", "测试员"),
-    "bug_finder": (
-        "bug_finder",
-        "bug-finder",
-        "bug finder",
-        "bugfinder",
-        "找错子代理",
-        "找茬子代理",
-        "找错代理",
-        "找茬代理",
-        "找错角色",
-        "找茬角色",
-        "找错",
-        "找茬",
-    ),
-    "acceptor": ("acceptor", "验收子代理", "验收代理", "验收角色", "验收员", "由acceptor", "由 acceptor"),
-}
-_ROLE_COVERAGE_ORDER = ("tester", "bug_finder", "acceptor")
+# LLM: QA marker rules are shared with hierarchy scheduling so final acceptance and auto-dispatch cannot drift.
+from .qa_role_contract import (
+    qa_role_identity_roles,
+    qa_roles_required_by_task,
+)
+
 _ROLE_SCAN_MAX_NODES = 64
 _ROLE_SCAN_MAX_BYTES = 65536
 
@@ -61,34 +47,7 @@ def required_role_coverage_finding(task, created_at: float) -> AcceptanceReviewF
 # LLM: _required_role_coverage reads only explicit role words from task contracts.
 # 函数用途: 从 goal/acceptance 文本提取用户点名的 QA 角色；leaf 不承接父级角色覆盖检查。
 def _required_role_coverage(task) -> list[str]:
-    if _task_is_leaf(task):
-        return []
-    text = _task_contract_text(task)
-    return [role for role in _ROLE_COVERAGE_ORDER if _role_marker_present(text, role)]
-
-
-# LLM: _task_contract_text combines stable task fields while avoiding output self-claims.
-# 函数用途: 只从任务目标和验收条件判断“要求过什么”，不相信 runner 总结里自称已完成。
-def _task_contract_text(task) -> str:
-    values = [str(getattr(task, "goal", "") or "")]
-    values.extend(str(item) for item in getattr(task, "acceptance_checks", []) or [])
-    return " ".join(values).lower()
-
-
-# LLM: _task_is_leaf mirrors child-spawn checks so inherited parent wording does not punish leaf workers.
-# 函数用途: leaf_worker 或名字带 leaf 的任务不继续要求下级 QA 角色，避免父级继承文本误伤。
-def _task_is_leaf(task) -> bool:
-    role = str(getattr(task, "role", "") or "").lower()
-    agent_name = str(getattr(task, "agent_name", "") or "").lower()
-    return role == "leaf_worker" or "leaf" in agent_name
-
-
-# LLM: _role_marker_present keeps role detection explicit and ordered.
-# 函数用途: 检查文本是否点名某个内置 QA 角色，避免把普通“验收条件”当成 acceptor 角色要求。
-def _role_marker_present(text: str, role: str) -> bool:
-    markers = _ROLE_COVERAGE_MARKERS.get(role, ())
-    lowered = str(text or "").lower()
-    return any(marker in lowered for marker in markers)
+    return qa_roles_required_by_task(task)
 
 
 # LLM: _descendant_roles scans persisted child task.json files, not model summaries.
@@ -160,15 +119,10 @@ def _read_child_task_record(workspace: Path, run_id: str) -> dict[str, object]:
 # LLM: _roles_from_record trusts persisted identity fields, not inherited goal prose.
 # 函数用途: 从后代 task.json 的 role/agent_name 恢复实际 QA 角色，避免父级继承文本伪装成真实角色。
 def _roles_from_record(record: dict[str, object]) -> set[str]:
-    roles: set[str] = set()
-    normalized = normalize_subagent_role(str(record.get("role") or ""))
-    if normalized in _ROLE_COVERAGE_ORDER:
-        roles.add(normalized)
-    text = str(record.get("agent_name") or "").lower()
-    for role in _ROLE_COVERAGE_ORDER:
-        if _role_marker_present(text, role):
-            roles.add(role)
-    return roles
+    return qa_role_identity_roles(
+        role=str(record.get("role") or ""),
+        agent_name=str(record.get("agent_name") or ""),
+    )
 
 
 # LLM: _role_coverage_message gives parent recovery enough facts to re-dispatch missing roles.

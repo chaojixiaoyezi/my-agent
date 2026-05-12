@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+# LLM: structural run/ref/qa words are stopwords so generated checker children do not collide by parent refs.
 DOMAIN_STOPWORDS = {
     "agent",
     "acceptor",
@@ -18,6 +19,7 @@ DOMAIN_STOPWORDS = {
     "grand",
     "grandchild",
     "html",
+    "id",
     "implementer",
     "js",
     "css",
@@ -29,8 +31,12 @@ DOMAIN_STOPWORDS = {
     "one",
     "page",
     "reporter",
+    "ref",
+    "refs",
     "reviewer",
+    "run",
     "runner",
+    "qa",
     "shop",
     "static",
     "subagent",

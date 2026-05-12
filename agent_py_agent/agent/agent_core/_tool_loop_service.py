@@ -9,6 +9,10 @@ import json
 from ..backends import ModelResponse
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
 from ..prompting_parts.builder import ToolSections
+from ..tooling.content_recovery_mode import (
+    LongContentRecoveryRequest,
+    long_content_recovery_context,
+)
 from ..tools import ToolExecutionResult
 from ._runtime_params import ToolLoopExecuteParams
 from .parameters import _one_shot_tool_call_key
@@ -265,6 +269,7 @@ class ToolLoopService:
             f"[tool-output-record round={record.tool_rounds} index={record.idx}]\n"
             f"{render_tool_result_for_live_prompt(record.result, archive_record)}"
         )
+        _append_long_content_recovery_context(record)
 
     # LLM: _archive_tool_call_record 属于 SimpleAgent 核心运行的函数边界；工具输出归档格式变化会影响 raw archive 和 compact。
     # 函数用途: 生成可归档的工具调用记录，大输出外置为 artifact，当前工具上下文仍保留完整结果。
@@ -338,3 +343,18 @@ def _payload_with_runtime_scope(agent, params: ToolLoopExecuteParams, payload: o
 # 函数用途: 子代理 runner 调用 agent.run(save=False) 时通常不显式传 run_id，这里补当前 runner id。
 def _runtime_run_id(agent, params: ToolLoopExecuteParams) -> str:
     return str(params.run_id or getattr(agent, "_current_subagent_run_id", "") or "")
+
+
+# LLM: _append_long_content_recovery_context makes large-write recovery a live prompt policy, not a one-off error.
+# 函数用途: 工具调用因长正文截断/拒绝失败时，给下一轮模型追加分块恢复规则。
+def _append_long_content_recovery_context(record: ToolCallRecordParams) -> None:
+    context = long_content_recovery_context(
+        LongContentRecoveryRequest(
+            payload=record.payload,
+            result_tool=record.result.tool,
+            result_ok=record.result.ok,
+            output=record.result.output,
+        )
+    )
+    if context:
+        record.params.tool_context.append(context)
