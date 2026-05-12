@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
 from typing import Any
 
 from ..debug_trace import trace_hierarchy_schedule
@@ -13,9 +12,21 @@ from .base import CreateRunParams
 from .hierarchy_acceptance import scheduled_child_acceptance_checks
 from .hierarchy_agent_names import scheduled_child_agent_name
 from .hierarchy_context import inherited_hierarchy_thought, scheduled_child_goal
-from .hierarchy_qa_scheduler import QaOrchestrationAdvice, qa_orchestration_advice
+from .hierarchy_qa_scheduler import qa_orchestration_advice
 from .hierarchy_scheduled_role import scheduled_child_role
-from .hierarchy_scope_guards import duplicate_child_domain_reason, schedule_block_reason
+from .hierarchy_scheduler_models import (
+    HierarchyChildSpec,
+    HierarchyCreateChildRequest,
+    HierarchyResultBuildRequest,
+    HierarchyScheduledItem,
+    HierarchyScheduleRequest,
+    HierarchyScheduleResult,
+)
+from .hierarchy_scope_guards import (
+    duplicate_child_domain_reason,
+    schedule_block_reason,
+    schedule_warnings,
+)
 from .hierarchy_tool_policy import (
     LeafWriteIntentRequest,
     ToolPolicyRequest,
@@ -30,84 +41,6 @@ from .hierarchy_write_policy import (
     scheduled_child_extra_write_roots,
 )
 
-
-# LLM: HierarchyChildSpec is the stable bundle for one planned descendant run.
-# 类用途: 描述一个待创建的子/孙代理任务，避免用散乱 kwargs 扩展层级调度接口。
-@dataclass(frozen=True)
-class HierarchyChildSpec:
-    goal: str
-    agent_name: str = "worker"
-    role: str = "worker"
-    thought: str = ""
-    plan: list[str] = field(default_factory=list)
-    allowed_skills: list[str] = field(default_factory=list)
-    allowed_tools: list[str] = field(default_factory=list)
-    acceptance_checks: list[str] = field(default_factory=list)
-    extra_write_roots: list[str] = field(default_factory=list)
-
-# LLM: HierarchyScheduleRequest is the only business entrypoint for hierarchy materialization.
-# 类用途: 集中保存层级调度的 parent、候选子任务、限制和执行模式。
-@dataclass(frozen=True)
-class HierarchyScheduleRequest:
-    parent_run_id: str
-    child_specs: list[HierarchyChildSpec]
-    apply: bool = False
-    requested_by: str = "parent"
-    max_children: int = 0
-    max_depth: int = 2
-
-# LLM: HierarchyScheduledItem reports either a planned or created child without loading large artifacts.
-# 类用途: 返回单个调度条目摘要，给 CLI、测试和后续调度器读取。
-@dataclass(frozen=True)
-class HierarchyScheduledItem:
-    run_id: str
-    parent_id: str
-    root_id: str
-    depth: int
-    role: str
-    agent_name: str
-    goal: str
-    created: bool
-    reason: str = ""
-
-# LLM: HierarchyScheduleResult keeps automatic behavior visible and conservative by default.
-# 类用途: 返回层级调度结果、阻断原因和是否真正创建 run。
-@dataclass(frozen=True)
-class HierarchyScheduleResult:
-    generated_at: float
-    parent_run_id: str
-    root_id: str
-    dry_run: bool
-    blocked: bool
-    reason: str
-    requested_by: str
-    planned_count: int
-    created_run_ids: list[str]
-    items: list[HierarchyScheduledItem]
-    manual_confirmation_required: bool = True
-    automatic_execution_allowed: bool = False
-    # LLM: quality_advice guides the model's next QA choice without creating a fixed workflow.
-    quality_advice: QaOrchestrationAdvice | None = None
-
-
-# LLM: HierarchyCreateChildRequest separates child creation facts from the persistence call.
-# 类用途: 保存创建一个 child run 所需的已推导字段，供参数组装 helper 使用。
-@dataclass(frozen=True)
-class HierarchyCreateChildRequest:
-    parent: SubAgentTask
-    spec: HierarchyChildSpec
-    role: str
-    goal: str
-    extra_write_roots: list[str]
-
-
-# LLM: HierarchyResultBuildRequest bundles shared result-rendering inputs to keep helpers small.
-# 类用途: 组装 blocked/dry-run/apply 结果时复用 parent、request 和 LLM advice，避免 helper 参数继续膨胀。
-@dataclass(frozen=True)
-class HierarchyResultBuildRequest:
-    parent: SubAgentTask
-    request: HierarchyScheduleRequest
-    quality_advice: QaOrchestrationAdvice | None = None
 
 # LLM: SubAgentHierarchyScheduler owns hierarchy limits and delegates actual persistence to SubAgentManager.
 # 类用途: 封装层级创建规则；只通过 manager.create_run 写任务，避免绕开既有工单/控制面同步。
@@ -124,7 +57,12 @@ class SubAgentHierarchyScheduler:
     def schedule_children(self, request: HierarchyScheduleRequest) -> HierarchyScheduleResult:
         parent = self.manager.load(request.parent_run_id)
         quality_advice = qa_orchestration_advice(manager=self.manager, parent=parent, specs=request.child_specs)
-        result_build = HierarchyResultBuildRequest(parent=parent, request=request, quality_advice=quality_advice)
+        result_build = HierarchyResultBuildRequest(
+            parent=parent,
+            request=request,
+            quality_advice=quality_advice,
+            scheduling_warnings=schedule_warnings(self.manager, parent, request),
+        )
         # LLM: generic guards run first; duplicate-domain guard needs persisted sibling metadata.
         reason = schedule_block_reason(parent, request) or duplicate_child_domain_reason(
             self.manager,
@@ -167,6 +105,7 @@ def _blocked_result(build: HierarchyResultBuildRequest, reason: str) -> Hierarch
         created_run_ids=[],
         items=_planned_items(parent, request),
         quality_advice=build.quality_advice,
+        scheduling_warnings=list(build.scheduling_warnings),
     )
 
 
@@ -189,6 +128,7 @@ def _dry_run_result(
         created_run_ids=[],
         items=_planned_items(parent, request),
         quality_advice=build.quality_advice,
+        scheduling_warnings=list(build.scheduling_warnings),
     )
 
 
@@ -213,6 +153,7 @@ def _apply_result(
         created_run_ids=[item.id for item in created],
         items=[_created_item(item) for item in created],
         quality_advice=build.quality_advice,
+        scheduling_warnings=list(build.scheduling_warnings),
     )
 
 

@@ -14,7 +14,7 @@ from .hierarchy_domain_terms import (
     DOMAIN_STOPWORDS,
     FORBIDDEN_SCOPE_GENERIC_TERMS,
 )
-from .hierarchy_leaf_targets import LeafTargetDedupeRequest, duplicate_verified_leaf_target_reason
+from .hierarchy_leaf_targets import LeafTargetDedupeRequest, duplicate_verified_leaf_target_warnings
 from .hierarchy_write_policy import inherited_extra_write_roots
 from .qa_role_contract import qa_role_identity_roles
 
@@ -45,16 +45,6 @@ def duplicate_child_domain_reason(manager: Any, parent: SubAgentTask, request: A
     qa_phase_reason = _qa_before_implementation_reason(manager, parent, request)
     if qa_phase_reason:
         return qa_phase_reason
-    leaf_reason = duplicate_verified_leaf_target_reason(
-        LeafTargetDedupeRequest(
-            manager=manager,
-            parent=parent,
-            schedule_request=request,
-            leaf_like=_is_leaf_like,
-        )
-    )
-    if leaf_reason:
-        return leaf_reason
     seen_domains: list[set[str]] = []
     for child in _existing_coordination_children(manager, parent):
         seen_domains.append(_child_domain_tokens(child))
@@ -68,6 +58,19 @@ def duplicate_child_domain_reason(manager: Any, parent: SubAgentTask, request: A
         if domains:
             seen_domains.append(domains)
     return ""
+
+
+# LLM: schedule_warnings reports soft coordination risks while allowing the parent LLM to decide.
+# 函数用途: 返回重复文件目标等可审计风险；不在底层阻断调度，避免修复/协作写同一文件时卡死。
+def schedule_warnings(manager: Any, parent: SubAgentTask, request: Any) -> list[str]:
+    return duplicate_verified_leaf_target_warnings(
+        LeafTargetDedupeRequest(
+            manager=manager,
+            parent=parent,
+            schedule_request=request,
+            leaf_like=_is_leaf_like,
+        )
+    )
 
 
 # LLM: _qa_before_implementation_reason keeps QA creation from becoming the only next layer.

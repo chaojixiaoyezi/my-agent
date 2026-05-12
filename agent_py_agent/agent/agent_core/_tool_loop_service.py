@@ -6,13 +6,8 @@ from __future__ import annotations
 
 import json
 
-from ..backends import ModelResponse
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
 from ..prompting_parts.builder import ToolSections
-from ..tooling.content_recovery_mode import (
-    LongContentRecoveryRequest,
-    long_content_recovery_context,
-)
 from ..tools import ToolExecutionResult
 from ._runtime_params import ToolLoopExecuteParams
 from .parameters import _one_shot_tool_call_key
@@ -24,9 +19,19 @@ from .runner_stage_trace import (
 from .subagent_attempt_guard import stale_subagent_attempt_result
 from .subagent_dispatch_closeout import subagent_dispatch_limit_response
 from .tool_agent_budget_stage import ToolAgentBudgetStageRequest, maybe_block_tool_agent_budget
+from .tool_body_read_guard_stage import (
+    ToolBodyReadGuardStageRequest,
+    maybe_block_delegating_body_read_stage,
+)
 from .tool_call_context_reducer import render_tool_payload_for_live_prompt
 from .tool_context_reducer import render_tool_result_for_live_prompt
 from .tool_loop_completion import ToolRoundCompletionRequest, completion_response_after_tool_round
+from .tool_loop_recovery import (
+    append_long_content_recovery_context,
+    payload_with_runtime_scope,
+    runtime_run_id,
+    without_tool_call_after_limit,
+)
 from .tool_model_generation import ModelGenerateParams, generate_model_response
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 from .tool_round_execution import (
@@ -211,13 +216,13 @@ class ToolLoopService:
                 tool_rounds=tool_rounds,
             )
         )
-        final_response = _without_tool_call_after_limit(self._agent, final_response)
+        final_response = without_tool_call_after_limit(self._agent, final_response)
         return final_prompt, final_response
 
     # LLM: _execute_one_tool_call 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 推进one工具call的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _execute_one_tool_call(self, request: ToolCallExecuteParams):
-        payload = _payload_with_runtime_scope(self._agent, request.params, request.payload)
+        payload = payload_with_runtime_scope(self._agent, request.params, request.payload)
         trace_request = RunnerToolStageTraceRequest(
             agent=self._agent,
             params=request.params,
@@ -233,6 +238,11 @@ class ToolLoopService:
         stale_result = stale_subagent_attempt_result(self._agent, payload)
         if stale_result is not None:
             return _trace_finished_result(trace_request, stale_result)
+        body_read_result = maybe_block_delegating_body_read_stage(
+            ToolBodyReadGuardStageRequest(self._agent, request, payload)
+        )
+        if body_read_result is not None:
+            return body_read_result
         budget_result = maybe_block_tool_agent_budget(ToolAgentBudgetStageRequest(self._agent, request, payload))
         if budget_result:
             return budget_result
@@ -269,7 +279,7 @@ class ToolLoopService:
             f"[tool-output-record round={record.tool_rounds} index={record.idx}]\n"
             f"{render_tool_result_for_live_prompt(record.result, archive_record)}"
         )
-        _append_long_content_recovery_context(record)
+        append_long_content_recovery_context(record)
 
     # LLM: _archive_tool_call_record 属于 SimpleAgent 核心运行的函数边界；工具输出归档格式变化会影响 raw archive 和 compact。
     # 函数用途: 生成可归档的工具调用记录，大输出外置为 artifact，当前工具上下文仍保留完整结果。
@@ -282,7 +292,7 @@ class ToolLoopService:
             output=record.result.output,
             ok=record.result.ok,
             request_id=record.params.request_id,
-            run_id=_runtime_run_id(self._agent, record.params),
+            run_id=runtime_run_id(self._agent, record.params),
             task_id=record.params.task_id,
         )
         fail_safe = write_tool_output_fail_safe_checkpoint(request)
@@ -310,51 +320,3 @@ def _orchestration_result_is_blocked(output: object) -> bool:
     if not isinstance(payload, dict):
         return False
     return bool(payload.get("blocked"))
-
-
-# LLM: _without_tool_call_after_limit enforces max-tool-round boundaries even if the model ignores the stop hint.
-# 函数用途: 工具轮数已到顶后，如果模型仍输出工具调用，改成确定性停止说明，避免上层把新工具请求当最终答复。
-def _without_tool_call_after_limit(agent, response: ModelResponse) -> ModelResponse:
-    if not agent.tools.parse_tool_calls(response.text):
-        return response
-    return ModelResponse(
-        text=(
-            "已达到最大工具轮数限制，系统已经停止执行新的工具调用。"
-            "模型在收口阶段仍输出工具调用请求，后续工具请求不会被执行；"
-            "请只基于已有工具结果总结，若已有证据足够则进入等待验收。"
-        ),
-        backend=response.backend,
-    )
-
-
-# LLM: _payload_with_runtime_scope injects current runner ids into scoped tools without model involvement.
-# 函数用途: 让 read_artifact 短引用按当前 run/task/request 解析，避免同号 artifact 跨 run 串线。
-def _payload_with_runtime_scope(agent, params: ToolLoopExecuteParams, payload: object) -> object:
-    if not isinstance(payload, dict) or str(payload.get("tool") or "") != "read_artifact":
-        return payload
-    scoped = dict(payload)
-    scoped.setdefault("run_id", _runtime_run_id(agent, params))
-    scoped.setdefault("task_id", params.task_id)
-    scoped.setdefault("request_id", params.request_id)
-    return scoped
-
-
-# LLM: _runtime_run_id falls back to active subagent context for nested runner tool records.
-# 函数用途: 子代理 runner 调用 agent.run(save=False) 时通常不显式传 run_id，这里补当前 runner id。
-def _runtime_run_id(agent, params: ToolLoopExecuteParams) -> str:
-    return str(params.run_id or getattr(agent, "_current_subagent_run_id", "") or "")
-
-
-# LLM: _append_long_content_recovery_context makes large-write recovery a live prompt policy, not a one-off error.
-# 函数用途: 工具调用因长正文截断/拒绝失败时，给下一轮模型追加分块恢复规则。
-def _append_long_content_recovery_context(record: ToolCallRecordParams) -> None:
-    context = long_content_recovery_context(
-        LongContentRecoveryRequest(
-            payload=record.payload,
-            result_tool=record.result.tool,
-            result_ok=record.result.ok,
-            output=record.result.output,
-        )
-    )
-    if context:
-        record.params.tool_context.append(context)

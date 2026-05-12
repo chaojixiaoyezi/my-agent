@@ -934,7 +934,8 @@ docs/
 - `agent_py_agent/agent/local_storage/control_plane_codec.py`: 集中维护控制面 SQLite SQL、参数组装和行转换，避免公开 mixin 因 SQL 细节膨胀。
 - `agent_py_agent/cli/shared_progress.py`: 给 `status` 和 `subagents` CLI 生成共享进度摘要，展示 blocked、failure handoff refs 和 takeover packet refs 数量，不读取正文。
 - `agent_py_agent/agent/agent_core/tool_output_failsafe.py`: 大工具输出写 artifact 前写 fail-safe recovery snapshot，只记录工具名、hash、大小和恢复建议。
-- `agent_py_agent/agent/agent_core/tool_context_reducer.py`: 大工具输出进入下一轮 live prompt 前只注入 artifact 摘要和 checkpoint refs，小输出仍保留原工具结果。
+- `agent_py_agent/agent/agent_core/tool_context_reducer.py`: 大工具输出进入下一轮 live prompt 前只注入 artifact 摘要和 checkpoint refs，小输出仍保留原工具结果；调度类输出会交给 orchestration summary 只保留 next_action/run refs。
+- `agent_py_agent/agent/agent_core/tool_context_orchestration_summary.py`: externalized dispatch/schedule/read_artifact 调度输出的 live-prompt 摘要层，保留状态、建议工具调用和 refs，不默认诱导父级读 artifact 正文。
 - `agent_py_agent/agent/agent_core/dispatch_acceptance_records.py`: 承接 dispatch acceptance record 构建、parent acceptance auto-policy/auto-execution 摘要和显式 tests 后的 refresh 调用，让主 dispatch service 保持薄编排。
 - `agent_py_agent/agent/agent_core/dispatch_acceptance_refresh.py`: 本轮显式 parent tests 写入 `test_execution.json` 后重新 dry-run acceptance，并刷新 dispatch 展示、单 run 审计和 aggregate acceptance report；不 apply、不 rescue、不修改 task 状态。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`: 承接 runner-context `dispatch_subagents` 工具返回 payload 的单条 record 构造，输出 test/follow-up refs 和摘要，不展开正文；错 run_id 时顶层 recovery 会给 `valid_run_ids`。
@@ -1002,7 +1003,8 @@ docs/
 - `agent_py_agent/agent/subagents/services/hierarchy_tool_policy.py`: 从 scheduler 拆出的工具策略，统一处理 coordinator/leaf 的工具继承、写文件工具补齐和 `write`/`read` 等模型工具名别名修正；coordinator 显式 allowed_tools 会补回内置编排工具，避免模型漏传后失去派工能力。
 - `agent_py_agent/agent/subagents/execution_test_items.py`: 预处理父级验收 tests，推断 workspace 内 `working_dir`，拆安全 `cd <dir> && pytest`，并把带明确期望内容的 `cat <workspace文件>` 改成受控 `content_check`，避免为真实模型输出放开 `cat` 命令；多页 HTML artifacts 会自动补 `static_site_check`。
 - `agent_py_agent/agent/subagents/execution_executor.py`: `content_check` 支持 `content_pattern` 包含匹配，也支持 `content_equals` / `expected_content` + `match_mode=exact`，用于严格验证文件内容没有额外字符；`static_site_check` 用于机器验收购物站这类静态产物的页面存在性、坏链接、占位符和明显失效控件。
-- `agent_py_agent/agent/agent_core/_tool_loop_service.py`: 主代理和 subagent 共用的工具循环；到达 `max_tool_rounds` 后给模型一次收口机会，如果模型仍吐工具调用，返回确定性停止说明而不是把新 `[TOOL_CALL]` 当最终回答；执行真实工具前会检查 per-run 工具预算，预算触发时只拦截当前 run 的工具并给模型自检/上报提示。
+- `agent_py_agent/agent/agent_core/_tool_loop_service.py`: 主代理和 subagent 共用的工具循环；到达 `max_tool_rounds` 后给模型一次收口机会，如果模型仍吐工具调用，返回确定性停止说明而不是把新 `[TOOL_CALL]` 当最终回答；执行真实工具前会检查 per-run 工具预算和委托期读正文守卫，预算触发时只拦截当前 run 的工具并给模型自检/上报提示。
+- `agent_py_agent/agent/agent_core/orchestration_body_read_guard.py`: 委托期 refs-only 工具守卫；父级已有 child 且 acceptor 未完成时阻断 product `read_file` 和 `read_artifact` 正文读取，运行元数据仍可读，用户显式要求父级亲自验收时临时放行。
 - `agent_py_agent/agent/agent_core/orchestration_tools.py`: 顶层 `create_subagents` / `subagent_board` 工具入口；显式 root/coordinator seed 会从当前原始用户 prompt 补回模型摘要漏掉的 required/forbidden 文件合同和 4层/depth 命名约束，并以增强后的 `CreateRunParams.goal` 创建 root。
 - `agent_py_agent/agent/agent_core/orchestration_root_contract.py`: root/coordinator seed 合同修复 helper；从原始用户 prompt 提取 required/forbidden 文件和精确层级命名合同，避免自然语言摘要把机器合同改写或漏传。
 - `agent_py_agent/agent/agent_core/subagent_finalize_helpers.py`: 子代理 runner 收尾持久化 helper；coordinator 已真实创建并验收 child 时可合成等待父级验收的收口，同时会阻断“没工具调用、没 child refs，只说下一步要 schedule_child_subagents”的假完成，转成 `BLOCKED / needs_child_creation` 让 LLM 继续派工。

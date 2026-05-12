@@ -136,6 +136,12 @@ def _schedule_payload_json(result: HierarchyScheduleResult) -> str:
     }
     if result.quality_advice is not None:
         payload["quality_advice"] = _quality_advice_payload(result.quality_advice)
+    if result.scheduling_warnings:
+        payload["scheduling_warnings"] = list(result.scheduling_warnings)
+        payload["coordination_advice"] = (
+            "这些是审计提示，不是底层阻断。父级需要用看板、消息或任务说明协调文件 ownership；"
+            "如果是 QA 后修复或共享文件补丁，可以继续执行并在最终报告里说明原因。"
+        )
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 

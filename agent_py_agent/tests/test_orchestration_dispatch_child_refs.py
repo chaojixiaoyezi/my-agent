@@ -35,7 +35,11 @@ def _dispatch_payload_for_record(record: SimpleNamespace) -> dict:
 
 # LLM: _dispatch_payload_with_direct_children builds a runner-context dispatch payload fixture.
 # 函数用途: 构造带当前 parent runner 和 direct child 状态的 payload，验证继续调度指令。
-def _dispatch_payload_with_direct_children(children: list[SimpleNamespace]) -> dict:
+def _dispatch_payload_with_direct_children(
+    children: list[SimpleNamespace],
+    *,
+    parent: SimpleNamespace | None = None,
+) -> dict:
     mock_report = MagicMock()
     mock_report.dry_run = False
     mock_report.summary = {"total": 0}
@@ -44,6 +48,9 @@ def _dispatch_payload_with_direct_children(children: list[SimpleNamespace]) -> d
     mock_agent._current_subagent_run_id = "root"
     mock_agent.subagents.workspace = Path("/tmp/workspace")
     mock_agent.subagents.list_runs.return_value = children
+    if parent is not None:
+        by_id = {str(parent.id): parent, **{str(item.id): item for item in children}}
+        mock_agent.subagents.load.side_effect = lambda run_id: by_id[str(run_id)]
     return DispatchSubagentsTool(mock_agent)._report_payload(mock_report)
 
 
@@ -215,6 +222,37 @@ def test_dispatch_payload_tells_runner_to_summarize_ready_children():
     assert direct["ready_for_parent_acceptance"] is True
     assert direct["next_action"] == "summarize_direct_children_refs"
     assert "不要反复 read_file/read_artifact" in direct["closeout_hint"]
+
+
+# LLM: Required QA roles should steer parent to create QA children instead of rereading artifacts.
+# 函数用途: 父级目标点名 tester/bug_finder/acceptor 且实现已 ready 时，dispatch payload 要提示补 QA 波次。
+def test_dispatch_payload_suggests_quality_wave_before_closeout():
+    parent = SimpleNamespace(
+        id="root",
+        goal="购物网站必须有 tester / bug_finder / acceptor 三类 QA 子代理。",
+        acceptance_checks=[],
+        child_ids=["child-a"],
+        allowed_write_roots=["/tmp/shop/build"],
+        task_dir="",
+        role="coordinator",
+        agent_name="root",
+    )
+    child = SimpleNamespace(
+        id="child-a",
+        parent_id="root",
+        status="AWAITING_ACCEPTANCE",
+        verification_status="NEEDS_ACCEPTANCE",
+        role="leaf_worker",
+        agent_name="小傻妞-worker",
+        child_ids=[],
+    )
+    payload = _dispatch_payload_with_direct_children([child], parent=parent)
+
+    direct = payload["direct_children"]
+    assert direct["ready_for_parent_acceptance"] is False
+    assert direct["next_action"] == "create_quality_children_from_ready_refs"
+    assert direct["quality_advice"]["phase"] == "quality_wave_ready"
+    assert set(direct["quality_advice"]["suggested_roles"]) == {"tester", "bug_finder", "acceptor"}
 
 
 # LLM: test_dispatch_payload_treats_rejected_child_as_recovery protects R8 parent rescue flow.

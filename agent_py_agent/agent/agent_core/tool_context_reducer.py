@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 
 from ..tools import ToolExecutionResult
+from .tool_context_orchestration_summary import orchestration_live_summary
 
 
 # LLM: render_tool_result_for_live_prompt is the ToolContextReducer boundary for one tool call.
@@ -15,6 +16,9 @@ from ..tools import ToolExecutionResult
 def render_tool_result_for_live_prompt(result: ToolExecutionResult, archive_record: dict[str, object]) -> str:
     if not archive_record.get("output_externalized"):
         return result.render_for_prompt()
+    orchestration_summary = orchestration_live_summary(result, archive_record)
+    if orchestration_summary:
+        return orchestration_summary
     status = "ok" if result.ok else "error"
     artifact_ref = str(archive_record.get("artifact_ref") or archive_record.get("output_path") or "")
     call_id = str(archive_record.get("id") or "")

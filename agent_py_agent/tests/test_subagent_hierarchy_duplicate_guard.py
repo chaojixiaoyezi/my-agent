@@ -169,9 +169,9 @@ def test_hierarchy_schedule_duplicate_domain_ignores_depth_markers(tmp_path):
     assert len(result.created_run_ids) == 2
 
 
-# LLM: test_hierarchy_schedule_blocks_duplicate_verified_leaf_targets covers R11 duplicate auth leaf creation.
-# 函数用途: 同父级已有 DONE/VERIFIED leaf 写出 register/login 后，不能再派同一文件的 leaf。
-def test_hierarchy_schedule_blocks_duplicate_verified_leaf_targets(tmp_path):
+# LLM: test_hierarchy_schedule_warns_duplicate_verified_leaf_targets covers R73 audit-over-blocking.
+# 函数用途: 同父级已有 DONE/VERIFIED leaf 写过同一文件时，调度应创建新任务并给父级审计提示，而不是硬阻断修复/协作。
+def test_hierarchy_schedule_warns_duplicate_verified_leaf_targets(tmp_path):
     manager = SubAgentManager(tmp_path)
     parent = _auth_parent_with_verified_leaf(manager)
 
@@ -202,8 +202,10 @@ def test_hierarchy_schedule_blocks_duplicate_verified_leaf_targets(tmp_path):
         )
     )
 
-    assert duplicate.blocked is True
-    assert duplicate.reason == "duplicate_leaf_target:login.html"
+    assert duplicate.blocked is False
+    assert duplicate.reason == "created"
+    assert duplicate.scheduling_warnings == ["duplicate_leaf_target:login.html"]
+    assert len(duplicate.created_run_ids) == 1
     assert sibling.blocked is False
     assert len(sibling.created_run_ids) == 1
 
