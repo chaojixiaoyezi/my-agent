@@ -211,12 +211,16 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |   `-- tools/                         # 日志分析专用工具
 |   |   |-- memory.py                          # 记忆兼容入口，真实实现已拆到 memory_store/
 |   |   |-- memory_settings.py                 # memory 配置安全解析兼容入口，真实实现已拆到 settings/memory.py
-|   |   |-- memory_store/                      # 长期记忆存储，当前是 JSONL + LocalStore 索引
+|   |   |-- memory_store/                      # 长期记忆存储，当前是 JSONL + LocalStore 索引 + home daily mirror
 |   |   |-- memory_archive/                    # raw/hook/snapshot、runtime workspace/facts、schema v2、control-plane query、tool-output artifacts 和非破坏性 compact apply/resume/continue packet/subagent-owner refs
 |   |   |-- memory_routing/                    # 长期规则索引化路由，负责 MEMORY -> index -> authority file 的确定性匹配
 |   |   |-- observability/                     # 未来 request_id、耗时、状态、错误码、metrics、trace 目录
-|   |   |   `-- user_space/                    # 用户数据隔离：路径解析、目录管理、迁移工具
+|   |   |   `-- user_space/                    # 用户数据隔离、owner home、provider 空间和 run workspace
 |   |   |       |-- __init__.py               # 模块导出
+|   |   |       |-- home_layout.py            # ~/.my-agent 路径、初始化和任务目录模板
+|   |   |       |-- run_workspace.py          # 普通主代理 run 的 outputs/runtime/agents 任务工作区
+|   |   |       |-- provider_space.py         # provider 根、用户/群空间和配额统计
+|   |   |       |-- provider_trash.py         # provider scoped trash、审计和 retention 清理
 |   |   |       |-- paths.py                 # UserPaths 数据类和 get_user_paths() 函数
 |   |   |       |-- manager.py               # UserSpaceManager：用户目录创建、访问控制、列表
 |   |   |       `-- migration.py              # migrate_to_user_space() 迁移工具

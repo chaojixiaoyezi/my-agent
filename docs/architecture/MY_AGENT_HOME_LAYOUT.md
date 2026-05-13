@@ -100,14 +100,19 @@ external_knowledge_database_sources: []
 ## 当前已实现
 
 - `agent.user_space.home_layout`：解析 `MY_AGENT_HOME`、标准路径、任务工作区模板，并提供不覆盖已有入口文件的 `ensure_my_agent_home()` 初始化。
-- `agent.user_space.provider_space`：懒创建 provider 根、外部用户/群空间、配额统计、同空间 trash 和 scoped audit。
+- `SimpleAgent` 启动时会根据 `my_agent_home` 初始化 owner home，并把 `home_paths` 交给 memory、prompt 和 run workspace 复用。
+- `agent.user_space.run_workspace`：普通主代理 run 保存时，会在 `workspace/tasks/{date}/{task_slug}/` 下创建 `outputs/`、`runtime/`、`agents/`、`logs/`、`task.yaml`、`state.json` 和 `timeline.jsonl`。
+- `JsonlMemory`：旧 `memory_path` 仍然可读写，同时可按配置镜像到 `memory/daily/YYYY-MM-DD.jsonl`，为后续迁移到按天流水做准备。
+- `PromptBuilder`：home-backed agent 会读取 `memory.md` 关键记忆，并按任务文本匹配有限数量的 `memory/lessons/*.md`，不会每轮全量读取教训库。
+- `agent.user_space.provider_space`：懒创建 provider 根、外部用户/群空间和配额统计。
+- `agent.user_space.provider_trash`：同空间 trash、scoped audit、按配置清理过期 trash。
 - `agent.external_knowledge.config`：把后端配置转成外部知识库查询 bundle。
-- `AgentConfig` / normalize / 默认 YAML 已有家目录、任务模板、外部知识库和 provider 空间配置字段。
+- `AgentConfig` / normalize / 默认 YAML 已有家目录启动、home context、daily mirror、run task workspace、外部知识库和 provider 空间风险配置字段。
 
 ## 后续接入
 
-1. 安装/初始化命令创建 `~/.my-agent/` 基础文件。
-2. memory 写入从旧 `data/memory.jsonl` 逐步迁到 `memory/daily/YYYY-MM-DD.jsonl`。
+1. 把 CLI doctor/init 命令显式展示 home 初始化结果和缺失文件修复建议。
+2. memory 查询和 resume 从旧 `data/memory.jsonl` 逐步迁到优先读 `memory/daily/YYYY-MM-DD.jsonl`。
 3. provider adapter 首次见到新平台/用户/群时调用 provider space resolver。
 4. 工具/skill 执行网关读取 provider space scope，限制外部用户只能写自己的空间。
 5. trash retention 后台任务按配置清理过期 trash，但审计事件继续保留。

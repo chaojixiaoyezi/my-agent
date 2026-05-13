@@ -20,6 +20,8 @@ class HomeLayoutFieldsService:
         out = dict(data)
         warnings = _normalize_home_strings(out, defaults)
         _normalize_external_knowledge_lists(out, defaults)
+        warnings.extend(_apply_int_fields(out, defaults, _HOME_RUNTIME_INT_FIELDS))
+        warnings.extend(_apply_bool_fields(out, defaults, _HOME_RUNTIME_BOOL_FIELDS))
         warnings.extend(_apply_int_fields(out, defaults, _PROVIDER_SPACE_INT_FIELDS))
         warnings.extend(_apply_bool_fields(out, defaults, ("provider_space_destructive_actions_use_trash",)))
         return out, warnings
@@ -56,6 +58,17 @@ _EXTERNAL_KNOWLEDGE_LIST_FIELDS = (
     "external_knowledge_directory_roots",
     "external_knowledge_api_sources",
     "external_knowledge_database_sources",
+)
+
+_HOME_RUNTIME_INT_FIELDS = (
+    ("home_lesson_auto_read_limit", 0, 20),
+)
+
+_HOME_RUNTIME_BOOL_FIELDS = (
+    "home_runtime_bootstrap_enabled",
+    "home_context_enabled",
+    "daily_memory_mirror_enabled",
+    "run_task_workspace_enabled",
 )
 
 _PROVIDER_SPACE_INT_FIELDS = (

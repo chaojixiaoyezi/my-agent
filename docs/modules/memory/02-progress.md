@@ -268,3 +268,10 @@
 - archive query / resume 的扫描文件上限、LocalStore 命中预览长度、recommended read paths 数量现在从 `memory_archive_search_file_limit`、`memory_query_content_preview_chars`、`memory_resume_recommended_read_paths_limit` 读取。
 - raw archive 事件 preview 和 level=2 summary 的长度现在通过 `memory_archive_preview_level_*_chars` 和 `memory_archive_summary_chars` 控制；默认值保持旧行为。
 - 这轮不改变现有归档文件格式，不删除旧数据，不把 artifact 正文自动塞回 prompt；只是把运行默认值抽到后端配置层。
+
+## 2026-05-13 home runtime bootstrap
+- 中文说明：单用户 `~/.my-agent` 暂不接飞书/QQ，但已经接入主代理本地运行时。`SimpleAgent` 启动会初始化 `my_agent_home`，普通保存型 run 会创建 `workspace/tasks/{date}/{task_slug}/outputs`、`runtime`、`agents`、`logs` 和 refs-only 状态文件。
+- `JsonlMemory` 保留旧 `memory_path` 兼容，同时按配置镜像到 `memory/daily/YYYY-MM-DD.jsonl`，后续 query/resume 可以逐步迁移到按天流水。
+- `PromptBuilder` 对 home-backed agent 读取 `memory.md` 关键记忆，并用 lesson 文件名和当前任务文本做轻量匹配；不会每轮全量读取整个 lessons 目录。
+- provider trash 从 `provider_space.py` 拆到 `provider_trash.py`，新增按配置保留天数清理旧 trash 日期目录；破坏性操作仍默认走同空间 trash 和审计。
+- 本轮 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_home_runtime_bootstrap.py agent_py_agent/tests/test_provider_space.py agent_py_agent/tests/test_config_normalize.py::TestNormalizeAgentConfig::test_normalize_home_provider_risk_fields agent_py_agent/tests/test_agent/test_memory_and_basic.py agent_py_agent/tests/test_prompting_builder.py` -> passed；strict code-size 维持 `hard=0 high-risk=0 soft=0`。

@@ -13,14 +13,18 @@ from .manager import UserSpaceManager
 from .migration import migrate_to_user_space
 from .paths import UserPaths, get_user_paths
 from .provider_space import ProviderSpaceIdentity, ProviderSpacePaths, ensure_provider_space
+from .run_workspace import EnsureRunWorkspaceRequest, RunWorkspacePaths, ensure_run_workspace
 
 __all__ = [
     "ProviderSpaceIdentity",
     "ProviderSpacePaths",
     "UserPaths",
     "UserSpaceManager",
+    "EnsureRunWorkspaceRequest",
+    "RunWorkspacePaths",
     "ensure_provider_space",
     "ensure_my_agent_home",
+    "ensure_run_workspace",
     "get_user_paths",
     "home_paths",
     "migrate_to_user_space",

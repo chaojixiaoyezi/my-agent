@@ -205,6 +205,11 @@ class TestNormalizeAgentConfig:
         """验证 provider 空间风险配置可归一化，避免执行层写死危险默认值。"""
         normalized, warnings = normalize_agent_config(
             {
+                "home_runtime_bootstrap_enabled": "true",
+                "home_context_enabled": "false",
+                "home_lesson_auto_read_limit": "4",
+                "daily_memory_mirror_enabled": "true",
+                "run_task_workspace_enabled": "false",
                 "provider_space_default_max_storage_mb": "512",
                 "provider_space_max_download_file_mb": "64",
                 "provider_space_trash_retention_days": "45",
@@ -212,6 +217,11 @@ class TestNormalizeAgentConfig:
             }
         )
         assert warnings == []
+        assert normalized["home_runtime_bootstrap_enabled"] is True
+        assert normalized["home_context_enabled"] is False
+        assert normalized["home_lesson_auto_read_limit"] == 4
+        assert normalized["daily_memory_mirror_enabled"] is True
+        assert normalized["run_task_workspace_enabled"] is False
         assert normalized["provider_space_default_max_storage_mb"] == 512
         assert normalized["provider_space_max_download_file_mb"] == 64
         assert normalized["provider_space_trash_retention_days"] == 45

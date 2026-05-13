@@ -140,3 +140,36 @@ def test_provider_space_quota_from_agent_config():
     assert warnings == []
     assert quota.max_storage_mb == 512
     assert quota.max_download_file_mb == 64
+
+
+# LLM: provider trash cleanup must use retention days from config and never leave the provider space.
+# 函数用途: 验证外部用户/群空间 trash 可按配置保留天数清理旧日期目录。
+def test_provider_trash_retention_from_agent_config_purges_old_days(tmp_path: Path):
+    from agent_py_agent.agent.settings.config import AgentConfig
+    from agent_py_agent.agent.settings.config_normalize import normalize_agent_config
+    from agent_py_agent.agent.user_space.provider_space import (
+        ProviderSpaceIdentity,
+        ensure_provider_space,
+        provider_trash_retention_days_from_agent_config,
+        purge_provider_trash,
+    )
+
+    normalized, warnings = normalize_agent_config({"provider_space_trash_retention_days": "2"})
+    paths = ensure_provider_space(tmp_path, ProviderSpaceIdentity("qq", "group", "g1"))
+    old_file = paths.trash_dir / "2026-05-10" / "old.txt"
+    recent_file = paths.trash_dir / "2026-05-12" / "recent.txt"
+    old_file.parent.mkdir(parents=True)
+    recent_file.parent.mkdir(parents=True)
+    old_file.write_text("old\n", encoding="utf-8")
+    recent_file.write_text("recent\n", encoding="utf-8")
+
+    deleted = purge_provider_trash(
+        paths,
+        retention_days=provider_trash_retention_days_from_agent_config(AgentConfig(**normalized)),
+        today="2026-05-13",
+    )
+
+    assert warnings == []
+    assert old_file.parent in deleted
+    assert not old_file.exists()
+    assert recent_file.exists()
