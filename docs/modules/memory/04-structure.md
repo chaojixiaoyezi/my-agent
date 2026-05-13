@@ -7,7 +7,7 @@ agent_py_agent/agent/
 |-- memory.py                         # 旧兼容入口，真实存储已拆到 memory_store/
 |-- memory_settings.py                # 旧兼容入口，真实配置解析在 settings/memory.py
 |-- settings/memory.py                # memory 配置、默认值、warning、安全归一化和参数边界
-|-- memory_store/                     # 长期记忆 JSONL 事实流水，可选同步索引到 LocalStore
+|-- memory_store/                     # 长期记忆 JSONL 事实流水，可选同步索引到 LocalStore，并可镜像到 home daily
 |-- memory_routing/                   # route index、匹配、required/candidate path、read receipt
 `-- memory_archive/                   # hook snapshot、raw archive、留存、token 估算、compact 预演
     |-- agent_run_workspace.py         # Phase 1 task-local agent run workspace 骨架
@@ -52,7 +52,7 @@ agent_py_agent/cli/
 
 ## 核心文件
 
-- `memory_store/jsonl.py`：读写长期记忆 JSONL，是最朴素的事实落盘层；LocalStore 只是索引，不替代 JSONL。
+- `memory_store/jsonl.py`：读写长期记忆 JSONL，是最朴素的事实落盘层；LocalStore 只是索引，不替代 JSONL。`SimpleAgent` 传入 home daily mirror 后，同一条记录也会追加到 `~/.my-agent/memory/daily/YYYY-MM-DD.jsonl`，便于以后按天恢复和查询。
 - `settings/memory.py`：解析配置，处理非法值回退和 warning；会原地更新 AgentConfig-like 对象。
 - `memory_routing/loader.py`：读取 route index；JSON 面向程序稳定性，Markdown 面向人工维护，并兼容常见中英文列表分隔符。
 - `memory_routing/models.py`：定义 route、match、path resolution、read receipt 等票据结构。
@@ -107,8 +107,8 @@ agent_py_agent/cli/
 
 ## 数据流
 
-1. 用户对话或命令触发记忆写入，基础事实先落到 JSONL。
-2. LocalStore 可以为旧 memory 补建索引，让搜索和 timeline 能看到它。
+1. 用户对话或命令触发记忆写入，基础事实先落到旧 `memory_path` JSONL；home-backed agent 同时镜像到 `memory/daily/YYYY-MM-DD.jsonl`。
+2. LocalStore 可以为旧 memory 补建索引，让搜索和 timeline 能看到它；daily mirror 先作为按天事实流水，不替代旧索引。
 3. 当新任务需要规则时，memory routing 根据 query 匹配 route index。
 4. 匹配到的 authority path 会被安全读取成上下文片段。
 5. token 预算逼近阈值时，run 主链路先写 `memory_archive/snapshots/*.json` 权威快照，再做组合压缩；快照内容必须带上 routed memory context 和 auto resume context，保证 compact 后恢复能回到同一批 authority path 和恢复线索。
@@ -184,7 +184,7 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 
 ## My-Agent Home / Provider 空间
 
-新的家目录约定记录在 `docs/architecture/MY_AGENT_HOME_LAYOUT.md`。大白话说：主账号住在 `~/.my-agent/`，每天记忆放 `memory/daily/`，教训放 `memory/lessons/`，任务放 `workspace/tasks/{date}/{task_slug}/`；QQ/飞书这类外部平台接入后，才在 `providers/<provider>/users|groups/<id>/` 下给对应用户或群开独立空间。外部用户/群可以有自己的 tools、skills、role_templates、workflows、workspace、memory、trash，但不能写主账号家目录，也不能越权碰别人的空间。
+新的家目录约定记录在 `docs/architecture/MY_AGENT_HOME_LAYOUT.md`。大白话说：主账号住在 `~/.my-agent/`，每天记忆放 `memory/daily/`，教训放 `memory/lessons/`，任务放 `workspace/tasks/{date}/{task_slug}/`；普通保存型 run 现在已经会创建任务目录里的 `outputs/`、`runtime/`、`agents/`、`logs/`、`state.json` 和 `timeline.jsonl`。`PromptBuilder` 会读取 `memory.md` 关键记忆，并只按文件名匹配少量 lesson，不会每轮全量读教训库。QQ/飞书这类外部平台接入后，才在 `providers/<provider>/users|groups/<id>/` 下给对应用户或群开独立空间。外部用户/群可以有自己的 tools、skills、role_templates、workflows、workspace、memory、trash，但不能写主账号家目录，也不能越权碰别人的空间。
 
 日期窗口说明：`--since YYYY-MM-DD` 从当天 00:00 开始；`--until YYYY-MM-DD` 包含当天全天。这样用户按自然日期查跨天交接时，不会漏掉当天白天的 hook snapshot。
 

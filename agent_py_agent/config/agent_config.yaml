@@ -28,6 +28,18 @@ workspace_root: ["", "C:/Users/41542/Desktop/2026年工作/5月","/Users/xiaoyez
 # - MY_AGENT_HOME 环境变量优先级更高，适合测试或多 profile 隔离。
 my_agent_home: "~/.my-agent"
 
+# 家目录运行时开关：
+# - home_runtime_bootstrap_enabled: 启动 SimpleAgent 时自动创建 ~/.my-agent 基础目录和 SOUL/USER/AGENTS/memory 入口文件。
+# - home_context_enabled: 每轮 prompt 允许读取轻量 home 上下文，例如 memory.md 和匹配 lesson。
+# - home_lesson_auto_read_limit: 每轮最多自动读取多少个匹配 lesson 文件；0 表示不自动读 lesson。
+# - daily_memory_mirror_enabled: 写旧 memory_path 的同时，镜像一份到 memory/daily/YYYY-MM-DD.jsonl。
+# - run_task_workspace_enabled: 保存 run 时自动创建 workspace/tasks/date/task_slug/outputs 和 runtime 等目录。
+home_runtime_bootstrap_enabled: true
+home_context_enabled: true
+home_lesson_auto_read_limit: 3
+daily_memory_mirror_enabled: true
+run_task_workspace_enabled: true
+
 # 任务工作区路径模板：
 # - {date} 是任务创建日期，例如 2026-05-13。
 # - {task_slug} 是从任务名生成的安全目录名，例如 “购物网站 E2E / main” -> “购物网站-e2e-main”。

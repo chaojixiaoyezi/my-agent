@@ -20,6 +20,7 @@ from ..memory_archive.snapshots import (
     RecoverySnapshotInput,
 )
 from ..memory_archive.tokens import TurnTokenUsage, append_session_token_usage
+from ..user_space.run_workspace import EnsureRunWorkspaceRequest, ensure_run_workspace
 from ._runtime_params import (
     ArchiveRunParams,
     EstimateTokenParams,
@@ -110,6 +111,7 @@ class FinalizationService:
     def _archive_run_if_needed(self, params: ArchiveRunParams):
         if not params.do_save:
             return None
+        _write_run_task_workspace_if_needed(self._agent, params)
         self._agent.memory.add("user", params.user_prompt)
         self._agent.memory.add(
             "agent", params.final_response.text, tags=[params.final_response.backend]
@@ -234,6 +236,29 @@ def _recovery_content_paths(ctx: FinalizeContext, runtime_fact_source: str) -> l
     if runtime_fact_source:
         paths.append(runtime_fact_source)
     return paths
+
+
+# LLM: _write_run_task_workspace_if_needed gives saved runs a clean home task folder without changing legacy archive paths.
+# 函数用途: 在主代理 run 保存时创建 home/workspace/tasks/date/task 的产物区、运行区和 refs-only 状态文件。
+def _write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
+    if not bool(getattr(agent.config, "run_task_workspace_enabled", True)):
+        return ""
+    home_paths = getattr(agent, "home_paths", None)
+    if home_paths is None:
+        return ""
+    result = ensure_run_workspace(
+        EnsureRunWorkspaceRequest(
+            home=home_paths.root,
+            template=str(getattr(agent.config, "workspace_task_path_template", "")),
+            task_name=params.task_id or params.run_id or params.run_request_id or params.user_prompt,
+            user_prompt=params.user_prompt,
+            request_id=params.run_request_id,
+            run_id=params.run_id,
+            task_id=params.task_id,
+            source=params.source,
+        )
+    )
+    return str(result.root)
 
 
 # LLM: _snapshot_result_fields 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

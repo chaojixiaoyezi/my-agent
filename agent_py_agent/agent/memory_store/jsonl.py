@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import asdict, dataclass
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -86,7 +87,12 @@ class JsonlMemory(JsonlMemoryIndexMixin):
 
     # LLM: memory store 以 JSONL 记录和本地索引作为事实来源；修改 __init__ 时同步检查返回值、异常处理和读写副作用。
     # 函数用途: 初始化实例依赖、路径或缓存状态，为同一对象的后续方法提供共享上下文。
-    def __init__(self, path: str | Path, local_store: LocalStore | None = None):
+    def __init__(
+        self,
+        path: str | Path,
+        local_store: LocalStore | None = None,
+        daily_mirror_dir: str | Path | None = None,
+    ):
         """初始化 JSONL 记忆文件位置，并确保父目录存在。
 
         新手说明:
@@ -100,6 +106,7 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         会创建 path 的父目录；不会创建 LocalStore，也不会调用模型。"""
         self.path = Path(path)
         self.local_store = local_store
+        self.daily_mirror_dir = Path(daily_mirror_dir) if daily_mirror_dir is not None else None
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     # LLM: memory store 以 JSONL 记录和本地索引作为事实来源；修改 add 时同步检查返回值、异常处理和读写副作用。
@@ -138,8 +145,17 @@ class JsonlMemory(JsonlMemoryIndexMixin):
             created_at=time.time(),
         )
         append_jsonl(self.path, asdict(record))
+        self._append_daily_mirror(record)
         self._try_index_record(record)
         return record
+
+    # LLM: daily mirror keeps the future ~/.my-agent/memory/daily ledger populated while legacy memory_path stays readable.
+    # 函数用途: 把同一条记忆追加到按天分片的 home memory JSONL；未配置时保持旧行为。
+    def _append_daily_mirror(self, record: MemoryRecord) -> None:
+        if self.daily_mirror_dir is None:
+            return
+        path = self.daily_mirror_dir / f"{date.fromtimestamp(record.created_at).isoformat()}.jsonl"
+        append_jsonl(path, asdict(record))
 
     # LLM: memory store 以 JSONL 记录和本地索引作为事实来源；修改 all 时同步检查返回值、异常处理和读写副作用。
     # 函数用途: 读取 all 需要的文件、记录或配置，并整理成调用方可直接使用的结果。

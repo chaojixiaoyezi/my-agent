@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from ..config import AgentConfig
 from ..memory import MemoryRecord
@@ -55,9 +56,10 @@ class PromptBuilder:
 
     # LLM: PromptBuilder.__init__ belongs to Prompt 构造; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 初始化实例依赖和字段，不应在构造阶段做难以回滚的重副作用；它是 PromptBuilder 的方法，通常依赖实例字段。
-    def __init__(self, config: AgentConfig, root: Path):
+    def __init__(self, config: AgentConfig, root: Path, home_paths: Any | None = None):
         self.config = config
         self.root = root
+        self.home_paths = home_paths
 
     # LLM: PromptBuilder.read_prompt_files belongs to Prompt 构造; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 读取动态 prompt 文件并拼接内容。 大白话解释： 这些文件相当于'额外行为规则'，只要被读进来，这一轮模型就真的能看到。。
@@ -108,7 +110,7 @@ class PromptBuilder:
         memory_text = "\n".join(
             f"- [{m.kind}] {m.role}: {m.content}" for m in request.memories
         ) or "（无相关记忆）"
-        dynamic = "\n".join(self.read_prompt_files(request.prompt_files))
+        dynamic = "\n".join([*self.read_prompt_files(request.prompt_files), *self.read_home_context(request.user_prompt)])
         injected = "\n".join(request.inject or [])
         task_and_transcript = _task_and_transcript_section(request.user_prompt, _tools.tool_context or [])
         default_tools = "# Tools\n（当前未启用工具）"
@@ -122,6 +124,15 @@ class PromptBuilder:
             f"{_tools.tool_recommendations_section or default_recommendations}\n\n"
             f"{task_and_transcript}\n"
         )
+
+    # LLM: read_home_context injects lightweight owner context without loading every lesson in ~/.my-agent.
+    # 函数用途: 读取 home memory.md 和少量匹配 lesson 文件，作为运行时动态上下文。
+    def read_home_context(self, user_prompt: str) -> list[str]:
+        if not self.home_paths or not bool(getattr(self.config, "home_context_enabled", True)):
+            return []
+        chunks = _home_key_memory_chunks(self.home_paths)
+        chunks.extend(_matching_lesson_chunks(self.home_paths, user_prompt, _lesson_limit(self.config)))
+        return chunks
 
 
 # LLM: _task_and_transcript_section belongs to Prompt 构造; keep caller-visible returns, errors, and side effects aligned with focused tests.
@@ -138,3 +149,50 @@ def _task_and_transcript_section(user_prompt: str, tool_context: list[str]) -> s
         "如果某个工具调用已经成功，不要重复调用同一个工具和同一组参数；"
         "直接使用已有结果进入下一步，或在证据足够时给出最终答案。"
     )
+
+
+# LLM: _home_key_memory_chunks keeps key memory small and explicit in every home-backed prompt.
+# 函数用途: 读取 memory.md 关键记忆；文件为空或不存在时不注入。
+def _home_key_memory_chunks(home_paths: Any) -> list[str]:
+    path = Path(home_paths.memory_md)
+    content = _read_text_if_nonempty(path)
+    if not content:
+        return []
+    return [f"# Home Key Memory: {path}\n{content}"]
+
+
+# LLM: _matching_lesson_chunks uses simple filename matching until semantic lesson routing is added.
+# 函数用途: 按 lesson 文件名和当前任务文本匹配少量教训文件，避免每轮全量读取。
+def _matching_lesson_chunks(home_paths: Any, user_prompt: str, limit: int) -> list[str]:
+    if limit <= 0:
+        return []
+    lessons_dir = Path(home_paths.memory_lessons_dir)
+    if not lessons_dir.exists():
+        return []
+    prompt_text = str(user_prompt or "").casefold()
+    chunks: list[str] = []
+    for path in sorted(lessons_dir.glob("*.md")):
+        if len(chunks) >= limit:
+            break
+        if path.stem.casefold() not in prompt_text:
+            continue
+        content = _read_text_if_nonempty(path)
+        if content:
+            chunks.append(f"# Home Lesson: {path}\n{content}")
+    return chunks
+
+
+# LLM: _lesson_limit centralizes config coercion for home lesson reads.
+# 函数用途: 获取每轮 prompt 最多自动读取多少个 lesson 文件。
+def _lesson_limit(config: AgentConfig) -> int:
+    return max(0, int(getattr(config, "home_lesson_auto_read_limit", 3) or 0))
+
+
+# LLM: _read_text_if_nonempty is a tolerant prompt-context reader for user-owned markdown files.
+# 函数用途: 安全读取 UTF-8 文本，文件缺失、权限或编码问题时返回空字符串。
+def _read_text_if_nonempty(path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    return text

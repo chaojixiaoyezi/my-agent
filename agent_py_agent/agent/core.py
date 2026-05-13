@@ -72,6 +72,7 @@ from .memory import JsonlMemory
 from .prompting import PromptBuilder
 from .subagent import SubAgentManager
 from .tooling.registry import ToolRegistry, ToolRegistryParams
+from .user_space.home_layout import ensure_my_agent_home, home_paths
 from .user_space.paths import get_user_paths
 
 
@@ -144,6 +145,7 @@ class SimpleAgent(
         self._capability_config_runtime_snapshot = None
         self.workspace_roots = _normalized_workspace_roots(self.root, workspace_roots)
 
+        self.home_paths = _resolve_home_paths(config)
         paths = _resolve_paths(config, self.root)
         self.local_store = LocalStore(
             paths["local_store_path"],
@@ -151,12 +153,32 @@ class SimpleAgent(
             events_path=paths["local_store_events_path"],
             enable_fts=config.local_store_fts_enabled,
         )
-        self.memory = JsonlMemory(paths["memory_path"], local_store=self.local_store)
-        self.prompts = PromptBuilder(config, self.root)
+        self.memory = JsonlMemory(
+            paths["memory_path"],
+            local_store=self.local_store,
+            daily_mirror_dir=_daily_memory_dir(config, self.home_paths),
+        )
+        self.prompts = PromptBuilder(config, self.root, home_paths=self.home_paths)
         self.backend = get_backend(config.model_backend, config)
         self.subagents = _build_subagent_manager(self, paths)
         self.tools = _build_tool_registry(self, config)
         _register_orchestration_tools(self)
+
+
+# LLM: _resolve_home_paths is the single owner-home bootstrap point for SimpleAgent startup.
+# 函数用途: 根据配置初始化或解析 my-agent 家目录，并把路径对象交给运行时复用。
+def _resolve_home_paths(config: AgentConfig):
+    if bool(getattr(config, "home_runtime_bootstrap_enabled", True)):
+        return ensure_my_agent_home(getattr(config, "my_agent_home", None))
+    return home_paths(getattr(config, "my_agent_home", None))
+
+
+# LLM: _daily_memory_dir keeps daily mirroring opt-in/out through config while preserving legacy memory_path.
+# 函数用途: 返回 JsonlMemory 的按天镜像目录；关闭配置时返回 None。
+def _daily_memory_dir(config: AgentConfig, paths):
+    if not bool(getattr(config, "daily_memory_mirror_enabled", True)):
+        return None
+    return paths.memory_daily_dir
 
 
 # LLM: _build_subagent_manager 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。

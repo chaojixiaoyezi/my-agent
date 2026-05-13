@@ -12,6 +12,11 @@ from dataclasses import dataclass, field
 class HomeProviderConfigFields:
     my_agent_home: str = "~/.my-agent"
     workspace_task_path_template: str = "workspace/tasks/{date}/{task_slug}"
+    home_runtime_bootstrap_enabled: bool = True
+    home_context_enabled: bool = True
+    home_lesson_auto_read_limit: int = 3
+    daily_memory_mirror_enabled: bool = True
+    run_task_workspace_enabled: bool = True
     external_knowledge_index_file_name: str = "MY_AGENT_INDEX.md"
     external_knowledge_directory_roots: list[str] = field(default_factory=list)
     external_knowledge_api_sources: list[str] = field(default_factory=list)
