@@ -34,10 +34,9 @@ from .filter_policy import (
     filter_by_time_window,
 )
 
-# Re-export from query_logic for backward compatibility
+# Re-export from query_logic for backward compatibility; resume guidance lives in a bundle module.
 from .query_logic import (
     archive_filters_from_args,
-    build_resume_guidance,
     collect_archive_records,
     collect_resume_task_ids,
     filter_archive_records,
@@ -65,6 +64,7 @@ from .rendering_adapter import (
     format_query_response_json,
     render_resume_guidance,
 )
+from .resume_guidance import ResumeGuidanceRequest, build_resume_guidance
 
 __all__ = [
     # query_models
@@ -72,6 +72,7 @@ __all__ = [
     "ArchiveQueryResponse",
     "ArchiveFilterOptions",
     "RawArchiveCollectOptions",
+    "ResumeGuidanceRequest",
     "ResumeContext",
     "paginate_records",
     # query_service

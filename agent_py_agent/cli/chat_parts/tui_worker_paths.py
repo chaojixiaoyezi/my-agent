@@ -113,10 +113,14 @@ def _record_gateway_response(ctx, agent_response_text: str, stream_has_visible_t
             agent_response_text, stream_has_visible_text, ctx.cfg.assistant_outputs, ctx.cfg.agent
         )
     if not _stream_output_contains_response(ctx.cfg, agent_response_text):
-        from .fallback_ui import _render_assistant_response
+        from .fallback_ui import AssistantResponseRenderRequest, _render_assistant_response
 
         _render_assistant_response(
-            agent_response_text, ctx.cfg.assistant_outputs, ctx.cfg.agent.config.agent_name
+            AssistantResponseRenderRequest(
+                text=agent_response_text,
+                assistant_outputs=ctx.cfg.assistant_outputs,
+                agent_name=ctx.cfg.agent.config.agent_name,
+            )
         )
         return True
     ctx.cfg.assistant_outputs.append(agent_response_text)
@@ -178,7 +182,11 @@ def _worker_local_path(ctx) -> tuple[str, bool]:
             ctx.cfg.assistant_outputs.append(result.response)
             return result.response, True
         _render_assistant_response(
-            result.response, ctx.cfg.assistant_outputs, ctx.cfg.agent.config.agent_name
+            AssistantResponseRenderRequest(
+                text=result.response,
+                assistant_outputs=ctx.cfg.assistant_outputs,
+                agent_name=ctx.cfg.agent.config.agent_name,
+            )
         )
         return result.response, True
     return result.response, False

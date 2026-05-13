@@ -20,7 +20,23 @@ from .archive_io import (
     _gateway_terminal_request_path,
     _read_archive_file,
 )
+from .resume_guidance import ResumeGuidanceRequest, build_resume_guidance
 from .task_sources import task_recovery_read_paths
+
+# LLM: Resume guidance stays re-exported from query_logic for legacy tests while implementation lives in resume_guidance.py.
+__all__ = [
+    "CollectArchiveRecordsParams",
+    "FilterArchiveRecordsParams",
+    "ResumeGuidanceRequest",
+    "archive_filters_from_args",
+    "build_resume_guidance",
+    "collect_archive_records",
+    "collect_resume_task_ids",
+    "filter_archive_records",
+    "local_hit_payload",
+    "resume_local_query",
+    "strip_sort_keys",
+]
 
 
 # LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _ArchiveFilterContext 前先核对字段语义、序列化形态和调用方假设。
@@ -195,30 +211,6 @@ def collect_gateway_payloads(local_hits: list[dict[str, Any]], *, limit: int) ->
             break
     return payloads
 
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 build_resume_guidance 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 组装 build resume guidance 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
-def build_resume_guidance(
-    archive_matches: list[dict[str, Any]],
-    local_hits: list[dict[str, Any]],
-    task_payloads: list[dict[str, Any]],
-    gateway_payloads: list[dict[str, Any]] | None = None,
-    *,
-    recommended_read_paths_limit: int = 20,
-) -> dict[str, Any]:
-    gateway_items = gateway_payloads or []
-    return {
-        "archive_match_count": len(archive_matches),
-        "local_match_count": len(local_hits),
-        "task_fact_source_count": len(task_payloads),
-        "gateway_fact_source_count": len(gateway_items),
-        "recommended_read_paths": _recommended_resume_reads(
-            task_payloads,
-            gateway_items,
-            local_hits,
-        )[: max(0, int(recommended_read_paths_limit))],
-        "next_actions": _resume_next_actions(task_payloads, gateway_items),
-    }
-
 # LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 strip_sort_keys 时同步检查返回值、异常处理和读写副作用。
 # 函数用途: 完成 strip sort keys 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
 def strip_sort_keys(payload: Any) -> Any:
@@ -343,49 +335,3 @@ def _gateway_payload(hit: dict[str, Any]) -> dict[str, Any] | None:
         "content_path": content_path,
         "recommended_read_paths": _dedupe_strings([request_path, response_path, content_path]),
     }
-
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _recommended_resume_reads 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 完成 recommended resume reads 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
-def _recommended_resume_reads(
-    task_payloads: list[dict[str, Any]],
-    gateway_payloads: list[dict[str, Any]],
-    local_hits: list[dict[str, Any]],
-) -> list[str]:
-    recommended_reads: list[str] = []
-    for payload in (*task_payloads, *gateway_payloads):
-        _append_paths(recommended_reads, payload.get("recommended_read_paths", []) or [])
-    _append_paths(recommended_reads, (str(hit.get("content_path", "") or "") for hit in local_hits))
-    return recommended_reads
-
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _append_paths 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 写入或登记 append paths 相关记录，集中处理目标路径、格式化和状态更新。
-def _append_paths(target: list[str], paths) -> None:
-    for path in paths:
-        if path and path not in target:
-            target.append(path)
-
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _resume_next_actions 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 收集或查询 resume next actions 的候选结果，并按参数完成筛选、排序或数量限制。
-def _resume_next_actions(
-    task_payloads: list[dict[str, Any]],
-    gateway_payloads: list[dict[str, Any]],
-) -> list[str]:
-    next_actions = [
-        "Read task fact sources before deciding whether work can continue.",
-        "Treat archive matches as recovery clues, not final authority.",
-    ]
-    invalid_authority = _invalid_authority_ids(task_payloads)
-    if invalid_authority:
-        next_actions.append("Repair missing task authority files before resume: " + ", ".join(invalid_authority[:5]))
-    if not task_payloads and not gateway_payloads:
-        next_actions.append("Use memory-archive-search to narrow request_id/run_id/session_id first.")
-    return next_actions
-
-# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _invalid_authority_ids 时同步检查返回值、异常处理和读写副作用。
-# 函数用途: 计算 invalid authority ids 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
-def _invalid_authority_ids(task_payloads: list[dict[str, Any]]) -> list[str]:
-    return [
-        task.get("run_id", "")
-        for task in task_payloads
-        if isinstance(task.get("authority_validation"), dict) and not task["authority_validation"].get("ok", False)
-    ]

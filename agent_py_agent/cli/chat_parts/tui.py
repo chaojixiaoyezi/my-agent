@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 
 from .rendering import _cprint, _tui_print_banner, progress_bar
+from .tui_activity import format_activity_text
 from .tui_params import (
     MakeTuiAppParams,
     StartWorkerParams,
@@ -105,27 +106,7 @@ def _tui_get_activity_text(refs: TuiStatusRefs) -> str:
         running = bool(refs.is_running_ref[0])
     if not thinking:
         return ""
-    star = _format_activity_star(started_at, running)
-    return f"{star} {_format_thinking_status(thinking, started_at, running)}"
-
-
-# LLM: _format_activity_star 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
-def _format_activity_star(started_at: float, running: bool) -> str:
-    if not running or not started_at:
-        return "✦"
-    frames = ("✦", "✧", "✶", "✷")
-    elapsed = max(0.0, time.perf_counter() - started_at)
-    return frames[int(elapsed * 4) % len(frames)]
-
-
-# LLM: _format_thinking_status 属于chat CLI；改行为前先对齐调用方和快照/单测。
-# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
-def _format_thinking_status(thinking: str, started_at: float, running: bool) -> str:
-    if not running or not started_at:
-        return thinking
-    elapsed = max(0.0, time.perf_counter() - started_at)
-    return f"{thinking} {elapsed:.1f}s"
+    return format_activity_text(thinking, started_at, running, now=time.perf_counter())
 
 
 # LLM: _tui_handle_expand_command 属于chat CLI；改行为前先对齐调用方和快照/单测。

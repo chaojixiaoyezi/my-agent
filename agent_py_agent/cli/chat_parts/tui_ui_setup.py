@@ -31,6 +31,17 @@ class StatusBarConfig:
     context_window_chars: int
 
 
+# LLM: TranscriptSinkRequest bundles TUI transcript sink installation inputs.
+# 类用途: 打包 TUI transcript 输出区、跟随状态、app 引用和配置参数。
+@dataclass
+class TranscriptSinkRequest:
+    output_area: Any | None
+    transcript_follow_ref: list[bool] | None
+    app_ref: list[Any]
+    app: Any
+    params: MakeTuiAppParams
+
+
 APP_RENDER_POSTPONE_SECONDS = 1 / 60
 
 
@@ -187,7 +198,7 @@ def make_tui_app(params: MakeTuiAppParams):
         min_redraw_interval=APP_REDRAW_INTERVAL_SECONDS if use_app_scrollback else None,
         max_render_postpone_time=APP_RENDER_POSTPONE_SECONDS if use_app_scrollback else 0.01,
     )
-    _configure_transcript_sink(output_area, transcript_follow_ref, app_ref, app, params)
+    _configure_transcript_sink(TranscriptSinkRequest(output_area, transcript_follow_ref, app_ref, app, params))
 
     return app
 
@@ -257,17 +268,11 @@ def _make_tui_style():
 
 # LLM: _configure_transcript_sink 属于chat CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
-def _configure_transcript_sink(
-    output_area: Any | None,
-    transcript_follow_ref: list[bool] | None,
-    app_ref: list[Any],
-    app: Any,
-    params: MakeTuiAppParams,
-) -> None:
-    if output_area is not None and transcript_follow_ref is not None:
-        app_ref[0] = app
-        max_chars = int(getattr(params.agent.config, "chat_transcript_max_chars", 500_000) or 500_000)
-        _install_transcript_sink(output_area, transcript_follow_ref, app_ref, max_chars=max_chars)
+def _configure_transcript_sink(request: TranscriptSinkRequest) -> None:
+    if request.output_area is not None and request.transcript_follow_ref is not None:
+        request.app_ref[0] = request.app
+        max_chars = int(getattr(request.params.agent.config, "chat_transcript_max_chars", 500_000) or 500_000)
+        _install_transcript_sink(request.output_area, request.transcript_follow_ref, request.app_ref, max_chars=max_chars)
         return
     set_tui_output_sink(None)
     set_tui_stream_sink(None)

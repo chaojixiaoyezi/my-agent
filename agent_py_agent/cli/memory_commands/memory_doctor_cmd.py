@@ -138,7 +138,7 @@ def _build_archive_doctor(root: Path, config: object) -> dict[str, Any]:
 
 # LLM: _archive_dir_payload 属于memory CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
-def _archive_dir_payload(directory: Path, today_path: Path, *, config: object) -> dict[str, Any]:
+def _archive_dir_payload(directory: Path, today_path: Path, *, config: object | None = None) -> dict[str, Any]:
     files = sorted(
         [path for path in directory.glob("*.jsonl") if path.is_file()] if directory.exists() else [],
         key=lambda path: (path.stat().st_mtime, path.name),
@@ -151,9 +151,15 @@ def _archive_dir_payload(directory: Path, today_path: Path, *, config: object) -
         "today_path": str(today_path),
         "recent_files": [
             _archive_file_payload(path)
-            for path in files[: int(getattr(config, "memory_doctor_recent_archive_file_limit", 5) or 0)]
+            for path in files[: _recent_archive_file_limit(config)]
         ],
     }
+
+
+# LLM: _recent_archive_file_limit preserves old helper calls while making doctor limits config-backed.
+# 函数用途: 从配置读取 memory doctor 最近文件数量上限；没有配置时回退 5。
+def _recent_archive_file_limit(config: object | None) -> int:
+    return int(getattr(config, "memory_doctor_recent_archive_file_limit", 5) or 0)
 
 
 # LLM: _archive_file_payload 属于memory CLI；改行为前先对齐调用方和快照/单测。

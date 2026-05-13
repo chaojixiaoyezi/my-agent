@@ -18,6 +18,7 @@ from ..agent.memory_archive.compact_resume import (
     build_memory_compact_resume,
 )
 from ..agent.memory_archive.query import (
+    ResumeGuidanceRequest,
     archive_filters_from_args,
     build_resume_guidance,
     collect_archive_records,
@@ -32,6 +33,8 @@ from ..agent.memory_archive.query import (
 from ..agent.memory_archive.resume_brief import build_resume_brief
 from .common import make_agent
 from .memory_resume_compact_rendering import print_memory_resume_from_compact
+
+# LLM: memory resume CLI converts argparse fields into ResumeGuidanceRequest before calling archive services.
 
 
 # LLM: cmd_memory_archive_list 属于memory CLI；改行为前先对齐调用方和快照/单测。
@@ -137,13 +140,15 @@ def cmd_memory_resume(args) -> int:
         return _cmd_memory_resume_from_compact(agent, args)
     filters, archive_matches, local_payloads, task_payloads, gateway_payloads = _collect_resume_data(agent, args)
     resume = build_resume_guidance(
-        archive_matches,
-        local_payloads,
-        task_payloads,
-        gateway_payloads,
-        recommended_read_paths_limit=int(
-            getattr(agent.config, "memory_resume_recommended_read_paths_limit", 20) or 0
-        ),
+        ResumeGuidanceRequest(
+            archive_matches=archive_matches,
+            local_hits=local_payloads,
+            task_payloads=task_payloads,
+            gateway_payloads=gateway_payloads,
+            recommended_read_paths_limit=int(
+                getattr(agent.config, "memory_resume_recommended_read_paths_limit", 20) or 0
+            ),
+        )
     )
     brief = build_resume_brief(
         archive_matches, local_payloads, task_payloads,

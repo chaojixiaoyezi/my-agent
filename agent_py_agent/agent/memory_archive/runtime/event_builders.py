@@ -154,6 +154,22 @@ def _tool_event(
 ) -> RawMemoryEvent:
     tool_call = ctx.tool_call
     fields = _tool_event_fields(tool_call, backend=ctx.backend, preview_limits=ctx.preview_limits)
+    event = _tool_raw_event(identity, ctx, fields)
+    return _apply_archive_level_to_tool_event(
+        event,
+        tool_call=tool_call,
+        metadata=fields.metadata,
+        preview_limits=ctx.preview_limits,
+    )
+
+
+# LLM: _tool_raw_event maps normalized tool fields into the RawMemoryEvent contract.
+# 函数用途: 根据工具调用身份、上下文和规范化字段创建原始归档事件。
+def _tool_raw_event(
+    identity: EventIdentity,
+    ctx: ToolCallContext,
+    fields: _ToolEventFields,
+) -> RawMemoryEvent:
     event_id = _event_id(
         {
             "kind": "tool",
@@ -180,7 +196,7 @@ def _tool_event(
         created_at=ctx.created_at,
         status=fields.status,
         error_code=fields.error_code,
-        is_dispatch=bool(tool_call.get("is_dispatch", False)),
+        is_dispatch=bool(ctx.tool_call.get("is_dispatch", False)),
         task_id=identity.task_id,
         tool_name=fields.tool_name,
         tool_call_id=fields.tool_call_id,
@@ -192,12 +208,7 @@ def _tool_event(
         source=ctx.source,
         archive_level=_normalize_archive_level(ctx.archive_level),
     )
-    return _apply_archive_level_to_tool_event(
-        event,
-        tool_call=tool_call,
-        metadata=fields.metadata,
-        preview_limits=ctx.preview_limits,
-    )
+    return event
 
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _tool_event_fields 时同步检查返回值、异常处理和读写副作用。

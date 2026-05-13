@@ -63,6 +63,7 @@ agent_py_agent/cli/
 - `memory_archive/runtime.py`：把 run turn 的用户、助手、工具元数据写成 raw archive 事件。
 - `memory_archive/snapshots.py`：在 run/gateway/subagent 完成点写轻量恢复 snapshot，并提供压缩前必须成功的 `write_compression_snapshot()` hook。
 - `memory_archive/query.py`：把 raw/hook JSONL 读成统一可搜索记录，并整理 resume 线索。
+- `memory_archive/query/resume_guidance.py`：把 archive/local/task/gateway 线索整理成 `ResumeGuidanceRequest` bundle，输出推荐读取路径和下一步动作，避免恢复建议接口继续用散装参数。
 - `memory_archive/query/task_sources.py`：集中维护 subagent 恢复事实源优先级；checkpoint artifacts 优先，传统 `STATUS.md` / `HANDOFF.md` 继续保留。
 - `memory_archive/task_workspace.py`：创建文件系统版 task workspace 的最小骨架，并写 `agents/<run_id>/legacy_run_ref.json` 指向旧 subagent work-order 目录；这是 adapter，不迁移历史目录。
 - `memory_archive/task_workspace.py`、`agent_run_workspace.py`、`daily_ledger.py`、`artifact_registry.py`、`compact_chain.py`、`shared_workspace.py`：这些 runtime memory 写入入口统一提供 `*Request` bundle；旧参数形态只作为兼容 adapter，新增字段应进入 bundle，避免跨阶段继续拉长函数签名。
@@ -180,6 +181,10 @@ memory-resume 或 run(auto resume)
 当前 Phase 0/1/2/3/4/5/6 已创建 task workspace 外壳、agent run workspace 外壳、daily event ledger、artifact manifest、checkpoint-first compact chain、shared 协作面和 run-local memory gate。全局 `memory-compact --apply` 已能生成 `memory_archive/compact_applies/` 下的非破坏性 apply context、apply bundle、restore refs、work state snapshot、self-check 和失败阻断报告，`memory-resume --from-compact` 已能从这些产物生成手动恢复上下文、consistency report、handoff、continue packet 和 action guard；action guard 在 auto 模式字段齐全时可以返回 `allow_automated_continue`，但仍标记不自动执行工具。`run` 已能在上下文风险达到阈值时触发默认 plan-only 的 auto compact cycle，并可在显式配置下做非破坏性 apply + auto resume + continue packet 停车。大工具输出已能进入 `memory_archive/artifacts/tool_outputs/`，control-plane query 已能统一查 daily/task-run/compact/tool-output refs，这几类轻量索引已统一到 schema v2/reserved 结构，但还不会删除、重写或裁剪历史内容，也不会自动继续执行工具。`tasks/<root_id>/agents/<run_id>/legacy_run_ref.json` 会继续指向旧 run 目录；`memory_gate/` 保存 review 候选、decision log、export log、retention report 和 verifier report。只有显式 export 命令才会写主代理长期记忆或生成 skill draft。
 
 LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 目录里的权威文件。
+
+## My-Agent Home / Provider 空间
+
+新的家目录约定记录在 `docs/architecture/MY_AGENT_HOME_LAYOUT.md`。大白话说：主账号住在 `~/.my-agent/`，每天记忆放 `memory/daily/`，教训放 `memory/lessons/`，任务放 `workspace/tasks/{date}/{task_slug}/`；QQ/飞书这类外部平台接入后，才在 `providers/<provider>/users|groups/<id>/` 下给对应用户或群开独立空间。外部用户/群可以有自己的 tools、skills、role_templates、workflows、workspace、memory、trash，但不能写主账号家目录，也不能越权碰别人的空间。
 
 日期窗口说明：`--since YYYY-MM-DD` 从当天 00:00 开始；`--until YYYY-MM-DD` 包含当天全天。这样用户按自然日期查跨天交接时，不会漏掉当天白天的 hook snapshot。
 

@@ -79,9 +79,11 @@ def _maybe_record_response(
     agent,
 ) -> bool:
     if text and (not stream_has_visible_text) and text.strip():
-        from .fallback_ui import _render_assistant_response
+        from .fallback_ui import AssistantResponseRenderRequest, _render_assistant_response
 
-        _render_assistant_response(text, assistant_outputs, agent.config.agent_name)
+        _render_assistant_response(
+            AssistantResponseRenderRequest(text=text, assistant_outputs=assistant_outputs, agent_name=agent.config.agent_name)
+        )
         return True
     return False
 

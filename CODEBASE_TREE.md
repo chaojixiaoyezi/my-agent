@@ -17,7 +17,7 @@
 ```text
 agent_py_agent/
 |-- cli/                                      # 命令行入口层，只做参数解析、展示和调用服务
-|   |-- chat_parts/                           # 交互 chat 的 UI、历史、gateway client 和 fallback worker
+|   |-- chat_parts/                           # 交互 chat 的 UI、历史、gateway client、fallback worker、TUI activity/scrollback helpers
 |   |-- commands/                             # 命令行分组入口和小型 command helpers
 |   |-- memory_commands/                      # memory route/query/doctor/compact/archive 子命令
 |   |-- scenario_cases/                       # gateway、subagent、runner、repair 等确定性 scenario
@@ -53,6 +53,7 @@ agent_py_agent/
 |   |   `-- tools/                             # agent 可调用的日志查询/trace/hunt 工具
 |   |-- memory_archive/                       # raw archive、task/run workspace、runtime facts、compact apply/resume/handoff/action-guard/auto/suggest/subagent-owner refs、memory gate
 |   |   |-- query/                             # archive 查询/filter/payload 构造
+|   |   |   `-- resume_guidance.py             # 恢复建议 bundle，生成 refs-only 推荐读取路径和 next actions
 |   |   |-- runtime/                           # run-time archive hook 和事件同步
 |   |   `-- snapshots/                         # 快照模型和 snapshot IO
 |   |-- memory_routing/                       # 长期规则索引、匹配、上下文注入和 receipt
@@ -62,7 +63,9 @@ agent_py_agent/
 |   |-- prompting_parts/                      # prompt 构造、工具 transcript 和上下文片段
 |   |-- session/                              # 跨通道会话和 admin 查询
 |   |-- settings/                             # 配置 schema、normalize、服务化 coercion
-|   |   `-- services/                         # 配置字段归一化和 runtime/subagent 子配置
+|   |   |-- home_config.py                     # 家目录、外部知识库、provider 空间字段组，避免 AgentConfig 类体膨胀
+|   |   `-- services/                         # 配置字段归一化和 runtime/subagent/home/provider 子配置
+|   |-- external_knowledge/                   # 外部知识库配置 bundle；后续接目录/API/数据库查询
 |   |-- subagent_workflows/                   # 子代理 workflow route/compile/plan 和内置模板
 |   |-- subagents/role_template_resolution.py # 自然 role 名到模板 id 的运行时解析
 |   |-- subagents/role_templates.py           # 子代理广义角色模板加载、校验和查询
@@ -75,7 +78,7 @@ agent_py_agent/
 |   |   `-- services/                          # lifecycle/dispatch/indexing/actions/persistence 等服务
 |   |-- task_registry/                        # 任务注册表和查找入口
 |   |-- tooling/                              # 工具模型、文件/HTTP/shell 工具、注册表、写边界
-|   |-- user_space/                           # 用户数据隔离路径和迁移
+|   |-- user_space/                           # 用户数据隔离、my-agent 家目录、provider 用户/群空间和迁移
 |   |-- clients/ repositories/ security/ validators/
 |   |                                          # 预留边界目录；新增实现前先补设计说明
 |   |-- core.py                               # SimpleAgent 兼容组合入口
@@ -117,6 +120,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |-- architecture/                          # 架构文档
 |   |   |-- BOUNDARY_RULES.md                  # 分层导入矩阵
 |   |   |-- MODULE_OWNERSHIP.md                # 模块职责归属表
+|   |   |-- MY_AGENT_HOME_LAYOUT.md            # ~/.my-agent 家目录、provider 空间、外部知识库和 memory 区域约定
 |   |   |-- CHAT_REFACTOR_PLAN.md              # chat.py 重构计划
 |   |   `-- SUBAGENT_SERVICE_REFACTOR_PLAN.md  # SubAgent 服务化重构计划
 |   |-- development/                           # 开发规范

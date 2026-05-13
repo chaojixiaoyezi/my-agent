@@ -359,10 +359,10 @@ class TestChatCommandArguments:
         args = parser.parse_args(["chat", "--no-resume-context"])
         assert args.resume_context is False
 
-    def test_chat_default_memory_limit(self):
-        """测试 chat 命令默认 memory-limit 为 5。
+    def test_chat_default_memory_limit_defers_to_config(self):
+        """测试 chat 命令默认 memory-limit 留给运行时配置决定。
 
-        验证默认值正确。
+        验证 parser 不写死数字，cmd_chat 会从 AgentConfig 读取默认值。
         """
         from agent_py_agent.cli.subcommands_basic import add_basic_subcommands
 
@@ -371,7 +371,7 @@ class TestChatCommandArguments:
         add_basic_subcommands(sub)
 
         args = parser.parse_args(["chat"])
-        assert args.memory_limit == 5
+        assert args.memory_limit is None
 
 
 class TestChatCommandRuntime:

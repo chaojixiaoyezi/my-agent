@@ -69,6 +69,10 @@ before changing code.
 - Product service / domain / repository / gateway / subagent / memory / tool /
   skill / delegation interfaces must not use loose `*args` or `**kwargs` as
   business parameter entry points.
+- When a function reaches the code-size high-risk band because related values
+  keep growing, split those values into a named dataclass bundle instead of
+  raising limits. Recent examples include `ResumeGuidanceRequest`,
+  `ProviderTrashRequest`, and chat/TUI render request objects.
 - Service-facing APIs should accept one typed dataclass bundle, usually named
   `Params`, `Options`, `Context`, `Request`, `Command`, or `Query` according to
   intent.
@@ -160,6 +164,12 @@ before changing code.
   templates, tools, and skills may be removed.  The hard line is uninstalling or
   disabling my-agent itself.  If a user asks to uninstall my-agent, explain manual
   steps; do not execute the uninstall or delete required runtime/core files.
+- Provider user/group spaces must be resolved through `agent.user_space.provider_space`.
+  External users and groups may write only inside their own provider space. Group
+  owners/admins may destructively manage their own group space, but destructive
+  actions must go to scoped trash and write an audit event. They must not write
+  owner home, another user, another group, or provider root metadata unless an
+  explicit admin migration command owns that change.
 
 ---
 

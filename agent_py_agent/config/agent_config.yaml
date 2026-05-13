@@ -22,6 +22,18 @@ auto_detect_work_on_startup: true
 # - 这就是“测试不能影响当前开发仓库”的关键开关。
 workspace_root: ["", "C:/Users/41542/Desktop/2026年工作/5月","/Users/xiaoyezi/my-claude-code"]
 
+# my-agent 家目录：
+# - 默认 ~/.my-agent，类比 模型助手 Code / 会话运行时 / 长期助手 的本机 profile 目录。
+# - 这里放配置、全局脚本、长期记忆、模板、provider 空间和运行缓存。
+# - MY_AGENT_HOME 环境变量优先级更高，适合测试或多 profile 隔离。
+my_agent_home: "~/.my-agent"
+
+# 任务工作区路径模板：
+# - {date} 是任务创建日期，例如 2026-05-13。
+# - {task_slug} 是从任务名生成的安全目录名，例如 “购物网站 E2E / main” -> “购物网站-e2e-main”。
+# - 默认结果形如 ~/.my-agent/workspace/tasks/2026-05-13/购物网站-e2e-main/。
+workspace_task_path_template: "workspace/tasks/{date}/{task_slug}"
+
 # 默认模型后端：
 # - echo: 本地离线调试
 # - openai_compatible: 走 /chat/completions
@@ -91,6 +103,16 @@ memory_query_content_preview_chars: 500
 memory_resume_archive_scan_limit: 0
 memory_resume_recommended_read_paths_limit: 20
 memory_doctor_recent_archive_file_limit: 5
+
+# 外部知识库配置：
+# - 默认全部为空，不会额外扫描，也不会拖慢普通聊天。
+# - index_file_name 是每个外部知识库目录里优先读取的索引文件名。
+# - directory_roots 是本地/挂载目录；api_sources 是查询接口；database_sources 是数据库连接或命名来源。
+# - 查询顺序固定为：目录 -> API -> 数据库，用户不需要再维护 query_order。
+external_knowledge_index_file_name: "MY_AGENT_INDEX.md"
+external_knowledge_directory_roots: []
+external_knowledge_api_sources: []
+external_knowledge_database_sources: []
 
 # 是否启用自学习功能
 # - false: 默认关闭，只按已有 prompt、记忆、工具和 skill 工作，不自动沉淀新经验
@@ -309,6 +331,17 @@ feishu_callback_port: 8421
 # - qq_app_id / qq_app_secret: QQ 机器人应用凭证
 qq_app_id: ""
 qq_app_secret: ""
+
+# 外部平台用户/群空间配置：
+# - provider_space_default_max_storage_mb 是每个外部用户/群空间默认容量，单位 MiB。
+# - provider_space_max_download_file_mb 是单个下载/导入文件的建议上限，单位 MiB。
+# - provider_space_trash_retention_days 是 trash 保留天数，默认 30 天。
+# - provider_space_destructive_actions_use_trash=true 表示删除先移动到该用户/群自己的 trash。
+# - 外部用户只能写自己的空间；群主/群管理员只能管理自己群空间，不能碰主账号家目录或别的群。
+provider_space_default_max_storage_mb: 2048
+provider_space_max_download_file_mb: 200
+provider_space_trash_retention_days: 30
+provider_space_destructive_actions_use_trash: true
 
 # 会话工作区：
 # - 会话持久化目录，存储 session.json 和会话级别的上下文文件

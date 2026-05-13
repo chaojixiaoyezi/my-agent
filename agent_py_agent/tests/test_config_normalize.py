@@ -201,6 +201,22 @@ class TestNormalizeAgentConfig:
         assert normalized["auto_bench_model_on_first_use"] is False
         assert warnings == []
 
+    def test_normalize_home_provider_risk_fields(self):
+        """验证 provider 空间风险配置可归一化，避免执行层写死危险默认值。"""
+        normalized, warnings = normalize_agent_config(
+            {
+                "provider_space_default_max_storage_mb": "512",
+                "provider_space_max_download_file_mb": "64",
+                "provider_space_trash_retention_days": "45",
+                "provider_space_destructive_actions_use_trash": "true",
+            }
+        )
+        assert warnings == []
+        assert normalized["provider_space_default_max_storage_mb"] == 512
+        assert normalized["provider_space_max_download_file_mb"] == 64
+        assert normalized["provider_space_trash_retention_days"] == 45
+        assert normalized["provider_space_destructive_actions_use_trash"] is True
+
     def test_normalize_empty_dict(self):
         """验证空字典使用所有默认值。"""
         normalized, warnings = normalize_agent_config({})

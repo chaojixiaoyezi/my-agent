@@ -8,8 +8,21 @@ from __future__ import annotations
 按 user_id 隔离数据目录，为多用户场景打基础。
 """
 
+from .home_layout import ensure_my_agent_home, home_paths, resolve_my_agent_home
 from .manager import UserSpaceManager
 from .migration import migrate_to_user_space
 from .paths import UserPaths, get_user_paths
+from .provider_space import ProviderSpaceIdentity, ProviderSpacePaths, ensure_provider_space
 
-__all__ = ["UserPaths", "get_user_paths", "UserSpaceManager", "migrate_to_user_space"]
+__all__ = [
+    "ProviderSpaceIdentity",
+    "ProviderSpacePaths",
+    "UserPaths",
+    "UserSpaceManager",
+    "ensure_provider_space",
+    "ensure_my_agent_home",
+    "get_user_paths",
+    "home_paths",
+    "migrate_to_user_space",
+    "resolve_my_agent_home",
+]
