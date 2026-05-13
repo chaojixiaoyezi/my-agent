@@ -151,6 +151,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |-- README.md                              # 包级说明文档
 |   |-- cli/                                   # CLI 命令层，按 common/local/subagents/gateway/scenario/chat/parser 拆分
 |   |   |-- common.py                          # 配置加载、创建 SimpleAgent、能力路由和通用格式化
+|   |   |-- home_runtime_commands.py           # home-status / memory-daily-list / task-workspace-list 只读调试命令
 |   |   |-- local_doctor.py                    # LocalStore/gateway/subagent 体检和重建规则
 |   |   |-- local_commands.py                  # status/timeline/run/memory/local-search/local-doctor/local-rebuild 命令
 |   |   |-- memory_commands.py                 # memory-route/memory-doctor 可见诊断命令
@@ -218,6 +219,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |   `-- user_space/                    # 用户数据隔离、owner home、provider 空间和 run workspace
 |   |   |       |-- __init__.py               # 模块导出
 |   |   |       |-- home_layout.py            # ~/.my-agent 路径、初始化和任务目录模板
+|   |   |       |-- home_runtime_query.py     # daily memory、task workspace 和 home status 只读查询服务
 |   |   |       |-- run_workspace.py          # 普通主代理 run 的 outputs/runtime/agents 任务工作区
 |   |   |       |-- provider_space.py         # provider 根、用户/群空间和配额统计
 |   |   |       |-- provider_trash.py         # provider scoped trash、审计和 retention 清理
@@ -269,6 +271,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |       |-- test_memory_compact.py              # compact apply/resume、handoff、completion prompt 和手动 fact-write 闭环测试
 |       |-- test_memory_compact_auto.py        # 自动 compact/resume 协调器的 plan-only 和 action guard 停车测试
 |       |-- test_memory_cli.py                 # memory-route / memory-doctor CLI 可见诊断测试
+|       |-- test_home_runtime_query.py         # home daily memory、task workspace、doctor 和 CLI 读取侧迁移测试
 |       |-- test_memory_config.py              # memory 配置安全默认、非法值回退和 warning receipt 测试
 |       |-- test_memory_routing.py             # 长期规则 route 加载、匹配、soft/strict 解析和索引诊断测试
 |       |-- test_memory_routing_context.py     # runtime rule routing context 安全读取和 prompt 片段测试

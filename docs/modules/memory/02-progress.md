@@ -68,6 +68,8 @@
 - 2026-05-08 Compact work-state scope 安全修正：request/session/task/run id 现在按字面路径解析，`*`、`[]` 等 glob 字符不会扩大扫描 `tasks/*/agents/*`；半自动 completion 命令也会保留原 `--session-id/--request-id/--task-id/--run-id` scope。
 - 2026-05-08 compact + parent acceptance 联调第一片已落地：新增 focused 测试串起 subagent task、compact apply/resume、continue packet、parent acceptance apply 阻断和 auto-policy dry-run；断言 auto-policy 仍 `executed=false`、`mutates_task_state=false`，且 task 状态不被 compact 自动链路改动。
 - 2026-05-13 Code-size high-risk 清零第一片已落地：`memory_archive/query/resume_guidance.py` 承接 `ResumeGuidanceRequest` bundle，CLI/runtime 恢复建议不再用散装参数；相关 focused tests、ruff、strict code-size 已验证 `hard=0 high-risk=0 soft=0`。
+- 2026-05-13 Home Runtime 读取侧迁移第一片已落地：`memory_store/jsonl.py` 的搜索/recall 会把 `~/.my-agent/memory/daily/YYYY-MM-DD.jsonl` 作为旧 `memory_path` 的补充事实源并去重，`all()` / `index_all()` 仍保持旧 memory_path 语义；新增 `home_runtime_query.py`，统一读取 daily memory、`workspace/tasks/{date}/{task_slug}` 和 home status。
+- 2026-05-13 Home Runtime CLI/Doctor 第一片已落地：新增 `home-status`、`memory-daily-list`、`task-workspace-list`；`memory-doctor --json` 会报告 home 入口文件、关键目录和计数；`memory-resume --task-id/--run-id` 在旧 subagent 工单不存在时可回退到主代理 task workspace 的 `state.json` / `timeline.jsonl`。
 - **记忆推模式** (`memory_push.py`)：在关键决策点自动查询并注入相关记忆，实现"推模式"记忆系统。
   - `MemoryType` 枚举：`LESSON_GENERAL`、`LESSON_TASK`、`LESSON_TEMP`、`CONTEXT`、`FACT`
   - `push_relevant_memories()` 函数：根据触发类型搜索相关记忆
@@ -116,6 +118,7 @@
 - tool output fail-safe checkpoint 解决了“黑盒大输出外置过程中如果失败，可能没有恢复锚点”的问题；现在 externalizer 前先留下 metadata-only snapshot，后续接管代理至少能看到工具名、hash、大小和建议下一步。
 - ToolContextReducer live prompt 保护解决了“artifact 已经外置，但下一轮 prompt 仍把完整大正文塞回上下文”的问题；现在模型看到的是恢复安全摘要，想读正文必须显式走 artifact 路径。
 - control-plane query 解决了“daily ledger、compact apply、tool output index 和 task/run refs 只能各自散扫”的问题；现在 compact/resume/debug 可以先走统一只读入口，再按 refs 回到权威文件核实。
+- Home Runtime 读取侧迁移解决了“家目录写了 daily memory 和主代理 task workspace，但搜索、resume、doctor 和 CLI 还看不到”的问题；现在 daily memory 可以被 `agent.recall()` 和 `memory-daily-list` 找到，主代理任务可以被 `task-workspace-list` 和 `memory-resume` 找到，doctor 能检查 home 骨架是否完整。
 - schema v2 / reserved 固化解决了“索引记录以后要加字段时没有统一落点”的问题；现在核心 runtime memory 轻量记录都带同一个版本和保留槽，架构评审能区分正式字段、兼容字段和未来实验扩展。
 - compact apply 第二片解决了“apply 只有摘要产物，但缺少显式恢复包和失败阻断”的问题；现在恢复时可以先读 apply bundle，再按 restore refs 回查原始事实源，自检失败也会留下机器可读失败报告。
 - 自动 compact/resume 协调第一片解决了“直接接自动化容易一压完就继续乱跑”的问题；现在自动链路先有默认 plan-only、显式 allow_apply 和 action guard 停车点，后续再接真实触发器时不会越过安全边界。
