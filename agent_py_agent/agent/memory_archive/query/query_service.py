@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...user_space.home_runtime_query import home_task_workspace_payload
 from .archive_helpers import _append_run_id, _dedupe_strings
 from .archive_io import _archive_files, _gateway_terminal_request_path, _read_archive_file
 from .filter_policy import ArchiveFilterOptions, evaluate_filters
@@ -98,7 +99,7 @@ def collect_task_payloads(agent, task_ids: list[str], *, limit: int) -> list[dic
         try:
             task = agent.subagents.load(run_id)
         except (FileNotFoundError, json.JSONDecodeError, TypeError):
-            payloads.append({"run_id": run_id, "exists": False, "error": "task not found"})
+            payloads.append(_missing_or_home_task_payload(agent, run_id))
             continue
         # LLM: use one compact-first source list for CLI resume and runtime resume.
         paths = task_recovery_read_paths(task)
@@ -110,6 +111,15 @@ def collect_task_payloads(agent, task_ids: list[str], *, limit: int) -> list[dic
             "authority_validation": _validate_task_fact_sources(paths),
         })
     return payloads
+
+
+# LLM: _missing_or_home_task_payload upgrades resume from legacy-only subagents to home task workspace refs.
+# 函数用途: 旧 subagent 工单不存在时，尝试从 ~/.my-agent/workspace/tasks 找主代理任务事实源。
+def _missing_or_home_task_payload(agent, run_id: str) -> dict[str, Any]:
+    payload = home_task_workspace_payload(agent.home_paths, run_id)
+    if payload is not None:
+        return payload
+    return {"run_id": run_id, "exists": False, "error": "task not found"}
 
 
 # LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _validate_task_fact_sources 时同步检查返回值、异常处理和读写副作用。

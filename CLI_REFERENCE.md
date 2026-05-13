@@ -146,11 +146,14 @@ Ctrl+C
 | `remember` | 手动写入一条记忆 | 是 | 否 |
 | `memory-list` | 列出最近记忆 | 否 | 否 |
 | `memory-search` | 搜索记忆 | 否 | 否 |
+| `home-status` | 查看 `~/.my-agent` 入口文件、关键目录和轻量计数 | 否 | 否 |
+| `memory-daily-list` | 直接查看 home daily memory 按天流水 | 否 | 否 |
 | `memory-route` | 按长期规则索引预览 memory 路由命中 | 否 | 否 |
 | `memory-doctor` | 诊断 memory 配置、路由索引和归档目录 | 否 | 否 |
 | `memory-archive-list` | 列出 raw/hook 归档记录 | 否 | 否 |
 | `memory-archive-search` | 按字段搜索 raw/hook 归档 | 否 | 否 |
 | `memory-resume` | 从归档、LocalStore 和任务目录生成恢复线索 | 否 | 否 |
+| `task-workspace-list` | 查看 home workspace/tasks 任务工作区 | 否 | 否 |
 | `memory-artifact-read` | 显式读取已登记 tool-output artifact 正文 | 否 | 否 |
 | `memory-fact-write` | 写入用户确认的 compact resume 补全事实源 | 是 | 否 |
 | `memory-compact` | 预演 memory compact 计划；`--apply` 生成非破坏性恢复产物 | `--apply` 时写 | 否 |
@@ -311,6 +314,37 @@ my-agent memory-search "表格" --limit 5
 | `query` | - | 必填，搜索关键词。 |
 | `--limit <n>` | `5` | 最多显示条数。 |
 
+## `home-status`
+
+```powershell
+my-agent home-status
+my-agent home-status --json
+```
+
+查看当前配置解析出的 `~/.my-agent` 家目录状态，包括 `SOUL.md`、`USER.md`、`AGENTS.md`、`memory.md` 是否存在，`memory/daily`、`workspace/tasks`、`scripts`、`role_templates`、`workflows` 等关键目录是否存在，以及 daily 文件数和 task workspace 数量。它只读目录结构，不调用模型、不扫描产物正文。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `memory-daily-list`
+
+```powershell
+my-agent memory-daily-list "表格" --date 2026-05-13
+my-agent memory-daily-list --date 2026-05-13 --role user --kind preference --json
+```
+
+直接查看 home daily memory：也就是 `~/.my-agent/memory/daily/YYYY-MM-DD.jsonl` 里的按天记忆流水。这个命令适合调试“今天到底存了什么记忆”，不会读取旧 `memory_path`，也不会调用模型。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `query` | 空 | 可选搜索关键词；为空时列出匹配日期、角色和类型的记录。 |
+| `--date <YYYY-MM-DD>` | - | 只查看某一天的 daily memory 文件。 |
+| `--role <role>` | 空 | 按 role 精确过滤，例如 `user`、`assistant`、`tool`。 |
+| `--kind <kind>` | 空 | 按 kind 精确过滤，例如 `dialogue`、`preference`、`note`。 |
+| `--limit <n>` | `50` | 最多显示多少条记录；未传时读 `cli_task_list_limit`。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
 ## `memory-route`
 
 ```powershell
@@ -340,12 +374,12 @@ my-agent memory-doctor --index memory/routing/INDEX.md
 my-agent memory-doctor --json
 ```
 
-诊断 memory 配置和文件骨架：显示 memory 配置的 effective values、配置回退 warnings、路由索引是否存在、routes 加载和校验结果，以及 `memory/hooks`、`memory/raw` 目录的文件数、最近文件和 hook retention 配置。
+诊断 memory 配置和文件骨架：显示 memory 配置的 effective values、配置回退 warnings、home runtime 入口文件/目录状态、路由索引是否存在、routes 加载和校验结果，以及 `memory/hooks`、`memory/raw` 目录的文件数、最近文件和 hook retention 配置。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--index <path>` | `memory/routing/INDEX.md` | 指定路由索引文件；相对路径按 agent workspace root 解析。 |
-| `--json` | `false` | 输出机器可读 JSON，包含 `warnings`、`routing.routes` 和 archive 目录状态。 |
+| `--json` | `false` | 输出机器可读 JSON，包含 `home`、`warnings`、`routing.routes` 和 archive 目录状态。 |
 
 ## `memory-archive-list`
 
@@ -406,7 +440,7 @@ my-agent memory-resume "继续" --context-only
 my-agent memory-resume --from-compact apply-xxx --context-only
 ```
 
-从归档线索、LocalStore 检索结果和 subagent 任务目录中生成恢复简报。它会列出 archive clues、LocalStore clues、任务事实源路径和下一步建议，提醒你先读 `STATUS.md`、`WORK_LOG.md`、`HANDOFF.md`、`TEST_CHECKLIST.md` 等权威文件后再继续。
+从归档线索、LocalStore 检索结果、旧 subagent 任务目录和 home task workspace 中生成恢复简报。它会列出 archive clues、LocalStore clues、任务事实源路径和下一步建议，提醒你先读 `STATUS.md`、`WORK_LOG.md`、`HANDOFF.md`、`TEST_CHECKLIST.md`，或 `~/.my-agent/workspace/tasks/<date>/<task>/state.json` / `timeline.jsonl` 等权威文件后再继续。
 
 `--context-only` 只打印稳定格式的 `Recovery Brief` 文本块，不打印外层说明。这个输出适合复制给真实环境测试、人工 handoff，后续也可以作为自动上下文注入的复用入口。
 
@@ -455,6 +489,22 @@ JSON 输出里会额外包含 `brief`：
 | `--compact-owner-type <type>` | `main_agent` | compact owner 类型；`subagent_run` / `subagent_session` 会只读解析 task-local run workspace refs。 |
 | `--compact-owner-id <id>` | 空 | compact owner 标识；子代理 owner 通常传 run_id，不会写主 memory 或自动执行工具。 |
 | `--context-only` | `false` | 只输出可交接/注入的恢复上下文块。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `task-workspace-list`
+
+```powershell
+my-agent task-workspace-list --date 2026-05-13
+my-agent task-workspace-list "购物网站" --json
+```
+
+列出 `~/.my-agent/workspace/tasks/{date}/{task_slug}/` 下的主代理任务工作区。它会展示 `state.json`、`timeline.jsonl`、`task.yaml`、`outputs/`、`runtime/`、`agents/` 等引用，帮助恢复和前端调试；不会读取产物正文，也不会调用模型。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `query` | 空 | 可选关键词，可匹配 task_id、task_name、run_id、request_id 或目录 slug。 |
+| `--date <YYYY-MM-DD>` | - | 只查看某一天的任务目录。 |
+| `--limit <n>` | `50` | 最多显示多少个任务；未传时读 `cli_task_list_limit`。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
 
 ## `memory-artifact-read`

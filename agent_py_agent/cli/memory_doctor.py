@@ -23,6 +23,7 @@ from ..agent.memory_routing import (
     load_routes,
     validate_routes,
 )
+from ..agent.user_space.home_runtime_query import home_runtime_status
 from .common import make_agent
 
 DEFAULT_ROUTE_INDEX = Path("memory") / "routing" / "INDEX.md"
@@ -41,6 +42,7 @@ def cmd_memory_doctor(args) -> int:
     payload = {
         "ok": routing["load_error"] == "",
         "workspace_root": str(agent.root),
+        "home": home_runtime_status(agent.home_paths),
         "config": _memory_config_payload(agent.config),
         "warnings": warnings,
         "routing": routing,
@@ -220,6 +222,7 @@ def _print_memory_doctor_report(payload: dict[str, Any], *, json_output: bool) -
     print("MY-AGENT MEMORY DOCTOR")
     print(f"ok={payload['ok']}")
     print(f"workspace={payload['workspace_root']}")
+    _print_home_report(payload["home"])
     print("Config")
     for key, value in payload["config"].items():
         print(f"- {key}={value}")
@@ -250,3 +253,13 @@ def _print_memory_doctor_report(payload: dict[str, Any], *, json_output: bool) -
             f"- {label}: dir={state['dir']} exists={state['exists']} "
             f"files={state['file_count']} recent={recent}"
         )
+
+
+# LLM: _print_home_report keeps memory doctor text aligned with the JSON home payload.
+# 函数用途: 在 memory-doctor 文本输出中展示 home runtime 入口文件和关键目录状态。
+def _print_home_report(home: dict[str, Any]) -> None:
+    print("Home")
+    print(f"- root={home['root']}")
+    print(f"- daily_files={home['counts']['daily_files']} task_workspaces={home['counts']['task_workspaces']}")
+    for name, state in home["directories"].items():
+        print(f"- {name}: exists={state['exists']}")

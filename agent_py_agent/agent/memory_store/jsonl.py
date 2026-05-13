@@ -169,20 +169,12 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         这个方法没有输入参数。
 
         返回说明:
-        返回 MemoryRecord 列表，顺序按 JSONL 文件中的行顺序。
+        返回旧 memory_path 的 MemoryRecord 列表；home daily mirror 由 search() 补充检索或 CLI 直接读取。
 
         异常说明:
         如果某一行不是合法 JSON，目前会由 json.loads 抛错；后续如需容错可加 read audit。"""
 
-        if not self.path.exists():
-            return []
-        records: list[MemoryRecord] = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            obj = json.loads(line)
-            records.append(MemoryRecord(**obj))
-        return records
+        return self._read_memory_file(self.path)
 
     # LLM: memory store 以 JSONL 记录和本地索引作为事实来源；修改 search 时同步检查返回值、异常处理和读写副作用。
     # 函数用途: 完成 search 在当前模块中的核心转换或协调步骤，衔接 memory store 以 JSONL 记录和本地索引作为事实来源。
@@ -201,9 +193,14 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         返回 MemoryRecord 列表。LocalStore 有命中时返回索引结果，否则返回 JSONL fallback 结果。"""
 
         indexed = self._search_local_store(query, top_k)
-        if indexed:
-            return indexed
-        return self._search_jsonl(query, top_k)
+        if len(indexed) >= top_k:
+            return indexed[:top_k]
+        fallback = _merge_search_results(
+            self._search_jsonl(query, top_k),
+            self._search_daily_mirror(query, top_k),
+            top_k,
+        )
+        return _merge_search_results(indexed, fallback, top_k)
 
     # LLM: memory store 以 JSONL 记录和本地索引作为事实来源；修改 index_all 时同步检查返回值、异常处理和读写副作用。
     # 函数用途: 写入或登记 index all 相关记录，集中处理目标路径、格式化和状态更新。
@@ -218,7 +215,7 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         这个方法没有输入参数。
 
         返回说明:
-        返回成功尝试索引的记录数量。
+        返回成功尝试索引的旧 memory_path 记录数量；home daily mirror 暂不混入本地索引重建。
 
         副作用说明:
         会调用 LocalStore.upsert_record；不会改写 JSONL。"""
@@ -226,7 +223,84 @@ class JsonlMemory(JsonlMemoryIndexMixin):
         if not self.local_store:
             return 0
         count = 0
-        for record in self.all():
+        for record in self._read_memory_file(self.path):
             self._index_record(record)
             count += 1
         return count
+
+    # LLM: _daily_mirror_files exposes daily mirror reads without changing the append path.
+    # 函数用途: 返回按天镜像 JSONL 文件列表；未配置或目录不存在时返回空列表。
+    def _daily_mirror_files(self) -> list[Path]:
+        if self.daily_mirror_dir is None or not self.daily_mirror_dir.exists():
+            return []
+        return sorted(path for path in self.daily_mirror_dir.glob("*.jsonl") if path.is_file())
+
+    # LLM: _read_memory_file is shared by legacy memory_path and daily mirror reads.
+    # 函数用途: 读取一个 JSONL 文件并转换成 MemoryRecord；文件不存在时返回空列表。
+    def _read_memory_file(self, path: Path) -> list[MemoryRecord]:
+        if not path.exists():
+            return []
+        records: list[MemoryRecord] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            obj = json.loads(line)
+            records.append(MemoryRecord(**obj))
+        return records
+
+    # LLM: _search_daily_mirror lets recall see home daily records without changing legacy all()/index_all semantics.
+    # 函数用途: 在 home daily mirror 中做轻量关键词检索，作为旧 memory_path 搜索补充。
+    def _search_daily_mirror(self, query: str, top_k: int) -> list[MemoryRecord]:
+        records: list[MemoryRecord] = []
+        for path in self._daily_mirror_files():
+            records.extend(self._read_memory_file(path))
+        return _search_memory_records(records, query, top_k)
+
+
+# LLM: _memory_record_key dedupes legacy memory and daily mirror copies without relying on line numbers.
+# 函数用途: 生成记忆记录去重 key，避免同一条写入同时从两个文件返回。
+def _memory_record_key(record: MemoryRecord) -> tuple[str, str, str, float]:
+    return (record.role, record.kind, record.content, float(record.created_at or 0.0))
+
+
+# LLM: _search_memory_records mirrors JSONL fallback scoring for non-legacy record lists.
+# 函数用途: 对已加载的 MemoryRecord 列表做关键词评分，供 daily mirror 搜索复用。
+def _search_memory_records(records: list[MemoryRecord], query: str, top_k: int) -> list[MemoryRecord]:
+    query_terms = {term.lower() for term in query.split() if term.strip()}
+    scored: list[tuple[int, float, MemoryRecord]] = []
+    for record in records:
+        score = _memory_search_score(record, query, query_terms)
+        if score > 0 or not query_terms:
+            scored.append((score, record.created_at, record))
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [record for _, _, record in scored[:top_k]]
+
+
+# LLM: _memory_search_score keeps daily mirror search behavior aligned with JsonlMemoryIndexMixin.
+# 函数用途: 计算单条记忆和查询文本的简单关键词命中分数。
+def _memory_search_score(record: MemoryRecord, query: str, query_terms: set[str]) -> int:
+    text = record.content.lower()
+    score = sum(1 for term in query_terms if term in text)
+    if query and query.lower() in text:
+        score += 3
+    return score
+
+
+# LLM: _merge_search_results preserves LocalStore priority while filling gaps from JSONL/daily facts.
+# 函数用途: 合并索引搜索和 JSONL fallback 结果，并按 MemoryRecord 语义去重。
+def _merge_search_results(
+    indexed: list[MemoryRecord],
+    fallback: list[MemoryRecord],
+    top_k: int,
+) -> list[MemoryRecord]:
+    records: list[MemoryRecord] = []
+    seen: set[tuple[str, str, str, float]] = set()
+    for record in [*indexed, *fallback]:
+        key = _memory_record_key(record)
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append(record)
+        if len(records) >= top_k:
+            break
+    return records

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...user_space.home_runtime_query import home_task_workspace_payload
 from .archive_helpers import (
     _append_run_id,
     _archive_search_text,
@@ -183,12 +184,21 @@ def local_hit_payload(hit, *, preview_chars: int = 500) -> dict[str, Any]:
 def collect_resume_task_ids(args, archive_matches: list[dict[str, Any]], local_hits: list[dict[str, Any]]) -> list[str]:
     ids: list[str] = []
     for value in (args.run_id, args.task_id):
-        _append_run_id(ids, value)
+        _append_resume_task_ref(ids, value)
     for record in archive_matches:
         _append_archive_task_ids(ids, record)
     for hit in local_hits:
         _append_local_hit_task_ids(ids, hit)
     return ids
+
+
+# LLM: _append_resume_task_ref accepts both legacy subagent ids and home task/run refs from explicit CLI filters.
+# 函数用途: 把用户显式传入的 run_id/task_id 加入恢复候选；不要求一定是 subagent-*。
+def _append_resume_task_ref(ids: list[str], value: object) -> None:
+    text = str(value or "").strip()
+    if text and text not in ids:
+        ids.append(text)
+
 
 # LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 collect_task_payloads 时同步检查返回值、异常处理和读写副作用。
 # 函数用途: 收集或查询 collect task payloads 的候选结果，并按参数完成筛选、排序或数量限制。
@@ -287,7 +297,7 @@ def _task_payload(agent, run_id: str) -> dict[str, Any]:
     try:
         task = agent.subagents.load(run_id)
     except (FileNotFoundError, json.JSONDecodeError, TypeError):
-        return {"run_id": run_id, "exists": False, "error": "task not found"}
+        return _missing_or_home_task_payload(agent, run_id)
     paths = _task_read_paths(task)
     return {
         "run_id": task.id,
@@ -300,6 +310,16 @@ def _task_payload(agent, run_id: str) -> dict[str, Any]:
         "recommended_read_paths": paths,
         "authority_validation": _validate_task_fact_sources(paths),
     }
+
+
+# LLM: _missing_or_home_task_payload preserves legacy query behavior while adding home task workspace fallback.
+# 函数用途: 旧 subagent 事实源不存在时，从 home workspace/tasks 补充主代理任务事实源。
+def _missing_or_home_task_payload(agent, run_id: str) -> dict[str, Any]:
+    payload = home_task_workspace_payload(agent.home_paths, run_id)
+    if payload is not None:
+        return payload
+    return {"run_id": run_id, "exists": False, "error": "task not found"}
+
 
 # LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _task_read_paths 时同步检查返回值、异常处理和读写副作用。
 # 函数用途: 完成 task read paths 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
