@@ -12,8 +12,12 @@ Facade pattern: delegates to service classes in runtime_services.py.
 """
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+from .compact_auto_continuation import (
+    compact_auto_continuation_decision,
+    mark_compact_auto_continued,
+)
 from .runtime_loop_support import (
     RunParams,
     _execute_runtime_loop,
@@ -214,6 +218,7 @@ class SimpleAgentRuntimeMixin:
             recovery_content_paths=rp.recovery_content_paths,
             recovery_next_actions=rp.recovery_next_actions,
             tool_rounds=params.tool_rounds,
+            compact_auto_continue_depth=rp.compact_auto_continue_depth,
         )
 
     # LLM: remember 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -256,6 +261,22 @@ def _run_params_from_compat(params: RunParams, fields: _RunCompatibilityFields) 
 # LLM: _run_with_params keeps the public run() compatibility shim under code-size limits.
 # 函数用途: 执行已归一化的 RunParams，串接准备上下文、工具循环和 finalization。
 def _run_with_params(agent, user_prompt: str, params: RunParams):
+    result = _run_once_with_params(agent, user_prompt, params)
+    decision = compact_auto_continuation_decision(
+        result,
+        depth=params.compact_auto_continue_depth,
+        max_depth=params.compact_auto_continue_max_depth,
+    )
+    if not decision.should_continue:
+        return result
+    next_params = _compact_auto_continue_params(params, decision.injection)
+    continued = _run_once_with_params(agent, decision.user_prompt, next_params)
+    return mark_compact_auto_continued(continued, result, depth=next_params.compact_auto_continue_depth)
+
+
+# LLM: _run_once_with_params contains one normal model/tool/finalize pass for reuse by auto continuation.
+# 函数用途: 执行单轮 run，不处理自动 compact 后续跑，避免递归和重复上下文作用域。
+def _run_once_with_params(agent, user_prompt: str, params: RunParams):
     with _current_prompt_scope(agent, user_prompt):
         prepared = _prepare_runtime_context(agent, user_prompt, params.inject, params.resume_context)
         loop_result = _execute_runtime_loop(
@@ -264,3 +285,13 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
         )
         ctx = agent._build_finalize_context(_finalize_params(user_prompt, prepared, loop_result, params))
         return agent._get_services().finalization.finalize(ctx)
+
+
+# LLM: _compact_auto_continue_params injects the continue packet and bumps depth for exactly one guarded turn.
+# 函数用途: 构造自动续跑参数，保留原有注入内容，同时防止续跑轮再次触发自动续跑链。
+def _compact_auto_continue_params(params: RunParams, injection: str) -> RunParams:
+    return replace(
+        params,
+        inject=[*(params.inject or []), injection],
+        compact_auto_continue_depth=params.compact_auto_continue_depth + 1,
+    )

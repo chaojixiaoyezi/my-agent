@@ -34,6 +34,8 @@ class RunParams:
     recovery_content_paths: list[str] | None = None
     recovery_next_actions: list[str] | None = None
     on_chunk: object = None
+    compact_auto_continue_depth: int = 0
+    compact_auto_continue_max_depth: int = 1
 
 
 # LLM: _RuntimeLoopParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

@@ -185,6 +185,8 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- core.py                            # SimpleAgent 兼容组合入口，真实实现已拆到 agent_core/
 |   |   |-- agent_core/                        # 主循环、子代理 runner、planner、dispatch、编排工具、runner 规则
 |   |   |   |-- capability_config_patch_tool.py # 模型可调用的 capability_config 安全补丁工具
+|   |   |   |-- compact_auto_continuation.py # 主 agent 自动 compact 后渲染 continue packet 并受控续跑一次
+|   |   |   |-- finalization_compact_auto.py # run 收尾阶段的 compact auto 字段投影和续跑轮跳过策略
 |   |   |   |-- task_complexity.py            # 任务规模预判：基于 goal 关键词、plan 步骤数、工具数量估算轮数
 |   |   |   |-- automation_guard.py            # 主代理代劳防护：根据自动化级别判断是否应派子代理
 |   |   |-- file_io.py                         # 文件 I/O 兼容入口，真实实现已拆到 io/

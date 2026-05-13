@@ -54,3 +54,7 @@ class AgentRunResult:
     memory_compact_auto_tool_execution: str = "none"
     memory_compact_auto_apply_id: str = ""
     memory_compact_auto_continue_ready: bool = False
+    memory_compact_auto_continue_packet: dict | None = None
+    memory_compact_auto_continued: bool = False
+    memory_compact_auto_continued_from_apply_id: str = ""
+    memory_compact_auto_continuation_depth: int = 0
