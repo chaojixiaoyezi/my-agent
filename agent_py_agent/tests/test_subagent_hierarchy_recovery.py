@@ -171,3 +171,47 @@ def test_hierarchy_recovery_packet_includes_unfinished_child_after_parent_timeou
     assert child.context_bundle_ref.endswith("context_bundle.json")
     assert child.parent_context_bundle_ref.endswith("context_bundle.json")
     assert "subagents-recovery-tree" in child.recommended_command
+
+
+# LLM: test_hierarchy_recovery_packet_marks_failed_middle_leader_with_strategy covers 4-level handoff.
+# 函数用途: 四层链路中间 coordinator 挂掉时，恢复树要标出 leader recovery，而不是只提示普通 followup。
+def test_hierarchy_recovery_packet_marks_failed_middle_leader_with_strategy(tmp_path):
+    manager = SubAgentManager(tmp_path)
+    root = manager.create_run(goal="root", thought="orchestrate", plan=["split"], role="coordinator")
+    child = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=root.id,
+            apply=True,
+            child_specs=[HierarchyChildSpec(goal="child lead", role="child_coordinator", agent_name="child")],
+        )
+    ).created_run_ids[0]
+    grand = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=child,
+            apply=True,
+            child_specs=[HierarchyChildSpec(goal="grand lead", role="grandchild_coordinator", agent_name="grand")],
+        )
+    ).created_run_ids[0]
+    leaf = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=grand,
+            apply=True,
+            max_depth=4,
+            child_specs=[HierarchyChildSpec(goal="leaf work", role="worker", agent_name="leaf")],
+        )
+    ).created_run_ids[0]
+    grand_task = manager.load(grand)
+    grand_task.status = "TIMEOUT"
+    grand_task.failure_type = "runner_timeout"
+    manager.save(grand_task)
+
+    result = manager.build_hierarchy_recovery_packet(
+        params=HierarchyRecoveryRequest(root_run_id=root.id, include_healthy=False)
+    )
+
+    nodes = {item.run_id: item for item in result.nodes}
+    assert grand in nodes
+    assert leaf in nodes[grand].child_ids
+    assert nodes[grand].recovery_action == "recover_coordinator_leadership"
+    assert nodes[grand].continue_packet_status == "ready"
+    assert nodes[grand].continue_packet_ref.endswith("latest_continue_packet.json")

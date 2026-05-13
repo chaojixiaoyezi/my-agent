@@ -7,6 +7,10 @@ import json
 from pathlib import Path
 
 from ..subagents.services.hierarchy_qa_scheduler import qa_orchestration_advice
+from ..subagents.services.recovery_strategy import (
+    SubagentRecoveryStrategyRequest,
+    build_subagent_recovery_strategy,
+)
 from .orchestration_quality_payload import quality_repair_advice_payload
 from .runner_context import current_subagent_run_id
 
@@ -23,6 +27,7 @@ def direct_children_progress_payload(agent) -> dict[str, object]:
     payload = _progress_payload(parent_run_id, direct_children)
     payload["direct_children"].update(quality_repair_advice_payload(agent, parent_run_id))
     _attach_quality_advice(agent, parent_run_id, payload["direct_children"])
+    _attach_recovery_strategies(agent, payload["direct_children"])
     _attach_direct_child_next_action(payload["direct_children"])
     return payload
 
@@ -50,7 +55,7 @@ def _attach_direct_child_next_action(children: dict[str, object]) -> None:
         children.update(_continue_dispatch_payload(children["unfinished_run_ids"]))
         return
     if children["needs_recovery"]:
-        children.update(_recovery_dispatch_payload(children["recovery_run_ids"]))
+        children.update(_recovery_dispatch_payload(children["recovery_run_ids"], children.get("recovery_strategies")))
         return
     if children.get("quality_advice"):
         children["ready_for_parent_acceptance"] = False
@@ -75,13 +80,18 @@ def _continue_dispatch_payload(run_ids: list[str]) -> dict[str, object]:
 
 # LLM: _recovery_dispatch_payload keeps failed-child recovery refs-first and bounded.
 # 函数用途: 生成 BLOCKED/FAILED/TIMEOUT child 的重试或恢复 child 建议。
-def _recovery_dispatch_payload(run_ids: list[str]) -> dict[str, object]:
+def _recovery_dispatch_payload(
+    run_ids: list[str],
+    strategies: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    primary = _primary_recovery_strategy(strategies or [])
     return {
         "next_action": "inspect_or_rescue_direct_children",
-        "suggested_tool_call": _dispatch_tool_call(run_ids),
+        "suggested_tool_call": _recovery_dispatch_tool_call(run_ids, primary),
         "suggested_recovery_child_tool_call": _recovery_child_tool_call(run_ids),
         "recovery_hint": (
-            "有直接 child 已 BLOCKED/FAILED/TIMEOUT；先用这些 run_ids 尝试受控重试。"
+            "有直接 child 已 BLOCKED/FAILED/TIMEOUT；先看 recovery_strategies。"
+            "如果单个 run 的 latest_continue_packet 可用，优先按 runner_instruction 续跑原 run。"
             "如果仍不可重试，按 suggested_recovery_child_tool_call 创建恢复 child。"
             "恢复 child 默认可以是 worker；只有确实需要继续拆多层时，父节点才改成 coordinator。"
             "在执行恢复动作前不要反复 read_file/read_artifact 打开 child 产物正文；先按 refs 和建议工具调用推进。"
@@ -130,6 +140,30 @@ def _dispatch_tool_call(run_ids: list[str]) -> dict[str, object]:
     }
 
 
+# LLM: _recovery_dispatch_tool_call adds packet-first instruction only when it cannot cross-contaminate.
+# 函数用途: 单个恢复 run 才附加 runner_instruction；多个 run 仍只传 run_ids，避免共享指令串线。
+def _recovery_dispatch_tool_call(
+    run_ids: list[str],
+    primary_strategy: dict[str, object] | None,
+) -> dict[str, object]:
+    call = _dispatch_tool_call(run_ids)
+    if len([item for item in run_ids if item]) != 1 or not primary_strategy:
+        return call
+    action = str(primary_strategy.get("recommended_action") or "")
+    if not action.startswith("rerun_original"):
+        return call
+    instruction = str(primary_strategy.get("runner_instruction") or "").strip()
+    if instruction:
+        call["runner_instruction"] = instruction
+    return call
+
+
+# LLM: _primary_recovery_strategy picks the only unambiguous strategy for single-run hints.
+# 函数用途: 只有一个恢复候选时返回它；多候选时让父节点按列表分批处理。
+def _primary_recovery_strategy(strategies: list[dict[str, object]]) -> dict[str, object] | None:
+    return strategies[0] if len(strategies) == 1 else None
+
+
 # LLM: _attach_quality_advice exposes missing QA roles through dispatch, not only schedule dry-runs.
 # 函数用途: 让父 runner 在实现 child ready 后直接看到 QA 缺口和候选 child specs，避免自己读正文猜验收流程。
 def _attach_quality_advice(agent, parent_run_id: str, children: dict[str, object]) -> None:
@@ -143,6 +177,52 @@ def _attach_quality_advice(agent, parent_run_id: str, children: dict[str, object
     if advice is None or advice.phase != "quality_wave_ready":
         return
     children["quality_advice"] = _quality_advice_payload(advice)
+
+
+# LLM: _attach_recovery_strategies gives parent runners packet-first decisions without artifact bodies.
+# 函数用途: 为每个失败/阻塞 child 生成 refs-only 恢复策略，优先暴露 latest_continue_packet 和降级 refs。
+def _attach_recovery_strategies(agent, children: dict[str, object]) -> None:
+    strategies: list[dict[str, object]] = []
+    for run_id in children.get("recovery_run_ids") or []:
+        task = _load_recovery_task(agent, str(run_id))
+        if task is None:
+            continue
+        strategies.append(build_subagent_recovery_strategy(_strategy_request(agent, task)).to_dict())
+    if not strategies:
+        return
+    children["recovery_strategies"] = strategies
+    children["recovery_action_counts"] = _action_counts(strategies)
+
+
+# LLM: _load_recovery_task isolates manager lookup failures from the payload builder.
+# 函数用途: 读取指定 child run；缺失或 manager 异常时跳过，不让 dispatch 响应失败。
+def _load_recovery_task(agent, run_id: str):
+    try:
+        task = agent.subagents.load(run_id)
+    except Exception:
+        return None
+    return task if str(getattr(task, "id", "") or "") == run_id else None
+
+
+# LLM: _strategy_request maps optional config values into the recovery service bundle.
+# 函数用途: 让未来配置能控制 packet 过期和熔断阈值；当前缺配置时使用服务默认值。
+def _strategy_request(agent, task) -> SubagentRecoveryStrategyRequest:
+    config = getattr(agent, "config", None)
+    return SubagentRecoveryStrategyRequest(
+        task=task,
+        packet_max_age_seconds=float(getattr(config, "subagent_recovery_packet_max_age_seconds", 0.0) or 0.0),
+        no_progress_attempt_limit=int(getattr(config, "subagent_no_progress_attempt_limit", 4) or 4),
+    )
+
+
+# LLM: _action_counts summarizes batch recovery decisions without long per-run prose.
+# 函数用途: 多个 child 同时失败时，父级能看到应该续跑、接管、熔断的大致数量。
+def _action_counts(strategies: list[dict[str, object]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in strategies:
+        action = str(item.get("recommended_action") or "unknown")
+        counts[action] = counts.get(action, 0) + 1
+    return counts
 
 
 # LLM: _quality_advice_payload keeps QA suggestions compact and copyable for the next tool call.
