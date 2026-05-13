@@ -134,7 +134,10 @@ export type SettingsState = {
     scheduler_mode: string;
     concurrency: number;
     start_rate: number;
-    timeout_seconds: number;
+    timeout_seconds: string;
+    dynamic_timeout_min: number;
+    dynamic_timeout_max: number;
+    dynamic_timeout_safety_margin: number;
     failure_policy: string;
   };
   setRunnerParams: (params: Partial<SettingsState["runnerParams"]>) => void;

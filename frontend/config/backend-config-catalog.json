@@ -155,7 +155,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 54,
+            "order": 49,
             "min": 0,
             "max": 1000000
           },
@@ -252,7 +252,7 @@
           {
             "key": "model_speed_profile_path",
             "label": "model_speed_profile_path（model speed profile path）",
-            "description": "模型速度配置文件路径",
+            "description": "model_speed_profile_path 表示模型速度样本文件路径，动态超时会用它估算任务耗时。",
             "type": "path",
             "defaultValue": "data/model_speed_profile.json",
             "currentValue": "data/model_speed_profile.json",
@@ -264,12 +264,12 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 48
+            "order": 78
           },
           {
             "key": "auto_bench_model_on_first_use",
             "label": "auto_bench_model_on_first_use（auto bench model on first use）",
-            "description": "是否在首次使用时自动运行速度测试",
+            "description": "auto_bench_model_on_first_use 表示首次使用时是否自动跑速度测试，给后续动态超时提供样本。",
             "type": "boolean",
             "defaultValue": true,
             "currentValue": true,
@@ -281,7 +281,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 49
+            "order": 79
           },
           {
             "key": "api_base",
@@ -1538,63 +1538,6 @@
             "order": 42
           },
           {
-            "key": "dynamic_timeout_safety_margin",
-            "label": "dynamic_timeout_safety_margin（dynamic timeout safety margin）",
-            "description": "动态超时安全边际 - 实际超时 = 预估耗时 * safety_margin - 默认 2.0，即预估 10 秒的任务给 20 秒超时",
-            "type": "number",
-            "defaultValue": 2,
-            "currentValue": 2,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 43,
-            "min": 0,
-            "max": 3600
-          },
-          {
-            "key": "dynamic_timeout_min",
-            "label": "dynamic_timeout_min（dynamic timeout min）",
-            "description": "动态超时下限（秒）",
-            "type": "number",
-            "defaultValue": 30,
-            "currentValue": 30,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 44,
-            "min": 0,
-            "max": 3600
-          },
-          {
-            "key": "dynamic_timeout_max",
-            "label": "dynamic_timeout_max（dynamic timeout max）",
-            "description": "动态超时上限（秒）",
-            "type": "number",
-            "defaultValue": 600,
-            "currentValue": 600,
-            "category": "subagent",
-            "categoryLabel": "子代理配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "medium",
-            "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
-            "requiresUnlock": true,
-            "source": "agent_config.yaml",
-            "order": 45,
-            "min": 0,
-            "max": 3600
-          },
-          {
             "key": "max_auto_split_depth",
             "label": "max_auto_split_depth（max auto split depth）",
             "description": "失败后最大自动拆分次数 - 避免无限拆分 - 0 表示不自动拆分",
@@ -1609,7 +1552,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 46,
+            "order": 43,
             "min": 0,
             "max": 1000000
           },
@@ -1628,7 +1571,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 47,
+            "order": 44,
             "min": 0,
             "max": 1000000
           },
@@ -1647,7 +1590,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 55,
+            "order": 50,
             "min": 0,
             "max": 1000000
           },
@@ -1666,7 +1609,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 56
+            "order": 51
           },
           {
             "key": "subagent_allowed_tools",
@@ -1683,7 +1626,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 57
+            "order": 52
           },
           {
             "key": "subagent_role_template_dirs",
@@ -1700,7 +1643,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 58
+            "order": 53
           },
           {
             "key": "subagent_workflow_mode",
@@ -1717,7 +1660,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 59,
+            "order": 54,
             "choices": [
               "auto",
               "manual",
@@ -1739,7 +1682,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 60
+            "order": 55
           },
           {
             "key": "subagent_user_workflow_dirs",
@@ -1760,7 +1703,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 61
+            "order": 56
           },
           {
             "key": "subagent_workflow_review_rounds",
@@ -1777,7 +1720,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 62
+            "order": 57
           },
           {
             "key": "task_max_subagents",
@@ -1794,7 +1737,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 63,
+            "order": 58,
             "min": 0,
             "max": 1000000
           },
@@ -1813,7 +1756,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 64,
+            "order": 59,
             "min": 0,
             "max": 1000000
           },
@@ -1832,7 +1775,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 65,
+            "order": 60,
             "min": 0,
             "max": 1000000
           },
@@ -1851,7 +1794,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 66,
+            "order": 61,
             "min": 0,
             "max": 1000000
           },
@@ -1870,7 +1813,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 67,
+            "order": 62,
             "min": 0,
             "max": 1000000
           },
@@ -1889,7 +1832,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 68,
+            "order": 63,
             "min": 0,
             "max": 1000000
           },
@@ -1908,7 +1851,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 69,
+            "order": 64,
             "min": 0,
             "max": 1000000
           },
@@ -1927,7 +1870,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 70,
+            "order": 65,
             "min": 0,
             "max": 1000000
           },
@@ -1946,7 +1889,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 71,
+            "order": 66,
             "min": 0,
             "max": 1000000
           },
@@ -1965,7 +1908,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 72,
+            "order": 67,
             "min": 0,
             "max": 2000000
           },
@@ -1984,7 +1927,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 73,
+            "order": 68,
             "min": 0,
             "max": 2000000
           },
@@ -2003,7 +1946,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 74
+            "order": 69
           },
           {
             "key": "acceptance_test_timeout_seconds",
@@ -2020,7 +1963,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 75,
+            "order": 70,
             "min": 0,
             "max": 3600
           }
@@ -2047,7 +1990,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 76,
+            "order": 71,
             "choices": [
               "auto",
               "manual",
@@ -2069,7 +2012,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 77,
+            "order": 72,
             "choices": [
               "auto"
             ]
@@ -2089,7 +2032,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 78,
+            "order": 73,
             "choices": [
               "auto"
             ]
@@ -2097,7 +2040,7 @@
           {
             "key": "runner_timeout_seconds",
             "label": "runner_timeout_seconds（runner timeout seconds）",
-            "description": "agent_config.yaml 中的 runner_timeout_seconds 配置项。",
+            "description": "Runner 超时开关和动态超时参数；这三项必须放一起看。 runner_timeout_seconds 表示 runner 超时模式：\"off\"/0 是不限制；\"auto\" 是启用动态超时；数字字符串表示固定秒数。",
             "type": "choice",
             "defaultValue": "off",
             "currentValue": "off",
@@ -2109,10 +2052,71 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 79,
+            "order": 74,
             "choices": [
-              "off"
+              "off",
+              "auto"
             ],
+            "min": 0,
+            "max": 3600
+          },
+          {
+            "key": "dynamic_timeout_min",
+            "label": "dynamic_timeout_min（dynamic timeout min）",
+            "description": "dynamic_timeout_min 表示动态超时下限：auto 模式算出来再短，也至少给这么多秒，避免小任务被误杀。",
+            "type": "number",
+            "defaultValue": 30,
+            "currentValue": 30,
+            "category": "gateway",
+            "categoryLabel": "Gateway / 调度",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 75,
+            "unit": "秒",
+            "min": 0,
+            "max": 3600
+          },
+          {
+            "key": "dynamic_timeout_max",
+            "label": "dynamic_timeout_max（dynamic timeout max）",
+            "description": "dynamic_timeout_max 表示动态超时上限：auto 模式算出来再长，也最多给这么多秒，避免子代理长期卡住。",
+            "type": "number",
+            "defaultValue": 600,
+            "currentValue": 600,
+            "category": "gateway",
+            "categoryLabel": "Gateway / 调度",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 76,
+            "unit": "秒",
+            "min": 0,
+            "max": 3600
+          },
+          {
+            "key": "dynamic_timeout_safety_margin",
+            "label": "dynamic_timeout_safety_margin（dynamic timeout safety margin）",
+            "description": "动态超时估算辅助参数；这些字段服务于 runner_timeout_seconds=\"auto\"。 dynamic_timeout_safety_margin 表示安全倍率：实际超时 = 预估耗时 * 这个倍率。",
+            "type": "number",
+            "defaultValue": 2,
+            "currentValue": 2,
+            "category": "gateway",
+            "categoryLabel": "Gateway / 调度",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 77,
+            "unit": "倍",
             "min": 0,
             "max": 3600
           },
@@ -2956,7 +2960,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 50
+            "order": 45
           },
           {
             "key": "user_data_root",
@@ -2973,7 +2977,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 51
+            "order": 46
           },
           {
             "key": "auth_enabled",
@@ -2990,7 +2994,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 52
+            "order": 47
           },
           {
             "key": "admin_user_id",
@@ -3007,7 +3011,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 53
+            "order": 48
           },
           {
             "key": "notification_enabled",

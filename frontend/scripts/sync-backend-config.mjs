@@ -34,7 +34,7 @@ const choiceMap = {
   scheduler_mode: ["auto", "manual", "off"],
   runner_concurrency: ["auto"],
   runner_start_rate: ["auto"],
-  runner_timeout_seconds: ["off"],
+  runner_timeout_seconds: ["off", "auto"],
   runner_failure_policy: ["auto", "off", "none", "disabled"],
   daemon_max_runners: ["auto"],
   daemon_reviewer: ["parent-daemon"],
@@ -63,6 +63,9 @@ const unitMap = {
   subagent_run_timeout: "秒",
   subagent_heartbeat_timeout: "秒",
   subagent_due_check_interval: "秒",
+  dynamic_timeout_min: "秒",
+  dynamic_timeout_max: "秒",
+  dynamic_timeout_safety_margin: "倍",
   memory_hook_retention_days: "天",
   cli_audit_cleanup_days: "天",
 };
@@ -148,7 +151,6 @@ function inferCategory(sourceId, key) {
     key.startsWith("subagent_") ||
     key.startsWith("task_max_") ||
     key.startsWith("acceptance_") ||
-    key.startsWith("dynamic_timeout_") ||
     key.startsWith("max_auto_") ||
     key === "enable_subagents"
   ) return "subagent";
@@ -157,6 +159,7 @@ function inferCategory(sourceId, key) {
     key.startsWith("dispatch_") ||
     key.startsWith("daemon_") ||
     key.startsWith("runner_") ||
+    key.startsWith("dynamic_timeout_") ||
     key.startsWith("scheduler_") ||
     key.startsWith("lease_")
   ) return "gateway";

@@ -87,7 +87,10 @@
       "scheduler_mode": "auto",
       "concurrency": 0,
       "start_rate": 0,
-      "timeout_seconds": 0,
+      "timeout_seconds": "off",
+      "dynamic_timeout_min": 30,
+      "dynamic_timeout_max": 600,
+      "dynamic_timeout_safety_margin": 2,
       "failure_policy": "auto"
     },
     "log": {
