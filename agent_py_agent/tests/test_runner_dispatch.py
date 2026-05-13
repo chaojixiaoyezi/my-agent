@@ -204,6 +204,21 @@ class TestRunnerTaskTimeout:
 
         assert get_task_timeout(task, 0.0, self._timeout_config("off")) == 0.0
 
+    # LLM: runner timeout off must override stale adaptive timeout attributes after a failed run.
+    # 函数用途: 确认用户关闭 runner 超时后，旧任务里的 dynamic_timeout_seconds 不会继续制造隐藏超时墙。
+    def test_off_runner_timeout_ignores_dynamic_timeout_attribute(self):
+        """用户配置 off 时，失败后遗留的动态超时也不能重新启用超时。"""
+        from agent_py_agent.agent.agent_core.runner_gate import get_task_timeout
+
+        task = MagicMock()
+        task.attributes = {"dynamic_timeout_seconds": 300.0}
+        task.goal = "恢复一个刚刚 timeout 的子代理任务。"
+        task.plan = ["读取 continue packet", "继续执行"]
+        task.role = "worker"
+        task.allowed_tools = ["read_file", "write_file"]
+
+        assert get_task_timeout(task, 0.0, self._timeout_config("off")) == 0.0
+
     def test_static_runner_timeout_still_overrides_no_limit_config(self):
         """用户显式数字超时时，仍按数字超时执行。"""
         from agent_py_agent.agent.agent_core.runner_gate import get_task_timeout
@@ -220,6 +235,22 @@ class TestRunnerTaskTimeout:
 
 class TestIsDispatchRunnerCandidate:
     """测试 _is_dispatch_runner_candidate() 函数。"""
+
+    # LLM: active RUNNING attempts must not be selected again by ordinary dispatch.
+    # 函数用途: 防止同一个 run 在前一次模型回合未结束时被 dispatch 再次启动，造成 stale result。
+    def test_running_task_with_active_attempt_is_not_runner_candidate(self):
+        """RUNNING 且已有 active attempt 时，不能被普通 dispatch 重入执行。"""
+        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+
+        mock_task = MagicMock()
+        mock_task.status = "RUNNING"
+        mock_task.runner_active_attempt_id = "attempt-active"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.channel_status = "OK"
+        mock_task.capability_requests = []
+        mock_task.capability_gaps = []
+
+        assert _is_dispatch_runner_candidate(mock_task, runner_max_attempts=2) is False
 
     def test_done_status_not_candidate(self):
         """已完成任务不是候选。"""
@@ -263,8 +294,8 @@ class TestIsDispatchRunnerCandidate:
 
         assert _is_dispatch_runner_candidate(mock_task) is False
 
-    def test_running_status_is_candidate(self):
-        """RUNNING 状态是候选。"""
+    def test_running_status_without_active_attempt_is_not_candidate(self):
+        """RUNNING 即便没有 active attempt，也不能被普通 dispatch 重入执行。"""
         from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
 
         mock_task = MagicMock()
@@ -274,7 +305,7 @@ class TestIsDispatchRunnerCandidate:
         mock_task.capability_requests = []
         mock_task.capability_gaps = []
 
-        assert _is_dispatch_runner_candidate(mock_task) is True
+        assert _is_dispatch_runner_candidate(mock_task) is False
 
     def test_planning_status_is_candidate(self):
         """PLANNING 状态是候选。"""
@@ -353,14 +384,14 @@ class TestDispatchRunnerCandidates:
         from agent_py_agent.agent.agent_core.runner_dispatch import _dispatch_runner_candidates
 
         mock_task1 = MagicMock()
-        mock_task1.status = "RUNNING"
+        mock_task1.status = "PLANNING"
         mock_task1.verification_status = "PENDING"
         mock_task1.channel_status = "OK"
         mock_task1.capability_requests = []
         mock_task1.capability_gaps = []
 
         mock_task2 = MagicMock()
-        mock_task2.status = "RUNNING"
+        mock_task2.status = "PLANNING"
         mock_task2.verification_status = "PENDING"
         mock_task2.channel_status = "OK"
         mock_task2.capability_requests = []

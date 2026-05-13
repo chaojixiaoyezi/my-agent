@@ -5,6 +5,7 @@ from pathlib import Path
 
 from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
 from agent_py_agent.agent.subagents.manager import SubAgentManager
+from agent_py_agent.agent.subagents.manager_runner_results import RecordRunnerResultParams
 
 
 # LLM: subagent saves must materialize a task-local continue packet before any parent rerun.
@@ -70,3 +71,42 @@ def test_runner_prompt_uses_generated_task_local_continue_packet(tmp_path: Path)
     assert "从 task-local packet 继续写验收证据" in prompt
     assert "页面骨架已经存在" in prompt
     assert "SOUL.md" not in prompt
+
+
+# LLM: timeout recovery packets must reflect the final runner state, not the earlier RUNNING attempt state.
+# 函数用途: 验证 runner timeout 写回后，接管包、失败交接和 continue packet 都能指向同一个 TIMEOUT 事实。
+def test_timeout_runner_result_refreshes_recovery_packets(tmp_path: Path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="长任务执行中发生超时",
+        thought="恢复包必须按失败状态更新。",
+        plan=["开始执行", "失败后接续"],
+        role="worker",
+    )
+    manager.prepare_runner_attempt(task.id, retry_reason="")
+
+    manager.record_runner_result(
+        RecordRunnerResultParams(
+            run_id=task.id,
+            dry_run=False,
+            ok=False,
+            message="runner timed out after 30.00s",
+            status="TIMEOUT",
+            verification_status="UNVERIFIED",
+            failure_type="runner_timeout",
+        )
+    )
+    loaded = manager.load(task.id)
+
+    packet_ref = Path(loaded.agent_run_compactions_dir) / "latest_continue_packet.json"
+    packet = json.loads(packet_ref.read_text(encoding="utf-8"))
+    readiness = json.loads(Path(loaded.takeover_readiness_json).read_text(encoding="utf-8"))
+    handoff = json.loads(Path(loaded.failure_handoff_json).read_text(encoding="utf-8"))
+
+    assert loaded.status == "TIMEOUT"
+    assert packet["status"] == "TIMEOUT"
+    assert packet["current_step"] == "TIMEOUT"
+    assert packet["blockers"] == ["runner timed out after 30.00s"]
+    assert readiness["status"] == "TIMEOUT"
+    assert readiness["failure_handoff_ref"] == loaded.failure_handoff_json
+    assert handoff["failure_type"] == "runner_timeout"

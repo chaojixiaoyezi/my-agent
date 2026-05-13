@@ -1054,3 +1054,16 @@
 - 已实现：`subagents-recovery-tree` 的节点现在也带 `recovery_action`、`continue_packet_ref`、`continue_packet_status` 和 `no_progress_fuse`。四层链路中间 coordinator 挂掉时，恢复树会标出 `recover_coordinator_leadership`，而不是当作普通 follow-up。
 - 已补测试：`test_subagent_recovery_strategy.py` 覆盖 packet 优先、坏包/过期包降级、no-progress fuse、挂死 worker takeover、失败 coordinator leader recovery；`test_subagent_takeover_run.py` 覆盖 takeover run 继承 refs 和幂等；`test_orchestration_progress_payload.py` 覆盖 dispatch packet-first 和多失败批量策略；`test_subagent_hierarchy_recovery.py` 覆盖四层中间 leader 恢复。
 - 下一步：进入真实 E2E 回复测试。测试必须只给 root prompt，由 root 自己创建/恢复下级；观察日志、packet、checkpoint、takeover 和 leader recovery refs，发现问题再修长期方案。
+
+## 2026-05-13 R87: root-only E2E reply loop accepted
+- 中文说明：R87 按“外层只观察 root，不直接对子代理说话”的方式跑通了短购物站链路。外层只创建并运行 root；root 自己创建 worker，worker 写产物；root 再创建 tester 和 acceptor，最后 root 汇总 refs 并等待父级验收。
+- 真实测试目录：`/Users/xiaoyezi/my-claude-code`。临时 E2E 配置把 workspace、subagents、gateway、LocalStore 都指向测试目录下的 `_agent_runtime/`，避免再把测试文件写回源码目录。
+- 产物目录：`/Users/xiaoyezi/my-claude-code/deliverables/e2e_root_reply_20260514_003941/build`，包含 `index.html`、`styles.css`、`app.js`、`README.md`。
+- 子代理链路：root `subagent-1778690381-c4124c06` 创建 worker `subagent-1778690420-2c6a8bed`、tester `subagent-1778690617-e58aeada`、acceptor `subagent-1778690617-de87f276`；三个下级均 `DONE / VERIFIED`，root 显式 acceptance 后通过。
+- 已修正 1：默认配置里 `runner_timeout_seconds: off` 仍被旧 `dynamic_timeout_seconds` 影响，导致 hidden runner timeout。现在 `off/none/disabled/0` 会优先关闭 runner 包裹超时，不再被动态字段覆盖。
+- 已修正 2：普通 dispatch 不应捡起已经 `RUNNING` 的任务再跑一遍。现在 runner 候选只允许推进 `PLANNING` 和可重试的 `BLOCKED/FAILED/TIMEOUT`，避免旧 gateway 或并行轮次把父节点自己重入。
+- 已修正 3：模型接口流式连接持续发心跳或 `backend.generate` 本身卡住时，runner 不能一直占着 `RUNNING`。现在 gateway SSE 有总时长保护，公共 `generate_model_response` 也按 `request_timeout` 加墙钟保护，超时统一抛 `ProviderTimeoutError`，让恢复链路能拿到标准失败。
+- 已修正 4：写入预检曾把中文里的“无 `http://` 外链图片”误切成 `p://` Windows 路径，阻断 QA 子代理创建。现在 URL/bare scheme 会被路径扫描跳过，Windows 盘符识别也加了前缀边界。
+- 真实观察：root 在所有孩子完成后仍多看了几轮 board/list_files 才收口，最终没有卡死，但提示词涨到 6 万多字符。后续要继续优化 root final-closeout 提示和验收角色模板，让“孩子全完成 + acceptor verified”时更快写 `SUBAGENT_RESULT`。
+- 已补测试：`test_tool_model_generation.py` 覆盖公共模型调用墙钟超时；`test_orchestration_write_guard.py` 新增 bare scheme 误判回归；并回归 runner timeout、dispatch candidate、subagent compact continuation、gateway stream timeout focused tests。
+- 下一步：进入 12 个专项恢复测试。每条仍按 root-only 原则跑：只给主/root prompt，观察 packet、checkpoint、summary、takeover、leader recovery 和 no-progress fuse；发现问题做长期修复，不做一次性绕过。

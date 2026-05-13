@@ -4893,3 +4893,36 @@ This document is append-only. Record every real subagent E2E issue found during 
   - This is still JSON artifact storage; it avoids prompt flood and adds size preflight, but a future streaming artifact reader would be better for truly giant files.
 - Next:
   - Run a short real root-only test where a leaf must recover from an externalized artifact wrapper and prove it can use scoped `read_artifact` with `mode=search` / small `max_chars`.
+
+### Result: R87 Root-Only Reply Loop Accepted
+
+- Discovered at: 2026-05-13 during the first packet-first recovery E2E reply loop.
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Temporary config: `/Users/xiaoyezi/my-claude-code/e2e_agent_config.yaml`.
+  - Runtime data was isolated under `/Users/xiaoyezi/my-claude-code/_agent_runtime/`.
+  - Deliverables were written to `/Users/xiaoyezi/my-claude-code/deliverables/e2e_root_reply_20260514_003941/build`.
+  - The outer observer only created and ran the root; the root created and dispatched its lower agents.
+- Observed behavior:
+  - Root `subagent-1778690381-c4124c06` created worker `subagent-1778690420-2c6a8bed`.
+  - The worker wrote `index.html`, `styles.css`, `app.js`, and `README.md`.
+  - The root then created tester `subagent-1778690617-e58aeada` and acceptor `subagent-1778690617-de87f276`.
+  - Worker, tester, and acceptor all reached `DONE / VERIFIED`; applying root acceptance returned `ACCEPT`.
+- 中文解释：
+  - 这轮确认了“外层只当用户观察 root”可以跑通短购物站闭环：root 自己派工，worker 写页面，tester 测，acceptor 验收，最后 root 汇总交付。
+  - 大白话：不是我绕过 root 去指挥孩子，而是 root 真的自己把孩子叫起来、安排活、看结果，然后交卷。
+- Fixes made from this run:
+  - `runner_timeout_seconds: off` now wins over stale `dynamic_timeout_seconds`, so a config that explicitly disables runner timeout no longer secretly被旧动态超时打断。
+  - Ordinary dispatch no longer treats `RUNNING` tasks as new runner candidates; this avoids active parent/root runs being picked up again by a dispatch sweep.
+  - Gateway SSE streaming and common `backend.generate` now have wall-clock timeout protection, so heartbeat-only or stuck provider calls raise `ProviderTimeoutError` and become recoverable failures.
+  - Path preflight no longer mistakes policy text such as `http://` for a Windows-style path fragment like `p://`.
+- Verification:
+  - `test_tool_model_generation.py` covers model-call wall-clock timeout.
+  - `test_orchestration_write_guard.py` covers bare URL scheme path false positives.
+  - Focused runner timeout, dispatch candidate, gateway stream timeout, and compact continuation tests were run after the fixes.
+- Remaining gap:
+  - Root still spent extra rounds reading board/list files after all children were done; the chain completed, but closeout can be faster.
+  - Prompt size reached more than 60k characters in this short scenario, so final-closeout and role-template prompt economy still need continued optimization.
+  - Real failure/takeover was not covered by R87; that is the next专项恢复测试 set.
+- Next:
+  - Run the 12 recovery and compact专项 tests with the same root-only observer rule: parent packet continuation, packet-first dispatch, takeover, leader recovery, batch failure recovery, fallback refs, no-progress fuse, four-layer recovery, shopping-site recovery closeout, task-local compact refs, and repeated compact continuation.

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from ..subagent import SubAgentRunnerResult, SubAgentTask
 from ..subagents.services.dispatch_params import DispatchRecordParams
+from .runner_child_summary import runner_child_summary_fields
 from .runner_patch_review import _dispatch_patch_review_run_ids, _task_has_runner_patches
 from .runner_worker import RunSubagentWorkerParams, _run_subagent_worker
 from .runner_workflow_dependencies import workflow_dependency_ready_candidates
@@ -31,7 +32,6 @@ RETRYABLE_RUNNER_FAILURE_TYPES = {
     "transient_error",
     "runner_timeout",
 }
-_RUNNER_CHILD_FINAL_STATUSES = {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
 
 
 # LLM: role phase ordering trusts role/name identity before broad inherited goal prose.
@@ -223,62 +223,9 @@ def _runner_dispatch_record(params: RunnerDispatchRecordParams):
                 params.result.result_json,
                 params.result.output_json,
             ],
-            **_runner_child_summary_fields(params.agent, params.after, params.result),
+            **runner_child_summary_fields(params.agent, params.after, params.result),
         ),
     )
-
-
-# LLM: _runner_child_summary_fields makes nested schedule_child_subagents visible to the parent dispatch payload.
-# 函数用途: 从执行后的任务快照收集 child ids/roles 和 runner 摘要，避免上层模型把 dispatch 记录数当成孩子数。
-def _runner_child_summary_fields(agent, after: SubAgentTask, result: SubAgentRunnerResult) -> dict[str, object]:
-    child_ids = [str(item) for item in (after.child_ids or []) if str(item).strip()]
-    child_states = _runner_child_states(agent, child_ids)
-    return {
-        "runner_summary": result.structured_summary,
-        "runner_created_child_count": len(child_ids),
-        "runner_created_child_ids": child_ids,
-        "runner_created_roles": [item["role"] for item in child_states if item["role"]],
-        "runner_child_status_counts": _runner_child_status_counts(child_states),
-        "runner_unfinished_child_ids": _runner_unfinished_child_ids(child_states),
-        "runner_partial_success": bool(child_ids and not result.ok),
-    }
-
-
-# LLM: _runner_child_states resolves child status/role from persisted refs only.
-# 函数用途: 给 dispatch 报告附加轻量 child 状态；读失败时保留 id，避免调度记录写入失败。
-def _runner_child_states(agent, child_ids: list[str]) -> list[dict[str, str]]:
-    states: list[dict[str, str]] = []
-    for child_id in child_ids:
-        try:
-            child = agent.subagents.load(child_id)
-        except Exception:
-            states.append({"id": child_id, "role": "", "status": "UNKNOWN"})
-            continue
-        states.append({
-            "id": child_id,
-            "role": str(getattr(child, "role", "") or "").strip(),
-            "status": str(getattr(child, "status", "") or "UNKNOWN").strip().upper(),
-        })
-    return states
-
-
-# LLM: _runner_child_status_counts keeps partial-success records compact.
-# 函数用途: 汇总 runner 已创建 child 的状态分布，不读取 child artifact 正文。
-def _runner_child_status_counts(child_states: list[dict[str, str]]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for item in child_states:
-        status = item["status"] or "UNKNOWN"
-        counts[status] = counts.get(status, 0) + 1
-    return counts
-
-
-# LLM: _runner_unfinished_child_ids surfaces children that need another dispatch wave.
-# 函数用途: 标出还没终态的 child ids，便于父级 timeout 后继续调度或接管。
-def _runner_unfinished_child_ids(child_states: list[dict[str, str]]) -> list[str]:
-    return [
-        item["id"] for item in child_states
-        if item["id"] and item["status"] not in _RUNNER_CHILD_FINAL_STATUSES
-    ]
 
 
 # LLM: _dispatch_runner_candidates 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -329,6 +276,8 @@ def _is_dispatch_runner_candidate(
     runner_max_attempts: int = 1,
 ) -> bool:
 
+    if task.status == "RUNNING":
+        return False
     if task.status in {
         "AWAITING_ACCEPTANCE",
         "DONE",
@@ -350,4 +299,13 @@ def _is_dispatch_runner_candidate(
         return bool(_runner_retry_reason(task, runner_max_attempts))
     if task.status in {"FAILED", "TIMEOUT"}:
         return bool(_runner_retry_reason(task, runner_max_attempts))
-    return task.status in {"PLANNING", "RUNNING"}
+    return task.status == "PLANNING"
+
+
+# LLM: _runner_active_attempt_id keeps active-runner reentry checks concrete and MagicMock-safe.
+# 函数用途: 读取任务当前 active attempt；存在时说明该 run 已有执行器在跑，普通 dispatch 不应再次启动。
+def _runner_active_attempt_id(task: SubAgentTask) -> str:
+    value = getattr(task, "runner_active_attempt_id", "")
+    if not isinstance(value, str):
+        return ""
+    return value.strip()

@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from queue import Empty, Queue
+from threading import Thread
 
+from ..backends.errors import ProviderTimeoutError
 from ._runtime_params import ToolLoopExecuteParams
 from .runner_stage_trace import (
     RunnerModelStageTraceRequest,
@@ -28,6 +31,14 @@ class ModelGenerateParams:
     tool_rounds: int
 
 
+# LLM: _BackendGenerateResult keeps the background timeout bridge typed without exposing thread details.
+# 类用途: 保存 backend.generate 的返回或异常；公共模型调用边界用它把后台结果安全传回主流程。
+@dataclass(frozen=True)
+class _BackendGenerateResult:
+    response: object | None = None
+    exc: BaseException | None = None
+
+
 # LLM: generate_model_response wraps backend calls with refs-only runner stage trace events.
 # 函数用途: 在模型请求前后写 runner 阶段心跳；普通主代理没有 runner id 时不会写 trace。
 def generate_model_response(request: ModelGenerateParams):
@@ -41,10 +52,7 @@ def generate_model_response(request: ModelGenerateParams):
     )
     chunk_filter = ToolBoundaryChunkFilter(request.params.effective_on_chunk)
     try:
-        response = request.agent.backend.generate(
-            request.prompt,
-            on_chunk=chunk_filter if request.params.effective_on_chunk is not None else None,
-        )
+        response = _generate_with_wall_timeout(request, chunk_filter)
     except Exception as exc:
         trace_runner_model_request_failed(
             RunnerModelStageTraceRequest(
@@ -72,3 +80,52 @@ def generate_model_response(request: ModelGenerateParams):
         )
     )
     return response
+
+
+# LLM: _generate_with_wall_timeout prevents a stuck provider call from trapping the whole runner.
+# 函数用途: 给任意 backend.generate 增加 request_timeout 总时长保护；后端正常返回时保持原响应对象。
+def _generate_with_wall_timeout(request: ModelGenerateParams, chunk_filter: ToolBoundaryChunkFilter):
+    timeout = _model_request_timeout_seconds(request.agent)
+    on_chunk = chunk_filter if request.params.effective_on_chunk is not None else None
+    if timeout <= 0:
+        return request.agent.backend.generate(request.prompt, on_chunk=on_chunk)
+
+    results: Queue[_BackendGenerateResult] = Queue(maxsize=1)
+
+    # LLM: _target runs the provider call in a daemon guard thread so the caller can regain control.
+    # 函数用途: 执行真实模型请求并把返回值或异常放回队列；超时后线程不会阻塞当前 run 退出。
+    def _target() -> None:
+        try:
+            results.put(
+                _BackendGenerateResult(
+                    response=request.agent.backend.generate(request.prompt, on_chunk=on_chunk)
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - exercised through queue result.
+            results.put(_BackendGenerateResult(exc=exc))
+
+    worker = Thread(target=_target, name="my-agent-model-generate-timeout-guard", daemon=True)
+    worker.start()
+    try:
+        result = results.get(timeout=timeout)
+    except Empty as exc:
+        raise ProviderTimeoutError(
+            f"模型接口请求超时: request_timeout={timeout:g}s"
+        ) from exc
+    if result.exc is not None:
+        raise result.exc
+    return result.response
+
+
+# LLM: _model_request_timeout_seconds resolves the public request_timeout setting for the guard layer.
+# 函数用途: 从 agent.config 或 backend 上读取 request_timeout；无效或关闭时返回 0 表示不启用总时长保护。
+def _model_request_timeout_seconds(agent: object) -> float:
+    config = getattr(agent, "config", None)
+    raw = getattr(config, "request_timeout", None)
+    if raw is None:
+        raw = getattr(getattr(agent, "backend", None), "request_timeout", 0)
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    return timeout if timeout > 0 else 0.0

@@ -16,7 +16,10 @@ from ..path_recovery_hints import overlaps_spans, suggest_workspace_typo_target,
 
 WRITE_SUBAGENT_TOOLS = {"write_file", "append_file", "replace_in_file"}
 
-_ABSOLUTE_PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/][^\s\"'<>|]+|~[\\/][^\s\"'<>|]+|(?<![\w.\-<+])/[^\s\"'<>|]+)")
+_ABSOLUTE_PATH_RE = re.compile(
+    r"(?:(?<![A-Za-z0-9+.\-/])[A-Za-z]:[\\/][^\s\"'<>|]+|"
+    r"~[\\/][^\s\"'<>|]+|(?<![\w.\-<+])/[^\s\"'<>|]+)"
+)
 _WINDOWS_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _WRITE_INTENT_WORDS = (
     "写",
