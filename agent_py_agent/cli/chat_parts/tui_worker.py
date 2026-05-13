@@ -56,6 +56,17 @@ class WorkerPathContext:
     stop_spinner: Any
 
 
+# LLM: ConversationTurnAppendRequest bundles chat history mutation inputs for the TUI worker.
+# 类用途: 打包追加一轮对话历史需要的列表、锁、消息和保留轮数。
+@dataclass
+class ConversationTurnAppendRequest:
+    conversation_history: list[tuple[str, str]]
+    history_lock: Any
+    user_message: str
+    assistant_message: str
+    max_turns: int
+
+
 # LLM: _tui_update_running_state 属于chat CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 维护 TUI 聊天界面的输入、状态栏、退出或渲染行为。
 def _tui_update_running_state(cfg: TuiWorkerConfig, job) -> None:
@@ -81,11 +92,13 @@ def _tui_cleanup_after_job(
         if not response_recorded:
             cfg.assistant_outputs.append(agent_response_text)
         _append_conversation_turn(
-            cfg.conversation_history,
-            cfg.history_lock,
-            job.user,
-            agent_response_text,
-            max_turns=chat_history_max_turns(cfg.agent.config),
+            ConversationTurnAppendRequest(
+                conversation_history=cfg.conversation_history,
+                history_lock=cfg.history_lock,
+                user_message=job.user,
+                assistant_message=agent_response_text,
+                max_turns=chat_history_max_turns(cfg.agent.config),
+            )
         )
     _reset_worker_refs(cfg)
     cfg.jobs.task_done()
@@ -211,15 +224,8 @@ def _make_stream_callbacks(cfg: TuiWorkerConfig, next_message_id: int, spinner):
 
 # LLM: _append_conversation_turn 属于chat CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
-def _append_conversation_turn(
-    conversation_history: list[tuple[str, str]],
-    history_lock,
-    user_message: str,
-    assistant_message: str,
-    *,
-    max_turns: int,
-) -> None:
-    with history_lock:
-        conversation_history.append((user_message, assistant_message))
-        if len(conversation_history) > max_turns:
-            conversation_history[:] = conversation_history[-max_turns:]
+def _append_conversation_turn(request: ConversationTurnAppendRequest) -> None:
+    with request.history_lock:
+        request.conversation_history.append((request.user_message, request.assistant_message))
+        if len(request.conversation_history) > request.max_turns:
+            request.conversation_history[:] = request.conversation_history[-request.max_turns:]

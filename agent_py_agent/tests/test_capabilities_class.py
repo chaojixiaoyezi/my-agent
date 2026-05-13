@@ -166,10 +166,10 @@ def test_score_card_capabilities_match():
 # ── CapabilityRouter 测试 ──────────────────────────────────────────────────
 
 def test_capability_router_empty():
-    """测试空路由器。"""
+    """测试路由器默认带内置 Playwright 能力。"""
     router = CapabilityRouter()
     cards = router.cards()
-    assert cards == []
+    assert [card.id for card in cards] == ["builtin:playwright-browser-testing"]
 
 
 def test_capability_router_register():
@@ -184,8 +184,7 @@ def test_capability_router_register():
     router.register(card)
 
     cards = router.cards()
-    assert len(cards) == 1
-    assert cards[0].id == "reg-test"
+    assert any(card.id == "reg-test" for card in cards)
 
 
 def test_capability_router_register_override():
@@ -198,8 +197,9 @@ def test_capability_router_register_override():
     router.register(card2)
 
     cards = router.cards()
-    assert len(cards) == 1
-    assert cards[0].name == "第二个"
+    selected = [card for card in cards if card.id == "same-id"]
+    assert len(selected) == 1
+    assert selected[0].name == "第二个"
 
 
 def test_capability_router_filter_by_kind():
@@ -214,7 +214,7 @@ def test_capability_router_filter_by_kind():
     assert skill_cards[0].kind == "skill"
 
     tool_cards = router.cards(kinds={"tool"})
-    assert len(tool_cards) == 2
+    assert len(tool_cards) == 3
     assert all(c.kind == "tool" for c in tool_cards)
 
 

@@ -180,7 +180,8 @@ class TestListFilesTool:
 
         assert result.ok is True
         assert "已截断" in result.output
-        assert "最多显示 5 条" in result.output
+        assert "next_offset=5" in result.output
+        assert "limit=5" in result.output
 
     def test_list_files_single_file(self, tmp_path: Path):
         """列出单个文件。"""
@@ -351,7 +352,8 @@ class TestSearchTextTool:
 
         assert result.ok is True
         assert "已截断" in result.output
-        assert "最多显示 5 条" in result.output
+        assert "next_offset=5" in result.output
+        assert "limit=5" in result.output
 
     def test_search_text_path_traversal_blocked(self, tmp_path: Path):
         """搜索时防止路径穿越。"""

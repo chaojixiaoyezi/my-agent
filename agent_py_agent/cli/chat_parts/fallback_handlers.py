@@ -121,12 +121,16 @@ def _render_if_needed(
     ctx: FallbackJobContext, response_text: str, stream_started: bool
 ) -> None:
     if not stream_started:
+        from .fallback_ui import AssistantResponseRenderRequest
+
         _render_assistant_response(
-            response_text,
-            ctx.assistant_outputs,
-            ctx.agent.config.agent_name,
-            preview_lines=_chat_preview_lines(ctx),
-            preview_chars=_chat_preview_chars(ctx),
+            AssistantResponseRenderRequest(
+                text=response_text,
+                assistant_outputs=ctx.assistant_outputs,
+                agent_name=ctx.agent.config.agent_name,
+                preview_lines=_chat_preview_lines(ctx),
+                preview_chars=_chat_preview_chars(ctx),
+            )
         )
 
 

@@ -126,12 +126,18 @@ def _has_prompt_toolkit() -> bool:
         return False
 
 
+# LLM: _ensure_chat_memory_limit keeps cmd_chat below code-size risk and centralizes the default.
+# 函数用途: 在 chat 参数未显式设置 memory_limit 时，从配置填入默认值。
+def _ensure_chat_memory_limit(args, agent) -> None:
+    if getattr(args, "memory_limit", None) is None:
+        args.memory_limit = int(getattr(agent.config, "cli_chat_memory_limit", 5) or 0)
+
+
 # LLM: cmd_chat 是交互聊天入口；会在 gateway、本地、TUI 和 fallback 间选择路径。
 # 函数用途: 创建 agent/session，注入响应风格，并启动对应的聊天界面。
 def cmd_chat(args) -> int:
     agent = make_agent(args)
-    if getattr(args, "memory_limit", None) is None:
-        args.memory_limit = int(getattr(agent.config, "cli_chat_memory_limit", 5) or 0)
+    _ensure_chat_memory_limit(args, agent)
     use_gateway = bool(args.gateway)
     paths = gateway_paths(agent)
     if use_gateway:

@@ -11,10 +11,22 @@ from __future__ import annotations
 
 import sys
 import threading
+from dataclasses import dataclass
 
 from .fallback_state import FALLBACK_CHAT_PROMPT
 from .input_loop import parse_expand_target
 from .rendering import GRAY, GREEN, _cprint, collapse_response_text, style_text
+
+
+# LLM: AssistantResponseRenderRequest bundles response-render settings for fallback and TUI workers.
+# 类用途: 打包一次助手回复渲染需要的正文、输出列表、名称和折叠配置。
+@dataclass(frozen=True)
+class AssistantResponseRenderRequest:
+    text: str
+    assistant_outputs: list[str]
+    agent_name: str
+    preview_lines: int = 12
+    preview_chars: int = 900
 
 
 # LLM: _make_chunk_handler 属于chat CLI；改行为前先对齐调用方和快照/单测。
@@ -50,28 +62,21 @@ def _make_chunk_handler(agent_name: str, next_message_id: int, *, preview_chars:
 
 # LLM: _render_assistant_response 属于chat CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
-def _render_assistant_response(
-    text: str,
-    assistant_outputs: list[str],
-    agent_name: str,
-    *,
-    preview_lines: int = 12,
-    preview_chars: int = 900,
-) -> None:
+def _render_assistant_response(request: AssistantResponseRenderRequest) -> None:
     preview, collapsed = collapse_response_text(
-        text,
-        preview_lines=preview_lines,
-        preview_chars=preview_chars,
+        request.text,
+        preview_lines=request.preview_lines,
+        preview_chars=request.preview_chars,
     )
-    assistant_outputs.append(text)
-    message_id = len(assistant_outputs)
+    request.assistant_outputs.append(request.text)
+    message_id = len(request.assistant_outputs)
     if collapsed:
-        _cprint(f"{style_text(f'{agent_name}#{message_id}>', GREEN)} {preview}")
+        _cprint(f"{style_text(f'{request.agent_name}#{message_id}>', GREEN)} {preview}")
         _cprint(
             style_text(f"[回复较长，已自动折叠。输入 /expand {message_id} 或 /expand last 查看全文。]", GRAY)
         )
         return
-    _cprint(f"{style_text(f'{agent_name}#{message_id}>', GREEN)} {text}")
+    _cprint(f"{style_text(f'{request.agent_name}#{message_id}>', GREEN)} {request.text}")
 
 
 # LLM: _handle_expand_command 属于chat CLI；改行为前先对齐调用方和快照/单测。

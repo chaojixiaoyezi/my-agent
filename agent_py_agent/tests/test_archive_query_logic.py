@@ -234,7 +234,7 @@ class TestBuildResumeGuidance:
 
     def test_empty_payloads(self):
         """验证空负载返回基础指导"""
-        result = query_logic.build_resume_guidance([], [], [], None)
+        result = query_logic.build_resume_guidance(query_logic.ResumeGuidanceRequest([], [], [], None))
 
         assert "archive_match_count" in result
         assert "recommended_read_paths" in result
@@ -250,7 +250,7 @@ class TestBuildResumeGuidance:
             }
         ]
 
-        result = query_logic.build_resume_guidance([], [], task_payloads, None)
+        result = query_logic.build_resume_guidance(query_logic.ResumeGuidanceRequest([], [], task_payloads, None))
 
         assert result["task_fact_source_count"] == 1
         assert "/path/status.md" in result["recommended_read_paths"]
@@ -264,7 +264,7 @@ class TestBuildResumeGuidance:
             }
         ]
 
-        result = query_logic.build_resume_guidance([], [], [], gateway_payloads)
+        result = query_logic.build_resume_guidance(query_logic.ResumeGuidanceRequest([], [], [], gateway_payloads))
 
         assert result["gateway_fact_source_count"] == 1
 
@@ -277,7 +277,7 @@ class TestBuildResumeGuidance:
             }
         ]
 
-        result = query_logic.build_resume_guidance([], [], task_payloads, None)
+        result = query_logic.build_resume_guidance(query_logic.ResumeGuidanceRequest([], [], task_payloads, None))
 
         assert any("sub-bad" in action for action in result["next_actions"])
 

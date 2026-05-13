@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .config_io import load_simple_yaml, parse_scalar
+from .home_config import HomeProviderConfigFields
 from .memory import normalize_agent_memory_config
 from .normalize import (
     _coerce_bool_config,
@@ -60,7 +61,7 @@ _LOG_LEVELS = {
 # LLM: AgentConfig 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
 # 类用途: 主运行配置对象，汇总模型、工具、gateway、子代理、通知和用户空间字段。
 @dataclass
-class AgentConfig:
+class AgentConfig(HomeProviderConfigFields):
 
     agent_name: str = "myagent"
     system_prompt: str = "你是一个谨慎、可扩展、会记录记忆、会在必要时调用工具的 Python CLI 智能体。先理解任务，再给出结构化回答。"

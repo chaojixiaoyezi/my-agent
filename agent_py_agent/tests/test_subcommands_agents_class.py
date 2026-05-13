@@ -68,7 +68,7 @@ class TestSubagentsSubcommandRegistration:
     def test_spawn_subagents_has_count_argument(self):
         """测试 spawn-subagents 命令有 count 参数。
 
-        验证 count 参数默认值为 3。
+        验证 count 参数默认交给运行时配置决定。
         """
         from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
 
@@ -78,7 +78,7 @@ class TestSubagentsSubcommandRegistration:
 
         args = parser.parse_args(["spawn-subagents", "测试"])
         assert hasattr(args, "count")
-        assert args.count == 3
+        assert args.count is None
 
     def test_spawn_subagents_has_role_arguments(self):
         """spawn-subagents 支持显式创建 coordinator/root 入口。"""

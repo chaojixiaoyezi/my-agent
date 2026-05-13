@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from .query import (
+    ResumeGuidanceRequest,
     build_resume_guidance,
     collect_archive_records,
     collect_gateway_payloads,
@@ -123,15 +124,7 @@ def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
     archive_matches, query = _first_archive_matches(records, user_prompt, limit=limit)
     args = _resume_args(query)
     local_query = resume_local_query(args, archive_matches)
-    local_hits = (
-        agent.local_store.search(local_query, limit=limit)
-        if local_query
-        else agent.local_store.list_recent(limit=limit)
-    )
-    local_payloads = [
-        local_hit_payload(hit, preview_chars=int(getattr(agent.config, "memory_query_content_preview_chars", 500) or 0))
-        for hit in local_hits
-    ]
+    local_payloads = _resume_local_payloads(agent, local_query, limit)
     task_ids = collect_resume_task_ids(args, archive_matches, local_payloads)
     task_payloads = collect_task_payloads(agent, task_ids, limit=limit)
     # Gateway 恢复也必须回到 request/response JSON，而不是只注入 LocalStore 摘要。
@@ -139,13 +132,15 @@ def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
     if not archive_matches and not local_payloads and not task_payloads and not gateway_payloads:
         return ResumeContextResult(query=query, reason="no_evidence")
     resume = build_resume_guidance(
-        archive_matches,
-        local_payloads,
-        task_payloads,
-        gateway_payloads,
-        recommended_read_paths_limit=int(
-            getattr(agent.config, "memory_resume_recommended_read_paths_limit", 20) or 0
-        ),
+        ResumeGuidanceRequest(
+            archive_matches=archive_matches,
+            local_hits=local_payloads,
+            task_payloads=task_payloads,
+            gateway_payloads=gateway_payloads,
+            recommended_read_paths_limit=int(
+                getattr(agent.config, "memory_resume_recommended_read_paths_limit", 20) or 0
+            ),
+        )
     )
     brief = build_resume_brief(
         archive_matches,
@@ -162,6 +157,18 @@ def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
         task_fact_source_count=len(task_payloads),
         reason="matched",
     )
+
+
+# LLM: _resume_local_payloads keeps resume context assembly shallow and preview-size config-backed.
+# 函数用途: 查询 LocalStore 恢复线索，并转成可注入的轻量 payload。
+def _resume_local_payloads(agent: Any, local_query: str, limit: int) -> list[dict[str, Any]]:
+    local_hits = (
+        agent.local_store.search(local_query, limit=limit)
+        if local_query
+        else agent.local_store.list_recent(limit=limit)
+    )
+    preview_chars = int(getattr(agent.config, "memory_query_content_preview_chars", 500) or 0)
+    return [local_hit_payload(hit, preview_chars=preview_chars) for hit in local_hits]
 
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _first_archive_matches 时同步检查返回值、异常处理和读写副作用。
