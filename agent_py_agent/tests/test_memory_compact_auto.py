@@ -173,6 +173,42 @@ def test_memory_compact_resume_links_subagent_run_workspace_refs(tmp_path: Path)
     assert Path(owner["legacy_run_ref"]["legacy_task_dir"]).parts[-2:] == ("subagents", "run-compact")
 
 
+# LLM: parent resume status needs to see whether a subagent has a task-local continue packet ready.
+# 函数用途: 验证 compact resume 会把子代理 run workspace 的 latest_continue_packet 作为只读引用暴露给父级。
+def test_memory_compact_resume_exposes_subagent_latest_continue_packet(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    _write_compact_fixture(root)
+    _write_work_state_fact_sources(root)
+    _write_subagent_run_workspace(root)
+    packet = root / "tasks" / "root-compact" / "agents" / "run-compact" / "compactions" / "latest_continue_packet.json"
+    packet.write_text(
+        json.dumps({"ready_to_continue": True, "next_action": "resume subagent locally"}),
+        encoding="utf-8",
+    )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        ),
+    )
+    resume = build_memory_compact_resume(
+        root,
+        MemoryCompactResumeOptions(
+            apply_ref=result["apply_id"],
+            owner_type="subagent_run",
+            owner_id="run-compact",
+            resume_mode="auto",
+        ),
+    )
+
+    owner = resume["subagent_session_compact"]
+    assert owner["refs"]["latest_continue_packet"].endswith("latest_continue_packet.json")
+    assert owner["reserved_hooks"]["enabled"] is True
+    assert owner["reserved_hooks"]["continue_packet_ref"].endswith("latest_continue_packet.json")
+    assert owner["reserved_hooks"]["writes_main_memory"] is False
+
+
 def _auto_cycle_options(*, allow_apply: bool = False) -> MemoryCompactAutoCycleOptions:
     return MemoryCompactAutoCycleOptions(
         current_tokens=8000,

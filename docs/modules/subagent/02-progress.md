@@ -1036,3 +1036,12 @@
 - 边界说明：这不是让模型随便改配置。未知字段、版本不匹配、危险字段都会阻止或只给建议；审计文件默认写到 subagent workspace，不污染用户产物目录。
 - 已补测试：`test_capability_runtime_config.py` 覆盖安全补丁、危险字段建议、版本冲突、router 热加载、工具注册和工具写入；并回归 capability config 与 capability_request focused tests。
 - 下一步：继续真实 root-only 子代理测试，观察 agent 是否能在配置导致误判时先自检并使用补丁工具，而不是把问题推给用户。
+
+## 2026-05-13 task-local compact continuation refs
+- 中文说明：子代理会话 compact 第一版不把子代理写进主代理长期记忆，而是让 runner 从自己的 `tasks/<root>/agents/<run>/` 任务目录接续。
+- 已实现：`context_bundle.workspace_refs` 补齐 agent run workspace 的 `task.md`、`checkpoint.json`、`summary.md`、`final_report.md`、`findings.jsonl`、`timeline.jsonl`、`compactions/` 和 shared refs，父级/接管代理能 refs-first 看状态。
+- 已实现：runner prompt 在这些 refs 存在时加入 `Task-Local Compact Continuation`，只读取 bounded 小片段和 `compactions/latest_continue_packet.json` 摘要；不读取主代理 `SOUL.md` / `USER.md`，不自动写主 memory。
+- 已实现：`memory-resume --from-compact owner_type=subagent_run` 可以通过 `compact_subagent_owner.py` 看见已存在的 `latest_continue_packet.json`，并返回 `continue_packet_ready=true`；这只是可见性和交接，不会自动执行工具。
+- 已实现闭环：`SubAgentManager.save()` 会自动写 `latest_continue_packet.json` 和 `session_compact_ledger.jsonl`。父级重新 runner/dispatch 同一个 run 时，prompt 会自动读取这个包，带着子代理上一轮的 current step、summary、blockers 和推荐读取路径继续。
+- 已补测试：`test_runner_prompt_includes_task_local_compact_continuation_refs`、`test_memory_compact_resume_exposes_subagent_latest_continue_packet`、`test_context_bundle_v1_captures_task_handoff_fields`。
+- 下一步：做更高层的恢复调度策略：父级发现子代理超时/中断/父节点失联时，如何选择原 run 重跑、创建 takeover run，或把子树挂到新 leader。
