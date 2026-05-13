@@ -103,7 +103,7 @@ external_knowledge_database_sources: []
 - `SimpleAgent` 启动时会根据 `my_agent_home` 初始化 owner home，并把 `home_paths` 交给 memory、prompt 和 run workspace 复用。
 - `agent.user_space.run_workspace`：普通主代理 run 保存时，会在 `workspace/tasks/{date}/{task_slug}/` 下创建 `outputs/`、`runtime/`、`agents/`、`logs/`、`task.yaml`、`state.json` 和 `timeline.jsonl`。
 - `JsonlMemory`：旧 `memory_path` 仍然可读写，同时可按配置镜像到 `memory/daily/YYYY-MM-DD.jsonl`，为后续迁移到按天流水做准备。
-- `PromptBuilder`：home-backed agent 会读取 `memory.md` 关键记忆，并按任务文本匹配有限数量的 `memory/lessons/*.md`，不会每轮全量读取教训库。
+- `PromptBuilder`：home-backed root 每轮会按固定顺序读取 `AGENTS.md`、`SOUL.md`、`USER.md`、`memory.md` 四个入口文件。`AGENTS.md` 先作为启动制度和读文件规则，后面再读人格、用户偏好和关键记忆；`memory/lessons/*.md` 仍只按任务文本匹配有限数量，不会每轮全量读取教训库。
 - `agent.user_space.provider_space`：懒创建 provider 根、外部用户/群空间和配额统计。
 - `agent.user_space.provider_trash`：同空间 trash、scoped audit、按配置清理过期 trash。
 - `agent.external_knowledge.config`：把后端配置转成外部知识库查询 bundle。
