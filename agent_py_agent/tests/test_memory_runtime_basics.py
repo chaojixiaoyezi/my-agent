@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_archive import (
@@ -40,6 +41,23 @@ priority: 30
 
 def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+# LLM: CaptureBackend lets compact auto-continuation tests inspect each model prompt without network calls.
+# 类用途: 测试后端，记录每次模型请求 prompt，并返回可区分第几轮的响应。
+class CaptureBackend:
+    name = "capture"
+
+    # LLM: CaptureBackend.__init__ keeps prompt capture state isolated per test.
+    # 函数用途: 初始化 prompt 记录列表，供断言自动续跑是否真的发起第二轮模型调用。
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    # LLM: CaptureBackend.generate records prompt text and returns deterministic model output.
+    # 函数用途: 模拟模型响应，不调用外部 API；响应文本带轮次，方便区分原始轮和续跑轮。
+    def generate(self, prompt: str, on_chunk=None):
+        self.prompts.append(prompt)
+        return ModelResponse(text=f"capture response {len(self.prompts)}", backend=self.name)
 
 
 def test_run_injects_routed_memory_authority_context(tmp_path):
@@ -110,8 +128,8 @@ def test_run_surfaces_compact_suggestion_without_auto_apply(tmp_path):
     assert not (tmp_path / "memory_archive" / "compact_applies").exists()
 
 
-def test_run_auto_compact_apply_stops_after_continue_packet(tmp_path):
-    """LLM: Tests opt-in auto compact apply still stops after guarded continue packet."""
+def test_run_auto_compact_apply_continues_once_after_continue_packet(tmp_path):
+    """LLM: Tests opt-in auto compact apply performs one guarded continuation turn."""
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
     agent.config.memory_compact_context_window_tokens = 20
     agent.config.memory_compact_auto_allow_apply = True
@@ -125,13 +143,68 @@ def test_run_auto_compact_apply_stops_after_continue_packet(tmp_path):
         recovery_next_actions=["continue only after reading continue packet"],
     )
 
-    assert result.memory_compact_auto_status == "ready_after_action_guard"
-    assert result.memory_compact_auto_next_action == "continue_after_guard"
-    assert result.memory_compact_auto_allowed_to_continue is True
-    assert result.memory_compact_auto_continue_ready is True
+    assert result.memory_compact_auto_status == "skipped_after_guarded_continuation"
+    assert result.memory_compact_auto_next_action == "continue_without_compact"
+    assert result.memory_compact_auto_allowed_to_continue is False
+    assert result.memory_compact_auto_continue_ready is False
     assert result.memory_compact_auto_tool_execution == "none"
-    assert result.memory_compact_auto_apply_id
+    assert result.memory_compact_auto_continued is True
+    assert result.memory_compact_auto_continued_from_apply_id
+    assert "# Compact Auto Continuation" in result.prompt
     assert (tmp_path / "memory_archive" / "compact_applies").exists()
+
+
+# LLM: auto compact continuation should turn a ready continue packet into the next guarded model turn.
+# 函数用途: 验证主 agent 自动 compact apply 后会把继续包注入下一轮 prompt，并重新带上家目录关键文件。
+def test_run_auto_compact_apply_continues_with_home_entries_and_packet(tmp_path):
+    home = tmp_path / "home"
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(home)), tmp_path)
+    backend = CaptureBackend()
+    agent.backend = backend
+    agent.config.memory_compact_context_window_tokens = 20
+    agent.config.memory_compact_auto_allow_apply = True
+    agent.home_paths.agents_md.write_text("执行制度：每轮先读 AGENTS。\n", encoding="utf-8")
+    agent.home_paths.soul_md.write_text("人格：稳住状态继续干。\n", encoding="utf-8")
+    agent.home_paths.user_md.write_text("用户偏好：大白话汇报。\n", encoding="utf-8")
+    agent.home_paths.memory_md.write_text("关键记忆：不要重做已完成步骤。\n", encoding="utf-8")
+
+    result = agent.run(
+        "验收: continuation packet injected\n约束: do not redo completed work\n测试: focused compact auto continuation",
+        save=True,
+        request_id="req-auto-continuation",
+        run_id="run-auto-continuation",
+        task_id="run-auto-continuation",
+        recovery_next_actions=["continue from compact next_step"],
+    )
+
+    assert len(backend.prompts) == 2
+    assert result.response == "capture response 2"
+    assert result.memory_compact_auto_continued is True
+    assert result.memory_compact_auto_continued_from_apply_id
+    second_prompt = backend.prompts[1]
+    assert "# Home Entry: AGENTS.md" in second_prompt
+    assert "# Home Entry: SOUL.md" in second_prompt
+    assert "# Home Entry: USER.md" in second_prompt
+    assert "# Home Entry: memory.md" in second_prompt
+    assert second_prompt.index("# Home Entry: AGENTS.md") < second_prompt.index("# Compact Auto Continuation")
+    assert "continue from compact next_step" in second_prompt
+    assert "Do not redo completed work" in second_prompt
+
+
+# LLM: blocked compact resumes must not trigger an automated second model turn.
+# 函数用途: 验证缺少验收/约束/测试/next_step 等字段时，自动 compact 只停车，不自动续跑。
+def test_run_auto_compact_apply_does_not_continue_when_guard_blocks(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    backend = CaptureBackend()
+    agent.backend = backend
+    agent.config.memory_compact_context_window_tokens = 20
+    agent.config.memory_compact_auto_allow_apply = True
+
+    result = agent.run("请生成足够长的 compact 提示触发内容", save=True, request_id="req-blocked-continuation")
+
+    assert len(backend.prompts) == 1
+    assert result.memory_compact_auto_continued is False
+    assert result.memory_compact_auto_continued_from_apply_id == ""
 
 
 def test_run_no_save_blocks_opt_in_auto_compact_apply(tmp_path):

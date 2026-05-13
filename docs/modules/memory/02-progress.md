@@ -62,7 +62,7 @@
 - 2026-05-08 Continue Packet 第一片已落地：`memory-resume --from-compact` 现在返回 `compact_continue_packet`，把目标、阶段、下一步、验收、约束、最近测试、推荐读取路径、action guard 和 subagent owner refs 固定成统一继续契约；它只表达恢复上下文是否可继续，不代表业务验收通过。
 - 2026-05-08 半自动 Resume 第二片已落地：`completion_prompt` 新增 `suggested_commands`，给出 `memory-fact-write --from-compact`、同 scope 重新 `memory-compact --apply` 和 `memory-resume --compact-resume-mode auto` 的闭环提示；仍只写用户显式确认事实，不解析助手回复。
 - 2026-05-08 子代理 Compact Hook 预留第二片已落地：subagent owner refs 会带 `reserved_hooks`，预留 run-local `session_compact_ledger.jsonl` 和 `latest_continue_packet.json` 路径；当前 `enabled=false`，不写主 memory、不自动执行工具、不改 runner。
-- 2026-05-08 Auto Compact/Resume 第一版增强已落地：新增 `memory_compact_auto_allow_apply` 配置，默认 false；开启后 `SimpleAgent.run()` 也只做非破坏性 apply、auto resume、continue packet 和 guard 停车，并把 `apply_id` / `continue_ready` 暴露给结果和 CLI。
+- 2026-05-08 Auto Compact/Resume 第一版增强已落地：新增 `memory_compact_auto_allow_apply` 配置，默认 false；开启后 `SimpleAgent.run()` 会做非破坏性 apply、auto resume、continue packet 和 guard 检查；guard 放行时主 agent 会把继续包注入下一轮 prompt 并受控续跑一次，阻断时仍停车。
 - 2026-05-08 Auto Compact/Resume 持久化边界修正：即使配置开启 `memory_compact_auto_allow_apply`，`run(..., save=False)` / `--no-save` 仍会阻止自动 apply 写入 `memory_archive/compact_applies/*`，继续只返回人工确认建议。
 - 2026-05-08 Runtime Fact Source 解析边界修正：显式验收/约束/测试段落遇到未知标题会停止当前桶，避免“实施步骤”等后续段落被误收为 acceptance/constraints/latest_tests。
 - 2026-05-08 Compact work-state scope 安全修正：request/session/task/run id 现在按字面路径解析，`*`、`[]` 等 glob 字符不会扩大扫描 `tasks/*/agents/*`；半自动 completion 命令也会保留原 `--session-id/--request-id/--task-id/--run-id` scope。
@@ -278,3 +278,8 @@
 - `PromptBuilder` 对 home-backed root 每轮按 `AGENTS.md`、`SOUL.md`、`USER.md`、`memory.md` 顺序读取四个家目录入口文件，并用 lesson 文件名和当前任务文本做轻量匹配；不会每轮全量读取整个 lessons 目录。
 - provider trash 从 `provider_space.py` 拆到 `provider_trash.py`，新增按配置保留天数清理旧 trash 日期目录；破坏性操作仍默认走同空间 trash 和审计。
 - 本轮 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_home_runtime_bootstrap.py agent_py_agent/tests/test_provider_space.py agent_py_agent/tests/test_config_normalize.py::TestNormalizeAgentConfig::test_normalize_home_provider_risk_fields agent_py_agent/tests/test_agent/test_memory_and_basic.py agent_py_agent/tests/test_prompting_builder.py` -> passed；strict code-size 维持 `hard=0 high-risk=0 soft=0`。
+
+## 2026-05-13 compact auto continuation bridge
+- 中文说明：主 agent 的自动 compact 已从“生成恢复包后停车”推进到“guard 放行后受控续跑一次”。第二轮 prompt 会重新带上 `AGENTS.md`、`SOUL.md`、`USER.md`、`memory.md`，并在 Runtime Injection 放入 `# Compact Auto Continuation`，要求只从 `Next Step` 继续。
+- 防重复边界：续跑轮会跳过再次 compact，避免低阈值测试或长任务中出现 compact -> continue -> compact 的循环。字段缺失、自检失败、refs 异常或 `save=False` 时仍不会续跑。
+- 本轮 focused 验收：`python -m pytest -q agent_py_agent/tests/test_memory_runtime_basics.py agent_py_agent/tests/test_memory_compact_auto.py agent_py_agent/tests/test_home_runtime_bootstrap.py agent_py_agent/tests/test_prompting_builder.py` -> passed。

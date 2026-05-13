@@ -705,10 +705,10 @@ my-agent memory-resume --from-compact <apply_id> --context-only
 - `--compact-resume-mode auto` 会启用严格守门：consistency/self-check/refs/goal/next_step 必须通过，且 `missing_fields` 必须为空。
 - 如果 work state 缺 acceptance、constraints、latest_tests 等字段，自动模式会返回 `blocked_missing_work_state_fields`，CLI 退出码为 2。
 - 如果 work state 字段齐全、refs 存在、self-check 通过且 `resume_mode=auto`，action guard 会返回 `allow_automated_continue`、`allowed_to_continue=true` 和 `allowed_next_action=continue_after_guard`。
-- action guard 和 auto cycle 都显式写 `automatic_tool_execution=none`：这一步只给出 go/no-go 机器判断，不自动运行工具或修改代码。
+- action guard 和 auto cycle 都显式写 `automatic_tool_execution=none`：这一步只给出 go/no-go 机器判断，本身不运行工具或修改代码。
 - 新增 `compact_auto.py`，提供 `run_memory_compact_auto_cycle()`：默认 `allow_apply=false` 时只返回 compact 建议和 `needs_user_confirmation`，不会写 apply 产物。
-- 显式 `allow_apply=true` 时，auto cycle 只执行非破坏性 apply 和 `resume_mode=auto` 的 action guard 检查；如果字段不完整会停在 `blocked_after_action_guard`，仍不会执行工具或继续改代码。
-- `SimpleAgent.run()` 收尾已经接入 auto cycle 的默认 plan-only 分支；达到 compact 阈值时，CLI 会显示 `compact_suggestion` 和 `compact_auto`，其中 `compact_auto` 只说明当前状态、下一步和工具执行状态，不会自动 apply。
+- 显式 `allow_apply=true` 时，auto cycle 执行非破坏性 apply 和 `resume_mode=auto` 的 action guard 检查；如果字段不完整会停在 `blocked_after_action_guard`。
+- `SimpleAgent.run()` 收尾已经接入 auto cycle 的默认 plan-only 分支；达到 compact 阈值时，CLI 会显示 `compact_suggestion` 和 `compact_auto`。当配置 `memory_compact_auto_allow_apply=true` 且 guard 放行时，主 agent 会把 `compact_continue_packet` 注入下一轮 prompt 并受控续跑一次；续跑轮跳过再次 compact，防止循环。
 - `compact_subagent_owner.py` 已接入 `memory-resume --from-compact`：指定 `subagent_run` / `subagent_session` owner 后，会返回 `linked_run_workspace`、`legacy_only` 或 `owner_refs_not_found` 状态，以及 task-local refs；当前仍不自动执行工具、不改 runner、不污染主 memory。
 - 当前仍不会自动继续工具调用或代码修改；这一步只是把“提示、可选 apply、恢复、自检、停住”的无人值守安全骨架做出来。
 
