@@ -65,3 +65,21 @@ def test_external_write_guard_ignores_url_image_sources(tmp_path):
     )
 
     assert result == ""
+
+
+# LLM: Bare scheme text such as "no http:// links" is content policy wording, not a Windows path.
+# 函数用途: 覆盖真实 E2E 中 `无 http:// 外链图片` 被误切成 `p://` 后阻断 QA 子代理创建的问题。
+def test_external_write_guard_ignores_bare_scheme_policy_text(tmp_path):
+    workspace_root = tmp_path / "my-claude-code"
+    target = workspace_root / "deliverables" / "shop" / "build"
+    mock_agent = MagicMock()
+    mock_agent.subagents.workspace_root = workspace_root
+    mock_agent.subagents.workspace_roots = [workspace_root]
+
+    result = external_write_target_error(
+        mock_agent,
+        f"在 {target} 创建 tester，必须检查无 http:// 外链图片，并把测试结果写入 output.json。",
+        ["write_file"],
+    )
+
+    assert result == ""

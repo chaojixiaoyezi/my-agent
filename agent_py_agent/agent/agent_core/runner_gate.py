@@ -41,17 +41,17 @@ def get_task_timeout(
 ) -> float:
     from .dynamic_timeout import calculate_dynamic_timeout, estimate_task_tokens
 
-    # Check for pre-calculated dynamic timeout
-    if task.attributes and "dynamic_timeout_seconds" in task.attributes:
-        timeout = float(task.attributes["dynamic_timeout_seconds"])
-        if timeout > 0:
-            return timeout
-
     # Use configured static timeout
     if runner_timeout_seconds > 0:
         return runner_timeout_seconds
     if _runner_timeout_disabled(config):
         return 0.0
+
+    # Check for pre-calculated dynamic timeout
+    if task.attributes and "dynamic_timeout_seconds" in task.attributes:
+        timeout = float(task.attributes["dynamic_timeout_seconds"])
+        if timeout > 0:
+            return timeout
 
     # Dynamic calculation
     estimated_input_tokens, estimated_output_tokens = estimate_task_tokens(task.goal, task.plan)

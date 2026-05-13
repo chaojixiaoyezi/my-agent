@@ -137,6 +137,23 @@ class TestPostStream:
         result = post_stream(_request())
         assert len(result) == 1
 
+    @patch("agent_py_agent.agent.backends.gateway_helpers.time.monotonic")
+    @patch("urllib.request.urlopen")
+    def test_stream_enforces_total_timeout_on_heartbeat_lines(self, mock_urlopen, mock_monotonic):
+        """流式服务持续发心跳但不结束时，也会按 request_timeout 总时长退出。"""
+        from agent_py_agent.agent.backends.errors import ProviderTimeoutError
+        from agent_py_agent.agent.backends.gateway_helpers import post_stream
+
+        mock_monotonic.side_effect = [0, 31]
+        mock_response = MagicMock()
+        mock_response.__iter__ = MagicMock(return_value=iter([b": ping"]))
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
+
+        with pytest.raises(ProviderTimeoutError, match="流式响应超时"):
+            post_stream(_request())
+
 
 class TestPostStreamIter:
     """post_stream_iter 流式迭代器测试。"""

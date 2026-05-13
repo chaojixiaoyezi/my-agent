@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -72,9 +73,10 @@ def _post_stream_lines(request: GatewayRequest) -> Iterator[str]:
     request.payload["stream"] = True
     _require_api_key(request.api_key)
     req = _urllib_request(request)
+    deadline = _stream_deadline(request.timeout)
     try:
         with urllib.request.urlopen(req, timeout=request.timeout) as resp:
-            yield from _iter_sse_data_lines(resp)
+            yield from _iter_sse_data_lines(resp, deadline=deadline, timeout=request.timeout, url=request.url)
     except urllib.error.HTTPError as exc:
         raise _runtime_http_error(exc) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -137,8 +139,19 @@ def _is_timeout_exception(exc: BaseException) -> bool:
 
 # LLM: _iter_sse_data_lines 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
 # 函数用途: 处理迭代SSEdatalines相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模型请求参数、流式解析和错误传播上的返回值和副作用边界稳定。
-def _iter_sse_data_lines(response) -> Iterator[str]:
+def _stream_deadline(timeout: int) -> float:
+    return time.monotonic() + max(1, int(timeout or 0))
+
+
+# LLM: _iter_sse_data_lines enforces total stream wall-clock timeout, not only socket idle timeout.
+# 函数用途: 迭代 SSE 数据行；如果服务端持续发空心跳但没有结束，也会按 request_timeout 总时长退出。
+def _iter_sse_data_lines(response, *, deadline: float, timeout: int, url: str) -> Iterator[str]:
     for raw_line in response:
+        if time.monotonic() > deadline:
+            raise ProviderTimeoutError(
+                "模型接口流式响应超时: "
+                f"request_timeout={timeout}s url={url}"
+            )
         line = raw_line.decode("utf-8").strip()
         if _is_sse_data_line(line):
             yield line[5:].strip()
