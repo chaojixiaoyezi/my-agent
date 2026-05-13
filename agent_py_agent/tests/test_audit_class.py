@@ -118,6 +118,29 @@ class TestAuditLogger:
         lines = audit_file.read_text(encoding="utf-8").strip().split("\n")
         assert len(lines) == 1
 
+    def test_log_path_can_be_file(self, tmp_path: Path):
+        """audit_log_path 指向文件时直接写该文件，兼容旧配置。"""
+        from agent_py_agent.agent.audit.logger import AuditAction, AuditLogger, AuditStatus
+
+        audit_file = tmp_path / "custom-audit.jsonl"
+
+        class MockConfig:
+            audit_log_path = str(audit_file)
+
+        logger = AuditLogger(MockConfig())
+        logger.log(
+            action=AuditAction.CREATE_TASK,
+            user_id="user1",
+            channel="chat",
+            target_type="task",
+            target_id="task_001",
+            status=AuditStatus.SUCCESS,
+        )
+
+        assert audit_file.exists()
+        assert audit_file.is_file()
+
+        lines = audit_file.read_text(encoding="utf-8").strip().split("\n")
         data = json.loads(lines[0])
         assert data["action"] == "CREATE_TASK"
 

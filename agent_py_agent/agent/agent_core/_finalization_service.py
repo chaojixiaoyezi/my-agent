@@ -128,6 +128,8 @@ class FinalizationService:
                     tool_calls=params.archive_tool_calls or [],
                     source=params.source,
                     archive_level=int(getattr(self._agent.config, "memory_archive_level", 3)),
+                    preview_limits=_memory_archive_preview_limits(self._agent.config),
+                    summary_chars=int(getattr(self._agent.config, "memory_archive_summary_chars", 96) or 96),
                 ),
             )
         )
@@ -307,3 +309,14 @@ def _compact_context_window_tokens(agent) -> int:
         return configured
     max_tokens = int(getattr(agent.config, "max_tokens", 1024) or 1024)
     return max(8192, max_tokens * 16)
+
+
+# LLM: _memory_archive_preview_limits centralizes archive preview sizing so callers do not bake defaults.
+# 函数用途: 从 AgentConfig 读取 raw archive 各 archive_level 的预览字符数，供归档事件构建复用。
+def _memory_archive_preview_limits(config) -> dict[int, int]:
+    return {
+        0: int(getattr(config, "memory_archive_preview_level_0_chars", 2048) or 0),
+        1: int(getattr(config, "memory_archive_preview_level_1_chars", 1024) or 0),
+        2: int(getattr(config, "memory_archive_preview_level_2_chars", 512) or 0),
+        3: int(getattr(config, "memory_archive_preview_level_3_chars", 160) or 0),
+    }

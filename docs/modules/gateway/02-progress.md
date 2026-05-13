@@ -89,6 +89,11 @@
 - gateway 连接 CLI、后台进程、文件协议、LocalStore、chat、adapter，变化面大，文档很容易再次散开。
 - 文件队列并发写入需要持续测试，否则 worker pool 扩大后容易出现重复处理或状态覆盖。
 - 普通用户入口和开发者命令层级需要继续打磨，避免体验被内部协议细节淹没。
+
+## 2026-05-13 backend config extraction
+- 中文说明：gateway/chat 入口的默认等待和默认 memory 展示数量继续收回后端配置；`cmd_default` 不再写死 chat memory limit，而是交给 `cmd_chat` 从 `AgentConfig` 解析。
+- `gateway_ready_timeout_seconds` 现在控制前台 chat/gateway client 等待 gateway 存活确认的默认时间；显式 CLI timeout 仍优先。
+- worker join、service command/stop timeout 也已在 `agent_config.yaml` 定义为后端配置字段，后续继续把剩余 service wrapper 调用切到这些字段。
 ## 2026-05-06 code-size cleanup
 - 中文说明：这一轮把 gateway 请求执行、IO、lease、恢复、supervisor 和 adapter helper 继续拆薄。用户可见行为不变，主要是降低 gateway 大文件继续膨胀和并发路径难调试的风险。
 - Split gateway request execution out of the request worker and flattened gateway IO, lease, recovery, supervisor, and adapter helpers.

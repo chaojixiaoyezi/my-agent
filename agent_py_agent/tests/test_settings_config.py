@@ -3,6 +3,7 @@
 给人看的解释：
 测试配置模块：配置加载、字段验证、默认值处理。
 """
+import logging
 import tempfile
 from pathlib import Path
 
@@ -160,7 +161,7 @@ class TestNormalizeAgentConfig:
         """验证负数 tool_rounds 回退到默认值。"""
         data = {"max_tool_rounds": -5}
         normalized, warnings = normalize_agent_config(data)
-        assert normalized["max_tool_rounds"] == 5  # 默认值
+        assert normalized["max_tool_rounds"] == 0  # 默认值，0 表示不限制
         assert len(warnings) > 0
 
     # LLM: Tool write inline limits must be user-configurable through the standard config normalizer.
@@ -169,6 +170,28 @@ class TestNormalizeAgentConfig:
         data = {"tool_write_inline_max_chars": 16384}
         normalized, warnings = normalize_agent_config(data)
         assert normalized["tool_write_inline_max_chars"] == 16384
+        assert warnings == []
+
+    # LLM: Tool catalog prompt budgets must be real config fields, not hidden registry constants.
+    # 函数用途: 验证工具目录分页、模式、类别和展示上限能通过配置归一化。
+    def test_normalize_agent_config_tool_catalog_fields(self):
+        data = {
+            "tool_catalog_mode": "full",
+            "tool_catalog_offset": 2,
+            "tool_catalog_categories": ["filesystem", "shell"],
+            "tool_catalog_include_examples": False,
+            "tool_catalog_entry_max_chars": 900,
+            "tool_catalog_show_truncated_notice": False,
+            "tool_detail_max_chars": 3000,
+        }
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["tool_catalog_mode"] == "full"
+        assert normalized["tool_catalog_offset"] == 2
+        assert normalized["tool_catalog_categories"] == ["filesystem", "shell"]
+        assert normalized["tool_catalog_include_examples"] is False
+        assert normalized["tool_catalog_entry_max_chars"] == 900
+        assert normalized["tool_catalog_show_truncated_notice"] is False
+        assert normalized["tool_detail_max_chars"] == 3000
         assert warnings == []
 
     # LLM: Invalid inline write limits should fall back before reaching ToolRegistry.
@@ -286,6 +309,23 @@ class TestLoadConfig:
         finally:
             path.unlink()
 
+    def test_load_config_applies_log_level(self):
+        """验证 log_level 配置加载后会影响包内 logger。"""
+        logger = logging.getLogger("agent_py_agent")
+        previous_level = logger.level
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write("model_backend: echo\nlog_level: debug\n")
+            f.flush()
+            path = Path(f.name)
+
+        try:
+            config = load_config(path)
+            assert config.log_level == "debug"
+            assert logger.level == logging.DEBUG
+        finally:
+            logger.setLevel(previous_level)
+            path.unlink()
+
     def test_load_config_with_invalid_field(self):
         """验证无效字段被忽略。"""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -324,7 +364,7 @@ class TestAgentConfigDefaults:
         """验证默认配置值。"""
         config = AgentConfig()
         assert config.model_backend == "echo"
-        assert config.max_tool_rounds == 5
+        assert config.max_tool_rounds == 0
         assert config.memory_top_k == 5
         assert config.max_subagents == 1000
 

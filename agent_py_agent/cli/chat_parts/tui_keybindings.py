@@ -49,6 +49,7 @@ class TuiCreateKeybindingsParams:
     assistant_outputs: list[str]
     jobs: Queue[Any]
     pending_jobs_ref_for_enqueue: list[int]
+    transcript_scroll_lines: int = TRANSCRIPT_SCROLL_LINES
 
 
 # LLM: _tui_create_keybindings 属于chat CLI；改行为前先对齐调用方和快照/单测。
@@ -62,8 +63,8 @@ def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
     kb.add("c-c")(lambda e: _handle_ctrl_c_keybinding(e, params))
     kb.add("c-d")(lambda e: _handle_ctrl_d_keybinding(e, params))
     if params.transcript_area is not None:
-        kb.add("pageup")(lambda e: _scroll_transcript(params, -TRANSCRIPT_SCROLL_LINES))
-        kb.add("pagedown")(lambda e: _scroll_transcript(params, TRANSCRIPT_SCROLL_LINES))
+        kb.add("pageup")(lambda e: _scroll_transcript(params, -params.transcript_scroll_lines))
+        kb.add("pagedown")(lambda e: _scroll_transcript(params, params.transcript_scroll_lines))
         kb.add("home")(lambda e: _scroll_transcript_home(params))
         kb.add("end")(lambda e: _scroll_transcript_end(params))
         kb.add(Keys.ScrollUp)(lambda e: _scroll_transcript(params, -3))

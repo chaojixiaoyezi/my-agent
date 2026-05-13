@@ -32,7 +32,7 @@ def add_task_subcommands(subparsers: argparse._SubParsersAction[argparse.Argumen
     task_list = subparsers.add_parser("task-list", help="列出任务列表")
     task_list.add_argument("--user-id", help="按用户 ID 过滤")
     task_list.add_argument("--status", help="按状态过滤，如 PLANNING/RUNNING/DONE")
-    task_list.add_argument("--limit", type=int, default=50, help="最多显示多少条")
+    task_list.add_argument("--limit", type=int, default=None, help="最多显示多少条；默认读配置")
     task_list.set_defaults(func=cmd_task_list)
 
     task_abandon = subparsers.add_parser("task-abandon", help="标记任务为 ABANDONED（不再重试）")

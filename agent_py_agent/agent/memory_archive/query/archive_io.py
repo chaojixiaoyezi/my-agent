@@ -29,7 +29,13 @@ ARCHIVE_SEARCH_FILE_LIMIT = 30
 
 # LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _archive_files 时同步检查返回值、异常处理和读写副作用。
 # 函数用途: 完成 archive files 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
-def _archive_files(root: Path, *, layer: str, date_key: str | None) -> list[tuple[str, Path]]:
+def _archive_files(
+    root: Path,
+    *,
+    layer: str,
+    date_key: str | None,
+    file_limit: int = ARCHIVE_SEARCH_FILE_LIMIT,
+) -> list[tuple[str, Path]]:
 
     layers = ["raw", "hook"] if layer == "all" else [layer]
     files: list[tuple[str, Path]] = []
@@ -39,7 +45,7 @@ def _archive_files(root: Path, *, layer: str, date_key: str | None) -> list[tupl
             files.extend(_dated_layer_file(current_layer, directory, date_key))
             continue
         if directory.exists():
-            files.extend(_recent_layer_files(current_layer, directory))
+            files.extend(_recent_layer_files(current_layer, directory, file_limit=file_limit))
     return files
 
 
@@ -52,12 +58,17 @@ def _dated_layer_file(layer: str, directory: Path, date_key: str) -> list[tuple[
 
 # LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _recent_layer_files 时同步检查返回值、异常处理和读写副作用。
 # 函数用途: 完成 recent layer files 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
-def _recent_layer_files(layer: str, directory: Path) -> list[tuple[str, Path]]:
+def _recent_layer_files(
+    layer: str,
+    directory: Path,
+    *,
+    file_limit: int = ARCHIVE_SEARCH_FILE_LIMIT,
+) -> list[tuple[str, Path]]:
     layer_files = sorted(
         [path for path in directory.glob("*.jsonl") if path.is_file()],
         key=lambda path: (path.stat().st_mtime, path.name),
         reverse=True,
-    )[:ARCHIVE_SEARCH_FILE_LIMIT]
+    )[: max(0, int(file_limit))]
     return [(layer, path) for path in layer_files]
 
 

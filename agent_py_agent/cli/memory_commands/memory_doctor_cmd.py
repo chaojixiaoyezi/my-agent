@@ -129,16 +129,16 @@ def _build_archive_doctor(root: Path, config: object) -> dict[str, Any]:
             "memory_hook_archive_level": int(getattr(config, "memory_hook_archive_level", 3)),
             "memory_archive_level": int(getattr(config, "memory_archive_level", 3)),
         },
-        "hook": _archive_dir_payload(hook_today_path.parent, hook_today_path),
-        "raw": _archive_dir_payload(raw_today_path.parent, raw_today_path),
-        "snapshots": _snapshot_dir_payload(snapshot_dir),
+        "hook": _archive_dir_payload(hook_today_path.parent, hook_today_path, config=config),
+        "raw": _archive_dir_payload(raw_today_path.parent, raw_today_path, config=config),
+        "snapshots": _snapshot_dir_payload(snapshot_dir, config=config),
         "consistency_warnings": _archive_consistency_warnings(hook_today_path.parent, snapshot_dir),
     }
 
 
 # LLM: _archive_dir_payload 属于memory CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
-def _archive_dir_payload(directory: Path, today_path: Path) -> dict[str, Any]:
+def _archive_dir_payload(directory: Path, today_path: Path, *, config: object) -> dict[str, Any]:
     files = sorted(
         [path for path in directory.glob("*.jsonl") if path.is_file()] if directory.exists() else [],
         key=lambda path: (path.stat().st_mtime, path.name),
@@ -149,7 +149,10 @@ def _archive_dir_payload(directory: Path, today_path: Path) -> dict[str, Any]:
         "exists": directory.exists(),
         "file_count": len(files),
         "today_path": str(today_path),
-        "recent_files": [_archive_file_payload(path) for path in files[:RECENT_ARCHIVE_FILE_LIMIT]],
+        "recent_files": [
+            _archive_file_payload(path)
+            for path in files[: int(getattr(config, "memory_doctor_recent_archive_file_limit", 5) or 0)]
+        ],
     }
 
 
@@ -167,7 +170,7 @@ def _archive_file_payload(path: Path) -> dict[str, Any]:
 
 # LLM: _snapshot_dir_payload 属于memory CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
-def _snapshot_dir_payload(directory: Path) -> dict[str, Any]:
+def _snapshot_dir_payload(directory: Path, *, config: object) -> dict[str, Any]:
     files = sorted(
         [path for path in directory.glob("*.json") if path.is_file()] if directory.exists() else [],
         key=lambda path: (path.stat().st_mtime, path.name),
@@ -187,7 +190,10 @@ def _snapshot_dir_payload(directory: Path) -> dict[str, Any]:
         "exists": directory.exists(),
         "file_count": len(files),
         "invalid_json_files": invalid_json_files,
-        "recent_files": [_archive_file_payload(path) for path in files[:RECENT_ARCHIVE_FILE_LIMIT]],
+        "recent_files": [
+            _archive_file_payload(path)
+            for path in files[: int(getattr(config, "memory_doctor_recent_archive_file_limit", 5) or 0)]
+        ],
     }
 
 

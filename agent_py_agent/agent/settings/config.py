@@ -13,13 +13,14 @@ from __future__ import annotations
 这里坚持只用标准库，目的是让项目在 Windows / Linux / macOS 上都能轻装运行。
 """
 
-import ast
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .config_io import load_simple_yaml, parse_scalar
 from .memory import normalize_agent_memory_config
 from .normalize import (
     _coerce_bool_config,
@@ -40,12 +41,20 @@ __all__ = [
     "load_config",
     "load_simple_yaml",
     "parse_scalar",
+    "apply_log_level",
     "normalize_agent_config",
     "normalize_subagent_workflow_config",
 ]
 
 _INT_PATTERN = re.compile(r"-?[0-9]+")
 _FLOAT_PATTERN = re.compile(r"-?[0-9]+(\.[0-9]+)?")
+_LOG_LEVELS = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+    "critical": logging.CRITICAL,
+}
 
 
 # LLM: AgentConfig 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
@@ -73,6 +82,19 @@ class AgentConfig:
     memory_resume_auto_context_mode: str = "trigger"
     memory_resume_auto_context_limit: int = 5
     memory_compact_auto_allow_apply: bool = False
+    memory_artifact_default_read_chars: int = 4000
+    memory_archive_preview_level_0_chars: int = 2048
+    memory_archive_preview_level_1_chars: int = 1024
+    memory_archive_preview_level_2_chars: int = 512
+    memory_archive_preview_level_3_chars: int = 160
+    memory_archive_summary_chars: int = 96
+    memory_archive_search_file_limit: int = 30
+    memory_query_default_limit: int = 100
+    memory_query_default_page_size: int = 100
+    memory_query_content_preview_chars: int = 500
+    memory_resume_archive_scan_limit: int = 0
+    memory_resume_recommended_read_paths_limit: int = 20
+    memory_doctor_recent_archive_file_limit: int = 5
     memory_config_warnings: list[dict[str, Any]] = field(default_factory=list)
     local_store_path: str = "data/local_store/local.db"
     local_store_files_dir: str = "data/local_store/files"
@@ -93,6 +115,15 @@ class AgentConfig:
     subagent_workflow_config_warnings: list[dict[str, Any]] = field(default_factory=list)
     task_max_subagents: int = 0
     task_max_grandchildren: int = 0
+    subagent_spawn_default_count: int = 3
+    subagent_cli_default_limit: int = 20
+    subagent_probe_default_limit: int = 20
+    subagent_hierarchy_default_max_depth: int = 2
+    subagent_hierarchy_recovery_max_nodes: int = 200
+    subagent_hierarchy_max_children_per_tool_call: int = 2
+    subagent_descendant_scan_limit: int = 128
+    subagent_context_summary_inline_json_chars: int = 900
+    subagent_context_summary_inline_text_chars: int = 500
     subagent_automation_level: int = 2
     subagent_debug_trace_level: int = 0
     acceptance_execute_tests: bool = False
@@ -124,6 +155,10 @@ class AgentConfig:
     gateway_processing_timeout_seconds: int = 900
     gateway_request_max_attempts: int = 2
     gateway_port: int = 8420
+    gateway_worker_join_timeout_seconds: int = 2
+    gateway_ready_timeout_seconds: int = 10
+    gateway_service_command_timeout_seconds: int = 30
+    gateway_service_stop_timeout_seconds: int = 90
     adapter_workspace: str = "data/adapters/file"
     # 飞书适配器配置
     feishu_app_id: str = ""
@@ -141,7 +176,7 @@ class AgentConfig:
     concurrency_lock_enabled: bool = True
     task_lock_timeout_seconds: int = 30
     audit_enabled: bool = True
-    audit_log_path: str = "data/audit/audit.jsonl"
+    audit_log_path: str = "data/audit"
     daemon_planner: bool = True
     daemon_apply: bool = True
     daemon_execute_runners: bool = True
@@ -166,99 +201,64 @@ class AgentConfig:
     temperature: str = "0.2"
     anthropic_version: str = "2023-06-01"
     enable_tools: bool = True
-    max_tool_rounds: int = 5
+    max_tool_rounds: int = 0
     tool_agent_budget_window_seconds: int = 600
     tool_agent_budget_max_calls: int = 50
-    tool_read_max_chars: int = 6000
+    tool_artifact_read_budget_window_seconds: int = 600
+    tool_artifact_read_budget_max_chars: int = 240_000
+    tool_read_max_chars: int = 50_000
     tool_write_inline_max_chars: int = DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
     tool_list_max_entries: int = 200
     tool_search_max_matches: int = 50
-    tool_web_max_chars: int = 12000
+    tool_web_max_chars: int = 100_000
     tool_http_timeout: int = 30
-    tool_shell_timeout: int = 30
+    tool_shell_timeout: int = 240
     stream_enabled: bool = True
     tool_catalog_limit: int = 20
+    tool_catalog_mode: str = "compact"
+    tool_catalog_offset: int = 0
+    tool_catalog_categories: list[str] = field(default_factory=list)
+    tool_catalog_include_examples: bool = True
+    tool_catalog_entry_max_chars: int = 1200
+    tool_catalog_show_truncated_notice: bool = True
+    tool_detail_max_chars: int = 4000
     tool_retrieval_limit: int = 3
-    tool_vector_search_enabled: bool = False
+    tool_vector_search_enabled: bool = True
+    chat_history_max_turns: int = 20
+    chat_history_assistant_preview_chars: int = 500
+    chat_transcript_max_chars: int = 500_000
+    chat_collapse_preview_lines: int = 12
+    chat_collapse_preview_chars: int = 900
+    chat_context_window_chars: int = 200_000
+    chat_transcript_scroll_lines: int = 10
+    cli_status_limit: int = 5
+    cli_timeline_limit: int = 20
+    cli_memory_list_limit: int = 20
+    cli_memory_search_limit: int = 5
+    cli_chat_memory_limit: int = 5
+    cli_memory_archive_limit: int = 20
+    cli_memory_route_limit: int = 5
+    cli_local_search_limit: int = 5
+    cli_local_search_preview_chars: int = 500
+    cli_local_doctor_limit: int = 20
+    cli_task_list_limit: int = 50
+    cli_notification_limit: int = 20
+    cli_audit_limit: int = 100
+    cli_audit_cleanup_days: int = 90
     # Dispatch 闭环保证配置
     dispatch_max_consecutive_rounds: int = 20
     dispatch_active_interval: int = 5
     dispatch_idle_interval: int = 30
+    dispatch_default_max_runners: int = 1
+    dispatch_default_limit: int = 20
+    dispatch_default_watch_interval: float = 30.0
+    dispatch_pending_runner_scan_limit: int = 999
     # Watchdog 配置
     watchdog_enabled: bool = False
     watchdog_interval: int = 60
     watchdog_max_restarts: int = 3
     watchdog_restart_delay: int = 10
     config_warnings: list[str] = field(default_factory=list)
-
-
-# LLM: parse_scalar 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 解析 parse_scalar 数据结构。
-def parse_scalar(value: str) -> Any:
-
-    value = value.strip().strip('"').strip("'")
-    if value.startswith("[") and value.endswith("]"):
-        parsed = _parse_inline_list(value)
-        if parsed is not None:
-            return parsed
-    if value.lower() in {"true", "false"}:
-        return value.lower() == "true"
-    try:
-        return int(value)
-    except ValueError:
-        return value
-
-
-# LLM: _parse_inline_list 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 解析 parse_inline_list 数据结构。
-def _parse_inline_list(value: str) -> list[Any] | None:
-    try:
-        parsed = ast.literal_eval(value)
-    except (SyntaxError, ValueError):
-        return None
-    if not isinstance(parsed, list):
-        return None
-    return parsed
-
-
-# LLM: load_simple_yaml 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 读取 load_simple_yaml 数据并转换成内部对象。
-def load_simple_yaml(path: Path) -> dict[str, Any]:
-
-    data: dict[str, Any] = {}
-    current_key: str | None = None
-    for raw in path.read_text(encoding="utf-8-sig").splitlines():
-        line = raw.split("#", 1)[0].rstrip()
-        if not line.strip():
-            continue
-        if _append_yaml_list_item(data, current_key, line):
-            continue
-        current_key = _handle_yaml_mapping_line(data, current_key, line)
-    return data
-
-
-# LLM: _append_yaml_list_item 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 向结果或告警集合加入 append_yaml_list_item，同时保留调用方依赖的顺序。
-def _append_yaml_list_item(data: dict[str, Any], current_key: str | None, line: str) -> bool:
-    if not (line.startswith("  - ") and current_key):
-        return False
-    data.setdefault(current_key, []).append(parse_scalar(line[4:]))
-    return True
-
-
-# LLM: _handle_yaml_mapping_line 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 配置系统 中的 handle_yaml_mapping_line 步骤，并保持调用方依赖的数据形状。
-def _handle_yaml_mapping_line(data: dict[str, Any], current_key: str | None, line: str) -> str | None:
-    if ":" not in line or line.startswith(" "):
-        return current_key
-    key, value = line.split(":", 1)
-    key = key.strip()
-    value = value.strip()
-    if value == "":
-        data[key] = []
-        return key
-    data[key] = parse_scalar(value)
-    return None
 
 
 # LLM: load_config 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -293,4 +293,12 @@ def load_config(config_path: str | Path) -> AgentConfig:
         if env_value:
             config.api_key = env_value
 
+    apply_log_level(config)
     return config
+
+
+# LLM: apply_log_level makes the user-facing log_level config affect package loggers without touching global handlers.
+# 函数用途: 根据 log_level 调整 agent_py_agent 包日志级别；改配置后重新加载配置即可生效。
+def apply_log_level(config: AgentConfig) -> None:
+    level_name = str(getattr(config, "log_level", "info") or "info").strip().lower()
+    logging.getLogger("agent_py_agent").setLevel(_LOG_LEVELS.get(level_name, logging.INFO))

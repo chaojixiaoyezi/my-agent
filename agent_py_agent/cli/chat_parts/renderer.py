@@ -33,13 +33,20 @@ def progress_bar(ratio: float, width: int = 10) -> str:
 
 # LLM: collapse_response_text 属于chat CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
-def collapse_response_text(text: str) -> tuple[str, bool]:
+def collapse_response_text(
+    text: str,
+    *,
+    preview_lines: int = COLLAPSE_PREVIEW_LINES,
+    preview_chars: int = COLLAPSE_PREVIEW_CHARS,
+) -> tuple[str, bool]:
     lines = text.splitlines()
-    if len(lines) <= COLLAPSE_PREVIEW_LINES and len(text) <= COLLAPSE_PREVIEW_CHARS:
+    preview_lines = max(0, int(preview_lines or 0))
+    preview_chars = max(0, int(preview_chars or 0))
+    if len(lines) <= preview_lines and len(text) <= preview_chars:
         return text, False
-    preview = "\n".join(lines[:COLLAPSE_PREVIEW_LINES]).strip()
-    if len(preview) > COLLAPSE_PREVIEW_CHARS:
-        preview = preview[:COLLAPSE_PREVIEW_CHARS].rstrip()
+    preview = "\n".join(lines[:preview_lines]).strip() if preview_lines else ""
+    if preview_chars and len(preview) > preview_chars:
+        preview = preview[:preview_chars].rstrip()
     if len(preview) < len(text):
         preview += "\n..."
     return preview, True

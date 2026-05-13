@@ -18,10 +18,11 @@ class TaskLockManager:
     # LLM: TaskLockManager.__init__ belongs to 并发和冲突重试; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 初始化实例依赖和字段，不应在构造阶段做难以回滚的重副作用；它是 TaskLockManager 的方法，通常依赖实例字段。
     def __init__(self, config: AgentConfig | None = None):
+        self.enabled = _lock_enabled(config)
         self._read_locks: dict[str, threading.RLock] = {}
         self._write_lock = threading.RLock()
         self._lock_creation_time: dict[str, float] = {}
-        self._cleanup_timeout = 300  # 5 分钟无访问则清理
+        self._cleanup_timeout = _cleanup_timeout(config)
 
     # LLM: TaskLockManager._get_read_lock belongs to 并发和冲突重试; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 查询已有记录、索引或配置并返回给上层调用方，返回结构需要保持稳定；它是 TaskLockManager 的方法，通常依赖实例字段。
@@ -37,12 +38,16 @@ class TaskLockManager:
     # LLM: TaskLockManager.acquire_read belongs to 并发和冲突重试; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 完成 并发和冲突重试 里的 acquire_read 步骤，保持现有返回值、异常和副作用语义；会读取实例字段。
     def acquire_read(self, task_id: str) -> None:
+        if not self.enabled:
+            return
         lock, _ = self._get_read_lock(task_id)
         lock.acquire()
 
     # LLM: TaskLockManager.release_read belongs to 并发和冲突重试; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 完成 并发和冲突重试 里的 release_read 步骤，保持现有返回值、异常和副作用语义；会读取实例字段。
     def release_read(self, task_id: str) -> None:
+        if not self.enabled:
+            return
         with self._write_lock:
             lock = self._read_locks.get(task_id)
             if lock is not None:
@@ -51,6 +56,8 @@ class TaskLockManager:
     # LLM: TaskLockManager.acquire_write belongs to 并发和冲突重试; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 完成 并发和冲突重试 里的 acquire_write 步骤，保持现有返回值、异常和副作用语义；会读取实例字段。
     def acquire_write(self, task_id: str) -> None:
+        if not self.enabled:
+            return
         with self._write_lock:
             # 先获取读锁，再升级为写锁
             lock, _ = self._get_read_lock(task_id)
@@ -60,6 +67,8 @@ class TaskLockManager:
     # LLM: TaskLockManager.release_write belongs to 并发和冲突重试; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 完成 并发和冲突重试 里的 release_write 步骤，保持现有返回值、异常和副作用语义；会读取实例字段。
     def release_write(self, task_id: str) -> None:
+        if not self.enabled:
+            return
         with self._write_lock:
             lock = self._read_locks.get(task_id)
             if lock is not None:
@@ -99,6 +108,8 @@ class TaskLockManager:
     # LLM: TaskLockManager.cleanup belongs to 并发和冲突重试; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 完成 并发和冲突重试 里的 cleanup 步骤，保持现有返回值、异常和副作用语义；会读取实例字段。
     def cleanup(self) -> int:
+        if not self.enabled:
+            return 0
         with self._write_lock:
             now = time.time()
             to_remove = [
@@ -144,12 +155,32 @@ def _release_lock_twice(lock: threading.RLock) -> None:
         pass
 
 
+# LLM: _lock_enabled mirrors config normalization for small config stubs passed directly in tests or integrations.
+# 函数用途: 判断任务锁是否开启；兼容未完整归一化的轻量配置对象。
+def _lock_enabled(config: AgentConfig | None) -> bool:
+    raw_value = getattr(config, "concurrency_lock_enabled", True)
+    if isinstance(raw_value, str):
+        return raw_value.strip().lower() not in {"false", "no", "off", "0"}
+    return bool(raw_value)
+
+
+# LLM: _cleanup_timeout makes task_lock_timeout_seconds the single knob for stale lock cleanup.
+# 函数用途: 从配置读取任务锁清理超时；没有配置对象时保持旧的 300 秒默认。
+def _cleanup_timeout(config: AgentConfig | None) -> int:
+    raw_value = getattr(config, "task_lock_timeout_seconds", 300)
+    try:
+        timeout = int(raw_value)
+    except (TypeError, ValueError):
+        return 300
+    return max(1, timeout)
+
+
 # LLM: get_task_lock_manager belongs to 并发和冲突重试; keep caller-visible returns, errors, and side effects aligned with focused tests.
 # 函数用途: 查询已有记录、索引或配置并返回给上层调用方，返回结构需要保持稳定。
-def get_task_lock_manager() -> TaskLockManager:
+def get_task_lock_manager(config: AgentConfig | None = None) -> TaskLockManager:
     global _global_lock_manager
     if _global_lock_manager is None:
-        _global_lock_manager = TaskLockManager()
+        _global_lock_manager = TaskLockManager(config)
     return _global_lock_manager
 
 

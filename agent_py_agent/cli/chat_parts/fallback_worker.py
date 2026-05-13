@@ -13,12 +13,12 @@ from .fallback_handlers import (
 )
 from .fallback_refs import FallbackInputRefs
 from .fallback_state import (
-    MAX_HISTORY_TURNS,
     ConversationTurn,
     FallbackWorkerConfig,
     RunFallbackConfig,
     append_conversation_turn,
 )
+from .history import chat_history_max_turns
 
 
 # LLM: _fallback_process_job 属于chat CLI；改行为前先对齐调用方和快照/单测。
@@ -56,7 +56,7 @@ def _fallback_finish_job(
             cfg.conversation_history,
             cfg.history_lock,
             ConversationTurn(job.user, agent_response_text),
-            max_turns=MAX_HISTORY_TURNS,
+            max_turns=chat_history_max_turns(getattr(cfg.agent, "config", object())),
         )
     with cfg.state_lock:
         cfg.is_running_ref[0] = False

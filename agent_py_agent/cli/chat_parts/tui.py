@@ -77,14 +77,20 @@ COLLAPSE_PREVIEW_CHARS = 900
 
 # LLM: _tui_get_status_text 属于chat CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 维护 TUI 聊天界面的输入、状态栏、退出或渲染行为。
-def _tui_get_status_text(refs: TuiStatusRefs, model: str) -> str:
+def _tui_get_status_text(
+    refs: TuiStatusRefs,
+    model: str,
+    *,
+    context_window_chars: int = CONTEXT_WINDOW,
+) -> str:
     with refs.state_lock:
         tokens = refs.last_token_estimate_ref[0]
-    pct = tokens / CONTEXT_WINDOW if CONTEXT_WINDOW else 0
+    window = max(1, int(context_window_chars or CONTEXT_WINDOW))
+    pct = tokens / window if window else 0
     bar = progress_bar(pct)
     pieces = [
         f"model {model}",
-        f"ctx {tokens / 1000:.1f}K/{CONTEXT_WINDOW / 1000:.0f}K",
+        f"ctx {tokens / 1000:.1f}K/{window / 1000:.0f}K",
         f"[{bar}] {pct:.0%}",
     ]
     return " | ".join(pieces)

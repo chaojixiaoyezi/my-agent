@@ -167,11 +167,12 @@ def cmd_task_search(args) -> int:
 # LLM: _task_list_options 属于task CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _task_list_options(args) -> TaskListOptions:
+    config = load_config(args.config)
     return TaskListOptions(
         config=args.config,
         user_id=args.user_id,
         status=args.status,
-        limit=int(args.limit or 0),
+        limit=int(args.limit if args.limit is not None else getattr(config, "cli_task_list_limit", 50)),
     )
 
 

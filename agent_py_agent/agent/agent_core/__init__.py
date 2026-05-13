@@ -9,6 +9,7 @@ SimpleAgent 的主循环、子代理、dispatch、prompt 模板、工具类和�
 `agent.core` 仍然是外部主入口，这个包服务内部组合。
 """
 
+from .capability_config_patch_tool import CapabilityConfigPatchTool
 from .capability_request_tool import CapabilityRequestTool
 from .dispatch_mixin import SimpleAgentDispatchMixin
 from .hierarchy_tools import ScheduleChildSubagentsTool
@@ -25,6 +26,7 @@ from .subagent_mixin import SimpleAgentSubagentMixin
 __all__ = [
     "AgentRunResult",
     "CapabilityRequestTool",
+    "CapabilityConfigPatchTool",
     "CreateSubagentsTool",
     "DispatchSubagentsTool",
     "ScheduleChildSubagentsTool",

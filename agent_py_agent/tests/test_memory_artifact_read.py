@@ -89,6 +89,108 @@ def test_read_artifact_tool_reads_explicit_slice_from_registered_artifact(tmp_pa
     assert payload["reads_artifact_body"] is True
 
 
+# LLM: artifact read modes should let agents inspect large outputs without rereading the whole body.
+# 函数用途: 验证 read_artifact 支持 head/tail/search/slice 模式，方便子代理只读需要的片段或关键行。
+def test_read_artifact_supports_head_tail_and_search_modes(tmp_path: Path) -> None:
+    content = "alpha first\nbeta middle\nneedle here\nbeta after\nomega last"
+    artifact_path = _write_externalized_tool_output(tmp_path, content=content)
+
+    head = _read_artifact_payload(tmp_path, artifact_path, {"mode": "head", "max_chars": 11})
+    tail = _read_artifact_payload(tmp_path, artifact_path, {"mode": "tail", "max_chars": 10})
+    search = _read_artifact_payload(tmp_path, artifact_path, {"mode": "search", "query": "beta", "max_chars": 80})
+
+    assert head["ok"] is True
+    assert head["read_mode"] == "head"
+    assert head["content"] == "alpha first"
+    assert tail["ok"] is True
+    assert tail["read_mode"] == "tail"
+    assert tail["content"] == "omega last"
+    assert search["ok"] is True
+    assert search["read_mode"] == "search"
+    assert search["search_query"] == "beta"
+    assert search["match_count"] == 2
+    assert "2: beta middle" in search["content"]
+    assert "4: beta after" in search["content"]
+
+
+# LLM: artifact read budgets prevent repeated artifact-body pulls from flooding prompts or disk IO.
+# 函数用途: 验证同一 run 在窗口内超过 artifact 正文读取字符预算时会被阻断，兄弟 run 不受影响。
+def test_read_artifact_tool_enforces_per_run_artifact_read_budget(tmp_path: Path) -> None:
+    artifact_path = _write_externalized_tool_output(tmp_path, content="0123456789" * 20)
+    registry = ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=tmp_path,
+            max_chars=1000,
+            max_entries=20,
+            max_matches=20,
+            web_max_chars=1000,
+            http_timeout=5,
+            catalog_limit=20,
+            retrieval_limit=10,
+            vector_search_enabled=False,
+            artifact_read_budget_window_seconds=600,
+            artifact_read_budget_max_chars=12,
+        )
+    )
+
+    first = registry.execute_call({
+        "tool": "read_artifact",
+        "artifact_ref": str(artifact_path),
+        "run_id": "reader-a",
+        "max_chars": 8,
+    })
+    second = registry.execute_call({
+        "tool": "read_artifact",
+        "artifact_ref": str(artifact_path),
+        "run_id": "reader-a",
+        "max_chars": 8,
+    })
+    sibling = registry.execute_call({
+        "tool": "read_artifact",
+        "artifact_ref": str(artifact_path),
+        "run_id": "reader-b",
+        "max_chars": 8,
+    })
+
+    assert first.ok is True
+    assert second.ok is False
+    assert "artifact 读取预算" in second.output
+    assert "reader-a" in second.output
+    assert sibling.ok is True
+
+
+# LLM: unbounded reads should use the artifact index size before loading the body.
+# 函数用途: 验证 max_chars=0 读取全部时，会先按 index 里的 size_bytes 做预算预判，避免大 artifact 被直接展开。
+def test_read_artifact_budget_blocks_unbounded_large_read_from_index(tmp_path: Path) -> None:
+    artifact_path = _write_externalized_tool_output(tmp_path, content="0123456789" * 20)
+    registry = ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=tmp_path,
+            max_chars=1000,
+            max_entries=20,
+            max_matches=20,
+            web_max_chars=1000,
+            http_timeout=5,
+            catalog_limit=20,
+            retrieval_limit=10,
+            vector_search_enabled=False,
+            artifact_read_budget_window_seconds=600,
+            artifact_read_budget_max_chars=12,
+        )
+    )
+
+    result = registry.execute_call({
+        "tool": "read_artifact",
+        "artifact_ref": str(artifact_path),
+        "run_id": "reader-a",
+        "max_chars": 0,
+    })
+
+    assert result.ok is False
+    assert "artifact 读取预算" in result.output
+    assert "本次请求" in result.output
+
+
 def test_read_artifact_tool_repairs_wrong_prefix_with_unique_artifact_name(tmp_path: Path) -> None:
     artifact_path = _write_externalized_tool_output(tmp_path, content="abcdef" * 300)
     registry = ToolRegistry(
@@ -206,6 +308,23 @@ def test_read_file_rejects_tool_output_artifact_wrapper(tmp_path: Path) -> None:
     assert "max_chars" in result.output
 
 
+# LLM: wrapper hints should tell a restricted agent how to request artifact-read capability.
+# 函数用途: 当当前 allowed_tools 只有 read_file 时，误读外置 artifact 的提示要说明缺 read_artifact 权限并建议上报能力申请。
+def test_read_file_artifact_wrapper_hint_mentions_missing_read_artifact_permission(tmp_path: Path) -> None:
+    artifact_path = _write_externalized_tool_output(tmp_path, content="large-output" * 500)
+    registry = _registry(tmp_path)
+
+    result = registry.execute_call(
+        {"tool": "read_file", "path": str(artifact_path)},
+        allowed_tools=["read_file"],
+    )
+
+    assert result.ok is False
+    assert "read_artifact" in result.output
+    assert "未授权" in result.output
+    assert "capability_request" in result.output
+
+
 # LLM: test_read_file_typo_to_tool_output_artifact_routes_to_read_artifact catches copied-prefix drift.
 # 函数用途: 模型把 artifact 绝对路径前缀抄错时，read_file 也要提示改用 read_artifact，而不是按 suggested_target 继续读文件。
 def test_read_file_typo_to_tool_output_artifact_routes_to_read_artifact(tmp_path: Path) -> None:
@@ -264,6 +383,29 @@ def _registry(root: Path) -> ToolRegistry:
             catalog_limit=20,
             retrieval_limit=10,
             vector_search_enabled=False,
+        )
+    )
+
+
+# LLM: _read_artifact_payload keeps mode tests focused on the public memory reader contract.
+# 函数用途: 直接调用 artifact reader 并返回 JSON payload，避免重复构造 registry。
+def _read_artifact_payload(
+    root: Path,
+    artifact_path: Path,
+    options: dict[str, object],
+) -> dict:
+    from agent_py_agent.agent.memory_archive.artifact_reader import (
+        ReadToolOutputArtifactRequest,
+        read_tool_output_artifact,
+    )
+
+    return read_tool_output_artifact(
+        ReadToolOutputArtifactRequest(
+            root=root,
+            artifact_ref=str(artifact_path),
+            mode=str(options.get("mode") or "slice"),
+            max_chars=int(options.get("max_chars") or 4000),
+            query=str(options.get("query") or ""),
         )
     )
 

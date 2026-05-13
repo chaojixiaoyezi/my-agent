@@ -17,6 +17,41 @@ from ..tools import ToolSpec
 from .config import CapabilityConfig
 from .skills import SkillCard, SkillRegistry
 
+_PLAYWRIGHT_CAPABILITIES = [
+    "playwright",
+    "browser_automation",
+    "frontend_e2e",
+    "ui_testing",
+    "screenshot",
+]
+_PLAYWRIGHT_WHEN_TO_USE = [
+    "需要真实浏览器打开页面、点击按钮、截图或验证前端流程时使用",
+    "购物、登录、设置页、仪表盘等 UI E2E 验收需要可追溯证据时使用",
+]
+_PLAYWRIGHT_NOT_WHEN_TO_USE = [
+    "只需要读取静态文件或做纯文本检查时不必启动浏览器",
+    "没有父级授权 command/path scope 的子代理不能自行执行 shell",
+]
+_PLAYWRIGHT_KEYWORDS = [
+    "playwright",
+    "browser",
+    "chrome",
+    "chromium",
+    "e2e",
+    "ui",
+    "frontend",
+    "screenshot",
+    "click",
+    "form",
+    "浏览器",
+    "前端",
+    "端到端",
+    "截图",
+    "按钮",
+    "登录",
+    "购物",
+]
+
 
 # LLM: CapabilityCard is a 能力路由 boundary object; coordinate field or method changes with callers, docs, and focused tests.
 # 类用途: 统一能力卡片。 `kind` 当前主要是 `skill` 或 `tool`，但刻意保留成普通字符串。 后续如果要加入 resource、mcp、remote_agent，也不用改 schema。
@@ -103,6 +138,8 @@ class CapabilityRouter:
                 self.register(from_skill_card(card))
         for spec in tool_specs or []:
             self.register(from_tool_spec(spec))
+        for card in default_capability_cards():
+            self.register(card)
         for card in extra_cards or []:
             self.register(card)
 
@@ -214,6 +251,34 @@ def from_tool_spec(spec: ToolSpec) -> CapabilityCard:
             "parameters": spec.parameters,
             "examples": spec.examples,
         },
+    )
+
+
+# LLM: default_capability_cards maps built-in higher-level abilities onto stable execution tools.
+# 函数用途: 提供默认能力卡；例如 Playwright 前端/E2E 能力先路由到 controlled_exec，后续有专用工具时可只替换这里的卡片映射。
+def default_capability_cards() -> list[CapabilityCard]:
+    return [_playwright_capability_card()]
+
+
+# LLM: _playwright_capability_card keeps browser/E2E routing centralized and easy to swap.
+# 函数用途: 构造 Playwright 默认能力卡，把前端浏览器测试需求映射到受控执行工具。
+def _playwright_capability_card() -> CapabilityCard:
+    return CapabilityCard(
+        id="builtin:playwright-browser-testing",
+        kind="tool",
+        name="controlled_exec",
+        description=(
+            "Playwright browser automation ability for frontend E2E, screenshots, "
+            "click/form checks, and UI smoke tests inside authorized workspaces."
+        ),
+        capabilities=list(_PLAYWRIGHT_CAPABILITIES),
+        when_to_use=list(_PLAYWRIGHT_WHEN_TO_USE),
+        not_when_to_use=list(_PLAYWRIGHT_NOT_WHEN_TO_USE),
+        keywords=list(_PLAYWRIGHT_KEYWORDS),
+        risk_level="medium",
+        side_effects=["local_process", "browser_automation", "filesystem_read"],
+        source="builtin_capability_card",
+        metadata={"package": "playwright", "execution_tool": "controlled_exec"},
     )
 
 

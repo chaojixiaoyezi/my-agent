@@ -36,7 +36,12 @@ from .chat_parts.fallback import FALLBACK_CHAT_PROMPT, run_fallback
 from .chat_parts.fallback_state import RunFallbackConfig
 
 # Backward compatibility imports from chat_parts
-from .chat_parts.history import append_conversation_turn, build_history_context
+from .chat_parts.history import (
+    append_conversation_turn,
+    build_history_context,
+    chat_assistant_preview_chars,
+    chat_history_max_turns,
+)
 from .chat_parts.input_loop import handle_common_slash_command
 from .chat_parts.rendering import (
     COLLAPSE_PREVIEW_CHARS as _COLLAPSE_PREVIEW_CHARS,
@@ -82,7 +87,7 @@ def _setup_session(args, session_manager: SessionManager):
 
 # LLM: _init_chat_state 初始化 chat 共享状态；TUI 和 fallback 共用这些字段。
 # 函数用途: 创建对话历史、锁、停止事件、队列和 history context builder。
-def _init_chat_state():
+def _init_chat_state(agent):
     conversation_history: list[tuple[str, str]] = []
     history_lock = threading.Lock()
     state = dict(
@@ -101,7 +106,12 @@ def _init_chat_state():
     # LLM: _build_history_context 属于chat CLI；改行为前先对齐调用方和快照/单测。
     # 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
     def _build_history_context() -> str:
-        return build_history_context(conversation_history, history_lock, max_turns=MAX_HISTORY_TURNS)
+        return build_history_context(
+            conversation_history,
+            history_lock,
+            max_turns=chat_history_max_turns(agent.config),
+            assistant_preview_chars=chat_assistant_preview_chars(agent.config),
+        )
 
     return state, _build_history_context
 
@@ -120,17 +130,22 @@ def _has_prompt_toolkit() -> bool:
 # 函数用途: 创建 agent/session，注入响应风格，并启动对应的聊天界面。
 def cmd_chat(args) -> int:
     agent = make_agent(args)
+    if getattr(args, "memory_limit", None) is None:
+        args.memory_limit = int(getattr(agent.config, "cli_chat_memory_limit", 5) or 0)
     use_gateway = bool(args.gateway)
     paths = gateway_paths(agent)
     if use_gateway:
-        _, alive = wait_for_gateway_running(paths, timeout=10.0)
+        _, alive = wait_for_gateway_running(
+            paths,
+            timeout=float(getattr(agent.config, "gateway_ready_timeout_seconds", 10) or 10),
+        )
         if not alive:
             print("gateway 未在运行。请先执行: my-agent gateway start", file=sys.stderr)
             return 2
 
     session_manager = SessionManager(agent.config)
     current_session_id = _setup_session(args, session_manager)
-    state, build_history_context = _init_chat_state()
+    state, build_history_context = _init_chat_state(agent)
     runtime_inject: list[str] = args.inject or []
     prompt_files: list[str] = args.prompt_file or []
 

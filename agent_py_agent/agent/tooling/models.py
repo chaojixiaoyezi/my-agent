@@ -33,23 +33,33 @@ class ToolSpec:
 
     # LLM: ToolSpec.render_catalog_entry 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 把 render_catalog_entry 转成人或模型可读的展示文本。
-    def render_catalog_entry(self) -> str:
+    def render_catalog_entry(
+        self,
+        *,
+        include_examples: bool = True,
+        max_chars: int = 0,
+    ) -> str:
 
         params = "、".join(self.parameters.keys()) or "无"
         use_cases = "；".join(self.use_cases[:2]) or "无"
         avoid_when = "；".join(self.avoid_when[:1]) or "无"
-        example = f"\n  示例：{self.examples[0]}" if self.examples else ""
-        return (
+        example = f"\n  示例：{self.examples[0]}" if include_examples and self.examples else ""
+        rendered = (
             f"- {self.name} [{self.category}]：{self.description}\n"
             f"  适用场景：{use_cases}\n"
             f"  关键参数：{params}\n"
             f"  不适用时机：{avoid_when}"
             f"{example}"
         )
+        return _truncate_rendered_tool_entry(
+            rendered,
+            max_chars=max_chars,
+            label="tool_catalog_entry_max_chars",
+        )
 
     # LLM: ToolSpec.render_detail_entry 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 把 render_detail_entry 转成人或模型可读的展示文本。
-    def render_detail_entry(self) -> str:
+    def render_detail_entry(self, *, max_chars: int = 0) -> str:
 
         params = "\n".join(
             f"  - {name}: {self.parameter_details.get(name, desc)}"
@@ -58,7 +68,7 @@ class ToolSpec:
         examples = "\n".join(f"  - {item}" for item in self.examples) or "  - 无"
         use_cases = "\n".join(f"  - {item}" for item in self.use_cases) or "  - 无"
         avoid_when = "\n".join(f"  - {item}" for item in self.avoid_when) or "  - 无"
-        return (
+        rendered = (
             f"## {self.name}\n"
             f"类别：{self.category}\n"
             f"一句话说明：{self.description}\n"
@@ -66,6 +76,11 @@ class ToolSpec:
             f"关键参数说明：\n{params}\n"
             f"示例：\n{examples}\n"
             f"这些场景别优先选它：\n{avoid_when}"
+        )
+        return _truncate_rendered_tool_entry(
+            rendered,
+            max_chars=max_chars,
+            label="tool_detail_max_chars",
         )
 
 
@@ -176,6 +191,14 @@ class BaseTool:
     # 函数用途: 执行 BaseTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         raise NotImplementedError
+
+
+# LLM: _truncate_rendered_tool_entry lets config cap tool prompt blocks without changing tool metadata.
+# 函数用途: 按配置截断工具目录/详情文本，避免单个工具说明撑爆 prompt。
+def _truncate_rendered_tool_entry(text: str, *, max_chars: int, label: str) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + f"\n  ... 已按 {label} 截断"
 
 
 

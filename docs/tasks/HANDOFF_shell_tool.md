@@ -13,8 +13,8 @@
 | 文件 | 改动 |
 |------|------|
 | `agent_py_agent/agent/tooling/registry.py` | 添加 `shell_tool_timeout` 参数；实例化并注册 `ShellTool` |
-| `agent_py_agent/agent/settings/config.py` | 添加 `tool_shell_timeout: int = 30` 字段和 coerce 规则 |
-| `agent_py_agent/config/agent_config.yaml` | 添加 `tool_shell_timeout: 30` |
+| `agent_py_agent/agent/settings/config.py` | 添加 `tool_shell_timeout: int = 240` 字段和 coerce 规则 |
+| `agent_py_agent/config/agent_config.yaml` | 添加 `tool_shell_timeout: 240` |
 | `agent_py_agent/tests/test_tools/test_shell_tool.py` | 新建，22 个测试用例 |
 | `agent_py_agent/tests/test_tools/backends.py` | `make_tool_registry()` 添加 `shell_tool_timeout=30` |
 | `agent_py_agent/tests/test_capabilities.py` | 两处 `ToolRegistry()` 初始化添加 `shell_tool_timeout=30` |

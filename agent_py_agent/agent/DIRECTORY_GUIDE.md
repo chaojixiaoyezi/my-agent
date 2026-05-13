@@ -44,9 +44,9 @@
 
 能力治理层。放 Capability Card、Skill Card、Tool Card 路由、能力配置、skill 扫描。
 
-允许：能力检索、能力授权候选、skill/tool 卡片统一抽象、能力缺口上抛相关结构。
+允许：能力检索、能力授权候选、skill/tool 卡片统一抽象、能力缺口上抛相关结构、`capability_config` 结构化补丁和热加载 snapshot。
 
-不允许：真正执行工具、直接跑模型、直接修改 subagent 状态。
+不允许：真正执行工具、直接跑模型、绕过补丁服务直接修改配置或 subagent 状态。
 
 ### `clients/`
 

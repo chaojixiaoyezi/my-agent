@@ -63,21 +63,100 @@ class ToolFieldsService:
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         out = dict(data)
-        warnings = _apply_int_fields(
-            out,
-            defaults,
-            (
-                ("max_tool_rounds", 1, None),
-                ("tool_agent_budget_window_seconds", 0, None),
-                ("tool_agent_budget_max_calls", 0, None),
-                ("tool_read_max_chars", 100, None),
-                ("tool_write_inline_max_chars", 100, 100_000),
-                ("tool_http_timeout", 1, None),
-                ("tool_shell_timeout", 1, None),
-            ),
-        )
-        warnings.extend(_apply_bool_fields(out, defaults, ("stream_enabled",)))
+        warnings = _normalize_tool_int_fields(out, defaults)
+        warnings.extend(_normalize_tool_bool_fields(out, defaults))
+        warnings.extend(_normalize_tool_catalog_fields(out, defaults))
+        warnings.extend(_normalize_dispatch_watch_interval(out, defaults))
         return out, warnings
+
+
+# LLM: _normalize_tool_int_fields keeps ToolFieldsService.normalize below code-size limits.
+# 函数用途: 归一化工具、聊天和 CLI 展示相关整数配置。
+def _normalize_tool_int_fields(out: dict[str, object], defaults: object) -> list[str]:
+    return _apply_int_fields(out, defaults, _TOOL_INT_FIELDS)
+
+
+# LLM: _normalize_tool_bool_fields keeps boolean tool prompt switches in one audited list.
+# 函数用途: 归一化工具开关和工具目录展示布尔配置。
+def _normalize_tool_bool_fields(out: dict[str, object], defaults: object) -> list[str]:
+    return _apply_bool_fields(
+        out,
+        defaults,
+        ("stream_enabled", "tool_catalog_include_examples", "tool_catalog_show_truncated_notice"),
+    )
+
+
+# LLM: _normalize_tool_catalog_fields keeps catalog prompt-shaping knobs safe and config-backed.
+# 函数用途: 归一化工具目录展示模式和类别过滤列表。
+def _normalize_tool_catalog_fields(out: dict[str, object], defaults: object) -> list[str]:
+    warnings: list[str] = []
+    mode, warn = CoercionService.coerce_choice(
+        "tool_catalog_mode",
+        out.get("tool_catalog_mode"),
+        defaults.tool_catalog_mode,
+        choices=("compact", "full", "retrieval_only", "off"),
+    )
+    out["tool_catalog_mode"] = mode
+    _append_warning(warnings, warn)
+    out["tool_catalog_categories"] = _normalize_string_list(
+        out.get("tool_catalog_categories", defaults.tool_catalog_categories)
+    )
+    return warnings
+
+
+# LLM: _normalize_dispatch_watch_interval handles the one float in the runtime tool slice.
+# 函数用途: 归一化 dispatch 默认 watch 间隔，并返回配置告警。
+def _normalize_dispatch_watch_interval(out: dict[str, object], defaults: object) -> list[str]:
+    warnings: list[str] = []
+    value, warn = CoercionService.coerce_float(
+        "dispatch_default_watch_interval",
+        out.get("dispatch_default_watch_interval"),
+        defaults.dispatch_default_watch_interval,
+        min_val=0.0,
+        max_val=None,
+    )
+    out["dispatch_default_watch_interval"] = value
+    _append_warning(warnings, warn)
+    return warnings
+
+
+_TOOL_INT_FIELDS = (
+    ("max_tool_rounds", 0, None),
+    ("tool_agent_budget_window_seconds", 0, None),
+    ("tool_agent_budget_max_calls", 0, None),
+    ("tool_artifact_read_budget_window_seconds", 0, None),
+    ("tool_artifact_read_budget_max_chars", 0, None),
+    ("tool_read_max_chars", 100, None),
+    ("tool_write_inline_max_chars", 100, 100_000),
+    ("tool_web_max_chars", 0, None),
+    ("tool_http_timeout", 1, None),
+    ("tool_shell_timeout", 1, None),
+    ("tool_catalog_limit", 0, None),
+    ("tool_catalog_offset", 0, None),
+    ("tool_catalog_entry_max_chars", 0, None),
+    ("tool_detail_max_chars", 0, None),
+    ("chat_history_max_turns", 1, None),
+    ("chat_history_assistant_preview_chars", 0, None),
+    ("chat_transcript_max_chars", 1000, None),
+    ("chat_collapse_preview_lines", 0, None),
+    ("chat_collapse_preview_chars", 0, None),
+    ("chat_context_window_chars", 1000, None),
+    ("chat_transcript_scroll_lines", 1, None),
+    ("cli_status_limit", 0, None),
+    ("cli_timeline_limit", 0, None),
+    ("cli_memory_list_limit", 0, None),
+    ("cli_memory_search_limit", 0, None),
+    ("cli_chat_memory_limit", 0, None),
+    ("cli_memory_archive_limit", 0, None),
+    ("cli_memory_route_limit", 0, None),
+    ("cli_local_search_limit", 0, None),
+    ("cli_local_search_preview_chars", -1, None),
+    ("cli_local_doctor_limit", 0, None),
+    ("cli_task_list_limit", 0, None),
+    ("cli_notification_limit", 0, None),
+    ("cli_audit_limit", 0, None),
+    ("cli_audit_cleanup_days", 0, None),
+)
 
 
 # LLM: SubagentBasicFieldsService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
@@ -93,7 +172,20 @@ class SubagentBasicFieldsService:
         warnings = _apply_int_fields(
             out,
             defaults,
-            (("memory_top_k", 0, None), ("max_subagents", 0, None), ("subagent_board_limit", 0, None)),
+            (
+                ("memory_top_k", 0, None),
+                ("max_subagents", 0, None),
+                ("subagent_board_limit", 0, None),
+                ("subagent_spawn_default_count", 0, None),
+                ("subagent_cli_default_limit", 0, None),
+                ("subagent_probe_default_limit", 0, None),
+                ("subagent_hierarchy_default_max_depth", 0, None),
+                ("subagent_hierarchy_recovery_max_nodes", 0, None),
+                ("subagent_hierarchy_max_children_per_tool_call", 1, None),
+                ("subagent_descendant_scan_limit", 1, None),
+                ("subagent_context_summary_inline_json_chars", 0, None),
+                ("subagent_context_summary_inline_text_chars", 0, None),
+            ),
         )
         out["subagent_allowed_tools"] = _normalize_string_list(
             out.get("subagent_allowed_tools", defaults.subagent_allowed_tools)
@@ -211,28 +303,6 @@ class UserFieldsService:
         else:
             out["admin_user_id"] = defaults.admin_user_id
 
-        return out, warnings
-
-
-# LLM: TimeoutFieldsService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: TimeoutFieldsService 封装 配置系统 的一组相关操作，供上层组合调用。
-class TimeoutFieldsService:
-    """Normalize timeout-related config fields."""
-
-    # LLM: TimeoutFieldsService.normalize 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 归一化 TimeoutFieldsService 负责的配置字段并追加告警。
-    @staticmethod
-    def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
-        out = dict(data)
-        warnings = _apply_int_fields(
-            out,
-            defaults,
-            (
-                ("lease_heartbeat_interval_seconds", 10, None),
-                ("lease_stale_without_heartbeat_seconds", 30, None),
-                ("task_lock_timeout_seconds", 1, None),
-            ),
-        )
         return out, warnings
 
 

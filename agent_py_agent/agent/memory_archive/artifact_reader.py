@@ -10,6 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .artifact_read_modes import (
+    ArtifactContentReadRequest,
+    ArtifactContentReadResult,
+    read_artifact_content_by_mode,
+)
+
 DEFAULT_ARTIFACT_READ_CHARS = 4000
 
 
@@ -21,6 +27,8 @@ class ReadToolOutputArtifactRequest:
     artifact_ref: str
     offset: int = 0
     max_chars: int = DEFAULT_ARTIFACT_READ_CHARS
+    mode: str = "slice"
+    query: str = ""
     run_id: str = ""
     task_id: str = ""
     request_id: str = ""
@@ -54,6 +62,22 @@ def read_tool_output_artifact(request: ReadToolOutputArtifactRequest) -> dict[st
     return _read_registered_artifact(_RegisteredArtifactRead(path=path, record=record, request=request))
 
 
+# LLM: estimate_tool_output_artifact_size reads only the lightweight index, never the artifact body.
+# 函数用途: 在 read_artifact 真正展开正文前估算 artifact 大小，用于预算和安全预判。
+def estimate_tool_output_artifact_size(request: ReadToolOutputArtifactRequest) -> int | None:
+    root = Path(request.root).expanduser().resolve(strict=False)
+    artifact_ref = str(request.artifact_ref or "").strip()
+    if not artifact_ref:
+        return None
+    record = _find_index_record(root, artifact_ref, request)
+    if record is None:
+        return None
+    try:
+        return max(0, int(record.get("size_bytes") or 0))
+    except (TypeError, ValueError):
+        return None
+
+
 # LLM: _read_registered_artifact validates artifact JSON and returns only the requested content slice.
 # 函数用途: 读取 artifact JSON 正文，校验 kind/content/hash，再按 offset/max_chars 返回显式读取片段。
 def _read_registered_artifact(read: _RegisteredArtifactRead) -> dict[str, Any]:
@@ -72,13 +96,37 @@ def _read_registered_artifact(read: _RegisteredArtifactRead) -> dict[str, Any]:
     expected = str(payload.get("sha256") or record.get("sha256") or "")
     if expected and digest != expected:
         return _error_payload("artifact_hash_mismatch", artifact_ref, "artifact content hash does not match metadata")
-    offset = max(0, int(request.offset or 0))
-    max_chars = max(0, int(request.max_chars if request.max_chars is not None else DEFAULT_ARTIFACT_READ_CHARS))
-    content_slice, truncated = _content_slice(content, offset=offset, max_chars=max_chars)
+    read_result = read_artifact_content_by_mode(
+        ArtifactContentReadRequest(
+            content=content,
+            mode=request.mode,
+            offset=request.offset,
+            max_chars=request.max_chars,
+            query=request.query,
+        )
+    )
+    if not read_result.ok:
+        return _error_payload(read_result.error_code, artifact_ref, read_result.message)
+    base = _success_base_payload(read, payload, content, digest)
+    base.update(_success_content_payload(read_result))
+    base.update(read_result.metadata or {})
+    return base
+
+
+# LLM: _success_base_payload keeps artifact metadata assembly out of the read/validate function.
+# 函数用途: 生成成功读取时的稳定 metadata 字段，不包含具体正文片段字段。
+def _success_base_payload(
+    read: _RegisteredArtifactRead,
+    payload: dict[str, Any],
+    content: str,
+    digest: str,
+) -> dict[str, Any]:
+    record = read.record
+    artifact_ref = read.request.artifact_ref
     return {
         "ok": True,
         "artifact_ref": artifact_ref,
-        "artifact_path": str(path),
+        "artifact_path": str(read.path),
         "kind": "tool_output",
         "tool": str(payload.get("tool") or record.get("tool") or ""),
         "call_id": str(payload.get("call_id") or record.get("call_id") or ""),
@@ -87,15 +135,22 @@ def _read_registered_artifact(read: _RegisteredArtifactRead) -> dict[str, Any]:
         "task_id": str(payload.get("task_id") or record.get("task_id") or ""),
         "sha256": digest,
         "size_bytes": len(content.encode("utf-8")),
-        "content_offset": offset,
-        "content_max_chars": max_chars,
-        "content_chars": len(content_slice),
-        "truncated": truncated,
         "content_hash_verified": True,
         "reads_artifact_body": True,
-        "content": content_slice,
     }
 
+
+# LLM: _success_content_payload keeps mode-specific content fields in one small mapper.
+# 函数用途: 把 ArtifactContentReadResult 转成公开 read_artifact payload 的正文相关字段。
+def _success_content_payload(read_result: ArtifactContentReadResult) -> dict[str, Any]:
+    return {
+        "read_mode": read_result.mode,
+        "content_offset": read_result.offset,
+        "content_max_chars": read_result.max_chars,
+        "content_chars": len(read_result.content),
+        "truncated": read_result.truncated,
+        "content": read_result.content,
+    }
 
 # LLM: _find_index_record accepts registered path/hash/call id refs while keeping index as authority.
 # 函数用途: 从 tool output index 中查找用户传入的 artifact ref；找不到就拒绝读取。
@@ -205,17 +260,6 @@ def _index_records(index_path: Path) -> list[dict[str, Any]]:
         if isinstance(record, dict):
             records.append(record)
     return records
-
-
-# LLM: _content_slice applies explicit slicing so artifact reads can avoid re-flooding prompts.
-# 函数用途: max_chars=0 读取全部，否则返回 offset 后最多 max_chars 个字符，并标记是否截断。
-def _content_slice(content: str, *, offset: int, max_chars: int) -> tuple[str, bool]:
-    if offset >= len(content):
-        return "", False
-    if max_chars == 0:
-        return content[offset:], False
-    end = min(len(content), offset + max_chars)
-    return content[offset:end], end < len(content)
 
 
 # LLM: _error_payload keeps failed reads metadata-only and omits content.

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .agent_core import (
     AgentRunResult,
+    CapabilityConfigPatchTool,
     CapabilityRequestTool,
     CreateSubagentsTool,
     DispatchSubagentsTool,
@@ -64,6 +65,7 @@ from .agent_core.runner_prompts import (
     _build_subagent_runner_repair_prompt,
 )
 from .backend import get_backend
+from .capability.runtime_config import default_capability_config_path
 from .config import AgentConfig
 from .local_store import LocalStore
 from .memory import JsonlMemory
@@ -138,6 +140,8 @@ class SimpleAgent(
         """
         self.config = config
         self.root = Path(root)
+        self.capability_config_path = default_capability_config_path(self.root)
+        self._capability_config_runtime_snapshot = None
         self.workspace_roots = _normalized_workspace_roots(self.root, workspace_roots)
 
         paths = _resolve_paths(config, self.root)
@@ -184,9 +188,20 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             web_max_chars=config.tool_web_max_chars,
             http_timeout=config.tool_http_timeout,
             catalog_limit=config.tool_catalog_limit,
+            catalog_mode=config.tool_catalog_mode,
+            catalog_offset=config.tool_catalog_offset,
+            catalog_categories=config.tool_catalog_categories,
+            catalog_include_examples=config.tool_catalog_include_examples,
+            catalog_entry_max_chars=config.tool_catalog_entry_max_chars,
+            catalog_show_truncated_notice=config.tool_catalog_show_truncated_notice,
+            tool_detail_max_chars=config.tool_detail_max_chars,
             retrieval_limit=config.tool_retrieval_limit,
             vector_search_enabled=config.tool_vector_search_enabled,
+            shell_tool_timeout=config.tool_shell_timeout,
             tool_write_inline_max_chars=config.tool_write_inline_max_chars,
+            artifact_read_budget_window_seconds=config.tool_artifact_read_budget_window_seconds,
+            artifact_read_budget_max_chars=config.tool_artifact_read_budget_max_chars,
+            artifact_default_read_chars=config.memory_artifact_default_read_chars,
         )
     )
 
@@ -196,6 +211,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CreateSubagentsTool(agent))
     agent.tools.register(CapabilityRequestTool(agent))
+    agent.tools.register(CapabilityConfigPatchTool(agent))
     agent.tools.register(SubagentBoardTool(agent))
     agent.tools.register(SubagentMessageTool(agent))
     agent.tools.register(DispatchSubagentsTool(agent))
@@ -205,6 +221,7 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
 __all__ = [
     "AgentRunResult",
     "CapabilityRequestTool",
+    "CapabilityConfigPatchTool",
     "CODING_SUBAGENT_TOOLS",
     "CreateSubagentsTool",
     "DispatchSubagentsTool",

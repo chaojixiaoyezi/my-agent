@@ -35,7 +35,7 @@ class MemoryCompactPlanOptions:
     run_id: str = ""
     task_id: str = ""
     level: int | None = None
-    limit: int = 50
+    limit: int = 0
 
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 build_memory_compact_plan 时同步检查返回值、异常处理和读写副作用。

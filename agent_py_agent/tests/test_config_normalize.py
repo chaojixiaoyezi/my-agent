@@ -116,11 +116,18 @@ class TestNormalizeAgentConfig:
         assert normalized["max_tool_rounds"] == 10
         assert len(warnings) == 0
 
-    def test_normalize_max_tool_rounds_invalid(self):
-        """验证无效的 max_tool_rounds 回退。"""
+    def test_normalize_max_tool_rounds_zero_means_unlimited(self):
+        """验证 max_tool_rounds=0 表示不限制。"""
         data = {"max_tool_rounds": 0}
         normalized, warnings = normalize_agent_config(data)
-        assert normalized["max_tool_rounds"] == 5  # 默认值（最小1）
+        assert normalized["max_tool_rounds"] == 0
+        assert len(warnings) == 0
+
+    def test_normalize_max_tool_rounds_invalid(self):
+        """验证无效的 max_tool_rounds 回退。"""
+        data = {"max_tool_rounds": -1}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["max_tool_rounds"] == 0  # 默认值，0 表示不限制
         assert len(warnings) > 0
 
     def test_normalize_memory_top_k_valid(self):
@@ -174,6 +181,25 @@ class TestNormalizeAgentConfig:
         normalized, warnings = normalize_agent_config(data)
         assert normalized["task_lock_timeout_seconds"] == AgentConfig().task_lock_timeout_seconds
         assert len(warnings) > 0
+
+    def test_normalize_runtime_bool_strings(self):
+        """验证运行期布尔开关里的字符串 false 不会在业务代码里变成真值。"""
+        data = {
+            "audit_enabled": "false",
+            "auto_save_memory": "false",
+            "enable_subagents": "false",
+            "watchdog_enabled": "true",
+            "daemon_probe": "false",
+            "auto_bench_model_on_first_use": "false",
+        }
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["audit_enabled"] is False
+        assert normalized["auto_save_memory"] is False
+        assert normalized["enable_subagents"] is False
+        assert normalized["watchdog_enabled"] is True
+        assert normalized["daemon_probe"] is False
+        assert normalized["auto_bench_model_on_first_use"] is False
+        assert warnings == []
 
     def test_normalize_empty_dict(self):
         """验证空字典使用所有默认值。"""

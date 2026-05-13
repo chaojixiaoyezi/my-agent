@@ -44,6 +44,7 @@ def cmd_daemon(args) -> int:
         return 2
 
     capability_config = load_capability_config(args.capability_config)
+    agent.capability_config_path = args.capability_config
     router = make_capability_router(agent, capability_config, args.skill_dir)
     mode = "apply" if options.apply else "dry-run"
     print("MY-AGENT DAEMON")

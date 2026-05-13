@@ -23,7 +23,7 @@ def cmd_memory_compact(args) -> int:
     if getattr(args, "apply", False):
         return _cmd_memory_compact_apply(args)
     agent = make_agent(args)
-    plan = build_memory_compact_plan(agent.root, _options_from_args(args))
+    plan = build_memory_compact_plan(agent.root, _options_from_args(args, agent=agent))
     if args.json:
         print(json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
@@ -37,7 +37,7 @@ def _cmd_memory_compact_apply(args) -> int:
     agent = make_agent(args)
     result = apply_memory_compact(
         agent.root,
-        MemoryCompactApplyOptions(plan_options=_options_from_args(args)),
+        MemoryCompactApplyOptions(plan_options=_options_from_args(args, agent=agent)),
     )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
@@ -48,7 +48,8 @@ def _cmd_memory_compact_apply(args) -> int:
 
 # LLM: _options_from_args 属于memory CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
-def _options_from_args(args) -> MemoryCompactPlanOptions:
+def _options_from_args(args, *, agent=None) -> MemoryCompactPlanOptions:
+    resolved_agent = agent or make_agent(args)
     return MemoryCompactPlanOptions(
         layer=args.layer,
         date=args.date or "",
@@ -59,8 +60,17 @@ def _options_from_args(args) -> MemoryCompactPlanOptions:
         run_id=args.run_id or "",
         task_id=args.task_id or "",
         level=args.level,
-        limit=args.limit,
+        limit=_compact_limit(resolved_agent, args),
     )
+
+
+# LLM: _compact_limit keeps compact complete by default; --limit is only an explicit debug override.
+# 函数用途: 用户没有传 --limit 时不截断 compact 记录；显式传入时才限制本次处理范围。
+def _compact_limit(agent, args) -> int:
+    value = getattr(args, "limit", None)
+    if value is not None:
+        return int(value)
+    return 0
 
 
 # LLM: _print_memory_compact_plan 属于memory CLI；改行为前先对齐调用方和快照/单测。

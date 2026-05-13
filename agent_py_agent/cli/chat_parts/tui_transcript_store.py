@@ -9,7 +9,7 @@ from typing import Any
 
 from .renderer import strip_ansi
 
-MAX_TRANSCRIPT_CHARS = 200_000
+MAX_TRANSCRIPT_CHARS = 500_000
 APP_REDRAW_INTERVAL_SECONDS = 1 / 30
 
 
@@ -18,10 +18,18 @@ APP_REDRAW_INTERVAL_SECONDS = 1 / 30
 class TuiTranscriptStore:
     # LLM: __init__ 属于chat CLI；改行为前先对齐调用方和快照/单测。
     # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
-    def __init__(self, output_area: Any, follow_ref: list[bool], app_ref: list[Any]) -> None:
+    def __init__(
+        self,
+        output_area: Any,
+        follow_ref: list[bool],
+        app_ref: list[Any],
+        *,
+        max_chars: int = MAX_TRANSCRIPT_CHARS,
+    ) -> None:
         self.output_area = output_area
         self.follow_ref = follow_ref
         self.app_ref = app_ref
+        self.max_chars = max(1, int(max_chars or MAX_TRANSCRIPT_CHARS))
         self.history = ""
         self.live_stream = ""
         self.lock = threading.Lock()
@@ -57,8 +65,8 @@ class TuiTranscriptStore:
     # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def _append_history_locked(self, text: str) -> None:
         self.history += text
-        if len(self.history) > MAX_TRANSCRIPT_CHARS:
-            self.history = self.history[-MAX_TRANSCRIPT_CHARS:]
+        if len(self.history) > self.max_chars:
+            self.history = self.history[-self.max_chars:]
 
     # LLM: _commit_live_stream_locked 属于chat CLI；改行为前先对齐调用方和快照/单测。
     # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。

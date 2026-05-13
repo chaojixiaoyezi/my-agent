@@ -22,7 +22,7 @@ from .models import SubagentsMemoryGateOptions
 # 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagents_memory_gate(args) -> int:
     agent = make_agent(args)
-    options = _subagents_memory_gate_options(args)
+    options = _subagents_memory_gate_options(args, agent=agent)
     if options.retention_dry_run or options.retention_apply:
         return _cmd_memory_gate_retention(agent, options)
     if options.export_memory:
@@ -70,7 +70,7 @@ def cmd_subagents_memory_gate(args) -> int:
 
 # LLM: _subagents_memory_gate_options 属于memory CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
-def _subagents_memory_gate_options(args) -> SubagentsMemoryGateOptions:
+def _subagents_memory_gate_options(args, *, agent=None) -> SubagentsMemoryGateOptions:
     requested_path = getattr(args, "memory_path", None)
     memory_path = Path(requested_path) if isinstance(requested_path, str) and requested_path else None
     return SubagentsMemoryGateOptions(
@@ -81,13 +81,22 @@ def _subagents_memory_gate_options(args) -> SubagentsMemoryGateOptions:
         note=getattr(args, "note", None) or "",
         memory_path=memory_path,
         skill_output_dir=getattr(args, "skill_output_dir", None),
-        limit=int(getattr(args, "limit", 0) or 0),
+        limit=_memory_gate_config_int(agent, args, "limit", "subagent_cli_default_limit"),
         retention_dry_run=bool(getattr(args, "retention_dry_run", False)),
         retention_apply=bool(getattr(args, "retention_apply", False)),
         export_memory=bool(getattr(args, "export_memory", False)),
         export_skill=bool(getattr(args, "export_skill", False)),
         verify=bool(getattr(args, "verify", False)),
     )
+
+
+# LLM: _memory_gate_config_int keeps memory-gate list limits configurable.
+# 函数用途: memory gate 未传 limit 时，读取 agent_config.yaml 默认值。
+def _memory_gate_config_int(agent, args, arg_name: str, config_name: str) -> int:
+    value = getattr(args, arg_name, None)
+    if value is not None:
+        return int(value)
+    return int(getattr(getattr(agent, "config", None), config_name, 0) or 0)
 
 
 # LLM: _cmd_memory_gate_retention 属于memory CLI；改行为前先对齐调用方和快照/单测。

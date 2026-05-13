@@ -258,6 +258,51 @@ def test_search_text_does_not_follow_symlink_to_outside_workspace():
         assert "路径超出允许的工作区范围" in read_result.output
 
 
+def test_search_text_supports_limit_offset_and_glob(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "a.py").write_text("needle one\nneedle two\n", encoding="utf-8")
+    (workspace / "b.md").write_text("needle markdown\n", encoding="utf-8")
+    tool = SearchTextTool(workspace, max_matches=10)
+
+    result = tool.execute({"query": "needle", "file_glob": "*.py", "limit": 1, "offset": 1})
+
+    assert result.ok
+    assert "a.py:2" in result.output
+    assert "b.md" not in result.output
+    assert "next_offset" not in result.output
+
+
+def test_list_files_supports_limit_offset_depth_and_glob(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "a.py").write_text("a", encoding="utf-8")
+    (workspace / "b.py").write_text("b", encoding="utf-8")
+    (workspace / "c.md").write_text("c", encoding="utf-8")
+    nested = workspace / "nested"
+    nested.mkdir()
+    (nested / "deep.py").write_text("d", encoding="utf-8")
+    tool = ListFilesTool(workspace, max_entries=10)
+
+    result = tool.execute(
+        {
+            "path": ".",
+            "recursive": True,
+            "file_glob": "*.py",
+            "limit": 1,
+            "offset": 1,
+            "max_depth": 1,
+        }
+    )
+
+    assert result.ok
+    assert "b.py" in result.output
+    assert "a.py" not in result.output
+    assert "c.md" not in result.output
+    assert "nested/deep.py" not in result.output
+    assert "next_offset=2" in result.output
+
+
 def test_replace_in_file_tool():
     """LLM: verify that ReplaceInFileTool replaces text and reports the count.
 

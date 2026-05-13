@@ -1,0 +1,226 @@
+{
+  "defaults": {
+    "model": {
+      "temperature": 0.2,
+      "top_p": 0.95,
+      "max_tokens": 16314,
+      "timeout": 60,
+      "anthropic_version": "2023-06-01",
+      "api_key_env": "AGENT_API_KEY",
+      "model_speed_profile_path": "data/model_speed_profile.json",
+      "auto_bench_model_on_first_use": true
+    },
+    "tools": {
+      "budget": {
+        "window_seconds": 600,
+        "max_calls": 50,
+        "artifact_read_window_seconds": 600,
+        "artifact_read_max_chars": 240000
+      },
+      "limits": {
+        "write_inline_max_chars": 12000,
+        "read_max_chars": 50000,
+        "list_max_entries": 200,
+        "http_timeout": 30,
+        "shell_timeout": 240
+      },
+      "advanced": {
+        "search_max_matches": 50,
+        "web_max_chars": 100000,
+        "catalog_limit": 20,
+        "catalog_mode": "compact",
+        "catalog_offset": 0,
+        "catalog_categories": [],
+        "catalog_include_examples": true,
+        "catalog_entry_max_chars": 1200,
+        "catalog_show_truncated_notice": true,
+        "tool_detail_max_chars": 4000,
+        "retrieval_limit": 3,
+        "vector_search_enabled": true
+      }
+    },
+    "memory": {
+      "limit": 5000,
+      "retention_days": 30,
+      "enable_archive": true,
+      "advanced": {
+        "top_k": 5,
+        "archive_level": "3",
+        "hook_enabled": true,
+        "hook_archive_level": "3",
+        "hook_retention_days": 7,
+        "rule_routing_enabled": true,
+        "rule_routing_mode": "soft",
+        "rule_auto_read_limit": 3,
+        "rule_receipt_enabled": true,
+        "resume_auto_context_enabled": false,
+        "resume_auto_context_mode": "trigger",
+        "resume_auto_context_limit": 5,
+        "compact_auto_allow_apply": false
+      }
+    },
+    "gateway": {
+      "port": 8420,
+      "heartbeat_interval": 5,
+      "enable_watchdog": true,
+      "stale_seconds": 120,
+      "stop_timeout": 20,
+      "processing_timeout_seconds": 900,
+      "request_max_attempts": 2,
+      "lease_heartbeat_interval_seconds": 60,
+      "lease_stale_without_heartbeat_seconds": 300
+    },
+    "daemon": {
+      "planner": true,
+      "apply": true,
+      "execute_runners": true,
+      "interval": 30,
+      "max_runners": 1,
+      "limit": 0,
+      "max_cycles": 0,
+      "max_cards": 0,
+      "probe": true,
+      "reviewer": true,
+      "runner_instruction": ""
+    },
+    "runner": {
+      "scheduler_mode": "auto",
+      "concurrency": 0,
+      "start_rate": 0,
+      "timeout_seconds": 0,
+      "failure_policy": "auto"
+    },
+    "log": {
+      "level": "info",
+      "max_lines": 5000
+    },
+    "acceptance": {
+      "reviewer_mode": "parent-dispatch",
+      "auto_accept": false
+    },
+    "workflow": {
+      "mode": "auto",
+      "enable_self_learning": false
+    },
+    "subagent": {
+      "board_limit": 5,
+      "builtin_workflows": true,
+      "user_workflow_dirs": [".agent/workflows/user"],
+      "workflow_review_rounds": 1,
+      "task_max_subagents": 0,
+      "task_max_grandchildren": 0,
+      "max_auto_split_depth": 2,
+      "max_auto_retry_attempts": 3
+    },
+    "security": {
+      "max_input_length": 2048,
+      "max_path_length": 512,
+      "forbid_dangerous_chars": true,
+      "path_whitelist_only": false
+    },
+    "localStore": {
+      "store_path": "data/local_store/local.db",
+      "files_dir": "data/local_store/files",
+      "events_path": "data/local_store/events.jsonl",
+      "fts_enabled": true
+    },
+    "notification": {
+      "store_path": "data/notifications",
+      "channel_timeout_seconds": 300
+    },
+    "audit": {
+      "log_path": "data/audit",
+      "enabled": true
+    },
+    "session": {
+      "workspace": "data/sessions"
+    },
+    "watchdog": {
+      "enabled": false,
+      "interval": 60,
+      "max_restarts": 3,
+      "restart_delay": 10
+    },
+    "adapters": {
+      "workspace": "data/adapters/file",
+      "feishu_app_id": "",
+      "feishu_app_secret": "",
+      "feishu_webhook_url": "",
+      "qq_bot_uin": "",
+      "qq_http_api_url": "",
+      "qq_group_whitelist": "",
+      "qq_admin_qq": ""
+    }
+  },
+  "tools": [
+    { "name": "read_file", "desc": "读取文件内容", "enabled": true, "calls": 1240 },
+    { "name": "write_file", "desc": "写入文件内容", "enabled": true, "calls": 856 },
+    { "name": "append_file", "desc": "追加文件内容", "enabled": true, "calls": 432 },
+    { "name": "list_files", "desc": "列出目录文件", "enabled": true, "calls": 678 },
+    { "name": "search_text", "desc": "文本搜索", "enabled": true, "calls": 321 },
+    { "name": "read_artifact", "desc": "按预算读取外置产物", "enabled": true, "calls": 211 },
+    { "name": "controlled_exec", "desc": "受控执行工作区内命令", "enabled": true, "calls": 56 },
+    { "name": "http_request", "desc": "HTTP 请求", "enabled": true, "calls": 98 },
+    { "name": "subagent_message", "desc": "代理间一对一消息", "enabled": true, "calls": 144 },
+    { "name": "subagent_board", "desc": "公共看板广播/同步", "enabled": true, "calls": 88 },
+    { "name": "capability_request", "desc": "向上级申请工具或技能", "enabled": true, "calls": 31 }
+  ],
+  "role_templates": [
+    {
+      "name": "coordinator",
+      "label": "Coordinator（协调者）",
+      "description": "负责拆分任务、传递消息、广播变更、汇总下层结果",
+      "max_rounds": 3,
+      "allowed_tools": ["read_file", "list_files", "search_text", "subagent_message", "subagent_board", "read_artifact"],
+      "builtin": true
+    },
+    {
+      "name": "worker",
+      "label": "Worker（工作者）",
+      "description": "执行具体开发、修改、生成产物和记录证据",
+      "max_rounds": 5,
+      "allowed_tools": ["read_file", "write_file", "append_file", "list_files", "search_text", "read_artifact", "controlled_exec"],
+      "builtin": true
+    },
+    {
+      "name": "tester",
+      "label": "Tester（测试者）",
+      "description": "编写并运行测试，验证产物是否可用",
+      "max_rounds": 3,
+      "allowed_tools": ["read_file", "list_files", "search_text", "read_artifact", "controlled_exec"],
+      "builtin": true
+    },
+    {
+      "name": "writer",
+      "label": "Writer（写作者）",
+      "description": "编写文档、说明、报告和交付材料",
+      "max_rounds": 3,
+      "allowed_tools": ["read_file", "write_file", "append_file", "list_files", "search_text", "read_artifact"],
+      "builtin": true
+    },
+    {
+      "name": "researcher",
+      "label": "Researcher（研究者）",
+      "description": "搜索资料、读取文档、整理引用和研究结论",
+      "max_rounds": 4,
+      "allowed_tools": ["read_file", "list_files", "search_text", "http_request", "read_artifact"],
+      "builtin": true
+    },
+    {
+      "name": "bug_finder",
+      "label": "Bug Finder（缺陷发现者）",
+      "description": "找错、找风险、找遗漏，并给出可复现证据",
+      "max_rounds": 3,
+      "allowed_tools": ["read_file", "list_files", "search_text", "read_artifact", "controlled_exec"],
+      "builtin": true
+    },
+    {
+      "name": "acceptor",
+      "label": "Acceptor（验收者）",
+      "description": "根据验收标准确认是否交付，必要时要求返工",
+      "max_rounds": 2,
+      "allowed_tools": ["read_file", "list_files", "search_text", "read_artifact", "controlled_exec"],
+      "builtin": true
+    }
+  ]
+}

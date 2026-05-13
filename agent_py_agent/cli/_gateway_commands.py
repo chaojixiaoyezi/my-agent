@@ -120,6 +120,7 @@ def _gateway_run_context_from_args(request: _GatewayRunBuildRequest) -> GatewayR
 # 函数用途: 读取 capability 配置，创建 router，并返回替换后的 context。
 def _gateway_context_with_router(run_context: GatewayRunContext, args) -> GatewayRunContext:
     capability_config = load_capability_config(args.capability_config)
+    run_context.agent.capability_config_path = args.capability_config
     router = make_capability_router(run_context.agent, capability_config, args.skill_dir)
     return GatewayRunContext(
         agent=run_context.agent,
@@ -177,7 +178,7 @@ def cmd_gateway_start(args) -> int:
     command = _gateway_start_command(_gateway_start_options_from_args(args))
     process = _spawn_gateway_process(paths, command, cwd=ROOT.parent)
     _write_gateway_start_files(paths, pid=process.pid, command=command)
-    wait_for_gateway_running(paths, timeout=10.0)
+    wait_for_gateway_running(paths, timeout=float(getattr(agent.config, "gateway_ready_timeout_seconds", 10) or 10))
     print(f"gateway starting pid={process.pid}")
     print(f"state: {paths.state}")
     print(f"log: {paths.log}")

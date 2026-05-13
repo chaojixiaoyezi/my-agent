@@ -43,6 +43,7 @@ class CollectArchiveRecordsParams:
     date_key: str | None = None
     limit: int = 0
     level: int | None = None
+    file_limit: int = 30
 
 
 # LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 FilterArchiveRecordsParams 前先核对字段语义、序列化形态和调用方假设。
@@ -65,13 +66,19 @@ def collect_archive_records(
     date_key: str | None = None,
     limit: int = 0,
     level: int | None = None,
+    file_limit: int = 30,
     params: CollectArchiveRecordsParams | None = None,
 ) -> list[dict[str, Any]]:
-    values = params or CollectArchiveRecordsParams(layer, date_key, limit, level)
+    values = params or CollectArchiveRecordsParams(layer, date_key, limit, level, file_limit)
     layer = str(values.layer)
     limit = int(values.limit)
     records: list[dict[str, Any]] = []
-    for current_layer, path in _archive_files(root, layer=layer, date_key=values.date_key):
+    for current_layer, path in _archive_files(
+        root,
+        layer=layer,
+        date_key=values.date_key,
+        file_limit=values.file_limit,
+    ):
         records.extend(_read_archive_file(current_layer, path))
     if values.level is not None:
         records = [record for record in records if int(record.get("archive_level", -1)) == int(values.level)]
@@ -142,13 +149,13 @@ def resume_local_query(args, archive_matches: list[dict[str, Any]]) -> str:
 
 # LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 local_hit_payload 时同步检查返回值、异常处理和读写副作用。
 # 函数用途: 组装 local hit payload 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
-def local_hit_payload(hit) -> dict[str, Any]:
+def local_hit_payload(hit, *, preview_chars: int = 500) -> dict[str, Any]:
     return {
         "id": hit.id,
         "source_type": hit.source_type,
         "source_id": hit.source_id,
         "title": hit.title,
-        "content_preview": hit.content[:500],
+        "content_preview": hit.content[: max(0, int(preview_chars))],
         "metadata": hit.metadata,
         "visibility": hit.visibility,
         "updated_at": hit.updated_at,
@@ -195,6 +202,8 @@ def build_resume_guidance(
     local_hits: list[dict[str, Any]],
     task_payloads: list[dict[str, Any]],
     gateway_payloads: list[dict[str, Any]] | None = None,
+    *,
+    recommended_read_paths_limit: int = 20,
 ) -> dict[str, Any]:
     gateway_items = gateway_payloads or []
     return {
@@ -202,7 +211,11 @@ def build_resume_guidance(
         "local_match_count": len(local_hits),
         "task_fact_source_count": len(task_payloads),
         "gateway_fact_source_count": len(gateway_items),
-        "recommended_read_paths": _recommended_resume_reads(task_payloads, gateway_items, local_hits)[:20],
+        "recommended_read_paths": _recommended_resume_reads(
+            task_payloads,
+            gateway_items,
+            local_hits,
+        )[: max(0, int(recommended_read_paths_limit))],
         "next_actions": _resume_next_actions(task_payloads, gateway_items),
     }
 

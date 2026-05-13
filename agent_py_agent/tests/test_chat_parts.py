@@ -36,6 +36,63 @@ def test_history_context_keeps_recent_turns_in_reverse_order() -> None:
     assert context.index("用户: third") < context.index("用户: second")
 
 
+def test_history_context_uses_configured_assistant_preview_chars() -> None:
+    history = [("question", "abcdefghijklmnopqrstuvwxyz")]
+    lock = threading.Lock()
+
+    context = build_history_context(
+        history,
+        lock,
+        max_turns=1,
+        assistant_preview_chars=7,
+    )
+
+    assert "助手: abcdefg" in context
+    assert "hijklmnop" not in context
+
+
+def test_history_append_trims_to_configured_turn_count() -> None:
+    history: list[tuple[str, str]] = []
+    lock = threading.Lock()
+
+    append_conversation_turn(history, lock, ConversationTurn("first", "a"), max_turns=2)
+    append_conversation_turn(history, lock, ConversationTurn("second", "b"), max_turns=2)
+    append_conversation_turn(history, lock, ConversationTurn("third", "c"), max_turns=2)
+
+    assert history == [("second", "b"), ("third", "c")]
+
+
+def test_tui_transcript_store_uses_configured_max_chars() -> None:
+    from agent_py_agent.cli.chat_parts.tui_transcript_store import TuiTranscriptStore
+
+    area = SimpleNamespace(text="", buffer=SimpleNamespace(cursor_position=0))
+    app = SimpleNamespace(invalidated=False, invalidate=lambda: setattr(app, "invalidated", True))
+    store = TuiTranscriptStore(area, [True], [app], max_chars=5)
+
+    store.append_history("abcdef")
+
+    assert area.text == "bcdef"
+    assert store.history == "bcdef"
+
+
+def test_tui_status_uses_configured_context_window() -> None:
+    from agent_py_agent.cli.chat_parts.tui import TuiStatusRefs, _tui_get_status_text
+
+    refs = TuiStatusRefs(
+        state_lock=threading.Lock(),
+        is_running_ref=[False],
+        pending_jobs_ref=[0],
+        running_started_at_ref=[0.0],
+        last_token_estimate_ref=[50_000],
+        thinking_line_ref=[""],
+    )
+
+    status = _tui_get_status_text(refs, "model-x", context_window_chars=100_000)
+
+    assert "ctx 50.0K/100K" in status
+    assert "50%" in status
+
+
 def test_collapse_response_text_returns_preview_for_long_text() -> None:
     text = "\n".join(f"line {index}" for index in range(20))
 

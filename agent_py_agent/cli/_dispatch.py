@@ -25,15 +25,16 @@ from .models import SubagentsDispatchOptions
 
 # LLM: _subagents_dispatch_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
 # 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
-def _subagents_dispatch_options(args) -> SubagentsDispatchOptions:
+def _subagents_dispatch_options(args, agent=None) -> SubagentsDispatchOptions:
+    config = getattr(agent, "config", None)
     return SubagentsDispatchOptions(
         apply=bool(args.apply),
         execute_runners=bool(args.execute_runners),
         execute_acceptance_tests=bool(getattr(args, "execute_acceptance_tests", False)),
         planner=bool(args.planner),
         workflow_mode=args.workflow_mode or "off",
-        max_runners=int(args.max_runners or 0),
-        limit=int(args.limit or 0),
+        max_runners=_configured_int(args.max_runners, config, "dispatch_default_max_runners"),
+        limit=_configured_int(args.limit, config, "dispatch_default_limit"),
         reviewer=args.reviewer or "parent-dispatch",
         note=args.note or "",
         instruction=args.instruction or "",
@@ -41,11 +42,27 @@ def _subagents_dispatch_options(args) -> SubagentsDispatchOptions:
         probe=not bool(args.no_probe),
         take_over_by=args.take_over_by or "",
         locked_files=args.locked_file or [],
-        interval=float(args.interval or 0),
+        interval=_configured_float(args.interval, config, "dispatch_default_watch_interval"),
         max_cycles=int(args.max_cycles or 0),
         force_lock=bool(args.force_lock),
         watch=bool(args.watch),
     )
+
+
+# LLM: _configured_int resolves optional dispatch CLI numbers from AgentConfig.
+# 函数用途: 把 argparse 的 None 映射为后端配置值，显式 0 仍按用户输入保留。
+def _configured_int(value: object, config: object, field: str) -> int:
+    if value is not None:
+        return int(value)
+    return int(getattr(config, field, 0) or 0)
+
+
+# LLM: _configured_float resolves optional dispatch CLI floats from AgentConfig.
+# 函数用途: 和 _configured_int 一样处理 watch interval 这类浮点配置。
+def _configured_float(value: object, config: object, field: str) -> float:
+    if value is not None:
+        return float(value)
+    return float(getattr(config, field, 0.0) or 0.0)
 
 
 # LLM: _dispatch_params 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
@@ -141,13 +158,14 @@ def _print_dispatch_report(agent, report, options: SubagentsDispatchOptions) -> 
 # 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagents_dispatch(args) -> int:
 
-    options = _subagents_dispatch_options(args)
+    agent = make_agent(args)
+    options = _subagents_dispatch_options(args, agent=agent)
     if options.execute_runners and not options.apply:
         print("--execute-runners 必须和 --apply 一起使用。", file=sys.stderr)
         return 2
 
-    agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
+    agent.capability_config_path = args.capability_config
     router = make_capability_router(agent, capability_config, args.skill_dir)
     if options.watch:
         try:

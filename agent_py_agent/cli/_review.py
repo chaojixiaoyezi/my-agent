@@ -19,7 +19,7 @@ from .models import SubagentsAcceptanceOptions, SubagentsPatchOptions
 def cmd_subagents_acceptance(args) -> int:
 
     agent = make_agent(args)
-    options = _subagents_acceptance_options(args)
+    options = _subagents_acceptance_options(args, agent=agent)
     report = agent.subagents.write_acceptance_review_report(
         run_ids=options.run_ids,
         options=AcceptanceReviewOptions(
@@ -54,13 +54,13 @@ def cmd_subagents_acceptance(args) -> int:
 
 # LLM: _subagents_acceptance_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
 # 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
-def _subagents_acceptance_options(args) -> SubagentsAcceptanceOptions:
+def _subagents_acceptance_options(args, *, agent=None) -> SubagentsAcceptanceOptions:
     return SubagentsAcceptanceOptions(
         run_ids=getattr(args, "run_id", None) or None,
         apply=bool(getattr(args, "apply", False)),
         reviewer=getattr(args, "reviewer", None),
         note=getattr(args, "note", None) or "",
-        limit=int(getattr(args, "limit", 0) or 0),
+        limit=_subagent_config_int(agent, args, "limit", "subagent_cli_default_limit"),
         execute_tests=getattr(args, "execute_tests", None),
         test_timeout=getattr(args, "test_timeout", None),
     )
@@ -117,7 +117,7 @@ def cmd_subagents_patches(args) -> int:
 
     agent = make_agent(args)
     workspace = agent.subagents.workspace
-    options = _subagents_patch_options(args)
+    options = _subagents_patch_options(args, agent=agent)
 
     if options.action == "apply_dry_run":
         report = agent.subagents.write_patch_apply_report(
@@ -161,14 +161,23 @@ def cmd_subagents_patches(args) -> int:
 
 # LLM: _subagents_patch_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
 # 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
-def _subagents_patch_options(args) -> SubagentsPatchOptions:
+def _subagents_patch_options(args, *, agent=None) -> SubagentsPatchOptions:
     return SubagentsPatchOptions(
         action=getattr(args, "patch_action", None) or "review_dry_run",
         run_ids=getattr(args, "run_id", None) or None,
         reviewer=getattr(args, "reviewer", None),
         note=getattr(args, "note", None) or "",
-        limit=int(getattr(args, "limit", 0) or 0),
+        limit=_subagent_config_int(agent, args, "limit", "subagent_cli_default_limit"),
     )
+
+
+# LLM: _subagent_config_int keeps review CLI limits configurable.
+# 函数用途: 验收和 patch 命令未传 limit 时，从 agent_config.yaml 读取默认数量。
+def _subagent_config_int(agent, args, arg_name: str, config_name: str) -> int:
+    value = getattr(args, arg_name, None)
+    if value is not None:
+        return int(value)
+    return int(getattr(getattr(agent, "config", None), config_name, 0) or 0)
 
 
 # LLM: _print_review_report 属于CLI 命令层；改行为前先对齐调用方和快照/单测。

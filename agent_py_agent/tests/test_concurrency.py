@@ -305,6 +305,26 @@ class TestTaskLockManager(unittest.TestCase):
         # 至少应该清理一些
         self.assertGreaterEqual(count, 0)
 
+    def test_config_controls_lock_cleanup_timeout(self):
+        """测试 task_lock_timeout_seconds 会控制锁清理窗口。"""
+        class MockConfig:
+            concurrency_lock_enabled = True
+            task_lock_timeout_seconds = 1
+
+        manager = TaskLockManager(MockConfig())
+        self.assertEqual(manager._cleanup_timeout, 1)
+
+    def test_config_can_disable_task_locks(self):
+        """测试 concurrency_lock_enabled=false 时锁操作变成 no-op。"""
+        class MockConfig:
+            concurrency_lock_enabled = "false"
+            task_lock_timeout_seconds = 1
+
+        manager = TaskLockManager(MockConfig())
+        manager.acquire_read("task-1")
+        self.assertEqual(manager.get_active_locks(), [])
+        self.assertEqual(manager.cleanup(), 0)
+
     def test_with_lock_exception_handling(self):
         """测试锁内函数抛出异常时锁也会释放。"""
         def raise_error():

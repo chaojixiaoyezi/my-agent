@@ -84,6 +84,17 @@ agent_py_agent/
 |-- config/                                   # 默认配置样例
 |-- prompts/                                  # 默认 prompt 规则
 `-- tests/                                    # 回归测试；不强制每个测试函数双层注释
+frontend/
+|-- config/                                   # 前端集中配置；backend-config-catalog.json 由后端 YAML 生成
+|-- scripts/                                  # 前端同步/检查脚本，例如 sync-backend-config.mjs
+|-- src/
+|   |-- api/                                  # mock API 边界；后续替换为真实后端 API
+|   |-- components/                           # 配置表单、设置页、通用 UI 组件
+|   |-- data/                                 # 读取生成配置和 runtime config 的轻包装
+|   |-- pages/                                # Dashboard/Config/Subagents/Memory/Tools/Logs/Templates/Settings 页面
+|   |-- stores/                               # Zustand 状态；不再硬编码后端默认参数
+|   `-- types/                                # 前端配置 schema 和 UI 类型
+`-- test-settings.mjs                         # Playwright 页面 smoke；默认检查 http://localhost:3000
 ```
 
 ```text
@@ -158,11 +169,17 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- capabilities.py                    # 能力路由兼容入口，真实实现已拆到 capability/
 |   |   |-- capability_config.py              # 能力配置兼容入口，真实实现已拆到 capability/
 |   |   |-- capability/                        # 能力路由、能力配置、Skill Card、Tool Card 统一治理
+|   |   |   |-- runtime_config.py              # capability_config 运行期补丁和热加载兼容导出
+|   |   |   |-- runtime_config_models.py       # capability_config 补丁、结果和 snapshot 数据模型
+|   |   |   |-- runtime_config_patch.py        # capability_config 结构化补丁、allowlist、审计和通知
+|   |   |   |-- runtime_config_patch_io.py     # capability_config YAML 写入、审计 JSONL 和通知 I/O
+|   |   |   `-- runtime_config_reload.py       # capability_config 默认路径、版本校验和热加载 snapshot
 |   |   |-- clients/                           # 未来非模型外部服务客户端目录，目前用 README 定义边界
 |   |   |-- config.py                          # 配置兼容入口，真实实现已拆到 settings/
 |   |   |-- settings/                          # 配置结构、简化 YAML 加载器和环境变量覆盖
 |   |   |-- core.py                            # SimpleAgent 兼容组合入口，真实实现已拆到 agent_core/
 |   |   |-- agent_core/                        # 主循环、子代理 runner、planner、dispatch、编排工具、runner 规则
+|   |   |   |-- capability_config_patch_tool.py # 模型可调用的 capability_config 安全补丁工具
 |   |   |   |-- task_complexity.py            # 任务规模预判：基于 goal 关键词、plan 步骤数、工具数量估算轮数
 |   |   |   |-- automation_guard.py            # 主代理代劳防护：根据自动化级别判断是否应派子代理
 |   |   |-- file_io.py                         # 文件 I/O 兼容入口，真实实现已拆到 io/
@@ -488,6 +505,11 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - 同一能力失败后最多尝试多少个替代工具。
 
 这里的数字限制项统一约定：`0` 表示不限制。
+
+运行期配置不能靠 agent 直接改 YAML。`capability/runtime_config_patch.py` / `runtime_config_reload.py` 提供
+结构化补丁、内容版本校验、安全字段 allowlist、审计和 hot reload snapshot；
+`agent_core/capability_config_patch_tool.py` 把这套能力暴露给模型。安全字段可
+自动写入，`enable_capability_routing` 这类全局行为开关只返回人工确认建议。
 
 ### `agent_py_agent/agent/skills.py`
 
@@ -962,12 +984,15 @@ docs/
 - `agent_py_agent/agent/memory_archive/compact_resume_failsafe.py`: 从 compact restore refs 指向的 hook JSONL 中提取工具输出外置前 fail-safe checkpoint，保持 memory-resume refs-only。
 - `agent_py_agent/agent/memory_archive/compact_continue_packet.py`: 把 compact resume 后的 work_state、action guard、推荐读取路径和 subagent owner refs 固定成继续工作包；它只表达恢复上下文可继续，不执行工具或业务验收。
 - `agent_py_agent/agent/memory_archive/compact_resume_blocked.py`: 生成 compact metadata 缺失时的 schema-compatible 阻断 payload，让主 resume 编排保持薄。
-- `agent_py_agent/agent/memory_archive/artifact_reader.py`: 按 tool output index 显式读取外置 artifact 正文切片，并校验路径边界和 sha256；路径前缀抄错但 artifact 文件名唯一时，可修复到登记记录。
+- `agent_py_agent/agent/memory_archive/artifact_reader.py`: 按 tool output index 显式读取外置 artifact 正文切片，并校验路径边界和 sha256；路径前缀抄错但 artifact 文件名唯一时，可修复到登记记录；支持 `slice/head/tail/search` 窄读和 index-only size 预判。
+- `agent_py_agent/agent/memory_archive/artifact_read_modes.py`: `read_artifact` 正文窄读模式实现，负责 slice/head/tail/search 的内容 shaping，让 `artifact_reader.py` 只管 index、边界和 hash。
 - `agent_py_agent/agent/path_recovery_hints.py`: 共享 URL span 和工作区路径 typo 恢复提示，供派工预检、读文件和列目录等入口复用。
 - `agent_py_agent/agent/tooling/_filesystem_read.py`: `read_file` 读取工作区文本文件；读/列/search 同时接受顶层参数和 `filesystem.*` bundle 参数；遇到疑似工作区路径拼写错误时返回 `suggested_target`；误读 tool-output artifact 包装的判断拆到 `filesystem_artifact_guard.py`。
-- `agent_py_agent/agent/tooling/filesystem_artifact_guard.py`: 拒绝 `memory_archive/artifacts/tool_outputs/*.json` 外置工具输出包装经由 `read_file` 读取，提示改用 `read_artifact` 分片。
-- `agent_py_agent/agent/tooling/artifact.py`: 注册 `read_artifact` 工具，给模型提供受控 artifact slice 读取入口。
+- `agent_py_agent/agent/tooling/filesystem_artifact_guard.py`: 拒绝 `memory_archive/artifacts/tool_outputs/*.json` 外置工具输出包装经由 `read_file` 读取，提示改用 `read_artifact` 分片；当当前上下文未授权 `read_artifact` 时提示上报 `capability_request`。
+- `agent_py_agent/agent/tooling/artifact.py`: 注册 `read_artifact` 工具，给模型提供受控 artifact slice/head/tail/search 读取入口。
+- `agent_py_agent/agent/tooling/artifact_read_budget.py`: `read_artifact` 的单 run 正文读取预算器，按 `run_id` 统计滚动窗口字符数，避免子代理反复展开大 artifact。
 - `agent_py_agent/agent/tooling/controlled_exec.py`: 注册 `controlled_exec` 工具包装；只从 `write_boundary.controlled_exec_grants` 读取父级 shell grant，dry-run 返回 plan，显式 apply 才调用 bounded shell execution 或 task trash；`apply/execute/run/full` 字符串也会被识别为执行意图，delete-to-trash dry-run 作为有效计划返回，但 prompt/验收会要求真实 stdout/audit/trash refs 才算完成。执行后的 shell decision/audit 会标记 `dry_run=false`，避免模型把真实执行误读成计划。
+- `agent_py_agent/agent/tooling/registry_params.py`: 工具执行参数准备 helper，给 `read_file` 注入只用于恢复提示的 allowed_tools 上下文，让主 registry execution 继续保持薄。
 - `agent_py_agent/agent/tooling/registry_tool_dispatch.py`: 工具已解析、授权和写边界校验后的最终分发层；普通工具走 `tool.execute()`，registry-aware 工具如 `controlled_exec` 在这里读取注入上下文。
 - `agent_py_agent/cli/memory_artifact_commands.py`: 提供 `memory-artifact-read` 命令，保持 artifact 正文读取和 archive resume/search CLI 分离。
 - `agent_py_agent/cli/memory_resume_compact_rendering.py`: 输出 `memory-resume --from-compact` 的 handoff、continue packet、completion prompt 和推荐路径。
@@ -1048,10 +1073,12 @@ docs/
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_tool.py`: `dispatch_subagents` 模型工具类；把模型参数收敛成 `DispatchParams`，返回 refs-first 调度报告和错误 run id 恢复提示。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_scope.py`: 集中维护 dispatch_subagents 的 apply/execute 默认、parent scope、self-exclude、workflow-off 和验收收口策略；顶层 active root/coordinator 在 `apply=true` 时强制 workflow off，避免全局 auto workflow 先生成 producer/critic/repair 子工单并绕过 root 自己派工。
 - `agent_py_agent/agent/agent_core/capability_request_tool.py`: `capability_request` 模型工具类；runner 缺工具、skill、MCP、网络或 shell 时写正式 OPEN `CapabilityRequest`，只允许当前 run 自己申请，父级后续 route/grant/rerun。
+- `agent_py_agent/agent/agent_core/capability_config_patch_tool.py`: `capability_config_patch` 模型工具类；把配置修复请求收敛成 `CapabilityConfigPatchRequest`，只自动应用安全字段，危险字段返回建议，并写审计/通知。
 - `agent_py_agent/agent/agent_core/orchestration_workflow_mode.py`: create/dispatch 共用 workflow mode 归一化 helper，维持 `off` / `plan` / `auto` 兼容语义。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`: dispatch 工具返回 payload 压缩层；单条 record 只保留 refs 和关键字段，错 run_id 时把 `runner_selection_recovery.valid_run_ids` 放到顶层。
 - `agent_py_agent/agent/agent_core/dispatch_runner_selection.py`: runner 候选范围和显式 `include_run_ids` 预检；错 id 会返回 `runner_selection/invalid_run_ids`、可用 direct child ids 和保守纠正提示。
 - `agent_py_agent/agent/agent_core/dispatch_runner_batches.py`: runner 候选收集和执行批处理；调用 selection helper 精确推进父节点给定的直接孩子。
+- `agent_py_agent/agent/agent_core/services/watch_config_reload.py`: dispatch watch 的 capability_config 热加载层；每轮开始前检测配置 hash，变化只影响后续 dispatch，不改已经运行中的 runner。
 - `agent_py_agent/agent/tooling/json_repair.py`: 工具调用 JSON 的窄口修复 helper；目前只修有效对象后多余右花括号，避免模型因 parse error 把完整任务 goal 越改越短。
 - `agent_py_agent/agent/subagents/role_contracts.py`: 新增 reporter/checker 角色契约和 analyst/reviewer 兼容映射；同时把模板角色接入默认工具、输出契约和 parent final gate。
 - `agent_py_agent/agent/subagents/automation_gate.py`: 新增半自动/自动执行门，默认只放行 refs-only 查询动作，跑工具或改状态动作继续需要人工确认。
@@ -1065,7 +1092,7 @@ docs/
 - `agent_py_agent/agent/subagents/services/acceptance_findings.py`: 普通验收 finding 汇总层；已有 `reports/test_execution.json` 时优先以机器执行报告判断 tests_passed；pending capability finding 防止半成品被验收；`required_child_spawned` 会在目标要求创建下级时核对真实 `task.child_ids`，`descendant_health` 会阻断仍有未完成/失败后代的父级验收，但不会把 leaf/self 的“真实创建 leaf_worker”自述误判为还要继续创建 child。
 - `agent_py_agent/agent/subagents/services/acceptance_descendant_health.py`: 父级验收的后代健康门；沿真实 `child_ids` 有界读取后代 `task.json`，后代未完成、未验收、失败、阻塞或缺失时返回 P0 finding。
 - `agent_py_agent/agent/subagents/services/acceptance_controlled_exec_findings.py`: controlled_exec 专属验收 finding；当 goal/acceptance 声明受控 shell 时，要求实际工具记录和 stdout/audit/trash refs，并会在 task_dir/allowed_write_roots 内按固定小文件名查找 refs/summary；若 refs 文件显式指向 `controlled_exec-*.json` tool-output artifact，会按 64KB 上限精确读取该小 artifact 补齐 stdout/audit refs，防止伪 refs 报告通过且避免扫描目录或读取大日志。
-- `agent_py_agent/agent/settings/config.py`: 新增 `acceptance_execute_tests`、`acceptance_test_timeout_seconds`、`subagent_allowed_tools`、`subagent_role_template_dirs` 和 `tool_agent_budget_*`，真实测试执行默认关闭，子代理工具默认自动判断，单代理工具预算默认 10 分钟 50 次。
+- `agent_py_agent/agent/settings/config.py`: 新增 `acceptance_execute_tests`、`acceptance_test_timeout_seconds`、`subagent_allowed_tools`、`subagent_role_template_dirs`、`tool_agent_budget_*` 和 `tool_artifact_read_budget_*`，真实测试执行默认关闭，子代理工具默认自动判断，单代理工具预算默认 10 分钟 50 次，artifact 正文读取预算默认 10 分钟 240000 字符。
 - `agent_py_agent/agent/settings/services/_normalize_runtime_fields.py`: 校验真实验收执行配置，布尔开关走 bool coerce，超时限制在 1 到 300 秒；`subagent_allowed_tools` 和 `subagent_role_template_dirs` 归一成去空白字符串列表。
 - `agent_py_agent/config/agent_config.yaml`: 新增父级验收真实执行配置注释，说明默认关闭和单次命令覆盖方式。
 - `agent_py_agent/cli/_acceptance_plan.py`: 新增 `subagents-acceptance-plan` 命令入口；默认只展示父级 dry-run 决策和 refs，`--write` 写入决策审计，`--apply` 只允许 inspect_only，`--next-action` / `--auto-policy` / `--auto-execution` / `--followup` / `--apply-followup` 都走显式分支。
@@ -1099,4 +1126,4 @@ docs/
 - `agent_py_agent/tests/test_orchestration_write_guard.py`: 覆盖派工写入预检，确保 UI 文案、HTML 标签和图片 URL 不会被误判为外部绝对路径，并验证疑似工作区路径拼写错误会返回可重试的 `suggested_target`。
 - `agent_py_agent/tests/test_tool_output_externalizer.py`: 覆盖大工具输出外置 artifact 和外置前 fail-safe recovery snapshot。
 - `agent_py_agent/tests/test_memory_compact_failsafe.py`: 覆盖 `memory-resume --from-compact` 如何展示 fail-safe checkpoint refs 且不读取 artifact 正文。
-- `agent_py_agent/tests/test_memory_artifact_read.py`: 覆盖 CLI 和 `read_artifact` 工具如何显式读取已登记 artifact，并拒绝未登记普通文件；同时覆盖 `read_file` 不能直接读取 tool-output artifact JSON 包装。
+- `agent_py_agent/tests/test_memory_artifact_read.py`: 覆盖 CLI 和 `read_artifact` 工具如何显式读取已登记 artifact，并拒绝未登记普通文件；同时覆盖 `read_file` 不能直接读取 tool-output artifact JSON 包装、artifact head/tail/search 模式、单 run artifact 读取预算和缺 `read_artifact` 权限提示。

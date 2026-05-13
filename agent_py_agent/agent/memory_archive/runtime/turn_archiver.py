@@ -87,6 +87,8 @@ class RunContext:
     source: str
     archive_level: int
     created_at: str
+    preview_limits: dict[int, int] | None = None
+    summary_chars: int = 96
 
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _build_run_turn_events 时同步检查返回值、异常处理和读写副作用。
@@ -125,6 +127,8 @@ def _message_events(session_id: str, turn: TurnData, ctx: RunContext) -> list[Ra
                 archive_level=ctx.archive_level,
                 created_at=ctx.created_at,
                 content=turn.user_prompt,
+                preview_limits=ctx.preview_limits,
+                summary_chars=ctx.summary_chars,
             ),
         ),
         _message_event(
@@ -144,6 +148,8 @@ def _message_events(session_id: str, turn: TurnData, ctx: RunContext) -> list[Ra
                 archive_level=ctx.archive_level,
                 created_at=ctx.created_at,
                 content=turn.response_text,
+                preview_limits=ctx.preview_limits,
+                summary_chars=ctx.summary_chars,
             ),
         ),
     ]
@@ -170,6 +176,7 @@ def _tool_events(session_id: str, turn: TurnData, ctx: RunContext) -> list[RawMe
                     source=ctx.source,
                     archive_level=ctx.archive_level,
                     created_at=ctx.created_at,
+                    preview_limits=ctx.preview_limits,
                 ),
             )
         )
@@ -193,6 +200,8 @@ class ArchiveTurnContext:
     source: str = "run"
     archive_level: int = 3
     created_at: str | None = None
+    preview_limits: dict[int, int] | None = None
+    summary_chars: int = 96
 
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 ArchiveRunTurnParams 前先核对字段语义、序列化形态和调用方假设。
@@ -231,6 +240,8 @@ def archive_run_turn(
             source=str(ctx.source),
             archive_level=normalized_level,
             created_at=timestamp,
+            preview_limits=ctx.preview_limits,
+            summary_chars=ctx.summary_chars,
         ),
     )
 

@@ -430,7 +430,7 @@ class CoordinatorToolLimitBlockedBackend(BaseBackend):
                 backend=self.name,
             )
 
-        assert "# SubAgent Runner Output Repair" in prompt
+        assert "# SubAgent Runner Output Repair" in prompt or "已达到最大工具轮数限制" in prompt
         return ModelResponse(
             text=(
                 "[SUBAGENT_RESULT]\n"

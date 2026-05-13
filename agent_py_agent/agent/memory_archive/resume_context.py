@@ -113,7 +113,13 @@ def build_auto_resume_context(
 def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
 
     limit = int(getattr(agent.config, "memory_resume_auto_context_limit", 5) or 5)
-    records = collect_archive_records(agent.root, layer="all", date_key=None, limit=0)
+    records = collect_archive_records(
+        agent.root,
+        layer="all",
+        date_key=None,
+        limit=int(getattr(agent.config, "memory_resume_archive_scan_limit", 0) or 0),
+        file_limit=int(getattr(agent.config, "memory_archive_search_file_limit", 30) or 0),
+    )
     archive_matches, query = _first_archive_matches(records, user_prompt, limit=limit)
     args = _resume_args(query)
     local_query = resume_local_query(args, archive_matches)
@@ -122,14 +128,25 @@ def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
         if local_query
         else agent.local_store.list_recent(limit=limit)
     )
-    local_payloads = [local_hit_payload(hit) for hit in local_hits]
+    local_payloads = [
+        local_hit_payload(hit, preview_chars=int(getattr(agent.config, "memory_query_content_preview_chars", 500) or 0))
+        for hit in local_hits
+    ]
     task_ids = collect_resume_task_ids(args, archive_matches, local_payloads)
     task_payloads = collect_task_payloads(agent, task_ids, limit=limit)
     # Gateway 恢复也必须回到 request/response JSON，而不是只注入 LocalStore 摘要。
     gateway_payloads = collect_gateway_payloads(local_payloads, limit=limit)
     if not archive_matches and not local_payloads and not task_payloads and not gateway_payloads:
         return ResumeContextResult(query=query, reason="no_evidence")
-    resume = build_resume_guidance(archive_matches, local_payloads, task_payloads, gateway_payloads)
+    resume = build_resume_guidance(
+        archive_matches,
+        local_payloads,
+        task_payloads,
+        gateway_payloads,
+        recommended_read_paths_limit=int(
+            getattr(agent.config, "memory_resume_recommended_read_paths_limit", 20) or 0
+        ),
+    )
     brief = build_resume_brief(
         archive_matches,
         local_payloads,

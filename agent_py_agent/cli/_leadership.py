@@ -26,7 +26,12 @@ def cmd_subagents_leadership_recovery_plan(args) -> int:
         write_report=True,
         root_id=str(args.root_id or ""),
         leader_ids=list(args.leader or []),
-        max_children_per_leader=int(args.max_children_per_leader or 0),
+        max_children_per_leader=_leader_config_int(
+            agent,
+            args,
+            "max_children_per_leader",
+            "subagent_hierarchy_max_children_per_tool_call",
+        ),
     )
     report = agent.subagents.write_leadership_recovery_plan(params=params)
     if args.json:
@@ -61,7 +66,12 @@ def cmd_subagents_leadership_recovery_apply(args) -> int:
         leader_id=str(args.leader or ""),
         child_ids=list(args.child_run_id or []),
         apply=bool(args.apply),
-        max_children_per_leader=int(args.max_children_per_leader or 0),
+        max_children_per_leader=_leader_config_int(
+            agent,
+            args,
+            "max_children_per_leader",
+            "subagent_hierarchy_max_children_per_tool_call",
+        ),
     )
     report = agent.subagents.write_leadership_recovery_apply(params=params)
     if args.json:
@@ -82,3 +92,12 @@ def cmd_subagents_leadership_recovery_apply(args) -> int:
     print(f"\n已写入: {agent.subagents.workspace / 'subagent_leadership_recovery_apply_report.json'}")
     print(f"已写入: {agent.subagents.workspace / 'SUBAGENT_LEADERSHIP_RECOVERY_APPLY.md'}")
     return 0
+
+
+# LLM: _leader_config_int keeps leadership recovery capacities configurable.
+# 函数用途: leadership recovery CLI 未传容量时，读取 agent_config.yaml 默认值。
+def _leader_config_int(agent, args, arg_name: str, config_name: str) -> int:
+    value = getattr(args, arg_name, None)
+    if value is not None:
+        return int(value)
+    return int(getattr(agent.config, config_name, 0) or 0)

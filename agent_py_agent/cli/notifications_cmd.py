@@ -57,7 +57,9 @@ def cmd_notifications(args) -> int:
 
     # 列出通知
     include_all = getattr(args, "all", False)
-    limit = getattr(args, "limit", 20)
+    limit = getattr(args, "limit", None)
+    if limit is None:
+        limit = int(getattr(config, "cli_notification_limit", 20) or 0)
 
     notifications = manager.list_notifications(
         user_id,

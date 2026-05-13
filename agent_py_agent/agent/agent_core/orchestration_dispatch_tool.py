@@ -4,9 +4,14 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..capabilities import CapabilityRouter
+from ..capability.runtime_config import (
+    default_capability_config_path,
+    load_capability_config_snapshot,
+)
 from ..capability_config import CapabilityConfig
 from ..tools import BaseTool, ToolExecutionResult
 from .dispatch_no_progress import dispatch_no_progress_payload
@@ -127,17 +132,30 @@ class DispatchSubagentsTool(BaseTool):
 # LLM: _dispatch_capability_config aligns model-facing due-check with runner timeout policy.
 # 函数用途: 生成 dispatch_subagents 内部能力配置；当用户关闭 runner 超时时，不让自动调度把活跃 runner 误接管。
 def _dispatch_capability_config(agent: SimpleAgent) -> CapabilityConfig:
-    cfg = CapabilityConfig()
+    cfg = _runtime_capability_config(agent)
     if _runner_timeouts_disabled(getattr(agent, "config", None)):
         cfg.subagent_run_timeout = 0
         cfg.subagent_heartbeat_timeout = 0
     return cfg
 
 
+# LLM: _runtime_capability_config lets model-facing dispatch pick up safe config patches automatically.
+# 函数用途: 从 agent 上的 capability_config_path 热加载配置；失败时回退默认值，不打断 dispatch。
+def _runtime_capability_config(agent: SimpleAgent) -> CapabilityConfig:
+    path = Path(getattr(agent, "capability_config_path", "") or default_capability_config_path(getattr(agent, "root", ".")))
+    try:
+        snapshot = load_capability_config_snapshot(path)
+    except (FileNotFoundError, OSError, ValueError):
+        return CapabilityConfig()
+    agent.capability_config_path = path
+    agent._capability_config_runtime_snapshot = snapshot
+    return snapshot.config
+
+
 # LLM: _runner_timeouts_disabled keeps the accepted off/none/disabled spellings in one small check.
 # 函数用途: 判断 agent_config 里 runner_timeout_seconds 是否表示不限制，用于自动 dispatch 的 due-check 降噪。
 def _runner_timeouts_disabled(config: object) -> bool:
-    raw = getattr(config, "runner_timeout_seconds", "auto")
+    raw = getattr(config, "runner_timeout_seconds", "off")
     if isinstance(raw, str):
         return raw.strip().lower() in {"off", "none", "disabled", "false", "no", "0"}
     try:

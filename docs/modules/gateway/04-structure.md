@@ -169,3 +169,8 @@ memory-resume 或 run(auto resume)
 - Module structure docs now treat the definition-level double-layer comments as part of the code architecture: `LLM:` records model-facing contract/caller/side-effect notes, and `函数用途:` / `类用途:` records beginner-readable purpose and edit guidance.
 - New files, services, bundles, or facade methods must update both this structure page and the in-code comments at the same time.
 - The global file tree in `CODEBASE_TREE.md` now includes a current architecture map for CLI, agent core, gateway, memory, log-analysis, subagent, tooling, and settings boundaries.
+
+## 2026-05-13 backend config structure update
+- 中文说明：gateway 相关默认等待、join timeout、service command timeout 进入 `AgentConfig`，由 `agent_config.yaml` 作为真实后端配置源。
+- CLI 层应在 `make_agent()` 后解析这些默认值；不要在 `gateway_client.py`、`chat.py` 或 gateway process helper 里再写一套独立数字策略。
+- 结构边界不变：gateway 文件队列协议、request/response JSON 和 worker 认领流程没有因为配置抽取改变。

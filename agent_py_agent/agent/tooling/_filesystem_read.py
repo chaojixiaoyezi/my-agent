@@ -4,13 +4,13 @@
 
 from __future__ import annotations
 
+import fnmatch
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..path_recovery_hints import suggest_workspace_typo_target
 from ._filesystem_helpers import (
-    _MAX_SEARCH_LINE_CHARS,
-    _MAX_SEARCH_QUERY_CHARS,
     _bool_param,
     _bundled_filesystem_param,
     _int_param,
@@ -21,6 +21,7 @@ from ._filesystem_helpers import (
     _text_param,
 )
 from .filesystem_artifact_guard import (
+    allowed_tools_hint_param,
     tool_output_artifact_read_hint,
     tool_output_artifact_typo_hint,
 )
@@ -119,14 +120,26 @@ class ListFilesTool(FileSystemTool):
             parameters={
                 "path": "要查看的目录，默认是工作区根目录",
                 "recursive": "是否递归展开子目录，默认 false",
+                "limit": "本次最多返回多少条，默认使用工具配置上限",
+                "offset": "从第几条开始返回，用于分页，默认 0",
+                "max_depth": "递归时最多展开几层，默认不额外限制",
+                "file_glob": "按 glob 过滤文件/目录名，例如 *.py",
+                "include_dirs": "是否包含目录，默认 true",
+                "include_files": "是否包含文件，默认 true",
             },
             parameter_details={
                 "path": "相对工作区的目录路径；不传时默认从项目根目录开始列。",
                 "recursive": "传 true 时会继续往下展开子目录；目录很大时要谨慎用，避免结果太长。",
+                "limit": "分页大小；目录很多时先小批量查看，再用 next_offset 继续。",
+                "offset": "上一页返回 next_offset 后，下一次传入这里继续看。",
+                "max_depth": "只在 recursive=true 时生效；1 表示只看当前目录下一层。",
+                "file_glob": "按工作区相对路径或文件名匹配；例如 *.py、src/*.ts。",
+                "include_dirs": "false 时只返回文件。",
+                "include_files": "false 时只返回目录。",
             },
             examples=[
                 '{"tool": "list_files", "path": "."}',
-                '{"tool": "list_files", "path": "agent_py_agent/agent", "recursive": true}',
+                '{"tool": "list_files", "path": "agent_py_agent/agent", "recursive": true, "limit": 50, "offset": 0}',
             ],
         )
 
@@ -134,25 +147,106 @@ class ListFilesTool(FileSystemTool):
     # 函数用途: 执行 ListFilesTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
-            raw_path = _optional_path(_bundled_filesystem_param(params, "path", "."), default=".")
-            recursive = _bool_param(_bundled_filesystem_param(params, "recursive", False), default=False)
-            target = self.resolve_path(raw_path)
+            request = _list_files_request_from_params(params, self.max_entries)
+            target = self.resolve_path(request.raw_path)
         except ValueError as exc:
             return ToolExecutionResult("list_files", False, str(exc))
         if not target.exists():
             return ToolExecutionResult("list_files", False, f"路径不存在: {self.display_path(target)}")
         if target.is_file():
             return ToolExecutionResult("list_files", True, self.display_path(target))
+        return self._list_target(target, request)
 
-        iterator = target.rglob("*") if recursive else target.iterdir()
+    # LLM: ListFilesTool._list_target keeps execute focused on validation and path safety.
+    # 函数用途: 遍历目标目录，按分页和过滤参数生成 list_files 输出。
+    def _list_target(self, target: Path, request: _ListFilesRequest) -> ToolExecutionResult:
+        iterator = target.rglob("*") if request.recursive else target.iterdir()
         entries: list[str] = []
+        seen = 0
+        paged_notice_added = False
         for item in iterator:
+            if not self._list_item_visible(item, root=target, request=request):
+                continue
+            if seen < request.offset:
+                seen += 1
+                continue
+            if len(entries) >= request.limit:
+                entries.append(
+                    f"... 已截断，next_offset={seen} limit={request.limit}；继续查看请再次调用 list_files 并传入 offset={seen}"
+                )
+                paged_notice_added = True
+                break
             suffix = "/" if item.is_dir() else ""
             entries.append(self.display_path(item) + suffix)
-            if len(entries) >= self.max_entries:
-                entries.append(f"... 已截断，最多显示 {self.max_entries} 条")
-                break
+            seen += 1
+        if entries and len(entries) >= request.limit and not paged_notice_added:
+            entries.append(
+                f"... 本页已满，next_offset={seen} limit={request.limit}；如需确认还有没有结果，可继续传入 offset={seen}"
+            )
         return ToolExecutionResult("list_files", True, "\n".join(entries) or "目录为空")
+
+    # LLM: _list_item_visible applies paging filters without changing workspace safety checks.
+    # 函数用途: 根据 depth、glob 和文件/目录开关判断 list_files 是否返回某个条目。
+    def _list_item_visible(
+        self,
+        item: Path,
+        *,
+        root: Path,
+        request: _ListFilesRequest,
+    ) -> bool:
+        if item.is_dir() and not request.include_dirs:
+            return False
+        if item.is_file() and not request.include_files:
+            return False
+        if request.recursive and request.max_depth:
+            try:
+                depth = len(item.relative_to(root).parts)
+            except ValueError:
+                return False
+            if depth > request.max_depth:
+                return False
+        if not request.file_glob:
+            return True
+        display = self.display_path(item)
+        return fnmatch.fnmatch(item.name, request.file_glob) or fnmatch.fnmatch(display, request.file_glob)
+
+
+# LLM: _ListFilesRequest bundles list_files filters so paging can expand without long signatures.
+# 类用途: 保存 list_files 的路径、分页、递归和过滤参数。
+@dataclass(frozen=True)
+class _ListFilesRequest:
+    raw_path: str
+    recursive: bool
+    limit: int
+    offset: int
+    max_depth: int
+    file_glob: str
+    include_dirs: bool
+    include_files: bool
+
+
+# LLM: _list_files_request_from_params validates model JSON before any directory traversal.
+# 函数用途: 从 list_files 工具参数中解析长期可配置的分页和过滤参数。
+def _list_files_request_from_params(params: dict[str, Any], max_entries: int) -> _ListFilesRequest:
+    return _ListFilesRequest(
+        raw_path=_optional_path(_bundled_filesystem_param(params, "path", "."), default="."),
+        recursive=_bool_param(_bundled_filesystem_param(params, "recursive", False), default=False),
+        limit=min(
+            _int_param(_bundled_filesystem_param(params, "limit"), name="limit", default=max_entries, min_value=1),
+            max_entries,
+        ),
+        offset=_int_param(_bundled_filesystem_param(params, "offset"), name="offset", default=0, min_value=0),
+        max_depth=_int_param(_bundled_filesystem_param(params, "max_depth"), name="max_depth", default=0, min_value=0),
+        file_glob=_text_param(
+            _bundled_filesystem_param(params, "file_glob", ""),
+            name="file_glob",
+            max_chars=200,
+            allow_empty=True,
+            strip=True,
+        ),
+        include_dirs=_bool_param(_bundled_filesystem_param(params, "include_dirs", True), default=True),
+        include_files=_bool_param(_bundled_filesystem_param(params, "include_files", True), default=True),
+    )
 
 
 # LLM: ReadFileTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
@@ -200,7 +294,11 @@ class ReadFileTool(FileSystemTool):
             target = self.resolve_path(raw_path)
         except ValueError as exc:
             return ToolExecutionResult("read_file", False, str(exc))
-        artifact_hint = tool_output_artifact_read_hint(target, self.workspace_roots)
+        artifact_hint = tool_output_artifact_read_hint(
+            target,
+            self.workspace_roots,
+            allowed_tools=allowed_tools_hint_param(params),
+        )
         if artifact_hint:
             return ToolExecutionResult("read_file", False, artifact_hint)
         if not target.exists():
@@ -231,122 +329,3 @@ class ReadFileTool(FileSystemTool):
         if len(result) > self.max_chars:
             result = result[: self.max_chars] + "\n... 已截断"
         return ToolExecutionResult("read_file", True, result or "(空文件)")
-
-
-# LLM: SearchTextTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: SearchTextTool 数据模型，集中保存 工具系统 的结构化状态。
-class SearchTextTool(FileSystemTool):
-
-    # LLM: SearchTextTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 初始化 SearchTextTool 的依赖、配置和运行期字段。
-    def __init__(self, workspace_root: Path, max_matches: int, workspace_roots: list[Path] | None = None):
-        super().__init__(workspace_root, workspace_roots)
-        self.max_matches = max_matches
-        self.spec = ToolSpec(
-            name="search_text",
-            category="filesystem",
-            description="在工作区里搜索纯文本，适合找函数名、配置项和关键字。",
-            use_cases=[
-                "想找某个函数、类、配置项出现在哪些文件里",
-                "先全局搜索，再决定读哪几个文件",
-            ],
-            avoid_when=[
-                "已经知道具体文件并且要看上下文时，直接 read_file 更合适",
-            ],
-            keywords=["搜索", "查找", "关键字", "grep", "rg", "全文检索", "文本匹配"],
-            parameters={
-                "query": "要搜索的文本",
-                "path": "从哪个目录开始搜，默认是工作区根目录",
-            },
-            parameter_details={
-                "query": "必填，直接按文本包含关系匹配，不做正则解析。",
-                "path": "可选，把搜索范围缩小到某个子目录时更高效。",
-            },
-            examples=[
-                '{"tool": "search_text", "query": "PromptBuilder"}',
-                '{"tool": "search_text", "query": "max_tool_rounds", "path": "agent_py_agent"}',
-            ],
-        )
-
-    # LLM: SearchTextTool.execute 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 执行 SearchTextTool 的主流程并返回 ToolExecutionResult。
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        try:
-            query = _text_param(
-                _bundled_filesystem_param(params, "query"),
-                name="query",
-                max_chars=_MAX_SEARCH_QUERY_CHARS,
-                strip=True,
-            )
-            raw_path = _optional_path(_bundled_filesystem_param(params, "path", "."), default=".")
-            target = self.resolve_path(raw_path)
-        except ValueError as exc:
-            return ToolExecutionResult("search_text", False, str(exc))
-        if not target.exists():
-            return ToolExecutionResult("search_text", False, f"路径不存在: {self.display_path(target)}")
-        search_root = target if target.is_dir() else target.parent
-        candidates = [target] if target.is_file() else list(search_root.rglob("*"))
-        matches: list[str] = []
-        for item in candidates:
-            if not item.is_file():
-                continue
-            found = self._search_item_for_query(item, query, matches)
-            if found == "full":
-                return ToolExecutionResult("search_text", True, "\n".join(matches))
-        return ToolExecutionResult("search_text", True, "\n".join(matches) or "没有找到匹配项")
-
-    # LLM: SearchTextTool._search_item_for_query 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 工具系统 中的 search_item_for_query 步骤，并保持调用方依赖的数据形状。
-    def _search_item_for_query(self, item: Path, query: str, matches: list[str]) -> str:
-        try:
-            safe_item = self.resolve_path(item)
-        except ValueError:
-            return ""
-        try:
-            return self._search_lines(item, safe_item, query, matches)
-        except UnicodeDecodeError:
-            return ""
-        return ""
-
-    # LLM: SearchTextTool._search_lines 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 工具系统 中的 search_lines 步骤，并保持调用方依赖的数据形状。
-    def _search_lines(
-        self,
-        item: Path,
-        safe_item: Path,
-        query: str,
-        matches: list[str],
-    ) -> str:
-        for idx, line in enumerate(safe_item.read_text(encoding="utf-8").splitlines(), start=1):
-            if query not in line:
-                continue
-            self._append_search_match(self._item_relative_path(item, safe_item), idx, line, matches)
-            if len(matches) >= self.max_matches:
-                matches.append(f"... 已截断，最多显示 {self.max_matches} 条")
-                return "full"
-        return ""
-
-    # LLM: SearchTextTool._append_search_match 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 向结果或告警集合加入 append_search_match，同时保留调用方依赖的顺序。
-    def _append_search_match(
-        self,
-        rel: str,
-        line_number: int,
-        line: str,
-        matches: list[str],
-    ) -> None:
-        snippet = self._make_snippet(line)
-        matches.append(f"{rel}:{line_number}: {snippet}")
-
-    # LLM: SearchTextTool._make_snippet 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 工具系统 中的 make_snippet 步骤，并保持调用方依赖的数据形状。
-    def _make_snippet(self, line: str) -> str:
-        snippet = line.strip()
-        if len(snippet) > _MAX_SEARCH_LINE_CHARS:
-            snippet = snippet[:_MAX_SEARCH_LINE_CHARS] + "... 已截断"
-        return snippet
-
-    # LLM: SearchTextTool._item_relative_path 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 工具系统 中的 item_relative_path 步骤，并保持调用方依赖的数据形状。
-    def _item_relative_path(self, item: Path, safe_item: Path) -> str:
-        return self.display_path(safe_item if safe_item.is_absolute() else item)

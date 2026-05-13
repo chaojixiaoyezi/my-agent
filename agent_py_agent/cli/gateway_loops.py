@@ -56,7 +56,7 @@ def _gateway_request_loop(context: GatewayRunContext, paths: GatewayPaths, stop_
     while not stop_event.is_set():
         stop_event.wait(0.5)
     for thread in workers:
-        thread.join(timeout=2)
+        thread.join(timeout=max(0, int(getattr(bootstrap_agent.config, "gateway_worker_join_timeout_seconds", 2) or 0)))
 
 
 # LLM: _gateway_request_worker_loop 属于gateway CLI；改行为前先对齐调用方和快照/单测。

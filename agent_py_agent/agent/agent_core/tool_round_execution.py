@@ -18,8 +18,13 @@ from .tool_call_context_reducer import (
     render_assistant_tool_round_context,
 )
 
-_STATEFUL_ORCHESTRATION_TOOLS = {"create_subagents", "schedule_child_subagents"}
+_STATEFUL_ORCHESTRATION_TOOLS = {
+    "capability_config_patch",
+    "create_subagents",
+    "schedule_child_subagents",
+}
 _DEPENDENT_ORCHESTRATION_TOOLS = {
+    "capability_config_patch",
     "create_subagents",
     "dispatch_subagents",
     "schedule_child_subagents",
