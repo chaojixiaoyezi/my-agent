@@ -125,12 +125,12 @@ class PromptBuilder:
             f"{task_and_transcript}\n"
         )
 
-    # LLM: read_home_context injects lightweight owner context without loading every lesson in ~/.my-agent.
-    # 函数用途: 读取 home memory.md 和少量匹配 lesson 文件，作为运行时动态上下文。
+    # LLM: read_home_context injects owner entry files every round, then only matching lesson files.
+    # 函数用途: 每轮读取家目录关键入口文件，并按任务匹配少量 lesson 文件作为运行时动态上下文。
     def read_home_context(self, user_prompt: str) -> list[str]:
         if not self.home_paths or not bool(getattr(self.config, "home_context_enabled", True)):
             return []
-        chunks = _home_key_memory_chunks(self.home_paths)
+        chunks = _home_entry_context_chunks(self.home_paths)
         chunks.extend(_matching_lesson_chunks(self.home_paths, user_prompt, _lesson_limit(self.config)))
         return chunks
 
@@ -151,14 +151,21 @@ def _task_and_transcript_section(user_prompt: str, tool_context: list[str]) -> s
     )
 
 
-# LLM: _home_key_memory_chunks keeps key memory small and explicit in every home-backed prompt.
-# 函数用途: 读取 memory.md 关键记忆；文件为空或不存在时不注入。
-def _home_key_memory_chunks(home_paths: Any) -> list[str]:
-    path = Path(home_paths.memory_md)
-    content = _read_text_if_nonempty(path)
-    if not content:
-        return []
-    return [f"# Home Key Memory: {path}\n{content}"]
+# LLM: _home_entry_context_chunks loads stable owner entry files with AGENTS.md first as the boot contract.
+# 函数用途: 读取 SOUL/USER/AGENTS/memory 四个家目录关键文件；文件为空或不存在时跳过。
+def _home_entry_context_chunks(home_paths: Any) -> list[str]:
+    entries = (
+        ("AGENTS.md", Path(home_paths.agents_md)),
+        ("SOUL.md", Path(home_paths.soul_md)),
+        ("USER.md", Path(home_paths.user_md)),
+        ("memory.md", Path(home_paths.memory_md)),
+    )
+    chunks: list[str] = []
+    for label, path in entries:
+        content = _read_text_if_nonempty(path)
+        if content:
+            chunks.append(f"# Home Entry: {label}\nPath: {path}\n{content}")
+    return chunks
 
 
 # LLM: _matching_lesson_chunks uses simple filename matching until semantic lesson routing is added.

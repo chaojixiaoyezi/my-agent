@@ -101,3 +101,30 @@ def test_prompt_builder_reads_key_memory_and_matching_lessons(tmp_path: Path):
     assert "记住：产物目录必须干净。" in prompt
     assert "子代理教训：路径必须由上层传递。" in prompt
     assert "视频教训：不用读。" not in prompt
+
+
+# LLM: root prompts should load the owner entry files every round, not only memory.md.
+# 函数用途: 验证 SOUL/USER/AGENTS/memory 四个家目录关键文件会进入每轮 prompt。
+def test_prompt_builder_reads_home_entry_files_every_round(tmp_path: Path):
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    cfg = AgentConfig(my_agent_home=str(home), prompt_files=[])
+    agent = SimpleAgent(cfg, repo)
+    agent.home_paths.soul_md.write_text("人格规则：先证据后判断。\n", encoding="utf-8")
+    agent.home_paths.user_md.write_text("用户偏好：短汇报但要有验证。\n", encoding="utf-8")
+    agent.home_paths.agents_md.write_text("执行制度：每轮读关键文件。\n", encoding="utf-8")
+    agent.home_paths.memory_md.write_text("关键记忆：产物目录要干净。\n", encoding="utf-8")
+
+    prompt = agent.prompts.build("继续测试")
+
+    assert "# Home Entry: SOUL.md" in prompt
+    assert "人格规则：先证据后判断。" in prompt
+    assert "# Home Entry: USER.md" in prompt
+    assert "用户偏好：短汇报但要有验证。" in prompt
+    assert "# Home Entry: AGENTS.md" in prompt
+    assert "执行制度：每轮读关键文件。" in prompt
+    assert "# Home Entry: memory.md" in prompt
+    assert "关键记忆：产物目录要干净。" in prompt
+    assert prompt.index("# Home Entry: AGENTS.md") < prompt.index("# Home Entry: SOUL.md")
+    assert prompt.index("# Home Entry: SOUL.md") < prompt.index("# Home Entry: USER.md")
+    assert prompt.index("# Home Entry: USER.md") < prompt.index("# Home Entry: memory.md")

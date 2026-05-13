@@ -190,7 +190,7 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 
 ## My-Agent Home / Provider 空间
 
-新的家目录约定记录在 `docs/architecture/MY_AGENT_HOME_LAYOUT.md`。大白话说：主账号住在 `~/.my-agent/`，每天记忆放 `memory/daily/`，教训放 `memory/lessons/`，任务放 `workspace/tasks/{date}/{task_slug}/`；普通保存型 run 现在已经会创建任务目录里的 `outputs/`、`runtime/`、`agents/`、`logs/`、`state.json` 和 `timeline.jsonl`。`PromptBuilder` 会读取 `memory.md` 关键记忆，并只按文件名匹配少量 lesson，不会每轮全量读教训库。QQ/飞书这类外部平台接入后，才在 `providers/<provider>/users|groups/<id>/` 下给对应用户或群开独立空间。外部用户/群可以有自己的 tools、skills、role_templates、workflows、workspace、memory、trash，但不能写主账号家目录，也不能越权碰别人的空间。
+新的家目录约定记录在 `docs/architecture/MY_AGENT_HOME_LAYOUT.md`。大白话说：主账号住在 `~/.my-agent/`，每天记忆放 `memory/daily/`，教训放 `memory/lessons/`，任务放 `workspace/tasks/{date}/{task_slug}/`；普通保存型 run 现在已经会创建任务目录里的 `outputs/`、`runtime/`、`agents/`、`logs/`、`state.json` 和 `timeline.jsonl`。`PromptBuilder` 会每轮按 `AGENTS.md`、`SOUL.md`、`USER.md`、`memory.md` 顺序读取四个入口文件，并只按文件名匹配少量 lesson，不会每轮全量读教训库。QQ/飞书这类外部平台接入后，才在 `providers/<provider>/users|groups/<id>/` 下给对应用户或群开独立空间。外部用户/群可以有自己的 tools、skills、role_templates、workflows、workspace、memory、trash，但不能写主账号家目录，也不能越权碰别人的空间。
 
 日期窗口说明：`--since YYYY-MM-DD` 从当天 00:00 开始；`--until YYYY-MM-DD` 包含当天全天。这样用户按自然日期查跨天交接时，不会漏掉当天白天的 hook snapshot。
 

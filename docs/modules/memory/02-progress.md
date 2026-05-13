@@ -275,6 +275,6 @@
 ## 2026-05-13 home runtime bootstrap
 - 中文说明：单用户 `~/.my-agent` 暂不接飞书/QQ，但已经接入主代理本地运行时。`SimpleAgent` 启动会初始化 `my_agent_home`，普通保存型 run 会创建 `workspace/tasks/{date}/{task_slug}/outputs`、`runtime`、`agents`、`logs` 和 refs-only 状态文件。
 - `JsonlMemory` 保留旧 `memory_path` 兼容，同时按配置镜像到 `memory/daily/YYYY-MM-DD.jsonl`，后续 query/resume 可以逐步迁移到按天流水。
-- `PromptBuilder` 对 home-backed agent 读取 `memory.md` 关键记忆，并用 lesson 文件名和当前任务文本做轻量匹配；不会每轮全量读取整个 lessons 目录。
+- `PromptBuilder` 对 home-backed root 每轮按 `AGENTS.md`、`SOUL.md`、`USER.md`、`memory.md` 顺序读取四个家目录入口文件，并用 lesson 文件名和当前任务文本做轻量匹配；不会每轮全量读取整个 lessons 目录。
 - provider trash 从 `provider_space.py` 拆到 `provider_trash.py`，新增按配置保留天数清理旧 trash 日期目录；破坏性操作仍默认走同空间 trash 和审计。
 - 本轮 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_home_runtime_bootstrap.py agent_py_agent/tests/test_provider_space.py agent_py_agent/tests/test_config_normalize.py::TestNormalizeAgentConfig::test_normalize_home_provider_risk_fields agent_py_agent/tests/test_agent/test_memory_and_basic.py agent_py_agent/tests/test_prompting_builder.py` -> passed；strict code-size 维持 `hard=0 high-risk=0 soft=0`。
