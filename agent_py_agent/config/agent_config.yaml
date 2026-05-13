@@ -120,17 +120,6 @@ subagent_automation_level: 2
 # - 5: 额外把完整 prompt、response、tool 参数和工具输出写到 debug_traces/details；仅建议真实 E2E 排障时开启
 subagent_debug_trace_level: 0
 
-# 动态超时安全边际
-# - 实际超时 = 预估耗时 * safety_margin
-# - 默认 2.0，即预估 10 秒的任务给 20 秒超时
-dynamic_timeout_safety_margin: 2.0
-
-# 动态超时下限（秒）
-dynamic_timeout_min: 30
-
-# 动态超时上限（秒）
-dynamic_timeout_max: 600
-
 # 失败后最大自动拆分次数
 # - 避免无限拆分
 # - 0 表示不自动拆分
@@ -141,12 +130,6 @@ max_auto_split_depth: 2
 # - 超过此次数后放弃自动重试，通知用户介入
 # - 默认 3 次
 max_auto_retry_attempts: 3
-
-# 模型速度配置文件路径
-model_speed_profile_path: "data/model_speed_profile.json"
-
-# 是否在首次使用时自动运行速度测试
-auto_bench_model_on_first_use: true
 
 # 用户数据隔离配置
 # - user_id: 当前用户标识，默认为 admin
@@ -239,7 +222,26 @@ acceptance_test_timeout_seconds: 120
 scheduler_mode: "auto"
 runner_concurrency: "auto"
 runner_start_rate: "auto"
+
+# Runner 超时开关和动态超时参数；这三项必须放一起看。
+# runner_timeout_seconds 表示 runner 超时模式："off"/0 是不限制；"auto" 是启用动态超时；数字字符串表示固定秒数。
 runner_timeout_seconds: "off"
+
+# dynamic_timeout_min 表示动态超时下限：auto 模式算出来再短，也至少给这么多秒，避免小任务被误杀。
+dynamic_timeout_min: 30
+
+# dynamic_timeout_max 表示动态超时上限：auto 模式算出来再长，也最多给这么多秒，避免子代理长期卡住。
+dynamic_timeout_max: 600
+
+# 动态超时估算辅助参数；这些字段服务于 runner_timeout_seconds="auto"。
+# dynamic_timeout_safety_margin 表示安全倍率：实际超时 = 预估耗时 * 这个倍率。
+dynamic_timeout_safety_margin: 2.0
+
+# model_speed_profile_path 表示模型速度样本文件路径，动态超时会用它估算任务耗时。
+model_speed_profile_path: "data/model_speed_profile.json"
+
+# auto_bench_model_on_first_use 表示首次使用时是否自动跑速度测试，给后续动态超时提供样本。
+auto_bench_model_on_first_use: true
 
 # runner_failure_policy 控制 runner 临时失败后的总尝试次数：
 # - "auto": 当前等价于最多 2 次，也就是首次失败后下一轮 dispatch 再试一次

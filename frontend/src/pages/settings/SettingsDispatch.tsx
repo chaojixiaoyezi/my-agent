@@ -3,6 +3,7 @@ import { useAuthStore } from "../../stores/authStore";
 import {
   AdminSection,
   NumberField,
+  StringField,
   ChoiceField,
   ToggleField,
   Divider,
@@ -124,13 +125,41 @@ export default function SettingsDispatch() {
             unit="个/秒"
             disabled={!isAdmin}
           />
-          <NumberField
-            label="runner_timeout_seconds（超时时间）"
-            description="单个 runner 最大运行时间"
+          <StringField
+            label="runner_timeout_seconds（超时开关）"
+            description="off/0 表示不限制；auto 表示启用动态超时；数字表示固定秒数"
             value={runner.timeout_seconds}
             onChange={(v) => { setRunner({ timeout_seconds: v }); markDirty(); }}
+            placeholder="off / auto / 240"
+            disabled={!isAdmin}
+          />
+          <NumberField
+            label="dynamic_timeout_min（动态下限）"
+            description="动态算出来再短，也至少给这么多秒"
+            value={runner.dynamic_timeout_min}
+            onChange={(v) => { setRunner({ dynamic_timeout_min: v }); markDirty(); }}
             min={10}
             max={3600}
+            unit="秒"
+            disabled={!isAdmin}
+          />
+          <NumberField
+            label="dynamic_timeout_safety_margin（动态安全边际）"
+            description="动态超时 = 预估耗时 × 这个倍率"
+            value={runner.dynamic_timeout_safety_margin}
+            onChange={(v) => { setRunner({ dynamic_timeout_safety_margin: v }); markDirty(); }}
+            min={1}
+            max={10}
+            unit="倍"
+            disabled={!isAdmin}
+          />
+          <NumberField
+            label="dynamic_timeout_max（动态上限）"
+            description="动态算出来再长，也最多给这么多秒"
+            value={runner.dynamic_timeout_max}
+            onChange={(v) => { setRunner({ dynamic_timeout_max: v }); markDirty(); }}
+            min={60}
+            max={7200}
             unit="秒"
             disabled={!isAdmin}
           />
