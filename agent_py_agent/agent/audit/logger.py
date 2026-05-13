@@ -7,9 +7,9 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .paths import resolve_audit_paths
 from .records import (
     AuditAction,
     AuditEntry,
@@ -24,6 +24,15 @@ if TYPE_CHECKING:
     from ..settings.config import AgentConfig
 
 
+# LLM: Direct callers sometimes pass small config stubs, so audit_enabled needs local string handling too.
+# 函数用途: 判断审计是否开启；兼容未经过完整配置归一化的测试配置或轻量配置对象。
+def _audit_enabled(config: AgentConfig) -> bool:
+    raw_value = getattr(config, "audit_enabled", True)
+    if isinstance(raw_value, str):
+        return raw_value.strip().lower() not in {"false", "no", "off", "0"}
+    return bool(raw_value)
+
+
 # LLM: Bridges high-level audit actions to JSONL and optional LocalStore records; preserve public convenience methods.
 # 类用途: 负责生成审计记录、落盘到 audit.jsonl，并在可用时同步到 LocalStore。
 class AuditLogger:
@@ -33,9 +42,12 @@ class AuditLogger:
     def __init__(self, config: AgentConfig, local_store: LocalStore | None = None):
         self.config = config
         self._local_store = local_store
-        self._audit_root = Path(getattr(config, "audit_log_path", "data/audit"))
-        self._audit_root.mkdir(parents=True, exist_ok=True)
-        self._audit_file = self._audit_root / "audit.jsonl"
+        self.enabled = _audit_enabled(config)
+        paths = resolve_audit_paths(config)
+        self._audit_root = paths.root
+        self._audit_file = paths.log_file
+        if self.enabled:
+            self._audit_root.mkdir(parents=True, exist_ok=True)
 
     # LLM: ID format is timestamp plus short random suffix; keep it stable enough for log readers.
     # 函数用途: 生成审计记录 ID，用时间戳方便粗略排序，用随机段降低冲突概率。
@@ -76,6 +88,8 @@ class AuditLogger:
             user_agent=user_agent,
         )
         entry = self._entry_from_params(log_params)
+        if not self.enabled:
+            return entry
         self._write_to_file(entry)
         if self._local_store is not None:
             self._write_to_local_store(entry)

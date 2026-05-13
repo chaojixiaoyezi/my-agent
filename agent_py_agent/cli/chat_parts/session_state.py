@@ -43,17 +43,18 @@ class ConversationHistory:
 
     # LLM: __init__ 属于chat CLI；改行为前先对齐调用方和快照/单测。
     # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
-    def __init__(self, max_turns: int = 8) -> None:
+    def __init__(self, max_turns: int = 8, assistant_preview_chars: int = 500) -> None:
         self._history: list[tuple[str, str]] = []
         self._lock = threading.Lock()
         self._max_turns = max_turns
+        self._assistant_preview_chars = assistant_preview_chars
 
     # LLM: append 属于chat CLI；改行为前先对齐调用方和快照/单测。
     # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def append(self, user: str, assistant: str) -> None:
         with self._lock:
             self._history.append((user, assistant))
-            if len(self._history) > self._max_turns * 2:
+            if len(self._history) > self._max_turns:
                 self._history[:] = self._history[-self._max_turns:]
 
     # LLM: get_context 属于chat CLI；改行为前先对齐调用方和快照/单测。
@@ -67,8 +68,15 @@ class ConversationHistory:
         lines = ["## 最近对话上下文（供参考，按时间倒序）"]
         for user_msg, assistant_msg in reversed(recent):
             lines.append(f"用户: {user_msg}")
-            lines.append(f"助手: {assistant_msg[:500]}")
+            lines.append(f"助手: {self._assistant_preview(assistant_msg)}")
         return "\n".join(lines)
+
+    # LLM: _assistant_preview mirrors chat history rendering so session state honors config.
+    # 函数用途: 根据构造参数截断助手历史；0 或负数表示不截断。
+    def _assistant_preview(self, text: str) -> str:
+        if self._assistant_preview_chars <= 0 or len(text) <= self._assistant_preview_chars:
+            return text
+        return text[: self._assistant_preview_chars]
 
     # LLM: __len__ 属于chat CLI；改行为前先对齐调用方和快照/单测。
     # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。

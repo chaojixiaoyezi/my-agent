@@ -40,7 +40,9 @@ def _fallback_gateway_handle(ctx: FallbackJobContext) -> tuple[str, bool]:
         raise RuntimeError("gateway 已停止。请先执行 my-agent gateway start")
     started_at = time.perf_counter()
     on_chunk, stream_started_ref = _make_chunk_handler(
-        ctx.agent.config.agent_name, _next_message_id(ctx)
+        ctx.agent.config.agent_name,
+        _next_message_id(ctx),
+        preview_chars=_chat_preview_chars(ctx),
     )
     request_id, chunk_path, response_path = submit_chat_request(
         ctx.paths,
@@ -68,7 +70,9 @@ def _fallback_gateway_handle(ctx: FallbackJobContext) -> tuple[str, bool]:
 def _fallback_local_handle(ctx: FallbackJobContext) -> tuple[str, bool]:
     started_at = time.perf_counter()
     on_chunk, stream_started_ref = _make_chunk_handler(
-        ctx.agent.config.agent_name, _next_message_id(ctx)
+        ctx.agent.config.agent_name,
+        _next_message_id(ctx),
+        preview_chars=_chat_preview_chars(ctx),
     )
     result = ctx.agent.run(
         ctx.job.user,
@@ -117,7 +121,31 @@ def _render_if_needed(
     ctx: FallbackJobContext, response_text: str, stream_started: bool
 ) -> None:
     if not stream_started:
-        _render_assistant_response(response_text, ctx.assistant_outputs, ctx.agent.config.agent_name)
+        _render_assistant_response(
+            response_text,
+            ctx.assistant_outputs,
+            ctx.agent.config.agent_name,
+            preview_lines=_chat_preview_lines(ctx),
+            preview_chars=_chat_preview_chars(ctx),
+        )
+
+
+# LLM: fallback preview getters keep long-response folding wired to agent_config.yaml.
+# 函数用途: 从配置读取折叠预览行数；配置异常时回退到 12 行。
+def _chat_preview_lines(ctx: FallbackJobContext) -> int:
+    try:
+        return max(0, int(getattr(ctx.agent.config, "chat_collapse_preview_lines", 12) or 0))
+    except (TypeError, ValueError):
+        return 12
+
+
+# LLM: fallback preview getters keep long-response folding wired to agent_config.yaml.
+# 函数用途: 从配置读取折叠预览字符数；配置异常时回退到 900 字符。
+def _chat_preview_chars(ctx: FallbackJobContext) -> int:
+    try:
+        return max(0, int(getattr(ctx.agent.config, "chat_collapse_preview_chars", 900) or 0))
+    except (TypeError, ValueError):
+        return 900
 
 
 # LLM: _print_gateway_timing 属于chat CLI；改行为前先对齐调用方和快照/单测。

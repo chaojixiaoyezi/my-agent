@@ -1005,3 +1005,34 @@
 - R86 短链路已复测：root 创建 `小傻妞-r86-coordinator`，coordinator 创建 `小小傻妞-r86-leaf-worker` 和一个 acceptor；leaf 的 `execution_context.json` / `task.json` 里真实出现 `read_artifact`，并写出 `/Users/example/my-终端应用/deliverables/stage7_r86_artifact_tool/build/proof.txt`，内容包含 `r86-read-artifact-tool-ok`。
 - R86 剩余范围：这轮是短链路确认，不是完整购物站，也没有制造大外置 read artifact 给 leaf 必须读取；下一轮长 E2E 要继续观察 leaf 遇到 wrapper JSON 时是否会改用 scoped `read_artifact`。
 - 下一步：回到完整购物站链路，重点压 `root -> coordinator -> leaf -> QA/acceptor` 的完整收口，并继续减少父级读正文和大文件整块工具参数。
+
+## 2026-05-13 backend config extraction
+- 中文说明：子代理 CLI 默认数量、看板 limit、probe limit、hierarchy depth/recovery nodes、dispatch 默认 runner/limit/watch interval 已抽到 `agent_config.yaml`，后续调大或调小不用改代码。
+- `spawn-subagents --count`、`subagents --limit`、due-check/action/route/acceptance/patch/memory-gate 等 limit 在用户未显式传参时读取后端配置；显式命令行参数仍优先。
+- `subagents-dispatch` 的 `max_runners`、`limit`、`interval` 默认值改为读取 `dispatch_default_*` 配置，避免 daemon/dispatch/test 场景各自写死一套策略。
+- 这轮不改变子代理状态机、不改变 role template 选择、不改变用户需求语义；只是把默认预算和展示条数统一到后端配置层。
+
+## 2026-05-13 artifact narrow-read hardening
+- 中文说明：R85/R86 后继续补“外置 artifact 怎么安全读取”。目标不是让子代理少工具，而是让它们只读必要片段，避免为了找一行线索把大工具输出搬回上下文。
+- 已实现：`read_artifact` 支持 `mode=slice/head/tail/search`。search 只返回匹配行和行号；head/tail 方便看大日志开头和尾部；slice 保持旧 offset/max_chars 兼容。
+- 已实现：单 run artifact 正文读取预算，默认 10 分钟 240000 字符。预算按 `run_id` 隔离；兄弟子代理互不抢额度；主代理无 run_id 普通聊天不受这个预算限制。
+- 已实现：`max_chars=0` 读全部时，会先用 `tool_outputs/index.jsonl` 的 `size_bytes` 做预算预判；如果明显超过预算，就不会先把大正文读进来。
+- 已实现：如果 leaf 只有 `read_file`，却误读外置 artifact 包装 JSON，错误提示会明确“当前未授权 read_artifact，请 capability_request”，避免模型继续用 `read_file` 空转。
+- 已补测试：`test_read_artifact_supports_head_tail_and_search_modes`、`test_read_artifact_tool_enforces_per_run_artifact_read_budget`、`test_read_artifact_budget_blocks_unbounded_large_read_from_index`、`test_read_file_artifact_wrapper_hint_mentions_missing_read_artifact_permission`，并回归 `test_memory_artifact_read.py` 全文件。
+- 下一步：用短真实链路制造一个 leaf 必须读取外置 artifact 的场景，观察模型是否优先用 `mode=search` 或 scoped ref，而不是继续抄长路径。
+
+## 2026-05-13 max_tool_rounds unlimited default
+- 中文说明：按新的测试策略，主代理单次任务不再默认限制“模型调用工具再继续推理”的轮数；`max_tool_rounds=0` 现在明确表示不限制。
+- 已实现：`agent_config.yaml`、`AgentConfig`、`ToolConfig` 默认值统一改为 `0`；配置归一化允许 `0`，负数仍回退到默认 `0`。
+- 已实现：工具循环只在 `max_tool_rounds > 0` 时触发“工具轮数到顶”收束；`0` 不会再被误判成“立刻到顶”。
+- 边界说明：这只取消单次工具轮数上限，不取消单代理工具预算。subagent 有 `tool_agent_budget_window_seconds/tool_agent_budget_max_calls`，默认仍是 10 分钟 50 次，用来防止单个代理复读工具。
+- 下一步：继续按真实 root-only 子代理测试观察工具预算是否足够宽松；如果测试链路仍因预算过早收口，再优先调配置而不是写死流程。
+
+## 2026-05-13 capability config self-heal lane
+- 中文说明：能力路由配置现在有正式的“结构化补丁”入口，agent 发现超时、候选数量、能力包预算等安全字段不合理时，可以调用 `capability_config_patch`，而不是要求用户手动改 YAML。
+- 已实现：`agent.capability.runtime_config` 提供 `CapabilityConfigPatchRequest`、内容 hash 版本校验、allowlist 安全字段、manual-only 字段建议、JSONL 审计、通知记录和热加载 snapshot。
+- 已实现：`capability_config_patch` 模型工具已注册到主代理工具表。安全字段在 `apply=true` 时可自动写入；`enable_capability_routing` 这类全局行为开关只返回 `manual_approval_required`，不会偷偷打开。
+- 已实现：`dispatch_subagents` 工具和 `watch_subagents` 后续轮次会读取最新 capability config；已运行中的子代理不被中途篡改，新 dispatch/retry/takeover 才使用新配置。
+- 边界说明：这不是让模型随便改配置。未知字段、版本不匹配、危险字段都会阻止或只给建议；审计文件默认写到 subagent workspace，不污染用户产物目录。
+- 已补测试：`test_capability_runtime_config.py` 覆盖安全补丁、危险字段建议、版本冲突、router 热加载、工具注册和工具写入；并回归 capability config 与 capability_request focused tests。
+- 下一步：继续真实 root-only 子代理测试，观察 agent 是否能在配置导致误判时先自检并使用补丁工具，而不是把问题推给用户。

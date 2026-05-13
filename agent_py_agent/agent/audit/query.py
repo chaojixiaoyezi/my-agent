@@ -7,13 +7,13 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..settings.config import AgentConfig
 
 from .logger import AuditAction, AuditEntry
+from .paths import resolve_audit_paths
 
 
 # LLM: AuditQueryResult is a 审计系统 boundary object; coordinate field or method changes with callers, docs, and focused tests.
@@ -134,8 +134,9 @@ class AuditQuery:
     # 函数用途: 初始化实例依赖和字段，不应在构造阶段做难以回滚的重副作用；它是 AuditQuery 的方法，通常依赖实例字段。
     def __init__(self, config: AgentConfig):
         self.config = config
-        self._audit_root = Path(getattr(config, "audit_log_path", "data/audit"))
-        self._audit_file = self._audit_root / "audit.jsonl"
+        paths = resolve_audit_paths(config)
+        self._audit_root = paths.root
+        self._audit_file = paths.log_file
 
     # LLM: AuditQuery.query belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 查询已有记录、索引或配置并返回给上层调用方，返回结构需要保持稳定；它是 AuditQuery 的方法，通常依赖实例字段。

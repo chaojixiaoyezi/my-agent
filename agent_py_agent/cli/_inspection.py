@@ -20,7 +20,7 @@ def cmd_subagents_due_check(args) -> int:
 
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
-    options = _subagents_due_check_options(args)
+    options = _subagents_due_check_options(args, agent=agent)
     report = agent.subagents.write_due_check(
         params=SubAgentDueCheckOptions(
             config=capability_config,
@@ -52,7 +52,7 @@ def cmd_subagents_due_check(args) -> int:
 def cmd_subagents_probe(args) -> int:
 
     agent = make_agent(args)
-    options = _subagents_probe_options(args)
+    options = _subagents_probe_options(args, agent=agent)
     report = agent.subagents.write_channel_probe_report(
         params=SubAgentChannelProbeOptions(run_ids=options.run_ids, limit=options.limit),
     )
@@ -120,21 +120,33 @@ def cmd_subagent_context(args) -> int:
 
 # LLM: _subagents_due_check_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
 # 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
-def _subagents_due_check_options(args) -> SubagentsDueCheckOptions:
+def _subagents_due_check_options(args, *, agent=None) -> SubagentsDueCheckOptions:
     return SubagentsDueCheckOptions(
         all=bool(args.all),
-        limit=int(args.limit or 0),
+        limit=_subagent_config_int(agent, args, "limit", "subagent_cli_default_limit"),
         root_id=str(getattr(args, "root_id", "") or ""),
     )
 
 
 # LLM: _subagents_probe_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
 # 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
-def _subagents_probe_options(args) -> SubagentsProbeOptions:
-    return SubagentsProbeOptions(run_ids=args.run_id or None, limit=int(args.limit or 0))
+def _subagents_probe_options(args, *, agent=None) -> SubagentsProbeOptions:
+    return SubagentsProbeOptions(
+        run_ids=args.run_id or None,
+        limit=_subagent_config_int(agent, args, "limit", "subagent_probe_default_limit"),
+    )
 
 
 # LLM: _subagent_context_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
 # 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _subagent_context_options(args) -> SubagentContextOptions:
     return SubagentContextOptions(run_id=args.run_id, max_cards=int(args.max_cards or 0))
+
+
+# LLM: _subagent_config_int keeps inspection CLI defaults owned by AgentConfig.
+# 函数用途: argparse 默认 None 时，从后端配置读取对应子代理命令默认值。
+def _subagent_config_int(agent, args, arg_name: str, config_name: str) -> int:
+    value = getattr(args, arg_name, None)
+    if value is not None:
+        return int(value)
+    return int(getattr(getattr(agent, "config", None), config_name, 0) or 0)

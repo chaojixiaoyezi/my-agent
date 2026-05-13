@@ -14,6 +14,11 @@ from ...capabilities import CapabilityRouter
 from ...capability_config import CapabilityConfig
 from ...subagents.services.dispatch_params import DispatchWatchHeartbeatParams
 from ..dispatch_params import DispatchParams, WatchParams, dispatch_params_from_watch
+from .watch_config_reload import (
+    WatchRuntimeConfigRequest,
+    initial_watch_config_snapshot,
+    watch_runtime_config,
+)
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -52,6 +57,17 @@ class WatchLoopParams:
     active_interval: float
     idle_interval: float
     max_consecutive: int
+
+
+# LLM: WatchCycleBuildParams bundles one cycle's dynamic config and progress state.
+# 类用途: 构建 RunSingleWatchCycleParams 时集中携带 loop、热加载配置和上轮是否有变化。
+@dataclass(frozen=True)
+class WatchCycleBuildParams:
+    loop: WatchLoopParams
+    cycle: int
+    last_dispatch_had_changes: bool
+    cfg: CapabilityConfig
+    router: CapabilityRouter
 
 
 # LLM: watch_subagents 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -112,14 +128,23 @@ def _run_watch_cycles(
 ) -> int:
     cycle = 0
     last_dispatch_had_changes = False
+    config_snapshot = initial_watch_config_snapshot(agent, loop.cfg, loop.router)
     while loop.params.max_cycles == 0 or cycle < loop.params.max_cycles:
         if loop.stop_path and loop.stop_path.exists():
             break
         cycle += 1
+        runtime = watch_runtime_config(
+            WatchRuntimeConfigRequest(agent, loop.cfg, loop.router, config_snapshot)
+        )
+        config_snapshot = runtime.snapshot
         cycle_params = _watch_cycle_params(
-            loop,
-            cycle,
-            last_dispatch_had_changes,
+            WatchCycleBuildParams(
+                loop=loop,
+                cycle=cycle,
+                last_dispatch_had_changes=last_dispatch_had_changes,
+                cfg=runtime.cfg,
+                router=runtime.router,
+            )
         )
         record = _run_single_watch_cycle(agent, cycle_params)
         records.append(record)
@@ -129,17 +154,14 @@ def _run_watch_cycles(
 
 # LLM: _watch_cycle_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 推进cycle参数的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
-def _watch_cycle_params(
-    loop: WatchLoopParams,
-    cycle: int,
-    last_dispatch_had_changes: bool,
-) -> RunSingleWatchCycleParams:
-    params = loop.params
+def _watch_cycle_params(request: WatchCycleBuildParams) -> RunSingleWatchCycleParams:
+    loop = request.loop
+    params = request.loop.params
     return RunSingleWatchCycleParams(
-        cycle=cycle, lock_path=loop.lock_path, stop_path=loop.stop_path, router=loop.router, cfg=loop.cfg,
+        cycle=request.cycle, lock_path=loop.lock_path, stop_path=loop.stop_path, router=request.router, cfg=request.cfg,
         dispatch_params=dispatch_params_from_watch(params),
         active_interval=loop.active_interval, idle_interval=loop.idle_interval,
-        max_consecutive=loop.max_consecutive, last_dispatch_had_changes=last_dispatch_had_changes,
+        max_consecutive=loop.max_consecutive, last_dispatch_had_changes=request.last_dispatch_had_changes,
         max_cycles=params.max_cycles,
     )
 

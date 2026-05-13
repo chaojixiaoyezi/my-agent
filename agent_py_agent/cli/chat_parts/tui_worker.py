@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .chat_style import CHAT_RESPONSE_STYLE_INJECT
+from .history import chat_history_max_turns
 from .renderer import GREEN, RESET
 from .tui_worker_paths import _worker_gateway_path, _worker_local_path
 from .tui_worker_stream import (
@@ -84,6 +85,7 @@ def _tui_cleanup_after_job(
             cfg.history_lock,
             job.user,
             agent_response_text,
+            max_turns=chat_history_max_turns(cfg.agent.config),
         )
     _reset_worker_refs(cfg)
     cfg.jobs.task_done()
@@ -207,9 +209,6 @@ def _make_stream_callbacks(cfg: TuiWorkerConfig, next_message_id: int, spinner):
     return begin_stream, on_stream_chunk
 
 
-MAX_HISTORY_TURNS = 8
-
-
 # LLM: _append_conversation_turn 属于chat CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _append_conversation_turn(
@@ -217,8 +216,10 @@ def _append_conversation_turn(
     history_lock,
     user_message: str,
     assistant_message: str,
+    *,
+    max_turns: int,
 ) -> None:
     with history_lock:
         conversation_history.append((user_message, assistant_message))
-        if len(conversation_history) > MAX_HISTORY_TURNS * 2:
-            conversation_history[:] = conversation_history[-MAX_HISTORY_TURNS:]
+        if len(conversation_history) > max_turns:
+            conversation_history[:] = conversation_history[-max_turns:]

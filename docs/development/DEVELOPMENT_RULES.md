@@ -195,6 +195,10 @@ x = x + 1  # skip the sentinel row that the legacy exporter always emits
 - Code-size spans count implementation lines, not comment/docstring lines. Do not weaken
   required comments to satisfy size checks; split real implementation when the
   implementation itself approaches the limit.
+- Frontend files under `frontend/` are excluded from the Python strict code-size
+  guard. They must instead pass the frontend gates: `npm run check:config`,
+  `npm run lint`, and `npm run build` from `frontend/`. This keeps Python
+  architecture guardrails focused while still making UI changes testable.
 
 ---
 
@@ -294,6 +298,14 @@ do_write()
   Default policy is `tool_agent_budget_window_seconds=600` and
   `tool_agent_budget_max_calls=50`, keyed by `run_id`. Calls without a `run_id`
   are treated as ordinary main-agent chat and are not limited by this guard.
+- Artifact body reads have their own per-run character budget. Default policy is
+  `tool_artifact_read_budget_window_seconds=600` and
+  `tool_artifact_read_budget_max_chars=240000`, keyed by `run_id`; `0` disables
+  the budget. Read these two fields as one policy: "within this many seconds,
+  this run may read up to this many artifact body chars." Prefer
+  `read_artifact mode=search/head/tail` or small slices over full artifact reads.
+  `read_file` must never be used to open
+  `memory_archive/artifacts/tool_outputs/*.json` wrapper files.
 - A budget hit must be a recoverable self-check/handoff signal: return a bounded
   tool result asking the agent to summarize current progress, detect repeated
   tool use, and escalate to its parent if more tools are needed. Do not silently
@@ -321,6 +333,10 @@ do_write()
   writes inside the allowed workspace and returns only refs/audit metadata.
   Streaming stdout/stderr can improve observability, but it is not a fix for an
   oversized or malformed tool-call JSON block.
+- Tool prompt budgets must be long-term config-backed. If a tool/catalog/search
+  threshold affects runtime behavior, put it in `agent_config.yaml`,
+  `AgentConfig`, the normalizer, and the frontend runtime config together; do
+  not leave a second hardcoded default in UI/store/tool code.
 - Long-content recovery must be policy-driven. If a write-like tool parse error
   or inline-limit rejection needs to guide the next model turn, put that rule in
   `content_recovery_mode.py` and append a compact `[tool-system]` recovery mode;
@@ -422,6 +438,54 @@ do_write()
   ids, and refs instead.
 - When a real E2E exposes a new trace need, record the reason in
   `docs/modules/subagent/06-real-e2e-findings.md` before expanding trace detail.
+
+## 11.4 Backend Config Ownership / 后端配置所有权
+
+- Product behavior defaults must live in backend config, not as scattered
+  literals in service code. Use `AgentConfig` plus
+  `agent_py_agent/config/agent_config.yaml` for runtime defaults that affect
+  memory, compact/resume, tools, subagents, dispatch, gateway, chat, CLI
+  limits, budgets, timeouts, preview sizes, and scan windows.
+- New backend parameters need three pieces at the same time: an `AgentConfig`
+  field, a documented YAML entry, and normalization in the settings services
+  when the value is numeric/bool/list-like. Call sites should read the resolved
+  config value after `make_agent()` or through a bundle that already carries
+  config.
+- Argparse defaults for behavior-affecting numbers should be `None` when the
+  real default comes from config. A literal `0` is allowed only when it is an
+  explicit user meaning such as “unlimited”, “disabled”, or “do not execute”.
+- Fallback literals are allowed only at bootstrap or compatibility boundaries:
+  dataclass defaults, parser help text, tests, transparent wrappers, and code
+  paths that must survive missing/broken config. They must mirror YAML defaults
+  and must not become a second independent policy source.
+- Config fields that are intentionally internal do not need frontend exposure
+  yet, but they still belong in backend config if changing them affects
+  runtime behavior. User-facing frontend config should later read these backend
+  fields instead of copying hardcoded frontend defaults.
+- Before pushing a change that adds or changes backend config, run at least:
+  `python -m py_compile`, focused tests for touched modules, `ruff check`, and
+  a `load_config(agent_config.yaml)` smoke test. When pushing to remote without
+  GitHub Actions, run the strict local gate first.
+
+## 11.5 Runtime Config Self-Healing / 运行期配置自修复
+
+- Agents must not raw-edit `agent_py_agent/config/capability_config.yaml`.
+  Runtime adjustments go through `CapabilityConfigPatchRequest` and the
+  `capability_config_patch` tool so field validation, allowlist policy,
+  version checks, audit, and reload behavior stay centralized.
+- Safe capability fields may be auto-applied only when they are listed in the
+  runtime config allowlist. Global behavior switches and unknown fields must
+  return suggestions such as `manual_approval_required` instead of mutating
+  config silently.
+- Every runtime config write needs a content-version check when the caller has
+  a version, plus a JSONL audit record. Version mismatch means “stop and
+  re-read”, not “overwrite”.
+- Config reload affects future dispatch/watch/retry/takeover cycles only. Do
+  not mutate already-running subagent prompts, grants, or execution contexts
+  in-place.
+- User-facing docs and tool specs should tell the model how to use the patch
+  lane, so ordinary users do not need to know YAML field names to recover from
+  obvious config limits.
 
 ---
 

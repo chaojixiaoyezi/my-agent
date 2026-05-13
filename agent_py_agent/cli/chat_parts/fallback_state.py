@@ -95,7 +95,8 @@ _CHAT_RESPONSE_STYLE_INJECT = (
 )
 
 FALLBACK_CHAT_PROMPT = "❯ "
-MAX_HISTORY_TURNS = 8
+MAX_HISTORY_TURNS = 20
+ASSISTANT_PREVIEW_CHARS = 500
 
 
 # LLM: _startup_banner 属于chat CLI；改行为前先对齐调用方和快照/单测。
@@ -117,7 +118,7 @@ def append_conversation_turn(
 ) -> None:
     with history_lock:
         conversation_history.append((turn.user_message, turn.assistant_message))
-        if len(conversation_history) > max_turns * 2:
+        if len(conversation_history) > max_turns:
             conversation_history[:] = conversation_history[-max_turns:]
 
 
@@ -152,4 +153,3 @@ class ChatJob:
         self.show_prompt = show_prompt
         self.inject = inject
         self.prompt_files = prompt_files
-

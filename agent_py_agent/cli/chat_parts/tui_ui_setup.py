@@ -28,6 +28,7 @@ from .tui_transcript_store import (
 class StatusBarConfig:
     refs: TuiStatusRefs
     model_name: str
+    context_window_chars: int
 
 
 APP_RENDER_POSTPONE_SECONDS = 1 / 60
@@ -66,7 +67,7 @@ def _make_status_bar(
             lambda: [
                 (
                     "class:status-bar",
-                    f" {_tui_get_status_text(config.refs, config.model_name)} ",
+                    f" {_tui_get_status_text(config.refs, config.model_name, context_window_chars=config.context_window_chars)} ",
                 )
             ],
         ),
@@ -127,8 +128,14 @@ def _make_transcript_area() -> Any:
 
 # LLM: _install_transcript_sink 属于chat CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
-def _install_transcript_sink(output_area: Any, follow_ref: list[bool], app_ref: list[Any]) -> None:
-    store = TuiTranscriptStore(output_area, follow_ref, app_ref)
+def _install_transcript_sink(
+    output_area: Any,
+    follow_ref: list[bool],
+    app_ref: list[Any],
+    *,
+    max_chars: int = 500_000,
+) -> None:
+    store = TuiTranscriptStore(output_area, follow_ref, app_ref, max_chars=max_chars)
 
     set_tui_output_sink(store.append_history)
     set_tui_stream_sink(store.append_stream, finish=store.finish_stream)
@@ -180,7 +187,7 @@ def make_tui_app(params: MakeTuiAppParams):
         min_redraw_interval=APP_REDRAW_INTERVAL_SECONDS if use_app_scrollback else None,
         max_render_postpone_time=APP_RENDER_POSTPONE_SECONDS if use_app_scrollback else 0.01,
     )
-    _configure_transcript_sink(output_area, transcript_follow_ref, app_ref, app)
+    _configure_transcript_sink(output_area, transcript_follow_ref, app_ref, app, params)
 
     return app
 
@@ -188,6 +195,7 @@ def make_tui_app(params: MakeTuiAppParams):
 # LLM: _make_status_bar_config 属于chat CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _make_status_bar_config(params: MakeTuiAppParams) -> StatusBarConfig:
+    config = params.agent.config
     return StatusBarConfig(
         refs=TuiStatusRefs(
             params.state_lock,
@@ -197,7 +205,8 @@ def _make_status_bar_config(params: MakeTuiAppParams) -> StatusBarConfig:
             params.last_token_estimate_ref,
             params.thinking_line_ref,
         ),
-        model_name=params.agent.config.model_name,
+        model_name=config.model_name,
+        context_window_chars=int(getattr(config, "chat_context_window_chars", 200_000) or 200_000),
     )
 
 
@@ -230,6 +239,7 @@ def _make_tui_keybindings(
             app_config.assistant_outputs,
             app_config.jobs,
             app_config.pending_jobs_ref_for_enqueue,
+            int(getattr(app_config.agent.config, "chat_transcript_scroll_lines", 10) or 10),
         )
     )
 
@@ -252,10 +262,12 @@ def _configure_transcript_sink(
     transcript_follow_ref: list[bool] | None,
     app_ref: list[Any],
     app: Any,
+    params: MakeTuiAppParams,
 ) -> None:
     if output_area is not None and transcript_follow_ref is not None:
         app_ref[0] = app
-        _install_transcript_sink(output_area, transcript_follow_ref, app_ref)
+        max_chars = int(getattr(params.agent.config, "chat_transcript_max_chars", 500_000) or 500_000)
+        _install_transcript_sink(output_area, transcript_follow_ref, app_ref, max_chars=max_chars)
         return
     set_tui_output_sink(None)
     set_tui_stream_sink(None)

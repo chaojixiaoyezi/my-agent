@@ -86,6 +86,25 @@ class TestAuditLogger(unittest.TestCase):
 
         self.assertTrue(self.audit_path.exists())
         self.assertTrue((self.audit_path / "audit.jsonl").exists())
+        self.assertEqual(entry.action, "CREATE_TASK")
+
+    def test_disabled_audit_does_not_write_file(self):
+        """audit_enabled=false 时返回事件对象，但不落盘。"""
+        class MockConfig:
+            audit_log_path = str(self.audit_path)
+            audit_enabled = False
+
+        logger = AuditLogger(MockConfig())
+        entry = logger.log(
+            action=AuditAction.CREATE_TASK,
+            user_id="test-user",
+            channel="chat",
+            target_type="task",
+            target_id="task-123",
+        )
+
+        self.assertEqual(entry.action, "CREATE_TASK")
+        self.assertFalse((self.audit_path / "audit.jsonl").exists())
 
     def test_log_writes_jsonl(self):
         """测试写入 JSONL 格式。"""

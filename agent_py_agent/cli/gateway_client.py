@@ -109,7 +109,8 @@ def cmd_default(args) -> int:
     args.gateway_timeout = None
     args.inject = None
     args.prompt_file = None
-    args.memory_limit = 5
+    # LLM: leave chat memory default unresolved so cmd_chat can read AgentConfig.
+    args.memory_limit = None
     args.no_save = False
     args.app_scrollback = not bool(getattr(args, "plain", False))
     return cmd_chat(args)
@@ -248,7 +249,10 @@ def cmd_gateway_ask(args) -> int:
 
     agent = make_agent(args)
     paths = gateway_paths(agent)
-    pid, alive = wait_for_gateway_running(paths, timeout=10.0)
+    pid, alive = wait_for_gateway_running(
+        paths,
+        timeout=float(getattr(agent.config, "gateway_ready_timeout_seconds", 10) or 10),
+    )
     if not alive:
         print("gateway 未在运行。请先执行: my-agent gateway start", file=sys.stderr)
         return 2

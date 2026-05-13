@@ -300,7 +300,7 @@ class MaxToolRoundBackend(BaseBackend):
     """LLM: fake model backend that verifies a final response is generated when max tool rounds are hit.
 
     新手说明:
-    第一次调用时请求工具调用，第二次调用时确认已收到最大轮数提示并给出最终回答。
+    前两次调用时请求工具调用，第三次确认已收到最大轮数提示并给出最终回答。
     用来测试工具轮数到顶时的收口逻辑。
     """
 
@@ -311,7 +311,7 @@ class MaxToolRoundBackend(BaseBackend):
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
-        if self.calls == 1:
+        if self.calls <= 2:
             return ModelResponse(
                 text='[TOOL_CALL]\n{"tool":"read_file","path":"notes.txt"}\n[/TOOL_CALL]',
                 backend=self.name,

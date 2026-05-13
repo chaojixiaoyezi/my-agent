@@ -251,3 +251,19 @@
 - `tool_context_reducer` 的 live prompt 提示现在优先展示 artifact path、`output_scoped_call_id` 和 scope flags；模型要读正文时会拿到可复制的 scoped `read_artifact` 参数，而不是只看到全局短号。
 - 行为边界不变：artifact 正文仍只通过显式 `read_artifact` 读取，仍校验 index、目录边界和 sha256；这次修复只改变“引用怎么定位”，不把大输出重新塞回 prompt，也不开放任意文件读取。
 - 本轮 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_memory_artifact_read.py agent_py_agent/tests/test_tool_output_externalizer.py agent_py_agent/tests/test_failure_introspector.py agent_py_agent/tests/test_tools/test_tool_loop.py` -> `39 passed`。
+
+## 2026-05-13 artifact read modes and budgets
+- 中文说明：真实测试里模型会为了找一小段线索反复展开大 artifact。现在 `read_artifact` 不只有 offset slice，还支持 `mode=head/tail/search/slice`：看开头、看尾部、按关键词搜匹配行、或按 offset 分片读正文。
+- `memory-artifact-read` CLI 同步支持 `--mode` 和 `--query`；`mode=search` 只返回带行号的匹配行，不把整个 artifact 搬回 prompt。
+- 新增单 run artifact 正文读取预算：`tool_artifact_read_budget_window_seconds=600`、`tool_artifact_read_budget_max_chars=240000`，`0` 表示关闭。预算按 `run_id` 隔离，不限制普通主代理无 run_id 的聊天，也不做整棵任务树总预算。
+- `max_chars=0` 仍兼容“读全部”，但如果有 run scope 和预算，会先从 `tool_outputs/index.jsonl` 的 `size_bytes` 做预判，过大就提前阻断，避免读 1G 日志这种事故先进入正文加载。
+- `read_file` 误读 `memory_archive/artifacts/tool_outputs/*.json` 包装文件时，会根据当前 `allowed_tools` 给更准确提示：有 `read_artifact` 就直接让模型用它；没有就要求向父级发 `capability_request`，不再让受限 leaf 空转。
+- 对标吸收：长期助手 的工具输出外置 + preview + 分段读，通道运行时 的响应前缀限制/事件截断，会话运行时/模型助手 Code 的“工具结果正文不要自动回灌 prompt”。my-agent 选择 index-first、refs-first、按需窄读，不把大 artifact 当普通文件读。
+- 本轮 focused 验收：`/Users/example/ai_claw/bin/python -m pytest agent_py_agent/tests/test_memory_artifact_read.py -q` -> `12 passed`。
+
+## 2026-05-13 backend config extraction
+- 中文说明：把 memory / compact / artifact 的默认读取长度、预览长度、扫描文件数、恢复推荐路径数等行为参数集中到 `AgentConfig` 和 `agent_config.yaml`，避免继续散在代码里。
+- `memory-artifact-read` 和 `read_artifact` 现在默认读取长度来自 `memory_artifact_default_read_chars`；显式传 `--max-chars` / `max_chars` 仍可覆盖。
+- archive query / resume 的扫描文件上限、LocalStore 命中预览长度、recommended read paths 数量现在从 `memory_archive_search_file_limit`、`memory_query_content_preview_chars`、`memory_resume_recommended_read_paths_limit` 读取。
+- raw archive 事件 preview 和 level=2 summary 的长度现在通过 `memory_archive_preview_level_*_chars` 和 `memory_archive_summary_chars` 控制；默认值保持旧行为。
+- 这轮不改变现有归档文件格式，不删除旧数据，不把 artifact 正文自动塞回 prompt；只是把运行默认值抽到后端配置层。

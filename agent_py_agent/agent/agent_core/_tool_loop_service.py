@@ -84,14 +84,18 @@ def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
     effective = agent.config.max_tool_rounds
     attrs_to_check = params.task_attributes or getattr(agent, "_current_task_attributes", None)
     if attrs_to_check and "max_tool_rounds" in attrs_to_check:
-        return int(attrs_to_check["max_tool_rounds"])
-    return effective
+        effective = attrs_to_check["max_tool_rounds"]
+    try:
+        return max(0, int(effective))
+    except (TypeError, ValueError):
+        return 0
 
 
 # LLM: _executed_subagent_orchestration gates deterministic limit closeout to subagent workflows.
 # 函数用途: 只有本轮实际碰过子代理编排工具时，工具上限才改用 subagent task.json 事实报告。
 def _executed_subagent_orchestration(params: ToolLoopExecuteParams) -> bool:
     orchestration_tools = {
+        "capability_config_patch",
         "create_subagents",
         "dispatch_subagents",
         "schedule_child_subagents",
@@ -206,7 +210,8 @@ class ToolLoopService:
     # LLM: _tool_round_limit_reached 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 处理工具round限制reached相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def _tool_round_limit_reached(self, params: ToolLoopExecuteParams, tool_rounds: int) -> bool:
-        return tool_rounds >= _effective_max_tool_rounds(self._agent, params)
+        limit = _effective_max_tool_rounds(self._agent, params)
+        return limit > 0 and tool_rounds >= limit
 
     # LLM: _final_response_after_tool_limit 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 处理final响应after工具限制相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。

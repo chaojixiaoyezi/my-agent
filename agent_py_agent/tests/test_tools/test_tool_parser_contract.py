@@ -77,6 +77,30 @@ def test_registry_uses_configured_write_inline_limit(tmp_path: Path):
     assert "最多 512 字符" in result.output
 
 
+# LLM: Shell timeout config should reach the actual run_command tool, not stop at AgentConfig.
+# 函数用途: 验证工具注册表把 tool_shell_timeout 传给 run_command 的默认超时和工具说明。
+def test_registry_uses_configured_shell_timeout(tmp_path: Path):
+    registry = ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=tmp_path,
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            shell_tool_timeout=240,
+        )
+    )
+
+    tool = registry.tools["run_command"]
+
+    assert tool.default_timeout == 240
+    assert "default 240" in tool.spec.parameters["timeout"]
+
+
 def test_tool_catalog_format_example_does_not_bias_to_path_param():
     """LLM: Tool call instructions should not teach all tools to pass a fake path parameter."""
     registry = _registry()
@@ -87,6 +111,33 @@ def test_tool_catalog_format_example_does_not_bias_to_path_param():
     assert '"actual_parameter_name": "actual_value"' in catalog
     assert '"param_name": "param_value"' not in catalog
     assert "不要写 param_name" in catalog
+
+
+def test_tool_catalog_uses_configured_categories_offset_and_notice():
+    registry = ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=Path.cwd(),
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=1,
+            catalog_offset=1,
+            catalog_categories=["filesystem"],
+            catalog_include_examples=False,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            shell_tool_timeout=30,
+        )
+    )
+
+    catalog = registry.render_catalog_section()
+
+    assert "read_file" in catalog
+    assert "list_files" not in catalog
+    assert "示例：" not in catalog
+    assert "next_offset=2" in catalog
 
 
 def test_tool_call_parser_unwraps_model_param_name_bundle():

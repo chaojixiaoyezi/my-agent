@@ -124,6 +124,8 @@ def _execute_route_logic(request: RouteLogicRequest):
 # 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_memory_route(args) -> int:
     agent = _resolve_agent(args)
+    if getattr(args, "limit", None) is None:
+        args.limit = int(getattr(agent.config, "cli_memory_route_limit", 5) or 0)
     mode = _resolve_route_mode(args.mode, agent.config)
     auto_read_limit = _resolve_auto_read_limit(args.auto_read_limit, agent.config)
     index_path = _resolve_index_path(agent.root, args.index)

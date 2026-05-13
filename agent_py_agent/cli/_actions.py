@@ -19,7 +19,7 @@ def cmd_subagents_plan_actions(args) -> int:
 
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
-    options = _subagents_plan_actions_options(args)
+    options = _subagents_plan_actions_options(args, agent=agent)
     report = agent.subagents.write_action_plan(
         params=SubAgentPlanActionsOptions(
             config=capability_config,
@@ -48,10 +48,10 @@ def cmd_subagents_plan_actions(args) -> int:
 
 # LLM: _subagents_plan_actions_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
 # 函数用途: 生成 action-plan 结构化字段，保持 CLI 输出、报告和测试读取口径一致。
-def _subagents_plan_actions_options(args) -> SubagentsPlanActionsOptions:
+def _subagents_plan_actions_options(args, *, agent=None) -> SubagentsPlanActionsOptions:
     return SubagentsPlanActionsOptions(
         all=bool(args.all),
-        limit=int(args.limit or 0),
+        limit=_subagent_config_int(agent, args, "limit", "subagent_cli_default_limit"),
         root_id=str(getattr(args, "root_id", "") or ""),
     )
 
@@ -62,7 +62,7 @@ def cmd_subagents_apply_actions(args) -> int:
 
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
-    options = _subagents_action_apply_options(args)
+    options = _subagents_action_apply_options(args, agent=agent)
     report = agent.subagents.write_action_apply_report(
         capability_config,
         options=options,
@@ -90,14 +90,14 @@ def cmd_subagents_apply_actions(args) -> int:
 
 # LLM: _subagents_action_apply_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
 # 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
-def _subagents_action_apply_options(args) -> ActionApplyOptions:
+def _subagents_action_apply_options(args, *, agent=None) -> ActionApplyOptions:
     return ActionApplyOptions(
         apply=bool(getattr(args, "apply", False)),
         action_filter=getattr(args, "action", None) or "",
         run_id=getattr(args, "run_id", None) or "",
         take_over_by=getattr(args, "take_over_by", None) or "",
         locked_files=getattr(args, "locked_file", None) or [],
-        limit=int(getattr(args, "limit", 0) or 0),
+        limit=_subagent_config_int(agent, args, "limit", "subagent_cli_default_limit"),
     )
 
 
@@ -108,7 +108,7 @@ def cmd_subagents_route_capabilities(args) -> int:
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(agent, capability_config, args.skill_dir)
-    options = _subagents_capability_route_options(args)
+    options = _subagents_capability_route_options(args, agent=agent)
     report = agent.subagents.write_capability_route_report(
         router,
         capability_config,
@@ -142,9 +142,18 @@ def cmd_subagents_route_capabilities(args) -> int:
 
 # LLM: _subagents_capability_route_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
 # 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
-def _subagents_capability_route_options(args) -> SubagentsCapabilityRouteOptions:
+def _subagents_capability_route_options(args, *, agent=None) -> SubagentsCapabilityRouteOptions:
     return SubagentsCapabilityRouteOptions(
         apply=bool(args.apply),
         run_ids=args.run_id or None,
-        limit=int(args.limit or 0),
+        limit=_subagent_config_int(agent, args, "limit", "subagent_cli_default_limit"),
     )
+
+
+# LLM: _subagent_config_int keeps action CLI defaults in agent_config.yaml.
+# 函数用途: 子代理 action/route/plan 命令没有显式 limit 时，读取统一默认值。
+def _subagent_config_int(agent, args, arg_name: str, config_name: str) -> int:
+    value = getattr(args, arg_name, None)
+    if value is not None:
+        return int(value)
+    return int(getattr(getattr(agent, "config", None), config_name, 0) or 0)

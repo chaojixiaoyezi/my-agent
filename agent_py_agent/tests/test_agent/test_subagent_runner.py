@@ -371,7 +371,7 @@ def test_subagent_runner_keeps_completed_coordinator_awaiting_acceptance_after_t
             enable_tools=True,
             model_backend="echo",
             subagent_workspace="subs",
-            max_tool_rounds=0,
+            max_tool_rounds=1,
         )
         agent = SimpleAgent(cfg, root)
         agent.backend = CoordinatorToolLimitBlockedBackend()

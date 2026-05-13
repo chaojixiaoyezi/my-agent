@@ -8,7 +8,7 @@
 # 是否启用能力路由
 # - false: 默认关闭，子代理仍按现有逻辑工作
 # - true: 后续允许子代理用 capability_request 向父代理申请 skill/tool 能力
-enable_capability_routing: false
+enable_capability_routing: true
 
 # 子代理能力请求的最大 token 数
 # - 用来限制 problem / needed_capability / tried / evidence 等描述总长度
@@ -25,19 +25,19 @@ capability_escalation_max_hops: 4
 # 父代理每次最多返回多少个候选 skill/tool card
 # - 默认 5，避免一次下发太多候选能力导致 token 膨胀和选择混乱
 # - 设为 0 表示不限制
-capability_candidate_limit: 5
+capability_candidate_limit: 7
 
 # 一个子代理本轮拿到的能力包最大 token 数
 # - 能力包包括 skill card、tool card、授权说明和必要约束
 # - 默认 3000，避免子代理上下文被能力说明淹没
 # - 设为 0 表示不限制
-capability_bundle_max_tokens: 3000
+capability_bundle_max_tokens: 10000
 
 # 同一个能力失败后最多尝试几个替代工具
 # - 例如 web_search_A 失败后，可以继续尝试 web_search_B / fetch_url 等
 # - 默认 3，避免同类工具无限重试
 # - 设为 0 表示不限制
-capability_fallback_max_attempts: 3
+capability_fallback_max_attempts: 5
 
 # 子代理心跳超时秒数
 # - 超过这个时间没有更新 heartbeat，父代理应视为需要 due-check

@@ -35,8 +35,8 @@ def add_agents_leadership_subcommands(sub):
     recovery_plan.add_argument(
         "--max-children-per-leader",
         type=int,
-        default=3,
-        help="每个候选 leader 最多接多少个直接孩子",
+        default=None,
+        help="每个候选 leader 最多接多少个直接孩子；默认读配置",
     )
     recovery_plan.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     recovery_plan.set_defaults(func=cmd_subagents_leadership_recovery_plan)
@@ -48,7 +48,7 @@ def add_agents_leadership_subcommands(sub):
     recovery_apply.add_argument("--coordinator", required=True, help="旧 coordinator run_id")
     recovery_apply.add_argument("--leader", required=True, help="新 leader run_id")
     recovery_apply.add_argument("--child-run-id", action="append", required=True, help="要重挂的直接 child run_id，可重复")
-    recovery_apply.add_argument("--max-children-per-leader", type=int, default=0, help="可选 leader 直接 child 容量上限；0 表示不检查")
+    recovery_apply.add_argument("--max-children-per-leader", type=int, default=None, help="可选 leader 直接 child 容量上限；0 表示不检查；默认读配置")
     recovery_apply.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     recovery_apply.set_defaults(func=cmd_subagents_leadership_recovery_apply, apply=False)
 
@@ -67,7 +67,7 @@ def add_agents_hierarchy_subcommands(sub):
     hierarchy.add_argument("--apply", action="store_true", help="真正创建 child runs；默认只 dry-run")
     hierarchy.add_argument("--requested-by", default="parent", help="调度请求来源，用于审计摘要")
     hierarchy.add_argument("--max-children", type=int, default=0, help="父级最多 child 数；0 表示不限制")
-    hierarchy.add_argument("--max-depth", type=int, default=2, help="允许创建的最大层级深度")
+    hierarchy.add_argument("--max-depth", type=int, default=None, help="允许创建的最大层级深度；默认读配置")
     hierarchy.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     hierarchy.set_defaults(func=cmd_subagents_hierarchy)
 
@@ -76,6 +76,6 @@ def add_agents_hierarchy_subcommands(sub):
     recovery.add_argument("run_id", help="根 subagent 运行 ID")
     recovery.add_argument("--hide-healthy", action="store_true", help="只展示 root 和需要恢复的节点")
     recovery.add_argument("--requested-by", default="parent", help="查询请求来源，用于审计摘要")
-    recovery.add_argument("--max-nodes", type=int, default=200, help="最多扫描多少个子树节点")
+    recovery.add_argument("--max-nodes", type=int, default=None, help="最多扫描多少个子树节点；默认读配置")
     recovery.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     recovery.set_defaults(func=cmd_subagents_recovery_tree)

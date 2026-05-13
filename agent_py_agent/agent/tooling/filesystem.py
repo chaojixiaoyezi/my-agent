@@ -27,8 +27,8 @@ from ._filesystem_read import (
     FileSystemTool,
     ListFilesTool,
     ReadFileTool,
-    SearchTextTool,
 )
+from ._filesystem_search import SearchTextTool
 
 # Re-export write tools
 from ._filesystem_write import (

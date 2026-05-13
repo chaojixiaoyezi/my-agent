@@ -23,11 +23,22 @@ def cmd_memory_artifact_read(args) -> int:
             root=agent.root,
             artifact_ref=args.artifact_ref,
             offset=getattr(args, "offset", 0),
-            max_chars=getattr(args, "max_chars", 4000),
+            max_chars=_memory_artifact_max_chars(agent, args),
+            mode=getattr(args, "mode", "slice"),
+            query=getattr(args, "query", ""),
         )
     )
     _print_memory_artifact_read(payload, json_output=args.json)
     return 0 if payload.get("ok") else 2
+
+
+# LLM: _memory_artifact_max_chars resolves the CLI default from backend config.
+# 函数用途: 用户没有显式传 --max-chars 时，使用 agent_config.yaml 的 memory_artifact_default_read_chars。
+def _memory_artifact_max_chars(agent, args) -> int:
+    value = getattr(args, "max_chars", None)
+    if value is not None:
+        return int(value)
+    return int(getattr(agent.config, "memory_artifact_default_read_chars", 4000) or 0)
 
 
 # LLM: _print_memory_artifact_read keeps metadata visible before printing explicit artifact content.
@@ -44,6 +55,9 @@ def _print_memory_artifact_read(payload: dict, *, json_output: bool) -> None:
         return
     print(f"artifact_path={payload['artifact_path']}")
     print(f"sha256={payload['sha256']}")
-    print(f"offset={payload['content_offset']} max_chars={payload['content_max_chars']} truncated={payload['truncated']}")
+    print(
+        f"mode={payload.get('read_mode') or 'slice'} "
+        f"offset={payload['content_offset']} max_chars={payload['content_max_chars']} truncated={payload['truncated']}"
+    )
     print("Content")
     print(payload["content"])

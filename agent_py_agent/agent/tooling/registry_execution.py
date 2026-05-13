@@ -20,6 +20,7 @@ from .json_repair import load_tool_block_json
 from .models import BaseTool, ToolExecutionResult
 from .parse_error_hint import parse_error_message
 from .parser import parse_xmlish_tool_calls
+from .registry_params import tool_params_for_execution
 from .registry_tool_dispatch import AuthorizedToolDispatchRequest, execute_authorized_tool
 from .write_boundary import validate_write_boundary
 
@@ -120,7 +121,7 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
     if tool is None:
         return ToolExecutionResult(tool_name, False, f"未知工具: {tool_name}")
 
-    tool_params = {key: value for key, value in normalized_payload.items() if key != "tool"}
+    tool_params = tool_params_for_execution(normalized_payload, tool_name, call.allowed_tools)
     boundary_error = validate_write_boundary(
         tool_name,
         tool_params,

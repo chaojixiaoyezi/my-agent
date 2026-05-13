@@ -49,6 +49,8 @@ class MessageContext:
     archive_level: int
     created_at: str
     content: str
+    preview_limits: dict[int, int] | None = None
+    summary_chars: int = 96
 
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 ToolCallContext 前先核对字段语义、序列化形态和调用方假设。
@@ -61,6 +63,7 @@ class ToolCallContext:
     source: str
     archive_level: int
     created_at: str
+    preview_limits: dict[int, int] | None = None
 
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _ToolEventFields 前先核对字段语义、序列化形态和调用方假设。
@@ -90,6 +93,7 @@ class _ToolFacts:
     status: str
     error_code: str
     backend: str
+    preview_limits: dict[int, int] | None = None
 
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _message_event 时同步检查返回值、异常处理和读写副作用。
@@ -127,14 +131,19 @@ def _message_event(
         created_at=ctx.created_at,
         status="ok",
         task_id=identity.task_id,
-        content_preview=_preview(content, ctx.archive_level),
+        content_preview=_preview(content, ctx.archive_level, ctx.preview_limits),
         content_path="",
         content_hash=content_hash,
         visibility="private",
         source=ctx.source,
         archive_level=_normalize_archive_level(ctx.archive_level),
     )
-    return _apply_archive_level_to_message_event(event, content=content)
+    return _apply_archive_level_to_message_event(
+        event,
+        content=content,
+        summary_chars=ctx.summary_chars,
+        preview_limits=ctx.preview_limits,
+    )
 
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _tool_event 时同步检查返回值、异常处理和读写副作用。
@@ -144,7 +153,7 @@ def _tool_event(
     ctx: ToolCallContext,
 ) -> RawMemoryEvent:
     tool_call = ctx.tool_call
-    fields = _tool_event_fields(tool_call, backend=ctx.backend)
+    fields = _tool_event_fields(tool_call, backend=ctx.backend, preview_limits=ctx.preview_limits)
     event_id = _event_id(
         {
             "kind": "tool",
@@ -176,19 +185,29 @@ def _tool_event(
         tool_name=fields.tool_name,
         tool_call_id=fields.tool_call_id,
         tool_success=fields.tool_success,
-        content_preview=_preview(fields.metadata_text, ctx.archive_level),
+        content_preview=_preview(fields.metadata_text, ctx.archive_level, ctx.preview_limits),
         content_path=str(fields.metadata.get("output_path") or fields.metadata.get("content_path") or ""),
         content_hash=fields.content_hash,
         visibility="private",
         source=ctx.source,
         archive_level=_normalize_archive_level(ctx.archive_level),
     )
-    return _apply_archive_level_to_tool_event(event, tool_call=tool_call, metadata=fields.metadata)
+    return _apply_archive_level_to_tool_event(
+        event,
+        tool_call=tool_call,
+        metadata=fields.metadata,
+        preview_limits=ctx.preview_limits,
+    )
 
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _tool_event_fields 时同步检查返回值、异常处理和读写副作用。
 # 函数用途: 完成 tool event fields 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
-def _tool_event_fields(tool_call: dict[str, Any], *, backend: str) -> _ToolEventFields:
+def _tool_event_fields(
+    tool_call: dict[str, Any],
+    *,
+    backend: str,
+    preview_limits: dict[int, int] | None = None,
+) -> _ToolEventFields:
     """Normalize tool-call facts before creating the archive event."""
     tool_name = _first_text(tool_call, "tool_name", "tool", "name") or "unknown"
     tool_call_id = _first_text(tool_call, "tool_call_id", "call_id", "id")
@@ -204,6 +223,7 @@ def _tool_event_fields(tool_call: dict[str, Any], *, backend: str) -> _ToolEvent
             status=status,
             error_code=error_code,
             backend=backend,
+            preview_limits=preview_limits,
         ),
     )
     return _ToolEventFields(
@@ -237,7 +257,7 @@ def _tool_metadata(
         if key in tool_call:
             text = str(tool_call[key])
             metadata[f"{key}_hash"] = _content_hash(text)
-            metadata[f"{key}_preview"] = _preview(text, 2)
+            metadata[f"{key}_preview"] = _preview(text, 2, facts.preview_limits)
             break
     for key in ("output_hash", "output_preview", "output_path", "output_externalized", "output_size_bytes"):
         if key in tool_call:
@@ -251,7 +271,13 @@ def _tool_metadata(
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _apply_archive_level_to_message_event 时同步检查返回值、异常处理和读写副作用。
 # 函数用途: 完成 apply archive level to message event 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
-def _apply_archive_level_to_message_event(event: RawMemoryEvent, *, content: str) -> RawMemoryEvent:
+def _apply_archive_level_to_message_event(
+    event: RawMemoryEvent,
+    *,
+    content: str,
+    summary_chars: int = 96,
+    preview_limits: dict[int, int] | None = None,
+) -> RawMemoryEvent:
 
     if event.archive_level == 0:
         return event
@@ -260,10 +286,10 @@ def _apply_archive_level_to_message_event(event: RawMemoryEvent, *, content: str
             event.content_hash = ""
         return event
     if event.archive_level == 2:
-        event.content_preview = _summarize_text(content, fallback=event.action)
+        event.content_preview = _summarize_text(content, fallback=event.action, limit=summary_chars)
         event.content_hash = ""
         return event
-    event.content_preview = _preview(content, event.archive_level)
+    event.content_preview = _preview(content, event.archive_level, preview_limits)
     return event
 
 
@@ -274,6 +300,7 @@ def _apply_archive_level_to_tool_event(
     *,
     tool_call: dict[str, Any],
     metadata: dict[str, Any],
+    preview_limits: dict[int, int] | None = None,
 ) -> RawMemoryEvent:
 
     if event.archive_level == 0:
@@ -293,5 +320,5 @@ def _apply_archive_level_to_tool_event(
         event.content_preview = f"{event.tool_name}:{event.status or 'unknown'}"
         event.content_hash = ""
         return event
-    event.content_preview = _preview(_stable_display_json(metadata), event.archive_level)
+    event.content_preview = _preview(_stable_display_json(metadata), event.archive_level, preview_limits)
     return event

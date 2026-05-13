@@ -39,12 +39,14 @@ from .memory_resume_compact_rendering import print_memory_resume_from_compact
 def cmd_memory_archive_list(args) -> int:
 
     agent = make_agent(args)
+    _apply_archive_default_limit(agent, args)
     records = collect_archive_records(
         agent.root,
         layer=args.layer,
         date_key=args.date,
         limit=args.limit,
         level=getattr(args, "level", None),
+        file_limit=_archive_search_file_limit(agent),
     )
     payload = {
         "ok": True,
@@ -64,7 +66,14 @@ def cmd_memory_archive_list(args) -> int:
 def cmd_memory_archive_search(args) -> int:
 
     agent = make_agent(args)
-    records = collect_archive_records(agent.root, layer=args.layer, date_key=args.date, limit=0)
+    _apply_archive_default_limit(agent, args)
+    records = collect_archive_records(
+        agent.root,
+        layer=args.layer,
+        date_key=args.date,
+        limit=0,
+        file_limit=_archive_search_file_limit(agent),
+    )
     filters = archive_filters_from_args(args)
     matches = filter_archive_records(
         records,
@@ -92,7 +101,13 @@ def cmd_memory_archive_search(args) -> int:
 # LLM: _collect_resume_data 属于memory CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 汇总多个检查来源，并按统一结构返回调用方。
 def _collect_resume_data(agent, args):
-    archive_records = collect_archive_records(agent.root, layer=args.layer, date_key=args.date, limit=0)
+    archive_records = collect_archive_records(
+        agent.root,
+        layer=args.layer,
+        date_key=args.date,
+        limit=0,
+        file_limit=_archive_search_file_limit(agent),
+    )
     filters = archive_filters_from_args(args)
     archive_matches = filter_archive_records(
         archive_records, query=args.query or "", filters=filters,
@@ -103,7 +118,10 @@ def _collect_resume_data(agent, args):
         agent.local_store.search(local_query, limit=args.limit)
         if local_query else agent.local_store.list_recent(limit=args.limit)
     )
-    local_payloads = [local_hit_payload(hit) for hit in local_hits]
+    local_payloads = [
+        local_hit_payload(hit, preview_chars=int(getattr(agent.config, "memory_query_content_preview_chars", 500) or 0))
+        for hit in local_hits
+    ]
     task_ids = collect_resume_task_ids(args, archive_matches, local_payloads)
     task_payloads = collect_task_payloads(agent, task_ids, limit=args.limit)
     gateway_payloads = collect_gateway_payloads(local_payloads, limit=args.limit)
@@ -114,10 +132,19 @@ def _collect_resume_data(agent, args):
 # 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_memory_resume(args) -> int:
     agent = make_agent(args)
+    _apply_archive_default_limit(agent, args)
     if _from_compact_arg(args):
         return _cmd_memory_resume_from_compact(agent, args)
     filters, archive_matches, local_payloads, task_payloads, gateway_payloads = _collect_resume_data(agent, args)
-    resume = build_resume_guidance(archive_matches, local_payloads, task_payloads, gateway_payloads)
+    resume = build_resume_guidance(
+        archive_matches,
+        local_payloads,
+        task_payloads,
+        gateway_payloads,
+        recommended_read_paths_limit=int(
+            getattr(agent.config, "memory_resume_recommended_read_paths_limit", 20) or 0
+        ),
+    )
     brief = build_resume_brief(
         archive_matches, local_payloads, task_payloads,
         recommended_read_paths=resume["recommended_read_paths"],
@@ -169,6 +196,19 @@ def _compact_resume_exit_ok(payload: dict[str, Any]) -> bool:
         return False
     guard = payload.get("action_guard", {}) if isinstance(payload.get("action_guard"), dict) else {}
     return guard.get("mode") != "auto" or bool(guard.get("allowed_to_continue"))
+
+
+# LLM: _archive_search_file_limit keeps archive scans tied to backend config instead of fixed module constants.
+# 函数用途: 读取 memory_archive_search_file_limit；用户可通过配置调大/调小恢复和查询扫描范围。
+def _archive_search_file_limit(agent) -> int:
+    return int(getattr(agent.config, "memory_archive_search_file_limit", 30) or 0)
+
+
+# LLM: _apply_archive_default_limit lets archive CLI defaults live in AgentConfig.
+# 函数用途: 用户没有传 --limit 时，统一使用 cli_memory_archive_limit。
+def _apply_archive_default_limit(agent, args) -> None:
+    if getattr(args, "limit", None) is None:
+        args.limit = int(getattr(agent.config, "cli_memory_archive_limit", 20) or 0)
 
 
 # LLM: _print_archive_list 属于memory CLI；改行为前先对齐调用方和快照/单测。

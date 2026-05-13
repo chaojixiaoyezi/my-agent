@@ -60,7 +60,7 @@ def cmd_spawn(args) -> int:
     tasks = agent.spawn_subagents(
         params=SpawnSubagentsParams(
             goal=args.goal,
-            count=args.count,
+            count=_subagent_config_int(agent, args, "count", "subagent_spawn_default_count"),
             role=getattr(args, "role", "worker"),
             agent_name=getattr(args, "agent_name", ""),
         )
@@ -76,7 +76,7 @@ def cmd_subagents(args) -> int:
 
     agent = make_agent(args)
     board = agent.subagents.write_board(
-        options=SubAgentBoardOptions(recent_limit=int(args.limit or 0)),
+        options=SubAgentBoardOptions(recent_limit=_subagent_config_int(agent, args, "limit", "subagent_cli_default_limit")),
     )
     items = filter_board_items(
         board.items if args.all else board.hot_list or board.recent,
@@ -95,7 +95,8 @@ def cmd_subagents(args) -> int:
     if not items:
         print("没有匹配的子代理记录。")
         return 0
-    for item in items[: args.limit]:
+    limit = _subagent_config_int(agent, args, "limit", "subagent_cli_default_limit")
+    for item in items[:limit]:
         flags = ",".join(item.risk_flags) if item.risk_flags else "ok"
         print(
             f"- {item.id} status={item.status} verify={item.verification_status} "
@@ -115,6 +116,15 @@ def _print_shared_progress(panels: list[dict]) -> None:
     print("Shared Progress")
     for line in format_shared_progress_lines(panels):
         print(line)
+
+
+# LLM: _subagent_config_int resolves optional subagent CLI defaults from AgentConfig.
+# 函数用途: 子代理 CLI 没有显式传数量/条数时，统一读取 agent_config.yaml。
+def _subagent_config_int(agent, args, arg_name: str, config_name: str) -> int:
+    value = getattr(args, arg_name, None)
+    if value is not None:
+        return int(value)
+    return int(getattr(agent.config, config_name, 0) or 0)
 
 
 # LLM: cmd_subagent_detail 属于CLI 命令层；改行为前先对齐调用方和快照/单测。

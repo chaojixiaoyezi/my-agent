@@ -59,13 +59,13 @@ def add_basic_subcommands(sub: argparse._SubParsersAction) -> None:
 # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_status_timeline_run_commands(sub: argparse._SubParsersAction) -> None:
     status = sub.add_parser("status", help="查看 my-agent 全局状态")
-    status.add_argument("--limit", type=int, default=5, help="最多显示多少条 hot/recent/timeline 项")
+    status.add_argument("--limit", type=int, default=None, help="最多显示多少条 hot/recent/timeline 项；默认读配置")
     status.add_argument("--recent", action="store_true", help="显示最近子代理列表")
     status.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     status.set_defaults(func=cmd_status)
 
     timeline = sub.add_parser("timeline", help="查看本地事实源最近事件")
-    timeline.add_argument("--limit", type=int, default=20, help="最多显示多少条事件")
+    timeline.add_argument("--limit", type=int, default=None, help="最多显示多少条事件；默认读配置")
     timeline.add_argument("--source-type", help="按来源过滤，如 gateway_request/subagent_run")
     timeline.add_argument("--event-type", help="按事件类型过滤，如 gateway_request_completed")
     timeline.add_argument("--details", action="store_true", help="显示事件 payload 摘要")
@@ -92,18 +92,18 @@ def _add_memory_chat_commands(sub: argparse._SubParsersAction) -> None:
     remember.set_defaults(func=cmd_remember)
 
     memory_list = sub.add_parser("memory-list", help="列出最近记忆")
-    memory_list.add_argument("--limit", type=int, default=20, help="最多显示条数")
+    memory_list.add_argument("--limit", type=int, default=None, help="最多显示条数；默认读配置")
     memory_list.set_defaults(func=cmd_memory_list)
 
     memory_search = sub.add_parser("memory-search", help="搜索记忆")
     memory_search.add_argument("query", help="搜索关键词")
-    memory_search.add_argument("--limit", type=int, default=5, help="最多显示条数")
+    memory_search.add_argument("--limit", type=int, default=None, help="最多显示条数；默认读配置")
     memory_search.set_defaults(func=cmd_memory_search)
 
     chat = sub.add_parser("chat", help="启动交互循环，反复与智能体交流")
     chat.add_argument("--inject", action="append", help="启动时注入 prompt，可多次传入")
     chat.add_argument("--prompt-file", action="append", help="启动时加载额外 prompt 文件，可多次传入")
-    chat.add_argument("--memory-limit", type=int, default=5, help="交互中 /memory 默认显示条数")
+    chat.add_argument("--memory-limit", type=int, default=None, help="交互中 /memory 默认显示条数；默认读配置")
     chat.add_argument("--no-save", action="store_true", help="交互对话不自动保存到记忆")
     chat.add_argument("--gateway", action="store_true", help="把普通聊天消息投递给后台 gateway，而不是在当前前台进程里调用模型")
     chat.add_argument("--gateway-timeout", type=float, help="gateway 模式等待单条响应的秒数，默认使用配置 gateway_request_timeout")
@@ -129,7 +129,7 @@ def _add_archive_search_args(parser) -> None:
     parser.add_argument("--status", help="按 status 精确过滤，如 ok/failed")
     parser.add_argument("--tool-name", help="按工具名精确过滤")
     parser.add_argument("--source", help="按来源精确过滤，如 run/gateway/subagent")
-    parser.add_argument("--limit", type=int, default=20, help="最多显示多少条记录")
+    parser.add_argument("--limit", type=int, default=None, help="最多显示多少条记录；默认读配置")
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
 
 
@@ -154,7 +154,7 @@ def _add_archive_resume_args(parser) -> None:
     parser.add_argument("--status", help="按 status 精确过滤")
     parser.add_argument("--tool-name", help="按工具名精确过滤")
     parser.add_argument("--source", help="按来源精确过滤")
-    parser.add_argument("--limit", type=int, default=20, help="最多显示多少条线索")
+    parser.add_argument("--limit", type=int, default=None, help="最多显示多少条线索；默认读配置")
     parser.add_argument("--context-only", action="store_true", help="只输出可交接/注入的恢复上下文块")
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
 
@@ -190,7 +190,7 @@ def _add_memory_compact_args(parser) -> None:
     parser.add_argument("--run-id", help="按 run_id 精确过滤")
     parser.add_argument("--task-id", help="按 task_id 精确过滤")
     parser.add_argument("--level", type=int, choices=[0, 1, 2, 3], help="只扫描指定 archive_level")
-    parser.add_argument("--limit", type=int, default=50, help="最多纳入多少条归档记录；0 表示不限")
+    parser.add_argument("--limit", type=int, default=None, help="最多纳入多少条归档记录；0 表示不限；默认不截断")
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
 
 
@@ -202,7 +202,7 @@ def add_memory_subcommands(sub: argparse._SubParsersAction) -> None:
     memory_route.add_argument("--index", help="路由索引文件；相对路径按 workspace root 解析")
     memory_route.add_argument("--mode", choices=["off", "soft", "strict"], help="路由模式；默认使用配置")
     memory_route.add_argument("--validate", action="store_true", help="只校验路由索引冲突、死链和重复关键词")
-    memory_route.add_argument("--limit", type=int, default=5, help="最多显示多少条命中 route；0 表示不截断")
+    memory_route.add_argument("--limit", type=int, default=None, help="最多显示多少条命中 route；0 表示不截断；默认读配置")
     memory_route.add_argument("--auto-read-limit", type=int, help="最多升级多少条规则路径；默认使用配置")
     memory_route.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     memory_route.set_defaults(func=cmd_memory_route)
@@ -222,7 +222,7 @@ def _add_memory_archive_subcommands(sub: argparse._SubParsersAction) -> None:
     memory_archive_list.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="查看哪一层归档")
     memory_archive_list.add_argument("--date", help="只查看某一天，格式 YYYY-MM-DD")
     memory_archive_list.add_argument("--level", type=int, choices=[0, 1, 2, 3], help="只查看指定 archive_level")
-    memory_archive_list.add_argument("--limit", type=int, default=20, help="最多显示多少条记录")
+    memory_archive_list.add_argument("--limit", type=int, default=None, help="最多显示多少条记录；默认读配置")
     memory_archive_list.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     memory_archive_list.set_defaults(func=cmd_memory_archive_list)
 
@@ -239,7 +239,9 @@ def _add_memory_archive_subcommands(sub: argparse._SubParsersAction) -> None:
     memory_artifact_read = sub.add_parser("memory-artifact-read", help="显式读取已登记 tool-output artifact 正文")
     memory_artifact_read.add_argument("artifact_ref", help="来自恢复包、manifest 或 tool output index 的 artifact path/hash/call_id")
     memory_artifact_read.add_argument("--offset", type=int, default=0, help="从正文第几个字符开始读取")
-    memory_artifact_read.add_argument("--max-chars", type=int, default=4000, help="最多读取多少字符；0 表示读取全部")
+    memory_artifact_read.add_argument("--max-chars", type=int, default=None, help="最多读取多少字符；0 表示读取全部；默认读配置")
+    memory_artifact_read.add_argument("--mode", choices=["slice", "head", "tail", "search"], default="slice", help="读取模式")
+    memory_artifact_read.add_argument("--query", default="", help="mode=search 时搜索的关键词")
     memory_artifact_read.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     memory_artifact_read.set_defaults(func=cmd_memory_artifact_read)
 
@@ -260,10 +262,10 @@ def add_local_store_subcommands(sub: argparse._SubParsersAction) -> None:
 
     local_search = sub.add_parser("local-search", help="搜索本地事实源 SQLite/FTS5 索引")
     local_search.add_argument("query", help="搜索关键词；为空时可用 local-store-status 看整体状态")
-    local_search.add_argument("--limit", type=int, default=5, help="最多显示条数")
+    local_search.add_argument("--limit", type=int, default=None, help="最多显示条数；默认读配置")
     local_search.add_argument("--source-type", help="按来源过滤，如 memory/gateway_request/subagent_run")
     local_search.add_argument("--visibility", help="按可见性过滤，默认不过滤")
-    local_search.add_argument("--preview-chars", type=int, default=500, help="每条命中最多打印多少正文字符；-1 表示完整打印")
+    local_search.add_argument("--preview-chars", type=int, default=None, help="每条命中最多打印多少正文字符；-1 表示完整打印；默认读配置")
     local_search.set_defaults(func=cmd_local_search)
 
     local_index_memory = sub.add_parser("local-index-memory", help="把现有 JSONL 记忆补建到本地事实源")
@@ -272,7 +274,7 @@ def add_local_store_subcommands(sub: argparse._SubParsersAction) -> None:
     local_doctor = sub.add_parser("local-doctor", help="诊断 LocalStore、gateway 队列和 subagent 文件事实源")
     local_doctor.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     local_doctor.add_argument("--repair", action="store_true", help="处理超时 processing gateway 请求")
-    local_doctor.add_argument("--limit", type=int, default=20, help="每类问题最多显示多少条")
+    local_doctor.add_argument("--limit", type=int, default=None, help="每类问题最多显示多少条；默认读配置")
     local_doctor.set_defaults(func=cmd_local_doctor)
 
     local_rebuild = sub.add_parser("local-rebuild", help="从 memory/gateway/subagent 文件事实源重建 LocalStore")

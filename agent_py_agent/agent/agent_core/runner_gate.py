@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 # LLM: timeout off/none/disabled must mean no runner wrapper timeout, not auto dynamic timeout.
 # 函数用途: 判断用户是否显式关闭 runner 超时；返回 true 时 runner 可一直等到模型自然返回。
 def _runner_timeout_disabled(config: Any) -> bool:
-    raw_value = getattr(config, "runner_timeout_seconds", "auto")
+    raw_value = getattr(config, "runner_timeout_seconds", "off")
     if isinstance(raw_value, str):
         return raw_value.strip().lower() in {"off", "none", "disabled", "false", "no", "0"}
     try:

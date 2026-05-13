@@ -13,7 +13,9 @@ from ..agent.audit import AuditAction, AuditQuery
 # LLM: _show_recent_users 属于logs CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _show_recent_users(query: AuditQuery, args) -> int:
-    limit = getattr(args, "limit", 10)
+    limit = getattr(args, "limit", None)
+    if limit is None:
+        limit = int(getattr(query.config, "cli_audit_limit", 100) or 0)
     users = query.recent_users(limit=limit)
 
     if not users:
@@ -67,7 +69,7 @@ def _show_entries(query: AuditQuery, args) -> int:
         target_id=getattr(args, "target", None),
         target_type=getattr(args, "target_type", None),
         status=getattr(args, "status", None),
-        limit=getattr(args, "limit", 100),
+        limit=_audit_limit(query, args),
         offset=getattr(args, "offset", 0),
     )
 
@@ -131,13 +133,24 @@ def cmd_audit_log(args) -> int:
 
     # 清理旧条目
     if getattr(args, "cleanup", False):
-        days = getattr(args, "days", 90)
+        days = getattr(args, "days", None)
+        if days is None:
+            days = int(getattr(config, "cli_audit_cleanup_days", 90) or 0)
         count = query.cleanup_old_entries(days=days)
         print(f"已清理 {count} 条超过 {days} 天的审计记录。", file=sys.stdout)
         return 0
 
     # 查询日志
     return _show_entries(query, args)
+
+
+# LLM: _audit_limit resolves audit CLI defaults from AgentConfig.
+# 函数用途: audit-log 未显式传 limit 时，使用 agent_config.yaml 的 cli_audit_limit。
+def _audit_limit(query: AuditQuery, args) -> int:
+    value = getattr(args, "limit", None)
+    if value is not None:
+        return int(value)
+    return int(getattr(query.config, "cli_audit_limit", 100) or 0)
 
 
 __all__ = ["cmd_audit_log"]

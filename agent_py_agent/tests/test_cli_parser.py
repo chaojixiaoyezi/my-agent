@@ -158,12 +158,12 @@ class TestStatusSubcommand:
     """测试 status 子命令参数解析。"""
 
     def test_status_default_limit(self) -> None:
-        """测试 status 默认 limit。"""
+        """测试 status 默认 limit 由运行配置解析。"""
         from agent_py_agent.cli.parser import build_parser
 
         parser = build_parser()
         args = parser.parse_args(["status"])
-        assert args.limit == 5
+        assert args.limit is None
 
     def test_status_with_limit(self) -> None:
         """测试 status 自定义 limit。"""
@@ -186,12 +186,12 @@ class TestChatSubcommand:
     """测试 chat 子命令参数解析。"""
 
     def test_chat_default_memory_limit(self) -> None:
-        """测试 chat 默认 memory-limit。"""
+        """测试 chat 默认 memory-limit 由运行配置解析。"""
         from agent_py_agent.cli.parser import build_parser
 
         parser = build_parser()
         args = parser.parse_args(["chat"])
-        assert args.memory_limit == 5
+        assert args.memory_limit is None
 
     def test_chat_with_no_save(self) -> None:
         """测试 chat 的 --no-save 参数。"""

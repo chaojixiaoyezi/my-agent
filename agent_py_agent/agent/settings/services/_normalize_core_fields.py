@@ -106,6 +106,7 @@ class ModelFieldsService:
         warnings.extend(
             _apply_int_fields(out, defaults, (("request_timeout", 1, 600), ("max_tokens", 1, None)))
         )
+        warnings.extend(_apply_bool_fields(out, defaults, ("auto_bench_model_on_first_use",)))
         warnings.extend(_normalize_temperature(out, defaults))
         return out, warnings
 
@@ -158,6 +159,10 @@ class DaemonFieldsService:
             ),
         )
         warnings.extend(
-            _apply_bool_fields(out, defaults, ("daemon_apply", "daemon_execute_runners"))
+            _apply_bool_fields(
+                out,
+                defaults,
+                ("daemon_planner", "daemon_apply", "daemon_execute_runners", "daemon_probe"),
+            )
         )
         return out, warnings

@@ -260,3 +260,11 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 - `agent_core/_tool_loop_service.py` 会把当前 subagent run scope 注入 `read_artifact` 参数和工具输出归档记录；`agent_core/subagent_run_flow.py` 也会把 subagent run/task id 传进 `agent.run()`，让工具链能从调用栈拿到稳定 scope。
 - `agent_core/tool_context_reducer.py` 的 live prompt 只给模型 scoped 读取线索：artifact path、hash、`output_scoped_call_id`、run/task/request flags 和 preview；完整 artifact 正文仍必须通过 `read_artifact` 显式读取。
 - 这条结构规则用于修复真实 E2E 的 prompt/路径误传问题：模型看到的引用不能只是人类可读短号，必须能绑定到当前任务、当前 run、当前 workspace。
+
+## 2026-05-13 artifact read mode and budget structure update
+- `memory_archive/artifact_reader.py` 继续是唯一 tool-output artifact 正文读取入口；现在 `ReadToolOutputArtifactRequest` 增加 `mode` 和 `query` 字段，支持 `slice/head/tail/search` 四种窄读方式。所有模式仍先查 `tool_outputs/index.jsonl`、校验目录边界和 sha256。
+- `memory_archive/artifact_read_modes.py` 承接正文 shaping：slice/head/tail/search 的 offset、截断、匹配行和附加元数据都在这里处理，避免 artifact index 读取层继续增长。
+- `memory_archive/artifact_reader.py` 还提供 `estimate_tool_output_artifact_size()`，只读 index 的 `size_bytes`，不打开正文，用于 `max_chars=0` 这类无界读取的预算预判。
+- `tooling/artifact_read_budget.py` 是 read_artifact 的单 run 正文读取预算器；它记录 `run_id -> [(timestamp, chars)]`，只限制带 run scope 的子代理读取，不限制普通主代理聊天。
+- `tooling/artifact.py` 把工具参数转成 `ReadToolOutputArtifactRequest` bundle，再先做预算 preflight，成功读取后按实际 `content_chars` 计费。这样预算逻辑不散落到 reader 或 tool loop 里。
+- `tooling/filesystem_artifact_guard.py` 负责普通 `read_file` 误读 artifact 包装文件的恢复提示；提示会根据 registry 注入的 `allowed_tools` 判断当前上下文是否有 `read_artifact`，没有时要求上报 `capability_request`。

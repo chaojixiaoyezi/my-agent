@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 __all__ = ["DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS", "ToolConfig"]
 
@@ -19,17 +19,26 @@ class ToolConfig:
     """Tool registry and execution limits."""
 
     enable_tools: bool = True
-    max_tool_rounds: int = 5
+    max_tool_rounds: int = 0
     tool_agent_budget_window_seconds: int = 600
     tool_agent_budget_max_calls: int = 50
-    tool_read_max_chars: int = 6000
+    tool_artifact_read_budget_window_seconds: int = 600
+    tool_artifact_read_budget_max_chars: int = 240_000
+    tool_read_max_chars: int = 50_000
     tool_write_inline_max_chars: int = DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
     tool_list_max_entries: int = 200
     tool_search_max_matches: int = 50
-    tool_web_max_chars: int = 12000
+    tool_web_max_chars: int = 100_000
     tool_http_timeout: int = 30
-    tool_shell_timeout: int = 30
+    tool_shell_timeout: int = 240
     stream_enabled: bool = True
     tool_catalog_limit: int = 20
+    tool_catalog_mode: str = "compact"
+    tool_catalog_offset: int = 0
+    tool_catalog_categories: list[str] = field(default_factory=list)
+    tool_catalog_include_examples: bool = True
+    tool_catalog_entry_max_chars: int = 1200
+    tool_catalog_show_truncated_notice: bool = True
+    tool_detail_max_chars: int = 4000
     tool_retrieval_limit: int = 3
-    tool_vector_search_enabled: bool = False
+    tool_vector_search_enabled: bool = True

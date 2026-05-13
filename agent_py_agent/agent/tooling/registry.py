@@ -17,6 +17,10 @@ from typing import Any
 
 from ..log_analysis.capabilities import SECURITY_TOOL_NAMES
 from .artifact import ReadArtifactTool
+from .artifact_read_budget import (
+    DEFAULT_ARTIFACT_READ_BUDGET_MAX_CHARS,
+    DEFAULT_ARTIFACT_READ_BUDGET_WINDOW_SECONDS,
+)
 from .content_transport_policy import MAX_INLINE_WRITE_CONTENT_CHARS
 from .controlled_exec import ControlledExecTool
 from .filesystem import (
@@ -35,6 +39,7 @@ from .models import (
     ToolSpec,
     VectorToolSearchProvider,
 )
+from .registry_catalog import CatalogRenderConfig, render_catalog_entries
 from .registry_execution import (
     ExecuteRegistryCallParams,
     allowed_tool_set,
@@ -63,8 +68,18 @@ class ToolRegistryParams:
     vector_search_enabled: bool
     workspace_roots: list[Path] | None = None
     shell_tool_timeout: int = 30
+    catalog_mode: str = "compact"
+    catalog_offset: int = 0
+    catalog_categories: list[str] | None = None
+    catalog_include_examples: bool = True
+    catalog_entry_max_chars: int = 0
+    catalog_show_truncated_notice: bool = True
+    tool_detail_max_chars: int = 0
     tool_write_inline_max_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS
     expose_security_tools: bool = False
+    artifact_read_budget_window_seconds: int = DEFAULT_ARTIFACT_READ_BUDGET_WINDOW_SECONDS
+    artifact_read_budget_max_chars: int = DEFAULT_ARTIFACT_READ_BUDGET_MAX_CHARS
+    artifact_default_read_chars: int = 4000
 
 
 # LLM: _build_tool_retriever centralizes catalog retrieval setup so ToolRegistry.__init__ stays small.
@@ -76,6 +91,61 @@ def _build_tool_retriever(params: ToolRegistryParams) -> HybridToolRetriever:
             VectorToolSearchProvider(enabled=params.vector_search_enabled),
         ]
     )
+
+
+# LLM: _register_filesystem_tools keeps constructor size stable as file-tool config grows.
+# 函数用途: 注册文件系统工具，并把用户配置的读取/写入上限传给对应工具。
+def _register_filesystem_tools(registry: ToolRegistry, params: ToolRegistryParams) -> None:
+    workspace_roots = registry.workspace_roots
+    registry.register(ListFilesTool(registry.workspace_root, params.max_entries, workspace_roots))
+    registry.register(ReadFileTool(registry.workspace_root, params.max_chars, workspace_roots))
+    registry.register(SearchTextTool(registry.workspace_root, params.max_matches, workspace_roots))
+    registry.register(
+        ReadArtifactTool(
+            registry.workspace_root,
+            artifact_read_budget_window_seconds=params.artifact_read_budget_window_seconds,
+            artifact_read_budget_max_chars=params.artifact_read_budget_max_chars,
+            default_read_chars=params.artifact_default_read_chars,
+        )
+    )
+    registry.register(
+        WriteFileTool(
+            registry.workspace_root,
+            workspace_roots,
+            max_inline_content_chars=params.tool_write_inline_max_chars,
+        )
+    )
+    registry.register(
+        AppendFileTool(
+            registry.workspace_root,
+            workspace_roots,
+            max_inline_content_chars=params.tool_write_inline_max_chars,
+        )
+    )
+    registry.register(ReplaceInFileTool(registry.workspace_root, workspace_roots))
+
+
+# LLM: _register_network_tools isolates non-filesystem tool setup from constructor policy.
+# 函数用途: 注册网页、HTTP、shell 和受控执行工具，保持工具初始化顺序稳定。
+def _register_network_tools(registry: ToolRegistry, params: ToolRegistryParams) -> None:
+    registry.register(FetchUrlTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
+    registry.register(HttpRequestTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
+    registry.register(ShellTool(registry.workspace_root, default_timeout=params.shell_tool_timeout))
+    registry.register(ControlledExecTool())
+
+
+# LLM: _register_security_tools keeps optional security tool registration easy to audit.
+# 函数用途: 延迟导入并注册安全分析工具，避免主注册流程继续增长。
+def _register_security_tools(registry: ToolRegistry) -> None:
+    from ..log_analysis.tools import (
+        SecurityHuntIpTool,
+        SecurityQueryTool,
+        SecurityTraceCaseTool,
+    )
+
+    registry.register(SecurityQueryTool(registry.workspace_root))
+    registry.register(SecurityHuntIpTool(registry.workspace_root))
+    registry.register(SecurityTraceCaseTool(registry.workspace_root))
 
 
 # LLM: ToolRegistry 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
@@ -94,56 +164,18 @@ class ToolRegistry:
         self.expose_security_tools = params.expose_security_tools
         self.security_tool_names = set(SECURITY_TOOL_NAMES)
         self.catalog_limit = params.catalog_limit
+        self.catalog_mode = params.catalog_mode
+        self.catalog_offset = max(0, params.catalog_offset)
+        self.catalog_categories = [item.strip() for item in params.catalog_categories or [] if item.strip()]
+        self.catalog_include_examples = params.catalog_include_examples
+        self.catalog_entry_max_chars = max(0, params.catalog_entry_max_chars)
+        self.catalog_show_truncated_notice = params.catalog_show_truncated_notice
+        self.tool_detail_max_chars = max(0, params.tool_detail_max_chars)
         self.retrieval_limit = params.retrieval_limit
         self.retriever = _build_tool_retriever(params)
-        self._register_filesystem_tools(params)
-        self._register_network_tools(params)
-        self._register_security_tools()
-
-    # LLM: ToolRegistry._register_filesystem_tools keeps constructor size stable as file-tool config grows.
-    # 函数用途: 注册文件系统工具，并把用户配置的读取/写入上限传给对应工具。
-    def _register_filesystem_tools(self, params: ToolRegistryParams) -> None:
-        workspace_roots = self.workspace_roots
-        self.register(ListFilesTool(self.workspace_root, params.max_entries, workspace_roots))
-        self.register(ReadFileTool(self.workspace_root, params.max_chars, workspace_roots))
-        self.register(SearchTextTool(self.workspace_root, params.max_matches, workspace_roots))
-        self.register(ReadArtifactTool(self.workspace_root))
-        self.register(
-            WriteFileTool(
-                self.workspace_root,
-                workspace_roots,
-                max_inline_content_chars=params.tool_write_inline_max_chars,
-            )
-        )
-        self.register(
-            AppendFileTool(
-                self.workspace_root,
-                workspace_roots,
-                max_inline_content_chars=params.tool_write_inline_max_chars,
-            )
-        )
-        self.register(ReplaceInFileTool(self.workspace_root, workspace_roots))
-
-    # LLM: ToolRegistry._register_network_tools isolates non-filesystem tool setup from constructor policy.
-    # 函数用途: 注册网页、HTTP、shell 和受控执行工具，保持工具初始化顺序稳定。
-    def _register_network_tools(self, params: ToolRegistryParams) -> None:
-        self.register(FetchUrlTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
-        self.register(HttpRequestTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
-        self.register(ShellTool(self.workspace_root, default_timeout=params.shell_tool_timeout))
-        self.register(ControlledExecTool())
-
-    # LLM: ToolRegistry._register_security_tools keeps optional security tool registration easy to audit.
-    # 函数用途: 延迟导入并注册安全分析工具，避免主注册流程继续增长。
-    def _register_security_tools(self) -> None:
-        from ..log_analysis.tools import (
-            SecurityHuntIpTool,
-            SecurityQueryTool,
-            SecurityTraceCaseTool,
-        )
-
-        self.register(SecurityQueryTool(self.workspace_root))
-        self.register(SecurityHuntIpTool(self.workspace_root))
-        self.register(SecurityTraceCaseTool(self.workspace_root))
+        _register_filesystem_tools(self, params)
+        _register_network_tools(self, params)
+        _register_security_tools(self)
 
     # LLM: ToolRegistry.register 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 完成 工具系统 中的 register 步骤，并保持调用方依赖的数据形状。
@@ -189,7 +221,7 @@ class ToolRegistry:
             granted_capabilities=granted_capabilities,
             include_orchestration=True,
         )
-        entries = [spec.render_catalog_entry() for spec in specs[: self.catalog_limit]]
+        entries = render_catalog_entries(specs, self._catalog_render_config())
         if not entries:
             entries = ["- none：当前执行上下文没有授权任何工具；缺能力时请上抛 capability_request。"]
         return (
@@ -204,6 +236,20 @@ class ToolRegistry:
             "可以连续写多个 [TOOL_CALL] 块。拿到工具结果后，再输出最终答案，不要把工具调用块留在最后回复里。\n\n"
             "# Tool Catalog\n"
             + "\n".join(entries)
+        )
+
+    # LLM: ToolRegistry._catalog_render_config bundles registry fields for the catalog renderer.
+    # 函数用途: 生成工具目录渲染参数包，避免渲染逻辑膨胀 ToolRegistry。
+    def _catalog_render_config(self) -> CatalogRenderConfig:
+        return CatalogRenderConfig(
+            mode=self.catalog_mode,
+            offset=self.catalog_offset,
+            limit=self.catalog_limit,
+            categories=self.catalog_categories,
+            include_examples=self.catalog_include_examples,
+            entry_max_chars=self.catalog_entry_max_chars,
+            show_truncated_notice=self.catalog_show_truncated_notice,
+            detail_max_chars=self.tool_detail_max_chars,
         )
 
     # LLM: ToolRegistry.find_relevant_specs 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -260,7 +306,7 @@ class ToolRegistry:
         for hit in hits:
             spec = by_name[hit.name]
             reason_text = "；".join(hit.reasons) or "与当前任务相关"
-            blocks.append(f"{spec.render_detail_entry()}\n推荐理由：{reason_text}")
+            blocks.append(f"{spec.render_detail_entry(max_chars=self.tool_detail_max_chars)}\n推荐理由：{reason_text}")
         return "# Recommended Tools\n" + "\n\n".join(blocks)
 
     # LLM: ToolRegistry.parse_tool_calls 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。

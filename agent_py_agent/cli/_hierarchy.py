@@ -63,7 +63,7 @@ def cmd_subagents_hierarchy(args) -> int:
             apply=bool(args.apply),
             requested_by=args.requested_by or "parent",
             max_children=int(args.max_children or 0),
-            max_depth=int(args.max_depth or 2),
+            max_depth=_hierarchy_config_int(agent, args, "max_depth", "subagent_hierarchy_default_max_depth"),
         )
     )
     if args.json:
@@ -83,7 +83,7 @@ def cmd_subagents_recovery_tree(args) -> int:
             root_run_id=args.run_id,
             requested_by=args.requested_by or "parent",
             include_healthy=not bool(args.hide_healthy),
-            max_nodes=int(args.max_nodes or 200),
+            max_nodes=_hierarchy_config_int(agent, args, "max_nodes", "subagent_hierarchy_recovery_max_nodes"),
             heartbeat_timeout=float(capability_config.subagent_heartbeat_timeout),
             run_timeout=float(capability_config.subagent_run_timeout),
         )
@@ -115,3 +115,12 @@ def _print_recovery_tree(payload: dict[str, object]) -> None:
         )
         if node.get("takeover_readiness_ref"):
             print(f"  takeover_readiness_ref={node.get('takeover_readiness_ref')}")
+
+
+# LLM: _hierarchy_config_int keeps hierarchy CLI defaults in AgentConfig.
+# 函数用途: 层级创建/恢复查询没有显式传数量时，读取 agent_config.yaml。
+def _hierarchy_config_int(agent, args, arg_name: str, config_name: str) -> int:
+    value = getattr(args, arg_name, None)
+    if value is not None:
+        return int(value)
+    return int(getattr(agent.config, config_name, 0) or 0)

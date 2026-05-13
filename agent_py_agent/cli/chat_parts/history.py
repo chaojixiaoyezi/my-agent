@@ -7,7 +7,8 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 
-MAX_HISTORY_TURNS = 8
+MAX_HISTORY_TURNS = 20
+ASSISTANT_PREVIEW_CHARS = 500
 
 
 # LLM: ConversationTurn 是chat CLI的数据契约；字段名会被调用方和测试读取。
@@ -25,6 +26,7 @@ def build_history_context(
     history_lock: threading.Lock,
     *,
     max_turns: int = MAX_HISTORY_TURNS,
+    assistant_preview_chars: int = ASSISTANT_PREVIEW_CHARS,
 ) -> str:
     with history_lock:
         if not conversation_history:
@@ -33,7 +35,7 @@ def build_history_context(
     lines = ["## 最近对话上下文（供参考，按时间倒序）"]
     for user_msg, agent_msg in reversed(recent):
         lines.append(f"用户: {user_msg}")
-        lines.append(f"助手: {agent_msg[:500]}")
+        lines.append(f"助手: {_preview_assistant_message(agent_msg, assistant_preview_chars)}")
     return "\n".join(lines)
 
 
@@ -48,5 +50,31 @@ def append_conversation_turn(
 ) -> None:
     with history_lock:
         conversation_history.append((turn.user_message, turn.assistant_message))
-        if len(conversation_history) > max_turns * 2:
+        if len(conversation_history) > max_turns:
             conversation_history[:] = conversation_history[-max_turns:]
+
+
+# LLM: _preview_assistant_message centralizes chat-history truncation so config can tune it.
+# 函数用途: 根据配置生成助手历史预览；0 或负数表示不截断，避免长任务丢关键上下文。
+def _preview_assistant_message(message: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(message) <= max_chars:
+        return message
+    return message[:max_chars]
+
+
+# LLM: chat config getters hide defensive casts from UI worker modules.
+# 函数用途: 从 agent.config 读取聊天历史轮数，配置缺失或异常时回退到稳定默认值。
+def chat_history_max_turns(config: object) -> int:
+    try:
+        return max(1, int(getattr(config, "chat_history_max_turns", MAX_HISTORY_TURNS) or MAX_HISTORY_TURNS))
+    except (TypeError, ValueError):
+        return MAX_HISTORY_TURNS
+
+
+# LLM: chat config getters hide defensive casts from UI worker modules.
+# 函数用途: 从 agent.config 读取助手历史预览字符数，0 表示不截断。
+def chat_assistant_preview_chars(config: object) -> int:
+    try:
+        return max(0, int(getattr(config, "chat_history_assistant_preview_chars", ASSISTANT_PREVIEW_CHARS) or 0))
+    except (TypeError, ValueError):
+        return ASSISTANT_PREVIEW_CHARS

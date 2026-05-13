@@ -47,15 +47,16 @@ from .thinking_spinner import ThinkingSpinner
 def cmd_status(args) -> int:
 
     agent = make_agent(args)
+    limit = _config_int(agent, args, "limit", "cli_status_limit")
     paths = gateway_paths(agent)
     local_stats = agent.local_store.stats()
     board = agent.subagents.build_board(
         options=SubAgentBoardOptions(
-            recent_limit=args.limit,
+            recent_limit=limit,
             include_child_status_counts=False,
         )
     )
-    timeline = agent.local_store.timeline(limit=args.limit)
+    timeline = agent.local_store.timeline(limit=limit)
     pid, alive = gateway_running(paths)
     gateway_state = read_json_file(paths.state)
     heartbeat = read_json_file(paths.heartbeat)
@@ -96,6 +97,7 @@ def cmd_status(args) -> int:
 def cmd_timeline(args) -> int:
 
     agent = make_agent(args)
+    _apply_default_arg_limit(args, agent, "cli_timeline_limit")
     options = _timeline_options(args)
     items = agent.local_store.timeline(
         limit=options.limit,
@@ -214,7 +216,8 @@ def cmd_remember(args) -> int:
 def cmd_memory_list(args) -> int:
 
     agent = make_agent(args)
-    records = agent.memory.all()[-args.limit :]
+    limit = _config_int(agent, args, "limit", "cli_memory_list_limit")
+    records = agent.memory.all()[-limit:]
     for rec in records:
         print(json.dumps(rec.__dict__, ensure_ascii=False))
     return 0
@@ -225,7 +228,8 @@ def cmd_memory_list(args) -> int:
 def cmd_memory_search(args) -> int:
 
     agent = make_agent(args)
-    for rec in agent.recall(args.query, args.limit):
+    limit = _config_int(agent, args, "limit", "cli_memory_search_limit")
+    for rec in agent.recall(args.query, limit):
         print(json.dumps(rec.__dict__, ensure_ascii=False))
     return 0
 
@@ -244,6 +248,9 @@ def cmd_local_store_status(args) -> int:
 def cmd_local_search(args) -> int:
 
     agent = make_agent(args)
+    _apply_default_arg_limit(args, agent, "cli_local_search_limit")
+    if getattr(args, "preview_chars", None) is None:
+        args.preview_chars = int(getattr(agent.config, "cli_local_search_preview_chars", 500) or 0)
     options = _local_search_options(args)
     hits = agent.local_store.search(
         options.query,
@@ -289,6 +296,22 @@ def _timeline_options(args) -> TimelineOptions:
         json=bool(args.json),
         details=bool(args.details),
     )
+
+
+# LLM: _config_int resolves CLI optional defaults from AgentConfig after make_agent is available.
+# 函数用途: argparse 无法提前读取配置时，在命令执行层把 None 转为配置文件里的默认值。
+def _config_int(agent, args, arg_name: str, config_name: str) -> int:
+    value = getattr(args, arg_name, None)
+    if value is not None:
+        return int(value)
+    return int(getattr(agent.config, config_name, 0) or 0)
+
+
+# LLM: _apply_default_arg_limit keeps existing option bundle helpers unchanged while moving defaults to config.
+# 函数用途: 在调用旧 helper 前把 args.limit 补成后端配置值。
+def _apply_default_arg_limit(args, agent, config_name: str) -> None:
+    if getattr(args, "limit", None) is None:
+        args.limit = int(getattr(agent.config, config_name, 0) or 0)
 
 
 # LLM: _local_search_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。

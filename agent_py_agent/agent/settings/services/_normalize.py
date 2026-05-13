@@ -6,14 +6,15 @@
 from __future__ import annotations
 
 from ._normalize_core_fields import DaemonFieldsService, GatewayFieldsService, ModelFieldsService
+from ._normalize_operational_fields import RuntimeBoolFieldsService
 from ._normalize_runtime_fields import (
     AdapterFieldsService,
     SubagentAdvancedFieldsService,
     SubagentBasicFieldsService,
-    TimeoutFieldsService,
     ToolFieldsService,
     UserFieldsService,
 )
+from ._normalize_timeout_fields import TimeoutFieldsService
 
 _NORMALIZE_SERVICES = (
     ModelFieldsService,
@@ -23,6 +24,7 @@ _NORMALIZE_SERVICES = (
     SubagentBasicFieldsService,
     AdapterFieldsService,
     UserFieldsService,
+    RuntimeBoolFieldsService,
     TimeoutFieldsService,
     SubagentAdvancedFieldsService,
 )

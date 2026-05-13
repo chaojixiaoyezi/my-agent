@@ -21,13 +21,14 @@ _PREVIEW_LIMITS = {
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _summarize_text 时同步检查返回值、异常处理和读写副作用。
 # 函数用途: 完成 summarize text 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
-def _summarize_text(content: str, *, fallback: str) -> str:
+def _summarize_text(content: str, *, fallback: str, limit: int = 96) -> str:
     """Build a short deterministic summary when full previews should not be stored."""
     compact = " ".join(str(content).split())
     if not compact:
         return fallback
-    short = compact[:96]
-    if len(compact) > 96:
+    limit = max(0, int(limit))
+    short = compact[:limit]
+    if len(compact) > limit:
         short += "..."
     return short
 
@@ -62,9 +63,10 @@ def _normalize_archive_level(value: int) -> int:
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _preview 时同步检查返回值、异常处理和读写副作用。
 # 函数用途: 完成 preview 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
-def _preview(content: str, archive_level: int) -> str:
+def _preview(content: str, archive_level: int, preview_limits: dict[int, int] | None = None) -> str:
     """Trim archived text according to archive level."""
-    limit = _PREVIEW_LIMITS[_normalize_archive_level(archive_level)]
+    limits = preview_limits or _PREVIEW_LIMITS
+    limit = int(limits.get(_normalize_archive_level(archive_level), _PREVIEW_LIMITS[3]))
     if len(content) <= limit:
         return content
     if limit <= 3:

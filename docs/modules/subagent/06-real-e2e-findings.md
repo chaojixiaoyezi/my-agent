@@ -4868,3 +4868,28 @@ This document is append-only. Record every real subagent E2E issue found during 
   - A later full shopping-site run should still watch for the exact R85 failure mode: model sees a tool-output wrapper JSON and should choose scoped `read_artifact` instead of repeated `read_file`.
 - Next:
   - Resume full shopping-site E2E with the same root-only observer rule, but keep the checkpoint shorter: stop once a new systemic issue is visible, patch it, and rerun instead of spending a long test window on a known failure mode.
+
+### Follow-up: Artifact Reads Need Narrow Modes And Budgets
+
+- Discovered at: 2026-05-13 while reviewing R85/R86 artifact-wrapper behavior and comparing 长期助手/通道运行时/会话运行时 output handling.
+- Symptom:
+  - Leaf/coordinator agents can be forced toward `read_artifact` after `read_file` rejects tool-output wrapper JSON, but a naive `read_artifact` still risks pulling too much body text back into the live prompt.
+  - If a tool-output artifact points at a huge log, repeated reads by several sibling agents could become expensive even though the disk can store it.
+- 中文解释：
+  - 大白话：外置 artifact 像仓库里的大箱子。我们不能让孩子每次找一个零件都把整个箱子搬进脑子里；应该让它看箱子开头、尾巴、搜关键词，或者按小片段拿。
+- Fix:
+  - `read_artifact` now supports `mode=slice/head/tail/search`.
+  - `mode=search` returns matching lines with line numbers instead of the whole artifact.
+  - `tool_artifact_read_budget_window_seconds` and `tool_artifact_read_budget_max_chars` add a per-run artifact body read budget.
+  - `max_chars=0` reads use `tool_outputs/index.jsonl` `size_bytes` for budget preflight before opening the body when scoped by `run_id`.
+  - `read_file` artifact-wrapper hints now mention missing `read_artifact` authorization and `capability_request` when the current allowed tool set lacks it.
+- Verification:
+  - `test_read_artifact_supports_head_tail_and_search_modes`
+  - `test_read_artifact_tool_enforces_per_run_artifact_read_budget`
+  - `test_read_artifact_budget_blocks_unbounded_large_read_from_index`
+  - `test_read_file_artifact_wrapper_hint_mentions_missing_read_artifact_permission`
+  - Focused run: `/Users/example/ai_claw/bin/python -m pytest agent_py_agent/tests/test_memory_artifact_read.py -q` -> `12 passed`.
+- Remaining gap:
+  - This is still JSON artifact storage; it avoids prompt flood and adds size preflight, but a future streaming artifact reader would be better for truly giant files.
+- Next:
+  - Run a short real root-only test where a leaf must recover from an externalized artifact wrapper and prove it can use scoped `read_artifact` with `mode=search` / small `max_chars`.

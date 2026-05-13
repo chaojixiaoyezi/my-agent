@@ -75,6 +75,23 @@ memory_resume_auto_context_mode: "trigger"
 memory_resume_auto_context_limit: 5
 memory_compact_auto_allow_apply: false
 
+# Memory / compact / artifact 默认预算：
+# - 这些值只控制“默认读取多少、预览多少、扫描多少”，不是数据保留上限。
+# - 用户后续觉得太保守或太激进时，可以只改这里，不需要改 Python 代码。
+memory_artifact_default_read_chars: 4000
+memory_archive_preview_level_0_chars: 2048
+memory_archive_preview_level_1_chars: 1024
+memory_archive_preview_level_2_chars: 512
+memory_archive_preview_level_3_chars: 160
+memory_archive_summary_chars: 96
+memory_archive_search_file_limit: 30
+memory_query_default_limit: 100
+memory_query_default_page_size: 100
+memory_query_content_preview_chars: 500
+memory_resume_archive_scan_limit: 0
+memory_resume_recommended_read_paths_limit: 20
+memory_doctor_recent_archive_file_limit: 5
+
 # 是否启用自学习功能
 # - false: 默认关闭，只按已有 prompt、记忆、工具和 skill 工作，不自动沉淀新经验
 # - true: 允许后续自学习模块在任务结束后生成“学习候选”
@@ -187,6 +204,19 @@ subagent_workflow_review_rounds: 1
 task_max_subagents: 0
 task_max_grandchildren: 0
 
+# 子代理运行默认值：
+# - 这些是 CLI 和内部调度的默认数量/摘要长度，不是用户需求的硬规则。
+# - 0 通常表示不限制或交给上层决策；具体含义以旁边注释为准。
+subagent_spawn_default_count: 3
+subagent_cli_default_limit: 20
+subagent_probe_default_limit: 20
+subagent_hierarchy_default_max_depth: 2
+subagent_hierarchy_recovery_max_nodes: 200
+subagent_hierarchy_max_children_per_tool_call: 2
+subagent_descendant_scan_limit: 128
+subagent_context_summary_inline_json_chars: 900
+subagent_context_summary_inline_text_chars: 500
+
 # 父级验收是否默认真实执行 runner 输出里的 tests：
 # - false: 保守默认，只检查 runner 填写的 tests 字段和证据，不自动跑命令。
 # - true: `subagents-acceptance` 默认执行 allowlist 内的 command/file/content 验证。
@@ -198,11 +228,14 @@ acceptance_execute_tests: false
 # - `subagents-acceptance --test-timeout` 和 `subagents-tests --timeout` 可覆盖单次调用。
 acceptance_test_timeout_seconds: 120
 
-# 调度策略（未来 gateway 的主要策略面板）：
-# - auto 表示由主代理/调度器根据模型速度、失败率、队列长度和卡住情况自适应调整。
-# - off/none/disabled 表示 runner 不设置外层超时，适合真实 E2E 和长任务压测。
-# - 普通用户不需要改这些；高级用户可以改成具体数字或具体策略。
-# - 当前前台 daemon 只会读取 daemon_* 低层参数；这些字段先作为 gateway 设计契约和配置落点。
+# 调度模式（scheduler_mode）：
+# - "auto": 默认值。未来 gateway/调度器会自动判断怎么派 runner、怎么排队、怎么处理卡住任务。
+# - "manual": 预留给“只在用户或上层 workflow 明确要求时才调度”的模式。
+# - "off" / "none" / "disabled": 预留给“关闭自动调度”的模式。
+# - 当前状态：这个字段已经作为配置位和前端字段保留，但核心调度暂时还没有真正读取它；
+#   所以现在改 scheduler_mode 不会直接改变 runner 行为。当前真正生效的是下面几个字段：
+#   runner_concurrency、runner_start_rate、runner_timeout_seconds、runner_failure_policy。
+# - 给用户的建议：普通使用保持 "auto"；等 gateway 调度策略正式接入后，再按 UI/文档选择 manual/off。
 scheduler_mode: "auto"
 runner_concurrency: "auto"
 runner_start_rate: "auto"
@@ -245,6 +278,10 @@ gateway_request_poll_interval: 1
 gateway_request_workers: 1
 gateway_processing_timeout_seconds: 900
 gateway_request_max_attempts: 2
+gateway_worker_join_timeout_seconds: 2
+gateway_ready_timeout_seconds: 10
+gateway_service_command_timeout_seconds: 30
+gateway_service_stop_timeout_seconds: 90
 
 # HTTP 服务端口（gateway 守护进程用）
 # - 默认 8420
@@ -328,10 +365,16 @@ daemon_runner_instruction: ""
 lease_heartbeat_interval_seconds: 60
 lease_stale_without_heartbeat_seconds: 300
 
-# 日志级别预留字段
+# 日志级别：重新加载配置后会应用到 agent_py_agent 包内 logger
 log_level: "info"
 
-# 扩展目录预留字段
+# 扩展目录（extensions_dir）：
+# - 默认 "extensions"，表示项目根目录下的 extensions/ 目录。
+# - 未来用途：放用户自定义工具、skill、workflow、插件或本地能力包，让 my-agent 启动时统一扫描。
+# - 可以填相对路径，例如 "extensions"、".agent/extensions"；也可以填绝对路径。
+# - 当前状态：扩展插件接口已经有基础骨架，但还没有自动扫描/加载 extensions_dir；
+#   所以现在创建这个目录不会自动启用新扩展。需要等后续 extension loader 接入。
+# - 给用户的建议：普通使用保持默认；想提前规划目录结构时，可以在这里改成团队约定的扩展目录。
 extensions_dir: "extensions"
 
 # 真实模型接口地址
@@ -369,15 +412,21 @@ enable_tools: true
 # 是否启用流式模型响应；关闭后走一次性响应路径，便于排查兼容接口问题。
 stream_enabled: true
 
-# 单轮请求里，最多允许几次“模型调用工具再继续推理”
-max_tool_rounds: 5
+# 单轮请求里，最多允许几次“模型调用工具再继续推理”；0 表示不限制
+max_tool_rounds: 0
 
 # 单个代理滚动工具预算；只按 subagent run_id 生效，普通主代理聊天默认不限制
 tool_agent_budget_window_seconds: 600
 tool_agent_budget_max_calls: 50
 
+# 单个代理滚动 artifact 正文读取预算（下面两个参数必须一起看）：
+# - window_seconds=600 + max_chars=240000 表示单个 run_id 最近 10 分钟最多读取 240000 字符正文。
+# - 任一配置为 0 表示关闭这个 artifact 正文读取预算。
+tool_artifact_read_budget_window_seconds: 600
+tool_artifact_read_budget_max_chars: 240000
+
 # read_file 工具最多返回多少字符，避免单次结果太长
-tool_read_max_chars: 6000
+tool_read_max_chars: 50000
 
 # write_file / append_file 单次 inline content 硬上限
 # 默认 12000；调大可以减少分块次数，但过大更容易让工具 JSON 被模型截断。
@@ -390,25 +439,77 @@ tool_list_max_entries: 200
 tool_search_max_matches: 50
 
 # 网页抓取和接口响应最多保留多少字符
-tool_web_max_chars: 12000
+tool_web_max_chars: 100000
 
 # fetch_url / http_request 工具默认超时秒数
 tool_http_timeout: 30
 
 # run_command 工具默认超时秒数
-tool_shell_timeout: 30
+tool_shell_timeout: 240
 
 # 工具目录里最多展示多少个工具条目
 # 这个值偏大也没问题，因为目录只放中等详细度信息，不会像完整手册那么占 prompt
 tool_catalog_limit: 20
+
+# 工具目录展示模式：
+# - compact：给模型一份精简工具目录，默认推荐。
+# - full：给模型完整工具详情，适合调试模板/工具选择问题。
+# - retrieval_only：不铺完整目录，只靠 Recommended Tools 召回。
+# - off：关闭工具目录注入，通常只用于极限省 token 的实验。
+tool_catalog_mode: "compact"
+
+# 工具目录分页偏移；一般保持 0，调试目录分页时可和 tool_catalog_limit 配合。
+tool_catalog_offset: 0
+
+# 工具目录按类别过滤；空列表表示不过滤。
+# 例如 ["filesystem", "network"] 只展示文件和网络工具，但不改变真正授权。
+tool_catalog_categories: []
+
+# 工具目录条目是否带示例；关闭可省 token，但模型更容易写错参数。
+tool_catalog_include_examples: true
+
+# 单个工具目录条目的字符上限；0 表示不截断。
+tool_catalog_entry_max_chars: 1200
+
+# 工具目录分页/截断时是否提示 next_offset。
+tool_catalog_show_truncated_notice: true
+
+# Recommended Tools 单个详细工具说明字符上限；0 表示不截断。
+tool_detail_max_chars: 4000
 
 # 每次只把多少个最相关工具的“详细说明”注入 prompt
 # 这个值越小越省 token，但过小可能漏掉次优工具
 tool_retrieval_limit: 3
 
 # 是否启用向量检索预留开关
-# 当前代码已经把接口留好了，但默认仍以关键词检索为主
-tool_vector_search_enabled: false
+# 当前代码已经把接口留好了；未接真实向量索引前仍以关键词检索为主
+tool_vector_search_enabled: true
+
+# Chat / CLI 默认展示和读取预算：
+# - 这些配置控制命令默认显示多少、交互历史带多少、长文本折叠多少。
+# - 后续前端配置页也应读取这些真实后端字段，而不是另写一套默认值。
+chat_history_max_turns: 20
+chat_history_assistant_preview_chars: 500
+chat_transcript_max_chars: 500000
+chat_collapse_preview_lines: 12
+chat_collapse_preview_chars: 900
+chat_context_window_chars: 200000
+chat_transcript_scroll_lines: 10
+cli_status_limit: 5
+cli_timeline_limit: 20
+cli_memory_list_limit: 20
+cli_memory_search_limit: 5
+cli_chat_memory_limit: 5
+cli_memory_archive_limit: 20
+# memory-compact 默认不截断当前 scope 的匹配记录；如需调试小范围 compact，可在命令行显式传 --limit。
+cli_memory_route_limit: 5
+cli_local_search_limit: 5
+cli_local_search_preview_chars: 500
+cli_local_doctor_limit: 20
+cli_task_list_limit: 50
+cli_notification_limit: 20
+cli_audit_limit: 100
+cli_audit_cleanup_days: 90
 
 # Dispatch 闭环保证配置：
 # - dispatch_max_consecutive_rounds: 最大连续调度轮数，防止无限循环
@@ -417,6 +518,10 @@ tool_vector_search_enabled: false
 dispatch_max_consecutive_rounds: 20
 dispatch_active_interval: 5
 dispatch_idle_interval: 30
+dispatch_default_max_runners: 1
+dispatch_default_limit: 20
+dispatch_default_watch_interval: 30.0
+dispatch_pending_runner_scan_limit: 999
 
 # Watchdog 监控配置：
 # - watchdog_enabled: 是否启用 watchdog 监控 daemon 进程存活

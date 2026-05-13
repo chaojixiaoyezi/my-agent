@@ -73,6 +73,7 @@ EXCLUDE_PARTS = {
 }
 EXCLUDE_PATH_PREFIXES = {
     "agent_py_agent/data/",
+    "frontend/",
 }
 EXCLUDE_PREFIXES = ("._",)
 EXCLUDE_SUFFIXES = {".pyc", ".pyo"}

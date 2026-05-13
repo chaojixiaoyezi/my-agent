@@ -86,9 +86,9 @@ class TestStatusParser:
         return parser
 
     def test_status_default_limit(self, parser_with_basic: argparse.ArgumentParser) -> None:
-        """测试 status 默认 limit 值。"""
+        """测试 status 默认 limit 值由运行配置解析。"""
         args = parser_with_basic.parse_args(["status"])
-        assert args.limit == 5
+        assert args.limit is None
 
     def test_status_custom_limit(self, parser_with_basic: argparse.ArgumentParser) -> None:
         """测试 status 自定义 limit 值。"""

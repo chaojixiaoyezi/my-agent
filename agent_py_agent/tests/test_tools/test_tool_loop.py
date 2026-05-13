@@ -12,6 +12,7 @@ from pathlib import Path
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import ToolLoopService
 from agent_py_agent.agent.agent_core.tool_round_execution import ToolCallExecuteParams
+from agent_py_agent.agent.backend import ModelResponse
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.log_analysis.storage import LocalLogStore
@@ -58,6 +59,22 @@ class _BlockedScheduleTools:
         )
 
 
+# LLM: _UnlimitedRoundsBackend proves max_tool_rounds=0 disables only the round cap, not normal tool execution.
+# 类用途: 测试专用后端；前两轮都请求读取文件，第三轮自行收口，用来验证 0 表示不限制。
+class _UnlimitedRoundsBackend:
+    name = "fake_unlimited_rounds_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None):
+        self.calls += 1
+        if self.calls <= 2:
+            return ToolCallingBackend().generate(prompt, on_chunk=on_chunk)
+        assert "已达到最大工具轮数限制" not in prompt
+        return ModelResponse(text="无限轮数配置已正常收口", backend=self.name)
+
+
 def test_tool_loop_and_prompt_transcript():
     """LLM: verify that a tool call round feeds tool output back to the model for a final answer.
 
@@ -74,6 +91,24 @@ def test_tool_loop_and_prompt_transcript():
         assert result.response == "工具执行完成"
         assert result.tool_rounds == 1
         assert "hello tool world" in result.prompt
+
+
+# LLM: max_tool_rounds=0 should mean unlimited, while the model can still stop itself.
+# 函数用途: 验证主代理单次请求的工具轮数上限为 0 时不会立刻触发限制提示。
+def test_max_tool_rounds_zero_allows_multiple_tool_rounds():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        (workspace / "notes.txt").write_text("hello unlimited", encoding="utf-8")
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=0)
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = _UnlimitedRoundsBackend()
+
+        result = agent.run("重复读取 notes 后收口", save=False)
+
+        assert result.response == "无限轮数配置已正常收口"
+        assert result.tool_rounds == 2
+        assert agent.backend.calls == 3
+        assert "已达到最大工具轮数限制" not in result.prompt
 
 
 # LLM: complete tool JSON should execute even when the closing marker is missing.
@@ -349,7 +384,7 @@ def test_max_tool_rounds_generates_final_response():
     """LLM: verify that hitting max_tool_rounds still produces a final model response.
 
     新手说明:
-    把 max_tool_rounds 设为 0，模型应该收到轮数限制提示并给出回答。
+    把 max_tool_rounds 设为 1，模型应该收到轮数限制提示并给出回答。
     """
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
@@ -357,7 +392,7 @@ def test_max_tool_rounds_generates_final_response():
         cfg = AgentConfig(
             enable_tools=True,
             memory_path="memory.jsonl",
-            max_tool_rounds=0,
+            max_tool_rounds=1,
         )
         agent = SimpleAgent(cfg, workspace)
         agent.backend = MaxToolRoundBackend()
@@ -365,8 +400,8 @@ def test_max_tool_rounds_generates_final_response():
         result = agent.run("读取 notes", save=False)
 
         assert result.response == "工具轮数到顶后已正常收口。"
-        assert result.tool_rounds == 0
-        assert agent.backend.calls == 2
+        assert result.tool_rounds == 1
+        assert agent.backend.calls == 3
 
 
 # LLM: tool loop must not return a fresh TOOL_CALL as the final answer after max rounds.
@@ -374,7 +409,7 @@ def test_max_tool_rounds_generates_final_response():
 def test_max_tool_rounds_hard_stops_when_model_still_requests_tools():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=0)
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=1)
         agent = SimpleAgent(cfg, workspace)
         agent.backend = StubbornToolAfterLimitBackend()
 
@@ -383,8 +418,8 @@ def test_max_tool_rounds_hard_stops_when_model_still_requests_tools():
         assert "已达到最大工具轮数限制" in result.response
         assert "后续工具请求不会被执行" in result.response
         assert "[TOOL_CALL]" not in result.response
-        assert result.tool_rounds == 0
-        assert agent.backend.calls == 2
+        assert result.tool_rounds == 1
+        assert agent.backend.calls == 3
 
 
 # LLM: verifies runner completion artifacts short-circuit extra model turns.

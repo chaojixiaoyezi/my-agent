@@ -28,6 +28,8 @@ from .models import LocalDoctorOptions, LocalRebuildOptions
 def cmd_local_doctor(args) -> int:
 
     agent = make_agent(args)
+    if getattr(args, "limit", None) is None:
+        args.limit = int(getattr(agent.config, "cli_local_doctor_limit", 20) or 0)
     options = _local_doctor_options(args)
     if options.repair:
         recovery = recover_gateway_processing_requests(
