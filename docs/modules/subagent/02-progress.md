@@ -1045,3 +1045,12 @@
 - 已实现闭环：`SubAgentManager.save()` 会自动写 `latest_continue_packet.json` 和 `session_compact_ledger.jsonl`。父级重新 runner/dispatch 同一个 run 时，prompt 会自动读取这个包，带着子代理上一轮的 current step、summary、blockers 和推荐读取路径继续。
 - 已补测试：`test_runner_prompt_includes_task_local_compact_continuation_refs`、`test_memory_compact_resume_exposes_subagent_latest_continue_packet`、`test_context_bundle_v1_captures_task_handoff_fields`。
 - 下一步：做更高层的恢复调度策略：父级发现子代理超时/中断/父节点失联时，如何选择原 run 重跑、创建 takeover run，或把子树挂到新 leader。
+
+## 2026-05-13 packet-first recovery dispatch
+- 中文说明：这轮把上一条的 continue packet 从“runner prompt 可读”推进到“父级调度会先用它做恢复判断”。直接 child 卡住时，父级不再只看到笼统的重试建议，而是会看到 `recovery_strategies`：该续跑原 run、创建 takeover run、做 coordinator leader recovery，还是触发 no-progress fuse。
+- 已实现：新增 `subagents/services/recovery_strategy.py`，统一读取 `latest_continue_packet.json`，坏包/缺包/过期包会降级到 checkpoint/summary，不会卡死，也不会读取 artifact 正文。
+- 已实现：`dispatch_subagents` 的 runner-context payload 会把每个失败 child 的 `packet_status`、`recommended_action`、`fallback_refs`、`takeover_refs` 和 `runner_instruction` 返回给父级；只有单个 run 恢复时才把 runner_instruction 放进 suggested tool call，多个 run 同时失败时只给 run_ids 和策略列表，避免串线。
+- 已实现：新增 `SubAgentTakeoverRunService` 和 `manager.create_takeover_run()`。原 run 超时/断通道时，可以创建一个同 scope 的 takeover run，带着旧任务目录、artifacts、checkpoint、summary、latest packet refs 继续；同一个旧 run 重复恢复会复用已有 takeover，不会无限扩容。
+- 已实现：`subagents-recovery-tree` 的节点现在也带 `recovery_action`、`continue_packet_ref`、`continue_packet_status` 和 `no_progress_fuse`。四层链路中间 coordinator 挂掉时，恢复树会标出 `recover_coordinator_leadership`，而不是当作普通 follow-up。
+- 已补测试：`test_subagent_recovery_strategy.py` 覆盖 packet 优先、坏包/过期包降级、no-progress fuse、挂死 worker takeover、失败 coordinator leader recovery；`test_subagent_takeover_run.py` 覆盖 takeover run 继承 refs 和幂等；`test_orchestration_progress_payload.py` 覆盖 dispatch packet-first 和多失败批量策略；`test_subagent_hierarchy_recovery.py` 覆盖四层中间 leader 恢复。
+- 下一步：进入真实 E2E 回复测试。测试必须只给 root prompt，由 root 自己创建/恢复下级；观察日志、packet、checkpoint、takeover 和 leader recovery refs，发现问题再修长期方案。

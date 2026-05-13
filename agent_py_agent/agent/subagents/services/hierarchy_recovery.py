@@ -10,6 +10,7 @@ from typing import Any
 
 from ..models import SubAgentTask
 from ..policies import _is_active
+from .recovery_strategy import SubagentRecoveryStrategyRequest, build_subagent_recovery_strategy
 
 RECOVERY_STATUSES = frozenset({"BLOCKED", "FAILED", "TIMEOUT", "ERROR", "CHANNEL_ERROR"})
 
@@ -49,6 +50,10 @@ class HierarchyRecoveryNode:
     context_bundle_ref: str = ""
     parent_context_bundle_ref: str = ""
     recommended_command: str = ""
+    recovery_action: str = ""
+    continue_packet_ref: str = ""
+    continue_packet_status: str = ""
+    no_progress_fuse: bool = False
     artifact_refs: list[str] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)
 
@@ -155,6 +160,7 @@ def _node_from_task(
     task_index: dict[str, SubAgentTask] | None = None,
 ) -> HierarchyRecoveryNode:
     reason = _recovery_reason(task, request, task_index=task_index)
+    strategy = _recovery_strategy_for_task(task, reason)
     return HierarchyRecoveryNode(
         run_id=task.id,
         parent_id=task.parent_id,
@@ -174,9 +180,21 @@ def _node_from_task(
         context_bundle_ref=_context_bundle_ref(task),
         parent_context_bundle_ref=_parent_context_bundle_ref(task, task_index),
         recommended_command=_recommended_command(task, reason),
+        recovery_action=strategy.recommended_action if strategy else "",
+        continue_packet_ref=strategy.packet_ref if strategy else "",
+        continue_packet_status=strategy.packet_status if strategy else "",
+        no_progress_fuse=bool(strategy.no_progress_fuse) if strategy else False,
         artifact_refs=list(dict.fromkeys(task.artifact_refs)),
         evidence_refs=list(dict.fromkeys(task.evidence_refs)),
     )
+
+
+# LLM: _recovery_strategy_for_task enriches candidate nodes with packet-first action hints.
+# 函数用途: 只在节点确实需要恢复时调用统一策略服务，不读取 artifact 正文。
+def _recovery_strategy_for_task(task: SubAgentTask, reason: str):
+    if not reason:
+        return None
+    return build_subagent_recovery_strategy(SubagentRecoveryStrategyRequest(task=task))
 
 
 # LLM: _context_bundle_ref points recovery-tree readers at the task-local handoff bundle.

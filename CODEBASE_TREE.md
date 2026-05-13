@@ -997,6 +997,8 @@ docs/
 - `agent_py_agent/agent/subagents/services/takeover_readiness.py`: 生成接管前必读包 `reports/takeover_readiness.json` 和 `TAKEOVER_READINESS.md`，只保存 context bundle refs、checkpoint refs、artifact manifest 元数据和读取顺序，不读取大正文。
 - `agent_py_agent/agent/subagents/rendering_rescue.py`: 渲染 rescue packet 的 refs-only 摘要，避免主 `rendering.py` 因接管/救援展示继续膨胀。
 - `agent_py_agent/agent/subagents/services/compact_continue_packet.py`: 子代理 task-local continue packet 写入层；保存任务时生成 `compactions/latest_continue_packet.json` 和 `session_compact_ledger.jsonl`，供父级 rerun/dispatch 按 refs 接续。
+- `agent_py_agent/agent/subagents/services/recovery_strategy.py`: 子代理恢复策略入口；优先验证 task-local `latest_continue_packet.json`，坏包/缺包/过期包降级到 checkpoint/summary，并给出续跑原 run、创建 takeover run、leader recovery 或 no-progress fuse 的 refs-only 决策。
+- `agent_py_agent/agent/subagents/services/takeover_run.py`: 原 runner 挂死后的幂等接管 run 创建服务；新 run 保留旧 task_dir/artifacts/checkpoint/packet refs，同一个 source run 重复恢复不会无限创建接管者。
 - `agent_py_agent/agent/memory_archive/compact_resume_failsafe.py`: 从 compact restore refs 指向的 hook JSONL 中提取工具输出外置前 fail-safe checkpoint，保持 memory-resume refs-only。
 - `agent_py_agent/agent/memory_archive/compact_continue_packet.py`: 把 compact resume 后的 work_state、action guard、推荐读取路径和 subagent owner refs 固定成继续工作包；它只表达恢复上下文可继续，不执行工具或业务验收。
 - `agent_py_agent/agent/memory_archive/compact_resume_blocked.py`: 生成 compact metadata 缺失时的 schema-compatible 阻断 payload，让主 resume 编排保持薄。
@@ -1063,7 +1065,7 @@ docs/
 - `agent_py_agent/agent/subagents/services/hierarchy_leaf_targets.py`: 从 scope guard 拆出的已验证 leaf 目标文件去重 helper；只读 direct child 元数据和 `output.json.artifacts` 路径引用，不读取 artifact 正文。
 - `agent_py_agent/agent/subagents/services/hierarchy_context.py`: 层级目标继承 helper；把父级 required/forbidden 文件合同、4层/depth/命名合同和能力安全合同补进下级 goal，防止模型总结时把关键边界缩水。
 - `agent_py_agent/agent/subagents/services/hierarchy_write_policy.py`: 层级写入根策略，区分 task-local 报告写入和最终产品写入；coordinator/researcher/tester/bug_finder/acceptor 可保留产品路径上下文但不继承产品写入根。
-- `agent_py_agent/agent/subagents/services/hierarchy_recovery.py`: 多层恢复包服务，从 root run 只读扫描子树，返回需要恢复的后代、当前/父级 context bundle refs、接管入口和 checkpoint refs；现在也可按 capability 阈值标记 stale `RUNNING` 后代，不读取 artifact 正文。
+- `agent_py_agent/agent/subagents/services/hierarchy_recovery.py`: 多层恢复包服务，从 root run 只读扫描子树，返回需要恢复的后代、当前/父级 context bundle refs、接管入口和 checkpoint refs；节点还会携带 `recovery_action`、`continue_packet_ref/status` 和 no-progress fuse 状态，不读取 artifact 正文。
 - `agent_py_agent/agent/subagents/services/board.py`: due-check 和 plan-actions 支持 root_id 作用域，真实 E2E 多棵任务树共用 workspace 时可以只看当前 root 并只生成当前树动作。
 - `agent_py_agent/agent/subagents/services/board_due_models.py`: due-check 共享参数包和 issue 构造 helper，避免巡检谓词文件继续膨胀。
 - `agent_py_agent/agent/subagents/services/board_due_checks.py`: due-check heartbeat/run-timeout 规则把已派生 child runs 的 parked `PLANNING` coordinator 转成 `coordinator_heartbeat_stale` 领导权恢复问题，避免误当普通 runner 接管，同时不会静默漏掉失联 coordinator。
@@ -1124,6 +1126,8 @@ docs/
 - `agent_py_agent/tests/test_subagent_failure_handoff.py`: 覆盖失败/阻塞 run 保存时的 failure handoff JSON 落盘和 LocalStore metadata refs。
 - `agent_py_agent/tests/test_subagent_context_bundle.py`: 覆盖 Context Bundle v1 字段、Context Gate、runner prompt 接入、agent run workspace 镜像和四层 lineage refs。
 - `agent_py_agent/tests/test_subagent_compact_continuation.py`: 覆盖子代理保存自动生成 latest continue packet、session compact ledger，以及父级 runner prompt 自动读取该 packet。
+- `agent_py_agent/tests/test_subagent_recovery_strategy.py`: 覆盖子代理 packet-first 恢复策略，包括 packet 优先、坏包/过期包降级、no-progress fuse、worker takeover 和 coordinator leader recovery。
+- `agent_py_agent/tests/test_subagent_takeover_run.py`: 覆盖原 run 挂死后的 takeover run 创建、旧任务 refs 继承和重复恢复不无限扩容。
 - `agent_py_agent/tests/test_subagent_takeover_readiness.py`: 覆盖接管前必读包生成、context bundle refs、落盘和不读取 artifact 正文的边界。
 - `agent_py_agent/tests/test_subagent_security_reserve.py`: 覆盖安全信号预留字段随 task 持久化，并投影到 LocalStore metadata。
 - `agent_py_agent/tests/test_subagent_test_execution_record.py`: 覆盖真实验收执行记录模型的序列化、stdout/stderr 截断和 `passed` 语义。
