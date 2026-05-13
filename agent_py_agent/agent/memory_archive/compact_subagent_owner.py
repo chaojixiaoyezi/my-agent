@@ -109,6 +109,8 @@ def _primary_run_refs(run_workspace: Path) -> dict[str, str]:
         "agent_timeline": run_workspace / "timeline.jsonl",
         "agent_findings": run_workspace / "findings.jsonl",
         "agent_compactions": run_workspace / "compactions",
+        "latest_continue_packet": run_workspace / "compactions" / "latest_continue_packet.json",
+        "session_compact_ledger": run_workspace / "compactions" / "session_compact_ledger.jsonl",
         "agent_artifacts": run_workspace / "artifacts",
         "legacy_run_ref": run_workspace / "legacy_run_ref.json",
     }
@@ -128,13 +130,15 @@ def _read_legacy_run_ref(value: str) -> dict[str, Any]:
 # 函数用途: 预留子代理自动会话压缩 hook 的路径和边界，当前只返回 refs，不写文件。
 def _reserved_hooks(request: CompactSubagentOwnerRequest, refs: dict[str, Any]) -> dict[str, Any]:
     compactions = str(refs.get("agent_compactions", "") or "")
+    continue_packet = str(refs.get("latest_continue_packet", "") or "")
     return {
-        "enabled": False,
+        "enabled": bool(continue_packet),
         "owner_type": request.owner_type,
         "owner_id": request.owner_id,
         "run_compactions_dir": compactions,
         "session_compact_ledger": f"{compactions}/session_compact_ledger.jsonl" if compactions else "",
-        "continue_packet_ref": f"{compactions}/latest_continue_packet.json" if compactions else "",
+        "continue_packet_ref": continue_packet or (f"{compactions}/latest_continue_packet.json" if compactions else ""),
+        "continue_packet_ready": bool(continue_packet),
         "writes_main_memory": False,
         "automatic_tool_execution": "none",
         "notes": [

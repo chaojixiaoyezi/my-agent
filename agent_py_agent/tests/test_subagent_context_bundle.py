@@ -49,6 +49,11 @@ def test_context_bundle_v1_captures_task_handoff_fields(tmp_path) -> None:
     assert bundle.workspace_refs["shared_messages"].endswith("shared/messages.jsonl")
     assert bundle.workspace_refs["agent_run_inbox"].endswith("inbox")
     assert bundle.workspace_refs["agent_run_outbox"].endswith("outbox")
+    assert bundle.workspace_refs["agent_run_task"].endswith("task.md")
+    assert bundle.workspace_refs["agent_run_checkpoint"].endswith("checkpoint.json")
+    assert bundle.workspace_refs["agent_run_summary"].endswith("summary.md")
+    assert bundle.workspace_refs["agent_run_findings"].endswith("findings.jsonl")
+    assert bundle.workspace_refs["agent_run_compactions"].endswith("compactions")
     assert bundle.output_contract["final_report_ref"].endswith("final_report.md")
     assert "task.goal" in bundle.source_refs["goal"]
     assert "task.acceptance_checks" in bundle.source_refs["acceptance_checks"]

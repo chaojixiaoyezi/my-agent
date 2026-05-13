@@ -15,6 +15,7 @@ from dataclasses import asdict
 from ..subagent import SubAgentExecutionContext
 from ..subagents.context_bundle import context_gate_prompt_lines
 from ..subagents.role_templates import role_template_detail_text, role_template_index_text
+from . import subagent_compact_continuation
 
 _SUBAGENT_RESULT_TEMPLATE = (
     "[SUBAGENT_RESULT]\n"
@@ -86,6 +87,10 @@ def _build_subagent_runner_prompt(
     extra = instruction.strip() or "按执行上下文完成任务；如果能力不足，说明需要上抛的 capability_request。"
     execution_contract = "\n".join(_runner_execution_contract_lines(context))
     context_gate = "\n".join(context_gate_prompt_lines(context.context_bundle))
+    compact_continuation = subagent_compact_continuation.build_subagent_compact_continuation_section(
+        subagent_compact_continuation.SubagentCompactContinuationRequest(context=context)
+    )
+    compact_block = f"{compact_continuation}\n\n" if compact_continuation else ""
     return (
         "# SubAgent Runner Task\n\n"
         "你是一个被父代理授权的子代理，只能依据下面的执行上下文工作。\n"
@@ -96,6 +101,7 @@ def _build_subagent_runner_prompt(
         f"{execution_contract}\n\n"
         "## Context Bundle Gate\n\n"
         f"{context_gate}\n\n"
+        f"{compact_block}"
         "## Execution Context JSON\n\n"
         "```json\n"
         f"{payload}\n"

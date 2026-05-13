@@ -42,6 +42,7 @@ agent_py_agent/agent/
     |-- tool_output_externalizer.py    # runtime 大工具输出 artifact 化和 index
     |-- ../../agent_core/tool_context_reducer.py # 大工具输出进入 live prompt 前的摘要化边界
     |-- ../../agent_core/compact_auto_continuation.py # 主 agent 自动 compact 后的一次受控续跑桥
+    |-- ../../agent_core/subagent_compact_continuation.py # 子代理 task-local compact 接续 prompt 片段
     |-- ../../agent_core/finalization_compact_auto.py # run 收尾 compact auto 字段投影和续跑跳过策略
     |-- snapshots/_helpers.py          # snapshot 字段裁剪、hash、工具调用 metadata 归一化 helper
     `-- query/task_sources.py          # task/run 恢复入口推荐，不把子代理内容写入主 memory
@@ -85,11 +86,13 @@ agent_py_agent/cli/
 - `memory_archive/compact_continue_packet.py`：把 handoff、work_state、action guard、推荐读取路径和子代理 owner refs 组装成 `compact_continue_packet`，给手动、半自动和自动续跑流程一个共同继续契约；它只打包已有结果，不读 artifact 正文、不执行工具。
 - `memory_archive/compact_resume_completion.py`：当 resume 发现 missing work_state 字段时，生成 `completion_prompt`，说明缺哪些字段、对应人类标签、可复制补全模板和 `memory-fact-write` / 重新 apply / auto resume 建议命令；它只提示，不写 runtime facts。
 - `memory_archive/compact_resume_handoff.py`：把 compact resume 的 work state、action guard、推荐读取路径和下一步动作整理成 `compact_resume_handoff`，并渲染可复制到新会话的上下文块。
-- `memory_archive/compact_subagent_owner.py`：为 `subagent_run` / `subagent_session` compact resume 只读解析 `tasks/*/agents/<run_id>/` 和旧 `subagents/<run_id>/`，返回 run workspace、checkpoint、summary、timeline、artifacts、compactions、legacy adapter refs 和未来 `session_compact_ledger` / `latest_continue_packet` 预留 hook；输出明确 `memory_scope=task_local`、`writes_main_memory=false`、`automatic_tool_execution=none`。
+- `memory_archive/compact_subagent_owner.py`：为 `subagent_run` / `subagent_session` compact resume 只读解析 `tasks/*/agents/<run_id>/` 和旧 `subagents/<run_id>/`，返回 run workspace、checkpoint、summary、timeline、artifacts、compactions、legacy adapter refs 和 `session_compact_ledger` / `latest_continue_packet` hook；当 `latest_continue_packet.json` 已存在时，父级 resume/status 会看到 `continue_packet_ready=true`，但仍明确 `memory_scope=task_local`、`writes_main_memory=false`、`automatic_tool_execution=none`。
 - `memory_archive/compact_action_guard.py`：在 compact resume 后生成动作守门报告；`manual` 模式要求人工确认，`auto` 模式必须通过一致性、自检、refs 和 work state 字段检查，否则阻断为 `blocked_*`；字段齐全时只返回 `allow_automated_continue` 机器信号，仍不执行工具。
 - `memory_archive/compact_suggest.py`：根据累计 token、上下文窗口和 compact dry-run plan 生成半自动提示，返回 `status`、`message`、`recommended_commands` 和 `requires_confirmation`；它只提示，不自动 apply，不切换上下文。
 - `memory_archive/compact_auto.py`：串起 compact suggestion、可选非破坏性 apply、auto resume、continue packet 和 action guard；默认 `allow_apply=false` 只返回 `needs_user_confirmation`。配置 `memory_compact_auto_allow_apply=true` 且 guard 放行时，主 agent 会把 continue packet 注入下一轮 prompt 并受控续跑一次；字段缺失、自检失败或 refs 异常时仍停车。
 - `agent_core/compact_auto_continuation.py`：主 agent 自动 compact 后的续跑桥。它把 `compact_continue_packet` 渲染成 `# Compact Auto Continuation` 注入块，要求模型只从 `Next Step` 继续、不重做已完成内容；续跑轮会跳过再次 compact，防止自动循环。
+- `agent_core/subagent_compact_continuation.py`：子代理 runner 的任务本地接续片段。它只从 `context_bundle.workspace_refs` 指向的 run workspace 读取 bounded checkpoint/summary/task/findings 和最新 continue packet 摘要，生成 `Task-Local Compact Continuation`；不读取主代理 home 关键文件、不写任何 memory、不执行工具。
+- `subagents/services/compact_continue_packet.py`：子代理保存闭环的写入层。`SubAgentManager.save()` 会通过它把当前任务状态、下一步、blockers 和恢复 refs 写成 `compactions/latest_continue_packet.json`，并追加 `session_compact_ledger.jsonl`；父级重新 dispatch 时仍只是按 refs 接续，不直接执行工具。
 - `agent_core/finalization_compact_auto.py`：从 finalization 主文件拆出的 compact auto 字段投影层；负责 run 收尾触发 auto cycle、把 continue packet 暴露到 `AgentRunResult`，以及续跑轮跳过再次 compact 的固定字段。
 - `memory_archive/tool_output_externalizer.py`：在工具循环归档时把超过阈值的大工具输出写成 `memory_archive/artifacts/tool_outputs/<tool>-<call>-<hash>.json`，并追加 `index.jsonl`；archive/tool event 只保存 preview/hash/path/size。
 - `agent_core/tool_output_failsafe.py`：在调用 tool output externalizer 前写 recovery snapshot，保留工具名、hash、大小、run/task/request id 和下一步建议；完整输出正文仍只在 artifact 文件里。

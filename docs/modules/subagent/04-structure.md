@@ -34,6 +34,7 @@
 - Rescue packet metadata now travels with action plan/apply records: dedupe, repeat count, retry limit, escalation target, manual confirmation, and recovery entrypoints are visible as refs-only audit data.
 - Parent Acceptance Auto Policy v1 dry-run 已有第一片实现：当前只生成策略审计，不执行 tests、不 apply acceptance、不自动触发 rescue。
 - Context Bundle v1 已接入执行上下文生成：`SubAgentTask` 会被压成实时工单包，写入旧 run 工单目录和 agent run workspace，runner prompt 只展示 gate 状态和 refs，不展开大型 artifact 正文。
+- Context Bundle v1 的 `workspace_refs` 现在包含 agent run workspace 的 task/checkpoint/summary/final_report/findings/timeline/compactions 和 shared refs；这些 refs 是父级状态、接管和 compact 接续的共同事实入口。
 - Context Gate v1 当前检查最小工单字段是否齐全；缺字段时要求 runner 返回 `BLOCKED` 和缺字段列表，后续可升级为调度前硬阻断。
 - Context Bundle v1 现在带 `lineage`：记录 root、parent、depth、自己的 bundle ref 和直接父级 bundle ref；多层恢复时只沿 refs 读交接包，不把父级全文塞给子孙节点。
 - `takeover_readiness.json`、`rescue_context_refs` 和 hierarchy recovery-tree 节点会暴露 context bundle refs；失败、阻塞、超时或父节点超时后，接管者可以先读当前/父级交接包，再读 checkpoint、status report、artifact manifest，仍不展开 artifact 正文、不自动执行接管。
@@ -58,7 +59,7 @@ agent_py_agent/agent/
 |   |-- compiler.py                     # 把 workflow 编译成 worker 派工规格
 |   |-- planner.py                      # dry-run 规划门面
 |   `-- acceptance.py                   # 父级验收计划
-`-- agent_core/                         # 主循环、dispatch、runner prompt 等接入点
+`-- agent_core/                         # 主循环、dispatch、runner prompt、compact continuation 等接入点
 ```
 
 ## 核心文件
@@ -191,7 +192,8 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/services/persistence_inheritance.py`：归一化并写入 `reports/inheritance_manifest.json`，让 persistence 主流程保持薄编排。
 - `agent_py_agent/agent/subagents/services/failure_handoff.py`：根据失败/阻塞状态和 `failure_type` 生成失败交接记录，给后续接管代理留下警告、避坑建议和推荐下一步。
 - `agent_py_agent/agent/subagents/services/persistence_failure_handoff.py`：归一化并写入 `reports/failure_handoff.json`，让 persistence 主流程只负责编排。
-- `agent_py_agent/agent/subagents/services/persistence_recovery_outputs.py`：集中写 checkpoint artifacts 和 takeover readiness 文件，避免 persistence 主保存流程重新靠近 code-size 风险。
+- `agent_py_agent/agent/subagents/services/persistence_recovery_outputs.py`：集中写 checkpoint artifacts、takeover readiness 和 task-local continue packet，避免 persistence 主保存流程重新靠近 code-size 风险。
+- `agent_py_agent/agent/subagents/services/compact_continue_packet.py`：子代理保存闭环的写入层；每次保存会在 run workspace `compactions/` 下写 `latest_continue_packet.json` 并追加 `session_compact_ledger.jsonl`，父级后续重新 dispatch 同一 run 时通过 runner prompt 自动读取。
 - `agent_py_agent/agent/subagents/services/takeover_readiness.py`：生成 `reports/takeover_readiness.json` 和 `TAKEOVER_READINESS.md` 接管前必读包；只整理 context bundle refs、checkpoint refs、manifest 元数据和读取顺序，不读取 artifact 正文；并提供 refs-only 的推荐读取顺序解析给 rescue/action apply 使用。
 - `agent_py_agent/agent/subagents/services/persistence_security.py`：归一化 `SecuritySignal` 预留字段，让安全信号解析不挤进 persistence 主流程；当前不执行安全策略。
 - `agent_py_agent/agent/subagents/services/persistence_identity.py`：归一化 `RuntimeIdentity` 预留字段，让员工/会话/配置 scope 解析不挤进 persistence 主流程；当前只保留审计元数据。
@@ -199,7 +201,8 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/services/task_workspace_adapter.py`：把 runtime memory task workspace 路径同步回 `SubAgentTask`，避免 persistence 保存函数继续膨胀。
 - `agent_py_agent/agent/memory_archive/task_workspace.py`：subagent 保存路径调用的 runtime memory adapter；创建 `tasks/<root_id>/` task workspace skeleton 和 `agents/<run_id>/legacy_run_ref.json`，但不移动旧工单目录。
 - `agent_py_agent/agent/memory_archive/agent_run_workspace.py`：创建 `tasks/<root_id>/agents/<run_id>/` 下的 agent run workspace skeleton；旧工单目录仍是兼容读写面，run workspace 先承接恢复、接管、finding 和 compact 链的后续入口。
-- `agent_py_agent/agent/memory_archive/compact_subagent_owner.py`：给 `memory-resume --from-compact` 提供子代理 owner 只读引用解析；`subagent_run` / `subagent_session` 会指向 task-local run workspace、legacy adapter refs 和未来 session compact hook 路径，但不写主 memory、不改 runner。
+- `agent_py_agent/agent/memory_archive/compact_subagent_owner.py`：给 `memory-resume --from-compact` 提供子代理 owner 只读引用解析；`subagent_run` / `subagent_session` 会指向 task-local run workspace、legacy adapter refs 和 session compact hook 路径；当 `latest_continue_packet.json` 已存在时，父级能看到 `continue_packet_ready=true`，但不写主 memory、不自动执行工具。
+- `agent_py_agent/agent/agent_core/subagent_compact_continuation.py`：给 runner prompt 生成 `Task-Local Compact Continuation` 小节；只从当前子代理 run workspace 读取 bounded checkpoint/summary/task/findings/latest continue packet 摘要，不读取主代理长期记忆，不自动执行工具。
 - `agent_py_agent/agent/memory_archive/daily_ledger.py`：追加 `daily/YYYY-MM-DD/events.jsonl`，只写 task/run 状态摘要、duration、artifact/evidence refs 和 workspace 路径引用。
 - `agent_py_agent/agent/memory_archive/artifact_registry.py`：把 `artifact_refs` 写成 task/run `artifacts/manifest.jsonl`，记录摘要、hash、路径、size、exists 和 `resolution_status`；只读取 legacy task dir、task workspace、agent run workspace 和该 run 的 `allowed_write_roots` 内的文件，越界路径只登记 blocked，不复制正文。
 - `agent_py_agent/agent/memory_archive/artifact_reader.py`：显式读取 tool-output artifact 时仍以 `tool_outputs/index.jsonl` 为唯一事实源；如果模型把路径前缀抄错，但 artifact 文件名在 index 中唯一，会修复到登记记录，再做目录边界和 sha256 校验。

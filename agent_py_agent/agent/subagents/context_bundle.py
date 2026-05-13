@@ -185,14 +185,31 @@ def _workspace_refs(task: SubAgentTask) -> dict[str, str]:
         "task_dir": _safe_string_ref(task, "task_dir"),
         "task_workspace": _safe_string_ref(task, "task_workspace_dir"),
         "agent_run_workspace": _safe_string_ref(task, "agent_run_workspace_dir"),
+        "agent_run_task": _safe_string_ref(task, "agent_run_task_md"),
+        "agent_run_checkpoint": _safe_string_ref(task, "agent_run_checkpoint_json"),
+        "agent_run_summary": _safe_string_ref(task, "agent_run_summary_md"),
+        "agent_run_final_report": _safe_string_ref(task, "agent_run_final_report_md"),
+        "agent_run_findings": _safe_string_ref(task, "agent_run_findings_jsonl"),
+        "agent_run_timeline": _safe_string_ref(task, "agent_run_timeline_jsonl"),
+        "agent_run_compactions": _safe_string_ref(task, "agent_run_compactions_dir"),
+        "agent_run_latest_continue_packet": _latest_continue_packet_ref(task),
         "shared_blackboard": _safe_string_ref(task, "task_workspace_shared_blackboard"),
         "shared_messages": _safe_string_ref(task, "task_workspace_shared_messages_jsonl"),
+        "shared_findings": _safe_string_ref(task, "task_workspace_shared_findings_jsonl"),
+        "shared_evidence_index": _safe_string_ref(task, "task_workspace_shared_evidence_index_jsonl"),
         "agent_run_inbox": _safe_string_ref(task, "agent_run_inbox_dir"),
         "agent_run_outbox": _safe_string_ref(task, "agent_run_outbox_dir"),
         "artifacts_dir": _safe_string_ref(task, "agent_run_artifacts_dir") or _safe_string_ref(task, "output_dir"),
         "execution_context_json": _safe_string_ref(task, "execution_context_json"),
         "execution_context_file": _safe_string_ref(task, "execution_context_file"),
     }
+
+
+# LLM: _latest_continue_packet_ref reserves a stable task-local subagent resume packet path.
+# 函数用途: 从 agent_run_compactions_dir 派生 latest_continue_packet.json，供 runner prompt 按存在性读取。
+def _latest_continue_packet_ref(task: SubAgentTask) -> str:
+    compactions = _safe_string_ref(task, "agent_run_compactions_dir")
+    return str(Path(compactions) / "latest_continue_packet.json") if compactions else ""
 
 
 # LLM: _output_contract tells the runner where durable reports and machine output must land.

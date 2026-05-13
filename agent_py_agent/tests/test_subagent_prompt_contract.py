@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
 from agent_py_agent.agent.subagents.models import SubAgentExecutionContext
 
@@ -187,3 +190,72 @@ def test_runner_prompt_loads_current_role_template_for_worker():
     assert "当前角色模板详情" in prompt
     assert "你是执行子代理" in prompt
     assert "你是找茬子代理" not in prompt
+
+
+# LLM: compacted subagents must resume from their task-local run workspace, not parent long-term memory.
+# 函数用途: 验证子代理 runner prompt 会引用本地 checkpoint、summary 和 latest continue packet，避免压缩后丢失任务状态。
+def test_runner_prompt_includes_task_local_compact_continuation_refs(tmp_path: Path):
+    context = _compact_continuation_context(tmp_path)
+
+    prompt = _build_subagent_runner_prompt(context)
+
+    assert "Task-Local Compact Continuation" in prompt
+    assert "memory_scope: task_local" in prompt
+    assert "writes_main_memory: false" in prompt
+    assert "latest_continue_packet.json" in prompt
+    assert "continue checkout tests" in prompt
+    assert "继续补齐 checkout tests" in prompt
+    assert "已完成商品列表" in prompt
+    assert "SOUL.md" not in prompt
+    assert "USER.md" not in prompt
+
+
+# LLM: _compact_continuation_context builds realistic task-local refs without bloating the assertion test.
+# 函数用途: 准备带 compact packet、checkpoint 和 summary 的子代理执行上下文，复用标准 workspace_refs 形状。
+def _compact_continuation_context(tmp_path: Path) -> SubAgentExecutionContext:
+    run_workspace = tmp_path / "tasks" / "root-1" / "agents" / "leaf-compact"
+    compactions = run_workspace / "compactions"
+    compactions.mkdir(parents=True)
+    (run_workspace / "task.md").write_text("实现购物车结算按钮\n", encoding="utf-8")
+    (run_workspace / "checkpoint.json").write_text(
+        json.dumps({"current_step": "继续补齐 checkout tests", "next_action": "write tests"}),
+        encoding="utf-8",
+    )
+    (run_workspace / "summary.md").write_text("已完成商品列表，剩余购物车验收。\n", encoding="utf-8")
+    (run_workspace / "final_report.md").write_text("还没有最终验收。\n", encoding="utf-8")
+    (run_workspace / "findings.jsonl").write_text('{"claim":"cart missing tests"}\n', encoding="utf-8")
+    (run_workspace / "timeline.jsonl").write_text('{"event":"checkpoint_written"}\n', encoding="utf-8")
+    (compactions / "latest_continue_packet.json").write_text(
+        json.dumps(
+            {
+                "ready_to_continue": True,
+                "continue_mode": "subagent_task_local",
+                "next_action": "continue checkout tests",
+                "recommended_read_paths": [str(run_workspace / "checkpoint.json")],
+            }
+        ),
+        encoding="utf-8",
+    )
+    context = SubAgentExecutionContext(
+        run_id="leaf-compact",
+        generated_at=1.0,
+        goal="继续购物网站子任务",
+        thought="",
+        plan=["从 checkpoint 接续"],
+        role="leaf_worker",
+        task_dir=str(tmp_path / "subagents" / "leaf-compact"),
+        context_bundle={
+            "gate": {"ok": True, "missing_fields": []},
+            "workspace_refs": {
+                "agent_run_workspace": str(run_workspace),
+                "agent_run_compactions": str(compactions),
+                "agent_run_task": str(run_workspace / "task.md"),
+                "agent_run_checkpoint": str(run_workspace / "checkpoint.json"),
+                "agent_run_summary": str(run_workspace / "summary.md"),
+                "agent_run_final_report": str(run_workspace / "final_report.md"),
+                "agent_run_findings": str(run_workspace / "findings.jsonl"),
+                "agent_run_timeline": str(run_workspace / "timeline.jsonl"),
+            },
+        },
+    )
+    return context
