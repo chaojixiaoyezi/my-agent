@@ -37,6 +37,7 @@
 - `tooling/registry_execution.py` 会把旧 `[TOOL_CALL]` 解析成 `ToolCallEnvelope` 后执行，并把 `call_id/result_envelope` 挂回 `ToolExecutionResult`；envelope 去重/结果关联在 `registry_envelopes.py`，最终工具执行在 `registry_invoke.py`，旧标记扫描在 `registry_markers.py`，避免一个 registry 文件重新变厚。
 - `subagents/parsing.py` 保留旧 parser 和旧导入入口；`subagents/parsing_envelope.py` 负责把旧 `[SUBAGENT_RESULT]` 转为 `SubagentResultEnvelope`。真实工具列表由执行层传入，模型 `used_tools` 和 summary 不作为权威工具事实。
 - `create_subagents` 与 runner 内 `schedule_child_subagents` 会在 JSON 响应里附带 `typed_envelope.kind=subagent_schedule`，多层派工通过 parent/root/created refs 串联；这只是 refs-first 调度事实，不代表 child 已完成。
+- `dispatch_subagents` 现在也会附带 `typed_envelope.kind=subagent_dispatch`，把 `actionable_run_ids`、`recovery_run_ids`、dispatch 报告 refs 和状态摘要作为稳定控制字段；父级推进和恢复优先读这些字段，不从自然语言 `message` 里猜 run id。
 - `acceptance_helpers/evidence_acceptance_findings.py` 与 service 版 evidence findings 已去掉 summary 关键词推断；read/write_file 验收只看系统工具事实和证据字段，避免自然语言自证。
 - Context Bundle v1 已接入执行上下文生成：`SubAgentTask` 会被压成实时工单包，写入旧 run 工单目录和 agent run workspace，runner prompt 只展示 gate 状态和 refs，不展开大型 artifact 正文。
 - Context Bundle v1 的 `workspace_refs` 现在包含 agent run workspace 的 task/checkpoint/summary/final_report/findings/timeline/compactions 和 shared refs；这些 refs 是父级状态、接管和 compact 接续的共同事实入口。

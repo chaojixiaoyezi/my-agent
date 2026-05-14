@@ -69,3 +69,10 @@
 - 角色模板/契约改成职责叠加，所有角色都有基础读写、汇报和能力申请工具；root 执行上下文会隐藏能力申请工具。
 - `context_bundle` 增加 `task_packet`，runner prompt 明确优先按结构化任务包执行。
 - 标准 JSON 工具调用增加别名归一，减少模型把工具名或路径字段写错造成的硬失败。
+
+## Step 9 Dispatch Envelope
+
+- 中文说明：`create_subagents` 和 `schedule_child_subagents` 已经有 `typed_envelope`；本轮把 `dispatch_subagents` 也补成 `subagent_dispatch` typed envelope。
+- envelope 只放稳定控制字段：`dry_run`、`summary`、`actionable_run_ids`、`recovery_run_ids`、`dispatch_json`、`dispatch_md`、`record_count` 和 scope。父级要继续推进或恢复时读这些字段，不从自然语言 `message` 里猜 run id。
+- 旧报告里 `summary` 可能是字符串；新桥接会把它包成 `{"text": "..."}`，保持兼容。
+- 这一步的目的不是增加流程，而是减少“模型把摘要当工具/把路径说错/把 run id 读漏”的机会。结构化字段是事实来源，自然语言只负责让人看懂。

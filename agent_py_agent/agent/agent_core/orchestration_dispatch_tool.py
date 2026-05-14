@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..action_protocol import subagent_dispatch_envelope_from_payload
 from ..capabilities import CapabilityRouter
 from ..capability.runtime_config import (
     default_capability_config_path,
@@ -133,6 +134,7 @@ class DispatchSubagentsTool(BaseTool):
         if terminal := dispatch_no_progress_payload(report):
             payload["dispatch_terminal"] = terminal
         payload.update(direct_children_progress_payload(self.agent))
+        payload["typed_envelope"] = subagent_dispatch_envelope_from_payload(payload).to_dict()
         return payload
 
 
