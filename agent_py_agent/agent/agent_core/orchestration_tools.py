@@ -21,6 +21,7 @@ from .coordinator_seed_tools import explicit_root_allowed_tools
 from .hierarchy_tools import ScheduleChildSubagentsTool
 from .orchestration_board_payload import (
     board_actionable_run_ids,
+    board_completion_status,
     board_status_filter,
     clip_board_text,
 )
@@ -611,6 +612,7 @@ class SubagentBoardTool(BaseTool):
         items = items[:limit]
         payload = {
             "summary": board.summary,
+            "completion_status": board_completion_status(items),
             "returned": len(items),
             "actionable_run_ids": board_actionable_run_ids(items),
             "subagent_workspace": str(self.agent.subagents.workspace),
@@ -634,6 +636,7 @@ class SubagentBoardTool(BaseTool):
                     "open_gap_count": item.open_gap_count,
                     "latest_summary": clip_board_text(str(getattr(item, "latest_summary", "") or ""), limit=180),
                     "blocker_count": int(getattr(item, "blocker_count", 0) or 0),
+                    "target_tokens": list(getattr(item, "target_tokens", []) or []),
                     "task_dir": item.task_dir,
                     "output_json": str(getattr(item, "output_json", "") or ""),
                 }

@@ -96,7 +96,7 @@ class DispatchSubagentsTool(BaseTool):
             execute_runners=execute_runners,
             planner=_bool_param(params.get("planner"), default=False),
             workflow_mode=dispatch_workflow_mode(self.agent, params, tool_workflow_mode),
-            max_runners=dispatch_max_runners_default(self.agent, params),
+            max_runners=dispatch_max_runners_default(self.agent, params, execute_runners=execute_runners),
             limit=_non_negative_int(params.get("limit"), default=20),
             reviewer=str(params.get("reviewer") or "chat-tool").strip(),
             note=str(params.get("note") or "triggered by dispatch_subagents tool").strip(),

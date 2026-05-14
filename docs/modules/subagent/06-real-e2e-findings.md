@@ -6457,3 +6457,200 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Verification:
   - Config files were updated; focused tests for capability loading and subagent dispatch remain part of the next validation batch.
 - Status: fixed in default config surface; deeper removal from dataclasses is deferred until compatibility migration is safe.
+
+### Finding 80: runner auto concurrency must actually run multiple workers
+
+- Discovered at: 2026-05-15 during 3-worker furniture E2E group 3.
+- Symptom:
+  - Root correctly created three workers for `index1.html`、`index2.html`、`index3.html` and called `dispatch_subagents` with `max_runners=3`.
+  - Runtime still entered `_run_sequential_batch`; `index2` waited until `index1` blocked, and `index3` stayed in `PLANNING`.
+- 中文解释：
+  - 大白话：主代理已经安排了三个小傻妞同时干活，但底层把“自动并发”翻译成“一个一个排队”。这不是小傻妞不会干活，是调度器踩了刹车。
+- Root cause:
+  - `runner_concurrency: "auto"` was historically resolved to `1`.
+  - That conservative default was useful when runner behavior was immature, but it contradicts the current product goal: subagents should be capable workers and normal fan-out should not silently serialize.
+- Fix:
+  - `auto` now resolves to a bounded internal policy: `min(job_count, 8)`.
+  - Invalid or empty concurrency values also fall back to the same bounded auto policy.
+  - This stays internal and does not add another user-facing knob.
+- Verification:
+  - Focused regression: `test_resolve_runner_concurrency_auto_uses_bounded_parallelism`.
+  - Existing worker-pool tests remain in the focused validation batch.
+- Status: fixed by focused tests; clean group rerun pending.
+
+### Finding 81: valid long write content should not bounce back to the model
+
+- Discovered at: 2026-05-15 during 3-worker furniture E2E group 3.
+- Symptom:
+  - A worker produced a valid `write_file` call with about 37K characters of single-file HTML.
+  - The tool rejected it because `tool_write_inline_max_chars` was treated as a hard limit, so the model retried large writes and chunking until it hit tool-round pressure and path typos.
+- 中文解释：
+  - 大白话：模型已经把完整文件递到工具手里了，我们工具却说“太长，不收”。结果模型只能把已经写好的东西重新拆、重新说、重新猜路径，越绕越容易出错。
+- Root cause:
+  - The configured write size was designed as a transport recommendation, but implementation enforced it as a product write boundary.
+  - Once JSON/tool parsing already succeeded, rejecting the content wastes model context and makes recovery worse.
+- Fix:
+  - `tool_write_inline_max_chars` is now a recommended inline size, not a hard write limit.
+  - `write_file` and `append_file` preserve and write already-parsed valid content, while returning a warning that future very large writes should use chunking/artifacts.
+  - Recovery-mode wording was updated so older “过长” failures and new “超过推荐值” warnings are both understood.
+- Verification:
+  - Focused regressions in `test_tooling_filesystem_write.py` now prove long write/append calls succeed and surface a recommendation warning.
+  - Focused recovery test in `test_tool_output_externalizer.py` covers the new wording.
+- Status: fixed by focused tests; clean group rerun pending.
+
+### Finding 82: static-site repair facts must be precise and not over-strict
+
+- Discovered at: 2026-05-15 during 3-worker furniture E2E group 3b.
+- Symptom:
+  - The first group 3b run improved: three workers started and all three HTML files were written.
+  - Parent acceptance then reported `missing_dom_id_hits` and root created repair workers.
+  - A repair worker spent many rounds searching for `view-btn` and reading full HTML/artifacts instead of making a focused edit; prompt size grew past 100K chars, so the run was interrupted.
+- 中文解释：
+  - 大白话：验收只告诉修复小傻妞“缺几个 id”，但没有告诉它“这是安全可选代码，还是页面骨架真的坏了”。于是它像在黑屋里找开关，越找越乱。
+- Root cause:
+  - Static-site validation flagged every missing `getElementById(...)` target, including safe optional hooks such as `const v = getElementById('view-btn'); v && ...`.
+  - At the same time, the validator did not catch a more serious issue: a generated `index1.html` had HTML body content inside an unclosed `<style>` block and lacked a complete `head/body` skeleton.
+  - Dispatch failure details had concrete counts but not enough repair direction.
+- Fix:
+  - Optional guarded DOM lookups are no longer treated as hard failures.
+  - Inferred static-site checks now set `require_complete_html=true`.
+  - The validator records `html_structure_hits` for missing `</head>`、`<body>`、unbalanced `style/script` 等结构问题。
+  - Validation results now include bounded `repair_hints`, and dispatch payloads expose those hints to parent repair planning.
+- Verification:
+  - Focused regression: `test_static_site_check_allows_optional_missing_dom_binding`.
+  - Focused regression: `test_static_site_check_blocks_malformed_complete_html`.
+  - Focused regression: `test_static_site_failure_details_include_structure_and_repair_hints`.
+  - Focused static-site/test-item/dispatch failure tests passed.
+- Status: fixed by focused tests; clean group rerun pending.
+
+### Finding 83: negative content checks must not invert “no bad ref” assertions
+
+- Discovered at: 2026-05-15 during 3-worker furniture E2E group 3c.
+- Symptom:
+  - The chain repaired all three pages far enough that the final static-site check for all pages passed.
+  - One older second-round repair run stayed `AWAITING_ACCEPTANCE` because its acceptance check was “验证无 index4.html 引用”.
+  - That natural negative check was executed as a normal `contains index4.html` content check, so removing the bad ref caused the check to fail.
+- 中文解释：
+  - 大白话：任务要求“不要有 index4.html”，小傻妞把它删掉了，系统却按“必须有 index4.html”验收。等于是把反话听成正话。
+- Root cause:
+  - `content_check` only supported positive contains/exact checks.
+  - Test preparation and model-produced tests had no stable way to express `not_contains`, and the executor did not infer obvious negative wording.
+- Fix:
+  - `content_check` now supports `match_mode=not_contains` plus `expect_absent/negate/should_not_contain`.
+  - For natural names like “无 xxx 引用 / 不包含 xxx / must not contain xxx”, executor infers absent semantics when the pattern appears in the test name.
+  - The validation result records `expect_absent=true` and `match_mode=not_contains` for auditability.
+- Verification:
+  - Focused regression: `test_test_executor_content_check_supports_natural_negative_contains`.
+  - Focused executor/static-site/dispatch tests passed.
+- Status: fixed by focused tests; clean group rerun pending.
+
+### Finding 84: verified takeover sources must not block final closeout
+
+- Discovered at: 2026-05-15 during 3-worker furniture E2E group 3d.
+- Symptom:
+  - Three HTML files were produced and the verified replacement runs for `index1.html` and `index2.html` were DONE/VERIFIED.
+  - Final answer was still corrected to “链路尚未完整通过” because the original timed-out runs stayed `TAKEN_OVER/UNVERIFIED` and were counted as blockers.
+- 中文解释：
+  - 大白话：旧小傻妞中途掉线后，新小傻妞已经接上并验收通过了；系统还盯着旧小傻妞说“它没完成”，所以整队被误判没完成。
+- Root cause:
+  - Closeout only accepted strict `DONE/VERIFIED` rows and did not treat `TAKEN_OVER -> verified replacement` as resolved.
+- Fix:
+  - Dispatch closeout now treats a `TAKEN_OVER` task as resolved only when its exact `takeover_by` replacement exists in the current task snapshot and is `DONE/VERIFIED`.
+  - Lookup is exact in-memory by run id; it does not glob user-provided ids.
+- Verification:
+  - Focused regression: `test_dispatch_closeout_treats_verified_takeover_source_as_resolved`.
+- Status: fixed by focused tests; clean group rerun pending.
+
+### Finding 85: model-written absent-pattern evidence needs stable semantics
+
+- Discovered at: 2026-05-15 during 3-worker furniture E2E group 3d.
+- Symptom:
+  - Repair worker correctly removed empty `href="#"` links, then wrote evidence like “页脚链接无空 href=\"#\"” with `content_pattern="<a href=\"#\">"`.
+  - It set `ok=false` because the forbidden pattern was absent; parent acceptance interpreted that as failed evidence.
+- 中文解释：
+  - 大白话：小傻妞的意思是“我搜坏东西，没搜到，所以安全”，系统却只看 `false`，以为它说“我失败了”。
+- Root cause:
+  - Model-produced evidence mixed two meanings of `ok`: raw pattern matched vs requirement passed.
+  - The schema did not normalize obvious negative content checks before parent acceptance.
+- Fix:
+  - Structured result processing now normalizes `kind=content_check` evidence with a `content_pattern` and negative summary wording such as “无/没有/不包含/not contain/absent/no” so `ok=false` means the absent-pattern requirement passed.
+  - Ordinary failures without a negative summary still remain failures.
+- Verification:
+  - Focused regression: `test_process_structured_output_normalizes_absent_pattern_evidence`.
+- Status: fixed by focused tests; clean group rerun pending.
+
+### Finding 86: model-facing dispatch should tolerate `limit` as runner count during execution
+
+- Discovered at: 2026-05-15 during 3-worker furniture E2E group 3d.
+- Symptom:
+  - Root created three workers but called `dispatch_subagents` with `limit=10` instead of `max_runners`.
+  - The dispatch record limit was high, but runner execution still defaulted to one worker per batch.
+- 中文解释：
+  - 大白话：主代理想表达“多跑几个”，但用了常见词 `limit`；系统非要它说专业字段 `max_runners`，于是又退回一个一个跑。
+- Root cause:
+  - Model-facing dispatch had two similar-looking fields: `limit` for report/candidate count and `max_runners` for actual runner count.
+  - The model naturally chose the more common `limit` name.
+- Fix:
+  - When `dispatch_subagents` is actually executing runners and `max_runners` is absent, `runner_limit` or `limit` is accepted as the runner count.
+  - Dry-run/report-only usage keeps the old `limit` behavior.
+- Verification:
+  - Focused regression: `test_execute_limit_aliases_runner_count_when_max_runners_missing`.
+- Status: fixed by focused tests; clean group rerun pending.
+
+### Finding 87: absent-reference checks must not create fake required files
+
+- Discovered at: 2026-05-15 during 3-worker furniture E2E group 3e.
+- Symptom:
+  - A repair loop started looking for `index4.html` even though the user/task requirement was “无任何 index4.html 引用”.
+  - The parent file contract had turned an absence check into a required file, so a nonexistent bad reference became something the system tried to satisfy.
+- 中文解释：
+  - 大白话：用户说“不要有 index4.html”，系统却记成了“必须有 index4.html”。这会把修复小傻妞带到完全反方向。
+- Root cause:
+  - Required-file extraction did not distinguish “无/没有/不存在 xxx 引用” from positive deliverable lists.
+- Fix:
+  - Required/forbidden file term extraction now treats natural absence-reference wording as `forbidden_files` only.
+  - This keeps “bad reference should be absent” separate from “deliverable file must exist”.
+- Verification:
+  - Focused regression: `test_file_contract_treats_absent_reference_checks_as_forbidden_terms`.
+- Status: fixed by focused tests; clean group rerun pending.
+
+### Finding 88: board completion status must be explicit and coverage-aware
+
+- Discovered at: 2026-05-15 during 3-worker furniture E2E groups 3f/3g.
+- Symptom:
+  - In one run, `subagent_board` had `AWAITING_ACCEPTANCE/NEEDS_ACCEPTANCE` rows but the top-level board payload did not make “do not report done” obvious, so root almost summarized as complete too early.
+  - After later repairs, the opposite happened: old failed rows remained visible as blockers even though verified repair runs had already covered the same concrete HTML files.
+- 中文解释：
+  - 大白话：看板有时没把“还不能交差”写在最上面；修好以后又没把“旧失败已经被新修复覆盖”说清楚。父级就容易一会儿早报喜，一会儿又重复修。
+- Root cause:
+  - Board rows exposed raw status, but did not provide a single `completion_status` contract aligned with final closeout.
+  - Board completion did not compare stale failed run target files against later `DONE/VERIFIED` target files.
+- Fix:
+  - `subagent_board` now exposes `completion_status.status`、`blocking_run_ids`、`must_not_report_done` and a suggested `dispatch_subagents` call when work is not complete.
+  - Board rows now include bounded `target_tokens`.
+  - Board completion treats a stale failed/awaiting row as covered when its concrete target files are a subset of later verified target files.
+- Verification:
+  - Focused regression: `test_board_payload_marks_awaiting_acceptance_as_not_complete`.
+  - Focused regression: `test_board_payload_treats_verified_target_coverage_as_complete`.
+- Status: fixed by focused tests; clean group rerun pending.
+
+### Finding 89: local `/Users/...` paths must not be cut by English `use`
+
+- Discovered at: 2026-05-15 while validating group 3g closeout.
+- Symptom:
+  - A verified worker had `artifact_path=/Users/.../deliverables/index3.html` in `[SUBAGENT_RESULT]`, but target extraction returned the wrong sibling file target.
+  - This kept a broad repair run from being recognized as covered by three verified page workers.
+- 中文解释：
+  - 大白话：系统看到 `/Users/...`，把里面的 `Use` 当成英文“使用/引用”的提示词，直接把路径前半截切掉了。于是明明写的是 `index3.html`，账本却没认出来。
+- Root cause:
+  - The reference-hint regex matched English `use` inside larger words like `Users`.
+  - Final closeout and board completion also had duplicated target extraction semantics.
+- Fix:
+  - English reference hints now require word boundaries, so `/Users/...` is treated as a path.
+  - Concrete target extraction is shared through `task_actual_target_tokens()`, preferring structured `output.json` / `[SUBAGENT_RESULT]` refs before natural-language goals.
+  - Final closeout and board completion now use the same target coverage semantics.
+- Verification:
+  - Focused regression: `test_dispatch_closeout_reads_users_path_from_result_json`.
+  - Focused regression: `test_dispatch_closeout_treats_multi_file_repair_as_resolved_by_verified_outputs`.
+  - Manual replay against `subagent_hardening_e2e_20260515_group03g` now reports `blocking_run_ids: (none)` and board `completion_status=complete_or_no_blockers`.
+- Status: fixed by focused tests; clean group rerun pending.

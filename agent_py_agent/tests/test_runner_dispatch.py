@@ -133,12 +133,13 @@ class TestRunnerCandidateCapabilityGrant:
 class TestResolveRunnerConcurrency:
     """测试 _resolve_runner_concurrency() 函数。"""
 
-    def test_auto_returns_1(self):
-        """auto 策略返回 1，避免默认并发消耗 API。"""
+    def test_auto_uses_bounded_job_count(self):
+        """auto 策略按任务数并发，但受内部安全上限约束。"""
         from agent_py_agent.agent.agent_core.runner_dispatch import _resolve_runner_concurrency
 
-        assert _resolve_runner_concurrency("auto", 5) == 1
-        assert _resolve_runner_concurrency("", 5) == 1
+        assert _resolve_runner_concurrency("auto", 5) == 5
+        assert _resolve_runner_concurrency("", 5) == 5
+        assert _resolve_runner_concurrency("auto", 20) == 8
 
     def test_zero_job_count_returns_0(self):
         """job_count 为 0 时返回 0。"""

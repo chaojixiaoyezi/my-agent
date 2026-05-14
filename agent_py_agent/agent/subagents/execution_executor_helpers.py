@@ -84,25 +84,33 @@ def _content_match_record(
     pattern: str,
     *,
     exact: bool = False,
+    expect_absent: bool = False,
 ) -> TestExecutionRecord:
     """Return a content_check validation record."""
 
+    # LLM: expect_absent turns natural "no bad pattern" checks into a deterministic not_contains result.
+    # 函数用途: 支持正向包含、全文相等和负向不存在三种内容验收，避免“无 xxx”被反向判定。
     text = path.read_text(encoding="utf-8", errors="replace")
     matched = text == pattern if exact else pattern in text
+    ok = not matched if expect_absent else matched
+    mode = "exact" if exact else "contains"
+    if expect_absent:
+        mode = "not_contains"
     return TestExecutionRecord(
         test_name=_test_name(test),
         executed=True,
-        exit_code=0 if matched else 1,
+        exit_code=0 if ok else 1,
         executed_at=_utc_now_iso(),
         validation_method="content_check",
         validation_result={
-            "ok": matched,
+            "ok": ok,
             "matched": matched,
             "path": str(path),
             "pattern": pattern,
-            "match_mode": "exact" if exact else "contains",
+            "match_mode": mode,
+            "expect_absent": expect_absent,
         },
-        error="" if matched else ("内容不相等" if exact else "内容未匹配"),
+        error="" if ok else ("内容不应出现" if expect_absent else ("内容不相等" if exact else "内容未匹配")),
     )
 
 

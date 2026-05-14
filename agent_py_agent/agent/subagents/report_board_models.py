@@ -38,6 +38,8 @@ class SubAgentBoardItem:
     output_json: str
     agent_name: str = ""
     role: str = ""
+    # LLM: target_tokens expose concrete artifact ownership without reading artifact bodies.
+    target_tokens: list[str] = field(default_factory=list)
     # LLM: board rows expose task-tree evidence and child state without reading logs.
     evidence_packet_count: int = 0
     finding_count: int = 0

@@ -38,7 +38,10 @@ def test_static_site_failure_details_reach_dispatch_record(tmp_path):
     record = next(item for item in report.records if item.step == "acceptance" and item.run_id == task.id)
     assert record.action == "reject"
     assert "inert_control_hits=1" in record.parent_acceptance_test_failure_summary
-    assert record.parent_acceptance_test_failure_details == ["inert_control_hits: index.html:a:Shop"]
+    assert record.parent_acceptance_test_failure_details == [
+        "inert_control_hits: index.html:a:Shop href=#",
+        "repair_hints: inert_controls: add real href targets, onclick handlers, or matching anchor sections for listed controls",
+    ]
 
 
 # LLM: _acceptance_task creates the minimum awaiting-acceptance task with evidence.

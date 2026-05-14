@@ -52,7 +52,7 @@ def _needs_long_content_recovery(request: LongContentRecoveryRequest) -> bool:
     if request.result_tool == "__parse_error__":
         return _parse_error_mentions_long_write(request.payload, output)
     if request.result_tool in {"write_file", "append_file"}:
-        return "inline content 过长" in output or "分块追加" in output
+        return "inline content 过长" in output or "inline content 超过推荐值" in output or "分块追加" in output
     return False
 
 

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.subagent_attempt_guard import stale_subagent_attempt_result
@@ -78,3 +79,119 @@ def test_dispatch_limit_response_uses_persisted_task_state(tmp_path):
     assert "TIMEOUT/UNVERIFIED" in response.text
     assert "BLOCKED/FAILED" in response.text
     assert "不要把本轮说成完成" in response.text
+
+
+# LLM: test_dispatch_closeout_treats_verified_takeover_source_as_resolved covers timeout recovery closeout.
+# 函数用途: 旧 run 被 takeover 后，只要接管 run 已 DONE/VERIFIED，最终收口不应再把旧 run 当 blocker。
+def test_dispatch_closeout_treats_verified_takeover_source_as_resolved(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    source = manager.create_run(goal="write page", thought="old worker", plan=["write"])
+    replacement = manager.create_run(goal="take over write page", thought="replacement", plan=["write"])
+    source.status = "TAKEN_OVER"
+    source.verification_status = "UNVERIFIED"
+    source.takeover_by = replacement.id
+    replacement.status = "DONE"
+    replacement.verification_status = "VERIFIED"
+    manager.save(source)
+    manager.save(replacement)
+    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id="")
+
+    response = subagent_dispatch_limit_response(agent, backend="test")
+
+    assert response is not None
+    assert "未发现阻塞状态" in response.text
+    assert "blocking_run_ids: (none)" in response.text
+    assert "done_verified: 2" in response.text
+
+
+# LLM: Verified repair runs should cover stale failed runs for the same concrete artifact.
+# 函数用途: 修复小傻妞验收通过后，旧的失败 worker 不应继续让最终收口显示“链路未完成”。
+def test_dispatch_closeout_treats_verified_repair_target_as_resolved(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    source = manager.create_run(goal="create index1.html", thought="old worker", plan=["write"])
+    repair = manager.create_run(goal="repair index1.html", thought="repair worker", plan=["fix"])
+    _write_output_json(source.output_json, {"artifacts": [{"path": "deliverables/index1.html"}]})
+    _write_output_json(repair.output_json, {"artifacts": [{"path": "deliverables/index1.html"}]})
+    source.status = "BLOCKED"
+    source.verification_status = "UNVERIFIED"
+    repair.status = "DONE"
+    repair.verification_status = "VERIFIED"
+    manager.save(source)
+    manager.save(repair)
+    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id="")
+
+    response = subagent_dispatch_limit_response(agent, backend="test")
+
+    assert response is not None
+    assert "未发现阻塞状态" in response.text
+    assert "blocking_run_ids: (none)" in response.text
+    assert "done_verified: 2" in response.text
+
+
+# LLM: Broad repair output files_modified refs should resolve stale originals once all touched files are verified.
+# 函数用途: 一个修复代理改了多个页面后，即使自身仍停在待验收，若页面已有 VERIFIED 覆盖，也不能拖住最终账本。
+def test_dispatch_closeout_treats_multi_file_repair_as_resolved_by_verified_outputs(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    repair = manager.create_run(
+        goal='修复 href="index.html" 改为 index1.html，并修复 index2.html',
+        thought="repair",
+        plan=["fix"],
+    )
+    page1 = manager.create_run(goal="verify index1.html", thought="done", plan=["verify"])
+    page2 = manager.create_run(goal="verify index2.html", thought="done", plan=["verify"])
+    repair.result = _subagent_result_json({
+        "status": "AWAITING_ACCEPTANCE",
+        "files_modified": [
+            {"file": "/Users/example/project/deliverables/index1.html"},
+            {"file": "/Users/example/project/deliverables/index2.html"},
+        ],
+    })
+    _write_output_json(page1.output_json, {"artifacts": [{"path": "deliverables/index1.html"}]})
+    _write_output_json(page2.output_json, {"artifacts": [{"path": "deliverables/index2.html"}]})
+    repair.status = "AWAITING_ACCEPTANCE"
+    repair.verification_status = "NEEDS_ACCEPTANCE"
+    page1.status = page2.status = "DONE"
+    page1.verification_status = page2.verification_status = "VERIFIED"
+    manager.save(repair)
+    manager.save(page1)
+    manager.save(page2)
+    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id="")
+
+    response = subagent_dispatch_limit_response(agent, backend="test")
+
+    assert response is not None
+    assert "blocking_run_ids: (none)" in response.text
+    assert "done_verified: 3" in response.text
+
+
+# LLM: Closeout target parsing must not mistake /Users paths for the English word "use".
+# 函数用途: runner 只在 SUBAGENT_RESULT 写 artifact_path 时，也能从 /Users/.../index3.html 提取真实产物名。
+def test_dispatch_closeout_reads_users_path_from_result_json(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    stale = manager.create_run(goal="repair all pages", thought="old repair", plan=["fix"])
+    verified = manager.create_run(goal="verify index3.html", thought="done", plan=["verify"])
+    stale.result = _subagent_result_json({
+        "artifact_path": "/Users/xiaoyezi/my-claude-code/work/deliverables/index3.html",
+    })
+    _write_output_json(verified.output_json, {"artifacts": [{"path": "deliverables/index3.html"}]})
+    stale.status = "AWAITING_ACCEPTANCE"
+    stale.verification_status = "NEEDS_ACCEPTANCE"
+    verified.status = "DONE"
+    verified.verification_status = "VERIFIED"
+    manager.save(stale)
+    manager.save(verified)
+    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id="")
+
+    response = subagent_dispatch_limit_response(agent, backend="test")
+
+    assert response is not None
+    assert "blocking_run_ids: (none)" in response.text
+
+
+def _write_output_json(path: str, payload: dict[str, object]) -> None:
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+
+
+def _subagent_result_json(payload: dict[str, object]) -> str:
+    return "[SUBAGENT_RESULT]\n" + json.dumps(payload, ensure_ascii=False) + "\n[/SUBAGENT_RESULT]"

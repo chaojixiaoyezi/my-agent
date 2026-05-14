@@ -49,9 +49,9 @@ def test_tool_catalog_and_recommended_sections():
     assert "推荐理由" in recommended
 
 
-# LLM: ToolRegistry must pass config-level inline write limits into registered file-write tools.
-# 函数用途: 验证注册表里的 write_file 会使用用户配置的单次正文上限，而不是硬编码默认值。
-def test_registry_uses_configured_write_inline_limit(tmp_path: Path):
+# LLM: ToolRegistry treats configured inline write limits as transport advice, not a write blocker.
+# 函数用途: 验证注册表里的 write_file 会使用用户配置的推荐值提示模型，但合法内容仍然先写入文件。
+def test_registry_uses_configured_write_inline_recommendation(tmp_path: Path):
     registry = ToolRegistry(
         ToolRegistryParams(
             workspace_root=tmp_path,
@@ -73,8 +73,10 @@ def test_registry_uses_configured_write_inline_limit(tmp_path: Path):
         allowed_tools=None,
     )
 
-    assert result.ok is False
-    assert "最多 512 字符" in result.output
+    assert result.ok is True
+    assert (tmp_path / "site/app.js").read_text(encoding="utf-8") == "A" * 513
+    assert "超过推荐值" in result.output
+    assert "512" in result.output
 
 
 # LLM: Shell timeout config should reach the actual run_command tool, not stop at AgentConfig.

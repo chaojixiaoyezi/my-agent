@@ -47,8 +47,8 @@ class TestWriteFileTool:
         assert tool.spec.parameter_details["content"] == write_file_content_parameter_detail()
         assert str(MAX_INLINE_WRITE_CONTENT_CHARS) in tool.spec.parameter_details["content"]
 
-    # LLM: The inline write threshold is intentionally trialed at 12K before chunked transport lands.
-    # 函数用途: 固定 write_file 单次 inline content 试运行阈值；12K 可写，超过 1 字符仍走分块提示。
+    # LLM: The inline write threshold is a model-facing recommendation; valid parsed content must not be discarded.
+    # 函数用途: 固定 write_file 推荐 inline 尺寸；超过推荐值时仍写入并提示后续分块。
     def test_write_file_allows_trial_12k_inline_content(self, tmp_path: Path):
         from agent_py_agent.agent.tooling.filesystem_write import WriteFileTool
 
@@ -65,8 +65,8 @@ class TestWriteFileTool:
         assert result.ok is True
         assert (workspace / "site" / "style.css").read_text() == "A" * 12_000
 
-    # LLM: Per-tool inline write limits must be configurable without changing policy defaults.
-    # 函数用途: 验证写入工具能接收调用方传入的 inline 上限，并把该上限写入模型说明和执行检查。
+    # LLM: Per-tool inline write limits guide future model behavior without dropping already parsed content.
+    # 函数用途: 验证写入工具接收推荐 inline 上限，超过后仍写入并在结果里提示。
     def test_write_file_uses_configured_inline_content_limit(self, tmp_path: Path):
         from agent_py_agent.agent.tooling.filesystem_write import WriteFileTool
 
@@ -79,9 +79,10 @@ class TestWriteFileTool:
             "content": "A" * 513,
         })
 
-        assert result.ok is False
-        assert "最多 512 字符" in result.output
+        assert result.ok is True
+        assert "推荐最多 512 字符" in result.output
         assert "512" in tool.spec.parameter_details["content"]
+        assert (workspace / "site" / "style.css").read_text() == "A" * 513
 
     def test_write_file_creates_parent_dirs(self, tmp_path: Path):
         """写入时自动创建父目录。"""
@@ -165,9 +166,9 @@ class TestWriteFileTool:
         assert result.ok is False
         assert "过长" in result.output
 
-    # LLM: Large generated files must not travel as one giant JSON tool parameter.
-    # 函数用途: 验证 write_file 拒绝过长 inline content，并提示模型改用分块/受控内容传输。
-    def test_write_file_rejects_long_inline_content_with_transport_hint(self, tmp_path: Path):
+    # LLM: Large generated files should be preserved once the tool call is valid, with guidance for future chunks.
+    # 函数用途: 验证 write_file 对超过推荐值的合法内容自动落盘，并提示模型改用分块/受控内容传输。
+    def test_write_file_accepts_long_inline_content_with_transport_hint(self, tmp_path: Path):
         from agent_py_agent.agent.tooling.filesystem_write import WriteFileTool
 
         workspace = tmp_path / "workspace"
@@ -180,11 +181,11 @@ class TestWriteFileTool:
             "content": "A" * (MAX_INLINE_WRITE_CONTENT_CHARS + 1),
         })
 
-        assert result.ok is False
-        assert "inline content 过长" in result.output
+        assert result.ok is True
+        assert "inline content 超过推荐值" in result.output
         assert "append_file 分块追加" in result.output
         assert "controlled_exec" in result.output
-        assert not target.exists()
+        assert target.read_text(encoding="utf-8") == "A" * (MAX_INLINE_WRITE_CONTENT_CHARS + 1)
 
     def test_write_file_missing_path(self, tmp_path: Path):
         """缺少路径参数。"""
@@ -313,9 +314,9 @@ class TestAppendFileTool:
         assert result.ok is False
         assert "过长" in result.output
 
-    # LLM: Append chunks should stay bounded so the parser never has to carry huge file bodies.
-    # 函数用途: 验证 append_file 也使用统一长内容策略，并且失败时不改动已有文件。
-    def test_append_file_rejects_long_inline_content_without_mutating(self, tmp_path: Path):
+    # LLM: Append keeps valid oversize content instead of forcing the model into retry loops.
+    # 函数用途: 验证 append_file 也使用统一长内容策略，超过推荐值时追加并提示后续分块。
+    def test_append_file_accepts_long_inline_content_with_warning(self, tmp_path: Path):
         from agent_py_agent.agent.tooling.filesystem_write import AppendFileTool
 
         workspace = tmp_path / "workspace"
@@ -329,10 +330,12 @@ class TestAppendFileTool:
             "content": "B" * (MAX_INLINE_WRITE_CONTENT_CHARS + 1),
         })
 
-        assert result.ok is False
-        assert "inline content 过长" in result.output
+        assert result.ok is True
+        assert "inline content 超过推荐值" in result.output
         assert "每块 content" in result.output
-        assert existing.read_text(encoding="utf-8") == "const ok = true;\n"
+        assert existing.read_text(encoding="utf-8") == "const ok = true;\n" + "B" * (
+            MAX_INLINE_WRITE_CONTENT_CHARS + 1
+        )
 
     def test_append_file_empty_content(self, tmp_path: Path):
         """追加空内容。"""

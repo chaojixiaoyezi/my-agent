@@ -1287,3 +1287,41 @@
 - 已修正：直接写产物 guard 复用自然委托识别，`不要亲自写页面`、`安排小傻妞`、`只根据报告做收口` 这类普通话表达都会阻止 root/父级直接写业务文件。
 - 已测试：`test_no_comment_constraint_can_be_preserved_in_child_goal`、`test_natural_delegate_prompt_blocks_root_write_file_to_deliverables` 先红后绿。
 - 下一步：干净重跑 Group 2 三文件并行任务，确认 root 只派工、不亲自写页面，并且 worker 不抢同一文件。
+
+## 2026-05-15 子代理硬化 Group 3 前置修复：auto 真并发、长写入不硬拦
+- 中文说明：新的三页面家具站 E2E 暴露两个底层问题。主代理已经派了 3 个小傻妞，但 `runner_concurrency: "auto"` 实际退成单线程；同时合法的长 HTML `write_file` 被工具当成硬上限拒绝，导致模型反复重试、分块、再出现路径漂移。
+- 已修正：runner `auto` 改成内部有界并发策略，最多同时跑 8 个，本轮 3 个 worker 会直接并发跑；无效/空 concurrency 也回到这个策略，不额外增加用户配置。
+- 已修正：`tool_write_inline_max_chars` 改成推荐值而不是硬写入上限。JSON/tool call 已经解析成功时，`write_file`/`append_file` 会写入内容并返回“建议后续分块”的提示，避免把完整内容再丢回模型重说一遍。
+- 已测试：`test_runner_dispatch.py`、`test_tooling_filesystem_write.py`、`test_tool_output_externalizer.py` 和 worker-pool focused tests 通过；相关 ruff 通过。
+- 下一步：干净重跑 Group 3 三文件自然语言 E2E，确认三个 worker 真并发、长页面能一次写入或稳定分块，root 仍只看 refs/报告不偷读正文。
+
+## 2026-05-15 子代理硬化 Group 3b 修复：验收别误报，坏 HTML 要先修骨架
+- 中文说明：Group 3b 证明并发和长写入已经向好，三个页面都能产出。但父级验收对 DOM id 太机械，把安全可选的 `getElementById` 也当硬失败；同时漏掉了更关键的 HTML 结构问题，导致修复小傻妞反复搜索一个可选按钮，prompt 滚到 100K+。
+- 已修正：静态站点验收会识别 `const el = getElementById(...); el && ...` 这种安全可选 DOM 绑定，不再要求一定存在。
+- 已修正：自动推断出的 HTML 验收默认要求完整 HTML 骨架；缺 `</head>`、`<body>`、`</body>`、style/script 不闭合等会写进 `html_structure_hits`。
+- 已修正：dispatch 的失败详情加入 `repair_hints`，父级可以把“先修完整 HTML 骨架，再修 DOM/id”这种明确方向传给修复 worker。
+- 已测试：static-site validator、test item preparation、dispatch failure summary focused tests 通过。
+- 下一步：重跑 Group 3c，验证 root 能从结构化失败事实继续派修复，而不是让 repair worker 盲目查正文。
+
+## 2026-05-15 子代理硬化 Group 3c 修复：自然语言否定验收不再反着判
+- 中文说明：Group 3c 已经把三页面任务推进到 10 个 run 里 9 个验证通过，页面级 static-site check 最终通过；最后卡住的是旧的第二轮 repair run。它的验收项是“无 index4.html 引用”，但被当成“必须包含 index4.html”执行，导致已经修好的文件反而失败。
+- 已修正：`content_check` 支持 `match_mode=not_contains`，也支持 `expect_absent/negate/should_not_contain`。
+- 已修正：执行器能从“无 xxx 引用 / 不包含 xxx / must not contain xxx”这类自然语言测试名推断为 negative content check。
+- 已测试：`test_subagent_test_executor.py` 新增自然否定用例；executor、static-site、test-item、dispatch failure focused tests 通过。
+- 下一步：重跑 Group 3d，确认最后不再因为旧 repair run 的反向验收而停在 9/10。
+
+## 2026-05-15 子代理硬化 Group 3d 修复：接管链和负向证据收口
+- 中文说明：Group 3d 三个页面文件都写出并通过页面级验收，但最终状态报告仍拦住，因为旧的 `TAKEN_OVER` 原 run 和一个 repair run 的负向证据语义还没被状态机正确理解。
+- 已修正：dispatch closeout 会把 `TAKEN_OVER` 且 `takeover_by` 指向 DONE/VERIFIED 接管者的旧 run 当作已被覆盖，不再把旧 run 当 blocker。
+- 已修正：子代理结构化结果里的 `content_check` 如果是“无/没有/不包含/absent”这种负向检查，并且 `ok=false` 代表坏模式没搜到，会规范成验收通过语义。
+- 已修正：真实执行 `dispatch_subagents` 时，如果模型只给常见字段 `limit` 而没给专业字段 `max_runners`，会把它当 runner 数量意图，避免退回单线程。
+- 已测试：runtime guard、result processors、dispatch tool focused tests 通过。
+- 下一步：干净重跑 Group 3e，验证三文件并行任务最终能不被历史接管节点和负向证据误卡。
+
+## 2026-05-15 子代理硬化 Group 3e-3g 修复：看板和最终账本讲同一种事实
+- 中文说明：三页面家具站继续暴露了“不是模型笨，而是事实接口还不够硬”的问题。`无 index4.html 引用` 曾被抽成必需文件；看板曾经不知道旧失败已被后续 verified 修复覆盖；`/Users/...` 路径里的 `Users` 又被英文 `use` 误切断。
+- 已修正：文件合同提取能把“无/没有/不存在 xxx 引用”归到禁止/缺席语义，不再创建假 required 文件。
+- 已修正：`subagent_board` 增加 `completion_status` 和 `target_tokens`，父级一眼能看到是否允许汇报完成，以及哪些 run_id 真阻塞。
+- 已修正：目标产物识别统一走 `task_actual_target_tokens()`，优先读 `output.json` / `[SUBAGENT_RESULT]` 的结构化 refs；最终 closeout 和 board completion 共用“后续 verified 产物覆盖旧失败”的语义。
+- 已测试：focused tests 覆盖缺席文件合同、看板 not_complete/coverage、`/Users/...` artifact_path 和多文件 repair 覆盖；group03g 本地重放显示 final closeout 与 board 都不再把旧失败当 blocker。
+- 下一步：提交前跑 ruff、doc sync、strict code-size 和更宽 focused/full pytest；随后继续用自然语言三文件任务干净重跑，确认 root 不再早报喜或重复修旧失败。

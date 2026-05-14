@@ -29,9 +29,11 @@ class StaticSiteCheckResult:
     missing_required_files: list[str] = field(default_factory=list)
     placeholder_hits: list[str] = field(default_factory=list)
     broken_local_refs: list[str] = field(default_factory=list)
+    html_structure_hits: list[str] = field(default_factory=list)
     inert_control_hits: list[str] = field(default_factory=list)
     form_binding_hits: list[str] = field(default_factory=list)
     missing_dom_id_hits: list[str] = field(default_factory=list)
+    repair_hints: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     # LLM: ok is the single pass/fail boolean consumed by parent acceptance.
@@ -42,6 +44,7 @@ class StaticSiteCheckResult:
             self.missing_required_files
             or self.placeholder_hits
             or self.broken_local_refs
+            or self.html_structure_hits
             or self.inert_control_hits
             or self.form_binding_hits
             or self.missing_dom_id_hits
@@ -57,9 +60,11 @@ class StaticSiteCheckResult:
             "missing_required_files": self.missing_required_files,
             "placeholder_hits": self.placeholder_hits,
             "broken_local_refs": self.broken_local_refs,
+            "html_structure_hits": self.html_structure_hits,
             "inert_control_hits": self.inert_control_hits,
             "form_binding_hits": self.form_binding_hits,
             "missing_dom_id_hits": self.missing_dom_id_hits,
+            "repair_hints": self.repair_hints,
             "warnings": self.warnings,
         }
 
@@ -99,6 +104,7 @@ def _scan_site(test: dict[str, Any], site_root: Path) -> StaticSiteCheckResult:
     result.checked_files = [_rel(path, site_root) for path in html_files]
     check_refs = test.get("check_local_refs", True) is not False
     check_placeholders = test.get("forbid_placeholders", True) is not False
+    check_complete_html = test.get("require_complete_html", False) is True
     check_controls = test.get("check_inert_controls", True) is not False
     check_forms = test.get("check_form_bindings", True) is not False
     form_ids: set[str] = set()
@@ -109,6 +115,8 @@ def _scan_site(test: dict[str, Any], site_root: Path) -> StaticSiteCheckResult:
         text = path.read_text(encoding="utf-8", errors="replace")
         if check_placeholders and _has_visible_template_placeholder(text):
             result.placeholder_hits.append(_rel(path, site_root))
+        if check_complete_html:
+            result.html_structure_hits.extend(_html_structure_hits(text, path, site_root))
         parser = StaticSiteHTMLParser()
         parser.feed(text)
         form_ids.update(parser.form_ids)
@@ -127,6 +135,7 @@ def _scan_site(test: dict[str, Any], site_root: Path) -> StaticSiteCheckResult:
     if check_forms:
         result.form_binding_hits.extend(_form_binding_hits(form_ids, combined_script_text))
     result.missing_dom_id_hits.extend(_missing_dom_id_hits(element_ids, combined_script_text))
+    result.repair_hints.extend(_repair_hints(result))
     return result
 
 
@@ -232,6 +241,57 @@ def _small_text(path: Path, max_bytes: int = 262144) -> str:
 _VALIDATE_FORM_CALL_RE = re.compile(r"validateForm\(\s*['\"]([^'\"]+)['\"]\s*\)")
 _GET_ELEMENT_BY_ID_RE = re.compile(r"getElementById\(\s*['\"]([^'\"]+)['\"]\s*\)")
 _QUERY_SELECTOR_ID_RE = re.compile(r"querySelector(?:All)?\(\s*['\"]#([A-Za-z0-9_-]+)['\"]\s*\)")
+_ASSIGNED_GET_ELEMENT_RE = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*document\.getElementById\(\s*['\"]([^'\"]+)['\"]\s*\)\s*;"
+)
+
+
+# LLM: _html_structure_hits catches malformed full-page HTML without requiring a browser.
+# 函数用途: 对声明为完整 HTML 的产物做轻量结构检查，避免正文落进 style/script 这类明显坏页通过验收。
+def _html_structure_hits(text: str, html_file: Path, site_root: Path) -> list[str]:
+    rel = _rel(html_file, site_root)
+    lower = text.lower()
+    hits: list[str] = []
+    required = (
+        ("doctype", "<!doctype"),
+        ("html_open", "<html"),
+        ("html_close", "</html>"),
+        ("head_close", "</head>"),
+        ("body_open", "<body"),
+        ("body_close", "</body>"),
+    )
+    for label, marker in required:
+        if marker not in lower:
+            hits.append(f"{rel}:{label}")
+    for tag in ("style", "script"):
+        opens = len(re.findall(rf"<{tag}\b", lower))
+        closes = lower.count(f"</{tag}>")
+        if opens != closes:
+            hits.append(f"{rel}:unbalanced_{tag}")
+    if lower.find("<body") != -1 and lower.find("</head>") != -1 and lower.find("<body") < lower.find("</head>"):
+        hits.append(f"{rel}:body_before_head_close")
+    return hits
+
+
+# LLM: _get_element_assignment_vars maps DOM ids back to optional local variables.
+# 函数用途: 识别 `const x = document.getElementById('id'); x && ...` 这类安全可选绑定，减少误报。
+def _get_element_assignment_vars(script_text: str) -> dict[str, list[str]]:
+    mapping: dict[str, list[str]] = {}
+    for match in _ASSIGNED_GET_ELEMENT_RE.finditer(script_text or ""):
+        var_name, target = match.groups()
+        mapping.setdefault(target, []).append(var_name)
+    return mapping
+
+
+# LLM: _is_optionally_guarded_dom_lookup avoids false failures for intentionally optional UI hooks.
+# 函数用途: 如果缺失 id 只通过 `var && ...` 或 `if (var)` 保护使用，就不把它当成硬失败。
+def _is_optionally_guarded_dom_lookup(script_text: str, target: str) -> bool:
+    for var_name in _get_element_assignment_vars(script_text).get(target, []):
+        escaped = re.escape(var_name)
+        guarded = re.search(rf"\b{escaped}\s*&&", script_text) or re.search(rf"if\s*\(\s*{escaped}\s*\)", script_text)
+        if guarded:
+            return True
+    return False
 
 
 # LLM: _form_binding_hits catches generated JS bound to non-existent form ids.
@@ -250,11 +310,28 @@ def _missing_dom_id_hits(element_ids: set[str], script_text: str) -> list[str]:
     hits: list[str] = []
     for target in sorted(set(_GET_ELEMENT_BY_ID_RE.findall(script_text or ""))):
         if target not in element_ids:
+            if _is_optionally_guarded_dom_lookup(script_text, target):
+                continue
             hits.append(f"getElementById:{target}")
     for target in sorted(set(_QUERY_SELECTOR_ID_RE.findall(script_text or ""))):
         if target not in element_ids:
             hits.append(f"querySelector:{target}")
     return hits
+
+
+# LLM: _repair_hints turns validation facts into short action hints for parent repair dispatch.
+# 函数用途: 给父级/修复子代理一组不用读正文也能理解的修复方向，避免只靠自然语言猜。
+def _repair_hints(result: StaticSiteCheckResult) -> list[str]:
+    hints: list[str] = []
+    if result.html_structure_hits:
+        hints.append("html_structure: repair or regenerate a complete HTML skeleton before DOM/id fixes")
+    if result.inert_control_hits:
+        hints.append("inert_controls: add real href targets, onclick handlers, or matching anchor sections for listed controls")
+    if result.form_binding_hits:
+        hints.append("form_bindings: create the referenced form id or update validateForm(...) to the existing form id")
+    if result.missing_dom_id_hits:
+        hints.append("missing_dom_ids: add the referenced id to a real element or remove the stale unguarded JS lookup")
+    return hints[:6]
 
 
 # LLM: _inert_controls finds obvious clickable controls with no target or event handler.
@@ -275,7 +352,7 @@ def _inert_controls(
         onclick = str(control.get("onclick") or "").strip()
         button_type = str(control.get("type") or "").strip().lower()
         if tag == "a" and not onclick and _anchor_is_inert(href, element_ids):
-            hits.append(f"{_rel(html_file, site_root)}:a:{text or '<empty>'}")
+            hits.append(f"{_rel(html_file, site_root)}:a:{text or '<empty>'} href={href or '<empty>'}")
         if tag == "button" and not onclick and button_type not in {"submit", "reset"} and not has_script_handlers:
             hits.append(f"{_rel(html_file, site_root)}:button:{text or '<empty>'}")
     return hits
@@ -324,6 +401,8 @@ def _failure_summary(result: StaticSiteCheckResult) -> str:
         parts.append(f"placeholder_hits={len(result.placeholder_hits)}")
     if result.broken_local_refs:
         parts.append(f"broken_local_refs={len(result.broken_local_refs)}")
+    if result.html_structure_hits:
+        parts.append(f"html_structure_hits={len(result.html_structure_hits)}")
     if result.inert_control_hits:
         parts.append(f"inert_control_hits={len(result.inert_control_hits)}")
     if result.form_binding_hits:

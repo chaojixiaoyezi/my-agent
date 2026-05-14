@@ -106,8 +106,8 @@ def test_static_site_check_blocks_placeholder_hash_links(tmp_path):
     assert record.passed is False
     assert "inert_control_hits=2" in record.error
     assert record.validation_result["inert_control_hits"] == [
-        "index.html:a:查看详情",
-        "index.html:a:缺失锚点",
+        "index.html:a:查看详情 href=#",
+        "index.html:a:缺失锚点 href=#missing",
     ]
 
 
@@ -190,6 +190,33 @@ def test_static_site_check_allows_external_script_button_handlers(tmp_path):
     assert record.validation_result["inert_control_hits"] == []
 
 
+# LLM: optional DOM hooks should not create repair loops when a UI branch is absent by design.
+# 函数用途: `const el = getElementById(...); el && ...` 是安全可选绑定，不能被误判成硬失败。
+def test_static_site_check_allows_optional_missing_dom_binding(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "index.html": (
+                "<main id='home'>Home</main>"
+                "<script>const v=document.getElementById('view-btn');v&&v.addEventListener('click',()=>{});</script>"
+            ),
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "optional dom hook",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index.html"],
+        }
+    )
+
+    assert record.passed is True
+    assert record.validation_result["missing_dom_id_hits"] == []
+
+
 # LLM: DOM id binding mismatches catch generated buttons that look clickable but break at runtime.
 # 函数用途: app.js 读取不存在的按钮 id 时，父级静态验收要失败并给出具体缺失 id。
 def test_static_site_check_blocks_missing_dom_id_targets(tmp_path):
@@ -217,6 +244,43 @@ def test_static_site_check_blocks_missing_dom_id_targets(tmp_path):
     assert record.passed is False
     assert "missing_dom_id_hits=1" in record.error
     assert record.validation_result["missing_dom_id_hits"] == ["getElementById:retry-btn"]
+    assert record.validation_result["repair_hints"] == [
+        "missing_dom_ids: add the referenced id to a real element or remove the stale unguarded JS lookup"
+    ]
+
+
+# LLM: inferred full-page checks must catch malformed HTML that browsers would render incorrectly.
+# 函数用途: 完整 HTML 产物正文落进 style/head 时，父级验收应提示先修骨架，而不是只追 DOM id。
+def test_static_site_check_blocks_malformed_complete_html(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "index.html": (
+                "<!DOCTYPE html><html><head><style>.btn{color:red}"
+                "<main><button>Buy</button></main><script>console.log(1)</script></body></html>"
+            ),
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "complete html shape",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index.html"],
+            "require_complete_html": True,
+        }
+    )
+
+    assert record.passed is False
+    assert "html_structure_hits=" in record.error
+    assert "index.html:head_close" in record.validation_result["html_structure_hits"]
+    assert "index.html:body_open" in record.validation_result["html_structure_hits"]
+    assert "index.html:unbalanced_style" in record.validation_result["html_structure_hits"]
+    assert record.validation_result["repair_hints"][0] == (
+        "html_structure: repair or regenerate a complete HTML skeleton before DOM/id fixes"
+    )
 
 
 # LLM: test_static_site_check_allows_javascript_template_literals preserves real shop pages.

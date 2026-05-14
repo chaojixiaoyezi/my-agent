@@ -47,6 +47,9 @@ def inferred_static_site_items(request: StaticSiteTestItemsRequest) -> list[dict
         "validation_method": "static_site_check",
         "site_root": _relative_or_absolute(site_root, request.workspace_root),
         "required_files": required_files,
+        # LLM: inferred HTML checks must verify a complete skeleton before chasing smaller DOM/id issues.
+        # 函数用途: 自动推断静态页验收时默认检查完整 HTML 骨架，防止坏结构被后续修复项掩盖。
+        "require_complete_html": True,
     }
     if len(html_paths) == 1:
         item["html_files"] = required_files

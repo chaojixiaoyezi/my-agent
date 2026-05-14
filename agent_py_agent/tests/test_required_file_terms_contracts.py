@@ -78,6 +78,21 @@ def test_file_contract_treats_bare_negative_targets_as_forbidden_terms():
     ]
 
 
+# LLM: R87 showed natural absence checks can become fake required files during repair loops.
+# 函数用途: “无/没有/不存在 index4.html 引用”这类验收条件只能进入 forbidden_files，不能进入 required_files。
+def test_file_contract_treats_absent_reference_checks_as_forbidden_terms():
+    text = (
+        "必须包含 index1.html、index2.html、index3.html。"
+        "无任何 index4.html 引用；没有 legacy.html 链接；不存在 old.html 跳转。"
+    )
+
+    required = required_file_terms_from_text(text, extensions=r"html?|css|js")
+    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js")
+
+    assert required == ["index1.html", "index2.html", "index3.html"]
+    assert forbidden == ["index4.html", "legacy.html", "old.html"]
+
+
 # LLM: R59 used "禁止创建：" and polluted descendant required_files.
 # 函数用途: 确认“禁止创建：a.html、b.json”整段只进入 forbidden_files，不能混入必需产物。
 def test_file_contract_treats_forbidden_create_label_as_forbidden_terms():

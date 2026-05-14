@@ -154,13 +154,14 @@ class TestExecutor:
         path, error = self._resolve_test_path(test.get("file_path"))
         pattern = _content_pattern(test)
         exact = _content_match_is_exact(test)
+        expect_absent = _content_match_expects_absent(test)
         if error:
             return _file_record(test, "content_check", error=error)
         if not pattern:
             return _file_record(test, "content_check", error="内容检查缺少 content_pattern")
         if not path.exists() or not path.is_file():
             return _file_record(test, "content_check", error="文件不存在", path=path)
-        return _content_match_record(test, path, pattern, exact=exact)
+        return _content_match_record(test, path, pattern, exact=exact, expect_absent=expect_absent)
 
     # LLM: _resolve_test_path enforces that file validations cannot escape the executor workspace.
     # 函数用途: 把测试项里的相对路径解析为 workspace 内绝对路径；越界路径会返回错误。
@@ -216,3 +217,39 @@ def _content_pattern(test: dict[str, Any]) -> str:
 def _content_match_is_exact(test: dict[str, Any]) -> bool:
     mode = str(test.get("match_mode") or "").strip().lower()
     return mode in {"exact", "equals", "equal"} or any(key in test for key in ("content_equals", "expected_content"))
+
+
+_NEGATIVE_CONTENT_MARKERS = (
+    "不包含",
+    "不得包含",
+    "不能包含",
+    "不要包含",
+    "不应包含",
+    "不出现",
+    "不得出现",
+    "不能出现",
+    "不要出现",
+    "无",
+    "没有",
+    "must not contain",
+    "does not contain",
+    "not contain",
+    "no ",
+    "absent",
+)
+
+
+# LLM: _content_match_expects_absent prevents natural negative checks from becoming inverted tests.
+# 函数用途: 把“无/不包含 xxx”这类验收项识别成 not_contains，避免父级把已修好的内容误判失败。
+def _content_match_expects_absent(test: dict[str, Any]) -> bool:
+    mode = str(test.get("match_mode") or "").strip().lower()
+    if mode in {"not_contains", "absent", "missing", "not_present", "does_not_contain"}:
+        return True
+    if bool(test.get("expect_absent") or test.get("negate") or test.get("should_not_contain")):
+        return True
+    name = str(test.get("name") or "").strip().lower()
+    pattern = str(_content_pattern(test) or "").strip().lower()
+    haystack = name
+    if pattern and pattern in haystack:
+        return any(marker in haystack for marker in _NEGATIVE_CONTENT_MARKERS)
+    return False

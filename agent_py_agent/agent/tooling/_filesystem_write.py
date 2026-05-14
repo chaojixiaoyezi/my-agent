@@ -103,6 +103,8 @@ class WriteFileTool(FileSystemTool):
         target.write_text(content, encoding="utf-8")
         integrity_note = html_post_write_note(target, content)
         output = f"已写入文件: {self.display_path(target)}"
+        if content_policy.message:
+            output = f"{output}\n{content_policy.message}"
         if integrity_note:
             output = f"{output}\n{integrity_note}"
         return ToolExecutionResult(
@@ -192,6 +194,8 @@ class AppendFileTool(FileSystemTool):
             file.write(content)
         integrity_note = html_post_write_note(target, f"{existing_text}{content}")
         output = f"已追加文件: {self.display_path(target)}"
+        if content_policy.message:
+            output = f"{output}\n{content_policy.message}"
         if integrity_note:
             output = f"{output}\n{integrity_note}"
         return ToolExecutionResult(

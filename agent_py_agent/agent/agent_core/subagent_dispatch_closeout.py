@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from ..backends import ModelResponse
+from ..subagents.services.hierarchy_leaf_targets import task_actual_target_tokens
 from ._runtime_params import ToolLoopExecuteParams
 
 
@@ -102,9 +103,7 @@ def _subagent_tasks(agent) -> list[object]:
 # 函数用途: 只有所有任务状态都是 DONE 且 verification_status 是 VERIFIED 时才允许跳过额外模型请求。
 def _all_tasks_done_verified(tasks: list[object]) -> bool:
     for task in tasks:
-        if str(getattr(task, "status", "") or "") != "DONE":
-            return False
-        if str(getattr(task, "verification_status", "") or "") != "VERIFIED":
+        if not _task_resolved_for_closeout(task, tasks):
             return False
     return True
 
@@ -283,12 +282,7 @@ def _task_sort_key(task: object) -> tuple[int, float, str]:
 # LLM: _done_verified_count counts only persisted DONE + VERIFIED rows.
 # 函数用途: 给确定性报告提供严格完成数，不能把 AWAITING_ACCEPTANCE 或模型自述算完成。
 def _done_verified_count(tasks: list[object]) -> int:
-    return sum(
-        1
-        for task in tasks
-        if str(getattr(task, "status", "") or "") == "DONE"
-        and str(getattr(task, "verification_status", "") or "") == "VERIFIED"
-    )
+    return sum(1 for task in tasks if _task_resolved_for_closeout(task, tasks))
 
 
 # LLM: _blocking_task_ids identifies run ids that make the whole hierarchy not complete.
@@ -296,12 +290,66 @@ def _done_verified_count(tasks: list[object]) -> int:
 def _blocking_task_ids(tasks: list[object]) -> list[str]:
     blockers: list[str] = []
     for task in tasks:
-        status = str(getattr(task, "status", "") or "").upper()
-        verification = str(getattr(task, "verification_status", "") or "").upper()
         task_id = str(getattr(task, "id", "") or "")
-        if status != "DONE" or verification != "VERIFIED":
+        if not _task_resolved_for_closeout(task, tasks):
             blockers.append(task_id)
     return [item for item in blockers if item]
+
+
+# LLM: _task_resolved_for_closeout treats a superseded takeover source as complete only when its replacement is verified.
+# 函数用途: 判断单个任务是否已经被 DONE/VERIFIED 或已验证的 takeover 接管覆盖，避免旧 run 卡住整棵树收口。
+def _task_resolved_for_closeout(task: object, tasks: list[object]) -> bool:
+    status = str(getattr(task, "status", "") or "").upper()
+    verification = str(getattr(task, "verification_status", "") or "").upper()
+    if status == "DONE" and verification == "VERIFIED":
+        return True
+    if _task_targets_resolved_by_verified_siblings(task, tasks):
+        return True
+    if status != "TAKEN_OVER":
+        return False
+    takeover_by = str(getattr(task, "takeover_by", "") or "").strip()
+    if not takeover_by:
+        return False
+    replacement = _task_by_id(tasks, takeover_by)
+    return bool(replacement and _task_done_verified(replacement))
+
+
+# LLM: _task_targets_resolved_by_verified_siblings lets verified repair leaves cover stale failed leaves.
+# 函数用途: 如果旧失败任务的具体产物已被其它 DONE/VERIFIED 任务覆盖，最终收口不再被旧 run 卡住。
+def _task_targets_resolved_by_verified_siblings(task: object, tasks: list[object]) -> bool:
+    targets = _closeout_target_tokens(task)
+    if not targets:
+        return False
+    verified_targets: set[str] = set()
+    for other in tasks:
+        if other is task or not _task_done_verified(other):
+            continue
+        verified_targets.update(_closeout_target_tokens(other))
+    return bool(verified_targets and targets.issubset(verified_targets))
+
+
+# LLM: _closeout_target_tokens prefers structured output refs over natural-language repair goals.
+# 函数用途: 获取任务实际触碰的产物文件名；优先 output.json，避免“把 index.html 改成 index1.html”把旧坏名当目标。
+def _closeout_target_tokens(task: object) -> set[str]:
+    return task_actual_target_tokens(task)
+
+
+# LLM: _task_by_id performs exact in-memory lookup and never filesystem globs user-provided ids.
+# 函数用途: 在当前 list_runs 快照中按 run_id 找接管者，避免用模式匹配扫描无关任务。
+def _task_by_id(tasks: list[object], run_id: str) -> object | None:
+    for task in tasks:
+        if str(getattr(task, "id", "") or "") == run_id:
+            return task
+    return None
+
+
+# LLM: _task_done_verified is the strict terminal success predicate reused by closeout helpers.
+# 函数用途: 精确判断任务是否 DONE/VERIFIED；不给 AWAITING_ACCEPTANCE 或口头完成放行。
+def _task_done_verified(task: object) -> bool:
+    return (
+        str(getattr(task, "status", "") or "").upper() == "DONE"
+        and str(getattr(task, "verification_status", "") or "").upper() == "VERIFIED"
+    )
 
 
 # LLM: _root_task_ids extracts top-level subagent ids for deterministic final summaries.
