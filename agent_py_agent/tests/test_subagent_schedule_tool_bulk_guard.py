@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 
+from agent_py_agent.agent.action_protocol import SubagentScheduleEnvelope, decode_action_envelope
 from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
@@ -59,3 +60,7 @@ def test_schedule_tool_allows_two_child_batches(tmp_path):
     assert result.ok is True
     assert len(payload["created_run_ids"]) == 2
     assert agent.subagents.load(root.id).child_ids == payload["created_run_ids"]
+    envelope = decode_action_envelope(payload["typed_envelope"])
+    assert isinstance(envelope, SubagentScheduleEnvelope)
+    assert envelope.parent_run_id == root.id
+    assert envelope.created_run_ids == payload["created_run_ids"]

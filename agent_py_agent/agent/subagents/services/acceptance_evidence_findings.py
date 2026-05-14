@@ -84,7 +84,6 @@ def _required_read_file_finding(task: SubAgentTask, created_at: float) -> Accept
         and (
             item.kind in {"read_file", "file_read", "file_content"}
             or "read_file" in item.command.lower()
-            or "read_file" in item.summary.lower()
         )
         for item in task.evidence
     )
@@ -110,8 +109,6 @@ def _required_write_file_finding(task: SubAgentTask, created_at: float) -> Accep
         and (
             item.kind in {"write_file", "file_write", "file_written"}
             or "write_file" in item.command.lower()
-            or "write_file" in item.summary.lower()
-            or "写入" in item.summary
         )
         for item in task.evidence
     )

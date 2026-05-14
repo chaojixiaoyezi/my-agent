@@ -290,6 +290,7 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 - `tooling/filesystem_artifact_guard.py` 负责普通 `read_file` 误读 artifact 包装文件的恢复提示；提示会根据 registry 注入的 `allowed_tools` 判断当前上下文是否有 `read_artifact`，没有时要求上报 `capability_request`。
 
 ## 2026-05-14 compact multi-hop and subagent owner structure update
+- `agent/action_protocol.py` 现在作为 typed protocol facade 导出 `CompactContinuePacketEnvelope` 和 `PathRef`，具体 compact envelope 在 `action_protocol_compact.py`，共享 refs 在 `action_protocol_core.py`；`memory_archive/compact_continue_packet.py` 会把旧 continue packet 同步包装成 `typed_envelope`，推荐读取路径进入结构化 `path_refs`，避免后续自动恢复解析自然语言说明。
 - `agent_core/runtime_mixin.py` 现在把自动 compact continuation 当成一个受限循环：每一轮都读上一轮 result 里的 continue packet，调用 `_compact_auto_continue_params()` 注入恢复块，再由 `memory_compact_auto_continue_max_depth` 控制最大续跑深度。
 - `agent_core/finalization_compact_auto.py` 读取 `memory_compact_context_window_tokens` 作为 compact 阈值窗口；为 `0` 时回退到保守估算。它仍先检查 `ctx.do_save`，所以 `save=False` 不会写 compact apply。
 - `agent_core/_finalization_service.py` 给 auto compact 传真实 per-run request id，并把 `# Compact Auto Continuation` runtime injection 传给 runtime fact source，保证后续 apply 能继承显式验收、约束和最近测试字段。

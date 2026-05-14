@@ -15,15 +15,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..action_protocol import (
+    RunScope,
+    ToolCallEnvelope,
+)
 from ..log_analysis.capabilities import SECURITY_TOOL_NAMES, has_security_tool_capability
 from .json_repair import load_tool_block_json
 from .models import BaseTool, ToolExecutionResult
 from .parse_error_hint import parse_error_message
 from .parser import parse_xmlish_tool_calls
 from .registry_control_ranges import mask_protected_control_ranges
-from .registry_params import tool_params_for_execution
-from .registry_tool_dispatch import AuthorizedToolDispatchRequest, execute_authorized_tool
-from .write_boundary import validate_write_boundary
+from .registry_envelopes import (
+    attach_result_envelope,
+    legacy_payloads_to_tool_envelopes,
+    payload_from_tool_call_envelope,
+    tool_call_envelope_from_execution_payload,
+)
+from .registry_invoke import RegistryToolInvokeRequest, invoke_registry_tool
+from .registry_markers import next_tool_block_end, next_tool_block_start
 
 _MAX_TOOL_PAYLOAD_FIELDS = 64
 _MAX_TOOL_FIELD_NAME_CHARS = 128
@@ -74,11 +83,11 @@ def parse_registry_tool_calls(text: str) -> list[dict[str, Any]]:
     calls: list[tuple[int, dict[str, Any]]] = []
     cursor = 0
     while True:
-        start_info = _next_tool_block_start(scan_text, cursor)
+        start_info = next_tool_block_start(scan_text, cursor)
         if start_info is None:
             break
         start, marker_start = start_info
-        end_info = _next_tool_block_end(scan_text, start + len(marker_start))
+        end_info = next_tool_block_end(scan_text, start + len(marker_start))
         if end_info is None:
             raw = scan_text[start + len(marker_start) :].strip().strip("`")
             payload = _parse_tool_block_payload(raw)
@@ -94,55 +103,78 @@ def parse_registry_tool_calls(text: str) -> list[dict[str, Any]]:
     return [payload for _, payload in calls]
 
 
+# LLM: parse_registry_tool_call_envelopes is the typed bridge for legacy text tool calls.
+# 函数用途: 复用旧文本 parser，但把结果立即包装成 ToolCallEnvelope，避免业务层继续直接消费自然语言块。
+def parse_registry_tool_call_envelopes(
+    text: str,
+    *,
+    scope: RunScope | None = None,
+    source: str = "legacy_text_protocol",
+) -> list[ToolCallEnvelope]:
+    return legacy_payloads_to_tool_envelopes(
+        parse_registry_tool_calls(text),
+        scope=scope,
+        source=source,
+    )
+
+
 # LLM: execute_registry_call 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
 # 函数用途: 完成 工具系统 中的 execute_registry_call 步骤，并保持调用方依赖的数据形状。
 def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResult:
 
-    prepared = _prepare_tool_payload(call.payload)
+    envelope = tool_call_envelope_from_execution_payload(call.payload)
+    if isinstance(envelope, ToolExecutionResult):
+        return envelope
+    prepared = _prepare_tool_payload(envelope or call.payload)
     if isinstance(prepared, ToolExecutionResult):
-        return prepared
+        return attach_result_envelope(prepared, envelope)
     normalized_payload = prepared
 
     if normalized_payload.get("tool") == "__parse_error__":
-        return ToolExecutionResult(
-            "__parse_error__",
-            False,
-            parse_error_message(normalized_payload),
+        return attach_result_envelope(
+            ToolExecutionResult(
+                "__parse_error__",
+                False,
+                parse_error_message(normalized_payload),
+            ),
+            envelope,
         )
 
     try:
         tool_name = _tool_name(normalized_payload.get("tool"))
     except ValueError as exc:
-        return ToolExecutionResult("unknown", False, str(exc))
+        return attach_result_envelope(ToolExecutionResult("unknown", False, str(exc)), envelope)
 
     auth_error = _registry_auth_error(tool_name, call)
     if auth_error:
-        return ToolExecutionResult(tool_name, False, auth_error)
+        return attach_result_envelope(ToolExecutionResult(tool_name, False, auth_error), envelope)
 
-    tool = call.tools.get(tool_name)
-    if tool is None:
-        return ToolExecutionResult(tool_name, False, f"未知工具: {tool_name}")
-
-    tool_params = tool_params_for_execution(normalized_payload, tool_name, call.allowed_tools)
-    boundary_error = validate_write_boundary(
-        tool_name,
-        tool_params,
-        workspace_root=call.workspace_root,
-        workspace_roots=call.workspace_roots,
-        write_boundary=call.write_boundary,
+    return attach_result_envelope(
+        invoke_registry_tool(
+            RegistryToolInvokeRequest(
+                tool_name=tool_name,
+                payload=normalized_payload,
+                tools=call.tools,
+                workspace_root=call.workspace_root,
+                workspace_roots=call.workspace_roots,
+                allowed_tools=call.allowed_tools,
+                write_boundary=call.write_boundary,
+            )
+        ),
+        envelope,
     )
-    if boundary_error:
-        return ToolExecutionResult(tool_name, False, boundary_error)
 
-    return execute_authorized_tool(
-        AuthorizedToolDispatchRequest(
-            tool_name=tool_name,
-            tool=tool,
-            tool_params=tool_params,
-            workspace_root=call.workspace_root,
-            write_boundary=call.write_boundary,
-        )
-    )
+
+# LLM: _prepare_tool_payload 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 整理工具调用的 prepare_tool_payload 信息，供注册表鉴权或执行使用。
+def _prepare_tool_payload(payload: object) -> dict[str, Any] | ToolExecutionResult:
+    if isinstance(payload, ToolCallEnvelope):
+        payload = payload_from_tool_call_envelope(payload)
+    normalized_payload, payload_error = _normalize_tool_payload(payload)
+    if payload_error:
+        return ToolExecutionResult("unknown", False, payload_error)
+    assert normalized_payload is not None
+    return normalized_payload
 
 
 # LLM: _registry_auth_error 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -157,16 +189,6 @@ def _registry_auth_error(tool_name: str, call: ExecuteRegistryCallParams) -> str
             security_tool_names=call.security_tool_names,
         ),
     )
-
-
-# LLM: _prepare_tool_payload 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 整理工具调用的 prepare_tool_payload 信息，供注册表鉴权或执行使用。
-def _prepare_tool_payload(payload: object) -> dict[str, Any] | ToolExecutionResult:
-    normalized_payload, payload_error = _normalize_tool_payload(payload)
-    if payload_error:
-        return ToolExecutionResult("unknown", False, payload_error)
-    assert normalized_payload is not None
-    return normalized_payload
 
 
 # LLM: allowed_tool_set 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -191,32 +213,6 @@ def security_tools_visible(
         or (allowed is not None and bool(allowed.intersection(SECURITY_TOOL_NAMES)))
         or has_security_tool_capability(granted_capabilities)
     )
-
-
-# LLM: _next_tool_block_start 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 整理工具调用的 next_tool_block_start 信息，供注册表鉴权或执行使用。
-def _next_tool_block_start(text: str, cursor: int) -> tuple[int, str] | None:
-    start_markers = ["[TOOL_CALL]", "[SUBAGENT_CALL]"]
-    starts = [
-        (pos, marker)
-        for marker in start_markers
-        for pos in [text.find(marker, cursor)]
-        if pos != -1
-    ]
-    return min(starts, key=lambda item: item[0]) if starts else None
-
-
-# LLM: _next_tool_block_end 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 整理工具调用的 next_tool_block_end 信息，供注册表鉴权或执行使用。
-def _next_tool_block_end(text: str, start_at: int) -> tuple[int, str] | None:
-    end_markers = ["[/TOOL_CALL]", "[/SUBAGENT_CALL]"]
-    ends = [
-        (pos, marker)
-        for marker in end_markers
-        for pos in [text.find(marker, start_at)]
-        if pos != -1
-    ]
-    return min(ends, key=lambda item: item[0]) if ends else None
 
 
 # LLM: _parse_tool_block_payload 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。

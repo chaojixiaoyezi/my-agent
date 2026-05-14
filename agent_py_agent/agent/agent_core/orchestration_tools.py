@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from ..action_protocol import subagent_schedule_envelope_from_payload
 from ..subagents.models import SubAgentBoardOptions
 from ..subagents.services.base import CreateRunParams, _extract_write_dirs
 from ..tools import BaseTool, ToolExecutionResult
@@ -244,7 +245,7 @@ class CreateSubagentsTool(BaseTool):
     # LLM: _create_payload 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 构建载荷所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def _create_payload(self, tasks, allowed_tools: list[str] | None) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "created": len(tasks),
             "ids": [task.id for task in tasks],
             "allowed_tools": allowed_tools or "automatic",
@@ -260,6 +261,11 @@ class CreateSubagentsTool(BaseTool):
                 for task in tasks
             ],
         }
+        payload["typed_envelope"] = subagent_schedule_envelope_from_payload(
+            payload,
+            tool="create_subagents",
+        ).to_dict()
+        return payload
 
 
 # LLM: SubagentBoardTool 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

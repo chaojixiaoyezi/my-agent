@@ -248,6 +248,42 @@ class TestBuildEvidenceFindings:
         assert write_finding is not None
         assert write_finding.ok is True
 
+    def test_acceptance_does_not_accept_read_file_from_summary_only(self, tmp_path: Path):
+        """summary 里提到 read_file 不等于真实工具证据。"""
+        from agent_py_agent.agent.subagents.acceptance_helpers import _build_evidence_findings
+
+        task = MagicMock()
+        task.evidence = [
+            MagicMock(ok=True, kind="note", command="", summary="I used read_file")
+        ]
+        task.acceptance_checks = ["read_file 验证"]
+        task.used_tools = ["read_file"]
+        task.acceptance_file = str(tmp_path / "acceptance.json")
+
+        findings = _build_evidence_findings(task, 1234567890.0)
+
+        read_finding = next((f for f in findings if f.name == "acceptance_requires_read_file"), None)
+        assert read_finding is not None
+        assert read_finding.ok is False
+
+    def test_acceptance_does_not_accept_write_file_from_summary_only(self, tmp_path: Path):
+        """summary 里提到写入不等于真实工具证据。"""
+        from agent_py_agent.agent.subagents.acceptance_helpers import _build_evidence_findings
+
+        task = MagicMock()
+        task.evidence = [
+            MagicMock(ok=True, kind="note", command="", summary="写入文件")
+        ]
+        task.acceptance_checks = ["write_file 验证"]
+        task.used_tools = ["write_file"]
+        task.acceptance_file = str(tmp_path / "acceptance.json")
+
+        findings = _build_evidence_findings(task, 1234567890.0)
+
+        write_finding = next((f for f in findings if f.name == "acceptance_requires_write_file"), None)
+        assert write_finding is not None
+        assert write_finding.ok is False
+
 
 class TestBuildOutputAndCapabilityFindings:
     """测试 _build_output_and_capability_findings 函数。"""
