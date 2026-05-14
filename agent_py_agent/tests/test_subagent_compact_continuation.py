@@ -11,6 +11,7 @@ from agent_py_agent.agent.agent_core.subagent_compact_continuation import (
 )
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.manager_runner_results import RecordRunnerResultParams
+from agent_py_agent.agent.subagents.models import SubAgentParsedOutput
 
 
 # LLM: subagent saves must materialize a task-local continue packet before any parent rerun.
@@ -227,3 +228,130 @@ def test_timeout_runner_result_refreshes_recovery_packets(tmp_path: Path) -> Non
     assert readiness["status"] == "TIMEOUT"
     assert readiness["failure_handoff_ref"] == loaded.failure_handoff_json
     assert handoff["failure_type"] == "runner_timeout"
+
+
+# LLM: subagent-owned compact packages must stay inside the run workspace, never main memory_archive.
+# 函数用途: 验证子代理模型回合接近上下文上限时，会写 task-local session compact 包并挂到 continue packet。
+def test_subagent_runner_result_writes_task_local_session_compact_package(tmp_path: Path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="长任务 worker 需要压缩后继续",
+        thought="runner 会接近上下文窗口。",
+        plan=["写第一段", "压缩后继续第二段"],
+        role="worker",
+        root_id="root-session-compact",
+    )
+    manager.prepare_runner_attempt(task.id)
+
+    _record_session_compact_result(
+        manager,
+        task.id,
+        {
+            "summary": "已完成第一段，下一步继续第二段。",
+            "next_action": "继续第二段实现",
+            "compact": {
+                "status": "near_limit",
+                "ratio": 0.92,
+                "message": "subagent local compact needed",
+                "token_budget": {"current_tokens": 9200, "max_context_tokens": 10000},
+            },
+        },
+    )
+    loaded = manager.load(task.id)
+    refs = _session_compact_refs(loaded)
+    metadata = refs["metadata"]
+    packet = refs["packet"]
+
+    assert metadata["schema_version"] == "subagent_session_compact.v1"
+    assert metadata["owner"] == {"owner_type": "subagent_run", "owner_id": task.id}
+    assert metadata["memory_scope"] == "task_local"
+    assert metadata["writes_main_memory"] is False
+    assert metadata["source"]["auto_status"] == "needs_user_confirmation"
+    assert metadata["token_budget"]["current_tokens"] == 9200
+    assert metadata["restore_refs"]["agent_run_checkpoint"].endswith("checkpoint.json")
+    assert refs["latest_summary"].read_text(encoding="utf-8").startswith("# Subagent Session Compact")
+    assert packet["session_compact"]["metadata_ref"] == str(refs["latest_metadata"])
+    assert packet["session_compact"]["summary_ref"] == str(refs["latest_summary"])
+    assert str(refs["latest_metadata"]) in packet["recommended_read_paths"]
+    assert any(row.get("event_type") == "subagent_session_compact" for row in refs["ledger_rows"])
+    assert not (tmp_path / "memory_archive" / "compact_applies").exists()
+
+
+# LLM: runner prompts should surface the task-local session compact package before stale parent memory.
+# 函数用途: 验证父级重新 dispatch 时，runner prompt 展示子代理 compact metadata/summary refs 和下一步。
+def test_runner_prompt_includes_task_local_session_compact_package(tmp_path: Path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="继续压缩后的 worker 任务",
+        thought="需要读子代理自己的 compact package。",
+        plan=["读本地 compact metadata", "继续实现"],
+        role="worker",
+    )
+    manager.prepare_runner_attempt(task.id)
+    _record_session_compact_result(
+        manager,
+        task.id,
+        {
+            "summary": "第一轮已写完目录结构。",
+            "next_action": "继续补齐页面交互",
+            "compact": {"token_budget": {"current_tokens": 9300, "max_context_tokens": 10000}},
+        },
+    )
+
+    prompt = _build_subagent_runner_prompt(manager.build_execution_context(task.id))
+
+    assert "Session Compact Package" in prompt
+    assert "subagent_session_compact.v1" in prompt
+    assert "继续补齐页面交互" in prompt
+    assert "latest_metadata.json" in prompt
+    assert "latest_summary.md" in prompt
+    assert "memory_archive/compact_applies" not in prompt
+
+
+# LLM: _record_session_compact_result keeps compact package tests focused on assertions.
+# 函数用途: 写入一个带 session_compact 信号的 runner result，复用结构化输出和 token budget 形状。
+def _record_session_compact_result(
+    manager: SubAgentManager,
+    run_id: str,
+    case: dict[str, object],
+) -> None:
+    compact = case.get("compact") if isinstance(case.get("compact"), dict) else {}
+    compact_payload = {
+        "suggested": True,
+        "auto_status": "needs_user_confirmation",
+        **compact,
+    }
+    manager.record_runner_result(
+        RecordRunnerResultParams(
+            run_id=run_id,
+            dry_run=False,
+            ok=True,
+            message=str(compact_payload.get("message") or "runner compacted locally"),
+            status="RUNNING",
+            verification_status="UNVERIFIED",
+            structured_output=SubAgentParsedOutput(
+                found=True,
+                ok=True,
+                status="RUNNING",
+                summary=str(case.get("summary") or ""),
+                next_actions=[str(case.get("next_action") or "")],
+            ),
+            session_compact=compact_payload,
+        )
+    )
+
+
+# LLM: _session_compact_refs reads the compact package files produced by manager persistence.
+# 函数用途: 返回测试断言需要的 metadata、continue packet 和 ledger 行，避免测试函数变长。
+def _session_compact_refs(task) -> dict[str, object]:
+    latest_metadata = Path(task.agent_run_latest_compaction_metadata_json)
+    latest_summary = Path(task.agent_run_latest_compaction_summary_md)
+    packet_ref = Path(task.agent_run_compactions_dir) / "latest_continue_packet.json"
+    ledger_ref = Path(task.agent_run_compactions_dir) / "session_compact_ledger.jsonl"
+    return {
+        "latest_metadata": latest_metadata,
+        "latest_summary": latest_summary,
+        "metadata": json.loads(latest_metadata.read_text(encoding="utf-8")),
+        "packet": json.loads(packet_ref.read_text(encoding="utf-8")),
+        "ledger_rows": [json.loads(line) for line in ledger_ref.read_text(encoding="utf-8").splitlines()],
+    }

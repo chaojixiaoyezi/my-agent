@@ -25,7 +25,6 @@ from .dispatch_facade import _DispatchFacadeMixin, _DispatchFailureMixin
 from .dispatch_mixin_helpers import (
     DispatchRunnerStageRequest,
     RunnerJobExecutionParams,
-    parent_planner_dispatch_record,
     run_dispatch_runner_stage,
 )
 from .dispatch_params import (
@@ -36,22 +35,15 @@ from .dispatch_params import (
 )
 from .dispatch_record_params import (
     AcceptanceRecordParams,
-    ActionApplyRecordParams,
-    CapabilityRouteRecordParams,
     PatchReviewRecordParams,
-    WorkflowRecordParams,
 )
 from .dispatch_runner_batches import execute_runner_jobs
 
 if TYPE_CHECKING:
     pass
 
+from .dispatch_collection_records import collect_dispatch_records
 from .dispatch_service import (
-    build_workflow_records,
-    make_action_apply_records,
-    make_capability_route_records,
-    make_due_check_record,
-    make_leadership_recovery_plan_record,
     make_patch_review_records,
     update_pending_work_state,
 )
@@ -88,55 +80,7 @@ class _DispatchCollectionBase:
     # LLM: _collect_dispatch_records 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 读取或查询记录需要的状态，返回调用方可继续处理的快照；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
     def _collect_dispatch_records(self, ctx: DispatchContext):
-        records = []
-
-        if ctx.planner:
-            records.append(parent_planner_dispatch_record(self, ctx))
-
-        if ctx.normalized_workflow_mode in {"plan", "auto"}:
-            workflow_records = build_workflow_records(
-                WorkflowRecordParams(
-                    self,
-                    self.subagents.list_runs(),
-                    ctx.normalized_workflow_mode,
-                    ctx.limit,
-                    ctx.apply,
-                )
-            )
-            records.extend(workflow_records)
-
-        records.append(
-            make_due_check_record(
-                self,
-                ctx.cfg,
-                ctx.apply,
-                root_id=ctx.root_id,
-                include_run_ids=ctx.include_run_ids,
-                exclude_run_ids=ctx.exclude_run_ids,
-            )
-        )
-        leadership_record = make_leadership_recovery_plan_record(self, ctx.cfg)
-        if leadership_record is not None:
-            records.append(leadership_record)
-        action_records = make_action_apply_records(
-            ActionApplyRecordParams(
-                self,
-                ctx.cfg,
-                ctx.apply,
-                ctx.take_over_by,
-                ctx.locked_files,
-                ctx.limit,
-                ctx.root_id,
-                ctx.include_run_ids,
-                ctx.exclude_run_ids,
-            )
-        )
-        records.extend(action_records)
-        route_records = make_capability_route_records(
-            CapabilityRouteRecordParams(self, ctx.router, ctx.cfg, ctx.apply, ctx.limit)
-        )
-        records.extend(route_records)
-        return records
+        return collect_dispatch_records(self, ctx)
 
     # LLM: _execute_runner_jobs 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 推进执行器jobs的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。

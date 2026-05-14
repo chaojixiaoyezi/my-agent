@@ -21,6 +21,7 @@ from .manager_work_orders import (
 )
 from .models import SubAgentCard, SubAgentTask, TakeoverRecord, WorkOrderValidation
 from .services.base import CreateRunParams
+from .services.takeover_run import SubAgentTakeoverRunService
 from .utils import _new_id
 
 if TYPE_CHECKING:
@@ -171,8 +172,6 @@ class SubAgentBaseMixin:
     # LLM: create_takeover_run creates one idempotent replacement run for a dead source run.
     # 函数用途: 原 runner 挂死时创建接管 run，并记录旧 run 被接管；重复调用会复用已有接管者。
     def create_takeover_run(self, params):
-        from .services.takeover_run import SubAgentTakeoverRunService
-
         return SubAgentTakeoverRunService(self).create(params)
 
     # LLM: load 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

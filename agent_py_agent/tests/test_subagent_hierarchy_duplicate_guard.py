@@ -240,57 +240,41 @@ def test_hierarchy_schedule_allows_explicit_repair_leaf_for_existing_target(tmp_
 def test_hierarchy_schedule_blocks_active_duplicate_repair_child(tmp_path):
     manager = SubAgentManager(tmp_path)
     parent = _shared_parent_with_verified_leaf(manager)
-    first = manager.schedule_child_runs(
-        params=HierarchyScheduleRequest(
-            parent_run_id=parent.id,
-            child_specs=[
-                HierarchyChildSpec(
-                    goal="根据失败 QA refs 修复 app.js 按钮绑定。",
-                    role="worker",
-                    agent_name="qa-repair-worker",
-                )
-            ],
-            apply=True,
-        )
-    )
-
-    duplicate = manager.schedule_child_runs(
-        params=HierarchyScheduleRequest(
-            parent_run_id=parent.id,
-            child_specs=[
-                HierarchyChildSpec(
-                    goal="修复失败 QA ref 指出的按钮绑定和 retry 逻辑。",
-                    role="worker",
-                    agent_name="qa-repair-worker",
-                )
-            ],
-            apply=True,
-        )
-    )
+    first = _schedule_repair_worker(manager, parent.id, "根据失败 QA refs 修复 app.js 按钮绑定。", "qa-repair-worker")
+    duplicate = _schedule_repair_worker(manager, parent.id, "修复失败 QA ref 指出的按钮绑定和 retry 逻辑。", "qa-repair-worker")
 
     assert len(first.created_run_ids) == 1
-    assert duplicate.blocked is True
-    assert duplicate.created_run_ids == []
-    assert f"active_duplicate_child:{first.created_run_ids[0]}" in duplicate.reason
-    assert len(manager.load(parent.id).child_ids) == 2
+    _assert_duplicate_repair_blocked(manager, parent.id, duplicate, first.created_run_ids[0])
 
-    renamed_duplicate = manager.schedule_child_runs(
+    renamed_duplicate = _schedule_repair_worker(
+        manager,
+        parent.id,
+        "最终修复 case01 失败 QA 指出的按钮绑定。",
+        "case01-final-repair-worker",
+    )
+
+    _assert_duplicate_repair_blocked(manager, parent.id, renamed_duplicate, first.created_run_ids[0])
+
+
+# LLM: _schedule_repair_worker keeps duplicate-repair tests focused on guard semantics.
+# 函数用途: 创建一个同父级 repair worker 调度请求，复用 goal/name 参数。
+def _schedule_repair_worker(manager: SubAgentManager, parent_id: str, goal: str, agent_name: str):
+    return manager.schedule_child_runs(
         params=HierarchyScheduleRequest(
-            parent_run_id=parent.id,
-            child_specs=[
-                HierarchyChildSpec(
-                    goal="最终修复 case01 失败 QA 指出的按钮绑定。",
-                    role="worker",
-                    agent_name="case01-final-repair-worker",
-                )
-            ],
+            parent_run_id=parent_id,
+            child_specs=[HierarchyChildSpec(goal=goal, role="worker", agent_name=agent_name)],
             apply=True,
         )
     )
 
-    assert renamed_duplicate.blocked is True
-    assert f"active_duplicate_child:{first.created_run_ids[0]}" in renamed_duplicate.reason
-    assert len(manager.load(parent.id).child_ids) == 2
+
+# LLM: _assert_duplicate_repair_blocked verifies active repair dedupe without repeating assertions.
+# 函数用途: 断言重复 repair worker 被阻断，且父节点 child_ids 没有继续膨胀。
+def _assert_duplicate_repair_blocked(manager: SubAgentManager, parent_id: str, result, first_run_id: str) -> None:
+    assert result.blocked is True
+    assert result.created_run_ids == []
+    assert f"active_duplicate_child:{first_run_id}" in result.reason
+    assert len(manager.load(parent_id).child_ids) == 2
 
 
 # LLM: Referencing shared assets must not make a page worker claim ownership of those assets.

@@ -300,14 +300,18 @@ def test_subagent_debug_trace_records_runner_model_and_tool_stages(tmp_path):
 
 def test_runner_stage_trace_refreshes_active_ancestor_heartbeats(tmp_path):
     """孙级 runner 活动时刷新仍在执行的祖先 heartbeat，避免 nested dispatch 误接管活父级。"""
-    from types import SimpleNamespace
-
-    from agent_py_agent.agent.agent_core.runner_stage_trace import (
-        RunnerToolStageTraceRequest,
-        trace_runner_tool_call_started,
-    )
-
     manager = SubAgentManager(tmp_path / "subs", debug_trace_level=0)
+    old = 10.0
+    root, parent, child = _running_trace_hierarchy(manager, old)
+
+    _trace_child_tool_started(manager, root.id, child.id)
+
+    _assert_ancestor_heartbeats_refreshed(manager, [child.id, parent.id, root.id], old)
+
+
+# LLM: _running_trace_hierarchy builds a three-level active subagent tree for heartbeat tests.
+# 函数用途: 创建 root -> parent -> child 并把三层都标记为 RUNNING，减少测试主体样板。
+def _running_trace_hierarchy(manager: SubAgentManager, old: float):
     root = manager.create_run(goal="root", thought="root", plan=["root"], role="coordinator")
     parent = manager.create_run(
         goal="parent",
@@ -327,32 +331,42 @@ def test_runner_stage_trace_refreshes_active_ancestor_heartbeats(tmp_path):
         root_id=root.id,
         depth=2,
     )
-    old = 10.0
     for task in [root, parent, child]:
         task.status = "RUNNING"
         task.runner_active_attempt_id = f"attempt-{task.id}"
         task.heartbeat_at = old
         task.updated_at = old
         manager.save(task)
+    return root, parent, child
 
-    agent = SimpleNamespace(
-        subagents=manager,
-        _current_subagent_run_id=child.id,
+
+# LLM: _trace_child_tool_started sends the same runner trace event the real tool loop would emit.
+# 函数用途: 触发孙级工具开始事件，验证祖先 heartbeat 刷新。
+def _trace_child_tool_started(manager: SubAgentManager, root_id: str, child_id: str) -> None:
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.runner_stage_trace import (
+        RunnerToolStageTraceRequest,
+        trace_runner_tool_call_started,
     )
 
+    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id=child_id)
     trace_runner_tool_call_started(
         RunnerToolStageTraceRequest(
             agent=agent,
-            params=SimpleNamespace(source="test", request_id="", run_id=child.id, task_id=root.id),
+            params=SimpleNamespace(source="test", request_id="", run_id=child_id, task_id=root_id),
             tool_rounds=1,
             idx=1,
             payload={"tool": "write_file", "path": "x"},
         )
     )
 
-    assert manager.load(child.id).heartbeat_at > old
-    assert manager.load(parent.id).heartbeat_at > old
-    assert manager.load(root.id).heartbeat_at > old
+
+# LLM: _assert_ancestor_heartbeats_refreshed keeps heartbeat expectations compact and ordered.
+# 函数用途: 断言 child、parent、root 三层 heartbeat 都被刷新。
+def _assert_ancestor_heartbeats_refreshed(manager: SubAgentManager, run_ids: list[str], old: float) -> None:
+    for run_id in run_ids:
+        assert manager.load(run_id).heartbeat_at > old
 
 
 def test_subagent_debug_trace_level_four_records_stage_previews(tmp_path):

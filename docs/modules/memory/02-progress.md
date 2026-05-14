@@ -304,3 +304,9 @@
 - compact work_state 从 shared raw/hook JSONL 文件读取记录时，会重新按 `session_id/request_id/run_id/task_id` scope 过滤。restore refs 指向的是文件，不代表整个文件都属于当前 compact。
 - 真实验证：case11 clean4 低阈值 E2E 生成 4 个 apply 包，均 `missing_fields=[]` 并最终回复 `已完成`。
 - 遗留：子代理自己的模型会话内多次 compact/apply/resume 仍待下一片实现；当前已具备 task-local continue packet 和 `memory-resume` owner refs。
+
+## 2026-05-14 subagent session compact package
+- 中文说明：子代理的 compact 第一片现在保持“任务本地”。当 `save=False` 的子代理 runner 触发 compact 建议信号时，不写主 memory archive，而是在该 run 的 `compactions/` 下写本地 compact package。
+- package 固定包含 `latest_metadata.json`、`latest_summary.md`、`restore_refs.json` 和 append-only `session_compact_ledger.jsonl`。这些文件只保存恢复线索、状态、token budget 和 refs，不复制产物正文。
+- `latest_continue_packet.json` 会带 `session_compact` 字段，父级恢复/重新 dispatch 时可以优先读 metadata/summary，再读 checkpoint/summary/task refs。
+- 遗留：这不是完整的子代理模型会话内自动续跑。下一片要让 runner 在 package 就绪后受控接续，并用真实 E2E 验证一个子代理连续 compact 多次。

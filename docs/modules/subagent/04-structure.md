@@ -195,6 +195,7 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/services/persistence_failure_handoff.py`：归一化并写入 `reports/failure_handoff.json`，让 persistence 主流程只负责编排。
 - `agent_py_agent/agent/subagents/services/persistence_recovery_outputs.py`：集中写 checkpoint artifacts、takeover readiness 和 task-local continue packet，避免 persistence 主保存流程重新靠近 code-size 风险。
 - `agent_py_agent/agent/subagents/services/compact_continue_packet.py`：子代理保存闭环的写入层；每次保存会在 run workspace `compactions/` 下写 `latest_continue_packet.json` 并追加 `session_compact_ledger.jsonl`，父级后续重新 dispatch 同一 run 时通过 runner prompt 自动读取。
+- `agent_py_agent/agent/subagents/services/subagent_session_compact.py`：子代理本地 session compact package 写入层；当 runner 结果带 compact 信号时，只在当前 run 的 `compactions/` 下写 `latest_metadata.json`、`latest_summary.md`、package refs 和 ledger，不写主代理 `memory_archive/compact_applies`。
 - `agent_py_agent/agent/subagents/services/takeover_readiness.py`：生成 `reports/takeover_readiness.json` 和 `TAKEOVER_READINESS.md` 接管前必读包；只整理 context bundle refs、checkpoint refs、manifest 元数据和读取顺序，不读取 artifact 正文；并提供 refs-only 的推荐读取顺序解析给 rescue/action apply 使用。
 - `agent_py_agent/agent/subagents/services/persistence_security.py`：归一化 `SecuritySignal` 预留字段，让安全信号解析不挤进 persistence 主流程；当前不执行安全策略。
 - `agent_py_agent/agent/subagents/services/persistence_identity.py`：归一化 `RuntimeIdentity` 预留字段，让员工/会话/配置 scope 解析不挤进 persistence 主流程；当前只保留审计元数据。

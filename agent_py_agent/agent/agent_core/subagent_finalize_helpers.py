@@ -57,8 +57,30 @@ def record_finalized_runner_result(request: FinalizedRunnerRecordRequest):
             structured_repair_attempted=repair_state["attempted"],
             structured_repair_ok=repair_state["ok"],
             structured_repair_error=repair_state["error"],
+            session_compact=_subagent_session_compact_payload(params.result),
         )
     )
+
+
+# LLM: _subagent_session_compact_payload converts save=False compact signals into task-local package facts.
+# 函数用途: 从 AgentRunResult 提取自动 compact 建议；子代理不会写主 memory，只把这些字段交给 task-local writer。
+def _subagent_session_compact_payload(result: object) -> dict[str, object]:
+    if not bool(getattr(result, "memory_compact_suggested", False)):
+        return {}
+    return {
+        "suggested": True,
+        "status": str(getattr(result, "memory_compact_status", "") or ""),
+        "auto_status": str(getattr(result, "memory_compact_auto_status", "") or ""),
+        "ratio": float(getattr(result, "memory_compact_ratio", 0.0) or 0.0),
+        "message": str(getattr(result, "memory_compact_message", "") or ""),
+        "commands": list(getattr(result, "memory_compact_commands", []) or []),
+        "token_budget": {
+            "current_tokens": int(getattr(result, "cumulative_token_estimate", 0) or 0),
+            "turn_tokens": int(getattr(result, "turn_token_estimate", 0) or 0),
+            "prompt_tokens": int(getattr(result, "prompt_token_estimate", 0) or 0),
+        },
+        "continue_packet": dict(getattr(result, "memory_compact_auto_continue_packet", None) or {}),
+    }
 
 
 # LLM: _coordinator_analysis_only_override blocks fake completion when no child creation happened.

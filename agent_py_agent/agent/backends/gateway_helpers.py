@@ -101,14 +101,23 @@ def _urllib_request(request: GatewayRequest) -> urllib.request.Request:
 def _open_gateway_request(request: GatewayRequest):
     last_attempt = len(_RETRYABLE_HTTP_DELAYS_SECONDS)
     for attempt in range(last_attempt + 1):
-        req = _urllib_request(request)
-        try:
-            return urllib.request.urlopen(req, timeout=request.timeout)
-        except urllib.error.HTTPError as exc:
-            if not _should_retry_http_error(exc, attempt, last_attempt):
-                raise
-            time.sleep(_retry_delay_seconds(exc, attempt))
+        response = _gateway_request_attempt(request, attempt, last_attempt)
+        if response is not None:
+            return response
     raise RuntimeError("unreachable gateway retry state")
+
+
+# LLM: _gateway_request_attempt wraps one provider call and sleeps only for retryable HTTP errors.
+# 函数用途: 执行一次 gateway HTTP 请求；可重试错误返回 None，非可重试错误原样抛出。
+def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt: int):
+    req = _urllib_request(request)
+    try:
+        return urllib.request.urlopen(req, timeout=request.timeout)
+    except urllib.error.HTTPError as exc:
+        if not _should_retry_http_error(exc, attempt, last_attempt):
+            raise
+        time.sleep(_retry_delay_seconds(exc, attempt))
+        return None
 
 
 # LLM: _should_retry_http_error keeps auth/schema errors fail-fast while retrying provider overload and gateway flakiness.

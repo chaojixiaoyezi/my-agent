@@ -11,7 +11,8 @@ Human version:
 """
 
 from .models import SubAgentBoardOptions, SubAgentDueCheckOptions, SubAgentPlanActionsOptions
-from .services.board import SubAgentBoardService, _build_risk_flags, _to_board_item
+from .services.board import SubAgentBoardService
+from .services.board_items import build_risk_flags, to_board_item
 
 
 # LLM: SubAgentBoardMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
@@ -30,12 +31,12 @@ class SubAgentBoardMixin:
     # LLM: _to_board_item 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
     # 函数用途: 转换看板条目的数据表示，保持跨模块传递时的字段含义一致；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def _to_board_item(self, task):
-        return _to_board_item(self, task)
+        return to_board_item(self, task)
 
     # LLM: _risk_flags 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
     # 函数用途: 处理riskflags相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def _risk_flags(self, task, open_request_count=0, open_gap_count=0):
-        return _build_risk_flags(task, open_request_count, open_gap_count)
+        return build_risk_flags(task, open_request_count, open_gap_count)
 
     # LLM: build_board 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
     # 函数用途: 构建看板所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。

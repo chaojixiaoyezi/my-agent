@@ -20,6 +20,8 @@ _REF_KEYS = (
     "agent_run_task",
     "agent_run_checkpoint",
     "agent_run_summary",
+    "agent_run_latest_compaction_metadata",
+    "agent_run_latest_compaction_summary",
     "agent_run_final_report",
     "agent_run_findings",
     "agent_run_timeline",
@@ -53,6 +55,7 @@ def build_subagent_compact_continuation_section(request: SubagentCompactContinua
     ]
     lines.extend(_preflight_lines(request.context.context_bundle, request.max_chars))
     lines.extend(_packet_lines(packet, request.max_chars))
+    lines.extend(_session_compact_lines(existing_refs, request.max_chars))
     lines.extend(_ref_lines(existing_refs))
     lines.extend(_snippet_lines(existing_refs, request.max_chars))
     return "\n".join(lines).rstrip()
@@ -77,6 +80,8 @@ def _workspace_refs(context: SubAgentExecutionContext) -> dict[str, str]:
     compactions = values.get("agent_run_compactions", "")
     if compactions:
         values.setdefault("agent_run_latest_continue_packet", str(Path(compactions) / "latest_continue_packet.json"))
+        values.setdefault("agent_run_latest_compaction_metadata", str(Path(compactions) / "latest_metadata.json"))
+        values.setdefault("agent_run_latest_compaction_summary", str(Path(compactions) / "latest_summary.md"))
     return values
 
 
@@ -128,6 +133,43 @@ def _packet_lines(path: Path | None, max_chars: int) -> list[str]:
         lines.append("- recommended_read_paths:")
         lines.extend(f"  - {_short(item, max_chars)}" for item in paths[:5])
     return lines + [""]
+
+
+# LLM: _session_compact_lines shows subagent-local compact metadata without reading main memory.
+# 函数用途: 从 compactions/latest_metadata.json 和 latest_summary.md 渲染本地 compact 包摘要。
+def _session_compact_lines(refs: dict[str, str], max_chars: int) -> list[str]:
+    metadata_ref = refs.get("agent_run_latest_compaction_metadata", "")
+    summary_ref = refs.get("agent_run_latest_compaction_summary", "")
+    if not metadata_ref and not summary_ref:
+        return []
+    payload, status = _read_json_with_status(Path(metadata_ref)) if metadata_ref else ({}, "missing")
+    lines = ["### Session Compact Package", ""]
+    lines.extend(_compact_ref_lines(metadata_ref, summary_ref))
+    lines.extend(_compact_metadata_bullets(payload, status, max_chars))
+    summary = _read_text(Path(summary_ref), max_chars) if summary_ref else ""
+    if summary:
+        lines.extend(["", summary])
+    return lines + [""]
+
+
+# LLM: _compact_ref_lines keeps session compact refs rendering flat and reusable.
+# 函数用途: 渲染 latest metadata/summary 路径行，减少主 prompt 拼装函数嵌套。
+def _compact_ref_lines(metadata_ref: str, summary_ref: str) -> list[str]:
+    lines: list[str] = []
+    if metadata_ref:
+        lines.append(f"- latest_metadata: {metadata_ref}")
+    if summary_ref:
+        lines.append(f"- latest_summary: {summary_ref}")
+    return lines
+
+
+# LLM: _compact_metadata_bullets extracts small scalar metadata hints from the local compact package.
+# 函数用途: 渲染 compact metadata 的关键字段；坏 metadata 只展示状态，不抛错。
+def _compact_metadata_bullets(payload: dict[str, Any], status: str, max_chars: int) -> list[str]:
+    if status != "ok":
+        return [f"- metadata_status: {status}"]
+    keys = ("schema_version", "memory_scope", "writes_main_memory", "current_step", "next_action")
+    return [f"- {key}: {_short(payload[key], max_chars)}" for key in keys if key in payload]
 
 
 # LLM: _preflight_lines keeps packet self-healing auditable after prepare_runner_attempt regenerates files.

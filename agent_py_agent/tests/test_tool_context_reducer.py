@@ -7,46 +7,10 @@ from agent_py_agent.agent.tools import ToolExecutionResult
 # LLM: dispatch externalization tests protect root context from growing by artifact rereads.
 # 函数用途: 验证大型 dispatch_subagents 输出外置后，live prompt 仍保留 refs-first 下一步，而不是诱导模型读正文。
 def test_dispatch_externalized_result_keeps_compact_next_action_without_read_hint():
-    output = json.dumps(
-        {
-            "summary": {"runner": 3, "acceptance": 2},
-            "records": [{"message": "x" * 2000}],
-            "direct_children": {
-                "parent_run_id": "root-1",
-                "total": 1,
-                "by_status": {"AWAITING_ACCEPTANCE": 1},
-                "needs_recovery": True,
-                "next_action": "inspect_or_rescue_direct_children",
-                "recovery_run_ids": ["child-1"],
-                "recovery_action_counts": {"rerun_original_from_continue_packet": 1},
-                "recovery_strategies": [
-                    {
-                        "run_id": "child-1",
-                        "recommended_action": "rerun_original_from_continue_packet",
-                        "packet_status": "ready",
-                        "uses_continue_packet": True,
-                        "runner_instruction": "先读 latest_continue_packet.json 再继续当前步骤",
-                    }
-                ],
-                "suggested_tool_call": {
-                    "tool": "dispatch_subagents",
-                    "run_ids": ["child-1"],
-                    "execute_runners": True,
-                },
-            },
-        }
-    )
+    output = _dispatch_externalized_output()
     rendered = render_tool_result_for_live_prompt(
         ToolExecutionResult("dispatch_subagents", True, output),
-        {
-            "output_externalized": True,
-            "artifact_ref": "/tmp/tool_outputs/dispatch_subagents-1.json",
-            "output_path": "/tmp/tool_outputs/dispatch_subagents-1.json",
-            "call_id": "1-1",
-            "scoped_call_id": "root-1:1-1",
-            "output_hash": "abc",
-            "output_size_bytes": len(output),
-        },
+        _dispatch_externalized_archive_record(output),
     )
 
     assert "orchestration_summary" in rendered
@@ -59,6 +23,56 @@ def test_dispatch_externalized_result_keeps_compact_next_action_without_read_hin
     assert "records" not in rendered
     assert "read_artifact_hint" not in rendered
     assert len(rendered) < 1400
+
+
+# LLM: _dispatch_externalized_output keeps the reducer regression fixture out of the assertion body.
+# 函数用途: 构造带 direct_children/recovery 策略的大型 dispatch_subagents 输出。
+def _dispatch_externalized_output() -> str:
+    return json.dumps(
+        {
+            "summary": {"runner": 3, "acceptance": 2},
+            "records": [{"message": "x" * 2000}],
+            "direct_children": _direct_children_recovery_payload(),
+        }
+    )
+
+
+# LLM: _direct_children_recovery_payload models the compact next-action facts the reducer must preserve.
+# 函数用途: 返回 direct_children 恢复摘要，保护 latest_continue_packet 路径提示不丢失。
+def _direct_children_recovery_payload() -> dict:
+    return {
+        "parent_run_id": "root-1",
+        "total": 1,
+        "by_status": {"AWAITING_ACCEPTANCE": 1},
+        "needs_recovery": True,
+        "next_action": "inspect_or_rescue_direct_children",
+        "recovery_run_ids": ["child-1"],
+        "recovery_action_counts": {"rerun_original_from_continue_packet": 1},
+        "recovery_strategies": [
+            {
+                "run_id": "child-1",
+                "recommended_action": "rerun_original_from_continue_packet",
+                "packet_status": "ready",
+                "uses_continue_packet": True,
+                "runner_instruction": "先读 latest_continue_packet.json 再继续当前步骤",
+            }
+        ],
+        "suggested_tool_call": {"tool": "dispatch_subagents", "run_ids": ["child-1"], "execute_runners": True},
+    }
+
+
+# LLM: _dispatch_externalized_archive_record mirrors the tool-output archive metadata shape.
+# 函数用途: 给 live prompt reducer 提供外置 artifact 元数据和 scoped call id。
+def _dispatch_externalized_archive_record(output: str) -> dict:
+    return {
+        "output_externalized": True,
+        "artifact_ref": "/tmp/tool_outputs/dispatch_subagents-1.json",
+        "output_path": "/tmp/tool_outputs/dispatch_subagents-1.json",
+        "call_id": "1-1",
+        "scoped_call_id": "root-1:1-1",
+        "output_hash": "abc",
+        "output_size_bytes": len(output),
+    }
 
 
 # LLM: read_artifact reducer tests prevent repeated full dispatch artifact rereads.

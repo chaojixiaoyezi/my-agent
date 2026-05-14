@@ -43,6 +43,7 @@ def write_subagent_continue_packet(request: SubagentContinuePacketRequest) -> st
 def build_subagent_continue_packet(request: SubagentContinuePacketRequest, packet_ref: Path) -> dict[str, Any]:
     task = request.task
     restore_refs = _restore_refs(task)
+    session_compact = _session_compact_refs(task)
     return {
         "schema_version": _SCHEMA_VERSION,
         "kind": "subagent_task_local_continue_packet",
@@ -64,6 +65,7 @@ def build_subagent_continue_packet(request: SubagentContinuePacketRequest, packe
         "next_action": _next_action(task, request.output_payload),
         "blockers": _unique_strings([*task.blockers, *_strings(request.output_payload.get("blockers"))]),
         "restore_refs": restore_refs,
+        "session_compact": session_compact,
         "recommended_read_paths": _recommended_read_paths(task, packet_ref, restore_refs),
         "guard": _guard_payload(task),
         "reserved": {},
@@ -89,6 +91,8 @@ def _restore_refs(task: SubAgentTask) -> dict[str, str]:
         "agent_run_findings": task.agent_run_findings_jsonl,
         "agent_run_timeline": task.agent_run_timeline_jsonl,
         "agent_run_compactions": task.agent_run_compactions_dir,
+        "agent_run_latest_compaction_summary": task.agent_run_latest_compaction_summary_md,
+        "agent_run_latest_compaction_metadata": task.agent_run_latest_compaction_metadata_json,
         "legacy_task_dir": task.task_dir,
         "legacy_checkpoint": task.checkpoint_json or task.checkpoint_ref,
         "runner_result": task.runner_result_json,
@@ -101,6 +105,29 @@ def _restore_refs(task: SubAgentTask) -> dict[str, str]:
     return {key: str(value) for key, value in pairs.items() if str(value or "").strip()}
 
 
+# LLM: subagent_restore_refs exposes the same refs to package writers without duplicating path rules.
+# 函数用途: 给子代理 session compact 写入器复用恢复路径映射，保证 continue packet 和 compact metadata 一致。
+def subagent_restore_refs(task: SubAgentTask) -> dict[str, str]:
+    return _restore_refs(task)
+
+
+# LLM: _session_compact_refs summarizes the latest task-local compact package if one exists.
+# 函数用途: 把 latest_metadata/latest_summary 挂进 continue packet，父级恢复时能优先按 refs 接续。
+def _session_compact_refs(task: SubAgentTask) -> dict[str, str]:
+    metadata_ref = str(getattr(task, "agent_run_latest_compaction_metadata_json", "") or "").strip()
+    summary_ref = str(getattr(task, "agent_run_latest_compaction_summary_md", "") or "").strip()
+    if not metadata_ref or not Path(metadata_ref).exists():
+        return {}
+    payload = _read_json_object(Path(metadata_ref))
+    return {
+        "schema_version": str(payload.get("schema_version") or "subagent_session_compact.v1"),
+        "package_id": str(payload.get("package_id") or ""),
+        "metadata_ref": metadata_ref,
+        "summary_ref": summary_ref if summary_ref and Path(summary_ref).exists() else "",
+        "next_action": str(payload.get("next_action") or ""),
+    }
+
+
 # LLM: _recommended_read_paths orders the smallest recovery facts before heavy reports.
 # 函数用途: 给父级重新 dispatch 或接管时的读取顺序，优先 checkpoint、summary、task 和 output refs。
 def _recommended_read_paths(task: SubAgentTask, packet_ref: Path, restore_refs: dict[str, str]) -> list[str]:
@@ -108,6 +135,8 @@ def _recommended_read_paths(task: SubAgentTask, packet_ref: Path, restore_refs: 
         str(packet_ref),
         restore_refs.get("agent_run_checkpoint", ""),
         restore_refs.get("agent_run_summary", ""),
+        restore_refs.get("agent_run_latest_compaction_metadata", ""),
+        restore_refs.get("agent_run_latest_compaction_summary", ""),
         restore_refs.get("agent_run_task", ""),
         restore_refs.get("output_json", ""),
         restore_refs.get("runner_result", ""),
@@ -115,6 +144,16 @@ def _recommended_read_paths(task: SubAgentTask, packet_ref: Path, restore_refs: 
         restore_refs.get("shared_messages", ""),
     ]
     return _unique_strings([item for item in values if _path_exists_or_is_future_ref(item, task)])
+
+
+# LLM: _read_json_object tolerates absent or corrupt optional compact metadata.
+# 函数用途: 读取 latest_metadata.json 时失败返回空对象，让 continue packet 仍能写出。
+def _read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 # LLM: _path_exists_or_is_future_ref keeps packet refs stable even before optional files appear.
@@ -201,5 +240,6 @@ def _unique_strings(values: list[str]) -> list[str]:
 __all__ = [
     "SubagentContinuePacketRequest",
     "build_subagent_continue_packet",
+    "subagent_restore_refs",
     "write_subagent_continue_packet",
 ]
