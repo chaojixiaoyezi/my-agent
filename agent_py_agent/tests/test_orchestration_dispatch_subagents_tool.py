@@ -202,6 +202,37 @@ class TestDispatchSubagentsToolTopLevelWorkflow:
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
         assert call_kwargs["params"].workflow_mode == "off"
 
+    def test_top_level_dispatch_does_not_auto_workflow_concrete_worker_file_task(self):
+        """顶层推进明确文件交付 worker 时，模型误传 auto 也不应扩成通用 workflow。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        mock_report = MagicMock()
+        mock_report.dry_run = False
+        mock_report.summary = {}
+        mock_report.records = []
+
+        mock_agent = MagicMock()
+        mock_agent._current_subagent_run_id = ""
+        mock_agent.config.subagent_workflow_mode = "auto"
+        mock_agent.tools.specs.return_value = []
+        mock_agent.dispatch_subagents.return_value = mock_report
+        mock_agent.subagents.workspace = Path("/tmp/workspace")
+        mock_agent.subagents.list_runs.return_value = [
+            SimpleNamespace(
+                id="worker",
+                role="worker",
+                parent_id="",
+                status="PLANNING",
+                goal="把最终文件写到 /tmp/workspace/deliverables/index.html",
+            )
+        ]
+
+        result = DispatchSubagentsTool(mock_agent).execute({"apply": True, "execute_runners": True, "workflow_mode": "auto"})
+
+        assert result.ok is True
+        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
+        assert call_kwargs["params"].workflow_mode == "off"
+
 
 
 class TestDispatchSubagentsToolRunnerContext:

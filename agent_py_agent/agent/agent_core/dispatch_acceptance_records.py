@@ -16,10 +16,15 @@ from ..subagents.rendering import render_acceptance_review_markdown
 from ..subagents.reports import AcceptanceReviewRecord, AcceptanceReviewReport
 from ..subagents.services.dispatch_params import DispatchRecordParams
 from ..subagents.services.indexing_params import IndexReportParams
+from .dispatch_acceptance_alignment import (
+    align_acceptance_record_with_parent_tests,
+    parent_tests_require_rescue,
+)
 from .dispatch_acceptance_refresh import (
     DispatchAcceptanceRefreshRequest,
     refresh_acceptance_after_parent_tests,
 )
+from .dispatch_acceptance_stored_record import stored_acceptance_record
 from .dispatch_record_params import AcceptanceRecordParams
 
 
@@ -40,6 +45,7 @@ def make_acceptance_records(params: AcceptanceRecordParams):
             DispatchAcceptanceRefreshRequest(agent, item, params, policy_summary)
         )
         refreshed = _apply_acceptance_followup_if_ready(params, refreshed, policy_summary)
+        refreshed = _align_acceptance_record_with_parent_tests(params, refreshed, policy_summary)
         refreshed_records.append(refreshed)
         records.append(agent.subagents.make_dispatch_record(
             params=_acceptance_dispatch_record_params(refreshed, policy_summary)
@@ -138,6 +144,32 @@ def _acceptance_dispatch_record_params(item: Any, policy_summary: dict[str, obje
     )
 
 
+# LLM: _align_acceptance_record_with_parent_tests makes dispatch facts single-source after real tests fail.
+# 函数用途: 显式父级验收 tests 失败时，把 acceptance record、aggregate 和单 run 审计都改成拒绝修复口径。
+def _align_acceptance_record_with_parent_tests(
+    params: AcceptanceRecordParams,
+    record: AcceptanceReviewRecord,
+    policy_summary: dict[str, object],
+) -> AcceptanceReviewRecord:
+    if not parent_tests_require_rescue(policy_summary):
+        return record
+    aligned = align_acceptance_record_with_parent_tests(record, policy_summary)
+    if params.apply and params.execute_acceptance_tests:
+        _write_single_acceptance_record_files(params.agent, aligned)
+    return aligned
+
+
+# LLM: _write_single_acceptance_record_files mirrors the manager writer after post-test normalization.
+# 函数用途: 单 run acceptance_review.json/Markdown 也使用测试失败后的拒绝口径，避免和 dispatch 报告不一致。
+def _write_single_acceptance_record_files(agent: Any, record: AcceptanceReviewRecord) -> None:
+    writer = getattr(agent.subagents, "_write_acceptance_record_files", None)
+    indexer = getattr(agent.subagents, "_index_acceptance_review", None)
+    if callable(writer):
+        writer(record)
+    if callable(indexer):
+        indexer(record)
+
+
 # LLM: _parent_acceptance_policy_summary attaches policy/execution refs and runs tests only with explicit options.
 # 函数用途: 为 acceptance 调度记录生成自动验收策略和执行摘要；默认只写审计，显式 options 才跑 tests。
 def _parent_acceptance_policy_summary(
@@ -175,7 +207,7 @@ def _apply_acceptance_followup_if_ready(
         ),
     )
     policy_summary.update(_followup_control_summary(result))
-    return _stored_acceptance_record(params.agent, record.run_id) or record
+    return stored_acceptance_record(params.agent, record.run_id) or record
 
 
 # LLM: _should_apply_acceptance_followup keeps top-level dispatch and failed tests non-mutating.
@@ -206,45 +238,6 @@ def _followup_control_summary(result: Any) -> dict[str, object]:
         "parent_acceptance_followup_command": str(getattr(result, "recommended_command", "") or ""),
         "parent_acceptance_followup_reason": str(getattr(result, "message", "") or ""),
     }
-
-
-# LLM: _stored_acceptance_record reloads the authoritative record written by the follow-up apply gate.
-# 函数用途: follow-up apply 后从 task-local acceptance_review.json 取回 after_status/applied 等最终字段。
-def _stored_acceptance_record(agent: Any, run_id: str) -> AcceptanceReviewRecord | None:
-    try:
-        task = agent.subagents.load(run_id)
-    except FileNotFoundError:
-        return None
-    path = Path(task.reports_dir) / "acceptance_review.json"
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return AcceptanceReviewRecord(
-        id=str(payload.get("id") or ""),
-        run_id=str(payload.get("run_id") or run_id),
-        dry_run=bool(payload.get("dry_run", True)),
-        applied=bool(payload.get("applied", False)),
-        ok=bool(payload.get("ok", False)),
-        decision=str(payload.get("decision") or ""),
-        message=str(payload.get("message") or ""),
-        before_status=str(payload.get("before_status") or ""),
-        after_status=str(payload.get("after_status") or ""),
-        before_verification_status=str(payload.get("before_verification_status") or ""),
-        after_verification_status=str(payload.get("after_verification_status") or ""),
-        reviewer=str(payload.get("reviewer") or ""),
-        note=str(payload.get("note") or ""),
-        evidence_count=int(payload.get("evidence_count") or 0),
-        test_count=int(payload.get("test_count") or 0),
-        artifact_count=int(payload.get("artifact_count") or 0),
-        worker_claims=_string_list(payload.get("worker_claims")),
-        evidence_facts=_string_list(payload.get("evidence_facts")),
-        parent_conclusions=_string_list(payload.get("parent_conclusions")),
-        evidence_paths=_string_list(payload.get("evidence_paths")),
-        created_at=float(payload.get("created_at") or 0.0),
-    )
 
 
 # LLM: _parent_acceptance_policy_payload keeps the summary field list out of the orchestration function.
@@ -327,10 +320,3 @@ def _read_followup_payload(path: Path) -> dict[str, object]:
     followup = payload.get("followup") if isinstance(payload, dict) else {}
     return followup if isinstance(followup, dict) else {}
 
-
-# LLM: _string_list normalizes optional JSON arrays from stored audit files.
-# 函数用途: 把 acceptance_review.json 中可能缺失或非字符串的数组字段安全转回字符串列表。
-def _string_list(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item) for item in value if item is not None]

@@ -76,3 +76,25 @@
 - envelope 只放稳定控制字段：`dry_run`、`summary`、`actionable_run_ids`、`recovery_run_ids`、`dispatch_json`、`dispatch_md`、`record_count` 和 scope。父级要继续推进或恢复时读这些字段，不从自然语言 `message` 里猜 run id。
 - 旧报告里 `summary` 可能是字符串；新桥接会把它包成 `{"text": "..."}`，保持兼容。
 - 这一步的目的不是增加流程，而是减少“模型把摘要当工具/把路径说错/把 run id 读漏”的机会。结构化字段是事实来源，自然语言只负责让人看懂。
+
+## Steps 10-12 Planner And QA Verification
+
+- 中文说明：第 10-12 步的重点是“父级别变重、QA 别空转”。parent planner 使用 control-plane 提示和空工具列表，只消费状态快照；父级委托下级后，在 acceptor 完成前只读 refs、报告和运行元数据。
+- QA/tester/acceptor 不再一开始固定创建。系统先返回 `quality_advice`，等 worker/writer/leaf 有可验收产物后，再让 LLM 决定 QA 范围、数量和顺序。
+- 一个 QA 可以检查多个 worker，也可以只检查高风险 refs；系统只挡明显错误，例如没有产物时创建空 QA、QA 失败却直接收口、repair 覆盖无关文件。
+- 复验命令覆盖 planner 隔离、body-read guard、QA 后置、dispatch child refs 和 planner/watch；当前 focused tests 通过。
+
+## Steps 13-18 Recovery Verification
+
+- 中文说明：第 13-18 步验证“出故障时不要越修越乱”。父级 dispatch 返回 direct child 状态和 refs；继续跑优先看 `latest_continue_packet.json`，坏包/旧包/缺包降级 checkpoint 和 summary。
+- worker 挂死走 takeover run，保留原任务目录、artifacts 和恢复 refs；coordinator/leader 挂死且带孩子时走 leadership recovery，把孩子转交给新 leader，不创建空接管节点。
+- 多个 child 同时失败时，payload 给 batch recovery 摘要和 action counts；自动 gate 会拦太大的 refs-only 批次，防止无限扩容。
+- 连续恢复没有进展时触发 no-progress fuse，写 blocker/worklog 并停止本轮自动恢复，不把失败说成完成。
+
+## Steps 19-24 Natural E2E Verification
+
+- 中文说明：第 19-24 步改成真实小白提示词验证，不在普通任务里塞 `dispatch/run_id` 这类术语。外部测试者只给主代理一句自然任务，后续必须由主代理创建和调度小傻妞。
+- 已加固：明确文件交付 worker 即使命中全局 workflow auto，create/dispatch 也会关闭通用 producer/critic/repair 扩展；质量波次等 worker 完成后再由 LLM 按 refs 决定。
+- 已加固：`dispatch_subagents` 验收记录以父级真实 tests/follow-up 为准。测试失败、测试为空但需要 rescue、或 follow-up 指向 `plan_rescue` 时，dispatch record、aggregate report 和单 run `acceptance_review.json` 都写 `REJECT`，不再混入“验收通过”。
+- 已加固：refs-only 委托期不只挡 `read_file/read_artifact`，也挡 `run_command` 里的 `cat/tail/head/sed/rg` 等产物正文读取；控制面元数据仍可读，避免恢复和调度卡死。
+- 真实复验：`subagent_hardening_e2e_20260515_step24d` 通过，root 自然语言派工，1 个小傻妞 worker 写出家具网站首页，最终 `done_verified=1`。

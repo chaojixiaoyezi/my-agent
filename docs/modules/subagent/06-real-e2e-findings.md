@@ -6317,3 +6317,64 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Related group: `python3 -m pytest -q agent_py_agent/tests/test_tools/test_filesystem_tools.py agent_py_agent/tests/test_tooling_filesystem.py agent_py_agent/tests/test_artifact_integrity.py agent_py_agent/tests/test_subagent_finalize_helpers.py agent_py_agent/tests/test_execution_static_site_items.py agent_py_agent/tests/test_tools/test_tool_loop.py` -> passed.
   - Ruff: `/Users/xiaoyezi/ai_claw/bin/ruff check agent_py_agent/agent/tooling/_filesystem_read.py agent_py_agent/tests/test_tools/test_filesystem_tools.py agent_py_agent/agent/subagents/static_required_files.py agent_py_agent/agent/agent_core/subagent_dispatch_closeout.py agent_py_agent/tests/test_execution_static_site_items.py agent_py_agent/tests/test_tools/test_tool_loop.py` -> passed.
 - Status: fixed by focused tests; rerun clean R17.
+
+### Finding 73: top-level concrete workers must not grow generic workflow tails
+
+- Discovered at: 2026-05-15 during subagent hardening natural furniture E2E step24.
+- Symptom:
+  - Root created one worker for `/deliverables/index.html`.
+  - The model then passed `workflow_mode=auto` during dispatch, so the system expanded the simple worker into generic workflow tail nodes.
+- 中文解释：
+  - 大白话：用户只是让小傻妞写一个 `index.html`，系统不应该因为一个 `auto` 参数又多造 producer/critic/repair 一串角色。简单明确文件交付，先让 worker 把活干完。
+- Root cause:
+  - Dispatch only normalized mode strings but did not look at existing active top-level worker goals.
+  - Create-time concrete-file detection and dispatch-time concrete-file detection were not aligned.
+- Fix:
+  - Create and dispatch both recognize explicit file targets such as `index.html`.
+  - If an active top-level ordinary worker owns a concrete file target, dispatch forces `workflow_mode=off`; QA/repair is deferred until worker reports facts.
+- Verification:
+  - Focused regression: `test_top_level_dispatch_does_not_auto_workflow_concrete_worker_file_task`.
+  - Clean E2E `subagent_hardening_e2e_20260515_step24d`: one root-created worker only, no generic workflow tail.
+- Status: fixed by focused tests and clean real E2E.
+
+### Finding 74: acceptance records must not say pass and rescue at the same time
+
+- Discovered at: 2026-05-15 during subagent hardening natural furniture E2E step24b/step24c.
+- Symptom:
+  - `subagent_dispatch_report.json` and task-local `acceptance_review.json` could contain `message: 验收通过` while the same record also had `parent_acceptance_followup_action=plan_rescue`.
+  - Root trusted the success wording and wrote an over-optimistic completion paragraph; the later `Subagent State Notice` had to correct it.
+- 中文解释：
+  - 大白话：同一张验收单上不能一边写“通过”，一边写“需要救援”。模型不是读心术，它会被这种矛盾事实带偏。
+- Root cause:
+  - Acceptance refresh recomputed dry-run review before parent test/follow-up facts were normalized.
+  - Failed tests, empty tests with rescue, and blocked follow-up were not mapped back into the dispatch-visible `AcceptanceReviewRecord`.
+- Fix:
+  - After parent tests/follow-up are known, acceptance records are aligned to one truth source.
+  - Real test failures produce `REJECT` with a failure message.
+  - Empty or blocked tests with rescue produce `REJECT` with “未产生可执行测试或测试执行被拦截”，not a fake pass.
+  - Aggregate acceptance report and single-run `acceptance_review.json` are rewritten with the same normalized record.
+- Verification:
+  - Focused regression: `test_subagent_dispatch_failed_acceptance_tests_override_old_pass_message`.
+  - Focused group with parent acceptance controller and runner-context acceptance passed.
+- Status: fixed by focused tests; clean E2E no longer emitted contradictory acceptance facts.
+
+### Finding 75: shell reads can bypass refs-only body-read guard
+
+- Discovered at: 2026-05-15 during subagent hardening natural furniture E2E step24c.
+- Symptom:
+  - User asked root to “只根据小傻妞的报告做收口，不要亲自写页面”.
+  - `read_file` body reads were guarded, but root then tried `run_command tail -20 .../deliverables/index.html` to inspect the product body.
+- 中文解释：
+  - 大白话：挡住了“读文件”按钮，但模型换成 shell 里的 `tail` 也能看正文，这等于从侧门绕过去了。
+- Root cause:
+  - Delegation body-read guard only covered `read_file` and `read_artifact`.
+  - Shell commands were treated as generic commands, even when they were clearly `cat/tail/head/sed/rg` against product files.
+- Fix:
+  - `run_command` now enters the same guard when it uses common body-reading commands against product paths.
+  - Shell wrappers like `bash -lc "tail file"` are handled conservatively.
+  - Runtime/control-plane metadata such as `subagent_dispatch_report.json` remains readable, so recovery and dispatch do not get blocked.
+- Verification:
+  - Focused regression: `test_top_level_natural_report_only_prompt_blocks_shell_tail_product_body`.
+  - Focused regression: `test_top_level_refs_only_root_can_shell_read_orchestration_metadata`.
+  - Clean E2E `subagent_hardening_e2e_20260515_step24d`: root did not inspect product body; task closed from local subagent state.
+- Status: fixed by focused tests and clean real E2E.

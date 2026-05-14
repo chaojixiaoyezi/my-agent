@@ -23,6 +23,7 @@ from agent_py_agent.agent.agent_core.orchestration_tools import _tool_workflow_m
         (None, "auto", "auto"),
         (None, "manual", "plan"),
         ("invalid", "invalid", "off"),
+        ("execute", "auto", "off"),
         ("  off  ", "auto", "off"),
     ],
 )
