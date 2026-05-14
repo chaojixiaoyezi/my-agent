@@ -231,6 +231,46 @@ def test_filesystem_tools_reject_bad_parameters_and_hide_absolute_outside_paths(
         assert "src/nested.txt" not in non_recursive.output
 
 
+def test_read_file_reports_next_start_line_when_truncated():
+    """LLM: long read_file outputs should include a continuation cursor.
+
+    新手说明:
+    文件太长被截断时，要告诉模型下次从哪一行继续读，避免它乱猜行号。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        target = workspace / "long.txt"
+        target.write_text("\n".join(f"Line {idx}" for idx in range(1, 80)), encoding="utf-8")
+        read_tool = ReadFileTool(workspace, max_chars=80)
+
+        result = read_tool.execute({"path": "long.txt"})
+
+        assert result.ok
+        assert "已截断" in result.output
+        assert "total_lines=79" in result.output
+        assert "next_start_line=" in result.output
+
+
+def test_read_file_start_line_past_eof_reports_total_lines():
+    """LLM: tail reads past EOF should return actionable line-count guidance.
+
+    新手说明:
+    模型读超过文件末尾时，要返回总行数和建议尾部范围，而不是让它看到空结果继续猜。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        target = workspace / "short.txt"
+        target.write_text("one\ntwo\nthree\n", encoding="utf-8")
+        read_tool = ReadFileTool(workspace, max_chars=2000)
+
+        result = read_tool.execute({"path": "short.txt", "start_line": 99})
+
+        assert not result.ok
+        assert "start_line 超出文件末尾" in result.output
+        assert "total_lines=3" in result.output
+        assert "end_line=3" in result.output
+
+
 def test_search_text_does_not_follow_symlink_to_outside_workspace():
     """LLM: verify that SearchTextTool does not follow symlinks pointing outside the workspace.
 

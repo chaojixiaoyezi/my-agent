@@ -94,15 +94,26 @@ def _runner_timeout_role_keys(task: SubAgentTask) -> list[str]:
     run_id = str(getattr(task, "id", "") or "")
     parent_id = str(getattr(task, "parent_id", "") or "")
     root_id = str(getattr(task, "root_id", "") or "")
-    if not parent_id or (run_id and root_id and run_id == root_id):
+    role = str(getattr(task, "role", "") or "").strip().lower()
+    if (not parent_id or (run_id and root_id and run_id == root_id)) and _runner_timeout_root_like_role(role):
         keys.append("root")
     if str((getattr(task, "attributes", {}) or {}).get("takeover_source_run_id") or "").strip():
         keys.append("takeover")
-    role = str(getattr(task, "role", "") or "").strip().lower()
     if role:
         keys.append(role)
         keys.extend(_runner_timeout_role_aliases(role))
     return keys
+
+
+# LLM: _runner_timeout_root_like_role keeps a top-level worker from inheriting root's unlimited budget.
+# 函数用途: 判断无父节点任务是否真是带队/root 类角色；普通 worker 即使在顶层也应按 worker 超时桶。
+def _runner_timeout_root_like_role(role: str) -> bool:
+    normalized = str(role or "").strip().lower().replace("-", "_")
+    if not normalized:
+        return True
+    return normalized in {"root", "coordinator", "leader", "manager", "planner", "dispatcher"} or normalized.endswith(
+        "_coordinator"
+    )
 
 
 # LLM: _runner_timeout_role_aliases hides internal template names from user-facing timeout config.

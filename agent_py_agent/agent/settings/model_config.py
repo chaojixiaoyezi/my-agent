@@ -21,7 +21,7 @@ class ModelConfig:
     api_key: str = ""
     api_key_env: str = "AGENT_API_KEY"
     model_name: str = "gpt-4o-mini"
-    request_timeout: int = 60
+    request_timeout: int = 240
     max_tokens: int = 1024
     temperature: str = "0.2"
     anthropic_version: str = "2023-06-01"

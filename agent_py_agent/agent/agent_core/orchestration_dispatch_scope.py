@@ -26,26 +26,33 @@ def dispatch_execute_runners_default(agent, params: dict[str, object], *, apply:
     return bool(apply and current_subagent_run_id(agent))
 
 
-# LLM: dispatch_execute_acceptance_tests_default makes runner parents validate direct children after execution.
-# 函数用途: runner 内部调度默认跑父级验收 tests；顶层和显式 false 仍保持原来的非自动执行边界。
-def dispatch_execute_acceptance_tests_default(agent, params: dict[str, object], *, apply: bool) -> bool:
+# LLM: dispatch_execute_acceptance_tests_default validates real runner output at every dispatch boundary.
+# 函数用途: 真实执行 runner 时默认跑父级验收 tests；显式 false 仍可关闭，dry-run 不执行。
+def dispatch_execute_acceptance_tests_default(
+    agent,
+    params: dict[str, object],
+    *,
+    apply: bool,
+    execute_runners: bool,
+) -> bool:
     if "execute_acceptance_tests" in params:
         return _bool_param(params.get("execute_acceptance_tests"), default=False)
-    return bool(apply and current_subagent_run_id(agent))
+    return bool(apply and execute_runners)
 
 
-# LLM: dispatch_auto_apply_acceptance_followup_default closes runner-context children after passed tests.
-# 函数用途: 顶层仍保留人工 follow-up；runner 内 apply+tests 通过后默认落子节点验收状态。
+# LLM: dispatch_auto_apply_acceptance_followup_default only applies machine-proven acceptance follow-ups.
+# 函数用途: 真实 runner 的验收 tests 全通过后默认落状态；失败、dry-run 或显式 false 都不会自动闭环。
 def dispatch_auto_apply_acceptance_followup_default(
     agent,
     params: dict[str, object],
     *,
     apply: bool,
+    execute_runners: bool,
     execute_acceptance_tests: bool,
 ) -> bool:
     if "auto_apply_acceptance_followup" in params:
         return _bool_param(params.get("auto_apply_acceptance_followup"), default=False)
-    return bool(apply and execute_acceptance_tests and current_subagent_run_id(agent))
+    return bool(apply and execute_runners and execute_acceptance_tests)
 
 
 # LLM: dispatch_max_runners_default prevents runner-context parents from advancing only one child and timing out.

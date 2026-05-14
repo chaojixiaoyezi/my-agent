@@ -309,6 +309,25 @@ class TestRunnerTaskTimeout:
         assert get_task_timeout(root_task, 8.0, config) == 0.0
         assert get_task_timeout(worker_task, 8.0, config) == 8.0
 
+    # LLM: top-level worker runs are still workers, not unlimited root coordinators.
+    # 函数用途: 复现真实 E2E 中顶层 worker 因 parent_id 为空误吃 root=off，导致 worker 时间上限失效的问题。
+    def test_top_level_worker_uses_worker_timeout_not_root_timeout(self):
+        from agent_py_agent.agent.agent_core.runner_gate import get_task_timeout
+
+        config = self._timeout_config("off")
+        config.runner_timeout_by_role = {"root": "off", "worker": "180"}
+
+        task = MagicMock()
+        task.id = "top-worker"
+        task.root_id = "top-worker"
+        task.parent_id = ""
+        task.role = "worker"
+        task.attributes = {}
+        task.goal = "做三个家具品牌首页。"
+        task.plan = []
+
+        assert get_task_timeout(task, 0.0, config) == 180.0
+
     # LLM: user-facing worker timeout should cover internal concrete worker roles.
     # 函数用途: 验证 leaf_worker 这类内部角色名会自动匹配用户配置的 worker 超时。
     def test_role_timeout_worker_alias_matches_leaf_worker(self):
@@ -488,6 +507,24 @@ class TestIsDispatchRunnerCandidate:
         # capability_request 在 capability_grants 为空时不可重试
         assert _is_dispatch_runner_candidate(mock_task, runner_max_attempts=2) is False
 
+    # LLM: Provider timeouts are transient model-service failures and must enter bounded runner retry.
+    # 函数用途: 确认真实模型请求超时后的 BLOCKED runner 会被下一轮 dispatch 选中重试，而不是只做 classify_blocker。
+    def test_provider_timeout_blocked_task_is_retry_candidate(self):
+        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+
+        task = SimpleNamespace(
+            status="BLOCKED",
+            verification_status="UNVERIFIED",
+            channel_status="OK",
+            capability_requests=[],
+            capability_gaps=[],
+            capability_grants=[],
+            failure_type="provider_timeout",
+            runner_attempts=1,
+        )
+
+        assert _is_dispatch_runner_candidate(task, runner_max_attempts=2) is True
+
 
 class TestDispatchRunnerCandidates:
     """测试 _dispatch_runner_candidates() 函数。"""
@@ -592,4 +629,5 @@ class TestRetryableRunnerFailureTypes:
         assert "structured_output_parse_error" in RETRYABLE_RUNNER_FAILURE_TYPES
         assert "tool_result_missing" in RETRYABLE_RUNNER_FAILURE_TYPES
         assert "api_error" in RETRYABLE_RUNNER_FAILURE_TYPES
+        assert "provider_timeout" in RETRYABLE_RUNNER_FAILURE_TYPES
         assert "runner_timeout" in RETRYABLE_RUNNER_FAILURE_TYPES

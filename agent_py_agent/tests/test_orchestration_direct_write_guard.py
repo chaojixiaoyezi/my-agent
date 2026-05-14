@@ -12,6 +12,15 @@ def _agent():
     return SimpleNamespace(root="/tmp/workspace")
 
 
+def _runner_agent(role: str):
+    task = SimpleNamespace(role=role, agent_name=f"小小傻妞-{role}")
+    return SimpleNamespace(
+        root="/tmp/workspace",
+        _current_subagent_run_id="run-1",
+        subagents=SimpleNamespace(load=lambda _run_id: task),
+    )
+
+
 def test_delegate_only_prompt_blocks_root_write_file_to_deliverables():
     """用户要求通过子代理完成时，root 不能直接 write_file 写业务产物。"""
     result = maybe_block_delegate_only_direct_write(
@@ -41,6 +50,33 @@ def test_delegate_only_prompt_blocks_shell_redirection_write():
     assert result is not None
     assert result.ok is False
     assert "delegated_direct_write_blocked" in result.output
+
+
+def test_delegate_only_prompt_allows_leaf_worker_product_write():
+    """被派去交付的 leaf_worker 应能写自己的产物，guard 只拦 root/父级偷写。"""
+    result = maybe_block_delegate_only_direct_write(
+        DelegateOnlyDirectWriteGuardRequest(
+            agent=_runner_agent("leaf_worker"),
+            user_prompt="请派小傻妞来做，不要你自己亲自写页面。",
+            payload={"tool": "write_file", "path": "/tmp/workspace/artifacts/index.html", "content": "..."},
+        )
+    )
+
+    assert result is None
+
+
+def test_delegate_only_prompt_still_blocks_coordinator_product_write():
+    """coordinator 可以写协调报告，但不能代替 worker 直接写最终页面。"""
+    result = maybe_block_delegate_only_direct_write(
+        DelegateOnlyDirectWriteGuardRequest(
+            agent=_runner_agent("coordinator"),
+            user_prompt="请派小傻妞来做，不要你自己亲自写页面。",
+            payload={"tool": "write_file", "path": "/tmp/workspace/artifacts/index.html", "content": "..."},
+        )
+    )
+
+    assert result is not None
+    assert result.ok is False
 
 
 def test_delegate_only_prompt_allows_read_only_shell_commands():

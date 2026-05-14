@@ -83,6 +83,28 @@ class _DispatchThenQualityBackend:
         )
 
 
+# LLM: _DispatchThenOverclaimBackend reproduces a root model calling blocked subagents "passed".
+# 类用途: 第一次执行 dispatch，第二次故意过度乐观收口，用来验证系统会用真实状态覆盖报喜稿。
+class _DispatchThenOverclaimBackend:
+    name = "fake_dispatch_then_overclaim_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    '{"tool":"dispatch_subagents","apply":false,"execute_runners":false,"no_probe":true}\n'
+                    "[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        return ModelResponse(text="测试通过，所有子代理已经完成。", backend=self.name)
+
+
 # LLM: _UnlimitedRoundsBackend proves max_tool_rounds=0 disables only the round cap, not normal tool execution.
 # 类用途: 测试专用后端；前两轮都请求读取文件，第三轮自行收口，用来验证 0 表示不限制。
 class _UnlimitedRoundsBackend:
@@ -97,6 +119,24 @@ class _UnlimitedRoundsBackend:
             return ToolCallingBackend().generate(prompt, on_chunk=on_chunk)
         assert "已达到最大工具轮数限制" not in prompt
         return ModelResponse(text="无限轮数配置已正常收口", backend=self.name)
+
+
+# LLM: _EmptyAfterToolBackend reproduces provider empty final text after a successful tool call.
+# 类用途: 第一次请求工具，第二次模拟 MiniMax/Anthropic-compatible 空流式响应，验证工具结果不被异常吞掉。
+class _EmptyAfterToolBackend:
+    name = "fake_empty_after_tool_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"read_file","path":"notes.txt"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        raise RuntimeError("Anthropic-compatible 流式响应没有文本内容")
 
 
 def test_tool_loop_and_prompt_transcript():
@@ -115,6 +155,23 @@ def test_tool_loop_and_prompt_transcript():
         assert result.response == "工具执行完成"
         assert result.tool_rounds == 1
         assert "hello tool world" in result.prompt
+
+
+# LLM: provider empty final response after tools should not crash the whole run.
+# 函数用途: 覆盖真实 E2E 中工具都跑完、最终总结模型空响应导致 CLI 异常退出的问题。
+def test_tool_loop_falls_back_when_final_model_response_is_empty_after_tool():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        (workspace / "notes.txt").write_text("hello empty model fallback", encoding="utf-8")
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = _EmptyAfterToolBackend()
+
+        result = agent.run("读取 notes 后总结", save=False, allowed_tools=["read_file"])
+
+        assert "模型接口最终总结返回空文本" in result.response
+        assert result.executed_tools == ["read_file"]
+        assert agent.backend.calls == 2
 
 
 # LLM: max_tool_rounds=0 should mean unlimited, while the model can still stop itself.
@@ -519,6 +576,38 @@ def test_completed_dispatch_does_not_close_when_prompt_requires_quality_roles():
         assert agent.backend.calls == 2
         assert "继续创建 tester 和 acceptor" in result.response
         assert "未再发起额外模型请求" not in result.response
+
+
+# LLM: final root answers must not overclaim success when persisted subagent tasks are blocked.
+# 函数用途: 复现真实 E2E 里产物存在但 task.json 未全绿，模型却说测试通过的问题。
+def test_final_response_warns_when_subagent_tree_still_has_blockers():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            subagent_workspace="subs",
+            max_tool_rounds=4,
+        )
+        agent = SimpleAgent(cfg, workspace)
+        task = agent.subagents.create_run(
+            goal="残留阻塞任务 fixture",
+            thought="用于测试最终回答不能过度乐观。",
+            plan=["失败", "等待恢复"],
+            allowed_tools=[],
+        )
+        task.status = "BLOCKED"
+        task.verification_status = "FAILED"
+        task.failure_type = "acceptance_failed"
+        agent.subagents.save(task)
+        agent.backend = _DispatchThenOverclaimBackend()
+
+        result = agent.run("推进恢复并汇报", save=False)
+
+        assert "测试通过，所有子代理已经完成。" not in result.response
+        assert "结论修正" in result.response
+        assert "不能按完成汇报" in result.response
+        assert task.id in result.response
 
 
 # LLM: _done_verified_task creates a traceable finished subagent for top-level closeout tests.

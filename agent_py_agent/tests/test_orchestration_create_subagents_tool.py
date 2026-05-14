@@ -149,6 +149,36 @@ class TestCreateSubagentsToolTemplatePolicy:
         assert result.ok is True
         assert params.allowed_tools is None
 
+    def test_frontend_preset_completes_partial_explicit_tool_list(self):
+        """frontend-dev 这类写页面预设会补齐 append/replace，避免模型少填工具后卡住。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_task = MagicMock()
+        mock_task.id = "frontend_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/frontend_001"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": "修复 /tmp/project/artifacts/index2.html 页面。",
+            "tool_preset": "frontend-dev",
+            "allowed_tools": ["write_file", "read_file", "run_command"],
+            "extra_write_roots": ["/tmp/project/artifacts"],
+        })
+
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert result.ok is True
+        assert "append_file" in params.allowed_tools
+        assert "replace_in_file" in params.allowed_tools
+        assert "read_artifact" in params.allowed_tools
+
     def test_vague_deliverable_worker_requires_extra_write_root(self):
         """写真实产物但只说目标目录时必须拒绝，避免 worker 写进自己的任务目录。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
@@ -242,6 +272,268 @@ class TestCreateSubagentsToolCoordinatorSeed:
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
         assert params.workflow_mode == "off"
+
+    def test_coordinator_seed_intent_repairs_model_worker_role(self):
+        """模型把 root coordinator 误写成 worker 时，工具层要按目标意图纠偏。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "auto"
+        mock_agent._current_user_prompt = (
+            "请建立主代理 -> 小傻妞-root-coordinator -> 小小傻妞-child-coordinator "
+            "-> 小小小傻妞-leaf-worker 的链路。第一层必须创建下一层，不能自己写最终产物。"
+        )
+
+        mock_task = MagicMock()
+        mock_task.id = "root_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/root_001"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": (
+                "创建 小傻妞-root-coordinator，并让它使用 schedule_child_subagents "
+                "继续创建 小小傻妞-child-coordinator；本节点不要写最终产物。"
+            ),
+            "role": "worker",
+            "workflow_mode": "auto",
+        })
+
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert result.ok is True
+        assert params.role == "coordinator"
+        assert params.workflow_mode == "off"
+
+    def test_user_style_delegate_to_next_layer_repairs_worker_to_coordinator(self):
+        """用户说小傻妞可再找小小傻妞时，第一层应按带队角色创建。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "auto"
+        mock_agent._current_user_prompt = (
+            "请你派小傻妞来完成这个任务，不要你自己亲自写页面。"
+            "如果任务比较多，可以让小傻妞再找小小傻妞帮忙。"
+        )
+
+        mock_task = MagicMock()
+        mock_task.id = "root_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/root_001"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": "做 3 个高端现代家具品牌网站首页 HTML 文件。",
+            "role": "worker",
+            "workflow_mode": "auto",
+        })
+
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert result.ok is True
+        assert params.role == "coordinator"
+        assert params.workflow_mode == "off"
+
+    def test_lineage_agent_name_in_role_field_becomes_name_not_role(self):
+        """模型把“小傻妞-root-coordinator”写进 role 时，应拆成标准 role 和显示名。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "auto"
+
+        mock_task = MagicMock()
+        mock_task.id = "root_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/root_001"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": "创建第一层 root coordinator，并使用 schedule_child_subagents 创建下一层。",
+            "role": "小傻妞-root-coordinator",
+            "workflow_mode": "auto",
+        })
+
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert result.ok is True
+        assert params.role == "coordinator"
+        assert params.agent_name == "小傻妞-root-coordinator"
+        assert params.workflow_mode == "off"
+
+    def test_concrete_single_file_worker_disables_generic_workflow_auto(self):
+        """具体单文件 worker 不应被 workflow=auto 套成 producer/critic/repair。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "auto"
+        mock_agent._current_user_prompt = "请派小傻妞做两个不同风格的家具品牌首页。"
+        mock_agent.subagents.workspace_root = Path("/tmp/project")
+        mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
+
+        mock_task = MagicMock()
+        mock_task.id = "worker_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/worker_001"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": "在 /tmp/project 目录下创建一个名为 index1.html 的单文件 HTML 页面。",
+            "role": "小傻妞",
+            "workflow_mode": "auto",
+            "extra_write_roots": ["/tmp/project"],
+        })
+
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert result.ok is True
+        assert params.role == "worker"
+        assert params.workflow_mode == "off"
+
+    def test_single_file_child_worker_is_not_repaired_to_coordinator(self):
+        """用户允许多层派工时，单文件 child_worker 仍应保持交付角色。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "auto"
+        mock_agent._current_user_prompt = "请派小傻妞来做，如果任务多，可以让小傻妞再找小小傻妞帮忙。"
+        mock_agent.subagents.workspace_root = Path("/tmp/project")
+        mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
+
+        mock_task = MagicMock()
+        mock_task.id = "worker_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/worker_001"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": "在 /tmp/project/artifacts/index1.html 创建一个单文件 HTML 页面。",
+            "role": "child_worker",
+            "workflow_mode": "auto",
+            "extra_write_roots": ["/tmp/project/artifacts"],
+        })
+
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert result.ok is True
+        assert params.role == "child_worker"
+        assert params.workflow_mode == "off"
+
+    def test_repeated_concrete_file_goal_requires_explicit_split(self):
+        """count 不能复制同一个带文件名的 worker goal，避免多个子代理抢同一批产物。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "auto"
+        mock_agent._current_user_prompt = "请派小傻妞做两个家具首页。"
+        mock_agent.subagents.workspace_root = Path("/tmp/project")
+        mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": (
+                "在 /tmp/project/artifacts 创建 index1.html 和 index2.html 两个单文件 HTML 页面。"
+            ),
+            "count": 2,
+            "role": "leaf_worker",
+            "workflow_mode": "auto",
+            "extra_write_roots": ["/tmp/project/artifacts"],
+        })
+
+        assert result.ok is False
+        assert "ambiguous_repeated_product_goal" in result.output
+        assert "count=1 的 coordinator" in result.output
+        mock_agent.subagents.create_run.assert_not_called()
+
+    def test_create_subagents_rejects_button_constraint_reversal(self):
+        """派工目标不能把用户的“不失灵按钮”改写成 href=#。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "auto"
+        mock_agent._current_user_prompt = "请做家具首页，不要有失灵按钮。"
+        mock_agent.subagents.workspace_root = Path("/tmp/project")
+        mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": "创建 index1.html，所有按钮可点击（可指向 #）。",
+            "role": "worker",
+            "extra_write_roots": ["/tmp/project/artifacts"],
+        })
+
+        assert result.ok is False
+        assert "delegation_constraint_conflict" in result.output
+        mock_agent.subagents.create_run.assert_not_called()
+
+    def test_create_subagents_rejects_hash_anchor_escape_when_user_requires_working_buttons(self):
+        """派工目标不能用“#锚点”绕过用户的不失灵按钮约束。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "auto"
+        mock_agent._current_user_prompt = "请做家具首页，不要有失灵按钮。"
+        mock_agent.subagents.workspace_root = Path("/tmp/project")
+        mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": "创建 index1.html，所有按钮都要有 href 属性或 #锚点。",
+            "role": "worker",
+            "extra_write_roots": ["/tmp/project/artifacts"],
+        })
+
+        assert result.ok is False
+        assert "delegation_constraint_conflict" in result.output
+        mock_agent.subagents.create_run.assert_not_called()
+
+    def test_create_subagents_rejects_unverified_remote_images_when_user_requires_no_broken_images(self):
+        """用户要求不失效图片时，派工目标不能擅自要求远程图片 URL。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "auto"
+        mock_agent._current_user_prompt = "请做家具首页，不要出现失效图片链接。"
+        mock_agent.subagents.workspace_root = Path("/tmp/project")
+        mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": "创建 index1.html，使用 Unsplash 的真实图片 URL。",
+            "role": "worker",
+            "extra_write_roots": ["/tmp/project/artifacts"],
+        })
+
+        assert result.ok is False
+        assert "delegation_constraint_conflict" in result.output
+        mock_agent.subagents.create_run.assert_not_called()
 
     def test_explicit_coordinator_seed_without_name_gets_lineage_prefix(self):
         """模型没传 agent_name 时，第一层 root/coordinator 也必须有小傻妞前缀。"""

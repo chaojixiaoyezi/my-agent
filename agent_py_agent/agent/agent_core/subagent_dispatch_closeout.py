@@ -37,13 +37,42 @@ def subagent_dispatch_completion_response(request: DispatchCompletionRequest) ->
 
 # LLM: subagent_dispatch_limit_response prevents final user reports from inventing subagent status.
 # 函数用途: 顶层工具轮数耗尽时，直接按 task.json 生成事实状态报告，不再让模型自由总结失败链路。
-def subagent_dispatch_limit_response(agent, *, backend: str) -> ModelResponse | None:
+def subagent_dispatch_limit_response(agent, *, backend: str, reason: str = "tool_limit") -> ModelResponse | None:
     if _inside_subagent_runner(agent):
         return None
     tasks = _subagent_tasks(agent)
     if not tasks:
         return None
-    return ModelResponse(text=_dispatch_limit_text(tasks), backend=backend)
+    return ModelResponse(text=_dispatch_limit_text(tasks, reason=reason), backend=backend)
+
+
+# LLM: subagent_dispatch_final_response_guard makes the final user answer reflect persisted task state.
+# 函数用途: 顶层主代理用过子代理编排工具后，如果 task.json 仍有阻塞，就用事实报告替换模型草稿，防止先报喜再纠正。
+def subagent_dispatch_final_response_guard(
+    agent,
+    response: ModelResponse | None,
+    *,
+    executed_tools: list[object],
+) -> ModelResponse | None:
+    if response is None or _inside_subagent_runner(agent):
+        return response
+    if not _executed_orchestration(executed_tools):
+        return response
+    tasks = _subagent_tasks(agent)
+    blockers = _blocking_task_ids(tasks)
+    if not blockers:
+        return response
+    notice = _dispatch_incomplete_notice(tasks, blockers)
+    text = str(getattr(response, "text", "") or "")
+    if text.strip() == notice.strip():
+        return response
+    return ModelResponse(text=notice, backend=response.backend)
+
+
+# LLM: _executed_orchestration mirrors the top-level tool-loop check without importing the service.
+# 函数用途: 判断本轮是否执行过 dispatch；单纯 create/board 只是中间状态，不覆盖诚实的等待调度回答。
+def _executed_orchestration(executed_tools: list[object]) -> bool:
+    return "dispatch_subagents" in [str(item or "") for item in executed_tools or []]
 
 
 # LLM: _inside_subagent_runner keeps runner closeout controlled by output.json only.
@@ -135,11 +164,11 @@ def _dispatch_completion_text(tasks: list[object]) -> str:
 
 # LLM: _dispatch_limit_text is a refs-first factual report for incomplete or failed subagent trees.
 # 函数用途: 工具轮数到顶时输出真实状态、阻塞 run_id 和引用路径，避免模型把 TIMEOUT/BLOCKED 说成完成。
-def _dispatch_limit_text(tasks: list[object]) -> str:
+def _dispatch_limit_text(tasks: list[object], *, reason: str = "tool_limit") -> str:
     rows = _task_status_rows(tasks)
     blockers = _blocking_task_ids(tasks)
     lines = [
-        "已达到最大工具轮数限制，系统根据本地 subagent task.json 直接生成状态报告，未让模型继续自由总结。",
+        _dispatch_fallback_reason_text(reason),
         "",
         "结论：子代理链路尚未完整通过，不能按完成汇报。" if blockers else "结论：未发现阻塞状态，但本轮是工具上限收口，请按下方真实状态复核。",
         "",
@@ -166,6 +195,41 @@ def _dispatch_limit_text(tasks: list[object]) -> str:
             ]
         )
     return "\n".join(lines)
+
+
+# LLM: _dispatch_incomplete_notice replaces over-optimistic final model text.
+# 函数用途: 用真实 task 状态替换最终汇报，确保有阻塞时用户先看到未完成事实而不是模型自述成功。
+def _dispatch_incomplete_notice(tasks: list[object], blockers: list[str]) -> str:
+    lines = [
+        "---",
+        "",
+        "## Subagent State Notice",
+        "",
+        "结论修正：子代理链路尚未完整通过，不能按完成汇报。",
+        "",
+        f"- total_runs: {len(tasks)}",
+        f"- done_verified: {_done_verified_count(tasks)}",
+        f"- blocking_run_ids: {', '.join(blockers) if blockers else '(none)'}",
+        "",
+        "Persisted task state:",
+    ]
+    lines.extend(_task_status_rows(tasks)[:12])
+    lines.extend(
+        [
+            "",
+            "建议下一步：继续让父级基于 blocking_run_ids 做 retry、takeover、repair 或验收复核；"
+            "不要只因为产物文件存在就认为整条子代理恢复链路已通过。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+# LLM: _dispatch_fallback_reason_text keeps deterministic subagent status reports honest.
+# 函数用途: 区分工具轮数耗尽和最终模型空响应两类收口原因，避免 E2E 报告误导用户。
+def _dispatch_fallback_reason_text(reason: str) -> str:
+    if reason == "empty_model_response":
+        return "模型接口最终总结返回空文本，系统根据本地 subagent task.json 直接生成状态报告，未让本轮崩溃。"
+    return "已达到最大工具轮数限制，系统根据本地 subagent task.json 直接生成状态报告，未让模型继续自由总结。"
 
 
 # LLM: _dispatch_completion_header renders stable counters without touching output bodies.
@@ -228,16 +292,14 @@ def _done_verified_count(tasks: list[object]) -> int:
 
 
 # LLM: _blocking_task_ids identifies run ids that make the whole hierarchy not complete.
-# 函数用途: 找出 BLOCKED/FAILED/TIMEOUT/CHANNEL_ERROR 或验收失败节点，供父级恢复使用。
+# 函数用途: 找出所有尚未 DONE/VERIFIED 的节点，供父级恢复、重试、验收或接管使用。
 def _blocking_task_ids(tasks: list[object]) -> list[str]:
     blockers: list[str] = []
     for task in tasks:
         status = str(getattr(task, "status", "") or "").upper()
         verification = str(getattr(task, "verification_status", "") or "").upper()
         task_id = str(getattr(task, "id", "") or "")
-        if status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"} or (
-            status == "DONE" and verification != "VERIFIED"
-        ):
+        if status != "DONE" or verification != "VERIFIED":
             blockers.append(task_id)
     return [item for item in blockers if item]
 

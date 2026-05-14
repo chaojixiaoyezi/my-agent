@@ -315,21 +315,83 @@ class ReadFileTool(FileSystemTool):
         if summary:
             return ToolExecutionResult("read_file", True, summary)
         lines = content.splitlines()
+        raw_end_line = _bundled_filesystem_param(params, "end_line")
         try:
-            start_line = _int_param(_bundled_filesystem_param(params, "start_line"), name="start_line", default=1, min_value=1)
+            start_line = _int_param(
+                _bundled_filesystem_param(params, "start_line"),
+                name="start_line",
+                default=1,
+                min_value=1,
+            )
             end_line = _int_param(
-                _bundled_filesystem_param(params, "end_line"),
+                raw_end_line,
                 name="end_line",
                 default=max(len(lines), 1),
                 min_value=1,
             )
         except ValueError as exc:
             return ToolExecutionResult("read_file", False, str(exc))
+        if not lines:
+            if start_line > 1:
+                return ToolExecutionResult("read_file", False, "start_line 超出文件末尾：total_lines=0，文件为空。")
+            return ToolExecutionResult("read_file", True, "(空文件)")
+        if start_line > len(lines) and raw_end_line is None:
+            return ToolExecutionResult("read_file", False, _past_eof_line_message(start_line, len(lines)))
         if end_line < start_line:
             return ToolExecutionResult("read_file", False, "end_line 不能小于 start_line")
-        selected = lines[start_line - 1 : end_line]
-        numbered = [f"{idx}: {line}" for idx, line in enumerate(selected, start=start_line)]
-        result = "\n".join(numbered)
-        if len(result) > self.max_chars:
-            result = result[: self.max_chars] + "\n... 已截断"
+        if start_line > len(lines):
+            return ToolExecutionResult("read_file", False, _past_eof_line_message(start_line, len(lines)))
+        result = _render_numbered_read_lines(
+            lines=lines,
+            start_line=start_line,
+            end_line=end_line,
+            max_chars=self.max_chars,
+        )
         return ToolExecutionResult("read_file", True, result or "(空文件)")
+
+
+# LLM: _render_numbered_read_lines keeps long file reads line-aware so agents can continue by line.
+# 函数用途: 按行号输出文件切片；达到字符上限时给出 total_lines 和 next_start_line，避免模型猜尾行。
+def _render_numbered_read_lines(
+    *,
+    lines: list[str],
+    start_line: int,
+    end_line: int,
+    max_chars: int,
+) -> str:
+    rendered: list[str] = []
+    used_chars = 0
+    for line_number, line in enumerate(lines[start_line - 1 : end_line], start=start_line):
+        item = f"{line_number}: {line}"
+        separator = 1 if rendered else 0
+        if rendered and used_chars + separator + len(item) > max_chars:
+            rendered.append(_truncated_read_footer(len(lines), line_number, max_chars))
+            return "\n".join(rendered)
+        if not rendered and len(item) > max_chars:
+            return "\n".join([
+                item[:max_chars],
+                _truncated_read_footer(len(lines), min(line_number + 1, len(lines)), max_chars),
+            ])
+        rendered.append(item)
+        used_chars += separator + len(item)
+    return "\n".join(rendered)
+
+
+# LLM: _truncated_read_footer gives the model a deterministic continuation cursor.
+# 函数用途: 生成 read_file 截断提示，包含总行数、下一次建议 start_line 和当前字符预算。
+def _truncated_read_footer(total_lines: int, next_start_line: int, max_chars: int) -> str:
+    return (
+        f"... 已截断; total_lines={total_lines}; "
+        f"next_start_line={next_start_line}; limit_chars={max_chars}"
+    )
+
+
+# LLM: _past_eof_line_message turns empty tail reads into actionable line-range guidance.
+# 函数用途: 当模型读到超过文件末尾的行号时，明确告诉它总行数和建议的尾部读取范围。
+def _past_eof_line_message(start_line: int, total_lines: int) -> str:
+    suggested_start = max(1, total_lines - 80 + 1)
+    return (
+        f"start_line 超出文件末尾：start_line={start_line}, total_lines={total_lines}。"
+        f"请改用 start_line={suggested_start}, end_line={total_lines} 读取文件尾部，"
+        "或用 search_text 搜索目标标签。"
+    )

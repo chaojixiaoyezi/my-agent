@@ -11,6 +11,7 @@ from agent_py_agent.cli.scenario_utils import (
     build_scenario_runner_instruction,
     collect_scenario_report_files,
 )
+from agent_py_agent.cli.scenario_workspace import ScenarioConfigRequest, write_scenario_config
 
 
 def test_collect_scenario_report_files_reads_task_dir_outputs():
@@ -45,3 +46,31 @@ def test_runner_instruction_mentions_write_boundary_target():
 
     assert "allowed_write_roots" in instruction
     assert "task_dir/scenario_outputs/<run_id>.md" in instruction
+
+
+# LLM: Scenario stress flags should be persisted in the isolated config, not edited into the real config.
+# 函数用途: 确认 scenario-test 的并发和模型超时覆盖项只写入本次测试配置，方便真实压测可复现。
+def test_write_scenario_config_persists_runner_stress_overrides(tmp_path):
+    source = tmp_path / "agent_config.yaml"
+    target = tmp_path / "scenario_agent_config.yaml"
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    source.write_text("model_backend: echo\n", encoding="utf-8")
+
+    write_scenario_config(
+        ScenarioConfigRequest(
+            source_config=source,
+            target_config=target,
+            fixture_root=fixture,
+            request_timeout=180,
+            max_subagents=10,
+            runner_concurrency="5",
+            runner_start_rate="10",
+            model_request_timeout=240,
+        )
+    )
+
+    text = target.read_text(encoding="utf-8")
+    assert 'runner_concurrency: "5"' in text
+    assert 'runner_start_rate: "10"' in text
+    assert "request_timeout: 240" in text

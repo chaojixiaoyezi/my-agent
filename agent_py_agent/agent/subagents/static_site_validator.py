@@ -120,7 +120,9 @@ def _scan_site(test: dict[str, Any], site_root: Path) -> StaticSiteCheckResult:
         if check_refs:
             result.broken_local_refs.extend(_broken_refs(parser.refs, path, site_root))
         if check_controls:
-            result.inert_control_hits.extend(_inert_controls(parser.controls, path, f"{text}\n{local_script_text}", site_root))
+            result.inert_control_hits.extend(
+                _inert_controls(parser.controls, path, f"{text}\n{local_script_text}", site_root, set(parser.element_ids))
+            )
     combined_script_text = "\n".join(script_texts)
     if check_forms:
         result.form_binding_hits.extend(_form_binding_hits(form_ids, combined_script_text))
@@ -248,6 +250,7 @@ def _inert_controls(
     html_file: Path,
     html_text: str,
     site_root: Path,
+    element_ids: set[str],
 ) -> list[str]:
     hits: list[str] = []
     has_script_handlers = "addEventListener" in html_text
@@ -257,11 +260,24 @@ def _inert_controls(
         href = str(control.get("href") or "").strip()
         onclick = str(control.get("onclick") or "").strip()
         button_type = str(control.get("type") or "").strip().lower()
-        if tag == "a" and not href and not onclick:
+        if tag == "a" and not onclick and _anchor_is_inert(href, element_ids):
             hits.append(f"{_rel(html_file, site_root)}:a:{text or '<empty>'}")
         if tag == "button" and not onclick and button_type not in {"submit", "reset"} and not has_script_handlers:
             hits.append(f"{_rel(html_file, site_root)}:button:{text or '<empty>'}")
     return hits
+
+
+# LLM: _anchor_is_inert separates real in-page anchors from placeholder or missing hash links.
+# 函数用途: 判断 a 标签是否明显不会跳转到有效目标；href="#" 和不存在的 "#id" 都算失效控件。
+def _anchor_is_inert(href: str, element_ids: set[str]) -> bool:
+    cleaned = href.strip()
+    if not cleaned:
+        return True
+    if cleaned == "#":
+        return True
+    if cleaned.startswith("#"):
+        return cleaned[1:] not in element_ids
+    return False
 
 
 # LLM: _static_site_record converts validator facts into the common TestExecutionRecord contract.

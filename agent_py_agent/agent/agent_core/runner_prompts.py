@@ -130,8 +130,12 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "- 验证文件内容时优先写 validation_method=\"content_check\"、file_path、content_pattern 或 content_equals、match_mode=\"exact\"，不要写 cat 文件命令。",
         "- 写代码和测试后，必须逐条对照验收条件做静态自检，确保实现、测试、README 三者互相一致。",
         "- 写 Python 测试时必须保证从 working_dir 运行能导入被测模块；优先把测试文件和模块放同一目录，或显式处理 import path。",
+        "- 如果用户要求按钮、链接或图片不能失效，不要用 href=\"#\"、空锚点或不存在的 #id 假装可点击；"
+        "页面内跳转必须指向真实存在的元素 id，按钮必须有真实交互或真实本地目标。",
         "- 生成长 CSS/JS/HTML 或大段代码时，不要一次性把完整 content 塞进 write_file；"
         "先用 write_file 写短骨架，再用 append_file 分块追加；正常分块时单次 content 建议 1500-2000 字符。"
+        "写 HTML 时，最后一块才写 </body></html>；一旦文件已经闭合，不要再 append 正文，"
+        "需要补中间内容就用 replace_in_file 插到 </body> 前。"
         "如果出现工具调用解析失败，再降到不超过 800 字符，并且每轮只输出 1 个写入工具调用，"
         "闭合 [/TOOL_CALL] 后再继续下一块。",
         "- write_file 和 append_file 会在授权 allowed_write_roots 内自动创建父目录；不要因为目标目录尚未创建就标记 BLOCKED。",

@@ -22,6 +22,9 @@ class ScenarioConfigRequest:
     fixture_root: Path
     request_timeout: float
     max_subagents: int
+    runner_concurrency: object | None = None
+    runner_start_rate: object | None = None
+    model_request_timeout: object | None = None
 
 
 # LLM: write_scenario_fixture 属于scenario CLI；改行为前先对齐调用方和快照/单测。
@@ -81,4 +84,10 @@ daemon_interval: 1
 runner_failure_policy: "auto"
 max_tool_rounds: 8
 """
+    if request.runner_concurrency is not None:
+        overrides += f'runner_concurrency: "{request.runner_concurrency}"\n'
+    if request.runner_start_rate is not None:
+        overrides += f'runner_start_rate: "{request.runner_start_rate}"\n'
+    if request.model_request_timeout is not None:
+        overrides += f"request_timeout: {int(float(request.model_request_timeout))}\n"
     request.target_config.write_text(base + overrides, encoding="utf-8")

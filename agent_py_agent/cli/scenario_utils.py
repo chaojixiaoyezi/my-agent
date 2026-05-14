@@ -59,6 +59,9 @@ def create_scenario_workspace(args) -> ScenarioPaths:
         fixture_root=fixture_root,
         request_timeout=args.timeout,
         max_subagents=max(args.count, 1),
+        runner_concurrency=_optional_arg(args, "runner_concurrency"),
+        runner_start_rate=_optional_arg(args, "runner_start_rate"),
+        model_request_timeout=_optional_arg(args, "model_request_timeout"),
     ))
     return ScenarioPaths(
         run_root=run_root,
@@ -67,6 +70,16 @@ def create_scenario_workspace(args) -> ScenarioPaths:
         summary_json=run_root / "scenario_summary.json",
         summary_md=run_root / "SCENARIO_SUMMARY.md",
     )
+
+
+# LLM: _optional_arg keeps older tests and programmatic callers compatible with newly added scenario flags.
+# 函数用途: 读取 argparse 可选字段；字段不存在或为空字符串时返回 None，避免 MagicMock 这类测试对象污染配置文件。
+def _optional_arg(args: object, name: str) -> object | None:
+    data = vars(args) if hasattr(args, "__dict__") else {}
+    value = data.get(name)
+    if value in {"", None}:
+        return None
+    return value
 
 
 # LLM: load_scenario_agent 属于scenario CLI；改行为前先对齐调用方和快照/单测。

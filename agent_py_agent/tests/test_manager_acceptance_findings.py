@@ -237,6 +237,46 @@ class TestSubAgentAcceptanceFindingMixin(_FindingSetupMixin, _FindingAssertMixin
 
         self._assert_finding(findings, "evidence_not_failed", expected_ok=False)
 
+    def test_coordinator_write_file_requirement_accepts_descendant_evidence(self, tmp_path: Path):
+        """coordinator 的 write_file 验收要求可以由后代 leaf 的真实写入证据满足。"""
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
+
+        class MockManager(SubAgentAcceptanceFindingMixin):
+            def __init__(self):
+                self.workspace = tmp_path
+
+        workspace = tmp_path / "subagents"
+        parent_dir = workspace / "parent"
+        leaf_dir = workspace / "leaf"
+        leaf_dir.mkdir(parents=True)
+        parent_dir.mkdir(parents=True)
+        (leaf_dir / "task.json").write_text(json.dumps({
+            "id": "leaf",
+            "status": "DONE",
+            "verification_status": "VERIFIED",
+            "child_ids": [],
+            "used_tools": ["write_file"],
+            "evidence": [{"kind": "write_file", "command": "write_file", "ok": True}],
+        }), encoding="utf-8")
+
+        manager = MockManager()
+        task = self._make_findings_task(
+            tmp_path,
+            task_dir=parent_dir,
+            child_ids=["leaf"],
+            used_tools=["dispatch_subagents"],
+            evidence=[MagicMock(ok=True)],
+            acceptance_checks=["叶子必须用 write_file 写报告"],
+        )
+        self._write_findings_files(tmp_path)
+        manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
+
+        findings = self._call_findings(manager, task, tmp_path)
+
+        self._assert_finding(findings, "acceptance_requires_write_file", expected_ok=True)
+
     def test_no_open_capability_requests(self, tmp_path: Path):
         """没有待处理 capability 请求检查。"""
         from agent_py_agent.agent.subagents.manager_acceptance_findings import (

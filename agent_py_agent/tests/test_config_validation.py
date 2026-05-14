@@ -129,7 +129,7 @@ def test_load_config_warns_on_bad_values(tmp_path):
     )
     config = load_config(config_path)
     assert config.model_backend == "echo"  # fallback
-    assert config.request_timeout == 60  # fallback
+    assert config.request_timeout == 240  # fallback
     assert len(config.config_warnings) >= 3  # backend + timeout + temperature + unknown key
 
 

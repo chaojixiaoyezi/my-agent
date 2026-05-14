@@ -77,6 +77,40 @@ def test_static_site_check_blocks_common_generated_site_failures(tmp_path):
     assert record.validation_result["placeholder_hits"] == ["order-success.html"]
 
 
+# LLM: Placeholder hash links from real E2E must fail when pages claim buttons/links work.
+# 函数用途: 家具网站真实测试生成 href="#" 后，静态验收要把这类假链接当成失效控件。
+def test_static_site_check_blocks_placeholder_hash_links(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "index.html": (
+                '<main id="home">Home</main>'
+                '<a href="#home">真实锚点</a>'
+                '<a href="#" class="cta">查看详情</a>'
+                '<a href="#missing">缺失锚点</a>'
+            ),
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "no dead links",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index.html"],
+        }
+    )
+
+    assert record.executed is True
+    assert record.passed is False
+    assert "inert_control_hits=2" in record.error
+    assert record.validation_result["inert_control_hits"] == [
+        "index.html:a:查看详情",
+        "index.html:a:缺失锚点",
+    ]
+
+
 # LLM: R59 shopping E2E generated loginForm/registerForm but JS bound login-form/register-form.
 # 函数用途: 父级静态验收要能发现表单 id 和本地 app.js 绑定目标不一致，避免按钮假可用。
 def test_static_site_check_blocks_missing_validate_form_targets(tmp_path):

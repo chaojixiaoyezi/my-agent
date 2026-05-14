@@ -50,14 +50,14 @@ class TestNormalizeAgentConfig:
         """验证过小的 request_timeout 回退。"""
         data = {"request_timeout": 0}
         normalized, warnings = normalize_agent_config(data)
-        assert normalized["request_timeout"] == 60  # 默认值
+        assert normalized["request_timeout"] == 240  # 默认值
         assert len(warnings) > 0
 
     def test_normalize_request_timeout_too_high(self):
         """验证过大的 request_timeout 回退。"""
         data = {"request_timeout": 999}
         normalized, warnings = normalize_agent_config(data)
-        assert normalized["request_timeout"] == 60  # 默认值（上限600）
+        assert normalized["request_timeout"] == 240  # 默认值（上限600）
         assert len(warnings) > 0
 
     def test_normalize_max_tokens_valid(self):
@@ -231,7 +231,7 @@ class TestNormalizeAgentConfig:
         """验证空字典使用所有默认值。"""
         normalized, warnings = normalize_agent_config({})
         assert normalized["model_backend"] == "echo"
-        assert normalized["request_timeout"] == 60
+        assert normalized["request_timeout"] == 240
         assert len(warnings) == 0
 
 

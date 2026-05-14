@@ -5767,3 +5767,553 @@ This document is append-only. Record every real subagent E2E issue found during 
     - acceptance passed for all 3; final board `DONE=3 / VERIFIED=3 / channel_OK=3`
     - `runner_instruction/ignore_multi_runner_instruction` remained an expected guard, preventing shared per-run instructions from leaking across multiple selected runners.
 - Status: fixed and verified by focused tests plus single-worker and three-worker real E2E.
+
+### Finding 46: Provider Timeout Was Classified But Not Retried
+
+- Symptom:
+  - 单层真实子代理测试中，3-worker 和 5-worker happy path 通过。
+  - 10-worker happy path 里有 3 个 runner 遇到 `模型接口请求超时: request_timeout=60s`，task 记录了 `failure_type=provider_timeout`。
+  - 后续 dispatch 循环没有重试这些 runner，而是反复执行 `classify_blocker`，最终 `SCENARIO_FAIL`。
+- 中文解释：
+  - 大白话：系统已经知道“这是模型接口临时超时”，但调度器还没把这类失败放进“可以再试一次”的名单，所以它只是在旁边登记问题，没有真的让子代理继续干。
+- Reference comparison:
+  - 会话运行时 的 stream 侧会区分可重试错误，并用 retry budget + backoff 继续请求。
+  - 长期助手 对长任务更偏向 inactivity timeout，并把网络/timeout 这类 transient failure 放进恢复或重试路径。
+  - 通道运行时 的 cron/retry 类型里也把 `timeout` 作为 transient retry 类别之一。
+- Fix:
+  - `provider_timeout` 纳入 `RETRYABLE_RUNNER_FAILURE_TYPES`，沿用现有 `runner_failure_policy` 上限，不会无限扩容或无限重跑。
+  - 默认 `request_timeout` 从 60 秒调到 240 秒；这不是放开 runner 外层超时，而是给真实模型一次请求更合理的完成窗口。
+  - `scenario-test` 增加 `--runner-concurrency`、`--runner-start-rate`、`--model-request-timeout`，真实压测可以在隔离配置里显式设置并发和模型超时，避免默认串行把 10-worker 压测拖成长时间等待。
+- Verification:
+  - Focused tests cover `provider_timeout` retry candidate selection, retryable type registration, config fallback, provider timeout classification, and scenario stress override persistence.
+  - Real model single-layer E2E:
+    - 3-worker happy path passed.
+    - 5-worker happy path passed.
+    - 10-worker happy path first exposed default serial execution taking too long; after adding scenario stress overrides, rerun with `--runner-concurrency 5 --runner-start-rate 10 --model-request-timeout 240` passed with `DONE=10 / VERIFIED=10 / SCENARIO_PASS`.
+- Status: fixed and verified by focused tests plus single-layer real E2E.
+
+### Finding 47: User-Style Coordinator Intent Could Be Downgraded To Worker
+
+- Symptom:
+  - 多层真实链路里，用户只说“主代理创建第一层，后面让下级继续创建下级”。
+  - 模型有时在 `create_subagents` 里把第一层 `role` 写成 `worker`，但 `goal` 里明明要求它继续派下一层 coordinator。
+  - 结果工作流自动规划可能误以为这是普通 worker，派出 producer/critic/repair 这类不相关节点。
+- 中文解释：
+  - 大白话：用户表达的是“找一个带队的”，但模型填表时把角色填成“普通干活的”。系统以前太相信这个表格字段，就把队长当普通员工用了。
+- Reference comparison:
+  - 会话运行时 风格更重视 typed action 的语义校验：不是只看某个自然语言字段，而是把结构化字段和意图一起归一化。
+  - 长期助手/通道运行时 也会在工具边界做 schema/registry 归一，而不是完全相信模型一段自由文本。
+- Fix:
+  - `create_subagents` 在工具边界做 role-intent repair：当目标文本明显要求创建/调度下一层子代理时，优先归一为 coordinator 类角色。
+  - 普通 worker 请求不受影响；只有明确带“继续创建/派下一层/协调下级”等语义才修正。
+- Verification:
+  - Focused test: `test_coordinator_seed_intent_repairs_model_worker_role`.
+  - Real Phase 3 fixed5: 主代理只创建 `小傻妞-root-coordinator`，后续由它创建 `小小傻妞-child-coordinator`，再由第二层创建 leaf。
+- Status: fixed.
+
+### Finding 48: Lineage Names Could Be Misread As Role Names
+
+- Symptom:
+  - 真实模型偶发把 `小傻妞-root-coordinator` 放进 `role` 字段，而不是 `agent_name` 字段。
+  - 旧逻辑会把它当角色名，生成重复或怪异名字，例如 `小傻妞-小傻妞-root-coordinator`。
+- 中文解释：
+  - 大白话：模型把“人的名字”填到了“岗位”这一栏。系统以前没纠正，就让名字套娃了。
+- Fix:
+  - 工具边界识别 `小傻妞-*` / `小小傻妞-*` 这类 lineage display name。
+  - 如果它出现在 `role` 字段，就拆成稳定角色和 `agent_name`，既保留用户想看的名字，也不污染角色系统。
+- Verification:
+  - Focused test: `test_lineage_agent_name_in_role_field_becomes_name_not_role`.
+  - Real Phase 3 fixed5: 三层名称分别是 `小傻妞-root-coordinator`、`小小傻妞-child-coordinator`、`小小小傻妞-leaf-worker`，没有重复前缀。
+- Status: fixed.
+
+### Finding 49: Missing Workspace Context Made Models Invent `/workspace`
+
+- Symptom:
+  - 多层链路里，模型有时把产物路径写成 `/workspace/artifacts`。
+  - 真实用户只会说“放到产物目录”，不会每次都给绝对路径。
+- 中文解释：
+  - 大白话：系统没在每轮提示里清楚告诉模型“真正的工作目录在哪里”，模型就用了训练里常见的 `/workspace` 假路径。
+- Fix:
+  - prompt builder 每轮注入 `# Workspace Context`：
+    - 当前真实 `primary_workspace_root`。
+    - 相对路径默认从该目录解析。
+    - 产物应放在真实 workspace 下的 artifacts/deliverables。
+    - 除非用户明确给了 `/workspace`，否则不要把它当真实目录。
+- Verification:
+  - Focused test: `test_build_includes_workspace_context`.
+  - Real Phase 3 fixed5: leaf 写入 `/Users/example/my-终端应用/phase3_hierarchy_e2e_user_style_fixed5/fixture_project/artifacts/小傻妞报告.md`。
+- Status: fixed.
+
+### Finding 50: Coordinator Acceptance Needed Descendant Evidence
+
+- Symptom:
+  - 第一层 coordinator 自己没有直接 `write_file`，而是按要求让 leaf 写产物。
+  - 旧验收只看 coordinator 自己的工具证据，会把“下级写了文件”误判成 coordinator 没完成。
+- 中文解释：
+  - 大白话：队长的工作不是亲手写文件，而是让队员把文件写出来。验收以前只看队长有没有亲手写，所以错判了。
+- Fix:
+  - coordinator/parent acceptance 在判断工具类验收时，会读取直属/后代 task-local evidence。
+  - 仍然限制在当前任务树内，不跨任务、不用 glob 扫无关目录。
+- Verification:
+  - Focused test: `test_coordinator_write_file_requirement_accepts_descendant_evidence`.
+  - Real Phase 3 fixed5: root coordinator 的 acceptance 通过，三个节点均 `DONE / VERIFIED`。
+- Status: fixed.
+
+### Finding 51: Empty Final Model Text After Tool Success Should Not Crash The Run
+
+- Symptom:
+  - 真实模型在工具已经完成、子代理状态已经写盘后，最终总结流式响应偶发空文本。
+  - 旧 CLI 抛出 `Anthropic-compatible 流式响应没有文本内容`，外层看起来像整轮失败。
+- 中文解释：
+  - 大白话：活已经干完了，工具结果也存好了，但模型最后一句总结没吐出来。以前系统把“总结没吐出来”当成“任务失败”，这不合理。
+- Fix:
+  - 工具循环捕获“最终空文本”错误。
+  - 如果本轮已经有真实工具执行，返回基于工具结果的 closeout；对子代理调度会输出结构化本地任务状态，不再重新问模型总结。
+  - 没有工具执行的空响应仍然按后端错误处理，避免伪成功。
+- Verification:
+  - Focused test: `test_tool_loop_falls_back_when_final_model_response_is_empty_after_tool`.
+  - Real Phase 3 fixed5: final output 显示 `子代理调度已完成，系统根据本地任务状态直接收口，未再发起额外模型请求。`
+- Status: fixed.
+
+### Finding 52: Four-Layer User-Style Chain Now Passes By Root-Only Observation
+
+- Scenario:
+  - Test directory: `/Users/example/my-终端应用/phase3_hierarchy_e2e_user_style_fixed5`.
+  - Prompt 要求主代理只创建第一层，第一层创建第二层，第二层创建 leaf，禁止创建更深节点。
+- Result:
+  - `小傻妞-root-coordinator`: `DONE / VERIFIED`.
+  - `小小傻妞-child-coordinator`: `DONE / VERIFIED`.
+  - `小小小傻妞-leaf-worker`: `DONE / VERIFIED`.
+  - No `小小小小傻妞-*` node was created.
+  - Artifact: `fixture_project/artifacts/小傻妞报告.md`.
+- 中文解释:
+  - 大白话：这轮测试里，我只像用户一样给主代理下任务。主代理只派第一层，后面确实是下级自己继续派下级，最后叶子写文件，验收通过。
+- Status: passed. Next phase should focus on failure recovery rather than basic hierarchy creation.
+
+### Finding 53: 普通真实 E2E 提示词不能泄漏内部术语
+
+- Discovered at: 2026-05-14 during Phase 4 recovery E2E preparation.
+- Symptom:
+  - 测试提示词里出现了 `dispatch_subagents`、`run_id`、`恢复/接管能力` 等内部工程词。
+  - 测试任务只要求生成 `README.md` 和 `demo.py` 两个小文件，复杂度太低，不像真实用户任务。
+- 中文解释：
+  - 大白话：普通用户不会说这些内部词。测试提示词如果直接告诉主代理“用哪个按钮、哪个内部能力”，就测不出它自己会不会规划、派工、检查和收尾。
+- Prompt contract:
+  - 普通真实 E2E 要使用小白用户口吻，只说“我想要什么”和“质量要求是什么”。
+  - 不允许在普通测试提示词里写内部术语，例如工具名、函数名、run id、dispatch、runner、protocol、artifact ref、control-plane。
+  - 可以使用用户能懂的说法，例如“派工”“派小傻妞”“让小傻妞再派小小傻妞”，或“你自己安排人手完成并检查”。
+  - 专项压力测试可以写少量专业目标，但也要优先用自然语言描述现象，例如“有人干到一半断了，看看能不能继续”，而不是把底层实现名写满。
+- Standard user task prompt:
+
+```text
+用单文件html做一个高端现代家具品牌的网站首页，风格高级、简洁、有设计感，适合真实商业品牌使用。只输出完整html，不要注释。
+```
+
+- Status: documented as the default task prompt for ordinary real E2E runs.
+- Remaining risk:
+  - 后续如果需要测 4 层派工，应使用“你让小傻妞派小小傻妞，再让小小傻妞派小小小傻妞干”这类用户话术，而不是直接写内部 API 名。
+
+### Finding 54: 真实 E2E 不应靠极端短时间上限制造复杂度
+
+- Discovered at: 2026-05-14 during Phase 4 natural-language recovery E2E.
+- Symptom:
+  - 一轮家具首页任务把普通 worker / leaf_worker 的时间上限设成 1 秒，用来模拟“中途没干完”。
+  - 但用户给的家具首页本身通常需要 1-2 分钟才能做好，1 秒会把正常任务强行变成异常任务，测试结果不够真实。
+- 中文解释：
+  - 大白话：不能为了测试恢复能力，就把小傻妞刚开始干活就掐断。这样测出来的是“测试配置太离谱”，不是用户真实使用会遇到的问题。
+- Test rule:
+  - 普通真实 E2E 使用合理时间上限，例如单个页面 120-240 秒，多个页面或复杂项目 240-600 秒。
+  - 如果需要把任务自然拉长，优先增加真实工作量，例如让它做 2/3/5 个不同风格页面，文件名用 `index1.html`、`index2.html`、`index3.html` 等。
+  - 故障专项可以模拟中途断掉、网络失败、继续包损坏、进程被杀，但不要默认用 1 秒这种离谱配置代表真实用户任务。
+  - 测试提示词仍然保持小白用户口吻，不说内部工具名；可以说“有人中途没干完、断了、卡住了，你想办法接着完成”。
+- Status: documented. The interrupted 1-second furniture run is treated as an invalid stress setup, not product behavior evidence.
+
+### Finding 55: 顶层普通小傻妞误吃 root 不限时
+
+- Discovered at: 2026-05-14 during Phase 4 natural-language furniture E2E v2.
+- Symptom:
+  - 测试配置给普通 worker 设置了合理时间上限，但顶层创建出来的小傻妞一直 `RUNNING`，超过上限后没有进入恢复。
+  - 现场只写出 `index1.html`，`index2.html` / `index3.html` 未生成；同时这个小傻妞已经创建了 3 个下级，但它们停在 `PLANNING`。
+- 中文解释：
+  - 大白话：我们本来想让“普通干活的小傻妞”最多工作一段合理时间，超时就让别人接手；但系统看到它没有父节点，就把它当成“最高层队长/root”，而 root 是不限时的，所以它不会按 worker 时间上限停下来。
+- Root cause:
+  - `runner_timeout_by_role` 的匹配顺序把 `parent_id=""` 或 `run_id == root_id` 的任务先归为 `root`。
+  - 顶层普通 worker 也满足这个条件，因此 `root: off` 覆盖了 `worker: 180/300`。
+- Fix:
+  - `runner_gate._runner_timeout_role_keys()` 只让真正 root-like 角色匹配 `root`，例如 `root`、`coordinator`、`leader`、`manager`、`planner`。
+  - 顶层普通 `worker` 仍然按 `worker` 时间上限执行。
+- Verification:
+  - Focused regression: `test_top_level_worker_uses_worker_timeout_not_root_timeout`.
+  - Runner timeout regression group: `python3 -m pytest -q agent_py_agent/tests/test_runner_dispatch.py` -> `47 passed`.
+- Status: fixed by focused tests; needs a fresh natural-language E2E rerun.
+
+### Finding 56: 自然语言多层派工被落成普通 worker + 通用 workflow
+
+- Discovered at: 2026-05-14 during Phase 4 natural-language furniture E2E v3.
+- Symptom:
+  - 用户提示只说“派小傻妞，如果任务多，可以让小傻妞再找小小傻妞帮忙”。
+  - root 创建第一层时把 role 填成 `worker`、`workflow_mode=auto`。
+  - 系统把它当普通 worker，并自动套出 `produce/critic/repair` 通用 workflow；但这个顶层 worker 自己又写出了 `index1.html`、`index2.html`、`index3.html`。
+  - 结果产物文件存在，但任务树残留 PLANNING/RUNNING/TAKEN_OVER 子任务，收尾变慢且状态不干净。
+- 中文解释：
+  - 大白话：用户想表达的是“找一个带队的小傻妞，让她必要时再找帮手”。系统却把她当成普通干活的人，又额外塞了一套通用检查流程，于是出现“人自己干完了，但旁边还有一堆没必要的小任务没收拾”的乱象。
+- Root cause:
+  - `create_subagents` 的 role-intent repair 只识别工具参数里的 coordinator/child-spawn 语义。
+  - root 生成的工具参数没有保留“让小傻妞再找小小傻妞帮忙”这句原始用户话术，所以没有被纠成 coordinator。
+- Fix:
+  - `orchestration_tools._has_user_style_delegation_intent()` 会读取当前原始用户提示词。
+  - 当用户用“小傻妞再找小小傻妞 / 子代理再派下一层”等自然话术表达多层派工，并且当前只创建一个第一层代理时，工具边界把 role 从 `worker` 纠成 `coordinator`，同时关闭自动通用 workflow。
+  - 这样第一层会以带队角色亲自决定是否再派下级，而不是被系统硬套 produce/critic/repair。
+- Verification:
+  - Focused regression: `test_user_style_delegate_to_next_layer_repairs_worker_to_coordinator`.
+  - Create tool regression group: `python3 -m pytest -q agent_py_agent/tests/test_orchestration_create_subagents_tool.py` -> `17 passed`.
+- Status: fixed by focused tests; needs a fresh natural-language E2E rerun.
+
+### Finding 57: 明确单文件 worker 不应自动套通用 workflow
+
+- Discovered at: 2026-05-14 during Phase 4 natural-language furniture E2E v4.
+- Symptom:
+  - root 按自然语言创建了两个第一层小傻妞，每个目标都像 `index1.html` / `index2.html` 这种明确单文件交付。
+  - 但每个小傻妞仍继承 `workflow_mode=auto`，于是又长出 `produce/critic/repair` 通用 workflow 子任务。
+  - 结果一个简单文件 worker 被拆成一棵小树，任务目录和状态看板变重，恢复测试也更难判断真实问题。
+- 中文解释：
+  - 大白话：如果一个小傻妞的任务已经很清楚，就是“写这个文件”，那它应该直接写完。测试、找错、验收可以等它完成后由父级再决定派谁，而不是一开始就给每个小任务套一整套固定流程。
+- Root cause:
+  - 全局 `subagent_workflow_mode=auto` 对普通 worker 生效太宽。
+  - 系统没有区分“明确文件交付 worker”和“需要继续拆分的大任务容器”。
+- Fix:
+  - `orchestration_tools._should_disable_generic_workflow_for_concrete_worker()` 识别普通 worker 目标里的明确文件名，例如 `.html`、`.css`、`.js`、`.py`、`.md`、`.json`。
+  - 命中后把该 worker 的 `workflow_mode` 改成 `off`，让它直接完成文件。
+  - coordinator、tester、bug_finder、acceptor 等角色不走这个分支，避免破坏质量角色和带队角色语义。
+- Verification:
+  - Focused regression: `test_concrete_single_file_worker_disables_generic_workflow_auto`.
+  - Create tool regression group: `python3 -m pytest -q agent_py_agent/tests/test_orchestration_create_subagents_tool.py` -> `17 passed`.
+- Status: fixed by focused tests; next step is a fresh natural-language E2E rerun.
+
+### Finding 58: 父级直写保护误伤 leaf worker
+
+- Discovered at: 2026-05-14 during Phase 4 natural-language furniture E2E v5.
+- Symptom:
+  - 用户说“不要你自己亲自写页面，请派小傻妞来做”。
+  - root 正确创建了 `小傻妞-coordinator`，coordinator 又创建两个 `小小傻妞-page*-worker`。
+  - 两个 leaf worker 尝试写 `artifacts/index1.html` / `artifacts/index2.html` 时，被 `delegated_direct_write_blocked=true` 拦住。
+  - worker 以为自己缺能力，写了 `capability_request`，任务进入 `BLOCKED`，但真正问题不是缺能力，而是 guard 边界太粗。
+- 中文解释：
+  - 大白话：这条保护本来是防止“主代理嘴上说派人，手上自己偷偷写页面”。但真正被派去干活的小小傻妞也被当成“主代理偷写”拦住了，相当于把工人的笔拿走了。
+- Root cause:
+  - `maybe_block_delegate_only_direct_write()` 只看用户是否要求 delegated-only，没有区分当前执行者是 root/父级，还是被授权交付的 worker/leaf_worker。
+- Fix:
+  - 新增 `_current_runner_can_write_product()`：当前上下文如果有 `_current_subagent_run_id`，且任务 role/name 是 `worker`、`leaf_worker`、`writer`、`coder`、`builder`、`implementer` 这类交付角色，则允许写业务产物。
+  - `root`、`coordinator`、`lead`、`tester`、`bug_finder`、`critic`、`acceptor`、`reviewer` 等仍会被拦，避免父级或质量角色替 worker 写最终文件。
+- Verification:
+  - Focused regression: `test_delegate_only_prompt_allows_leaf_worker_product_write`.
+  - Guard regression group: `python3 -m pytest -q agent_py_agent/tests/test_orchestration_direct_write_guard.py` -> `7 passed`.
+- Status: fixed by focused tests; rerun the natural-language furniture E2E from a clean directory.
+
+### Finding 59: 单文件小傻妞被过度纠成 coordinator
+
+- Discovered at: 2026-05-14 during Phase 4 natural-language furniture E2E v6.
+- Symptom:
+  - root 创建两个独立小傻妞，分别负责 `index1.html` 和 `index2.html`。
+  - 因为原始用户提示里有“任务比较多，可以让小傻妞再找小小傻妞帮忙”，两个单文件小傻妞都被纠成 `coordinator`。
+  - 其中一个 coordinator 后续把 `index2.html` 任务误传成 `index1.html`，写根漂移 guard 拦住了错误下派。
+- 中文解释：
+  - 大白话：用户说“任务多时可以再找帮手”是一个总原则，不代表每个已经很明确的小文件任务都要变成队长。一个小傻妞只负责一个文件时，它应该直接干活，不应该再先当队长。
+- Root cause:
+  - `_has_user_style_delegation_intent()` 只看全局用户话术和“派小傻妞”标记，没有看当前 create 调用是不是单个明确文件目标。
+- Fix:
+  - 新增 `_goal_has_single_concrete_file_target()`。
+  - 当前 create 目标只有一个明确文件名时，不做 user-style coordinator repair；保留原 role，并由 `_should_disable_generic_workflow_for_concrete_worker()` 关闭通用 workflow。
+  - 目标包含多个文件或本地参数明确表达 coordinator/child-spawn 时，仍可以按 coordinator 处理。
+- Verification:
+  - Focused regression: `test_single_file_child_worker_is_not_repaired_to_coordinator`.
+  - Existing regression still passes: `test_user_style_delegate_to_next_layer_repairs_worker_to_coordinator`.
+  - Create tool regression group: `python3 -m pytest -q agent_py_agent/tests/test_orchestration_create_subagents_tool.py` -> `18 passed`.
+- Status: fixed by focused tests; rerun clean v7.
+
+### Finding 60: coordinator 不能用“文件存在”覆盖 child TIMEOUT
+
+- Discovered at: 2026-05-14 during Phase 4 natural-language furniture E2E v7.
+- Symptom:
+  - root 正确创建 `小傻妞-coordinator`，coordinator 创建两个 `小小傻妞-worker*`。
+  - 两个 worker 都写出了部分 HTML 文件，但在固定 240 秒 runner timeout 下被标记为 `TIMEOUT/UNVERIFIED`。
+  - coordinator 后续只看到 `artifacts/index1.html` / `index2.html` 文件存在，就写出“两个页面已完成，等待验收”的结构化结果。
+  - 顶层最终回答先生成“任务完成报告”，随后 `Subagent State Notice` 又修正说链路未完整通过。
+- 中文解释：
+  - 大白话：两个小小傻妞其实没正常交卷，只是桌上已经有半截文件。队长不能只看“桌上有文件”就说全员完成，必须先看每个下属真实状态。
+- Root cause:
+  - coordinator 收口时没有把直属 child 的 `task.json` 状态作为硬门。
+  - 之前的保护只在最终回答阶段追加纠错 notice，能避免彻底误报，但仍然会先出现一段乐观完成汇报。
+- Fix:
+  - `subagent_finalize_helpers.record_finalized_runner_result()` 新增 coordinator child blocker gate。
+  - coordinator 如果要把自己标成 `AWAITING_ACCEPTANCE/DONE/COMPLETED`，但直属 child 里存在 `TIMEOUT/BLOCKED/FAILED/CHANNEL_ERROR` 或 `DONE` 未 `VERIFIED`，系统会把 coordinator 结果改成 `BLOCKED`，`failure_type=child_blocked`。
+  - 父级下一步会围绕 blocking child ids 做 `dispatch_subagents`、retry、takeover 或恢复，而不是直接验收产物正文。
+- Verification:
+  - Focused regression: `test_coordinator_success_closeout_blocks_when_direct_child_timed_out`.
+  - Compatibility regression: `test_coordinator_tool_limit_cleanup_still_passes_when_children_verified`.
+  - Focused group: `python3 -m pytest -q agent_py_agent/tests/test_subagent_finalize_helpers.py` -> `3 passed`.
+- Status: fixed by focused tests; rerun a clean natural-language E2E with non-extreme timeout settings.
+
+### Finding 61: count 复制多文件 worker goal 会制造抢写和 workflow 膨胀
+
+- Discovered at: 2026-05-14 during Phase 4 natural-language furniture E2E v8.
+- Symptom:
+  - root 先被 delegated-only 保护挡住直写，随后重新调用 `create_subagents`。
+  - 它传了 `count=2`、`role=leaf_worker`，但两个 leaf worker 拿到的是同一个大 goal：同时创建 `index1.html` 和 `index2.html`。
+  - 每个 leaf 又在 `dispatch_subagents workflow_mode=auto` 下长出 `produce/critic/repair`，导致两棵重复 workflow 同时抢同一批文件。
+- 中文解释：
+  - 大白话：用户要两个页面，系统不应该复制两个“一模一样都做两个页面”的小傻妞。正确做法是，要么派一个队长去拆 `index1` / `index2`，要么直接派两个 worker，一个只做 `index1`，一个只做 `index2`。
+- Root cause:
+  - 工具说明里已经写了“不同切片不要用 count 复制同一个 goal”，但模型仍可能这么调用。
+  - 运行时没有把“count>1 + worker/leaf_worker + 具体文件名”当成歧义输入拒绝。
+- Fix:
+  - `create_subagents` 新增 `ambiguous_repeated_product_goal` 运行时检查。
+  - 当 `count>1`、角色是直接交付 worker 类，并且 goal 里出现 `index.html`、`.css`、`.py` 等明确文件名时，工具返回错误，不创建任务。
+  - 错误提示要求模型二选一：创建 `count=1` 的 coordinator 让它继续拆，或多次调用 `create_subagents`，每次给一个 worker 一个明确文件目标。
+- Verification:
+  - Focused regression: `test_repeated_concrete_file_goal_requires_explicit_split`.
+  - Create tool regression group: `python3 -m pytest -q agent_py_agent/tests/test_orchestration_create_subagents_tool.py` -> `19 passed`.
+- Status: fixed by focused tests; rerun clean v9.
+
+### Finding 62: isolated E2E config must use an absolute `my_agent_home`
+
+- Discovered at: 2026-05-14 during Phase 4 natural-language furniture E2E v8/v9.
+- Symptom:
+  - The test config used `my_agent_home: ".my_agent_home"`.
+  - Because the CLI process was launched from the repo checkout, runtime memory was written under `/Users/example/my_agent/my-agent/.my_agent_home` instead of the isolated test directory.
+  - The next clean-looking run then read stale timeout/recovery facts and started by talking about old failed work.
+- 中文解释：
+  - 大白话：我以为给这次测试准备了一个新家，但配置写的是相对路径，程序实际把家放到了代码仓库里面。下一次测试就像搬进了旧房间，先看到了上一轮的失败纸条。
+- Root cause:
+  - `my_agent_home` supports relative paths, but relative paths are resolved from process CWD, not from the config file location.
+  - E2E tests that generate temporary config files need an absolute home path to avoid cross-run memory contamination.
+- Fix:
+  - Testing discipline fix for now: generated E2E configs must write absolute `my_agent_home`.
+  - R10 used `/Users/example/my-终端应用/phase4_natural_recovery_furniture_v10/.my_agent_home`, and the root no longer hallucinated the previous timeout before doing work.
+- Status: recorded. Follow-up: consider making config loading warn when `my_agent_home` is relative in generated/test configs.
+
+### Finding 63: long HTML chunk writes need machine integrity gates, not only prompt guidance
+
+- Discovered at: 2026-05-14 during Phase 4 natural-language furniture E2E v10.
+- Symptom:
+  - Root correctly created one `小傻妞-coordinator`, and the coordinator correctly created two leaf workers: one for `index1.html`, one for `index2.html`.
+  - `index1.html` completed, but `index2.html` repeatedly wrote a partial file, appended content after `</html>`, then tried to rewrite a long complete HTML body that exceeded the inline write limit.
+  - The file alternated between “dirty but closed” and “large but incomplete”; the prompt grew past 100k characters and the runner burned dozens of tool rounds.
+- 中文解释：
+  - 大白话：小小傻妞不是完全不会写页面，而是写长页面时先把门关上了（写了 `</html>`），后面又继续往门外塞家具。发现不对后它想整屋重写，但正文太长又被工具限制挡住，于是反复修、反复坏。
+- Root cause:
+  - `append_file` allowed non-whitespace content after an existing `</html>`.
+  - Runner finalization trusted model self-report and did not run a local structure check before moving a declared HTML artifact toward acceptance.
+  - Existing prompt guidance said “短骨架 + append_file 分块”，but did not give a hard machine boundary for HTML closing tags.
+- Fix:
+  - Added `artifact_integrity.py` as a small reusable integrity gate.
+  - `append_file` now blocks appending non-empty content after an HTML file already contains `</html>` and tells the model to use `replace_in_file` before `</body>` or rewrite the complete file.
+  - `write_file` / `append_file` now return a bounded HTML integrity hint after successful writes, so models know whether the file is still intentionally open or structurally suspicious.
+  - Runner finalization now checks declared local HTML artifacts; incomplete HTML, multiple close tags, or content after `</html>` changes the runner result to `BLOCKED` with `failure_type=artifact_integrity_failed`.
+  - Runner prompt now explicitly says: close `</body></html>` only in the final chunk; after closing, do not append body content.
+- Verification:
+  - Focused regression: `test_append_file_blocks_html_content_after_closing_tag`.
+  - Focused regression: `test_artifact_integrity_detects_incomplete_html`.
+  - Focused regression: `test_artifact_integrity_detects_content_after_html_close`.
+  - Finalize regression: `test_leaf_success_closeout_blocks_incomplete_html_artifact`.
+  - Focused group: `python3 -m pytest -q agent_py_agent/tests/test_artifact_integrity.py agent_py_agent/tests/test_subagent_finalize_helpers.py agent_py_agent/tests/test_tools/test_tool_loop.py` -> `28 passed`.
+- Status: fixed by focused tests; rerun clean R11 with the same natural-language furniture prompt.
+
+### Finding 64: relative artifact refs must resolve against product write roots before task_dir
+
+- Discovered at: 2026-05-15 during Phase 4 natural-language furniture E2E v11.
+- Symptom:
+  - The repair leaf correctly edited the real product file at `/Users/example/my-终端应用/phase4_natural_recovery_furniture_v11/artifacts/index2.html`.
+  - Its structured result reported the artifact as `artifacts/index2.html`.
+  - The new artifact integrity gate interpreted that relative path as the leaf's internal task directory, producing a false `artifact_missing`.
+- 中文解释：
+  - 大白话：修理工真的修了用户房间里的文件，但交报告时写了“artifacts/index2.html”这个短地址。系统拿这个短地址去修理工自己的小房间里找，当然找不到，就误报没修。
+- Root cause:
+  - `_resolve_artifact_path()` only used `context.task_dir` for relative artifact refs.
+  - It did not check `write_boundary.product_write_roots` / `allowed_write_roots`, which are the authoritative product write locations for delegated workers.
+- Fix:
+  - Artifact finalization now resolves relative artifact refs against product write roots first.
+  - If a product write root is a file and has the same filename as the relative artifact, that file wins over the internal task directory.
+- Verification:
+  - Focused regression: `test_leaf_relative_artifact_uses_product_write_root`.
+  - Focused group: `python3 -m pytest -q agent_py_agent/tests/test_subagent_finalize_helpers.py agent_py_agent/tests/test_artifact_integrity.py` -> `8 passed`.
+- Status: fixed by focused tests; rerun clean R12/R13.
+
+### Finding 65: dispatch workflow auto can override per-task workflow off
+
+- Discovered at: 2026-05-15 during Phase 4 natural-language furniture E2E v12.
+- Symptom:
+  - Root created two worker tasks with explicit concrete files (`index1.html`, `index2.html`).
+  - Create-time logic should keep these as direct worker tasks, but top-level `dispatch_subagents` later used global workflow auto and spawned `produce/critic/repair` children under each worker.
+  - The task tree became heavier and harder to observe, even though the deliverable was a simple single-file HTML page per worker.
+- 中文解释：
+  - 大白话：创建工单时我们已经说“这个小傻妞只写一个文件，别给她套固定流程”。但调度器后面又按全局设置给她硬塞了一套 produce/critic/repair，等于前面关了，后面又打开。
+- Root cause:
+  - `build_workflow_records()` selected every top-level unfinished task when dispatch workflow mode was auto.
+  - It did not respect `task.workflow_mode == "off"` that was intentionally persisted at create time.
+- Fix:
+  - Dispatch workflow planning now skips tasks whose persisted `workflow_mode` is `off`.
+  - Global dispatch auto can still plan workflow for tasks created with `auto/plan`; it no longer reopens tasks that explicitly opted out.
+- Verification:
+  - Focused regression: `test_build_workflow_records_respects_task_workflow_off`.
+  - Focused group: `python3 -m pytest -q agent_py_agent/tests/test_dispatch_workflow_records.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_orchestration_dispatch_subagents_tool.py` -> `34 passed`.
+- Status: fixed by focused tests; rerun clean R13.
+
+### Finding 66: root delegation must not weaken user constraints
+
+- Discovered at: 2026-05-15 during Phase 4 natural-language furniture E2E v12.
+- Symptom:
+  - User prompt said no broken image links and no broken buttons.
+  - Root created child goals that added `使用 Unsplash 的真实图片 URL` and `所有按钮可点击（可指向 #）`.
+  - This makes the test less realistic: a user will usually state the outcome, not internal link tricks, and `#` buttons are exactly what the user wanted to avoid.
+- 中文解释：
+  - 大白话：用户说“不要坏按钮”，root 派工时却写成“按钮可以指向 #”。这不是分解任务，是把用户要求改歪了。以后派工目标不能削弱用户原话里的硬要求。
+- Root cause:
+  - Tool prompt told the model to write clear goals but did not make “do not weaken original user constraints” a tool-level rule.
+  - Runtime did not reject common contradictory child-goal phrases.
+- Fix:
+  - `create_subagents` now rejects child goals with `delegation_constraint_conflict` when:
+    - user requires working buttons but the child goal allows `href="#"` / `指向 #`;
+    - user requires no broken images but the child goal mandates unverified remote image URLs such as Unsplash;
+    - user requires no comments but the child goal asks for comments.
+  - The create tool detail now tells the model to preserve user constraints exactly.
+- Verification:
+  - Focused regression: `test_create_subagents_rejects_button_constraint_reversal`.
+  - Focused regression: `test_create_subagents_rejects_unverified_remote_images_when_user_requires_no_broken_images`.
+  - Focused group: `python3 -m pytest -q agent_py_agent/tests/test_dispatch_workflow_records.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_orchestration_dispatch_subagents_tool.py` -> `34 passed`.
+- Status: fixed by focused tests; rerun clean R13.
+
+### Finding 67: `#锚点` and missing hash links can bypass “no dead buttons”
+
+- Discovered at: 2026-05-15 during Phase 4 natural-language furniture E2E v13.
+- Symptom:
+  - Root used a more natural prompt and correctly delegated to small agents instead of writing the page itself.
+  - The child goal still weakened the user constraint by saying buttons could use `href` or `#锚点`.
+  - Generated `index1.html` and `index2.html` contained multiple `href="#"` links even though the user asked for no broken buttons.
+- 中文解释：
+  - 大白话：上一轮已经拦住了“按钮可指向 #”，但模型换了个说法，写成“可以用 #锚点”。结果页面里还是出现了假按钮。这个不能只靠提示词，要让派工和验收都能识别。
+- Root cause:
+  - Delegation guard recognized `href="#"` / `指向 #`, but not the natural Chinese escape phrase `#锚点`.
+  - `static_site_check` only treated `<a>` without `href` as inert; it did not treat `href="#"` or `href="#missing"` as invalid controls.
+- Fix:
+  - `create_subagents` now treats `#锚点` / `# 锚点` / `空锚点` / `hash anchor` as delegation conflicts when the user requires working buttons.
+  - `static_site_check` now allows real in-page anchors only when the referenced element id exists in the same HTML file.
+  - `href="#"` and `href="#missing"` are reported as `inert_control_hits`; valid `href="#existing-id"` remains allowed.
+  - Runner guidance now tells generated web workers not to fake clickable controls with empty hash links when the user asks for working buttons/links.
+- Verification:
+  - Focused regression: `test_static_site_check_blocks_placeholder_hash_links`.
+  - Focused regression: `test_create_subagents_rejects_hash_anchor_escape_when_user_requires_working_buttons`.
+  - Focused group: `python3 -m pytest -q agent_py_agent/tests/test_static_site_validator.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_artifact_integrity.py agent_py_agent/tests/test_subagent_finalize_helpers.py agent_py_agent/tests/test_dispatch_workflow_records.py agent_py_agent/tests/test_orchestration_dispatch_subagents_tool.py` -> `51 passed`.
+  - Ruff: `/Users/example/ai_claw/bin/ruff check agent_py_agent/agent/subagents/static_site_validator.py agent_py_agent/agent/agent_core/orchestration_tools.py agent_py_agent/agent/agent_core/orchestration_tool_specs.py agent_py_agent/agent/agent_core/runner_prompts.py agent_py_agent/tests/test_static_site_validator.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py` -> passed.
+- Status: fixed by focused tests; rerun clean natural-language E2E next.
+
+### Finding 68: static-site failures must attach to the right artifact scope
+
+- Discovered at: 2026-05-15 during Phase 4 natural-language furniture E2E v14.
+- Symptom:
+  - `index2.html` contained `href="#"` and `getElementById('extra-contact')`, and the new static-site check correctly detected them.
+  - However, the failing static-site report was attached to the `index1.html` leaf because that leaf had an artifact ref and inherited parent required files (`index1.html`, `index2.html`).
+  - The `index2.html` leaf wrote a raw `artifact_path` in its result text but did not emit a normalized `artifacts` list, so its own test inference had zero executable tests and it was incorrectly marked `DONE/VERIFIED`.
+- 中文解释：
+  - 大白话：问题明明在 `index2.html`，但验收报告把锅扣到了负责 `index1.html` 的小傻妞头上；真正写坏 `index2.html` 的小傻妞反而因为“没写清楚 artifact 列表”被放过了。
+- Root cause:
+  - Static-site inference merged task-level `required_files` into a leaf artifact check, so sibling files could make the wrong leaf fail.
+  - When a runner omitted `artifacts` but the task goal clearly mentioned `index2.html`, acceptance did not infer a static-site check from required files.
+- Fix:
+  - If a leaf has concrete HTML artifact refs, inferred `static_site_check` now scopes required files to those observed artifact refs only.
+  - If a task has no artifact refs but its goal/acceptance text names static files, acceptance now falls back to common product roots such as `artifacts/`, `deliverables/`, `outputs/`, then workspace root, and still generates a static-site check.
+  - This keeps leaf failures local while still catching omitted artifact lists.
+- Verification:
+  - Focused regression: `test_prepare_items_scopes_static_check_to_observed_leaf_artifacts`.
+  - Focused regression: `test_prepare_items_infers_static_check_from_required_files_without_artifacts`.
+- Status: fixed by focused tests; rerun clean natural-language E2E next.
+
+### Finding 69: frontend repair tasks need preset tool completion
+
+- Discovered at: 2026-05-15 during Phase 4 natural-language furniture E2E v14.
+- Symptom:
+  - Root correctly created a repair worker for `index2.html`.
+  - The repair worker needed to rewrite a long HTML file in chunks, but root had explicitly granted only `write_file`, `read_file`, and `run_command`.
+  - The worker then tried `append_file` and got `工具未授权: append_file`.
+- 中文解释：
+  - 大白话：修页面这种活一定会用到“写骨架 + 追加 + 替换”。root 少写一个工具名，修复小傻妞就被绑住手脚了。工具包应该按“前端开发”这个任务类型自动补齐，而不是全靠 root 一个个列。
+- Root cause:
+  - `create_subagents` treated explicit `allowed_tools` as a full override even when `tool_preset` clearly said `frontend-dev`.
+  - `frontend-dev` was not mapped to a stable coding tool bundle.
+- Fix:
+  - `frontend-dev` / `frontend` / `web` / `web-dev` / `coding` / `file-edit` / `edit` now map to a coding tool bundle.
+  - If explicit tools are present together with one of these write presets, the system unions them with the preset minimum grants, including `append_file`, `replace_in_file`, `read_artifact`, and `capability_request`.
+  - `read_only` and `none` remain restrictive.
+- Verification:
+  - Focused regression: `test_frontend_preset_completes_partial_explicit_tool_list`.
+  - Focused group: `python3 -m pytest -q agent_py_agent/tests/test_execution_static_site_items.py agent_py_agent/tests/test_static_site_validator.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_orchestration_dispatch_subagents_tool.py agent_py_agent/tests/test_subagent_test_execution_report.py agent_py_agent/tests/test_parent_acceptance_empty_report.py agent_py_agent/tests/test_artifact_integrity.py agent_py_agent/tests/test_subagent_finalize_helpers.py agent_py_agent/tests/test_dispatch_workflow_records.py` -> `57 passed`.
+  - Ruff: `/Users/example/ai_claw/bin/ruff check agent_py_agent/agent/subagents/execution_static_site_items.py agent_py_agent/agent/subagents/execution_test_items.py agent_py_agent/agent/subagents/static_site_validator.py agent_py_agent/agent/agent_core/orchestration_tools.py agent_py_agent/agent/agent_core/orchestration_tool_specs.py agent_py_agent/agent/agent_core/runner_prompts.py agent_py_agent/tests/test_execution_static_site_items.py agent_py_agent/tests/test_static_site_validator.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py` -> passed.
+- Status: fixed by focused tests; rerun clean R15.
+
+### Finding 70: leaf required_files must be narrowed by concrete write roots
+
+- Discovered at: 2026-05-15 during Phase 4 natural-language furniture E2E v15.
+- Symptom:
+  - `index1.html` leaf and `index2.html` leaf both reached `AWAITING_ACCEPTANCE`.
+  - `index2.html` had real static-site failures, but the same `inert_control_hits` report also appeared under the `index1.html` leaf.
+  - The page1 leaf had no normalized artifact refs, and its context inherited parent required files (`index1.html`, `index2.html`), so fallback static-site inference scanned both sibling files.
+- 中文解释：
+  - 大白话：负责 `index1.html` 的小小傻妞只应该检查自己的 `index1.html`。但它的工单里顺手带着父级的两个文件名，于是验收把 `index2.html` 的坏按钮也算到它头上。
+- Root cause:
+  - `required_static_files_for_task()` extracted filenames from inherited parent context but did not use `allowed_write_roots` to know the current leaf's concrete product file.
+  - This broke the “一个 leaf 对一个明确产物负责”的验收边界。
+- Fix:
+  - `required_static_files_for_task()` now narrows extracted static files when `allowed_write_roots` contains concrete static file paths such as `.../artifacts/index1.html`.
+  - Directory write roots still keep the broader required-file list, so coordinator/root checks can still validate multi-page deliverables.
+- Verification:
+  - Focused regression: `test_required_static_files_scope_to_concrete_allowed_write_file`.
+  - Related group: `python3 -m pytest -q agent_py_agent/tests/test_execution_static_site_items.py agent_py_agent/tests/test_static_site_validator.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_orchestration_dispatch_subagents_tool.py agent_py_agent/tests/test_subagent_test_execution_report.py agent_py_agent/tests/test_parent_acceptance_empty_report.py agent_py_agent/tests/test_artifact_integrity.py agent_py_agent/tests/test_subagent_finalize_helpers.py agent_py_agent/tests/test_dispatch_workflow_records.py agent_py_agent/tests/test_tools/test_tool_loop.py` -> passed.
+- Status: fixed by focused tests; rerun clean R16.
+
+### Finding 71: blocked dispatch final answers must replace over-optimistic drafts
+
+- Discovered at: 2026-05-15 during Phase 4 natural-language furniture E2E v15.
+- Symptom:
+  - The root final answer first said the two pages were complete and had passed checks.
+  - The system then appended `Subagent State Notice` saying the subagent chain was not actually complete (`done_verified=0`, root still blocked).
+  - The correction was true, but the answer still started with a misleading success claim.
+- 中文解释：
+  - 大白话：守门员发现没过，但用户先看到一句“完成了”。这会让人误会。只要真实状态没全绿，就应该直接说没全绿，而不是先报喜再道歉。
+- Root cause:
+  - `subagent_dispatch_final_response_guard()` appended the factual notice after the model response instead of replacing the model response.
+  - `_blocking_task_ids()` only listed hard terminal states and missed `AWAITING_ACCEPTANCE/NEEDS_ACCEPTANCE` leaves, so recovery refs were not complete enough.
+- Fix:
+  - After `dispatch_subagents`, if any persisted task is not `DONE/VERIFIED`, the final response is replaced with a deterministic factual state report.
+  - `blocking_run_ids` now includes all not-yet-verified nodes, including `AWAITING_ACCEPTANCE`.
+  - Single `create_subagents` / board-only intermediate answers are not replaced, so honest “已创建并等待调度” replies remain intact.
+- Verification:
+  - Focused regression: `test_final_response_warns_when_subagent_tree_still_has_blockers`.
+  - Existing create-only regressions still pass:
+    `test_agent_can_delegate_to_subagents_from_tool_call`,
+    `test_repeated_orchestration_tool_call_is_not_executed_twice`.
+  - Related group: `python3 -m pytest -q agent_py_agent/tests/test_execution_static_site_items.py agent_py_agent/tests/test_static_site_validator.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_orchestration_dispatch_subagents_tool.py agent_py_agent/tests/test_subagent_test_execution_report.py agent_py_agent/tests/test_parent_acceptance_empty_report.py agent_py_agent/tests/test_artifact_integrity.py agent_py_agent/tests/test_subagent_finalize_helpers.py agent_py_agent/tests/test_dispatch_workflow_records.py agent_py_agent/tests/test_tools/test_tool_loop.py` -> passed.
+- Status: fixed by focused tests; rerun clean R16.
+
+### Finding 72: long file tail reads need continuation cursors
+
+- Discovered at: 2026-05-15 during Phase 4 natural-language furniture E2E v16.
+- Symptom:
+  - The `index2.html` worker wrote a long 40KB+ partial HTML file, then repeatedly tried to inspect the tail with guessed line numbers.
+  - Calls like `read_file(start_line=1600)` could return `end_line 不能小于 start_line` when the file had fewer lines.
+  - Calls beyond EOF returned `(空文件)` in some ranges, so the worker kept guessing line numbers and burned tool rounds instead of appending the missing body/footer/closing tags.
+  - `index1.html` never started because the first worker occupied the dispatch runner window.
+- 中文解释：
+  - 大白话：小傻妞想看文件写到哪儿了，但工具没有告诉它“这个文件一共多少行、下一次从哪行读”。它只能猜 1600、1700、1750，猜错就空转。
+- Root cause:
+  - `read_file` truncated by raw character count and did not return a stable continuation cursor.
+  - `start_line` beyond EOF with no `end_line` fell through to the generic `end_line < start_line` check.
+- Fix:
+  - `read_file` is now line-aware when output exceeds `tool_read_max_chars`.
+  - Truncated reads include `total_lines`, `next_start_line`, and `limit_chars`.
+  - `start_line` beyond EOF now returns an actionable message with `total_lines` and a suggested tail range instead of a misleading empty/range result.
+- Verification:
+  - Focused regression: `test_read_file_reports_next_start_line_when_truncated`.
+  - Focused regression: `test_read_file_start_line_past_eof_reports_total_lines`.
+  - Related group: `python3 -m pytest -q agent_py_agent/tests/test_tools/test_filesystem_tools.py agent_py_agent/tests/test_tooling_filesystem.py agent_py_agent/tests/test_artifact_integrity.py agent_py_agent/tests/test_subagent_finalize_helpers.py agent_py_agent/tests/test_execution_static_site_items.py agent_py_agent/tests/test_tools/test_tool_loop.py` -> passed.
+  - Ruff: `/Users/example/ai_claw/bin/ruff check agent_py_agent/agent/tooling/_filesystem_read.py agent_py_agent/tests/test_tools/test_filesystem_tools.py agent_py_agent/agent/subagents/static_required_files.py agent_py_agent/agent/agent_core/subagent_dispatch_closeout.py agent_py_agent/tests/test_execution_static_site_items.py agent_py_agent/tests/test_tools/test_tool_loop.py` -> passed.
+- Status: fixed by focused tests; rerun clean R17.
