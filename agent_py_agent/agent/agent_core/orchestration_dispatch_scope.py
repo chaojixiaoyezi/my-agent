@@ -113,7 +113,67 @@ def dispatch_exclude_run_ids(agent, params: dict[str, object]) -> list[str]:
     current = current_subagent_run_id(agent)
     if current and current not in excluded:
         excluded.append(current)
+    for ancestor_id in _active_ancestor_run_ids(agent, current):
+        if ancestor_id not in excluded:
+            excluded.append(ancestor_id)
     return excluded
+
+
+# LLM: _active_ancestor_run_ids protects live parent runners during nested dispatch.
+# 函数用途: 子/孙 runner 调度自己的孩子时，把仍在执行的祖先排除在 due-check/action-apply 外，避免误接管活父级。
+def _active_ancestor_run_ids(agent, current_run_id: str) -> list[str]:
+    run_id = str(current_run_id or "").strip()
+    if not run_id:
+        return []
+    ancestors: list[str] = []
+    seen: set[str] = {run_id}
+    parent_id = _parent_id_for_run(agent, run_id)
+    while parent_id and parent_id not in seen:
+        seen.add(parent_id)
+        try:
+            parent = agent.subagents.load(parent_id)
+        except Exception:
+            break
+        if not _is_active_ancestor(parent):
+            break
+        ancestors.append(parent_id)
+        parent_id = _safe_run_id(getattr(parent, "parent_id", ""))
+    return ancestors
+
+
+# LLM: _parent_id_for_run keeps MagicMock/default values from becoming fake run ids.
+# 函数用途: 安全读取当前 run 的 parent_id；测试桩或缺失字段直接返回空字符串。
+def _parent_id_for_run(agent, run_id: str) -> str:
+    try:
+        task = agent.subagents.load(run_id)
+    except Exception:
+        return ""
+    return _safe_run_id(getattr(task, "parent_id", ""))
+
+
+# LLM: _is_active_ancestor mirrors heartbeat propagation without importing due-check internals.
+# 函数用途: 判断祖先是否还在真实执行中；只有活祖先才从当前 nested dispatch 的恢复扫描中排除。
+def _is_active_ancestor(task) -> bool:
+    status = str(getattr(task, "status", "") or "").upper()
+    active_attempt = _safe_run_id(getattr(task, "runner_active_attempt_id", ""))
+    return status == "RUNNING" or bool(active_attempt)
+
+
+# LLM: _safe_run_id accepts only concrete string ids from task records.
+# 函数用途: 避免 MagicMock、None 或非字符串对象被 str() 后误当成真实 run_id。
+def _safe_run_id(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+# LLM: dispatch_take_over_by_default keeps recovery apply usable inside parent runners.
+# 函数用途: runner 内部未显式传接管者时默认使用当前父级 run id，避免模型因漏传底层参数而无法接管失联孩子。
+def dispatch_take_over_by_default(agent, params: dict[str, object]) -> str:
+    explicit = str(params.get("take_over_by") or "").strip()
+    if explicit:
+        return explicit
+    return current_subagent_run_id(agent)
 
 
 # LLM: dispatch_finalize_acceptance lets runner parents write acceptance/test refs for direct children.

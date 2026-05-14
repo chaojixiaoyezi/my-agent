@@ -5,6 +5,7 @@ from __future__ import annotations
 
 """read-only subagent owner reference resolver for compact resume."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ class CompactSubagentOwnerRequest:
     owner_type: str
     owner_id: str
     resume_mode: str
+    subagent_workspace: Path | None = None
 
 
 # LLM: resolve_compact_subagent_owner returns stable refs only; it never creates or edits run files.
@@ -38,13 +40,14 @@ def resolve_compact_subagent_owner(request: CompactSubagentOwnerRequest) -> dict
         return base | {"status": "not_subagent_owner", "refs": {}, "workspace_refs": [], "legacy_run_ref": {}}
     if not request.owner_id:
         return base | {"status": "missing_owner_id", "refs": {}, "workspace_refs": [], "legacy_run_ref": {}}
-    refs = _owner_refs(request.workspace, request.owner_id)
+    refs = _owner_refs(request)
     status = _owner_status(refs)
     return base | {
         "status": status,
         "refs": refs,
         "workspace_refs": refs.get("agent_run_workspaces", []),
         "legacy_run_ref": _read_legacy_run_ref(refs.get("legacy_run_ref", "")),
+        "recommended_read_paths": _recommended_subagent_read_paths(refs),
         "reserved_hooks": _reserved_hooks(request, refs),
     }
 
@@ -68,16 +71,32 @@ def _base_payload(request: CompactSubagentOwnerRequest) -> dict[str, Any]:
     }
 
 
-# LLM: _owner_refs searches only known task workspace shapes under the active runtime workspace.
-# 函数用途: 从 tasks/<root>/agents/<run_id> 和 legacy subagents/<run_id> 收集存在的恢复引用路径。
-def _owner_refs(workspace: Path, owner_id: str) -> dict[str, Any]:
-    run_workspaces = _agent_run_workspaces(workspace, owner_id)
+# LLM: _owner_refs searches bounded root/configured subagent workspace shapes for owner-local refs.
+# 函数用途: 从 workspace 和配置 subagent_workspace 收集 run workspace 与 legacy work-order 恢复引用。
+def _owner_refs(request: CompactSubagentOwnerRequest) -> dict[str, Any]:
+    owner_id = _owner_path_segment(request.owner_id)
+    if not owner_id:
+        return {}
+    run_workspaces = _run_workspaces_from_search_roots(request, owner_id)
+    legacy_dirs = _legacy_task_dirs(request, owner_id)
+    run_workspaces = _unique_existing_dirs(
+        [
+            *run_workspaces,
+            *[
+                str(path)
+                for path in (
+                    _run_workspace_from_legacy_task(legacy_dir, request) for legacy_dir in legacy_dirs
+                )
+                if path
+            ],
+        ]
+    )
     primary = Path(run_workspaces[0]) if run_workspaces else None
-    legacy_dir = workspace / "subagents" / owner_id
+    legacy_dir = legacy_dirs[0] if legacy_dirs else None
     refs: dict[str, Any] = {
         "agent_run_workspace": str(primary) if primary else "",
         "agent_run_workspaces": run_workspaces,
-        "legacy_task_dir": str(legacy_dir) if legacy_dir.exists() else "",
+        "legacy_task_dir": str(legacy_dir) if legacy_dir else "",
     }
     if primary:
         refs.update(_primary_run_refs(primary))
@@ -89,13 +108,67 @@ def _owner_refs(workspace: Path, owner_id: str) -> dict[str, Any]:
     return {key: value for key, value in refs.items() if value}
 
 
-# LLM: _agent_run_workspaces finds task-local run dirs without scanning outside the runtime workspace.
-# 函数用途: 查找所有 tasks/*/agents/<run_id> 候选路径，排序后让恢复输出稳定可比对。
+# LLM: _run_workspaces_from_search_roots keeps configured runtime subagent dirs first-class resume sources.
+# 函数用途: 在主 workspace 与配置 subagent_workspace 的 tasks/*/agents/<run_id> 下查找候选 run workspace。
+def _run_workspaces_from_search_roots(request: CompactSubagentOwnerRequest, owner_id: str) -> list[str]:
+    return _unique_existing_dirs(
+        path
+        for root in _run_workspace_search_roots(request)
+        for path in _agent_run_workspaces(root, owner_id)
+    )
+
+
+# LLM: _run_workspace_search_roots bounds owner lookup to known local runtime roots.
+# 函数用途: 生成 run workspace 搜索根，避免为了找子代理恢复引用而扫描整个用户工作目录。
+def _run_workspace_search_roots(request: CompactSubagentOwnerRequest) -> list[Path]:
+    return _unique_paths([request.workspace, *_configured_subagent_workspace_roots(request)])
+
+
+# LLM: _configured_subagent_workspace_roots normalizes the explicit subagent workspace passed by config/CLI.
+# 函数用途: 把配置中的 subagent_workspace 解析为绝对路径，并去掉空值和重复项。
+def _configured_subagent_workspace_roots(request: CompactSubagentOwnerRequest) -> list[Path]:
+    return _unique_paths([request.subagent_workspace] if request.subagent_workspace else [])
+
+
+# LLM: _agent_run_workspaces finds direct child run dirs without globbing owner-controlled text.
+# 函数用途: 查找 tasks/<task>/agents/<run_id> 候选路径，把 owner_id 当普通目录名而不是 glob 表达式。
 def _agent_run_workspaces(workspace: Path, owner_id: str) -> list[str]:
     tasks_root = workspace / "tasks"
     if not tasks_root.exists():
         return []
-    return [str(path) for path in sorted(tasks_root.glob(f"*/agents/{owner_id}")) if path.is_dir()]
+    matches: list[str] = []
+    for task_dir in sorted(path for path in tasks_root.iterdir() if path.is_dir()):
+        candidate = task_dir / "agents" / owner_id
+        if candidate.is_dir():
+            matches.append(str(candidate))
+    return matches
+
+
+# LLM: _legacy_task_dirs supports both default root/subagents and configured subagent_workspace/<run_id>.
+# 函数用途: 查找旧 work-order 目录，真实 E2E 会把它放进配置指定的 runtime subagents 根目录。
+def _legacy_task_dirs(request: CompactSubagentOwnerRequest, owner_id: str) -> list[Path]:
+    candidates = [
+        *(root / owner_id for root in _configured_subagent_workspace_roots(request)),
+        request.workspace / "subagents" / owner_id,
+    ]
+    return [path for path in _unique_paths(candidates) if path.is_dir()]
+
+
+# LLM: _run_workspace_from_legacy_task upgrades legacy work-order metadata into current run workspace refs.
+# 函数用途: 从旧 task.json 的 agent_run_workspace_dir 找到新 run workspace，支撑断点接管和 compact resume。
+def _run_workspace_from_legacy_task(
+    legacy_dir: Path, request: CompactSubagentOwnerRequest
+) -> Path | None:
+    payload = read_json_object(legacy_dir / "task.json")
+    raw = str(payload.get("agent_run_workspace_dir") or "")
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    path = path if path.is_absolute() else legacy_dir / path
+    if not path.is_dir():
+        return None
+    allowed_roots = [request.workspace, *_configured_subagent_workspace_roots(request)]
+    return path if _path_is_under_any(path, allowed_roots) else None
 
 
 # LLM: _primary_run_refs maps the current run workspace contract into compact resume references.
@@ -117,6 +190,20 @@ def _primary_run_refs(run_workspace: Path) -> dict[str, str]:
     return {key: str(path) for key, path in candidates.items() if path.exists()}
 
 
+# LLM: _recommended_subagent_read_paths gives continuation callers task-local refs before main memory refs.
+# 函数用途: 为子代理 compact/resume 显式列出应该先读的 run workspace 文件，避免误读主代理长期记忆。
+def _recommended_subagent_read_paths(refs: dict[str, Any]) -> list[str]:
+    ordered_keys = [
+        "latest_continue_packet",
+        "agent_checkpoint",
+        "agent_summary",
+        "agent_task",
+        "agent_timeline",
+        "agent_findings",
+    ]
+    return [str(refs[key]) for key in ordered_keys if refs.get(key)]
+
+
 # LLM: _read_legacy_run_ref exposes adapter metadata only when the declared JSON ref exists and is valid.
 # 函数用途: 读取 legacy_run_ref.json 中的旧工单目录引用，便于新旧子代理 workspace 互相接管。
 def _read_legacy_run_ref(value: str) -> dict[str, Any]:
@@ -124,6 +211,60 @@ def _read_legacy_run_ref(value: str) -> dict[str, Any]:
         return {}
     payload = read_json_object(Path(value))
     return payload if payload else {}
+
+
+# LLM: _owner_path_segment makes owner ids literal directory names and rejects traversal-shaped values.
+# 函数用途: 防止 request/session/run id 中的 slash 或 dot segments 被当成路径层级参与恢复扫描。
+def _owner_path_segment(owner_id: str) -> str:
+    if not owner_id or owner_id in {".", ".."}:
+        return ""
+    path = Path(owner_id)
+    return owner_id if path.name == owner_id and len(path.parts) == 1 else ""
+
+
+# LLM: _unique_paths keeps search order deterministic while avoiding duplicate root scans.
+# 函数用途: 规范化并去重路径列表，保留调用方传入的优先级。
+def _unique_paths(paths: Iterable[Path | None]) -> list[Path]:
+    result: list[Path] = []
+    seen: set[str] = set()
+    for raw in paths:
+        if raw is None:
+            continue
+        path = raw.expanduser()
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key not in seen:
+            seen.add(key)
+            result.append(path)
+    return result
+
+
+# LLM: _unique_existing_dirs normalizes discovered run workspace refs without changing their contents.
+# 函数用途: 去重并只保留真实存在的目录，保证 compact resume 输出稳定。
+def _unique_existing_dirs(paths: Iterable[str | Path]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw in paths:
+        path = Path(raw)
+        if not path.is_dir():
+            continue
+        key = str(path.resolve())
+        if key not in seen:
+            seen.add(key)
+            result.append(str(path))
+    return result
+
+
+# LLM: _path_is_under_any prevents legacy task metadata from pointing compact resume at unrelated trees.
+# 函数用途: 判断候选 run workspace 是否仍位于主 workspace 或配置 subagent_workspace 下。
+def _path_is_under_any(path: Path, roots: Iterable[Path]) -> bool:
+    resolved = path.resolve()
+    for root in roots:
+        try:
+            resolved.relative_to(root.expanduser().resolve())
+        except ValueError:
+            continue
+        return True
+    return False
 
 
 # LLM: _reserved_hooks names future subagent session compact files without creating or mutating them.

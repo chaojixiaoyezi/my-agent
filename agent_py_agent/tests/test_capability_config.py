@@ -34,6 +34,7 @@ class TestCapabilityConfigDefaults:
         config = CapabilityConfig()
         assert config.capability_candidate_limit == 5
         assert config.capability_fallback_max_attempts == 3
+        assert config.subagent_no_progress_attempt_limit == 4
 
     def test_capability_config_zero_means_unlimited(self):
         """验证 0 表示不限制。"""

@@ -161,19 +161,15 @@ def test_subagent_action_apply_dry_run_and_apply():
         assert (root / "subs" / "subagent_action_apply_log.jsonl").exists()
         assert (root / "subs" / "ACTION_APPLY_LOG.md").exists()
 
-        # Test takeover with missing owner fails
+        # Test dead-run takeover creates a replacement run without asking for a manual owner
         stale = _make_stale_task(agent)
-        missing = agent.subagents.write_action_apply_report(cap, apply=True, action_filter="takeover_or_reassign", run_id=stale.id)
-        assert not missing.records[0].ok and agent.subagents.load(stale.id).status == "PLANNING"
-
-        # Test takeover with owner succeeds
-        takeover = agent.subagents.write_action_apply_report(
-            cap, apply=True, action_filter="takeover_or_reassign", run_id=stale.id,
-            take_over_by="parent-supervisor", locked_files=["src/example.py"],
-        )
+        takeover = agent.subagents.write_action_apply_report(cap, apply=True, action_filter="takeover_or_reassign", run_id=stale.id)
         taken = agent.subagents.load(stale.id)
         assert takeover.records[0].ok and taken.status == "TAKEN_OVER"
-        assert taken.takeover_by == "parent-supervisor" and "src/example.py" in taken.locked_files
+        replacement = agent.subagents.load(taken.takeover_by)
+        assert replacement.parent_id == taken.parent_id
+        assert taken.task_dir in replacement.allowed_write_roots
+        assert replacement.attributes["takeover_source_refs"]["task_dir"] == taken.task_dir
         assert Path(taken.takeover_file).exists()
 
 
@@ -215,6 +211,48 @@ def test_subagent_action_apply_recovers_coordinator_leadership():
         assert child.id in reloaded_leader.child_ids
         assert reloaded_child.depth == reloaded_leader.depth + 1
         assert reloaded_grandchild.depth == reloaded_child.depth + 1
+
+
+def test_subagent_action_apply_excludes_active_parent_from_takeover():
+    """LLM: Parent dispatch must never apply takeover_or_reassign to the active parent run itself."""
+    from agent_py_agent.agent.subagents.services.action_options import ActionApplyOptions
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        cap = CapabilityConfig(subagent_heartbeat_timeout=1, subagent_run_timeout=0)
+        parent = _make_stale_task(agent)
+        child = agent.subagents.create_run(
+            goal="孩子失联",
+            thought="模拟父级可接管的孩子。",
+            plan=["work"],
+            parent_id=parent.id,
+            root_id=parent.root_id,
+            supervisor=parent.id,
+        )
+        stale_child = agent.subagents.load(child.id)
+        stale_child.heartbeat_at = time.time() - 30
+        agent.subagents.save(stale_child)
+
+        report = agent.subagents.write_action_apply_report(
+            cap,
+            options=ActionApplyOptions(
+                apply=True,
+                action_filter="takeover_or_reassign",
+                take_over_by=parent.id,
+                root_id=parent.root_id,
+                exclude_run_ids=[parent.id],
+            ),
+        )
+
+        assert [record.run_id for record in report.records] == [child.id]
+        assert agent.subagents.load(parent.id).status != "TAKEN_OVER"
+        taken_child = agent.subagents.load(child.id)
+        replacement = agent.subagents.load(taken_child.takeover_by)
+        assert taken_child.status == "TAKEN_OVER"
+        assert replacement.parent_id == parent.id
+        assert replacement.attributes["takeover_source_refs"]["task_dir"] == taken_child.task_dir
 
 
 def test_subagent_action_apply_parent_timeout_child_recovery_is_record_only():

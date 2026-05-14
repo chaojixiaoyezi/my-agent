@@ -36,7 +36,7 @@ def dispatch_no_progress_payload(dispatch_report) -> dict[str, object]:
     if signature is None or not signature:
         return {}
     records = list(getattr(dispatch_report, "records", []) or [])
-    return {
+    payload = {
         "no_progress_actions_only": True,
         "recommended_next_action": "stop_dispatch_and_report_blockers",
         "reason": (
@@ -46,6 +46,15 @@ def dispatch_no_progress_payload(dispatch_report) -> dict[str, object]:
         "record_count": len(records),
         "blocked_run_ids": _record_run_ids(records),
     }
+    if tool_call := _dry_run_recovery_tool_call(records):
+        payload["recommended_next_action"] = "rerun_dispatch_with_apply_for_recovery"
+        payload["reason"] = (
+            "本轮只做了 dry-run，已经发现可写回的恢复动作。"
+            "如果当前父级确实要接管/重分配，请按 suggested_tool_call 重新调用；"
+            "runner 内部会默认用当前父级 run_id 作为 take_over_by。"
+        )
+        payload["suggested_tool_call"] = tool_call
+    return payload
 
 
 # LLM: _dispatch_no_progress_signature protects parent dispatch from repeating identical audit-only work forever.
@@ -127,6 +136,7 @@ _RECORD_ONLY_ACTIONS = {
     "classify_blocker",
     "inspect_failure",
     "recover_child_after_parent_timeout",
+    "stop_no_progress_and_escalate",
     "route_capability_request",
     "triage_capability_gap",
 }
@@ -176,6 +186,32 @@ def _record_run_ids(records: list[object]) -> list[str]:
         if run_id and run_id not in run_ids:
             run_ids.append(run_id)
     return run_ids[:20]
+
+
+# LLM: _dry_run_recovery_tool_call turns a non-mutating recovery preview into a safe exact next call.
+# 函数用途: 当父模型误把恢复接管跑成 dry-run 时，返回可复制的 apply 调度参数，避免继续空转或误新建 repair。
+def _dry_run_recovery_tool_call(records: list[object]) -> dict[str, object]:
+    if not any(_is_dry_run_recovery_apply(record) for record in records):
+        return {}
+    return {
+        "tool": "dispatch_subagents",
+        "apply": True,
+        "execute_runners": False,
+        "workflow_mode": "off",
+        "max_runners": 0,
+        "limit": max(len(records), 1),
+    }
+
+
+# LLM: _is_dry_run_recovery_apply recognizes safe recovery actions that need apply=true to mutate state.
+# 函数用途: 只对接管/领导权恢复这类恢复写回给建议，普通 classify dry-run 仍按阻塞项汇报。
+def _is_dry_run_recovery_apply(record: object) -> bool:
+    return (
+        _safe_str(record, "step") == "action_apply"
+        and _safe_str(record, "action") in {"takeover_or_reassign", "recover_coordinator_leadership"}
+        and _safe_bool(record, "dry_run")
+        and not _safe_bool(record, "applied")
+    )
 
 
 __all__ = ["DispatchNoProgressTracker", "dispatch_no_progress_payload"]

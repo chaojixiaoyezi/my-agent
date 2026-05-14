@@ -47,15 +47,17 @@ def _direct_children(agent, parent_run_id: str) -> list | None:
 # LLM: _attach_direct_child_next_action centralizes model-facing progress guidance.
 # 函数用途: 根据 child 状态把继续调度、恢复或收口建议补进直接 child payload。
 def _attach_direct_child_next_action(children: dict[str, object]) -> None:
+    if children["needs_recovery"]:
+        children.update(_recovery_dispatch_payload(children["recovery_run_ids"], children.get("recovery_strategies")))
+        if children.get("needs_repair_wave"):
+            children["repair_wave_deferred_by_recovery"] = True
+        return
     if children.get("needs_repair_wave"):
         children["ready_for_parent_acceptance"] = False
         children["next_action"] = "create_repair_child_from_qa_refs"
         return
     if children["needs_more_dispatch"]:
         children.update(_continue_dispatch_payload(children["unfinished_run_ids"]))
-        return
-    if children["needs_recovery"]:
-        children.update(_recovery_dispatch_payload(children["recovery_run_ids"], children.get("recovery_strategies")))
         return
     if children.get("quality_advice"):
         children["ready_for_parent_acceptance"] = False

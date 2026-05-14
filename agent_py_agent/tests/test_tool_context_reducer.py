@@ -18,6 +18,16 @@ def test_dispatch_externalized_result_keeps_compact_next_action_without_read_hin
                 "needs_recovery": True,
                 "next_action": "inspect_or_rescue_direct_children",
                 "recovery_run_ids": ["child-1"],
+                "recovery_action_counts": {"rerun_original_from_continue_packet": 1},
+                "recovery_strategies": [
+                    {
+                        "run_id": "child-1",
+                        "recommended_action": "rerun_original_from_continue_packet",
+                        "packet_status": "ready",
+                        "uses_continue_packet": True,
+                        "runner_instruction": "先读 latest_continue_packet.json 再继续当前步骤",
+                    }
+                ],
                 "suggested_tool_call": {
                     "tool": "dispatch_subagents",
                     "run_ids": ["child-1"],
@@ -41,6 +51,8 @@ def test_dispatch_externalized_result_keeps_compact_next_action_without_read_hin
 
     assert "orchestration_summary" in rendered
     assert "inspect_or_rescue_direct_children" in rendered
+    assert "rerun_original_from_continue_packet" in rendered
+    assert "latest_continue_packet.json" in rendered
     assert "child-1" in rendered
     assert "output_scoped_call_id: root-1:1-1" in rendered
     assert "prefer output_scoped_call_id" in rendered

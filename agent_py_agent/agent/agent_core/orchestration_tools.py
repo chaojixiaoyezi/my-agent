@@ -46,6 +46,23 @@ CODING_SUBAGENT_TOOLS = [
     "append_file",
     "replace_in_file",
 ]
+_VAGUE_PRODUCT_TARGET_WORDS = (
+    "目标目录",
+    "同一目录",
+    "当前目录",
+    "任务目录",
+    "产物目录",
+    "输出目录",
+    "build 目录",
+    "build目录",
+    "deliverables 目录",
+    "deliverables目录",
+    "target directory",
+    "same directory",
+    "current directory",
+    "task directory",
+    "output directory",
+)
 
 
 # LLM: _subagent_allowed_tools 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -125,18 +142,18 @@ def _merged_extra_write_roots(params: dict[str, object], goal: str) -> list[str]
 # 函数用途: 显式 root/coordinator 要交付文件但没带产物写入根时拒绝创建，要求模型带 extra_write_roots 重试。
 def explicit_root_missing_write_root_error(params: dict[str, object], goal: str) -> str:
     role = str(params.get("role") or "worker").strip()
-    if not is_explicit_root_role(role):
-        return ""
     if _merged_extra_write_roots(params, goal):
         return ""
     if not _goal_needs_product_write_root(goal):
         return ""
+    if not is_explicit_root_role(role) and not _goal_has_vague_product_target(goal):
+        return ""
     return (
-        "显式 root/coordinator 要交付文件或网站时，必须提供真实产物写入根，"
+        "要交付文件或网站时，必须提供真实产物写入根，"
         "否则下级会误把 agent-run workspace 当成 build 目录。"
         "请重新调用 create_subagents，并在顶层传入 extra_write_roots，"
         "例如 extra_write_roots=[\"/Users/.../deliverables/.../build\"]；"
-        "不要只在 goal 里写“build 目录”。"
+        "不要只在 goal 里写“目标目录”“同一目录”或“build 目录”。"
     )
 
 
@@ -147,6 +164,13 @@ def _goal_needs_product_write_root(goal: str) -> bool:
     if not any(word in lowered for word in ("交付", "deliver", "build", "网站", "demo", "文件")):
         return False
     return any(suffix in lowered for suffix in (".html", ".css", ".js", ".py", ".md", ".json", ".txt"))
+
+
+# LLM: _goal_has_vague_product_target blocks path drift before a worker silently writes into task_dir.
+# 函数用途: 识别“目标目录/任务目录”等模糊产物位置；没有 extra_write_roots 时要求模型重试并带真实目录。
+def _goal_has_vague_product_target(goal: str) -> bool:
+    lowered = goal.lower()
+    return any(word in lowered for word in _VAGUE_PRODUCT_TARGET_WORDS)
 
 
 # LLM: CreateSubagentsTool 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

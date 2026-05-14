@@ -20,6 +20,8 @@ class DueCheckSettings:
     heartbeat_timeout: float
     run_timeout: float
     min_evidence: int
+    # LLM: no_progress_attempt_limit keeps repeated recovery fuse configurable at the due-check boundary.
+    no_progress_attempt_limit: int = 4
 
 
 # LLM: DueInspectionContext bundles repeated per-task values for all due-check predicates.

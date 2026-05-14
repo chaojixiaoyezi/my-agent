@@ -66,13 +66,23 @@ def _build_risk_flags(
     return flags
 
 
-# LLM: _scoped_due_check_tasks keeps root-scoped due-check filtering in one auditable helper.
-# 函数用途: 过滤到期检查任务列表；未传 root_id 时保持全部任务，传入时只保留该 root 树。
-def _scoped_due_check_tasks(tasks: list[SubAgentTask], root_id: str) -> list[SubAgentTask]:
+# LLM: _scoped_due_check_tasks keeps root-scoped/excluded due-check filtering in one helper.
+# 函数用途: 过滤到期检查任务列表；root_id 限定任务树，exclude_run_ids 排除当前正在执行的父级。
+def _scoped_due_check_tasks(
+    tasks: list[SubAgentTask],
+    root_id: str,
+    include_run_ids: list[str] | None = None,
+    exclude_run_ids: list[str] | None = None,
+) -> list[SubAgentTask]:
     normalized = str(root_id or "").strip()
+    included = {str(item) for item in (include_run_ids or []) if str(item or "").strip()}
+    excluded = {str(item) for item in (exclude_run_ids or []) if str(item or "").strip()}
+    filtered = [task for task in tasks if task.id not in excluded]
+    if included:
+        filtered = [task for task in filtered if task.id in included]
     if not normalized:
-        return tasks
-    return [task for task in tasks if (task.root_id or task.id) == normalized]
+        return filtered
+    return [task for task in filtered if (task.root_id or task.id) == normalized]
 
 
 # LLM: _to_board_item 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -232,7 +242,14 @@ class SubAgentBoardService:
 
     # LLM: due_check can scope inspection to one root task while preserving default all-runs behavior.
     # 函数用途: 巡检子代理是否超时、阻塞或缺证据；传 root_id 时只看该任务树。
-    def due_check(self, config: CapabilityConfig | None = None, *, root_id: str = "") -> DueCheckReport:
+    def due_check(
+        self,
+        config: CapabilityConfig | None = None,
+        *,
+        root_id: str = "",
+        include_run_ids: list[str] | None = None,
+        exclude_run_ids: list[str] | None = None,
+    ) -> DueCheckReport:
         """Inspect all subagent runs to find issues needing parent intervention."""
         if config is None and hasattr(self.manager, "_make_default_capability_config"):
             config = self.manager._make_default_capability_config()
@@ -241,10 +258,17 @@ class SubAgentBoardService:
         heartbeat_timeout = cfg.subagent_heartbeat_timeout if cfg else 0
         run_timeout = cfg.subagent_run_timeout if cfg else 0
         min_evidence = cfg.subagent_min_evidence_for_done if cfg else 0
-        settings = DueCheckSettings(now, heartbeat_timeout, run_timeout, min_evidence)
+        no_progress_attempt_limit = getattr(cfg, "subagent_no_progress_attempt_limit", 4) if cfg else 4
+        settings = DueCheckSettings(
+            now=now,
+            heartbeat_timeout=heartbeat_timeout,
+            run_timeout=run_timeout,
+            min_evidence=min_evidence,
+            no_progress_attempt_limit=no_progress_attempt_limit,
+        )
         issues: list[DueCheckIssue] = []
         # LLM: due-check uses one loaded task index so parent/child rules stay refs-only and cheap.
-        tasks = _scoped_due_check_tasks(self.manager.list_runs(), root_id)
+        tasks = _scoped_due_check_tasks(self.manager.list_runs(), root_id, include_run_ids, exclude_run_ids)
         task_index = {task.id: task for task in tasks}
 
         for task in tasks:
@@ -278,9 +302,16 @@ class SubAgentBoardService:
         config: CapabilityConfig | None = None,
         *,
         root_id: str = "",
+        include_run_ids: list[str] | None = None,
+        exclude_run_ids: list[str] | None = None,
     ) -> ActionPlanReport:
         """Convert due-check issues into a dry-run action plan."""
-        due_report = self.due_check(config, root_id=root_id)
+        due_report = self.due_check(
+            config,
+            root_id=root_id,
+            include_run_ids=include_run_ids,
+            exclude_run_ids=exclude_run_ids,
+        )
         merged: dict[tuple[str, str], ActionPlanItem] = {}
         for issue in due_report.issues:
             action, priority, would_change_status_to = _action_for_issue(issue)

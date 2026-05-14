@@ -31,6 +31,7 @@ class StaticSiteCheckResult:
     broken_local_refs: list[str] = field(default_factory=list)
     inert_control_hits: list[str] = field(default_factory=list)
     form_binding_hits: list[str] = field(default_factory=list)
+    missing_dom_id_hits: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     # LLM: ok is the single pass/fail boolean consumed by parent acceptance.
@@ -43,6 +44,7 @@ class StaticSiteCheckResult:
             or self.broken_local_refs
             or self.inert_control_hits
             or self.form_binding_hits
+            or self.missing_dom_id_hits
         )
 
     # LLM: to_dict keeps result serialization stable and bounded for reports.
@@ -57,6 +59,7 @@ class StaticSiteCheckResult:
             "broken_local_refs": self.broken_local_refs,
             "inert_control_hits": self.inert_control_hits,
             "form_binding_hits": self.form_binding_hits,
+            "missing_dom_id_hits": self.missing_dom_id_hits,
             "warnings": self.warnings,
         }
 
@@ -72,6 +75,7 @@ class StaticSiteHTMLParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.refs: list[tuple[str, str]] = []
         self.controls: list[dict[str, object]] = []
+        self.element_ids: list[str] = []
         self.form_ids: list[str] = []
         self._current_control: dict[str, object] | None = None
 
@@ -82,6 +86,8 @@ class StaticSiteHTMLParser(HTMLParser):
         for ref_attr in ("href", "src", "action"):
             if attr_map.get(ref_attr):
                 self.refs.append((ref_attr, attr_map[ref_attr]))
+        if attr_map.get("id"):
+            self.element_ids.append(attr_map["id"])
         if tag == "form" and attr_map.get("id"):
             self.form_ids.append(attr_map["id"])
         if tag in {"button", "a"}:
@@ -146,6 +152,7 @@ def _scan_site(test: dict[str, Any], site_root: Path) -> StaticSiteCheckResult:
     check_controls = test.get("check_inert_controls", True) is not False
     check_forms = test.get("check_form_bindings", True) is not False
     form_ids: set[str] = set()
+    element_ids: set[str] = set()
     script_refs: list[Path] = []
     script_texts: list[str] = []
     for path in html_files:
@@ -155,15 +162,19 @@ def _scan_site(test: dict[str, Any], site_root: Path) -> StaticSiteCheckResult:
         parser = StaticSiteHTMLParser()
         parser.feed(text)
         form_ids.update(parser.form_ids)
-        script_refs.extend(_local_script_refs(parser.refs, path, site_root))
-        script_texts.append(text)
+        element_ids.update(parser.element_ids)
+        local_scripts = _local_script_refs(parser.refs, path, site_root)
+        local_script_text = "\n".join(_small_text(item) for item in _unique_paths(local_scripts))
+        script_refs.extend(local_scripts)
+        script_texts.extend([text, local_script_text])
         if check_refs:
             result.broken_local_refs.extend(_broken_refs(parser.refs, path, site_root))
         if check_controls:
-            result.inert_control_hits.extend(_inert_controls(parser.controls, path, text, site_root))
+            result.inert_control_hits.extend(_inert_controls(parser.controls, path, f"{text}\n{local_script_text}", site_root))
+    combined_script_text = "\n".join(script_texts)
     if check_forms:
-        script_texts.extend(_small_text(path) for path in _unique_paths(script_refs))
-        result.form_binding_hits.extend(_form_binding_hits(form_ids, "\n".join(script_texts)))
+        result.form_binding_hits.extend(_form_binding_hits(form_ids, combined_script_text))
+    result.missing_dom_id_hits.extend(_missing_dom_id_hits(element_ids, combined_script_text))
     return result
 
 
@@ -253,6 +264,8 @@ def _small_text(path: Path, max_bytes: int = 262144) -> str:
 
 
 _VALIDATE_FORM_CALL_RE = re.compile(r"validateForm\(\s*['\"]([^'\"]+)['\"]\s*\)")
+_GET_ELEMENT_BY_ID_RE = re.compile(r"getElementById\(\s*['\"]([^'\"]+)['\"]\s*\)")
+_QUERY_SELECTOR_ID_RE = re.compile(r"querySelector(?:All)?\(\s*['\"]#([A-Za-z0-9_-]+)['\"]\s*\)")
 
 
 # LLM: _form_binding_hits catches generated JS bound to non-existent form ids.
@@ -262,6 +275,19 @@ def _form_binding_hits(form_ids: set[str], script_text: str) -> list[str]:
     for form_id in sorted(set(_VALIDATE_FORM_CALL_RE.findall(script_text or ""))):
         if form_id not in form_ids:
             hits.append(f"validateForm:{form_id}")
+    return hits
+
+
+# LLM: _missing_dom_id_hits catches JS selectors that point at absent local ids.
+# 函数用途: 检查本地 HTML/JS 中 `getElementById` 和 `querySelector('#id')` 的目标是否存在。
+def _missing_dom_id_hits(element_ids: set[str], script_text: str) -> list[str]:
+    hits: list[str] = []
+    for target in sorted(set(_GET_ELEMENT_BY_ID_RE.findall(script_text or ""))):
+        if target not in element_ids:
+            hits.append(f"getElementById:{target}")
+    for target in sorted(set(_QUERY_SELECTOR_ID_RE.findall(script_text or ""))):
+        if target not in element_ids:
+            hits.append(f"querySelector:{target}")
     return hits
 
 
@@ -322,6 +348,8 @@ def _failure_summary(result: StaticSiteCheckResult) -> str:
         parts.append(f"inert_control_hits={len(result.inert_control_hits)}")
     if result.form_binding_hits:
         parts.append(f"form_binding_hits={len(result.form_binding_hits)}")
+    if result.missing_dom_id_hits:
+        parts.append(f"missing_dom_id_hits={len(result.missing_dom_id_hits)}")
     return "; ".join(parts)
 
 

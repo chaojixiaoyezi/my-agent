@@ -28,6 +28,8 @@ class WorkStateFieldSourceRequest:
 # 类用途: 保存从 workspace 事实源读取到的验收、约束、测试和路径线索。
 @dataclass(frozen=True)
 class WorkStateFieldSources:
+    goal: str
+    next_actions: list[str]
     acceptance: dict[str, Any]
     constraints: dict[str, Any]
     latest_tests: dict[str, Any]
@@ -38,13 +40,15 @@ class WorkStateFieldSources:
 # 函数用途: 从 task/run 事实源提取验收、约束和最近测试；找不到时保持 not_recorded。
 def build_work_state_field_sources(request: WorkStateFieldSourceRequest) -> WorkStateFieldSources:
     roots = _candidate_fact_roots(request)
+    goal = _first_item(_field_items(roots, ("task.json",), json_keys=("goal",)))
+    next_actions = _field_items(roots, ("task.json", "next_actions.json"), json_keys=("next_actions",))
     acceptance = _field_payload(_field_items(roots, _ACCEPTANCE_FILES, json_keys=("acceptance_checks", "acceptance")))
     constraints = _field_payload(_field_items(roots, _CONSTRAINT_FILES, json_keys=("constraints", "hard_constraints")))
     latest_tests = _test_payload(
         _field_items(roots, _TEST_FILES, json_keys=("latest_tests", "tests", "failing_tests", "test_status"))
     )
     read_files = _dedupe([*acceptance["source_paths"], *constraints["source_paths"], *latest_tests["source_paths"]])
-    return WorkStateFieldSources(acceptance, constraints, latest_tests, read_files)
+    return WorkStateFieldSources(goal, list(next_actions["items"]), acceptance, constraints, latest_tests, read_files)
 
 
 # LLM: _candidate_fact_roots scopes work-state reads to current workspace and compact task/run ids.
@@ -114,6 +118,12 @@ def _field_payload(source: dict[str, Any]) -> dict[str, Any]:
         "source_status": "recorded" if source["items"] else "not_recorded",
         "source_paths": list(source["source_paths"]),
     }
+
+
+# LLM: _first_item pulls single-value task metadata such as goal from candidate fact sources.
+# 函数用途: 从字段扫描结果中取第一条非空文本，供 compact work_state 兜底恢复目标。
+def _first_item(source: dict[str, Any]) -> str:
+    return next((item for item in source["items"] if item), "")
 
 
 # LLM: _test_payload mirrors field payload but keeps the historical latest_tests.status key.

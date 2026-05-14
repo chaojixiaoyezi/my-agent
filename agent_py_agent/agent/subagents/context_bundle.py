@@ -78,7 +78,7 @@ def build_context_bundle(task: SubAgentTask) -> ContextBundleV1:
         lineage=_lineage(task),
         context_packs=list(task.context_packs or []),
         source_refs=_source_refs(),
-        reserved={},
+        reserved=_reserved(task),
     )
 
 
@@ -226,6 +226,17 @@ def _output_contract(task: SubAgentTask) -> dict[str, object]:
         "tests_ref_style": "refs_only_with_working_dir",
         "artifact_refs_required": True,
     }
+
+
+# LLM: _reserved carries small future-extensible handoff hints without changing the context bundle schema.
+# 函数用途: 将 task.attributes 里的轻量恢复预检信息传给 runner prompt；不复制正文产物或主代理记忆。
+def _reserved(task: SubAgentTask) -> dict[str, object]:
+    attributes = getattr(task, "attributes", {})
+    attributes = attributes if isinstance(attributes, dict) else {}
+    preflight = attributes.get("runner_recovery_preflight")
+    if not isinstance(preflight, dict):
+        return {}
+    return {"runner_recovery_preflight": dict(preflight)}
 
 
 # LLM: _required_file_contract extracts exact deliverable filenames from task text without reading artifacts.

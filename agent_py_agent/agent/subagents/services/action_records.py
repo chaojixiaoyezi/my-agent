@@ -18,6 +18,7 @@ from .action_handlers import (
     apply_reopen_for_evidence,
     apply_repair_work_order,
     apply_run_acceptance,
+    apply_stop_no_progress_and_escalate,
     apply_takeover_or_reassign,
 )
 from .action_options import ActionApplyOptions
@@ -45,6 +46,7 @@ ACTION_DISPATCH = {
     "triage_capability_gap": apply_record_only_action,
     "inspect_failure": apply_record_only_action,
     "classify_blocker": apply_record_only_action,
+    "stop_no_progress_and_escalate": apply_stop_no_progress_and_escalate,
 }
 
 

@@ -22,20 +22,34 @@ _ORCHESTRATION_ARTIFACT_PREFIXES = (
 )
 _METADATA_FILE_NAMES = {
     "ACCEPTANCE.md",
+    "CONTEXT_BUNDLE.md",
     "HANDOFF.md",
     "STATUS.md",
     "TAKEOVER_READINESS.md",
     "acceptance_review.json",
+    "checkpoint.json",
+    "compaction_ledger.jsonl",
+    "context_bundle.json",
     "failing_tests.json",
     "failure_handoff.json",
+    "final_report.md",
+    "latest_continue_packet.json",
+    "latest_metadata.json",
+    "latest_summary.md",
     "output.json",
     "parent_acceptance_auto_followup.json",
     "progress.md",
     "runner_result.json",
+    "session_compact_ledger.jsonl",
     "status_report.json",
+    "subagent_board.json",
+    "subagent_dispatch_report.json",
+    "summary.md",
     "takeover_readiness.json",
+    "task.md",
     "task.json",
     "test_execution.json",
+    "timeline.jsonl",
 }
 _MAX_DESCENDANT_SCAN = 128
 
@@ -49,6 +63,17 @@ class DelegatingBodyReadGuardRequest:
     user_prompt: str = ""
 
 
+# LLM: _TopLevelDelegationParent mirrors a CLI root that has child runs but no current subagent id.
+# 类用途: 给顶层 root 复用现有 descendants/acceptor 判断；只保存 child_ids，不落盘不持久化。
+@dataclass(frozen=True)
+class _TopLevelDelegationParent:
+    id: str
+    child_ids: list[str]
+    role: str = "root"
+    agent_name: str = "root"
+    task_dir: str = ""
+
+
 # LLM: maybe_block_delegating_body_read is the tool-loop entry point for refs-only delegation.
 # 函数用途: 当前 runner 已委托下级且 acceptor 未完成时，阻断 read_file/read_artifact 读取正文。
 def maybe_block_delegating_body_read(request: DelegatingBodyReadGuardRequest) -> ToolExecutionResult | None:
@@ -58,6 +83,8 @@ def maybe_block_delegating_body_read(request: DelegatingBodyReadGuardRequest) ->
     if tool not in _BODY_READ_TOOLS:
         return None
     parent = _current_parent_task(request.agent)
+    if parent is None:
+        parent = _top_level_delegation_parent(request.agent, request.user_prompt)
     if parent is None or not _has_delegated_children(parent):
         return None
     if _user_authorized_parent_body_read(request.user_prompt):
@@ -81,6 +108,52 @@ def _current_parent_task(agent: object):
         return agent.subagents.load(run_id)
     except (AttributeError, FileNotFoundError, OSError, KeyError, TypeError, ValueError):
         return None
+
+
+# LLM: _top_level_delegation_parent protects normal CLI roots when the user explicitly asks for refs-only delegation.
+# 函数用途: root 不是子代理 run 时，从 manager.list_runs 构造一个临时父节点，让验收前读正文保护仍生效。
+def _top_level_delegation_parent(agent: object, prompt: str) -> _TopLevelDelegationParent | None:
+    if not _prompt_requests_refs_only_delegation(prompt):
+        return None
+    tasks = _top_level_child_tasks(agent)
+    child_ids = [str(getattr(task, "id", "") or "") for task in tasks if str(getattr(task, "id", "") or "").strip()]
+    if not child_ids:
+        return None
+    return _TopLevelDelegationParent(id="top-level-root", child_ids=child_ids)
+
+
+# LLM: _top_level_child_tasks reads only the subagent manager's bounded task list.
+# 函数用途: 顶层 root 没有 parent task 时，获取当前 subagent workspace 中的 run 列表；失败即放行，避免普通工具误伤。
+def _top_level_child_tasks(agent: object) -> list[object]:
+    try:
+        items = agent.subagents.list_runs()
+    except (AttributeError, FileNotFoundError, OSError, KeyError, TypeError, ValueError):
+        return []
+    if not isinstance(items, list):
+        return []
+    return items[:_MAX_DESCENDANT_SCAN]
+
+
+# LLM: _prompt_requests_refs_only_delegation distinguishes explicit root delegation from ordinary acceptance wording.
+# 函数用途: 只有当前用户明确要求 root/父级只调度下级、只读 refs/报告时，才启用顶层 root 读正文保护。
+def _prompt_requests_refs_only_delegation(prompt: str) -> bool:
+    compact = " ".join(str(prompt or "").lower().split())
+    if not compact:
+        return False
+    markers = (
+        "root 只能创建和调度下级",
+        "root只能创建和调度下级",
+        "主代理只能创建和调度下级",
+        "父级只能创建和调度下级",
+        "只读 refs/报告",
+        "只读refs/报告",
+        "refs-only",
+        "refs only",
+        "不要直接读取业务产物正文",
+        "不要主动读取产物正文",
+        "不要读正文",
+    )
+    return any(marker in compact for marker in markers)
 
 
 # LLM: _has_delegated_children is the cheap signal that this runner is a parent/coordinator now.
@@ -144,7 +217,11 @@ def _is_runtime_metadata_read(agent: object, parent: object, payload: dict[str, 
     path = _payload_path(agent, payload)
     if path is None or path.name not in _METADATA_FILE_NAMES:
         return False
-    return _looks_like_runtime_path(path) or _is_current_task_metadata_path(parent, path)
+    return (
+        _looks_like_runtime_path(path)
+        or _is_current_task_metadata_path(parent, path)
+        or _is_descendant_task_metadata_path(agent, parent, path)
+    )
 
 
 # LLM: _is_orchestration_artifact_read lets parents read small refs/status artifacts while blocking product bodies.
@@ -195,6 +272,8 @@ def _looks_like_runtime_path(path: Path) -> bool:
     parts = tuple(path.parts)
     if ".my_agent_runtime" in parts and "subagents" in parts:
         return True
+    if "_runtime" in parts and "subagents" in parts:
+        return True
     if "tasks" in parts and "agents" in parts:
         return True
     return False
@@ -211,6 +290,21 @@ def _is_current_task_metadata_path(parent: object, path: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+# LLM: _is_descendant_task_metadata_path lets a delegating parent read child status packets without product bodies.
+# 函数用途: 允许父级读取已委托子代理 task_dir 下的 output/status/runner 元数据，避免恢复时被 refs-only 卡死。
+def _is_descendant_task_metadata_path(agent: object, parent: object, path: Path) -> bool:
+    for task in _descendants(agent, parent):
+        task_dir = str(getattr(task, "task_dir", "") or "").strip()
+        if not task_dir:
+            continue
+        try:
+            path.relative_to(Path(task_dir).expanduser().resolve(strict=False))
+        except ValueError:
+            continue
+        return True
+    return False
 
 
 # LLM: _blocked_message teaches the model the recovery route instead of making it ask the user.

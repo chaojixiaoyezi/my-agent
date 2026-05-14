@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -81,6 +82,52 @@ class TestRunnerFailureType:
         mock_task.failure_type = ""
 
         assert _runner_failure_type(mock_task) == ""
+
+
+class TestRunnerCandidateCapabilityGrant:
+    """测试能力授权后的 blocked runner 能继续执行。"""
+
+    # LLM: granted permission blockers should re-enter runner selection without relying on retry attempts.
+    # 函数用途: 子代理因为写权限阻塞后，父级授权完成时必须能被 dispatch 再跑一轮。
+    def test_permission_blocked_with_grant_is_runner_candidate(self):
+        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+
+        task = SimpleNamespace(
+            status="BLOCKED",
+            verification_status="UNVERIFIED",
+            channel_status="OK",
+            capability_requests=[SimpleNamespace(status="GRANTED")],
+            capability_gaps=[],
+            capability_grants=[SimpleNamespace(id="grant-write")],
+            failure_type="permission_blocked",
+            runner_attempts=1,
+            current_step="等待父级授权写入 allowed_write_roots",
+            result="",
+            blockers=[],
+        )
+
+        assert _is_dispatch_runner_candidate(task, runner_max_attempts=1) is True
+
+    # LLM: open requests remain a hard stop even if an older grant exists.
+    # 函数用途: 仍有 OPEN capability_request 时不能提前重跑，避免模型在未授权状态反复失败。
+    def test_open_request_still_blocks_runner_candidate(self):
+        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+
+        task = SimpleNamespace(
+            status="BLOCKED",
+            verification_status="UNVERIFIED",
+            channel_status="OK",
+            capability_requests=[SimpleNamespace(status="OPEN")],
+            capability_gaps=[],
+            capability_grants=[SimpleNamespace(id="grant-write")],
+            failure_type="permission_blocked",
+            runner_attempts=1,
+            current_step="等待父级授权写入 allowed_write_roots",
+            result="",
+            blockers=[],
+        )
+
+        assert _is_dispatch_runner_candidate(task, runner_max_attempts=2) is False
 
 
 class TestResolveRunnerConcurrency:
@@ -185,6 +232,7 @@ class TestRunnerTaskTimeout:
 
         config = MagicMock()
         config.runner_timeout_seconds = runner_timeout_seconds
+        config.runner_timeout_by_role = {}
         config.dynamic_timeout_safety_margin = 2.0
         config.dynamic_timeout_min = 30
         config.dynamic_timeout_max = 600
@@ -231,6 +279,94 @@ class TestRunnerTaskTimeout:
         task.allowed_tools = ["write_file"]
 
         assert get_task_timeout(task, 45.0, self._timeout_config("off")) == 45.0
+
+    # LLM: role timeout overrides let root stay alive while leaf workers are intentionally bounded.
+    # 函数用途: 验证 root/coordinator/worker 可以使用不同 runner timeout，不再为了测试 worker 超时误杀 root。
+    def test_role_timeout_override_can_disable_root_and_bound_worker(self):
+        from agent_py_agent.agent.agent_core.runner_gate import get_task_timeout
+
+        config = self._timeout_config("8")
+        config.runner_timeout_by_role = {"root": "off", "worker": "8"}
+
+        root_task = MagicMock()
+        root_task.id = "root-run"
+        root_task.root_id = "root-run"
+        root_task.parent_id = ""
+        root_task.role = "coordinator"
+        root_task.attributes = {}
+        root_task.goal = "协调真实 E2E 测试。"
+        root_task.plan = []
+
+        worker_task = MagicMock()
+        worker_task.id = "worker-run"
+        worker_task.root_id = "root-run"
+        worker_task.parent_id = "root-run"
+        worker_task.role = "worker"
+        worker_task.attributes = {}
+        worker_task.goal = "写一个购物网站页面。"
+        worker_task.plan = []
+
+        assert get_task_timeout(root_task, 8.0, config) == 0.0
+        assert get_task_timeout(worker_task, 8.0, config) == 8.0
+
+    # LLM: user-facing worker timeout should cover internal concrete worker roles.
+    # 函数用途: 验证 leaf_worker 这类内部角色名会自动匹配用户配置的 worker 超时。
+    def test_role_timeout_worker_alias_matches_leaf_worker(self):
+        from agent_py_agent.agent.agent_core.runner_gate import get_task_timeout
+
+        config = self._timeout_config("off")
+        config.runner_timeout_by_role = {"worker": "7"}
+
+        task = MagicMock()
+        task.id = "leaf-run"
+        task.root_id = "root-run"
+        task.parent_id = "root-run"
+        task.role = "leaf_worker"
+        task.attributes = {}
+        task.goal = "写一个页面。"
+        task.plan = []
+
+        assert get_task_timeout(task, 0.0, config) == 7.0
+
+    # LLM: takeover timeout bucket lets recovery runs get a different budget than the failed worker.
+    # 函数用途: 验证接管 run 优先匹配 takeover 超时桶，再回退到 leaf_worker/worker。
+    def test_role_timeout_takeover_bucket_overrides_worker_alias(self):
+        from agent_py_agent.agent.agent_core.runner_gate import get_task_timeout
+
+        config = self._timeout_config("off")
+        config.runner_timeout_by_role = {"worker": "1", "takeover": "30"}
+
+        task = MagicMock()
+        task.id = "takeover-run"
+        task.root_id = "root-run"
+        task.parent_id = "root-run"
+        task.role = "leaf_worker"
+        task.attributes = {"takeover_source_run_id": "old-run"}
+        task.goal = "接管一个失败 worker。"
+        task.plan = []
+
+        assert get_task_timeout(task, 0.0, config) == 30.0
+
+    # LLM: role auto should mean dynamic timeout even when the global config is fixed.
+    # 函数用途: 验证角色级 auto 可以绕过全局固定超时，使用动态估算。
+    def test_role_timeout_auto_uses_dynamic_timeout(self):
+        from agent_py_agent.agent.agent_core.runner_gate import get_task_timeout
+
+        config = self._timeout_config("8")
+        config.runner_timeout_by_role = {"worker": "auto"}
+        config.dynamic_timeout_min = 30
+        config.dynamic_timeout_max = 60
+
+        task = MagicMock()
+        task.id = "worker-run"
+        task.root_id = "root-run"
+        task.parent_id = "root-run"
+        task.role = "worker"
+        task.attributes = {}
+        task.goal = "写一个需要一点时间的任务。"
+        task.plan = []
+
+        assert get_task_timeout(task, 8.0, config) >= 30.0
 
 
 class TestIsDispatchRunnerCandidate:

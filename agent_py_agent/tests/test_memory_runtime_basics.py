@@ -191,6 +191,43 @@ def test_run_auto_compact_apply_continues_with_home_entries_and_packet(tmp_path)
     assert "Do not redo completed work" in second_prompt
 
 
+# LLM: Long unattended runs need bounded multi-hop compact continuation, not only a single resumed turn.
+# 函数用途: 验证配置允许时主代理可以连续多次 compact/apply/resume，并由 max depth 防止死循环。
+def test_run_auto_compact_apply_can_continue_multiple_guarded_turns(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            memory_compact_auto_allow_apply=True,
+            memory_compact_auto_continue_max_depth=3,
+        ),
+        tmp_path,
+    )
+    backend = CaptureBackend()
+    agent.backend = backend
+    agent.config.memory_compact_context_window_tokens = 20
+
+    result = agent.run(
+        "验收: multi-hop compact packet exists\n约束: do not redo completed work\n测试: focused multi compact",
+        save=True,
+        request_id="req-auto-multi-compact",
+        run_id="run-auto-multi-compact",
+        task_id="run-auto-multi-compact",
+        recovery_next_actions=["continue from compact packet until max depth"],
+    )
+
+    apply_dir = tmp_path / "memory_archive" / "compact_applies"
+    metadata_files = [
+        path
+        for path in apply_dir.glob("apply-*.json")
+        if not any(marker in path.name for marker in (".apply_bundle.", ".restore_refs.", ".work_state_snapshot.", ".self_check"))
+    ]
+    assert len(backend.prompts) == 4
+    assert len(metadata_files) >= 3
+    assert result.memory_compact_auto_continued is True
+    assert result.memory_compact_auto_continuation_depth == 3
+    assert result.memory_compact_auto_status == "skipped_after_guarded_continuation"
+
+
 # LLM: blocked compact resumes must not trigger an automated second model turn.
 # 函数用途: 验证缺少验收/约束/测试/next_step 等字段时，自动 compact 只停车，不自动续跑。
 def test_run_auto_compact_apply_does_not_continue_when_guard_blocks(tmp_path):

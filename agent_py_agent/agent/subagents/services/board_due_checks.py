@@ -17,6 +17,7 @@ from .board_due_models import (
     _single_issue,
 )
 from .board_parent_timeout import check_parent_timeout_child_issues
+from .recovery_strategy import SubagentRecoveryStrategyRequest, build_subagent_recovery_strategy
 
 
 # LLM: _check_work_order_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -60,6 +61,71 @@ def _check_status_issues(ctx: DueInspectionContext):
                 f"status_{task.status.lower()}",
                 f"任务状态为 {task.status}，需要父代理确认原因，不能当作完成。",
                 action,
+            ),
+        )
+    ]
+
+
+# LLM: _check_no_progress_fuse_issues lifts recovery-strategy fuse decisions into due-check reports.
+# 函数用途: 当同一个 run 连续恢复无进展达到阈值时，明确生成 no-progress fuse，而不是继续当普通失败重试。
+def _check_no_progress_fuse_issues(ctx: DueInspectionContext, attempt_limit: int):
+    """Check whether repeated recovery attempts must stop automatic retry."""
+    if attempt_limit <= 0:
+        return []
+    strategy = build_subagent_recovery_strategy(
+        SubagentRecoveryStrategyRequest(
+            task=ctx.task,
+            now=0.0,
+            no_progress_attempt_limit=attempt_limit,
+        )
+    )
+    if not strategy.no_progress_fuse:
+        return []
+    refs = [strategy.packet_ref, *strategy.fallback_refs, *strategy.takeover_refs]
+    return [
+        _single_issue(
+            ctx,
+            DueIssueSpec(
+                "P0",
+                "no_progress_fuse",
+                (
+                    f"任务已连续尝试 {ctx.task.runner_attempts} 次，达到无进展熔断阈值 {attempt_limit}；"
+                    "停止自动重试和扩容，改为汇总 refs 后等待父级/用户决策。"
+                ),
+                "stop_no_progress_and_escalate",
+                related_refs=list(dict.fromkeys(ref for ref in refs if ref)),
+            ),
+        )
+    ]
+
+
+# LLM: _check_leadership_recovery_issues lifts dead coordinator decisions above generic timeout handling.
+# 函数用途: 带 child_ids 的 coordinator/leader 失联时，优先生成领导权恢复问题，避免普通 takeover 新建空 run。
+def _check_leadership_recovery_issues(ctx: DueInspectionContext, attempt_limit: int):
+    """Check whether a dead coordinator should hand off its child subtree."""
+    strategy = build_subagent_recovery_strategy(
+        SubagentRecoveryStrategyRequest(
+            task=ctx.task,
+            now=0.0,
+            no_progress_attempt_limit=attempt_limit,
+        )
+    )
+    if not strategy.leadership_recovery:
+        return []
+    child_refs = [f"child_run:{run_id}" for run_id in strategy.child_run_ids]
+    refs = [*child_refs, *strategy.fallback_refs, *strategy.takeover_refs]
+    return [
+        _single_issue(
+            ctx,
+            DueIssueSpec(
+                "P0",
+                "coordinator_needs_leadership_recovery",
+                (
+                    f"协调节点状态为 {ctx.task.status}，旗下仍有 {len(strategy.child_run_ids)} 个子任务；"
+                    "必须先把子树交给新 leader，不能按普通 worker 新建 takeover run。"
+                ),
+                "recover_coordinator_leadership",
+                related_refs=list(dict.fromkeys(ref for ref in refs if ref)),
             ),
         )
     ]
@@ -311,7 +377,13 @@ def inspect_single_task_due(request: InspectTaskDueRequest):
     validation = request.manager.validate_work_order(task.id)
     issues = []
     issues.extend(_check_work_order_issues(ctx, validation))
-    issues.extend(_check_status_issues(ctx))
+    no_progress_issues = _check_no_progress_fuse_issues(ctx, request.settings.no_progress_attempt_limit)
+    leadership_issues = (
+        []
+        if no_progress_issues
+        else _check_leadership_recovery_issues(ctx, request.settings.no_progress_attempt_limit)
+    )
+    issues.extend(no_progress_issues or leadership_issues or _check_status_issues(ctx))
     issues.extend(check_parent_timeout_child_issues(ctx))
     issues.extend(_check_channel_broken_issues(ctx))
     issues.extend(_check_channel_degraded_issues(ctx))

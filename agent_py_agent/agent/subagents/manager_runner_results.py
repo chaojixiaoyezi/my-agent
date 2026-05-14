@@ -253,11 +253,13 @@ class _SubAgentRunnerResultFacade:
     # LLM: _check_stale_runner_result 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
     # 函数用途: 校验stale执行器结果需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
     def _check_stale_runner_result(self, task, attempt_id, dry_run):
+        if not dry_run and (_task_text_attr(task, "status").upper() == "TAKEN_OVER" or _task_text_attr(task, "takeover_by")):
+            return self._make_quick_result(task, dry_run, False, "ignored runner result for already taken-over run")
         normalized_attempt_id = str(attempt_id or "").strip()
         if normalized_attempt_id:
-            if normalized_attempt_id in task.runner_abandoned_attempt_ids:
+            if normalized_attempt_id in _task_list_attr(task, "runner_abandoned_attempt_ids"):
                 return self._make_quick_result(task, dry_run, False, f"ignored stale runner result for abandoned attempt {normalized_attempt_id}")
-            active_attempt_id = str(task.runner_active_attempt_id or "").strip()
+            active_attempt_id = _task_text_attr(task, "runner_active_attempt_id")
             if active_attempt_id and active_attempt_id != normalized_attempt_id:
                 return self._make_quick_result(task, dry_run, False, f"ignored stale runner result for non-active attempt {normalized_attempt_id}")
         return None
@@ -274,6 +276,22 @@ class _SubAgentRunnerResultFacade:
             result_file=task.runner_result_file, result_json=task.runner_result_json,
             output_json=task.output_json, created_at=time.time(),
         )
+
+
+# LLM: _task_text_attr prevents MagicMock default attributes from becoming real task state.
+# 函数用途: 从真实 task 或测试替身读取字符串字段；缺失/非字符串值按空值处理。
+def _task_text_attr(task, name: str) -> str:
+    value = getattr(task, name, "")
+    return value.strip() if isinstance(value, str) else ""
+
+
+# LLM: _task_list_attr reads list-like task fields while ignoring mock placeholders.
+# 函数用途: 兼容旧测试替身缺字段的情况，避免 stale runner 判断误读 MagicMock。
+def _task_list_attr(task, name: str) -> list[str]:
+    value = getattr(task, name, [])
+    if not isinstance(value, list | tuple | set):
+        return []
+    return [str(item) for item in value if str(item or "").strip()]
 
 
 # LLM: SubAgentRunnerResultMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

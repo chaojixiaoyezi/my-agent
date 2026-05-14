@@ -64,6 +64,9 @@ class SubAgentTakeoverRunService:
         existing = _existing_takeover(self.manager, source)
         if existing:
             return _existing_result(source, existing)
+        chain_limit = _takeover_chain_limit(self.manager)
+        if _takeover_chain_depth(source) >= chain_limit:
+            return _chain_exhausted_result(self.manager, source, chain_limit)
         takeover = _create_takeover_task(self.manager, source, request)
         self.manager.record_takeover(source.id, take_over_by=takeover.id, reason=request.reason, locked_files=[])
         return TakeoverRunResult(
@@ -81,11 +84,31 @@ class SubAgentTakeoverRunService:
 def _existing_takeover(manager: Any, source: SubAgentTask) -> SubAgentTask | None:
     takeover_id = str(source.takeover_by or "").strip()
     if not takeover_id:
-        return None
+        return _existing_takeover_by_source_ref(manager, source.id)
     try:
         return manager.load(takeover_id)
     except FileNotFoundError:
+        return _existing_takeover_by_source_ref(manager, source.id)
+
+
+# LLM: source-ref scanning makes takeover creation idempotent even if a stale source snapshot lost takeover_by.
+# 函数用途: 根据 takeover task attributes 反查已有接管 run，防止旧 runner/旧父级快照导致重复创建接管分支。
+def _existing_takeover_by_source_ref(manager: Any, source_run_id: str) -> SubAgentTask | None:
+    try:
+        tasks = manager.list_runs()
+    except Exception:
         return None
+    source_id = str(source_run_id or "").strip()
+    candidates: list[SubAgentTask] = []
+    for task in tasks:
+        attrs = getattr(task, "attributes", {}) or {}
+        if str(attrs.get("takeover_source_run_id") or "").strip() != source_id:
+            continue
+        if str(getattr(task, "status", "") or "").upper() in {"ABANDONED", "TAKEN_OVER"}:
+            continue
+        candidates.append(task)
+    candidates.sort(key=lambda item: item.created_at or item.updated_at or 0.0)
+    return candidates[0] if candidates else None
 
 
 # LLM: _existing_result reports idempotent reuse with the original source refs.
@@ -97,6 +120,30 @@ def _existing_result(source: SubAgentTask, existing: SubAgentTask) -> TakeoverRu
         created=False,
         applied=False,
         message=f"source {source.id} already taken over by {existing.id}",
+        takeover_refs=_source_refs(source),
+    )
+
+
+# LLM: _chain_exhausted_result turns repeated takeover timeouts into a visible blocker instead of more children.
+# 函数用途: 同一任务连续接管超过上限时停止扩容，标记当前 run 为 BLOCKED 并保留 refs 给父级决策。
+def _chain_exhausted_result(manager: Any, source: SubAgentTask, chain_limit: int) -> TakeoverRunResult:
+    source.status = "BLOCKED"
+    source.failure_type = "takeover_chain_exhausted"
+    source.blockers = _unique_strings(
+        [
+            *source.blockers,
+            f"takeover chain reached max depth {chain_limit}; escalate or adjust timeout/scope before retry",
+        ]
+    )
+    source.current_step = "takeover chain exhausted; waiting for parent decision"
+    source.result = source.result or "连续 takeover 仍无进展，已停止继续创建接管 run。"
+    manager.save(source)
+    return TakeoverRunResult(
+        source_run_id=source.id,
+        takeover_run_id="",
+        created=False,
+        applied=False,
+        message=f"takeover chain exhausted for {source.id}; max_depth={chain_limit}",
         takeover_refs=_source_refs(source),
     )
 
@@ -121,6 +168,8 @@ def _create_takeover_task(manager: Any, source: SubAgentTask, request: TakeoverR
     )
     takeover.attributes["takeover_source_run_id"] = source.id
     takeover.attributes["takeover_source_refs"] = _source_refs(source)
+    takeover.attributes["takeover_lineage_root_run_id"] = _takeover_lineage_root(source)
+    takeover.attributes["takeover_chain_depth"] = _takeover_chain_depth(source) + 1
     takeover.current_step = "读取 takeover_source_refs.latest_continue_packet 或 checkpoint 后接续原任务。"
     takeover.latest_summary = source.latest_summary
     takeover.artifact_refs = _unique_strings([*source.artifact_refs, source.agent_run_artifacts_dir])
@@ -176,14 +225,51 @@ def _latest_continue_packet_ref(source: SubAgentTask) -> str:
 # LLM: _takeover_write_roots grants the replacement access to source-owned task/artifact directories.
 # 函数用途: 新 run 可在同一任务产物区继续写，但不扩大到主代理或其他分支目录。
 def _takeover_write_roots(source: SubAgentTask) -> list[str]:
-    return _existing_dirs(
+    return _unique_strings(
         [
-            source.task_dir,
-            source.agent_run_artifacts_dir,
-            source.task_workspace_artifacts_dir,
-            source.task_workspace_shared_dir,
+            *_explicit_source_write_roots(source),
+            *_existing_dirs(
+                [
+                    source.task_dir,
+                    source.agent_run_artifacts_dir,
+                    source.task_workspace_artifacts_dir,
+                    source.task_workspace_shared_dir,
+                ]
+            ),
         ]
     )
+
+
+# LLM: explicit source write roots may be future product directories that write_file will create.
+# 函数用途: 保留父级派工时明确给原 run 的写入目录，即使目录还不存在；避免 takeover 再次申请同一写权限。
+def _explicit_source_write_roots(source: SubAgentTask) -> list[str]:
+    return _unique_strings([str(item) for item in source.allowed_write_roots if str(item or "").strip()])
+
+
+# LLM: _takeover_chain_limit keeps the safety fuse configurable but available in bare unit tests.
+# 函数用途: 读取 manager 上的接管链深度上限；0 表示不允许继续创建 takeover。
+def _takeover_chain_limit(manager: Any) -> int:
+    try:
+        return max(0, int(getattr(manager, "takeover_chain_max_depth", 2) or 0))
+    except (TypeError, ValueError):
+        return 2
+
+
+# LLM: _takeover_chain_depth is stored on replacement runs and defaults to 0 for original runs.
+# 函数用途: 获取当前 run 已经位于第几层 takeover 链，用于防止无限接管。
+def _takeover_chain_depth(source: SubAgentTask) -> int:
+    try:
+        return max(0, int((source.attributes or {}).get("takeover_chain_depth", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+# LLM: _takeover_lineage_root keeps later takeover runs tied to the original failed run.
+# 函数用途: 返回接管链最初的 run_id，便于日志和后续 no-progress 诊断。
+def _takeover_lineage_root(source: SubAgentTask) -> str:
+    attrs = source.attributes or {}
+    root = str(attrs.get("takeover_lineage_root_run_id") or "").strip()
+    return root or source.id
 
 
 # LLM: _existing_dirs filters write roots down to real directories.

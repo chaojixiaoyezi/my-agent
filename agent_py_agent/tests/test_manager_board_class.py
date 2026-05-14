@@ -392,6 +392,93 @@ class TestDueCheck:
 
         assert {issue.run_id for issue in report.issues} == {"run_failed_a"}
 
+    def test_due_check_can_scope_to_explicit_run_ids(self, tmp_path: Path):
+        """显式 run_ids 调度时，due-check 不应把同目录其它失败 run 混进来。"""
+        from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
+        from agent_py_agent.agent.subagents.models import SubAgentDueCheckOptions, SubAgentTask
+
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+            def __init__(self, workspace: Path):
+                SubAgentBaseMixin.__init__(self, workspace=workspace)
+                self._tasks = []
+
+            def list_runs(self):
+                return self._tasks
+
+            def validate_work_order(self, run_id):
+                from agent_py_agent.agent.subagents.models import WorkOrderValidation
+                return WorkOrderValidation(run_id=run_id, ok=True, missing=[], warnings=[])
+
+        mixin = TestMixin(workspace=tmp_path)
+        first = SubAgentTask(
+            id="target_run",
+            goal="目标任务",
+            thought="check",
+            plan=["inspect"],
+            status="FAILED",
+            verification_status="FAILED",
+            channel_status="OK",
+            **mixin._build_work_order_paths("target_run"),
+        )
+        second = SubAgentTask(
+            id="unrelated_run",
+            goal="无关失败任务",
+            thought="check",
+            plan=["inspect"],
+            status="FAILED",
+            verification_status="FAILED",
+            channel_status="OK",
+            **mixin._build_work_order_paths("unrelated_run"),
+        )
+        mixin._tasks = [first, second]
+
+        report = mixin.due_check(params=SubAgentDueCheckOptions(include_run_ids=["target_run"]))
+
+        assert {issue.run_id for issue in report.issues} == {"target_run"}
+
+    def test_due_check_reports_no_progress_fuse_before_generic_failure(self, tmp_path: Path):
+        """连续恢复无进展时，due-check 应明确报告熔断而不是普通失败。"""
+        from agent_py_agent.agent.capability_config import CapabilityConfig
+        from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
+        from agent_py_agent.agent.subagents.models import SubAgentTask
+
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+            def __init__(self, workspace: Path):
+                SubAgentBaseMixin.__init__(self, workspace=workspace)
+                self._tasks = []
+
+            def list_runs(self):
+                return self._tasks
+
+            def validate_work_order(self, run_id):
+                from agent_py_agent.agent.subagents.models import WorkOrderValidation
+                return WorkOrderValidation(run_id=run_id, ok=True, missing=[], warnings=[])
+
+        mixin = TestMixin(workspace=tmp_path)
+        task = SubAgentTask(
+            id="stuck_run",
+            goal="反复恢复仍失败",
+            thought="check",
+            plan=["inspect"],
+            status="FAILED",
+            verification_status="FAILED",
+            channel_status="OK",
+            runner_attempts=4,
+            **mixin._build_work_order_paths("stuck_run"),
+        )
+        task.agent_run_checkpoint_json = str(tmp_path / "stuck_run" / "reports" / "checkpoint.json")
+        Path(task.agent_run_checkpoint_json).parent.mkdir(parents=True, exist_ok=True)
+        Path(task.agent_run_checkpoint_json).write_text("{}", encoding="utf-8")
+        mixin._tasks = [task]
+
+        report = mixin.due_check(CapabilityConfig(subagent_no_progress_attempt_limit=4))
+
+        assert [issue.kind for issue in report.issues] == ["no_progress_fuse"]
+        assert report.issues[0].suggested_action == "stop_no_progress_and_escalate"
+        assert task.agent_run_checkpoint_json in report.issues[0].related_refs
+
 class TestPlanActions:
     """测试 plan_actions() 方法。"""
 
@@ -459,6 +546,89 @@ class TestPlanActions:
         report = mixin.plan_actions(params=SubAgentPlanActionsOptions(root_id="root-a"))
 
         assert {action.run_id for action in report.actions} == {"run_failed_a"}
+
+    def test_plan_actions_can_scope_to_explicit_run_ids(self, tmp_path: Path):
+        """显式 run_ids 调度时，action plan 只生成目标 run 的动作。"""
+        from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
+        from agent_py_agent.agent.subagents.models import SubAgentPlanActionsOptions, SubAgentTask
+
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+            def __init__(self, workspace: Path):
+                SubAgentBaseMixin.__init__(self, workspace=workspace)
+                self._tasks = []
+
+            def list_runs(self):
+                return self._tasks
+
+            def validate_work_order(self, run_id):
+                from agent_py_agent.agent.subagents.models import WorkOrderValidation
+                return WorkOrderValidation(run_id=run_id, ok=True, missing=[], warnings=[])
+
+        mixin = TestMixin(workspace=tmp_path)
+        first = SubAgentTask(
+            id="target_run",
+            goal="目标任务",
+            thought="check",
+            plan=["inspect"],
+            status="FAILED",
+            verification_status="FAILED",
+            channel_status="OK",
+            **mixin._build_work_order_paths("target_run"),
+        )
+        second = SubAgentTask(
+            id="unrelated_run",
+            goal="无关失败任务",
+            thought="check",
+            plan=["inspect"],
+            status="FAILED",
+            verification_status="FAILED",
+            channel_status="OK",
+            **mixin._build_work_order_paths("unrelated_run"),
+        )
+        mixin._tasks = [first, second]
+
+        report = mixin.plan_actions(params=SubAgentPlanActionsOptions(include_run_ids=["target_run"]))
+
+        assert {action.run_id for action in report.actions} == {"target_run"}
+
+    def test_plan_actions_uses_no_progress_fuse_action(self, tmp_path: Path):
+        """no-progress fuse 应生成停止自动重试的动作计划。"""
+        from agent_py_agent.agent.capability_config import CapabilityConfig
+        from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
+        from agent_py_agent.agent.subagents.models import SubAgentTask
+
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+            def __init__(self, workspace: Path):
+                SubAgentBaseMixin.__init__(self, workspace=workspace)
+                self._tasks = []
+
+            def list_runs(self):
+                return self._tasks
+
+            def validate_work_order(self, run_id):
+                from agent_py_agent.agent.subagents.models import WorkOrderValidation
+                return WorkOrderValidation(run_id=run_id, ok=True, missing=[], warnings=[])
+
+        mixin = TestMixin(workspace=tmp_path)
+        task = SubAgentTask(
+            id="stuck_run",
+            goal="反复恢复仍失败",
+            thought="check",
+            plan=["inspect"],
+            status="FAILED",
+            verification_status="FAILED",
+            channel_status="OK",
+            runner_attempts=5,
+            **mixin._build_work_order_paths("stuck_run"),
+        )
+        mixin._tasks = [task]
+
+        report = mixin.plan_actions(CapabilityConfig(subagent_no_progress_attempt_limit=4))
+
+        assert [action.action for action in report.actions] == ["stop_no_progress_and_escalate"]
+        assert report.actions[0].source_issue_kinds == ["no_progress_fuse"]
 
 class TestWriteBoard:
     """测试 write_board() 方法。"""

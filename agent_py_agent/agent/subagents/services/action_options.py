@@ -24,6 +24,9 @@ class ActionApplyOptions:
     take_over_by: str = ""
     locked_files: list[str] | None = None
     limit: int = 0
+    root_id: str = ""
+    include_run_ids: list[str] | None = None
+    exclude_run_ids: list[str] | None = None
 
     # LLM: from_values 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
     # 函数用途: 转换values的数据表示，保持跨模块传递时的字段含义一致；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
@@ -38,6 +41,9 @@ class ActionApplyOptions:
         take_over_by: str | None = None,
         locked_files: list[str] | None = None,
         limit: int | None = None,
+        root_id: str | None = None,
+        include_run_ids: list[str] | None = None,
+        exclude_run_ids: list[str] | None = None,
     ):
         """Build the options bundle from explicit legacy fields."""
 
@@ -49,6 +55,9 @@ class ActionApplyOptions:
             "take_over_by": take_over_by,
             "locked_files": locked_files,
             "limit": limit,
+            "root_id": root_id,
+            "include_run_ids": include_run_ids,
+            "exclude_run_ids": exclude_run_ids,
         }
         clean = {key: value for key, value in updates.items() if value is not None}
         return replace(base, **clean)

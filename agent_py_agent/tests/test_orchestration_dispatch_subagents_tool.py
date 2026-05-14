@@ -94,6 +94,22 @@ class TestDispatchSubagentsToolExecute:
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
         assert call_kwargs["params"].include_run_ids == ["child-auth", "child-catalog"]
 
+    def test_runner_timeout_off_keeps_stale_heartbeat_detection(self):
+        """runner 不限时只关闭总运行时长阈值，不能关闭心跳挂死检测。"""
+        from agent_py_agent.agent.agent_core.orchestration_dispatch_tool import (
+            _dispatch_capability_config,
+        )
+
+        mock_agent = MagicMock()
+        mock_agent.root = "/tmp/workspace"
+        mock_agent.config.runner_timeout_seconds = "off"
+        mock_agent.capability_config_path = ""
+
+        cfg = _dispatch_capability_config(mock_agent)
+
+        assert cfg.subagent_run_timeout == 0
+        assert cfg.subagent_heartbeat_timeout > 0
+
 
 
 class TestDispatchSubagentsToolTopLevelWorkflow:
@@ -224,8 +240,46 @@ class TestDispatchSubagentsToolRunnerContext:
         assert call_kwargs["params"].exclude_run_ids == ["subagent-root"]
         assert call_kwargs["params"].finalize_acceptance is True
 
-    def test_dispatch_tool_respects_runner_timeout_off_for_auto_due_check(self):
-        """runner_timeout_seconds=off 时，模型调度工具不应自动生成 run/heartbeat 接管动作。"""
+    def test_nested_dispatch_excludes_active_ancestors(self):
+        """孙级 dispatch 不应把仍在执行的父级/祖父级误判成可接管目标。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        mock_report = MagicMock()
+        mock_report.dry_run = False
+        mock_report.summary = {"runner": 1}
+        mock_report.records = []
+
+        root = SimpleNamespace(id="root-run", parent_id="", status="RUNNING", runner_active_attempt_id="a-root")
+        parent = SimpleNamespace(
+            id="parent-run",
+            parent_id="root-run",
+            status="RUNNING",
+            runner_active_attempt_id="a-parent",
+        )
+        current = SimpleNamespace(
+            id="child-run",
+            parent_id="parent-run",
+            status="RUNNING",
+            runner_active_attempt_id="a-child",
+        )
+        by_id = {item.id: item for item in [root, parent, current]}
+
+        mock_agent = MagicMock()
+        mock_agent._current_subagent_run_id = "child-run"
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent.tools.specs.return_value = []
+        mock_agent.dispatch_subagents.return_value = mock_report
+        mock_agent.subagents.workspace = Path("/tmp/workspace")
+        mock_agent.subagents.load.side_effect = lambda run_id: by_id[run_id]
+
+        result = DispatchSubagentsTool(mock_agent).execute({})
+
+        assert result.ok is True
+        params = mock_agent.dispatch_subagents.call_args.kwargs["params"]
+        assert params.exclude_run_ids == ["child-run", "parent-run", "root-run"]
+
+    def test_dispatch_tool_keeps_heartbeat_stale_detection_when_runner_timeout_off(self):
+        """runner_timeout_seconds=off 只关闭总时长接管；心跳挂死仍要能被父级发现。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
         mock_report = MagicMock()
@@ -247,4 +301,4 @@ class TestDispatchSubagentsToolRunnerContext:
         assert result.ok is True
         capability_config = mock_agent.dispatch_subagents.call_args.args[1]
         assert capability_config.subagent_run_timeout == 0
-        assert capability_config.subagent_heartbeat_timeout == 0
+        assert capability_config.subagent_heartbeat_timeout > 0

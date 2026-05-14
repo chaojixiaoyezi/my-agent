@@ -84,7 +84,7 @@ class FinalizationService:
         )
         token_ledger = self._estimate_token_usage(token_params)
 
-        return self._build_agent_run_result(ctx, archive_result, snapshot_result, token_ledger)
+        return self._build_agent_run_result(ctx, archive_result, snapshot_result, token_ledger, run_request_id)
 
     # LLM: _write_runtime_fact_source_if_needed makes real run facts visible to later compact apply.
     # 函数用途: 保存真实 run 的显式验收、约束和测试事实源，并把目录交给 recovery snapshot。
@@ -101,6 +101,7 @@ class FinalizationService:
                 status="ok",
                 next_actions=ctx.recovery_next_actions or [],
                 archive_tool_calls=ctx.archive_tool_calls or [],
+                runtime_injections=tuple(str(item) for item in ctx.runtime_injections or []),
             )
         )
 
@@ -195,7 +196,7 @@ class FinalizationService:
     # LLM: _build_agent_run_result 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 构建agentrun结果所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _build_agent_run_result(
-        self, ctx: FinalizeContext, archive_result, snapshot_result, token_ledger
+        self, ctx: FinalizeContext, archive_result, snapshot_result, token_ledger, run_request_id: str
     ):
         routed_context = ctx.routed_context
         return AgentRunResult(
@@ -223,7 +224,7 @@ class FinalizationService:
             compression_applied=ctx.compression_applied,
             turn_token_estimate=token_ledger["turn"],
             cumulative_token_estimate=token_ledger["cumulative"],
-            **compact_auto_cycle_fields(self._agent, ctx, token_ledger),
+            **compact_auto_cycle_fields(self._agent, ctx, token_ledger, request_id=run_request_id),
         )
 
 

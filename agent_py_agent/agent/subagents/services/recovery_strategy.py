@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ..models import SubAgentTask
+from .task_attribute_reader import task_int, task_list, task_role, task_status, task_text
 
 _PACKET_SCHEMA_VERSION = "subagent_continue_packet.v1"
 _RECOVERABLE_STATUSES = {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "ERROR"}
@@ -91,16 +92,16 @@ def build_subagent_recovery_strategy(request: SubagentRecoveryStrategyRequest) -
     no_progress_fuse = _no_progress_fuse(task, request.no_progress_attempt_limit)
     action = _recommended_action(task, packet, fallback_refs, no_progress_fuse)
     return SubagentRecoveryStrategy(
-        run_id=task.id,
-        status=str(task.status or "").upper(),
-        role=str(task.role or ""),
+        run_id=task_text(task, "id"),
+        status=task_status(task),
+        role=task_role(task),
         recommended_action=action,
         packet_status=packet.status,
         packet_ref=packet.ref,
         uses_continue_packet=packet.status == "ready" and _action_uses_packet(action),
         fallback_refs=fallback_refs,
         takeover_refs=_takeover_refs(task),
-        child_run_ids=_string_list(task.child_ids),
+        child_run_ids=task_list(task, "child_ids"),
         leadership_recovery=action == "recover_coordinator_leadership",
         no_progress_fuse=no_progress_fuse,
         blocked_by=packet.blocked_by,
@@ -146,9 +147,10 @@ def _packet_blockers(task: SubAgentTask, payload: dict[str, Any]) -> list[str]:
     blockers: list[str] = []
     if payload.get("schema_version") != _PACKET_SCHEMA_VERSION:
         blockers.append("schema_mismatch")
-    if str(payload.get("run_id") or "") != task.id:
+    task_id = task_text(task, "id")
+    if str(payload.get("run_id") or "") != task_id:
         blockers.append("run_id_mismatch")
-    if str(owner.get("owner_id") or "") != task.id:
+    if str(owner.get("owner_id") or "") != task_id:
         blockers.append("owner_mismatch")
     if payload.get("memory_scope") != "task_local":
         blockers.append("memory_scope_not_task_local")
@@ -219,7 +221,7 @@ def _packet_instruction(task: SubAgentTask, packet: _PacketState) -> str:
 def _fallback_instruction(task: SubAgentTask, fallback_refs: list[str]) -> str:
     refs = ", ".join(fallback_refs[:4])
     return (
-        f"恢复 run {task.id}：latest_continue_packet 不可用，改读 checkpoint/summary fallback refs：{refs}。"
+        f"恢复 run {task_text(task, 'id')}：latest_continue_packet 不可用，改读 checkpoint/summary fallback refs：{refs}。"
         "只根据这些 task-local refs 接续，不要重读主代理长期记忆。"
     )
 
@@ -229,7 +231,7 @@ def _fallback_instruction(task: SubAgentTask, fallback_refs: list[str]) -> str:
 def _takeover_instruction(task: SubAgentTask, packet: _PacketState, fallback_refs: list[str]) -> str:
     source = packet.ref if packet.status == "ready" else ", ".join(fallback_refs[:3])
     return (
-        f"原 run {task.id} 看起来已挂死：创建 takeover run 接管同一个任务目录 {task.task_dir} "
+        f"原 run {task_text(task, 'id')} 看起来已挂死：创建 takeover run 接管同一个任务目录 {task_text(task, 'task_dir')} "
         f"和同一批 artifacts refs。恢复入口：{source}。不要重写健康分支。"
     )
 
@@ -237,9 +239,10 @@ def _takeover_instruction(task: SubAgentTask, packet: _PacketState, fallback_ref
 # LLM: _packet_ref derives the canonical latest packet path from the run workspace.
 # 函数用途: 只从 agent_run_compactions_dir 推导 latest_continue_packet.json，保持路径规则唯一。
 def _packet_ref(task: SubAgentTask) -> str:
-    if not task.agent_run_compactions_dir:
+    compactions_dir = task_text(task, "agent_run_compactions_dir")
+    if not compactions_dir:
         return ""
-    return str(Path(task.agent_run_compactions_dir) / "latest_continue_packet.json")
+    return str(Path(compactions_dir) / "latest_continue_packet.json")
 
 
 # LLM: _packet_is_stale compares file mtime only when the caller enables a max age.
@@ -258,13 +261,13 @@ def _packet_is_stale(path: Path, request: SubagentRecoveryStrategyRequest) -> bo
 # 函数用途: packet 不可用时提供 checkpoint/summary/task/failure handoff 等最小读取顺序。
 def _fallback_refs(task: SubAgentTask) -> list[str]:
     values = [
-        task.agent_run_checkpoint_json,
-        task.agent_run_summary_md,
-        task.agent_run_task_md,
-        task.failure_handoff_json,
-        task.takeover_readiness_json,
-        task.output_json,
-        task.runner_result_json,
+        task_text(task, "agent_run_checkpoint_json"),
+        task_text(task, "agent_run_summary_md"),
+        task_text(task, "agent_run_task_md"),
+        task_text(task, "failure_handoff_json"),
+        task_text(task, "takeover_readiness_json"),
+        task_text(task, "output_json"),
+        task_text(task, "runner_result_json"),
     ]
     return _existing_refs(values)
 
@@ -274,11 +277,11 @@ def _fallback_refs(task: SubAgentTask) -> list[str]:
 def _takeover_refs(task: SubAgentTask) -> list[str]:
     return _existing_refs(
         [
-            task.task_dir,
-            task.agent_run_workspace_dir,
-            task.agent_run_artifacts_dir,
-            task.task_workspace_artifacts_dir,
-            task.task_workspace_shared_dir,
+            task_text(task, "task_dir"),
+            task_text(task, "agent_run_workspace_dir"),
+            task_text(task, "agent_run_artifacts_dir"),
+            task_text(task, "task_workspace_artifacts_dir"),
+            task_text(task, "task_workspace_shared_dir"),
         ]
     )
 
@@ -297,8 +300,8 @@ def _existing_refs(values: list[str]) -> list[str]:
 # LLM: _needs_leadership_recovery detects failed coordinators with live child refs.
 # 函数用途: coordinator/lead 带着下级失败时，优先让新 leader 接管孩子，而不是无限重试旧 leader。
 def _needs_leadership_recovery(task: SubAgentTask) -> bool:
-    role = str(task.role or "").lower()
-    return bool(task.child_ids) and (role in _COORDINATOR_ROLES or "coordinator" in role) and _is_dead(task)
+    role = task_role(task).lower()
+    return bool(task_list(task, "child_ids")) and (role in _COORDINATOR_ROLES or "coordinator" in role) and _is_dead(task)
 
 
 # LLM: _needs_takeover detects dead worker-style runs that should be replaced.
@@ -310,21 +313,21 @@ def _needs_takeover(task: SubAgentTask) -> bool:
 # LLM: _is_dead classifies statuses and failure types that imply the old process is gone.
 # 函数用途: 将 TIMEOUT/CHANNEL_ERROR/runner_timeout 等统一成需要接管的状态。
 def _is_dead(task: SubAgentTask) -> bool:
-    status = str(task.status or "").upper()
-    failure_type = str(task.failure_type or "").lower()
+    status = task_status(task)
+    failure_type = task_text(task, "failure_type").lower()
     return status in _DEAD_STATUSES or failure_type in {"runner_timeout", "channel_error", "runner_channel_failed"}
 
 
 # LLM: _is_recoverable keeps retry logic scoped to known incomplete states.
 # 函数用途: 判断任务是否还应该继续推进，避免已关闭任务被重新 dispatch。
 def _is_recoverable(task: SubAgentTask) -> bool:
-    return str(task.status or "").upper() in _RECOVERABLE_STATUSES
+    return task_status(task) in _RECOVERABLE_STATUSES
 
 
 # LLM: _is_closed recognizes terminal states that need no automatic recovery.
 # 函数用途: 已完成/放弃/被接管的任务不再建议恢复。
 def _is_closed(task: SubAgentTask) -> bool:
-    return str(task.status or "").upper() in _CLOSED_STATUSES
+    return task_status(task) in _CLOSED_STATUSES
 
 
 # LLM: _no_progress_fuse converts repeated attempts into an explicit stop signal.
@@ -332,7 +335,7 @@ def _is_closed(task: SubAgentTask) -> bool:
 def _no_progress_fuse(task: SubAgentTask, attempt_limit: int) -> bool:
     if attempt_limit <= 0:
         return False
-    return int(task.runner_attempts or 0) >= attempt_limit and _is_recoverable(task)
+    return task_int(task, "runner_attempts") >= attempt_limit and _is_recoverable(task)
 
 
 # LLM: _takeover_action preserves whether the packet or fallback refs are the source of truth.

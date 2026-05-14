@@ -9,11 +9,15 @@ from typing import Any
 
 
 # LLM: parse_scalar 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 解析简化 YAML 中的单个标量或行内列表值。
+# 函数用途: 解析简化 YAML 中的单个标量、行内列表或行内字典值。
 def parse_scalar(value: str) -> Any:
     value = value.strip().strip('"').strip("'")
     if value.startswith("[") and value.endswith("]"):
         parsed = _parse_inline_list(value)
+        if parsed is not None:
+            return parsed
+    if value.startswith("{") and value.endswith("}"):
+        parsed = _parse_inline_dict(value)
         if parsed is not None:
             return parsed
     if value.lower() in {"true", "false"}:
@@ -34,6 +38,18 @@ def _parse_inline_list(value: str) -> list[Any] | None:
     if not isinstance(parsed, list):
         return None
     return parsed
+
+
+# LLM: _parse_inline_dict lets config expose small maps without adding a full YAML dependency.
+# 函数用途: 解析简化 YAML 的行内字典，例如 {"worker": 8, "root": "off"}；解析失败时回退普通字符串。
+def _parse_inline_dict(value: str) -> dict[str, Any] | None:
+    try:
+        parsed = ast.literal_eval(value)
+    except (SyntaxError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return {str(key): item for key, item in parsed.items()}
 
 
 # LLM: load_simple_yaml 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。

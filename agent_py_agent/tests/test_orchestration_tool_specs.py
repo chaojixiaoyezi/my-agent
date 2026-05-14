@@ -58,6 +58,22 @@ class TestOrchestrationToolsSpec:
         assert spec.name == "dispatch_subagents"
         assert spec.category == "orchestration"
 
+    def test_dispatch_subagents_spec_documents_leadership_recovery_params(self):
+        """dispatch_subagents 暴露 leader 接管参数，避免恢复能力只存在于代码里。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent.tools.specs.return_value = []
+
+        tool = DispatchSubagentsTool(mock_agent)
+        spec = tool.spec
+
+        assert "take_over_by" in spec.parameters
+        assert "locked_files" in spec.parameters
+        assert "leader" in spec.parameter_details["take_over_by"]
+        assert any("take_over_by" in example for example in spec.examples)
+
     def test_schedule_child_subagents_spec_defined(self):
         """ScheduleChildSubagentsTool 工具规格已定义。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool

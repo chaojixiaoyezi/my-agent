@@ -125,6 +125,8 @@ class SubAgentDueCheckOptions:
     config: Any | None = None
     write_report: bool = False
     root_id: str = ""
+    include_run_ids: list[str] = field(default_factory=list)
+    exclude_run_ids: list[str] = field(default_factory=list)
 
 
 # LLM: SubAgentPlanActionsOptions keeps action-plan scope explicit without widening CLI/service calls.
@@ -136,6 +138,8 @@ class SubAgentPlanActionsOptions:
     config: Any | None = None
     write_report: bool = False
     root_id: str = ""
+    include_run_ids: list[str] = field(default_factory=list)
+    exclude_run_ids: list[str] = field(default_factory=list)
 
 
 # LLM: SubAgentLeadershipRecoveryPlanOptions keeps batch leader handoff planning read-only and scoped.

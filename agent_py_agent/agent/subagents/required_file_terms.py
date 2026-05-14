@@ -53,7 +53,16 @@ _NEGATIVE_CHAIN_CONNECTOR_RE = re.compile(r"^(?:[\s,，、/]*|[\s,，、/]*(?:�
 _BULLET_PREFIX_RE = re.compile(r"^[-*]\s*")
 _LOCATION_TARGET_RE = re.compile(r"(?:放进|放入|放到|放在|置于|移入|inside|under|into)", re.IGNORECASE)
 _FILE_LIKE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9]{1,6}")
-_INTERNAL_REF_FILES = frozenset({"task.json", "execution_context.json", "runner_result.md", "runner_result.json"})
+_INTERNAL_REF_FILES = frozenset({
+    "task.json",
+    "execution_context.json",
+    "runner_result.md",
+    "runner_result.json",
+    "latest_continue_packet.json",
+    "checkpoint.json",
+    "summary.md",
+    "context_bundle.json",
+})
 _INTERNAL_REF_HINTS = (
     "真实",
     "里的",
@@ -63,6 +72,13 @@ _INTERNAL_REF_HINTS = (
     "引用",
     "读取",
     "报告",
+    "恢复",
+    "接着",
+    "续跑",
+    "continue",
+    "packet",
+    "checkpoint",
+    "summary",
     "run",
     "root",
     "child",

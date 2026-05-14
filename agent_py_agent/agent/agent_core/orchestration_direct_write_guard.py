@@ -1,0 +1,139 @@
+# LLM: Delegate-only direct-write guard keeps root/parent agents from bypassing assigned workers.
+# 模块用途: 当用户明确要求通过子代理完成时，阻止 root/父级直接写业务产物，要求改走 worker/takeover/repair。
+
+from __future__ import annotations
+
+"""Guard direct product writes when the current user asked for delegated execution."""
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from ..tools import ToolExecutionResult
+
+_DIRECT_WRITE_TOOLS = {"write_file", "append_file", "replace_in_file"}
+_SHELL_TOOL = "run_command"
+_RUNTIME_MARKERS = {"_runtime", ".my_agent_runtime", "subagents", "tasks", "agents"}
+_RUNTIME_FILE_NAMES = {
+    "ACTION_RECEIPTS.md",
+    "BUGS.md",
+    "BUILD_REPORT.md",
+    "CONTEXT_BUNDLE.md",
+    "HANDOFF.md",
+    "STATUS.md",
+    "WORK_LOG.md",
+    "output.json",
+    "task.json",
+}
+_WRITE_COMMAND_PATTERNS = (
+    r"(^|[;&|]\s*)(cat|printf|echo)\b[\s\S]*(>|>>)",
+    r"(^|[;&|]\s*)tee\b",
+    r"\bwrite_text\s*\(",
+    r"\bopen\s*\([^)]*,\s*['\"][wa]",
+    r"(^|[;&|]\s*)touch\s+",
+    r"(^|[;&|]\s*)cp\s+",
+    r"(^|[;&|]\s*)mv\s+",
+)
+_DELEGATE_ONLY_PATTERNS = (
+    r"只能.{0,16}(通过|让|由).{0,12}(子代理|subagent|worker|builder)",
+    r"必须.{0,16}(通过|让|由).{0,12}(子代理|subagent|worker|builder)",
+    r"不能.{0,12}(自己|直接).{0,12}(写|实现|修改|创建|write|implement|create)",
+    r"不要.{0,12}(自己|直接).{0,12}(写|实现|修改|创建|write|implement|create)",
+    r"root.{0,24}(must not|cannot|do not).{0,24}(write|implement|create)",
+    r"delegate[-_ ]only",
+)
+
+
+# LLM: DelegateOnlyDirectWriteGuardRequest bundles tool-loop data for direct-write policy checks.
+# 类用途: 保存即将执行的工具 payload 和当前用户 prompt，避免工具循环直接知道正则细节。
+@dataclass(frozen=True)
+class DelegateOnlyDirectWriteGuardRequest:
+    agent: object
+    payload: object
+    user_prompt: str = ""
+
+
+# LLM: maybe_block_delegate_only_direct_write is a tool-loop preflight for delegated task boundaries.
+# 函数用途: 用户明确要求通过子代理完成时，阻断 root/父级直接写文件或用 shell 生成产物。
+def maybe_block_delegate_only_direct_write(
+    request: DelegateOnlyDirectWriteGuardRequest,
+) -> ToolExecutionResult | None:
+    if not isinstance(request.payload, dict):
+        return None
+    if not _user_requested_delegate_only(request.user_prompt):
+        return None
+    tool = str(request.payload.get("tool") or "").strip()
+    if tool in _DIRECT_WRITE_TOOLS and not _is_runtime_write(request.agent, request.payload):
+        return _blocked_result(tool)
+    if tool == _SHELL_TOOL and _shell_command_writes_product(request.payload):
+        return _blocked_result(tool)
+    return None
+
+
+# LLM: _user_requested_delegate_only detects explicit current-run delegation constraints.
+# 函数用途: 只在用户明确说不能由 root 直接写/必须通过子代理时触发，避免普通任务误伤。
+def _user_requested_delegate_only(prompt: str) -> bool:
+    text = " ".join(str(prompt or "").lower().split())
+    if not text:
+        return False
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _DELEGATE_ONLY_PATTERNS)
+
+
+# LLM: _is_runtime_write lets agents still write their own coordination reports.
+# 函数用途: 允许写 task/runtime 元数据或报告，不允许写 deliverables 这类最终业务产物。
+def _is_runtime_write(agent: object, payload: dict[str, Any]) -> bool:
+    path = _payload_path(agent, payload)
+    if path is None:
+        return False
+    if path.name in _RUNTIME_FILE_NAMES and _looks_like_runtime_path(path):
+        return True
+    return _looks_like_runtime_path(path) and "deliverables" not in path.parts
+
+
+# LLM: _shell_command_writes_product flags shell forms that can create or mutate product files.
+# 函数用途: 拦截 cat/echo/tee/python write_text/cp/mv/touch 等直接产物写入；ls/find/mkdir 等观察和建目录不拦。
+def _shell_command_writes_product(payload: dict[str, Any]) -> bool:
+    command = str(payload.get("command") or "").strip()
+    if not command:
+        return False
+    return any(re.search(pattern, command, flags=re.IGNORECASE) for pattern in _WRITE_COMMAND_PATTERNS)
+
+
+# LLM: _payload_path resolves write paths enough to distinguish runtime refs from products.
+# 函数用途: 支持绝对路径和相对 workspace root 路径；解析失败时保守返回 None。
+def _payload_path(agent: object, payload: dict[str, Any]) -> Path | None:
+    raw = str(payload.get("path") or payload.get("file") or "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        root = Path(str(getattr(agent, "root", "") or ".")).expanduser()
+        candidate = root / candidate
+    try:
+        return candidate.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
+# LLM: _looks_like_runtime_path detects my-agent runtime areas without importing workspace adapters.
+# 函数用途: 用路径片段识别 subagent/task/agent 元数据区，给协调报告留下写入通道。
+def _looks_like_runtime_path(path: Path) -> bool:
+    parts = set(path.parts)
+    return bool(_RUNTIME_MARKERS.intersection(parts)) and "subagents" in parts
+
+
+# LLM: _blocked_result teaches the model the correct delegated recovery route.
+# 函数用途: 工具层拒绝直接写后，明确建议继续派 worker/takeover/repair，而不是询问用户。
+def _blocked_result(tool: str) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        tool,
+        False,
+        (
+            "delegated_direct_write_blocked=true。"
+            "用户已要求 root/父级通过子代理完成，不能直接写业务产物。"
+            "请改用 create_subagents、schedule_child_subagents 或 dispatch_subagents："
+            "有可恢复 run 时优先 packet/takeover/repair worker；"
+            "没有产物且原 worker 超时时，可以创建新的 worker，但 root 仍不能亲自写最终 deliverables。"
+        ),
+    )

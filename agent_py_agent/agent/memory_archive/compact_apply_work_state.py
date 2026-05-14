@@ -35,7 +35,7 @@ class WorkStateSnapshotRequest:
 # LLM: build_work_state_snapshot captures state signals for future manual resume consistency checks.
 # 函数用途: 生成 compact apply 的工作状态快照，固定目标、下一步、约束、引用和测试状态的可恢复字段。
 def build_work_state_snapshot(request: WorkStateSnapshotRequest) -> dict[str, Any]:
-    source_state = _source_work_state(request.restore_refs)
+    source_state = _source_work_state(request.restore_refs, request.plan["scope"])
     snapshot = _base_snapshot(request, source_state)
     snapshot["completeness"] = _work_state_completeness(snapshot, request.restore_refs)
     snapshot["missing_fields"] = _missing_fields(snapshot["completeness"])
@@ -68,8 +68,9 @@ def restore_refs_summary(restore_refs: dict[str, Any]) -> dict[str, int]:
 # LLM: _base_snapshot records known fields and marks unknown fields explicitly.
 # 函数用途: 组装 work_state_snapshot 的固定字段，不把缺失验收、约束或测试状态伪造成已知。
 def _base_snapshot(request: WorkStateSnapshotRequest, source_state: dict[str, Any]) -> dict[str, Any]:
-    next_actions = source_state["next_actions"]
     field_sources = build_work_state_field_sources(WorkStateFieldSourceRequest(request.plan, source_state))
+    goal = source_state["goal"] or field_sources.goal
+    next_actions = source_state["next_actions"] or field_sources.next_actions
     return {
         "version": COMPACT_WORK_STATE_SNAPSHOT_SCHEMA.version,
         "schema": runtime_memory_schema_payload(COMPACT_WORK_STATE_SNAPSHOT_SCHEMA),
@@ -79,7 +80,7 @@ def _base_snapshot(request: WorkStateSnapshotRequest, source_state: dict[str, An
         "workspace_root": request.plan["workspace_root"],
         "scope": request.plan["scope"],
         "created_at": request.now,
-        "goal": source_state["goal"],
+        "goal": goal,
         "phase": "manual_compact_apply",
         "next_step": next_actions[0] if next_actions else "",
         "next_actions": next_actions,
@@ -98,26 +99,38 @@ def _base_snapshot(request: WorkStateSnapshotRequest, source_state: dict[str, An
 
 # LLM: _source_work_state prefers authoritative snapshot files, then falls back to bounded run archives.
 # 函数用途: 从 restore refs 指向的 snapshot/hook/raw 文件提取目标和下一步，不猜测未记录的验收或约束。
-def _source_work_state(restore_refs: dict[str, Any]) -> dict[str, Any]:
+def _source_work_state(restore_refs: dict[str, Any], scope: dict[str, Any]) -> dict[str, Any]:
     for ref in restore_refs["source_refs"]["snapshot_files"]:
         payload = _read_json_dict(Path(ref["path"]))
-        if payload:
-            return {
-                "goal": _first_text(payload.get("user_intents")),
-                "next_actions": _text_list(payload.get("next_actions")),
-                "content_paths": _text_list(payload.get("content_paths")),
-                "task_refs": _text_list(payload.get("task_refs")),
-            }
-    archive_state = _archive_work_state(restore_refs)
+        candidate = _snapshot_work_state_candidate(payload)
+        if candidate:
+            return candidate
+    archive_state = _archive_work_state(restore_refs, scope)
     if archive_state["goal"] or archive_state["next_actions"]:
         return archive_state
     return {"goal": "", "next_actions": [], "content_paths": [], "task_refs": []}
 
 
+# LLM: _snapshot_work_state_candidate ignores empty/generated snapshots before archive fallback.
+# 函数用途: 从权威 snapshot JSON 中提取目标、下一步和引用；没有有效工作状态时返回空字典。
+def _snapshot_work_state_candidate(payload: dict[str, Any]) -> dict[str, Any]:
+    if not payload:
+        return {}
+    candidate = {
+        "goal": _first_text(payload.get("user_intents")),
+        "next_actions": _text_list(payload.get("next_actions")),
+        "content_paths": _text_list(payload.get("content_paths")),
+        "task_refs": _text_list(payload.get("task_refs")),
+    }
+    if candidate["goal"] or candidate["content_paths"] or candidate["task_refs"]:
+        return candidate
+    return {}
+
+
 # LLM: _archive_work_state reads only restore_refs archive files to recover real-run goal and next action.
 # 函数用途: 当没有 snapshot JSON 文件时，从 hook recovery snapshot 或 raw 用户事件回填最小工作状态。
-def _archive_work_state(restore_refs: dict[str, Any]) -> dict[str, Any]:
-    records = _archive_records(restore_refs)
+def _archive_work_state(restore_refs: dict[str, Any], scope: dict[str, Any]) -> dict[str, Any]:
+    records = _archive_records(restore_refs, scope)
     return {
         "goal": _archive_goal(records),
         "next_actions": _archive_next_actions(records),
@@ -128,10 +141,38 @@ def _archive_work_state(restore_refs: dict[str, Any]) -> dict[str, Any]:
 
 # LLM: _archive_records keeps fallback reads scoped to compact restore refs instead of scanning workspace.
 # 函数用途: 读取 restore_refs 已登记的 raw/hook JSONL 文件，跳过损坏行并保持文件顺序。
-def _archive_records(restore_refs: dict[str, Any]) -> list[dict[str, Any]]:
+def _archive_records(restore_refs: dict[str, Any], scope: dict[str, Any]) -> list[dict[str, Any]]:
     refs = restore_refs.get("source_refs", {}) if isinstance(restore_refs.get("source_refs"), dict) else {}
     archive_refs = refs.get("archive_files", []) if isinstance(refs.get("archive_files"), list) else []
-    return [record for ref in archive_refs for record in _read_jsonl_dicts(Path(str(ref.get("path", ""))))]
+    return [
+        record
+        for ref in archive_refs
+        for record in _read_jsonl_dicts(Path(str(ref.get("path", ""))))
+        if _record_matches_scope(record, scope)
+    ]
+
+
+# LLM: _record_matches_scope re-applies compact filters after opening shared raw/hook JSONL files.
+# 函数用途: restore refs 保存的是文件路径；读取文件内容时仍要按 session/request/run/task 过滤，防止串台。
+def _record_matches_scope(record: dict[str, Any], scope: dict[str, Any]) -> bool:
+    for key in ("session_id", "request_id", "run_id", "task_id"):
+        expected = str(scope.get(key) or "")
+        if expected and expected not in _record_scope_values(record, key):
+            return False
+    return True
+
+
+# LLM: _record_scope_values supports raw events and hook snapshots with nested turn_range ids.
+# 函数用途: 提取归档记录里可用于 scope 匹配的 id；raw 用顶层字段，snapshot 用 turn_range/dispatch_events。
+def _record_scope_values(record: dict[str, Any], key: str) -> set[str]:
+    values = {str(record.get(key) or "").strip()}
+    turn_range = record.get("turn_range")
+    if isinstance(turn_range, dict):
+        values.add(str(turn_range.get(key) or "").strip())
+    dispatch_events = record.get("dispatch_events")
+    if isinstance(dispatch_events, list):
+        values.update(str(item.get(key) or "").strip() for item in dispatch_events if isinstance(item, dict))
+    return {value for value in values if value}
 
 
 # LLM: _archive_goal prefers recovery hook user_intents, then raw user message previews.

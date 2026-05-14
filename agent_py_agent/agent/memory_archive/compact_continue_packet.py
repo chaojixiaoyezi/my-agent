@@ -109,6 +109,8 @@ def _subagent_payload(owner_refs: dict[str, Any]) -> dict[str, Any]:
         "writes_main_memory": bool(owner_refs.get("writes_main_memory", False)),
         "automatic_tool_execution": str(owner_refs.get("automatic_tool_execution", "none")),
         "refs": dict(owner_refs.get("refs", {})),
+        # LLM: subagent owner packets expose task-local read hints without copying main memory.
+        "recommended_read_paths": _string_list(owner_refs.get("recommended_read_paths")),
         "reserved_hooks": dict(owner_refs.get("reserved_hooks", {})),
     }
 

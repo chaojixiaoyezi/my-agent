@@ -151,6 +151,7 @@ def _trace_runner_stage(bundle: RunnerStageTraceBundle) -> None:
         task = bundle.agent.subagents.load(run_id)
     except Exception:
         return
+    task = _touch_active_heartbeat_chain(bundle.agent.subagents, task)
     from ..subagents.debug_trace import SubAgentDebugTraceRequest, write_subagent_debug_trace
 
     write_subagent_debug_trace(
@@ -170,6 +171,48 @@ def _trace_runner_stage(bundle: RunnerStageTraceBundle) -> None:
             },
         )
     )
+
+
+# LLM: _touch_active_heartbeat_chain prevents live nested runners from being mistaken as stale parents.
+# 函数用途: 子/孙 runner 有模型或工具活动时，刷新自身和仍在执行的祖先 heartbeat，避免 nested dispatch 误接管活节点。
+def _touch_active_heartbeat_chain(manager: Any, task: Any) -> Any:
+    import time
+
+    now = time.time()
+    current = task
+    seen: set[str] = set()
+    latest_current = task
+    while current is not None:
+        run_id = str(getattr(current, "id", "") or "").strip()
+        if not run_id or run_id in seen:
+            break
+        seen.add(run_id)
+        if not _heartbeat_active_task(current):
+            break
+        current.heartbeat_at = now
+        current.updated_at = now
+        try:
+            manager.save(current)
+        except Exception:
+            break
+        if run_id == str(getattr(task, "id", "") or "").strip():
+            latest_current = current
+        parent_id = str(getattr(current, "parent_id", "") or "").strip()
+        if not parent_id:
+            break
+        try:
+            current = manager.load(parent_id)
+        except Exception:
+            break
+    return latest_current
+
+
+# LLM: _heartbeat_active_task keeps propagation limited to live runner attempts.
+# 函数用途: 只刷新 RUNNING 或带 active attempt 的任务，避免已完成父节点被子节点活动重新“唤活”。
+def _heartbeat_active_task(task: Any) -> bool:
+    status = str(getattr(task, "status", "") or "").upper()
+    active_attempt = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
+    return status == "RUNNING" or bool(active_attempt)
 
 
 # LLM: _detail_trace_payload adds opt-in level 4 previews and level 5 detail refs to stage events.

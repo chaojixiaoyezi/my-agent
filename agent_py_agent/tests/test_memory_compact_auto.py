@@ -209,6 +209,76 @@ def test_memory_compact_resume_exposes_subagent_latest_continue_packet(tmp_path:
     assert owner["reserved_hooks"]["writes_main_memory"] is False
 
 
+# LLM: Real E2E stores legacy subagent work orders in the configured subagent workspace, not always root/subagents.
+# 函数用途: 验证 compact resume 能通过配置的 subagent_workspace 找到真实子代理 run workspace 和继续包。
+def test_memory_compact_resume_uses_configured_subagent_workspace_refs(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    configured_subagents = root / "_runtime" / "subagents"
+    _write_compact_fixture(root)
+    _write_work_state_fact_sources(root)
+    _write_subagent_run_workspace_in_configured_root(configured_subagents, "run-configured")
+    _write_configured_continue_packet(configured_subagents, "run-configured")
+    resume = _configured_subagent_resume(root, configured_subagents)
+
+    _assert_configured_subagent_owner_resume(resume, configured_subagents)
+
+
+# LLM: _assert_configured_subagent_owner_resume keeps the E2E-shaped regression compact and readable.
+# 函数用途: 校验 configured subagent workspace 被解析成 task-local owner refs 和推荐读取路径。
+def _assert_configured_subagent_owner_resume(resume: dict, configured_subagents: Path) -> None:
+    owner = resume["subagent_session_compact"]
+    assert owner["status"] == "linked_run_workspace"
+    assert owner["refs"]["legacy_task_dir"] == str(configured_subagents / "run-configured")
+    assert owner["refs"]["agent_run_workspace"].endswith("tasks/root-configured/agents/run-configured")
+    assert owner["reserved_hooks"]["continue_packet_ready"] is True
+    subagent_packet = resume["continue_packet"]["subagent"]
+    assert subagent_packet["recommended_read_paths"] == [
+        owner["refs"]["latest_continue_packet"],
+        owner["refs"]["agent_checkpoint"],
+        owner["refs"]["agent_summary"],
+        owner["refs"]["agent_task"],
+        owner["refs"]["agent_timeline"],
+        owner["refs"]["agent_findings"],
+    ]
+    assert all(str(configured_subagents) in path for path in subagent_packet["recommended_read_paths"])
+
+
+# LLM: _configured_subagent_resume creates one compact apply then resumes it with an explicit subagent root.
+# 函数用途: 复用标准 compact apply 流程，返回指定 subagent_run owner 的 resume payload。
+def _configured_subagent_resume(root: Path, configured_subagents: Path) -> dict:
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        ),
+    )
+    return build_memory_compact_resume(
+        root,
+        MemoryCompactResumeOptions(
+            apply_ref=result["apply_id"],
+            owner_type="subagent_run",
+            owner_id="run-configured",
+            resume_mode="auto",
+            subagent_workspace=configured_subagents,
+        ),
+    )
+
+
+# LLM: _write_configured_continue_packet simulates the task-local packet produced by a real subagent save.
+# 函数用途: 在配置 subagent workspace 的 agent-run compactions 目录写 latest_continue_packet.json。
+def _write_configured_continue_packet(configured_subagents: Path, run_id: str) -> None:
+    packet = (
+        configured_subagents
+        / "tasks"
+        / "root-configured"
+        / "agents"
+        / run_id
+        / "compactions"
+        / "latest_continue_packet.json"
+    )
+    packet.write_text(json.dumps({"ready_to_continue": True}), encoding="utf-8")
+
+
 def _auto_cycle_options(*, allow_apply: bool = False) -> MemoryCompactAutoCycleOptions:
     return MemoryCompactAutoCycleOptions(
         current_tokens=8000,
@@ -260,3 +330,33 @@ def _write_subagent_run_workspace(root: Path) -> None:
     (run_dir / "task.md").write_text("task\n", encoding="utf-8")
     (run_dir / "timeline.jsonl").write_text("", encoding="utf-8")
     (run_dir / "findings.jsonl").write_text("", encoding="utf-8")
+
+
+def _write_subagent_run_workspace_in_configured_root(subagents_root: Path, run_id: str) -> None:
+    legacy_dir = subagents_root / run_id
+    run_dir = subagents_root / "tasks" / "root-configured" / "agents" / run_id
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    for directory in ("compactions", "artifacts"):
+        (run_dir / directory).mkdir(exist_ok=True)
+    for path, payload in {
+        run_dir / "state.json": {"run_id": run_id, "status": "running"},
+        run_dir / "checkpoint.json": {"run_id": run_id, "current_step": "resume"},
+        run_dir / "legacy_run_ref.json": {"legacy_task_dir": str(legacy_dir)},
+    }.items():
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    (run_dir / "summary.md").write_text("summary\n", encoding="utf-8")
+    (run_dir / "task.md").write_text("task\n", encoding="utf-8")
+    (run_dir / "timeline.jsonl").write_text("", encoding="utf-8")
+    (run_dir / "findings.jsonl").write_text("", encoding="utf-8")
+    (legacy_dir / "task.json").write_text(
+        json.dumps(
+            {
+                "id": run_id,
+                "agent_run_workspace_dir": str(run_dir),
+                "agent_run_checkpoint_json": str(run_dir / "checkpoint.json"),
+                "agent_run_compactions_dir": str(run_dir / "compactions"),
+            }
+        ),
+        encoding="utf-8",
+    )

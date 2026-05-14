@@ -86,6 +86,8 @@ auto_save_memory: true
 #   off: 不注入恢复块；trigger: 只有“继续/恢复/刚刚/run_id”等场景触发；always: 每轮都尝试。
 # - memory_resume_auto_context_limit 表示自动恢复最多拿多少条线索，范围 1-50。
 # - memory_compact_auto_allow_apply 默认关闭；开启后也只允许非破坏性 apply + auto resume + guard，不自动跑工具。
+# - memory_compact_context_window_tokens 为 0 时自动按模型输出预算估算；测试或小上下文模型可以显式填窗口大小。
+# - memory_compact_auto_continue_max_depth 表示一次 run 里自动 compact 后最多续跑几轮；1 是保守默认，长任务测试可调高。
 memory_archive_level: 3
 memory_hook_enabled: true
 memory_hook_archive_level: 3
@@ -98,6 +100,8 @@ memory_resume_auto_context_enabled: false
 memory_resume_auto_context_mode: "trigger"
 memory_resume_auto_context_limit: 5
 memory_compact_auto_allow_apply: false
+memory_compact_context_window_tokens: 0
+memory_compact_auto_continue_max_depth: 1
 
 # Memory / compact / artifact 默认预算：
 # - 这些值只控制“默认读取多少、预览多少、扫描多少”，不是数据保留上限。
@@ -231,6 +235,8 @@ subagent_hierarchy_default_max_depth: 2
 subagent_hierarchy_recovery_max_nodes: 200
 subagent_hierarchy_max_children_per_tool_call: 2
 subagent_descendant_scan_limit: 128
+# 同一失败任务连续 takeover 的最大深度；超过后阻塞并上报，防止 1 个挂死任务扩成一串新代理。
+subagent_takeover_chain_max_depth: 2
 subagent_context_summary_inline_json_chars: 900
 subagent_context_summary_inline_text_chars: 500
 
@@ -260,6 +266,10 @@ runner_start_rate: "auto"
 # Runner 超时开关和动态超时参数；这三项必须放一起看。
 # runner_timeout_seconds 表示 runner 超时模式："off"/0 是不限制；"auto" 是启用动态超时；数字字符串表示固定秒数。
 runner_timeout_seconds: "off"
+
+# runner_timeout_by_role 表示按角色覆盖 runner 超时：常用于 root/coordinator 长跑、worker/leaf 短保护、takeover 接管 run 给更长预算。
+# 支持行内字典，例如 {"root": "off", "coordinator": "off", "worker": 30, "takeover": 180}；空字典表示全部走 runner_timeout_seconds。
+runner_timeout_by_role: {}
 
 # dynamic_timeout_min 表示动态超时下限：auto 模式算出来再短，也至少给这么多秒，避免小任务被误杀。
 dynamic_timeout_min: 30

@@ -104,6 +104,60 @@ def test_static_site_check_blocks_missing_validate_form_targets(tmp_path):
     assert record.validation_result["form_binding_hits"] == ["validateForm:login-form"]
 
 
+# LLM: external app.js listeners should count as real button behavior.
+# 函数用途: 本地脚本里绑定按钮事件时，静态验收不能只因为 HTML 没有 onclick 就误报 inert control。
+def test_static_site_check_allows_external_script_button_handlers(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "index.html": '<button id="sendBtn">发送</button><script src="app.js"></script>',
+            "app.js": "document.getElementById('sendBtn').addEventListener('click', handleSend);",
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "external button handler",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index.html", "app.js"],
+        }
+    )
+
+    assert record.passed is True
+    assert record.validation_result["inert_control_hits"] == []
+
+
+# LLM: DOM id binding mismatches catch generated buttons that look clickable but break at runtime.
+# 函数用途: app.js 读取不存在的按钮 id 时，父级静态验收要失败并给出具体缺失 id。
+def test_static_site_check_blocks_missing_dom_id_targets(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "index.html": '<button id="sendBtn">发送</button><script src="app.js"></script>',
+            "app.js": (
+                "document.getElementById('sendBtn').addEventListener('click', handleSend);"
+                "document.getElementById('retry-btn').style.display = 'none';"
+            ),
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "missing dom id",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index.html", "app.js"],
+        }
+    )
+
+    assert record.passed is False
+    assert "missing_dom_id_hits=1" in record.error
+    assert record.validation_result["missing_dom_id_hits"] == ["getElementById:retry-btn"]
+
+
 # LLM: test_static_site_check_allows_javascript_template_literals preserves real shop pages.
 # 函数用途: JS 运行时模板字符串可以包含 `${...}`，但不应被当成未替换的 HTML 占位符。
 def test_static_site_check_allows_javascript_template_literals(tmp_path):

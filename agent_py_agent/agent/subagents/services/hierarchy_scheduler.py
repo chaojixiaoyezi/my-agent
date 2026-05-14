@@ -23,6 +23,7 @@ from .hierarchy_scheduler_models import (
     HierarchyScheduleResult,
 )
 from .hierarchy_scope_guards import (
+    active_duplicate_child_reason,
     qa_phase_block_reason,
     schedule_block_reason,
     schedule_warnings,
@@ -64,10 +65,14 @@ class SubAgentHierarchyScheduler:
             scheduling_warnings=schedule_warnings(self.manager, parent, request),
         )
         # LLM: red-line guards stay hard; duplicate coordination domains are emitted as warnings.
-        reason = schedule_block_reason(parent, request) or qa_phase_block_reason(
+        reason = (
+            schedule_block_reason(parent, request)
+            or qa_phase_block_reason(
             self.manager,
             parent,
             request,
+            )
+            or active_duplicate_child_reason(self.manager, parent, request)
         )
         if reason:
             return trace_hierarchy_schedule(
