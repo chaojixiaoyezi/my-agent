@@ -60,8 +60,6 @@ class SubAgentActionService:
         include_run_ids: list[str] | None = None,
     ) -> ActionApplyReport:
         """Execute or dry-run an action plan."""
-        from ..reports import ActionApplyReport
-
         opts = ActionApplyOptions.from_values(
             options,
             apply=apply,
@@ -72,6 +70,12 @@ class SubAgentActionService:
             limit=limit,
             include_run_ids=include_run_ids,
         )
+        records = self._apply_action_plan_records(config, opts)
+        return _action_apply_report_from_records(opts, records)
+
+    # LLM: _apply_action_plan_records executes filtered plan items and handles optional apply logging.
+    # 函数用途: 根据 ActionApplyOptions 过滤 action plan，并逐条生成 apply record。
+    def _apply_action_plan_records(self, config: Any, opts: ActionApplyOptions) -> list[ActionApplyRecord]:
         plan = self.manager.plan_actions(
             config,
             params=_plan_options_from_action_options(config, opts),
@@ -88,13 +92,7 @@ class SubAgentActionService:
             records.append(record)
             if opts.apply:
                 self._append_action_apply_log(record)
-
-        return ActionApplyReport(
-            generated_at=time.time(),
-            dry_run=not opts.apply,
-            summary=action_apply_summary(records),
-            records=records,
-        )
+        return records
 
     # LLM: _apply_action_item 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
     # 函数用途: 更新动作条目对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、报告记录和持久化副作用，需避免破坏既有状态机约定。
@@ -201,4 +199,20 @@ def _plan_options_from_action_options(config: Any, opts: ActionApplyOptions) -> 
         root_id=opts.root_id,
         exclude_run_ids=list(opts.exclude_run_ids or []),
         include_run_ids=list(opts.include_run_ids or []),
+    )
+
+
+# LLM: _action_apply_report_from_records keeps report assembly out of the public apply method.
+# 函数用途: 根据 apply records 生成 ActionApplyReport，并统一维护 summary 字段。
+def _action_apply_report_from_records(
+    opts: ActionApplyOptions,
+    records: list[ActionApplyRecord],
+) -> ActionApplyReport:
+    from ..reports import ActionApplyReport
+
+    return ActionApplyReport(
+        generated_at=time.time(),
+        dry_run=not opts.apply,
+        summary=action_apply_summary(records),
+        records=records,
     )

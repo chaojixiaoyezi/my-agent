@@ -36,6 +36,8 @@ class RecordRunnerResultParams:
     structured_repair_attempted: bool = False
     structured_repair_ok: bool = False
     structured_repair_error: str = ""
+    # LLM: session_compact carries save=False runner compact facts into task-local subagent storage.
+    session_compact: dict[str, object] | None = None
 
 
 # LLM: BuildAndPersistContext 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

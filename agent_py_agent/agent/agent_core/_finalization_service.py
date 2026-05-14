@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import time as time_module
+from dataclasses import dataclass
 
 from ..memory_archive import (
     archive_run_turn,
@@ -26,6 +27,17 @@ from ._runtime_params import (
 )
 from .finalization_compact_auto import compact_auto_cycle_fields
 from .models import AgentRunResult
+
+
+# LLM: BuildAgentRunResultParams keeps final AgentRunResult assembly inputs bundled and extensible.
+# 类用途: 保存收尾阶段组装 AgentRunResult 需要的归档、快照、token 和 request_id 字段。
+@dataclass(frozen=True)
+class BuildAgentRunResultParams:
+    ctx: FinalizeContext
+    archive_result: object
+    snapshot_result: object
+    token_ledger: dict[str, int]
+    run_request_id: str
 
 
 # LLM: FinalizationService 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -72,19 +84,11 @@ class FinalizationService:
             routed_context=ctx.routed_context,
         )
         snapshot_result = self._write_recovery_snapshot_if_needed(recovery_params)
-        turn_id = run_request_id or ctx.run_id or ctx.task_id or f"turn-{time_module.time_ns()}"
-        token_params = EstimateTokenParams(
-            user_prompt=ctx.user_prompt,
-            runtime_injections=ctx.runtime_injections,
-            memories=ctx.memories,
-            final_response=ctx.final_response,
-            archive_tool_calls=ctx.archive_tool_calls,
-            run_request_id=run_request_id,
-            turn_id=turn_id,
-        )
-        token_ledger = self._estimate_token_usage(token_params)
+        token_ledger = self._estimate_token_usage(_estimate_token_params(ctx, run_request_id))
 
-        return self._build_agent_run_result(ctx, archive_result, snapshot_result, token_ledger, run_request_id)
+        return self._build_agent_run_result(
+            BuildAgentRunResultParams(ctx, archive_result, snapshot_result, token_ledger, run_request_id)
+        )
 
     # LLM: _write_runtime_fact_source_if_needed makes real run facts visible to later compact apply.
     # 函数用途: 保存真实 run 的显式验收、约束和测试事实源，并把目录交给 recovery snapshot。
@@ -195,9 +199,8 @@ class FinalizationService:
 
     # LLM: _build_agent_run_result 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 构建agentrun结果所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
-    def _build_agent_run_result(
-        self, ctx: FinalizeContext, archive_result, snapshot_result, token_ledger, run_request_id: str
-    ):
+    def _build_agent_run_result(self, params: BuildAgentRunResultParams):
+        ctx = params.ctx
         routed_context = ctx.routed_context
         return AgentRunResult(
             prompt=ctx.final_prompt,
@@ -211,20 +214,20 @@ class FinalizationService:
                 *routed_context.required_read_paths,
                 *routed_context.candidate_paths,
             ],
-            archive_events=archive_result.event_count if archive_result else 0,
-            archive_token_estimate=archive_result.token_estimate if archive_result else 0,
+            archive_events=params.archive_result.event_count if params.archive_result else 0,
+            archive_token_estimate=params.archive_result.token_estimate if params.archive_result else 0,
             prompt_token_estimate=estimate_tokens(ctx.final_prompt),
             runtime_injection_token_estimate=estimate_tokens(ctx.runtime_injections)
             if ctx.runtime_injections
             else 0,
-            **_snapshot_result_fields(snapshot_result),
+            **_snapshot_result_fields(params.snapshot_result),
             **_resume_context_fields(ctx),
             compression_snapshot_id=ctx.compression_snapshot_id,
             compression_snapshot_path=ctx.compression_snapshot_path,
             compression_applied=ctx.compression_applied,
-            turn_token_estimate=token_ledger["turn"],
-            cumulative_token_estimate=token_ledger["cumulative"],
-            **compact_auto_cycle_fields(self._agent, ctx, token_ledger, request_id=run_request_id),
+            turn_token_estimate=params.token_ledger["turn"],
+            cumulative_token_estimate=params.token_ledger["cumulative"],
+            **compact_auto_cycle_fields(self._agent, ctx, params.token_ledger, request_id=params.run_request_id),
         )
 
 
@@ -235,6 +238,21 @@ def _recovery_content_paths(ctx: FinalizeContext, runtime_fact_source: str) -> l
     if runtime_fact_source:
         paths.append(runtime_fact_source)
     return paths
+
+
+# LLM: _estimate_token_params keeps FinalizationService.finalize focused on lifecycle ordering.
+# 函数用途: 组装 token 估算参数包，保持 turn_id 生成规则和调用方解耦。
+def _estimate_token_params(ctx: FinalizeContext, run_request_id: str) -> EstimateTokenParams:
+    turn_id = run_request_id or ctx.run_id or ctx.task_id or f"turn-{time_module.time_ns()}"
+    return EstimateTokenParams(
+        user_prompt=ctx.user_prompt,
+        runtime_injections=ctx.runtime_injections,
+        memories=ctx.memories,
+        final_response=ctx.final_response,
+        archive_tool_calls=ctx.archive_tool_calls,
+        run_request_id=run_request_id,
+        turn_id=turn_id,
+    )
 
 
 # LLM: _write_run_task_workspace_if_needed gives saved runs a clean home task folder without changing legacy archive paths.

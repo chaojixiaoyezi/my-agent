@@ -1170,3 +1170,11 @@
 - 已测试：真实 case11 clean4 四次 apply 均 `missing_fields=[]`；focused regressions 覆盖多跳续接、continuation fact、scope 过滤和配置字段。
 - 遗留：专项 12 的“子代理模型会话内多次 compact/apply/resume”还没有完整实现；当前只有 task-local continue packet 和 owner refs 恢复链路。
 - 下一步：实现子代理自有 compact cycle，产物只写 agent-run workspace 的 `compactions/`，然后重跑专项 12。
+
+## 2026-05-14 recovery 专项 12 第一片：子代理本地 session compact package
+- 中文说明：子代理 runner 使用 `save=False` 时仍然不会写主代理 `memory_archive/compact_applies/*`。现在如果 runner 结果带 compact 信号，会把“需要压缩后继续”的事实写进自己的 agent-run workspace。
+- 已实现：新增 `subagents/services/subagent_session_compact.py`，在 `tasks/<root>/agents/<run>/compactions/` 下写 package 目录、`latest_metadata.json`、`latest_summary.md`、`restore_refs.json`，并追加 `session_compact_ledger.jsonl`。
+- 已实现：`latest_continue_packet.json` 会挂上 `session_compact.metadata_ref/summary_ref`，`recommended_read_paths` 会优先推荐这些 task-local refs；父级重新 dispatch 时 runner prompt 会显示 `Session Compact Package` 小节。
+- 边界：这个第一片仍不是“子代理一次模型会话里自动 compact 后立刻继续多轮”。它先把子代理自己的 compact 包、恢复 refs 和 prompt 读取链路补齐，为下一片自动续接打底。
+- 已测试：focused regression 覆盖子代理本地 compact 包写入、continue packet 挂接、runner prompt 展示，以及不写主 `memory_archive/compact_applies`。
+- 下一步：把这套 package 接到真实 runner 自动续接控制里，重跑专项 12：单个子代理连续 compact 4 次以上仍能接着完成任务。

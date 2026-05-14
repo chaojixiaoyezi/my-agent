@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .context_bundle_sources import source_refs
 from .controlled_exec_gateway import controlled_exec_grant_refs
 from .models import SubAgentTask
 from .required_file_terms import forbidden_file_terms_from_text, required_file_terms_from_text
@@ -77,7 +78,7 @@ def build_context_bundle(task: SubAgentTask) -> ContextBundleV1:
         output_contract=_output_contract(task),
         lineage=_lineage(task),
         context_packs=list(task.context_packs or []),
-        source_refs=_source_refs(),
+        source_refs=source_refs(),
         reserved=_reserved(task),
     )
 
@@ -193,6 +194,9 @@ def _workspace_refs(task: SubAgentTask) -> dict[str, str]:
         "agent_run_timeline": _safe_string_ref(task, "agent_run_timeline_jsonl"),
         "agent_run_compactions": _safe_string_ref(task, "agent_run_compactions_dir"),
         "agent_run_latest_continue_packet": _latest_continue_packet_ref(task),
+        # LLM: session compact refs stay task-local and let runner prompts avoid parent memory.
+        "agent_run_latest_compaction_summary": _safe_string_ref(task, "agent_run_latest_compaction_summary_md"),
+        "agent_run_latest_compaction_metadata": _safe_string_ref(task, "agent_run_latest_compaction_metadata_json"),
         "shared_blackboard": _safe_string_ref(task, "task_workspace_shared_blackboard"),
         "shared_messages": _safe_string_ref(task, "task_workspace_shared_messages_jsonl"),
         "shared_findings": _safe_string_ref(task, "task_workspace_shared_findings_jsonl"),
@@ -325,30 +329,6 @@ def _safe_string_ref(task: SubAgentTask, field_name: str) -> str:
     if isinstance(value, Path):
         return str(value)
     return value if isinstance(value, str) else ""
-
-
-# LLM: _source_refs makes every major bundle field traceable to existing task facts.
-# 函数用途: 给大模型和调试人员标明关键字段从哪里来，后续可扩展到 ledger/compact/task refs。
-def _source_refs() -> dict[str, list[str]]:
-    return {
-        "goal": ["task.goal"],
-        "thought": ["task.thought"],
-        "plan": ["task.plan"],
-        "acceptance_checks": ["task.acceptance_checks"],
-        "permissions": ["task.allowed_tools", "task.allowed_skills", "task.capability_grants"],
-        "constraints": ["task.allowed_write_roots", "task.forbidden_write_roots", "task.locked_files"],
-        "workspace_refs": ["task.task_dir", "task.task_workspace_dir", "task.agent_run_workspace_dir"],
-        "output_contract": [
-            "task.output_json",
-            "task.runner_result_json",
-            "task.agent_run_final_report_md",
-            "task.goal",
-            "task.thought",
-            "task.acceptance_checks",
-        ],
-        "lineage": ["task.root_id", "task.parent_id", "task.depth", "task.inheritance_manifest_json"],
-        "context_packs": ["task.context_packs"],
-    }
 
 
 # LLM: _is_missing defines the minimum useful handoff signal for gate checks.

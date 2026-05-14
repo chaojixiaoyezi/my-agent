@@ -9,12 +9,16 @@ from __future__ import annotations
 这里把单任务巡检拆出 board.py，用一个上下文对象承载重复参数，避免每个检查函数都有长参数列表。
 """
 
-from ..policies import _is_active
 from .board_due_models import (
     DueInspectionContext,
     DueIssueSpec,
     InspectTaskDueRequest,
     _single_issue,
+)
+from .board_due_timeout_checks import (
+    check_coordinator_heartbeat_issues,
+    check_heartbeat_timeout_issues,
+    check_run_timeout_issues,
 )
 from .board_parent_timeout import check_parent_timeout_child_issues
 from .recovery_strategy import SubagentRecoveryStrategyRequest, build_subagent_recovery_strategy
@@ -265,99 +269,6 @@ def _check_capability_gap_issues(ctx: DueInspectionContext):
     ]
 
 
-# LLM: _check_heartbeat_timeout_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 校验heartbeat超时issues需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
-def _check_heartbeat_timeout_issues(ctx: DueInspectionContext, heartbeat_timeout):
-    """Check for stale heartbeat on active tasks."""
-    if not (
-        _is_runtime_timeout_candidate(ctx.task)
-        and heartbeat_timeout > 0
-        and ctx.stale_seconds > heartbeat_timeout
-    ):
-        return []
-    severity = "P0" if ctx.stale_seconds > heartbeat_timeout * 3 else "P1"
-    return [
-        _single_issue(
-            ctx,
-            DueIssueSpec(
-                severity,
-                "heartbeat_stale",
-                f"心跳已停滞 {ctx.stale_seconds:.0f}s，超过配置阈值 {heartbeat_timeout}s。",
-                "check_runtime_or_takeover",
-            ),
-        )
-    ]
-
-
-# LLM: _check_coordinator_heartbeat_issues reports orphan-risk coordinators without treating them as runners.
-# 函数用途: 检查有子任务的 coordinator 是否失联；只生成领导权恢复建议，不触发普通 runner timeout。
-def _check_coordinator_heartbeat_issues(ctx: DueInspectionContext, heartbeat_timeout):
-    """Check for stale planning coordinators that may need leadership handoff."""
-    if not (
-        _is_parked_planning_coordinator(ctx.task)
-        and heartbeat_timeout > 0
-        and ctx.stale_seconds > heartbeat_timeout
-    ):
-        return []
-    severity = "P1" if ctx.stale_seconds <= heartbeat_timeout * 3 else "P0"
-    child_count = len(getattr(ctx.task, "child_ids", []) or [])
-    return [
-        _single_issue(
-            ctx,
-            DueIssueSpec(
-                severity,
-                "coordinator_heartbeat_stale",
-                (
-                    f"协调节点心跳已停滞 {ctx.stale_seconds:.0f}s，旗下还有 {child_count} 个子任务，"
-                    "需要父代理确认是否重新指定 leader。"
-                ),
-                "recover_coordinator_leadership",
-            ),
-        )
-    ]
-
-
-# LLM: _check_run_timeout_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 校验超时issues需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
-def _check_run_timeout_issues(ctx: DueInspectionContext, run_timeout):
-    """Check for run timeout on active tasks."""
-    if not (
-        _is_runtime_timeout_candidate(ctx.task)
-        and run_timeout > 0
-        and ctx.age_seconds > run_timeout
-    ):
-        return []
-    return [
-        _single_issue(
-            ctx,
-            DueIssueSpec(
-                "P0",
-                "run_timeout",
-                f"任务已运行 {ctx.age_seconds:.0f}s，超过配置阈值 {run_timeout}s。",
-                "shrink_scope_reassign_or_takeover",
-            ),
-        )
-    ]
-
-
-# LLM: _is_runtime_timeout_candidate separates real runner stalls from parked coordinator planning nodes.
-# 函数用途: 判断任务是否应该进入 heartbeat/run timeout 规则；有子任务的 PLANNING 协调节点不按 runner 卡死处理。
-def _is_runtime_timeout_candidate(task) -> bool:
-    status = str(task.status or "").upper()
-    active_attempt = bool(getattr(task, "runner_active_attempt_id", "") or "")
-    if _is_parked_planning_coordinator(task):
-        return False
-    return _is_active(status)
-
-
-# LLM: _is_parked_planning_coordinator identifies parent-only planning nodes with live child ownership.
-# 函数用途: 判断一个任务是否是等待子任务的 coordinator，而不是正在执行的 runner。
-def _is_parked_planning_coordinator(task) -> bool:
-    status = str(getattr(task, "status", "") or "").upper()
-    active_attempt = bool(getattr(task, "runner_active_attempt_id", "") or "")
-    return status == "PLANNING" and not active_attempt and bool(getattr(task, "child_ids", None))
-
-
 # LLM: inspect_single_task_due stays bundle-first so new predicates do not grow the public signature.
 # 函数用途: 处理单个任务的到期巡检，串起所有 predicate 并返回 refs-only issue 列表。
 def inspect_single_task_due(request: InspectTaskDueRequest):
@@ -392,7 +303,7 @@ def inspect_single_task_due(request: InspectTaskDueRequest):
     issues.extend(_check_done_verification_issues(ctx))
     issues.extend(_check_capability_request_issues(ctx))
     issues.extend(_check_capability_gap_issues(ctx))
-    issues.extend(_check_coordinator_heartbeat_issues(ctx, request.settings.heartbeat_timeout))
-    issues.extend(_check_heartbeat_timeout_issues(ctx, request.settings.heartbeat_timeout))
-    issues.extend(_check_run_timeout_issues(ctx, request.settings.run_timeout))
+    issues.extend(check_coordinator_heartbeat_issues(ctx, request.settings.heartbeat_timeout))
+    issues.extend(check_heartbeat_timeout_issues(ctx, request.settings.heartbeat_timeout))
+    issues.extend(check_run_timeout_issues(ctx, request.settings.run_timeout))
     return issues

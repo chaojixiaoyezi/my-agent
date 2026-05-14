@@ -4,31 +4,21 @@
 
 from __future__ import annotations
 
-import json
-
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
 from ..prompting_parts.builder import ToolSections
-from ..tools import ToolExecutionResult
 from ._runtime_params import ToolLoopExecuteParams
-from .parameters import _one_shot_tool_call_key
 from .runner_stage_trace import (
     RunnerToolStageTraceRequest,
-    trace_runner_tool_call_finished,
     trace_runner_tool_call_started,
 )
-from .subagent_attempt_guard import stale_subagent_attempt_result
 from .subagent_dispatch_closeout import subagent_dispatch_limit_response
-from .tool_agent_budget_stage import ToolAgentBudgetStageRequest, maybe_block_tool_agent_budget
-from .tool_body_read_guard_stage import (
-    ToolBodyReadGuardStageRequest,
-    maybe_block_delegating_body_read_stage,
-)
 from .tool_call_context_reducer import render_tool_payload_for_live_prompt
-from .tool_context_reducer import render_tool_result_for_live_prompt
-from .tool_direct_write_guard_stage import (
-    ToolDirectWriteGuardStageRequest,
-    maybe_block_delegate_only_direct_write_stage,
+from .tool_call_runtime import (
+    ToolCallRuntimeRequest,
+    execute_traced_tool_call,
+    guarded_tool_call_result,
 )
+from .tool_context_reducer import render_tool_result_for_live_prompt
 from .tool_loop_completion import ToolRoundCompletionRequest, completion_response_after_tool_round
 from .tool_loop_recovery import (
     append_long_content_recovery_context,
@@ -107,37 +97,6 @@ def _executed_subagent_orchestration(params: ToolLoopExecuteParams) -> bool:
         "subagent_message",
     }
     return any(str(item or "") in orchestration_tools for item in params.executed_tools or [])
-
-
-# LLM: _duplicate_one_shot_result 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理duplicateoneshot结果相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
-def _duplicate_one_shot_result(payload: dict[str, object]) -> ToolExecutionResult:
-    tool_name = str(payload.get("tool") or "unknown")
-    return ToolExecutionResult(
-        tool_name,
-        False,
-        "本轮已经执行过相同的一次性编排工具调用，系统已阻止重复执行。"
-        "请基于前面的工具结果直接给最终回答，不要再次调用同一个工具。",
-    )
-
-
-# LLM: _trace_finished_result keeps guard branches short while preserving runner trace symmetry.
-# 函数用途: 工具调用被 guard 提前拦截时，统一写 finished trace 并返回同一个 ToolExecutionResult。
-def _trace_finished_result(
-    trace_request: RunnerToolStageTraceRequest,
-    result: ToolExecutionResult,
-):
-    trace_runner_tool_call_finished(
-        RunnerToolStageTraceRequest(
-            agent=trace_request.agent,
-            params=trace_request.params,
-            tool_rounds=trace_request.tool_rounds,
-            idx=trace_request.idx,
-            payload=trace_request.payload,
-            result=result,
-        )
-    )
-    return result
 
 
 # LLM: ToolLoopService 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -250,45 +209,11 @@ class ToolLoopService:
             payload=payload,
         )
         trace_runner_tool_call_started(trace_request)
-        one_shot_key = _one_shot_tool_call_key(payload)
-        if one_shot_key and one_shot_key in request.params.one_shot_tool_calls:
-            result = _duplicate_one_shot_result(payload)
-            return _trace_finished_result(trace_request, result)
-        stale_result = stale_subagent_attempt_result(self._agent, payload)
-        if stale_result is not None:
-            return _trace_finished_result(trace_request, stale_result)
-        body_read_result = maybe_block_delegating_body_read_stage(
-            ToolBodyReadGuardStageRequest(self._agent, request, payload)
-        )
-        if body_read_result is not None:
-            return body_read_result
-        direct_write_result = maybe_block_delegate_only_direct_write_stage(
-            ToolDirectWriteGuardStageRequest(self._agent, request, payload)
-        )
-        if direct_write_result is not None:
-            return direct_write_result
-        budget_result = maybe_block_tool_agent_budget(ToolAgentBudgetStageRequest(self._agent, request, payload))
-        if budget_result:
-            return budget_result
-        result = self._agent.tools.execute_call(
-            payload,
-            allowed_tools=request.params.allowed_tools,
-            granted_capabilities=request.params.granted_capabilities,
-            write_boundary=request.params.write_boundary,
-        )
-        if one_shot_key and _one_shot_result_consumes_key(result):
-            request.params.one_shot_tool_calls.add(one_shot_key)
-        trace_runner_tool_call_finished(
-            RunnerToolStageTraceRequest(
-                agent=self._agent,
-                params=request.params,
-                tool_rounds=request.tool_rounds,
-                idx=request.idx,
-                payload=payload,
-                result=result,
-            )
-        )
-        return result
+        runtime_request = ToolCallRuntimeRequest(self._agent, request, payload, trace_request)
+        guard_result = guarded_tool_call_result(runtime_request)
+        if guard_result is not None:
+            return guard_result
+        return execute_traced_tool_call(runtime_request)
 
     # LLM: _record_tool_call 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 写入工具call的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
@@ -324,23 +249,3 @@ class ToolLoopService:
         output_record.update(fail_safe)
         output_record["parameters"] = record.payload
         return output_record
-
-
-# LLM: _one_shot_result_consumes_key preserves retry room for semantic orchestration blocks.
-# 函数用途: 只有真正成功推进的 create/schedule 调用才登记去重；blocked=true 允许上层修正后重试。
-def _one_shot_result_consumes_key(result: ToolExecutionResult) -> bool:
-    if not result.ok:
-        return False
-    return not _orchestration_result_is_blocked(result.output)
-
-
-# LLM: _orchestration_result_is_blocked detects JSON schedule payloads that did not mutate the tree.
-# 函数用途: schedule_child_subagents 可能 ok=True 但返回 blocked=true；这类结果不应吃掉一次性调用名额。
-def _orchestration_result_is_blocked(output: object) -> bool:
-    try:
-        payload = json.loads(str(output or ""))
-    except (TypeError, json.JSONDecodeError):
-        return False
-    if not isinstance(payload, dict):
-        return False
-    return bool(payload.get("blocked"))

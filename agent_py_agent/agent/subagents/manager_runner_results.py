@@ -30,6 +30,10 @@ from .result_processors import (
     merge_actual_tools_for_unparsed,
 )
 from .runner_rendering import render_runner_result_markdown
+from .services.subagent_session_compact import (
+    SubagentSessionCompactRequest,
+    write_subagent_session_compact,
+)
 from .utils import _apply_missing_paths
 
 # ---------------------------------------------------------------------------
@@ -206,6 +210,10 @@ class _SubAgentRunnerResultFacade:
             task,
             result,
             _PostResultSideEffectParams(output_payload, params.dry_run, extracted.parsed, extracted.lessons),
+        )
+        # LLM: save=False runner compact signals are persisted only as task-local package refs.
+        write_subagent_session_compact(
+            SubagentSessionCompactRequest(task, params.session_compact or {}, output_payload)
         )
         # LLM: optional debug tracing is refs-only and gated by subagent_debug_trace_level.
         from .debug_trace import SubAgentRunnerTraceRequest, trace_runner_result

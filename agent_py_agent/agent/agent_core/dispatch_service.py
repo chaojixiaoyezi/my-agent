@@ -50,6 +50,18 @@ class MakeDispatchWatchRecordParams:
     evidence_paths: list[str] | None = None
 
 
+# LLM: DueCheckRecordParams bundles dispatch due-check scoping and apply mode for a single record.
+# 类用途: 保存 due-check dispatch record 构造参数，避免函数签名随着 root/run 过滤继续膨胀。
+@dataclass(frozen=True)
+class DueCheckRecordParams:
+    agent: Any
+    cfg: CapabilityConfig
+    apply: bool
+    root_id: str = ""
+    include_run_ids: list[str] | None = None
+    exclude_run_ids: list[str] | None = None
+
+
 # ---------------------------------------------------------------------------
 # Step record builders
 # ---------------------------------------------------------------------------
@@ -57,32 +69,25 @@ class MakeDispatchWatchRecordParams:
 
 # LLM: make_due_check_record 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 构建到期检查记录所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
-def make_due_check_record(
-    agent,
-    cfg,
-    apply,
-    *,
-    root_id: str = "",
-    include_run_ids: list[str] | None = None,
-    exclude_run_ids: list[str] | None = None,
-):
+def make_due_check_record(params: DueCheckRecordParams):
+    agent = params.agent
     options = SubAgentDueCheckOptions(
-        config=cfg,
-        write_report=apply,
-        root_id=root_id,
-        include_run_ids=list(include_run_ids or []),
-        exclude_run_ids=list(exclude_run_ids or []),
+        config=params.cfg,
+        write_report=params.apply,
+        root_id=params.root_id,
+        include_run_ids=list(params.include_run_ids or []),
+        exclude_run_ids=list(params.exclude_run_ids or []),
     )
     due_report = (
         agent.subagents.write_due_check(params=options)
-        if apply
+        if params.apply
         else agent.subagents.due_check(params=options)
     )
     return agent.subagents.make_dispatch_record(
         params=DispatchRecordParams(
         step="due_check",
         action="scan",
-        dry_run=not apply,
+        dry_run=not params.apply,
         applied=False,
         ok=True,
         message=f"发现 {due_report.summary.get('total', 0)} 个 due-check issue。",
@@ -125,51 +130,52 @@ def make_leadership_recovery_plan_record(agent, cfg):
 def make_action_apply_records(params: ActionApplyRecordParams):
     agent = params.agent
     records = []
-    action_report = (
-        agent.subagents.write_action_apply_report(
-            params.cfg,
-            options=ActionApplyOptions(
-                apply=params.apply,
-                take_over_by=params.take_over_by or "",
-                locked_files=params.locked_files or [],
-                limit=params.limit,
-                root_id=params.root_id,
-                include_run_ids=list(params.include_run_ids or []),
-                exclude_run_ids=list(params.exclude_run_ids or []),
-            ),
-        )
-        if params.apply
-        else agent.subagents.apply_actions(
-            params.cfg,
-            options=ActionApplyOptions(
-                apply=False,
-                take_over_by=params.take_over_by or "",
-                locked_files=params.locked_files or [],
-                limit=params.limit,
-                root_id=params.root_id,
-                include_run_ids=list(params.include_run_ids or []),
-                exclude_run_ids=list(params.exclude_run_ids or []),
-            ),
-        )
-    )
+    action_options = _action_apply_options(params)
+    action_report = _action_apply_report(agent, params, action_options)
     for item in action_report.records:
-        records.append(
-            agent.subagents.make_dispatch_record(
-                params=DispatchRecordParams(
-                step="action_apply",
-                action=item.action,
-                run_id=item.run_id,
-                dry_run=item.dry_run,
-                applied=item.applied,
-                ok=item.ok,
-                message=item.message,
-                before_status=item.before_status,
-                after_status=item.after_status,
-                evidence_paths=item.evidence_paths,
-                ),
-            )
-        )
+        records.append(_action_apply_dispatch_record(agent, item))
     return records
+
+
+# LLM: _action_apply_options mirrors dispatch scoping into the subagent action apply bundle.
+# 函数用途: 从 dispatch 参数构造 ActionApplyOptions，保证 apply/dry-run 两条路径使用同一过滤条件。
+def _action_apply_options(params: ActionApplyRecordParams) -> ActionApplyOptions:
+    return ActionApplyOptions(
+        apply=params.apply,
+        take_over_by=params.take_over_by or "",
+        locked_files=params.locked_files or [],
+        limit=params.limit,
+        root_id=params.root_id,
+        include_run_ids=list(params.include_run_ids or []),
+        exclude_run_ids=list(params.exclude_run_ids or []),
+    )
+
+
+# LLM: _action_apply_report calls the mutating or dry-run action path with the same options object.
+# 函数用途: 根据 apply 开关选择 write_action_apply_report 或 apply_actions。
+def _action_apply_report(agent: Any, params: ActionApplyRecordParams, options: ActionApplyOptions):
+    if params.apply:
+        return agent.subagents.write_action_apply_report(params.cfg, options=options)
+    return agent.subagents.apply_actions(params.cfg, options=options)
+
+
+# LLM: _action_apply_dispatch_record projects one action apply record into the dispatch ledger schema.
+# 函数用途: 把 action apply report 的单条记录转换为 dispatch record。
+def _action_apply_dispatch_record(agent: Any, item):
+    return agent.subagents.make_dispatch_record(
+        params=DispatchRecordParams(
+            step="action_apply",
+            action=item.action,
+            run_id=item.run_id,
+            dry_run=item.dry_run,
+            applied=item.applied,
+            ok=item.ok,
+            message=item.message,
+            before_status=item.before_status,
+            after_status=item.after_status,
+            evidence_paths=item.evidence_paths,
+        ),
+    )
 
 
 # LLM: make_capability_route_records 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

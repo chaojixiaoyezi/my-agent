@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import ClassVar
 
 # LLM: imports stay ruff-clean because this service is shared by CLI, manager facades, and CI acceptance tests.
+from .acceptance_review_diagnostics import diagnostic_review_inputs
 from .acceptance_review_verifier import build_verifier_checks
 from .acceptance_test_execution import (
     AcceptanceTestExecutionRequest,
@@ -24,25 +25,6 @@ from .models import SubAgentTask
 from .parsing import _dict_list
 from .reports import AcceptanceReviewFinding, AcceptanceReviewRecord
 from .utils import _new_id, _read_json_object
-
-_DIAGNOSTIC_COMPLETION_STATUSES = frozenset({
-    "completed_with_issues",
-    "completed_with_findings",
-    "issues_found",
-    "findings_found",
-})
-_DIAGNOSTIC_NON_BLOCKING_FINDINGS = frozenset({
-    "tests_passed",
-    "no_unresolved_patches",
-})
-_DIAGNOSTIC_ROLES = frozenset({
-    "tester",
-    "test",
-    "qa_tester",
-    "bug_finder",
-    "bugfinder",
-    "bug-finder",
-})
 
 
 # LLM: AcceptanceReviewOptions 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
@@ -160,7 +142,7 @@ def review_acceptance_task(manager, request: AcceptanceReviewRequest) -> Accepta
     before_status = task.status
     before_verification = task.verification_status
     inputs = _acceptance_review_inputs(manager, request, now)
-    inputs = _diagnostic_review_inputs(task, inputs)
+    inputs = diagnostic_review_inputs(task, inputs)
     review_checks = [*inputs.findings, *inputs.verifier_checks]
     ok = all(item.ok or item.severity == "P2" for item in review_checks)
     ready = task.status == "AWAITING_ACCEPTANCE" or task.verification_status == "NEEDS_ACCEPTANCE"
@@ -211,54 +193,6 @@ def _acceptance_review_inputs(manager, request: AcceptanceReviewRequest, now: fl
         findings=findings,
         verifier_checks=build_verifier_checks(task, now),
     )
-
-
-# LLM: _diagnostic_review_inputs keeps QA-finding roles from being marked failed for successfully reporting bugs.
-# 函数用途: tester/bug_finder 输出 COMPLETED_WITH_ISSUES 时，把“发现的产品问题”降为 P2 事实，不影响自身任务完成；worker 仍严格失败。
-def _diagnostic_review_inputs(task: SubAgentTask, inputs: AcceptanceReviewInputs) -> AcceptanceReviewInputs:
-    if not _is_completed_diagnostic_role(task, inputs.output):
-        return inputs
-    findings = [_diagnostic_finding(item) for item in inputs.findings]
-    return replace(inputs, findings=findings)
-
-
-# LLM: _diagnostic_finding downgrades only product-issue findings, never channel/readiness/capability gates.
-# 函数用途: 保留 finding.ok=False 作为“发现问题”的证据，只把 severity 调成 P2，让父级 repair/acceptor 继续闭环。
-def _diagnostic_finding(finding: AcceptanceReviewFinding) -> AcceptanceReviewFinding:
-    if finding.ok or finding.severity == "P2" or finding.name not in _DIAGNOSTIC_NON_BLOCKING_FINDINGS:
-        return finding
-    message = f"{finding.message}（诊断角色已报告，交由父级 repair/acceptor 闭环。）"
-    return replace(finding, severity="P2", message=message)
-
-
-# LLM: _is_completed_diagnostic_role requires both a QA-like role and an explicit completed-with-issues status.
-# 函数用途: 判断 tester/bug_finder 是否已经完成“找问题”职责，避免 worker 借 COMPLETED_WITH_ISSUES 绕过失败。
-def _is_completed_diagnostic_role(task: SubAgentTask, output: dict) -> bool:
-    if not _is_diagnostic_role(task):
-        return False
-    return _normalized_output_status(output) in _DIAGNOSTIC_COMPLETION_STATUSES
-
-
-# LLM: _is_diagnostic_role centralizes lightweight role matching without importing role-template machinery here.
-# 函数用途: 识别测试/找茬角色；只匹配诊断角色，不把 acceptor 或普通 worker 放宽。
-def _is_diagnostic_role(task: SubAgentTask) -> bool:
-    role = _normalized_role_text(getattr(task, "role", ""))
-    name = str(getattr(task, "agent_name", "") or "").lower()
-    return role in _DIAGNOSTIC_ROLES or role.endswith("_tester") or "测试" in name or "找茬" in name
-
-
-# LLM: _normalized_output_status reads compact structured status from either modern or legacy output shapes.
-# 函数用途: 统一 structured_output.status / output.status 的大小写和分隔符，供验收语义判断使用。
-def _normalized_output_status(output: dict) -> str:
-    structured = output.get("structured_output")
-    value = structured.get("status") if isinstance(structured, dict) else output.get("status")
-    return _normalized_role_text(value)
-
-
-# LLM: _normalized_role_text is intentionally tiny because acceptance matching must stay deterministic.
-# 函数用途: 把角色/状态里的大小写、空格和横线归一，降低模型输出轻微漂移带来的误判。
-def _normalized_role_text(value: object) -> str:
-    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
 
 
 # LLM: _acceptance_record 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

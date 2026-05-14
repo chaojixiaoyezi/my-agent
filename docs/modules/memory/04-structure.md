@@ -93,6 +93,7 @@ agent_py_agent/cli/
 - `agent_core/compact_auto_continuation.py`：主 agent 自动 compact 后的续跑桥。它把 `compact_continue_packet` 渲染成 `# Compact Auto Continuation` 注入块，要求模型只从 `Next Step` 继续、不重做已完成内容；续跑轮会跳过再次 compact，防止自动循环。
 - `agent_core/subagent_compact_continuation.py`：子代理 runner 的任务本地接续片段。它只从 `context_bundle.workspace_refs` 指向的 run workspace 读取 bounded checkpoint/summary/task/findings 和最新 continue packet 摘要，生成 `Task-Local Compact Continuation`；不读取主代理 home 关键文件、不写任何 memory、不执行工具。
 - `subagents/services/compact_continue_packet.py`：子代理保存闭环的写入层。`SubAgentManager.save()` 会通过它把当前任务状态、下一步、blockers 和恢复 refs 写成 `compactions/latest_continue_packet.json`，并追加 `session_compact_ledger.jsonl`；父级重新 dispatch 时仍只是按 refs 接续，不直接执行工具。
+- `subagents/services/subagent_session_compact.py`：子代理本地 session compact package 写入层。子代理 runner 的 compact 信号会写进当前 run workspace 的 `compactions/latest_metadata.json`、`latest_summary.md` 和 package refs，不写主代理 `memory_archive/compact_applies`；continue packet 会引用这些 task-local refs。
 - `agent_core/finalization_compact_auto.py`：从 finalization 主文件拆出的 compact auto 字段投影层；负责 run 收尾触发 auto cycle、把 continue packet 暴露到 `AgentRunResult`，以及续跑轮跳过再次 compact 的固定字段。
 - `memory_archive/tool_output_externalizer.py`：在工具循环归档时把超过阈值的大工具输出写成 `memory_archive/artifacts/tool_outputs/<tool>-<call>-<hash>.json`，并追加 `index.jsonl`；archive/tool event 只保存 preview/hash/path/size。
 - `agent_core/tool_output_failsafe.py`：在调用 tool output externalizer 前写 recovery snapshot，保留工具名、hash、大小、run/task/request id 和下一步建议；完整输出正文仍只在 artifact 文件里。

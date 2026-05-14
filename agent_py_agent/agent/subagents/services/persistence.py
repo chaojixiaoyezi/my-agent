@@ -40,6 +40,7 @@ from .persistence_inheritance import normalize_inheritance_manifest, write_inher
 from .persistence_recovery_outputs import write_recovery_output_files
 from .persistence_rendering import render_thought_markdown
 from .persistence_security import normalize_security_signal
+from .persistence_status_report import build_status_report
 from .task_workspace_adapter import sync_task_workspace_fields
 
 
@@ -184,39 +185,6 @@ def _normalize_status_report(value: object) -> StatusReport:
         payload[key] = _string_list_value(payload.get(key))
     payload["updated_at"] = _float_value(payload.get("updated_at"))
     return StatusReport(**payload)
-
-
-# LLM: _summary_delta 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 渲染或汇总delta的展示文本，保持命令行、日志和审计输出一致；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
-def _summary_delta(task: SubAgentTask) -> dict[str, list[str]]:
-    return {
-        "facts_added": [task.latest_summary] if task.latest_summary else [],
-        "facts_invalidated": [],
-        "decisions_changed": [],
-        "open_questions": list(task.blockers),
-    }
-
-
-# LLM: build_status_report 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 构建状态报告所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
-def build_status_report(task: SubAgentTask) -> StatusReport:
-    previous = task.latest_status_report if isinstance(task.latest_status_report, StatusReport) else StatusReport()
-    progress = max(0.0, min(1.0, _float_value(task.progress)))
-    return StatusReport(
-        run_id=task.id,
-        version=max(0, int(previous.version or 0)) + 1,
-        state=task.status,
-        progress=progress,
-        current_step=task.current_step or task.status,
-        summary_delta=_summary_delta(task),
-        budget_used=dict(task.budget_used or {}),
-        artifact_refs=list(dict.fromkeys(task.artifact_refs)),
-        evidence_refs=list(dict.fromkeys(task.evidence_refs)),
-        blockers=list(dict.fromkeys(task.blockers)),
-        checkpoint_ref=task.checkpoint_ref,
-        next_recommended_action=(task.blockers[0] if task.blockers else ""),
-        updated_at=task.updated_at or task.heartbeat_at or task.created_at,
-    )
 
 
 # LLM: SubAgentPersistenceService 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
