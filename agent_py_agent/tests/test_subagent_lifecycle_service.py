@@ -58,7 +58,9 @@ def test_subagent_lifecycle_service_records_capabilities_and_status(tmp_path) ->
     assert loaded.capability_grants[0].path_scope == ["/workspace/project"]
     assert evidence.ok is True
     assert updated.status == "DONE"
-    assert loaded.allowed_tools == ["search_text"]
+    assert "search_text" in loaded.allowed_tools
+    assert "read_file" in loaded.allowed_tools
+    assert "write_file" in loaded.allowed_tools
     assert loaded.capability_requests[0].id == request.id
 
 

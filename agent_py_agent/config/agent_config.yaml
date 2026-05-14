@@ -140,34 +140,35 @@ enable_self_learning: false
 prompt_files:
   - "prompts/default.md"
 
-# 是否启用子任务记录
+# 子代理配置
+# - 子代理默认应该像“不同记忆/权限的主代理”一样能独立干活。
+# - 角色模板只追加职责，不应该拿掉基础读写、汇报和任务目录内执行能力。
+# - 这里保留少量用户能理解的开关；更细的调度/上下文/runner 参数由系统内部自动处理。
 enable_subagents: true
 
-# 子代理自动化级别
-# - 1: 极大优先子代理。预估 >= 2 轮的任务都派子代理。
-# - 2: 中等优先。预估 >= 4 轮的任务派子代理。
-# - 3: 保守优先。预估 >= 8 轮或用户明确指定才派子代理。
-subagent_automation_level: 2
+# 子代理运行模式
+# - trusted_local_hardening: 默认本地硬化模式。保留系统安全底线，放宽流程型限制，优先把活干好。
+# - balanced: 后续用于更保守的日常默认。
+# - strict: 后续用于外部用户/高风险环境。
+subagent_mode: "trusted_local_hardening"
 
-# 子代理调试追踪等级
-# - 0: 默认关闭，不写额外调试日志
-# - 1: 只记录关键生命周期事件，比如任务创建、runner 收束
-# - 2: 记录调度/验收/runner 结果的更多 refs-only 字段
-# - 3: 记录模型请求/响应、工具调用开始/结束的 refs-only 阶段日志
-# - 4: 在 JSONL 里追加短 prompt/response/tool 预览，方便 tail 实时观察
-# - 5: 额外把完整 prompt、response、tool 参数和工具输出写到 debug_traces/details；仅建议真实 E2E 排障时开启
+# 单个任务最多允许登记多少个子代理；默认 1000，表示用户层基本不限制。
+# 真实并发仍由调度器按机器和模型情况自动控制。
+max_subagents: 1000
+
+# 子任务记录输出目录。
+subagent_workspace: "data/subagents"
+
+# 子代理角色模板目录。
+# - [] 表示自动使用工作区 .agent/subagents/roles（如果存在）+ 内置模板。
+# - 模板只影响职责和检查重点，不应让代理失去基础读写/汇报能力。
+subagent_role_template_dirs: []
+
+# 子代理调试追踪等级。
+# - 0: 默认关闭
+# - 1-2: 记录生命周期、调度、验收等 refs-only 信息
+# - 3-5: 逐步增加 prompt/tool/response 预览或完整细节，建议只在真实 E2E 排障时开启
 subagent_debug_trace_level: 0
-
-# 失败后最大自动拆分次数
-# - 避免无限拆分
-# - 0 表示不自动拆分
-max_auto_split_depth: 2
-
-# 失败后最大自动重试次数
-# - 每次重试会引入 LLM 分析失败原因，根据分析结果调整策略
-# - 超过此次数后放弃自动重试，通知用户介入
-# - 默认 3 次
-max_auto_retry_attempts: 3
 
 # 用户数据隔离配置
 # - user_id: 当前用户标识，默认为 admin
@@ -180,65 +181,6 @@ user_data_root: "data/users"
 # - admin_user_id: 管理员用户 ID，外部通道携带此 user_id 时也获得 admin 权限
 auth_enabled: true
 admin_user_id: "admin"
-
-# 单次最多拆出多少个子任务
-# - 默认 1000，表示用户层基本不限制；真实并发仍由 runner/scheduler 控制。
-# - 如果你明确想限制规模，可以改小，例如 20。
-max_subagents: 1000
-
-# status/startup 等轻量路径展示多少条子代理看板摘要；完整报告仍可读取详细记录。
-subagent_board_limit: 5
-
-# 子任务记录输出目录
-subagent_workspace: "data/subagents"
-
-# 子代理 runner 默认工具白名单：
-# - [] 表示自动：让角色模板、任务目标和 LLM/调度器共同判断工具。
-# - 用户一般不需要填；只有特别受限的测试环境才建议显式填工具名。
-subagent_allowed_tools: []
-
-# 子代理角色模板目录：
-# - [] 表示自动使用工作区 .agent/subagents/roles（如果存在）+ 内置模板。
-# - 用户要新增角色模板时，优先放到 .agent/subagents/roles/*.json。
-subagent_role_template_dirs: []
-
-# Subagent Workflow 工作流开关（第一阶段配置骨架）：
-# - auto: 由主代理按任务复杂度自动选择是否套用工作流模板。
-# - manual: 只在用户或上层调度明确指定时使用工作流。
-# - off: 关闭工作流选择与模板套用，只保留普通 subagent 能力。
-subagent_workflow_mode: "auto"
-
-# 是否启用内置工作流模板；关闭后只会考虑用户模板目录。
-subagent_builtin_workflows: true
-
-# 用户自定义工作流模板目录；可配置多个目录，按列表顺序扫描。
-subagent_user_workflow_dirs:
-  - ".agent/workflows/user"
-
-# 工作流结果复核轮数上限；0 表示不额外复核，默认保持保守。
-subagent_workflow_review_rounds: 1
-
-# 任务规模策略（用户层）：
-# - 这是你和主代理聊天时“最多开多少子代理/孙代理”的默认边界。
-# - 0 表示不设硬上限，让主代理按任务复杂度决定；如果用户在聊天里明确说“最多 20 个子代理”，那条任务可以覆盖这里。
-# - 这些是任务规模，不是模型调用并发。并发由下面 scheduler/runner 策略控制。
-task_max_subagents: 0
-task_max_grandchildren: 0
-
-# 子代理运行默认值：
-# - 这些是 CLI 和内部调度的默认数量/摘要长度，不是用户需求的硬规则。
-# - 0 通常表示不限制或交给上层决策；具体含义以旁边注释为准。
-subagent_spawn_default_count: 3
-subagent_cli_default_limit: 20
-subagent_probe_default_limit: 20
-subagent_hierarchy_default_max_depth: 2
-subagent_hierarchy_recovery_max_nodes: 200
-subagent_hierarchy_max_children_per_tool_call: 2
-subagent_descendant_scan_limit: 128
-# 同一失败任务连续 takeover 的最大深度；超过后阻塞并上报，防止 1 个挂死任务扩成一串新代理。
-subagent_takeover_chain_max_depth: 2
-subagent_context_summary_inline_json_chars: 900
-subagent_context_summary_inline_text_chars: 500
 
 # 父级验收是否默认真实执行 runner 输出里的 tests：
 # - false: 保守默认，只检查 runner 填写的 tests 字段和证据，不自动跑命令。

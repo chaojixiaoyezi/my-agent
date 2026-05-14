@@ -45,6 +45,7 @@ def _planner_and_workflow_records(agent, ctx) -> list:
                     ctx.normalized_workflow_mode,
                     ctx.limit,
                     ctx.apply,
+                    override_task_off=True,
                 )
             )
         )

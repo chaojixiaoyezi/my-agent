@@ -1230,3 +1230,14 @@
   - coordinator 验收可使用后代 evidence，不再要求队长亲手写产物。
   - 工具已经成功但最终模型总结为空时，按本地任务状态收口，不让 CLI 崩掉。
 - 下一步：第 4 阶段失败恢复测试，重点覆盖 provider timeout、runner 失败、packet-first 恢复、takeover 和 no-progress fuse。
+
+## 2026-05-15 子代理硬化迁移第一片：少配置、强任务包、默认有手脚
+- 中文说明：这轮开始按 Codex/OpenClaw/Hermes 的成熟思路收敛子代理：结构化任务包优先，角色只追加职责，不再用一堆用户配置和流程限制把子代理变成脆弱的小工具。
+- 已调整默认配置：`agent_config.yaml` 里只保留 8 个用户可见子代理项：`enable_subagents`、`subagent_mode`、`max_subagents`、`subagent_workspace`、`subagent_role_template_dirs`、`subagent_debug_trace_level`、`acceptance_execute_tests`、`acceptance_test_timeout_seconds`。旧字段仍保留代码兼容，但不继续暴露给普通用户。
+- 已调整角色契约：worker、coordinator、tester、bug_finder、acceptor、reporter/checker 和用户自定义模板都会叠加基础读写、报告和任务目录工作能力；角色模板表达“做什么”，不表达“没手没脚”。
+- 已调整 root 能力边界：root 没有上级，runner execution context 不再展示 `capability_request`，避免 root 自己写 OPEN request 卡住；普通 child/leaf 仍保留向父级申请能力的通道。
+- 已新增结构化任务包：`context_bundle.task_packet` 固定 role、goal、file_contract、write_contract、tool_contract 和 workspace refs；runner prompt 明确要求优先按 task packet 执行，不从摘要里重新猜路径或工具名。
+- 已增强工具协议容错：标准 JSON 工具调用也会归一 `write -> write_file`、`read -> read_file`、`file_path -> path` 等稳定别名；如果 `path` 和 `file_path` 同时出现且不同，会明确报错，避免静默写错文件。
+- 已新增迁移文档：`09-hardening-migration.md` 记录参考项目经验、24 步迁移顺序和 15 组测试。
+- 已测试：focused tests 覆盖配置瘦身、角色默认工具、root capability 隐藏、context task packet、JSON 工具别名归一；相关 ruff passed。
+- 下一步：继续做 dispatcher/scheduler 的 typed packet 优先读取和 QA/验收后置策略，减少自然语言误传和空转角色。

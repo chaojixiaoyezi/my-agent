@@ -86,15 +86,17 @@ def test_create_run_applies_reporter_contract(tmp_path):
     assert task.quality_contract.parent_final_gate is True
 
 
-# LLM: test_create_run_applies_checker_contract keeps checker read-only and parent-gated by default.
-# 函数用途: 创建 checker 任务时自动补只读工具边界和不能自验收的质量合同。
+# LLM: test_create_run_applies_checker_contract keeps checker capable and parent-gated by default.
+# 函数用途: 创建 checker 任务时保留基础读写/报告能力，但最终验收仍由父级门决定。
 def test_create_run_applies_checker_contract(tmp_path):
     manager = SubAgentManager(tmp_path)
 
     task = manager.create_run(goal="verify evidence", thought="check only", plan=["inspect"], role="reviewer")
 
     assert task.role == CHECKER_ROLE
-    assert task.allowed_tools == ["list_files", "read_file", "search_text", "read_artifact"]
+    assert "read_file" in task.allowed_tools
+    assert "write_file" in task.allowed_tools
+    assert "replace_in_file" in task.allowed_tools
     assert task.quality_contract.final_judge == "parent_final_gate"
     assert task.quality_contract.cannot_self_accept is True
     assert task.quality_contract.parent_final_gate is True
@@ -122,4 +124,6 @@ def test_hierarchy_scheduler_applies_role_contracts_to_children(tmp_path):
     checker = manager.load(result.created_run_ids[1])
     assert reporter.role == REPORTER_ROLE
     assert checker.role == CHECKER_ROLE
-    assert checker.allowed_tools == ["list_files", "read_file", "search_text", "read_artifact"]
+    assert "read_file" in checker.allowed_tools
+    assert "write_file" in checker.allowed_tools
+    assert "replace_in_file" in checker.allowed_tools

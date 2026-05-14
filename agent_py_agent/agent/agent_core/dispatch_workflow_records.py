@@ -16,7 +16,7 @@ def build_workflow_records(params: WorkflowRecordParams):
         for task in params.tasks
         if not task.parent_id
         and not task.workflow_parent_run_id
-        and _task_allows_dispatch_workflow(task)
+        and _task_allows_dispatch_workflow(task, params.override_task_off)
         and task.status not in {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
     ]
     if params.limit > 0:
@@ -28,9 +28,11 @@ def build_workflow_records(params: WorkflowRecordParams):
     return records
 
 
-# LLM: _task_allows_dispatch_workflow respects per-task off decisions made at create time.
-# 函数用途: 明确单文件 worker 等任务创建时已关闭 workflow，后续顶层 dispatch 不应再按全局 auto 重新套流程。
-def _task_allows_dispatch_workflow(task) -> bool:
+# LLM: _task_allows_dispatch_workflow separates per-task off from explicit dispatch overrides.
+# 函数用途: 普通构建记录尊重任务自己的 workflow=off；CLI/dispatch 明确传 plan/auto 时可覆盖默认 off。
+def _task_allows_dispatch_workflow(task, override_task_off: bool = False) -> bool:
+    if override_task_off:
+        return True
     return str(getattr(task, "workflow_mode", "") or "").strip().lower() != "off"
 
 
