@@ -98,3 +98,41 @@
 - 已加固：`dispatch_subagents` 验收记录以父级真实 tests/follow-up 为准。测试失败、测试为空但需要 rescue、或 follow-up 指向 `plan_rescue` 时，dispatch record、aggregate report 和单 run `acceptance_review.json` 都写 `REJECT`，不再混入“验收通过”。
 - 已加固：refs-only 委托期不只挡 `read_file/read_artifact`，也挡 `run_command` 里的 `cat/tail/head/sed/rg` 等产物正文读取；控制面元数据仍可读，避免恢复和调度卡死。
 - 真实复验：`subagent_hardening_e2e_20260515_step24d` 通过，root 自然语言派工，1 个小傻妞 worker 写出家具网站首页，最终 `done_verified=1`。
+
+## Group 3 Parallel Natural E2E Pre-Fixes
+
+- 中文说明：三文件家具站测试暴露的是调度和工具层问题，不是用户提示词问题。主代理能自然派 3 个小傻妞，但 `auto` 并发退成了 1；长 HTML 内容已经作为合法工具参数到达，工具却硬拒，迫使模型反复重试。
+- 调度修正：`runner_concurrency: "auto"` 改为内部有界并发，按任务数并发但最多 8 个，避免普通 fan-out 被静默串行化。
+- 写入修正：`tool_write_inline_max_chars` 只作为推荐运输尺寸。内容已经被工具解析出来时，先写入，再提示后续大内容建议分块或 artifact 化。
+- 迁移原则：这些都不新增用户可见配置；默认行为应该更接近主代理正常干活，而不是要求用户调一堆细碎参数。
+
+## Group 3b Acceptance Repair Pre-Fix
+
+- 中文说明：验收器不能把模型带偏。安全可选 DOM 钩子不应触发硬修复；坏掉的完整 HTML 骨架必须优先暴露出来。
+- 已调整：自动推断的 `static_site_check` 会设置 `require_complete_html=true`，并报告 `html_structure_hits`。
+- 已调整：`getElementById` 的可选保护用法不会再被误报为缺失 DOM id。
+- 已调整：dispatch payload 带 `repair_hints`，让父级派修复时有“先修骨架/再修控件”的明确方向。
+
+## Group 3c Negative Acceptance Pre-Fix
+
+- 中文说明：自然语言验收里的否定词必须被结构化理解。`无 index4.html 引用` 代表 `not_contains(index4.html)`，不能被执行成 positive contains。
+- 已调整：`content_check` 支持 `match_mode=not_contains`、`expect_absent`、`negate` 和 `should_not_contain`。
+- 已调整：当测试名里有“无/不包含/不得出现/must not contain”等否定语境，并且包含待匹配 pattern 时，执行器会自动采用 absent 语义。
+
+## Group 3d Closeout Semantics Pre-Fix
+
+- 中文说明：子代理恢复链路不能被旧状态拖死。旧 worker 被 takeover 后，如果接管者已经 DONE/VERIFIED，旧 worker 应该显示为被覆盖，而不是继续当 blocker。
+- 已调整：dispatch final/limit closeout 使用 `DONE/VERIFIED` 或 `TAKEN_OVER -> verified replacement` 作为 resolved 判定。
+- 已调整：模型写出的“无空 href”这类负向证据，如果 `ok=false` 表示坏模式没有命中，会在结构化结果入口规范成“需求通过”。
+- 已调整：真实执行 dispatch 时，`limit` 可作为 `max_runners` 的模型友好别名，减少父级因为字段名不熟而意外串行。
+- 迁移原则：继续把专业字段变成容错的机器接口，不让小白用户或父级 LLM 被内部字段名绊倒。
+
+## Group 3e-3g Board And Target Semantics Pre-Fix
+
+- 中文说明：看板、收口和文件合同必须共用同一种机器事实。父级不能从自然语言摘要里猜“哪个 HTML 修好了”，也不能因为旧失败 run 还在 task.json 里就永远不收口。
+- 已调整：`无/没有/不存在 xxx 引用` 进入缺席/禁止语义，不再污染 `required_files`。
+- 已调整：看板 payload 顶层给 `completion_status`，包括 `must_not_report_done`、`blocking_run_ids` 和建议继续 dispatch 的结构化调用。
+- 已调整：`target_tokens` 成为 board row 的 refs-only 字段；父级可以知道 run 关联的具体产物名，但不读取产物正文。
+- 已调整：`task_actual_target_tokens()` 统一目标识别，优先结构化 `output.json` 和 `[SUBAGENT_RESULT]`，再回退自然语言 goal；英文引用词 `use/include/import/load/link to` 需要词边界，避免 `/Users/...` 被误切。
+- 已调整：最终 closeout 和 board completion 都接受“旧失败/待验收 run 的目标文件已被后续 DONE/VERIFIED sibling 覆盖”这一事实，避免重复修和假阻塞。
+- 迁移原则：把事实从 prompt 里抽出来，放到 typed refs 和目标 token；prompt 可以自然，状态机必须稳定。

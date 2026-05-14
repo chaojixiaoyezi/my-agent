@@ -14,15 +14,26 @@ from unittest.mock import MagicMock
 def _board_item(run_id: str, status: str):
     item = MagicMock()
     item.id = run_id
+    item.root_id = run_id
+    item.parent_id = ""
+    item.depth = 0
+    item.agent_name = "小傻妞-worker"
+    item.role = "worker"
     item.goal = "测试"
     item.status = status
     item.verification_status = "UNVERIFIED"
     item.channel_status = "UNKNOWN"
     item.risk_flags = []
     item.evidence_count = 0
+    item.child_count = 0
+    item.child_status_counts = {}
     item.open_request_count = 0
     item.open_gap_count = 0
+    item.latest_summary = ""
+    item.blocker_count = 0
+    item.target_tokens = []
     item.task_dir = f"/tmp/{run_id}"
+    item.output_json = f"/tmp/{run_id}/output.json"
     return item
 
 
@@ -43,3 +54,46 @@ def test_status_all_keeps_board_items():
     assert result.ok is True
     assert '"returned": 1' in result.output
     assert '"planning": [' in result.output
+
+
+# LLM: Board reads must tell the parent not to summarize incomplete child work as done.
+# 函数用途: AWAITING_ACCEPTANCE/NEEDS_ACCEPTANCE 看板条目要在顶层暴露阻塞 id 和建议 dispatch，不让模型看见文件就报完成。
+def test_board_payload_marks_awaiting_acceptance_as_not_complete():
+    from agent_py_agent.agent.agent_core.orchestration_tools import SubagentBoardTool
+
+    mock_agent = MagicMock()
+    mock_agent.subagents.workspace = Path("/tmp/workspace")
+    mock_board = MagicMock()
+    mock_board.summary = {"total": 1, "AWAITING_ACCEPTANCE": 1, "NEEDS_ACCEPTANCE": 1}
+    item = _board_item("run_1", "AWAITING_ACCEPTANCE")
+    item.verification_status = "NEEDS_ACCEPTANCE"
+    mock_board.items = [item]
+    mock_agent.subagents.write_board.return_value = mock_board
+
+    result = SubagentBoardTool(mock_agent).execute({"limit": 10})
+
+    assert result.ok is True
+    assert '"status": "not_complete"' in result.output
+    assert '"must_not_report_done": true' in result.output
+    assert '"blocking_run_ids": [' in result.output
+    assert '"run_1"' in result.output
+    assert '"tool": "dispatch_subagents"' in result.output
+
+
+# LLM: Board completion should match closeout when a verified repair covers stale failed work.
+# 函数用途: 后续 VERIFIED 产物已经覆盖旧失败 run 时，看板不能继续提示父级重修同一个文件。
+def test_board_payload_treats_verified_target_coverage_as_complete():
+    from agent_py_agent.agent.agent_core.orchestration_board_payload import board_completion_status
+
+    stale = _board_item("stale", "BLOCKED")
+    stale.verification_status = "UNVERIFIED"
+    stale.target_tokens = ["index1.html"]
+    repair = _board_item("repair", "DONE")
+    repair.verification_status = "VERIFIED"
+    repair.target_tokens = ["index1.html"]
+
+    status = board_completion_status([stale, repair])
+
+    assert status["status"] == "complete_or_no_blockers"
+    assert status["blocking_run_ids"] == []
+    assert status["must_not_report_done"] is False

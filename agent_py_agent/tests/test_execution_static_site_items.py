@@ -32,6 +32,7 @@ def test_prepare_items_infers_static_check_from_required_files_without_artifacts
             "validation_method": "static_site_check",
             "site_root": "artifacts",
             "required_files": ["index1.html", "index2.html"],
+            "require_complete_html": True,
         }
     ]
 
@@ -58,6 +59,7 @@ def test_prepare_items_scopes_static_check_to_observed_leaf_artifacts(tmp_path):
             "validation_method": "static_site_check",
             "site_root": "artifacts",
             "required_files": ["index1.html"],
+            "require_complete_html": True,
             "html_files": ["index1.html"],
         }
     ]

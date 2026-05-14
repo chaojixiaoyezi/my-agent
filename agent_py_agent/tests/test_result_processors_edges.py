@@ -71,6 +71,29 @@ def test_process_structured_output_records_evidence_packets_and_findings(mock_ta
     assert mock_task.artifact_refs == ["artifact://raw-1"]
 
 
+# LLM: negative content-check evidence must mean the requirement passed when the forbidden pattern is absent.
+# 函数用途: 覆盖模型常把“没有坏模式”写成 ok=false 的情况，避免父级验收误判修复失败。
+def test_process_structured_output_normalizes_absent_pattern_evidence(mock_task):
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        evidence=[{
+            "kind": "content_check",
+            "summary": "页脚链接无空 href=\"#\"",
+            "path": "/tmp/index.html",
+            "content_pattern": "<a href=\"#\">",
+            "ok": False,
+        }],
+    )
+
+    result = _process_structured_output(mock_task, parsed, 123456.0, None)
+
+    assert result["structured_evidence_count"] == 1
+    assert mock_task.evidence[0].ok is True
+
+
 def test_process_structured_output_synthesizes_artifact_evidence_packet(mock_task):
     """LLM: artifact-only runner outputs still become traceable parent-acceptance evidence."""
     parsed = SubAgentParsedOutput(

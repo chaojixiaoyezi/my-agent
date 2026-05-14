@@ -28,8 +28,8 @@ def test_static_site_failure_details_expose_concrete_inert_controls(tmp_path):
                         "validation_result": {
                             "ok": False,
                             "inert_control_hits": [
-                                "index2.html:a:Collection",
-                                "index2.html:a:Contact",
+                                "index2.html:a:Collection href=#",
+                                "index2.html:a:Contact href=#missing",
                             ],
                         },
                     }
@@ -46,5 +46,47 @@ def test_static_site_failure_details_expose_concrete_inert_controls(tmp_path):
         "inferred static site check: inert_control_hits=2"
     )
     assert payload["parent_acceptance_test_failure_details"] == [
-        "inert_control_hits: index2.html:a:Collection; index2.html:a:Contact",
+        "inert_control_hits: index2.html:a:Collection href=#; index2.html:a:Contact href=#missing",
+    ]
+
+
+# LLM: structure and repair hints should reach parent repair dispatch without reading page bodies.
+# 函数用途: HTML 骨架坏掉时，dispatch payload 要告诉父级先修完整结构，而不是只给失败数量。
+def test_static_site_failure_details_include_structure_and_repair_hints(tmp_path):
+    path = tmp_path / "test_execution.json"
+    path.write_text(
+        json.dumps(
+            {
+                "records": [
+                    {
+                        "test_name": "inferred static site check",
+                        "executed": True,
+                        "exit_code": 1,
+                        "error": "html_structure_hits=2",
+                        "validation_result": {
+                            "ok": False,
+                            "html_structure_hits": [
+                                "index1.html:head_close",
+                                "index1.html:unbalanced_style",
+                            ],
+                            "repair_hints": [
+                                "html_structure: repair or regenerate a complete HTML skeleton before DOM/id fixes"
+                            ],
+                        },
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    payload = acceptance_test_failure_payload(path)
+
+    assert payload["parent_acceptance_test_failure_summary"] == (
+        "inferred static site check: html_structure_hits=2"
+    )
+    assert payload["parent_acceptance_test_failure_details"] == [
+        "html_structure_hits: index1.html:head_close; index1.html:unbalanced_style",
+        "repair_hints: html_structure: repair or regenerate a complete HTML skeleton before DOM/id fixes",
     ]

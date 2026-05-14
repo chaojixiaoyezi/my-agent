@@ -41,6 +41,8 @@ CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES = {
     "write_permission_blocked",
 }
 
+DEFAULT_AUTO_RUNNER_CONCURRENCY = 8
+
 
 # LLM: role phase ordering trusts role/name identity before broad inherited goal prose.
 # 函数用途: 给 runner 角色分配执行阶段；coordinator 先拆任务，worker 产出，tester/找错随后检查，acceptor 最后验收。
@@ -135,16 +137,16 @@ def _resolve_runner_concurrency(value: object, job_count: int) -> int:
     if isinstance(value, str):
         normalized = value.strip().lower()
         if normalized in {"", "auto"}:
-            return 1
+            return min(job_count, DEFAULT_AUTO_RUNNER_CONCURRENCY)
         try:
             parsed = int(normalized)
         except ValueError:
-            return 1
+            return min(job_count, DEFAULT_AUTO_RUNNER_CONCURRENCY)
     else:
         try:
             parsed = int(value)
         except (TypeError, ValueError):
-            return 1
+            return min(job_count, DEFAULT_AUTO_RUNNER_CONCURRENCY)
     return max(1, min(parsed, job_count))
 
 

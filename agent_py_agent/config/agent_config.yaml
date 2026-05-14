@@ -391,8 +391,8 @@ tool_artifact_read_budget_max_chars: 240000
 # read_file 工具最多返回多少字符，避免单次结果太长
 tool_read_max_chars: 50000
 
-# write_file / append_file 单次 inline content 硬上限
-# 默认 12000；调大可以减少分块次数，但过大更容易让工具 JSON 被模型截断。
+# write_file / append_file 单次 inline content 推荐值
+# 默认 12000；超过推荐值的合法工具调用仍会落盘，但工具会提示后续改用分块，避免模型反复长写。
 tool_write_inline_max_chars: 12000
 
 # list_files 工具最多列出多少条结果

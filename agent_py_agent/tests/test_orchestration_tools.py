@@ -56,6 +56,7 @@ class TestSubagentBoardToolExecute:
         mock_item.open_gap_count = 0
         mock_item.latest_summary = ""
         mock_item.blocker_count = 0
+        mock_item.target_tokens = []
         mock_item.task_dir = "/tmp/item"
         mock_item.output_json = "/tmp/item/output.json"
         mock_board.items = [mock_item]
@@ -93,6 +94,7 @@ class TestSubagentBoardToolExecute:
         mock_item.open_gap_count = 0
         mock_item.latest_summary = ""
         mock_item.blocker_count = 0
+        mock_item.target_tokens = []
         mock_item.task_dir = "/tmp"
         mock_item.output_json = "/tmp/output.json"
 

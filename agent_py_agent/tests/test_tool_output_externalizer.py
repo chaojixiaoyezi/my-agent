@@ -220,8 +220,8 @@ def test_tool_loop_enters_long_content_recovery_after_truncated_write_parse_erro
     assert "site/app.js" in live_context
 
 
-# LLM: write-tool rejections should trigger the same reusable recovery mode as parser failures.
-# 函数用途: 验证 inline content 被硬上限拒绝后，下一轮 prompt 会明确要求小块追加，避免模型原样重试。
+# LLM: write-tool long-content failures should trigger the same reusable recovery mode as parser failures.
+# 函数用途: 验证长 content 写入失败后，下一轮 prompt 会明确要求小块追加，避免模型原样重试。
 def test_tool_loop_enters_long_content_recovery_after_inline_write_rejection(
     tmp_path: Path,
 ) -> None:
@@ -229,8 +229,8 @@ def test_tool_loop_enters_long_content_recovery_after_inline_write_rejection(
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
     rejected_chars = MAX_INLINE_WRITE_CONTENT_CHARS + 500
     output = (
-        f"write_file.content inline content 过长：{rejected_chars} 字符，"
-        f"最多 {MAX_INLINE_WRITE_CONTENT_CHARS} 字符。 path=site/app.css\n"
+        f"write_file.content inline content 超过推荐值：{rejected_chars} 字符，"
+        f"推荐最多 {MAX_INLINE_WRITE_CONTENT_CHARS} 字符。 path=site/app.css\n"
         "请先用 write_file 写短骨架，再用 append_file 分块追加。"
     )
 

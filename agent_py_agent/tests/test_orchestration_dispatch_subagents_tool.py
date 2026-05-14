@@ -295,6 +295,34 @@ class TestDispatchSubagentsToolRunnerContext:
         assert call_kwargs["params"].exclude_run_ids == ["subagent-root"]
         assert call_kwargs["params"].finalize_acceptance is True
 
+    def test_execute_limit_aliases_runner_count_when_max_runners_missing(self):
+        """真实执行时，模型只写 limit 也应按 runner 数量推进，避免误退回单线程。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        mock_report = MagicMock()
+        mock_report.dry_run = False
+        mock_report.summary = {"runner": 3}
+        mock_report.records = []
+
+        mock_agent = MagicMock()
+        mock_agent._current_subagent_run_id = ""
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent.tools.specs.return_value = []
+        mock_agent.dispatch_subagents.return_value = mock_report
+        mock_agent.subagents.workspace = Path("/tmp/workspace")
+        mock_agent.subagents.list_runs.return_value = []
+
+        result = DispatchSubagentsTool(mock_agent).execute({
+            "apply": True,
+            "execute_runners": True,
+            "limit": 10,
+        })
+
+        assert result.ok is True
+        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
+        assert call_kwargs["params"].max_runners == 10
+        assert call_kwargs["params"].limit == 10
+
     def test_nested_dispatch_excludes_active_ancestors(self):
         """孙级 dispatch 不应把仍在执行的父级/祖父级误判成可接管目标。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool

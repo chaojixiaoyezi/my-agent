@@ -64,9 +64,13 @@ def dispatch_auto_apply_acceptance_followup_default(
 
 # LLM: dispatch_max_runners_default prevents runner-context parents from advancing only one child and timing out.
 # 函数用途: 顶层默认每轮 1 个 runner；runner 内部默认推进最多 6 个直接 child，显式参数优先。
-def dispatch_max_runners_default(agent, params: dict[str, object]) -> int:
+def dispatch_max_runners_default(agent, params: dict[str, object], *, execute_runners: bool | None = None) -> int:
     if "max_runners" in params:
         return _non_negative_int(params.get("max_runners"), default=1)
+    if "runner_limit" in params:
+        return _non_negative_int(params.get("runner_limit"), default=1)
+    if execute_runners and "limit" in params:
+        return _non_negative_int(params.get("limit"), default=1)
     if current_subagent_run_id(agent):
         return 6
     return 1

@@ -96,10 +96,13 @@ class WriteFileTool(FileSystemTool):
         target.parent.mkdir(parents=True, exist_ok=True)
         target = self.resolve_path(target)
         target.write_text(content, encoding="utf-8")
+        output = f"已写入文件: {self.display_path(target)}"
+        if content_policy.message:
+            output = f"{output}\n{content_policy.message}"
         return ToolExecutionResult(
             "write_file",
             True,
-            f"已写入文件: {self.display_path(target)}",
+            output,
         )
 
 
@@ -167,10 +170,13 @@ class AppendFileTool(FileSystemTool):
         target = self.resolve_path(target)
         with target.open("a", encoding="utf-8") as file:
             file.write(content)
+        output = f"已追加文件: {self.display_path(target)}"
+        if content_policy.message:
+            output = f"{output}\n{content_policy.message}"
         return ToolExecutionResult(
             "append_file",
             True,
-            f"已追加文件: {self.display_path(target)}",
+            output,
         )
 
 

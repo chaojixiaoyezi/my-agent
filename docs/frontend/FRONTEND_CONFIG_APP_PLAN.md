@@ -260,12 +260,12 @@ type ConfigSchema = {
 ```typescript
 const toolWriteInlineMaxChars: ConfigField = {
   key: "tool_write_inline_max_chars",
-  label: "写文件单次内联字符上限",
+  label: "写文件内联推荐字符数",
   description:
-    "控制 write_file / append_file 单次 inline content 的最大字符数。" +
-    "调大可以减少 append_file 的分块次数，但过大可能导致模型输出的工具 JSON 被截断。" +
+    "控制 write_file / append_file 单次 inline content 的推荐字符数。" +
+    "超过该值的合法工具调用仍会写入文件，但会提示模型后续改用分块，避免反复输出超长 JSON。" +
     "建议根据模型上下文窗口和工具调用稳定性调整。",
-  shortDescription: "write_file / append_file 单次 inline content 字符上限",
+  shortDescription: "write_file / append_file 单次 inline content 推荐值",
   type: "number",
   defaultValue: 12000,
   min: 100,
@@ -1594,10 +1594,10 @@ const configSchemaExample: ConfigSchema = {
         },
         {
           key: "tool_write_inline_max_chars",
-          label: "写文件单次内联字符上限",
+          label: "写文件内联推荐字符数",
           description:
-            "控制 write_file / append_file 单次 inline content 的最大字符数。调大可以减少 append_file 的分块次数，但过大可能导致模型输出的工具 JSON 被截断。",
-          shortDescription: "write_file / append_file 单次 inline content 字符上限",
+            "控制 write_file / append_file 单次 inline content 的推荐字符数。超过该值的合法工具调用仍会写入文件，但会提示模型后续改用分块，避免反复输出超长 JSON。",
+          shortDescription: "write_file / append_file 单次 inline content 推荐值",
           type: "number",
           defaultValue: 12000,
           min: 100,

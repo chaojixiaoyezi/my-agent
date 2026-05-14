@@ -19,6 +19,8 @@ _NEGATIVE_HINTS = (
     "不生成",
     "不产出",
     "不包含",
+    "没有",
+    "不存在",
     "勿",
     "无",
     "do not",
@@ -35,7 +37,11 @@ _NEGATIVE_TARGET_RE = re.compile(
     re.IGNORECASE,
 )
 _BARE_NEGATIVE_TARGET_RE = re.compile(
-    r"(?:^|[\s：:，,、])(?:禁止(?:改名|文件名|文件|创建|生成|产出|写入|写)?|不允许|不要|不能|不得|勿|do not|don't|must not)\s*[：:]?\s*$",
+    r"(?:^|[\s：:，,、])(?:禁止(?:改名|文件名|文件|创建|生成|产出|写入|写)?|不允许|不要|不能|不得|勿|没有|不存在|无(?:任何)?|do not|don't|must not|no)\s*[：:]?\s*$",
+    re.IGNORECASE,
+)
+_NEGATIVE_AFTER_FILE_RE = re.compile(
+    r"^\s*(?:引用|链接|跳转|依赖|包含|出现|存在|refs?|references?|links?)\b",
     re.IGNORECASE,
 )
 _NEGATIVE_LABEL_RE = re.compile(
@@ -210,7 +216,20 @@ def _is_negative_target(segment: str, start: int) -> bool:
     bare_negative = bool(_BARE_NEGATIVE_TARGET_RE.search(window))
     if bare_negative and not target_negative and _is_location_rule_source(segment, start):
         return False
-    return target_negative or bare_negative
+    return target_negative or bare_negative or _is_absent_reference_target(segment, start)
+
+
+# LLM: _is_absent_reference_target handles natural acceptance like “无 index4.html 引用”.
+# 函数用途: 识别“没有/不存在/无 xxx.html 引用”这种反向验收，避免把应消失的文件名当成必需产物。
+def _is_absent_reference_target(segment: str, start: int) -> bool:
+    before = segment[:start].lower()
+    if not any(hint in before[-32:] for hint in ("无", "没有", "不存在", "no", "without")):
+        return False
+    after = segment[start:]
+    match = _FILE_LIKE_RE.match(after)
+    if not match:
+        return False
+    return bool(_NEGATIVE_AFTER_FILE_RE.search(after[match.end() :]))
 
 
 # LLM: _is_location_rule_source keeps "do not place style.css under css/" from forbidding style.css itself.

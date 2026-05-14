@@ -11,9 +11,11 @@ _DETAIL_KEYS = (
     "missing_required_files",
     "placeholder_hits",
     "broken_local_refs",
+    "html_structure_hits",
     "inert_control_hits",
     "form_binding_hits",
     "missing_dom_id_hits",
+    "repair_hints",
 )
 _MAX_DETAIL_ITEMS = 8
 _MAX_DETAIL_CHARS = 260

@@ -365,7 +365,7 @@ python3 -m agent_py_agent adapter file --watch
 python3 -m agent_py_agent daemon
 ```
 
-`daemon` 默认读取 `agent_config.yaml` 里的 `daemon_*` 配置。用户层任务规模用 `task_max_subagents=0` / `task_max_grandchildren=0` 表示不设硬上限；未来 gateway 的并发、超时和启动速率先写成 `auto`。当前前台 daemon 里，`daemon_max_runners: "auto"` 会映射成保守值 1，`daemon_max_cycles=0` 表示持续运行，`daemon_limit=0` 表示不限制记录条数。
+`daemon` 默认读取 `agent_config.yaml` 里的 `daemon_*` 配置。用户层任务规模用 `task_max_subagents=0` / `task_max_grandchildren=0` 表示不设硬上限；runner 并发、超时和启动速率默认走 `auto`。当前 `runner_concurrency: "auto"` 会按待运行任务数自动并发，并受内部安全上限约束；`daemon_max_cycles=0` 表示持续运行，`daemon_limit=0` 表示不限制记录条数。
 
 父代理 LLM planner 常驻循环：
 

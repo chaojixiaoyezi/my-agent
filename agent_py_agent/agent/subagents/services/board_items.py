@@ -9,6 +9,7 @@ from typing import Any
 
 from ..models import SubAgentBoardOptions, SubAgentTask
 from ..reports import SubAgentBoardItem
+from .hierarchy_leaf_targets import task_actual_target_tokens
 
 
 # LLM: build_risk_flags derives board warnings from task state without mutating the task.
@@ -21,6 +22,10 @@ def build_risk_flags(
     flags: list[str] = []
     if task.status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
         flags.append(task.status.lower())
+    if task.status == "AWAITING_ACCEPTANCE":
+        flags.append("awaiting_acceptance")
+    if task.verification_status == "NEEDS_ACCEPTANCE":
+        flags.append("needs_acceptance")
     if task.status == "DONE" and not task.evidence:
         flags.append("done_without_evidence")
     if task.status == "DONE" and task.verification_status != "VERIFIED":
@@ -152,6 +157,7 @@ def _board_item_payload(
         "risk_flags": build_risk_flags(task, open_request_count, open_gap_count),
         "task_dir": task.task_dir,
         "output_json": task.output_json,
+        "target_tokens": sorted(task_actual_target_tokens(task))[:20],
     }
 
 
