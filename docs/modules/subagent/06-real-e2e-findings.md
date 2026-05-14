@@ -5705,3 +5705,65 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Real model smoke:
     - `test_scenario_real_model_recovery_smoke` passed after the fix.
 - Status: fixed.
+
+### Finding 44: Parent Planner Could Inherit Root Context And Use The Wrong Result Marker
+
+- Symptom:
+  - Typed protocol E2E passed worker dispatch and verification, but parent planner report logged one `parse_error`。
+  - The model returned a valid parent-planner JSON payload, but wrapped it in `[SUBAGENT_RESULT] ... [/SUBAGENT_RESULT]` instead of `[PARENT_PLANNER_RESULT] ... [/PARENT_PLANNER_RESULT]`。
+- 中文解释：
+  - 大白话：父级调度员本来应该用“父级调度结果单”，但它看到了太多普通主代理和子代理协议说明，最后拿错了表格。
+- Root cause:
+  - Parent planner internally called the normal root `run(...)` path.
+  - That path injected owner memory, home files, dynamic prompt files, auto recovery context, and unrelated protocol examples.
+  - The control-plane planner prompt was therefore polluted by normal conversation / runner context.
+- Reference comparison:
+  - Hermes keeps tool calls and structured content behind schema/registry boundaries, and normalizes model mistakes at the boundary.
+  - OpenClaw uses schema/registry-style parsing and sandbox boundaries rather than relying on free-form natural-language reminders.
+  - No local Codex source copy was present under `~/Downloads`; the applicable Codex-style lesson is still the same: isolate control-plane calls and parse typed payloads at the protocol boundary.
+- Fix:
+  - Parent planner now runs with a dedicated `PARENT_PLANNER_SYSTEM_PROMPT` and `context_scope="control_plane"`。
+  - `control_plane` suppresses owner memory, home files, configured prompt files, memory routing, and auto-resume injection, just like task-local isolation.
+  - Parser adds a narrow compatibility fallback: if the block marker is `[SUBAGENT_RESULT]` but the JSON is clearly parent-planner-shaped (`decision/should_dispatch/actions`) and not runner-shaped (`status/used_tools`), it can still recover.
+  - Normal subagent results are still rejected by the parent planner parser.
+- Verification:
+  - Focused tests:
+    - `test_parent_planner_parser_recovers_schema_matching_alias_marker`
+    - `test_parent_planner_parser_rejects_plain_subagent_result_alias`
+    - `test_control_plane_context_suppresses_owner_memory_and_home_files`
+    - parent-planner dispatch test now asserts the dedicated planner system prompt is used.
+- Status: fixed by focused tests; real E2E rerun should confirm the parent planner parse_error disappears.
+
+### Finding 45: Parent Planner Tool Loop Was Too Slow For E2E Dispatch
+
+- Symptom:
+  - After Finding 44, parent planner marker parsing was fixed, but real E2E could still spend minutes inside parent planner.
+  - In one run, parent planner returned `ok=1 / DISPATCH=1 / parse_error=""`, but used 8 model/tool rounds before producing the decision.
+  - A single-worker rerun showed the same pattern: the run directory had only `parent_planner_prompt.md` for a long time, meaning dispatch was waiting on planner's model turn.
+- 中文解释：
+  - 大白话：调度员本来只是看一张状态表然后决定“派谁干活”，结果它自己跑去翻文件、读状态、绕了很多圈。这样调度层会变成新的慢点。
+- Root cause:
+  - Parent planner still had read-only tools available.
+  - The prompt said it could use read tools to verify state, so the real model sometimes chose tool loops instead of one-shot decision.
+  - For parent planner, the already-built State Snapshot is the authoritative control-plane input; extra read tools are not needed for the normal dispatch path.
+- Reference comparison:
+  - Hermes/OpenClaw both separate runtime execution from structured control/registry boundaries.
+  - Mature pattern: control-plane decisions should consume precomputed structured state and return a schema-shaped decision, while separate worker/tool stages do the expensive file reads.
+- Fix:
+  - Parent planner now runs with `allowed_tools=[]`.
+  - Planner system prompt and planner task prompt now explicitly say tools are unavailable and State Snapshot is the only fact source.
+  - Existing `PARENT_PLANNER_READ_TOOLS` remains as a legacy/exported constant, but the active parent planner path is tool-less.
+- Verification:
+  - Focused test asserts parent planner prompt uses the dedicated planner system prompt and has no authorized tools.
+  - Real E2E single-worker happy path:
+    - `SCENARIO_PASS`
+    - parent planner: `ok=True / decision=DISPATCH / tool_rounds=0 / parse_error=""`
+    - runner completed `read_file` + `write_file`
+    - acceptance passed; final board `DONE=1 / VERIFIED=1 / channel_OK=1`
+  - Real E2E three-worker happy path:
+    - `SCENARIO_PASS`
+    - parent planner: `ok=True / DISPATCH / tool_rounds=0 / parse_error=""`
+    - 3 runners completed `read_file` + `write_file`
+    - acceptance passed for all 3; final board `DONE=3 / VERIFIED=3 / channel_OK=3`
+    - `runner_instruction/ignore_multi_runner_instruction` remained an expected guard, preventing shared per-run instructions from leaking across multiple selected runners.
+- Status: fixed and verified by focused tests plus single-worker and three-worker real E2E.

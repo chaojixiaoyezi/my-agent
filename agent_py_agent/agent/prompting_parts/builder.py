@@ -178,11 +178,11 @@ def _memory_text(memories: list[MemoryRecord]) -> str:
 
 
 # LLM: _dynamic_prompt_text centralizes prompt-file and home-context injection rules.
-# 函数用途: task_local 禁止读取主家目录；普通 root 运行读取配置 prompt 和匹配 lesson。
-def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, task_local: bool) -> str:
+# 函数用途: 隔离上下文禁止读取主家目录；普通 root 运行读取配置 prompt 和匹配 lesson。
+def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, isolated: bool) -> str:
     chunks = [
-        *builder.read_prompt_files(request.prompt_files, include_config=not task_local),
-        *([] if task_local else builder.read_home_context(request.user_prompt)),
+        *builder.read_prompt_files(request.prompt_files, include_config=not isolated),
+        *([] if isolated else builder.read_home_context(request.user_prompt)),
     ]
     return "\n".join(chunks)
 
@@ -203,10 +203,10 @@ def _task_and_transcript_section(user_prompt: str, tool_context: list[str]) -> s
     )
 
 
-# LLM: _is_task_local_context is the prompt-layer boundary between owner memory and subagent workspaces.
-# 函数用途: 判断本轮 prompt 是否只允许任务本地上下文，避免子代理看到主代理长期记忆和家目录制度。
+# LLM: _is_task_local_context is the prompt-layer boundary between owner memory and isolated workspaces.
+# 函数用途: 判断本轮 prompt 是否只允许隔离上下文，避免子代理或控制面调用看到主代理长期记忆和家目录制度。
 def _is_task_local_context(value: object) -> bool:
-    return str(value or "").strip().lower() == "task_local"
+    return str(value or "").strip().lower() in {"task_local", "control_plane"}
 
 
 # LLM: _home_entry_context_chunks loads stable owner entry files with AGENTS.md first as the boot contract.

@@ -49,6 +49,36 @@ def test_parent_planner_parser_reads_structured_result():
     assert parsed.risks == ["api_budget"]
 
 
+def test_parent_planner_parser_recovers_schema_matching_alias_marker():
+    """LLM: Parent planner parser tolerates a marker-only alias when the payload is planner-shaped."""
+    parsed = parse_parent_planner_output(
+        "[SUBAGENT_RESULT]\n"
+        "{\n"
+        '  "decision": "DISPATCH",\n'
+        '  "summary": "marker alias but planner schema",\n'
+        '  "should_dispatch": true,\n'
+        '  "actions": [{"action": "execute_runner", "run_id": "r1"}]\n'
+        "}\n"
+        "[/SUBAGENT_RESULT]"
+    )
+
+    assert parsed.found
+    assert parsed.ok
+    assert parsed.decision == "DISPATCH"
+    assert parsed.actions[0]["run_id"] == "r1"
+
+
+def test_parent_planner_parser_rejects_plain_subagent_result_alias():
+    """LLM: Alias recovery must not turn normal runner results into parent planner decisions."""
+    parsed = parse_parent_planner_output(
+        "[SUBAGENT_RESULT]\n"
+        '{"status": "AWAITING_ACCEPTANCE", "summary": "worker done", "used_tools": []}\n'
+        "[/SUBAGENT_RESULT]"
+    )
+
+    assert not parsed.found
+
+
 def test_subagent_dispatch_parent_planner_runs_when_gate_has_work():
     """LLM: Verifies parent planner runs dispatch when there are active tasks in the gate."""
     with tempfile.TemporaryDirectory() as td:
@@ -74,6 +104,8 @@ def test_subagent_dispatch_parent_planner_runs_when_gate_has_work():
         )
 
         assert len(backend.prompts) == 1
+        assert "你是 my-agent 的父级调度 planner" in backend.prompts[0]
+        assert "当前执行上下文没有授权任何工具" in backend.prompts[0]
         assert any(item.step == "parent_planner" and item.ok for item in report.records)
         assert any(item.step == "runner" and item.action == "runner_dry_run" for item in report.records)
         planner_record = next(item for item in report.records if item.step == "parent_planner")

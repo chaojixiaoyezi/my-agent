@@ -1194,3 +1194,15 @@
 - 架构整理：新增 `agent_core/runtime_loop_models.py`，运行循环参数模型从主编排文件拆出；新增 `tooling/filesystem_structured_read.py`，结构化读取策略从 `read_file` 主实现拆出；strict code-size 当前 `hard=0 high-risk=0 soft=0`。
 - 遗留：真实“一个子代理模型会话内连续 4+ 次 compact 并自动续跑直到完成”还需要在瘦身后再跑一次长专项；当前真实 E2E 已证明 task-local 进度、continue packet、session compact refs 和父级验收主链路可用。
 - 下一步：继续专项 12 长任务复跑，重点观察 4+ child-local compact 后是否不重复章节、ledger 不再重复膨胀、root 不直接干预下层。
+
+## 2026-05-14 typed protocol E2E：父级 planner 控制面隔离
+- 中文说明：真实 E2E 暴露父级 planner 曾经继承 root/子代理协议上下文，偶发把 `[PARENT_PLANNER_RESULT]` 写成 `[SUBAGENT_RESULT]`，以及父级 planner 用只读工具绕多轮导致调度变慢。
+- 已修正：
+  - parent planner 使用专用 `PARENT_PLANNER_SYSTEM_PROMPT`，并以 `context_scope="control_plane"` 运行；不会读取主代理长期 memory、家目录、配置 prompt files、memory routing 或 auto-resume。
+  - parent planner 正常路径改成 tool-less 控制面调用，只消费 State Snapshot，一次性返回结构化调度决定。
+  - parent planner parser 增加窄容错：只有 JSON 同时像 parent planner schema，且不是 runner result schema 时，才允许从误用的 `[SUBAGENT_RESULT]` marker 恢复。
+- 已测试：
+  - Focused tests 覆盖 control-plane prompt 隔离、planner marker alias 恢复、普通 subagent result 不会被误认成 planner。
+  - 真实单 worker E2E：`SCENARIO_PASS`，parent planner `tool_rounds=0 / parse_error=""`，最终 `DONE=1 / VERIFIED=1 / channel_OK=1`。
+  - 真实三 worker E2E：`SCENARIO_PASS`，3 个 runner 全部完成并通过验收，最终 `DONE=3 / VERIFIED=3 / channel_OK=3`。
+- 下一步：继续扩大真实 E2E 场景，重点测试更大任务下 runner 速度、模型输出稳定性和恢复/验收闭环。

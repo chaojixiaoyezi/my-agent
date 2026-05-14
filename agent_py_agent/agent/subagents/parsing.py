@@ -102,6 +102,9 @@ def parse_parent_planner_output(text: str) -> ParentPlannerParsedOutput:
                 ok=False,
                 parse_error="缺少 [/PARENT_PLANNER_RESULT] 结束标记。",
             )
+        fallback = _parent_planner_from_alias_result(text)
+        if fallback.found:
+            return fallback
         return ParentPlannerParsedOutput(found=False, ok=False)
 
     parse_errors = []
@@ -119,6 +122,32 @@ def parse_parent_planner_output(text: str) -> ParentPlannerParsedOutput:
             parse_error=parse_errors[0],
         )
     return ParentPlannerParsedOutput(found=True, ok=False, parse_error="未找到可解析的结构化结果。")
+
+
+# LLM: _parent_planner_from_alias_result repairs a narrow marker mix-up without accepting arbitrary runner results.
+# 函数用途: 当控制面回复误用 SUBAGENT_RESULT 包裹父级 planner JSON 时，仅在字段形状匹配时兜底解析。
+def _parent_planner_from_alias_result(text: str) -> ParentPlannerParsedOutput:
+    candidates = _extract_subagent_result_blocks(text, "[SUBAGENT_RESULT]", "[/SUBAGENT_RESULT]")
+    for raw in reversed(candidates):
+        payload, error = _parse_runner_json_payload(raw)
+        if error or not _looks_like_parent_planner_payload(payload):
+            continue
+        return _parsed_parent_planner_from_payload(payload)
+    return ParentPlannerParsedOutput(found=False, ok=False)
+
+
+# LLM: _looks_like_parent_planner_payload keeps alias recovery schema-bound.
+# 函数用途: 判断 JSON 是否真像父级 planner 决策，避免把普通 runner 结果错当调度命令。
+def _looks_like_parent_planner_payload(payload: dict[str, object]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    has_parent_fields = {"decision", "should_dispatch", "actions"} & set(payload)
+    if len(has_parent_fields) < 2:
+        return False
+    decision = str(payload.get("decision", "") or "").strip().upper()
+    if decision and decision not in {"DISPATCH", "HEARTBEAT_OK", "BLOCKED", "TAKEOVER"}:
+        return False
+    return "status" not in payload and "used_tools" not in payload
 
 
 # LLM: _extract_subagent_result_blocks 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

@@ -320,7 +320,7 @@ def _parent_planner_prompt(payload: str, mode: str, params: PlannerPromptParams)
         "你是父代理 planner。这个 tick 来自定时 watch，不是浅层 heartbeat。\n"
         "你必须根据状态快照判断是否有待处理事项；如果有 active/pending/stalled/"
         "needs-intervention，不允许只返回 HEARTBEAT_OK。\n\n"
-        "你可以使用只读工具核对状态，但不要直接写文件。真正写回由调度器按审计流程执行。\n\n"
+        "你不能调用工具；State Snapshot 是本轮唯一事实来源。真正写回由调度器按审计流程执行。\n\n"
         "## Runtime\n\n"
         f"- mode: {mode}\n"
         f"- execute_runners: {params.execute_runners}\n"

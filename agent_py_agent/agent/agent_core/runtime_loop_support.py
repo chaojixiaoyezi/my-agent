@@ -132,7 +132,7 @@ def _resolve_tool_sections(agent, allowed_tools, granted_capabilities):
 
 
 # LLM: _prepare_runtime_context prepares owner memory, routing, and resume sections from one bundle.
-# 函数用途: 根据 RuntimeContextRequest 准备 memory、路由和恢复上下文；task_local 时不注入主代理长期记忆。
+# 函数用途: 根据 RuntimeContextRequest 准备 memory、路由和恢复上下文；隔离上下文时不注入主代理长期记忆。
 def _prepare_runtime_context(agent, request: RuntimeContextRequest):
     task_local = _is_task_local_context(request.context_scope)
     memories = [] if task_local else agent.memory.search(request.user_prompt, agent.config.memory_top_k)
@@ -221,10 +221,10 @@ def _execute_runtime_compression(agent, params: RuntimeLoopParams) -> Compressio
     return CompressionLoopResult(memories=memories, snapshot_id=snapshot_id, snapshot_path=snapshot_path, applied=applied)
 
 
-# LLM: _is_task_local_context prevents subagent runner turns from inheriting owner-level memory.
-# 函数用途: 识别只允许任务本地 refs 的运行模式，供 memory/routing/resume 注入共同使用。
+# LLM: _is_task_local_context prevents isolated turns from inheriting owner-level memory.
+# 函数用途: 识别只允许隔离 refs 的运行模式，供 memory/routing/resume 注入共同使用。
 def _is_task_local_context(value: object) -> bool:
-    return str(value or "").strip().lower() == "task_local"
+    return str(value or "").strip().lower() in {"task_local", "control_plane"}
 
 
 # LLM: _tool_loop_execute_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
