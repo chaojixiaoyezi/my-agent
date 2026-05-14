@@ -302,6 +302,35 @@ class TestBuildPromptFilesParam:
         assert "HOME SECRET" not in result
         assert "（无相关记忆）" in result
 
+    def test_control_plane_context_suppresses_owner_memory_and_home_files(self, tmp_path):
+        """控制面调用也不能混入主代理长期记忆、家目录制度或全局 prompt 文件。"""
+        global_prompt = tmp_path / "GLOBAL.md"
+        global_prompt.write_text("GLOBAL SECRET", encoding="utf-8")
+        home = tmp_path / "home"
+        home.mkdir()
+        agents = home / "AGENTS.md"
+        agents.write_text("HOME SECRET", encoding="utf-8")
+        home_paths = SimpleNamespace(
+            agents_md=agents,
+            soul_md=home / "SOUL.md",
+            user_md=home / "USER.md",
+            memory_md=home / "memory.md",
+            memory_lessons_dir=home / "lessons",
+        )
+        config = AgentConfig(system_prompt="System", prompt_files=[str(global_prompt)], home_context_enabled=True)
+        builder = PromptBuilder(config, tmp_path, home_paths=home_paths)
+        request = PromptBuildRequest(
+            user_prompt="planner task",
+            memories=[MemoryRecord(role="user", content="MEMORY SECRET", kind="dialogue")],
+            context_scope="control_plane",
+        )
+
+        result = builder.build(request=request)
+
+        assert "MEMORY SECRET" not in result
+        assert "GLOBAL SECRET" not in result
+        assert "HOME SECRET" not in result
+
 
 class TestBuildFullPrompt:
     def test_build_full_prompt_order(self, tmp_path):

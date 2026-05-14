@@ -552,3 +552,10 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `services/acceptance_findings.py` 的 `required_child_spawned` 会在任务目标明确要求创建下级/depth child 时核对真实 `task.child_ids`，防止 coordinator 在没有真实 child run 的情况下只靠结果块伪造完成；leaf/self 任务里“真实创建 leaf_worker”这类自述不会误触发下级创建合同。
 - `services/acceptance_descendant_health.py` 的 `descendant_health` 会在父级已有真实 `child_ids` 时扫描所有后代状态；未完成、未验收、失败、阻塞、缺失的后代都会阻断父级 `DONE/VERIFIED`，防止 root 在 QA 子代理仍失败或未跑完时假绿。
 - `services/acceptance_controlled_exec_findings.py` 的 `controlled_exec_contract_satisfied` 会在目标声明 `controlled_exec` 时要求真实工具记录和 `stdout_ref` / `audit_ref` / `trash_manifest_ref`；它会从 `output.json`、task_dir 和 `allowed_write_roots` 下固定小型 refs/summary 文件中找证据，单文件 64KB 上限。若 refs 文件只写了明确的 `/memory_archive/artifacts/tool_outputs/controlled_exec-*.json` 小 artifact 引用，验收会精确读取这些受控工具 artifact 来补齐 stdout/audit refs；不会扫整个 artifact 目录，也不会读取大日志。
+
+## 2026-05-14 parent planner control-plane structure update
+- `agent_core/planner_templates.py` 定义 parent planner 专用 system prompt；planner 是控制面结构化调用，不继承 root/worker/subagent runner 身份。
+- `agent_core/_subagent_planner_mixin.py` 调用 parent planner 时使用 `context_scope="control_plane"`、`resume_context=False` 和 `allowed_tools=[]`；State Snapshot 是唯一事实来源，planner 不再进入工具循环。
+- `prompting_parts/builder.py` 和 `agent_core/runtime_loop_support.py` 把 `control_plane` 纳入隔离上下文；这类调用不会注入 owner memory、home files、配置 prompt files、memory routing 或 auto-resume。
+- `subagents/parsing.py` 对 parent planner 结果做 schema-bound marker 恢复：误用 `[SUBAGENT_RESULT]` 但 payload 明确是 `decision/should_dispatch/actions` 的 parent planner JSON 时可以恢复；普通 runner `status/used_tools` 结果仍会被拒绝。
+- 后续新增控制面 LLM 调用应优先复用这条结构：预先构造 bounded State Snapshot，tool-less 一次性返回结构化结果；需要文件核实时另建 worker/tool 阶段，不能让控制面自己长时间翻文件。

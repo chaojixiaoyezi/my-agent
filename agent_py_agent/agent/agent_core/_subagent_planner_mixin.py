@@ -10,11 +10,8 @@ from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..subagent import ParentPlannerRecord
 from ..subagents.services.dispatch_params import ParentPlannerRecordParams
-from .planner import (
-    PARENT_PLANNER_READ_TOOLS,
-    _build_parent_planner_prompt,
-    _build_parent_planner_state,
-)
+from .planner import _build_parent_planner_prompt, _build_parent_planner_state
+from .planner_templates import PARENT_PLANNER_SYSTEM_PROMPT
 
 
 # LLM: RunParentPlannerParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -131,7 +128,15 @@ class _ParentPlannerMixin:
         )
         self.subagents.write_parent_planner_exchange(prompt)
         try:
-            return self.run(prompt, save=False, allowed_tools=PARENT_PLANNER_READ_TOOLS)
+            return self.run(
+                prompt,
+                save=False,
+                # LLM: parent planner is a control-plane structured call; the state snapshot is authoritative.
+                allowed_tools=[],
+                resume_context=False,
+                system_prompt_override=PARENT_PLANNER_SYSTEM_PROMPT,
+                context_scope="control_plane",
+            )
         except Exception:
             return None
 
