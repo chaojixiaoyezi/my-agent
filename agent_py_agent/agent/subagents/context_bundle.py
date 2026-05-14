@@ -43,6 +43,7 @@ class ContextBundleV1:
     output_contract: dict[str, object] = field(default_factory=dict)
     lineage: dict[str, object] = field(default_factory=dict)
     context_packs: list[dict[str, object]] = field(default_factory=list)
+    task_packet: dict[str, object] = field(default_factory=dict)
     source_refs: dict[str, list[str]] = field(default_factory=dict)
     reserved: dict[str, object] = field(default_factory=dict)
 
@@ -78,6 +79,7 @@ def build_context_bundle(task: SubAgentTask) -> ContextBundleV1:
         output_contract=_output_contract(task),
         lineage=_lineage(task),
         context_packs=list(task.context_packs or []),
+        task_packet=_task_packet(task),
         source_refs=source_refs(),
         reserved=_reserved(task),
     )
@@ -128,6 +130,8 @@ def render_context_bundle_markdown(bundle: ContextBundleV1, gate: ContextGateRep
     lines.extend(_render_output_contract_lines(bundle.output_contract))
     lines.extend(["", "## Lineage", ""])
     lines.extend(f"- {key}: {value or 'none'}" for key, value in bundle.lineage.items())
+    lines.extend(["", "## Task Packet", ""])
+    lines.extend(_render_task_packet_lines(bundle.task_packet))
     lines.extend(["", "## Context Gate", ""])
     lines.append(f"- ok: {gate.ok}")
     lines.append(f"- blocking_reason: {gate.blocking_reason or 'none'}")
@@ -146,6 +150,8 @@ def context_gate_prompt_lines(context_bundle: dict[str, object]) -> list[str]:
         return [
             "- Context Gate: PASS",
             f"- context_bundle_json: {context_bundle.get('context_bundle_json', 'context_bundle.json')}",
+            "- 优先按 context_bundle.task_packet 的 role、goal、file_contract、write_contract 和 tool_contract 执行；"
+            "不要从摘要里重新猜路径或工具名。",
             "- 先按 context bundle 做一次自检，再执行任务。",
         ]
     return [
@@ -242,6 +248,51 @@ def _output_contract(task: SubAgentTask) -> dict[str, object]:
     }
 
 
+# LLM: _task_packet is the compact typed handoff child runners should trust before prose.
+# 函数用途: 生成子代理/接管代理优先读取的结构化任务包，避免从自然语言摘要里猜路径、角色和工具。
+def _task_packet(task: SubAgentTask) -> dict[str, object]:
+    required = _required_file_contract(task)
+    forbidden = _forbidden_file_contract(task)
+    refs = _workspace_refs(task)
+    return {
+        "schema_version": "subagent_task_packet.v1",
+        "run_id": task.id,
+        "root_id": task.root_id or task.id,
+        "parent_id": task.parent_id,
+        "depth": int(task.depth or 0),
+        "role": task.role,
+        "agent_name": task.agent_name,
+        "goal": task.goal,
+        "plan": list(task.plan or []),
+        "acceptance_checks": list(task.acceptance_checks or []),
+        "file_contract": {
+            "required_files": required,
+            "forbidden_files": forbidden,
+            "source": "task_text_positive_negative_extraction",
+        },
+        "write_contract": {
+            "allowed_write_roots": list(task.allowed_write_roots or []),
+            "forbidden_write_roots": list(task.forbidden_write_roots or []),
+            "locked_files": list(task.locked_files or []),
+        },
+        "tool_contract": {
+            "allowed_tools": list(task.allowed_tools or []),
+            "allowed_skills": list(task.allowed_skills or []),
+            "canonical_tool_names": True,
+            "path_argument": "path",
+            "output_json_ref": _safe_string_ref(task, "output_json"),
+        },
+        "workspace_refs": {
+            "task_dir": refs.get("task_dir", ""),
+            "agent_run_workspace": refs.get("agent_run_workspace", ""),
+            "context_bundle_json": refs.get("agent_run_workspace", "")
+            and str(Path(refs["agent_run_workspace"]) / "context_bundle.json"),
+            "latest_continue_packet": refs.get("agent_run_latest_continue_packet", ""),
+        },
+        "reserved": {},
+    }
+
+
 # LLM: _reserved carries small future-extensible handoff hints without changing the context bundle schema.
 # 函数用途: 将 task.attributes 里的轻量恢复预检信息传给 runner prompt；不复制正文产物或主代理记忆。
 def _reserved(task: SubAgentTask) -> dict[str, object]:
@@ -307,6 +358,31 @@ def _render_output_contract_lines(contract: dict[str, object]) -> list[str]:
             rendered = str(value) if value not in (None, "") else "none"
         lines.append(f"- {key}: {rendered}")
     return lines
+
+
+# LLM: _render_task_packet_lines keeps the packet readable without dumping nested JSON into Markdown.
+# 函数用途: 在 CONTEXT_BUNDLE.md 展示任务包关键字段，让人和接管代理快速确认结构化合同。
+def _render_task_packet_lines(packet: dict[str, object]) -> list[str]:
+    file_contract = packet.get("file_contract") if isinstance(packet.get("file_contract"), dict) else {}
+    write_contract = packet.get("write_contract") if isinstance(packet.get("write_contract"), dict) else {}
+    tool_contract = packet.get("tool_contract") if isinstance(packet.get("tool_contract"), dict) else {}
+    return [
+        f"- schema_version: {packet.get('schema_version') or 'none'}",
+        f"- run_id: {packet.get('run_id') or 'none'}",
+        f"- role: {packet.get('role') or 'none'}",
+        f"- required_files: {_compact_list(file_contract.get('required_files'))}",
+        f"- forbidden_files: {_compact_list(file_contract.get('forbidden_files'))}",
+        f"- allowed_write_roots: {_compact_list(write_contract.get('allowed_write_roots'))}",
+        f"- allowed_tools: {_compact_list(tool_contract.get('allowed_tools'))}",
+    ]
+
+
+# LLM: _compact_list renders short packet arrays for handoff markdown.
+# 函数用途: 把列表值压成一行；空值显示 none。
+def _compact_list(value: object) -> str:
+    if not isinstance(value, list) or not value:
+        return "none"
+    return ", ".join(str(item) for item in value)
 
 
 # LLM: _lineage gives nested runners parent/root refs without expanding ancestor files into prompt text.

@@ -149,3 +149,32 @@ def test_capability_request_tool_is_available_to_role_and_leaf_defaults(tmp_path
 
     leaf = manager.load(result.created_run_ids[0])
     assert "capability_request" in leaf.allowed_tools
+
+
+# LLM: test_root_execution_context_hides_capability_request_tool removes a misleading no-parent lane.
+# 函数用途: root/coordinator 没有上级，执行上下文不应展示 capability_request；普通 child 仍保留。
+def test_root_execution_context_hides_capability_request_tool(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    root = manager.create_run(
+        goal="root 负责调度",
+        thought="root 没有上级",
+        plan=["派工"],
+        role="coordinator",
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "capability_request"],
+    )
+    child = manager.create_run(
+        goal="child 需要可申请能力",
+        thought="child 有父级",
+        plan=["执行"],
+        parent_id=root.id,
+        root_id=root.id,
+        depth=1,
+        role="worker",
+        allowed_tools=["read_file", "write_file", "capability_request"],
+    )
+
+    root_context = manager.build_execution_context(root.id)
+    child_context = manager.build_execution_context(child.id)
+
+    assert "capability_request" not in root_context.allowed_tools
+    assert "capability_request" in child_context.allowed_tools

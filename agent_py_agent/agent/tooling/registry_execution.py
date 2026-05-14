@@ -48,6 +48,50 @@ _MODEL_WRAPPER_PARAM_KEYS = {
     "system",
     "web",
 }
+_TOOL_NAME_ALIASES = {
+    "append": "append_file",
+    "cat": "read_file",
+    "fetch": "fetch_url",
+    "grep": "search_text",
+    "http": "http_request",
+    "list": "list_files",
+    "ls": "list_files",
+    "open": "read_file",
+    "read": "read_file",
+    "replace": "replace_in_file",
+    "request": "http_request",
+    "search": "search_text",
+    "write": "write_file",
+}
+_FILESYSTEM_PATH_PARAM_ALIASES = {
+    "dir": "path",
+    "directory": "path",
+    "file": "path",
+    "file_path": "path",
+    "filepath": "path",
+    "filename": "path",
+    "target": "path",
+    "target_path": "path",
+}
+_PARAM_ALIASES_BY_TOOL = {
+    "append_file": _FILESYSTEM_PATH_PARAM_ALIASES,
+    "list_files": _FILESYSTEM_PATH_PARAM_ALIASES,
+    "read_file": _FILESYSTEM_PATH_PARAM_ALIASES,
+    "write_file": _FILESYSTEM_PATH_PARAM_ALIASES,
+    "replace_in_file": {
+        **_FILESYSTEM_PATH_PARAM_ALIASES,
+        "old_text": "old",
+        "new_text": "new",
+        "replacement": "new",
+    },
+    "search_text": {
+        **_FILESYSTEM_PATH_PARAM_ALIASES,
+        "keyword": "query",
+        "pattern": "query",
+        "search_text": "query",
+        "text": "query",
+    },
+}
 
 
 # LLM: ExecuteRegistryCallParams 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
@@ -287,9 +331,12 @@ def _normalize_tool_payload(payload: object) -> tuple[dict[str, Any] | None, str
     expanded, error = _unwrap_param_name_bundle(normalized)
     if error:
         return None, error
-    if len(expanded) > _MAX_TOOL_PAYLOAD_FIELDS:
+    canonical, error = _canonicalize_tool_payload(expanded)
+    if error:
+        return None, error
+    if len(canonical) > _MAX_TOOL_PAYLOAD_FIELDS:
         return None, f"工具调用字段过多，最多 {_MAX_TOOL_PAYLOAD_FIELDS} 个字段"
-    return expanded, ""
+    return canonical, ""
 
 
 # LLM: _normalize_payload_mapping validates a tool payload map before dispatch.
@@ -327,6 +374,34 @@ def _unwrap_param_name_bundle(payload: dict[str, Any]) -> tuple[dict[str, Any], 
     if "tool" in bundled:
         return {}, f"{wrapper_keys[0]} 参数包不能包含 tool 字段"
     return {"tool": payload["tool"], **bundled}, ""
+
+
+# LLM: _canonicalize_tool_payload repairs stable aliases before auth and execution.
+# 函数用途: 把 JSON 工具调用里的 write/read/file_path 等常见别名归一，避免模型小错直接卡住。
+def _canonicalize_tool_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    tool = _canonical_tool_name(payload.get("tool"))
+    normalized: dict[str, Any] = {"tool": tool} if "tool" in payload else {}
+    aliases = _PARAM_ALIASES_BY_TOOL.get(tool, {})
+    for key, value in payload.items():
+        if key == "tool":
+            continue
+        canonical_key = aliases.get(key, key)
+        if canonical_key in normalized and normalized[canonical_key] != value:
+            return {}, (
+                "conflicting parameter aliases: "
+                f"{key} conflicts with {canonical_key}; 请只保留一个参数名。"
+            )
+        normalized[canonical_key] = value
+    return normalized, ""
+
+
+# LLM: _canonical_tool_name keeps parser and direct execution equally tolerant of simple tool aliases.
+# 函数用途: 统一 JSON 工具名别名；未知工具名保留给后续鉴权/未知工具错误处理。
+def _canonical_tool_name(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    name = value.strip()
+    return _TOOL_NAME_ALIASES.get(name, name)
 
 
 # LLM: _tool_name 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。

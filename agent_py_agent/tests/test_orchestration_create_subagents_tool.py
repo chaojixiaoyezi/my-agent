@@ -372,6 +372,10 @@ class TestCreateSubagentsToolCoordinatorSeed:
         assert params.agent_name == "小傻妞-root-coordinator"
         assert params.workflow_mode == "off"
 
+
+class TestCreateSubagentsToolWorkerWorkflow:
+    """测试具体 worker 任务不会被泛化 workflow 污染。"""
+
     def test_concrete_single_file_worker_disables_generic_workflow_auto(self):
         """具体单文件 worker 不应被 workflow=auto 套成 producer/critic/repair。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
@@ -466,6 +470,10 @@ class TestCreateSubagentsToolCoordinatorSeed:
         assert "count=1 的 coordinator" in result.output
         mock_agent.subagents.create_run.assert_not_called()
 
+
+class TestCreateSubagentsToolDelegationGuard:
+    """测试派工目标不能反转用户的真实交付约束。"""
+
     def test_create_subagents_rejects_button_constraint_reversal(self):
         """派工目标不能把用户的“不失灵按钮”改写成 href=#。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
@@ -534,6 +542,10 @@ class TestCreateSubagentsToolCoordinatorSeed:
         assert result.ok is False
         assert "delegation_constraint_conflict" in result.output
         mock_agent.subagents.create_run.assert_not_called()
+
+
+class TestCreateSubagentsToolRawPromptRepair:
+    """测试 root seed 能从原始用户 prompt 补回硬合同。"""
 
     def test_explicit_coordinator_seed_without_name_gets_lineage_prefix(self):
         """模型没传 agent_name 时，第一层 root/coordinator 也必须有小傻妞前缀。"""

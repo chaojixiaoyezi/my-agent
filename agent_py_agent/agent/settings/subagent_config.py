@@ -17,6 +17,7 @@ class SubagentConfig:
     """Subagent limits and automation policies."""
 
     enable_subagents: bool = True
+    subagent_mode: str = "trusted_local_hardening"
     max_subagents: int = 1000
     subagent_workspace: str = "data/subagents"
     subagent_role_template_dirs: list[str] = field(default_factory=list)

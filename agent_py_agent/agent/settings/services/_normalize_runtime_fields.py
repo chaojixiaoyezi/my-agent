@@ -194,6 +194,14 @@ class SubagentBasicFieldsService:
         out["subagent_role_template_dirs"] = _normalize_string_list(
             out.get("subagent_role_template_dirs", defaults.subagent_role_template_dirs)
         )
+        mode, warn = CoercionService.coerce_choice(
+            "subagent_mode",
+            out.get("subagent_mode"),
+            defaults.subagent_mode,
+            choices=("trusted_local_hardening", "balanced", "strict"),
+        )
+        out["subagent_mode"] = mode
+        _append_warning(warnings, warn)
         return out, warnings
 
 

@@ -184,6 +184,42 @@ def test_tool_executor_unwraps_model_filesystem_bundle(tmp_path: Path):
     assert "category bundle recovered" in result.output
 
 
+# LLM: test_tool_call_parser_canonicalizes_json_tool_and_param_aliases covers non-XML model drift.
+# 函数用途: 标准 JSON 工具块里写 write/file_path 这类别名时，协议层应归一成 write_file/path。
+def test_tool_call_parser_canonicalizes_json_tool_and_param_aliases():
+    registry = make_tool_registry(Path.cwd())
+
+    calls = registry.parse_tool_calls(
+        '[TOOL_CALL]\n{"tool":"write","file_path":"notes.txt","content":"ok"}\n[/TOOL_CALL]'
+    )
+
+    assert calls == [{"tool": "write_file", "path": "notes.txt", "content": "ok"}]
+
+
+# LLM: test_tool_executor_canonicalizes_json_aliases keeps direct envelope execution equally robust.
+# 函数用途: 直接执行旧 dict/envelope payload 时也要归一工具名和路径别名，不能只修 parser。
+def test_tool_executor_canonicalizes_json_aliases(tmp_path: Path):
+    registry = make_tool_registry(tmp_path)
+
+    result = registry.execute_call({"tool": "write", "file_path": "notes.txt", "content": "alias ok"})
+
+    assert result.ok
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "alias ok"
+
+
+# LLM: test_tool_call_parser_rejects_conflicting_canonical_aliases avoids silent path swaps.
+# 函数用途: 如果 path 和 file_path 同时出现且不同，必须明确报错，不能猜哪个是真的。
+def test_tool_call_parser_rejects_conflicting_canonical_aliases():
+    registry = make_tool_registry(Path.cwd())
+
+    calls = registry.parse_tool_calls(
+        '[TOOL_CALL]\n{"tool":"read_file","path":"A.md","file_path":"B.md"}\n[/TOOL_CALL]'
+    )
+
+    assert calls[0]["tool"] == "__parse_error__"
+    assert "conflicting parameter aliases" in calls[0]["error"]
+
+
 def test_tool_call_parser_unwraps_model_memory_bundle():
     """LLM: memory/read_artifact wrappers should flatten to stable tool params."""
     registry = make_tool_registry(Path.cwd())

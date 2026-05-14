@@ -1203,9 +1203,18 @@ my-agent daemon --max-cycles 1 --interval 0 --no-planner
 默认配置位置：
 
 ```yaml
-# 用户层任务规模：0 表示不设硬上限，让主代理按任务复杂度决定
-task_max_subagents: 0
-task_max_grandchildren: 0
+# 子代理默认像“不同记忆/权限的主代理”一样工作。
+# 默认只保留少量用户能理解的入口，细节由系统和 LLM 判断。
+enable_subagents: true
+subagent_mode: "trusted_local_hardening"
+max_subagents: 1000
+subagent_workspace: "data/subagents"
+subagent_role_template_dirs: []
+subagent_debug_trace_level: 0
+
+# 父级验收默认不直接执行命令；需要真实跑测试时再显式打开。
+acceptance_execute_tests: false
+acceptance_test_timeout_seconds: 120
 
 # 未来 gateway 调度策略：auto 表示由主代理/调度器自适应
 scheduler_mode: "auto"

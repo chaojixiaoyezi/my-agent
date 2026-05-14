@@ -895,7 +895,7 @@ docs/
     `-- live-lab/                     # Live Lab 四件套索引
 ```
 
-模块四件套固定为：`01-discussion.md`、`02-progress.md`、`03-purpose.md`、`04-structure.md`。其中 `02-progress.md` 必须保留“已完成 / 解决的问题 / 下一步 / 已跑测试 / 未跑测试 / 风险”六段，方便并行 worker 和初学者快速判断模块状态。subagent 还额外维护 `06-real-e2e-findings.md` 记录真实压测问题，`08-role-selection-strategy.md` 记录 root/coordinator/lead 如何选择角色模板。
+模块四件套固定为：`01-discussion.md`、`02-progress.md`、`03-purpose.md`、`04-structure.md`。其中 `02-progress.md` 必须保留“已完成 / 解决的问题 / 下一步 / 已跑测试 / 未跑测试 / 风险”六段，方便并行 worker 和初学者快速判断模块状态。subagent 还额外维护 `06-real-e2e-findings.md` 记录真实压测问题，`08-role-selection-strategy.md` 记录 root/coordinator/lead 如何选择角色模板，`09-hardening-migration.md` 记录子代理硬化迁移原则、24 步计划和 15 组测试矩阵。
 
 ## 2026-04-30 文档同步门补充
 

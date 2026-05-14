@@ -31,7 +31,12 @@ def inferred_static_site_items(request: StaticSiteTestItemsRequest) -> list[dict
     declared_files = _normalized_required_files(request.required_files)
     if html_paths:
         site_root = _common_parent(html_paths)
-        required_files = _required_files(html_paths, site_root)
+        observed_required = _required_files(html_paths, site_root)
+        required_files = (
+            _merged_required_files(observed_required, declared_files)
+            if len(html_paths) > 1
+            else observed_required
+        )
     else:
         if not declared_files:
             return []

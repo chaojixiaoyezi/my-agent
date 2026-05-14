@@ -83,7 +83,9 @@ def test_user_role_template_can_extend_catalog(tmp_path):
         role="ppt_polisher",
         allowed_tools=["read_file", "write_file"],
     )
-    assert task.allowed_tools == ["read_file"]
+    assert "read_file" in task.allowed_tools
+    assert "write_file" in task.allowed_tools
+    assert "replace_in_file" not in task.allowed_tools
     assert any("PPT润色子代理" in check for check in task.acceptance_checks)
 
 
@@ -123,7 +125,10 @@ def test_user_template_role_can_be_selected_from_natural_name(tmp_path):
     )
 
     assert task.role == "slide_ppt_polisher_lead"
-    assert task.allowed_tools == ["list_files", "read_file", "read_artifact"]
+    assert "list_files" in task.allowed_tools
+    assert "read_file" in task.allowed_tools
+    assert "write_file" in task.allowed_tools
+    assert "replace_in_file" in task.allowed_tools
     assert any("PPT润色子代理" in check for check in task.acceptance_checks)
 
 
@@ -159,7 +164,7 @@ def test_tiny_action_template_is_rejected(tmp_path):
 
 
 # LLM: test_quality_role_contracts_use_template_defaults verifies core new QA roles.
-# 函数用途: 找茬、测试、验收角色默认是可复用的检查型角色，不能直接写业务产物，也不能自验收。
+# 函数用途: 找茬、测试、验收角色默认是可复用的检查型角色，可以写报告/修复建议，但不能自验收。
 def test_quality_role_contracts_use_template_defaults(tmp_path):
     manager = SubAgentManager(tmp_path)
 
@@ -323,7 +328,7 @@ def test_all_builtin_role_contracts_are_applied_on_create_run(tmp_path):
         assert task.quality_contract.cannot_self_accept is True
         assert task.quality_contract.parent_final_gate is True
         for tool_name in ["write_file", "append_file", "replace_in_file"]:
-            assert (tool_name in task.allowed_tools) is template.can_write
+            assert tool_name in task.allowed_tools
         assert ("schedule_child_subagents" in task.allowed_tools) is template.can_spawn_children
 
 

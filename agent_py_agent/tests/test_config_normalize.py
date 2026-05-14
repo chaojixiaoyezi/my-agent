@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from agent_py_agent.agent.settings.config import AgentConfig, load_simple_yaml
+from agent_py_agent.agent.settings.config import (
+    HIDDEN_COMPAT_CONFIG_FIELDS,
+    AgentConfig,
+    load_simple_yaml,
+)
 from agent_py_agent.agent.settings.config_normalize import (
     normalize_agent_config,
     normalize_subagent_workflow_config,
@@ -158,7 +162,35 @@ class TestNormalizeAgentConfig:
         assert normalized["max_subagents"] == 1000
         assert normalized["subagent_allowed_tools"] == []
         assert normalized["subagent_role_template_dirs"] == []
+        assert normalized["subagent_mode"] == "trusted_local_hardening"
         assert AgentConfig().subagent_workflow_mode == "auto"
+
+    def test_normalize_subagent_mode_invalid_falls_back(self):
+        """验证子代理模式只有少量稳定档位，非法值回退到本地硬化默认。"""
+        normalized, warnings = normalize_agent_config({"subagent_mode": "tiny_locked_down"})
+        assert normalized["subagent_mode"] == "trusted_local_hardening"
+        assert any("subagent_mode" in warning for warning in warnings)
+
+    def test_default_config_exposes_fewer_than_ten_subagent_user_knobs(self):
+        """验证默认配置不再暴露大量子代理微调参数，避免用户被奇葩参数拖住。"""
+        config_path = Path(__file__).parents[1] / "config" / "agent_config.yaml"
+        visible = load_simple_yaml(config_path)
+        exposed = {
+            key
+            for key in visible
+            if key.startswith("subagent_")
+            or key in {"enable_subagents", "max_subagents", "acceptance_execute_tests", "acceptance_test_timeout_seconds"}
+        }
+        assert exposed == {
+            "enable_subagents",
+            "subagent_mode",
+            "subagent_debug_trace_level",
+            "max_subagents",
+            "subagent_workspace",
+            "subagent_role_template_dirs",
+            "acceptance_execute_tests",
+            "acceptance_test_timeout_seconds",
+        }
 
     def test_empty_subagent_workflow_mode_means_auto(self):
         """验证配置文件里把工作流模式置空时，运行期按自动策略处理。"""
@@ -308,7 +340,7 @@ class TestNormalizeAgentConfigIntegration:
             "subagent_workflow_config_warnings",
             "config_warnings",
         }
-        config_keys = set(AgentConfig.__dataclass_fields__) - internal_keys
+        config_keys = set(AgentConfig.__dataclass_fields__) - internal_keys - HIDDEN_COMPAT_CONFIG_FIELDS
 
         assert sorted(config_keys - yaml_keys) == []
         assert sorted(yaml_keys - config_keys) == []

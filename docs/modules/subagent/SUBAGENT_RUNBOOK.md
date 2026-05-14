@@ -269,15 +269,15 @@ Task Context Pack、Role Context Pack，并按 sampling_plan 抽查后半段和 
 #### 哪些应该做成开关
 
 这些会影响成本、速度、模型调用或用户体验，应该可配置：
-- `subagent_quality_mode`: `off|advisory|strict`。默认建议 `advisory`，重要交付可升 `strict`。
-- `subagent_auto_critic`: 是否在 producer 后自动派 critic。默认可按任务类型开启。
-- `subagent_auto_repair`: critic 失败后是否自动派 repairer。默认关闭或限制轮数。
-- `subagent_max_review_rounds`: 最多生产/挑错/修复几轮，避免无限循环。
-- `subagent_context_budget`: 每个子代理上下文预算。
-- `subagent_full_context`: 调试或特殊任务才允许全量上下文。
-- `subagent_require_human_final`: 高审美/高风险任务是否必须人工最终确认。
-- `subagent_quality_profile`: 用户或父会话指定质量 profile。
-- `subagent_dispatch_topology`: `single|producer_critic|producer_critic_repairer|custom`。
+- `enable_subagents`: 是否启用子代理。
+- `subagent_mode`: 本地硬化、平衡、严格三档；普通本地开发默认 `trusted_local_hardening`。
+- `max_subagents`: 单任务登记上限，默认给得很高，避免把正常任务误卡住。
+- `subagent_workspace`: 子代理运行记录目录。
+- `subagent_role_template_dirs`: 额外角色模板目录；空列表表示内置模板 + 工作区模板。
+- `subagent_debug_trace_level`: 0-5 调试追踪等级，默认关闭。
+- `acceptance_execute_tests` / `acceptance_test_timeout_seconds`: 父级验收是否真实执行测试，以及单条测试超时。
+
+其他更细的质量模式、上下文预算、QA 拓扑、修复轮数和调度细节先由系统内部策略/LLM 判断，不再作为普通用户默认配置项。需要面向企业/外部用户暴露时，再通过 workflow 或高阶 profile 统一打开，而不是继续堆几十个微参数。
 
 #### 哪些仍需要用户或父会话表达
 
@@ -1009,7 +1009,7 @@ python3 -m agent_py_agent daemon
 `daemon` 读取 `agent_config.yaml` 里的 `daemon_*` 配置，适合把常驻参数收进配置文件，日常启动时少打长命令。
 
 配置分两层：
-- 用户层任务规模：`task_max_subagents=0` / `task_max_grandchildren=0` 表示不设硬上限，让主代理按任务复杂度决定。
+- 子代理用户层配置：默认只暴露 `enable_subagents`、`subagent_mode`、`max_subagents`、`subagent_workspace`、`subagent_role_template_dirs`、`subagent_debug_trace_level` 和父级验收两项。普通用户不需要判断每个角色用什么工具、上下文给多少、一次派几个叶子。
 - 未来 gateway 调度策略：`runner_concurrency: "auto"`、`runner_start_rate: "auto"` 让主代理/调度器根据队列长度和卡住情况自适应；`runner_timeout_seconds: "off"` 表示 runner 不套外层超时，适合真实 E2E 和长任务压测；需要固定上限时可改成秒数，需要动态预算时可改成 `auto`。
 - 当前前台 daemon 高级参数：`daemon_max_runners: "auto"` 会先映射成保守值 1；`daemon_max_cycles=0` 表示持续运行；`daemon_limit=0` 表示不限制记录条数；`daemon_max_cards=0` 表示不限制能力卡数量；`daemon_interval=0` 通常只用于测试或单轮验证。
 

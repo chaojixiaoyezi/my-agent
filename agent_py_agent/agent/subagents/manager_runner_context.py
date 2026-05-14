@@ -154,7 +154,7 @@ class SubAgentRunnerContextMixin:
         _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
         granted_skills, granted_tools, grants = self._extract_granted_caps(task)
         allowed_skills = _merge_list(task.allowed_skills, granted_skills)
-        allowed_tools = _merge_list(task.allowed_tools, granted_tools)
+        allowed_tools = _runner_allowed_tools(task, _merge_list(task.allowed_tools, granted_tools))
         return self._make_execution_context(
             task,
             allowed_skills=allowed_skills,
@@ -169,12 +169,11 @@ class SubAgentRunnerContextMixin:
         self,
         task: SubAgentTask,
         *,
-        params: object | None = None,
         allowed_skills: list[str],
         allowed_tools: list[str],
         grants: list[dict[str, object]],
         max_cards: int,
-        ) -> SubAgentExecutionContext:
+    ) -> SubAgentExecutionContext:
         controlled_exec_grants = controlled_exec_grant_refs(list(task.capability_grants or []))
         return SubAgentExecutionContext(
             **_execution_context_task_fields(task),
@@ -272,6 +271,24 @@ def _granted_filesystem_write_roots(task: object) -> list[str]:
             continue
         roots = _merge_list(roots, _string_list(getattr(grant, "path_scope", []) or []))
     return roots
+
+
+# LLM: _runner_allowed_tools removes parent-only request lanes from root execution contexts.
+# 函数用途: root 没有上级授权者，不在 runner prompt 展示 capability_request；普通子代理仍可向父级申请。
+def _runner_allowed_tools(task: SubAgentTask, tools: list[str]) -> list[str]:
+    if not _is_root_task(task):
+        return tools
+    return [item for item in tools if item != "capability_request"]
+
+
+# LLM: _is_root_task mirrors capability_request root detection without importing agent-core tools.
+# 函数用途: 判断 task 是否为 root run，避免 root 自己等待不存在的父级。
+def _is_root_task(task: SubAgentTask) -> bool:
+    parent_id = str(getattr(task, "parent_id", "") or "").strip()
+    root_id = str(getattr(task, "root_id", "") or "").strip()
+    depth = int(getattr(task, "depth", 0) or 0)
+    run_id = str(getattr(task, "id", "") or "").strip()
+    return not parent_id and (not root_id or root_id == run_id or depth == 0)
 
 
 # LLM: _task_report_write_roots grants runners only their internal report workspace, not product roots.

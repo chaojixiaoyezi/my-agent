@@ -181,7 +181,7 @@ agent_py_agent/agent/
 - `agent_py_agent/cli/_hierarchy.py`：同时实现 `subagents-recovery-tree` 命令；按 root run 输出多层恢复包，`--hide-healthy` 可减少上下文体积，`--capability-config` 提供 stale RUNNING 判定阈值，仍只展示 refs 和摘要。
 - `agent_py_agent/cli/_leadership.py`：实现 `subagents-leadership-recovery-plan` 和 `subagents-leadership-recovery-apply`；前者只写计划，后者默认 dry-run，只有 `--apply` 才按指定 `--child-run-id` 重挂子树。
 - `agent_py_agent/cli/_review.py`：提供 `subagents-tests` 和验收相关兼容导出；tests 默认只读取已有 `test_execution.json`，显式 `--re-run` 才重新执行 `output.json.tests`。
-- `agent_py_agent/agent/settings/config.py` / `agent_py_agent/config/agent_config.yaml`：提供 `acceptance_execute_tests` 和 `acceptance_test_timeout_seconds`，默认保持老验收路径不自动跑命令；`subagent_board_limit` 控制轻量看板摘要数量；`subagent_allowed_tools=[]` 表示自动工具策略，由角色模板、任务目标和调度器判断，只有受限环境才显式填工具名；`subagent_role_template_dirs=[]` 表示使用工作区 `.agent/subagents/roles` 作为用户模板目录；`runner_timeout_seconds="off"` 表示真实 runner 不套外层超时，适合当前 E2E 压测；`runner_timeout_by_role={}` 表示不启用角色级覆盖，可配置成 `{"root": "off", "coordinator": "off", "worker": 120}`；`tool_agent_budget_window_seconds=600` 和 `tool_agent_budget_max_calls=50` 是单 run 工具次数预算；`tool_artifact_read_budget_window_seconds=600` 和 `tool_artifact_read_budget_max_chars=240000` 是单 run artifact 正文读取预算；这些预算字段设为 `0` 表示关闭，不代表任务树或单次对话预算。
+- `agent_py_agent/agent/settings/config.py` / `agent_py_agent/config/agent_config.yaml`：提供少量用户可见子代理配置：`enable_subagents`、`subagent_mode`、`max_subagents`、`subagent_workspace`、`subagent_role_template_dirs`、`subagent_debug_trace_level`、`acceptance_execute_tests` 和 `acceptance_test_timeout_seconds`。`subagent_mode="trusted_local_hardening"` 表示本地默认少卡流程、多保证干活；角色模板和调度策略继续自动判断工具、QA 拓扑和上下文，不再把 `subagent_allowed_tools`、`subagent_context_budget` 等微参数暴露给普通用户。`runner_timeout_seconds="off"` 表示真实 runner 不套外层超时，适合当前 E2E 压测；`runner_timeout_by_role={}` 表示不启用角色级覆盖，可配置成 `{"root": "off", "coordinator": "off", "worker": 120}`；`tool_agent_budget_window_seconds=600` 和 `tool_agent_budget_max_calls=50` 是单 run 工具次数预算；`tool_artifact_read_budget_window_seconds=600` 和 `tool_artifact_read_budget_max_chars=240000` 是单 run artifact 正文读取预算；这些预算字段设为 `0` 表示关闭，不代表任务树或单次对话预算。
 - Auto Policy v1 当前只实现 dry-run 审计，尚未接主配置；后续若做成用户可见主配置，配置默认值和中文说明必须同步写入 `agent_py_agent/config/agent_config.yaml` 与 `AgentConfig`。如果只是 subagent/capability 路由内部的授权、次数或 allowlist 细则，应进入 `agent_py_agent/config/capability_config.yaml` 与 `capability_config.py`，不要扩张主配置。
 - `agent_py_agent/agent/subagents/manager_indexing.py`：实现 `_select_runs()` 等索引和过滤逻辑，同时提供公开别名 `select_runs()`、`index_task()` 等。
 - `agent_py_agent/agent/subagents/manager_acceptance_findings.py`：实现验收发现逻辑，公开别名 `acceptance_findings()`。
@@ -559,3 +559,13 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `prompting_parts/builder.py` 和 `agent_core/runtime_loop_support.py` 把 `control_plane` 纳入隔离上下文；这类调用不会注入 owner memory、home files、配置 prompt files、memory routing 或 auto-resume。
 - `subagents/parsing.py` 对 parent planner 结果做 schema-bound marker 恢复：误用 `[SUBAGENT_RESULT]` 但 payload 明确是 `decision/should_dispatch/actions` 的 parent planner JSON 时可以恢复；普通 runner `status/used_tools` 结果仍会被拒绝。
 - 后续新增控制面 LLM 调用应优先复用这条结构：预先构造 bounded State Snapshot，tool-less 一次性返回结构化结果；需要文件核实时另建 worker/tool 阶段，不能让控制面自己长时间翻文件。
+
+## 2026-05-15 subagent hardening structure update
+- `config/agent_config.yaml` 只暴露少量子代理用户项；`AgentConfig` 仍保留旧字段以兼容已有调用和测试，但新功能不要再把调度微参数直接塞进默认用户配置。
+- `settings/services/_normalize_runtime_fields.py` 继续归一旧字段，同时新增 `subagent_mode` 三档：`trusted_local_hardening`、`balanced`、`strict`。当前默认是本地硬化模式，目标是少卡流程、多保证子代理能完成工作。
+- `subagents/role_contracts.py` 的角色契约改为“职责叠加”：显式工具、模板工具和 `ROLE_BASE_TOOLS` 合并去重。reporter/checker/tester/acceptor 等质量角色也有基础读写和报告能力，最终能否验收仍由父级质量门决定。
+- `subagents/manager_runner_context.py` 会在 root execution context 里移除 `capability_request`，因为 root 没有上级授权者；下级 run 的能力申请通道不变。
+- `subagents/context_bundle.py` 新增 `task_packet` 字段，schema 为 `subagent_task_packet.v1`。它是 runner 和 takeover 优先读取的结构化工单，包含 role、goal、plan、acceptance、file_contract、write_contract、tool_contract、workspace_refs 和 reserved。
+- `context_gate_prompt_lines()` 会明确告诉 runner 优先按 `context_bundle.task_packet` 执行，避免从自然语言摘要里重新猜路径、工具名或文件合同。
+- `tooling/registry_execution.py` 现在对标准 JSON 工具块也做窄别名归一：工具名如 `write/read/list/search/append/replace` 会转成正式工具名；文件路径参数如 `file_path/filename/target_path` 会转成 `path`。同一参数别名冲突会返回 parse error，不会静默猜测。
+- `docs/modules/subagent/09-hardening-migration.md` 是这轮迁移的总说明，包含参考项目经验、24 步迁移计划和 15 组测试矩阵。

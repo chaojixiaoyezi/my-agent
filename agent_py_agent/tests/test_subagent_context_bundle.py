@@ -55,6 +55,11 @@ def test_context_bundle_v1_captures_task_handoff_fields(tmp_path) -> None:
     assert bundle.workspace_refs["agent_run_findings"].endswith("findings.jsonl")
     assert bundle.workspace_refs["agent_run_compactions"].endswith("compactions")
     assert bundle.output_contract["final_report_ref"].endswith("final_report.md")
+    assert bundle.task_packet["schema_version"] == "subagent_task_packet.v1"
+    assert bundle.task_packet["run_id"] == task.id
+    assert bundle.task_packet["role"] == "worker"
+    assert bundle.task_packet["tool_contract"]["allowed_tools"] == ["read_file", "write_file"]
+    assert bundle.task_packet["write_contract"]["allowed_write_roots"] == [str(tmp_path / task.id / "artifacts")]
     assert "task.goal" in bundle.source_refs["goal"]
     assert "task.acceptance_checks" in bundle.source_refs["acceptance_checks"]
     assert set(REQUIRED_CONTEXT_BUNDLE_FIELDS).issubset(payload)
@@ -138,6 +143,18 @@ def test_context_bundle_output_contract_separates_required_and_forbidden_files(t
         "legacy.html",
         "obsolete.html",
     ]
+    assert bundle.task_packet["file_contract"]["required_files"] == [
+        "index.html",
+        "product-detail.html",
+        "style.css",
+        "app.js",
+    ]
+    assert bundle.task_packet["file_contract"]["forbidden_files"] == [
+        "product.html",
+        "old-product.html",
+        "legacy.html",
+        "obsolete.html",
+    ]
     assert bundle.output_contract["file_contract_source"] == "task_text_positive_negative_extraction"
 
 
@@ -209,6 +226,7 @@ def test_runner_prompt_includes_context_gate_status(tmp_path) -> None:
     assert "## Context Bundle Gate" in prompt
     assert "Context Gate: PASS" in prompt
     assert "context_bundle.json" in prompt
+    assert "优先按 context_bundle.task_packet" in prompt
 
 
 def test_runner_prompt_describes_scoped_capability_request_loop(tmp_path) -> None:

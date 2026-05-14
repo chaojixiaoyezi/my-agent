@@ -7,11 +7,15 @@ from dataclasses import replace
 from typing import Any
 
 from .quality_models import QualityContract
-from .role_templates import RoleTemplate, role_template_id_for_role, template_for_role
+from .role_templates import (
+    ROLE_BASE_TOOLS,
+    RoleTemplate,
+    role_template_id_for_role,
+    template_for_role,
+)
 
 REPORTER_ROLE = "reporter"
 CHECKER_ROLE = "checker"
-WRITE_TOOL_NAMES = {"write", "write_file", "append_file", "replace_in_file", "edit_file"}
 
 ROLE_ALIASES = {
     "analyst": REPORTER_ROLE,
@@ -34,7 +38,6 @@ ROLE_ALIASES = {
     "writer": "writer",
 }
 
-CHECKER_READ_ONLY_TOOLS = ["list_files", "read_file", "search_text", "read_artifact"]
 REPORTER_ACCEPTANCE_CHECK = "Reporter output must cite evidence_refs or artifact_refs for each user-visible claim."
 CHECKER_ACCEPTANCE_CHECK = "Checker must verify reporter evidence refs and cannot self-accept final work."
 
@@ -101,8 +104,8 @@ def _acceptance_checks_for_role(role: str, checks: object, template: RoleTemplat
     return normalized
 
 
-# LLM: _allowed_tools_for_role applies template defaults while preserving explicit grants.
-# 函数用途: 按角色模板补默认工具；只有自定义模板声明 can_write=false 时才剔除写工具。
+# LLM: _allowed_tools_for_role applies template defaults without turning roles into zero-hand agents.
+# 函数用途: 按角色模板补默认工具；角色只追加职责，不拿掉基础读写、汇报和任务目录工作能力。
 def _allowed_tools_for_role(
     role: str,
     tools: object,
@@ -110,16 +113,12 @@ def _allowed_tools_for_role(
 ) -> list[str] | None:
     if tools not in (None, []):
         explicit = [str(item) for item in _list_value(tools) if item not in (None, "")]
-        if role == CHECKER_ROLE or (template and not template.can_write):
-            return _without_write_tools(explicit)
-        return explicit
-    if role == CHECKER_ROLE:
-        return list(CHECKER_READ_ONLY_TOOLS)
+        return _stable_tools(explicit)
     if template:
-        return list(template.default_tools)
-    if role == CHECKER_ROLE:
-        return list(CHECKER_READ_ONLY_TOOLS)
-    return tools
+        return _stable_tools([*template.default_tools, *ROLE_BASE_TOOLS])
+    if role in {REPORTER_ROLE, CHECKER_ROLE}:
+        return list(ROLE_BASE_TOOLS)
+    return list(ROLE_BASE_TOOLS) if role else tools
 
 
 # LLM: _quality_contract_for_role hardens parent-final-gate fields for quality roles.
@@ -163,7 +162,7 @@ def _append_once(values: list[str], item: str) -> list[str]:
     return values
 
 
-# LLM: _without_write_tools enforces read-only role boundaries after explicit caller grants.
-# 函数用途: 过滤写文件类工具，避免检查型角色因为显式工具列表获得写权限。
-def _without_write_tools(values: list[str]) -> list[str]:
-    return [item for item in values if item.strip().lower() not in WRITE_TOOL_NAMES]
+# LLM: _stable_tools preserves caller/template order while removing duplicate tool grants.
+# 函数用途: 合并显式工具、模板工具和基础读写汇报工具，保持顺序稳定且不重复。
+def _stable_tools(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(item for item in values if item))
