@@ -59,8 +59,18 @@ _LOG_LEVELS = {
 }
 
 HIDDEN_COMPAT_CONFIG_FIELDS = {
+    "auto_bench_model_on_first_use",
+    "dynamic_timeout_max",
+    "dynamic_timeout_min",
+    "dynamic_timeout_safety_margin",
     "max_auto_retry_attempts",
     "max_auto_split_depth",
+    "model_speed_profile_path",
+    "runner_concurrency",
+    "runner_start_rate",
+    "runner_timeout_by_role",
+    "runner_timeout_seconds",
+    "scheduler_mode",
     "subagent_allowed_tools",
     "subagent_automation_level",
     "subagent_board_limit",

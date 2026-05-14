@@ -206,6 +206,35 @@ class TestCreateSubagentsToolTemplatePolicy:
         assert "目标目录" in result.output
         mock_agent.subagents.create_run.assert_not_called()
 
+    def test_no_comment_constraint_can_be_preserved_in_child_goal(self):
+        """用户要求不要注释时，子任务保留“不要写注释”不应被误判为要求写注释。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent._current_user_prompt = "只输出完整 HTML，不要注释。"
+        mock_agent.subagents.workspace_root = Path("/tmp/project")
+        mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
+        mock_task = MagicMock()
+        mock_task.id = "frontend_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/frontend_001"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": "请在 /tmp/project/deliverables/index1.html 输出完整 HTML，不要写注释。",
+            "role": "worker",
+            "extra_write_roots": ["/tmp/project/deliverables"],
+        })
+
+        assert result.ok is True
+        mock_agent.subagents.create_run.assert_called_once()
+
 
 
 class TestCreateSubagentsToolCoordinatorSeed:

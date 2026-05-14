@@ -193,42 +193,6 @@ acceptance_execute_tests: false
 # - `subagents-acceptance --test-timeout` 和 `subagents-tests --timeout` 可覆盖单次调用。
 acceptance_test_timeout_seconds: 120
 
-# 调度模式（scheduler_mode）：
-# - "auto": 默认值。未来 gateway/调度器会自动判断怎么派 runner、怎么排队、怎么处理卡住任务。
-# - "manual": 预留给“只在用户或上层 workflow 明确要求时才调度”的模式。
-# - "off" / "none" / "disabled": 预留给“关闭自动调度”的模式。
-# - 当前状态：这个字段已经作为配置位和前端字段保留，但核心调度暂时还没有真正读取它；
-#   所以现在改 scheduler_mode 不会直接改变 runner 行为。当前真正生效的是下面几个字段：
-#   runner_concurrency、runner_start_rate、runner_timeout_seconds、runner_failure_policy。
-# - 给用户的建议：普通使用保持 "auto"；等 gateway 调度策略正式接入后，再按 UI/文档选择 manual/off。
-scheduler_mode: "auto"
-runner_concurrency: "auto"
-runner_start_rate: "auto"
-
-# Runner 超时开关和动态超时参数；这三项必须放一起看。
-# runner_timeout_seconds 表示 runner 超时模式："off"/0 是不限制；"auto" 是启用动态超时；数字字符串表示固定秒数。
-runner_timeout_seconds: "off"
-
-# runner_timeout_by_role 表示按角色覆盖 runner 超时：常用于 root/coordinator 长跑、worker/leaf 短保护、takeover 接管 run 给更长预算。
-# 支持行内字典，例如 {"root": "off", "coordinator": "off", "worker": 30, "takeover": 180}；空字典表示全部走 runner_timeout_seconds。
-runner_timeout_by_role: {}
-
-# dynamic_timeout_min 表示动态超时下限：auto 模式算出来再短，也至少给这么多秒，避免小任务被误杀。
-dynamic_timeout_min: 30
-
-# dynamic_timeout_max 表示动态超时上限：auto 模式算出来再长，也最多给这么多秒，避免子代理长期卡住。
-dynamic_timeout_max: 600
-
-# 动态超时估算辅助参数；这些字段服务于 runner_timeout_seconds="auto"。
-# dynamic_timeout_safety_margin 表示安全倍率：实际超时 = 预估耗时 * 这个倍率。
-dynamic_timeout_safety_margin: 2.0
-
-# model_speed_profile_path 表示模型速度样本文件路径，动态超时会用它估算任务耗时。
-model_speed_profile_path: "data/model_speed_profile.json"
-
-# auto_bench_model_on_first_use 表示首次使用时是否自动跑速度测试，给后续动态超时提供样本。
-auto_bench_model_on_first_use: true
-
 # runner_failure_policy 控制 runner 临时失败后的总尝试次数：
 # - "auto": 当前等价于最多 2 次，也就是首次失败后下一轮 dispatch 再试一次
 # - "off" / "none" / "disabled": 不自动重试，总尝试次数为 1

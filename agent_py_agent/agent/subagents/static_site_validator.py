@@ -95,7 +95,7 @@ def _resolve_site_root(test: dict[str, Any], workspace_root: Path) -> tuple[Path
 def _scan_site(test: dict[str, Any], site_root: Path) -> StaticSiteCheckResult:
     result = StaticSiteCheckResult(checked_root=str(site_root))
     _check_required_files(result, test, site_root)
-    html_files = _html_files(site_root, int(test.get("max_files") or 200))
+    html_files = _html_files(test, site_root, int(test.get("max_files") or 200))
     result.checked_files = [_rel(path, site_root) for path in html_files]
     check_refs = test.get("check_local_refs", True) is not False
     check_placeholders = test.get("forbid_placeholders", True) is not False
@@ -141,9 +141,23 @@ def _check_required_files(result: StaticSiteCheckResult, test: dict[str, Any], s
 
 # LLM: _html_files limits directory scanning so large workspaces cannot explode validation cost.
 # 函数用途: 返回站点根下有限数量的 HTML 文件；按路径排序保证报告稳定。
-def _html_files(site_root: Path, max_files: int) -> list[Path]:
+def _html_files(test: dict[str, Any], site_root: Path, max_files: int) -> list[Path]:
+    scoped = _scoped_html_files(test, site_root)
+    if scoped:
+        return scoped[: max(1, min(max_files, 500))]
     limit = max(1, min(max_files, 500))
     return sorted(path for path in site_root.rglob("*.html") if path.is_file())[:limit]
+
+
+# LLM: _scoped_html_files lets leaf acceptance validate one declared page without sibling interference.
+# 函数用途: 当测试项声明 html_files/check_files 时，只扫描这些站点内 HTML 文件；不存在文件由 required_files 报告。
+def _scoped_html_files(test: dict[str, Any], site_root: Path) -> list[Path]:
+    paths: list[Path] = []
+    for item in _string_list(test.get("html_files") or test.get("check_files")):
+        candidate = (site_root / item).resolve()
+        if _inside(candidate, site_root) and candidate.is_file() and candidate.suffix.lower() in {".html", ".htm"}:
+            paths.append(candidate)
+    return sorted(dict.fromkeys(paths))
 
 
 # LLM: _broken_refs checks only local href/src/action targets and ignores remote URLs.

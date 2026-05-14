@@ -111,6 +111,33 @@ def test_static_site_check_blocks_placeholder_hash_links(tmp_path):
     ]
 
 
+# LLM: Leaf acceptance must not fail because sibling pages in the same deliverables folder are still broken.
+# 函数用途: 单个 worker 只负责 index1.html 时，static_site_check 可以限定检查文件，避免 sibling 串扰。
+def test_static_site_check_can_scope_to_declared_html_files(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "index1.html": '<main id="home">Home</main><a href="#home">真实锚点</a>',
+            "index2.html": '<a href="#">坏 sibling</a>',
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "single leaf page",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index1.html"],
+            "html_files": ["index1.html"],
+        }
+    )
+
+    assert record.executed is True
+    assert record.passed is True
+    assert record.validation_result["checked_files"] == ["index1.html"]
+
+
 # LLM: R59 shopping E2E generated loginForm/registerForm but JS bound login-form/register-form.
 # 函数用途: 父级静态验收要能发现表单 id 和本地 app.js 绑定目标不一致，避免按钮假可用。
 def test_static_site_check_blocks_missing_validate_form_targets(tmp_path):

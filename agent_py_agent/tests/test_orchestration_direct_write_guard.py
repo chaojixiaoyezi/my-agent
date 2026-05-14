@@ -52,6 +52,21 @@ def test_delegate_only_prompt_blocks_shell_redirection_write():
     assert "delegated_direct_write_blocked" in result.output
 
 
+def test_natural_delegate_prompt_blocks_root_write_file_to_deliverables():
+    """自然语言说“不要亲自写页面/安排小傻妞”时，也要阻止 root 偷写产物。"""
+    result = maybe_block_delegate_only_direct_write(
+        DelegateOnlyDirectWriteGuardRequest(
+            agent=_agent(),
+            user_prompt="请不要亲自写页面，请安排小傻妞们分工完成，完成后你只根据小傻妞们的报告做收口。",
+            payload={"tool": "write_file", "path": "/tmp/workspace/deliverables/index1.html", "content": "..."},
+        )
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert "delegated_direct_write_blocked" in result.output
+
+
 def test_delegate_only_prompt_allows_leaf_worker_product_write():
     """被派去交付的 leaf_worker 应能写自己的产物，guard 只拦 root/父级偷写。"""
     result = maybe_block_delegate_only_direct_write(

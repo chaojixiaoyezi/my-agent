@@ -1,103 +1,20 @@
 # 能力路由配置文件
 # 说明：
-# - 这里放 skill / tool / 子代理授权 / 能力上抛相关参数
-# - 不和 agent_config.yaml 混在一起，避免主配置越来越臃肿
-# - 所有数字限制项里，0 都表示“不限制”
-# - 当前主要是为后续 Capability Router 预留，默认不会改变现有 chat 行为
+# - 这里管的是“子代理/工具/skill 遇到不会做的事时，能不能向上级申请能力”。
+# - 普通用户不需要配置每个子代理能用什么工具；默认由系统和 LLM 根据任务判断。
+# - 旧版细碎限制项仍由代码默认值兼容读取，但不再放进默认配置文件里。
 
-# 是否启用能力路由
-# - false: 默认关闭，子代理仍按现有逻辑工作
-# - true: 后续允许子代理用 capability_request 向父代理申请 skill/tool 能力
+# 是否启用能力路由。
+# - true: 子代理遇到缺工具、缺 skill 或新问题时，可以写能力请求，让上级判断怎么补。
+# - false: 关闭能力申请链路，子代理只能使用创建时已有的能力。
 enable_capability_routing: true
 
-# 子代理能力请求的最大 token 数
-# - 用来限制 problem / needed_capability / tried / evidence 等描述总长度
-# - 默认 600，避免子代理把失败过程无限展开
-# - 设为 0 表示不限制
-capability_request_max_tokens: 600
-
-# 能力请求最多向上抛几层
-# - 用来避免“子代理 -> 父代理 -> 爷代理 -> 更上层”无限上抛
-# - 默认 4 层，通常足够覆盖子代理、孙子代理、曾孙子代理场景
-# - 设为 0 表示不限制
+# 能力请求最多向上抛几层。
+# - 4: 覆盖主 -> 子 -> 孙 -> 孙孙的常见链路。
+# - 0: 不限制，但容易在坏任务里反复上抛；真实压测默认先用 4。
 capability_escalation_max_hops: 4
 
-# 父代理每次最多返回多少个候选 skill/tool card
-# - 默认 5，避免一次下发太多候选能力导致 token 膨胀和选择混乱
-# - 设为 0 表示不限制
-capability_candidate_limit: 7
-
-# 一个子代理本轮拿到的能力包最大 token 数
-# - 能力包包括 skill card、tool card、授权说明和必要约束
-# - 默认 3000，避免子代理上下文被能力说明淹没
-# - 设为 0 表示不限制
-capability_bundle_max_tokens: 10000
-
-# 同一个能力失败后最多尝试几个替代工具
-# - 例如 web_search_A 失败后，可以继续尝试 web_search_B / fetch_url 等
-# - 默认 3，避免同类工具无限重试
-# - 设为 0 表示不限制
-capability_fallback_max_attempts: 5
-
-# 子代理心跳超时秒数
-# - 超过这个时间没有更新 heartbeat，父代理应视为需要 due-check
-# - 设为 0 表示不限制
-subagent_heartbeat_timeout: 180
-
-# 子代理单次运行默认超时秒数
-# - 用来避免子代理长时间卡在工具调用或写文件上没人接管
-# - 设为 0 表示不限制
-subagent_run_timeout: 900
-
-# 父代理 due-check 间隔秒数
-# - 用来提醒父代理定期查看实际产出，而不是 spawn 后放养
-# - 设为 0 表示不限制
-subagent_due_check_interval: 120
-
-# 子代理标记 DONE 前最少需要多少条验收证据
-# - 默认 1，避免纯口头“完成了”
-# - 设为 0 表示不要求证据
-subagent_min_evidence_for_done: 1
-
-# 子代理连续恢复无进展的熔断次数
-# - runner_attempts 达到这个值且任务仍未完成时，父代理不再自动重试或扩容
-# - 会记录 no-progress fuse，要求父级/用户根据 refs 决定下一步
-# - 设为 0 表示关闭这个熔断
-subagent_no_progress_attempt_limit: 4
-
-# 子代理一次请求里最多列多少条“已尝试”
-# - 设为 0 表示不限制
-capability_request_max_tried_items: 0
-
-# 子代理一次请求里最多带多少条证据或错误摘要
-# - 设为 0 表示不限制
-capability_request_max_evidence_items: 0
-
-# 单个任务最多发起多少次能力请求
-# - 设为 0 表示不限制
-capability_request_max_per_task: 0
-
-# 一次最多给下级挂多少个 skill
-# - 设为 0 表示不限制
-capability_grant_max_skills: 0
-
-# 一次最多给下级挂多少个 tool
-# - 设为 0 表示不限制
-capability_grant_max_tools: 0
-
-# 下发能力是否默认只在当前任务有效
-# - true: 默认推荐，任务结束后收回临时授权
-# - false: 后续可以让授权跨任务保留，但需要更强的审计和用户确认
+# 下发能力是否只在当前任务有效。
+# - true: 推荐默认值，任务结束后收回临时授权，避免污染后续任务。
+# - false: 允许授权跨任务保留，后续需要更强审计。
 capability_grant_expires_after_task: true
-
-# 单个 skill card 注入 prompt 的最大 token 数
-# - 设为 0 表示不限制
-skill_card_max_tokens: 0
-
-# 单个 tool card 注入 prompt 的最大 token 数
-# - 设为 0 表示不限制
-tool_card_max_tokens: 0
-
-# 真正加载 SKILL.md 正文时的最大 token 数
-# - 设为 0 表示不限制
-skill_body_max_tokens: 0

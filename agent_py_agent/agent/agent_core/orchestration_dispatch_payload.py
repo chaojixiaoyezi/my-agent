@@ -76,6 +76,8 @@ def _dispatch_record_acceptance_payload(item) -> dict[str, object]:
         "test_ref": "parent_acceptance_auto_execution_test_ref",
         "test_total": "parent_acceptance_auto_execution_test_total",
         "test_failed": "parent_acceptance_auto_execution_test_failed",
+        "test_failure_summary": "parent_acceptance_test_failure_summary",
+        "test_failure_details": "parent_acceptance_test_failure_details",
         "followup_ref": "parent_acceptance_followup_ref",
         "followup_status": "parent_acceptance_followup_status",
         "followup_action": "parent_acceptance_followup_action",

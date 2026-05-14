@@ -25,6 +25,7 @@ from .orchestration_board_payload import (
     clip_board_text,
 )
 from .orchestration_dispatch_tool import DispatchSubagentsTool
+from .orchestration_negation_markers import contains_unnegated_marker
 from .orchestration_root_contract import explicit_root_goal_with_user_contract
 from .orchestration_tool_specs import (
     build_create_subagents_spec,
@@ -440,9 +441,9 @@ def _user_requires_working_buttons(text: str) -> bool:
 # 函数用途: 判断派工目标是否允许 # 空链接或假按钮。
 def _goal_allows_dead_buttons(text: str) -> bool:
     lowered = text.lower()
-    return any(
-        marker in lowered
-        for marker in ('href="#"', "指向 #", "指向#", "可指向 #", "#锚点", "# 锚点", "空锚点", "hash anchor", "can point to #")
+    return contains_unnegated_marker(
+        lowered,
+        ('href="#"', "指向 #", "指向#", "可指向 #", "#锚点", "# 锚点", "空锚点", "hash anchor", "can point to #"),
     )
 
 
@@ -457,21 +458,33 @@ def _user_requires_no_broken_images(text: str) -> bool:
 # 函数用途: 子任务目标主动要求 Unsplash/远程图片 URL 时，如果用户要求不失效图片，就拒绝这类弱化约束。
 def _goal_requires_unverified_remote_images(text: str) -> bool:
     lowered = text.lower()
-    return any(marker in lowered for marker in ("unsplash", "images.unsplash", "图片 url", "image url", "http"))
+    return contains_unnegated_marker(lowered, ("unsplash", "images.unsplash", "图片 url", "image url", "http"))
 
 
 # LLM: _user_requires_no_comments detects simple no-comment deliverable requests.
 # 函数用途: 识别用户明确不要注释的交付约束。
 def _user_requires_no_comments(text: str) -> bool:
     lowered = text.lower()
-    return any(marker in lowered for marker in ("不要注释", "不要有注释", "no comments"))
+    return any(
+        marker in lowered
+        for marker in (
+            "不要注释",
+            "不要有注释",
+            "不要写注释",
+            "不写注释",
+            "禁止注释",
+            "no comments",
+            "without comments",
+            "do not write comments",
+        )
+    )
 
 
 # LLM: _goal_requests_comments catches delegated tasks that reintroduce comments.
 # 函数用途: 判断派工目标是否要求代码注释或注释说明。
 def _goal_requests_comments(text: str) -> bool:
     lowered = text.lower()
-    return any(marker in lowered for marker in ("有注释", "写注释", "代码注释", "with comments"))
+    return contains_unnegated_marker(lowered, ("有注释", "写注释", "代码注释", "with comments"))
 
 
 # LLM: CreateSubagentsTool 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

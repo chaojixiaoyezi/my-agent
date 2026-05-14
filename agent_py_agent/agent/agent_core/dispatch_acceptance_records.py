@@ -26,6 +26,7 @@ from .dispatch_acceptance_refresh import (
 )
 from .dispatch_acceptance_stored_record import stored_acceptance_record
 from .dispatch_record_params import AcceptanceRecordParams
+from .dispatch_test_failure_summary import acceptance_test_failure_payload
 
 
 # LLM: make_acceptance_records builds dispatch-visible acceptance records after optional parent tests.
@@ -266,6 +267,7 @@ def _parent_acceptance_policy_payload(task: Any, policy: Any, execution: Any) ->
         "parent_acceptance_auto_execution_test_ref": execution.test_execution_ref,
         "parent_acceptance_auto_execution_test_total": execution.test_total,
         "parent_acceptance_auto_execution_test_failed": execution.test_failed,
+        **acceptance_test_failure_payload(execution.test_execution_ref),
         "parent_acceptance_followup_ref": execution.followup_ref,
         "parent_acceptance_followup_status": execution.followup_status,
         "parent_acceptance_followup_action": execution.followup_action,
@@ -300,6 +302,7 @@ def _existing_test_followup_payload(task: Any) -> dict[str, object]:
         "parent_acceptance_auto_execution_test_ref": str(test_ref),
         "parent_acceptance_auto_execution_test_total": int(test_payload.get("total_tests") or 0),
         "parent_acceptance_auto_execution_test_failed": int(test_payload.get("failed") or 0),
+        **acceptance_test_failure_payload(test_ref),
         "parent_acceptance_followup_ref": str(followup_ref) if followup_ref.exists() else "",
         "parent_acceptance_followup_status": str(followup.get("status") or ""),
         "parent_acceptance_followup_action": str(followup.get("action") or ""),
@@ -319,4 +322,3 @@ def _read_followup_payload(path: Path) -> dict[str, object]:
         return {}
     followup = payload.get("followup") if isinstance(payload, dict) else {}
     return followup if isinstance(followup, dict) else {}
-

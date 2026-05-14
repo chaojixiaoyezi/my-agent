@@ -1010,7 +1010,7 @@ python3 -m agent_py_agent daemon
 
 配置分两层：
 - 子代理用户层配置：默认只暴露 `enable_subagents`、`subagent_mode`、`max_subagents`、`subagent_workspace`、`subagent_role_template_dirs`、`subagent_debug_trace_level` 和父级验收两项。普通用户不需要判断每个角色用什么工具、上下文给多少、一次派几个叶子。
-- 未来 gateway 调度策略：`runner_concurrency: "auto"`、`runner_start_rate: "auto"` 让主代理/调度器根据队列长度和卡住情况自适应；`runner_timeout_seconds: "off"` 表示 runner 不套外层超时，适合真实 E2E 和长任务压测；需要固定上限时可改成秒数，需要动态预算时可改成 `auto`。
+- 能力路由配置：`capability_config.yaml` 默认只保留开关、上抛层数和授权过期。具体给哪个子代理什么工具，默认由任务包、角色模板和 LLM 判断，不要求用户逐个填写。
 - 当前前台 daemon 高级参数：`daemon_max_runners: "auto"` 会先映射成保守值 1；`daemon_max_cycles=0` 表示持续运行；`daemon_limit=0` 表示不限制记录条数；`daemon_max_cards=0` 表示不限制能力卡数量；`daemon_interval=0` 通常只用于测试或单轮验证。
 
 父代理 planner 模式：

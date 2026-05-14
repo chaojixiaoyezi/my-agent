@@ -1242,6 +1242,14 @@
 - 已测试：focused tests 覆盖配置瘦身、角色默认工具、root capability 隐藏、context task packet、JSON 工具别名归一；相关 ruff passed。
 - 下一步：继续做 dispatcher/scheduler 的 typed packet 优先读取和 QA/验收后置策略，减少自然语言误传和空转角色。
 
+## 2026-05-15 子代理硬化迁移第二片：验收失败要给具体修复线索
+- 中文说明：对照 会话运行时 的 typed collab 事件和 长期助手 的 `delegate_task(goal, context)` 经验，父级不能只得到“failed=1”，还要得到“哪几个按钮/链接/文件失败”。
+- 已修复：`dispatch_subagents` 的 acceptance 记录新增 `test_failure_summary` 和 `test_failure_details`，从 `test_execution.json` 里抽取有界、refs-only 的失败细节，避免 root/修复子代理靠猜。
+- 已修复：单页面 leaf 的 static-site 验收只扫描该 leaf 声明的 `html_files/check_files`，不再被同目录兄弟页面误伤。
+- 已瘦身默认配置：`capability_config.yaml` 只保留 3 个普通用户能理解的能力路由项；旧字段仍可被代码读取，但默认安装不再展示一堆细碎 token/timeout/card 限制。
+- 已测试：dispatch payload、失败摘要提取、真实 dispatch static-site 失败细节、static-site scoped check、执行项推断相关 focused tests 均通过。
+- 下一步：用自然中文任务继续跑 3-worker E2E，让 root 根据结构化失败细节派小傻妞修复，而不是自己猜或自己读正文。
+
 ## 2026-05-15 子代理硬化第 9 步：dispatch typed envelope
 - 中文说明：`dispatch_subagents` 的返回结果现在也带 `typed_envelope.kind=subagent_dispatch`。父级后续推进时可以直接读 `actionable_run_ids`、`recovery_run_ids`、dispatch 报告 refs 和状态摘要，不需要从一段自然语言汇报里猜哪个子代理该继续跑。
 - 已实现：新增 `SubagentDispatchEnvelope`，并接入 action protocol 解码；dispatch payload 会把稳定控制字段写入 `typed_envelope`。
@@ -1272,3 +1280,10 @@
 - 最新真实结果：`/Users/example/my-终端应用/subagent_hardening_e2e_20260515_step24d` 跑通。root 只创建并调度一个 `小傻妞` worker，最终 `total_runs=1`、`done_verified=1`，产物 `/deliverables/index.html` 存在，dispatch summary 为 `accept=1`。
 - 已测试：新增/复验 `test_orchestration_dispatch_subagents_tool.py`、`test_orchestration_body_read_guard.py`、`test_orchestration_workflow_mode.py`、`test_agent/test_dispatch_and_planner.py`、`test_agent/test_dispatch_runner_context_acceptance.py`、`test_parent_acceptance_controller.py` focused tests；相关 ruff passed。
 - 下一步：把本轮真实问题继续追加到 `06-real-e2e-findings.md`，再跑提交前 doc sync、strict code-size、focused/broad pytest；随后提交并推远端，进入更大规模 3/5/10/层级恢复测试。
+
+## 2026-05-15 子代理硬化 Group 2 前置修复：自然约束别误判、root 别偷写
+- 中文说明：3-worker 自然语言 E2E 第一次跑出了一个关键问题。用户说“不要亲自写页面，安排小傻妞们分工完成”，root 创建子代理时因为“不要写注释”被误判为冲突，随后开始自己写 `index1.html`。
+- 已修正：派工约束检查现在能区分“写注释”和“不要写注释”；同样适用于“不要 # 锚点”“不要远程图片 URL”这类否定约束，避免把保留原约束当成反向改写。
+- 已修正：直接写产物 guard 复用自然委托识别，`不要亲自写页面`、`安排小傻妞`、`只根据报告做收口` 这类普通话表达都会阻止 root/父级直接写业务文件。
+- 已测试：`test_no_comment_constraint_can_be_preserved_in_child_goal`、`test_natural_delegate_prompt_blocks_root_write_file_to_deliverables` 先红后绿。
+- 下一步：干净重跑 Group 2 三文件并行任务，确认 root 只派工、不亲自写页面，并且 worker 不抢同一文件。

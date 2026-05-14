@@ -58,6 +58,7 @@ def test_prepare_items_scopes_static_check_to_observed_leaf_artifacts(tmp_path):
             "validation_method": "static_site_check",
             "site_root": "artifacts",
             "required_files": ["index1.html"],
+            "html_files": ["index1.html"],
         }
     ]
 

@@ -6378,3 +6378,82 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Focused regression: `test_top_level_refs_only_root_can_shell_read_orchestration_metadata`.
   - Clean E2E `subagent_hardening_e2e_20260515_step24d`: root did not inspect product body; task closed from local subagent state.
 - Status: fixed by focused tests and clean real E2E.
+
+### Finding 76: preserved negative constraints can be misread as conflicts
+
+- Discovered at: 2026-05-15 during subagent hardening 3-worker natural E2E group 2.
+- Symptom:
+  - User asked root not to write pages itself and to arrange 小傻妞 workers.
+  - `create_subagents` repeatedly rejected child goals that preserved the user constraint “不要写注释”.
+  - Root then gave up on delegation and started writing `deliverables/index1.html` itself.
+- 中文解释：
+  - 大白话：用户说“不要写注释”，小傻妞任务也照着写了“不要写注释”，系统却只看到里面的“写注释”，误以为子任务在要求加注释。然后 root 没被拦住，自己开始写网页。
+- Root cause:
+  - The constraint conflict guard used raw substring checks. It treated negated phrases such as “不要写注释” as positive requests like “写注释”.
+  - Direct-write guard had its own narrower delegation detector and did not reuse the broader natural-language refs-only detector.
+- Fix:
+  - Constraint checks now ignore markers preceded by negation words such as “不要/禁止/without/do not”.
+  - Direct-write guard now reuses the natural delegation intent helper, so prompts like “不要亲自写页面，安排小傻妞” block root product writes.
+- Verification:
+  - Focused regression: `test_no_comment_constraint_can_be_preserved_in_child_goal`.
+  - Focused regression: `test_natural_delegate_prompt_blocks_root_write_file_to_deliverables`.
+- Status: fixed by focused tests; rerun 3-worker natural E2E clean.
+
+### Finding 77: leaf static-site checks must not scan sibling pages
+
+- Discovered at: 2026-05-15 during 3-worker furniture E2E group 2.
+- Symptom:
+  - `index1.html`、`index2.html`、`index3.html` 由三个 worker 分别负责。
+  - 父级验收某个 leaf 时扫描整个 `deliverables/`，导致 `index2.html` 的坏链接可能让 `index1.html` 的 leaf 也失败。
+- 中文解释：
+  - 大白话：三个小傻妞各写一个页面，验收小傻妞 A 时不能把小傻妞 B 的页面也算到 A 头上。否则修复会找错人。
+- Root cause:
+  - `static_site_check` 默认扫描站点根目录下所有 HTML。
+  - leaf 已经知道自己负责的 HTML 文件，但测试项没有把这个范围传给 validator。
+- Fix:
+  - inferred static-site test 会在单 leaf 场景写入 `html_files`。
+  - validator 优先使用 `html_files/check_files`，只扫描声明的页面；缺文件仍由 `required_files` 报告。
+- Verification:
+  - Focused regression: `test_static_site_check_can_scope_to_declared_html_files`.
+  - Focused regression: `test_prepare_items_scopes_static_check_to_observed_leaf_artifacts`.
+  - Focused regression: `test_prepare_test_items_infers_static_site_check_for_single_html_artifact`.
+- Status: fixed by focused tests.
+
+### Finding 78: failed parent tests need concrete repair facts, not only failed counts
+
+- Discovered at: 2026-05-15 during 3-worker furniture E2E group 2.
+- Symptom:
+  - Parent acceptance correctly returned `test_failed=1` for `index2.html`。
+  - Root saw “测试失败” but did not get `index2.html:a:Collection`、`Contact` 等具体失败项，于是 repair prompt 只能泛泛写“修复父级验收失败”。
+- 中文解释：
+  - 大白话：医生只告诉你“体检没过”，不告诉你是哪项没过，修理工就只能碰运气。
+- Root cause:
+  - `dispatch_subagents` payload exposed `test_ref/test_total/test_failed/followup_action` but not the bounded validation details.
+  - Root attempted to read a guessed artifact ref for `test_execution.json` and failed; it should not have to guess report paths.
+- Fix:
+  - Added `test_failure_summary` and `test_failure_details` to dispatch acceptance records and model-facing payload.
+  - The summary is extracted from `test_execution.json` and bounded to refs-only facts such as `inert_control_hits: index2.html:a:Collection; index2.html:a:Contact`.
+  - Human Markdown reports now show `failure_summary` beside test refs.
+- Verification:
+  - Focused regression: `test_static_site_failure_details_expose_concrete_inert_controls`.
+  - Focused regression: `test_dispatch_payload_includes_acceptance_followup`.
+  - Focused regression: `test_subagent_dispatch_surfaces_static_site_failure_details`.
+- Status: fixed by focused tests; next real E2E should confirm root uses these details for repair dispatch.
+
+### Finding 79: default subagent/capability config exposed too many knobs
+
+- Discovered at: 2026-05-15 after repeated fragile E2E runs and user review.
+- Symptom:
+  - Default config exposed runner timeouts, dynamic timeout internals, capability token/card limits, heartbeat/due-check intervals and similar low-level fields.
+  - User had to reason about settings that should be internal policy, not everyday product configuration.
+- 中文解释：
+  - 大白话：子代理还没像主代理一样稳定干活，就先让用户调一堆“螺丝”。这会让系统变得像走钢丝，稍微一改就坏。
+- Root cause:
+  - Earlier hardening phases added protective knobs directly to user-facing YAML instead of keeping them as internal defaults or debug-only compatibility fields.
+- Fix:
+  - `agent_config.yaml` now exposes only 8 subagent items: enable/mode/max/workspace/template dirs/debug trace/acceptance test switch/test timeout.
+  - `capability_config.yaml` now exposes only capability routing enablement, escalation depth, and per-task grant expiry.
+  - Old fields remain load-compatible in code so existing configs and tests are not broken.
+- Verification:
+  - Config files were updated; focused tests for capability loading and subagent dispatch remain part of the next validation batch.
+- Status: fixed in default config surface; deeper removal from dataclasses is deferred until compatibility migration is safe.

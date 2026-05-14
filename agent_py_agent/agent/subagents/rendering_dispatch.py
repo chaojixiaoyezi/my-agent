@@ -99,6 +99,8 @@ def _dispatch_auto_execution_line(record) -> str:
             f"test_total={record.parent_acceptance_auto_execution_test_total} "
             f"test_failed={record.parent_acceptance_auto_execution_test_failed}"
         )
+        if record.parent_acceptance_test_failure_summary:
+            tests = f"{tests} failure_summary={record.parent_acceptance_test_failure_summary}"
     return (
         "  - parent_acceptance_auto_execution: "
         f"execution_status={record.parent_acceptance_auto_execution_status} "
