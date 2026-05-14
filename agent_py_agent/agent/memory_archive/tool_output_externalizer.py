@@ -53,6 +53,9 @@ def externalize_tool_output_record(request: ExternalizeToolOutputRequest) -> dic
     output = str(request.output or "")
     digest = _sha256_text(output)
     record = _base_record(request, output, digest)
+    if _is_bounded_read_artifact_output(request, output):
+        record.update(_read_artifact_record_fields(output))
+        return record
     if len(output) >= max(0, int(request.min_chars)):
         path = _write_output_artifact(request, output, digest)
         record.update({
@@ -162,6 +165,37 @@ def _preview(output: str) -> str:
 # 函数用途: 计算 UTF-8 文本的 sha256 hex digest。
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# LLM: _is_bounded_read_artifact_output prevents artifact-of-artifact loops in live recovery.
+# 函数用途: 判断工具输出是否已经是 read_artifact 返回的受控正文切片；这种输出不再二次外置。
+def _is_bounded_read_artifact_output(request: ExternalizeToolOutputRequest, output: str) -> bool:
+    if request.tool != "read_artifact" or not request.ok:
+        return False
+    payload = _json_object(output)
+    return bool(payload and payload.get("reads_artifact_body") is True)
+
+
+# LLM: _read_artifact_record_fields keeps source artifact metadata visible without creating a wrapper artifact.
+# 函数用途: 给 read_artifact 归档记录补充原始 artifact 引用，方便后续按 source_artifact_ref 继续分片读取。
+def _read_artifact_record_fields(output: str) -> dict[str, Any]:
+    payload = _json_object(output) or {}
+    return {
+        "reads_artifact_body": True,
+        "source_artifact_ref": str(payload.get("artifact_ref") or ""),
+        "source_tool": str(payload.get("tool") or ""),
+        "source_call_id": str(payload.get("call_id") or ""),
+    }
+
+
+# LLM: _json_object parses only dict payloads and lets malformed tool text fall back to normal externalization.
+# 函数用途: 安全解析工具输出 JSON；不是对象或解析失败时返回 None。
+def _json_object(text: str) -> dict[str, Any] | None:
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
 
 
 # LLM: _safe_segment 避免工具名和 call id 把 artifact 写到预期目录外。

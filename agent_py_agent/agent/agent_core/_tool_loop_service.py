@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
 from ..prompting_parts.builder import ToolSections
+from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
 from ._runtime_params import ToolLoopExecuteParams
 from .runner_stage_trace import (
     RunnerToolStageTraceRequest,
@@ -49,6 +50,7 @@ def _build_prompt(agent, params: ToolLoopExecuteParams) -> str:
         inject=params.runtime_injections,
         prompt_files=params.prompt_files,
         system_prompt_override=params.system_prompt_override,
+        context_scope=params.context_scope,
         tools=ToolSections(
             tool_catalog_section=params.tool_catalog_section,
             tool_recommendations_section=params.tool_recommendations_section,
@@ -229,6 +231,9 @@ class ToolLoopService:
             f"{render_tool_result_for_live_prompt(record.result, archive_record)}"
         )
         append_long_content_recovery_context(record)
+        progress = record_runtime_subagent_tool_progress(self._agent, record)
+        if progress:
+            record.params.tool_context.append(_task_local_progress_context(progress))
 
     # LLM: _archive_tool_call_record 属于 SimpleAgent 核心运行的函数边界；工具输出归档格式变化会影响 raw archive 和 compact。
     # 函数用途: 生成可归档的工具调用记录，大输出外置为 artifact，当前工具上下文仍保留完整结果。
@@ -249,3 +254,18 @@ class ToolLoopService:
         output_record.update(fail_safe)
         output_record["parameters"] = record.payload
         return output_record
+
+
+# LLM: _task_local_progress_context gives the next runner turn a tiny progress anchor after writes.
+# 函数用途: 将 latest_tool_progress 摘要放入 live prompt，提醒子代理 compact/续跑后对照已完成章节。
+def _task_local_progress_context(progress: dict[str, object]) -> str:
+    return "\n".join(
+        [
+            "[task-local-progress]",
+            f"summary: {progress.get('summary', '')}",
+            f"latest_written_path: {progress.get('latest_written_path', '')}",
+            f"headings: {progress.get('headings', [])}",
+            f"latest_tool_progress_ref: {progress.get('latest_tool_progress_ref', '')}",
+            "policy: continue from this progress snapshot; avoid duplicating recorded headings.",
+        ]
+    )

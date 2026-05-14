@@ -217,9 +217,11 @@ def _source_refs(source: SubAgentTask) -> dict[str, str]:
 # LLM: _latest_continue_packet_ref keeps the packet path derivation identical to recovery strategy.
 # 函数用途: 从 source.agent_run_compactions_dir 推导 latest_continue_packet.json。
 def _latest_continue_packet_ref(source: SubAgentTask) -> str:
+    if source.agent_run_latest_session_continue_packet_json:
+        return source.agent_run_latest_session_continue_packet_json
     if not source.agent_run_compactions_dir:
         return ""
-    return str(Path(source.agent_run_compactions_dir) / "latest_continue_packet.json")
+    return str(Path(source.agent_run_compactions_dir) / "session" / "latest_continue_packet.json")
 
 
 # LLM: _takeover_write_roots grants the replacement access to source-owned task/artifact directories.

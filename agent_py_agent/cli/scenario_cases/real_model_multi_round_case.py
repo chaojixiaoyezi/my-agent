@@ -23,7 +23,11 @@ from ..scenario_utils import (
     print_scenario_step,
     write_scenario_summary,
 )
-from .real_model_recovery_case import _real_model_recovery_resume
+from .real_model_recovery_case import (
+    _real_model_recovery_resume,
+    _scenario_summary_preview,
+    _subagent_result_text,
+)
 from .subagent_cases import _write_parent_subagent_recovery_fact_files
 
 
@@ -63,32 +67,30 @@ class ScenarioRealModelMultiRoundBackend:
     # LLM: _final_structured_result 属于scenario CLI；改行为前先对齐调用方和快照/单测。
     # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def _final_structured_result(self) -> str:
-        summary_preview = self.real_response_text[:200]
-        return (
-            "[SUBAGENT_RESULT]\n"
-            "{\n"
-            '  "status": "AWAITING_ACCEPTANCE",\n'
-            f'  "summary": "Real model multi-round smoke test: {summary_preview}",\n'
-            f'  "used_tools": {json.dumps(self.tool_sequence)},\n'
-            '  "used_skills": [],\n'
-            '  "evidence": [\n'
-            '    {"kind": "read_file", "summary": "README.md read via real model runner", "path": "README.md", "ok": true},\n'
-            '    {"kind": "search_text", "summary": "search_text gateway via real model runner", "query": "gateway", "ok": true}\n'
-            "  ],\n"
-            '  "capability_requests": [],\n'
-            '  "artifacts": [],\n'
-            '  "tests": [\n'
-            '    {"name": "real_model_multi_round_runner", "command": "", "ok": true, '
-            '"summary": "real model multi-round API call succeeded"}\n'
-            "  ],\n"
-            '  "patches": [],\n'
-            '  "lessons": ["real model multi-round API round-trip verified in recovery smoke test"],\n'
-            '  "next_actions": ["parent should validate recovery context includes multi-round evidence"],\n'
-            '  "blocked_reason": "",\n'
-            '  "failure_type": ""\n'
-            "}\n"
-            "[/SUBAGENT_RESULT]"
-        )
+        summary_preview = _scenario_summary_preview(self.real_response_text)
+        return _subagent_result_text({
+            "status": "AWAITING_ACCEPTANCE",
+            "summary": f"Real model multi-round smoke test: {summary_preview}",
+            "used_tools": self.tool_sequence,
+            "used_skills": [],
+            "evidence": [
+                {"kind": "read_file", "summary": "README.md read via real model runner", "path": "README.md", "ok": True},
+                {"kind": "search_text", "summary": "search_text gateway via real model runner", "query": "gateway", "ok": True},
+            ],
+            "capability_requests": [],
+            "artifacts": [],
+            "tests": [{
+                "name": "real_model_multi_round_runner",
+                "command": "",
+                "ok": True,
+                "summary": "real model multi-round API call succeeded",
+            }],
+            "patches": [],
+            "lessons": ["real model multi-round API round-trip verified in recovery smoke test"],
+            "next_actions": ["parent should validate recovery context includes multi-round evidence"],
+            "blocked_reason": "",
+            "failure_type": "",
+        })
 
 
 # LLM: _tool_payload 属于scenario CLI；改行为前先对齐调用方和快照/单测。

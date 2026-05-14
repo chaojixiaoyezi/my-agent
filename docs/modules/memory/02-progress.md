@@ -285,10 +285,10 @@
 - 本轮 focused 验收：`python -m pytest -q agent_py_agent/tests/test_memory_runtime_basics.py agent_py_agent/tests/test_memory_compact_auto.py agent_py_agent/tests/test_home_runtime_bootstrap.py agent_py_agent/tests/test_prompting_builder.py` -> passed。
 
 ## 2026-05-13 subagent task-local compact continuation
-- 中文说明：子代理 compact/resume 先落地“任务本地接续”第一版。runner prompt 会在有 run workspace refs 时注入 `Task-Local Compact Continuation`，只读取 `tasks/<root>/agents/<run>/` 里的 checkpoint、summary、task、findings 和 `compactions/latest_continue_packet.json` 短片段，不读取主代理 `SOUL.md` / `USER.md` / 长期 memory。
+- 中文说明：子代理 compact/resume 先落地“任务本地接续”第一版。runner prompt 会在有 run workspace refs 时注入 `Task-Local Compact Continuation`，只读取 `tasks/<root>/agents/<run>/` 里的 checkpoint、summary、task、findings 和 `compactions/session/latest_continue_packet.json` 短片段，不读取主代理 `SOUL.md` / `USER.md` / 长期 memory。
 - `compact_subagent_owner.py` 现在会把已存在的 `latest_continue_packet.json` 作为只读 ref 暴露给 `memory-resume --from-compact owner_type=subagent_run`；`reserved_hooks.continue_packet_ready=true` 只表示父级能看到恢复包，不会自动执行工具，也不会写主 memory。
 - `context_bundle.workspace_refs` 同步补齐 agent run workspace 的 task/checkpoint/summary/final_report/findings/timeline/compactions/shared refs，方便父级、接管代理和 runner 都从同一 refs-first 工单包恢复。
-- 闭环补齐：`SubAgentManager.save()` 现在会在每次保存后自动写 `compactions/latest_continue_packet.json` 和 append-only `session_compact_ledger.jsonl`；父级下一次 runner/dispatch 重新构建 prompt 时，会自动读取这个包继续原任务。
+- 闭环补齐：`SubAgentManager.save()` 现在会在每次保存后自动写 `compactions/session/latest_continue_packet.json` 和去重后的 `session_compact_ledger.jsonl`；父级下一次 runner/dispatch 重新构建 prompt 时，会自动读取这个包继续原任务。
 - 本轮 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_subagent_prompt_contract.py agent_py_agent/tests/test_subagent_context_bundle.py agent_py_agent/tests/test_memory_compact_auto.py` -> passed；strict code-size 维持 `hard=0 high-risk=0 soft=0`。
 
 ## 2026-05-14 compact resume configured subagent workspace

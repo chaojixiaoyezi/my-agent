@@ -18,11 +18,12 @@ from .compact_auto_continuation import (
     compact_auto_continuation_decision,
     mark_compact_auto_continued,
 )
+from .runtime_loop_models import RuntimeContextRequest
 from .runtime_loop_support import (
+    FinalizeParams,
     RunParams,
     _execute_runtime_loop,
     _finalize_params,
-    _FinalizeParams,
     _prepare_runtime_context,
     _runtime_loop_params,
     run_params_from_values,
@@ -75,6 +76,7 @@ class _RunCompatibilityFields:
     recovery_content_paths: list[str] | None = None
     recovery_next_actions: list[str] | None = None
     on_chunk: object = None
+    context_scope: str | None = None
 
 
 # LLM: _current_prompt_scope keeps run() flat while preserving the legacy _current_user_prompt behavior.
@@ -164,6 +166,7 @@ class SimpleAgentRuntimeMixin:
         recovery_task_refs: list[str] | None = None, recovery_content_paths: list[str] | None = None,
         recovery_next_actions: list[str] | None = None,
         on_chunk: object = None,
+        context_scope: str | None = None,
     ):
         provided_params = params
         params = _run_params_from_compat(
@@ -187,6 +190,7 @@ class SimpleAgentRuntimeMixin:
                 recovery_content_paths=recovery_content_paths,
                 recovery_next_actions=recovery_next_actions,
                 on_chunk=on_chunk,
+                context_scope=context_scope,
             ),
         )
         params = _apply_config_compact_auto_defaults(self.config, params, provided_params=provided_params is not None)
@@ -194,7 +198,7 @@ class SimpleAgentRuntimeMixin:
 
     # LLM: _build_finalize_context 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 构建finalize上下文所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
-    def _build_finalize_context(self, params: _FinalizeParams):
+    def _build_finalize_context(self, params: FinalizeParams):
         from .runtime_services import FinalizeContext
         rp = params.run_params
         return FinalizeContext(
@@ -258,6 +262,7 @@ def _run_params_from_compat(params: RunParams, fields: _RunCompatibilityFields) 
         recovery_content_paths=fields.recovery_content_paths,
         recovery_next_actions=fields.recovery_next_actions,
         on_chunk=fields.on_chunk,
+        context_scope=fields.context_scope,
     )
 
 
@@ -284,7 +289,10 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
 # 函数用途: 执行单轮 run，不处理自动 compact 后续跑，避免递归和重复上下文作用域。
 def _run_once_with_params(agent, user_prompt: str, params: RunParams):
     with _current_prompt_scope(agent, user_prompt):
-        prepared = _prepare_runtime_context(agent, user_prompt, params.inject, params.resume_context)
+        prepared = _prepare_runtime_context(
+            agent,
+            RuntimeContextRequest(user_prompt, params.inject, params.resume_context, params.context_scope),
+        )
         loop_result = _execute_runtime_loop(
             agent,
             _runtime_loop_params(user_prompt, prepared, params),

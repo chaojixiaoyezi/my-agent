@@ -241,6 +241,36 @@ def test_tool_call_parser_reports_missing_closing_tool_marker():
     assert "缩短 goal/plan/acceptance_checks" in result.output
 
 
+def test_tool_call_parser_ignores_markers_inside_subagent_result_payload():
+    """LLM: SUBAGENT_RESULT JSON strings are data, not executable tool calls."""
+    registry = make_tool_registry(Path.cwd())
+    calls = registry.parse_tool_calls(
+        "[SUBAGENT_RESULT]\n"
+        "{\n"
+        '  "status": "AWAITING_ACCEPTANCE",\n'
+        '  "summary": "model mentioned [TOOL_CALL] {\\\\\\"tool\\\\\\":\\\\\\"read_file\\\\\\"}"\n'
+        "}\n"
+        "[/SUBAGENT_RESULT]\n"
+    )
+
+    assert calls == []
+
+
+def test_tool_call_parser_still_accepts_tool_call_after_subagent_result():
+    """LLM: protected result masking should not hide a real tool call outside the result block."""
+    registry = make_tool_registry(Path.cwd())
+    calls = registry.parse_tool_calls(
+        "[SUBAGENT_RESULT]\n"
+        '{"summary":"quoted [TOOL_CALL] marker"}\n'
+        "[/SUBAGENT_RESULT]\n"
+        "[TOOL_CALL]\n"
+        '{"tool":"read_file","path":"README.md"}\n'
+        "[/TOOL_CALL]\n"
+    )
+
+    assert calls == [{"tool": "read_file", "path": "README.md"}]
+
+
 # LLM: complete JSON without the closing marker should still execute when the payload is intact.
 # 函数用途: 真实模型偶尔少写 [/TOOL_CALL]，但 JSON 已完整；这种情况不应浪费一轮重试。
 def test_tool_call_parser_recovers_complete_json_without_closing_marker():

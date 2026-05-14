@@ -16,6 +16,8 @@ from agent_py_agent.agent.agent_core.orchestration_tools import _tool_workflow_m
     ("explicit", "configured", "expected"),
     [
         ("off", "auto", "off"),
+        ("auto", "off", "off"),
+        ("plan", "off", "off"),
         ("plan", "auto", "plan"),
         ("auto", "manual", "auto"),
         (None, "auto", "auto"),

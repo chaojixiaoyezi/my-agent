@@ -78,6 +78,7 @@ class ToolLoopExecuteParams:
     archive_tool_calls: list
     tool_rounds: int = 0
     system_prompt_override: str | None = None
+    context_scope: str = "default"
 
 
 # LLM: CompressionContext 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

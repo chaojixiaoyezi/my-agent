@@ -5031,7 +5031,7 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Root run: `subagent-1778692121-cd812563`.
   - The outer observer only prompted root; root read control-plane refs and called `dispatch_subagents` itself.
 - Observed behavior:
-  - Root runner prompts exposed task-local `compactions/latest_continue_packet.json`, checkpoint, summary and workspace refs.
+  - Root runner prompts exposed task-local `compactions/session/latest_continue_packet.json`, checkpoint, summary and workspace refs.
   - A real interrupted/timeout runner could continue from packet/checkpoint facts instead of starting from the original user goal.
   - `dispatch_subagents(apply=true)` successfully marked three stale repair children as `TAKEN_OVER` by the current root run.
   - A short follow-up run read `latest_continue_packet.json` successfully and then ran control-plane dispatch without listing root itself for takeover.
@@ -5553,3 +5553,155 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Let runner finalization hand a subagent continuation packet back to parent when mid-run compact is needed.
   - Then rerun专项 12 with one root-created worker and at least four child-local compact continuations.
 - Status: documented gap; next feature slice.
+
+## 2026-05-14 Recovery Case 12: Subagent Session Compact / Continue Packet E2E
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用/recovery_cases/case12_subagent_multi_compact`.
+  - Config: `/Users/example/my-终端应用/recovery_cases/case12_subagent_multi_compact/e2e_agent_config.yaml`.
+  - Model backend: `anthropic_compatible`.
+  - Model name: `MiniMax-M2.7`.
+  - Real execution mode: 外层只启动 root；root 创建并推进 1 个 worker。
+  - Compact pressure: `memory_compact_context_window_tokens=100`，`memory_compact_auto_continue_max_depth=4`。
+
+### Finding 39: Reading latest_continue_packet Could Create An Artifact Wrapper Loop
+
+- Symptom:
+  - Worker 读取 `compactions/session/latest_continue_packet.json` 后，`read_file` 因输出较大把内容外置成 `memory_archive/artifacts/tool_outputs/read_file-*.json`。
+  - 模型随后调用 `read_artifact`，但 `read_artifact` 的输出又被外置成新的 `read_artifact-*.json`。
+  - 下一轮提示词里出现的是 wrapper artifact 路径，模型继续读 wrapper，而不是读原始 source artifact。
+- 中文解释：
+  - 大白话：孩子本来只是想看“接班小纸条”，结果系统把小纸条包了一层盒子；孩子打开盒子后，系统又把“打开盒子的结果”再包一层，变成套娃，浪费工具轮和上下文。
+- Root cause:
+  - tool output externalizer 没区分“普通大工具输出”和“已经是有界 `read_artifact` 读取结果”的情况。
+  - orchestration summary 也把 wrapper artifact 路径暴露给模型，容易诱导继续读 wrapper。
+- Fix:
+  - `tool_output_externalizer` 对成功的 bounded `read_artifact` 输出不再二次外置。
+  - orchestration summary 暴露 `source_artifact_ref/source_artifact_tool/source_call_id`，并提示继续读取 source artifact，而不是 wrapper。
+- Verification:
+  - Focused tests:
+    - `test_read_artifact_output_is_not_re_externalized`
+    - `test_read_artifact_summary_hides_nested_wrapper_artifact_path`
+  - Case 12 后续真实运行不再出现 `read_artifact -> read_artifact wrapper` 循环。
+- Status: fixed.
+
+### Finding 40: Empty Continue Packet Had No Concrete Work Progress
+
+- Symptom:
+  - `latest_continue_packet.json` 只有 status/refs，没有“刚刚写了哪个文件、写到哪些章节”。
+  - compact/retry 后，worker 可能重新理解任务或重复写已经完成的章节。
+- 中文解释：
+  - 大白话：接班纸条只写了“你还在这个任务里”，但没写“你刚刚已经写完第一章、第二章”。新一轮 worker 看不见细进度，就容易从头再来。
+- Root cause:
+  - 子代理 `save=False` 的 runner 工具调用没有写 task-local 进度快照。
+  - continue packet 的 `latest_summary` 优先用旧 task summary，没优先使用刚写文件产生的进度事实。
+- Fix:
+  - 新增 `subagents/services/session_progress.py`。
+  - 成功的 `write_file` / `append_file` / `replace_in_file` 会写：
+    - `agents/<run_id>/progress/tool_progress.jsonl`
+    - `agents/<run_id>/progress/latest_tool_progress.json`
+  - 进度快照会记录最近写入路径、累计 written paths、Markdown headings、短摘要和下一步。
+  - `latest_continue_packet.json` 新增 `work_progress`，`recommended_read_paths` 优先推荐 `latest_tool_progress.json`。
+  - `latest_summary` 现在优先使用 `work_progress.summary`。
+- Verification:
+  - Focused tests:
+    - `test_task_local_write_progress_updates_continue_packet`
+    - `test_continue_packet_prefers_work_progress_summary`
+  - Real Case 12 produced `latest_tool_progress.json` with headings including `算法测试方案`、`第一章 排序`、`第二章 搜索`、`第三章 动态规划`、`第四章 图算法`。
+- Status: fixed.
+
+### Finding 41: Continue Packet Raw JSON Was Too Heavy For Default read_file
+
+- Symptom:
+  - 即使 packet 很小，模型默认也会读完整 JSON；如果未来 refs 和 reserved 字段增多，prompt 会变厚。
+  - 真实 trace 中模型倾向读完整包，再读 artifact，而不是直接根据 packet 摘要继续。
+- 中文解释：
+  - 大白话：接班包是机器文件，字段以后会越来越多。模型不需要每次看全量 JSON，只需要看“能不能继续、现在到哪、该读哪个小文件”。
+- Root cause:
+  - `read_file` 对控制面 JSON 和普通文本文件没有区别。
+- Fix:
+  - 新增 `tooling/filesystem_structured_read.py`。
+  - 默认读取 `latest_continue_packet.json` 且未指定行号时，`read_file` 返回结构化摘要：
+    - `status / ready_to_continue / latest_summary / next_action`
+    - `work_progress` 摘要和 headings
+    - `session_compact` 关键 refs
+    - 前几个 `recommended_read_paths`
+    - 明确 read policy：如果 `work_progress/session_compact` 为空，就从任务目标继续，不要反复读包体。
+  - 如果调用方显式传 `start_line/end_line`，仍可读取原始 JSON 行。
+- Verification:
+  - Focused tests:
+    - `test_read_file_summarizes_subagent_continue_packet`
+    - `test_read_file_line_range_preserves_full_continue_packet_read`
+  - Real Case 12 中读取 packet 的输出缩到约 1.6K 字符，没有再触发 artifact 套娃。
+- Status: fixed.
+
+### Finding 42: Low Compact Threshold Could Spam Identical Packet Ledger Rows
+
+- Symptom:
+  - 压低 compact 阈值后，Case 12 的 `session_compact_ledger.jsonl` 曾写出 26 行左右的重复记录。
+  - 用户看到“写了很多 compaction 文件/记录”会担心是不是每次都做了完整压缩。
+- 中文解释：
+  - 大白话：这不是 26 次完整大压缩，而是低阈值压力测试下，每次保存/检查都顺手写一条“当前接班包状态”。很多行内容其实一样，所以看起来虚胖。
+- Root cause:
+  - continue packet 每次保存都会 append ledger row，没有判断关键状态是否和上一条完全相同。
+- Fix:
+  - `compact_continue_packet.py` 给 ledger row 增加 `state_fingerprint`。
+  - 连续保存时，如果 run/status/verification/summary/next_action/progress/session package 没变化，就不追加重复行。
+- Verification:
+  - Focused test: `test_continue_packet_ledger_dedupes_unchanged_state`.
+- Status: fixed by unit coverage; next long Case 12 rerun should confirm ledger row count drops in real traces.
+
+### Result: Root-Only Worker Case 12 Passed
+
+- Observed behavior:
+  - Command ran with the real root prompt only; lower worker was created by root.
+  - Elapsed time: `90.6s`.
+  - Root output: `total_runs: 1`, `done_verified: 1`。
+  - Worker run: `subagent-1778750813-b1bf189e`。
+  - Deliverable written:
+    - `/Users/example/my-终端应用/recovery_cases/case12_subagent_multi_compact/算法测试方案.md`
+  - Worker `output.json`: `AWAITING_ACCEPTANCE / NEEDS_ACCEPTANCE` before parent acceptance.
+  - Final task state: `DONE / VERIFIED` after parent closeout.
+  - Latest continue packet included `work_progress` and task-local session compact refs.
+- Status: passed for the root-only, one-worker, task-local progress + session compact package path.
+
+### Remaining Gap After Case 12
+
+- The “one subagent model session compacted and resumed 4+ times mid-run” live E2E is still not fully proven.
+- Current proof level:
+  - unit/focused tests cover multiple local compacts and automatic continuation mechanics;
+  - real Case 12 proves root-only dispatch, worker file write, task-local progress snapshot, continue packet refresh, and final acceptance;
+  - the longer 4+ compact real run hit provider latency / prompt-thickness limits earlier, so it should be rerun after this read/ledger slimming.
+- Next recommended test:
+  - Use the same root-only rule.
+  - Keep lower agents created only by root/parent.
+  - Use a shorter but multi-step writing task that forces at least 4 child-local compact saves without requiring a huge product build.
+  - Confirm `latest_tool_progress.json` prevents duplicate chapters and `session_compact_ledger.jsonl` no longer grows with identical rows.
+
+### Finding 43: Result Summary Control Markers Could Re-trigger Tool Parsing
+
+- Symptom:
+  - Full pytest 的真实模型 recovery smoke 里，真实模型原话包含 `[TOOL_CALL]`。
+  - Scenario wrapper 把这段原话塞进 `SUBAGENT_RESULT.summary` 后，工具循环又把 summary 里的 `[TOOL_CALL]` 当成新工具调用，连续触发 parse error，最后跑到工具轮数上限。
+  - 同时，本地 compact 续跑后，续跑前真实执行过的 `read_file` 没有带到最终 runner result，导致 `used_tools` 为空。
+- 中文解释：
+  - 大白话：模型说“我准备调用工具”这句话被我们放进了结果摘要。系统后面看到摘要里的工具标记，以为它真的又要调工具，于是自己绕进去了。
+  - 另一半问题是：子代理压缩续跑前已经读过文件，但接班后的最后结果没记住“前面已经读过”，验收层就不认账。
+- Root cause:
+  - 工具解析器没有把 `SUBAGENT_RESULT` / `PARENT_PLANNER_RESULT` 视作受保护的数据块。
+  - Scenario 真实模型摘要没有转义协议标记。
+  - 子代理 task-local compact continuation 只返回最后一段 `AgentRunResult.executed_tools`，没有合并续跑前的真实工具执行记录。
+- Fix:
+  - `registry_execution.py` 屏蔽结构化结果块内部文本，再解析真实工具调用；结果块外部的真实工具调用不受影响。
+  - Scenario wrapper 用 `json.dumps` 序列化结果，并把真实模型摘要里的 `[TOOL_CALL]` / `[SUBAGENT_RESULT]` 等协议标记转成普通文本。
+  - `subagent_session_continuation.py` 在多段本地 compact 续跑之间合并 `executed_tools`，最终 runner result 能保留续跑前真实工具证据。
+- Verification:
+  - Focused tests:
+    - `test_tool_call_parser_ignores_markers_inside_subagent_result_payload`
+    - `test_tool_call_parser_still_accepts_tool_call_after_subagent_result`
+    - `test_subagent_session_continuation_preserves_executed_tools`
+    - `test_real_model_recovery_backend_escapes_real_response_in_result_json`
+    - `test_real_model_multi_round_backend_escapes_real_response_in_result_json`
+  - Real model smoke:
+    - `test_scenario_real_model_recovery_smoke` passed after the fix.
+- Status: fixed.

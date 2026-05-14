@@ -239,10 +239,13 @@ def _takeover_instruction(task: SubAgentTask, packet: _PacketState, fallback_ref
 # LLM: _packet_ref derives the canonical latest packet path from the run workspace.
 # 函数用途: 只从 agent_run_compactions_dir 推导 latest_continue_packet.json，保持路径规则唯一。
 def _packet_ref(task: SubAgentTask) -> str:
+    explicit = task_text(task, "agent_run_latest_session_continue_packet_json")
+    if explicit:
+        return explicit
     compactions_dir = task_text(task, "agent_run_compactions_dir")
     if not compactions_dir:
         return ""
-    return str(Path(compactions_dir) / "latest_continue_packet.json")
+    return str(Path(compactions_dir) / "session" / "latest_continue_packet.json")
 
 
 # LLM: _packet_is_stale compares file mtime only when the caller enables a max age.

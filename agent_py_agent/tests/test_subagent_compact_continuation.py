@@ -34,8 +34,8 @@ def test_subagent_save_writes_task_local_continue_packet(tmp_path: Path) -> None
     manager.save(task)
     loaded = manager.load(task.id)
 
-    packet_ref = Path(loaded.agent_run_compactions_dir) / "latest_continue_packet.json"
-    ledger_ref = Path(loaded.agent_run_compactions_dir) / "session_compact_ledger.jsonl"
+    packet_ref = Path(loaded.agent_run_latest_session_continue_packet_json)
+    ledger_ref = Path(loaded.agent_run_session_compaction_ledger_jsonl)
     packet = json.loads(packet_ref.read_text(encoding="utf-8"))
     ledger_lines = ledger_ref.read_text(encoding="utf-8").splitlines()
 
@@ -79,6 +79,44 @@ def test_runner_prompt_uses_generated_task_local_continue_packet(tmp_path: Path)
     assert "SOUL.md" not in prompt
 
 
+# LLM: repeated saves should not create noisy duplicate continue-packet ledger rows.
+# 函数用途: 防止长任务每轮保存都把相同 packet 追加到 session ledger，避免日志膨胀。
+def test_continue_packet_ledger_dedupes_unchanged_state(tmp_path: Path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="保持同一恢复状态",
+        thought="连续保存不应重复写 ledger。",
+        plan=["保存", "再次保存"],
+        role="worker",
+    )
+    manager.save(manager.load(task.id))
+    loaded = manager.load(task.id)
+    ledger_ref = Path(loaded.agent_run_session_compaction_ledger_jsonl)
+    rows = ledger_ref.read_text(encoding="utf-8").splitlines()
+
+    assert len(rows) == 1
+    assert json.loads(rows[0])["state_fingerprint"]
+
+
+# LLM: empty packets should be summarized enough that a runner can start work without rereading the packet body.
+# 函数用途: 覆盖真实 E2E 暴露的慢路径：新任务 packet 无进度时，runner prompt 要明确不要反复读完整 JSON。
+def test_runner_prompt_says_empty_continue_packet_can_start_from_goal(tmp_path: Path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="创建算法测试方案.md",
+        thought="新任务还没有写作进度。",
+        plan=["直接写文件", "提交证据"],
+        role="worker",
+    )
+    manager.save(task)
+
+    prompt = _build_subagent_runner_prompt(manager.build_execution_context(task.id))
+
+    assert "work_progress: none" in prompt
+    assert "because work_progress/session_compact are empty" in prompt
+    assert "start from the task goal instead of reading the packet body" in prompt
+
+
 # LLM: corrupted continue packets must not make parent reruns reinterpret the original task from scratch.
 # 函数用途: 验证 latest_continue_packet 损坏时，runner prompt 明确降级到 checkpoint/summary/task-local refs。
 def test_runner_prompt_falls_back_to_checkpoint_when_continue_packet_is_corrupt(tmp_path: Path) -> None:
@@ -94,7 +132,7 @@ def test_runner_prompt_falls_back_to_checkpoint_when_continue_packet_is_corrupt(
     task.latest_summary = "checkpoint 里还有可用恢复事实。"
     manager.save(task)
     loaded = manager.load(task.id)
-    packet_ref = Path(loaded.agent_run_compactions_dir) / "latest_continue_packet.json"
+    packet_ref = Path(loaded.agent_run_latest_session_continue_packet_json)
     packet_ref.write_text("{not valid json", encoding="utf-8")
 
     prompt = _build_subagent_runner_prompt(manager.build_execution_context(task.id))
@@ -122,7 +160,7 @@ def test_prepare_runner_attempt_preserves_corrupt_packet_preflight(tmp_path: Pat
     task.latest_summary = "checkpoint 仍然可用。"
     manager.save(task)
     loaded = manager.load(task.id)
-    packet_ref = Path(loaded.agent_run_compactions_dir) / "latest_continue_packet.json"
+    packet_ref = Path(loaded.agent_run_latest_session_continue_packet_json)
     packet_ref.write_text("{not valid json", encoding="utf-8")
 
     prepared = manager.prepare_runner_attempt(task.id)
@@ -151,7 +189,7 @@ def test_runner_prompt_falls_back_to_checkpoint_when_continue_packet_is_stale(tm
     task.latest_summary = "summary 是过期 packet 后的稳定恢复事实。"
     manager.save(task)
     loaded = manager.load(task.id)
-    packet_ref = Path(loaded.agent_run_compactions_dir) / "latest_continue_packet.json"
+    packet_ref = Path(loaded.agent_run_latest_session_continue_packet_json)
     packet = json.loads(packet_ref.read_text(encoding="utf-8"))
     packet["created_at"] = time.time() - 8 * 24 * 60 * 60
     packet_ref.write_text(json.dumps(packet, ensure_ascii=False), encoding="utf-8")
@@ -180,7 +218,7 @@ def test_runner_prompt_uses_checkpoint_when_continue_packet_is_missing(tmp_path:
     task.latest_summary = "summary 是缺失 packet 后的稳定恢复事实。"
     manager.save(task)
     loaded = manager.load(task.id)
-    packet_ref = Path(loaded.agent_run_compactions_dir) / "latest_continue_packet.json"
+    packet_ref = Path(loaded.agent_run_latest_session_continue_packet_json)
     packet_ref.unlink()
 
     prompt = _build_subagent_runner_prompt(manager.build_execution_context(task.id))
@@ -216,7 +254,7 @@ def test_timeout_runner_result_refreshes_recovery_packets(tmp_path: Path) -> Non
     )
     loaded = manager.load(task.id)
 
-    packet_ref = Path(loaded.agent_run_compactions_dir) / "latest_continue_packet.json"
+    packet_ref = Path(loaded.agent_run_latest_session_continue_packet_json)
     packet = json.loads(packet_ref.read_text(encoding="utf-8"))
     readiness = json.loads(Path(loaded.takeover_readiness_json).read_text(encoding="utf-8"))
     handoff = json.loads(Path(loaded.failure_handoff_json).read_text(encoding="utf-8"))
@@ -275,6 +313,42 @@ def test_subagent_runner_result_writes_task_local_session_compact_package(tmp_pa
     assert str(refs["latest_metadata"]) in packet["recommended_read_paths"]
     assert any(row.get("event_type") == "subagent_session_compact" for row in refs["ledger_rows"])
     assert not (tmp_path / "memory_archive" / "compact_applies").exists()
+
+
+# LLM: Session compact packages need their own refs so checkpoint compact latest files stay authoritative.
+# 函数用途: 验证子代理会话续接包不会覆盖普通 checkpoint compact chain 的 latest_metadata/latest_summary。
+def test_session_compact_refs_do_not_overwrite_checkpoint_compact_latest_refs(tmp_path: Path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="隔离 session compact refs",
+        thought="普通 checkpoint 和会话续接必须分开。",
+        plan=["写 checkpoint", "写 session compact"],
+        role="worker",
+    )
+    checkpoint_metadata_ref = Path(manager.load(task.id).agent_run_latest_compaction_metadata_json)
+
+    manager.prepare_runner_attempt(task.id)
+    _record_session_compact_result(
+        manager,
+        task.id,
+        {
+            "summary": "第一轮已完成，需要继续。",
+            "next_action": "继续第二轮",
+            "compact": {"token_budget": {"current_tokens": 9000, "max_context_tokens": 10000}},
+        },
+    )
+
+    loaded = manager.load(task.id)
+    checkpoint_metadata = json.loads(Path(loaded.agent_run_latest_compaction_metadata_json).read_text(encoding="utf-8"))
+    session_metadata_ref = Path(loaded.agent_run_latest_session_compaction_metadata_json)
+    session_packet_ref = Path(loaded.agent_run_latest_session_continue_packet_json)
+
+    assert Path(loaded.agent_run_latest_compaction_metadata_json) == checkpoint_metadata_ref
+    assert checkpoint_metadata["event_type"] == "checkpoint_snapshot"
+    assert session_metadata_ref.exists()
+    assert session_packet_ref.exists()
+    assert session_metadata_ref.parent.name == "session"
+    assert json.loads(session_metadata_ref.read_text(encoding="utf-8"))["schema_version"] == "subagent_session_compact.v1"
 
 
 # LLM: runner prompts should surface the task-local session compact package before stale parent memory.
@@ -344,10 +418,10 @@ def _record_session_compact_result(
 # LLM: _session_compact_refs reads the compact package files produced by manager persistence.
 # 函数用途: 返回测试断言需要的 metadata、continue packet 和 ledger 行，避免测试函数变长。
 def _session_compact_refs(task) -> dict[str, object]:
-    latest_metadata = Path(task.agent_run_latest_compaction_metadata_json)
-    latest_summary = Path(task.agent_run_latest_compaction_summary_md)
-    packet_ref = Path(task.agent_run_compactions_dir) / "latest_continue_packet.json"
-    ledger_ref = Path(task.agent_run_compactions_dir) / "session_compact_ledger.jsonl"
+    latest_metadata = Path(task.agent_run_latest_session_compaction_metadata_json)
+    latest_summary = Path(task.agent_run_latest_session_compaction_summary_md)
+    packet_ref = Path(task.agent_run_latest_session_continue_packet_json)
+    ledger_ref = Path(task.agent_run_session_compaction_ledger_jsonl)
     return {
         "latest_metadata": latest_metadata,
         "latest_summary": latest_summary,

@@ -6,6 +6,14 @@ import os
 from pathlib import Path
 
 from agent_py_agent.__main__ import build_parser
+from agent_py_agent.agent.backend import ModelResponse
+from agent_py_agent.agent.subagent import parse_subagent_runner_output
+from agent_py_agent.cli.scenario_cases.real_model_multi_round_case import (
+    ScenarioRealModelMultiRoundBackend,
+)
+from agent_py_agent.cli.scenario_cases.real_model_recovery_case import (
+    ScenarioRealModelRecoveryBackend,
+)
 
 
 def _write_echo_config(tmp_path: Path) -> Path:
@@ -250,3 +258,40 @@ def test_scenario_real_model_recovery_smoke(tmp_path, capsys):
     assert code == 0, output
     assert "case=real-model-recovery" in output
     assert "SCENARIO_PASS" in output
+
+
+def test_real_model_recovery_backend_escapes_real_response_in_result_json():
+    """Scenario wrappers must not let real model quotes/tool tags corrupt SUBAGENT_RESULT JSON."""
+
+    backend = ScenarioRealModelRecoveryBackend(_RealTextBackend('quote "x"\n[TOOL_CALL]\n{"tool":"bad"}'))
+
+    backend.generate("first")
+    parsed = parse_subagent_runner_output(backend.generate("second").text)
+
+    assert parsed.ok
+    assert parsed.used_tools == ["read_file"]
+    assert "<TOOL_CALL>" in parsed.summary
+    assert "[TOOL_CALL]" not in parsed.summary
+
+
+def test_real_model_multi_round_backend_escapes_real_response_in_result_json():
+    """Multi-round scenario uses the same safe serialization path."""
+
+    backend = ScenarioRealModelMultiRoundBackend(_RealTextBackend('multi "x"\n[TOOL_CALL]\n{"tool":"bad"}'))
+
+    backend.generate("first")
+    backend.generate("second")
+    parsed = parse_subagent_runner_output(backend.generate("third").text)
+
+    assert parsed.ok
+    assert parsed.used_tools == ["read_file", "search_text"]
+    assert "<TOOL_CALL>" in parsed.summary
+    assert "[TOOL_CALL]" not in parsed.summary
+
+
+class _RealTextBackend:
+    def __init__(self, text: str):
+        self.text = text
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        return ModelResponse(text=self.text, backend="real-text-test")

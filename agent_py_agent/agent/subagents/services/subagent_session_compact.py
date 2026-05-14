@@ -39,15 +39,17 @@ def write_subagent_session_compact(request: SubagentSessionCompactRequest) -> di
     if not compactions:
         return {}
     compactions.mkdir(parents=True, exist_ok=True)
-    package_dir = compactions / "packages" / _package_id(request.task)
+    session_dir = compactions / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    package_dir = session_dir / "packages" / _package_id(request.task)
     package_dir.mkdir(parents=True, exist_ok=True)
-    refs = _package_refs(compactions, package_dir)
+    refs = _package_refs(session_dir, package_dir)
     metadata = _metadata_payload(request, refs)
     refs["metadata"].write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     refs["restore_refs"].write_text(json.dumps(metadata["restore_refs"], ensure_ascii=False, indent=2), encoding="utf-8")
     refs["summary"].write_text(_summary_text(metadata), encoding="utf-8")
     _write_latest_refs(request.task, refs)
-    _append_session_ledger(compactions / "session_compact_ledger.jsonl", metadata, refs)
+    _append_session_ledger(session_dir / "session_compact_ledger.jsonl", metadata, refs)
     write_subagent_continue_packet(SubagentContinuePacketRequest(request.task, request.output_payload))
     return {"metadata_ref": str(refs["latest_metadata"]), "summary_ref": str(refs["latest_summary"])}
 
@@ -73,18 +75,18 @@ def _compactions_dir(task: SubAgentTask) -> Path | None:
 # LLM: _package_id makes compact package ids stable enough for humans and unique enough for repeated cycles.
 # 函数用途: 用时间戳和 run_id 生成本地 compact 包目录名，支持同一子代理多次压缩。
 def _package_id(task: SubAgentTask) -> str:
-    return f"session-compact-{int(time.time() * 1000)}-{_safe_id(task.id)}"
+    return f"session-compact-{time.time_ns()}-{_safe_id(task.id)}"
 
 
 # LLM: _package_refs centralizes package and latest ref names so prompt readers use one convention.
 # 函数用途: 生成 package 内部文件和 compactions/latest_* 快捷引用路径。
-def _package_refs(compactions: Path, package_dir: Path) -> dict[str, Path]:
+def _package_refs(session_dir: Path, package_dir: Path) -> dict[str, Path]:
     return {
         "metadata": package_dir / "metadata.json",
         "summary": package_dir / "summary.md",
         "restore_refs": package_dir / "restore_refs.json",
-        "latest_metadata": compactions / "latest_metadata.json",
-        "latest_summary": compactions / "latest_summary.md",
+        "latest_metadata": session_dir / "latest_metadata.json",
+        "latest_summary": session_dir / "latest_summary.md",
     }
 
 
@@ -155,8 +157,10 @@ def _summary_text(metadata: dict[str, Any]) -> str:
 def _write_latest_refs(task: SubAgentTask, refs: dict[str, Path]) -> None:
     refs["latest_metadata"].write_text(refs["metadata"].read_text(encoding="utf-8"), encoding="utf-8")
     refs["latest_summary"].write_text(refs["summary"].read_text(encoding="utf-8"), encoding="utf-8")
-    task.agent_run_latest_compaction_metadata_json = str(refs["latest_metadata"])
-    task.agent_run_latest_compaction_summary_md = str(refs["latest_summary"])
+    session_dir = refs["latest_metadata"].parent
+    task.agent_run_session_compaction_ledger_jsonl = str(session_dir / "session_compact_ledger.jsonl")
+    task.agent_run_latest_session_compaction_metadata_json = str(refs["latest_metadata"])
+    task.agent_run_latest_session_compaction_summary_md = str(refs["latest_summary"])
 
 
 # LLM: _append_session_ledger leaves an append-only breadcrumb for every subagent compact package.

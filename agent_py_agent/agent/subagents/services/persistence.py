@@ -289,6 +289,9 @@ class SubAgentPersistenceService:
         checkpoint_artifacts = build_checkpoint_artifact_payloads(task, output_payload)
         # LLM: 任务工作区是增量运行记忆适配层，旧路径暂时仍是权威来源。
         sync_task_workspace_fields(self.workspace, task)
+        write_inheritance_manifest(task)
+        write_failure_handoff(task)
+        write_recovery_output_files(task, checkpoint_artifacts)
         payload = json.dumps(asdict(task), ensure_ascii=False, indent=2)
         (task_dir / "task.json").write_text(payload, encoding="utf-8")
         (task_dir / "run.json").write_text(payload, encoding="utf-8")
@@ -297,9 +300,6 @@ class SubAgentPersistenceService:
                 json.dumps(asdict(task.latest_status_report), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-        write_inheritance_manifest(task)
-        write_failure_handoff(task)
-        write_recovery_output_files(task, checkpoint_artifacts)
         (task_dir / "thought.md").write_text(render_thought_markdown(task), encoding="utf-8")
         self.manager._index_task(task)
         if self.manager.local_store:
