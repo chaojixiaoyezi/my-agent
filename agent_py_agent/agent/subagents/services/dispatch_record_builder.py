@@ -96,6 +96,8 @@ def _parent_acceptance_fields(params) -> dict[str, object]:
         "parent_acceptance_auto_execution_test_ref": params.parent_acceptance_auto_execution_test_ref,
         "parent_acceptance_auto_execution_test_total": params.parent_acceptance_auto_execution_test_total,
         "parent_acceptance_auto_execution_test_failed": params.parent_acceptance_auto_execution_test_failed,
+        "parent_acceptance_test_failure_summary": params.parent_acceptance_test_failure_summary,
+        "parent_acceptance_test_failure_details": params.parent_acceptance_test_failure_details or [],
         "parent_acceptance_followup_ref": params.parent_acceptance_followup_ref,
         "parent_acceptance_followup_status": params.parent_acceptance_followup_status,
         "parent_acceptance_followup_action": params.parent_acceptance_followup_action,

@@ -42,12 +42,15 @@ def inferred_static_site_items(request: StaticSiteTestItemsRequest) -> list[dict
             return []
         site_root = _required_site_root(declared_files, request.workspace_root)
         required_files = declared_files
-    return [{
+    item = {
         "name": "inferred static site check",
         "validation_method": "static_site_check",
         "site_root": _relative_or_absolute(site_root, request.workspace_root),
         "required_files": required_files,
-    }]
+    }
+    if len(html_paths) == 1:
+        item["html_files"] = required_files
+    return [item]
 
 
 # LLM: _has_static_site_check keeps runner-declared checks from being duplicated.

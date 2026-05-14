@@ -54,6 +54,8 @@ class DispatchRecordParams:
     parent_acceptance_auto_execution_test_ref: str = ""
     parent_acceptance_auto_execution_test_total: int = 0
     parent_acceptance_auto_execution_test_failed: int = 0
+    parent_acceptance_test_failure_summary: str = ""
+    parent_acceptance_test_failure_details: list[str] | None = None
     parent_acceptance_followup_ref: str = ""
     parent_acceptance_followup_status: str = ""
     parent_acceptance_followup_action: str = ""

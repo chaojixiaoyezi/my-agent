@@ -281,6 +281,7 @@ def test_prepare_test_items_infers_static_site_check_for_single_html_artifact(tm
         "validation_method": "static_site_check",
         "site_root": "deliverables/shop/build",
         "required_files": ["index.html"],
+        "html_files": ["index.html"],
     }]
 
 

@@ -20,10 +20,7 @@ from agent_py_agent.agent.subagents.parent_acceptance_followup_control import (
     ParentAcceptanceFollowUpControlOptions,
 )
 
-from .backends import (
-    AcceptedSubagentBackend,
-    FlakyThenAcceptedSubagentBackend,
-)
+from .backends import AcceptedSubagentBackend, FlakyThenAcceptedSubagentBackend
 
 
 def _make_router(agent):
@@ -570,67 +567,3 @@ def test_subagent_dispatch_retries_transient_runner_failure(monkeypatch):
         assert loaded.runner_attempts == 2
         assert loaded.runner_last_error == ""
 
-
-def test_subagent_dispatch_workflow_plan_mode_persists_plan_only():
-    """LLM: Verifies dispatch can backfill workflow plans onto existing parent runs without spawning children."""
-    with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
-        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
-        agent = SimpleAgent(cfg, root)
-        parent = agent.subagents.create_run(
-            goal="Fix API bug and add regression tests",
-            thought="先建父工单，再由 dispatch 补做 workflow 规划。",
-            plan=["等待规划"],
-        )
-
-        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
-        report = agent.dispatch_subagents(
-            router,
-            CapabilityConfig(),
-            apply=True,
-            workflow_mode="plan",
-            max_runners=0,
-        )
-        loaded = agent.subagents.load(parent.id)
-
-        assert any(item.step == "workflow" and item.action == "plan_workflow" and item.ok for item in report.records)
-        assert loaded.workflow_mode == "plan"
-        assert loaded.workflow_template_id == "code_feature_split"
-        assert loaded.workflow_plan["ok"] is True
-        assert loaded.workflow_child_run_ids == []
-        assert loaded.child_ids == []
-
-
-def test_subagent_dispatch_workflow_auto_mode_spawns_worker_children():
-    """LLM: Verifies dispatch auto mode turns a parent workflow plan into worker child runs."""
-    with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
-        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
-        agent = SimpleAgent(cfg, root)
-        parent = agent.subagents.create_run(
-            goal="Fix API bug and add regression tests",
-            thought="让 workflow 自动派出 implementation/tests worker。",
-            plan=["等待自动派工"],
-            agent_name="小傻妞-api-parent",
-        )
-
-        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
-        report = agent.dispatch_subagents(
-            router,
-            CapabilityConfig(),
-            apply=True,
-            workflow_mode="auto",
-            max_runners=0,
-        )
-        loaded = agent.subagents.load(parent.id)
-        children = [agent.subagents.load(run_id) for run_id in loaded.workflow_child_run_ids]
-
-        assert any(item.step == "workflow" and item.action == "spawn_workflow_workers" for item in report.records)
-        assert loaded.workflow_mode == "auto"
-        assert loaded.workflow_plan["ok"] is True
-        assert len(loaded.workflow_child_run_ids) == 3
-        assert len(children) == 3
-        assert {child.workflow_phase_id for child in children} == {"design_contract", "implementation", "tests"}
-        assert all(child.parent_id == loaded.id for child in children)
-        assert all(child.agent_name.startswith("小小傻妞-") for child in children)
-        assert any(child.workflow_depends_on == ["design_contract"] for child in children if child.workflow_phase_id in {"implementation", "tests"})

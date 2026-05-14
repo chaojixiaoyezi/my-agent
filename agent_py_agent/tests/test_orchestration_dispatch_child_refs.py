@@ -101,12 +101,20 @@ def test_dispatch_payload_includes_acceptance_followup():
         before_status="AWAITING_ACCEPTANCE",
         after_status="AWAITING_ACCEPTANCE",
         parent_acceptance_auto_execution_test_failed=5,
+        parent_acceptance_test_failure_summary="inferred static site check: inert_control_hits=15",
+        parent_acceptance_test_failure_details=[
+            "inert_control_hits: index2.html:a:Collection; index2.html:a:Contact",
+        ],
         parent_acceptance_followup_action="plan_rescue",
         parent_acceptance_followup_command="subagents-acceptance-plan leaf-1 --take-over-by <agent>",
     )
     payload = _dispatch_payload_for_record(record)
 
     assert payload["records"][0]["test_failed"] == 5
+    assert payload["records"][0]["test_failure_summary"] == "inferred static site check: inert_control_hits=15"
+    assert payload["records"][0]["test_failure_details"] == [
+        "inert_control_hits: index2.html:a:Collection; index2.html:a:Contact",
+    ]
     assert payload["records"][0]["followup_action"] == "plan_rescue"
     assert payload["records"][0]["followup_command"].endswith("--take-over-by <agent>")
 

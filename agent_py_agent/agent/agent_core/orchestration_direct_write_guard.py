@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ..tools import ToolExecutionResult
+from .orchestration_delegation_intent import prompt_requests_refs_only_delegation
 
 _DIRECT_WRITE_TOOLS = {"write_file", "append_file", "replace_in_file"}
 _SHELL_TOOL = "run_command"
@@ -104,6 +105,8 @@ def _user_requested_delegate_only(prompt: str) -> bool:
     text = " ".join(str(prompt or "").lower().split())
     if not text:
         return False
+    if prompt_requests_refs_only_delegation(text):
+        return True
     return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _DELEGATE_ONLY_PATTERNS)
 
 
