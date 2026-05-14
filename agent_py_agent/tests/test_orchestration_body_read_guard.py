@@ -132,6 +132,21 @@ def test_delegating_parent_can_read_child_task_output_metadata_before_acceptor_d
     assert result is None
 
 
+# LLM: A delegating worker still owns its task-local deliverables and must be able to inspect them.
+# 函数用途: worker 读回自己刚写的产物不应被父级 refs-only 保护误挡；保护的是父级偷看下级正文。
+def test_delegating_worker_can_read_own_task_local_product_body_before_acceptor_done():
+    tasks = {"root": _task("root", identity="worker", children=["tester"]), "tester": _task("tester")}
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_agent(tasks),
+            user_prompt="请让子代理先做，最后按验收标准收口。",
+            payload={"tool": "read_file", "path": "/tmp/runtime/subagents/root/算法测试方案.md"},
+        )
+    )
+
+    assert result is None
+
+
 # LLM: Dispatch report JSON is a refs-only orchestration summary, not product body text.
 # 函数用途: 父级恢复时可以读取 subagent_dispatch_report，避免因看不到调度摘要而重复创建 repair。
 def test_delegating_parent_can_read_subagent_dispatch_report_before_acceptor_done():

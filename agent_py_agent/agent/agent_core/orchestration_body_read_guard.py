@@ -93,6 +93,8 @@ def maybe_block_delegating_body_read(request: DelegatingBodyReadGuardRequest) ->
         return None
     if tool == "read_file" and _is_runtime_metadata_read(request.agent, parent, request.payload):
         return None
+    if tool == "read_file" and _is_current_task_local_read(request.agent, parent, request.payload):
+        return None
     if tool == "read_artifact" and _is_orchestration_artifact_read(request.payload):
         return None
     return ToolExecutionResult(tool, False, _blocked_message(tool, parent))
@@ -282,6 +284,22 @@ def _looks_like_runtime_path(path: Path) -> bool:
 # LLM: _is_current_task_metadata_path recognizes the active legacy task directory as runtime metadata.
 # 函数用途: 允许父级读取自己 task_dir 下的 output/status/runner 元数据，但不放行业务产物正文。
 def _is_current_task_metadata_path(parent: object, path: Path) -> bool:
+    task_dir = str(getattr(parent, "task_dir", "") or "").strip()
+    if not task_dir:
+        return False
+    try:
+        path.relative_to(Path(task_dir).expanduser().resolve(strict=False))
+    except ValueError:
+        return False
+    return True
+
+
+# LLM: _is_current_task_local_read lets a runner inspect files in its own assigned workspace.
+# 函数用途: 允许 worker/coordinator 读取自己 task_dir 下的正文；refs-only 保护仍阻止父级读取下级或外部产物。
+def _is_current_task_local_read(agent: object, parent: object, payload: dict[str, Any]) -> bool:
+    path = _payload_path(agent, payload)
+    if path is None:
+        return False
     task_dir = str(getattr(parent, "task_dir", "") or "").strip()
     if not task_dir:
         return False

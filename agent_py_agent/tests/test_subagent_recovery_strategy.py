@@ -52,7 +52,7 @@ def test_recovery_strategy_prefers_task_local_continue_packet(tmp_path: Path) ->
 # 函数用途: latest_continue_packet 损坏时不能卡死，要降级读取 checkpoint/summary。
 def test_recovery_strategy_falls_back_when_packet_is_corrupt(tmp_path: Path) -> None:
     _, task = _saved_task(tmp_path)
-    packet_ref = Path(task.agent_run_compactions_dir) / "latest_continue_packet.json"
+    packet_ref = Path(task.agent_run_latest_session_continue_packet_json)
     packet_ref.write_text("{not-json", encoding="utf-8")
 
     result = build_subagent_recovery_strategy(SubagentRecoveryStrategyRequest(task=task))
@@ -68,7 +68,7 @@ def test_recovery_strategy_falls_back_when_packet_is_corrupt(tmp_path: Path) -> 
 # 函数用途: packet 过期时继续使用 checkpoint/summary，而不是盲目相信旧恢复包。
 def test_recovery_strategy_falls_back_when_packet_is_stale(tmp_path: Path) -> None:
     _, task = _saved_task(tmp_path)
-    packet_ref = Path(task.agent_run_compactions_dir) / "latest_continue_packet.json"
+    packet_ref = Path(task.agent_run_latest_session_continue_packet_json)
     os.utime(packet_ref, (100.0, 100.0))
 
     result = build_subagent_recovery_strategy(

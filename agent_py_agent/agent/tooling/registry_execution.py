@@ -20,6 +20,7 @@ from .json_repair import load_tool_block_json
 from .models import BaseTool, ToolExecutionResult
 from .parse_error_hint import parse_error_message
 from .parser import parse_xmlish_tool_calls
+from .registry_control_ranges import mask_protected_control_ranges
 from .registry_params import tool_params_for_execution
 from .registry_tool_dispatch import AuthorizedToolDispatchRequest, execute_authorized_tool
 from .write_boundary import validate_write_boundary
@@ -69,25 +70,26 @@ class _ToolAuthContext:
 # 函数用途: 解析 parse_registry_tool_calls 数据结构。
 def parse_registry_tool_calls(text: str) -> list[dict[str, Any]]:
 
+    scan_text = mask_protected_control_ranges(text)
     calls: list[tuple[int, dict[str, Any]]] = []
     cursor = 0
     while True:
-        start_info = _next_tool_block_start(text, cursor)
+        start_info = _next_tool_block_start(scan_text, cursor)
         if start_info is None:
             break
         start, marker_start = start_info
-        end_info = _next_tool_block_end(text, start + len(marker_start))
+        end_info = _next_tool_block_end(scan_text, start + len(marker_start))
         if end_info is None:
-            raw = text[start + len(marker_start) :].strip().strip("`")
+            raw = scan_text[start + len(marker_start) :].strip().strip("`")
             payload = _parse_tool_block_payload(raw)
             calls.append((start, _parse_error_payload("工具调用缺少结束标记 [/TOOL_CALL]", raw) if payload.get("tool") == "__parse_error__" else payload))
             break
         end, marker_end = end_info
-        raw = text[start + len(marker_start) : end].strip().strip("`")
+        raw = scan_text[start + len(marker_start) : end].strip().strip("`")
         calls.append((start, _parse_tool_block_payload(raw)))
         cursor = end + len(marker_end)
 
-    calls.extend(parse_xmlish_tool_calls(text))
+    calls.extend(parse_xmlish_tool_calls(scan_text))
     calls.sort(key=lambda item: item[0])
     return [payload for _, payload in calls]
 

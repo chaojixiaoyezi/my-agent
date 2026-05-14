@@ -7,6 +7,8 @@ from __future__ import annotations
 # LLM: tool_workflow_mode preserves legacy manual/auto/off semantics for model tools.
 # 函数用途: 把显式参数和配置里的 workflow mode 归一化成 off、plan 或 auto，供创建和调度工具复用。
 def tool_workflow_mode(explicit_mode: object, config_mode: object) -> str:
+    if isinstance(config_mode, str) and config_mode.strip().lower() == "off":
+        return "off"
     if isinstance(explicit_mode, str):
         normalized = explicit_mode.strip().lower()
         if normalized in {"off", "plan", "auto"}:

@@ -25,6 +25,7 @@ from .filesystem_artifact_guard import (
     tool_output_artifact_read_hint,
     tool_output_artifact_typo_hint,
 )
+from .filesystem_structured_read import structured_read_summary
 from .models import BaseTool, ToolExecutionResult, ToolSpec
 
 
@@ -310,6 +311,9 @@ class ReadFileTool(FileSystemTool):
             content = target.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             return ToolExecutionResult("read_file", False, "文件不是有效 UTF-8 文本，无法读取。")
+        summary = structured_read_summary(target, content, params)
+        if summary:
+            return ToolExecutionResult("read_file", True, summary)
         lines = content.splitlines()
         try:
             start_line = _int_param(_bundled_filesystem_param(params, "start_line"), name="start_line", default=1, min_value=1)

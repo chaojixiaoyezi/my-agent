@@ -408,6 +408,25 @@ def test_subagent_persistence_writes_compact_checkpoint_chain(tmp_path) -> None:
     assert output_path.exists()
 
 
+# LLM: checkpoint compact writes should be material-change driven, not every save call.
+# 函数用途: 相同任务状态重复保存时不追加新的 checkpoint compact 事件，避免长 runner 目录被噪音撑大。
+def test_subagent_persistence_deduplicates_unchanged_compact_checkpoint_chain(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+
+    task = manager.create_run(
+        goal="去重 checkpoint compact 链",
+        thought="重复 save 不应制造重复 compact 事件。",
+        plan=["保存一次", "重复保存"],
+    )
+    loaded = manager.load(task.id)
+    before = _read_jsonl(loaded.agent_run_compaction_ledger_jsonl)
+
+    manager.save(loaded)
+    after = _read_jsonl(manager.load(task.id).agent_run_compaction_ledger_jsonl)
+
+    assert len(after) == len(before)
+
+
 def test_subagent_persistence_syncs_shared_workspace_facts(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     task = _create_task_with_shared_facts(manager)

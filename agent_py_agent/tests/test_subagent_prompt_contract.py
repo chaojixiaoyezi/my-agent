@@ -213,29 +213,7 @@ def test_runner_prompt_includes_task_local_compact_continuation_refs(tmp_path: P
 # LLM: _compact_continuation_context builds realistic task-local refs without bloating the assertion test.
 # 函数用途: 准备带 compact packet、checkpoint 和 summary 的子代理执行上下文，复用标准 workspace_refs 形状。
 def _compact_continuation_context(tmp_path: Path) -> SubAgentExecutionContext:
-    run_workspace = tmp_path / "tasks" / "root-1" / "agents" / "leaf-compact"
-    compactions = run_workspace / "compactions"
-    compactions.mkdir(parents=True)
-    (run_workspace / "task.md").write_text("实现购物车结算按钮\n", encoding="utf-8")
-    (run_workspace / "checkpoint.json").write_text(
-        json.dumps({"current_step": "继续补齐 checkout tests", "next_action": "write tests"}),
-        encoding="utf-8",
-    )
-    (run_workspace / "summary.md").write_text("已完成商品列表，剩余购物车验收。\n", encoding="utf-8")
-    (run_workspace / "final_report.md").write_text("还没有最终验收。\n", encoding="utf-8")
-    (run_workspace / "findings.jsonl").write_text('{"claim":"cart missing tests"}\n', encoding="utf-8")
-    (run_workspace / "timeline.jsonl").write_text('{"event":"checkpoint_written"}\n', encoding="utf-8")
-    (compactions / "latest_continue_packet.json").write_text(
-        json.dumps(
-            {
-                "ready_to_continue": True,
-                "continue_mode": "subagent_task_local",
-                "next_action": "continue checkout tests",
-                "recommended_read_paths": [str(run_workspace / "checkpoint.json")],
-            }
-        ),
-        encoding="utf-8",
-    )
+    run_workspace, compactions = _prepare_compact_continuation_workspace(tmp_path)
     context = SubAgentExecutionContext(
         run_id="leaf-compact",
         generated_at=1.0,
@@ -259,3 +237,39 @@ def _compact_continuation_context(tmp_path: Path) -> SubAgentExecutionContext:
         },
     )
     return context
+
+
+# LLM: _prepare_compact_continuation_workspace keeps the prompt contract test data realistic but local.
+# 函数用途: 创建子代理 run workspace、checkpoint、summary 和 latest_continue_packet 测试文件。
+def _prepare_compact_continuation_workspace(tmp_path: Path) -> tuple[Path, Path]:
+    run_workspace = tmp_path / "tasks" / "root-1" / "agents" / "leaf-compact"
+    compactions = run_workspace / "compactions"
+    session_compactions = compactions / "session"
+    session_compactions.mkdir(parents=True)
+    (run_workspace / "task.md").write_text("实现购物车结算按钮\n", encoding="utf-8")
+    (run_workspace / "checkpoint.json").write_text(
+        json.dumps({"current_step": "继续补齐 checkout tests", "next_action": "write tests"}),
+        encoding="utf-8",
+    )
+    (run_workspace / "summary.md").write_text("已完成商品列表，剩余购物车验收。\n", encoding="utf-8")
+    (run_workspace / "final_report.md").write_text("还没有最终验收。\n", encoding="utf-8")
+    (run_workspace / "findings.jsonl").write_text('{"claim":"cart missing tests"}\n', encoding="utf-8")
+    (run_workspace / "timeline.jsonl").write_text('{"event":"checkpoint_written"}\n', encoding="utf-8")
+    _write_latest_continue_packet(session_compactions, run_workspace)
+    return run_workspace, compactions
+
+
+# LLM: _write_latest_continue_packet isolates the packet fixture shape from workspace setup.
+# 函数用途: 写入最小 task-local continue packet，供 prompt 续接测试读取。
+def _write_latest_continue_packet(session_compactions: Path, run_workspace: Path) -> None:
+    (session_compactions / "latest_continue_packet.json").write_text(
+        json.dumps(
+            {
+                "ready_to_continue": True,
+                "continue_mode": "subagent_task_local",
+                "next_action": "continue checkout tests",
+                "recommended_read_paths": [str(run_workspace / "checkpoint.json")],
+            }
+        ),
+        encoding="utf-8",
+    )

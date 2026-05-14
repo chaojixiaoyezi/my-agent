@@ -11,6 +11,7 @@ from .subagent_params import (
     SubagentRunFailureParams,
     SubagentRunParams,
 )
+from .subagent_session_continuation import continue_subagent_session_if_needed
 
 
 # LLM: SubagentModelTurnBundle keeps runner finalization inputs together across helper calls.
@@ -89,6 +90,9 @@ def _run_and_finalize_subagent(agent, bundle: SubagentModelTurnBundle):
 
     try:
         result = _run_subagent_model_turn(agent, bundle.prompt, bundle.context)
+        continued = continue_subagent_session_if_needed(agent, bundle, result)
+        result = continued.result
+        bundle = continued.bundle
     except Exception as exc:
         return agent._handle_subagent_run_failure(
             SubagentRunFailureParams(
@@ -131,4 +135,5 @@ def _run_subagent_model_turn(agent, prompt: str, context):
         system_prompt_override=subagent_runner_system_prompt(context),
         source="subagent_run_model_turn",
         recovery_snapshot=False,
+        context_scope="task_local",
     )

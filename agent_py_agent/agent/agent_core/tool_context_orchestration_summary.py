@@ -33,19 +33,20 @@ def _render_artifact_read_summary(
     content = str(payload.get("content") or "")
     inner = _json_object(content)
     if inner_tool in _ORCHESTRATION_TOOLS and inner is not None:
-        return _render_orchestration_summary("artifact_read_summary", inner_tool, inner, archive_record)
+        return _render_orchestration_summary("artifact_read_summary", inner_tool, inner, _source_artifact_record(payload))
     lines = [
         "[tool=read_artifact; status=ok]",
         "artifact_read_summary:",
         "- policy: artifact body was requested explicitly; live prompt keeps only a bounded preview.",
-        f"- artifact_ref: {payload.get('artifact_ref', '')}",
-        f"- artifact_tool: {inner_tool}",
+        f"- source_artifact_ref: {payload.get('artifact_ref', '')}",
+        f"- source_artifact_tool: {inner_tool}",
+        f"- source_call_id: {payload.get('call_id', '')}",
         f"- content_offset: {payload.get('content_offset', 0)}",
         f"- content_chars: {payload.get('content_chars', len(content))}",
         f"- truncated: {payload.get('truncated', False)}",
         f"- content_preview: {_clip(content)}",
+        "- continue_read_policy: read source_artifact_ref with offset/mode if more evidence is needed; do not read a read_artifact wrapper path.",
     ]
-    lines.extend(_archive_pointer_lines(archive_record, include_read_hint=False))
     return "\n".join(lines)
 
 
@@ -174,6 +175,20 @@ def _archive_pointer_lines(archive_record: dict[str, object], *, include_read_hi
     if include_read_hint:
         lines.append("- read_artifact_hint: read only a narrow evidence slice when the compact summary is insufficient.")
     return lines
+
+
+# LLM: _source_artifact_record maps read_artifact metadata back to the original artifact, not the wrapper output.
+# 函数用途: 生成摘要指针时隐藏 read_artifact 自己的二次外置路径，只保留原始 artifact 引用。
+def _source_artifact_record(payload: dict[str, Any]) -> dict[str, object]:
+    return {
+        "output_path": "",
+        "artifact_ref": str(payload.get("artifact_ref") or ""),
+        "call_id": str(payload.get("call_id") or ""),
+        "scoped_call_id": str(payload.get("scoped_call_id") or ""),
+        "output_hash": str(payload.get("sha256") or ""),
+        "output_size_bytes": int(payload.get("size_bytes") or payload.get("content_chars") or 0),
+        "ok": bool(payload.get("ok", True)),
+    }
 
 
 # LLM: _json_object parses only dict JSON payloads for defensive summarization.

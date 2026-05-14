@@ -59,35 +59,61 @@ class ScenarioRealModelRecoveryBackend:
                 ),
                 backend=self.name,
             )
-        summary_preview = self.real_response_text[:200]
+        summary_preview = _scenario_summary_preview(self.real_response_text)
+        payload = {
+            "status": "AWAITING_ACCEPTANCE",
+            "summary": f"Real model smoke test: {summary_preview}",
+            "used_tools": ["read_file"],
+            "used_skills": [],
+            "evidence": [{
+                "kind": "read_file",
+                "summary": "README.md read via real model runner",
+                "path": "README.md",
+                "ok": True,
+            }],
+            "capability_requests": [],
+            "artifacts": [],
+            "tests": [{
+                "name": "real_model_runner",
+                "command": "",
+                "ok": True,
+                "summary": "real model API call succeeded",
+            }],
+            "patches": [],
+            "lessons": ["real model API round-trip verified in recovery smoke test"],
+            "next_actions": ["parent should validate recovery context includes real response content"],
+            "blocked_reason": "",
+            "failure_type": "",
+        }
         return ModelResponse(
-            text=(
-                "[SUBAGENT_RESULT]\n"
-                "{\n"
-                '  "status": "AWAITING_ACCEPTANCE",\n'
-                f'  "summary": "Real model smoke test: {summary_preview}",\n'
-                '  "used_tools": ["read_file"],\n'
-                '  "used_skills": [],\n'
-                '  "evidence": [\n'
-                '    {"kind": "read_file", "summary": "README.md read via real model runner", '
-                '"path": "README.md", "ok": true}\n'
-                "  ],\n"
-                '  "capability_requests": [],\n'
-                '  "artifacts": [],\n'
-                '  "tests": [\n'
-                '    {"name": "real_model_runner", "command": "", "ok": true, '
-                '"summary": "real model API call succeeded"}\n'
-                "  ],\n"
-                '  "patches": [],\n'
-                '  "lessons": ["real model API round-trip verified in recovery smoke test"],\n'
-                '  "next_actions": ["parent should validate recovery context includes real response content"],\n'
-                '  "blocked_reason": "",\n'
-                '  "failure_type": ""\n'
-                "}\n"
-                "[/SUBAGENT_RESULT]"
-            ),
+            text=_subagent_result_text(payload),
             backend=self.name,
         )
+
+
+# LLM: _subagent_result_text serializes scenario payloads safely even when real model text contains JSON syntax.
+# 函数用途: 把 scenario 结构化结果用 json.dumps 生成，避免真实模型回复里的引号、换行或工具块破坏 JSON。
+def _subagent_result_text(payload: dict[str, object]) -> str:
+    return "[SUBAGENT_RESULT]\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n[/SUBAGENT_RESULT]"
+
+
+# LLM: _scenario_summary_preview keeps real-model transcript snippets from becoming executable protocol text.
+# 函数用途: 测试夹具只需要证明真实模型有响应；摘要里的工具/结果标记要转义，避免后续工具解析误触发。
+def _scenario_summary_preview(text: str, limit: int = 200) -> str:
+    preview = str(text or "")[:limit]
+    replacements = {
+        "[TOOL_CALL]": "<TOOL_CALL>",
+        "[/TOOL_CALL]": "</TOOL_CALL>",
+        "[SUBAGENT_CALL]": "<SUBAGENT_CALL>",
+        "[/SUBAGENT_CALL]": "</SUBAGENT_CALL>",
+        "[SUBAGENT_RESULT]": "<SUBAGENT_RESULT>",
+        "[/SUBAGENT_RESULT]": "</SUBAGENT_RESULT>",
+        "[PARENT_PLANNER_RESULT]": "<PARENT_PLANNER_RESULT>",
+        "[/PARENT_PLANNER_RESULT]": "</PARENT_PLANNER_RESULT>",
+    }
+    for marker, safe in replacements.items():
+        preview = preview.replace(marker, safe)
+    return preview
 
 
 # LLM: _real_model_recovery_setup 属于scenario CLI；改行为前先对齐调用方和快照/单测。

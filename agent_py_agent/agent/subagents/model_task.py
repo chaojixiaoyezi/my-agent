@@ -255,6 +255,12 @@ class SubAgentTask:
     agent_run_compaction_ledger_jsonl: str = ""
     agent_run_latest_compaction_summary_md: str = ""
     agent_run_latest_compaction_metadata_json: str = ""
+    # LLM: session compact refs are separate from checkpoint compact refs so runner resume never overwrites checkpoints.
+    # 字段用途: 指向子代理会话续接包的最新 metadata/summary/packet；只用于 task-local 自动续跑和接管。
+    agent_run_session_compaction_ledger_jsonl: str = ""
+    agent_run_latest_session_compaction_summary_md: str = ""
+    agent_run_latest_session_compaction_metadata_json: str = ""
+    agent_run_latest_session_continue_packet_json: str = ""
     # LLM: Phase 6 gate files hold review candidates only; they never auto-promote memory.
     agent_run_memory_gate_dir: str = ""
     agent_run_memory_candidates_jsonl: str = ""

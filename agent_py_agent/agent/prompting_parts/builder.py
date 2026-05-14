@@ -47,6 +47,20 @@ class PromptBuildRequest:
     prompt_files: list[str] | None = None
     tools: ToolSections | None = None
     system_prompt_override: str | None = None
+    context_scope: str = "default"
+
+
+# LLM: _PromptBuildCompatArgs bundles legacy kwargs before normalizing to PromptBuildRequest.
+# 类用途: 保存 build 旧参数入口，避免辅助函数继续出现长参数列表。
+@dataclass(frozen=True)
+class _PromptBuildCompatArgs:
+    user_prompt: str
+    memories: list[MemoryRecord] | None
+    inject: list[str] | None
+    prompt_files: list[str] | None
+    tools: ToolSections | None
+    system_prompt_override: str | None
+    context_scope: str
 
 
 # LLM: PromptBuilder is a Prompt 构造 boundary object; coordinate field or method changes with callers, docs, and focused tests.
@@ -63,14 +77,15 @@ class PromptBuilder:
 
     # LLM: PromptBuilder.read_prompt_files belongs to Prompt 构造; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 读取动态 prompt 文件并拼接内容。 大白话解释： 这些文件相当于'额外行为规则'，只要被读进来，这一轮模型就真的能看到。。
-    def read_prompt_files(self, extra_files: list[str] | None = None) -> list[str]:
+    def read_prompt_files(self, extra_files: list[str] | None = None, *, include_config: bool = True) -> list[str]:
         """读取动态 prompt 文件并拼接内容。
 
         大白话解释：
         这些文件相当于'额外行为规则'，只要被读进来，这一轮模型就真的能看到。"""
 
         chunks: list[str] = []
-        for name in [*self.config.prompt_files, *(extra_files or [])]:
+        configured = self.config.prompt_files if include_config else []
+        for name in [*configured, *(extra_files or [])]:
             path = Path(name)
             if not path.is_absolute():
                 path = self.root / path
@@ -90,6 +105,7 @@ class PromptBuilder:
         prompt_files: list[str] | None = None,
         tools: ToolSections | None = None,
         system_prompt_override: str | None = None,
+        context_scope: str = "default",
     ) -> str:
         """拼出完整 prompt。
 
@@ -97,20 +113,23 @@ class PromptBuilder:
         - `tool_catalog_section`：常驻的工具目录，告诉模型'你手里有什么工具'
         - `tool_recommendations_section`：按当前任务筛出来的少量候选详情，告诉模型'这次大概率该用谁'"""
 
-        request = request or PromptBuildRequest(
-            user_prompt,
-            memories or [],
-            inject,
-            prompt_files,
-            tools,
-            system_prompt_override,
+        request = _prompt_build_request(
+            request,
+            _PromptBuildCompatArgs(
+                user_prompt,
+                memories,
+                inject,
+                prompt_files,
+                tools,
+                system_prompt_override,
+                context_scope,
+            ),
         )
         _tools = request.tools or ToolSections()
         system_prompt = request.system_prompt_override or self.config.system_prompt
-        memory_text = "\n".join(
-            f"- [{m.kind}] {m.role}: {m.content}" for m in request.memories
-        ) or "（无相关记忆）"
-        dynamic = "\n".join([*self.read_prompt_files(request.prompt_files), *self.read_home_context(request.user_prompt)])
+        task_local = _is_task_local_context(request.context_scope)
+        memory_text = _memory_text([] if task_local else request.memories)
+        dynamic = _dynamic_prompt_text(self, request, task_local)
         injected = "\n".join(request.inject or [])
         task_and_transcript = _task_and_transcript_section(request.user_prompt, _tools.tool_context or [])
         default_tools = "# Tools\n（当前未启用工具）"
@@ -135,6 +154,39 @@ class PromptBuilder:
         return chunks
 
 
+# LLM: _prompt_build_request keeps legacy build kwargs as one explicit PromptBuildRequest bundle.
+# 函数用途: 兼容旧调用方式，同时让 build 主流程只处理已经归一化的参数包。
+def _prompt_build_request(
+    request: PromptBuildRequest | None,
+    args: _PromptBuildCompatArgs,
+) -> PromptBuildRequest:
+    return request or PromptBuildRequest(
+        args.user_prompt,
+        args.memories or [],
+        args.inject,
+        args.prompt_files,
+        args.tools,
+        args.system_prompt_override,
+        args.context_scope,
+    )
+
+
+# LLM: _memory_text renders related memory separately so PromptBuilder.build remains thin.
+# 函数用途: 将 memory records 渲染成 prompt 文本；没有可用记忆时输出固定占位。
+def _memory_text(memories: list[MemoryRecord]) -> str:
+    return "\n".join(f"- [{m.kind}] {m.role}: {m.content}" for m in memories) or "（无相关记忆）"
+
+
+# LLM: _dynamic_prompt_text centralizes prompt-file and home-context injection rules.
+# 函数用途: task_local 禁止读取主家目录；普通 root 运行读取配置 prompt 和匹配 lesson。
+def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, task_local: bool) -> str:
+    chunks = [
+        *builder.read_prompt_files(request.prompt_files, include_config=not task_local),
+        *([] if task_local else builder.read_home_context(request.user_prompt)),
+    ]
+    return "\n".join(chunks)
+
+
 # LLM: _task_and_transcript_section belongs to Prompt 构造; keep caller-visible returns, errors, and side effects aligned with focused tests.
 # 函数用途: 完成 Prompt 构造 里的 _task_and_transcript_section 步骤，保持现有返回值、异常和副作用语义。
 def _task_and_transcript_section(user_prompt: str, tool_context: list[str]) -> str:
@@ -149,6 +201,12 @@ def _task_and_transcript_section(user_prompt: str, tool_context: list[str]) -> s
         "如果某个工具调用已经成功，不要重复调用同一个工具和同一组参数；"
         "直接使用已有结果进入下一步，或在证据足够时给出最终答案。"
     )
+
+
+# LLM: _is_task_local_context is the prompt-layer boundary between owner memory and subagent workspaces.
+# 函数用途: 判断本轮 prompt 是否只允许任务本地上下文，避免子代理看到主代理长期记忆和家目录制度。
+def _is_task_local_context(value: object) -> bool:
+    return str(value or "").strip().lower() == "task_local"
 
 
 # LLM: _home_entry_context_chunks loads stable owner entry files with AGENTS.md first as the boot contract.

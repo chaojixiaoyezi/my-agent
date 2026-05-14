@@ -24,6 +24,10 @@ from agent_py_agent.agent.memory_archive.runtime.turn_archiver import (
     archive_run_turn,
 )
 from agent_py_agent.agent.memory_archive.schema import RUNTIME_MEMORY_SCHEMA_VERSION
+from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
+    ExternalizeToolOutputRequest,
+    externalize_tool_output_record,
+)
 from agent_py_agent.agent.tooling.content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
     RECOVERY_WRITE_CHUNK_CHARS,
@@ -102,6 +106,37 @@ def test_tool_loop_externalizer_falls_back_to_current_subagent_run_id(tmp_path: 
     assert record["run_id"] == "runner-42"
     assert record["scoped_call_id"] == "runner-42:7-1"
     assert artifact["run_id"] == "runner-42"
+
+
+# LLM: read_artifact already returns bounded slices, so archiving it must not create artifact-of-artifact loops.
+# 函数用途: 防止显式读取 artifact 后又生成第二层 tool_output JSON，避免模型继续追套娃引用。
+def test_read_artifact_output_is_not_re_externalized(tmp_path: Path) -> None:
+    output = json.dumps(
+        {
+            "ok": True,
+            "reads_artifact_body": True,
+            "artifact_ref": str(tmp_path / "memory_archive/artifacts/tool_outputs/read_file-1.json"),
+            "content": "important recovery packet\n" + ("x" * 1600),
+            "content_chars": 1626,
+            "truncated": False,
+        },
+        ensure_ascii=False,
+    )
+
+    record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=tmp_path,
+            tool="read_artifact",
+            call_id="2-1",
+            output=output,
+            ok=True,
+            run_id="runner-1",
+        )
+    )
+
+    assert record["output_externalized"] is False
+    assert record["output_path"] == ""
+    assert not (tmp_path / "memory_archive/artifacts/tool_outputs").exists()
 
 
 def test_tool_loop_summarizes_large_tool_call_payload_for_live_prompt() -> None:

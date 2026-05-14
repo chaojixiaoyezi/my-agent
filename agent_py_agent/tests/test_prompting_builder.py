@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from agent_py_agent.agent.memory_store import MemoryRecord
-from agent_py_agent.agent.prompting_parts.builder import PromptBuilder, ToolSections
+from agent_py_agent.agent.prompting_parts.builder import (
+    PromptBuilder,
+    PromptBuildRequest,
+    ToolSections,
+)
 from agent_py_agent.agent.settings import AgentConfig
 
 
@@ -264,6 +269,38 @@ class TestBuildPromptFilesParam:
         result = builder.build("hello", [])
         assert "# Dynamic Prompt Files" in result
         assert "（无）" in result
+
+    def test_task_local_context_suppresses_owner_memory_and_home_files(self, tmp_path):
+        """子代理 task-local prompt 不能混入主代理长期记忆、家目录制度或全局 prompt 文件。"""
+        global_prompt = tmp_path / "GLOBAL.md"
+        global_prompt.write_text("GLOBAL SECRET", encoding="utf-8")
+        home = tmp_path / "home"
+        home.mkdir()
+        agents = home / "AGENTS.md"
+        agents.write_text("HOME SECRET", encoding="utf-8")
+        lessons = home / "lessons"
+        lessons.mkdir()
+        home_paths = SimpleNamespace(
+            agents_md=agents,
+            soul_md=home / "SOUL.md",
+            user_md=home / "USER.md",
+            memory_md=home / "memory.md",
+            memory_lessons_dir=lessons,
+        )
+        config = AgentConfig(system_prompt="System", prompt_files=[str(global_prompt)], home_context_enabled=True)
+        builder = PromptBuilder(config, tmp_path, home_paths=home_paths)
+        request = PromptBuildRequest(
+            user_prompt="subagent task",
+            memories=[MemoryRecord(role="user", content="MEMORY SECRET", kind="dialogue")],
+            context_scope="task_local",
+        )
+
+        result = builder.build(request=request)
+
+        assert "MEMORY SECRET" not in result
+        assert "GLOBAL SECRET" not in result
+        assert "HOME SECRET" not in result
+        assert "（无相关记忆）" in result
 
 
 class TestBuildFullPrompt:

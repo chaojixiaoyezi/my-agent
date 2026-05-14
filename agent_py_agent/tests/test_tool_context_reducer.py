@@ -121,3 +121,35 @@ def test_read_artifact_dispatch_content_is_summarized_for_live_prompt():
     assert "records" not in rendered
     assert "read_artifact_hint" not in rendered
     assert len(rendered) < 1600
+
+
+# LLM: legacy nested read_artifact archive records must not invite models to chase artifact-of-artifact files.
+# 函数用途: 验证显式 read_artifact 后的 live prompt 只保留原始 artifact 引用，不暴露二次外置 wrapper 路径。
+def test_read_artifact_summary_hides_nested_wrapper_artifact_path():
+    output = json.dumps(
+        {
+            "ok": True,
+            "artifact_ref": "/tmp/tool_outputs/read_file-1.json",
+            "tool": "read_file",
+            "call_id": "1-1",
+            "content": "latest_continue_packet body" + ("x" * 2000),
+            "content_chars": 2027,
+            "truncated": True,
+            "reads_artifact_body": True,
+        }
+    )
+    rendered = render_tool_result_for_live_prompt(
+        ToolExecutionResult("read_artifact", True, output),
+        {
+            "output_externalized": True,
+            "artifact_ref": "/tmp/tool_outputs/read_artifact-2.json",
+            "output_path": "/tmp/tool_outputs/read_artifact-2.json",
+            "output_hash": "def",
+            "output_size_bytes": len(output),
+        },
+    )
+
+    assert "artifact_read_summary" in rendered
+    assert "source_artifact_ref: /tmp/tool_outputs/read_file-1.json" in rendered
+    assert "read_artifact-2.json" not in rendered
+    assert "read_artifact_hint" not in rendered

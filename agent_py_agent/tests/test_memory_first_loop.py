@@ -166,7 +166,10 @@ def test_runtime_compression_receives_routed_and_resume_context(monkeypatch):
     monkeypatch.setattr(runtime_loop_support, "build_routed_memory_context", lambda *args, **kwargs: routed_context)
     monkeypatch.setattr(runtime_loop_support, "build_auto_resume_context", lambda *args, **kwargs: resume_context)
 
-    prepared = runtime_loop_support._prepare_runtime_context(agent, "继续 compact", [], True)
+    prepared = runtime_loop_support._prepare_runtime_context(
+        agent,
+        runtime_loop_support.RuntimeContextRequest("继续 compact", [], True),
+    )
     params = runtime_loop_support._runtime_loop_params(
         "继续 compact",
         prepared,

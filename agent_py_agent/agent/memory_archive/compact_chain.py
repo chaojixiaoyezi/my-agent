@@ -11,6 +11,7 @@ checkpoint snapshots and compact metadata without deleting timelines, artifacts,
 or legacy work-order files.
 """
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -54,6 +55,7 @@ class _CompactSnapshotContext:
     summary_md: Path
     metadata_json: Path
     now: float
+    state_fingerprint: str
 
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 sync_agent_run_compact_chain 时同步检查返回值、异常处理和读写副作用。
@@ -77,6 +79,9 @@ def sync_agent_run_compact_chain(
     )
     paths = _compact_paths(inputs.agent_run_workspace_root)
     paths.ledger_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    state_fingerprint = _state_fingerprint(inputs.task, inputs.artifact_manifest_jsonl)
+    if _latest_state_fingerprint(paths.latest_metadata_json) == state_fingerprint:
+        return paths
     sequence = _next_sequence(paths.ledger_jsonl)
     previous_event_id = _last_event_id(paths.ledger_jsonl)
     event_id = _event_id(str(getattr(inputs.task, "id", "")), sequence)
@@ -91,6 +96,7 @@ def sync_agent_run_compact_chain(
         summary_md=event_summary,
         metadata_json=event_metadata,
         now=inputs.now,
+        state_fingerprint=state_fingerprint,
     )
     metadata = _metadata_payload(inputs.task, context)
     summary = _summary_markdown(inputs.task, metadata)
@@ -176,6 +182,7 @@ def _metadata_payload(
         "summary": str(getattr(task, "latest_summary", "")),
         "refs": _refs(task, context),
         "created_at": _utc_iso(context.now),
+        "state_fingerprint": context.state_fingerprint,
     }
 
 
@@ -263,6 +270,38 @@ def _last_event_id(path: Path) -> str:
         if event_id:
             return event_id
     return ""
+
+
+# LLM: _latest_state_fingerprint lets saves skip no-op checkpoint compact entries.
+# 函数用途: 读取最新 checkpoint compact 的状态指纹；旧 metadata 没有该字段时返回空值以保持兼容。
+def _latest_state_fingerprint(path: Path) -> str:
+    return str(_read_json_object(path).get("state_fingerprint") or "")
+
+
+# LLM: _state_fingerprint captures material recovery facts while ignoring updated_at/save churn.
+# 函数用途: 生成 checkpoint compact 去重指纹；只有任务状态、摘要、阻塞、产物引用或 artifact manifest 变化才追加事件。
+def _state_fingerprint(task: Any, artifact_manifest_jsonl: Path) -> str:
+    payload = {
+        "status": str(getattr(task, "status", "")),
+        "verification_status": str(getattr(task, "verification_status", "")),
+        "progress": float(getattr(task, "progress", 0.0) or 0.0),
+        "current_step": str(getattr(task, "current_step", "")),
+        "latest_summary": str(getattr(task, "latest_summary", "")),
+        "blockers": [str(item) for item in list(getattr(task, "blockers", []) or [])],
+        "artifact_refs": [str(item) for item in list(getattr(task, "artifact_refs", []) or [])],
+        "manifest_sha256": _file_sha256(artifact_manifest_jsonl),
+    }
+    body = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+# LLM: _file_sha256 keeps artifact manifest changes visible without embedding manifest bodies in metadata.
+# 函数用途: 对 artifact manifest 做短指纹；文件不存在或读取失败时返回空字符串。
+def _file_sha256(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
 
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _ledger_lines 时同步检查返回值、异常处理和读写副作用。

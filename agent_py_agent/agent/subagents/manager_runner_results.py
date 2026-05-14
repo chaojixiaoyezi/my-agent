@@ -212,9 +212,11 @@ class _SubAgentRunnerResultFacade:
             _PostResultSideEffectParams(output_payload, params.dry_run, extracted.parsed, extracted.lessons),
         )
         # LLM: save=False runner compact signals are persisted only as task-local package refs.
-        write_subagent_session_compact(
+        session_refs = write_subagent_session_compact(
             SubagentSessionCompactRequest(task, params.session_compact or {}, output_payload)
         )
+        if session_refs:
+            self.save(task)
         # LLM: optional debug tracing is refs-only and gated by subagent_debug_trace_level.
         from .debug_trace import SubAgentRunnerTraceRequest, trace_runner_result
 

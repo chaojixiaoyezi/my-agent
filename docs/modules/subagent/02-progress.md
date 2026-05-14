@@ -1040,9 +1040,9 @@
 ## 2026-05-13 task-local compact continuation refs
 - 中文说明：子代理会话 compact 第一版不把子代理写进主代理长期记忆，而是让 runner 从自己的 `tasks/<root>/agents/<run>/` 任务目录接续。
 - 已实现：`context_bundle.workspace_refs` 补齐 agent run workspace 的 `task.md`、`checkpoint.json`、`summary.md`、`final_report.md`、`findings.jsonl`、`timeline.jsonl`、`compactions/` 和 shared refs，父级/接管代理能 refs-first 看状态。
-- 已实现：runner prompt 在这些 refs 存在时加入 `Task-Local Compact Continuation`，只读取 bounded 小片段和 `compactions/latest_continue_packet.json` 摘要；不读取主代理 `SOUL.md` / `USER.md`，不自动写主 memory。
+- 已实现：runner prompt 在这些 refs 存在时加入 `Task-Local Compact Continuation`，只读取 bounded 小片段和 `compactions/session/latest_continue_packet.json` 摘要；不读取主代理 `SOUL.md` / `USER.md`，不自动写主 memory。
 - 已实现：`memory-resume --from-compact owner_type=subagent_run` 可以通过 `compact_subagent_owner.py` 看见已存在的 `latest_continue_packet.json`，并返回 `continue_packet_ready=true`；这只是可见性和交接，不会自动执行工具。
-- 已实现闭环：`SubAgentManager.save()` 会自动写 `latest_continue_packet.json` 和 `session_compact_ledger.jsonl`。父级重新 runner/dispatch 同一个 run 时，prompt 会自动读取这个包，带着子代理上一轮的 current step、summary、blockers 和推荐读取路径继续。
+- 已实现闭环：`SubAgentManager.save()` 会自动写 `compactions/session/latest_continue_packet.json` 和去重后的 `session_compact_ledger.jsonl`。父级重新 runner/dispatch 同一个 run 时，prompt 会自动读取这个包，带着子代理上一轮的 current step、summary、blockers、work_progress 和推荐读取路径继续。
 - 已补测试：`test_runner_prompt_includes_task_local_compact_continuation_refs`、`test_memory_compact_resume_exposes_subagent_latest_continue_packet`、`test_context_bundle_v1_captures_task_handoff_fields`。
 - 下一步：做更高层的恢复调度策略：父级发现子代理超时/中断/父节点失联时，如何选择原 run 重跑、创建 takeover run，或把子树挂到新 leader。
 
@@ -1178,3 +1178,16 @@
 - 边界：这个第一片仍不是“子代理一次模型会话里自动 compact 后立刻继续多轮”。它先把子代理自己的 compact 包、恢复 refs 和 prompt 读取链路补齐，为下一片自动续接打底。
 - 已测试：focused regression 覆盖子代理本地 compact 包写入、continue packet 挂接、runner prompt 展示，以及不写主 `memory_archive/compact_applies`。
 - 下一步：把这套 package 接到真实 runner 自动续接控制里，重跑专项 12：单个子代理连续 compact 4 次以上仍能接着完成任务。
+
+## 2026-05-14 recovery 专项 12 第二片：task-local 进度、结构化读取和 ledger 去重
+- 中文说明：这轮把“子代理有接班包”推进到“接班包里有具体工作进度，模型读取时不会套娃，也不会因为低阈值写一堆重复 ledger”。
+- 已实现：新增 `subagents/services/session_progress.py`。子代理 runner 成功调用 `write_file` / `append_file` / `replace_in_file` 后，会在当前 `tasks/<root>/agents/<run>/progress/` 下写 `latest_tool_progress.json` 和 `tool_progress.jsonl`，记录最近写入路径、累计标题、摘要和下一步。
+- 已实现：`latest_continue_packet.json` 移到 `compactions/session/latest_continue_packet.json`，并嵌入 `work_progress`；`recommended_read_paths` 优先推荐 `latest_tool_progress.json`，避免 compact/retry 后重复写已完成章节。
+- 已实现：新增 `tooling/filesystem_structured_read.py`。默认 `read_file` 读取 `latest_continue_packet.json` 时返回结构化摘要；显式传 `start_line/end_line` 才读原始 JSON，降低 token 和 artifact 套娃风险。
+- 已实现：`read_artifact` 的有界读取结果不再被二次外置；外置摘要会指回 `source_artifact_ref`，防止模型追着 wrapper artifact 读。
+- 已实现：`session_compact_ledger.jsonl` 增加 `state_fingerprint`，连续相同状态不再追加重复行。
+- 真实验证：Case 12 root-only 真实运行通过，root 创建 1 个 worker，worker 写出 `/Users/xiaoyezi/my-claude-code/recovery_cases/case12_subagent_multi_compact/算法测试方案.md`，最终 `total_runs=1`、`done_verified=1`，耗时约 `90.6s`。
+- 已补测试：`test_subagent_session_auto_continuation.py`、`test_subagent_compact_continuation.py`、`test_tool_output_externalizer.py`、`test_tool_context_reducer.py`、`test_memory_artifact_read.py`、`test_tooling_filesystem.py::TestReadFileTool` focused tests 通过。
+- 架构整理：新增 `agent_core/runtime_loop_models.py`，运行循环参数模型从主编排文件拆出；新增 `tooling/filesystem_structured_read.py`，结构化读取策略从 `read_file` 主实现拆出；strict code-size 当前 `hard=0 high-risk=0 soft=0`。
+- 遗留：真实“一个子代理模型会话内连续 4+ 次 compact 并自动续跑直到完成”还需要在瘦身后再跑一次长专项；当前真实 E2E 已证明 task-local 进度、continue packet、session compact refs 和父级验收主链路可用。
+- 下一步：继续专项 12 长任务复跑，重点观察 4+ child-local compact 后是否不重复章节、ledger 不再重复膨胀、root 不直接干预下层。

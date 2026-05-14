@@ -194,9 +194,16 @@ def _workspace_refs(task: SubAgentTask) -> dict[str, str]:
         "agent_run_timeline": _safe_string_ref(task, "agent_run_timeline_jsonl"),
         "agent_run_compactions": _safe_string_ref(task, "agent_run_compactions_dir"),
         "agent_run_latest_continue_packet": _latest_continue_packet_ref(task),
-        # LLM: session compact refs stay task-local and let runner prompts avoid parent memory.
         "agent_run_latest_compaction_summary": _safe_string_ref(task, "agent_run_latest_compaction_summary_md"),
         "agent_run_latest_compaction_metadata": _safe_string_ref(task, "agent_run_latest_compaction_metadata_json"),
+        # LLM: session compact refs stay task-local and let runner prompts avoid parent memory.
+        "agent_run_session_compaction_ledger": _safe_string_ref(task, "agent_run_session_compaction_ledger_jsonl"),
+        "agent_run_latest_session_compaction_summary": _safe_string_ref(
+            task, "agent_run_latest_session_compaction_summary_md"
+        ),
+        "agent_run_latest_session_compaction_metadata": _safe_string_ref(
+            task, "agent_run_latest_session_compaction_metadata_json"
+        ),
         "shared_blackboard": _safe_string_ref(task, "task_workspace_shared_blackboard"),
         "shared_messages": _safe_string_ref(task, "task_workspace_shared_messages_jsonl"),
         "shared_findings": _safe_string_ref(task, "task_workspace_shared_findings_jsonl"),
@@ -212,8 +219,11 @@ def _workspace_refs(task: SubAgentTask) -> dict[str, str]:
 # LLM: _latest_continue_packet_ref reserves a stable task-local subagent resume packet path.
 # 函数用途: 从 agent_run_compactions_dir 派生 latest_continue_packet.json，供 runner prompt 按存在性读取。
 def _latest_continue_packet_ref(task: SubAgentTask) -> str:
+    explicit = _safe_string_ref(task, "agent_run_latest_session_continue_packet_json")
+    if explicit:
+        return explicit
     compactions = _safe_string_ref(task, "agent_run_compactions_dir")
-    return str(Path(compactions) / "latest_continue_packet.json") if compactions else ""
+    return str(Path(compactions) / "session" / "latest_continue_packet.json") if compactions else ""
 
 
 # LLM: _output_contract tells the runner where durable reports and machine output must land.

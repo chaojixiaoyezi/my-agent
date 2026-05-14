@@ -180,7 +180,17 @@ def test_memory_compact_resume_exposes_subagent_latest_continue_packet(tmp_path:
     _write_compact_fixture(root)
     _write_work_state_fact_sources(root)
     _write_subagent_run_workspace(root)
-    packet = root / "tasks" / "root-compact" / "agents" / "run-compact" / "compactions" / "latest_continue_packet.json"
+    packet = (
+        root
+        / "tasks"
+        / "root-compact"
+        / "agents"
+        / "run-compact"
+        / "compactions"
+        / "session"
+        / "latest_continue_packet.json"
+    )
+    packet.parent.mkdir(parents=True, exist_ok=True)
     packet.write_text(
         json.dumps({"ready_to_continue": True, "next_action": "resume subagent locally"}),
         encoding="utf-8",
@@ -274,8 +284,10 @@ def _write_configured_continue_packet(configured_subagents: Path, run_id: str) -
         / "agents"
         / run_id
         / "compactions"
+        / "session"
         / "latest_continue_packet.json"
     )
+    packet.parent.mkdir(parents=True, exist_ok=True)
     packet.write_text(json.dumps({"ready_to_continue": True}), encoding="utf-8")
 
 

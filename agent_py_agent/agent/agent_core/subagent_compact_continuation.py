@@ -20,8 +20,8 @@ _REF_KEYS = (
     "agent_run_task",
     "agent_run_checkpoint",
     "agent_run_summary",
-    "agent_run_latest_compaction_metadata",
-    "agent_run_latest_compaction_summary",
+    "agent_run_latest_session_compaction_metadata",
+    "agent_run_latest_session_compaction_summary",
     "agent_run_final_report",
     "agent_run_findings",
     "agent_run_timeline",
@@ -79,7 +79,10 @@ def _workspace_refs(context: SubAgentExecutionContext) -> dict[str, str]:
         values.setdefault("agent_run_compactions", str(base / "compactions"))
     compactions = values.get("agent_run_compactions", "")
     if compactions:
-        values.setdefault("agent_run_latest_continue_packet", str(Path(compactions) / "latest_continue_packet.json"))
+        session = Path(compactions) / "session"
+        values.setdefault("agent_run_latest_continue_packet", str(session / "latest_continue_packet.json"))
+        values.setdefault("agent_run_latest_session_compaction_metadata", str(session / "latest_metadata.json"))
+        values.setdefault("agent_run_latest_session_compaction_summary", str(session / "latest_summary.md"))
         values.setdefault("agent_run_latest_compaction_metadata", str(Path(compactions) / "latest_metadata.json"))
         values.setdefault("agent_run_latest_compaction_summary", str(Path(compactions) / "latest_summary.md"))
     return values
@@ -90,7 +93,7 @@ def _workspace_refs(context: SubAgentExecutionContext) -> dict[str, str]:
 def _latest_continue_packet_path(refs: dict[str, str]) -> Path | None:
     value = refs.get("agent_run_latest_continue_packet", "")
     if not value and refs.get("agent_run_compactions"):
-        value = str(Path(refs["agent_run_compactions"]) / "latest_continue_packet.json")
+        value = str(Path(refs["agent_run_compactions"]) / "session" / "latest_continue_packet.json")
     path = Path(value) if value else None
     return path if path and path.exists() else None
 
@@ -128,18 +131,56 @@ def _packet_lines(path: Path | None, max_chars: int) -> list[str]:
     for key in ("ready_to_continue", "continue_mode", "next_action"):
         if key in payload:
             lines.append(f"- {key}: {_short(payload[key], max_chars)}")
+    lines.extend(_packet_progress_lines(payload, max_chars))
     paths = payload.get("recommended_read_paths")
     if isinstance(paths, list) and paths:
         lines.append("- recommended_read_paths:")
         lines.extend(f"  - {_short(item, max_chars)}" for item in paths[:5])
+    lines.extend(_packet_read_policy_lines(payload))
     return lines + [""]
+
+
+# LLM: _packet_progress_lines gives runners the useful part of packet state without reading the full JSON.
+# 函数用途: 展示 work_progress 的摘要、最近写入路径和标题；没有进度时明确告诉 runner 可以直接开始任务。
+def _packet_progress_lines(payload: dict[str, Any], max_chars: int) -> list[str]:
+    progress = payload.get("work_progress")
+    if not isinstance(progress, dict) or not progress:
+        return ["- work_progress: none"]
+    lines = ["- work_progress:"]
+    for key in ("summary", "latest_written_path", "next_action", "latest_tool_progress_ref"):
+        value = progress.get(key)
+        if str(value or "").strip():
+            lines.append(f"  - {key}: {_short(value, max_chars)}")
+    headings = progress.get("headings")
+    if isinstance(headings, list) and headings:
+        lines.append("  - headings:")
+        lines.extend(f"    - {_short(item, max_chars)}" for item in headings[:8])
+    return lines
+
+
+# LLM: _packet_read_policy_lines prevents empty packets from wasting model turns.
+# 函数用途: 如果 packet 已经被 prompt 摘要过且没有实际进度，提示 runner 不要反复读完整 JSON。
+def _packet_read_policy_lines(payload: dict[str, Any]) -> list[str]:
+    progress = payload.get("work_progress")
+    session = payload.get("session_compact")
+    has_progress = isinstance(progress, dict) and bool(progress)
+    has_session = isinstance(session, dict) and bool(session)
+    if has_progress or has_session:
+        return ["- packet_read_policy: read specific refs only when the summary is insufficient."]
+    return [
+        "- packet_read_policy: packet is already summarized here; "
+        "because work_progress/session_compact are empty, start from the task goal instead of reading the packet body.",
+    ]
 
 
 # LLM: _session_compact_lines shows subagent-local compact metadata without reading main memory.
 # 函数用途: 从 compactions/latest_metadata.json 和 latest_summary.md 渲染本地 compact 包摘要。
 def _session_compact_lines(refs: dict[str, str], max_chars: int) -> list[str]:
-    metadata_ref = refs.get("agent_run_latest_compaction_metadata", "")
-    summary_ref = refs.get("agent_run_latest_compaction_summary", "")
+    metadata_ref = refs.get("agent_run_latest_session_compaction_metadata", "")
+    summary_ref = refs.get("agent_run_latest_session_compaction_summary", "")
+    if not metadata_ref and not summary_ref:
+        metadata_ref = _legacy_session_metadata_ref(refs)
+        summary_ref = _legacy_session_summary_ref(refs) if metadata_ref else ""
     if not metadata_ref and not summary_ref:
         return []
     payload, status = _read_json_with_status(Path(metadata_ref)) if metadata_ref else ({}, "missing")
@@ -150,6 +191,24 @@ def _session_compact_lines(refs: dict[str, str], max_chars: int) -> list[str]:
     if summary:
         lines.extend(["", summary])
     return lines + [""]
+
+
+# LLM: _legacy_session_metadata_ref keeps old workspaces readable only when their latest metadata is a session package.
+# 函数用途: 兼容迁移前把 session compact 写到 compactions/latest_metadata.json 的旧任务，避免误把 checkpoint 当 session。
+def _legacy_session_metadata_ref(refs: dict[str, str]) -> str:
+    metadata_ref = refs.get("agent_run_latest_compaction_metadata", "")
+    if not metadata_ref:
+        return ""
+    payload, status = _read_json_with_status(Path(metadata_ref))
+    if status == "ok" and payload.get("schema_version") == "subagent_session_compact.v1":
+        return metadata_ref
+    return ""
+
+
+# LLM: _legacy_session_summary_ref pairs with legacy metadata only after the metadata schema check passes.
+# 函数用途: 返回旧 session summary 路径；新任务应使用 agent_run_latest_session_compaction_summary。
+def _legacy_session_summary_ref(refs: dict[str, str]) -> str:
+    return refs.get("agent_run_latest_compaction_summary", "")
 
 
 # LLM: _compact_ref_lines keeps session compact refs rendering flat and reusable.
