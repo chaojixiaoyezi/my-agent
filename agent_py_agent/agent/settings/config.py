@@ -83,6 +83,8 @@ class AgentConfig(HomeProviderConfigFields):
     memory_resume_auto_context_mode: str = "trigger"
     memory_resume_auto_context_limit: int = 5
     memory_compact_auto_allow_apply: bool = False
+    memory_compact_context_window_tokens: int = 0
+    memory_compact_auto_continue_max_depth: int = 1
     memory_artifact_default_read_chars: int = 4000
     memory_archive_preview_level_0_chars: int = 2048
     memory_archive_preview_level_1_chars: int = 1024
@@ -123,6 +125,7 @@ class AgentConfig(HomeProviderConfigFields):
     subagent_hierarchy_recovery_max_nodes: int = 200
     subagent_hierarchy_max_children_per_tool_call: int = 2
     subagent_descendant_scan_limit: int = 128
+    subagent_takeover_chain_max_depth: int = 2
     subagent_context_summary_inline_json_chars: int = 900
     subagent_context_summary_inline_text_chars: int = 500
     subagent_automation_level: int = 2
@@ -145,6 +148,7 @@ class AgentConfig(HomeProviderConfigFields):
     runner_concurrency: str = "auto"
     runner_start_rate: str = "auto"
     runner_timeout_seconds: str = "off"
+    runner_timeout_by_role: dict[str, object] = field(default_factory=dict)
     runner_failure_policy: str = "auto"
     gateway_workspace: str = "data/gateway"
     gateway_heartbeat_interval: int = 5

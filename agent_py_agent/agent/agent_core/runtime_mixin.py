@@ -165,6 +165,7 @@ class SimpleAgentRuntimeMixin:
         recovery_next_actions: list[str] | None = None,
         on_chunk: object = None,
     ):
+        provided_params = params
         params = _run_params_from_compat(
             params,
             _RunCompatibilityFields(
@@ -188,6 +189,7 @@ class SimpleAgentRuntimeMixin:
                 on_chunk=on_chunk,
             ),
         )
+        params = _apply_config_compact_auto_defaults(self.config, params, provided_params=provided_params is not None)
         return _run_with_params(self, user_prompt, params)
 
     # LLM: _build_finalize_context 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -219,6 +221,7 @@ class SimpleAgentRuntimeMixin:
             recovery_next_actions=rp.recovery_next_actions,
             tool_rounds=params.tool_rounds,
             compact_auto_continue_depth=rp.compact_auto_continue_depth,
+            compact_auto_continue_max_depth=rp.compact_auto_continue_max_depth,
         )
 
     # LLM: remember 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -261,17 +264,20 @@ def _run_params_from_compat(params: RunParams, fields: _RunCompatibilityFields) 
 # LLM: _run_with_params keeps the public run() compatibility shim under code-size limits.
 # 函数用途: 执行已归一化的 RunParams，串接准备上下文、工具循环和 finalization。
 def _run_with_params(agent, user_prompt: str, params: RunParams):
-    result = _run_once_with_params(agent, user_prompt, params)
-    decision = compact_auto_continuation_decision(
-        result,
-        depth=params.compact_auto_continue_depth,
-        max_depth=params.compact_auto_continue_max_depth,
-    )
-    if not decision.should_continue:
-        return result
-    next_params = _compact_auto_continue_params(params, decision.injection)
-    continued = _run_once_with_params(agent, decision.user_prompt, next_params)
-    return mark_compact_auto_continued(continued, result, depth=next_params.compact_auto_continue_depth)
+    current_params = params
+    result = _run_once_with_params(agent, user_prompt, current_params)
+    while True:
+        decision = compact_auto_continuation_decision(
+            result,
+            depth=current_params.compact_auto_continue_depth,
+            max_depth=current_params.compact_auto_continue_max_depth,
+        )
+        if not decision.should_continue:
+            return result
+        next_params = _compact_auto_continue_params(current_params, decision.injection)
+        continued = _run_once_with_params(agent, decision.user_prompt, next_params)
+        result = mark_compact_auto_continued(continued, result, depth=next_params.compact_auto_continue_depth)
+        current_params = next_params
 
 
 # LLM: _run_once_with_params contains one normal model/tool/finalize pass for reuse by auto continuation.
@@ -295,3 +301,12 @@ def _compact_auto_continue_params(params: RunParams, injection: str) -> RunParam
         inject=[*(params.inject or []), injection],
         compact_auto_continue_depth=params.compact_auto_continue_depth + 1,
     )
+
+
+# LLM: _apply_config_compact_auto_defaults gives public run() a config-backed continuation depth.
+# 函数用途: 用户没有显式传 RunParams 时，用配置控制自动 compact/resume 最多连续续跑多少轮。
+def _apply_config_compact_auto_defaults(config, params: RunParams, *, provided_params: bool) -> RunParams:
+    if provided_params:
+        return params
+    depth = int(getattr(config, "memory_compact_auto_continue_max_depth", params.compact_auto_continue_max_depth) or 0)
+    return replace(params, compact_auto_continue_max_depth=max(0, depth))

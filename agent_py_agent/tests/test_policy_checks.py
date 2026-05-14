@@ -392,6 +392,21 @@ def test_action_for_issue_coordinator_heartbeat_stale():
     assert new_status == ""
 
 
+def test_action_for_issue_coordinator_needs_leadership_recovery():
+    """死 coordinator 带子树时，动作优先级高于普通 takeover。"""
+    issue = DueCheckIssue(
+        run_id="root-timeout",
+        severity="P0",
+        kind="coordinator_needs_leadership_recovery",
+        message="",
+        suggested_action="recover_coordinator_leadership",
+    )
+    action, priority, new_status = _action_for_issue(issue)
+    assert action == "recover_coordinator_leadership"
+    assert priority == 930
+    assert new_status == ""
+
+
 def test_action_for_issue_parent_timeout_with_unfinished_children():
     """父超时但子任务未完成时，只生成子树恢复提示动作。"""
     issue = DueCheckIssue(
@@ -404,6 +419,21 @@ def test_action_for_issue_parent_timeout_with_unfinished_children():
     action, priority, new_status = _action_for_issue(issue)
     assert action == "recover_child_after_parent_timeout"
     assert priority == 830
+    assert new_status == ""
+
+
+def test_action_for_issue_no_progress_fuse():
+    """连续恢复无进展时生成停止自动重试动作。"""
+    issue = DueCheckIssue(
+        run_id="stuck-run",
+        severity="P0",
+        kind="no_progress_fuse",
+        message="",
+        suggested_action="stop_no_progress_and_escalate",
+    )
+    action, priority, new_status = _action_for_issue(issue)
+    assert action == "stop_no_progress_and_escalate"
+    assert priority == 990
     assert new_status == ""
 
 
@@ -439,6 +469,13 @@ def test_commands_for_action_recover_child_after_parent_timeout():
     """父超时子任务恢复动作返回 recovery-tree 命令。"""
     commands = _commands_for_action("recover_child_after_parent_timeout", "root-timeout")
     assert any("subagents-recovery-tree root-timeout" in cmd for cmd in commands)
+
+
+def test_commands_for_action_no_progress_fuse():
+    """no-progress fuse 动作返回 run 和恢复树读取命令。"""
+    commands = _commands_for_action("stop_no_progress_and_escalate", "stuck-run")
+    assert any(command == "my-agent subagent stuck-run" for command in commands)
+    assert any("subagents-recovery-tree stuck-run" in cmd for cmd in commands)
 
 
 # ── _is_active 测试 ────────────────────────────────────────────────────────

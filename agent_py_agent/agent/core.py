@@ -192,6 +192,7 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
         role_template_dirs=agent.config.subagent_role_template_dirs,
         enable_self_learning=agent.config.enable_self_learning,
         debug_trace_level=agent.config.subagent_debug_trace_level,
+        takeover_chain_max_depth=agent.config.subagent_takeover_chain_max_depth,
     )
 
 

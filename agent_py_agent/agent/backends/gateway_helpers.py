@@ -14,6 +14,10 @@ from dataclasses import dataclass
 
 from .errors import ProviderTimeoutError
 
+_RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 409, 425, 429, 502, 503, 504, 529})
+_RETRYABLE_HTTP_DELAYS_SECONDS = (2.0, 5.0, 15.0)
+_MAX_RETRY_AFTER_SECONDS = 30.0
+
 
 # LLM: GatewayRequest 属于模型后端请求的类边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
 # 类用途: 集中保存网关请求字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发模型请求参数、流式解析和错误传播相关副作用，需保持公开契约稳定。
@@ -41,9 +45,8 @@ def post_json(
     request: GatewayRequest,
 ) -> dict[str, Any]:
     _require_api_key(request.api_key)
-    req = _urllib_request(request)
     try:
-        with urllib.request.urlopen(req, timeout=request.timeout) as resp:
+        with _open_gateway_request(request) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         raise _runtime_http_error(exc) from exc
@@ -72,10 +75,9 @@ def post_stream_iter(
 def _post_stream_lines(request: GatewayRequest) -> Iterator[str]:
     request.payload["stream"] = True
     _require_api_key(request.api_key)
-    req = _urllib_request(request)
     deadline = _stream_deadline(request.timeout)
     try:
-        with urllib.request.urlopen(req, timeout=request.timeout) as resp:
+        with _open_gateway_request(request) as resp:
             yield from _iter_sse_data_lines(resp, deadline=deadline, timeout=request.timeout, url=request.url)
     except urllib.error.HTTPError as exc:
         raise _runtime_http_error(exc) from exc
@@ -92,6 +94,51 @@ def _urllib_request(request: GatewayRequest) -> urllib.request.Request:
         method="POST",
         headers=request.headers,
     )
+
+
+# LLM: _open_gateway_request retries only pre-response transient provider overloads so long tasks survive peak traffic.
+# 函数用途: 打开模型 HTTP 请求；对 429/529/503 等服务端临时繁忙错误做短暂重试，非临时错误仍原样抛出。
+def _open_gateway_request(request: GatewayRequest):
+    last_attempt = len(_RETRYABLE_HTTP_DELAYS_SECONDS)
+    for attempt in range(last_attempt + 1):
+        req = _urllib_request(request)
+        try:
+            return urllib.request.urlopen(req, timeout=request.timeout)
+        except urllib.error.HTTPError as exc:
+            if not _should_retry_http_error(exc, attempt, last_attempt):
+                raise
+            time.sleep(_retry_delay_seconds(exc, attempt))
+    raise RuntimeError("unreachable gateway retry state")
+
+
+# LLM: _should_retry_http_error keeps auth/schema errors fail-fast while retrying provider overload and gateway flakiness.
+# 函数用途: 判断 HTTP 错误是否属于可重试的临时服务端/限流错误。
+def _should_retry_http_error(exc: urllib.error.HTTPError, attempt: int, last_attempt: int) -> bool:
+    return attempt < last_attempt and int(getattr(exc, "code", 0) or 0) in _RETRYABLE_HTTP_STATUS_CODES
+
+
+# LLM: _retry_delay_seconds honors Retry-After when providers send it, with a cap to avoid unbounded CLI stalls.
+# 函数用途: 计算 HTTP 临时失败后的等待秒数；没有 Retry-After 时使用短阶梯退避。
+def _retry_delay_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
+    header_delay = _retry_after_header_seconds(exc)
+    if header_delay is not None:
+        return min(header_delay, _MAX_RETRY_AFTER_SECONDS)
+    index = min(attempt, len(_RETRYABLE_HTTP_DELAYS_SECONDS) - 1)
+    return _RETRYABLE_HTTP_DELAYS_SECONDS[index]
+
+
+# LLM: _retry_after_header_seconds parses provider retry hints without depending on a specific HTTP header object type.
+# 函数用途: 从 Retry-After 头读取秒数；无法解析时返回 None 让默认退避接管。
+def _retry_after_header_seconds(exc: urllib.error.HTTPError) -> float | None:
+    headers = getattr(exc, "headers", None)
+    raw = headers.get("Retry-After") if headers is not None and hasattr(headers, "get") else None
+    if raw is None:
+        return None
+    try:
+        value = float(str(raw).strip())
+    except ValueError:
+        return None
+    return max(0.0, value)
 
 
 # LLM: _require_api_key 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。

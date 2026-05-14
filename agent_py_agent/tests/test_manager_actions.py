@@ -165,6 +165,38 @@ class TestApplyActionItemNotFound:
         assert record.applied is False
 
 
+class TestNoProgressFuseActionApply:
+    """测试 no-progress fuse 写回动作。"""
+
+    def test_apply_stop_no_progress_records_blocker_without_status_change(self, tmp_path: Path):
+        manager = SubAgentManager(tmp_path)
+        task = manager.create_run(
+            goal="反复恢复仍失败",
+            thought="check",
+            plan=["inspect"],
+        )
+        task.status = "FAILED"
+        task.runner_attempts = 5
+        manager.save(task)
+        action = _make_action_item(
+            action_id="action_fuse",
+            run_id=task.id,
+            action="stop_no_progress_and_escalate",
+            would_change_status_to="",
+        )
+
+        record = manager._apply_action_item(action, apply=True)
+        loaded = manager.load(task.id)
+
+        assert record.ok is True
+        assert record.applied is True
+        assert record.action == "stop_no_progress_and_escalate"
+        assert record.before_status == "FAILED"
+        assert record.after_status == "FAILED"
+        assert loaded.failure_type == "no_progress_fuse"
+        assert any("no_progress_fuse" in blocker for blocker in loaded.blockers)
+
+
 class TestTakeoverReadinessActionApply:
     def test_takeover_apply_evidence_paths_follow_readiness_read_order_without_artifact_body(self, tmp_path: Path):
         manager = SubAgentManager(tmp_path)
@@ -212,6 +244,45 @@ class TestTakeoverReadinessActionApply:
         assert loaded.agent_run_artifact_manifest_jsonl in record.evidence_paths
         assert record.evidence_paths[0 : len(expected_order)] == expected_order
         assert "DO_NOT_PULL_ARTIFACT_BODY_INTO_APPLY_RECORD" not in encoded
+
+
+class TestCoordinatorTakeoverGuard:
+    def test_generic_takeover_refuses_dead_coordinator_with_children(self, tmp_path: Path):
+        """带孩子的死 coordinator 不能被普通 takeover 新建空接管 run。"""
+        manager = SubAgentManager(tmp_path)
+        coordinator = manager.create_run(
+            goal="协调 leaf",
+            thought="handoff guard",
+            plan=["dispatch leaf"],
+            role="coordinator",
+        )
+        manager.create_run(
+            goal="leaf work",
+            thought="child",
+            plan=["write proof"],
+            parent_id=coordinator.id,
+            root_id=coordinator.root_id,
+            depth=1,
+        )
+        coordinator = manager.load(coordinator.id)
+        coordinator.status = "TIMEOUT"
+        coordinator.failure_type = "runner_timeout"
+        manager.save(coordinator)
+        action = _make_action_item(
+            action_id="action_wrong_takeover",
+            run_id=coordinator.id,
+            action="takeover_or_reassign",
+        )
+
+        record = manager._apply_action_item(action, apply=True, take_over_by="new-leader")
+        loaded = manager.load(coordinator.id)
+
+        assert record.ok is False
+        assert record.applied is False
+        assert "recover_coordinator_leadership" in record.message
+        assert loaded.status == "TIMEOUT"
+        assert loaded.takeover_by == ""
+        assert len(manager.list_runs()) == 2
 
 
 class TestRecordAfterTaskAction:

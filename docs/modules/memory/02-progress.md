@@ -290,3 +290,17 @@
 - `context_bundle.workspace_refs` 同步补齐 agent run workspace 的 task/checkpoint/summary/final_report/findings/timeline/compactions/shared refs，方便父级、接管代理和 runner 都从同一 refs-first 工单包恢复。
 - 闭环补齐：`SubAgentManager.save()` 现在会在每次保存后自动写 `compactions/latest_continue_packet.json` 和 append-only `session_compact_ledger.jsonl`；父级下一次 runner/dispatch 重新构建 prompt 时，会自动读取这个包继续原任务。
 - 本轮 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_subagent_prompt_contract.py agent_py_agent/tests/test_subagent_context_bundle.py agent_py_agent/tests/test_memory_compact_auto.py` -> passed；strict code-size 维持 `hard=0 high-risk=0 soft=0`。
+
+## 2026-05-14 compact resume configured subagent workspace
+- 中文说明：`memory-resume --from-compact --compact-owner-type subagent_run` 现在会使用真实配置里的 `subagent_workspace`，能找到测试目录或用户目录下的子代理 run workspace。
+- 子代理恢复输出保持 task-local：推荐读取 `latest_continue_packet.json`、checkpoint、summary、task、timeline、findings，不推荐主代理 `SOUL.md` / `USER.md` / 长期 memory。
+- resolver 现在把 owner id 当作字面路径段处理，不再让 `*` / `[]` 这类 glob 字符扩大扫描范围。
+- 本轮真实验证：case09 tester run 恢复为 `linked_run_workspace`、`writes_main_memory=false`。
+
+## 2026-05-14 compact auto multi-hop and scoped archive reads
+- 中文说明：主 agent 自动 compact 现在可以按 `memory_compact_auto_continue_max_depth` 连续多次受控续跑；默认仍是保守值 1，测试或长任务可调高。
+- 新增后端配置：`memory_compact_context_window_tokens` 控制 compact 阈值估算窗口；为 0 时继续走保守估算。
+- runtime fact source 会读取 `# Compact Auto Continuation` 注入中的显式 acceptance、constraints、latest_tests，避免第二轮之后 work_state 字段丢失。
+- compact work_state 从 shared raw/hook JSONL 文件读取记录时，会重新按 `session_id/request_id/run_id/task_id` scope 过滤。restore refs 指向的是文件，不代表整个文件都属于当前 compact。
+- 真实验证：case11 clean4 低阈值 E2E 生成 4 个 apply 包，均 `missing_fields=[]` 并最终回复 `已完成`。
+- 遗留：子代理自己的模型会话内多次 compact/apply/resume 仍待下一片实现；当前已具备 task-local continue packet 和 `memory-resume` owner refs。

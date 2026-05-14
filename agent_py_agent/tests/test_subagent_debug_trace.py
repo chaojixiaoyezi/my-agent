@@ -298,6 +298,63 @@ def test_subagent_debug_trace_records_runner_model_and_tool_stages(tmp_path):
     assert tool_finished["output_chars"] > 0
 
 
+def test_runner_stage_trace_refreshes_active_ancestor_heartbeats(tmp_path):
+    """孙级 runner 活动时刷新仍在执行的祖先 heartbeat，避免 nested dispatch 误接管活父级。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.runner_stage_trace import (
+        RunnerToolStageTraceRequest,
+        trace_runner_tool_call_started,
+    )
+
+    manager = SubAgentManager(tmp_path / "subs", debug_trace_level=0)
+    root = manager.create_run(goal="root", thought="root", plan=["root"], role="coordinator")
+    parent = manager.create_run(
+        goal="parent",
+        thought="parent",
+        plan=["parent"],
+        role="child_coordinator",
+        parent_id=root.id,
+        root_id=root.id,
+        depth=1,
+    )
+    child = manager.create_run(
+        goal="child",
+        thought="child",
+        plan=["child"],
+        role="leaf_worker",
+        parent_id=parent.id,
+        root_id=root.id,
+        depth=2,
+    )
+    old = 10.0
+    for task in [root, parent, child]:
+        task.status = "RUNNING"
+        task.runner_active_attempt_id = f"attempt-{task.id}"
+        task.heartbeat_at = old
+        task.updated_at = old
+        manager.save(task)
+
+    agent = SimpleNamespace(
+        subagents=manager,
+        _current_subagent_run_id=child.id,
+    )
+
+    trace_runner_tool_call_started(
+        RunnerToolStageTraceRequest(
+            agent=agent,
+            params=SimpleNamespace(source="test", request_id="", run_id=child.id, task_id=root.id),
+            tool_rounds=1,
+            idx=1,
+            payload={"tool": "write_file", "path": "x"},
+        )
+    )
+
+    assert manager.load(child.id).heartbeat_at > old
+    assert manager.load(parent.id).heartbeat_at > old
+    assert manager.load(root.id).heartbeat_at > old
+
+
 def test_subagent_debug_trace_level_four_records_stage_previews(tmp_path):
     """等级 4 写 prompt/response/tool 的短预览，方便实时 tail 定位模型传参。"""
     cfg = AgentConfig(

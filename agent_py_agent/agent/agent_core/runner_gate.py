@@ -40,11 +40,22 @@ def get_task_timeout(
     config: Any,
 ) -> float:
     from .dynamic_timeout import calculate_dynamic_timeout, estimate_task_tokens
+    from .runner_dispatch import _resolve_runner_timeout_seconds
+
+    role_override = _runner_timeout_for_task_role(task, config)
+    if role_override is not None:
+        if _runner_timeout_value_disabled(role_override):
+            return 0.0
+        resolved_override = _resolve_runner_timeout_seconds(role_override)
+        if resolved_override > 0:
+            return resolved_override
+        if not _runner_timeout_value_auto(role_override):
+            role_override = None
 
     # Use configured static timeout
-    if runner_timeout_seconds > 0:
+    if role_override is None and runner_timeout_seconds > 0:
         return runner_timeout_seconds
-    if _runner_timeout_disabled(config):
+    if role_override is None and _runner_timeout_disabled(config):
         return 0.0
 
     # Check for pre-calculated dynamic timeout
@@ -60,6 +71,70 @@ def get_task_timeout(
         estimated_input_tokens,
         estimated_output_tokens,
     )
+
+
+# LLM: _runner_timeout_for_task_role lets tests and production use different wrapper budgets per hierarchy role.
+# 函数用途: 先匹配 root，再匹配 task.role，最后匹配 default/*；未配置时返回 None 走全局 runner_timeout_seconds。
+def _runner_timeout_for_task_role(task: SubAgentTask, config: Any) -> object | None:
+    mapping = getattr(config, "runner_timeout_by_role", {}) or {}
+    if not isinstance(mapping, dict):
+        return None
+    keys = _runner_timeout_role_keys(task)
+    normalized = {str(key).strip().lower(): value for key, value in mapping.items()}
+    for key in keys:
+        if key in normalized:
+            return normalized[key]
+    return normalized.get("default", normalized.get("*"))
+
+
+# LLM: _runner_timeout_role_keys keeps root detection independent from a role label typo.
+# 函数用途: 为当前任务生成角色匹配顺序；根节点优先 root，其次再看 coordinator/worker 等模板角色。
+def _runner_timeout_role_keys(task: SubAgentTask) -> list[str]:
+    keys: list[str] = []
+    run_id = str(getattr(task, "id", "") or "")
+    parent_id = str(getattr(task, "parent_id", "") or "")
+    root_id = str(getattr(task, "root_id", "") or "")
+    if not parent_id or (run_id and root_id and run_id == root_id):
+        keys.append("root")
+    if str((getattr(task, "attributes", {}) or {}).get("takeover_source_run_id") or "").strip():
+        keys.append("takeover")
+    role = str(getattr(task, "role", "") or "").strip().lower()
+    if role:
+        keys.append(role)
+        keys.extend(_runner_timeout_role_aliases(role))
+    return keys
+
+
+# LLM: _runner_timeout_role_aliases hides internal template names from user-facing timeout config.
+# 函数用途: 把 leaf_worker/repair_worker/review/critic/acceptance 等内部角色归到用户能理解的大类。
+def _runner_timeout_role_aliases(role: str) -> list[str]:
+    aliases: list[str] = []
+    if "worker" in role and role != "worker":
+        aliases.append("worker")
+    if role in {"review", "reviewer", "critic", "qa", "tester"}:
+        aliases.append("tester")
+    if role in {"acceptor", "acceptance", "verifier"}:
+        aliases.append("acceptor")
+    if role in {"coordinator", "leader", "manager"}:
+        aliases.append("coordinator")
+    return aliases
+
+
+# LLM: _runner_timeout_value_disabled mirrors runner_timeout_seconds without requiring a whole config object.
+# 函数用途: 判断角色级 timeout 值是否表示不限制，用于 root/coordinator 长跑、worker 短超时的混合场景。
+def _runner_timeout_value_disabled(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"off", "none", "disabled", "false", "no", "0"}
+    try:
+        return float(value) == 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+# LLM: _runner_timeout_value_auto lets role overrides opt into dynamic timeout without inheriting the global value.
+# 函数用途: 判断角色级 timeout 是否表示动态估算；只有 auto 会跳过全局固定超时进入后续动态计算。
+def _runner_timeout_value_auto(value: object) -> bool:
+    return isinstance(value, str) and value.strip().lower() == "auto"
 
 
 # LLM: resolve_runner_config 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

@@ -286,3 +286,14 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 - `tooling/artifact_read_budget.py` 是 read_artifact 的单 run 正文读取预算器；它记录 `run_id -> [(timestamp, chars)]`，只限制带 run scope 的子代理读取，不限制普通主代理聊天。
 - `tooling/artifact.py` 把工具参数转成 `ReadToolOutputArtifactRequest` bundle，再先做预算 preflight，成功读取后按实际 `content_chars` 计费。这样预算逻辑不散落到 reader 或 tool loop 里。
 - `tooling/filesystem_artifact_guard.py` 负责普通 `read_file` 误读 artifact 包装文件的恢复提示；提示会根据 registry 注入的 `allowed_tools` 判断当前上下文是否有 `read_artifact`，没有时要求上报 `capability_request`。
+
+## 2026-05-14 compact multi-hop and subagent owner structure update
+- `agent_core/runtime_mixin.py` 现在把自动 compact continuation 当成一个受限循环：每一轮都读上一轮 result 里的 continue packet，调用 `_compact_auto_continue_params()` 注入恢复块，再由 `memory_compact_auto_continue_max_depth` 控制最大续跑深度。
+- `agent_core/finalization_compact_auto.py` 读取 `memory_compact_context_window_tokens` 作为 compact 阈值窗口；为 `0` 时回退到保守估算。它仍先检查 `ctx.do_save`，所以 `save=False` 不会写 compact apply。
+- `agent_core/_finalization_service.py` 给 auto compact 传真实 per-run request id，并把 `# Compact Auto Continuation` runtime injection 传给 runtime fact source，保证后续 apply 能继承显式验收、约束和最近测试字段。
+- `memory_archive/runtime_fact_source.py` 同时解析用户 prompt 和 compact continuation 注入，但只接受明确的 `Acceptance`、`Constraints`、`Latest Tests` 段落；其它恢复说明不会被升级成事实。
+- `memory_archive/compact_apply_work_state.py` 读取 restore refs 指向的 shared raw/hook JSONL 后，会重新用 `session_id/request_id/run_id/task_id` 过滤记录。raw 事件从顶层字段取 scope；hook snapshot 从 `turn_range` / `dispatch_events` 取 scope。
+- `memory_archive/compact_work_state_sources.py` 现在能从 task/run fact source 读取 `goal` 和 `next_actions`，用于补足 auto continuation 后的 work_state。
+- `memory_archive/compact_subagent_owner.py` 是 `memory-resume --from-compact` 的只读子代理 owner resolver。它只搜索 active workspace 和配置里的 `subagent_workspace`，owner id 按字面路径段处理，并可从 legacy `task.json` 升级到新的 agent-run workspace。
+- `memory_archive/compact_continue_packet.py` 会把 subagent owner 的 `recommended_read_paths` 带进 continue packet；这些路径只指向 agent-run workspace 的 packet/checkpoint/summary/task/timeline/findings，不复制主代理长期 memory。
+- `cli/memory_archive_commands.py` 负责把当前 agent 的 `subagents.workspace` 传给 resume options，CLI 不再让 compact owner resolver 猜默认路径。

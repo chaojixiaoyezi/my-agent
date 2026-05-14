@@ -33,6 +33,13 @@ RETRYABLE_RUNNER_FAILURE_TYPES = {
     "runner_timeout",
 }
 
+CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES = {
+    "capability_request",
+    "permission_blocked",
+    "missing_capability",
+    "write_permission_blocked",
+}
+
 
 # LLM: role phase ordering trusts role/name identity before broad inherited goal prose.
 # 函数用途: 给 runner 角色分配执行阶段；coordinator 先拆任务，worker 产出，tester/找错随后检查，acceptor 最后验收。
@@ -294,12 +301,36 @@ def _is_dispatch_runner_candidate(
     if any(item.status == "OPEN" for item in task.capability_gaps):
         return False
     if task.status == "BLOCKED":
-        if _runner_failure_type(task) == "capability_request" and bool(task.capability_grants):
+        if _blocked_after_capability_grant(task):
             return True
         return bool(_runner_retry_reason(task, runner_max_attempts))
     if task.status in {"FAILED", "TIMEOUT"}:
         return bool(_runner_retry_reason(task, runner_max_attempts))
     return task.status == "PLANNING"
+
+
+# LLM: granted capability blockers should rerun once the parent has routed the request.
+# 函数用途: 能力申请已被父级授权且没有未处理 OPEN 请求时，允许 blocked runner 再跑一轮，避免“纸面授权但任务卡死”。
+def _blocked_after_capability_grant(task: SubAgentTask) -> bool:
+    if not getattr(task, "capability_grants", None):
+        return False
+    if any(item.status == "OPEN" for item in getattr(task, "capability_requests", []) or []):
+        return False
+    if any(item.status == "OPEN" for item in getattr(task, "capability_gaps", []) or []):
+        return False
+    failure_type = _runner_failure_type(task)
+    if failure_type in CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES:
+        return True
+    text = " ".join(
+        str(item or "")
+        for item in [
+            getattr(task, "current_step", ""),
+            getattr(task, "result", ""),
+            " ".join(str(blocker or "") for blocker in getattr(task, "blockers", []) or []),
+        ]
+        if str(item or "").strip()
+    ).lower()
+    return any(marker in text for marker in ("capability", "permission", "allowed_write_roots", "授权"))
 
 
 # LLM: _runner_active_attempt_id keeps active-runner reentry checks concrete and MagicMock-safe.

@@ -28,6 +28,8 @@ def test_memory_settings_accepts_boundary_values():
             "memory_resume_auto_context_mode": "ALWAYS",
             "memory_resume_auto_context_limit": "1",
             "memory_compact_auto_allow_apply": "true",
+            "memory_compact_context_window_tokens": "50000",
+            "memory_compact_auto_continue_max_depth": "4",
         }
     )
 
@@ -44,6 +46,8 @@ def test_memory_settings_accepts_boundary_values():
     assert settings.memory_resume_auto_context_mode == "always"
     assert settings.memory_resume_auto_context_limit == 1
     assert settings.memory_compact_auto_allow_apply is True
+    assert settings.memory_compact_context_window_tokens == 50000
+    assert settings.memory_compact_auto_continue_max_depth == 4
 
 
 def test_memory_settings_invalid_values_fall_back_with_warnings():
@@ -61,6 +65,8 @@ def test_memory_settings_invalid_values_fall_back_with_warnings():
             "memory_resume_auto_context_mode": "always; rm -rf /",
             "memory_resume_auto_context_limit": 999,
             "memory_compact_auto_allow_apply": "maybe",
+            "memory_compact_context_window_tokens": -1,
+            "memory_compact_auto_continue_max_depth": 999,
         }
     )
 
@@ -78,6 +84,8 @@ def test_memory_settings_invalid_values_fall_back_with_warnings():
         "memory_resume_auto_context_mode",
         "memory_resume_auto_context_limit",
         "memory_compact_auto_allow_apply",
+        "memory_compact_context_window_tokens",
+        "memory_compact_auto_continue_max_depth",
     }
     assert all(warning.fallback_value is not None for warning in warnings)
 
@@ -99,6 +107,8 @@ def test_load_config_normalizes_memory_values_and_keeps_warning_receipts(tmp_pat
                 "memory_resume_auto_context_mode: trigger",
                 "memory_resume_auto_context_limit: 0",
                 "memory_compact_auto_allow_apply: yes",
+                "memory_compact_context_window_tokens: 50000",
+                "memory_compact_auto_continue_max_depth: 4",
             ]
         ),
         encoding="utf-8",
@@ -118,6 +128,8 @@ def test_load_config_normalizes_memory_values_and_keeps_warning_receipts(tmp_pat
     assert config.memory_resume_auto_context_mode == "trigger"
     assert config.memory_resume_auto_context_limit == 5
     assert config.memory_compact_auto_allow_apply is True
+    assert config.memory_compact_context_window_tokens == 50000
+    assert config.memory_compact_auto_continue_max_depth == 4
     assert [item["field_name"] for item in config.memory_config_warnings] == [
         "memory_archive_level",
         "memory_hook_enabled",

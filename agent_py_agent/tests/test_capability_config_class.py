@@ -26,6 +26,7 @@ def test_capability_config_defaults():
     assert config.subagent_run_timeout == 900
     assert config.subagent_due_check_interval == 120
     assert config.subagent_min_evidence_for_done == 1
+    assert config.subagent_no_progress_attempt_limit == 4
 
 
 def test_capability_config_custom_values():
@@ -164,6 +165,7 @@ def test_capability_config_integer_fields(tmp_path):
         "subagent_run_timeout: 3600\n"
         "subagent_due_check_interval: 60\n"
         "subagent_min_evidence_for_done: 3\n"
+        "subagent_no_progress_attempt_limit: 9\n"
         "capability_request_max_tried_items: 10\n"
         "capability_request_max_evidence_items: 20\n"
         "capability_request_max_per_task: 50\n"
@@ -181,6 +183,7 @@ def test_capability_config_integer_fields(tmp_path):
     assert config.capability_escalation_max_hops == 10
     assert config.capability_candidate_limit == 20
     assert config.capability_bundle_max_tokens == 5000
+    assert config.subagent_no_progress_attempt_limit == 9
     assert config.skill_body_max_tokens == 8000
 
 

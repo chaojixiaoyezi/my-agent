@@ -57,6 +57,7 @@ class MemoryCompactResumeOptions:
     owner_type: str = "main_agent"
     owner_id: str = ""
     resume_mode: str = "manual"
+    subagent_workspace: str | Path = ""
 
 
 # LLM: _ResumePayloadBuildRequest keeps compact resume rendering extensible without long helper signatures.
@@ -319,8 +320,18 @@ def _subagent_extension(workspace: Path, options: MemoryCompactResumeOptions) ->
             owner_type=options.owner_type,
             owner_id=options.owner_id,
             resume_mode=options.resume_mode,
+            subagent_workspace=_subagent_workspace_path(workspace, options.subagent_workspace),
         )
     )
+
+
+# LLM: _subagent_workspace_path resolves config-provided subagent roots for compact owner lookup.
+# 函数用途: 把 CLI/配置中的 subagent_workspace 转成绝对路径，空值保持旧默认搜索行为。
+def _subagent_workspace_path(workspace: Path, value: str | Path) -> Path | None:
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else workspace / path
 
 
 __all__ = ["MemoryCompactResumeOptions", "build_memory_compact_resume"]

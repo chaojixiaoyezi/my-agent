@@ -19,6 +19,7 @@ from .hierarchy_write_policy import inherited_extra_write_roots
 from .qa_role_contract import qa_role_identity_roles
 
 _IMPLEMENTATION_SCAN_MAX_NODES = 64
+_ACTIVE_DUPLICATE_STATUSES = {"PLANNING", "RUNNING", "BLOCKED", "AWAITING_ACCEPTANCE"}
 
 
 # LLM: schedule_block_reason keeps only red-line dispatch guards; workflow shape is left to LLM/templates.
@@ -43,6 +44,18 @@ def schedule_block_reason(parent: SubAgentTask, request: Any) -> str:
 # 函数用途: 只阻断“没有实现产物却创建 QA”的红线；重复 coordinator 这类协作风险降级为 warning。
 def qa_phase_block_reason(manager: Any, parent: SubAgentTask, request: Any) -> str:
     return _qa_before_implementation_reason(manager, parent, request)
+
+
+# LLM: active_duplicate_child_reason prevents recovery loops from spawning endless same-purpose QA repairs.
+# 函数用途: 同父级已有活跃 QA/修复/验收类同名 child 时，阻断再次创建并提示复用或 takeover 现有 run。
+def active_duplicate_child_reason(manager: Any, parent: SubAgentTask, request: Any) -> str:
+    for spec in request.child_specs:
+        if not _is_recovery_quality_like(spec):
+            continue
+        duplicate_id = _active_duplicate_child_id(manager, parent, spec)
+        if duplicate_id:
+            return f"active_duplicate_child:{duplicate_id};reuse_existing_run_or_takeover"
+    return ""
 
 
 # LLM: schedule_warnings reports soft coordination risks while allowing the parent LLM to decide.
@@ -103,6 +116,76 @@ def _parent_has_product_root(parent: SubAgentTask) -> bool:
 # 函数用途: 判断 child spec 是否是 tester、bug_finder 或 acceptor 这类 QA 角色。
 def _is_qa_like(item: Any) -> bool:
     return bool(qa_role_identity_roles(role=str(getattr(item, "role", "")), agent_name=str(getattr(item, "agent_name", ""))))
+
+
+# LLM: _active_duplicate_child_id scans siblings only, so unrelated branches can still run parallel repairs.
+# 函数用途: 找到同父级、同名且仍活跃的 QA/修复类子任务；DONE/VERIFIED 任务不挡后续显式返工。
+def _active_duplicate_child_id(manager: Any, parent: SubAgentTask, spec: Any) -> str:
+    wanted_name = _normalized_agent_name(getattr(spec, "agent_name", ""))
+    if not wanted_name:
+        return ""
+    spec_is_repair = _is_repair_like(spec)
+    for child_id in parent.child_ids:
+        try:
+            child = manager.load(child_id)
+        except (FileNotFoundError, OSError, ValueError, TypeError):
+            continue
+        if not _is_active_child(child) or not _is_recovery_quality_like(child):
+            continue
+        if spec_is_repair and _is_repair_like(child):
+            return str(getattr(child, "id", "") or child_id)
+        if _normalized_agent_name(getattr(child, "agent_name", "")) == wanted_name:
+            return str(getattr(child, "id", "") or child_id)
+    return ""
+
+
+# LLM: _is_active_child treats blocked/running/awaiting-acceptance runs as recoverable work, not fresh slots.
+# 函数用途: 判断已有子任务是否仍需要继续、接管或验收；完成的任务不算活跃重复。
+def _is_active_child(item: Any) -> bool:
+    status = str(getattr(item, "status", "") or "").upper()
+    verification = str(getattr(item, "verification_status", "") or "").upper()
+    if verification == "VERIFIED":
+        return False
+    return status in _ACTIVE_DUPLICATE_STATUSES
+
+
+# LLM: _is_recovery_quality_like narrows hard duplicate blocking to QA/recovery roles, not normal fanout workers.
+# 函数用途: 只给 repair/test/bug/accept/check 这类质量恢复任务做活跃同名去重，避免挡住普通并行实现。
+def _is_recovery_quality_like(item: Any) -> bool:
+    text = f"{getattr(item, 'agent_name', '')} {getattr(item, 'role', '')} {getattr(item, 'goal', '')}".lower()
+    return any(
+        token in text
+        for token in (
+            "repair",
+            "qa",
+            "test",
+            "tester",
+            "bug",
+            "accept",
+            "verify",
+            "review",
+            "checker",
+            "fix",
+            "修复",
+            "测试",
+            "验收",
+            "找错",
+        )
+    )
+
+
+# LLM: _is_repair_like catches renamed repair workers so recovery cannot bypass dedupe by changing labels.
+# 函数用途: 判断任务是否是修复/返工类；同父级活跃 repair 只能继续或接管，不能无限换名新增。
+def _is_repair_like(item: Any) -> bool:
+    text = f"{getattr(item, 'agent_name', '')} {getattr(item, 'role', '')} {getattr(item, 'goal', '')}".lower()
+    return any(token in text for token in ("repair", "fix", "修复", "返工", "补救"))
+
+
+# LLM: _normalized_agent_name compares model-selected role names without freezing user-facing Chinese prefixes.
+# 函数用途: 去掉空白并小写化 agent_name；命名不同的 worker/QA 仍允许并行存在。
+def _normalized_agent_name(value: Any) -> str:
+    compact = re.sub(r"\s+", "", str(value or "").strip().lower())
+    return re.sub(r"^(?:小+傻妞[-_:：]*)+", "", compact)
 
 
 # LLM: _ready_implementation_children scans persisted descendants so QA can follow delegated production chains.

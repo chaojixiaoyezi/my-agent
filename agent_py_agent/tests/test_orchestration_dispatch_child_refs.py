@@ -11,13 +11,19 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from agent_py_agent.agent.agent_core.dispatch_params import DispatchContext
+from agent_py_agent.agent.agent_core.dispatch_runner_batches import _runner_candidates_for_context
 from agent_py_agent.agent.agent_core.dispatch_runner_selection import scoped_runner_tasks
 from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 from agent_py_agent.agent.agent_core.runner_dispatch import (
     RunnerDispatchRecordParams,
     _runner_dispatch_record,
 )
+from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.models import SubAgentRunnerResult
+from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
+    HierarchyChildSpec,
+    HierarchyScheduleRequest,
+)
 
 
 # LLM: _dispatch_payload_for_record keeps payload tests focused and below size guard limits.
@@ -169,6 +175,48 @@ def test_dispatch_payload_marks_no_progress_terminal_actions():
     assert terminal["blocked_run_ids"] == ["blocked-run"]
 
 
+# LLM: dry-run takeover previews should give parents an exact apply call instead of a terminal stop.
+# 函数用途: 防止父 runner 把接管预览当成完成或阻塞，导致不接管又反复新建 repair。
+def test_dispatch_payload_suggests_apply_for_dry_run_recovery_actions():
+    mock_report = MagicMock()
+    mock_report.dry_run = True
+    mock_report.summary = {"total": 2}
+    mock_report.records = [
+        SimpleNamespace(
+            step="due_check",
+            action="scan",
+            run_id="",
+            ok=True,
+            dry_run=True,
+            applied=False,
+            message="scan",
+            before_status="",
+            after_status="",
+        ),
+        SimpleNamespace(
+            step="action_apply",
+            action="takeover_or_reassign",
+            run_id="stale-run",
+            ok=True,
+            dry_run=True,
+            applied=False,
+            message="dry-run: would takeover",
+            before_status="RUNNING",
+            after_status="RUNNING",
+        ),
+    ]
+    mock_agent = MagicMock()
+    mock_agent.subagents.workspace = Path("/tmp/workspace")
+    mock_agent.subagents.list_runs.return_value = []
+
+    payload = DispatchSubagentsTool(mock_agent)._report_payload(mock_report)
+
+    terminal = payload["dispatch_terminal"]
+    assert terminal["recommended_next_action"] == "rerun_dispatch_with_apply_for_recovery"
+    assert terminal["suggested_tool_call"]["apply"] is True
+    assert terminal["suggested_tool_call"]["execute_runners"] is False
+
+
 # LLM: test_dispatch_payload_exposes_recovery_valid_run_ids covers model retry ergonomics.
 # 函数用途: 模型传错 run_id 时，顶层恢复 payload 要直接给机器可读的 valid_run_ids。
 def test_dispatch_payload_exposes_recovery_valid_run_ids():
@@ -316,6 +364,47 @@ def test_dispatch_payload_surfaces_qa_repair_advice_from_direct_child(tmp_path: 
     assert direct["qa_repair_advice"]["suggested_tool_call"]["children"][0]["role"] == "worker"
 
 
+# LLM: Recovery-ready QA blockers must prefer packet continuation before repair waves.
+# 函数用途: 当同一个 tester 既有失败信号又有 latest_continue_packet 时，父级应先复用原 run 续跑。
+def test_dispatch_payload_prefers_packet_recovery_over_qa_repair(tmp_path: Path):
+    manager = SubAgentManager(tmp_path)
+    parent = manager.create_run(goal="父任务", thought="派 tester", plan=["schedule"], role="coordinator")
+    tester_id = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            apply=True,
+            child_specs=[HierarchyChildSpec(goal="继续 QA", role="tester", agent_name="小傻妞-tester")],
+        )
+    ).created_run_ids[0]
+    tester = manager.load(tester_id)
+    Path(tester.output_json).write_text(
+        json.dumps({"structured_output": {"summary": "发现缺陷：按钮没有效果。"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    tester.status = "BLOCKED"
+    manager.save(tester)
+
+    mock_report = MagicMock()
+    mock_report.dry_run = False
+    mock_report.summary = {}
+    mock_report.records = []
+    mock_agent = MagicMock()
+    mock_agent._current_subagent_run_id = parent.id
+    mock_agent.config.subagent_workflow_mode = "off"
+    mock_agent.tools.specs.return_value = []
+    mock_agent.dispatch_subagents.return_value = mock_report
+    mock_agent.subagents = manager
+
+    direct = json.loads(DispatchSubagentsTool(mock_agent).execute({"apply": True}).output)["direct_children"]
+
+    assert direct["needs_recovery"] is True
+    assert direct["needs_repair_wave"] is True
+    assert direct["repair_wave_deferred_by_recovery"] is True
+    assert direct["next_action"] == "inspect_or_rescue_direct_children"
+    assert direct["suggested_tool_call"]["run_ids"] == [tester_id]
+    assert "latest_continue_packet.json" in direct["suggested_tool_call"]["runner_instruction"]
+
+
 # LLM: QA repair advice must scan descendants so upper coordinators see lower tester failures.
 # 函数用途: root 的直接 child 是 coordinator 时，孙级 tester 的失败也应作为 refs-first repair 建议返回。
 def test_dispatch_payload_surfaces_qa_repair_advice_from_descendant(tmp_path: Path):
@@ -375,6 +464,84 @@ def test_scoped_runner_tasks_honors_include_run_ids_order():
     scoped = scoped_runner_tasks(tasks, ctx)
 
     assert [task.id for task in scoped] == ["child-b", "child-a"]
+
+
+# LLM: Explicit packet recovery should rerun a blocked original child instead of only classifying it.
+# 函数用途: 覆盖真实 E2E 暴露的问题：run_ids+latest_continue_packet 指令必须让 BLOCKED run 进入 runner 候选。
+def test_explicit_packet_recovery_allows_blocked_runner_candidate():
+    task = SimpleNamespace(
+        id="child-blocked",
+        parent_id="root",
+        root_id="root",
+        status="BLOCKED",
+        verification_status="FAILED",
+        channel_status="OK",
+        failure_type="",
+        runner_attempts=0,
+        capability_requests=[],
+        capability_gaps=[],
+    )
+    ctx = DispatchContext(
+        cfg=MagicMock(),
+        normalized_workflow_mode="off",
+        apply=True,
+        planner=False,
+        runner_instruction="先读取 latest_continue_packet.json，再按 packet 继续。",
+        max_runners=1,
+        limit=20,
+        reviewer="tester",
+        note="",
+        take_over_by="",
+        locked_files=None,
+        router=MagicMock(),
+        parent_run_id="root",
+        root_id="root",
+        include_run_ids=["child-blocked"],
+    )
+
+    selected = _runner_candidates_for_context([task], ctx, runner_max_attempts=1)
+
+    assert [item.id for item in selected] == ["child-blocked"]
+
+
+# LLM: Terminal recovery blockers should not be re-executed just because the parent repeats packet recovery.
+# 函数用途: 接管链路已经熔断时，显式 run_ids+packet 指令也不能继续创建 runner attempt，避免无限重试。
+def test_explicit_packet_recovery_skips_takeover_chain_exhausted_task():
+    task = SimpleNamespace(
+        id="child-terminal",
+        parent_id="root",
+        root_id="root",
+        status="BLOCKED",
+        verification_status="FAILED",
+        channel_status="OK",
+        failure_type="takeover_chain_exhausted",
+        current_step="takeover chain exhausted; waiting for parent decision",
+        result="",
+        runner_attempts=0,
+        capability_requests=[],
+        capability_gaps=[],
+    )
+    ctx = DispatchContext(
+        cfg=MagicMock(),
+        normalized_workflow_mode="off",
+        apply=True,
+        planner=False,
+        runner_instruction="先读取 latest_continue_packet.json，再按 packet 继续。",
+        max_runners=1,
+        limit=20,
+        reviewer="tester",
+        note="",
+        take_over_by="",
+        locked_files=None,
+        router=MagicMock(),
+        parent_run_id="root",
+        root_id="root",
+        include_run_ids=["child-terminal"],
+    )
+
+    selected = _runner_candidates_for_context([task], ctx, runner_max_attempts=1)
+
+    assert selected == []
 
 
 # LLM: test_runner_dispatch_record_carries_created_child_summary validates persisted dispatch evidence.

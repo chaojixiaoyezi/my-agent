@@ -21,11 +21,14 @@ class _AcceptSetupMixin:
         channel_status = kwargs.pop("channel_status", "OK")
         evidence = kwargs.pop("evidence", None)
         evidence_packets = kwargs.pop("evidence_packets", None)
+        role = kwargs.pop("role", "worker")
         if kwargs:
             raise TypeError(f"Unexpected task options: {sorted(kwargs)}")
 
         task = MagicMock()
         task.id = "test_task"
+        task.role = role
+        task.agent_name = f"小傻妞-{role}"
         task.status = status
         task.verification_status = verification_status
         task.output_json = str(tmp_path / "output.json")
@@ -186,6 +189,70 @@ class TestSubAgentAcceptanceMixin(_AcceptSetupMixin, _AcceptRunMixin, _AcceptAss
         assert record.decision == "REJECT"
         assert record.applied is True
 
+    def test_review_acceptance_diagnostic_tester_can_complete_with_reported_issues(self, tmp_path: Path):
+        """tester 发现产品问题时，应完成诊断任务而不是把自己标成系统失败。"""
+        from agent_py_agent.agent.subagents.manager_acceptance import SubAgentAcceptanceMixin
+
+        class MockManager(SubAgentAcceptanceMixin):
+            def __init__(self):
+                self.workspace = tmp_path
+
+        manager = MockManager()
+
+        task = self._make_standard_task(tmp_path, role="tester", evidence=[MagicMock(ok=True)])
+        self._write_standard_files(
+            tmp_path,
+            {
+                "structured_output": {"status": "COMPLETED_WITH_ISSUES"},
+                "tests": [{"name": "links", "ok": False}],
+                "patches": [{"path": "login.html", "status": "planned"}],
+                "artifacts": [],
+                "blockers": [],
+            },
+        )
+        findings = [
+            _finding("tests_passed", False, "P1", "存在 1 条失败测试。"),
+            _finding("no_unresolved_patches", False, "P1", "仍有 1 个 patch 处于 planned/blocked。"),
+        ]
+
+        record = self._review_with_fixtures(manager, task, tmp_path, findings=findings, apply=True)
+
+        assert record.decision == "ACCEPT"
+        assert task.status == "DONE"
+        assert task.verification_status == "VERIFIED"
+        assert record.findings[0].severity == "P2"
+        assert record.findings[1].severity == "P2"
+
+    def test_review_acceptance_worker_still_rejects_completed_with_issues(self, tmp_path: Path):
+        """worker 输出 COMPLETED_WITH_ISSUES 仍代表实现未完成，不能套用 tester 语义。"""
+        from agent_py_agent.agent.subagents.manager_acceptance import SubAgentAcceptanceMixin
+
+        class MockManager(SubAgentAcceptanceMixin):
+            def __init__(self):
+                self.workspace = tmp_path
+
+        manager = MockManager()
+
+        task = self._make_standard_task(tmp_path, role="worker", evidence=[MagicMock(ok=True)])
+        self._write_standard_files(
+            tmp_path,
+            {
+                "structured_output": {"status": "COMPLETED_WITH_ISSUES"},
+                "tests": [{"name": "links", "ok": False}],
+                "patches": [{"path": "login.html", "status": "planned"}],
+            },
+        )
+        findings = [
+            _finding("tests_passed", False, "P1", "存在 1 条失败测试。"),
+            _finding("no_unresolved_patches", False, "P1", "仍有 1 个 patch 处于 planned/blocked。"),
+        ]
+
+        record = self._review_with_fixtures(manager, task, tmp_path, findings=findings, apply=True)
+
+        assert record.decision == "REJECT"
+        assert task.status == "BLOCKED"
+        assert task.verification_status == "FAILED"
+
     def test_review_acceptance_not_ready_skips_apply(self, tmp_path: Path):
         """任务不在等待验收状态时不执行 apply。"""
         from agent_py_agent.agent.subagents.manager_acceptance import SubAgentAcceptanceMixin
@@ -294,6 +361,20 @@ def _acceptance_record_data() -> dict:
         "reviewer": "parent",
         "note": "",
     }
+
+
+# LLM: _finding keeps acceptance tests focused on decision semantics instead of MagicMock boilerplate.
+# 函数用途: 构造最小验收 finding；测试只关心 ok/severity/message/evidence_path/created_at 这几个字段。
+def _finding(name: str, ok: bool, severity: str, message: str):
+    from agent_py_agent.agent.subagents.reports import AcceptanceReviewFinding
+
+    return AcceptanceReviewFinding(
+        name=name,
+        ok=ok,
+        severity=severity,
+        message=message,
+        created_at=time.time(),
+    )
 
 
 class TestAcceptanceReviewRecord:

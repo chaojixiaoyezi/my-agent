@@ -73,7 +73,12 @@ class SubAgentBoardMixin:
     # 函数用途: 生成到期检查报告；可按 root_id 限定一棵任务树，避免其他测试树的问题混进当前汇报。
     def due_check(self, config=None, *, params: SubAgentDueCheckOptions | None = None):
         options = _due_check_options(config=config, params=params, write_report=False)
-        return self._board_service.due_check(options.config, root_id=options.root_id)
+        return self._board_service.due_check(
+            options.config,
+            root_id=options.root_id,
+            include_run_ids=options.include_run_ids,
+            exclude_run_ids=options.exclude_run_ids,
+        )
 
     # LLM: write_due_check writes the same scoped due-check result that the user requested.
     # 函数用途: 写入到期检查报告；如果传了 root_id，只落盘当前任务树的问题视图。
@@ -95,7 +100,12 @@ class SubAgentBoardMixin:
     # 函数用途: 生成子代理 dry-run 动作计划；可按 root_id 只处理一棵任务树的问题。
     def plan_actions(self, config=None, *, params: SubAgentPlanActionsOptions | None = None):
         options = _plan_actions_options(config=config, params=params, write_report=False)
-        return self._board_service.plan_actions(options.config, root_id=options.root_id)
+        return self._board_service.plan_actions(
+            options.config,
+            root_id=options.root_id,
+            include_run_ids=options.include_run_ids,
+            exclude_run_ids=options.exclude_run_ids,
+        )
 
     # LLM: write_action_plan persists the same scoped action plan requested by CLI or parent controller.
     # 函数用途: 写入动作计划报告；如果传了 root_id，只落盘当前任务树的问题动作视图。

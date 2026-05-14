@@ -25,6 +25,10 @@ from .tool_body_read_guard_stage import (
 )
 from .tool_call_context_reducer import render_tool_payload_for_live_prompt
 from .tool_context_reducer import render_tool_result_for_live_prompt
+from .tool_direct_write_guard_stage import (
+    ToolDirectWriteGuardStageRequest,
+    maybe_block_delegate_only_direct_write_stage,
+)
 from .tool_loop_completion import ToolRoundCompletionRequest, completion_response_after_tool_round
 from .tool_loop_recovery import (
     append_long_content_recovery_context,
@@ -258,6 +262,11 @@ class ToolLoopService:
         )
         if body_read_result is not None:
             return body_read_result
+        direct_write_result = maybe_block_delegate_only_direct_write_stage(
+            ToolDirectWriteGuardStageRequest(self._agent, request, payload)
+        )
+        if direct_write_result is not None:
+            return direct_write_result
         budget_result = maybe_block_tool_agent_budget(ToolAgentBudgetStageRequest(self._agent, request, payload))
         if budget_result:
             return budget_result

@@ -308,6 +308,7 @@ class SubAgentPersistenceService:
         _apply_missing_paths(task, self.manager._build_work_order_paths(task.id, task.task_dir or None))
         if preserve_child_links:
             _merge_existing_child_links(self, task)
+            _merge_existing_takeover_state(self, task)
         task_dir = Path(task.task_dir)
         task_dir.mkdir(parents=True, exist_ok=True)
         self.manager._ensure_work_order_files(task)
@@ -353,6 +354,25 @@ def _merge_existing_child_links(service: SubAgentPersistenceService, task: SubAg
     except (FileNotFoundError, json.JSONDecodeError, TypeError):
         return
     task.child_ids = _unique_strings([*existing.child_ids, *task.child_ids])
+
+
+# LLM: stale runner snapshots must not undo a takeover that was already recorded by the parent.
+# 函数用途: 保存旧 task 对象时保留磁盘上的 TAKEN_OVER/takeover_by，避免超时线程或旧父级快照把接管状态写回 TIMEOUT。
+def _merge_existing_takeover_state(service: SubAgentPersistenceService, task: SubAgentTask) -> None:
+    try:
+        existing = service.load(task.id)
+    except (FileNotFoundError, json.JSONDecodeError, TypeError):
+        return
+    existing_taken = str(existing.status or "").upper() == "TAKEN_OVER" or bool(existing.takeover_by)
+    incoming_taken = str(task.status or "").upper() == "TAKEN_OVER" or bool(task.takeover_by)
+    if not existing_taken or incoming_taken:
+        return
+    task.status = existing.status
+    task.takeover_by = existing.takeover_by
+    task.takeover_reason = existing.takeover_reason
+    task.takeover_records = list(existing.takeover_records)
+    task.final_owner = existing.final_owner
+    task.locked_files = _unique_strings([*existing.locked_files, *task.locked_files])
 
 
 # LLM: _unique_strings keeps append-only refs stable while removing duplicates.

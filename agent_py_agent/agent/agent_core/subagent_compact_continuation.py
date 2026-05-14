@@ -6,6 +6,7 @@ from __future__ import annotations
 """Task-local compact continuation prompt section for subagent runners."""
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,8 @@ from typing import Any
 from ..subagent import SubAgentExecutionContext
 
 _DEFAULT_SNIPPET_CHARS = 1200
+_MAX_PACKET_JSON_CHARS = 200_000
+_STALE_PACKET_SECONDS = 7 * 24 * 60 * 60
 _REF_KEYS = (
     "agent_run_task",
     "agent_run_checkpoint",
@@ -48,6 +51,7 @@ def build_subagent_compact_continuation_section(request: SubagentCompactContinua
         "- 只从下面的子代理任务目录接续；不要读取或写入主代理长期 memory。",
         "",
     ]
+    lines.extend(_preflight_lines(request.context.context_bundle, request.max_chars))
     lines.extend(_packet_lines(packet, request.max_chars))
     lines.extend(_ref_lines(existing_refs))
     lines.extend(_snippet_lines(existing_refs, request.max_chars))
@@ -102,8 +106,20 @@ def _existing_refs(refs: dict[str, str]) -> dict[str, str]:
 def _packet_lines(path: Path | None, max_chars: int) -> list[str]:
     if not path:
         return []
-    payload = _read_json(path)
+    payload, status = _read_json_with_status(path)
     lines = ["### Continue Packet", "", f"- latest_continue_packet: {path}"]
+    if status != "ok":
+        lines.extend([
+            f"- packet_status: {status}",
+            "- fallback_to: checkpoint/summary/task-local refs",
+        ])
+        return lines + [""]
+    if _is_stale_packet(path, payload):
+        lines.extend([
+            "- packet_status: stale",
+            "- fallback_to: checkpoint/summary/task-local refs",
+        ])
+        return lines + [""]
     for key in ("ready_to_continue", "continue_mode", "next_action"):
         if key in payload:
             lines.append(f"- {key}: {_short(payload[key], max_chars)}")
@@ -111,6 +127,35 @@ def _packet_lines(path: Path | None, max_chars: int) -> list[str]:
     if isinstance(paths, list) and paths:
         lines.append("- recommended_read_paths:")
         lines.extend(f"  - {_short(item, max_chars)}" for item in paths[:5])
+    return lines + [""]
+
+
+# LLM: _preflight_lines keeps packet self-healing auditable after prepare_runner_attempt regenerates files.
+# 函数用途: 展示 runner 启动前看到的 corrupt/missing/stale packet 状态，并明确降级到 checkpoint/summary。
+def _preflight_lines(context_bundle: dict[str, object], max_chars: int) -> list[str]:
+    if not isinstance(context_bundle, dict):
+        return []
+    reserved = context_bundle.get("reserved") if isinstance(context_bundle.get("reserved"), dict) else {}
+    preflight = reserved.get("runner_recovery_preflight") if isinstance(reserved, dict) else None
+    if not isinstance(preflight, dict):
+        return []
+    status = str(preflight.get("packet_status") or "unknown")
+    lines = [
+        "### Recovery Preflight",
+        "",
+        f"- packet_status_before_prepare: {_short(status, max_chars)}",
+        f"- packet_ref_before_prepare: {_short(preflight.get('packet_ref', ''), max_chars)}",
+        "- fallback_to: checkpoint/summary/task-local refs",
+    ]
+    instruction = str(preflight.get("runner_instruction") or "").strip()
+    if instruction:
+        lines.append(f"- runner_instruction: {_short(instruction, max_chars)}")
+    refs = preflight.get("fallback_refs")
+    if isinstance(refs, list) and refs:
+        lines.append("- fallback_refs:")
+        lines.extend(f"  - {_short(item, max_chars)}" for item in refs[:5])
+    if preflight.get("save_may_regenerate_continue_packet") is True:
+        lines.append("- prepare_note: runner prepare may regenerate latest_continue_packet after this preflight.")
     return lines + [""]
 
 
@@ -138,11 +183,45 @@ def _snippet_lines(refs: dict[str, str], max_chars: int) -> list[str]:
 # LLM: _read_json is intentionally forgiving because corrupted packets should not crash prompt rendering.
 # 函数用途: 容错读取 JSON 对象，失败时返回空对象并让其它 refs 继续可用。
 def _read_json(path: Path) -> dict[str, Any]:
+    payload, _status = _read_json_with_status(path)
+    return payload
+
+
+# LLM: _read_json_with_status lets prompt builders explain corrupted packet fallback without throwing.
+# 函数用途: 容错读取 JSON，并返回 ok/unreadable_json 状态供恢复提示明确降级原因。
+def _read_json_with_status(path: Path) -> tuple[dict[str, Any], str]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8")[: _DEFAULT_SNIPPET_CHARS * 4])
+        raw = path.read_text(encoding="utf-8")
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
+        return {}, "unreadable_json"
+    if len(raw) > _MAX_PACKET_JSON_CHARS:
+        return {}, "unreadable_json"
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}, "unreadable_json"
+    return (payload, "ok") if isinstance(payload, dict) else ({}, "unreadable_json")
+
+
+# LLM: _is_stale_packet uses packet created_at when present, otherwise filesystem mtime as a conservative fallback.
+# 函数用途: 判断 continue packet 是否过期；过期时不信任 next_action，只把 checkpoint/summary 作为恢复事实源。
+def _is_stale_packet(path: Path, payload: dict[str, Any]) -> bool:
+    timestamp = _packet_timestamp(path, payload)
+    return timestamp > 0 and time.time() - timestamp > _STALE_PACKET_SECONDS
+
+
+# LLM: _packet_timestamp tolerates old packets without created_at by using mtime.
+# 函数用途: 从 packet 字段或文件 mtime 得到可比较时间戳，失败时返回 0。
+def _packet_timestamp(path: Path, payload: dict[str, Any]) -> float:
+    raw = payload.get("created_at")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        try:
+            value = path.stat().st_mtime
+        except OSError:
+            return 0.0
+    return max(0.0, value)
 
 
 # LLM: _read_text bounds every file snippet so a huge log cannot flood the runner prompt.

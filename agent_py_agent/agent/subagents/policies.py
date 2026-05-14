@@ -115,6 +115,8 @@ def _issue_weight(issue: DueCheckIssue) -> int:
         "missing_work_order_files": 90,
         "fake_done_risk": 85,
         "run_timeout": 80,
+        "no_progress_fuse": 78,
+        "coordinator_needs_leadership_recovery": 77,
         "heartbeat_stale": 70,
         "channel_broken": 68,
         "status_failed": 65,
@@ -150,6 +152,10 @@ def _action_for_issue(issue: DueCheckIssue) -> tuple[str, int, str]:
         return "run_acceptance", 760, ""
     if kind in {"run_timeout", "heartbeat_stale", "status_timeout"}:
         return "takeover_or_reassign", 900, "TIMEOUT"
+    if kind == "no_progress_fuse":
+        return "stop_no_progress_and_escalate", 990, ""
+    if kind == "coordinator_needs_leadership_recovery":
+        return "recover_coordinator_leadership", 930, ""
     if kind == "parent_timeout_with_unfinished_children":
         return "recover_child_after_parent_timeout", 830, ""
     if kind == "coordinator_heartbeat_stale":
@@ -174,6 +180,8 @@ def _commands_for_action(action: str, run_id: str) -> list[str]:
         "repair_work_order",
         "takeover_or_reassign",
     }
+    if action == "stop_no_progress_and_escalate":
+        return [f"{cli} subagent {run_id}", f"{cli} subagents-recovery-tree {run_id} --hide-healthy"]
     if action in probe_actions:
         return [f"{cli} subagents-probe {run_id}", f"{cli} subagent {run_id}"]
     if action in {"recover_coordinator_leadership", "recover_child_after_parent_timeout"}:

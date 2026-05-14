@@ -497,3 +497,17 @@ def test_file_contract_ignores_task_json_inside_hierarchy_state_clause():
     required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
 
     assert required == ["index.html", "style.css", "app.js"]
+
+
+# LLM: recovery packet filenames are state refs, not user deliverables.
+# 函数用途: 防止恢复说明里的 latest_continue_packet.json 被继承成 worker 必须创建的业务产物。
+def test_file_contract_ignores_continue_packet_recovery_reference():
+    text = (
+        "必须包含 index.html、app.js、RECOVERY_NOTES.md。\n"
+        "若任何 runner 半路失败或超时，必须优先读取 latest_continue_packet.json / checkpoint / summary 接着跑，"
+        "不要重新理解任务。"
+    )
+
+    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
+
+    assert required == ["index.html", "app.js", "RECOVERY_NOTES.md"]

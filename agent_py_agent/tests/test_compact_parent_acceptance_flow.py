@@ -63,7 +63,8 @@ def test_compact_resume_and_parent_acceptance_auto_policy_stay_refs_only(tmp_pat
     reloaded = agent.subagents.load(task.id)
     assert resume["continue_packet"]["ready_to_continue"] is True
     assert resume["continue_packet"]["subagent"]["writes_main_memory"] is False
-    assert resume["continue_packet"]["subagent"]["reserved_hooks"]["enabled"] is False
+    assert resume["continue_packet"]["subagent"]["reserved_hooks"]["enabled"] is True
+    assert resume["continue_packet"]["subagent"]["reserved_hooks"]["writes_main_memory"] is False
     assert resume["continue_packet"]["automatic_tool_execution"] == "none"
     assert policy.decision == "allow"
     assert policy.action == "run_tests"

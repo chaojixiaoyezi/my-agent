@@ -34,12 +34,16 @@ _CREATE_PARAMETER_DETAILS = {
     "acceptance_checks": "JSON 数组或多行文本，说明父代理后续怎样判断任务完成。",
     "plan": "JSON 数组或多行文本，给子代理的初始执行步骤。",
     "workflow_mode": "默认跟随配置：auto->auto，manual->plan，off->off。显式 coordinator/root/lead 入口会强制 off，孩子必须由该 coordinator 自己创建。",
-    "extra_write_roots": "JSON 数组，例如 [\"C:/Users/you/Desktop/work\"]；只给本次子代理任务增加写入边界。",
+    "extra_write_roots": (
+        "JSON 数组，例如 [\"C:/Users/you/Desktop/work\"]；只给本次子代理任务增加写入边界。"
+        "凡是要写真实交付物、恢复 worker、重试超时 worker，都必须保留用户给的绝对产物目录；"
+        "不要只在 goal 里写“目标目录/同一目录/任务目录”。"
+    ),
 }
 _CREATE_EXAMPLES = [
     '{"tool":"create_subagents","goal":"在隔离 fixture 项目里实现三个小功能并写报告","count":3,"role":"worker","workflow_mode":"auto","acceptance_checks":["必须有文件证据","必须说明测试结果"]}',
-    '{"tool":"create_subagents","goal":"实现购物网站 HTML 骨架和 products.json","count":1,"role":"worker","agent_name":"小傻妞-基础结构"}',
-    '{"tool":"create_subagents","goal":"实现购物网站 styles.css 和 app.js 交互","count":1,"role":"worker","agent_name":"小傻妞-样式交互"}',
+    '{"tool":"create_subagents","goal":"在 /workspace/deliverables/shop/build 实现购物网站 HTML 骨架和 products.json","count":1,"role":"worker","agent_name":"小傻妞-基础结构","extra_write_roots":["/workspace/deliverables/shop/build"]}',
+    '{"tool":"create_subagents","goal":"在 /workspace/deliverables/shop/build 实现购物网站 styles.css 和 app.js 交互","count":1,"role":"worker","agent_name":"小傻妞-样式交互","extra_write_roots":["/workspace/deliverables/shop/build"]}',
     '{"tool":"create_subagents","goal":"检查多个 worker 的购物网站实现","count":1,"role":"bug_finder"}',
     '{"tool":"create_subagents","goal":"验收购物网站从注册到下单的完整流程","count":1,"role":"acceptor"}',
 ]
@@ -60,10 +64,16 @@ _DISPATCH_PARAMETERS = {
     "limit": "每阶段最多处理多少条记录，默认 20；0 表示不限制",
     "run_ids": "精确指定本轮要推进的 run_id 列表，按给定顺序执行；也可写 include_run_ids",
     "runner_instruction": "给单个 runner 的额外指令；多 run_ids 同轮执行时会被忽略以防串线",
+    "take_over_by": "显式指定执行接管/重挂动作的 leader run_id；用于 coordinator 挂掉后的领导权恢复",
+    "locked_files": "本轮接管或重派时需要保守锁定的文件列表，避免恢复动作和仍在运行的分支互相覆盖",
 }
 _DISPATCH_PARAMETER_DETAILS = {
     "apply": "顶层默认 false 只生成计划和报告；当前 runner 内部默认 true，只推进当前节点的直接孩子。显式 false 会覆盖默认。",
-    "execute_runners": "顶层默认 false；当前 runner 内部且 apply=true 时默认 true，会消耗真实 API。显式 false 会覆盖默认。",
+    "execute_runners": (
+        "顶层默认 false；当前 runner 内部且 apply=true 时默认 true，会消耗真实 API。"
+        "如果目标是让某个 coordinator 亲自创建下一层 refs，必须对这个 coordinator 设置 execute_runners=true；"
+        "不要把“下下层 worker 暂不执行”误写成当前 coordinator 的 execute_runners=false。"
+    ),
     "execute_acceptance_tests": "顶层默认 false；当前 runner 内部且 apply=true 时默认 true，用于执行直接 child 的 tests 并写 follow-up refs。",
     "auto_apply_acceptance_followup": "顶层默认 false；当前 runner 内部且 apply=true、tests 通过、follow-up 指向 apply_acceptance 时默认 true，只落当前直接 child 的验收状态。",
     "planner": "true 会额外调用父代理 LLM planner；适合长任务统筹，但会多消耗一次模型调用。",
@@ -71,6 +81,11 @@ _DISPATCH_PARAMETER_DETAILS = {
     "max_runners": "用来限制本轮推进数量；顶层默认 1，runner 内部默认 6，避免父节点只推进一个孩子就超时。",
     "run_ids": "适合父 runner 用 schedule_child_subagents 返回的 created_run_ids 指定本轮孩子，例如先跑 auth/catalog，再跑 cart/quality。",
     "runner_instruction": "只适合单个 run_id 的补充说明。多个不同子任务一起跑时不要写子任务专属内容；需要专属说明就拆成多次单 run_id dispatch。",
+    "take_over_by": (
+        "只在恢复动作需要新 leader 时填写。先用 subagent_board 或 due-check 找到可接管的已有 coordinator/leader run_id，"
+        "再把它传给 dispatch_subagents；runner 内未填写时默认当前父 run 接管。不要凭空编 run_id。"
+    ),
+    "locked_files": "JSON 数组，填写相对或绝对文件路径；用于恢复/重派时向调度器声明这些文件暂时不能被其他分支并发修改。",
 }
 
 _SCHEDULE_CHILD_USE_CASES = [
@@ -171,8 +186,10 @@ def build_dispatch_subagents_spec() -> ToolSpec:
         parameter_details=_DISPATCH_PARAMETER_DETAILS,
         examples=[
             '{"tool":"dispatch_subagents","apply":false,"workflow_mode":"plan","max_runners":1}',
+            '{"tool":"dispatch_subagents","apply":true,"execute_runners":true,"run_ids":["coordinator-id"],"runner_instruction":"只创建下一层 refs，不要执行 leaf worker"}',
             '{"tool":"dispatch_subagents","apply":true,"execute_runners":true,"run_ids":["child-auth","child-catalog"],"max_runners":2}',
             '{"tool":"dispatch_subagents","apply":true,"execute_runners":true,"run_ids":["child-auth"],"max_runners":1,"runner_instruction":"只补充 auth 子任务自己的执行重点"}',
+            '{"tool":"dispatch_subagents","apply":true,"execute_runners":false,"take_over_by":"subagent-new-leader","max_runners":0}',
         ],
     )
 

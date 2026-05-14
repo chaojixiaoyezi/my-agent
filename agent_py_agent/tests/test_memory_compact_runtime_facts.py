@@ -81,6 +81,46 @@ def test_runtime_fact_source_stops_sections_at_unknown_headings(tmp_path: Path) 
     assert "do not treat this as acceptance" not in payload["acceptance"]
 
 
+# LLM: Generated compact continuation packets should carry facts into the next compact cycle.
+# 函数用途: 验证 runtime facts 会解析受控 Compact Auto Continuation 注入块，但不会把后续标题下的内容串场。
+def test_runtime_fact_source_reads_compact_auto_continuation_injection(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+
+    write_runtime_fact_source(
+        RuntimeFactSourceRequest(
+            root=root,
+            request_id="req-compact-continuation",
+            user_prompt="继续执行 Compact Auto Continuation 包里的 Next Step。",
+            response_text="ok",
+            backend="echo",
+            status="ok",
+            next_actions=["continue"],
+            archive_tool_calls=[],
+            runtime_injections=(
+                "# Compact Auto Continuation\n"
+                "## Acceptance\n"
+                "- compact packet remains complete\n"
+                "## Constraints\n"
+                "- do not redo completed work\n"
+                "## Latest Tests\n"
+                "Status: recorded\n"
+                "- focused compact continuation test\n"
+                "## Changed Files\n"
+                "- should not become latest_tests\n",
+            ),
+        )
+    )
+
+    payload = json.loads(
+        (root / "memory_archive" / "runtime_facts" / "req-compact-continuation" / "task.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert payload["acceptance"] == ["compact packet remains complete"]
+    assert payload["constraints"] == ["do not redo completed work"]
+    assert payload["latest_tests"] == ["focused compact continuation test"]
+
+
 # LLM: _write_config keeps the real-run test isolated from repository and user config.
 # 函数用途: 写入临时 echo backend 配置，让测试只使用 tmp_path workspace。
 def _write_config(tmp_path: Path) -> Path:

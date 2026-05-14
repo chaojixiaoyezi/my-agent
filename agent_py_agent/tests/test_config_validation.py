@@ -146,6 +146,21 @@ def test_load_config_coerces_string_numbers(tmp_path):
     assert config.max_tokens == 2048
 
 
+# LLM: runner_timeout_by_role must survive config normalization so E2E can bound leaf workers without killing root.
+# 函数用途: 验证角色级 runner timeout 配置能从 YAML 加载到 AgentConfig。
+def test_load_config_keeps_runner_timeout_by_role(tmp_path):
+    config_path = _write_config(
+        tmp_path,
+        [
+            'runner_timeout_by_role: {"root": "off", "coordinator": "off", "worker": 8}',
+        ],
+    )
+
+    config = load_config(config_path)
+
+    assert config.runner_timeout_by_role == {"root": "off", "coordinator": "off", "worker": 8}
+
+
 def test_daemon_defaults_are_true():
     """验证 daemon_apply 和 daemon_execute_runners 默认值为 True。"""
     defaults_normalized, _ = normalize_agent_config({})

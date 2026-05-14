@@ -1067,3 +1067,106 @@
 - 真实观察：root 在所有孩子完成后仍多看了几轮 board/list_files 才收口，最终没有卡死，但提示词涨到 6 万多字符。后续要继续优化 root final-closeout 提示和验收角色模板，让“孩子全完成 + acceptor verified”时更快写 `SUBAGENT_RESULT`。
 - 已补测试：`test_tool_model_generation.py` 覆盖公共模型调用墙钟超时；`test_orchestration_write_guard.py` 新增 bare scheme 误判回归；并回归 runner timeout、dispatch candidate、subagent compact continuation、gateway stream timeout focused tests。
 - 下一步：进入 12 个专项恢复测试。每条仍按 root-only 原则跑：只给主/root prompt，观察 packet、checkpoint、summary、takeover、leader recovery 和 no-progress fuse；发现问题做长期修复，不做一次性绕过。
+
+## 2026-05-14 recovery 专项 1：packet-first 父级续跑和接管
+- 中文说明：完成第一条专项验证：真实 root runner 半路失败/超时后，可以从 task-local `latest_continue_packet.json` 接上状态，并通过控制面 dispatch 处理失联子代理。
+- 真实验证：`case01_packet_failure` 中 root 先遇到模型超时和多个 stale repair child；修复后 root 成功读取自己的 packet，并用 `dispatch_subagents(apply=true)` 把 3 个旧 repair child 标记为 `TAKEN_OVER`。
+- 已修正：
+  - runner-context dispatch 漏传 `take_over_by` 时自动用当前父级 run id。
+  - dry-run recovery preview 会给精确 `suggested_tool_call`，避免父级看见接管计划却不写回。
+  - body-read guard 放行 task-local compact/recovery refs，不再挡 `latest_continue_packet.json`。
+  - due-check/action-apply 支持排除当前父级 run，避免 root 因自身 heartbeat stale 被接管自己。
+  - required-file parser、static validator、duplicate repair guard 补齐对应真实问题。
+- 已测试：focused pytest 覆盖 dispatch payload、takeover default、body-read guard、action apply exclude、required files、static site validator、repair duplicate guard。
+- 遗留：旧 tester 存在“summary 说通过但状态 BLOCKED/FAILED”的历史冲突，当前 dispatch 已把它作为唯一 blocker 暴露给 `qa_repair_advice`。这会在后续购物站恢复闭环里继续测。
+- 下一步：专项 2 验证 dispatch 是否优先 latest packet；专项 3 验证 takeover run 是否复用原任务目录和 artifacts。
+
+## 2026-05-14 recovery 专项 2：dispatch packet-first 优先级
+- 中文说明：完成第二条专项验证：`dispatch_subagents` 现在会把 `latest_continue_packet.json` 续跑原 run 作为首选路径，不会被 QA repair 建议抢先。
+- 真实验证：root 只通过 `subagent_board` 和 `dispatch_subagents` 推进；blocked tester `subagent-1778692647-1e346a3f` 被 root 用 packet-first `runner_instruction` 复用原 run 重新执行。
+- 已修正：
+  - `direct_children.next_action` 在 recovery 和 repair 同时存在时优先 recovery，并标记 `repair_wave_deferred_by_recovery=true`。
+  - 外置后的 dispatch 摘要会保留 `recovery_action_counts` 和 packet-first strategy preview，避免模型只看到 repair 建议。
+  - 显式 `run_ids + latest_continue_packet/checkpoint` 恢复指令允许 `BLOCKED/FAILED` 原 run 进入 runner 候选；普通 blocked 任务仍不会被盲目重跑。
+- 已测试：
+  - 真实 dispatch report 记录了 `runner execute_runner subagent-1778692647-1e346a3f BLOCKED -> AWAITING_ACCEPTANCE FAILED -> NEEDS_ACCEPTANCE`。
+  - focused pytest 覆盖 packet recovery 优先于 QA repair、摘要保留 packet-first 信息、blocked 原 run 可被显式 packet 恢复。
+- 遗留：旧 acceptance review 里仍有历史 REJECT 文本；当前 task state 和最新 dispatch/acceptance report 已恢复，后续要继续确认旧报告不会误导新的恢复链路。
+- 下一步：专项 3 验证原 run 挂死后 takeover run 是否复用同一任务目录和 artifacts。
+
+## 2026-05-14 recovery 专项 3：takeover run 接管与连续失败保护
+- 中文说明：专项 3 已打到关键路径：root 自己创建 worker，worker 被短 runner timeout 打断后，`dispatch_subagents` 能创建 takeover run，并把旧 run 标为 `TAKEN_OVER`。
+- 真实验证目录：`/Users/xiaoyezi/my-claude-code/recovery_cases/case02_takeover_run`。外层只运行 root，root 通过 `schedule_child_subagents` 和 `dispatch_subagents` 推进。
+- 已修正：
+  - 新增 `runner_timeout_by_role`，允许 root/coordinator 不限时、worker/tester/acceptor 设置短超时，避免为了测试 worker 超时把 root 也误杀。
+  - `leaf_worker` / `repair_worker` 等内部角色自动匹配用户配置的 `worker` 超时桶，用户不需要知道内部角色名。
+  - takeover run 会优先匹配 `takeover` 超时桶，再回退到 `worker`，让“原 worker 短超时、接管者长预算”成为配置能力。
+  - 新增 `subagent_takeover_chain_max_depth`，连续 takeover 到上限后把当前 run 标成 `BLOCKED/takeover_chain_exhausted`，防止 1 个挂死任务扩成一串代理。
+- 已测试：focused pytest 覆盖角色级超时、inline dict 配置、takeover refs 继承、幂等复用和 takeover-chain exhaustion。
+- 真实发现：故意把 worker timeout 设到 1 秒后，原 worker 被接管成功，但 takeover run 也会继续超时；这提前覆盖了专项 5/7 的无限扩容风险，已先补熔断机制。
+- 下一步：用较合理的 worker timeout 复测专项 3 收口，然后进入专项 4 coordinator 挂掉后的子树 leader 接管。
+
+## 2026-05-14 recovery 专项 4-7：leader 接管、批量恢复、坏包降级和 no-progress fuse
+- 中文说明：这一段继续按 root-only 原则跑真实专项。外层只做故障注入和观察，恢复动作由 root 通过 `dispatch_subagents` 完成。
+- 专项 4 已验证：旧 coordinator 挂掉后，新 leader 能接管其 child subtree；旧 coordinator 标记 `TAKEN_OVER`，孩子重挂到新 leader，避免中间层死掉后下面的孙/孙孙没人管。
+- 专项 5 已验证：多个子代理同时失败时，系统按原 run 一对一创建 takeover，不会一个失败分裂成无限多新代理。
+- 专项 6 已验证：`latest_continue_packet.json` 损坏时，runner prompt 会保留 `Recovery Preflight`，明确写出坏包状态，并降级读 checkpoint/summary/task-local refs，而不是从头重解任务。
+- 专项 7 已验证并修正：连续恢复无进展现在会进入 `no_progress_fuse`，due-check/action-plan/action-apply 都显式显示 `stop_no_progress_and_escalate`；它只写 task-local blocker/worklog，不执行 runner、不创建 child、不把失败伪装成完成。
+- 已新增配置：`subagent_no_progress_attempt_limit` 放在 `capability_config.yaml`，默认 4，设为 0 表示关闭熔断。
+- 已测试：focused pytest 覆盖 corrupt packet preflight、dispatch run_ids 范围、no-progress due-check/action/apply、capability config 默认与加载；真实 case07 dispatch report 已显示 `stop_no_progress_and_escalate: 1` 和 `runner_created_children: 0`。
+- 下一步：专项 8 四层链路中间任意一层挂掉后的恢复；重点看新 leader 是否能接住下层孩子，且父级不越层直接干预。
+
+## 2026-05-14 recovery 专项 8：四层中间 leader 挂掉后的子树交接
+- 中文说明：专项 8 已验证并修正。中间层 coordinator/leader 死掉且仍带 child_ids 时，控制面会优先做 `recover_coordinator_leadership`，把孩子重挂到指定新 leader，而不是走普通 timeout takeover 再新建一个空接管 run。
+- 真实问题：case08 首轮 root 真实调度暴露 due-check 先生成普通 `status_timeout`，导致 `takeover_or_reassign` 创建了 `subagent-1778726692-b7012b1e`，leaf 没交给用户指定的新 leader。这个问题不是模型单纯乱说，而是动作候选本身给错了。
+- 已修正：
+  - `board_due_checks.py` 新增 `coordinator_needs_leadership_recovery`，并在 generic status timeout 前调用 recovery strategy。
+  - `policies.py` / `policy_checks.py` 把该 issue 映射到高优先级 `recover_coordinator_leadership`。
+  - `apply_takeover_or_reassign` 对“死 coordinator/leader 仍带 child_ids”的场景 fail closed，提示必须走 leadership recovery，防止以后又新建空 takeover run。
+- 真实验证：root 只调用一次 `dispatch_subagents(apply=true, execute_runners=false, max_runners=0, run_ids=["subagent-1778726011-9b301200"], take_over_by="subagent-1778725325-60f69eb4")`；结果旧 leader `TAKEN_OVER`，new leader 的 `child_ids` 包含 leaf，leaf 的 `parent_id/supervisor/final_owner` 都变成新 leader。
+- 已测试：`python3 -m pytest agent_py_agent/tests/test_subagent_coordinator_due_check.py agent_py_agent/tests/test_policy_checks.py agent_py_agent/tests/test_manager_actions.py -q` -> `69 passed`；相关 ruff passed。
+- 遗留：root 的自然语言汇报仍可能把“record-only parent timeout 提示”误读成 leaf 没迁移；最终验收必须以结构化 `task.json` / dispatch report 为准。后续要优化 root 读结构化结果和收口措辞。
+- 下一步：专项 9，真实购物网站 E2E 在恢复后继续完成 QA、修复、验收闭环。
+
+## 2026-05-14 recovery 专项 9：delegate-only 购物站 E2E 前置修正
+- 中文说明：专项 9 首轮真实测试没有直接进入闭环，而是先暴露了两个更底层的问题：root 在 worker 连续超时后会尝试绕过子代理自己写产物；被阻止后，又会创建一个没有真实产物目录的 recovery writer，导致 writer 把自己的任务目录当成“目标目录”。
+- 已修正 1：新增 delegate-only direct-write guard。当前用户明确说“只能/必须通过子代理、root 不能直接写”时，root/父级直接 `write_file` 或用 shell 重定向写业务产物会被工具层拒绝，并引导它继续创建 worker、takeover 或 repair worker。
+- 已修正 2：`create_subagents` 对“在目标目录/同一目录/任务目录写 index.html/style.css/app.js”等模糊产物写入目标做硬拦截；没有 `extra_write_roots` 或目标里的真实绝对路径时，不再创建 worker，避免产物写进 agent-run workspace。
+- 已同步：`create_subagents` 工具规格和示例强调恢复/重试 worker 必须保留用户真实产物目录，并通过 `extra_write_roots` 传递。
+- 已测试：`test_orchestration_direct_write_guard.py`、`test_orchestration_create_subagents_tool.py`、`test_orchestration_tool_specs.py` focused tests passed；相关 ruff passed。
+- 下一步：清空 case09 测试目录，重跑真实购物站 E2E；要求 root 仍只能通过子代理推进，最终必须在真实 deliverables/build 下完成页面、QA、修复和验收。
+
+## 2026-05-14 recovery 专项 9：购物站 clean rerun 与验收语义修正
+- 中文说明：clean rerun 已跑通 worker -> tester -> acceptor 主链路。root 只启动下级，worker 把购物站写到真实 `deliverables/shopping_site/build`；tester 和 acceptor 都完成为 `DONE / VERIFIED`。
+- 真实产物：`/Users/xiaoyezi/my-claude-code/recovery_cases/case09_shopping_recovery_e2e/deliverables/shopping_site/build`，包含 `index.html`、`product.html`、`cart.html`、`checkout.html`、`register.html`、`login.html`、`styles.css`。
+- 已修正 3：诊断型角色语义。`tester/bug_finder` 如果明确输出 `COMPLETED_WITH_ISSUES`，说明它完成了“找问题”的职责；这时失败测试和 planned patch 会作为 P2 诊断事实交给 repair/acceptor，不再把 tester 自己标成 `FAILED`。普通 worker 仍然严格失败。
+- 已修正 4：顶层 root 的 refs-only 读正文保护。以前 guard 只保护子代理 runner，顶层 CLI root 不在 `current_subagent_run_id` 里，所以验收前还能读产品正文。现在当前 prompt 明确要求 root 只调度下级、只读 refs/报告时，顶层 root 也会在 acceptor 完成前被阻止读取产品正文。
+- 已测试：`test_manager_acceptance.py`、`test_orchestration_body_read_guard.py` 和 closeout 相关 focused tests passed；相关 ruff passed。
+- 真实观察：本次 clean rerun 是在顶层 root 读正文保护修复前完成的，所以它暴露了 Finding 36。下一次 case09 或更大购物站复跑时，要确认 root 在 acceptor 完成前不再读产品正文。
+- 下一步：继续专项 10-12，重点测试 compact 后子代理恢复是否只读 task-local refs，不读主代理 SOUL/USER/memory，并测试多次 compact 的主代理/子代理续接稳定性。
+
+## 2026-05-14 recovery 专项 10：子代理 compact owner refs
+- 中文说明：`memory-resume --from-compact` 指定 `subagent_run` / `subagent_session` 后，现在能按配置里的 `subagent_workspace` 找到真实 agent-run workspace，而不是只找旧的主 workspace 路径。
+- 真实验证：基于 case09 clean rerun 的 tester `subagent-1778735158-e18fd554`，恢复命令返回 `owner_status=linked_run_workspace`、`subagent_memory_scope=task_local`、`writes_main_memory=false`、`automatic_tool_execution=none`。
+- 已修正：compact owner resolver 会读取配置 subagent workspace，并能从 legacy `task.json` 升级到 `tasks/<root>/agents/<run_id>/`；owner id 按字面路径段处理，避免 glob 扩扫。
+- 已新增：subagent compact resume payload 里带 `recommended_read_paths`，只推荐 `latest_continue_packet.json`、checkpoint、summary、task、timeline、findings 等任务本地 refs。
+- 已测试：focused regression 覆盖 configured subagent workspace refs 和 task-local recommended paths。
+- 下一步：进入专项 11，测试主代理多次自动 compact 后是否能连续接住任务。
+
+## 2026-05-14 recovery 专项 11：主代理多次 compact 自动续接
+- 中文说明：主 agent 自动 compact 已从“最多续跑一次”推进到“按配置受控续跑多次”。这轮真实 clean4 测试用低阈值触发了 4 次 compact apply，并最终返回已完成。
+- 真实验证目录：`/Users/xiaoyezi/my-claude-code/recovery_cases/case11_main_multi_compact_clean4`。
+- 真实 apply ids：
+  - `apply-1766b56e7b6f25b1-20260514T054912Z0000`
+  - `apply-98bf4e3678585c05-20260514T055050Z0000`
+  - `apply-5e2cd91535effe51-20260514T055113Z0000`
+  - `apply-571db68e347e0839-20260514T055356Z0000`
+- 已修正：
+  - `memory_compact_context_window_tokens` 和 `memory_compact_auto_continue_max_depth` 成为真实后端配置字段。
+  - `SimpleAgent.run()` 会按 max depth 循环执行 guarded continuation，不再固定只续跑一次。
+  - auto compact 用真实 per-run `request_id` 写 scope，避免 CLI 未传 request id 时串 scope。
+  - runtime fact source 会从 `# Compact Auto Continuation` 注入里继承显式 acceptance/constraints/latest_tests。
+  - work_state 读取 shared raw/hook JSONL 时会二次按 scope 过滤，避免旧任务事实污染新 compact。
+- 已测试：真实 case11 clean4 四次 apply 均 `missing_fields=[]`；focused regressions 覆盖多跳续接、continuation fact、scope 过滤和配置字段。
+- 遗留：专项 12 的“子代理模型会话内多次 compact/apply/resume”还没有完整实现；当前只有 task-local continue packet 和 owner refs 恢复链路。
+- 下一步：实现子代理自有 compact cycle，产物只写 agent-run workspace 的 `compactions/`，然后重跑专项 12。

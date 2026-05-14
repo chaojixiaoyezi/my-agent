@@ -185,6 +185,8 @@ def _cmd_memory_resume_from_compact(agent, args) -> int:
             owner_type=getattr(args, "compact_owner_type", "main_agent") or "main_agent",
             owner_id=getattr(args, "compact_owner_id", "") or "",
             resume_mode=getattr(args, "compact_resume_mode", "manual") or "manual",
+            # LLM: CLI passes configured subagent workspace so owner refs find task-local run homes.
+            subagent_workspace=getattr(getattr(agent, "subagents", None), "workspace", ""),
         ),
     )
     if getattr(args, "context_only", False):

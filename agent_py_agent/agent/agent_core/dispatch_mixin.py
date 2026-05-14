@@ -105,7 +105,16 @@ class _DispatchCollectionBase:
             )
             records.extend(workflow_records)
 
-        records.append(make_due_check_record(self, ctx.cfg, ctx.apply))
+        records.append(
+            make_due_check_record(
+                self,
+                ctx.cfg,
+                ctx.apply,
+                root_id=ctx.root_id,
+                include_run_ids=ctx.include_run_ids,
+                exclude_run_ids=ctx.exclude_run_ids,
+            )
+        )
         leadership_record = make_leadership_recovery_plan_record(self, ctx.cfg)
         if leadership_record is not None:
             records.append(leadership_record)
@@ -117,6 +126,9 @@ class _DispatchCollectionBase:
                 ctx.take_over_by,
                 ctx.locked_files,
                 ctx.limit,
+                ctx.root_id,
+                ctx.include_run_ids,
+                ctx.exclude_run_ids,
             )
         )
         records.extend(action_records)

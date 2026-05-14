@@ -52,6 +52,12 @@ class TestParseScalar:
         """Inline lists are convenient for workspace_root."""
         assert parse_scalar('["", "C:/work"]') == ["", "C:/work"]
 
+    # LLM: inline dict support keeps small config maps editable without adding PyYAML.
+    # 函数用途: 验证简化 YAML 能解析角色级 runner timeout 这类小字典配置。
+    def test_parse_scalar_inline_dict(self):
+        """Inline dict syntax should work for compact role maps."""
+        assert parse_scalar('{"root": "off", "worker": 8}') == {"root": "off", "worker": 8}
+
 
 class TestLoadSimpleYaml:
     """测试 load_simple_yaml 简化 YAML 加载。"""
@@ -93,6 +99,21 @@ class TestLoadSimpleYaml:
         try:
             data = load_simple_yaml(path)
             assert data["workspace_root"] == ["", "C:/work"]
+        finally:
+            path.unlink()
+
+    # LLM: simple YAML inline maps are used for role-level runtime policy knobs.
+    # 函数用途: 验证配置文件中的行内字典能被 load_simple_yaml 保留下来。
+    def test_load_simple_yaml_with_inline_dict(self):
+        """Inline dict syntax should work for compact map values."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write('runner_timeout_by_role: {"root": "off", "worker": 8}\n')
+            f.flush()
+            path = Path(f.name)
+
+        try:
+            data = load_simple_yaml(path)
+            assert data["runner_timeout_by_role"] == {"root": "off", "worker": 8}
         finally:
             path.unlink()
 

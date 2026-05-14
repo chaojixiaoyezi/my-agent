@@ -116,10 +116,14 @@ class SubAgentRunnerContextMixin:
         report_roots = _task_report_write_roots(task)
         product_roots = task_product_write_roots(task, report_roots)
         controlled_exec_grants = controlled_exec_grant_refs(list(task.capability_grants or []))
+        grant_write_roots = _granted_filesystem_write_roots(task)
         return {
             "task_dir": task.task_dir,
             "role": task.role,
-            "allowed_write_roots": _merge_list(task.allowed_write_roots, report_roots),
+            "allowed_write_roots": _merge_list(
+                _merge_list(task.allowed_write_roots, grant_write_roots),
+                report_roots,
+            ),
             "product_write_roots": product_roots,
             "product_write_policy": task_product_write_policy(task, product_roots),
             "forbidden_write_roots": task.forbidden_write_roots,
@@ -257,6 +261,21 @@ def _execution_context_task_fields(task: SubAgentTask) -> dict[str, object]:
         "execution_context_file": task.execution_context_file,
         "execution_context_json": task.execution_context_json,
     }
+
+
+_FILESYSTEM_WRITE_GRANT_TOOLS = {"write_file", "append_file", "replace_in_file"}
+
+
+# LLM: grant path_scope becomes an actual filesystem write boundary only for explicit file-write grants.
+# 函数用途: 把父级已批准的 write_file/append_file/replace_in_file 路径范围加入 runner 写边界；shell grant 仍走 controlled_exec，不混进普通文件写权限。
+def _granted_filesystem_write_roots(task: object) -> list[str]:
+    roots: list[str] = []
+    for grant in getattr(task, "capability_grants", []) or []:
+        tools = {str(item or "").strip() for item in getattr(grant, "tools", []) or []}
+        if not tools & _FILESYSTEM_WRITE_GRANT_TOOLS:
+            continue
+        roots = _merge_list(roots, _string_list(getattr(grant, "path_scope", []) or []))
+    return roots
 
 
 # LLM: _task_report_write_roots grants runners only their internal report workspace, not product roots.

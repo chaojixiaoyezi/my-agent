@@ -34,6 +34,7 @@ class CapabilityConfig:
     subagent_run_timeout: int = 900
     subagent_due_check_interval: int = 120
     subagent_min_evidence_for_done: int = 1
+    subagent_no_progress_attempt_limit: int = 4
     capability_request_max_tried_items: int = 0
     capability_request_max_evidence_items: int = 0
     capability_request_max_per_task: int = 0

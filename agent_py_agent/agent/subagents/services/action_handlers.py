@@ -113,7 +113,41 @@ def apply_run_acceptance(service, action, task, ctx: ActionHandlerContext):
 # 函数用途: 更新takeoverreassign对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、报告记录和持久化副作用，需避免破坏既有状态机约定。
 def apply_takeover_or_reassign(service, action, task, ctx: ActionHandlerContext):
     from ..reports import ActionApplyRecord
+    from .takeover_run import TakeoverRunRequest
 
+    if _needs_coordinator_handoff_action(task):
+        return _coordinator_handoff_error_record(
+            CoordinatorHandoffErrorRequest(
+                service,
+                action,
+                task,
+                ctx,
+                (
+                    "带子任务的 coordinator/leader 不能走普通 takeover_or_reassign；"
+                    "请使用 recover_coordinator_leadership 并传入 --take-over-by 新 leader。"
+                ),
+            )
+        )
+    if _should_create_takeover_run(action, task):
+        result = service.manager.create_takeover_run(
+            TakeoverRunRequest(source_run_id=action.run_id, reason=action.reason)
+        )
+        task = service.manager.load(action.run_id)
+        message = _takeover_apply_message(result)
+        service._append_task_work_log(
+            task,
+            f"action_apply takeover_or_reassign: {message}",
+        )
+        return service._record_after_task_action(
+            RecordAfterTaskActionParams(
+                action,
+                task,
+                ctx.before_status,
+                ctx.before_channel_status,
+                message,
+                evidence_paths=_takeover_action_evidence(service, task, result),
+            )
+        )
     take_over_by = ctx.take_over_by
     if not take_over_by:
         return ActionApplyRecord(
@@ -155,6 +189,60 @@ def apply_takeover_or_reassign(service, action, task, ctx: ActionHandlerContext)
             evidence_paths=list(dict.fromkeys(ref for ref in evidence_paths if ref)),
         )
     )
+
+
+# LLM: _needs_coordinator_handoff_action protects child subtrees from generic replacement-run takeover.
+# 函数用途: 判断任务是否是已失联且仍带 child_ids 的协调节点；这种场景必须走 leadership recovery。
+def _needs_coordinator_handoff_action(task) -> bool:
+    if not getattr(task, "child_ids", None):
+        return False
+    role = str(getattr(task, "role", "") or "").lower()
+    if role not in {"coordinator", "lead", "team_lead", "child_coordinator"} and "coordinator" not in role:
+        return False
+    status = str(getattr(task, "status", "") or "").upper()
+    failure_type = str(getattr(task, "failure_type", "") or "").lower()
+    return status in {"TIMEOUT", "CHANNEL_ERROR"} or failure_type in {
+        "runner_timeout",
+        "channel_error",
+        "runner_channel_failed",
+    }
+
+
+# LLM: _should_create_takeover_run chooses replacement-run takeover for dead runner work.
+# 函数用途: 超时/断通道/runner_timeout 应创建新 run 继承 refs；普通手动 reassign 仍走显式 take_over_by。
+def _should_create_takeover_run(action, task) -> bool:
+    triggers = {item for item in str(getattr(action, "rescue_trigger", "") or "").split(",") if item}
+    if triggers & {"run_timeout", "heartbeat_stale", "status_timeout"}:
+        return True
+    status = str(getattr(task, "status", "") or "").upper()
+    failure_type = str(getattr(task, "failure_type", "") or "").lower()
+    return status in {"TIMEOUT", "CHANNEL_ERROR"} or failure_type in {
+        "runner_timeout",
+        "channel_error",
+        "runner_channel_failed",
+    }
+
+
+# LLM: _takeover_action_evidence keeps source and takeover refs visible in the apply record.
+# 函数用途: 给 dispatch/action report 写入旧任务接管文件、新 takeover run 目录和继承 refs，便于父级继续 dispatch。
+def _takeover_action_evidence(service, task, result) -> list[str]:
+    refs = [task.takeover_file, task.work_log_file]
+    try:
+        refs.append(service.manager.load(result.takeover_run_id).task_dir)
+    except FileNotFoundError:
+        pass
+    refs.extend(str(value) for value in result.takeover_refs.values())
+    return list(dict.fromkeys(ref for ref in refs if ref))
+
+
+# LLM: _takeover_apply_message preserves idempotent/exhausted takeover outcomes for the parent model.
+# 函数用途: 根据接管结果生成清晰中文消息，避免失败熔断时还显示“已创建 takeover run”。
+def _takeover_apply_message(result) -> str:
+    if result.created and result.takeover_run_id:
+        return f"已创建 takeover run {result.takeover_run_id} 接管原任务。"
+    if result.takeover_run_id:
+        return f"未新建 takeover run；已复用 {result.takeover_run_id}。"
+    return f"未新建 takeover run：{result.message}"
 
 
 # LLM: apply_recover_coordinator_leadership performs explicit child subtree reparenting for stale coordinators.
@@ -202,6 +290,33 @@ def apply_recover_coordinator_leadership(service, action, task, ctx: ActionHandl
             ctx.before_channel_status,
             f"已把 coordinator 标记为接管，并将 {len(updated_children)} 个子任务交给 {leader.id}。",
             evidence_paths=[task.takeover_file, task.work_log_file, *(_task_dirs(service, updated_children))],
+        )
+    )
+
+
+# LLM: apply_stop_no_progress_and_escalate records a terminal retry fuse without changing ownership or spawning work.
+# 函数用途: 连续恢复无进展时写入明确 blocker/worklog，让父级停止自动重试并根据 refs 人工决策。
+def apply_stop_no_progress_and_escalate(service, action, task, ctx: ActionHandlerContext):
+    task.failure_type = "no_progress_fuse"
+    blocker = "no_progress_fuse: 连续恢复没有进展，已停止自动重试和扩容。"
+    if blocker not in task.blockers:
+        task.blockers.append(blocker)
+    task.current_step = "no-progress fuse tripped; waiting for parent/user decision"
+    task.latest_summary = "连续恢复无进展；请父级/用户根据 checkpoint、summary 和 task-local refs 决定下一步。"
+    task.updated_at = ctx.now
+    service.manager.save(task)
+    service._append_task_work_log(
+        task,
+        "action_apply stop_no_progress_and_escalate: 已触发 no-progress fuse，停止自动重试和扩容。",
+    )
+    return service._record_after_task_action(
+        RecordAfterTaskActionParams(
+            action,
+            task,
+            ctx.before_status,
+            ctx.before_channel_status,
+            "no-progress fuse 已触发：已停止自动重试和扩容，等待父级/用户决策。",
+            evidence_paths=[task.work_log_file, task.task_dir],
         )
     )
 

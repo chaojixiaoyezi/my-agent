@@ -121,11 +121,21 @@ class SubAgentLifecycleMixin:
     def prepare_runner_attempt(self, run_id: str, *, retry_reason: str = ""):
         """Prepare task for runner execution (set RUNNING, reset verification)."""
 
-        from .models import SubAgentTask
+        from .services.recovery_strategy import (
+            SubagentRecoveryStrategyRequest,
+            build_subagent_recovery_strategy,
+        )
         from .utils import _new_id
 
         task = self.load(run_id)
         previous = f"{task.status}/{task.failure_type or 'none'}"
+        strategy = build_subagent_recovery_strategy(
+            SubagentRecoveryStrategyRequest(
+                task=task,
+                now=time.time(),
+                packet_max_age_seconds=7 * 24 * 60 * 60,
+            )
+        )
         attempt_id = _new_id("attempt")
         task.status = "RUNNING"
         task.verification_status = "UNVERIFIED"
@@ -134,6 +144,7 @@ class SubAgentLifecycleMixin:
         task.runner_active_attempt_id = attempt_id
         task.updated_at = time.time()
         task.heartbeat_at = task.updated_at
+        _record_runner_recovery_preflight(task, strategy, previous)
         self.save(task)
         suffix = f" retry_reason={retry_reason}" if retry_reason else ""
         self._append_task_work_log(
@@ -164,3 +175,31 @@ class SubAgentLifecycleMixin:
                 f"runner_attempt: abandon attempt_id={normalized} reason={reason}",
             )
         return task
+
+
+# LLM: _record_runner_recovery_preflight preserves damaged-packet evidence before save regenerates packet files.
+# 函数用途: 在 runner 准备阶段记录启动前恢复包状态；packet 坏/缺/过期时让后续 prompt 仍能说明降级来源。
+def _record_runner_recovery_preflight(task, strategy, previous_status: str) -> None:
+    if str(getattr(strategy, "packet_status", "") or "") == "ready":
+        _clear_runner_recovery_preflight(task)
+        return
+    attributes = dict(getattr(task, "attributes", {}) or {})
+    attributes["runner_recovery_preflight"] = {
+        "packet_status": str(getattr(strategy, "packet_status", "") or "unknown"),
+        "packet_ref": str(getattr(strategy, "packet_ref", "") or ""),
+        "fallback_refs": list(getattr(strategy, "fallback_refs", []) or []),
+        "runner_instruction": str(getattr(strategy, "runner_instruction", "") or ""),
+        "previous_status": previous_status,
+        "observed_at": time.time(),
+        "save_may_regenerate_continue_packet": True,
+    }
+    task.attributes = attributes
+
+
+# LLM: _clear_runner_recovery_preflight prevents stale warnings from following healthy reruns.
+# 函数用途: packet 正常时清理旧的 preflight 降级记录，避免 runner prompt 误报历史问题。
+def _clear_runner_recovery_preflight(task) -> None:
+    attributes = dict(getattr(task, "attributes", {}) or {})
+    if "runner_recovery_preflight" in attributes:
+        attributes.pop("runner_recovery_preflight", None)
+        task.attributes = attributes

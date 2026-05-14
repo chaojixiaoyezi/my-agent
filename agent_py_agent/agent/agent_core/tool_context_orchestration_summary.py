@@ -91,8 +91,14 @@ def _direct_children_lines(value: object) -> list[str]:
             lines.append(f"- {key}: {_json_inline(value.get(key))}")
     if value.get("quality_advice"):
         lines.append(f"- quality_advice: {_json_inline(value.get('quality_advice'))}")
+    if value.get("recovery_action_counts"):
+        lines.append(f"- recovery_action_counts: {_json_inline(value.get('recovery_action_counts'))}")
+    if value.get("recovery_strategies"):
+        lines.append(f"- recovery_strategy_preview: {_json_inline(_strategy_preview(value.get('recovery_strategies')))}")
     if value.get("qa_repair_advice"):
         lines.append(f"- qa_repair_advice: {_json_inline(value.get('qa_repair_advice'))}")
+    if value.get("repair_wave_deferred_by_recovery"):
+        lines.append("- repair_wave_deferred_by_recovery: true")
     if value.get("suggested_tool_call"):
         lines.append(f"- suggested_tool_call: {_json_inline(value.get('suggested_tool_call'))}")
     if value.get("suggested_recovery_child_tool_call"):
@@ -132,6 +138,25 @@ def _summary_lines(payload: dict[str, Any]) -> list[str]:
     if payload.get("dispatch_md"):
         lines.append(f"- dispatch_md: {payload.get('dispatch_md')}")
     return lines
+
+
+# LLM: _strategy_preview keeps packet-first recovery visible after large dispatch outputs are archived.
+# 函数用途: 从 recovery_strategies 中提取首要恢复动作和 packet ref，不展开完整 fallback/takeover refs。
+def _strategy_preview(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    preview: list[dict[str, object]] = []
+    for item in value[:3]:
+        if not isinstance(item, dict):
+            continue
+        preview.append({
+            "run_id": item.get("run_id", ""),
+            "recommended_action": item.get("recommended_action", ""),
+            "packet_status": item.get("packet_status", ""),
+            "uses_continue_packet": bool(item.get("uses_continue_packet", False)),
+            "runner_instruction": _clip(item.get("runner_instruction", ""), limit=220),
+        })
+    return preview
 
 
 # LLM: _archive_pointer_lines provides recovery pointers without encouraging immediate body rereads.

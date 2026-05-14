@@ -13,6 +13,7 @@ SubAgentManager 通过 facade 方法委托到这里。
 import time
 from typing import TYPE_CHECKING, Any
 
+from ..models import SubAgentPlanActionsOptions
 from .action_options import ActionApplyOptions
 from .action_params import RecordAfterTaskActionParams
 from .action_records import (
@@ -56,6 +57,7 @@ class SubAgentActionService:
         take_over_by: str | None = None,
         locked_files: list[str] | None = None,
         limit: int | None = None,
+        include_run_ids: list[str] | None = None,
     ) -> ActionApplyReport:
         """Execute or dry-run an action plan."""
         from ..reports import ActionApplyReport
@@ -68,8 +70,12 @@ class SubAgentActionService:
             take_over_by=take_over_by,
             locked_files=locked_files,
             limit=limit,
+            include_run_ids=include_run_ids,
         )
-        plan = self.manager.plan_actions(config)
+        plan = self.manager.plan_actions(
+            config,
+            params=_plan_options_from_action_options(config, opts),
+        )
         actions = self.manager._filter_action_plan_items(
             plan.actions,
             action_filter=opts.action_filter,
@@ -173,6 +179,7 @@ class SubAgentActionService:
             created_at=time.time(),
         )
 
+
     # LLM: _append_action_apply_log 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
     # 函数用途: 写入动作应用log的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def _append_action_apply_log(self, record: ActionApplyRecord) -> None:
@@ -184,3 +191,14 @@ class SubAgentActionService:
     def _append_task_work_log(self, task: SubAgentTask, message: str) -> None:
         """Write apply progress to task's own WORK_LOG."""
         append_task_work_log(self.manager, task, message)
+
+
+# LLM: _plan_options_from_action_options carries dispatch scoping into action planning.
+# 函数用途: 让 action_apply 复用 due-check 的 root/exclude 边界，防止父级接管自己或别的任务树。
+def _plan_options_from_action_options(config: Any, opts: ActionApplyOptions) -> SubAgentPlanActionsOptions:
+    return SubAgentPlanActionsOptions(
+        config=config,
+        root_id=opts.root_id,
+        exclude_run_ids=list(opts.exclude_run_ids or []),
+        include_run_ids=list(opts.include_run_ids or []),
+    )

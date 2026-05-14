@@ -59,6 +59,12 @@ subagent_due_check_interval: 120
 # - 设为 0 表示不要求证据
 subagent_min_evidence_for_done: 1
 
+# 子代理连续恢复无进展的熔断次数
+# - runner_attempts 达到这个值且任务仍未完成时，父代理不再自动重试或扩容
+# - 会记录 no-progress fuse，要求父级/用户根据 refs 决定下一步
+# - 设为 0 表示关闭这个熔断
+subagent_no_progress_attempt_limit: 4
+
 # 子代理一次请求里最多列多少条“已尝试”
 # - 设为 0 表示不限制
 capability_request_max_tried_items: 0

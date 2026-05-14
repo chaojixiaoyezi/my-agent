@@ -677,7 +677,7 @@ my-agent memory-resume --from-compact <apply_id> --context-only
 - 新增 `compact_suggest.py`，根据累计 token、上下文窗口和 dry-run plan 生成 `compact_suggestion`。
 - `run` 结果新增 `memory_compact_suggested/status/ratio/message/commands` 字段；CLI 只在达到建议阈值时打印提示。
 - 提示会给出 `memory-compact --dry-run`、`memory-compact --apply` 和 `memory-resume --from-compact <apply_id> --context-only` 命令，但 `automatic_action=none`。
-- 当前默认上下文窗口来自 `memory_compact_context_window_tokens`；未设置时用 `max_tokens * 16` 且不低于 8192 的保守估计，后续接真实模型 context window 时只替换这一层。
+- 当前默认上下文窗口来自 `memory_compact_context_window_tokens`；为 `0` 或未设置时用 `max_tokens * 16` 且不低于 8192 的保守估计，后续接真实模型 context window 时只替换这一层。
 - `owner_type/owner_id` 会继续透传给 compact resume；子代理 owner 当前只解析 refs，不触碰 subagent runner，也不自动做子代理会话压缩。
 
 ### Step 4：自动 compact/resume
@@ -708,8 +708,12 @@ my-agent memory-resume --from-compact <apply_id> --context-only
 - action guard 和 auto cycle 都显式写 `automatic_tool_execution=none`：这一步只给出 go/no-go 机器判断，本身不运行工具或修改代码。
 - 新增 `compact_auto.py`，提供 `run_memory_compact_auto_cycle()`：默认 `allow_apply=false` 时只返回 compact 建议和 `needs_user_confirmation`，不会写 apply 产物。
 - 显式 `allow_apply=true` 时，auto cycle 执行非破坏性 apply 和 `resume_mode=auto` 的 action guard 检查；如果字段不完整会停在 `blocked_after_action_guard`。
-- `SimpleAgent.run()` 收尾已经接入 auto cycle 的默认 plan-only 分支；达到 compact 阈值时，CLI 会显示 `compact_suggestion` 和 `compact_auto`。当配置 `memory_compact_auto_allow_apply=true` 且 guard 放行时，主 agent 会把 `compact_continue_packet` 注入下一轮 prompt 并受控续跑一次；续跑轮跳过再次 compact，防止循环。
-- `compact_subagent_owner.py` 已接入 `memory-resume --from-compact`：指定 `subagent_run` / `subagent_session` owner 后，会返回 `linked_run_workspace`、`legacy_only` 或 `owner_refs_not_found` 状态，以及 task-local refs；当前仍不自动执行工具、不改 runner、不污染主 memory。
+- `SimpleAgent.run()` 收尾已经接入 auto cycle 的默认 plan-only 分支；达到 compact 阈值时，CLI 会显示 `compact_suggestion` 和 `compact_auto`。当配置 `memory_compact_auto_allow_apply=true` 且 guard 放行时，主 agent 会把 `compact_continue_packet` 注入下一轮 prompt 并受控续跑。
+- 自动续跑次数由 `memory_compact_auto_continue_max_depth` 控制；默认 `1` 保守续跑一次，长任务或 E2E 可调高。每一轮都必须重新通过 work-state/self-check/refs/action guard，不会因为上一轮通过就无限继续。
+- 自动 compact 在没有显式 request id 的 CLI run 中，会使用当前真实 per-run request id 写入 scope；后续打开 shared raw/hook JSONL 时会再次按 `session_id/request_id/run_id/task_id` 过滤，避免旧任务事实污染新 compact。
+- `# Compact Auto Continuation` 注入里的显式 `Acceptance`、`Constraints`、`Latest Tests` 会被 runtime fact source 读取；这样第二轮、第三轮 compact 仍能继承已确认工作状态，而不是从恢复提示里丢字段。
+- `compact_subagent_owner.py` 已接入 `memory-resume --from-compact`：指定 `subagent_run` / `subagent_session` owner 后，会返回 `linked_run_workspace`、`legacy_only` 或 `owner_refs_not_found` 状态，以及 task-local refs；它会使用配置里的 `subagent_workspace`，并把 owner id 当作字面路径段处理。
+- 子代理 owner resume 的 `recommended_read_paths` 只推荐 agent-run workspace 内的 `latest_continue_packet.json`、checkpoint、summary、task、timeline、findings 等 refs；当前仍不自动执行工具、不改 runner、不污染主 memory。
 - 当前仍不会自动继续工具调用或代码修改；这一步只是把“提示、可选 apply、恢复、自检、停住”的无人值守安全骨架做出来。
 
 这条顺序先让风险可见，再让数据可恢复，再让用户确认流程顺滑，最后才做真正自动化。

@@ -38,6 +38,7 @@ class SubAgentManagerInitParams:
     role_template_dirs: list[str | Path] | None = None
     enable_self_learning: bool = False
     debug_trace_level: int = 0
+    takeover_chain_max_depth: int = 2
 
 
 # LLM: SubAgentBaseMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
@@ -74,6 +75,7 @@ class SubAgentBaseMixin:
         self.role_template_dirs = _normalized_template_dirs(self.workspace_root, params.role_template_dirs)
         self.enable_self_learning = bool(params.enable_self_learning)
         self.debug_trace_level = _normalize_debug_trace_level(params.debug_trace_level)
+        self.takeover_chain_max_depth = max(0, int(params.takeover_chain_max_depth or 0))
 
         from .services.base import SubAgentBaseService
         from .services.lifecycle import SubAgentLifecycleService

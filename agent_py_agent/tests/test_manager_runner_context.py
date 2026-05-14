@@ -394,6 +394,31 @@ def test_build_execution_context_exposes_controlled_exec_grant_refs(mock_manager
     assert context.write_boundary["controlled_exec_grants"] == context.controlled_exec_grants
 
 
+# LLM: filesystem grants must affect the actual write boundary, not only the audit grant list.
+# 函数用途: 验证父级批准 write_file 路径后，runner context 的 allowed_write_roots 会包含 grant.path_scope。
+def test_build_execution_context_adds_filesystem_grant_path_scope_to_write_roots(mock_manager, tmp_path):
+    sample_task = make_task(tmp_path)
+    build_dir = tmp_path / "deliverables" / "build"
+    grant = CapabilityGrant(
+        id="grant-write-1",
+        request_id="req-write-1",
+        grant_to_run_id="run-456",
+        grant_type="tool",
+        tools=["write_file", "append_file"],
+        path_scope=[str(build_dir)],
+        reason="允许接管 run 继续写产物目录",
+        constraints={},
+        expires_after_task=True,
+        created_at=123456.0,
+    )
+    sample_task.capability_grants = [grant]
+    mock_manager._tasks[sample_task.id] = sample_task
+
+    context = mock_manager.build_execution_context(sample_task.id)
+
+    assert str(build_dir) in context.write_boundary["allowed_write_roots"]
+
+
 def test_build_execution_context_multiple_grants(mock_manager, tmp_path):
     """测试多条授权记录。"""
     sample_task = make_task(tmp_path)

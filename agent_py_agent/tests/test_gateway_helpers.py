@@ -65,6 +65,31 @@ class TestPostJson:
         with pytest.raises(RuntimeError, match="HTTP 401"):
             post_json(_request(api_key="bad-key"))
 
+    @patch("agent_py_agent.agent.backends.gateway_helpers.time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_retryable_http_error_retries_before_wrapping(self, mock_urlopen, mock_sleep):
+        """验证模型服务临时过载时会短暂重试，而不是一次 529 直接打断长任务。"""
+        from io import BytesIO
+
+        first = urllib.error.HTTPError(
+            "https://api.example.com",
+            529,
+            "Overloaded",
+            {"Content-Type": "application/json"},
+            BytesIO(b'{"error": "overloaded"}'),
+        )
+        second = MagicMock()
+        second.read.return_value = json.dumps({"content": "after retry"}).encode()
+        second.__enter__ = MagicMock(return_value=second)
+        second.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.side_effect = [first, second]
+
+        from agent_py_agent.agent.backends.gateway_helpers import post_json
+
+        assert post_json(_request()) == {"content": "after retry"}
+        assert mock_urlopen.call_count == 2
+        mock_sleep.assert_called_once()
+
     @patch("urllib.request.urlopen")
     def test_url_error_is_wrapped_with_endpoint_hint(self, mock_urlopen):
         """验证 DNS/网络错误被包装成可读提示。"""

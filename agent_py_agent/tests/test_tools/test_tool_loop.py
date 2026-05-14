@@ -59,6 +59,31 @@ class _BlockedScheduleTools:
         )
 
 
+# LLM: _DispatchThenQualityBackend proves explicit QA role requirements must return control to the model.
+# 函数用途: 第一次要求 dispatch，第二次给最终文本；若系统本地提前收口就不会发生第二次调用。
+class _DispatchThenQualityBackend:
+    name = "fake_dispatch_then_quality_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    '{"tool":"dispatch_subagents","apply":true,"execute_runners":false,"no_probe":true}\n'
+                    "[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        return ModelResponse(
+            text="继续创建 tester 和 acceptor 子代理，不能只因 worker 验收通过就收口。",
+            backend=self.name,
+        )
+
+
 # LLM: _UnlimitedRoundsBackend proves max_tool_rounds=0 disables only the round cap, not normal tool execution.
 # 类用途: 测试专用后端；前两轮都请求读取文件，第三轮自行收口，用来验证 0 表示不限制。
 class _UnlimitedRoundsBackend:
@@ -473,6 +498,28 @@ def test_completed_dispatch_closes_without_extra_model_call():
         assert result.tool_rounds == 1
         assert "未再发起额外模型请求" in result.response
         assert task.id in result.response
+
+
+# LLM: explicit QA/acceptor instructions must override deterministic one-worker closeout.
+# 函数用途: 用户要求 worker 完成后继续创建测试/验收角色时，主循环不能因为已有 worker DONE/VERIFIED 就本地收口。
+def test_completed_dispatch_does_not_close_when_prompt_requires_quality_roles():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            subagent_workspace="subs",
+            max_tool_rounds=4,
+        )
+        agent = SimpleAgent(cfg, workspace)
+        _done_verified_task(agent)
+        agent.backend = _DispatchThenQualityBackend()
+
+        result = agent.run("worker 完成后必须继续创建 tester 和 acceptor 做测试验收", save=False)
+
+        assert agent.backend.calls == 2
+        assert "继续创建 tester 和 acceptor" in result.response
+        assert "未再发起额外模型请求" not in result.response
 
 
 # LLM: _done_verified_task creates a traceable finished subagent for top-level closeout tests.

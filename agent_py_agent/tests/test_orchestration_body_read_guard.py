@@ -34,6 +34,19 @@ def _agent(tasks):
     )
 
 
+# LLM: _top_level_agent models the CLI root that has delegated children but is not itself a subagent run.
+# 函数用途: 构造无 current_subagent_run_id 的 fake agent，覆盖真实 E2E root 只能读 refs/报告的场景。
+def _top_level_agent(tasks):
+    return SimpleNamespace(
+        root="/tmp/workspace",
+        _current_subagent_run_id="",
+        subagents=SimpleNamespace(
+            load=lambda run_id: tasks[run_id],
+            list_runs=lambda: list(tasks.values()),
+        ),
+    )
+
+
 # LLM: read_file body guard test captures the user's refs-only parent rule.
 # 函数用途: 父级已有下级且验收代理未完成时，读取业务产物正文会被阻断。
 def test_delegating_parent_cannot_read_product_body_before_acceptor_done():
@@ -77,6 +90,57 @@ def test_delegating_parent_can_read_own_task_output_metadata_before_acceptor_don
             agent=_agent(tasks),
             user_prompt="请让子代理先做，最后按验收标准收口。",
             payload={"tool": "read_file", "path": "/tmp/runtime/subagents/root/output.json"},
+        )
+    )
+
+    assert result is None
+
+
+# LLM: task-local compact packets are recovery control-plane refs, not product body reads.
+# 函数用途: 父级恢复自己时必须能读 latest_continue_packet/checkpoint/summary，否则 packet-first 接续会被 guard 卡住。
+def test_delegating_parent_can_read_own_task_local_continue_packet_before_acceptor_done():
+    tasks = {"root": _task("root", identity="coordinator", children=["worker"]), "worker": _task("worker")}
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_agent(tasks),
+            user_prompt="请从 latest_continue_packet 接着跑。",
+            payload={
+                "tool": "read_file",
+                "path": (
+                    "/tmp/runtime/subagents/tasks/root/agents/root/"
+                    "compactions/latest_continue_packet.json"
+                ),
+            },
+        )
+    )
+
+    assert result is None
+
+
+# LLM: Child task metadata must be visible to a parent that is trying to recover or close a delegated run.
+# 函数用途: 防止父级 refs-only 状态下连子代理 output/status 也读不到，从而卡在恢复/验收循环里。
+def test_delegating_parent_can_read_child_task_output_metadata_before_acceptor_done():
+    tasks = {"root": _task("root", identity="coordinator", children=["worker"]), "worker": _task("worker")}
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_agent(tasks),
+            user_prompt="请让子代理先做，最后按验收标准收口。",
+            payload={"tool": "read_file", "path": "/tmp/runtime/subagents/worker/output.json"},
+        )
+    )
+
+    assert result is None
+
+
+# LLM: Dispatch report JSON is a refs-only orchestration summary, not product body text.
+# 函数用途: 父级恢复时可以读取 subagent_dispatch_report，避免因看不到调度摘要而重复创建 repair。
+def test_delegating_parent_can_read_subagent_dispatch_report_before_acceptor_done():
+    tasks = {"root": _task("root", identity="coordinator", children=["worker"]), "worker": _task("worker")}
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_agent(tasks),
+            user_prompt="请让子代理先做，最后按验收标准收口。",
+            payload={"tool": "read_file", "path": "/tmp/workspace/_runtime/subagents/subagent_dispatch_report.json"},
         )
     )
 
@@ -169,3 +233,41 @@ def test_generic_acceptance_criteria_does_not_authorize_parent_body_read():
 
     assert result is not None
     assert "delegating_body_read_blocked" in result.output
+
+
+# LLM: top-level CLI roots also need refs-only protection after delegation starts.
+# 函数用途: root 不是 subagent run 时，只要当前提示明确要求“只调度下级、只读 refs/报告”，验收前也不能读产物正文。
+def test_top_level_refs_only_root_cannot_read_product_body_before_acceptor_done():
+    tasks = {
+        "worker": _task("worker", identity="worker", done=True),
+        "tester": _task("tester", identity="tester", done=True),
+    }
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_top_level_agent(tasks),
+            user_prompt="root 只能创建和调度下级，并读 refs/报告；不要直接读取业务产物正文。",
+            payload={"tool": "read_file", "path": "/tmp/workspace/deliverables/index.html"},
+        )
+    )
+
+    assert result is not None
+    assert "delegating_body_read_blocked" in result.output
+
+
+# LLM: top-level refs-only protection unlocks after a real acceptor has completed.
+# 函数用途: 最终验收子代理 DONE/VERIFIED 后，root 才能进入最后读正文核查阶段。
+def test_top_level_refs_only_root_can_read_product_body_after_acceptor_done():
+    tasks = {
+        "worker": _task("worker", identity="worker", done=True),
+        "tester": _task("tester", identity="tester", done=True),
+        "acceptor": _task("acceptor", identity=("acceptor", "小傻妞-验收"), done=True),
+    }
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_top_level_agent(tasks),
+            user_prompt="root 只能创建和调度下级，并读 refs/报告；不要直接读取业务产物正文。",
+            payload={"tool": "read_file", "path": "/tmp/workspace/deliverables/index.html"},
+        )
+    )
+
+    assert result is None

@@ -39,6 +39,9 @@ class ActionApplyRecordParams:
     take_over_by: str | None
     locked_files: list[str] | None
     limit: int
+    root_id: str = ""
+    include_run_ids: list[str] | None = None
+    exclude_run_ids: list[str] | None = None
 
 
 # LLM: CapabilityRouteRecordParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

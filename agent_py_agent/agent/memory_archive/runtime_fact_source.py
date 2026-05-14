@@ -24,6 +24,7 @@ class RuntimeFactSourceRequest:
     status: str
     next_actions: list[str]
     archive_tool_calls: list[Any]
+    runtime_injections: tuple[str, ...] = ()
 
 
 # LLM: ApprovedRuntimeFactSourceRequest carries user-approved compact completion facts without parsing prose.
@@ -67,7 +68,7 @@ def write_approved_runtime_fact_source(request: ApprovedRuntimeFactSourceRequest
 # LLM: _runtime_fact_payload keeps explicit user-authored fields separate from run status fields.
 # 函数用途: 生成 task.json；验收/约束只来自明确标题或标签，测试来自明确测试条目或实际工具命令。
 def _runtime_fact_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
-    sections = _explicit_sections(request.user_prompt)
+    sections = _explicit_sections(_fact_source_text(request))
     latest_tests = _dedupe([*sections.tests, *_tool_test_items(request.archive_tool_calls)])
     return {
         "version": 1,
@@ -84,6 +85,25 @@ def _runtime_fact_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
             "response_present": bool(request.response_text.strip()),
         },
     }
+
+
+# LLM: _fact_source_text includes compact auto continuation facts without parsing unrelated home prompts.
+# 函数用途: 合并用户原始 prompt 和受控 compact 续跑注入块，让多次 compact 不丢验收/约束/测试字段。
+def _fact_source_text(request: RuntimeFactSourceRequest) -> str:
+    continuation_blocks = [
+        text for text in _runtime_injection_texts(request.runtime_injections) if "# Compact Auto Continuation" in text
+    ]
+    return "\n\n".join([request.user_prompt, *continuation_blocks])
+
+
+# LLM: _runtime_injection_texts tolerates old callers that accidentally pass one string instead of a tuple.
+# 函数用途: 将 runtime injections 规整成字符串列表，供 compact continuation 事实源解析。
+def _runtime_injection_texts(value: tuple[str, ...] | list[str] | str) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if str(item)]
+    return []
 
 
 # LLM: _approved_fact_payload keeps manual completion facts auditable and schema-compatible with task.json readers.
@@ -128,6 +148,8 @@ def _explicit_sections(text: str) -> _ExplicitSections:
             active = label
             buckets[label].extend(_inline_items(inline))
             continue
+        if active and _is_section_metadata_line(line):
+            continue
         if _looks_like_unmatched_heading(line):
             active = ""
             continue
@@ -140,19 +162,43 @@ def _explicit_sections(text: str) -> _ExplicitSections:
     )
 
 
+# LLM: _is_section_metadata_line skips status/source metadata inside generated fact sections.
+# 函数用途: 让 `Status: recorded` 这类说明不打断 Latest Tests 下方的真实测试 bullet。
+def _is_section_metadata_line(line: str) -> bool:
+    text = line.strip().lower()
+    return bool(re.match(r"^(status|source_status|source paths?|source_paths)\s*[:：]", text))
+
+
 # LLM: _section_heading recognizes explicit Chinese/English section labels with optional inline content.
 # 函数用途: 判断一行是否是验收、约束或测试标题，并返回标题后的内联条目。
 def _section_heading(line: str) -> tuple[str, str]:
     text = line.strip().lstrip("-*# ").strip()
     match = re.match(r"^(验收条件|验收|acceptance|constraints?|约束|限制|tests?|测试|最近测试)\s*[:：]\s*(.*)$", text, re.I)
     if not match:
-        return "", ""
+        return _markdown_section_heading(line, text)
     return _label_key(match.group(1)), match.group(2).strip()
+
+
+# LLM: _markdown_section_heading recognizes generated compact continuation headings without colons.
+# 函数用途: 支持 `## Acceptance` / `## Constraints` / `## Latest Tests` 这类受控注入块事实源。
+def _markdown_section_heading(line: str, text: str) -> tuple[str, str]:
+    if not line.strip().startswith("#"):
+        return "", ""
+    lowered = text.lower()
+    if lowered in {"acceptance", "验收", "验收条件"}:
+        return "acceptance", ""
+    if lowered in {"constraints", "constraint", "约束", "限制"}:
+        return "constraints", ""
+    if lowered in {"latest tests", "tests", "test", "最近测试", "测试"}:
+        return "tests", ""
+    return "", ""
 
 
 # LLM: _looks_like_unmatched_heading prevents unrelated labeled sections from leaking into active fact buckets.
 # 函数用途: 识别未知标题或标签行，一旦出现就停止继续收集上一段验收/约束/测试事实。
 def _looks_like_unmatched_heading(line: str) -> bool:
+    if line.strip().startswith("#"):
+        return True
     text = line.strip().lstrip("-*# ").strip()
     if not text:
         return False

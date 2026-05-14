@@ -100,6 +100,102 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Stage7 R34：购物站 10 个文件真实落到用户产物目录，但 root/部分 child 的 `output.json` 缺 evidence packet，导致严格验收失败；同时 dispatch 工具缺少“只剩重复记账，不要再调度”的明确提示。现在 output.json 自动收口会从已存在报告/产物路径补最小证据包，dispatch_subagents 会返回 `dispatch_terminal` 让父模型停下来汇报 blockers。
 - Stage7 R63-R67：QA 自动补派曾让 tester / bug_finder / acceptor 在空 build 上提前空转。现在系统只保留“空产物不准 QA”等红线，并把缺失 QA 角色、候选 child spec 和下一步提示写成 `quality_advice` 交给 LLM 选择；R66 进一步发现 root 可能只写“下一步应该派工”但没真正创建 child，已增加 `needs_child_creation` 收尾红线，后续要真实复测它是否会继续 schedule。
 
+## 2026-05-14 Recovery Case 02: Takeover Run 接管同一任务目录
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code/recovery_cases/case02_takeover_run`
+  - Config: `/Users/xiaoyezi/my-claude-code/recovery_cases/case02_takeover_run/e2e_agent_config.yaml`
+  - Model backend: `anthropic_compatible`
+  - Model name: `MiniMax-M2.7`
+  - Real execution mode: 外层只执行 root runner，root 通过 `schedule_child_subagents` / `dispatch_subagents` 创建和推进下级。
+  - Fault injection: `runner_timeout_by_role.worker=1`，故意让普通 worker 1 秒超时；`runner_timeout_by_role.takeover=120`，接管 run 有更长预算。
+
+### Result: Timeout 后 takeover run 能接管并写产物
+
+- Observed behavior:
+  - Root run: `subagent-1778717885-a196949f`
+  - Original worker: `subagent-1778717942-330ea5f4`
+  - Takeover worker: `subagent-1778717973-271052ec`
+  - 原 worker 按测试配置 1 秒超时，状态变成 `TAKEN_OVER`，`takeover_by=subagent-1778717973-271052ec`。
+  - takeover worker 继承了原 worker 的 task refs、artifact refs 和业务写目录 `/Users/xiaoyezi/my-claude-code/recovery_cases/case02_takeover_run/deliverables/build`。
+  - takeover worker 写出：
+    - `/Users/xiaoyezi/my-claude-code/recovery_cases/case02_takeover_run/deliverables/build/README.md`
+    - `/Users/xiaoyezi/my-claude-code/recovery_cases/case02_takeover_run/deliverables/build/demo.py`
+  - takeover worker 最终状态为 `DONE / VERIFIED`。
+  - root 的结果摘要写明：创建 1 个 worker -> 故意 timeout -> 系统创建 takeover run -> takeover run 完成并写入产物。
+- 中文解释:
+  - 这条测试不是在测“正常任务应该 1 秒超时”，而是故意把普通 worker 调得很短，用来制造真实失败。
+  - 目标是确认：孩子挂掉后，父级能发现、创建接管者、接管者能拿到原任务现场和产物目录，然后继续完成任务。
+
+### Finding 31: 模型会把故障注入 timeout 误解释成配置错误
+
+- Symptom:
+  - 原 worker 的失败分析里写了“用户提供参数是 120 秒但实际 1 秒”，认为是 `timeout_misconfig`。
+- Root cause:
+  - 真实测试配置同时存在 `worker=1` 和 `takeover=120`。
+  - 1 秒是普通 worker 的故障注入预算，120 秒是 takeover 的恢复预算。
+  - 模型只看到了失败信息和恢复指令，容易把两类角色预算混在一起解释。
+- Fix:
+  - 产品代码不依赖模型自述判断是否配置错误；真实判断以 `runner_timeout_by_role`、dispatch log 和 task role 为准。
+  - 本记录明确标注：`runner timed out after 1.00s` 在本 case 中是预期故障注入。
+- Status: documented.
+- Remaining risk:
+  - 后续调试 UI/日志需要把“角色级 timeout”显示得更清楚，避免用户或模型把故障注入误看成产品 bug。
+
+### Finding 32: capability grant 只写审计记录，没有进入文件写边界
+
+- Symptom:
+  - takeover run 能收到 `GRANTED` capability grant，但实际 `write_file` 仍认为目标目录不在 `allowed_write_roots`。
+  - 结果是“纸面授权成功，工具层仍不让写”，任务卡在 `permission_blocked`。
+- Root cause:
+  - `grant.path_scope` 被写进了 `capability_grants` 审计记录。
+  - runner execution context 的 `write_boundary.allowed_write_roots` 没有把文件写工具 grant 的 `path_scope` 合进去。
+- Fix:
+  - 在 `agent_py_agent/agent/subagents/manager_runner_context.py` 中新增 `_granted_filesystem_write_roots()`。
+  - 只有明确带 `write_file` / `append_file` / `replace_in_file` 的 grant 才会把 `path_scope` 合入普通文件写边界。
+  - shell grant 仍然只走 `controlled_exec`，不会混进普通写文件权限。
+- Verification:
+  - `python3 -m pytest agent_py_agent/tests/test_manager_runner_context.py::test_build_execution_context_adds_filesystem_grant_path_scope_to_write_roots -q`
+- Status: solved.
+
+### Finding 33: takeover run 没继承还没创建的业务产物目录
+
+- Symptom:
+  - 原 worker 的 `allowed_write_roots` 包含 `/deliverables/build`。
+  - takeover run 一开始只继承了 runtime/task/artifact/shared 目录，没有继承业务产物目录。
+  - 原因是继承函数只保留“已经存在的目录”，但 `write_file` 本来应该能自动创建父目录。
+- Root cause:
+  - `_takeover_write_roots()` 把所有候选路径交给 `_existing_dirs()` 过滤。
+  - 对“父级明确授权但尚未创建”的业务目录来说，这个过滤过于严格。
+- Fix:
+  - takeover 会保留原 run 的显式 `allowed_write_roots`，即使目录暂时不存在。
+  - runtime/task/artifact/shared 这类系统目录仍然用 existing-dir 过滤。
+- Verification:
+  - `python3 -m pytest agent_py_agent/tests/test_subagent_takeover_run.py::test_takeover_run_inherits_source_product_write_roots -q`
+  - 真实 root-only E2E 复测：takeover run 写出 `README.md` 和 `demo.py`，并变成 `DONE / VERIFIED`。
+- Status: solved.
+
+### Finding 34: 旧快照可能重复创建 takeover run
+
+- Symptom:
+  - 早期复测中，原 worker 已被 `TAKEN_OVER` 后，旧 runner/旧父级快照仍可能把原 run 当成 `TIMEOUT`，导致重复创建 takeover。
+- Root cause:
+  - 幂等检查只看 source 上的 `takeover_by`。
+  - 当旧快照丢了 `takeover_by` 时，系统没有通过已有 takeover 的 `attributes.takeover_source_run_id` 反查。
+- Fix:
+  - takeover 创建时会先扫描已有 run 的 `takeover_source_run_id`。
+  - persistence 保存时会保护已经落盘的 `TAKEN_OVER` / `takeover_by` 状态。
+  - 旧 runner 结果返回时，如果源 run 已被接管，会被忽略，不再覆盖状态。
+- Verification:
+  - `python3 -m pytest agent_py_agent/tests/test_subagent_takeover_run.py -q`
+- Status: solved.
+
+### Remaining Gap After Case 02
+
+- root 自身完成后仍是 `AWAITING_ACCEPTANCE / NEEDS_ACCEPTANCE`，需要后续父级最终验收链继续收口。
+- 模型会写出“timeout_misconfig”这类错误自诊断，后续日志/提示词应明确区分“故障注入预算”和“恢复预算”。
+- 后续专项 4 要继续测试 coordinator 挂掉后的子树 leader 接管，而不是只测试单个 leaf worker 的 takeover。
+
 ## 2026-05-09 Real 3-Subagent Parallel E2E
 
 - Test scene:
@@ -4926,3 +5022,534 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Real failure/takeover was not covered by R87; that is the next专项恢复测试 set.
 - Next:
   - Run the 12 recovery and compact专项 tests with the same root-only observer rule: parent packet continuation, packet-first dispatch, takeover, leader recovery, batch failure recovery, fallback refs, no-progress fuse, four-layer recovery, shopping-site recovery closeout, task-local compact refs, and repeated compact continuation.
+
+### Result: case01 Packet-First Parent Recovery Takeover
+
+- Discovered at: 2026-05-14 during recovery专项 1.
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code/recovery_cases/case01_packet_failure`.
+  - Root run: `subagent-1778692121-cd812563`.
+  - The outer observer only prompted root; root read control-plane refs and called `dispatch_subagents` itself.
+- Observed behavior:
+  - Root runner prompts exposed task-local `compactions/latest_continue_packet.json`, checkpoint, summary and workspace refs.
+  - A real interrupted/timeout runner could continue from packet/checkpoint facts instead of starting from the original user goal.
+  - `dispatch_subagents(apply=true)` successfully marked three stale repair children as `TAKEN_OVER` by the current root run.
+  - A short follow-up run read `latest_continue_packet.json` successfully and then ran control-plane dispatch without listing root itself for takeover.
+- 中文解释：
+  - 这轮确认了“父级半路挂了还能拿 packet 接着跑”的关键路径。packet 是任务本地的小交接包，不是主代理长期 memory，也不是业务正文。
+  - 大白话：root 摔了一跤后，醒来先看自己的交接纸条，再处理失联孩子，而不是重新猜一遍任务。
+- Fixes made from this run:
+  - Runner-context `dispatch_subagents` now defaults missing `take_over_by` to the active parent run id; explicit `take_over_by` still wins for future leader handoff.
+  - Dry-run recovery previews now return an exact `suggested_tool_call` with `apply=true`, `execute_runners=false`, and `max_runners=0`, so the parent can write recovery state without spawning duplicate repair workers.
+  - Body-read guard now allows task-local recovery/control-plane refs such as `latest_continue_packet.json`, `checkpoint.json`, `summary.md`, and compact ledgers while still blocking business artifact bodies.
+  - Due-check/action-apply now support `exclude_run_ids`; runner-context dispatch excludes the active parent run so a stale heartbeat cannot make root “take over itself.”
+  - Required-file parsing no longer treats `latest_continue_packet.json` mentioned in recovery instructions as a user deliverable.
+  - Static-site validation now follows local external scripts for button handlers and catches JS references to missing DOM ids.
+  - Active repair sibling detection blocks duplicate repair workers even when the model renames the repair child.
+- Verification:
+  - Real logs under `case01_packet_failure/*_run.log` and debug traces show packet read, takeover writes, and no self-takeover after the fix.
+  - Focused tests cover takeover defaults, dry-run recovery suggested calls, task-local packet read allowance, active-parent exclusion, required-file parsing, static validator checks, and duplicate repair guards.
+- Remaining gap:
+  - Historical tester `subagent-1778692647-1e346a3f` still has conflicting state: report summary says tests passed, but task state is `BLOCKED/FAILED`. Dispatch now exposes it as the only blocker with `qa_repair_advice`; later shopping-site recovery tests should close the QA/repair/acceptance loop.
+- Next:
+  - Continue专项 2 and 3: verify `dispatch_subagents` chooses latest packet before reinterpreting the task, and verify takeover runs reuse the same task directory/artifacts.
+
+### Result: case01 Packet-First Dispatch Rerun
+
+- Discovered at: 2026-05-14 during recovery专项 2.
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code/recovery_cases/case01_packet_failure`.
+  - Root run: `subagent-1778692121-cd812563`.
+  - Recovery target: blocked tester `subagent-1778692647-1e346a3f`.
+  - The outer observer only prompted root; root called `subagent_board` and `dispatch_subagents` itself.
+- Observed behavior before fix:
+  - `dispatch_subagents` exposed a valid `recovery_strategies[0].recommended_action=rerun_original_from_continue_packet`.
+  - The same payload also exposed `qa_repair_advice`, and `direct_children.next_action` pointed to `create_repair_child_from_qa_refs`.
+  - Root followed the repair lane and created/ran a repair worker instead of first rerunning the original tester from packet.
+  - A later exact `run_ids + runner_instruction` dispatch still only classified the blocked tester because runner candidate filtering excluded `BLOCKED` tasks without retryable failure types.
+- Fixes made:
+  - `direct_children.next_action` now prioritizes recovery over repair when both are present, and marks `repair_wave_deferred_by_recovery=true`.
+  - Large dispatch output summaries now include `recovery_action_counts` and a compact `recovery_strategy_preview`, so packet-first advice survives artifact externalization.
+  - Explicit `run_ids + latest_continue_packet/checkpoint runner_instruction` now allows `BLOCKED/FAILED` original runs to enter runner candidates; ordinary blocked runs remain protected from blind reruns.
+- Verification:
+  - Real rerun: root copied the packet-first `suggested_tool_call`, executed `dispatch_subagents(apply=true, execute_runners=true, run_ids=[subagent-1778692647-1e346a3f], runner_instruction=...)`.
+  - Dispatch report showed `runner execute_runner subagent-1778692647-1e346a3f BLOCKED -> AWAITING_ACCEPTANCE FAILED -> NEEDS_ACCEPTANCE`.
+  - Follow-up acceptance accepted the tester, and `run.json` now shows `status=AWAITING_ACCEPTANCE`, `verification_status=NEEDS_ACCEPTANCE`, `failure_type=""`, `runner_attempts=2`.
+  - Focused tests cover packet recovery beating QA repair, recovery strategy preview in live summaries, and blocked explicit packet rerun candidates.
+- 中文解释：
+  - 这轮确认了“有 packet 就先接着原 run 跑”，不会因为旁边有 QA repair 建议就先扩容新 worker。
+  - 大白话：孩子手里有一张能继续干活的纸条，就先把这个孩子叫醒继续干，不是马上再生一个孩子来替它。
+- Remaining gap:
+  - The tester’s historical acceptance review still contains old rejected text, but current task state and latest dispatch/acceptance report are updated. Later E2E should rely on current task state plus latest report, not stale old prose.
+- Next:
+  - Continue专项 3: verify a genuinely dead original run creates/reuses a takeover run while keeping the same task directory and artifacts refs.
+
+### Result: case02 Takeover Run Timeout Scope
+
+- Discovered at: 2026-05-14 during recovery专项 3.
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code/recovery_cases/case02_takeover_run`.
+  - Root run: `subagent-1778713909-b1d74ed3`.
+  - The outer observer only prompted root; root was expected to create and dispatch lower agents.
+- Observed behavior before fix:
+  - The temporary config used `runner_timeout_seconds: 8` to force a worker timeout.
+  - Direct `subagent-run --execute` on the root also inherited that 8-second wrapper timeout and returned `TIMEOUT` before it could schedule any child.
+- 中文解释：
+  - 大白话：我们本来想让 worker 短一点，故意测它挂了能不能接管；结果这个短绳子也套到了 root 脖子上，root 还没来得及派工就被砍掉。
+- Fix:
+  - Added `runner_timeout_by_role` so tests and production can keep `root` / `coordinator` long-running while setting a shorter timeout for `worker` / leaf runs.
+  - The field supports inline config such as `runner_timeout_by_role: {"root": "off", "coordinator": "off", "worker": 8}`.
+  - Follow-up fix: internal concrete roles such as `leaf_worker` and `repair_worker` now automatically match the user-facing `worker` timeout bucket.
+  - Follow-up fix: takeover runs now match a dedicated `takeover` timeout bucket before `worker`, so recovery can get a longer budget than the original failed worker.
+  - Follow-up fix: added `subagent_takeover_chain_max_depth`; when repeated takeover runs keep timing out, the current run becomes `BLOCKED/takeover_chain_exhausted` instead of creating an endless takeover chain.
+- Verification:
+  - Focused unit tests cover inline dict parsing, config load preservation, root timeout disabled by role, worker timeout bounded by role, `leaf_worker -> worker` aliasing, takeover timeout override, role-level `auto` dynamic timeout, takeover ref inheritance, idempotent takeover reuse, and takeover-chain exhaustion.
+- Next:
+  - Rerun case02 with root/coordinator `off` and worker `8`, then verify the original dead run creates a takeover run with inherited task_dir/artifact/checkpoint/packet refs.
+
+### Result: case02 Takeover Run Reused Task Directory And Artifacts
+
+- Discovered at: 2026-05-14 during recovery专项 3 retest.
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code/recovery_cases/case02_takeover_run`.
+  - Original worker: `subagent-1778717942-330ea5f4`.
+  - Takeover worker: `subagent-1778717973-271052ec`.
+  - Fault injection: `runner_timeout_by_role.worker=1` intentionally timed out the first worker; `runner_timeout_by_role.takeover=120` gave the takeover run a longer budget.
+- Observed behavior:
+  - Root created and dispatched the original worker through normal orchestration.
+  - The worker timed out after the injected one-second budget.
+  - The parent/control plane created a takeover run rather than repeatedly rerunning the same dead run.
+  - The takeover run inherited the same deliverables root and wrote `README.md` and `demo.py` under `/Users/xiaoyezi/my-claude-code/recovery_cases/case02_takeover_run/deliverables/build/`.
+- 中文解释：
+  - 大白话：原来的孩子半路挂了以后，不是让它原地无限重试，也不是换一个完全陌生的新目录重做；系统新建了一个接班孩子，接着同一个任务现场继续交付。
+- Fixes confirmed:
+  - Capability grants now add write roots only for write-like grants, avoiding read-only permissions accidentally widening write scope.
+  - Blocked-after-grant tasks can re-enter runner selection once the permission blocker is cleared.
+  - Takeover runs inherit explicit source write roots even if the target directory does not exist yet.
+- Verification:
+  - Focused tests covered execution-context write-root grants, blocked-after-grant runner candidates, and takeover write-root inheritance.
+  - Real output files existed under the same case deliverables directory after takeover completion.
+- Remaining gap:
+  - This case covered one failed worker. It did not cover coordinator subtree leadership handoff or multi-failure batch recovery.
+- Next:
+  - Continue专项 4: simulate a coordinator losing leadership while it still has child refs, then verify a sibling leader can adopt those children without the observer talking to children directly.
+
+### Result: case04 Coordinator Leadership Handoff
+
+- Discovered at: 2026-05-14 during recovery专项 4.
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code/recovery_cases/case04_recovery_handoff`.
+  - Total/root task: `subagent-1778719710-955189ec`.
+  - Old coordinator: `subagent-1778719726-cdc68dd3`.
+  - New leader: `subagent-1778719726-c2578b7b`.
+  - Leaf refs:
+    - `subagent-1778719748-ec8750fd` (`小小小傻妞-readme-ref`)
+    - `subagent-1778719748-22c8ca25` (`小小小傻妞-plan-ref`)
+  - The outer observer only prompted root. Root called `subagent_board`, `dispatch_subagents`, and read control-plane reports; it did not directly talk to leaf agents.
+- Observed behavior before fixes:
+  - A first attempt created two top-level coordinators as separate root trees. That shape is not a good leadership-recovery fixture because sibling leaders should be inside the same task tree.
+  - A same-root attempt exposed a real false takeover: a live parent coordinator was running nested child dispatch, but its own heartbeat was not refreshed by child/grandchild activity. Due-check treated the live parent as stale and created a takeover run.
+  - Another attempt showed `execute_runners=false` was easy for the model to misuse: root used it on the current coordinator, which meant the coordinator itself never ran, instead of meaning "run coordinator but do not run its leaf workers."
+- Fixes made:
+  - Runner stage trace now refreshes active ancestors' `heartbeat_at` / `updated_at` when descendants emit model/tool stage events, so live nested parents are not mistaken for stale coordinators.
+  - Runner-context dispatch excludes active ancestor run ids from due-check/action-apply sweeps, so a nested dispatch does not recover its own live parent.
+  - `dispatch_subagents` model-facing docs now expose and explain `take_over_by`, `locked_files`, and the precise meaning of `execute_runners`. The examples say that if the current coordinator must create child refs, the current coordinator dispatch needs `execute_runners=true`.
+- Final observed behavior:
+  - The fixture was cleaned so due-check had one target issue: `coordinator_heartbeat_stale` for old coordinator `subagent-1778719726-cdc68dd3`.
+  - Root called `dispatch_subagents` with `apply=true`, `execute_runners=false`, `take_over_by=subagent-1778719726-c2578b7b`, and the old coordinator run id.
+  - The action applied `recover_coordinator_leadership`.
+  - Old coordinator became `TAKEN_OVER`, `takeover_by=subagent-1778719726-c2578b7b`, and `child_ids=[]`.
+  - New leader gained `child_ids=['subagent-1778719748-ec8750fd', 'subagent-1778719748-22c8ca25']`.
+  - Both leaf refs now have `parent_id=subagent-1778719726-c2578b7b` and `final_owner=subagent-1778719726-c2578b7b`.
+- 中文解释：
+  - 大白话：旧小负责人挂了，但它手下两个孩子没有丢。root 自己发现这个失联负责人，指定同一棵树里的新负责人接班，然后系统把两个孩子从旧负责人名下搬到了新负责人名下。
+  - 这次不是我手动改孩子归属；我只做了故障注入和观察，真正接管动作由 root 调 `dispatch_subagents` 完成。
+- Extra real issue found:
+  - During the first retry, MiniMax returned `HTTP 529 overloaded_error`. The old backend would let one次服务端高峰直接中断 root run.
+  - Fix: gateway HTTP helpers now retry pre-response transient provider errors for `408/409/425/429/502/503/504/529` with bounded short backoff. Ordinary `500` and auth/schema errors still fail fast.
+- Verification:
+  - `test_runner_stage_trace_refreshes_active_ancestor_heartbeats`
+  - `test_nested_dispatch_excludes_active_ancestors`
+  - `test_dispatch_subagents_spec_documents_leadership_recovery_params`
+  - `test_retryable_http_error_retries_before_wrapping`
+  - `python3 -m pytest agent_py_agent/tests/test_gateway_helpers.py -q` -> `15 passed`.
+- Remaining gap:
+  - Root still spent many rounds reading tool-output artifacts and shelling out to inspect JSON after the action had already applied. The result is correct, but closeout is heavier than ideal.
+  - After handoff, the new leader is a parked planning coordinator. If it is not dispatched soon, due-check will later report it stale too. This is expected for an unexecuted leader, but the next test should dispatch it promptly or refresh its heartbeat intentionally.
+  - The fixture's leaf artifact paths still point into the old coordinator's agent workspace. Parent/final-owner recovery is correct, but a later leaf execution should prove the new leader can either use inherited paths safely or rewrite work roots before executing leaves.
+- Next:
+  - Continue专项 5: simulate multiple child failures at once and confirm the parent batches recovery without recursively spawning unlimited replacements.
+
+### Result: case05 Batch Timeout Recovery Did Not Expand Unboundedly
+
+- Discovered at: 2026-05-14 during recovery专项 5.
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code/recovery_cases/case05_batch_recovery`.
+  - Root-only setup run asked root to create four worker refs and not dispatch them.
+  - Worker refs:
+    - `subagent-1778721423-076fec4e`
+    - `subagent-1778721423-5132b274`
+    - `subagent-1778721423-841ead23`
+    - `subagent-1778721423-8c92efb1`
+  - Fault injection marked all four as `TIMEOUT / runner_timeout` with `channel_status=OK`.
+  - The outer observer did not create recovery runs manually; root called `dispatch_subagents` with the four run ids.
+- Observed behavior:
+  - Due-check reported exactly four `status_timeout` issues.
+  - Root called `dispatch_subagents(apply=true, execute_runners=false, max_runners=0, run_ids=[...])`.
+  - Action apply created exactly four takeover runs:
+    - `subagent-1778721537-aa8e9f15`
+    - `subagent-1778721537-869f22ed`
+    - `subagent-1778721537-2683e1dc`
+    - `subagent-1778721537-10665111`
+  - Each original run became `TAKEN_OVER` and points to one takeover run through `takeover_by` / `takeover_records`.
+  - Total run directories became 8: four originals plus four takeovers.
+  - Due-check returned `total_issues=0` immediately after recovery.
+- 中文解释：
+  - 大白话：四个孩子同时挂了以后，系统没有一个挂了生十个、十个又继续生更多；它很克制地给每个挂掉的孩子安排一个接班孩子，然后停在那里等下一步。
+- Verification:
+  - Control-plane inspection confirmed one takeover record per source run.
+  - `subagents --all` showed four `TAKEN_OVER` originals and four `PLANNING` takeover runs.
+  - `subagents-due-check --all` returned no remaining issues.
+- Extra real issue found:
+  - Root used `create_subagents` even though the prompt named four specific workers. The created tasks were top-level worker refs with empty `owner`, while root's natural-language summary invented the requested names.
+  - This does not break batch recovery, but it means `create_subagents(count=4)` is weaker than `schedule_child_subagents` for named hierarchy tests. Future hierarchy tests should require structured child specs or use the schedule tool.
+- Remaining gap:
+  - This case proves bounded batch takeover creation, not execution quality of those takeover runs.
+  - It also used four top-level worker refs, not children under one coordinator. The stricter parent/child version belongs in the four-layer recovery专项.
+- Next:
+  - Continue专项 6: corrupt, delete, or age `latest_continue_packet.json` and confirm recovery falls back to checkpoint/summary instead of reinterpreting the whole task from scratch.
+
+### Result: case06 Corrupt Continue Packet Fell Back To Checkpoint/Summary
+
+- Discovered at: 2026-05-14 during recovery专项 6.
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code/recovery_cases/case06_packet_fallback`.
+  - Config: `/Users/xiaoyezi/my-claude-code/recovery_cases/case06_packet_fallback/e2e_agent_config.yaml`.
+  - Root-only setup run created one worker and did not execute it:
+    - `subagent-1778723690-ddef02b1`.
+  - The outer observer only fault-injected the worker's task-local `latest_continue_packet.json` by making it invalid JSON, then asked root to dispatch that exact run id.
+- Observed behavior:
+  - Root called `dispatch_subagents(apply=true, execute_runners=true, max_runners=1, run_ids=["subagent-1778723690-ddef02b1"])`.
+  - Dispatch stayed scoped to the explicit run id; it did not pull unrelated stale/blocked runs from the same workspace.
+  - Due-check reported 0 issues, runner executed once, and parent acceptance passed.
+  - Runner prompt contained an explicit recovery preflight:
+    - `packet_status_before_prepare: corrupt`
+    - `fallback_to: checkpoint/summary/task-local refs`
+    - The preflight also explained that `prepare_runner_attempt` may regenerate `latest_continue_packet.json` after recording the damaged state.
+  - Worker wrote `/Users/xiaoyezi/my-claude-code/recovery_cases/case06_packet_fallback/deliverables/build/packet-fallback.proof`.
+- 中文解释：
+  - 大白话：恢复包坏了以后，系统没有装作没事，也没有重新从头理解任务；它先记下来“这个包坏过”，再让 worker 根据 checkpoint、summary、task 这些本地备份继续干活。
+- Verification:
+  - Proof content:
+    - `schema: proof-v1`
+    - `worker: packet-fallback-worker`
+    - `timestamp: 2026-05-15T12:29:14.518Z`
+    - `run_id: subagent-1778723690-ddef02b1`
+  - `SUBAGENT_DISPATCH.md` showed exactly three records: due-check scan, one runner execution, and acceptance pass.
+  - `runner_prompt.md` preserved the corrupt-packet preflight evidence and fallback refs.
+- Real issues found and fixed:
+  - Issue 1: `prepare_runner_attempt` rewrites `latest_continue_packet.json`, so a damaged packet could be self-healed before the runner prompt, losing the audit trail.
+    - Fix: record `runner_recovery_preflight` in task attributes before save regenerates packet files; expose it through context bundle reserved fields and render it in the task-local compact continuation prompt.
+    - Status: fixed and covered by focused tests.
+  - Issue 2: `dispatch_subagents(run_ids=[...])` previously scoped runner selection but not due-check/action-apply, so unrelated bad runs in the same workspace could still be swept into the same dispatch.
+    - Fix: propagate explicit include run ids through due-check and action-plan/action-apply scoping.
+    - Status: fixed and covered by focused tests.
+  - Issue 3: Reusing the older case05 workspace hid the signal because existing takeover-chain runs were already at `max_depth=2` and got blocked before runner fallback could execute.
+    - Fix: moved the packet fallback proof to a clean case06 workspace so the test measures the intended behavior.
+    - Status: test-method fix; no product-code change needed beyond the two fixes above.
+- Remaining gap:
+  - This case proves corrupt packet fallback. Missing packet and stale packet are covered by focused tests but still need separate real E2E runs if we want live-model proof for all three variants.
+- Next:
+  - Continue专项 7: verify repeated recovery failures trip the no-progress fuse instead of looping forever.
+
+### Result: case07 Repeated Recovery Trips No-Progress Fuse
+
+- Discovered at: 2026-05-14 during recovery专项 7.
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code/recovery_cases/case07_no_progress_fuse`.
+  - Config: `/Users/xiaoyezi/my-claude-code/recovery_cases/case07_no_progress_fuse/e2e_agent_config.yaml`.
+  - Root-only setup created one worker:
+    - `subagent-1778723959-bef4105e`.
+  - The outer observer only fault-injected the worker state to simulate repeated failed recovery:
+    - `status=FAILED`
+    - `verification_status=FAILED`
+    - `failure_type=runner_error`
+    - `runner_attempts=5`
+    - blocker: `repeated recovery produced no progress`
+  - Root was then asked to call exactly one `dispatch_subagents(apply=true, execute_runners=true, max_runners=1, run_ids=[...])`.
+- Observed behavior:
+  - Dispatch returned exactly two records: one due-check scan and one `action_apply/stop_no_progress_and_escalate`.
+  - `SUBAGENT_DISPATCH.md` summary included:
+    - `stop_no_progress_and_escalate: 1`
+    - `runner_created_children: 0`
+    - `applied: 1`
+  - The task stayed `FAILED` and did not spawn a runner or takeover child.
+  - The task was marked with `failure_type=no_progress_fuse`, `current_step=no-progress fuse tripped; waiting for parent/user decision`, and a Chinese blocker explaining that automatic retry/expansion has stopped.
+- 中文解释：
+  - 大白话：这个孩子已经连续救了好几次都没救回来。系统这次没有继续派新孩子硬冲，也没有无限扩容，而是明确写下“熔断了，先别自动重试，等父级/用户根据证据决定下一步”。
+- Real issue found and fixed:
+  - Issue: `recovery_strategy.py` already knew `runner_attempts` should trigger `stop_no_progress_and_escalate`, but due-check/action-plan/action-apply only surfaced a generic `status_failed -> inspect_failure`. Tool reports did stop runner creation, but did not explicitly say no-progress fuse.
+  - Fix:
+    - Added `subagent_no_progress_attempt_limit` to capability config.
+    - Due-check now reuses the recovery strategy and emits a `no_progress_fuse` issue before generic failed-status handling.
+    - Action planning maps that issue to `stop_no_progress_and_escalate`.
+    - Action apply records a task-local blocker/worklog and keeps status unchanged so the run does not look magically recovered.
+    - Dispatch no-progress accounting treats `stop_no_progress_and_escalate` as record-only, so repeated reports do not count as real progress.
+  - Status: fixed and covered by focused tests.
+- Verification:
+  - Focused tests:
+    - `python3 -m pytest agent_py_agent/tests/test_manager_board_class.py agent_py_agent/tests/test_manager_actions.py agent_py_agent/tests/test_policy_checks.py agent_py_agent/tests/test_subagent_policies.py agent_py_agent/tests/test_capability_config_class.py agent_py_agent/tests/test_capability_config.py -q` -> passed.
+    - `python3 -m pytest agent_py_agent/tests/test_subagent_compact_continuation.py agent_py_agent/tests/test_gateway_helpers.py agent_py_agent/tests/test_manager_board_class.py::TestDueCheck::test_due_check_can_scope_to_explicit_run_ids agent_py_agent/tests/test_manager_board_class.py::TestPlanActions::test_plan_actions_can_scope_to_explicit_run_ids agent_py_agent/tests/test_manager_board_class.py::TestDueCheck::test_due_check_reports_no_progress_fuse_before_generic_failure agent_py_agent/tests/test_manager_board_class.py::TestPlanActions::test_plan_actions_uses_no_progress_fuse_action agent_py_agent/tests/test_manager_actions.py::TestNoProgressFuseActionApply::test_apply_stop_no_progress_records_blocker_without_status_change -q` -> passed.
+    - `~/ai_claw/bin/ruff check ...` on touched files -> passed.
+  - Real root-only rerun:
+    - Root called the requested single dispatch.
+    - `SUBAGENT_DISPATCH.md` showed `action_apply/stop_no_progress_and_escalate`.
+    - `subagent_dispatch_report.json` showed no runner-created children.
+- Remaining gap:
+  - This case proves the single-run fuse. Four-layer fuse propagation still needs专项 8, especially when the stuck run is a middle coordinator rather than a leaf worker.
+- Next:
+  - Continue专项 8: four-layer recovery where an intermediate child/grandchild leader fails and a new leader must take over without the observer directly touching lower layers.
+
+### Result: case08 Four-Layer Dead Leader Handoff Uses Leadership Recovery
+
+- Discovered at: 2026-05-14 during recovery 专项 8.
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code/recovery_cases/case08_four_layer_recovery`.
+  - Root-only flow created a four-layer-ish chain:
+    - child coordinator: `subagent-1778725305-a9f9b0bb`
+    - old middle leader: `subagent-1778726011-9b301200`
+    - new middle leader: `subagent-1778725325-60f69eb4`
+    - leaf: `subagent-1778726165-aca031fb`
+  - The outer observer fault-injected only state, not child work:
+    - old middle leader `status=TIMEOUT`, `failure_type=runner_timeout`
+    - old middle leader kept `child_ids=["subagent-1778726165-aca031fb"]`
+    - leaf was put back under old middle leader before recovery.
+  - Root was asked to call exactly one scoped dispatch:
+    - `dispatch_subagents(apply=true, execute_runners=false, max_runners=0, run_ids=["subagent-1778726011-9b301200"], take_over_by="subagent-1778725325-60f69eb4")`
+- First observed failure before fix:
+  - Due-check surfaced ordinary timeout handling before leadership recovery.
+  - Action apply chose `takeover_or_reassign`, creating another takeover run `subagent-1778726692-b7012b1e`.
+  - Leaf did not move to the requested new leader.
+  - Root's natural-language report claimed handoff success, but `task.json` showed the child still belonged to the old failed leader.
+- 中文解释：
+  - 大白话：中间队长死了，正确做法是把它手下的孩子交给新队长；之前系统却把死队长当普通 worker，又造了一个新队长，结果孩子没有真正交过去。
+- Fix:
+  - Due-check now asks the recovery strategy first for dead coordinator/leader tasks with `child_ids`.
+  - It emits `coordinator_needs_leadership_recovery` before generic `status_timeout`.
+  - Policy maps that issue to `recover_coordinator_leadership` with higher priority than ordinary takeover.
+  - Generic `takeover_or_reassign` now refuses dead coordinator/leader tasks that still own children, so this class of mistake fails closed instead of spawning another empty takeover run.
+- Verification after fix:
+  - Root called the requested scoped dispatch.
+  - `SUBAGENT_DISPATCH.md` showed:
+    - `action_apply/recover_coordinator_leadership`
+    - message: `已把 coordinator 标记为接管，并将 1 个子任务交给 subagent-1778725325-60f69eb4。`
+    - `runner_created_children: 0`
+  - Final structured state:
+    - old leader `subagent-1778726011-9b301200`: `status=TAKEN_OVER`, `takeover_by=subagent-1778725325-60f69eb4`, `child_ids=[]`
+    - new leader `subagent-1778725325-60f69eb4`: `child_ids=["subagent-1778726165-aca031fb"]`
+    - leaf `subagent-1778726165-aca031fb`: `parent_id/supervisor/final_owner=subagent-1778725325-60f69eb4`
+- Focused tests:
+  - `python3 -m pytest agent_py_agent/tests/test_subagent_coordinator_due_check.py agent_py_agent/tests/test_policy_checks.py agent_py_agent/tests/test_manager_actions.py -q` -> `69 passed`.
+  - `~/ai_claw/bin/ruff check ...` on touched files -> passed.
+- Remaining gap:
+  - Root still read dispatch artifacts after the tool returned instead of trusting the structured tool summary. This is acceptable for verification, but production prompt templates should make root close out faster once `recover_coordinator_leadership` is confirmed.
+  - The current case proves handoff state. It does not yet prove the new leader continues QA/fix/acceptance work after recovery; that belongs to专项 9.
+- Next:
+  - Continue专项 9: real shopping-site E2E after recovery, including QA, repair, and acceptance closeout.
+
+### Finding: case09 Delegate-Only Shopping E2E Path Drift
+
+- Discovered at: 2026-05-14 during recovery 专项 9.
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code/recovery_cases/case09_shopping_recovery_e2e`.
+  - The outer observer only prompted root and watched logs/files.
+  - User contract required root to complete the shopping-site task through subagents, not by writing business files itself.
+- First observed behavior:
+  - Root created a builder worker for `/deliverables/shopping_site/build`.
+  - Two builder attempts hit provider timeout and left the real deliverables directory empty.
+  - Root then started to switch to “directly create the website” even though the prompt said it could not write the website itself.
+- Fix 1:
+  - Added the delegate-only direct-write guard.
+  - When the current user prompt explicitly says root/parent must use subagents, tool-loop preflight blocks root/parent `write_file`/`append_file`/`replace_in_file` and common shell write forms such as `cat >`, `echo >`, `tee`, `touch`, `cp`, `mv`, or Python `write_text`.
+  - Read-only shell commands and task/runtime report writes are still allowed.
+- Second observed behavior:
+  - Root no longer wrote files itself, but created a recovery writer with a vague goal like “在目标目录写 index.html” and no `extra_write_roots`.
+  - The writer then treated its own agent-run task directory as the target directory.
+  - Root almost accepted the task-local `index.html` as if the real deliverables directory had been completed.
+- 中文解释：
+  - 大白话：root 没有亲自写文件以后，又出了第二个真实问题：它派给新 worker 的时候把“真正应该写到哪里”说丢了。worker 看到“目标目录”，就把自己的小房间当目标目录写了，最后真正给用户看的产物目录还是空的。
+- Fix 2:
+  - `create_subagents` now rejects deliverable worker tasks that mention vague targets such as “目标目录/同一目录/当前目录/任务目录/产物目录/build 目录” while also naming deliverable files, unless the call includes `extra_write_roots` or a concrete path that can be extracted from the goal.
+  - Tool docs and examples now show that recovery/retry workers must preserve the absolute deliverables directory and pass it through `extra_write_roots`.
+- Verification:
+  - Focused tests:
+    - `python3 -m pytest agent_py_agent/tests/test_orchestration_direct_write_guard.py agent_py_agent/tests/test_orchestration_body_read_guard.py -q` -> passed.
+    - `python3 -m pytest agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_orchestration_tool_specs.py agent_py_agent/tests/test_orchestration_direct_write_guard.py -q` -> passed.
+    - `~/ai_claw/bin/ruff check agent_py_agent/agent/agent_core/orchestration_tools.py agent_py_agent/agent/agent_core/orchestration_tool_specs.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py` -> passed.
+- Remaining gap:
+  - The full shopping-site QA/repair/acceptance closeout must be rerun from a clean case09 workspace after both fixes.
+  - Recovery retry should prefer a small worker with `workflow_mode=off`; otherwise `workflow_mode=auto` can create extra produce/critic/repair children during a simple recovery step and make the tree harder to observe.
+- Next:
+  - Rerun case09 from a clean workspace and verify the real deliverables path, QA, repair, and acceptor chain all close without root directly writing product files.
+
+### Result: case09 Clean Rerun Reached Worker -> Tester -> Acceptor
+
+- Discovered at: 2026-05-14 during the clean rerun of recovery 专项 9.
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code/recovery_cases/case09_shopping_recovery_e2e`.
+  - Archived previous runtime/deliverables to `/Users/xiaoyezi/my-claude-code/recovery_cases/_archived_case09/20260514T125806-after-tester-semantic-fix`.
+  - Outer observer only launched the top-level root command; root created and dispatched all subagents.
+  - Product root: `/Users/xiaoyezi/my-claude-code/recovery_cases/case09_shopping_recovery_e2e/deliverables/shopping_site/build`.
+- Observed behavior after fixes:
+  - Worker `subagent-1778734727-eddaa071` wrote all seven required files to the real product root:
+    - `index.html`, `product.html`, `cart.html`, `checkout.html`, `register.html`, `login.html`, `styles.css`.
+  - Tester `subagent-1778735158-e18fd554` completed as `DONE / VERIFIED`.
+  - Acceptor `subagent-1778735334-76f4bf1a` completed as `DONE / VERIFIED`.
+  - Final structured state reported `done_verified=3`.
+  - Independent observer link/static checks found:
+    - all seven files exist,
+    - no missing local `href` / `src` refs,
+    - `styles.css` contains media queries,
+    - HTML files contain multiple `localStorage` references.
+- 中文解释：
+  - 大白话：这次 root 没有亲自写网站，worker 真正把网站写到了用户产物目录；tester 和 acceptor 也都被 root 创建并跑完了。之前 tester 找到问题就被系统当成失败的语义坑，这次没有复发。
+- Verification:
+  - Real run ended with:
+    - `total_runs: 3`
+    - `done_verified: 3`
+    - output refs for worker/tester/acceptor.
+  - Structured task state:
+    - worker: `DONE / VERIFIED`
+    - tester: `DONE / VERIFIED`
+    - acceptor: `DONE / VERIFIED`
+  - Focused tests after the semantic fix:
+    - `python3 -m pytest agent_py_agent/tests/test_manager_acceptance.py agent_py_agent/tests/test_manager_acceptance_output_findings.py -q` -> passed.
+    - `~/ai_claw/bin/ruff check agent_py_agent/agent/subagents/acceptance_review_service.py agent_py_agent/tests/test_manager_acceptance.py` -> passed.
+
+### Finding 35: Tester Finding Product Issues Must Not Mean Tester Failed
+
+- Symptom:
+  - Previous case09 run had a tester whose structured output said it completed diagnostics and found issues.
+  - The parent correctly created a repair worker and an acceptor afterward, but the tester task itself stayed `BLOCKED / FAILED / acceptance_failed`.
+  - This made root summaries and structured board state disagree.
+- Root cause:
+  - Acceptance review treated all failed `tests_passed` and all `planned/blocked` patches as task failure.
+  - That rule is correct for a worker that promised to deliver a finished product.
+  - It is wrong for diagnostic roles such as `tester` / `bug_finder`, because their job is to report product defects and hand them to repair/acceptance.
+- Fix:
+  - Acceptance review now recognizes diagnostic roles with explicit statuses such as `COMPLETED_WITH_ISSUES`.
+  - For those roles only, product-issue findings like `tests_passed=false` and planned patch suggestions are downgraded to P2 facts, so the tester can finish its diagnostic task.
+  - Worker/writer roles still reject the same output; `COMPLETED_WITH_ISSUES` is not a loophole for unfinished implementation.
+- Verification:
+  - Added focused tests:
+    - tester with `COMPLETED_WITH_ISSUES` becomes `DONE / VERIFIED`;
+    - worker with the same failed tests and planned patch stays `BLOCKED / FAILED`.
+  - Clean case09 rerun produced tester `DONE / VERIFIED`.
+- Status: fixed.
+
+### Finding 36: Top-Level Root Was Not Covered By Body-Read Guard
+
+- Symptom:
+  - In the clean case09 rerun, after tester completed and before acceptor completed, top-level root tried to read `index.html` and `styles.css` directly.
+  - That did not break product correctness, but it violates the intended refs-only delegation rule and can bloat root context on larger projects.
+- Root cause:
+  - `orchestration_body_read_guard` protected a subagent runner that already had `current_subagent_run_id`.
+  - The CLI top-level root is not itself a subagent run, so the guard did not see a parent task and allowed product body reads.
+- Fix:
+  - The body-read guard now has a top-level refs-only mode.
+  - When the current prompt explicitly says root/parent can only delegate and read refs/reports, the guard builds a bounded synthetic parent from `subagents.list_runs()`.
+  - Before a real acceptor is `DONE / VERIFIED`, product body reads are blocked; after acceptor completion, final inspection is allowed.
+  - Runtime metadata and orchestration artifacts remain readable so recovery/dispatch does not go blind.
+- Verification:
+  - Added focused tests:
+    - top-level refs-only root cannot read product body before acceptor completion;
+    - top-level refs-only root can read product body after acceptor completion.
+  - `python3 -m pytest agent_py_agent/tests/test_orchestration_body_read_guard.py agent_py_agent/tests/test_manager_acceptance.py agent_py_agent/tests/test_tools/test_tool_loop.py::test_completed_dispatch_does_not_close_when_prompt_requires_quality_roles -q` -> passed.
+  - Related ruff check -> passed.
+- Status: fixed by unit coverage; next real rerun should verify root no longer reads product bodies before acceptor when prompt asks for refs-only.
+
+### Finding 37: Subagent Compact Resume Missed Configured Runtime Workspace
+
+- Discovered at: 2026-05-14 during recovery 专项 10.
+- Test scene:
+  - Source run: case09 clean shopping E2E.
+  - Compact apply id: `apply-22d21d15a97ae2c9-20260514T051029Z0000`.
+  - Command shape: `memory-resume --from-compact <apply_id> --compact-owner-type subagent_run --compact-owner-id subagent-1778735158-e18fd554`.
+  - Runtime subagent workspace: `/Users/xiaoyezi/my-claude-code/recovery_cases/case09_shopping_recovery_e2e/_runtime/subagents`.
+- Symptom:
+  - `subagent_session_compact.status` returned `owner_refs_not_found`.
+  - The run workspace and `latest_continue_packet.json` existed, but compact resume only searched the main workspace legacy shapes.
+- 中文解释：
+  - 大白话：子代理的小房间其实在测试目录的 `_runtime/subagents` 里，但恢复命令只去老地方找，所以它误以为“找不到这个子代理”。
+- Root cause:
+  - Compact owner lookup ignored the configured `subagent_workspace`.
+  - Legacy `subagents/<run_id>/task.json` could point to the new `tasks/<root>/agents/<run_id>/` workspace, but resolver did not upgrade through that adapter.
+- Fix:
+  - `memory-resume` now passes the configured subagent workspace into compact owner resolution.
+  - Owner lookup searches bounded roots only: active workspace plus configured `subagent_workspace`.
+  - Legacy task refs can upgrade to the real agent-run workspace through `agent_run_workspace_dir`.
+  - Owner id is treated as a literal path segment; glob characters in ids cannot widen scans.
+  - Resume payload now exposes task-local `recommended_read_paths`: `latest_continue_packet.json`, `checkpoint.json`, `summary.md`, `task.md`, `timeline.jsonl`, and `findings.jsonl`.
+- Verification:
+  - Real rerun returned:
+    - `owner_status=linked_run_workspace`
+    - `subagent_memory_scope=task_local`
+    - `writes_main_memory=false`
+    - `automatic_tool_execution=none`
+  - Recommended paths stayed inside the subagent run workspace and did not include main `SOUL.md` / `USER.md` / long-term memory.
+  - Added focused regression: configured subagent workspace refs are found and exposed as task-local resume paths.
+- Status: fixed for refs-only compact resume.
+
+### Finding 38: Main Multi-Compact Needed Real Request Scope And Scoped Archive Reads
+
+- Discovered at: 2026-05-14 during recovery 专项 11.
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code/recovery_cases/case11_main_multi_compact_clean4`.
+  - Config: `memory_compact_auto_allow_apply=true`, `memory_compact_context_window_tokens=100`, `memory_compact_auto_continue_max_depth=4`.
+  - Tooling disabled; the model could only continue from compact continuation context.
+- Observed behavior after fixes:
+  - The real run created four compact apply packages:
+    - `apply-1766b56e7b6f25b1-20260514T054912Z0000`
+    - `apply-98bf4e3678585c05-20260514T055050Z0000`
+    - `apply-5e2cd91535effe51-20260514T055113Z0000`
+    - `apply-571db68e347e0839-20260514T055356Z0000`
+  - Each apply had `missing_fields=[]`.
+  - Each apply scope had a unique `request_id` under session `myagent-e2e-case11-main-multi-compact-clean4`.
+  - Final response reported `累计 Compact Apply 次数：4 次` and `已完成`.
+- 中文解释：
+  - 大白话：主代理现在可以在一次长任务里“压缩 -> 接着干 -> 再压缩 -> 再接着干”，不是只能压一次。每次压缩都有自己的 request id，所以不会把旧任务的记忆混进来。
+- Real bugs found and fixed:
+  - Config field gap: `memory_compact_context_window_tokens` existed in docs/config intent but was not a real `AgentConfig` field, so earlier low-threshold tests did not reliably trigger compact.
+  - Auto continuation depth gap: automatic compact continuation originally stopped after one continuation turn; long tasks needed a bounded multi-hop loop.
+  - Fact carry gap: continuation prompt contained acceptance/constraints/latest_tests, but runtime fact writer only parsed the original user prompt, so later compact rounds could lose required work-state fields.
+  - Shared JSONL scope gap: restore refs pointed to shared raw/hook JSONL files; after opening those files, work-state extraction did not reapply `session_id/request_id/run_id/task_id`, so unrelated older case facts could leak into a new compact snapshot.
+- Fix:
+  - Added config-backed `memory_compact_context_window_tokens` and `memory_compact_auto_continue_max_depth`.
+  - `SimpleAgent.run()` now loops through guarded compact continuations up to the configured max depth.
+  - Auto compact uses the real generated per-run `request_id` even when the caller did not pass one.
+  - Runtime fact source can parse `# Compact Auto Continuation` injections for explicit acceptance/constraints/latest_tests.
+  - Work-state snapshot now re-filters shared archive records by compact scope after reading restore-ref files.
+- Verification:
+  - Real case11 clean4 run produced four scoped apply packages.
+  - Added focused regressions for multi-hop auto compact, continuation fact parsing, configured context window, and shared archive scope filtering.
+- Status: fixed for main-agent multi-compact continuation.
+
+### Gap: Subagent Model-Session Multi-Compact Is Not Yet A Real Apply Loop
+
+- Discovered at: 2026-05-14 while preparing recovery 专项 12.
+- Current state:
+  - Subagents already write task-local `latest_continue_packet.json` and `session_compact_ledger.jsonl` after save.
+  - `memory-resume --compact-owner-type subagent_run` can now find configured run workspaces and expose task-local refs.
+  - Runner prompts can read task-local compact continuation refs without reading main `SOUL.md` / `USER.md` / long-term memory.
+- Missing behavior:
+  - A subagent model turn currently calls `agent.run(..., save=False)` and finalizes through the subagent manager.
+  - Because `save=False` is intentionally a persistence boundary, the main-agent auto apply path does not write `memory_archive/compact_applies/*` for that subagent turn.
+  - Therefore, the true “one child model session compacted and resumed four times mid-run” E2E is not complete yet.
+- 中文解释：
+  - 大白话：子代理现在有“接班包”和“任务本地恢复资料”，但还没有像主代理一样在自己一次模型会话里反复自动 compact/apply/resume。这个不能假装已经跑通。
+- Recommended next implementation:
+  - Add a subagent-owned compact cycle that writes only under the agent-run workspace `compactions/`, not main memory.
+  - Keep `save=False` semantics for ordinary no-save/private runs.
+  - Let runner finalization hand a subagent continuation packet back to parent when mid-run compact is needed.
+  - Then rerun专项 12 with one root-created worker and at least four child-local compact continuations.
+- Status: documented gap; next feature slice.

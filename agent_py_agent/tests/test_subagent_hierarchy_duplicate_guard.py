@@ -235,6 +235,64 @@ def test_hierarchy_schedule_allows_explicit_repair_leaf_for_existing_target(tmp_
     assert len(repair.created_run_ids) == 1
 
 
+# LLM: Active QA/repair duplicates should reuse or recover the current run instead of growing the tree.
+# 函数用途: 复现真实恢复 E2E 中 root 反复创建 qa-repair-worker 的问题，要求调度层阻断无限扩容。
+def test_hierarchy_schedule_blocks_active_duplicate_repair_child(tmp_path):
+    manager = SubAgentManager(tmp_path)
+    parent = _shared_parent_with_verified_leaf(manager)
+    first = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="根据失败 QA refs 修复 app.js 按钮绑定。",
+                    role="worker",
+                    agent_name="qa-repair-worker",
+                )
+            ],
+            apply=True,
+        )
+    )
+
+    duplicate = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="修复失败 QA ref 指出的按钮绑定和 retry 逻辑。",
+                    role="worker",
+                    agent_name="qa-repair-worker",
+                )
+            ],
+            apply=True,
+        )
+    )
+
+    assert len(first.created_run_ids) == 1
+    assert duplicate.blocked is True
+    assert duplicate.created_run_ids == []
+    assert f"active_duplicate_child:{first.created_run_ids[0]}" in duplicate.reason
+    assert len(manager.load(parent.id).child_ids) == 2
+
+    renamed_duplicate = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="最终修复 case01 失败 QA 指出的按钮绑定。",
+                    role="worker",
+                    agent_name="case01-final-repair-worker",
+                )
+            ],
+            apply=True,
+        )
+    )
+
+    assert renamed_duplicate.blocked is True
+    assert f"active_duplicate_child:{first.created_run_ids[0]}" in renamed_duplicate.reason
+    assert len(manager.load(parent.id).child_ids) == 2
+
+
 # LLM: Referencing shared assets must not make a page worker claim ownership of those assets.
 # 函数用途: 复现 R38 cart-writer 只“引入 app.js”却被当成 app.js 产物重复的真实 E2E 问题。
 def test_hierarchy_schedule_allows_leaf_referencing_shared_assets(tmp_path):

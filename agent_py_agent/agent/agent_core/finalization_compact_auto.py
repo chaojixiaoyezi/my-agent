@@ -11,8 +11,10 @@ from ._runtime_params import FinalizeContext
 
 # LLM: compact_auto_cycle_fields honors do_save before any opt-in compact apply write.
 # 函数用途: 在 run 收尾时触发自动 compact/resume 协调器；`save=False` 时即使配置允许也只做计划，不写 apply 产物。
-def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[str, int]) -> dict:
-    if ctx.compact_auto_continue_depth > 0:
+def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[str, int], *, request_id: str = "") -> dict:
+    if ctx.compact_auto_continue_depth > 0 and ctx.compact_auto_continue_depth >= max(
+        0, ctx.compact_auto_continue_max_depth
+    ):
         return _compact_auto_continuation_skip_fields()
     allow_apply = ctx.do_save and bool(getattr(agent.config, "memory_compact_auto_allow_apply", False))
     cycle = run_memory_compact_auto_cycle(
@@ -22,7 +24,7 @@ def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[st
             max_context_tokens=_compact_context_window_tokens(agent),
             plan_options=MemoryCompactPlanOptions(
                 session_id=getattr(agent, "session_id", agent.config.agent_name),
-                request_id=ctx.request_id or "",
+                request_id=ctx.request_id or request_id,
                 run_id=ctx.run_id or "",
                 task_id=ctx.task_id or "",
             ),

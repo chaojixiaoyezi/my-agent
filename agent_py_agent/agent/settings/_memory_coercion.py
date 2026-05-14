@@ -72,6 +72,8 @@ _FIELDS = (
     _FieldSpec("memory_resume_auto_context_mode", "choice", choices={"off", "trigger", "always"}),
     _FieldSpec("memory_resume_auto_context_limit", "int", 1, 50),
     _FieldSpec("memory_compact_auto_allow_apply", "bool"),
+    _FieldSpec("memory_compact_context_window_tokens", "int", 0, None),
+    _FieldSpec("memory_compact_auto_continue_max_depth", "int", 0, 100),
 )
 
 

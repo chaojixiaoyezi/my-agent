@@ -30,6 +30,8 @@ def subagent_dispatch_completion_response(request: DispatchCompletionRequest) ->
     tasks = _subagent_tasks(request.agent)
     if not tasks or not _all_tasks_done_verified(tasks):
         return None
+    if _prompt_requires_uncreated_quality_roles(request.params.user_prompt, tasks):
+        return None
     return ModelResponse(text=_dispatch_completion_text(tasks), backend=request.backend)
 
 
@@ -76,6 +78,48 @@ def _all_tasks_done_verified(tasks: list[object]) -> bool:
         if str(getattr(task, "verification_status", "") or "") != "VERIFIED":
             return False
     return True
+
+
+# LLM: _prompt_requires_uncreated_quality_roles preserves explicit tester/acceptor workflow contracts.
+# 函数用途: 用户要求 worker 后继续创建测试/验收角色时，顶层不能因现有任务全绿而提前本地收口。
+def _prompt_requires_uncreated_quality_roles(prompt: str, tasks: list[object]) -> bool:
+    required = _required_quality_roles(prompt)
+    if not required:
+        return False
+    present = _present_role_tokens(tasks)
+    return any(role not in present for role in required)
+
+
+# LLM: _required_quality_roles reads only explicit role-style requirements, not generic quality prose.
+# 函数用途: 从当前用户 prompt 判断是否明确要求 tester/acceptor 角色，避免普通“测试一下”误伤本地收口。
+def _required_quality_roles(prompt: str) -> set[str]:
+    text = " ".join(str(prompt or "").lower().split())
+    if not text:
+        return set()
+    required: set[str] = set()
+    if "tester" in text or "测试子代理" in text or "测试代理" in text:
+        required.add("tester")
+    if "acceptor" in text or "验收子代理" in text or "验收代理" in text:
+        required.add("acceptor")
+    return required
+
+
+# LLM: _present_role_tokens normalizes role/name fields enough for deterministic closeout gating.
+# 函数用途: 汇总已有子代理的 role 和名字关键词，判断 tester/acceptor 是否已经真正创建过。
+def _present_role_tokens(tasks: list[object]) -> set[str]:
+    present: set[str] = set()
+    for task in tasks:
+        text = " ".join(
+            [
+                str(getattr(task, "role", "") or ""),
+                str(getattr(task, "agent_name", "") or ""),
+            ]
+        ).lower()
+        if "tester" in text or "test" in text or "测试" in text:
+            present.add("tester")
+        if "acceptor" in text or "accept" in text or "验收" in text:
+            present.add("acceptor")
+    return present
 
 
 # LLM: _dispatch_completion_text keeps final top-level output refs-first and compact.

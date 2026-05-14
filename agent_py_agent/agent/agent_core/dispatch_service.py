@@ -15,6 +15,7 @@ from ..subagents.models import (
     SubAgentDueCheckOptions,
     SubAgentLeadershipRecoveryPlanOptions,
 )
+from ..subagents.services.action_options import ActionApplyOptions
 from ..subagents.services.dispatch_params import DispatchRecordParams, DispatchWatchRecordParams
 from .dispatch_record_params import (
     AcceptanceRecordParams,
@@ -56,8 +57,22 @@ class MakeDispatchWatchRecordParams:
 
 # LLM: make_due_check_record 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 构建到期检查记录所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
-def make_due_check_record(agent, cfg, apply):
-    options = SubAgentDueCheckOptions(config=cfg, write_report=apply)
+def make_due_check_record(
+    agent,
+    cfg,
+    apply,
+    *,
+    root_id: str = "",
+    include_run_ids: list[str] | None = None,
+    exclude_run_ids: list[str] | None = None,
+):
+    options = SubAgentDueCheckOptions(
+        config=cfg,
+        write_report=apply,
+        root_id=root_id,
+        include_run_ids=list(include_run_ids or []),
+        exclude_run_ids=list(exclude_run_ids or []),
+    )
     due_report = (
         agent.subagents.write_due_check(params=options)
         if apply
@@ -113,18 +128,28 @@ def make_action_apply_records(params: ActionApplyRecordParams):
     action_report = (
         agent.subagents.write_action_apply_report(
             params.cfg,
-            apply=params.apply,
-            take_over_by=params.take_over_by,
-            locked_files=params.locked_files or [],
-            limit=params.limit,
+            options=ActionApplyOptions(
+                apply=params.apply,
+                take_over_by=params.take_over_by or "",
+                locked_files=params.locked_files or [],
+                limit=params.limit,
+                root_id=params.root_id,
+                include_run_ids=list(params.include_run_ids or []),
+                exclude_run_ids=list(params.exclude_run_ids or []),
+            ),
         )
         if params.apply
         else agent.subagents.apply_actions(
             params.cfg,
-            apply=False,
-            take_over_by=params.take_over_by,
-            locked_files=params.locked_files or [],
-            limit=params.limit,
+            options=ActionApplyOptions(
+                apply=False,
+                take_over_by=params.take_over_by or "",
+                locked_files=params.locked_files or [],
+                limit=params.limit,
+                root_id=params.root_id,
+                include_run_ids=list(params.include_run_ids or []),
+                exclude_run_ids=list(params.exclude_run_ids or []),
+            ),
         )
     )
     for item in action_report.records:

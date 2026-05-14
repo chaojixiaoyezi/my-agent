@@ -149,6 +149,33 @@ class TestCreateSubagentsToolTemplatePolicy:
         assert result.ok is True
         assert params.allowed_tools is None
 
+    def test_vague_deliverable_worker_requires_extra_write_root(self):
+        """写真实产物但只说目标目录时必须拒绝，避免 worker 写进自己的任务目录。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_task = MagicMock()
+        mock_task.id = "writer_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/writer_001"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": "在目标目录写一个极简单文件 index.html，并报告路径。",
+            "role": "writer",
+        })
+
+        assert result.ok is False
+        assert "extra_write_roots" in result.output
+        assert "目标目录" in result.output
+        mock_agent.subagents.create_run.assert_not_called()
+
 
 
 class TestCreateSubagentsToolCoordinatorSeed:

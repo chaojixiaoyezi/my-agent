@@ -26,6 +26,7 @@ from .orchestration_dispatch_scope import (
     dispatch_finalize_acceptance,
     dispatch_max_runners_default,
     dispatch_parent_run_id,
+    dispatch_take_over_by_default,
     dispatch_workflow_mode,
 )
 from .orchestration_progress_payload import direct_children_progress_payload
@@ -96,7 +97,7 @@ class DispatchSubagentsTool(BaseTool):
             runner_instruction=str(params.get("runner_instruction") or params.get("instruction") or "").strip(),
             max_cards=_non_negative_int(params.get("max_cards"), default=0),
             probe=not _bool_param(params.get("no_probe"), default=False),
-            take_over_by=str(params.get("take_over_by") or "").strip(),
+            take_over_by=dispatch_take_over_by_default(self.agent, params),
             locked_files=_string_list(params.get("locked_files")),
             execute_acceptance_tests=execute_acceptance_tests,
             auto_apply_acceptance_followup=dispatch_auto_apply_acceptance_followup_default(
@@ -130,12 +131,11 @@ class DispatchSubagentsTool(BaseTool):
 
 
 # LLM: _dispatch_capability_config aligns model-facing due-check with runner timeout policy.
-# 函数用途: 生成 dispatch_subagents 内部能力配置；当用户关闭 runner 超时时，不让自动调度把活跃 runner 误接管。
+# 函数用途: 生成 dispatch_subagents 内部能力配置；关闭 runner 总超时不关闭心跳挂死检测。
 def _dispatch_capability_config(agent: SimpleAgent) -> CapabilityConfig:
     cfg = _runtime_capability_config(agent)
     if _runner_timeouts_disabled(getattr(agent, "config", None)):
         cfg.subagent_run_timeout = 0
-        cfg.subagent_heartbeat_timeout = 0
     return cfg
 
 

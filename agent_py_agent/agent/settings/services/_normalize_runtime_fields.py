@@ -183,6 +183,7 @@ class SubagentBasicFieldsService:
                 ("subagent_hierarchy_recovery_max_nodes", 0, None),
                 ("subagent_hierarchy_max_children_per_tool_call", 1, None),
                 ("subagent_descendant_scan_limit", 1, None),
+                ("subagent_takeover_chain_max_depth", 0, None),
                 ("subagent_context_summary_inline_json_chars", 0, None),
                 ("subagent_context_summary_inline_text_chars", 0, None),
             ),
@@ -336,4 +337,47 @@ class SubagentAdvancedFieldsService:
         )
         out["dynamic_timeout_safety_margin"] = value
         _append_warning(warnings, warn)
+        timeouts, warn = _normalize_runner_timeout_by_role(
+            out.get("runner_timeout_by_role", defaults.runner_timeout_by_role)
+        )
+        out["runner_timeout_by_role"] = timeouts
+        _append_warning(warnings, warn)
         return out, warnings
+
+
+# LLM: runner_timeout_by_role is intentionally permissive because timeout values reuse runner_timeout_seconds grammar.
+# 函数用途: 把角色级 runner 超时配置归一成小写 key 的字典；支持行内 dict 或 ["worker=60"] 列表。
+def _normalize_runner_timeout_by_role(value: object) -> tuple[dict[str, object], str | None]:
+    if value in ({}, None, ""):
+        return {}, None
+    if isinstance(value, dict):
+        return _normalize_runner_timeout_mapping(value), None
+    if isinstance(value, list):
+        parsed = _timeout_mapping_from_list(value)
+        if parsed is not None:
+            return parsed, None
+    return {}, f"runner_timeout_by_role: expected dict or key=value list, got {value!r}; using default"
+
+
+# LLM: _normalize_runner_timeout_mapping keeps role names stable and leaves value grammar to runner_dispatch.
+# 函数用途: 清理角色名，保留 off/auto/数字等原始超时值，供 runner_gate 按角色取用。
+def _normalize_runner_timeout_mapping(value: dict[object, object]) -> dict[str, object]:
+    normalized: dict[str, object] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key or "").strip().lower()
+        if key:
+            normalized[key] = raw_value
+    return normalized
+
+
+# LLM: _timeout_mapping_from_list supports the repo's simple YAML list syntax without nested maps.
+# 函数用途: 把 ["worker=8", "coordinator=off"] 转成角色超时字典；遇到非法项返回 None。
+def _timeout_mapping_from_list(value: list[object]) -> dict[str, object] | None:
+    parsed: dict[object, object] = {}
+    for item in value:
+        text = str(item or "").strip()
+        if not text or "=" not in text:
+            return None
+        key, raw_value = text.split("=", 1)
+        parsed[key.strip()] = raw_value.strip()
+    return _normalize_runner_timeout_mapping(parsed)
