@@ -119,6 +119,17 @@ class TestBuildBasic:
         assert "hello" in result
         assert "（无相关记忆）" in result
 
+    def test_build_includes_workspace_context(self, tmp_path):
+        """主代理每轮都能看到真实 workspace，避免模型猜 /workspace 这类假路径。"""
+        config = AgentConfig()
+        builder = PromptBuilder(config, tmp_path)
+
+        result = builder.build("把报告写到 artifacts", [])
+
+        assert "# Workspace Context" in result
+        assert f"primary_workspace_root: {tmp_path}" in result
+        assert "不要把 /workspace 当作真实路径" in result
+
     def test_build_single_memory(self, tmp_path):
         config = AgentConfig()
         builder = PromptBuilder(config, tmp_path)

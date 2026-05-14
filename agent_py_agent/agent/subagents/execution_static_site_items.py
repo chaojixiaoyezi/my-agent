@@ -28,13 +28,15 @@ def inferred_static_site_items(request: StaticSiteTestItemsRequest) -> list[dict
     if _has_static_site_check(request.existing_tests):
         return []
     html_paths = _html_artifact_paths(request.artifact_paths)
-    if not html_paths:
-        return []
-    site_root = _common_parent(html_paths)
-    required_files = _merged_required_files(
-        _required_files(html_paths, site_root),
-        _normalized_required_files(request.required_files),
-    )
+    declared_files = _normalized_required_files(request.required_files)
+    if html_paths:
+        site_root = _common_parent(html_paths)
+        required_files = _required_files(html_paths, site_root)
+    else:
+        if not declared_files:
+            return []
+        site_root = _required_site_root(declared_files, request.workspace_root)
+        required_files = declared_files
     return [{
         "name": "inferred static site check",
         "validation_method": "static_site_check",
@@ -118,6 +120,26 @@ def _merged_required_files(observed: list[str], declared: list[str]) -> list[str
         if value and value not in files:
             files.append(value)
     return sorted(files)
+
+
+# LLM: _required_site_root gives empty-artifact outputs a deterministic static-site check root.
+# 函数用途: runner 漏写 artifacts 列表时，根据任务必需文件在常见产物目录里选择检查根目录。
+def _required_site_root(required_files: list[str], workspace_root: Path) -> Path:
+    root = Path(workspace_root).resolve()
+    candidates = [root / "artifacts", root / "deliverables", root / "outputs", root]
+    for candidate in candidates:
+        if candidate.is_dir() and _candidate_contains_required_file(candidate, required_files):
+            return candidate
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return root
+
+
+# LLM: _candidate_contains_required_file checks literal declared paths without walking large workspaces.
+# 函数用途: 判断常见产物目录是否包含任一必需 HTML/CSS/JS 文件；不存在也由执行器报告 missing。
+def _candidate_contains_required_file(candidate: Path, required_files: list[str]) -> bool:
+    return any((candidate / value).exists() for value in required_files)
 
 
 # LLM: _relative_or_absolute keeps generated test specs portable under workspace_root.

@@ -1250,6 +1250,7 @@ my-agent scenario-test --case runner-retry
 my-agent scenario-test --case all --count 1
 my-agent scenario-test --direct
 my-agent scenario-test --dry-run
+my-agent scenario-test --direct --count 10 --max-runners 10 --runner-concurrency 5 --runner-start-rate 10
 ```
 
 `scenario-test` 是专门给我们观察全流程用的隔离测试入口。默认流程是：
@@ -1290,6 +1291,9 @@ my-agent scenario-test --dry-run
 | `--max-runners <n>` | 每轮最多推进多少个 runner，默认 `2`。 |
 | `--max-cycles <n>` | 最多执行多少轮 dispatch，默认 `3`。 |
 | `--timeout <seconds>` | gateway ask 等待响应的秒数，默认 `300`。 |
+| `--runner-concurrency <value>` | 仅本次场景测试覆盖 `runner_concurrency`，用于真实并发压测；例如 `5`。不传则走真实配置。 |
+| `--runner-start-rate <value>` | 仅本次场景测试覆盖 `runner_start_rate`，用于限制本轮最多启动多少 runner；例如 `10`。不传则走真实配置。 |
+| `--model-request-timeout <seconds>` | 仅本次场景测试覆盖模型 `request_timeout`，用于压测慢模型或快速暴露超时恢复。 |
 | `--dry-run` | 只调度不执行真实 runner API；主代理/gateway 派工仍可能调用模型。 |
 | `--planner` | dispatch 时启用父代理 planner。 |
 | `--direct` | 不经过 gateway，直接用当前进程跑主代理派工；排查 gateway 时不要加。 |

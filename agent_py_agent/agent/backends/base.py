@@ -38,7 +38,7 @@ class BackendOptions:
     api_base: str
     api_key: str
     model_name: str
-    request_timeout: int = 60
+    request_timeout: int = 240
     max_tokens: int = 1024
     temperature: float = 0.2
     stream_enabled: bool = True

@@ -68,6 +68,30 @@ class TestDispatchSubagentsToolExecute:
 
         assert result.ok is True
 
+    def test_top_level_execute_runners_defaults_acceptance_test_closure(self):
+        """顶层真实跑 runner 时，默认进入受控验收测试和通过后自动闭环。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        mock_report = MagicMock()
+        mock_report.dry_run = False
+        mock_report.summary = "真实执行"
+        mock_report.records = []
+
+        mock_agent = MagicMock()
+        mock_agent._current_subagent_run_id = ""
+        mock_agent.config.subagent_workflow_mode = "auto"
+        mock_agent.tools.specs.return_value = []
+        mock_agent.dispatch_subagents.return_value = mock_report
+        mock_agent.subagents.workspace = Path("/tmp/workspace")
+        mock_agent.subagents.list_runs.return_value = []
+
+        result = DispatchSubagentsTool(mock_agent).execute({"apply": True, "execute_runners": True})
+
+        assert result.ok is True
+        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
+        assert call_kwargs["params"].execute_acceptance_tests is True
+        assert call_kwargs["params"].auto_apply_acceptance_followup is True
+
     def test_dispatch_exact_run_ids_are_passed_to_params(self):
         """run_ids 让父 runner 精确指定本轮孩子执行顺序。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool

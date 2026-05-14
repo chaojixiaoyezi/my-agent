@@ -84,7 +84,12 @@ class DispatchSubagentsTool(BaseTool):
         apply: bool,
         execute_runners: bool,
     ) -> DispatchParams:
-        execute_acceptance_tests = dispatch_execute_acceptance_tests_default(self.agent, params, apply=apply)
+        execute_acceptance_tests = dispatch_execute_acceptance_tests_default(
+            self.agent,
+            params,
+            apply=apply,
+            execute_runners=execute_runners,
+        )
         return DispatchParams(
             apply=apply,
             execute_runners=execute_runners,
@@ -104,6 +109,7 @@ class DispatchSubagentsTool(BaseTool):
                 self.agent,
                 params,
                 apply=apply,
+                execute_runners=execute_runners,
                 execute_acceptance_tests=execute_acceptance_tests,
             ),
             parent_run_id=dispatch_parent_run_id(self.agent, params),

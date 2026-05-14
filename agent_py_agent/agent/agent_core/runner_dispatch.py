@@ -30,6 +30,7 @@ RETRYABLE_RUNNER_FAILURE_TYPES = {
     "model_error",
     "api_error",
     "transient_error",
+    "provider_timeout",
     "runner_timeout",
 }
 

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from ..backends import ModelResponse
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
 from ..prompting_parts.builder import ToolSections
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
@@ -12,7 +13,10 @@ from .runner_stage_trace import (
     RunnerToolStageTraceRequest,
     trace_runner_tool_call_started,
 )
-from .subagent_dispatch_closeout import subagent_dispatch_limit_response
+from .subagent_dispatch_closeout import (
+    subagent_dispatch_final_response_guard,
+    subagent_dispatch_limit_response,
+)
 from .tool_call_context_reducer import render_tool_payload_for_live_prompt
 from .tool_call_runtime import (
     ToolCallRuntimeRequest,
@@ -119,7 +123,15 @@ class ToolLoopService:
         reserved_record_repairs = 0
 
         while True:
-            final_prompt, response = _next_model_response(self._agent, params, tool_rounds)
+            try:
+                final_prompt, response = _next_model_response(self._agent, params, tool_rounds)
+            except Exception as exc:
+                fallback = _empty_model_response_fallback(self._agent, params, exc)
+                if fallback is None:
+                    raise
+                final_prompt = _build_prompt(self._agent, params)
+                final_response = fallback
+                break
             final_response = response
             decision = tool_loop_response_decision(
                 ToolLoopResponseDecisionRequest(
@@ -154,6 +166,11 @@ class ToolLoopService:
             if final_response:
                 break
 
+        final_response = subagent_dispatch_final_response_guard(
+            self._agent,
+            final_response,
+            executed_tools=params.executed_tools,
+        )
         return final_prompt, final_response, tool_rounds
 
     # LLM: _run_tool_round executes one parsed tool round and returns any deterministic closeout.
@@ -269,3 +286,28 @@ def _task_local_progress_context(progress: dict[str, object]) -> str:
             "policy: continue from this progress snapshot; avoid duplicating recorded headings.",
         ]
     )
+
+
+# LLM: _empty_model_response_fallback prevents successful tool work from crashing on blank final text.
+# 函数用途: 模型最终总结返回空文本时，若已有真实工具结果，就用本地事实生成保守收口，不让 CLI 异常退出。
+def _empty_model_response_fallback(agent, params: ToolLoopExecuteParams, exc: Exception):
+    if not _is_empty_model_response_error(exc) or not params.executed_tools:
+        return None
+    backend = str(getattr(getattr(agent, "backend", None), "name", "") or "")
+    if _executed_subagent_orchestration(params):
+        deterministic = subagent_dispatch_limit_response(agent, backend=backend, reason="empty_model_response")
+        if deterministic is not None:
+            return deterministic
+    tools = ", ".join(str(item) for item in params.executed_tools[-6:])
+    text = (
+        "模型接口最终总结返回空文本；本轮真实工具调用已经完成，系统没有丢弃工具结果。\n\n"
+        f"- executed_tools: {tools or '(none)'}\n"
+        "- 请根据上方工具记录继续，或重试生成最终总结。"
+    )
+    return ModelResponse(text=text, backend=backend)
+
+
+# LLM: _is_empty_model_response_error matches provider adapters that signal blank assistant text.
+# 函数用途: 只兜底空文本响应，不吞掉普通 HTTP、权限、解析或业务异常。
+def _is_empty_model_response_error(exc: Exception) -> bool:
+    return "没有文本内容" in str(exc)

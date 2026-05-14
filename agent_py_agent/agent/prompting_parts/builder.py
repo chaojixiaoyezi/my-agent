@@ -131,6 +131,7 @@ class PromptBuilder:
         memory_text = _memory_text([] if task_local else request.memories)
         dynamic = _dynamic_prompt_text(self, request, task_local)
         injected = "\n".join(request.inject or [])
+        workspace_context = _workspace_context_text(self)
         task_and_transcript = _task_and_transcript_section(request.user_prompt, _tools.tool_context or [])
         default_tools = "# Tools\n（当前未启用工具）"
         default_recommendations = "# Recommended Tools\n（当前无候选工具详情）"
@@ -139,6 +140,7 @@ class PromptBuilder:
             f"# Related Memory\n{memory_text}\n\n"
             f"# Dynamic Prompt Files\n{dynamic or '（无）'}\n\n"
             f"# Runtime Injection\n{injected or '（无）'}\n\n"
+            f"# Workspace Context\n{workspace_context}\n\n"
             f"{_tools.tool_catalog_section or default_tools}\n\n"
             f"{_tools.tool_recommendations_section or default_recommendations}\n\n"
             f"{task_and_transcript}\n"
@@ -185,6 +187,18 @@ def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, is
         *([] if isolated else builder.read_home_context(request.user_prompt)),
     ]
     return "\n".join(chunks)
+
+
+# LLM: _workspace_context_text pins path semantics so models stop inventing /workspace.
+# 函数用途: 每轮把真实工作区根目录写进 prompt；相对路径默认落在这里，产物路径不要由模型猜。
+def _workspace_context_text(builder: PromptBuilder) -> str:
+    root = Path(builder.root).resolve()
+    return "\n".join([
+        f"- primary_workspace_root: {root}",
+        "- 相对路径默认相对 primary_workspace_root。",
+        "- 写文件、读文件、创建 artifacts/deliverables 时优先使用这个真实路径。",
+        "- 不要把 /workspace 当作真实路径，除非用户明确给了这个绝对目录。",
+    ])
 
 
 # LLM: _task_and_transcript_section belongs to Prompt 构造; keep caller-visible returns, errors, and side effects aligned with focused tests.

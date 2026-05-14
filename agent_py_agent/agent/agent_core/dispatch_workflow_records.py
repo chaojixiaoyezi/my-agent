@@ -16,6 +16,7 @@ def build_workflow_records(params: WorkflowRecordParams):
         for task in params.tasks
         if not task.parent_id
         and not task.workflow_parent_run_id
+        and _task_allows_dispatch_workflow(task)
         and task.status not in {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
     ]
     if params.limit > 0:
@@ -25,6 +26,12 @@ def build_workflow_records(params: WorkflowRecordParams):
         task_records = _build_single_workflow_records(params.agent, task, params.workflow_mode, params.apply)
         records.extend(task_records)
     return records
+
+
+# LLM: _task_allows_dispatch_workflow respects per-task off decisions made at create time.
+# 函数用途: 明确单文件 worker 等任务创建时已关闭 workflow，后续顶层 dispatch 不应再按全局 auto 重新套流程。
+def _task_allows_dispatch_workflow(task) -> bool:
+    return str(getattr(task, "workflow_mode", "") or "").strip().lower() != "off"
 
 
 # LLM: _build_single_workflow_records 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

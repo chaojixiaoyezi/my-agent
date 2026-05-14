@@ -16,14 +16,18 @@ _CREATE_PARAMETERS = {
     "count": "创建多少个子代理，默认 1，受 max_subagents 限制",
     "role": "子代理角色模板 id；默认 worker",
     "tool_preset": "默认 automatic；显式 read_only/coding/none 时才覆盖自动工具策略",
-    "allowed_tools": "显式工具列表；传了它就覆盖 role template 和 tool_preset",
+    "allowed_tools": "显式工具列表；一般省略。若同时传 frontend-dev/coding 等写作预设，系统会补齐必要读写工具，避免少填工具导致卡住。",
     "acceptance_checks": "验收标准列表",
     "plan": "每个子代理的初始步骤列表",
     "workflow_mode": "off/plan/auto；决定是否在建工单时挂 workflow 计划",
     "extra_write_roots": "额外写入目录列表；目录必须位于 workspace_root 列表允许范围内",
 }
 _CREATE_PARAMETER_DETAILS = {
-    "goal": "写清楚子代理要交付什么，不要只写一个空泛标题。",
+    "goal": (
+        "写清楚子代理要交付什么，不要只写一个空泛标题。"
+        "必须保留用户原始硬约束，不得反向改写：例如用户说不要失灵按钮，就不能写“按钮可指向 #”或“可以用 #锚点”；"
+        "用户说不要失效图片，就不要擅自要求远程图片 URL。"
+    ),
     "count": (
         "例如 3 表示创建 3 个同目标并列子任务。不同工作切片不要用 count 复制同一个 goal；"
         "请多次调用本工具，每次传不同 goal/agent_name，或让 coordinator 后续用 schedule_child_subagents.children 精细拆分。"
@@ -56,8 +60,8 @@ _BOARD_PARAMETERS = {
 _DISPATCH_PARAMETERS = {
     "apply": "是否写回低风险动作，默认 false",
     "execute_runners": "是否真实调用模型执行 runner，必须配合 apply=true",
-    "execute_acceptance_tests": "是否执行子代理输出的父级验收 tests；runner 内部默认 true",
-    "auto_apply_acceptance_followup": "tests 通过后是否自动应用验收 follow-up；runner 内部默认 true，顶层默认 false",
+    "execute_acceptance_tests": "是否执行子代理输出的父级验收 tests；真实执行 runner 时默认 true",
+    "auto_apply_acceptance_followup": "tests 通过后是否自动应用验收 follow-up；真实执行 runner 时默认 true",
     "planner": "是否启用父代理 planner，默认 false",
     "workflow_mode": "off/plan/auto；是否在 dispatch 前补做 workflow 规划或自动派工",
     "max_runners": "本轮最多推进多少个 runner，默认 1；0 表示不执行 runner",
@@ -74,8 +78,8 @@ _DISPATCH_PARAMETER_DETAILS = {
         "如果目标是让某个 coordinator 亲自创建下一层 refs，必须对这个 coordinator 设置 execute_runners=true；"
         "不要把“下下层 worker 暂不执行”误写成当前 coordinator 的 execute_runners=false。"
     ),
-    "execute_acceptance_tests": "顶层默认 false；当前 runner 内部且 apply=true 时默认 true，用于执行直接 child 的 tests 并写 follow-up refs。",
-    "auto_apply_acceptance_followup": "顶层默认 false；当前 runner 内部且 apply=true、tests 通过、follow-up 指向 apply_acceptance 时默认 true，只落当前直接 child 的验收状态。",
+    "execute_acceptance_tests": "apply=true 且 execute_runners=true 时默认 true，用受控 TestExecutor 执行直接 child 声明的 tests 并写 follow-up refs；显式 false 可关闭。",
+    "auto_apply_acceptance_followup": "apply=true、execute_runners=true、tests 通过且 follow-up 指向 apply_acceptance 时默认 true，只落本轮直接 child 的验收状态；失败不会自动通过。",
     "planner": "true 会额外调用父代理 LLM planner；适合长任务统筹，但会多消耗一次模型调用。",
     "workflow_mode": "plan 只把 workflow 计划写回父任务；auto 会在计划 OK 时落成 worker 子工单；未知值保守按 off 处理。",
     "max_runners": "用来限制本轮推进数量；顶层默认 1，runner 内部默认 6，避免父节点只推进一个孩子就超时。",

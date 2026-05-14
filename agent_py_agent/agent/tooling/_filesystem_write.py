@@ -15,6 +15,11 @@ from ._filesystem_helpers import (
     _text_param,
 )
 from ._filesystem_read import FileSystemTool
+from .artifact_integrity import (
+    HtmlAppendGuardRequest,
+    check_html_append_allowed,
+    html_post_write_note,
+)
 from .content_transport_policy import (
     InlineContentPolicyRequest,
     append_chunk_use_case,
@@ -96,10 +101,14 @@ class WriteFileTool(FileSystemTool):
         target.parent.mkdir(parents=True, exist_ok=True)
         target = self.resolve_path(target)
         target.write_text(content, encoding="utf-8")
+        integrity_note = html_post_write_note(target, content)
+        output = f"已写入文件: {self.display_path(target)}"
+        if integrity_note:
+            output = f"{output}\n{integrity_note}"
         return ToolExecutionResult(
             "write_file",
             True,
-            f"已写入文件: {self.display_path(target)}",
+            output,
         )
 
 
@@ -171,12 +180,24 @@ class AppendFileTool(FileSystemTool):
             return ToolExecutionResult("append_file", False, str(exc))
         target.parent.mkdir(parents=True, exist_ok=True)
         target = self.resolve_path(target)
+        existing_text = _read_text_safe(target) if target.exists() else ""
+        if existing_text is None:
+            return ToolExecutionResult("append_file", False, "文件不是有效 UTF-8 文本，无法追加。")
+        append_guard = check_html_append_allowed(
+            HtmlAppendGuardRequest(path=target, existing_text=existing_text, append_text=content)
+        )
+        if not append_guard.allowed:
+            return ToolExecutionResult("append_file", False, append_guard.message)
         with target.open("a", encoding="utf-8") as file:
             file.write(content)
+        integrity_note = html_post_write_note(target, f"{existing_text}{content}")
+        output = f"已追加文件: {self.display_path(target)}"
+        if integrity_note:
+            output = f"{output}\n{integrity_note}"
         return ToolExecutionResult(
             "append_file",
             True,
-            f"已追加文件: {self.display_path(target)}",
+            output,
         )
 
 

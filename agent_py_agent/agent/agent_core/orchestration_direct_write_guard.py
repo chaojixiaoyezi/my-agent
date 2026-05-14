@@ -43,6 +43,31 @@ _DELEGATE_ONLY_PATTERNS = (
     r"root.{0,24}(must not|cannot|do not).{0,24}(write|implement|create)",
     r"delegate[-_ ]only",
 )
+_PRODUCT_WRITER_ROLE_TOKENS = (
+    "worker",
+    "writer",
+    "coder",
+    "builder",
+    "implementer",
+)
+_NON_PRODUCT_WRITER_ROLE_TOKENS = (
+    "accept",
+    "bug",
+    "coordinator",
+    "critic",
+    "lead",
+    "manager",
+    "planner",
+    "qa",
+    "review",
+    "root",
+    "test",
+    "verifier",
+    "验收",
+    "协调",
+    "测试",
+    "找茬",
+)
 
 
 # LLM: DelegateOnlyDirectWriteGuardRequest bundles tool-loop data for direct-write policy checks.
@@ -63,6 +88,8 @@ def maybe_block_delegate_only_direct_write(
         return None
     if not _user_requested_delegate_only(request.user_prompt):
         return None
+    if _current_runner_can_write_product(request.agent):
+        return None
     tool = str(request.payload.get("tool") or "").strip()
     if tool in _DIRECT_WRITE_TOOLS and not _is_runtime_write(request.agent, request.payload):
         return _blocked_result(tool)
@@ -78,6 +105,44 @@ def _user_requested_delegate_only(prompt: str) -> bool:
     if not text:
         return False
     return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _DELEGATE_ONLY_PATTERNS)
+
+
+# LLM: _current_runner_can_write_product keeps delegate-only guard scoped to root/parent, not assigned leaves.
+# 函数用途: 当前上下文如果是被父级派去交付的 worker/leaf_worker，则允许写业务产物；root/coordinator/tester/acceptor 仍会被拦。
+def _current_runner_can_write_product(agent: object) -> bool:
+    run_id = str(getattr(agent, "_current_subagent_run_id", "") or "").strip()
+    if not run_id:
+        return False
+    task = _load_current_runner_task(agent, run_id)
+    identity = _runner_identity_text(task)
+    if not identity:
+        return False
+    if any(token in identity for token in _NON_PRODUCT_WRITER_ROLE_TOKENS):
+        return False
+    return any(token in identity for token in _PRODUCT_WRITER_ROLE_TOKENS)
+
+
+# LLM: _load_current_runner_task tolerates fake agents and partial managers in tests and recovery paths.
+# 函数用途: 尝试读取当前 runner 的 task 元数据；失败时返回 None，让 guard 保守按父级处理。
+def _load_current_runner_task(agent: object, run_id: str) -> object | None:
+    subagents = getattr(agent, "subagents", None)
+    load = getattr(subagents, "load", None)
+    if not callable(load):
+        return None
+    try:
+        return load(run_id)
+    except Exception:
+        return None
+
+
+# LLM: _runner_identity_text normalizes role/name fields for direct-writer role checks.
+# 函数用途: 合并 role 和 agent_name，兼容 leaf_worker、小小傻妞-worker 等自然命名。
+def _runner_identity_text(task: object | None) -> str:
+    if task is None:
+        return ""
+    role = str(getattr(task, "role", "") or "")
+    name = str(getattr(task, "agent_name", "") or "")
+    return f"{role} {name}".lower().replace("-", "_")
 
 
 # LLM: _is_runtime_write lets agents still write their own coordination reports.

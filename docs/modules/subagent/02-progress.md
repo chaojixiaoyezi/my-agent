@@ -9,6 +9,13 @@
 - 2026-05-14 Typed Action Protocol 迁移 1-9 阶段第一片已落地：新增 `agent/action_protocol.py`，把工具调用、工具结果、子代理结果、子代理创建结果和 compact continue packet 都包装成 typed envelope；旧 `[TOOL_CALL]` / `[SUBAGENT_RESULT]` 文本协议仍兼容，但执行层和验收层开始读取机器字段，不再从 summary 猜事实。
 - 2026-05-14 子代理验收事实边界修正：read_file/write_file 要求只认系统记录的 `kind` / `command` 和真实 `used_tools`，summary 里写 “I used read_file” 或 “写入文件” 不再算工具证据，避免模型自然语言自证通过验收。
 - 2026-05-14 多层派工协议统一第一片已落地：`create_subagents` 和 `schedule_child_subagents` 响应都会附带同一种 `subagent_schedule` typed envelope，主->子->孙->孙孙只靠 `parent_run_id/root_id/created_run_ids/items` 串联，不靠自然语言复述孩子 id。
+- 2026-05-14 普通真实 E2E 提示词规则已记录：普通测试必须使用小白用户口吻，不在提示词里暴露内部工具名、run id、dispatch/runner/protocol 等词；默认任务改为“用单文件 html 做高端现代家具品牌首页”，用于测试主代理是否能自己规划、派工、检查和收尾。
+- 2026-05-14 普通真实 E2E 时间规则已记录：不再用 1 秒这类极端时间上限制造失败；如果需要拉长任务，优先让用户自然要求 2/3/5 个不同风格产物，再用合理时间上限测试长任务、分工、QA 和恢复。
+- 2026-05-14 顶层 worker 时间上限修复已落地：`runner_timeout_by_role.root=off` 只覆盖真正 root/coordinator/leader 类角色；顶层普通 worker 不再因为 `parent_id` 为空误吃 root 不限时，而是按 `worker` 时间上限执行。
+- 2026-05-14 自然语言多层派工修复已落地：用户说“派小傻妞，如果任务多让小傻妞再找小小傻妞帮忙”时，第一层从普通 worker 纠成 coordinator，并关闭通用 workflow 自动套娃，避免自己写完产物后还残留一堆 PLANNING/TAKEN_OVER 子任务。
+- 2026-05-14 明确单文件 worker 修复已落地：`index.html`、`report.md` 等具体文件交付任务不再继承全局 `workflow_mode=auto` 去套 producer/critic/repair；worker 先直接交付，QA/验收由父级按完成事实再决定。
+- 2026-05-14 父级直写保护误伤 leaf worker 已修复：用户要求“主代理不要亲自写、派小傻妞做”时，root/coordinator 仍不能偷写业务产物，但被派去交付的 worker/leaf_worker 可以写自己的目标文件。
+- 2026-05-14 单文件小傻妞过度纠偏已修复：用户说“任务多可以再找小小傻妞”只是全局授权；当前 create 目标只有一个明确文件名时保持 worker/child_worker，不自动改成 coordinator。
 - 2026-05-06 code-size cleanup: split runner result payload/status helpers, capability route record/report helpers, evidence acceptance finding builders, and indexing record helpers out of oversized facade files. `check_code_size.py --mode warn` now reports `total=0 hard=0`.
 - 2026-05-06 Task Tree Control Plane v1 第一片已落地：`SubAgentTask` 增加 `StatusReport`、progress、current step、latest summary、blockers、artifact/evidence refs、evidence packets 和 findings 字段；runner 写回会生成 `reports/status_report.json`，看板会展示子任务状态汇总、证据包数、finding 数和阻塞数。
 - 2026-05-06 Evidence Packet / Finding 最小合同已接入：runner structured output 可写回 `evidence_packets` / `findings`，`output.json` 会保留这些结构化事实，acceptance 会阻断缺 evidence chain 的完成态结果。
@@ -863,7 +870,7 @@
 ## 2026-05-12 R61 follow-up: long content, provider timeout, QA auto scheduling
 - 中文说明：R61 暴露三类框架问题：长 `write_file/append_file` 工具调用会让 JSON 块损坏；provider timeout 缺少明确错误边界；tester / bug_finder / acceptor 以前主要靠 prompt 和最终验收，调度时不会主动补派。
 - 已修正：长内容失败后会进入 `long_content_recovery_mode`，下一轮强制短骨架、小块 append 或受控 exec refs，不再让模型重复输出同一个巨大 JSON 参数。
-- 已修正：模型接口请求/流式超时会抛 `ProviderTimeoutError`；子代理 runner 记录 `failure_type=provider_timeout`，CLI 输出可读 handoff 和非 0 退出。
+- 已修正：模型接口请求/流式超时会抛 `ProviderTimeoutError`；子代理 runner 记录 `failure_type=provider_timeout`，CLI 输出可读 handoff 和非 0 退出。真实 E2E 暴露 10 个 runner 时 provider timeout 会被反复 classify 的问题后，`provider_timeout` 已纳入有上限 runner retry，默认 `request_timeout` 也从 60 秒调到 240 秒。
 - 当时已修正：新增 `qa_role_contract.py` 和 `hierarchy_qa_scheduler.py`。父任务明确点名 tester / bug_finder / acceptor 时，层级调度会比较本轮 specs 和已存在后代，并提示缺失 QA 角色；最终验收也复用同一套角色识别规则。R67 后，缺失 QA 不再由系统自动创建，而是通过 `quality_advice` 交给 LLM 决策。
 - 已修正：duplicate-domain 去重过滤 `run/id/ref/refs/qa` 等结构词，避免自动 QA child 因共享父级 ref 被误判成同域重复。
 - 已补测试：长内容恢复、provider timeout、QA 自动补派、QA 去重和原有角色覆盖验收 focused tests 已通过。
@@ -1206,3 +1213,20 @@
   - 真实单 worker E2E：`SCENARIO_PASS`，parent planner `tool_rounds=0 / parse_error=""`，最终 `DONE=1 / VERIFIED=1 / channel_OK=1`。
   - 真实三 worker E2E：`SCENARIO_PASS`，3 个 runner 全部完成并通过验收，最终 `DONE=3 / VERIFIED=3 / channel_OK=3`。
 - 下一步：继续扩大真实 E2E 场景，重点测试更大任务下 runner 速度、模型输出稳定性和恢复/验收闭环。
+
+## 2026-05-14 phase 3：四层 user-style 子代理链路
+- 中文说明：第 3 阶段已经完成真实 root-only 验证。外层只给主代理一个笼统任务；主代理只创建第一层 `小傻妞-root-coordinator`，后续由下级继续创建下级。
+- 真实验证目录：`/Users/xiaoyezi/my-claude-code/phase3_hierarchy_e2e_user_style_fixed5`。
+- 结果：
+  - `小傻妞-root-coordinator` -> `DONE / VERIFIED`。
+  - `小小傻妞-child-coordinator` -> `DONE / VERIFIED`。
+  - `小小小傻妞-leaf-worker` -> `DONE / VERIFIED`。
+  - 没有创建越界的 `小小小小傻妞-*`。
+  - 叶子产物写在真实 workspace 的 `artifacts/小傻妞报告.md`。
+- 本阶段修正：
+  - coordinator 意图被误填成 worker 时，在工具边界按语义修正。
+  - lineage display name 被误填进 role 字段时，拆成稳定 role + agent_name。
+  - prompt 每轮注入真实 workspace context，降低 `/workspace` 假路径。
+  - coordinator 验收可使用后代 evidence，不再要求队长亲手写产物。
+  - 工具已经成功但最终模型总结为空时，按本地任务状态收口，不让 CLI 崩掉。
+- 下一步：第 4 阶段失败恢复测试，重点覆盖 provider timeout、runner 失败、packet-first 恢复、takeover 和 no-progress fuse。
