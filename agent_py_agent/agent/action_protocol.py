@@ -21,9 +21,11 @@ from .action_protocol_core import (
     RunScope,
 )
 from .action_protocol_subagents import (
+    SubagentDispatchEnvelope,
     SubagentResultEnvelope,
     SubagentScheduleEnvelope,
     path_refs_from_subagent_refs,
+    subagent_dispatch_envelope_from_payload,
     subagent_schedule_envelope_from_payload,
 )
 from .action_protocol_tooling import (
@@ -56,6 +58,8 @@ def decode_action_envelope(
         return CompactContinuePacketEnvelope.from_dict(payload)
     if kind == "subagent_schedule":
         return SubagentScheduleEnvelope.from_dict(payload)
+    if kind == "subagent_dispatch":
+        return SubagentDispatchEnvelope.from_dict(payload)
     raise ValueError(f"Unknown action envelope kind: {kind or '<missing>'}")
 
 
@@ -66,6 +70,7 @@ __all__ = [
     "EvidenceRef",
     "PathRef",
     "RunScope",
+    "SubagentDispatchEnvelope",
     "SubagentResultEnvelope",
     "SubagentScheduleEnvelope",
     "ToolCallEnvelope",
@@ -73,6 +78,7 @@ __all__ = [
     "ToolCallResultEnvelope",
     "decode_action_envelope",
     "path_refs_from_subagent_refs",
+    "subagent_dispatch_envelope_from_payload",
     "subagent_schedule_envelope_from_payload",
     "tool_call_envelope_from_payload",
 ]

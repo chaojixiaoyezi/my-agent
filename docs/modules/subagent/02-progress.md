@@ -1241,3 +1241,10 @@
 - 已新增迁移文档：`09-hardening-migration.md` 记录参考项目经验、24 步迁移顺序和 15 组测试。
 - 已测试：focused tests 覆盖配置瘦身、角色默认工具、root capability 隐藏、context task packet、JSON 工具别名归一；相关 ruff passed。
 - 下一步：继续做 dispatcher/scheduler 的 typed packet 优先读取和 QA/验收后置策略，减少自然语言误传和空转角色。
+
+## 2026-05-15 子代理硬化第 9 步：dispatch typed envelope
+- 中文说明：`dispatch_subagents` 的返回结果现在也带 `typed_envelope.kind=subagent_dispatch`。父级后续推进时可以直接读 `actionable_run_ids`、`recovery_run_ids`、dispatch 报告 refs 和状态摘要，不需要从一段自然语言汇报里猜哪个子代理该继续跑。
+- 已实现：新增 `SubagentDispatchEnvelope`，并接入 action protocol 解码；dispatch payload 会把稳定控制字段写入 `typed_envelope`。
+- 兼容边界：旧 payload 的 `summary` 如果是字符串，会被包成 `{"text": "..."}`，避免旧数据直接坏掉。
+- 已测试：focused tests 覆盖 dispatch envelope 生成、解码、run ids 和报告 refs；相关 ruff 和 strict code-size passed。
+- 下一步：继续第 10-12 步，隔离 planner/runner、把 QA/测试/验收改成按 worker 完成后的事实触发，而不是一开始固定创建空转角色。
