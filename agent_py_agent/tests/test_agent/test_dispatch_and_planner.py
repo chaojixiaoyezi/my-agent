@@ -171,6 +171,26 @@ def _assert_acceptance_aggregate_refreshed(root: Path, task) -> None:
     assert single["message"] == "验收通过。"
 
 
+# LLM: _assert_failed_acceptance_aggregate_refreshed guards the real-test failure truth source.
+# 函数用途: 检查父级真实验收测试失败时，全局和单 run 审计不再保留“验收通过”的旧口径。
+def _assert_failed_acceptance_aggregate_refreshed(root: Path, task) -> None:
+    report_path = root / "subs" / "subagent_acceptance_report.json"
+    single_path = Path(task.reports_dir) / "acceptance_review.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    single = json.loads(single_path.read_text(encoding="utf-8"))
+    assert report["dry_run"] is True
+    assert report["summary"]["REJECT"] == 1
+    assert report["summary"]["failed"] == 1
+    assert report["summary"]["dry_run"] == 1
+    assert report["records"][0]["run_id"] == task.id
+    assert report["records"][0]["decision"] == "REJECT"
+    assert report["records"][0]["ok"] is False
+    assert "父级真实验收测试失败" in report["records"][0]["message"]
+    assert single["decision"] == "REJECT"
+    assert single["ok"] is False
+    assert "验收通过" not in single["message"]
+
+
 def test_subagent_dispatch_dry_run_plans_runner_patch_and_acceptance():
     """LLM: Verifies dry-run dispatch plans runner, patch_review, and acceptance steps without mutating state."""
     with tempfile.TemporaryDirectory() as td:
@@ -370,6 +390,49 @@ def test_subagent_dispatch_apply_with_acceptance_tests_refreshes_aggregate_repor
         assert loaded.status == "AWAITING_ACCEPTANCE"
         assert loaded.verification_status == "NEEDS_ACCEPTANCE"
         _assert_acceptance_aggregate_refreshed(root, task)
+
+
+# LLM: test_subagent_dispatch_failed_acceptance_tests_override_old_pass_message protects E2E handoff truth.
+# 函数用途: 真实验收测试失败时，dispatch 给主代理看的 record 必须拒绝并指向 rescue，不能继续写“验收通过”。
+def test_subagent_dispatch_failed_acceptance_tests_override_old_pass_message():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        task = _setup_review_task(
+            agent,
+            agent.subagents.create_run(
+                goal="调度 apply 跑失败 tests 后要救援", thought="等待 tests。", plan=["tests"],
+            ),
+            patch_status="none",
+        )
+        _write_output_patches(task, [])
+
+        report = agent.dispatch_subagents(
+            _make_router(agent),
+            CapabilityConfig(),
+            params=DispatchParams(apply=True, max_runners=0, execute_acceptance_tests=True),
+        )
+
+        record = _acceptance_dispatch_record(report, task.id)
+        test_ref = Path(task.reports_dir) / "test_execution.json"
+        followup_ref = Path(task.reports_dir) / "parent_acceptance_auto_followup.json"
+        payload = json.loads(test_ref.read_text(encoding="utf-8"))
+        followup_payload = json.loads(followup_ref.read_text(encoding="utf-8"))
+        loaded = agent.subagents.load(task.id)
+        assert record.action == "reject"
+        assert record.ok is False
+        assert "父级真实验收测试失败" in record.message
+        assert "验收通过" not in record.message
+        assert record.parent_acceptance_auto_execution_test_failed == 1
+        assert record.parent_acceptance_followup_status == "needs_manual_rescue"
+        assert record.parent_acceptance_followup_action == "plan_rescue"
+        assert followup_payload["followup"]["status"] == "needs_manual_rescue"
+        assert followup_payload["followup"]["action"] == "plan_rescue"
+        assert payload["failed"] == 1
+        assert loaded.status == "AWAITING_ACCEPTANCE"
+        assert loaded.verification_status == "NEEDS_ACCEPTANCE"
+        _assert_failed_acceptance_aggregate_refreshed(root, task)
 
 
 def test_subagent_dispatch_to_followup_apply_acceptance_chain():

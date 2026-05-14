@@ -269,6 +269,63 @@ def test_top_level_refs_only_root_cannot_read_product_body_before_acceptor_done(
     assert "delegating_body_read_blocked" in result.output
 
 
+# LLM: natural Chinese "only use child report" should trigger top-level refs-only mode.
+# 函数用途: 用户不用 refs-only 术语、只说“根据小傻妞报告收口”时，root 也不能验收前偷读产物正文。
+def test_top_level_natural_report_only_prompt_blocks_product_body_before_acceptor_done():
+    tasks = {
+        "worker": _task("worker", identity="worker", done=True),
+    }
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_top_level_agent(tasks),
+            user_prompt="请不要亲自写页面，安排小傻妞完成后你只根据小傻妞的报告做收口。",
+            payload={"tool": "read_file", "path": "/tmp/workspace/deliverables/index.html"},
+        )
+    )
+
+    assert result is not None
+    assert "delegating_body_read_blocked" in result.output
+
+
+# LLM: top-level refs-only shell reads should not bypass read_file body protection.
+# 函数用途: root 用 run_command tail/cat 等读取产物正文时也要阻断，避免绕过子代理报告边界。
+def test_top_level_natural_report_only_prompt_blocks_shell_tail_product_body():
+    tasks = {
+        "worker": _task("worker", identity="worker", done=True),
+    }
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_top_level_agent(tasks),
+            user_prompt="请不要亲自写页面，安排小傻妞完成后你只根据小傻妞的报告做收口。",
+            payload={"tool": "run_command", "command": "tail -20 /tmp/workspace/deliverables/index.html"},
+        )
+    )
+
+    assert result is not None
+    assert "delegating_body_read_blocked" in result.output
+    assert "run_command" in result.output
+
+
+# LLM: orchestration metadata may still be inspected through shell reads.
+# 函数用途: 委托期允许 root 用 shell 查看 subagent_dispatch_report 这类控制面文件，不把父级恢复卡死。
+def test_top_level_refs_only_root_can_shell_read_orchestration_metadata():
+    tasks = {
+        "worker": _task("worker", identity="worker", done=True),
+    }
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_top_level_agent(tasks),
+            user_prompt="请不要亲自写页面，安排小傻妞完成后你只根据小傻妞的报告做收口。",
+            payload={
+                "tool": "run_command",
+                "command": "cat /tmp/workspace/_runtime/subagents/subagent_dispatch_report.json",
+            },
+        )
+    )
+
+    assert result is None
+
+
 # LLM: top-level refs-only protection unlocks after a real acceptor has completed.
 # 函数用途: 最终验收子代理 DONE/VERIFIED 后，root 才能进入最后读正文核查阶段。
 def test_top_level_refs_only_root_can_read_product_body_after_acceptor_done():

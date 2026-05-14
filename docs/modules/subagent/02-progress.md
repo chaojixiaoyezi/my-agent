@@ -1248,3 +1248,27 @@
 - 兼容边界：旧 payload 的 `summary` 如果是字符串，会被包成 `{"text": "..."}`，避免旧数据直接坏掉。
 - 已测试：focused tests 覆盖 dispatch envelope 生成、解码、run ids 和报告 refs；相关 ruff 和 strict code-size passed。
 - 下一步：继续第 10-12 步，隔离 planner/runner、把 QA/测试/验收改成按 worker 完成后的事实触发，而不是一开始固定创建空转角色。
+
+## 2026-05-15 子代理硬化第 10-12 步复验：planner 隔离与 QA 后置
+- 中文说明：第 10-12 步目前已有实现并完成复验。父级 planner 走 `control_plane` + `allowed_tools=[]`，只读状态快照，不读业务正文；委托中的父级在 acceptor 完成前只能读 refs/报告/运行元数据，不能偷读产品正文。
+- QA 策略：父任务明确要求 tester / bug_finder / acceptor 时，系统先给 `quality_advice`，不自动硬塞一组空转 QA。等 worker/writer/leaf 有 ready 产物后，才提示 LLM 选择局部 QA、整体 QA、repair 或 acceptance 顺序。
+- 覆盖范围：一个 QA 可以检查多个 worker，也可以按风险只检查部分 refs；系统只守红线，具体流程交给 LLM 和后续 workflow。
+- 已测试：`test_prompting_builder.py`、`test_planner.py`、`test_agent/test_planner_and_watch.py`、`test_subagent_hierarchy_scheduler_qa_roles.py`、`test_orchestration_body_read_guard.py`、`test_orchestration_dispatch_child_refs.py` 相关 focused tests 共 98 个通过；相关 ruff passed。
+- 下一步：进入第 13-18 步，复验 direct child 进度摘要、takeover packet、leader 接管、批量失败、packet fallback 和 no-progress fuse。
+
+## 2026-05-15 子代理硬化第 13-18 步复验：恢复链路
+- 中文说明：第 13-18 步已完成 focused 复验。父级 dispatch 响应会先给 direct child 状态、可继续 run ids、需要恢复 run ids、建议工具调用和 refs；失败恢复优先读 `latest_continue_packet.json`，坏了/过期了再降级 checkpoint 和 summary。
+- takeover：普通挂死 worker 会创建或复用 takeover run，并保留同一个任务目录、artifacts 和恢复 refs；带孩子的 coordinator/leader 不走普通 takeover，必须走 leadership recovery，把原孩子交给新 leader。
+- 批量失败：多个 child 同时失败时，payload 给批量恢复建议和 action counts；自动 gate 会挡住过大的 refs-only 恢复批次，避免 3 个失败滚成 30 个新代理。
+- no-progress fuse：连续恢复无进展会写 `stop_no_progress_and_escalate`，阻止死循环；它只记录 blocker/worklog，不把失败伪装成完成。
+- 已测试：`test_orchestration_progress_payload.py`、`test_orchestration_dispatch_takeover_defaults.py`、`test_subagent_takeover_readiness.py`、`test_subagent_takeover_run.py`、`test_subagent_recovery_strategy.py`、`test_subagent_leadership_recovery_plan.py`、`test_subagent_coordinator_due_check.py`、`test_subagent_hierarchy_recovery.py`、`test_manager_actions.py`、`test_dispatch_loop*.py`、`test_subagent_automation_gate.py`、`test_orchestration_dispatch_runner_records.py` 相关 focused tests 共 98 个通过。
+- 下一步：进入第 19-24 步，复验子代理 compact 只读 task-local refs、自然语言 E2E、问题记录和提交前严格验证。
+
+## 2026-05-15 子代理硬化第 19-24 步：自然语言真实 E2E 与结构化兜底
+- 中文说明：按“小白用户”提示词重跑家具网站真实 E2E，不在普通任务里塞 dispatch/run_id 术语。测试者只观察主代理，主代理创建小傻妞，产物由小傻妞写。
+- 第一次复验发现：顶层 worker 明确写 `/deliverables/index.html` 时，模型显式传 `workflow_mode=auto` 会触发通用 workflow 尾巴；已在 create/dispatch 两层对“明确文件交付 worker”强制关闭通用 workflow。
+- 第二次复验发现：验收 tests 失败或 follow-up 需要 rescue 时，dispatch 记录和单 run `acceptance_review.json` 曾同时出现“验收通过”和 `plan_rescue`；已改成单一口径，失败/空测试/被拦截都不能标记通过。
+- 第三次复验发现：root 在 refs-only 委托期会尝试用 `run_command tail ...` 读取产物正文，绕过 `read_file` guard；已把 `run_command` 中的 `cat/tail/head/sed/rg` 等正文读取纳入同一 guard，同时仍允许读取控制面元数据。
+- 最新真实结果：`/Users/example/my-终端应用/subagent_hardening_e2e_20260515_step24d` 跑通。root 只创建并调度一个 `小傻妞` worker，最终 `total_runs=1`、`done_verified=1`，产物 `/deliverables/index.html` 存在，dispatch summary 为 `accept=1`。
+- 已测试：新增/复验 `test_orchestration_dispatch_subagents_tool.py`、`test_orchestration_body_read_guard.py`、`test_orchestration_workflow_mode.py`、`test_agent/test_dispatch_and_planner.py`、`test_agent/test_dispatch_runner_context_acceptance.py`、`test_parent_acceptance_controller.py` focused tests；相关 ruff passed。
+- 下一步：把本轮真实问题继续追加到 `06-real-e2e-findings.md`，再跑提交前 doc sync、strict code-size、focused/broad pytest；随后提交并推远端，进入更大规模 3/5/10/层级恢复测试。

@@ -3,16 +3,20 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..subagents.services.qa_role_contract import qa_role_identity_roles
 from ..tools import ToolExecutionResult
+from .orchestration_delegation_intent import (
+    prompt_requests_refs_only_delegation,
+    user_authorized_parent_body_read,
+)
+from .orchestration_shell_body_read import ShellBodyReadPathRequest, shell_body_read_paths
 from .runner_context import current_subagent_run_id
 
-_BODY_READ_TOOLS = {"read_file", "read_artifact"}
+_BODY_READ_TOOLS = {"read_file", "read_artifact", "run_command"}
 _ORCHESTRATION_ARTIFACT_PREFIXES = (
     "dispatch_subagents-",
     "subagent_board-",
@@ -87,10 +91,14 @@ def maybe_block_delegating_body_read(request: DelegatingBodyReadGuardRequest) ->
         parent = _top_level_delegation_parent(request.agent, request.user_prompt)
     if parent is None or not _has_delegated_children(parent):
         return None
-    if _user_authorized_parent_body_read(request.user_prompt):
+    if user_authorized_parent_body_read(request.user_prompt):
         return None
     if _has_completed_acceptor(request.agent, parent):
         return None
+    if tool == "run_command":
+        if not _is_shell_body_read_command(request.agent, parent, request.payload):
+            return None
+        return ToolExecutionResult(tool, False, _blocked_message(tool, parent))
     if tool == "read_file" and _is_runtime_metadata_read(request.agent, parent, request.payload):
         return None
     if tool == "read_file" and _is_current_task_local_read(request.agent, parent, request.payload):
@@ -115,7 +123,7 @@ def _current_parent_task(agent: object):
 # LLM: _top_level_delegation_parent protects normal CLI roots when the user explicitly asks for refs-only delegation.
 # 函数用途: root 不是子代理 run 时，从 manager.list_runs 构造一个临时父节点，让验收前读正文保护仍生效。
 def _top_level_delegation_parent(agent: object, prompt: str) -> _TopLevelDelegationParent | None:
-    if not _prompt_requests_refs_only_delegation(prompt):
+    if not prompt_requests_refs_only_delegation(prompt):
         return None
     tasks = _top_level_child_tasks(agent)
     child_ids = [str(getattr(task, "id", "") or "") for task in tasks if str(getattr(task, "id", "") or "").strip()]
@@ -134,28 +142,6 @@ def _top_level_child_tasks(agent: object) -> list[object]:
     if not isinstance(items, list):
         return []
     return items[:_MAX_DESCENDANT_SCAN]
-
-
-# LLM: _prompt_requests_refs_only_delegation distinguishes explicit root delegation from ordinary acceptance wording.
-# 函数用途: 只有当前用户明确要求 root/父级只调度下级、只读 refs/报告时，才启用顶层 root 读正文保护。
-def _prompt_requests_refs_only_delegation(prompt: str) -> bool:
-    compact = " ".join(str(prompt or "").lower().split())
-    if not compact:
-        return False
-    markers = (
-        "root 只能创建和调度下级",
-        "root只能创建和调度下级",
-        "主代理只能创建和调度下级",
-        "父级只能创建和调度下级",
-        "只读 refs/报告",
-        "只读refs/报告",
-        "refs-only",
-        "refs only",
-        "不要直接读取业务产物正文",
-        "不要主动读取产物正文",
-        "不要读正文",
-    )
-    return any(marker in compact for marker in markers)
 
 
 # LLM: _has_delegated_children is the cheap signal that this runner is a parent/coordinator now.
@@ -236,22 +222,6 @@ def _is_orchestration_artifact_read(payload: dict[str, Any]) -> bool:
     return any(name.startswith(prefix) for prefix in _ORCHESTRATION_ARTIFACT_PREFIXES)
 
 
-# LLM: _user_authorized_parent_body_read recognizes explicit current-run user override phrases.
-# 函数用途: 用户明确要求主代理亲自验收/检查时，临时允许父级读正文；普通“验收标准”不会触发。
-def _user_authorized_parent_body_read(prompt: str) -> bool:
-    compact = " ".join(str(prompt or "").lower().split())
-    if not compact:
-        return False
-    explicit_patterns = (
-        r"你自己.{0,12}(验收|检查|核查|看一下)",
-        r"你亲自.{0,12}(验收|检查|核查|看一下)",
-        r"你.{0,8}做一下.{0,8}(验收|检查|核查)",
-        r"(主代理|父级).{0,12}(亲自|自己).{0,12}(验收|检查|核查|看一下)",
-        r"(parent agent|root agent|you yourself|personally).{0,40}(acceptance|inspect|review|verify)",
-    )
-    return any(re.search(pattern, compact) for pattern in explicit_patterns)
-
-
 # LLM: _payload_path normalizes read_file path enough for policy checks but does not require file existence.
 # 函数用途: 支持绝对路径和相对 workspace root 路径；解析失败时保守返回 None。
 def _payload_path(agent: object, payload: dict[str, Any]) -> Path | None:
@@ -266,6 +236,32 @@ def _payload_path(agent: object, payload: dict[str, Any]) -> Path | None:
         return candidate.resolve(strict=False)
     except (OSError, RuntimeError):
         return None
+
+
+# LLM: _is_shell_body_read_command detects shell reads that would bypass read_file/read_artifact guards.
+# 函数用途: 父级委托期间，如果 run_command 用 cat/tail/head/sed/rg 等读取产物正文，也按正文读取处理。
+def _is_shell_body_read_command(agent: object, parent: object, payload: dict[str, Any]) -> bool:
+    command = str(payload.get("command") or payload.get("cmd") or "").strip()
+    if not command:
+        return False
+    paths = shell_body_read_paths(
+        ShellBodyReadPathRequest(command=command, root=str(getattr(agent, "root", "") or "."))
+    )
+    return any(_shell_path_requires_body_read_block(agent, parent, path) for path in paths)
+
+
+# LLM: _shell_path_requires_body_read_block separates metadata/control-plane reads from product bodies.
+# 函数用途: shell 正文命令读取业务产物时阻断；读取 runtime 元数据或当前 task-local 文件时放行。
+def _shell_path_requires_body_read_block(agent: object, parent: object, path: Path) -> bool:
+    if path.name in _METADATA_FILE_NAMES and (
+        _looks_like_runtime_path(path)
+        or _is_current_task_metadata_path(parent, path)
+        or _is_descendant_task_metadata_path(agent, parent, path)
+    ):
+        return False
+    if _is_current_task_local_path(parent, path):
+        return False
+    return True
 
 
 # LLM: _looks_like_runtime_path keeps runtime metadata readable without importing workspace adapters.
@@ -300,6 +296,12 @@ def _is_current_task_local_read(agent: object, parent: object, payload: dict[str
     path = _payload_path(agent, payload)
     if path is None:
         return False
+    return _is_current_task_local_path(parent, path)
+
+
+# LLM: _is_current_task_local_path is shared by direct read_file and guarded shell reads.
+# 函数用途: 判断路径是否属于当前 runner 自己的 task_dir；这类读取不属于父级偷看下级产物。
+def _is_current_task_local_path(parent: object, path: Path) -> bool:
     task_dir = str(getattr(parent, "task_dir", "") or "").strip()
     if not task_dir:
         return False
@@ -332,7 +334,7 @@ def _blocked_message(tool: str, parent: object) -> str:
         "delegating_body_read_blocked=true "
         f"tool={tool} parent_run_id={getattr(parent, 'id', '')}。"
         "父级已经派出子代理，验收子代理完成前保持 refs-only："
-        "不要主动 read_file/read_artifact 读取产物正文或大 artifact 正文。"
+        "不要主动 read_file/read_artifact/run_command 读取产物正文或大 artifact 正文。"
         "请先使用 subagent_board 或 dispatch_subagents 的 direct_children 摘要查看状态；"
         "如缺 tester/bug_finder/acceptor，请调用 schedule_child_subagents 创建质量子代理；"
         "如已有失败 refs，请创建 scoped repair worker；"

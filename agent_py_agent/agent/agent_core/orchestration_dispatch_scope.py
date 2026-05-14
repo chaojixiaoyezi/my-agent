@@ -3,11 +3,18 @@
 
 from __future__ import annotations
 
+import re
+
 from .parameters import _bool_param, _non_negative_int, _string_list
 from .runner_context import current_subagent_run_id
 from .spawn_role_seed import is_explicit_root_role
 
 _DISPATCH_FINAL_STATUSES = {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
+_CONCRETE_FILE_TARGET_RE = re.compile(
+    r"[\w.-]+\.(?:html|css|js|mjs|cjs|ts|tsx|jsx|py|md|json|yaml|yml|txt|csv|vue|svelte)\b",
+    re.IGNORECASE,
+)
+_NON_WORKER_ROLE_TOKENS = {"acceptor", "bug_finder", "checker", "coordinator", "critic", "qa", "reviewer", "tester"}
 
 
 # LLM: dispatch_apply_default keeps top-level dispatch safe while runner-context dispatch can actually advance children.
@@ -70,6 +77,8 @@ def dispatch_max_runners_default(agent, params: dict[str, object]) -> int:
 def dispatch_workflow_mode(agent, params: dict[str, object], parser) -> str:
     if _top_level_root_role_dispatch(agent, params):
         return "off"
+    if _top_level_concrete_worker_dispatch(agent, params):
+        return "off"
     if "workflow_mode" in params:
         return parser(params.get("workflow_mode"), agent.config.subagent_workflow_mode)
     if current_subagent_run_id(agent):
@@ -94,6 +103,23 @@ def _top_level_root_role_dispatch(agent, params: dict[str, object]) -> bool:
     return any(_is_active_root_role_task(task) for task in runs)
 
 
+# LLM: _top_level_concrete_worker_dispatch prevents simple one-file workers from growing generic workflow tails.
+# 函数用途: 顶层推进明确文件交付 worker 时，即使模型误传 workflow_mode=auto，也关闭 producer/critic/repair 自动扩展。
+def _top_level_concrete_worker_dispatch(agent, params: dict[str, object]) -> bool:
+    if current_subagent_run_id(agent):
+        return False
+    if not _bool_param(params.get("apply"), default=False):
+        return False
+    requested_mode = str(params.get("workflow_mode") or agent.config.subagent_workflow_mode or "").strip().lower()
+    if requested_mode not in {"plan", "auto", "manual"}:
+        return False
+    try:
+        runs = agent.subagents.list_runs()
+    except Exception:
+        return False
+    return any(_is_active_concrete_worker_task(task) for task in runs)
+
+
 # LLM: _is_active_root_role_task identifies explicit root/coordinator runs that should own child creation.
 # 函数用途: 判断任务是否是未结束的顶层协调节点，用于阻止 dispatch workflow 污染层级。
 def _is_active_root_role_task(task) -> bool:
@@ -102,6 +128,20 @@ def _is_active_root_role_task(task) -> bool:
         and is_explicit_root_role(str(getattr(task, "role", "") or ""))
         and str(getattr(task, "status", "") or "").upper() not in _DISPATCH_FINAL_STATUSES
     )
+
+
+# LLM: _is_active_concrete_worker_task mirrors create-time workflow disabling at dispatch time.
+# 函数用途: 判断顶层普通 worker 是否已经有明确文件交付目标；这类任务先让 worker 自己完成，质量波次后置。
+def _is_active_concrete_worker_task(task) -> bool:
+    if str(getattr(task, "parent_id", "") or "").strip():
+        return False
+    if str(getattr(task, "status", "") or "").upper() in _DISPATCH_FINAL_STATUSES:
+        return False
+    role = str(getattr(task, "role", "") or "worker").strip().lower().replace("-", "_")
+    if role and (role in _NON_WORKER_ROLE_TOKENS or any(token in role for token in _NON_WORKER_ROLE_TOKENS)):
+        return False
+    goal = str(getattr(task, "goal", "") or "")
+    return bool(_CONCRETE_FILE_TARGET_RE.search(goal))
 
 
 # LLM: dispatch_parent_run_id scopes runner-context dispatch to the current node's direct children.

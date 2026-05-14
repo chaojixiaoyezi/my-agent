@@ -37,7 +37,7 @@ _CREATE_PARAMETER_DETAILS = {
     "allowed_tools": "一般省略。只有受限环境才显式写 JSON 数组，例如 [\"read_file\", \"write_file\"]。",
     "acceptance_checks": "JSON 数组或多行文本，说明父代理后续怎样判断任务完成。",
     "plan": "JSON 数组或多行文本，给子代理的初始执行步骤。",
-    "workflow_mode": "默认跟随配置：auto->auto，manual->plan，off->off。显式 coordinator/root/lead 入口会强制 off，孩子必须由该 coordinator 自己创建。",
+    "workflow_mode": "默认建议省略或写 off。只有用户明确要求 workflow/工作流时才写 plan/auto；明确文件交付 worker 会强制 off。",
     "extra_write_roots": (
         "JSON 数组，例如 [\"C:/Users/you/Desktop/work\"]；只给本次子代理任务增加写入边界。"
         "凡是要写真实交付物、恢复 worker、重试超时 worker，都必须保留用户给的绝对产物目录；"
@@ -45,7 +45,7 @@ _CREATE_PARAMETER_DETAILS = {
     ),
 }
 _CREATE_EXAMPLES = [
-    '{"tool":"create_subagents","goal":"在隔离 fixture 项目里实现三个小功能并写报告","count":3,"role":"worker","workflow_mode":"auto","acceptance_checks":["必须有文件证据","必须说明测试结果"]}',
+    '{"tool":"create_subagents","goal":"在隔离 fixture 项目里实现三个小功能并写报告","count":3,"role":"worker","workflow_mode":"off","acceptance_checks":["必须有文件证据","必须说明测试结果"]}',
     '{"tool":"create_subagents","goal":"在 /workspace/deliverables/shop/build 实现购物网站 HTML 骨架和 products.json","count":1,"role":"worker","agent_name":"小傻妞-基础结构","extra_write_roots":["/workspace/deliverables/shop/build"]}',
     '{"tool":"create_subagents","goal":"在 /workspace/deliverables/shop/build 实现购物网站 styles.css 和 app.js 交互","count":1,"role":"worker","agent_name":"小傻妞-样式交互","extra_write_roots":["/workspace/deliverables/shop/build"]}',
     '{"tool":"create_subagents","goal":"检查多个 worker 的购物网站实现","count":1,"role":"bug_finder"}',
