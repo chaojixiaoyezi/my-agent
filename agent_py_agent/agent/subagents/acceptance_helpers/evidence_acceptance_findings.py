@@ -31,7 +31,6 @@ class ToolEvidenceParams:
 
     tool_name: str
     kind_aliases: set[str]
-    extra_summary_keywords: list[str]
     used_tools: list[str]
     evidence: list
 
@@ -72,8 +71,6 @@ def _has_tool_evidence(
         item.ok and (
             item.kind in params.kind_aliases
             or params.tool_name in item.command.lower()
-            or params.tool_name in item.summary.lower()
-            or any(kw in item.summary for kw in params.extra_summary_keywords)
         )
         for item in params.evidence
     )
@@ -159,7 +156,6 @@ def _build_read_file_requirement_finding(
         ToolEvidenceParams(
             "read_file",
             {"read_file", "file_read", "file_content"},
-            [],
             task.used_tools,
             task.evidence,
         )
@@ -188,7 +184,6 @@ def _build_write_file_requirement_finding(
         ToolEvidenceParams(
             "write_file",
             {"write_file", "file_write", "file_written"},
-            ["写入"],
             task.used_tools,
             task.evidence,
         )

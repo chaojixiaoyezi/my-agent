@@ -11,6 +11,7 @@ Human version:
 """
 
 import json
+from typing import TYPE_CHECKING
 
 from .models import SubAgentParsedOutput
 from .parsing_capability_requests import capability_requests_from_payload
@@ -34,6 +35,10 @@ from .parsing_values import (
     _string_list as _string_list,
 )
 from .reports import ParentPlannerParsedOutput
+
+if TYPE_CHECKING:
+    from ..action_protocol import SubagentResultEnvelope
+    from .parsing_envelope import SubagentResultEnvelopeParseRequest
 
 
 # LLM: parse_subagent_runner_output 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
@@ -68,6 +73,18 @@ def parse_subagent_runner_output(text: str) -> SubAgentParsedOutput:
             parse_error=parse_errors[0],
         )
     return SubAgentParsedOutput(found=True, ok=False, parse_error="未找到可解析的结构化结果。")
+
+
+# LLM: parse_subagent_result_envelope keeps the old import path while delegating typed conversion.
+# 函数用途: 兼容旧导入位置；真正的 envelope 转换在 parsing_envelope.py，避免 parser 主文件继续变大。
+def parse_subagent_result_envelope(
+    request: SubagentResultEnvelopeParseRequest,
+) -> SubagentResultEnvelope | None:
+    """兼容旧模块入口，调用 typed result envelope bridge。"""
+
+    from .parsing_envelope import parse_subagent_result_envelope as _parse
+
+    return _parse(request)
 
 
 # LLM: parse_parent_planner_output 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

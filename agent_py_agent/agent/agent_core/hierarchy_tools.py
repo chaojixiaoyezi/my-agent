@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..action_protocol import subagent_schedule_envelope_from_payload
 from ..subagents.services.hierarchy_scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
@@ -142,6 +143,10 @@ def _schedule_payload_json(result: HierarchyScheduleResult) -> str:
             "这些是审计提示，不是底层阻断。父级需要用看板、消息或任务说明协调文件 ownership；"
             "如果是 QA 后修复或共享文件补丁，可以继续执行并在最终报告里说明原因。"
         )
+    payload["typed_envelope"] = subagent_schedule_envelope_from_payload(
+        payload,
+        tool="schedule_child_subagents",
+    ).to_dict()
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ..action_protocol import CompactContinuePacketEnvelope, PathRef, RunScope
 from .schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_reserved_fields,
@@ -36,7 +37,7 @@ class CompactContinuePacketRequest:
 def build_compact_continue_packet(request: CompactContinuePacketRequest) -> dict[str, Any]:
     guard = request.action_guard
     missing = _string_list(guard.get("missing_fields") or request.work_state.get("missing_fields"))
-    return {
+    payload = {
         "version": COMPACT_CONTINUE_PACKET_SCHEMA.version,
         "schema": runtime_memory_schema_payload(COMPACT_CONTINUE_PACKET_SCHEMA),
         "event_type": "compact_continue_packet",
@@ -56,6 +57,56 @@ def build_compact_continue_packet(request: CompactContinuePacketRequest) -> dict
         "resume_instructions": _resume_instructions(guard),
         "reserved": runtime_memory_reserved_fields(COMPACT_CONTINUE_PACKET_SCHEMA),
     }
+    payload["typed_envelope"] = _typed_continue_packet_envelope(payload).to_dict()
+    return payload
+
+
+# LLM: _typed_continue_packet_envelope mirrors the legacy dict as an executable-safe recovery envelope.
+# 函数用途: 从 continue packet 字典生成 typed envelope，供后续自动恢复按字段读取而不是解析自然语言。
+def _typed_continue_packet_envelope(payload: dict[str, Any]) -> CompactContinuePacketEnvelope:
+    owner = payload.get("owner", {}) if isinstance(payload.get("owner"), dict) else {}
+    owner_type = str(owner.get("owner_type") or "")
+    owner_id = str(owner.get("owner_id") or "")
+    return CompactContinuePacketEnvelope(
+        packet_id=_compact_continue_packet_id(payload),
+        apply_id=str(payload.get("apply_id") or ""),
+        plan_id=str(payload.get("plan_id") or ""),
+        ready_to_continue=bool(payload.get("ready_to_continue")),
+        continue_mode=str(payload.get("continue_mode") or ""),
+        owner=dict(owner),
+        work_state=dict(payload.get("work_state_snapshot", {})),
+        guard=dict(payload.get("guard", {})),
+        path_refs=_path_refs_from_recommended(payload.get("recommended_read_paths"), owner_id=owner_id),
+        next_actions=_string_list(payload.get("next_actions")),
+        scope=RunScope(owner_type=owner_type, owner_id=owner_id),
+        reserved={"source": "compact_continue_packet"},
+    )
+
+
+# LLM: _compact_continue_packet_id produces a stable human-readable packet id.
+# 函数用途: 根据 apply_id/plan_id 生成恢复包 id，缺失时使用 compact-continue-unknown。
+def _compact_continue_packet_id(payload: dict[str, Any]) -> str:
+    apply_id = str(payload.get("apply_id") or "").strip()
+    plan_id = str(payload.get("plan_id") or "").strip()
+    if apply_id:
+        return f"compact-continue-{apply_id}"
+    if plan_id:
+        return f"compact-continue-{plan_id}"
+    return "compact-continue-unknown"
+
+
+# LLM: _path_refs_from_recommended keeps resume read hints as structured refs.
+# 函数用途: 把 recommended_read_paths 转成 PathRef，不读取文件正文。
+def _path_refs_from_recommended(value: Any, *, owner_id: str = "") -> list[PathRef]:
+    return [
+        PathRef(
+            path=path,
+            kind="recommended_read",
+            owner_run_id=owner_id,
+            source="compact_continue_packet.recommended_read_paths",
+        )
+        for path in _string_list(value)
+    ]
 
 
 # LLM: _work_state_payload keeps the continuation packet focused on task state, not raw artifact bodies.

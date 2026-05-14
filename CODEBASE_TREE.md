@@ -242,6 +242,9 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- tooling/                           # 工具模型、文件工具、HTTP 工具、解析器、注册表、写边界
 |   |   |   |-- filesystem_structured_read.py # read_file 对 latest_continue_packet 等机器文件的结构化摘要策略
 |   |   |   |-- registry_control_ranges.py    # 屏蔽 SUBAGENT_RESULT 等结果块，避免摘要里的协议标记误触发工具
+|   |   |   |-- registry_envelopes.py         # ToolCallEnvelope 去重、执行前展开和结果 envelope 关联
+|   |   |   |-- registry_invoke.py            # 已授权工具的最终参数准备、写边界检查和执行分发
+|   |   |   |-- registry_markers.py           # 旧 [TOOL_CALL]/[SUBAGENT_CALL] 标记扫描 helper
 |   |   |   `-- registry_execution.py          # ToolRegistry 的工具调用解析、授权检查和执行分发 helper
 |   |   `-- validators/                        # 未来跨领域校验规则目录，目前用 README 定义边界
 |   |-- config/                                # 配置目录
@@ -968,6 +971,11 @@ docs/
 
 ## 2026-05-08 Tree Update: Agent Runtime Control Plane
 
+- `agent_py_agent/agent/action_protocol.py`: typed protocol facade，集中兼容导出工具调用/结果、子代理结果、子代理创建、compact continue packet 和 refs 类型；普通自然语言 summary 只展示，不作为执行或验收事实。
+- `agent_py_agent/agent/action_protocol_core.py`: typed protocol 的 schema version、RunScope、ArtifactRef、EvidenceRef、PathRef 和共享归一化 helper。
+- `agent_py_agent/agent/action_protocol_tooling.py`: ToolCallEnvelope、ToolCallResultEnvelope 和旧工具 payload -> typed envelope 的 bundle 入口。
+- `agent_py_agent/agent/action_protocol_subagents.py`: SubagentResultEnvelope、SubagentScheduleEnvelope 和 artifact/evidence -> path refs 的结构化转换。
+- `agent_py_agent/agent/action_protocol_compact.py`: CompactContinuePacketEnvelope，承接 compact/resume 的结构化继续工作包。
 - `agent_py_agent/agent/local_storage/control_plane_models.py`: 定义 agent run、agent event、task rollup、runtime query context 和任务树查询结果的数据结构，保留 `metadata` / `reserved` 给后续继承策略、共享面板和失败交接扩展。
 - `agent_py_agent/agent/local_storage/control_plane.py`: 给 LocalStore 增加控制面 API，支持 upsert run、记录事件、重建 rollup、查询 root task 树、查询子树、blocked runs、takeover candidates 和带 requester/scope 的 runtime query；`takeover_candidates` 覆盖 BLOCKED / FAILED / ERROR / TIMEOUT，避免超时孙代理漏出接管视图。
 - `agent_py_agent/agent/local_storage/control_plane_panel.py`: 给 LocalStore 增加共享进度面板查询，把 runtime query、rollup、blocked runs 和 inheritance refs 组合成上级/接管代理可读状态包。
@@ -976,6 +984,8 @@ docs/
 - `agent_py_agent/agent/agent_core/tool_output_failsafe.py`: 大工具输出写 artifact 前写 fail-safe recovery snapshot，只记录工具名、hash、大小和恢复建议。
 - `agent_py_agent/agent/agent_core/tool_context_reducer.py`: 大工具输出进入下一轮 live prompt 前只注入 artifact 摘要和 checkpoint refs，小输出仍保留原工具结果；调度类输出会交给 orchestration summary 只保留 next_action/run refs。
 - `agent_py_agent/agent/agent_core/tool_context_orchestration_summary.py`: externalized dispatch/schedule/read_artifact 调度输出的 live-prompt 摘要层，保留状态、建议工具调用和 refs，不默认诱导父级读 artifact 正文。
+- `agent_py_agent/agent/agent_core/hierarchy_tools.py`: runner 内 `schedule_child_subagents` 仍负责当前节点创建下一层 child，现在响应会附带 `typed_envelope.kind=subagent_schedule`，父级恢复不必从自然语言里抄 child id。
+- `agent_py_agent/agent/agent_core/orchestration_tools.py`: 顶层 `create_subagents` 响应会附带同一 `subagent_schedule` typed envelope；顶层和多层派工走同一 refs 形状。
 - `agent_py_agent/agent/agent_core/subagent_compact_continuation.py`: 子代理 runner 的 task-local compact 接续 prompt 片段，只读取 run workspace 内 bounded checkpoint/summary/task/findings/latest continue packet 摘要，不读取主代理长期记忆。
 - `agent_py_agent/agent/agent_core/dispatch_acceptance_records.py`: 承接 dispatch acceptance record 构建、parent acceptance auto-policy/auto-execution 摘要和显式 tests 后的 refresh 调用，让主 dispatch service 保持薄编排。
 - `agent_py_agent/agent/agent_core/dispatch_acceptance_refresh.py`: 本轮显式 parent tests 写入 `test_execution.json` 后重新 dry-run acceptance，并刷新 dispatch 展示、单 run 审计和 aggregate acceptance report；不 apply、不 rescue、不修改 task 状态。
@@ -988,6 +998,8 @@ docs/
 - `agent_py_agent/agent/subagents/result_artifact_evidence.py`: 从 runner artifact metadata 合并 `artifact_refs`，并在模型漏写 `evidence_packets` 时合成 refs-only artifact evidence packet，不读取 artifact 正文。
 - `agent_py_agent/agent/subagents/parsing_partial.py`: 从 runner 结果块恢复被截断但仍有可追溯 `evidence_packets` 的成功结果；只接受 refs-only 证据链，避免把无证据长文本误当完成。
 - `agent_py_agent/agent/subagents/parsing_values.py`: 子代理结果解析共用的 list/dict/int 归一化 helper，让 `parsing.py` 保持薄层并保留旧 private import 兼容。
+- `agent_py_agent/agent/subagents/parsing.py`: 旧 `[SUBAGENT_RESULT]` / planner 兼容解析入口；`parse_subagent_result_envelope()` 只保留旧导入路径，实际 typed 转换委托给 `parsing_envelope.py`。
+- `agent_py_agent/agent/subagents/parsing_envelope.py`: 把旧 `[SUBAGENT_RESULT]` 转成 `SubagentResultEnvelope`，真实工具列表由执行层传入，不信模型 summary。
 - `agent_py_agent/agent/subagents/capability_status.py`: 统一判断 runner 结构化状态是否仍在等待 tool/skill/shell/MCP/capability，供 parser、policy 和 acceptance 共用。
 - `agent_py_agent/agent/subagents/parsing_capability_requests.py`: 当模型写出 pending capability 状态但漏填 `capability_requests` 时，从结构化 pending steps 恢复父级可路由申请；推不出具体工具或命令时不生成空泛 generic request，避免产生无用 grant。
 - `agent_py_agent/agent/subagents/services/persistence.py`: 负责 task/run/status report 落盘和旧任务兼容归一化；保存时会合并磁盘已有 `child_ids`，避免旧父/子快照覆盖新派生的层级链接。
@@ -1006,6 +1018,7 @@ docs/
 - `agent_py_agent/agent/subagents/services/takeover_run.py`: 原 runner 挂死后的幂等接管 run 创建服务；新 run 保留旧 task_dir/artifacts/checkpoint/packet refs，同一个 source run 重复恢复不会无限创建接管者。
 - `agent_py_agent/agent/memory_archive/compact_resume_failsafe.py`: 从 compact restore refs 指向的 hook JSONL 中提取工具输出外置前 fail-safe checkpoint，保持 memory-resume refs-only。
 - `agent_py_agent/agent/memory_archive/compact_continue_packet.py`: 把 compact resume 后的 work_state、action guard、推荐读取路径和 subagent owner refs 固定成继续工作包；它只表达恢复上下文可继续，不执行工具或业务验收。
+- `agent_py_agent/agent/memory_archive/compact_continue_packet.py`: continue packet 同时写 `typed_envelope.kind=compact_continue_packet`，把推荐读取路径转成 `PathRef`，后续自动恢复可按字段读，不解析说明文字。
 - `agent_py_agent/agent/memory_archive/compact_resume_blocked.py`: 生成 compact metadata 缺失时的 schema-compatible 阻断 payload，让主 resume 编排保持薄。
 - `agent_py_agent/agent/memory_archive/artifact_reader.py`: 按 tool output index 显式读取外置 artifact 正文切片，并校验路径边界和 sha256；路径前缀抄错但 artifact 文件名唯一时，可修复到登记记录；支持 `slice/head/tail/search` 窄读和 index-only size 预判。
 - `agent_py_agent/agent/memory_archive/artifact_read_modes.py`: `read_artifact` 正文窄读模式实现，负责 slice/head/tail/search 的内容 shaping，让 `artifact_reader.py` 只管 index、边界和 hash。
@@ -1014,6 +1027,7 @@ docs/
 - `agent_py_agent/agent/tooling/filesystem_artifact_guard.py`: 拒绝 `memory_archive/artifacts/tool_outputs/*.json` 外置工具输出包装经由 `read_file` 读取，提示改用 `read_artifact` 分片；当当前上下文未授权 `read_artifact` 时提示上报 `capability_request`。
 - `agent_py_agent/agent/tooling/filesystem_structured_read.py`: `read_file` 的结构化读取策略；默认把 `latest_continue_packet.json` 渲染成状态、work_progress、session_compact 和推荐读取路径摘要，显式行号读取仍返回原始文本。
 - `agent_py_agent/agent/tooling/registry_control_ranges.py`: 工具解析前屏蔽 `SUBAGENT_RESULT` / `PARENT_PLANNER_RESULT` 等结构化结果块，确保结果摘要里提到的协议标记不会被误当作真实工具调用。
+- `agent_py_agent/agent/tooling/registry_execution.py`: 旧文本 `[TOOL_CALL]` 解析后先转成 `ToolCallEnvelope`，执行结果挂回 `call_id/result_envelope`；非 `tool_call` envelope 会明确拒绝执行。envelope helper、最终执行和 marker 扫描已分别拆到 `registry_envelopes.py` / `registry_invoke.py` / `registry_markers.py`。
 - `agent_py_agent/agent/tooling/artifact.py`: 注册 `read_artifact` 工具，给模型提供受控 artifact slice/head/tail/search 读取入口。
 - `agent_py_agent/agent/tooling/artifact_read_budget.py`: `read_artifact` 的单 run 正文读取预算器，按 `run_id` 统计滚动窗口字符数，避免子代理反复展开大 artifact。
 - `agent_py_agent/agent/tooling/controlled_exec.py`: 注册 `controlled_exec` 工具包装；只从 `write_boundary.controlled_exec_grants` 读取父级 shell grant，dry-run 返回 plan，显式 apply 才调用 bounded shell execution 或 task trash；`apply/execute/run/full` 字符串也会被识别为执行意图，delete-to-trash dry-run 作为有效计划返回，但 prompt/验收会要求真实 stdout/audit/trash refs 才算完成。执行后的 shell decision/audit 会标记 `dry_run=false`，避免模型把真实执行误读成计划。

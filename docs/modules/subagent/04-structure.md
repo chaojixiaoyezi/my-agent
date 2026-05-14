@@ -33,6 +33,11 @@
 - Takeover/rescue command paths now consume takeover readiness refs first: action plans and takeover apply records surface `takeover_readiness.json` before its recommended read order, without loading artifact bodies.
 - Rescue packet metadata now travels with action plan/apply records: dedupe, repeat count, retry limit, escalation target, manual confirmation, and recovery entrypoints are visible as refs-only audit data.
 - Parent Acceptance Auto Policy v1 dry-run 已有第一片实现：当前只生成策略审计，不执行 tests、不 apply acceptance、不自动触发 rescue。
+- Typed Action Protocol 第一片已接入：`agent/action_protocol.py` 是兼容 facade，具体类型拆在 `action_protocol_core.py` / `action_protocol_tooling.py` / `action_protocol_subagents.py` / `action_protocol_compact.py`；旧文本协议只作为兼容输入，后续执行/恢复/验收优先读 envelope 字段。
+- `tooling/registry_execution.py` 会把旧 `[TOOL_CALL]` 解析成 `ToolCallEnvelope` 后执行，并把 `call_id/result_envelope` 挂回 `ToolExecutionResult`；envelope 去重/结果关联在 `registry_envelopes.py`，最终工具执行在 `registry_invoke.py`，旧标记扫描在 `registry_markers.py`，避免一个 registry 文件重新变厚。
+- `subagents/parsing.py` 保留旧 parser 和旧导入入口；`subagents/parsing_envelope.py` 负责把旧 `[SUBAGENT_RESULT]` 转为 `SubagentResultEnvelope`。真实工具列表由执行层传入，模型 `used_tools` 和 summary 不作为权威工具事实。
+- `create_subagents` 与 runner 内 `schedule_child_subagents` 会在 JSON 响应里附带 `typed_envelope.kind=subagent_schedule`，多层派工通过 parent/root/created refs 串联；这只是 refs-first 调度事实，不代表 child 已完成。
+- `acceptance_helpers/evidence_acceptance_findings.py` 与 service 版 evidence findings 已去掉 summary 关键词推断；read/write_file 验收只看系统工具事实和证据字段，避免自然语言自证。
 - Context Bundle v1 已接入执行上下文生成：`SubAgentTask` 会被压成实时工单包，写入旧 run 工单目录和 agent run workspace，runner prompt 只展示 gate 状态和 refs，不展开大型 artifact 正文。
 - Context Bundle v1 的 `workspace_refs` 现在包含 agent run workspace 的 task/checkpoint/summary/final_report/findings/timeline/compactions 和 shared refs；这些 refs 是父级状态、接管和 compact 接续的共同事实入口。
 - Context Gate v1 当前检查最小工单字段是否齐全；缺字段时要求 runner 返回 `BLOCKED` 和缺字段列表，后续可升级为调度前硬阻断。

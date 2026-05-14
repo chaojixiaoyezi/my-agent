@@ -2,6 +2,7 @@
 
 ## 已完成
 
+- 2026-05-14 Compact Continue Packet typed envelope 第一片已落地：`memory-resume --from-compact` 返回的 continue packet 仍保留旧字段，同时新增 `typed_envelope.kind=compact_continue_packet`，把 apply/plan、work_state、guard、next_actions 和 recommended_read_paths 转成机器可读恢复包；它仍不执行工具、不改任务状态。
 - `memory_store/` 已承接长期记忆 JSONL 存储，根层 `memory.py` 保留兼容入口。
 - `memory_routing/` 已有 route index 加载、匹配、校验、上下文读取和 receipt 结构。
 - `memory_archive/` 已有压缩前 snapshot、raw event、每日 hook/raw JSONL、留存和 token 估算骨架。

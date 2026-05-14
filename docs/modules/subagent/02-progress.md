@@ -6,6 +6,9 @@
 # Subagent：开发推进记录
 
 ## 已完成
+- 2026-05-14 Typed Action Protocol 迁移 1-9 阶段第一片已落地：新增 `agent/action_protocol.py`，把工具调用、工具结果、子代理结果、子代理创建结果和 compact continue packet 都包装成 typed envelope；旧 `[TOOL_CALL]` / `[SUBAGENT_RESULT]` 文本协议仍兼容，但执行层和验收层开始读取机器字段，不再从 summary 猜事实。
+- 2026-05-14 子代理验收事实边界修正：read_file/write_file 要求只认系统记录的 `kind` / `command` 和真实 `used_tools`，summary 里写 “I used read_file” 或 “写入文件” 不再算工具证据，避免模型自然语言自证通过验收。
+- 2026-05-14 多层派工协议统一第一片已落地：`create_subagents` 和 `schedule_child_subagents` 响应都会附带同一种 `subagent_schedule` typed envelope，主->子->孙->孙孙只靠 `parent_run_id/root_id/created_run_ids/items` 串联，不靠自然语言复述孩子 id。
 - 2026-05-06 code-size cleanup: split runner result payload/status helpers, capability route record/report helpers, evidence acceptance finding builders, and indexing record helpers out of oversized facade files. `check_code_size.py --mode warn` now reports `total=0 hard=0`.
 - 2026-05-06 Task Tree Control Plane v1 第一片已落地：`SubAgentTask` 增加 `StatusReport`、progress、current step、latest summary、blockers、artifact/evidence refs、evidence packets 和 findings 字段；runner 写回会生成 `reports/status_report.json`，看板会展示子任务状态汇总、证据包数、finding 数和阻塞数。
 - 2026-05-06 Evidence Packet / Finding 最小合同已接入：runner structured output 可写回 `evidence_packets` / `findings`，`output.json` 会保留这些结构化事实，acceptance 会阻断缺 evidence chain 的完成态结果。

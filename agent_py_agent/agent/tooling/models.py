@@ -92,6 +92,8 @@ class ToolExecutionResult:
     tool: str
     ok: bool
     output: str
+    call_id: str = ""
+    result_envelope: dict[str, Any] = field(default_factory=dict)
 
     # LLM: ToolExecutionResult.render_for_prompt 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 把 render_for_prompt 转成人或模型可读的展示文本。
