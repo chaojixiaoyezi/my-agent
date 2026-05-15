@@ -376,22 +376,26 @@ class OutputJsonCompletionBackend(BaseBackend):
         )
 
 
-# LLM: DispatchCompletionBackend proves completed subagent dispatch can close without a second model call.
-# 类用途: 测试专用后端；第一次要求 dispatch_subagents，若系统没有本地收口而二次请求模型就失败。
+# LLM: DispatchCompletionBackend proves completed subagent dispatch returns to root synthesis.
+# 类用途: 测试专用后端；第一次要求 dispatch_subagents，第二次确认 root 能看到 refs 并生成正常最终回答。
 class DispatchCompletionBackend(BaseBackend):
     name = "fake_dispatch_completion_backend"
 
-    # LLM: __init__ tracks model calls so the regression test catches extra final requests.
-    # 函数用途: 初始化调用计数；第二次 generate 说明顶层 dispatch 未按本地 DONE/VERIFIED 状态收敛。
+    # LLM: __init__ tracks model calls so tests can assert the parent synthesis turn happened.
+    # 函数用途: 初始化调用计数；第二轮应收到 dispatch 工具结果并给用户正常口吻的交付回复。
     def __init__(self):
         self.calls = 0
 
-    # LLM: generate emits one dispatch_subagents call and refuses extra finalization turns.
-    # 函数用途: 让主代理执行一次 dispatch_subagents；之后应由系统本地生成收尾回答。
+    # LLM: generate emits one dispatch_subagents call, then synthesizes from returned artifact refs.
+    # 函数用途: 让主代理执行一次 dispatch_subagents；之后检查 prompt 里有 refs，再生成最终回答。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls > 1:
-            raise AssertionError("completed dispatch should close without another model call")
+            assert "dispatch_subagents" in prompt
+            return ModelResponse(
+                text="我已经综合子代理结果，最终产物见 deliverables/report.md。",
+                backend=self.name,
+            )
         return ModelResponse(
             text=(
                 "[TOOL_CALL]\n"

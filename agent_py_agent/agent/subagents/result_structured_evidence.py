@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from .models import EvidencePacket, Finding, SubAgentTask, VerificationEvidence
 from .parsing import _string_list
+from .result_artifact_evidence import normalize_artifact_ref
 from .utils import _merge_list, _new_id
 
 _NEGATIVE_EVIDENCE_HINTS = (
@@ -50,7 +51,7 @@ def process_evidence_items(parsed, task: SubAgentTask, now: float) -> int:
 def process_evidence_packets(parsed, task: SubAgentTask, now: float) -> list[dict[str, object]]:
     packets: list[dict[str, object]] = []
     for item in parsed.evidence_packets:
-        packet = _evidence_packet_from_item(item, now)
+        packet = _evidence_packet_from_item(task, item, now)
         if packet is None:
             continue
         task.evidence_packets.append(packet)
@@ -75,11 +76,11 @@ def process_findings(parsed, task: SubAgentTask, now: float) -> list[dict[str, o
 
 
 # LLM: _evidence_packet_from_item validates refs before creating a durable packet.
-# 函数用途: 从单条模型输出中构建 EvidencePacket；缺 claim 或 refs 时返回 None。
-def _evidence_packet_from_item(item: dict[str, object], now: float) -> EvidencePacket | None:
+# 函数用途: 从单条模型输出中构建 EvidencePacket，并把 artifact_refs 归一化成 task-local durable refs；缺 claim 或 refs 时返回 None。
+def _evidence_packet_from_item(task: SubAgentTask, item: dict[str, object], now: float) -> EvidencePacket | None:
     claim = str(item.get("claim", "") or "").strip()
     evidence_refs = _string_refs(item.get("evidence_refs", []))
-    artifact_refs = _string_refs(item.get("artifact_refs", []))
+    artifact_refs = [normalize_artifact_ref(task, ref) for ref in _string_refs(item.get("artifact_refs", []))]
     if not claim or not (evidence_refs or artifact_refs):
         return None
     return EvidencePacket(

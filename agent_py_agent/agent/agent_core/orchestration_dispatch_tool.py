@@ -126,14 +126,16 @@ class DispatchSubagentsTool(BaseTool):
     # LLM: _report_payload keeps dispatch output compact and recovery-friendly for the parent model.
     # 函数用途: 生成 dispatch_subagents 的 JSON 响应，包含顶层 runner_selection_recovery 和直接孩子进度摘要。
     def _report_payload(self, report) -> dict[str, object]:
+        record_payloads = [dispatch_record_payload(item) for item in report.records]
         payload = {
             "dry_run": report.dry_run,
             "runner_selection_recovery": dispatch_recovery_payload(report.records),
             "summary": report.summary,
-            "records": [dispatch_record_payload(item) for item in report.records],
+            "records": record_payloads,
             "dispatch_json": str(self.agent.subagents.workspace / "subagent_dispatch_report.json"),
             "dispatch_md": str(self.agent.subagents.workspace / "SUBAGENT_DISPATCH.md"),
         }
+        payload.update(_dispatch_top_level_guidance(self.agent, report, record_payloads))
         if terminal := dispatch_no_progress_payload(report):
             payload["dispatch_terminal"] = terminal
         payload.update(artifact_integrity_repair_advice_from_records(report.records))
@@ -197,3 +199,165 @@ def _record_touches_runner_scope(record: object) -> bool:
     if step != "runner":
         return False
     return action in {"execute_runner", "retry_runner", "runner_dry_run"}
+
+
+# LLM: _dispatch_top_level_guidance makes root dispatch results actionable before records are externalized.
+# 函数用途: 汇总 dispatch 的阻塞 run、修复建议和产物 refs，避免 root 先写最终报告再被状态提示纠正。
+def _dispatch_top_level_guidance(agent: object, report: object, records: list[dict[str, object]]) -> dict[str, object]:
+    blockers = _blocking_run_ids(records)
+    payload: dict[str, object] = {
+        "completion_status": _dispatch_completion_status(blockers),
+        "must_not_report_done": bool(blockers),
+    }
+    if blockers:
+        payload["blocking_run_ids"] = blockers
+        payload["next_action"] = "repair_or_continue_blocking_run_ids"
+        payload.update(_aggregate_parent_acceptance_repair_advice(records))
+    artifact_refs = _related_task_refs(agent, report, "artifact_refs")
+    evidence_refs = _related_task_refs(agent, report, "evidence_refs")
+    if artifact_refs:
+        payload["deliverable_artifact_refs"] = artifact_refs
+    if evidence_refs:
+        payload["deliverable_evidence_refs"] = evidence_refs
+    return payload
+
+
+# LLM: _dispatch_completion_status is a compact gate, not a replacement for acceptance reports.
+# 函数用途: 给模型一个明确的“是否可报完成”机器字段。
+def _dispatch_completion_status(blocking_run_ids: list[str]) -> dict[str, object]:
+    if not blocking_run_ids:
+        return {
+            "status": "complete_or_no_blockers",
+            "blocking_run_ids": [],
+            "must_not_report_done": False,
+        }
+    return {
+        "status": "not_complete",
+        "blocking_run_ids": blocking_run_ids,
+        "must_not_report_done": True,
+        "recommended_next_action": "repair_or_continue_blocking_run_ids",
+    }
+
+
+# LLM: _blocking_run_ids extracts machine run ids from failed dispatch records.
+# 函数用途: dispatch 出现 reject/fail 时，顶层直接暴露阻塞 id，避免模型只看见已生成文件就收尾。
+def _blocking_run_ids(records: list[dict[str, object]]) -> list[str]:
+    ids: list[str] = []
+    for record in records:
+        if bool(record.get("ok", True)):
+            continue
+        run_id = str(record.get("run_id") or "").strip()
+        if run_id and run_id not in ids:
+            ids.append(run_id)
+    return ids[:20]
+
+
+# LLM: _aggregate_parent_acceptance_repair_advice keeps repair hints visible outside bulky records.
+# 函数用途: records 被外置时，仍在顶层保留父级验收失败的 refs-first 修复建议。
+def _aggregate_parent_acceptance_repair_advice(records: list[dict[str, object]]) -> dict[str, object]:
+    advices = [
+        item.get("parent_acceptance_repair_advice")
+        for item in records
+        if isinstance(item.get("parent_acceptance_repair_advice"), dict)
+    ]
+    if not advices:
+        return {}
+    failed_ids = _unique_strings([
+        str(run_id)
+        for advice in advices
+        for run_id in list(advice.get("failed_run_ids") or [])
+    ])
+    failure_refs = [
+        ref
+        for advice in advices
+        for ref in list(advice.get("failure_refs") or [])
+        if isinstance(ref, dict)
+    ][:12]
+    suggested_calls = [
+        call
+        for advice in advices
+        if isinstance(call := advice.get("suggested_tool_call"), dict)
+    ][:5]
+    advice: dict[str, object] = {
+        "phase": "parent_acceptance_repair_recommended",
+        "failed_run_ids": failed_ids,
+        "failure_refs": failure_refs,
+        "llm_next_step": (
+            "还有子代理未通过父级验收；先按 failure_refs 创建修复/接管小傻妞，"
+            "重新 dispatch 并通过验收后再向用户报完成。"
+        ),
+    }
+    if suggested_calls:
+        advice["suggested_tool_call"] = suggested_calls[0]
+        advice["suggested_tool_calls"] = suggested_calls
+    return {"parent_acceptance_repair_advice": advice}
+
+
+# LLM: _related_task_refs exposes product refs from the runs touched by this dispatch report.
+# 函数用途: 收集本轮 run 和 runner 新建 child 的 artifact/evidence refs，不读取文件正文。
+def _related_task_refs(agent: object, report: object, attr: str, *, limit: int = 20) -> list[str]:
+    refs: list[str] = []
+    seen: set[str] = set()
+    for run_id in _related_run_ids(report):
+        task = _safe_load_task(agent, run_id)
+        if _extend_unique_refs(refs, seen, _string_refs(getattr(task, attr, []), limit=limit), limit):
+            return refs
+    return refs
+
+
+# LLM: _related_run_ids includes explicit runner targets and nested child ids created during the dispatch.
+# 函数用途: 顶层 refs 汇总要看到 runner 内创建的孙代理，不能只看父 run。
+def _related_run_ids(report: object) -> list[str]:
+    ids: list[str] = []
+    for record in getattr(report, "records", []) or []:
+        _extend_unique_refs(ids, set(ids), _record_related_run_ids(record), 100)
+    return ids
+
+
+# LLM: _record_related_run_ids flattens one dispatch record into candidate run refs.
+# 函数用途: 从一条 dispatch record 中取当前 run 和 runner 新建 child id，供顶层 refs 汇总去重。
+def _record_related_run_ids(record: object) -> list[str]:
+    ids = [str(getattr(record, "run_id", "") or "").strip()]
+    ids.extend(str(item or "").strip() for item in getattr(record, "runner_created_child_ids", []) or [])
+    return [item for item in ids if item]
+
+
+# LLM: _extend_unique_refs is the shared bounded append helper for run ids and artifact refs.
+# 函数用途: 按首次出现顺序追加非空唯一 ref；达到 limit 时返回 True 提示调用方停止。
+def _extend_unique_refs(target: list[str], seen: set[str], refs: list[str], limit: int) -> bool:
+    for ref in refs:
+        if ref in seen:
+            continue
+        seen.add(ref)
+        target.append(ref)
+        if len(target) >= limit:
+            return True
+    return False
+
+
+# LLM: _safe_load_task keeps advisory payload generation from breaking dispatch_subagents.
+# 函数用途: 读取任务失败时返回空对象，保证 refs 汇总只增强输出、不影响调度主流程。
+def _safe_load_task(agent: object, run_id: str) -> object:
+    try:
+        return agent.subagents.load(run_id)
+    except Exception:
+        return object()
+
+
+# LLM: _string_refs bounds persisted task refs before model-facing payloads.
+# 函数用途: 清洗 artifact/evidence refs，避免 dispatch 输出被大量产物路径撑大。
+def _string_refs(value: object, *, limit: int) -> list[str]:
+    if not isinstance(value, list | tuple | set):
+        return []
+    return _unique_strings([str(item or "").strip() for item in value if str(item or "").strip()])[:limit]
+
+
+# LLM: _unique_strings preserves first occurrence order for small model-facing lists.
+# 函数用途: 给 run ids 和 refs 去重，保持调度输出稳定。
+def _unique_strings(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result

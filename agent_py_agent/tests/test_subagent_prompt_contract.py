@@ -102,6 +102,10 @@ def test_runner_prompt_tells_coordinator_to_stay_capable_and_delegate_when_usefu
 
     assert "coordinator" in prompt
     assert "拥有完整基础读写能力" in prompt
+    assert "先读取最小必要材料" in prompt
+    assert "不要在派工前把所有正文" in prompt
+    assert "先创建并 dispatch child" in prompt
+    assert "不要把所有 child 正文一次性吞回自己的上下文" in prompt
     assert "派工是为了把活做好，不是硬流程" in prompt
     assert "你可以直接完成" in prompt
     assert "不要误以为只能创建 worker" in prompt

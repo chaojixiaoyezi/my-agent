@@ -115,13 +115,18 @@ def _runner_timeout_root_like_role(role: str) -> bool:
 # 函数用途: 把 leaf_worker/review/critic 等内部角色归到用户能理解的大类。
 def _runner_timeout_role_aliases(role: str) -> list[str]:
     aliases: list[str] = []
-    if "worker" in role and role != "worker":
+    normalized = str(role or "").strip().lower().replace("-", "_")
+    if "worker" in normalized and normalized != "worker":
         aliases.append("worker")
-    if role in {"review", "reviewer", "critic", "qa", "tester"}:
+    if normalized in {"review", "reviewer", "critic", "qa", "tester"}:
         aliases.append("tester")
-    if role in {"acceptor", "acceptance", "verifier"}:
+    if normalized in {"acceptor", "acceptance", "verifier"}:
         aliases.append("acceptor")
-    if role in {"coordinator", "leader", "manager"}:
+    if (
+        ("coordinator" in normalized and normalized != "coordinator")
+        or normalized in {"leader", "manager", "planner", "dispatcher"}
+        or normalized.endswith("_leader")
+    ):
         aliases.append("coordinator")
     return aliases
 

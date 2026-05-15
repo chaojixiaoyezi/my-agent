@@ -28,6 +28,12 @@ from .tool_call_runtime import (
 )
 from .tool_context_reducer import render_tool_result_for_live_prompt
 from .tool_loop_completion import ToolRoundCompletionRequest, completion_response_after_tool_round
+from .tool_loop_empty_response import (
+    empty_model_response_fallback,
+    empty_model_response_retry_context,
+    should_retry_empty_model_response,
+)
+from .tool_loop_orchestration_scope import executed_subagent_orchestration
 from .tool_loop_recovery import (
     append_long_content_recovery_context,
     payload_with_runtime_scope,
@@ -104,20 +110,6 @@ def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
         return 0
 
 
-# LLM: _executed_subagent_orchestration gates deterministic limit closeout to subagent workflows.
-# 函数用途: 只有本轮实际碰过子代理编排工具时，工具上限才改用 subagent task.json 事实报告。
-def _executed_subagent_orchestration(params: ToolLoopExecuteParams) -> bool:
-    orchestration_tools = {
-        "capability_config_patch",
-        "create_subagents",
-        "dispatch_subagents",
-        "schedule_child_subagents",
-        "subagent_board",
-        "subagent_message",
-    }
-    return any(str(item or "") in orchestration_tools for item in params.executed_tools or [])
-
-
 # LLM: ToolLoopService 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 类用途: 封装工具循环服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class ToolLoopService:
@@ -134,9 +126,18 @@ class ToolLoopService:
         final_response = None
         tool_rounds = params.tool_rounds
         reserved_record_repairs = 0
+        empty_response_repairs = 0
 
         while True:
-            final_prompt, final_response, should_stop = self._model_turn_or_fallback(params, tool_rounds)
+            (
+                final_prompt,
+                final_response,
+                should_stop,
+                retry_after_empty,
+                empty_response_repairs,
+            ) = self._model_turn_or_fallback(params, tool_rounds, empty_response_repairs)
+            if retry_after_empty:
+                continue
             if should_stop:
                 break
             reserved_record_repairs, action = self._response_action(
@@ -169,19 +170,32 @@ class ToolLoopService:
 
     # LLM: _model_turn_or_fallback keeps model errors and fallback response generation isolated.
     # 函数用途: 执行一轮模型调用；过期 runner attempt 或空响应可恢复时返回 fallback 并要求主循环停止。
-    def _model_turn_or_fallback(self, params: ToolLoopExecuteParams, tool_rounds: int):
+    def _model_turn_or_fallback(
+        self,
+        params: ToolLoopExecuteParams,
+        tool_rounds: int,
+        empty_response_repairs: int,
+    ):
         stale_message = stale_subagent_attempt_message(self._agent)
         if stale_message is not None:
             backend = str(getattr(getattr(self._agent, "backend", None), "name", "") or "")
-            return "", ModelResponse(text=stale_message, backend=backend), True
+            return "", ModelResponse(text=stale_message, backend=backend), True, False, empty_response_repairs
         try:
             prompt, response = _next_model_response(self._agent, params, tool_rounds)
-            return prompt, response, False
+            return prompt, response, False, False, empty_response_repairs
         except Exception as exc:
-            fallback = _empty_model_response_fallback(self._agent, params, exc)
+            if should_retry_empty_model_response(params, exc, empty_response_repairs):
+                params.tool_context.append(empty_model_response_retry_context(params))
+                return _build_prompt(self._agent, params), None, False, True, empty_response_repairs + 1
+            fallback = empty_model_response_fallback(
+                self._agent,
+                params,
+                exc,
+                executed_subagent_orchestration=executed_subagent_orchestration,
+            )
             if fallback is None:
                 raise
-            return _build_prompt(self._agent, params), fallback, True
+            return _build_prompt(self._agent, params), fallback, True, False, empty_response_repairs
 
     # LLM: _response_action owns response decision bookkeeping for one model turn.
     # 函数用途: 根据模型输出判断继续生成、停止、或进入工具执行，并同步 reserved repair 次数。
@@ -245,7 +259,7 @@ class ToolLoopService:
     # 函数用途: 处理final响应after工具限制相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def _final_response_after_tool_limit(self, params: ToolLoopExecuteParams, tool_rounds: int):
         params.tool_context.append("[tool-system]\n已达到最大工具轮数限制，停止继续调用工具。")
-        if _executed_subagent_orchestration(params):
+        if executed_subagent_orchestration(params):
             backend = str(getattr(self._agent.backend, "name", "") or "")
             deterministic = subagent_dispatch_limit_response(self._agent, backend=backend)
             if deterministic is not None:
@@ -334,28 +348,3 @@ def _task_local_progress_context(progress: dict[str, object]) -> str:
             "If next_action mentions output.json, stop product-body writes and close out with structured refs.",
         ]
     )
-
-
-# LLM: _empty_model_response_fallback prevents successful tool work from crashing on blank final text.
-# 函数用途: 模型最终总结返回空文本时，若已有真实工具结果，就用本地事实生成保守收口，不让 CLI 异常退出。
-def _empty_model_response_fallback(agent, params: ToolLoopExecuteParams, exc: Exception):
-    if not _is_empty_model_response_error(exc) or not params.executed_tools:
-        return None
-    backend = str(getattr(getattr(agent, "backend", None), "name", "") or "")
-    if _executed_subagent_orchestration(params):
-        deterministic = subagent_dispatch_limit_response(agent, backend=backend, reason="empty_model_response")
-        if deterministic is not None:
-            return deterministic
-    tools = ", ".join(str(item) for item in params.executed_tools[-6:])
-    text = (
-        "模型接口最终总结返回空文本；本轮真实工具调用已经完成，系统没有丢弃工具结果。\n\n"
-        f"- executed_tools: {tools or '(none)'}\n"
-        "- 请根据上方工具记录继续，或重试生成最终总结。"
-    )
-    return ModelResponse(text=text, backend=backend)
-
-
-# LLM: _is_empty_model_response_error matches provider adapters that signal blank assistant text.
-# 函数用途: 只兜底空文本响应，不吞掉普通 HTTP、权限、解析或业务异常。
-def _is_empty_model_response_error(exc: Exception) -> bool:
-    return "没有文本内容" in str(exc)

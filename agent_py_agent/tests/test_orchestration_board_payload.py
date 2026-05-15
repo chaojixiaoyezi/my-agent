@@ -34,6 +34,8 @@ def _board_item(run_id: str, status: str):
     item.latest_summary = ""
     item.blocker_count = 0
     item.target_tokens = []
+    item.artifact_refs = []
+    item.evidence_refs = []
     item.task_dir = f"/tmp/{run_id}"
     item.output_json = f"/tmp/{run_id}/output.json"
     return item
@@ -99,6 +101,32 @@ def test_board_payload_treats_verified_target_coverage_as_complete():
     assert status["status"] == "complete_or_no_blockers"
     assert status["blocking_run_ids"] == []
     assert status["must_not_report_done"] is False
+
+
+# LLM: Board payload must surface child deliverables so root agents do not guess task paths.
+# 函数用途: 验证 subagent_board 顶层和条目都带 artifact/evidence refs，保护真实 E2E 的收集阶段。
+def test_board_payload_includes_deliverable_refs_for_completed_children():
+    from agent_py_agent.agent.agent_core.orchestration_tools import SubagentBoardTool
+
+    mock_agent = MagicMock()
+    mock_agent.subagents.workspace = Path("/tmp/workspace")
+    mock_board = MagicMock()
+    mock_board.summary = {"total": 1, "DONE": 1, "VERIFIED": 1}
+    item = _board_item("run_1", "DONE")
+    item.verification_status = "VERIFIED"
+    item.artifact_refs = ["/tmp/site/final_report.md"]
+    item.evidence_refs = ["/tmp/site/evidence.json"]
+    mock_board.items = [item]
+    mock_agent.subagents.write_board.return_value = mock_board
+
+    result = SubagentBoardTool(mock_agent).execute({"limit": 10})
+
+    assert result.ok is True
+    assert '"deliverable_artifact_refs": [' in result.output
+    assert '"/tmp/site/final_report.md"' in result.output
+    assert '"deliverable_evidence_refs": [' in result.output
+    assert '"/tmp/site/evidence.json"' in result.output
+    assert '"artifact_refs": [' in result.output
 
 
 # LLM: Active board scope prevents old workspace rows from steering the current root turn.

@@ -1,0 +1,81 @@
+"""Dispatch completion gate tests split out from the broad execute suite."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+
+# LLM: dispatch gate tests cover root-facing not-complete signals and refs.
+# 函数用途: 验证 dispatch_subagents 顶层和 markdown 都暴露阻塞状态，防止父级误报完成。
+def test_dispatch_payload_exposes_blocking_gate_and_refs():
+    """dispatch 顶层要暴露阻塞 run 和产物 refs，避免 root 先写最终完成报告。"""
+    from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+    record = SimpleNamespace(
+        step="acceptance",
+        action="reject",
+        run_id="child-bad",
+        ok=False,
+        dry_run=True,
+        applied=False,
+        message="验收失败",
+        before_status="AWAITING_ACCEPTANCE",
+        after_status="AWAITING_ACCEPTANCE",
+        parent_acceptance_auto_execution_test_ref="/tmp/child-bad/reports/test_execution.json",
+        parent_acceptance_followup_ref="/tmp/child-bad/reports/parent_acceptance_auto_followup.json",
+        parent_acceptance_test_failure_summary="存在未完成 child",
+        parent_acceptance_test_failure_details=["direct children acceptance failed"],
+    )
+    mock_report = SimpleNamespace(dry_run=False, summary={"failed": 1}, records=[record])
+
+    mock_agent = MagicMock()
+    mock_agent.config.subagent_workflow_mode = "off"
+    mock_agent.tools.specs.return_value = []
+    mock_agent.dispatch_subagents.return_value = mock_report
+    mock_agent.subagents.workspace = Path("/tmp/workspace")
+    mock_agent.subagents.load.return_value = SimpleNamespace(
+        artifact_refs=["/tmp/site/final_report.md"],
+        evidence_refs=["/tmp/site/evidence.json"],
+    )
+
+    result = DispatchSubagentsTool(mock_agent).execute({"apply": True, "execute_runners": True})
+    payload = json.loads(result.output)
+
+    assert payload["completion_status"]["status"] == "not_complete"
+    assert payload["must_not_report_done"] is True
+    assert payload["blocking_run_ids"] == ["child-bad"]
+    assert payload["deliverable_artifact_refs"] == ["/tmp/site/final_report.md"]
+    assert payload["parent_acceptance_repair_advice"]["failed_run_ids"] == ["child-bad"]
+
+
+# LLM: markdown gate coverage keeps artifact-only readers from bypassing machine status.
+# 函数用途: 验证 SUBAGENT_DISPATCH.md 写出 completion gate，便于模型或人工读 markdown 时继续修复。
+def test_dispatch_markdown_exposes_completion_gate():
+    """SUBAGENT_DISPATCH.md 也要写清楚未全验收，避免模型读 markdown 后误报完成。"""
+    from agent_py_agent.agent.subagents.rendering_dispatch import render_dispatch_markdown
+
+    record = SimpleNamespace(
+        step="acceptance",
+        action="reject",
+        run_id="child-bad",
+        ok=False,
+        dry_run=True,
+        applied=False,
+        message="验收失败",
+        runner_summary="",
+        runner_created_child_count=0,
+        parent_acceptance_policy_ref="",
+        parent_acceptance_auto_execution_ref="",
+        parent_acceptance_followup_ref="",
+    )
+    report = SimpleNamespace(dry_run=False, generated_at=1.0, summary={"failed": 1}, records=[record])
+
+    rendered = render_dispatch_markdown(report)
+
+    assert "## Completion Gate" in rendered
+    assert "status: not_complete" in rendered
+    assert "must_not_report_done: true" in rendered
+    assert "blocking_run_ids: child-bad" in rendered

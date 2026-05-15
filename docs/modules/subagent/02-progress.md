@@ -1422,3 +1422,13 @@
 - 已测试：parent acceptance repair、artifact parser、empty report、workspace root、tool-context summary focused suite 通过；ruff 通过；strict code-size 已清零 `hard=0 high-risk=0 soft=0`。
 - 已追加测试：dispatch capability follow-up、task-local progress、HTML artifact integrity、tool-loop closeout、runner prompt contract、runner result repair action focused suite 通过。
 - 下一步：重跑一个完整 repair-loop 真实 E2E，确认 root 会按 `parent_acceptance_repair_advice` / `artifact_integrity_repair_advice` 新派修复小傻妞，修复后重新父级验收。
+
+## 2026-05-16 Task 17 多层真实 E2E 收口
+- 中文说明：用普通自然语言任务重新跑“东南亚 B2B SaaS 市场进入策略”真实 E2E，验证 root -> 小傻妞 -> 小小傻妞 -> 小小小傻妞的链路，不由外层直接替下层干活。
+- 已修正：MiniMax/API gateway 的 EOF、remote disconnected、proxy tunnel 503/502/504 等 pre-response 网络抖动会按 provider transient 做有限重试；timeout 仍按 timeout 分类。
+- 已修正：顶层 `dispatch_subagents` 完成后不再直接返回内部状态表，而是让 root 再做一轮自然语言综合；runner 内部 `output.json` 的本地收口仍保留。
+- 已修正：`subagent_board` 和 live summary 会暴露 `deliverable_artifact_refs / deliverable_evidence_refs`，父级无需猜 `task_dir` 下的报告文件名。
+- 已修正：`dispatch_subagents` 顶层和 `SUBAGENT_DISPATCH.md` 增加 completion gate：`completion_status / must_not_report_done / blocking_run_ids / parent_acceptance_repair_advice`。records 外置后，root 也能先看到“还不能报完成”。
+- 真实 E2E：`my-agent-task17-20260516-035520.log` 通过；10 个 run 全部 `DONE/VERIFIED`，最终写出 `final_report.md`，覆盖首选国家、备选顺序、渠道、定价、本地化、风险和 6 个月行动计划。
+- 已测试：gateway transient、dispatch payload、board refs、tool-context summary、tool-loop closeout、natural language E2E focused tests 通过；ruff touched files 通过。
+- 剩余观察：root 仍会先读几份正文再派工；模型最终汇报里偶尔会把“10 个 run”描述成更大的“3+9”，后续要继续用 kernel/board 机器事实纠偏展示。

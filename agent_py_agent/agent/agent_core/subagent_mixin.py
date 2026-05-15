@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 
-from ..backends import is_provider_timeout_error
+from ..backends import is_provider_timeout_error, is_provider_transient_error
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..subagent import (
@@ -264,11 +264,13 @@ class SimpleAgentSubagentMixin(
     pass
 
 
-# LLM: _subagent_run_failure_type keeps provider timeout recovery distinct from generic runner crashes.
-# 函数用途: 把模型接口超时写成可检索的 failure_type，便于父级恢复和动作计划识别。
+# LLM: _subagent_run_failure_type keeps provider failures distinct from generic runner crashes.
+# 函数用途: 把模型接口超时/临时断连写成可检索的 failure_type，便于父级恢复和动作计划识别。
 def _subagent_run_failure_type(exc: BaseException) -> str:
     if is_provider_timeout_error(exc):
         return "provider_timeout"
+    if is_provider_transient_error(exc):
+        return "transient_error"
     return "runner_error"
 
 

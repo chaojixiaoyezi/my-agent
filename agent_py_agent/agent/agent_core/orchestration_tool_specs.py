@@ -9,6 +9,7 @@ from ..tools import ToolSpec
 _CREATE_USE_CASES = [
     "用户要求拆分任务、派多个子代理、开工单或让子代理分别处理事项",
     "需要把聊天里的计划落盘，后续由 dispatch_subagents 推进和验收",
+    "材料很多且用户要求派工时，先读 README/目标/评分/目录等最小必要信息，再用 items/tasks 派小傻妞分别读取和分析正文",
 ]
 _CREATE_KEYWORDS = ["子代理", "派工", "拆分", "工单", "任务", "subagent", "delegate", "spawn", "assign"]
 _CREATE_PARAMETERS = {
@@ -39,6 +40,8 @@ _CREATE_PARAMETER_DETAILS = {
         "[{\"goal\":\"研究市场\",\"role\":\"worker\",\"agent_name\":\"小傻妞-市场\"},"
         "{\"goal\":\"研究竞争\",\"role\":\"worker\",\"agent_name\":\"小傻妞-竞争\"}]。"
         "create_subagents 只创建任务记录；返回后要调用 dispatch_subagents 才会真实执行。"
+        "如果任务材料很多，不要由 root 先读完所有正文再派工；root 只读最小必要信息，"
+        "把具体正文、数据表和长报告的读取分析写进各 item 的 goal。"
     ),
     "tasks": "items 的兼容别名，字段规则相同。",
     "role": "优先用模板角色，而不是临时造小角色。可用角色模板索引：\n{role_template_index}",

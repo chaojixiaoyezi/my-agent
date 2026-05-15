@@ -15,13 +15,16 @@ from .models import (
     VerificationEvidence,
 )
 from .parsing import _normalize_runner_items, _split_allowed_items, _string_dict, _string_list
-from .result_artifact_evidence import merge_artifact_evidence
+from .result_artifact_evidence import merge_artifact_evidence, normalize_artifact_items
 from .result_structured_evidence import (
     process_evidence_items,
     process_evidence_packets,
     process_findings,
 )
 from .utils import _merge_list, _new_id
+
+# LLM: artifact refs are normalized before merge so parent agents can read durable task-local paths.
+# 函数用途: 本文件合并 structured output 时先把模型短路径修正为真实 artifact refs，再进入验收链路。
 
 
 # LLM: MergeActualToolsParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
@@ -216,6 +219,7 @@ def _process_structured_output(
     findings = process_findings(parsed, task, now)
     structured_request_count, created_request_ids = _create_capability_requests_from_parsed(task, parsed, now)
     normalized = _normalize_parsed_fields(parsed)
+    normalized["artifacts"] = normalize_artifact_items(task, normalized["artifacts"])
     evidence_packets = merge_artifact_evidence(
         task,
         normalized["artifacts"],

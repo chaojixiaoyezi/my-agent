@@ -7455,3 +7455,94 @@ This document is append-only. Record every real subagent E2E issue found during 
     - `test_task_local_write_progress_many_placeholder_links_prompts_batch_repair`
     - `test_replace_in_file_multiple_occurrences`
 - Status: fixed by focused tests; needs next real E2E to verify tool rounds drop substantially on repeated placeholder repairs.
+
+## 2026-05-16 Task 17 Multi-layer Market Strategy E2E
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用/third-party-eval/runs/my-agent/task_17/agent_subagent_eval_suite/task_17_hierarchical_agents_sea_market`
+  - Runner script: `/Users/example/my-终端应用/third-party-eval/bin/run-my-agent-task17.sh`
+  - Model backend: `anthropic_compatible`
+  - Model name: `MiniMax-M2.7`
+  - User-style prompt: 普通自然语言要求“组织多层小傻妞研究东南亚 B2B SaaS 市场进入策略”，没有要求用户手写专业 dispatch/refs 术语。
+
+### Finding 128: Provider transient network failures need provider-level retry
+
+- Symptom:
+  - MiniMax/API gateway 偶发 EOF、remote disconnected、proxy tunnel 503。
+  - 旧行为会把这类网络抖动当成普通失败，子代理直接失败或被接管。
+- Root cause:
+  - provider pre-response network errors 没有统一分类；timeout 和 transient network failures 混在一起。
+- Fix:
+  - 新增 `ProviderTransientError` 和 `is_provider_transient_error()`。
+  - `gateway_helpers` 对 EOF、连接重置、broken pipe、proxy tunnel 503/502/504 等 retryable 网络错误做有限重试。
+  - timeout 仍保持 `ProviderTimeoutError`，不和 transient retry 混用。
+- Verification:
+  - `agent_py_agent/tests/test_gateway_helpers.py`
+  - `test_subagent_run_failure_classifies_provider_transient`
+  - `test_subagent_run_failure_classifies_provider_timeout`
+- Status: solved.
+
+### Finding 129: Root should synthesize after dispatch, not return raw deterministic table
+
+- Symptom:
+  - 第一轮完整 task17 跑到 `9 DONE / 9 VERIFIED`，但 root 直接返回内部状态表，缺少自然语言最终交付口吻。
+- Root cause:
+  - 顶层 `dispatch_subagents` 完成后被 deterministic closeout 抢先收口，root 没有再进入一轮模型综合。
+- Fix:
+  - `completion_response_after_tool_round()` 只对 subagent runner 的 `output.json` 做本地短路；顶层 dispatch 完成后返回 `None`，让 root 再综合成正常用户可读答复。
+  - 工具上限/空模型回复兜底仍保留 deterministic closeout。
+- Verification:
+  - `test_tool_loop_subagent_closeout.py`
+  - `test_subagent_natural_language_e2e.py`
+- Status: solved.
+
+### Finding 130: Board/dispatch did not surface artifact refs early enough
+
+- Symptom:
+  - root 看见子代理完成后，曾去猜 `data/subagents/tasks/...`、`MARKET_ENV_REPORT.md`、`strategy_report.md` 等路径。
+- Root cause:
+  - `subagent_board` 行里没有直接暴露 `artifact_refs/evidence_refs`。
+  - 大型 `subagent_board` 输出被外置后，live prompt 摘要只保留 record count / board path，未保留可读产物 refs。
+- Fix:
+  - `SubAgentBoardItem` 增加 bounded `artifact_refs` 和 `evidence_refs`。
+  - `subagent_board` 顶层增加 `deliverable_artifact_refs` / `deliverable_evidence_refs`。
+  - orchestration live summary 在大输出外置后仍保留这些 refs，并提示“先用 refs，不要猜 task_dir child paths”。
+- Verification:
+  - `test_board_payload_includes_deliverable_refs_for_completed_children`
+  - `test_subagent_board_externalized_result_keeps_deliverable_refs`
+- Status: solved.
+
+### Finding 131: Dispatch reject records must be visible before final reporting
+
+- Symptom:
+  - 一轮真实 E2E 中，root 先写了 `final_report.md` 并汇报完成，随后系统状态提示又追加“其实 9 个 run 里只有 7 个 verified，还有 2 个 blocker”。
+  - 中文解释：兜底防误报有效，但用户体验仍像“先报喜再改口”。
+- Root cause:
+  - `parent_acceptance_repair_advice` 原本埋在 `records[]` 里；dispatch 输出外置后 live prompt 只看到 record count。
+  - `SUBAGENT_DISPATCH.md` 顶部没有 completion gate，root 读 markdown 时容易只看见已有产物。
+- Fix:
+  - `dispatch_subagents` 顶层增加 `completion_status`、`must_not_report_done`、`blocking_run_ids`、`parent_acceptance_repair_advice`。
+  - `SUBAGENT_DISPATCH.md` 增加 `Completion Gate` 区块，明确 `not_complete / must_not_report_done / blocking_run_ids`。
+  - tool-context summary 把这些顶层字段保留下来，records 外置也不会丢。
+- Verification:
+  - `test_dispatch_payload_exposes_blocking_gate_and_refs`
+  - `test_dispatch_markdown_exposes_completion_gate`
+  - `test_dispatch_externalized_result_keeps_top_level_completion_gate`
+- Status: solved.
+
+### Result: Clean multi-layer E2E passed after fixes
+
+- Latest run:
+  - Log: `/Users/example/my-终端应用/third-party-eval/logs/my-agent-task17-20260516-035520.log`
+  - Final deliverable: `/Users/example/my-终端应用/third-party-eval/runs/my-agent/task_17/agent_subagent_eval_suite/task_17_hierarchical_agents_sea_market/final_report.md`
+- Observed behavior:
+  - root 创建 3 个小傻妞：`小傻妞-市场环境`、`小傻妞-竞争格局`、`小傻妞-进入策略`。
+  - 下面继续创建小小傻妞，其中进入策略分支继续创建小小小傻妞。
+  - 最终 10 个 run 全部 `DONE / VERIFIED`。
+  - root 写出中文策略报告，首选国家为越南，包含备选顺序、渠道、定价、本地化、风险和 6 个月行动计划。
+- 中文解释:
+  - 这轮不是我们手动替小傻妞干活，而是外层只给 root 普通任务，root 自己创建下层、下层继续创建下层，最后 root 汇总。
+  - 目前 task17 链路证明：多层派工、真实模型执行、产物写入、父级验收、最终汇报已经能完整跑通。
+- Remaining gap:
+  - root 仍会先读几份正文再派工，后续还要继续优化“少读正文、先派 refs-only 小傻妞”。
+  - 有些模型生成的层级数量描述会偏大，例如把 10 个 run 说成“3 个子代理 + 9 个孙代理”；状态事实以 `task.json` / board / dispatch report 为准。
