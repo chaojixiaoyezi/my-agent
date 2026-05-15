@@ -30,6 +30,7 @@ def render_dispatch_markdown(report: DispatchReport) -> str:
     ]
     for key in sorted(report.summary):
         lines.append(f"- {key}: {report.summary[key]}")
+    lines.extend(_dispatch_completion_gate_lines(report.records))
     lines.extend(["", "## Records", ""])
     if not report.records:
         lines.append("- 暂无调度动作")
@@ -50,6 +51,40 @@ def render_dispatch_markdown(report: DispatchReport) -> str:
         if record.parent_acceptance_followup_ref:
             lines.append(_dispatch_acceptance_followup_line(record))
     return "\n".join(lines) + "\n"
+
+
+# LLM: _dispatch_completion_gate_lines prevents markdown readers from reporting done while reject records remain.
+# 函数用途: 在 SUBAGENT_DISPATCH.md 顶部写清楚是否允许收尾，避免 root 读 markdown 后忽略阻塞 run。
+def _dispatch_completion_gate_lines(records: list[object]) -> list[str]:
+    blockers = _dispatch_blocking_run_ids(records)
+    lines = ["", "## Completion Gate", ""]
+    if not blockers:
+        lines.extend([
+            "- status: complete_or_no_blockers",
+            "- must_not_report_done: false",
+            "- blocking_run_ids: (none)",
+        ])
+        return lines
+    lines.extend([
+        "- status: not_complete",
+        "- must_not_report_done: true",
+        f"- blocking_run_ids: {', '.join(blockers)}",
+        "- next_action: repair_or_continue_blocking_run_ids before final user-facing completion.",
+    ])
+    return lines
+
+
+# LLM: _dispatch_blocking_run_ids derives the gate from failed dispatch records only.
+# 函数用途: 收集 reject/fail 记录里的 run_id；空 run_id 的全局错误不污染任务 id 列表。
+def _dispatch_blocking_run_ids(records: list[object]) -> list[str]:
+    ids: list[str] = []
+    for record in records:
+        if bool(getattr(record, "ok", True)):
+            continue
+        run_id = str(getattr(record, "run_id", "") or "").strip()
+        if run_id and run_id not in ids:
+            ids.append(run_id)
+    return ids[:20]
 
 
 # LLM: _dispatch_runner_line shows nested runner effects compactly for humans and LLM readers.

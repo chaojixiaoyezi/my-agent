@@ -10,10 +10,22 @@ class ProviderTimeoutError(RuntimeError):
     pass
 
 
+# LLM: ProviderTransientError marks provider/network flakes that can be retried or recovered without blaming task logic.
+# 类用途: 表示模型接口临时断开、连接重置、EOF 等可恢复网络问题；子代理父级可据此重试或接管，而不是把任务当成业务失败。
+class ProviderTransientError(RuntimeError):
+    pass
+
+
 # LLM: is_provider_timeout_error lets higher layers avoid string-matching backend messages.
 # 函数用途: 判断异常是否是模型接口超时；以后新增 provider 子类时只需要改这里。
 def is_provider_timeout_error(exc: BaseException) -> bool:
     return isinstance(exc, ProviderTimeoutError)
+
+
+# LLM: is_provider_transient_error lets recovery distinguish provider flakes from code/permission failures.
+# 函数用途: 判断异常是否是模型接口临时网络故障；用于子代理恢复和重试分类，避免靠字符串猜错误类型。
+def is_provider_transient_error(exc: BaseException) -> bool:
+    return isinstance(exc, ProviderTransientError)
 
 
 # LLM: provider_timeout_report renders a compact operator-facing timeout handoff.

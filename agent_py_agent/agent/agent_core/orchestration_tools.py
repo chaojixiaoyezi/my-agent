@@ -21,9 +21,11 @@ from .orchestration_board_payload import (
     board_actionable_run_ids,
     board_completion_status,
     board_kernel_snapshot_payload,
-    board_status_filter,
-    clip_board_text,
-    scoped_board_items,
+)
+from .orchestration_board_tool_payload import (
+    board_items_for_payload,
+    board_payload_item,
+    board_ref_preview,
 )
 from .orchestration_create_constraints import (
     ambiguous_repeated_product_goal_error,
@@ -259,47 +261,20 @@ class SubagentBoardTool(BaseTool):
     # 函数用途: 推进execute的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         limit = _positive_int(params.get("limit"), default=10)
-        status_filter = board_status_filter(params.get("status"))
         board = self.agent.subagents.write_board(
             options=SubAgentBoardOptions(recent_limit=max(1, limit)),
         )
-        items = scoped_board_items(self.agent, board.items)
-        if status_filter:
-            items = [item for item in items if item.status.upper() == status_filter]
-        items = items[:limit]
+        items = board_items_for_payload(self.agent, board.items, params, limit)
         payload = {
             "summary": board.summary,
             "completion_status": board_completion_status(items),
             "kernel_snapshot": board_kernel_snapshot_payload(self.agent, items),
             "returned": len(items),
             "actionable_run_ids": board_actionable_run_ids(items),
+            "deliverable_artifact_refs": board_ref_preview(items, "artifact_refs"),
+            "deliverable_evidence_refs": board_ref_preview(items, "evidence_refs"),
             "subagent_workspace": str(self.agent.subagents.workspace),
-            "items": [
-                {
-                    "id": item.id,
-                    "root_id": str(getattr(item, "root_id", "") or ""),
-                    "parent_id": str(getattr(item, "parent_id", "") or ""),
-                    "depth": int(getattr(item, "depth", 0) or 0),
-                    "agent_name": str(getattr(item, "agent_name", "") or ""),
-                    "role": str(getattr(item, "role", "") or ""),
-                    "goal": clip_board_text(item.goal),
-                    "status": item.status,
-                    "verification_status": item.verification_status,
-                    "channel_status": item.channel_status,
-                    "risk_flags": item.risk_flags,
-                    "evidence_count": item.evidence_count,
-                    "child_count": int(getattr(item, "child_count", 0) or 0),
-                    "child_status_counts": dict(getattr(item, "child_status_counts", {}) or {}),
-                    "open_request_count": item.open_request_count,
-                    "open_gap_count": item.open_gap_count,
-                    "latest_summary": clip_board_text(str(getattr(item, "latest_summary", "") or ""), limit=180),
-                    "blocker_count": int(getattr(item, "blocker_count", 0) or 0),
-                    "target_tokens": list(getattr(item, "target_tokens", []) or []),
-                    "task_dir": item.task_dir,
-                    "output_json": str(getattr(item, "output_json", "") or ""),
-                }
-                for item in items
-            ],
+            "items": [board_payload_item(item) for item in items],
             "board_json": str(self.agent.subagents.workspace / "subagent_board.json"),
             "board_md": str(self.agent.subagents.workspace / "SUBAGENT_BOARD.md"),
         }

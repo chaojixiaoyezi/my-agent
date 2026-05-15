@@ -88,6 +88,28 @@ class _EmptyAfterToolBackend:
         raise RuntimeError("Anthropic-compatible 流式响应没有文本内容")
 
 
+# LLM: _EmptyThenFinalAfterToolBackend verifies blank provider text is recoverable without losing tool facts.
+# 类用途: 第一次请求工具、第二次空响应、第三次根据恢复上下文正常继续收口。
+class _EmptyThenFinalAfterToolBackend:
+    name = "fake_empty_then_final_after_tool_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"read_file","path":"notes.txt"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        if self.calls == 2:
+            raise RuntimeError("Anthropic-compatible 流式响应没有文本内容")
+        assert "上一轮模型接口返回了空文本" in prompt
+        assert "hello empty repair" in prompt
+        return ModelResponse(text="已根据工具结果继续完成。", backend=self.name)
+
+
 def test_tool_loop_and_prompt_transcript():
     """LLM: verify that a tool call round feeds tool output back to the model for a final answer.
 
@@ -120,7 +142,24 @@ def test_tool_loop_falls_back_when_final_model_response_is_empty_after_tool():
 
         assert "模型接口最终总结返回空文本" in result.response
         assert result.executed_tools == ["read_file"]
-        assert agent.backend.calls == 2
+        assert agent.backend.calls == 3
+
+
+# LLM: provider blank text after tools should get one continuation attempt before deterministic fallback.
+# 函数用途: 覆盖真实 MiniMax 空文本后继续生成的恢复路径，避免读完材料就直接退出。
+def test_tool_loop_retries_once_when_final_model_response_is_empty_after_tool():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        (workspace / "notes.txt").write_text("hello empty repair", encoding="utf-8")
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = _EmptyThenFinalAfterToolBackend()
+
+        result = agent.run("读取 notes 后继续总结", save=False, allowed_tools=["read_file"])
+
+        assert result.response == "已根据工具结果继续完成。"
+        assert result.executed_tools == ["read_file"]
+        assert agent.backend.calls == 3
 
 
 # LLM: max_tool_rounds=0 should mean unlimited, while the model can still stop itself.

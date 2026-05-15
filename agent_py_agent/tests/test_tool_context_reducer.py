@@ -123,6 +123,72 @@ def test_read_artifact_dispatch_content_is_summarized_for_live_prompt():
     assert len(rendered) < 1600
 
 
+# LLM: Board externalization must keep deliverable refs visible to the root synthesis turn.
+# 函数用途: subagent_board 输出过大时，live prompt 仍给出可读产物 refs，避免模型乱猜 task_dir。
+def test_subagent_board_externalized_result_keeps_deliverable_refs():
+    output = json.dumps(
+        {
+            "summary": {"DONE": 2, "VERIFIED": 2},
+            "deliverable_artifact_refs": ["/tmp/site/final_report.md"],
+            "deliverable_evidence_refs": ["/tmp/site/evidence.json"],
+            "items": [
+                {
+                    "id": "child-1",
+                    "status": "DONE",
+                    "artifact_refs": ["/tmp/site/final_report.md"],
+                    "evidence_refs": ["/tmp/site/evidence.json"],
+                    "goal": "x" * 2000,
+                }
+            ],
+        }
+    )
+
+    rendered = render_tool_result_for_live_prompt(
+        ToolExecutionResult("subagent_board", True, output),
+        _dispatch_externalized_archive_record(output),
+    )
+
+    assert "deliverable_artifact_refs" in rendered
+    assert "/tmp/site/final_report.md" in rendered
+    assert "refs_policy" in rendered
+    assert "do not guess task_dir child paths" in rendered
+    assert '"goal"' not in rendered
+
+
+# LLM: Top-level dispatch completion gates must survive output externalization.
+# 函数用途: dispatch 大输出被外置时，root 仍能看到 not_complete 和修复建议，避免先报完成。
+def test_dispatch_externalized_result_keeps_top_level_completion_gate():
+    output = json.dumps(
+        {
+            "completion_status": {
+                "status": "not_complete",
+                "blocking_run_ids": ["child-bad"],
+                "must_not_report_done": True,
+            },
+            "must_not_report_done": True,
+            "blocking_run_ids": ["child-bad"],
+            "next_action": "repair_or_continue_blocking_run_ids",
+            "parent_acceptance_repair_advice": {
+                "failed_run_ids": ["child-bad"],
+                "suggested_tool_call": {"tool": "create_subagents", "goal": "修复 child-bad"},
+            },
+            "records": [{"message": "z" * 2000}],
+        }
+    )
+
+    rendered = render_tool_result_for_live_prompt(
+        ToolExecutionResult("dispatch_subagents", True, output),
+        _dispatch_externalized_archive_record(output),
+    )
+
+    assert "not_complete" in rendered
+    assert "must_not_report_done" in rendered
+    assert "child-bad" in rendered
+    assert "repair_or_continue_blocking_run_ids" in rendered
+    assert "create_subagents" in rendered
+    assert "records" not in rendered
+
+
 # LLM: Parent acceptance repair advice must survive dispatch output externalization.
 # 函数用途: dispatch_subagents 输出过大时，live prompt 摘要仍要保留修复子代理建议，而不是丢掉测试失败线索。
 def test_dispatch_externalized_result_keeps_parent_acceptance_repair_advice():

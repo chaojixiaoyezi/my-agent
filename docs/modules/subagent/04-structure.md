@@ -38,6 +38,9 @@
 - `subagents/parsing.py` 保留旧 parser 和旧导入入口；`subagents/parsing_envelope.py` 负责把旧 `[SUBAGENT_RESULT]` 转为 `SubagentResultEnvelope`。真实工具列表由执行层传入，模型 `used_tools` 和 summary 不作为权威工具事实。
 - `create_subagents` 与 runner 内 `schedule_child_subagents` 会在 JSON 响应里附带 `typed_envelope.kind=subagent_schedule`，多层派工通过 parent/root/created refs 串联；这只是 refs-first 调度事实，不代表 child 已完成。
 - `dispatch_subagents` 现在也会附带 `typed_envelope.kind=subagent_dispatch`，把 `actionable_run_ids`、`recovery_run_ids`、dispatch 报告 refs 和状态摘要作为稳定控制字段；父级推进和恢复优先读这些字段，不从自然语言 `message` 里猜 run id。
+- `dispatch_subagents` / `subagent_board` 现在把 `completion_status`、`must_not_report_done`、`blocking_run_ids`、`deliverable_artifact_refs` 和 `deliverable_evidence_refs` 放到顶层；大输出被外置后，`tool_context_orchestration_summary.py` 仍保留这些机器字段，root 必须先处理阻塞 run，再基于 artifact/evidence refs 汇总，不能只因为某个报告文件存在就向用户报完成。
+- runner artifact refs 现在会在 `result_structured.py` / `result_structured_evidence.py` / `result_artifact_evidence.py` 中归一化：模型写短路径时，系统会优先在当前 task/output/report/allowed_write_roots 内解析成真实路径；找不到时保留原 ref，不读取正文、不扫描整机。这样父级验收读的是 durable refs，而不是自然语言里的猜测路径。
+- Provider transient error 第一片接入 backend/gateway：EOF、remote disconnected、connection reset、broken pipe、proxy tunnel 503、bad gateway、gateway timeout 这类“模型调用前连接抖动”会有限重试；耗尽后标记 `transient_error`，子代理状态保留可恢复失败类型。模型超时仍走 timeout 语义，不被当成普通瞬断重试。
 - `acceptance_helpers/evidence_acceptance_findings.py` 与 service 版 evidence findings 已去掉 summary 关键词推断；read/write_file 验收只看系统工具事实和证据字段，避免自然语言自证。
 - Context Bundle v1 已接入执行上下文生成：`SubAgentTask` 会被压成实时工单包，写入旧 run 工单目录和 agent run workspace，runner prompt 只展示 gate 状态和 refs，不展开大型 artifact 正文。
 - Context Bundle v1 的 `workspace_refs` 现在包含 agent run workspace 的 task/checkpoint/summary/final_report/findings/timeline/compactions 和 shared refs；这些 refs 是父级状态、接管和 compact 接续的共同事实入口。

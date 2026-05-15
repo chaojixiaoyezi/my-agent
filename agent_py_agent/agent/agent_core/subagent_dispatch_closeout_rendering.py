@@ -10,7 +10,11 @@ from .subagent_dispatch_closeout_resolution import blocking_task_ids, done_verif
 # 函数用途: 从已验收任务生成用户可读收尾说明，列出 root、任务数和 output.json 引用。
 def dispatch_completion_text(tasks: list[object]) -> str:
     refs = _output_refs(tasks)
+    artifact_refs = _artifact_refs(tasks)
     lines = _dispatch_completion_header(tasks)
+    if artifact_refs:
+        lines.append("- artifact_refs:")
+        lines.extend(f"  - {ref}" for ref in artifact_refs[:12])
     if refs:
         lines.append("- output_json_refs:")
         lines.extend(f"  - {ref}" for ref in refs[:12])
@@ -183,3 +187,41 @@ def _output_refs(tasks: list[object]) -> list[str]:
         if ref and ref not in refs:
             refs.append(ref)
     return refs
+
+
+# LLM: _artifact_refs exposes deliverable refs in deterministic closeout without reading bodies.
+# 函数用途: 收集已完成子代理登记的业务产物路径，让 root 本地收口也能交付可读报告 refs。
+def _artifact_refs(tasks: list[object]) -> list[str]:
+    refs: list[str] = []
+    for task in sorted(tasks, key=_task_sort_key):
+        _append_user_artifact_refs(refs, getattr(task, "artifact_refs", []) or [])
+    return refs
+
+
+# LLM: _append_user_artifact_refs keeps filtering separate from sorted task traversal.
+# 函数用途: 只追加可交付产物 ref，过滤 output/checkpoint/report 等内部状态文件。
+def _append_user_artifact_refs(target: list[str], refs: list[object]) -> None:
+    for ref in refs:
+        text = str(ref or "").strip()
+        if text and _looks_like_user_artifact(text) and text not in target:
+            target.append(text)
+
+
+# LLM: _looks_like_user_artifact filters internal state refs from closeout deliverable refs.
+# 函数用途: 避免把 output.json、checkpoint、运行审计报告当作用户最终产物展示。
+def _looks_like_user_artifact(ref: str) -> bool:
+    text = str(ref or "").strip().replace("\\", "/")
+    if not text:
+        return False
+    lower = text.lower()
+    if lower.endswith("/output.json") or lower == "output.json":
+        return False
+    blocked_parts = (
+        "/reports/",
+        "/memory_archive/",
+        "/agent_run/",
+        "/compactions/",
+        "/checkpoint",
+        "/takeover_readiness",
+    )
+    return not any(part in lower for part in blocked_parts)

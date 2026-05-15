@@ -19,8 +19,10 @@ from .backends import (  # noqa: F401
     ModelResponse,
     OpenAICompatibleBackend,
     ProviderTimeoutError,
+    ProviderTransientError,
     get_backend,
     is_provider_timeout_error,
+    is_provider_transient_error,
     provider_timeout_report,
 )
 
@@ -33,7 +35,9 @@ __all__ = [
     "ModelResponse",
     "OpenAICompatibleBackend",
     "ProviderTimeoutError",
+    "ProviderTransientError",
     "get_backend",
     "is_provider_timeout_error",
+    "is_provider_transient_error",
     "provider_timeout_report",
 ]

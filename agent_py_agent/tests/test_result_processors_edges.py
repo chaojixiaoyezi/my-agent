@@ -118,6 +118,71 @@ def test_process_structured_output_synthesizes_artifact_evidence_packet(mock_tas
     assert mock_task.evidence_packets[0].claim == "artifact produced: 包含精确内容 coordinator-seed-ok"
 
 
+# LLM: short artifact paths from real runners should become durable refs before parent closeout.
+# 函数用途: 覆盖 coordinator 输出 market_synthesis_report.md 这类短路径时，任务状态保存真实文件路径。
+def test_process_structured_output_normalizes_relative_artifact_refs(mock_task, tmp_path):
+    task_dir = tmp_path / "subagent-run"
+    task_dir.mkdir()
+    artifact = task_dir / "market_synthesis_report.md"
+    artifact.write_text("report", encoding="utf-8")
+    mock_task.task_dir = str(task_dir)
+    mock_task.output_dir = str(task_dir / "output")
+    mock_task.reports_dir = str(task_dir / "reports")
+    mock_task.task_workspace_artifacts_dir = ""
+    mock_task.agent_run_artifacts_dir = ""
+    mock_task.data_dir = ""
+    mock_task.scratch_dir = ""
+    mock_task.allowed_write_roots = []
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        artifacts=[{"path": "market_synthesis_report.md", "kind": "report", "summary": "market"}],
+    )
+
+    result = _process_structured_output(mock_task, parsed, 123456.0, None)
+
+    assert result["artifacts"][0]["path"] == str(artifact)
+    assert result["evidence_packets"][0]["artifact_refs"] == [str(artifact)]
+    assert mock_task.artifact_refs == [str(artifact)]
+
+
+# LLM: model-provided evidence packet refs need the same path normalization as artifacts.
+# 函数用途: 覆盖 evidence_packets.artifact_refs 直接写短路径时，父级 closeout 不再出现相对/绝对混用。
+def test_process_structured_output_normalizes_evidence_packet_artifact_refs(mock_task, tmp_path):
+    task_dir = tmp_path / "subagent-run"
+    output_dir = task_dir / "output"
+    output_dir.mkdir(parents=True)
+    artifact = output_dir / "entry_strategy.md"
+    artifact.write_text("strategy", encoding="utf-8")
+    mock_task.task_dir = str(task_dir)
+    mock_task.output_dir = str(output_dir)
+    mock_task.reports_dir = str(task_dir / "reports")
+    mock_task.task_workspace_artifacts_dir = ""
+    mock_task.agent_run_artifacts_dir = ""
+    mock_task.data_dir = ""
+    mock_task.scratch_dir = ""
+    mock_task.allowed_write_roots = []
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        evidence_packets=[{
+            "claim": "策略文件已完成",
+            "checked_scope": "output",
+            "artifact_refs": ["output/entry_strategy.md"],
+            "confidence": 0.9,
+        }],
+    )
+
+    result = _process_structured_output(mock_task, parsed, 123456.0, None)
+
+    assert result["evidence_packets"][0]["artifact_refs"] == [str(artifact)]
+    assert mock_task.artifact_refs == [str(artifact)]
+
+
 def _lessons_payload_context(mock_task, parsed: SubAgentParsedOutput) -> OutputPayloadContext:
     lessons = ["经验1", "经验2"]
     next_actions = ["行动1", "行动2", "行动3"]

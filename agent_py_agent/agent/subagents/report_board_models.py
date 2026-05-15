@@ -40,6 +40,10 @@ class SubAgentBoardItem:
     role: str = ""
     # LLM: target_tokens expose concrete artifact ownership without reading artifact bodies.
     target_tokens: list[str] = field(default_factory=list)
+    # LLM: artifact refs make completed work directly recoverable from board rows without path guessing.
+    artifact_refs: list[str] = field(default_factory=list)
+    # LLM: evidence refs keep verification/supporting facts visible without expanding artifact bodies.
+    evidence_refs: list[str] = field(default_factory=list)
     # LLM: board rows expose task-tree evidence and child state without reading logs.
     evidence_packet_count: int = 0
     finding_count: int = 0

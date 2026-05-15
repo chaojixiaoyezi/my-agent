@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from agent_py_agent.agent.backend import BaseBackend, ModelResponse
-from agent_py_agent.agent.backends.errors import ProviderTimeoutError
+from agent_py_agent.agent.backends.errors import ProviderTimeoutError, ProviderTransientError
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagents.manager import SubAgentManager
@@ -75,6 +75,15 @@ class _ProviderTimeoutBackend(BaseBackend):
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         raise ProviderTimeoutError("模型接口请求超时: request_timeout=17s")
+
+
+# LLM: _ProviderTransientBackend lets runner tests exercise provider flake classification without real network calls.
+# 类用途: 测试模型接口临时断连时，子代理失败类型会进入可恢复 transient_error，而不是普通 runner_error。
+class _ProviderTransientBackend(BaseBackend):
+    name = "provider_transient_backend"
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        raise ProviderTransientError("网络请求失败: 模型接口临时断开")
 
 
 def test_subagent_debug_trace_is_off_by_default(tmp_path):
@@ -499,6 +508,37 @@ def test_subagent_run_failure_classifies_provider_timeout(tmp_path):
         if record["event_type"] == "runner_model_request_failed"
     )
     assert failed["error_type"] == "ProviderTimeoutError"
+
+
+# LLM: provider transient errors should stay retryable/recoverable instead of looking like task logic failures.
+# 函数用途: 确认子代理模型接口临时断连会写成 transient_error，便于父级按恢复/重跑策略处理。
+def test_subagent_run_failure_classifies_provider_transient(tmp_path):
+    cfg = AgentConfig(
+        enable_tools=True,
+        model_backend="echo",
+        subagent_workspace="subs",
+        subagent_debug_trace_level=3,
+    )
+    agent = SimpleAgent(cfg, tmp_path)
+    agent.backend = _ProviderTransientBackend()
+    task = agent.subagents.create_run(
+        goal="observe provider transient failure",
+        thought="模型接口会临时断连。",
+        plan=["call model"],
+        allowed_tools=[],
+    )
+
+    result = agent.run_subagent(task.id, dry_run=False, probe=False)
+    recorded = agent.subagents.load(task.id)
+
+    assert not result.ok
+    assert recorded.failure_type == "transient_error"
+    assert "模型接口临时断开" in result.message
+    failed = next(
+        record for record in _trace_records(tmp_path / "subs")
+        if record["event_type"] == "runner_model_request_failed"
+    )
+    assert failed["error_type"] == "ProviderTransientError"
 
 
 def _read_debug_detail(path_text: str) -> str:

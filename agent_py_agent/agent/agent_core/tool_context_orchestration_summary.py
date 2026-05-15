@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-_ORCHESTRATION_TOOLS = {"dispatch_subagents", "schedule_child_subagents", "subagent_board"}
+_ORCHESTRATION_TOOLS = {"create_subagents", "dispatch_subagents", "schedule_child_subagents", "subagent_board"}
 _MAX_INLINE_JSON = 900
 _MAX_INLINE_TEXT = 500
 
@@ -65,6 +65,7 @@ def _render_orchestration_summary(
     ]
     lines.extend(_direct_children_lines(payload.get("direct_children")))
     lines.extend(_top_level_action_lines(payload))
+    lines.extend(_ref_lines(payload))
     lines.extend(_summary_lines(payload))
     lines.extend(_archive_pointer_lines(archive_record, include_read_hint=False))
     return "\n".join(lines)
@@ -127,6 +128,14 @@ def _top_level_action_lines(payload: dict[str, Any]) -> list[str]:
     keys = (
         "blocked",
         "reason",
+        "created",
+        "ids",
+        "allowed_tools",
+        "subagent_workspace",
+        "completion_status",
+        "must_not_report_done",
+        "blocking_run_ids",
+        "parent_acceptance_repair_advice",
         "created_run_ids",
         "planned_count",
         "scheduling_warnings",
@@ -153,6 +162,71 @@ def _summary_lines(payload: dict[str, Any]) -> list[str]:
     if payload.get("dispatch_md"):
         lines.append(f"- dispatch_md: {payload.get('dispatch_md')}")
     return lines
+
+
+# LLM: _ref_lines keeps completed child outputs visible after bulky board/dispatch payloads are archived.
+# 函数用途: 从调度 payload 顶层和 items[] 中提取 artifact/evidence refs，告诉模型直接读 refs，不要猜路径。
+def _ref_lines(payload: dict[str, Any]) -> list[str]:
+    artifact_refs = _refs_from_payload(payload, "deliverable_artifact_refs", item_key="artifact_refs")
+    evidence_refs = _refs_from_payload(payload, "deliverable_evidence_refs", item_key="evidence_refs")
+    lines: list[str] = []
+    if artifact_refs:
+        lines.append(f"- deliverable_artifact_refs: {_json_inline(artifact_refs)}")
+        lines.append("- refs_policy: use deliverable_artifact_refs/read_artifact first; do not guess task_dir child paths.")
+    if evidence_refs:
+        lines.append(f"- deliverable_evidence_refs: {_json_inline(evidence_refs)}")
+    return lines
+
+
+# LLM: _refs_from_payload handles both explicit top-level refs and older item-level board rows.
+# 函数用途: 向后兼容旧 payload；如果没有顶层 refs，就从 items[] 里收集对应字段。
+def _refs_from_payload(payload: dict[str, Any], top_key: str, *, item_key: str, limit: int = 12) -> list[str]:
+    refs = _string_refs(payload.get(top_key), limit=limit)
+    if refs:
+        return refs
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return []
+    collected: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if _collect_item_refs((collected, seen), item, item_key, limit):
+            return collected
+    return collected
+
+
+# LLM: _collect_item_refs is the item-level fallback for older board payloads.
+# 函数用途: 从单条 items[] 里追加唯一 ref；不是 dict 时直接跳过。
+def _collect_item_refs(collection: tuple[list[str], set[str]], item: object, item_key: str, limit: int) -> bool:
+    if not isinstance(item, dict):
+        return False
+    target, seen = collection
+    for ref in _string_refs(item.get(item_key), limit=limit):
+        if ref in seen:
+            continue
+        seen.add(ref)
+        target.append(ref)
+        if len(target) >= limit:
+            return True
+    return False
+
+
+# LLM: _string_refs bounds refs before they enter the live prompt.
+# 函数用途: 清洗 refs 列表，只保留非空字符串并做去重和数量限制。
+def _string_refs(value: object, *, limit: int) -> list[str]:
+    if not isinstance(value, list | tuple | set):
+        return []
+    refs: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        refs.append(text)
+        if len(refs) >= limit:
+            break
+    return refs
 
 
 # LLM: _strategy_preview keeps packet-first recovery visible after large dispatch outputs are archived.

@@ -12,11 +12,28 @@ import urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-from .errors import ProviderTimeoutError
+from .errors import ProviderTimeoutError, ProviderTransientError
 
 _RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 409, 425, 429, 502, 503, 504, 529})
 _RETRYABLE_HTTP_DELAYS_SECONDS = (2.0, 5.0, 15.0)
 _MAX_RETRY_AFTER_SECONDS = 30.0
+_RETRYABLE_NETWORK_ERROR_MARKERS = frozenset(
+    {
+        "unexpected_eof",
+        "unexpected eof",
+        "eof occurred",
+        "remote end closed",
+        "remote disconnected",
+        "tunnel connection failed",
+        "service unavailable",
+        "bad gateway",
+        "gateway timeout",
+        "connection reset",
+        "connection aborted",
+        "broken pipe",
+        "temporarily unavailable",
+    }
+)
 
 
 # LLM: GatewayRequest 属于模型后端请求的类边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
@@ -96,8 +113,8 @@ def _urllib_request(request: GatewayRequest) -> urllib.request.Request:
     )
 
 
-# LLM: _open_gateway_request retries only pre-response transient provider overloads so long tasks survive peak traffic.
-# 函数用途: 打开模型 HTTP 请求；对 429/529/503 等服务端临时繁忙错误做短暂重试，非临时错误仍原样抛出。
+# LLM: _open_gateway_request retries pre-response transient provider overloads and network disconnects.
+# 函数用途: 打开模型 HTTP 请求；对 429/529/503 和 EOF/远端断开等临时错误做短暂重试，非临时错误仍原样抛出。
 def _open_gateway_request(request: GatewayRequest):
     last_attempt = len(_RETRYABLE_HTTP_DELAYS_SECONDS)
     for attempt in range(last_attempt + 1):
@@ -107,8 +124,8 @@ def _open_gateway_request(request: GatewayRequest):
     raise RuntimeError("unreachable gateway retry state")
 
 
-# LLM: _gateway_request_attempt wraps one provider call and sleeps only for retryable HTTP errors.
-# 函数用途: 执行一次 gateway HTTP 请求；可重试错误返回 None，非可重试错误原样抛出。
+# LLM: _gateway_request_attempt wraps one provider call and sleeps only for retryable pre-response errors.
+# 函数用途: 执行一次 gateway HTTP 请求；可重试 HTTP/网络临时错误返回 None，非可重试错误原样抛出。
 def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt: int):
     req = _urllib_request(request)
     try:
@@ -118,6 +135,11 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
             raise
         time.sleep(_retry_delay_seconds(exc, attempt))
         return None
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        if not _should_retry_network_error(exc, attempt, last_attempt):
+            raise
+        time.sleep(_network_retry_delay_seconds(attempt))
+        return None
 
 
 # LLM: _should_retry_http_error keeps auth/schema errors fail-fast while retrying provider overload and gateway flakiness.
@@ -126,12 +148,25 @@ def _should_retry_http_error(exc: urllib.error.HTTPError, attempt: int, last_att
     return attempt < last_attempt and int(getattr(exc, "code", 0) or 0) in _RETRYABLE_HTTP_STATUS_CODES
 
 
+# LLM: _should_retry_network_error retries only provider-side disconnect shapes, never local timeout/auth/config failures.
+# 函数用途: 判断网络异常是否属于可短暂重试的模型服务临时断连；超时和 DNS/配置错误不在这里重试。
+def _should_retry_network_error(exc: BaseException, attempt: int, last_attempt: int) -> bool:
+    return attempt < last_attempt and _is_transient_network_error(exc)
+
+
 # LLM: _retry_delay_seconds honors Retry-After when providers send it, with a cap to avoid unbounded CLI stalls.
 # 函数用途: 计算 HTTP 临时失败后的等待秒数；没有 Retry-After 时使用短阶梯退避。
 def _retry_delay_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
     header_delay = _retry_after_header_seconds(exc)
     if header_delay is not None:
         return min(header_delay, _MAX_RETRY_AFTER_SECONDS)
+    index = min(attempt, len(_RETRYABLE_HTTP_DELAYS_SECONDS) - 1)
+    return _RETRYABLE_HTTP_DELAYS_SECONDS[index]
+
+
+# LLM: _network_retry_delay_seconds uses the same bounded retry cadence for provider disconnects.
+# 函数用途: 计算临时网络断连后的等待秒数；不读取 header，只用短阶梯退避。
+def _network_retry_delay_seconds(attempt: int) -> float:
     index = min(attempt, len(_RETRYABLE_HTTP_DELAYS_SECONDS) - 1)
     return _RETRYABLE_HTTP_DELAYS_SECONDS[index]
 
@@ -169,11 +204,18 @@ def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
 def _runtime_network_error(exc: BaseException, request: GatewayRequest) -> RuntimeError:
     parsed = urllib.parse.urlparse(request.url)
     host = parsed.netloc or parsed.path.split("/", 1)[0] or request.api_base
-    reason = getattr(exc, "reason", None) or str(exc) or exc.__class__.__name__
+    reason = _network_error_text(exc)
     if _is_timeout_exception(exc):
         return ProviderTimeoutError(
             "模型接口请求超时: "
             f"host={host} request_timeout={request.timeout}s url={request.url} "
+            f"底层错误: {reason}"
+        )
+    if _is_transient_network_error(exc):
+        return ProviderTransientError(
+            "网络请求失败: "
+            f"模型接口 {host} 临时断开或连接被重置（{request.url}）。"
+            "本次请求可由重试/恢复/接管继续处理；"
             f"底层错误: {reason}"
         )
     return RuntimeError(
@@ -191,6 +233,28 @@ def _is_timeout_exception(exc: BaseException) -> bool:
         return True
     reason = getattr(exc, "reason", None)
     return isinstance(reason, (TimeoutError, socket.timeout))
+
+
+# LLM: _is_transient_network_error keeps retry classification structured instead of matching parent prompts or runner text.
+# 函数用途: 识别 provider 临时断连类网络异常；只看异常类型和底层错误文本，避免把 DNS/配置错误误判为可重试。
+def _is_transient_network_error(exc: BaseException) -> bool:
+    if _is_timeout_exception(exc):
+        return False
+    text = _network_error_text(exc).lower()
+    return any(marker in text for marker in _RETRYABLE_NETWORK_ERROR_MARKERS)
+
+
+# LLM: _network_error_text flattens urllib reason chains so retry and messages classify the same evidence.
+# 函数用途: 把 URLError.reason、异常文本和异常类名拼成稳定文本，供重试判断和用户提示复用。
+def _network_error_text(exc: BaseException) -> str:
+    reason = getattr(exc, "reason", None)
+    parts = [
+        exc.__class__.__name__,
+        str(reason or ""),
+        reason.__class__.__name__ if reason is not None else "",
+        str(exc),
+    ]
+    return " ".join(part for part in parts if part).strip() or exc.__class__.__name__
 
 
 # LLM: _iter_sse_data_lines 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。

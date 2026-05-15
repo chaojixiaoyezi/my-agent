@@ -158,6 +158,8 @@ def _board_item_payload(
         "task_dir": task.task_dir,
         "output_json": task.output_json,
         "target_tokens": sorted(task_actual_target_tokens(task))[:20],
+        "artifact_refs": _bounded_unique_strings(task.artifact_refs, limit=12),
+        "evidence_refs": _bounded_unique_strings(task.evidence_refs, limit=12),
     }
 
 
@@ -178,3 +180,21 @@ def _child_status_counts(
             continue
         counts[child.status] = counts.get(child.status, 0) + 1
     return counts
+
+
+# LLM: _bounded_unique_strings exposes refs to parents while keeping board rows small.
+# 函数用途: 去重并限制 artifact/evidence refs 数量，避免看板因为大量产物引用撑爆上下文。
+def _bounded_unique_strings(value: object, *, limit: int) -> list[str]:
+    if not isinstance(value, list | tuple | set):
+        return []
+    items: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        items.append(text)
+        if len(items) >= limit:
+            break
+    return items
