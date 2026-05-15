@@ -34,6 +34,11 @@ class SubAgentExecutionContext:
     parent_id: str = ""
     root_id: str = ""
     depth: int = 0
+    # LLM: These ids describe the long-lived subagent session, separate from one runner attempt.
+    subagent_session_id: str = ""
+    agent_thread_id: str = ""
+    parent_subagent_session_id: str = ""
+    root_subagent_session_id: str = ""
     task_dir: str = ""
     execution_context_file: str = ""
     execution_context_json: str = ""

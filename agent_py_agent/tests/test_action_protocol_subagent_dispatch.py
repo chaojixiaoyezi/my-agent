@@ -43,6 +43,7 @@ def test_dispatch_subagents_output_contains_typed_envelope():
 
     assert isinstance(envelope, SubagentDispatchEnvelope)
     assert envelope.kind == "subagent_dispatch"
+    assert envelope.operation_id == "subagent_dispatch:dispatch_subagents:/tmp/subagents/subagent_dispatch_report.json"
     assert envelope.dispatch_json == "/tmp/subagents/subagent_dispatch_report.json"
     assert envelope.actionable_run_ids == ["child-1"]
     assert envelope.record_count == 1

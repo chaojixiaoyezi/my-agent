@@ -76,7 +76,7 @@ class SubAgentManager(
         role_template_dirs=None,
         enable_self_learning=False,
         debug_trace_level=0,
-        takeover_chain_max_depth=2,
+        takeover_chain_max_depth=0,
     ):
         # LLM: role_template_dirs lets runtime load user JSON role templates while keeping built-ins external.
         # 函数用途: 当调用方不传目录时，底层会自动使用工作区 .agent/subagents/roles。

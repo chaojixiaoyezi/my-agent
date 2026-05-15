@@ -19,28 +19,9 @@ from agent_py_agent.agent.subagents.role_templates import (
 BUILTIN_ROLE_IDS = ["acceptor", "bug_finder", "coordinator", "researcher", "tester", "worker", "writer"]
 
 
-# LLM: test_builtin_role_templates_are_bilingual_and_broad protects the user-facing role catalog.
-# 函数用途: 确保内置找茬、测试、验收模板都有中文说明，并声明能处理多个目标而不是小动作。
-def test_builtin_role_templates_are_bilingual_and_broad():
-    store = load_role_template_store()
-
-    for template_id in ["bug_finder", "tester", "acceptor"]:
-        template = store.get(template_id)
-        assert template is not None
-        assert template.scope == "role"
-        assert template.handles_multiple_targets is True
-        assert template.name_zh
-        assert template.summary_zh
-        assert template.use_when_zh
-        assert template.output_contract_zh
-        assert template.source == "builtin"
-        assert template.source_path.endswith(".json")
-
-
-# LLM: test_user_role_template_can_extend_catalog covers user-defined role format loading.
-# 函数用途: 用户可以在自定义目录按 JSON 模板新增广义角色，且保留中文可读字段。
-def test_user_role_template_can_extend_catalog(tmp_path):
-    template_dir = tmp_path / "templates"
+# LLM: _write_ppt_polisher_template creates a reusable user role fixture.
+# 函数用途: 写入带中文说明的 PPT 润色角色模板，供用户模板加载相关测试复用。
+def _write_ppt_polisher_template(template_dir) -> None:
     template_dir.mkdir()
     (template_dir / "ppt_polisher.json").write_text(
         json.dumps(
@@ -65,6 +46,31 @@ def test_user_role_template_can_extend_catalog(tmp_path):
         ),
         encoding="utf-8",
     )
+
+
+# LLM: test_builtin_role_templates_are_bilingual_and_broad protects the user-facing role catalog.
+# 函数用途: 确保内置找茬、测试、验收模板都有中文说明，并声明能处理多个目标而不是小动作。
+def test_builtin_role_templates_are_bilingual_and_broad():
+    store = load_role_template_store()
+
+    for template_id in ["bug_finder", "tester", "acceptor"]:
+        template = store.get(template_id)
+        assert template is not None
+        assert template.scope == "role"
+        assert template.handles_multiple_targets is True
+        assert template.name_zh
+        assert template.summary_zh
+        assert template.use_when_zh
+        assert template.output_contract_zh
+        assert template.source == "builtin"
+        assert template.source_path.endswith(".json")
+
+
+# LLM: test_user_role_template_can_extend_catalog covers user-defined role format loading.
+# 函数用途: 用户可以在自定义目录按 JSON 模板新增广义角色，且保留中文可读字段。
+def test_user_role_template_can_extend_catalog(tmp_path):
+    template_dir = tmp_path / "templates"
+    _write_ppt_polisher_template(template_dir)
 
     store = load_role_template_store(user_template_dir=template_dir)
     template = store.get("ppt_polisher")
@@ -251,12 +257,13 @@ def test_role_template_detail_text_loads_prompt_contract_on_demand():
     assert "验收子代理" not in detail
 
 
-def test_coordinator_template_says_parent_authority_covers_children_but_should_delegate():
+def test_coordinator_template_says_parent_authority_covers_children_without_disabling_work():
     detail = role_template_detail_text(roles=["coordinator"])
 
     assert "上层权限应覆盖下层" in detail
     assert "继承产物写入根" in detail
-    assert "不要抢 worker" in detail
+    assert "可以直接完成" in detail
+    assert "需要多人视角" in detail
     assert "child_coordinator" in detail
     assert "worker/writer/leaf_worker" in detail
     assert "subagent_message" in detail

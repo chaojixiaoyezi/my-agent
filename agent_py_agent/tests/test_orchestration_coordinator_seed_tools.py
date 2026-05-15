@@ -1,6 +1,6 @@
-"""LLM: focused tests for explicit root/coordinator seed tool filtering.
+"""LLM: focused tests for explicit root/coordinator seed tool merging.
 
-函数/模块用途: 验证主代理创建 root coordinator 时不会因模型多写工具名而扩大权限。
+函数/模块用途: 验证主代理创建 root coordinator 时会保留父级已给工具，并补齐协调工具。
 """
 
 from __future__ import annotations
@@ -26,9 +26,9 @@ def _mock_coordinator_agent():
     return mock_agent
 
 
-# LLM: test_explicit_coordinator_seed_filters_model_shell_web_tools covers real model over-grants.
-# 函数用途: 模型误给 root 塞 shell/web 工具时，显式 coordinator seed 仍只拿内置协调工具。
-def test_explicit_coordinator_seed_filters_model_shell_web_tools():
+# LLM: test_explicit_coordinator_seed_merges_parent_and_coordinator_tools covers upper-level grants.
+# 函数用途: 显式 coordinator seed 保留父级已授予工具，同时补齐内置协调工具。
+def test_explicit_coordinator_seed_merges_parent_and_coordinator_tools():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
     from agent_py_agent.agent.subagents.role_templates import COORDINATOR_TOOLS
 
@@ -42,9 +42,11 @@ def test_explicit_coordinator_seed_filters_model_shell_web_tools():
 
     params = mock_agent.subagents.create_run.call_args.kwargs["params"]
     assert result.ok is True
-    assert params.allowed_tools == COORDINATOR_TOOLS
-    assert "run_command" not in params.allowed_tools
-    assert "fetch_url" not in params.allowed_tools
+    for tool_name in COORDINATOR_TOOLS:
+        assert tool_name in params.allowed_tools
+    assert "run_command" in params.allowed_tools
+    assert "fetch_url" in params.allowed_tools
+    assert "write_file" in params.allowed_tools
 
 
 # LLM: test_explicit_coordinator_seed_keeps_product_paths_and_write_grants locks parent coverage.

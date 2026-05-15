@@ -39,6 +39,9 @@ def shell_body_read_paths(request: ShellBodyReadPathRequest) -> list[Path]:
 def _shell_command_read_paths(command: str, *, root: str, depth: int) -> list[Path]:
     if depth > 2:
         return []
+    segments = _shell_segments(command)
+    if len(segments) > 1:
+        return _shell_chain_read_paths(segments, root=root, depth=depth)
     tokens = _shell_tokens(command)
     if not tokens:
         return []
@@ -49,6 +52,65 @@ def _shell_command_read_paths(command: str, *, root: str, depth: int) -> list[Pa
     if command_name not in _SHELL_BODY_READ_COMMANDS:
         return []
     return [_path_from_shell_token(raw, root=root) for raw in _shell_path_candidates(tokens)]
+
+
+# LLM: _shell_chain_read_paths carries simple cd context across shell command segments.
+# 函数用途: 识别 `cd deliverables && grep index.html` 这类常见绕读形式，同时不执行 shell。
+def _shell_chain_read_paths(segments: list[str], *, root: str, depth: int) -> list[Path]:
+    cwd = str(root or ".")
+    paths: list[Path] = []
+    for segment in segments:
+        tokens = _shell_tokens(segment)
+        if not tokens:
+            continue
+        command_name = Path(tokens[0]).name
+        if command_name == "cd":
+            cwd = _shell_cd_root(tokens, cwd)
+            continue
+        paths.extend(_shell_command_read_paths(segment, root=cwd, depth=depth + 1))
+    return paths
+
+
+# LLM: _shell_segments splits common shell chains without trying to be a full shell interpreter.
+# 函数用途: 按未引用的 &&、||、;、换行切分命令段，让 guard 能继续分析后续读文件命令。
+def _shell_segments(command: str) -> list[str]:
+    try:
+        return _shell_segments_with_shlex(command)
+    except ValueError:
+        return _shell_segments_fallback(command)
+
+
+# LLM: _shell_segments_with_shlex avoids a hand-rolled nested shell scanner for common chains.
+# 函数用途: 用 shlex 保留未引用的 &&、||、;、换行分隔效果，并把每段重新拼成可再次解析的命令。
+def _shell_segments_with_shlex(command: str) -> list[str]:
+    lexer = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    segments: list[str] = []
+    current: list[str] = []
+    for token in lexer:
+        if token in {"&&", "||", ";"}:
+            _append_shell_segment(segments, current)
+            current = []
+            continue
+        current.append(token)
+    _append_shell_segment(segments, current)
+    return segments
+
+
+# LLM: _shell_segments_fallback keeps malformed shell text non-fatal for the guard.
+# 函数用途: shlex 因引号不完整失败时，按最保守的普通分隔符切分。
+def _shell_segments_fallback(command: str) -> list[str]:
+    raw_segments = re.split(r"\s*(?:&&|\|\||;|\n)\s*", command)
+    return [segment.strip() for segment in raw_segments if segment.strip()]
+
+
+# LLM: _append_shell_segment keeps empty command separators from producing fake reads.
+# 函数用途: 标准化命令段切分结果，去掉空白段。
+def _append_shell_segment(segments: list[str], current: list[str]) -> None:
+    segment = " ".join(current).strip()
+    if segment:
+        segments.append(segment)
 
 
 # LLM: _shell_tokens tolerates malformed model shell text and keeps guard failure non-fatal.
@@ -68,6 +130,33 @@ def _wrapped_shell_command(tokens: list[str], command_name: str) -> str:
     for idx, token in enumerate(tokens[:-1]):
         if token in {"-c", "-lc"}:
             return tokens[idx + 1]
+    return ""
+
+
+# LLM: _shell_cd_root resolves a simple cd target for later relative body-read checks.
+# 函数用途: 处理命令链里的工作目录切换；复杂 shell 展开不猜测，失败时保留原 cwd。
+def _shell_cd_root(tokens: list[str], root: str) -> str:
+    target = _shell_cd_target(tokens)
+    if not target:
+        return root
+    path = Path(target).expanduser()
+    if not path.is_absolute():
+        path = Path(str(root or ".")).expanduser() / path
+    try:
+        return str(path.resolve(strict=False))
+    except (OSError, RuntimeError):
+        return str(path)
+
+
+# LLM: _shell_cd_target extracts the directory operand while ignoring simple cd flags.
+# 函数用途: 从 `cd dir` 或 `cd -- dir` 中取目录；无法确定时返回空字符串。
+def _shell_cd_target(tokens: list[str]) -> str:
+    for token in tokens[1:]:
+        if token == "--":
+            continue
+        if token.startswith("-"):
+            return ""
+        return token.strip("'\"")
     return ""
 
 

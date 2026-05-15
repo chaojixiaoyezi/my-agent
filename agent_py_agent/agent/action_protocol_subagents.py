@@ -14,6 +14,7 @@ from .action_protocol_core import (
     EvidenceRef,
     PathRef,
     RunScope,
+    _default_operation_id,
     _dict_list,
     _dict_or_empty,
     _now_iso,
@@ -38,10 +39,17 @@ class SubagentResultEnvelope:
     blocked_reason: str = ""
     failure_type: str = ""
     scope: RunScope = field(default_factory=RunScope)
+    operation_id: str = ""
     schema_version: int = ACTION_PROTOCOL_SCHEMA_VERSION
     kind: str = "subagent_result"
     created_at: str = field(default_factory=_now_iso)
     reserved: dict[str, Any] = field(default_factory=dict)
+
+    # LLM: __post_init__ assigns a replay-safe operation key for child result ingestion.
+    # 函数用途: 旧子代理结果没有 operation_id 时，按 result_id 自动补齐。
+    def __post_init__(self) -> None:
+        if not self.operation_id:
+            object.__setattr__(self, "operation_id", _default_operation_id(self.kind, self.result_id))
 
     # LLM: to_dict serializes nested refs explicitly for storage and parent review.
     # 函数用途: 把子代理结果 envelope 转成 JSON 字典。
@@ -71,6 +79,7 @@ class SubagentResultEnvelope:
             blocked_reason=str(payload.get("blocked_reason") or ""),
             failure_type=str(payload.get("failure_type") or ""),
             scope=RunScope.from_dict(payload.get("scope")),
+            operation_id=str(payload.get("operation_id") or ""),
             schema_version=int(payload.get("schema_version") or ACTION_PROTOCOL_SCHEMA_VERSION),
             kind=str(payload.get("kind") or "subagent_result"),
             created_at=str(payload.get("created_at") or _now_iso()),
@@ -93,10 +102,17 @@ class SubagentScheduleEnvelope:
     reason: str = ""
     items: list[dict[str, Any]] = field(default_factory=list)
     scope: RunScope = field(default_factory=RunScope)
+    operation_id: str = ""
     schema_version: int = ACTION_PROTOCOL_SCHEMA_VERSION
     kind: str = "subagent_schedule"
     created_at: str = field(default_factory=_now_iso)
     reserved: dict[str, Any] = field(default_factory=dict)
+
+    # LLM: __post_init__ gives every fan-out event a stable idempotency key.
+    # 函数用途: 让 create/schedule 子代理事件能被恢复逻辑去重。
+    def __post_init__(self) -> None:
+        if not self.operation_id:
+            object.__setattr__(self, "operation_id", _default_operation_id(self.kind, self.schedule_id))
 
     # LLM: to_dict keeps subagent fan-out results machine-readable for parent recovery.
     # 函数用途: 把 SubagentScheduleEnvelope 转成 JSON 字典。
@@ -121,6 +137,7 @@ class SubagentScheduleEnvelope:
             reason=str(payload.get("reason") or ""),
             items=_dict_list(payload.get("items")),
             scope=RunScope.from_dict(payload.get("scope")),
+            operation_id=str(payload.get("operation_id") or ""),
             schema_version=int(payload.get("schema_version") or ACTION_PROTOCOL_SCHEMA_VERSION),
             kind=str(payload.get("kind") or "subagent_schedule"),
             created_at=str(payload.get("created_at") or _now_iso()),
@@ -142,10 +159,17 @@ class SubagentDispatchEnvelope:
     dispatch_md: str = ""
     record_count: int = 0
     scope: RunScope = field(default_factory=RunScope)
+    operation_id: str = ""
     schema_version: int = ACTION_PROTOCOL_SCHEMA_VERSION
     kind: str = "subagent_dispatch"
     created_at: str = field(default_factory=_now_iso)
     reserved: dict[str, Any] = field(default_factory=dict)
+
+    # LLM: __post_init__ makes dispatch rounds addressable for resume and audit.
+    # 函数用途: 自动补齐 dispatch operation_id，避免父级从报告文本里猜是哪一轮调度。
+    def __post_init__(self) -> None:
+        if not self.operation_id:
+            object.__setattr__(self, "operation_id", _default_operation_id(self.kind, self.dispatch_id))
 
     # LLM: to_dict serializes dispatch refs without expanding runner record bodies.
     # 函数用途: 把 dispatch envelope 转成 JSON 字典，供工具输出、日志和接管流程读取。
@@ -169,6 +193,7 @@ class SubagentDispatchEnvelope:
             dispatch_md=str(payload.get("dispatch_md") or ""),
             record_count=int(payload.get("record_count") or 0),
             scope=RunScope.from_dict(payload.get("scope")),
+            operation_id=str(payload.get("operation_id") or ""),
             schema_version=int(payload.get("schema_version") or ACTION_PROTOCOL_SCHEMA_VERSION),
             kind=str(payload.get("kind") or "subagent_dispatch"),
             created_at=str(payload.get("created_at") or _now_iso()),

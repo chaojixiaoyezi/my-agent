@@ -100,8 +100,8 @@ class TestCreateSubagentsToolTemplatePolicy:
         assert call_kwargs["params"].role == "worker"
         assert result.ok is True
 
-    def test_explicit_tool_preset_read_only_still_works(self):
-        """显式 tool_preset=read_only 仍然会限制为只读工具。"""
+    def test_explicit_tool_preset_read_only_keeps_baseline_write_tools(self):
+        """显式 read_only 只表达职责偏好，不能让子代理失去基础读写能力。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -120,7 +120,31 @@ class TestCreateSubagentsToolTemplatePolicy:
         tool.execute({"goal": "测试", "tool_preset": "read_only"})
 
         call_kwargs = mock_agent.subagents.create_run.call_args[1]
-        assert call_kwargs["params"].allowed_tools == ["list_files", "read_file", "search_text"]
+        assert "read_file" in call_kwargs["params"].allowed_tools
+        assert "write_file" in call_kwargs["params"].allowed_tools
+        assert "replace_in_file" in call_kwargs["params"].allowed_tools
+
+    def test_tool_preset_none_does_not_create_toolless_subagent(self):
+        """模型传 tool_preset=none 时回退自动策略，不创建空工具子代理。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+
+        mock_task = MagicMock()
+        mock_task.id = "run_default"
+        mock_task.goal = ""
+        mock_task.status = "PENDING"
+        mock_task.verification_status = "PENDING"
+        mock_task.task_dir = "/tmp"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        tool.execute({"goal": "测试", "tool_preset": "none"})
+
+        call_kwargs = mock_agent.subagents.create_run.call_args[1]
+        assert call_kwargs["params"].allowed_tools is None
 
     def test_unknown_tool_preset_does_not_override_role_template(self):
         """模型误把 role 写到 tool_preset 时，应回退给 role template 自动决定工具。"""
@@ -205,7 +229,6 @@ class TestCreateSubagentsToolTemplatePolicy:
         assert "extra_write_roots" in result.output
         assert "目标目录" in result.output
         mock_agent.subagents.create_run.assert_not_called()
-
     def test_no_comment_constraint_can_be_preserved_in_child_goal(self):
         """用户要求不要注释时，子任务保留“不要写注释”不应被误判为要求写注释。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
@@ -498,187 +521,3 @@ class TestCreateSubagentsToolWorkerWorkflow:
         assert "ambiguous_repeated_product_goal" in result.output
         assert "count=1 的 coordinator" in result.output
         mock_agent.subagents.create_run.assert_not_called()
-
-
-class TestCreateSubagentsToolDelegationGuard:
-    """测试派工目标不能反转用户的真实交付约束。"""
-
-    def test_create_subagents_rejects_button_constraint_reversal(self):
-        """派工目标不能把用户的“不失灵按钮”改写成 href=#。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-        mock_agent = MagicMock()
-        mock_agent.config.enable_subagents = True
-        mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "auto"
-        mock_agent._current_user_prompt = "请做家具首页，不要有失灵按钮。"
-        mock_agent.subagents.workspace_root = Path("/tmp/project")
-        mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
-
-        tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
-            "goal": "创建 index1.html，所有按钮可点击（可指向 #）。",
-            "role": "worker",
-            "extra_write_roots": ["/tmp/project/artifacts"],
-        })
-
-        assert result.ok is False
-        assert "delegation_constraint_conflict" in result.output
-        mock_agent.subagents.create_run.assert_not_called()
-
-    def test_create_subagents_rejects_hash_anchor_escape_when_user_requires_working_buttons(self):
-        """派工目标不能用“#锚点”绕过用户的不失灵按钮约束。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-        mock_agent = MagicMock()
-        mock_agent.config.enable_subagents = True
-        mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "auto"
-        mock_agent._current_user_prompt = "请做家具首页，不要有失灵按钮。"
-        mock_agent.subagents.workspace_root = Path("/tmp/project")
-        mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
-
-        tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
-            "goal": "创建 index1.html，所有按钮都要有 href 属性或 #锚点。",
-            "role": "worker",
-            "extra_write_roots": ["/tmp/project/artifacts"],
-        })
-
-        assert result.ok is False
-        assert "delegation_constraint_conflict" in result.output
-        mock_agent.subagents.create_run.assert_not_called()
-
-    def test_create_subagents_rejects_unverified_remote_images_when_user_requires_no_broken_images(self):
-        """用户要求不失效图片时，派工目标不能擅自要求远程图片 URL。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-        mock_agent = MagicMock()
-        mock_agent.config.enable_subagents = True
-        mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "auto"
-        mock_agent._current_user_prompt = "请做家具首页，不要出现失效图片链接。"
-        mock_agent.subagents.workspace_root = Path("/tmp/project")
-        mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
-
-        tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
-            "goal": "创建 index1.html，使用 Unsplash 的真实图片 URL。",
-            "role": "worker",
-            "extra_write_roots": ["/tmp/project/artifacts"],
-        })
-
-        assert result.ok is False
-        assert "delegation_constraint_conflict" in result.output
-        mock_agent.subagents.create_run.assert_not_called()
-
-
-class TestCreateSubagentsToolRawPromptRepair:
-    """测试 root seed 能从原始用户 prompt 补回硬合同。"""
-
-    def test_explicit_coordinator_seed_without_name_gets_lineage_prefix(self):
-        """模型没传 agent_name 时，第一层 root/coordinator 也必须有小傻妞前缀。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-        mock_agent = MagicMock()
-        mock_agent.config.enable_subagents = True
-        mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "off"
-
-        mock_task = MagicMock()
-        mock_task.id = "root_001"
-        mock_task.goal = ""
-        mock_task.status = "PLANNING"
-        mock_task.verification_status = "UNVERIFIED"
-        mock_task.task_dir = "/tmp/root_001"
-        mock_agent.subagents.create_run.return_value = mock_task
-
-        tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
-            "goal": "创建 root/coordinator 并让它继续派工。",
-            "role": "coordinator",
-        })
-
-        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
-        assert result.ok is True
-        assert params.agent_name == "小傻妞-coordinator"
-
-    def test_explicit_coordinator_seed_inherits_raw_user_file_and_hierarchy_contract(self):
-        """主代理摘要 root goal 时，工具层要补回原始用户 prompt 的硬合同。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-        mock_agent = MagicMock()
-        mock_agent.config.enable_subagents = True
-        mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "off"
-        mock_agent._current_user_prompt = (
-            "在 /tmp/shop/build 交付购物站。必须包含 index.html、products.html、"
-            "product-detail.html、style.css、app.js。"
-            "禁止文件名：product.html/old-product.html/legacy.html/obsolete.html。"
-            "禁止在 build 写 output.json/RUNNER_RESULT.md/execution_context.json。"
-            "必须正好覆盖一条 4层总链路：root -> 子 -> 孙 -> 孙孙。"
-            "depth=1 用小傻妞-*，depth=2 用小小傻妞-*，depth=3 用小小小傻妞-*，max_depth=3。"
-        )
-
-        mock_task = MagicMock()
-        mock_task.id = "root_001"
-        mock_task.goal = ""
-        mock_task.status = "PLANNING"
-        mock_task.verification_status = "UNVERIFIED"
-        mock_task.task_dir = "/tmp/root_001"
-        mock_agent.subagents.create_run.return_value = mock_task
-
-        tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
-            "goal": (
-                "完成购物站，交付 index.html、products.html、product-detail.html、style.css、app.js，"
-                "文件名不要改，建立 4层链路。"
-            ),
-            "role": "coordinator",
-            "extra_write_roots": ["/tmp/shop/build"],
-        })
-
-        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
-        assert result.ok is True
-        assert "用户原始禁止文件/反例名" in params.goal
-        assert "product.html" in params.goal
-        assert "RUNNER_RESULT.md" in params.goal
-        assert "用户原始层级/命名约束" in params.goal
-        assert "depth=3" in params.goal
-
-    def test_explicit_coordinator_seed_repairs_wrong_lineage_summary_from_raw_prompt(self):
-        """模型写错层级前缀时，root seed 必须保留用户原始精确命名合同。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-        mock_agent = MagicMock()
-        mock_agent.config.enable_subagents = True
-        mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "off"
-        mock_agent._current_user_prompt = (
-            "命名必须按层级规则：depth=1 用“小傻妞-*”，"
-            "depth=2 用“小小傻妞-*”，depth=3 用“小小小傻妞-*”。"
-            "本轮 max_depth=3，禁止创建 depth>=4，禁止创建“小小小小傻妞-*”节点。"
-        )
-
-        mock_task = MagicMock()
-        mock_task.id = "root_001"
-        mock_task.goal = ""
-        mock_task.status = "PLANNING"
-        mock_task.verification_status = "UNVERIFIED"
-        mock_task.task_dir = "/tmp/root_001"
-        mock_agent.subagents.create_run.return_value = mock_task
-
-        tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
-            "goal": (
-                "层级要求：depth=1 用“小傻妞-*”，depth=2 用“小小傻妞-*”，"
-                "depth=3 用“小小的傻妞-*”；本轮 max_depth=3，禁止创建“小小小傻妞-*”节点。"
-            ),
-            "role": "coordinator",
-        })
-
-        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
-        assert result.ok is True
-        assert "用户原始层级/命名约束" in params.goal
-        assert "小小小傻妞-*" in params.goal
-        assert "小小小小傻妞-*" in params.goal

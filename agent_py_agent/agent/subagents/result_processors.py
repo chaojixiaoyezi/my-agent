@@ -25,11 +25,11 @@ from .result_structured import (
     _merge_actual_tools,
     _merge_task_tools,
     _normalize_parsed_fields,
-    _process_evidence_items,
     _process_structured_output,
     _split_tools_and_skills,
     merge_actual_tools_for_unparsed,
 )
+from .result_structured_evidence import process_evidence_items as _process_evidence_items
 
 
 # LLM: _build_runner_result 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

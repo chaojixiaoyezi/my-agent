@@ -68,8 +68,8 @@ def spawn_explicit_role_runs(request: SpawnExplicitRoleRequest) -> list[SubAgent
     return tasks
 
 
-# LLM: _spawn_role_allowed_tools gives coordinator roots orchestration and report-writing tools.
-# 函数用途: 为显式 root/coordinator 生成工具列表，确保它能创建/调度下层，并写自己的协调报告。
+# LLM: _spawn_role_allowed_tools gives coordinator roots orchestration tools without dropping caller grants.
+# 函数用途: 为显式 root/coordinator 补齐协调工具，并保留上层已授权的读写/执行工具。
 def _spawn_role_allowed_tools(role: str, configured_tools: list[str] | None) -> list[str] | None:
     if not is_explicit_root_role(role):
         return configured_tools
@@ -84,7 +84,7 @@ def _create_explicit_role_run(request: ExplicitRoleRunRequest) -> SubAgentTask:
     return seed.agent.subagents.create_run(
         params=CreateRunParams(
             goal=_spawn_goal_text(seed.options.goal, request.index, seed.count),
-            thought="负责拆分、调度、检查、接管和救援；权限覆盖下级，但正常执行时优先派 worker 写最终产物。",
+            thought="负责拆分、调度、检查、接管和救援；权限覆盖下级，可按任务大小选择亲自完成或派工协作。",
             plan=["创建直接子代理", "调度直接子代理", "观察子代理状态", "汇报证据和阻塞"],
             agent_name=_spawn_agent_name(seed.options.agent_name, request.role, request.index, seed.count),
             role=request.role,

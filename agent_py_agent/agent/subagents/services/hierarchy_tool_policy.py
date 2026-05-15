@@ -126,8 +126,8 @@ def _leaf_write_tools(tools: list[str]) -> list[str]:
     return list(dict.fromkeys(tool for tool in tools if tool not in _LEAF_ORCHESTRATION_TOOLS))
 
 
-# LLM: _coordinator_tools preserves report-writing tools but keeps this hook for orchestration policy.
-# 函数用途: coordinator/lead 可写自己的计划/证据报告；业务产物仍交给 worker/writer。
+# LLM: _coordinator_tools preserves all inherited tools and adds orchestration grants.
+# 函数用途: coordinator/lead 保留基础读写和协调工具；是否亲自写产物由任务上下文决定，不由角色硬限制。
 def _coordinator_tools(tools: list[str]) -> list[str]:
     return list(dict.fromkeys(tools))
 

@@ -240,11 +240,13 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- subagents/                         # 子代理模型、报告、manager mixin、验收、dispatch、runner、索引等
 |   |   |-- tools.py                           # 工具兼容入口，真实实现已拆到 tooling/
 |   |   |-- tooling/                           # 工具模型、文件工具、HTTP 工具、解析器、注册表、写边界
+|   |   |   |-- filesystem_read_file.py       # read_file 执行、行号分页、结构化摘要和截断提示
 |   |   |   |-- filesystem_structured_read.py # read_file 对 latest_continue_packet 等机器文件的结构化摘要策略
 |   |   |   |-- registry_control_ranges.py    # 屏蔽 SUBAGENT_RESULT 等结果块，避免摘要里的协议标记误触发工具
 |   |   |   |-- registry_envelopes.py         # ToolCallEnvelope 去重、执行前展开和结果 envelope 关联
 |   |   |   |-- registry_invoke.py            # 已授权工具的最终参数准备、写边界检查和执行分发
 |   |   |   |-- registry_markers.py           # 旧 [TOOL_CALL]/[SUBAGENT_CALL] 标记扫描 helper
+|   |   |   |-- registry_payload_normalize.py # 工具 JSON payload 校验、工具名/参数名别名归一
 |   |   |   `-- registry_execution.py          # ToolRegistry 的工具调用解析、授权检查和执行分发 helper
 |   |   `-- validators/                        # 未来跨领域校验规则目录，目前用 README 定义边界
 |   |-- config/                                # 配置目录
@@ -994,7 +996,8 @@ docs/
 - `agent_py_agent/agent/subagents/services/control_plane_projection.py`: 在 subagent 保存时把 task 当前状态投影到 LocalStore 控制面；它只做查询索引，不替代旧工单目录或 runtime workspace 事实源。
 - `agent_py_agent/agent/subagents/debug_trace.py`: 子代理正式调试追踪开关的写入层；`subagent_debug_trace_level=0` 时完全静默，level 1-3 只把 bounded refs-only 事件写入内部 `debug_traces/subagent_trace.jsonl`，level 4 加短预览，level 5 把完整 prompt/response/tool payload/tool output 写入内部 `debug_traces/details/` 并在 JSONL 里留 ref。
 - `agent_py_agent/agent/subagents/context_bundle.py`: 生成 runner-facing `context_bundle.json` / `CONTEXT_BUNDLE.md`，包含目标、计划、验收、权限、写入边界、输出合同、lineage、agent run workspace refs 和 Context Gate；多层传递只保存当前/父级 bundle refs，不展开父级正文。
-- `agent_py_agent/agent/subagents/result_structured.py`: 解析 runner structured output 并写回 artifacts、tests、evidence packets、findings 和 capability requests；artifact 证据合成委托给小模块，保持解析主流程薄。
+- `agent_py_agent/agent/subagents/result_structured.py`: 解析 runner structured output 并写回 tools、artifacts、tests、blockers 和 capability requests；evidence/finding 解析已拆到 `result_structured_evidence.py`，保持解析主流程薄。
+- `agent_py_agent/agent/subagents/result_structured_evidence.py`: 解析并写回 runner evidence、evidence_packets 和 findings；负向 content_check 语义在这里规范，避免“坏模式没出现”被误判为失败。
 - `agent_py_agent/agent/subagents/result_artifact_evidence.py`: 从 runner artifact metadata 合并 `artifact_refs`，并在模型漏写 `evidence_packets` 时合成 refs-only artifact evidence packet，不读取 artifact 正文。
 - `agent_py_agent/agent/subagents/parsing_partial.py`: 从 runner 结果块恢复被截断但仍有可追溯 `evidence_packets` 的成功结果；只接受 refs-only 证据链，避免把无证据长文本误当完成。
 - `agent_py_agent/agent/subagents/parsing_values.py`: 子代理结果解析共用的 list/dict/int 归一化 helper，让 `parsing.py` 保持薄层并保留旧 private import 兼容。
@@ -1023,11 +1026,13 @@ docs/
 - `agent_py_agent/agent/memory_archive/artifact_reader.py`: 按 tool output index 显式读取外置 artifact 正文切片，并校验路径边界和 sha256；路径前缀抄错但 artifact 文件名唯一时，可修复到登记记录；支持 `slice/head/tail/search` 窄读和 index-only size 预判。
 - `agent_py_agent/agent/memory_archive/artifact_read_modes.py`: `read_artifact` 正文窄读模式实现，负责 slice/head/tail/search 的内容 shaping，让 `artifact_reader.py` 只管 index、边界和 hash。
 - `agent_py_agent/agent/path_recovery_hints.py`: 共享 URL span 和工作区路径 typo 恢复提示，供派工预检、读文件和列目录等入口复用。
-- `agent_py_agent/agent/tooling/_filesystem_read.py`: `read_file` 读取工作区文本文件；读/列/search 同时接受顶层参数和 `filesystem.*` bundle 参数；遇到疑似工作区路径拼写错误时返回 `suggested_target`；误读 tool-output artifact 包装的判断拆到 `filesystem_artifact_guard.py`，控制面 JSON 摘要拆到 `filesystem_structured_read.py`。
+- `agent_py_agent/agent/tooling/_filesystem_read.py`: 文件系统读/列工具声明和 workspace path 解析；`read_file` 的实际读取、分页和截断提示拆到 `filesystem_read_file.py`。
+- `agent_py_agent/agent/tooling/filesystem_read_file.py`: 执行 `read_file`，负责 UTF-8 读取、结构化摘要、start/end 行号、越界提示和 `next_start_line` 截断提示。
 - `agent_py_agent/agent/tooling/filesystem_artifact_guard.py`: 拒绝 `memory_archive/artifacts/tool_outputs/*.json` 外置工具输出包装经由 `read_file` 读取，提示改用 `read_artifact` 分片；当当前上下文未授权 `read_artifact` 时提示上报 `capability_request`。
 - `agent_py_agent/agent/tooling/filesystem_structured_read.py`: `read_file` 的结构化读取策略；默认把 `latest_continue_packet.json` 渲染成状态、work_progress、session_compact 和推荐读取路径摘要，显式行号读取仍返回原始文本。
 - `agent_py_agent/agent/tooling/registry_control_ranges.py`: 工具解析前屏蔽 `SUBAGENT_RESULT` / `PARENT_PLANNER_RESULT` 等结构化结果块，确保结果摘要里提到的协议标记不会被误当作真实工具调用。
-- `agent_py_agent/agent/tooling/registry_execution.py`: 旧文本 `[TOOL_CALL]` 解析后先转成 `ToolCallEnvelope`，执行结果挂回 `call_id/result_envelope`；非 `tool_call` envelope 会明确拒绝执行。envelope helper、最终执行和 marker 扫描已分别拆到 `registry_envelopes.py` / `registry_invoke.py` / `registry_markers.py`。
+- `agent_py_agent/agent/tooling/registry_execution.py`: 旧文本 `[TOOL_CALL]` 解析后先转成 `ToolCallEnvelope`，执行结果挂回 `call_id/result_envelope`；非 `tool_call` envelope 会明确拒绝执行。envelope helper、最终执行、marker 扫描和 payload 归一已分别拆到 `registry_envelopes.py` / `registry_invoke.py` / `registry_markers.py` / `registry_payload_normalize.py`。
+- `agent_py_agent/agent/tooling/registry_payload_normalize.py`: 对标准 JSON 工具块做 payload 校验、工具名别名归一和参数别名归一；冲突参数明确报错，不静默猜测。
 - `agent_py_agent/agent/tooling/artifact.py`: 注册 `read_artifact` 工具，给模型提供受控 artifact slice/head/tail/search 读取入口。
 - `agent_py_agent/agent/tooling/artifact_read_budget.py`: `read_artifact` 的单 run 正文读取预算器，按 `run_id` 统计滚动窗口字符数，避免子代理反复展开大 artifact。
 - `agent_py_agent/agent/tooling/controlled_exec.py`: 注册 `controlled_exec` 工具包装；只从 `write_boundary.controlled_exec_grants` 读取父级 shell grant，dry-run 返回 plan，显式 apply 才调用 bounded shell execution 或 task trash；`apply/execute/run/full` 字符串也会被识别为执行意图，delete-to-trash dry-run 作为有效计划返回，但 prompt/验收会要求真实 stdout/audit/trash refs 才算完成。执行后的 shell decision/audit 会标记 `dry_run=false`，避免模型把真实执行误读成计划。
@@ -1040,7 +1045,7 @@ docs/
 - `agent_py_agent/agent/subagents/model_task.py`: 新增 `SecuritySignal` 和 `security_review_required` 安全预留字段，用于记录安全劫持、安全欺骗、prompt injection、工具权限异常等可疑信号；当前只审计不拦截。
 - `agent_py_agent/agent/subagents/execution_records.py`: 新增 `TestExecutionRecord`，定义真实验收执行证据、输出截断和通过结果派生。
 - `agent_py_agent/agent/subagents/execution_executor.py`: 新增最小 `TestExecutor`，执行 command/file/content/static_site 四类检查并产出 `TestExecutionRecord`；当前不接 acceptance 自动写回。
-- `agent_py_agent/agent/subagents/static_site_validator.py`: 父级验收的静态站点检查器，扫描 workspace 内 HTML 必需文件、本地 href/src/action、`${...}` 占位符和明显无动作控件，不执行 JS、不访问网络。
+- `agent_py_agent/agent/subagents/static_site_validator.py`: 父级验收的静态站点检查器门面，扫描 workspace 内 HTML 必需文件、本地 href/src/action、`${...}` 占位符和明显无动作控件，不执行 JS、不访问网络；DOM/id/control 检查和路径/ref 检查已拆到 `static_site_dom_checks.py` / `static_site_path_checks.py`。
 - `agent_py_agent/agent/subagents/execution_test_items.py`: 新增测试项预处理 helper，根据 runner artifacts 安全推断 command 测试工作目录，避免父验收在 workspace 根目录误跑相对测试命令；也会把 workspace 内安全的 `cd <dir> && pytest` 拆成 `working_dir + 纯命令`，不放开 shell；当 artifacts 显示静态 HTML 且缺少同类测试时，会追加 `static_site_check`，并能把调用方传入的 task-level required files 合进 required_files。
 - `agent_py_agent/agent/subagents/static_required_files.py`: 从 task goal/thought/description/acceptance_checks 提取 `index.html`、`style.css`、`app.js` 等静态 Web 必需文件名，不读取产物正文。
 - `agent_py_agent/agent/subagents/required_file_terms.py`: 层级 handoff、context bundle 和静态站验收共用的文件契约提取器，把正向交付文件放进 `required_files`，把 `禁止改名/禁止文件名/禁止文件名（...）/禁止内部文件（...）/禁止创建文件（forbidden_files）：/不要创建/不写output.json` 等反例放进 `forbidden_files`，并处理 `product.html/old-product.html` 这类斜杠分隔反例列表；文件名边界按 ASCII 处理，中文紧贴文件名或 `RUNNER_RESULT.md等` 也能识别；负向标题后的 bullet 或纯文件列表都会继承负向语境；`禁止 style.css/app.js 放进子目录` 这类位置约束不会把必需资源误标成 forbidden。

@@ -10,7 +10,7 @@ from .execution_executor import TestExecutor
 from .execution_test_items import TestItemPreparationRequest, prepare_test_items
 from .models import SubAgentTask
 from .parsing import _dict_list
-from .static_required_files import required_static_files_for_task
+from .static_required_files import required_static_files_for_task, static_site_root_hints_for_task
 
 
 # LLM: unsafe_test_reason preflights command syntax through TestExecutor validation without running it.
@@ -31,12 +31,14 @@ def prepared_tests_for_parent_acceptance(
     workspace_root: str | Path,
     task: SubAgentTask,
 ) -> list[dict[str, Any]]:
+    # LLM: Preflight must normalize pseudo-checks before deciding whether human confirmation is required.
     return prepare_test_items(
         TestItemPreparationRequest(
             tests=_dict_list(output.get("tests", [])),
             output=output,
             workspace_root=workspace_root,
             required_files=required_static_files_for_task(task),
+            site_root_hints=static_site_root_hints_for_task(task),
         )
     )
 

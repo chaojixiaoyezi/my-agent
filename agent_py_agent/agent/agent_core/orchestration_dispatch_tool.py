@@ -31,6 +31,7 @@ from .orchestration_dispatch_scope import (
     dispatch_workflow_mode,
 )
 from .orchestration_progress_payload import direct_children_progress_payload
+from .orchestration_run_scope import remember_orchestration_run_ids
 from .orchestration_tool_specs import build_dispatch_subagents_spec
 from .orchestration_workflow_mode import tool_workflow_mode
 from .parameters import _bool_param, _non_negative_int, _string_list
@@ -67,6 +68,7 @@ class DispatchSubagentsTool(BaseTool):
             cfg,
             params=self._dispatch_params(params, apply, execute_runners),
         )
+        remember_orchestration_run_ids(self.agent, _run_ids_from_dispatch(params, report))
         payload = self._report_payload(report)
         return ToolExecutionResult("dispatch_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -170,3 +172,26 @@ def _runner_timeouts_disabled(config: object) -> bool:
         return float(raw) == 0.0
     except (TypeError, ValueError):
         return False
+
+
+# LLM: _run_ids_from_dispatch captures the current root-turn scope from explicit params and dispatch records.
+# 函数用途: 记录本轮 dispatch 真实触碰的 run_id，最终收口不要扫描旧任务工作区。
+def _run_ids_from_dispatch(params: dict[str, object], report) -> list[str]:
+    ids = _string_list(params.get("run_ids") or params.get("include_run_ids"))
+    for record in getattr(report, "records", []) or []:
+        if not _record_touches_runner_scope(record):
+            continue
+        run_id = str(getattr(record, "run_id", "") or "").strip()
+        if run_id and run_id not in ids:
+            ids.append(run_id)
+    return ids
+
+
+# LLM: _record_touches_runner_scope keeps old acceptance rows out of current-turn memory.
+# 函数用途: dispatch 报告可能包含验收/历史记录；只有真实 runner 选择记录能扩展本轮收口范围。
+def _record_touches_runner_scope(record: object) -> bool:
+    step = str(getattr(record, "step", "") or "").strip().lower()
+    action = str(getattr(record, "action", "") or "").strip().lower()
+    if step != "runner":
+        return False
+    return action in {"execute_runner", "retry_runner", "runner_dry_run"}

@@ -6476,7 +6476,7 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Verification:
   - Focused regression: `test_resolve_runner_concurrency_auto_uses_bounded_parallelism`.
   - Existing worker-pool tests remain in the focused validation batch.
-- Status: fixed by focused tests; clean group rerun pending.
+- Status: fixed by focused tests; verified in clean group03n rerun.
 
 ### Finding 81: valid long write content should not bounce back to the model
 
@@ -6496,7 +6496,7 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Verification:
   - Focused regressions in `test_tooling_filesystem_write.py` now prove long write/append calls succeed and surface a recommendation warning.
   - Focused recovery test in `test_tool_output_externalizer.py` covers the new wording.
-- Status: fixed by focused tests; clean group rerun pending.
+- Status: fixed by focused tests; verified in clean group03n rerun.
 
 ### Finding 82: static-site repair facts must be precise and not over-strict
 
@@ -6521,7 +6521,7 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Focused regression: `test_static_site_check_blocks_malformed_complete_html`.
   - Focused regression: `test_static_site_failure_details_include_structure_and_repair_hints`.
   - Focused static-site/test-item/dispatch failure tests passed.
-- Status: fixed by focused tests; clean group rerun pending.
+- Status: fixed by focused tests; verified in clean group03n rerun.
 
 ### Finding 83: negative content checks must not invert “no bad ref” assertions
 
@@ -6542,7 +6542,7 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Verification:
   - Focused regression: `test_test_executor_content_check_supports_natural_negative_contains`.
   - Focused executor/static-site/dispatch tests passed.
-- Status: fixed by focused tests; clean group rerun pending.
+- Status: fixed by focused tests; verified in clean group03n rerun.
 
 ### Finding 84: verified takeover sources must not block final closeout
 
@@ -6559,7 +6559,7 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Lookup is exact in-memory by run id; it does not glob user-provided ids.
 - Verification:
   - Focused regression: `test_dispatch_closeout_treats_verified_takeover_source_as_resolved`.
-- Status: fixed by focused tests; clean group rerun pending.
+- Status: fixed by focused tests; verified in clean group03n rerun.
 
 ### Finding 85: model-written absent-pattern evidence needs stable semantics
 
@@ -6577,7 +6577,7 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Ordinary failures without a negative summary still remain failures.
 - Verification:
   - Focused regression: `test_process_structured_output_normalizes_absent_pattern_evidence`.
-- Status: fixed by focused tests; clean group rerun pending.
+- Status: fixed by focused tests; verified in clean group03n rerun.
 
 ### Finding 86: model-facing dispatch should tolerate `limit` as runner count during execution
 
@@ -6654,3 +6654,277 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Focused regression: `test_dispatch_closeout_treats_multi_file_repair_as_resolved_by_verified_outputs`.
   - Manual replay against `subagent_hardening_e2e_20260515_group03g` now reports `blocking_run_ids: (none)` and board `completion_status=complete_or_no_blockers`.
 - Status: fixed by focused tests; clean group rerun pending.
+
+### Finding 90: reused subagent workspaces must be scoped to the current root turn
+
+- Discovered at: 2026-05-15 during 3-worker furniture E2E groups 3h/3i.
+- Symptom:
+  - A fresh root run reused the same `_agent_runtime/subagents` directory.
+  - `subagent_board` / final closeout / implicit `dispatch_subagents` saw old failed or old verified rows from previous E2E runs.
+  - Root either got unlocked by an old acceptor or started repairing unrelated old workers.
+- 中文解释：
+  - 大白话：这次任务只派了 3 个小傻妞，但仓库里还躺着昨天的小傻妞记录；系统把旧记录也拿来算账，导致“别人家的孩子”跑进了这次验收。
+- Root cause:
+  - The live root turn did not remember which run ids it created or dispatched.
+  - State readers fell back to broad workspace scans.
+- Fix:
+  - The agent now records current-turn run ids in memory for the live root process.
+  - Final closeout, board payload, top-level body-read guard, and implicit runner selection use that scope.
+  - Explicit `run_ids` still keep exact recovery semantics.
+- Verification:
+  - Focused regression: `test_dispatch_closeout_ignores_unseen_historical_runs`.
+  - Focused regression: `test_scoped_board_items_ignores_unseen_historical_rows`.
+  - Focused regression: `test_top_level_scope_ignores_old_acceptor_when_blocking_product_body`.
+  - Focused regression: `test_scoped_current_turn_runner_tasks_ignores_old_runs_without_explicit_include`.
+- Status: fixed by focused tests; verified in clean group03n rerun.
+
+### Finding 91: shell `cd && grep/cat` can bypass body-read protection if parsed as only `cd`
+
+- Discovered at: 2026-05-15 during 3-worker furniture E2E group 3i.
+- Symptom:
+  - Root correctly stopped using `read_file`, but used `run_command` with a pattern like `cd deliverables && grep ... index.html`.
+  - The delegated-body guard did not block it, so root could still read product content before QA/acceptor finished.
+- 中文解释：
+  - 大白话：我们堵住了“直接打开文件”，但没堵住“先 cd 到目录，再用 grep 看文件”。这还是父级偷看正文。
+- Root cause:
+  - Shell body-read detection only inspected the first command token.
+  - When the first segment was `cd`, the later `grep index.html` segment was ignored.
+- Fix:
+  - Shell body-read detection now splits simple command chains by unquoted `&&` / `||` / `;` / newline.
+  - It carries a simple `cd` working directory into later read commands without executing shell or expanding variables.
+- Verification:
+  - Focused regression: `test_top_level_natural_report_only_prompt_blocks_shell_cd_grep_product_body`.
+  - Existing metadata-read regression still passes: `test_top_level_refs_only_root_can_shell_read_orchestration_metadata`.
+- Status: fixed by focused tests; verified in clean group03n rerun.
+
+### Finding 92: static-site acceptance must use task write roots when output artifacts are missing
+
+- Discovered at: 2026-05-15 during 3-worker furniture E2E group 3i.
+- Symptom:
+  - Repair workers wrote `index2.html` and `index3.html` into the task-specific `...group03i/deliverables/` folder.
+  - Their `output.json` did not list artifacts, so auto static-site acceptance guessed `/Users/xiaoyezi/my-claude-code/deliverables`.
+  - The files existed, but acceptance failed with `missing_required_files=index2.html/index3.html`.
+- 中文解释：
+  - 大白话：小傻妞把文件放对了地方，验收却跑去另一个固定目录找，于是误报“文件没写”。
+- Root cause:
+  - The fallback static-site root inference only tried common global folders (`artifacts/`, `deliverables/`, `outputs/`, root).
+  - It did not use the task’s `allowed_write_roots`, which already contained the exact deliverable directory/file.
+- Fix:
+  - Test preparation now passes task write-root hints into static-site inference.
+  - When artifacts are missing, static-site checks prefer hinted roots that contain the required file, then fall back to common folders.
+  - Preflight and confirmed manual execution use the same preparation path.
+- Verification:
+  - Focused regression: `test_prepare_items_uses_site_root_hints_when_no_artifacts`.
+  - Focused static-site preparation suite passes.
+- Status: fixed by focused tests; verified in clean group03n rerun.
+
+### Finding 93: model negative-check aliases must not invert content tests
+
+- Discovered at: 2026-05-15 during 3-worker furniture E2E group 3j.
+- Symptom:
+  - `index1.html` existed and static-site check passed.
+  - The worker wrote a content test with `match_mode=not_exists` for `href="#"`.
+  - Parent execution treated it as normal `contains`, so “bad string absent” became `内容未匹配` and the worker stayed `AWAITING_ACCEPTANCE/NEEDS_ACCEPTANCE`.
+- 中文解释：
+  - 大白话：小傻妞说“这个坏东西不应该存在”，系统只认识另一种说法，于是反过来判成失败。
+- Root cause:
+  - The executor recognized `not_contains/absent/missing/not_present/does_not_contain`, but not `not_exists`.
+- Fix:
+  - `match_mode=not_exists/not_exist` now maps to the same absent-content semantics as `not_contains`.
+- Verification:
+  - Focused regression: `test_test_executor_content_check_supports_not_exists_match_mode`.
+- Status: fixed by focused tests; verified in clean group03n rerun.
+
+### Finding 94: dispatch scope memory must not record old acceptance rows
+
+- Discovered at: 2026-05-15 during 3-worker furniture E2E group 3j.
+- Symptom:
+  - Current workers, tester, and acceptor were created in the new run.
+  - Final `Subagent State Notice` still included old group 3h/3i blockers.
+  - The tool-facing board was mostly scoped, but the final closeout scope had already been polluted by report records.
+- 中文解释：
+  - 大白话：这次 root 明明只派了新的几个小傻妞，但调度报告里顺手带了旧验收记录；我们把这些旧 id 也记进“本轮任务名单”，最后又被旧任务拖住。
+- Root cause:
+  - `_run_ids_from_dispatch()` added every `record.run_id` from a dispatch report.
+  - Dispatch reports may include acceptance/history records unrelated to the runner wave.
+- Fix:
+  - Current-turn memory now records explicit `run_ids/include_run_ids` plus real `runner` records only.
+  - Non-runner report rows such as acceptance review records no longer expand the final closeout scope.
+  - Scoped closeout/board/body guard no longer fall back to all rows when an active scope exists but no row matches.
+- Verification:
+  - Focused regression: `test_dispatch_scope_memory_ignores_non_runner_report_records`.
+  - Existing scope regressions for closeout, board, and body-read guard pass.
+- Status: fixed by focused tests; verified in clean group03n rerun.
+
+### Finding 95: worker-only deterministic closeout must respect natural QA/acceptance wording
+
+- Discovered at: 2026-05-15 during 3-worker furniture E2E group 3k.
+- Symptom:
+  - Root created one worker for all three pages instead of continuing to tester/acceptor.
+  - After the worker became `DONE/VERIFIED`, deterministic local closeout ended the task immediately.
+  - The user prompt had said to close out based on “测试结果和验收结果”, but no tester or acceptor had been created.
+- 中文解释：
+  - 大白话：用户说“做完后看测试和验收结果再交差”，系统只看到 worker 绿了就提前收工，少走了 QA/验收链路。
+- Root cause:
+  - The closeout guard only recognized explicit role words such as `tester/acceptor/测试子代理/验收子代理`.
+  - It did not treat natural wording like `测试结果` / `验收结果` / `最终验收` as a quality-role requirement.
+- Fix:
+  - Natural Chinese quality wording now blocks worker-only deterministic closeout until tester/acceptor roles are present.
+- Verification:
+  - Focused regression: `test_dispatch_completion_waits_for_natural_test_and_acceptance_results`.
+- Status: fixed by focused tests; verified in clean group03n rerun.
+
+### Finding 96: top-level root must not be told to use child-only delegation tools
+
+- Discovered at: 2026-05-15 during 3-worker furniture E2E group 3m.
+- Symptom:
+  - Root created workers and a tester, then tried to create the acceptor with `schedule_child_subagents`.
+  - `schedule_child_subagents` is only valid inside an active subagent runner, so no acceptor run was created at top level.
+  - Root then summarized as if acceptance existed.
+- 中文解释：
+  - 大白话：顶层主代理想补一个验收小傻妞，但系统提示它用了“子代理内部才有的工具”。结果验收小傻妞没出生，root 还差点口头说完成。
+- Root cause:
+  - Delegation body-read guard used one generic blocked message for both root and nested parents.
+  - Final response guard only checked failed/blocking tasks; when worker/tester were green but acceptor never existed, it let the model's optimistic final text pass through.
+- Fix:
+  - Top-level blocked message now recommends `create_subagents`; nested parent runners still use `schedule_child_subagents`.
+  - Final response guard now reads the current user prompt, detects missing requested quality roles, and replaces false completion with a factual notice.
+- Verification:
+  - Focused regression: `test_top_level_refs_only_root_cannot_read_product_body_before_acceptor_done`.
+  - Focused regression: `test_final_response_guard_blocks_missing_natural_acceptance_result`.
+  - Clean group03n rerun created a real acceptor (`subagent-1778805453-7e3f5552`) and ended with `total_runs=8`, `done_verified=8`.
+- Status: fixed by focused tests and clean group03n rerun.
+
+### Finding 97: natural multi-worker E2E can complete through repair, tester, and acceptor without parent body reads
+
+- Discovered at: 2026-05-15 during clean 3-worker furniture E2E group 3n.
+- Scenario:
+  - User-style prompt: root must not write pages itself.
+  - Root created three worker 小傻妞 runs for `index1.html`, `index2.html`, and `index3.html`.
+  - Root then created repair workers, a tester, and an acceptor based on persisted reports.
+- 中文解释：
+  - 大白话：这次不是“刚好一次写对就过”，而是像真实开发一样：先写、发现问题、派人修、再测试、再验收，最后再交差。
+- Observed fixes:
+  - `index1.html` initially failed `html_structure/unbalanced_style`; root created a repair worker.
+  - `index3.html` initially had `href="#"`, then had broken local refs (`privacy.html/terms.html/sitemap.html`); root created two follow-up repair workers.
+  - Tester reported the three pages usable, with only one low-priority note.
+  - Acceptor completed final acceptance.
+- Verification:
+  - CLI run exited cleanly.
+  - Final deterministic closeout:
+    - `total_runs=8`
+    - `done_verified=8`
+    - output refs include all current worker, repair, tester, and acceptor task records.
+  - Deliverables exist:
+    - `/Users/xiaoyezi/my-claude-code/subagent_hardening_e2e_20260515_group03n/deliverables/index1.html`
+    - `/Users/xiaoyezi/my-claude-code/subagent_hardening_e2e_20260515_group03n/deliverables/index2.html`
+    - `/Users/xiaoyezi/my-claude-code/subagent_hardening_e2e_20260515_group03n/deliverables/index3.html`
+- Remaining notes:
+  - The run needed 32 tool rounds. This is acceptable for the current hardening test, but reinforces the plan to simplify subagent configuration and avoid unnecessary tool/role friction.
+  - The final compact suggestion showed context usage above the configured comfort zone. This belongs to compact/resume tuning, not subagent correctness.
+- Status: passed as a real E2E baseline.
+
+### Finding 98: QA and acceptance roles need visible report-write permission without becoming product writers
+
+- Discovered at: 2026-05-15 during clean 3-worker furniture E2E group 3n.
+- Symptom:
+  - The tester goal asked for `test_report.md` in the user deliverables folder.
+  - The acceptor goal asked for `acceptance_report.md` in the user deliverables folder.
+  - Both roles wrote reports into their task directories instead, and their output lessons said they could not write deliverables directly.
+- 中文解释：
+  - 大白话：测试/验收小傻妞会干活，也会写报告，但被角色边界拦了一下，只能把报告写到自己的小屋里。这样用户看产物目录时会少看到测试报告和验收报告。
+- Root cause:
+  - Delegate-only direct-write guard treated every non-runtime write by tester/acceptor as product writing.
+  - The policy did not distinguish business product files (`index.html`) from report artifacts (`test_report.md`, `acceptance_report.md`).
+- Fix:
+  - Direct-write guard now allows report-like artifacts (`report/status/summary/test/acceptance/review/finding/...` with `.md/.txt/.json/.jsonl`) to be written outside runtime dirs.
+  - Product files remain protected: non-worker roles still cannot write `index.html` or similar business deliverables when the user asked root to delegate.
+- Verification:
+  - Focused regression: `test_delegate_only_prompt_allows_quality_role_report_write_to_deliverables`.
+  - Existing direct-write guard tests still block root/coordinator product writes and allow worker product writes.
+- Status: fixed by focused tests; next clean E2E should confirm reports land in deliverables when requested.
+
+### Finding 99: Runner-context dispatch filtered out freshly scheduled children
+
+- Discovered at: 2026-05-15 during natural-language furniture single-page E2E.
+- Symptom:
+  - Root created `小傻妞-家具总控`.
+  - The coordinator created `小小傻妞-家具叶子`, then called dispatch.
+  - Dispatch only wrote a due-check record; the leaf stayed `PLANNING`, so the parent was marked incomplete.
+- 中文解释：
+  - 大白话：小傻妞刚把小小傻妞叫出来，系统又用“只看本轮 root 记录”的旧过滤器把这个新孩子挡在门外，导致孩子没开工。
+- Root cause:
+  - Current-turn runner filtering was designed to stop top-level root from accidentally running stale workspace tasks.
+  - Inside a subagent runner, `parent_run_id` already scopes dispatch to the current node's direct children, so the extra current-turn filter was too strict.
+- Fix:
+  - `scoped_current_turn_runner_tasks()` now returns the already parent-scoped candidates unchanged when `parent_run_id` is present.
+  - Top-level implicit dispatch still keeps the stale-workspace protection.
+- Verification:
+  - Focused regression: `test_scoped_current_turn_runner_tasks_keeps_direct_children_when_parent_scoped`.
+  - Natural-language E2E now reaches the leaf runner and writes `site/index.html`.
+- Status: fixed by focused tests.
+
+### Finding 100: Built-in static-site checks written as commands should not hit shell allowlist
+
+- Discovered at: 2026-05-15 during natural-language furniture single-page E2E.
+- Symptom:
+  - Leaf wrote a valid `index.html`.
+  - Runner reported test command `static_site_check`.
+  - Parent acceptance rejected it as `测试命令不在 allowlist 内: static_site_check`, even though `static_site_check` is an internal read-only validator.
+- 中文解释：
+  - 大白话：小小傻妞说“用系统自带网页检查器检查一下”，但它把名字写在 command 里。系统误以为这是要跑 shell 命令，于是拦住了。
+- Root cause:
+  - Test preparation treated `static_site_check` in `command` as a shell command.
+  - Static-site inference also treated any existing `validation_method=static_site_check` as complete, even when it lacked `site_root`.
+- Fix:
+  - `execution_test_items.py` converts `command: static_site_check` / `static-site-check` into native `validation_method=static_site_check`.
+  - `execution_static_site_items.py` only treats declared static checks with `site_root` as executable; incomplete pseudo-checks are dropped once inferred checks are available.
+- Verification:
+  - Focused regression: `test_prepare_test_items_converts_static_site_command_alias`.
+  - Natural-language E2E verifies both root coordinator and leaf as `DONE/VERIFIED`.
+- Status: fixed by focused tests.
+
+### Finding 101: Natural-language root -> child -> grandchild E2E now has a deterministic baseline
+
+- Discovered at: 2026-05-15 during the 5-stage subagent hardening pass.
+- Scenario:
+  - User prompt stayed non-technical: “用单文件 html 做一个高端现代家具品牌的网站首页...”
+  - Root created `小傻妞-家具总控`.
+  - The coordinator created and dispatched `小小傻妞-家具叶子`.
+  - The leaf wrote `site/index.html`.
+  - Parent acceptance ran the internal static-site validator and completed both runs.
+- 中文解释：
+  - 大白话：这次不是我们手动替下级干活，而是 root 自己派小傻妞，小傻妞再派小小傻妞，小小傻妞自己写文件，系统自己验收，最后确定两层都完成。
+- Verification:
+  - Focused E2E: `test_natural_language_root_drives_child_and_grandchild_e2e`.
+  - Expected closeout includes `done_verified: 2`.
+- Status: passed as a focused natural-language baseline.
+
+### Finding 102: High-risk code-size cleanup should preserve the natural-language baseline
+
+- Discovered at: 2026-05-15 during the 7-stage subagent hardening/code-size cleanup.
+- Scenario:
+  - Refactored the recently hardened subagent/tooling path without changing user-facing workflow.
+  - Split large or near-soft modules into purpose-specific helpers:
+    - `result_structured_evidence.py`
+    - `filesystem_read_file.py`
+    - `registry_payload_normalize.py`
+    - `subagent_finalize_artifact_integrity.py`
+    - `runner_timeout_policy.py`
+    - `static_site_dom_checks.py`
+    - `static_site_path_checks.py`
+    - closeout/context bundle helper modules
+- 中文解释：
+  - 大白话：这轮不是继续给子代理加规矩，而是把已经能跑的代码拆得更结实。以前一些文件太接近上限，后面一改就容易牵一发动全身；现在把“读文件”“工具名纠错”“证据解析”“静态网页检查”等各放各的小屋。
+- Root cause:
+  - Several recently improved flows were correct but too concentrated in large files or long helpers.
+  - That made future changes risky and contradicted the goal of a hard, maintainable subagent system.
+- Fix:
+  - Kept behavior stable and moved cohesive details into focused modules.
+  - Updated compatibility facade imports so old helper entry points still work.
+  - Split near-soft tests into smaller files/helpers instead of weakening the strict guard.
+- Verification:
+  - Strict code-size: `hard=0 high-risk=0 soft=0`.
+  - Focused tests: `157 passed`.
+  - Natural-language hierarchy/recovery baseline: `29 passed`.
+- Status: fixed as a maintainability hardening pass.

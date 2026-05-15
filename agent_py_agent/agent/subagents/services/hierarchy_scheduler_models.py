@@ -25,7 +25,7 @@ class HierarchyChildSpec:
 
 
 # LLM: HierarchyScheduleRequest is the only business entrypoint for hierarchy materialization.
-# 类用途: 集中保存层级调度的 parent、候选子任务、限制和执行模式。
+# 类用途: 集中保存层级调度的 parent、候选子任务、限制和执行模式；0 表示不限制深度或直接孩子数量。
 @dataclass(frozen=True)
 class HierarchyScheduleRequest:
     parent_run_id: str
@@ -33,7 +33,7 @@ class HierarchyScheduleRequest:
     apply: bool = False
     requested_by: str = "parent"
     max_children: int = 0
-    max_depth: int = 2
+    max_depth: int = 0
 
 
 # LLM: HierarchyScheduledItem reports either a planned or created child without loading large artifacts.

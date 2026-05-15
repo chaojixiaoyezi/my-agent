@@ -234,6 +234,25 @@ class TestValidateWriteBoundaryAllowedRoots:
         )
         assert result == ""
 
+    def test_delegate_policy_allows_product_root_report_artifacts(self, tmp_path):
+        task_dir = tmp_path / "task"
+        product = tmp_path / "deliverables"
+        task_dir.mkdir()
+        product.mkdir()
+        for filename in ["test_report.md", "acceptance_report.md", "验收报告.txt", "findings.jsonl"]:
+            result = validate_write_boundary(
+                "write_file",
+                {"path": str(product / filename)},
+                workspace_root=tmp_path,
+                write_boundary={
+                    "role": "acceptor",
+                    "allowed_write_roots": [str(task_dir), str(product)],
+                    "product_write_roots": [str(product)],
+                    "product_write_policy": "delegate",
+                },
+            )
+            assert result == "", filename
+
     def test_direct_policy_allows_worker_product_write(self, tmp_path):
         product = tmp_path / "deliverables"
         product.mkdir()

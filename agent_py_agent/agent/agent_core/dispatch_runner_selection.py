@@ -19,6 +19,28 @@ def scoped_runner_tasks(tasks: list, ctx: DispatchContext) -> list:
     return scoped
 
 
+# LLM: scoped_current_turn_runner_tasks keeps implicit top-level dispatch inside the runs touched this turn.
+# 函数用途: 顶层 root 复用全局 subagent workspace 时，模型省略 run_ids 不能把旧任务误选进本轮 runner。
+def scoped_current_turn_runner_tasks(
+    tasks: list,
+    ctx: DispatchContext,
+    *,
+    active_run_ids: set[str],
+) -> list:
+    if requested_include_ids(ctx):
+        return list(tasks)
+    if str(getattr(ctx, "parent_run_id", "") or "").strip():
+        return list(tasks)
+    active_ids = {str(item) for item in active_run_ids if str(item or "").strip()}
+    if not active_ids:
+        return list(tasks)
+    root_ids = _active_scope_root_ids(tasks, active_ids)
+    return [
+        task for task in tasks
+        if _task_in_active_scope(task, active_ids, root_ids)
+    ]
+
+
 # LLM: scope_visible_runner_tasks applies parent/root/exclude scope without narrowing explicit include ids.
 # 函数用途: 计算当前 dispatch 能看到的 runner 范围；用于候选过滤和错误提示里的“可用 direct child ids”。
 def scope_visible_runner_tasks(tasks: list, ctx: DispatchContext) -> list:
@@ -33,6 +55,30 @@ def scope_visible_runner_tasks(tasks: list, ctx: DispatchContext) -> list:
             continue
         scoped.append(task)
     return scoped
+
+
+# LLM: _active_scope_root_ids keeps descendant runs of touched coordinators visible in implicit dispatch.
+# 函数用途: 当前轮记录了父级 run_id 时，同 root_id 的孙级/后代仍可被后续 dispatch 推进。
+def _active_scope_root_ids(tasks: list, active_ids: set[str]) -> set[str]:
+    root_ids: set[str] = set()
+    for task in tasks:
+        task_id = str(getattr(task, "id", "") or "")
+        if task_id not in active_ids:
+            continue
+        root_id = str(getattr(task, "root_id", "") or task_id).strip()
+        if root_id:
+            root_ids.add(root_id)
+    return root_ids
+
+
+# LLM: _task_in_active_scope accepts exact touched ids plus descendants of touched roots.
+# 函数用途: 判断一个 runner 是否属于当前 root 轮次；旧工作区里其它任务不参与隐式调度。
+def _task_in_active_scope(task: object, active_ids: set[str], root_ids: set[str]) -> bool:
+    task_id = str(getattr(task, "id", "") or "")
+    if task_id in active_ids:
+        return True
+    root_id = str(getattr(task, "root_id", "") or "")
+    return bool(root_id and root_id in root_ids)
 
 
 # LLM: invalid_include_run_ids_record stops a runner parent from silently pursuing hallucinated child ids.

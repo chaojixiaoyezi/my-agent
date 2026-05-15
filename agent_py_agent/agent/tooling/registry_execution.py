@@ -10,7 +10,6 @@ ToolRegistry 本身保持'服务台'职责；这里集中放工具调用解析�
 避免注册表类继续变厚。
 """
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,7 +19,6 @@ from ..action_protocol import (
     ToolCallEnvelope,
 )
 from ..log_analysis.capabilities import SECURITY_TOOL_NAMES, has_security_tool_capability
-from .json_repair import load_tool_block_json
 from .models import BaseTool, ToolExecutionResult
 from .parse_error_hint import parse_error_message
 from .parser import parse_xmlish_tool_calls
@@ -33,65 +31,14 @@ from .registry_envelopes import (
 )
 from .registry_invoke import RegistryToolInvokeRequest, invoke_registry_tool
 from .registry_markers import next_tool_block_end, next_tool_block_start
-
-_MAX_TOOL_PAYLOAD_FIELDS = 64
-_MAX_TOOL_FIELD_NAME_CHARS = 128
-_MAX_TOOL_NAME_CHARS = 128
-_MAX_PARSE_ERROR_RAW_CHARS = 1000
-_MODEL_WRAPPER_PARAM_KEYS = {
-    "api",
-    "filesystem",
-    "log_analysis",
-    "memory",
-    "orchestration",
-    "param_name",
-    "system",
-    "web",
-}
-_TOOL_NAME_ALIASES = {
-    "append": "append_file",
-    "cat": "read_file",
-    "fetch": "fetch_url",
-    "grep": "search_text",
-    "http": "http_request",
-    "list": "list_files",
-    "ls": "list_files",
-    "open": "read_file",
-    "read": "read_file",
-    "replace": "replace_in_file",
-    "request": "http_request",
-    "search": "search_text",
-    "write": "write_file",
-}
-_FILESYSTEM_PATH_PARAM_ALIASES = {
-    "dir": "path",
-    "directory": "path",
-    "file": "path",
-    "file_path": "path",
-    "filepath": "path",
-    "filename": "path",
-    "target": "path",
-    "target_path": "path",
-}
-_PARAM_ALIASES_BY_TOOL = {
-    "append_file": _FILESYSTEM_PATH_PARAM_ALIASES,
-    "list_files": _FILESYSTEM_PATH_PARAM_ALIASES,
-    "read_file": _FILESYSTEM_PATH_PARAM_ALIASES,
-    "write_file": _FILESYSTEM_PATH_PARAM_ALIASES,
-    "replace_in_file": {
-        **_FILESYSTEM_PATH_PARAM_ALIASES,
-        "old_text": "old",
-        "new_text": "new",
-        "replacement": "new",
-    },
-    "search_text": {
-        **_FILESYSTEM_PATH_PARAM_ALIASES,
-        "keyword": "query",
-        "pattern": "query",
-        "search_text": "query",
-        "text": "query",
-    },
-}
+from .registry_payload_normalize import (
+    normalize_tool_payload,
+    parse_error_payload,
+    parse_tool_block_payload,
+)
+from .registry_payload_normalize import (
+    tool_name as normalize_tool_name,
+)
 
 
 # LLM: ExecuteRegistryCallParams 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
@@ -134,12 +81,19 @@ def parse_registry_tool_calls(text: str) -> list[dict[str, Any]]:
         end_info = next_tool_block_end(scan_text, start + len(marker_start))
         if end_info is None:
             raw = scan_text[start + len(marker_start) :].strip().strip("`")
-            payload = _parse_tool_block_payload(raw)
-            calls.append((start, _parse_error_payload("工具调用缺少结束标记 [/TOOL_CALL]", raw) if payload.get("tool") == "__parse_error__" else payload))
+            payload = parse_tool_block_payload(raw)
+            calls.append(
+                (
+                    start,
+                    parse_error_payload("工具调用缺少结束标记 [/TOOL_CALL]", raw)
+                    if payload.get("tool") == "__parse_error__"
+                    else payload,
+                )
+            )
             break
         end, marker_end = end_info
         raw = scan_text[start + len(marker_start) : end].strip().strip("`")
-        calls.append((start, _parse_tool_block_payload(raw)))
+        calls.append((start, parse_tool_block_payload(raw)))
         cursor = end + len(marker_end)
 
     calls.extend(parse_xmlish_tool_calls(scan_text))
@@ -185,7 +139,7 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
         )
 
     try:
-        tool_name = _tool_name(normalized_payload.get("tool"))
+        tool_name = normalize_tool_name(normalized_payload.get("tool"))
     except ValueError as exc:
         return attach_result_envelope(ToolExecutionResult("unknown", False, str(exc)), envelope)
 
@@ -214,7 +168,7 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
 def _prepare_tool_payload(payload: object) -> dict[str, Any] | ToolExecutionResult:
     if isinstance(payload, ToolCallEnvelope):
         payload = payload_from_tool_call_envelope(payload)
-    normalized_payload, payload_error = _normalize_tool_payload(payload)
+    normalized_payload, payload_error = normalize_tool_payload(payload)
     if payload_error:
         return ToolExecutionResult("unknown", False, payload_error)
     assert normalized_payload is not None
@@ -258,22 +212,6 @@ def security_tools_visible(
         or has_security_tool_capability(granted_capabilities)
     )
 
-
-# LLM: _parse_tool_block_payload 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 解析 parse_tool_block_payload 数据结构。
-def _parse_tool_block_payload(raw: str) -> dict[str, Any]:
-    try:
-        payload = load_tool_block_json(raw)
-    except json.JSONDecodeError as exc:
-        return _parse_error_payload(f"工具调用 JSON 解析失败: {exc}", raw)
-    if not isinstance(payload, dict):
-        return _parse_error_payload("工具调用必须是 JSON 对象", raw)
-    normalized, error = _normalize_tool_payload(payload)
-    if error or normalized is None:
-        return _parse_error_payload(error or "工具调用解析失败", raw)
-    return normalized
-
-
 # LLM: _tool_auth_error 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
 # 函数用途: 整理工具调用的 tool_auth_error 信息，供注册表鉴权或执行使用。
 def _tool_auth_error(
@@ -308,122 +246,3 @@ def _security_tool_call_authorized(
         or (allowed is not None and tool_name in allowed)
         or has_security_tool_capability(granted_capabilities)
     )
-
-
-# LLM: _parse_error_payload 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 解析 parse_error_payload 数据结构。
-def _parse_error_payload(error: str, raw: str) -> dict[str, str]:
-    return {
-        "tool": "__parse_error__",
-        "error": error,
-        "raw": _truncate(raw, _MAX_PARSE_ERROR_RAW_CHARS),
-    }
-
-
-# LLM: _normalize_tool_payload 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 把输入值归一成 工具系统 内部使用的稳定格式。
-def _normalize_tool_payload(payload: object) -> tuple[dict[str, Any] | None, str]:
-    if not isinstance(payload, dict):
-        return None, "工具调用必须是 JSON 对象"
-    normalized, error = _normalize_payload_mapping(payload)
-    if error:
-        return None, error
-    expanded, error = _unwrap_param_name_bundle(normalized)
-    if error:
-        return None, error
-    canonical, error = _canonicalize_tool_payload(expanded)
-    if error:
-        return None, error
-    if len(canonical) > _MAX_TOOL_PAYLOAD_FIELDS:
-        return None, f"工具调用字段过多，最多 {_MAX_TOOL_PAYLOAD_FIELDS} 个字段"
-    return canonical, ""
-
-
-# LLM: _normalize_payload_mapping validates a tool payload map before dispatch.
-# 函数用途: 检查工具参数名是否安全，并把参数键统一转成字符串，避免坏键污染执行层。
-def _normalize_payload_mapping(payload: dict[Any, Any]) -> tuple[dict[str, Any], str]:
-    if len(payload) > _MAX_TOOL_PAYLOAD_FIELDS:
-        return {}, f"工具调用字段过多，最多 {_MAX_TOOL_PAYLOAD_FIELDS} 个字段"
-
-    normalized: dict[str, Any] = {}
-    for key, value in payload.items():
-        key_text = str(key)
-        if not key_text:
-            return {}, "工具调用包含空参数名"
-        if len(key_text) > _MAX_TOOL_FIELD_NAME_CHARS:
-            return {}, f"工具调用参数名过长，最多 {_MAX_TOOL_FIELD_NAME_CHARS} 个字符"
-        if any(ord(char) < 32 for char in key_text):
-            return {}, "工具调用参数名包含不支持的控制字符"
-        normalized[key_text] = value
-    return normalized, ""
-
-
-# LLM: _unwrap_param_name_bundle repairs a common model mistake without hiding real collisions.
-# 函数用途: 当模型把真实参数误包进 param_name 字段时，将其展开成工具可执行的扁平参数。
-def _unwrap_param_name_bundle(payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
-    wrapper_keys = [key for key in payload if key != "tool"]
-    if (
-        len(wrapper_keys) != 1
-        or wrapper_keys[0] not in _MODEL_WRAPPER_PARAM_KEYS
-        or not isinstance(payload.get(wrapper_keys[0]), dict)
-    ):
-        return payload, ""
-    bundled, error = _normalize_payload_mapping(payload[wrapper_keys[0]])
-    if error:
-        return {}, error
-    if "tool" in bundled:
-        return {}, f"{wrapper_keys[0]} 参数包不能包含 tool 字段"
-    return {"tool": payload["tool"], **bundled}, ""
-
-
-# LLM: _canonicalize_tool_payload repairs stable aliases before auth and execution.
-# 函数用途: 把 JSON 工具调用里的 write/read/file_path 等常见别名归一，避免模型小错直接卡住。
-def _canonicalize_tool_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
-    tool = _canonical_tool_name(payload.get("tool"))
-    normalized: dict[str, Any] = {"tool": tool} if "tool" in payload else {}
-    aliases = _PARAM_ALIASES_BY_TOOL.get(tool, {})
-    for key, value in payload.items():
-        if key == "tool":
-            continue
-        canonical_key = aliases.get(key, key)
-        if canonical_key in normalized and normalized[canonical_key] != value:
-            return {}, (
-                "conflicting parameter aliases: "
-                f"{key} conflicts with {canonical_key}; 请只保留一个参数名。"
-            )
-        normalized[canonical_key] = value
-    return normalized, ""
-
-
-# LLM: _canonical_tool_name keeps parser and direct execution equally tolerant of simple tool aliases.
-# 函数用途: 统一 JSON 工具名别名；未知工具名保留给后续鉴权/未知工具错误处理。
-def _canonical_tool_name(value: object) -> object:
-    if not isinstance(value, str):
-        return value
-    name = value.strip()
-    return _TOOL_NAME_ALIASES.get(name, name)
-
-
-# LLM: _tool_name 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 整理工具调用的 tool_name 信息，供注册表鉴权或执行使用。
-def _tool_name(value: object) -> str:
-    if value is None:
-        raise ValueError("工具调用缺少 tool 字段")
-    if not isinstance(value, (str, int, float, bool)):
-        raise ValueError("tool 字段必须是字符串工具名")
-    name = str(value).strip()
-    if not name:
-        raise ValueError("工具调用缺少 tool 字段")
-    if len(name) > _MAX_TOOL_NAME_CHARS:
-        raise ValueError(f"tool 字段过长，最多 {_MAX_TOOL_NAME_CHARS} 个字符")
-    if any(ord(char) < 32 for char in name):
-        raise ValueError("tool 字段包含不支持的控制字符")
-    return name
-
-
-# LLM: _truncate 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 工具系统 中的 truncate 步骤，并保持调用方依赖的数据形状。
-def _truncate(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars] + "\n... 已截断"

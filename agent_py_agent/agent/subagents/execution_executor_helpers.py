@@ -11,11 +11,23 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .execution_records import TestExecutionRecord
+
+
+# LLM: ContentMatchRecordRequest keeps content-check options bundled for future match modes.
+# 类用途: 保存内容验收记录构造所需的文件、模式和匹配选项，避免 helper 参数继续扩散。
+@dataclass(frozen=True)
+class ContentMatchRecordRequest:
+    test: dict[str, Any]
+    path: Path
+    pattern: str
+    exact: bool = False
+    expect_absent: bool = False
 
 
 # LLM: _split_command centralizes platform shlex mode so validation and execution see the same argv.
@@ -78,26 +90,19 @@ def _file_result(path: Path, exists: bool) -> dict[str, Any]:
 
 # LLM: _content_match_record reads one workspace-local text file and supports exact matches for cat normalization.
 # 函数用途: 构造内容检查记录；不会把完整文件正文写入 validation_result，可用于精确或包含匹配。
-def _content_match_record(
-    test: dict[str, Any],
-    path: Path,
-    pattern: str,
-    *,
-    exact: bool = False,
-    expect_absent: bool = False,
-) -> TestExecutionRecord:
+def _content_match_record(request: ContentMatchRecordRequest) -> TestExecutionRecord:
     """Return a content_check validation record."""
 
     # LLM: expect_absent turns natural "no bad pattern" checks into a deterministic not_contains result.
     # 函数用途: 支持正向包含、全文相等和负向不存在三种内容验收，避免“无 xxx”被反向判定。
-    text = path.read_text(encoding="utf-8", errors="replace")
-    matched = text == pattern if exact else pattern in text
-    ok = not matched if expect_absent else matched
-    mode = "exact" if exact else "contains"
-    if expect_absent:
+    text = request.path.read_text(encoding="utf-8", errors="replace")
+    matched = text == request.pattern if request.exact else request.pattern in text
+    ok = not matched if request.expect_absent else matched
+    mode = "exact" if request.exact else "contains"
+    if request.expect_absent:
         mode = "not_contains"
     return TestExecutionRecord(
-        test_name=_test_name(test),
+        test_name=_test_name(request.test),
         executed=True,
         exit_code=0 if ok else 1,
         executed_at=_utc_now_iso(),
@@ -105,13 +110,21 @@ def _content_match_record(
         validation_result={
             "ok": ok,
             "matched": matched,
-            "path": str(path),
-            "pattern": pattern,
+            "path": str(request.path),
+            "pattern": request.pattern,
             "match_mode": mode,
-            "expect_absent": expect_absent,
+            "expect_absent": request.expect_absent,
         },
-        error="" if ok else ("内容不应出现" if expect_absent else ("内容不相等" if exact else "内容未匹配")),
+        error="" if ok else _content_match_error(request),
     )
+
+
+# LLM: _content_match_error keeps localized failure text beside match option handling.
+# 函数用途: 根据内容检查模式返回用户可读的失败原因。
+def _content_match_error(request: ContentMatchRecordRequest) -> str:
+    if request.expect_absent:
+        return "内容不应出现"
+    return "内容不相等" if request.exact else "内容未匹配"
 
 
 # LLM: _file_record builds rejected file/content validation records without duplicating failure shape.

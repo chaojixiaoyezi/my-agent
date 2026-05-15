@@ -36,6 +36,14 @@ def test_context_bundle_v1_captures_task_handoff_fields(tmp_path) -> None:
     bundle = build_context_bundle(manager.load(task.id))
     payload = asdict(bundle)
 
+    _assert_core_context_bundle(bundle, task)
+    _assert_workspace_context_bundle(bundle, task, tmp_path)
+    assert set(REQUIRED_CONTEXT_BUNDLE_FIELDS).issubset(payload)
+
+
+# LLM: _assert_core_context_bundle groups identity and task contract assertions.
+# 函数用途: 检查 context bundle 的身份、目标、计划、验收和权限主字段。
+def _assert_core_context_bundle(bundle, task) -> None:
     assert bundle.schema_version == "subagent_context_bundle.v1"
     assert bundle.run_id == task.id
     assert bundle.root_id == "root-1"
@@ -46,6 +54,11 @@ def test_context_bundle_v1_captures_task_handoff_fields(tmp_path) -> None:
     assert bundle.acceptance_checks == ["能从购物车进入结算", "测试覆盖订单总价"]
     assert bundle.constraints["forbidden_write_roots"] == ["/System"]
     assert bundle.permissions["allowed_tools"] == ["read_file", "write_file"]
+
+
+# LLM: _assert_workspace_context_bundle groups filesystem refs and packet contract assertions.
+# 函数用途: 检查 task/run workspace 引用、输出合同和 source refs 没有退化。
+def _assert_workspace_context_bundle(bundle, task, tmp_path: Path) -> None:
     assert bundle.workspace_refs["shared_messages"].endswith("shared/messages.jsonl")
     assert bundle.workspace_refs["agent_run_inbox"].endswith("inbox")
     assert bundle.workspace_refs["agent_run_outbox"].endswith("outbox")
@@ -62,7 +75,6 @@ def test_context_bundle_v1_captures_task_handoff_fields(tmp_path) -> None:
     assert bundle.task_packet["write_contract"]["allowed_write_roots"] == [str(tmp_path / task.id / "artifacts")]
     assert "task.goal" in bundle.source_refs["goal"]
     assert "task.acceptance_checks" in bundle.source_refs["acceptance_checks"]
-    assert set(REQUIRED_CONTEXT_BUNDLE_FIELDS).issubset(payload)
 
 
 def test_context_bundle_exposes_controlled_exec_grant_refs(tmp_path) -> None:
@@ -171,6 +183,39 @@ def test_context_bundle_gate_reports_missing_required_handoff_fields(tmp_path) -
     assert "plan" in report.missing_fields
     assert "acceptance_checks" in report.missing_fields
     assert report.blocking_reason == "missing_required_context_fields"
+
+
+def test_context_bundle_gate_reports_semantic_file_contract_mismatch(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="用单文件 html 做品牌首页，必须交付 index.html 和 style.css",
+        thought="父级要求文件名不能缩水。",
+        plan=["写页面", "写样式"],
+        role="worker",
+        acceptance_checks=["index.html 存在", "style.css 存在"],
+    )
+    manager.save(task)
+    bundle = build_context_bundle(manager.load(task.id))
+    broken = bundle.__class__(
+        **{
+            **asdict(bundle),
+            "output_contract": {**bundle.output_contract, "required_files": ["index.html"]},
+            "task_packet": {
+                **bundle.task_packet,
+                "file_contract": {
+                    **bundle.task_packet["file_contract"],
+                    "required_files": ["index.html"],
+                },
+            },
+        }
+    )
+
+    report = validate_context_bundle(broken)
+
+    assert report.ok is False
+    assert "output_contract.required_files:style.css" in report.missing_fields
+    assert "task_packet.file_contract.required_files:style.css" in report.missing_fields
+    assert report.blocking_reason == "semantic_context_mismatch"
 
 
 def test_write_execution_context_persists_context_bundle_files(tmp_path) -> None:

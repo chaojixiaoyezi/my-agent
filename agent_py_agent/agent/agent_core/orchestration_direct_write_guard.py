@@ -69,6 +69,23 @@ _NON_PRODUCT_WRITER_ROLE_TOKENS = (
     "测试",
     "找茬",
 )
+_REPORT_WRITE_SUFFIXES = (".md", ".txt", ".json", ".jsonl")
+_REPORT_WRITE_NAME_MARKERS = (
+    "acceptance",
+    "audit",
+    "bug",
+    "check",
+    "finding",
+    "handoff",
+    "report",
+    "review",
+    "status",
+    "summary",
+    "test",
+    "验收",
+    "报告",
+    "测试",
+)
 
 
 # LLM: DelegateOnlyDirectWriteGuardRequest bundles tool-loop data for direct-write policy checks.
@@ -92,7 +109,7 @@ def maybe_block_delegate_only_direct_write(
     if _current_runner_can_write_product(request.agent):
         return None
     tool = str(request.payload.get("tool") or "").strip()
-    if tool in _DIRECT_WRITE_TOOLS and not _is_runtime_write(request.agent, request.payload):
+    if tool in _DIRECT_WRITE_TOOLS and not _is_allowed_non_product_write(request.agent, request.payload):
         return _blocked_result(tool)
     if tool == _SHELL_TOOL and _shell_command_writes_product(request.payload):
         return _blocked_result(tool)
@@ -110,19 +127,14 @@ def _user_requested_delegate_only(prompt: str) -> bool:
     return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _DELEGATE_ONLY_PATTERNS)
 
 
-# LLM: _current_runner_can_write_product keeps delegate-only guard scoped to root/parent, not assigned leaves.
-# 函数用途: 当前上下文如果是被父级派去交付的 worker/leaf_worker，则允许写业务产物；root/coordinator/tester/acceptor 仍会被拦。
+# LLM: _current_runner_can_write_product keeps delegate-only guard scoped to the outer root, not active subagents.
+# 函数用途: 只要已经进入某个 subagent runner，上层派工约束就不再按角色剥夺它的基础写入能力；真实路径仍由 write boundary 守住。
 def _current_runner_can_write_product(agent: object) -> bool:
     run_id = str(getattr(agent, "_current_subagent_run_id", "") or "").strip()
     if not run_id:
         return False
     task = _load_current_runner_task(agent, run_id)
-    identity = _runner_identity_text(task)
-    if not identity:
-        return False
-    if any(token in identity for token in _NON_PRODUCT_WRITER_ROLE_TOKENS):
-        return False
-    return any(token in identity for token in _PRODUCT_WRITER_ROLE_TOKENS)
+    return task is not None
 
 
 # LLM: _load_current_runner_task tolerates fake agents and partial managers in tests and recovery paths.
@@ -157,6 +169,24 @@ def _is_runtime_write(agent: object, payload: dict[str, Any]) -> bool:
     if path.name in _RUNTIME_FILE_NAMES and _looks_like_runtime_path(path):
         return True
     return _looks_like_runtime_path(path) and "deliverables" not in path.parts
+
+
+# LLM: _is_allowed_non_product_write separates report artifacts from business deliverables.
+# 函数用途: 委托模式下允许 root/QA/coordinator 写报告类交接文件，但继续阻止它们写 index.html 等业务正文。
+def _is_allowed_non_product_write(agent: object, payload: dict[str, Any]) -> bool:
+    return _is_runtime_write(agent, payload) or _is_report_artifact_write(agent, payload)
+
+
+# LLM: _is_report_artifact_write lets reviewer roles leave visible evidence without editing product bodies.
+# 函数用途: 识别 test_report/acceptance_report/status 等小型交接文件；它们是验收证据，不是 worker 负责的业务产物。
+def _is_report_artifact_write(agent: object, payload: dict[str, Any]) -> bool:
+    path = _payload_path(agent, payload)
+    if path is None:
+        return False
+    name = path.name.lower()
+    if not name.endswith(_REPORT_WRITE_SUFFIXES):
+        return False
+    return any(marker in name for marker in _REPORT_WRITE_NAME_MARKERS)
 
 
 # LLM: _shell_command_writes_product flags shell forms that can create or mutate product files.

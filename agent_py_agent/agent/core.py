@@ -143,6 +143,7 @@ class SimpleAgent(
         self.root = Path(root)
         self.capability_config_path = default_capability_config_path(self.root)
         self._capability_config_runtime_snapshot = None
+        self._orchestration_run_ids_seen: set[str] = set()
         self.workspace_roots = _normalized_workspace_roots(self.root, workspace_roots)
 
         self.home_paths = _resolve_home_paths(config)

@@ -12,7 +12,7 @@ Human version:
 
 import json
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -69,6 +69,17 @@ from .write_boundary_policy import task_product_write_policy, task_product_write
 
 if TYPE_CHECKING:
     from ..local_store import LocalStore
+
+
+# LLM: ExecutionContextBuildRequest bundles runner context inputs for a stable method boundary.
+# 类用途: 保存构建子代理执行上下文所需的任务、工具、技能、授权卡片和卡片上限。
+@dataclass(frozen=True)
+class ExecutionContextBuildRequest:
+    task: object
+    allowed_skills: list[str]
+    allowed_tools: list[str]
+    grants: list[dict[str, object]]
+    max_cards: int
 
 # LLM: SubAgentRunnerContextMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 类用途: 拆分subagent执行器上下文混入流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
@@ -156,31 +167,26 @@ class SubAgentRunnerContextMixin:
         allowed_skills = _merge_list(task.allowed_skills, granted_skills)
         allowed_tools = _runner_allowed_tools(task, _merge_list(task.allowed_tools, granted_tools))
         return self._make_execution_context(
-            task,
-            allowed_skills=allowed_skills,
-            allowed_tools=allowed_tools,
-            grants=grants,
-            max_cards=max_cards,
+            ExecutionContextBuildRequest(
+                task=task,
+                allowed_skills=allowed_skills,
+                allowed_tools=allowed_tools,
+                grants=grants,
+                max_cards=max_cards,
+            )
         )
 
     # LLM: _make_execution_context 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
     # 函数用途: 构建execution上下文所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
-    def _make_execution_context(
-        self,
-        task: SubAgentTask,
-        *,
-        allowed_skills: list[str],
-        allowed_tools: list[str],
-        grants: list[dict[str, object]],
-        max_cards: int,
-    ) -> SubAgentExecutionContext:
+    def _make_execution_context(self, request: ExecutionContextBuildRequest) -> SubAgentExecutionContext:
+        task = request.task
         controlled_exec_grants = controlled_exec_grant_refs(list(task.capability_grants or []))
         return SubAgentExecutionContext(
             **_execution_context_task_fields(task),
-            allowed_skills=allowed_skills,
-            allowed_tools=allowed_tools,
-            granted_cards=_dedupe_granted_cards(task.capability_grants, max_cards=max_cards),
-            grants=grants,
+            allowed_skills=request.allowed_skills,
+            allowed_tools=request.allowed_tools,
+            granted_cards=_dedupe_granted_cards(task.capability_grants, max_cards=request.max_cards),
+            grants=request.grants,
             controlled_exec_grants=controlled_exec_grants,
             acceptance_checks=task.acceptance_checks,
             evidence=[asdict(item) for item in task.evidence],
@@ -252,10 +258,22 @@ def _execution_context_task_fields(task: SubAgentTask) -> dict[str, object]:
         "parent_id": task.parent_id,
         "root_id": task.root_id,
         "depth": task.depth,
+        # LLM: Session identity lets takeover/compact treat subagents as independent agent sessions.
+        "subagent_session_id": _task_text_field(task, "subagent_session_id"),
+        "agent_thread_id": _task_text_field(task, "agent_thread_id"),
+        "parent_subagent_session_id": _task_text_field(task, "parent_subagent_session_id"),
+        "root_subagent_session_id": _task_text_field(task, "root_subagent_session_id"),
         "task_dir": task.task_dir,
         "execution_context_file": task.execution_context_file,
         "execution_context_json": task.execution_context_json,
     }
+
+
+# LLM: _task_text_field protects execution context JSON from MagicMock or legacy partial task objects.
+# 函数用途: 读取新增字符串字段；旧测试/迁移对象没有真实字段时返回空字符串，而不是序列化 mock。
+def _task_text_field(task: object, name: str) -> str:
+    value = getattr(task, name, "")
+    return value if isinstance(value, str) else ""
 
 
 _FILESYSTEM_WRITE_GRANT_TOOLS = {"write_file", "append_file", "replace_in_file"}

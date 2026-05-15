@@ -39,6 +39,7 @@ def test_compact_continue_packet_contains_typed_recovery_envelope():
     envelope = decode_action_envelope(packet["typed_envelope"])
 
     assert isinstance(envelope, CompactContinuePacketEnvelope)
+    assert envelope.operation_id == "compact_continue_packet:compact-continue-apply-1"
     assert envelope.apply_id == "apply-1"
     assert envelope.ready_to_continue is True
     assert [item.path for item in envelope.path_refs] == [

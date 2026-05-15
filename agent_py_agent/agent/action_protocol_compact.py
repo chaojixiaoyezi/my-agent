@@ -12,6 +12,7 @@ from .action_protocol_core import (
     ACTION_PROTOCOL_SCHEMA_VERSION,
     PathRef,
     RunScope,
+    _default_operation_id,
     _dict_list,
     _dict_or_empty,
     _now_iso,
@@ -34,10 +35,17 @@ class CompactContinuePacketEnvelope:
     path_refs: list[PathRef] = field(default_factory=list)
     next_actions: list[str] = field(default_factory=list)
     scope: RunScope = field(default_factory=RunScope)
+    operation_id: str = ""
     schema_version: int = ACTION_PROTOCOL_SCHEMA_VERSION
     kind: str = "compact_continue_packet"
     created_at: str = field(default_factory=_now_iso)
     reserved: dict[str, Any] = field(default_factory=dict)
+
+    # LLM: __post_init__ makes compact continuation packets safe to replay or dedupe.
+    # 函数用途: 自动生成 compact 恢复包 operation_id，旧包缺字段时也能按 packet_id 识别。
+    def __post_init__(self) -> None:
+        if not self.operation_id:
+            object.__setattr__(self, "operation_id", _default_operation_id(self.kind, self.packet_id))
 
     # LLM: to_dict serializes compact recovery packets for resume payloads.
     # 函数用途: 把 CompactContinuePacketEnvelope 转成 JSON 字典。
@@ -63,6 +71,7 @@ class CompactContinuePacketEnvelope:
             path_refs=[PathRef.from_dict(item) for item in _dict_list(payload.get("path_refs"))],
             next_actions=_string_list(payload.get("next_actions")),
             scope=RunScope.from_dict(payload.get("scope")),
+            operation_id=str(payload.get("operation_id") or ""),
             schema_version=int(payload.get("schema_version") or ACTION_PROTOCOL_SCHEMA_VERSION),
             kind=str(payload.get("kind") or "compact_continue_packet"),
             created_at=str(payload.get("created_at") or _now_iso()),

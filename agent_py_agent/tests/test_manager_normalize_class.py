@@ -258,13 +258,13 @@ class TestWorkflowWorkerTools:
         result = _workflow_worker_tools(["custom_tool"], "worker")
         assert result == ["custom_tool"]
 
-    def test_read_only_for_review_kind(self):
-        """review 类型返回只读工具。"""
+    def test_review_kind_keeps_baseline_write_tools(self):
+        """review 只是角色偏好，不应让子代理失去基础读写能力。"""
         from agent_py_agent.agent.subagents.manager_base import _workflow_worker_tools
 
         result = _workflow_worker_tools([], "review")
         assert "read_file" in result
-        assert "write_file" not in result
+        assert "write_file" in result
 
     def test_coding_for_worker_kind(self):
         """worker 类型返回编码工具。"""

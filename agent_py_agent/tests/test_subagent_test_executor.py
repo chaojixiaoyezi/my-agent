@@ -151,6 +151,26 @@ def test_test_executor_content_check_supports_natural_negative_contains(tmp_path
     assert record.validation_result["expect_absent"] is True
 
 
+# LLM: Model-produced negative aliases should not invert no-bad-pattern checks.
+# 函数用途: 子代理常写 `match_mode=not_exists` 表示坏内容不应存在；父级验收必须按 not_contains 处理。
+def test_test_executor_content_check_supports_not_exists_match_mode(tmp_path):
+    (tmp_path / "page.html").write_text("<a href='index1.html'>首页</a>\n", encoding="utf-8")
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute({
+        "name": "检查 href=#",
+        "validation_method": "content_check",
+        "file_path": "page.html",
+        "content_pattern": "href=\"#\"",
+        "match_mode": "not_exists",
+    })
+
+    assert record.executed is True
+    assert record.passed is True
+    assert record.validation_result["match_mode"] == "not_contains"
+    assert record.validation_result["expect_absent"] is True
+
+
 def test_test_executor_content_check_supports_exact_match(tmp_path):
     """LLM: Exact content checks keep parent acceptance from accepting extra text."""
     (tmp_path / "proof.txt").write_text("context-lineage-ok\n", encoding="utf-8")

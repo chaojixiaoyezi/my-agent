@@ -196,8 +196,8 @@ def _is_root_context(context: SubAgentExecutionContext) -> bool:
     return not parent_id and (not root_id or root_id == context.run_id or context.depth == 0)
 
 
-# LLM: _coordinator_execution_contract_lines keeps delegation policy readable and under size limits.
-# 函数用途: 生成 coordinator/lead 专属执行规则，包括模板选择、权限继承、产物委派和调度失败处理。
+# LLM: _coordinator_execution_contract_lines keeps delegation guidance readable without disabling the agent.
+# 函数用途: 生成 coordinator/lead 专属执行规则，包括模板选择、权限继承、派工建议和调度失败处理；角色偏好不等于能力剥夺。
 def _coordinator_execution_contract_lines() -> list[str]:
     lines = ["可用角色模板索引："]
     lines.extend(f"  {line}" for line in role_template_index_text().splitlines())
@@ -205,13 +205,10 @@ def _coordinator_execution_contract_lines() -> list[str]:
     lines.extend(f"  {line}" for line in role_template_detail_text().splitlines())
     lines.extend(
         [
-            "- coordinator/lead 节点可以在自己的 task_dir 写计划、证据和协调报告；"
-            "也可以继承产物写入根用于检查、接管和救援；业务代码、页面、文档正文等最终产物仍应优先交给 worker/writer。",
-            "- 上层权限应覆盖下层；如果父级给了产物写入根，你可以用它检查、修复或接管，"
-            "但不要因为有权限就绕过 worker/writer 直接替它们完成整块业务产物；"
-            "如果直接写业务产物被工具层拒绝，立刻创建救援 worker/writer/leaf_worker。",
-            "- 正确动作是调用 schedule_child_subagents 创建 worker/writer/leaf_worker，"
-            "把目标路径、文件名、验收条件原样传给下一层，然后用 dispatch_subagents 推进直接 child。",
+            "- coordinator/lead 节点拥有完整基础读写能力：可以写自己的计划、证据、协调报告，也可以在授权产物根里检查、修复或接管。",
+            "- 派工是为了把活做好，不是硬流程。任务小、用户要求你亲自验收/修复、或下级卡住时，你可以直接完成；"
+            "任务大、可并行或需要多人视角时，优先创建 worker/tester/acceptor 等 child。",
+            "- 创建 child 时，把目标路径、文件名、验收条件原样传给下一层，然后用 dispatch_subagents 推进直接 child。",
             "- 如果缺口只属于未来 child/leaf 的执行能力，例如 leaf 才需要 controlled_exec、shell、网络或某个 skill，"
             "coordinator/lead 不要替后代提前提交 capability_request 后停止；先创建并 dispatch 对应 child，"
             "由真正需要该能力的 runner 正式申请，父级再 route grant 并继续推进。",
@@ -228,7 +225,7 @@ def _coordinator_execution_contract_lines() -> list[str]:
             '不要包成 {"orchestration": {...}}，长目标请分多次调用，每次 1-2 个 child。',
             "- 不要让 worker/writer 代写 coordinator 自己的协调证据；需要共享时引用 artifact_refs/evidence_refs。",
             "- 创建 child/leaf 时必须原样传递父级指定的文件名、目录和验收条件，不要把 solution.py 改成别的模块名。",
-            "- 同一次 schedule_child_subagents 不要混建 coordinator 和 leaf_worker；如返回 mixed_coordinator_leaf_children，先只创建下一层 coordinator。",
+            "- 同一次 schedule_child_subagents 可以混建 coordinator、worker、tester 或 acceptor；如果工具返回 scheduling_warnings，按提示复核派工说明即可。",
             "- 如果 schedule_child_subagents 返回 domain_mismatch 或 forbidden_child_scope，必须修正 child 领域后重试，不能宣称完成。",
             "- 创建 leaf 后使用 dispatch_subagents(apply=true, execute_runners=true) 推进直接 child，并汇总 leaf 的产物 refs。",
             "- 多个 child 同轮 dispatch 时不要写子任务专属 runner_instruction；需要专属补充就按单个 run_id 分多次 dispatch。",

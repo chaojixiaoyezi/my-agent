@@ -65,7 +65,7 @@ class SubAgentTakeoverRunService:
         if existing:
             return _existing_result(source, existing)
         chain_limit = _takeover_chain_limit(self.manager)
-        if _takeover_chain_depth(source) >= chain_limit:
+        if chain_limit > 0 and _takeover_chain_depth(source) >= chain_limit:
             return _chain_exhausted_result(self.manager, source, chain_limit)
         takeover = _create_takeover_task(self.manager, source, request)
         self.manager.record_takeover(source.id, take_over_by=takeover.id, reason=request.reason, locked_files=[])
@@ -248,13 +248,13 @@ def _explicit_source_write_roots(source: SubAgentTask) -> list[str]:
     return _unique_strings([str(item) for item in source.allowed_write_roots if str(item or "").strip()])
 
 
-# LLM: _takeover_chain_limit keeps the safety fuse configurable but available in bare unit tests.
-# 函数用途: 读取 manager 上的接管链深度上限；0 表示不允许继续创建 takeover。
+# LLM: _takeover_chain_limit keeps the safety fuse explicit; zero means unrestricted.
+# 函数用途: 读取 manager 上的接管链深度上限；0 表示不限制，显式正数才触发接管链熔断。
 def _takeover_chain_limit(manager: Any) -> int:
     try:
-        return max(0, int(getattr(manager, "takeover_chain_max_depth", 2) or 0))
+        return max(0, int(getattr(manager, "takeover_chain_max_depth", 0) or 0))
     except (TypeError, ValueError):
-        return 2
+        return 0
 
 
 # LLM: _takeover_chain_depth is stored on replacement runs and defaults to 0 for original runs.

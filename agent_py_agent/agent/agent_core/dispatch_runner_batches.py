@@ -13,8 +13,10 @@ from .dispatch_params import DispatchContext, RunnerBatchContext
 from .dispatch_runner_selection import (
     invalid_include_run_ids_record,
     requested_include_ids,
+    scoped_current_turn_runner_tasks,
     scoped_runner_tasks,
 )
+from .orchestration_run_scope import remembered_orchestration_run_ids
 from .runner_dispatch import (
     RunnerDispatchRecordParams,
     _dispatch_runner_candidates,
@@ -62,7 +64,11 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
     records = list(batch.records)
     runner_max_attempts = _runner_max_attempts(agent.config.runner_failure_policy)
     all_tasks = agent.subagents.list_runs()
-    scoped_tasks = scoped_runner_tasks(all_tasks, ctx)
+    scoped_tasks = scoped_current_turn_runner_tasks(
+        scoped_runner_tasks(all_tasks, ctx),
+        ctx,
+        active_run_ids=remembered_orchestration_run_ids(agent),
+    )
     selection_record = invalid_include_run_ids_record(agent, ctx, all_tasks, scoped_tasks)
     if selection_record is not None:
         records.append(selection_record)

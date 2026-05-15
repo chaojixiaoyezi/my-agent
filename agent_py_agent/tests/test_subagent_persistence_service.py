@@ -53,6 +53,34 @@ def test_subagent_persistence_service_round_trips_task(tmp_path) -> None:
     _assert_runtime_workspace_paths(loaded, tmp_path / "tasks" / task.root_id, task.id)
 
 
+def test_subagent_task_has_session_and_thread_identity(tmp_path) -> None:
+    """子代理 run 上方要有稳定 session/thread 身份，供接管和 compact 续跑复用。"""
+    manager = SubAgentManager(tmp_path)
+    root = manager.create_run(goal="root", thought="coordinate", plan=["split"])
+    child = manager.create_run(
+        goal="child",
+        thought="work",
+        plan=["do"],
+        parent_id=root.id,
+        root_id=root.id,
+        depth=1,
+    )
+
+    loaded_child = manager.load(child.id)
+
+    assert root.subagent_session_id.startswith("session-")
+    assert root.agent_thread_id.startswith("thread-")
+    assert loaded_child.subagent_session_id.startswith("session-")
+    assert loaded_child.agent_thread_id.startswith("thread-")
+    assert loaded_child.parent_subagent_session_id == root.subagent_session_id
+    assert loaded_child.root_subagent_session_id == root.root_subagent_session_id
+    assert loaded_child.subagent_session_id != root.subagent_session_id
+
+    context = manager.build_execution_context(child.id)
+    assert context.subagent_session_id == loaded_child.subagent_session_id
+    assert context.parent_subagent_session_id == root.subagent_session_id
+
+
 def test_subagent_persistence_creates_task_workspace_skeleton(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
 
@@ -490,70 +518,6 @@ def _assert_shared_workspace_facts(loaded, task) -> None:
     assert packet["claim"] == "复核输入已经准备好"
     assert "需要 sibling 复核证据链" in blackboard
     assert "等待 sibling 复核" in blackboard
-
-
-def _create_checkpoint_recovery_task(manager: SubAgentManager, tmp_path: Path):
-    task = manager.create_run(
-        goal="恢复 compact 后的子代理事实",
-        thought="只保存恢复需要的结构化事实。",
-        plan=["写状态", "写失败测试", "写下一步"],
-    )
-    output_payload = {
-        "run_id": task.id,
-        "status": "BLOCKED",
-        "blockers": ["缺少验证证据"],
-        "tests": [
-            {
-                "name": "focused",
-                "ok": False,
-                "message": "assertion failed",
-                "evidence_ref": "logs/focused.txt",
-            },
-            {"name": "lint", "ok": True},
-        ],
-        "next_actions": ["补证据链"],
-        "next_action": "请求父级验收",
-    }
-    (tmp_path / task.id / "output.json").write_text(json.dumps(output_payload), encoding="utf-8")
-    task.status = "BLOCKED"
-    task.progress = 0.4
-    task.current_step = "等待证据"
-    task.latest_summary = "runner 已产出材料但证据不足。"
-    task.blockers = ["父级未验收"]
-    task.artifact_refs = ["output.json"]
-    task.evidence_refs = ["logs/focused.txt"]
-    return task
-
-
-def _assert_checkpoint_recovery_artifacts(tmp_path: Path, task) -> None:
-    checkpoint = json.loads((tmp_path / task.id / "reports" / "checkpoint.json").read_text(encoding="utf-8"))
-    failing_tests = json.loads((tmp_path / task.id / "reports" / "failing_tests.json").read_text(encoding="utf-8"))
-    next_actions = json.loads((tmp_path / task.id / "reports" / "next_actions.json").read_text(encoding="utf-8"))
-    progress_md = (tmp_path / task.id / "reports" / "progress.md").read_text(encoding="utf-8")
-
-    assert checkpoint["run_id"] == task.id
-    assert checkpoint["status"] == "BLOCKED"
-    assert _path_text(checkpoint["checkpoint_ref"]).endswith("reports/checkpoint.json")
-    assert _path_text(checkpoint["status_report_ref"]).endswith("reports/status_report.json")
-    assert checkpoint["blockers"] == ["父级未验收", "缺少验证证据"]
-    assert failing_tests["failing_tests"] == [
-        {
-            "name": "focused",
-            "status": "failed",
-            "evidence_ref": "logs/focused.txt",
-            "message": "assertion failed",
-        }
-    ]
-    assert next_actions["next_actions"][:2] == ["补证据链", "请求父级验收"]
-    assert "runner 已产出材料但证据不足。" in progress_md
-
-
-def test_subagent_persistence_writes_checkpoint_recovery_artifacts(tmp_path) -> None:
-    manager = SubAgentManager(tmp_path)
-    task = _create_checkpoint_recovery_task(manager, tmp_path)
-    manager.save(task)
-
-    _assert_checkpoint_recovery_artifacts(tmp_path, task)
 
 
 def _read_jsonl(path: str) -> list[dict[str, object]]:

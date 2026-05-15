@@ -18,6 +18,23 @@ WRITE_TOOL_NAMES = {"write_file", "append_file", "replace_in_file"}
 _MAX_BOUNDARY_PATH_CHARS = 4096
 _PRODUCT_WRITE_DELEGATE_POLICY = "delegate"
 _INTERNAL_OUTPUT_JSON_NAME = "output.json"
+_REPORT_ARTIFACT_SUFFIXES = (".md", ".txt", ".json", ".jsonl")
+_REPORT_ARTIFACT_NAME_MARKERS = (
+    "acceptance",
+    "audit",
+    "bug",
+    "check",
+    "finding",
+    "handoff",
+    "report",
+    "review",
+    "status",
+    "summary",
+    "test",
+    "验收",
+    "报告",
+    "测试",
+)
 
 
 # LLM: _path_text 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -128,14 +145,28 @@ def _product_write_policy_error(
     product_roots = _boundary_paths(write_boundary.get("product_write_roots"), workspace_root, workspace_roots)
     if not any(_is_relative_to(target, root) for root in product_roots):
         return ""
+    if _is_report_artifact_target(target):
+        return ""
     role = str(write_boundary.get("role") or "coordinator").strip() or "coordinator"
     return (
         "业务产物写入被阻止: 当前角色拥有上层覆盖权限用于检查、接管和救援，"
         "但默认不能直接写最终业务产物。"
         f" role={role} target={_display_path(target, workspace_root)} "
         "请创建或调度 worker/writer/leaf_worker 处理该产物；"
-        "当前角色只能把计划、证据和协调报告写入自己的 task_dir。"
+        "当前角色可以把 test_report/acceptance_report/status 等报告证据写到授权目录，"
+        "但不能写 index.html 等业务正文。"
     )
+
+
+# LLM: _is_report_artifact_target lets QA/acceptance roles leave visible evidence in deliverables.
+# 函数用途: 识别报告、测试、验收、状态、发现等交接证据文件；这些不是业务正文产物。
+def _is_report_artifact_target(target: Path) -> bool:
+    name = target.name.lower()
+    if name == _INTERNAL_OUTPUT_JSON_NAME:
+        return False
+    if not name.endswith(_REPORT_ARTIFACT_SUFFIXES):
+        return False
+    return any(marker in name for marker in _REPORT_ARTIFACT_NAME_MARKERS)
 
 
 # LLM: _forbidden_boundary_error 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。

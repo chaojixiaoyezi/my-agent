@@ -267,6 +267,8 @@ def test_top_level_refs_only_root_cannot_read_product_body_before_acceptor_done(
 
     assert result is not None
     assert "delegating_body_read_blocked" in result.output
+    assert "create_subagents" in result.output
+    assert "schedule_child_subagents" not in result.output
 
 
 # LLM: natural Chinese "only use child report" should trigger top-level refs-only mode.
@@ -306,6 +308,27 @@ def test_top_level_natural_report_only_prompt_blocks_shell_tail_product_body():
     assert "run_command" in result.output
 
 
+# LLM: Shell body-read guard must understand common cd-and-read command chains.
+# 函数用途: root 用 `cd 产物目录 && grep/cat 文件` 读取页面正文时也要阻断，不能绕过 read_file 保护。
+def test_top_level_natural_report_only_prompt_blocks_shell_cd_grep_product_body():
+    tasks = {
+        "worker": _task("worker", identity="worker", done=True),
+    }
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_top_level_agent(tasks),
+            user_prompt="请不要亲自写页面，安排小傻妞完成后你只根据小傻妞的报告做收口。",
+            payload={
+                "tool": "run_command",
+                "command": "cd /tmp/workspace/deliverables && grep -c 'href=\"#\"' index.html",
+            },
+        )
+    )
+
+    assert result is not None
+    assert "delegating_body_read_blocked" in result.output
+
+
 # LLM: orchestration metadata may still be inspected through shell reads.
 # 函数用途: 委托期允许 root 用 shell 查看 subagent_dispatch_report 这类控制面文件，不把父级恢复卡死。
 def test_top_level_refs_only_root_can_shell_read_orchestration_metadata():
@@ -343,3 +366,25 @@ def test_top_level_refs_only_root_can_read_product_body_after_acceptor_done():
     )
 
     assert result is None
+
+
+# LLM: Current-turn scope prevents old acceptor runs from unlocking a fresh delegated root.
+# 函数用途: 复用 subagent_workspace 时，旧任务里的 VERIFIED acceptor 不能让本轮 root 偷读新产物正文。
+def test_top_level_scope_ignores_old_acceptor_when_blocking_product_body():
+    tasks = {
+        "current-worker": _task("current-worker", identity="worker", done=True),
+        "old-acceptor": _task("old-acceptor", identity=("acceptor", "旧验收"), done=True),
+    }
+    agent = _top_level_agent(tasks)
+    agent._orchestration_run_ids_seen = {"current-worker"}
+
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=agent,
+            user_prompt="请不要亲自写页面，安排小傻妞完成后你只根据小傻妞的报告做收口。",
+            payload={"tool": "read_file", "path": "/tmp/workspace/deliverables/index.html"},
+        )
+    )
+
+    assert result is not None
+    assert "delegating_body_read_blocked" in result.output

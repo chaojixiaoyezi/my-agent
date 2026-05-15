@@ -7,8 +7,18 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from ..backends import ModelResponse
-from ..subagents.services.hierarchy_leaf_targets import task_actual_target_tokens
 from ._runtime_params import ToolLoopExecuteParams
+from .orchestration_run_scope import remembered_orchestration_run_ids
+from .subagent_dispatch_closeout_rendering import (
+    dispatch_completion_text,
+    dispatch_incomplete_notice,
+    dispatch_limit_text,
+    dispatch_missing_quality_roles_notice,
+)
+from .subagent_dispatch_closeout_resolution import (
+    all_tasks_done_verified,
+    blocking_task_ids,
+)
 
 
 # LLM: DispatchCompletionRequest bundles the deterministic closeout inputs for bundle-interface rules.
@@ -29,11 +39,11 @@ def subagent_dispatch_completion_response(request: DispatchCompletionRequest) ->
     if _inside_subagent_runner(request.agent) or not _round_executed_dispatch(request):
         return None
     tasks = _subagent_tasks(request.agent)
-    if not tasks or not _all_tasks_done_verified(tasks):
+    if not tasks or not all_tasks_done_verified(tasks):
         return None
     if _prompt_requires_uncreated_quality_roles(request.params.user_prompt, tasks):
         return None
-    return ModelResponse(text=_dispatch_completion_text(tasks), backend=request.backend)
+    return ModelResponse(text=dispatch_completion_text(tasks), backend=request.backend)
 
 
 # LLM: subagent_dispatch_limit_response prevents final user reports from inventing subagent status.
@@ -44,7 +54,7 @@ def subagent_dispatch_limit_response(agent, *, backend: str, reason: str = "tool
     tasks = _subagent_tasks(agent)
     if not tasks:
         return None
-    return ModelResponse(text=_dispatch_limit_text(tasks, reason=reason), backend=backend)
+    return ModelResponse(text=dispatch_limit_text(tasks, reason=reason), backend=backend)
 
 
 # LLM: subagent_dispatch_final_response_guard makes the final user answer reflect persisted task state.
@@ -60,10 +70,17 @@ def subagent_dispatch_final_response_guard(
     if not _executed_orchestration(executed_tools):
         return response
     tasks = _subagent_tasks(agent)
-    blockers = _blocking_task_ids(tasks)
+    prompt = str(getattr(agent, "_current_user_prompt", "") or "")
+    missing_quality_roles = _missing_required_quality_roles(prompt, tasks)
+    if missing_quality_roles:
+        return ModelResponse(
+            text=dispatch_missing_quality_roles_notice(tasks, missing_quality_roles),
+            backend=response.backend,
+        )
+    blockers = blocking_task_ids(tasks)
     if not blockers:
         return response
-    notice = _dispatch_incomplete_notice(tasks, blockers)
+    notice = dispatch_incomplete_notice(tasks, blockers)
     text = str(getattr(response, "text", "") or "")
     if text.strip() == notice.strip():
         return response
@@ -94,28 +111,61 @@ def _round_executed_dispatch(request: DispatchCompletionRequest) -> bool:
 # 函数用途: 安全读取当前 workspace 的子代理任务列表；manager 不可用时保守返回空，不影响常规模型流程。
 def _subagent_tasks(agent) -> list[object]:
     try:
-        return list(agent.subagents.list_runs())
+        return _scoped_tasks(agent, list(agent.subagents.list_runs()))
     except Exception:
         return []
 
 
-# LLM: _all_tasks_done_verified gates deterministic closeout on the persisted task state.
-# 函数用途: 只有所有任务状态都是 DONE 且 verification_status 是 VERIFIED 时才允许跳过额外模型请求。
-def _all_tasks_done_verified(tasks: list[object]) -> bool:
+# LLM: _scoped_tasks avoids letting stale runs from a reused workspace pollute this turn's final report.
+# 函数用途: 如果本轮记录了创建/调度过的 run_id，只汇总这些 run 及其同 root 子树；无记录时保持旧兼容行为。
+def _scoped_tasks(agent, tasks: list[object]) -> list[object]:
+    seen = remembered_orchestration_run_ids(agent)
+    if not seen:
+        return tasks
+    root_ids = _scope_root_ids(tasks, seen)
+    scoped = [
+        task for task in tasks
+        if _task_in_scope(task, seen, root_ids)
+    ]
+    return scoped
+
+
+# LLM: _scope_root_ids expands explicit run ids to their persisted root ids for descendant closeout.
+# 函数用途: 顶层只调度 root/coordinator 时，也能把它创建的子孙纳入同一轮收口。
+def _scope_root_ids(tasks: list[object], seen: set[str]) -> set[str]:
+    roots: set[str] = set()
     for task in tasks:
-        if not _task_resolved_for_closeout(task, tasks):
-            return False
-    return True
+        task_id = str(getattr(task, "id", "") or "")
+        if task_id not in seen:
+            continue
+        roots.add(str(getattr(task, "root_id", "") or task_id))
+    return {item for item in roots if item}
+
+
+# LLM: _task_in_scope keeps exact ids and same-root descendants, but excludes unrelated historical workspace runs.
+# 函数用途: 判断 task 是否属于本轮创建/调度范围，避免 E2E 复用 workspace 时旧 run 进入 final guard。
+def _task_in_scope(task: object, seen: set[str], root_ids: set[str]) -> bool:
+    task_id = str(getattr(task, "id", "") or "")
+    if task_id in seen:
+        return True
+    root_id = str(getattr(task, "root_id", "") or "")
+    return bool(root_id and root_id in root_ids)
 
 
 # LLM: _prompt_requires_uncreated_quality_roles preserves explicit tester/acceptor workflow contracts.
 # 函数用途: 用户要求 worker 后继续创建测试/验收角色时，顶层不能因现有任务全绿而提前本地收口。
 def _prompt_requires_uncreated_quality_roles(prompt: str, tasks: list[object]) -> bool:
+    return bool(_missing_required_quality_roles(prompt, tasks))
+
+
+# LLM: _missing_required_quality_roles turns prompt intent into concrete missing role tokens.
+# 函数用途: 找出用户明确要求但尚未真实创建的 tester/acceptor 角色，防止 root 只靠口头总结跳过验收链路。
+def _missing_required_quality_roles(prompt: str, tasks: list[object]) -> list[str]:
     required = _required_quality_roles(prompt)
     if not required:
-        return False
+        return []
     present = _present_role_tokens(tasks)
-    return any(role not in present for role in required)
+    return sorted(role for role in required if role not in present)
 
 
 # LLM: _required_quality_roles reads only explicit role-style requirements, not generic quality prose.
@@ -125,9 +175,22 @@ def _required_quality_roles(prompt: str) -> set[str]:
     if not text:
         return set()
     required: set[str] = set()
-    if "tester" in text or "测试子代理" in text or "测试代理" in text:
+    if (
+        "tester" in text
+        or "测试子代理" in text
+        or "测试代理" in text
+        or "测试结果" in text
+        or "测试报告" in text
+    ):
         required.add("tester")
-    if "acceptor" in text or "验收子代理" in text or "验收代理" in text:
+    if (
+        "acceptor" in text
+        or "验收子代理" in text
+        or "验收代理" in text
+        or "验收结果" in text
+        or "验收报告" in text
+        or "最终验收" in text
+    ):
         required.add("acceptor")
     return required
 
@@ -148,228 +211,3 @@ def _present_role_tokens(tasks: list[object]) -> set[str]:
         if "acceptor" in text or "accept" in text or "验收" in text:
             present.add("acceptor")
     return present
-
-
-# LLM: _dispatch_completion_text keeps final top-level output refs-first and compact.
-# 函数用途: 从已验收任务生成用户可读收尾说明，列出 root、任务数和 output.json 引用，不复述长日志。
-def _dispatch_completion_text(tasks: list[object]) -> str:
-    refs = _output_refs(tasks)
-    lines = _dispatch_completion_header(tasks)
-    if refs:
-        lines.append("- output_json_refs:")
-        lines.extend(f"  - {ref}" for ref in refs[:12])
-    return "\n".join(lines)
-
-
-# LLM: _dispatch_limit_text is a refs-first factual report for incomplete or failed subagent trees.
-# 函数用途: 工具轮数到顶时输出真实状态、阻塞 run_id 和引用路径，避免模型把 TIMEOUT/BLOCKED 说成完成。
-def _dispatch_limit_text(tasks: list[object], *, reason: str = "tool_limit") -> str:
-    rows = _task_status_rows(tasks)
-    blockers = _blocking_task_ids(tasks)
-    lines = [
-        _dispatch_fallback_reason_text(reason),
-        "",
-        "结论：子代理链路尚未完整通过，不能按完成汇报。" if blockers else "结论：未发现阻塞状态，但本轮是工具上限收口，请按下方真实状态复核。",
-        "",
-        f"- total_runs: {len(tasks)}",
-        f"- done_verified: {_done_verified_count(tasks)}",
-        f"- blocking_run_ids: {', '.join(blockers) if blockers else '(none)'}",
-        "",
-        "## Persisted Task State",
-        "",
-    ]
-    lines.extend(rows[:24])
-    refs = _output_refs(tasks)
-    if refs:
-        lines.extend(["", "## Output Refs", ""])
-        lines.extend(f"- {ref}" for ref in refs[:12])
-    if blockers:
-        lines.extend(
-            [
-                "",
-                "## Required Next Action",
-                "",
-                "- 先读取 blocking_run_ids 的 runner_result、failure_handoff、acceptance_review，再由父级接管、重试或重派。",
-                "- 不要把本轮说成完成；页面产物存在不等于子代理层级、角色覆盖和验收链路已经通过。",
-            ]
-        )
-    return "\n".join(lines)
-
-
-# LLM: _dispatch_incomplete_notice replaces over-optimistic final model text.
-# 函数用途: 用真实 task 状态替换最终汇报，确保有阻塞时用户先看到未完成事实而不是模型自述成功。
-def _dispatch_incomplete_notice(tasks: list[object], blockers: list[str]) -> str:
-    lines = [
-        "---",
-        "",
-        "## Subagent State Notice",
-        "",
-        "结论修正：子代理链路尚未完整通过，不能按完成汇报。",
-        "",
-        f"- total_runs: {len(tasks)}",
-        f"- done_verified: {_done_verified_count(tasks)}",
-        f"- blocking_run_ids: {', '.join(blockers) if blockers else '(none)'}",
-        "",
-        "Persisted task state:",
-    ]
-    lines.extend(_task_status_rows(tasks)[:12])
-    lines.extend(
-        [
-            "",
-            "建议下一步：继续让父级基于 blocking_run_ids 做 retry、takeover、repair 或验收复核；"
-            "不要只因为产物文件存在就认为整条子代理恢复链路已通过。",
-        ]
-    )
-    return "\n".join(lines)
-
-
-# LLM: _dispatch_fallback_reason_text keeps deterministic subagent status reports honest.
-# 函数用途: 区分工具轮数耗尽和最终模型空响应两类收口原因，避免 E2E 报告误导用户。
-def _dispatch_fallback_reason_text(reason: str) -> str:
-    if reason == "empty_model_response":
-        return "模型接口最终总结返回空文本，系统根据本地 subagent task.json 直接生成状态报告，未让本轮崩溃。"
-    return "已达到最大工具轮数限制，系统根据本地 subagent task.json 直接生成状态报告，未让模型继续自由总结。"
-
-
-# LLM: _dispatch_completion_header renders stable counters without touching output bodies.
-# 函数用途: 生成本地收尾回答的固定头部，帮助用户快速定位总数和 root 节点。
-def _dispatch_completion_header(tasks: list[object]) -> list[str]:
-    roots = _root_task_ids(tasks)
-    return [
-        "子代理调度已完成，系统根据本地任务状态直接收口，未再发起额外模型请求。",
-        "",
-        f"- total_runs: {len(tasks)}",
-        f"- done_verified: {len(tasks)}",
-        f"- root_run_ids: {', '.join(roots) if roots else '(none)'}",
-    ]
-
-
-# LLM: _task_status_rows renders short task facts from persisted fields only.
-# 函数用途: 汇总每个子代理真实 id、role、name、depth、status 和 task_dir，不读取大日志正文。
-def _task_status_rows(tasks: list[object]) -> list[str]:
-    lines: list[str] = []
-    for task in sorted(tasks, key=_task_sort_key):
-        task_id = str(getattr(task, "id", "") or "")
-        status = str(getattr(task, "status", "") or "UNKNOWN")
-        verification = str(getattr(task, "verification_status", "") or "UNKNOWN")
-        role = str(getattr(task, "role", "") or "")
-        name = str(getattr(task, "agent_name", "") or "")
-        depth = str(getattr(task, "depth", "") or 0)
-        parent = str(getattr(task, "parent_id", "") or "")
-        child_count = len(getattr(task, "child_ids", []) or [])
-        task_dir = str(getattr(task, "task_dir", "") or "")
-        lines.append(
-            f"- `{task_id}` depth={depth} role={role or 'unknown'} name={name or 'unnamed'} "
-            f"status={status}/{verification} parent={parent or '(root)'} children={child_count} task_dir={task_dir}"
-        )
-    return lines
-
-
-# LLM: _task_sort_key keeps factual reports stable across filesystem ordering.
-# 函数用途: 按 depth、创建时间和 id 排序，便于对比 E2E 日志。
-def _task_sort_key(task: object) -> tuple[int, float, str]:
-    try:
-        depth = int(getattr(task, "depth", 0) or 0)
-    except (TypeError, ValueError):
-        depth = 0
-    try:
-        created = float(getattr(task, "created_at", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        created = 0.0
-    return depth, created, str(getattr(task, "id", "") or "")
-
-
-# LLM: _done_verified_count counts only persisted DONE + VERIFIED rows.
-# 函数用途: 给确定性报告提供严格完成数，不能把 AWAITING_ACCEPTANCE 或模型自述算完成。
-def _done_verified_count(tasks: list[object]) -> int:
-    return sum(1 for task in tasks if _task_resolved_for_closeout(task, tasks))
-
-
-# LLM: _blocking_task_ids identifies run ids that make the whole hierarchy not complete.
-# 函数用途: 找出所有尚未 DONE/VERIFIED 的节点，供父级恢复、重试、验收或接管使用。
-def _blocking_task_ids(tasks: list[object]) -> list[str]:
-    blockers: list[str] = []
-    for task in tasks:
-        task_id = str(getattr(task, "id", "") or "")
-        if not _task_resolved_for_closeout(task, tasks):
-            blockers.append(task_id)
-    return [item for item in blockers if item]
-
-
-# LLM: _task_resolved_for_closeout treats a superseded takeover source as complete only when its replacement is verified.
-# 函数用途: 判断单个任务是否已经被 DONE/VERIFIED 或已验证的 takeover 接管覆盖，避免旧 run 卡住整棵树收口。
-def _task_resolved_for_closeout(task: object, tasks: list[object]) -> bool:
-    status = str(getattr(task, "status", "") or "").upper()
-    verification = str(getattr(task, "verification_status", "") or "").upper()
-    if status == "DONE" and verification == "VERIFIED":
-        return True
-    if _task_targets_resolved_by_verified_siblings(task, tasks):
-        return True
-    if status != "TAKEN_OVER":
-        return False
-    takeover_by = str(getattr(task, "takeover_by", "") or "").strip()
-    if not takeover_by:
-        return False
-    replacement = _task_by_id(tasks, takeover_by)
-    return bool(replacement and _task_done_verified(replacement))
-
-
-# LLM: _task_targets_resolved_by_verified_siblings lets verified repair leaves cover stale failed leaves.
-# 函数用途: 如果旧失败任务的具体产物已被其它 DONE/VERIFIED 任务覆盖，最终收口不再被旧 run 卡住。
-def _task_targets_resolved_by_verified_siblings(task: object, tasks: list[object]) -> bool:
-    targets = _closeout_target_tokens(task)
-    if not targets:
-        return False
-    verified_targets: set[str] = set()
-    for other in tasks:
-        if other is task or not _task_done_verified(other):
-            continue
-        verified_targets.update(_closeout_target_tokens(other))
-    return bool(verified_targets and targets.issubset(verified_targets))
-
-
-# LLM: _closeout_target_tokens prefers structured output refs over natural-language repair goals.
-# 函数用途: 获取任务实际触碰的产物文件名；优先 output.json，避免“把 index.html 改成 index1.html”把旧坏名当目标。
-def _closeout_target_tokens(task: object) -> set[str]:
-    return task_actual_target_tokens(task)
-
-
-# LLM: _task_by_id performs exact in-memory lookup and never filesystem globs user-provided ids.
-# 函数用途: 在当前 list_runs 快照中按 run_id 找接管者，避免用模式匹配扫描无关任务。
-def _task_by_id(tasks: list[object], run_id: str) -> object | None:
-    for task in tasks:
-        if str(getattr(task, "id", "") or "") == run_id:
-            return task
-    return None
-
-
-# LLM: _task_done_verified is the strict terminal success predicate reused by closeout helpers.
-# 函数用途: 精确判断任务是否 DONE/VERIFIED；不给 AWAITING_ACCEPTANCE 或口头完成放行。
-def _task_done_verified(task: object) -> bool:
-    return (
-        str(getattr(task, "status", "") or "").upper() == "DONE"
-        and str(getattr(task, "verification_status", "") or "").upper() == "VERIFIED"
-    )
-
-
-# LLM: _root_task_ids extracts top-level subagent ids for deterministic final summaries.
-# 函数用途: 找出 parent_id 为空或等于自身的 root 节点 id，方便用户定位主链路。
-def _root_task_ids(tasks: list[object]) -> list[str]:
-    roots: list[str] = []
-    for task in tasks:
-        task_id = str(getattr(task, "id", "") or "")
-        parent_id = str(getattr(task, "parent_id", "") or "")
-        if task_id and (not parent_id or parent_id == task_id):
-            roots.append(task_id)
-    return roots
-
-
-# LLM: _output_refs keeps deterministic summaries traceable without reading big outputs.
-# 函数用途: 收集每个任务 output.json 路径作为验收追踪入口；只列路径，不读取正文。
-def _output_refs(tasks: list[object]) -> list[str]:
-    refs: list[str] = []
-    for task in tasks:
-        ref = str(getattr(task, "output_json", "") or "")
-        if ref and ref not in refs:
-            refs.append(ref)
-    return refs

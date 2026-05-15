@@ -141,6 +141,10 @@ class TestNormalizeAgentConfig:
         assert normalized["memory_top_k"] == 10
         assert len(warnings) == 0
 
+
+class TestNormalizeSubagentAgentConfig:
+    """测试 normalize_agent_config 里的子代理和用户空间配置。"""
+
     def test_normalize_subagent_allowed_tools_list(self):
         """验证子代理默认工具白名单会被归一成字符串列表。"""
         data = {"subagent_allowed_tools": ["read_file", " write_file ", "", None]}
@@ -191,6 +195,26 @@ class TestNormalizeAgentConfig:
             "acceptance_execute_tests",
             "acceptance_test_timeout_seconds",
         }
+
+    def test_hidden_subagent_compat_limits_default_to_unrestricted(self):
+        """验证隐藏兼容参数默认不再限制层级、单次创建和接管链。"""
+        defaults = AgentConfig()
+
+        normalized, warnings = normalize_agent_config(
+            {
+                "subagent_hierarchy_default_max_depth": 0,
+                "subagent_hierarchy_max_children_per_tool_call": 0,
+                "subagent_takeover_chain_max_depth": 0,
+            }
+        )
+
+        assert defaults.subagent_hierarchy_default_max_depth == 0
+        assert defaults.subagent_hierarchy_max_children_per_tool_call == 0
+        assert defaults.subagent_takeover_chain_max_depth == 0
+        assert normalized["subagent_hierarchy_default_max_depth"] == 0
+        assert normalized["subagent_hierarchy_max_children_per_tool_call"] == 0
+        assert normalized["subagent_takeover_chain_max_depth"] == 0
+        assert warnings == []
 
     def test_empty_subagent_workflow_mode_means_auto(self):
         """验证配置文件里把工作流模式置空时，运行期按自动策略处理。"""

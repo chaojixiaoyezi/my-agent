@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from ..backends import ModelResponse
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
 from ..prompting_parts.builder import ToolSections
@@ -43,6 +45,16 @@ from .tool_round_execution import (
     ToolRoundExecutionRequest,
     execute_tool_round,
 )
+
+
+# LLM: _ToolStepRequest bundles one tool-step transition for the loop service.
+# 类用途: 保存进入工具执行/工具上限判断所需的上下文，避免 helper 参数继续扩散。
+@dataclass(frozen=True)
+class _ToolStepRequest:
+    params: ToolLoopExecuteParams
+    tool_rounds: int
+    action: object
+    current_prompt: str
 
 
 # LLM: _build_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -123,44 +135,25 @@ class ToolLoopService:
         reserved_record_repairs = 0
 
         while True:
-            try:
-                final_prompt, response = _next_model_response(self._agent, params, tool_rounds)
-            except Exception as exc:
-                fallback = _empty_model_response_fallback(self._agent, params, exc)
-                if fallback is None:
-                    raise
-                final_prompt = _build_prompt(self._agent, params)
-                final_response = fallback
+            final_prompt, final_response, should_stop = self._model_turn_or_fallback(params, tool_rounds)
+            if should_stop:
                 break
-            final_response = response
-            decision = tool_loop_response_decision(
-                ToolLoopResponseDecisionRequest(
-                    self._agent, params, response, reserved_record_repairs
-                )
+            reserved_record_repairs, action = self._response_action(
+                params,
+                final_response,
+                reserved_record_repairs,
             )
-            reserved_record_repairs = decision.reserved_record_repairs
-            if decision.action == "continue":
+            if action.action == "continue":
                 continue
-            if decision.action == "break":
-                final_response = decision.response
+            if action.action == "break":
+                final_response = action.response
                 break
-
-            if self._tool_round_limit_reached(params, tool_rounds):
-                final_prompt, final_response = self._final_response_after_tool_limit(
-                    params, tool_rounds
-                )
-                break
-
-            tool_rounds += 1
-            tool_rounds, final_response = self._run_tool_round(
-                ToolRoundExecutionRequest(
-                    self._agent,
-                    params,
-                    tool_rounds,
-                    decision.response,
-                    decision.calls,
-                    self._execute_one_tool_call,
-                    self._record_tool_call,
+            final_prompt, final_response, tool_rounds = self._tool_step_or_limit(
+                _ToolStepRequest(
+                    params=params,
+                    tool_rounds=tool_rounds,
+                    action=action,
+                    current_prompt=final_prompt,
                 )
             )
             if final_response:
@@ -172,6 +165,54 @@ class ToolLoopService:
             executed_tools=params.executed_tools,
         )
         return final_prompt, final_response, tool_rounds
+
+    # LLM: _model_turn_or_fallback keeps model errors and fallback response generation isolated.
+    # 函数用途: 执行一轮模型调用；空响应可恢复时返回 fallback 并要求主循环停止。
+    def _model_turn_or_fallback(self, params: ToolLoopExecuteParams, tool_rounds: int):
+        try:
+            prompt, response = _next_model_response(self._agent, params, tool_rounds)
+            return prompt, response, False
+        except Exception as exc:
+            fallback = _empty_model_response_fallback(self._agent, params, exc)
+            if fallback is None:
+                raise
+            return _build_prompt(self._agent, params), fallback, True
+
+    # LLM: _response_action owns response decision bookkeeping for one model turn.
+    # 函数用途: 根据模型输出判断继续生成、停止、或进入工具执行，并同步 reserved repair 次数。
+    def _response_action(self, params: ToolLoopExecuteParams, response, reserved_record_repairs: int):
+        decision = tool_loop_response_decision(
+            ToolLoopResponseDecisionRequest(
+                self._agent,
+                params,
+                response,
+                reserved_record_repairs,
+            )
+        )
+        return decision.reserved_record_repairs, decision
+
+    # LLM: _tool_step_or_limit keeps tool-limit closeout separate from normal tool execution.
+    # 函数用途: 达到工具轮数上限时生成收口回复，否则执行一轮工具并返回新状态。
+    def _tool_step_or_limit(self, request: _ToolStepRequest):
+        if self._tool_round_limit_reached(request.params, request.tool_rounds):
+            final_prompt, final_response = self._final_response_after_tool_limit(
+                request.params,
+                request.tool_rounds,
+            )
+            return final_prompt, final_response, request.tool_rounds
+        next_round = request.tool_rounds + 1
+        next_round, final_response = self._run_tool_round(
+            ToolRoundExecutionRequest(
+                self._agent,
+                request.params,
+                next_round,
+                request.action.response,
+                request.action.calls,
+                self._execute_one_tool_call,
+                self._record_tool_call,
+            )
+        )
+        return request.current_prompt, final_response, next_round
 
     # LLM: _run_tool_round executes one parsed tool round and returns any deterministic closeout.
     # 函数用途: 封装工具执行、output.json 收口和顶层 dispatch 收口，让 execute 保持短流程。

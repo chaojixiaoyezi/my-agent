@@ -24,7 +24,6 @@ if TYPE_CHECKING:
 
 
 _WORKFLOW_MODES = {"off", "plan", "auto"}
-_READ_ONLY_SUBAGENT_TOOLS = ["list_files", "read_file", "search_text"]
 _CODING_SUBAGENT_TOOLS = [
     "list_files",
     "read_file",
@@ -33,6 +32,7 @@ _CODING_SUBAGENT_TOOLS = [
     "append_file",
     "replace_in_file",
 ]
+_READ_ONLY_SUBAGENT_TOOLS = list(_CODING_SUBAGENT_TOOLS)
 
 
 # LLM: _WorkflowAgentNameSpec adapts workflow phases to the hierarchy naming helper.
@@ -53,13 +53,11 @@ def _normalize_workflow_mode_value(value: object) -> str:
     return "off"
 
 
-# LLM: _workflow_worker_tools 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 处理工作流工作器工具相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
+# LLM: _workflow_worker_tools keeps role specialization in prompts, not by removing basic tools.
+# 函数用途: 为 workflow child 生成基础工具包；review/planning 也保留读写工具，避免角色变成无法产出报告或修复的空壳。
 def _workflow_worker_tools(parent_tools: list[str], worker_kind: str) -> list[str]:
     if parent_tools:
         return list(parent_tools)
-    if worker_kind in {"review", "verification", "planning"}:
-        return list(_READ_ONLY_SUBAGENT_TOOLS)
     return list(_CODING_SUBAGENT_TOOLS)
 
 

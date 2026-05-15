@@ -35,6 +35,11 @@ def _render_execution_context_header(context):
         f"- parent_id: {context.parent_id or 'none'}",
         f"- root_id: {context.root_id or context.run_id}",
         f"- depth: {context.depth}",
+        # LLM: Render session ids so resumed runners do not confuse run attempts with agent identity.
+        f"- subagent_session_id: {context.subagent_session_id or 'none'}",
+        f"- agent_thread_id: {context.agent_thread_id or 'none'}",
+        f"- parent_subagent_session_id: {context.parent_subagent_session_id or 'none'}",
+        f"- root_subagent_session_id: {context.root_subagent_session_id or context.subagent_session_id or 'none'}",
         f"- task_dir: {context.task_dir}",
         "",
         "## Goal",

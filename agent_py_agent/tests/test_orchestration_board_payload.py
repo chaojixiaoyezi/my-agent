@@ -97,3 +97,20 @@ def test_board_payload_treats_verified_target_coverage_as_complete():
     assert status["status"] == "complete_or_no_blockers"
     assert status["blocking_run_ids"] == []
     assert status["must_not_report_done"] is False
+
+
+# LLM: Active board scope prevents old workspace rows from steering the current root turn.
+# 函数用途: 本轮已经创建 run_id 时，subagent_board 默认只返回本轮相关行，不混入旧失败测试。
+def test_scoped_board_items_ignores_unseen_historical_rows():
+    from agent_py_agent.agent.agent_core.orchestration_board_payload import scoped_board_items
+
+    old = _board_item("old", "BLOCKED")
+    old.verification_status = "FAILED"
+    current = _board_item("current", "DONE")
+    current.verification_status = "VERIFIED"
+    agent = MagicMock()
+    agent._orchestration_run_ids_seen = {"current"}
+
+    items = scoped_board_items(agent, [old, current])
+
+    assert [item.id for item in items] == ["current"]

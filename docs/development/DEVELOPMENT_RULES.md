@@ -73,6 +73,9 @@ before changing code.
   keep growing, split those values into a named dataclass bundle instead of
   raising limits. Recent examples include `ResumeGuidanceRequest`,
   `ProviderTrashRequest`, and chat/TUI render request objects.
+- The same rule applies to tests: split near-soft test files into focused files
+  or named assertion helpers. Do not treat test bloat as harmless, because it
+  hides behavior boundaries from later humans and LLM agents.
 - Service-facing APIs should accept one typed dataclass bundle, usually named
   `Params`, `Options`, `Context`, `Request`, `Command`, or `Query` according to
   intent.

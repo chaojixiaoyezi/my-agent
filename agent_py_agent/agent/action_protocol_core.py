@@ -23,6 +23,14 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+# LLM: _default_operation_id gives every action envelope an idempotent execution key.
+# 函数用途: 根据 envelope 类型和主标识生成稳定 operation_id，避免恢复/重放时靠自然语言判断同一个动作。
+def _default_operation_id(kind: str, identifier: str) -> str:
+    clean_kind = str(kind or "operation").strip() or "operation"
+    clean_identifier = str(identifier or "unknown").strip() or "unknown"
+    return f"{clean_kind}:{clean_identifier}"
+
+
 # LLM: RunScope is the ownership boundary carried by every typed action envelope.
 # 类用途: 保存请求、会话、任务、运行和 owner 信息，让工具/子代理动作能按范围追踪和校验。
 @dataclass(frozen=True)

@@ -391,6 +391,34 @@ def test_prepare_test_items_does_not_duplicate_static_site_check(tmp_path):
     assert [item["validation_method"] for item in prepared] == ["static_site_check"]
 
 
+# LLM: static_site_check written as a pseudo command should use the native validator instead of shell policy.
+# 函数用途: 覆盖真实 E2E 暴露的问题：模型把内置验收写进 command 字段时，不应被 allowlist 当陌生命令拦住。
+def test_prepare_test_items_converts_static_site_command_alias(tmp_path):
+    site_dir = tmp_path / "site"
+    site_dir.mkdir()
+    index = site_dir / "index.html"
+    index.write_text("<!doctype html><html><body><a href='#hero'>hero</a><section id='hero'></section></body></html>", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[{"name": "static-site-smoke", "command": "static_site_check"}],
+            output={"artifacts": [{"path": str(index)}]},
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert prepared == [
+        {
+            "name": "inferred static site check",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index.html"],
+            "require_complete_html": True,
+            "html_files": ["index.html"],
+        }
+    ]
+
+
 def test_prepare_test_items_normalizes_pytest_method_with_command(tmp_path):
     """LLM: Verifies runner `validation_method=pytest` remains executable by TestExecutor."""
     target_dir = tmp_path / "deliverables" / "leaf"

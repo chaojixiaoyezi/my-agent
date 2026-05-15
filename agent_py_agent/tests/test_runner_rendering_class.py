@@ -58,6 +58,31 @@ class TestExecutionContextRendering:
         assert "## Goal" in result
         assert "## Plan" in result
 
+    def test_render_execution_context_explains_delegate_report_writes(self):
+        """测试委托写入边界会说明报告类文件仍可写。
+
+        验证 tester/acceptor 不会因为 delegate 策略误以为自己不能写验收报告。
+        """
+        context = SubAgentExecutionContext(
+            run_id="run-report-boundary",
+            generated_at=time.time(),
+            goal="写测试报告",
+            thought="思考",
+            plan=["检查产物", "写报告"],
+            role="acceptor",
+            write_boundary={
+                "task_dir": "/tmp/task",
+                "allowed_write_roots": ["/tmp/task", "/tmp/deliverables"],
+                "product_write_roots": ["/tmp/deliverables"],
+                "product_write_policy": "delegate",
+            },
+        )
+
+        result = render_execution_context_markdown(context)
+
+        assert "- product_write_policy: delegate" in result
+        assert "- allowed_write_roots: /tmp/task, /tmp/deliverables" in result
+
     def test_render_execution_context_markdown_empty_fields(self):
         """测试空字段执行上下文渲染。
 
