@@ -133,6 +133,8 @@ def test_runner_context_dispatch_includes_packet_first_recovery_strategy(tmp_pat
     assert strategy["recommended_action"] == "rerun_original_from_continue_packet"
     assert strategy["packet_status"] == "ready"
     assert strategy["uses_continue_packet"] is True
+    assert strategy["task_envelope"]["address"]["lineage"] == [parent.id, child_id]
+    assert strategy["task_envelope"]["acceptance"]["checks"]
     assert "latest_continue_packet.json" in suggested["runner_instruction"]
     assert suggested["run_ids"] == [child_id]
 

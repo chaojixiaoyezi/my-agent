@@ -1366,3 +1366,12 @@
 - 已接入：recovery strategy 输出 `address` 和 `task_envelope`，packet-first 恢复仍优先使用 `latest_continue_packet.json`；parent acceptance decision 的 reserved 字段也携带 task envelope，QA/验收能读同一份验收合同。
 - 已测试：`python3 -m pytest -q agent_py_agent/tests/test_subagent_protocol_contracts.py agent_py_agent/tests/test_subagent_kernel.py agent_py_agent/tests/test_orchestration_board_payload.py -p no:cacheprovider` -> `14 passed`。
 - 下一步：继续把 dispatcher/runner 入口改成优先消费 `TaskEnvelope` 和 tool preflight 结果，再做真实 E2E 验证普通话任务是否还会路径漂移。
+
+## 2026-05-15 Runner/Dispatcher 消费 TaskEnvelope 第一片
+- 中文说明：继续 1-6 步，把上一片协议从“能生成”推进到“runner 开工前能看到、dispatcher 恢复时能用”。核心还是少限制：不因为 preflight 有 issue 就关掉基础读写，只把缺口讲清楚。
+- 已实现：`context_bundle.json` / `CONTEXT_BUNDLE.md` 现在包含 `task_envelope` 和 `tool_preflight`。runner prompt 会显示 `TaskEnvelope: subagent_task_envelope.v1`、`Tool Preflight: PASS/ISSUE` 和 issue codes，要求优先按 envelope 的 address/tool/write/acceptance 执行。
+- 已实现：`tool_preflight` 会在开工前暴露缺产物写入根、缺 controlled exec grant 等问题；它不修改任务、不自动发权限、不剥夺 `read_file/write_file` 这类基础能力。
+- 已实现：runner-context `dispatch_subagents` 的 `recovery_strategies[].task_envelope.address.lineage` 会带完整父子链。父级恢复 child 时能看到 `[parent, child]`，不再只知道失败 run 自己。
+- 已测试：`python3 -m pytest -q agent_py_agent/tests/test_subagent_context_bundle.py::test_context_bundle_embeds_task_envelope_and_tool_preflight agent_py_agent/tests/test_subagent_context_bundle.py::test_runner_prompt_includes_task_envelope_and_preflight_status agent_py_agent/tests/test_orchestration_progress_payload.py::test_runner_context_dispatch_includes_packet_first_recovery_strategy -p no:cacheprovider` -> `3 passed`。
+- 已测试：自然语言 root -> 小傻妞 -> 小小傻妞本地 E2E、恢复策略、接管、coordinator due-check、父级验收和静态站点验收一起通过：`python3 -m pytest -q agent_py_agent/tests/test_subagent_natural_language_e2e.py agent_py_agent/tests/test_subagent_recovery_strategy.py agent_py_agent/tests/test_subagent_takeover_run.py agent_py_agent/tests/test_subagent_coordinator_due_check.py agent_py_agent/tests/test_parent_acceptance_controller.py agent_py_agent/tests/test_static_site_validator.py -p no:cacheprovider` -> `47 passed`。
+- 下一步：用普通自然语言真实 E2E 重跑家具页面/三文件任务，观察模型是否仍会从摘要里误猜路径；如果还漂移，优先修 protocol/tool gateway，不继续堆 prompt 规则。

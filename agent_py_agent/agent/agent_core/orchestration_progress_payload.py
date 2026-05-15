@@ -185,11 +185,12 @@ def _attach_quality_advice(agent, parent_run_id: str, children: dict[str, object
 # 函数用途: 为每个失败/阻塞 child 生成 refs-only 恢复策略，优先暴露 latest_continue_packet 和降级 refs。
 def _attach_recovery_strategies(agent, children: dict[str, object]) -> None:
     strategies: list[dict[str, object]] = []
+    all_tasks = _safe_all_tasks(agent)
     for run_id in children.get("recovery_run_ids") or []:
         task = _load_recovery_task(agent, str(run_id))
         if task is None:
             continue
-        strategies.append(build_subagent_recovery_strategy(_strategy_request(agent, task)).to_dict())
+        strategies.append(build_subagent_recovery_strategy(_strategy_request(agent, task, all_tasks)).to_dict())
     if not strategies:
         return
     children["recovery_strategies"] = strategies
@@ -206,12 +207,22 @@ def _load_recovery_task(agent, run_id: str):
     return task if str(getattr(task, "id", "") or "") == run_id else None
 
 
+# LLM: _safe_all_tasks gives recovery strategies enough tree context for TaskAddress lineage.
+# 函数用途: 读取当前任务树全集供 TaskEnvelope/address 使用；失败时返回空列表保持 dispatch 响应可用。
+def _safe_all_tasks(agent) -> list:
+    try:
+        return list(agent.subagents.list_runs())
+    except Exception:
+        return []
+
+
 # LLM: _strategy_request maps optional config values into the recovery service bundle.
 # 函数用途: 让未来配置能控制 packet 过期和熔断阈值；当前缺配置时使用服务默认值。
-def _strategy_request(agent, task) -> SubagentRecoveryStrategyRequest:
+def _strategy_request(agent, task, all_tasks: list | None = None) -> SubagentRecoveryStrategyRequest:
     config = getattr(agent, "config", None)
     return SubagentRecoveryStrategyRequest(
         task=task,
+        all_tasks=list(all_tasks or []),
         packet_max_age_seconds=float(getattr(config, "subagent_recovery_packet_max_age_seconds", 0.0) or 0.0),
         no_progress_attempt_limit=int(getattr(config, "subagent_no_progress_attempt_limit", 4) or 4),
     )

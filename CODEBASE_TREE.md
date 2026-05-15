@@ -1002,7 +1002,7 @@ docs/
 - `agent_py_agent/agent/subagents/protocol.py`: TaskAddress / TaskEnvelope 协议合同；父级、恢复、QA 和验收用同一组机器字段描述 run 地址、任务目标、工具合同、写入合同、验收合同和 context refs。
 - `agent_py_agent/agent/subagents/protocol_preflight.py`: 子代理开工前的非破坏性预检；缺工具、缺产物写入根、缺 controlled exec 授权时返回结构化 issue，不剥夺基础读写能力。
 - `agent_py_agent/agent/subagents/debug_trace.py`: 子代理正式调试追踪开关的写入层；`subagent_debug_trace_level=0` 时完全静默，level 1-3 只把 bounded refs-only 事件写入内部 `debug_traces/subagent_trace.jsonl`，level 4 加短预览，level 5 把完整 prompt/response/tool payload/tool output 写入内部 `debug_traces/details/` 并在 JSONL 里留 ref。
-- `agent_py_agent/agent/subagents/context_bundle.py`: 生成 runner-facing `context_bundle.json` / `CONTEXT_BUNDLE.md`，包含目标、计划、验收、权限、写入边界、输出合同、lineage、agent run workspace refs 和 Context Gate；多层传递只保存当前/父级 bundle refs，不展开父级正文。
+- `agent_py_agent/agent/subagents/context_bundle.py`: 生成 runner-facing `context_bundle.json` / `CONTEXT_BUNDLE.md`，包含目标、计划、验收、权限、写入边界、输出合同、lineage、TaskEnvelope、tool_preflight、agent run workspace refs 和 Context Gate；多层传递只保存当前/父级 bundle refs，不展开父级正文。
 - `agent_py_agent/agent/subagents/result_structured.py`: 解析 runner structured output 并写回 tools、artifacts、tests、blockers 和 capability requests；evidence/finding 解析已拆到 `result_structured_evidence.py`，保持解析主流程薄。
 - `agent_py_agent/agent/subagents/result_structured_evidence.py`: 解析并写回 runner evidence、evidence_packets 和 findings；负向 content_check 语义在这里规范，避免“坏模式没出现”被误判为失败。
 - `agent_py_agent/agent/subagents/result_artifact_evidence.py`: 从 runner artifact metadata 合并 `artifact_refs`，并在模型漏写 `evidence_packets` 时合成 refs-only artifact evidence packet，不读取 artifact 正文。
@@ -1157,7 +1157,7 @@ docs/
 - `agent_py_agent/tests/test_local_store_shared_progress_panel.py`: 覆盖共享进度面板如何组合 runtime query、task rollup、blocked runs、inheritance manifest refs 和 takeover readiness refs。
 - `agent_py_agent/tests/test_subagent_inheritance_manifest.py`: 覆盖 parent/child 创建时的继承、覆盖、裁剪记录和 manifest JSON 落盘。
 - `agent_py_agent/tests/test_subagent_failure_handoff.py`: 覆盖失败/阻塞 run 保存时的 failure handoff JSON 落盘和 LocalStore metadata refs。
-- `agent_py_agent/tests/test_subagent_context_bundle.py`: 覆盖 Context Bundle v1 字段、Context Gate、runner prompt 接入、agent run workspace 镜像和四层 lineage refs。
+- `agent_py_agent/tests/test_subagent_context_bundle.py`: 覆盖 Context Bundle v1 字段、TaskEnvelope/tool_preflight、Context Gate、runner prompt 接入、agent run workspace 镜像和四层 lineage refs。
 - `agent_py_agent/tests/test_subagent_compact_continuation.py`: 覆盖子代理保存自动生成 latest continue packet、session compact ledger、task-local session compact package，以及父级 runner prompt 自动读取这些恢复 refs。
 - `agent_py_agent/tests/test_subagent_recovery_strategy.py`: 覆盖子代理 packet-first 恢复策略，包括 packet 优先、坏包/过期包降级、no-progress fuse、worker takeover 和 coordinator leader recovery。
 - `agent_py_agent/tests/test_subagent_takeover_run.py`: 覆盖原 run 挂死后的 takeover run 创建、旧任务 refs 继承和重复恢复不无限扩容。
