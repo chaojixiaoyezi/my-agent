@@ -20,6 +20,7 @@ from .hierarchy_tools import ScheduleChildSubagentsTool
 from .orchestration_board_payload import (
     board_actionable_run_ids,
     board_completion_status,
+    board_kernel_snapshot_payload,
     board_status_filter,
     clip_board_text,
     scoped_board_items,
@@ -177,6 +178,7 @@ class SubagentBoardTool(BaseTool):
         payload = {
             "summary": board.summary,
             "completion_status": board_completion_status(items),
+            "kernel_snapshot": board_kernel_snapshot_payload(self.agent, items),
             "returned": len(items),
             "actionable_run_ids": board_actionable_run_ids(items),
             "subagent_workspace": str(self.agent.subagents.workspace),

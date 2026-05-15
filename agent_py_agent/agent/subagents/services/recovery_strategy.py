@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ..models import SubAgentTask
+from ..protocol import build_task_address, build_task_envelope
 from .task_attribute_reader import task_int, task_list, task_role, task_status, task_text
 
 _PACKET_SCHEMA_VERSION = "subagent_continue_packet.v1"
@@ -26,6 +27,7 @@ _CLOSED_STATUSES = {"DONE", "COMPLETED", "ABANDONED", "TAKEN_OVER"}
 @dataclass(frozen=True)
 class SubagentRecoveryStrategyRequest:
     task: SubAgentTask
+    all_tasks: list[SubAgentTask] = field(default_factory=list)
     now: float = 0.0
     packet_max_age_seconds: float = 0.0
     no_progress_attempt_limit: int = 4
@@ -46,6 +48,8 @@ class SubagentRecoveryStrategy:
     fallback_refs: list[str] = field(default_factory=list)
     takeover_refs: list[str] = field(default_factory=list)
     child_run_ids: list[str] = field(default_factory=list)
+    address: dict[str, object] = field(default_factory=dict)
+    task_envelope: dict[str, object] = field(default_factory=dict)
     leadership_recovery: bool = False
     no_progress_fuse: bool = False
     blocked_by: list[str] = field(default_factory=list)
@@ -66,6 +70,8 @@ class SubagentRecoveryStrategy:
             "fallback_refs": list(self.fallback_refs),
             "takeover_refs": list(self.takeover_refs),
             "child_run_ids": list(self.child_run_ids),
+            "address": dict(self.address),
+            "task_envelope": dict(self.task_envelope),
             "leadership_recovery": self.leadership_recovery,
             "no_progress_fuse": self.no_progress_fuse,
             "blocked_by": list(self.blocked_by),
@@ -102,6 +108,8 @@ def build_subagent_recovery_strategy(request: SubagentRecoveryStrategyRequest) -
         fallback_refs=fallback_refs,
         takeover_refs=_takeover_refs(task),
         child_run_ids=task_list(task, "child_ids"),
+        address=build_task_address(task, all_tasks=request.all_tasks).to_dict(),
+        task_envelope=build_task_envelope(task, all_tasks=request.all_tasks).to_dict(),
         leadership_recovery=action == "recover_coordinator_leadership",
         no_progress_fuse=no_progress_fuse,
         blocked_by=packet.blocked_by,
@@ -353,12 +361,6 @@ def _takeover_action(packet: _PacketState) -> str:
 # 函数用途: 避免 leader recovery 或熔断场景误报 uses_continue_packet。
 def _action_uses_packet(action: str) -> bool:
     return action in {"rerun_original_from_continue_packet", "create_takeover_run_from_continue_packet"}
-
-
-# LLM: _string_list normalizes child ids without mutating task fields.
-# 函数用途: 清理 child_run_ids，保持结果可 JSON 化。
-def _string_list(values: list[str]) -> list[str]:
-    return [str(item) for item in values if str(item or "").strip()]
 
 
 __all__ = [

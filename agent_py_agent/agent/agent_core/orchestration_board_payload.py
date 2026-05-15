@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from ..subagents.kernel import SubagentKernelQuery
 from .orchestration_run_scope import remembered_orchestration_run_ids
 
 
@@ -71,6 +72,30 @@ def board_completion_status(items) -> dict[str, object]:
     }
 
 
+# LLM: board_kernel_snapshot_payload exposes the new kernel read model to parent agents without reading artifacts.
+# 函数用途: 给 subagent_board 输出附加统一内核快照，父级后续按结构化状态桶和 refs 判断下一步。
+def board_kernel_snapshot_payload(agent: object, items) -> dict[str, object]:
+    manager = getattr(agent, "subagents", None)
+    if manager is None or not _manager_has_kernel_snapshot(manager):
+        return {}
+    root_id = _single_board_root_id(items)
+    if not root_id:
+        return {}
+    snapshot = manager.kernel_snapshot(SubagentKernelQuery(root_id=root_id))
+    return {
+        "schema_version": snapshot.schema_version,
+        "root_id": snapshot.root_id,
+        "scope": snapshot.scope,
+        "running_run_ids": snapshot.running_run_ids,
+        "blocked_run_ids": snapshot.blocked_run_ids,
+        "completed_run_ids": snapshot.completed_run_ids,
+        "failed_run_ids": snapshot.failed_run_ids,
+        "takeover_candidate_run_ids": snapshot.takeover_candidate_run_ids,
+        "rows": [_kernel_row_payload(row) for row in snapshot.runs[:20]],
+        "warnings": list(snapshot.warnings),
+    }
+
+
 # LLM: _board_item_in_scope mirrors final closeout scoping for board rows.
 # 函数用途: 精确 id 或同 root 子树属于当前轮；其它历史 run 不进入默认看板 payload。
 def _board_item_in_scope(item, seen: set[str], root_ids: set[str]) -> bool:
@@ -104,6 +129,47 @@ def _verified_target_tokens(items) -> set[str]:
         if status == "DONE" and verification == "VERIFIED":
             tokens.update(str(token or "") for token in getattr(item, "target_tokens", []) or [])
     return {token for token in tokens if token}
+
+
+# LLM: _manager_has_kernel_snapshot avoids MagicMock auto-attributes and keeps board tests deterministic.
+# 函数用途: 只有真实 manager 类或显式 fake 暴露 kernel_snapshot 时，才追加内核快照。
+def _manager_has_kernel_snapshot(manager: object) -> bool:
+    return callable(getattr(type(manager), "kernel_snapshot", None))
+
+
+# LLM: _single_board_root_id keeps kernel snapshot selection scoped to one root tree.
+# 函数用途: 从当前看板行推导唯一 root_id；多棵树混在一起时不猜，避免污染父级判断。
+def _single_board_root_id(items) -> str:
+    root_ids = {
+        str(getattr(item, "root_id", "") or getattr(item, "id", "") or "")
+        for item in items
+        if str(getattr(item, "root_id", "") or getattr(item, "id", "") or "")
+    }
+    return next(iter(root_ids)) if len(root_ids) == 1 else ""
+
+
+# LLM: _kernel_row_payload keeps the board payload compact and refs-first.
+# 函数用途: 将 kernel run 行转成 JSON 友好字段，不展开 goal、artifact 正文或长日志。
+def _kernel_row_payload(row: object) -> dict[str, object]:
+    return {
+        "run_id": row.run_id,
+        "parent_id": row.parent_id,
+        "depth": row.depth,
+        "role": row.role,
+        "agent_name": row.agent_name,
+        "status": row.status,
+        "verification_status": row.verification_status,
+        "progress": row.progress,
+        "child_ids": list(row.child_ids),
+        "address": dict(row.address),
+        "task_envelope": dict(row.task_envelope),
+        "workspace_refs": dict(row.workspace_refs),
+        "recovery_refs": dict(row.recovery_refs),
+        "tool_contract": dict(row.tool_contract),
+        "artifact_refs": list(row.artifact_refs),
+        "evidence_refs": list(row.evidence_refs),
+        "blockers": list(row.blockers),
+    }
 
 
 # LLM: board_status_filter normalizes model-friendly aliases before filtering board rows.

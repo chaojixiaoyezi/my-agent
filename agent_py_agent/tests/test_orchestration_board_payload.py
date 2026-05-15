@@ -8,6 +8,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from agent_py_agent.agent.subagents.kernel import SubagentKernelRun, SubagentKernelSnapshot
+
 
 # LLM: _board_item builds minimal board row fixtures for board-tool payload tests.
 # 函数用途: 构造带状态、目标和 task_dir 的假看板条目，避免测试重复 mock 字段。
@@ -114,3 +116,46 @@ def test_scoped_board_items_ignores_unseen_historical_rows():
     items = scoped_board_items(agent, [old, current])
 
     assert [item.id for item in items] == ["current"]
+
+
+def test_board_payload_includes_kernel_snapshot_when_available():
+    from agent_py_agent.agent.agent_core.orchestration_tools import SubagentBoardTool
+
+    class FakeSubagents:
+        workspace = Path("/tmp/workspace")
+
+        def write_board(self, options):
+            board = MagicMock()
+            board.summary = {"total": 1}
+            board.items = [_board_item("run_1", "RUNNING")]
+            return board
+
+        def kernel_snapshot(self, query):
+            return SubagentKernelSnapshot(
+                schema_version="subagent_kernel_snapshot.v1",
+                root_id=query.root_id,
+                scope=query.scope,
+                running_run_ids=["run_1"],
+                runs=[
+                    SubagentKernelRun(
+                        run_id="run_1",
+                        root_id="run_1",
+                        status="RUNNING",
+                        role="worker",
+                        tool_contract={"allowed_tools": ["read_file", "write_file"]},
+                        workspace_refs={"agent_run_workspace": "/tmp/workspace/run_1"},
+                        recovery_refs={"checkpoint": "/tmp/workspace/run_1/checkpoint.json"},
+                    )
+                ],
+            )
+
+    mock_agent = MagicMock()
+    mock_agent.subagents = FakeSubagents()
+
+    result = SubagentBoardTool(mock_agent).execute({"limit": 10})
+
+    assert result.ok is True
+    assert '"kernel_snapshot": {' in result.output
+    assert '"running_run_ids": [' in result.output
+    assert '"allowed_tools": [' in result.output
+    assert '"agent_run_workspace": "/tmp/workspace/run_1"' in result.output

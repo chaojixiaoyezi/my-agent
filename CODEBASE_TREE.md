@@ -238,6 +238,9 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- subagent.py                        # 子代理兼容入口，真实实现已拆到 subagents/
 |   |   |-- subagent_workflows/                # 子代理 workflow 模板模型、加载器和内置模板资源
 |   |   |-- subagents/                         # 子代理模型、报告、manager mixin、验收、dispatch、runner、索引等
+|   |   |   |-- kernel.py                         # 子代理内核只读快照，统一 run/session/tree/status/refs
+|   |   |   |-- protocol.py                       # TaskAddress / TaskEnvelope / 协议校验
+|   |   |   `-- protocol_preflight.py           # 工具和产物写入合同预检
 |   |   |-- tools.py                           # 工具兼容入口，真实实现已拆到 tooling/
 |   |   |-- tooling/                           # 工具模型、文件工具、HTTP 工具、解析器、注册表、写边界
 |   |   |   |-- filesystem_read_file.py       # read_file 执行、行号分页、结构化摘要和截断提示
@@ -992,8 +995,12 @@ docs/
 - `agent_py_agent/agent/agent_core/dispatch_acceptance_records.py`: 承接 dispatch acceptance record 构建、parent acceptance auto-policy/auto-execution 摘要和显式 tests 后的 refresh 调用，让主 dispatch service 保持薄编排。
 - `agent_py_agent/agent/agent_core/dispatch_acceptance_refresh.py`: 本轮显式 parent tests 写入 `test_execution.json` 后重新 dry-run acceptance，并刷新 dispatch 展示、单 run 审计和 aggregate acceptance report；不 apply、不 rescue、不修改 task 状态。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`: 承接 runner-context `dispatch_subagents` 工具返回 payload 的单条 record 构造，输出 test/follow-up refs 和摘要，不展开正文；错 run_id 时顶层 recovery 会给 `valid_run_ids`。
+- `agent_py_agent/agent/agent_core/orchestration_board_payload.py`: 承接 `subagent_board` 的状态桶、完成状态、当前轮作用域和 kernel snapshot payload；看板只附加 refs-first 内核快照，不读取业务产物正文。
 - `agent_py_agent/agent/agent_core/runner_stage_trace.py`: 把子代理 runner 的模型请求/响应/失败和工具调用开始/结束写入 debug trace；level 3 只记录长度、backend、工具名、payload keys 和 ok，level 4/5 才追加短预览或完整 detail 文件 ref。
 - `agent_py_agent/agent/subagents/services/control_plane_projection.py`: 在 subagent 保存时把 task 当前状态投影到 LocalStore 控制面；它只做查询索引，不替代旧工单目录或 runtime workspace 事实源。
+- `agent_py_agent/agent/subagents/kernel.py`: 子代理内核只读快照入口；`SubAgentManager.kernel_snapshot()` 统一返回 root tree / own subtree 的状态桶、workspace refs、recovery refs、tool_contract、TaskAddress/TaskEnvelope、artifact/evidence refs 和 takeover candidates，不调度、不恢复、不读取产物正文。
+- `agent_py_agent/agent/subagents/protocol.py`: TaskAddress / TaskEnvelope 协议合同；父级、恢复、QA 和验收用同一组机器字段描述 run 地址、任务目标、工具合同、写入合同、验收合同和 context refs。
+- `agent_py_agent/agent/subagents/protocol_preflight.py`: 子代理开工前的非破坏性预检；缺工具、缺产物写入根、缺 controlled exec 授权时返回结构化 issue，不剥夺基础读写能力。
 - `agent_py_agent/agent/subagents/debug_trace.py`: 子代理正式调试追踪开关的写入层；`subagent_debug_trace_level=0` 时完全静默，level 1-3 只把 bounded refs-only 事件写入内部 `debug_traces/subagent_trace.jsonl`，level 4 加短预览，level 5 把完整 prompt/response/tool payload/tool output 写入内部 `debug_traces/details/` 并在 JSONL 里留 ref。
 - `agent_py_agent/agent/subagents/context_bundle.py`: 生成 runner-facing `context_bundle.json` / `CONTEXT_BUNDLE.md`，包含目标、计划、验收、权限、写入边界、输出合同、lineage、agent run workspace refs 和 Context Gate；多层传递只保存当前/父级 bundle refs，不展开父级正文。
 - `agent_py_agent/agent/subagents/result_structured.py`: 解析 runner structured output 并写回 tools、artifacts、tests、blockers 和 capability requests；evidence/finding 解析已拆到 `result_structured_evidence.py`，保持解析主流程薄。
