@@ -71,8 +71,6 @@ class TestCreateSubagentsToolExecute:
         # 应该最多只创建 max_subagents 个
         assert mock_agent.subagents.create_run.call_count <= 2
 
-
-
 class TestCreateSubagentsToolTemplatePolicy:
     """测试 create_subagents 的角色模板和工具推断策略。"""
 

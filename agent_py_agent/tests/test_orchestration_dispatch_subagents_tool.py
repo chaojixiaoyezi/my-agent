@@ -146,6 +146,31 @@ class TestDispatchSubagentsToolExecute:
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
         assert call_kwargs["params"].include_run_ids == ["child-auth", "child-catalog"]
 
+    def test_dispatch_explicit_run_ids_default_max_runners_to_all_targets(self):
+        """模型给多个 run_ids 但漏 max_runners 时，默认推进全部显式目标。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        mock_report = MagicMock()
+        mock_report.dry_run = False
+        mock_report.summary = {}
+        mock_report.records = []
+
+        mock_agent = MagicMock()
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent.tools.specs.return_value = []
+        mock_agent.dispatch_subagents.return_value = mock_report
+        mock_agent.subagents.workspace = Path("/tmp/workspace")
+
+        result = DispatchSubagentsTool(mock_agent).execute({
+            "apply": True,
+            "execute_runners": True,
+            "run_ids": ["child-auth", "child-catalog", "child-cart"],
+        })
+
+        assert result.ok is True
+        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
+        assert call_kwargs["params"].max_runners == 3
+
     def test_dispatch_scope_memory_ignores_non_runner_report_records(self):
         """当前轮作用域只记本轮显式/runner run_id，不把旧验收记录写进最终收口范围。"""
         from agent_py_agent.agent.agent_core.orchestration_dispatch_tool import (
