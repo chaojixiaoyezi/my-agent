@@ -1122,7 +1122,11 @@ docs/
 - `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context dispatch 的直接 child 进度摘要；含状态计数、unfinished ids、recovery ids、rejected acceptance ids、`needs_more_dispatch` / `needs_recovery` 和带 `run_ids` 的建议继续调度或恢复工具调用。
 - `agent_py_agent/agent/agent_core/orchestration_board_payload.py`: subagent board 输出整形 helper；把可继续处理的 run id 按状态放到顶层，归一 `status=ALL/*/ANY` 为不过滤，并截断长 goal，避免看板响应挤占模型上下文。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_tool.py`: `dispatch_subagents` 模型工具类；把模型参数收敛成 `DispatchParams`，返回 refs-first 调度报告和错误 run id 恢复提示。
-- `agent_py_agent/agent/agent_core/orchestration_dispatch_scope.py`: 集中维护 dispatch_subagents 的 apply/execute 默认、parent scope、self-exclude、workflow-off 和验收收口策略；顶层 active root/coordinator 在 `apply=true` 时强制 workflow off，避免全局 auto workflow 先生成 producer/critic/repair 子工单并绕过 root 自己派工。
+- `agent_py_agent/agent/agent_core/orchestration_dispatch_scope.py`: 集中维护 dispatch_subagents 的 apply/execute 默认、parent scope、self-exclude、workflow-off 和验收收口策略；真实执行 runner 的模型工具调用固定开启父级验收测试，顶层 active root/coordinator 在 `apply=true` 时强制 workflow off，避免全局 auto workflow 先生成 producer/critic/repair 子工单并绕过 root 自己派工。
+- `agent_py_agent/agent/agent_core/runner_prompts.py`: 子代理 runner / repair prompt 构建器；只把 slim execution context summary、TaskEnvelope/tool preflight 提示和 refs 放进启动提示词，避免真实模型因完整 context bundle 内联而超时。
+- `agent_py_agent/agent/agent_core/runner_prompt_context_summary.py`: runner prompt 的瘦身执行摘要生成层；集中提取身份、refs、任务、权限、写入边界、TaskEnvelope 和 preflight 短字段。
+- `agent_py_agent/agent/agent_core/subagent_dispatch_closeout.py`: 顶层子代理调度收口守卫；用持久 task 状态替换过度乐观最终回答，并只在用户显式要求 tester/acceptor 角色时才阻断本地完成收口。
+- `agent_py_agent/agent/subagents/context_bundle_contracts.py`: context bundle 合同生成层；从任务文本和文件级 product write roots 推导 required/forbidden files，保证写权限事实和验收文件合同一致。
 - `agent_py_agent/agent/agent_core/capability_request_tool.py`: `capability_request` 模型工具类；runner 缺工具、skill、MCP、网络或 shell 时写正式 OPEN `CapabilityRequest`，只允许当前 run 自己申请，父级后续 route/grant/rerun。
 - `agent_py_agent/agent/agent_core/capability_config_patch_tool.py`: `capability_config_patch` 模型工具类；把配置修复请求收敛成 `CapabilityConfigPatchRequest`，只自动应用安全字段，危险字段返回建议，并写审计/通知。
 - `agent_py_agent/agent/agent_core/orchestration_workflow_mode.py`: create/dispatch 共用 workflow mode 归一化 helper，维持 `off` / `plan` / `auto` 兼容语义。

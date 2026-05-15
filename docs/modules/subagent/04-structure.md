@@ -585,3 +585,7 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `subagents/execution_executor.py` / `execution_executor_helpers.py` 的 `content_check` 支持 `match_mode=not_contains`、`expect_absent`、`negate` 和 `should_not_contain`，用于父级生成的机器测试，不再靠自然语言猜正反。
 - `subagents/static_site_validator.py` / `execution_static_site_items.py` 默认把自动推断的 HTML 验收提升为完整骨架检查，并输出 `html_structure_hits`、`repair_hints`；安全可选 DOM 绑定不再触发硬失败。
 - `agent_core/orchestration_dispatch_scope.py` 允许真实执行 dispatch 时把模型常用的 `limit` / `runner_limit` 作为 `max_runners` 别名；dry-run/report-only 语义保持原样。
+- `agent_core/runner_prompts.py` 的 real-runner prompt 只内联瘦身执行摘要；完整 execution context、context bundle、TaskEnvelope 和 tool preflight 通过 refs 读取，避免真实模型启动时被大 JSON 拖到超时。
+- `subagents/context_bundle_contracts.py` 会从文件级 product write roots 推导 `required_files`，例如 `/.../furniture-home/index.html` 同时产生 `index.html` 和 `furniture-home/index.html`；内部 task/run workspace 文件不会进入用户产物合同。
+- `agent_core/subagent_dispatch_closeout.py` 只把显式 tester/acceptor 角色话术视为必须创建质量子代理；普通“安排和验收 / 汇报验收结果”可由父级验收满足，避免自然语言被死流程带偏。
+- `agent_core/orchestration_dispatch_scope.py` 对模型工具调用固定执行 live runner 的父级验收测试；CLI 直达 `DispatchParams` 仍可人工关闭测试。这个边界保证 LLM 不会误把 `execute_acceptance_tests=false` 当成跳过质量门。

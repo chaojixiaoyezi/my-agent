@@ -177,19 +177,17 @@ def _required_quality_roles(prompt: str) -> set[str]:
     required: set[str] = set()
     if (
         "tester" in text
+        or " qa " in f" {text} "
         or "测试子代理" in text
         or "测试代理" in text
-        or "测试结果" in text
-        or "测试报告" in text
+        or "派测试" in text
     ):
         required.add("tester")
     if (
         "acceptor" in text
         or "验收子代理" in text
         or "验收代理" in text
-        or "验收结果" in text
-        or "验收报告" in text
-        or "最终验收" in text
+        or "派验收" in text
     ):
         required.add("acceptor")
     return required

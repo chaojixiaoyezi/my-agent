@@ -10,12 +10,12 @@ runner 真正调用模型前，需要把执行上下文压成明确任务；模�
 """
 
 import json
-from dataclasses import asdict
 
 from ..subagent import SubAgentExecutionContext
 from ..subagents.context_bundle import context_gate_prompt_lines
 from ..subagents.role_templates import role_template_detail_text, role_template_index_text
 from . import subagent_compact_continuation
+from .runner_prompt_context_summary import runner_context_summary_payload
 
 _SUBAGENT_RESULT_TEMPLATE = (
     "[SUBAGENT_RESULT]\n"
@@ -83,7 +83,7 @@ def _build_subagent_runner_prompt(
     instruction: str = "",
 ) -> str:
 
-    payload = json.dumps(asdict(context), ensure_ascii=False, indent=2)
+    payload = json.dumps(runner_context_summary_payload(context), ensure_ascii=False, indent=2)
     extra = instruction.strip() or "按执行上下文完成任务；如果能力不足，说明需要上抛的 capability_request。"
     execution_contract = "\n".join(_runner_execution_contract_lines(context))
     context_gate = "\n".join(context_gate_prompt_lines(context.context_bundle))
@@ -103,6 +103,7 @@ def _build_subagent_runner_prompt(
         f"{context_gate}\n\n"
         f"{compact_block}"
         "## Execution Context JSON\n\n"
+        "下面是瘦身后的执行摘要；完整上下文请按 refs 读取，不要让模型一次吞完整大 JSON。\n\n"
         "```json\n"
         f"{payload}\n"
         "```\n\n"
@@ -278,7 +279,7 @@ def _build_subagent_runner_repair_prompt(
     parse_error: str = "",
 ) -> str:
 
-    payload = json.dumps(asdict(context), ensure_ascii=False, indent=2)
+    payload = json.dumps(runner_context_summary_payload(context), ensure_ascii=False, indent=2)
     problem = parse_error.strip() or "上一轮回复缺少 [SUBAGENT_RESULT] 结果块。"
     prompt_tail = _clip_repair_text(original_prompt, 6000)
     response_tail = _clip_repair_text(original_response, 12000)
