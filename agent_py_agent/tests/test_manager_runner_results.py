@@ -190,6 +190,49 @@ def test_record_runner_result_with_parsed_output(mock_manager, sample_task):
     assert result.structured_output_found is True
 
 
+# LLM: A runner that claims a missing artifact must not enter the parent-readable acceptance lane.
+# 函数用途: 防止子代理只在 JSON 里声称写了报告、实际没写文件时被父级当作已完成产物读取。
+def test_record_runner_result_blocks_missing_local_artifact_ref(mock_manager, sample_task, tmp_path):
+    mock_manager._tasks[sample_task.id] = sample_task
+    sample_task.task_dir = str(tmp_path)
+    sample_task.output_dir = str(tmp_path / "output")
+    sample_task.reports_dir = str(tmp_path / "reports")
+    sample_task.task_workspace_artifacts_dir = ""
+    sample_task.agent_run_artifacts_dir = ""
+    sample_task.data_dir = ""
+    sample_task.scratch_dir = ""
+    sample_task.allowed_write_roots = []
+
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="AWAITING_ACCEPTANCE",
+        summary="报告已完成",
+        artifacts=[{"path": "missing_report.md", "kind": "report"}],
+        evidence_packets=[{
+            "claim": "报告已完成",
+            "checked_scope": "missing_report.md",
+            "artifact_refs": ["missing_report.md"],
+            "confidence": 0.9,
+        }],
+    )
+
+    result = mock_manager.record_runner_result(_rrr(
+        run_id="run-123",
+        dry_run=False,
+        ok=True,
+        message="完成",
+        structured_output=parsed,
+    ))
+
+    assert result.ok is False
+    assert sample_task.status == "BLOCKED"
+    assert sample_task.verification_status == "UNVERIFIED"
+    assert sample_task.failure_type == "missing_artifact_refs"
+    assert "missing_report.md" in sample_task.runner_last_error
+
+
 def test_record_runner_result_dry_run(mock_manager, sample_task):
     """测试 dry_run 不增加 runner_attempts。"""
     sample_task.runner_attempts = 0

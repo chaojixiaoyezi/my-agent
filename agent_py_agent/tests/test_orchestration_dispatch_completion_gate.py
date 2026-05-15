@@ -10,8 +10,8 @@ from unittest.mock import MagicMock
 
 # LLM: dispatch gate tests cover root-facing not-complete signals and refs.
 # 函数用途: 验证 dispatch_subagents 顶层和 markdown 都暴露阻塞状态，防止父级误报完成。
-def test_dispatch_payload_exposes_blocking_gate_and_refs():
-    """dispatch 顶层要暴露阻塞 run 和产物 refs，避免 root 先写最终完成报告。"""
+def test_dispatch_payload_exposes_blocking_gate_without_deliverable_refs():
+    """dispatch 有阻塞时不能把未验收产物暴露成可交付 refs。"""
     from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
     record = SimpleNamespace(
@@ -47,7 +47,8 @@ def test_dispatch_payload_exposes_blocking_gate_and_refs():
     assert payload["completion_status"]["status"] == "not_complete"
     assert payload["must_not_report_done"] is True
     assert payload["blocking_run_ids"] == ["child-bad"]
-    assert payload["deliverable_artifact_refs"] == ["/tmp/site/final_report.md"]
+    assert "deliverable_artifact_refs" not in payload
+    assert payload["pending_artifact_refs"] == ["/tmp/site/final_report.md"]
     assert payload["parent_acceptance_repair_advice"]["failed_run_ids"] == ["child-bad"]
 
 
