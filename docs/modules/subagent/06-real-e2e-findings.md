@@ -6928,3 +6928,34 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Focused tests: `157 passed`.
   - Natural-language hierarchy/recovery baseline: `29 passed`.
 - Status: fixed as a maintainability hardening pass.
+
+### Finding 103: Protocol must enter runner prompts before the next real MiniMax E2E
+
+- Discovered at: 2026-05-15 during the TaskEnvelope/Tool Preflight integration slice.
+- Scenario:
+  - Previous protocol work created `TaskAddress`, `TaskEnvelope`, kernel rows, recovery refs and parent acceptance refs.
+  - Before this slice, the real runner prompt still mainly surfaced `context_bundle.task_packet`; `TaskEnvelope` and preflight issue codes were not visible in the startup handoff.
+- 中文解释：
+  - 大白话：我们已经有了更硬的“机器工单”，但如果小傻妞开工时看不到它，真实模型还是可能回到老毛病：从摘要里猜路径、猜工具、猜验收条件。
+- Root cause:
+  - Protocol objects existed as services and reports, but had not been written into `context_bundle.json` / `CONTEXT_BUNDLE.md`.
+  - Recovery strategies were building envelope with only the failed child task, so `address.lineage` could collapse to just the child id.
+- Fix:
+  - `context_bundle` now writes `task_envelope` and `tool_preflight`.
+  - Runner prompt now shows short protocol hints: `TaskEnvelope: subagent_task_envelope.v1`, `Tool Preflight: PASS/ISSUE`, and issue codes.
+  - `dispatch_subagents` recovery strategy generation now passes the visible task list, so `TaskAddress.lineage` contains parent -> child.
+- Verification:
+  - Focused protocol prompt tests:
+    - `test_context_bundle_embeds_task_envelope_and_tool_preflight`
+    - `test_runner_prompt_includes_task_envelope_and_preflight_status`
+    - `test_runner_context_dispatch_includes_packet_first_recovery_strategy`
+  - Local natural-language hierarchy/recovery/acceptance suite:
+    - `test_subagent_natural_language_e2e.py`
+    - `test_subagent_recovery_strategy.py`
+    - `test_subagent_takeover_run.py`
+    - `test_subagent_coordinator_due_check.py`
+    - `test_parent_acceptance_controller.py`
+    - `test_static_site_validator.py`
+- Status: fixed by focused tests.
+- Remaining gap:
+  - A fresh real MiniMax furniture-page E2E still needs to be run after this slice, using ordinary user language and no internal terms.

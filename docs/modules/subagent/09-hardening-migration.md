@@ -176,3 +176,11 @@
 - 恢复链路仍然 packet-first：如果 `latest_continue_packet.json` 已准备好，推荐从 packet 接；否则再降级 checkpoint/summary。区别是现在推荐动作同时带 address 和 envelope，后续接管者不需要重新读自然语言摘要猜任务。
 - 验收链路拿同一份 envelope：parent acceptance decision 会带 `task_envelope.acceptance`，QA/tester/acceptor 能看到父级要求的验收条件，而不是从输出摘要里反推。
 - 后续迁移要求：dispatcher 和 runner 下一步要优先消费 `TaskEnvelope`，tool gateway 要优先消费 preflight issue；真实 E2E 要继续使用普通用户自然语言，不在 prompt 里塞内部字段名。
+
+## Stages 1-6 Runner Consumption Slice
+
+- 中文说明：协议现在进入 runner 开工前路径。`context_bundle` 会同时写旧 `task_packet` 和新 `task_envelope`，模型仍能看中文说明，但真正的地址、工具、写入和验收事实优先读 envelope。
+- `tool_preflight` 随 `context_bundle` 一起写入，runner prompt 只展示短 issue codes。它用于早发现缺口，例如“只有内部 task_dir，没有产物写入根”或“allowed_tools 里有 controlled_exec 但没有 grant”。
+- preflight 不做硬阻断：它不删除工具、不改任务状态、不自动发 grant。父级/runner 可以根据 issue codes 决定是继续写报告、上抛 capability request，还是先补产物目录。
+- recovery payload 现在用完整 `all_tasks` 构建 `TaskAddress.lineage`。当 child 失败时，父 runner 看到的是 parent -> child 链路，而不是一个孤立 run id。
+- 测试边界：本片先用 focused tests 验证协议进入 context bundle、prompt 和 recovery payload；真实 MiniMax E2E 是下一片，继续用普通话任务，不使用 `dispatch/run_id/TaskEnvelope` 等专业词。

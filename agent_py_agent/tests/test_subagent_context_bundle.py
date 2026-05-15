@@ -41,6 +41,33 @@ def test_context_bundle_v1_captures_task_handoff_fields(tmp_path) -> None:
     assert set(REQUIRED_CONTEXT_BUNDLE_FIELDS).issubset(payload)
 
 
+# LLM: test_context_bundle_embeds_task_envelope_and_tool_preflight protects protocol-first handoff.
+# 函数用途: runner 开工前要拿到 TaskEnvelope 和 Tool Preflight，不能只靠自然语言 task_packet 猜路径和工具。
+def test_context_bundle_embeds_task_envelope_and_tool_preflight(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="写 build/index.html",
+        thought="产物应该写到明确交付目录。",
+        plan=["写页面"],
+        role="worker",
+    )
+    task.allowed_tools = ["read_file", "write_file", "controlled_exec"]
+    task.acceptance_checks = ["build/index.html 存在"]
+    manager.save(task)
+
+    bundle = build_context_bundle(manager.load(task.id))
+
+    assert bundle.task_envelope["schema_version"] == "subagent_task_envelope.v1"
+    assert bundle.task_envelope["address"]["run_id"] == task.id
+    assert bundle.task_envelope["acceptance"]["checks"] == ["build/index.html 存在"]
+    preflight = bundle.tool_preflight
+    assert preflight["ok"] is False
+    assert [item["code"] for item in preflight["issues"]] == [
+        "missing_allowed_write_roots",
+        "controlled_exec_grant_missing",
+    ]
+
+
 # LLM: _assert_core_context_bundle groups identity and task contract assertions.
 # 函数用途: 检查 context bundle 的身份、目标、计划、验收和权限主字段。
 def _assert_core_context_bundle(bundle, task) -> None:
@@ -272,6 +299,31 @@ def test_runner_prompt_includes_context_gate_status(tmp_path) -> None:
     assert "Context Gate: PASS" in prompt
     assert "context_bundle.json" in prompt
     assert "优先按 context_bundle.task_packet" in prompt
+
+
+# LLM: test_runner_prompt_includes_task_envelope_and_preflight_status guards model-facing protocol hints.
+# 函数用途: 子代理 prompt 要直接告诉模型先读 TaskEnvelope，并展示 preflight issue，避免模型从摘要里猜。
+def test_runner_prompt_includes_task_envelope_and_preflight_status(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
+
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="写 build/index.html",
+        thought="测试 preflight 提示。",
+        plan=["写文件"],
+        role="worker",
+    )
+    task.allowed_tools = ["read_file", "write_file", "controlled_exec"]
+    task.acceptance_checks = ["build/index.html 存在"]
+    manager.save(task)
+    context = manager.write_execution_context(task.id)
+
+    prompt = _build_subagent_runner_prompt(context)
+
+    assert "TaskEnvelope: subagent_task_envelope.v1" in prompt
+    assert "Tool Preflight: ISSUE" in prompt
+    assert "missing_allowed_write_roots" in prompt
+    assert "controlled_exec_grant_missing" in prompt
 
 
 def test_runner_prompt_describes_scoped_capability_request_loop(tmp_path) -> None:

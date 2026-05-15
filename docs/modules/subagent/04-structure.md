@@ -575,6 +575,7 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `subagents/role_contracts.py` 的角色契约改为“职责叠加”：显式工具、模板工具和 `ROLE_BASE_TOOLS` 合并去重。reporter/checker/tester/acceptor 等质量角色也有基础读写和报告能力，最终能否验收仍由父级质量门决定。
 - `subagents/manager_runner_context.py` 会在 root execution context 里移除 `capability_request`，因为 root 没有上级授权者；下级 run 的能力申请通道不变。
 - `subagents/context_bundle.py` 新增 `task_packet` 字段，schema 为 `subagent_task_packet.v1`。它是 runner 和 takeover 优先读取的结构化工单，包含 role、goal、plan、acceptance、file_contract、write_contract、tool_contract、workspace_refs 和 reserved。
+- `subagents/context_bundle.py` 也会写入 `task_envelope` 与 `tool_preflight`：前者是更完整的 TaskAddress/TaskEnvelope 协议包，后者是开工前工具/产物写入/controlled exec 授权预检。runner prompt 只显示短 issue codes，不展开大 JSON；preflight 只报告，不自动关工具或改状态。
 - `subagents/context_bundle_semantic.py` 承接 Context Gate 的轻量语义校验：从 goal/plan/acceptance 重新提取明确文件名，确认 `output_contract.required_files` 与 `task_packet.file_contract.required_files` 没有缩水；它不读取 artifact 正文。
 - `context_gate_prompt_lines()` 会明确告诉 runner 优先按 `context_bundle.task_packet` 执行，避免从自然语言摘要里重新猜路径、工具名或文件合同。
 - `tooling/registry_execution.py` 现在对标准 JSON 工具块也做窄别名归一：工具名如 `write/read/list/search/append/replace` 会转成正式工具名；文件路径参数如 `file_path/filename/target_path` 会转成 `path`。同一参数别名冲突会返回 parse error，不会静默猜测。
