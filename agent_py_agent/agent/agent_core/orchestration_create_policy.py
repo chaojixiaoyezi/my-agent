@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import json
+
 from ..subagents.services.base import CreateRunParams
 from .coordinator_seed_tools import explicit_root_allowed_tools
 from .orchestration_create_constraints import (
@@ -89,7 +91,7 @@ def create_run_params(
     return CreateRunParams(
         goal=goal,
         thought=str(raw_params.get("thought") or "根据父代理派工执行，并保留可验收证据。").strip(),
-        plan=_string_list(raw_params.get("plan")) or ["理解目标", "执行任务", "产出证据", "等待父代理验收"],
+        plan=_create_plan(raw_params),
         agent_name=_root_agent_name(raw_params, role),
         role=role,
         allowed_tools=allowed_tools,
@@ -222,3 +224,59 @@ def _agent_name_from_role_field(raw_params: dict[str, object]) -> str:
     if not _role_field_is_lineage_agent_name(role_text):
         return ""
     return role_text.replace("_", "-")
+
+
+# LLM: _create_plan prevents global batch plans from leaking into every item child.
+# 函数用途: 优先用当前 item 自己的 plan；没有 plan 但有下级 tasks 时，把 tasks 变成协调者可读步骤。
+def _create_plan(raw_params: dict[str, object]) -> list[str]:
+    explicit = _string_list(raw_params.get("plan"))
+    if explicit:
+        return explicit
+    task_hints = _child_task_hint_plan(raw_params.get("tasks"))
+    if task_hints:
+        return [
+            "理解父级目标和可用资料",
+            *task_hints,
+            "汇总下级结果、证据 refs 和阻塞项",
+            "等待父代理验收",
+        ]
+    return ["理解目标", "执行任务", "产出证据", "等待父代理验收"]
+
+
+# LLM: _child_task_hint_plan turns 长期助手 nested tasks into readable coordinator steps.
+# 函数用途: 把 item.tasks 的下级任务提示交给 coordinator，而不是丢在未使用参数里。
+def _child_task_hint_plan(value: object) -> list[str]:
+    items = _json_task_items(value)
+    lines: list[str] = []
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        goal = str(item.get("goal") or "").strip()
+        if not goal:
+            continue
+        role = str(item.get("role") or "worker").strip() or "worker"
+        name = str(item.get("agent_name") or "").strip()
+        suffix = f"（role={role}{', agent_name=' + name if name else ''}）"
+        lines.append(f"按需创建/调度下级任务 {index}: {goal}{suffix}")
+    return lines
+
+
+# LLM: _json_task_items accepts the common nested tasks shapes produced by LLMs.
+# 函数用途: 支持 list、单对象和 JSON 字符串形式的下级任务提示；解析失败时返回空列表。
+def _json_task_items(value: object) -> list[object]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        return [value]
+    text = str(value or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        return [parsed]
+    return []

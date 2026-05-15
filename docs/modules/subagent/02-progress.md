@@ -1248,6 +1248,15 @@
 - 已修复：单页面 leaf 的 static-site 验收只扫描该 leaf 声明的 `html_files/check_files`，不再被同目录兄弟页面误伤。
 - 已瘦身默认配置：`capability_config.yaml` 只保留 3 个普通用户能理解的能力路由项；旧字段仍可被代码读取，但默认安装不再展示一堆细碎 token/timeout/card 限制。
 - 已测试：dispatch payload、失败摘要提取、真实 dispatch static-site 失败细节、static-site scoped check、执行项推断相关 focused tests 均通过。
+
+## 2026-05-16 对照 长期助手/通道运行时 后的派工入口修复
+- 中文说明：真实对比测试里，my-agent 顶层容易用 `count` 复制同一个目标，创建完工单后又误以为子代理已经开跑；长期助手 的 `delegate_task(tasks=[])` 更稳，因为每个子任务天然有独立 goal/context。通道运行时 的控制面也强调“创建记录”和“执行 run”是两件事。
+- 已修复：`create_subagents` 新增 `items` / `tasks` 批量入口；每项可以独立写 `goal`、`role`、`agent_name`、`plan`、`acceptance_checks` 和写入根，顶层默认字段会被继承，item 自己的字段优先。
+- 已修复：`create_subagents` 返回 payload 增加 `next_action`，明确告诉模型下一步应调用 `dispatch_subagents`，并带上真实 `run_ids`、`execute_runners=true` 和本轮 `max_runners`；这能减少“只创建任务目录但没人实际干活”的误判。
+- 已修复：`items/tasks` 不再把顶层全局 `plan` 复制给每个 child；item 自己写的 nested `tasks` 会转成 coordinator 可读的下级任务提示。这样“主代理最后输出 final_report.md”不会误伤每个小傻妞的 Context Gate。
+- 已修复：`dispatch_subagents` 如果显式给了多个 `run_ids` 且真实执行 runner，但漏写 `max_runners`，现在默认按 `run_ids` 数量推进，不再只跑第一个孩子。这学习的是成熟控制面的直觉：用户已经点名一组 run，就应该默认执行这一组，而不是让模型记住另一个计数字段。
+- 保持边界：旧的 `goal + count` 单任务模式仍兼容；不同工作切片优先走 `items/tasks`，只有确实需要多个同质 worker 时才用 `count`。
+- 已测试：新增 `items` 批量创建不同目标、`max_subagents` 截断和 `next_action` 回执的 focused tests；同时回归 create/dispatch/tool-spec/hierarchy/protocol/runner dispatch 相关测试。
 - 下一步：用自然中文任务继续跑 3-worker E2E，让 root 根据结构化失败细节派小傻妞修复，而不是自己猜或自己读正文。
 
 ## 2026-05-15 子代理硬化第 9 步：dispatch typed envelope

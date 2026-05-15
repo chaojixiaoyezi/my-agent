@@ -30,6 +30,7 @@ from .orchestration_create_constraints import (
     delegation_constraint_conflict_error,
     explicit_root_missing_write_root_error,
 )
+from .orchestration_create_items import CreateSubagentItem, create_items_from_params
 from .orchestration_create_policy import (
     create_run_params,
 )
@@ -68,6 +69,12 @@ class CreateSubagentsTool(BaseTool):
         if not self.agent.config.enable_subagents:
             return ToolExecutionResult("create_subagents", False, "配置已禁用 subagent。")
 
+        items = create_items_from_params(params)
+        if isinstance(items, str):
+            return ToolExecutionResult("create_subagents", False, items)
+        if items:
+            return self._execute_items(items)
+
         goal = str(params.get("goal") or "").strip()
         if not goal:
             return ToolExecutionResult("create_subagents", False, "缺少必填参数 goal。")
@@ -104,6 +111,63 @@ class CreateSubagentsTool(BaseTool):
             json.dumps(payload, ensure_ascii=False, indent=2),
         )
 
+    # LLM: _execute_items is the structured batch path, equivalent to 长期助手 delegate_task tasks[].
+    # 函数用途: 按 items[] 中每个独立 goal 创建子代理，避免 count 复制同一个任务目标。
+    def _execute_items(self, items: list[CreateSubagentItem]) -> ToolExecutionResult:
+        capped = self._cap_items(items)
+        allowed_tool_values = [subagent_allowed_tools(item.params) for item in capped]
+        for item, allowed_tools in zip(capped, allowed_tool_values, strict=True):
+            validation = self._validate_single_goal(item.params, item.goal, allowed_tools)
+            if validation:
+                return ToolExecutionResult("create_subagents", False, validation)
+        tasks = []
+        for item in capped:
+            task = self.agent.subagents.create_run(
+                params=create_run_params(
+                    self.agent,
+                    item.params,
+                    item.goal,
+                    subagent_allowed_tools(item.params),
+                ),
+            )
+            tasks.append(task)
+        remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
+        payload = self._create_payload(tasks, _payload_allowed_tools(allowed_tool_values))
+        payload["batch_mode"] = "items"
+        return ToolExecutionResult(
+            "create_subagents",
+            True,
+            json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+
+    # LLM: _cap_items applies the same user-configured fan-out ceiling as count mode.
+    # 函数用途: 避免 items[] 绕过 max_subagents；配置为 0 或更小时表示不限制。
+    def _cap_items(self, items: list[CreateSubagentItem]) -> list[CreateSubagentItem]:
+        max_subagents = int(getattr(self.agent.config, "max_subagents", 0) or 0)
+        if max_subagents > 0:
+            return items[:max_subagents]
+        return items
+
+    # LLM: _validate_single_goal centralizes per-child create checks for count and items modes.
+    # 函数用途: 对单个子代理目标做写入边界和约束检查，返回空字符串表示可创建。
+    def _validate_single_goal(
+        self,
+        params: dict[str, object],
+        goal: str,
+        allowed_tools: list[str] | None,
+    ) -> str:
+        missing_write_root = explicit_root_missing_write_root_error(params, goal)
+        if missing_write_root:
+            return missing_write_root
+        target_error = external_write_target_error(
+            self.agent,
+            goal,
+            allowed_tools or CODING_SUBAGENT_TOOLS,
+        )
+        if target_error:
+            return target_error
+        return delegation_constraint_conflict_error(self.agent, goal)
+
     # LLM: _requested_count 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 发送requested数量请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
     def _requested_count(self, params: dict[str, object]) -> int | ToolExecutionResult:
@@ -129,11 +193,12 @@ class CreateSubagentsTool(BaseTool):
 
     # LLM: _create_payload 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 构建载荷所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
-    def _create_payload(self, tasks, allowed_tools: list[str] | None) -> dict[str, object]:
+    def _create_payload(self, tasks, allowed_tools: list[str] | str | None) -> dict[str, object]:
         payload: dict[str, object] = {
             "created": len(tasks),
             "ids": [task.id for task in tasks],
             "allowed_tools": allowed_tools or "automatic",
+            "next_action": _dispatch_next_action(tasks),
             "subagent_workspace": str(self.agent.subagents.workspace),
             "tasks": [
                 {
@@ -151,6 +216,33 @@ class CreateSubagentsTool(BaseTool):
             tool="create_subagents",
         ).to_dict()
         return payload
+
+
+# LLM: _payload_allowed_tools summarizes items-mode tool policy without hiding per-task params.
+# 函数用途: 多个 item 工具策略一致时保留原输出；不一致时告诉模型每个任务独立决定。
+def _payload_allowed_tools(values: list[list[str] | None]) -> list[str] | str | None:
+    if not values:
+        return None
+    first = values[0]
+    if all(value == first for value in values):
+        return first
+    return "per_item"
+
+
+# LLM: _dispatch_next_action makes create-vs-run explicit for the parent model.
+# 函数用途: 告诉模型 create_subagents 只创建任务记录；真正执行要随后 dispatch 这些 run_id。
+def _dispatch_next_action(tasks) -> dict[str, object]:
+    run_ids = [task.id for task in tasks]
+    return {
+        "tool": "dispatch_subagents",
+        "reason": "create_subagents 只创建任务记录；要让子代理真正开始工作，请调度这些 run_id。",
+        "params": {
+            "apply": True,
+            "execute_runners": True,
+            "run_ids": run_ids,
+            "max_runners": len(run_ids),
+        },
+    }
 
 
 # LLM: SubagentBoardTool 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

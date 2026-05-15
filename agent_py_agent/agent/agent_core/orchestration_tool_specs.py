@@ -12,8 +12,10 @@ _CREATE_USE_CASES = [
 ]
 _CREATE_KEYWORDS = ["子代理", "派工", "拆分", "工单", "任务", "subagent", "delegate", "spawn", "assign"]
 _CREATE_PARAMETERS = {
-    "goal": "总目标或任务描述，必填",
-    "count": "创建多少个子代理，默认 1，受 max_subagents 限制",
+    "goal": "单任务模式的总目标或任务描述；如果传 items/tasks，可省略",
+    "items": "批量模式：独立子任务对象列表，每项必须有 goal，可单独写 role/agent_name/plan/acceptance_checks",
+    "tasks": "items 的别名，兼容 Hermes 风格的 tasks[] 批量委托",
+    "count": "单任务模式创建多少个同目标子代理，默认 1，受 max_subagents 限制；不同切片请用 items/tasks",
     "role": "子代理角色模板 id；默认 worker",
     "tool_preset": "默认 automatic；显式 read_only/coding/none 时才覆盖自动工具策略",
     "allowed_tools": "显式工具列表；一般省略。若同时传 frontend-dev/coding 等写作预设，系统会补齐必要读写工具，避免少填工具导致卡住。",
@@ -30,8 +32,15 @@ _CREATE_PARAMETER_DETAILS = {
     ),
     "count": (
         "例如 3 表示创建 3 个同目标并列子任务。不同工作切片不要用 count 复制同一个 goal；"
-        "请多次调用本工具，每次传不同 goal/agent_name，或让 coordinator 后续用 schedule_child_subagents.children 精细拆分。"
+        "优先传 items/tasks，每项写独立 goal/agent_name；只有确实需要多个同质 worker 时才用 count。"
     ),
+    "items": (
+        "推荐批量入口，等价于 Hermes delegate_task 的 tasks[]："
+        "[{\"goal\":\"研究市场\",\"role\":\"worker\",\"agent_name\":\"小傻妞-市场\"},"
+        "{\"goal\":\"研究竞争\",\"role\":\"worker\",\"agent_name\":\"小傻妞-竞争\"}]。"
+        "create_subagents 只创建任务记录；返回后要调用 dispatch_subagents 才会真实执行。"
+    ),
+    "tasks": "items 的兼容别名，字段规则相同。",
     "role": "优先用模板角色，而不是临时造小角色。可用角色模板索引：\n{role_template_index}",
     "tool_preset": "省略时自动：由 role template、任务目标和调度器决定工具；角色模板默认保留基础读写/汇报能力。`none` 只表示不覆盖自动策略。",
     "allowed_tools": "一般省略。只有受限环境才显式写 JSON 数组，例如 [\"read_file\", \"write_file\"]。",
@@ -45,6 +54,13 @@ _CREATE_PARAMETER_DETAILS = {
     ),
 }
 _CREATE_EXAMPLES = [
+    (
+        '{"tool":"create_subagents","items":['
+        '{"goal":"研究市场环境并输出证据摘要","role":"worker","agent_name":"小傻妞-市场"},'
+        '{"goal":"研究竞争格局并输出证据摘要","role":"worker","agent_name":"小傻妞-竞争"},'
+        '{"goal":"制定进入策略并整合风险","role":"coordinator","agent_name":"小傻妞-策略"}],'
+        '"acceptance_checks":["必须有证据","必须标注未确认信息"]}'
+    ),
     '{"tool":"create_subagents","goal":"在隔离 fixture 项目里实现三个小功能并写报告","count":3,"role":"worker","workflow_mode":"off","acceptance_checks":["必须有文件证据","必须说明测试结果"]}',
     '{"tool":"create_subagents","goal":"在 /workspace/deliverables/shop/build 实现购物网站 HTML 骨架和 products.json","count":1,"role":"worker","agent_name":"小傻妞-基础结构","extra_write_roots":["/workspace/deliverables/shop/build"]}',
     '{"tool":"create_subagents","goal":"在 /workspace/deliverables/shop/build 实现购物网站 styles.css 和 app.js 交互","count":1,"role":"worker","agent_name":"小傻妞-样式交互","extra_write_roots":["/workspace/deliverables/shop/build"]}',
@@ -151,7 +167,7 @@ def build_create_subagents_spec() -> ToolSpec:
     return ToolSpec(
         name="create_subagents",
         category="orchestration",
-        description="创建一个或多个子代理任务记录，适合把复杂任务正式拆给子代理。",
+        description="创建一个或多个子代理任务记录。不同工作切片优先用 items/tasks；创建后必须 dispatch_subagents 才会真实执行。",
         use_cases=_CREATE_USE_CASES,
         avoid_when=["只是解释思路、不需要真正创建任务时，不要调用；先直接回答即可"],
         keywords=_CREATE_KEYWORDS,
