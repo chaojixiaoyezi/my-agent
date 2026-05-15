@@ -10,6 +10,8 @@ SubAgentManager 仍然是外部代码使用的入口，但具体能力已经分�
 它本身不写业务逻辑，只组合那些已经按职责拆开的能力。
 """
 
+# LLM: kernel mixin adds the read-only subagent kernel snapshot facade without changing lifecycle behavior.
+from .kernel import SubagentKernelMixin
 from .manager_acceptance import SubAgentAcceptanceMixin
 from .manager_acceptance_findings import SubAgentAcceptanceFindingMixin
 from .manager_actions import SubAgentActionMixin
@@ -55,6 +57,7 @@ class SubAgentManager(
     SubAgentIndexingMixin,
     SubAgentHierarchyMixin,
     SubAgentWorkflowMixin,
+    SubagentKernelMixin,
 ):
     """LLM contract: public subagent orchestration facade composed from focused mixins.
 

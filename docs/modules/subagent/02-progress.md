@@ -1336,3 +1336,33 @@
 - 配置收敛：默认 `capability_config.yaml` 只保留能力路由开关和任务内授权过期；前端配置计划去掉 `subagent_allowed_tools`、runner 超时、dynamic timeout、capability hops 等普通用户不该调的微参数。
 - 追加收口：隐藏兼容字段里的层级默认深度、单次 child 数、takeover 链深度统一改成 `0=不限制`；显式正数才进入限制/熔断。模型工具说明也同步去掉“默认 3 层”“read_only 只读”“none 无工具”等旧表述，避免自然派工被旧规则带偏。
 - 下一步：继续用中等规模自然语言任务做 root -> 小傻妞 -> 小小傻妞 的真实 E2E，重点观察质量角色后置、局部 QA 和恢复链路，而不是再加流程型限制。
+
+## 2026-05-15 Subagent Kernel 边界第一片
+- 中文说明：继续最初 1-7 阶段里的第 2 阶段，把“子代理内核”先做成只读统一入口。新增 `SubAgentManager.kernel_snapshot()`，返回一棵 root tree 或某个 run 的 own subtree。
+- 已实现：kernel snapshot 包含 run/session/thread 身份、parent/child/depth、状态桶、workspace refs、recovery refs、artifact/evidence refs、blockers 和 takeover candidates。它只读取现有 task/run 事实，不执行调度、恢复、测试或正文读取。
+- 目的：后续协议层、工具网关、恢复接管、QA/验收都可以先消费同一个内核快照，减少每个模块自己从自然语言或零散文件里猜状态。
+- 已测试：`python3 -m pytest -q agent_py_agent/tests/test_subagent_kernel.py -p no:cacheprovider` -> `3 passed`。
+- 下一步：把第 3 阶段协议层继续往 kernel 快照靠拢，让 dispatch/acceptance/recovery 的入口少读自然语言 summary，多读 typed refs 和 kernel rows。
+
+## 2026-05-15 Board 接入 Kernel 快照第一片
+- 中文说明：继续第 3 阶段协议结构化，`subagent_board` 在当前看板只有一棵 root tree 时，会附带 `kernel_snapshot` 机器字段。
+- 已实现：父级看板输出能直接看到 running/blocked/completed/failed/takeover candidate run ids，以及每个 run 的 workspace refs、recovery refs、artifact/evidence refs。它仍然不读取业务产物正文。
+- 目的：父级和接管逻辑先看同一种 kernel 状态，不再分别从 board summary、自然语言 latest_summary 或旧报告里猜。
+- 已测试：`python3 -m pytest -q agent_py_agent/tests/test_orchestration_board_payload.py agent_py_agent/tests/test_subagent_kernel.py -p no:cacheprovider` -> `8 passed`。
+- 下一步：继续把 dispatch/acceptance/recovery 输出逐步对齐 kernel snapshot，减少散落状态字段。
+
+## 2026-05-15 Tool Contract Readiness 第一片
+- 中文说明：继续第 4 阶段工具网关统一化，kernel run row 新增 `tool_contract`。它把 allowed tools、used tools、open capability requests、grants、gaps 和 controlled exec grant ids 统一成机器字段。
+- 已实现：`subagent_board.kernel_snapshot.rows[].tool_contract` 会把这组工具状态带给父级。父级不需要从自然语言 summary 里猜“这个小傻妞有没有写文件工具、有没有申请 shell、有没有能力缺口”。
+- 边界：这一步不自动发工具权限，也不新增限制，只是把工具状态读出来；完整受控 exec、大输出分片和 tool/skill 申请闭环后续继续做。
+- 已测试：`python3 -m pytest -q agent_py_agent/tests/test_subagent_kernel.py agent_py_agent/tests/test_orchestration_board_payload.py -p no:cacheprovider` -> `8 passed`。
+
+## 2026-05-15 TaskAddress / TaskEnvelope 协议第一片
+- 中文说明：按 deep research report 的建议，把 1-6 步先收成机器协议，而不是继续让父子代理从自然语言摘要里猜路径、run id、工具和验收条件。
+- 已实现：新增 `TaskAddress`，固定 `run_id/root_id/parent_id/depth/lineage/attempt_id/workspace_ref`。kernel、board、recovery、acceptance 都可以拿同一个地址字段。
+- 已实现：新增 `TaskEnvelope`，固定 goal、role、plan、tool contract、write contract、acceptance、context refs 和 audit 字段。它是父级派工、恢复接管、QA/验收之间的第一版交接包。
+- 已实现：write contract 区分 `internal_task_root` 和 `product_write_roots`。子代理能写自己的日志/报告，不等于已经有权限写用户要交付的产物目录。
+- 已实现：`run_tool_preflight()` 会在开工前报告缺失工具、缺少产物写入根、controlled exec 缺授权等结构化问题；它不剥夺基础读写工具，不把角色变成空模板。
+- 已接入：recovery strategy 输出 `address` 和 `task_envelope`，packet-first 恢复仍优先使用 `latest_continue_packet.json`；parent acceptance decision 的 reserved 字段也携带 task envelope，QA/验收能读同一份验收合同。
+- 已测试：`python3 -m pytest -q agent_py_agent/tests/test_subagent_protocol_contracts.py agent_py_agent/tests/test_subagent_kernel.py agent_py_agent/tests/test_orchestration_board_payload.py -p no:cacheprovider` -> `14 passed`。
+- 下一步：继续把 dispatcher/runner 入口改成优先消费 `TaskEnvelope` 和 tool preflight 结果，再做真实 E2E 验证普通话任务是否还会路径漂移。

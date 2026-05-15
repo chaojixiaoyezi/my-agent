@@ -145,3 +145,34 @@
 - 已清零：strict code-size 报告达到 `hard=0 high-risk=0 soft=0`。后续新增功能不允许靠调高阈值通过；接近 high-risk 时要优先拆模块、用 bundle，或把纯数据表移出控制流文件。
 - 已复验：focused 子代理/工具/配置测试 `157 passed`；自然语言层级基线和恢复相关 focused tests `29 passed`。
 - 开发要求：后续继续少写死流程。工具、路径、执行、自毁红线由系统守；角色选择、QA 范围、修复顺序、是否继续派工尽量交给 LLM + 模板 + workflow + 验收事实决定。
+
+## Stage 2 Kernel Boundary Slice
+
+- 中文说明：继续最初 1-7 阶段里的第 2 阶段，新增 `SubagentKernel` 只读内核视图。它不是新的调度器，也不是新的事实源；旧 `task.json`、agent run workspace 和控制面投影仍是事实来源。
+- `SubagentKernelQuery` / `SubagentKernelSnapshot` 固定 root tree、own subtree、状态桶、workspace refs、recovery refs、artifact/evidence refs 和 takeover candidates 的读取形状。父级、接管、QA、验收后续优先读这个快照，不再各模块自己拼状态。
+- `SubAgentManager.kernel_snapshot()` 是当前公开入口；它只读 `manager.list_runs()` 和 run 记录，不调度、不恢复、不执行测试、不读取 artifact 正文。
+- 迁移原则：这是“把发动机仪表盘统一起来”，不是继续加 guard。后续第 3 阶段协议层、第 4 阶段工具网关、第 5 阶段恢复接管都要尽量消费 kernel snapshot 或它的后续扩展。
+
+## Stage 3 Board Kernel Envelope Slice
+
+- 中文说明：继续第 3 阶段协议结构化，`subagent_board` 输出现在会在可确定单棵 root tree 时附带 `kernel_snapshot`。
+- `kernel_snapshot` 只包含状态桶、run rows、workspace refs、recovery refs、artifact/evidence refs 和 blockers，不读取业务产物正文。父级模型要判断“谁还在跑、谁失败、谁可接管、恢复入口在哪里”时，可以先读机器字段，不再从看板自然语言摘要里猜。
+- 如果看板混入多棵 root tree，或 manager 没有 kernel 入口，则不附加该字段，避免把无关任务树混到当前决策里。
+- 验收：`test_orchestration_board_payload.py` 和 `test_subagent_kernel.py` focused tests 通过；strict code-size 仍为 `hard=0 high-risk=0 soft=0`。
+
+## Stage 4 Tool Contract Readiness Slice
+
+- 中文说明：继续第 4 阶段工具网关统一化的前置工作。kernel run row 现在带 `tool_contract`，把 allowed tools、used tools、open capability request count、grant count、gap count 和 controlled exec grant ids 变成机器字段。
+- 这一步不授予新权限，也不引入新的限制；它只是让父级和接管者知道“这个 run 手里有什么工具、用过什么工具、还缺什么工具”。后续受控 exec、大输出分片和 tool/skill 申请可以基于这些字段继续做。
+- `subagent_board.kernel_snapshot.rows[].tool_contract` 会把这组字段带给父级模型，减少从 prompt 或 summary 里猜工具状态。
+
+## Stages 1-6 Protocol Contract Slice
+
+- 中文说明：这一步把“少限制、强协议”的 1-6 步收成第一版可执行合同。目标不是把流程写死，而是让父级、子级、恢复和验收都读同一份机器字段。
+- `TaskAddress` 是子代理地址：包含 run、root、parent、depth、lineage、attempt 和 workspace ref。它解决“谁是谁的孩子、接管哪个目录、恢复哪个 run”这些不该靠自然语言猜的问题。
+- `TaskEnvelope` 是子代理任务包：包含 goal、role、plan、tool contract、write contract、acceptance、context refs 和 audit。它会出现在 kernel snapshot、recovery strategy 和 parent acceptance decision 里。
+- `write_contract` 区分 `internal_task_root` 和 `product_write_roots`。子代理始终可以写自己的任务日志/报告；但要写用户产物目录，必须有明确 product root，避免“能写自己屋子”误判成“能交付项目文件”。
+- `run_tool_preflight()` 是工具预检：缺工具、缺产物写入根、缺 controlled exec 授权时返回结构化 `ToolContractError`。它不把基础读写工具关掉，也不新增用户可见微参数。
+- 恢复链路仍然 packet-first：如果 `latest_continue_packet.json` 已准备好，推荐从 packet 接；否则再降级 checkpoint/summary。区别是现在推荐动作同时带 address 和 envelope，后续接管者不需要重新读自然语言摘要猜任务。
+- 验收链路拿同一份 envelope：parent acceptance decision 会带 `task_envelope.acceptance`，QA/tester/acceptor 能看到父级要求的验收条件，而不是从输出摘要里反推。
+- 后续迁移要求：dispatcher 和 runner 下一步要优先消费 `TaskEnvelope`，tool gateway 要优先消费 preflight issue；真实 E2E 要继续使用普通用户自然语言，不在 prompt 里塞内部字段名。

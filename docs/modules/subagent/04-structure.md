@@ -52,6 +52,9 @@
 agent_py_agent/agent/
 |-- subagent.py                         # 兼容入口
 |-- subagents/                          # subagent 任务、manager、报告、runner、解析和渲染
+|   |-- kernel.py                       # 子代理内核只读快照：run/session/tree/status/refs
+|   |-- protocol.py                     # TaskAddress / TaskEnvelope / protocol validation
+|   |-- protocol_preflight.py           # 工具和写入合同预检，不修改任务状态
 |   |-- context_bundle.py               # 实时子代理工单包和 Context Gate
 |   |-- context_bundle_semantic.py      # Context Gate 的文件合同语义校验
 |   |-- role_template_resolution.py      # 自然 role 名到模板 id 的运行时解析
@@ -75,6 +78,9 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagent_workflows/compiler.py`：把抽象模板变成具体 worker 任务说明。
 - `agent_py_agent/agent/subagent_workflows/acceptance.py`：生成父会话要检查什么。
 - `agent_py_agent/agent/subagents/`：保存真实 subagent 管理、运行、报告和验收相关代码。
+- `agent_py_agent/agent/subagents/kernel.py`：提供 `SubagentKernelQuery`、`SubagentKernelSnapshot` 和 `SubAgentManager.kernel_snapshot()`。它只读现有 task/run 事实，统一返回 root tree、own subtree、状态桶、workspace refs、recovery refs 和 takeover candidates；不调度、不恢复、不执行测试、不读取 artifact 正文。
+- `agent_py_agent/agent/subagents/protocol.py`：定义第一版父子代理交接协议。`TaskAddress` 固定 run/root/parent/depth/lineage/workspace；`TaskEnvelope` 固定目标、角色、工具合同、写入合同、验收合同和上下文 refs。
+- `agent_py_agent/agent/subagents/protocol_preflight.py`：根据 `TaskEnvelope` 做开工前预检，返回 `ToolContractError` 等结构化 issue；只报告缺工具、缺产物写入根、缺 scoped exec 授权，不自动加限制或剥夺基础工具。
 - `agent_py_agent/agent/subagents/models.py`：定义 `SubAgentTask`、`TaskStatus`、`DISPATCH_INELIGIBLE_STATUSES` 等核心数据结构。
 - `agent_py_agent/agent/subagents/model_task.py`：承接 `SubAgentTask`、`EvidencePacket`、`Finding`、`StatusReport`、`SecuritySignal` 等任务树、证据和安全预留合同模型，`models.py` 继续作为兼容导出入口。
 - `agent_py_agent/agent/subagents/model_task.py`：同时定义 `RuntimeIdentity`，记录 service owner、requester、effective principal、conversation、memory namespace 和 config overlay scope；这些字段是隔离和审计口子，不是授权、长期记忆或全局配置事实源。

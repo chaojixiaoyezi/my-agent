@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -18,6 +18,7 @@ from .parent_acceptance_preflight import (
     unsafe_test_reason,
 )
 from .parsing import _dict_list
+from .protocol import task_envelope_dict
 from .utils import _read_json_object
 
 
@@ -101,28 +102,39 @@ def build_parent_acceptance_decision(
     takeover_ref = _existing_path(Path(task.reports_dir) / "takeover_readiness.json")
 
     if _task_is_failed(task):
-        return _rescue_for_task_failure(task, refs, failure_ref, takeover_ref)
+        return _with_task_envelope(task, _rescue_for_task_failure(task, refs, failure_ref, takeover_ref))
 
     unsafe_reason = unsafe_test_reason(runnable_tests, workspace_root)
     if unsafe_reason:
-        return _request_human_for_unsafe_test(task, refs, unsafe_reason)
+        return _with_task_envelope(task, _request_human_for_unsafe_test(task, refs, unsafe_reason))
 
     if runnable_tests and not report_path.exists():
-        return _execute_tests_for_missing_report(task, refs)
+        return _with_task_envelope(task, _execute_tests_for_missing_report(task, refs))
 
     if report_path.exists():
-        return _decision_from_test_report(
-            TestReportDecisionInput(
-                task=task,
-                output=output,
-                refs=refs,
-                report_path=report_path,
-                recovery_refs=(failure_ref, takeover_ref),
-                runnable_tests=runnable_tests,
-            )
+        return _with_task_envelope(
+            task,
+            _decision_from_test_report(
+                TestReportDecisionInput(
+                    task=task,
+                    output=output,
+                    refs=refs,
+                    report_path=report_path,
+                    recovery_refs=(failure_ref, takeover_ref),
+                    runnable_tests=runnable_tests,
+                )
+            ),
         )
 
-    return _inspect_without_tests(task, output, refs)
+    return _with_task_envelope(task, _inspect_without_tests(task, output, refs))
+
+
+# LLM: _with_task_envelope attaches the protocol package to every parent acceptance decision.
+# 函数用途: 让 QA/验收链路读取同一个 TaskEnvelope，不再从 output summary 里猜验收条件。
+def _with_task_envelope(task: SubAgentTask, decision: ParentAcceptanceDecision) -> ParentAcceptanceDecision:
+    reserved = dict(decision.reserved)
+    reserved["task_envelope"] = task_envelope_dict(task)
+    return replace(decision, reserved=reserved)
 
 
 # LLM: write_parent_acceptance_decision_file persists the dry-run decision as an audit artifact only.
