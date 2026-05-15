@@ -147,6 +147,19 @@ def test_jsonl_memory_indexes_to_local_store():
         assert "FTS5" in hits[0].content
 
 
+def test_jsonl_memory_local_store_search_is_scoped_by_memory_path():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        store = LocalStore(root / "local.db")
+        first = JsonlMemory(root / "one" / "memory.jsonl", local_store=store)
+        second = JsonlMemory(root / "two" / "memory.jsonl", local_store=store)
+
+        first.add("user", "排序算法任务应该留在第一个记忆文件。", kind="dialogue")
+        second_hits = second.search("排序算法", top_k=3)
+
+        assert second_hits == []
+
+
 def test_jsonl_memory_can_backfill_existing_records():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)

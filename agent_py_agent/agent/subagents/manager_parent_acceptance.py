@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .acceptance_review_service import AcceptanceReviewOptions
+from .acceptance_workspace import acceptance_workspace_root_for_task
 from .debug_trace import trace_acceptance_decision, trace_acceptance_next_action
 from .parent_acceptance_apply import (
     ParentAcceptanceApplyResult,
@@ -63,7 +64,7 @@ def manager_plan_parent_acceptance(manager, run_id: str) -> ParentAcceptanceDeci
     task = manager.load(run_id)
     decision = build_parent_acceptance_decision(
         task,
-        workspace_root=acceptance_workspace_root(manager),
+        workspace_root=acceptance_workspace_root(manager, task),
     )
     return trace_acceptance_decision(manager, task, decision)
 
@@ -74,7 +75,7 @@ def manager_write_parent_acceptance_decision(manager, run_id: str) -> ParentAcce
     task = manager.load(run_id)
     decision = build_parent_acceptance_decision(
         task,
-        workspace_root=acceptance_workspace_root(manager),
+        workspace_root=acceptance_workspace_root(manager, task),
     )
     write_parent_acceptance_decision_file(task, decision)
     return trace_acceptance_decision(manager, task, decision)
@@ -92,7 +93,7 @@ def manager_apply_parent_acceptance_decision(
     task = manager.load(run_id)
     decision = build_parent_acceptance_decision(
         task,
-        workspace_root=acceptance_workspace_root(manager),
+        workspace_root=acceptance_workspace_root(manager, task),
     )
     decision_ref = str(write_parent_acceptance_decision_file(task, decision))
     if decision.decision != "inspect_only":
@@ -118,7 +119,7 @@ def manager_plan_parent_acceptance_next_action(manager, run_id: str) -> ParentAc
     task = manager.load(run_id)
     action = build_parent_acceptance_next_action(
         task,
-        workspace_root=acceptance_workspace_root(manager),
+        workspace_root=acceptance_workspace_root(manager, task),
     )
     return trace_acceptance_next_action(manager, task, action)
 
@@ -129,7 +130,7 @@ def manager_plan_parent_acceptance_auto_policy(manager, run_id: str) -> ParentAc
     task = manager.load(run_id)
     return build_parent_acceptance_auto_policy(
         task,
-        workspace_root=acceptance_workspace_root(manager),
+        workspace_root=acceptance_workspace_root(manager, task),
     )
 
 
@@ -144,7 +145,7 @@ def manager_plan_parent_acceptance_auto_execution(
     task = manager.load(run_id)
     return build_parent_acceptance_auto_execution(
         task,
-        workspace_root=acceptance_workspace_root(manager),
+        workspace_root=acceptance_workspace_root(manager, task),
         options=options,
     )
 
@@ -156,8 +157,8 @@ def manager_plan_parent_acceptance_followup(
     run_id: str,
 ) -> ParentAcceptanceFollowUpControlResult:
     task = manager.load(run_id)
-    _ensure_followup_from_current_tests(task, workspace_root=acceptance_workspace_root(manager))
-    rescue = missing_followup_rescue_preview(task, workspace_root=acceptance_workspace_root(manager))
+    _ensure_followup_from_current_tests(task, workspace_root=acceptance_workspace_root(manager, task))
+    rescue = missing_followup_rescue_preview(task, workspace_root=acceptance_workspace_root(manager, task))
     if rescue is not None:
         return rescue
     payload = read_parent_acceptance_followup_payload(task)
@@ -179,12 +180,12 @@ def manager_apply_parent_acceptance_followup(
 ) -> ParentAcceptanceFollowUpControlResult:
     task = manager.load(run_id)
     opts = options or ParentAcceptanceFollowUpControlOptions()
-    _ensure_followup_from_current_tests(task, workspace_root=acceptance_workspace_root(manager))
+    _ensure_followup_from_current_tests(task, workspace_root=acceptance_workspace_root(manager, task))
     payload = read_parent_acceptance_followup_payload(task)
     if not payload:
         payload = missing_followup_rescue_payload(
             task,
-            workspace_root=acceptance_workspace_root(manager),
+            workspace_root=acceptance_workspace_root(manager, task),
         )
     result = _followup_control_result(manager, task, payload, opts)
     write_parent_acceptance_followup_control_file(task, result)
@@ -320,9 +321,12 @@ def _followup_rescue_action(task) -> ActionPlanItem:
     )
 
 
-# LLM: acceptance_workspace_root mirrors real execution and prefers manager.workspace_root over runtime folders.
-# 函数用途: 推断父级验收命令所在项目根目录；隐藏 runtime/subagent 目录不能替代用户任务根目录。
-def acceptance_workspace_root(manager) -> Path:
+# LLM: acceptance_workspace_root mirrors real execution and prefers the root containing task artifacts.
+# 函数用途: 推断父级验收命令所在项目根目录；多工作区时选择包含当前产物的 root，避免扫错项目。
+def acceptance_workspace_root(manager, task=None) -> Path:
+    scoped = acceptance_workspace_root_for_task(manager, task=task)
+    if scoped:
+        return scoped
     workspace_root = getattr(manager, "workspace_root", None)
     if workspace_root:
         return Path(workspace_root).resolve()

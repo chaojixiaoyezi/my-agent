@@ -9,6 +9,27 @@ from ..tools import ToolExecutionResult
 # LLM: stale_subagent_attempt_result checks persisted attempt state before any runner tool executes.
 # 函数用途: 如果当前 runner attempt 已被 timeout/abandon 标记，返回阻断结果，避免旧线程继续写文件或发消息。
 def stale_subagent_attempt_result(agent, payload: object) -> ToolExecutionResult | None:
+    reason = _stale_attempt_reason(agent)
+    if reason is None:
+        return None
+    return _blocked_result(payload, reason)
+
+
+# LLM: stale_subagent_attempt_message lets the tool loop stop stale runner threads before another model call.
+# 函数用途: 在下一轮模型调用前检查当前 runner attempt 是否已超时/废弃；若是，返回本地收口消息。
+def stale_subagent_attempt_message(agent) -> str | None:
+    reason = _stale_attempt_reason(agent)
+    if reason is None:
+        return None
+    return (
+        f"{reason}。旧 runner attempt 已停止，不再继续调用模型或工具；"
+        "请等待父级接管、重试或创建新的 attempt 继续同一任务目录。"
+    )
+
+
+# LLM: _stale_attempt_reason is the shared persisted-state check for tool and model-turn guards.
+# 函数用途: 读取当前 subagent run 的 active/abandoned attempt 字段，判断当前线程是否已经过期。
+def _stale_attempt_reason(agent) -> str | None:
     run_id = str(getattr(agent, "_current_subagent_run_id", "") or "").strip()
     attempt_id = str(getattr(agent, "_current_subagent_attempt_id", "") or "").strip()
     if not run_id or not attempt_id:
@@ -18,10 +39,10 @@ def stale_subagent_attempt_result(agent, payload: object) -> ToolExecutionResult
     except Exception:
         return None
     if attempt_id in set(getattr(task, "runner_abandoned_attempt_ids", []) or []):
-        return _blocked_result(payload, f"runner attempt 已被废弃或超时: {attempt_id}")
+        return f"runner attempt 已被废弃或超时: {attempt_id}"
     active_attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
     if active_attempt_id and active_attempt_id != attempt_id:
-        return _blocked_result(payload, f"runner attempt 已不是当前活动 attempt: {attempt_id}")
+        return f"runner attempt 已不是当前活动 attempt: {attempt_id}"
     return None
 
 

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 _DESCENDANT_EVIDENCE_MAX_NODES = 96
 _DESCENDANT_EVIDENCE_MAX_BYTES = 65536
+_CURRENT_ATTEMPT_TIME_EPSILON = 0.001
 
 
 # LLM: build_evidence_findings 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -34,12 +35,14 @@ def build_evidence_findings(task: SubAgentTask, created_at: float) -> list[Accep
 # LLM: _base_evidence_findings 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 函数用途: 处理基础证据findings相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _base_evidence_findings(task: SubAgentTask, created_at: float) -> list[AcceptanceReviewFinding]:
-    ok_evidence = [item for item in task.evidence if item.ok]
-    bad_evidence = [item for item in task.evidence if not item.ok]
+    evidence = _current_attempt_items(task, task.evidence)
+    packets = _current_attempt_items(task, task.evidence_packets)
+    ok_evidence = [item for item in evidence if item.ok]
+    bad_evidence = [item for item in evidence if not item.ok]
     packets_with_refs = [
-        item for item in task.evidence_packets if item.evidence_refs or item.artifact_refs
+        item for item in packets if item.evidence_refs or item.artifact_refs
     ]
-    machine_report = None if task.evidence_packets else passed_test_execution_report(task)
+    machine_report = None if packets else passed_test_execution_report(task)
     evidence_chain_ok = bool(packets_with_refs) or machine_report is not None
     evidence_chain_message = _evidence_chain_message(packets_with_refs, machine_report)
     evidence_chain_path = str(machine_report.json_path) if machine_report is not None else task.output_json
@@ -69,6 +72,21 @@ def _base_evidence_findings(task: SubAgentTask, created_at: float) -> list[Accep
             created_at=created_at,
         ),
     ]
+
+
+# LLM: _current_attempt_items prevents stale failed runner evidence from blocking a successful retry.
+# 函数用途: 优先返回最近一次 runner 尝试产生的证据/证据包；没有可识别当前尝试时才回退到完整历史。
+def _current_attempt_items(task: SubAgentTask, items: list) -> list:
+    last_attempt_at = float(getattr(task, "runner_last_attempt_at", 0.0) or 0.0)
+    if last_attempt_at <= 0:
+        return items
+    threshold = last_attempt_at - _CURRENT_ATTEMPT_TIME_EPSILON
+    current = [
+        item
+        for item in items
+        if float(getattr(item, "created_at", 0.0) or 0.0) >= threshold
+    ]
+    return current or items
 
 
 # LLM: _evidence_chain_message explains whether traceability came from worker packets or machine tests.

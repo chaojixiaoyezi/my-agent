@@ -245,6 +245,9 @@ def test_subagent_acceptance_uses_actual_tool_evidence_from_runner():
             allowed_tools=["read_file", "write_file"],
             acceptance_checks=["必须有 read_file 证据；必须有 write_file 证据"],
         )
+        Path(task.task_dir, "README.md").write_text("read ok\n", encoding="utf-8")
+        Path(task.task_dir, "scenario_outputs").mkdir(parents=True, exist_ok=True)
+        Path(task.task_dir, "scenario_outputs", "demo.md").write_text("write ok\n", encoding="utf-8")
         parsed = parse_subagent_runner_output(_actual_tool_evidence_output())
         agent.subagents.record_runner_result(
             _rrr(

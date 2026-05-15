@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,12 +14,19 @@ from agent_py_agent.agent.subagent import SubAgentParsedOutput
 
 # LLM: _task keeps finalize tests focused on refs-only child status instead of manager persistence.
 # 函数用途: 构造最小 task 替身，覆盖 coordinator child 状态门需要的字段。
-def _task(run_id: str, *, status: str, verification: str, children: list[str] | None = None):
+def _task(
+    run_id: str,
+    *,
+    status: str,
+    verification: str,
+    children: list[str] | None = None,
+):
     return SimpleNamespace(
         id=run_id,
         status=status,
         verification_status=verification,
         child_ids=list(children or []),
+        agent_run_workspace_dir="",
     )
 
 
@@ -182,6 +190,84 @@ def test_leaf_success_closeout_blocks_incomplete_html_artifact(tmp_path: Path):
     assert "missing_html_close" in captured.params.structured_output.blocked_reason
 
 
+# LLM: leaf workers cannot close out web artifacts with inert or broken links.
+# 函数用途: 子代理写完 HTML 后如果还留 href="#" 或不存在的锚点，finalize 必须转 BLOCKED 让父级派修复。
+def test_leaf_success_closeout_blocks_invalid_html_links(tmp_path: Path):
+    artifact = tmp_path / "artifacts" / "index.html"
+    artifact.parent.mkdir()
+    artifact.write_text(
+        "<html><body><main id='home'>done</main><a href='#'>咨询</a><a href='#missing'>更多</a></body></html>",
+        encoding="utf-8",
+    )
+    agent, captured = _agent({"worker": _task("worker", status="RUNNING", verification="UNVERIFIED")})
+    structured = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        status="AWAITING_ACCEPTANCE",
+        summary="页面已完成。",
+        artifacts=[{"path": str(artifact), "kind": "file", "summary": "homepage"}],
+    )
+
+    result = record_finalized_runner_result(
+        FinalizedRunnerRecordRequest(
+            agent,
+            _params(
+                "worker",
+                context=_context(role="leaf_worker", agent_name="小小傻妞-page"),
+            ),
+            structured,
+            _repair_state(),
+        )
+    )
+
+    assert result.status == "BLOCKED"
+    assert captured.params.structured_output.failure_type == "artifact_integrity_failed"
+    assert "placeholder_hash_link" in captured.params.structured_output.blocked_reason
+    assert "missing_hash_target" in captured.params.structured_output.blocked_reason
+
+
+# LLM: latest tool progress should restore artifact refs omitted from output.json closeout.
+# 函数用途: 复现真实 E2E 中 output.json.artifacts=[]；finalize 应从 latest_tool_progress 补产物并继续 integrity gate。
+def test_leaf_success_closeout_recovers_missing_artifact_from_latest_progress(tmp_path: Path):
+    artifact = tmp_path / "deliverables" / "furniture-home" / "index.html"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("<html><body><main id='home'>done</main><a href='#'>咨询</a></body></html>", encoding="utf-8")
+    workspace = tmp_path / "tasks" / "worker" / "agents" / "worker"
+    progress_dir = workspace / "progress"
+    progress_dir.mkdir(parents=True)
+    (progress_dir / "latest_tool_progress.json").write_text(
+        json.dumps({
+            "latest_written_path": str(artifact),
+            "artifact_integrity": {"kind": "html", "warning_codes": ["placeholder_hash_link"]},
+        }),
+        encoding="utf-8",
+    )
+    task = _task("worker", status="RUNNING", verification="UNVERIFIED")
+    task.agent_run_workspace_dir = str(workspace)
+    agent, captured = _agent({"worker": task})
+    structured = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        status="AWAITING_ACCEPTANCE",
+        summary="页面已完成。",
+        artifacts=[],
+    )
+
+    result = record_finalized_runner_result(
+        FinalizedRunnerRecordRequest(
+            agent,
+            _params("worker", context=_context(role="leaf_worker", agent_name="小小傻妞-page")),
+            structured,
+            _repair_state(),
+        )
+    )
+
+    assert result.status == "BLOCKED"
+    assert captured.params.structured_output.artifacts[0]["path"] == str(artifact)
+    assert captured.params.structured_output.failure_type == "artifact_integrity_failed"
+    assert "placeholder_hash_link" in captured.params.structured_output.blocked_reason
+
+
 # LLM: relative artifact refs from repair workers should resolve to product write roots first.
 # 函数用途: 修复子代理常用 artifacts/index.html 相对路径汇报；finalize 要检查真实产物目录而不是内部 task_dir。
 def test_leaf_relative_artifact_uses_product_write_root(tmp_path: Path):
@@ -201,6 +287,36 @@ def test_leaf_relative_artifact_uses_product_write_root(tmp_path: Path):
         agent_name="小小傻妞-repair",
         task_dir=str(tmp_path / ".my_agent" / "subagents" / "worker"),
         write_boundary={"product_write_roots": [str(artifact)]},
+    )
+
+    result = record_finalized_runner_result(
+        FinalizedRunnerRecordRequest(agent, _params("worker", context=context), structured, _repair_state())
+    )
+
+    assert result.status == "AWAITING_ACCEPTANCE"
+    assert captured.params.structured_output.failure_type == ""
+
+
+# LLM: product-root relative refs may include the root suffix already, as real models often report.
+# 函数用途: 覆盖 deliverables/site/index.html 这类相对路径，避免 integrity gate 误拼成 site/deliverables/site/index.html。
+def test_leaf_relative_artifact_with_product_root_suffix(tmp_path: Path):
+    product_root = tmp_path / "deliverables" / "furniture-home"
+    artifact = product_root / "index.html"
+    product_root.mkdir(parents=True)
+    artifact.write_text("<html><body><main>done</main></body></html>", encoding="utf-8")
+    agent, captured = _agent({"worker": _task("worker", status="RUNNING", verification="UNVERIFIED")})
+    structured = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        status="AWAITING_ACCEPTANCE",
+        summary="页面已完成。",
+        artifacts=[{"path": "deliverables/furniture-home/index.html", "kind": "file", "summary": "homepage"}],
+    )
+    context = _context(
+        role="leaf_worker",
+        agent_name="小傻妞-worker",
+        task_dir=str(tmp_path / "runtime" / "subagents" / "worker"),
+        write_boundary={"product_write_roots": [str(product_root)]},
     )
 
     result = record_finalized_runner_result(

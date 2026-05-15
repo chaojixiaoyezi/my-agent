@@ -106,6 +106,60 @@ def test_write_boundary_blocks_subagent_writes_outside_allowed_roots():
         _assert_blocked_non_string_path(registry, boundary)
 
 
+def test_write_boundary_allows_explicit_product_root_outside_primary_workspace():
+    """LLM: product roots granted by the parent must be usable even outside the agent code workspace.
+
+    新手说明:
+    真实任务常把产物写到用户指定目录，而 my-agent 代码在另一个目录。
+    只要父级 write_boundary 明确给了 allowed_write_roots，写工具就应该能写进去。
+    """
+    with tempfile.TemporaryDirectory() as workspace_td, tempfile.TemporaryDirectory() as product_td:
+        workspace = Path(workspace_td)
+        product_root = Path(product_td) / "deliverables"
+        registry = make_tool_registry(workspace)
+
+        result = registry.execute_call(
+            {
+                "tool": "write_file",
+                "path": str(product_root / "index.html"),
+                "content": "<!doctype html><html><body>ok</body></html>",
+            },
+            allowed_tools=["write_file"],
+            write_boundary={
+                "allowed_write_roots": [str(product_root)],
+                "product_write_roots": [str(product_root)],
+                "product_write_policy": "direct",
+            },
+        )
+
+        assert result.ok
+        assert (product_root / "index.html").read_text(encoding="utf-8").startswith("<!doctype")
+
+
+def test_write_boundary_extends_read_tools_to_explicit_product_root():
+    """LLM: subagents should be able to read the product root that the parent allowed them to write."""
+    with tempfile.TemporaryDirectory() as workspace_td, tempfile.TemporaryDirectory() as product_td:
+        workspace = Path(workspace_td)
+        product_root = Path(product_td) / "deliverables"
+        product_root.mkdir()
+        (product_root / "index.html").write_text("hello product", encoding="utf-8")
+        registry = make_tool_registry(workspace)
+        boundary = {
+            "allowed_write_roots": [str(product_root)],
+            "product_write_roots": [str(product_root)],
+            "product_write_policy": "direct",
+        }
+
+        result = registry.execute_call(
+            {"tool": "read_file", "path": str(product_root / "index.html")},
+            allowed_tools=["read_file"],
+            write_boundary=boundary,
+        )
+
+        assert result.ok
+        assert "hello product" in result.output
+
+
 def test_write_boundary_blocks_symlink_escape_under_allowed_root():
     """LLM: verify that a symlink inside an allowed root cannot escape to write outside.
 

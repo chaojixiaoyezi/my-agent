@@ -293,33 +293,6 @@ def test_dispatch_payload_suggests_quality_wave_before_closeout():
     assert set(direct["quality_advice"]["suggested_roles"]) == {"tester", "bug_finder", "acceptor"}
 
 
-# LLM: test_dispatch_payload_treats_rejected_child_as_recovery protects R8 parent rescue flow.
-# 函数用途: child 最新验收已 REJECT 时，父 runner 不能再把它当成可收口结果反复读文件。
-def test_dispatch_payload_treats_rejected_child_as_recovery(tmp_path: Path):
-    reports_dir = tmp_path / "child-a" / "reports"
-    reports_dir.mkdir(parents=True)
-    (reports_dir / "acceptance_review.json").write_text(
-        '{"decision": "REJECT", "message": "missing child"}',
-        encoding="utf-8",
-    )
-    payload = _dispatch_payload_with_direct_children([
-        SimpleNamespace(
-            id="child-a",
-            parent_id="root",
-            status="AWAITING_ACCEPTANCE",
-            verification_status="NEEDS_ACCEPTANCE",
-            reports_dir=str(reports_dir),
-        )
-    ])
-
-    direct = payload["direct_children"]
-    assert direct["needs_recovery"] is True
-    assert direct["rejected_acceptance_run_ids"] == ["child-a"]
-    assert direct["ready_for_parent_acceptance"] is False
-    assert direct["next_action"] == "inspect_or_rescue_direct_children"
-    assert "不要反复 read_file/read_artifact" in direct["recovery_hint"]
-
-
 # LLM: QA self-reported failures should guide repair without forcing an automatic workflow.
 # 函数用途: tester 自己报告流程缺失时，dispatch payload 要返回 repair advice，而不是让父级直接收口。
 def test_dispatch_payload_surfaces_qa_repair_advice_from_direct_child(tmp_path: Path):
@@ -351,6 +324,52 @@ def test_dispatch_payload_surfaces_qa_repair_advice_from_direct_child(tmp_path: 
     assert direct["ready_for_parent_acceptance"] is False
     assert direct["qa_repair_advice"]["failed_or_conflicting_qa_run_ids"] == ["tester-1"]
     assert direct["qa_repair_advice"]["suggested_tool_call"]["children"][0]["role"] == "worker"
+
+
+# LLM: Artifact integrity blocks should steer parents to repair children before generic recovery.
+# 函数用途: 直接 child 的 HTML 结构检查失败时，父 runner 应拿到 refs-first 修复建议，不应先读正文或泛化接管。
+def test_dispatch_payload_surfaces_artifact_integrity_repair_from_direct_child(tmp_path: Path):
+    run_dir = tmp_path / "worker"
+    product_root = tmp_path / "deliverables" / "furniture-home"
+    product_root.mkdir(parents=True)
+    artifact = product_root / "index.html"
+    run_dir.mkdir()
+    artifact.write_text("<html><body>", encoding="utf-8")
+    (run_dir / "output.json").write_text(
+        json.dumps({
+            "status": "BLOCKED",
+            "blockers": [f"artifact_integrity_failed:{artifact}:missing_body_close"],
+            "artifacts": [{"path": str(artifact)}],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    payload = _dispatch_payload_with_direct_children([
+        SimpleNamespace(
+            id="worker-1",
+            parent_id="root",
+            role="worker",
+            agent_name="小傻妞-worker",
+            status="BLOCKED",
+            verification_status="UNVERIFIED",
+            failure_type="artifact_integrity_failed",
+            blockers=[f"artifact_integrity_failed:{artifact}:missing_body_close"],
+            task_dir=str(run_dir),
+            output_json=str(run_dir / "output.json"),
+            allowed_write_roots=[str(run_dir), str(product_root)],
+        )
+    ])
+
+    direct = payload["direct_children"]
+    assert direct["needs_artifact_integrity_repair_wave"] is True
+    assert direct["needs_recovery"] is False
+    assert direct["next_action"] == "create_repair_child_from_artifact_integrity_refs"
+    advice = direct["artifact_integrity_repair_advice"]
+    assert advice["failed_run_ids"] == ["worker-1"]
+    assert advice["failure_refs"][0]["artifact_refs"] == [str(artifact)]
+    child = advice["suggested_tool_call"]["children"][0]
+    assert child["role"] == "worker"
+    assert str(artifact) in child["goal"]
 
 
 # LLM: Recovery-ready QA blockers must prefer packet continuation before repair waves.

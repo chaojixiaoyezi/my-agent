@@ -98,8 +98,20 @@ def _direct_children_lines(value: object) -> list[str]:
         lines.append(f"- recovery_strategy_preview: {_json_inline(_strategy_preview(value.get('recovery_strategies')))}")
     if value.get("qa_repair_advice"):
         lines.append(f"- qa_repair_advice: {_json_inline(value.get('qa_repair_advice'))}")
+    if value.get("artifact_integrity_repair_advice"):
+        lines.append(
+            f"- artifact_integrity_repair_advice: {_json_inline(value.get('artifact_integrity_repair_advice'))}"
+        )
+    if value.get("parent_acceptance_repair_advice"):
+        lines.append(
+            f"- parent_acceptance_repair_advice: {_json_inline(value.get('parent_acceptance_repair_advice'))}"
+        )
     if value.get("repair_wave_deferred_by_recovery"):
         lines.append("- repair_wave_deferred_by_recovery: true")
+    if value.get("artifact_integrity_repair_deferred_by_recovery"):
+        lines.append("- artifact_integrity_repair_deferred_by_recovery: true")
+    if value.get("parent_acceptance_repair_deferred_by_recovery"):
+        lines.append("- parent_acceptance_repair_deferred_by_recovery: true")
     if value.get("suggested_tool_call"):
         lines.append(f"- suggested_tool_call: {_json_inline(value.get('suggested_tool_call'))}")
     if value.get("suggested_recovery_child_tool_call"):
@@ -121,6 +133,8 @@ def _top_level_action_lines(payload: dict[str, Any]) -> list[str]:
         "coordination_advice",
         "runner_selection_recovery",
         "quality_advice",
+        "artifact_integrity_repair_advice",
+        "next_action",
     )
     return [f"- {key}: {_json_inline(payload.get(key))}" for key in keys if payload.get(key)]
 

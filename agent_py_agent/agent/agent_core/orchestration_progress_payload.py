@@ -3,13 +3,18 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 from ..subagents.services.hierarchy_qa_scheduler import qa_orchestration_advice
 from ..subagents.services.recovery_strategy import (
     SubagentRecoveryStrategyRequest,
     build_subagent_recovery_strategy,
+)
+from .orchestration_artifact_integrity_repair import (
+    artifact_integrity_blocked,
+    artifact_integrity_repair_advice_payload,
+)
+from .orchestration_parent_acceptance_repair import (
+    parent_acceptance_rejected,
+    parent_acceptance_repair_advice_payload,
 )
 from .orchestration_quality_payload import quality_repair_advice_payload
 from .runner_context import current_subagent_run_id
@@ -25,6 +30,8 @@ def direct_children_progress_payload(agent) -> dict[str, object]:
     if direct_children is None:
         return {}
     payload = _progress_payload(parent_run_id, direct_children)
+    payload["direct_children"].update(artifact_integrity_repair_advice_payload(direct_children))
+    payload["direct_children"].update(parent_acceptance_repair_advice_payload(direct_children))
     payload["direct_children"].update(quality_repair_advice_payload(agent, parent_run_id))
     _attach_quality_advice(agent, parent_run_id, payload["direct_children"])
     _attach_recovery_strategies(agent, payload["direct_children"])
@@ -51,6 +58,18 @@ def _attach_direct_child_next_action(children: dict[str, object]) -> None:
         children.update(_recovery_dispatch_payload(children["recovery_run_ids"], children.get("recovery_strategies")))
         if children.get("needs_repair_wave"):
             children["repair_wave_deferred_by_recovery"] = True
+        if children.get("needs_parent_acceptance_repair_wave"):
+            children["parent_acceptance_repair_deferred_by_recovery"] = True
+        if children.get("needs_artifact_integrity_repair_wave"):
+            children["artifact_integrity_repair_deferred_by_recovery"] = True
+        return
+    if children.get("needs_artifact_integrity_repair_wave"):
+        children["ready_for_parent_acceptance"] = False
+        children["next_action"] = "create_repair_child_from_artifact_integrity_refs"
+        return
+    if children.get("needs_parent_acceptance_repair_wave"):
+        children["ready_for_parent_acceptance"] = False
+        children["next_action"] = "create_repair_child_from_parent_acceptance_refs"
         return
     if children.get("needs_repair_wave"):
         children["ready_for_parent_acceptance"] = False
@@ -169,7 +188,12 @@ def _primary_recovery_strategy(strategies: list[dict[str, object]]) -> dict[str,
 # LLM: _attach_quality_advice exposes missing QA roles through dispatch, not only schedule dry-runs.
 # 函数用途: 让父 runner 在实现 child ready 后直接看到 QA 缺口和候选 child specs，避免自己读正文猜验收流程。
 def _attach_quality_advice(agent, parent_run_id: str, children: dict[str, object]) -> None:
-    if children.get("needs_more_dispatch") or children.get("needs_recovery") or children.get("needs_repair_wave"):
+    if (
+        children.get("needs_more_dispatch")
+        or children.get("needs_recovery")
+        or children.get("needs_parent_acceptance_repair_wave")
+        or children.get("needs_repair_wave")
+    ):
         return
     try:
         parent = agent.subagents.load(parent_run_id)
@@ -274,9 +298,9 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
             planning_ids.append(item_id)
         if status == "RUNNING":
             running_ids.append(item_id)
-        if _latest_acceptance_rejected(item):
+        if parent_acceptance_rejected(item):
             rejected_ids.append(item_id)
-        if status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"} or item_id in rejected_ids:
+        if status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"} and not artifact_integrity_blocked(item):
             recovery_ids.append(item_id)
     unfinished_ids = [item for item in [*planning_ids, *running_ids] if item]
     recovery_ids = [item for item in recovery_ids if item]
@@ -289,10 +313,13 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
             "running_run_ids": [item for item in running_ids if item],
             "recovery_run_ids": recovery_ids,
             "rejected_acceptance_run_ids": [item for item in rejected_ids if item],
+            "parent_acceptance_repair_run_ids": [item for item in rejected_ids if item],
             "unfinished_run_ids": unfinished_ids,
             "needs_more_dispatch": bool(unfinished_ids),
             "needs_recovery": bool(recovery_ids),
-            "ready_for_parent_acceptance": bool(direct_children) and not unfinished_ids and not recovery_ids,
+            "ready_for_parent_acceptance": (
+                bool(direct_children) and not unfinished_ids and not recovery_ids and not rejected_ids
+            ),
         }
     }
 
@@ -324,19 +351,3 @@ def _recovery_child_tool_call(recovery_run_ids: list[str]) -> dict[str, object]:
             }
         ],
     }
-
-
-# LLM: _latest_acceptance_rejected makes rejected child acceptance visible as recovery work.
-# 函数用途: 读取 child 本地验收报告；如果最新验收为 REJECT，父级 dispatch payload 不再提示直接收口。
-def _latest_acceptance_rejected(item) -> bool:
-    reports_dir = str(getattr(item, "reports_dir", "") or "")
-    if not reports_dir:
-        return False
-    path = Path(reports_dir) / "acceptance_review.json"
-    if not path.exists():
-        return False
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    return str(payload.get("decision") or "").upper() == "REJECT"

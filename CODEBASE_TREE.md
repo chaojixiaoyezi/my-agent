@@ -57,7 +57,7 @@ agent_py_agent/
 |   |   |-- runtime/                           # run-time archive hook 和事件同步
 |   |   `-- snapshots/                         # 快照模型和 snapshot IO
 |   |-- memory_routing/                       # 长期规则索引、匹配、上下文注入和 receipt
-|   |-- memory_store/                         # 长期 memory JSONL 存储和 LocalStore 索引
+|   |-- memory_store/                         # 长期 memory JSONL 存储和按 memory_path 隔离的 LocalStore 索引
 |   |-- model_speed/                          # 模型速度 benchmark 和模型描述
 |   |-- notification/                         # 通知收件箱、过滤和用户可见摘要
 |   |-- prompting_parts/                      # prompt 构造、工具 transcript 和上下文片段
@@ -186,6 +186,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- agent_core/                        # 主循环、子代理 runner、planner、dispatch、编排工具、runner 规则
 |   |   |   |-- capability_config_patch_tool.py # 模型可调用的 capability_config 安全补丁工具
 |   |   |   |-- compact_auto_continuation.py # 主 agent 自动 compact 后渲染 continue packet 并受控续跑一次
+|   |   |   |-- dispatch_capability_followup.py # 子代理 runner 申请能力后的 route/grant/rerun 同轮闭环
 |   |   |   |-- subagent_compact_continuation.py # 子代理 task-local compact 接续 prompt 片段
 |   |   |   |-- finalization_compact_auto.py # run 收尾阶段的 compact auto 字段投影和续跑轮跳过策略
 |   |   |   |-- runtime_loop_models.py       # RunParams、runtime/finalize/tool-loop bundle 和结果模型
@@ -216,7 +217,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |   `-- tools/                         # 日志分析专用工具
 |   |   |-- memory.py                          # 记忆兼容入口，真实实现已拆到 memory_store/
 |   |   |-- memory_settings.py                 # memory 配置安全解析兼容入口，真实实现已拆到 settings/memory.py
-|   |   |-- memory_store/                      # 长期记忆存储，当前是 JSONL + LocalStore 索引 + home daily mirror
+|   |   |-- memory_store/                      # 长期记忆存储，当前是 JSONL + 按 memory_path 隔离的 LocalStore 索引 + home daily mirror
 |   |   |-- memory_archive/                    # raw/hook/snapshot、runtime workspace/facts、schema v2、control-plane query、tool-output artifacts 和非破坏性 compact apply/resume/continue packet/subagent-owner refs
 |   |   |-- memory_routing/                    # 长期规则索引化路由，负责 MEMORY -> index -> authority file 的确定性匹配
 |   |   |-- observability/                     # 未来 request_id、耗时、状态、错误码、metrics、trace 目录
@@ -240,14 +241,15 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- subagents/                         # 子代理模型、报告、manager mixin、验收、dispatch、runner、索引等
 |   |   |   |-- kernel.py                         # 子代理内核只读快照，统一 run/session/tree/status/refs
 |   |   |   |-- protocol.py                       # TaskAddress / TaskEnvelope / 协议校验
-|   |   |   `-- protocol_preflight.py           # 工具和产物写入合同预检
+|   |   |   |-- protocol_preflight.py           # 工具和产物写入合同预检
+|   |   |   `-- services/acceptance_evidence_findings.py # 父级验收证据门，按当前 runner attempt 判定失败证据
 |   |   |-- tools.py                           # 工具兼容入口，真实实现已拆到 tooling/
 |   |   |-- tooling/                           # 工具模型、文件工具、HTTP 工具、解析器、注册表、写边界
 |   |   |   |-- filesystem_read_file.py       # read_file 执行、行号分页、结构化摘要和截断提示
 |   |   |   |-- filesystem_structured_read.py # read_file 对 latest_continue_packet 等机器文件的结构化摘要策略
 |   |   |   |-- registry_control_ranges.py    # 屏蔽 SUBAGENT_RESULT 等结果块，避免摘要里的协议标记误触发工具
 |   |   |   |-- registry_envelopes.py         # ToolCallEnvelope 去重、执行前展开和结果 envelope 关联
-|   |   |   |-- registry_invoke.py            # 已授权工具的最终参数准备、写边界检查和执行分发
+|   |   |   |-- registry_invoke.py            # 已授权工具的最终参数准备、写边界检查、父级授权产物根临时注入和执行分发
 |   |   |   |-- registry_markers.py           # 旧 [TOOL_CALL]/[SUBAGENT_CALL] 标记扫描 helper
 |   |   |   |-- registry_payload_normalize.py # 工具 JSON payload 校验、工具名/参数名别名归一
 |   |   |   `-- registry_execution.py          # ToolRegistry 的工具调用解析、授权检查和执行分发 helper
@@ -482,6 +484,7 @@ CLI 只负责启动命令和打印结果；协议细节交给 `gateway.py`。
 - JSONL：保存追加式审计流水，方便人直接排查，也方便以后做上传同步。
 
 当前已接入记忆系统：新记忆会继续写 `memory.jsonl`，同时索引到 LocalStore。
+LocalStore 检索会按当前 `memory_path` 过滤，避免临时测试家目录或不同用户空间串到旧任务记忆。
 旧记忆可以通过 `my-agent local-index-memory` 补建索引。
 
 当前也已接入主要运行日志：gateway request / gateway lifecycle、subagent run、
@@ -995,6 +998,8 @@ docs/
 - `agent_py_agent/agent/agent_core/dispatch_acceptance_records.py`: 承接 dispatch acceptance record 构建、parent acceptance auto-policy/auto-execution 摘要和显式 tests 后的 refresh 调用，让主 dispatch service 保持薄编排。
 - `agent_py_agent/agent/agent_core/dispatch_acceptance_refresh.py`: 本轮显式 parent tests 写入 `test_execution.json` 后重新 dry-run acceptance，并刷新 dispatch 展示、单 run 审计和 aggregate acceptance report；不 apply、不 rescue、不修改 task 状态。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`: 承接 runner-context `dispatch_subagents` 工具返回 payload 的单条 record 构造，输出 test/follow-up refs 和摘要，不展开正文；错 run_id 时顶层 recovery 会给 `valid_run_ids`。
+- `agent_py_agent/agent/agent_core/orchestration_artifact_integrity_signals.py`: 从 task/dispatch record/output.json/run.json 提取 artifact_integrity_failed 信号、artifact refs 和 product write roots，不读取产物正文。
+- `agent_py_agent/agent/agent_core/orchestration_artifact_integrity_repair.py`: 把 artifact integrity 信号转换成 refs-first 修复建议；顶层给 `create_subagents`，runner-context 给 `schedule_child_subagents`。
 - `agent_py_agent/agent/agent_core/orchestration_board_payload.py`: 承接 `subagent_board` 的状态桶、完成状态、当前轮作用域和 kernel snapshot payload；看板只附加 refs-first 内核快照，不读取业务产物正文。
 - `agent_py_agent/agent/agent_core/runner_stage_trace.py`: 把子代理 runner 的模型请求/响应/失败和工具调用开始/结束写入 debug trace；level 3 只记录长度、backend、工具名、payload keys 和 ok，level 4/5 才追加短预览或完整 detail 文件 ref。
 - `agent_py_agent/agent/subagents/services/control_plane_projection.py`: 在 subagent 保存时把 task 当前状态投影到 LocalStore 控制面；它只做查询索引，不替代旧工单目录或 runtime workspace 事实源。
@@ -1008,6 +1013,8 @@ docs/
 - `agent_py_agent/agent/subagents/result_artifact_evidence.py`: 从 runner artifact metadata 合并 `artifact_refs`，并在模型漏写 `evidence_packets` 时合成 refs-only artifact evidence packet，不读取 artifact 正文。
 - `agent_py_agent/agent/subagents/parsing_partial.py`: 从 runner 结果块恢复被截断但仍有可追溯 `evidence_packets` 的成功结果；只接受 refs-only 证据链，避免把无证据长文本误当完成。
 - `agent_py_agent/agent/subagents/parsing_values.py`: 子代理结果解析共用的 list/dict/int 归一化 helper，让 `parsing.py` 保持薄层并保留旧 private import 兼容。
+- `agent_py_agent/agent/subagents/parsing_artifacts.py`: runner 产物字段别名归一化，把 `deliverables` / `output_files` / `files`、`evidence.kind=artifact.path` 和 `evidence_packets.artifact_refs` 收敛成标准 `artifacts`。
+- `agent_py_agent/agent/subagents/acceptance_workspace.py`: 父级验收 workspace 选择 helper，优先使用包含 artifact refs 或 product write roots 的 configured workspace root，忽略 task-local runtime 根。
 - `agent_py_agent/agent/subagents/parsing.py`: 旧 `[SUBAGENT_RESULT]` / planner 兼容解析入口；`parse_subagent_result_envelope()` 只保留旧导入路径，实际 typed 转换委托给 `parsing_envelope.py`。
 - `agent_py_agent/agent/subagents/parsing_envelope.py`: 把旧 `[SUBAGENT_RESULT]` 转成 `SubagentResultEnvelope`，真实工具列表由执行层传入，不信模型 summary。
 - `agent_py_agent/agent/subagents/capability_status.py`: 统一判断 runner 结构化状态是否仍在等待 tool/skill/shell/MCP/capability，供 parser、policy 和 acceptance 共用。
@@ -1022,7 +1029,8 @@ docs/
 - `agent_py_agent/agent/subagents/services/takeover_readiness.py`: 生成接管前必读包 `reports/takeover_readiness.json` 和 `TAKEOVER_READINESS.md`，只保存 context bundle refs、checkpoint refs、artifact manifest 元数据和读取顺序，不读取大正文。
 - `agent_py_agent/agent/subagents/rendering_rescue.py`: 渲染 rescue packet 的 refs-only 摘要，避免主 `rendering.py` 因接管/救援展示继续膨胀。
 - `agent_py_agent/agent/subagents/services/compact_continue_packet.py`: 子代理 task-local continue packet 写入层；保存任务时生成 `compactions/session/latest_continue_packet.json` 和去重后的 `session_compact_ledger.jsonl`，供父级 rerun/dispatch 按 refs 接续。
-- `agent_py_agent/agent/subagents/services/session_progress.py`: 子代理 runner task-local 工具进度层；成功写文件后生成 `progress/latest_tool_progress.json` 和 `tool_progress.jsonl`，让 compact/retry 能按已写路径和标题续跑。
+- `agent_py_agent/agent/subagents/services/session_progress.py`: 子代理 runner task-local 工具进度层；成功写文件后生成 `progress/latest_tool_progress.json` 和 `tool_progress.jsonl`，让 compact/retry 能按已写路径、标题、HTML 完整性和收口下一步续跑。
+- `agent_py_agent/agent/subagents/services/session_progress_integrity.py`: HTML artifact integrity 进度提示层；把缺闭合标签、假链接、缺失 hash target 等检查结果压成 bounded issue/count/examples 和 next_action，并在大量重复 `href="#"` 时提示 `replace_in_file count=0` 批量修复。
 - `agent_py_agent/agent/subagents/services/subagent_session_compact.py`: 子代理本地 session compact package 写入层；runner compact 信号只写当前 run `compactions/session/latest_metadata.json` / `latest_summary.md` / package refs，不写主代理 `memory_archive/compact_applies`。
 - `agent_py_agent/agent/subagents/services/recovery_strategy.py`: 子代理恢复策略入口；优先验证 task-local `latest_continue_packet.json`，坏包/缺包/过期包降级到 checkpoint/summary，并给出续跑原 run、创建 takeover run、leader recovery 或 no-progress fuse 的 refs-only 决策。
 - `agent_py_agent/agent/subagents/services/takeover_run.py`: 原 runner 挂死后的幂等接管 run 创建服务；新 run 保留旧 task_dir/artifacts/checkpoint/packet refs，同一个 source run 重复恢复不会无限创建接管者。
@@ -1039,6 +1047,7 @@ docs/
 - `agent_py_agent/agent/tooling/filesystem_structured_read.py`: `read_file` 的结构化读取策略；默认把 `latest_continue_packet.json` 渲染成状态、work_progress、session_compact 和推荐读取路径摘要，显式行号读取仍返回原始文本。
 - `agent_py_agent/agent/tooling/registry_control_ranges.py`: 工具解析前屏蔽 `SUBAGENT_RESULT` / `PARENT_PLANNER_RESULT` 等结构化结果块，确保结果摘要里提到的协议标记不会被误当作真实工具调用。
 - `agent_py_agent/agent/tooling/registry_execution.py`: 旧文本 `[TOOL_CALL]` 解析后先转成 `ToolCallEnvelope`，执行结果挂回 `call_id/result_envelope`；非 `tool_call` envelope 会明确拒绝执行。envelope helper、最终执行、marker 扫描和 payload 归一已分别拆到 `registry_envelopes.py` / `registry_invoke.py` / `registry_markers.py` / `registry_payload_normalize.py`。
+- `agent_py_agent/agent/tooling/registry_invoke.py`: 工具执行前的参数准备、写边界校验和临时工作根注入层；当父级明确授权外部 product/artifact 目录时，同一工具调用内会把这些目录加入文件工具 read/list/search/write 根，调用结束后恢复原工具状态。
 - `agent_py_agent/agent/tooling/registry_payload_normalize.py`: 对标准 JSON 工具块做 payload 校验、工具名别名归一和参数别名归一；冲突参数明确报错，不静默猜测。
 - `agent_py_agent/agent/tooling/artifact.py`: 注册 `read_artifact` 工具，给模型提供受控 artifact slice/head/tail/search 读取入口。
 - `agent_py_agent/agent/tooling/artifact_read_budget.py`: `read_artifact` 的单 run 正文读取预算器，按 `run_id` 统计滚动窗口字符数，避免子代理反复展开大 artifact。
@@ -1085,9 +1094,11 @@ docs/
 - `agent_py_agent/agent/agent_core/orchestration_tools.py`: 顶层 `create_subagents` / `subagent_board` 工具入口；显式 root/coordinator seed 会从当前原始用户 prompt 补回模型摘要漏掉的 required/forbidden 文件合同和 4层/depth 命名约束，并以增强后的 `CreateRunParams.goal` 创建 root。
 - `agent_py_agent/agent/agent_core/orchestration_root_contract.py`: root/coordinator seed 合同修复 helper；从原始用户 prompt 提取 required/forbidden 文件和精确层级命名合同，避免自然语言摘要把机器合同改写或漏传。
 - `agent_py_agent/agent/agent_core/subagent_finalize_helpers.py`: 子代理 runner 收尾持久化 helper；coordinator 已真实创建并验收 child 时可合成等待父级验收的收口，同时会阻断“没工具调用、没 child refs，只说下一步要 schedule_child_subagents”的假完成，转成 `BLOCKED / needs_child_creation` 让 LLM 继续派工。
+- `agent_py_agent/agent/agent_core/subagent_finalize_artifact_integrity.py`: runner 收尾前的产物完整性检查层；相对 artifact ref 会优先对齐 product write root 尾部，避免 `deliverables/site/index.html` 被误拼成重复目录后标成 `artifact_missing`。
 - `agent_py_agent/agent/backends/base.py`: Anthropic-compatible 非流式响应解析会在 thinking-only/no-text 内容块时重试一次，避免真实 E2E 被可恢复的厂商响应形状直接打成 runner 失败；普通空响应仍报错。
 - `agent_py_agent/agent/agent_core/tool_agent_budget.py` / `tool_agent_budget_stage.py`: 单个代理滚动工具预算 helper 和工具循环集成层；默认按 `run_id` 做 10 分钟 50 次限制，没有 `run_id` 的主代理普通聊天不受限，且不做任务树或单次对话的全局预算。
-- `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context `dispatch_subagents` 的直接 child 进度摘要；提示继续调度、恢复阻塞 child 或最新 acceptance review 为 REJECT 的 child，只有 child 都已等待验收/完成且没有 rejected acceptance 时才用 refs-first summary 收口，避免上层反复读取子产物正文。
+- `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context `dispatch_subagents` 的直接 child 进度摘要；提示继续调度、恢复阻塞 child 或最新 acceptance review 为 REJECT 的 child，只有 child 都已等待验收/完成且没有 rejected acceptance 时才用 refs-first summary 收口；被父级验收拒绝的 child 会进入 repair lane 并暴露 `parent_acceptance_repair_advice`，避免上层反复读取子产物正文或把验收失败当普通 runner 恢复。
+- `agent_py_agent/agent/agent_core/orchestration_parent_acceptance_repair.py`: 父级验收失败后的 refs-first 修复建议生成层；从 acceptance/tests/follow-up 记录提取失败摘要、引用路径和建议 repair child scope，不读取业务产物正文。
 - `agent_py_agent/agent/agent_core/tool_round_execution.py`: 单轮工具执行 helper；负责记录 assistant tool round、执行/记录工具调用、检测子代理 `output.json` 收口，并把同轮 `schedule_child_subagents` 后依赖真实 run id 的 `dispatch_subagents` 等编排调用延后到下一轮，避免模型使用脑补 run id；`output.json` 收口检测支持 flat `path` 和 bundle `filesystem.path`。
 - `agent_py_agent/agent/subagents/services/hierarchy_role_identity.py`: 从 scheduler 拆出的角色 identity 兜底策略，根据 `agent_name` / `goal` 恢复模型漏填的 researcher/tester/acceptor/bug_finder/writer/worker 等角色。
 - `agent_py_agent/agent/subagents/services/hierarchy_scheduled_role.py`: 从 scheduler 拆出的下一层 role 推断策略，把 child/general/worker 这类模型模糊角色修正成 coordinator 或 leaf_worker。
@@ -1119,7 +1130,7 @@ docs/
 - `agent_py_agent/agent/backends/errors.py`: 模型后端错误类型；`ProviderTimeoutError` 让 CLI、runner 和恢复逻辑能把 provider 超时从普通崩溃里分出来。
 - `agent_py_agent/agent/agent_core/coordinator_seed_tools.py`: 显式 root/coordinator seed 的工具过滤策略；模型额外传入 shell/web 工具时收敛回内置 coordinator 工具包。
 - `agent_py_agent/agent/agent_core/spawn_role_seed.py`: CLI 显式 role seed 入口；root/coordinator seed 保留 goal 里的产品路径给下层派工，但自身 allowed write roots 只保留 task-local 协调目录。
-- `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context dispatch 的直接 child 进度摘要；含状态计数、unfinished ids、recovery ids、rejected acceptance ids、`needs_more_dispatch` / `needs_recovery` 和带 `run_ids` 的建议继续调度或恢复工具调用。
+- `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context dispatch 的直接 child 进度摘要；含状态计数、unfinished ids、recovery ids、rejected acceptance ids、`parent_acceptance_repair_advice`、`needs_more_dispatch` / `needs_recovery` 和带 `run_ids` 的建议继续调度、修复或恢复工具调用。
 - `agent_py_agent/agent/agent_core/orchestration_board_payload.py`: subagent board 输出整形 helper；把可继续处理的 run id 按状态放到顶层，归一 `status=ALL/*/ANY` 为不过滤，并截断长 goal，避免看板响应挤占模型上下文。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_tool.py`: `dispatch_subagents` 模型工具类；把模型参数收敛成 `DispatchParams`，返回 refs-first 调度报告和错误 run id 恢复提示。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_scope.py`: 集中维护 dispatch_subagents 的 apply/execute 默认、parent scope、self-exclude、workflow-off 和验收收口策略；真实执行 runner 的模型工具调用固定开启父级验收测试，顶层 active root/coordinator 在 `apply=true` 时强制 workflow off，避免全局 auto workflow 先生成 producer/critic/repair 子工单并绕过 root 自己派工。
@@ -1130,12 +1141,13 @@ docs/
 - `agent_py_agent/agent/agent_core/capability_request_tool.py`: `capability_request` 模型工具类；runner 缺工具、skill、MCP、网络或 shell 时写正式 OPEN `CapabilityRequest`，只允许当前 run 自己申请，父级后续 route/grant/rerun。
 - `agent_py_agent/agent/agent_core/capability_config_patch_tool.py`: `capability_config_patch` 模型工具类；把配置修复请求收敛成 `CapabilityConfigPatchRequest`，只自动应用安全字段，危险字段返回建议，并写审计/通知。
 - `agent_py_agent/agent/agent_core/orchestration_workflow_mode.py`: create/dispatch 共用 workflow mode 归一化 helper，维持 `off` / `plan` / `auto` 兼容语义。
-- `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`: dispatch 工具返回 payload 压缩层；单条 record 只保留 refs 和关键字段，错 run_id 时把 `runner_selection_recovery.valid_run_ids` 放到顶层。
+- `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`: dispatch 工具返回 payload 压缩层；单条 record 只保留 refs 和关键字段，错 run_id 时把 `runner_selection_recovery.valid_run_ids` 放到顶层；顶层父级验收 REJECT 也会返回 `parent_acceptance_repair_advice` 和 `create_subagents` 修复建议。
 - `agent_py_agent/agent/agent_core/dispatch_runner_selection.py`: runner 候选范围和显式 `include_run_ids` 预检；错 id 会返回 `runner_selection/invalid_run_ids`、可用 direct child ids 和保守纠正提示。
 - `agent_py_agent/agent/agent_core/dispatch_runner_batches.py`: runner 候选收集和执行批处理；调用 selection helper 精确推进父节点给定的直接孩子。
 - `agent_py_agent/agent/agent_core/services/watch_config_reload.py`: dispatch watch 的 capability_config 热加载层；每轮开始前检测配置 hash，变化只影响后续 dispatch，不改已经运行中的 runner。
 - `agent_py_agent/agent/tooling/json_repair.py`: 工具调用 JSON 的窄口修复 helper；目前只修有效对象后多余右花括号，避免模型因 parse error 把完整任务 goal 越改越短。
 - `agent_py_agent/agent/subagents/role_contracts.py`: 新增 reporter/checker 角色契约和 analyst/reviewer 兼容映射；同时把模板角色接入默认工具、输出契约和 parent final gate。
+- `agent_py_agent/agent/subagents/runner_result_rendering.py`: `RUNNER_RESULT.md` 专属渲染模块；当 runner 因 `artifact_integrity_failed` 阻塞时，会给父级/root 明确 `Parent Next Action`，要求派 repair worker 读取 refs 修复，而不是父级亲自写业务产物。
 - `agent_py_agent/agent/subagents/automation_gate.py`: 新增半自动/自动执行门，默认只放行 refs-only 查询动作，跑工具或改状态动作继续需要人工确认。
 - `agent_py_agent/agent/agent_core/dispatch_limiter.py`: 新增 runner 启动限流 bundle/helper，统一处理 start-rate 和可选 role budgets，供 dispatch runner batch 调用。
 - `agent_py_agent/cli/_hierarchy.py`: 新增 `subagents-hierarchy` 和 `subagents-recovery-tree` CLI；前者默认 dry-run、`--apply` 才创建下一层子代理，后者查询 refs-only 多层恢复包并通过 capability config 判断 stale `RUNNING` 后代。

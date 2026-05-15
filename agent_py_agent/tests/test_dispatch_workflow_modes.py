@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import json
+
+from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 from agent_py_agent.agent.capabilities import CapabilityRouter
 from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.config import AgentConfig
@@ -68,3 +71,33 @@ def test_workflow_auto_mode_spawns_worker_children(tmp_path):
     assert all(child.parent_id == loaded.id for child in children)
     assert all(child.agent_name.startswith("小小傻妞-") for child in children)
     assert any(child.workflow_depends_on == ["design_contract"] for child in children)
+
+
+# LLM: test_model_dispatch_run_ids_respects_task_workflow_off covers real root-created worker E2E.
+# 函数用途: 模型显式推进某个 workflow=off 的 run 时，不能因为全局 workflow auto 又给它套 implement/verify 子任务。
+def test_model_dispatch_run_ids_respects_task_workflow_off(tmp_path):
+    config = AgentConfig(model_backend="echo", subagent_workspace="subs")
+    config.subagent_workflow_mode = "auto"
+    agent = SimpleAgent(config, tmp_path)
+    task = agent.subagents.create_run(
+        goal="创建一个高端现代家具品牌网站首页的单文件HTML",
+        thought="直接完成父级交付，不自动套 workflow。",
+        plan=["写页面", "交验收"],
+        role="worker",
+        acceptance_checks=[f"文件必须保存到 {tmp_path}/deliverables/furniture-home/index.html"],
+        workflow_mode="off",
+    )
+
+    result = DispatchSubagentsTool(agent).execute({
+        "apply": True,
+        "execute_runners": False,
+        "max_runners": 0,
+        "run_ids": [task.id],
+    })
+    payload = json.loads(result.output)
+    loaded = agent.subagents.load(task.id)
+
+    assert result.ok is True
+    assert loaded.workflow_mode == "off"
+    assert loaded.workflow_child_run_ids == []
+    assert all(record["step"] != "workflow" for record in payload["records"])

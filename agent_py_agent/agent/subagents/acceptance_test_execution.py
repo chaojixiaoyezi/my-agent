@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .acceptance_workspace import acceptance_workspace_root_for_task
 from .execution_executor import TestExecutor
 from .execution_executor_helpers import _test_name, _utc_now_iso
 from .execution_records import TestExecutionRecord
@@ -49,7 +50,7 @@ def build_acceptance_test_execution_findings(
     output = request.output
     options = request.options
     tests = _tests_with_child_acceptance_fallback(task, _dict_list(output.get("tests", [])))
-    workspace_root = _acceptance_test_workspace(manager)
+    workspace_root = _acceptance_test_workspace(manager, task, output)
     # LLM: Parent tests run from inferred artifact cwd and static-site roots when runners emit compact refs.
     tests = prepare_test_items(
         TestItemPreparationRequest(
@@ -155,9 +156,12 @@ def _child_acceptance_error(child_ids: list[str], missing: list[str], incomplete
 
 # LLM: _acceptance_test_workspace prefers the explicit manager root so hidden runtime folders do not become test cwd.
 # 函数用途: 推断真实测试命令的工作目录；新旧 subagent workspace 下都应返回用户项目根目录。
-def _acceptance_test_workspace(manager: Any) -> Path:
+def _acceptance_test_workspace(manager: Any, task: Any, output: dict[str, object]) -> Path:
     """Return the workspace root for acceptance test execution."""
 
+    scoped = acceptance_workspace_root_for_task(manager, task=task, output=output)
+    if scoped:
+        return scoped
     workspace_root = getattr(manager, "workspace_root", None)
     if workspace_root:
         return Path(workspace_root).resolve()

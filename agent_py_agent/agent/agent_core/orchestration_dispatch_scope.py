@@ -87,9 +87,34 @@ def dispatch_workflow_mode(agent, params: dict[str, object], parser) -> str:
         return "off"
     if "workflow_mode" in params:
         return parser(params.get("workflow_mode"), agent.config.subagent_workflow_mode)
+    if _explicit_workflow_off_target_dispatch(agent, params):
+        return "off"
     if current_subagent_run_id(agent):
         return "off"
     return parser(None, agent.config.subagent_workflow_mode)
+
+
+# LLM: _explicit_workflow_off_target_dispatch preserves create-time workflow choices for model dispatch.
+# 函数用途: 模型只指定 run_ids 推进任务时，尊重目标 run 自己的 workflow_mode=off，避免全局 auto 二次套流程。
+def _explicit_workflow_off_target_dispatch(agent, params: dict[str, object]) -> bool:
+    if current_subagent_run_id(agent):
+        return False
+    if not _bool_param(params.get("apply"), default=False):
+        return False
+    run_ids = _string_list(params.get("run_ids") or params.get("include_run_ids"))
+    if not run_ids:
+        return False
+    return all(_target_workflow_mode(agent, run_id) == "off" for run_id in run_ids)
+
+
+# LLM: _target_workflow_mode safely reads persisted task workflow mode for explicit dispatch targets.
+# 函数用途: 读取目标 run 的 workflow 模式；缺失或读取失败时返回空值，让调用方保守回退原逻辑。
+def _target_workflow_mode(agent, run_id: str) -> str:
+    try:
+        task = agent.subagents.load(run_id)
+    except Exception:
+        return ""
+    return str(getattr(task, "workflow_mode", "") or "").strip().lower()
 
 
 # LLM: _top_level_root_role_dispatch protects coordinator-owned hierarchy from generic workflow auto-splitting.

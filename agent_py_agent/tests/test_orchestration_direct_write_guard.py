@@ -12,6 +12,10 @@ def _agent():
     return SimpleNamespace(root="/tmp/workspace")
 
 
+def _delegated_root_agent():
+    return SimpleNamespace(root="/tmp/workspace", _orchestration_run_ids_seen={"run-1"})
+
+
 def _runner_agent(role: str):
     task = SimpleNamespace(role=role, agent_name=f"小小傻妞-{role}")
     return SimpleNamespace(
@@ -65,6 +69,48 @@ def test_natural_delegate_prompt_blocks_root_write_file_to_deliverables():
     assert result is not None
     assert result.ok is False
     assert "delegated_direct_write_blocked" in result.output
+
+
+# LLM: recovery wording that asks root to arrange takeover still means delegated product writing.
+# 函数用途: 复现真实恢复 E2E 中 root 看到旧小傻妞超时后想自己补全页面；应改派接管/恢复小傻妞。
+def test_natural_recovery_delegate_prompt_blocks_root_product_write():
+    result = maybe_block_delegate_only_direct_write(
+        DelegateOnlyDirectWriteGuardRequest(
+            agent=_agent(),
+            user_prompt=(
+                "继续刚才任务。如果有小傻妞超时、卡住，或者页面还没写完，"
+                "就安排它从上次进度接着写，或者派新的小傻妞接管修复。"
+            ),
+            payload={"tool": "append_file", "path": "/tmp/workspace/deliverables/index.html", "content": "..."},
+        )
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert "delegated_direct_write_blocked" in result.output
+    assert "takeover" in result.output
+
+
+# LLM: exact resumed root wording from real E2E must block full-file rewrite attempts too.
+# 函数用途: 复现 root 读到失败报告后说“我直接接管重写”并调用 write_file 的风险路径。
+def test_natural_recovery_delegate_prompt_blocks_root_full_rewrite():
+    result = maybe_block_delegate_only_direct_write(
+        DelegateOnlyDirectWriteGuardRequest(
+            agent=_agent(),
+            user_prompt=(
+                "继续刚才的高端家具品牌首页任务。你只需要按已有小傻妞任务状态继续推进；"
+                "如果有小傻妞超时、卡住，或者页面还没写完，就安排它从上次进度接着写，"
+                "或者派新的小傻妞接管修复。最终网页仍然放到 /tmp/workspace/deliverables/index.html，"
+                "并检查页面完整、链接有效、布局正常。"
+            ),
+            payload={"tool": "write_file", "path": "/tmp/workspace/deliverables/index.html", "content": "..."},
+        )
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert "delegated_direct_write_blocked" in result.output
+    assert "root 仍不能亲自写最终 deliverables" in result.output
 
 
 def test_delegate_only_prompt_allows_leaf_worker_product_write():
@@ -131,6 +177,37 @@ def test_normal_prompt_does_not_block_direct_write():
         DelegateOnlyDirectWriteGuardRequest(
             agent=_agent(),
             user_prompt="请创建一个简单页面。",
+            payload={"tool": "write_file", "path": "/tmp/workspace/deliverables/index.html", "content": "..."},
+        )
+    )
+
+    assert result is None
+
+
+# LLM: once root has dispatched a subagent, repair should stay delegated unless user explicitly overrides.
+# 函数用途: 复现真实 E2E 中 root 验收失败后亲自 write_file 重写产物；应改派 repair worker。
+def test_active_delegated_root_blocks_product_write_without_explicit_override():
+    result = maybe_block_delegate_only_direct_write(
+        DelegateOnlyDirectWriteGuardRequest(
+            agent=_delegated_root_agent(),
+            user_prompt="请安排小傻妞去做，你负责检查和验收结果。",
+            payload={"tool": "write_file", "path": "/tmp/workspace/deliverables/index.html", "content": "..."},
+        )
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert "delegated_direct_write_blocked" in result.output
+    assert "repair worker" in result.output
+
+
+# LLM: explicit user override still lets root take over product writing.
+# 函数用途: 用户明确要求“你亲自修复”时不拦，让自然语言权力高于默认委托边界。
+def test_active_delegated_root_allows_explicit_parent_repair_override():
+    result = maybe_block_delegate_only_direct_write(
+        DelegateOnlyDirectWriteGuardRequest(
+            agent=_delegated_root_agent(),
+            user_prompt="先安排小傻妞去做，如果不合格你亲自修复页面。",
             payload={"tool": "write_file", "path": "/tmp/workspace/deliverables/index.html", "content": "..."},
         )
     )

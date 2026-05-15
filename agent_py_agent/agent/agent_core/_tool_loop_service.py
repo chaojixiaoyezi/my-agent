@@ -15,6 +15,7 @@ from .runner_stage_trace import (
     RunnerToolStageTraceRequest,
     trace_runner_tool_call_started,
 )
+from .subagent_attempt_guard import stale_subagent_attempt_message
 from .subagent_dispatch_closeout import (
     subagent_dispatch_final_response_guard,
     subagent_dispatch_limit_response,
@@ -167,8 +168,12 @@ class ToolLoopService:
         return final_prompt, final_response, tool_rounds
 
     # LLM: _model_turn_or_fallback keeps model errors and fallback response generation isolated.
-    # 函数用途: 执行一轮模型调用；空响应可恢复时返回 fallback 并要求主循环停止。
+    # 函数用途: 执行一轮模型调用；过期 runner attempt 或空响应可恢复时返回 fallback 并要求主循环停止。
     def _model_turn_or_fallback(self, params: ToolLoopExecuteParams, tool_rounds: int):
+        stale_message = stale_subagent_attempt_message(self._agent)
+        if stale_message is not None:
+            backend = str(getattr(getattr(self._agent, "backend", None), "name", "") or "")
+            return "", ModelResponse(text=stale_message, backend=backend), True
         try:
             prompt, response = _next_model_response(self._agent, params, tool_rounds)
             return prompt, response, False
@@ -323,8 +328,10 @@ def _task_local_progress_context(progress: dict[str, object]) -> str:
             f"summary: {progress.get('summary', '')}",
             f"latest_written_path: {progress.get('latest_written_path', '')}",
             f"headings: {progress.get('headings', [])}",
+            f"next_action: {progress.get('next_action', '')}",
             f"latest_tool_progress_ref: {progress.get('latest_tool_progress_ref', '')}",
-            "policy: continue from this progress snapshot; avoid duplicating recorded headings.",
+            "policy: follow next_action; avoid duplicating recorded headings. "
+            "If next_action mentions output.json, stop product-body writes and close out with structured refs.",
         ]
     )
 

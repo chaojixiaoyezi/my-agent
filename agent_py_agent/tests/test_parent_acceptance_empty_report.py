@@ -92,3 +92,36 @@ def test_parent_acceptance_plan_inspects_empty_report_with_traceable_artifact_ev
         assert decision.decision == "inspect_only"
         assert decision.risk_level == "low"
         assert "no executable tests" in decision.reason
+
+
+# LLM: Empty reports with only audit refs must not turn repair workers into DONE/VERIFIED.
+# 函数用途: 修复子代理只带 output/takeover 这类审计引用时，父级不能把空测试报告当作可验收产物。
+def test_parent_acceptance_empty_report_rejects_generic_evidence_refs():
+    root_ctx, agent, task = _agent_and_task()
+    with root_ctx:
+        _write_output(task)
+        task.evidence_packets = [
+            EvidencePacket(
+                id="packet-audit",
+                claim="runner wrote status refs",
+                evidence_refs=[task.output_json],
+            )
+        ]
+        agent.subagents.save(task)
+        write_test_execution_report(
+            task.reports_dir,
+            [],
+            options=TestExecutionReportOptions(executed_at="2026-05-10T12:00:00Z"),
+        )
+
+        decision = agent.subagents.plan_parent_acceptance(task.id)
+        action = agent.subagents.plan_parent_acceptance_next_action(task.id)
+        result = agent.subagents.apply_parent_acceptance_decision(task.id, reviewer="parent")
+        reloaded = agent.subagents.load(task.id)
+
+        assert decision.decision == "rescue"
+        assert action.action == "plan_rescue"
+        assert result.applied is False
+        assert result.parent_decision == "rescue"
+        assert reloaded.status == "AWAITING_ACCEPTANCE"
+        assert reloaded.verification_status == "NEEDS_ACCEPTANCE"

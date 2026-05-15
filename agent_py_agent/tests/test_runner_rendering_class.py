@@ -280,6 +280,30 @@ class TestRunnerResultRendering:
         assert "## Structured Output" in output
         assert "summary: 任务摘要" in output
 
+    def test_render_runner_result_markdown_with_artifact_repair_action(self):
+        """产物结构失败时，报告要告诉父级派修复子代理而不是亲自改文件。"""
+        result = SubAgentRunnerResult(
+            run_id="run-result-artifact-blocked",
+            created_at=time.time(),
+            dry_run=False,
+            ok=True,
+            status="BLOCKED",
+            verification_status="UNVERIFIED",
+            message="等待父级处理",
+            structured_output_found=True,
+            structured_output_ok=True,
+            structured_summary="artifact integrity check failed; repair listed files",
+            blocked_reason="artifact_integrity_failed:/tmp/workspace/index.html:placeholder_hash_link",
+            output_json="/tmp/workspace/runtime/subagents/worker/output.json",
+        )
+
+        output = render_runner_result_markdown(result)
+
+        assert "## Parent Next Action" in output
+        assert "不要直接改业务产物" in output
+        assert "repair worker" in output
+        assert "output_json" in output
+
     def test_render_runner_result_markdown_with_counts(self):
         """测试带计数的 runner 结果渲染。
 

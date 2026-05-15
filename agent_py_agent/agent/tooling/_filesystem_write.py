@@ -221,6 +221,7 @@ class ReplaceInFileTool(FileSystemTool):
                 "只改一个函数、一段注释、一行配置或一小段文档",
                 "已经通过 read_file 看过上下文，知道要替换的原文",
                 "希望保留文件其他部分不动，避免 write_file 整文件覆盖",
+                "要批量替换完全相同的文本时传 count=0，一次替换全部匹配",
             ],
             avoid_when=[
                 "要创建新文件时用 write_file",
@@ -252,6 +253,7 @@ class ReplaceInFileTool(FileSystemTool):
             examples=[
                 '{"tool": "replace_in_file", "path": "agent_py_agent/agent/core.py", "old": "max_tool_rounds: int = 5", "new": "max_tool_rounds: int = 8"}',
                 '{"tool": "replace_in_file", "path": "README.md", "old": "old text", "new": "new text", "count": 1}',
+                '{"tool": "replace_in_file", "path": "index.html", "old": "href=\\"#\\"", "new": "href=\\"#products\\"", "count": 0}',
             ],
         )
 

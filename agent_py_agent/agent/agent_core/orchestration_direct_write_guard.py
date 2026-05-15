@@ -12,6 +12,7 @@ from typing import Any
 
 from ..tools import ToolExecutionResult
 from .orchestration_delegation_intent import prompt_requests_refs_only_delegation
+from .orchestration_run_scope import remembered_orchestration_run_ids
 
 _DIRECT_WRITE_TOOLS = {"write_file", "append_file", "replace_in_file"}
 _SHELL_TOOL = "run_command"
@@ -39,10 +40,23 @@ _WRITE_COMMAND_PATTERNS = (
 _DELEGATE_ONLY_PATTERNS = (
     r"只能.{0,16}(通过|让|由).{0,12}(子代理|subagent|worker|builder)",
     r"必须.{0,16}(通过|让|由).{0,12}(子代理|subagent|worker|builder)",
+    r"(安排|派|让).{0,24}(小傻妞|子代理|subagent|worker).{0,32}(做|写|继续|接着|接管|修复|完成)",
+    r"(安排它|让它).{0,24}(继续|接着|接管|修复|写|完成)",
+    r"(小傻妞|子代理|subagent|worker).{0,32}(继续|接着|接管|修复|完成|写)",
     r"不能.{0,12}(自己|直接).{0,12}(写|实现|修改|创建|write|implement|create)",
     r"不要.{0,12}(自己|直接).{0,12}(写|实现|修改|创建|write|implement|create)",
     r"root.{0,24}(must not|cannot|do not).{0,24}(write|implement|create)",
     r"delegate[-_ ]only",
+)
+_PARENT_PRODUCT_WRITE_OVERRIDE_PATTERNS = (
+    r"你.{0,8}(自己|亲自).{0,16}(修复|重写|写|修改|实现|创建)",
+    r"(主代理|父级|root).{0,12}(自己|亲自).{0,16}(修复|重写|写|修改|实现|创建)",
+    r"(you yourself|personally).{0,40}(fix|repair|rewrite|write|implement|create)",
+)
+_PARENT_PRODUCT_WRITE_NEGATION_PATTERNS = (
+    r"(不能|不要|不准|禁止).{0,24}(自己|亲自|root|主代理|父级).{0,24}(修复|重写|写|修改|实现|创建)",
+    r"(root|主代理|父级).{0,16}(不能|不要|不准|禁止).{0,24}(自己|亲自)?.{0,16}(修复|重写|写|修改|实现|创建)",
+    r"(cannot|must not|do not).{0,40}(write|fix|repair|rewrite|implement|create)",
 )
 _PRODUCT_WRITER_ROLE_TOKENS = (
     "worker",
@@ -104,7 +118,7 @@ def maybe_block_delegate_only_direct_write(
 ) -> ToolExecutionResult | None:
     if not isinstance(request.payload, dict):
         return None
-    if not _user_requested_delegate_only(request.user_prompt):
+    if not _delegate_write_guard_active(request):
         return None
     if _current_runner_can_write_product(request.agent):
         return None
@@ -125,6 +139,25 @@ def _user_requested_delegate_only(prompt: str) -> bool:
     if prompt_requests_refs_only_delegation(text):
         return True
     return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _DELEGATE_ONLY_PATTERNS)
+
+
+# LLM: _delegate_write_guard_active also protects root after it already dispatched a child.
+# 函数用途: 用户没说“只读报告”但 root 本轮已派工时，默认不让 root 自己写业务产物，除非用户明确要求亲自修复。
+def _delegate_write_guard_active(request: DelegateOnlyDirectWriteGuardRequest) -> bool:
+    if _user_authorized_parent_product_write(request.user_prompt):
+        return False
+    if _user_requested_delegate_only(request.user_prompt):
+        return True
+    return bool(remembered_orchestration_run_ids(request.agent))
+
+
+# LLM: _user_authorized_parent_product_write detects explicit override from the current user.
+# 函数用途: 用户明确说“你亲自修复/你自己写”时，允许 root 接管产物写入；普通“检查/验收”不算。
+def _user_authorized_parent_product_write(prompt: str) -> bool:
+    compact = " ".join(str(prompt or "").lower().split())
+    if any(re.search(pattern, compact, flags=re.IGNORECASE) for pattern in _PARENT_PRODUCT_WRITE_NEGATION_PATTERNS):
+        return False
+    return any(re.search(pattern, compact, flags=re.IGNORECASE) for pattern in _PARENT_PRODUCT_WRITE_OVERRIDE_PATTERNS)
 
 
 # LLM: _current_runner_can_write_product keeps delegate-only guard scoped to the outer root, not active subagents.

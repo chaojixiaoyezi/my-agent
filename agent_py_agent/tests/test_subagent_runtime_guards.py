@@ -9,7 +9,11 @@ import json
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
-from agent_py_agent.agent.agent_core.subagent_attempt_guard import stale_subagent_attempt_result
+from agent_py_agent.agent.agent_core._tool_loop_service import ToolLoopService
+from agent_py_agent.agent.agent_core.subagent_attempt_guard import (
+    stale_subagent_attempt_message,
+    stale_subagent_attempt_result,
+)
 from agent_py_agent.agent.agent_core.subagent_dispatch_closeout import (
     DispatchCompletionRequest,
     subagent_dispatch_completion_response,
@@ -18,6 +22,15 @@ from agent_py_agent.agent.agent_core.subagent_dispatch_closeout import (
 )
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.subagents.manager import SubAgentManager
+
+
+# LLM: _ExplodingBackend proves stale runner attempts stop before any new model request.
+# 类用途: 测试超时旧线程时，如果工具循环还调用模型就立刻失败，避免真实环境继续烧请求。
+class _ExplodingBackend:
+    name = "exploding_backend"
+
+    def generate(self, prompt: str, on_chunk=None):  # noqa: ARG002
+        raise AssertionError("stale runner attempt must not call the model again")
 
 
 # LLM: test_stale_attempt_guard_blocks_abandoned_runner_tools covers timeout-thread leakage.
@@ -44,6 +57,57 @@ def test_stale_attempt_guard_blocks_abandoned_runner_tools(tmp_path):
     assert result.ok is False
     assert result.tool == "write_file"
     assert "已被废弃或超时" in result.output
+
+
+# LLM: ToolLoopService must stop stale runner threads before the next model turn.
+# 函数用途: runner timeout 后旧线程进入下一轮时，应本地收口并退出，不能继续向模型发请求或消耗工具轮。
+def test_stale_attempt_guard_stops_tool_loop_before_next_model_call(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    task = manager.create_run(
+        goal="写一个文件",
+        thought="模拟超时旧线程",
+        plan=["write"],
+        allowed_tools=["write_file"],
+    )
+    prepared = manager.prepare_runner_attempt(task.id)
+    manager.abandon_runner_attempt(task.id, prepared.runner_active_attempt_id, reason="timeout")
+    agent = SimpleNamespace(
+        config=SimpleNamespace(max_tool_rounds=0),
+        backend=_ExplodingBackend(),
+        subagents=manager,
+        _current_subagent_run_id=task.id,
+        _current_subagent_attempt_id=prepared.runner_active_attempt_id,
+    )
+    params = ToolLoopExecuteParams(
+        user_prompt="继续写文件",
+        memories=[],
+        runtime_injections=[],
+        prompt_files=[],
+        tool_catalog_section="",
+        tool_recommendations_section="",
+        tool_context=[],
+        effective_on_chunk=None,
+        allowed_tools=None,
+        granted_capabilities=None,
+        write_boundary=None,
+        task_attributes=None,
+        request_id="",
+        run_id="",
+        task_id=task.id,
+        one_shot_tool_calls=set(),
+        executed_tools=[],
+        archive_tool_calls=[],
+    )
+
+    message = stale_subagent_attempt_message(agent)
+    final_prompt, response, tool_rounds = ToolLoopService(agent).execute(params)
+
+    assert message is not None
+    assert final_prompt == ""
+    assert tool_rounds == 0
+    assert response is not None
+    assert "旧 runner attempt 已停止" in response.text
+    assert "父级接管" in response.text
 
 
 # LLM: test_dispatch_limit_response_uses_persisted_task_state prevents false-positive final summaries.

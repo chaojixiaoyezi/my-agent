@@ -300,3 +300,8 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 - `memory_archive/compact_subagent_owner.py` 是 `memory-resume --from-compact` 的只读子代理 owner resolver。它只搜索 active workspace 和配置里的 `subagent_workspace`，owner id 按字面路径段处理，并可从 legacy `task.json` 升级到新的 agent-run workspace。
 - `memory_archive/compact_continue_packet.py` 会把 subagent owner 的 `recommended_read_paths` 带进 continue packet；这些路径只指向 agent-run workspace 的 packet/checkpoint/summary/task/timeline/findings，不复制主代理长期 memory。
 - `cli/memory_archive_commands.py` 负责把当前 agent 的 `subagents.workspace` 传给 resume options，CLI 不再让 compact owner resolver 猜默认路径。
+
+## 2026-05-15 LocalStore scoped memory structure update
+- `memory_store/_jsonl_indexing.py` 现在把当前 `JsonlMemory.path` 写入 LocalStore 记录的 `metadata.memory_path`，并在搜索返回前按同一个路径过滤 memory hits。
+- 这个 scope 只约束 `source_type=memory` 的 LocalStore 命中；task/run/archive/tool-output 这些其它索引仍按各自 refs 和 scope 规则处理。
+- 结构原则：LocalStore 是加速索引，不是跨空间权威记忆池。临时 E2E、多用户空间或不同 `memory_path` 不能互相读到对方的旧 hit；需要恢复旧事实时必须回到对应 JSONL/daily/task/run 文件。

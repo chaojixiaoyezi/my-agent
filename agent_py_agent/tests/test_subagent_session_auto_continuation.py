@@ -148,6 +148,145 @@ def test_task_local_write_progress_updates_continue_packet(tmp_path: Path) -> No
     assert packet["recommended_read_paths"][1].endswith("latest_tool_progress.json")
 
 
+# LLM: complete HTML progress should steer runners toward structured closeout instead of endless writing.
+# 函数用途: 复现真实 E2E 里 HTML 已闭合但子代理继续读写不收口；进度包应提示写 output.json 交父级验收。
+def test_task_local_write_progress_completed_html_prompts_output_json_closeout(tmp_path: Path) -> None:
+    task = _progress_task(tmp_path)
+    artifact = tmp_path / "deliverables" / "furniture-home" / "index.html"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("<html><body><main id='hero'>done</main></body></html>", encoding="utf-8")
+
+    snapshot = record_subagent_tool_progress(
+        SubagentToolProgressRequest(
+            task=task,
+            tool="append_file",
+            payload={"path": str(artifact), "content": "</body></html>"},
+            output="已追加文件: index.html\nHTML 完整性提示: 当前结构没有发现明显问题。",
+            ok=True,
+            tool_round=3,
+            tool_index=1,
+        )
+    )
+    packet = json.loads(Path(task.agent_run_latest_session_continue_packet_json).read_text(encoding="utf-8"))
+
+    assert "停止继续写正文" in snapshot["next_action"]
+    assert "output.json" in snapshot["next_action"]
+    assert packet["work_progress"]["next_action"] == snapshot["next_action"]
+
+
+# LLM: fake hash links should keep the runner in repair mode before structured closeout.
+# 函数用途: 复现家具页真实产物残留 href="#"；进度包应提示先修复明显失效链接，再写 output.json。
+def test_task_local_write_progress_placeholder_hash_link_prompts_repair(tmp_path: Path) -> None:
+    task = _progress_task(tmp_path)
+    artifact = tmp_path / "deliverables" / "furniture-home" / "index.html"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(
+        "<html><body><main id='hero'>done</main><a href='#'>品牌故事</a><a href='#missing'>空间系列</a></body></html>",
+        encoding="utf-8",
+    )
+
+    snapshot = record_subagent_tool_progress(
+        SubagentToolProgressRequest(
+            task=task,
+            tool="replace_in_file",
+            payload={"path": str(artifact), "content": ""},
+            output="已修改文件: index.html",
+            ok=True,
+            tool_round=4,
+            tool_index=1,
+        )
+    )
+
+    assert "先修复" in snapshot["next_action"]
+    assert "placeholder_hash_link" in snapshot["next_action"]
+    assert "品牌故事 href=#" in snapshot["next_action"]
+    assert snapshot["artifact_integrity"]["issues"][0]["code"] == "placeholder_hash_link"
+    assert snapshot["artifact_integrity"]["issues"][0]["count"] == 1
+    assert "品牌故事 href=#" in snapshot["artifact_integrity"]["issues"][0]["examples"]
+    assert "空间系列 href=#missing" in snapshot["next_action"]
+
+
+# LLM: many fake links should steer the runner toward batch repair instead of one-link loops.
+# 函数用途: 复现真实 E2E 中 17 个 href="#" 被一轮只替换一个，进度包应提示批量修复策略。
+def test_task_local_write_progress_many_placeholder_links_prompts_batch_repair(tmp_path: Path) -> None:
+    task = _progress_task(tmp_path)
+    artifact = tmp_path / "deliverables" / "furniture-home" / "index.html"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(
+        (
+            "<html><body><main id='hero'>done</main>"
+            "<a href='#'>查看全部产品</a><a href='#'>了解更多</a>"
+            "<a href='#'>微信</a><a href='#'>微博</a><a href='#'>小红书</a>"
+            "</body></html>"
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = record_subagent_tool_progress(
+        SubagentToolProgressRequest(
+            task=task,
+            tool="append_file",
+            payload={"path": str(artifact), "content": "</body></html>"},
+            output="已追加文件: index.html",
+            ok=True,
+            tool_round=3,
+            tool_index=1,
+        )
+    )
+
+    assert "placeholder_hash_linkx5" in snapshot["next_action"]
+    assert "一次性批量修复" in snapshot["next_action"]
+    assert "count=0" in snapshot["next_action"]
+    assert "不要一轮只替换一个链接" in snapshot["next_action"]
+
+
+# LLM: internal output.json writes must not erase unresolved product repair facts.
+# 函数用途: 复现真实 E2E 中 worker 写 output.json 后覆盖 href 问题；最新进度仍应指向产品文件和修复建议。
+def test_task_local_output_json_closeout_preserves_product_integrity_progress(tmp_path: Path) -> None:
+    task = _progress_task(tmp_path)
+    output_json = tmp_path / "legacy" / "run-progress" / "output.json"
+    output_json.parent.mkdir(parents=True)
+    task.output_json = str(output_json)
+    artifact = tmp_path / "deliverables" / "furniture-home" / "index.html"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(
+        "<html><body><main id='hero'>done</main><a href='#'>联系客服</a></body></html>",
+        encoding="utf-8",
+    )
+
+    product_snapshot = record_subagent_tool_progress(
+        SubagentToolProgressRequest(
+            task=task,
+            tool="replace_in_file",
+            payload={"path": str(artifact), "content": ""},
+            output="已修改文件: index.html",
+            ok=True,
+            tool_round=8,
+            tool_index=1,
+        )
+    )
+    closeout_snapshot = record_subagent_tool_progress(
+        SubagentToolProgressRequest(
+            task=task,
+            tool="write_file",
+            payload={"path": str(output_json), "content": '{"status":"AWAITING_ACCEPTANCE"}'},
+            output="已写入文件: output.json",
+            ok=True,
+            tool_round=9,
+            tool_index=1,
+        )
+    )
+    packet = json.loads(Path(task.agent_run_latest_session_continue_packet_json).read_text(encoding="utf-8"))
+
+    assert product_snapshot["latest_written_path"] == str(artifact)
+    assert closeout_snapshot["latest_written_path"] == str(artifact)
+    assert closeout_snapshot["closeout_written_path"] == str(output_json)
+    assert "placeholder_hash_link" in closeout_snapshot["next_action"]
+    assert closeout_snapshot["artifact_integrity"]["warning_codes"] == ["placeholder_hash_link"]
+    assert packet["work_progress"]["latest_written_path"] == str(artifact)
+    assert packet["work_progress"]["closeout_written_path"] == str(output_json)
+
+
 # LLM: packet summaries should prefer fresh write progress over older task summaries.
 # 函数用途: 防止 compact 续跑拿旧摘要当最新事实，导致子代理重复写已经完成的章节。
 def test_continue_packet_prefers_work_progress_summary(tmp_path: Path) -> None:
@@ -180,6 +319,22 @@ def test_continue_packet_prefers_work_progress_summary(tmp_path: Path) -> None:
     packet = json.loads(Path(task.agent_run_latest_session_continue_packet_json).read_text(encoding="utf-8"))
 
     assert packet["latest_summary"] == "最近 append_file 算法测试方案.md；已记录标题：第1章：排序；第2章：搜索"
+
+
+# LLM: _progress_task keeps progress snapshot tests focused on state transitions, not task boilerplate.
+# 函数用途: 创建带 agent_run_workspace/compactions 路径的最小子代理任务。
+def _progress_task(tmp_path: Path) -> SubAgentTask:
+    task = SubAgentTask(
+        id="run-progress",
+        root_id="run-progress",
+        task_dir=str(tmp_path / "legacy" / "run-progress"),
+        goal="写 HTML 产物",
+        thought="记录子代理写作进度。",
+        plan=["写文件", "刷新进度快照"],
+    )
+    task.agent_run_workspace_dir = str(tmp_path / "tasks" / "run-progress" / "agents" / "run-progress")
+    task.agent_run_compactions_dir = str(Path(task.agent_run_workspace_dir) / "compactions")
+    return task
 
 
 # LLM: _agent_with_local_compact creates a tiny context window so fake long responses trigger compact.

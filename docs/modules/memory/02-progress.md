@@ -311,3 +311,10 @@
 - package 固定包含 `latest_metadata.json`、`latest_summary.md`、`restore_refs.json` 和 append-only `session_compact_ledger.jsonl`。这些文件只保存恢复线索、状态、token budget 和 refs，不复制产物正文。
 - `latest_continue_packet.json` 会带 `session_compact` 字段，父级恢复/重新 dispatch 时可以优先读 metadata/summary，再读 checkpoint/summary/task refs。
 - 遗留：这不是完整的子代理模型会话内自动续跑。下一片要让 runner 在 package 就绪后受控接续，并用真实 E2E 验证一个子代理连续 compact 多次。
+
+## 2026-05-15 LocalStore memory_path isolation
+- 中文说明：真实子代理 E2E 发现临时 `memory_path` 仍可能从共享 LocalStore 索引里搜到旧任务记忆，导致 root 把旧任务当成本轮任务继续做。
+- `JsonlMemory` 写 LocalStore memory 索引时现在会记录 `metadata.memory_path`；搜索时只接受当前 `JsonlMemory.path` 对应的索引命中。
+- 旧的未带 `memory_path` 索引记录不会污染隔离 run；这些记录仍可通过原 JSONL/daily 文件链路读取，不作为当前临时记忆文件的 LocalStore 命中。
+- 行为边界不变：LocalStore 仍只是搜索加速和线索入口，权威事实仍在当前 memory JSONL、daily ledger、task/run workspace 和 archive refs。
+- 本轮 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_local_store.py::test_jsonl_memory_local_store_search_is_scoped_by_memory_path -p no:cacheprovider` -> passed。

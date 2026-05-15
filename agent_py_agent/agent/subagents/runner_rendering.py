@@ -7,10 +7,10 @@ from .models import (
     ChannelProbeReport,
     ChannelProbeResult,
     SubAgentExecutionContext,
-    SubAgentRunnerResult,
 )
 from .runner_rendering_context import render_context_bundle_section
 from .runner_rendering_sections import render_evidence_item_lines, render_granted_card_lines
+from .runner_result_rendering import render_runner_result_markdown
 
 
 # LLM: execution-context Markdown includes context bundle refs before capabilities so handoff checks are visible first.
@@ -205,85 +205,6 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
     return "\n".join(lines) + "\n"
 
 
-# LLM: render_runner_result_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 渲染或汇总执行器结果markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
-def render_runner_result_markdown(result: SubAgentRunnerResult) -> str:
-    status = "OK" if result.ok else "FAIL"
-    mode = "dry-run" if result.dry_run else "execute"
-    lines = _runner_result_header_lines(result, mode, status)
-    lines.extend(_runner_structured_output_lines(result))
-    lines.extend(_runner_result_file_lines(result))
-    return "\n".join(lines) + "\n"
-
-
-# LLM: _runner_result_header_lines 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 推进执行器结果headerlines的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
-def _runner_result_header_lines(
-    result: SubAgentRunnerResult,
-    mode: str,
-    status: str,
-) -> list[str]:
-    return [
-        "# SUBAGENT RUNNER RESULT",
-        "",
-        f"- run_id: {result.run_id}",
-        f"- created_at: {result.created_at}",
-        f"- mode: {mode}",
-        f"- status: {result.status}",
-        f"- verification_status: {result.verification_status}",
-        f"- ok: {status}",
-        f"- backend: {result.backend or 'none'}",
-        f"- tool_rounds: {result.tool_rounds}",
-        f"- runner_attempts: {result.runner_attempts}",
-        f"- runner_last_error: {result.runner_last_error or 'none'}",
-        f"- structured_output_found: {result.structured_output_found}",
-        f"- structured_output_ok: {result.structured_output_ok}",
-        f"- structured_repair_attempted: {result.structured_repair_attempted}",
-        f"- structured_repair_ok: {result.structured_repair_ok}",
-        f"- evidence_count: {result.evidence_count}",
-        f"- capability_request_count: {result.capability_request_count}",
-        f"- artifact_count: {result.artifact_count}",
-        f"- test_count: {result.test_count}",
-        f"- patch_count: {result.patch_count}",
-        f"- lesson_count: {result.lesson_count}",
-        "",
-        "## Message",
-        "",
-        result.message or "none",
-    ]
-
-
-# LLM: _runner_structured_output_lines 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 推进执行器structuredoutputlines的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
-def _runner_structured_output_lines(result: SubAgentRunnerResult) -> list[str]:
-    if result.structured_summary or result.blocked_reason or result.structured_parse_error:
-        lines = ["", "## Structured Output", ""]
-        if result.structured_summary:
-            lines.append(f"- summary: {result.structured_summary}")
-        if result.blocked_reason:
-            lines.append(f"- blocked_reason: {result.blocked_reason}")
-        if result.structured_parse_error:
-            lines.append(f"- parse_error: {result.structured_parse_error}")
-        if result.structured_repair_error:
-            lines.append(f"- repair_error: {result.structured_repair_error}")
-        return lines
-    return []
-
-
-# LLM: _runner_result_file_lines 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 推进执行器结果文件lines的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
-def _runner_result_file_lines(result: SubAgentRunnerResult) -> list[str]:
-    return [
-        "",
-        "## Files",
-        "",
-        f"- execution_context_json: {result.execution_context_json}",
-        f"- execution_context_file: {result.execution_context_file}",
-        f"- prompt_file: {result.prompt_file or 'none'}",
-        f"- response_file: {result.response_file or 'none'}",
-        f"- result_json: {result.result_json}",
-        f"- output_json: {result.output_json}",
-    ]
 # LLM: render_channel_probe_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 函数用途: 渲染或汇总通道probemarkdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def render_channel_probe_markdown(report: ChannelProbeReport) -> str:
