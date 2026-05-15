@@ -237,6 +237,10 @@ class TestSubAgentAcceptanceFindingMixin(_FindingSetupMixin, _FindingAssertMixin
 
         self._assert_finding(findings, "evidence_not_failed", expected_ok=False)
 
+
+class TestSubAgentAcceptanceCapabilityFindings(_FindingSetupMixin, _FindingAssertMixin, _FindingReportMixin):
+    """测试 capability 与后代证据相关的验收发现。"""
+
     def test_coordinator_write_file_requirement_accepts_descendant_evidence(self, tmp_path: Path):
         """coordinator 的 write_file 验收要求可以由后代 leaf 的真实写入证据满足。"""
         from agent_py_agent.agent.subagents.manager_acceptance_findings import (

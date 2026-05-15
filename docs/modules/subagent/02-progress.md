@@ -1325,3 +1325,14 @@
 - 已修正：目标产物识别统一走 `task_actual_target_tokens()`，优先读 `output.json` / `[SUBAGENT_RESULT]` 的结构化 refs；最终 closeout 和 board completion 共用“后续 verified 产物覆盖旧失败”的语义。
 - 已测试：focused tests 覆盖缺席文件合同、看板 not_complete/coverage、`/Users/...` artifact_path 和多文件 repair 覆盖；group03g 本地重放显示 final closeout 与 board 都不再把旧失败当 blocker。
 - 下一步：提交前跑 ruff、doc sync、strict code-size 和更宽 focused/full pytest；随后继续用自然语言三文件任务干净重跑，确认 root 不再早报喜或重复修旧失败。
+
+## 2026-05-15 子代理 5 阶段硬化：少限制、强协议、自然语言基线
+- 中文说明：按“子代理像不同记忆/权限边界的主代理”方向收敛。角色模板只影响职责重点，不再默认剥夺基础读写能力；root 不再因为没有细碎能力字段就卡住；层级深度和单次创建数默认不作为普通用户硬限制。
+- 已修正：`read_only` / `tool_preset=none` / review/bug-finder/coordinator 角色都保留基础读写和报告能力；显式 root/coordinator seed 会合并父级工具和内置协调工具，不会生成“没手没脚”的代理。
+- 已修正：runner-context `dispatch_subagents` 带 `parent_run_id` 时不再被 top-level 当前轮过滤误伤；小傻妞刚创建的小小傻妞可以立即被自己 dispatch 推进。
+- 已修正：`static_site_check` 写成 command 时会转回内置 `validation_method`，父级验收不再把读-only 网页检查器当陌生 shell 命令拦住。
+- 已新增：`operation_id` 接入 tool/subagent/compact typed envelopes；`SubAgentTask` 和 `SubAgentExecutionContext` 增加 `subagent_session_id`、`agent_thread_id` 等独立会话身份字段。
+- 已测试：自然语言家具单页 E2E 通过：root 只收到普通用户话术，创建 `小傻妞-家具总控`，该 coordinator 创建并 dispatch `小小傻妞-家具叶子`，leaf 写 `site/index.html`，最终 `done_verified=2`。
+- 配置收敛：默认 `capability_config.yaml` 只保留能力路由开关和任务内授权过期；前端配置计划去掉 `subagent_allowed_tools`、runner 超时、dynamic timeout、capability hops 等普通用户不该调的微参数。
+- 追加收口：隐藏兼容字段里的层级默认深度、单次 child 数、takeover 链深度统一改成 `0=不限制`；显式正数才进入限制/熔断。模型工具说明也同步去掉“默认 3 层”“read_only 只读”“none 无工具”等旧表述，避免自然派工被旧规则带偏。
+- 下一步：继续用中等规模自然语言任务做 root -> 小傻妞 -> 小小傻妞 的真实 E2E，重点观察质量角色后置、局部 QA 和恢复链路，而不是再加流程型限制。

@@ -240,15 +240,14 @@ type ConfigSchema = {
 | `memory` | 记忆配置 | `memory_path`, `memory_top_k`, `auto_save_memory`, `memory_archive_level` |
 | `compact_resume` | 压缩与恢复 | `memory_compact_auto_allow_apply`, `memory_resume_auto_context_enabled`, `memory_resume_auto_context_mode` |
 | `local_store` | 本地事实源 | `local_store_path`, `local_store_fts_enabled` |
-| `subagent` | 子代理 | `enable_subagents`, `subagent_automation_level`, `max_subagents`, `subagent_allowed_tools` |
+| `subagent` | 子代理 | `enable_subagents`, `subagent_mode`, `max_subagents`, `subagent_workspace`, `subagent_debug_trace_level` |
 | `role_template` | 角色模板 | `subagent_role_template_dirs` |
 | `workflow` | 工作流（预留） | `subagent_workflow_mode`, `subagent_builtin_workflows`, `subagent_workflow_review_rounds` |
-| `capability` | 能力路由 | `enable_capability_routing`, `capability_request_max_tokens`, `capability_escalation_max_hops` |
+| `capability` | 能力路由 | `enable_capability_routing`, `capability_grant_expires_after_task` |
 | `gateway` | Gateway | `gateway_workspace`, `gateway_port`, `gateway_heartbeat_interval`, `gateway_request_workers` |
 | `daemon` | 前台 Daemon | `daemon_planner`, `daemon_apply`, `daemon_execute_runners`, `daemon_interval` |
-| `scheduler` | 调度策略 | `scheduler_mode`, `runner_concurrency`, `runner_failure_policy` |
+| `scheduler` | 调度策略（高级兼容） | `scheduler_mode`, `runner_failure_policy` |
 | `acceptance` | 验收策略 | `acceptance_execute_tests`, `acceptance_test_timeout_seconds` |
-| `timeout` | 超时控制 | `dynamic_timeout_safety_margin`, `dynamic_timeout_min`, `dynamic_timeout_max` |
 | `notification` | 通知系统 | `notification_enabled`, `notification_store_path` |
 | `audit` | 审计日志 | `audit_enabled`, `audit_log_path` |
 | `concurrency` | 并发控制 | `concurrency_lock_enabled`, `task_lock_timeout_seconds` |
@@ -736,7 +735,7 @@ const toolWriteInlineMaxChars: ConfigField = {
 
 **查询参数**：
 - `root_run_id`：根 run_id
-- `max_depth`：最大深度（默认 5）
+- `max_depth`：最大展开深度；省略或 `0` 表示不限制，由前端分页/折叠控制展示量
 
 **响应**：
 ```json
@@ -2034,25 +2033,6 @@ const configSchemaExample: ConfigSchema = {
           order: 1,
         },
         {
-          key: "subagent_automation_level",
-          label: "自动化级别",
-          description:
-            "1: 极大优先子代理（>= 2 轮的任务都派子代理）；2: 中等优先（>= 4 轮）；3: 保守优先（>= 8 轮或明确指定）",
-          type: "choice",
-          defaultValue: 2,
-          choices: ["1", "2", "3"],
-          choiceLabels: {
-            "1": "1 - 极大优先（>= 2 轮）",
-            "2": "2 - 中等优先（>= 4 轮）",
-            "3": "3 - 保守优先（>= 8 轮）",
-          },
-          category: "subagent",
-          advanced: false,
-          restartRequired: false,
-          riskLevel: "medium",
-          order: 2,
-        },
-        {
           key: "max_subagents",
           label: "最大子代理数",
           description: "单次最多拆出多少个子任务。0 表示不设硬上限",
@@ -2065,7 +2045,7 @@ const configSchemaExample: ConfigSchema = {
           advanced: true,
           restartRequired: false,
           riskLevel: "medium",
-          order: 3,
+          order: 2,
         },
         {
           key: "subagent_debug_trace_level",
@@ -2087,32 +2067,39 @@ const configSchemaExample: ConfigSchema = {
           advanced: true,
           restartRequired: false,
           riskLevel: "low",
+          order: 3,
+        },
+        {
+          key: "subagent_mode",
+          label: "子代理模式",
+          description: "默认 trusted_local_hardening：少卡流程，优先把活干好；更保守模式后续再接。",
+          type: "choice",
+          defaultValue: "trusted_local_hardening",
+          choices: ["trusted_local_hardening", "balanced", "strict"],
+          category: "subagent",
+          advanced: false,
+          restartRequired: false,
+          riskLevel: "medium",
           order: 4,
         },
         {
-          key: "subagent_allowed_tools",
-          label: "默认工具白名单",
-          description: "子代理 runner 默认工具白名单。[] 表示自动判断",
-          type: "string_list",
-          defaultValue: [],
+          key: "subagent_workspace",
+          label: "子代理工作区",
+          description: "保存子代理 task、runner 日志、验收报告和 refs 的目录。",
+          type: "string",
+          defaultValue: "data/subagents",
           category: "subagent",
           advanced: true,
           restartRequired: false,
-          riskLevel: "medium",
+          riskLevel: "low",
           order: 5,
         },
         {
-          key: "subagent_workflow_mode",
-          label: "工作流模式",
-          description: "auto: 自动选择；manual: 明确指定时才用；off: 关闭工作流",
-          type: "choice",
-          defaultValue: "auto",
-          choices: ["auto", "manual", "off"],
-          choiceLabels: {
-            auto: "自动",
-            manual: "手动",
-            off: "关闭",
-          },
+          key: "subagent_role_template_dirs",
+          label: "角色模板目录",
+          description: "额外角色模板目录；[] 表示自动使用内置模板和工作区模板。",
+          type: "string_list",
+          defaultValue: [],
           category: "subagent",
           advanced: true,
           restartRequired: false,
@@ -2146,23 +2133,6 @@ const configSchemaExample: ConfigSchema = {
           order: 1,
         },
         {
-          key: "runner_concurrency",
-          label: "Runner 并发",
-          description: "Runner 并发数策略",
-          type: "choice",
-          defaultValue: "auto",
-          choices: ["auto", "off"],
-          choiceLabels: {
-            auto: "自适应",
-            off: "关闭",
-          },
-          category: "scheduler",
-          advanced: true,
-          restartRequired: false,
-          riskLevel: "medium",
-          order: 2,
-        },
-        {
           key: "runner_failure_policy",
           label: "Runner 失败策略",
           description: "auto: 最多 2 次；off: 不自动重试；数字: 最多尝试 N 次",
@@ -2174,22 +2144,7 @@ const configSchemaExample: ConfigSchema = {
           advanced: true,
           restartRequired: false,
           riskLevel: "medium",
-          order: 3,
-        },
-        {
-          key: "dynamic_timeout_safety_margin",
-          label: "超时安全边际",
-          description: "实际超时 = 预估耗时 * safety_margin",
-          type: "number",
-          defaultValue: 2.0,
-          min: 1.0,
-          max: 10.0,
-          step: 0.1,
-          category: "scheduler",
-          advanced: true,
-          restartRequired: false,
-          riskLevel: "low",
-          order: 4,
+          order: 2,
         },
         {
           key: "max_auto_retry_attempts",
@@ -2267,79 +2222,16 @@ const configSchemaExample: ConfigSchema = {
           order: 1,
         },
         {
-          key: "capability_request_max_tokens",
-          label: "能力请求最大 Token 数",
-          description: "限制能力请求描述的总长度",
-          type: "number",
-          defaultValue: 600,
-          min: 0,
-          max: 10000,
-          unit: "tokens",
+          key: "capability_grant_expires_after_task",
+          label: "授权随任务结束回收",
+          description: "建议保持开启，任务级临时能力结束后自动回收，避免污染后续任务。",
+          type: "boolean",
+          defaultValue: true,
           category: "capability",
-          advanced: true,
+          advanced: false,
           restartRequired: false,
           riskLevel: "low",
           order: 2,
-        },
-        {
-          key: "capability_escalation_max_hops",
-          label: "能力上抛最大层数",
-          description: "避免子代理 -> 父代理 -> 爷代理无限上抛",
-          type: "number",
-          defaultValue: 4,
-          min: 0,
-          max: 10,
-          unit: "层",
-          category: "capability",
-          advanced: true,
-          restartRequired: false,
-          riskLevel: "low",
-          order: 3,
-        },
-        {
-          key: "capability_candidate_limit",
-          label: "候选能力数量上限",
-          description: "父代理每次最多返回多少个候选 skill/tool card",
-          type: "number",
-          defaultValue: 5,
-          min: 0,
-          max: 50,
-          unit: "个",
-          category: "capability",
-          advanced: true,
-          restartRequired: false,
-          riskLevel: "low",
-          order: 4,
-        },
-        {
-          key: "subagent_heartbeat_timeout",
-          label: "子代理心跳超时（秒）",
-          description: "超过此时间没有心跳更新，视为需要 due-check",
-          type: "number",
-          defaultValue: 180,
-          min: 0,
-          max: 3600,
-          unit: "秒",
-          category: "capability",
-          advanced: true,
-          restartRequired: false,
-          riskLevel: "low",
-          order: 5,
-        },
-        {
-          key: "subagent_run_timeout",
-          label: "子代理运行超时（秒）",
-          description: "单次运行默认超时，避免长时间卡住",
-          type: "number",
-          defaultValue: 900,
-          min: 0,
-          max: 7200,
-          unit: "秒",
-          category: "capability",
-          advanced: true,
-          restartRequired: false,
-          riskLevel: "low",
-          order: 6,
         },
       ],
     },

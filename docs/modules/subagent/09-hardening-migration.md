@@ -66,6 +66,7 @@
 
 - 默认配置已经只暴露 8 个子代理相关用户项。
 - 旧子代理微参数进入 `HIDDEN_COMPAT_CONFIG_FIELDS` 兼容层：老配置仍能被代码识别，但默认样例和新开发规范不再鼓励用户调这些细碎开关。
+- 隐藏兼容限制项默认改为不限制：层级深度、单次 child 数和 takeover 链深度都采用 `0=unrestricted`，只有显式正数才作为测试或严格工作流的限制。
 - 角色模板/契约改成职责叠加，所有角色都有基础读写、汇报和能力申请工具；root 执行上下文会隐藏能力申请工具。
 - `context_bundle` 增加 `task_packet`，runner prompt 明确优先按结构化任务包执行。
 - 标准 JSON 工具调用增加别名归一，减少模型把工具名或路径字段写错造成的硬失败。
@@ -136,3 +137,11 @@
 - 已调整：`task_actual_target_tokens()` 统一目标识别，优先结构化 `output.json` 和 `[SUBAGENT_RESULT]`，再回退自然语言 goal；英文引用词 `use/include/import/load/link to` 需要词边界，避免 `/Users/...` 被误切。
 - 已调整：最终 closeout 和 board completion 都接受“旧失败/待验收 run 的目标文件已被后续 DONE/VERIFIED sibling 覆盖”这一事实，避免重复修和假阻塞。
 - 迁移原则：把事实从 prompt 里抽出来，放到 typed refs 和目标 token；prompt 可以自然，状态机必须稳定。
+
+## 2026-05-15 Code-Size Zero Refactor
+
+- 中文说明：本轮不新增流程限制，主要把已经跑通的子代理硬化代码拆成更稳的长期结构，目标是“子代理像换了记忆/任务空间的主代理一样能干活”，而不是继续靠大文件和细碎参数走钢丝。
+- 已拆分：`result_structured_evidence.py` 承接 evidence / evidence_packets / findings 解析；`filesystem_read_file.py` 承接 `read_file` 执行；`registry_payload_normalize.py` 承接工具 JSON 容错归一；`runner_timeout_policy.py`、`subagent_finalize_artifact_integrity.py`、`subagent_dispatch_closeout_*`、`context_bundle_*`、`static_site_*` 小模块承接各自边界。
+- 已清零：strict code-size 报告达到 `hard=0 high-risk=0 soft=0`。后续新增功能不允许靠调高阈值通过；接近 high-risk 时要优先拆模块、用 bundle，或把纯数据表移出控制流文件。
+- 已复验：focused 子代理/工具/配置测试 `157 passed`；自然语言层级基线和恢复相关 focused tests `29 passed`。
+- 开发要求：后续继续少写死流程。工具、路径、执行、自毁红线由系统守；角色选择、QA 范围、修复顺序、是否继续派工尽量交给 LLM + 模板 + workflow + 验收事实决定。

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from .execution_executor_helpers import (
+    ContentMatchRecordRequest,
     _command_completed_record,
     _command_error_record,
     _command_name,
@@ -161,7 +162,15 @@ class TestExecutor:
             return _file_record(test, "content_check", error="内容检查缺少 content_pattern")
         if not path.exists() or not path.is_file():
             return _file_record(test, "content_check", error="文件不存在", path=path)
-        return _content_match_record(test, path, pattern, exact=exact, expect_absent=expect_absent)
+        return _content_match_record(
+            ContentMatchRecordRequest(
+                test=test,
+                path=path,
+                pattern=pattern,
+                exact=exact,
+                expect_absent=expect_absent,
+            )
+        )
 
     # LLM: _resolve_test_path enforces that file validations cannot escape the executor workspace.
     # 函数用途: 把测试项里的相对路径解析为 workspace 内绝对路径；越界路径会返回错误。
@@ -243,7 +252,16 @@ _NEGATIVE_CONTENT_MARKERS = (
 # 函数用途: 把“无/不包含 xxx”这类验收项识别成 not_contains，避免父级把已修好的内容误判失败。
 def _content_match_expects_absent(test: dict[str, Any]) -> bool:
     mode = str(test.get("match_mode") or "").strip().lower()
-    if mode in {"not_contains", "absent", "missing", "not_present", "does_not_contain"}:
+    # LLM: Common model spellings for absence all mean the same negative-content assertion.
+    if mode in {
+        "not_contains",
+        "not_exists",
+        "not_exist",
+        "absent",
+        "missing",
+        "not_present",
+        "does_not_contain",
+    }:
         return True
     if bool(test.get("expect_absent") or test.get("negate") or test.get("should_not_contain")):
         return True

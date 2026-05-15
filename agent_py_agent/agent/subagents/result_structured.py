@@ -10,14 +10,17 @@ from dataclasses import dataclass
 from .capability_request_identity import find_equivalent_capability_request
 from .models import (
     CapabilityRequest,
-    EvidencePacket,
-    Finding,
     SubAgentParsedOutput,
     SubAgentTask,
     VerificationEvidence,
 )
 from .parsing import _normalize_runner_items, _split_allowed_items, _string_dict, _string_list
 from .result_artifact_evidence import merge_artifact_evidence
+from .result_structured_evidence import (
+    process_evidence_items,
+    process_evidence_packets,
+    process_findings,
+)
 from .utils import _merge_list, _new_id
 
 
@@ -175,154 +178,6 @@ def merge_actual_tools_for_unparsed(task: SubAgentTask, actual_tools: list[str] 
     return _merge_task_tools(MergeTaskToolsParams(task, [], [], actual_tools, [], now))
 
 
-# LLM: _process_evidence_items 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 推进证据条目的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
-def _process_evidence_items(parsed, task, now):
-    count = 0
-    for item in parsed.evidence:
-        summary = str(item.get("summary", "")).strip()
-        if not summary:
-            continue
-        task.evidence.append(
-            VerificationEvidence(
-                kind=str(item.get("kind", "note") or "note"),
-                summary=summary,
-                command=str(item.get("command", "") or ""),
-                path=str(item.get("path", "") or ""),
-                url=str(item.get("url", "") or ""),
-                ok=_evidence_ok(item, summary),
-                created_at=now,
-            )
-        )
-        count += 1
-    return count
-
-
-_NEGATIVE_EVIDENCE_HINTS = (
-    "无",
-    "没有",
-    "不包含",
-    "不存在",
-    "不得出现",
-    "禁止出现",
-    "must not contain",
-    "does not contain",
-    "not contain",
-    "absent",
-    "no ",
-)
-
-
-# LLM: _evidence_ok normalizes model-written negative content checks into requirement-pass semantics.
-# 函数用途: 子代理把“坏模式没搜到”写成 ok=false 时，结合 summary/content_pattern 判断为负向检查通过。
-def _evidence_ok(item: dict[str, object], summary: str) -> bool:
-    raw_ok = bool(item.get("ok", True))
-    if raw_ok:
-        return True
-    kind = str(item.get("kind", "") or "").lower()
-    pattern = str(item.get("content_pattern", "") or "").strip()
-    if kind == "content_check" and pattern and _negative_evidence_summary(summary):
-        return True
-    return False
-
-
-# LLM: _negative_evidence_summary keeps the heuristic narrow and multilingual.
-# 函数用途: 只把明显表达“不得包含/没有某内容”的证据当负向检查，避免普通失败被误放行。
-def _negative_evidence_summary(summary: str) -> bool:
-    text = " ".join(str(summary or "").lower().split())
-    return any(hint in text for hint in _NEGATIVE_EVIDENCE_HINTS)
-
-
-# LLM: _string_refs 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 处理stringrefs相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
-def _string_refs(value: object) -> list[str]:
-    return _string_list(value)
-
-
-# LLM: _float_confidence 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 处理floatconfidence相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
-def _float_confidence(value: object) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-# LLM: _process_evidence_packets 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 推进证据packets的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
-def _process_evidence_packets(parsed, task, now):
-    packets: list[dict[str, object]] = []
-    for item in parsed.evidence_packets:
-        claim = str(item.get("claim", "") or "").strip()
-        evidence_refs = _string_refs(item.get("evidence_refs", []))
-        artifact_refs = _string_refs(item.get("artifact_refs", []))
-        if not claim or not (evidence_refs or artifact_refs):
-            continue
-        packet = EvidencePacket(
-            id=str(item.get("id", "") or _new_id("evpkt")),
-            claim=claim,
-            checked_scope=str(item.get("checked_scope", "") or ""),
-            evidence_refs=evidence_refs,
-            artifact_refs=artifact_refs,
-            counter_evidence_refs=_string_refs(item.get("counter_evidence_refs", [])),
-            confidence=_float_confidence(item.get("confidence", 0.0)),
-            unresolved_risks=_string_refs(item.get("unresolved_risks", [])),
-            created_at=now,
-        )
-        task.evidence_packets.append(packet)
-        task.evidence_refs = _merge_list(task.evidence_refs, packet.evidence_refs)
-        task.artifact_refs = _merge_list(task.artifact_refs, packet.artifact_refs)
-        packets.append({
-            "id": packet.id,
-            "claim": packet.claim,
-            "checked_scope": packet.checked_scope,
-            "evidence_refs": packet.evidence_refs,
-            "artifact_refs": packet.artifact_refs,
-            "counter_evidence_refs": packet.counter_evidence_refs,
-            "confidence": packet.confidence,
-            "unresolved_risks": packet.unresolved_risks,
-            "created_at": packet.created_at,
-        })
-    return packets
-
-
-# LLM: _process_findings 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 推进findings的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
-def _process_findings(parsed, task, now):
-    findings: list[dict[str, object]] = []
-    for item in parsed.findings:
-        claim = str(item.get("claim", "") or "").strip()
-        evidence_packet_ids = _string_refs(item.get("evidence_packet_ids", []))
-        evidence_refs = _string_refs(item.get("evidence_refs", []))
-        if not claim or not (evidence_packet_ids or evidence_refs):
-            continue
-        finding = Finding(
-            id=str(item.get("id", "") or _new_id("finding")),
-            claim=claim,
-            status=str(item.get("status", "OPEN") or "OPEN"),
-            severity=str(item.get("severity", "") or ""),
-            confidence=_float_confidence(item.get("confidence", 0.0)),
-            evidence_packet_ids=evidence_packet_ids,
-            evidence_refs=evidence_refs,
-            counter_evidence_refs=_string_refs(item.get("counter_evidence_refs", [])),
-            created_at=now,
-        )
-        task.findings.append(finding)
-        task.evidence_refs = _merge_list(task.evidence_refs, finding.evidence_refs)
-        findings.append({
-            "id": finding.id,
-            "claim": finding.claim,
-            "status": finding.status,
-            "severity": finding.severity,
-            "confidence": finding.confidence,
-            "evidence_packet_ids": finding.evidence_packet_ids,
-            "evidence_refs": finding.evidence_refs,
-            "counter_evidence_refs": finding.counter_evidence_refs,
-            "created_at": finding.created_at,
-        })
-    return findings
-
-
 # LLM: _normalize_parsed_fields 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 函数用途: 解析并归一化parsed字段的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _normalize_parsed_fields(parsed):
@@ -356,9 +211,9 @@ def _process_structured_output(
         task.used_tools = _merge_list(task.used_tools, used_tools)
     task.used_skills = _merge_list(task.used_skills, used_skills)
 
-    structured_evidence_count = _process_evidence_items(parsed, task, now)
-    evidence_packets = _process_evidence_packets(parsed, task, now)
-    findings = _process_findings(parsed, task, now)
+    structured_evidence_count = process_evidence_items(parsed, task, now)
+    evidence_packets = process_evidence_packets(parsed, task, now)
+    findings = process_findings(parsed, task, now)
     structured_request_count, created_request_ids = _create_capability_requests_from_parsed(task, parsed, now)
     normalized = _normalize_parsed_fields(parsed)
     evidence_packets = merge_artifact_evidence(

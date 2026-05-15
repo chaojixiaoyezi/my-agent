@@ -20,6 +20,7 @@ class StaticSiteTestItemsRequest:
     workspace_root: Path
     existing_tests: list[dict[str, Any]]
     required_files: list[str] = field(default_factory=list)
+    site_root_hints: list[object] = field(default_factory=list)
 
 
 # LLM: inferred_static_site_items creates one refs-only static_site_check for HTML outputs.
@@ -40,7 +41,11 @@ def inferred_static_site_items(request: StaticSiteTestItemsRequest) -> list[dict
     else:
         if not declared_files:
             return []
-        site_root = _required_site_root(declared_files, request.workspace_root)
+        site_root = _required_site_root(
+            declared_files,
+            request.workspace_root,
+            site_root_hints=request.site_root_hints,
+        )
         required_files = declared_files
     item = {
         "name": "inferred static site check",
@@ -59,7 +64,11 @@ def inferred_static_site_items(request: StaticSiteTestItemsRequest) -> list[dict
 # LLM: _has_static_site_check keeps runner-declared checks from being duplicated.
 # 函数用途: 如果模型已经显式提供 static_site_check，自动推断不再追加第二条。
 def _has_static_site_check(tests: list[dict[str, Any]]) -> bool:
-    return any(str(item.get("validation_method") or "").strip().lower() == "static_site_check" for item in tests)
+    return any(
+        str(item.get("validation_method") or "").strip().lower() == "static_site_check"
+        and str(item.get("site_root") or "").strip()
+        for item in tests
+    )
 
 
 # LLM: _html_artifact_paths selects concrete HTML artifact refs without touching file contents.
@@ -135,9 +144,20 @@ def _merged_required_files(observed: list[str], declared: list[str]) -> list[str
 
 # LLM: _required_site_root gives empty-artifact outputs a deterministic static-site check root.
 # 函数用途: runner 漏写 artifacts 列表时，根据任务必需文件在常见产物目录里选择检查根目录。
-def _required_site_root(required_files: list[str], workspace_root: Path) -> Path:
+def _required_site_root(
+    required_files: list[str],
+    workspace_root: Path,
+    *,
+    site_root_hints: list[object] | None = None,
+) -> Path:
     root = Path(workspace_root).resolve()
-    candidates = [root / "artifacts", root / "deliverables", root / "outputs", root]
+    candidates = [
+        *_site_root_hint_candidates(site_root_hints or [], root),
+        root / "artifacts",
+        root / "deliverables",
+        root / "outputs",
+        root,
+    ]
     for candidate in candidates:
         if candidate.is_dir() and _candidate_contains_required_file(candidate, required_files):
             return candidate
@@ -145,6 +165,36 @@ def _required_site_root(required_files: list[str], workspace_root: Path) -> Path
         if candidate.is_dir():
             return candidate
     return root
+
+
+# LLM: _site_root_hint_candidates turns task write roots into static-site check roots.
+# 函数用途: 子任务写到专属产物目录且漏写 artifacts 时，用 allowed_write_roots 这类 refs 找回正确 site_root。
+def _site_root_hint_candidates(values: list[object], workspace_root: Path) -> list[Path]:
+    candidates: list[Path] = []
+    for value in values:
+        path = _workspace_candidate_root(value, workspace_root)
+        if path is None or path in candidates:
+            continue
+        candidates.append(path)
+    return candidates
+
+
+# LLM: _workspace_candidate_root keeps site-root hints bounded to the acceptance workspace.
+# 函数用途: 把文件级/目录级 hint 规整成 workspace 内目录；越界或空值直接忽略。
+def _workspace_candidate_root(value: object, workspace_root: Path) -> Path | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser()
+    path = candidate if candidate.is_absolute() else workspace_root / candidate
+    if path.suffix.lower() in {".html", ".htm", ".css", ".js"}:
+        path = path.parent
+    try:
+        resolved = path.resolve(strict=False)
+        resolved.relative_to(workspace_root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return resolved
 
 
 # LLM: _candidate_contains_required_file checks literal declared paths without walking large workspaces.

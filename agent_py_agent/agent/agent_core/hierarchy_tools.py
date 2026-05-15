@@ -22,7 +22,7 @@ from .runner_context import current_subagent_run_id
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
-_MAX_CHILDREN_PER_TOOL_CALL = 2
+_MAX_CHILDREN_PER_TOOL_CALL = 0
 
 
 # LLM: ScheduleRequestBuildParams bundles internal request-build inputs to keep signatures stable.
@@ -210,6 +210,8 @@ def _hierarchy_child_specs(params: dict[str, object]) -> list[HierarchyChildSpec
 # LLM: _bulk_schedule_error turns real-model long child batches into explicit retry guidance.
 # 函数用途: 限制 runner 单次层级调度最多 2 个 child，避免长 JSON 工具参数被截断后卡死。
 def _bulk_schedule_error(child_specs: list[HierarchyChildSpec]) -> str:
+    if _MAX_CHILDREN_PER_TOOL_CALL <= 0:
+        return ""
     if len(child_specs) <= _MAX_CHILDREN_PER_TOOL_CALL:
         return ""
     return (
@@ -273,7 +275,7 @@ def _hierarchy_target_error(agent, specs: list[HierarchyChildSpec]) -> str:
 # LLM: _schedule_max_depth accepts model-friendly relative depth when absolute depth would block all children.
 # 函数用途: 兼容模型把 max_depth=1 理解成“再开一层”的写法，同时保留顶层绝对 depth 语义。
 def _schedule_max_depth(agent, parent_run_id: str, params: dict[str, object]) -> int:
-    parsed = _non_negative_int(params.get("max_depth"), default=3)
+    parsed = _non_negative_int(params.get("max_depth"), default=0)
     if "max_depth" not in params:
         return parsed
     try:

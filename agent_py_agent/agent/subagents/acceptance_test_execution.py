@@ -17,7 +17,7 @@ from .execution_test_items import TestItemPreparationRequest, prepare_test_items
 from .parent_acceptance_auto_execution_reports import write_execution_followup
 from .parsing import _dict_list
 from .reports import AcceptanceReviewFinding
-from .static_required_files import required_static_files_for_task
+from .static_required_files import required_static_files_for_task, static_site_root_hints_for_task
 from .test_failure_classification import (
     TestFailureClassificationRequest,
     write_test_failure_classification,
@@ -50,13 +50,14 @@ def build_acceptance_test_execution_findings(
     options = request.options
     tests = _tests_with_child_acceptance_fallback(task, _dict_list(output.get("tests", [])))
     workspace_root = _acceptance_test_workspace(manager)
-    # LLM: Parent tests run from an inferred artifact cwd when runner emitted relative commands.
+    # LLM: Parent tests run from inferred artifact cwd and static-site roots when runners emit compact refs.
     tests = prepare_test_items(
         TestItemPreparationRequest(
             tests=tests,
             output=output,
             workspace_root=workspace_root,
             required_files=required_static_files_for_task(task),
+            site_root_hints=static_site_root_hints_for_task(task),
         )
     )
     executor = TestExecutor(workspace_root, timeout_seconds=options.test_timeout_seconds)

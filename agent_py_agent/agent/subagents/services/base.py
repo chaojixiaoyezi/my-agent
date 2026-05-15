@@ -110,6 +110,20 @@ def _load_parent_task(manager: Any, parent_id: str):
         return None
 
 
+# LLM: _session_identity_fields creates stable session/thread ids above concrete run attempts.
+# 函数用途: 为新 run 生成独立会话身份，并把 parent/root session refs 传下去；旧记录缺字段时按 run_id 兼容。
+def _session_identity_fields(run_id: str, parent_task: Any | None) -> dict[str, str]:
+    session_id = f"session-{run_id}"
+    parent_session = str(getattr(parent_task, "subagent_session_id", "") or "")
+    root_session = str(getattr(parent_task, "root_subagent_session_id", "") or parent_session or session_id)
+    return {
+        "subagent_session_id": session_id,
+        "agent_thread_id": f"thread-{run_id}",
+        "parent_subagent_session_id": parent_session,
+        "root_subagent_session_id": root_session,
+    }
+
+
 # LLM: SubAgentBaseService 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 类用途: 封装subagent基础服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
 class SubAgentBaseService:
@@ -234,6 +248,7 @@ class SubAgentBaseService:
         now = prepared["now"]
         workflow_plan_dict = prepared["workflow_plan_dict"]
 
+        parent_task = _load_parent_task(self.manager, params.parent_id)
         task = SubAgentTask(
             id=run_id,
             goal=params.goal,
@@ -247,6 +262,7 @@ class SubAgentBaseService:
             parent_id=params.parent_id,
             root_id=params.root_id or run_id,
             depth=params.depth,
+            **_session_identity_fields(run_id, parent_task),
             allowed_skills=params.allowed_skills or [],
             allowed_tools=params.allowed_tools or [],
             acceptance_checks=prepared["merged_acceptance"],
@@ -261,7 +277,7 @@ class SubAgentBaseService:
             workflow_plan=workflow_plan_dict or {},
             **prepared["paths"],
         )
-        task.inheritance_manifest = build_inheritance_manifest(_load_parent_task(self.manager, params.parent_id), task)
+        task.inheritance_manifest = build_inheritance_manifest(parent_task, task)
         return task
 
     # LLM: _finalize_task 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。

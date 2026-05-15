@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from .orchestration_run_scope import remembered_orchestration_run_ids
+
 
 # LLM: board_actionable_run_ids puts status buckets before verbose board rows for LLM recovery.
 # 函数用途: 把看板条目按状态整理成可继续 dispatch、验收或排障的 run id 列表，方便模型先看到关键 id。
@@ -14,6 +16,25 @@ def board_actionable_run_ids(items) -> dict[str, list[str]]:
         if key:
             buckets[key].append(item.id)
     return {key: value for key, value in buckets.items() if value}
+
+
+# LLM: scoped_board_items narrows model-facing board rows to the active root-turn scope when available.
+# 函数用途: 当前轮已经创建或调度子代理时，看板默认只展示同一轮相关 run，避免旧任务污染父级判断。
+def scoped_board_items(agent: object, items) -> list:
+    seen = remembered_orchestration_run_ids(agent)
+    rows = list(items or [])
+    if not seen:
+        return rows
+    root_ids = {
+        str(getattr(item, "root_id", "") or getattr(item, "id", "") or "")
+        for item in rows
+        if str(getattr(item, "id", "") or "") in seen
+    }
+    scoped = [
+        item for item in rows
+        if _board_item_in_scope(item, seen, root_ids)
+    ]
+    return scoped
 
 
 # LLM: board_completion_status puts the “do not report done yet” fact at the top of board payloads.
@@ -48,6 +69,16 @@ def board_completion_status(items) -> dict[str, object]:
             "max_runners": min(len(blockers), 8) or 1,
         },
     }
+
+
+# LLM: _board_item_in_scope mirrors final closeout scoping for board rows.
+# 函数用途: 精确 id 或同 root 子树属于当前轮；其它历史 run 不进入默认看板 payload。
+def _board_item_in_scope(item, seen: set[str], root_ids: set[str]) -> bool:
+    item_id = str(getattr(item, "id", "") or "")
+    if item_id in seen:
+        return True
+    root_id = str(getattr(item, "root_id", "") or "")
+    return bool(root_id and root_id in root_ids)
 
 
 # LLM: _item_blocks_completion mirrors final closeout semantics at board-read time.

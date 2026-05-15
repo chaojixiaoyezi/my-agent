@@ -46,6 +46,7 @@ def decode_action_envelope(
     | SubagentResultEnvelope
     | CompactContinuePacketEnvelope
     | SubagentScheduleEnvelope
+    | SubagentDispatchEnvelope
 ):
     kind = str(payload.get("kind") or "")
     if kind == "tool_call":

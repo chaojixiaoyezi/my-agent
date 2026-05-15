@@ -33,7 +33,7 @@ _CREATE_PARAMETER_DETAILS = {
         "请多次调用本工具，每次传不同 goal/agent_name，或让 coordinator 后续用 schedule_child_subagents.children 精细拆分。"
     ),
     "role": "优先用模板角色，而不是临时造小角色。可用角色模板索引：\n{role_template_index}",
-    "tool_preset": "省略时自动：由 role template、任务目标和调度器决定工具；`read_only` 只允许 list/read/search；`coding` 允许读写和替换文件；`none` 不授予工具。",
+    "tool_preset": "省略时自动：由 role template、任务目标和调度器决定工具；角色模板默认保留基础读写/汇报能力。`none` 只表示不覆盖自动策略。",
     "allowed_tools": "一般省略。只有受限环境才显式写 JSON 数组，例如 [\"read_file\", \"write_file\"]。",
     "acceptance_checks": "JSON 数组或多行文本，说明父代理后续怎样判断任务完成。",
     "plan": "JSON 数组或多行文本，给子代理的初始执行步骤。",
@@ -108,7 +108,7 @@ _SCHEDULE_CHILD_KEYWORDS = [
 _SCHEDULE_CHILD_PARAMETERS = {
     "children": "下一层子任务列表，每项包含 goal/role/agent_name 等字段，必填",
     "apply": "是否真正创建下一层任务；runner 内默认 true，显式 false 只预览",
-    "max_depth": "允许创建到的最大 depth，默认 3",
+    "max_depth": "允许创建到的最大 depth；省略或 0 表示不限制",
     "max_children": "父节点最多能拥有多少直接 child，0 表示不限制",
 }
 _SCHEDULE_CHILD_PARAMETER_DETAILS = {
@@ -119,12 +119,12 @@ _SCHEDULE_CHILD_PARAMETER_DETAILS = {
         "优先从这些角色模板索引里选 role：\n{role_template_index}"
     ),
     "apply": "runner 内省略时默认 true；显式 false 只返回会创建什么，适合先检查。",
-    "max_depth": "用来避免子代理无限递归创建下级节点。",
-    "max_children": "用来避免一个父节点一次挂太多直接孩子。",
+    "max_depth": "显式正数才限制层级；普通任务建议省略，让上级按任务需要决定。",
+    "max_children": "显式正数才限制直接孩子数量；普通任务建议省略或 0。",
 }
 _SCHEDULE_CHILD_EXAMPLES = [
     (
-        '{"tool":"schedule_child_subagents","apply":true,"max_depth":3,'
+        '{"tool":"schedule_child_subagents","apply":true,'
         '"children":[{"role":"child_coordinator","agent_name":"catalog-lead",'
         '"goal":"继续拆分商品目录实现任务",'
         '"allowed_tools":["schedule_child_subagents","dispatch_subagents","subagent_board","read_file"]}]}'
@@ -137,7 +137,7 @@ _SCHEDULE_CHILD_EXAMPLES = [
     ),
 ]
 _SCHEDULE_CHILD_COORDINATOR_RULES = (
-    "coordinator/lead 的权限应覆盖下级，便于检查、接管和救援；但正常职责不是亲自写最终业务产物。"
+    "coordinator/lead 的权限应覆盖下级，便于检查、接管和救援；小任务、用户明确要求或下级卡住时也可以亲自完成。"
     "请用本工具创建 worker/writer/leaf_worker，并把父级给定的路径、文件名和验收条件原样传下去。"
     "如果父级要求 4 层链路，深度未到孙孙层前先创建下一层 coordinator。"
     "需要通知下级时用 subagent_message：少量不同消息用 direct+descendants，大量统一消息用 broadcast+descendants；"

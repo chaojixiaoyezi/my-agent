@@ -39,7 +39,7 @@ class SubAgentManagerInitParams:
     role_template_dirs: list[str | Path] | None = None
     enable_self_learning: bool = False
     debug_trace_level: int = 0
-    takeover_chain_max_depth: int = 2
+    takeover_chain_max_depth: int = 0
 
 
 # LLM: SubAgentBaseMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

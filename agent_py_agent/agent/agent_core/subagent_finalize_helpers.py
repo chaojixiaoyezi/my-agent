@@ -6,11 +6,13 @@ from __future__ import annotations
 """finalized subagent runner persistence helpers kept outside the lifecycle mixin."""
 
 from dataclasses import dataclass
-from pathlib import Path
 
 from ..subagent import RecordRunnerResultParams, SubAgentParsedOutput
-from ..tooling.artifact_integrity import ArtifactIntegrityCheckRequest, check_artifact_integrity
 from ._subagent_repair_mixin import RecoverySnapshotParams
+from .subagent_finalize_artifact_integrity import (
+    artifact_integrity_override,
+    looks_like_success_closeout,
+)
 from .subagent_params import SubagentFinalizeParams
 from .subagent_session_compact_payload import subagent_session_compact_payload_from_result
 
@@ -40,7 +42,7 @@ class FinalizedRecoverySnapshotRequest:
 def record_finalized_runner_result(request: FinalizedRunnerRecordRequest):
     params = request.params
     structured = _coordinator_child_blockers_override(request, request.structured)
-    structured = _artifact_integrity_override(request, structured)
+    structured = artifact_integrity_override(request, structured)
     structured = _coordinator_child_completion_override(request, structured)
     structured = _coordinator_analysis_only_override(request, structured)
     repair_state = request.repair_state
@@ -75,7 +77,7 @@ def _coordinator_child_blockers_override(
 ) -> object:
     if not _is_coordinator_context(request.params.context):
         return structured
-    if not _looks_like_success_closeout(structured):
+    if not looks_like_success_closeout(structured):
         return structured
     blockers = _blocking_direct_child_refs(request.agent, request.params.run_id)
     if not blockers:
@@ -101,130 +103,6 @@ def _coordinator_child_blockers_override(
         ],
         next_actions=["dispatch_subagents", "recover_blocking_children"],
     )
-
-
-# LLM: _artifact_integrity_override makes obvious broken product files block before parent acceptance.
-# 函数用途: runner 自称完成但 HTML 产物半截或闭合后被追加时，改成 BLOCKED 并给父级明确修复动作。
-def _artifact_integrity_override(
-    request: FinalizedRunnerRecordRequest,
-    structured: object,
-) -> object:
-    if not _looks_like_success_closeout(structured):
-        return structured
-    blockers: list[str] = []
-    for artifact_path in _structured_artifact_paths(request, structured):
-        decision = check_artifact_integrity(
-            ArtifactIntegrityCheckRequest(path=artifact_path, require_complete=True)
-        )
-        if decision.ok:
-            continue
-        codes = ",".join(decision.blocker_codes[:4]) or "unknown"
-        blockers.append(f"{artifact_path}:{codes}")
-    if not blockers:
-        return structured
-    blocker_text = "; ".join(blockers[:4])
-    return _blocked_artifact_output(structured, blocker_text)
-
-
-# LLM: _blocked_artifact_output preserves useful runner metadata while changing the lifecycle state.
-# 函数用途: 把产物结构检查失败写入标准 SubAgentParsedOutput，供父级恢复和验收链路读取。
-def _blocked_artifact_output(structured: object, blocker_text: str) -> SubAgentParsedOutput:
-    existing_tests = list(getattr(structured, "tests", []) or [])
-    return SubAgentParsedOutput(
-        found=True,
-        ok=True,
-        status="BLOCKED",
-        summary=(
-            "artifact integrity check failed; repair the listed product files before parent acceptance. "
-            f"issues={blocker_text}"
-        ),
-        blocked_reason=f"artifact_integrity_failed:{blocker_text}",
-        failure_type="artifact_integrity_failed",
-        used_skills=list(getattr(structured, "used_skills", []) or []),
-        used_tools=list(getattr(structured, "used_tools", []) or []),
-        evidence=list(getattr(structured, "evidence", []) or []),
-        evidence_packets=list(getattr(structured, "evidence_packets", []) or []),
-        findings=list(getattr(structured, "findings", []) or []),
-        capability_requests=list(getattr(structured, "capability_requests", []) or []),
-        artifacts=list(getattr(structured, "artifacts", []) or []),
-        tests=[
-            *existing_tests,
-            {
-                "name": "artifact integrity",
-                "validation_method": "artifact_integrity",
-                "ok": False,
-                "summary": blocker_text,
-            },
-        ],
-        patches=list(getattr(structured, "patches", []) or []),
-        lessons=list(getattr(structured, "lessons", []) or []),
-        next_actions=["repair_artifacts", "rerun_artifact_integrity_check"],
-    )
-
-
-# LLM: _structured_artifact_paths resolves local artifact refs without reading artifact bodies into prompts.
-# 函数用途: 从 structured artifacts 中提取本地文件路径；相对路径按 task_dir 解析。
-def _structured_artifact_paths(request: FinalizedRunnerRecordRequest, structured: object) -> list[Path]:
-    paths: list[Path] = []
-    for artifact in getattr(structured, "artifacts", []) or []:
-        raw_path = _artifact_path_text(artifact)
-        if not raw_path:
-            continue
-        paths.append(_resolve_artifact_path(request.params.context, raw_path))
-    return paths
-
-
-# LLM: _artifact_path_text supports the artifact dict shapes already used by subagent outputs.
-# 函数用途: 兼容 path/file_path/artifact_path/ref 等常见字段，避免模型字段小差异导致漏检。
-def _artifact_path_text(artifact: object) -> str:
-    if isinstance(artifact, dict):
-        for key in ("path", "file_path", "artifact_path", "ref"):
-            value = artifact.get(key)
-            if value:
-                return str(value).strip()
-        return ""
-    return str(artifact).strip()
-
-
-# LLM: _resolve_artifact_path keeps relative artifact refs tied to the runner task directory.
-# 函数用途: 解析产物路径；绝对路径原样检查，相对路径优先落到 context.task_dir。
-def _resolve_artifact_path(context: object, raw_path: str) -> Path:
-    candidate = Path(raw_path)
-    if candidate.is_absolute():
-        return candidate
-    for root in _artifact_resolution_roots(context):
-        if root.is_file() or root.suffix:
-            if root.name == candidate.name:
-                return root
-            continue
-        joined = root / candidate
-        if joined.exists():
-            return joined
-    task_dir = str(getattr(context, "task_dir", "") or "").strip()
-    if task_dir:
-        return Path(task_dir) / candidate
-    return candidate
-
-
-# LLM: _artifact_resolution_roots lets product outputs beat internal task directories for relative refs.
-# 函数用途: 从 write_boundary 中提取可检查的真实产物根；修复 worker 常用相对 artifact 路径汇报。
-def _artifact_resolution_roots(context: object) -> list[Path]:
-    boundary = getattr(context, "write_boundary", {}) or {}
-    if not isinstance(boundary, dict):
-        return []
-    raw_roots = [
-        *(boundary.get("product_write_roots") or []),
-        *(boundary.get("allowed_write_roots") or []),
-    ]
-    roots: list[Path] = []
-    for raw_root in raw_roots:
-        text = str(raw_root or "").strip()
-        if not text:
-            continue
-        path = Path(text)
-        if path.is_absolute() and path not in roots:
-            roots.append(path)
-    return roots
 
 
 # LLM: _subagent_session_compact_payload converts save=False compact signals into task-local package facts.
@@ -350,17 +228,6 @@ def _looks_like_tool_limit_cleanup(structured: object) -> bool:
         ]
     ).lower()
     return any(token in probe_text for token in ("max_tool", "tool_round", "工具", "轮数", "上限"))
-
-
-# LLM: _looks_like_success_closeout recognizes model self-reports that would otherwise move a parent forward.
-# 函数用途: 只拦截“我完成了/待验收”类 coordinator 汇报，不影响真实 capability 或业务阻塞。
-def _looks_like_success_closeout(structured: object) -> bool:
-    if not bool(getattr(structured, "found", False)) or not bool(getattr(structured, "ok", False)):
-        return False
-    if getattr(structured, "capability_requests", []) or getattr(structured, "blocked_reason", ""):
-        return False
-    status = str(getattr(structured, "status", "") or "").strip().upper()
-    return status in {"", "AWAITING_ACCEPTANCE", "DONE", "COMPLETED", "SUCCESS", "OK"}
 
 
 # LLM: _verified_direct_child_refs checks refs-only child status before synthesizing coordinator completion.

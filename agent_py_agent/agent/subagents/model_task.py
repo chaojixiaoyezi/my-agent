@@ -155,6 +155,12 @@ class SubAgentTask:
     parent_id: str = ""
     root_id: str = ""
     depth: int = 0
+    # LLM: Session identity sits above run_id so retries/takeovers/compact continuation can share an owner.
+    # 字段用途: subagent_session_id 表示一个独立子代理会话，agent_thread_id 表示当前模型对话线程；parent/root 字段用于跨层恢复。
+    subagent_session_id: str = ""
+    agent_thread_id: str = ""
+    parent_subagent_session_id: str = ""
+    root_subagent_session_id: str = ""
     allowed_skills: list[str] = field(default_factory=list)
     allowed_tools: list[str] = field(default_factory=list)
     used_skills: list[str] = field(default_factory=list)

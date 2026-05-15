@@ -171,3 +171,18 @@ def test_takeover_run_chain_exhaustion_blocks_without_new_child(tmp_path) -> Non
     assert reloaded_takeover.status == "BLOCKED"
     assert reloaded_takeover.failure_type == "takeover_chain_exhausted"
     assert len(manager.list_runs()) == 2
+
+
+# LLM: zero takeover chain depth means the default path is unrestricted, not disabled.
+# 函数用途: 默认/显式 0 不应把第一个接管 run 直接判成链路耗尽。
+def test_takeover_chain_zero_allows_replacement_creation(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path, takeover_chain_max_depth=0)
+    source = manager.create_run(goal="真实长任务", thought="中途失败", plan=["继续"], role="worker")
+    source.status = "TIMEOUT"
+    source.failure_type = "runner_timeout"
+    manager.save(source)
+
+    result = manager.create_takeover_run(TakeoverRunRequest(source_run_id=source.id, reason="timeout"))
+
+    assert result.created is True
+    assert result.takeover_run_id

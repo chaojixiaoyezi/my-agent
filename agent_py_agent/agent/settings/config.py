@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .config_compat import HIDDEN_COMPAT_CONFIG_FIELDS
 from .config_io import load_simple_yaml, parse_scalar
 from .home_config import HomeProviderConfigFields
 from .memory import normalize_agent_memory_config
@@ -57,41 +58,6 @@ _LOG_LEVELS = {
     "error": logging.ERROR,
     "critical": logging.CRITICAL,
 }
-
-HIDDEN_COMPAT_CONFIG_FIELDS = {
-    "auto_bench_model_on_first_use",
-    "dynamic_timeout_max",
-    "dynamic_timeout_min",
-    "dynamic_timeout_safety_margin",
-    "max_auto_retry_attempts",
-    "max_auto_split_depth",
-    "model_speed_profile_path",
-    "runner_concurrency",
-    "runner_start_rate",
-    "runner_timeout_by_role",
-    "runner_timeout_seconds",
-    "scheduler_mode",
-    "subagent_allowed_tools",
-    "subagent_automation_level",
-    "subagent_board_limit",
-    "subagent_builtin_workflows",
-    "subagent_cli_default_limit",
-    "subagent_context_summary_inline_json_chars",
-    "subagent_context_summary_inline_text_chars",
-    "subagent_descendant_scan_limit",
-    "subagent_hierarchy_default_max_depth",
-    "subagent_hierarchy_max_children_per_tool_call",
-    "subagent_hierarchy_recovery_max_nodes",
-    "subagent_probe_default_limit",
-    "subagent_spawn_default_count",
-    "subagent_takeover_chain_max_depth",
-    "subagent_user_workflow_dirs",
-    "subagent_workflow_mode",
-    "subagent_workflow_review_rounds",
-    "task_max_grandchildren",
-    "task_max_subagents",
-}
-
 
 # LLM: AgentConfig 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
 # 类用途: 主运行配置对象，汇总模型、工具、gateway、子代理、通知和用户空间字段。
@@ -157,11 +123,11 @@ class AgentConfig(HomeProviderConfigFields):
     subagent_spawn_default_count: int = 3
     subagent_cli_default_limit: int = 20
     subagent_probe_default_limit: int = 20
-    subagent_hierarchy_default_max_depth: int = 2
+    subagent_hierarchy_default_max_depth: int = 0
     subagent_hierarchy_recovery_max_nodes: int = 200
-    subagent_hierarchy_max_children_per_tool_call: int = 2
+    subagent_hierarchy_max_children_per_tool_call: int = 0
     subagent_descendant_scan_limit: int = 128
-    subagent_takeover_chain_max_depth: int = 2
+    subagent_takeover_chain_max_depth: int = 0
     subagent_context_summary_inline_json_chars: int = 900
     subagent_context_summary_inline_text_chars: int = 500
     subagent_automation_level: int = 2

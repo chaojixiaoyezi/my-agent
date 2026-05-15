@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 
 from ._coercion import CoercionService
+from .runtime_tool_field_specs import TOOL_INT_FIELDS
 
 
 # LLM: _append_warning 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -73,7 +74,7 @@ class ToolFieldsService:
 # LLM: _normalize_tool_int_fields keeps ToolFieldsService.normalize below code-size limits.
 # 函数用途: 归一化工具、聊天和 CLI 展示相关整数配置。
 def _normalize_tool_int_fields(out: dict[str, object], defaults: object) -> list[str]:
-    return _apply_int_fields(out, defaults, _TOOL_INT_FIELDS)
+    return _apply_int_fields(out, defaults, TOOL_INT_FIELDS)
 
 
 # LLM: _normalize_tool_bool_fields keeps boolean tool prompt switches in one audited list.
@@ -120,45 +121,6 @@ def _normalize_dispatch_watch_interval(out: dict[str, object], defaults: object)
     return warnings
 
 
-_TOOL_INT_FIELDS = (
-    ("max_tool_rounds", 0, None),
-    ("tool_agent_budget_window_seconds", 0, None),
-    ("tool_agent_budget_max_calls", 0, None),
-    ("tool_artifact_read_budget_window_seconds", 0, None),
-    ("tool_artifact_read_budget_max_chars", 0, None),
-    ("tool_read_max_chars", 100, None),
-    ("tool_write_inline_max_chars", 100, 100_000),
-    ("tool_web_max_chars", 0, None),
-    ("tool_http_timeout", 1, None),
-    ("tool_shell_timeout", 1, None),
-    ("tool_catalog_limit", 0, None),
-    ("tool_catalog_offset", 0, None),
-    ("tool_catalog_entry_max_chars", 0, None),
-    ("tool_detail_max_chars", 0, None),
-    ("chat_history_max_turns", 1, None),
-    ("chat_history_assistant_preview_chars", 0, None),
-    ("chat_transcript_max_chars", 1000, None),
-    ("chat_collapse_preview_lines", 0, None),
-    ("chat_collapse_preview_chars", 0, None),
-    ("chat_context_window_chars", 1000, None),
-    ("chat_transcript_scroll_lines", 1, None),
-    ("cli_status_limit", 0, None),
-    ("cli_timeline_limit", 0, None),
-    ("cli_memory_list_limit", 0, None),
-    ("cli_memory_search_limit", 0, None),
-    ("cli_chat_memory_limit", 0, None),
-    ("cli_memory_archive_limit", 0, None),
-    ("cli_memory_route_limit", 0, None),
-    ("cli_local_search_limit", 0, None),
-    ("cli_local_search_preview_chars", -1, None),
-    ("cli_local_doctor_limit", 0, None),
-    ("cli_task_list_limit", 0, None),
-    ("cli_notification_limit", 0, None),
-    ("cli_audit_limit", 0, None),
-    ("cli_audit_cleanup_days", 0, None),
-)
-
-
 # LLM: SubagentBasicFieldsService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
 # 类用途: SubagentBasicFieldsService 封装 配置系统 的一组相关操作，供上层组合调用。
 class SubagentBasicFieldsService:
@@ -181,7 +143,7 @@ class SubagentBasicFieldsService:
                 ("subagent_probe_default_limit", 0, None),
                 ("subagent_hierarchy_default_max_depth", 0, None),
                 ("subagent_hierarchy_recovery_max_nodes", 0, None),
-                ("subagent_hierarchy_max_children_per_tool_call", 1, None),
+                ("subagent_hierarchy_max_children_per_tool_call", 0, None),
                 ("subagent_descendant_scan_limit", 1, None),
                 ("subagent_takeover_chain_max_depth", 0, None),
                 ("subagent_context_summary_inline_json_chars", 0, None),

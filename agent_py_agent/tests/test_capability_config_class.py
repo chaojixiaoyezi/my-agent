@@ -18,13 +18,13 @@ def test_capability_config_defaults():
     config = CapabilityConfig()
     assert config.enable_capability_routing is False
     assert config.capability_request_max_tokens == 600
-    assert config.capability_escalation_max_hops == 4
+    assert config.capability_escalation_max_hops == 0
     assert config.capability_candidate_limit == 5
     assert config.capability_bundle_max_tokens == 3000
     assert config.capability_fallback_max_attempts == 3
-    assert config.subagent_heartbeat_timeout == 180
-    assert config.subagent_run_timeout == 900
-    assert config.subagent_due_check_interval == 120
+    assert config.subagent_heartbeat_timeout == 0
+    assert config.subagent_run_timeout == 0
+    assert config.subagent_due_check_interval == 0
     assert config.subagent_min_evidence_for_done == 1
     assert config.subagent_no_progress_attempt_limit == 4
 
@@ -96,7 +96,7 @@ def test_load_capability_config_partial(tmp_path):
     assert config.enable_capability_routing is True
     # 未指定的用默认值
     assert config.capability_request_max_tokens == 600
-    assert config.capability_escalation_max_hops == 4
+    assert config.capability_escalation_max_hops == 0
 
 
 def test_load_capability_config_ignores_unknown_fields(tmp_path):

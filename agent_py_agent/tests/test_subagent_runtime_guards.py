@@ -8,10 +8,15 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.subagent_attempt_guard import stale_subagent_attempt_result
 from agent_py_agent.agent.agent_core.subagent_dispatch_closeout import (
+    DispatchCompletionRequest,
+    subagent_dispatch_completion_response,
+    subagent_dispatch_final_response_guard,
     subagent_dispatch_limit_response,
 )
+from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 
 
@@ -188,6 +193,86 @@ def test_dispatch_closeout_reads_users_path_from_result_json(tmp_path):
     assert "blocking_run_ids: (none)" in response.text
 
 
+# LLM: Final closeout must scope reused workspaces to the current root turn.
+# 函数用途: 旧 E2E run 留在同一 subagent_workspace 时，本轮只调度新 run，最终报告不能被旧失败节点污染。
+def test_dispatch_closeout_ignores_unseen_historical_runs(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    old = manager.create_run(goal="old failed run", thought="old", plan=["old"])
+    current = manager.create_run(goal="current page", thought="new", plan=["write"])
+    old.status = "BLOCKED"
+    old.verification_status = "FAILED"
+    current.status = "DONE"
+    current.verification_status = "VERIFIED"
+    manager.save(old)
+    manager.save(current)
+    agent = SimpleNamespace(
+        subagents=manager,
+        _current_subagent_run_id="",
+        _orchestration_run_ids_seen={current.id},
+    )
+
+    response = subagent_dispatch_limit_response(agent, backend="test")
+
+    assert response is not None
+    assert "blocking_run_ids: (none)" in response.text
+    assert current.id in response.text
+    assert old.id not in response.text
+
+
+# LLM: Natural Chinese test/acceptance result requirements should prevent worker-only deterministic closeout.
+# 函数用途: 用户说“根据测试结果和验收结果收口”时，只有 worker DONE 不能直接完成；必须回到模型继续派 tester/acceptor。
+def test_dispatch_completion_waits_for_natural_test_and_acceptance_results(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    worker = manager.create_run(goal="write three pages", thought="worker", plan=["write"])
+    worker.status = "DONE"
+    worker.verification_status = "VERIFIED"
+    manager.save(worker)
+    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id="")
+
+    response = subagent_dispatch_completion_response(
+        DispatchCompletionRequest(
+            agent=agent,
+            params=_tool_loop_params(
+                "请派小傻妞做页面，完成后根据小傻妞报告、测试结果和验收结果收口。"
+            ),
+            before_executed_count=0,
+            backend="test",
+        )
+    )
+
+    assert response is None
+
+
+# LLM: Final model text must not claim completion when a requested acceptance role never ran.
+# 函数用途: root 已经调度 worker/tester 但缺少用户要求的验收结果时，最终回复守卫必须拦住口头完成。
+def test_final_response_guard_blocks_missing_natural_acceptance_result(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    worker = manager.create_run(goal="write page", thought="worker", plan=["write"], role="worker")
+    tester = manager.create_run(goal="test page", thought="tester", plan=["test"], role="tester")
+    for task in (worker, tester):
+        task.status = "DONE"
+        task.verification_status = "VERIFIED"
+        manager.save(task)
+    agent = SimpleNamespace(
+        subagents=manager,
+        _current_subagent_run_id="",
+        _current_user_prompt="请安排小傻妞做页面，最后根据测试结果和最终验收结果收口。",
+        _orchestration_run_ids_seen={worker.id, tester.id},
+    )
+
+    response = subagent_dispatch_final_response_guard(
+        agent,
+        ModelResponse(text="页面已经全部完成。", backend="test"),
+        executed_tools=["dispatch_subagents"],
+    )
+
+    assert response is not None
+    assert "缺少" in response.text
+    assert "acceptor" in response.text
+    assert "create_subagents" in response.text
+    assert "页面已经全部完成" not in response.text
+
+
 def _write_output_json(path: str, payload: dict[str, object]) -> None:
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle)
@@ -195,3 +280,26 @@ def _write_output_json(path: str, payload: dict[str, object]) -> None:
 
 def _subagent_result_json(payload: dict[str, object]) -> str:
     return "[SUBAGENT_RESULT]\n" + json.dumps(payload, ensure_ascii=False) + "\n[/SUBAGENT_RESULT]"
+
+
+def _tool_loop_params(prompt: str) -> ToolLoopExecuteParams:
+    return ToolLoopExecuteParams(
+        user_prompt=prompt,
+        memories=[],
+        runtime_injections=[],
+        prompt_files=[],
+        tool_catalog_section="",
+        tool_recommendations_section="",
+        tool_context=[],
+        effective_on_chunk=None,
+        allowed_tools=None,
+        granted_capabilities=None,
+        write_boundary=None,
+        task_attributes=None,
+        request_id="req",
+        run_id="run",
+        task_id="task",
+        one_shot_tool_calls=set(),
+        executed_tools=["dispatch_subagents"],
+        archive_tool_calls=[],
+    )

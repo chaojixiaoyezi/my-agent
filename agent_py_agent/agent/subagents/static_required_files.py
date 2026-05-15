@@ -34,6 +34,17 @@ def required_static_files_for_task(task: Any) -> list[str]:
     return _scope_to_allowed_write_files(files, getattr(task, "allowed_write_roots", []) or [])
 
 
+# LLM: static_site_root_hints_for_task exposes write-root refs to parent static-site acceptance.
+# 函数用途: 子代理漏写 artifacts 时，父级可用 allowed_write_roots 找到正确任务产物目录，而不是猜全局 deliverables。
+def static_site_root_hints_for_task(task: Any) -> list[str]:
+    hints: list[str] = []
+    for value in getattr(task, "allowed_write_roots", []) or []:
+        raw = str(value or "").strip()
+        if raw and raw not in hints:
+            hints.append(raw)
+    return hints
+
+
 # LLM: _scope_to_allowed_write_files prevents child acceptance from inheriting sibling deliverables.
 # 函数用途: 如果当前子任务的 allowed_write_roots 明确是具体静态文件，只验收这些文件，不扫父级其它 sibling 文件。
 def _scope_to_allowed_write_files(files: list[str], allowed_write_roots: list[object]) -> list[str]:

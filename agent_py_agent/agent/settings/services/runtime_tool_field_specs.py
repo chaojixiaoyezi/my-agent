@@ -1,0 +1,42 @@
+# LLM: Runtime tool integer field specs are data, not normalization control flow.
+# 模块用途: 集中维护工具、聊天和 CLI 相关整数配置的最小值/最大值规则。
+
+from __future__ import annotations
+
+TOOL_INT_FIELDS = (
+    ("max_tool_rounds", 0, None),
+    ("tool_agent_budget_window_seconds", 0, None),
+    ("tool_agent_budget_max_calls", 0, None),
+    ("tool_artifact_read_budget_window_seconds", 0, None),
+    ("tool_artifact_read_budget_max_chars", 0, None),
+    ("tool_read_max_chars", 100, None),
+    ("tool_write_inline_max_chars", 100, 100_000),
+    ("tool_web_max_chars", 0, None),
+    ("tool_http_timeout", 1, None),
+    ("tool_shell_timeout", 1, None),
+    ("tool_catalog_limit", 0, None),
+    ("tool_catalog_offset", 0, None),
+    ("tool_catalog_entry_max_chars", 0, None),
+    ("tool_detail_max_chars", 0, None),
+    ("chat_history_max_turns", 1, None),
+    ("chat_history_assistant_preview_chars", 0, None),
+    ("chat_transcript_max_chars", 1000, None),
+    ("chat_collapse_preview_lines", 0, None),
+    ("chat_collapse_preview_chars", 0, None),
+    ("chat_context_window_chars", 1000, None),
+    ("chat_transcript_scroll_lines", 1, None),
+    ("cli_status_limit", 0, None),
+    ("cli_timeline_limit", 0, None),
+    ("cli_memory_list_limit", 0, None),
+    ("cli_memory_search_limit", 0, None),
+    ("cli_chat_memory_limit", 0, None),
+    ("cli_memory_archive_limit", 0, None),
+    ("cli_memory_route_limit", 0, None),
+    ("cli_local_search_limit", 0, None),
+    ("cli_local_search_preview_chars", -1, None),
+    ("cli_local_doctor_limit", 0, None),
+    ("cli_task_list_limit", 0, None),
+    ("cli_notification_limit", 0, None),
+    ("cli_audit_limit", 0, None),
+    ("cli_audit_cleanup_days", 0, None),
+)

@@ -26,6 +26,7 @@ class TestItemPreparationRequest:
     output: dict[str, object]
     workspace_root: str | Path
     required_files: list[str] = field(default_factory=list)
+    site_root_hints: list[object] = field(default_factory=list)
 
 
 # LLM: TestItemPreparationContext bundles derived artifact indexes for one preparation pass.
@@ -67,6 +68,7 @@ def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, An
             workspace_root=workspace_root,
             existing_tests=prepared,
             required_files=request.required_files,
+            site_root_hints=request.site_root_hints,
         )
     )
     if inferred:
@@ -107,8 +109,27 @@ def _prepared_test_item(
 # 函数用途: 把 pytest/unittest 这类模型常写的验证方式转成 command，交给 TestExecutor 的 allowlist 校验。
 def _normalize_validation_method(item: dict[str, Any]) -> None:
     method = str(item.get("validation_method") or "command").strip().lower()
+    if method == "command" and _static_site_command_alias(item.get("command")):
+        item["validation_method"] = "static_site_check"
+        item.pop("command", None)
+        return
     if method in {"pytest", "unittest"} and str(item.get("command") or "").strip():
         item["validation_method"] = "command"
+
+
+# LLM: _static_site_command_alias treats common model pseudo-commands as native checks.
+# 函数用途: 模型把内置 static_site_check 写进 command 字段时，转成 validation_method，避免被 shell allowlist 误拦。
+def _static_site_command_alias(command: object) -> bool:
+    raw = str(command or "").strip()
+    if not raw:
+        return False
+    try:
+        parts = shlex.split(raw)
+    except ValueError:
+        return False
+    if not parts:
+        return False
+    return parts[0].strip().lower().replace("-", "_") == "static_site_check"
 
 
 # LLM: _drop_non_executable_model_checklist_items prevents malformed runner checklists from overriding inferred checks.

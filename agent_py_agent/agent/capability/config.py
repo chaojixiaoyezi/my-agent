@@ -26,13 +26,13 @@ class CapabilityConfig:
 
     enable_capability_routing: bool = False
     capability_request_max_tokens: int = 600
-    capability_escalation_max_hops: int = 4
+    capability_escalation_max_hops: int = 0
     capability_candidate_limit: int = 5
     capability_bundle_max_tokens: int = 3000
     capability_fallback_max_attempts: int = 3
-    subagent_heartbeat_timeout: int = 180
-    subagent_run_timeout: int = 900
-    subagent_due_check_interval: int = 120
+    subagent_heartbeat_timeout: int = 0
+    subagent_run_timeout: int = 0
+    subagent_due_check_interval: int = 0
     subagent_min_evidence_for_done: int = 1
     subagent_no_progress_attempt_limit: int = 4
     capability_request_max_tried_items: int = 0

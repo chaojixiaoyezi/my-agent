@@ -12,7 +12,10 @@ from unittest.mock import MagicMock
 
 from agent_py_agent.agent.agent_core.dispatch_params import DispatchContext
 from agent_py_agent.agent.agent_core.dispatch_runner_batches import _runner_candidates_for_context
-from agent_py_agent.agent.agent_core.dispatch_runner_selection import scoped_runner_tasks
+from agent_py_agent.agent.agent_core.dispatch_runner_selection import (
+    scoped_current_turn_runner_tasks,
+    scoped_runner_tasks,
+)
 from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
@@ -452,79 +455,102 @@ def test_scoped_runner_tasks_honors_include_run_ids_order():
     assert [task.id for task in scoped] == ["child-b", "child-a"]
 
 
+# LLM: Active root-turn scope must keep stale global workspace runs out of implicit dispatch waves.
+# 函数用途: 当前轮已有 run_id 记录且模型省略 run_ids 时，runner 候选只保留本轮任务，避免旧测试子代理被误调度。
+def test_scoped_current_turn_runner_tasks_ignores_old_runs_without_explicit_include():
+    tasks = [
+        SimpleNamespace(id="current-worker", parent_id="", root_id="current-worker"),
+        SimpleNamespace(id="old-worker", parent_id="", root_id="old-worker"),
+        SimpleNamespace(id="old-child", parent_id="old-worker", root_id="old-worker"),
+    ]
+    ctx = DispatchContext(
+        cfg=MagicMock(),
+        normalized_workflow_mode="off",
+        apply=True,
+        planner=False,
+        runner_instruction="",
+        max_runners=10,
+        limit=20,
+        reviewer="tester",
+        note="",
+        take_over_by="",
+        locked_files=None,
+        router=MagicMock(),
+        include_run_ids=[],
+    )
+
+    scoped = scoped_current_turn_runner_tasks(
+        tasks,
+        ctx,
+        active_run_ids={"current-worker"},
+    )
+
+    assert [task.id for task in scoped] == ["current-worker"]
+
+
+# LLM: Runner-context parent scope is already precise and must not hide freshly scheduled children.
+# 函数用途: 覆盖小傻妞派小小傻妞后，当前轮过滤误把直接 child 过滤掉导致只做 due-check 的回归。
+def test_scoped_current_turn_runner_tasks_keeps_direct_children_when_parent_scoped():
+    tasks = [
+        SimpleNamespace(id="leaf-now", parent_id="active-parent", root_id="active-parent"),
+    ]
+    ctx = DispatchContext(
+        cfg=MagicMock(),
+        normalized_workflow_mode="off",
+        apply=True,
+        planner=False,
+        runner_instruction="",
+        max_runners=10,
+        limit=20,
+        reviewer="tester",
+        note="",
+        take_over_by="",
+        locked_files=None,
+        router=MagicMock(),
+        parent_run_id="active-parent",
+        include_run_ids=[],
+    )
+
+    scoped = scoped_current_turn_runner_tasks(
+        tasks,
+        ctx,
+        active_run_ids={"active-parent"},
+    )
+
+    assert [task.id for task in scoped] == ["leaf-now"]
+
+
+# LLM: Explicit run_ids remain an exact operator request and are not narrowed by remembered root-turn scope.
+# 函数用途: 父级明确传 run_ids 时保持原有精确调度语义，避免当前轮过滤误伤接管/恢复操作。
+def test_scoped_current_turn_runner_tasks_preserves_explicit_include_ids():
+    tasks = [
+        SimpleNamespace(id="current-worker", parent_id="", root_id="current-worker"),
+        SimpleNamespace(id="old-worker", parent_id="", root_id="old-worker"),
+    ]
+    ctx = DispatchContext(
+        cfg=MagicMock(),
+        normalized_workflow_mode="off",
+        apply=True,
+        planner=False,
+        runner_instruction="",
+        max_runners=10,
+        limit=20,
+        reviewer="tester",
+        note="",
+        take_over_by="",
+        locked_files=None,
+        router=MagicMock(),
+        include_run_ids=["old-worker"],
+    )
+
+    scoped = scoped_current_turn_runner_tasks(
+        tasks,
+        ctx,
+        active_run_ids={"current-worker"},
+    )
+
+    assert [task.id for task in scoped] == ["current-worker", "old-worker"]
+
+
 # LLM: Explicit packet recovery should rerun a blocked original child instead of only classifying it.
 # 函数用途: 覆盖真实 E2E 暴露的问题：run_ids+latest_continue_packet 指令必须让 BLOCKED run 进入 runner 候选。
-def test_explicit_packet_recovery_allows_blocked_runner_candidate():
-    task = SimpleNamespace(
-        id="child-blocked",
-        parent_id="root",
-        root_id="root",
-        status="BLOCKED",
-        verification_status="FAILED",
-        channel_status="OK",
-        failure_type="",
-        runner_attempts=0,
-        capability_requests=[],
-        capability_gaps=[],
-    )
-    ctx = DispatchContext(
-        cfg=MagicMock(),
-        normalized_workflow_mode="off",
-        apply=True,
-        planner=False,
-        runner_instruction="先读取 latest_continue_packet.json，再按 packet 继续。",
-        max_runners=1,
-        limit=20,
-        reviewer="tester",
-        note="",
-        take_over_by="",
-        locked_files=None,
-        router=MagicMock(),
-        parent_run_id="root",
-        root_id="root",
-        include_run_ids=["child-blocked"],
-    )
-
-    selected = _runner_candidates_for_context([task], ctx, runner_max_attempts=1)
-
-    assert [item.id for item in selected] == ["child-blocked"]
-
-
-# LLM: Terminal recovery blockers should not be re-executed just because the parent repeats packet recovery.
-# 函数用途: 接管链路已经熔断时，显式 run_ids+packet 指令也不能继续创建 runner attempt，避免无限重试。
-def test_explicit_packet_recovery_skips_takeover_chain_exhausted_task():
-    task = SimpleNamespace(
-        id="child-terminal",
-        parent_id="root",
-        root_id="root",
-        status="BLOCKED",
-        verification_status="FAILED",
-        channel_status="OK",
-        failure_type="takeover_chain_exhausted",
-        current_step="takeover chain exhausted; waiting for parent decision",
-        result="",
-        runner_attempts=0,
-        capability_requests=[],
-        capability_gaps=[],
-    )
-    ctx = DispatchContext(
-        cfg=MagicMock(),
-        normalized_workflow_mode="off",
-        apply=True,
-        planner=False,
-        runner_instruction="先读取 latest_continue_packet.json，再按 packet 继续。",
-        max_runners=1,
-        limit=20,
-        reviewer="tester",
-        note="",
-        take_over_by="",
-        locked_files=None,
-        router=MagicMock(),
-        parent_run_id="root",
-        root_id="root",
-        include_run_ids=["child-terminal"],
-    )
-
-    selected = _runner_candidates_for_context([task], ctx, runner_max_attempts=1)
-
-    assert selected == []

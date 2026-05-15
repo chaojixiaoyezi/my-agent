@@ -231,7 +231,7 @@ def test_build_execution_context_write_boundary(mock_manager, tmp_path):
     assert "locked_files" in context.write_boundary
     assert context.write_boundary["role"] == "coordinator"
     assert context.write_boundary["product_write_roots"] == [str(product_root)]
-    assert context.write_boundary["product_write_policy"] == "delegate"
+    assert context.write_boundary["product_write_policy"] == "direct"
     assert context.write_boundary["skill_sparks_file"].endswith("skill_sparks.md")
     assert str(run_workspace) in context.write_boundary["allowed_write_roots"]
 

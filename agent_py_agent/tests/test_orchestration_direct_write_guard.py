@@ -80,8 +80,8 @@ def test_delegate_only_prompt_allows_leaf_worker_product_write():
     assert result is None
 
 
-def test_delegate_only_prompt_still_blocks_coordinator_product_write():
-    """coordinator 可以写协调报告，但不能代替 worker 直接写最终页面。"""
+def test_delegate_only_prompt_allows_active_coordinator_product_write():
+    """只要已经是被派出的 active runner，角色不会再剥夺基础写入能力。"""
     result = maybe_block_delegate_only_direct_write(
         DelegateOnlyDirectWriteGuardRequest(
             agent=_runner_agent("coordinator"),
@@ -90,8 +90,26 @@ def test_delegate_only_prompt_still_blocks_coordinator_product_write():
         )
     )
 
-    assert result is not None
-    assert result.ok is False
+    assert result is None
+
+
+# LLM: QA roles may write report artifacts to deliverables without becoming product writers.
+# 函数用途: tester/acceptor 生成 test_report/acceptance_report 是交接产物，不应被当成越权写业务页面。
+def test_delegate_only_prompt_allows_quality_role_report_write_to_deliverables():
+    for role, file_name in [("tester", "test_report.md"), ("acceptor", "acceptance_report.md")]:
+        result = maybe_block_delegate_only_direct_write(
+            DelegateOnlyDirectWriteGuardRequest(
+                agent=_runner_agent(role),
+                user_prompt="请派小傻妞来做，不要你自己亲自写页面。",
+                payload={
+                    "tool": "write_file",
+                    "path": f"/tmp/workspace/deliverables/{file_name}",
+                    "content": "# report\n",
+                },
+            )
+        )
+
+        assert result is None
 
 
 def test_delegate_only_prompt_allows_read_only_shell_commands():

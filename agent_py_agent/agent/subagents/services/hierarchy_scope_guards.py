@@ -26,13 +26,11 @@ _ACTIVE_DUPLICATE_STATUSES = {"PLANNING", "RUNNING", "BLOCKED", "AWAITING_ACCEPT
 def schedule_block_reason(parent: SubAgentTask, request: Any) -> str:
     if not request.child_specs:
         return "no_child_specs"
-    if parent.depth + 1 > request.max_depth:
+    # LLM: max_depth=0 means unlimited; explicit positive values remain an override for tests/strict workflows.
+    if request.max_depth > 0 and parent.depth + 1 > request.max_depth:
         return f"max_depth_exceeded:{request.max_depth}"
     if request.max_children > 0 and len(parent.child_ids) + len(request.child_specs) > request.max_children:
         return f"max_children_exceeded:{request.max_children}"
-    mixed_reason = _mixed_coordinator_leaf_reason(request.child_specs)
-    if mixed_reason:
-        return mixed_reason
     drift_reason = _child_write_root_drift_reason(parent, request)
     if drift_reason:
         return drift_reason
@@ -60,14 +58,17 @@ def active_duplicate_child_reason(manager: Any, parent: SubAgentTask, request: A
 # LLM: schedule_warnings reports soft coordination risks while allowing the parent LLM to decide.
 # 函数用途: 返回重复文件目标等可审计风险；不在底层阻断调度，避免修复/协作写同一文件时卡死。
 def schedule_warnings(manager: Any, parent: SubAgentTask, request: Any) -> list[str]:
-    warnings = duplicate_verified_leaf_target_warnings(
+    warnings: list[str] = []
+    if mixed_reason := _mixed_coordinator_leaf_reason(request.child_specs):
+        warnings.append(mixed_reason)
+    warnings.extend(duplicate_verified_leaf_target_warnings(
         LeafTargetDedupeRequest(
             manager=manager,
             parent=parent,
             schedule_request=request,
             leaf_like=_is_leaf_like,
         )
-    )
+    ))
     warnings.extend(duplicate_child_domain_warnings(manager, parent, request))
     return warnings
 

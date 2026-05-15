@@ -40,10 +40,12 @@ def test_tool_call_envelope_round_trips_with_scope_and_reserved_fields():
 
     assert payload["schema_version"] == ACTION_PROTOCOL_SCHEMA_VERSION
     assert payload["kind"] == "tool_call"
+    assert payload["operation_id"] == "tool_call:call-1"
     assert payload["scope"]["reserved"] == {"future": "ok"}
     assert payload["reserved"] == {"parser": "tool_block"}
     assert isinstance(decoded, ToolCallEnvelope)
     assert decoded.call_id == "call-1"
+    assert decoded.operation_id == "tool_call:call-1"
     assert decoded.scope.owner_type == "subagent_run"
     assert decoded.args == {"path": "README.md"}
 
@@ -60,6 +62,7 @@ def test_tool_call_envelope_from_payload_separates_tool_name_from_args():
     assert envelope.tool == "write_file"
     assert envelope.args == {"path": "out.txt", "content": "hello"}
     assert envelope.call_id == "call-write"
+    assert envelope.operation_id == "tool_call:call-write"
     assert envelope.source == "legacy_text_protocol"
 
 
@@ -94,8 +97,10 @@ def test_tool_call_result_and_subagent_result_envelopes_are_decodeable():
     decoded_subagent = decode_action_envelope(subagent.to_dict())
 
     assert isinstance(decoded_result, ToolCallResultEnvelope)
+    assert decoded_result.operation_id == "tool_call_result:call-1"
     assert decoded_result.output_ref == "memory_archive/artifacts/tool-call-1.txt"
     assert isinstance(decoded_subagent, SubagentResultEnvelope)
+    assert decoded_subagent.operation_id == "subagent_result:result-1"
     assert decoded_subagent.actual_tools == ["read_file"]
     assert decoded_subagent.artifact_refs[0].artifact_id == "art-1"
     assert decoded_subagent.evidence_refs[0].claim == "file exists"
@@ -155,6 +160,7 @@ def test_subagent_schedule_envelope_unifies_create_and_child_schedule_payloads()
 
     assert isinstance(decoded, SubagentScheduleEnvelope)
     assert decoded.kind == "subagent_schedule"
+    assert decoded.operation_id == "subagent_schedule:schedule_child_subagents:child-1"
     assert decoded.tool == "schedule_child_subagents"
     assert decoded.created_run_ids == ["child-1"]
     assert decoded.items[0]["agent_name"] == "小小傻妞-leaf"

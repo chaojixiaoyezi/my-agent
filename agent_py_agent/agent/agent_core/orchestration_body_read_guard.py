@@ -9,52 +9,21 @@ from typing import Any
 
 from ..subagents.services.qa_role_contract import qa_role_identity_roles
 from ..tools import ToolExecutionResult
+from .orchestration_body_read_refs import (
+    BODY_READ_TOOLS,
+    METADATA_FILE_NAMES,
+    blocked_message,
+    is_orchestration_artifact_read,
+    looks_like_runtime_path,
+)
 from .orchestration_delegation_intent import (
     prompt_requests_refs_only_delegation,
     user_authorized_parent_body_read,
 )
+from .orchestration_run_scope import remembered_orchestration_run_ids
 from .orchestration_shell_body_read import ShellBodyReadPathRequest, shell_body_read_paths
 from .runner_context import current_subagent_run_id
 
-_BODY_READ_TOOLS = {"read_file", "read_artifact", "run_command"}
-_ORCHESTRATION_ARTIFACT_PREFIXES = (
-    "dispatch_subagents-",
-    "subagent_board-",
-    "subagents_due_check-",
-    "subagents_plan_actions-",
-    "subagents_apply_actions-",
-)
-_METADATA_FILE_NAMES = {
-    "ACCEPTANCE.md",
-    "CONTEXT_BUNDLE.md",
-    "HANDOFF.md",
-    "STATUS.md",
-    "TAKEOVER_READINESS.md",
-    "acceptance_review.json",
-    "checkpoint.json",
-    "compaction_ledger.jsonl",
-    "context_bundle.json",
-    "failing_tests.json",
-    "failure_handoff.json",
-    "final_report.md",
-    "latest_continue_packet.json",
-    "latest_metadata.json",
-    "latest_summary.md",
-    "output.json",
-    "parent_acceptance_auto_followup.json",
-    "progress.md",
-    "runner_result.json",
-    "session_compact_ledger.jsonl",
-    "status_report.json",
-    "subagent_board.json",
-    "subagent_dispatch_report.json",
-    "summary.md",
-    "takeover_readiness.json",
-    "task.md",
-    "task.json",
-    "test_execution.json",
-    "timeline.jsonl",
-}
 _MAX_DESCENDANT_SCAN = 128
 
 
@@ -84,7 +53,7 @@ def maybe_block_delegating_body_read(request: DelegatingBodyReadGuardRequest) ->
     if not isinstance(request.payload, dict):
         return None
     tool = str(request.payload.get("tool") or "")
-    if tool not in _BODY_READ_TOOLS:
+    if tool not in BODY_READ_TOOLS:
         return None
     parent = _current_parent_task(request.agent)
     if parent is None:
@@ -98,14 +67,14 @@ def maybe_block_delegating_body_read(request: DelegatingBodyReadGuardRequest) ->
     if tool == "run_command":
         if not _is_shell_body_read_command(request.agent, parent, request.payload):
             return None
-        return ToolExecutionResult(tool, False, _blocked_message(tool, parent))
+        return ToolExecutionResult(tool, False, blocked_message(tool, parent))
     if tool == "read_file" and _is_runtime_metadata_read(request.agent, parent, request.payload):
         return None
     if tool == "read_file" and _is_current_task_local_read(request.agent, parent, request.payload):
         return None
-    if tool == "read_artifact" and _is_orchestration_artifact_read(request.payload):
+    if tool == "read_artifact" and is_orchestration_artifact_read(request.payload):
         return None
-    return ToolExecutionResult(tool, False, _blocked_message(tool, parent))
+    return ToolExecutionResult(tool, False, blocked_message(tool, parent))
 
 
 # LLM: _current_parent_task resolves the active runner task without assuming manager internals.
@@ -141,7 +110,35 @@ def _top_level_child_tasks(agent: object) -> list[object]:
         return []
     if not isinstance(items, list):
         return []
-    return items[:_MAX_DESCENDANT_SCAN]
+    return _scoped_top_level_tasks(agent, items)[:_MAX_DESCENDANT_SCAN]
+
+
+# LLM: _scoped_top_level_tasks keeps old verified acceptors from unlocking a new delegated root turn.
+# 函数用途: 当前轮已有 run_id 记录时，顶层 body-read guard 只看本轮任务，不让旧任务验收状态污染放行判断。
+def _scoped_top_level_tasks(agent: object, items: list[object]) -> list[object]:
+    seen = remembered_orchestration_run_ids(agent)
+    if not seen:
+        return items
+    root_ids = {
+        str(getattr(item, "root_id", "") or getattr(item, "id", "") or "")
+        for item in items
+        if str(getattr(item, "id", "") or "") in seen
+    }
+    scoped = [
+        item for item in items
+        if _top_level_task_in_scope(item, seen, root_ids)
+    ]
+    return scoped
+
+
+# LLM: _top_level_task_in_scope mirrors board/closeout root-turn filtering.
+# 函数用途: 精确 id 或同 root 子树属于当前轮；其它历史 run 不能参与委托期读正文放行。
+def _top_level_task_in_scope(item: object, seen: set[str], root_ids: set[str]) -> bool:
+    item_id = str(getattr(item, "id", "") or "")
+    if item_id in seen:
+        return True
+    root_id = str(getattr(item, "root_id", "") or "")
+    return bool(root_id and root_id in root_ids)
 
 
 # LLM: _has_delegated_children is the cheap signal that this runner is a parent/coordinator now.
@@ -159,7 +156,6 @@ def _has_completed_acceptor(agent: object, parent: object) -> bool:
         if _is_completed_for_acceptance(task):
             return True
     return False
-
 
 # LLM: _descendants walks persisted child ids and avoids broad workspace scans.
 # 函数用途: 只按 task.child_ids 读取有限后代，缺失节点跳过，避免 guard 自己扩大 IO。
@@ -203,23 +199,13 @@ def _is_completed_for_acceptance(task: object) -> bool:
 # 函数用途: 委托期 read_file 只允许读取 subagent runtime 元数据文件，不允许读 deliverables/业务正文。
 def _is_runtime_metadata_read(agent: object, parent: object, payload: dict[str, Any]) -> bool:
     path = _payload_path(agent, payload)
-    if path is None or path.name not in _METADATA_FILE_NAMES:
+    if path is None or path.name not in METADATA_FILE_NAMES:
         return False
     return (
-        _looks_like_runtime_path(path)
+        looks_like_runtime_path(path)
         or _is_current_task_metadata_path(parent, path)
         or _is_descendant_task_metadata_path(agent, parent, path)
     )
-
-
-# LLM: _is_orchestration_artifact_read lets parents read small refs/status artifacts while blocking product bodies.
-# 函数用途: 委托期允许 dispatch/subagent_board 等编排摘要 artifact，避免父级恢复时只能盲目派工。
-def _is_orchestration_artifact_read(payload: dict[str, Any]) -> bool:
-    raw = str(payload.get("artifact_ref") or payload.get("ref") or "").strip()
-    if not raw:
-        return False
-    name = Path(raw).name
-    return any(name.startswith(prefix) for prefix in _ORCHESTRATION_ARTIFACT_PREFIXES)
 
 
 # LLM: _payload_path normalizes read_file path enough for policy checks but does not require file existence.
@@ -253,8 +239,8 @@ def _is_shell_body_read_command(agent: object, parent: object, payload: dict[str
 # LLM: _shell_path_requires_body_read_block separates metadata/control-plane reads from product bodies.
 # 函数用途: shell 正文命令读取业务产物时阻断；读取 runtime 元数据或当前 task-local 文件时放行。
 def _shell_path_requires_body_read_block(agent: object, parent: object, path: Path) -> bool:
-    if path.name in _METADATA_FILE_NAMES and (
-        _looks_like_runtime_path(path)
+    if path.name in METADATA_FILE_NAMES and (
+        looks_like_runtime_path(path)
         or _is_current_task_metadata_path(parent, path)
         or _is_descendant_task_metadata_path(agent, parent, path)
     ):
@@ -262,19 +248,6 @@ def _shell_path_requires_body_read_block(agent: object, parent: object, path: Pa
     if _is_current_task_local_path(parent, path):
         return False
     return True
-
-
-# LLM: _looks_like_runtime_path keeps runtime metadata readable without importing workspace adapters.
-# 函数用途: 用路径片段识别 .my_agent_runtime/subagents 或 tasks/.../agents 元数据区。
-def _looks_like_runtime_path(path: Path) -> bool:
-    parts = tuple(path.parts)
-    if ".my_agent_runtime" in parts and "subagents" in parts:
-        return True
-    if "_runtime" in parts and "subagents" in parts:
-        return True
-    if "tasks" in parts and "agents" in parts:
-        return True
-    return False
 
 
 # LLM: _is_current_task_metadata_path recognizes the active legacy task directory as runtime metadata.
@@ -325,18 +298,3 @@ def _is_descendant_task_metadata_path(agent: object, parent: object, path: Path)
             continue
         return True
     return False
-
-
-# LLM: _blocked_message teaches the model the recovery route instead of making it ask the user.
-# 函数用途: 返回机器可读阻断原因和推荐工具，让父级自己派 QA/验收/修复，不打扰用户。
-def _blocked_message(tool: str, parent: object) -> str:
-    return (
-        "delegating_body_read_blocked=true "
-        f"tool={tool} parent_run_id={getattr(parent, 'id', '')}。"
-        "父级已经派出子代理，验收子代理完成前保持 refs-only："
-        "不要主动 read_file/read_artifact/run_command 读取产物正文或大 artifact 正文。"
-        "请先使用 subagent_board 或 dispatch_subagents 的 direct_children 摘要查看状态；"
-        "如缺 tester/bug_finder/acceptor，请调用 schedule_child_subagents 创建质量子代理；"
-        "如已有失败 refs，请创建 scoped repair worker；"
-        "只有 acceptor 完成验收后，父级才进入最终读正文核查阶段。"
-    )

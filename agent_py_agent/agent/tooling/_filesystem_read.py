@@ -20,12 +20,8 @@ from ._filesystem_helpers import (
     _required_path,
     _text_param,
 )
-from .filesystem_artifact_guard import (
-    allowed_tools_hint_param,
-    tool_output_artifact_read_hint,
-    tool_output_artifact_typo_hint,
-)
-from .filesystem_structured_read import structured_read_summary
+from .filesystem_artifact_guard import tool_output_artifact_typo_hint
+from .filesystem_read_file import execute_read_file
 from .models import BaseTool, ToolExecutionResult, ToolSpec
 
 
@@ -290,108 +286,4 @@ class ReadFileTool(FileSystemTool):
     # LLM: ReadFileTool.execute 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 执行 ReadFileTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        try:
-            raw_path = _required_path(_bundled_filesystem_param(params, "path"))
-            target = self.resolve_path(raw_path)
-        except ValueError as exc:
-            return ToolExecutionResult("read_file", False, str(exc))
-        artifact_hint = tool_output_artifact_read_hint(
-            target,
-            self.workspace_roots,
-            allowed_tools=allowed_tools_hint_param(params),
-        )
-        if artifact_hint:
-            return ToolExecutionResult("read_file", False, artifact_hint)
-        if not target.exists():
-            return ToolExecutionResult("read_file", False, f"文件不存在: {self.display_path(target)}")
-        if not target.is_file():
-            return ToolExecutionResult("read_file", False, f"目标不是文件: {self.display_path(target)}")
-
-        try:
-            content = target.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            return ToolExecutionResult("read_file", False, "文件不是有效 UTF-8 文本，无法读取。")
-        summary = structured_read_summary(target, content, params)
-        if summary:
-            return ToolExecutionResult("read_file", True, summary)
-        lines = content.splitlines()
-        raw_end_line = _bundled_filesystem_param(params, "end_line")
-        try:
-            start_line = _int_param(
-                _bundled_filesystem_param(params, "start_line"),
-                name="start_line",
-                default=1,
-                min_value=1,
-            )
-            end_line = _int_param(
-                raw_end_line,
-                name="end_line",
-                default=max(len(lines), 1),
-                min_value=1,
-            )
-        except ValueError as exc:
-            return ToolExecutionResult("read_file", False, str(exc))
-        if not lines:
-            if start_line > 1:
-                return ToolExecutionResult("read_file", False, "start_line 超出文件末尾：total_lines=0，文件为空。")
-            return ToolExecutionResult("read_file", True, "(空文件)")
-        if start_line > len(lines) and raw_end_line is None:
-            return ToolExecutionResult("read_file", False, _past_eof_line_message(start_line, len(lines)))
-        if end_line < start_line:
-            return ToolExecutionResult("read_file", False, "end_line 不能小于 start_line")
-        if start_line > len(lines):
-            return ToolExecutionResult("read_file", False, _past_eof_line_message(start_line, len(lines)))
-        result = _render_numbered_read_lines(
-            lines=lines,
-            start_line=start_line,
-            end_line=end_line,
-            max_chars=self.max_chars,
-        )
-        return ToolExecutionResult("read_file", True, result or "(空文件)")
-
-
-# LLM: _render_numbered_read_lines keeps long file reads line-aware so agents can continue by line.
-# 函数用途: 按行号输出文件切片；达到字符上限时给出 total_lines 和 next_start_line，避免模型猜尾行。
-def _render_numbered_read_lines(
-    *,
-    lines: list[str],
-    start_line: int,
-    end_line: int,
-    max_chars: int,
-) -> str:
-    rendered: list[str] = []
-    used_chars = 0
-    for line_number, line in enumerate(lines[start_line - 1 : end_line], start=start_line):
-        item = f"{line_number}: {line}"
-        separator = 1 if rendered else 0
-        if rendered and used_chars + separator + len(item) > max_chars:
-            rendered.append(_truncated_read_footer(len(lines), line_number, max_chars))
-            return "\n".join(rendered)
-        if not rendered and len(item) > max_chars:
-            return "\n".join([
-                item[:max_chars],
-                _truncated_read_footer(len(lines), min(line_number + 1, len(lines)), max_chars),
-            ])
-        rendered.append(item)
-        used_chars += separator + len(item)
-    return "\n".join(rendered)
-
-
-# LLM: _truncated_read_footer gives the model a deterministic continuation cursor.
-# 函数用途: 生成 read_file 截断提示，包含总行数、下一次建议 start_line 和当前字符预算。
-def _truncated_read_footer(total_lines: int, next_start_line: int, max_chars: int) -> str:
-    return (
-        f"... 已截断; total_lines={total_lines}; "
-        f"next_start_line={next_start_line}; limit_chars={max_chars}"
-    )
-
-
-# LLM: _past_eof_line_message turns empty tail reads into actionable line-range guidance.
-# 函数用途: 当模型读到超过文件末尾的行号时，明确告诉它总行数和建议的尾部读取范围。
-def _past_eof_line_message(start_line: int, total_lines: int) -> str:
-    suggested_start = max(1, total_lines - 80 + 1)
-    return (
-        f"start_line 超出文件末尾：start_line={start_line}, total_lines={total_lines}。"
-        f"请改用 start_line={suggested_start}, end_line={total_lines} 读取文件尾部，"
-        "或用 search_text 搜索目标标签。"
-    )
+        return execute_read_file(self, params, self.max_chars)

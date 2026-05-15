@@ -22,7 +22,7 @@ from .parent_acceptance_auto_policy import (
     build_parent_acceptance_auto_policy,
 )
 from .parsing import _dict_list
-from .static_required_files import required_static_files_for_task
+from .static_required_files import required_static_files_for_task, static_site_root_hints_for_task
 from .utils import _read_json_object
 
 
@@ -252,12 +252,14 @@ def _manual_execution_tests(task: SubAgentTask, output: dict[str, object], works
     tests = _dict_list(output.get("tests", []))
     if not tests:
         return []
+    # LLM: Manual acceptance uses the same static-site root hints as automatic dry-run preflight.
     return prepare_test_items(
         TestItemPreparationRequest(
             tests=tests,
             output=output,
             workspace_root=workspace_root,
             required_files=required_static_files_for_task(task),
+            site_root_hints=static_site_root_hints_for_task(task),
         )
     )
 

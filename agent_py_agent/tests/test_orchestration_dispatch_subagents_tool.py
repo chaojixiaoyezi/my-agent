@@ -118,8 +118,25 @@ class TestDispatchSubagentsToolExecute:
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
         assert call_kwargs["params"].include_run_ids == ["child-auth", "child-catalog"]
 
-    def test_runner_timeout_off_keeps_stale_heartbeat_detection(self):
-        """runner 不限时只关闭总运行时长阈值，不能关闭心跳挂死检测。"""
+    def test_dispatch_scope_memory_ignores_non_runner_report_records(self):
+        """当前轮作用域只记本轮显式/runner run_id，不把旧验收记录写进最终收口范围。"""
+        from agent_py_agent.agent.agent_core.orchestration_dispatch_tool import (
+            _run_ids_from_dispatch,
+        )
+
+        report = SimpleNamespace(
+            records=[
+                SimpleNamespace(step="runner", action="execute_runner", run_id="current-worker"),
+                SimpleNamespace(step="acceptance", action="review", run_id="old-worker"),
+            ]
+        )
+
+        ids = _run_ids_from_dispatch({"run_ids": ["current-worker"]}, report)
+
+        assert ids == ["current-worker"]
+
+    def test_runner_timeout_off_removes_default_runtime_thresholds(self):
+        """runner 不限时时不再保留隐藏心跳/运行超时墙。"""
         from agent_py_agent.agent.agent_core.orchestration_dispatch_tool import (
             _dispatch_capability_config,
         )
@@ -132,7 +149,7 @@ class TestDispatchSubagentsToolExecute:
         cfg = _dispatch_capability_config(mock_agent)
 
         assert cfg.subagent_run_timeout == 0
-        assert cfg.subagent_heartbeat_timeout > 0
+        assert cfg.subagent_heartbeat_timeout == 0
 
 
 
@@ -384,4 +401,4 @@ class TestDispatchSubagentsToolRunnerContext:
         assert result.ok is True
         capability_config = mock_agent.dispatch_subagents.call_args.args[1]
         assert capability_config.subagent_run_timeout == 0
-        assert capability_config.subagent_heartbeat_timeout > 0
+        assert capability_config.subagent_heartbeat_timeout == 0

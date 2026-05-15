@@ -23,11 +23,11 @@ class TestCapabilityConfigDefaults:
         assert config.enable_capability_routing is False
 
     def test_capability_config_default_timeouts(self):
-        """验证超时默认值。"""
+        """验证子代理默认不设置系统级超时墙。"""
         config = CapabilityConfig()
         assert config.capability_request_max_tokens == 600
-        assert config.subagent_run_timeout == 900
-        assert config.subagent_heartbeat_timeout == 180
+        assert config.subagent_run_timeout == 0
+        assert config.subagent_heartbeat_timeout == 0
 
     def test_capability_config_default_limits(self):
         """验证限制默认值。"""
@@ -155,12 +155,10 @@ class TestCapabilityConfigValidation:
         assert config.skill_card_max_tokens == 0  # 不限制
 
     def test_capability_config_timeout_hierarchy(self):
-        """验证超时层级合理。"""
+        """验证默认不靠超时层级限制子代理。"""
         config = CapabilityConfig()
-        # heartbeat 应该小于 run timeout
-        assert config.subagent_heartbeat_timeout < config.subagent_run_timeout
-        # run timeout 应该合理
-        assert config.subagent_run_timeout == 900
+        assert config.subagent_heartbeat_timeout == 0
+        assert config.subagent_run_timeout == 0
 
     def test_capability_config_evidence_requirements(self):
         """验证证据要求字段。"""

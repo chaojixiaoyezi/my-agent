@@ -65,6 +65,27 @@ def test_prepare_items_scopes_static_check_to_observed_leaf_artifacts(tmp_path):
     ]
 
 
+# LLM: Static-site inference should use task write-root hints when runners omit artifact refs.
+# 函数用途: worker 已写到任务专属 deliverables 目录但 output.json 没列 artifacts 时，父级验收不能退回全局 deliverables 误报缺文件。
+def test_prepare_items_uses_site_root_hints_when_no_artifacts(tmp_path):
+    deliverables = tmp_path / "nested" / "deliverables"
+    deliverables.mkdir(parents=True)
+    (deliverables / "index2.html").write_text("<!doctype html><html><body>ok</body></html>", encoding="utf-8")
+
+    items = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[],
+            output={},
+            workspace_root=tmp_path,
+            required_files=["index2.html"],
+            site_root_hints=[deliverables],
+        )
+    )
+
+    assert items[0]["site_root"] == "nested/deliverables"
+    assert items[0]["required_files"] == ["index2.html"]
+
+
 # LLM: Concrete write roots should narrow inherited parent required_files for leaf runners.
 # 函数用途: 子任务 goal 里被迫带着父级 index1/index2 清单时，验收仍只检查自己被授权写的那个文件。
 def test_required_static_files_scope_to_concrete_allowed_write_file(tmp_path):
