@@ -19,6 +19,7 @@ from .dispatch_no_progress import dispatch_no_progress_payload
 from .dispatch_params import DispatchParams
 from .orchestration_artifact_integrity_repair import artifact_integrity_repair_advice_from_records
 from .orchestration_dispatch_payload import dispatch_record_payload, dispatch_recovery_payload
+from .orchestration_dispatch_refs import related_task_refs
 from .orchestration_dispatch_scope import (
     dispatch_apply_default,
     dispatch_auto_apply_acceptance_followup_default,
@@ -213,8 +214,14 @@ def _dispatch_top_level_guidance(agent: object, report: object, records: list[di
         payload["blocking_run_ids"] = blockers
         payload["next_action"] = "repair_or_continue_blocking_run_ids"
         payload.update(_aggregate_parent_acceptance_repair_advice(records))
-    artifact_refs = _related_task_refs(agent, report, "artifact_refs")
-    evidence_refs = _related_task_refs(agent, report, "evidence_refs")
+    artifact_refs = related_task_refs(agent, report, "artifact_refs")
+    evidence_refs = related_task_refs(agent, report, "evidence_refs")
+    if blockers:
+        if artifact_refs:
+            payload["pending_artifact_refs"] = artifact_refs
+        if evidence_refs:
+            payload["pending_evidence_refs"] = evidence_refs
+        return payload
     if artifact_refs:
         payload["deliverable_artifact_refs"] = artifact_refs
     if evidence_refs:
@@ -291,65 +298,6 @@ def _aggregate_parent_acceptance_repair_advice(records: list[dict[str, object]])
         advice["suggested_tool_call"] = suggested_calls[0]
         advice["suggested_tool_calls"] = suggested_calls
     return {"parent_acceptance_repair_advice": advice}
-
-
-# LLM: _related_task_refs exposes product refs from the runs touched by this dispatch report.
-# 函数用途: 收集本轮 run 和 runner 新建 child 的 artifact/evidence refs，不读取文件正文。
-def _related_task_refs(agent: object, report: object, attr: str, *, limit: int = 20) -> list[str]:
-    refs: list[str] = []
-    seen: set[str] = set()
-    for run_id in _related_run_ids(report):
-        task = _safe_load_task(agent, run_id)
-        if _extend_unique_refs(refs, seen, _string_refs(getattr(task, attr, []), limit=limit), limit):
-            return refs
-    return refs
-
-
-# LLM: _related_run_ids includes explicit runner targets and nested child ids created during the dispatch.
-# 函数用途: 顶层 refs 汇总要看到 runner 内创建的孙代理，不能只看父 run。
-def _related_run_ids(report: object) -> list[str]:
-    ids: list[str] = []
-    for record in getattr(report, "records", []) or []:
-        _extend_unique_refs(ids, set(ids), _record_related_run_ids(record), 100)
-    return ids
-
-
-# LLM: _record_related_run_ids flattens one dispatch record into candidate run refs.
-# 函数用途: 从一条 dispatch record 中取当前 run 和 runner 新建 child id，供顶层 refs 汇总去重。
-def _record_related_run_ids(record: object) -> list[str]:
-    ids = [str(getattr(record, "run_id", "") or "").strip()]
-    ids.extend(str(item or "").strip() for item in getattr(record, "runner_created_child_ids", []) or [])
-    return [item for item in ids if item]
-
-
-# LLM: _extend_unique_refs is the shared bounded append helper for run ids and artifact refs.
-# 函数用途: 按首次出现顺序追加非空唯一 ref；达到 limit 时返回 True 提示调用方停止。
-def _extend_unique_refs(target: list[str], seen: set[str], refs: list[str], limit: int) -> bool:
-    for ref in refs:
-        if ref in seen:
-            continue
-        seen.add(ref)
-        target.append(ref)
-        if len(target) >= limit:
-            return True
-    return False
-
-
-# LLM: _safe_load_task keeps advisory payload generation from breaking dispatch_subagents.
-# 函数用途: 读取任务失败时返回空对象，保证 refs 汇总只增强输出、不影响调度主流程。
-def _safe_load_task(agent: object, run_id: str) -> object:
-    try:
-        return agent.subagents.load(run_id)
-    except Exception:
-        return object()
-
-
-# LLM: _string_refs bounds persisted task refs before model-facing payloads.
-# 函数用途: 清洗 artifact/evidence refs，避免 dispatch 输出被大量产物路径撑大。
-def _string_refs(value: object, *, limit: int) -> list[str]:
-    if not isinstance(value, list | tuple | set):
-        return []
-    return _unique_strings([str(item or "").strip() for item in value if str(item or "").strip()])[:limit]
 
 
 # LLM: _unique_strings preserves first occurrence order for small model-facing lists.

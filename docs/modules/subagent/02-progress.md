@@ -1432,3 +1432,12 @@
 - 真实 E2E：`my-agent-task17-20260516-035520.log` 通过；10 个 run 全部 `DONE/VERIFIED`，最终写出 `final_report.md`，覆盖首选国家、备选顺序、渠道、定价、本地化、风险和 6 个月行动计划。
 - 已测试：gateway transient、dispatch payload、board refs、tool-context summary、tool-loop closeout、natural language E2E focused tests 通过；ruff touched files 通过。
 - 剩余观察：root 仍会先读几份正文再派工；模型最终汇报里偶尔会把“10 个 run”描述成更大的“3+9”，后续要继续用 kernel/board 机器事实纠偏展示。
+
+## 2026-05-16 Task 17 三方对比修复：阻塞 refs 和缺失产物 gate
+- 中文说明：对比 长期助手 / 通道运行时 / my-agent 的同题 Task 17 后，发现 my-agent 虽然真实派出了多层小傻妞，但父级在还有 `AWAITING_ACCEPTANCE` / `NEEDS_ACCEPTANCE` 时仍能看到 deliverable refs，容易提前读正文并写最终报告。
+- 已修正：`dispatch_subagents` 在存在 blocker 时只暴露 `pending_artifact_refs` / `pending_evidence_refs`，不再把未验收产物放进 `deliverable_*`；父级必须先处理阻塞，不能把半成品当成完成品。
+- 已修正：runner 结构化结果里的 `evidence_packets.artifact_refs` 会做本地产物存在性校验。子代理声称写了某个报告但文件不存在时，本轮结果会变成 `BLOCKED / UNVERIFIED`，错误类型为 `missing_artifact_refs`。
+- 已修正：parsed output 本身是合法 JSON 但状态被完整性 gate 改成 `BLOCKED` 时，runner result 也会同步变成 `ok=False`，避免任务行显示阻塞但执行结果仍像成功。
+- 设计边界：这一步只校验 evidence packet 里明确用于验收的 artifact refs，不把旧式 `artifacts` 里的可选备注全部当硬阻塞，避免误伤能力申请和历史兼容结果。
+- 已测试：`test_dispatch_payload_exposes_blocking_gate_without_deliverable_refs` 和 `test_record_runner_result_blocks_missing_local_artifact_ref` 先红后绿；随后 62 个 focused regression 通过。
+- 下一步：重跑 my-agent Task 17 真实 E2E，确认 root 不再提前读阻塞产物，且缺失报告会在 runner 层被挡住。

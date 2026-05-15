@@ -56,13 +56,7 @@ def apply_runner_result_fields(params: RunnerResultFieldParams) -> None:
     parsed_ok = parsed.ok
     _apply_status_fields(task, status_context, parsed)
 
-    if parsed.found and not parsed_ok:
-        ok = False
-        message = f"{message} / structured output parse failed: {parsed.parse_error}"
-        task.result = response or message
-    elif not parsed.found:
-        _apply_unstructured_failure(task, ok, status_context["failure_type"])
-        task.result = response or message or task.result
+    ok, message = _runner_result_outcome(task, parsed, result_meta, status_context)
 
     if response and not (parsed.found and not parsed_ok):
         task.result = response
@@ -72,6 +66,24 @@ def apply_runner_result_fields(params: RunnerResultFieldParams) -> None:
     _apply_runner_attempt_fields(RunnerAttemptParams(task, dry_run, ok, message, params.now))
     result_meta["ok"] = ok
     result_meta["message"] = message
+
+
+# LLM: _runner_result_outcome keeps task status blockers aligned with runner-level success.
+# 函数用途: 根据 parsed 输出、缺失产物 gate 和普通 runner 错误，统一决定本次 runner 是否成功。
+def _runner_result_outcome(task, parsed, result_meta: dict, status_context: dict) -> tuple[bool, str]:
+    ok = result_meta["ok"]
+    message = result_meta["message"]
+    response = result_meta["response"]
+    if parsed.found and not parsed.ok:
+        message = f"{message} / structured output parse failed: {parsed.parse_error}"
+        task.result = response or message
+        return False, message
+    if parsed.found and task.status in _RUNNER_FAILURE_STATUSES:
+        return False, parsed.blocked_reason or message or task.failure_type or task.status.lower()
+    if not parsed.found:
+        _apply_unstructured_failure(task, ok, status_context["failure_type"])
+        task.result = response or message or task.result
+    return ok, message
 
 
 # LLM: _apply_status_fields 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

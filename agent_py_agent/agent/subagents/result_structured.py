@@ -16,6 +16,7 @@ from .models import (
 )
 from .parsing import _normalize_runner_items, _split_allowed_items, _string_dict, _string_list
 from .result_artifact_evidence import merge_artifact_evidence, normalize_artifact_items
+from .result_artifact_integrity import enforce_artifact_integrity
 from .result_structured_evidence import (
     process_evidence_items,
     process_evidence_packets,
@@ -220,6 +221,8 @@ def _process_structured_output(
     structured_request_count, created_request_ids = _create_capability_requests_from_parsed(task, parsed, now)
     normalized = _normalize_parsed_fields(parsed)
     normalized["artifacts"] = normalize_artifact_items(task, normalized["artifacts"])
+    # LLM: artifact integrity must run before evidence merge so fake refs become blockers.
+    enforce_artifact_integrity(task, parsed, normalized["artifacts"])
     evidence_packets = merge_artifact_evidence(
         task,
         normalized["artifacts"],

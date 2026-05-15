@@ -100,6 +100,59 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Stage7 R34：购物站 10 个文件真实落到用户产物目录，但 root/部分 child 的 `output.json` 缺 evidence packet，导致严格验收失败；同时 dispatch 工具缺少“只剩重复记账，不要再调度”的明确提示。现在 output.json 自动收口会从已存在报告/产物路径补最小证据包，dispatch_subagents 会返回 `dispatch_terminal` 让父模型停下来汇报 blockers。
 - Stage7 R63-R67：QA 自动补派曾让 tester / bug_finder / acceptor 在空 build 上提前空转。现在系统只保留“空产物不准 QA”等红线，并把缺失 QA 角色、候选 child spec 和下一步提示写成 `quality_advice` 交给 LLM 选择；R66 进一步发现 root 可能只写“下一步应该派工”但没真正创建 child，已增加 `needs_child_creation` 收尾红线，后续要真实复测它是否会继续 schedule。
 
+### 2026-05-16 Task17 三方对比复测
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用/third-party-eval`
+  - Same task: B2B SaaS 东南亚市场进入策略，要求主代理组织多层小傻妞协作并输出中文报告。
+  - Models: my-agent / 长期助手 / 通道运行时 都使用 MiniMax-M2.7。
+  - Logs:
+    - my-agent: `logs/my-agent-task17-20260516-043840.log`
+    - 长期助手: `logs/长期助手-task17-20260516-043840.log`
+    - 通道运行时: `logs/通道运行时-task17-20260516-044741.log`
+- Result summary:
+  - 长期助手 快速完成 `final_report.md`，报告结构完整，并用文字描述了三层代理协作；本轮黑盒日志未证明它真的创建了多层子代理。
+  - 通道运行时 快速完成 `final_report.md`，工具调用稳定；报告中明确写了“模拟执行”，说明这轮隔离 CLI 环境里不是完整真实多层派工。
+  - my-agent 确实创建并推进了 24 个真实 run，22 个 `DONE / VERIFIED`，但还有 2 个 `AWAITING_ACCEPTANCE / NEEDS_ACCEPTANCE`；completion gate 最终拦住了“已完成”的过度乐观汇报。
+- 中文解释:
+  - 这轮不是简单比谁快。长期助手/通道运行时 这次更像“一个主代理自己快速完成报告”，my-agent 更像“真的拉了一支队伍干活”，但队伍规模失控，最后还有两个人没验收完。
+  - 所以 my-agent 的优势是控制面和真实状态更透明，短板是太重、太容易过度派工、父级仍可能提前读未验收报告。
+
+### Finding 35: 阻塞 dispatch 仍暴露未验收产物为 deliverable refs
+
+- Symptom:
+  - my-agent 的 `dispatch_subagents` 已经返回 `blocking_run_ids`，但顶层 payload 仍包含 `deliverable_artifact_refs`。
+  - root 随后读取了阻塞分支的 `final_report.md`，并尝试写最终报告。
+- Root cause:
+  - dispatch 顶层 refs 汇总没有区分“已验收可交付产物”和“阻塞状态下仅供修复参考的候选产物”。
+- Fix:
+  - `orchestration_dispatch_tool.py` 中，若存在 blocking runs，不再输出 `deliverable_artifact_refs` / `deliverable_evidence_refs`。
+  - 阻塞状态下只输出 `pending_artifact_refs` / `pending_evidence_refs`，并保留 `must_not_report_done=true`。
+- Verification:
+  - `python3 -m pytest -q agent_py_agent/tests/test_orchestration_dispatch_completion_gate.py::test_dispatch_payload_exposes_blocking_gate_without_deliverable_refs`
+- Status: solved.
+
+### Finding 36: runner 声称写了 artifact，但真实文件不存在
+
+- Symptom:
+  - `subagent-1778877661-97a38cb7` 的 `output.json` 声称生成了 `market_entry_strategy_report.md`。
+  - 实际任务目录里只有 `channel_strategy_report.md` 和 `pricing_strategy_report.md`，没有 `market_entry_strategy_report.md`。
+  - 后续 acceptance 才发现路径不存在，导致父级在前一轮已经读到了部分报告并尝试汇总。
+- Root cause:
+  - runner 结构化结果会归一化 artifact refs，但找不到文件时只是保留原 ref，未在 runner 结果写回阶段把该 run 直接标为 blocked。
+- Fix:
+  - 新增 `result_artifact_integrity.py`。
+  - 当 evidence packet 里的本地 `artifact_refs` 找不到真实文件时，runner 直接转成 `BLOCKED / UNVERIFIED`，`failure_type=missing_artifact_refs`。
+  - 已经明确 `BLOCKED`、有 `blocked_reason` 或有 capability request 的任务不被 artifact 完整性覆盖，避免把能力申请误改成 artifact 缺失。
+- Verification:
+  - `python3 -m pytest -q agent_py_agent/tests/test_manager_runner_results.py::test_record_runner_result_blocks_missing_local_artifact_ref`
+  - Focused regression:
+    - `python3 -m pytest -q agent_py_agent/tests/test_result_processors_edges.py agent_py_agent/tests/test_manager_runner_results.py agent_py_agent/tests/test_agent/test_subagent_runner.py agent_py_agent/tests/test_agent/test_subagent_worker_pool.py`
+    - `python3 -m pytest -q agent_py_agent/tests/test_orchestration_dispatch_completion_gate.py agent_py_agent/tests/test_tools/test_tool_loop_subagent_closeout.py agent_py_agent/tests/test_agent/test_dispatch_and_planner.py`
+- Status: solved.
+- Remaining gap:
+  - my-agent 仍需要减少 root 前置读取正文、减少不必要扩容，并继续做同题三方对比复测。
+
 ## 2026-05-14 Recovery Case 02: Takeover Run 接管同一任务目录
 
 - Test scene:
