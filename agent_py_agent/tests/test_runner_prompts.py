@@ -93,6 +93,41 @@ class TestBuildSubagentRunnerPrompt:
         assert "自动创建父目录" in prompt
         assert "不要因为目标目录尚未创建就标记 BLOCKED" in prompt
 
+    # LLM: Real MiniMax runner E2E timed out when the prompt embedded full execution_context/context_bundle JSON.
+    # 函数用途: 锁住 runner prompt 的瘦身边界：模型看摘要和 refs，不直接吞完整大 JSON。
+    def test_prompt_uses_slim_context_summary_instead_of_full_bundle(self):
+        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
+
+        huge_blob = "BLOAT" * 6000
+        context = self._make_context(
+            "run_slim",
+            "写 index.html",
+            task_dir="/tmp/task",
+            execution_context_json="/tmp/task/execution_context.json",
+            execution_context_file="/tmp/task/EXECUTION_CONTEXT.md",
+            context_bundle_json="/tmp/task/context_bundle.json",
+            context_bundle_file="/tmp/task/CONTEXT_BUNDLE.md",
+            context_bundle={
+                "task_envelope": {
+                    "schema_version": "subagent_task_envelope.v1",
+                    "address": {"run_id": "run_slim", "lineage": ["parent", "run_slim"]},
+                    "acceptance": {"checks": ["index.html 存在"]},
+                },
+                "tool_preflight": {"ok": True, "issues": [], "effective_tools": ["write_file"]},
+                "oversized_internal_body": huge_blob,
+            },
+        )
+
+        prompt = _build_subagent_runner_prompt(context)
+
+        assert "Execution Context JSON" in prompt
+        assert "/tmp/task/execution_context.json" in prompt
+        assert "/tmp/task/context_bundle.json" in prompt
+        assert "subagent_task_envelope.v1" in prompt
+        assert "oversized_internal_body" not in prompt
+        assert huge_blob[:100] not in prompt
+        assert len(prompt) < 12000
+
 
 class TestBuildSubagentRunnerRepairPrompt:
     """测试 _build_subagent_runner_repair_prompt() 函数。"""

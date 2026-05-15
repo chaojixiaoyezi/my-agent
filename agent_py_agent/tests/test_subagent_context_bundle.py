@@ -197,6 +197,29 @@ def test_context_bundle_output_contract_separates_required_and_forbidden_files(t
     assert bundle.output_contract["file_contract_source"] == "task_text_positive_negative_extraction"
 
 
+# LLM: Real E2E showed file-level write roots can be present while text extraction misses index.html.
+# 函数用途: 产物写入根指向具体 HTML 文件时，required_files 必须包含该文件名，避免 Context Gate 误挡子代理。
+def test_context_bundle_required_files_include_file_level_write_roots(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    target = tmp_path / "deliverables" / "furniture-home" / "index.html"
+    task = manager.create_run(
+        goal=f"在 {target} 创建高端现代家具首页。",
+        thought="目标文件来自父级自然语言任务。",
+        plan=["写页面", "汇报验收"],
+        role="child",
+        acceptance_checks=["文件路径正确存在", "HTML 可正常解析"],
+    )
+    task.allowed_write_roots = [str(task.task_dir), str(target)]
+    manager.save(task)
+
+    bundle = build_context_bundle(manager.load(task.id))
+    report = validate_context_bundle(bundle)
+
+    assert "index.html" in bundle.output_contract["required_files"]
+    assert "index.html" in bundle.task_packet["file_contract"]["required_files"]
+    assert report.ok is True
+
+
 def test_context_bundle_gate_reports_missing_required_handoff_fields(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(goal="", thought="", plan=[])

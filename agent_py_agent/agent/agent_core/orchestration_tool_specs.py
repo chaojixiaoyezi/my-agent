@@ -78,7 +78,7 @@ _DISPATCH_PARAMETER_DETAILS = {
         "如果目标是让某个 coordinator 亲自创建下一层 refs，必须对这个 coordinator 设置 execute_runners=true；"
         "不要把“下下层 worker 暂不执行”误写成当前 coordinator 的 execute_runners=false。"
     ),
-    "execute_acceptance_tests": "apply=true 且 execute_runners=true 时默认 true，用受控 TestExecutor 执行直接 child 声明的 tests 并写 follow-up refs；显式 false 可关闭。",
+    "execute_acceptance_tests": "apply=true 且 execute_runners=true 时固定为 true，用受控 TestExecutor 执行直接 child 声明的 tests 并写 follow-up refs；模型工具调用不能跳过父级验收，CLI 手动 --no-execute-tests 另走直达参数。",
     "auto_apply_acceptance_followup": "apply=true、execute_runners=true、tests 通过且 follow-up 指向 apply_acceptance 时默认 true，只落本轮直接 child 的验收状态；失败不会自动通过。",
     "planner": "true 会额外调用父代理 LLM planner；适合长任务统筹，但会多消耗一次模型调用。",
     "workflow_mode": "plan 只把 workflow 计划写回父任务；auto 会在计划 OK 时落成 worker 子工单；未知值保守按 off 处理。",

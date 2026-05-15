@@ -92,6 +92,34 @@ class TestDispatchSubagentsToolExecute:
         assert call_kwargs["params"].execute_acceptance_tests is True
         assert call_kwargs["params"].auto_apply_acceptance_followup is True
 
+    def test_model_cannot_skip_acceptance_tests_for_live_runner_dispatch(self):
+        """模型工具调用误写 false 时，真实 runner 仍必须进入父级验收。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        mock_report = MagicMock()
+        mock_report.dry_run = False
+        mock_report.summary = "真实执行"
+        mock_report.records = []
+
+        mock_agent = MagicMock()
+        mock_agent._current_subagent_run_id = ""
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent.tools.specs.return_value = []
+        mock_agent.dispatch_subagents.return_value = mock_report
+        mock_agent.subagents.workspace = Path("/tmp/workspace")
+        mock_agent.subagents.list_runs.return_value = []
+
+        result = DispatchSubagentsTool(mock_agent).execute({
+            "apply": True,
+            "execute_runners": True,
+            "execute_acceptance_tests": False,
+        })
+
+        assert result.ok is True
+        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
+        assert call_kwargs["params"].execute_acceptance_tests is True
+        assert call_kwargs["params"].auto_apply_acceptance_followup is True
+
     def test_dispatch_exact_run_ids_are_passed_to_params(self):
         """run_ids 让父 runner 精确指定本轮孩子执行顺序。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool

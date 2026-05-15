@@ -33,8 +33,8 @@ def dispatch_execute_runners_default(agent, params: dict[str, object], *, apply:
     return bool(apply and current_subagent_run_id(agent))
 
 
-# LLM: dispatch_execute_acceptance_tests_default validates real runner output at every dispatch boundary.
-# 函数用途: 真实执行 runner 时默认跑父级验收 tests；显式 false 仍可关闭，dry-run 不执行。
+# LLM: dispatch_execute_acceptance_tests_default keeps model dispatch from skipping parent checks.
+# 函数用途: 真实执行 runner 时始终跑父级验收 tests；CLI 手动跳过测试走 DispatchParams 直达，不走模型工具入口。
 def dispatch_execute_acceptance_tests_default(
     agent,
     params: dict[str, object],
@@ -42,9 +42,11 @@ def dispatch_execute_acceptance_tests_default(
     apply: bool,
     execute_runners: bool,
 ) -> bool:
+    if apply and execute_runners:
+        return True
     if "execute_acceptance_tests" in params:
         return _bool_param(params.get("execute_acceptance_tests"), default=False)
-    return bool(apply and execute_runners)
+    return False
 
 
 # LLM: dispatch_auto_apply_acceptance_followup_default only applies machine-proven acceptance follow-ups.

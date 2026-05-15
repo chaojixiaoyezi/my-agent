@@ -184,3 +184,12 @@
 - preflight 不做硬阻断：它不删除工具、不改任务状态、不自动发 grant。父级/runner 可以根据 issue codes 决定是继续写报告、上抛 capability request，还是先补产物目录。
 - recovery payload 现在用完整 `all_tasks` 构建 `TaskAddress.lineage`。当 child 失败时，父 runner 看到的是 parent -> child 链路，而不是一个孤立 run id。
 - 测试边界：本片先用 focused tests 验证协议进入 context bundle、prompt 和 recovery payload；真实 MiniMax E2E 是下一片，继续用普通话任务，不使用 `dispatch/run_id/TaskEnvelope` 等专业词。
+
+## Real Runner E2E Hardening Slice
+
+- 中文说明：真实 MiniMax E2E 证明协议进入 prompt 后还需要控制两类成本：启动上下文不能太胖，父级验收不能被模型参数关掉。
+- runner prompt 现在只带 slim execution context summary。完整 context bundle、TaskEnvelope、tool preflight、output refs 仍落盘，prompt 只放短摘要和 refs，避免真实模型因 30K+ 开场提示词超时。
+- `required_file_contract()` 会从文件级 product write root 推导 required files。这样 `/.../deliverables/furniture-home/index.html` 既是写权限事实，也是验收合同事实。
+- 质量角色判断收窄：普通“主代理验收 / 汇报验收结果”不再强制 acceptor；只有显式 `acceptor`、`验收子代理`、`验收代理`、`派验收` 才要求独立验收角色。
+- 模型面对的 `dispatch_subagents` 在 `apply=true && execute_runners=true` 时固定执行父级 acceptance tests。手动 CLI `--no-execute-tests` 仍可用于人工轻量调度，但 LLM 不能无意跳过网页/static/content 验收。
+- 迁移原则：不是加新 guard，而是把“启动轻、事实硬、验收必须机器可证”收进协议边界。下一步做允许 repair 的真实 E2E，让 root 基于失败报告重新派修复 worker。

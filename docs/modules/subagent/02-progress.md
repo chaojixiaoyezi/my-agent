@@ -1375,3 +1375,12 @@
 - 已测试：`python3 -m pytest -q agent_py_agent/tests/test_subagent_context_bundle.py::test_context_bundle_embeds_task_envelope_and_tool_preflight agent_py_agent/tests/test_subagent_context_bundle.py::test_runner_prompt_includes_task_envelope_and_preflight_status agent_py_agent/tests/test_orchestration_progress_payload.py::test_runner_context_dispatch_includes_packet_first_recovery_strategy -p no:cacheprovider` -> `3 passed`。
 - 已测试：自然语言 root -> 小傻妞 -> 小小傻妞本地 E2E、恢复策略、接管、coordinator due-check、父级验收和静态站点验收一起通过：`python3 -m pytest -q agent_py_agent/tests/test_subagent_natural_language_e2e.py agent_py_agent/tests/test_subagent_recovery_strategy.py agent_py_agent/tests/test_subagent_takeover_run.py agent_py_agent/tests/test_subagent_coordinator_due_check.py agent_py_agent/tests/test_parent_acceptance_controller.py agent_py_agent/tests/test_static_site_validator.py -p no:cacheprovider` -> `47 passed`。
 - 下一步：用普通自然语言真实 E2E 重跑家具页面/三文件任务，观察模型是否仍会从摘要里误猜路径；如果还漂移，优先修 protocol/tool gateway，不继续堆 prompt 规则。
+
+## 2026-05-15 Real MiniMax E2E 修复批次：瘦提示词、写入合同、父级验收
+- 中文说明：用真实 MiniMax 跑普通话家具首页任务，按“只观察主代理派工，不替小傻妞干活”的方式暴露问题并修复。
+- 已修正：runner prompt 不再内联完整 execution context/context bundle，只带身份、TaskEnvelope、tool preflight、关键 refs 和短字段；完整大包留在文件里按需读。
+- 已修正：文件级 product write root 会进入 `required_files`，例如 `/.../furniture-home/index.html` 会生成 `index.html` 和 `furniture-home/index.html`，避免 Context Gate 误判缺产物。
+- 已修正：普通“你安排和验收 / 汇报验收结果”不会被误判为必须创建 acceptor；只有明确 `acceptor` / `验收子代理` / `派验收` 才要求单独验收角色。
+- 已修正：模型工具调用在真实执行 runner 时不能关闭父级验收测试；父级验收会继续跑 static-site / content checks，CLI 人工 `--no-execute-tests` 仍保留。
+- 真实 E2E 结果：第一轮真实 child 因 35K+ prompt 超时，瘦 prompt 后能进入工具调用；第二轮 child 能自己纠正一次路径拼错并写出页面；第三轮干净 closeout 成功且没有双重结论；第四轮父级验收捕获不完整 HTML，正确拒绝 completion。
+- 下一步：做“允许修复”的真实 E2E，让 root 在父级验收失败后重新派 repair worker，而不是停止汇报；同时优化 runner 写完后的自检收口，减少反复读文件尾部。

@@ -137,6 +137,30 @@ def test_completed_dispatch_does_not_close_when_prompt_requires_quality_roles():
         assert "未再发起额外模型请求" not in result.response
 
 
+# LLM: generic human wording like "验收结果" should not force a separate acceptor role.
+# 函数用途: 复现真实 E2E 里用户只要求主代理安排和验收，却被误判缺 acceptor 导致完成态自相矛盾。
+def test_generic_acceptance_result_wording_does_not_require_acceptor_role():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            subagent_workspace="subs",
+            max_tool_rounds=4,
+        )
+        agent = SimpleAgent(cfg, workspace)
+        task = _done_verified_task(agent)
+        agent.backend = DispatchCompletionBackend()
+
+        result = agent.run("请你作为主代理来安排和验收，完成后只汇报产物路径和验收结果。", save=False)
+
+        assert agent.backend.calls == 1
+        assert "未再发起额外模型请求" in result.response
+        assert "missing_quality_roles" not in result.response
+        assert "结论修正" not in result.response
+        assert task.id in result.response
+
+
 # LLM: final root answers must not overclaim success when persisted subagent tasks are blocked.
 # 函数用途: 复现真实 E2E 里产物存在但 task.json 未全绿，模型却说测试通过的问题。
 def test_final_response_warns_when_subagent_tree_still_has_blockers():

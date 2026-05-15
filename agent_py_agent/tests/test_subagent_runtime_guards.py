@@ -219,9 +219,9 @@ def test_dispatch_closeout_ignores_unseen_historical_runs(tmp_path):
     assert old.id not in response.text
 
 
-# LLM: Natural Chinese test/acceptance result requirements should prevent worker-only deterministic closeout.
-# 函数用途: 用户说“根据测试结果和验收结果收口”时，只有 worker DONE 不能直接完成；必须回到模型继续派 tester/acceptor。
-def test_dispatch_completion_waits_for_natural_test_and_acceptance_results(tmp_path):
+# LLM: Explicit quality-role requirements should prevent worker-only deterministic closeout.
+# 函数用途: 用户明确要求测试子代理和验收子代理时，只有 worker DONE 不能直接完成。
+def test_dispatch_completion_waits_for_explicit_quality_roles(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     worker = manager.create_run(goal="write three pages", thought="worker", plan=["write"])
     worker.status = "DONE"
@@ -233,7 +233,7 @@ def test_dispatch_completion_waits_for_natural_test_and_acceptance_results(tmp_p
         DispatchCompletionRequest(
             agent=agent,
             params=_tool_loop_params(
-                "请派小傻妞做页面，完成后根据小傻妞报告、测试结果和验收结果收口。"
+                "请派小傻妞做页面，完成后必须继续创建测试子代理和验收子代理收口。"
             ),
             before_executed_count=0,
             backend="test",
@@ -243,9 +243,9 @@ def test_dispatch_completion_waits_for_natural_test_and_acceptance_results(tmp_p
     assert response is None
 
 
-# LLM: Final model text must not claim completion when a requested acceptance role never ran.
-# 函数用途: root 已经调度 worker/tester 但缺少用户要求的验收结果时，最终回复守卫必须拦住口头完成。
-def test_final_response_guard_blocks_missing_natural_acceptance_result(tmp_path):
+# LLM: Final model text must not claim completion when a requested acceptor role never ran.
+# 函数用途: root 已经调度 worker/tester 但缺少用户明确要求的验收子代理时，最终回复守卫必须拦住口头完成。
+def test_final_response_guard_blocks_missing_explicit_acceptor_role(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     worker = manager.create_run(goal="write page", thought="worker", plan=["write"], role="worker")
     tester = manager.create_run(goal="test page", thought="tester", plan=["test"], role="tester")
@@ -256,7 +256,7 @@ def test_final_response_guard_blocks_missing_natural_acceptance_result(tmp_path)
     agent = SimpleNamespace(
         subagents=manager,
         _current_subagent_run_id="",
-        _current_user_prompt="请安排小傻妞做页面，最后根据测试结果和最终验收结果收口。",
+        _current_user_prompt="请安排小傻妞做页面，最后必须派验收子代理收口。",
         _orchestration_run_ids_seen={worker.id, tester.id},
     )
 

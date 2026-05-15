@@ -6959,3 +6959,80 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Status: fixed by focused tests.
 - Remaining gap:
   - A fresh real MiniMax furniture-page E2E still needs to be run after this slice, using ordinary user language and no internal terms.
+
+### Finding 104: Real MiniMax runner prompts must stay slim and refs-first
+
+- Discovered at: 2026-05-15 during real MiniMax furniture-page E2E under `/Users/xiaoyezi/my-claude-code`.
+- Symptom:
+  - Root correctly created and dispatched a worker subagent.
+  - The child runner timed out before doing useful work.
+  - Trace showed the initial runner prompt around 35K chars because the full execution context and nested context bundle were embedded directly.
+- 中文解释：
+  - 大白话：小傻妞刚开工就背了太多“行李”，模型请求变慢并超时。真正需要常驻的是任务、路径、工具和 refs，完整大包应该放文件里，需要时再读。
+- Root cause:
+  - `_build_subagent_runner_prompt()` converted the full execution context dataclass into prompt JSON.
+  - That duplicated large context bundle fields that were already available as refs on disk.
+- Fix:
+  - Runner and repair prompts now use a slim execution-context summary.
+  - The prompt keeps identity, task envelope, tool preflight, required refs and short fields, but does not inline oversized context bundle bodies.
+- Verification:
+  - Focused regression: `test_prompt_uses_slim_context_summary_instead_of_full_bundle`.
+  - Real MiniMax rerun no longer timed out at child startup; child reached tool calls and wrote product files.
+- Status: fixed by focused tests and real E2E observation.
+
+### Finding 105: File-level product write roots must feed required_files
+
+- Discovered at: 2026-05-15 during the next real MiniMax furniture-page E2E.
+- Symptom:
+  - The child had an exact file write root for `/.../deliverables/furniture-home/index.html`.
+  - `output_contract.required_files` and `task_packet.file_contract.required_files` still missed `index.html`.
+  - Context Gate could falsely block the child as missing required deliverables.
+- 中文解释：
+  - 大白话：系统已经把门钥匙给了小傻妞，让它写 `index.html`，但验收清单里却没写“要有 index.html”，于是开工前检查自己打了自己一巴掌。
+- Root cause:
+  - Required-file extraction was mainly text based and did not treat file-level `allowed_write_roots` as product deliverable facts.
+- Fix:
+  - `required_file_contract()` now derives product file terms from file-level write roots, including basename and last path segment such as `index.html` and `furniture-home/index.html`.
+  - Internal task workspace files are excluded so reports/checkpoints do not pollute product contracts.
+- Verification:
+  - Focused regression: `test_context_bundle_required_files_include_file_level_write_roots`.
+  - Real E2E context bundle now includes `required_files: ['index.html', 'furniture-home/index.html']`.
+- Status: fixed by focused tests and real E2E observation.
+
+### Finding 106: Generic “验收结果” wording must not force a separate acceptor role
+
+- Discovered at: 2026-05-15 during real MiniMax closeout E2E.
+- Symptom:
+  - User-style prompt said the root should arrange and validate, then report “验收结果”.
+  - Worker completed and parent accepted it.
+  - Final output first reported completion, then `Subagent State Notice` appended `missing_quality_roles: acceptor`.
+- 中文解释：
+  - 大白话：用户只是说“你验收一下并告诉我结果”，系统却理解成“必须再派一个验收子代理”。这太死板，也会让最终回答一半说完成、一半说没完成。
+- Root cause:
+  - `_required_quality_roles()` treated generic terms like `验收结果` / `验收报告` as explicit acceptor-role requirements.
+- Fix:
+  - Only explicit role wording such as `acceptor`、`验收子代理`、`验收代理`、`派验收` requires an acceptor run.
+  - Generic “安排和验收 / 汇报验收结果” can be satisfied by parent acceptance.
+- Verification:
+  - Focused regression: `test_generic_acceptance_result_wording_does_not_require_acceptor_role`.
+  - Clean real E2E closed with deterministic local subagent completion text and no contradictory notice.
+- Status: fixed by focused tests and real E2E observation.
+
+### Finding 107: Model tool calls must not disable parent acceptance for live runners
+
+- Discovered at: 2026-05-15 during clean real MiniMax parent-test E2E.
+- Symptom:
+  - Root called `dispatch_subagents` with `execute_acceptance_tests=false`.
+  - The worker produced an HTML file that static validation later flagged with an inert `href="#"`.
+  - Because parent acceptance tests were skipped, the task was incorrectly marked `DONE/VERIFIED`.
+- 中文解释：
+  - 大白话：小傻妞自称页面没问题，但网页检查器发现还有失效交互。之前主代理工具参数一写 `false`，父级就不检查了，这会让坏产物混成绿灯。
+- Root cause:
+  - The model-facing `dispatch_subagents` tool respected explicit `execute_acceptance_tests=false` even when `apply=true` and `execute_runners=true`.
+- Fix:
+  - For model tool calls, live runner dispatch now always enables parent acceptance tests.
+  - Manual CLI `--no-execute-tests` still goes through direct `DispatchParams`, so humans can explicitly do lightweight dispatch when needed.
+- Verification:
+  - Focused regression: `test_model_cannot_skip_acceptance_tests_for_live_runner_dispatch`.
+  - Real MiniMax rerun caught an incomplete HTML file through parent tests and refused to report completion.
+- Status: fixed by focused tests and real E2E observation.
