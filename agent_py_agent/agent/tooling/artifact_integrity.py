@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from html import unescape
 from pathlib import Path
 
 
@@ -23,6 +25,8 @@ class ArtifactIntegrityIssue:
     code: str
     message: str
     severity: str = "blocker"
+    count: int = 1
+    examples: list[str] = field(default_factory=list)
 
 
 # LLM: ArtifactIntegrityDecision is the machine-readable result consumed by tools and runner finalize.
@@ -61,6 +65,14 @@ class HtmlAppendGuardRequest:
 class HtmlAppendGuardDecision:
     allowed: bool
     message: str = ""
+
+
+_HTML_ID_RE = re.compile(r"\bid\s*=\s*['\"]([^'\"]+)['\"]", re.IGNORECASE)
+_HTML_ANCHOR_TAG_RE = re.compile(r"<a\b(?P<attrs>[^>]*)>(?P<label>.*?)</a>", re.IGNORECASE | re.DOTALL)
+_HTML_HREF_ATTR_RE = re.compile(r"\bhref\s*=\s*(['\"])(?P<href>.*?)\1", re.IGNORECASE | re.DOTALL)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_MAX_LINK_ISSUE_EXAMPLES = 5
+_MAX_LINK_LABEL_CHARS = 60
 
 
 # LLM: check_artifact_integrity validates supported artifact formats with bounded local parsing.
@@ -115,7 +127,8 @@ def html_post_write_note(path: Path, text: str) -> str:
             "HTML 完整性提示: 当前文件还未闭合，继续分块可以；"
             "最后一块再写 </body></html>，闭合后不要再 append。"
         )
-    return f"HTML 完整性提示: 发现需要修复的结构问题 codes={codes}。"
+    detail = "；".join(_issue_brief(issue) for issue in decision.issues[:3])
+    return f"HTML 完整性提示: 发现需要修复的结构问题 codes={codes}；{detail}。"
 
 
 # LLM: _check_html_text implements conservative structural checks without becoming a browser validator.
@@ -143,7 +156,108 @@ def _check_html_text(text: str, *, require_complete: bool) -> ArtifactIntegrityD
         html_end = lowered.rfind("</html>") + len("</html>")
         if text[html_end:].strip():
             issues.append(_issue("content_after_html_close", "</html> 后面还有非空内容。"))
+    issues.extend(_html_link_issues(text))
     return _decision("html", issues)
+
+
+# LLM: _html_link_issues catches fake in-page links without turning this into a full browser validator.
+# 函数用途: 识别 href="#" 和缺失目标 id 的 hash 链接，给模型即时修复提示；最终验收仍由静态站点 validator 深查。
+def _html_link_issues(text: str) -> list[ArtifactIntegrityIssue]:
+    ids = set(_HTML_ID_RE.findall(text or ""))
+    buckets: dict[str, dict[str, object]] = {}
+    for href, label in _html_anchor_hrefs(text or ""):
+        cleaned = href.strip()
+        code = _html_link_issue_code(cleaned, ids)
+        if not code:
+            continue
+        bucket = buckets.setdefault(code, {"count": 0, "examples": [], "first_href": cleaned})
+        bucket["count"] = int(bucket["count"]) + 1
+        examples = bucket["examples"]
+        if isinstance(examples, list) and len(examples) < _MAX_LINK_ISSUE_EXAMPLES:
+            examples.append(_html_link_issue_example(label, cleaned))
+    return [
+        ArtifactIntegrityIssue(
+            code=code,
+            message=_html_link_issue_message(
+                code,
+                str(bucket.get("first_href") or ""),
+                count=int(bucket.get("count") or 1),
+                examples=[str(item) for item in bucket.get("examples", [])],
+            ),
+            severity="warning",
+            count=int(bucket.get("count") or 1),
+            examples=[str(item) for item in bucket.get("examples", [])],
+        )
+        for code, bucket in buckets.items()
+    ]
+
+
+# LLM: _html_anchor_hrefs extracts only bounded anchor metadata for repair diagnostics.
+# 函数用途: 从 HTML 中取 a 标签的 href 和可读文本，避免把完整页面正文塞进进度包。
+def _html_anchor_hrefs(text: str) -> list[tuple[str, str]]:
+    items: list[tuple[str, str]] = []
+    for match in _HTML_ANCHOR_TAG_RE.finditer(text or ""):
+        href_match = _HTML_HREF_ATTR_RE.search(match.group("attrs") or "")
+        if not href_match:
+            continue
+        items.append((href_match.group("href"), _clean_anchor_label(match.group("label") or "")))
+    return items
+
+
+# LLM: _html_link_issue_code classifies only local inert anchors; normal external links are not touched.
+# 函数用途: href="#" 属于占位链接；#id 必须对应真实 id，否则也提示修复。
+def _html_link_issue_code(href: str, ids: set[str]) -> str:
+    if href == "#":
+        return "placeholder_hash_link"
+    if href.startswith("#") and href[1:] not in ids:
+        return "missing_hash_target"
+    return ""
+
+
+# LLM: _html_link_issue_message keeps user-facing write feedback short and actionable.
+# 函数用途: 根据 issue code 生成中文修复建议，避免模型继续把假链接当可验收功能。
+def _html_link_issue_message(
+    code: str,
+    href: str,
+    *,
+    count: int = 1,
+    examples: list[str] | None = None,
+) -> str:
+    example_text = _examples_text(examples or [])
+    suffix = f" 共 {count} 处{example_text}。" if count > 1 else f"{example_text}。"
+    if code == "placeholder_hash_link":
+        return f'HTML 存在 href="#" 占位链接，{suffix}请改成真实页面内 id、真实 URL、tel/mailto 或移除链接。'
+    return f"HTML 链接 {href} 指向不存在的页面内 id，{suffix}请补对应 id 或改成真实目标。"
+
+
+# LLM: _html_link_issue_example gives the model a concrete repair handle without including whole tags.
+# 函数用途: 把 `<a>` 标签压成“文本 href=目标”的小例子，帮助模型精准替换对应链接。
+def _html_link_issue_example(label: str, href: str) -> str:
+    clean_label = _clip(_clean_anchor_label(label) or "<empty>", _MAX_LINK_LABEL_CHARS)
+    return f"{clean_label} href={href or '<empty>'}"
+
+
+# LLM: _clean_anchor_label normalizes nested anchor text for compact issue examples.
+# 函数用途: 去掉标签、解码实体、压缩空白，避免完整 HTML 进入提示词。
+def _clean_anchor_label(label: str) -> str:
+    without_tags = _HTML_TAG_RE.sub(" ", label or "")
+    return _clip(" ".join(unescape(without_tags).split()), _MAX_LINK_LABEL_CHARS)
+
+
+# LLM: _examples_text keeps issue messages useful but bounded.
+# 函数用途: 将最多几个链接示例拼进 message，给模型看具体修复点。
+def _examples_text(examples: list[str]) -> str:
+    if not examples:
+        return ""
+    return f"（示例: {'; '.join(examples[:_MAX_LINK_ISSUE_EXAMPLES])}）"
+
+
+# LLM: _issue_brief renders one issue for short post-write tool feedback.
+# 函数用途: 写工具返回时用一行说明 code、数量和示例，避免模型只看到抽象错误码。
+def _issue_brief(issue: ArtifactIntegrityIssue) -> str:
+    count = f" x{issue.count}" if issue.count > 1 else ""
+    examples = f" examples={'; '.join(issue.examples[:3])}" if issue.examples else ""
+    return f"{issue.code}{count}{examples}"
 
 
 # LLM: _looks_like_html_path keeps the first integrity gate scoped to web artifacts only.
@@ -156,6 +270,12 @@ def _looks_like_html_path(path: Path) -> bool:
 # 函数用途: 创建统一的产物完整性 issue 对象。
 def _issue(code: str, message: str, *, severity: str = "blocker") -> ArtifactIntegrityIssue:
     return ArtifactIntegrityIssue(code=code, message=message, severity=severity)
+
+
+# LLM: _clip bounds diagnostic text that may come from model-written artifacts.
+# 函数用途: 裁剪链接文本和提示片段，防止长正文进入 tool feedback 或 progress packet。
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else f"{text[:limit].rstrip()}..."
 
 
 # LLM: _decision centralizes ok semantics so warnings do not block acceptance.

@@ -46,7 +46,8 @@ class JsonlMemoryIndexMixin:
             hits = self.local_store.search(query, limit=top_k, source_type="memory")
         except Exception:
             return []
-        return [self._memory_from_hit(hit) for hit in hits]
+        scoped_hits = [hit for hit in hits if self._hit_matches_memory_path(hit)]
+        return [self._memory_from_hit(hit) for hit in scoped_hits]
 
     # LLM: memory store 以 JSONL 记录和本地索引作为事实来源；修改 _try_index_record 时同步检查返回值、异常处理和读写副作用。
     # 函数用途: 完成 try index record 在当前模块中的核心转换或协调步骤，衔接 memory store 以 JSONL 记录和本地索引作为事实来源。
@@ -76,6 +77,7 @@ class JsonlMemoryIndexMixin:
                 "kind": record.kind,
                 "tags": record.tags or [],
                 "created_at": record.created_at,
+                "memory_path": self._memory_path_key(),
             },
         )
 
@@ -86,6 +88,19 @@ class JsonlMemoryIndexMixin:
         payload = json.dumps(asdict(record), ensure_ascii=False, sort_keys=True)
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
         return f"{record.created_at:.6f}:{record.role}:{record.kind}:{digest}"
+
+    # LLM: _hit_matches_memory_path prevents shared LocalStore indexes from leaking another memory file into this run.
+    # 函数用途: 只接受 metadata.memory_path 与当前 JsonlMemory.path 一致的索引结果；旧无路径索引回退给 JSONL 搜索。
+    def _hit_matches_memory_path(self, hit: LocalSearchResult) -> bool:
+        return str(hit.metadata.get("memory_path") or "") == self._memory_path_key()
+
+    # LLM: _memory_path_key is the stable scope key shared by index writes and search filtering.
+    # 函数用途: 将当前记忆文件路径规范化为字符串，避免临时测试或多用户配置共享 LocalStore 时串记忆。
+    def _memory_path_key(self) -> str:
+        try:
+            return str(self.path.resolve())
+        except Exception:
+            return str(self.path)
 
     # LLM: memory store 以 JSONL 记录和本地索引作为事实来源；修改 _memory_from_hit 时同步检查返回值、异常处理和读写副作用。
     # 函数用途: 完成 memory from hit 在当前模块中的核心转换或协调步骤，衔接 memory store 以 JSONL 记录和本地索引作为事实来源。

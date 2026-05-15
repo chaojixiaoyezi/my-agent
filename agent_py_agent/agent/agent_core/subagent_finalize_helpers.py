@@ -12,6 +12,7 @@ from ._subagent_repair_mixin import RecoverySnapshotParams
 from .subagent_finalize_artifact_integrity import (
     artifact_integrity_override,
     looks_like_success_closeout,
+    progress_artifacts_override,
 )
 from .subagent_params import SubagentFinalizeParams
 from .subagent_session_compact_payload import subagent_session_compact_payload_from_result
@@ -42,6 +43,7 @@ class FinalizedRecoverySnapshotRequest:
 def record_finalized_runner_result(request: FinalizedRunnerRecordRequest):
     params = request.params
     structured = _coordinator_child_blockers_override(request, request.structured)
+    structured = progress_artifacts_override(request, structured)
     structured = artifact_integrity_override(request, structured)
     structured = _coordinator_child_completion_override(request, structured)
     structured = _coordinator_analysis_only_override(request, structured)

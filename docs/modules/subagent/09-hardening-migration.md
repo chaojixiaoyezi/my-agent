@@ -193,3 +193,18 @@
 - 质量角色判断收窄：普通“主代理验收 / 汇报验收结果”不再强制 acceptor；只有显式 `acceptor`、`验收子代理`、`验收代理`、`派验收` 才要求独立验收角色。
 - 模型面对的 `dispatch_subagents` 在 `apply=true && execute_runners=true` 时固定执行父级 acceptance tests。手动 CLI `--no-execute-tests` 仍可用于人工轻量调度，但 LLM 不能无意跳过网页/static/content 验收。
 - 迁移原则：不是加新 guard，而是把“启动轻、事实硬、验收必须机器可证”收进协议边界。下一步做允许 repair 的真实 E2E，让 root 基于失败报告重新派修复 worker。
+
+## Repair Loop / Tool Gateway Hardening Slice
+
+- 中文说明：这片继续把真实 E2E 中暴露的“系统边界不硬”问题归到协议、记忆和工具网关，而不是继续往 prompt 里补口号。
+- Parent acceptance repair：`orchestration_parent_acceptance_repair.py` 把 `acceptance_review.json=REJECT`、`test_execution.json` 和 parent follow-up refs 转成机器字段 `parent_acceptance_repair_advice`。runner-context dispatch 的下一步会明确说“按父级验收 refs 派修复 child”，不是让 root 读正文猜。
+- Top-level repair handoff：顶层 `dispatch_subagents` 的 acceptance reject record 也会附带 `parent_acceptance_repair_advice` 和 `create_subagents` 建议工具调用；失败 refs 包含 test/follow-up/output/run，小傻妞修复任务会继承原 child 的 product write roots。
+- Stale runner stop：`subagent_attempt_guard.py` 现在同时服务工具前拦截和模型前停止。runner attempt 被 timeout/abandon 后，旧线程下一轮不会再调用模型。
+- Memory isolation：LocalStore memory hit 带 `memory_path`，搜索只接受当前 `JsonlMemory.path` 的命中，避免干净 E2E 或未来多用户 workspace 被旧任务记忆污染。
+- Tool gateway：registry 在单次文件工具调用内把父级授权的 product roots 并入 `workspace_roots`。读、列、搜、写都能访问用户指定产物目录；调用结束后恢复，避免授权根外泄到别的工具调用。
+- Artifact integrity：runner 结构化输出里的相对产物 ref 可能已经包含 product root 尾部，例如 `deliverables/furniture-home/index.html`。完整性检查会先做 root suffix 对齐，再检查真实文件，避免误拼路径后把已写成功的产物标成 `artifact_missing`。
+- Task-local progress：写 HTML 后的 `latest_tool_progress.json` 不再永远说“继续写”。它会带 `artifact_integrity` 小字段；未闭合就继续分块，已闭合就提示写 `output.json` / `SUBAGENT_RESULT` 收口，发现 `href="#"` 这类假链接就先修复再验收。这样把 runner 收口方向放进机器字段，而不是靠 prompt 猜。
+- Parser schema tolerance：runner 可以把产物 refs 写成 `deliverables` / `output_files` / `files`，也可能把产物路径放进 `evidence.kind=artifact.path` 或 `evidence_packets.artifact_refs`。解析层会把这些带 path/id 的条目统一转成 canonical `artifacts`。后续所有验收、typed envelope 和恢复逻辑继续只读 `artifacts`，不把同义词扩散到业务层。
+- Artifact repair lane：`artifact_integrity_failed` 现在有独立信号层和 repair 建议层。父级只读 output/run/artifact refs，顶层用 `create_subagents`、runner-context 用 `schedule_child_subagents` 派修复小傻妞；不再把缺闭合标签、半截 HTML 这类确定性产物错误泛化成 `classify_blocker` 让 root 自己修。
+- Real E2E baseline：`real-e2e-20260515-180300-repair-loop4` 通过自然语言 root -> worker -> parent acceptance；产物在 `/Users/xiaoyezi/my-claude-code/.../deliverables/furniture-home/index.html`，状态 `DONE/VERIFIED`。
+- 迁移原则：子代理是有任务边界的小主代理。父级给了产物目录，就必须能读写；runner 超时，就必须停止；记忆隔离，就不能串旧索引。

@@ -41,12 +41,23 @@ def empty_report_is_inspectable(
     )
 
 
-# LLM: has_traceable_acceptance_evidence checks metadata refs only and avoids body reads.
-# 函数用途: 判断任务或 output 是否已有 evidence/artifact 引用，可供父级验收继续检查。
+# LLM: has_traceable_acceptance_evidence accepts only product artifact refs for empty-report inspection.
+# 函数用途: 空测试报告不能只靠 output.json/takeover 这类审计引用放行；必须有真实产物 artifact ref 可继续验收。
 def has_traceable_acceptance_evidence(task: SubAgentTask, output: dict[str, Any]) -> bool:
-    if any(item.evidence_refs or item.artifact_refs for item in task.evidence_packets):
+    if _task_artifact_refs(task):
+        return True
+    if any(item.artifact_refs for item in task.evidence_packets):
         return True
     return any(
         str(item.get("path") or item.get("uri") or item.get("artifact_id") or "").strip()
         for item in _dict_list(output.get("artifacts", []))
     )
+
+
+# LLM: _task_artifact_refs keeps task-level product refs separate from generic evidence refs.
+# 函数用途: 读取 task.artifact_refs 时只接受非空字符串，避免把审计报告路径当作业务产物。
+def _task_artifact_refs(task: SubAgentTask) -> list[str]:
+    value = getattr(task, "artifact_refs", [])
+    if not isinstance(value, list | tuple | set):
+        return []
+    return [str(item).strip() for item in value if str(item or "").strip()]

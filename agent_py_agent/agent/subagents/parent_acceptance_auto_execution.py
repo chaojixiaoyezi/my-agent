@@ -250,8 +250,6 @@ def _execute_confirmed_tests(
 # 函数用途: 为手动确认执行准备 tests；只归一化安全 cwd，不运行命令、不放开 shell。
 def _manual_execution_tests(task: SubAgentTask, output: dict[str, object], workspace_root: Path) -> list[dict[str, Any]]:
     tests = _dict_list(output.get("tests", []))
-    if not tests:
-        return []
     # LLM: Manual acceptance uses the same static-site root hints as automatic dry-run preflight.
     return prepare_test_items(
         TestItemPreparationRequest(

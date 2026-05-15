@@ -3,10 +3,22 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from ..subagent import SubAgentParsedOutput
 from ..tooling.artifact_integrity import ArtifactIntegrityCheckRequest, check_artifact_integrity
+
+
+# LLM: progress_artifacts_override recovers product refs when runner output omits artifacts.
+# 函数用途: 子代理写过真实产物但 output.json 漏填 artifacts 时，从 task-local progress 补标准产物引用。
+def progress_artifacts_override(request: object, structured: object) -> object:
+    if getattr(structured, "artifacts", []) or not looks_like_success_closeout(structured):
+        return structured
+    artifacts = _progress_artifact_refs(request)
+    if artifacts:
+        structured.artifacts = artifacts
+    return structured
 
 
 # LLM: artifact_integrity_override makes obvious broken product files block before parent acceptance.
@@ -26,10 +38,51 @@ def _artifact_integrity_blockers(request: object, structured: object) -> list[st
     blockers: list[str] = []
     for artifact_path in _structured_artifact_paths(request, structured):
         decision = check_artifact_integrity(ArtifactIntegrityCheckRequest(path=artifact_path, require_complete=True))
-        if not decision.ok:
-            codes = ",".join(decision.blocker_codes[:4]) or "unknown"
+        codes = _closeout_blocker_codes(decision)
+        if codes:
             blockers.append(f"{artifact_path}:{codes}")
     return blockers
+
+
+# LLM: _progress_artifact_refs reads only the small latest_tool_progress.json control packet.
+# 函数用途: 从 task-local progress 找到最近真实业务产物路径；不读取产物正文，不扫描目录。
+def _progress_artifact_refs(request: object) -> list[dict[str, str]]:
+    payload = _latest_tool_progress_payload(request)
+    path = str(payload.get("latest_written_path") or "").strip()
+    if not path or path == str(payload.get("closeout_written_path") or "").strip():
+        return []
+    if not isinstance(payload.get("artifact_integrity"), dict):
+        return []
+    return [{"path": path, "kind": "file", "summary": "artifact ref recovered from latest_tool_progress"}]
+
+
+# LLM: _latest_tool_progress_payload locates the runner progress snapshot through the persisted task.
+# 函数用途: 精确读取当前 run 的 agents/<run_id>/progress/latest_tool_progress.json，失败时保守返回空。
+def _latest_tool_progress_payload(request: object) -> dict[str, object]:
+    try:
+        task = request.agent.subagents.load(request.params.run_id)
+    except (AttributeError, KeyError, FileNotFoundError, json.JSONDecodeError, TypeError):
+        return {}
+    workspace = str(getattr(task, "agent_run_workspace_dir", "") or "").strip()
+    if not workspace:
+        return {}
+    try:
+        payload = json.loads((Path(workspace) / "progress" / "latest_tool_progress.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+# LLM: _closeout_blocker_codes promotes actionable HTML warnings before a runner can self-close.
+# 函数用途: 子代理自称完成时，href="#" 和缺失锚点也必须修复；这些会让真实页面按钮失效。
+def _closeout_blocker_codes(decision: object) -> str:
+    codes = list(getattr(decision, "blocker_codes", []) or [])
+    codes.extend(
+        code
+        for code in getattr(decision, "warning_codes", []) or []
+        if code in {"placeholder_hash_link", "missing_hash_target"}
+    )
+    return ",".join(codes[:4])
 
 
 # LLM: _blocked_artifact_output preserves useful runner metadata while changing lifecycle state.
@@ -110,8 +163,25 @@ def _resolve_artifact_path(context: object, raw_path: str) -> Path:
 def _artifact_path_under_root(root: Path, candidate: Path) -> Path | None:
     if root.is_file() or root.suffix:
         return root if root.name == candidate.name else None
+    aligned = _candidate_aligned_to_root(root, candidate)
+    if aligned is not None:
+        return aligned
     joined = root / candidate
     return joined if joined.exists() else None
+
+
+# LLM: _candidate_aligned_to_root handles refs that already include the product root suffix.
+# 函数用途: 把 deliverables/site/index.html 这类相对产物 ref 对齐到 .../deliverables/site 根，避免重复拼目录。
+def _candidate_aligned_to_root(root: Path, candidate: Path) -> Path | None:
+    candidate_parts = candidate.parts
+    if len(candidate_parts) < 2:
+        return None
+    root_parts = root.parts
+    max_prefix = min(len(root_parts), len(candidate_parts) - 1)
+    for prefix_size in range(max_prefix, 0, -1):
+        if root_parts[-prefix_size:] == candidate_parts[:prefix_size]:
+            return root.joinpath(*candidate_parts[prefix_size:])
+    return None
 
 
 # LLM: _artifact_resolution_roots lets product outputs beat internal task directories for relative refs.

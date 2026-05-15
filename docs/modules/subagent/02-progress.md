@@ -1384,3 +1384,32 @@
 - 已修正：模型工具调用在真实执行 runner 时不能关闭父级验收测试；父级验收会继续跑 static-site / content checks，CLI 人工 `--no-execute-tests` 仍保留。
 - 真实 E2E 结果：第一轮真实 child 因 35K+ prompt 超时，瘦 prompt 后能进入工具调用；第二轮 child 能自己纠正一次路径拼错并写出页面；第三轮干净 closeout 成功且没有双重结论；第四轮父级验收捕获不完整 HTML，正确拒绝 completion。
 - 下一步：做“允许修复”的真实 E2E，让 root 在父级验收失败后重新派 repair worker，而不是停止汇报；同时优化 runner 写完后的自检收口，减少反复读文件尾部。
+
+## 2026-05-15 Repair Loop / Tool Gateway Hardening
+- 中文说明：继续真实 repair-loop E2E，发现并修复三个底层稳定性问题：超时旧 runner 不能继续请求模型、隔离记忆不能串旧 LocalStore、父级授权的产物目录必须能被读写工具真正使用。
+- 已实现：父级验收 `REJECT` + parent tests/follow-up 会进入 `parent_acceptance_repair_advice`，runner-context dispatch payload 会给 `next_action=create_repair_child_from_parent_acceptance_refs` 和 refs-first repair child 建议；大输出外置后仍保留这组 repair advice。
+- 已实现：旧 runner attempt 被 abandon/timeout 后，工具循环会在下一轮模型调用前本地收口，不再继续烧模型请求；工具入口 stale guard 仍保留，形成模型前和工具前两道停止点。
+- 已实现：`JsonlMemory` 写入 LocalStore 时记录 `memory_path`，搜索时只接受当前记忆文件对应的索引命中，避免临时 E2E 或多用户空间读到别的任务旧记忆。
+- 已实现：工具 registry 在单次调用内把 `write_boundary.allowed_write_roots/product_write_roots/task_dir` 临时并入文件工具根；子代理能读写父级明确授权的用户产物目录，执行后恢复原根列表。
+- 真实 E2E：`real-e2e-20260515-180300-repair-loop4` 通过，root 使用自然语言派 worker，worker 写出 20KB/376 行家具首页，父级验收为 `DONE/VERIFIED`。
+- 剩余观察：worker 仍会先 `list_files` 一个尚未创建的目录再恢复；这不阻塞完成，但后续可以把“缺目录时直接 write_file 会自动建父目录”做成更友好的工具提示或非致命返回。
+- 追加修复：真实 read-root E2E 发现 runner 写对并读回 `/deliverables/furniture-home/index.html` 后，artifact integrity 仍把 `deliverables/furniture-home/index.html` 相对 ref 错拼到 product root 下面，误报 `artifact_missing`。已把相对 artifact ref 与 product root suffix 对齐，`index.html` / `furniture-home/index.html` / `deliverables/furniture-home/index.html` 都能解析到同一个真实产物根。
+- 追加修复：短真实 E2E 确认 worker 不再被 artifact integrity 误挡；父级真实验收随后抓到 `href="#"` 惰性链接。top-level dispatch 现在也会把 REJECT 记录转成 `parent_acceptance_repair_advice`，并给出 `create_subagents` 修复小傻妞建议和继承的产物写入根，避免 root 自己下场改文件。
+- 追加修复：真实 E2E 发现 runner 把产物字段写成 `deliverables` 而不是 `artifacts`，导致父级以为没有文件要验收。解析层现在把 `deliverables` / `output_files` / `files` 这类带 path/id 的产物 refs 统一归一到标准 `artifacts`，下游验收仍只消费标准字段。
+- 追加修复：真实 E2E 又发现结构化修复器会把产物路径放进 `evidence.kind=artifact.path` 或 `evidence_packets.artifact_refs`，同时留下 `artifacts=[]`。解析层现在会把这些 refs 也补成标准 `artifacts`，避免父级只做 evidence-only 验收。
+- 追加修复：空 `test_execution.json` 不再因为普通 `evidence_refs` 就被视为可接受；必须能追到真实 artifact refs，否则继续 rescue。
+- 追加修复：父级验收执行现在会选择包含产物 artifact/write root 的 workspace，而不是默认第一个 CLI/root 工作区，避免网页在用户目录但验收扫代码仓库。
+- 追加修复：`artifact_integrity_failed` 不再走泛化 `classify_blocker`。dispatch 顶层记录和 runner-context direct child progress 都会返回 `artifact_integrity_repair_advice`，建议派修复小傻妞读取 output/run/artifact refs，只修列出的产物文件。
+- 追加修复：真实 E2E 发现 worker 写出完整 HTML 后仍长时间自检不收口，且页面残留 `href="#"` 假链接。task-local write progress 现在会把 HTML 完整性和 `placeholder_hash_link` 写成小型机器字段；完整 HTML 会提示停止正文写入并写 `output.json` / `SUBAGENT_RESULT`，有假链接则提示先修再收口。
+- 追加修复：真实 E2E 发现 worker 第一次写半截并申请 `write_file/append_file` 后，父级授权重跑时缺少明确“继续同一个 run”的机器提示，而且第一次失败证据会污染第二次成功验收。`dispatch_capability_followup.py` 现在在授权后重跑前注入 refs-first 续跑提示；`acceptance_evidence_findings.py` 优先用当前 runner 尝试的证据做验收，历史失败证据保留审计但不再否决成功重试。
+- 追加修复：真实 E2E 发现 worker 面对 `placeholder_hash_link` 抽象告警会反复自查但不收口。HTML artifact integrity issue 现在携带 `count/examples`，工具返回、task-local progress 和 `next_action` 都会显示具体链接示例，例如 `品牌故事 href=#`，让小傻妞先精准修复再写 `output.json`。
+- 追加修复：真实 E2E 进一步发现十几个同类 `href="#"` 会被模型一处一处修，速度太慢。task-local progress 现在对 `placeholder_hash_link` 大量残留给出批量修复策略：搜索全部 `href="#"`，重写相关导航/页脚/CTA 或整文件，不要一轮只替换一个链接。
+- 追加修复：真实 E2E 发现 root 在验收失败后会亲自 `write_file` 重写 `deliverables/index.html`。direct-write guard 现在在当前 root 轮次已派过子代理时默认阻止 root/父级直接写业务产物，除非用户明确要求“你亲自修复/你自己写”；正确路线是创建 repair worker。
+- 追加修复：真实 E2E 确认 direct-write guard 会把 root 的直接产品写入挡回修复派工，但同时暴露 `output.json` 会覆盖产品自检进度。task-local progress 现在把内部 `task.output_json` 写入记录为 `closeout_written_path`，不再覆盖产品 `latest_written_path` / `artifact_integrity` / `next_action`；finalize 也会把 `placeholder_hash_link` / `missing_hash_target` 这类会导致页面按钮失效的 warning 当成 closeout blocker。
+- 追加修复：真实 E2E 又发现 worker 修完页面后 `output.json.artifacts=[]`，导致父级只能重新读 deliverables 路径。finalize 现在会从 task-local `latest_tool_progress.json` 恢复产品 artifact ref，再交给同一套 artifact integrity gate 和父级验收链。
+- 追加修复：真实恢复 E2E 发现旧 worker 超时后，root 在新一轮自然语言“让小傻妞接着/接管”提示里仍可能想自己补产物。direct-write guard 现在识别这种恢复派工话术，阻止 root 直接写 deliverables；显式“你亲自修复”仍可覆盖。
+- 追加修复：真实恢复 E2E 发现 `RUNNER_RESULT.md` 只写 artifact_integrity blocker，不够明确告诉 root 下一步怎么安全修。runner result 现在对 `artifact_integrity_failed` 增加 `Parent Next Action`，要求父级/root 派 repair worker 读取 `output_json` 和 artifact refs，而不是直接改业务产物。
+- 真实 E2E 验证：`real-e2e-20260515-223000-parent-repair-action` 用自然语言让 root 派小傻妞写家具首页，最终 `subagent-1778854431-1bd143cf` 达到 `DONE/VERIFIED`，目标 HTML 的 artifact integrity 为 `ok=True` 且无 warning/blocker。暴露的效率问题是 28 个 `href="#"` 修复用了 49 个工具轮；已把 `replace_in_file count=0` 批量替换能力写进工具示例和 artifact repair next_action。
+- 已测试：parent acceptance repair、artifact parser、empty report、workspace root、tool-context summary focused suite 通过；ruff 通过；strict code-size 已清零 `hard=0 high-risk=0 soft=0`。
+- 已追加测试：dispatch capability follow-up、task-local progress、HTML artifact integrity、tool-loop closeout、runner prompt contract、runner result repair action focused suite 通过。
+- 下一步：重跑一个完整 repair-loop 真实 E2E，确认 root 会按 `parent_acceptance_repair_advice` / `artifact_integrity_repair_advice` 新派修复小傻妞，修复后重新父级验收。

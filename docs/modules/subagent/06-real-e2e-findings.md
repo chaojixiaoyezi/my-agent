@@ -7036,3 +7036,422 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Focused regression: `test_model_cannot_skip_acceptance_tests_for_live_runner_dispatch`.
   - Real MiniMax rerun caught an incomplete HTML file through parent tests and refused to report completion.
 - Status: fixed by focused tests and real E2E observation.
+
+### Finding 108: Abandoned runner attempts must stop before the next model request
+
+- Discovered at: 2026-05-15 during real MiniMax repair-loop E2E.
+- Symptom:
+  - A worker hit `runner_timeout_seconds`.
+  - The parent marked the runner attempt abandoned, but the old daemon thread kept sending model requests.
+  - Tool calls were blocked by stale-attempt guard, yet the model loop continued because it only checked staleness at tool execution time.
+- 中文解释：
+  - 大白话：小傻妞已经被系统判定“超时下线”了，但旧线程还在继续问模型。工具虽然被拦住，但请求还在烧，父级接管也会被拖慢。
+- Root cause:
+  - `stale_subagent_attempt_result()` only ran after the model had already produced another tool call.
+  - `ToolLoopService` did not check abandoned attempt state before starting the next model turn.
+- Fix:
+  - Added `stale_subagent_attempt_message()` as the shared persisted-state check.
+  - `ToolLoopService._model_turn_or_fallback()` now stops locally before another model call when the current attempt is abandoned or no longer active.
+- Verification:
+  - Focused regressions:
+    - `test_stale_attempt_guard_blocks_abandoned_runner_tools`
+    - `test_stale_attempt_guard_stops_tool_loop_before_next_model_call`
+- Status: fixed by focused tests.
+
+### Finding 109: Isolated memory_path must not read stale LocalStore memory hits
+
+- Discovered at: 2026-05-15 during real MiniMax repair-loop E2E.
+- Symptom:
+  - A clean E2E run used a temporary `memory_path`.
+  - Root still recalled an old sorting-algorithm task from a shared LocalStore index and drifted away from the furniture-page task.
+- 中文解释：
+  - 大白话：我们给这次测试换了一个空记忆文件，但搜索索引还连着旧仓库。root 像翻错了笔记本，把旧任务当成这次任务继续做。
+- Root cause:
+  - `JsonlMemory` indexed memory records into LocalStore without `memory_path`.
+  - Search returned any `source_type=memory` hit from the shared LocalStore, regardless of which JSONL memory file owned it.
+- Fix:
+  - New memory index records include `metadata.memory_path`.
+  - LocalStore-backed memory search filters hits to the current `JsonlMemory.path`; old unscoped hits fall back to JSONL/daily lookup instead of contaminating isolated runs.
+- Verification:
+  - Focused regression: `test_jsonl_memory_local_store_search_is_scoped_by_memory_path`.
+  - Real E2E rerun no longer drifted into the old sorting-algorithm task.
+- Status: fixed by focused tests and real E2E observation.
+
+### Finding 110: Parent-granted product roots must extend filesystem tool roots
+
+- Discovered at: 2026-05-15 during real MiniMax repair-loop E2E.
+- Symptom:
+  - Parent `write_boundary.allowed_write_roots` correctly included `/Users/xiaoyezi/my-claude-code/.../deliverables/furniture-home`.
+  - `write_file` still rejected the path as outside the primary my-agent code workspace.
+  - After write support was fixed, `read_file` self-check hit the same root-boundary issue.
+- 中文解释：
+  - 大白话：父级已经把钥匙给了小傻妞，但门卫只认 my-agent 代码目录这一个门牌。结果小傻妞明明被允许写用户产物目录，工具层还是说“不在工作区”。
+- Root cause:
+  - Write-boundary validation and filesystem tool path resolution used different root lists.
+  - The registry checked `allowed_write_roots`, then called filesystem tools whose own `workspace_roots` did not include those product roots.
+- Fix:
+  - Registry invocation now temporarily extends filesystem tool roots with `allowed_write_roots`, `product_write_roots`, and `task_dir` for the current tool call.
+  - The expansion covers `write_file`, `append_file`, `replace_in_file`, `read_file`, `list_files`, and `search_text`; it is scoped to one call and restored afterward.
+- Verification:
+  - Focused regressions:
+    - `test_write_boundary_allows_explicit_product_root_outside_primary_workspace`
+    - `test_write_boundary_extends_read_tools_to_explicit_product_root`
+    - existing symlink escape and allowed-root block tests.
+  - Real E2E rerun wrote `/deliverables/furniture-home/index.html` and parent accepted the worker.
+- Status: fixed by focused tests and real E2E observation.
+
+### Finding 111: Real MiniMax natural-language worker E2E passes after root isolation and tool-root fixes
+
+- Discovered at: 2026-05-15 during clean E2E under `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-180300-repair-loop4`.
+- Scenario:
+  - User prompt was ordinary Chinese: only asked root to派小傻妞, create a high-end furniture-brand single-file HTML homepage, avoid broken buttons/links/images, and repair if needed.
+  - Test observer did not talk to child agents and did not write product files.
+- Result:
+  - Root created one worker and dispatched it.
+  - Worker wrote `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-180300-repair-loop4/deliverables/furniture-home/index.html`.
+  - File exists, size about 20KB, 376 lines; quick grep found no `href="#"`, empty href/src, TODO, 404, or undefined markers.
+  - Parent acceptance moved the run to `DONE/VERIFIED`.
+- 中文解释：
+  - 大白话：这次是按真实用户说法跑的。root 没有自己写页面，小傻妞写出了页面，系统验收通过，最后 root 按本地事实收口。
+- Remaining gap:
+  - The worker first tried `list_files` on a not-yet-created directory, got a missing-path error, then recovered. This is not blocking now, but future tool UX can make “目标目录还没创建，直接 write_file 即可”更顺滑。
+  - This run did not require a real repair wave because the final worker output passed parent acceptance. Parent-acceptance rejected -> repair advice is covered by focused tests and still needs a purposely failing real E2E.
+- Status: passed as current natural-language worker baseline.
+
+### Finding 112: Relative artifact refs can already include the product-root suffix
+
+- Discovered at: 2026-05-15 during real MiniMax read-root E2E under `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-181352-readroot-check`.
+- Symptom:
+  - Worker wrote the requested file to `/deliverables/furniture-home/index.html` and successfully read it back.
+  - Its structured output reported the artifact as `deliverables/furniture-home/index.html`.
+  - The integrity gate joined that ref under the product root again, effectively looking for `deliverables/furniture-home/deliverables/furniture-home/index.html`, then fell back to the internal task directory and marked the run `BLOCKED`.
+- 中文解释：
+  - 大白话：小傻妞文件写对了，也自己读到了，但验收机器把“已经带目录的相对路径”又拼了一遍目录，于是误以为文件丢了。
+- Root cause:
+  - `_artifact_path_under_root()` only checked `root / candidate`.
+  - It did not recognize that `candidate` may start with the same suffix as the product root, which is a common natural model report shape.
+- Fix:
+  - Artifact integrity resolution now aligns relative artifact refs against the product root suffix first.
+  - `deliverables/furniture-home/index.html`, `furniture-home/index.html`, and `index.html` can all resolve to the same product root when the file exists.
+- Verification:
+  - Focused regression: `test_leaf_relative_artifact_with_product_root_suffix`.
+  - Existing product-root and broken-HTML integrity tests still pass.
+- Status: fixed by focused tests and follow-up real E2E observation; next real E2E should continue through the repair worker path.
+
+### Finding 113: Top-level parent-test rejection needs a create_subagents repair hint
+
+- Discovered at: 2026-05-15 during follow-up real MiniMax E2E under `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-182823-artifact-suffix-check`.
+- Symptom:
+  - Worker reached `AWAITING_ACCEPTANCE`, proving artifact integrity no longer falsely blocked `deliverables/furniture-home/index.html`.
+  - Parent acceptance correctly rejected the page because `static_site_check` found 13 inert controls (`href="#"` / unmatched anchors).
+  - Root tried to rerun the same already waiting worker with `runner_instruction`, but dispatch only reran acceptance and did not execute a repair turn. Root then started drifting toward direct file edits.
+- 中文解释：
+  - 大白话：验收机找茬找对了，但返回给主代理的下一步不够明确。主代理知道“失败了”，却没拿到“请新派一个修复小傻妞”的机器按钮，所以先绕了一圈，差点自己下场改。
+- Root cause:
+  - `parent_acceptance_repair_advice` only existed in runner-context direct-child progress payload.
+  - Top-level `dispatch_subagents` acceptance records exposed test/follow-up refs, but did not include a copyable `create_subagents` repair suggestion.
+- Fix:
+  - Top-level rejected acceptance records now include `next_action=create_repair_child_from_parent_acceptance_refs`.
+  - They also include `parent_acceptance_repair_advice.suggested_tool_call` using `create_subagents`, with test/follow-up/output/run refs and inherited product write roots from `run.json`.
+- Verification:
+  - Focused regression: `test_top_level_rejected_parent_tests_include_repair_child_tool_call`.
+- Status: fixed by focused tests; next real E2E should confirm root follows the repair-child advice instead of direct edits.
+
+### Finding 114: Runner deliverables aliases must normalize into artifacts
+
+- Discovered at: 2026-05-15 during follow-up real MiniMax repair-advice E2E under `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-183735-repair-advice-check`.
+- Symptom:
+  - The worker wrote a homepage and returned a valid `[SUBAGENT_RESULT]`.
+  - The JSON used `"deliverables": [...]` instead of the documented `"artifacts": [...]`.
+  - Parser ignored the file refs, so parent acceptance saw `artifact_count=0`, generated `total_tests=0`, and accepted without static-site checks.
+- 中文解释：
+  - 大白话：小傻妞把“我交付了什么”写成了 `deliverables`，不是 `artifacts`。人能看懂是同一个意思，但机器只认一个字段，于是验收机以为没有文件要测，直接放过了。
+- Root cause:
+  - The compatibility boundary was too narrow. `parse_subagent_runner_output()` normalized field values, but only read product refs from `payload["artifacts"]`.
+  - Real model output can use common product-ref aliases even when the prompt asks for the canonical field.
+- Fix:
+  - Parser now treats `deliverables`, `output_files`, and `files` as safe artifact aliases when their items contain `path`, `artifact_id`, or `id`.
+  - Downstream remains strict: result payloads, typed envelopes, static-site checks, and parent acceptance still consume the canonical `artifacts` list.
+- Verification:
+  - Focused regressions:
+    - `test_subagent_result_accepts_deliverables_alias_for_artifacts`
+    - `test_subagent_result_envelope_accepts_deliverables_alias_for_artifacts`
+  - Focused parser/runner/static/acceptance suite passed.
+- Status: fixed by focused tests; next real repair-loop E2E should verify alias-normalized artifacts trigger parent static-site checks and repair advice.
+
+### Finding 115: Structured repair can hide artifact refs under evidence
+
+- Discovered at: 2026-05-15 during real MiniMax E2E under `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-184908-repair-alias-check`.
+- Symptom:
+  - Worker wrote `/deliverables/furniture-home/index.html`.
+  - The final repaired `[SUBAGENT_RESULT]` had `evidence=[{"kind":"artifact","path":".../index.html"}]`, but `artifacts=[]`.
+  - Parent acceptance saw `artifact_count=0`, generated `total_tests=0`, and accepted based on evidence-only checks instead of static-site checks.
+- 中文解释：
+  - 大白话：小傻妞确实把文件路径写出来了，但写在“证据”栏里，不在“产物”栏里。人看得懂，机器验收只看产物栏，于是又漏掉了网页检查。
+- Root cause:
+  - Structured-output repair can preserve useful refs in evidence fields while leaving canonical `artifacts` empty.
+  - The artifact parser only normalized direct product fields and common aliases; it did not lift explicit artifact evidence refs into canonical artifacts.
+- Fix:
+  - `parsing_artifacts.py` now also recovers artifacts from `evidence` items with `kind=artifact` and a `path`.
+  - It also recovers refs from `evidence_packets[].artifact_refs`, keeping the canonical downstream shape as `artifacts`.
+- Verification:
+  - Focused regressions:
+    - `test_subagent_result_recovers_artifact_from_evidence_path`
+    - `test_subagent_result_recovers_artifact_from_evidence_packet_refs`
+  - Parser/runner/static/parent-acceptance focused suite passed.
+- Status: fixed by focused tests. The next real E2E should confirm parent acceptance runs static checks when the model reports artifacts via evidence refs.
+
+### Finding 116: Empty parent test reports must not trust generic evidence refs
+
+- Discovered at: 2026-05-15 during repair-loop E2E under `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-185933-artifact-evidence-check`.
+- Symptom:
+  - Repair worker output had `artifacts=0` and `tests=0`.
+  - Parent acceptance still treated an empty `test_execution.json` as inspect-only because generic refs like `output.json` / `takeover_readiness.json` existed.
+- 中文解释：
+  - 大白话：系统看见“有证据文件”，就误以为“有网页产物可以验收”。但这些只是运行记录，不是用户要看的页面。
+- Root cause:
+  - Empty-report safety only checked whether evidence refs existed, not whether refs pointed to actual artifacts.
+- Fix:
+  - Empty parent test reports now require real artifact refs from `task.artifact_refs`、`evidence_packets[].artifact_refs` or `output.artifacts`.
+  - Generic `evidence_refs` no longer make `0 tests` look safe.
+- Verification:
+  - Focused regression: `test_parent_acceptance_empty_report_rejects_generic_evidence_refs`.
+- Status: fixed by focused tests.
+
+### Finding 117: Parent acceptance must choose the workspace containing the artifact
+
+- Discovered at: 2026-05-15 during repair-loop E2E under `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-192113-repair-loop6`.
+- Symptom:
+  - Worker wrote the product under `/Users/xiaoyezi/my-claude-code/.../deliverables/furniture-home/`.
+  - Parent acceptance ran `static_site_check` from the my-agent code repo root because that was the first configured workspace root.
+- 中文解释：
+  - 大白话：网页在用户任务目录，验收机却站在代码仓库里找网页，所以检查位置错了。
+- Root cause:
+  - Acceptance execution used the first manager workspace root, not the workspace that contained artifact refs or product write roots.
+- Fix:
+  - `acceptance_workspace_root_for_task()` now chooses the configured workspace root that contains output artifacts, task artifact refs, or product allowed write roots.
+  - Task-local runtime directories are ignored so they do not override the real product workspace.
+- Verification:
+  - Focused regression: `test_acceptance_tests_use_workspace_root_containing_artifact`.
+- Status: fixed by focused tests.
+
+### Finding 118: Artifact integrity BLOCKED needs its own repair lane
+
+- Discovered at: 2026-05-15 during repair-loop E2E under `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-193529-repair-loop7`.
+- Symptom:
+  - Artifact integrity correctly marked a worker `BLOCKED/UNVERIFIED` because `index.html` missed closing `</body>` and `</html>`.
+  - Dispatch only surfaced a generic `classify_blocker` record. Root then drifted toward directly reading and editing the product file instead of creating a repair child.
+- 中文解释：
+  - 大白话：验收机发现网页半截了，这是对的。但返回给 root 的按钮只写“有阻塞”，没写“请派修复小傻妞”。root 就开始自己动手，违背“父级不要替孩子写产物”的原则。
+- Root cause:
+  - Artifact integrity failure was treated as generic recovery/classify bookkeeping.
+  - No top-level `create_subagents` or runner-context `schedule_child_subagents` repair suggestion was attached to the failure refs.
+- Fix:
+  - New artifact integrity signal layer extracts `output.json`、`run.json`、artifact refs、blockers and product write roots from task records or dispatch records.
+  - Top-level dispatch records now include `next_action=create_repair_child_from_artifact_integrity_refs` and `artifact_integrity_repair_advice.suggested_tool_call` using `create_subagents`.
+  - Runner-context direct child progress returns the same repair lane with `schedule_child_subagents`, and artifact integrity BLOCKED children no longer default to generic recovery first.
+  - Externalized orchestration summaries preserve this repair advice so large dispatch JSON does not hide the next action.
+- Verification:
+  - Focused regressions:
+    - `test_top_level_artifact_integrity_blocker_includes_repair_child_tool_call`
+    - `test_dispatch_payload_surfaces_artifact_integrity_repair_from_direct_child`
+    - `test_dispatch_externalized_result_keeps_artifact_integrity_repair_advice`
+  - Strict code-size after refactor: `hard=0 high-risk=0 soft=0`.
+- Status: fixed by focused tests. Next real E2E should rerun the repair-loop and confirm root creates a repair worker rather than editing the artifact itself.
+
+### Finding 119: Worker can keep self-checking after writing artifact and miss finalization
+
+- Discovered at: 2026-05-15 during fresh real MiniMax E2E under `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-195719-artifact-repair-lane`.
+- Symptom:
+  - Root used normal user wording and created one `小傻妞-worker`.
+  - Worker wrote `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-195719-artifact-repair-lane/deliverables/furniture-home/index.html` with about 20KB / 579 lines.
+  - Task stayed `RUNNING`, `output.json` stayed `PLANNING`, with no `artifacts` / `tests` / `acceptance` / `blockers`.
+  - Tool progress showed repeated read/search/replace self-check rounds after writing the page.
+  - The page was structurally closed, but still contained `href="#"` placeholder links, so it was not really ready for parent acceptance.
+- 中文解释：
+  - 大白话：小傻妞已经把网页写出来了，但系统一直给它“继续从进度接着写”的信号。它就继续读、搜、改小地方，却没有把“产物路径、证据、测试建议”写进 `output.json` 交给父级验收。更麻烦的是，里面还有假链接没修掉。
+- Root cause:
+  - `latest_tool_progress.json` had one generic `next_action`: continue from progress snapshot. It did not distinguish incomplete chunking, complete HTML closeout, or repair-needed HTML.
+  - `_task_local_progress_context()` repeated a generic “continue” policy into the next prompt, even when the artifact had already formed a complete HTML document.
+  - `html_post_write_note()` only reported closing-tag structure, not obvious fake links like `href="#"`.
+- Fix:
+  - Task-local write progress now runs a small artifact integrity summary for HTML paths and stores `artifact_integrity` with blocker/warning codes.
+  - Complete HTML progress now tells the runner to stop product-body writes and write `execution_context.output_json` / `[SUBAGENT_RESULT]` with refs.
+  - HTML with placeholder hash links now gets `placeholder_hash_link` as a warning and the next action says to repair before output closeout.
+  - Live `[task-local-progress]` context now follows the persisted `next_action` instead of always saying “continue”.
+- Verification:
+  - Focused regressions:
+    - `test_task_local_write_progress_completed_html_prompts_output_json_closeout`
+    - `test_task_local_write_progress_placeholder_hash_link_prompts_repair`
+    - `test_html_post_write_note_warns_placeholder_hash_links`
+- Status: fixed by focused tests. Next real E2E should confirm the worker either repairs fake links then writes `output.json`, or cleanly hands a completed artifact to parent acceptance without minutes of self-check drift.
+
+### Finding 120: Post-grant rerun can be blocked by stale failed evidence
+
+- Discovered at: 2026-05-15 during fresh real MiniMax E2E under `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-201434-progress-closeout`.
+- Symptom:
+  - Worker wrote a short incomplete `index.html`, correctly returned `BLOCKED/INCOMPLETE_OUTPUT`, and asked for `write_file` / `append_file`.
+  - Parent route granted the write tools and reran the same worker, but the task could still be rejected because the first attempt's failed evidence stayed in `task.evidence`.
+  - 中文解释：小傻妞第一次写半截失败是正常记录；第二次补完后，验收还拿第一次失败当“现在还失败”，于是把已经修好的 run 又挡住了。
+- Root cause:
+  - Parent acceptance evidence checks used the full historical `task.evidence` / `task.evidence_packets` list.
+  - Retry attempts share one run record, so old failed evidence is useful for audit but should not decide the latest attempt's acceptance result.
+- Fix:
+  - `dispatch_capability_followup.py` now adds a short refs-first continuation instruction before the post-grant rerun: read blockers/next_actions/artifact refs, do not restart, use newly granted tools, then close out through `output.json` / `SUBAGENT_RESULT`.
+  - `acceptance_evidence_findings.py` now evaluates acceptance evidence from the current runner attempt first, falling back to historical evidence only when no attempt timestamp exists. Old failed evidence remains persisted for audit, but it no longer vetoes a successful retry.
+- Verification:
+  - Focused regression: `test_dispatch_reruns_incomplete_output_after_write_grant`.
+  - Focused suite: `test_dispatch_capability_followup.py`, `test_subagent_session_auto_continuation.py`, `test_artifact_integrity.py`, `test_tool_loop_subagent_closeout.py`, `test_subagent_prompt_contract.py` -> `26 passed`.
+- Status: fixed by focused tests. Next real E2E should confirm a worker that asks to append/rewrite after incomplete HTML can finish in the same dispatch cycle and reach parent acceptance.
+
+### Finding 121: Artifact warning codes need concrete repair examples
+
+- Discovered at: 2026-05-15 during fresh real MiniMax E2E under `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-204332-workflow-off-respect`.
+- Symptom:
+  - Worker wrote a complete `/deliverables/furniture-home/index.html` of about 19KB / 425 lines.
+  - The task stayed `RUNNING` with `output.json` still `PLANNING`.
+  - `latest_tool_progress.json` repeatedly reported `warning_codes=["placeholder_hash_link"]`, but gave no concrete link text or href examples.
+  - 中文解释：小傻妞知道“页面里有假链接”，但不知道到底是哪几个链接，于是反复搜、反复修，却迟迟不写 `output.json` 交父级验收。
+- Root cause:
+  - `ArtifactIntegrityIssue` only carried `code/message/severity`.
+  - Task-local progress only exposed `blocker_codes` / `warning_codes`, and `next_action` only said `codes=placeholder_hash_link`.
+  - The live prompt therefore had an abstract machine code, not a repair handle like `品牌故事 href=#`.
+- Fix:
+  - `ArtifactIntegrityIssue` now includes bounded `count` and `examples`.
+  - HTML link integrity checks aggregate duplicate `href="#"` and missing `#id` issues with examples such as `品牌故事 href=#`.
+  - `html_post_write_note()` and `latest_tool_progress.json.artifact_integrity.issues` now carry the same compact issue details.
+  - Task-local `next_action` includes concrete issue examples before asking the runner to repair and then close out.
+- Verification:
+  - Focused regressions:
+    - `test_artifact_integrity_link_issues_include_counts_and_examples`
+    - `test_task_local_write_progress_placeholder_hash_link_prompts_repair`
+    - `test_html_post_write_note_warns_placeholder_hash_links`
+- Status: fixed by focused tests. Next real E2E should confirm the worker can repair named fake links instead of looping around opaque warning codes.
+
+### Finding 122: Many similar link warnings need a batch repair strategy
+
+- Discovered at: 2026-05-15 during real MiniMax E2E under `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-210000-link-examples`.
+- Symptom:
+  - The new issue examples worked: progress reported `placeholder_hash_linkx17 examples=查看全部产品 href=#; 了解更多 href=#; 微 href=#`.
+  - The worker then used several `replace_in_file` rounds but reduced the count slowly: `17 -> 16 -> 15 -> 13`.
+  - 中文解释：这次小傻妞知道具体哪几个链接有问题了，但它开始“一次只改一个”。十几个同类链接这样修会拖很久，真实任务体验还是不够硬。
+- Root cause:
+  - `next_action` gave concrete examples but did not explain the repair method for many repeated issues.
+  - The model chose narrow exact replacements instead of scanning all `href="#"` and rewriting a whole footer/nav/CTA block or the whole file.
+- Fix:
+  - Task-local progress now adds a batch repair strategy when `placeholder_hash_link` count is at least 4.
+  - The strategy tells the runner to search all `href="#"`, rewrite related navigation/footer/CTA or the full file, and not replace one link per round.
+- Verification:
+  - Focused regression: `test_task_local_write_progress_many_placeholder_links_prompts_batch_repair`.
+- Status: fixed by focused tests. Next real E2E should confirm the runner repairs many fake links in one or two mutations and then writes `output.json`.
+
+### Finding 123: Root must not directly rewrite delegated product files after failed acceptance
+
+- Discovered at: 2026-05-15 during real MiniMax E2E under `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-211000-batch-link-repair`.
+- Symptom:
+  - Worker closed out with `output.json`, but the product still had `href="#"` and missing hash targets.
+  - Root inspected the product, correctly noticed the page was bad, then called `write_file` itself on `/deliverables/furniture-home/index.html`.
+  - 中文解释：root 发现小傻妞交付不合格是对的，但它不应该亲自重写网页。正确动作是派修复小傻妞，保留“派工 -> 修复 -> 验收”的链路。
+- Root cause:
+  - Direct-write guard only triggered when the original user prompt explicitly said “不要自己写 / 只读报告 / refs-only”.
+  - Natural prompt “安排小傻妞做，你负责检查和验收” did not trigger delegate-only writing protection after `dispatch_subagents`.
+- Fix:
+  - Direct-write guard now also activates when the current root turn has already created/dispatched subagent run ids.
+  - In that state, root write/append/replace to business deliverables is blocked unless the user explicitly says root should personally repair/write.
+  - Runtime/report writes remain allowed, and active subagent runners keep their normal write ability.
+- Verification:
+  - Focused regressions:
+    - `test_active_delegated_root_blocks_product_write_without_explicit_override`
+    - `test_active_delegated_root_allows_explicit_parent_repair_override`
+- Status: fixed by focused tests. Next real E2E should confirm root creates a repair worker instead of editing the product file itself.
+
+### Finding 124: Internal output.json can mask unresolved product integrity progress
+
+- Discovered at: 2026-05-15 during real MiniMax E2E under `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-212000-delegated-repair-guard`.
+- Symptom:
+  - First worker wrote `/deliverables/furniture-home/index.html` and slowly reduced fake-link issues.
+  - It then wrote internal `output.json` with `status=COMPLETED` while product progress had recently shown unresolved `placeholder_hash_link` / `missing_hash_target`.
+  - `latest_tool_progress.json` was overwritten by the `output.json` write, losing the product file's latest artifact-integrity details.
+  - Root attempted one direct product `replace_in_file`; the direct-write guard stopped the path and root then created repair worker `subagent-1778851554-86ca8d66`.
+  - Repair worker eventually cleared all link warnings, but also wrote `output.json`, again replacing the final product progress with internal closeout progress.
+  - A follow-up run under `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-214000-output-progress-guard` showed another gap: the worker repaired the HTML to `warning_codes=[]`, but its `output.json.artifacts=[]`, so parent/root had to rediscover the product file by reading the deliverables path.
+- 中文解释：
+  - 大白话：网页还有按钮/链接问题时，小傻妞写了自己的“交作业表” `output.json`，系统就把“网页哪里坏了”的最新记录盖掉了。这样以后如果中途恢复，可能只看到“它交作业了”，看不到“网页还没修完”。
+- Root cause:
+  - Task-local progress treated every successful write the same.
+  - Internal runner closeout file `task.output_json` was allowed to become `latest_written_path`.
+  - Finalize integrity gate only blocked hard HTML structure errors; fake links and missing hash targets were warnings, so a self-reported success could move forward before repair.
+  - Finalize only checked structured `artifacts`; if the model omitted artifacts, the already-recorded product path in `latest_tool_progress.json` was not promoted into the standard artifact refs.
+- Fix:
+  - When the runner writes its internal `task.output_json`, task-local progress now preserves the previous product `latest_written_path`、`artifact_integrity`、`summary` and `next_action`, while adding `closeout_written_path`.
+  - Finalize now promotes actionable HTML link warnings (`placeholder_hash_link`, `missing_hash_target`) into closeout blockers for success-like runner results.
+  - Finalize also recovers missing artifact refs from `latest_tool_progress.json` when a success-like `output.json` leaves `artifacts=[]`.
+  - This keeps output.json useful as a closeout file, but prevents it from hiding product integrity problems.
+- Verification:
+  - Focused regressions:
+    - `test_task_local_output_json_closeout_preserves_product_integrity_progress`
+    - `test_leaf_success_closeout_blocks_invalid_html_links`
+    - `test_leaf_success_closeout_recovers_missing_artifact_from_latest_progress`
+- Status: fixed by focused tests. Next real E2E should confirm a worker that tries to close out with invalid HTML links becomes BLOCKED before root sees it as ready.
+
+### Finding 125: Resume wording can let root self-repair a timed-out delegated artifact
+
+- Discovered at: 2026-05-15 during real MiniMax recovery E2E under `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-214800-artifact-ref-recovery`.
+- Symptom:
+  - Worker wrote only the first incomplete HTML chunk and then timed out with `request_timeout=240s`.
+  - The task-local continue packet was good: `status=BLOCKED`, `ready_to_continue=true`, `work_progress.latest_written_path=index.html`, and `next_action` said to continue the incomplete HTML.
+  - A second root prompt using natural wording asked it to continue the existing small-agent task.
+  - Root inspected `subagent_board` and the partial HTML, correctly saw the worker timed out, but then said it would “自己接管补全” instead of rerunning the original worker from packet or creating a takeover/repair worker.
+- 中文解释：
+  - 大白话：系统记住了“这个小傻妞超时了、网页还没写完、可以接着写”，但 root 看完以后差点自己亲自补网页。我们要的是 root 派恢复/接管小傻妞，不是 root 变成 worker。
+- Root cause:
+  - Direct-write guard protected explicit “不要自己写” prompts and current-turn dispatched runs.
+  - It did not treat natural recovery wording like “安排它从上次进度接着写 / 派新的小傻妞接管修复” as a delegated product-write boundary.
+  - In a new resume turn, `remembered_orchestration_run_ids` can be empty, so old blocked runs on the board did not automatically activate the guard.
+- Fix:
+  - Direct-write guard now recognizes natural recovery delegation phrases involving 小傻妞 / 子代理 / worker and continuation/takeover/repair wording.
+  - Explicit user override still wins: “你亲自修复 / root 自己写” remains allowed, while negated phrases like “root 不能自己写” are not mistaken as overrides.
+- Verification:
+  - Focused regression: `test_natural_recovery_delegate_prompt_blocks_root_product_write`.
+- Status: fixed by focused tests. Next recovery E2E should verify root uses packet/takeover/repair dispatch instead of writing deliverables itself.
+
+### Finding 126: Runner result did not tell parent the safe repair route clearly enough
+
+- Discovered at: 2026-05-15 during real MiniMax recovery E2E under `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-214800-artifact-ref-recovery`.
+- Symptom:
+  - Repair worker produced a 420-line HTML page, but `output.json` ended as `status=BLOCKED` because artifact integrity still found many `placeholder_hash_link` warnings.
+  - Root read `RUNNER_RESULT.md`, noticed duplicate sections and broken structure, then generated a huge `write_file` call saying it would directly rewrite the page.
+  - 中文解释：小傻妞报告里有“网页还没过检查”，但给 root 看的报告没有明说“你下一步应该派修复小傻妞，别自己改”。root 就按普通工程师习惯想亲自接管了。
+- Root cause:
+  - `RUNNER_RESULT.md` only rendered summary and blocked_reason.
+  - The safer machine fields existed in `output.json.next_actions/blockers/artifacts`, but the human/model-facing markdown report did not promote them into an explicit parent action.
+  - Direct-write guard would still block execution when the tool call is actually processed, but the model can waste a large output trying to write the whole page before the guard has a chance to respond.
+- Fix:
+  - `RUNNER_RESULT.md` now adds `Parent Next Action` when `artifact_integrity_failed` appears.
+  - The section tells parent/root not to directly edit business deliverables and to create a repair worker using `output_json` and artifact refs, then rerun dispatch and artifact integrity checks.
+  - Added an exact recovery-prompt regression so natural “安排小傻妞接着/接管修复” plus `write_file` stays blocked.
+- Verification:
+  - Focused regressions:
+    - `test_render_runner_result_markdown_with_artifact_repair_action`
+    - `test_natural_recovery_delegate_prompt_blocks_root_full_rewrite`
+- Status: fixed by focused tests. Next clean real E2E should confirm root reads the stronger runner result and creates a repair worker instead of attempting a full direct rewrite.
+
+### Finding 127: Placeholder-link repair works but wastes too many tool rounds
+
+- Discovered at: 2026-05-15 during clean real MiniMax E2E under `/Users/xiaoyezi/my-claude-code/real-e2e-20260515-223000-parent-repair-action`.
+- Symptom:
+  - Worker created the furniture homepage and artifact progress found 28 `href="#"` placeholder links.
+  - The runner eventually repaired all of them and the final run became `DONE/VERIFIED`, but it needed 49 tool rounds.
+  - 中文解释：小傻妞能把活做完，但修一堆一样的假链接时太慢，像拿镊子一根根拔。真实任务能跑通，但效率不够硬。
+- Root cause:
+  - `replace_in_file` already supports `count=0` to replace all matching text, but the live tool examples shown to the model only demonstrated default single replacement and `count=1`.
+  - Task-local progress said “批量修复”，but did not name the concrete `count=0` tool shape.
+- Fix:
+  - `replace_in_file` tool spec now includes a batch replacement use case and example with `count=0`.
+  - Artifact progress batch-repair guidance now explicitly says: when one `old/new` pair can handle repeated text, use `replace_in_file` with `count=0`.
+- Verification:
+  - Real E2E result: `subagent-1778854431-1bd143cf` completed `DONE/VERIFIED`; `artifact_integrity` returned `ok=True` with no blockers or warnings.
+  - Focused regressions:
+    - `test_task_local_write_progress_many_placeholder_links_prompts_batch_repair`
+    - `test_replace_in_file_multiple_occurrences`
+- Status: fixed by focused tests; needs next real E2E to verify tool rounds drop substantially on repeated placeholder repairs.

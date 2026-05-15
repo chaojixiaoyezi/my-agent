@@ -12,6 +12,11 @@ from typing import Any
 
 from ..model_task import SubAgentTask
 from .compact_continue_packet import SubagentContinuePacketRequest, write_subagent_continue_packet
+from .session_progress_integrity import (
+    artifact_integrity_progress,
+    artifact_integrity_summary,
+    artifact_next_action,
+)
 
 _SCHEMA_VERSION = "subagent_tool_progress.v1"
 _WRITE_TOOLS = {"write_file", "append_file", "replace_in_file"}
@@ -37,6 +42,18 @@ class SubagentToolProgressRequest:
 class _ProgressRefs:
     latest: Path
     ledger: Path
+
+
+# LLM: _CloseoutSnapshotRequest bundles internal output.json progress preservation inputs.
+# 类用途: 把 output closeout 快照的多个局部变量收进一个包，避免 helper 接口继续长参数。
+@dataclass(frozen=True)
+class _CloseoutSnapshotRequest:
+    request: SubagentToolProgressRequest
+    previous: dict[str, Any]
+    refs: _ProgressRefs
+    path: str
+    headings: list[str]
+    written_paths: list[str]
 
 
 # LLM: record_runtime_subagent_tool_progress bridges ToolLoopService records to task-local progress snapshots.
@@ -109,7 +126,13 @@ def _snapshot_payload(
     path = str(request.payload.get("path") or "")
     headings = _merge_unique(_string_list(previous.get("headings")) + _headings_from_payload(request.payload))
     written_paths = _merge_unique(_string_list(previous.get("written_paths")) + ([path] if path else []))
-    summary = _summary(request.tool, path, headings)
+    if _is_internal_output_path(request.task, path) and previous:
+        return _output_closeout_snapshot(
+            _CloseoutSnapshotRequest(request, previous, refs, path, headings, written_paths)
+        )
+    integrity = artifact_integrity_progress(path)
+    summary = _summary(request.tool, path, headings, integrity)
+    next_action = artifact_next_action(integrity)
     return {
         "schema_version": _SCHEMA_VERSION,
         "kind": "subagent_tool_progress",
@@ -122,12 +145,44 @@ def _snapshot_payload(
         "written_paths": written_paths,
         "headings": headings[:_MAX_HEADINGS],
         "summary": summary,
-        "next_action": "继续从 latest_tool_progress.json 接续；写作前先对照 headings，避免重复已记录章节。",
+        "next_action": next_action,
+        "artifact_integrity": integrity,
         "latest_tool_progress_ref": str(refs.latest),
         "tool_progress_ledger_ref": str(refs.ledger),
         "output_preview": _clip(request.output, 300),
         "reserved": {},
     }
+
+
+# LLM: _output_closeout_snapshot preserves product progress when the runner writes internal output.json.
+# 函数用途: 子代理写内部收口文件时，不让 output.json 覆盖真实产物的最新自检状态和修复建议。
+def _output_closeout_snapshot(closeout: _CloseoutSnapshotRequest) -> dict[str, Any]:
+    request = closeout.request
+    snapshot = dict(closeout.previous)
+    snapshot.update({
+        "tool": request.tool,
+        "tool_round": request.tool_round,
+        "tool_index": request.tool_index,
+        "written_paths": closeout.written_paths,
+        "headings": closeout.headings[:_MAX_HEADINGS],
+        "latest_tool_progress_ref": str(closeout.refs.latest),
+        "tool_progress_ledger_ref": str(closeout.refs.ledger),
+        "closeout_written_path": closeout.path,
+        "closeout_output_preview": _clip(request.output, 300),
+        "reserved": dict(closeout.previous.get("reserved") or {}),
+    })
+    return snapshot
+
+
+# LLM: _is_internal_output_path recognizes the runner closeout file, not a user product artifact.
+# 函数用途: 判断当前写入是否是 task.output_json；只有内部收口文件才保留上一次产品进度。
+def _is_internal_output_path(task: SubAgentTask, path: str) -> bool:
+    if not path:
+        return False
+    try:
+        return Path(path).resolve() == Path(str(getattr(task, "output_json", "") or "")).resolve()
+    except OSError:
+        return False
 
 
 # LLM: _refresh_continue_packet promotes progress snapshot facts into the task-local continue packet.
@@ -164,11 +219,14 @@ def _headings_from_payload(payload: dict[str, object]) -> list[str]:
 
 # LLM: _summary renders one concise Chinese progress line for packet and board display.
 # 函数用途: 生成“最近写了什么、有哪些标题”的短摘要，帮助模型续跑时先校准进度。
-def _summary(tool: str, path: str, headings: list[str]) -> str:
+def _summary(tool: str, path: str, headings: list[str], integrity: dict[str, Any]) -> str:
     name = Path(path).name if path else "未命名文件"
+    integrity_summary = artifact_integrity_summary(integrity)
     if headings:
-        return f"最近 {tool} {name}；已记录标题：{'；'.join(headings[:6])}"
-    return f"最近 {tool} {name}；尚未识别到 Markdown 标题"
+        base = f"最近 {tool} {name}；已记录标题：{'；'.join(headings[:6])}"
+    else:
+        base = f"最近 {tool} {name}；尚未识别到 Markdown 标题"
+    return f"{base}；{integrity_summary}" if integrity_summary else base
 
 
 # LLM: _read_json_object tolerates missing progress files during the first write.

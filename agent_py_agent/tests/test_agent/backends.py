@@ -109,6 +109,27 @@ class CapabilityThenAcceptedBackend(BaseBackend):
         return ModelResponse(text=_controlled_exec_done_result(), backend=self.name)
 
 
+# LLM: IncompleteOutputThenAcceptedBackend covers product-writing blockers that ask for write grants.
+# 类用途: 测试用后端；第一轮模拟网页只写半截并申请继续写，第二轮在父级授权后完成。
+class IncompleteOutputThenAcceptedBackend(BaseBackend):
+    """测试用后端：先返回半截产物阻塞，授权继续写后完成。"""
+
+    name = "incomplete_output_then_accepted_backend"
+
+    def __init__(self):
+        self.calls = 0
+        self.prompts: list[str] = []
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        assert "[SUBAGENT_RESULT]" in prompt
+        self.prompts.append(prompt)
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(text=_incomplete_write_request_result(), backend=self.name)
+        assert "append_file" in prompt
+        return ModelResponse(text=_incomplete_write_done_result(), backend=self.name)
+
+
 # LLM: _controlled_exec_request_result keeps the capability backend class compact.
 # 函数用途: 返回一个结构化 BLOCKED 结果，包含 shell/tool/path/output budget 申请字段。
 def _controlled_exec_request_result() -> str:
@@ -131,6 +152,58 @@ def _controlled_exec_request_result() -> str:
         '  "next_actions": ["route_capability_request", "rerun_subagent_after_grant"],\n'
         '  "blocked_reason": "缺少 controlled_exec grant",\n'
         '  "failure_type": "capability_request"\n'
+        "}\n"
+        "[/SUBAGENT_RESULT]"
+    )
+
+
+# LLM: _incomplete_write_request_result keeps the product-output follow-up scenario reusable.
+# 函数用途: 返回一个非 capability_request failure_type 的 BLOCKED 结果，但包含继续写文件的能力申请。
+def _incomplete_write_request_result() -> str:
+    return (
+        "[SUBAGENT_RESULT]\n"
+        "{\n"
+        '  "status": "BLOCKED",\n'
+        '  "summary": "HTML只写了头部片段，需要继续写完整页面。",\n'
+        '  "used_tools": ["write_file"],\n'
+        '  "used_skills": [],\n'
+        '  "evidence": [{"kind": "command", "summary": "index.html 只写入 2386 字节", "ok": false}],\n'
+        '  "evidence_packets": [],\n'
+        '  "capability_requests": [\n'
+        '    {"problem": "HTML文件写入不完整，需要追加剩余内容", "needed_capability": "write_file或append_file继续写入", "capability_type": "tool", "expected_output": "完整HTML", "requested_tools": ["write_file", "append_file"], "path_scope": ["."]}\n'
+        "  ],\n"
+        '  "artifacts": [{"path": "index.html", "kind": "file", "summary": "半截HTML"}],\n'
+        '  "tests": [],\n'
+        '  "patches": [],\n'
+        '  "lessons": [],\n'
+        '  "next_actions": ["继续写完HTML"],\n'
+        '  "blocked_reason": "HTML文件写入不完整",\n'
+        '  "failure_type": "INCOMPLETE_OUTPUT"\n'
+        "}\n"
+        "[/SUBAGENT_RESULT]"
+    )
+
+
+# LLM: _incomplete_write_done_result is the second-turn success for artifact continuation.
+# 函数用途: 返回授权后完成的结构化结果，证明 dispatch 后置重跑真的发生。
+def _incomplete_write_done_result() -> str:
+    return (
+        "[SUBAGENT_RESULT]\n"
+        "{\n"
+        '  "status": "AWAITING_ACCEPTANCE",\n'
+        '  "summary": "HTML已补齐并等待父级验收。",\n'
+        '  "used_tools": ["append_file"],\n'
+        '  "used_skills": [],\n'
+        '  "evidence": [{"kind": "command", "summary": "HTML完整闭合", "ok": true}],\n'
+        '  "evidence_packets": [{"id": "evpkt-html-complete", "claim": "HTML已完整", "checked_scope": "index.html", "evidence_refs": ["runner_result.json"], "artifact_refs": [], "confidence": 0.9}],\n'
+        '  "capability_requests": [],\n'
+        '  "artifacts": [],\n'
+        '  "tests": [{"name": "html-integrity", "ok": true, "summary": "完整闭合"}],\n'
+        '  "patches": [],\n'
+        '  "lessons": [],\n'
+        '  "next_actions": [],\n'
+        '  "blocked_reason": "",\n'
+        '  "failure_type": ""\n'
         "}\n"
         "[/SUBAGENT_RESULT]"
     )

@@ -14,6 +14,7 @@ import json
 from typing import TYPE_CHECKING
 
 from .models import SubAgentParsedOutput
+from .parsing_artifacts import artifact_items_from_payload
 from .parsing_capability_requests import capability_requests_from_payload
 from .parsing_partial import extract_partial_subagent_result_text
 from .parsing_values import (
@@ -278,7 +279,7 @@ def _parsed_output_from_payload(payload: dict[str, object]) -> SubAgentParsedOut
         evidence_packets=_dict_list(payload.get("evidence_packets", [])),
         findings=_dict_list(payload.get("findings", [])),
         capability_requests=capability_requests_from_payload(payload),
-        artifacts=_dict_list(payload.get("artifacts", [])),
+        artifacts=artifact_items_from_payload(payload),
         tests=_dict_list(payload.get("tests", [])),
         patches=_dict_list(payload.get("patches", [])),
         lessons=_string_list(payload.get("lessons", [])),
