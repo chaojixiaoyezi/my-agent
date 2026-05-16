@@ -78,6 +78,7 @@ agent_py_agent/
 |   |   |-- acceptance_helpers/                # 父级验收 evidence/artifact/readiness helpers
 |   |   |-- patch/                             # patch review/apply/render 服务
 |   |   `-- services/                          # lifecycle/dispatch/indexing/actions/persistence 等服务
+|   |       |-- hierarchy_qa_ready_refs.py        # QA 波次输入 refs 收集，给 tester/acceptor 明确 ready worker 来源
 |   |-- task_registry/                        # 任务注册表和查找入口
 |   |-- tooling/                              # 工具模型、文件/HTTP/shell 工具、注册表、写边界
 |   |-- user_space/                           # 用户数据隔离、my-agent 家目录、provider 用户/群空间和迁移
@@ -189,6 +190,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |   |-- capability_config_patch_tool.py # 模型可调用的 capability_config 安全补丁工具
 |   |   |   |-- compact_auto_continuation.py # 主 agent 自动 compact 后渲染 continue packet 并受控续跑一次
 |   |   |   |-- dispatch_capability_followup.py # 子代理 runner 申请能力后的 route/grant/rerun 同轮闭环
+|   |   |   |-- orchestration_quality_advice_payload.py # schedule/dispatch 共享 QA advice refs-only JSON 渲染
 |   |   |   |-- orchestration_recovery_batches.py # 多个失败 child 的恢复动作分批，避免续跑/接管/熔断指令串线
 |   |   |   |-- subagent_compact_continuation.py # 子代理 task-local compact 接续 prompt 片段
 |   |   |   |-- finalization_compact_auto.py # run 收尾阶段的 compact auto 字段投影和续跑轮跳过策略

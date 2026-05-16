@@ -16,6 +16,7 @@ from .orchestration_parent_acceptance_repair import (
     parent_acceptance_rejected,
     parent_acceptance_repair_advice_payload,
 )
+from .orchestration_quality_advice_payload import quality_advice_payload
 from .orchestration_quality_payload import quality_repair_advice_payload
 from .orchestration_recovery_batches import recovery_batches_from_strategies
 from .runner_context import current_subagent_run_id
@@ -203,7 +204,7 @@ def _attach_quality_advice(agent, parent_run_id: str, children: dict[str, object
     advice = qa_orchestration_advice(manager=agent.subagents, parent=parent, specs=[])
     if advice is None or advice.phase != "quality_wave_ready":
         return
-    children["quality_advice"] = _quality_advice_payload(advice)
+    children["quality_advice"] = quality_advice_payload(advice)
 
 
 # LLM: _attach_recovery_strategies gives parent runners packet-first decisions without artifact bodies.
@@ -262,26 +263,6 @@ def _action_counts(strategies: list[dict[str, object]]) -> dict[str, int]:
         action = str(item.get("recommended_action") or "unknown")
         counts[action] = counts.get(action, 0) + 1
     return counts
-
-
-# LLM: _quality_advice_payload keeps QA suggestions compact and copyable for the next tool call.
-# 函数用途: 把 QA advice dataclass 转成模型可读 JSON，不读取任何业务产物正文。
-def _quality_advice_payload(advice) -> dict[str, object]:
-    return {
-        "phase": advice.phase,
-        "llm_next_step": advice.llm_next_step,
-        "guardrails": list(advice.guardrails),
-        "suggested_roles": list(advice.suggested_roles),
-        "suggested_children": [
-            {
-                "goal": item.goal,
-                "agent_name": item.agent_name,
-                "role": item.role,
-                "acceptance_checks": list(item.acceptance_checks),
-            }
-            for item in advice.suggested_children
-        ],
-    }
 
 
 # LLM: _progress_payload folds task statuses without expanding child artifacts.
