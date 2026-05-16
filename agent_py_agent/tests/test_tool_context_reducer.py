@@ -189,6 +189,35 @@ def test_dispatch_externalized_result_keeps_top_level_completion_gate():
     assert "records" not in rendered
 
 
+# LLM: Current-turn run state must survive orchestration output externalization.
+# 函数用途: create/schedule/dispatch 大输出被外置时，root 下一轮仍能看到状态桶和建议工具调用。
+def test_orchestration_externalized_result_keeps_current_turn_run_state():
+    output = json.dumps(
+        {
+            "created_run_ids": ["child-new"],
+            "current_turn_run_state": {
+                "total": 1,
+                "by_status": {"PLANNING": 1},
+                "dispatchable_run_ids": ["child-new"],
+                "next_action": "continue_dispatch_unfinished_run_ids",
+                "suggested_tool_call": {"tool": "dispatch_subagents", "run_ids": ["child-new"]},
+            },
+            "records": [{"message": "z" * 2000}],
+        }
+    )
+
+    rendered = render_tool_result_for_live_prompt(
+        ToolExecutionResult("create_subagents", True, output),
+        _dispatch_externalized_archive_record(output),
+    )
+
+    assert "current_turn_run_state" in rendered
+    assert "continue_dispatch_unfinished_run_ids" in rendered
+    assert "child-new" in rendered
+    assert "dispatch_subagents" in rendered
+    assert "records" not in rendered
+
+
 # LLM: Parent acceptance repair advice must survive dispatch output externalization.
 # 函数用途: dispatch_subagents 输出过大时，live prompt 摘要仍要保留修复子代理建议，而不是丢掉测试失败线索。
 def test_dispatch_externalized_result_keeps_parent_acceptance_repair_advice():

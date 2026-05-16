@@ -144,6 +144,9 @@ def _top_level_action_lines(payload: dict[str, Any]) -> list[str]:
         "runner_selection_recovery",
         "quality_advice",
         "artifact_integrity_repair_advice",
+        # LLM: keep root's status table after create/schedule/dispatch outputs are externalized.
+        # 函数用途: 大调度 JSON 外置后仍保留 current_turn_run_state，避免下一轮重复 create 或空 dispatch。
+        "current_turn_run_state",
         "next_action",
     )
     return [f"- {key}: {_json_inline(payload.get(key))}" for key in keys if payload.get(key)]

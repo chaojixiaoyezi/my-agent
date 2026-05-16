@@ -7,7 +7,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+from agent_py_agent.agent.agent_core.hierarchy_tools import ScheduleChildSubagentsTool
+from agent_py_agent.agent.agent_core.orchestration_tools import (
+    CreateSubagentsTool,
+    DispatchSubagentsTool,
+)
+from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.core import SimpleAgent
 
 
 # LLM: _dispatch_agent_with_state builds a minimal agent whose load() exposes mixed run statuses.
@@ -51,3 +57,37 @@ def test_dispatch_execute_payload_includes_current_turn_run_state():
     assert state["verified_run_ids"] == ["done"]
     assert state["next_action"] == "inspect_or_rescue_blocked_run_ids"
     assert state["suggested_tool_call"]["run_ids"] == ["blocked"]
+
+
+# LLM: create_subagents should expose current-turn state immediately, before a later dispatch call.
+# 函数用途: root 创建小傻妞后，不必靠记忆猜下一步，应直接看到 dispatchable run ids 和建议调度工具。
+def test_create_payload_includes_current_turn_run_state(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+
+    payload = json.loads(CreateSubagentsTool(agent).execute({
+        "goal": "写一个高端现代家具品牌首页 index.html",
+        "role": "worker",
+    }).output)
+
+    state = payload["current_turn_run_state"]
+    assert state["dispatchable_run_ids"] == payload["created_run_ids"]
+    assert state["next_action"] == "continue_dispatch_unfinished_run_ids"
+    assert state["suggested_tool_call"]["tool"] == "dispatch_subagents"
+
+
+# LLM: schedule_child_subagents should expose current-turn state for nested parents too.
+# 函数用途: 子代理创建小小傻妞后，要直接拿到 dispatchable run ids，不能等下一轮从 prose 里抄 id。
+def test_schedule_child_payload_includes_current_turn_run_state(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
+    parent = agent.subagents.create_run(goal="parent", thought="parent", plan=["parent"], parent_id=root.id, root_id=root.id)
+    agent._current_subagent_run_id = parent.id
+
+    payload = json.loads(ScheduleChildSubagentsTool(agent).execute({
+        "apply": True,
+        "children": [{"goal": "写商品卡片组件", "role": "worker"}],
+    }).output)
+
+    state = payload["current_turn_run_state"]
+    assert state["dispatchable_run_ids"] == payload["created_run_ids"]
+    assert state["next_action"] == "continue_dispatch_unfinished_run_ids"

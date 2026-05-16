@@ -15,6 +15,8 @@ from ..subagents.services.hierarchy_scheduler import (
 )
 from ..tools import BaseTool, ToolExecutionResult
 from .orchestration_create_context import create_context_manifest, create_context_packs
+from .orchestration_dispatch_state_contract import dispatch_state_contract_payload
+from .orchestration_run_scope import remember_orchestration_run_ids
 from .orchestration_tool_specs import build_schedule_child_subagents_spec
 from .orchestration_write_guard import external_write_target_error
 from .parameters import _bool_param, _non_negative_int, _string_list
@@ -70,7 +72,14 @@ class ScheduleChildSubagentsTool(BaseTool):
             )
         except (IndexError, TypeError, ValueError) as exc:
             return _schedule_error(_schedule_validation_error_message(exc))
-        return ToolExecutionResult("schedule_child_subagents", True, _schedule_payload_json(result))
+        # LLM: remember child ids from schedule so the nested parent sees a machine state table immediately.
+        # 函数用途: schedule_child_subagents 返回后直接给模型 dispatchable/running/blocked 状态，不靠 prose 抄 id。
+        remember_orchestration_run_ids(self.agent, [*result.created_run_ids, *result.reused_run_ids])
+        return ToolExecutionResult(
+            "schedule_child_subagents",
+            True,
+            _schedule_payload_json(result, dispatch_state_contract_payload(self.agent)),
+        )
 
 
 # LLM: _schedule_error keeps all schedule_child_subagents failures consistently named.
@@ -125,7 +134,7 @@ def _schedule_apply_default(params: dict[str, object]) -> bool:
 
 # LLM: _schedule_payload_json renders service results without leaking large workspace content.
 # 函数用途: 输出层级调度结果摘要，包含新建/复用/建议 dispatch 的 run id、层级关系和阻断原因。
-def _schedule_payload_json(result: HierarchyScheduleResult) -> str:
+def _schedule_payload_json(result: HierarchyScheduleResult, state_payload: dict[str, object] | None = None) -> str:
     payload = {
         "parent_run_id": result.parent_run_id,
         "root_id": result.root_id,
@@ -138,6 +147,7 @@ def _schedule_payload_json(result: HierarchyScheduleResult) -> str:
         "planned_count": result.planned_count,
         "items": [_schedule_item_payload(item) for item in result.items],
     }
+    payload.update(state_payload or {})
     if result.quality_advice is not None:
         payload["quality_advice"] = _quality_advice_payload(result.quality_advice)
     if result.scheduling_warnings:
