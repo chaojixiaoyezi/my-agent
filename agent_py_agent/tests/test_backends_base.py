@@ -363,6 +363,51 @@ class TestAnthropicCompatibleBackend:
         assert resp.text == "after retry"
         assert calls == [1, 2]
 
+    def test_generate_stream_falls_back_to_non_stream_after_empty_retries(self):
+        backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3"))
+        stream_calls: list[int] = []
+        json_payloads: list[dict[str, object]] = []
+
+        def request_stream(path, payload, headers):
+            del path, headers
+            stream_calls.append(len(stream_calls) + 1)
+            payload["stream"] = True
+            return [json.dumps({"type": "message_stop"})]
+
+        def request_json(path, payload, headers):
+            del path, headers
+            json_payloads.append(dict(payload))
+            return {"content": [{"type": "text", "text": "fallback ok"}]}
+
+        backend.request_stream = request_stream
+        backend.request_json = request_json
+
+        resp = backend.generate("test prompt", on_chunk=None)
+
+        assert resp.text == "fallback ok"
+        assert stream_calls == [1, 2]
+        assert json_payloads and "stream" not in json_payloads[0]
+
+    def test_generate_stream_fallback_emits_chunk(self):
+        backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3"))
+        chunks: list[str] = []
+
+        def request_stream_iter(path, payload, headers):
+            del path, payload, headers
+            yield json.dumps({"type": "message_stop"})
+
+        def request_json(path, payload, headers):
+            del path, payload, headers
+            return {"content": [{"type": "text", "text": "fallback chunk"}]}
+
+        backend.request_stream_iter = request_stream_iter
+        backend.request_json = request_json
+
+        resp = backend.generate("test prompt", on_chunk=chunks.append)
+
+        assert resp.text == "fallback chunk"
+        assert chunks == ["fallback chunk"]
+
 
 class TestGetBackend:
     def test_get_backend_echo(self):

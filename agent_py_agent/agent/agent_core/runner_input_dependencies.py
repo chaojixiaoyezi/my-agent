@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 from ..subagents.dependency_artifact_refs import ref_satisfied_by_dependency_artifact
+from ..subagents.workspace_roots import derived_workspace_roots_from_subagent_path
 
 _FILE_REF_RE = re.compile(
     r"(?<![\w./-])(?:/|~/)?(?:[\w.-]+/)*[\w.-]+\."
@@ -74,9 +75,14 @@ def missing_input_dependencies(task: object, *, dependency_tasks: list | None = 
     roots = _dependency_roots(task)
     if not roots:
         return []
+    goal = str(getattr(task, "goal", "") or "")
     return [
         ref for ref in refs
-        if not _ref_exists(ref, roots) and not ref_satisfied_by_dependency_artifact(ref, task, dependency_tasks)
+        if (
+            not _ref_exists(ref, roots)
+            and not ref_satisfied_by_dependency_artifact(ref, task, dependency_tasks)
+            and not _ref_marked_optional(goal, ref)
+        )
     ]
 
 
@@ -139,6 +145,28 @@ def _path_ref_is_output(text: str, start: int) -> bool:
     return _has_weak_output_marker(prefix) and not any(marker in prefix for marker in _READ_MARKERS)
 
 
+# LLM: _ref_marked_optional keeps "read AGENTS.md if present" from blocking otherwise valid workers.
+# 函数用途: 判断目标文本是否把某个输入文件标成可选；只影响缺失文件，不影响真实存在的读取。
+def _ref_marked_optional(text: str, ref: str) -> bool:
+    if not text or not ref:
+        return False
+    for match in re.finditer(re.escape(ref), text):
+        if _optional_ref_window(text, match.start(), match.end()):
+            return True
+    return False
+
+
+# LLM: _optional_ref_window keeps optional-file markers narrow so "README.md if subdirs exist" still requires README.
+# 函数用途: 只接受贴近文件名的“如有/可选/存在则”等标记，并排除“若有子目录”这类路径后续说明。
+def _optional_ref_window(text: str, start: int, end: int) -> bool:
+    prefix = text[max(0, start - 16):start]
+    suffix = text[end:end + 24]
+    window = f"{prefix}{suffix}"
+    if "子目录" in suffix[:12]:
+        return False
+    return any(marker in window for marker in ("如有", "若有", "如果有", "可选", "存在则"))
+
+
 # LLM: _has_direct_write_marker detects verbs close enough to bind to the following file path.
 # 函数用途: 识别“输出到/生成/写入 path”这类直接写目标，避免被更早的读取词误导。
 def _has_direct_write_marker(prefix: str) -> bool:
@@ -153,17 +181,26 @@ def _has_weak_output_marker(prefix: str) -> bool:
     return "输出" in direct or "output" in direct
 
 
-# LLM: _dependency_roots uses task allowed_write_roots plus task_dir as bounded lookup roots.
-# 函数用途: 限制输入依赖存在性检查在当前任务已授权的工作目录内完成。
+# LLM: _dependency_roots uses private run dirs plus derived project roots as bounded lookup roots.
+# 函数用途: 限制输入依赖存在性检查在 task_dir、allowed_write_roots 和受控推导出的项目根内完成。
 def _dependency_roots(task: object) -> list[Path]:
     roots: list[Path] = []
     for raw in [getattr(task, "task_dir", ""), *(getattr(task, "allowed_write_roots", []) or [])]:
         if not isinstance(raw, str | Path) or not str(raw).strip():
             continue
         root = Path(raw).expanduser().resolve(strict=False)
-        if root not in roots:
-            roots.append(root)
+        _append_root(roots, root)
+        for workspace_root in derived_workspace_roots_from_subagent_path(root):
+            _append_root(roots, workspace_root)
     return roots
+
+
+# LLM: _append_root keeps dependency lookup roots deduplicated and directory-shaped.
+# 函数用途: 追加存在或未创建的目录候选；如果传入文件路径则用父目录作为查找根。
+def _append_root(roots: list[Path], value: Path) -> None:
+    root = value if value.suffix == "" else value.parent
+    if root not in roots:
+        roots.append(root)
 
 
 # LLM: _ref_exists resolves absolute refs directly and relative refs below dependency roots.

@@ -8536,3 +8536,57 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Top-level repair suggestions now use stable repair `agent_name` values so create idempotency can reuse the same repair owner.
   - Target artifacts come from both `output.json.artifacts` and failed `test_execution.json` file/content paths, so missing final xlsx/html refs are still visible to the repair contract.
   - Remaining live gap: dispatch still needs to use this contract to create/reuse one repair owner when a generated script exists but the final product artifact is missing; this is the next E2E slice.
+
+### Finding 171: Runner input refs must resolve from the project workspace, not only the private run dir
+
+- Trigger:
+  - Live Lab real suite `step8-real-qa-refs-r2` reached `long_subagent`; root created one coordinator and two workers, but workers stayed `PLANNING`.
+  - Worker goals asked to read project files such as `README.md` and optional `AGENTS.md（如有）/SOUL.md（如有）`.
+- Problem:
+  - `runner_input_dependencies` only looked in the private run `task_dir` / `allowed_write_roots`.
+  - The real fixture uses `.my_agent/subagents/<run>` as the private runner workspace, while `README.md` lives at the project root.
+  - Optional hints like `AGENTS.md（如有）` were treated as hard required inputs.
+- 中文解释:
+  - 小傻妞住在自己的小屋里，但用户项目的 `README.md` 在项目大厅。
+  - 系统之前只去小屋里找，所以明明项目里有 README，也误判“缺文件，不能开工”。
+  - `AGENTS.md（如有）` 这种“有就读，没有也没事”的文件，也不应该把任务卡死。
+- 通道运行时/长期助手/会话运行时 comparison:
+  - 通道运行时 和 长期助手 都更偏向 session/task workspace 事实：私有 run 目录和项目/任务工作区是两个已知边界，不让模型自己猜路径。
+  - 会话运行时 的工具/路径合同也更强调结构化 root，而不是从自然语言摘要里重新推断。
+  - Lesson: input dependency gating should derive bounded workspace roots from known subagent directory markers.
+- Fix:
+  - Added `subagents/workspace_roots.py` as the shared helper for deriving project roots from `.my_agent/subagents/<run>`, `.my-agent/subagents/<run>`, and `data/subagents/<run>`.
+  - `runner_input_dependencies` now checks run-local roots plus the derived project workspace roots.
+  - Optional refs marked with `如有/若有/如果有/可选/存在则` no longer block dispatch when absent.
+  - `result_artifact_roots` reuses the same helper, so input gating and artifact validation share the same workspace-root contract.
+- Verification:
+  - Added `test_runner_input_dependencies.py`.
+  - Added `.my_agent/subagents` artifact-root regression to `test_result_artifact_workspace_roots.py`.
+  - Live Lab real suite `step8-real-qa-refs-r4` passed after this fix and the backend fallback below.
+- Status:
+  - Fixed in focused tests and real Live Lab.
+
+### Finding 172: Anthropic-compatible empty streams should fall back at the backend boundary
+
+- Trigger:
+  - Live Lab real suite `step8-real-qa-refs-r3` failed before subagent logic because `gateway_ask` spent several minutes and then raised `Anthropic-compatible 流式响应没有文本内容`.
+- Problem:
+  - The provider/backend occasionally returned stream events without visible assistant text.
+  - The old backend retried stream twice and then raised, so a provider response-shape wobble could kill the whole E2E before orchestration coverage.
+- 中文解释:
+  - 这不是小傻妞不会干活，而是模型接口这次“流式吐字”没吐出正文。
+  - 成熟系统不会让上层调度去猜这种接口毛病；应该在模型后端这一层兜底一次。
+  - 兜底成功就继续返回正常文本，调度层不需要知道刚刚流式抖了一下。
+- 通道运行时/长期助手/会话运行时 comparison:
+  - 会话运行时 的做法更像把 provider 协议差异收在 backend/protocol 边界，上层拿到的是统一结果。
+  - 通道运行时/长期助手 也会把运行状态和模型调用失败分层记录；真实业务状态不应该和 provider transient issue 混成一个自然语言错误。
+  - Lesson: stream/no-stream resilience belongs in the backend adapter, not in subagent prompt or E2E case code.
+- Fix:
+  - `AnthropicCompatibleBackend._generate_stream()` keeps the two stream attempts, then sends one non-streaming `/v1/messages` fallback if no text was produced.
+  - The fallback removes any `stream` field from payload and returns the same `ModelResponse` shape.
+  - If `on_chunk` is present and fallback text exists, it emits the fallback text once through the chunk callback.
+- Verification:
+  - Added backend tests for empty stream -> non-stream fallback and fallback chunk emission.
+  - Live Lab real suite `step8-real-qa-refs-r4` passed with `health`, `gateway_ask`, and `long_subagent`.
+- Status:
+  - Fixed in focused tests and real Live Lab.

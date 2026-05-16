@@ -1026,6 +1026,7 @@ docs/
 - `agent_py_agent/agent/subagents/coverage_records.py`: 规范化 `covered_run_id -> covered_by_run_id` 覆盖关系，供 runner 解析、父级验收和最终收口共用；只认机器 run id 和 verified covering run，不解析自然语言 fallback。
 - `agent_py_agent/agent/subagents/result_structured_evidence.py`: 解析并写回 runner evidence、evidence_packets 和 findings；负向 content_check 语义在这里规范，避免“坏模式没出现”被误判为失败。
 - `agent_py_agent/agent/subagents/result_artifact_evidence.py`: 从 runner artifact metadata 合并 `artifact_refs`，并在模型漏写 `evidence_packets` 时合成 refs-only artifact evidence packet，不读取 artifact 正文。
+- `agent_py_agent/agent/subagents/workspace_roots.py`: 从 `.my_agent/subagents/<run>`、`.my-agent/subagents/<run>`、`data/subagents/<run>` 受控推导项目工作区根；runner input gate 和 artifact integrity 共用它，避免真实 E2E 中 README/业务产物存在但被私有 run 目录误拦。
 - `agent_py_agent/agent/subagents/parsing_partial.py`: 从 runner 结果块恢复被截断但仍有可追溯 `evidence_packets` 的成功结果；只接受 refs-only 证据链，避免把无证据长文本误当完成。
 - `agent_py_agent/agent/subagents/parsing_values.py`: 子代理结果解析共用的 list/dict/int 归一化 helper，让 `parsing.py` 保持薄层并保留旧 private import 兼容。
 - `agent_py_agent/agent/subagents/parsing_artifacts.py`: runner 产物字段别名归一化，把 `deliverables` / `output_files` / `files`、`evidence.kind=artifact.path` 和 `evidence_packets.artifact_refs` 收敛成标准 `artifacts`。
@@ -1114,7 +1115,7 @@ docs/
 - `agent_py_agent/agent/agent_core/orchestration_root_contract.py`: root/coordinator seed 合同修复 helper；从原始用户 prompt 提取 required/forbidden 文件和精确层级命名合同，避免自然语言摘要把机器合同改写或漏传。
 - `agent_py_agent/agent/agent_core/subagent_finalize_helpers.py`: 子代理 runner 收尾持久化 helper；coordinator 已真实创建并验收 child 时可合成等待父级验收的收口，同时会阻断“没工具调用、没 child refs，只说下一步要 schedule_child_subagents”的假完成，转成 `BLOCKED / needs_child_creation` 让 LLM 继续派工。
 - `agent_py_agent/agent/agent_core/subagent_finalize_artifact_integrity.py`: runner 收尾前的产物完整性检查层；相对 artifact ref 会优先对齐 product write root 尾部，避免 `deliverables/site/index.html` 被误拼成重复目录后标成 `artifact_missing`。
-- `agent_py_agent/agent/backends/base.py`: Anthropic-compatible 非流式响应解析会在 thinking-only/no-text 内容块时重试一次，避免真实 E2E 被可恢复的厂商响应形状直接打成 runner 失败；普通空响应仍报错。
+- `agent_py_agent/agent/backends/base.py`: Anthropic-compatible 非流式响应解析会在 thinking-only/no-text 内容块时重试一次；流式响应连续空文本时会在后端边界做一次非流式 `/v1/messages` 兜底，避免真实 E2E 被可恢复的厂商响应形状直接打成 runner 失败；普通空响应仍报错。
 - `agent_py_agent/agent/agent_core/tool_agent_budget.py` / `tool_agent_budget_stage.py`: 单个代理滚动工具预算 helper 和工具循环集成层；默认按 `run_id` 做 10 分钟 50 次限制，没有 `run_id` 的主代理普通聊天不受限，且不做任务树或单次对话的全局预算。
 - `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context `dispatch_subagents` 的直接 child 进度摘要；提示继续调度、恢复阻塞 child 或最新 acceptance review 为 REJECT 的 child，只有 child 都已等待验收/完成且没有 rejected acceptance 时才用 refs-first summary 收口；被父级验收拒绝的 child 会进入 repair lane 并暴露 `parent_acceptance_repair_advice`，避免上层反复读取子产物正文或把验收失败当普通 runner 恢复。
 - `agent_py_agent/agent/agent_core/orchestration_parent_acceptance_repair.py`: 父级验收失败后的 refs-first 修复建议生成层；从 acceptance/tests/follow-up 记录提取失败摘要、引用路径和建议 repair child scope，不读取业务产物正文。

@@ -1687,3 +1687,11 @@
 - 已实现：`QaOrchestrationAdvice` 新增 `ready_work_refs`；`RequiredQaChildSpec` 新增 `source_run_ids` / `source_artifact_refs` / `source_output_refs` / `quality_scope`。`schedule_child_subagents` 和 runner-context dispatch 的 `quality_advice` 都会返回这些字段。
 - 已测试：补充 dispatch quality wave 和 schedule-without-children 的 ready refs regression；QA scope guard、验收 role coverage、progress payload focused tests 通过。
 - 下一步：进入第 8 步，做真实 E2E 对照压测前的本地收口：先跑完整守卫和 full pytest，再用自然语言家具/购物网站任务验证整个链路是否按 create -> dispatch -> QA -> repair/acceptance 推进。
+
+## 2026-05-17 第 8 步真实 Live Lab 收口
+- 中文说明：第 8 步不再加新的流程规矩，而是用真实模型把前 7 步合同跑一遍。第一轮暴露的是测试台 interface 缺目录字段；第二轮暴露的是 `.my_agent/subagents` 私有目录不能稳定读项目根输入；第三轮暴露的是 provider 流式空响应。都按底层边界修，不靠 prompt 临时补。
+- 对照结论：会话运行时 把 provider 协议问题收在后端/协议层，通道运行时/长期助手 把 session/task workspace 当机器事实边界。我们这次对应落到 `AnthropicCompatibleBackend` 兜底和 `workspace_roots.py` 共享路径合同。
+- 已实现：`LiveLab` / `_LabInterface` 暴露稳定 case surface；`workspace_roots.py` 支持从 `.my_agent/subagents/<run>`、`.my-agent/subagents/<run>`、`data/subagents/<run>` 推导项目工作区根；runner input gate 支持可选读取 refs；artifact roots 复用同一推导；Anthropic-compatible 空流式响应会非流式兜底一次。
+- 真实复测：`step8-real-qa-refs-r4` 返回 `LIVE_LAB_PASS`，真实 MiniMax-M2.7 完成 `health`、`gateway_ask`、`long_subagent`。long_subagent 创建 2 个 worker，分两轮 dispatch，写出 2 个 scenario output 文件，并通过 scenario summary。
+- 已测试：新增 Live Lab interface、runner input dependency、artifact workspace roots、backend stream fallback 单测；focused suites、ruff、doc sync、strict code-size 和 full pytest 作为本阶段收口门。
+- 下一步：把这个底座带进更大真实任务，优先跑自然语言家具首页/购物网站 E2E，并继续用 通道运行时/长期助手/会话运行时 对照“哪里是协议层、哪里是控制面、哪里是工具网关”。

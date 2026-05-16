@@ -20,6 +20,7 @@ scripts/
 - `live_agent_lab.py`：用户运行的稳定入口。
 - `live_lab/cli.py`：把命令行参数转成 runner 能理解的配置。
 - `live_lab/runner.py`：负责 suite 运行、输出目录、状态汇总。
+- `live_lab/runner.py` 的 `_LabInterface`：兼容旧 case surface；把 `run_root`、`prompts_dir`、`responses_dir`、`summary_path` 等目录属性转发给 case，case 不直接访问 runner/session 私有字段。
 - `live_lab/cases.py`：登记有哪些 case，每个 case 怎么跑。
 - `live_lab/log_analysis_replay.py`：把 SecurityAlertV1 fixture 跑成 LOG artifacts。
 - `agent_py_agent/tests/test_live_lab_log_analysis_replay.py`：验证 replay 的成功和失败路径。
@@ -53,3 +54,12 @@ scripts/
 - Live Lab scripts now treat definition-level comments as part of the developer-facing architecture map: `LLM:` records suite contracts, side effects, and caller expectations; `函数用途:` / `类用途:` gives a beginner-readable explanation.
 - `scripts/live_lab/runner.py`, `reporter.py`, `session.py`, `cases.py`, `cli.py`, and replay modules should keep comments synchronized when case flow, artifact paths, or process execution changes.
 - Code-size accounting excludes comment/docstring lines, so required guidance text does not count as implementation size.
+
+## 2026-05-17 compatibility structure update
+- 中文说明：Live Lab 的目录所有权在 `session.py`，命令执行在 `runner.py`，case 通过 `_LabInterface` 看见旧的 `LiveLab` 表面。以后新增 case 要走这个表面拿目录，不要读 `_runner._session` 这种私有字段。
+- `_LabInterface` and `LiveLab` expose the same small workspace path surface: `run_root`, `fixture_root`, `prompts_dir`, `responses_dir`, `config_path`, `transcript_path`, `summary_path`, and `stop_file`.
+
+## 2026-05-17 real-suite support boundaries
+- 中文说明：真实 `--suite real --real-llm` 不只依赖 Live Lab 自身，还依赖两个产品侧稳定边界：模型后端遇到 Anthropic-compatible 空流式响应时要能兜底，子代理私有目录要能受控推导项目工作区根来读取 `README.md` / 校验产物 refs。
+- Backend boundary: `agent_py_agent/agent/backends/base.py` keeps stream/no-stream resilience inside `AnthropicCompatibleBackend`, so Live Lab case logic does not special-case provider quirks.
+- Workspace boundary: `agent_py_agent/agent/subagents/workspace_roots.py` is the shared helper for deriving project roots from `.my_agent/subagents/<run>`, `.my-agent/subagents/<run>`, and `data/subagents/<run>` layouts. Live Lab real cases use this through runner input dependency checks and artifact integrity checks.
