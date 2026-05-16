@@ -92,7 +92,12 @@ def test_capability_request_tool_blocks_cross_run_writes(tmp_path):
 # 函数用途: root 没有上级，不能写 OPEN capability_request 把自己卡住；root 策略以后单独实现。
 def test_capability_request_tool_blocks_root_run_requests(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
-    root = manager.create_run(goal="root owns decisions", thought="decide", plan=["delegate"])
+    root = manager.create_run(
+        goal="root owns decisions",
+        thought="decide",
+        plan=["delegate"],
+        role="coordinator",
+    )
     agent = SimpleNamespace(subagents=manager, _current_subagent_run_id=root.id)
 
     result = CapabilityRequestTool(agent).execute(
@@ -106,6 +111,30 @@ def test_capability_request_tool_blocks_root_run_requests(tmp_path):
     assert result.ok is False
     assert "root run 不走 capability_request" in result.output
     assert manager.load(root.id).capability_requests == []
+
+
+# LLM: test_top_level_worker_can_request_capability fixes the main-agent parent boundary.
+# 函数用途: 顶层 worker 虽然没有 subagent parent_id，但真实上级是主代理，因此缺工具时必须能写 capability_request。
+def test_top_level_worker_can_request_capability(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    task = manager.create_run(
+        goal="top-level child needs network",
+        thought="ask main parent",
+        plan=["request"],
+        role="worker",
+    )
+    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id=task.id)
+
+    result = CapabilityRequestTool(agent).execute(
+        {
+            "problem": "需要 fetch_url 核验网页。",
+            "needed_capability": "network",
+            "requested_tools": ["fetch_url"],
+        }
+    )
+
+    assert result.ok is True
+    assert manager.load(task.id).capability_requests[0].requested_tools == ["fetch_url"]
 
 
 # LLM: test_capability_request_tool_is_registered_for_simple_agent proves runners can see the tool.
@@ -178,3 +207,20 @@ def test_root_execution_context_hides_capability_request_tool(tmp_path):
 
     assert "capability_request" not in root_context.allowed_tools
     assert "capability_request" in child_context.allowed_tools
+
+
+# LLM: test_top_level_worker_context_keeps_capability_request covers create_subagents direct children.
+# 函数用途: 主代理直接创建的一层 worker 没有 subagent parent_id，但执行上下文仍要保留能力申请工具。
+def test_top_level_worker_context_keeps_capability_request(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    worker = manager.create_run(
+        goal="主代理直接派的小傻妞要查网页",
+        thought="缺能力就向主代理申请",
+        plan=["执行"],
+        role="worker",
+        allowed_tools=["read_file", "write_file", "capability_request"],
+    )
+
+    context = manager.build_execution_context(worker.id)
+
+    assert "capability_request" in context.allowed_tools

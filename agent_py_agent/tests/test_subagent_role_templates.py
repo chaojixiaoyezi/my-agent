@@ -198,6 +198,8 @@ def test_quality_role_contracts_use_template_defaults(tmp_path):
         "read_file",
         "search_text",
         "read_artifact",
+        "fetch_url",
+        "http_request",
         "write_file",
         "append_file",
         "replace_in_file",

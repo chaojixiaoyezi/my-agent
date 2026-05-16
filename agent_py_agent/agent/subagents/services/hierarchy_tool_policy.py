@@ -10,11 +10,15 @@ from typing import Any, ClassVar
 
 from ..role_templates import COORDINATOR_TOOLS
 
+# LLM: Leaf defaults mirror main-agent basics: read/write/search/web plus orchestration, with no role-specific handcuffs.
+# 函数用途: 给调度出来的小傻妞默认补齐读写、网页证据和继续派工能力，减少因模板或自然语言误差导致的“有任务但没工具”。
 _DEFAULT_LEAF_CODING_TOOLS = [
     "list_files",
     "read_file",
     "search_text",
     "read_artifact",
+    "fetch_url",
+    "http_request",
     "write_file",
     "append_file",
     "replace_in_file",

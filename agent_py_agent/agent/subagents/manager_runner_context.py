@@ -55,6 +55,7 @@ from .probe import (
     _probe_ok,
     _probe_writable_dir,
 )
+from .root_task_policy import is_self_authorized_root_task
 from .runner_context_bundle_files import execution_context_bundle, write_context_bundle_files
 from .runner_rendering import _render_runner_item_line, render_execution_context_markdown
 from .utils import (
@@ -308,22 +309,12 @@ def _granted_filesystem_write_roots(task: object) -> list[str]:
     return roots
 
 
-# LLM: _runner_allowed_tools removes parent-only request lanes from root execution contexts.
-# 函数用途: root 没有上级授权者，不在 runner prompt 展示 capability_request；普通子代理仍可向父级申请。
+# LLM: _runner_allowed_tools removes parent-only request lanes only from self-authorized roots.
+# 函数用途: 显式 root/coordinator seed 不展示 capability_request；主代理直接创建的一层 worker 仍可向主代理申请。
 def _runner_allowed_tools(task: SubAgentTask, tools: list[str]) -> list[str]:
-    if not _is_root_task(task):
+    if not is_self_authorized_root_task(task):
         return tools
     return [item for item in tools if item != "capability_request"]
-
-
-# LLM: _is_root_task mirrors capability_request root detection without importing agent-core tools.
-# 函数用途: 判断 task 是否为 root run，避免 root 自己等待不存在的父级。
-def _is_root_task(task: SubAgentTask) -> bool:
-    parent_id = str(getattr(task, "parent_id", "") or "").strip()
-    root_id = str(getattr(task, "root_id", "") or "").strip()
-    depth = int(getattr(task, "depth", 0) or 0)
-    run_id = str(getattr(task, "id", "") or "").strip()
-    return not parent_id and (not root_id or root_id == run_id or depth == 0)
 
 
 # LLM: _task_report_write_roots grants runners only their internal report workspace, not product roots.

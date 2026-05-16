@@ -157,11 +157,15 @@ before changing code.
   due-check reports, status refs, and acceptance/test refs.  Product bodies and
   large child artifact bodies stay blocked until a real acceptor finishes or the
   current user prompt explicitly asks the parent to inspect or accept the work.
-- Root runs do not write `capability_request`.  A root has no parent to ask, so
-  ordinary task-local capability gaps must be handled by creating/routing lower
-  agents, using existing tools, or reporting that the requested action is not
-  currently supported.  Root self-termination/uninstall policy is a future
-  design topic and must not be modeled as an OPEN child capability request.
+- Self-authorized root/coordinator/lead runs do not write `capability_request`.
+  They have no parent to ask, so ordinary task-local capability gaps must be
+  handled by creating/routing lower agents, using existing tools, or reporting
+  that the requested action is not currently supported.  Main-agent-created
+  top-level workers/researchers/writers are different: their parent is the main
+  agent even when their subagent `parent_id` is empty, so they may use the
+  normal child capability request lane.  Root self-termination/uninstall policy
+  is a future design topic and must not be modeled as an OPEN child capability
+  request.
 - Cleanup is allowed inside authorized workspaces when it matches the task:
   temporary files, task trash, generated artifacts, task-local memory, drafts,
   templates, tools, and skills may be removed.  The hard line is uninstalling or
