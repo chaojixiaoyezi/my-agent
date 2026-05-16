@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from agent_py_agent.agent.agent_core.dispatch_params import DispatchContext
+from agent_py_agent.agent.agent_core.dispatch_runner_batches import _runner_candidates_for_context
 from agent_py_agent.agent.agent_core.orchestration_progress_payload import _progress_payload
 from agent_py_agent.agent.agent_core.runner_dispatch import _dispatch_runner_candidates
 from agent_py_agent.agent.subagents.manager import SubAgentManager
@@ -97,6 +99,35 @@ def test_runner_phase_ignores_inherited_qa_contract_for_plain_coordinator():
     selected = _dispatch_runner_candidates(tasks, max_runners=4)
 
     assert [task.id for task in selected] == ["coord"]
+
+
+# LLM: explicit run_ids must remain exact instead of being silently narrowed by phase gates.
+# 函数用途: 覆盖 Task17 真实 E2E：root 明确传 3 个 run_ids 时，不能只因 coordinator 优先就只跑 1 个。
+def test_explicit_run_ids_keep_mixed_worker_and_coordinator_targets():
+    tasks = [
+        _runner_task("market", "worker", "小傻妞-市场环境"),
+        _runner_task("competition", "worker", "小傻妞-竞争格局"),
+        _runner_task("strategy", "coordinator", "小傻妞-进入策略"),
+    ]
+    ctx = DispatchContext(
+        cfg=SimpleNamespace(),
+        normalized_workflow_mode="off",
+        apply=True,
+        planner=False,
+        runner_instruction="",
+        max_runners=3,
+        limit=20,
+        reviewer="tester",
+        note="",
+        take_over_by="",
+        locked_files=None,
+        router=SimpleNamespace(),
+        include_run_ids=["market", "competition", "strategy"],
+    )
+
+    selected = _runner_candidates_for_context(tasks, ctx, runner_max_attempts=1)
+
+    assert [task.id for task in selected] == ["market", "competition", "strategy"]
 
 
 # LLM: workflow phase dependencies must be respected before broad role ordering.

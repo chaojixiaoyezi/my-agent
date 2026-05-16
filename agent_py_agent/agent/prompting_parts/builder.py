@@ -17,6 +17,7 @@ from __future__ import annotations
 """
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -190,11 +191,15 @@ def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, is
 
 
 # LLM: _workspace_context_text pins path semantics so models stop inventing /workspace.
-# 函数用途: 每轮把真实工作区根目录写进 prompt；相对路径默认落在这里，产物路径不要由模型猜。
+# 函数用途: 每轮把真实工作区根目录和当前本地日期写进 prompt；相对路径和报告日期不要由模型猜。
 def _workspace_context_text(builder: PromptBuilder) -> str:
     root = Path(builder.root).resolve()
+    now = datetime.now().astimezone()
     return "\n".join([
         f"- primary_workspace_root: {root}",
+        f"- current_local_date: {now.date().isoformat()}",
+        f"- current_local_time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}",
+        "- 写报告日期时优先使用 current_local_date，不要从旧文件、旧记忆或训练知识里猜日期。",
         "- 相对路径默认相对 primary_workspace_root。",
         "- 写文件、读文件、创建 artifacts/deliverables 时优先使用这个真实路径。",
         "- 不要把 /workspace 当作真实路径，除非用户明确给了这个绝对目录。",

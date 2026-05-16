@@ -20,6 +20,7 @@ from .orchestration_run_scope import remembered_orchestration_run_ids
 from .runner_dispatch import (
     RunnerDispatchRecordParams,
     _dispatch_runner_candidates,
+    _is_dispatch_runner_candidate,
     _runner_dispatch_record,
     _runner_max_attempts,
     _runner_retry_reason,
@@ -89,14 +90,27 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
 # LLM: _runner_candidates_for_context lets explicit packet recovery rerun the original blocked child.
 # 函数用途: 普通 dispatch 仍走候选过滤；只有显式 run_id 加恢复指令时，才允许 BLOCKED/FAILED 原 run 续跑。
 def _runner_candidates_for_context(tasks: list, ctx: DispatchContext, runner_max_attempts: int) -> list:
+    if requested_include_ids(ctx):
+        candidates = _included_normal_runner_tasks(tasks, ctx, runner_max_attempts)
+        if candidates or not _is_explicit_recovery_dispatch(ctx):
+            return candidates
+        return _included_recovery_runner_tasks(tasks, ctx)
     candidates = _dispatch_runner_candidates(
         tasks,
         ctx.max_runners,
         runner_max_attempts=runner_max_attempts,
     )
-    if candidates or not _is_explicit_recovery_dispatch(ctx):
-        return candidates
-    return _included_recovery_runner_tasks(tasks, ctx)
+    return candidates
+
+
+# LLM: _included_normal_runner_tasks treats explicit run_ids as exact ordered targets.
+# 函数用途: 模型或父级已经给定 run_ids 时，不再用阶段闸门静默丢掉 worker/coordinator 混合批次。
+def _included_normal_runner_tasks(tasks: list, ctx: DispatchContext, runner_max_attempts: int) -> list:
+    selected = [
+        task for task in tasks
+        if _is_dispatch_runner_candidate(task, runner_max_attempts=runner_max_attempts)
+    ]
+    return selected[: max(0, int(ctx.max_runners or 0))]
 
 
 # LLM: _is_explicit_recovery_dispatch keeps forced reruns tied to control-plane recovery refs.

@@ -16,6 +16,15 @@ def _delegated_root_agent():
     return SimpleNamespace(root="/tmp/workspace", _orchestration_run_ids_seen={"run-1"})
 
 
+def _delegated_root_agent_with_task(status: str, verification_status: str):
+    task = SimpleNamespace(status=status, verification_status=verification_status)
+    return SimpleNamespace(
+        root="/tmp/workspace",
+        _orchestration_run_ids_seen={"run-1"},
+        subagents=SimpleNamespace(load=lambda _run_id: task),
+    )
+
+
 def _runner_agent(role: str):
     task = SimpleNamespace(role=role, agent_name=f"小小傻妞-{role}")
     return SimpleNamespace(
@@ -213,6 +222,22 @@ def test_active_delegated_root_allows_explicit_parent_repair_override():
     )
 
     assert result is None
+
+
+# LLM: root cannot write final reports while remembered delegated runs are still incomplete.
+# 函数用途: 复现 Task17 中 root 看到部分失败后仍写 final_report.md 的问题；应先修复/接管阻塞 run。
+def test_active_delegated_root_blocks_final_report_when_run_incomplete():
+    result = maybe_block_delegate_only_direct_write(
+        DelegateOnlyDirectWriteGuardRequest(
+            agent=_delegated_root_agent_with_task("BLOCKED", "UNVERIFIED"),
+            user_prompt="请安排小傻妞们协作完成，你负责最后汇总。",
+            payload={"tool": "write_file", "path": "/tmp/workspace/final_report.md", "content": "# done"},
+        )
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert "delegated_direct_write_blocked" in result.output
 
 
 def test_delegate_only_prompt_allows_runtime_report_write():
