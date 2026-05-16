@@ -7716,3 +7716,25 @@ This document is append-only. Record every real subagent E2E issue found during 
   - `final_report.md` exists and is 14,067 bytes.
 - Remaining gap:
   - root still reads too many source files before delegation. This is a refs-first/context-planning optimization, not a blocker for the current dispatch correctness slice.
+
+### Finding 134: Root needs a machine path for refs-first source handoff
+
+- Test scene:
+  - Follow-up from Task17 passing run `my-agent-task17-20260516-080326.log`.
+  - The dispatch tree passed, but root still read more source bodies than needed before delegating.
+- Symptom:
+  - root can use `create_subagents(items=...)`, but source paths had no first-class create-run mapping.
+  - Even when a model wanted to pass “read these files yourself” to a child, fields such as `required_read_paths` or `context_manifest` were not preserved by `create_run_params()`.
+- 中文解释:
+  - 以前 root 想偷懒很难：它要么把资料正文自己读完再总结给小傻妞，要么只能把路径塞进自然语言 goal。现在我们给它一条正路：把资料路径作为机器字段交给小傻妞。
+- Root cause:
+  - `CreateRunParams` already supported `context_manifest/context_packs`, and runner prompt already rendered them.
+  - The model-facing `create_subagents` path did not pass those fields through.
+- Fix:
+  - `create_subagents` single-goal and `items/tasks` mode now preserve `context_manifest`, `context_packs`, `required_read_paths`, `source_refs`, `reference_paths`, `material_refs`, `task_pack_refs`, and `context_pack_refs`.
+  - Main prompt workspace context now tells root to read only minimal index/rubric/README before delegation, then pass long source paths to child agents through `required_read_paths/context_manifest`.
+- Verification:
+  - `python3 -m pytest -q agent_py_agent/tests/test_orchestration_create_subagents_items.py agent_py_agent/tests/test_prompting_builder.py` -> `47 passed`.
+  - `/Users/example/ai_claw/bin/ruff check agent_py_agent/agent/agent_core/orchestration_create_policy.py agent_py_agent/agent/agent_core/orchestration_tool_specs.py agent_py_agent/agent/prompting_parts/builder.py agent_py_agent/tests/test_orchestration_create_subagents_items.py agent_py_agent/tests/test_prompting_builder.py` -> passed.
+- Next check:
+  - Re-run a natural-language Task17-style E2E and count root `read_file/read_artifact` calls before the first `create_subagents`. The target is not zero reads; it should read enough to understand the task, then delegate detailed source-body reads to child agents.

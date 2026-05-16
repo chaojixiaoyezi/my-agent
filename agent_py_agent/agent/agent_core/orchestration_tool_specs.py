@@ -22,6 +22,9 @@ _CREATE_PARAMETERS = {
     "allowed_tools": "工具偏好提示；一般省略。系统会自动补齐基础读写工具，模型少填工具不能把子代理变成无写入能力。",
     "acceptance_checks": "验收标准列表",
     "plan": "每个子代理的初始步骤列表",
+    "context_manifest": "refs-first 上下文清单；可放 required_read_paths/task_pack_refs/omitted_context",
+    "context_packs": "refs-only 上下文包列表；每项只放摘要和 path/ref，不放大正文",
+    "required_read_paths": "简写：子代理必须自己读取的资料路径列表；会进入 context_manifest.required_read_paths",
     "workflow_mode": "off/plan/auto；决定是否在建工单时挂 workflow 计划",
     "extra_write_roots": "额外写入目录列表；目录必须位于 workspace_root 列表允许范围内",
 }
@@ -49,6 +52,19 @@ _CREATE_PARAMETER_DETAILS = {
     "allowed_tools": "一般省略。若模型写了 [\"read_file\"] 这类不完整列表，系统仍会补齐基础读写工具；不要把它当安全限制。",
     "acceptance_checks": "JSON 数组或多行文本，说明父代理后续怎样判断任务完成。",
     "plan": "JSON 数组或多行文本，给子代理的初始执行步骤。",
+    "context_manifest": (
+        "结构化资料索引，推荐至少写 required_read_paths。"
+        "这些路径会出现在子代理 runner prompt 的 Context Manifest 中，子代理自己读正文；"
+        "root 不必先把所有材料正文读进自己的上下文。"
+    ),
+    "context_packs": (
+        "小型上下文包索引，例如 [{\"kind\":\"brief\",\"summary\":\"评分标准\",\"path\":\"rubric.md\"}]。"
+        "只放摘要和路径，不放长正文。"
+    ),
+    "required_read_paths": (
+        "当资料路径很多时用这个简写，例如 [\"README.md\",\"data/market.md\"]。"
+        "这不是 root 要立刻读取的清单，而是交给对应小傻妞读取和分析的清单。"
+    ),
     "workflow_mode": "默认建议省略或写 off。只有用户明确要求 workflow/工作流时才写 plan/auto；明确文件交付 worker 会强制 off。",
     "extra_write_roots": (
         "JSON 数组，例如 [\"C:/Users/you/Desktop/work\"]；只给本次子代理任务增加写入边界。"
@@ -63,6 +79,13 @@ _CREATE_EXAMPLES = [
         '{"goal":"研究竞争格局并输出证据摘要","role":"worker","agent_name":"小傻妞-竞争"},'
         '{"goal":"制定进入策略并整合风险","role":"coordinator","agent_name":"小傻妞-策略"}],'
         '"acceptance_checks":["必须有证据","必须标注未确认信息"]}'
+    ),
+    (
+        '{"tool":"create_subagents","items":['
+        '{"goal":"读取并分析 data/market.md，输出市场证据摘要","role":"worker",'
+        '"agent_name":"小傻妞-市场","required_read_paths":["data/market.md","rubric.md"]},'
+        '{"goal":"读取并分析 data/competition.md，输出竞争证据摘要","role":"worker",'
+        '"agent_name":"小傻妞-竞争","required_read_paths":["data/competition.md","rubric.md"]}]}'
     ),
     '{"tool":"create_subagents","goal":"在隔离 fixture 项目里实现三个小功能并写报告","count":3,"role":"worker","workflow_mode":"off","acceptance_checks":["必须有文件证据","必须说明测试结果"]}',
     '{"tool":"create_subagents","goal":"在 /workspace/deliverables/shop/build 实现购物网站 HTML 骨架和 products.json","count":1,"role":"worker","agent_name":"小傻妞-基础结构","extra_write_roots":["/workspace/deliverables/shop/build"]}',

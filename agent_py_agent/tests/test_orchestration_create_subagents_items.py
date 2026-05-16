@@ -134,6 +134,58 @@ class TestCreateSubagentsItemsMode:
         assert not any("final_report.md" in item for item in params.plan)
         assert any("分析越南市场" in item for item in params.plan)
 
+    def test_items_preserve_refs_first_context_manifest(self):
+        """items[] 应把资料路径作为 refs 传给子代理，而不是要求 root 先读正文。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = _agent()
+        mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+
+        result = CreateSubagentsTool(mock_agent).execute({
+            "items": [
+                {
+                    "goal": "分析市场资料",
+                    "required_read_paths": ["data/market.md", "rubric.md"],
+                    "context_manifest": {"required_read_paths": ["README.md"]},
+                    "context_packs": [{"kind": "brief", "summary": "评分标准", "path": "rubric.md"}],
+                }
+            ],
+        })
+
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert result.ok is True
+        assert params.context_manifest["required_read_paths"] == [
+            "README.md",
+            "data/market.md",
+            "rubric.md",
+        ]
+        assert params.context_packs == [{"kind": "brief", "summary": "评分标准", "path": "rubric.md"}]
+
+    def test_single_goal_preserves_source_refs_and_context_pack_refs(self):
+        """单任务模式也应保留 source_refs/context_pack_refs，方便小傻妞按路径读取资料。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = _agent()
+        mock_task = MagicMock()
+        mock_task.id = "run_1"
+        mock_task.goal = "研究资料"
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/run_1"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "研究资料并写摘要",
+            "source_refs": ["docs/a.md"],
+            "context_pack_refs": ["packs/brief.json"],
+        })
+
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert result.ok is True
+        assert params.context_manifest["required_read_paths"] == ["docs/a.md"]
+        assert params.context_manifest["task_pack_refs"] == ["packs/brief.json"]
+        assert params.context_packs == [{"kind": "context_ref", "path": "packs/brief.json"}]
+
     def test_items_and_tasks_cannot_be_mixed(self):
         """create_subagents 不能同时传 items 和 tasks，避免模型把两套批量协议混成一坨。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool

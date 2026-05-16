@@ -203,6 +203,9 @@ def _workspace_context_text(builder: PromptBuilder) -> str:
         "- 相对路径默认相对 primary_workspace_root。",
         "- 写文件、读文件、创建 artifacts/deliverables 时优先使用这个真实路径。",
         "- 不要把 /workspace 当作真实路径，除非用户明确给了这个绝对目录。",
+        "- 如果用户要求派工或任务材料很多，先读 README/目录/评分标准等最小必要线索；"
+        "把正文路径放进子代理任务的 required_read_paths/context_manifest，交给对应小傻妞读取分析。",
+        "- 除非用户明确要求主代理亲自验收正文，否则不要在派工前把所有长文档、数据表或产物正文都读进 root 上下文。",
     ])
 
 
