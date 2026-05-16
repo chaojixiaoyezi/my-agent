@@ -1557,3 +1557,30 @@
 - 已同步：runner prompt 合同渲染拆到 `runner_prompt_contract_lines.py`；业务产物验收和 patch 协议验收分别拆到 `acceptance_product_findings.py`、`acceptance_patch_findings.py`，保持边界清楚。
 - 已测试：新增 product root basename stripping regression；自然语言 root -> 小傻妞 -> 小小傻妞 E2E 重新通过，两个 run 均 `DONE/VERIFIED`，最终由确定性 closeout 收口。
 - 下一步：重跑全量门并推远端；后续继续用 OpenClaw/Hermes 的 refs-first 思路对照更大任务。
+
+## 2026-05-16 dependency pipeline 旧 run id 自写路径重绑定
+- 中文说明：真实 Task18 short 复跑时，root 创建了新的 `小傻妞-数据收集`，但 goal 里带着旧的 `data/subagents/subagent-.../data_collection.md`。子代理照着旧路径写，真实 run id 和产物目录不一致，后面又继续循环查找。
+- 对照结论：OpenClaw/Hermes 更偏向 session/task handle 和 task-local workspace；它们不会让模型预先猜一个未来 run id 再把这个猜测当事实源。
+- 已修正：`create_run` 在真实 run_id 生成后，会把“当前任务自己要写”的 `data/subagents/<旧subagent-id>/...` 输出路径重绑定到当前 run id；读取旧路径作为输入的文本不会被改。
+- 已记录：修正记录写入 `task.attributes.output_ref_rebindings`，方便后续 E2E 查“模型原本写错了什么、系统改成了什么”。
+- 已测试：新增 lifecycle 和 create_subagents payload regression；focused create/dependency 测试通过。
+- 下一步：重新跑 Task18 short 的 my-agent 真实链路，并同步跑/检查 OpenClaw、Hermes 对照；如果仍有循环，继续优先修结构化 closeout/输入输出合同，而不是加提示词补丁。
+
+## 2026-05-16 Task18 short 公共产物路径验收根修复
+- 中文说明：旧 run id 重绑定后，真实 `小傻妞-数据收集` 已经能写出 `data/subagents/subagent_data_collection/star_data.md`，但 closeout 仍被 `missing_artifact_refs` 拦住。
+- 发现问题：文件真实存在于任务工作区根目录下，artifact integrity 却只从当前 run-local 目录、allowed_write_roots 和 run artifacts 找，导致“有产物但验收找不到”。
+- 对照结论：OpenClaw/Hermes 都更强调 task/session workspace 是事实边界，产物 refs 相对这个工作区解析；不会只在某个内部 run 目录里找公共任务产物。
+- 已修正：新增 `result_artifact_roots.py`，让 artifact normalize 和 missing-check 使用同一套有界查找根；当路径结构包含 `/data/subagents/<run>` 时，会推导任务工作区根用于精确相对路径匹配。
+- 安全边界：只做 `root / ref` 的精确匹配；短文件名的 suffix/rglob 恢复仍只用较窄 run-local roots，避免扫整个任务工作区。
+- 已测试：新增 workspace product artifact regression，先红后绿；artifact refs focused suites 通过。
+- 下一步：重新跑 Task18 short，确认数据 worker 不再因已存在的 `star_data.md` 被误判缺产物；如果后续阶段失败，继续按结构化 refs/closeout 层定位。
+
+## 2026-05-17 Task18 short 创建/调度幂等第一片
+- 中文说明：真实 Task18 short 复跑已经完整跑通，三段流水线都完成并生成 `github_weekly_star_growth_short.xlsx` 和 `final_report.md`。同时暴露新问题：root 第一次创建了 3 个小傻妞后，又误以为那批是旧任务，重复创建了同名第二批。
+- 对照结论：OpenClaw/Hermes 更偏向 session/task handle 和控制面状态事实；重复派工时应该复用已有 run 或返回已有 run ids，而不是依赖模型自己记住“刚刚已经创建过”。
+- 已修正：新增 `orchestration_create_idempotency.py`。`create_subagents` 在同一 parent/root 下遇到明确同名、同 role 且仍可复用的 child，会返回已有 run，不再创建重复 child。
+- 已增强：create payload 增加 `created_run_ids`、`reused_run_ids`、`dispatch_run_ids`。已 `DONE/VERIFIED` 的复用 run 会出现在 `reused_run_ids`，但不会进入 `dispatch_run_ids`，防止父级重复跑已完成的小傻妞。
+- 已测试：新增同名三段流水线重复 create 回归，先红后绿；focused create/orchestration suites、ruff、code-size 已通过。
+- 真实复测：`/Users/xiaoyezi/my-claude-code/third-party-eval/runs/my-agent/task_18_short/20260517-003526/task_18_short_github_star_growth_xlsx` 一开始只创建 3 个 child，未再出现同名第二批；数据收集在授权网络能力后重跑到 `DONE/VERIFIED`，内容编写也 `DONE/VERIFIED`。
+- 新暴露：报告生成脚本有语法错误、执行工作目录边界失败，root 后续创建修复/执行小傻妞尝试补救；这属于下一层“脚本生成-执行-验收修复闭环”，不属于 create 幂等问题。
+- 下一步：修复 repair/execute 闭环，确保生成脚本后由同一个修复任务完成语法检查、执行和产物验证，不再拆出多段空转 repair 链。

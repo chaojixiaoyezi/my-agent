@@ -238,6 +238,7 @@ class SubAgentBaseService:
         """Build SubAgentTask from params and prepared context."""
         from ..models import SubAgentTask
         from ..services.inheritance_manifest import build_inheritance_manifest
+        from ..services.output_ref_rebinding import rebind_task_output_refs_to_run
         from ..services.persistence import (
             _normalize_context_manifest,
             _normalize_context_packs,
@@ -278,6 +279,8 @@ class SubAgentBaseService:
             **prepared["paths"],
         )
         task.inheritance_manifest = build_inheritance_manifest(parent_task, task)
+        # LLM: Bind self-output refs after run_id exists so models cannot persist guessed sibling ids.
+        rebind_task_output_refs_to_run(task)
         return task
 
     # LLM: _finalize_task 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。

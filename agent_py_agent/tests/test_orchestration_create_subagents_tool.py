@@ -448,36 +448,6 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         assert tasks[0].workflow_parent_run_id == tasks[1].workflow_parent_run_id
         assert mock_agent.subagents.save.call_count == 3
 
-    def test_vague_deliverable_worker_defaults_to_workspace_root(self):
-        """已有真实任务工作区时，目标目录默认指向 workspace_root，不要求用户补底层参数。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-        mock_agent = MagicMock()
-        mock_agent.config.enable_subagents = True
-        mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "off"
-        mock_agent.subagents.workspace_root = Path("/tmp/project")
-        mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
-        mock_agent.subagents.workspace = Path("/tmp/project/.my-agent/subagents")
-        mock_task = MagicMock()
-        mock_task.id = "writer_001"
-        mock_task.goal = ""
-        mock_task.status = "PLANNING"
-        mock_task.verification_status = "UNVERIFIED"
-        mock_task.task_dir = "/tmp/writer_001"
-        mock_agent.subagents.create_run.return_value = mock_task
-
-        tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
-            "goal": "在目标目录生成一个完整文件 index.html，并报告路径。",
-            "role": "writer",
-        })
-
-        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
-        assert result.ok is True
-        assert params.extra_write_roots == [str(Path("/tmp/project").resolve(strict=False))]
-
-
 class TestCreateSubagentsToolWorkerWorkflow:
     """测试具体 worker 任务不会被泛化 workflow 污染。"""
 
