@@ -43,6 +43,7 @@ from .orchestration_create_items import CreateSubagentItem, create_items_from_pa
 from .orchestration_create_policy import (
     create_run_params,
 )
+from .orchestration_dispatch_state_contract import dispatch_state_contract_payload
 from .orchestration_dispatch_tool import DispatchSubagentsTool
 from .orchestration_item_dependencies import enrich_item_dependencies, item_dependency_edges
 from .orchestration_lineage_names import indexed_count_params, indexed_item_params
@@ -240,6 +241,9 @@ class CreateSubagentsTool(BaseTool):
             payload,
             tool="create_subagents",
         ).to_dict()
+        # LLM: expose the same state contract immediately after create, before the parent calls dispatch.
+        # 函数用途: root 刚创建小傻妞就能看到哪些 run 可调度，避免下一轮凭自然语言记忆猜。
+        payload.update(dispatch_state_contract_payload(self.agent))
         return payload
 
 

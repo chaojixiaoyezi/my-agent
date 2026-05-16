@@ -1644,3 +1644,12 @@
 - 已保留：没有 repair_contract 的旧 QA/repair 同名活跃去重仍然存在，会提示复用/接管已有 repair run；带 repair_contract 的新路径交给幂等层复用或区分不同修复 scope。
 - 已测试：新增顶层不同 repair scope 不误合并、同 repair scope 复用、runner-context repair context 持久化、runner-context 同 repair scope 复用四类 regression；repair payload、dispatch child refs、tool context reducer、duplicate guard 等 49 个 focused tests 通过。
 - 下一步：进入第 3 步，把 root 每轮状态合同上下文补硬，让 root 每次行动前稳定看到 created/reused/dispatch/running/blocked/verified，而不是靠自己回忆上一轮发生了什么。
+
+## 2026-05-17 Root 每轮状态合同上下文
+- 中文说明：之前 `current_turn_run_state` 主要在 `dispatch_subagents` 后出现；root 刚创建小傻妞或 runner 刚创建小小傻妞时，下一步仍容易靠自然语言记忆去猜“应该跑谁”。这一片把同一张状态表接到 create/schedule 输出里。
+- 对照结论：会话运行时 的 thread/run API、通道运行时 的 session 列表、长期助手 的 delegate refs 都会让上层先看到“当前有哪些任务、哪个可跑、哪个阻塞”。我们也把这件事做成工具 payload 的机器字段，而不是让提示词提醒模型。
+- 已实现：`create_subagents` 在写入 current-turn run scope 后，会附带 `current_turn_run_state`，包括 `by_status`、`dispatchable_run_ids`、`running_run_ids`、`blocked_run_ids`、`verified_run_ids`、`unfinished_run_ids` 和 `suggested_tool_call`。
+- 已实现：`schedule_child_subagents` 会把新建/复用的 child ids 写入 current-turn scope，并在响应里返回同样的 `current_turn_run_state`。子代理创建下一层后可以直接照状态表 dispatch，不需要从 prose 里抄 run id。
+- 已实现：`tool_context_orchestration_summary.py` 会在调度类大输出外置后保留 `current_turn_run_state`，所以 root 下一轮 live prompt 仍能看到状态表和建议工具调用。
+- 已测试：新增 create payload、schedule payload、外置摘要三条状态合同 regression；dispatch 既有状态合同回归继续通过。
+- 下一步：进入第 4 步，继续把 packet/envelope 结构化硬化，减少自然语言摘要误当工具、路径和 run id 的机会。
