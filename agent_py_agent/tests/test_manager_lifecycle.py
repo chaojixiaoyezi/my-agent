@@ -314,6 +314,28 @@ def test_prepare_runner_attempt_sets_attempt_id():
     assert task.runner_active_attempt_id != ""
 
 
+# LLM: started runner attempts need a machine timestamp before final result returns.
+# 函数用途: runner 一进入 RUNNING 就写入 runner_last_attempt_at，避免真实 E2E 里状态像“运行中但没启动过”。
+def test_prepare_runner_attempt_records_attempt_start_time():
+    from agent_py_agent.agent.subagents.manager_lifecycle import SubAgentLifecycleMixin
+
+    manager = MockManager()
+    mixin = SubAgentLifecycleMixin.__new__(SubAgentLifecycleMixin)
+    mixin.load = manager.load
+    mixin.save = manager.save
+    mixin._append_task_work_log = lambda *args: None
+
+    run_id = "test-attempt-start-time"
+    task = manager.load(run_id)
+    task.runner_last_attempt_at = 0.0
+
+    mixin.prepare_runner_attempt(run_id)
+
+    task = manager.load(run_id)
+    assert task.runner_last_attempt_at > 0.0
+    assert task.heartbeat_at == task.runner_last_attempt_at
+
+
 def test_prepare_runner_attempt_increments_attempts():
     """测试 prepare_runner_attempt 生成 attempt_id。"""
     from agent_py_agent.agent.subagents.manager_lifecycle import SubAgentLifecycleMixin

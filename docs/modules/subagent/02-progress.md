@@ -1485,3 +1485,12 @@
 - 已测试：新增派工前 brief 放行、data 正文阻断、plain artifact 阻断、目录 shell 探测放行、历史 run 不污染、普通 root 读取不阻断六个 regression；`python3 -m pytest -q agent_py_agent/tests/test_orchestration_body_read_guard.py -q` 通过。
 - 已测试：补真实 `SimpleAgent` tool-loop regression，确认模型请求 `read_file data/company_profile.md` 时，下一轮 prompt 里出现 `predelegation_source_read_blocked`，且没有把正文传回模型。注意：真实终端日志只显示模型发出的工具请求，不显示工具返回，所以要看 tool transcript / artifact / test 结果判断是否真的泄露正文。
 - 下一步：再次跑 Task17 或家具站自然语言 E2E，观察第一次 `create_subagents` 前是否只读 brief/目录；如果模型仍绕 shell 读取大正文，再把 run_command 的派工前 source-body 识别接入同一 helper。
+
+## 2026-05-16 Task17 输入资料误判与 root 恢复路线收敛
+- 中文说明：继续复跑 Task17 后，root 开始更像 refs-first：先创建 3 个一层小傻妞，再让它们读资料。但市场分支被 Context Gate 拦住，因为系统把 `读取 data/country_packs/vietnam.md` 里的输入文件误当成了必须输出的产物。
+- 已修正：required-file 提取器新增 source/input/reference 语境识别。`vietnam.md 是输入资料`、`读取 data/.../vietnam.md` 不再进入 `required_files`；`最终输出 final_report.md` 仍会保留为产物。
+- 已修正：direct-write guard 被 root 触发后，只返回一条明确路线：`next_action=create_subagents_then_dispatch_subagents`，创建一个 `role=leaf_worker` 的整合/修复小傻妞，带 `extra_write_roots` 和已有 refs，然后立即 dispatch。它不再同时建议 `schedule_child_subagents`。
+- 已修正：runner 一进入 `RUNNING` 就记录 `runner_last_attempt_at`，避免状态看起来像“运行中但没有启动时间”。
+- 已记录：详见 `docs/modules/subagent/06-real-e2e-findings.md` 的 Finding 136。
+- 已测试：required-file contracts、context bundle、direct-write guard、manager lifecycle、hierarchy recovery focused suites 通过。
+- 下一步：重跑 Task17，确认市场分支不会再因为输入资料 `vietnam.md` 被挡；如果 root 被阻止写最终报告，应只派一个整合/修复 worker 来完成。

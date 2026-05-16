@@ -240,6 +240,24 @@ def test_active_delegated_root_blocks_final_report_when_run_incomplete():
     assert "delegated_direct_write_blocked" in result.output
 
 
+# LLM: blocked root writes should return one unambiguous child-worker recovery route.
+# 函数用途: 复现 Task17 root 被拦后同时尝试 schedule/create/直接写的混乱；提示必须收敛到 create_subagents 后 dispatch_subagents。
+def test_active_delegated_root_blocked_final_report_points_to_single_create_then_dispatch_route():
+    result = maybe_block_delegate_only_direct_write(
+        DelegateOnlyDirectWriteGuardRequest(
+            agent=_delegated_root_agent_with_task("BLOCKED", "UNVERIFIED"),
+            user_prompt="请安排小傻妞们协作完成，你负责最后汇总。",
+            payload={"tool": "write_file", "path": "/tmp/workspace/final_report.md", "content": "# done"},
+        )
+    )
+
+    assert result is not None
+    assert "next_action=create_subagents_then_dispatch_subagents" in result.output
+    assert "role=leaf_worker" in result.output
+    assert "extra_write_roots" in result.output
+    assert "schedule_child_subagents" not in result.output
+
+
 def test_delegate_only_prompt_allows_runtime_report_write():
     """协调报告和 task-local 元数据仍可写，避免 root/父级无法记录恢复事实。"""
     result = maybe_block_delegate_only_direct_write(

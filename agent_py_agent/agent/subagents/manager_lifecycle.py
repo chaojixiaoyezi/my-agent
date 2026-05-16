@@ -137,13 +137,16 @@ class SubAgentLifecycleMixin:
             )
         )
         attempt_id = _new_id("attempt")
+        now = time.time()
         task.status = "RUNNING"
         task.verification_status = "UNVERIFIED"
         task.failure_type = ""
         task.ended_at = 0.0
         task.runner_active_attempt_id = attempt_id
-        task.updated_at = time.time()
-        task.heartbeat_at = task.updated_at
+        # LLM: start time is recorded before result writeback so boards/recovery know this RUNNING run truly started.
+        task.runner_last_attempt_at = now
+        task.updated_at = now
+        task.heartbeat_at = now
         _record_runner_recovery_preflight(task, strategy, previous)
         self.save(task)
         suffix = f" retry_reason={retry_reason}" if retry_reason else ""

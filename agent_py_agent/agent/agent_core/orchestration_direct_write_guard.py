@@ -286,8 +286,11 @@ def _blocked_result(tool: str) -> ToolExecutionResult:
         (
             "delegated_direct_write_blocked=true。"
             "用户已要求 root/父级通过子代理完成，不能直接写业务产物。"
-            "请改用 create_subagents、schedule_child_subagents 或 dispatch_subagents："
-            "有可恢复 run 时优先 packet/takeover/repair worker；"
-            "没有产物且原 worker 超时时，可以创建新的 worker，但 root 仍不能亲自写最终 deliverables。"
+            "next_action=create_subagents_then_dispatch_subagents。"
+            "请创建一个 role=leaf_worker 的整合/修复 worker，"
+            "extra_write_roots 填任务根目录或目标产物目录，context_manifest 填已有 result_refs/artifact_refs，"
+            "然后立即 dispatch_subagents run_ids=[新 run_id]。"
+            "有可恢复 run 时让该 takeover/repair worker 优先读取 latest_continue_packet/checkpoint/summary 接管；"
+            "没有产物且原 worker 超时时，可以创建新的 repair worker，但 root 仍不能亲自写最终 deliverables。"
         ),
     )
