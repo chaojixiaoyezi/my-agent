@@ -13,6 +13,7 @@ from .orchestration_create_constraints import (
     merged_extra_write_roots,
     role_allows_direct_product_work,
 )
+from .orchestration_create_context import create_context_manifest, create_context_packs
 from .orchestration_root_contract import explicit_root_goal_with_user_contract
 from .orchestration_workflow_mode import tool_workflow_mode as _tool_workflow_mode
 from .parameters import _positive_int, _string_list
@@ -100,6 +101,8 @@ def create_run_params(
         final_owner=str(raw_params.get("final_owner") or "").strip(),
         acceptance_checks=_string_list(raw_params.get("acceptance_checks")),
         extra_write_roots=merged_extra_write_roots(raw_params, goal),
+        context_manifest=create_context_manifest(raw_params),
+        context_packs=create_context_packs(raw_params),
         workflow_mode=workflow_mode,
     )
 

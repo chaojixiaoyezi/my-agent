@@ -1463,3 +1463,12 @@
 - 已修正：direct-write guard 会检查当前轮已派工 run 的状态；只要还有未 `DONE/VERIFIED` 的 run，root 不能把 `final_report.md` 这类报告名文件当普通交接报告直接写。
 - 已测试：新增 `test_partial_explicit_allowed_tools_keep_baseline_write_tools` 和 `test_active_delegated_root_blocks_final_report_when_run_incomplete` 均先红后绿。
 - 下一步：继续修 root 派工结构混乱问题：不要允许 `create_subagents` 同时混用 `items/tasks/count` 造成层级语义漂移，必要时返回可恢复错误并引导 root 用 3 个 coordinator item。
+
+## 2026-05-16 Refs-first 派工上下文第一片
+- 中文说明：Task17 修复后真实复测已经能 9 run 全绿，但仍暴露 root 派工前会读取太多正文。本轮先补最小结构化通道，让 root 可以把资料路径交给小傻妞自己读。
+- 已实现：主 prompt 的 workspace context 增加 refs-first 派工提示：用户要求派工或材料很多时，root 先读 README/目录/评分标准等最小必要线索，再把正文路径写进 `required_read_paths/context_manifest`。
+- 已实现：`create_subagents` 单任务和 `items/tasks` 批量入口现在会把 `context_manifest`、`context_packs`、`required_read_paths`、`source_refs`、`context_pack_refs` 等 refs-only 字段写入 `CreateRunParams`；runner prompt 原有 `Context Manifest / Context Packs` 会展示给对应小傻妞。
+- 设计边界：这不是限制 root 不能读文件，而是给模型一条更稳的“把资料路径下发”的机器通道；如果用户明确要求主代理亲自验收正文，原有授权路径仍可走。
+- 已测试：`python3 -m pytest -q agent_py_agent/tests/test_orchestration_create_subagents_items.py agent_py_agent/tests/test_prompting_builder.py` -> `47 passed`。
+- 已测试：`/Users/xiaoyezi/ai_claw/bin/ruff check` touched files -> passed。
+- 下一步：跑一个普通自然语言 refs-first 真实 E2E，统计 root 在第一次 `create_subagents` 前的正文读取次数；如果仍过多，再优先修工具推荐/任务包生成，不继续堆零散 guard。

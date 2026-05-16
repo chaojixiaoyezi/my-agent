@@ -141,6 +141,16 @@ class TestBuildBasic:
         assert f"current_local_date: {date.today().isoformat()}" in result
         assert "写报告日期时优先使用 current_local_date" in result
 
+    def test_build_includes_refs_first_delegation_hint(self, tmp_path):
+        """主代理派工时应优先传资料 refs，不要先把所有正文塞进 root 上下文。"""
+        config = AgentConfig()
+        builder = PromptBuilder(config, tmp_path)
+
+        result = builder.build("让小傻妞分别分析这些资料", [])
+
+        assert "required_read_paths/context_manifest" in result
+        assert "不要在派工前把所有长文档" in result
+
     def test_build_single_memory(self, tmp_path):
         config = AgentConfig()
         builder = PromptBuilder(config, tmp_path)
