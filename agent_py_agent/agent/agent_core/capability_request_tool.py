@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..subagents.root_task_policy import is_self_authorized_root_task
 from ..subagents.services.lifecycle import RecordCapabilityRequestParams
 from ..tools import BaseTool, ToolExecutionResult, ToolSpec
 from .parameters import _string_list
@@ -105,8 +106,8 @@ def _capability_request_input(agent: object, params: dict[str, object]) -> Capab
     return CapabilityRequestToolInput(run_id=run_id, params=_record_params(normalized, problem))
 
 
-# LLM: _is_root_run prevents top-level orchestrators from waiting on nonexistent parents.
-# 函数用途: 判断当前 run 是否为 root；root 不写 capability_request，避免自己卡在等待上级授权。
+# LLM: _is_root_run only blocks self-authorized root/coordinator seeds, not main-agent children.
+# 函数用途: 判断当前 run 是否真的是无上级 root；普通一层小傻妞仍能向主代理申请能力。
 def _is_root_run(agent: object, run_id: str) -> bool:
     manager = getattr(agent, "subagents", None)
     if manager is None or not hasattr(manager, "load"):
@@ -115,10 +116,7 @@ def _is_root_run(agent: object, run_id: str) -> bool:
         task = manager.load(run_id)
     except FileNotFoundError:
         return False
-    parent_id = str(getattr(task, "parent_id", "") or "").strip()
-    root_id = str(getattr(task, "root_id", "") or "").strip()
-    depth = int(getattr(task, "depth", 0) or 0)
-    return not parent_id and (not root_id or root_id == run_id or depth == 0)
+    return is_self_authorized_root_task(task)
 
 
 # LLM: _record_params converts a normalized tool payload into the lifecycle request bundle.

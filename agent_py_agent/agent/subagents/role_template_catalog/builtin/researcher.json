@@ -8,7 +8,7 @@
   "handles_multiple_targets": true,
   "use_when_zh": ["需要先找资料、比对多个来源或整理证据。"],
   "do_not_use_when_zh": ["已有明确实现方案，只差写代码时不要单独用研究角色。"],
-  "default_tools": ["list_files", "read_file", "search_text", "read_artifact", "write_file", "append_file", "replace_in_file", "capability_request"],
+  "default_tools": ["list_files", "read_file", "search_text", "read_artifact", "fetch_url", "http_request", "write_file", "append_file", "replace_in_file", "capability_request"],
   "can_write": true,
   "can_accept": false,
   "output_contract": {"type": "research_brief"},

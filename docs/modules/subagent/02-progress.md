@@ -1595,3 +1595,13 @@
 - 已实现：runner execution context 的 Context Packs 渲染会展示 repair contract 的 schema、kind、same-run required actions 和目标 artifact refs。这样 repair 子代理不需要猜 execution context JSON，Markdown prompt 里就能看到“要修并验证哪个产物”。
 - 已测试：`test_parent_acceptance_repair_payload.py` 新增合同断言；相关 dispatch/artifact/create focused suites、ruff 和 strict code-size 通过。
 - 下一步：继续把这个合同接入真实 repair 调度闭环。目标是当 child 已生成脚本但最终产物缺失时，系统能创建/复用一个 repair owner，并在同一 run 内完成修复、执行和验证，而不是继续按阶段新建 repair worker。
+
+## 2026-05-17 Task18 short 对照修复：默认能力、路径和 root 边界
+- 中文说明：Task18 short 再次真实跑时不是单纯“挂死”。父级已经路由并授予 `fetch_url` 后重跑，但第一轮因为 researcher 没默认 web 工具多走了一次能力申请；下游 `required_read_paths` 里的 `/Users/...` 又被自然语言路径正则截成 `Users/...`；顶层 worker 还被误判成没有上级的 root。
+- 对照结论：Codex 的 spawn/wait/list 走结构化工具 schema；OpenClaw 的 subagent 是独立 session/run，但 completion/status 由控制面传回；Hermes delegate 让子任务拿到干净任务空间和可用工具集，父级只接 summary/refs。三者都不要求模型靠 prompt 猜工具名、路径开头或“谁是 root”。
+- 已实现：`ROLE_BASE_TOOLS`、内置角色模板和层级 child 默认工具加入 `fetch_url` / `http_request`；`researcher/writer/tester/acceptor/worker/coder` 等 `tool_preset` 会落到完整基础工具包，避免普通研究任务先卡能力申请。
+- 已实现：输入/输出依赖路径识别支持绝对路径和 `~/`，不会再把 `/Users/.../data_collection.md` 存成 `Users/.../data_collection.md`。
+- 已实现：新增 `subagents/root_task_policy.py`，只有 self-authorized root/coordinator/lead seed 才按“没有上级”处理并隐藏 `capability_request`；主代理直接创建的一层 worker/researcher/writer 仍可向主代理申请能力。
+- 已实现：`fetch_url` / `http_request` 增加按次 `max_chars`，模型可以在批量研究时先拿小预览，避免重复抓取大页面把上下文撑大；全局 `tool_web_max_chars` 仍是上限。
+- 已测试：新增 web 默认工具、绝对路径保真、顶层 worker 能力申请、web per-call preview 四类 regression；focused tests 通过。
+- 下一步：跑更窄的 Task18 short 复测，确认数据收集 worker 不再先因缺 web 工具往返，内容/报告 worker 读取依赖时保留绝对路径；如果报告修复链仍失败，继续按 repair execution contract 和状态合同定位。

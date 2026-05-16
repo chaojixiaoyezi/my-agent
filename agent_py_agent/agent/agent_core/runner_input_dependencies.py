@@ -9,7 +9,7 @@ from pathlib import Path
 from ..subagents.dependency_artifact_refs import ref_satisfied_by_dependency_artifact
 
 _FILE_REF_RE = re.compile(
-    r"(?<![\w.-])(?:[\w.-]+/)*[\w.-]+\."
+    r"(?<![\w./-])(?:/|~/)?(?:[\w.-]+/)*[\w.-]+\."
     r"(?:json|md|csv|txt|xlsx|xls|pdf|html|htm|py|yaml|yml)\b",
     re.IGNORECASE,
 )

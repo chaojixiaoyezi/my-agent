@@ -28,6 +28,7 @@ _MAX_HEADER_COUNT = 100
 _MAX_HEADER_NAME_CHARS = 128
 _MAX_HEADER_VALUE_CHARS = 8192
 _MAX_METHOD_CHARS = 16
+_MIN_RESPONSE_PREVIEW_CHARS = 256
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _HTTP_METHOD_RE = re.compile(r"^[A-Z][A-Z0-9_-]*$")
 
@@ -115,6 +116,19 @@ def _format_http_error(tool: str, exc: urllib.error.HTTPError, max_chars: int) -
     return ToolExecutionResult(tool, False, result)
 
 
+# LLM: _response_preview_chars lets agents request small previews without raising global config.
+# 函数用途: 读取可选 max_chars，但只能缩小到本工具配置上限，避免大网页反复灌进模型上下文。
+def _response_preview_chars(params: dict[str, Any], configured_max: int) -> int:
+    raw = params.get("max_chars")
+    if raw in (None, ""):
+        return configured_max
+    try:
+        requested = int(raw)
+    except (TypeError, ValueError):
+        return configured_max
+    return max(_MIN_RESPONSE_PREVIEW_CHARS, min(configured_max, requested))
+
+
 # LLM: FetchUrlTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
 # 类用途: FetchUrlTool 数据模型，集中保存 工具系统 的结构化状态。
 class FetchUrlTool(BaseTool):
@@ -138,9 +152,11 @@ class FetchUrlTool(BaseTool):
             keywords=["网页", "抓网页", "文档", "URL", "fetch", "GET", "在线说明"],
             parameters={
                 "url": "完整 URL",
+                "max_chars": "可选，限制本次返回正文预览字符数",
             },
             parameter_details={
                 "url": "必填，传入完整的 http 或 https 地址；工具内部固定按 GET 请求处理。",
+                "max_chars": "可选；只缩小本次预览，不能超过配置文件里的 tool_web_max_chars。研究/批量抓取时建议先用较小预览。",
             },
             examples=[
                 '{"tool": "fetch_url", "url": "https://example.com/docs"}',
@@ -152,6 +168,7 @@ class FetchUrlTool(BaseTool):
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
             url = _normalize_url(params.get("url"))
+            max_chars = _response_preview_chars(params, self.max_chars)
         except ValueError as exc:
             return ToolExecutionResult("fetch_url", False, str(exc))
 
@@ -163,9 +180,9 @@ class FetchUrlTool(BaseTool):
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 body = resp.read().decode("utf-8", "replace")
-                return _format_response(_ResponseParts("fetch_url", resp.status, resp.headers, body), self.max_chars)
+                return _format_response(_ResponseParts("fetch_url", resp.status, resp.headers, body), max_chars)
         except urllib.error.HTTPError as exc:
-            return _format_http_error("fetch_url", exc, self.max_chars)
+            return _format_http_error("fetch_url", exc, max_chars)
         except (urllib.error.URLError, TimeoutError) as exc:
             return ToolExecutionResult("fetch_url", False, f"请求失败: {exc.__class__.__name__}")
 
@@ -196,12 +213,14 @@ class HttpRequestTool(BaseTool):
                 "method": "HTTP 方法，默认 GET",
                 "headers": "可选请求头",
                 "body": "可选请求体",
+                "max_chars": "可选，限制本次返回正文预览字符数",
             },
             parameter_details={
                 "url": "必填，接口完整地址。",
                 "method": "可选，支持 GET/POST/PUT/DELETE 等；默认是 GET。",
                 "headers": "可传 JSON 对象或 JSON 字符串，常用于 Content-Type、Authorization 等。",
                 "body": "可选，请求体会按 utf-8 文本发送；适合传 JSON 字符串或普通文本。",
+                "max_chars": "可选；只缩小本次预览，不能超过配置文件里的 tool_web_max_chars。分页/批量 API 建议先用较小预览。",
             },
             examples=[
                 '{"tool": "http_request", "url": "https://example.com/health"}',
@@ -216,6 +235,7 @@ class HttpRequestTool(BaseTool):
             url = _normalize_url(params.get("url"))
             method = _normalize_method(params.get("method", "GET"))
             headers = self._normalize_headers(params.get("headers"))
+            max_chars = _response_preview_chars(params, self.max_chars)
             body = params.get("body")
             body_text = None if body is None else _scalar_text(
                 body,
@@ -233,10 +253,10 @@ class HttpRequestTool(BaseTool):
                 response_body = resp.read().decode("utf-8", "replace")
                 return _format_response(
                     _ResponseParts("http_request", resp.status, resp.headers, response_body),
-                    self.max_chars,
+                    max_chars,
                 )
         except urllib.error.HTTPError as exc:
-            return _format_http_error("http_request", exc, self.max_chars)
+            return _format_http_error("http_request", exc, max_chars)
         except (urllib.error.URLError, TimeoutError) as exc:
             return ToolExecutionResult("http_request", False, f"请求失败: {exc.__class__.__name__}")
 

@@ -30,6 +30,27 @@ class TestFetchUrlTool:
         assert "status=200" in result.output
 
     @patch("urllib.request.urlopen")
+    def test_fetch_url_accepts_per_call_max_chars(self, mock_urlopen, tmp_path: Path):
+        """批量研究时可按次缩小网页预览，避免大页面反复撑大上下文。"""
+        from agent_py_agent.agent.tooling.web import FetchUrlTool
+
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.headers = {"Content-Type": "text/plain"}
+        mock_response.read.return_value = b"a" * 1000
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
+
+        tool = FetchUrlTool(max_chars=10000, timeout=10)
+        result = tool.execute({"url": "https://example.com", "max_chars": 300})
+
+        assert result.ok is True
+        body = result.output.split("\n\n", 1)[1].split("\n... 已截断", 1)[0]
+        assert body == "a" * 300
+        assert "已截断" in result.output
+
+    @patch("urllib.request.urlopen")
     def test_fetch_url_with_http_error(self, mock_urlopen, tmp_path: Path):
         """HTTP 错误响应处理。"""
         import urllib.error
@@ -148,6 +169,27 @@ class TestHttpRequestTool:
 
         assert result.ok is True
         assert "status=200" in result.output
+
+    @patch("urllib.request.urlopen")
+    def test_http_request_accepts_per_call_max_chars(self, mock_urlopen, tmp_path: Path):
+        """HTTP API 也支持按次缩小返回预览。"""
+        from agent_py_agent.agent.tooling.web import HttpRequestTool
+
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.headers = {"Content-Type": "application/json"}
+        mock_response.read.return_value = b"b" * 1000
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
+
+        tool = HttpRequestTool(max_chars=10000, timeout=10)
+        result = tool.execute({"url": "https://api.example.com/large", "max_chars": 300})
+
+        assert result.ok is True
+        body = result.output.split("\n\n", 1)[1].split("\n... 已截断", 1)[0]
+        assert body == "b" * 300
+        assert "已截断" in result.output
 
     @patch("urllib.request.urlopen")
     def test_http_request_post(self, mock_urlopen, tmp_path: Path):

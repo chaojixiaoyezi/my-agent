@@ -11,8 +11,11 @@ from typing import Any
 
 from .role_template_resolution import resolve_role_template_id
 
-READ_ONLY_TOOLS = ["list_files", "read_file", "search_text", "read_artifact"]
-WORKER_READ_TOOLS = ["list_files", "read_file", "search_text", "read_artifact"]
+# LLM: WEB_TOOLS keeps broad role templates able to gather web evidence without role-specific tool gaps.
+# 函数用途: 给研究、写作、测试、验收等模板统一补齐网页读取能力，避免自然语言派工后落成“没法查资料”的空角色。
+WEB_TOOLS = ["fetch_url", "http_request"]
+READ_ONLY_TOOLS = ["list_files", "read_file", "search_text", "read_artifact", *WEB_TOOLS]
+WORKER_READ_TOOLS = ["list_files", "read_file", "search_text", "read_artifact", *WEB_TOOLS]
 WORKER_WRITE_TOOLS = ["write_file", "append_file", "replace_in_file"]
 REPORT_WRITE_TOOLS = ["write_file", "append_file", "replace_in_file"]
 CAPABILITY_REQUEST_TOOL = "capability_request"

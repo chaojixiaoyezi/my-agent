@@ -10,6 +10,8 @@ CODING_SUBAGENT_TOOLS = [
     "read_file",
     "search_text",
     "read_artifact",
+    "fetch_url",
+    "http_request",
     "write_file",
     "append_file",
     "replace_in_file",
@@ -20,7 +22,22 @@ CODING_SUBAGENT_TOOLS = [
     "capability_request",
 ]
 READ_ONLY_SUBAGENT_TOOLS = list(CODING_SUBAGENT_TOOLS)
-_CODING_TOOL_PRESETS = {"coding", "frontend-dev", "frontend", "web", "web-dev", "file-edit", "edit"}
+_CODING_TOOL_PRESETS = {
+    "coding",
+    "coder",
+    "frontend-dev",
+    "frontend",
+    "web",
+    "web-dev",
+    "file-edit",
+    "edit",
+    "research",
+    "researcher",
+    "writer",
+    "tester",
+    "acceptor",
+    "worker",
+}
 
 
 # LLM: subagent_allowed_tools resolves explicit grants without treating empty lists as no-tools.
