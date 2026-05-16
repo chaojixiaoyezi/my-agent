@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from agent_py_agent.agent.action_protocol import decode_action_envelope
 from agent_py_agent.agent.agent_core.hierarchy_tools import ScheduleChildSubagentsTool
 from agent_py_agent.agent.agent_core.orchestration_tools import (
     CreateSubagentsTool,
@@ -73,6 +74,9 @@ def test_create_payload_includes_current_turn_run_state(tmp_path):
     assert state["dispatchable_run_ids"] == payload["created_run_ids"]
     assert state["next_action"] == "continue_dispatch_unfinished_run_ids"
     assert state["suggested_tool_call"]["tool"] == "dispatch_subagents"
+    envelope = decode_action_envelope(payload["typed_envelope"])
+    assert envelope.current_turn_run_state["dispatchable_run_ids"] == payload["created_run_ids"]
+    assert envelope.dispatch_run_ids == payload["dispatch_run_ids"]
 
 
 # LLM: schedule_child_subagents should expose current-turn state for nested parents too.
@@ -91,3 +95,6 @@ def test_schedule_child_payload_includes_current_turn_run_state(tmp_path):
     state = payload["current_turn_run_state"]
     assert state["dispatchable_run_ids"] == payload["created_run_ids"]
     assert state["next_action"] == "continue_dispatch_unfinished_run_ids"
+    envelope = decode_action_envelope(payload["typed_envelope"])
+    assert envelope.current_turn_run_state["dispatchable_run_ids"] == payload["created_run_ids"]
+    assert envelope.dispatch_run_ids == payload["dispatch_run_ids"]
