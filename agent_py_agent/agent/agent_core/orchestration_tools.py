@@ -45,6 +45,7 @@ from .orchestration_create_policy import (
 )
 from .orchestration_dispatch_tool import DispatchSubagentsTool
 from .orchestration_item_dependencies import enrich_item_dependencies, item_dependency_edges
+from .orchestration_lineage_names import indexed_count_params, indexed_item_params
 from .orchestration_run_scope import remember_orchestration_run_ids
 from .orchestration_tool_grants import (
     CODING_SUBAGENT_TOOLS,
@@ -134,12 +135,16 @@ class CreateSubagentsTool(BaseTool):
             if validation:
                 return ToolExecutionResult("create_subagents", False, validation)
         resolutions: list[CreateTaskResolution] = []
-        for item in capped:
+        for index, item in enumerate(capped, start=1):
+            run_params = create_run_params(
+                self.agent,
+                item.params,
+                item.goal,
+                subagent_allowed_tools(item.params),
+            )
             resolution = resolve_create_run(
                 self.agent.subagents,
-                create_run_params(
-                    self.agent, item.params, item.goal, subagent_allowed_tools(item.params),
-                ),
+                indexed_item_params(run_params, index=index, total=len(capped)),
             )
             resolutions.append(resolution)
         tasks = [item.task for item in resolutions]
@@ -196,13 +201,8 @@ class CreateSubagentsTool(BaseTool):
     def _create_tasks(self, goal: str, count: int, run_params: CreateRunParams) -> list[CreateTaskResolution]:
         resolutions: list[CreateTaskResolution] = []
         for index in range(1, count + 1):
-            task_goal = run_params.goal if count == 1 else f"{run_params.goal} / 子任务{index}"
-            task_params = CreateRunParams(**{**run_params.__dict__, "goal": task_goal})
-            if count > 1:
-                task = self.agent.subagents.create_run(params=task_params)
-                resolutions.append(CreateTaskResolution(task=task, reused=False))
-            else:
-                resolutions.append(resolve_create_run(self.agent.subagents, task_params))
+            task_params = indexed_count_params(run_params, index=index, count=count)
+            resolutions.append(resolve_create_run(self.agent.subagents, task_params))
         return resolutions
 
     # LLM: _create_payload 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -271,6 +271,12 @@ def _payload_allowed_tools(values: list[list[str] | None]) -> list[str] | str | 
 # 函数用途: 告诉模型 create_subagents 只创建任务记录；下一步默认先推进 1 个，流水线依赖由 dispatch 再判断。
 def _dispatch_next_action(tasks) -> dict[str, object]:
     run_ids = [task.id for task in tasks]
+    if not run_ids:
+        return {
+            "tool": "subagent_board",
+            "reason": "create_subagents 没有可调度的新 run；请读取看板/状态后决定是否汇报或进入验收。",
+            "params": {"limit": 20},
+        }
     return {
         "tool": "dispatch_subagents",
         "reason": (

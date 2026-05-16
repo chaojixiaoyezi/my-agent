@@ -8,11 +8,15 @@ from typing import Any
 from ..models import SubAgentTask
 
 
-# LLM: scheduled_child_agent_name applies the depth prefix while preserving the semantic suffix.
-# 函数用途: 按 parent.depth + 1 生成子节点展示名；会去掉已有同类前缀，避免重复叠前缀。
-def scheduled_child_agent_name(parent: SubAgentTask, spec: Any) -> str:
+# LLM: scheduled_child_agent_name applies the depth prefix and sibling id contract.
+# 函数用途: 按 parent.depth + 1 生成子节点展示名；默认名会变成 小小傻妞-role-index，避免模型手写漂移。
+def scheduled_child_agent_name(parent: SubAgentTask, spec: Any, *, sibling_index: int = 1) -> str:
     depth = max(1, int(parent.depth or 0) + 1, _parent_visible_lineage_depth(parent) + 1)
-    suffix = _agent_name_suffix(spec.agent_name or spec.role or "worker", fallback=spec.role)
+    raw_name = str(getattr(spec, "agent_name", "") or "").strip().strip("-")
+    source = _agent_name_source(spec)
+    suffix = _agent_name_suffix(source, fallback=getattr(spec, "role", "worker"))
+    if _needs_role_index_repair(raw_name) and not _has_trailing_identifier(suffix):
+        suffix = f"{suffix}-{max(1, int(sibling_index or 1))}"
     return f"{_lineage_prefix(depth)}-{suffix}"
 
 
@@ -34,6 +38,36 @@ def _agent_name_suffix(value: str, fallback: str = "worker") -> str:
     if _is_placeholder_suffix(text):
         return "worker" if _has_lineage_prefix(fallback_text) else fallback_text
     return text
+
+
+# LLM: _agent_name_source prefers role when the model only supplied a default placeholder name.
+# 函数用途: HierarchyChildSpec.agent_name 默认是 worker；role=tester 时不能因此生成 worker 名字。
+def _agent_name_source(spec: Any) -> str:
+    name = str(getattr(spec, "agent_name", "") or "").strip().strip("-")
+    role = str(getattr(spec, "role", "") or "worker").strip().strip("-") or "worker"
+    if _needs_role_index_repair(name):
+        return role
+    return name
+
+
+# LLM: _needs_role_index_repair marks generated or prefix-only names that need role/index repair.
+# 函数用途: 空名、worker/general、小小傻妞 这种半截名都由系统补成 role-index。
+def _needs_role_index_repair(value: str) -> bool:
+    text = str(value or "").strip().strip("-")
+    return text in {"", "worker", "general", "subagent", "agent", "child"} or _is_prefix_only_name(text)
+
+
+# LLM: _is_prefix_only_name distinguishes 小小傻妞 from 小小傻妞-product-worker.
+# 函数用途: 只有没有后缀的层级前缀需要回退 role；已有语义后缀不能被吞掉。
+def _is_prefix_only_name(value: str) -> bool:
+    text = str(value or "").strip().strip("-")
+    return "-" not in text and _has_lineage_prefix(text)
+
+
+# LLM: _has_trailing_identifier keeps repeated scheduling from growing name-1-1 chains.
+# 函数用途: 识别已有数字编号，避免同一 sibling 名字被重复追加编号。
+def _has_trailing_identifier(value: str) -> bool:
+    return str(value or "").strip().rsplit("-", 1)[-1].isdigit()
 
 
 # LLM: _has_lineage_prefix recognizes 小傻妞 / 小小傻妞 style prefixes.

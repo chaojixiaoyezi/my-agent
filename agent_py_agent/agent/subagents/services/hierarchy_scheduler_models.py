@@ -81,6 +81,7 @@ class HierarchyCreateChildRequest:
     role: str
     goal: str
     extra_write_roots: list[str]
+    sibling_index: int = 1
 
 
 # LLM: HierarchyResultBuildRequest bundles shared result-rendering inputs to keep helpers small.

@@ -67,9 +67,9 @@ class TestCreateSubagentsItemsMode:
             "制定进入策略",
         ]
         assert [params.agent_name for params in created_params] == [
-            "小傻妞-市场",
-            "小傻妞-竞争",
-            "小傻妞-策略",
+            "小傻妞-市场-1",
+            "小傻妞-竞争-2",
+            "小傻妞-策略-3",
         ]
         assert payload["created"] == 3
         assert payload["next_action"]["tool"] == "dispatch_subagents"

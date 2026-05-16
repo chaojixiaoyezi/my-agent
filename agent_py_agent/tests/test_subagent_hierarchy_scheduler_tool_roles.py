@@ -130,8 +130,8 @@ def test_hierarchy_schedule_repairs_bare_lineage_agent_name(tmp_path):
     )
     grandchild = manager.load(result.created_run_ids[0])
 
-    assert grandchild.agent_name == "小小傻妞-coordinator"
-    assert result.items[0].agent_name == "小小傻妞-coordinator"
+    assert grandchild.agent_name == "小小傻妞-coordinator-1"
+    assert result.items[0].agent_name == "小小傻妞-coordinator-1"
 
 
 # LLM: test_hierarchy_schedule_infers_coordinator_even_with_report_write_tools covers report-write coordinators.
