@@ -526,3 +526,29 @@ def test_file_contract_ignores_continue_packet_recovery_reference():
     required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
 
     assert required == ["index.html", "app.js", "RECOVERY_NOTES.md"]
+
+
+# LLM: Task17 showed source Markdown inputs can be misread as deliverables.
+# 函数用途: “读取/参考 data/.../vietnam.md”只是输入资料，不能进入 required_files；只有明确输出才算产物。
+def test_file_contract_ignores_markdown_source_inputs_when_output_is_not_named():
+    text = (
+        "读取 data/country_packs/vietnam.md，结合 channel_partners.csv 做越南市场进入分析。"
+        "输出市场环境报告，未确认信息标注【未确认】。"
+    )
+
+    required = required_file_terms_from_text(text, extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html")
+
+    assert required == []
+
+
+# LLM: Source-reference filtering must not remove explicitly named deliverables.
+# 函数用途: 同一句里有输入文件和输出文件时，只保留输出文件，避免把输入/资料路径传给下层当交付物。
+def test_file_contract_keeps_named_output_but_ignores_source_inputs():
+    text = (
+        "读取 data/country_packs/vietnam.md 和 data/channel_partners.csv。"
+        "最终输出 final_report.md，要求包含渠道策略和6个月行动计划。"
+    )
+
+    required = required_file_terms_from_text(text, extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html")
+
+    assert required == ["final_report.md"]

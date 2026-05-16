@@ -92,6 +92,7 @@ _INTERNAL_REF_HINTS = (
 _POSITIVE_DELIVERABLE_HINTS = (
     "交付",
     "产出",
+    "输出",
     "创建",
     "生成",
     "写入",
@@ -102,6 +103,40 @@ _POSITIVE_DELIVERABLE_HINTS = (
     "create",
     "generate",
     "write",
+)
+_SOURCE_INPUT_HINTS_BEFORE = (
+    "读取",
+    "读 ",
+    "参考",
+    "结合",
+    "基于",
+    "输入",
+    "资料",
+    "材料",
+    "数据",
+    "source",
+    "input",
+    "context",
+    "read",
+    "reference",
+    "based on",
+)
+_SOURCE_INPUT_HINTS_AFTER = (
+    "是输入",
+    "输入资料",
+    "输入文件",
+    "参考资料",
+    "资料",
+    "材料",
+    "数据",
+    "不是产物",
+    "不是需要创建",
+    "不是要创建",
+    "not a deliverable",
+    "source",
+    "input",
+    "context",
+    "reference",
 )
 
 
@@ -143,7 +178,12 @@ def _positive_terms(segment: str, pattern: re.Pattern[str]) -> list[str]:
         connector = segment[last_end : match.start()]
         direct_negative = _is_negative_target(segment, match.start())
         chained_negative = negative_chain_active and _is_negative_chain_connector(connector)
-        if not direct_negative and not chained_negative and not _is_internal_context_reference(segment, match):
+        if (
+            not direct_negative
+            and not chained_negative
+            and not _is_internal_context_reference(segment, match)
+            and not _is_source_input_reference(segment, match)
+        ):
             values.append(match.group(1))
         negative_chain_active = direct_negative or chained_negative
         last_end = match.end()
@@ -252,6 +292,19 @@ def _is_internal_context_reference(segment: str, match: re.Match[str]) -> bool:
     if any(hint in before for hint in _POSITIVE_DELIVERABLE_HINTS):
         return False
     return any(hint in before or hint in after for hint in _INTERNAL_REF_HINTS)
+
+
+# LLM: _is_source_input_reference keeps data/source filenames out of deliverable contracts.
+# 函数用途: 识别“读取/参考 xxx.md，xxx.md 是输入资料”这类输入文件，避免 Context Gate 把资料误当输出。
+def _is_source_input_reference(segment: str, match: re.Match[str]) -> bool:
+    before = segment[max(0, match.start() - 80) : match.start()].lower()
+    after = segment[match.end() : match.end() + 80].lower()
+    positive_before = before[-48:]
+    if any(hint in positive_before for hint in _POSITIVE_DELIVERABLE_HINTS):
+        return False
+    return any(hint in before for hint in _SOURCE_INPUT_HINTS_BEFORE) or any(
+        hint in after for hint in _SOURCE_INPUT_HINTS_AFTER
+    )
 
 
 # LLM: _is_negative_chain_connector extends one forbidden target across sibling alternatives.

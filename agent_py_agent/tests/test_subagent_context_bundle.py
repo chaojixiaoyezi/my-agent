@@ -220,6 +220,31 @@ def test_context_bundle_required_files_include_file_level_write_roots(tmp_path) 
     assert report.ok is True
 
 
+# LLM: Context Gate should not block when a task reads a Markdown data pack as input.
+# 函数用途: 复现 Task17 里 `读取 .../vietnam.md` 被误判成必需输出文件，导致市场子代理无法开工。
+def test_context_bundle_ignores_source_markdown_inputs_for_required_files(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal=(
+            "读取 data/country_packs/vietnam.md，结合 data/channel_partners.csv，"
+            "输出越南市场环境分析，未确认信息标注【未确认】。"
+        ),
+        thought="vietnam.md 是输入资料，不是需要创建的报告文件。",
+        plan=["读取越南资料", "整理市场机会", "输出分析结论"],
+        role="leaf_worker",
+        acceptance_checks=["分析覆盖市场机会、渠道和风险", "不把输入资料当成产物"],
+    )
+    task.allowed_write_roots = [str(Path(task.task_dir) / "reports")]
+    manager.save(task)
+
+    bundle = build_context_bundle(manager.load(task.id))
+    report = validate_context_bundle(bundle)
+
+    assert bundle.output_contract["required_files"] == []
+    assert bundle.task_packet["file_contract"]["required_files"] == []
+    assert report.ok is True
+
+
 def test_context_bundle_gate_reports_missing_required_handoff_fields(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(goal="", thought="", plan=[])

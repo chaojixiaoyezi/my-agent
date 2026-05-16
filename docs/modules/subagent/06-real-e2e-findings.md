@@ -7793,3 +7793,38 @@ This document is append-only. Record every real subagent E2E issue found during 
   - `python3 -m pytest -q agent_py_agent/tests/test_tools/test_tool_loop.py::test_tool_loop_blocks_predelegation_source_body_read -q` -> passed.
 - Next check:
   - Re-run Task17 or a natural furniture-site E2E and inspect the first `create_subagents` boundary. Expected behavior: terminal may still show a requested source read, but tool transcript should return `predelegation_source_read_blocked` and the next model step should delegate source body paths to child agents.
+
+### Finding 136: Source Markdown was treated as required output and root recovery was too ambiguous
+
+- Test scene:
+  - Log: `/Users/example/my-终端应用/third-party-eval/logs/my-agent-task17-20260516-134034.log`
+  - Same Task17 SEA market entry task after refs-first and pre-delegation handoff fixes.
+- Good result:
+  - root initially behaved more refs-first: it read task brief files, then created three first-level agents with `items[]` instead of reading every source body first.
+  - `小傻妞-竞争` completed with two child runs, and `小傻妞-策略` completed.
+  - A later integration worker wrote its own `agents/<run_id>/final_report.md`, proving the worker could produce the report when given write roots.
+- Symptom:
+  - `小傻妞-市场` was blocked by `semantic_context_mismatch` because `vietnam.md` appeared in `output_contract.required_files` and `task_packet.file_contract.required_files`.
+  - In the original task, `vietnam.md` was an input/source file under `data/country_packs/`, not an output report.
+  - After direct-write guard blocked root from writing `final_report.md`, the returned guidance mentioned several routes (`create_subagents`, `schedule_child_subagents`, `dispatch_subagents`), so root tried a mix of direct write, schedule, create, and retry paths.
+  - A newly created integration worker entered `RUNNING` with an active attempt, but the machine state did not record `runner_last_attempt_at` at runner start; this made the state look less clear while the runner was active.
+- 中文解释:
+  - 这次不是“市场分析做不了”，而是系统把“要读的资料文件 vietnam.md”误当成“要写出来的产物 vietnam.md”。这会让 Context Gate 以为小傻妞缺产物名，从而不开工。
+  - root 被拦住以后，系统给它的下一步提示太散，像同时给了几条路。模型就会一会儿 schedule、一会儿 create、一会儿又想自己写。现在要让它只走一条路：创建一个整合/修复 worker，再 dispatch 这个 worker。
+- Root cause:
+  - Required-file extraction had many forbidden/internal-file filters, but did not treat “输入资料 / source / input / reference” filenames as non-deliverable when they appeared in short task fields such as `thought`.
+  - Direct-write guard was technically blocking the root write, but its recovery message was not a strict machine action.
+  - `prepare_runner_attempt()` set `RUNNING`, `runner_active_attempt_id`, `heartbeat_at`, and `updated_at`, but left `runner_last_attempt_at=0` until final result recording.
+- Fix:
+  - `required_file_terms.py` now recognizes source/input/reference contexts and keeps those filenames out of required output contracts unless an adjacent deliverable verb such as `输出/交付/写入/create/write` owns the filename.
+  - Direct-write guard now returns `next_action=create_subagents_then_dispatch_subagents`, asks for one `role=leaf_worker` integration/repair worker, and explicitly requires `extra_write_roots` plus `context_manifest` refs before immediate dispatch.
+  - `prepare_runner_attempt()` now writes `runner_last_attempt_at` at runner start using the same timestamp as `heartbeat_at/updated_at`.
+- Verification:
+  - `python3 -m pytest -q agent_py_agent/tests/test_required_file_terms_contracts.py::test_file_contract_ignores_markdown_source_inputs_when_output_is_not_named agent_py_agent/tests/test_required_file_terms_contracts.py::test_file_contract_keeps_named_output_but_ignores_source_inputs`
+  - `python3 -m pytest -q agent_py_agent/tests/test_subagent_context_bundle.py::test_context_bundle_ignores_source_markdown_inputs_for_required_files`
+  - `python3 -m pytest -q agent_py_agent/tests/test_orchestration_direct_write_guard.py::test_active_delegated_root_blocked_final_report_points_to_single_create_then_dispatch_route`
+  - `python3 -m pytest -q agent_py_agent/tests/test_manager_lifecycle.py::test_prepare_runner_attempt_records_attempt_start_time`
+  - Related focused suite: required-file contracts, context bundle, direct-write guard, manager lifecycle, and hierarchy recovery all pass.
+- Status: fixed by focused tests.
+- Next check:
+  - Re-run Task17. Expected behavior: `小傻妞-市场` should not be blocked just because it needs to read `vietnam.md`; if root is blocked from direct final-report writing, it should create exactly one integration/repair worker and dispatch it.
