@@ -1,6 +1,8 @@
 """result_processors 边界场景测试。"""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from agent_py_agent.agent.subagents.models import SubAgentParsedOutput
@@ -222,6 +224,55 @@ def test_process_structured_output_resolves_refs_from_agent_run_workspace(mock_t
     assert parsed.failure_type == ""
     assert result["evidence_packets"][0]["artifact_refs"] == [str(artifact)]
     assert mock_task.artifact_refs == [str(artifact)]
+
+
+# LLM: coordinator parent refs should prefer child task artifact_refs over guessed child paths.
+# 函数用途: 复现真实 E2E 中父级把 child 产物路径猜错，但 child task.json 里已有真实 artifact_refs 的场景。
+def test_process_structured_output_resolves_guessed_child_artifact_refs(mock_task, tmp_path):
+    subagents_root = tmp_path / "subagents"
+    parent_dir = subagents_root / "parent-run"
+    child_id = "subagent-child-1"
+    child_dir = subagents_root / child_id
+    actual = parent_dir / "grandchild_direct_competitors" / "reports" / "direct_competitors_research.md"
+    actual.parent.mkdir(parents=True)
+    actual.write_text("direct competitors", encoding="utf-8")
+    child_dir.mkdir(parents=True)
+    (child_dir / "task.json").write_text(
+        json.dumps({"id": child_id, "artifact_refs": [str(actual)]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    mock_task.task_dir = str(parent_dir)
+    mock_task.output_dir = str(parent_dir / "output")
+    mock_task.reports_dir = str(parent_dir / "reports")
+    mock_task.agent_run_workspace_dir = ""
+    mock_task.task_workspace_artifacts_dir = ""
+    mock_task.agent_run_artifacts_dir = ""
+    mock_task.task_workspace_shared_dir = ""
+    mock_task.task_workspace_dir = ""
+    mock_task.data_dir = ""
+    mock_task.scratch_dir = ""
+    mock_task.allowed_write_roots = []
+    mock_task.child_ids = [child_id]
+    guessed = subagents_root / child_id / "reports" / "direct_competitors_research.md"
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="AWAITING_ACCEPTANCE",
+        evidence_packets=[{
+            "claim": "直接竞争对手研究已完成",
+            "checked_scope": "child artifact refs",
+            "artifact_refs": [str(guessed)],
+            "confidence": 0.9,
+        }],
+    )
+
+    result = _process_structured_output(mock_task, parsed, 123456.0, None)
+
+    assert parsed.status == "AWAITING_ACCEPTANCE"
+    assert parsed.failure_type == ""
+    assert result["evidence_packets"][0]["artifact_refs"] == [str(actual)]
+    assert mock_task.artifact_refs == [str(actual)]
 
 
 def _lessons_payload_context(mock_task, parsed: SubAgentParsedOutput) -> OutputPayloadContext:

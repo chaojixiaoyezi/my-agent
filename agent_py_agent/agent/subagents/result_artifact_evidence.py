@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from .models import EvidencePacket, SubAgentTask
@@ -51,9 +52,15 @@ def normalize_artifact_ref(task: SubAgentTask, value: object) -> str:
     except OSError:
         return text
     if path.is_absolute():
-        return str(path) if path.exists() else text
+        if path.exists():
+            return str(path)
+        child_ref = _resolve_child_artifact_ref(task, text)
+        return str(child_ref) if child_ref is not None else text
     resolved = _resolve_relative_artifact(task, path)
-    return str(resolved) if resolved is not None else text
+    if resolved is not None:
+        return str(resolved)
+    child_ref = _resolve_child_artifact_ref(task, text)
+    return str(child_ref) if child_ref is not None else text
 
 
 # LLM: _resolve_relative_artifact searches only task-local roots so artifact repair stays bounded.
@@ -109,6 +116,88 @@ def _resolve_by_suffix(path: Path, roots: list[Path]) -> Path | None:
         matches.extend(item for item in root.rglob(parts[-1]) if _path_has_suffix(item, parts))
     unique = list(dict.fromkeys(matches))
     return unique[0] if len(unique) == 1 else None
+
+
+# LLM: _resolve_child_artifact_ref trusts child task artifact_refs over parent-guessed paths.
+# 函数用途: 父级 coordinator 猜错 child 文件目录时，按 child_id 和文件名回到 child task.json 的真实产物 refs。
+def _resolve_child_artifact_ref(task: SubAgentTask, text: str) -> Path | None:
+    name = _safe_path_name(text)
+    if not name:
+        return None
+    matches: list[Path] = []
+    for child_id in _child_ids_for_ref(task, text):
+        matches.extend(_matching_child_artifact_refs(task, child_id, name))
+    unique = list(dict.fromkeys(matches))
+    return unique[0] if len(unique) == 1 else None
+
+
+# LLM: _matching_child_artifact_refs keeps child-ref matching shallow for guardrails.
+# 函数用途: 返回某个直接 child 中与目标文件名匹配且真实存在的 artifact refs。
+def _matching_child_artifact_refs(task: SubAgentTask, child_id: str, name: str) -> list[Path]:
+    matches: list[Path] = []
+    for ref in _child_task_artifact_refs(task, child_id):
+        path = _existing_local_path(ref)
+        if path is not None and path.name == name:
+            matches.append(path)
+    return matches
+
+
+# LLM: _child_ids_for_ref narrows child artifact recovery when the bad ref includes a run id.
+# 函数用途: 优先只查路径里出现的 child_id；没有明确 child_id 时才查全部直接 child，避免同名报告误配。
+def _child_ids_for_ref(task: SubAgentTask, text: str) -> list[str]:
+    child_ids = [str(item or "").strip() for item in getattr(task, "child_ids", []) or []]
+    child_ids = [item for item in child_ids if item]
+    hinted = [item for item in child_ids if item in text]
+    return hinted or child_ids
+
+
+# LLM: _child_task_artifact_refs reads a direct child's small task.json only.
+# 函数用途: 获取直接 child 已验收登记的 artifact_refs；不扫描正文，不读大产物。
+def _child_task_artifact_refs(task: SubAgentTask, child_id: str) -> list[str]:
+    child_task = _child_task_json_path(task, child_id)
+    if child_task is None:
+        return []
+    try:
+        payload = json.loads(child_task.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return []
+    refs = payload.get("artifact_refs")
+    if not isinstance(refs, list):
+        return []
+    return [str(ref or "").strip() for ref in refs if str(ref or "").strip()]
+
+
+# LLM: _child_task_json_path derives the bounded sibling task.json location from parent task_dir.
+# 函数用途: 只在当前 subagents 根下查直接 child 的 task.json，避免按用户文本做 glob 扫描。
+def _child_task_json_path(task: SubAgentTask, child_id: str) -> Path | None:
+    task_dir = _existing_local_path(getattr(task, "task_dir", ""))
+    if task_dir is None:
+        return None
+    root = task_dir if task_dir.is_dir() else task_dir.parent
+    candidate = root.parent / child_id / "task.json"
+    return candidate if candidate.is_file() else None
+
+
+# LLM: _existing_local_path normalizes local paths while ignoring protocols and invalid values.
+# 函数用途: 判断 ref 是否是存在的本地路径；协议引用和坏路径返回 None。
+def _existing_local_path(value: object) -> Path | None:
+    text = str(value or "").strip()
+    if not text or "://" in text:
+        return None
+    try:
+        path = Path(text).expanduser()
+    except OSError:
+        return None
+    return path if path.exists() else None
+
+
+# LLM: _safe_path_name extracts a filename without trusting malformed huge path text.
+# 函数用途: 从模型上报 ref 中取最后文件名；坏路径返回空，防止异常中断验收。
+def _safe_path_name(text: str) -> str:
+    try:
+        return Path(str(text or "").strip()).name
+    except OSError:
+        return ""
 
 
 # LLM: _path_has_suffix keeps suffix repair deterministic and independent of platform separators.
