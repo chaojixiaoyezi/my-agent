@@ -443,6 +443,54 @@ class TestSubAgentAcceptanceTestsAndArtifactFindings(_FindingSetupMixin, _Findin
 
         self._assert_finding(findings, "artifact_paths_exist", expected_ok=True)
 
+    # LLM: This regression prevents internal runner final_report.md from satisfying user deliverables.
+    # 函数用途: 验收必须看到 product root 下的 final_report.md，不能只接受 agent-run 内部交接报告。
+    def test_required_product_file_must_exist_under_product_root(self, tmp_path: Path):
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
+
+        class MockManager(SubAgentAcceptanceFindingMixin):
+            def __init__(self):
+                self.workspace = tmp_path / ".my_agent_subagents"
+
+        manager = MockManager()
+        task_dir = tmp_path / ".my_agent_subagents" / "run-1"
+        product_root = tmp_path / "product"
+        internal_report = task_dir / "tasks" / "run-1" / "agents" / "run-1" / "final_report.md"
+        internal_report.parent.mkdir(parents=True)
+        internal_report.write_text("internal report", encoding="utf-8")
+        task = self._make_findings_task(
+            tmp_path,
+            goal="整合结果，输出到 final_report.md",
+            task_dir=task_dir,
+            allowed_write_roots=[str(task_dir), str(product_root)],
+        )
+        self._write_findings_files(tmp_path)
+        manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
+        manager._artifact_exists = MagicMock(return_value=True)
+
+        findings = manager._acceptance_findings(
+            task,
+            {"artifacts": [{"path": str(internal_report)}]},
+            {},
+            time.time(),
+        )
+
+        self._assert_finding(findings, "artifact_paths_exist", expected_ok=True)
+        self._assert_finding(findings, "required_product_files_exist", expected_ok=False)
+
+        product_root.mkdir()
+        (product_root / "final_report.md").write_text("user-facing report", encoding="utf-8")
+        findings = manager._acceptance_findings(
+            task,
+            {"artifacts": [{"path": str(product_root / "final_report.md")}]},
+            {},
+            time.time(),
+        )
+
+        self._assert_finding(findings, "required_product_files_exist", expected_ok=True)
+
     def test_nested_relative_artifact_paths_exist(self, tmp_path: Path):
         """artifact 路径少写外层运行目录时，验收层仍能在工作区内核对。"""
         from agent_py_agent.agent.subagents.manager_acceptance_findings import (

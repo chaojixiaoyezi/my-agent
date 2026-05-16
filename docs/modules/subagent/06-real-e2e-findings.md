@@ -8090,3 +8090,337 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Next check:
   - Re-run a shorter Task18 slice to verify the worker can still produce data while downstream waits correctly.
   - Keep watching for true no-progress loops separately; this fix solves prompt bloat for productive long writers, not every possible stuck-task pattern.
+
+### Finding 146: Task18 short slice needs run-level sibling dependency, not only path dependency
+
+- Trigger:
+  - Short Task18 slice after Finding 144/145 fixes.
+  - my-agent run directory: `/Users/xiaoyezi/my-claude-code/third-party-eval/runs/my-agent/task_18_short/20260516-195147/task_18_short_github_star_growth_xlsx`
+  - my-agent log: `/Users/xiaoyezi/my-claude-code/third-party-eval/logs/my-agent-task18-short-20260516-195147.log`
+- Problem:
+  - Root created three first-level agents: data collection, content writing, and xlsx generation.
+  - It then called `dispatch_subagents` with all three `run_ids` and `max_runners=3`.
+  - The goals were natural language: “基于小傻妞-数据收集提供的原始数据” and “整合数据收集和内容编写的结果”.
+  - Because the upstream agents did not declare concrete output paths yet, file-based `required_read_paths` could not block the downstream work.
+- 中文解释:
+  - 之前我们只会拦“下游要读 data/a.json，但文件还不存在”。
+  - 这次下游没有写文件名，只说“用数据收集那个小傻妞的结果”。
+  - 人能看懂这是先后顺序，但系统没把它记成机器字段，所以三个小傻妞一起跑了。
+- OpenClaw/Hermes comparison:
+  - Hermes has `kanban_create(parents=[...])` and `kanban_link`; child tasks stay waiting until parent tasks are done. It does not depend on prose like “use A's result” as the only scheduling fact.
+  - OpenClaw's subagents are separate sessions with stable task handles and session/run metadata. Its QA scenarios assert real `sessions_spawn` calls through debug logs instead of trusting text that says “I delegated”.
+  - Shared lesson: natural language can describe the plan, but scheduling must use control-plane facts: task ids, parent ids, dependency edges, and completion state.
+- Fix:
+  - Added `orchestration_item_dependencies.py`.
+  - `create_subagents(items=...)` now infers sibling dependency edges when a later item references an earlier item by `agent_name` or short role name plus dependency words such as `基于`, `读取`, `整合`, `结果`, or `提供`.
+  - If upstream output paths exist, the downstream item also receives `required_read_paths`.
+  - If paths do not exist yet, the created tasks still receive run-level `workflow_parent_run_id`, `workflow_phase_id`, and `workflow_depends_on` refs.
+  - Explicit `dispatch_subagents(run_ids=[...])` now also filters through `workflow_depends_on`, so a parent cannot accidentally start downstream siblings before upstream siblings are complete.
+- Verification:
+  - Added regression for `读取小傻妞-核验翻译的输出 data/github_star_analysis.md` being treated as an input dependency, not the current task's output.
+  - Added regression for `items[]` inferring `required_read_paths` when upstream output paths are declared.
+  - Added regression for `items[]` persisting run-level sibling dependencies when no output path is declared.
+  - Added regression for explicit `run_ids` waiting on `workflow_depends_on`.
+- Status:
+  - Fixed in focused tests.
+  - Next live check is to rerun the Task18 short slice and confirm only the upstream data worker starts first even if root asks for all three run ids.
+
+### Finding 147: Explicit downstream dispatch must see completed upstream deps outside the requested ids
+
+- Trigger:
+  - Plain Chinese dependency-pipeline E2E under `/Users/xiaoyezi/my-claude-code/third-party-eval/runs/my-agent/dependency_pipeline/20260516-201800/pipeline_dependency_check`.
+  - Prompt asked root to create three agents: `小傻妞-数据收集`, `小傻妞-内容编写`, `小傻妞-生成报告`.
+  - The model first ran data collection. After data collection reached `DONE/VERIFIED`, it dispatched only content/report.
+- Problem:
+  - The new `workflow_depends_on` refs were persisted correctly.
+  - `小傻妞-内容编写` depended on `小傻妞-数据收集`.
+  - `小傻妞-生成报告` depended on both upstream agents.
+  - But explicit dispatch scoped the candidate list to only the requested downstream ids, so the workflow dependency index could not see the already-finished data agent.
+  - Result: content/report remained `PLANNING`, root thought the children were blocked, then started reading/writing deliverables itself.
+- 中文解释:
+  - 依赖边已经有了，但第二轮调度只拿“内容编写、生成报告”两张卡片去判断。
+  - 判断时看不到“数据收集已经完成”这张卡，所以误以为内容编写还不能跑。
+  - 这就是“控制面视野太窄”，不是模型笨。
+- OpenClaw/Hermes comparison:
+  - Hermes kanban dependency gating checks dependency state from the task board, not just the currently requested child subset.
+  - OpenClaw session/run metadata also treats child sessions as control-plane facts; waiting/yielding is based on session events and handles, not a narrow prompt-local list.
+  - Lesson: selection can be narrow, but dependency lookup must read the full visible task registry.
+- Fix:
+  - Split runner candidate policy into `dispatch_runner_candidates.py` so dependency, input, and recovery gates have a single boundary.
+  - `execute_runner_jobs()` now passes the full task list as `dependency_tasks` while keeping the selected candidates scoped to requested ids.
+  - `_included_normal_runner_tasks()` filters only selected candidates, but checks `workflow_depends_on` against the full visible dependency table.
+- Verification:
+  - Added regression where collect is already `DONE/VERIFIED`, the second dispatch only includes `content` and `report`, and content is selected while report remains waiting.
+  - Focused subagent phase gate and create-subagents tests pass.
+- Status:
+  - Fixed in focused tests.
+  - Next live check: rerun the same plain Chinese dependency pipeline and confirm content starts after data without root writing the downstream files itself.
+
+### Finding 148: Short required_read_paths must resolve to upstream artifact refs
+
+- Trigger:
+  - Clean dependency-pipeline rerun under `/Users/xiaoyezi/my-claude-code/third-party-eval/runs/my-agent/dependency_pipeline/20260516-202800/pipeline_dependency_check`.
+  - Root created the three pipeline agents and correctly persisted run-level dependencies.
+  - Data collection completed and wrote `data_collection.md` inside its own subagent run directory.
+- Problem:
+  - The content writer task had `required_read_paths=["data_collection.md"]`.
+  - The real file was `/.../data/subagents/<data-run-id>/data_collection.md`, not `<task root>/data_collection.md`.
+  - The run-level dependency was satisfied, but file-input gating still blocked the content writer because it only checked local roots and did not resolve upstream artifacts.
+- 中文解释:
+  - 小傻妞 A 已经把文件写好了，但文件在 A 自己的屋子里。
+  - 小傻妞 B 只拿到短名 `data_collection.md`，不知道 A 的屋子路径。
+  - 系统不能让 B 猜路径，应该把 A 的真实 artifact ref 交给 B。
+- OpenClaw/Hermes comparison:
+  - Hermes delegate/kanban handoff keeps child results as refs/summaries for the parent to consume, not as guessed filenames.
+  - OpenClaw uses session handles/events and workspace/session metadata; the parent knows which subagent produced which result instead of relying on a sibling to infer a path.
+  - Lesson: sibling handoff must turn “same filename” into a resolved artifact ref before the runner starts.
+- Fix:
+  - Added `subagents/dependency_artifact_refs.py`.
+  - Input dependency gating now accepts a missing short `required_read_paths` entry if a completed upstream dependency has an artifact with the same basename or suffix.
+  - `build_execution_context()` now appends the completed upstream artifact refs into the downstream `Context Manifest`, so the runner sees the real path it should read.
+- Verification:
+  - Added regression for dispatch candidate selection where `data_collection.md` is satisfied by a completed dependency artifact in an upstream run directory.
+  - Added regression for execution context generation injecting the upstream artifact path into `context.context_manifest.required_read_paths`.
+  - Focused phase gate, create-subagents, and manager runner-context tests pass.
+- Status:
+  - Fixed in focused tests.
+  - Next live check: rerun the clean dependency pipeline and watch content writer start after data, with the real upstream artifact path visible in its runner context.
+
+### Finding 149: Bare filenames must count as pipeline refs
+
+- Trigger:
+  - Clean dependency-pipeline rerun under `/Users/xiaoyezi/my-claude-code/third-party-eval/runs/my-agent/dependency_pipeline/20260516-203400/pipeline_dependency_check`.
+  - Root wrote plain goals such as `输出到 data_collection.md`, `读取 data_collection.md`, and `输出到 content_writeup.md`.
+- Problem:
+  - The file-ref extractor only matched paths with a slash, such as `data/weekly_data.json`.
+  - It ignored bare filenames like `data_collection.md`.
+  - As a result, `create_subagents(items=...)` did not infer `required_read_paths` or output refs from the plain Chinese task, and a downstream report/coordinator could start too early.
+- 中文解释:
+  - 普通用户和模型都很常写 `final_report.md`、`data_collection.md` 这种短文件名。
+  - 系统以前只认 `data/final_report.md` 这种带目录的路径。
+  - 这会让“读取/输出某文件”的先后关系丢掉。
+- OpenClaw/Hermes comparison:
+  - Mature agent systems reduce this risk by using task handles, artifacts, and structured handoff refs rather than relying on prose path parsing.
+  - Our near-term fix is still necessary because my-agent accepts plain natural-language `items[]`; the long-term direction remains refs-first and typed task packets.
+- Fix:
+  - `runner_input_dependencies` file-ref regex now accepts bare filenames with supported extensions as well as nested paths.
+  - Existing read/write marker rules still decide whether the bare filename is an input dependency or current output target.
+- Verification:
+  - Added regression for `create_subagents(items=...)` inferring `data_collection.md` and `content_writeup.md` dependencies from bare filenames.
+  - Focused subagent phase gate, create-subagents, and manager runner-context tests pass.
+- Status:
+  - Fixed in focused tests.
+  - Next live check: rerun the clean dependency pipeline after the short-filename fix.
+
+### Finding 150: "Integrate path A and path B" should mark both paths as inputs
+
+- Trigger:
+  - Follow-up from the 2026-05-16 dependency-pipeline rerun.
+  - Root used goals like `整合 data/subagents/subagent_data_collection/results.md 和 data/subagents/subagent_content_writer/results.md 的结果`.
+- Problem:
+  - The first path appeared after `整合`, but `整合` was not included in the read markers.
+  - The second long path was too far from the initial verb for the 48-character prefix window.
+  - So both upstream result paths were missed as input dependencies.
+- 中文解释:
+  - 用户说“整合 A 和 B 的结果”，这当然表示 A 和 B 都是输入。
+  - 系统以前只认“读取/基于/参考”，漏了“整合”。
+  - 长路径又让第二个文件离动词太远，于是依赖丢了。
+- Fix:
+  - Added `整合` to read/input markers.
+  - Expanded the local classification prefix from 48 to 96 characters so linked input paths in the same phrase stay attached to the read verb.
+- Verification:
+  - Added regression for `整合 data/subagents/.../results.md 和 data/subagents/.../results.md 的结果` producing two `required_read_paths`.
+  - Focused subagent phase gate, create-subagents, and manager runner-context tests pass.
+- Status:
+  - Fixed in focused tests.
+  - Next live check: rerun the clean dependency pipeline with this parser fix included from process start.
+
+### Finding 151: Tool grants must not upgrade item workers into coordinators
+
+- Trigger:
+  - Clean dependency-pipeline rerun under `/Users/xiaoyezi/my-claude-code/third-party-eval/runs/my-agent/dependency_pipeline/20260516-205600/pipeline_dependency_check`.
+  - Root called `create_subagents(items=[...])` with three ordinary `role=worker` items, but also passed a broad `allowed_tools` list containing `create_subagents` and `dispatch_subagents`.
+- Problem:
+  - `orchestration_create_policy._local_create_intent_text()` mixed task intent fields with `allowed_tools`.
+  - Because the tool list contained orchestration tool names, `_has_explicit_local_child_spawn_intent()` treated all three workers as child-spawning coordinators.
+  - The first item, `小傻妞-数据收集`, became a coordinator and created children for content/report work itself, even though its local goal was only data collection.
+- 中文解释:
+  - “给它一把锤子”不等于“它现在必须当包工头”。
+  - 子代理有 `dispatch_subagents` 工具只是说明它有能力，不说明这个任务要继续派工。
+  - 角色应该看任务目标、计划和显式 role，不应该被工具清单偷偷改掉。
+- OpenClaw/Hermes comparison:
+  - OpenClaw's `sessions_spawn` keeps tool availability/sandbox policy separate from the spawned task's `taskName`, session, and runtime state.
+  - Hermes `kanban_create` separates task body, assignee, parents, and available worker capabilities; dependency/role state is not inferred from a generic tool grant.
+  - Lesson: permissions are capability facts; orchestration intent must come from local task contract or explicit structured fields.
+- Fix:
+  - Removed `allowed_tools` from `_local_create_intent_text()`.
+  - `create_subagents(items=...)` workers can still receive broad baseline tools, but those tools no longer change `role`.
+  - Explicit coordinator/root goals and explicit “创建下一层/孙代理” local instructions still upgrade to coordinator.
+- Verification:
+  - Added regression where an `items[]` batch passes `allowed_tools=["read_file","write_file","create_subagents","dispatch_subagents"]`; all three item roles remain `worker`, and root/user hierarchy contract text is not appended to worker goals.
+- Status:
+  - Fixed in focused tests.
+  - Next live check: rerun the dependency pipeline and confirm the first-level data/content/report agents stay workers unless their own goal explicitly says to create the next layer.
+
+### Finding 152: Completed dispatch should close from task state, not another free model turn
+
+- Trigger:
+  - Same dependency-pipeline rerun.
+  - After the first dispatch finished and a final report existed, the root model kept calling read/list tools and drifted into stale task language from another evaluation scenario.
+- Problem:
+  - The code had a deterministic `subagent_dispatch_completion_response()` helper, but `tool_loop_completion.py` was deliberately returning control to the root model after top-level dispatch.
+  - That extra free model turn let stale prompt/memory/context text steer the root away from the just-finished task.
+- 中文解释:
+  - 孩子们已经把活干完并登记好了，系统还让主代理再自由想一轮。
+  - 这一轮自由发挥可能本来想“写个漂亮总结”，但也可能被旧上下文带偏。
+  - 更稳的做法是：任务状态已经全绿，就按机器记录直接收口，给用户看产物路径和 refs。
+- OpenClaw/Hermes comparison:
+  - OpenClaw treats subagent completion as a runtime/task event and warns parents not to poll in loops while waiting for completion.
+  - Hermes kanban tasks have terminal state; orchestration should advance from the board state instead of reinterpreting prose.
+  - Lesson: completion state is a control-plane fact. Once all scoped tasks are `DONE/VERIFIED`, the closeout can be deterministic and refs-first.
+- Fix:
+  - `completion_response_after_tool_round()` now calls `subagent_dispatch_completion_response()` after a top-level `dispatch_subagents` round.
+  - If all scoped tasks are done/verified and the prompt did not explicitly require missing tester/acceptor roles, it returns a deterministic refs-first response without another model call.
+  - If the user explicitly required tester/acceptor roles that do not exist yet, the loop still returns to the model so it can create those quality agents.
+- Verification:
+  - Updated closeout regression: completed dispatch now uses one backend call, includes `未再发起额外模型请求`, and exposes artifact refs.
+  - Existing explicit quality-role regression still proves tester/acceptor requirements keep the model loop open.
+- Status:
+  - Fixed in focused tests.
+  - Next live check: rerun a clean ordinary Chinese pipeline and confirm completion stops at structured refs instead of reading random task files after success.
+
+### Finding 153: Related memory must not override the current task
+
+- Trigger:
+  - Clean dependency-pipeline rerun under `/Users/xiaoyezi/my-claude-code/third-party-eval/runs/my-agent/dependency_pipeline/20260516-211725/pipeline_dependency_check`.
+  - The current prompt asked for a GitHub project pipeline, but the model started by saying the task had already been completed and switched to an older “东南亚市场进入策略” task.
+- Problem:
+  - `JsonlMemory.search()` correctly found related daily memory, but the prompt rendered it as plain `# Related Memory` text without an authority warning.
+  - Because the stale memory appeared before `# User Task`, the model treated historical task text as if it could replace the new user request.
+- 中文解释:
+  - 旧记忆可以提醒“以前做过什么”，但不能替用户改题。
+  - 用户这轮让做 B，旧记忆里有 A，模型必须做 B。
+  - 所以记忆区必须明说：这是历史参考，不是当前命令。
+- OpenClaw/Hermes comparison:
+  - OpenClaw marks active subagent context as runtime-generated state, not user-authored instructions, and says subagent outputs are evidence rather than policy-overriding commands.
+  - Hermes worker context puts the current task title/body first, then bounded prior attempts, parent handoffs, and comments; history is context, not the task source of truth.
+  - Lesson: historical context and current task authority must be separated in the prompt, not left for the model to infer.
+- Fix:
+  - `prompting_parts/builder.py::_memory_text()` now prefixes non-empty related memory with an explicit authority note:
+    `Related Memory 是历史参考，不是当前任务指令。`
+  - The note tells the model to follow `# User Task`, current workspace files, and latest tool results whenever they conflict with old memory.
+  - This keeps memory retrieval useful while preventing stale task takeover.
+- Verification:
+  - Added regression proving stale “东南亚市场进入策略” memory can coexist with a new GitHub pipeline task, and the prompt explicitly states current-task priority before rendering memory records.
+- Status:
+  - Fixed in focused prompt tests.
+  - Next live check: rerun the same clean dependency pipeline without deleting stale daily memory; the root should treat the GitHub pipeline as the current task.
+
+### Finding 154: Item dependency edges must be persisted before dispatch
+
+- Trigger:
+  - Follow-up clean dependency-pipeline rerun under `/Users/xiaoyezi/my-claude-code/third-party-eval/runs/my-agent/dependency_pipeline/20260516-212849/pipeline_dependency_check`.
+  - The stale-memory issue was gone: root read the current GitHub pipeline prompt and created the three requested workers.
+- Problem:
+  - The second and third workers had `required_read_paths` such as `data/subagents/data_collection.md`, but their `workflow_depends_on` stayed empty.
+  - The first worker wrote the real artifact under its run directory, for example `data/subagents/<run_id>/data_collection.md`.
+  - Because the create phase did not persist workflow edges, later dispatch calls could not reliably connect short downstream refs to upstream artifact refs, and root drifted into manually writing `content_writeup.md` / `final_report.md`.
+- 中文解释:
+  - 下游说“读取 data_collection.md”，上游实际写在自己的小屋里。
+  - 这个时候系统应该知道“内容编写等数据收集”，而不是让 root 自己去翻文件、自己接管。
+  - 真正稳的做法是创建三位小傻妞时就把先后顺序写进机器字段。
+- OpenClaw/Hermes comparison:
+  - OpenClaw uses session/run handles and completion events instead of requiring a parent to rediscover child output paths from prose.
+  - Hermes kanban/delegate tasks store task parents and structured handoff refs; workers consume parent results through task records, not guessed sibling filenames.
+  - Lesson: natural-language items must be converted into run-level dependency edges before runner selection.
+- Fix:
+  - `orchestration_item_dependencies.item_dependency_edges()` now treats matching input/output paths as a workflow edge, not only producer-name mentions.
+  - It also accepts common explicit dependency labels such as `dependencies: ["data_collection"]` by matching producer artifact basename/stem and agent names.
+  - `runner_input_dependencies` now recognizes terse Chinese output phrases such as `写推荐理由到 data/subagents/content_writeup.md`.
+- Verification:
+  - Added regression for a three-worker pipeline where item 2 reads item 1's output path, and item 3 reads item 1 + item 2 outputs.
+  - Added regression proving the real `create_subagents` tool persists those edges as `workflow_depends_on`.
+- Status:
+  - Fixed in focused tests.
+  - Next live check: rerun dependency pipeline; after worker 1 finishes, worker 2 should be selected by dispatch using the persisted dependency edge and upstream artifact ref.
+
+### Finding 155: User deliverables must not be confused with agent-run internal reports
+
+- Trigger:
+  - Dependency-pipeline rerun under `/Users/xiaoyezi/my-claude-code/third-party-eval/runs/my-agent/dependency_pipeline/20260516-214106/pipeline_dependency_check`.
+  - The three workers reached the right dependency order, but the final report artifact pointed at the run-private file under `data/subagents/tasks/<run_id>/agents/<run_id>/final_report.md`.
+- Problem:
+  - `output_contract.final_report_ref` only exposed the agent-run internal handoff report.
+  - Parent acceptance checked that some artifact path existed, so an internal handoff report could satisfy a user-facing `final_report.md` requirement.
+- 中文解释:
+  - 子代理自己的“交接报告”不是用户要看的“最终报告”。
+  - 用户说“写到当前任务目录的 final_report.md”，系统就必须检查这个真实业务文件。
+  - 不能因为内部小屋里有一个同名 `final_report.md` 就算交付完成。
+- OpenClaw/Hermes comparison:
+  - Hermes 同题会直接在任务目录生成 `final_report.md`，同时把中间数据写成独立 JSON 文件。
+  - OpenClaw 的工具/会话输出会带 workspace task dir；内部 session 报告和用户 workspace 文件不是同一个事实源。
+  - Lesson: output contract must carry exact product refs, and internal handoff refs must be named separately.
+- Fix:
+  - `context_bundle_contracts.output_contract()` now separates `required_file_refs` / product `final_report_ref` from `agent_run_final_report_ref`.
+  - Runner prompt tells the model that `agent_run_final_report_ref` is internal and cannot satisfy user deliverables unless it also appears in `required_file_refs`.
+  - Parent acceptance adds `required_product_files_exist`, checking required files under `product_write_roots`.
+- Verification:
+  - Added context-bundle regression for `final_report.md` mapping to product root.
+  - Added parent-acceptance regression proving an internal agent-run `final_report.md` alone fails until the product-root file exists.
+- Status:
+  - Fixed in focused tests.
+  - Follow-up live check exposed Finding 156 below.
+
+### Finding 156: Downstream runners must read resolved upstream artifact refs before prose aliases
+
+- Trigger:
+  - Dependency-pipeline rerun under `/Users/xiaoyezi/my-claude-code/third-party-eval/runs/my-agent/dependency_pipeline/20260516-220905/pipeline_dependency_check`.
+  - Data and content workers completed, but the original report worker blocked on `data/subagents/subagent-数据收集/data_collection.md`, while the real upstream artifact was `/.../data_collection.md`.
+- Problem:
+  - The execution context already had the real upstream artifact refs appended to `context_manifest.required_read_paths`.
+  - The slim runner prompt did not highlight those resolved refs, so the model followed the prose alias first and treated one missing alias as a hard blocker.
+- 中文解释:
+  - 上游实际把文件放在 A，任务描述里还残留一个口语路径 B。
+  - 下游应该先看系统给的“真实存在文件列表”，不能 B 不存在就直接说干不了。
+  - 这类问题不能靠“提示词里说仔细点”，必须把真实 refs 做成显眼的机器字段。
+- OpenClaw/Hermes comparison:
+  - Hermes 同题完成后有 `data_collection.json`、`content_writeup.json`、`final_report.md` 三个明确文件；它用结构化 handoff/工作区文件做下游输入，没有把口语别名当唯一事实。
+  - OpenClaw 同题主会话先写 `data.json` 并 spawn 下一步 session；它用 session/workspace refs 表达后续工作，没有在本轮出现“读错人名路径后 BLOCKED”。
+  - Lesson: upstream outputs should be surfaced as resolved input refs in the model-visible contract, while prose aliases remain secondary.
+- Fix:
+  - `runner_prompt_context_summary.py` now adds `input_contract.required_read_paths`, `input_contract.resolved_read_paths`, and `input_contract.unresolved_read_paths`.
+  - `runner_prompts.py` now tells runners to read `input_contract.resolved_read_paths` first, and not block on one missing natural-language alias until all related candidates fail.
+- Verification:
+  - Added prompt regression proving a downstream task sees the existing upstream artifact path and the missing alias separately.
+  - Focused prompt, context-bundle, acceptance, manager-context, item-dependency, and phase-gate tests pass.
+  - Live my-agent rerun under `/Users/xiaoyezi/my-claude-code/third-party-eval/runs/my-agent/dependency_pipeline/20260516-222638/pipeline_dependency_check` completed without repair fallback; `final_report.md` exists at the task root and the report worker reached `DONE / VERIFIED`.
+- Status:
+  - Fixed in live E2E and focused tests.
+  - Continue monitoring larger multi-layer tasks for any remaining prose alias drift; future fixes should go into input/output contracts, not ad hoc guards.
+
+### Finding 157: Product refs must not duplicate the product root basename
+
+- Trigger:
+  - Full pytest caught `test_natural_language_root_drives_child_and_grandchild_e2e` after product contract hardening.
+  - The leaf wrote the real file at `/tmp/.../site/index.html`, but acceptance looked for `/tmp/.../site/site/index.html`.
+- Problem:
+  - Required file extraction produced both `index.html` and `site/index.html`.
+  - `required_product_file_refs()` blindly joined `site/index.html` onto product root `/tmp/.../site`, duplicating the product directory name.
+- 中文解释:
+  - 用户或模型说“site/index.html”，系统已经知道产品目录就是 `site`。
+  - 这时不能再拼一次 `site`，否则明明文件写对了，验收却去错地方找。
+  - 这个问题要在 context bundle 合同层修，不应该靠验收放水。
+- OpenClaw/Hermes comparison:
+  - Hermes 同题用明确任务目录文件作为交付，不会把工作区目录名重复拼接到产物路径里。
+  - OpenClaw 的 workspace task dir 是任务上下文事实；产物路径相对这个事实解析，避免父级从自然语言路径重新拼错。
+  - Lesson: product-root-relative refs need normalization before acceptance and prompt rendering.
+- Fix:
+  - `context_bundle_contracts._file_path_with_product_root_stripped()` now strips the leading product root basename from relative required refs.
+  - `site/index.html` under product root `/tmp/.../site` resolves to `/tmp/.../site/index.html`.
+  - Natural-language E2E now asserts deterministic subagent closeout (`done_verified: 2`) rather than requiring an extra free-model final sentence.
+- Verification:
+  - Added context-bundle regression for product root basename stripping.
+  - Re-ran the natural-language furniture E2E; child and grandchild both reach `DONE/VERIFIED`, and the site artifact passes static validation.
+- Status:
+  - Fixed in focused tests.
+  - Full suite should stay green after rerun; keep future path fixes in structured product refs, not prompt wording.

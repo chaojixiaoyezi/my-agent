@@ -128,6 +128,38 @@ class TestBuildSubagentRunnerPrompt:
         assert huge_blob[:100] not in prompt
         assert len(prompt) < 12000
 
+    # LLM: Downstream runners must see resolved upstream artifacts before stale natural-language paths.
+    # 函数用途: 防止下游先读不存在的人名路径后直接 BLOCKED，而忽略 context_manifest 中已解析的真实上游产物。
+    def test_prompt_highlights_resolved_dependency_read_paths(self, tmp_path):
+        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
+        from agent_py_agent.agent.subagents.models import ContextManifest
+
+        workspace = tmp_path / "task"
+        workspace.mkdir()
+        artifact = workspace / "data_collection.md"
+        artifact.write_text("data", encoding="utf-8")
+        missing_alias = "data/subagents/subagent-数据收集/data_collection.md"
+        context = self._make_context(
+            "run_downstream",
+            "整合上游结果，生成 final_report.md",
+            task_dir=str(workspace / "data" / "subagents" / "run_downstream"),
+            context_manifest=ContextManifest(required_read_paths=[missing_alias, "data_collection.md"]),
+            write_boundary={"product_write_roots": [str(workspace)]},
+            context_bundle={
+                "output_contract": {
+                    "required_file_refs": [str(workspace / "final_report.md")],
+                },
+            },
+            allowed_tools=["read_file", "write_file"],
+        )
+
+        prompt = _build_subagent_runner_prompt(context)
+
+        assert "resolved_read_paths" in prompt
+        assert str(artifact) in prompt
+        assert missing_alias in prompt
+        assert "某个自然语言路径不存在" in prompt
+
 
 class TestBuildSubagentRunnerRepairPrompt:
     """测试 _build_subagent_runner_repair_prompt() 函数。"""

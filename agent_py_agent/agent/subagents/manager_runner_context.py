@@ -20,6 +20,7 @@ from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..file_io import append_jsonl
 from .controlled_exec_gateway import controlled_exec_grant_refs
+from .dependency_artifact_refs import dependency_artifact_refs_for_required_paths
 from .models import SubAgentExecutionContext
 from .parsing import (
     _dict_list,
@@ -163,6 +164,7 @@ class SubAgentRunnerContextMixin:
 
         task = self.load(run_id)
         _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
+        _append_dependency_artifact_refs(task, self.list_runs())
         granted_skills, granted_tools, grants = self._extract_granted_caps(task)
         allowed_skills = _merge_list(task.allowed_skills, granted_skills)
         allowed_tools = _runner_allowed_tools(task, _merge_list(task.allowed_tools, granted_tools))
@@ -274,6 +276,21 @@ def _execution_context_task_fields(task: SubAgentTask) -> dict[str, object]:
 def _task_text_field(task: object, name: str) -> str:
     value = getattr(task, name, "")
     return value if isinstance(value, str) else ""
+
+
+# LLM: _append_dependency_artifact_refs exposes completed upstream outputs as concrete read refs.
+# 函数用途: 下游只写了短文件名时，把已完成上游 artifact 路径补进 Context Manifest，避免 runner 猜路径。
+def _append_dependency_artifact_refs(task: object, dependency_tasks: list) -> None:
+    manifest = getattr(task, "context_manifest", None)
+    if manifest is None:
+        return
+    refs = dependency_artifact_refs_for_required_paths(task, dependency_tasks)
+    if not refs:
+        return
+    current = getattr(manifest, "required_read_paths", None)
+    if not isinstance(current, list):
+        return
+    manifest.required_read_paths = _merge_list(current, refs)
 
 
 _FILESYSTEM_WRITE_GRANT_TOOLS = {"write_file", "append_file", "replace_in_file"}

@@ -37,6 +37,7 @@ from .orchestration_create_policy import (
     create_run_params,
 )
 from .orchestration_dispatch_tool import DispatchSubagentsTool
+from .orchestration_item_dependencies import enrich_item_dependencies, item_dependency_edges
 from .orchestration_run_scope import remember_orchestration_run_ids
 from .orchestration_tool_grants import (
     CODING_SUBAGENT_TOOLS,
@@ -116,7 +117,9 @@ class CreateSubagentsTool(BaseTool):
     # LLM: _execute_items is the structured batch path, equivalent to Hermes delegate_task tasks[].
     # 函数用途: 按 items[] 中每个独立 goal 创建子代理，避免 count 复制同一个任务目标。
     def _execute_items(self, items: list[CreateSubagentItem]) -> ToolExecutionResult:
-        capped = self._cap_items(items)
+        capped_raw = self._cap_items(items)
+        dependency_edges = item_dependency_edges(capped_raw)
+        capped = enrich_item_dependencies(capped_raw)
         allowed_tool_values = [subagent_allowed_tools(item.params) for item in capped]
         for item, allowed_tools in zip(capped, allowed_tool_values, strict=True):
             validation = self._validate_single_goal(item.params, item.goal, allowed_tools)
@@ -133,6 +136,7 @@ class CreateSubagentsTool(BaseTool):
                 ),
             )
             tasks.append(task)
+        _apply_item_dependency_edges(self.agent.subagents, tasks, dependency_edges)
         remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
         payload = self._create_payload(tasks, _payload_allowed_tools(allowed_tool_values))
         payload["batch_mode"] = "items"
@@ -218,6 +222,19 @@ class CreateSubagentsTool(BaseTool):
             tool="create_subagents",
         ).to_dict()
         return payload
+
+
+# LLM: _apply_item_dependency_edges persists batch sibling ordering as workflow-style phase refs.
+# 函数用途: items[] 下游自然引用上游代理时，写入 run 级依赖，dispatch 显式 run_ids 也不能抢跑。
+def _apply_item_dependency_edges(manager, tasks: list, dependency_edges: list[list[int]]) -> None:
+    if not tasks:
+        return
+    batch_id = f"items:{tasks[0].id}"
+    for task, deps in zip(tasks, dependency_edges, strict=False):
+        task.workflow_parent_run_id = batch_id
+        task.workflow_phase_id = task.id
+        task.workflow_depends_on = [tasks[index].id for index in deps if 0 <= index < len(tasks)]
+        manager.save(task)
 
 
 # LLM: _payload_allowed_tools summarizes items-mode tool policy without hiding per-task params.

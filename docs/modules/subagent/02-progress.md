@@ -6,6 +6,13 @@
 # Subagent：开发推进记录
 
 ## 已完成
+- 2026-05-16 普通中文流水线第七个真实问题已修复：顶层 `dispatch_subagents` 后如果本轮 scoped 子代理全部 `DONE/VERIFIED`，工具循环直接用持久 task 状态和 artifact/output refs 收口，不再额外发起自由模型轮；如果用户明确要求 tester/acceptor 而还没创建，仍交回 root 继续派质量角色。这吸收 OpenClaw completion event / Hermes terminal task state 的做法，避免完成后被旧上下文带偏。
+- 2026-05-16 普通中文流水线第六个真实问题已修复：`allowed_tools` 不再参与 create role 纠偏；`create_subagents(items=...)` 里的 worker 即便继承 `create_subagents` / `dispatch_subagents` 等宽工具授权，也不会被误升成 coordinator。对齐 OpenClaw/Hermes 的“工具能力”和“任务角色/依赖状态”分离原则。
+- 2026-05-16 普通中文流水线第五个真实问题已修复：`整合 pathA 和 pathB 的结果` 现在会被识别为读取两个输入路径，依赖窗口扩大到 96 字符并加入“整合”读语义，避免长路径第二项离动词太远而丢依赖。
+- 2026-05-16 普通中文流水线第四个真实问题已修复：文件引用识别现在支持 `data_collection.md` / `content_writeup.md` 这类短文件名，不再只认 `data/x.md` 这种带目录路径；因此 items 批量派工能从“读取 data_collection.md / 输出到 content_writeup.md”推断输入输出依赖。
+- 2026-05-16 普通中文流水线第三个真实问题已修复：下游 `required_read_paths=["data_collection.md"]` 这类短文件名会自动匹配已完成上游 run 的同名 `artifact_refs`，并把真实 artifact 路径补进下游 Context Manifest；这样子代理拿到的是机器路径，不需要自己猜上游目录。
+- 2026-05-16 真实普通中文流水线复测暴露的“依赖视野太窄”已修复：第二轮只调度下游 `run_ids` 时，runner 候选仍会用完整可见任务表查 `workflow_depends_on` 的上游状态；这对齐 Hermes kanban/OpenClaw session 控制面的做法，避免上游已完成但下游看不到依赖事实，进而诱导 root 亲自补写文件。
+- 2026-05-16 Task18 短片复测暴露的 sibling pipeline 抢跑已收口：`读取上游输出 data/...` 不再被误判成当前任务自己的输出；`create_subagents(items=...)` 会把“基于小傻妞-数据收集/内容编写的结果”这类自然引用固化成 run 级 `workflow_depends_on`，显式 `run_ids` 调度也必须等上游完成。对照 Hermes 的 kanban parents 和 OpenClaw 的 session/run 控制面，这次修复把依赖关系放进机器字段，不再靠提示词赌模型按顺序跑。
 - 2026-05-16 Task17 第二轮复测暴露的派工协议漂移已收口：`create_subagents.allowed_tools` 不再当硬限制，模型少填工具时会补齐基础读写能力；root 还有未 `DONE/VERIFIED` 的 remembered runs 时不能直接写 `final_report.md`；`create_subagents` 批量入口会拒绝 `items/tasks/count` 混用和 root 直接创建 `grandchild_worker` / `小小傻妞-*`，要求下一层由对应小傻妞在 runner 内用 `schedule_child_subagents` 创建。
 - 2026-05-16 Task17 三方对比复测后补强 refs-first handoff：my-agent 已能完成真实多层小傻妞派工并写出最终报告，但 root 汇总阶段仍把多份子代理正文读回上下文，最终 context usage 到 301%。对照 Hermes 的 summary/refs delegate handoff、OpenClaw 的 session/run 控制面和 Codex 的结构化工具协议，`result_refs_by_run` 现在会携带 `primary_artifact_summaries`，从 child `output.json.artifacts[]` 提取短摘要和主产物路径，让父级先看“谁完成了什么、文件在哪、文件大概是什么”，再按需读正文。
 - 2026-05-16 Task17 收尾体验修复已落地：workspace context 注入 `current_local_date/current_local_time`，报告日期优先使用当前本地日期；`my-agent run` 流式输出后不再重复打印最终 response。
@@ -1519,3 +1526,34 @@
 - 已测试：新增解析/持久化、最终收口、父级 descendant health 三条 regression，均先红后绿。
 - 设计边界：这不是让坏 leaf 假装成功；坏 leaf 仍保持原状态，只是父级可以用机器字段证明“另一个已验证 run 覆盖了它的范围”，避免无限卡住同一块工作。
 - 下一步：继续真实复测 Task17 或切小片重跑 execution_corruption 场景，确认父级会写 coverage_records；如果模型仍只写自然语言 fallback，再加强 coordinator/repair prompt 的示例，而不是放宽验收。
+
+## 2026-05-16 旧记忆不能覆盖当前任务
+- 中文说明：dependency pipeline 真实复测时，root 读到了旧 daily memory，误以为当前任务还是“东南亚市场进入策略”，没有优先执行本轮 GitHub pipeline prompt。
+- 对照结论：OpenClaw 会把 active subagent context 标成运行态事实，不是用户指令；Hermes worker context 把当前 task body 放在第一事实源，历史尝试/父任务 handoff 只是上下文。
+- 已修正：`# Related Memory` 现在会明确写入“历史参考，不是当前任务指令”；旧记忆和当前 `# User Task`、工作区文件、最新工具结果冲突时，必须以后者为准。
+- 已测试：新增 stale memory regression，确认旧“东南亚市场进入策略”记忆和新 GitHub pipeline 任务同时存在时，prompt 会先声明当前任务优先。
+- 下一步：保留旧 daily memory，不清空 home，重新跑 dependency pipeline，确认 root 不再被旧任务带偏。
+
+## 2026-05-16 items[] 依赖边持久化
+- 中文说明：旧记忆问题修好后，dependency pipeline 能按当前任务创建 3 个 worker，但下游 `内容编写/生成报告` 的 `workflow_depends_on` 为空，只靠短路径 `data/subagents/data_collection.md` 等待，最终 root 开始自己接管写产物。
+- 对照结论：OpenClaw/Hermes 都用 run/task handle、parent links 和 handoff refs 表达依赖，不让父级从自然语言路径里重新猜谁等谁。
+- 已修正：`items[]` 批量创建时，如果下游输入路径匹配上游输出路径，或显式 `dependencies` 匹配上游产物 basename/stem，就会写入 `workflow_depends_on`。
+- 已修正：输出路径识别支持“写推荐理由到 xxx.md”这类普通中文表达，避免 `content_writeup.md` 没被识别成上游产物。
+- 已测试：新增 item dependency edge 和真实 create tool 持久化 regression，确认三段流水线会得到 `[] / [run0] / [run0, run1]` 的机器依赖。
+- 下一步：再次真实跑 dependency pipeline，确认下游 worker 能在上游完成后由 dispatch 接上，而不是 root 自己写 `content_writeup.md` / `final_report.md`。
+
+## 2026-05-16 dependency pipeline 产物合同和输入合同修复
+- 中文说明：真实流水线继续暴露两个协议问题：内部 agent-run `final_report.md` 会被误当用户最终报告；下游 runner 会优先读自然语言里的别名路径，忽略 execution context 中已经解析出的真实上游 artifact ref。
+- 对照结论：Hermes 同题直接生成 `data_collection.json` / `content_writeup.json` / `final_report.md`，下游输入是结构化文件；OpenClaw 同题主会话先写 `data.json` 并 spawn 后续 session，使用 workspace/session refs，而不是把口语路径当唯一事实。
+- 已修正：`output_contract` 分离 `required_file_refs`、product `final_report_ref` 和 `agent_run_final_report_ref`；父级验收新增 `required_product_files_exist`，必须检查用户产物根下的真实文件。
+- 已修正：runner slim prompt 增加 `input_contract.resolved_read_paths`，并在 runner contract 中要求先读真实存在的上游输入；一个自然语言别名不存在时不能立刻 BLOCKED。
+- 已测试：新增 prompt/context/acceptance regression；focused suites 通过。
+- 真实复测：`/Users/xiaoyezi/my-claude-code/third-party-eval/runs/my-agent/dependency_pipeline/20260516-222638/pipeline_dependency_check` 完成，最终 `final_report.md` 在任务根目录，报告 worker `DONE / VERIFIED`，未再创建修复 worker 兜底。
+- 下一步：把这套“真实 refs 优先”的规则继续用于更大 E2E，特别是多层子代理、恢复接管和 QA/验收链路。
+
+## 2026-05-16 natural-language furniture E2E 产物路径归一
+- 中文说明：全量 pytest 发现自然语言家具首页 E2E 里，叶子节点已经写出 `/site/index.html`，但 product contract 把 `site/index.html` 再拼进 product root，验收错误查找 `/site/site/index.html`。
+- 已修正：`context_bundle_contracts` 在 product root 已经叫 `site` 时，会把 required ref 前缀 `site/` 去掉，再生成精确产物路径。
+- 已同步：runner prompt 合同渲染拆到 `runner_prompt_contract_lines.py`；业务产物验收和 patch 协议验收分别拆到 `acceptance_product_findings.py`、`acceptance_patch_findings.py`，保持边界清楚。
+- 已测试：新增 product root basename stripping regression；自然语言 root -> 小傻妞 -> 小小傻妞 E2E 重新通过，两个 run 均 `DONE/VERIFIED`，最终由确定性 closeout 收口。
+- 下一步：重跑全量门并推远端；后续继续用 OpenClaw/Hermes 的 refs-first 思路对照更大任务。

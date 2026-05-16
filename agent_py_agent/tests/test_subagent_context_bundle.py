@@ -104,6 +104,52 @@ def _assert_workspace_context_bundle(bundle, task, tmp_path: Path) -> None:
     assert "task.acceptance_checks" in bundle.source_refs["acceptance_checks"]
 
 
+# LLM: This regression keeps user deliverables separate from agent-run internal reports.
+# 函数用途: 验证 final_report.md 这类用户产物会绑定到 product root，而不是内部 agent_run final_report。
+def test_context_bundle_maps_required_file_to_product_root(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path / ".my-agent" / "subagents")
+    product_root = tmp_path / "product"
+    task = manager.create_run(
+        goal="整合上游结果，输出到 final_report.md",
+        thought="最终报告给用户看。",
+        plan=["读取上游", "写报告"],
+        role="coordinator",
+        extra_write_roots=[str(product_root)],
+    )
+    manager.save(task)
+
+    bundle = build_context_bundle(manager.load(task.id))
+    expected = str(product_root / "final_report.md")
+
+    assert bundle.output_contract["product_write_roots"] == [str(product_root)]
+    assert bundle.output_contract["required_file_refs"] == [expected]
+    assert bundle.output_contract["final_report_ref"] == expected
+    assert bundle.output_contract["agent_run_final_report_ref"].endswith("final_report.md")
+    assert bundle.task_packet["file_contract"]["required_file_refs"] == [expected]
+    assert bundle.task_packet["write_contract"]["product_write_roots"] == [str(product_root)]
+
+
+# LLM: This regression covers product refs that already include the product root basename.
+# 函数用途: 防止 `site/index.html` 在 product root `/tmp/site` 下被拼成 `/tmp/site/site/index.html`。
+def test_context_bundle_strips_product_root_basename_from_required_ref(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path / ".my-agent" / "subagents")
+    product_root = tmp_path / "site"
+    task = manager.create_run(
+        goal=f"在 {product_root / 'index.html'} 写高端家具首页。",
+        thought="需要生成完整 index.html。",
+        plan=["写页面"],
+        role="worker",
+        extra_write_roots=[str(product_root)],
+        acceptance_checks=["site/index.html 存在"],
+    )
+    manager.save(task)
+
+    bundle = build_context_bundle(manager.load(task.id))
+
+    assert bundle.output_contract["required_file_refs"] == [str(product_root / "index.html")]
+    assert bundle.task_packet["file_contract"]["required_file_refs"] == [str(product_root / "index.html")]
+
+
 def test_context_bundle_exposes_controlled_exec_grant_refs(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
