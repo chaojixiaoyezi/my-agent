@@ -211,6 +211,33 @@ This document is append-only. Record every real subagent E2E issue found during 
   - `python3 -m pytest -q agent_py_agent/tests/test_orchestration_direct_write_guard.py::test_active_delegated_root_blocks_final_report_when_run_incomplete`
 - Status: fixed in code, needs next real E2E verification.
 
+### Finding 41: Task17 三方对比后，my-agent 能完成真实多层派工但父级上下文仍偏胖
+
+- Test scene:
+  - Log: `/Users/example/my-终端应用/third-party-eval/logs/my-agent-task17-20260516-123517.log`
+  - Workspace: `/Users/example/my-终端应用/third-party-eval/runs/my-agent/task_17/agent_subagent_eval_suite/task_17_hierarchical_agents_sea_market`
+  - Model: MiniMax-M2.7 through `anthropic_compatible`.
+- Good result:
+  - root 真实创建 3 个第一层小傻妞，并由它们继续创建孙代理；最终 23 个 task/run 记录里 22 个 runner result，全部收口到 `DONE / VERIFIED`。
+  - root 写出 `final_report.md`，报告日期正确为 `2026-05-16`，终端没有重复打印最终 response。
+  - root 最后读取的 `final_report.md`、`market_environment_report.md`、`market_comparison_report.md` 都是真实存在文件；上一轮“猜不存在文件名”的问题明显缓解。
+- Remaining issue:
+  - root 最终汇总阶段仍读取了多份子代理正文，最后提示 `context usage is 301%`。
+  - 大白话：队伍真的干完了，但队长为了写总结还是把太多孩子报告原文塞进脑子里，容易把上下文撑爆。
+- Cross-project reference:
+  - 长期助手 delegate 更强调 parent 接收 summary / refs / tool trace，不把 child raw transcript 全塞回父级。
+  - 通道运行时 控制面更强调 session/run/status/logs 分离，让父级先看状态和文件引用。
+  - 会话运行时 风格的结构化工具协议也说明：机器事实应该走字段，不靠自然语言摘要猜。
+- Fix:
+  - `dispatch_subagents` 的 `result_refs_by_run` 继续作为父级 handoff 主入口。
+  - 新增 `primary_artifact_summaries`：从 child `output.json.artifacts[]` 提取 `path/kind/summary`，让父级先看到“每个子产物是什么”，减少为了理解产物而读取全文。
+  - 如果 `task.artifact_refs` 为空，会从 `output.json.artifacts[]` 和 `evidence_packets[].artifact_refs` 恢复主产物路径。
+- Verification:
+  - `python3 -m pytest -q agent_py_agent/tests/test_orchestration_dispatch_refs.py agent_py_agent/tests/test_tool_context_reducer.py::test_dispatch_externalized_result_keeps_result_refs_by_run agent_py_agent/tests/test_manager_acceptance.py::TestSubAgentAcceptanceMixin::test_review_acceptance_apply_accept agent_py_agent/tests/test_manager_acceptance.py::TestSubAgentAcceptanceMixin::test_review_acceptance_apply_reject`
+- Status: fixed in code, needs next real E2E verification.
+- Remaining gap:
+  - 还要继续观察 root 是否会主动少读正文；如果模型仍旧把 summary/refs 当提示而不是事实入口，下一步应在 runner/root synthesis prompt 中加入更明确的 “summary-first, refs-on-demand” 交接规则，而不是增加硬拦截。
+
 ## 2026-05-14 Recovery Case 02: Takeover Run 接管同一任务目录
 
 - Test scene:

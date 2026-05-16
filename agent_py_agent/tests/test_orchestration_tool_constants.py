@@ -26,3 +26,6 @@ def test_coding_subagent_tools_contains_file_tools():
     assert "append_file" in CODING_SUBAGENT_TOOLS
     assert "read_file" in CODING_SUBAGENT_TOOLS
     assert "list_files" in CODING_SUBAGENT_TOOLS
+    assert "schedule_child_subagents" in CODING_SUBAGENT_TOOLS
+    assert "dispatch_subagents" in CODING_SUBAGENT_TOOLS
+    assert "subagent_board" in CODING_SUBAGENT_TOOLS

@@ -19,7 +19,7 @@ from .dispatch_no_progress import dispatch_no_progress_payload
 from .dispatch_params import DispatchParams
 from .orchestration_artifact_integrity_repair import artifact_integrity_repair_advice_from_records
 from .orchestration_dispatch_payload import dispatch_record_payload, dispatch_recovery_payload
-from .orchestration_dispatch_refs import related_task_refs
+from .orchestration_dispatch_refs import related_task_refs, related_task_result_refs
 from .orchestration_dispatch_scope import (
     dispatch_apply_default,
     dispatch_auto_apply_acceptance_followup_default,
@@ -136,6 +136,7 @@ class DispatchSubagentsTool(BaseTool):
             "runner_selection_recovery": dispatch_recovery_payload(report.records),
             "summary": report.summary,
             "records": record_payloads,
+            "result_refs_by_run": related_task_result_refs(self.agent, report),
             "dispatch_json": str(self.agent.subagents.workspace / "subagent_dispatch_report.json"),
             "dispatch_md": str(self.agent.subagents.workspace / "SUBAGENT_DISPATCH.md"),
         }

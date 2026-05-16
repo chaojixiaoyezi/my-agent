@@ -342,6 +342,27 @@ class TestAnthropicCompatibleBackend:
             "after-second",
         ]
 
+    def test_generate_stream_retries_once_on_empty_text(self):
+        backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3"))
+        calls: list[int] = []
+
+        def request_stream(path, payload, headers):
+            del path, payload, headers
+            calls.append(len(calls) + 1)
+            if len(calls) == 1:
+                return [json.dumps({"type": "message_stop"})]
+            return [
+                json.dumps({"type": "content_block_delta", "delta": {"text": "after "}}),
+                json.dumps({"type": "content_block_delta", "delta": {"text": "retry"}}),
+                json.dumps({"type": "message_stop"}),
+            ]
+
+        backend.request_stream = request_stream
+        resp = backend.generate("test prompt", on_chunk=None)
+
+        assert resp.text == "after retry"
+        assert calls == [1, 2]
+
 
 class TestGetBackend:
     def test_get_backend_echo(self):

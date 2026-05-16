@@ -209,13 +209,13 @@ def test_hierarchy_schedule_keeps_write_intent_as_leaf_role(tmp_path):
 
     assert leaf.role == "leaf_worker"
     assert "write_file" in leaf.allowed_tools
-    assert "schedule_child_subagents" not in leaf.allowed_tools
-    assert "dispatch_subagents" not in leaf.allowed_tools
+    assert "schedule_child_subagents" in leaf.allowed_tools
+    assert "dispatch_subagents" in leaf.allowed_tools
 
 
-# LLM: test_hierarchy_schedule_strips_orchestration_tools_from_leaf_write_tasks prevents leaf recursion.
-# 函数用途: 当模型给叶子交付任务误带调度工具时，系统去掉调度权限，避免 leaf 再创建孩子。
-def test_hierarchy_schedule_strips_orchestration_tools_from_leaf_write_tasks(tmp_path):
+# LLM: test_hierarchy_schedule_keeps_orchestration_tools_for_leaf_write_tasks protects full-agent leaves.
+# 函数用途: leaf 角色仍保留派下级能力；角色只是职责倾向，不能把子代理变成不能求助的小工人。
+def test_hierarchy_schedule_keeps_orchestration_tools_for_leaf_write_tasks(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
     parent = manager.create_run(
@@ -244,9 +244,9 @@ def test_hierarchy_schedule_strips_orchestration_tools_from_leaf_write_tasks(tmp
 
     assert leaf.role == "leaf_worker"
     assert "write_file" in leaf.allowed_tools
-    assert "schedule_child_subagents" not in leaf.allowed_tools
-    assert "dispatch_subagents" not in leaf.allowed_tools
-    assert "subagent_board" not in leaf.allowed_tools
+    assert "schedule_child_subagents" in leaf.allowed_tools
+    assert "dispatch_subagents" in leaf.allowed_tools
+    assert "subagent_board" in leaf.allowed_tools
 
 
 # LLM: test_hierarchy_schedule_preserves_report_write_tools_for_coordinators covers coordinator report output.

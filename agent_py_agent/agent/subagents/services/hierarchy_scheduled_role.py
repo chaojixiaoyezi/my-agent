@@ -22,6 +22,8 @@ def scheduled_child_role(
     role = role_from_child_spec_identity(spec)
     if role not in {"worker", "general", "child"}:
         return role
+    if _looks_like_child_creation_goal(goal or getattr(spec, "goal", "")):
+        return _coordinator_role_for_depth(parent)
     if should_infer_leaf_coding_tools(
         LeafWriteIntentRequest(spec=spec, extra_write_roots=extra_write_roots or [], goal=goal)
     ):
@@ -29,9 +31,24 @@ def scheduled_child_role(
     tools = set(getattr(spec, "allowed_tools", []) or [])
     if "schedule_child_subagents" not in tools and "dispatch_subagents" not in tools:
         return role
+    return _coordinator_role_for_depth(parent)
+
+
+# LLM: _coordinator_role_for_depth maps hierarchy depth to the existing role naming contract.
+# 函数用途: 将“继续创建下级”的任务按层级命名成 child/grandchild coordinator。
+def _coordinator_role_for_depth(parent: SubAgentTask) -> str:
     depth = int(parent.depth or 0) + 1
     if depth == 1:
         return "child_coordinator"
     if depth == 2:
         return "grandchild_coordinator"
     return "coordinator"
+
+
+# LLM: _looks_like_child_creation_goal catches coordinator intent before file-extension leaf inference.
+# 函数用途: goal 说创建/调度 worker 或下一层时，即使提到 evidence.json 也应是协调节点。
+def _looks_like_child_creation_goal(goal: object) -> bool:
+    text = str(goal or "").lower()
+    return ("创建" in text or "create" in text or "spawn" in text) and (
+        "worker" in text or "leaf" in text or "子代理" in text or "下级" in text or "下一层" in text
+    )

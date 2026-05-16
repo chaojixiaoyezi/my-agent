@@ -18,9 +18,13 @@ _DEFAULT_LEAF_CODING_TOOLS = [
     "write_file",
     "append_file",
     "replace_in_file",
+    "schedule_child_subagents",
+    "dispatch_subagents",
+    "subagent_board",
+    "subagent_message",
     "capability_request",
 ]
-_LEAF_ORCHESTRATION_TOOLS = {"schedule_child_subagents", "dispatch_subagents", "subagent_board"}
+# LLM: Leaf defaults intentionally include coordination tools; role changes prompt style, not basic capability.
 _TOOL_NAME_ALIASES = {
     "append": "append_file",
     "list": "list_files",
@@ -80,25 +84,14 @@ class ToolPolicyRequest:
 def scheduled_child_tools(request: ToolPolicyRequest) -> list[str]:
     """Return the allowed tools for a scheduled child."""
 
-    should_infer_leaf_tools = should_infer_leaf_coding_tools(
-        LeafWriteIntentRequest(
-            spec=request.spec,
-            extra_write_roots=request.extra_write_roots,
-            goal=request.goal,
-        )
-    )
     if request.spec.allowed_tools:
         explicit_tools = [_canonical_tool_name(item) for item in request.spec.allowed_tools]
         if is_coordinator_spec(request.spec):
-            return _coordinator_tools([*explicit_tools, *COORDINATOR_TOOLS])
-        if should_infer_leaf_tools:
-            return _leaf_write_tools([*explicit_tools, *_DEFAULT_LEAF_CODING_TOOLS])
-        return list(dict.fromkeys(explicit_tools))
+            return _coordinator_tools([*explicit_tools, *_DEFAULT_LEAF_CODING_TOOLS, *COORDINATOR_TOOLS])
+        return _leaf_write_tools([*explicit_tools, *_DEFAULT_LEAF_CODING_TOOLS])
     if is_coordinator_spec(request.spec):
-        return _coordinator_tools([*request.parent_tools, *COORDINATOR_TOOLS])
-    if should_infer_leaf_tools:
-        return _leaf_write_tools([*request.parent_tools, *_DEFAULT_LEAF_CODING_TOOLS])
-    return request.parent_tools
+        return _coordinator_tools([*request.parent_tools, *_DEFAULT_LEAF_CODING_TOOLS, *COORDINATOR_TOOLS])
+    return _leaf_write_tools([*request.parent_tools, *_DEFAULT_LEAF_CODING_TOOLS])
 
 
 # LLM: should_infer_leaf_coding_tools keeps automatic write-tool inference narrow and auditable.
@@ -120,10 +113,10 @@ def is_coordinator_spec(spec: Any) -> bool:
     return "coordinator" in role_text or "lead" in role_text
 
 
-# LLM: _leaf_write_tools strips hierarchy orchestration grants from concrete product-writing leaves.
-# 函数用途: 给 leaf 写文件任务保留文件读写工具，去掉继续派下级的工具。
+# LLM: _leaf_write_tools preserves baseline read/write/orchestration tools for capable small agents.
+# 函数用途: 给 leaf 写文件任务保留完整基础能力；是否继续派下级由任务和模型判断，不由工具层硬砍。
 def _leaf_write_tools(tools: list[str]) -> list[str]:
-    return list(dict.fromkeys(tool for tool in tools if tool not in _LEAF_ORCHESTRATION_TOOLS))
+    return list(dict.fromkeys(tools))
 
 
 # LLM: _coordinator_tools preserves all inherited tools and adds orchestration grants.

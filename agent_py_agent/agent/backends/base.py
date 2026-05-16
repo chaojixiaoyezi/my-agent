@@ -257,16 +257,29 @@ class AnthropicCompatibleBackend(HttpBackend):
         """流式解析 Anthropic SSE：监听 content_block_delta 事件拼接文本。"""
         # LLM: Anthropic SSE 用事件行区分类型，数据行携带 JSON 片段。
         # request_stream 已过滤 event 行，需从 data 行的 type 字段恢复事件类型。
-        parts: list[str] = []
-        lines = self.request_stream_iter if on_chunk is not None else self.request_stream
-        for text in anthropic_stream_contents(lines("/v1/messages", payload, headers)):
-            parts.append(text)
-            if on_chunk is not None:
-                on_chunk(text)
-        text = "".join(parts)
+        for attempt in range(2):
+            text = self._stream_text_once(payload, headers, on_chunk)
+            if text or attempt > 0:
+                break
         if not text:
             raise RuntimeError("Anthropic-compatible 流式响应没有文本内容")
         return ModelResponse(text=text, backend=self.name)
+
+    # LLM: _stream_text_once isolates one Anthropic SSE attempt so retry logic stays flat.
+    # 函数用途: 执行一次流式请求并拼接文本；有 on_chunk 时同步把片段推给调用方。
+    def _stream_text_once(
+        self,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        on_chunk: Callable[[str], None] | None,
+    ) -> str:
+        lines = self.request_stream_iter if on_chunk is not None else self.request_stream
+        parts: list[str] = []
+        for chunk in anthropic_stream_contents(lines("/v1/messages", payload, headers)):
+            parts.append(chunk)
+            if on_chunk is not None:
+                on_chunk(chunk)
+        return "".join(parts)
 
 
 # LLM: _anthropic_text_from_response extracts only assistant-visible text from messages payloads.

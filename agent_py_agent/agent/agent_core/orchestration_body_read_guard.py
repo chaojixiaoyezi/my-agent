@@ -224,7 +224,7 @@ def _is_runtime_metadata_read(agent: object, parent: object, payload: dict[str, 
 # LLM: _payload_path normalizes read_file path enough for policy checks but does not require file existence.
 # 函数用途: 支持绝对路径和相对 workspace root 路径；解析失败时保守返回 None。
 def _payload_path(agent: object, payload: dict[str, Any]) -> Path | None:
-    raw = str(payload.get("path") or payload.get("file") or "").strip()
+    raw = str(_payload_value(payload, ("path", "file")) or "").strip()
     if not raw:
         return None
     candidate = Path(raw).expanduser()
@@ -235,6 +235,28 @@ def _payload_path(agent: object, payload: dict[str, Any]) -> Path | None:
         return candidate.resolve(strict=False)
     except (OSError, RuntimeError):
         return None
+
+
+# LLM: _payload_value keeps refs-only guards tolerant of flat and bundle-shaped filesystem calls.
+# 函数用途: 读取 path/file 参数时兼容 {"path": "..."} 与 {"filesystem": {"path": "..."}}，keys 用 bundle 传入避免业务 varargs。
+def _payload_value(payload: dict[str, Any], keys: tuple[str, ...]) -> object:
+    direct = _first_payload_value(payload, keys)
+    if direct:
+        return direct
+    filesystem = payload.get("filesystem")
+    if isinstance(filesystem, dict):
+        return _first_payload_value(filesystem, keys)
+    return ""
+
+
+# LLM: _first_payload_value keeps bundle alias checks shallow for code-size and reviewability.
+# 函数用途: 按顺序从一个 payload 层读取第一个非空参数值，供 flat 和 filesystem bundle 共同复用。
+def _first_payload_value(payload: dict[str, Any], keys: tuple[str, ...]) -> object:
+    for key in keys:
+        value = payload.get(key)
+        if value:
+            return value
+    return ""
 
 
 # LLM: _is_shell_body_read_command detects shell reads that would bypass read_file/read_artifact guards.

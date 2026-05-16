@@ -48,40 +48,8 @@ def _batch_protocol_error(params: dict[str, object]) -> str:
     raw_items = params.get("items") if "items" in params else params.get("tasks")
     if raw_items is None:
         return ""
-    count_error = _batch_count_error(params.get("count"))
-    if count_error:
-        return count_error
-    items = _json_list_param(raw_items)
-    for index, raw in enumerate(items, start=1):
-        if _looks_like_direct_grandchild(raw):
-            return (
-                f"items[{index}] 越过了一层。create_subagents 只能创建直接小傻妞；"
-                "小小傻妞/孙代理必须由对应小傻妞在 runner 内调用 schedule_child_subagents 创建。"
-            )
+    del raw_items
     return ""
-
-
-# LLM: _batch_count_error keeps count for single-goal mode only.
-# 函数用途: 批量 items/tasks 已经逐项表示人数和目标，不再同时使用 count 复制一批。
-def _batch_count_error(value: object) -> str:
-    if value is None:
-        return ""
-    text = str(value).strip()
-    if text in {"", "1", "1.0"}:
-        return ""
-    return "items/tasks 批量模式不要同时传 count；每个 item 就是一名直接小傻妞。"
-
-
-# LLM: _looks_like_direct_grandchild catches model attempts to create lower layers from root.
-# 函数用途: 检查 item 的 role/agent_name/name 是否明显写成小小傻妞或 grandchild，防止 root 越层造孙代理。
-def _looks_like_direct_grandchild(raw: object) -> bool:
-    if not isinstance(raw, dict):
-        return False
-    text = "\n".join(
-        str(raw.get(key) or "")
-        for key in ("role", "agent_name", "name", "display_name")
-    ).lower()
-    return "grandchild" in text or "小小傻妞" in text
 
 
 # LLM: _create_item merges parent defaults with one explicit child object.
@@ -96,6 +64,9 @@ def _create_item(
     goal = str(raw.get("goal") or "").strip()
     if not goal:
         return f"items[{index}] 缺少必填 goal。"
+    direct_grandchild = _direct_grandchild_error(raw)
+    if direct_grandchild:
+        return direct_grandchild
     merged = _create_item_params(base_params, raw, goal)
     return CreateSubagentItem(goal=goal, params=merged)
 
@@ -116,6 +87,18 @@ def _create_item_params(
     merged["goal"] = goal
     merged["count"] = 1
     return merged
+
+
+# LLM: _direct_grandchild_error keeps root batch mode at the direct-child boundary.
+# 函数用途: create_subagents 只能创建直接小傻妞；小小傻妞/孙代理要由对应父节点在 runner 内创建。
+def _direct_grandchild_error(raw: dict[str, object]) -> str:
+    identity = f"{raw.get('role') or ''} {raw.get('agent_name') or ''}".lower()
+    if "grandchild" not in identity and "小小傻妞" not in identity:
+        return ""
+    return (
+        "create_subagents 只能创建直接小傻妞。"
+        "请先创建上一层小傻妞/coordinator，再由它调用 schedule_child_subagents 创建小小傻妞/孙代理。"
+    )
 
 
 # LLM: _json_list_param accepts common LLM encodings while keeping the public API explicit.

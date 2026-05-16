@@ -225,6 +225,53 @@ def test_dispatch_externalized_result_keeps_parent_acceptance_repair_advice():
     assert "records" not in rendered
 
 
+# LLM: Result refs by run must survive clipping that affects flat artifact lists.
+# 函数用途: dispatch 大输出外置后，每个直接子代理的主产物路径仍单独展示，避免 root 只看到第一类报告就猜其它文件名。
+def test_dispatch_externalized_result_keeps_result_refs_by_run():
+    output = json.dumps(
+        {
+            "summary": {"runner": 3},
+            "result_refs_by_run": [
+                {
+                    "run_id": "market",
+                    "status": "DONE",
+                    "verification_status": "VERIFIED",
+                    "summary": "市场环境报告完成",
+                    "primary_artifact_refs": ["/tmp/subagents/market/market_env_comprehensive_report.md"],
+                    "output_json": "/tmp/subagents/market/output.json",
+                },
+                {
+                    "run_id": "competitor",
+                    "status": "DONE",
+                    "verification_status": "VERIFIED",
+                    "summary": "竞争格局报告完成",
+                    "primary_artifact_refs": ["/tmp/subagents/competitor/competitive_landscape_report.md"],
+                    "primary_artifact_summaries": [{
+                        "path": "/tmp/subagents/competitor/competitive_landscape_report.md",
+                        "kind": "report",
+                        "summary": "竞品矩阵和差异化机会",
+                    }],
+                    "output_json": "/tmp/subagents/competitor/output.json",
+                },
+            ],
+            "deliverable_artifact_refs": ["/tmp/too-many/market.md", *[f"/tmp/too-many/ref-{i}.md" for i in range(60)]],
+            "records": [{"message": "z" * 2000}],
+        }
+    )
+
+    rendered = render_tool_result_for_live_prompt(
+        ToolExecutionResult("dispatch_subagents", True, output),
+        _dispatch_externalized_archive_record(output),
+    )
+
+    assert "result_refs_by_run" in rendered
+    assert "/tmp/subagents/market/market_env_comprehensive_report.md" in rendered
+    assert "/tmp/subagents/competitor/competitive_landscape_report.md" in rendered
+    assert "竞品矩阵和差异化机会" in rendered
+    assert "do not guess child filenames" in rendered
+    assert "records" not in rendered
+
+
 # LLM: Artifact integrity repair advice must survive orchestration output externalization.
 # 函数用途: dispatch 大输出被外置时，live prompt 仍保留产物修复建议，避免 root 去读正文自己修。
 def test_dispatch_externalized_result_keeps_artifact_integrity_repair_advice():

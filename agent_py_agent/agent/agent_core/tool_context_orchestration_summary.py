@@ -65,6 +65,7 @@ def _render_orchestration_summary(
     ]
     lines.extend(_direct_children_lines(payload.get("direct_children")))
     lines.extend(_top_level_action_lines(payload))
+    lines.extend(_result_refs_by_run_lines(payload.get("result_refs_by_run")))
     lines.extend(_ref_lines(payload))
     lines.extend(_summary_lines(payload))
     lines.extend(_archive_pointer_lines(archive_record, include_read_hint=False))
@@ -146,6 +147,32 @@ def _top_level_action_lines(payload: dict[str, Any]) -> list[str]:
         "next_action",
     )
     return [f"- {key}: {_json_inline(payload.get(key))}" for key in keys if payload.get(key)]
+
+
+# LLM: _result_refs_by_run_lines makes final handoff refs visible even when the flat ref list is clipped.
+# 函数用途: 每个直接子代理单独一行展示主产物路径和状态，父级汇总时不用猜文件名或翻诊断文件。
+def _result_refs_by_run_lines(value: object) -> list[str]:
+    if not isinstance(value, list) or not value:
+        return []
+    lines = ["- result_refs_by_run:"]
+    for item in value[:8]:
+        if not isinstance(item, dict):
+            continue
+        run_id = item.get("run_id", "")
+        status = f"{item.get('status', '')}/{item.get('verification_status', '')}"
+        artifacts = _json_inline(item.get("primary_artifact_refs") or [])
+        artifact_summaries = item.get("primary_artifact_summaries") or []
+        output_json = item.get("output_json", "")
+        summary = _clip(item.get("summary", ""), limit=220)
+        lines.append(f"  - run_id={run_id} status={status} primary_artifact_refs={artifacts}")
+        if artifact_summaries:
+            lines.append(f"    artifact_summaries={_json_inline(artifact_summaries)}")
+        if output_json:
+            lines.append(f"    output_json={output_json}")
+        if summary:
+            lines.append(f"    summary={summary}")
+    lines.append("- result_ref_policy: read primary_artifact_refs or output_json from result_refs_by_run; do not guess child filenames.")
+    return lines
 
 
 # LLM: _summary_lines includes count fields and deliberately reports only record_count.

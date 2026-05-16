@@ -85,6 +85,25 @@ def test_predelegation_root_blocks_data_body_before_subagents_created():
     assert "required_read_paths" in result.output
 
 
+# LLM: bundle-shaped filesystem calls must hit the same refs-first guard as flat path calls.
+# 函数用途: 真实模型会写 {"filesystem": {"path": ...}}；派工前 source 正文仍要阻断且提示带路径。
+def test_predelegation_root_blocks_bundled_data_body_before_subagents_created():
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_predelegation_agent(),
+            user_prompt="请安排小傻妞协作完成这个任务。",
+            payload={
+                "tool": "read_file",
+                "filesystem": {"path": "/tmp/workspace/data/company_profile.md"},
+            },
+        )
+    )
+
+    assert result is not None
+    assert "predelegation_source_read_blocked" in result.output
+    assert "/tmp/workspace/data/company_profile.md" in result.output
+
+
 # LLM: artifact bodies also stay out of root context before initial delegation.
 # 函数用途: 派工前 root 不应先读取 read_file 大输出 artifact，应把来源路径或 artifact ref 交给下级。
 def test_predelegation_root_blocks_plain_artifact_before_subagents_created():
@@ -162,6 +181,26 @@ def test_delegating_parent_cannot_read_product_body_before_acceptor_done():
     assert "delegating_body_read_blocked" in result.output
     assert "subagent_board" in result.output
     assert "acceptor" in result.output
+
+
+# LLM: delegated parent body guard must not rely on parser-flattened filesystem parameters.
+# 函数用途: 委托期父级用 bundle 形态读业务正文时也阻断，避免真实模型参数换形态绕过。
+def test_delegating_parent_cannot_read_bundled_product_body_before_acceptor_done():
+    tasks = {"root": _task("root", identity="coordinator", children=["worker"]), "worker": _task("worker")}
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_agent(tasks),
+            user_prompt="请让子代理先做，最后按验收标准收口。",
+            payload={
+                "tool": "read_file",
+                "filesystem": {"path": "/tmp/workspace/deliverables/app.js"},
+            },
+        )
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert "delegating_body_read_blocked" in result.output
 
 
 # LLM: metadata reads stay available so parents can recover from blocked children without reading products.

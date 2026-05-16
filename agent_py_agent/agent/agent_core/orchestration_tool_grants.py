@@ -13,6 +13,10 @@ CODING_SUBAGENT_TOOLS = [
     "write_file",
     "append_file",
     "replace_in_file",
+    "schedule_child_subagents",
+    "dispatch_subagents",
+    "subagent_board",
+    "subagent_message",
     "capability_request",
 ]
 READ_ONLY_SUBAGENT_TOOLS = list(CODING_SUBAGENT_TOOLS)

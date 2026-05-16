@@ -7,6 +7,7 @@
 
 ## 已完成
 - 2026-05-16 Task17 第二轮复测暴露的派工协议漂移已收口：`create_subagents.allowed_tools` 不再当硬限制，模型少填工具时会补齐基础读写能力；root 还有未 `DONE/VERIFIED` 的 remembered runs 时不能直接写 `final_report.md`；`create_subagents` 批量入口会拒绝 `items/tasks/count` 混用和 root 直接创建 `grandchild_worker` / `小小傻妞-*`，要求下一层由对应小傻妞在 runner 内用 `schedule_child_subagents` 创建。
+- 2026-05-16 Task17 三方对比复测后补强 refs-first handoff：my-agent 已能完成真实多层小傻妞派工并写出最终报告，但 root 汇总阶段仍把多份子代理正文读回上下文，最终 context usage 到 301%。对照 长期助手 的 summary/refs delegate handoff、通道运行时 的 session/run 控制面和 会话运行时 的结构化工具协议，`result_refs_by_run` 现在会携带 `primary_artifact_summaries`，从 child `output.json.artifacts[]` 提取短摘要和主产物路径，让父级先看“谁完成了什么、文件在哪、文件大概是什么”，再按需读正文。
 - 2026-05-16 Task17 收尾体验修复已落地：workspace context 注入 `current_local_date/current_local_time`，报告日期优先使用当前本地日期；`my-agent run` 流式输出后不再重复打印最终 response。
 - 2026-05-16 Task17 第三轮复测暴露的 dispatch 显式 run_ids 阶段误伤已修复：父级明确传多个 run_ids 时，runner 候选按给定列表执行，不再因为 coordinator 阶段优先而静默只跑 1 个；dispatch payload 同时会把 remembered runs 中未 `DONE/VERIFIED` 的任务放入 `unfinished_run_ids` 并标记 `must_not_report_done=true`。复跑 Task17 已完成 9 个 run 全部 `DONE/VERIFIED`，并写出 `final_report.md`。
 - 2026-05-14 Typed Action Protocol 迁移 1-9 阶段第一片已落地：新增 `agent/action_protocol.py`，把工具调用、工具结果、子代理结果、子代理创建结果和 compact continue packet 都包装成 typed envelope；旧 `[TOOL_CALL]` / `[SUBAGENT_RESULT]` 文本协议仍兼容，但执行层和验收层开始读取机器字段，不再从 summary 猜事实。
