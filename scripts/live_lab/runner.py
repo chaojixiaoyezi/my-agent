@@ -215,8 +215,32 @@ class LiveLab:
         self._reporter.log_header()
         self._reporter.log_model_preflight()
 
+    # LLM: run_root 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 暴露本轮输出根目录，供 case 写自己的产物。
+    @property
+    def run_root(self) -> Path:
+        return self._session.run_root
+
+    # LLM: prompts_dir 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 暴露本轮 prompt 记录目录，保持旧 case surface 可用。
+    @property
+    def prompts_dir(self) -> Path:
+        return self._session.prompts_dir
+
+    # LLM: responses_dir 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 暴露真实模型 response 记录目录，避免 case 直接碰 runner 私有字段。
+    @property
+    def responses_dir(self) -> Path:
+        return self._session.responses_dir
+
+    # LLM: summary_path 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 暴露最终 summary JSON 路径，保持旧 LiveLab surface 兼容。
+    @property
+    def summary_path(self) -> Path:
+        return self._session.summary_path
+
     # LLM: transcript_path 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
+    # 函数用途: 暴露本轮 Markdown transcript 路径。
     @property
     def transcript_path(self) -> Path:
         return self._session.transcript_path
@@ -330,6 +354,30 @@ class _LabInterface:
         self._reporter = runner._reporter
         self._session = runner._session
         self.args = runner.args
+
+    # LLM: run_root 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 暴露本轮输出根目录，供 case 写自己的产物。
+    @property
+    def run_root(self) -> Path:
+        return self._session.run_root
+
+    # LLM: prompts_dir 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 暴露本轮 prompt 记录目录，保持旧 case surface 可用。
+    @property
+    def prompts_dir(self) -> Path:
+        return self._session.prompts_dir
+
+    # LLM: responses_dir 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 暴露真实模型 response 记录目录，避免 case 直接碰 runner 私有字段。
+    @property
+    def responses_dir(self) -> Path:
+        return self._session.responses_dir
+
+    # LLM: summary_path 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 暴露最终 summary JSON 路径，保持旧 LiveLab surface 兼容。
+    @property
+    def summary_path(self) -> Path:
+        return self._session.summary_path
 
     # LLM: transcript_path 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
     # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。

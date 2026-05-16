@@ -262,6 +262,10 @@ class AnthropicCompatibleBackend(HttpBackend):
             if text or attempt > 0:
                 break
         if not text:
+            text = self._fallback_non_stream_text(payload, headers)
+            if text and on_chunk is not None:
+                on_chunk(text)
+        if not text:
             raise RuntimeError("Anthropic-compatible 流式响应没有文本内容")
         return ModelResponse(text=text, backend=self.name)
 
@@ -280,6 +284,17 @@ class AnthropicCompatibleBackend(HttpBackend):
             if on_chunk is not None:
                 on_chunk(chunk)
         return "".join(parts)
+
+    # LLM: _fallback_non_stream_text mirrors Codex-style provider resilience at the backend boundary.
+    # 函数用途: 当 Anthropic-compatible 流式响应没有可见文本时，改走一次非流式完整响应；去掉 stream 字段避免污染兜底请求。
+    def _fallback_non_stream_text(self, payload: dict[str, Any], headers: dict[str, str]) -> str:
+        fallback_payload = dict(payload)
+        fallback_payload.pop("stream", None)
+        try:
+            obj = self.request_json("/v1/messages", fallback_payload, headers)
+            return _anthropic_text_from_response(obj)
+        except Exception:
+            return ""
 
 
 # LLM: _anthropic_text_from_response extracts only assistant-visible text from messages payloads.

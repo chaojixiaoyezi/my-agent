@@ -52,3 +52,44 @@ def test_workspace_product_artifact_ref_is_not_missing_from_run_local_task(tmp_p
 
     assert normalize_artifact_ref(task, artifact_ref) == str(artifact)
     assert missing_local_artifact_refs(task, parsed, []) == []
+
+
+# LLM: .my_agent/subagents is the scenario-test runtime layout and must derive the same product workspace root.
+# 函数用途: 产物引用在 `.my_agent/subagents/<run>` 私有目录下解析时，也能回到项目根找业务产物。
+def test_my_agent_workspace_product_artifact_ref_is_not_missing(tmp_path) -> None:
+    workspace = tmp_path / "fixture_project"
+    run_dir = workspace / ".my_agent" / "subagents" / "subagent-actual-run"
+    run_dir.mkdir(parents=True)
+    artifact_ref = "public/index.html"
+    artifact = workspace / artifact_ref
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("<html></html>", encoding="utf-8")
+    task = SimpleNamespace(
+        task_dir=str(run_dir),
+        output_dir=str(run_dir / "output"),
+        reports_dir=str(run_dir / "reports"),
+        agent_run_workspace_dir="",
+        task_workspace_artifacts_dir="",
+        agent_run_artifacts_dir="",
+        task_workspace_shared_dir="",
+        task_workspace_dir="",
+        data_dir="",
+        scratch_dir="",
+        allowed_write_roots=[str(run_dir)],
+        child_ids=[],
+    )
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        evidence_packets=[{
+            "claim": "site generated",
+            "checked_scope": "project workspace product path",
+            "artifact_refs": [artifact_ref],
+            "confidence": 0.9,
+        }],
+    )
+
+    assert normalize_artifact_ref(task, artifact_ref) == str(artifact)
+    assert missing_local_artifact_refs(task, parsed, []) == []

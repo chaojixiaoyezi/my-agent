@@ -6,6 +6,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from .workspace_roots import derived_workspace_roots_from_subagent_path
+
 _ROOT_ATTRIBUTES = (
     "output_dir",
     "reports_dir",
@@ -72,7 +74,7 @@ def _append_derived_workspace_roots(roots: list[Path]) -> None:
 def _derived_workspace_roots(roots: list[Path]) -> list[Path]:
     derived: list[Path] = []
     for root in list(roots):
-        derived.extend(_workspace_roots_from_subagents_path(root))
+        derived.extend(derived_workspace_roots_from_subagent_path(root))
     return derived
 
 
@@ -81,33 +83,3 @@ def _derived_workspace_roots(roots: list[Path]) -> list[Path]:
 def _append_existing_workspace_root(roots: list[Path], workspace: Path) -> None:
     if workspace.exists() and workspace.is_dir() and workspace not in roots:
         roots.append(workspace)
-
-
-# LLM: _workspace_roots_from_subagents_path treats data/subagents as the stable boundary, not model-written text.
-# 函数用途: 只在路径结构明确包含 data/subagents 时推导父工作区，避免把普通同名目录误当搜索根。
-def _workspace_roots_from_subagents_path(path: Path) -> list[Path]:
-    parts = path.parts
-    roots: list[Path] = []
-    for index in _subagents_marker_indexes(parts):
-        candidate = Path(*parts[:index])
-        if _usable_workspace_root(candidate, path, roots):
-            roots.append(candidate)
-    return roots
-
-
-# LLM: _subagents_marker_indexes locates stable data/subagents boundaries without interpreting model text.
-# 函数用途: 找出路径中 `data/subagents/<child>` 结构的起点；没有子目录时不推导 workspace。
-def _subagents_marker_indexes(parts: tuple[str, ...]) -> list[int]:
-    return [
-        index
-        for index in range(1, len(parts) - 2)
-        if parts[index] == "data" and parts[index + 1] == "subagents"
-    ]
-
-
-# LLM: _usable_workspace_root rejects filesystem root and empty relative roots.
-# 函数用途: 确认推导出的工作区根不是 `/`、`.`、原路径或重复项。
-def _usable_workspace_root(candidate: Path, original: Path, roots: list[Path]) -> bool:
-    if candidate == candidate.parent:
-        return False
-    return str(candidate) not in {"", "."} and candidate != original and candidate not in roots
