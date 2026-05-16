@@ -6,12 +6,16 @@ from __future__ import annotations
 测试父代理调度逻辑：dispatch_subagents、watch mode、failure introspection、闭环检测。
 """
 
+import json
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
 from agent_py_agent.agent.agent_core.dispatch_mixin import SimpleAgentDispatchMixin
+from agent_py_agent.agent.agent_core.services.notification_service import notify_completed_tasks
 from agent_py_agent.agent.subagent import DispatchReport
 from agent_py_agent.agent.subagents.models import SubAgentRunnerResult, SubAgentTask
 
@@ -196,6 +200,81 @@ class TestDispatchMixinNotifyCompleted:
 
         records = [MagicMock(step="runner", run_id="task-1", applied=False)]
         mixin._notify_completed_tasks(records)
+
+    def test_completed_task_notification_reaches_chat_channel(self, tmp_path: Path) -> None:
+        """测试完成通知能真正进入可用 chat 通道。"""
+        config = _notification_test_config(tmp_path)
+        _write_online_chat_session(config, "admin")
+        agent = _notification_test_agent(config)
+        record = SimpleNamespace(step="runner", run_id="run-1", applied=True, after_status="DONE")
+
+        notify_completed_tasks(agent, [record])
+
+        payload = _single_notification_payload(tmp_path)
+        assert payload["status"] == "delivered"
+        assert payload["delivery_channel"] == "chat"
+
+    def test_completed_task_notification_delivery_exception_is_recorded(self, tmp_path: Path) -> None:
+        """测试投递异常不会打断收尾，但会把通知标成 failed。"""
+        config = _notification_test_config(tmp_path)
+        _write_online_chat_session(config, "admin")
+        agent = _notification_test_agent(config)
+        record = SimpleNamespace(step="runner", run_id="run-1", applied=True, after_status="DONE")
+
+        with patch(
+            "agent_py_agent.agent.notification.NotificationRouter.deliver",
+            side_effect=TimeoutError("gateway timeout"),
+        ):
+            notify_completed_tasks(agent, [record])
+
+        payload = _single_notification_payload(tmp_path)
+        assert payload["status"] == "failed"
+        assert "gateway timeout" in str(payload["last_error"])
+
+
+# LLM: notification test helpers keep completion-notification fixtures realistic without reaching the real user home.
+# 函数用途: 生成通知测试配置，把通知、会话和适配器目录都限制在 pytest 临时目录里。
+def _notification_test_config(tmp_path: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        notification_enabled=True,
+        notification_store_path=str(tmp_path / "notifications"),
+        session_workspace=str(tmp_path / "sessions"),
+        adapter_workspace=str(tmp_path / "adapters"),
+        notification_channel_timeout_seconds=300,
+        user_id="admin",
+    )
+
+
+# LLM: this fixture mirrors a finished subagent task while avoiding the full manager stack.
+# 函数用途: 构造最小 agent 对象，让 notify_completed_tasks 能加载 DONE 任务并创建完成通知。
+def _notification_test_agent(config: SimpleNamespace) -> SimpleNamespace:
+    task = SimpleNamespace(
+        status="DONE",
+        root_id="root-1",
+        goal="完成任务",
+        runner_attempts=1,
+        last_active_channel="chat",
+    )
+    subagents = MagicMock()
+    subagents.load.return_value = task
+    return SimpleNamespace(config=config, subagents=subagents)
+
+
+# LLM: chat delivery depends on a fresh session heartbeat, so tests write the same file the router reads.
+# 函数用途: 写入在线 chat 会话，让通知路由器选择 chat 作为真实可投递通道。
+def _write_online_chat_session(config: SimpleNamespace, user_id: str) -> None:
+    session_dir = Path(config.session_workspace) / "session-1"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"user_id": user_id, "last_active_channel": "chat", "updated_at": time.time()}
+    (session_dir / "session.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+# LLM: notification assertions read the persisted JSON contract instead of private objects.
+# 函数用途: 读取测试生成的唯一通知文件，方便断言状态、渠道和后续兼容字段。
+def _single_notification_payload(tmp_path: Path) -> dict[str, object]:
+    paths = list((tmp_path / "notifications").glob("*.json"))
+    assert len(paths) == 1
+    return json.loads(paths[0].read_text(encoding="utf-8"))
 
 
 class TestDispatchMixinDispatchReport:

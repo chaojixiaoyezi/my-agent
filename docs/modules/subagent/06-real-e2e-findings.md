@@ -7921,3 +7921,108 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Status: protocol and focused regressions fixed. Real E2E still needs a follow-up run to verify the model actually emits `coverage_records` when it sees sibling coverage.
 - Next check:
   - Re-run Task17 or a smaller execution-corruption fixture. Expected behavior: coordinator writes `coverage_records` when one verified sibling covers a damaged leaf; if it only writes prose, the run should remain blocked with a clear next action.
+
+### Finding 140: Task17 can now complete a natural-language multi-layer run
+
+- Test scene:
+  - Log: `/Users/xiaoyezi/my-claude-code/third-party-eval/logs/my-agent-task17-20260516-172128.log`
+  - Task: B2B SaaS SEA market entry strategy, MiniMax-M2.7.
+  - User-style prompt asked the root agent to read the task materials, organize multi-layer 小傻妞 collaboration, and deliver a Chinese strategy report.
+- Good result:
+  - The run completed without manual intervention.
+  - The hierarchy reached 23 subagent runs and every run ended `DONE / VERIFIED`.
+  - Roles used in the real run: 6 `coordinator`, 15 `researcher`, and 2 `leaf_worker`.
+  - The root deliverable was written at `final_report.md` in the task root.
+  - The final report selected Vietnam as the first-entry market and included backup order, channels, pricing, localization, risks, and a six-month plan.
+  - Several subagent session compactions were produced during long-running work, and the workers still completed afterward.
+- 中文解释:
+  - 这次是真实自然语言任务，不是我们手动一个个控制下级代理。
+  - root 先派 3 个小傻妞，后面小傻妞继续派小小傻妞、小小小傻妞，最后自己收口出了根目录 `final_report.md`。
+  - 最重要的是：所有 23 个节点最终都是 `DONE / VERIFIED`，没有出现之前那种“有分支坏了但 root 还报喜”的情况。
+- Observations:
+  - The first `create_subagents` attempt mixed `items` and `tasks`; the tool rejected/recovered cleanly and the model retried with only three first-level `items`.
+  - The root read `data/company_profile.md` before delegation. In this task the prompt explicitly asked it to read materials, so this is not counted as a failure, but future delegated-code E2E should keep checking that root does not read large source bodies unnecessarily.
+  - The final answer read the final report through `read_file/read_artifact`, which is expected because final verification is allowed after children complete.
+  - The hierarchy expanded more than the root's first verbal outline, but did not grow without bound.
+- Status: passed as a real E2E positive sample.
+- Next check:
+  - Run the same Task17 prompt through OpenClaw and Hermes in isolated task directories, then compare completion speed, delegation shape, final artifact quality, and whether their roots avoid unnecessary body reads.
+  - Keep a follow-up my-agent run for corruption/coverage scenarios, because this successful run did not exercise the new `coverage_records` recovery path.
+
+### Finding 141: Same-task comparison against OpenClaw and Hermes
+
+- Test scene:
+  - Same Task17 SEA market entry task, MiniMax-M2.7.
+  - my-agent log: `/Users/xiaoyezi/my-claude-code/third-party-eval/logs/my-agent-task17-20260516-172128.log`
+  - OpenClaw log: `/Users/xiaoyezi/my-claude-code/third-party-eval/logs/openclaw-task17-20260516-174412.log`
+  - Hermes log: `/Users/xiaoyezi/my-claude-code/third-party-eval/logs/hermes-task17-20260516-174412.log`
+- Result comparison:
+  - my-agent: true multi-layer run completed; 23 subagent nodes all `DONE / VERIFIED`; root `final_report.md` was 25,637 bytes.
+  - OpenClaw: produced a root `final_report.md` of 5,782 bytes, but subagent spawning failed in the isolated setup because the gateway token was missing.
+  - Hermes: produced a root `final_report.md` of 9,442 bytes and created seven isolated session files during the run.
+- 中文解释:
+  - my-agent 这次真的派出了小傻妞、小小傻妞、小小小傻妞，而且每个节点都有机器状态和验收结果。
+  - Hermes 也很干净：它用多个 session 做任务隔离，最后报告更短，但收口快。
+  - OpenClaw 这次因为测试环境里 gateway token 没配，子代理没起来；不过它有一个值得学的点：子代理失败时，主代理会明确说明原因并兜底产出报告。
+- Lessons:
+  - Keep my-agent's machine-readable tree, task state, and acceptance records; they make real hierarchy auditable.
+  - Borrow Hermes' simplicity where possible: session/task isolation should remain easy to understand, not hidden behind too many policy layers.
+  - Borrow OpenClaw's graceful degradation principle: when delegation infrastructure is unavailable, the root should report the blocker clearly and choose the safest allowed fallback instead of hanging.
+- Status: comparative black-box run completed. No code fix was made from this comparison yet.
+- Next check:
+  - Re-run OpenClaw only after a valid isolated gateway token is available, otherwise it cannot serve as a fair multi-agent comparison.
+  - Add a my-agent targeted test for delegation-tool failure fallback so we know root reports the blocker clearly if subagent startup fails.
+
+### Finding 142: OpenClaw real environment completes after absolute task path prompt
+
+- Test scene:
+  - Log: `/Users/xiaoyezi/my-claude-code/third-party-eval/logs/openclaw-real-task17-abs-20260516-175751.log`
+  - Task dir: `/Users/xiaoyezi/my-claude-code/third-party-eval/runs/openclaw-real/task_17_abs/agent_subagent_eval_suite/task_17_hierarchical_agents_sea_market`
+  - Model: MiniMax-M2.7 through the user's real OpenClaw config.
+- Result:
+  - OpenClaw created three subagent sessions under the real `main` agent:
+    - `3131e0ea-4bb0-40d6-a0b4-8091be081d28`
+    - `6743b19f-ab5c-4bf9-98fe-7dcbd6f42f9e`
+    - `d0db10e5-326d-4dbd-bcf8-885433396815`
+  - Each subagent session used MiniMax-M2.7 with `contextTokens=200000`.
+  - The task root received `final_report.md` with 9,542 bytes.
+  - The real config file `~/.openclaw/openclaw.json` did not change; only runtime state such as `~/.openclaw/subagents/runs.json` changed.
+- 中文解释:
+  - 第一轮真实 OpenClaw 失败不是 MiniMax 问题，而是它默认只看 `~/.openclaw/workspace`，没有把 shell 的当前目录当任务目录。
+  - 第二轮把测试材料绝对路径写进 prompt 后，OpenClaw 就能读到任务、派 3 个子代理，并写出最终报告。
+  - 这说明 OpenClaw 的强项是“子代理像独立会话一样工作”，但任务目录选择更依赖它自己的 workspace/session 机制。
+- Observed gap:
+  - During closeout, OpenClaw printed a transient gateway timeout while announcing subagent completion:
+    `Subagent announce completion direct announce agent call transient failure`.
+  - The final report still existed, so this was a notification/announce issue rather than a work-product failure.
+- Lessons for my-agent:
+  - Keep supporting explicit task workspace roots; do not make users rely on implicit cwd when another runtime may ignore it.
+  - For subagent completion announce/reporting, separate "artifact is done" from "notification was delivered" so a notification timeout does not hide a completed deliverable.
+  - Keep subagents as full-context independent sessions where possible; OpenClaw's subagent sessions all used the same large context window instead of artificial child limits.
+- Status: comparative real-env OpenClaw run completed. No my-agent code change yet.
+- Next check:
+  - Add or verify my-agent behavior for completion notification failures: final artifacts should remain discoverable and root closeout should not regress just because an announce step times out.
+
+### Finding 143: Completion notification state must be observable but non-blocking
+
+- Trigger:
+  - Follow-up from Finding 142.
+  - OpenClaw real-env run finished the artifact but printed a transient subagent completion announce timeout.
+- my-agent check:
+  - Existing my-agent behavior already attempted to keep notification delivery non-blocking, but the completion notification path imported the router from the wrong relative module and called it with the wrong constructor shape.
+  - Because the whole notification block swallowed exceptions, a completed task could leave a `pending` notification instead of a delivered/failed notification record.
+- 中文解释:
+  - 任务完成和通知送达是两件事。
+  - 如果报告已经写完，就不能因为“通知用户时网关超时”把任务算失败。
+  - 但也不能完全静默，否则以后只看到“没通知到”，不知道哪里坏了。
+- Fix:
+  - Completion notification now imports `NotificationManager` / `NotificationRouter` from the real notification module.
+  - Completion notification now calls `NotificationRouter(config)` with the same constructor contract as the rest of the notification system.
+  - If notification delivery raises, the notification file is marked `failed` and records a bounded `last_error`, while task completion remains non-blocking.
+  - Old notification JSON records remain readable because unknown fields are ignored and `last_error` has a default.
+- Verification:
+  - Added regression for completed task notification reaching an online chat channel.
+  - Added regression for delivery exception becoming `failed` with `last_error` instead of breaking closeout or staying invisible.
+- Status: fixed in focused tests.
+- Next check:
+  - Keep comparing OpenClaw/Hermes notification and completion behavior in future E2E runs, especially where subagent completion succeeds but announcement delivery fails.

@@ -24,6 +24,7 @@ class Notification:
     created_at: float = 0.0
     delivered_at: float = 0.0
     delivery_channel: str = ""  # 实际投递通道
+    last_error: str = ""
 
     # LLM: Notification.__post_init__ 属于 通知系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 补齐 dataclass 的派生默认值，避免调用方处理 None。
@@ -43,7 +44,8 @@ class Notification:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Notification:
         """从字典创建通知实例。"""
-        return cls(**data)
+        fields = cls.__dataclass_fields__
+        return cls(**{name: value for name, value in data.items() if name in fields})
 
     # LLM: Notification.touch_delivered 属于 通知系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 完成 通知系统 中的 touch_delivered 步骤，并保持调用方依赖的数据形状。
@@ -58,6 +60,13 @@ class Notification:
     def touch_stored(self) -> None:
         """标记为离线存储。"""
         self.status = "stored"
+
+    # LLM: failed notification state is diagnostic-only and must not imply task failure.
+    # 函数用途: 把通知投递异常记录到通知文件，方便排查网关超时等问题。
+    def touch_failed(self, error: str) -> None:
+        """标记为投递失败，并保留可查询的错误摘要。"""
+        self.status = "failed"
+        self.last_error = error
 
 
 # LLM: NotificationDelivery 属于 通知系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
