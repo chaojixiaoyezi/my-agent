@@ -991,7 +991,8 @@ docs/
 - `agent_py_agent/cli/shared_progress.py`: 给 `status` 和 `subagents` CLI 生成共享进度摘要，展示 blocked、failure handoff refs 和 takeover packet refs 数量，不读取正文。
 - `agent_py_agent/agent/agent_core/tool_output_failsafe.py`: 大工具输出写 artifact 前写 fail-safe recovery snapshot，只记录工具名、hash、大小和恢复建议。
 - `agent_py_agent/agent/agent_core/tool_context_reducer.py`: 大工具输出进入下一轮 live prompt 前只注入 artifact 摘要和 checkpoint refs，小输出仍保留原工具结果；调度类输出会交给 orchestration summary 只保留 next_action/run refs。
-- `agent_py_agent/agent/agent_core/tool_context_orchestration_summary.py`: externalized dispatch/schedule/read_artifact 调度输出的 live-prompt 摘要层，保留状态、建议工具调用和 refs，不默认诱导父级读 artifact 正文。
+- `agent_py_agent/agent/agent_core/orchestration_dispatch_refs.py`: 汇总 dispatch 触达 run 的 artifact/evidence refs，并生成 `result_refs_by_run`；它会从 child `output.json.artifacts[]` 提取主产物路径和短摘要，父级先读 summary/refs 再按需读正文。
+- `agent_py_agent/agent/agent_core/tool_context_orchestration_summary.py`: externalized dispatch/schedule/read_artifact 调度输出的 live-prompt 摘要层，保留状态、建议工具调用、`result_refs_by_run`、artifact summaries 和 refs，不默认诱导父级读 artifact 正文。
 - `agent_py_agent/agent/agent_core/hierarchy_tools.py`: runner 内 `schedule_child_subagents` 仍负责当前节点创建下一层 child，现在响应会附带 `typed_envelope.kind=subagent_schedule`，父级恢复不必从自然语言里抄 child id。
 - `agent_py_agent/agent/agent_core/orchestration_tools.py`: 顶层 `create_subagents` 响应会附带同一 `subagent_schedule` typed envelope；顶层和多层派工走同一 refs 形状。顶层批量派工支持 Hermes 风格 `items/tasks`，不同子任务拥有独立 goal，并在响应里给出下一步 `dispatch_subagents` 的真实 run_id。
 - `agent_py_agent/agent/agent_core/orchestration_create_items.py`: 解析 `create_subagents` 的 `items/tasks` 批量入口；继承顶层默认字段，让每个 child item 独立覆盖 goal/role/name/验收/写入边界；顶层全局 plan 不自动复制到每个 child。

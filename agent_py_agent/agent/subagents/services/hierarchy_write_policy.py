@@ -51,8 +51,8 @@ def scheduled_child_extra_write_roots(request: ScheduledWriteRootRequest) -> lis
     return list(dict.fromkeys(request.requested_roots))
 
 
-# LLM: requested_child_write_roots keeps model-provided deliverable paths available for delegated coverage.
-# 函数用途: child spec 自己写出产物路径时也纳入候选根；最终会作为上层覆盖下层的可委派写入根。
+# LLM: requested_child_write_roots gives descendants product/shared roots without leaking parent internals.
+# 函数用途: 下级继承父级可委派产物根和 child spec 里的产物路径；不默认写父级 task_dir，避免污染上级工单目录。
 def requested_child_write_roots(request: ChildWriteRootRequest) -> list[str]:
     roots: list[str] = []
     for item in [

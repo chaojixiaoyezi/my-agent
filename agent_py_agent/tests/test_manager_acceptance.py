@@ -163,6 +163,11 @@ class TestSubAgentAcceptanceMixin(_AcceptSetupMixin, _AcceptRunMixin, _AcceptAss
 
         assert record.decision == "ACCEPT"
         assert record.applied is True
+        output = json.loads((tmp_path / "output.json").read_text(encoding="utf-8"))
+        assert output["status"] == "DONE"
+        assert output["verification_status"] == "VERIFIED"
+        assert output["next_action"] == "deliver_to_parent"
+        assert output["parent_acceptance"]["decision"] == "ACCEPT"
 
     def test_review_acceptance_apply_reject(self, tmp_path: Path):
         """apply=True 且验收失败时更新任务状态为 BLOCKED。"""
@@ -188,6 +193,11 @@ class TestSubAgentAcceptanceMixin(_AcceptSetupMixin, _AcceptRunMixin, _AcceptAss
 
         assert record.decision == "REJECT"
         assert record.applied is True
+        output = json.loads((tmp_path / "output.json").read_text(encoding="utf-8"))
+        assert output["status"] == "BLOCKED"
+        assert output["verification_status"] == "FAILED"
+        assert output["next_action"] == "repair_or_retry"
+        assert output["parent_acceptance"]["decision"] == "REJECT"
 
     def test_review_acceptance_not_ready_skips_apply(self, tmp_path: Path):
         """任务不在等待验收状态时不执行 apply。"""

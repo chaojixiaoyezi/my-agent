@@ -54,20 +54,38 @@ _HIERARCHY_CONTRACT_MARKERS = (
     "child_coordinator",
 )
 _USER_STYLE_DELEGATION_MARKERS = (
+    "找小小傻妞",
+    "小小傻妞帮忙",
     "小傻妞再找小小傻妞",
     "小傻妞再派小小傻妞",
     "小傻妞派小小傻妞",
+    "小傻妞如果需要",
     "子代理再派",
     "子代理派下一层",
     "下一层子代理",
     "下一级子代理",
 )
 _USER_STYLE_TOP_AGENT_MARKERS = (
+    "小傻妞-",
     "派小傻妞",
     "让小傻妞",
     "不要你自己亲自写",
     "不要自己亲自写",
     "不要你亲自写",
+    "小小傻妞",
+)
+_EXPLICIT_LOCAL_CHILD_SPAWN_MARKERS = (
+    "schedule_child_subagents",
+    "dispatch_subagents",
+    "创建并调度",
+    "创建至少",
+    "调度至少",
+    "至少2个孙代理",
+    "至少 2 个孙代理",
+    "至少两个孙代理",
+    "至少2名孙代理",
+    "至少 2 名孙代理",
+    "孙代理",
     "小小傻妞",
 )
 
@@ -115,6 +133,10 @@ def _role_from_create_intent(raw_params: dict[str, object], goal: str, agent) ->
         return _role_from_lineage_agent_name(role)
     if is_explicit_root_role(role):
         return role
+    if _json_task_items(raw_params.get("tasks")):
+        return "coordinator"
+    if _has_explicit_local_child_spawn_intent(raw_params, goal):
+        return "coordinator"
     if _has_coordinator_seed_intent(raw_params, goal, agent):
         return "coordinator"
     if _has_user_style_delegation_intent(raw_params, goal, agent):
@@ -162,6 +184,13 @@ def _has_user_style_delegation_intent(raw_params: dict[str, object], goal: str, 
     local_text = _local_create_intent_text(raw_params, goal)
     explicit_count = _positive_int(raw_params.get("count"), default=1)
     return explicit_count == 1 and _contains_any(user_text + "\n" + local_text, _USER_STYLE_TOP_AGENT_MARKERS)
+
+
+# LLM: _has_explicit_local_child_spawn_intent trusts a child's own goal over the role label.
+# 函数用途: 子任务目标明确要求创建/调度孙代理时，即便 role 写成 worker，也按 coordinator 创建。
+def _has_explicit_local_child_spawn_intent(raw_params: dict[str, object], goal: str) -> bool:
+    local_text = _local_create_intent_text(raw_params, goal)
+    return _contains_any(local_text, _EXPLICIT_LOCAL_CHILD_SPAWN_MARKERS)
 
 
 # LLM: _local_create_intent_text extracts only the current tool call, not the whole conversation.

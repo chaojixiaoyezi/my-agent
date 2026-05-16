@@ -44,6 +44,37 @@ def test_hierarchy_schedule_keeps_report_roles_with_parent_write_coverage(tmp_pa
     assert "允许写入根：" in child.goal
 
 
+# LLM: descendants use their own task room plus product/shared roots, not parent internals.
+# 函数用途: 小小傻妞写局部报告到自己的 task_dir；跨层共享走 message/summary/refs，不直接污染父级任务目录。
+def test_hierarchy_schedule_does_not_grant_parent_task_dir_to_children(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    parent = manager.create_run(
+        goal="研究市场环境并整合孩子报告",
+        thought="coordinate",
+        plan=["plan"],
+        role="coordinator",
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="研究印尼市场，并在自己的 task_dir 写 indonesia_research.md 供父级通过 refs 整合。",
+                    agent_name="小小傻妞-印尼研究",
+                    role="researcher",
+                )
+            ],
+            apply=True,
+        )
+    )
+    child = manager.load(result.created_run_ids[0])
+
+    assert parent.task_dir not in child.allowed_write_roots
+    assert "write_file" in child.allowed_tools
+
+
 # LLM: test_hierarchy_schedule_keeps_report_goal_product_root_writable_for_recovery covers model paths.
 # 函数用途: 模型把最终目录写进报告型 goal 时，系统保留路径上下文并授予覆盖权限，方便父链检查和恢复。
 def test_hierarchy_schedule_keeps_report_goal_product_root_writable_for_recovery(tmp_path):

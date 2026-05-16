@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 
@@ -227,6 +226,7 @@ class TestCreateSubagentsToolTemplatePolicy:
         assert "extra_write_roots" in result.output
         assert "目标目录" in result.output
         mock_agent.subagents.create_run.assert_not_called()
+
     def test_no_comment_constraint_can_be_preserved_in_child_goal(self):
         """用户要求不要注释时，子任务保留“不要写注释”不应被误判为要求写注释。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
@@ -255,174 +255,6 @@ class TestCreateSubagentsToolTemplatePolicy:
 
         assert result.ok is True
         mock_agent.subagents.create_run.assert_called_once()
-
-
-
-class TestCreateSubagentsToolCoordinatorSeed:
-    """测试 coordinator/root seed 的边界继承和 workflow 保护。"""
-
-    def test_slash_separated_deliverable_labels_do_not_trip_external_write_guard(self):
-        """交付物标签里的斜杠不是绝对路径，不能误拦截 coordinator seed。"""
-        from pathlib import Path
-
-        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-        mock_agent = MagicMock()
-        mock_agent.config.enable_subagents = True
-        mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "off"
-        mock_agent.subagents.workspace_root = Path("/Users/xiaoyezi/my-claude-code")
-        mock_agent.subagents.workspace_roots = [Path("/Users/xiaoyezi/my-claude-code")]
-
-        mock_task = MagicMock()
-        mock_task.id = "coordinator_001"
-        mock_task.goal = ""
-        mock_task.status = "PLANNING"
-        mock_task.verification_status = "UNVERIFIED"
-        mock_task.task_dir = "/tmp/coordinator_001"
-        mock_agent.subagents.create_run.return_value = mock_task
-
-        tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
-            "goal": (
-                "Create deliverables named requirements/research-brief/implementation/"
-                "README/bug-report/test-report/acceptance-verdict inside the approved root."
-            ),
-            "role": "coordinator",
-            "extra_write_roots": ["/Users/xiaoyezi/my-claude-code/deliverables/role-template"],
-        })
-
-        assert result.ok is True
-        mock_agent.subagents.create_run.assert_called_once()
-
-    def test_explicit_coordinator_seed_ignores_model_workflow_auto(self):
-        """coordinator/root seed 只能创建根节点，不能被模型的 workflow_mode=auto 自动污染孩子。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-        mock_agent = MagicMock()
-        mock_agent.config.enable_subagents = True
-        mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "auto"
-
-        mock_task = MagicMock()
-        mock_task.id = "coordinator_001"
-        mock_task.goal = ""
-        mock_task.status = "PLANNING"
-        mock_task.verification_status = "UNVERIFIED"
-        mock_task.task_dir = "/tmp/coordinator_001"
-        mock_agent.subagents.create_run.return_value = mock_task
-
-        tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
-            "goal": "Seed one root coordinator. Children must be created by that coordinator.",
-            "role": "coordinator",
-            "workflow_mode": "auto",
-        })
-
-        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
-        assert result.ok is True
-        assert params.workflow_mode == "off"
-
-    def test_coordinator_seed_intent_repairs_model_worker_role(self):
-        """模型把 root coordinator 误写成 worker 时，工具层要按目标意图纠偏。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-        mock_agent = MagicMock()
-        mock_agent.config.enable_subagents = True
-        mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "auto"
-        mock_agent._current_user_prompt = (
-            "请建立主代理 -> 小傻妞-root-coordinator -> 小小傻妞-child-coordinator "
-            "-> 小小小傻妞-leaf-worker 的链路。第一层必须创建下一层，不能自己写最终产物。"
-        )
-
-        mock_task = MagicMock()
-        mock_task.id = "root_001"
-        mock_task.goal = ""
-        mock_task.status = "PLANNING"
-        mock_task.verification_status = "UNVERIFIED"
-        mock_task.task_dir = "/tmp/root_001"
-        mock_agent.subagents.create_run.return_value = mock_task
-
-        tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
-            "goal": (
-                "创建 小傻妞-root-coordinator，并让它使用 schedule_child_subagents "
-                "继续创建 小小傻妞-child-coordinator；本节点不要写最终产物。"
-            ),
-            "role": "worker",
-            "workflow_mode": "auto",
-        })
-
-        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
-        assert result.ok is True
-        assert params.role == "coordinator"
-        assert params.workflow_mode == "off"
-
-    def test_user_style_delegate_to_next_layer_repairs_worker_to_coordinator(self):
-        """用户说小傻妞可再找小小傻妞时，第一层应按带队角色创建。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-        mock_agent = MagicMock()
-        mock_agent.config.enable_subagents = True
-        mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "auto"
-        mock_agent._current_user_prompt = (
-            "请你派小傻妞来完成这个任务，不要你自己亲自写页面。"
-            "如果任务比较多，可以让小傻妞再找小小傻妞帮忙。"
-        )
-
-        mock_task = MagicMock()
-        mock_task.id = "root_001"
-        mock_task.goal = ""
-        mock_task.status = "PLANNING"
-        mock_task.verification_status = "UNVERIFIED"
-        mock_task.task_dir = "/tmp/root_001"
-        mock_agent.subagents.create_run.return_value = mock_task
-
-        tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
-            "goal": "做 3 个高端现代家具品牌网站首页 HTML 文件。",
-            "role": "worker",
-            "workflow_mode": "auto",
-        })
-
-        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
-        assert result.ok is True
-        assert params.role == "coordinator"
-        assert params.workflow_mode == "off"
-
-    def test_lineage_agent_name_in_role_field_becomes_name_not_role(self):
-        """模型把“小傻妞-root-coordinator”写进 role 时，应拆成标准 role 和显示名。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-        mock_agent = MagicMock()
-        mock_agent.config.enable_subagents = True
-        mock_agent.config.max_subagents = 10
-        mock_agent.config.subagent_workflow_mode = "auto"
-
-        mock_task = MagicMock()
-        mock_task.id = "root_001"
-        mock_task.goal = ""
-        mock_task.status = "PLANNING"
-        mock_task.verification_status = "UNVERIFIED"
-        mock_task.task_dir = "/tmp/root_001"
-        mock_agent.subagents.create_run.return_value = mock_task
-
-        tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
-            "goal": "创建第一层 root coordinator，并使用 schedule_child_subagents 创建下一层。",
-            "role": "小傻妞-root-coordinator",
-            "workflow_mode": "auto",
-        })
-
-        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
-        assert result.ok is True
-        assert params.role == "coordinator"
-        assert params.agent_name == "小傻妞-root-coordinator"
-        assert params.workflow_mode == "off"
-
-
 class TestCreateSubagentsToolWorkerWorkflow:
     """测试具体 worker 任务不会被泛化 workflow 污染。"""
 

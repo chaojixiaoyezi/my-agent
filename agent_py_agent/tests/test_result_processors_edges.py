@@ -183,6 +183,47 @@ def test_process_structured_output_normalizes_evidence_packet_artifact_refs(mock
     assert mock_task.artifact_refs == [str(artifact)]
 
 
+# LLM: Real hierarchy runs may write deliverables beside run metadata, not only inside artifacts/.
+# 函数用途: 覆盖子代理把报告写在 agent_run_workspace 根目录、evidence packet 只报短路径时，验收不再误判 missing_artifact_refs。
+def test_process_structured_output_resolves_refs_from_agent_run_workspace(mock_task, tmp_path):
+    task_dir = tmp_path / "legacy-task"
+    run_workspace = tmp_path / "tasks" / "parent" / "agents" / "child"
+    run_workspace.mkdir(parents=True)
+    artifact = run_workspace / "thailand_analysis.md"
+    artifact.write_text("analysis", encoding="utf-8")
+    mock_task.task_dir = str(task_dir)
+    mock_task.output_dir = str(task_dir / "output")
+    mock_task.reports_dir = str(task_dir / "reports")
+    mock_task.agent_run_workspace_dir = str(run_workspace)
+    mock_task.task_workspace_artifacts_dir = str(tmp_path / "tasks" / "parent" / "artifacts")
+    mock_task.agent_run_artifacts_dir = str(run_workspace / "artifacts")
+    mock_task.task_workspace_shared_dir = str(tmp_path / "tasks" / "parent" / "shared")
+    mock_task.task_workspace_dir = str(tmp_path / "tasks" / "parent")
+    mock_task.data_dir = ""
+    mock_task.scratch_dir = ""
+    mock_task.allowed_write_roots = []
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="AWAITING_ACCEPTANCE",
+        artifacts=[{"path": str(artifact), "kind": "report"}],
+        evidence_packets=[{
+            "claim": "泰国分析报告已完成",
+            "checked_scope": "thailand_analysis.md",
+            "artifact_refs": ["thailand_analysis.md"],
+            "confidence": 0.95,
+        }],
+    )
+
+    result = _process_structured_output(mock_task, parsed, 123456.0, None)
+
+    assert parsed.status == "AWAITING_ACCEPTANCE"
+    assert parsed.failure_type == ""
+    assert result["evidence_packets"][0]["artifact_refs"] == [str(artifact)]
+    assert mock_task.artifact_refs == [str(artifact)]
+
+
 def _lessons_payload_context(mock_task, parsed: SubAgentParsedOutput) -> OutputPayloadContext:
     lessons = ["经验1", "经验2"]
     next_actions = ["行动1", "行动2", "行动3"]

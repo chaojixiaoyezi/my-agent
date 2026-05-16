@@ -67,14 +67,17 @@ def _resolve_relative_artifact(task: SubAgentTask, path: Path) -> Path | None:
     return _resolve_by_suffix(path, roots)
 
 
-# LLM: _artifact_roots orders concrete task output roots before broad task/workspace roots.
-# 函数用途: 返回当前 run 能合理产生产物的目录；allowed_write_roots 中的文件路径用其父目录参与解析。
+# LLM: _artifact_roots orders concrete run/workspace/shared roots before broad fallback roots.
+# 函数用途: 返回当前 run 能合理产生产物的目录，包含 runtime workspace/shared/artifacts；allowed_write_roots 文件路径用父目录参与解析。
 def _artifact_roots(task: SubAgentTask) -> list[Path]:
     raw_roots = [
         getattr(task, "output_dir", ""),
         getattr(task, "reports_dir", ""),
+        getattr(task, "agent_run_workspace_dir", ""),
         getattr(task, "task_workspace_artifacts_dir", ""),
         getattr(task, "agent_run_artifacts_dir", ""),
+        getattr(task, "task_workspace_shared_dir", ""),
+        getattr(task, "task_workspace_dir", ""),
         getattr(task, "task_dir", ""),
         getattr(task, "data_dir", ""),
         getattr(task, "scratch_dir", ""),

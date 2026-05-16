@@ -79,15 +79,18 @@ def _local_ref_missing(task: Any, ref: object) -> bool:
     return True
 
 
-# LLM: _candidate_roots mirrors artifact resolution roots but stays local to this checker.
-# 函数用途: 给相对产物路径提供 task_dir/output/reports 等有限候选根，避免误扫用户整机。
+# LLM: _candidate_roots mirrors artifact resolution roots including runtime workspace/shared roots.
+# 函数用途: 给相对产物路径提供 output/reports/run workspace/shared 等有限候选根，避免误扫用户整机。
 def _candidate_roots(task: Any) -> list[Path]:
     roots: list[Path] = []
     for value in (
         getattr(task, "output_dir", ""),
         getattr(task, "reports_dir", ""),
+        getattr(task, "agent_run_workspace_dir", ""),
         getattr(task, "task_workspace_artifacts_dir", ""),
         getattr(task, "agent_run_artifacts_dir", ""),
+        getattr(task, "task_workspace_shared_dir", ""),
+        getattr(task, "task_workspace_dir", ""),
         getattr(task, "task_dir", ""),
         getattr(task, "data_dir", ""),
         getattr(task, "scratch_dir", ""),

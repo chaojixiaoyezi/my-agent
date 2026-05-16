@@ -9,6 +9,7 @@ from __future__ import annotations
 验收一条任务时既要读 runner 输出又可能写回状态，拆出后 mixin 保持薄门面。
 """
 
+import json
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -271,6 +272,35 @@ def _apply_acceptance_decision(
     task.updated_at = request.now
     task.heartbeat_at = request.now
     manager.save(task)
+    _sync_output_json_acceptance_state(task, request=request, message=message)
+
+
+# LLM: _sync_output_json_acceptance_state keeps the model-facing runner closeout aligned with canonical task state.
+# 函数用途: 父级常会读取 output.json 汇总子代理结果；验收 apply 后把状态镜像同步进去，避免 DONE/VERIFIED 的任务仍显示等待验收。
+def _sync_output_json_acceptance_state(
+    task: SubAgentTask,
+    *,
+    request: AcceptanceDecisionRequest,
+    message: str,
+) -> None:
+    path = Path(str(getattr(task, "output_json", "") or ""))
+    if not path.exists():
+        return
+    payload = _read_json_object(path)
+    if not payload:
+        return
+    payload["status"] = task.status
+    payload["verification_status"] = task.verification_status
+    payload["next_action"] = "deliver_to_parent" if request.ok else "repair_or_retry"
+    payload["parent_acceptance"] = {
+        "decision": "ACCEPT" if request.ok else "REJECT",
+        "ok": request.ok,
+        "message": message,
+        "applied": True,
+        "accepted_at": request.now if request.ok else None,
+        "reviewed_at": request.now,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
 # LLM: _worker_claims 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

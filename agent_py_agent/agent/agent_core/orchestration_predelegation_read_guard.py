@@ -80,7 +80,7 @@ def _allowed_predelegation_read(agent: object, payload: dict[str, Any]) -> bool:
 # LLM: _payload_path resolves model read_file params without requiring the target to exist.
 # 函数用途: 支持绝对和相对路径；解析失败时返回 None，让调用方保守阻断正文读取。
 def _payload_path(agent: object, payload: dict[str, Any]) -> Path | None:
-    raw = str(payload.get("path") or payload.get("file") or "").strip()
+    raw = str(_payload_value(payload, ("path", "file")) or "").strip()
     if not raw:
         return None
     path = Path(raw).expanduser()
@@ -104,7 +104,7 @@ def _looks_like_source_body(path: Path) -> bool:
 # LLM: _blocked_message gives the model a direct recovery path instead of asking the user.
 # 函数用途: 告诉 root 改用 create_subagents 的 required_read_paths/context_manifest 下发正文路径。
 def _blocked_message(tool: str, payload: dict[str, Any]) -> str:
-    target = str(payload.get("path") or payload.get("artifact_ref") or payload.get("ref") or "")
+    target = str(_payload_value(payload, ("path", "artifact_ref", "ref")) or "")
     return (
         "predelegation_source_read_blocked=true "
         f"tool={tool} target={target}。"
@@ -113,3 +113,29 @@ def _blocked_message(tool: str, payload: dict[str, Any]) -> str:
         "请调用 create_subagents，用 items/tasks 为每个小傻妞写独立 goal，"
         "并把这些资料路径放进 required_read_paths、context_manifest 或 context_packs。"
     )
+
+
+# LLM: _payload_value keeps the guard independent from parser normalization.
+# 函数用途: 同时读取扁平参数和 filesystem/orchestration 等 bundle 里的参数，避免真实模型换形态后提示丢路径。
+def _payload_value(payload: dict[str, Any], keys: tuple[str, ...]) -> object:
+    direct = _first_payload_value(payload, keys)
+    if direct:
+        return direct
+    for wrapper in ("filesystem", "orchestration", "request"):
+        value = payload.get(wrapper)
+        if not isinstance(value, dict):
+            continue
+        wrapped = _first_payload_value(value, keys)
+        if wrapped:
+            return wrapped
+    return ""
+
+
+# LLM: _first_payload_value flattens alias lookup so guard logic stays predictable.
+# 函数用途: 从当前 payload 层按 key 顺序取第一个非空值；bundle 外层和内层都复用同一规则。
+def _first_payload_value(payload: dict[str, Any], keys: tuple[str, ...]) -> object:
+    for key in keys:
+        value = payload.get(key)
+        if value:
+            return value
+    return ""
