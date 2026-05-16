@@ -1,6 +1,7 @@
 """Split orchestration tool execution tests for code-size guard clarity."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -200,8 +201,8 @@ class TestCreateSubagentsToolTemplatePolicy:
         assert "replace_in_file" in params.allowed_tools
         assert "read_artifact" in params.allowed_tools
 
-    def test_vague_deliverable_worker_requires_extra_write_root(self):
-        """写真实产物但只说目标目录时必须拒绝，避免 worker 写进自己的任务目录。"""
+    def test_vague_deliverable_worker_requires_extra_write_root_without_workspace(self):
+        """没有真实 workspace_root 时仍拒绝模糊目标目录，避免 worker 写进自己的任务目录。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -255,6 +256,71 @@ class TestCreateSubagentsToolTemplatePolicy:
 
         assert result.ok is True
         mock_agent.subagents.create_run.assert_called_once()
+
+
+class TestCreateSubagentsToolWorkspaceDefaults:
+    """测试任务工作区默认写入根和保守调度提示。"""
+
+    def test_create_next_action_starts_conservatively(self):
+        """创建多个任务后的默认下一步先推进 1 个，避免流水线下游抢跑。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "off"
+        tasks = []
+        for index in range(2):
+            task = MagicMock()
+            task.id = f"run_{index}"
+            task.goal = ""
+            task.status = "PLANNING"
+            task.verification_status = "UNVERIFIED"
+            task.task_dir = f"/tmp/run_{index}"
+            tasks.append(task)
+        mock_agent.subagents.create_run.side_effect = tasks
+
+        result = CreateSubagentsTool(mock_agent).execute({
+            "items": [
+                {"goal": "生成 data/weekly_data.json", "role": "worker"},
+                {"goal": "读取 data/weekly_data.json，生成 final_report.md", "role": "worker"},
+            ]
+        })
+
+        payload = json.loads(result.output)
+        assert result.ok is True
+        assert payload["next_action"]["params"]["max_runners"] == 1
+
+    def test_vague_deliverable_worker_defaults_to_workspace_root(self):
+        """已有真实任务工作区时，目标目录默认指向 workspace_root，不要求用户补底层参数。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent.subagents.workspace_root = Path("/tmp/project")
+        mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
+        mock_agent.subagents.workspace = Path("/tmp/project/.my-agent/subagents")
+        mock_task = MagicMock()
+        mock_task.id = "writer_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/writer_001"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": "在目标目录生成一个完整文件 index.html，并报告路径。",
+            "role": "writer",
+        })
+
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert result.ok is True
+        assert params.extra_write_roots == [str(Path("/tmp/project").resolve(strict=False))]
+
+
 class TestCreateSubagentsToolWorkerWorkflow:
     """测试具体 worker 任务不会被泛化 workflow 污染。"""
 

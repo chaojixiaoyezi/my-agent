@@ -86,7 +86,7 @@ class CreateSubagentsTool(BaseTool):
             return count
 
         allowed_tools = subagent_allowed_tools(params)
-        missing_write_root = explicit_root_missing_write_root_error(params, goal)
+        missing_write_root = explicit_root_missing_write_root_error(self.agent, params, goal)
         if missing_write_root:
             return ToolExecutionResult("create_subagents", False, missing_write_root)
         target_error = external_write_target_error(
@@ -158,7 +158,7 @@ class CreateSubagentsTool(BaseTool):
         goal: str,
         allowed_tools: list[str] | None,
     ) -> str:
-        missing_write_root = explicit_root_missing_write_root_error(params, goal)
+        missing_write_root = explicit_root_missing_write_root_error(self.agent, params, goal)
         if missing_write_root:
             return missing_write_root
         target_error = external_write_target_error(
@@ -232,17 +232,20 @@ def _payload_allowed_tools(values: list[list[str] | None]) -> list[str] | str | 
 
 
 # LLM: _dispatch_next_action makes create-vs-run explicit for the parent model.
-# 函数用途: 告诉模型 create_subagents 只创建任务记录；真正执行要随后 dispatch 这些 run_id。
+# 函数用途: 告诉模型 create_subagents 只创建任务记录；下一步默认先推进 1 个，流水线依赖由 dispatch 再判断。
 def _dispatch_next_action(tasks) -> dict[str, object]:
     run_ids = [task.id for task in tasks]
     return {
         "tool": "dispatch_subagents",
-        "reason": "create_subagents 只创建任务记录；要让子代理真正开始工作，请调度这些 run_id。",
+        "reason": (
+            "create_subagents 只创建任务记录；要让子代理真正开始工作，请调度这些 run_id。"
+            "默认 max_runners=1，确认任务彼此独立时再提高并发。"
+        ),
         "params": {
             "apply": True,
             "execute_runners": True,
             "run_ids": run_ids,
-            "max_runners": len(run_ids),
+            "max_runners": 1,
         },
     }
 

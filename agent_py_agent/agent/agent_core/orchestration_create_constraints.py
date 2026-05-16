@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from ..subagents.services.base import _extract_write_dirs
 from .orchestration_negation_markers import contains_unnegated_marker
@@ -28,7 +29,7 @@ _VAGUE_PRODUCT_TARGET_WORDS = (
     "output directory",
 )
 _CONCRETE_FILE_TARGET_RE = re.compile(
-    r"[\w.-]+\.(?:html|css|js|mjs|cjs|ts|tsx|jsx|py|md|json|yaml|yml|txt|csv|vue|svelte)\b",
+    r"[\w.-]+\.(?:html|css|js|mjs|cjs|ts|tsx|jsx|py|md|json|yaml|yml|txt|csv|xlsx|xls|pdf|vue|svelte)\b",
     re.IGNORECASE,
 )
 _NON_WORKER_ROLES = {
@@ -78,13 +79,23 @@ def merged_extra_write_roots(params: dict[str, object], goal: str) -> list[str]:
     return roots
 
 
+# LLM: resolved_extra_write_roots gives vague "目标目录" tasks the current task workspace as a concrete root.
+# 函数用途: 合并显式写入根、goal 中路径和安全的 workspace_root 默认值，避免用户必须填写底层 extra_write_roots。
+def resolved_extra_write_roots(agent: object, params: dict[str, object], goal: str) -> list[str]:
+    explicit = merged_extra_write_roots(params, goal)
+    if explicit:
+        return explicit
+    default_root = _default_workspace_product_root(agent, params, goal)
+    return [default_root] if default_root else []
+
+
 # LLM: explicit_root_missing_write_root_error prevents product paths from drifting into agent workspaces.
 # 函数用途: 显式 root/coordinator 要交付文件但没带产物写入根时拒绝创建，要求模型带 extra_write_roots 重试。
-def explicit_root_missing_write_root_error(params: dict[str, object], goal: str) -> str:
+def explicit_root_missing_write_root_error(agent: object, params: dict[str, object], goal: str) -> str:
     role = str(params.get("role") or "worker").strip()
-    if merged_extra_write_roots(params, goal):
+    if resolved_extra_write_roots(agent, params, goal):
         return ""
-    if not _goal_needs_product_write_root(goal):
+    if not _goal_has_product_write_intent(goal):
         return ""
     if not is_explicit_root_role(role) and not _goal_has_vague_product_target(goal):
         return ""
@@ -140,9 +151,21 @@ def delegation_constraint_conflict_error(agent, goal: str) -> str:
 # 函数用途: 判断目标是否像文件/网站交付任务；只用于缺写入根时的保守拦截。
 def _goal_needs_product_write_root(goal: str) -> bool:
     lowered = goal.lower()
-    if not any(word in lowered for word in ("交付", "deliver", "build", "网站", "demo", "文件")):
+    if not any(word in lowered for word in ("交付", "deliver", "build", "网站", "demo", "文件", "报告", "xlsx", "pdf")):
         return False
-    return any(suffix in lowered for suffix in (".html", ".css", ".js", ".py", ".md", ".json", ".txt"))
+    return bool(_CONCRETE_FILE_TARGET_RE.search(lowered))
+
+
+# LLM: _goal_has_product_write_intent is broader than missing-root rejection and still local to product tasks.
+# 函数用途: 判断目标是否像真实交付物写入任务，用于决定是否可采用 workspace_root 默认写入根。
+def _goal_has_product_write_intent(goal: str) -> bool:
+    lowered = str(goal or "").lower()
+    write_words = ("写", "创建", "生成", "保存", "输出", "产出", "write", "create", "generate", "save", "output")
+    return _goal_needs_product_write_root(goal) or (
+        _goal_has_vague_product_target(goal)
+        and any(word in lowered for word in write_words)
+        and bool(_CONCRETE_FILE_TARGET_RE.search(lowered))
+    )
 
 
 # LLM: _goal_has_vague_product_target blocks path drift before a worker silently writes into task_dir.
@@ -150,6 +173,45 @@ def _goal_needs_product_write_root(goal: str) -> bool:
 def _goal_has_vague_product_target(goal: str) -> bool:
     lowered = goal.lower()
     return any(word in lowered for word in _VAGUE_PRODUCT_TARGET_WORDS)
+
+
+# LLM: _default_workspace_product_root refuses mocks/internal subagent dirs and only returns a real workspace path.
+# 函数用途: 从 agent.subagents.workspace_root 取当前任务工作区；如果只是测试 MagicMock 或内部 subagents 目录则不自动授权。
+def _default_workspace_product_root(agent: object, params: dict[str, object], goal: str) -> str:
+    if not _goal_has_product_write_intent(goal):
+        return ""
+    raw = getattr(getattr(agent, "subagents", None), "workspace_root", None)
+    if not isinstance(raw, str | Path):
+        return ""
+    root = Path(raw).expanduser().resolve(strict=False)
+    workspace = getattr(getattr(agent, "subagents", None), "workspace", None)
+    if isinstance(workspace, str | Path) and root == Path(workspace).expanduser().resolve(strict=False):
+        return ""
+    roots = _agent_workspace_roots(agent, root)
+    return str(root) if any(_is_relative_to(root, item) for item in roots) else ""
+
+
+# LLM: _agent_workspace_roots mirrors write-guard root normalization without importing that preflight module.
+# 函数用途: 读取 agent.subagents.workspace_roots；缺省时只允许 workspace_root 自身。
+def _agent_workspace_roots(agent: object, root: Path) -> list[Path]:
+    raw_roots = getattr(getattr(agent, "subagents", None), "workspace_roots", None)
+    if not isinstance(raw_roots, list):
+        return [root]
+    roots: list[Path] = []
+    for raw in [root, *raw_roots]:
+        if isinstance(raw, str | Path):
+            roots.append(Path(raw).expanduser().resolve(strict=False))
+    return roots or [root]
+
+
+# LLM: _is_relative_to keeps pathlib compatibility in one tiny helper.
+# 函数用途: 判断 path 是否位于 root 下，用于 workspace_root 默认授权校验。
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 # LLM: _user_requires_working_buttons detects the natural-language no-dead-buttons contract.

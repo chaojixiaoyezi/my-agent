@@ -38,6 +38,7 @@ from .orchestration_run_scope import (
     remember_orchestration_run_ids,
     remembered_orchestration_run_ids,
 )
+from .orchestration_runner_instruction import resolved_runner_instruction
 from .orchestration_tool_specs import build_dispatch_subagents_spec
 from .orchestration_workflow_mode import tool_workflow_mode
 from .parameters import _bool_param, _non_negative_int, _string_list
@@ -110,7 +111,10 @@ class DispatchSubagentsTool(BaseTool):
             limit=_non_negative_int(params.get("limit"), default=20),
             reviewer=str(params.get("reviewer") or "chat-tool").strip(),
             note=str(params.get("note") or "triggered by dispatch_subagents tool").strip(),
-            runner_instruction=str(params.get("runner_instruction") or params.get("instruction") or "").strip(),
+            runner_instruction=resolved_runner_instruction(
+                self.agent,
+                params.get("runner_instruction") or params.get("instruction"),
+            ),
             max_cards=_non_negative_int(params.get("max_cards"), default=0),
             probe=not _bool_param(params.get("no_probe"), default=False),
             take_over_by=dispatch_take_over_by_default(self.agent, params),

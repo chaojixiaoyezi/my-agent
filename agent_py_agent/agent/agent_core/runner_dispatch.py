@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from ..subagent import SubAgentRunnerResult, SubAgentTask
 from ..subagents.services.dispatch_params import DispatchRecordParams
 from .runner_child_summary import runner_child_summary_fields
+from .runner_input_dependencies import input_dependency_ready_candidates
 from .runner_patch_review import _dispatch_patch_review_run_ids, _task_has_runner_patches
 from .runner_worker import RunSubagentWorkerParams, _run_subagent_worker
 from .runner_workflow_dependencies import workflow_dependency_ready_candidates
@@ -254,6 +255,7 @@ def _dispatch_runner_candidates(
         if not _is_dispatch_runner_candidate(task, runner_max_attempts=runner_max_attempts):
             continue
         candidates.append(task)
+    candidates = input_dependency_ready_candidates(candidates)
     candidates = workflow_dependency_ready_candidates(candidates, tasks)
     candidates = _ready_phase_candidates(candidates)
     ordered = sorted(enumerate(candidates), key=lambda item: (_runner_role_phase_priority(item[1]), item[0]))
