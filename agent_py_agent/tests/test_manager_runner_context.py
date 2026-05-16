@@ -39,6 +39,9 @@ def mock_manager(tmp_path):
         def save(self, task: SubAgentTask) -> None:
             self._tasks[task.id] = task
 
+        def list_runs(self):
+            return list(self._tasks.values())
+
         def _build_work_order_paths(self, run_id: str, task_dir=None):
             return {}
 
@@ -132,6 +135,31 @@ def test_build_execution_context_basic(mock_manager, tmp_path):
     assert context.agent_name == "data-agent"
     assert context.role == "analyst"
     assert context.generated_at > 0
+
+
+def test_build_execution_context_adds_completed_dependency_artifact_refs(mock_manager, tmp_path):
+    """测试下游执行上下文会看到已完成上游的真实 artifact ref。"""
+    upstream = make_task(tmp_path, "collect")
+    upstream.status = "DONE"
+    upstream.verification_status = "VERIFIED"
+    upstream.workflow_parent_run_id = "batch-1"
+    upstream.workflow_phase_id = "collect"
+    artifact = tmp_path / "collect" / "data_collection.md"
+    artifact.parent.mkdir()
+    artifact.write_text("data", encoding="utf-8")
+    upstream.artifact_refs = [str(artifact)]
+
+    downstream = make_task(tmp_path, "content")
+    downstream.workflow_parent_run_id = "batch-1"
+    downstream.workflow_phase_id = "content"
+    downstream.workflow_depends_on = ["collect"]
+    downstream.context_manifest = ContextManifest(required_read_paths=["data_collection.md"])
+    mock_manager._tasks[upstream.id] = upstream
+    mock_manager._tasks[downstream.id] = downstream
+
+    context = mock_manager.build_execution_context(downstream.id)
+
+    assert str(artifact) in context.context_manifest.required_read_paths
 
 
 def test_build_execution_context_includes_granted_skills_and_tools(mock_manager, tmp_path):

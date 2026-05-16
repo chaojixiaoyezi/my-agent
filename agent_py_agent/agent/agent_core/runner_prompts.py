@@ -16,6 +16,10 @@ from ..subagents.context_bundle import context_gate_prompt_lines
 from ..subagents.role_templates import role_template_detail_text, role_template_index_text
 from . import subagent_compact_continuation
 from .runner_prompt_context_summary import runner_context_summary_payload
+from .runner_prompt_contract_lines import (
+    input_dependency_contract_lines,
+    required_product_contract_lines,
+)
 from .runner_prompt_coordinator_policy import coordinator_execution_policy_lines
 
 _SUBAGENT_RESULT_TEMPLATE = (
@@ -147,6 +151,8 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "如果出现工具调用解析失败，再降到不超过 800 字符，并且每轮只输出 1 个写入工具调用，"
         "闭合 [/TOOL_CALL] 后再继续下一块。",
         "- write_file 和 append_file 会在授权 allowed_write_roots 内自动创建父目录；不要因为目标目录尚未创建就标记 BLOCKED。",
+        *input_dependency_contract_lines(context),
+        *required_product_contract_lines(context),
         "- 如果最终结果需要列很多 artifacts 或证据，优先用 write_file 写 execution_context.output_json 的短 JSON；"
         "系统会自动把它包成 SUBAGENT_RESULT 收口，避免对话里的长结果块被截断。",
         "- output.json 是内部收口文件名；只能写 execution_context.output_json，"

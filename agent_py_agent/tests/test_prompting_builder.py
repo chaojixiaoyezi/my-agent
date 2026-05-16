@@ -156,7 +156,27 @@ class TestBuildBasic:
         builder = PromptBuilder(config, tmp_path)
         memories = [MemoryRecord(role="user", content="test memory")]
         result = builder.build("continue", memories)
+        assert "Related Memory 是历史参考" in result
         assert "[dialogue] user: test memory" in result
+
+    def test_related_memory_is_marked_non_authoritative(self, tmp_path):
+        config = AgentConfig()
+        builder = PromptBuilder(config, tmp_path)
+        memories = [
+            MemoryRecord(
+                role="assistant",
+                content="之前的任务是继续完成东南亚市场进入策略。",
+                kind="daily",
+            ),
+        ]
+
+        result = builder.build("请派小傻妞整理 GitHub 热门项目流水线。", memories)
+
+        assert "之前的任务是继续完成东南亚市场进入策略" in result
+        assert "请派小傻妞整理 GitHub 热门项目流水线" in result
+        assert result.index("Related Memory 是历史参考") < result.index("[daily] assistant")
+        assert result.index("# Related Memory") < result.index("# User Task")
+        assert "如果它和 # User Task、当前工作区文件或最新工具结果冲突，必须以后者为准" in result
 
     def test_build_multiple_memories(self, tmp_path):
         config = AgentConfig()

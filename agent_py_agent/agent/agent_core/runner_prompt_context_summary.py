@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from ..subagent import SubAgentExecutionContext
 
 
@@ -27,13 +29,41 @@ def runner_context_summary_payload(context: SubAgentExecutionContext) -> dict[st
         "write_boundary": dict(context.write_boundary or {}),
         "task_envelope": _task_envelope_prompt_payload(bundle.get("task_envelope")),
         "tool_preflight": _tool_preflight_prompt_payload(bundle.get("tool_preflight")),
+        "input_contract": _input_contract_prompt_payload(context),
         "output_contract": _dict_prompt_subset(
             bundle.get("output_contract"),
-            ["required_files", "output_json_ref", "file_contract", "write_contract"],
+            [
+                "product_write_roots",
+                "required_files",
+                "required_file_refs",
+                "final_report_ref",
+                "agent_run_final_report_ref",
+                "output_json_ref",
+                "file_contract",
+                "write_contract",
+            ],
         ),
         "pending_requests": list(context.pending_requests or [])[:3],
         "open_gaps": list(context.open_gaps or [])[:3],
         "instructions": list(context.instructions or [])[:8],
+    }
+
+
+# LLM: _input_contract_prompt_payload lifts concrete dependency artifacts above natural-language task text.
+# 函数用途: 把已存在的上游输入路径单独放进瘦身 prompt，避免 runner 先读不存在的口语路径就误判 BLOCKED。
+def _input_contract_prompt_payload(context: SubAgentExecutionContext) -> dict[str, object]:
+    refs = _string_list(getattr(context.context_manifest, "required_read_paths", []))
+    if not refs:
+        return {}
+    resolved, unresolved = _resolve_read_paths(refs, _read_roots(context))
+    return {
+        "required_read_paths": refs[:12],
+        "resolved_read_paths": resolved[:12],
+        "unresolved_read_paths": unresolved[:12],
+        "read_policy": (
+            "先读取 resolved_read_paths；某个自然语言路径不存在时，继续尝试同名或已解析候选，"
+            "只有所有相关候选都失败才 BLOCKED。"
+        ),
     }
 
 
@@ -124,3 +154,71 @@ def _dict_prompt_subset(value: object, keys: list[str]) -> dict[str, object]:
     if not isinstance(value, dict):
         return {}
     return {key: value[key] for key in keys if key in value}
+
+
+# LLM: _read_roots returns likely workspace roots for resolving relative required_read_paths.
+# 函数用途: 读取 product_write_roots/output_contract root，再兜底 task_dir，让 summary 能给出真实可读绝对路径。
+def _read_roots(context: SubAgentExecutionContext) -> list[Path]:
+    roots: list[str] = []
+    write_boundary = context.write_boundary if isinstance(context.write_boundary, dict) else {}
+    roots.extend(_string_list(write_boundary.get("product_write_roots")))
+    bundle = context.context_bundle if isinstance(context.context_bundle, dict) else {}
+    contract = bundle.get("output_contract") if isinstance(bundle.get("output_contract"), dict) else {}
+    roots.extend(_string_list(contract.get("product_write_roots")))
+    roots.append(context.task_dir)
+    return _unique_paths([Path(item).expanduser().resolve(strict=False) for item in roots if str(item or "").strip()])
+
+
+# LLM: _resolve_read_paths keeps prompt-level path help deterministic and filesystem-backed.
+# 函数用途: 将 required_read_paths 分成已存在的真实路径与未解析路径；相对路径按候选 root 尝试解析。
+def _resolve_read_paths(refs: list[str], roots: list[Path]) -> tuple[list[str], list[str]]:
+    resolved: list[str] = []
+    unresolved: list[str] = []
+    for ref in refs:
+        path = Path(ref).expanduser()
+        candidates = [path] if path.is_absolute() else [root / path for root in roots]
+        existing = [str(item.resolve(strict=False)) for item in candidates if item.exists()]
+        if existing:
+            resolved.extend(existing)
+        else:
+            unresolved.append(ref)
+    return _unique_strings(resolved), _unique_strings(unresolved)
+
+
+# LLM: _string_list normalizes shallow config or manifest lists without importing subagent parsing helpers.
+# 函数用途: 将单个字符串或列表安全转成字符串列表，供 prompt summary 保持轻依赖。
+def _string_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, list | tuple | set):
+        return [str(item).strip() for item in value if str(item or "").strip()]
+    return []
+
+
+# LLM: _unique_strings preserves first-seen order in model-facing path lists.
+# 函数用途: 字符串去重，避免 prompt 里重复展示同一个候选路径。
+def _unique_strings(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+# LLM: _unique_paths preserves root priority while removing duplicate filesystem candidates.
+# 函数用途: Path 去重，保持 product root 优先于 task_dir。
+def _unique_paths(values: list[Path]) -> list[Path]:
+    result: list[Path] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value)
+        if text in seen:
+            continue
+        seen.add(text)
+        result.append(value)
+    return result

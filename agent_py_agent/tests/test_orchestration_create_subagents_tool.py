@@ -6,6 +6,34 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 
+# LLM: _mock_create_items_agent keeps items-mode tests focused on create params, not fixture setup.
+# 函数用途: 构造支持 create_subagents items[] 测试的最小 agent mock 和固定数量任务。
+def _mock_create_items_agent(task_count: int = 3):
+    mock_agent = MagicMock()
+    mock_agent.config.enable_subagents = True
+    mock_agent.config.max_subagents = 10
+    mock_agent.config.subagent_workflow_mode = "off"
+    mock_agent.subagents.workspace_root = Path("/tmp/project")
+    mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
+    mock_agent.subagents.workspace = Path("/tmp/project/.my-agent/subagents")
+    tasks = [_mock_created_task(index) for index in range(task_count)]
+    mock_agent._created_tasks = tasks
+    mock_agent.subagents.create_run.side_effect = tasks
+    return mock_agent
+
+
+# LLM: _mock_created_task gives create_subagents payload rendering stable task fields.
+# 函数用途: 为 create_run side_effect 提供带 id/status/task_dir 的任务替身。
+def _mock_created_task(index: int):
+    task = MagicMock()
+    task.id = f"run_{index}"
+    task.goal = ""
+    task.status = "PLANNING"
+    task.verification_status = "UNVERIFIED"
+    task.task_dir = f"/tmp/run_{index}"
+    return task
+
+
 class TestCreateSubagentsToolExecute:
     """测试 CreateSubagentsTool.execute() 方法。"""
 
@@ -290,6 +318,135 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         payload = json.loads(result.output)
         assert result.ok is True
         assert payload["next_action"]["params"]["max_runners"] == 1
+
+    def test_items_mode_infers_sibling_output_dependencies(self):
+        """items 里下游提到“接收/读取上游输出”时，自动写入 required_read_paths。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = _mock_create_items_agent()
+
+        result = CreateSubagentsTool(mock_agent).execute({
+            "items": [
+                {
+                    "goal": "整理三周 GitHub star 数据，输出到 data/github_star_data.md",
+                    "agent_name": "小傻妞-数据搜集",
+                    "role": "worker",
+                },
+                {
+                    "goal": (
+                        "接收小傻妞-数据搜集的输出，核验并翻译，"
+                        "输出到 data/github_star_analysis.md"
+                    ),
+                    "agent_name": "小傻妞-核验翻译",
+                    "role": "worker",
+                },
+                {
+                    "goal": (
+                        "读取小傻妞-核验翻译的输出 data/github_star_analysis.md，"
+                        "生成 xlsx/final_report.md"
+                    ),
+                    "agent_name": "小傻妞-生成报告",
+                    "role": "worker",
+                },
+            ]
+        })
+
+        calls = mock_agent.subagents.create_run.call_args_list
+        assert result.ok is True
+        assert calls[1].kwargs["params"].context_manifest["required_read_paths"] == [
+            "data/github_star_data.md"
+        ]
+        assert calls[2].kwargs["params"].context_manifest["required_read_paths"] == [
+            "data/github_star_analysis.md"
+        ]
+
+    def test_items_mode_infers_bare_filename_dependencies(self):
+        """模型只写 data_collection.md 这种短文件名时，也要生成输入依赖。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = _mock_create_items_agent()
+
+        result = CreateSubagentsTool(mock_agent).execute({
+            "items": [
+                {"goal": "收集项目数据，输出到 data_collection.md", "agent_name": "小傻妞-数据收集"},
+                {
+                    "goal": "读取 data_collection.md，写中文解释，输出到 content_writeup.md",
+                    "agent_name": "小傻妞-内容编写",
+                },
+                {
+                    "goal": "读取 data_collection.md 和 content_writeup.md，生成 final_report.md",
+                    "agent_name": "小傻妞-生成报告",
+                },
+            ]
+        })
+
+        calls = mock_agent.subagents.create_run.call_args_list
+        assert result.ok is True
+        assert calls[1].kwargs["params"].context_manifest["required_read_paths"] == ["data_collection.md"]
+        assert calls[2].kwargs["params"].context_manifest["required_read_paths"] == [
+            "data_collection.md",
+            "content_writeup.md",
+        ]
+
+    def test_items_mode_infers_integrate_long_path_dependencies(self):
+        """“整合 path 和 path 的结果”这类普通说法也要落成输入依赖。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = _mock_create_items_agent()
+
+        result = CreateSubagentsTool(mock_agent).execute({
+            "items": [
+                {
+                    "goal": "收集数据，输出到 data/subagents/subagent_data_collection/results.md",
+                    "agent_name": "小傻妞-数据收集",
+                },
+                {
+                    "goal": "编写内容，输出到 data/subagents/subagent_content_writer/results.md",
+                    "agent_name": "小傻妞-内容编写",
+                },
+                {
+                    "goal": (
+                        "整合 data/subagents/subagent_data_collection/results.md 和 "
+                        "data/subagents/subagent_content_writer/results.md 的结果，生成 final_report.md"
+                    ),
+                    "agent_name": "小傻妞-生成报告",
+                },
+            ]
+        })
+
+        calls = mock_agent.subagents.create_run.call_args_list
+        assert result.ok is True
+        assert calls[2].kwargs["params"].context_manifest["required_read_paths"] == [
+            "data/subagents/subagent_data_collection/results.md",
+            "data/subagents/subagent_content_writer/results.md",
+        ]
+
+    def test_items_mode_persists_sibling_run_dependencies_without_paths(self):
+        """下游只说“基于某小傻妞结果”时，也要写入 run 级依赖，不能全并发抢跑。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = _mock_create_items_agent()
+
+        result = CreateSubagentsTool(mock_agent).execute({
+            "items": [
+                {"goal": "收集三周 GitHub star 数据。", "agent_name": "小傻妞-数据收集"},
+                {
+                    "goal": "基于小傻妞-数据收集提供的原始数据，写中文解释。",
+                    "agent_name": "小傻妞-内容编写",
+                },
+                {
+                    "goal": "整合数据收集和内容编写的结果，生成 xlsx 文件。",
+                    "agent_name": "小傻妞-生成xlsx",
+                },
+            ]
+        })
+
+        tasks = mock_agent._created_tasks
+        assert result.ok is True
+        assert tasks[1].workflow_depends_on == ["run_0"]
+        assert tasks[2].workflow_depends_on == ["run_0", "run_1"]
+        assert tasks[0].workflow_parent_run_id == tasks[1].workflow_parent_run_id
+        assert mock_agent.subagents.save.call_count == 3
 
     def test_vague_deliverable_worker_defaults_to_workspace_root(self):
         """已有真实任务工作区时，目标目录默认指向 workspace_root，不要求用户补底层参数。"""

@@ -20,6 +20,8 @@ from .acceptance_artifacts import artifact_exists
 from .acceptance_controlled_exec_findings import controlled_exec_contract_finding
 from .acceptance_descendant_health import descendant_health_finding
 from .acceptance_evidence_findings import build_evidence_findings
+from .acceptance_patch_findings import patch_findings
+from .acceptance_product_findings import required_product_files_finding
 from .acceptance_role_coverage import required_role_coverage_finding
 
 if TYPE_CHECKING:
@@ -32,6 +34,7 @@ def _dict_list(value: object) -> list[dict[str, object]]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
     return []
+
 
 # LLM: SubAgentAcceptanceFindingService 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 类用途: 封装subagent验收finding服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
@@ -157,6 +160,7 @@ class SubAgentAcceptanceFindingService:
     # 函数用途: 读取或查询findings产物patches需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def _findings_artifacts_patches(self, task: SubAgentTask, output: dict, created_at: float) -> list[AcceptanceReviewFinding]:
         findings: list[AcceptanceReviewFinding] = []
+        findings.append(required_product_files_finding(task, created_at))
         artifacts = _dict_list(output.get("artifacts", []))
         missing_artifacts = [
             str(item.get("path", "") or "")
@@ -170,37 +174,13 @@ class SubAgentAcceptanceFindingService:
                     if not missing_artifacts else f"存在 {len(missing_artifacts)} 个 artifact 路径不存在: {missing_artifacts[0]}",
             evidence_path=task.output_json, created_at=created_at,
         ))
-        patches = _dict_list(output.get("patches", []))
-        valid_patch_statuses = {"applied", "planned", "blocked"}
-        unresolved_patches = [
-            item for item in patches if str(item.get("status", "")).lower() in {"planned", "blocked"}
-        ]
-        invalid_patches = [
-            item for item in patches
-            if str(item.get("status", "")).lower() not in valid_patch_statuses
-        ]
-        unreviewed_applied_patches = [
-            item for item in patches
-            if str(item.get("status", "")).lower() == "applied"
-            and str(item.get("review_status", "")).upper() != "APPROVED"
-        ]
-        findings.append(AcceptanceReviewFinding(
-            name="no_unresolved_patches", ok=not unresolved_patches, severity="P1",
-            message="没有未处理 patch。"
-                    if not unresolved_patches else f"仍有 {len(unresolved_patches)} 个 patch 处于 planned/blocked。",
-            evidence_path=task.output_json, created_at=created_at,
-        ))
-        findings.append(AcceptanceReviewFinding(
-            name="patch_status_valid", ok=not invalid_patches, severity="P1",
-            message="patch 状态均符合协议。" if not invalid_patches else f"存在 {len(invalid_patches)} 个未知 patch 状态。",
-            evidence_path=task.output_json, created_at=created_at,
-        ))
-        findings.append(AcceptanceReviewFinding(
-            name="patches_reviewed", ok=not unreviewed_applied_patches, severity="P1",
-            message="所有 applied patch 已审核。"
-                    if not unreviewed_applied_patches else f"仍有 {len(unreviewed_applied_patches)} 个 applied patch 未通过审核。",
-            evidence_path=task.output_json, created_at=created_at,
-        ))
+        findings.extend(
+            patch_findings(
+                _dict_list(output.get("patches", [])),
+                evidence_path=task.output_json,
+                created_at=created_at,
+            )
+        )
         return findings
 
     # LLM: acceptance_findings 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -222,6 +202,7 @@ class SubAgentAcceptanceFindingService:
         findings.extend(self._findings_output_content(task, output, created_at))
         findings.extend(self._findings_artifacts_patches(task, output, created_at))
         return findings
+
 
 # LLM: _string_list 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 函数用途: 处理stringlist相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。

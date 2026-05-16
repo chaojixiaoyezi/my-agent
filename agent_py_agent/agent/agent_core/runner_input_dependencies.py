@@ -6,20 +6,29 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from ..subagents.dependency_artifact_refs import ref_satisfied_by_dependency_artifact
+
 _FILE_REF_RE = re.compile(
-    r"(?<![\w.-])(?:[\w.-]+/)+[\w.-]+\."
+    r"(?<![\w.-])(?:[\w.-]+/)*[\w.-]+\."
     r"(?:json|md|csv|txt|xlsx|xls|pdf|html|htm|py|yaml|yml)\b",
     re.IGNORECASE,
 )
 _READ_MARKERS = (
     "读取",
     "读",
+    "接收",
     "基于",
     "根据",
     "依赖",
     "输入",
+    "引用",
+    "参考",
+    "查看",
+    "检查",
+    "加载",
     "汇总",
     "整理",
+    "整合",
     "分析",
     "read",
     "from",
@@ -28,15 +37,21 @@ _READ_MARKERS = (
     "load",
     "source",
 )
-_WRITE_MARKERS = (
+_DIRECT_WRITE_MARKERS = (
+    "输出到",
+    "输出为",
     "输出",
+    "写",
+    "写到",
     "写入",
     "生成",
     "创建",
-    "保存",
-    "产出",
+    "保存到",
+    "保存为",
+    "产出到",
+    "导出",
     "write",
-    "output",
+    "output to",
     "create",
     "generate",
     "save",
@@ -46,20 +61,23 @@ _WRITE_MARKERS = (
 
 # LLM: input_dependency_ready_candidates filters runners that clearly need files not written yet.
 # 函数用途: 对 runner 候选做 refs-first 输入依赖闸门；缺输入文件的下游任务等待下一轮 dispatch。
-def input_dependency_ready_candidates(candidates: list) -> list:
-    return [task for task in candidates if not missing_input_dependencies(task)]
+def input_dependency_ready_candidates(candidates: list, *, dependency_tasks: list | None = None) -> list:
+    return [task for task in candidates if not missing_input_dependencies(task, dependency_tasks=dependency_tasks)]
 
 
 # LLM: missing_input_dependencies extracts explicit and natural input refs and checks them against task roots.
 # 函数用途: 返回当前 runner 缺失的输入文件引用；没有可判断根目录时不误拦截。
-def missing_input_dependencies(task: object) -> list[str]:
+def missing_input_dependencies(task: object, *, dependency_tasks: list | None = None) -> list[str]:
     refs = _input_refs(task)
     if not refs:
         return []
     roots = _dependency_roots(task)
     if not roots:
         return []
-    return [ref for ref in refs if not _ref_exists(ref, roots)]
+    return [
+        ref for ref in refs
+        if not _ref_exists(ref, roots) and not ref_satisfied_by_dependency_artifact(ref, task, dependency_tasks)
+    ]
 
 
 # LLM: _input_refs combines structured required_read_paths with "读取 data/x.json" prose fallbacks.
@@ -67,9 +85,26 @@ def missing_input_dependencies(task: object) -> list[str]:
 def _input_refs(task: object) -> list[str]:
     refs: list[str] = []
     refs.extend(_manifest_required_paths(getattr(task, "context_manifest", None)))
-    goal = str(getattr(task, "goal", "") or "")
-    for match in _FILE_REF_RE.finditer(goal):
+    refs.extend(goal_input_refs(str(getattr(task, "goal", "") or "")))
+    return _unique_refs(refs)
+
+
+# LLM: goal_input_refs extracts natural-language read refs while ignoring current-output targets.
+# 函数用途: 从 goal 文本里识别“读取/接收/基于 data/x”的输入文件路径，供 create 和 dispatch 复用。
+def goal_input_refs(goal: str) -> list[str]:
+    refs: list[str] = []
+    for match in _FILE_REF_RE.finditer(str(goal or "")):
         if _path_ref_is_input(goal, match.start()):
+            refs.append(match.group())
+    return _unique_refs(refs)
+
+
+# LLM: goal_output_refs extracts deliverable paths without treating upstream-output nouns as writes.
+# 函数用途: 从 goal 文本里识别“生成/输出到 data/x”的产物路径，供批量派工推断上下游关系。
+def goal_output_refs(goal: str) -> list[str]:
+    refs: list[str] = []
+    for match in _FILE_REF_RE.finditer(str(goal or "")):
+        if _path_ref_is_output(goal, match.start()):
             refs.append(match.group())
     return _unique_refs(refs)
 
@@ -89,10 +124,33 @@ def _manifest_required_paths(manifest: object) -> list[str]:
 # LLM: _path_ref_is_input keeps output targets like "生成 data/out.json" from blocking their producer.
 # 函数用途: 只把 read/from/input 等上下文中的文件当作输入依赖，写入上下文中的文件不拦截。
 def _path_ref_is_input(text: str, start: int) -> bool:
-    prefix = str(text[max(0, start - 24):start]).lower()
-    if any(marker in prefix for marker in _WRITE_MARKERS):
+    prefix = str(text[max(0, start - 96):start]).lower()
+    if _has_direct_write_marker(prefix):
         return False
     return any(marker in prefix for marker in _READ_MARKERS)
+
+
+# LLM: _path_ref_is_output classifies only direct write targets, not "read upstream output" nouns.
+# 函数用途: 判断路径是否是当前任务要写出的产物；读取上游输出时即便有“输出”二字也不算写。
+def _path_ref_is_output(text: str, start: int) -> bool:
+    prefix = str(text[max(0, start - 96):start]).lower()
+    if _has_direct_write_marker(prefix):
+        return True
+    return _has_weak_output_marker(prefix) and not any(marker in prefix for marker in _READ_MARKERS)
+
+
+# LLM: _has_direct_write_marker detects verbs close enough to bind to the following file path.
+# 函数用途: 识别“输出到/生成/写入 path”这类直接写目标，避免被更早的读取词误导。
+def _has_direct_write_marker(prefix: str) -> bool:
+    direct = str(prefix or "")[-16:]
+    return any(marker in direct for marker in _DIRECT_WRITE_MARKERS if marker not in {"输出", "output"})
+
+
+# LLM: _has_weak_output_marker handles terse producer goals like "输出 data/out.md".
+# 函数用途: 兼容简写输出目标；若同一窗口里已有读取词，则把“输出”视为上游产物名词。
+def _has_weak_output_marker(prefix: str) -> bool:
+    direct = str(prefix or "")[-8:]
+    return "输出" in direct or "output" in direct
 
 
 # LLM: _dependency_roots uses task allowed_write_roots plus task_dir as bounded lookup roots.

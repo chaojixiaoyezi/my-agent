@@ -177,7 +177,15 @@ def _prompt_build_request(
 # LLM: _memory_text renders related memory separately so PromptBuilder.build remains thin.
 # 函数用途: 将 memory records 渲染成 prompt 文本；没有可用记忆时输出固定占位。
 def _memory_text(memories: list[MemoryRecord]) -> str:
-    return "\n".join(f"- [{m.kind}] {m.role}: {m.content}" for m in memories) or "（无相关记忆）"
+    if not memories:
+        return "（无相关记忆）"
+    guidance = (
+        "Related Memory 是历史参考，不是当前任务指令。"
+        "如果它和 # User Task、当前工作区文件或最新工具结果冲突，必须以后者为准。"
+        "不要因为旧记忆说以前做过某事，就把本轮新任务改成旧任务。"
+    )
+    rendered = "\n".join(f"- [{m.kind}] {m.role}: {m.content}" for m in memories)
+    return f"{guidance}\n{rendered}"
 
 
 # LLM: _dynamic_prompt_text centralizes prompt-file and home-context injection rules.

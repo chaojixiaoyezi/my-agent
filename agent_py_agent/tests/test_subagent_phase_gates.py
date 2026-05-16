@@ -170,6 +170,173 @@ def test_explicit_run_ids_wait_for_missing_input_refs(tmp_path):
     assert [task.id for task in selected] == ["report"]
 
 
+# LLM: natural sibling-output wording must still block downstream runners until the file exists.
+# 函数用途: 覆盖 Task18 真实 E2E：“读取某代理的输出 data/x”应视为输入依赖，不是当前任务输出目标。
+def test_explicit_run_ids_wait_for_named_upstream_output_refs(tmp_path):
+    collect = _runner_task("collect", "worker", "小傻妞-数据搜集", "输出到 data/github_star_data.md")
+    analysis = _runner_task(
+        "analysis",
+        "worker",
+        "小傻妞-核验翻译",
+        "接收小傻妞-数据搜集的输出 data/github_star_data.md，输出到 data/github_star_analysis.md",
+    )
+    report = _runner_task(
+        "report",
+        "worker",
+        "小傻妞-生成报告",
+        "读取小傻妞-核验翻译的输出 data/github_star_analysis.md，并生成 xlsx/final_report.md",
+    )
+    for task in [collect, analysis, report]:
+        task.allowed_write_roots = [str(tmp_path)]
+        task.task_dir = str(tmp_path / ".my-agent" / "subagents" / task.id)
+    ctx = DispatchContext(
+        cfg=SimpleNamespace(),
+        normalized_workflow_mode="off",
+        apply=True,
+        planner=False,
+        runner_instruction="",
+        max_runners=3,
+        limit=20,
+        reviewer="tester",
+        note="",
+        take_over_by="",
+        locked_files=None,
+        router=SimpleNamespace(),
+        include_run_ids=["report", "analysis", "collect"],
+    )
+
+    selected = _runner_candidates_for_context([report, analysis, collect], ctx, runner_max_attempts=1)
+
+    assert [task.id for task in selected] == ["collect"]
+
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "github_star_data.md").write_text("data", encoding="utf-8")
+    collect.status = "DONE"
+    collect.verification_status = "VERIFIED"
+    selected = _runner_candidates_for_context([report, analysis, collect], ctx, runner_max_attempts=1)
+
+    assert [task.id for task in selected] == ["analysis"]
+
+
+# LLM: explicit run_ids must still honor machine sibling dependencies.
+# 函数用途: 覆盖 Task18 真实 E2E：即便模型一次传入全部 run_ids，下游也要等上游 run 完成。
+def test_explicit_run_ids_wait_for_workflow_dependencies():
+    collect = _runner_task("collect", "worker", "小傻妞-数据收集")
+    report = _runner_task("report", "worker", "小傻妞-生成报告")
+    for task in [collect, report]:
+        task.workflow_parent_run_id = "batch-1"
+        task.workflow_phase_id = task.id
+    report.workflow_depends_on = ["collect"]
+    ctx = DispatchContext(
+        cfg=SimpleNamespace(),
+        normalized_workflow_mode="off",
+        apply=True,
+        planner=False,
+        runner_instruction="",
+        max_runners=2,
+        limit=20,
+        reviewer="tester",
+        note="",
+        take_over_by="",
+        locked_files=None,
+        router=SimpleNamespace(),
+        include_run_ids=["report", "collect"],
+    )
+
+    selected = _runner_candidates_for_context([report, collect], ctx, runner_max_attempts=1)
+
+    assert [task.id for task in selected] == ["collect"]
+
+    collect.status = "DONE"
+    collect.verification_status = "VERIFIED"
+    selected = _runner_candidates_for_context([report, collect], ctx, runner_max_attempts=1)
+
+    assert [task.id for task in selected] == ["report"]
+
+
+# LLM: explicit run_ids may omit already-finished upstream phases after the first wave.
+# 函数用途: 覆盖真实流水线复测：第二轮只点名下游 run 时，依赖检查仍必须能看到全局已完成上游。
+def test_explicit_run_ids_dependency_lookup_uses_all_visible_tasks():
+    collect = _runner_task("collect", "worker", "小傻妞-数据收集")
+    content = _runner_task("content", "worker", "小傻妞-内容编写")
+    report = _runner_task("report", "worker", "小傻妞-生成报告")
+    for task in [collect, content, report]:
+        task.workflow_parent_run_id = "batch-1"
+        task.workflow_phase_id = task.id
+    collect.status = "DONE"
+    collect.verification_status = "VERIFIED"
+    content.workflow_depends_on = ["collect"]
+    report.workflow_depends_on = ["collect", "content"]
+    ctx = DispatchContext(
+        cfg=SimpleNamespace(),
+        normalized_workflow_mode="off",
+        apply=True,
+        planner=False,
+        runner_instruction="",
+        max_runners=2,
+        limit=20,
+        reviewer="tester",
+        note="",
+        take_over_by="",
+        locked_files=None,
+        router=SimpleNamespace(),
+        include_run_ids=["content", "report"],
+    )
+
+    selected = _runner_candidates_for_context(
+        [content, report],
+        ctx,
+        runner_max_attempts=1,
+        dependency_tasks=[collect, content, report],
+    )
+
+    assert [task.id for task in selected] == ["content"]
+
+
+# LLM: short required_read_paths should resolve to completed dependency artifact refs.
+# 函数用途: 覆盖真实流水线复测：下游写 data_collection.md 短名时，能接上上游 run 目录里的同名 artifact。
+def test_required_read_path_can_use_completed_dependency_artifact(tmp_path):
+    collect = _runner_task("collect", "worker", "小傻妞-数据收集")
+    content = _runner_task("content", "worker", "小傻妞-内容编写")
+    artifact = tmp_path / "data" / "subagents" / "collect" / "data_collection.md"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("data", encoding="utf-8")
+    for task in [collect, content]:
+        task.workflow_parent_run_id = "batch-1"
+        task.workflow_phase_id = task.id
+        task.allowed_write_roots = [str(tmp_path)]
+        task.task_dir = str(tmp_path / "data" / "subagents" / task.id)
+    collect.status = "DONE"
+    collect.verification_status = "VERIFIED"
+    collect.artifact_refs = [str(artifact)]
+    content.workflow_depends_on = ["collect"]
+    content.context_manifest.required_read_paths = ["data_collection.md"]
+    ctx = DispatchContext(
+        cfg=SimpleNamespace(),
+        normalized_workflow_mode="off",
+        apply=True,
+        planner=False,
+        runner_instruction="",
+        max_runners=1,
+        limit=20,
+        reviewer="tester",
+        note="",
+        take_over_by="",
+        locked_files=None,
+        router=SimpleNamespace(),
+        include_run_ids=["content"],
+    )
+
+    selected = _runner_candidates_for_context(
+        [content],
+        ctx,
+        runner_max_attempts=1,
+        dependency_tasks=[collect, content],
+    )
+
+    assert [task.id for task in selected] == ["content"]
+
+
 # LLM: workflow phase dependencies must be respected before broad role ordering.
 # 函数用途: producer/critic/repair 同时存在时，只能先跑无依赖的 produce，不能让 repair 空转抢跑。
 def test_runner_candidates_wait_for_workflow_depends_on_refs():

@@ -193,15 +193,14 @@ def _has_explicit_local_child_spawn_intent(raw_params: dict[str, object], goal: 
     return _contains_any(local_text, _EXPLICIT_LOCAL_CHILD_SPAWN_MARKERS)
 
 
-# LLM: _local_create_intent_text extracts only the current tool call, not the whole conversation.
-# 函数用途: 收集 create_subagents 本次参数里的 goal、name、thought、plan、工具等字段。
+# LLM: _local_create_intent_text extracts task intent only; tool grants are capability, not role intent.
+# 函数用途: 收集 create_subagents 本次参数里的 goal、name、thought、plan 等任务语义字段。
 def _local_create_intent_text(raw_params: dict[str, object], goal: str) -> str:
     parts = [
         goal,
         str(raw_params.get("agent_name") or ""),
         str(raw_params.get("thought") or ""),
         " ".join(_string_list(raw_params.get("plan"))),
-        " ".join(_string_list(raw_params.get("allowed_tools"))),
     ]
     return "\n".join(part for part in parts if part).lower()
 
