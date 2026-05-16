@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .base import CreateRunParams
+from .repair_contract_identity import repair_contract_identity_from_context_packs
 
 _REUSABLE_STATUSES = {"PLANNING", "PENDING", "RUNNING", "AWAITING_ACCEPTANCE", "DONE", "COMPLETED", "BLOCKED", "PAUSED"}
 _DISPATCHABLE_STATUSES = {"PLANNING", "PENDING"}
@@ -70,9 +71,16 @@ def _same_schedule_contract(task: Any, params: CreateRunParams) -> bool:
         return False
     if _normalized_role(getattr(task, "role", "")) != _normalized_role(params.role):
         return False
+    if _external_write_roots(task) != _params_extra_write_roots(params):
+        return False
+    # LLM: repair contracts override prose-goal comparison so one repair owner can fix/execute/verify.
+    # 函数用途: 有 repair_contract 时按失败 run/目标产物复用，不因 goal 改写而拆出新 child。
+    repair_identity = repair_contract_identity_from_context_packs(params.context_packs)
+    if repair_identity:
+        return repair_contract_identity_from_context_packs(getattr(task, "context_packs", [])) == repair_identity
     if _normalized_goal(getattr(task, "goal", "")) != _normalized_goal(params.goal):
         return False
-    return _external_write_roots(task) == _params_extra_write_roots(params)
+    return True
 
 
 # LLM: _direct_children loads parent child_ids instead of scanning unrelated branches.

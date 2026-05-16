@@ -16,6 +16,7 @@ from .hierarchy_duplicate_domains import duplicate_child_domain_warnings
 from .hierarchy_leaf_targets import LeafTargetDedupeRequest, duplicate_verified_leaf_target_warnings
 from .hierarchy_write_policy import inherited_extra_write_roots
 from .qa_role_contract import qa_role_identity_roles
+from .repair_contract_identity import repair_contract_identity_from_context_packs
 
 _IMPLEMENTATION_SCAN_MAX_NODES = 64
 _ACTIVE_DUPLICATE_STATUSES = {"PLANNING", "RUNNING", "BLOCKED", "AWAITING_ACCEPTANCE"}
@@ -102,6 +103,10 @@ def _is_qa_like(item: Any) -> bool:
 def _active_duplicate_child_id(manager: Any, parent: SubAgentTask, spec: Any) -> str:
     wanted_name = _normalized_agent_name(getattr(spec, "agent_name", ""))
     if not wanted_name:
+        return ""
+    # LLM: repair contracts move duplicate handling into the idempotency layer instead of blocking first.
+    # 函数用途: 带 repair_contract 的修复任务按机器 scope 复用或新建，不被固定中文名字提前拦死。
+    if repair_contract_identity_from_context_packs(getattr(spec, "context_packs", [])):
         return ""
     spec_is_repair = _is_repair_like(spec)
     for child_id in parent.child_ids:

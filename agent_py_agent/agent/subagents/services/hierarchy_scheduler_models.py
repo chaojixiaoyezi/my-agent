@@ -22,6 +22,10 @@ class HierarchyChildSpec:
     allowed_tools: list[str] = field(default_factory=list)
     acceptance_checks: list[str] = field(default_factory=list)
     extra_write_roots: list[str] = field(default_factory=list)
+    # LLM: context fields let runner-context repair schedules preserve refs-first handoff contracts.
+    # 参数说明: context_manifest/context_packs 直接写入 child task，用于 repair/execute/verify 同 run 闭环。
+    context_manifest: dict[str, object] = field(default_factory=dict)
+    context_packs: list[dict[str, object]] = field(default_factory=list)
 
 
 # LLM: HierarchyScheduleRequest is the only business entrypoint for hierarchy materialization.
