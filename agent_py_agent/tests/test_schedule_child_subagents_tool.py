@@ -74,4 +74,6 @@ def test_runner_context_schedule_without_children_returns_quality_advice(tmp_pat
     assert payload["reason"] == "no_child_specs"
     assert payload["quality_advice"]["phase"] == "quality_wave_ready"
     assert set(payload["quality_advice"]["suggested_roles"]) == {"tester", "bug_finder", "acceptor"}
+    assert payload["quality_advice"]["ready_work_refs"][0]["run_id"] == worker.id
+    assert payload["quality_advice"]["suggested_children"][0]["source_run_ids"] == [worker.id]
     assert payload["created_run_ids"] == []

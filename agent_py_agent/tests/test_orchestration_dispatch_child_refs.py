@@ -291,6 +291,8 @@ def test_dispatch_payload_suggests_quality_wave_before_closeout():
     assert direct["next_action"] == "create_quality_children_from_ready_refs"
     assert direct["quality_advice"]["phase"] == "quality_wave_ready"
     assert set(direct["quality_advice"]["suggested_roles"]) == {"tester", "bug_finder", "acceptor"}
+    assert direct["quality_advice"]["ready_work_refs"][0]["run_id"] == "child-a"
+    assert direct["quality_advice"]["suggested_children"][0]["source_run_ids"] == ["child-a"]
 
 
 # LLM: QA self-reported failures should guide repair without forcing an automatic workflow.

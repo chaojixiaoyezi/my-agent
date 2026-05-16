@@ -1679,3 +1679,11 @@
 - 已实现：外置 dispatch 大输出摘要现在保留 `recovery_batches`，root 下一轮 live prompt 能看到分批恢复合同，不需要读完整 dispatch artifact。
 - 已测试：新增多 BLOCKED 批量续跑和 BLOCKED+TIMEOUT 混合恢复 regression；恢复策略、hierarchy recovery、packet recovery、takeover、tool context reducer focused tests 通过。
 - 下一步：进入第 7 步，把 QA/测试/验收链路继续做成智能波次：worker 完成后按 refs 触发 tester/bug_finder/acceptor，失败后走 repair，再回到验收，而不是一开始空转或靠父级读正文替代 QA。
+
+## 2026-05-17 QA/测试/验收 ready refs 合同
+- 中文说明：之前 `quality_advice` 能告诉父级缺 tester/bug_finder/acceptor，但 QA 子代理还要自己猜该检查哪个 worker。现在把 ready worker refs 作为机器字段交给 QA 波次。
+- 对照结论：Hermes delegate 父级拿 summary/refs，OpenClaw 控制面知道每个 run 的状态，Codex 工具结果用结构字段承载事实。我们这里让 QA 波次读 `ready_work_refs` / `source_run_ids` / `source_artifact_refs` / `source_output_refs`，不靠自然语言猜产物。
+- 已实现：新增 `hierarchy_qa_ready_refs.py`，扫描父任务子树里 worker/writer/coder/leaf 且处于 AWAITING_ACCEPTANCE/DONE/NEEDS_ACCEPTANCE/VERIFIED 的实现节点，输出 run/status/artifact/output refs；只收集 refs，不读取 HTML、代码或报告正文。
+- 已实现：`QaOrchestrationAdvice` 新增 `ready_work_refs`；`RequiredQaChildSpec` 新增 `source_run_ids` / `source_artifact_refs` / `source_output_refs` / `quality_scope`。`schedule_child_subagents` 和 runner-context dispatch 的 `quality_advice` 都会返回这些字段。
+- 已测试：补充 dispatch quality wave 和 schedule-without-children 的 ready refs regression；QA scope guard、验收 role coverage、progress payload focused tests 通过。
+- 下一步：进入第 8 步，做真实 E2E 对照压测前的本地收口：先跑完整守卫和 full pytest，再用自然语言家具/购物网站任务验证整个链路是否按 create -> dispatch -> QA -> repair/acceptance 推进。

@@ -16,6 +16,7 @@ from ..subagents.services.hierarchy_scheduler import (
 from ..tools import BaseTool, ToolExecutionResult
 from .orchestration_create_context import create_context_manifest, create_context_packs
 from .orchestration_dispatch_state_contract import dispatch_state_contract_payload
+from .orchestration_quality_advice_payload import quality_advice_payload
 from .orchestration_run_scope import remember_orchestration_run_ids
 from .orchestration_tool_specs import build_schedule_child_subagents_spec
 from .orchestration_write_guard import external_write_target_error
@@ -149,7 +150,7 @@ def _schedule_payload_json(result: HierarchyScheduleResult, state_payload: dict[
     }
     payload.update(state_payload or {})
     if result.quality_advice is not None:
-        payload["quality_advice"] = _quality_advice_payload(result.quality_advice)
+        payload["quality_advice"] = quality_advice_payload(result.quality_advice)
     if result.scheduling_warnings:
         payload["scheduling_warnings"] = list(result.scheduling_warnings)
         payload["coordination_advice"] = (
@@ -176,29 +177,6 @@ def _schedule_item_payload(item) -> dict[str, object]:
         "goal": item.goal,
         "created": item.created,
         "reason": item.reason,
-    }
-
-
-# LLM: _quality_advice_payload makes QA planning visible without materializing a fixed workflow.
-# 函数用途: 把服务层 quality_advice 转成模型可读 JSON，提示候选角色和红线，实际派工仍由 LLM 决定。
-def _quality_advice_payload(advice) -> dict[str, object]:
-    return {
-        "phase": advice.phase,
-        "llm_next_step": advice.llm_next_step,
-        "guardrails": list(advice.guardrails),
-        "suggested_roles": list(advice.suggested_roles),
-        "suggested_children": [_quality_child_payload(item) for item in advice.suggested_children],
-    }
-
-
-# LLM: _quality_child_payload keeps suggested QA specs refs-only and safe for prompt reuse.
-# 函数用途: 输出候选 QA child 的最小字段，LLM 可复制后按 scope/work_group_id 自行调整。
-def _quality_child_payload(item) -> dict[str, object]:
-    return {
-        "goal": item.goal,
-        "agent_name": item.agent_name,
-        "role": item.role,
-        "acceptance_checks": list(item.acceptance_checks),
     }
 
 
