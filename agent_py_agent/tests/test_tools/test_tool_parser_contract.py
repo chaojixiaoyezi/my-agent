@@ -94,12 +94,14 @@ def test_registry_uses_configured_shell_timeout(tmp_path: Path):
             retrieval_limit=3,
             vector_search_enabled=False,
             shell_tool_timeout=240,
+            shell_tool_output_max_chars=1234,
         )
     )
 
     tool = registry.tools["run_command"]
 
     assert tool.default_timeout == 240
+    assert tool.max_output_chars == 1234
     assert "default 240" in tool.spec.parameters["timeout"]
 
 

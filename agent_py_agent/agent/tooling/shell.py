@@ -13,6 +13,7 @@ from typing import Any
 from .models import BaseTool, ToolExecutionResult, ToolSpec
 
 _MAX_COMMAND_CHARS = 2000
+_DEFAULT_MAX_OUTPUT_CHARS = 12_000
 
 _DANGEROUS_COMMANDS = [
     r"^rm\s+-rf\s+/",
@@ -72,12 +73,32 @@ def _working_dir_from_params(params: dict[str, Any], workspace_root: Path) -> Pa
     return target if target.is_dir() else workspace_root
 
 
-# LLM: _format_process_result 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 把 format_process_result 转成人或模型可读的展示文本。
-def _format_process_result(result: subprocess.CompletedProcess[str]) -> str:
+# LLM: _bounded_output preserves enough command output for diagnosis without flooding the live prompt.
+# 函数用途: 按配置截断单个 stdout/stderr 字段，并返回是否截断，避免大日志撑爆上下文。
+def _bounded_output(text: str, max_chars: int) -> tuple[str, bool]:
+    if max_chars <= 0:
+        return "", bool(text)
+    if len(text) <= max_chars:
+        return text, False
+    return text[:max_chars], True
+
+
+# LLM: _format_process_result keeps shell results machine-readable so parent/subagents can reason from flags.
+# 函数用途: 把命令结果转成包含总长度、预览长度和截断标记的稳定文本格式。
+def _format_process_result(result: subprocess.CompletedProcess[str], max_output_chars: int) -> str:
     stdout = result.stdout if result.stdout else ""
     stderr = result.stderr if result.stderr else ""
-    return f"return_code={result.returncode}\nstdout={stdout}\nstderr={stderr}"
+    stdout_preview, stdout_truncated = _bounded_output(stdout, max_output_chars)
+    stderr_preview, stderr_truncated = _bounded_output(stderr, max_output_chars)
+    return (
+        f"return_code={result.returncode}\n"
+        f"stdout_chars={len(stdout)} stdout_preview_chars={len(stdout_preview)} "
+        f"stdout_truncated={stdout_truncated}\n"
+        f"stdout={stdout_preview}\n"
+        f"stderr_chars={len(stderr)} stderr_preview_chars={len(stderr_preview)} "
+        f"stderr_truncated={stderr_truncated}\n"
+        f"stderr={stderr_preview}"
+    )
 
 
 # LLM: _subprocess_text_env 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -94,9 +115,15 @@ class ShellTool(BaseTool):
 
     # LLM: ShellTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 初始化 ShellTool 的依赖、配置和运行期字段。
-    def __init__(self, workspace_root: Path, default_timeout: int = 30):
+    def __init__(
+        self,
+        workspace_root: Path,
+        default_timeout: int = 30,
+        max_output_chars: int = _DEFAULT_MAX_OUTPUT_CHARS,
+    ):
         self.workspace_root = workspace_root.resolve()
         self.default_timeout = default_timeout
+        self.max_output_chars = max(0, int(max_output_chars))
         self.spec = ToolSpec(
             name="run_command",
             category="shell",
@@ -121,6 +148,10 @@ class ShellTool(BaseTool):
                 "command": "Required. Full command string, for example 'ls -la' or 'python build.py'.",
                 "timeout": f"Optional. Defaults to {default_timeout} seconds.",
                 "working_dir": "Optional. Directory where the command runs.",
+                "output": (
+                    "Stdout/stderr are returned as bounded previews with *_chars and *_truncated flags; "
+                    f"each stream preview defaults to {self.max_output_chars} chars."
+                ),
             },
             examples=[
                 '{"tool": "run_command", "command": "ls -la"}',
@@ -143,7 +174,7 @@ class ShellTool(BaseTool):
         target = _working_dir_from_params(params, self.workspace_root)
         try:
             result = self._run_command(command, target, timeout)
-            return ToolExecutionResult(self.spec.name, True, _format_process_result(result))
+            return ToolExecutionResult(self.spec.name, True, _format_process_result(result, self.max_output_chars))
         except subprocess.TimeoutExpired:
             return ToolExecutionResult(self.spec.name, False, f"命令执行超时 timeout ({timeout}s): {command[:100]}...")
         except OSError as exc:

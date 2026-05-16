@@ -591,6 +591,8 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `agent_core/runner_prompts.py` 必须持续提醒 runner/coordinator：`output.json` 是内部结果文件名，给 child goal 时不能要求写到产品目录；需要结构化汇报时引用 `execution_context.output_json`。
 - `agent_core/runner_identity_prompt.py` 提供 `subagent_runner_system_prompt(context)`；runner 模型轮会通过 `PromptBuilder.build(system_prompt_override=...)` 注入子代理专属身份，而不是继承 root / 主代理的全局 `system_prompt`。这条边界只改本轮 prompt，不修改共享 config，避免测试 root prompt 或用户主代理身份污染子代理。
 - `tooling/registry_execution.py` 对标准 `[TOOL_CALL]` 做窄恢复：如果模型漏写 `[/TOOL_CALL]` 但中间 JSON object 已完整，就直接恢复并执行；如果 JSON 真的截断，仍返回 parse error 和分块写入提示。
+- `tooling/registry_payload_normalize.py` 是工具网关的别名兼容层：`shell/bash/cmd/sh/exec` 会归一到 `run_command`，`cmd/cwd/workdir` 会归一到 `command/working_dir`；`read_artifact` 的 `ref/path/call_id/limit` 会归一到 `artifact_ref/max_chars`。这些是窄口修复，不在业务层写提示词补丁。
+- `tooling/shell.py` 的 `run_command` 返回 bounded preview：stdout/stderr 都带总字符数、预览字符数和截断标记，预览长度由 `tool_shell_output_max_chars` 控制。完整大输出不进入 live prompt，后续需要正文时应通过 artifact/日志 refs 窄读。
 - `capability_status.py` 是 pending capability 状态的共享判断层；`policies.py` / `policy_checks.py` 把 pending capability/tool/skill/shell/MCP 状态统一映射为 `BLOCKED`。
 - `parsing_capability_requests.py` 负责 capability-request 兜底：模型写出 `PENDING_CAPABILITY_REQUEST` / `NEEDS_TOOL` / `NEEDS_SHELL` 等状态但漏填 `capability_requests` 时，会只从结构化 `pending_steps`、summary 和 blocked_reason 里恢复一个保守请求，交给父级路由；它不会直接授权或执行。若文本里推不出具体工具或命令，不生成空泛 generic request，避免污染 runner context 和 grant 列表。
 - `services/acceptance_findings.py` 的 `no_pending_structured_status` 会阻止 pending capability 输出进入父级验收，避免“还在申请工具”的 run 被误判完成。
