@@ -145,7 +145,10 @@ def _apply_result(
 ) -> HierarchyScheduleResult:
     parent = build.parent
     request = build.request
-    created = [_create_child(manager, parent, spec) for spec in request.child_specs]
+    created = [
+        _create_child(manager, parent, spec, sibling_index=index)
+        for index, spec in enumerate(request.child_specs, start=1)
+    ]
     return HierarchyScheduleResult(
         generated_at=time.time(),
         parent_run_id=parent.id,
@@ -164,7 +167,13 @@ def _apply_result(
 
 # LLM: _create_child converts one spec into CreateRunParams while preserving declared product paths.
 # 函数用途: 复用现有 create_run 路径创建子任务；child spec 自己写出的产物路径会成为候选根，最终授权仍由角色策略裁决。
-def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) -> SubAgentTask:
+def _create_child(
+    manager: Any,
+    parent: SubAgentTask,
+    spec: HierarchyChildSpec,
+    *,
+    sibling_index: int,
+) -> SubAgentTask:
     requested_write_roots = requested_child_write_roots(
         ChildWriteRootRequest(
             parent=parent,
@@ -197,6 +206,7 @@ def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) 
                 role=role,
                 goal=goal,
                 extra_write_roots=extra_write_roots,
+                sibling_index=sibling_index,
             )
         )
     )
@@ -207,7 +217,7 @@ def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) 
 def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParams:
     parent = request.parent
     spec = request.spec
-    agent_name = scheduled_child_agent_name(parent, spec)
+    agent_name = scheduled_child_agent_name(parent, spec, sibling_index=request.sibling_index)
     return CreateRunParams(
         goal=request.goal,
         thought=spec.thought or inherited_hierarchy_thought(parent, child_goal=request.goal),
@@ -270,12 +280,12 @@ def _planned_items(parent: SubAgentTask, request: HierarchyScheduleRequest) -> l
                 ),
                 goal=scheduled_child_goal(parent, spec),
             ),
-            agent_name=scheduled_child_agent_name(parent, spec),
+            agent_name=scheduled_child_agent_name(parent, spec, sibling_index=index),
             goal=scheduled_child_goal(parent, spec),
             created=False,
             reason="planned",
         )
-        for spec in request.child_specs
+        for index, spec in enumerate(request.child_specs, start=1)
     ]
 
 

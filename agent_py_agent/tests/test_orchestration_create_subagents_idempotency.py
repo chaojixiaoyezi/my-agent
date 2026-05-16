@@ -78,6 +78,84 @@ def test_count_fanout_creates_requested_number_of_sibling_runs(tmp_path):
     assert len(agent.subagents.list_runs()) == 2
 
 
+# LLM: Generic workers still need idempotency when the model repeats the same create call.
+# 函数用途: 没有明确 agent_name 的普通 worker 第二次创建同一合同，应复用已有 run，避免 root 复读时不断扩容。
+def test_generic_single_worker_reuses_same_contract(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _workspace_agent(tmp_path)
+    params = {
+        "goal": "在 artifacts/index.html 写一个现代家具品牌首页。",
+        "role": "worker",
+        "extra_write_roots": [str(tmp_path / "artifacts")],
+    }
+    first = json.loads(CreateSubagentsTool(agent).execute(params).output)
+    second = json.loads(CreateSubagentsTool(agent).execute(params).output)
+
+    assert second["created_run_ids"] == []
+    assert second["reused_run_ids"] == first["ids"]
+    assert second["dispatch_run_ids"] == first["ids"]
+    assert len(agent.subagents.list_runs()) == 1
+
+
+# LLM: Default role display names are generic and must not merge unrelated goals.
+# 函数用途: 两个未显式命名的小傻妞-worker 目标不同，应创建两个 run，不能只靠默认名字误复用。
+def test_generic_default_name_does_not_reuse_different_goal(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _workspace_agent(tmp_path)
+    tool = CreateSubagentsTool(agent)
+    first = json.loads(tool.execute({"goal": "写 index1.html", "role": "worker"}).output)
+    second = json.loads(tool.execute({"goal": "写 index2.html", "role": "worker"}).output)
+
+    assert first["ids"] != second["ids"]
+    assert second["created_run_ids"] == second["ids"]
+    assert second["reused_run_ids"] == []
+    assert len(agent.subagents.list_runs()) == 2
+
+
+# LLM: Repeated count fanout should reuse each indexed child, not create a second batch.
+# 函数用途: count=2 第二次重复调用应复用“子任务1/子任务2”，防止父级模型重复 create 后从 2 个扩成 4 个。
+def test_repeated_count_fanout_reuses_indexed_children(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _workspace_agent(tmp_path)
+    params = {
+        "goal": "隔离场景测试：实现 fixture 功能并产出证据",
+        "count": 2,
+        "role": "worker",
+        "agent_name": "小傻妞-隔离测试",
+    }
+    first = json.loads(CreateSubagentsTool(agent).execute(params).output)
+    second = json.loads(CreateSubagentsTool(agent).execute(params).output)
+
+    assert len(first["ids"]) == 2
+    assert second["created_run_ids"] == []
+    assert second["reused_run_ids"] == first["ids"]
+    assert len(agent.subagents.list_runs()) == 2
+
+
+# LLM: A fully done reused batch should not tell the parent to dispatch an empty run-id list.
+# 函数用途: 全部复用任务已 DONE/VERIFIED 时，next_action 应建议看板/汇报状态，而不是 dispatch_subagents 空跑。
+def test_all_reused_done_children_return_non_dispatch_next_action(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _workspace_agent(tmp_path)
+    tool = CreateSubagentsTool(agent)
+    first = json.loads(tool.execute({"items": _pipeline_items("weekly_star_data.md")}).output)
+    for run_id in first["ids"]:
+        task = agent.subagents.load(run_id)
+        task.status = "DONE"
+        task.verification_status = "VERIFIED"
+        agent.subagents.save(task)
+
+    second = json.loads(tool.execute({"items": _pipeline_items("weekly_data.md")}).output)
+
+    assert second["dispatch_run_ids"] == []
+    assert second["next_action"]["tool"] == "subagent_board"
+    assert second["next_action"]["reason"].startswith("create_subagents 没有可调度")
+
+
 # LLM: _pipeline_items mirrors the real Task18 short duplicate batch with stable child names.
 # 函数用途: 返回三段流水线 item，output_name 用来模拟第二次创建时目标文本略有变化。
 def _pipeline_items(output_name: str) -> list[dict[str, object]]:

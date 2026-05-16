@@ -32,6 +32,7 @@ from .orchestration_dispatch_scope import (
     dispatch_take_over_by_default,
     dispatch_workflow_mode,
 )
+from .orchestration_dispatch_state_contract import dispatch_state_contract_payload
 from .orchestration_progress_payload import direct_children_progress_payload
 from .orchestration_run_scope import (
     remember_dispatched_orchestration_run_ids,
@@ -151,6 +152,7 @@ class DispatchSubagentsTool(BaseTool):
         if terminal := dispatch_no_progress_payload(report):
             payload["dispatch_terminal"] = terminal
         payload.update(artifact_integrity_repair_advice_from_records(report.records))
+        payload.update(dispatch_state_contract_payload(self.agent))
         payload.update(direct_children_progress_payload(self.agent))
         payload["typed_envelope"] = subagent_dispatch_envelope_from_payload(payload).to_dict()
         return payload

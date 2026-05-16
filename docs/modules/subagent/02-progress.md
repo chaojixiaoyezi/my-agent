@@ -1605,3 +1605,23 @@
 - 已实现：`fetch_url` / `http_request` 增加按次 `max_chars`，模型可以在批量研究时先拿小预览，避免重复抓取大页面把上下文撑大；全局 `tool_web_max_chars` 仍是上限。
 - 已测试：新增 web 默认工具、绝对路径保真、顶层 worker 能力申请、web per-call preview 四类 regression；focused tests 通过。
 - 下一步：跑更窄的 Task18 short 复测，确认数据收集 worker 不再先因缺 web 工具往返，内容/报告 worker 读取依赖时保留绝对路径；如果报告修复链仍失败，继续按 repair execution contract 和状态合同定位。
+
+## 2026-05-17 创建/调度合同幂等第二片
+- 中文说明：上一片解决了“明确同名小傻妞”重复创建，但默认名 `小傻妞-worker` 仍然有两个风险：同一个任务重复 create 会扩容；不同任务又可能因为默认名相同被误复用。`count=2` 这类批量创建第二次重复调用也会从 2 个扩成 4 个。
+- 对照结论：会话运行时 的 agent tool 用结构化 run id 和 wait/list 状态合同推进；通道运行时 的控制面能看到 session/run 状态；长期助手 delegate 每个子任务有干净 task/session 边界。三者共同点是“调度事实来自机器字段”，不是让模型靠记忆判断刚才有没有创建过。
+- 已修正：默认名现在按 parent/root/role/goal/owner/supervisor/final_owner/extra_write_roots 精确合同复用；目标或产物根不同就创建新 run，避免把不同 worker 合并。
+- 已修正：`count>1` 会给 sibling agent_name 加稳定序号，例如 `小傻妞-隔离测试-1/-2`，并让重复调用复用对应子任务，不再扩容第二批。
+- 已修正：如果本次 create 只复用了已 `DONE/VERIFIED` 的 run，`next_action` 不再建议 `dispatch_subagents` 空跑，而是建议 `subagent_board` 查状态/进入汇报或验收判断。
+- 已测试：新增默认名合同复用、默认名不同目标不复用、count 重复复用、全 done 非 dispatch next_action 四类 regression；create/idempotency focused suites 通过。
+- 已实现：新增 `orchestration_dispatch_state_contract.py`。`dispatch_subagents` 会把当前轮 touched run ids 的 `PLANNING/RUNNING/BLOCKED/DONE` 状态桶放到顶层 `current_turn_run_state`，同时给出 `dispatchable/running/blocked/verified/unfinished/missing` run ids。
+- 已实现：状态合同会按优先级给 root 下一步建议：有 blocked 先 inspect/rescue；有 planning/pending 继续 dispatch；有 running 去看 board/等待；全部 verified 才 summarize/report。
+- 已测试：新增显式 `run_ids` 混合状态 regression，确认 root 不需要展开 bulky records 就能知道下一步。
+- 下一步：继续把真实 E2E 的 repair/execute/verify 闭环接到这个状态合同上，让 blocked run 的建议直接指向 packet/repair/takeover，而不是让 root 再自由发挥猜。
+
+## 2026-05-17 层级命名合同小字/角色/编号修复
+- 中文说明：按新的固定命名约定，系统生成的小傻妞名字不再只靠模型自然语言手写。第 1 层是 `小傻妞-角色-编号`，第 2 层是 `小小傻妞-角色-编号`，第 3 层继续多一个“小”。编号当前用同一批 sibling 的稳定顺序号，便于看板、日志和幂等复用；以后可替换为短随机 id，但格式不变。
+- 已修正：顶层 `create_subagents` 在模型没传明确语义名时，会把默认名补成 `小傻妞-worker-1`、`小傻妞-tester-2` 这类稳定名字；`count>1` 的重复 create 会继续按这些名字和任务合同复用，不会扩容。
+- 已修正：runner 内 `schedule_child_subagents` 会按父级 `depth` 和可见中文前缀生成下一层小字数量。`HierarchyChildSpec.agent_name` 默认是 `worker` 时不会再覆盖真实 role；例如 role=tester 会生成 `小小傻妞-tester-2`。
+- 已保留：模型明确给出的语义后缀（如 `小小傻妞-product-worker`）仍会保留，不会被误修成普通 worker；顶层批量语义名会追加 sibling 编号，例如 `小傻妞-市场-1`，语义和编号都保留；只有空名、`worker/general` 默认名、`小小傻妞` 这种半截前缀会被系统补 role/编号。
+- 已测试：新增 `test_subagent_lineage_naming_contract.py`；并更新裸前缀调度回归，focused create/schedule/natural-language E2E suites 通过。
+- 下一步：继续用真实 E2E 验证父级看板、debug trace 和恢复包里是否都按新 display name 展示，必要时把语义别名独立成 alias 字段，避免 display name 同时承担“稳定 id”和“人类描述”两种职责。

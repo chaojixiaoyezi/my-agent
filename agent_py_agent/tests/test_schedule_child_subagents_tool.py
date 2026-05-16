@@ -37,7 +37,7 @@ def test_runner_context_schedule_bare_lineage_name_returns_payload_not_index_err
 
     assert result.ok is True
     assert payload["created_run_ids"]
-    assert agent.subagents.load(payload["created_run_ids"][0]).agent_name == "小小傻妞-coordinator"
+    assert agent.subagents.load(payload["created_run_ids"][0]).agent_name == "小小傻妞-coordinator-1"
 
 
 # LLM: schedule_child_subagents without children can return LLM advice instead of forcing a fixed flow.

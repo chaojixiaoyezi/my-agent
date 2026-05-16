@@ -10,7 +10,31 @@ from ..subagents.services.base import CreateRunParams
 
 _REUSABLE_STATUSES = {"PLANNING", "PENDING", "RUNNING", "DONE", "COMPLETED", "BLOCKED", "PAUSED"}
 _DISPATCHABLE_STATUSES = {"PLANNING", "PENDING"}
-_GENERIC_AGENT_NAMES = {"", "general", "worker", "subagent", "agent", "小傻妞"}
+_GENERIC_AGENT_NAMES = {
+    "",
+    "general",
+    "worker",
+    "subagent",
+    "agent",
+    "小傻妞",
+    "小傻妞-worker",
+    "小傻妞-general",
+    "小傻妞-researcher",
+    "小傻妞-writer",
+    "小傻妞-tester",
+    "小傻妞-acceptor",
+}
+_GENERIC_LINEAGE_ROLES = {
+    "worker",
+    "general",
+    "researcher",
+    "writer",
+    "tester",
+    "acceptor",
+    "bug-finder",
+    "coordinator",
+    "leaf-worker",
+}
 
 
 # LLM: CreateTaskResolution records whether a task was newly created or reused.
@@ -34,10 +58,19 @@ def resolve_create_run(manager: Any, params: CreateRunParams) -> CreateTaskResol
 # 函数用途: 查询已有同名 sibling run；只复用未失败/未废弃的明确命名子代理，避免无限重复创建。
 def find_reusable_named_child(manager: Any, params: CreateRunParams):
     name = _normalized_name(params.agent_name)
-    if name in _GENERIC_AGENT_NAMES:
-        return None
+    if _is_generic_agent_name(name):
+        return find_reusable_contract_child(manager, params)
     for task in reversed(_safe_list_runs(manager)):
         if _same_create_scope(task, params, name):
+            return task
+    return None
+
+
+# LLM: find_reusable_contract_child covers default-named workers without merging unrelated goals.
+# 函数用途: 对“小傻妞-worker”这类默认名，用 parent/root/role/goal/写入根合同精确复用，避免 root 复读时无限扩容。
+def find_reusable_contract_child(manager: Any, params: CreateRunParams):
+    for task in reversed(_safe_list_runs(manager)):
+        if _same_contract_scope(task, params):
             return task
     return None
 
@@ -74,6 +107,24 @@ def _same_create_scope(task: Any, params: CreateRunParams, name: str) -> bool:
     return _compatible_role(getattr(task, "role", ""), params.role)
 
 
+# LLM: _same_contract_scope is the fallback idempotency key for generic/default display names.
+# 函数用途: 默认名字不可靠时，按精确任务合同复用；目标不同或产物根不同就创建新 run。
+def _same_contract_scope(task: Any, params: CreateRunParams) -> bool:
+    if _status(task) not in _REUSABLE_STATUSES:
+        return False
+    if _text(getattr(task, "parent_id", "")) != _text(params.parent_id):
+        return False
+    if _requested_root_id(params) and _text(getattr(task, "root_id", "")) != _requested_root_id(params):
+        return False
+    if not _compatible_role(getattr(task, "role", ""), params.role):
+        return False
+    if _normalized_goal(getattr(task, "goal", "")) != _normalized_goal(params.goal):
+        return False
+    if _identity_fields(task) != _params_identity_fields(params):
+        return False
+    return _external_write_roots(task) == _params_extra_write_roots(params)
+
+
 # LLM: _requested_root_id treats an omitted root as top-level create scope, not a literal empty root_id.
 # 函数用途: 顶层 create_run 会把 root_id 写成自己的 run id；模型没传 root_id 时按 parent/name 去重即可。
 def _requested_root_id(params: CreateRunParams) -> str:
@@ -90,6 +141,55 @@ def _compatible_role(existing: object, requested: object) -> bool:
     return existing_text == requested_text
 
 
+# LLM: _identity_fields keeps ownership-sensitive tasks from being accidentally reused across supervisors.
+# 函数用途: 提取 task 的 owner/supervisor/final_owner 三元组，用作默认名复用的合同字段。
+def _identity_fields(task: Any) -> tuple[str, str, str]:
+    return (
+        _text(getattr(task, "owner", "")),
+        _text(getattr(task, "supervisor", "")),
+        _text(getattr(task, "final_owner", "")),
+    )
+
+
+# LLM: _params_identity_fields mirrors task ownership fields before persistence.
+# 函数用途: 提取 CreateRunParams 的 owner/supervisor/final_owner 三元组，用作默认名复用的合同字段。
+def _params_identity_fields(params: CreateRunParams) -> tuple[str, str, str]:
+    return (_text(params.owner), _text(params.supervisor), _text(params.final_owner))
+
+
+# LLM: _external_write_roots ignores the task's private runtime dir when comparing user deliverable scope.
+# 函数用途: 从 allowed_write_roots 中去掉 task_dir，只比较用户/父级授权的产物根。
+def _external_write_roots(task: Any) -> tuple[str, ...]:
+    task_dir = _text(getattr(task, "task_dir", ""))
+    roots = []
+    for raw in getattr(task, "allowed_write_roots", []) or []:
+        root = _normalized_path(raw)
+        if root and root != _normalized_path(task_dir):
+            roots.append(root)
+    return tuple(sorted(dict.fromkeys(roots)))
+
+
+# LLM: _params_extra_write_roots is the create-time version of external write roots.
+# 函数用途: 规范化 CreateRunParams.extra_write_roots，确保同一产物根顺序不同也能复用。
+def _params_extra_write_roots(params: CreateRunParams) -> tuple[str, ...]:
+    return tuple(sorted(dict.fromkeys(_normalized_path(item) for item in params.extra_write_roots or [] if _text(item))))
+
+
+# LLM: _normalized_goal is strict enough for idempotency but tolerant of model whitespace.
+# 函数用途: 压缩空白后比较 goal；不做语义猜测，避免把不同任务合并。
+def _normalized_goal(value: object) -> str:
+    return " ".join(_text(value).split())
+
+
+# LLM: _normalized_path keeps write-root comparison stable without resolving nonexistent paths.
+# 函数用途: 清理路径字符串里的尾部斜杠和空格；不访问文件系统。
+def _normalized_path(value: object) -> str:
+    text = _text(value)
+    if text == "/":
+        return text
+    return text.rstrip("/")
+
+
 # LLM: _safe_list_runs keeps mocked managers and old adapters from crashing create_subagents.
 # 函数用途: manager 没有 list_runs 或读取失败时关闭复用逻辑，回到原创建行为。
 def _safe_list_runs(manager: Any) -> list[Any]:
@@ -104,6 +204,27 @@ def _safe_list_runs(manager: Any) -> list[Any]:
 # 函数用途: 规范化 agent_name；不做 aggressive 语义聚类，避免误合并不同子任务。
 def _normalized_name(value: object) -> str:
     return _text(value).casefold()
+
+
+# LLM: _is_generic_agent_name covers role/index names generated by the new lineage contract.
+# 函数用途: 小傻妞-worker-1 这种系统名仍要按 goal/write-root 合同复用，不能只按名字误合并不同任务。
+def _is_generic_agent_name(value: object) -> bool:
+    name = _normalized_name(value)
+    if name in _GENERIC_AGENT_NAMES:
+        return True
+    parts = name.split("-")
+    if len(parts) < 3 or not parts[-1].isdigit():
+        return False
+    prefix = parts[0]
+    role = "-".join(parts[1:-1])
+    return _is_lineage_prefix(prefix) and role in _GENERIC_LINEAGE_ROLES
+
+
+# LLM: _is_lineage_prefix recognizes generated 小傻妞 depth markers.
+# 函数用途: 判断名字第一段是否为“小...傻妞”，用于默认名合同复用。
+def _is_lineage_prefix(value: str) -> bool:
+    text = str(value or "").strip()
+    return len(text) >= 2 and text.endswith("傻妞") and set(text[:-2]) == {"小"}
 
 
 # LLM: _status normalizes task lifecycle values from dataclasses or mocks.
