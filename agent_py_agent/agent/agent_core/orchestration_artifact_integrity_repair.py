@@ -10,6 +10,12 @@ from .orchestration_artifact_integrity_signals import (
     artifact_integrity_signals_from_records,
     artifact_integrity_signals_from_tasks,
 )
+from .orchestration_repair_contract import (
+    RepairContractRequest,
+    repair_contract_acceptance_checks,
+    repair_contract_goal_suffix,
+    repair_contract_tool_fields,
+)
 
 _REPAIR_TOOLS = [
     "subagent_board",
@@ -78,21 +84,25 @@ def _advice(signals: list[dict[str, object]], *, top_level: bool) -> dict[str, o
 # LLM: _top_level_tool_call uses create_subagents because root is outside a runner context.
 # 函数用途: 给顶层 root 的可复制派工参数，继承失败 child 的产物写入根。
 def _top_level_tool_call(signals: list[dict[str, object]]) -> dict[str, object]:
+    contract_fields = _contract_tool_fields(signals)
     return {
         "tool": "create_subagents",
         "count": 1,
         "role": "worker",
+        "agent_name": "小傻妞-产物修复",
         "workflow_mode": "off",
         "goal": _repair_goal(signals),
         "extra_write_roots": _merged_roots(signals),
         "acceptance_checks": _acceptance_checks(),
         "allowed_tools": _REPAIR_TOOLS,
+        **contract_fields,
     }
 
 
 # LLM: _runner_context_tool_call uses schedule_child_subagents for coordinator/worker parents.
 # 函数用途: 给 runner 内父节点的修复 child 建议，不自动创建，不写死工作流。
 def _runner_context_tool_call(signals: list[dict[str, object]]) -> dict[str, object]:
+    contract_fields = _contract_tool_fields(signals)
     return {
         "tool": "schedule_child_subagents",
         "apply": True,
@@ -103,6 +113,7 @@ def _runner_context_tool_call(signals: list[dict[str, object]]) -> dict[str, obj
             "extra_write_roots": _merged_roots(signals),
             "acceptance_checks": _acceptance_checks(),
             "allowed_tools": _REPAIR_TOOLS,
+            **contract_fields,
         }],
     }
 
@@ -120,6 +131,7 @@ def _repair_goal(signals: list[dict[str, object]]) -> str:
         f"失败产物：{artifacts or '查看 output_ref artifacts/tests'}。"
         f"失败码：{blockers or '查看 output_ref blockers/tests'}。"
         "只修复列出的产物文件，补全缺失结构或明显截断内容；不要改写健康分支。"
+        f"{repair_contract_goal_suffix()}"
     )
 
 
@@ -150,7 +162,25 @@ def _acceptance_checks() -> list[str]:
         "只修复 artifact_integrity failure_refs 列出的产物文件",
         "修复后读取被修改文件，确认缺失结构或截断问题已消失",
         "不要改写无关产物或健康分支",
+        *repair_contract_acceptance_checks(),
     ]
+
+
+# LLM: _contract_tool_fields adds the common same-run repair/execute/verify contract.
+# 函数用途: 把产物修复信号转换成 create/schedule 都能携带的上下文合同字段。
+def _contract_tool_fields(signals: list[dict[str, object]]) -> dict[str, object]:
+    return repair_contract_tool_fields(
+        RepairContractRequest(
+            kind="artifact_integrity",
+            failed_run_ids=[str(item.get("run_id") or "") for item in signals],
+            failure_refs=signals,
+            target_artifact_refs=[
+                str(path)
+                for item in signals
+                for path in item.get("artifact_refs", []) or []
+            ],
+        )
+    )
 
 
 # LLM: _unique_text filters empty strings and preserves first-seen order.

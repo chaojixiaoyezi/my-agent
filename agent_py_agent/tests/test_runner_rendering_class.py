@@ -127,6 +127,32 @@ class TestExecutionContextRendering:
         assert "交付高质量代码" in result
         assert "parent_final_gate" in result
 
+    def test_render_execution_context_markdown_with_repair_contract_pack(self):
+        """测试 repair context pack 会展示关键合同字段。"""
+        context = SubAgentExecutionContext(
+            run_id="run-repair",
+            generated_at=time.time(),
+            goal="修复缺失产物",
+            thought="读取 refs 后修复",
+            plan=["读报告", "修复", "验证"],
+            context_packs=[{
+                "kind": "repair_contract",
+                "summary": "同一个 run 内修复、执行、验证",
+                "contract": {
+                    "schema": "subagent_repair_contract.v1",
+                    "kind": "parent_acceptance",
+                    "same_run_required_actions": ["repair_named_scope", "verify_target_artifacts"],
+                    "target_artifact_refs": ["/tmp/out/report.xlsx"],
+                },
+            }],
+        )
+
+        result = render_execution_context_markdown(context)
+
+        assert "contract.schema: subagent_repair_contract.v1" in result
+        assert "repair_named_scope, verify_target_artifacts" in result
+        assert "/tmp/out/report.xlsx" in result
+
     def test_render_execution_context_markdown_with_granted_cards(self):
         """测试带授权卡片执行上下文渲染。
 

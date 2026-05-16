@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from .dispatch_test_failure_summary import acceptance_test_failure_payload
+from .orchestration_repair_contract import (
+    RepairContractRequest,
+    repair_contract_acceptance_checks,
+    repair_contract_goal_suffix,
+    repair_contract_tool_fields,
+)
 
 _MAX_FAILED_LABELS = 6
 
@@ -62,6 +68,7 @@ def _repair_signal(item: Any) -> dict[str, object]:
         "test_failure_summary": str(failure_payload.get("parent_acceptance_test_failure_summary") or ""),
         "test_failure_details": list(failure_payload.get("parent_acceptance_test_failure_details") or []),
         "failed_tests": _failed_test_labels(followup),
+        "artifact_refs": _test_target_refs(test_ref),
         "allowed_write_roots": _allowed_write_roots(item),
     }
 
@@ -70,6 +77,14 @@ def _repair_signal(item: Any) -> dict[str, object]:
 # 函数用途: 生成一名修复 worker 的建议，不自动执行，也不固定最终角色流程。
 def _repair_child_tool_call(signals: list[dict[str, object]]) -> dict[str, object]:
     roots = _merged_roots(signals)
+    contract_fields = repair_contract_tool_fields(
+        RepairContractRequest(
+            kind="parent_acceptance",
+            failed_run_ids=[str(item.get("run_id") or "") for item in signals],
+            failure_refs=signals,
+            target_artifact_refs=_signal_artifact_refs(signals),
+        )
+    )
     return {
         "tool": "schedule_child_subagents",
         "apply": True,
@@ -83,6 +98,7 @@ def _repair_child_tool_call(signals: list[dict[str, object]]) -> dict[str, objec
                     "只修复父级验收 failure_refs 点名的问题",
                     "修复后必须让父级重新 dispatch 并执行验收 tests",
                     "不要改写健康分支或无关产物",
+                    *repair_contract_acceptance_checks(),
                 ],
                 "allowed_tools": [
                     "subagent_board",
@@ -93,6 +109,7 @@ def _repair_child_tool_call(signals: list[dict[str, object]]) -> dict[str, objec
                     "write_file",
                     "append_file",
                 ],
+                **contract_fields,
             }
         ],
     }
@@ -110,6 +127,7 @@ def _repair_goal(signals: list[dict[str, object]]) -> str:
         f"失败测试/线索：{failures}。"
         "只修复被父级验收报告点名的问题，优先补全 HTML/交互/文件路径等确定性失败；"
         "修复完成后写回证据 refs，等待父级重新执行验收 tests。"
+        f"{repair_contract_goal_suffix()}"
     )
 
 
@@ -136,6 +154,29 @@ def _signal_failure_labels(signals: list[dict[str, object]]) -> str:
         labels.extend(str(item) for item in signal.get("test_failure_details") or [])
     unique = _unique_text(labels)
     return "; ".join(unique[:_MAX_FAILED_LABELS]) or "查看 test_execution.json 和 followup 中的 failed_tests"
+
+
+# LLM: _signal_artifact_refs extracts target product refs when failure signals already know them.
+# 函数用途: 给修复合同补目标产物路径；父级验收信号没有产物时保守返回空列表。
+def _signal_artifact_refs(signals: list[dict[str, object]]) -> list[str]:
+    refs: list[str] = []
+    for signal in signals:
+        refs.extend(str(ref) for ref in signal.get("artifact_refs") or [])
+    return _unique_text(refs)
+
+
+# LLM: _test_target_refs extracts file targets from parent test execution records.
+# 函数用途: 从 file/content 检查失败记录里提取目标路径，让 repair contract 知道要验证哪个产物。
+def _test_target_refs(path: Path) -> list[str]:
+    payload = _read_json(path)
+    refs: list[str] = []
+    for record in payload.get("records") or []:
+        if not isinstance(record, dict):
+            continue
+        result = record.get("validation_result")
+        if isinstance(result, dict):
+            refs.append(str(result.get("path") or ""))
+    return _unique_text(refs)
 
 
 # LLM: _failed_test_labels normalizes followup failed_tests for model-facing repair goals.

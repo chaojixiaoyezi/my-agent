@@ -129,7 +129,36 @@ def _render_context_pack_item_lines(item: dict[str, object]) -> list[str]:
     for key in ["kind", "summary", "path", "ref", "role"]:
         if item.get(key):
             lines.append(f"  - {key}: {item[key]}")
+    lines.extend(_render_context_pack_contract_lines(item.get("contract")))
     return lines
+
+
+# LLM: _render_context_pack_contract_lines exposes small repair-contract facts in the runner prompt.
+# 函数用途: 渲染 repair_contract 的动作词和目标 refs；保持上限，避免把大合同或产物正文塞进 prompt。
+def _render_context_pack_contract_lines(value: object) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    lines = []
+    for key in ["schema", "kind"]:
+        if value.get(key):
+            lines.append(f"  - contract.{key}: {value[key]}")
+    actions = _bounded_contract_list(value.get("same_run_required_actions"), limit=6)
+    if actions:
+        lines.append(f"  - contract.same_run_required_actions: {', '.join(actions)}")
+    targets = _bounded_contract_list(value.get("target_artifact_refs"), limit=6)
+    if targets:
+        lines.append("- contract.target_artifact_refs:")
+        lines.extend(f"    - {item}" for item in targets)
+    return lines
+
+
+# LLM: _bounded_contract_list keeps prompt-visible contract lists small and string-only.
+# 函数用途: 将合同字段压成短列表；非列表字段不渲染，避免异常对象进入 Markdown。
+def _bounded_contract_list(value: object, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items = [" ".join(str(item or "").split()) for item in value[:limit]]
+    return [item for item in items if item]
 # LLM: _render_context_packs_section 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 函数用途: 渲染或汇总上下文packssection的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _render_context_packs_section(context):

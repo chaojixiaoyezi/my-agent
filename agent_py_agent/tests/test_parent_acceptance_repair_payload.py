@@ -47,18 +47,69 @@ def test_rejected_parent_tests_include_scoped_repair_child(tmp_path: Path):
     assert repair_child["role"] == "worker"
     assert "child-a" in repair_child["goal"]
     assert "HTML语法静态检查" in repair_child["goal"]
+    assert repair_child["repair_contract"]["schema"] == "subagent_repair_contract.v1"
+    assert "execute_generated_scripts_or_commands_if_needed" in repair_child["repair_contract"]["same_run_required_actions"]
+    assert str(reports_dir / "test_execution.json") in repair_child["required_read_paths"]
+    assert repair_child["context_packs"][0]["kind"] == "repair_contract"
 
 
 # LLM: top-level dispatch rejects should suggest create_subagents, not runner-only schedule_child_subagents.
 # 函数用途: 顶层 root 看到父级验收失败时，应拿到可派修复小傻妞的 refs-first 工具建议。
 def test_top_level_rejected_parent_tests_include_repair_child_tool_call(tmp_path: Path):
+    fixture = _top_level_reject_fixture(tmp_path)
+
+    payload = dispatch_record_payload(fixture.item)
+
+    assert payload["next_action"] == "create_repair_child_from_parent_acceptance_refs"
+    advice = payload["parent_acceptance_repair_advice"]
+    assert advice["failed_run_ids"] == ["child-a"]
+    assert advice["failure_refs"][0]["output_ref"] == str(fixture.output_ref)
+    suggested = advice["suggested_tool_call"]
+    assert suggested["tool"] == "create_subagents"
+    assert suggested["extra_write_roots"] == [str(fixture.product_root)]
+    assert str(fixture.test_ref) in suggested["goal"]
+    assert suggested["repair_contract"]["kind"] == "parent_acceptance"
+    assert str(fixture.test_ref) in suggested["repair_contract"]["required_read_paths"]
+    assert str(fixture.missing_xlsx) in suggested["repair_contract"]["target_artifact_refs"]
+    assert suggested["agent_name"] == "小傻妞-验收修复"
+    assert suggested["context_manifest"]["task_pack_refs"] == ["subagent_repair_contract.v1"]
+
+
+# LLM: _top_level_reject_fixture keeps the repair-contract test below size limits.
+# 函数用途: 准备顶层 parent acceptance reject 记录和对应 run/test/output refs。
+def _top_level_reject_fixture(tmp_path: Path) -> SimpleNamespace:
     run_dir = tmp_path / "child-a"
     reports_dir = run_dir / "reports"
     reports_dir.mkdir(parents=True)
-    test_ref = reports_dir / "test_execution.json"
-    followup_ref = reports_dir / "parent_acceptance_auto_followup.json"
+    refs = _top_level_reject_refs(run_dir, tmp_path / "deliverables" / "furniture-home")
+    return SimpleNamespace(
+        run_dir=run_dir,
+        item=_top_level_reject_item(refs.test_ref, refs.followup_ref),
+        **refs.__dict__,
+    )
+
+
+# LLM: _top_level_reject_refs writes machine refs for one rejected child.
+# 函数用途: 写 run.json、output.json 和 test_execution.json，让 repair payload 从真实小文件取合同字段。
+def _top_level_reject_refs(run_dir: Path, product_root: Path) -> SimpleNamespace:
+    test_ref = run_dir / "reports" / "test_execution.json"
     output_ref = run_dir / "output.json"
-    product_root = tmp_path / "deliverables" / "furniture-home"
+    missing_xlsx = product_root / "github_weekly_star_growth_short.xlsx"
+    _write_parent_reject_run_ref(run_dir, product_root)
+    output_ref.write_text(json.dumps({"artifacts": [{"path": "deliverables/furniture-home/index.html"}]}), encoding="utf-8")
+    test_ref.write_text(json.dumps({"records": [{"validation_result": {"ok": False, "path": str(missing_xlsx)}}]}), encoding="utf-8")
+    return SimpleNamespace(
+        test_ref=test_ref,
+        followup_ref=run_dir / "reports" / "parent_acceptance_auto_followup.json",
+        output_ref=output_ref,
+        product_root=product_root,
+        missing_xlsx=missing_xlsx,
+    )
+
+
+# LLM: _write_parent_reject_run_ref records product roots for the top-level repair suggestion.
+# 函数用途: 写 run.json，模拟失败 child 已授权的产物根。
+def _write_parent_reject_run_ref(run_dir: Path, product_root: Path) -> None:
     (run_dir / "run.json").write_text(
         json.dumps({
             "task_dir": str(run_dir),
@@ -66,8 +117,12 @@ def test_top_level_rejected_parent_tests_include_repair_child_tool_call(tmp_path
         }, ensure_ascii=False),
         encoding="utf-8",
     )
-    output_ref.write_text(json.dumps({"artifacts": [{"path": "deliverables/furniture-home/index.html"}]}), encoding="utf-8")
-    item = SimpleNamespace(
+
+
+# LLM: _top_level_reject_item mirrors the dispatch acceptance reject record.
+# 函数用途: 构造顶层 dispatch_record_payload 需要的 parent acceptance reject 字段。
+def _top_level_reject_item(test_ref: Path, followup_ref: Path) -> SimpleNamespace:
+    return SimpleNamespace(
         step="acceptance",
         action="reject",
         run_id="child-a",
@@ -84,17 +139,6 @@ def test_top_level_rejected_parent_tests_include_repair_child_tool_call(tmp_path
         parent_acceptance_followup_ref=str(followup_ref),
     )
 
-    payload = dispatch_record_payload(item)
-
-    assert payload["next_action"] == "create_repair_child_from_parent_acceptance_refs"
-    advice = payload["parent_acceptance_repair_advice"]
-    assert advice["failed_run_ids"] == ["child-a"]
-    assert advice["failure_refs"][0]["output_ref"] == str(output_ref)
-    suggested = advice["suggested_tool_call"]
-    assert suggested["tool"] == "create_subagents"
-    assert suggested["extra_write_roots"] == [str(product_root)]
-    assert str(test_ref) in suggested["goal"]
-
 
 # LLM: Artifact integrity blocks should become scoped repair work instead of generic blocker prose.
 # 函数用途: child 产物结构检查失败时，顶层 dispatch payload 要建议创建修复小傻妞读取 output/run refs。
@@ -110,8 +154,12 @@ def test_top_level_artifact_integrity_blocker_includes_repair_child_tool_call(tm
     assert advice["failure_refs"][0]["artifact_refs"] == [str(fixture.artifact)]
     suggested = advice["suggested_tool_call"]
     assert suggested["tool"] == "create_subagents"
+    assert suggested["agent_name"] == "小傻妞-产物修复"
     assert suggested["extra_write_roots"] == [str(fixture.product_root)]
     assert "missing_body_close" in suggested["goal"]
+    assert suggested["repair_contract"]["kind"] == "artifact_integrity"
+    assert suggested["repair_contract"]["target_artifact_refs"] == [str(fixture.artifact)]
+    assert "execute_generated_scripts_or_commands_if_needed" in suggested["repair_contract"]["same_run_required_actions"]
 
 
 # LLM: _artifact_integrity_blocker_fixture writes the compact run/output refs used by repair payload tests.

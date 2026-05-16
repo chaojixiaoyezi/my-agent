@@ -1584,3 +1584,14 @@
 - 真实复测：`/Users/xiaoyezi/my-claude-code/third-party-eval/runs/my-agent/task_18_short/20260517-003526/task_18_short_github_star_growth_xlsx` 一开始只创建 3 个 child，未再出现同名第二批；数据收集在授权网络能力后重跑到 `DONE/VERIFIED`，内容编写也 `DONE/VERIFIED`。
 - 新暴露：报告生成脚本有语法错误、执行工作目录边界失败，root 后续创建修复/执行小傻妞尝试补救；这属于下一层“脚本生成-执行-验收修复闭环”，不属于 create 幂等问题。
 - 下一步：修复 repair/execute 闭环，确保生成脚本后由同一个修复任务完成语法检查、执行和产物验证，不再拆出多段空转 repair 链。
+
+## 2026-05-17 Repair Contract 第一片
+- 中文说明：Task18 short 暴露的下一层问题是“修脚本”和“执行脚本/验证 xlsx”被拆成多个漂移小傻妞。现在先把 repair 建议升级成结构化合同，要求同一个 repair run 负责读取失败 refs、修复、必要执行、验证目标产物和报告 refs。
+- 对照结论：Codex 的 spawn/wait/list 用工具 schema 固定任务状态；OpenClaw completion handoff 返回稳定状态和结果；Hermes delegate 父级只拿子任务 summary/result。我们这里不再只给一段自然语言 repair goal，而是同时返回 `repair_contract`、`required_read_paths`、`context_manifest` 和 `context_packs`。
+- 已实现：新增 `orchestration_repair_contract.py`，被 parent-acceptance repair 和 artifact-integrity repair 共用。合同 schema 为 `subagent_repair_contract.v1`，动作包括 `read_failure_refs`、`repair_named_scope`、`execute_generated_scripts_or_commands_if_needed`、`verify_target_artifacts`、`report_artifact_and_test_refs`。
+- 已实现：顶层 `create_subagents` 修复建议和 runner 内 `schedule_child_subagents` 修复建议都会携带同一合同字段；顶层建议还给出稳定 `agent_name`，便于 create 幂等复用同一个 repair owner。修复 worker 的 acceptance checks 也要求同一个 run 闭环，不再建议另派一个只执行脚本/命令的 child。
+- 已实现：repair contract 会从 `output.json.artifacts` 和 `test_execution.json.records[].validation_result.path` 收集目标产物 refs；即使最终 xlsx/html 没写进 artifacts，只要父级测试记录了缺失路径，修复小傻妞也能知道必须验证哪个产物。
+- 已验证：`create_subagents` 会把 repair 建议里的 `required_read_paths` 和 `context_packs` 持久到 child task 的 `context_manifest/context_packs`，runner 开始时能看到合同，而不是只有 root 的工具返回里有。
+- 已实现：runner execution context 的 Context Packs 渲染会展示 repair contract 的 schema、kind、same-run required actions 和目标 artifact refs。这样 repair 子代理不需要猜 execution context JSON，Markdown prompt 里就能看到“要修并验证哪个产物”。
+- 已测试：`test_parent_acceptance_repair_payload.py` 新增合同断言；相关 dispatch/artifact/create focused suites、ruff 和 strict code-size 通过。
+- 下一步：继续把这个合同接入真实 repair 调度闭环。目标是当 child 已生成脚本但最终产物缺失时，系统能创建/复用一个 repair owner，并在同一 run 内完成修复、执行和验证，而不是继续按阶段新建 repair worker。

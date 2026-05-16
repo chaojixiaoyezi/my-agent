@@ -73,3 +73,26 @@ def test_vague_deliverable_worker_defaults_to_workspace_root():
 
     assert result.ok is True
     assert params.extra_write_roots == [str(Path("/tmp/project").resolve(strict=False))]
+
+
+# LLM: Repair suggested tool calls must survive create_subagents into the runner context.
+# 函数用途: 验证 repair_contract 第一片的 required refs/context packs 会写入真实 task，而不是只停留在父级工具输出里。
+def test_repair_contract_fields_are_persisted_to_child_context(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    test_ref = str(tmp_path / "reports" / "test_execution.json")
+    agent = _mock_workspace_agent(tmp_path)
+
+    result = CreateSubagentsTool(agent).execute({
+        "goal": "修复失败报告中的 xlsx 生成问题。",
+        "agent_name": "小傻妞-验收修复",
+        "role": "worker",
+        "required_read_paths": [test_ref],
+        "context_packs": [{"kind": "repair_contract", "summary": "同一个 run 内修复、执行、验证"}],
+    })
+    payload = json.loads(result.output)
+    task = agent.subagents.load(payload["ids"][0])
+
+    assert result.ok is True
+    assert task.context_manifest.required_read_paths == [test_ref]
+    assert task.context_packs[0]["kind"] == "repair_contract"
