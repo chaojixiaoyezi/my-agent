@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from .models import EvidencePacket, SubAgentTask
+from .result_artifact_roots import artifact_candidate_roots, artifact_suffix_roots
 from .utils import _merge_list, _new_id
 
 
@@ -66,43 +67,12 @@ def normalize_artifact_ref(task: SubAgentTask, value: object) -> str:
 # LLM: _resolve_relative_artifact searches only task-local roots so artifact repair stays bounded.
 # 函数用途: 先按候选根拼接相对路径，再按文件名和后缀做有限恢复；不扫描用户整台机器。
 def _resolve_relative_artifact(task: SubAgentTask, path: Path) -> Path | None:
-    roots = _artifact_roots(task)
-    for root in roots:
+    direct_roots = artifact_candidate_roots(task)
+    for root in direct_roots:
         candidate = root / path
         if candidate.exists():
             return candidate
-    return _resolve_by_suffix(path, roots)
-
-
-# LLM: _artifact_roots orders concrete run/workspace/shared roots before broad fallback roots.
-# 函数用途: 返回当前 run 能合理产生产物的目录，包含 runtime workspace/shared/artifacts；allowed_write_roots 文件路径用父目录参与解析。
-def _artifact_roots(task: SubAgentTask) -> list[Path]:
-    raw_roots = [
-        getattr(task, "output_dir", ""),
-        getattr(task, "reports_dir", ""),
-        getattr(task, "agent_run_workspace_dir", ""),
-        getattr(task, "task_workspace_artifacts_dir", ""),
-        getattr(task, "agent_run_artifacts_dir", ""),
-        getattr(task, "task_workspace_shared_dir", ""),
-        getattr(task, "task_workspace_dir", ""),
-        getattr(task, "task_dir", ""),
-        getattr(task, "data_dir", ""),
-        getattr(task, "scratch_dir", ""),
-        *(getattr(task, "allowed_write_roots", []) or []),
-    ]
-    roots: list[Path] = []
-    for value in raw_roots:
-        text = str(value or "").strip()
-        if not text:
-            continue
-        try:
-            path = Path(text).expanduser()
-        except OSError:
-            continue
-        root = path if path.is_dir() else path.parent
-        if root.exists() and root.is_dir() and root not in roots:
-            roots.append(root)
-    return roots
+    return _resolve_by_suffix(path, artifact_suffix_roots(task))
 
 
 # LLM: _resolve_by_suffix repairs common short refs like report.md without broad text matching.

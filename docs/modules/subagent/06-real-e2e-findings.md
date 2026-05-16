@@ -8424,3 +8424,110 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Status:
   - Fixed in focused tests.
   - Full suite should stay green after rerun; keep future path fixes in structured product refs, not prompt wording.
+
+### Finding 158: Created-child self output paths must be rebound to the actual run id
+
+- Trigger:
+  - Task18 short real run under `/Users/example/my-终端应用/third-party-eval/runs/my-agent/task_18_short/20260516-232743/task_18_short_github_star_growth_xlsx`.
+  - Tool output artifact: `/Users/example/my-终端应用/third-party-eval/runs/my-agent/task_18_short/20260516-232743/task_18_short_github_star_growth_xlsx/memory_archive/artifacts/tool_outputs/create_subagents-2-1-735fef4a2b38.json`.
+- Problem:
+  - Root created real child `subagent-1778945279-a193a8d5`, but the child goal told it to write `data/subagents/subagent-1778934654-79b8ef1e/data_collection.md`.
+  - The child then created that stale directory and kept looping/searching after partial output, because the persisted goal and actual run workspace disagreed.
+- 中文解释:
+  - 新小傻妞已经有自己的真实编号，但任务说明里混进了上一次/旧记忆里的编号。
+  - 它就像拿着别人家的门牌号去交作业，文件虽然写出来了，系统后面很难稳定判断“这是谁的产物”。
+  - 这个不能靠提示词提醒模型别写错；系统应该在真实编号生成后，把“当前小傻妞自己要写的产物路径”重新绑定到它自己的编号。
+- 通道运行时/长期助手 comparison:
+  - 通道运行时 侧重 session/run handle 与 workspace 上下文，任务续接时靠当前 session/工作区事实，不让模型猜未来 run id。
+  - 长期助手 delegate/handoff 更像 task-local refs，worker 拿到的是任务空间和交接 refs，而不是一个由模型拼出来的子代理目录。
+  - Lesson: model prose can mention desired files, but concrete run-owned paths must be normalized after the system creates the run id.
+- Fix:
+  - Added `output_ref_rebinding.py`.
+  - `create_run` now scans `goal/thought/plan/acceptance_checks` after the real run id exists.
+  - Only output/write contexts such as `写到/生成/保存到/输出到` are rebound from `data/subagents/<old-subagent-id>/...` to `data/subagents/<current-run-id>/...`.
+  - Input contexts such as `读取/基于/参考` are left untouched so downstream tasks can still read upstream refs.
+  - Rebinding audit records are persisted at `task.attributes.output_ref_rebindings`.
+- Verification:
+  - Added lifecycle regression proving output refs are rebound while input refs are preserved.
+  - Added create_subagents payload regression proving the model-visible payload returns the corrected run-owned path.
+- Status:
+  - Fixed in focused tests.
+  - Next live check: rerun Task18 short and compare with 通道运行时/长期助手 behavior; if a child still loops after writing, investigate structured closeout rather than path guessing.
+
+### Finding 159: Workspace product artifact refs must validate from the task workspace root
+
+- Trigger:
+  - Task18 short rerun under `/Users/example/my-终端应用/third-party-eval/runs/my-agent/task_18_short/20260516-234925/task_18_short_github_star_growth_xlsx`.
+  - Child `subagent-1778946599-5869837d` wrote `/Users/example/my-终端应用/third-party-eval/runs/my-agent/task_18_short/20260516-234925/task_18_short_github_star_growth_xlsx/data/subagents/subagent_data_collection/star_data.md`.
+- Problem:
+  - The file existed, but closeout marked the child `BLOCKED / UNVERIFIED` with `missing_artifact_refs: data/subagents/subagent_data_collection/star_data.md`.
+  - `normalize_artifact_ref()` and artifact integrity only searched run-local roots such as `data/subagents/<actual_run_id>/...`; they did not resolve task workspace product refs from the workspace root.
+- 中文解释:
+  - 小傻妞把作业交到了任务公共产物区，文件是真的有。
+  - 但验收员只去“小傻妞自己的房间”找，没有去“整个任务的公共产物区”找，所以误判丢了。
+  - 这不是模型提示词问题，而是系统查文件的根目录不一致。
+- 通道运行时/长期助手 comparison:
+  - 通道运行时 的 session/workspace 事实会把当前工作区作为路径边界，不要求所有产物都塞进某个子 session 内部目录。
+  - 长期助手 delegate 输出也更偏向 job/task output dir 和结构化 handoff refs，父级按任务输出空间找 refs，而不是只按 worker 私有目录猜。
+  - Lesson: artifact refs need one shared bounded root policy. Natural-language paths can be flexible, but normalize and integrity must agree on the same task workspace roots.
+- Fix:
+  - Added `result_artifact_roots.py` as the shared artifact root policy.
+  - `result_artifact_evidence.py` and `result_artifact_integrity.py` now use the same candidate roots.
+  - When a known path contains `data/subagents/<run>`, the resolver derives the task workspace root and can validate exact refs like `data/subagents/subagent_data_collection/star_data.md`.
+  - Broad suffix recovery still excludes the derived workspace root to avoid expensive workspace-wide scans.
+- Verification:
+  - Added `test_workspace_product_artifact_ref_is_not_missing_from_run_local_task`; it failed before the fix and passes after.
+  - Re-ran focused artifact processor tests.
+- Status:
+  - Fixed in focused tests.
+  - Next live check: rerun Task18 short and verify data collection no longer blocks on an existing workspace product artifact.
+
+### Finding 160: Repeated create_subagents calls should reuse named children instead of growing the tree
+
+- Trigger:
+  - Task18 short rerun under `/Users/example/my-终端应用/third-party-eval/runs/my-agent/task_18_short/20260517-000719/task_18_short_github_star_growth_xlsx`.
+  - Root first created `subagent-1778947699-*` for 数据收集 / 内容编写 / 生成报告, then after reading board and files created a second same-name batch `subagent-1778947815-*`.
+- Problem:
+  - The final task completed, but the task tree had 3 unused `PLANNING / UNVERIFIED` children from the first batch.
+  - The tool response did not distinguish newly created vs existing children, so root had to infer from prose and board text whether it had already created the correct team.
+- 中文解释:
+  - root 已经叫来了三位小傻妞，但后面看状态时又觉得“这批好像不对”，于是又叫了一批同名小傻妞。
+  - 任务能做完，但树会变乱，后续恢复、验收和统计都会多出空转节点。
+  - 这个不能靠提示词说“别重复创建”，应该由工具层保证：同一个父任务下同名同职责的小傻妞已经存在，就直接复用。
+- 通道运行时/长期助手 comparison:
+  - 通道运行时 的 session/run 控制面把当前活动 session 作为事实，不需要模型从自然语言回忆刚刚 spawn 了谁。
+  - 长期助手 delegate/handoff 也是任务 handle 优先；重复操作应该回到已有 job/task refs，而不是让树继续膨胀。
+  - Lesson: create/schedule needs idempotent structured contracts, separate from artifact path contracts.
+- Fix:
+  - Added `orchestration_create_idempotency.py`.
+  - `create_subagents` now checks same parent/root, explicit `agent_name`, compatible `role`, and reusable lifecycle status before creating.
+  - Payload now includes `created_run_ids`, `reused_run_ids`, and `dispatch_run_ids`.
+  - Reused `DONE/VERIFIED`, `RUNNING`, or `BLOCKED` children remain visible but are not suggested for duplicate dispatch; `PLANNING/PENDING` children are returned as dispatch candidates.
+- Verification:
+  - Added a repeated Task18-like three-child pipeline regression; the second create returns only `reused_run_ids` and no new runs.
+  - Added regression that a reused `DONE/VERIFIED` child is excluded from `dispatch_run_ids`.
+- Status:
+  - Fixed in focused tests and live retest.
+  - Live retest `20260517-003526` started with exactly 3 pipeline children and did not create an unused same-name second batch.
+  - New follow-up: repair/execute closeout can still grow extra repair children after a script generation failure; track separately below.
+
+### Finding 161: Script-generation repair should not split fix and execute into drifting repair children
+
+- Trigger:
+  - Task18 short live retest under `/Users/example/my-终端应用/third-party-eval/runs/my-agent/task_18_short/20260517-003526/task_18_short_github_star_growth_xlsx`.
+  - The main three-child pipeline did not duplicate, and the first two workers reached `DONE/VERIFIED`.
+- Problem:
+  - `小傻妞-生成报告` produced `generate_xlsx.py` and a report, but xlsx generation failed because the script had a syntax error and an earlier execution attempt hit a workspace working_dir boundary.
+  - Root then created `小傻妞-整合修复`, which fixed the script, but afterward created another `小傻妞-执行生成`, and then another planned `小傻妞-执行xlsx生成`.
+  - The repair chain started growing by phase instead of keeping one repair owner responsible for syntax check, execution, and artifact verification.
+- 中文解释:
+  - 这次不是重复创建同一批流水线 worker，而是“修一下脚本”和“执行脚本”被拆成了好几个补救小傻妞。
+  - 正确形态应该是：一个修复小傻妞拿到脚本、错误、目标 xlsx 路径，然后自己完成修复、运行、验证，不要修一半又丢给另一个小傻妞。
+  - 否则任务虽然可能最后做完，但会变慢、变乱，父级也更难判断谁负责最终产物。
+- 通道运行时/长期助手 comparison:
+  - 通道运行时 的 session/task continuation 更像同一个会话继续处理当前故障，不会每个小动作都变成新 session。
+  - 长期助手 delegate/handoff 更强调一个 job 的 output dir 和 failure context；修复任务应该带着失败上下文完成闭环，而不是只做半步。
+  - Lesson: repair tasks need an explicit completion contract that includes fix, execute, verify, and final artifact refs.
+- Status:
+  - Observed and recorded; not fixed in this slice.
+  - Next fix should live in repair/acceptance orchestration: when a child has generated an executable artifact but product artifact is missing, create/reuse one repair run with required refs and an explicit `fix_execute_verify` contract.

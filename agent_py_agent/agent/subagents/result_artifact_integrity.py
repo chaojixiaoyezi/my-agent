@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .result_artifact_evidence import normalize_artifact_ref
+from .result_artifact_roots import artifact_candidate_roots
 
 
 # LLM: enforce_artifact_integrity marks missing local product refs as runner blockers.
@@ -82,37 +83,7 @@ def _local_ref_missing(task: Any, ref: object) -> bool:
 # LLM: _candidate_roots mirrors artifact resolution roots including runtime workspace/shared roots.
 # 函数用途: 给相对产物路径提供 output/reports/run workspace/shared 等有限候选根，避免误扫用户整机。
 def _candidate_roots(task: Any) -> list[Path]:
-    roots: list[Path] = []
-    for value in (
-        getattr(task, "output_dir", ""),
-        getattr(task, "reports_dir", ""),
-        getattr(task, "agent_run_workspace_dir", ""),
-        getattr(task, "task_workspace_artifacts_dir", ""),
-        getattr(task, "agent_run_artifacts_dir", ""),
-        getattr(task, "task_workspace_shared_dir", ""),
-        getattr(task, "task_workspace_dir", ""),
-        getattr(task, "task_dir", ""),
-        getattr(task, "data_dir", ""),
-        getattr(task, "scratch_dir", ""),
-        *(getattr(task, "allowed_write_roots", []) or []),
-    ):
-        _append_root(roots, value)
-    return roots
-
-
-# LLM: _append_root normalizes path-like roots defensively for MagicMock-heavy tests.
-# 函数用途: 将存在的目录加入候选根；文件路径用父目录参与判断。
-def _append_root(roots: list[Path], value: object) -> None:
-    text = str(value or "").strip()
-    if not text:
-        return
-    try:
-        path = Path(text).expanduser()
-    except OSError:
-        return
-    root = path if path.is_dir() else path.parent
-    if root.exists() and root.is_dir() and root not in roots:
-        roots.append(root)
+    return artifact_candidate_roots(task)
 
 
 # LLM: _append_ref keeps first occurrence order stable for diagnostic messages.

@@ -32,6 +32,13 @@ from .orchestration_create_constraints import (
     delegation_constraint_conflict_error,
     explicit_root_missing_write_root_error,
 )
+from .orchestration_create_idempotency import (
+    CreateTaskResolution,
+    created_tasks,
+    dispatchable_tasks,
+    resolve_create_run,
+    reused_tasks,
+)
 from .orchestration_create_items import CreateSubagentItem, create_items_from_params
 from .orchestration_create_policy import (
     create_run_params,
@@ -105,9 +112,10 @@ class CreateSubagentsTool(BaseTool):
         ambiguous_product_count = ambiguous_repeated_product_goal_error(goal, count, run_params.role)
         if ambiguous_product_count:
             return ToolExecutionResult("create_subagents", False, ambiguous_product_count)
-        tasks = self._create_tasks(goal, count, run_params)
+        resolutions = self._create_tasks(goal, count, run_params)
+        tasks = [item.task for item in resolutions]
         remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
-        payload = self._create_payload(tasks, allowed_tools)
+        payload = self._create_payload(resolutions, allowed_tools)
         return ToolExecutionResult(
             "create_subagents",
             True,
@@ -125,20 +133,19 @@ class CreateSubagentsTool(BaseTool):
             validation = self._validate_single_goal(item.params, item.goal, allowed_tools)
             if validation:
                 return ToolExecutionResult("create_subagents", False, validation)
-        tasks = []
+        resolutions: list[CreateTaskResolution] = []
         for item in capped:
-            task = self.agent.subagents.create_run(
-                params=create_run_params(
-                    self.agent,
-                    item.params,
-                    item.goal,
-                    subagent_allowed_tools(item.params),
+            resolution = resolve_create_run(
+                self.agent.subagents,
+                create_run_params(
+                    self.agent, item.params, item.goal, subagent_allowed_tools(item.params),
                 ),
             )
-            tasks.append(task)
+            resolutions.append(resolution)
+        tasks = [item.task for item in resolutions]
         _apply_item_dependency_edges(self.agent.subagents, tasks, dependency_edges)
         remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
-        payload = self._create_payload(tasks, _payload_allowed_tools(allowed_tool_values))
+        payload = self._create_payload(resolutions, _payload_allowed_tools(allowed_tool_values))
         payload["batch_mode"] = "items"
         return ToolExecutionResult(
             "create_subagents",
@@ -186,25 +193,37 @@ class CreateSubagentsTool(BaseTool):
 
     # LLM: _create_tasks 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 构建tasks所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
-    def _create_tasks(self, goal: str, count: int, run_params: CreateRunParams):
-        tasks = []
+    def _create_tasks(self, goal: str, count: int, run_params: CreateRunParams) -> list[CreateTaskResolution]:
+        resolutions: list[CreateTaskResolution] = []
         for index in range(1, count + 1):
             task_goal = run_params.goal if count == 1 else f"{run_params.goal} / 子任务{index}"
             task_params = CreateRunParams(**{**run_params.__dict__, "goal": task_goal})
-            task = self.agent.subagents.create_run(
-                params=task_params,
-            )
-            tasks.append(task)
-        return tasks
+            if count > 1:
+                task = self.agent.subagents.create_run(params=task_params)
+                resolutions.append(CreateTaskResolution(task=task, reused=False))
+            else:
+                resolutions.append(resolve_create_run(self.agent.subagents, task_params))
+        return resolutions
 
     # LLM: _create_payload 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 构建载荷所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
-    def _create_payload(self, tasks, allowed_tools: list[str] | str | None) -> dict[str, object]:
+    def _create_payload(
+        self,
+        resolutions: list[CreateTaskResolution],
+        allowed_tools: list[str] | str | None,
+    ) -> dict[str, object]:
+        tasks = [item.task for item in resolutions]
+        created = created_tasks(resolutions)
+        reused = reused_tasks(resolutions)
+        dispatch = dispatchable_tasks(tasks)
         payload: dict[str, object] = {
-            "created": len(tasks),
+            "created": len(created),
             "ids": [task.id for task in tasks],
+            "created_run_ids": [task.id for task in created],
+            "reused_run_ids": [task.id for task in reused],
+            "dispatch_run_ids": [task.id for task in dispatch],
             "allowed_tools": allowed_tools or "automatic",
-            "next_action": _dispatch_next_action(tasks),
+            "next_action": _dispatch_next_action(dispatch),
             "subagent_workspace": str(self.agent.subagents.workspace),
             "tasks": [
                 {
