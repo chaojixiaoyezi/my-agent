@@ -26,3 +26,25 @@ def remembered_orchestration_run_ids(agent: object) -> set[str]:
     if not isinstance(seen, set):
         return set()
     return {str(item) for item in seen if str(item or "").strip()}
+
+
+# LLM: remember_dispatched_orchestration_run_ids tracks runs that have actually crossed dispatch.
+# 函数用途: 单独记录已经 dispatch 过的 run_id；最终回答兜底只看这组，避免只创建未调度时被误判为失败。
+def remember_dispatched_orchestration_run_ids(agent: object, run_ids: Iterable[object]) -> None:
+    seen = getattr(agent, "_orchestration_dispatched_run_ids_seen", None)
+    if not isinstance(seen, set):
+        seen = set()
+        agent._orchestration_dispatched_run_ids_seen = seen
+    for raw in run_ids:
+        run_id = str(raw or "").strip()
+        if run_id:
+            seen.add(run_id)
+
+
+# LLM: remembered_dispatched_orchestration_run_ids returns the dispatch-only root-turn scope.
+# 函数用途: 给最终回答 guard 读取真实调度过的 run_id；纯 create_subagents 不进入这里。
+def remembered_dispatched_orchestration_run_ids(agent: object) -> set[str]:
+    seen = getattr(agent, "_orchestration_dispatched_run_ids_seen", None)
+    if not isinstance(seen, set):
+        return set()
+    return {str(item) for item in seen if str(item or "").strip()}

@@ -1494,3 +1494,11 @@
 - 已记录：详见 `docs/modules/subagent/06-real-e2e-findings.md` 的 Finding 136。
 - 已测试：required-file contracts、context bundle、direct-write guard、manager lifecycle、hierarchy recovery focused suites 通过。
 - 下一步：重跑 Task17，确认市场分支不会再因为输入资料 `vietnam.md` 被挡；如果 root 被阻止写最终报告，应只派一个整合/修复 worker 来完成。
+
+## 2026-05-16 Task17 复跑：final response guard 记住派工 scope
+- 中文说明：重跑 Task17 后，`vietnam.md` 输入资料误判已修好，市场环境分支和进入策略分支都能完成；新问题出在最终回答阶段。
+- 发现问题：`小傻妞-竞争格局` 仍是 `BLOCKED / UNVERIFIED / missing_artifact_refs`，但 root 后面读取了整合 worker 的报告后，最终自然语言里说任务已完成，并声称有 `final_report.md`。
+- 大白话原因：root 前面派过小傻妞，系统也知道其中一个没过；但最终回答 guard 只看最后一段工具流里有没有 dispatch。后面读文件、读 artifact、搜索文本以后，这个判断太窄，漏掉了早先派工的阻塞状态。
+- 已修正：final response guard 现在会看本轮真实 dispatch 过的 subagent run scope。只创建但还没调度的正常等待状态不会被误判；只要已 dispatch 的 run 里还有未解决 blocker，哪怕后面又读了文件或搜索，最终也会被替换成“不能按完成汇报”的确定性状态说明。
+- 已测试：新增 `test_final_response_guard_uses_remembered_scope_after_later_tools` 先红后绿；`test_tool_loop_subagent_closeout.py` 全套通过。
+- 下一步：再次真实跑 Task17，确认当某个分支仍 blocked 时，root 会汇报 blocker 和下一步，而不是把 integration worker 的内部报告当成根目录最终交付。

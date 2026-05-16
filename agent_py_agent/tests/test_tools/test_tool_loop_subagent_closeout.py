@@ -6,6 +6,12 @@ import json
 import tempfile
 from pathlib import Path
 
+from agent_py_agent.agent.agent_core.orchestration_run_scope import (
+    remember_dispatched_orchestration_run_ids,
+)
+from agent_py_agent.agent.agent_core.subagent_dispatch_closeout import (
+    subagent_dispatch_final_response_guard,
+)
 from agent_py_agent.agent.backend import ModelResponse
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
@@ -192,6 +198,43 @@ def test_final_response_warns_when_subagent_tree_still_has_blockers():
         assert "结论修正" in result.response
         assert "不能按完成汇报" in result.response
         assert task.id in result.response
+
+
+# LLM: final closeout must use the remembered orchestration scope after later read/search tools.
+# 函数用途: 复现真实 E2E 中 dispatch 后又读取产物，最后模型报喜但仍有阻塞子代理的场景。
+def test_final_response_guard_uses_remembered_scope_after_later_tools():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            subagent_workspace="subs",
+            max_tool_rounds=4,
+        )
+        agent = SimpleAgent(cfg, workspace)
+        blocked = agent.subagents.create_run(
+            goal="竞争格局报告缺少可验收 refs",
+            thought="模拟真实 E2E 中父级后来又读了产物，但该分支 task.json 仍未全绿。",
+            plan=["等待修复"],
+            allowed_tools=[],
+        )
+        blocked.status = "BLOCKED"
+        blocked.verification_status = "UNVERIFIED"
+        blocked.failure_type = "missing_artifact_refs"
+        agent.subagents.save(blocked)
+        _done_verified_task(agent)
+        remember_dispatched_orchestration_run_ids(agent, [blocked.id])
+
+        guarded = subagent_dispatch_final_response_guard(
+            agent,
+            ModelResponse(text="所有子代理都完成了，可以按完成汇报。", backend="fake"),
+            executed_tools=["read_file", "read_artifact", "search_text"],
+        )
+
+        assert guarded is not None
+        assert "所有子代理都完成了" not in guarded.text
+        assert "结论修正" in guarded.text
+        assert blocked.id in guarded.text
 
 
 # LLM: _done_verified_task creates a traceable finished subagent for top-level closeout tests.
