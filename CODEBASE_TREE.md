@@ -1010,7 +1010,8 @@ docs/
 - `agent_py_agent/agent/subagents/protocol_preflight.py`: 子代理开工前的非破坏性预检；缺工具、缺产物写入根、缺 controlled exec 授权时返回结构化 issue，不剥夺基础读写能力。
 - `agent_py_agent/agent/subagents/debug_trace.py`: 子代理正式调试追踪开关的写入层；`subagent_debug_trace_level=0` 时完全静默，level 1-3 只把 bounded refs-only 事件写入内部 `debug_traces/subagent_trace.jsonl`，level 4 加短预览，level 5 把完整 prompt/response/tool payload/tool output 写入内部 `debug_traces/details/` 并在 JSONL 里留 ref。
 - `agent_py_agent/agent/subagents/context_bundle.py`: 生成 runner-facing `context_bundle.json` / `CONTEXT_BUNDLE.md`，包含目标、计划、验收、权限、写入边界、输出合同、lineage、TaskEnvelope、tool_preflight、agent run workspace refs 和 Context Gate；多层传递只保存当前/父级 bundle refs，不展开父级正文。
-- `agent_py_agent/agent/subagents/result_structured.py`: 解析 runner structured output 并写回 tools、artifacts、tests、blockers 和 capability requests；evidence/finding 解析已拆到 `result_structured_evidence.py`，保持解析主流程薄。
+- `agent_py_agent/agent/subagents/result_structured.py`: 解析 runner structured output 并写回 tools、artifacts、tests、blockers、coverage records 和 capability requests；evidence/finding 解析已拆到 `result_structured_evidence.py`，保持解析主流程薄。
+- `agent_py_agent/agent/subagents/coverage_records.py`: 规范化 `covered_run_id -> covered_by_run_id` 覆盖关系，供 runner 解析、父级验收和最终收口共用；只认机器 run id 和 verified covering run，不解析自然语言 fallback。
 - `agent_py_agent/agent/subagents/result_structured_evidence.py`: 解析并写回 runner evidence、evidence_packets 和 findings；负向 content_check 语义在这里规范，避免“坏模式没出现”被误判为失败。
 - `agent_py_agent/agent/subagents/result_artifact_evidence.py`: 从 runner artifact metadata 合并 `artifact_refs`，并在模型漏写 `evidence_packets` 时合成 refs-only artifact evidence packet，不读取 artifact 正文。
 - `agent_py_agent/agent/subagents/parsing_partial.py`: 从 runner 结果块恢复被截断但仍有可追溯 `evidence_packets` 的成功结果；只接受 refs-only 证据链，避免把无证据长文本误当完成。
@@ -1161,7 +1162,7 @@ docs/
 - `agent_py_agent/agent/subagents/manager_acceptance_parent_facade.py`: 新增父级验收 manager facade 方法集合，让 `manager_acceptance.py` 继续只承接普通 acceptance review 流程。
 - `agent_py_agent/agent/subagents/acceptance_test_execution.py`: 新增显式验收测试执行桥接，把 `AcceptanceReviewOptions(execute_tests=True)` 转成真实测试报告和阻断 findings；默认不运行。
 - `agent_py_agent/agent/subagents/services/acceptance_findings.py`: 普通验收 finding 汇总层；已有 `reports/test_execution.json` 时优先以机器执行报告判断 tests_passed；pending capability finding 防止半成品被验收；`required_child_spawned` 会在目标要求创建下级时核对真实 `task.child_ids`，`descendant_health` 会阻断仍有未完成/失败后代的父级验收，但不会把 leaf/self 的“真实创建 leaf_worker”自述误判为还要继续创建 child。
-- `agent_py_agent/agent/subagents/services/acceptance_descendant_health.py`: 父级验收的后代健康门；沿真实 `child_ids` 有界读取后代 `task.json`，后代未完成、未验收、失败、阻塞或缺失时返回 P0 finding。
+- `agent_py_agent/agent/subagents/services/acceptance_descendant_health.py`: 父级验收的后代健康门；沿真实 `child_ids` 有界读取后代 `task.json`，后代未完成、未验收、失败、阻塞或缺失时返回 P0 finding；若 `coverage_records` 指向同树内 `DONE/VERIFIED` 覆盖 run，可把损坏 leaf 视为已结构化覆盖。
 - `agent_py_agent/agent/subagents/services/acceptance_controlled_exec_findings.py`: controlled_exec 专属验收 finding；当 goal/acceptance 声明受控 shell 时，要求实际工具记录和 stdout/audit/trash refs，并会在 task_dir/allowed_write_roots 内按固定小文件名查找 refs/summary；若 refs 文件显式指向 `controlled_exec-*.json` tool-output artifact，会按 64KB 上限精确读取该小 artifact 补齐 stdout/audit refs，防止伪 refs 报告通过且避免扫描目录或读取大日志。
 - `agent_py_agent/agent/settings/config.py`: 新增 `acceptance_execute_tests`、`acceptance_test_timeout_seconds`、`subagent_allowed_tools`、`subagent_role_template_dirs`、`tool_agent_budget_*` 和 `tool_artifact_read_budget_*`，真实测试执行默认关闭，子代理工具默认自动判断，单代理工具预算默认 10 分钟 50 次，artifact 正文读取预算默认 10 分钟 240000 字符。
 - `agent_py_agent/agent/settings/services/_normalize_runtime_fields.py`: 校验真实验收执行配置，布尔开关走 bool coerce，超时限制在 1 到 300 秒；`subagent_allowed_tools` 和 `subagent_role_template_dirs` 归一成去空白字符串列表。

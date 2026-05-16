@@ -6,6 +6,7 @@ import json
 import pytest
 
 from agent_py_agent.agent.subagents.models import SubAgentParsedOutput
+from agent_py_agent.agent.subagents.parsing import parse_subagent_runner_output
 from agent_py_agent.agent.subagents.result_processors import (
     OutputPayloadContext,
     _build_output_payload,
@@ -71,6 +72,39 @@ def test_process_structured_output_records_evidence_packets_and_findings(mock_ta
     assert len(result["findings"]) == 1
     assert mock_task.evidence_refs == ["artifact://evidence-1"]
     assert mock_task.artifact_refs == ["artifact://raw-1"]
+
+
+# LLM: coverage records are the machine-readable replacement for parent prose like “sibling covered it”.
+# 函数用途: 验证 runner 输出的 coverage_records 会被解析并持久到 task.attributes，供验收和收口链路读取。
+def test_process_structured_output_records_coverage_records(mock_task):
+    text = """
+    [SUBAGENT_RESULT]
+    {
+      "status": "DONE",
+      "coverage_records": [
+        {
+          "covered_run_id": "bad-leaf",
+          "covered_by_run_id": "good-leaf",
+          "reason": "good leaf produced the same market section",
+          "artifact_refs": ["artifact://good-report"]
+        }
+      ]
+    }
+    [/SUBAGENT_RESULT]
+    """
+    parsed = parse_subagent_runner_output(text)
+    mock_task.attributes = {}
+
+    _process_structured_output(mock_task, parsed, 123456.0, None)
+
+    assert parsed.coverage_records[0]["covered_run_id"] == "bad-leaf"
+    assert mock_task.attributes["coverage_records"] == [{
+        "covered_run_id": "bad-leaf",
+        "covered_by_run_id": "good-leaf",
+        "reason": "good leaf produced the same market section",
+        "artifact_refs": ["artifact://good-report"],
+        "evidence_refs": [],
+    }]
 
 
 # LLM: negative content-check evidence must mean the requirement passed when the forbidden pattern is absent.

@@ -130,3 +130,47 @@ def test_dispatch_markdown_exposes_completion_gate():
     assert "status: not_complete" in rendered
     assert "must_not_report_done: true" in rendered
     assert "blocking_run_ids: child-bad" in rendered
+
+
+# LLM: closeout should trust explicit coverage_records only when the covering run is verified.
+# 函数用途: 覆盖真实 E2E：坏 leaf 输出损坏，但父级用机器字段声明已由 verified sibling 覆盖时，不再无限卡收口。
+def test_closeout_resolves_explicit_verified_coverage_record():
+    from agent_py_agent.agent.agent_core.subagent_dispatch_closeout_resolution import (
+        blocking_task_ids,
+        task_resolved_for_closeout,
+    )
+
+    broken = SimpleNamespace(
+        id="bad-leaf",
+        status="BLOCKED",
+        verification_status="UNVERIFIED",
+        takeover_by="",
+        attributes={},
+    )
+    coverer = SimpleNamespace(
+        id="good-leaf",
+        status="DONE",
+        verification_status="VERIFIED",
+        takeover_by="",
+        output_json="",
+        result="",
+        attributes={},
+    )
+    parent = SimpleNamespace(
+        id="parent-coordinator",
+        status="AWAITING_ACCEPTANCE",
+        verification_status="NEEDS_ACCEPTANCE",
+        takeover_by="",
+        attributes={
+            "coverage_records": [{
+                "covered_run_id": "bad-leaf",
+                "covered_by_run_id": "good-leaf",
+                "reason": "verified sibling completed the same scope",
+            }]
+        },
+    )
+
+    tasks = [broken, coverer, parent]
+
+    assert task_resolved_for_closeout(broken, tasks) is True
+    assert "bad-leaf" not in blocking_task_ids(tasks)

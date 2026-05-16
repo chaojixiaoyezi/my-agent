@@ -122,6 +122,9 @@ class SubAgentParsedOutput:
     # LLM: evidence_packets/findings keep claims traceable for parent acceptance.
     evidence_packets: list[dict[str, object]] = field(default_factory=list)
     findings: list[dict[str, object]] = field(default_factory=list)
+    # LLM: coverage_records records machine-readable sibling/takeover coverage for failed descendant runs.
+    # 字段用途: 保存 covered_run_id -> covered_by_run_id 的覆盖关系，禁止只靠自然语言 fallback 放行。
+    coverage_records: list[dict[str, object]] = field(default_factory=list)
     capability_requests: list[dict[str, object]] = field(default_factory=list)
     artifacts: list[dict[str, object]] = field(default_factory=list)
     tests: list[dict[str, object]] = field(default_factory=list)

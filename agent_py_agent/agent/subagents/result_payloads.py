@@ -25,6 +25,8 @@ def _build_structured_output_payload(ctx: OutputPayloadContext) -> dict[str, obj
         "evidence_count": ctx.structured_evidence_count,
         "capability_request_count": ctx.structured_request_count,
         "capability_request_ids": ctx.created_request_ids,
+        # LLM: coverage_records stay in structured_output so parent readers see machine fallback links.
+        "coverage_records": ctx.parsed.coverage_records,
         "artifact_count": len(ctx.artifacts),
         "test_count": len(ctx.tests),
         "patch_count": len(ctx.patches),
