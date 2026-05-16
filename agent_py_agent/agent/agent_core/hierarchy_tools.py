@@ -123,7 +123,7 @@ def _schedule_apply_default(params: dict[str, object]) -> bool:
 
 
 # LLM: _schedule_payload_json renders service results without leaking large workspace content.
-# 函数用途: 输出层级调度结果摘要，包含新建 run id、层级关系和阻断原因。
+# 函数用途: 输出层级调度结果摘要，包含新建/复用/建议 dispatch 的 run id、层级关系和阻断原因。
 def _schedule_payload_json(result: HierarchyScheduleResult) -> str:
     payload = {
         "parent_run_id": result.parent_run_id,
@@ -132,6 +132,8 @@ def _schedule_payload_json(result: HierarchyScheduleResult) -> str:
         "blocked": result.blocked,
         "reason": result.reason,
         "created_run_ids": result.created_run_ids,
+        "reused_run_ids": result.reused_run_ids,
+        "dispatch_run_ids": result.dispatch_run_ids,
         "planned_count": result.planned_count,
         "items": [_schedule_item_payload(item) for item in result.items],
     }

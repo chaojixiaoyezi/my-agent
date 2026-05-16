@@ -13,6 +13,13 @@ from .hierarchy_acceptance import scheduled_child_acceptance_checks
 from .hierarchy_agent_names import scheduled_child_agent_name
 from .hierarchy_context import inherited_hierarchy_thought, scheduled_child_goal
 from .hierarchy_qa_scheduler import qa_orchestration_advice
+from .hierarchy_schedule_idempotency import (
+    ScheduledChildResolution,
+    created_scheduled_children,
+    dispatchable_scheduled_children,
+    resolve_scheduled_child,
+    reused_scheduled_children,
+)
 from .hierarchy_scheduled_role import scheduled_child_role
 from .hierarchy_scheduler_models import (
     HierarchyChildSpec,
@@ -68,9 +75,9 @@ class SubAgentHierarchyScheduler:
         reason = (
             schedule_block_reason(parent, request)
             or qa_phase_block_reason(
-            self.manager,
-            parent,
-            request,
+                self.manager,
+                parent,
+                request,
             )
             or active_duplicate_child_reason(self.manager, parent, request)
         )
@@ -145,35 +152,54 @@ def _apply_result(
 ) -> HierarchyScheduleResult:
     parent = build.parent
     request = build.request
-    created = [
-        _create_child(manager, parent, spec, sibling_index=index)
+    resolutions = [
+        _resolve_child(manager, parent, spec, sibling_index=index)
         for index, spec in enumerate(request.child_specs, start=1)
     ]
+    created = created_scheduled_children(resolutions)
+    reused = reused_scheduled_children(resolutions)
+    dispatchable = dispatchable_scheduled_children(resolutions)
     return HierarchyScheduleResult(
         generated_at=time.time(),
         parent_run_id=parent.id,
         root_id=parent.root_id or parent.id,
         dry_run=False,
         blocked=False,
-        reason="created",
+        reason=_apply_reason(resolutions),
         requested_by=request.requested_by,
         planned_count=len(request.child_specs),
         created_run_ids=[item.id for item in created],
-        items=[_created_item(item) for item in created],
+        reused_run_ids=[item.id for item in reused],
+        dispatch_run_ids=[item.id for item in dispatchable],
+        items=[_resolved_item(item) for item in resolutions],
         quality_advice=build.quality_advice,
         scheduling_warnings=list(build.scheduling_warnings),
     )
 
 
-# LLM: _create_child converts one spec into CreateRunParams while preserving declared product paths.
-# 函数用途: 复用现有 create_run 路径创建子任务；child spec 自己写出的产物路径会成为候选根，最终授权仍由角色策略裁决。
-def _create_child(
+# LLM: _resolve_child converts one spec into a schedule contract before creating or reusing a run.
+# 函数用途: 复用现有 create_run 路径或返回同合同 direct child；child spec 写出的产物路径仍由角色策略裁决。
+def _resolve_child(
     manager: Any,
     parent: SubAgentTask,
     spec: HierarchyChildSpec,
     *,
     sibling_index: int,
-) -> SubAgentTask:
+) -> ScheduledChildResolution:
+    return resolve_scheduled_child(
+        manager,
+        _child_create_params(parent, spec, sibling_index=sibling_index),
+    )
+
+
+# LLM: _child_create_params derives CreateRunParams without mutating task state.
+# 函数用途: 把 child spec、父级状态、工具策略和命名规则转换为可比较/可创建的参数 bundle。
+def _child_create_params(
+    parent: SubAgentTask,
+    spec: HierarchyChildSpec,
+    *,
+    sibling_index: int,
+) -> CreateRunParams:
     requested_write_roots = requested_child_write_roots(
         ChildWriteRootRequest(
             parent=parent,
@@ -198,18 +224,30 @@ def _create_child(
         )
     )
     goal = scheduled_child_goal(parent, spec, write_roots=extra_write_roots)
-    return manager.create_run(
-        params=_create_child_params(
-            HierarchyCreateChildRequest(
-                parent=parent,
-                spec=spec,
-                role=role,
-                goal=goal,
-                extra_write_roots=extra_write_roots,
-                sibling_index=sibling_index,
-            )
+    return _create_child_params(
+        HierarchyCreateChildRequest(
+            parent=parent,
+            spec=spec,
+            role=role,
+            goal=goal,
+            extra_write_roots=extra_write_roots,
+            sibling_index=sibling_index,
         )
     )
+
+
+# LLM: _apply_reason exposes mixed create/reuse outcomes without forcing the model to infer from ids.
+# 函数用途: 给调度结果提供稳定 reason；纯复用、纯创建、混合三种情况都明确。
+def _apply_reason(resolutions: list[ScheduledChildResolution]) -> str:
+    if not resolutions:
+        return "created"
+    created_count = sum(1 for item in resolutions if not item.reused)
+    reused_count = len(resolutions) - created_count
+    if created_count and reused_count:
+        return "created_or_reused"
+    if reused_count:
+        return "reused"
+    return "created"
 
 
 # LLM: _create_child_params maps derived hierarchy facts into the existing CreateRunParams bundle.
@@ -289,9 +327,10 @@ def _planned_items(parent: SubAgentTask, request: HierarchyScheduleRequest) -> l
     ]
 
 
-# LLM: _created_item converts persisted child task data into the public schedule item shape.
-# 函数用途: 返回已创建 run 的轻量摘要，不读取 artifact 正文。
-def _created_item(task: SubAgentTask) -> HierarchyScheduledItem:
+# LLM: _resolved_item converts persisted child task data into the public schedule item shape.
+# 函数用途: 返回新建或复用 run 的轻量摘要，不读取 artifact 正文。
+def _resolved_item(resolution: ScheduledChildResolution) -> HierarchyScheduledItem:
+    task = resolution.task
     return HierarchyScheduledItem(
         run_id=task.id,
         parent_id=task.parent_id,
@@ -300,5 +339,6 @@ def _created_item(task: SubAgentTask) -> HierarchyScheduledItem:
         role=task.role,
         agent_name=task.agent_name,
         goal=task.goal,
-        created=True,
+        created=not resolution.reused,
+        reason="reused" if resolution.reused else "created",
     )

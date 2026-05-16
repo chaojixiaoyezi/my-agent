@@ -1625,3 +1625,12 @@
 - 已保留：模型明确给出的语义后缀（如 `小小傻妞-product-worker`）仍会保留，不会被误修成普通 worker；顶层批量语义名会追加 sibling 编号，例如 `小傻妞-市场-1`，语义和编号都保留；只有空名、`worker/general` 默认名、`小小傻妞` 这种半截前缀会被系统补 role/编号。
 - 已测试：新增 `test_subagent_lineage_naming_contract.py`；并更新裸前缀调度回归，focused create/schedule/natural-language E2E suites 通过。
 - 下一步：继续用真实 E2E 验证父级看板、debug trace 和恢复包里是否都按新 display name 展示，必要时把语义别名独立成 alias 字段，避免 display name 同时承担“稳定 id”和“人类描述”两种职责。
+
+## 2026-05-17 schedule_child_subagents 调度幂等合同
+- 中文说明：顶层 `create_subagents` 已经能防止重复创建同一批小傻妞；这一片把同样的合同下沉到 runner 内 `schedule_child_subagents`。也就是子代理/孙代理重复派同一个目标时，会复用已有 direct child，不会因为模型又说了一遍就继续扩容。
+- 对照结论：Codex 用 thread/run id 推进，OpenClaw 用 session/run 控制面看状态，Hermes 用 delegate task/session refs 做隔离。共同点是“已经创建过谁”来自机器字段，而不是让模型靠自然语言记忆。
+- 已实现：新增 `hierarchy_schedule_idempotency.py`。它只扫描当前 parent 的 direct children，并按 `parent/root/role/goal/extra_write_roots/status` 组成调度合同；合同一致且状态可复用时返回已有 run，合同不同才创建新 run。
+- 已实现：`HierarchyScheduleResult` 和 `schedule_child_subagents` JSON 响应新增 `reused_run_ids` 与 `dispatch_run_ids`。已 `DONE/VERIFIED` 的复用 child 会出现在 `reused_run_ids`，但不会出现在 `dispatch_run_ids`，避免父级重复跑已完成的小小傻妞。
+- 已实现：同名默认 worker 但目标不同不会误复用；写入根不同也不会合并。这样既防止重复扩容，又不会把不同任务硬捏成一个任务。
+- 已测试：新增 `test_subagent_hierarchy_schedule_idempotency.py`，覆盖同合同复用、不同目标新建、已完成复用但不 dispatch、工具 payload 暴露 reused/dispatch ids；周边 hierarchy scheduler / duplicate guard / tool role 回归通过。
+- 下一步：进入第 2 步，把 repair/execute/verify 做成同一个 repair run 的闭环，让“修脚本、执行脚本、验证产物”不要再漂移成多段空转链。
