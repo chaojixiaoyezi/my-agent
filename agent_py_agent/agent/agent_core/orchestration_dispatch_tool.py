@@ -34,6 +34,7 @@ from .orchestration_dispatch_scope import (
 )
 from .orchestration_progress_payload import direct_children_progress_payload
 from .orchestration_run_scope import (
+    remember_dispatched_orchestration_run_ids,
     remember_orchestration_run_ids,
     remembered_orchestration_run_ids,
 )
@@ -73,7 +74,9 @@ class DispatchSubagentsTool(BaseTool):
             cfg,
             params=self._dispatch_params(params, apply, execute_runners),
         )
-        remember_orchestration_run_ids(self.agent, _run_ids_from_dispatch(params, report))
+        dispatched_run_ids = _run_ids_from_dispatch(params, report)
+        remember_orchestration_run_ids(self.agent, dispatched_run_ids)
+        remember_dispatched_orchestration_run_ids(self.agent, dispatched_run_ids)
         payload = self._report_payload(report)
         return ToolExecutionResult("dispatch_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
 

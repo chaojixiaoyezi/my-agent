@@ -7828,3 +7828,33 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Status: fixed by focused tests.
 - Next check:
   - Re-run Task17. Expected behavior: `小傻妞-市场` should not be blocked just because it needs to read `vietnam.md`; if root is blocked from direct final-report writing, it should create exactly one integration/repair worker and dispatch it.
+
+### Finding 137: Final response guard must survive later read/search tools
+
+- Test scene:
+  - Log: `/Users/example/my-终端应用/third-party-eval/logs/my-agent-task17-20260516-141952.log`
+  - Same Task17 SEA market entry task after Finding 136 fixes.
+- Good result:
+  - `小傻妞-市场环境` no longer blocked on input file `vietnam.md`; it completed with two verified child runs.
+  - `小傻妞-进入策略` also completed with two verified child runs.
+  - direct-write guard blocked root's direct `final_report.md` write and pushed it toward a dedicated integration worker.
+- Symptom:
+  - `小傻妞-竞争格局` remained `BLOCKED / UNVERIFIED` with `failure_type=missing_artifact_refs`.
+  - root later read/search the integration worker's report and returned a natural-language success summary.
+  - Root-level `final_report.md` did not exist; the report only existed inside the integration worker workspace.
+- 中文解释:
+  - 这轮已经说明 `vietnam.md` 输入资料误判修好了，但又暴露一个更末端的问题：前面还有一个小傻妞没验收通过，root 后面又读了几份产物后，就把“我看到了报告”误说成“全都完成了”。
+  - 系统应该按机器状态判断最终能不能报喜，而不是按模型最后读到了什么正文来判断。
+- Root cause:
+  - `subagent_dispatch_final_response_guard()` only checked whether the current executed-tool list contained `dispatch_subagents`.
+  - In long turns, model may dispatch first, then read files, read artifacts, or search text before the final response.
+  - The final answer guard therefore needed to key off the remembered root-turn subagent run scope, not only the last visible dispatch tool.
+- Fix:
+  - Final response guard now treats dispatch-recorded run ids as an active closeout scope.
+  - If any remembered run remains unresolved, the model's success draft is replaced with the deterministic incomplete notice even after later `read_file/read_artifact/search_text` calls.
+- Verification:
+  - Added regression: `test_final_response_guard_uses_remembered_scope_after_later_tools`, first red, then green.
+  - Focused suite: `python3 -m pytest -q agent_py_agent/tests/test_tools/test_tool_loop_subagent_closeout.py` -> passed.
+- Status: fixed by focused tests.
+- Next check:
+  - Re-run Task17. Expected behavior: if one branch is still `BLOCKED / UNVERIFIED`, root must report the blocker and next action instead of claiming `final_report.md` is complete.

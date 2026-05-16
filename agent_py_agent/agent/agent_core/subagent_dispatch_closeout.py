@@ -8,7 +8,10 @@ from typing import ClassVar
 
 from ..backends import ModelResponse
 from ._runtime_params import ToolLoopExecuteParams
-from .orchestration_run_scope import remembered_orchestration_run_ids
+from .orchestration_run_scope import (
+    remembered_dispatched_orchestration_run_ids,
+    remembered_orchestration_run_ids,
+)
 from .subagent_dispatch_closeout_rendering import (
     dispatch_completion_text,
     dispatch_incomplete_notice,
@@ -67,7 +70,7 @@ def subagent_dispatch_final_response_guard(
 ) -> ModelResponse | None:
     if response is None or _inside_subagent_runner(agent):
         return response
-    if not _executed_orchestration(executed_tools):
+    if not _has_closeout_scope(agent, executed_tools):
         return response
     tasks = _subagent_tasks(agent)
     prompt = str(getattr(agent, "_current_user_prompt", "") or "")
@@ -87,8 +90,14 @@ def subagent_dispatch_final_response_guard(
     return ModelResponse(text=notice, backend=response.backend)
 
 
+# LLM: _has_closeout_scope keeps final answers tied to the persisted root-turn subagent scope.
+# 函数用途: 判断最终回答是否需要按本轮子代理事实兜底；即使后面又读文件/search，也不能丢掉前面派工的阻塞状态。
+def _has_closeout_scope(agent, executed_tools: list[object]) -> bool:
+    return _executed_orchestration(executed_tools) or bool(remembered_dispatched_orchestration_run_ids(agent))
+
+
 # LLM: _executed_orchestration mirrors the top-level tool-loop check without importing the service.
-# 函数用途: 判断本轮是否执行过 dispatch；单纯 create/board 只是中间状态，不覆盖诚实的等待调度回答。
+# 函数用途: 判断本轮是否执行过 dispatch；保留旧路径，兼容还没记录 run scope 的调用方。
 def _executed_orchestration(executed_tools: list[object]) -> bool:
     return "dispatch_subagents" in [str(item or "") for item in executed_tools or []]
 
