@@ -33,7 +33,10 @@ from .orchestration_dispatch_scope import (
     dispatch_workflow_mode,
 )
 from .orchestration_progress_payload import direct_children_progress_payload
-from .orchestration_run_scope import remember_orchestration_run_ids
+from .orchestration_run_scope import (
+    remember_orchestration_run_ids,
+    remembered_orchestration_run_ids,
+)
 from .orchestration_tool_specs import build_dispatch_subagents_spec
 from .orchestration_workflow_mode import tool_workflow_mode
 from .parameters import _bool_param, _non_negative_int, _string_list
@@ -206,17 +209,21 @@ def _record_touches_runner_scope(record: object) -> bool:
 # 函数用途: 汇总 dispatch 的阻塞 run、修复建议和产物 refs，避免 root 先写最终报告再被状态提示纠正。
 def _dispatch_top_level_guidance(agent: object, report: object, records: list[dict[str, object]]) -> dict[str, object]:
     blockers = _blocking_run_ids(records)
+    unfinished = _unfinished_remembered_run_ids(agent)
     payload: dict[str, object] = {
-        "completion_status": _dispatch_completion_status(blockers),
-        "must_not_report_done": bool(blockers),
+        "completion_status": _dispatch_completion_status(blockers, unfinished),
+        "must_not_report_done": bool(blockers or unfinished),
     }
     if blockers:
         payload["blocking_run_ids"] = blockers
-        payload["next_action"] = "repair_or_continue_blocking_run_ids"
         payload.update(_aggregate_parent_acceptance_repair_advice(records))
+    if unfinished:
+        payload["unfinished_run_ids"] = unfinished
+    if blockers or unfinished:
+        payload["next_action"] = "repair_or_continue_blocking_run_ids" if blockers else "continue_dispatch_unfinished_run_ids"
     artifact_refs = related_task_refs(agent, report, "artifact_refs")
     evidence_refs = related_task_refs(agent, report, "evidence_refs")
-    if blockers:
+    if blockers or unfinished:
         if artifact_refs:
             payload["pending_artifact_refs"] = artifact_refs
         if evidence_refs:
@@ -231,19 +238,44 @@ def _dispatch_top_level_guidance(agent: object, report: object, records: list[di
 
 # LLM: _dispatch_completion_status is a compact gate, not a replacement for acceptance reports.
 # 函数用途: 给模型一个明确的“是否可报完成”机器字段。
-def _dispatch_completion_status(blocking_run_ids: list[str]) -> dict[str, object]:
-    if not blocking_run_ids:
+def _dispatch_completion_status(
+    blocking_run_ids: list[str],
+    unfinished_run_ids: list[str] | None = None,
+) -> dict[str, object]:
+    unfinished_run_ids = list(unfinished_run_ids or [])
+    if not blocking_run_ids and not unfinished_run_ids:
         return {
             "status": "complete_or_no_blockers",
             "blocking_run_ids": [],
+            "unfinished_run_ids": [],
             "must_not_report_done": False,
         }
     return {
         "status": "not_complete",
         "blocking_run_ids": blocking_run_ids,
+        "unfinished_run_ids": unfinished_run_ids,
         "must_not_report_done": True,
         "recommended_next_action": "repair_or_continue_blocking_run_ids",
     }
+
+
+# LLM: _unfinished_remembered_run_ids keeps explicit dispatch scopes honest after partial execution.
+# 函数用途: 当前轮已创建/调度的 run 只要还有未完成未验收，就在顶层阻止 root 汇报完成。
+def _unfinished_remembered_run_ids(agent: object) -> list[str]:
+    load = getattr(getattr(agent, "subagents", None), "load", None)
+    if not callable(load):
+        return []
+    unfinished: list[str] = []
+    for run_id in sorted(remembered_orchestration_run_ids(agent)):
+        try:
+            task = load(run_id)
+        except Exception:
+            continue
+        status = str(getattr(task, "status", "") or "").strip().upper()
+        verification = str(getattr(task, "verification_status", "") or "").strip().upper()
+        if status != "DONE" or verification != "VERIFIED":
+            unfinished.append(run_id)
+    return unfinished[:20]
 
 
 # LLM: _blocking_run_ids extracts machine run ids from failed dispatch records.

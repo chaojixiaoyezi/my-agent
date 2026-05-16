@@ -20,15 +20,13 @@ _CODING_TOOL_PRESETS = {"coding", "frontend-dev", "frontend", "web", "web-dev", 
 
 
 # LLM: subagent_allowed_tools resolves explicit grants without treating empty lists as no-tools.
-# 函数用途: 处理 create_subagents 的 allowed_tools/tool_preset；省略或 none 都回到自动策略。
+# 函数用途: 处理 create_subagents 的 allowed_tools/tool_preset；模型少填工具时补齐基础读写，避免子代理被误限制。
 def subagent_allowed_tools(params: dict[str, object]) -> list[str] | None:
     allowed_tools = _string_list(params.get("allowed_tools"))
     preset = str(params.get("tool_preset") or "").strip().lower()
     preset_tools = _preset_allowed_tools(preset) if preset else None
     if allowed_tools:
-        if preset_tools:
-            return list(dict.fromkeys([*allowed_tools, *preset_tools]))
-        return allowed_tools
+        return _merge_tool_grants(allowed_tools, preset_tools or CODING_SUBAGENT_TOOLS)
     if "tool_preset" not in params:
         return None
     return _preset_allowed_tools(preset or "read_only")
@@ -44,3 +42,9 @@ def _preset_allowed_tools(preset: str) -> list[str] | None:
     if preset == "none":
         return None
     return None
+
+
+# LLM: _merge_tool_grants treats model-provided allowed_tools as hints, not hard capability removal.
+# 函数用途: 合并显式工具和基础工具包，保留模型意图但不让少填列表砍掉 write_file/read_artifact。
+def _merge_tool_grants(explicit: list[str], baseline: list[str] | None) -> list[str]:
+    return list(dict.fromkeys([*explicit, *(baseline or [])]))

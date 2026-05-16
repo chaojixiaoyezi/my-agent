@@ -18,6 +18,9 @@ class CreateSubagentItem:
 # LLM: create_items_from_params parses batch mode without forcing a top-level goal.
 # 函数用途: 从 create_subagents 的 items/tasks 字段解析多个独立子任务；返回字符串表示模型参数错误。
 def create_items_from_params(params: dict[str, object]) -> list[CreateSubagentItem] | str:
+    protocol_error = _batch_protocol_error(params)
+    if protocol_error:
+        return protocol_error
     raw_items = params.get("items") if "items" in params else params.get("tasks")
     if raw_items is None:
         return []
@@ -31,6 +34,54 @@ def create_items_from_params(params: dict[str, object]) -> list[CreateSubagentIt
             return item
         parsed.append(item)
     return parsed
+
+
+# LLM: _batch_protocol_error rejects ambiguous top-level batch envelopes before creating runs.
+# 函数用途: 让模型在 create_subagents 入口先修正 items/tasks/count 混用和越层派工，避免创建错误任务树。
+def _batch_protocol_error(params: dict[str, object]) -> str:
+    if "items" in params and "tasks" in params:
+        return (
+            "不要同时传 items 和 tasks；二选一即可。"
+            "create_subagents 只创建直接小傻妞；小小傻妞/孙代理请由对应小傻妞在 runner 内"
+            "调用 schedule_child_subagents 创建。"
+        )
+    raw_items = params.get("items") if "items" in params else params.get("tasks")
+    if raw_items is None:
+        return ""
+    count_error = _batch_count_error(params.get("count"))
+    if count_error:
+        return count_error
+    items = _json_list_param(raw_items)
+    for index, raw in enumerate(items, start=1):
+        if _looks_like_direct_grandchild(raw):
+            return (
+                f"items[{index}] 越过了一层。create_subagents 只能创建直接小傻妞；"
+                "小小傻妞/孙代理必须由对应小傻妞在 runner 内调用 schedule_child_subagents 创建。"
+            )
+    return ""
+
+
+# LLM: _batch_count_error keeps count for single-goal mode only.
+# 函数用途: 批量 items/tasks 已经逐项表示人数和目标，不再同时使用 count 复制一批。
+def _batch_count_error(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text in {"", "1", "1.0"}:
+        return ""
+    return "items/tasks 批量模式不要同时传 count；每个 item 就是一名直接小傻妞。"
+
+
+# LLM: _looks_like_direct_grandchild catches model attempts to create lower layers from root.
+# 函数用途: 检查 item 的 role/agent_name/name 是否明显写成小小傻妞或 grandchild，防止 root 越层造孙代理。
+def _looks_like_direct_grandchild(raw: object) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    text = "\n".join(
+        str(raw.get(key) or "")
+        for key in ("role", "agent_name", "name", "display_name")
+    ).lower()
+    return "grandchild" in text or "小小傻妞" in text
 
 
 # LLM: _create_item merges parent defaults with one explicit child object.

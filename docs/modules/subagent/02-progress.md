@@ -6,6 +6,9 @@
 # Subagent：开发推进记录
 
 ## 已完成
+- 2026-05-16 Task17 第二轮复测暴露的派工协议漂移已收口：`create_subagents.allowed_tools` 不再当硬限制，模型少填工具时会补齐基础读写能力；root 还有未 `DONE/VERIFIED` 的 remembered runs 时不能直接写 `final_report.md`；`create_subagents` 批量入口会拒绝 `items/tasks/count` 混用和 root 直接创建 `grandchild_worker` / `小小傻妞-*`，要求下一层由对应小傻妞在 runner 内用 `schedule_child_subagents` 创建。
+- 2026-05-16 Task17 收尾体验修复已落地：workspace context 注入 `current_local_date/current_local_time`，报告日期优先使用当前本地日期；`my-agent run` 流式输出后不再重复打印最终 response。
+- 2026-05-16 Task17 第三轮复测暴露的 dispatch 显式 run_ids 阶段误伤已修复：父级明确传多个 run_ids 时，runner 候选按给定列表执行，不再因为 coordinator 阶段优先而静默只跑 1 个；dispatch payload 同时会把 remembered runs 中未 `DONE/VERIFIED` 的任务放入 `unfinished_run_ids` 并标记 `must_not_report_done=true`。复跑 Task17 已完成 9 个 run 全部 `DONE/VERIFIED`，并写出 `final_report.md`。
 - 2026-05-14 Typed Action Protocol 迁移 1-9 阶段第一片已落地：新增 `agent/action_protocol.py`，把工具调用、工具结果、子代理结果、子代理创建结果和 compact continue packet 都包装成 typed envelope；旧 `[TOOL_CALL]` / `[SUBAGENT_RESULT]` 文本协议仍兼容，但执行层和验收层开始读取机器字段，不再从 summary 猜事实。
 - 2026-05-14 子代理验收事实边界修正：read_file/write_file 要求只认系统记录的 `kind` / `command` 和真实 `used_tools`，summary 里写 “I used read_file” 或 “写入文件” 不再算工具证据，避免模型自然语言自证通过验收。
 - 2026-05-14 多层派工协议统一第一片已落地：`create_subagents` 和 `schedule_child_subagents` 响应都会附带同一种 `subagent_schedule` typed envelope，主->子->孙->孙孙只靠 `parent_run_id/root_id/created_run_ids/items` 串联，不靠自然语言复述孩子 id。
@@ -1441,3 +1444,22 @@
 - 设计边界：这一步只校验 evidence packet 里明确用于验收的 artifact refs，不把旧式 `artifacts` 里的可选备注全部当硬阻塞，避免误伤能力申请和历史兼容结果。
 - 已测试：`test_dispatch_payload_exposes_blocking_gate_without_deliverable_refs` 和 `test_record_runner_result_blocks_missing_local_artifact_ref` 先红后绿；随后 62 个 focused regression 通过。
 - 下一步：重跑 my-agent Task 17 真实 E2E，确认 root 不再提前读阻塞产物，且缺失报告会在 runner 层被挡住。
+
+## 2026-05-16 Task 17 修复后真实复测：9 run 收敛和 CLI/date 修复
+- 中文说明：重跑同题 Task 17 后，my-agent 收敛到预期形状：3 个小傻妞、6 个小小傻妞，总计 9 个 run，全部 `DONE / VERIFIED`。root 在 board 确认全绿后再读产物整合，没有再提前读取阻塞半成品。
+- 已验证：这轮没有过度扩容到 24 个 run，也没有出现缺失 artifact 被当作 deliverable 的问题。最终报告成功写到 `final_report.md`。
+- 发现问题：root 仍会在派工前读取 README 和多个数据正文，说明“先派工、少读正文”的 refs-first 行为还要继续强化。
+- 发现问题：最终报告日期写成 `2026-05-15`，说明主 prompt 没有固定告诉模型当前本地日期；模型会从旧文件/旧记忆里猜。
+- 发现问题：CLI 流式输出后又打印了一遍完整 response，导致终端里最终总结重复两次。
+- 已修正：主 prompt 的 workspace context 现在写入 `current_local_date/current_local_time`，并明确“写报告日期优先使用 current_local_date”。
+- 已修正：`my-agent run` 流式输出已经写到 stdout 时，不再重复打印完整 response。
+- 下一步：再次真实复测 Task 17，确认日期变成当前本地日期、最终总结不重复，同时继续观察 root 派工前读取正文的问题。
+
+## 2026-05-16 Task 17 第二轮复测修复：allowed_tools 不再砍能力，未完成 run 阻止 final_report
+- 中文说明：再次真实复测 Task 17 时，报告日期已变成当前本地日期，终端总结也不再重复；但 root 的派工 JSON 开始混用 `goal/items/tasks/count`，并把下级 role 写成 `grandchild_worker` 直接挂在 root 下。
+- 发现问题：模型在 `allowed_tools` 里只写了 `read_file/list_files`，下级真实缺少 `write_file`，导致子代理不能写 `output.json`/报告，出现 `missing_allowed_write_roots`、`缺少 write_file` 和工具轮数耗尽。
+- 发现问题：有 run 仍是 `PLANNING/BLOCKED/UNVERIFIED` 时，root 仍写了 `final_report.md`，并在最终文本里声称有 3 子 + 6 孙，实际任务状态只有 6 个直接挂 root 的 worker。
+- 已修正：`create_subagents.allowed_tools` 现在被当作“工具偏好提示”，不是硬限制；只要模型少填，系统会自动补齐基础读写工具包（read/list/search/read_artifact/write/append/replace/capability_request）。
+- 已修正：direct-write guard 会检查当前轮已派工 run 的状态；只要还有未 `DONE/VERIFIED` 的 run，root 不能把 `final_report.md` 这类报告名文件当普通交接报告直接写。
+- 已测试：新增 `test_partial_explicit_allowed_tools_keep_baseline_write_tools` 和 `test_active_delegated_root_blocks_final_report_when_run_incomplete` 均先红后绿。
+- 下一步：继续修 root 派工结构混乱问题：不要允许 `create_subagents` 同时混用 `items/tasks/count` 造成层级语义漂移，必要时返回可恢复错误并引导 root 用 3 个 coordinator item。

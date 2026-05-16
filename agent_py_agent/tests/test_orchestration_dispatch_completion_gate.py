@@ -52,6 +52,56 @@ def test_dispatch_payload_exposes_blocking_gate_without_deliverable_refs():
     assert payload["parent_acceptance_repair_advice"]["failed_run_ids"] == ["child-bad"]
 
 
+# LLM: dispatch gate must treat unexecuted remembered runs as not complete, not just failed records.
+# 函数用途: 覆盖 Task17 真实 E2E：只跑完 1 个 run 但还有 2 个 PLANNING 时，root 不能汇报完成。
+def test_dispatch_payload_blocks_when_remembered_runs_remain_unfinished():
+    """还有 remembered run 未 DONE/VERIFIED 时，dispatch 顶层必须标记未完成。"""
+    from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+    record = SimpleNamespace(
+        step="runner",
+        action="execute_runner",
+        run_id="strategy",
+        ok=True,
+        dry_run=False,
+        applied=True,
+        message="runner done",
+        before_status="PLANNING",
+        after_status="DONE",
+    )
+    mock_report = SimpleNamespace(dry_run=False, summary={"ok": 1}, records=[record])
+
+    mock_agent = MagicMock()
+    mock_agent.config.subagent_workflow_mode = "off"
+    mock_agent.tools.specs.return_value = []
+    mock_agent.dispatch_subagents.return_value = mock_report
+    mock_agent.subagents.workspace = Path("/tmp/workspace")
+    states = {
+        "market": SimpleNamespace(status="PLANNING", verification_status="UNVERIFIED", artifact_refs=[]),
+        "competition": SimpleNamespace(status="PLANNING", verification_status="UNVERIFIED", artifact_refs=[]),
+        "strategy": SimpleNamespace(
+            status="DONE",
+            verification_status="VERIFIED",
+            artifact_refs=["/tmp/site/entry_strategy.md"],
+            evidence_refs=["/tmp/site/evidence.json"],
+        ),
+    }
+    mock_agent.subagents.load.side_effect = lambda run_id: states[run_id]
+
+    result = DispatchSubagentsTool(mock_agent).execute({
+        "apply": True,
+        "execute_runners": True,
+        "run_ids": ["market", "competition", "strategy"],
+    })
+    payload = json.loads(result.output)
+
+    assert payload["completion_status"]["status"] == "not_complete"
+    assert payload["must_not_report_done"] is True
+    assert payload["unfinished_run_ids"] == ["competition", "market"]
+    assert "deliverable_artifact_refs" not in payload
+    assert payload["pending_artifact_refs"] == ["/tmp/site/entry_strategy.md"]
+
+
 # LLM: markdown gate coverage keeps artifact-only readers from bypassing machine status.
 # 函数用途: 验证 SUBAGENT_DISPATCH.md 写出 completion gate，便于模型或人工读 markdown 时继续修复。
 def test_dispatch_markdown_exposes_completion_gate():

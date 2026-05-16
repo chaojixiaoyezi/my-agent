@@ -8,6 +8,7 @@ import json
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -283,3 +284,45 @@ class TestCmdRun:
              patch("agent_py_agent.cli.local_commands.ThinkingSpinner"):
             result = cmd_run(args)
             assert result == 0
+
+    def test_run_streaming_response_not_printed_twice(self, tmp_path: Path, capsys):
+        """流式输出已经写到 stdout 时，cmd_run 不应再重复打印完整 response。"""
+        from agent_py_agent.cli.local_commands import cmd_run
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.prompt = "测试 prompt"
+        args.inject = None
+        args.prompt_file = None
+        args.save = True
+        args.show_prompt = False
+        args.resume_context = None
+
+        result_payload = SimpleNamespace(
+            response="流式最终响应",
+            prompt="最终的 prompt",
+            backend="test",
+            used_memories=0,
+            tool_rounds=1,
+            memory_route_matches=0,
+            prompt_token_estimate=100,
+            runtime_injection_token_estimate=0,
+            archive_events=0,
+            recovery_snapshot_path=None,
+            recovery_snapshot_error=None,
+            memory_resume_context_injected=False,
+            memory_resume_context_token_estimate=0,
+            memory_compact_suggested=False,
+        )
+
+        class StreamingAgent:
+            def run(self, *args, **kwargs):
+                kwargs["on_chunk"]("流式最终响应")
+                return result_payload
+
+        with patch("agent_py_agent.cli.local_commands.make_agent", return_value=StreamingAgent()), \
+             patch("agent_py_agent.cli.local_commands.ThinkingSpinner"):
+            result = cmd_run(args)
+
+        assert result == 0
+        assert capsys.readouterr().out.count("流式最终响应") == 1

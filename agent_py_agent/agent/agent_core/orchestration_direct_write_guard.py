@@ -207,7 +207,30 @@ def _is_runtime_write(agent: object, payload: dict[str, Any]) -> bool:
 # LLM: _is_allowed_non_product_write separates report artifacts from business deliverables.
 # 函数用途: 委托模式下允许 root/QA/coordinator 写报告类交接文件，但继续阻止它们写 index.html 等业务正文。
 def _is_allowed_non_product_write(agent: object, payload: dict[str, Any]) -> bool:
-    return _is_runtime_write(agent, payload) or _is_report_artifact_write(agent, payload)
+    if _is_runtime_write(agent, payload):
+        return True
+    if _has_incomplete_remembered_runs(agent):
+        return False
+    return _is_report_artifact_write(agent, payload)
+
+
+# LLM: _has_incomplete_remembered_runs blocks root final reports until delegated runs are verified.
+# 函数用途: 当前轮已派工后，如果还有 PLANNING/RUNNING/BLOCKED/未验收 run，root 不能直接写 final_report.md。
+def _has_incomplete_remembered_runs(agent: object) -> bool:
+    run_ids = remembered_orchestration_run_ids(agent)
+    load = getattr(getattr(agent, "subagents", None), "load", None)
+    if not run_ids or not callable(load):
+        return False
+    for run_id in run_ids:
+        try:
+            task = load(run_id)
+        except Exception:
+            continue
+        status = str(getattr(task, "status", "") or "").strip().upper()
+        verification = str(getattr(task, "verification_status", "") or "").strip().upper()
+        if status != "DONE" or verification != "VERIFIED":
+            return True
+    return False
 
 
 # LLM: _is_report_artifact_write lets reviewer roles leave visible evidence without editing product bodies.

@@ -153,6 +153,64 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Remaining gap:
   - my-agent 仍需要减少 root 前置读取正文、减少不必要扩容，并继续做同题三方对比复测。
 
+### Finding 37: Task17 修复后收敛到 3 子 + 6 孙，但报告日期仍会猜错
+
+- Test scene:
+  - Log: `/Users/example/my-终端应用/third-party-eval/logs/my-agent-task17-20260516-070425.log`
+  - Output: `/Users/example/my-终端应用/third-party-eval/runs/my-agent/task_17/agent_subagent_eval_suite/task_17_hierarchical_agents_sea_market/final_report.md`
+- Good result:
+  - my-agent 创建了 3 个第一层小傻妞和 6 个下一层小傻妞，总计 9 个 run。
+  - 9 个 run 全部 `DONE / VERIFIED`。
+  - root 在 `subagent_board` 确认全绿后才读取 3 份整合报告并写 `final_report.md`。
+  - 没有再出现“有 blocker 仍把 pending artifact 暴露成 deliverable”的行为。
+- Remaining issue:
+  - root 派工前仍读取 README、company profile、competitor landscape、3 个 country pack 和 channel partners。大白话：它还是先自己看了很多正文，才派小傻妞干活。
+  - 最终报告写成 `报告生成日期: 2026-05-15`，但测试当天本地日期是 2026-05-16。
+- Fix:
+  - `PromptBuilder` 的 workspace context 增加 `current_local_date/current_local_time`，并提示报告日期优先用 `current_local_date`。
+- Status: fixed in code, needs next real E2E verification.
+
+### Finding 38: CLI run 流式输出后重复打印最终 response
+
+- Symptom:
+  - `run-my-agent-task17.sh` 的终端日志里，“任务完成总结”重复出现两遍。
+- Root cause:
+  - CLI `cmd_run` 传了 `on_chunk`，模型流式 chunk 已经写到 stdout；run 返回后又 `print(result.response)` 一次。
+- Fix:
+  - `cmd_run` 记录本轮是否收到过流式 chunk；收到过时不再重复打印完整 response。
+- Verification:
+  - `python3 -m pytest -q agent_py_agent/tests/test_status_commands.py::TestCmdRun::test_run_streaming_response_not_printed_twice`
+- Status: fixed in code.
+
+### Finding 39: 模型少填 allowed_tools 导致子代理失去写入能力
+
+- Test scene:
+  - Log: `/Users/example/my-终端应用/third-party-eval/logs/my-agent-task17-20260516-072745.log`
+- Symptom:
+  - root 在 `create_subagents` 里给下级写了 `allowed_tools=["read_file","list_files"]`。
+  - 下级需要写 `output.json` 或报告时，真实缺少 `write_file`，出现 `missing_allowed_write_roots`、`缺少 write_file`、工具轮数耗尽。
+- Root cause:
+  - `create_subagents.allowed_tools` 被当成硬限制，模型少写一个工具名就会把子代理砍成只读。
+- Fix:
+  - `subagent_allowed_tools()` 现在把模型传入的 `allowed_tools` 当作“工具偏好提示”，并自动合并基础读写工具包。
+  - 大白话：用户和模型都不用精确知道几十个工具该怎么配；少写不会让小傻妞变哑巴。
+- Verification:
+  - `python3 -m pytest -q agent_py_agent/tests/test_orchestration_create_subagents_tool.py::TestCreateSubagentsToolTemplatePolicy::test_partial_explicit_allowed_tools_keep_baseline_write_tools`
+- Status: fixed in code, needs next real E2E verification.
+
+### Finding 40: 有未完成/阻塞 run 时 root 仍写 final_report.md
+
+- Symptom:
+  - 第二轮 Task17 中实际只有 2 个 run `DONE/VERIFIED`，其余仍是 `PLANNING/BLOCKED/UNVERIFIED`。
+  - root 仍写了 `final_report.md`，并在报告中声称“三个子代理、六个孙代理”完成。
+- Root cause:
+  - direct-write guard 把 `final_report.md` 看成普通 report artifact，允许 root 写；它没有在“已有派工但仍有未完成 run”时升级为最终交付阻断。
+- Fix:
+  - direct-write guard 会读取当前轮 remembered run ids；只要有 run 未 `DONE/VERIFIED`，root 不允许直接写 `final_report.md` 这类最终报告。
+- Verification:
+  - `python3 -m pytest -q agent_py_agent/tests/test_orchestration_direct_write_guard.py::test_active_delegated_root_blocks_final_report_when_run_incomplete`
+- Status: fixed in code, needs next real E2E verification.
+
 ## 2026-05-14 Recovery Case 02: Takeover Run 接管同一任务目录
 
 - Test scene:
@@ -7599,3 +7657,62 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Remaining gap:
   - root 仍会先读几份正文再派工，后续还要继续优化“少读正文、先派 refs-only 小傻妞”。
   - 有些模型生成的层级数量描述会偏大，例如把 10 个 run 说成“3 个子代理 + 9 个孙代理”；状态事实以 `task.json` / board / dispatch report 为准。
+
+### Finding 132: Task17 second validation exposed mixed batch params and direct grandchild creation
+
+- Test scene:
+  - Log: `/Users/example/my-终端应用/third-party-eval/logs/my-agent-task17-20260516-072745.log`
+  - Same task: B2B SaaS SEA market entry strategy with user-style “多层小傻妞” delegation.
+- Symptom:
+  - root mixed `goal/items/tasks/count` in a single `create_subagents` call.
+  - root directly created `role=grandchild_worker` / `agent_name=小小傻妞-*` runs under itself.
+  - Some children received `allowed_tools=["read_file","list_files"]`, then lacked write tools and could not write reports or `output.json`.
+  - root wrote `final_report.md` while some remembered runs were still `PLANNING/BLOCKED/UNVERIFIED`.
+- 中文解释:
+  - 这轮不是“模型不会做市场分析”，而是派工协议乱了：root 一边说要多层派工，一边直接把孙代理挂到自己名下，还把工具少填成只读，最后又提前写总报告。
+- Root cause:
+  - `allowed_tools` was still treated as a full capability override when the model supplied a partial list.
+  - `create_subagents` batch mode accepted ambiguous envelopes instead of forcing one protocol shape.
+  - direct-write guard did not yet check remembered delegated run status before final report writes.
+- Fix:
+  - `subagent_allowed_tools()` now treats model-supplied `allowed_tools` as hints and merges baseline read/write/report tools.
+  - `create_items_from_params()` rejects `items` + `tasks` together, rejects `items/tasks` with `count>1`, and rejects top-level `grandchild_*` / `小小傻妞-*` items; lower layers must be created by `schedule_child_subagents` inside the active runner.
+  - direct-write guard blocks final report artifact writes while any remembered delegated run is not `DONE/VERIFIED`.
+- Verification:
+  - `python3 -m pytest -q agent_py_agent/tests/test_orchestration_create_subagents_tool.py::TestCreateSubagentsToolTemplatePolicy::test_partial_explicit_allowed_tools_keep_baseline_write_tools`
+  - `python3 -m pytest -q agent_py_agent/tests/test_orchestration_direct_write_guard.py::test_active_delegated_root_blocks_final_report_when_run_incomplete`
+  - `python3 -m pytest -q agent_py_agent/tests/test_orchestration_create_subagents_tool.py::TestCreateSubagentsToolTemplatePolicy::test_items_and_tasks_cannot_be_mixed`
+  - `python3 -m pytest -q agent_py_agent/tests/test_orchestration_create_subagents_tool.py::TestCreateSubagentsToolTemplatePolicy::test_create_subagents_rejects_direct_grandchild_items`
+- Status: fixed by focused tests; next real Task17 run must confirm the model self-corrects after the protocol error and keeps grandchild creation inside `schedule_child_subagents`.
+
+### Finding 133: Explicit run_ids were silently narrowed by runner phase gates
+
+- Test scene:
+  - Failed run: `/Users/example/my-终端应用/third-party-eval/logs/my-agent-task17-20260516-075215.log`
+  - Passing run: `/Users/example/my-终端应用/third-party-eval/logs/my-agent-task17-20260516-080326.log`
+- Symptom:
+  - root called `dispatch_subagents(apply=true, execute_runners=true, max_runners=3, run_ids=[market, competition, strategy])`.
+  - Dispatch only executed the coordinator-style `strategy` run; `market` and `competition` stayed `PLANNING / UNVERIFIED`.
+  - root then read the single strategy report and reported completion.
+- 中文解释:
+  - root 明明点了 3 个小傻妞一起开工，系统内部却因为“coordinator 阶段优先”只放行了一个。这个阶段规则本来是防止 QA 过早空转，但不能在父级已经明确给 run_ids 时偷偷改名单。
+- Root cause:
+  - `_dispatch_runner_candidates()` always applied role phase gates.
+  - Explicit include/run_ids had already been scoped and ordered, but the candidate selector resorted and filtered by phase priority.
+  - Dispatch payload only treated failed records as blockers, not unfinished remembered runs.
+- Fix:
+  - `_runner_candidates_for_context()` now treats explicit `include_run_ids/run_ids` as exact ordered targets and bypasses phase narrowing for normal runnable tasks.
+  - Packet/checkpoint recovery still has the narrower blocked/failed rerun path.
+  - Dispatch top-level guidance now checks remembered run ids and exposes unfinished runs as `unfinished_run_ids`; if any are not `DONE/VERIFIED`, it sets `must_not_report_done=true` and moves refs to pending refs.
+- Verification:
+  - `python3 -m pytest -q agent_py_agent/tests/test_subagent_phase_gates.py::test_explicit_run_ids_keep_mixed_worker_and_coordinator_targets`
+  - `python3 -m pytest -q agent_py_agent/tests/test_orchestration_dispatch_completion_gate.py::test_dispatch_payload_blocks_when_remembered_runs_remain_unfinished`
+  - Real E2E rerun: Task17 log `my-agent-task17-20260516-080326.log`
+- Real E2E result:
+  - 9 runs total.
+  - 3 first-level coordinators all `DONE / VERIFIED`.
+  - 6 second-level children all `DONE / VERIFIED`.
+  - `SUBAGENT_DISPATCH.md` recorded 3 `execute_runner` records, 3 acceptance records, 0 blockers.
+  - `final_report.md` exists and is 14,067 bytes.
+- Remaining gap:
+  - root still reads too many source files before delegation. This is a refs-first/context-planning optimization, not a blocker for the current dispatch correctness slice.

@@ -132,13 +132,8 @@ def cmd_run(args) -> int:
     agent = make_agent(args)
     spinner = ThinkingSpinner()
     spinner.start()
-
-    # LLM: _on_run_chunk 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
-    def _on_run_chunk(chunk: str) -> None:
-        spinner.stop()
-        sys.stdout.write(chunk)
-        sys.stdout.flush()
+    stream_state = {"seen": False}
+    on_chunk = _make_run_chunk_writer(spinner, stream_state)
 
     try:
         result = agent.run(
@@ -149,18 +144,40 @@ def cmd_run(args) -> int:
             source="cli_run",
             resume_context=resume_context_override(args),
             recovery_next_actions=["如需恢复本次单轮 run，先查看 memory-resume 和 LocalStore 记录。"],
-            on_chunk=_on_run_chunk,
+            on_chunk=on_chunk,
         )
     except ProviderTimeoutError as exc:
         print(_provider_timeout_cli_report(agent, exc))
         return 2
     finally:
         spinner.stop()
-    if args.show_prompt:
+    _print_run_result(result, show_prompt=args.show_prompt, streamed_response=stream_state["seen"])
+    return 0
+
+
+# LLM: _make_run_chunk_writer keeps streaming stdout state out of cmd_run.
+# 函数用途: 生成 run 的流式输出回调，并记录是否已经向终端写过 response 正文。
+def _make_run_chunk_writer(spinner: ThinkingSpinner, stream_state: dict[str, bool]):
+    # LLM: _on_run_chunk is the tiny stdout sink used by streaming CLI runs.
+    # 函数用途: 收到模型流式片段时停止 spinner、写入终端，并记录正文已流式输出。
+    def _on_run_chunk(chunk: str) -> None:
+        stream_state["seen"] = True
+        spinner.stop()
+        sys.stdout.write(chunk)
+        sys.stdout.flush()
+
+    return _on_run_chunk
+
+
+# LLM: _print_run_result prints final CLI metadata without duplicating streamed responses.
+# 函数用途: 输出 run 的最终文本、调试 prompt、统计信息和 compact 建议；流式正文已打印时不重复打印。
+def _print_run_result(result, *, show_prompt: bool, streamed_response: bool) -> None:
+    if show_prompt:
         print("===== FINAL PROMPT =====")
         print(result.prompt)
         print("===== RESPONSE =====")
-    print(result.response)
+    if not streamed_response:
+        print(result.response)
     snapshot_state = "error" if result.recovery_snapshot_error else "1" if result.recovery_snapshot_path else "0"
     print(
         f"\n[backend={result.backend}; used_memories={result.used_memories}; "
@@ -172,7 +189,6 @@ def cmd_run(args) -> int:
         f"resume_tokens≈{result.memory_resume_context_token_estimate}]"
     )
     _print_compact_suggestion(result)
-    return 0
 
 
 # LLM: _provider_timeout_cli_report converts backend timeout exceptions into a readable command result.

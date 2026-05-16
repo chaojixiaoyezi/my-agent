@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -129,6 +130,16 @@ class TestBuildBasic:
         assert "# Workspace Context" in result
         assert f"primary_workspace_root: {tmp_path}" in result
         assert "不要把 /workspace 当作真实路径" in result
+
+    def test_build_includes_current_local_date(self, tmp_path):
+        """主代理每轮都能看到当前日期，报告日期不要从旧文件里猜。"""
+        config = AgentConfig()
+        builder = PromptBuilder(config, tmp_path)
+
+        result = builder.build("写报告", [])
+
+        assert f"current_local_date: {date.today().isoformat()}" in result
+        assert "写报告日期时优先使用 current_local_date" in result
 
     def test_build_single_memory(self, tmp_path):
         config = AgentConfig()

@@ -133,3 +133,66 @@ class TestCreateSubagentsItemsMode:
         assert result.ok is True
         assert not any("final_report.md" in item for item in params.plan)
         assert any("分析越南市场" in item for item in params.plan)
+
+    def test_items_and_tasks_cannot_be_mixed(self):
+        """create_subagents 不能同时传 items 和 tasks，避免模型把两套批量协议混成一坨。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = _agent()
+        result = CreateSubagentsTool(mock_agent).execute({
+            "items": [{"goal": "研究市场", "role": "worker"}],
+            "tasks": [{"goal": "整合市场", "role": "coordinator"}],
+            "count": 3,
+        })
+
+        assert result.ok is False
+        assert "不要同时传 items 和 tasks" in result.output
+        mock_agent.subagents.create_run.assert_not_called()
+
+    def test_create_subagents_rejects_direct_grandchild_items(self):
+        """root 入口只能创建直接小傻妞；小小傻妞应由上级用 schedule_child_subagents 创建。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = _agent()
+        result = CreateSubagentsTool(mock_agent).execute({
+            "items": [{
+                "goal": "分析印尼市场",
+                "role": "grandchild_worker",
+                "agent_name": "小小傻妞-印尼市场",
+            }],
+        })
+
+        assert result.ok is False
+        assert "create_subagents 只能创建直接小傻妞" in result.output
+        assert "schedule_child_subagents" in result.output
+        mock_agent.subagents.create_run.assert_not_called()
+
+
+class TestCreateSubagentsToolGrantProtocol:
+    """测试 create_subagents 对模型少填工具和协议漂移的兜底。"""
+
+    def test_partial_explicit_allowed_tools_keep_baseline_write_tools(self):
+        """模型只填 read_file/list_files 时，系统仍补齐基础读写工具，避免子代理变哑巴。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = _agent()
+        mock_task = MagicMock()
+        mock_task.id = "worker_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/worker_001"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "研究资料并写 output.json",
+            "role": "worker",
+            "allowed_tools": ["read_file", "list_files"],
+        })
+
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert result.ok is True
+        assert "read_file" in params.allowed_tools
+        assert "write_file" in params.allowed_tools
+        assert "append_file" in params.allowed_tools
+        assert "replace_in_file" in params.allowed_tools
