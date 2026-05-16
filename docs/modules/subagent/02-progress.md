@@ -1502,3 +1502,11 @@
 - 已修正：final response guard 现在会看本轮真实 dispatch 过的 subagent run scope。只创建但还没调度的正常等待状态不会被误判；只要已 dispatch 的 run 里还有未解决 blocker，哪怕后面又读了文件或搜索，最终也会被替换成“不能按完成汇报”的确定性状态说明。
 - 已测试：新增 `test_final_response_guard_uses_remembered_scope_after_later_tools` 先红后绿；`test_tool_loop_subagent_closeout.py` 全套通过。
 - 下一步：再次真实跑 Task17，确认当某个分支仍 blocked 时，root 会汇报 blocker 和下一步，而不是把 integration worker 的内部报告当成根目录最终交付。
+
+## 2026-05-16 Task17 复跑：child artifact refs 作为父级事实源
+- 中文说明：final closeout scope 修复后再次跑 Task17，root 能真实创建和调度多层小傻妞；这轮扩展到 25 个 run，19 个达到 `DONE/VERIFIED` 后长期未完全收敛，因此没有算通过。
+- 发现问题：`小小傻妞-竞争格局研究` 被 `missing_artifact_refs` 阻塞，但它的两个 child 已经 `DONE/VERIFIED`，真实报告路径在 child task 的 `artifact_refs` 里。父级 coordinator 自己猜了 `data/subagents/<child_id>/reports/...` 路径，猜错后被系统当成缺产物。
+- 大白话原因：child 自己知道报告放哪儿，父级猜错路径时，系统应该信 child 的机器记录，不该信父级自然语言里的路径。
+- 已修正：artifact ref normalization 现在会在当前任务本地找不到 ref 时，按 direct child `task.json` 的 `artifact_refs` 做一次有界解析；如果坏路径包含 child_id 或唯一匹配 child 产物文件名，就改成 child 的真实路径。
+- 已测试：新增 `test_process_structured_output_resolves_guessed_child_artifact_refs` 先红后绿；`test_result_processors_edges.py` 和真正缺失产物 blocker 回归通过。
+- 剩余问题：这轮还暴露了一个 leaf 的 `execution_corruption`，模型输出碎成 tool_call/path 垃圾片段；父级口头说有 fallback，但没有写成机器可读 takeover/coverage。下一步要把这种 fallback/接管关系结构化，不能靠口头说明。

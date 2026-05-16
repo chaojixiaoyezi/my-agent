@@ -7858,3 +7858,37 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Status: fixed by focused tests.
 - Next check:
   - Re-run Task17. Expected behavior: if one branch is still `BLOCKED / UNVERIFIED`, root must report the blocker and next action instead of claiming `final_report.md` is complete.
+
+### Finding 138: Parent coordinators must canonicalize child artifact refs
+
+- Test scene:
+  - Log: `/Users/example/my-终端应用/third-party-eval/logs/my-agent-task17-20260516-150236.log`
+  - Same Task17 SEA market entry task after final closeout scope fix.
+- Observed behavior:
+  - root created three first-level agents and dispatched them.
+  - The hierarchy expanded to 25 runs; 19 reached `DONE / VERIFIED` before the run was stopped after prolonged non-convergence.
+  - Several coordinator/leaf runs were still `AWAITING_ACCEPTANCE`, and two blockers remained.
+- Symptom:
+  - `小小傻妞-竞争格局研究` was marked `BLOCKED / UNVERIFIED / missing_artifact_refs`.
+  - Its two child runs were actually `DONE / VERIFIED` and had real artifact refs:
+    - `grandchild_direct_competitors/reports/direct_competitors_research.md`
+    - `grandchild_substitutes/reports/substitutes_research.md`
+  - The parent coordinator's structured output guessed child paths under `data/subagents/<child_id>/reports/...`, which did not exist.
+- 中文解释:
+  - child 小傻妞真实写了报告，而且 child 自己的 `task.json` 里登记了正确路径。
+  - 父级 coordinator 后面汇总时自己猜了一条 child 报告路径，猜错了；系统之前信了父级猜测，所以把真实完成误判成“缺产物”。
+- Root cause:
+  - `normalize_artifact_ref()` and `missing_local_artifact_refs()` only resolved refs against the current task's local roots.
+  - They did not use direct child task records as the source of truth when the bad ref included a child run id or child artifact filename.
+- Fix:
+  - Artifact ref normalization now checks direct child `task.json` files when a declared ref is missing locally.
+  - If the bad ref points at a child id, or uniquely matches a direct child artifact filename, it canonicalizes to the child's real artifact ref.
+  - This keeps parent coordinator evidence refs machine-grounded and avoids trusting natural-language path guesses.
+- Verification:
+  - Added regression: `test_process_structured_output_resolves_guessed_child_artifact_refs`, first red, then green.
+  - Related suite: `python3 -m pytest -q agent_py_agent/tests/test_result_processors_edges.py agent_py_agent/tests/test_manager_runner_results.py::test_record_runner_result_blocks_missing_local_artifact_ref` -> passed.
+- Remaining gap:
+  - The same run also exposed one `execution_corruption` leaf where the model emitted broken tool-call fragments. Parent output claimed a sibling fallback covered the work, but did not write a machine-readable takeover/coverage relationship. That is still not fully solved.
+- Status: child artifact ref false blocker fixed by focused tests; execution-corruption recovery remains open.
+- Next check:
+  - Re-run a smaller Task17 slice or targeted coordinator fixture to confirm coordinator parent refs now use child task artifact refs, then tackle machine-readable fallback/takeover for corrupted leaves.
