@@ -57,7 +57,7 @@ def _load_final_task(agent: SimpleAgent, run_id: str, final_statuses: set[str]):
 # 函数用途: 处理deliver任务通知相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _deliver_task_notification(agent: SimpleAgent, task, run_id: str) -> None:
     try:
-        from ..notification import NotificationManager, NotificationRouter
+        from ...notification import NotificationManager, NotificationRouter
 
         notif_manager = NotificationManager(agent.config)
         channel = getattr(task, "last_active_channel", "") or "chat"
@@ -68,7 +68,10 @@ def _deliver_task_notification(agent: SimpleAgent, task, run_id: str) -> None:
             channel=channel,
             message=_task_completion_message(task, run_id),
         )
-        NotificationRouter(notif_manager, agent.config).deliver(notification.notification_id)
+        try:
+            NotificationRouter(agent.config).deliver(notification.notification_id)
+        except Exception as exc:
+            notif_manager.mark_failed(notification.notification_id, _notification_error_message(exc))
     except Exception:
         pass
 
@@ -82,3 +85,10 @@ def _task_completion_message(task, run_id: str) -> str:
         f"目标: {task.goal[:100]}\n"
         f"尝试次数: {task.runner_attempts}"
     )
+
+
+# LLM: notification errors can contain adapter internals, so persist a bounded diagnostic string.
+# 函数用途: 生成通知失败原因摘要，避免网关异常把超长错误写进通知文件。
+def _notification_error_message(exc: Exception) -> str:
+    message = f"{exc.__class__.__name__}: {exc}"
+    return message[:500]

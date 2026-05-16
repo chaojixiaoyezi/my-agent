@@ -122,7 +122,7 @@ class NotificationManager:
         if notification is None:
             return False
 
-        notification.status = "failed"
+        notification.touch_failed(error)
         self.save_notification(notification)
         return True
 
