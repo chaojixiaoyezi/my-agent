@@ -110,6 +110,26 @@ class _EmptyThenFinalAfterToolBackend:
         return ModelResponse(text="已根据工具结果继续完成。", backend=self.name)
 
 
+# LLM: _PredelegationSourceReadBackend verifies root tool-loop guard output, not just helper calls.
+# 类用途: 第一轮要求读取 data 正文；第二轮检查模型只收到派工前阻断提示，没有收到文件正文。
+class _PredelegationSourceReadBackend:
+    name = "fake_predelegation_source_read_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"read_file","path":"data/company_profile.md"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        assert "predelegation_source_read_blocked" in prompt
+        assert "SECRET COMPANY BODY" not in prompt
+        return ModelResponse(text="已改为把资料路径交给小傻妞。", backend=self.name)
+
+
 def test_tool_loop_and_prompt_transcript():
     """LLM: verify that a tool call round feeds tool output back to the model for a final answer.
 
@@ -126,6 +146,33 @@ def test_tool_loop_and_prompt_transcript():
         assert result.response == "工具执行完成"
         assert result.tool_rounds == 1
         assert "hello tool world" in result.prompt
+
+
+# LLM: root predelegation guard must run inside the real SimpleAgent tool loop.
+# 函数用途: 防止只测 helper、不测主循环接入；派工任务里 root 读 data 正文会被挡成 refs-first 提示。
+def test_tool_loop_blocks_predelegation_source_body_read():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        (workspace / "data").mkdir()
+        (workspace / "data" / "company_profile.md").write_text(
+            "SECRET COMPANY BODY",
+            encoding="utf-8",
+        )
+        cfg = AgentConfig(
+            enable_tools=True,
+            enable_subagents=True,
+            memory_path="memory.jsonl",
+            subagent_workspace="data/subagents",
+        )
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = _PredelegationSourceReadBackend()
+
+        result = agent.run("请组织多层小傻妞协作完成。", save=False)
+
+        assert result.response == "已改为把资料路径交给小傻妞。"
+        assert result.tool_rounds == 1
+        assert "predelegation_source_read_blocked" in result.prompt
+        assert "SECRET COMPANY BODY" not in result.prompt
 
 
 # LLM: provider empty final response after tools should not crash the whole run.
