@@ -8529,5 +8529,10 @@ This document is append-only. Record every real subagent E2E issue found during 
   - 长期助手 delegate/handoff 更强调一个 job 的 output dir 和 failure context；修复任务应该带着失败上下文完成闭环，而不是只做半步。
   - Lesson: repair tasks need an explicit completion contract that includes fix, execute, verify, and final artifact refs.
 - Status:
-  - Observed and recorded; not fixed in this slice.
-  - Next fix should live in repair/acceptance orchestration: when a child has generated an executable artifact but product artifact is missing, create/reuse one repair run with required refs and an explicit `fix_execute_verify` contract.
+  - First slice fixed in focused tests.
+  - Added `subagent_repair_contract.v1` via `orchestration_repair_contract.py`.
+  - Parent-acceptance repair advice and artifact-integrity repair advice now return `repair_contract`, `required_read_paths`, `context_manifest`, and `context_packs`.
+  - Repair workers now receive a same-run contract: read failure refs, repair named scope, execute generated scripts/commands if needed, verify target artifacts, and report artifact/test refs.
+  - Top-level repair suggestions now use stable repair `agent_name` values so create idempotency can reuse the same repair owner.
+  - Target artifacts come from both `output.json.artifacts` and failed `test_execution.json` file/content paths, so missing final xlsx/html refs are still visible to the repair contract.
+  - Remaining live gap: dispatch still needs to use this contract to create/reuse one repair owner when a generated script exists but the final product artifact is missing; this is the next E2E slice.

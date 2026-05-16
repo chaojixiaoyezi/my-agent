@@ -8,6 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .orchestration_artifact_integrity_repair import artifact_integrity_repair_record_payload
+from .orchestration_repair_contract import (
+    RepairContractRequest,
+    repair_contract_acceptance_checks,
+    repair_contract_goal_suffix,
+    repair_contract_tool_fields,
+)
 
 
 # LLM: _RepairRefs keeps top-level parent-repair helper signatures bundle-shaped.
@@ -146,10 +152,20 @@ def _top_level_repair_tool_call(
     item,
     refs: _RepairRefs,
 ) -> dict[str, object]:
+    failure_refs = _compact_failure_refs(item, refs)
+    contract_fields = repair_contract_tool_fields(
+        RepairContractRequest(
+            kind="parent_acceptance",
+            failed_run_ids=[str(item.run_id)] if item.run_id else [],
+            failure_refs=failure_refs,
+            target_artifact_refs=_repair_target_refs(refs),
+        )
+    )
     return {
         "tool": "create_subagents",
         "count": 1,
         "role": "worker",
+        "agent_name": "小傻妞-验收修复",
         "workflow_mode": "off",
         "goal": _repair_goal(item, refs),
         "extra_write_roots": _product_write_roots(refs.run_ref),
@@ -157,6 +173,7 @@ def _top_level_repair_tool_call(
             "只修复父级验收 failure_refs 点名的问题",
             "修复后读取被修改文件并说明验证结果",
             "不要改写无关产物或健康分支",
+            *repair_contract_acceptance_checks(),
         ],
         "allowed_tools": [
             "list_files",
@@ -166,6 +183,7 @@ def _top_level_repair_tool_call(
             "write_file",
             "append_file",
         ],
+        **contract_fields,
     }
 
 
@@ -180,6 +198,7 @@ def _repair_goal(item, refs: _RepairRefs) -> str:
         f"失败摘要：{getattr(item, 'parent_acceptance_test_failure_summary', '') or '查看 test_ref'}。"
         f"失败细节：{details or '查看 test_execution.json'}。"
         "只修复父级验收报告点名的问题；完成后写回文件并说明验证结果。"
+        f"{repair_contract_goal_suffix()}"
     )
 
 
@@ -219,6 +238,39 @@ def _product_write_roots(run_ref: str) -> list[str]:
     return roots
 
 
+# LLM: _output_artifact_refs reads only output.json artifact paths for repair targets.
+# 函数用途: 从失败 child 的 output_ref 提取目标产物路径，供 repair_contract 明确验证对象。
+def _output_artifact_refs(output_ref: str) -> list[str]:
+    payload = _read_json_object(output_ref)
+    refs: list[str] = []
+    for item in payload.get("artifacts") or []:
+        if isinstance(item, dict):
+            refs.append(str(item.get("path") or item.get("file_path") or item.get("ref") or ""))
+        else:
+            refs.append(str(item or ""))
+    return _unique_text(refs)
+
+
+# LLM: _repair_target_refs merges declared artifacts with failed file/content test targets.
+# 函数用途: 让修复合同包含缺失 xlsx/html 等目标路径，即使 child output 没把它写进 artifacts。
+def _repair_target_refs(refs: _RepairRefs) -> list[str]:
+    return _unique_text([*_output_artifact_refs(refs.output_ref), *_test_target_refs(refs.test_ref)])
+
+
+# LLM: _test_target_refs extracts target paths from persisted failed test records.
+# 函数用途: 从 test_execution.json 的 validation_result.path 中恢复需要修复/验证的产物路径。
+def _test_target_refs(test_ref: str) -> list[str]:
+    payload = _read_json_object(test_ref)
+    refs: list[str] = []
+    for record in payload.get("records") or []:
+        if not isinstance(record, dict):
+            continue
+        result = record.get("validation_result")
+        if isinstance(result, dict):
+            refs.append(str(result.get("path") or ""))
+    return _unique_text(refs)
+
+
 # LLM: _read_json_object tolerates missing or malformed refs in dispatch summaries.
 # 函数用途: 安全读取小型机器 JSON；失败返回空对象，不影响 dispatch 主流程。
 def _read_json_object(path: str) -> dict[str, object]:
@@ -229,3 +281,14 @@ def _read_json_object(path: str) -> dict[str, object]:
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+# LLM: _unique_text mirrors the local refs de-duplication used by repair payload helpers.
+# 函数用途: 过滤空字符串并保持 artifact refs 的首次出现顺序。
+def _unique_text(values: list[str]) -> list[str]:
+    unique: list[str] = []
+    for value in values:
+        text = " ".join(str(value or "").split())
+        if text and text not in unique:
+            unique.append(text)
+    return unique
