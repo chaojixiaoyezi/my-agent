@@ -205,6 +205,37 @@ class TestDispatchSubagentsToolExecute:
         assert cfg.subagent_heartbeat_timeout == 0
 
 
+class TestDispatchSubagentsToolRunnerInstruction:
+    """测试 dispatch runner_instruction 的路径占位符归一。"""
+
+    def test_runner_instruction_replaces_workspace_placeholder(self):
+        """模型把 {workspace_root} 当自然语言模板传进来时，工具入口应替换成真实路径。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        mock_report = MagicMock()
+        mock_report.dry_run = False
+        mock_report.summary = {}
+        mock_report.records = []
+
+        mock_agent = MagicMock()
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent.tools.specs.return_value = []
+        mock_agent.dispatch_subagents.return_value = mock_report
+        mock_agent.subagents.workspace = Path("/tmp/project/.my-agent/subagents")
+        mock_agent.subagents.workspace_root = Path("/tmp/project")
+
+        result = DispatchSubagentsTool(mock_agent).execute({
+            "apply": True,
+            "execute_runners": True,
+            "run_ids": ["child-report"],
+            "runner_instruction": "请把研究结果写入 {workspace_root}/data/subagents/report.md",
+        })
+
+        assert result.ok is True
+        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
+        root = Path("/tmp/project").resolve(strict=False)
+        assert call_kwargs["params"].runner_instruction == f"请把研究结果写入 {root}/data/subagents/report.md"
+
 
 class TestDispatchSubagentsToolTopLevelWorkflow:
     """测试顶层 dispatch 不会绕过 root coordinator 层级。"""

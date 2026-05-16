@@ -8026,3 +8026,67 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Status: fixed in focused tests.
 - Next check:
   - Keep comparing OpenClaw/Hermes notification and completion behavior in future E2E runs, especially where subagent completion succeeds but announcement delivery fails.
+
+### Finding 144: Task18 star-growth xlsx comparison exposed pipeline-start and workspace defaults
+
+- Test scene:
+  - Same Task18 prompt across my-agent, Hermes, and the user's real OpenClaw environment.
+  - Task: collect weekly GitHub star-growth top projects from 2026-01-01 to 2026-05-16, write weekly sheets plus summary sheet to an xlsx, and write a readable Chinese final report.
+  - my-agent log: `/Users/xiaoyezi/my-claude-code/third-party-eval/logs/my-agent-task18-20260516-182730.log`
+  - Hermes log: `/Users/xiaoyezi/my-claude-code/third-party-eval/logs/hermes-task18-20260516-182730.log`
+  - OpenClaw real log: `/Users/xiaoyezi/my-claude-code/third-party-eval/logs/openclaw-real-task18-20260516-182731.log`
+- Result comparison:
+  - OpenClaw real environment completed and wrote `github_weekly_star_growth_2026.xlsx`, `final_report.md`, `data_research.md`, and helper files under its workspace task directory.
+  - OpenClaw first tried subagents but its default subagent model was rejected (`model not allowed: openai-codex/gpt-5.5`), then root clearly fell back and delivered the artifact itself.
+  - Hermes exited with status 0 but only printed that it would decompose the task; it did not produce xlsx or final report in the isolated run directory.
+  - my-agent was stopped after enough evidence because it ran for about 20 minutes without completing the xlsx/report. It wrote `data/weekly_data.json` but no final workbook/report.
+- my-agent issues found:
+  - First `create_subagents` attempt failed because root did not provide `extra_write_roots`, even though the task already had a concrete workspace root.
+  - The default create payload suggested dispatching all created `run_ids` together with `max_runners=len(run_ids)`, which nudged the root into running upstream and downstream pipeline tasks in the same wave.
+  - Downstream workers that said `读取 data/weekly_data.json` started before that file existed, then became blocked instead of waiting for the producer.
+  - A shared `runner_instruction` leaked `{workspace_root}` literally into a child instruction. The real path should be machine-filled before reaching the runner.
+  - The data worker kept looping with many tool rounds and large prompt context. That remains a separate long-task progress/budget follow-up.
+- 中文解释:
+  - 这轮不是“模型完全不会干活”，而是我们给模型的系统接口还挖了坑。
+  - 明明任务目录已经确定，却还要求模型补 `extra_write_roots` 这种底层参数，小白用户不会写，模型也容易漏。
+  - 明明有先后顺序，系统默认又建议“一口气全跑”，所以下游提前读一个还不存在的文件。
+  - `{workspace_root}` 这种占位符如果传到子代理，就是把“模板”误当成“真实路径”，后面自然容易路径错。
+- Fix:
+  - `create_subagents` now defaults vague product targets like “目标目录/任务目录” to the current concrete `workspace_root` when no explicit write root was supplied.
+  - The create payload now suggests `max_runners=1` by default. Parent agents can still raise concurrency when tasks are independent, but pipeline tasks no longer get nudged into accidental parallel start.
+  - Runner candidate selection now checks machine/natural input refs such as `context_manifest.required_read_paths` and `读取 data/weekly_data.json`; a downstream runner waits until the file exists inside its allowed roots.
+  - `dispatch_subagents` now resolves `{workspace_root}` / `{{workspace_root}}` in `runner_instruction` before the runner sees it.
+  - Tool spec text now explains that users normally do not need to fill `extra_write_roots`; the system uses the task workspace by default.
+- Verification:
+  - Added regression for vague deliverable goals defaulting to workspace root.
+  - Added regression for create payload starting conservatively with `max_runners=1`.
+  - Added regression for explicit `run_ids` waiting on missing input refs before starting downstream work.
+  - Added regression for `{workspace_root}` placeholder replacement in `runner_instruction`.
+- Status: protocol/workspace/pipeline-start fixes are in focused tests. The long-loop data worker behavior is still tracked for the next long-task E2E pass.
+- Next check:
+  - Re-run a shorter Task18 slice and verify my-agent creates data first, then downstream enrichment/report generation, without manual extra_write_roots and without literal path placeholders.
+  - Add a separate progress-budget test for a research worker that keeps calling read/append tools without producing a terminal structured result.
+
+### Finding 145: Long-running writer runners must window live tool context
+
+- Trigger:
+  - Follow-up from Finding 144.
+  - In the Task18 my-agent run, the data worker kept making useful read/write progress but the runner prompt grew from about 27k chars to about 274k chars by tool round 62.
+  - The per-agent rolling tool budget did not trigger because the worker did not exceed 50 calls in any 10-minute window; it was slow prompt growth, not a short burst loop.
+- 中文解释:
+  - 这个问题不是“工具预算没用”，而是“每一轮工具记录都继续塞回下一轮聊天里”。
+  - 子代理一直写同一个数据文件时，老的写入记录应该留在文件和归档里，不应该每一轮都让模型重新背一遍。
+  - 不然任务越做越慢，模型上下文越来越大，最后看起来像卡住。
+- Fix:
+  - Added live `tool_context` windowing before prompt build.
+  - When old tool transcript entries exceed the internal live budget, the prompt keeps a compact `[tool-context-window]` summary plus recent tool records.
+  - Full tool records remain in `archive_tool_calls` / artifact refs; the model can still read precise refs when needed, but old write bodies are not replayed by default.
+  - This is internal prompt hygiene, not a new user-facing subagent limit.
+- Verification:
+  - Added regression where a runner appends to `data/weekly_data.json` for 45 tool rounds and then closes out.
+  - Before the fix, max prompt size reached 78,738 chars and old `row-1` content remained in the final prompt.
+  - After the fix, prompt size stays below the regression threshold, old rows are omitted from live prompt, and the final file still contains all 45 rows.
+- Status: fixed in focused tests.
+- Next check:
+  - Re-run a shorter Task18 slice to verify the worker can still produce data while downstream waits correctly.
+  - Keep watching for true no-progress loops separately; this fix solves prompt bloat for productive long writers, not every possible stuck-task pattern.

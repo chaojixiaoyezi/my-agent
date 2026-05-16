@@ -110,6 +110,32 @@ class _EmptyThenFinalAfterToolBackend:
         return ModelResponse(text="已根据工具结果继续完成。", backend=self.name)
 
 
+# LLM: _LongAppendPromptWindowBackend reproduces a productive runner whose live tool transcript grows every round.
+# 类用途: 测试专用后端；连续 append 同一个产物，确认系统会压缩旧工具上下文而不是让 prompt 无限变大。
+class _LongAppendPromptWindowBackend:
+    name = "fake_long_append_prompt_window_backend"
+
+    def __init__(self, rounds: int = 45):
+        self.calls = 0
+        self.rounds = rounds
+        self.max_prompt_chars = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        self.max_prompt_chars = max(self.max_prompt_chars, len(prompt))
+        if self.calls <= self.rounds:
+            content = f"row-{self.calls}: " + ("x" * 900)
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    f'{{"tool":"append_file","path":"data/weekly_data.json","content":"{content}\\n"}}\n'
+                    "[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        return ModelResponse(text="连续写入后已正常收口。", backend=self.name)
+
+
 # LLM: _PredelegationSourceReadBackend verifies root tool-loop guard output, not just helper calls.
 # 类用途: 第一轮要求读取 data 正文；第二轮检查模型只收到派工前阻断提示，没有收到文件正文。
 class _PredelegationSourceReadBackend:
@@ -266,6 +292,27 @@ def test_tool_loop_enforces_per_agent_tool_budget_for_run_id():
         assert result.tool_rounds == 2
         assert agent.backend.calls == 3
         assert result.executed_tools == ["read_file"]
+
+
+# LLM: long-running writers should keep working without making every old tool record part of the live prompt.
+# 函数用途: 覆盖真实 Task18 里单个数据 worker prompt 膨胀到数十万字符的问题。
+def test_tool_loop_windows_long_runner_tool_context():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        (workspace / "data").mkdir()
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=0)
+        agent = SimpleAgent(cfg, workspace)
+        backend = _LongAppendPromptWindowBackend()
+        agent.backend = backend
+
+        result = agent.run("持续写入 data/weekly_data.json 后收口", save=False, allowed_tools=["append_file"])
+
+        assert result.response == "连续写入后已正常收口。"
+        assert result.tool_rounds == 45
+        assert backend.max_prompt_chars < 70_000
+        assert "row-1:" not in result.prompt
+        assert "tool-context-window" in result.prompt
+        assert (workspace / "data" / "weekly_data.json").read_text(encoding="utf-8").count("row-") == 45
 
 
 # LLM: tool-loop should execute real TOOL_CALL blocks but discard model-written tool records.

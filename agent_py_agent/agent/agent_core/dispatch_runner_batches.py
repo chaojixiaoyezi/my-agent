@@ -35,6 +35,7 @@ from .runner_gate import (
     run_concurrent_runners,
     run_single_runner,
 )
+from .runner_input_dependencies import input_dependency_ready_candidates
 
 
 # LLM: RunnerRecordInput 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -110,6 +111,7 @@ def _included_normal_runner_tasks(tasks: list, ctx: DispatchContext, runner_max_
         task for task in tasks
         if _is_dispatch_runner_candidate(task, runner_max_attempts=runner_max_attempts)
     ]
+    selected = input_dependency_ready_candidates(selected)
     return selected[: max(0, int(ctx.max_runners or 0))]
 
 

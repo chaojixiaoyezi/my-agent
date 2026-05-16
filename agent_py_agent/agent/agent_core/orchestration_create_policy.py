@@ -10,7 +10,7 @@ from .coordinator_seed_tools import explicit_root_allowed_tools
 from .orchestration_create_constraints import (
     goal_has_concrete_file_target,
     goal_has_single_concrete_file_target,
-    merged_extra_write_roots,
+    resolved_extra_write_roots,
     role_allows_direct_product_work,
 )
 from .orchestration_create_context import create_context_manifest, create_context_packs
@@ -118,7 +118,7 @@ def create_run_params(
         supervisor=str(raw_params.get("supervisor") or "parent").strip(),
         final_owner=str(raw_params.get("final_owner") or "").strip(),
         acceptance_checks=_string_list(raw_params.get("acceptance_checks")),
-        extra_write_roots=merged_extra_write_roots(raw_params, goal),
+        extra_write_roots=resolved_extra_write_roots(agent, raw_params, goal),
         context_manifest=create_context_manifest(raw_params),
         context_packs=create_context_packs(raw_params),
         workflow_mode=workflow_mode,

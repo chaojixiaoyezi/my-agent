@@ -27,6 +27,7 @@ from .tool_call_runtime import (
     guarded_tool_call_result,
 )
 from .tool_context_reducer import render_tool_result_for_live_prompt
+from .tool_context_window import window_tool_context_params
 from .tool_loop_completion import ToolRoundCompletionRequest, completion_response_after_tool_round
 from .tool_loop_empty_response import (
     empty_model_response_fallback,
@@ -67,6 +68,7 @@ class _ToolStepRequest:
 # LLM: _build_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 构建提示词所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _build_prompt(agent, params: ToolLoopExecuteParams) -> str:
+    window_tool_context_params(params)
     return agent.prompts.build(
         params.user_prompt,
         params.memories,

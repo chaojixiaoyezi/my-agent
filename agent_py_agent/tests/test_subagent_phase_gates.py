@@ -26,6 +26,9 @@ def _runner_task(run_id: str, role: str, agent_name: str = "", goal: str = ""):
         role=role,
         agent_name=agent_name,
         goal=goal,
+        task_dir="",
+        allowed_write_roots=[],
+        context_manifest=SimpleNamespace(required_read_paths=[]),
         status="PLANNING",
         verification_status="UNVERIFIED",
         channel_status="OK",
@@ -128,6 +131,43 @@ def test_explicit_run_ids_keep_mixed_worker_and_coordinator_targets():
     selected = _runner_candidates_for_context(tasks, ctx, runner_max_attempts=1)
 
     assert [task.id for task in selected] == ["market", "competition", "strategy"]
+
+
+# LLM: explicit run_ids should not force downstream workers to start before their input refs exist.
+# 函数用途: 覆盖 Task18 真实 E2E：读取 data/weekly_data.json 的下游任务不能和生成该文件的上游任务同轮抢跑。
+def test_explicit_run_ids_wait_for_missing_input_refs(tmp_path):
+    data = _runner_task("collect", "worker", "小傻妞-数据", "生成 data/weekly_data.json")
+    report = _runner_task("report", "worker", "小傻妞-报告", "读取 data/weekly_data.json，生成 final_report.md")
+    for task in [data, report]:
+        task.allowed_write_roots = [str(tmp_path)]
+        task.task_dir = str(tmp_path / ".my-agent" / "subagents" / task.id)
+    ctx = DispatchContext(
+        cfg=SimpleNamespace(),
+        normalized_workflow_mode="off",
+        apply=True,
+        planner=False,
+        runner_instruction="",
+        max_runners=2,
+        limit=20,
+        reviewer="tester",
+        note="",
+        take_over_by="",
+        locked_files=None,
+        router=SimpleNamespace(),
+        include_run_ids=["collect", "report"],
+    )
+
+    selected = _runner_candidates_for_context([data, report], ctx, runner_max_attempts=1)
+
+    assert [task.id for task in selected] == ["collect"]
+
+    data.status = "DONE"
+    data.verification_status = "VERIFIED"
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "weekly_data.json").write_text("{}", encoding="utf-8")
+    selected = _runner_candidates_for_context([data, report], ctx, runner_max_attempts=1)
+
+    assert [task.id for task in selected] == ["report"]
 
 
 # LLM: workflow phase dependencies must be respected before broad role ordering.

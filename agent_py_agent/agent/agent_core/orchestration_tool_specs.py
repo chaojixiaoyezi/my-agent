@@ -26,7 +26,7 @@ _CREATE_PARAMETERS = {
     "context_packs": "refs-only 上下文包列表；每项只放摘要和 path/ref，不放大正文",
     "required_read_paths": "简写：子代理必须自己读取的资料路径列表；会进入 context_manifest.required_read_paths",
     "workflow_mode": "off/plan/auto；决定是否在建工单时挂 workflow 计划",
-    "extra_write_roots": "额外写入目录列表；目录必须位于 workspace_root 列表允许范围内",
+    "extra_write_roots": "额外写入目录列表；通常省略，系统会把当前任务 workspace_root 作为默认产物根；只有写到其它工作区内目录时才填",
 }
 _CREATE_PARAMETER_DETAILS = {
     "goal": (
@@ -68,8 +68,9 @@ _CREATE_PARAMETER_DETAILS = {
     "workflow_mode": "默认建议省略或写 off。只有用户明确要求 workflow/工作流时才写 plan/auto；明确文件交付 worker 会强制 off。",
     "extra_write_roots": (
         "JSON 数组，例如 [\"C:/Users/you/Desktop/work\"]；只给本次子代理任务增加写入边界。"
-        "凡是要写真实交付物、恢复 worker、重试超时 worker，都必须保留用户给的绝对产物目录；"
-        "不要只在 goal 里写“目标目录/同一目录/任务目录”。"
+        "普通任务可省略：如果 goal 写的是“目标目录/同一目录/任务目录”并且当前有真实 workspace_root，"
+        "系统会自动把 workspace_root 当作本次产物根。"
+        "只有用户明确给了其它工作区内产物目录、恢复 worker、重试超时 worker 时，才需要显式保留那个目录。"
     ),
 }
 _CREATE_EXAMPLES = [
