@@ -7763,5 +7763,6 @@ This document is append-only. Record every real subagent E2E issue found during 
   - The fix now checks post-delegation parent state first, then applies pre-delegation logic based on current-turn ids. Historical runs in the workspace no longer disable the fresh-turn source handoff.
 - Verification:
   - `python3 -m pytest -q agent_py_agent/tests/test_orchestration_body_read_guard.py -q` -> passed.
+  - `python3 -m pytest -q agent_py_agent/tests/test_tools/test_tool_loop.py::test_tool_loop_blocks_predelegation_source_body_read -q` -> passed.
 - Next check:
-  - Re-run Task17 or a natural furniture-site E2E and inspect the first `create_subagents` boundary. Expected behavior: root reads brief files and directory clues, then delegates source body paths to child agents.
+  - Re-run Task17 or a natural furniture-site E2E and inspect the first `create_subagents` boundary. Expected behavior: terminal may still show a requested source read, but tool transcript should return `predelegation_source_read_blocked` and the next model step should delegate source body paths to child agents.
