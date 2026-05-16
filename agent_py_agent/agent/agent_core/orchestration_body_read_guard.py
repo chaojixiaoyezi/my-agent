@@ -20,6 +20,10 @@ from .orchestration_delegation_intent import (
     prompt_requests_refs_only_delegation,
     user_authorized_parent_body_read,
 )
+from .orchestration_predelegation_read_guard import (
+    PreDelegationReadGuardRequest,
+    maybe_block_predelegation_source_read,
+)
 from .orchestration_run_scope import remembered_orchestration_run_ids
 from .orchestration_shell_body_read import ShellBodyReadPathRequest, shell_body_read_paths
 from .runner_context import current_subagent_run_id
@@ -55,6 +59,15 @@ def maybe_block_delegating_body_read(request: DelegatingBodyReadGuardRequest) ->
     tool = str(request.payload.get("tool") or "")
     if tool not in BODY_READ_TOOLS:
         return None
+    predelegation = maybe_block_predelegation_source_read(
+        PreDelegationReadGuardRequest(
+            agent=request.agent,
+            payload=request.payload,
+            user_prompt=request.user_prompt,
+        )
+    )
+    if predelegation is not None:
+        return predelegation
     parent = _current_parent_task(request.agent)
     if parent is None:
         parent = _top_level_delegation_parent(request.agent, request.user_prompt)

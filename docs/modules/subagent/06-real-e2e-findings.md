@@ -7738,3 +7738,25 @@ This document is append-only. Record every real subagent E2E issue found during 
   - `/Users/xiaoyezi/ai_claw/bin/ruff check agent_py_agent/agent/agent_core/orchestration_create_policy.py agent_py_agent/agent/agent_core/orchestration_tool_specs.py agent_py_agent/agent/prompting_parts/builder.py agent_py_agent/tests/test_orchestration_create_subagents_items.py agent_py_agent/tests/test_prompting_builder.py` -> passed.
 - Next check:
   - Re-run a natural-language Task17-style E2E and count root `read_file/read_artifact` calls before the first `create_subagents`. The target is not zero reads; it should read enough to understand the task, then delegate detailed source-body reads to child agents.
+
+### Finding 135: Root still over-read data bodies before first delegation
+
+- Test scene:
+  - Log: `/Users/xiaoyezi/my-claude-code/third-party-eval/logs/my-agent-task17-20260516-085115.log`
+  - Same Task17 SEA market entry task after refs-first context fields were wired.
+- Symptom:
+  - root successfully passed `context_manifest`, `context_packs`, and `required_read_paths` into `create_subagents`.
+  - Before the first `create_subagents`, root still read multiple source bodies: country packs, company profile, competitor landscape, CSV data, and one long read artifact.
+- 中文解释:
+  - 我们已经给 root 一条“把资料路径交给小傻妞”的路，但模型习惯还是先自己把资料看完再派工。这会让主代理上下文变重，也让多代理省上下文的目标打折。
+- Root cause:
+  - Prompt guidance alone was too soft for a real model under a complex research task.
+  - Existing body-read guard only activates after child runs already exist; it cannot catch the pre-delegation over-read window.
+- Fix:
+  - Added `orchestration_predelegation_read_guard.py`.
+  - Before any current-turn child run exists, natural delegation prompts may read brief task files, but data/material/source body reads are redirected to `create_subagents` with `required_read_paths/context_manifest/context_packs`.
+  - Once child runs exist, the existing delegating body-read guard remains responsible for parent refs-only behavior.
+- Verification:
+  - `python3 -m pytest -q agent_py_agent/tests/test_orchestration_body_read_guard.py -q` -> passed.
+- Next check:
+  - Re-run Task17 or a natural furniture-site E2E and inspect the first `create_subagents` boundary. Expected behavior: root reads brief files and directory clues, then delegates source body paths to child agents.
