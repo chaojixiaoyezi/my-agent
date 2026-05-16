@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..coverage_records import coverage_records_resolve_run, task_coverage_records
 from ..reports import AcceptanceReviewFinding
 
 _DESCENDANT_SCAN_MAX_NODES = 96
@@ -30,7 +31,7 @@ def descendant_health_finding(task: Any, created_at: float) -> AcceptanceReviewF
             created_at=created_at,
         )
     state = _scan_descendants(task, child_ids)
-    blocked = [item for item in state.items if not _is_healthy(item)]
+    blocked = [item for item in state.items if not _is_healthy(item, state)]
     return AcceptanceReviewFinding(
         name="descendant_health",
         ok=not blocked,
@@ -45,7 +46,13 @@ def descendant_health_finding(task: Any, created_at: float) -> AcceptanceReviewF
 # 函数用途: 有界扫描父任务下的真实后代状态，不读取报告正文或产物文件。
 def _scan_descendants(task: Any, child_ids: list[str]) -> _DescendantScanState:
     workspace = _child_workspace(task)
-    state = _DescendantScanState(workspace=workspace, queue=list(child_ids), seen=set(), items=[])
+    state = _DescendantScanState(
+        workspace=workspace,
+        queue=list(child_ids),
+        seen=set(),
+        items=[],
+        coverage_records=task_coverage_records(task),
+    )
     if workspace is None:
         return state
     scanned = 0
@@ -63,6 +70,7 @@ class _DescendantScanState:
     queue: list[str]
     seen: set[str]
     items: list[_DescendantStatus]
+    coverage_records: list[dict[str, object]]
 
 
 # LLM: _DescendantStatus carries only small persisted identity/status fields for acceptance messages.
@@ -87,16 +95,28 @@ def _scan_one_descendant(state: _DescendantScanState, run_id: str) -> int:
         state.items.append(_DescendantStatus(run_id, "", "", "MISSING", "UNVERIFIED"))
         return 1
     state.items.append(_status_from_record(run_id, record))
+    state.coverage_records.extend(task_coverage_records(record))
     state.queue.extend(child_id for child_id in _string_list(record.get("child_ids", [])) if child_id not in state.seen)
     return 1
 
 
 # LLM: _is_healthy defines the parent acceptance truth source for descendant completion.
 # 函数用途: 判断后代是否已经健康收口；DONE 必须 VERIFIED，接管/放弃视为已由恢复链路收口。
-def _is_healthy(item: _DescendantStatus) -> bool:
+def _is_healthy(item: _DescendantStatus, state: _DescendantScanState) -> bool:
     if (item.status, item.verification_status) == _HEALTHY_DONE:
         return True
-    return item.status in _CLOSED_STATUSES
+    if item.status in _CLOSED_STATUSES:
+        return True
+    return coverage_records_resolve_run(item.run_id, state.coverage_records, lambda run_id: _descendant_done(state, run_id))
+
+
+# LLM: _descendant_done looks up covering runs from the same bounded descendant scan.
+# 函数用途: coverage_records 只有指向同一棵子树里 DONE/VERIFIED 的 run 才能放行。
+def _descendant_done(state: _DescendantScanState, run_id: str) -> bool:
+    for item in state.items:
+        if item.run_id == run_id:
+            return (item.status, item.verification_status) == _HEALTHY_DONE
+    return False
 
 
 # LLM: _child_workspace derives sibling run dirs from the current task_dir.

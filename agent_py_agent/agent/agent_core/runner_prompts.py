@@ -31,6 +31,9 @@ _SUBAGENT_RESULT_TEMPLATE = (
     '  "evidence_packets": [\n'
     '    {"id": "evpkt-run-id-short", "claim": "可验收声明", "checked_scope": "检查范围", "evidence_refs": ["runner_result.json"], "artifact_refs": ["产物路径或output.json"], "confidence": 0.9}\n'
     "  ],\n"
+    '  "coverage_records": [\n'
+    '    {"covered_run_id": "失败或损坏的run_id", "covered_by_run_id": "已DONE/VERIFIED的覆盖run_id", "reason": "为什么覆盖同一范围", "artifact_refs": ["覆盖者产物路径"], "evidence_refs": ["覆盖者证据路径"]}\n'
+    "  ],\n"
     '  "capability_requests": [\n'
     '    {"problem": "缺少什么", "needed_capability": "能力名", "capability_type": "shell|tool|skill|mcp|network|generic", "expected_output": "希望得到什么", "requested_tools": [], "requested_skills": [], "requested_mcp_tools": [], "requested_commands": ["python3"], "cwd_scope": [], "path_scope": ["任务内需要访问的目录"], "network_scope": [], "output_budget": {"stdout_bytes": 65536, "stderr_bytes": 32768}, "risk_level": "low|medium|high", "tried": [], "evidence": [], "constraints": {}, "fallback_attempted": [], "escalation_target": "parent", "reserved": {}}\n'
     "  ],\n"
@@ -64,6 +67,7 @@ _SUBAGENT_REPAIR_RESULT_TEMPLATE = (
     '  "evidence_packets": [\n'
     '    {"id": "evpkt-repair-run-id-short", "claim": "可验收声明", "checked_scope": "修复整理范围", "evidence_refs": ["报告或output.json路径"], "artifact_refs": ["产物路径"], "confidence": 0.8}\n'
     "  ],\n"
+    '  "coverage_records": [],\n'
     '  "capability_requests": [],\n'
     '  "artifacts": [],\n'
     '  "tests": [],\n'
@@ -112,6 +116,8 @@ def _build_subagent_runner_prompt(
         "- 说明完成了什么或卡在哪里。\n"
         "- 列出使用过的授权工具或 skill。\n"
         "- 给出可验收证据；成功时 evidence_packets 必须有 artifact_refs 或 evidence_refs，不能只写普通 evidence。\n"
+        "- 如果你认为某个失败、损坏或超时的 child run 已由另一个已完成 run 覆盖，必须写 coverage_records；"
+        "只在 summary 里说“已覆盖”不会被父级验收或最终收口认可。\n"
         "- 结果块要短：evidence/artifacts/tests/lessons 每类只保留最关键的 1-5 条，长报告写文件后引用路径。\n"
         "- 最后必须输出一个机器可解析结果块，格式如下：\n\n"
         "注意：结果块里面只能放裸 JSON object，不要使用 ```json 或任何 Markdown 代码围栏。\n"

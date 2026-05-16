@@ -7892,3 +7892,32 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Status: child artifact ref false blocker fixed by focused tests; execution-corruption recovery remains open.
 - Next check:
   - Re-run a smaller Task17 slice or targeted coordinator fixture to confirm coordinator parent refs now use child task artifact refs, then tackle machine-readable fallback/takeover for corrupted leaves.
+
+### Finding 139: Fallback coverage must be machine-readable, not prose
+
+- Test scene:
+  - Same Task17 run as Finding 138.
+  - One leaf ended as `BLOCKED / UNVERIFIED / execution_corruption` after emitting broken `tool_call/path` fragments.
+- Symptom:
+  - Parent text said the Vietnam section was already covered by another sibling run.
+  - The system had no machine field proving which broken run was covered by which verified run.
+  - As a result, parent acceptance and final closeout could either remain blocked forever, or future code might be tempted to trust natural-language fallback text.
+- 中文解释:
+  - 父级说“这个坏掉的小傻妞不用管，另一个已经做了”，这句话人能看懂，但系统不能直接信。
+  - 正确做法是写成结构化字段：坏的是哪个 run，覆盖它的是哪个 run，覆盖者有没有真的 `DONE/VERIFIED`。
+- Root cause:
+  - Runner structured output did not have a first-class coverage relation.
+  - Closeout and descendant health could only use terminal status, takeover records, or same-target artifact heuristics.
+- Fix:
+  - Added `coverage_records` to runner structured output and persisted it in `task.attributes.coverage_records`.
+  - Added `coverage_records.py` to normalize coverage records from payloads/task records.
+  - Final closeout now treats a broken run as resolved only if a coverage record points to a `DONE/VERIFIED` covering run in the same task snapshot.
+  - Parent descendant health uses the same bounded relation while scanning exact child `task.json` files.
+  - Runner prompt now tells coordinators that prose fallback is not accepted; they must write `coverage_records`.
+- Verification:
+  - `test_process_structured_output_records_coverage_records` first red, then green.
+  - `test_closeout_resolves_explicit_verified_coverage_record` first red, then green.
+  - `test_parent_descendant_health_accepts_verified_coverage_record` first red, then green.
+- Status: protocol and focused regressions fixed. Real E2E still needs a follow-up run to verify the model actually emits `coverage_records` when it sees sibling coverage.
+- Next check:
+  - Re-run Task17 or a smaller execution-corruption fixture. Expected behavior: coordinator writes `coverage_records` when one verified sibling covers a damaged leaf; if it only writes prose, the run should remain blocked with a clear next action.

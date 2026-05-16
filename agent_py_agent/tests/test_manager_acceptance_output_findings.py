@@ -13,6 +13,49 @@ from agent_py_agent.tests.test_manager_acceptance_findings import (
 )
 
 
+# LLM: _write_child_task_json keeps descendant-health tests short while preserving real task.json layout.
+# 函数用途: 写一个最小 child task.json，让验收扫描走真实文件路径而不是 mock。
+def _write_child_task_json(root: Path, run_id: str, record: dict[str, object]) -> None:
+    (root / run_id).mkdir()
+    (root / run_id / "task.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+# LLM: _coverage_descendant_records keeps coverage tests focused on the health predicate.
+# 函数用途: 返回一个损坏 leaf 和一个已验证覆盖 leaf 的最小 task.json 记录。
+def _coverage_descendant_records() -> dict[str, dict[str, object]]:
+    return {
+        "bad-leaf": {
+            "id": "bad-leaf",
+            "role": "leaf_worker",
+            "agent_name": "小小傻妞-越南监管",
+            "status": "BLOCKED",
+            "verification_status": "UNVERIFIED",
+            "failure_type": "execution_corruption",
+            "child_ids": [],
+        },
+        "good-leaf": {
+            "id": "good-leaf",
+            "role": "leaf_worker",
+            "agent_name": "小小傻妞-越南综合",
+            "status": "DONE",
+            "verification_status": "VERIFIED",
+            "child_ids": [],
+        },
+    }
+
+
+# LLM: _coverage_task_attributes mirrors the runner-persisted coverage_records shape.
+# 函数用途: 构造父级 coordinator 声明的 bad-leaf -> good-leaf 覆盖关系。
+def _coverage_task_attributes() -> dict[str, object]:
+    return {
+        "coverage_records": [{
+            "covered_run_id": "bad-leaf",
+            "covered_by_run_id": "good-leaf",
+            "reason": "good-leaf 覆盖 bad-leaf 的监管和痛点范围",
+        }]
+    }
+
+
 class TestSubAgentAcceptanceOutputMiscFindings(_FindingSetupMixin, _FindingAssertMixin, _FindingReportMixin):
     """Misc output and artifact acceptance tests."""
 
@@ -272,6 +315,38 @@ class TestSubAgentAcceptanceRoleCoverageFindings(_FindingSetupMixin, _FindingAss
             role="coordinator",
             child_ids=["tester", "bug", "accept"],
         )
+        output = {"artifacts": [], "structured_output": {"status": "COMPLETED"}}
+        self._write_findings_files(tmp_path, output)
+        manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
+
+        findings = manager._acceptance_findings(task, output, {}, time.time())
+
+        self._assert_finding(findings, "descendant_health", expected_ok=True)
+
+
+class TestSubAgentAcceptanceCoverageFindings(_FindingSetupMixin, _FindingAssertMixin, _FindingReportMixin):
+    """Coverage-record descendant health tests."""
+
+    def test_parent_descendant_health_accepts_verified_coverage_record(self, tmp_path: Path):
+        """坏 leaf 被 verified sibling 结构化覆盖时，父级后代健康门不再误挡。"""
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
+
+        class MockManager(SubAgentAcceptanceFindingMixin):
+            def __init__(self):
+                self.workspace = tmp_path
+
+        manager = MockManager()
+        for run_id, record in _coverage_descendant_records().items():
+            _write_child_task_json(tmp_path, run_id, record)
+        task = self._make_findings_task(
+            tmp_path,
+            goal="汇总越南市场监管、痛点和进入策略。",
+            role="coordinator",
+            child_ids=["bad-leaf", "good-leaf"],
+        )
+        task.attributes = _coverage_task_attributes()
         output = {"artifacts": [], "structured_output": {"status": "COMPLETED"}}
         self._write_findings_files(tmp_path, output)
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))

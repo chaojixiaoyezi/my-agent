@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .capability_request_identity import find_equivalent_capability_request
+from .coverage_records import merge_task_coverage_records
 from .models import (
     CapabilityRequest,
     SubAgentParsedOutput,
@@ -26,6 +27,7 @@ from .utils import _merge_list, _new_id
 
 # LLM: artifact refs are normalized before merge so parent agents can read durable task-local paths.
 # 函数用途: 本文件合并 structured output 时先把模型短路径修正为真实 artifact refs，再进入验收链路。
+# LLM: coverage records are persisted as task attributes so acceptance/closeout never parse prose fallback.
 
 
 # LLM: MergeActualToolsParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
@@ -217,7 +219,7 @@ def _process_structured_output(
 
     structured_evidence_count = process_evidence_items(parsed, task, now)
     evidence_packets = process_evidence_packets(parsed, task, now)
-    findings = process_findings(parsed, task, now)
+    findings = _process_findings_and_coverage(parsed, task, now)
     structured_request_count, created_request_ids = _create_capability_requests_from_parsed(task, parsed, now)
     normalized = _normalize_parsed_fields(parsed)
     normalized["artifacts"] = normalize_artifact_items(task, normalized["artifacts"])
@@ -244,3 +246,10 @@ def _process_structured_output(
         "lessons": normalized["lessons"],
         "next_actions": normalized["next_actions"],
     }
+
+
+# LLM: _process_findings_and_coverage groups small structured facts so the main state function stays below guardrails.
+# 函数用途: 写入 findings 和 coverage_records；coverage 只记录机器 run_id 关系，不改变任务状态。
+def _process_findings_and_coverage(parsed, task: SubAgentTask, now: float) -> list[dict[str, object]]:
+    merge_task_coverage_records(task, parsed.coverage_records)
+    return process_findings(parsed, task, now)

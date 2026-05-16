@@ -13,6 +13,8 @@ Human version:
 import json
 from typing import TYPE_CHECKING
 
+# LLM: coverage_records_from_payload keeps fallback/takeover coverage structured instead of prose-based.
+from .coverage_records import coverage_records_from_payload
 from .models import SubAgentParsedOutput
 from .parsing_artifacts import artifact_items_from_payload
 from .parsing_capability_requests import capability_requests_from_payload
@@ -278,6 +280,7 @@ def _parsed_output_from_payload(payload: dict[str, object]) -> SubAgentParsedOut
         # LLM: 可追溯声明包与旧证据备注分开解析，避免语义互相污染。
         evidence_packets=_dict_list(payload.get("evidence_packets", [])),
         findings=_dict_list(payload.get("findings", [])),
+        coverage_records=coverage_records_from_payload(payload),
         capability_requests=capability_requests_from_payload(payload),
         artifacts=artifact_items_from_payload(payload),
         tests=_dict_list(payload.get("tests", [])),

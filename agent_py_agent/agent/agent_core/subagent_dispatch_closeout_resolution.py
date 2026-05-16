@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from ..subagents.coverage_records import all_task_coverage_records, coverage_records_resolve_run
 from ..subagents.services.hierarchy_leaf_targets import task_actual_target_tokens
 
 
@@ -30,6 +31,8 @@ def task_resolved_for_closeout(task: object, tasks: list[object]) -> bool:
     verification = str(getattr(task, "verification_status", "") or "").upper()
     if status == "DONE" and verification == "VERIFIED":
         return True
+    if _task_explicitly_covered_by_verified_run(task, tasks):
+        return True
     if _task_targets_resolved_by_verified_siblings(task, tasks):
         return True
     if status != "TAKEN_OVER":
@@ -56,6 +59,20 @@ def _task_targets_resolved_by_verified_siblings(task: object, tasks: list[object
             continue
         verified_targets.update(task_actual_target_tokens(other))
     return bool(verified_targets and targets.issubset(verified_targets))
+
+
+# LLM: _task_explicitly_covered_by_verified_run honors machine coverage_records, not prose fallback.
+# 函数用途: 坏 run 只有被 coverage_records 指向 DONE/VERIFIED coverer 时，才不再阻塞最终收口。
+def _task_explicitly_covered_by_verified_run(task: object, tasks: list[object]) -> bool:
+    run_id = str(getattr(task, "id", "") or "")
+    return coverage_records_resolve_run(run_id, all_task_coverage_records(tasks), lambda item: _task_id_done(tasks, item))
+
+
+# LLM: _task_id_done keeps coverage closeout tied to the current task snapshot.
+# 函数用途: 按 run_id 查找 coverer，并确认它已经 DONE/VERIFIED。
+def _task_id_done(tasks: list[object], run_id: str) -> bool:
+    task = _task_by_id(tasks, run_id)
+    return bool(task and _task_done_verified(task))
 
 
 # LLM: _task_by_id performs exact in-memory lookup and never filesystem globs user-provided ids.

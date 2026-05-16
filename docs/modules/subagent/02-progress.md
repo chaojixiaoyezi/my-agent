@@ -1510,3 +1510,12 @@
 - 已修正：artifact ref normalization 现在会在当前任务本地找不到 ref 时，按 direct child `task.json` 的 `artifact_refs` 做一次有界解析；如果坏路径包含 child_id 或唯一匹配 child 产物文件名，就改成 child 的真实路径。
 - 已测试：新增 `test_process_structured_output_resolves_guessed_child_artifact_refs` 先红后绿；`test_result_processors_edges.py` 和真正缺失产物 blocker 回归通过。
 - 剩余问题：这轮还暴露了一个 leaf 的 `execution_corruption`，模型输出碎成 tool_call/path 垃圾片段；父级口头说有 fallback，但没有写成机器可读 takeover/coverage。下一步要把这种 fallback/接管关系结构化，不能靠口头说明。
+
+## 2026-05-16 execution_corruption 覆盖关系结构化
+- 中文说明：真实 Task17 里某个 leaf 输出损坏后，父级 coordinator 只是用自然语言说“另一个小傻妞覆盖了这个工作”。这类话以后不再作为验收事实，必须写成 `coverage_records`。
+- 已实现：runner structured output 增加 `coverage_records` 字段，形状为 `covered_run_id -> covered_by_run_id`，并可带 `reason/artifact_refs/evidence_refs`；解析后会持久到 `task.attributes.coverage_records`。
+- 已实现：final closeout 和 parent descendant health 都会读取当前任务范围内的 `coverage_records`；只有 `covered_by_run_id` 指向 `DONE/VERIFIED` 的 run 时，坏 run 才会被视为已覆盖。
+- 已实现：runner prompt 和 `output.json.structured_output` 已同步这个字段，提醒模型不能只在 summary 里说“已覆盖”。
+- 已测试：新增解析/持久化、最终收口、父级 descendant health 三条 regression，均先红后绿。
+- 设计边界：这不是让坏 leaf 假装成功；坏 leaf 仍保持原状态，只是父级可以用机器字段证明“另一个已验证 run 覆盖了它的范围”，避免无限卡住同一块工作。
+- 下一步：继续真实复测 Task17 或切小片重跑 execution_corruption 场景，确认父级会写 coverage_records；如果模型仍只写自然语言 fallback，再加强 coordinator/repair prompt 的示例，而不是放宽验收。
