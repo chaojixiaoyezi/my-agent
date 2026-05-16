@@ -983,7 +983,8 @@ docs/
 - `agent_py_agent/agent/action_protocol.py`: typed protocol facade，集中兼容导出工具调用/结果、子代理结果、子代理创建、compact continue packet 和 refs 类型；普通自然语言 summary 只展示，不作为执行或验收事实。
 - `agent_py_agent/agent/action_protocol_core.py`: typed protocol 的 schema version、RunScope、ArtifactRef、EvidenceRef、PathRef 和共享归一化 helper。
 - `agent_py_agent/agent/action_protocol_tooling.py`: ToolCallEnvelope、ToolCallResultEnvelope 和旧工具 payload -> typed envelope 的 bundle 入口。
-- `agent_py_agent/agent/action_protocol_subagents.py`: SubagentResultEnvelope、SubagentScheduleEnvelope 和 artifact/evidence -> path refs 的结构化转换。
+- `agent_py_agent/agent/action_protocol_subagent_dispatch.py`: SubagentDispatchEnvelope 和 dispatch_subagents payload -> typed envelope 的结构化转换；保留 gate/status/blocking/pending/deliverable refs，父级不靠自然语言猜。
+- `agent_py_agent/agent/action_protocol_subagents.py`: SubagentResultEnvelope、SubagentScheduleEnvelope 和 artifact/evidence -> path refs 的结构化转换；schedule envelope 保留 reused/dispatch/status refs，父级不靠自然语言猜。
 - `agent_py_agent/agent/action_protocol_compact.py`: CompactContinuePacketEnvelope，承接 compact/resume 的结构化继续工作包。
 - `agent_py_agent/agent/local_storage/control_plane_models.py`: 定义 agent run、agent event、task rollup、runtime query context 和任务树查询结果的数据结构，保留 `metadata` / `reserved` 给后续继承策略、共享面板和失败交接扩展。
 - `agent_py_agent/agent/local_storage/control_plane.py`: 给 LocalStore 增加控制面 API，支持 upsert run、记录事件、重建 rollup、查询 root task 树、查询子树、blocked runs、takeover candidates 和带 requester/scope 的 runtime query；`takeover_candidates` 覆盖 BLOCKED / FAILED / ERROR / TIMEOUT，避免超时孙代理漏出接管视图。
@@ -996,7 +997,7 @@ docs/
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_state_contract.py`: 当前轮状态合同层；create/schedule/dispatch 共用，仅读取 remembered run ids，输出 `current_turn_run_state` 的 status buckets、dispatchable/running/blocked/verified ids 和下一步建议，避免 root 读大 records 或重复调度。
 - `agent_py_agent/agent/agent_core/tool_context_orchestration_summary.py`: externalized dispatch/schedule/read_artifact 调度输出的 live-prompt 摘要层，保留状态、建议工具调用、`result_refs_by_run`、artifact summaries 和 refs，不默认诱导父级读 artifact 正文。
 - `agent_py_agent/agent/agent_core/hierarchy_tools.py`: runner 内 `schedule_child_subagents` 仍负责当前节点创建下一层 child，现在响应会附带 `typed_envelope.kind=subagent_schedule`，并暴露 `created_run_ids` / `reused_run_ids` / `dispatch_run_ids` / `current_turn_run_state`，父级恢复和继续调度不必从自然语言里抄 child id；child 参数里的 `required_read_paths/context_packs` 会写入真实 task，repair contract 不会在 runner-context 调度边界丢失。
-- `agent_py_agent/agent/agent_core/orchestration_tools.py`: 顶层 `create_subagents` 响应会附带同一 `subagent_schedule` typed envelope；顶层和多层派工走同一 refs 形状。顶层批量派工支持 Hermes 风格 `items/tasks`，不同子任务拥有独立 goal；系统默认名会补成 `小傻妞-角色-编号`，并在响应里给出下一步 `dispatch_subagents` 的真实 run_id 和 `current_turn_run_state`；没有可调度 run 时会建议 `subagent_board`，避免空 dispatch。
+- `agent_py_agent/agent/agent_core/orchestration_tools.py`: 顶层 `create_subagents` 响应会附带同一 `subagent_schedule` typed envelope；顶层和多层派工走同一 refs 形状。顶层批量派工支持 Hermes 风格 `items/tasks`，不同子任务拥有独立 goal；系统默认名会补成 `小傻妞-角色-编号`，并在响应里给出下一步 `dispatch_subagents` 的真实 run_id 和 `current_turn_run_state`；typed envelope 会在状态合同生成后写入，避免恢复层丢掉 dispatchable refs；没有可调度 run 时会建议 `subagent_board`，避免空 dispatch。
 - `agent_py_agent/agent/agent_core/orchestration_create_items.py`: 解析 `create_subagents` 的 `items/tasks` 批量入口；继承顶层默认字段，让每个 child item 独立覆盖 goal/role/name/验收/写入边界；顶层全局 plan 不自动复制到每个 child。
 - `agent_py_agent/agent/agent_core/orchestration_create_policy.py`: create_subagents role 纠偏层；只把本地 goal/name/thought/plan 的明确派工语义用于 worker->coordinator 纠偏，`allowed_tools` 只当能力授权，不再把普通 items worker 误升成 coordinator。
 - `agent_py_agent/agent/agent_core/orchestration_lineage_names.py`: 顶层 create_subagents 的小傻妞默认命名 helper；把系统名补成 `小傻妞-角色-编号`，并防止重复回放时无限追加编号。
@@ -1146,7 +1147,7 @@ docs/
 - `agent_py_agent/agent/agent_core/spawn_role_seed.py`: CLI 显式 role seed 入口；root/coordinator seed 保留 goal 里的产品路径给下层派工，但自身 allowed write roots 只保留 task-local 协调目录。
 - `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context dispatch 的直接 child 进度摘要；含状态计数、unfinished ids、recovery ids、rejected acceptance ids、`parent_acceptance_repair_advice`、`needs_more_dispatch` / `needs_recovery` 和带 `run_ids` 的建议继续调度、修复或恢复工具调用。
 - `agent_py_agent/agent/agent_core/orchestration_board_payload.py`: subagent board 输出整形 helper；把可继续处理的 run id 按状态放到顶层，归一 `status=ALL/*/ANY` 为不过滤，并截断长 goal，避免看板响应挤占模型上下文。
-- `agent_py_agent/agent/agent_core/orchestration_dispatch_tool.py`: `dispatch_subagents` 模型工具类；把模型参数收敛成 `DispatchParams`，返回 refs-first 调度报告和错误 run id 恢复提示。
+- `agent_py_agent/agent/agent_core/orchestration_dispatch_tool.py`: `dispatch_subagents` 模型工具类；把模型参数收敛成 `DispatchParams`，返回 refs-first 调度报告、typed dispatch envelope、当前轮状态合同和错误 run id 恢复提示。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_scope.py`: 集中维护 dispatch_subagents 的 apply/execute 默认、parent scope、self-exclude、workflow-off 和验收收口策略；真实执行 runner 的模型工具调用固定开启父级验收测试，顶层 active root/coordinator 在 `apply=true` 时强制 workflow off，避免全局 auto workflow 先生成 producer/critic/repair 子工单并绕过 root 自己派工。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_scope.py`: 显式 `run_ids` 的真实 dispatch 若漏写 `max_runners`，默认按 run_ids 数量推进，避免模型点名多个孩子却只跑第一个。
 - `agent_py_agent/agent/agent_core/runner_prompts.py`: 子代理 runner / repair prompt 构建器；只把 slim execution context summary、TaskEnvelope/tool preflight 提示和 refs 放进启动提示词，避免真实模型因完整 context bundle 内联而超时。

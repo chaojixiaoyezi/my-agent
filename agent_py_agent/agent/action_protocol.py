@@ -20,12 +20,14 @@ from .action_protocol_core import (
     PathRef,
     RunScope,
 )
-from .action_protocol_subagents import (
+from .action_protocol_subagent_dispatch import (
     SubagentDispatchEnvelope,
+    subagent_dispatch_envelope_from_payload,
+)
+from .action_protocol_subagents import (
     SubagentResultEnvelope,
     SubagentScheduleEnvelope,
     path_refs_from_subagent_refs,
-    subagent_dispatch_envelope_from_payload,
     subagent_schedule_envelope_from_payload,
 )
 from .action_protocol_tooling import (

@@ -237,13 +237,13 @@ class CreateSubagentsTool(BaseTool):
                 for task in tasks
             ],
         }
+        # LLM: expose the same state contract immediately after create, before the parent calls dispatch.
+        # 函数用途: root 刚创建小傻妞就能看到哪些 run 可调度，避免下一轮凭自然语言记忆猜。
+        payload.update(dispatch_state_contract_payload(self.agent))
         payload["typed_envelope"] = subagent_schedule_envelope_from_payload(
             payload,
             tool="create_subagents",
         ).to_dict()
-        # LLM: expose the same state contract immediately after create, before the parent calls dispatch.
-        # 函数用途: root 刚创建小傻妞就能看到哪些 run 可调度，避免下一轮凭自然语言记忆猜。
-        payload.update(dispatch_state_contract_payload(self.agent))
         return payload
 
 

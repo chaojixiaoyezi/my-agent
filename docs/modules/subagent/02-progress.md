@@ -1653,3 +1653,11 @@
 - 已实现：`tool_context_orchestration_summary.py` 会在调度类大输出外置后保留 `current_turn_run_state`，所以 root 下一轮 live prompt 仍能看到状态表和建议工具调用。
 - 已测试：新增 create payload、schedule payload、外置摘要三条状态合同 regression；dispatch 既有状态合同回归继续通过。
 - 下一步：进入第 4 步，继续把 packet/envelope 结构化硬化，减少自然语言摘要误当工具、路径和 run id 的机会。
+
+## 2026-05-17 Packet/Envelope 结构化硬化第一片
+- 中文说明：前三步已经把 `created/reused/dispatch/current_turn_run_state` 放到工具 JSON 顶层，但 typed envelope 里还缺一部分字段。现在把这些机器字段也放进 `SubagentScheduleEnvelope` / `SubagentDispatchEnvelope`，避免后续恢复、接管、外置摘要只剩自然语言或顶层临时 JSON 可读。
+- 对照结论：Codex 的 tool/collab item 会用结构化 status/result 字段承载工具事实；OpenClaw 的 parent-owned background session 会把 parent/session/run 状态进任务注册表；Hermes delegate 明确区分 child summary 和 task refs。共同点是“控制事实要在协议对象里”，不是让模型从 message 里再抄。
+- 已实现：`SubagentScheduleEnvelope` 新增 `reused_run_ids`、`dispatch_run_ids`、`next_action` 和 `current_turn_run_state`。顶层 `create_subagents` 会先写入状态合同，再生成 typed envelope；runner 内 `schedule_child_subagents` 也会把同一状态合同带进 envelope。
+- 已实现：`SubagentDispatchEnvelope` 新增 `completion_status`、`must_not_report_done`、`blocking_run_ids`、`unfinished_run_ids`、pending/deliverable artifact/evidence refs、`next_action` 和 `current_turn_run_state`。父级恢复和验收可以读 envelope，不必解析 dispatch records 或自然语言摘要。
+- 已测试：新增 schedule envelope、dispatch envelope、create/schedule payload typed envelope 四条红绿 regression；确认字段缺失时测试会失败，补协议后通过。
+- 下一步：进入第 5 步，继续做工具网关与大输出策略，让子代理读写和大型日志/网页/产物交互更稳，不靠模型复制长正文。
