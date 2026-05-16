@@ -14,6 +14,7 @@ from ..subagents.services.hierarchy_scheduler import (
     HierarchyScheduleResult,
 )
 from ..tools import BaseTool, ToolExecutionResult
+from .orchestration_create_context import create_context_manifest, create_context_packs
 from .orchestration_tool_specs import build_schedule_child_subagents_spec
 from .orchestration_write_guard import external_write_target_error
 from .parameters import _bool_param, _non_negative_int, _string_list
@@ -240,6 +241,8 @@ def _hierarchy_child_spec(raw: object) -> HierarchyChildSpec | ToolExecutionResu
         allowed_tools=_string_list(raw.get("allowed_tools")),
         acceptance_checks=_string_list(raw.get("acceptance_checks")),
         extra_write_roots=_string_list(raw.get("extra_write_roots")),
+        context_manifest=create_context_manifest(raw),
+        context_packs=create_context_packs(raw),
     )
 
 

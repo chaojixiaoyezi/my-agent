@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..subagents.services.base import CreateRunParams
+from ..subagents.services.repair_contract_identity import (
+    repair_contract_identity_from_context_packs,
+)
 
 _REUSABLE_STATUSES = {"PLANNING", "PENDING", "RUNNING", "DONE", "COMPLETED", "BLOCKED", "PAUSED"}
 _DISPATCHABLE_STATUSES = {"PLANNING", "PENDING"}
@@ -57,6 +60,9 @@ def resolve_create_run(manager: Any, params: CreateRunParams) -> CreateTaskResol
 # LLM: find_reusable_named_child makes idempotency a structured state lookup, not a prompt instruction.
 # 函数用途: 查询已有同名 sibling run；只复用未失败/未废弃的明确命名子代理，避免无限重复创建。
 def find_reusable_named_child(manager: Any, params: CreateRunParams):
+    repair_identity = repair_contract_identity_from_context_packs(params.context_packs)
+    if repair_identity:
+        return find_reusable_repair_child(manager, params, repair_identity)
     name = _normalized_name(params.agent_name)
     if _is_generic_agent_name(name):
         return find_reusable_contract_child(manager, params)
@@ -71,6 +77,15 @@ def find_reusable_named_child(manager: Any, params: CreateRunParams):
 def find_reusable_contract_child(manager: Any, params: CreateRunParams):
     for task in reversed(_safe_list_runs(manager)):
         if _same_contract_scope(task, params):
+            return task
+    return None
+
+
+# LLM: find_reusable_repair_child keys repair reuse by failure refs, not by the generic repair display name.
+# 函数用途: 同一失败 run/目标产物复用同一个 repair owner；不同修复范围即使同名也创建新 run。
+def find_reusable_repair_child(manager: Any, params: CreateRunParams, repair_identity: tuple[object, ...]):
+    for task in reversed(_safe_list_runs(manager)):
+        if _same_repair_scope(task, params, repair_identity):
             return task
     return None
 
@@ -123,6 +138,22 @@ def _same_contract_scope(task: Any, params: CreateRunParams) -> bool:
     if _identity_fields(task) != _params_identity_fields(params):
         return False
     return _external_write_roots(task) == _params_extra_write_roots(params)
+
+
+# LLM: _same_repair_scope compares stable repair_contract identity before falling back to natural goals.
+# 函数用途: 防止 “小傻妞-验收修复” 这种固定名字把不同失败对象误合并。
+def _same_repair_scope(task: Any, params: CreateRunParams, repair_identity: tuple[object, ...]) -> bool:
+    if _status(task) not in _REUSABLE_STATUSES:
+        return False
+    if _text(getattr(task, "parent_id", "")) != _text(params.parent_id):
+        return False
+    if _requested_root_id(params) and _text(getattr(task, "root_id", "")) != _requested_root_id(params):
+        return False
+    if not _compatible_role(getattr(task, "role", ""), params.role):
+        return False
+    if _external_write_roots(task) != _params_extra_write_roots(params):
+        return False
+    return repair_contract_identity_from_context_packs(getattr(task, "context_packs", [])) == repair_identity
 
 
 # LLM: _requested_root_id treats an omitted root as top-level create scope, not a literal empty root_id.

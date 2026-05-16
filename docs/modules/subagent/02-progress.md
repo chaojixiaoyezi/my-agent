@@ -1634,3 +1634,13 @@
 - 已实现：同名默认 worker 但目标不同不会误复用；写入根不同也不会合并。这样既防止重复扩容，又不会把不同任务硬捏成一个任务。
 - 已测试：新增 `test_subagent_hierarchy_schedule_idempotency.py`，覆盖同合同复用、不同目标新建、已完成复用但不 dispatch、工具 payload 暴露 reused/dispatch ids；周边 hierarchy scheduler / duplicate guard / tool role 回归通过。
 - 下一步：进入第 2 步，把 repair/execute/verify 做成同一个 repair run 的闭环，让“修脚本、执行脚本、验证产物”不要再漂移成多段空转链。
+
+## 2026-05-17 Repair/Execute/Verify 同 run 合同第二片
+- 中文说明：第一片 repair contract 已经能告诉修复小傻妞“同一个 run 内修、执行、验证”，但真实底层还有两个风险：runner 内 `schedule_child_subagents` 会丢掉 repair context；顶层固定名字 `小傻妞-验收修复` 可能把不同失败对象误合并。
+- 对照结论：会话运行时 更像用 schema/thread 字段识别任务；通道运行时/长期助手 都把失败 handoff 和 session/task scope 放在控制面或 delegate refs 里。我们这里把 repair scope 也做成机器身份键，不再靠中文名字或 goal 文案判断。
+- 已实现：新增 `repair_contract_identity.py`，从 `context_packs[*].contract` 提取 `schema/kind/failed_run_ids/target_artifact_refs/required_read_paths` 身份键。`create_subagents` 和 `schedule_child_subagents` 的幂等层都会优先按这个键判断 repair owner。
+- 已实现：不同失败 run 或不同目标产物，即使都叫 `小傻妞-验收修复`，也会创建不同 repair run；同一个 repair contract 即使模型把 goal 改写成“继续修复并执行”，也会复用同一个 repair run，避免拆成“修复小傻妞、执行小傻妞、验证小傻妞”多段漂移。
+- 已实现：`HierarchyChildSpec` 增加 `context_manifest/context_packs`，`ScheduleChildSubagentsTool` 会把 child 参数里的 `required_read_paths/context_packs/repair_contract` 传进真实 task；runner 内父节点派修复 child 时，修复合同不会在 parser 边界丢失。
+- 已保留：没有 repair_contract 的旧 QA/repair 同名活跃去重仍然存在，会提示复用/接管已有 repair run；带 repair_contract 的新路径交给幂等层复用或区分不同修复 scope。
+- 已测试：新增顶层不同 repair scope 不误合并、同 repair scope 复用、runner-context repair context 持久化、runner-context 同 repair scope 复用四类 regression；repair payload、dispatch child refs、tool context reducer、duplicate guard 等 49 个 focused tests 通过。
+- 下一步：进入第 3 步，把 root 每轮状态合同上下文补硬，让 root 每次行动前稳定看到 created/reused/dispatch/running/blocked/verified，而不是靠自己回忆上一轮发生了什么。

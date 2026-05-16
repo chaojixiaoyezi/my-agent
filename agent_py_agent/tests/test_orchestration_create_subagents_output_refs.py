@@ -96,3 +96,110 @@ def test_repair_contract_fields_are_persisted_to_child_context(tmp_path):
     assert result.ok is True
     assert task.context_manifest.required_read_paths == [test_ref]
     assert task.context_packs[0]["kind"] == "repair_contract"
+
+
+# LLM: same display name is not enough to merge different repair scopes.
+# 函数用途: 两个验收修复小傻妞如果 repair_contract 指向不同失败 run/产物，必须创建不同任务。
+def test_repair_contract_idempotency_does_not_merge_different_scope(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _mock_workspace_agent(tmp_path)
+    tool = CreateSubagentsTool(agent)
+    first = json.loads(tool.execute(_repair_create_params("child-a", "a.xlsx")).output)
+    second = json.loads(tool.execute(_repair_create_params("child-b", "b.xlsx")).output)
+
+    assert first["created_run_ids"]
+    assert second["created_run_ids"]
+    assert second["reused_run_ids"] == []
+    assert first["ids"] != second["ids"]
+
+
+# LLM: same repair contract should reuse even when the model rewrites the natural-language goal.
+# 函数用途: 同一个失败 run/目标产物被重复派修复时，复用已有 repair owner，避免拆成修复/执行/验证多段链。
+def test_repair_contract_idempotency_reuses_same_scope_with_reworded_goal(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _mock_workspace_agent(tmp_path)
+    tool = CreateSubagentsTool(agent)
+    first = json.loads(tool.execute(_repair_create_params("child-a", "a.xlsx", goal="修复 xlsx 生成脚本")).output)
+    second = json.loads(tool.execute(_repair_create_params("child-a", "a.xlsx", goal="继续修复并执行 xlsx 生成")).output)
+
+    assert first["created_run_ids"]
+    assert second["created_run_ids"] == []
+    assert second["reused_run_ids"] == first["created_run_ids"]
+    assert second["dispatch_run_ids"] == first["created_run_ids"]
+
+
+# LLM: schedule_child_subagents should persist repair context into the child task, not drop it at parsing.
+# 函数用途: runner 内父节点创建修复 child 时，repair_contract 的 required refs/context pack 必须进入真实 task。
+def test_schedule_child_repair_contract_fields_are_persisted_to_child_context(tmp_path):
+    from agent_py_agent.agent.agent_core.hierarchy_tools import ScheduleChildSubagentsTool
+    from agent_py_agent.agent.config import AgentConfig
+    from agent_py_agent.agent.core import SimpleAgent
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
+    parent = agent.subagents.create_run(goal="parent", thought="parent", plan=["parent"], parent_id=root.id, root_id=root.id)
+    agent._current_subagent_run_id = parent.id
+    result = ScheduleChildSubagentsTool(agent).execute({
+        "apply": True,
+        "children": [_repair_create_params("child-a", "a.xlsx")],
+    })
+    payload = json.loads(result.output)
+    task = agent.subagents.load(payload["created_run_ids"][0])
+
+    assert result.ok is True
+    assert task.context_manifest.required_read_paths == ["reports/child-a/test_execution.json"]
+    assert task.context_packs[0]["kind"] == "repair_contract"
+
+
+# LLM: runner-context repair scheduling should reuse the same repair owner by contract, not exact prose.
+# 函数用途: 同一个父级重复派同一 repair_contract，即使 goal 改写，也不能拆出第二个执行/验证 child。
+def test_schedule_child_repair_contract_reuses_same_scope_with_reworded_goal(tmp_path):
+    from agent_py_agent.agent.agent_core.hierarchy_tools import ScheduleChildSubagentsTool
+    from agent_py_agent.agent.config import AgentConfig
+    from agent_py_agent.agent.core import SimpleAgent
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
+    parent = agent.subagents.create_run(goal="parent", thought="parent", plan=["parent"], parent_id=root.id, root_id=root.id)
+    agent._current_subagent_run_id = parent.id
+    tool = ScheduleChildSubagentsTool(agent)
+
+    first = json.loads(tool.execute({"apply": True, "children": [_repair_create_params("child-a", "a.xlsx")]}).output)
+    second = json.loads(tool.execute({
+        "apply": True,
+        "children": [_repair_create_params("child-a", "a.xlsx", goal="继续修复并执行 xlsx 生成")],
+    }).output)
+
+    assert first["created_run_ids"]
+    assert second["created_run_ids"] == []
+    assert second["reused_run_ids"] == first["created_run_ids"]
+    assert second["dispatch_run_ids"] == first["created_run_ids"]
+
+
+# LLM: _repair_create_params mirrors the repair suggested_tool_call shape used by parent acceptance.
+# 函数用途: 生成带同 run 修复合同的 create/schedule 参数，供顶层和 runner-context 测试复用。
+def _repair_create_params(run_id: str, artifact: str, *, goal: str = "修复父级验收失败") -> dict[str, object]:
+    contract = {
+        "schema": "subagent_repair_contract.v1",
+        "kind": "parent_acceptance",
+        "failed_run_ids": [run_id],
+        "required_read_paths": [f"reports/{run_id}/test_execution.json"],
+        "target_artifact_refs": [artifact],
+        "same_run_required_actions": [
+            "read_failure_refs",
+            "repair_named_scope",
+            "execute_generated_scripts_or_commands_if_needed",
+            "verify_target_artifacts",
+            "report_artifact_and_test_refs",
+        ],
+    }
+    return {
+        "goal": goal,
+        "agent_name": "小傻妞-验收修复",
+        "role": "worker",
+        "required_read_paths": list(contract["required_read_paths"]),
+        "context_packs": [{"kind": "repair_contract", "summary": "同一个 run 内修复、执行、验证", "contract": contract}],
+        "repair_contract": contract,
+    }
