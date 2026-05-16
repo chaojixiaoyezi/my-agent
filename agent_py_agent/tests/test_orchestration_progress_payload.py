@@ -176,5 +176,57 @@ def test_runner_context_dispatch_batches_multiple_recovery_strategies_without_sh
     direct = json.loads(result.output)["direct_children"]
     assert len(direct["recovery_strategies"]) == 2
     assert direct["recovery_action_counts"]["rerun_original_from_continue_packet"] == 2
+    assert direct["recovery_batches"][0]["action"] == "rerun_original_from_continue_packet"
+    assert set(direct["recovery_batches"][0]["run_ids"]) == set(created)
     assert set(direct["suggested_tool_call"]["run_ids"]) == set(created)
     assert "runner_instruction" not in direct["suggested_tool_call"]
+
+
+# LLM: Mixed recovery states should be split by action so takeover and rerun do not cross wires.
+# 函数用途: 一个 child 续跑原 run、另一个 child 需要 takeover 时，父级拿到分批计划而不是一个混合 dispatch。
+def test_runner_context_dispatch_splits_mixed_recovery_batches(tmp_path: Path) -> None:
+    manager = SubAgentManager(tmp_path)
+    parent = manager.create_run(goal="父任务", thought="派多个 child", plan=["schedule"], role="coordinator")
+    blocked_id, timeout_id = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            apply=True,
+            child_specs=[
+                HierarchyChildSpec(goal="继续登录", role="worker", agent_name="小傻妞-auth"),
+                HierarchyChildSpec(goal="继续购物车", role="worker", agent_name="小傻妞-cart"),
+            ],
+        )
+    ).created_run_ids
+    blocked = manager.load(blocked_id)
+    blocked.status = "BLOCKED"
+    manager.save(blocked)
+    timed_out = manager.load(timeout_id)
+    timed_out.status = "TIMEOUT"
+    timed_out.failure_type = "runner_timeout"
+    manager.save(timed_out)
+
+    mock_report = MagicMock()
+    mock_report.dry_run = False
+    mock_report.summary = {}
+    mock_report.records = []
+
+    mock_agent = MagicMock()
+    mock_agent._current_subagent_run_id = parent.id
+    mock_agent.config.subagent_workflow_mode = "off"
+    mock_agent.tools.specs.return_value = []
+    mock_agent.dispatch_subagents.return_value = mock_report
+    mock_agent.subagents = manager
+
+    result = DispatchSubagentsTool(mock_agent).execute({"apply": True, "execute_runners": True})
+
+    batches = json.loads(result.output)["direct_children"]["recovery_batches"]
+    by_action = {item["action"]: item for item in batches}
+    rerun = by_action["rerun_original_from_continue_packet"]
+    takeover = by_action["create_takeover_run_from_continue_packet"]
+    assert rerun["run_ids"] == [blocked_id]
+    assert rerun["suggested_tool_call"]["execute_runners"] is True
+    assert "runner_instruction" in rerun["suggested_tool_call"]
+    assert takeover["run_ids"] == [timeout_id]
+    assert takeover["execution_mode"] == "takeover_apply"
+    assert takeover["suggested_tool_call"]["execute_runners"] is False
+    assert takeover["suggested_tool_call"]["max_runners"] == 0

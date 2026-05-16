@@ -1670,3 +1670,12 @@
 - 已实现：新增用户可调配置 `tool_shell_output_max_chars`，默认 `12000`。它只控制 `run_command` 每个 stdout/stderr 流的回显预览长度，不改变真实命令执行、不删除日志、不把大输出塞回主上下文。
 - 已测试：新增 `test_tool_gateway_contract.py`，覆盖 shell/cmd/cwd 别名、shell 大输出截断、read_artifact ref/limit 别名；同时更新工具注册表配置透传测试。
 - 下一步：进入第 6 步，把恢复/接管/no-progress fuse 的结构化入口继续收硬，确保挂掉、卡住、packet 坏掉时优先按 packet/checkpoint/summary 接续，而不是重新理解整件事。
+
+## 2026-05-17 Recovery/Takeover/No-progress 分批合同
+- 中文说明：之前多个 child 同时失败时，父级只能看到 `recovery_action_counts` 和一个混合 `suggested_tool_call`。如果一个 child 适合按 packet 续跑，另一个 child 已 TIMEOUT 需要 takeover，混成一条工具调用就容易串线。
+- 对照结论：通道运行时 控制面会把 session/run 状态拆清楚，会话运行时 的工具调用有明确 status/result，长期助手 delegate 父级拿 refs 后分批处理子任务。我们这里把恢复动作也做成批次，不让一条 runner_instruction 同时发给多个不同失败原因的 child。
+- 已实现：新增 `orchestration_recovery_batches.py`，按 `recommended_action` 把 `recovery_strategies` 分组，生成 `recovery_batches`。普通 `rerun_original_*` 批次走 `dispatch_subagents execute_runners=true`，单个 run 才附带 `runner_instruction`；`create_takeover_run_*` 批次走 `execute_runners=false/max_runners=0`，先写接管状态，避免挂死后继续扩容。
+- 已实现：`recover_coordinator_leadership` 批次只暴露 `requires_leader_selection` 和 `child_run_ids_by_leader`，不会假造 leader；`stop_no_progress_and_escalate` 批次标记 `must_not_auto_retry`，提醒父级汇报 refs 而不是继续重试。
+- 已实现：外置 dispatch 大输出摘要现在保留 `recovery_batches`，root 下一轮 live prompt 能看到分批恢复合同，不需要读完整 dispatch artifact。
+- 已测试：新增多 BLOCKED 批量续跑和 BLOCKED+TIMEOUT 混合恢复 regression；恢复策略、hierarchy recovery、packet recovery、takeover、tool context reducer focused tests 通过。
+- 下一步：进入第 7 步，把 QA/测试/验收链路继续做成智能波次：worker 完成后按 refs 触发 tester/bug_finder/acceptor，失败后走 repair，再回到验收，而不是一开始空转或靠父级读正文替代 QA。

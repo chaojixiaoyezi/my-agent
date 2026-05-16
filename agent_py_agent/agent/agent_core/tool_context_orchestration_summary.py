@@ -94,10 +94,29 @@ def _direct_children_lines(value: object) -> list[str]:
             lines.append(f"- {key}: {_json_inline(value.get(key))}")
     if value.get("quality_advice"):
         lines.append(f"- quality_advice: {_json_inline(value.get('quality_advice'))}")
+    lines.extend(_direct_children_recovery_lines(value))
+    lines.extend(_direct_children_repair_lines(value))
+    lines.extend(_direct_children_suggested_tool_lines(value))
+    return lines
+
+
+# LLM: _direct_children_recovery_lines keeps recovery summaries visible while preserving function size.
+# 函数用途: 渲染 recovery counts/batches/strategy preview，不展开完整 records 或产物正文。
+def _direct_children_recovery_lines(value: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
     if value.get("recovery_action_counts"):
         lines.append(f"- recovery_action_counts: {_json_inline(value.get('recovery_action_counts'))}")
+    if value.get("recovery_batches"):
+        lines.append(f"- recovery_batches: {_json_inline(value.get('recovery_batches'))}")
     if value.get("recovery_strategies"):
         lines.append(f"- recovery_strategy_preview: {_json_inline(_strategy_preview(value.get('recovery_strategies')))}")
+    return lines
+
+
+# LLM: _direct_children_repair_lines renders deferred repair advice separately from recovery actions.
+# 函数用途: 渲染 QA/artifact/parent-acceptance repair 建议和恢复优先级延期标记。
+def _direct_children_repair_lines(value: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
     if value.get("qa_repair_advice"):
         lines.append(f"- qa_repair_advice: {_json_inline(value.get('qa_repair_advice'))}")
     if value.get("artifact_integrity_repair_advice"):
@@ -114,6 +133,13 @@ def _direct_children_lines(value: object) -> list[str]:
         lines.append("- artifact_integrity_repair_deferred_by_recovery: true")
     if value.get("parent_acceptance_repair_deferred_by_recovery"):
         lines.append("- parent_acceptance_repair_deferred_by_recovery: true")
+    return lines
+
+
+# LLM: _direct_children_suggested_tool_lines keeps copyable tool calls in one summary section.
+# 函数用途: 渲染调度/恢复建议工具调用，避免父级翻完整 artifact 找下一步。
+def _direct_children_suggested_tool_lines(value: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
     if value.get("suggested_tool_call"):
         lines.append(f"- suggested_tool_call: {_json_inline(value.get('suggested_tool_call'))}")
     if value.get("suggested_recovery_child_tool_call"):

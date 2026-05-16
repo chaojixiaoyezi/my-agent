@@ -17,6 +17,7 @@ from .orchestration_parent_acceptance_repair import (
     parent_acceptance_repair_advice_payload,
 )
 from .orchestration_quality_payload import quality_repair_advice_payload
+from .orchestration_recovery_batches import recovery_batches_from_strategies
 from .runner_context import current_subagent_run_id
 
 
@@ -219,6 +220,7 @@ def _attach_recovery_strategies(agent, children: dict[str, object]) -> None:
         return
     children["recovery_strategies"] = strategies
     children["recovery_action_counts"] = _action_counts(strategies)
+    children["recovery_batches"] = recovery_batches_from_strategies(strategies)
 
 
 # LLM: _load_recovery_task isolates manager lookup failures from the payload builder.
