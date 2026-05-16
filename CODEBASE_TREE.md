@@ -64,6 +64,7 @@ agent_py_agent/
 |   |-- session/                              # 跨通道会话和 admin 查询
 |   |-- settings/                             # 配置 schema、normalize、服务化 coercion
 |   |   |-- home_config.py                     # 家目录、外部知识库、provider 空间字段组，避免 AgentConfig 类体膨胀
+|   |   |-- tool_config.py                     # 工具系统字段组，避免 AgentConfig 类体膨胀并集中维护工具默认值
 |   |   `-- services/                         # 配置字段归一化和 runtime/subagent/home/provider 子配置
 |   |-- external_knowledge/                   # 外部知识库配置 bundle；后续接目录/API/数据库查询
 |   |-- subagent_workflows/                   # 子代理 workflow route/compile/plan 和内置模板
@@ -246,6 +247,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |   `-- services/acceptance_evidence_findings.py # 父级验收证据门，按当前 runner attempt 判定失败证据
 |   |   |-- tools.py                           # 工具兼容入口，真实实现已拆到 tooling/
 |   |   |-- tooling/                           # 工具模型、文件工具、HTTP 工具、解析器、注册表、写边界
+|   |   |   |-- shell.py                      # run_command 执行、危险命令拦截、超时和 bounded stdout/stderr 预览
 |   |   |   |-- filesystem_read_file.py       # read_file 执行、行号分页、结构化摘要和截断提示
 |   |   |   |-- filesystem_structured_read.py # read_file 对 latest_continue_packet 等机器文件的结构化摘要策略
 |   |   |   |-- registry_control_ranges.py    # 屏蔽 SUBAGENT_RESULT 等结果块，避免摘要里的协议标记误触发工具
@@ -1055,10 +1057,11 @@ docs/
 - `agent_py_agent/agent/tooling/filesystem_read_file.py`: 执行 `read_file`，负责 UTF-8 读取、结构化摘要、start/end 行号、越界提示和 `next_start_line` 截断提示。
 - `agent_py_agent/agent/tooling/filesystem_artifact_guard.py`: 拒绝 `memory_archive/artifacts/tool_outputs/*.json` 外置工具输出包装经由 `read_file` 读取，提示改用 `read_artifact` 分片；当当前上下文未授权 `read_artifact` 时提示上报 `capability_request`。
 - `agent_py_agent/agent/tooling/filesystem_structured_read.py`: `read_file` 的结构化读取策略；默认把 `latest_continue_packet.json` 渲染成状态、work_progress、session_compact 和推荐读取路径摘要，显式行号读取仍返回原始文本。
+- `agent_py_agent/agent/tooling/shell.py`: `run_command` 的执行器；除危险命令拦截和超时外，会按 `tool_shell_output_max_chars` 返回 stdout/stderr 有界预览、总字符数和截断标记，防止大日志直接进入 live prompt。
 - `agent_py_agent/agent/tooling/registry_control_ranges.py`: 工具解析前屏蔽 `SUBAGENT_RESULT` / `PARENT_PLANNER_RESULT` 等结构化结果块，确保结果摘要里提到的协议标记不会被误当作真实工具调用。
 - `agent_py_agent/agent/tooling/registry_execution.py`: 旧文本 `[TOOL_CALL]` 解析后先转成 `ToolCallEnvelope`，执行结果挂回 `call_id/result_envelope`；非 `tool_call` envelope 会明确拒绝执行。envelope helper、最终执行、marker 扫描和 payload 归一已分别拆到 `registry_envelopes.py` / `registry_invoke.py` / `registry_markers.py` / `registry_payload_normalize.py`。
 - `agent_py_agent/agent/tooling/registry_invoke.py`: 工具执行前的参数准备、写边界校验和临时工作根注入层；当父级明确授权外部 product/artifact 目录时，同一工具调用内会把这些目录加入文件工具 read/list/search/write 根，调用结束后恢复原工具状态。
-- `agent_py_agent/agent/tooling/registry_payload_normalize.py`: 对标准 JSON 工具块做 payload 校验、工具名别名归一和参数别名归一；冲突参数明确报错，不静默猜测。
+- `agent_py_agent/agent/tooling/registry_payload_normalize.py`: 对标准 JSON 工具块做 payload 校验、工具名别名归一和参数别名归一；支持 shell/cmd/cwd 与 read_artifact ref/limit 等常见模型漂移，冲突参数明确报错，不静默猜测。
 - `agent_py_agent/agent/tooling/artifact.py`: 注册 `read_artifact` 工具，给模型提供受控 artifact slice/head/tail/search 读取入口。
 - `agent_py_agent/agent/tooling/artifact_read_budget.py`: `read_artifact` 的单 run 正文读取预算器，按 `run_id` 统计滚动窗口字符数，避免子代理反复展开大 artifact。
 - `agent_py_agent/agent/tooling/controlled_exec.py`: 注册 `controlled_exec` 工具包装；只从 `write_boundary.controlled_exec_grants` 读取父级 shell grant，dry-run 返回 plan，显式 apply 才调用 bounded shell execution 或 task trash；`apply/execute/run/full` 字符串也会被识别为执行意图，delete-to-trash dry-run 作为有效计划返回，但 prompt/验收会要求真实 stdout/audit/trash refs 才算完成。执行后的 shell decision/audit 会标记 `dry_run=false`，避免模型把真实执行误读成计划。

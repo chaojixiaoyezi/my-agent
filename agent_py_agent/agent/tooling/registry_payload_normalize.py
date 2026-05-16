@@ -24,7 +24,10 @@ MODEL_WRAPPER_PARAM_KEYS = {
 }
 TOOL_NAME_ALIASES = {
     "append": "append_file",
+    "bash": "run_command",
     "cat": "read_file",
+    "command": "run_command",
+    "exec": "run_command",
     "fetch": "fetch_url",
     "grep": "search_text",
     "http": "http_request",
@@ -35,6 +38,8 @@ TOOL_NAME_ALIASES = {
     "replace": "replace_in_file",
     "request": "http_request",
     "search": "search_text",
+    "sh": "run_command",
+    "shell": "run_command",
     "write": "write_file",
 }
 FILESYSTEM_PATH_PARAM_ALIASES = {
@@ -64,6 +69,25 @@ PARAM_ALIASES_BY_TOOL = {
         "pattern": "query",
         "search_text": "query",
         "text": "query",
+    },
+    "read_artifact": {
+        "artifact": "artifact_ref",
+        "artifact_path": "artifact_ref",
+        "call_id": "artifact_ref",
+        "path": "artifact_ref",
+        "ref": "artifact_ref",
+        "scoped_call_id": "artifact_ref",
+        "limit": "max_chars",
+        "max_length": "max_chars",
+    },
+    "run_command": {
+        "cmd": "command",
+        "command_text": "command",
+        "shell": "command",
+        "cwd": "working_dir",
+        "workdir": "working_dir",
+        "working_directory": "working_dir",
+        "timeout_seconds": "timeout",
     },
 }
 

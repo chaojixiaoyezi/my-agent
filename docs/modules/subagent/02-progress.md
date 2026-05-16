@@ -1661,3 +1661,12 @@
 - 已实现：`SubagentDispatchEnvelope` 新增 `completion_status`、`must_not_report_done`、`blocking_run_ids`、`unfinished_run_ids`、pending/deliverable artifact/evidence refs、`next_action` 和 `current_turn_run_state`。父级恢复和验收可以读 envelope，不必解析 dispatch records 或自然语言摘要。
 - 已测试：新增 schedule envelope、dispatch envelope、create/schedule payload typed envelope 四条红绿 regression；确认字段缺失时测试会失败，补协议后通过。
 - 下一步：进入第 5 步，继续做工具网关与大输出策略，让子代理读写和大型日志/网页/产物交互更稳，不靠模型复制长正文。
+
+## 2026-05-17 Tool Gateway / 大输出策略第一片
+- 中文说明：真实模型经常把 `run_command` 写成 `shell`，把 `command` 写成 `cmd`，或者把 `read_artifact` 的 `artifact_ref` 写成 `ref/path/call_id`。这一片把这些常见漂移收进工具网关合同，避免子代理因为小参数名错误直接卡住。
+- 对照结论：会话运行时 的工具调用结果有结构化 item/status，长期助手 delegate/tool dispatch 会保留工具调用身份和 bounded refs，通道运行时 控制面只看 session/run 状态。共同点是“工具事实由机器字段承载，大正文走 refs/预览”，不是让模型复制一大段日志。
+- 已实现：`registry_payload_normalize.py` 扩展工具名和参数别名：`shell/bash/cmd/sh/exec` 归一到 `run_command`，`cmd/cwd/workdir` 归一到 `command/working_dir`；`read_artifact` 支持 `ref/path/call_id/limit` 等别名归一到 `artifact_ref/max_chars`。
+- 已实现：`run_command` 现在返回 `stdout_chars/stdout_preview_chars/stdout_truncated` 和 stderr 对应字段；stdout/stderr 正文只给配置控制的预览，避免 1G 日志或 100 个子代理重复读时把 live prompt 撑爆。
+- 已实现：新增用户可调配置 `tool_shell_output_max_chars`，默认 `12000`。它只控制 `run_command` 每个 stdout/stderr 流的回显预览长度，不改变真实命令执行、不删除日志、不把大输出塞回主上下文。
+- 已测试：新增 `test_tool_gateway_contract.py`，覆盖 shell/cmd/cwd 别名、shell 大输出截断、read_artifact ref/limit 别名；同时更新工具注册表配置透传测试。
+- 下一步：进入第 6 步，把恢复/接管/no-progress fuse 的结构化入口继续收硬，确保挂掉、卡住、packet 坏掉时优先按 packet/checkpoint/summary 接续，而不是重新理解整件事。

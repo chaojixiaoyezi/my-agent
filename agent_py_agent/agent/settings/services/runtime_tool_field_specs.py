@@ -14,6 +14,7 @@ TOOL_INT_FIELDS = (
     ("tool_web_max_chars", 0, None),
     ("tool_http_timeout", 1, None),
     ("tool_shell_timeout", 1, None),
+    ("tool_shell_output_max_chars", 100, None),
     ("tool_catalog_limit", 0, None),
     ("tool_catalog_offset", 0, None),
     ("tool_catalog_entry_max_chars", 0, None),

@@ -68,6 +68,7 @@ class ToolRegistryParams:
     vector_search_enabled: bool
     workspace_roots: list[Path] | None = None
     shell_tool_timeout: int = 30
+    shell_tool_output_max_chars: int = 12_000
     catalog_mode: str = "compact"
     catalog_offset: int = 0
     catalog_categories: list[str] | None = None
@@ -130,7 +131,13 @@ def _register_filesystem_tools(registry: ToolRegistry, params: ToolRegistryParam
 def _register_network_tools(registry: ToolRegistry, params: ToolRegistryParams) -> None:
     registry.register(FetchUrlTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
     registry.register(HttpRequestTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
-    registry.register(ShellTool(registry.workspace_root, default_timeout=params.shell_tool_timeout))
+    registry.register(
+        ShellTool(
+            registry.workspace_root,
+            default_timeout=params.shell_tool_timeout,
+            max_output_chars=params.shell_tool_output_max_chars,
+        )
+    )
     registry.register(ControlledExecTool())
 
 

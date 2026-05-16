@@ -31,6 +31,7 @@ class ToolConfig:
     tool_web_max_chars: int = 100_000
     tool_http_timeout: int = 30
     tool_shell_timeout: int = 240
+    tool_shell_output_max_chars: int = 12_000
     stream_enabled: bool = True
     tool_catalog_limit: int = 20
     tool_catalog_mode: str = "compact"

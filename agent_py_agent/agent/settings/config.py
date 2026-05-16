@@ -32,7 +32,7 @@ from .normalize import (
     normalize_agent_config,
     normalize_subagent_workflow_config,
 )
-from .tool_config import DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
+from .tool_config import ToolConfig
 
 __all__ = [
     "AgentConfig",
@@ -60,9 +60,9 @@ _LOG_LEVELS = {
 }
 
 # LLM: AgentConfig 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: 主运行配置对象，汇总模型、工具、gateway、子代理、通知和用户空间字段。
+# 类用途: 主运行配置对象，汇总模型、gateway、子代理、通知字段；工具和用户空间字段由基类承接。
 @dataclass
-class AgentConfig(HomeProviderConfigFields):
+class AgentConfig(HomeProviderConfigFields, ToolConfig):
 
     agent_name: str = "myagent"
     system_prompt: str = "你是一个谨慎、可扩展、会记录记忆、会在必要时调用工具的 Python CLI 智能体。先理解任务，再给出结构化回答。"
@@ -207,30 +207,6 @@ class AgentConfig(HomeProviderConfigFields):
     max_tokens: int = 1024
     temperature: str = "0.2"
     anthropic_version: str = "2023-06-01"
-    enable_tools: bool = True
-    max_tool_rounds: int = 0
-    tool_agent_budget_window_seconds: int = 600
-    tool_agent_budget_max_calls: int = 50
-    tool_artifact_read_budget_window_seconds: int = 600
-    tool_artifact_read_budget_max_chars: int = 240_000
-    tool_read_max_chars: int = 50_000
-    tool_write_inline_max_chars: int = DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
-    tool_list_max_entries: int = 200
-    tool_search_max_matches: int = 50
-    tool_web_max_chars: int = 100_000
-    tool_http_timeout: int = 30
-    tool_shell_timeout: int = 240
-    stream_enabled: bool = True
-    tool_catalog_limit: int = 20
-    tool_catalog_mode: str = "compact"
-    tool_catalog_offset: int = 0
-    tool_catalog_categories: list[str] = field(default_factory=list)
-    tool_catalog_include_examples: bool = True
-    tool_catalog_entry_max_chars: int = 1200
-    tool_catalog_show_truncated_notice: bool = True
-    tool_detail_max_chars: int = 4000
-    tool_retrieval_limit: int = 3
-    tool_vector_search_enabled: bool = True
     chat_history_max_turns: int = 20
     chat_history_assistant_preview_chars: int = 500
     chat_transcript_max_chars: int = 500_000

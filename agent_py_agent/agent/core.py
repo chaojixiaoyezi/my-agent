@@ -222,6 +222,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             retrieval_limit=config.tool_retrieval_limit,
             vector_search_enabled=config.tool_vector_search_enabled,
             shell_tool_timeout=config.tool_shell_timeout,
+            shell_tool_output_max_chars=config.tool_shell_output_max_chars,
             tool_write_inline_max_chars=config.tool_write_inline_max_chars,
             artifact_read_budget_window_seconds=config.tool_artifact_read_budget_window_seconds,
             artifact_read_budget_max_chars=config.tool_artifact_read_budget_max_chars,

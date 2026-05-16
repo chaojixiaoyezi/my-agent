@@ -410,6 +410,10 @@ tool_http_timeout: 30
 # run_command 工具默认超时秒数
 tool_shell_timeout: 240
 
+# run_command 的 stdout/stderr 分别最多回显多少字符
+# 超出时只回显预览、总字符数和截断标记，完整大输出后续应走 artifact/日志引用
+tool_shell_output_max_chars: 12000
+
 # 工具目录里最多展示多少个工具条目
 # 这个值偏大也没问题，因为目录只放中等详细度信息，不会像完整手册那么占 prompt
 tool_catalog_limit: 20
