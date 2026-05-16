@@ -115,6 +115,22 @@ def test_predelegation_root_can_shell_list_directories_before_subagents_created(
     assert result is None
 
 
+# LLM: old workspace runs must not disable the fresh root-turn refs-first handoff.
+# 函数用途: 真实复测复用目录时有历史 run；当前轮未派工前仍应阻断 root 读取 data 正文。
+def test_predelegation_root_ignores_historical_runs_when_blocking_data_body():
+    agent = _top_level_agent({"old-worker": _task("old-worker", identity="worker", done=True)})
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=agent,
+            user_prompt="当前目录里是一套材料，请组织多层小傻妞协作完成。",
+            payload={"tool": "read_file", "path": "/tmp/workspace/data/company_profile.md"},
+        )
+    )
+
+    assert result is not None
+    assert "predelegation_source_read_blocked" in result.output
+
+
 # LLM: ordinary non-delegation reads keep behaving normally.
 # 函数用途: 用户只是让 root 自己读取资料时，不启用派工前 source refs 保护。
 def test_predelegation_guard_does_not_block_plain_root_read():

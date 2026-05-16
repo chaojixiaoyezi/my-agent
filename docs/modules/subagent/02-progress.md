@@ -1478,6 +1478,8 @@
 - 真实 E2E：`/Users/xiaoyezi/my-claude-code/third-party-eval/logs/my-agent-task17-20260516-085115.log` 完成；3 个一层小傻妞 + 6 个下层小傻妞全部收敛，最终报告日期为 `2026-05-16`。
 - 发现问题：root 在第一次 `create_subagents` 前读取了 README、目标、rubric 之外的多份 `data/country_packs/*.md`、`company_profile.md`、`competitor_landscape.md` 和 CSV 正文。这样虽然能完成任务，但违背“主代理少吞正文、子代理自己读 refs”的目标。
 - 已实现：新增 `orchestration_predelegation_read_guard.py`。当本轮 root 还没有创建/记住任何 subagent run，且用户 prompt 明确要求“小傻妞/子代理/派工”时，`read_file` 读取 `data/docs/materials/sources/fixtures` 等正文文件会返回可恢复提示，要求改用 `create_subagents` 并把路径放进 `required_read_paths/context_manifest/context_packs`。
-- 设计边界：README、TARGET_OBJECT、rubric、AGENTS、USER、memory 等 brief 文件仍可读；普通“帮我读这个文件”不触发；已有子代理 run 后继续走委托期 body-read guard；用户明确要求 root 亲自验收正文的旧路径不变。
-- 已测试：新增派工前 brief 放行、data 正文阻断、plain artifact 阻断、目录 shell 探测放行、普通 root 读取不阻断五个 regression；`python3 -m pytest -q agent_py_agent/tests/test_orchestration_body_read_guard.py -q` 通过。
+- 追加真实复测：`my-agent-task17-20260516-092742.log` 任务完成并写出 `subagent_outputs/final_report.md`，但历史 run 复用目录时暴露一个边界：不能用“目录里是否已有 run”判断当前轮是否已派工，否则旧 run 会让派工前提示失效。
+- 已修正：先判断当前工具调用是否已处于委托后父级状态；如果不是，派工前提示只看当前轮 runner id / remembered run ids，不被历史 workspace run 污染。
+- 设计边界：README、TARGET_OBJECT、rubric、AGENTS、USER、memory 等 brief 文件仍可读；普通“帮我读这个文件”不触发；目录 shell 探测放行；已有当前轮子代理 run 后继续走委托期 body-read guard；用户明确要求 root 亲自验收正文的旧路径不变。
+- 已测试：新增派工前 brief 放行、data 正文阻断、plain artifact 阻断、目录 shell 探测放行、历史 run 不污染、普通 root 读取不阻断六个 regression；`python3 -m pytest -q agent_py_agent/tests/test_orchestration_body_read_guard.py -q` 通过。
 - 下一步：再次跑 Task17 或家具站自然语言 E2E，观察第一次 `create_subagents` 前是否只读 brief/目录；如果模型仍绕 shell 读取大正文，再把 run_command 的派工前 source-body 识别接入同一 helper。

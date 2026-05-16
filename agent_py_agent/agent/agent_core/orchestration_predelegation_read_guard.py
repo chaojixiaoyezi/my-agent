@@ -60,19 +60,7 @@ def _is_predelegation_root_turn(request: PreDelegationReadGuardRequest) -> bool:
         return False
     if remembered_orchestration_run_ids(request.agent):
         return False
-    if _has_existing_subagent_runs(request.agent):
-        return False
     return prompt_requests_subagent_delegation(request.user_prompt)
-
-
-# LLM: _has_existing_subagent_runs separates fresh delegation setup from post-dispatch parent checks.
-# 函数用途: 如果 manager 里已有 run，就交给委托后正文读取保护处理，不再返回派工前提示。
-def _has_existing_subagent_runs(agent: object) -> bool:
-    try:
-        items = agent.subagents.list_runs()
-    except (AttributeError, FileNotFoundError, OSError, KeyError, TypeError, ValueError):
-        return False
-    return bool(items)
 
 
 # LLM: _allowed_predelegation_read lets roots inspect brief files and orchestration summaries.

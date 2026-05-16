@@ -59,19 +59,19 @@ def maybe_block_delegating_body_read(request: DelegatingBodyReadGuardRequest) ->
     tool = str(request.payload.get("tool") or "")
     if tool not in BODY_READ_TOOLS:
         return None
-    predelegation = maybe_block_predelegation_source_read(
-        PreDelegationReadGuardRequest(
-            agent=request.agent,
-            payload=request.payload,
-            user_prompt=request.user_prompt,
-        )
-    )
-    if predelegation is not None:
-        return predelegation
     parent = _current_parent_task(request.agent)
     if parent is None:
         parent = _top_level_delegation_parent(request.agent, request.user_prompt)
     if parent is None or not _has_delegated_children(parent):
+        predelegation = maybe_block_predelegation_source_read(
+            PreDelegationReadGuardRequest(
+                agent=request.agent,
+                payload=request.payload,
+                user_prompt=request.user_prompt,
+            )
+        )
+        if predelegation is not None:
+            return predelegation
         return None
     if user_authorized_parent_body_read(request.user_prompt):
         return None

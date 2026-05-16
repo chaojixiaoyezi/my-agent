@@ -7756,6 +7756,11 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Added `orchestration_predelegation_read_guard.py`.
   - Before any current-turn child run exists, natural delegation prompts may read brief task files, but data/material/source body reads are redirected to `create_subagents` with `required_read_paths/context_manifest/context_packs`.
   - Once child runs exist, the existing delegating body-read guard remains responsible for parent refs-only behavior.
+- Follow-up from real rerun:
+  - Log: `/Users/xiaoyezi/my-claude-code/third-party-eval/logs/my-agent-task17-20260516-092742.log`
+  - The task completed and produced `subagent_outputs/final_report.md`.
+  - The first implementation still missed one pre-delegation `data/company_profile.md` read because the workspace contained old historical runs; a broad "manager has any run" check disabled the pre-delegation gate.
+  - The fix now checks post-delegation parent state first, then applies pre-delegation logic based on current-turn ids. Historical runs in the workspace no longer disable the fresh-turn source handoff.
 - Verification:
   - `python3 -m pytest -q agent_py_agent/tests/test_orchestration_body_read_guard.py -q` -> passed.
 - Next check:
