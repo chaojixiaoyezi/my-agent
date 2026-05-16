@@ -1472,3 +1472,12 @@
 - 已测试：`python3 -m pytest -q agent_py_agent/tests/test_orchestration_create_subagents_items.py agent_py_agent/tests/test_prompting_builder.py` -> `47 passed`。
 - 已测试：`/Users/example/ai_claw/bin/ruff check` touched files -> passed。
 - 下一步：跑一个普通自然语言 refs-first 真实 E2E，统计 root 在第一次 `create_subagents` 前的正文读取次数；如果仍过多，再优先修工具推荐/任务包生成，不继续堆零散 guard。
+
+## 2026-05-16 Refs-first 派工前正文读取第二片
+- 中文说明：复跑 Task17 后确认 `context_manifest/context_packs` 能真实下发，但 root 仍会在第一次创建小傻妞前先读多个 `data/` 正文。本轮补“派工前正文读取提示门”：不是禁止 root 干活，而是当用户明确要派小傻妞协作时，先把资料路径交给下级。
+- 真实 E2E：`/Users/example/my-终端应用/third-party-eval/logs/my-agent-task17-20260516-085115.log` 完成；3 个一层小傻妞 + 6 个下层小傻妞全部收敛，最终报告日期为 `2026-05-16`。
+- 发现问题：root 在第一次 `create_subagents` 前读取了 README、目标、rubric 之外的多份 `data/country_packs/*.md`、`company_profile.md`、`competitor_landscape.md` 和 CSV 正文。这样虽然能完成任务，但违背“主代理少吞正文、子代理自己读 refs”的目标。
+- 已实现：新增 `orchestration_predelegation_read_guard.py`。当本轮 root 还没有创建/记住任何 subagent run，且用户 prompt 明确要求“小傻妞/子代理/派工”时，`read_file` 读取 `data/docs/materials/sources/fixtures` 等正文文件会返回可恢复提示，要求改用 `create_subagents` 并把路径放进 `required_read_paths/context_manifest/context_packs`。
+- 设计边界：README、TARGET_OBJECT、rubric、AGENTS、USER、memory 等 brief 文件仍可读；普通“帮我读这个文件”不触发；已有子代理 run 后继续走委托期 body-read guard；用户明确要求 root 亲自验收正文的旧路径不变。
+- 已测试：新增派工前 brief 放行、data 正文阻断、plain artifact 阻断、目录 shell 探测放行、普通 root 读取不阻断五个 regression；`python3 -m pytest -q agent_py_agent/tests/test_orchestration_body_read_guard.py -q` 通过。
+- 下一步：再次跑 Task17 或家具站自然语言 E2E，观察第一次 `create_subagents` 前是否只读 brief/目录；如果模型仍绕 shell 读取大正文，再把 run_command 的派工前 source-body 识别接入同一 helper。

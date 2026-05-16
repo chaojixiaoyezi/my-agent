@@ -39,6 +39,29 @@ def prompt_requests_refs_only_delegation(prompt: str) -> bool:
     return any(marker in compact for marker in markers)
 
 
+# LLM: prompt_requests_subagent_delegation catches normal user wording for "let agents help".
+# 函数用途: 识别用户自然语言里的派工/小傻妞/分层团队意图，用于派工前少读正文策略。
+def prompt_requests_subagent_delegation(prompt: str) -> bool:
+    compact = " ".join(str(prompt or "").lower().split())
+    if not compact:
+        return False
+    markers = (
+        "小傻妞",
+        "子代理",
+        "孙代理",
+        "派工",
+        "分层团队",
+        "分层小队",
+        "协作完成",
+        "组织多层",
+        "多层",
+        "delegate",
+        "subagent",
+        "spawn agents",
+    )
+    return any(marker in compact for marker in markers)
+
+
 # LLM: user_authorized_parent_body_read recognizes explicit current-run user override phrases.
 # 函数用途: 用户明确要求主代理亲自验收/检查时，临时允许父级读正文；普通“验收标准”不会触发。
 def user_authorized_parent_body_read(prompt: str) -> bool:

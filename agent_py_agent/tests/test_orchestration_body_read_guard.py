@@ -47,6 +47,88 @@ def _top_level_agent(tasks):
     )
 
 
+# LLM: _predelegation_agent models a fresh root turn before any child run has been created.
+# 函数用途: 覆盖 root 尚未派出小傻妞时，派工任务应先传路径而不是吞 data 正文。
+def _predelegation_agent():
+    return _top_level_agent({})
+
+
+# LLM: predelegation roots may read brief task files to understand enough to delegate well.
+# 函数用途: 用户要求派小傻妞时，root 派工前仍可读 README/目标/rubric 等短说明。
+def test_predelegation_root_can_read_brief_before_subagents_created():
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_predelegation_agent(),
+            user_prompt="请安排小傻妞协作完成这个任务。",
+            payload={"tool": "read_file", "path": "/tmp/workspace/README.md"},
+        )
+    )
+
+    assert result is None
+
+
+# LLM: predelegation roots should hand data refs to children instead of reading source bodies first.
+# 函数用途: 真实 E2E 暴露 root 派工前吞 data 正文；这里固定为先 create_subagents 并传 required_read_paths。
+def test_predelegation_root_blocks_data_body_before_subagents_created():
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_predelegation_agent(),
+            user_prompt="请安排小傻妞协作完成这个任务。",
+            payload={"tool": "read_file", "path": "/tmp/workspace/data/company_profile.md"},
+        )
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert "predelegation_source_read_blocked" in result.output
+    assert "create_subagents" in result.output
+    assert "required_read_paths" in result.output
+
+
+# LLM: artifact bodies also stay out of root context before initial delegation.
+# 函数用途: 派工前 root 不应先读取 read_file 大输出 artifact，应把来源路径或 artifact ref 交给下级。
+def test_predelegation_root_blocks_plain_artifact_before_subagents_created():
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_predelegation_agent(),
+            user_prompt="请安排小傻妞协作完成这个任务。",
+            payload={"tool": "read_artifact", "artifact_ref": "read_file-12-1-abc.json"},
+        )
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert "predelegation_source_read_blocked" in result.output
+
+
+# LLM: predelegation roots still need shell directory discovery before assigning refs.
+# 函数用途: 派工前允许 root 用 find/ls 看目录结构，否则无法把正确资料路径交给下级。
+def test_predelegation_root_can_shell_list_directories_before_subagents_created():
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_predelegation_agent(),
+            user_prompt="请安排小傻妞协作完成这个任务。",
+            payload={"tool": "run_command", "command": "find /tmp/workspace -maxdepth 2 -type f"},
+        )
+    )
+
+    assert result is None
+
+
+# LLM: ordinary non-delegation reads keep behaving normally.
+# 函数用途: 用户只是让 root 自己读取资料时，不启用派工前 source refs 保护。
+def test_predelegation_guard_does_not_block_plain_root_read():
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_predelegation_agent(),
+            user_prompt="帮我看看这个资料文件。",
+            payload={"tool": "read_file", "path": "/tmp/workspace/data/company_profile.md"},
+        )
+    )
+
+    assert result is None
+
+
 # LLM: read_file body guard test captures the user's refs-only parent rule.
 # 函数用途: 父级已有下级且验收代理未完成时，读取业务产物正文会被阻断。
 def test_delegating_parent_cannot_read_product_body_before_acceptor_done():
