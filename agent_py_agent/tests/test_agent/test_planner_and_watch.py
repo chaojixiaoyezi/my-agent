@@ -207,6 +207,77 @@ def test_subagent_dispatch_watch_runs_one_cycle_and_releases_lock():
         assert not (workspace / "subagent_dispatch_watch.lock").exists()
 
 
+def test_subagent_dispatch_watch_idle_without_tasks_coalesces_records(monkeypatch):
+    """LLM: Empty watch cycles stay alive without running dispatch or writing repeated audit records."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(
+            model_backend="echo",
+            subagent_workspace="subs",
+            dispatch_idle_interval=7,
+        )
+        agent = SimpleAgent(cfg, root)
+        agent.dispatch_subagents = MagicMock(side_effect=AssertionError("idle watch should not dispatch"))
+        sleeps = []
+
+        def fake_sleep(interval, stop_path):
+            sleeps.append(interval)
+            return False
+
+        monkeypatch.setattr("agent_py_agent.agent.agent_core.parameters._sleep_with_stop", fake_sleep)
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+
+        report = agent.watch_subagents(
+            router,
+            CapabilityConfig(),
+            params=WatchParams(max_cycles=3, interval=0, max_runners=0),
+        )
+        log_path = root / "subs" / "subagent_dispatch_watch_log.jsonl"
+
+        agent.dispatch_subagents.assert_not_called()
+        assert report.summary["total"] == 1
+        assert report.records[0].dispatch_record_count == 0
+        assert report.records[0].dispatch_summary == {"idle": 1}
+        assert sleeps == [7, 7]
+        assert len(log_path.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_subagent_dispatch_watch_limit_returns_to_idle_sleep(monkeypatch):
+    """LLM: Repeated audit-only dispatch rounds sleep after the consecutive limit instead of busy-looping."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(
+            model_backend="echo",
+            subagent_workspace="subs",
+            dispatch_max_consecutive_rounds=2,
+            dispatch_idle_interval=7,
+        )
+        agent = SimpleAgent(cfg, root)
+        agent.subagents.create_run(
+            goal="watch no-progress fuse",
+            thought="只用于触发 due-check scan。",
+            plan=["wait"],
+        )
+        sleeps = []
+
+        def fake_sleep(interval, stop_path):
+            sleeps.append(interval)
+            return False
+
+        monkeypatch.setattr("agent_py_agent.agent.agent_core.parameters._sleep_with_stop", fake_sleep)
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+
+        report = agent.watch_subagents(
+            router,
+            CapabilityConfig(),
+            params=WatchParams(max_cycles=4, interval=0, max_runners=0),
+        )
+
+        assert sleeps == [7, 7, 7]
+        assert report.summary["total"] == 1
+        assert report.records[0].dispatch_summary["due_check"] == 1
+
+
 # LLM: Builds a watch fixture that is ready for parent acceptance policy planning.
 # 函数用途: 创建等待父级验收的子代理任务，并写入安全的 file_check 测试事实。
 def _setup_watch_acceptance_policy_task(agent):
@@ -395,10 +466,11 @@ def test_watch_dispatch_cycle_passes_dispatch_params_bundle():
         max_cycles=1,
     )
 
-    ok, _, record_count, _, _ = _execute_watch_dispatch(agent, params)
+    ok, _, record_count, _, _, dispatch_report = _execute_watch_dispatch(agent, params)
 
     assert ok is True
     assert record_count == 0
+    assert dispatch_report is report
     call_kwargs = agent.dispatch_subagents.call_args.kwargs
     assert call_kwargs["params"] is params.dispatch_params
     assert "apply" not in call_kwargs

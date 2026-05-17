@@ -29,6 +29,12 @@ class DispatchNoProgressTracker:
         return self.repeated_rounds >= 2
 
 
+# LLM: dispatch_made_progress gives watch/daemon loops the same progress definition as dispatch_loop.
+# 函数用途: 判断 dispatch 报告是否真的推进了任务树；watch 循环用它区分活跃工作和重复审计。
+def dispatch_made_progress(dispatch_report) -> bool:
+    return _dispatch_no_progress_signature(dispatch_report) is None
+
+
 # LLM: dispatch_no_progress_payload exposes no-progress diagnosis to model-facing dispatch tools.
 # 函数用途: 当 dispatch_subagents 只做重复审计/分类而没有真实推进时，返回机器可读停止提示，避免父模型继续空转调用。
 def dispatch_no_progress_payload(dispatch_report) -> dict[str, object]:
@@ -214,4 +220,4 @@ def _is_dry_run_recovery_apply(record: object) -> bool:
     )
 
 
-__all__ = ["DispatchNoProgressTracker", "dispatch_no_progress_payload"]
+__all__ = ["DispatchNoProgressTracker", "dispatch_made_progress", "dispatch_no_progress_payload"]

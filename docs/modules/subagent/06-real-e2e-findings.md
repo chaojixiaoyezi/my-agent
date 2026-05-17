@@ -8590,3 +8590,65 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Live Lab real suite `step8-real-qa-refs-r4` passed with `health`, `gateway_ask`, and `long_subagent`.
 - Status:
   - Fixed in focused tests and real Live Lab.
+
+### Finding 173: Gateway dispatch watch must stay idle without flooding reports
+
+- Trigger:
+  - Natural-language furniture-site E2E setup under `/Users/example/my-终端应用/real_e2e_next/scenario-20260517-072914-f418a6`.
+  - Root model request timed out after `request_timeout=240s` before creating any subagent runs.
+- Problem:
+  - While the root request was stuck in the model call, gateway dispatch watch kept running with no subagent tasks.
+  - The first 20 cycles respected sleep, then `dispatch_max_consecutive_rounds` wrote a stopped heartbeat but the loop continued immediately without sleeping.
+  - Result: `subagent_dispatch_watch_report.json` had 7,590 watch records, `data/local_store/files` had 15,189 files, and local store events grew to about 18.9 MB.
+- 中文解释:
+  - 这次不是小傻妞干活失败，而是“小傻妞还没被创建出来”，后台巡逻员自己刷屏。
+  - 到连续空转上限后，它只写了“我要停了”，但没有真的停，也没有回到慢速等待，于是开始飞快重复写日志。
+  - 这种问题会把真实错误埋掉，也会拖慢后续多代理测试。
+- 通道运行时/长期助手/会话运行时 comparison:
+  - 通道运行时/长期助手 的后台 worker 更像按 tick/poll 运行，空闲时只维持状态，不把每个 no-op 都当成业务事件。
+  - 会话运行时 的工具/事件链也更强调“真实动作才成为持久事实”；心跳和 no-op 不应该淹没工具/任务记录。
+  - Lesson: gateway watch needs an idle state and no-progress coalescing at the control-plane layer.
+- Fix:
+  - Added `dispatch_made_progress()` so watch uses the same progress definition as `dispatch_loop`.
+  - Added `WatchCycleResult` and `WatchLoopState` to separate heartbeat ticks from durable audit records.
+  - If there are no subagent runs, watch skips `dispatch_subagents` and writes only one coalesced idle record plus heartbeat.
+  - Repeated audit-only due-check/inspect cycles are coalesced after the first stored record.
+  - Reaching the consecutive no-progress limit now enters idle sleep and resets the counter instead of tight-looping.
+- Verification:
+  - Added focused regressions in `test_planner_and_watch.py`.
+  - Ran isolated gateway idle smoke under `/Users/example/my-终端应用/real_e2e_next/watch-idle-fix-20260517-074538`: after start/sleep/stop, watch log had 1 line, local store had 8 files, and `dispatch_records=0`.
+- Status:
+  - Fixed in focused tests and idle gateway smoke.
+  - Natural-language furniture-site rerun `scenario-20260517-075800-25c13e` confirmed the watch flood is fixed: 7 runs over a 724s root request produced 6 watch records instead of thousands.
+  - Remaining E2E gap is now repair closeout, tracked in Finding 174.
+
+### Finding 174: Natural furniture E2E needs one repair owner to close artifact integrity failures
+
+- Trigger:
+  - Natural-language furniture-site E2E under `/Users/example/my-终端应用/real_e2e_next/scenario-20260517-075800-25c13e`.
+  - Prompt used user-style wording: build three high-end modern furniture brand single-file HTML homepages and ask checker subagents to inspect.
+- Problem:
+  - Root successfully created three worker subagents and one inspector.
+  - The workers wrote `index1.html`, `index2.html`, and `index3.html` into the shared project workspace.
+  - One worker reached `DONE/VERIFIED`, but `index2.html` was incomplete because the run hit a configured `max_tool_rounds=16` cap before writing `</body></html>`.
+  - Root then created several repair subagents (`小傻妞-修复`, `小傻妞-精准修复`, `小傻妞-收尾修复`), but each repair run remained blocked by the same artifact-integrity issue.
+- 中文解释:
+  - 小傻妞已经会接活、分工、写真实网页文件，也不会把没完成的任务误报成功。
+  - 现在的问题是“修复这件事还不够硬”：一个网页没写完后，父级连续派了几个修复小傻妞，但没有形成“同一个修复负责人一直修到通过”的闭环。
+  - 这次还混入了我们测试配置太保守的问题：`max_tool_rounds=16` 对三个完整网页加检查来说偏低，容易把正常长任务截断。
+- 通道运行时/长期助手/会话运行时 comparison:
+  - 通道运行时 更像让同一个 session 带着当前故障继续处理，而不是每个小动作拆成新 session。
+  - 长期助手 delegate 更强调一个 job 的 output dir 和 failure context；修复任务应该继承失败上下文、目标产物和验收条件。
+  - 会话运行时 的结构化状态让上层更容易看见“已有修复负责人”和“当前 blocked artifact”，避免靠自然语言重开新任务。
+- Fix:
+  - Scenario config generator now uses `max_tool_rounds: 0` so scenario/live tests inherit the product default of unlimited tool rounds unless a specific stress test intentionally overrides it.
+  - Create idempotency now has a repair-goal fallback: if the model forgets to pass formal `repair_contract` but clearly creates a repair child for the same target file, the existing repair owner is reused.
+  - Repair tasks like `修复 index.html` now count as product-write tasks, so they receive the project workspace/product root instead of being trapped in their private run directory.
+- Verification:
+  - The failed run itself is the evidence: root returned a blocking summary instead of success, with `total_runs=7`, `done_verified=1`, and six blocking run ids.
+  - Added focused tests for repair-goal fallback reuse and repair file tasks defaulting to the workspace root.
+  - Reran natural-language furniture-site E2E under `/Users/example/my-终端应用/real_e2e_next/scenario-20260517-082741-21614b`.
+  - Result: root created three worker runs, one repair run, then closed with `total_runs=4`, `done_verified=4`; all three files in `fixture_project/brand_pages/` pass artifact integrity with no blockers or warnings.
+- Status:
+  - Fixed for the tested natural-language furniture-site flow.
+  - Remaining follow-up: create/repair advice should keep the user-requested output folder wording even more literal; this run completed in `brand_pages/` instead of root-level `index1.html`/`index2.html`/`index3.html`, so path-location fidelity still deserves a smaller focused slice.

@@ -151,7 +151,21 @@ def delegation_constraint_conflict_error(agent, goal: str) -> str:
 # 函数用途: 判断目标是否像文件/网站交付任务；只用于缺写入根时的保守拦截。
 def _goal_needs_product_write_root(goal: str) -> bool:
     lowered = goal.lower()
-    if not any(word in lowered for word in ("交付", "deliver", "build", "网站", "demo", "文件", "报告", "xlsx", "pdf")):
+    product_words = (
+        "交付",
+        "deliver",
+        "build",
+        "网站",
+        "demo",
+        "文件",
+        "报告",
+        "xlsx",
+        "pdf",
+        "修复",
+        "repair",
+        "fix",
+    )
+    if not any(word in lowered for word in product_words):
         return False
     return bool(_CONCRETE_FILE_TARGET_RE.search(lowered))
 
