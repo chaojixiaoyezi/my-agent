@@ -1716,7 +1716,23 @@
 ## 2026-05-17 Natural canary 假绿 / 路径 / 输入输出合同修复
 - 中文说明：后续三轮自然语言真实 E2E 继续把底层洞照出来：一轮是 artifact integrity 去子代理私有目录找公共产物；一轮是 closeout 把还在 PLANNING 的旧 run 算成 done；一轮是“输出路径”被前文“不依赖”误判成输入依赖。
 - 已实现：artifact integrity 相对 `product_write_roots` 现在会从 `.my_agent/subagents/<run>` 推导项目工作区根，和写工具的相对路径语义对齐。
-- 已实现：closeout 的同目标 sibling coverage 只覆盖 `BLOCKED/FAILED/TIMEOUT/TAKEN_OVER` 等已明确失败或接管的旧 run，不再让 `PLANNING/RUNNING` 消失；Live Lab 也会读 `task.json` 做最终状态门。
+- 已实现：closeout 的同目标 sibling coverage 只覆盖 `BLOCKED/FAILED/TIMEOUT/AWAITING_ACCEPTANCE/TAKEN_OVER` 等已明确失败、待验收或接管的旧 run，不再让 `PLANNING/RUNNING` 消失；Live Lab 也会读 `task.json` 做最终状态门。
 - 已实现：runner input dependency 识别 `输出路径/输出文件/保存路径/保存文件/目标文件/产物路径/产物文件`，避免把要写出的文件当成缺失输入。
 - 真实复测：`20260517-natural-html-05-input-output-contract` 通过。root 只创建并 dispatch 1 个 `小傻妞-前端`，没有亲自 `write_file`；小傻妞写出约 16KB 离线单文件 HTML，最终 `DONE/VERIFIED`。
 - 已测试：新增/更新 persisted-state gate、artifact root、closeout PLANNING sibling、input/output dependency 回归测试；下一步可以把同一套自然语言 canary 扩展到更完整的购物网站和 QA/repair/acceptance 链路。
+
+## 2026-05-17 Shop suite 购物流程 E2E 骨架
+- 中文说明：继续按“用户自然语言 -> 主代理派小傻妞 -> 小傻妞真实产物 -> 机器验收状态门”的方向，把家具首页升级成购物站流程测试。
+- 已实现：`shop` Live Lab suite 和 `natural_shop_subagent` case。提示词不说内部术语，只要求小傻妞完成注册、登录、商品、购物车、结算、下单成功的静态购物站，并保存到 `lab_outputs/shop-demo/index.html`。
+- 已实现：购物站验收不只看文件存在，还检查业务区域 id、关键按钮动作、无空链接/disabled、无外部渲染资源，并复用 `static_site_check` 查坏链接、占位符、失效控件和表单绑定。
+- 已测试：`test_live_lab_natural_case.py` 覆盖购物站 suite 注册、自然语言 prompt、缺业务区失败、完整离线购物站通过。下一步需要真实 MiniMax-M2.7 跑 `--suite shop --real-llm`，看模型实际会不会过度派工、漏动作或写坏 DOM。
+
+## 2026-05-17 Shop E2E / 父级验收修复波次第一片
+
+- 中文说明：真实购物站 E2E 已经从“会卡住/会假绿”推进到“能跑通一轮真实交付”。这轮重点不是购物站本身，而是把网页产物、父级验收失败和修复建议做成通用控制面。
+- 已实现：顶层 `artifact_refs` 进入产物解析；父级空报告验收会排除 `agent_run_final_report.md`、reports/logs、runner JSON 等内部运行文件，不能把内部报告当产品交付。
+- 已实现：`static_site_check` 通用识别真实 disabled HTML 控件；Live Lab shop gate 同时做业务语义检查和产品侧静态网页检查。
+- 已实现：`dispatch_subagents` 的外置摘要会保留 top-level `parent_acceptance_repair_advice` 的 failed run ids、failure refs、next tool 和 suggested tool call。
+- 已实现：父级验收 REJECT 后，root 会先获得一次修复派工机会；如果下一轮仍未创建修复 child 或 blockers 不变，才确定性返回阻塞事实，防止 gateway 超时。
+- 真实复测：`20260517-shop-flow-07-terminal-failure-closeout` 证明超时已变成明确 blocked；`20260517-shop-flow-08-repair-wave` 真实通过，`total_runs=1 done_verified=1`。
+- 下一步：增加强制失败的 repair-wave E2E，验证第一次 worker 失败后，root 真的按 advice 创建修复小傻妞、修复同一产物并覆盖旧失败 run。

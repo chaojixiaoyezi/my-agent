@@ -254,6 +254,40 @@ def test_dispatch_externalized_result_keeps_parent_acceptance_repair_advice():
     assert "records" not in rendered
 
 
+# LLM: Top-level parent-acceptance repair advice needs a copyable tool call, not only a clipped blob.
+# 函数用途: 顶层 dispatch 输出外置时，修复建议要保留独立 tool/refs/call 行，方便 root 下一轮直接派修复小傻妞。
+def test_dispatch_externalized_result_keeps_top_level_parent_repair_tool_call():
+    output = json.dumps(
+        {
+            "completion_status": {"status": "not_complete"},
+            "blocking_run_ids": ["child-1"],
+            "parent_acceptance_repair_advice": {
+                "failed_run_ids": ["child-1"],
+                "failure_refs": [{"run_id": "child-1", "test_ref": "/tmp/test_execution.json"}],
+                "suggested_tool_call": {
+                    "tool": "create_subagents",
+                    "count": 1,
+                    "role": "worker",
+                    "agent_name": "小傻妞-验收修复",
+                    "goal": "修复父级验收失败的 child-1，读取 test_execution.json 后只修复被点名的问题。",
+                },
+            },
+            "records": [{"message": "z" * 2000}],
+        }
+    )
+
+    rendered = render_tool_result_for_live_prompt(
+        ToolExecutionResult("dispatch_subagents", True, output),
+        _dispatch_externalized_archive_record(output),
+    )
+
+    assert "parent_acceptance_repair_next_tool: create_subagents" in rendered
+    assert "parent_acceptance_repair_suggested_tool_call" in rendered
+    assert "小傻妞-验收修复" in rendered
+    assert "/tmp/test_execution.json" in rendered
+    assert "records" not in rendered
+
+
 # LLM: Result refs by run must survive clipping that affects flat artifact lists.
 # 函数用途: dispatch 大输出外置后，每个直接子代理的主产物路径仍单独展示，避免 root 只看到第一类报告就猜其它文件名。
 def test_dispatch_externalized_result_keeps_result_refs_by_run():

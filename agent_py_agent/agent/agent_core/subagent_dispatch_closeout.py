@@ -8,6 +8,7 @@ from typing import ClassVar
 
 from ..backends import ModelResponse
 from ._runtime_params import ToolLoopExecuteParams
+from .orchestration_parent_acceptance_repair import parent_acceptance_rejected
 from .orchestration_run_scope import (
     remembered_dispatched_orchestration_run_ids,
     remembered_orchestration_run_ids,
@@ -47,6 +48,21 @@ def subagent_dispatch_completion_response(request: DispatchCompletionRequest) ->
     if _prompt_requires_uncreated_quality_roles(request.params.user_prompt, tasks):
         return None
     return ModelResponse(text=dispatch_completion_text(tasks), backend=request.backend)
+
+
+# LLM: subagent_dispatch_repair_required_response closes terminal failed dispatch rounds from task facts.
+# 函数用途: 本轮 dispatch 已经产生明确失败验收/阻塞事实时，直接返回未完成报告，避免再等模型自由总结到超时。
+def subagent_dispatch_repair_required_response(request: DispatchCompletionRequest) -> ModelResponse | None:
+    if _inside_subagent_runner(request.agent) or not _round_executed_dispatch(request):
+        return None
+    tasks = _subagent_tasks(request.agent)
+    repair_blockers = _repair_required_task_ids(tasks)
+    if not repair_blockers:
+        return None
+    if _grant_parent_acceptance_repair_turn(request, tasks, repair_blockers):
+        return None
+    blockers = blocking_task_ids(tasks) or repair_blockers
+    return ModelResponse(text=dispatch_incomplete_notice(tasks, blockers), backend=request.backend)
 
 
 # LLM: subagent_dispatch_limit_response prevents final user reports from inventing subagent status.
@@ -106,6 +122,76 @@ def _executed_orchestration(executed_tools: list[object]) -> bool:
 # 函数用途: 判断当前是否处在某个子代理 runner 内；runner 内不能用顶层 dispatch 收口替代 output.json 契约。
 def _inside_subagent_runner(agent) -> bool:
     return bool(str(getattr(agent, "_current_subagent_run_id", "") or ""))
+
+
+# LLM: _repair_required_task_ids distinguishes terminal repair facts from normal awaiting-acceptance work.
+# 函数用途: 只有失败验收或阻塞类状态才触发本地未完成收口；普通待验收仍交给后续 dispatch/模型继续推进。
+def _repair_required_task_ids(tasks: list[object]) -> list[str]:
+    ids: list[str] = []
+    for task in tasks:
+        task_id = str(getattr(task, "id", "") or "")
+        if task_id and (_task_status_requires_repair(task) or parent_acceptance_rejected(task)):
+            ids.append(task_id)
+    return ids
+
+
+# LLM: _grant_parent_acceptance_repair_turn lets root consume structured repair advice once before closeout.
+# 函数用途: 父级验收失败且已有 repair advice 时，给模型一次创建修复小傻妞的机会；若下一轮仍未推进，再事实收口。
+def _grant_parent_acceptance_repair_turn(
+    request: DispatchCompletionRequest,
+    tasks: list[object],
+    repair_blockers: list[str],
+) -> bool:
+    if not _has_parent_acceptance_repair(tasks, repair_blockers):
+        return False
+    key = tuple(sorted(repair_blockers))
+    granted = set(getattr(request.agent, "_subagent_parent_acceptance_repair_turns", set()) or set())
+    if key in granted:
+        return False
+    granted.add(key)
+    try:
+        request.agent._subagent_parent_acceptance_repair_turns = granted
+    except Exception:
+        return False
+    request.params.tool_context.append(_parent_acceptance_repair_turn_context(repair_blockers))
+    return True
+
+
+# LLM: _has_parent_acceptance_repair keeps the extra model turn scoped to test/acceptance rejects.
+# 函数用途: 只有父级验收 REJECT 才进入修复派工机会；TIMEOUT/BLOCKED 等终态仍直接收口或走恢复链路。
+def _has_parent_acceptance_repair(tasks: list[object], repair_blockers: list[str]) -> bool:
+    blocker_set = set(repair_blockers)
+    for task in tasks:
+        task_id = str(getattr(task, "id", "") or "")
+        if task_id in blocker_set and parent_acceptance_rejected(task):
+            return True
+    return False
+
+
+# LLM: _parent_acceptance_repair_turn_context is a small control-plane nudge, not a task-specific prompt.
+# 函数用途: 告诉 root 下一轮应按 dispatch_subagents 的结构化 advice 创建修复 child，不读正文、不直接报完成。
+def _parent_acceptance_repair_turn_context(repair_blockers: list[str]) -> str:
+    ids = ", ".join(repair_blockers)
+    return "\n".join([
+        "[subagent-parent-acceptance-repair-required]",
+        f"blocking_run_ids: {ids}",
+        "policy: parent acceptance rejected these runs; do not report final completion yet.",
+        "next_action: use the latest dispatch_subagents parent_acceptance_repair_advice.suggested_tool_call "
+        "to create a scoped repair child, then dispatch_subagents again.",
+        "refs_policy: repair child should read failure_refs/test_ref/output_ref/run_ref; root should not edit product bodies directly.",
+        "fallback: if you cannot create the repair child, answer with the blocking_run_ids and the exact reason.",
+    ])
+
+
+# LLM: _task_status_requires_repair captures generic lifecycle states that need recovery before success.
+# 函数用途: BLOCKED/FAILED/TIMEOUT/CHANNEL_ERROR 这类终态不能继续等模型口头收尾，必须先修复或接管。
+def _task_status_requires_repair(task: object) -> bool:
+    return str(getattr(task, "status", "") or "").upper() in {
+        "BLOCKED",
+        "FAILED",
+        "TIMEOUT",
+        "CHANNEL_ERROR",
+    }
 
 
 # LLM: _round_executed_dispatch looks only at tools executed in the just-finished round.

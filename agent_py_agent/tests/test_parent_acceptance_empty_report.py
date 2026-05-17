@@ -67,6 +67,15 @@ def _write_output(task) -> None:
     )
 
 
+# LLM: _write_output_with_artifact makes empty-report decisions exercise product vs internal refs.
+# 函数用途: 写入带 artifacts 的 output.json；用于区分用户产物和 agent-run 内部报告。
+def _write_output_with_artifact(task, artifact_path: str) -> None:
+    _write_output(task)
+    payload = json.loads(Path(task.output_json).read_text(encoding="utf-8"))
+    payload["artifacts"] = [{"path": artifact_path, "kind": "file", "summary": "artifact ref"}]
+    Path(task.output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 # LLM: This regression locks artifact-only empty reports to inspect_only instead of rescue.
 # 函数用途: 验证空测试报告配合 artifact evidence refs 时，父级验收继续检查而不是误判失败。
 def test_parent_acceptance_plan_inspects_empty_report_with_traceable_artifact_evidence():
@@ -92,6 +101,31 @@ def test_parent_acceptance_plan_inspects_empty_report_with_traceable_artifact_ev
         assert decision.decision == "inspect_only"
         assert decision.risk_level == "low"
         assert "no executable tests" in decision.reason
+
+
+# LLM: Internal final reports are handoff files, not proof that the user deliverable was checked.
+# 函数用途: 复现验收代理只产出 agent-run final_report.md 且空测试报告时，父级不能误放行。
+def test_parent_acceptance_empty_report_rejects_internal_final_report_artifact():
+    root_ctx, agent, task = _agent_and_task()
+    with root_ctx:
+        final_report = Path(task.agent_run_final_report_md)
+        final_report.parent.mkdir(parents=True, exist_ok=True)
+        final_report.write_text("自述验收全部通过", encoding="utf-8")
+        task.artifact_refs = [str(final_report)]
+        agent.subagents.save(task)
+        _write_output_with_artifact(task, str(final_report))
+        write_test_execution_report(
+            task.reports_dir,
+            [],
+            options=TestExecutionReportOptions(executed_at="2026-05-10T12:00:00Z"),
+        )
+
+        decision = agent.subagents.plan_parent_acceptance(task.id)
+        result = agent.subagents.apply_parent_acceptance_decision(task.id, reviewer="parent")
+
+        assert decision.decision == "rescue"
+        assert "total=0" in decision.reason
+        assert result.applied is False
 
 
 # LLM: Empty reports with only audit refs must not turn repair workers into DONE/VERIFIED.

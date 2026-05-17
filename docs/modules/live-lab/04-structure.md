@@ -73,3 +73,15 @@ scripts/
 - `agent_py_agent/tests/test_live_lab_natural_case.py`：锁住三个合同：提示词不含内部调度术语、suite 注册为 real opt-in、HTML artifact gate 不信口头总结。
 - 产品侧依赖：`subagent_finalize_artifact_integrity.py` 必须用和文件工具一致的工作区根解析相对产物根；`runner_input_dependencies.py` 必须把 `输出路径/保存路径/产物文件` 识别为写目标，不当成输入依赖。
 - 当前验收只做轻量结构检查、离线资源检查和子代理状态一致性检查。表单行为、视觉布局、可访问性和图片实际内容质量应作为后续更强 Live Lab case，而不是塞进这个最小 canary。
+
+## 2026-05-17 shop-suite structure
+- 中文说明：`shop` suite 是比家具首页更厚的真实业务流 canary。它仍然用普通用户话术，但要求小傻妞交付可演示注册、登录、商品、购物车、结算、下单成功的静态购物站。
+- `scripts/live_lab/constants.py`：`shop` suite 显式包含 `health` 和 `natural_shop_subagent`；`natural_shop_subagent` 属于 `REAL_CASES`，必须传 `--real-llm`。
+- `scripts/live_lab/cases.py`：`case_natural_shop_subagent()` 负责发购物站自然语言 prompt、保存 response、停止 gateway，并检查 `lab_outputs/shop-demo/index.html`。
+- `scripts/live_lab/shop_case.py`：承载购物站 prompt、业务流 HTML gate 和产品侧 `static_site_check` 复用逻辑，避免 `cases.py` 继续膨胀。
+- `scripts/live_lab/state_assertions.py`：承载 gateway response 阻塞检查和持久化 `task.json` 状态门；家具和购物站 case 共用，保证 Live Lab 不只看口头回复。
+- `scripts/live_lab/shop_case.py`：`_assert_shop_html_output()` 检查完整 HTML、关键业务区域、关键按钮动作、空链接、disabled 和外部渲染资源；`_assert_static_site_check_clean()` 复用产品侧 `static_site_check` 检查坏链接、可见占位符、失效控件、表单绑定和缺失 DOM id。
+- `agent_py_agent/tests/test_live_lab_natural_case.py`：同一个测试文件覆盖家具和购物站两个自然语言 canary，确保 suite 注册、提示词口径和产物门同步。
+- 产品侧依赖：`static_site_html_parser.py` / `static_site_dom_checks.py` 负责通用网页控件检查；真实 disabled 控件会被拦截，但 CSS/JS 里的 disabled 字样不会被当成坏按钮。
+- 调度侧依赖：父级验收失败时，`dispatch_subagents` 的外置摘要必须保留 `parent_acceptance_repair_advice` 机器字段；Live Lab shop case 不直接创建 repair child，但真实 E2E 会验证 root 是否能看见这类修复建议。
+- 当前真实验收：`20260517-shop-flow-08-repair-wave` 已通过，证明 shop suite 能跑真实 MiniMax-M2.7、隔离 gateway、子代理产物和最终状态门。后续还需要加“故意失败再修复”case，专门压测 repair wave。

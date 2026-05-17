@@ -6,13 +6,25 @@ import pytest
 
 from scripts.live_lab.cases import (
     _assert_natural_html_output,
-    _assert_no_subagent_state_blockers,
-    _assert_persisted_subagent_state_clean,
-    _external_asset_refs,
     _natural_html_prompt,
 )
 from scripts.live_lab.constants import REAL_CASES, SUITES
 from scripts.live_lab.session import LabSessionManager
+from scripts.live_lab.shop_case import (
+    _assert_shop_html_output,
+    _assert_static_site_check_clean,
+    _external_asset_refs,
+    _has_disabled_control,
+    _missing_shop_actions,
+    _missing_shop_sections,
+    _natural_shop_prompt,
+)
+from scripts.live_lab.state_assertions import (
+    assert_no_subagent_state_blockers as _assert_no_subagent_state_blockers,
+)
+from scripts.live_lab.state_assertions import (
+    assert_persisted_subagent_state_clean as _assert_persisted_subagent_state_clean,
+)
 
 
 # LLM: The natural Live Lab case should exercise ordinary user wording, not internal orchestration terms.
@@ -34,6 +46,21 @@ def test_natural_html_prompt_uses_user_language():
 def test_natural_html_case_is_registered_as_real_opt_in_suite():
     assert SUITES["natural"] == ["health", "natural_html_subagent"]
     assert "natural_html_subagent" in REAL_CASES
+
+
+# LLM: The shop canary should also stay user-language and real-LLM opt-in.
+# 函数用途: 确认购物站 E2E 不依赖内部术语，并且只有显式 suite 才会调用真实模型。
+def test_natural_shop_case_is_registered_as_real_opt_in_suite():
+    prompt = _natural_shop_prompt()
+
+    assert SUITES["shop"] == ["health", "natural_shop_subagent"]
+    assert "natural_shop_subagent" in REAL_CASES
+    assert "小傻妞" in prompt
+    assert "注册、登录、浏览商品、加入购物车、结算到下单成功" in prompt
+    assert "lab_outputs/shop-demo/index.html" in prompt
+    assert "dispatch" not in prompt.lower()
+    assert "runner" not in prompt.lower()
+    assert "contract" not in prompt.lower()
 
 
 # LLM: Natural Live Lab should not fail long page tasks because of an artificial test harness tool cap.
@@ -69,6 +96,46 @@ def test_assert_natural_html_output_rejects_empty_links(tmp_path):
 
     with pytest.raises(RuntimeError, match="空链接"):
         _assert_natural_html_output(output)
+
+
+# LLM: The shop gate should fail when a generated page lacks key purchase-flow sections.
+# 函数用途: 防止购物站只有漂亮首屏但没有注册、登录、购物车、结算和下单成功这些真实入口。
+def test_assert_shop_html_output_rejects_missing_flow_sections(tmp_path):
+    output = tmp_path / "lab_outputs" / "shop-demo" / "index.html"
+    output.parent.mkdir(parents=True)
+    output.write_text("<html><body><script></script><section id='catalog'>商品</section></body></html>", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="缺少业务区域"):
+        _assert_shop_html_output(output)
+
+
+# LLM: The shop gate should accept a compact but complete offline purchase-flow demo.
+# 函数用途: 确认单文件购物站只要包含必要区域、按钮动作和完整 HTML，就能通过轻量 E2E 产物门。
+def test_assert_shop_html_output_accepts_complete_offline_shop(tmp_path):
+    output = tmp_path / "lab_outputs" / "shop-demo" / "index.html"
+    output.parent.mkdir(parents=True)
+    output.write_text(_complete_shop_html(), encoding="utf-8")
+
+    _assert_shop_html_output(output)
+
+
+# LLM: Shop Live Lab should reuse static_site_check for behavior-level HTML failures.
+# 函数用途: 确认购物站 case 的静态站点验收能接受完整示例，避免真实 E2E 跑到最后才发现接口拼错。
+def test_assert_static_site_check_clean_accepts_complete_offline_shop(tmp_path):
+    output = tmp_path / "lab_outputs" / "shop-demo" / "index.html"
+    output.parent.mkdir(parents=True)
+    output.write_text(_complete_shop_html(), encoding="utf-8")
+
+    _assert_static_site_check_clean(tmp_path, output.parent)
+
+
+# LLM: Shop helper checks should report exact missing ids/actions for repair workers.
+# 函数用途: 确认购物站验收失败时能指出缺哪个区域或动作，方便后续小傻妞修复。
+def test_shop_missing_helpers_report_exact_contract_parts():
+    lower = "<section id='catalog'></section><button data-action='add-to-cart'>买</button>"
+
+    assert _missing_shop_sections(lower) == ["register", "login", "cart", "checkout", "order-confirmation"]
+    assert _missing_shop_actions(lower) == ["register", "login", "checkout", "place-order"]
 
 
 # LLM: The natural canary must fail when the gateway response says the subagent chain is still blocked.
@@ -150,6 +217,13 @@ def test_external_asset_refs_allows_normal_links():
     assert _external_asset_refs(html.lower()) == []
 
 
+# LLM: Disabled-control detection should reject real disabled attributes, not JS state management.
+# 函数用途: 购物站允许脚本里动态切换 button.disabled，但不能交付一开始就 disabled 的按钮。
+def test_has_disabled_control_ignores_css_and_javascript_state():
+    assert _has_disabled_control(".checkout-btn:disabled{color:#aaa} checkoutBtn.disabled = true;") is False
+    assert _has_disabled_control('<button class="buy" disabled>Buy</button>') is True
+
+
 # LLM: A complete single-file furniture page should satisfy the lightweight artifact gate.
 # 函数用途: 确认可打开的家具 HTML 文件可以通过自然语言 E2E 的基础验收。
 def test_assert_natural_html_output_accepts_complete_page(tmp_path):
@@ -161,3 +235,27 @@ def test_assert_natural_html_output_accepts_complete_page(tmp_path):
     )
 
     _assert_natural_html_output(output)
+
+
+# LLM: _complete_shop_html is a tiny valid shop fixture used by Live Lab contract tests.
+# 函数用途: 提供完整购物流程 HTML，避免测试样例自身缺区域或动作。
+def _complete_shop_html() -> str:
+    return """<!doctype html>
+<html>
+<head><title>Shop</title></head>
+<body>
+<section id="register"><form id="register-form"><input name="email"><button data-action="register" type="button" onclick="registerUser()">注册</button></form></section>
+<section id="login"><form id="login-form"><input name="email"><button data-action="login" type="button" onclick="loginUser()">登录</button></form></section>
+<section id="catalog"><article>商品</article><button data-action="add-to-cart" type="button" onclick="addToCart()">加入购物车</button></section>
+<section id="cart"><button data-action="checkout" type="button" onclick="showCheckout()">结算</button></section>
+<section id="checkout"><form id="checkout-form"><input name="address"><button data-action="place-order" type="button" onclick="placeOrder()">下单</button></form></section>
+<section id="order-confirmation">下单成功</section>
+<script>
+function registerUser(){return true}
+function loginUser(){return true}
+function addToCart(){return true}
+function showCheckout(){return true}
+function placeOrder(){return true}
+</script>
+</body>
+</html>"""

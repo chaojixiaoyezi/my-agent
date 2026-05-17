@@ -13,9 +13,17 @@ from __future__ import annotations
 import json
 import sys
 import textwrap
-from types import SimpleNamespace
 
 from .constants import REPO_ROOT
+from .shop_case import (
+    _external_asset_refs,
+    _has_disabled_control,
+    case_natural_shop_subagent,
+)
+from .state_assertions import (
+    assert_no_subagent_state_blockers,
+    assert_persisted_subagent_state_clean,
+)
 
 
 # LLM: run_case 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
@@ -34,6 +42,7 @@ def run_case(lab, case_name: str) -> None:
         "gateway_ask": case_gateway_ask,
         "long_subagent": case_long_subagent,
         "natural_html_subagent": case_natural_html_subagent,
+        "natural_shop_subagent": case_natural_shop_subagent,
     }
     handlers[case_name](lab)
 
@@ -219,7 +228,7 @@ def case_natural_html_subagent(lab) -> None:
         response_path = lab.responses_dir / "natural_html_subagent.stdout.json"
         response_path.write_text(response.stdout, encoding="utf-8")
         lab.log(f"response_file={response_path}")
-        _assert_no_subagent_state_blockers(response.stdout)
+        assert_no_subagent_state_blockers(response.stdout)
     finally:
         lab.run_command(
             lab.agent_command("gateway", "stop", "--timeout", "15", "--kill", "--reason", "live lab done"),
@@ -228,7 +237,7 @@ def case_natural_html_subagent(lab) -> None:
         )
     output_path = lab.fixture_root / "lab_outputs" / "furniture-home" / "index.html"
     _assert_natural_html_output(output_path)
-    _assert_persisted_subagent_state_clean(lab.fixture_root)
+    assert_persisted_subagent_state_clean(lab.fixture_root)
     lab.log(f"natural_html_output={output_path}")
 
 
@@ -260,90 +269,10 @@ def _assert_natural_html_output(output_path) -> None:
     missing = [term for term in required_terms if term not in lower]
     if missing:
         raise RuntimeError(f"自然语言 HTML 产物缺少基本标签: {missing}")
-    if "href=\"#\"" in lower or "disabled" in lower:
+    if "href=\"#\"" in lower or _has_disabled_control(lower):
         raise RuntimeError("自然语言 HTML 产物包含空链接或 disabled 按钮。")
     external_assets = _external_asset_refs(lower)
     if external_assets:
         raise RuntimeError(f"自然语言 HTML 产物依赖外部资源: {external_assets[:5]}")
     if "家具" not in content and "furniture" not in lower:
         raise RuntimeError("自然语言 HTML 产物不像家具品牌页面。")
-
-
-# LLM: _assert_no_subagent_state_blockers makes Live Lab trust control-plane state, not just visible files.
-# 函数用途: 检查 gateway 最终回复；如果主代理明确说子代理链路仍阻塞，就让自然语言 E2E 失败。
-def _assert_no_subagent_state_blockers(stdout: str) -> None:
-    text = _gateway_response_text(stdout)
-    lower = text.lower()
-    markers = [
-        "subagent state notice",
-        "blocking_run_ids",
-        "done_verified: 0",
-        "尚未完整通过",
-        "status=blocked",
-    ]
-    if any(marker in lower for marker in markers):
-        raise RuntimeError("子代理链路仍阻塞，不能把自然语言 E2E 记为通过。")
-
-
-# LLM: _assert_persisted_subagent_state_clean makes natural E2E compare final reports with task.json facts.
-# 函数用途: 读取隔离项目里的子代理持久化状态；只要还有未解决 run，就让真实 E2E 失败。
-def _assert_persisted_subagent_state_clean(fixture_root) -> None:
-    from agent_py_agent.agent.agent_core.subagent_dispatch_closeout_resolution import (
-        blocking_task_ids,
-        done_verified_count,
-    )
-
-    tasks = _persisted_subagent_tasks(fixture_root)
-    if not tasks:
-        raise RuntimeError("自然语言 E2E 没有创建任何子代理。")
-    blockers = blocking_task_ids(tasks)
-    if blockers:
-        raise RuntimeError(
-            "持久化子代理状态仍未完成: "
-            f"done_verified={done_verified_count(tasks)}/{len(tasks)} blockers={', '.join(blockers)}"
-        )
-
-
-# LLM: _persisted_subagent_tasks loads only small task.json files from the isolated Live Lab workspace.
-# 函数用途: 给 Live Lab 状态门提供最小 task 对象，不读取产物正文和 runner 长日志。
-def _persisted_subagent_tasks(fixture_root) -> list[SimpleNamespace]:
-    root = fixture_root / ".my_agent" / "subagents"
-    tasks: list[SimpleNamespace] = []
-    for path in sorted(root.glob("subagent-*/task.json")):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            continue
-        if isinstance(payload, dict):
-            tasks.append(SimpleNamespace(**payload))
-    return tasks
-
-
-# LLM: _gateway_response_text reads the response field when gateway emits JSON, with raw stdout fallback.
-# 函数用途: 从 gateway ask 的 JSON 输出里取模型最终文本；坏 JSON 时保守按原文本检查。
-def _gateway_response_text(stdout: str) -> str:
-    try:
-        payload = json.loads(stdout)
-    except (TypeError, json.JSONDecodeError):
-        return str(stdout or "")
-    if not isinstance(payload, dict):
-        return str(stdout or "")
-    if payload.get("ok") is False:
-        return f"gateway_not_ok {payload.get('error') or ''} {payload.get('response') or ''}"
-    return str(payload.get("response") or stdout or "")
-
-
-# LLM: _external_asset_refs keeps the canary offline-deterministic without banning normal outbound links.
-# 函数用途: 找出会让单文件页面离线失效的外部图片、字体、脚本或 CSS 背景资源。
-def _external_asset_refs(lower_content: str) -> list[str]:
-    refs: list[str] = []
-    for marker in ('src="http://', "src='http://", 'src="https://', "src='https://"):
-        if marker in lower_content:
-            refs.append(marker.rstrip("'\""))
-    for marker in ('<link href="http://', "<link href='http://", '<link href="https://', "<link href='https://"):
-        if marker in lower_content:
-            refs.append(marker.rstrip("'\""))
-    for marker in ("url(http://", "url(https://", "url('http://", "url('https://", 'url("http://', 'url("https://'):
-        if marker in lower_content:
-            refs.append(marker.rstrip("'\""))
-    return refs

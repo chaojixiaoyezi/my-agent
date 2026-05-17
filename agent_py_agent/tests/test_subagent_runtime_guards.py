@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
@@ -19,6 +20,10 @@ from agent_py_agent.agent.agent_core.subagent_dispatch_closeout import (
     subagent_dispatch_completion_response,
     subagent_dispatch_final_response_guard,
     subagent_dispatch_limit_response,
+)
+from agent_py_agent.agent.agent_core.tool_loop_completion import (
+    ToolRoundCompletionRequest,
+    completion_response_after_tool_round,
 )
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.subagents.manager import SubAgentManager
@@ -307,6 +312,46 @@ def test_dispatch_completion_waits_for_explicit_quality_roles(tmp_path):
     assert response is None
 
 
+# LLM: Parent acceptance repair gets one model turn before deterministic closeout.
+# 函数用途: 父级验收失败时先给 root 一次创建修复小傻妞的机会；同一阻塞重复出现才事实收口，避免无限等。
+def test_dispatch_round_grants_one_parent_acceptance_repair_turn(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    task = manager.create_run(goal="deliver web artifact", thought="await repair", plan=["repair"])
+    task.status = "AWAITING_ACCEPTANCE"
+    task.verification_status = "NEEDS_ACCEPTANCE"
+    manager.save(task)
+    _write_json(task.reports_dir, "acceptance_review.json", {"decision": "REJECT", "ok": False})
+    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id="")
+    params = _tool_loop_params("请安排小傻妞完成并验收。")
+
+    first = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="[TOOL_CALL dispatch_subagents]", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+    second = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="[TOOL_CALL dispatch_subagents]", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+
+    assert first is None
+    assert params.tool_context
+    assert "parent_acceptance_repair_advice.suggested_tool_call" in params.tool_context[-1]
+    assert second is not None
+    assert "尚未完整通过" in second.text
+    assert "不能按完成汇报" in second.text
+    assert task.id in second.text
+
+
 # LLM: Final model text must not claim completion when a requested acceptor role never ran.
 # 函数用途: root 已经调度 worker/tester 但缺少用户明确要求的验收子代理时，最终回复守卫必须拦住口头完成。
 def test_final_response_guard_blocks_missing_explicit_acceptor_role(tmp_path):
@@ -340,6 +385,14 @@ def test_final_response_guard_blocks_missing_explicit_acceptor_role(tmp_path):
 def _write_output_json(path: str, payload: dict[str, object]) -> None:
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle)
+
+
+# LLM: _write_json writes compact report fixtures beside task runtime files.
+# 函数用途: 给 runtime guard 测试写最小 JSON 报告，不重复路径创建样板。
+def _write_json(root: str, filename: str, payload: dict[str, object]) -> None:
+    path = Path(root) / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
 def _subagent_result_json(payload: dict[str, object]) -> str:

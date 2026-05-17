@@ -401,7 +401,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - 写入隔离配置，避免污染主仓库数据。
 - 打印并保存发给 `my-agent` 的 prompt。
 - 打印实际命令、stdout、stderr、退出码和耗时。
-- 调用现有 `scenario-test` 跑健康、坏天气、真实 gateway ask、真实 subagent 长链路和自然语言小傻妞 HTML 产物链路。
+- 调用现有 `scenario-test` 跑健康、坏天气、真实 gateway ask、真实 subagent 长链路、自然语言小傻妞 HTML 产物链路和购物站业务流链路。
 
 `scripts/open_live_lab.sh` 会在 macOS 新开 Terminal，让用户能直接看到测试过程。
 
@@ -863,12 +863,14 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - `agent_py_agent/agent/log_analysis/tools.py`: security query/hunt/trace tools accept optional `max_limit`.
 - `agent_py_agent/cli/logs.py`: LOG CLI query commands honor `query_max_limit` from log-analysis config.
 - `scripts/live_lab/log_analysis_replay.py`: offline SecurityAlertV1 replay command that emits case, route, report, forensic package, and replay summary artifacts.
-- `scripts/live_lab/cases.py`: adds the `log_analysis_replay` Live Lab case; later also owns the natural-language furniture HTML subagent canary, including gateway response blocker checks and persisted `task.json` state gates.
-- `scripts/live_lab/constants.py`: adds the `log-analysis` and `natural` suites and includes replay/natural cases in the `all` suite.
+- `scripts/live_lab/cases.py`: adds the `log_analysis_replay` Live Lab case; later also owns the natural-language furniture HTML canary and dispatches shop-flow through a split helper.
+- `scripts/live_lab/shop_case.py`: owns the shopping-flow prompt, HTML business-flow gate, disabled-control check, external-asset check, and `static_site_check` bridge.
+- `scripts/live_lab/state_assertions.py`: owns gateway response blocker checks and persisted `task.json` state gates shared by natural and shop Live Lab cases.
+- `scripts/live_lab/constants.py`: adds the `log-analysis`, `natural`, and `shop` suites and includes replay/natural/shop cases in the `all` suite.
 - `agent_py_agent/agent/subagent_workflows/planner.py`: composes workflow routing, compilation, and parent acceptance into one dry-run planning facade.
 - `agent_py_agent/tests/test_runtime_capabilities.py`: verifies ordinary prompts hide security tools, explicit grants expose them, and English/Chinese security-log prompts auto-grant them.
 - `agent_py_agent/tests/test_live_lab_log_analysis_replay.py`: verifies offline replay artifacts and failure-stage semantics.
-- `agent_py_agent/tests/test_live_lab_natural_case.py`: verifies the natural-language furniture HTML canary prompt, real-LLM gating, artifact validation, response blocker detection, and persisted subagent state checks.
+- `agent_py_agent/tests/test_live_lab_natural_case.py`: verifies the natural-language furniture HTML and shop-flow canary prompts, real-LLM gating, artifact validation, response blocker detection, and persisted subagent state checks.
 - `agent_py_agent/tests/test_subagent_workflow_planner.py`: verifies the planner facade for auto, manual, and off workflow modes.
 
 ## 2026-05-08 Tree Update: Acceptance Progress CLI Split
@@ -1002,6 +1004,8 @@ docs/
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_refs.py`: 汇总 dispatch 触达 run 的 artifact/evidence refs，并生成 `result_refs_by_run`；它会从 child `output.json.artifacts[]` 提取主产物路径和短摘要，父级先读 summary/refs 再按需读正文。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_state_contract.py`: 当前轮状态合同层；create/schedule/dispatch 共用，仅读取 remembered run ids，输出 `current_turn_run_state` 的 status buckets、dispatchable/running/blocked/verified ids 和下一步建议，避免 root 读大 records 或重复调度。
 - `agent_py_agent/agent/agent_core/tool_context_orchestration_summary.py`: externalized dispatch/schedule/read_artifact 调度输出的 live-prompt 摘要层，保留状态、建议工具调用、`result_refs_by_run`、artifact summaries 和 refs，不默认诱导父级读 artifact 正文。
+- `agent_py_agent/agent/agent_core/tool_context_repair_summary.py`: 渲染 parent-acceptance repair advice 的 copyable failed-run refs 和 suggested tool call，避免调度 records 外置后 root 看不见修复入口。
+- `agent_py_agent/agent/agent_core/tool_context_recovery_summary.py`: 渲染 recovery strategy 的 bounded preview，让 packet/checkpoint/takeover 批次进入 live prompt 时不展开完整恢复正文。
 - `agent_py_agent/agent/agent_core/hierarchy_tools.py`: runner 内 `schedule_child_subagents` 仍负责当前节点创建下一层 child，现在响应会附带 `typed_envelope.kind=subagent_schedule`，并暴露 `created_run_ids` / `reused_run_ids` / `dispatch_run_ids` / `current_turn_run_state`，父级恢复和继续调度不必从自然语言里抄 child id；child 参数里的 `required_read_paths/context_packs` 会写入真实 task，repair contract 不会在 runner-context 调度边界丢失。
 - `agent_py_agent/agent/agent_core/orchestration_tools.py`: 顶层 `create_subagents` 响应会附带同一 `subagent_schedule` typed envelope；顶层和多层派工走同一 refs 形状。顶层批量派工支持 Hermes 风格 `items/tasks`，不同子任务拥有独立 goal；系统默认名会补成 `小傻妞-角色-编号`，并在响应里给出下一步 `dispatch_subagents` 的真实 run_id 和 `current_turn_run_state`；typed envelope 会在状态合同生成后写入，避免恢复层丢掉 dispatchable refs；没有可调度 run 时会建议 `subagent_board`，避免空 dispatch。
 - `agent_py_agent/agent/agent_core/orchestration_create_items.py`: 解析 `create_subagents` 的 `items/tasks` 批量入口；继承顶层默认字段，让每个 child item 独立覆盖 goal/role/name/验收/写入边界；顶层全局 plan 不自动复制到每个 child。

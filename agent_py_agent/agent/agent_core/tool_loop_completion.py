@@ -11,6 +11,7 @@ from ._runtime_params import ToolLoopExecuteParams
 from .subagent_dispatch_closeout import (
     DispatchCompletionRequest,
     subagent_dispatch_completion_response,
+    subagent_dispatch_repair_required_response,
 )
 from .tool_round_execution import subagent_output_json_response
 
@@ -35,11 +36,13 @@ def completion_response_after_tool_round(
 ) -> ModelResponse | None:
     if request.subagent_output_written:
         return subagent_output_json_response(request.agent, request.response)
-    return subagent_dispatch_completion_response(
-        DispatchCompletionRequest(
-            agent=request.agent,
-            params=request.params,
-            before_executed_count=request.before_executed_count,
-            backend=request.response.backend,
-        )
+    dispatch_request = DispatchCompletionRequest(
+        agent=request.agent,
+        params=request.params,
+        before_executed_count=request.before_executed_count,
+        backend=request.response.backend,
+    )
+    return (
+        subagent_dispatch_completion_response(dispatch_request)
+        or subagent_dispatch_repair_required_response(dispatch_request)
     )

@@ -85,3 +85,19 @@
 - 已实现：artifact integrity 相对 `product_write_roots` 按项目工作区根解析；`输出路径/保存路径/产物文件` 这类自然语言写目标不会再被误判成输入依赖。
 - 已测试：新增/更新 `test_live_lab_natural_case.py`、`test_subagent_finalize_helpers.py`、`test_runner_input_dependencies.py` 和 `test_orchestration_dispatch_completion_gate.py` 覆盖这些边界。
 - 真实复测：`python3 scripts/live_agent_lab.py --suite natural --real-llm --runs-dir /Users/xiaoyezi/my-claude-code/real_e2e_next --run-id 20260517-natural-html-05-input-output-contract --timeout 420 --count 2 --max-runners 2 --max-cycles 3 --keep-going` -> `LIVE_LAB_PASS`。这轮 root 只调用 `create_subagents` 和 `dispatch_subagents`，没有亲自 `write_file`；只创建 1 个小傻妞，最终 `DONE/VERIFIED`，HTML 产物约 16KB，无外部资源、无空链接、无 disabled。
+
+## 2026-05-17 Shop suite 购物流程 E2E 骨架
+- 中文说明：家具首页 canary 只证明“自然语言派小傻妞写一个页面”能跑通；购物站 suite 用更接近真实业务的注册、登录、商品、购物车、结算、下单成功流程继续压测子代理。
+- 已实现：新增 `shop` suite，包含 `health` 和 `natural_shop_subagent`；它也是 real-LLM opt-in，只有显式 `--suite shop --real-llm` 才会调用真实模型。
+- 已实现：`natural_shop_subagent` prompt 仍是普通用户说法，只说“安排小傻妞”，不写 `dispatch/runner/contract`；产物要求保存到 `lab_outputs/shop-demo/index.html`。
+- 已实现：购物站产物门会检查完整 HTML、注册/登录/商品/购物车/结算/下单成功区域、关键按钮动作、无空链接、无 disabled、无外部渲染资源，并复用产品侧 `static_site_check` 检查坏链接、占位符、失效控件和表单绑定。
+- 已测试：`python3 -m pytest -q agent_py_agent/tests/test_live_lab_natural_case.py` -> `15 passed`；真实 `shop` suite 尚未跑，下一步应跑 MiniMax-M2.7 并根据真实问题修底层合同。
+
+## 2026-05-17 Shop suite 真实购物流程 E2E
+
+- 中文说明：真实购物站 E2E 已经跑通一轮，并且中间暴露的问题都按通用合同修复，而不是按购物网站特判。现在这个 suite 能检查“主代理派小傻妞写业务网页”这一类任务是否真的能交付。
+- 已实现：`natural_shop_subagent` 会用普通中文提示词要求注册、登录、商品、购物车、结算、下单成功流程，不暴露 dispatch/runner/contract 术语。
+- 已实现：`static_site_check` 现在会通用拒绝真实 disabled HTML 控件；Live Lab 自己只把 CSS/JS 里的 disabled 字样当普通文本，不误判。
+- 已实现：父级验收失败时，调度控制面会给 root 一次基于 `parent_acceptance_repair_advice.suggested_tool_call` 创建修复小傻妞的机会；同一阻塞重复出现才事实收口，避免卡死。
+- 真实复测：`python3 scripts/live_agent_lab.py --suite shop --real-llm --runs-dir /Users/xiaoyezi/my-claude-code/real_e2e_next --run-id 20260517-shop-flow-08-repair-wave --timeout 540 --count 1 --max-runners 3 --max-cycles 5 --keep-going` -> `LIVE_LAB_PASS`。MiniMax-M2.7 创建 1 个小傻妞，写出 `lab_outputs/shop-demo/index.html`，最终 `DONE/VERIFIED`。
+- 下一步：新增“故意失败再修复”的 shop/web case，验证 root 会真的创建 repair child，而不只是第一轮幸运通过。
