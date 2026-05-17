@@ -291,6 +291,33 @@ def test_context_bundle_ignores_source_markdown_inputs_for_required_files(tmp_pa
     assert report.ok is True
 
 
+# LLM: Live Lab runner plans mention README.md as report subject, not deliverable.
+# 函数用途: 防止“写报告，说明 README.md 内容摘要”误触发 required_files，导致 runner 已完成仍被 Context Gate BLOCKED。
+def test_context_bundle_ignores_readme_summary_subject_for_required_files(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="读取 fixture_project 目录下的 README.md，在子代理 task_dir/scenario_outputs/ 写入自己的证据报告",
+        thought="README.md 是输入证据，不是需要创建的产物。",
+        plan=[
+            "使用 read_file 读取 /workspace/fixture_project/README.md\n"
+            "使用 write_file 写入 task_dir/scenario_outputs/<run_id>.md，报告 README.md 内容摘要和子代理基本信息"
+        ],
+        role="worker",
+        acceptance_checks=[
+            "必须有 read_file 证据证明读取了 README.md",
+            "必须有 write_file 证据证明写入了 scenario_outputs/<run_id>.md",
+        ],
+    )
+    manager.save(task)
+
+    bundle = build_context_bundle(manager.load(task.id))
+    report = validate_context_bundle(bundle)
+
+    assert bundle.output_contract["required_files"] == []
+    assert bundle.task_packet["file_contract"]["required_files"] == []
+    assert report.ok is True
+
+
 def test_context_bundle_gate_reports_missing_required_handoff_fields(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(goal="", thought="", plan=[])

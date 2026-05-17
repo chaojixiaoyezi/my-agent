@@ -73,6 +73,8 @@ def find_reusable_named_child(manager: Any, params: CreateRunParams):
     name = _normalized_name(params.agent_name)
     if _is_generic_agent_name(name):
         return find_reusable_contract_child(manager, params)
+    if _is_indexed_generic_agent_name(name):
+        return find_reusable_indexed_contract_child(manager, params, name)
     for task in reversed(_safe_list_runs(manager)):
         if _same_create_scope(task, params, name):
             return task
@@ -84,6 +86,15 @@ def find_reusable_named_child(manager: Any, params: CreateRunParams):
 def find_reusable_contract_child(manager: Any, params: CreateRunParams):
     for task in reversed(_safe_list_runs(manager)):
         if _same_contract_scope(task, params):
+            return task
+    return None
+
+
+# LLM: find_reusable_indexed_contract_child keeps system-named siblings distinct while replay-safe.
+# 函数用途: 小傻妞-worker-1/2 这类默认编号名按“编号+合同”复用，避免同批 worker 被压成一个。
+def find_reusable_indexed_contract_child(manager: Any, params: CreateRunParams, name: str):
+    for task in reversed(_safe_list_runs(manager)):
+        if _same_indexed_contract_scope(task, params, name):
             return task
     return None
 
@@ -148,6 +159,18 @@ def _same_contract_scope(task: Any, params: CreateRunParams) -> bool:
     if _requested_root_id(params) and _text(getattr(task, "root_id", "")) != _requested_root_id(params):
         return False
     if not _compatible_role(getattr(task, "role", ""), params.role):
+        return False
+    if _normalized_goal(getattr(task, "goal", "")) != _normalized_goal(params.goal):
+        return False
+    if _identity_fields(task) != _params_identity_fields(params):
+        return False
+    return _external_write_roots(task) == _params_extra_write_roots(params)
+
+
+# LLM: _same_indexed_contract_scope adds generated sibling names to the generic contract key.
+# 函数用途: 带编号默认名既不能只按 goal 合并，也不能只按名字复用不同任务。
+def _same_indexed_contract_scope(task: Any, params: CreateRunParams, name: str) -> bool:
+    if not _same_create_scope(task, params, name):
         return False
     if _normalized_goal(getattr(task, "goal", "")) != _normalized_goal(params.goal):
         return False
@@ -275,6 +298,13 @@ def _is_generic_agent_name(value: object) -> bool:
     name = _normalized_name(value)
     if name in _GENERIC_AGENT_NAMES:
         return True
+    return False
+
+
+# LLM: _is_indexed_generic_agent_name detects generated role/index lineage names.
+# 函数用途: 区分“小傻妞-worker”和“小傻妞-worker-1”，让编号成为 sibling 身份的一部分。
+def _is_indexed_generic_agent_name(value: object) -> bool:
+    name = _normalized_name(value)
     parts = name.split("-")
     if len(parts) < 3 or not parts[-1].isdigit():
         return False

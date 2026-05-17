@@ -78,6 +78,46 @@ def test_count_fanout_creates_requested_number_of_sibling_runs(tmp_path):
     assert len(agent.subagents.list_runs()) == 2
 
 
+# LLM: Live Lab fixture names must not be mistaken for repair/fix work.
+# 函数用途: 防止 `fixture-worker-*` 里的英文 fix 触发修复任务复用，导致 items[] 两个 worker 被压成一个。
+def test_items_mode_fixture_worker_names_do_not_trigger_repair_dedupe(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _workspace_agent(tmp_path)
+    payload = json.loads(CreateSubagentsTool(agent).execute({
+        "items": [
+            _fixture_worker_item("fixture-worker-1"),
+            _fixture_worker_item("fixture-worker-2"),
+        ],
+        "count": 2,
+    }).output)
+
+    assert payload["created_run_ids"] == payload["ids"]
+    assert payload["reused_run_ids"] == []
+    assert len(set(payload["ids"])) == 2
+    assert len(agent.subagents.list_runs()) == 2
+
+
+# LLM: Indexed default lineage names should behave like separate siblings in the same batch.
+# 函数用途: 覆盖真实模型生成“小傻妞-worker-1/2”时，两个 item 不应被合同去重合成一个。
+def test_items_mode_indexed_generic_names_create_distinct_siblings(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _workspace_agent(tmp_path)
+    payload = json.loads(CreateSubagentsTool(agent).execute({
+        "items": [
+            _fixture_worker_item("小傻妞-worker-1"),
+            _fixture_worker_item("小傻妞-worker-2"),
+        ],
+        "count": 2,
+    }).output)
+
+    assert len(payload["ids"]) == 2
+    assert len(set(payload["ids"])) == 2
+    assert payload["created_run_ids"] == payload["ids"]
+    assert payload["reused_run_ids"] == []
+
+
 # LLM: Generic workers still need idempotency when the model repeats the same create call.
 # 函数用途: 没有明确 agent_name 的普通 worker 第二次创建同一合同，应复用已有 run，避免 root 复读时不断扩容。
 def test_generic_single_worker_reuses_same_contract(tmp_path):
@@ -176,3 +216,15 @@ def _pipeline_items(output_name: str) -> list[dict[str, object]]:
             "role": "worker",
         },
     ]
+
+
+# LLM: _fixture_worker_item mirrors the real Live Lab create_subagents tool call that regressed.
+# 函数用途: 构造含 README.md 目标和 fixture-worker 名称的普通 worker item。
+def _fixture_worker_item(agent_name: str) -> dict[str, object]:
+    return {
+        "agent_name": agent_name,
+        "goal": "在隔离 fixture 项目中读取 README.md，并在子代理 task_dir/scenario_outputs/ 写入自己的证据报告",
+        "role": "worker",
+        "acceptance_checks": ["必须有 read_file 证据", "必须有 write_file 证据", "必须等待父代理验收"],
+        "plan": "读取 README.md；写入 task_dir/scenario_outputs/<run_id>.md；等待验收",
+    }

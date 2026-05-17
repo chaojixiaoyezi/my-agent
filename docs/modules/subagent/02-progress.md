@@ -1695,3 +1695,11 @@
 - 真实复测：`step8-real-qa-refs-r4` 返回 `LIVE_LAB_PASS`，真实 MiniMax-M2.7 完成 `health`、`gateway_ask`、`long_subagent`。long_subagent 创建 2 个 worker，分两轮 dispatch，写出 2 个 scenario output 文件，并通过 scenario summary。
 - 已测试：新增 Live Lab interface、runner input dependency、artifact workspace roots、backend stream fallback 单测；focused suites、ruff、doc sync、strict code-size 和 full pytest 作为本阶段收口门。
 - 下一步：把这个底座带进更大真实任务，优先跑自然语言家具首页/购物网站 E2E，并继续用 OpenClaw/Hermes/Codex 对照“哪里是协议层、哪里是控制面、哪里是工具网关”。
+
+## 2026-05-17 Live Lab 批量创建 / Context Gate 回归修复
+- 中文说明：真实 MiniMax-M2.7 Live Lab 再次跑 `long_subagent` 时，先暴露“2 个 worker 被合并成 1 个”，再暴露“README.md 输入资料被误当成 required output”。这些都不是提示词问题，而是底层合同解析和幂等身份的问题。
+- 已实现：repair-goal 兜底识别改成英文词边界匹配，`fixture-worker-*` 里的 `fix` 不再触发修复任务复用；中文修复词、`fix/repair/bugfix/hotfix` 仍然有效。
+- 已实现：带编号的默认小傻妞名（如 `小傻妞-worker-1/2`）现在按“编号 + 任务合同”复用。第一次同批创建时不会合并成一个；同一批重复调用时仍能复用对应编号。
+- 已实现：required-file 提取会把“报告 README.md 内容摘要”识别为输入资料摘要，不再把 README.md 放进 `output_contract.required_files` 或 `task_packet.file_contract.required_files`。
+- 已测试：新增 idempotency 和 context-bundle regression；`20260517-subagent-real-04-long-subagent` 真实场景通过，2 个子代理都完成 read/write 并通过父级验收。
+- 下一步：继续把同一套合同带到更大的自然语言 E2E（家具首页、购物网站、对照 OpenClaw/Hermes/Codex），优先观察 create -> dispatch -> repair/QA -> acceptance 的真实稳定性。

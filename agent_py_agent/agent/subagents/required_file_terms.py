@@ -299,12 +299,24 @@ def _is_internal_context_reference(segment: str, match: re.Match[str]) -> bool:
 def _is_source_input_reference(segment: str, match: re.Match[str]) -> bool:
     before = segment[max(0, match.start() - 80) : match.start()].lower()
     after = segment[match.end() : match.end() + 80].lower()
+    if _is_summary_subject_reference(segment, match):
+        return True
     positive_before = before[-48:]
     if any(hint in positive_before for hint in _POSITIVE_DELIVERABLE_HINTS):
         return False
     return any(hint in before for hint in _SOURCE_INPUT_HINTS_BEFORE) or any(
         hint in after for hint in _SOURCE_INPUT_HINTS_AFTER
     )
+
+
+# LLM: _is_summary_subject_reference treats "report README.md summary" as input evidence, not output.
+# 函数用途: 避免 runner 计划里“写报告，说明 README.md 内容摘要”把 README.md 误列为 required_files。
+def _is_summary_subject_reference(segment: str, match: re.Match[str]) -> bool:
+    before = segment[max(0, match.start() - 16) : match.start()].lower()
+    after = segment[match.end() : match.end() + 24].lower()
+    if not any(hint in before for hint in ("报告", "总结", "摘要", "summarize", "summary of")):
+        return False
+    return any(hint in after for hint in ("内容", "摘要", "summary", "content"))
 
 
 # LLM: _is_negative_chain_connector extends one forbidden target across sibling alternatives.
