@@ -5,6 +5,7 @@ from __future__ import annotations
 
 """route parent goals to reusable workflow templates without mutating task state."""
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -72,47 +73,19 @@ class _RouteFieldsRequest:
     reason: str = "Subagent workflow routing is disabled by config."
 
 
-_QUALITY_CJK_KEYWORDS = ("高质量", "文档", "报告", "界面", "翻译", "论文", "交付", "排版", "验收")
-_CODE_CJK_KEYWORDS = ("代码", "修复", "报错", "功能", "开发", "实现", "测试", "重构", "日志", "安全", "模块", "命令")
-_QUALITY_KEYWORDS = (
-    "doc",
-    "docs",
-    "documentation",
-    "readme",
-    "pdf",
-    "ui",
-    "ux",
-    "interface",
-    "report",
-    "presentation",
-    "polish",
-    "quality",
-    "deliverable",
-    "高质量",
-    "文档",
-    "报告",
-    "界面",
+_STRUCTURED_ROUTE_FIELD_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(?P<tail>.*)$"
 )
-_CODE_KEYWORDS = (
-    "bug",
-    "bugfix",
-    "fix",
-    "error",
-    "exception",
-    "traceback",
-    "code",
-    "feature",
-    "implement",
-    "refactor",
-    "test",
-    "api",
-    "cli",
-    "compile",
-    "代码",
-    "修复",
-    "报错",
-    "功能",
+_WORKFLOW_TEMPLATE_FIELD_NAMES = frozenset(
+    {"workflow_template_id", "preferred_workflow_template", "subagent_workflow_template"}
 )
+_WORKFLOW_TASK_TYPE_FIELD_NAMES = frozenset({"workflow_task_type", "task_type"})
+_WORKFLOW_RISK_TAGS_FIELD_NAMES = frozenset({"workflow_risk_tags", "risk_tags"})
+_TASK_TYPE_TEMPLATE_MAP = {
+    "quality_deliverable": PRODUCER_CRITIC_TEMPLATE_ID,
+    "code_or_bugfix": CODE_FEATURE_TEMPLATE_ID,
+    "simple": SINGLE_WORKER_TEMPLATE_ID,
+}
 
 
 # LLM: route_workflow 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
@@ -236,33 +209,61 @@ def _select_template(request: _TemplateSelectionRequest) -> tuple[str, str]:
     return "", "No workflow template could be selected."
 
 
-# LLM: _classify_goal 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
-# 函数用途: 处理classify目标相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
+# LLM: _classify_goal reads only structured workflow fields; the LLM can choose templates, but code must not infer them from prose keywords.
+# 函数用途: 从 workflow_task_type、workflow_template_id、risk_tags 这类机器字段选择模板；普通自然语言目标默认走 single worker。
 def _classify_goal(goal: str) -> tuple[str, str, list[str]]:
-    text = goal.casefold()
-    if _matches_quality_goal(goal, text):
-        return "quality_deliverable", PRODUCER_CRITIC_TEMPLATE_ID, ["quality_bar", "review_needed"]
-    if _matches_code_goal(goal, text):
-        return "code_or_bugfix", CODE_FEATURE_TEMPLATE_ID, ["code_change", "verification_needed"]
-    return "simple", SINGLE_WORKER_TEMPLATE_ID, ["low_scope"]
+    fields = _workflow_goal_fields(goal)
+    task_type = fields.get("task_type", "simple")
+    preferred = fields.get("template_id") or _TASK_TYPE_TEMPLATE_MAP.get(task_type, SINGLE_WORKER_TEMPLATE_ID)
+    risk_tags = fields.get("risk_tags", [])
+    if not risk_tags:
+        risk_tags = ["explicit_workflow"] if task_type != "simple" or fields.get("template_id") else ["low_scope"]
+    return task_type, preferred, risk_tags
 
 
-# LLM: _matches_quality_goal 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
-# 函数用途: 处理matchesquality目标相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
-def _matches_quality_goal(goal: str, text: str) -> bool:
-    return _contains_any(goal, _QUALITY_CJK_KEYWORDS) or any(keyword in text for keyword in _QUALITY_KEYWORDS)
+# LLM: _workflow_goal_fields extracts shallow protocol fields from a goal without interpreting prose.
+# 函数用途: 支持 `workflow_task_type: code_or_bugfix`、`workflow_template_id: ...` 和 `risk_tags: a,b`。
+def _workflow_goal_fields(goal: str) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for raw in str(goal or "").splitlines():
+        match = _STRUCTURED_ROUTE_FIELD_RE.match(raw.strip())
+        if match:
+            _apply_workflow_goal_field(fields, match.group("field"), match.group("tail"))
+    return fields
 
 
-# LLM: _matches_code_goal 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
-# 函数用途: 处理matchescode目标相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
-def _matches_code_goal(goal: str, text: str) -> bool:
-    return _contains_any(goal, _CODE_CJK_KEYWORDS) or any(keyword in text for keyword in _CODE_KEYWORDS)
+# LLM: _apply_workflow_goal_field maps one protocol field to the router field dict.
+# 函数用途: 把 workflow 字段归一到 template_id/task_type/risk_tags，保持主解析循环浅。
+def _apply_workflow_goal_field(fields: dict[str, Any], field_name: str, value: str) -> None:
+    field = field_name.strip().lower()
+    tail = value.strip()
+    if not tail:
+        return
+    if field in _WORKFLOW_TEMPLATE_FIELD_NAMES:
+        fields["template_id"] = _first_token(tail)
+        return
+    if field in _WORKFLOW_TASK_TYPE_FIELD_NAMES:
+        fields["task_type"] = _first_token(tail)
+        return
+    if field in _WORKFLOW_RISK_TAGS_FIELD_NAMES:
+        fields["risk_tags"] = _list_tokens(tail)
 
 
-# LLM: _contains_any 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
-# 函数用途: 判断any条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
-def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
-    return any(keyword in text for keyword in keywords)
+# LLM: _first_token keeps workflow field values machine-shaped.
+# 函数用途: 从结构化字段里取第一个 id；忽略普通句子，避免把自然语言当模板 id。
+def _first_token(value: str) -> str:
+    tokens = _list_tokens(value)
+    return tokens[0] if tokens else ""
+
+
+# LLM: _list_tokens accepts identifier-like route values only.
+# 函数用途: 解析逗号、顿号、竖线分隔的机器 token；中文长句不会生成 workflow 决策 token。
+def _list_tokens(value: str) -> list[str]:
+    return [
+        item
+        for item in re.split(r"[\s,，、|/]+", str(value or "").strip().lower())
+        if re.fullmatch(r"[a-zA-Z0-9_-]+", item or "")
+    ]
 
 
 # LLM: _format_store_issue 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。

@@ -1,4 +1,13 @@
-﻿## 2026-05-06 code-size guard cleanup
+﻿## 2026-05-17 structured contract cleanup
+
+- 本轮专项清理了子代理/编排代码层的自然语言关键词硬判断：文件合同、内容合同、QA 角色要求、workflow 路由、复杂度估算、负向内容验收、direct/body read guard、输入依赖、output refs、repair 归属和 create role 纠偏都改为结构化字段、模板 id、状态事实或显式工具授权。
+- `subagent_workflows/router.py` 不再从“代码/修复/报告/界面/高质量”等中文/英文词里自动选模板；需要硬选时由 LLM 或调用方写 `workflow_task_type:` / `workflow_template_id:`。
+- `task_complexity.py` 不再用 goal 关键词增加轮数，只根据 plan 步骤和工具数量做保守估算。
+- `result_structured_evidence.py` / `execution_executor.py` 的负向内容检查只认 `match_mode=not_contains`、`not_exists`、`expect_absent=true` 等机器字段；summary 或测试名里的“无/没有/不存在”不会改变通过/失败语义。
+- `create_subagents` role 修正只认结构化输入：`tasks[]` 或显式 `allowed_tools` 包含 `schedule_child_subagents` / `dispatch_subagents` 时才按 coordinator 建立；用户 prompt 里说“小傻妞再找小小傻妞”不会被代码层写成死规则。
+- 开发规范新增“结构化合同边界”：自然语言可以出现在用户 prompt、模板和测试 prompt 中，但产品代码不得把 prose phrase 当作 routing / permission / acceptance / recovery 的唯一事实源。测试规范同步写入：真实 E2E 可以在 prompt 中要求 root “你自己不要做，只派小傻妞/子代理做”，但不能把这句话硬编码进 runtime。
+
+## 2026-05-06 code-size guard cleanup
 - Split `subagents/models.py` into focused capability, record, runtime, and task model modules while preserving the public compatibility import surface.
 - Split runner result structured-output processing and output payload assembly out of `result_processors.py`.
 - Split work-order path/file/validation helpers out of `manager_base.py` into `manager_work_orders.py`.

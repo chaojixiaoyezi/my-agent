@@ -1,5 +1,5 @@
 # LLM: Output ref rebinding keeps newly-created subagents from inheriting stale sibling run ids.
-# 模块用途: 子代理 run_id 生成后，把“当前任务自己要写”的 data/subagents/<旧id>/ 文件绑定到真实 run_id。
+# 模块用途: 子代理 run_id 生成后，把结构化 output_refs/output_files 里的 data/subagents/<旧id>/ 绑定到真实 run_id。
 
 from __future__ import annotations
 
@@ -13,25 +13,7 @@ _FILE_REF_RE = re.compile(
     r"(?:json|md|csv|txt|xlsx|xls|pdf|html|htm|py|yaml|yml)\b",
     re.IGNORECASE,
 )
-_DIRECT_WRITE_MARKERS = (
-    "写到",
-    "写入",
-    "保存到",
-    "保存为",
-    "生成",
-    "创建",
-    "输出到",
-    "输出为",
-    "产出到",
-    "导出",
-    "write",
-    "output to",
-    "create",
-    "generate",
-    "save",
-    "export",
-)
-_READ_MARKERS = ("读取", "读", "接收", "基于", "根据", "依赖", "输入", "引用", "参考", "read", "from", "input")
+_OUTPUT_REF_FIELD_RE = re.compile(r"^\s*(?:[-*]\s*)?(?:output_refs|output_files|artifact_refs)\s*[:=]", re.IGNORECASE)
 
 
 # LLM: OutputRefRebinding records one machine-auditable replacement for later E2E diagnosis.
@@ -72,8 +54,8 @@ def _rewrite_list_field(
     return [_rewrite_field(field, str(item), run_id, rewrites) for item in values]
 
 
-# LLM: _rewrite_field replaces only refs whose local grammar says "this task writes here".
-# 函数用途: 遍历文本中的文件路径；只有写入语义且路径含旧 subagent run id 时才替换。
+# LLM: _rewrite_field replaces only refs inside structured output fields.
+# 函数用途: 遍历文本中的文件路径；只有 output_refs/output_files/artifact_refs 行里的旧 subagent run id 才替换。
 def _rewrite_field(field: str, text: str, run_id: str, rewrites: list[OutputRefRebinding]) -> str:
     source = str(text or "")
     result = source
@@ -94,14 +76,11 @@ def _file_refs(text: str):
         yield match.group(), match.start()
 
 
-# LLM: _path_ref_is_output intentionally mirrors runner dependency parsing without importing agent_core.
-# 函数用途: 判断路径前缀是否表达当前任务写出产物，避免把“读取旧 run 文件”误改掉。
+# LLM: _path_ref_is_output checks machine output-ref fields only.
+# 函数用途: 判断路径所在行是否为 output_refs/output_files/artifact_refs，避免把自然语言里的旧 run 文件误改掉。
 def _path_ref_is_output(text: str, start: int) -> bool:
-    prefix = str(text[max(0, start - 96):start]).lower()
-    direct = prefix[-24:]
-    if any(marker in direct for marker in _DIRECT_WRITE_MARKERS):
-        return True
-    return ("输出" in direct or "output" in direct) and not any(marker in direct for marker in _READ_MARKERS)
+    line_start = str(text or "").rfind("\n", 0, start) + 1
+    return bool(_OUTPUT_REF_FIELD_RE.match(str(text or "")[line_start:start]))
 
 
 # LLM: _rebound_subagent_ref swaps the segment after data/subagents when it is a concrete run id.

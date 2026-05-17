@@ -178,6 +178,29 @@ before changing code.
   owner home, another user, another group, or provider root metadata unless an
   explicit admin migration command owns that change.
 
+## 7.2 Structured Contract Boundary / 结构化合同边界
+
+- Product code must not make hard business decisions from broad natural-language
+  keyword lists. Examples of banned behavior: "用户说了测试就必须创建 tester",
+  "goal 里出现修复就强制 repair", "summary 里有没有/不存在就反转验收结果",
+  or "prompt 里提到下级就把 worker 改成 coordinator".
+- Deterministic runtime decisions must read machine facts instead: protocol fields
+  (`required_files`, `forbidden_files`, `required_read_paths`, `output_files`,
+  `dependencies`, `workflow_task_type`, `workflow_template_id`, `delegate_only`,
+  `refs_only`, `parent_body_read=allow`), role/template ids, status fields,
+  failure codes, refs, task/workspace metadata, or explicit tool grants.
+- Natural language is still allowed in user prompts, LLM-facing instructions,
+  role/workflow template descriptions, user-visible messages, and test prompts.
+  It may guide the model, but product code must not treat a prose phrase as the
+  only source of truth for routing, permission, acceptance, or recovery.
+- Tool syntax and error syntax are different from business intent. It is OK to
+  parse command forms such as `cat file`, XML-ish tool markers, Python traceback
+  names, path strings, file extensions, and protocol tokens because those are
+  machine syntax or diagnostics, not guesses about what the user meant.
+- If a feature needs a new hard requirement, add a structured field/schema first,
+  document it, and add a regression that proves the same natural-language phrase
+  alone does not trigger the hard behavior.
+
 ---
 
 ## 8. Comments and Docstrings / 注释和 docstring

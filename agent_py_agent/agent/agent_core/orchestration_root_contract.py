@@ -1,5 +1,5 @@
 # LLM: Root subagent seed contract repair keeps create_subagents thin.
-# 模块用途: 当主模型创建 root/coordinator 时，从原始用户 prompt 补回不可丢的文件和层级合同。
+# 模块用途: 当主模型创建 root/coordinator 时，只从原始用户 prompt 的机器字段补回不可丢的文件和层级合同。
 
 from __future__ import annotations
 
@@ -31,18 +31,18 @@ def _missing_user_contract_blocks(goal: str, source: str) -> list[str]:
     blocks: list[str] = []
     required = _missing_terms(_required_file_terms(source), goal)
     if required:
-        blocks.append("用户原始必需文件/产物名（必须原样交付，root seed 不得总结缩水）：" + "、".join(required))
+        blocks.append("required_files: " + "、".join(required))
     forbidden = _missing_terms(_forbidden_file_terms(source), goal)
     if forbidden:
-        blocks.append("用户原始禁止文件/反例名（禁止创建，不得当成 required_files）：" + "、".join(forbidden))
+        blocks.append("forbidden_files: " + "、".join(forbidden))
     hierarchy = _missing_hierarchy_contracts(goal, source)
     if hierarchy:
-        blocks.append("用户原始层级/命名约束（必须原样遵守）：" + " / ".join(hierarchy))
+        blocks.append("hierarchy_contracts: " + " | ".join(hierarchy))
     return blocks
 
 
 # LLM: _required_file_terms keeps root seed contract parsing aligned with context bundles.
-# 函数用途: 从原始用户 prompt 提取正向交付文件名，作为 root 创建时的兜底合同。
+# 函数用途: 从原始用户 prompt 的 required_files 机器字段提取正向交付文件名，作为 root 创建时的兜底合同。
 def _required_file_terms(text: str) -> list[str]:
     return required_file_terms_from_text(
         text,
@@ -51,7 +51,7 @@ def _required_file_terms(text: str) -> list[str]:
 
 
 # LLM: _forbidden_file_terms keeps root seed negative examples separate from deliverables.
-# 函数用途: 从原始用户 prompt 提取禁止文件名，避免第一层 root goal 直接丢失 forbidden_files。
+# 函数用途: 从原始用户 prompt 的 forbidden_files 机器字段提取禁止文件名，避免第一层 root goal 丢失合同。
 def _forbidden_file_terms(text: str) -> list[str]:
     return forbidden_file_terms_from_text(
         text,

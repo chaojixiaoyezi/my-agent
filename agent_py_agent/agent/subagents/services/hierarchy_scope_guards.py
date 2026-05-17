@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..models import SubAgentTask
+from ..role_templates import role_template_id_for_role
 from .base import _extract_write_dirs
 from .hierarchy_domain_terms import (
     FORBIDDEN_SCOPE_GENERIC_TERMS,
@@ -35,7 +36,7 @@ def schedule_block_reason(parent: SubAgentTask, request: Any) -> str:
     drift_reason = _child_write_root_drift_reason(parent, request)
     if drift_reason:
         return drift_reason
-    return _forbidden_child_scope_reason(parent, request) or _domain_mismatch_reason(parent, request)
+    return _forbidden_child_scope_reason(parent, request)
 
 
 # LLM: qa_phase_block_reason keeps empty QA fanout from burning model calls with nothing to inspect.
@@ -133,36 +134,17 @@ def _is_active_child(item: Any) -> bool:
     return status in _ACTIVE_DUPLICATE_STATUSES
 
 
-# LLM: _is_recovery_quality_like narrows hard duplicate blocking to QA/recovery roles, not normal fanout workers.
-# 函数用途: 只给 repair/test/bug/accept/check 这类质量恢复任务做活跃同名去重，避免挡住普通并行实现。
+# LLM: _is_recovery_quality_like narrows duplicate blocking to structured QA/recovery roles.
+# 函数用途: 只给 QA 模板角色或带 repair_contract 的任务做活跃同名去重，避免从 goal 自然语言猜。
 def _is_recovery_quality_like(item: Any) -> bool:
-    text = f"{getattr(item, 'agent_name', '')} {getattr(item, 'role', '')} {getattr(item, 'goal', '')}".lower()
-    return any(
-        token in text
-        for token in (
-            "repair",
-            "qa",
-            "test",
-            "tester",
-            "bug",
-            "accept",
-            "verify",
-            "review",
-            "checker",
-            "fix",
-            "修复",
-            "测试",
-            "验收",
-            "找错",
-        )
-    )
+    role = _template_role_identity(item)
+    return bool(role in {"tester", "bug_finder", "acceptor"} or repair_contract_identity_from_context_packs(getattr(item, "context_packs", [])))
 
 
-# LLM: _is_repair_like catches renamed repair workers so recovery cannot bypass dedupe by changing labels.
-# 函数用途: 判断任务是否是修复/返工类；同父级活跃 repair 只能继续或接管，不能无限换名新增。
+# LLM: _is_repair_like checks structured repair contracts only.
+# 函数用途: 判断任务是否带 repair_contract；同父级活跃 repair 只能继续或接管，不能靠换名无限新增。
 def _is_repair_like(item: Any) -> bool:
-    text = f"{getattr(item, 'agent_name', '')} {getattr(item, 'role', '')} {getattr(item, 'goal', '')}".lower()
-    return any(token in text for token in ("repair", "fix", "修复", "返工", "补救"))
+    return bool(repair_contract_identity_from_context_packs(getattr(item, "context_packs", [])))
 
 
 # LLM: _normalized_agent_name compares model-selected role names without freezing user-facing Chinese prefixes.
@@ -203,11 +185,12 @@ def _implementation_child_ready(child: Any) -> bool:
     return status in {"AWAITING_ACCEPTANCE", "DONE"} or verification in {"NEEDS_ACCEPTANCE", "VERIFIED"}
 
 
-# LLM: _is_leaf_like detects implementation leaves without looking at broad goal prose.
+# LLM: _is_leaf_like detects implementation leaves from structured role/name ids.
 # 函数用途: 判断 child spec 是否是执行/写作类叶子节点，用于 root 绕层创建保护。
 def _is_leaf_like(item: Any) -> bool:
     text = f"{getattr(item, 'role', '')} {getattr(item, 'agent_name', '')}".lower()
-    return any(token in text for token in {"leaf", "leaf_worker", "leaf-worker", "worker", "writer", "coder"})
+    role = _template_role_identity(item)
+    return role in {"worker", "writer", "researcher"} or any(token in text for token in {"leaf", "leaf_worker", "leaf-worker", "coder"})
 
 
 # LLM: _mixed_coordinator_leaf_reason blocks one call from flattening a planned hierarchy.
@@ -299,13 +282,12 @@ def _request_contains_scope_term(child_specs: list[Any], term: str) -> bool:
     return bool(term) and any(term in _child_scope_text(spec) for spec in child_specs)
 
 
-# LLM: _forbidden_scope_terms extracts short machine-readable domain words from parent instructions.
-# 函数用途: 从 parent goal 中提取不得创建的英文/标识符领域名，如 arithmetic/text。
+# LLM: _forbidden_scope_terms extracts machine-readable forbidden child scopes.
+# 函数用途: 只从 forbidden_child_scopes 机器字段提取领域名，不从“不要创建 X”自然语言猜。
 def _forbidden_scope_terms(parent: SubAgentTask) -> list[str]:
     if int(parent.depth or 0) <= 0:
         return []
-    text = str(parent.goal or "").lower()
-    terms = re.findall(r"(?:不得|不能|不要)\s*创建\s*([a-zA-Z0-9_-]+)", text)
+    terms = _structured_scope_terms(parent.goal, "forbidden_child_scopes")
     return list(
         dict.fromkeys(
             term
@@ -315,39 +297,46 @@ def _forbidden_scope_terms(parent: SubAgentTask) -> list[str]:
     )
 
 
+# LLM: _structured_scope_terms reads simple protocol scope lists.
+# 函数用途: 支持 `forbidden_child_scopes: arithmetic, text` 和后续 bullet 列表。
+def _structured_scope_terms(text: object, field_name: str) -> list[str]:
+    terms: list[str] = []
+    active = False
+    pattern = re.compile(rf"^\s*(?:[-*]\s*)?{re.escape(field_name)}\s*[:=]\s*(?P<tail>.*)$", re.IGNORECASE)
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        match = pattern.match(line)
+        if match:
+            active = True
+            terms.extend(_scope_items(match.group("tail")))
+            continue
+        if not active:
+            continue
+        if not line.startswith(("-", "*")):
+            active = False
+            continue
+        terms.extend(_scope_items(line.lstrip("-* ")))
+    return terms
+
+
+# LLM: _scope_items tokenizes one structured scope value.
+# 函数用途: 读取英文/标识符 scope，不接受普通中文句子。
+def _scope_items(value: object) -> list[str]:
+    return [
+        item
+        for item in re.split(r"[\s,，、|/]+", str(value or ""))
+        if re.fullmatch(r"[a-zA-Z0-9_-]+", item or "")
+    ]
+
+
 # LLM: _child_scope_text keeps forbidden-scope matching limited to the requested child spec.
 # 函数用途: 合并 child 的 goal/agent_name/role，避免拿补全后的父级上下文误判。
 def _child_scope_text(spec: Any) -> str:
     return f"{spec.goal} {spec.agent_name} {spec.role}".lower()
 
 
-# LLM: _domain_mismatch_reason blocks child coordinators from drifting into sibling domains.
-# 函数用途: parent 已经是 text/arithmetic 等单一领域时，阻断创建其它领域 child。
-def _domain_mismatch_reason(parent: SubAgentTask, request: Any) -> str:
-    parent_domains = _domain_terms(f"{parent.goal} {parent.agent_name} {parent.role}")
-    if int(parent.depth or 0) <= 0 or not parent_domains:
-        return ""
-    return _first_domain_mismatch(parent_domains, request.child_specs)
-
-
-# LLM: _first_domain_mismatch returns the first blocked sibling drift message.
-# 函数用途: 按 child specs 顺序找第一个领域串线问题，保持错误信息稳定。
-def _first_domain_mismatch(parent_domains: set[str], child_specs: list[Any]) -> str:
-    for spec in child_specs:
-        child_domains = _domain_terms(_child_scope_text(spec))
-        if child_domains and parent_domains.isdisjoint(child_domains):
-            return f"domain_mismatch:{','.join(sorted(parent_domains))}->{','.join(sorted(child_domains))}"
-    return ""
-
-
-# LLM: _domain_terms extracts stable task-domain words without treating every filename as a domain.
-# 函数用途: 从 agent_name、leaf_worker_x、normalize_text 等命名里提取短领域词。
-def _domain_terms(text: str) -> set[str]:
-    lowered = str(text or "").lower()
-    terms = set(re.findall(r"(?:leaf_worker|leaf-worker|leaf|lead)[_-]([a-z][a-z0-9_-]*)", lowered))
-    if "arithmetic" in lowered:
-        terms.add("arithmetic")
-    if re.search(r"\btext\b|normalize_text", lowered):
-        terms.add("text")
-    generic = {"worker", "workers", "output", "outputs"}
-    return {term.split("_")[0].split("-")[0] for term in terms if term and term not in generic}
+# LLM: _template_role_identity maps role/name through the active template catalog.
+# 函数用途: 用模板 id 判断角色类别，替代中文/英文自然语言职责词。
+def _template_role_identity(item: Any) -> str:
+    identity = f"{getattr(item, 'role', '')} {getattr(item, 'agent_name', '')}"
+    return role_template_id_for_role(identity, fallback="")

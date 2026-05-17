@@ -136,7 +136,7 @@ def dispatchable_tasks(tasks: list[Any]) -> list[Any]:
 
 
 # LLM: _same_create_scope checks parent/root/name/role without comparing fragile natural-language goal text.
-# 函数用途: 判断一个已有 task 是否就是这次 create_subagents 想创建的同一位小傻妞。
+# 函数用途: 判断一个已有 task 是否就是这次 create_subagents 想创建的同一位小傻妞；自定义名也要合同一致才复用。
 def _same_create_scope(task: Any, params: CreateRunParams, name: str) -> bool:
     if _normalized_name(getattr(task, "agent_name", "")) != name:
         return False
@@ -146,7 +146,13 @@ def _same_create_scope(task: Any, params: CreateRunParams, name: str) -> bool:
         return False
     if _requested_root_id(params) and _text(getattr(task, "root_id", "")) != _requested_root_id(params):
         return False
-    return _compatible_role(getattr(task, "role", ""), params.role)
+    if not _compatible_role(getattr(task, "role", ""), params.role):
+        return False
+    if _normalized_goal(getattr(task, "goal", "")) != _normalized_goal(params.goal):
+        return False
+    if _identity_fields(task) != _params_identity_fields(params):
+        return False
+    return _external_write_roots(task) == _params_extra_write_roots(params)
 
 
 # LLM: _same_contract_scope is the fallback idempotency key for generic/default display names.

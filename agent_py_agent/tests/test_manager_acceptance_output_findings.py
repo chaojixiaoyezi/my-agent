@@ -72,7 +72,7 @@ class TestSubAgentAcceptanceOutputMiscFindings(_FindingSetupMixin, _FindingAsser
         manager = MockManager()
         task = self._make_findings_task(
             tmp_path,
-            goal="你的职责：创建 depth=3 小小小傻妞-执行工人(leaf_worker)。",
+            goal="child_spawn_required: true\nrequired_child_depth: 3",
             child_ids=[],
         )
         output = {"artifacts": [], "structured_output": {"status": "COMPLETED"}}
@@ -162,7 +162,7 @@ class TestSubAgentAcceptanceRoleCoverageFindings(_FindingSetupMixin, _FindingAss
         )
         task = self._make_findings_task(
             tmp_path,
-            goal="必须至少覆盖 tester / bug_finder / acceptor 三类 QA 子代理。",
+            goal="required_qa_roles: tester, bug_finder, acceptor",
             role="coordinator",
             child_ids=["child"],
         )
@@ -200,7 +200,7 @@ class TestSubAgentAcceptanceRoleCoverageFindings(_FindingSetupMixin, _FindingAss
         )
         task = self._make_findings_task(
             tmp_path,
-            goal="必须至少覆盖 tester / bug_finder / acceptor 三类 QA 子代理。",
+            goal="required_qa_roles: tester, bug_finder, acceptor",
             role="coordinator",
             child_ids=["child"],
         )
@@ -233,7 +233,7 @@ class TestSubAgentAcceptanceRoleCoverageFindings(_FindingSetupMixin, _FindingAss
             (tmp_path / run_id / "task.json").write_text(json.dumps(record), encoding="utf-8")
         task = self._make_findings_task(
             tmp_path,
-            goal="必须至少覆盖 tester / bug_finder / acceptor 三类 QA 子代理。",
+            goal="required_qa_roles: tester, bug_finder, acceptor",
             role="coordinator",
             child_ids=["tester", "bug", "accept"],
         )
@@ -272,7 +272,7 @@ class TestSubAgentAcceptanceRoleCoverageFindings(_FindingSetupMixin, _FindingAss
         )
         task = self._make_findings_task(
             tmp_path,
-            goal="必须至少覆盖 tester / bug_finder / acceptor 三类 QA 子代理。",
+            goal="required_qa_roles: tester, bug_finder, acceptor",
             role="coordinator",
             child_ids=["tester"],
         )
@@ -311,7 +311,7 @@ class TestSubAgentAcceptanceRoleCoverageFindings(_FindingSetupMixin, _FindingAss
             )
         task = self._make_findings_task(
             tmp_path,
-            goal="必须至少覆盖 tester / bug_finder / acceptor 三类 QA 子代理。",
+            goal="required_qa_roles: tester, bug_finder, acceptor",
             role="coordinator",
             child_ids=["tester", "bug", "accept"],
         )
@@ -462,7 +462,7 @@ class TestSubAgentAcceptanceTestsAndArtifactFindings(_FindingSetupMixin, _Findin
         internal_report.write_text("internal report", encoding="utf-8")
         task = self._make_findings_task(
             tmp_path,
-            goal="整合结果，输出到 final_report.md",
+            goal="required_files: final_report.md",
             task_dir=task_dir,
             allowed_write_roots=[str(task_dir), str(product_root)],
         )

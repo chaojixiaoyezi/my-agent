@@ -223,13 +223,8 @@ def _looks_like_tool_limit_cleanup(structured: object) -> bool:
     has_capability_requests = bool(getattr(structured, "capability_requests", []) or [])
     if status not in {"BLOCKED", "FAILED", "TIMEOUT"} and not has_capability_requests:
         return False
-    probe_text = " ".join(
-        [
-            *(str(getattr(structured, attr, "") or "") for attr in ("blocked_reason", "failure_type", "summary", "parse_error")),
-            *[str(item) for item in (getattr(structured, "capability_requests", []) or [])],
-        ]
-    ).lower()
-    return any(token in probe_text for token in ("max_tool", "tool_round", "工具", "轮数", "上限"))
+    failure_type = str(getattr(structured, "failure_type", "") or "").strip().lower()
+    return failure_type in {"max_tool_rounds", "tool_round_limit", "max_tool_round_limit"}
 
 
 # LLM: _verified_direct_child_refs checks refs-only child status before synthesizing coordinator completion.

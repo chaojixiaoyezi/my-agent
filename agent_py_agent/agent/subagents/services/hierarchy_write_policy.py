@@ -12,20 +12,6 @@ from .base import _extract_write_dirs
 if TYPE_CHECKING:
     from ..models import SubAgentTask
 
-_PRODUCT_WRITE_ROLE_MARKERS = ("worker", "writer", "implementer", "developer", "coder")
-_REPORT_ONLY_ROLE_MARKERS = (
-    "coordinator",
-    "researcher",
-    "bug_finder",
-    "tester",
-    "acceptor",
-    "checker",
-    "reviewer",
-    "critic",
-    "reporter",
-)
-
-
 # LLM: ScheduledWriteRootRequest bundles role and intent facts for the write-root policy.
 # 类用途: 把 role、requested roots 和 leaf 写入意图打包，避免策略函数使用散参数。
 @dataclass(frozen=True)

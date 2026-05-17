@@ -228,31 +228,10 @@ def _content_match_is_exact(test: dict[str, Any]) -> bool:
     return mode in {"exact", "equals", "equal"} or any(key in test for key in ("content_equals", "expected_content"))
 
 
-_NEGATIVE_CONTENT_MARKERS = (
-    "不包含",
-    "不得包含",
-    "不能包含",
-    "不要包含",
-    "不应包含",
-    "不出现",
-    "不得出现",
-    "不能出现",
-    "不要出现",
-    "无",
-    "没有",
-    "must not contain",
-    "does not contain",
-    "not contain",
-    "no ",
-    "absent",
-)
-
-
-# LLM: _content_match_expects_absent prevents natural negative checks from becoming inverted tests.
-# 函数用途: 把“无/不包含 xxx”这类验收项识别成 not_contains，避免父级把已修好的内容误判失败。
+# LLM: _content_match_expects_absent reads explicit negative-content schema only.
+# 函数用途: 只有 match_mode=not_contains 或 expect_absent=true 这类机器字段才表示反向内容检查。
 def _content_match_expects_absent(test: dict[str, Any]) -> bool:
     mode = str(test.get("match_mode") or "").strip().lower()
-    # LLM: Common model spellings for absence all mean the same negative-content assertion.
     if mode in {
         "not_contains",
         "not_exists",
@@ -265,9 +244,4 @@ def _content_match_expects_absent(test: dict[str, Any]) -> bool:
         return True
     if bool(test.get("expect_absent") or test.get("negate") or test.get("should_not_contain")):
         return True
-    name = str(test.get("name") or "").strip().lower()
-    pattern = str(_content_pattern(test) or "").strip().lower()
-    haystack = name
-    if pattern and pattern in haystack:
-        return any(marker in haystack for marker in _NEGATIVE_CONTENT_MARKERS)
     return False

@@ -13,6 +13,8 @@ if TYPE_CHECKING:
     from .hierarchy_scheduler import HierarchyChildSpec
 
 _LINEAGE_CONTRACT_RE = re.compile(r"小+傻妞-\*")
+_STRUCTURED_FIELD_RE = re.compile(r"^\s*(?:[-*]\s*)?(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(?P<tail>.*)$")
+_HIERARCHY_CONTRACT_FIELDS = frozenset({"hierarchy_contracts", "lineage_contracts", "delegation_contracts"})
 
 
 # LLM: inherited_hierarchy_thought gives descendants relevant context without expanding sibling scope.
@@ -160,15 +162,15 @@ def _inherited_goal_context(
         lines.extend(roots)
     file_terms = _file_terms(parent.goal)
     if file_terms:
-        lines.append("父级必需文件/产物名（structured required_files，必须原样传给下一层，不能改名或缩水）：")
+        lines.append("required_files:")
         lines.extend(f"- {item}" for item in file_terms)
     forbidden_file_terms = _forbidden_file_terms(parent.goal)
     if forbidden_file_terms:
-        lines.append("父级禁止文件/反例名（structured forbidden_files，不得创建，不得当成 required_files）：")
+        lines.append("forbidden_files:")
         lines.extend(f"- {item}" for item in forbidden_file_terms)
     hierarchy_contracts = _hierarchy_contract_segments(parent.goal)
     if hierarchy_contracts:
-        lines.append("父级层级/协作约束（必须原样遵守）：")
+        lines.append("hierarchy_contracts:")
         lines.extend(f"- {item}" for item in hierarchy_contracts)
     capability_contracts = _capability_contract_segments(parent.goal)
     if capability_contracts:
@@ -203,29 +205,28 @@ def _parent_goal_segments(text: str) -> list[str]:
     ]
 
 
-# LLM: _hierarchy_contract_segments extracts delegation-shape constraints without copying whole parent goals.
-# 函数用途: 保留 4 层链路、命名和层层创建规则；这些不是业务 sibling 目标，不能被相关性筛掉。
+# LLM: _hierarchy_contract_segments extracts structured delegation-shape constraints.
+# 函数用途: 只读取 hierarchy_contracts/lineage_contracts/delegation_contracts 机器字段，不从“4层/孙孙”等自然语言猜。
 def _hierarchy_contract_segments(text: str) -> list[str]:
-    keywords = (
-        "4 层",
-        "4层",
-        "四层",
-        "孙孙",
-        "great-grandchild",
-        "root ->",
-        "depth=1",
-        "depth=2",
-        "depth=3",
-        "max_depth",
-        "小傻妞",
-        "命名统一",
-        "层层",
-    )
-    return [
-        clip_parent_context(segment, limit=500)
-        for segment in _parent_goal_segments(text)
-        if any(keyword.lower() in segment.lower() for keyword in keywords)
-    ]
+    values: list[str] = []
+    active = False
+    for raw in str(text or "").splitlines():
+        active, items = _hierarchy_contract_line(raw, active=active)
+        values.extend(items)
+    return _dedupe_contracts(clip_parent_context(item, limit=500) for item in values)
+
+
+# LLM: _hierarchy_contract_line parses one hierarchy contract line.
+# 函数用途: 返回 active 状态和本行 hierarchy contract 项，避免主解析函数嵌套。
+def _hierarchy_contract_line(raw: str, *, active: bool) -> tuple[bool, list[str]]:
+    line = raw.strip()
+    field = _structured_contract_field(line)
+    if field:
+        is_active = field[0] in _HIERARCHY_CONTRACT_FIELDS
+        return is_active, _contract_items(field[1]) if is_active and field[1] else []
+    if active and line.startswith(("-", "*")):
+        return active, _contract_items(line.lstrip("-* "))
+    return False, []
 
 
 # LLM: hierarchy_contract_present verifies exact structured hierarchy terms before accepting a summary.
@@ -287,28 +288,42 @@ def _capability_contract_keywords() -> tuple[str, ...]:
     )
 
 
-# LLM: _segment_anchor gives contract presence checks a stable short token.
-# 函数用途: 用短关键字判断 child goal 是否已经携带同类层级合同，避免重复追加。
+# LLM: _segment_anchor gives structured contract checks a stable short token.
+# 函数用途: 用结构化字段片段的短 token 判断 child goal 是否已经携带同类层级合同，避免重复追加。
 def _segment_anchor(segment: str) -> str:
     lowered = segment.lower()
-    for anchor in (
-        "孙孙",
-        "great-grandchild",
-        "root ->",
-        "4 层",
-        "4层",
-        "四层",
-        "depth=1",
-        "depth=2",
-        "depth=3",
-        "max_depth",
-        "小傻妞",
-        "命名统一",
-        "层层",
-    ):
-        if anchor.lower() in lowered:
-            return anchor.lower()
-    return lowered[:24]
+    tokens = re.findall(r"[a-zA-Z0-9_]+|小+傻妞-\*", lowered)
+    return tokens[0] if tokens else lowered[:24]
+
+
+# LLM: _structured_contract_field recognizes protocol fields only.
+# 函数用途: 解析 hierarchy_contracts/capability_contracts 这类机器字段，避免中文标题进入代码规则。
+def _structured_contract_field(line: str) -> tuple[str, str] | None:
+    match = _STRUCTURED_FIELD_RE.match(line)
+    if not match:
+        return None
+    return match.group("field").strip().lower(), match.group("tail").strip()
+
+
+# LLM: _contract_items tokenizes compact structured contract lists.
+# 函数用途: 支持 `hierarchy_contracts: depth=1 | depth=2` 和 bullet 两种写法。
+def _contract_items(value: object) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    separator = "|" if "|" in text else "、"
+    return [item.strip() for item in text.split(separator) if item.strip()]
+
+
+# LLM: _dedupe_contracts preserves contract order.
+# 函数用途: 去重 hierarchy/capability 合同片段，避免继承块重复膨胀。
+def _dedupe_contracts(values) -> list[str]:
+    items: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in items:
+            items.append(text)
+    return items
 
 
 # LLM: _scope_tokens extracts model-stable identifiers such as arithmetic or leaf_worker_text.

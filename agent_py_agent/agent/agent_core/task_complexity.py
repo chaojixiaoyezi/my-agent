@@ -5,7 +5,7 @@ from __future__ import annotations
 
 """任务规模预判模块。
 
-基于 goal 关键词、plan 步骤数、工具数量估算任务轮数。
+只基于结构化 plan 步骤数和工具数量估算任务轮数；不从用户自然语言关键词猜业务复杂度。
 """
 
 from dataclasses import dataclass
@@ -34,24 +34,10 @@ def estimate_task_complexity(
     # 基础分：plan 步骤数，最小为1
     base_rounds = max(1, len(plan))
 
-    # 高复杂度关键词
-    high_complexity_keywords = ["翻译", "重构", "分析", "迁移", "部署", "测试", "优化", "审查", "转换"]
-    # 中等复杂度关键词
-    medium_complexity_keywords = ["修改", "更新", "添加", "检查", "查找", "生成", "创建", "写入"]
-
-    keyword_bonus = 0
-    goal_lower = goal.lower()
-    for kw in high_complexity_keywords:
-        if kw in goal:
-            keyword_bonus += 3
-    for kw in medium_complexity_keywords:
-        if kw in goal:
-            keyword_bonus += 1
-
     # 工具数量加权（多工具通常意味着多步骤）
     tool_bonus = max(0, len(allowed_tools) - 1)
 
-    estimated_rounds = base_rounds + keyword_bonus + tool_bonus
+    estimated_rounds = base_rounds + tool_bonus
 
     return TaskComplexityEstimate(
         estimated_rounds=estimated_rounds,
@@ -60,7 +46,8 @@ def estimate_task_complexity(
         confidence=0.6,
         factors={
             "plan_steps": len(plan),
-            "keyword_bonus": keyword_bonus,
+            "goal_signal_bonus": 0,
+            "keyword_bonus": 0,
             "tool_bonus": tool_bonus,
         },
     )

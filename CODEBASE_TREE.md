@@ -195,7 +195,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |   |-- subagent_compact_continuation.py # 子代理 task-local compact 接续 prompt 片段
 |   |   |   |-- finalization_compact_auto.py # run 收尾阶段的 compact auto 字段投影和续跑轮跳过策略
 |   |   |   |-- runtime_loop_models.py       # RunParams、runtime/finalize/tool-loop bundle 和结果模型
-|   |   |   |-- task_complexity.py            # 任务规模预判：基于 goal 关键词、plan 步骤数、工具数量估算轮数
+|   |   |   |-- task_complexity.py            # 任务规模预判：只基于 plan 步骤数和工具数量估算轮数，不读 goal 关键词
 |   |   |   |-- automation_guard.py            # 主代理代劳防护：根据自动化级别判断是否应派子代理
 |   |   |-- file_io.py                         # 文件 I/O 兼容入口，真实实现已拆到 io/
 |   |   |-- io/                                # 无业务含义的底层文件 I/O 原语，例如 locked JSONL append
@@ -848,7 +848,7 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - 后续如果要加命令执行类工具，需要继续保持这一层跨平台约束
 ## 2026-04-30 Tree Update
 
-- `agent_py_agent/agent/subagent_workflows/router.py`: routes task text and explicit template ids to workflow templates under auto/manual/off config.
+- `agent_py_agent/agent/subagent_workflows/router.py`: routes structured `workflow_task_type` / `workflow_template_id` fields to workflow templates under auto/manual/off config; plain task text falls back to the single-worker template.
 - `agent_py_agent/agent/subagent_workflows/compiler.py`: compiles template phases into worker dispatch specs with dependencies, boundaries, evidence rules, and `cannot_self_accept`.
 - `agent_py_agent/agent/subagent_workflows/acceptance.py`: builds parent final-gate acceptance plans from workflow templates and quality contracts.
 - `agent_py_agent/agent/log_analysis/storage/base.py`: now includes `JsonlReadAudit` for local JSONL read auditing.

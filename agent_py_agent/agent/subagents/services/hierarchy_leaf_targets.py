@@ -4,18 +4,13 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..models import SubAgentTask
-
-_REFERENCE_FILE_HINT_RE = re.compile(
-    r"(?:引入|引用|链接到|链接|导入|加载|依赖|\b(?:link(?:s)?\s+to|include|import|load|use(?:s|d)?)\b)",
-    re.IGNORECASE,
-)
+from .repair_contract_identity import repair_contract_identity_from_context_packs
 
 
 # LLM: LeafTargetDedupeRequest bundles all state needed for same-parent leaf output dedupe.
@@ -85,16 +80,14 @@ def _is_verified_leaf(item: Any, leaf_like: Callable[[Any], bool]) -> bool:
     )
 
 
-# LLM: _child_target_tokens extracts explicit output filenames from specs, task text, and output refs.
-# 函数用途: 识别 register.html、cart.py 这类具体目标文件；用于 leaf 去重，不把普通领域词当产物。
+# LLM: _child_target_tokens extracts explicit output filenames from structured roots and output refs.
+# 函数用途: 识别 extra_write_roots/output.json 里的具体目标文件；不从自然语言 goal 猜产物 ownership。
 def _child_target_tokens(item: Any) -> set[str]:
-    text = " ".join([
-        str(getattr(item, "agent_name", "") or ""),
-        str(getattr(item, "role", "") or ""),
-        str(getattr(item, "goal", "") or ""),
-        " ".join(str(root or "") for root in getattr(item, "extra_write_roots", []) or []),
-    ])
-    targets = set(_target_tokens_from_text(text))
+    targets = {
+        token
+        for root in getattr(item, "extra_write_roots", []) or []
+        for token in _target_tokens_from_text(str(root or ""))
+    }
     targets.update(_target_tokens_from_output_json(getattr(item, "output_json", "") or ""))
     return targets
 
@@ -112,26 +105,9 @@ def task_actual_target_tokens(item: Any) -> set[str]:
 
 
 # LLM: _is_explicit_repair_leaf lets parent coordinators create bounded fixes for known bad artifacts.
-# 函数用途: 判断新 leaf 是否明确是修复/补齐现有文件；这种任务允许写同一目标，避免真实 E2E 修复链被去重误挡。
+# 函数用途: 只通过 repair_contract/context_packs 判断修复任务；不从“修复/fix”等自然语言猜。
 def _is_explicit_repair_leaf(item: Any) -> bool:
-    text = " ".join([
-        str(getattr(item, "agent_name", "") or ""),
-        str(getattr(item, "role", "") or ""),
-        str(getattr(item, "goal", "") or ""),
-    ]).lower()
-    repair_tokens = {
-        "fix",
-        "repair",
-        "patch",
-        "update",
-        "补齐",
-        "补全",
-        "修复",
-        "修补",
-        "更新",
-        "改正",
-    }
-    return any(token in text for token in repair_tokens)
+    return bool(repair_contract_identity_from_context_packs(getattr(item, "context_packs", [])))
 
 
 # LLM: _target_tokens_from_output_json reads artifact path refs without expanding artifact contents.
@@ -174,6 +150,8 @@ def _target_tokens_from_artifact(artifact: Any) -> set[str]:
 # 函数用途: output.json 未带 files_modified 时，从 task.result 的结构化结果补回产物 refs，仍不读取产物正文。
 def _target_tokens_from_result_json(result_text: str) -> set[str]:
     text = str(result_text or "")
+    import re
+
     match = re.search(r"\[SUBAGENT_RESULT\]\s*(\{.*\})\s*\[/SUBAGENT_RESULT\]", text, re.DOTALL)
     if not match:
         return set()
@@ -235,34 +213,13 @@ def _target_tokens_from_text(text: str) -> list[str]:
 # LLM: _target_file_match_candidates keeps regex scanning outside the public token normalizer.
 # 函数用途: 从输出目标片段中产出文件路径候选，并过滤 URL，降低去重函数复杂度。
 def _target_file_match_candidates(text: str) -> list[str]:
-    matches: list[str] = []
-    for segment in _output_target_segments(text):
-        matches.extend(
-            match
-            for match in re.findall(r"[\w./~:-]+\.(?:html|css|js|ts|tsx|jsx|py|md|json|txt|csv|yaml|yml)", segment)
-            if "://" not in match
-        )
-    return matches
+    import re
 
-
-# LLM: _output_target_segments drops referenced assets from target ownership extraction.
-# 函数用途: 只把引用词之前的文件当作当前 leaf 产物，避免“引入 app.js”抢占共享资产 owner。
-def _output_target_segments(text: str) -> list[str]:
-    segments: list[str] = []
-    for raw in re.split(r"[\n。；;]+", str(text or "")):
-        segment = _segment_before_reference_hint(raw)
-        if segment:
-            segments.append(segment)
-    return segments
-
-
-# LLM: _segment_before_reference_hint keeps the subject file but skips imported/linked files.
-# 函数用途: “cart.html 引入 app.js”只保留 cart.html；“引入 app.js”整段跳过。
-def _segment_before_reference_hint(text: str) -> str:
-    match = _REFERENCE_FILE_HINT_RE.search(text or "")
-    if not match:
-        return text
-    return text[: match.start()]
+    return [
+        match
+        for match in re.findall(r"[\w./~:-]+\.(?:html|css|js|ts|tsx|jsx|py|md|json|txt|csv|yaml|yml)", str(text or ""))
+        if "://" not in match
+    ]
 
 
 # LLM: _first_overlapping_target keeps duplicate leaf errors deterministic.

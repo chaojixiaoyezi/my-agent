@@ -247,7 +247,7 @@ class TestCreateSubagentsToolTemplatePolicy:
 
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({
-            "goal": "在目标目录写一个极简单文件 index.html，并报告路径。",
+            "goal": "写一个极简单文件。\noutput_files: index.html",
             "role": "writer",
         })
 
@@ -320,7 +320,7 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         assert payload["next_action"]["params"]["max_runners"] == 1
 
     def test_items_mode_infers_sibling_output_dependencies(self):
-        """items 里下游提到“接收/读取上游输出”时，自动写入 required_read_paths。"""
+        """items 里下游用 dependencies 指向上游时，自动写入 required_read_paths。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _mock_create_items_agent()
@@ -328,22 +328,24 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         result = CreateSubagentsTool(mock_agent).execute({
             "items": [
                 {
-                    "goal": "整理三周 GitHub star 数据，输出到 data/github_star_data.md",
+                    "goal": "整理三周 GitHub star 数据。\noutput_files: data/github_star_data.md",
                     "agent_name": "小傻妞-数据搜集",
                     "role": "worker",
                 },
                 {
                     "goal": (
-                        "接收小傻妞-数据搜集的输出，核验并翻译，"
-                        "输出到 data/github_star_analysis.md"
+                        "核验并翻译。\n"
+                        "dependencies: 小傻妞-数据搜集\n"
+                        "output_files: data/github_star_analysis.md"
                     ),
                     "agent_name": "小傻妞-核验翻译",
                     "role": "worker",
                 },
                 {
                     "goal": (
-                        "读取小傻妞-核验翻译的输出 data/github_star_analysis.md，"
-                        "生成 xlsx/final_report.md"
+                        "生成报告。\n"
+                        "required_read_paths: data/github_star_analysis.md\n"
+                        "output_files: xlsx/final_report.md"
                     ),
                     "agent_name": "小傻妞-生成报告",
                     "role": "worker",
@@ -361,20 +363,20 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         ]
 
     def test_items_mode_infers_bare_filename_dependencies(self):
-        """模型只写 data_collection.md 这种短文件名时，也要生成输入依赖。"""
+        """模型用结构化字段写 data_collection.md 这种短文件名时，也要生成输入依赖。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _mock_create_items_agent()
 
         result = CreateSubagentsTool(mock_agent).execute({
             "items": [
-                {"goal": "收集项目数据，输出到 data_collection.md", "agent_name": "小傻妞-数据收集"},
+                {"goal": "收集项目数据。\noutput_files: data_collection.md", "agent_name": "小傻妞-数据收集"},
                 {
-                    "goal": "读取 data_collection.md，写中文解释，输出到 content_writeup.md",
+                    "goal": "写中文解释。\nrequired_read_paths: data_collection.md\noutput_files: content_writeup.md",
                     "agent_name": "小傻妞-内容编写",
                 },
                 {
-                    "goal": "读取 data_collection.md 和 content_writeup.md，生成 final_report.md",
+                    "goal": "生成报告。\nrequired_read_paths: data_collection.md, content_writeup.md\noutput_files: final_report.md",
                     "agent_name": "小傻妞-生成报告",
                 },
             ]
@@ -389,7 +391,7 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         ]
 
     def test_items_mode_infers_integrate_long_path_dependencies(self):
-        """“整合 path 和 path 的结果”这类普通说法也要落成输入依赖。"""
+        """长路径输入输出也通过结构化字段落成输入依赖。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _mock_create_items_agent()
@@ -397,17 +399,19 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         result = CreateSubagentsTool(mock_agent).execute({
             "items": [
                 {
-                    "goal": "收集数据，输出到 data/subagents/subagent_data_collection/results.md",
+                    "goal": "收集数据。\noutput_files: data/subagents/subagent_data_collection/results.md",
                     "agent_name": "小傻妞-数据收集",
                 },
                 {
-                    "goal": "编写内容，输出到 data/subagents/subagent_content_writer/results.md",
+                    "goal": "编写内容。\noutput_files: data/subagents/subagent_content_writer/results.md",
                     "agent_name": "小傻妞-内容编写",
                 },
                 {
                     "goal": (
-                        "整合 data/subagents/subagent_data_collection/results.md 和 "
-                        "data/subagents/subagent_content_writer/results.md 的结果，生成 final_report.md"
+                        "整合结果。\n"
+                        "required_read_paths: data/subagents/subagent_data_collection/results.md, "
+                        "data/subagents/subagent_content_writer/results.md\n"
+                        "output_files: final_report.md"
                     ),
                     "agent_name": "小傻妞-生成报告",
                 },
@@ -422,7 +426,7 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         ]
 
     def test_items_mode_persists_sibling_run_dependencies_without_paths(self):
-        """下游只说“基于某小傻妞结果”时，也要写入 run 级依赖，不能全并发抢跑。"""
+        """下游用 dependencies 字段引用上游时，要写入 run 级依赖，不能全并发抢跑。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _mock_create_items_agent()
@@ -431,11 +435,13 @@ class TestCreateSubagentsToolWorkspaceDefaults:
             "items": [
                 {"goal": "收集三周 GitHub star 数据。", "agent_name": "小傻妞-数据收集"},
                 {
-                    "goal": "基于小傻妞-数据收集提供的原始数据，写中文解释。",
+                    "goal": "写中文解释。",
+                    "dependencies": ["小傻妞-数据收集"],
                     "agent_name": "小傻妞-内容编写",
                 },
                 {
-                    "goal": "整合数据收集和内容编写的结果，生成 xlsx 文件。",
+                    "goal": "生成 xlsx 文件。",
+                    "dependencies": ["小傻妞-数据收集", "小傻妞-内容编写"],
                     "agent_name": "小傻妞-生成xlsx",
                 },
             ]

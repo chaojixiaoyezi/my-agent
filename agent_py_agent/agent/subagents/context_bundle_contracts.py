@@ -41,7 +41,7 @@ def output_contract(task: SubAgentTask) -> dict[str, object]:
         "output_json_ref": safe_string_ref(task, "output_json"),
         "required_files": required_files,
         "forbidden_files": forbidden_file_contract(task),
-        "file_contract_source": "task_text_positive_negative_extraction",
+        "file_contract_source": "structured_required_forbidden_fields",
         "evidence_refs_required": True,
         "tests_ref_style": "refs_only_with_working_dir",
         "artifact_refs_required": True,
@@ -70,7 +70,7 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
             "required_files": required_files,
             "required_file_refs": required_file_refs,
             "forbidden_files": forbidden_file_contract(task),
-            "source": "task_text_positive_negative_extraction",
+            "source": "structured_required_forbidden_fields",
         },
         "write_contract": {
             "product_write_roots": product_roots,
@@ -96,8 +96,8 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
     }
 
 
-# LLM: required_file_contract extracts exact deliverable filenames from task text without reading artifacts.
-# 函数用途: 从任务文本和文件级写入根生成必需文件清单；不读取产物正文。
+# LLM: required_file_contract extracts exact deliverable filenames from structured fields and write roots.
+# 函数用途: 从 required_files 机器字段和文件级写入根生成必需文件清单；不读取产物正文。
 def required_file_contract(task: SubAgentTask) -> list[str]:
     return _dedupe_file_terms(
         [
@@ -141,8 +141,8 @@ def required_product_file_refs(
     return refs
 
 
-# LLM: forbidden_file_contract extracts negative filename examples so descendants do not treat them as outputs.
-# 函数用途: 从任务文本里生成禁止文件清单，明确反例不能创建。
+# LLM: forbidden_file_contract extracts structured forbidden filenames.
+# 函数用途: 从 forbidden_files 机器字段生成禁止文件清单，明确反例不能创建。
 def forbidden_file_contract(task: SubAgentTask) -> list[str]:
     return _dedupe_file_terms(
         term

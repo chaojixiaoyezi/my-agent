@@ -107,9 +107,33 @@ def test_process_structured_output_records_coverage_records(mock_task):
     }]
 
 
-# LLM: negative content-check evidence must mean the requirement passed when the forbidden pattern is absent.
-# 函数用途: 覆盖模型常把“没有坏模式”写成 ok=false 的情况，避免父级验收误判修复失败。
-def test_process_structured_output_normalizes_absent_pattern_evidence(mock_task):
+# LLM: negative content-check evidence must use explicit schema rather than summary prose.
+# 函数用途: 子代理用 match_mode=not_contains 表示坏模式不存在时，父级验收按负向检查通过。
+def test_process_structured_output_normalizes_explicit_absent_pattern_evidence(mock_task):
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        evidence=[{
+            "kind": "content_check",
+            "summary": "页脚链接无空 href=\"#\"",
+            "path": "/tmp/index.html",
+            "content_pattern": "<a href=\"#\">",
+            "match_mode": "not_contains",
+            "ok": False,
+        }],
+    )
+
+    result = _process_structured_output(mock_task, parsed, 123456.0, None)
+
+    assert result["structured_evidence_count"] == 1
+    assert mock_task.evidence[0].ok is True
+
+
+# LLM: prose-only negative summaries are not enough to flip evidence state.
+# 函数用途: 防止代码层把“没有/无/不存在”这类自然语言摘要误当成业务验收合同。
+def test_process_structured_output_does_not_invert_natural_absent_summary(mock_task):
     parsed = SubAgentParsedOutput(
         found=True,
         ok=True,
@@ -127,7 +151,7 @@ def test_process_structured_output_normalizes_absent_pattern_evidence(mock_task)
     result = _process_structured_output(mock_task, parsed, 123456.0, None)
 
     assert result["structured_evidence_count"] == 1
-    assert mock_task.evidence[0].ok is True
+    assert mock_task.evidence[0].ok is False
 
 
 def test_process_structured_output_synthesizes_artifact_evidence_packet(mock_task):

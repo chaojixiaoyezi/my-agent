@@ -1,5 +1,5 @@
 # LLM: Tool policy helpers keep hierarchy scheduling from growing tool-selection branches inline.
-# 模块用途: 判断 child/leaf/coordinator 应拿哪些工具，统一修正常见模型工具名别名。
+# 模块用途: 判断 child/leaf/coordinator 应拿哪些工具，统一修正工具名别名；不从自然语言 goal 猜写入意图。
 
 from __future__ import annotations
 
@@ -37,25 +37,6 @@ _TOOL_NAME_ALIASES = {
     "search": "search_text",
     "write": "write_file",
 }
-_WRITE_INTENT_MARKERS = (
-    "write_file",
-    "append_file",
-    "replace_in_file",
-    "写入",
-    "写文件",
-    "产物路径",
-    "output path",
-    "deliverable",
-    ".py",
-    ".md",
-    ".json",
-    ".txt",
-    ".html",
-    ".css",
-    ".js",
-)
-
-
 # LLM: LeafWriteIntentRequest bundles the signals used to infer concrete file-writing intent.
 # 类用途: 保存 child spec、授权写入根和当前 goal，避免写入意图判断继续扩散参数。
 @dataclass(frozen=True)
@@ -98,16 +79,14 @@ def scheduled_child_tools(request: ToolPolicyRequest) -> list[str]:
     return _leaf_write_tools([*request.parent_tools, *_DEFAULT_LEAF_CODING_TOOLS])
 
 
-# LLM: should_infer_leaf_coding_tools keeps automatic write-tool inference narrow and auditable.
-# 函数用途: 只在非 coordinator child、继承写入根且文本里有明确写文件意图时返回 True。
+# LLM: should_infer_leaf_coding_tools keeps automatic write-tool inference structural and auditable.
+# 函数用途: 只在非 coordinator child 且继承写入根时返回 True；不解析“写/生成/产物”等自然语言。
 def should_infer_leaf_coding_tools(request: LeafWriteIntentRequest) -> bool:
     if not request.extra_write_roots:
         return False
     if is_coordinator_spec(request.spec):
         return False
-    checks = list(getattr(request.spec, "acceptance_checks", []) or [])
-    intent_text = "\n".join([request.goal or request.spec.goal, *checks]).lower()
-    return any(marker.lower() in intent_text for marker in _WRITE_INTENT_MARKERS)
+    return True
 
 
 # LLM: is_coordinator_spec centralizes role/name checks used by role and tool inference.

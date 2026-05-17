@@ -30,7 +30,7 @@ def test_items_mode_payload_rebinds_stale_self_output_run_id(tmp_path):
 
     result = CreateSubagentsTool(mock_agent).execute({
         "items": [{
-            "goal": f"收集项目数据，请把结果写到 data/subagents/{stale_id}/data_collection.md",
+            "goal": f"收集项目数据。\noutput_files: data/subagents/{stale_id}/data_collection.md",
             "agent_name": "小傻妞-数据收集",
             "role": "worker",
         }],
@@ -46,8 +46,8 @@ def test_items_mode_payload_rebinds_stale_self_output_run_id(tmp_path):
 
 
 # LLM: This keeps the workspace-root default behavior out of the oversized create tool test file.
-# 函数用途: 验证已有真实任务工作区时，模糊交付 worker 默认获得 workspace_root 写入根。
-def test_vague_deliverable_worker_defaults_to_workspace_root():
+# 函数用途: 验证已有真实任务工作区时，结构化 output_files worker 默认获得 workspace_root 写入根。
+def test_structured_output_worker_defaults_to_workspace_root():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     mock_agent = MagicMock()
@@ -66,7 +66,7 @@ def test_vague_deliverable_worker_defaults_to_workspace_root():
     mock_agent.subagents.create_run.return_value = mock_task
 
     result = CreateSubagentsTool(mock_agent).execute({
-        "goal": "在目标目录生成一个完整文件 index.html，并报告路径。",
+        "goal": "生成一个完整文件。\noutput_files: index.html",
         "role": "writer",
     })
     params = mock_agent.subagents.create_run.call_args.kwargs["params"]
@@ -75,9 +75,9 @@ def test_vague_deliverable_worker_defaults_to_workspace_root():
     assert params.extra_write_roots == [str(Path("/tmp/project").resolve(strict=False))]
 
 
-# LLM: repair tasks that mention a file need the product workspace, not only a private run dir.
-# 函数用途: 验证“修复 index.html”这类自然语言任务默认拿到项目写入根，避免 repair 写到私有工单目录。
-def test_repair_file_task_defaults_to_workspace_root():
+# LLM: repair tasks with structured output refs need the product workspace, not only a private run dir.
+# 函数用途: 验证 repair_worker 带 output_files 时默认拿到项目写入根，避免 repair 写到私有工单目录。
+def test_repair_file_task_with_output_ref_defaults_to_workspace_root():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     mock_agent = MagicMock()
@@ -96,7 +96,7 @@ def test_repair_file_task_defaults_to_workspace_root():
     mock_agent.subagents.create_run.return_value = mock_task
 
     result = CreateSubagentsTool(mock_agent).execute({
-        "goal": "修复 index1.html 的页面内链接问题。",
+        "goal": "修复页面内链接问题。\noutput_files: index1.html",
         "role": "repair",
     })
     params = mock_agent.subagents.create_run.call_args.kwargs["params"]
@@ -208,9 +208,9 @@ def test_repair_contract_idempotency_reuses_same_scope_with_reworded_goal(tmp_pa
     assert second["dispatch_run_ids"] == first["created_run_ids"]
 
 
-# LLM: fallback repair identity covers live runs where the model omitted repair_contract fields.
-# 函数用途: 自然语言“修复/精准修复/收尾修复”只要指向同一产物，就复用同一个 repair owner。
-def test_repair_goal_fallback_reuses_same_target_without_contract(tmp_path):
+# LLM: repair identity no longer guesses scope from natural goals without repair_contract.
+# 函数用途: 没有 repair_contract 时，即使自然语言看起来是同一文件修复，也不靠代码词表复用。
+def test_repair_goal_without_contract_does_not_guess_same_target(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _mock_workspace_agent(tmp_path)
@@ -228,14 +228,13 @@ def test_repair_goal_fallback_reuses_same_target_without_contract(tmp_path):
     }).output)
 
     assert first["created_run_ids"]
-    assert second["created_run_ids"] == []
-    assert second["reused_run_ids"] == first["created_run_ids"]
-    assert second["dispatch_run_ids"] == first["created_run_ids"]
+    assert second["created_run_ids"]
+    assert second["reused_run_ids"] == []
 
 
-# LLM: fallback repair identity must not merge unrelated file repairs just because both say repair.
-# 函数用途: 两个不同目标文件的自然语言修复任务应保持独立 repair owner。
-def test_repair_goal_fallback_keeps_different_targets_separate(tmp_path):
+# LLM: without repair_contract, same display name but different goal text remains separate work.
+# 函数用途: 两个不同目标文件的自然语言修复任务应保持独立 repair owner，不靠“修复”词合并。
+def test_repair_goal_without_contract_keeps_different_targets_separate(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _mock_workspace_agent(tmp_path)

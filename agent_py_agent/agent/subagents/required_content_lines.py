@@ -1,41 +1,27 @@
-# LLM: Required content-line extraction provides a generic machine contract for non-web artifacts.
-# 模块用途: 从任务验收文本里提取必须出现在产物中的字面内容行，供父级生成 content_check。
+# LLM: Required content contracts are protocol fields, not natural-language guesses.
+# 模块用途: 从 required_content_lines / required_content_texts 机器字段读取普通文件内容验收合同。
 
 from __future__ import annotations
 
-"""Extract explicit required content lines from task text."""
+"""Extract explicit required content lines from structured task text."""
 
-import json
 import re
 from typing import Any
 
 _REQUIRED_CONTENT_RE = re.compile(
-    r"\brequired_content_(?:lines|texts?)\s*[:=]\s*(.*)",
+    r"^\s*(?:[-*]\s*)?required_content_(?:lines|texts?)\s*[:=]\s*(?P<tail>.*)$",
     re.IGNORECASE,
 )
 _REQUIRED_CONTENT_FILE_RE = re.compile(
-    r"\brequired_content_(?:lines|texts?)\[([^\]]+)\]\s*[:=]\s*(.*)",
+    r"^\s*(?:[-*]\s*)?required_content_(?:lines|texts?)\[([^\]]+)\]\s*[:=]\s*(?P<tail>.*)$",
     re.IGNORECASE,
 )
-_FILE_TERM_RE = re.compile(r"([A-Za-z0-9_.\-/]+?\.(?:csv|txt|md|markdown|json|ya?ml|py|js|ts|html?|css))")
-_NATURAL_COUNT_RE = re.compile(
-    r"(?:下面|以下|后面|接下来)\s*([0-9一二两三四五六七八九十]+)\s*行.*(?:一字不差|逐字|原样|出现在|包含)"
-)
-_ENGLISH_COUNT_RE = re.compile(r"(?:next|following)\s+(\d+)\s+lines?.*(?:exactly|verbatim|contain)", re.IGNORECASE)
-_FENCED_CONTENT_ANCHORS = (
-    "必须包含以下内容",
-    "需要包含以下内容",
-    "以下内容",
-    "下面内容",
-    "一字不差",
-    "原样包含",
-    "must contain the following",
-    "include the following",
-)
+_ANY_STRUCTURED_FIELD_RE = re.compile(r"^\s*(?:[-*]\s*)?[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?\s*[:=]")
+_BULLET_RE = re.compile(r"^\s*[-*]\s*(?P<value>.*)$")
 
 
-# LLM: required_content_lines_from_texts accepts structured fields plus narrow exact-content natural blocks.
-# 函数用途: 从 `required_content_lines: a | b`、项目符号、代码块或“下面 N 行一字不差”提取必须出现的字面行。
+# LLM: required_content_lines_from_texts reads only structured content contract fields.
+# 函数用途: 从 `required_content_lines: a | b` 或其 bullet/fence 续行提取必须出现的字面行。
 def required_content_lines_from_texts(texts: list[object]) -> list[str]:
     """Return explicit required content lines from structured task text."""
 
@@ -45,8 +31,8 @@ def required_content_lines_from_texts(texts: list[object]) -> list[str]:
     return _dedupe(values)[:100]
 
 
-# LLM: required_content_lines_by_file_from_texts extracts explicit file-scoped content contracts.
-# 函数用途: 从 `required_content_lines[file]` 或 “file 必须包含以下内容”提取多文件内容验收映射。
+# LLM: required_content_lines_by_file_from_texts reads per-file structured content contracts.
+# 函数用途: 从 `required_content_lines[file.md]: ...` 提取多文件内容验收映射。
 def required_content_lines_by_file_from_texts(texts: list[object]) -> dict[str, list[str]]:
     """Return explicit per-file content-line contracts from task text."""
 
@@ -57,134 +43,85 @@ def required_content_lines_by_file_from_texts(texts: list[object]) -> dict[str, 
 
 
 # LLM: required_content_lines_for_task centralizes task fields used by parent content checks.
-# 函数用途: 从 task 的目标、说明和验收条件里提取 content_check 需要的字面内容行。
+# 函数用途: 从 task 的目标、说明和验收条件里提取 content_check 需要的结构化字面内容行。
 def required_content_lines_for_task(task: Any) -> list[str]:
     """Return explicit content-line contracts from a subagent task."""
 
-    return required_content_lines_from_texts([
-        getattr(task, "goal", ""),
-        getattr(task, "thought", ""),
-        getattr(task, "description", ""),
-        *(getattr(task, "acceptance_checks", []) or []),
-    ])
+    return required_content_lines_from_texts(_task_texts(task))
 
 
 # LLM: required_content_lines_by_file_for_task centralizes per-file content checks for multi-artifact tasks.
-# 函数用途: 从 task 的目标、说明和验收条件里提取普通文件到 required lines 的映射。
+# 函数用途: 从 task 的目标、说明和验收条件里提取普通文件到 required lines 的结构化映射。
 def required_content_lines_by_file_for_task(task: Any) -> dict[str, list[str]]:
     """Return explicit per-file content contracts from a subagent task."""
 
-    return required_content_lines_by_file_from_texts([
+    return required_content_lines_by_file_from_texts(_task_texts(task))
+
+
+# LLM: _task_texts keeps all public task wrappers aligned.
+# 函数用途: 收集轻量任务文本字段，不读取 artifact 正文。
+def _task_texts(task: Any) -> list[object]:
+    return [
         getattr(task, "goal", ""),
         getattr(task, "thought", ""),
         getattr(task, "description", ""),
         *(getattr(task, "acceptance_checks", []) or []),
-    ])
+    ]
 
 
-# LLM: _required_lines_from_text supports explicit field markers and narrow natural exact-content blocks.
-# 函数用途: 扫描 required_content_lines、明确“下面 N 行一字不差”和代码块内容；普通说明不猜。
+# LLM: _required_lines_from_text scans unscoped structured content fields.
+# 函数用途: 只处理 required_content_lines/required_content_texts，不从普通说明或代码块中猜。
 def _required_lines_from_text(text: str) -> list[str]:
-    lines = text.splitlines()
+    lines = str(text or "").splitlines()
     values: list[str] = []
     index = 0
     while index < len(lines):
-        extracted, consumed = _unscoped_content_at(lines, index)
+        match = _REQUIRED_CONTENT_RE.match(lines[index].strip())
+        if not match:
+            index += 1
+            continue
+        extracted, consumed = _content_from_structured_match(match.group("tail"), lines[index + 1 :])
         values.extend(extracted)
-        index += consumed
+        index += consumed + 1
     return values
 
 
-# LLM: _required_lines_by_file_from_text scans exact content contracts that name their target file.
-# 函数用途: 解析多文件任务的内容验收映射；只接受显式文件名加结构化内容，不按普通描述猜。
+# LLM: _required_lines_by_file_from_text scans file-scoped structured content fields.
+# 函数用途: 多文件任务必须写 required_content_lines[file]，否则代码层不猜目标文件。
 def _required_lines_by_file_from_text(text: str) -> dict[str, list[str]]:
-    lines = text.splitlines()
+    lines = str(text or "").splitlines()
     values: dict[str, list[str]] = {}
     index = 0
     while index < len(lines):
-        file_key, extracted, consumed = _file_scoped_content_at(lines, index)
-        _extend_file_lines(values, file_key, extracted)
-        index += consumed
+        match = _REQUIRED_CONTENT_FILE_RE.match(lines[index].strip())
+        if not match:
+            index += 1
+            continue
+        extracted, consumed = _content_from_structured_match(match.group("tail"), lines[index + 1 :])
+        _extend_file_lines(values, _clean_file_key(match.group(1)), extracted)
+        index += consumed + 1
     return values
 
 
-# LLM: _merge_file_line_mapping keeps the public by-file extractor shallow for code-size guards.
-# 函数用途: 合并一段文本解析出的文件内容映射，空内容跳过，同一文件保持去重和顺序。
-def _merge_file_line_mapping(merged: dict[str, list[str]], mapping: dict[str, list[str]]) -> None:
-    for file_key, lines in mapping.items():
-        if lines:
-            merged[file_key] = _dedupe([*merged.get(file_key, []), *lines])[:100]
-
-
-# LLM: _unscoped_content_at returns the extracted content and how many source lines were consumed.
-# 函数用途: 解析单文件/全局内容合同的一行入口，让主扫描循环不嵌套多层判断。
-def _unscoped_content_at(lines: list[str], index: int) -> tuple[list[str], int]:
-    line = lines[index].strip()
-    match = _REQUIRED_CONTENT_RE.search(line)
-    if match:
-        return _content_from_required_match(match, lines[index + 1 :])
-    return _anchored_content_after(lines, index)
-
-
-# LLM: _content_from_required_match handles inline and following-bullet structured content fields.
-# 函数用途: 解析 `required_content_lines:` 行；有尾部就直接拆，没有尾部就读取后续项目符号。
-def _content_from_required_match(match: re.Match[str], following_lines: list[str]) -> tuple[list[str], int]:
-    tail = match.group(1).strip()
-    if tail:
-        return _inline_items(tail), 1
-    consumed, bullet_values = _following_bullet_items(following_lines)
-    return bullet_values, consumed + 1
-
-
-# LLM: _file_scoped_content_at resolves one source line into a file key, content lines, and consumption.
-# 函数用途: 解析 per-file 内容合同的一行入口；没有明确文件目标时只消费当前行。
-def _file_scoped_content_at(lines: list[str], index: int) -> tuple[str, list[str], int]:
-    line = lines[index].strip()
-    match = _REQUIRED_CONTENT_FILE_RE.search(line)
-    if match:
-        return _file_content_from_required_match(match, lines[index + 1 :])
-    file_key = _file_key_from_content_anchor(line)
-    if not file_key:
-        return "", [], 1
-    extracted, consumed = _anchored_content_after(lines, index)
-    return file_key, extracted, consumed
-
-
-# LLM: _file_content_from_required_match handles structured per-file inline or bullet contracts.
-# 函数用途: 解析 `required_content_lines[file]: ...`，返回文件名、内容行和消耗行数。
-def _file_content_from_required_match(match: re.Match[str], following_lines: list[str]) -> tuple[str, list[str], int]:
-    file_key = _clean_file_key(match.group(1))
-    tail = match.group(2).strip()
-    if tail:
-        return file_key, _inline_items(tail), 1
-    consumed, bullet_values = _following_bullet_items(following_lines)
-    return file_key, bullet_values, consumed + 1
-
-
-# LLM: _anchored_content_after handles explicit fenced or counted natural-language content blocks.
-# 函数用途: 在“必须包含以下内容”或“下面 N 行一字不差”后提取内容；没有命中只消费当前行。
-def _anchored_content_after(lines: list[str], index: int) -> tuple[list[str], int]:
-    line = lines[index].strip()
-    fenced, consumed = _following_fenced_content(lines[index:])
+# LLM: _content_from_structured_match supports inline, bullet, and fenced values after a machine field.
+# 函数用途: 字段尾部有内容就按 `|` 拆；尾部为空时读取后续 bullet 或 fenced block。
+def _content_from_structured_match(tail: str, following_lines: list[str]) -> tuple[list[str], int]:
+    if tail.strip():
+        return _inline_items(tail), 0
+    fenced, consumed = _following_fenced_content(following_lines)
     if fenced:
         return fenced, consumed
-    count = _natural_exact_line_count(line)
-    if count:
-        return _following_exact_lines(lines[index + 1 :], count), count + 1
-    return [], 1
+    consumed, bullet_values = _following_bullet_items(following_lines)
+    return bullet_values, consumed
 
 
-# LLM: _following_fenced_content captures code fences only when introduced by an explicit content anchor.
-# 函数用途: 用户写“必须包含以下内容”并给代码块时，提取代码块每行作为内容验收合同。
+# LLM: _following_fenced_content reads a code fence only after a structured required_content field.
+# 函数用途: 支持 `required_content_lines:\n```...``` `，但不接受没有字段锚点的自然语言代码块。
 def _following_fenced_content(lines: list[str]) -> tuple[list[str], int]:
-    if not lines or not _content_block_anchor(lines[0]):
-        return [], 0
-    start = 1
-    while start < len(lines) and not lines[start].strip().startswith("```"):
-        if lines[start].strip():
-            return [], 0
+    start = 0
+    while start < len(lines) and not lines[start].strip():
         start += 1
-    if start >= len(lines):
+    if start >= len(lines) or not lines[start].strip().startswith("```"):
         return [], 0
     values: list[str] = []
     offset = start + 1
@@ -197,20 +134,54 @@ def _following_fenced_content(lines: list[str]) -> tuple[list[str], int]:
     return [], 0
 
 
-# LLM: _content_block_anchor is intentionally narrow so prose paragraphs do not become content checks.
-# 函数用途: 判断某行是否明确引出后续精确内容；没有这些词就不读取后续代码块。
-def _content_block_anchor(line: str) -> bool:
-    text = str(line or "").strip().lower()
-    return any(anchor in text for anchor in _FENCED_CONTENT_ANCHORS)
+# LLM: _following_bullet_items accepts compact lists after an empty required_content field.
+# 函数用途: 支持 `required_content_lines:` 下一行起用 `- 文本` 写多条字面内容。
+def _following_bullet_items(lines: list[str]) -> tuple[int, list[str]]:
+    values: list[str] = []
+    consumed = 0
+    for line in lines:
+        status, value = _bullet_continuation_value(line, has_values=bool(values))
+        if status == "skip":
+            consumed += 1
+            continue
+        if status == "stop":
+            break
+        if value:
+            values.append(value)
+        consumed += 1
+    return consumed, values
 
 
-# LLM: _file_key_from_content_anchor finds a target file only on lines that introduce exact content.
-# 函数用途: 多文件内容合同必须同时有文件名和内容锚点；普通“生成 report.md”不会触发。
-def _file_key_from_content_anchor(line: str) -> str:
-    if not (_content_block_anchor(line) or _natural_exact_line_count(line)):
-        return ""
-    match = _FILE_TERM_RE.search(str(line or ""))
-    return _clean_file_key(match.group(1)) if match else ""
+# LLM: _bullet_continuation_value classifies one line after an empty content field.
+# 函数用途: 区分继续读取、跳过前置空行和停止读取，避免主循环嵌套增长。
+def _bullet_continuation_value(line: str, *, has_values: bool) -> tuple[str, str]:
+    if _ANY_STRUCTURED_FIELD_RE.match(line):
+        return "stop", ""
+    bullet = _BULLET_RE.match(line)
+    if bullet:
+        return "value", _clean_item(bullet.group("value"))
+    if not line.strip() and not has_values:
+        return "skip", ""
+    return "stop", ""
+
+
+# LLM: _inline_items treats pipe as the only multi-item separator so CSV commas stay intact.
+# 函数用途: 拆 `required_content_lines: a | b`，不按英文逗号切 CSV 内容。
+def _inline_items(value: str) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    if "|" in text:
+        return [_clean_item(item) for item in text.split("|") if _clean_item(item)]
+    return [_clean_item(text)] if _clean_item(text) else []
+
+
+# LLM: _merge_file_line_mapping keeps the public by-file extractor shallow for code-size guards.
+# 函数用途: 合并一段文本解析出的文件内容映射，空内容跳过，同一文件保持去重和顺序。
+def _merge_file_line_mapping(merged: dict[str, list[str]], mapping: dict[str, list[str]]) -> None:
+    for file_key, lines in mapping.items():
+        if lines:
+            merged[file_key] = _dedupe([*merged.get(file_key, []), *lines])[:100]
 
 
 # LLM: _extend_file_lines deduplicates per-file values while preserving prompt order.
@@ -227,124 +198,17 @@ def _clean_file_key(value: object) -> str:
     return str(value or "").strip().strip("'\"").replace("\\", "/").lstrip("./")
 
 
-# LLM: _natural_exact_line_count recognizes user-friendly exact-line instructions without internal field names.
-# 函数用途: 解析“下面四行一字不差”或英文 “following 3 lines exactly”，返回应捕获的行数。
-def _natural_exact_line_count(line: str) -> int:
-    text = str(line or "").strip()
-    match = _NATURAL_COUNT_RE.search(text)
-    if match:
-        return _positive_count(match.group(1))
-    english = _ENGLISH_COUNT_RE.search(text)
-    return _positive_count(english.group(1)) if english else 0
-
-
-# LLM: _following_exact_lines captures exactly N non-empty lines after an explicit counted instruction.
-# 函数用途: 按用户声明的行数提取后续内容，避免把后面的“请检查”等普通说明吃进去。
-def _following_exact_lines(lines: list[str], count: int) -> list[str]:
-    values: list[str] = []
-    for line in lines:
-        text = _clean_item(line)
-        if not text and not values:
-            continue
-        if not text:
-            break
-        values.append(text)
-        if len(values) >= count:
-            break
-    return values
-
-
-# LLM: _positive_count clamps natural block extraction to a small exact-content range.
-# 函数用途: 把阿拉伯数字或常见中文数字转成 1-20 的行数，防止一次吞掉大段 prompt。
-def _positive_count(value: str) -> int:
-    try:
-        number = int(value)
-    except ValueError:
-        number = _chinese_number(value)
-    return number if 0 < number <= 20 else 0
-
-
-# LLM: _chinese_number handles the small line counts users naturally write in Chinese prompts.
-# 函数用途: 支持 一/两/二 到 二十 的行数表达；超出范围返回 0。
-def _chinese_number(value: str) -> int:
-    digits = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
-    text = str(value or "").strip()
-    if text in digits:
-        return digits[text]
-    if text == "十":
-        return 10
-    if text.startswith("十") and len(text) == 2:
-        return 10 + digits.get(text[1], 0)
-    if "十" in text:
-        left, right = text.split("十", 1)
-        return digits.get(left, 0) * 10 + (digits.get(right, 0) if right else 0)
-    return 0
-
-
-# LLM: _inline_items splits only on pipes so CSV commas and prose punctuation remain literal content.
-# 函数用途: 解析 `a | b` 或 JSON 字符串数组；不会按逗号拆分，避免破坏 CSV 行。
-def _inline_items(value: str) -> list[str]:
-    parsed = _json_string_items(value)
-    if parsed:
-        return parsed
-    return [_clean_item(item) for item in value.split("|") if _clean_item(item)]
-
-
-# LLM: _json_string_items lets future structured packets pass exact strings without delimiter escaping.
-# 函数用途: 如果值是 JSON 字符串数组，则直接读取数组元素；解析失败就回退到竖线分隔。
-def _json_string_items(value: str) -> list[str]:
-    if not value.startswith("["):
-        return []
-    try:
-        payload = json.loads(value)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(payload, list):
-        return []
-    return [_clean_item(item) for item in payload if _clean_item(item)]
-
-
-# LLM: _following_bullet_items accepts one compact block after an empty required_content_lines marker.
-# 函数用途: 支持 `required_content_lines:` 下一行起用 `- 文本` 写多条字面内容。
-def _following_bullet_items(lines: list[str]) -> tuple[int, list[str]]:
-    values: list[str] = []
-    consumed = 0
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            consumed += 1
-            break
-        item = _bullet_item(stripped)
-        if item is None:
-            break
-        values.append(item)
-        consumed += 1
-    return consumed, values
-
-
-# LLM: _bullet_item keeps only plain list items and strips common Markdown markers.
-# 函数用途: 将 `- 文本`、`* 文本`、`1. 文本` 这类项目符号还原为字面内容。
-def _bullet_item(value: str) -> str | None:
-    match = re.match(r"(?:[-*+]|\d+[.)])\s+(.+)", value)
-    if not match:
-        return None
-    return _clean_item(match.group(1))
-
-
-# LLM: _clean_item trims quoting wrappers while preserving internal spaces and commas.
-# 函数用途: 去掉结构化条目前后的空白和一层引号；中间内容保持原样用于字面匹配。
+# LLM: _clean_item strips list/fence framing without altering inner CSV/text content.
+# 函数用途: 清理 required_content_lines 的单条字面内容。
 def _clean_item(value: object) -> str:
-    text = str(value or "").strip()
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
-        text = text[1:-1].strip()
-    return text
+    return str(value or "").strip().strip("`").strip()
 
 
-# LLM: _dedupe preserves first occurrence order for stable generated test names.
-# 函数用途: 去重内容行但保持任务合同里的顺序，避免重复生成同一 content_check。
+# LLM: _dedupe preserves first-seen order for generated content checks.
+# 函数用途: 去重内容合同，保持用户/任务字段中的顺序。
 def _dedupe(values: list[str]) -> list[str]:
     items: list[str] = []
     for value in values:
-        if value and value not in items:
+        if value not in items:
             items.append(value)
     return items

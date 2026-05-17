@@ -21,20 +21,20 @@ class TestEstimateTaskComplexity:
         assert result.estimated_rounds == 1
         assert "plan_steps" in result.factors
 
-    def test_high_complexity_keyword_translate(self):
+    def test_goal_words_do_not_change_complexity_translate(self):
         result = estimate_task_complexity("翻译这篇英文文档", [], [])
-        assert result.estimated_rounds >= 4
-        assert result.factors["keyword_bonus"] >= 3
+        assert result.estimated_rounds == 1
+        assert result.factors["keyword_bonus"] == 0
 
-    def test_high_complexity_keyword_refactor(self):
+    def test_goal_words_do_not_change_complexity_refactor(self):
         result = estimate_task_complexity("重构这个模块的代码", [], [])
-        assert result.estimated_rounds >= 4
-        assert result.factors["keyword_bonus"] >= 3
+        assert result.estimated_rounds == 1
+        assert result.factors["keyword_bonus"] == 0
 
-    def test_medium_complexity_keyword(self):
+    def test_goal_words_do_not_add_medium_bonus(self):
         result = estimate_task_complexity("修改配置文件", [], [])
-        assert result.estimated_rounds >= 2
-        assert result.factors["keyword_bonus"] >= 1
+        assert result.estimated_rounds == 1
+        assert result.factors["keyword_bonus"] == 0
 
     def test_plan_steps_count(self):
         result = estimate_task_complexity("做点什么", ["步骤1", "步骤2", "步骤3"], [])
@@ -53,6 +53,7 @@ class TestEstimateTaskComplexity:
         )
         assert result.estimated_rounds > 1
         assert "keyword_bonus" in result.factors
+        assert result.factors["keyword_bonus"] == 0
         assert "tool_bonus" in result.factors
         assert "plan_steps" in result.factors
 
