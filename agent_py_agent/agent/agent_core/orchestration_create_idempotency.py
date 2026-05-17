@@ -10,6 +10,10 @@ from ..subagents.services.base import CreateRunParams
 from ..subagents.services.repair_contract_identity import (
     repair_contract_identity_from_context_packs,
 )
+from ..subagents.services.repair_goal_identity import (
+    repair_goal_targets,
+    repair_goal_targets_overlap,
+)
 
 _REUSABLE_STATUSES = {"PLANNING", "PENDING", "RUNNING", "DONE", "COMPLETED", "BLOCKED", "PAUSED"}
 _DISPATCHABLE_STATUSES = {"PLANNING", "PENDING"}
@@ -63,6 +67,9 @@ def find_reusable_named_child(manager: Any, params: CreateRunParams):
     repair_identity = repair_contract_identity_from_context_packs(params.context_packs)
     if repair_identity:
         return find_reusable_repair_child(manager, params, repair_identity)
+    repair_targets = repair_goal_targets(params)
+    if repair_targets:
+        return find_reusable_repair_goal_child(manager, params, repair_targets)
     name = _normalized_name(params.agent_name)
     if _is_generic_agent_name(name):
         return find_reusable_contract_child(manager, params)
@@ -86,6 +93,15 @@ def find_reusable_contract_child(manager: Any, params: CreateRunParams):
 def find_reusable_repair_child(manager: Any, params: CreateRunParams, repair_identity: tuple[object, ...]):
     for task in reversed(_safe_list_runs(manager)):
         if _same_repair_scope(task, params, repair_identity):
+            return task
+    return None
+
+
+# LLM: find_reusable_repair_goal_child is the fallback when LLM omitted formal repair_contract.
+# 函数用途: 同一父级下修同一目标文件时，复用现有 repair owner，避免精准修复/收尾修复无限扩容。
+def find_reusable_repair_goal_child(manager: Any, params: CreateRunParams, repair_targets: tuple[str, ...]):
+    for task in reversed(_safe_list_runs(manager)):
+        if _same_repair_goal_scope(task, params, repair_targets):
             return task
     return None
 
@@ -154,6 +170,22 @@ def _same_repair_scope(task: Any, params: CreateRunParams, repair_identity: tupl
     if _external_write_roots(task) != _params_extra_write_roots(params):
         return False
     return repair_contract_identity_from_context_packs(getattr(task, "context_packs", [])) == repair_identity
+
+
+# LLM: _same_repair_goal_scope compares fallback repair targets only inside the same parent/root scope.
+# 函数用途: 没有 repair_contract 时，按修复目标文件交集复用；普通 worker 不走这条路径。
+def _same_repair_goal_scope(task: Any, params: CreateRunParams, repair_targets: tuple[str, ...]) -> bool:
+    if _status(task) not in _REUSABLE_STATUSES:
+        return False
+    if _text(getattr(task, "parent_id", "")) != _text(params.parent_id):
+        return False
+    if _requested_root_id(params) and _text(getattr(task, "root_id", "")) != _requested_root_id(params):
+        return False
+    if not _compatible_role(getattr(task, "role", ""), params.role):
+        return False
+    if _external_write_roots(task) != _params_extra_write_roots(params):
+        return False
+    return repair_goal_targets_overlap(repair_goal_targets(task), repair_targets)
 
 
 # LLM: _requested_root_id treats an omitted root as top-level create scope, not a literal empty root_id.

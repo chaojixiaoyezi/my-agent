@@ -82,7 +82,7 @@ daemon_execute_runners: false
 daemon_max_runners: 0
 daemon_interval: 1
 runner_failure_policy: "auto"
-max_tool_rounds: 8
+max_tool_rounds: 0
 """
     if request.runner_concurrency is not None:
         overrides += f'runner_concurrency: "{request.runner_concurrency}"\n'

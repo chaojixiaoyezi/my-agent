@@ -75,6 +75,36 @@ def test_vague_deliverable_worker_defaults_to_workspace_root():
     assert params.extra_write_roots == [str(Path("/tmp/project").resolve(strict=False))]
 
 
+# LLM: repair tasks that mention a file need the product workspace, not only a private run dir.
+# 函数用途: 验证“修复 index.html”这类自然语言任务默认拿到项目写入根，避免 repair 写到私有工单目录。
+def test_repair_file_task_defaults_to_workspace_root():
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    mock_agent = MagicMock()
+    mock_agent.config.enable_subagents = True
+    mock_agent.config.max_subagents = 10
+    mock_agent.config.subagent_workflow_mode = "off"
+    mock_agent.subagents.workspace_root = Path("/tmp/project")
+    mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
+    mock_agent.subagents.workspace = Path("/tmp/project/.my-agent/subagents")
+    mock_task = MagicMock()
+    mock_task.id = "repair_001"
+    mock_task.goal = ""
+    mock_task.status = "PLANNING"
+    mock_task.verification_status = "UNVERIFIED"
+    mock_task.task_dir = "/tmp/repair_001"
+    mock_agent.subagents.create_run.return_value = mock_task
+
+    result = CreateSubagentsTool(mock_agent).execute({
+        "goal": "修复 index1.html 的页面内链接问题。",
+        "role": "repair",
+    })
+    params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+
+    assert result.ok is True
+    assert params.extra_write_roots == [str(Path("/tmp/project").resolve(strict=False))]
+
+
 # LLM: Repair suggested tool calls must survive create_subagents into the runner context.
 # 函数用途: 验证 repair_contract 第一片的 required refs/context packs 会写入真实 task，而不是只停留在父级工具输出里。
 def test_repair_contract_fields_are_persisted_to_child_context(tmp_path):
@@ -128,6 +158,55 @@ def test_repair_contract_idempotency_reuses_same_scope_with_reworded_goal(tmp_pa
     assert second["created_run_ids"] == []
     assert second["reused_run_ids"] == first["created_run_ids"]
     assert second["dispatch_run_ids"] == first["created_run_ids"]
+
+
+# LLM: fallback repair identity covers live runs where the model omitted repair_contract fields.
+# 函数用途: 自然语言“修复/精准修复/收尾修复”只要指向同一产物，就复用同一个 repair owner。
+def test_repair_goal_fallback_reuses_same_target_without_contract(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _mock_workspace_agent(tmp_path)
+    tool = CreateSubagentsTool(agent)
+    artifact = tmp_path / "index2.html"
+    first = json.loads(tool.execute({
+        "goal": f"修复 {artifact} 的 HTML 闭合标签，并验证页面完整。",
+        "agent_name": "小傻妞-修复",
+        "role": "leaf_worker",
+    }).output)
+    second = json.loads(tool.execute({
+        "goal": f"收尾修复文件：{artifact}，确保 </body></html> 是最后内容。",
+        "agent_name": "小傻妞-收尾修复",
+        "role": "leaf_worker",
+    }).output)
+
+    assert first["created_run_ids"]
+    assert second["created_run_ids"] == []
+    assert second["reused_run_ids"] == first["created_run_ids"]
+    assert second["dispatch_run_ids"] == first["created_run_ids"]
+
+
+# LLM: fallback repair identity must not merge unrelated file repairs just because both say repair.
+# 函数用途: 两个不同目标文件的自然语言修复任务应保持独立 repair owner。
+def test_repair_goal_fallback_keeps_different_targets_separate(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _mock_workspace_agent(tmp_path)
+    tool = CreateSubagentsTool(agent)
+    first = json.loads(tool.execute({
+        "goal": f"修复 {tmp_path / 'index1.html'} 的锚点链接。",
+        "agent_name": "小傻妞-修复",
+        "role": "leaf_worker",
+    }).output)
+    second = json.loads(tool.execute({
+        "goal": f"修复 {tmp_path / 'index2.html'} 的 HTML 闭合标签。",
+        "agent_name": "小傻妞-修复",
+        "role": "leaf_worker",
+    }).output)
+
+    assert first["created_run_ids"]
+    assert second["created_run_ids"]
+    assert second["reused_run_ids"] == []
+    assert first["ids"] != second["ids"]
 
 
 # LLM: schedule_child_subagents should persist repair context into the child task, not drop it at parsing.
