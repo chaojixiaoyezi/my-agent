@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from .execution_content_checks import CatContentCheckRequest, normalize_cat_content_check
+from .execution_inferred_content_items import (
+    ContentCheckInferenceRequest,
+    inferred_content_check_items,
+)
 from .execution_static_site_items import StaticSiteTestItemsRequest, inferred_static_site_items
+from .execution_test_checklists import drop_non_executable_model_checklist_items
 
 
 # LLM: TestItemPreparationRequest keeps test normalization inputs bundled for future schema fields.
@@ -28,6 +33,8 @@ class TestItemPreparationRequest:
     required_files: list[str] = field(default_factory=list)
     # LLM: required_dom_ids lets parent acceptance pass machine-readable business sections into static_site_check.
     required_dom_ids: list[str] = field(default_factory=list)
+    # LLM: required_content_lines lets parent acceptance validate plain artifacts without trusting model self-reports.
+    required_content_lines: list[str] = field(default_factory=list)
     site_root_hints: list[object] = field(default_factory=list)
 
 
@@ -74,9 +81,17 @@ def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, An
             site_root_hints=request.site_root_hints,
         )
     )
-    if inferred:
-        prepared = _drop_non_executable_model_checklist_items(prepared)
-    return [*prepared, *inferred]
+    content_checks = inferred_content_check_items(
+        ContentCheckInferenceRequest(
+            artifact_paths=context.artifact_paths,
+            workspace_root=workspace_root,
+            existing_tests=prepared,
+            required_lines=request.required_content_lines,
+        )
+    )
+    if inferred or content_checks:
+        prepared = drop_non_executable_model_checklist_items(prepared)
+    return [*prepared, *inferred, *content_checks]
 
 
 # LLM: _prepared_test_item keeps cwd inference flat so the public helper stays easy to audit.
@@ -133,37 +148,6 @@ def _static_site_command_alias(command: object) -> bool:
     if not parts:
         return False
     return parts[0].strip().lower().replace("-", "_") == "static_site_check"
-
-
-# LLM: _drop_non_executable_model_checklist_items prevents malformed runner checklists from overriding inferred checks.
-# 函数用途: 静态站点自动验收已存在时，丢弃缺必要字段、无法执行的模型自报测试项，避免误报失败。
-def _drop_non_executable_model_checklist_items(tests: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [item for item in tests if not _non_executable_model_checklist_item(item)]
-
-
-# LLM: _non_executable_model_checklist_item identifies schema-shaped assertions that cannot be executed safely.
-# 函数用途: 判断测试项是否只是模型清单文字而非可执行检查；只有自动推断出机器验收时才会被过滤。
-def _non_executable_model_checklist_item(item: dict[str, Any]) -> bool:
-    method = str(item.get("validation_method") or "command").strip().lower() or "command"
-    if method == "command":
-        return not str(item.get("command") or "").strip()
-    if method == "file_check":
-        return not str(item.get("file_path") or "").strip()
-    if method == "content_check":
-        return not str(item.get("file_path") or "").strip() or not _content_pattern_value(item)
-    if method == "static_site_check":
-        return not str(item.get("site_root") or "").strip()
-    return False
-
-
-# LLM: _content_pattern_value mirrors executor pattern aliases without importing executor internals.
-# 函数用途: 判断 content_check 是否提供了可执行的字面匹配内容，支持旧字段和 v2 字段。
-def _content_pattern_value(item: dict[str, Any]) -> str:
-    for key in ("content_equals", "expected_content", "content_pattern"):
-        value = str(item.get(key) or "")
-        if value:
-            return value
-    return ""
 
 
 # LLM: _normalize_leading_cd_command removes a safe shell cwd wrapper without allowing shell execution.

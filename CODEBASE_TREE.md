@@ -863,15 +863,16 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - `agent_py_agent/agent/log_analysis/tools.py`: security query/hunt/trace tools accept optional `max_limit`.
 - `agent_py_agent/cli/logs.py`: LOG CLI query commands honor `query_max_limit` from log-analysis config.
 - `scripts/live_lab/log_analysis_replay.py`: offline SecurityAlertV1 replay command that emits case, route, report, forensic package, and replay summary artifacts.
-- `scripts/live_lab/cases.py`: adds the `log_analysis_replay` Live Lab case; later also owns the natural-language furniture HTML canary and dispatches shop-flow/repair-wave through split helpers.
+- `scripts/live_lab/cases.py`: adds the `log_analysis_replay` Live Lab case; later also owns the natural-language furniture HTML canary and dispatches shop-flow/repair-wave/file-repair through split helpers.
 - `scripts/live_lab/shop_case.py`: owns the shopping-flow prompt, HTML business-flow gate, disabled-control check, external-asset check, and `static_site_check` bridge.
 - `scripts/live_lab/shop_repair_wave_case.py`: owns the seeded failed-shop child, repair-wave natural prompt, verified repair sibling assertion, and business-flow success contract for failure-to-repair Live Lab canaries.
+- `scripts/live_lab/file_repair_wave_case.py`: owns the seeded failed CSV child, natural repair prompt, required content-line checks, and verified repair sibling assertion for non-web file repair canaries.
 - `scripts/live_lab/state_assertions.py`: owns gateway response blocker checks and persisted `task.json` state gates shared by natural and shop Live Lab cases.
-- `scripts/live_lab/constants.py`: adds the `log-analysis`, `natural`, `shop`, and `shop-repair` suites and includes replay/natural/shop/repair cases in the `all` suite.
+- `scripts/live_lab/constants.py`: adds the `log-analysis`, `natural`, `shop`, `shop-repair`, and `file-repair` suites and includes replay/natural/shop/repair/file-repair cases in the `all` suite.
 - `agent_py_agent/agent/subagent_workflows/planner.py`: composes workflow routing, compilation, and parent acceptance into one dry-run planning facade.
 - `agent_py_agent/tests/test_runtime_capabilities.py`: verifies ordinary prompts hide security tools, explicit grants expose them, and English/Chinese security-log prompts auto-grant them.
 - `agent_py_agent/tests/test_live_lab_log_analysis_replay.py`: verifies offline replay artifacts and failure-stage semantics.
-- `agent_py_agent/tests/test_live_lab_natural_case.py`: verifies the natural-language furniture HTML, shop-flow, and repair-wave canary prompts, real-LLM gating, artifact validation, response blocker detection, and persisted subagent state checks.
+- `agent_py_agent/tests/test_live_lab_natural_case.py`: verifies the natural-language furniture HTML, shop-flow, shop-repair, and file-repair canary prompts, real-LLM gating, artifact validation, response blocker detection, and persisted subagent state checks.
 - `agent_py_agent/tests/test_subagent_workflow_planner.py`: verifies the planner facade for auto, manual, and off workflow modes.
 
 ## 2026-05-08 Tree Update: Acceptance Progress CLI Split
@@ -1085,8 +1086,11 @@ docs/
 - `agent_py_agent/agent/subagents/execution_records.py`: 新增 `TestExecutionRecord`，定义真实验收执行证据、输出截断和通过结果派生。
 - `agent_py_agent/agent/subagents/execution_executor.py`: 新增最小 `TestExecutor`，执行 command/file/content/static_site 四类检查并产出 `TestExecutionRecord`；当前不接 acceptance 自动写回。
 - `agent_py_agent/agent/subagents/static_site_validator.py`: 父级验收的静态站点检查器门面，扫描 workspace 内 HTML 必需文件、结构化 required DOM ids、本地 href/src/action、`${...}` 占位符和明显无动作控件，不执行 JS、不访问网络；DOM/id/control 检查和路径/ref 检查已拆到 `static_site_dom_checks.py` / `static_site_path_checks.py`。
-- `agent_py_agent/agent/subagents/execution_test_items.py`: 新增测试项预处理 helper，根据 runner artifacts 安全推断 command 测试工作目录，避免父验收在 workspace 根目录误跑相对测试命令；也会把 workspace 内安全的 `cd <dir> && pytest` 拆成 `working_dir + 纯命令`，不放开 shell；当 artifacts 显示静态 HTML 且缺少同类测试时，会追加 `static_site_check`，并能把调用方传入的 task-level required files / required DOM ids 合进测试项。
+- `agent_py_agent/agent/subagents/execution_test_items.py`: 新增测试项预处理 helper，根据 runner artifacts 安全推断 command 测试工作目录，避免父验收在 workspace 根目录误跑相对测试命令；也会把 workspace 内安全的 `cd <dir> && pytest` 拆成 `working_dir + 纯命令`，不放开 shell；当 artifacts 显示静态 HTML 且缺少同类测试时，会追加 `static_site_check`，并能把调用方传入的 task-level required files / required DOM ids 合进测试项；当任务显式声明 `required_content_lines` 且只有一个普通文件 artifact 时，会生成 `content_check`。
+- `agent_py_agent/agent/subagents/execution_inferred_content_items.py`: 根据单个普通文件 artifact 和显式 required content lines 推断逐行 `content_check`，保持 `execution_test_items.py` 只做测试项编排。
+- `agent_py_agent/agent/subagents/execution_test_checklists.py`: 过滤不可执行的模型空壳测试清单，只有已有机器验收兜底时才使用，避免 malformed checklist 盖过真实检查。
 - `agent_py_agent/agent/subagents/static_required_files.py`: 从 task goal/thought/description/acceptance_checks 提取 `index.html`、`style.css`、`app.js` 等静态 Web 必需文件名；只从结构化 `required_dom_ids` 提取必需 DOM ids，不从普通正文猜测业务区块，不读取产物正文。
+- `agent_py_agent/agent/subagents/required_content_lines.py`: 从 task goal/thought/description/acceptance_checks 提取显式 `required_content_lines` / `required_content_texts` 合同，供父级普通文件 `content_check` 使用；只读任务文本，不读取产物正文。
 - `agent_py_agent/agent/subagents/required_file_terms.py`: 层级 handoff、context bundle 和静态站验收共用的文件契约提取器，把正向交付文件放进 `required_files`，把 `禁止改名/禁止文件名/禁止文件名（...）/禁止内部文件（...）/禁止创建文件（forbidden_files）：/不要创建/不写output.json` 等反例放进 `forbidden_files`，并处理 `product.html/old-product.html` 这类斜杠分隔反例列表；文件名边界按 ASCII 处理，中文紧贴文件名或 `RUNNER_RESULT.md等` 也能识别；负向标题后的 bullet 或纯文件列表都会继承负向语境；`禁止 style.css/app.js 放进子目录` 这类位置约束不会把必需资源误标成 forbidden。
 - `agent_py_agent/agent/subagents/parent_acceptance_preflight.py`: 父级验收预检 helper，负责准备测试项和命令安全预检，保持 controller 决策文件更薄。
 - `agent_py_agent/agent/subagents/execution_static_site_items.py`: 根据 output artifacts 推断静态站点机器验收项，只读 HTML 路径引用，生成 site_root、required_files 和 required_dom_ids，并合并父级传入的 task-level required files / required DOM ids，不读取页面正文。
@@ -1112,7 +1116,7 @@ docs/
 - `agent_py_agent/agent/subagents/services/base.py`: 子代理基础创建服务；`_extract_write_dirs()` 从目标文本中提取本地写入根，并跳过 URL 范围，避免图片/API 地址被误当成可写目录。
 - `agent_py_agent/agent/subagents/services/hierarchy_acceptance.py`: 从 scheduler 拆出的验收兜底策略，只在模型没有显式 `acceptance_checks` 时派生最小验收项。
 - `agent_py_agent/agent/subagents/services/hierarchy_tool_policy.py`: 从 scheduler 拆出的工具策略，统一处理 coordinator/leaf 的工具继承、写文件工具补齐和 `write`/`read` 等模型工具名别名修正；coordinator 显式 allowed_tools 会补回内置编排工具，避免模型漏传后失去派工能力。
-- `agent_py_agent/agent/subagents/execution_test_items.py`: 预处理父级验收 tests，推断 workspace 内 `working_dir`，拆安全 `cd <dir> && pytest`，并把带明确期望内容的 `cat <workspace文件>` 改成受控 `content_check`，避免为真实模型输出放开 `cat` 命令；多页 HTML artifacts 会自动补 `static_site_check`。
+- `agent_py_agent/agent/subagents/execution_test_items.py`: 预处理父级验收 tests，推断 workspace 内 `working_dir`，拆安全 `cd <dir> && pytest`，并把带明确期望内容的 `cat <workspace文件>` 改成受控 `content_check`，避免为真实模型输出放开 `cat` 命令；多页 HTML artifacts 会自动补 `static_site_check`，普通文件可从 `required_content_lines` 自动补逐行 `content_check`。
 - `agent_py_agent/agent/subagents/execution_executor.py`: `content_check` 支持 `content_pattern` 包含匹配，也支持 `content_equals` / `expected_content` + `match_mode=exact`，用于严格验证文件内容没有额外字符；`static_site_check` 用于机器验收购物站这类静态产物的页面存在性、坏链接、占位符和明显失效控件。
 - `agent_py_agent/agent/agent_core/_tool_loop_service.py`: 主代理和 subagent 共用的工具循环；到达 `max_tool_rounds` 后给模型一次收口机会，如果模型仍吐工具调用，返回确定性停止说明而不是把新 `[TOOL_CALL]` 当最终回答；执行真实工具前会检查 per-run 工具预算和委托期读正文守卫，预算触发时只拦截当前 run 的工具并给模型自检/上报提示。
 - `agent_py_agent/agent/agent_core/orchestration_body_read_guard.py`: 委托期 refs-only 工具守卫；父级已有 child 且 acceptor 未完成时阻断 product `read_file` 和大正文 `read_artifact`，运行元数据和调度类小 artifact 可读，用户显式要求父级亲自验收时临时放行；它也接入派工前 source-body 提示门，避免 root 在第一次创建小傻妞前吞掉 `data/docs/materials` 正文。

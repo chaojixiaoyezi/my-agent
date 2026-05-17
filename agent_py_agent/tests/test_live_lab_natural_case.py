@@ -9,6 +9,12 @@ from scripts.live_lab.cases import (
     _natural_html_prompt,
 )
 from scripts.live_lab.constants import REAL_CASES, SUITES
+from scripts.live_lab.file_repair_wave_case import (
+    _assert_order_csv_output,
+    _natural_file_repair_wave_prompt,
+    assert_file_repair_wave_created,
+    seed_failed_file_child,
+)
 from scripts.live_lab.session import LabSessionManager
 from scripts.live_lab.shop_case import (
     _assert_shop_html_output,
@@ -83,6 +89,21 @@ def test_natural_shop_repair_wave_case_is_registered_as_real_opt_in_suite():
     assert "contract" not in prompt.lower()
 
 
+# LLM: The file repair canary keeps repair-wave coverage outside web/static-site tasks.
+# 函数用途: 确认非网页文件修复 E2E 也走普通用户话术和真实模型 opt-in，不依赖内部调度词。
+def test_natural_file_repair_wave_case_is_registered_as_real_opt_in_suite():
+    prompt = _natural_file_repair_wave_prompt()
+
+    assert SUITES["file-repair"] == ["health", "natural_file_repair_wave"]
+    assert "natural_file_repair_wave" in REAL_CASES
+    assert "小傻妞" in prompt
+    assert "订单报表" in prompt
+    assert "lab_outputs/order-report/orders.csv" in prompt
+    assert "dispatch" not in prompt.lower()
+    assert "runner" not in prompt.lower()
+    assert "contract" not in prompt.lower()
+
+
 # LLM: The repair-wave seed must look like a real failed child run, not a prose-only fixture.
 # 函数用途: 确认测试台能预置一个待修复购物站 run，并保留机器可读产物、验收失败和写入边界。
 def test_seed_failed_shop_child_creates_rejected_run_with_artifact_refs(tmp_path):
@@ -100,6 +121,23 @@ def test_seed_failed_shop_child_creates_rejected_run_with_artifact_refs(tmp_path
     assert '"status": "AWAITING_ACCEPTANCE"' in text
     assert '"verification_status": "UNVERIFIED"' in text
     assert str(output) in text
+
+
+# LLM: The file repair seed must use ordinary file/content checks instead of static-site validation.
+# 函数用途: 确认测试台能预置一个 CSV 文件验收失败 run，并保留 content_check 失败证据和产物写入边界。
+def test_seed_failed_file_child_creates_rejected_run_with_content_refs(tmp_path):
+    seed = seed_failed_file_child(tmp_path)
+
+    output = tmp_path / "lab_outputs" / "order-report" / "orders.csv"
+    task_json = tmp_path / ".my_agent" / "subagents" / seed.run_id / "task.json"
+    report = tmp_path / ".my_agent" / "subagents" / seed.run_id / "reports" / "test_execution.json"
+    assert output.exists()
+    assert "order_id,customer,total" not in output.read_text(encoding="utf-8")
+    assert task_json.exists()
+    assert report.exists()
+    text = report.read_text(encoding="utf-8")
+    assert '"validation_method": "content_check"' in text
+    assert str(output) in task_json.read_text(encoding="utf-8")
 
 
 # LLM: The repair-wave assertion should require a verified repair sibling that covers the same product file.
@@ -136,6 +174,42 @@ def test_assert_shop_repair_wave_created_requires_verified_repair_sibling(tmp_pa
     )
 
     assert_shop_repair_wave_created(tmp_path, seed.run_id)
+
+
+# LLM: File repair completion should require a verified sibling and a repaired target file.
+# 函数用途: 复现非网页 repair-wave 的状态门；失败 seed 不能单独通过，修复 sibling 必须覆盖同一个 CSV。
+def test_assert_file_repair_wave_created_requires_verified_repair_sibling(tmp_path):
+    seed = seed_failed_file_child(tmp_path)
+
+    with pytest.raises(RuntimeError, match="没有发现已验证的文件修复小傻妞"):
+        assert_file_repair_wave_created(tmp_path, seed.run_id)
+
+    repair_dir = tmp_path / ".my_agent" / "subagents" / "subagent-file-repair"
+    repair_dir.mkdir(parents=True)
+    output = tmp_path / "lab_outputs" / "order-report" / "orders.csv"
+    output.write_text(_complete_order_csv(), encoding="utf-8")
+    (repair_dir / "output.json").write_text(
+        '{"artifacts":[{"path":"' + str(output) + '"}]}',
+        encoding="utf-8",
+    )
+    (repair_dir / "task.json").write_text(
+        "\n".join(
+            [
+                "{",
+                '  "id": "subagent-file-repair",',
+                '  "status": "DONE",',
+                '  "verification_status": "VERIFIED",',
+                '  "role": "worker",',
+                '  "agent_name": "小傻妞-文件修复",',
+                '  "goal": "修复 lab_outputs/order-report/orders.csv",',
+                '  "output_json": "' + str(repair_dir / "output.json") + '"',
+                "}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert_file_repair_wave_created(tmp_path, seed.run_id)
 
 
 # LLM: Natural Live Lab should not fail long page tasks because of an artificial test harness tool cap.
@@ -202,6 +276,20 @@ def test_assert_static_site_check_clean_accepts_complete_offline_shop(tmp_path):
     output.write_text(_complete_shop_html(), encoding="utf-8")
 
     _assert_static_site_check_clean(tmp_path, output.parent)
+
+
+# LLM: The file repair artifact gate checks concrete CSV content, not final prose.
+# 函数用途: 确认订单报表缺关键表头/行时会失败，修复完整后才能通过。
+def test_assert_order_csv_output_checks_required_content(tmp_path):
+    output = tmp_path / "lab_outputs" / "order-report" / "orders.csv"
+    output.parent.mkdir(parents=True)
+    output.write_text("order_id,total\nA-1001,299.00\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="订单报表缺少内容"):
+        _assert_order_csv_output(output)
+
+    output.write_text(_complete_order_csv(), encoding="utf-8")
+    _assert_order_csv_output(output)
 
 
 # LLM: Shop helper checks should report exact missing ids/actions for repair workers.
@@ -334,3 +422,17 @@ function placeOrder(){return true}
 </script>
 </body>
 </html>"""
+
+
+# LLM: _complete_order_csv is a compact valid non-web artifact for file repair tests.
+# 函数用途: 提供满足订单报表验收的 CSV 内容，避免测试夹具本身缺字段。
+def _complete_order_csv() -> str:
+    return "\n".join(
+        [
+            "order_id,customer,total,status,notes",
+            "A-1001,Lin Studio,299.00,PAID,first order",
+            "A-1002,North Home,188.50,SHIPPED,priority delivery",
+            "SUMMARY,total_orders=2,total_amount=487.50,status=OK,notes=ready",
+            "",
+        ]
+    )

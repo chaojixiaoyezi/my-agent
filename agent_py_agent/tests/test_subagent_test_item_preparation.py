@@ -4,6 +4,9 @@ from agent_py_agent.agent.subagents.execution_test_items import (
     TestItemPreparationRequest,
     prepare_test_items,
 )
+from agent_py_agent.agent.subagents.required_content_lines import (
+    required_content_lines_from_texts,
+)
 from agent_py_agent.agent.subagents.static_required_files import (
     required_static_dom_ids_from_texts,
     static_required_files_from_texts,
@@ -316,6 +319,78 @@ def test_prepare_test_items_infers_static_site_check_with_required_dom_ids(tmp_p
         "required_dom_ids": ["register", "login", "catalog"],
         "html_files": ["index.html"],
     }]
+
+
+# LLM: Required content lines should become parent content checks for non-web artifacts.
+# 函数用途: 子代理只报告一个普通文件产物时，父级能按机器字段检查关键内容，不依赖模型自评。
+def test_prepare_test_items_infers_content_checks_for_single_file_artifact(tmp_path):
+    report_dir = tmp_path / "deliverables" / "orders"
+    report_dir.mkdir(parents=True)
+    artifact = report_dir / "orders.csv"
+    artifact.write_text("order_id,total\nA-1001,299.00\n", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[],
+            output={"artifacts": [{"path": str(artifact)}]},
+            workspace_root=tmp_path,
+            required_content_lines=[
+                "order_id,customer,total,status,notes",
+                "A-1001,Lin Studio,299.00,PAID,first order",
+            ],
+        )
+    )
+
+    assert prepared == [
+        {
+            "name": "inferred content check 1",
+            "validation_method": "content_check",
+            "file_path": "deliverables/orders/orders.csv",
+            "content_pattern": "order_id,customer,total,status,notes",
+        },
+        {
+            "name": "inferred content check 2",
+            "validation_method": "content_check",
+            "file_path": "deliverables/orders/orders.csv",
+            "content_pattern": "A-1001,Lin Studio,299.00,PAID,first order",
+        },
+    ]
+
+
+# LLM: Ambiguous multi-artifact outputs should not guess which file owns required lines.
+# 函数用途: 有多个普通文件产物时先不自动猜目标文件，避免把验收内容套到错误文件上。
+def test_prepare_test_items_does_not_guess_required_content_file_for_multiple_artifacts(tmp_path):
+    report_dir = tmp_path / "deliverables" / "orders"
+    report_dir.mkdir(parents=True)
+    orders = report_dir / "orders.csv"
+    readme = report_dir / "README.md"
+    orders.write_text("order_id,total\n", encoding="utf-8")
+    readme.write_text("# report\n", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[],
+            output={"artifacts": [{"path": str(orders)}, {"path": str(readme)}]},
+            workspace_root=tmp_path,
+            required_content_lines=["order_id,customer,total,status,notes"],
+        )
+    )
+
+    assert prepared == []
+
+
+# LLM: Structured required content text should keep CSV commas intact.
+# 函数用途: 从内部验收合同提取必须出现的文本行，按竖线拆分，不把 CSV 逗号误当分隔符。
+def test_required_content_lines_from_structured_acceptance_text():
+    lines = required_content_lines_from_texts([
+        "required_content_lines: order_id,customer,total,status,notes | A-1001,Lin Studio,299.00,PAID,first order",
+        "普通说明不会被猜成内容验收",
+    ])
+
+    assert lines == [
+        "order_id,customer,total,status,notes",
+        "A-1001,Lin Studio,299.00,PAID,first order",
+    ]
 
 
 # LLM: Structured required DOM ids in acceptance text should become parent-test inputs.

@@ -18,6 +18,7 @@ from .execution_test_items import TestItemPreparationRequest, prepare_test_items
 from .parent_acceptance_auto_execution_reports import write_execution_followup
 from .parsing import _dict_list
 from .reports import AcceptanceReviewFinding
+from .required_content_lines import required_content_lines_for_task
 from .static_required_files import (
     required_static_dom_ids_for_task,
     required_static_files_for_task,
@@ -64,6 +65,8 @@ def build_acceptance_test_execution_findings(
             workspace_root=workspace_root,
             required_files=required_static_files_for_task(task),
             required_dom_ids=required_static_dom_ids_for_task(task),
+            # LLM: Explicit content-line contracts make plain-file artifacts verifiable like static sites.
+            required_content_lines=required_content_lines_for_task(task),
             site_root_hints=static_site_root_hints_for_task(task),
         )
     )

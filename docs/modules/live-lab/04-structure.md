@@ -10,9 +10,12 @@ scripts/
     |-- __init__.py
     |-- cli.py                         # 参数解析和 suite 选择
     |-- runner.py                      # 运行 suite、管理输出目录、汇总结果
-    |-- cases.py                       # smoke、log-analysis 等 case 定义
+    |-- cases.py                       # smoke、log-analysis 等 case 分发
     |-- constants.py                   # suite 名、默认目录等常量
-    `-- log_analysis_replay.py         # LOG 离线 replay 具体流程
+    |-- file_repair_wave_case.py       # 普通文件失败后修复闭环真实 case
+    |-- log_analysis_replay.py         # LOG 离线 replay 具体流程
+    |-- shop_case.py                   # 购物站业务流真实 case
+    `-- shop_repair_wave_case.py       # 购物站失败后修复闭环真实 case
 ```
 
 ## 核心文件
@@ -22,6 +25,7 @@ scripts/
 - `live_lab/runner.py`：负责 suite 运行、输出目录、状态汇总。
 - `live_lab/runner.py` 的 `_LabInterface`：兼容旧 case surface；把 `run_root`、`prompts_dir`、`responses_dir`、`summary_path` 等目录属性转发给 case，case 不直接访问 runner/session 私有字段。
 - `live_lab/cases.py`：登记有哪些 case，每个 case 怎么跑。
+- `live_lab/file_repair_wave_case.py`：负责 `file-repair` suite 的坏 CSV seed、自然语言修复 prompt、最终内容 gate 和 verified repair sibling 检查。
 - `live_lab/log_analysis_replay.py`：把 SecurityAlertV1 fixture 跑成 LOG artifacts。
 - `agent_py_agent/tests/test_live_lab_log_analysis_replay.py`：验证 replay 的成功和失败路径。
 
@@ -95,3 +99,12 @@ scripts/
 - `assert_shop_repair_wave_created()` 会读取 `.my_agent/subagents/subagent-*/task.json`，要求出现 DONE/VERIFIED 的修复 run，并用产品侧 closeout resolver 判断旧失败 run 是否被同目标修复 sibling 覆盖。
 - 这个 suite 的目标是压测通用 repair wave：以后 Excel、PDF、代码仓库等任务失败时，也应沿用同一套 parent acceptance refs -> repair child -> dispatch -> verified closeout 的合同。
 - 当前真实验收：`20260517-shop-repair-wave-03` 已通过。前两轮失败分别固化成通用合同：repair 建议必须继承原始成功条件，create/schedule 必须从目标 refs 推导产品写入根，静态站点验收可读取结构化 `required_dom_ids`，不能只修最新报错点。
+
+## 2026-05-17 file-repair structure
+
+- 中文说明：`file-repair` suite 是非网页文件的失败恢复 canary。它证明 repair wave 不是只会修 HTML：CSV、Markdown、TXT、代码文件这类普通文件也可以用结构化内容合同做父级机器验收。
+- `scripts/live_lab/constants.py`：`file-repair` suite 显式包含 `health` 和 `natural_file_repair_wave`；`natural_file_repair_wave` 属于 `REAL_CASES`，必须传 `--real-llm`。
+- `scripts/live_lab/cases.py`：只负责把 `natural_file_repair_wave` 分发到拆分模块，避免主 case 文件继续膨胀。
+- `scripts/live_lab/file_repair_wave_case.py`：负责 `seed_failed_file_child()`、`_natural_file_repair_wave_prompt()`、`assert_file_repair_wave_created()` 和最终 CSV 内容 gate。seed 使用真实 `SubAgentManager` 创建 task，并在 acceptance checks 里写结构化 `required_content_lines`。
+- 产品侧依赖：`required_content_lines.py` 从任务验收文本抽取必须出现的字面行，`execution_test_items.py` 在单个普通文件 artifact 上生成 `content_check`。这条路只读 workspace 内真实文件，不相信模型自述。
+- 当前真实验收：`20260517-file-repair-wave-02` 已通过。最终 `orders.csv` 四行一字不差，旧失败 run 的 4 条父级 `content_check` 全部通过；后续可把同一合同扩展到 Excel 导出清单、Markdown 报告和代码生成任务。
