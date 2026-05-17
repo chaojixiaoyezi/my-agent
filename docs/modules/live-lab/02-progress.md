@@ -22,6 +22,14 @@
 - 把 Live Lab 结果接入 acceptance/evidence 记录模板。
 - 如果新增 case 或改变产物路径，同步更新本文件和 `04-structure.md`。
 
+## 2026-05-17 Markdown repair-wave canary
+
+- 中文说明：新增 `markdown-repair` suite，用普通用户话术测试“普通文档做坏了以后，root 是否会安排小傻妞修同一个真实文件，并让父级机器验收内容”。这个 case 不依赖购物站、HTML 或 CSV 特判。
+- 已实现：`natural_markdown_repair_wave` 会预置一个坏的 Markdown 周报 child，写入 `output.json`、`acceptance_review.json`、`test_execution.json` 和 follow-up refs，然后启动真实 gateway 让 root 继续处理。
+- 已实现：seed 的验收条件包含 `required_content_lines[weekly.md]`，产品侧父级验收会把它转成逐行 `content_check`；验收读真实 `lab_outputs/report/weekly.md`，不相信最终口头回复。
+- 已测试：`python3 -m pytest agent_py_agent/tests/test_live_lab_natural_case.py -q --tb=short` -> `28 passed`。
+- 真实复测：`python3 scripts/live_agent_lab.py --suite markdown-repair --real-llm --runs-dir /Users/xiaoyezi/my-claude-code/real_e2e_next --run-id 20260517-markdown-repair-wave-01 --timeout 600 --count 1 --max-runners 3 --max-cycles 6 --keep-going` -> `LIVE_LAB_PASS`。MiniMax-M2.7 创建 `小傻妞-周报修复`，最终 `lab_outputs/report/weekly.md` 五行一字不差，并覆盖旧失败 run。
+
 ## 2026-05-17 File repair-wave canary
 
 - 中文说明：新增 `file-repair` suite，用普通用户话术测试“非网页文件做坏了以后，root 是否会安排小傻妞修同一个真实文件，并让父级机器验收内容”。这个 case 不依赖购物站或 HTML 特判。

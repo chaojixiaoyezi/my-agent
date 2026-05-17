@@ -17,7 +17,7 @@ DEFAULT_CONFIG = REPO_ROOT / "agent_py_agent" / "config" / "agent_config.yaml"
 DEFAULT_RUNS_DIR = REPO_ROOT / "validation" / "live_lab"
 
 # Suite map is part of the public Live Lab CLI contract; keep docs/modules/live-lab in sync when it changes.
-# LLM: web and file repair suites validate seeded failure recovery through the same refs-first repair contract.
+# LLM: web, file, and document repair suites validate seeded failure recovery through the same refs-first repair contract.
 SUITES = {
     "health": ["health"],
     "bad-weather": ["bad_weather"],
@@ -27,6 +27,7 @@ SUITES = {
     "shop": ["health", "natural_shop_subagent"],
     "shop-repair": ["health", "natural_shop_repair_wave"],
     "file-repair": ["health", "natural_file_repair_wave"],
+    "markdown-repair": ["health", "natural_markdown_repair_wave"],
     "real": ["health", "gateway_ask", "long_subagent"],
     "all": [
         "health",
@@ -38,6 +39,7 @@ SUITES = {
         "natural_shop_subagent",
         "natural_shop_repair_wave",
         "natural_file_repair_wave",
+        "natural_markdown_repair_wave",
     ],
 }
 
@@ -48,4 +50,5 @@ REAL_CASES = {
     "natural_shop_subagent",
     "natural_shop_repair_wave",
     "natural_file_repair_wave",
+    "natural_markdown_repair_wave",
 }

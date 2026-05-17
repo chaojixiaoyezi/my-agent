@@ -49,6 +49,9 @@ def test_rejected_parent_tests_include_scoped_repair_child(tmp_path: Path):
     assert "HTML语法静态检查" in repair_child["goal"]
     assert repair_child["repair_contract"]["schema"] == "subagent_repair_contract.v1"
     assert "execute_generated_scripts_or_commands_if_needed" in repair_child["repair_contract"]["same_run_required_actions"]
+    assert repair_child["repair_contract"]["output_tests_required"] is True
+    assert "content_check" in repair_child["repair_contract"]["recommended_test_methods"]
+    assert any("output.json.tests" in item for item in repair_child["acceptance_checks"])
     assert str(reports_dir / "test_execution.json") in repair_child["required_read_paths"]
     assert repair_child["context_packs"][0]["kind"] == "repair_contract"
 
