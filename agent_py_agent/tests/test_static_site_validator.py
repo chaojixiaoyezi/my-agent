@@ -306,6 +306,35 @@ def test_static_site_check_blocks_missing_dom_id_targets(tmp_path):
     ]
 
 
+# LLM: Explicit required DOM ids let parent acceptance preserve business flow contracts.
+# 函数用途: 当任务声明必须存在某些页面区域时，static_site_check 要检查这些 id，而不是只看 HTML 结构。
+def test_static_site_check_blocks_missing_required_dom_ids(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "index.html": "<!doctype html><html><head></head><body><section id='catalog'></section></body></html>",
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "required business sections",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index.html"],
+            "required_dom_ids": ["register", "login", "catalog"],
+        }
+    )
+
+    assert record.passed is False
+    assert "missing_dom_id_hits=2" in record.error
+    assert record.validation_result["missing_dom_id_hits"] == [
+        "required_dom_id:login",
+        "required_dom_id:register",
+    ]
+
+
 # LLM: inferred full-page checks must catch malformed HTML that browsers would render incorrectly.
 # 函数用途: 完整 HTML 产物正文落进 style/head 时，父级验收应提示先修骨架，而不是只追 DOM id。
 def test_static_site_check_blocks_malformed_complete_html(tmp_path):

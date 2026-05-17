@@ -10,7 +10,11 @@ from .execution_executor import TestExecutor
 from .execution_test_items import TestItemPreparationRequest, prepare_test_items
 from .models import SubAgentTask
 from .parsing import _dict_list
-from .static_required_files import required_static_files_for_task, static_site_root_hints_for_task
+from .static_required_files import (
+    required_static_dom_ids_for_task,
+    required_static_files_for_task,
+    static_site_root_hints_for_task,
+)
 
 
 # LLM: unsafe_test_reason preflights command syntax through TestExecutor validation without running it.
@@ -38,6 +42,8 @@ def prepared_tests_for_parent_acceptance(
             output=output,
             workspace_root=workspace_root,
             required_files=required_static_files_for_task(task),
+            # LLM: Required DOM ids are explicit task facts, not prose guesses, so preflight can enforce them deterministically.
+            required_dom_ids=required_static_dom_ids_for_task(task),
             site_root_hints=static_site_root_hints_for_task(task),
         )
     )

@@ -24,6 +24,7 @@ class _RepairRefs:
     followup_ref: str
     output_ref: str
     run_ref: str
+    task_ref: str
 
 
 # LLM: dispatch_record_payload exposes compact acceptance facts to coordinator runners.
@@ -143,6 +144,7 @@ def _repair_refs(item) -> _RepairRefs:
         followup_ref=str(getattr(item, "parent_acceptance_followup_ref", "") or ""),
         output_ref=_sibling_ref(test_ref, "output.json"),
         run_ref=_sibling_ref(test_ref, "run.json"),
+        task_ref=_sibling_ref(test_ref, "task.json"),
     )
 
 
@@ -170,10 +172,10 @@ def _top_level_repair_tool_call(
         "goal": _repair_goal(item, refs),
         "extra_write_roots": _product_write_roots(refs.run_ref),
         "acceptance_checks": [
-            "只修复父级验收 failure_refs 点名的问题",
+            "先修复父级验收 failure_refs 点名的问题，同时保持原任务完整目标",
             "修复后读取被修改文件并说明验证结果",
             "不要改写无关产物或健康分支",
-            *repair_contract_acceptance_checks(),
+            *repair_contract_acceptance_checks(failure_refs),
         ],
         "allowed_tools": [
             "list_files",
@@ -191,13 +193,15 @@ def _top_level_repair_tool_call(
 # 函数用途: 拼出修复 worker 的任务目标，包含 run id、测试失败摘要和可读取报告路径。
 def _repair_goal(item, refs: _RepairRefs) -> str:
     details = "; ".join(str(value) for value in (getattr(item, "parent_acceptance_test_failure_details", []) or [])[:4])
+    original = _original_contract_goal_text(refs.task_ref)
     return (
         f"修复父级验收失败的子代理 run：{item.run_id}。"
         f"先读取这些 refs：test_ref={refs.test_ref}; followup_ref={refs.followup_ref}; "
-        f"output_ref={refs.output_ref}; run_ref={refs.run_ref}。"
+        f"output_ref={refs.output_ref}; run_ref={refs.run_ref}; task_ref={refs.task_ref}。"
         f"失败摘要：{getattr(item, 'parent_acceptance_test_failure_summary', '') or '查看 test_ref'}。"
         f"失败细节：{details or '查看 test_execution.json'}。"
-        "只修复父级验收报告点名的问题；完成后写回文件并说明验证结果。"
+        f"{original}"
+        "先修复父级验收报告点名的问题，但最终必须重新满足原始完整验收要求；完成后写回文件并说明验证结果。"
         f"{repair_contract_goal_suffix()}"
     )
 
@@ -211,6 +215,9 @@ def _compact_failure_refs(item, refs: _RepairRefs) -> list[dict[str, object]]:
         "followup_ref": refs.followup_ref,
         "output_ref": refs.output_ref,
         "run_ref": refs.run_ref,
+        "task_ref": refs.task_ref,
+        "original_goal": _task_goal(refs.task_ref),
+        "original_acceptance_checks": _task_acceptance_checks(refs.task_ref),
         "test_failure_summary": getattr(item, "parent_acceptance_test_failure_summary", "") or "",
         "test_failure_details": list(getattr(item, "parent_acceptance_test_failure_details", []) or [])[:8],
     }]
@@ -269,6 +276,36 @@ def _test_target_refs(test_ref: str) -> list[str]:
         if isinstance(result, dict):
             refs.append(str(result.get("path") or ""))
     return _unique_text(refs)
+
+
+# LLM: _task_goal reads only the persisted task contract, never product bodies.
+# 函数用途: 从失败 child 的 task.json 取原始 goal，供修复建议保持完整任务目标。
+def _task_goal(task_ref: str) -> str:
+    payload = _read_json_object(task_ref)
+    return str(payload.get("goal") or "").strip()
+
+
+# LLM: _task_acceptance_checks reads inherited full-success gates from task.json.
+# 函数用途: 提取失败 child 的原始 acceptance_checks，避免 repair worker 只修最近一个症状。
+def _task_acceptance_checks(task_ref: str) -> list[str]:
+    payload = _read_json_object(task_ref)
+    raw = payload.get("acceptance_checks")
+    if not isinstance(raw, list):
+        return []
+    return _unique_text([str(item) for item in raw])
+
+
+# LLM: _original_contract_goal_text keeps the repair goal compact while preserving full success criteria.
+# 函数用途: 把原始 goal/验收条件摘要拼入修复目标；没有 task_ref 时返回空字符串。
+def _original_contract_goal_text(task_ref: str) -> str:
+    goal = _task_goal(task_ref)
+    checks = _task_acceptance_checks(task_ref)
+    parts = []
+    if goal:
+        parts.append(f"原始任务目标：{goal}")
+    if checks:
+        parts.append("原始完整验收要求：" + "；".join(checks[:8]))
+    return ("。".join(parts) + "。") if parts else ""
 
 
 # LLM: _read_json_object tolerates missing or malformed refs in dispatch summaries.

@@ -7,6 +7,12 @@ import re
 from pathlib import Path
 
 from ..subagents.services.base import _extract_write_dirs
+from .orchestration_create_target_roots import (
+    agent_workspace_roots,
+    context_target_write_roots,
+    is_relative_to,
+    normalized_write_root,
+)
 from .orchestration_negation_markers import contains_unnegated_marker
 from .parameters import _string_list
 from .spawn_role_seed import is_explicit_root_role
@@ -73,7 +79,7 @@ def goal_has_single_concrete_file_target(goal: str) -> bool:
 def merged_extra_write_roots(params: dict[str, object], goal: str) -> list[str]:
     roots: list[str] = []
     for item in [*_string_list(params.get("extra_write_roots")), *_extract_write_dirs(goal)]:
-        text = str(item or "").strip()
+        text = normalized_write_root(item)
         if text and text not in roots:
             roots.append(text)
     return roots
@@ -85,6 +91,9 @@ def resolved_extra_write_roots(agent: object, params: dict[str, object], goal: s
     explicit = merged_extra_write_roots(params, goal)
     if explicit:
         return explicit
+    target_roots = context_target_write_roots(agent, params) if _goal_has_product_write_intent(goal) else []
+    if target_roots:
+        return target_roots
     default_root = _default_workspace_product_root(agent, params, goal)
     return [default_root] if default_root else []
 
@@ -201,31 +210,8 @@ def _default_workspace_product_root(agent: object, params: dict[str, object], go
     workspace = getattr(getattr(agent, "subagents", None), "workspace", None)
     if isinstance(workspace, str | Path) and root == Path(workspace).expanduser().resolve(strict=False):
         return ""
-    roots = _agent_workspace_roots(agent, root)
-    return str(root) if any(_is_relative_to(root, item) for item in roots) else ""
-
-
-# LLM: _agent_workspace_roots mirrors write-guard root normalization without importing that preflight module.
-# 函数用途: 读取 agent.subagents.workspace_roots；缺省时只允许 workspace_root 自身。
-def _agent_workspace_roots(agent: object, root: Path) -> list[Path]:
-    raw_roots = getattr(getattr(agent, "subagents", None), "workspace_roots", None)
-    if not isinstance(raw_roots, list):
-        return [root]
-    roots: list[Path] = []
-    for raw in [root, *raw_roots]:
-        if isinstance(raw, str | Path):
-            roots.append(Path(raw).expanduser().resolve(strict=False))
-    return roots or [root]
-
-
-# LLM: _is_relative_to keeps pathlib compatibility in one tiny helper.
-# 函数用途: 判断 path 是否位于 root 下，用于 workspace_root 默认授权校验。
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
+    roots = agent_workspace_roots(agent, root)
+    return str(root) if any(is_relative_to(root, item) for item in roots) else ""
 
 
 # LLM: _user_requires_working_buttons detects the natural-language no-dead-buttons contract.

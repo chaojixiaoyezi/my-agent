@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 from .required_file_terms import required_file_terms_from_text
 
 _STATIC_FILE_SUFFIXES = {".html", ".htm", ".css", ".js"}
+_REQUIRED_DOM_IDS_RE = re.compile(r"\brequired_dom_ids?\s*[:=]\s*([^\n。；;]+)", re.IGNORECASE)
 
 
 # LLM: static_required_files_from_texts extracts small static-web file expectations from human/task text.
@@ -22,6 +24,16 @@ def static_required_files_from_texts(texts: list[object]) -> list[str]:
     return _dedupe(matches)[:50]
 
 
+# LLM: required_static_dom_ids_from_texts extracts explicit DOM-id contracts only.
+# 函数用途: 从 `required_dom_ids: a, b` 这类结构化验收文本提取业务区域 id；普通自然语言不猜。
+def required_static_dom_ids_from_texts(texts: list[object]) -> list[str]:
+    ids: list[str] = []
+    for value in texts:
+        for match in _REQUIRED_DOM_IDS_RE.findall(str(value or "")):
+            ids.extend(_dom_id_items(match))
+    return _dedupe(ids)[:50]
+
+
 # LLM: required_static_files_for_task centralizes task text fields used by parent acceptance.
 # 函数用途: 从 task 的目标、思考、说明和验收条件里抽取静态站点必需文件；不读取任何产物正文。
 def required_static_files_for_task(task: Any) -> list[str]:
@@ -32,6 +44,17 @@ def required_static_files_for_task(task: Any) -> list[str]:
         *(getattr(task, "acceptance_checks", []) or []),
     ])
     return _scope_to_allowed_write_files(files, getattr(task, "allowed_write_roots", []) or [])
+
+
+# LLM: required_static_dom_ids_for_task centralizes explicit DOM section contracts.
+# 函数用途: 从 task 的验收文本里提取 required_dom_ids，交给父级 static_site_check 做机器验收。
+def required_static_dom_ids_for_task(task: Any) -> list[str]:
+    return required_static_dom_ids_from_texts([
+        getattr(task, "goal", ""),
+        getattr(task, "thought", ""),
+        getattr(task, "description", ""),
+        *(getattr(task, "acceptance_checks", []) or []),
+    ])
 
 
 # LLM: static_site_root_hints_for_task exposes write-root refs to parent static-site acceptance.
@@ -75,6 +98,17 @@ def _allowed_static_file_names(values: list[object]) -> set[str]:
 def _matches_allowed_file(item: str, allowed: set[str]) -> bool:
     normalized = str(item or "").replace("\\", "/").lstrip("./")
     return normalized in allowed or Path(normalized).name in allowed
+
+
+# LLM: _dom_id_items tokenizes a structured required_dom_ids line.
+# 函数用途: 按逗号/空白切分 DOM id，并只保留常见 HTML id 字符。
+def _dom_id_items(value: str) -> list[str]:
+    items: list[str] = []
+    for raw in re.split(r"[\s,，]+", value):
+        text = raw.strip()
+        if text and all(ch.isalnum() or ch in {"-", "_", ":"} for ch in text):
+            items.append(text)
+    return items
 
 
 # LLM: _dedupe preserves first-seen file order from user/task text.

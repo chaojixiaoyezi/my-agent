@@ -863,14 +863,15 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - `agent_py_agent/agent/log_analysis/tools.py`: security query/hunt/trace tools accept optional `max_limit`.
 - `agent_py_agent/cli/logs.py`: LOG CLI query commands honor `query_max_limit` from log-analysis config.
 - `scripts/live_lab/log_analysis_replay.py`: offline SecurityAlertV1 replay command that emits case, route, report, forensic package, and replay summary artifacts.
-- `scripts/live_lab/cases.py`: adds the `log_analysis_replay` Live Lab case; later also owns the natural-language furniture HTML canary and dispatches shop-flow through a split helper.
+- `scripts/live_lab/cases.py`: adds the `log_analysis_replay` Live Lab case; later also owns the natural-language furniture HTML canary and dispatches shop-flow/repair-wave through split helpers.
 - `scripts/live_lab/shop_case.py`: owns the shopping-flow prompt, HTML business-flow gate, disabled-control check, external-asset check, and `static_site_check` bridge.
+- `scripts/live_lab/shop_repair_wave_case.py`: owns the seeded failed-shop child, repair-wave natural prompt, verified repair sibling assertion, and business-flow success contract for failure-to-repair Live Lab canaries.
 - `scripts/live_lab/state_assertions.py`: owns gateway response blocker checks and persisted `task.json` state gates shared by natural and shop Live Lab cases.
-- `scripts/live_lab/constants.py`: adds the `log-analysis`, `natural`, and `shop` suites and includes replay/natural/shop cases in the `all` suite.
+- `scripts/live_lab/constants.py`: adds the `log-analysis`, `natural`, `shop`, and `shop-repair` suites and includes replay/natural/shop/repair cases in the `all` suite.
 - `agent_py_agent/agent/subagent_workflows/planner.py`: composes workflow routing, compilation, and parent acceptance into one dry-run planning facade.
 - `agent_py_agent/tests/test_runtime_capabilities.py`: verifies ordinary prompts hide security tools, explicit grants expose them, and English/Chinese security-log prompts auto-grant them.
 - `agent_py_agent/tests/test_live_lab_log_analysis_replay.py`: verifies offline replay artifacts and failure-stage semantics.
-- `agent_py_agent/tests/test_live_lab_natural_case.py`: verifies the natural-language furniture HTML and shop-flow canary prompts, real-LLM gating, artifact validation, response blocker detection, and persisted subagent state checks.
+- `agent_py_agent/tests/test_live_lab_natural_case.py`: verifies the natural-language furniture HTML, shop-flow, and repair-wave canary prompts, real-LLM gating, artifact validation, response blocker detection, and persisted subagent state checks.
 - `agent_py_agent/tests/test_subagent_workflow_planner.py`: verifies the planner facade for auto, manual, and off workflow modes.
 
 ## 2026-05-08 Tree Update: Acceptance Progress CLI Split
@@ -1083,12 +1084,12 @@ docs/
 - `agent_py_agent/agent/subagents/model_task.py`: 新增 `SecuritySignal` 和 `security_review_required` 安全预留字段，用于记录安全劫持、安全欺骗、prompt injection、工具权限异常等可疑信号；当前只审计不拦截。
 - `agent_py_agent/agent/subagents/execution_records.py`: 新增 `TestExecutionRecord`，定义真实验收执行证据、输出截断和通过结果派生。
 - `agent_py_agent/agent/subagents/execution_executor.py`: 新增最小 `TestExecutor`，执行 command/file/content/static_site 四类检查并产出 `TestExecutionRecord`；当前不接 acceptance 自动写回。
-- `agent_py_agent/agent/subagents/static_site_validator.py`: 父级验收的静态站点检查器门面，扫描 workspace 内 HTML 必需文件、本地 href/src/action、`${...}` 占位符和明显无动作控件，不执行 JS、不访问网络；DOM/id/control 检查和路径/ref 检查已拆到 `static_site_dom_checks.py` / `static_site_path_checks.py`。
-- `agent_py_agent/agent/subagents/execution_test_items.py`: 新增测试项预处理 helper，根据 runner artifacts 安全推断 command 测试工作目录，避免父验收在 workspace 根目录误跑相对测试命令；也会把 workspace 内安全的 `cd <dir> && pytest` 拆成 `working_dir + 纯命令`，不放开 shell；当 artifacts 显示静态 HTML 且缺少同类测试时，会追加 `static_site_check`，并能把调用方传入的 task-level required files 合进 required_files。
-- `agent_py_agent/agent/subagents/static_required_files.py`: 从 task goal/thought/description/acceptance_checks 提取 `index.html`、`style.css`、`app.js` 等静态 Web 必需文件名，不读取产物正文。
+- `agent_py_agent/agent/subagents/static_site_validator.py`: 父级验收的静态站点检查器门面，扫描 workspace 内 HTML 必需文件、结构化 required DOM ids、本地 href/src/action、`${...}` 占位符和明显无动作控件，不执行 JS、不访问网络；DOM/id/control 检查和路径/ref 检查已拆到 `static_site_dom_checks.py` / `static_site_path_checks.py`。
+- `agent_py_agent/agent/subagents/execution_test_items.py`: 新增测试项预处理 helper，根据 runner artifacts 安全推断 command 测试工作目录，避免父验收在 workspace 根目录误跑相对测试命令；也会把 workspace 内安全的 `cd <dir> && pytest` 拆成 `working_dir + 纯命令`，不放开 shell；当 artifacts 显示静态 HTML 且缺少同类测试时，会追加 `static_site_check`，并能把调用方传入的 task-level required files / required DOM ids 合进测试项。
+- `agent_py_agent/agent/subagents/static_required_files.py`: 从 task goal/thought/description/acceptance_checks 提取 `index.html`、`style.css`、`app.js` 等静态 Web 必需文件名；只从结构化 `required_dom_ids` 提取必需 DOM ids，不从普通正文猜测业务区块，不读取产物正文。
 - `agent_py_agent/agent/subagents/required_file_terms.py`: 层级 handoff、context bundle 和静态站验收共用的文件契约提取器，把正向交付文件放进 `required_files`，把 `禁止改名/禁止文件名/禁止文件名（...）/禁止内部文件（...）/禁止创建文件（forbidden_files）：/不要创建/不写output.json` 等反例放进 `forbidden_files`，并处理 `product.html/old-product.html` 这类斜杠分隔反例列表；文件名边界按 ASCII 处理，中文紧贴文件名或 `RUNNER_RESULT.md等` 也能识别；负向标题后的 bullet 或纯文件列表都会继承负向语境；`禁止 style.css/app.js 放进子目录` 这类位置约束不会把必需资源误标成 forbidden。
 - `agent_py_agent/agent/subagents/parent_acceptance_preflight.py`: 父级验收预检 helper，负责准备测试项和命令安全预检，保持 controller 决策文件更薄。
-- `agent_py_agent/agent/subagents/execution_static_site_items.py`: 根据 output artifacts 推断静态站点机器验收项，只读 HTML 路径引用，生成 site_root 和 required_files，并合并父级传入的 task-level required files，不读取页面正文。
+- `agent_py_agent/agent/subagents/execution_static_site_items.py`: 根据 output artifacts 推断静态站点机器验收项，只读 HTML 路径引用，生成 site_root、required_files 和 required_dom_ids，并合并父级传入的 task-level required files / required DOM ids，不读取页面正文。
 - `agent_py_agent/agent/subagents/execution_content_checks.py`: 从测试项预处理拆出的内容验收归一化 helper，把模型常写的 `cat <workspace文件>` 转成受控 `content_check`，只接受明确期望内容，不放开 `cat` 命令。
 - `agent_py_agent/agent/subagents/execution_executor_helpers.py`: 新增 `TestExecutor` 命令解析、记录构造和时间戳 helper，保持执行器主文件只负责 bounded execution。
 - `agent_py_agent/agent/subagents/execution_report.py`: 新增 `test_execution.json` / `test_execution.md` 报告写读入口；JSON 是机器事实源，Markdown 只做展示。
@@ -1125,7 +1126,7 @@ docs/
 - `agent_py_agent/agent/backends/base.py`: Anthropic-compatible 非流式响应解析会在 thinking-only/no-text 内容块时重试一次；流式响应连续空文本时会在后端边界做一次非流式 `/v1/messages` 兜底，避免真实 E2E 被可恢复的厂商响应形状直接打成 runner 失败；普通空响应仍报错。
 - `agent_py_agent/agent/agent_core/tool_agent_budget.py` / `tool_agent_budget_stage.py`: 单个代理滚动工具预算 helper 和工具循环集成层；默认按 `run_id` 做 10 分钟 50 次限制，没有 `run_id` 的主代理普通聊天不受限，且不做任务树或单次对话的全局预算。
 - `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context `dispatch_subagents` 的直接 child 进度摘要；提示继续调度、恢复阻塞 child 或最新 acceptance review 为 REJECT 的 child，只有 child 都已等待验收/完成且没有 rejected acceptance 时才用 refs-first summary 收口；被父级验收拒绝的 child 会进入 repair lane 并暴露 `parent_acceptance_repair_advice`，避免上层反复读取子产物正文或把验收失败当普通 runner 恢复。
-- `agent_py_agent/agent/agent_core/orchestration_parent_acceptance_repair.py`: 父级验收失败后的 refs-first 修复建议生成层；从 acceptance/tests/follow-up 记录提取失败摘要、引用路径和建议 repair child scope，不读取业务产物正文。
+- `agent_py_agent/agent/agent_core/orchestration_parent_acceptance_repair.py`: 父级验收失败后的 refs-first 修复建议生成层；从 acceptance/tests/follow-up 记录提取失败摘要、引用路径和建议 repair child scope，不读取业务产物正文；direct runner-context repair 也会携带原始 task refs、goal 和 acceptance checks，防止 child 只修当前失败症状。
 - `agent_py_agent/agent/agent_core/tool_round_execution.py`: 单轮工具执行 helper；负责记录 assistant tool round、执行/记录工具调用、检测子代理 `output.json` 收口，并把同轮 `schedule_child_subagents` 后依赖真实 run id 的 `dispatch_subagents` 等编排调用延后到下一轮，避免模型使用脑补 run id；`output.json` 收口检测支持 flat `path` 和 bundle `filesystem.path`。
 - `agent_py_agent/agent/subagents/services/hierarchy_role_identity.py`: 从 scheduler 拆出的角色 identity 兜底策略，根据 `agent_name` / `goal` 恢复模型漏填的 researcher/tester/acceptor/bug_finder/writer/worker 等角色。
 - `agent_py_agent/agent/subagents/services/hierarchy_scheduled_role.py`: 从 scheduler 拆出的下一层 role 推断策略，把 child/general/worker 这类模型模糊角色修正成 coordinator 或 leaf_worker。
@@ -1172,7 +1173,10 @@ docs/
 - `agent_py_agent/agent/agent_core/capability_request_tool.py`: `capability_request` 模型工具类；runner 缺工具、skill、MCP、网络或 shell 时写正式 OPEN `CapabilityRequest`，只允许当前 run 自己申请，父级后续 route/grant/rerun。
 - `agent_py_agent/agent/agent_core/capability_config_patch_tool.py`: `capability_config_patch` 模型工具类；把配置修复请求收敛成 `CapabilityConfigPatchRequest`，只自动应用安全字段，危险字段返回建议，并写审计/通知。
 - `agent_py_agent/agent/agent_core/orchestration_workflow_mode.py`: create/dispatch 共用 workflow mode 归一化 helper，维持 `off` / `plan` / `auto` 兼容语义。
-- `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`: dispatch 工具返回 payload 压缩层；单条 record 只保留 refs 和关键字段，错 run_id 时把 `runner_selection_recovery.valid_run_ids` 放到顶层；顶层父级验收 REJECT 也会返回 `parent_acceptance_repair_advice` 和 `create_subagents` 修复建议。
+- `agent_py_agent/agent/agent_core/orchestration_repair_contract.py`: repair/execute/verify 共享合同层；把失败 refs、目标产物 refs、原始任务 goal/acceptance 和完整成功检查打成机器字段，避免 repair worker 只修最新错误提示。
+- `agent_py_agent/agent/agent_core/orchestration_create_constraints.py`: create/schedule 写入根和任务约束推导层；保留高层约束判断，例如重复文件目标、委托约束冲突和缺写入根提示。
+- `agent_py_agent/agent/agent_core/orchestration_create_target_roots.py`: create/schedule 的目标写入根解析层；会从 context/read/repair target refs 推导产品写入根，并把目标文件路径归一为父目录，防止修复同一个产物时写到 sibling 目录。
+- `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`: dispatch 工具返回 payload 压缩层；单条 record 只保留 refs 和关键字段，错 run_id 时把 `runner_selection_recovery.valid_run_ids` 放到顶层；顶层父级验收 REJECT 也会返回 `parent_acceptance_repair_advice` 和 `create_subagents` 修复建议，并把原始 task refs / goal / acceptance checks 传给 repair child，避免修复目标缩水。
 - `agent_py_agent/agent/agent_core/dispatch_runner_selection.py`: runner 候选范围和显式 `include_run_ids` 预检；错 id 会返回 `runner_selection/invalid_run_ids`、可用 direct child ids 和保守纠正提示。
 - `agent_py_agent/agent/agent_core/dispatch_runner_candidates.py`: runner 候选策略层；显式 run_ids、输入文件依赖、workflow sibling 依赖和 packet/checkpoint 恢复候选都在这里统一判断。
 - `agent_py_agent/agent/agent_core/dispatch_runner_batches.py`: runner 候选收集和执行批处理；调用 selection、输入依赖和 workflow 依赖 helper 精确推进父节点给定的直接孩子。

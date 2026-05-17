@@ -26,6 +26,8 @@ class TestItemPreparationRequest:
     output: dict[str, object]
     workspace_root: str | Path
     required_files: list[str] = field(default_factory=list)
+    # LLM: required_dom_ids lets parent acceptance pass machine-readable business sections into static_site_check.
+    required_dom_ids: list[str] = field(default_factory=list)
     site_root_hints: list[object] = field(default_factory=list)
 
 
@@ -68,6 +70,7 @@ def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, An
             workspace_root=workspace_root,
             existing_tests=prepared,
             required_files=request.required_files,
+            required_dom_ids=request.required_dom_ids,
             site_root_hints=request.site_root_hints,
         )
     )

@@ -1736,3 +1736,12 @@
 - 已实现：父级验收 REJECT 后，root 会先获得一次修复派工机会；如果下一轮仍未创建修复 child 或 blockers 不变，才确定性返回阻塞事实，防止 gateway 超时。
 - 真实复测：`20260517-shop-flow-07-terminal-failure-closeout` 证明超时已变成明确 blocked；`20260517-shop-flow-08-repair-wave` 真实通过，`total_runs=1 done_verified=1`。
 - 下一步：增加强制失败的 repair-wave E2E，验证第一次 worker 失败后，root 真的按 advice 创建修复小傻妞、修复同一产物并覆盖旧失败 run。
+
+## 2026-05-17 Shop repair-wave 真实失败后修复闭环
+
+- 中文说明：新增 `shop-repair` Live Lab 后，用普通中文提示 root：“刚刚那个购物网站没通过检查，请安排小傻妞修好”。测试者不直接和下级代理对话，只观察 root 是否会按状态和 refs 派修复小傻妞。
+- 真实发现 1：第一轮修复小傻妞只修了 `<head>` 和 disabled 按钮，没有继承“注册、登录、商品、购物车、结算、下单成功”的原始成功条件。已把 `task_ref`、`original_goal`、`original_acceptance_checks` 和 `full_success_checks` 放进 parent-acceptance repair 建议，repair worker 必须修完整成功合同，不能把任务缩成最新症状。
+- 真实发现 2：第二轮修复小傻妞读了 `lab_outputs/shop-demo/index.html`，但写到了 `/fixture_project/index.html`。已让 create/schedule 写入根优先从 `required_read_paths`、`context_manifest.required_read_paths`、repair contract target refs 和 context pack refs 推导；如果 ref 是文件路径，会归一成父目录，避免产品路径漂移。
+- 真实发现 3：父级网页验收只看常规文件/链接时，容易漏掉业务区块。`static_site_check` 现在支持结构化 `required_dom_ids`，测试项预处理会从 task acceptance 传入这些 id；这仍是通用静态站点验收能力，不是购物站特判。
+- 真实复测：`20260517-shop-repair-wave-03` 使用 MiniMax-M2.7 跑 `--suite shop-repair --real-llm` 返回 `LIVE_LAB_PASS`；最终同一 `lab_outputs/shop-demo/index.html` 被修复，并出现 DONE/VERIFIED 的修复 sibling 覆盖旧失败 run。
+- 下一步：把同样 repair-wave 合同带到非网页场景，例如 Excel/文档/代码仓库，让验收条件、目标 refs 和产品写入根都来自结构化事实，而不是依赖模型复述。

@@ -81,6 +81,38 @@ class StaticSiteCheckResult:
         }
 
 
+# LLM: StaticSiteScanOptions keeps _scan_site thin as validators grow.
+# 类用途: 保存一次静态站点扫描的布尔开关和显式 DOM 合同。
+@dataclass(frozen=True)
+class StaticSiteScanOptions:
+    check_refs: bool
+    check_placeholders: bool
+    check_complete_html: bool
+    check_controls: bool
+    check_forms: bool
+    required_dom_ids: list[str]
+
+
+# LLM: StaticSiteScanState accumulates cross-file IDs and script text for bounded checks.
+# 类用途: 汇总多 HTML 文件里的 form/id/script 摘要，供最终 DOM 和表单绑定检查使用。
+@dataclass
+class StaticSiteScanState:
+    form_ids: set[str] = field(default_factory=set)
+    element_ids: set[str] = field(default_factory=set)
+    script_texts: list[str] = field(default_factory=list)
+
+
+# LLM: StaticSiteHtmlScanRequest bundles per-file scan dependencies.
+# 类用途: 避免 `_scan_html_file` 继续增加散参数；后续扫描字段扩展到这个请求包里。
+@dataclass(frozen=True)
+class StaticSiteHtmlScanRequest:
+    result: StaticSiteCheckResult
+    path: Path
+    site_root: Path
+    options: StaticSiteScanOptions
+    state: StaticSiteScanState
+
+
 # LLM: run_static_site_check is the public validation entrypoint used by TestExecutor.
 # 函数用途: 检查 workspace 内静态站点目录，并返回父级验收能直接读取的执行记录。
 def run_static_site_check(test: dict[str, Any], workspace_root: Path) -> TestExecutionRecord:
@@ -114,48 +146,71 @@ def _scan_site(test: dict[str, Any], site_root: Path) -> StaticSiteCheckResult:
     _check_required_files(result, test, site_root)
     html_files = _html_files(test, site_root, int(test.get("max_files") or 200))
     result.checked_files = [rel(path, site_root) for path in html_files]
-    check_refs = test.get("check_local_refs", True) is not False
-    check_placeholders = test.get("forbid_placeholders", True) is not False
-    check_complete_html = test.get("require_complete_html", False) is True
-    check_controls = test.get("check_inert_controls", True) is not False
-    check_forms = test.get("check_form_bindings", True) is not False
-    form_ids: set[str] = set()
-    element_ids: set[str] = set()
-    script_refs: list[Path] = []
-    script_texts: list[str] = []
+    options = _scan_options(test)
+    state = StaticSiteScanState()
     for path in html_files:
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if check_placeholders and _has_visible_template_placeholder(text):
-            result.placeholder_hits.append(rel(path, site_root))
-        if check_complete_html:
-            result.html_structure_hits.extend(_html_structure_hits(text, path, site_root))
-        parser = StaticSiteHTMLParser()
-        parser.feed(text)
-        form_ids.update(parser.form_ids)
-        element_ids.update(parser.element_ids)
-        local_scripts = local_script_refs(parser.refs, path, site_root)
-        local_script_text = "\n".join(small_text(item) for item in unique_paths(local_scripts))
-        script_refs.extend(local_scripts)
-        script_texts.extend([text, local_script_text])
-        if check_refs:
-            result.broken_local_refs.extend(broken_refs(parser.refs, path, site_root))
-        if check_controls:
-            result.inert_control_hits.extend(
-                inert_control_hits(
-                    InertControlCheckRequest(
-                        controls=parser.controls,
-                        rel_path=rel(path, site_root),
-                        html_text=f"{text}\n{local_script_text}",
-                        element_ids=set(parser.element_ids),
-                    )
-                )
-            )
-    combined_script_text = "\n".join(script_texts)
-    if check_forms:
-        result.form_binding_hits.extend(form_binding_hits(form_ids, combined_script_text))
-    result.missing_dom_id_hits.extend(missing_dom_id_hits(element_ids, combined_script_text))
+        _scan_html_file(StaticSiteHtmlScanRequest(result, path, site_root, options, state))
+    _finalize_dom_checks(result, options, state)
     result.repair_hints.extend(_repair_hints(result))
     return result
+
+
+# LLM: _scan_options extracts validator flags once so the scanner stays readable.
+# 函数用途: 从测试项生成静态站点扫描选项；后续新增开关集中放这里。
+def _scan_options(test: dict[str, Any]) -> StaticSiteScanOptions:
+    return StaticSiteScanOptions(
+        check_refs=test.get("check_local_refs", True) is not False,
+        check_placeholders=test.get("forbid_placeholders", True) is not False,
+        check_complete_html=test.get("require_complete_html", False) is True,
+        check_controls=test.get("check_inert_controls", True) is not False,
+        check_forms=test.get("check_form_bindings", True) is not False,
+        required_dom_ids=string_list(test.get("required_dom_ids")),
+    )
+
+
+# LLM: _scan_html_file performs one-file checks and records cross-file facts in state.
+# 函数用途: 读取一个 HTML 文件，检查局部引用/控件/占位符，并把 id/script 摘要写入扫描状态。
+def _scan_html_file(request: StaticSiteHtmlScanRequest) -> None:
+    result, path, site_root = request.result, request.path, request.site_root
+    options, state = request.options, request.state
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if options.check_placeholders and _has_visible_template_placeholder(text):
+        result.placeholder_hits.append(rel(path, site_root))
+    if options.check_complete_html:
+        result.html_structure_hits.extend(_html_structure_hits(text, path, site_root))
+    parser = StaticSiteHTMLParser()
+    parser.feed(text)
+    state.form_ids.update(parser.form_ids)
+    state.element_ids.update(parser.element_ids)
+    local_script_text = "\n".join(small_text(item) for item in unique_paths(local_script_refs(parser.refs, path, site_root)))
+    state.script_texts.extend([text, local_script_text])
+    if options.check_refs:
+        result.broken_local_refs.extend(broken_refs(parser.refs, path, site_root))
+    if options.check_controls:
+        result.inert_control_hits.extend(
+            inert_control_hits(
+                InertControlCheckRequest(
+                    controls=parser.controls,
+                    rel_path=rel(path, site_root),
+                    html_text=f"{text}\n{local_script_text}",
+                    element_ids=set(parser.element_ids),
+                )
+            )
+        )
+
+
+# LLM: _finalize_dom_checks runs cross-file DOM checks after every HTML file is scanned.
+# 函数用途: 汇总表单绑定、脚本引用 id 和 required_dom_ids 的最终机器失败事实。
+def _finalize_dom_checks(
+    result: StaticSiteCheckResult,
+    options: StaticSiteScanOptions,
+    state: StaticSiteScanState,
+) -> None:
+    combined_script_text = "\n".join(state.script_texts)
+    if options.check_forms:
+        result.form_binding_hits.extend(form_binding_hits(state.form_ids, combined_script_text))
+    result.missing_dom_id_hits.extend(missing_dom_id_hits(state.element_ids, combined_script_text))
+    result.missing_dom_id_hits.extend(_missing_required_dom_id_hits(state.element_ids, options.required_dom_ids))
 
 
 # LLM: _check_required_files records missing pages/assets without opening arbitrary paths.
@@ -186,6 +241,16 @@ def _scoped_html_files(test: dict[str, Any], site_root: Path) -> list[Path]:
         if inside(candidate, site_root) and candidate.is_file() and candidate.suffix.lower() in {".html", ".htm"}:
             paths.append(candidate)
     return sorted(dict.fromkeys(paths))
+
+
+# LLM: _missing_required_dom_id_hits checks explicit business-section contracts.
+# 函数用途: static_site_check 调用方声明 required_dom_ids 时，缺少对应 id 就写入机器失败事实。
+def _missing_required_dom_id_hits(element_ids: set[str], required_dom_ids: list[str]) -> list[str]:
+    return [
+        f"required_dom_id:{item}"
+        for item in sorted(set(required_dom_ids))
+        if item not in element_ids
+    ]
 
 
 # LLM: _html_structure_hits catches malformed full-page HTML without requiring a browser.

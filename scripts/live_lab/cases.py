@@ -20,11 +20,14 @@ from .shop_case import (
     _has_disabled_control,
     case_natural_shop_subagent,
 )
+from .shop_repair_wave_case import case_natural_shop_repair_wave
 from .state_assertions import (
     assert_no_subagent_state_blockers,
     assert_persisted_subagent_state_clean,
 )
 
+# LLM: Case imports stay explicit so adding a real canary also updates docs and tests in one place.
+# 函数用途: 下面的 run_case 字典是 CLI suite 字符串到真实 case 函数的公开调度表。
 
 # LLM: run_case 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
 # 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
@@ -43,6 +46,7 @@ def run_case(lab, case_name: str) -> None:
         "long_subagent": case_long_subagent,
         "natural_html_subagent": case_natural_html_subagent,
         "natural_shop_subagent": case_natural_shop_subagent,
+        "natural_shop_repair_wave": case_natural_shop_repair_wave,
     }
     handlers[case_name](lab)
 

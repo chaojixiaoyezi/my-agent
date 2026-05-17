@@ -105,6 +105,54 @@ def test_repair_file_task_defaults_to_workspace_root():
     assert params.extra_write_roots == [str(Path("/tmp/project").resolve(strict=False))]
 
 
+# LLM: Repair create calls with target refs should write to the target artifact directory, not workspace root.
+# 函数用途: 复现真实 E2E 中修复 worker 读对了 lab_outputs/index.html 却写到项目根 index.html 的路径漂移。
+def test_repair_task_uses_required_read_target_as_product_root(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _mock_workspace_agent(tmp_path)
+    target = tmp_path / "lab_outputs" / "shop-demo" / "index.html"
+    report = tmp_path / ".my-agent" / "subagents" / "child-a" / "reports" / "test_execution.json"
+
+    result = CreateSubagentsTool(agent).execute({
+        "goal": "修复购物站 index.html 的结构验证问题，并满足 required_dom_ids。",
+        "agent_name": "小傻妞-验收修复",
+        "role": "repair_worker",
+        "required_read_paths": [str(report), str(target)],
+    })
+    payload = json.loads(result.output)
+    task = agent.subagents.load(payload["ids"][0])
+
+    assert result.ok is True
+    assert task.allowed_write_roots == [
+        str(task.task_dir),
+        str(target.parent.resolve(strict=False)),
+    ]
+
+
+# LLM: Absolute target files in natural goals should become directory write roots.
+# 函数用途: 防止 create_subagents 从“目标文件:/.../index.html”提取出文件本身作为 allowed_write_root。
+def test_goal_absolute_target_file_normalizes_write_root_to_parent(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _mock_workspace_agent(tmp_path)
+    target = tmp_path / "lab_outputs" / "shop-demo" / "index.html"
+
+    result = CreateSubagentsTool(agent).execute({
+        "goal": f"修复购物站验收失败问题。目标文件：{target}",
+        "agent_name": "小傻妞-修复购物站",
+        "role": "worker",
+    })
+    payload = json.loads(result.output)
+    task = agent.subagents.load(payload["ids"][0])
+
+    assert result.ok is True
+    assert task.allowed_write_roots == [
+        str(task.task_dir),
+        str(target.parent.resolve(strict=False)),
+    ]
+
+
 # LLM: Repair suggested tool calls must survive create_subagents into the runner context.
 # 函数用途: 验证 repair_contract 第一片的 required refs/context packs 会写入真实 task，而不是只停留在父级工具输出里。
 def test_repair_contract_fields_are_persisted_to_child_context(tmp_path):

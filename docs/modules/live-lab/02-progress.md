@@ -101,3 +101,14 @@
 - 已实现：父级验收失败时，调度控制面会给 root 一次基于 `parent_acceptance_repair_advice.suggested_tool_call` 创建修复小傻妞的机会；同一阻塞重复出现才事实收口，避免卡死。
 - 真实复测：`python3 scripts/live_agent_lab.py --suite shop --real-llm --runs-dir /Users/xiaoyezi/my-claude-code/real_e2e_next --run-id 20260517-shop-flow-08-repair-wave --timeout 540 --count 1 --max-runners 3 --max-cycles 5 --keep-going` -> `LIVE_LAB_PASS`。MiniMax-M2.7 创建 1 个小傻妞，写出 `lab_outputs/shop-demo/index.html`，最终 `DONE/VERIFIED`。
 - 下一步：新增“故意失败再修复”的 shop/web case，验证 root 会真的创建 repair child，而不只是第一轮幸运通过。
+
+## 2026-05-17 Shop repair-wave canary
+
+- 中文说明：新增 `shop-repair` suite，专门测试“已经有一个小傻妞做坏了，root 会不会根据状态和验收失败 refs 派修复小傻妞继续干”。这不是购物站特判，而是失败后修复闭环的真实模型 canary。
+- 已实现：`natural_shop_repair_wave` 会先在隔离 workspace 用真实 `SubAgentManager` 预置一个 `AWAITING_ACCEPTANCE` 的失败 child；它有坏 HTML、`output.json`、`acceptance_review.json`、`test_execution.json` 和 `parent_acceptance_auto_followup.json`。
+- 已实现：提示词仍然用普通中文，只说“刚刚那个购物网站没通过检查，请安排小傻妞修好”，不出现 `dispatch`、`runner`、`contract` 等内部词。
+- 已实现：验收不信最终口头回复；它会检查最终 `lab_outputs/shop-demo/index.html`、产品侧 `static_site_check`、是否出现 DONE/VERIFIED 的修复小傻妞，以及旧失败 run 是否被同目标 verified sibling 覆盖。
+- 真实复测：`20260517-shop-repair-wave-01` 暴露 repair child 只修最新失败症状、没有继承原始成功合同；已把 `task_ref`、`original_goal`、`original_acceptance_checks` 和 `full_success_checks` 写入修复建议。
+- 真实复测：`20260517-shop-repair-wave-02` 暴露 repair child 读的是目标文件却写到 sibling 目录；已把 required/read target refs 转成产品写入根，并把文件路径归一到父目录。
+- 真实复测：`python3 scripts/live_agent_lab.py --suite shop-repair --real-llm --runs-dir /Users/xiaoyezi/my-claude-code/real_e2e_next --run-id 20260517-shop-repair-wave-03 --timeout 600 --count 1 --max-runners 3 --max-cycles 6 --keep-going` -> `LIVE_LAB_PASS`。MiniMax-M2.7 用普通中文 prompt 派修复小傻妞，修复同一 `lab_outputs/shop-demo/index.html`，最终 `DONE/VERIFIED`。
+- 已测试：`python3 -m pytest agent_py_agent/tests/test_live_lab_natural_case.py -q --tb=short` -> `20 passed`；后续 focused suite 扩展到 repair 合同、写入根、DOM id 验收和静态站点测试项。
