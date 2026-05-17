@@ -22,6 +22,14 @@
 - 把 Live Lab 结果接入 acceptance/evidence 记录模板。
 - 如果新增 case 或改变产物路径，同步更新本文件和 `04-structure.md`。
 
+## 2026-05-17 File repair-wave canary
+
+- 中文说明：新增 `file-repair` suite，用普通用户话术测试“非网页文件做坏了以后，root 是否会安排小傻妞修同一个真实文件，并让父级机器验收内容”。这个 case 不依赖购物站或 HTML 特判。
+- 已实现：`natural_file_repair_wave` 会预置一个坏的订单 CSV child，写入 `output.json`、`acceptance_review.json`、`test_execution.json` 和 follow-up refs，然后启动真实 gateway 让 root 继续处理。
+- 已实现：seed 的验收条件包含 `required_content_lines`，产品侧父级验收会把它转成 4 条 `content_check`；验收读真实 `lab_outputs/order-report/orders.csv`，不相信最终口头回复。
+- 真实复测：`python3 scripts/live_agent_lab.py --suite file-repair --real-llm --runs-dir /Users/xiaoyezi/my-claude-code/real_e2e_next --run-id 20260517-file-repair-wave-02 --timeout 600 --count 1 --max-runners 3 --max-cycles 6 --keep-going` -> `LIVE_LAB_PASS`。MiniMax-M2.7 创建修复小傻妞，最终 CSV 包含表头、两条订单和 SUMMARY 行。
+- 已知后续增强：这轮修复小傻妞自己的 `tests` 仍可能为空；目前通过旧失败 run 的内容合同完成父级验收。后续普通新文件任务也应更容易生成内容验收合同，而不是只靠 seed/follow-up 继承。
+
 ## 已跑测试
 
 - 历史记录显示 `agent_py_agent/tests/test_live_lab_log_analysis_replay.py` 已覆盖正向 replay、no-finding、evidence/report failure gates。

@@ -8915,3 +8915,33 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Status:
   - Fixed for the observed shop E2E path.
   - Remaining improvement: run harder cases where the first worker fails, then confirm root actually creates a separate repair child and the repaired artifact covers the old failed run.
+
+### Finding 185: Plain-file repair needed machine content checks, not model self-report
+
+- Trigger:
+  - Live Lab file repair run `20260517-file-repair-wave-01`.
+  - The prompt asked root to repair a failed `orders.csv` through 小傻妞.
+- Problem:
+  - The child wrote a CSV that mostly matched the natural prompt, but the Live Lab gate expected exact notes values that the prompt had not made explicit.
+  - More importantly, the repair child reported `tests=[]`, and parent acceptance could accept traceable artifact evidence without executing concrete content checks.
+  - This meant a non-web file task could drift back to “model says the file is fine” unless the failed seed already carried strong test evidence.
+- 中文解释:
+  - 网页有 `static_site_check`，能检查页面、链接、按钮。
+  - 普通 CSV/TXT/Markdown 文件也需要类似的机器检查，不能只看小傻妞说“我检查了”。
+  - 正确做法是把“这些行必须出现”变成机器字段，然后父级按真实文件逐行查。
+- OpenClaw/Hermes/Codex comparison:
+  - Codex 的工具/产物结果靠结构化 fields、call id 和真实文件路径关联，不靠自然语言复述。
+  - Hermes 的 `kanban_complete` 会验证结构化引用是否真实存在；幻觉引用不能让任务完成。
+  - OpenClaw 的 run/session 状态和工具记录会绑定真实 runId，而不是把摘要当事实源。
+  - Lesson: for non-web artifacts, required content must become test input, not just prose.
+- Fix:
+  - Added `required_content_lines.py` to extract explicit `required_content_lines` / `required_content_texts` from task goal/thought/description/acceptance checks.
+  - Extended `TestItemPreparationRequest` and `execution_test_items.py` so one ordinary file artifact plus explicit content lines generates bounded `content_check` tests.
+  - Wired the same content-line contract through parent preflight, manual auto-execution, and acceptance test execution.
+  - Added `file-repair` Live Lab suite with a seeded failed CSV run and exact content-line acceptance.
+- Verification:
+  - Focused deterministic tests passed for content-line extraction, single-file `content_check` inference, and multi-artifact no-guess behavior.
+  - Real MiniMax-M2.7 run `20260517-file-repair-wave-02` passed. The final `orders.csv` contained the exact four required lines, and the old failed run's parent test report showed 4 `content_check` records with 0 failures.
+- Status:
+  - Fixed for explicit content-line contracts on single ordinary-file artifacts.
+  - Remaining improvement: new plain-file tasks should learn to create content-line contracts more often, so they do not depend on a seeded failed run to carry exact checks.

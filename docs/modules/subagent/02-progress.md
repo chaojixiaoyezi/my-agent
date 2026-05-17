@@ -6,6 +6,8 @@
 # Subagent：开发推进记录
 
 ## 已完成
+- 2026-05-17 非网页 repair-wave 内容合同已落地：父级验收现在支持从任务验收文本里的 `required_content_lines` 提取普通文件必须包含的字面行，并在只有一个普通 artifact 时自动生成 `content_check`。这吸收 Codex/Hermes/OpenClaw 的结构化 refs-first 思路，把“模型说内容齐了”降级为备注，把真实文件内容检查变成机器事实。
+- 2026-05-17 文件修复真实 E2E 已通过：新增 `file-repair` Live Lab suite，先预置一个 `AWAITING_ACCEPTANCE` 的坏 CSV child，再用普通中文让 root 安排小傻妞修复同一文件；真实 MiniMax-M2.7 run `20260517-file-repair-wave-02` 通过，最终 CSV 四行一字不差，旧失败 run 的父级验收生成 4 条 `content_check` 且全部通过。
 - 2026-05-16 普通中文流水线第七个真实问题已修复：顶层 `dispatch_subagents` 后如果本轮 scoped 子代理全部 `DONE/VERIFIED`，工具循环直接用持久 task 状态和 artifact/output refs 收口，不再额外发起自由模型轮；如果用户明确要求 tester/acceptor 而还没创建，仍交回 root 继续派质量角色。这吸收 OpenClaw completion event / Hermes terminal task state 的做法，避免完成后被旧上下文带偏。
 - 2026-05-16 普通中文流水线第六个真实问题已修复：`allowed_tools` 不再参与 create role 纠偏；`create_subagents(items=...)` 里的 worker 即便继承 `create_subagents` / `dispatch_subagents` 等宽工具授权，也不会被误升成 coordinator。对齐 OpenClaw/Hermes 的“工具能力”和“任务角色/依赖状态”分离原则。
 - 2026-05-16 普通中文流水线第五个真实问题已修复：`整合 pathA 和 pathB 的结果` 现在会被识别为读取两个输入路径，依赖窗口扩大到 96 字符并加入“整合”读语义，避免长路径第二项离动词太远而丢依赖。

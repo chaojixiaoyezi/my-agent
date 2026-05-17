@@ -15,6 +15,7 @@ import sys
 import textwrap
 
 from .constants import REPO_ROOT
+from .file_repair_wave_case import case_natural_file_repair_wave
 from .shop_case import (
     _external_asset_refs,
     _has_disabled_control,
@@ -47,6 +48,8 @@ def run_case(lab, case_name: str) -> None:
         "natural_html_subagent": case_natural_html_subagent,
         "natural_shop_subagent": case_natural_shop_subagent,
         "natural_shop_repair_wave": case_natural_shop_repair_wave,
+        # LLM: File repair canary stays split so generic cases.py does not grow CSV-specific assertions.
+        "natural_file_repair_wave": case_natural_file_repair_wave,
     }
     handlers[case_name](lab)
 
