@@ -10,14 +10,18 @@ from typing import Any
 _ABS_PATH_RE = re.compile(r"(?<![\w.-])/(?:[^\s\"'<>`，。；：、)）\]}】]+/)*[^\s\"'<>`，。；：、)）\]}】]+")
 _FILE_TOKEN_RE = re.compile(r"(?<![\w./-])[\w.-]+\.(?:html?|xlsx|csv|json|md|txt|py|ts|tsx|js|jsx|css)\b")
 _REPAIR_TOKENS = (
-    "repair",
-    "fix",
     "修复",
     "补齐",
     "纠正",
     "整改",
     "收尾",
     "继续完成",
+)
+# LLM: English repair intent uses token boundaries so fixture/prefix are ordinary words, not fix tasks.
+# 函数用途: 保留 fix/repair/bugfix/hotfix 修复语义，同时避免普通英文子串触发 repair 去重。
+_ASCII_REPAIR_RE = re.compile(
+    r"(?<![a-z0-9_])(?:repair(?:ed|s|ing)?|fix(?:ed|es|ing)?|bugfix(?:es|ing)?|hotfix(?:es|ing)?)(?![a-z0-9_])",
+    re.IGNORECASE,
 )
 
 
@@ -42,7 +46,7 @@ def repair_goal_targets_overlap(left: tuple[str, ...], right: tuple[str, ...]) -
 # 函数用途: 防止普通创建任务因为提到了某个文件名就被误合并成修复任务。
 def _repair_like(role: str, name: str, goal: str) -> bool:
     text = " ".join([role, name, goal]).casefold()
-    return any(token.casefold() in text for token in _REPAIR_TOKENS)
+    return bool(_ASCII_REPAIR_RE.search(text)) or any(token.casefold() in text for token in _REPAIR_TOKENS)
 
 
 # LLM: _target_refs extracts concrete files while avoiding generic directories.

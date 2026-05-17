@@ -8652,3 +8652,82 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Status:
   - Fixed for the tested natural-language furniture-site flow.
   - Remaining follow-up: create/repair advice should keep the user-requested output folder wording even more literal; this run completed in `brand_pages/` instead of root-level `index1.html`/`index2.html`/`index3.html`, so path-location fidelity still deserves a smaller focused slice.
+
+### Finding 175: Batch child creation merged normal workers when names looked repair-like
+
+- Trigger:
+  - Live Lab real subagent run `20260517-subagent-real-01`.
+  - Root called `create_subagents` with two items named `fixture-worker-1` and `fixture-worker-2`, both reading `README.md` and writing separate evidence reports.
+- Problem:
+  - Only one run was created and the payload contained the same run id twice.
+  - Root correctly noticed the bug and reported that `count=2` produced one child.
+  - Root cause: repair-goal idempotency treated the substring `fix` inside `fixture` as a repair marker, then reused the first worker because both items mentioned `README.md`.
+- 中文解释:
+  - 不是模型不会创建两个小傻妞，而是我们底层把 `fixture` 这个普通测试词误看成了 `fix` 修复。
+  - 于是两个正常 worker 被错当成“修同一个 README.md 的修复代理”，第二个被合并掉。
+  - 这种问题必须在身份识别层修，不能靠提示词让模型别用某个名字。
+- 通道运行时/长期助手/会话运行时 comparison:
+  - 会话运行时 的稳定点是把 run/tool identity 放进结构化字段，不靠普通英文片段猜任务类型。
+  - 通道运行时/长期助手 的 session/job 也更强调显式任务身份；自然语言只辅助展示，不应该决定是否复用一个 run。
+  - Lesson: repair intent must be token-aware and contract-aware, not substring matching.
+- Fix:
+  - `repair_goal_identity` now matches English repair words by word boundary (`fix`, `fixed`, `repair`, `bugfix`, `hotfix`) and keeps Chinese repair tokens.
+  - `fixture` / `prefix` style ordinary words no longer trigger repair reuse.
+  - Added regression coverage for `fixture-worker-*` batch creation.
+- Verification:
+  - Focused idempotency tests passed.
+  - The first rerun moved past this exact failure, then exposed the next indexed-name issue tracked below.
+- Status:
+  - Fixed.
+
+### Finding 176: Indexed default names must keep siblings distinct while still replay-safe
+
+- Trigger:
+  - Live Lab real subagent rerun `20260517-subagent-real-02-long-subagent`.
+  - Root used fixed lineage names `小傻妞-worker-1` and `小傻妞-worker-2`.
+- Problem:
+  - Only one child was created again.
+  - Root cause: generated indexed names were treated as fully generic names, so idempotency ignored the sibling number and deduped by the same goal/write-root contract.
+- 中文解释:
+  - `小傻妞-worker` 这种没编号的默认名字，可以按任务合同去重。
+  - 但 `小傻妞-worker-1` 和 `小傻妞-worker-2` 是同一批里的两个位置，编号就是身份的一部分。
+  - 重复同一批时要复用 1/2；第一次创建时不能把 1/2 合成一个。
+- 通道运行时/长期助手/会话运行时 comparison:
+  - 会话运行时 风格是让 run id / operation id / task index 成为机器字段。
+  - 长期助手 delegate 的 tasks[] 也天然把 sibling item 当成独立任务。
+  - Lesson: generated lineage name should be part of the create/schedule contract, not a decorative label.
+- Fix:
+  - Added indexed-generic idempotency: `小傻妞-worker-1/2` reuses only when both name index and task contract match.
+  - Unindexed generic names still use contract dedupe, so repeated single-worker calls do not grow infinite children.
+  - Added regression coverage for indexed default lineage names.
+- Verification:
+  - Focused idempotency tests passed.
+  - Live Lab real subagent rerun `20260517-subagent-real-03-long-subagent` successfully created 2 children and moved to runner execution.
+- Status:
+  - Fixed.
+
+### Finding 177: Context Bundle Gate mistook input README.md summary as a required output file
+
+- Trigger:
+  - Live Lab real subagent rerun `20260517-subagent-real-03-long-subagent`.
+  - Two children were created, then runner dispatch blocked with `output_contract.required_files:README.md` and `task_packet.file_contract.required_files:README.md`.
+- Problem:
+  - One runner had actually read `README.md`, wrote its scenario report, and produced evidence.
+  - The gate still marked the task `BLOCKED` because the plan text said the report should include a `README.md` content summary.
+  - Root cause: required-file extraction saw a nearby `write_file` phrase and treated the later `README.md` subject as a deliverable.
+- 中文解释:
+  - README.md 是输入资料，不是小傻妞要新建的产物。
+  - “报告 README.md 内容摘要”意思是“报告里说一下 README 的内容”，不是“必须交付 README.md”。
+  - 这个也应该在文件合同解析层修，不应该让子代理绕开 gate 或假装成功。
+- 通道运行时/长期助手/会话运行时 comparison:
+  - 会话运行时 的文件合同更偏结构化：输入路径和输出路径要分开。
+  - 长期助手 delegate job 的 output dir/refs 也会把 source/input 和 output artifact 分层。
+  - Lesson: context bundle needs separate source-read refs and output required refs; summary subjects must stay on the input side.
+- Fix:
+  - Required-file extraction now treats “报告/总结/摘要 README.md 内容/摘要” as a source-summary subject, not a deliverable.
+  - Added context-bundle regression coverage matching the Live Lab runner wording.
+- Verification:
+  - Focused required-file/context-bundle/idempotency tests passed.
+  - Live Lab real subagent rerun `20260517-subagent-real-04-long-subagent` passed: 2 children created, both runners completed read/write evidence, both reached `DONE/VERIFIED`, and 2 scenario output reports were written.
+- Status:
+  - Fixed for the Live Lab real subagent flow.

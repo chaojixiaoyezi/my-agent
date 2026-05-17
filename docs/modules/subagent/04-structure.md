@@ -604,6 +604,9 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `services/acceptance_findings.py` 的 `required_child_spawned` 会在任务目标明确要求创建下级/depth child 时核对真实 `task.child_ids`，防止 coordinator 在没有真实 child run 的情况下只靠结果块伪造完成；leaf/self 任务里“真实创建 leaf_worker”这类自述不会误触发下级创建合同。
 - `services/acceptance_descendant_health.py` 的 `descendant_health` 会在父级已有真实 `child_ids` 时扫描所有后代状态；未完成、未验收、失败、阻塞、缺失的后代都会阻断父级 `DONE/VERIFIED`，防止 root 在 QA 子代理仍失败或未跑完时假绿。
 - `services/acceptance_controlled_exec_findings.py` 的 `controlled_exec_contract_satisfied` 会在目标声明 `controlled_exec` 时要求真实工具记录和 `stdout_ref` / `audit_ref` / `trash_manifest_ref`；它会从 `output.json`、task_dir 和 `allowed_write_roots` 下固定小型 refs/summary 文件中找证据，单文件 64KB 上限。若 refs 文件只写了明确的 `/memory_archive/artifacts/tool_outputs/controlled_exec-*.json` 小 artifact 引用，验收会精确读取这些受控工具 artifact 来补齐 stdout/audit refs；不会扫整个 artifact 目录，也不会读取大日志。
+- `subagents/services/repair_goal_identity.py` 的自然语言 repair fallback 只按词边界识别英文 `fix/repair/bugfix/hotfix`，中文修复词仍按短语识别。`fixture`、`prefix` 这类普通词不能触发修复复用，否则批量 worker 会被错合并。
+- `agent_core/orchestration_create_idempotency.py` 区分无编号默认名和带编号默认名：`小傻妞-worker` 继续按任务合同去重；`小傻妞-worker-1/2` 会把编号纳入身份键，既能同批创建多个 sibling，又能在重复同一批时复用对应 run。
+- `subagents/required_file_terms.py` 把“报告/总结/摘要 README.md 内容/摘要”识别为输入资料摘要，不进入 `required_files`。Context Bundle 的 `output_contract.required_files` 和 `task_packet.file_contract.required_files` 只表达用户要求交付的新产物，不表达被读取/被总结的源文件。
 
 ## 2026-05-14 parent planner control-plane structure update
 - `agent_core/planner_templates.py` 定义 parent planner 专用 system prompt；planner 是控制面结构化调用，不继承 root/worker/subagent runner 身份。
