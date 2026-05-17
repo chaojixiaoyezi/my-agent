@@ -17,6 +17,9 @@ def artifact_items_from_payload(payload: dict[str, object]) -> list[dict[str, ob
         result.extend(_new_artifact_items(payload.get(field, []), seen))
     for field in ("files_modified", "modified_files", "changed_files", "created_files"):
         result.extend(_artifact_items_from_string_refs(payload.get(field, []), seen))
+    # LLM: top-level artifact_refs is a product-ref alias from repair/validator agents, not only evidence metadata.
+    # 函数用途: 模型把产物路径直接放到 artifact_refs 时，也要进入标准 artifacts，避免父级验收漏查真实文件。
+    result.extend(_artifact_items_from_string_refs(payload.get("artifact_refs", []), seen, summary="reported artifact ref"))
     result.extend(_artifact_items_from_evidence(payload.get("evidence", []), seen))
     result.extend(_artifact_items_from_evidence_packets(payload.get("evidence_packets", []), seen))
     return result
@@ -67,7 +70,12 @@ def _artifact_items_from_evidence_packets(value: object, seen: set[str]) -> list
 
 # LLM: _artifact_items_from_string_refs recovers common repair-output file lists as product artifacts.
 # 函数用途: 把 files_modified/created_files 这类字符串路径列表转成标准 artifact 条目，让父级验收能继续跑机器检查。
-def _artifact_items_from_string_refs(value: object, seen: set[str]) -> list[dict[str, object]]:
+def _artifact_items_from_string_refs(
+    value: object,
+    seen: set[str],
+    *,
+    summary: str = "reported modified artifact",
+) -> list[dict[str, object]]:
     """Return artifact items from string path lists emitted by repair workers."""
 
     items: list[dict[str, object]] = []
@@ -75,7 +83,7 @@ def _artifact_items_from_string_refs(value: object, seen: set[str]) -> list[dict
         if ref in seen:
             continue
         seen.add(ref)
-        items.append({"path": ref, "kind": "file", "summary": "reported modified artifact"})
+        items.append({"path": ref, "kind": "file", "summary": summary})
     return items
 
 

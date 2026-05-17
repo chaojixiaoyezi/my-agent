@@ -426,6 +426,24 @@ def test_top_level_natural_report_only_prompt_blocks_product_body_before_accepto
     assert "delegating_body_read_blocked" in result.output
 
 
+# LLM: Real user wording may include "你自己直接写页面正文" instead of refs-only jargon.
+# 函数用途: 购物站真实 E2E 暴露 root 读正文保护漏识别这类普通话术；这里固定为验收前阻断。
+def test_top_level_delegate_only_prompt_with_you_directly_write_text_blocks_product_body():
+    tasks = {
+        "worker": _task("worker", identity="worker", done=True),
+    }
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_top_level_agent(tasks),
+            user_prompt="请你安排小傻妞来完成，不要你自己直接写页面正文。",
+            payload={"tool": "read_file", "path": "/tmp/workspace/deliverables/index.html"},
+        )
+    )
+
+    assert result is not None
+    assert "delegating_body_read_blocked" in result.output
+
+
 # LLM: top-level refs-only shell reads should not bypass read_file body protection.
 # 函数用途: root 用 run_command tail/cat 等读取产物正文时也要阻断，避免绕过子代理报告边界。
 def test_top_level_natural_report_only_prompt_blocks_shell_tail_product_body():

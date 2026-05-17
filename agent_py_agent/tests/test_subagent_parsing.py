@@ -148,6 +148,22 @@ class TestParseSubagentRunnerOutput:
         assert result.lessons == ["l1"]
         assert result.next_actions == ["a1"]
 
+    # LLM: top-level artifact_refs are common in reviewer/acceptor outputs and must feed machine checks.
+    # 函数用途: 复现验收代理把真实产物写在 artifact_refs 而不是 artifacts 时，父级测试漏掉产物的问题。
+    def test_parse_top_level_artifact_refs_as_artifacts(self):
+        text = """[SUBAGENT_RESULT]
+{
+  "status": "AWAITING_ACCEPTANCE",
+  "summary": "验收完成",
+  "artifact_refs": ["/tmp/shop/index.html", "/tmp/report.md"]
+}
+[/SUBAGENT_RESULT]"""
+
+        result = parse_subagent_runner_output(text)
+
+        assert [item["path"] for item in result.artifacts] == ["/tmp/shop/index.html", "/tmp/report.md"]
+        assert result.artifacts[0]["summary"] == "reported artifact ref"
+
 
 class TestParseParentPlannerOutput:
     """parse_parent_planner_output 函数测试。"""

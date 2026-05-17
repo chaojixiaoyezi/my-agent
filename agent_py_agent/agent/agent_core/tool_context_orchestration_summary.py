@@ -6,6 +6,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .tool_context_recovery_summary import strategy_preview
+from .tool_context_repair_summary import repair_advice_action_lines
+
 _ORCHESTRATION_TOOLS = {"create_subagents", "dispatch_subagents", "schedule_child_subagents", "subagent_board"}
 _MAX_INLINE_JSON = 900
 _MAX_INLINE_TEXT = 500
@@ -64,6 +67,7 @@ def _render_orchestration_summary(
         "- policy: refs-first orchestration output; do not read artifact/file bodies unless a specific evidence ref requires it.",
     ]
     lines.extend(_direct_children_lines(payload.get("direct_children")))
+    lines.extend(repair_advice_action_lines(payload.get("parent_acceptance_repair_advice")))
     lines.extend(_top_level_action_lines(payload))
     lines.extend(_result_refs_by_run_lines(payload.get("result_refs_by_run")))
     lines.extend(_ref_lines(payload))
@@ -109,7 +113,7 @@ def _direct_children_recovery_lines(value: dict[str, Any]) -> list[str]:
     if value.get("recovery_batches"):
         lines.append(f"- recovery_batches: {_json_inline(value.get('recovery_batches'))}")
     if value.get("recovery_strategies"):
-        lines.append(f"- recovery_strategy_preview: {_json_inline(_strategy_preview(value.get('recovery_strategies')))}")
+        lines.append(f"- recovery_strategy_preview: {_json_inline(strategy_preview(value.get('recovery_strategies')))}")
     return lines
 
 
@@ -285,25 +289,6 @@ def _string_refs(value: object, *, limit: int) -> list[str]:
     return refs
 
 
-# LLM: _strategy_preview keeps packet-first recovery visible after large dispatch outputs are archived.
-# 函数用途: 从 recovery_strategies 中提取首要恢复动作和 packet ref，不展开完整 fallback/takeover refs。
-def _strategy_preview(value: object) -> list[dict[str, object]]:
-    if not isinstance(value, list):
-        return []
-    preview: list[dict[str, object]] = []
-    for item in value[:3]:
-        if not isinstance(item, dict):
-            continue
-        preview.append({
-            "run_id": item.get("run_id", ""),
-            "recommended_action": item.get("recommended_action", ""),
-            "packet_status": item.get("packet_status", ""),
-            "uses_continue_packet": bool(item.get("uses_continue_packet", False)),
-            "runner_instruction": _clip(item.get("runner_instruction", ""), limit=220),
-        })
-    return preview
-
-
 # LLM: _archive_pointer_lines provides recovery pointers without encouraging immediate body rereads.
 # 函数用途: 输出 hash/path/size；调度摘要足够时不放 read_artifact_hint。
 def _archive_pointer_lines(archive_record: dict[str, object], *, include_read_hint: bool) -> list[str]:
@@ -347,12 +332,12 @@ def _json_object(text: str) -> dict[str, Any] | None:
 
 # LLM: _json_inline bounds nested advisory JSON so suggested tool calls stay copyable but small.
 # 函数用途: 将列表/字典压成单行 JSON，并在超长时带 hash 预览。
-def _json_inline(value: object) -> str:
+def _json_inline(value: object, *, limit: int = _MAX_INLINE_JSON) -> str:
     try:
         text = json.dumps(value, ensure_ascii=False, sort_keys=True)
     except TypeError:
         text = repr(value)
-    return _clip(text, limit=_MAX_INLINE_JSON)
+    return _clip(text, limit=limit)
 
 
 # LLM: _clip is a tiny prompt-safety primitive for all summary fields.

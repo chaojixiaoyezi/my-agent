@@ -42,8 +42,8 @@ def missing_dom_id_hits(element_ids: set[str], script_text: str) -> list[str]:
     return hits
 
 
-# LLM: inert_control_hits finds obvious clickable controls with no target or event handler.
-# 函数用途: 标记明显失效的 button/a；表单 submit/reset 和全局监听页面会跳过误报。
+# LLM: inert_control_hits finds controls that are unavailable or have no target/handler.
+# 函数用途: 标记默认不可用控件和明显无动作控件；表单 submit/reset 和全局监听页面会跳过误报。
 def inert_control_hits(request: InertControlCheckRequest) -> list[str]:
     hits: list[str] = []
     has_script_handlers = "addEventListener" in request.html_text
@@ -93,8 +93,8 @@ def _is_optionally_guarded_dom_lookup(script_text: str, target: str) -> bool:
     return False
 
 
-# LLM: _inert_control_hit renders one control finding at most, preserving validator summary shape.
-# 函数用途: 根据 tag/href/onclick/type 判断单个控件是否明显失效。
+# LLM: _inert_control_hit renders one generic control finding at most.
+# 函数用途: 根据 disabled/tag/href/onclick/type 判断单个控件是否默认不可用或明显无动作。
 def _inert_control_hit(
     control: dict[str, object],
     request: InertControlCheckRequest,
@@ -105,6 +105,9 @@ def _inert_control_hit(
     href = str(control.get("href") or "").strip()
     onclick = str(control.get("onclick") or "").strip()
     button_type = str(control.get("type") or "").strip().lower()
+    disabled = bool(control.get("disabled"))
+    if disabled and tag in {"button", "input", "select", "textarea"}:
+        return [f"{request.rel_path}:{tag}:{text or '<empty>'} disabled"]
     if tag == "a" and not onclick and _anchor_is_inert(href, request.element_ids):
         return [f"{request.rel_path}:a:{text or '<empty>'} href={href or '<empty>'}"]
     if tag == "button" and not onclick and button_type not in {"submit", "reset"} and not has_script_handlers:

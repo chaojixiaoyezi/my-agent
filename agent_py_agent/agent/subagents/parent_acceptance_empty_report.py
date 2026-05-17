@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from .models import SubAgentTask
@@ -44,12 +45,12 @@ def empty_report_is_inspectable(
 # LLM: has_traceable_acceptance_evidence accepts only product artifact refs for empty-report inspection.
 # 函数用途: 空测试报告不能只靠 output.json/takeover 这类审计引用放行；必须有真实产物 artifact ref 可继续验收。
 def has_traceable_acceptance_evidence(task: SubAgentTask, output: dict[str, Any]) -> bool:
-    if _task_artifact_refs(task):
+    if _product_artifact_refs(task, _task_artifact_refs(task)):
         return True
-    if any(item.artifact_refs for item in task.evidence_packets):
+    if any(_product_artifact_refs(task, item.artifact_refs) for item in task.evidence_packets):
         return True
     return any(
-        str(item.get("path") or item.get("uri") or item.get("artifact_id") or "").strip()
+        _product_artifact_refs(task, [str(item.get("path") or item.get("uri") or item.get("artifact_id") or "")])
         for item in _dict_list(output.get("artifacts", []))
     )
 
@@ -61,3 +62,57 @@ def _task_artifact_refs(task: SubAgentTask) -> list[str]:
     if not isinstance(value, list | tuple | set):
         return []
     return [str(item).strip() for item in value if str(item or "").strip()]
+
+
+# LLM: _product_artifact_refs filters out run-private reports before empty reports can be inspected.
+# 函数用途: 空测试报告只能因用户产物 ref 进入 inspect_only；agent-run final_report/output 等内部文件不算。
+def _product_artifact_refs(task: SubAgentTask, refs: list[str]) -> list[str]:
+    return [ref for ref in refs if _is_product_artifact_ref(task, ref)]
+
+
+# LLM: _is_product_artifact_ref keeps legacy local artifacts allowed while excluding known run-private refs.
+# 函数用途: 判断一个 artifact ref 是否像用户交付物；协议引用保留，内部报告/审计路径过滤掉。
+def _is_product_artifact_ref(task: SubAgentTask, ref: str) -> bool:
+    text = str(ref or "").strip()
+    if not text:
+        return False
+    if "://" in text:
+        return True
+    resolved = _resolved_path_text(text)
+    return not any(_path_within(resolved, root) for root in _run_private_roots(task))
+
+
+# LLM: _run_private_roots enumerates internal refs that must not satisfy product evidence.
+# 函数用途: 收集 output、runner、reports、agent-run workspace 等内部路径；不访问文件正文。
+def _run_private_roots(task: SubAgentTask) -> list[str]:
+    fields = (
+        "agent_run_workspace_dir",
+        "agent_run_artifacts_dir",
+        "agent_run_final_report_md",
+        "task_workspace_dir",
+        "reports_dir",
+        "logs_dir",
+        "runner_result_json",
+        "output_json",
+        "debrief_file",
+    )
+    roots = [_resolved_path_text(getattr(task, field, "")) for field in fields]
+    return [item for item in roots if item]
+
+
+# LLM: _path_within compares normalized path strings without requiring the file to exist.
+# 函数用途: 判断 ref 是否等于内部路径或位于内部目录下，避免空测试报告把内部报告当产物。
+def _path_within(path: str, root: str) -> bool:
+    return bool(path and root and (path == root or path.startswith(f"{root}/")))
+
+
+# LLM: _resolved_path_text normalizes local refs for internal-boundary comparison only.
+# 函数用途: 用 strict=False 解析路径；坏路径回退原文本，保证验收决策不因异常中断。
+def _resolved_path_text(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return str(Path(text).expanduser().resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return text

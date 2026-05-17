@@ -8856,3 +8856,62 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Natural rerun `20260517-natural-html-05-input-output-contract` passed with one `worker` run, no root direct write, `DONE/VERIFIED`, and valid offline HTML.
 - Status:
   - Fixed.
+
+### Finding 183: Shop E2E exposed missing generic web artifact gates
+
+- Trigger:
+  - Live Lab shop reruns `20260517-shop-flow-01` through `20260517-shop-flow-05-artifact-contract`.
+  - The user-style prompt only said to arrange 小傻妞 for a shopping website; it did not mention internal dispatch, runner or contract terms.
+- Problems:
+  - Root could still read product body when the prompt said not to write the page directly.
+  - Some reports treated internal runtime files such as `agent_run_final_report.md` as product artifacts.
+  - Top-level `artifact_refs` in worker output were not parsed as deliverable artifacts.
+  - Static site validation did not reject actual disabled HTML controls in a reusable way.
+  - The first Live Lab shop gate was too exact-id oriented; it needed semantic checks that work for future web tasks too.
+- 中文解释:
+  - 这些不是“购物网站专属问题”，而是网页产物合同不够硬。
+  - 系统必须知道哪些文件是真产物、哪些只是小傻妞自己的运行报告。
+  - 网页按钮如果真的带 `disabled`，那就是不可用控件；不能靠 CSS/JS 文本误判，也不能漏判真实禁用按钮。
+- 通道运行时/长期助手/会话运行时 comparison:
+  - 会话运行时 的方向是工具结果和 artifact refs 机器可读，不让模型从自然语言摘要里猜。
+  - 长期助手 delegate 父级拿 summary / refs / artifacts，不把 child 私有报告当最终产物。
+  - 通道运行时 控制面看 session/run 状态；最终汇报不能只看“文件存在”。
+- Fix:
+  - Delegation body-read guard now recognizes natural Chinese refs-only wording such as “不要你自己直接写页面/正文/产物”.
+  - Artifact parsing now accepts top-level `artifact_refs`.
+  - Parent acceptance empty-report checks filter out run-private report/log/runner JSON refs and require real product artifacts.
+  - Static site parser/checker now treats actual disabled `button/input/select/textarea` as inert controls; CSS/JS mentions of disabled state do not count.
+  - Shop Live Lab gate checks semantic sections/actions/offline resources and reuses generic `static_site_check`.
+- Verification:
+  - Added regression tests in `test_orchestration_body_read_guard.py`, `test_subagent_parsing.py`, `test_parent_acceptance_empty_report.py`, `test_static_site_validator.py`, and `test_live_lab_natural_case.py`.
+  - Focused web artifact and subagent closeout tests passed.
+- Status:
+  - Fixed.
+
+### Finding 184: Failed parent acceptance could either hang or close before repair
+
+- Trigger:
+  - `20260517-shop-flow-06-disabled-validator` timed out after parent acceptance rejected a generated shopping page.
+  - `20260517-shop-flow-07-terminal-failure-closeout` then returned a clear blocked report in 160 seconds, proving the hang was gone, but it stopped before giving root a repair wave.
+- Problem:
+  - The control plane had two extremes:
+    - without deterministic closeout, the gateway could wait until request timeout;
+    - with immediate closeout, root had no chance to create a scoped repair 小傻妞 from `parent_acceptance_repair_advice`.
+  - The repair advice was present in the externalized `dispatch_subagents` artifact, but the live prompt summary could clip the suggested tool call.
+- 中文解释:
+  - 验收失败后，系统不能卡住，也不能马上放弃。
+  - 正确动作是：先给主代理一次明确机会，让它按机器字段派一个修复小傻妞；如果它还是没派，才如实告诉用户哪里阻塞。
+- 通道运行时/长期助手/会话运行时 comparison:
+  - 通道运行时 的控制面会让父级看到 run 状态和下一步，而不是无限等。
+  - 会话运行时 的工具协议会把下一步放成结构化字段。
+  - 长期助手 的 delegate 思路是父级读 refs 和 summary，必要时再开新 task 修复，不把正文塞回父级。
+- Fix:
+  - `subagent_dispatch_closeout.py` now grants one parent-acceptance repair turn when a rejected child has repair refs. It appends a small control-plane context telling root to use `parent_acceptance_repair_advice.suggested_tool_call`.
+  - If the same blockers remain after that opportunity, deterministic closeout returns the factual incomplete report instead of waiting forever.
+  - `tool_context_orchestration_summary.py` now renders top-level parent acceptance repair advice as separate copyable fields, including failed run ids, failure refs, next tool, and suggested tool call.
+- Verification:
+  - Regression tests cover the one-turn repair opportunity and the externalized repair suggested tool call.
+  - Real MiniMax-M2.7 rerun `20260517-shop-flow-08-repair-wave` passed: health passed, root created and dispatched one 小傻妞, output `lab_outputs/shop-demo/index.html` passed shop artifact gates, and final state was `total_runs=1 done_verified=1`.
+- Status:
+  - Fixed for the observed shop E2E path.
+  - Remaining improvement: run harder cases where the first worker fails, then confirm root actually creates a separate repair child and the repaired artifact covers the old failed run.

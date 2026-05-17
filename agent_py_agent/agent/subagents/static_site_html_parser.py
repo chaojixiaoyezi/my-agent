@@ -21,8 +21,8 @@ class StaticSiteHTMLParser(HTMLParser):
         self.form_ids: list[str] = []
         self._current_control: dict[str, object] | None = None
 
-    # LLM: handle_starttag records href/src/action refs and simple clickable controls.
-    # 函数用途: 收集本地资源引用和可点击控件，后续判断是否失效或明显无动作。
+    # LLM: handle_starttag records refs and bounded control facts for generic artifact validation.
+    # 函数用途: 收集本地资源引用和基础控件属性，后续判断页面交付物是否存在失效控件。
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr_map = {key.lower(): value or "" for key, value in attrs}
         for ref_attr in ("href", "src", "action"):
@@ -32,14 +32,20 @@ class StaticSiteHTMLParser(HTMLParser):
             self.element_ids.append(attr_map["id"])
         if tag == "form" and attr_map.get("id"):
             self.form_ids.append(attr_map["id"])
-        if tag in {"button", "a"}:
-            self._current_control = {
+        if tag in {"button", "a", "input", "select", "textarea"}:
+            control = {
                 "tag": tag,
                 "href": attr_map.get("href", ""),
                 "onclick": attr_map.get("onclick", ""),
                 "type": attr_map.get("type", ""),
+                "disabled": "disabled" in attr_map,
                 "text": "",
             }
+            if tag == "input":
+                control["text"] = attr_map.get("aria-label") or attr_map.get("placeholder") or attr_map.get("value") or ""
+                self.controls.append(control)
+                return
+            self._current_control = control
 
     # LLM: handle_data keeps only short button/link text for diagnostics.
     # 函数用途: 给控件问题生成可读摘要；不会保存完整页面正文。

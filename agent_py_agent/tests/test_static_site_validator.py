@@ -111,6 +111,63 @@ def test_static_site_check_blocks_placeholder_hash_links(tmp_path):
     ]
 
 
+# LLM: Disabled HTML controls are generic inert UI, independent of the task domain.
+# 函数用途: 固定静态网页产物的通用验收合同；页面打开时默认失效的控件不能通过。
+def test_static_site_check_blocks_disabled_html_controls(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "index.html": (
+                '<button id="checkoutBtn" onclick="checkout()" disabled>去结算</button>'
+                "<script>function checkout(){}</script>"
+            ),
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "disabled checkout button",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index.html"],
+        }
+    )
+
+    assert record.executed is True
+    assert record.passed is False
+    assert "inert_control_hits=1" in record.error
+    assert record.validation_result["inert_control_hits"] == ["index.html:button:去结算 disabled"]
+
+
+# LLM: CSS pseudo-classes and runtime JS disabled assignments are not initial disabled controls.
+# 函数用途: 只拦截 HTML 初始 disabled 属性，不误伤样式选择器或运行时状态切换代码。
+def test_static_site_check_ignores_css_and_runtime_disabled_mentions(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "index.html": (
+                "<style>button:disabled{opacity:.6}</style>"
+                '<button id="checkoutBtn" onclick="checkout()">去结算</button>'
+                "<script>function checkout(){document.getElementById('checkoutBtn').disabled=false}</script>"
+            ),
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "runtime disabled state",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index.html"],
+        }
+    )
+
+    assert record.passed is True
+    assert record.validation_result["inert_control_hits"] == []
+
+
 # LLM: Leaf acceptance must not fail because sibling pages in the same deliverables folder are still broken.
 # 函数用途: 单个 worker 只负责 index1.html 时，static_site_check 可以限定检查文件，避免 sibling 串扰。
 def test_static_site_check_can_scope_to_declared_html_files(tmp_path):
