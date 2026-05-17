@@ -33,6 +33,7 @@ def test_compact_continue_packet_contains_typed_recovery_envelope():
             recommended_read_paths=["compact_context.md", "work_state_snapshot.json"],
             next_actions=["continue"],
             subagent_owner_refs={},
+            main_context_bundle={},
         )
     )
 

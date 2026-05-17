@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ..contracts.state_machine import RunStateFacts, can_dispatch
 from ..subagents.services.base import CreateRunParams
 from ..subagents.services.repair_contract_identity import (
     repair_contract_identity_from_context_packs,
@@ -16,7 +17,6 @@ from ..subagents.services.repair_goal_identity import (
 )
 
 _REUSABLE_STATUSES = {"PLANNING", "PENDING", "RUNNING", "DONE", "COMPLETED", "BLOCKED", "PAUSED"}
-_DISPATCHABLE_STATUSES = {"PLANNING", "PENDING"}
 _GENERIC_AGENT_NAMES = {
     "",
     "general",
@@ -132,7 +132,11 @@ def reused_tasks(resolutions: list[CreateTaskResolution]) -> list[Any]:
 # LLM: dispatchable_tasks returns only children that should be started now.
 # 函数用途: 已 DONE/RUNNING/BLOCKED 的复用 run 仍展示给 root，但不会被建议重复 dispatch。
 def dispatchable_tasks(tasks: list[Any]) -> list[Any]:
-    return [task for task in tasks if _status(task) in _DISPATCHABLE_STATUSES]
+    return [
+        task
+        for task in tasks
+        if can_dispatch(RunStateFacts(status=_status(task), verification_status=_verification(task)))
+    ]
 
 
 # LLM: _same_create_scope checks parent/root/name/role without comparing fragile natural-language goal text.
@@ -148,7 +152,7 @@ def _same_create_scope(task: Any, params: CreateRunParams, name: str) -> bool:
         return False
     if not _compatible_role(getattr(task, "role", ""), params.role):
         return False
-    if _normalized_goal(getattr(task, "goal", "")) != _normalized_goal(params.goal):
+    if _requires_goal_identity(name) and _normalized_goal(getattr(task, "goal", "")) != _normalized_goal(params.goal):
         return False
     if _identity_fields(task) != _params_identity_fields(params):
         return False
@@ -319,6 +323,12 @@ def _is_indexed_generic_agent_name(value: object) -> bool:
     return _is_lineage_prefix(prefix) and role in _GENERIC_LINEAGE_ROLES
 
 
+# LLM: _requires_goal_identity keeps generic names distinct while letting explicit names be stable ids.
+# 函数用途: 默认名/泛角色名要用 goal 区分；用户或系统给出的语义名字则作为结构化身份复用。
+def _requires_goal_identity(name: str) -> bool:
+    return _is_generic_agent_name(name) or _is_indexed_generic_agent_name(name)
+
+
 # LLM: _is_lineage_prefix recognizes generated 小傻妞 depth markers.
 # 函数用途: 判断名字第一段是否为“小...傻妞”，用于默认名合同复用。
 def _is_lineage_prefix(value: str) -> bool:
@@ -330,6 +340,12 @@ def _is_lineage_prefix(value: str) -> bool:
 # 函数用途: 读取状态并转成大写字符串，供复用和调度过滤。
 def _status(task: Any) -> str:
     return _text(getattr(task, "status", "")).upper()
+
+
+# LLM: _verification mirrors the shared state-machine facts without importing subagent task models.
+# 函数用途: 读取 task.verification_status 供 dispatchable 判断兼容未来状态扩展。
+def _verification(task: Any) -> str:
+    return _text(getattr(task, "verification_status", "")).upper()
 
 
 # LLM: _text guards against MagicMock truthiness and non-string fields.

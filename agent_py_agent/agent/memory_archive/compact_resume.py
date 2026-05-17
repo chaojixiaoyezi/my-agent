@@ -14,27 +14,19 @@ from .compact_action_guard import (
     CompactActionGuardRequest,
     build_compact_action_guard,
 )
-from .compact_continue_packet import (
-    CompactContinuePacketRequest,
-    build_compact_continue_packet,
-)
+from .compact_context_bundle_refs import compact_context_bundle_summary
 from .compact_resume_blocked import BlockedCompactResumeRequest, build_blocked_compact_resume
-from .compact_resume_completion import (
-    CompactCompletionPromptRequest,
-    build_compact_completion_prompt,
-)
 from .compact_resume_failsafe import collect_fail_safe_checkpoints
-from .compact_resume_handoff import (
-    CompactResumeHandoffRequest,
-    build_compact_resume_handoff,
-    render_compact_resume_context_block,
-)
 from .compact_resume_io import (
     read_compact_apply_artifacts,
     read_json_object,
     resolve_compact_metadata_path,
 )
 from .compact_resume_paths import recommended_compact_resume_paths
+from .compact_resume_payloads import (
+    CompactResumePayloadPartsRequest,
+    build_compact_resume_payload_parts,
+)
 from .compact_subagent_owner import (
     CompactSubagentOwnerRequest,
     resolve_compact_subagent_owner,
@@ -70,30 +62,6 @@ class _ResumePayloadBuildRequest:
     artifacts: dict[str, Any]
     consistency: dict[str, Any]
     action_guard: dict[str, Any]
-
-
-# LLM: _HandoffBundleRequest keeps resume handoff construction separate from the top-level payload.
-# 类用途: 汇总 handoff、completion prompt 和 context block 所需字段，避免恢复 payload 函数膨胀。
-@dataclass(frozen=True)
-class _HandoffBundleRequest:
-    metadata: dict[str, Any]
-    artifacts: dict[str, Any]
-    consistency: dict[str, Any]
-    action_guard: dict[str, Any]
-    recommended: list[str]
-    next_actions: list[str]
-    fail_safe_checkpoints: list[dict[str, Any]]
-
-
-# LLM: _ContinuePacketBuildRequest keeps continue-packet inputs bundled at the resume boundary.
-# 类用途: 汇总继续工作包构建所需字段，避免私有 helper 继续拉长参数列表。
-@dataclass(frozen=True)
-class _ContinuePacketBuildRequest:
-    payload_request: _ResumePayloadBuildRequest
-    recommended: list[str]
-    next_actions: list[str]
-    subagent_refs: dict[str, Any]
-    handoff: dict[str, Any]
 
 
 # LLM: build_memory_compact_resume is read-only; it never mutates archive, task, or subagent files.
@@ -179,24 +147,7 @@ def _resume_payload(request: _ResumePayloadBuildRequest) -> dict[str, Any]:
     artifacts = request.artifacts
     consistency = request.consistency
     action_guard = request.action_guard
-    fail_safe_checkpoints = collect_fail_safe_checkpoints(artifacts["restore_refs"])
-    recommended = recommended_compact_resume_paths(metadata, artifacts, fail_safe_checkpoints)
-    next_actions = _next_actions(consistency)
-    subagent_refs = _subagent_extension(request.workspace, request.options)
-    handoff_bundle = _handoff_bundle(
-        _HandoffBundleRequest(
-            metadata=metadata,
-            artifacts=artifacts,
-            consistency=consistency,
-            action_guard=action_guard,
-            recommended=recommended,
-            next_actions=next_actions,
-            fail_safe_checkpoints=fail_safe_checkpoints,
-        )
-    )
-    continue_packet = _continue_packet(
-        _ContinuePacketBuildRequest(request, recommended, next_actions, subagent_refs, handoff_bundle["handoff"])
-    )
+    parts = _resume_payload_parts(request)
     return {
         "version": COMPACT_RESUME_SCHEMA.version,
         "schema": runtime_memory_schema_payload(COMPACT_RESUME_SCHEMA),
@@ -205,68 +156,63 @@ def _resume_payload(request: _ResumePayloadBuildRequest) -> dict[str, Any]:
         "workspace_root": str(request.workspace),
         "apply_id": metadata.get("apply_id", ""),
         "plan_id": metadata.get("plan_id", ""),
+        "lineage": dict(metadata.get("lineage", {}) if isinstance(metadata.get("lineage"), dict) else {}),
         "owner": _owner_payload(request.options),
         "refs": metadata.get("refs", {}),
         "work_state": artifacts["work_state"],
         "consistency_report": consistency,
         "action_guard": action_guard,
-        "handoff": handoff_bundle["handoff"],
-        "continue_packet": continue_packet,
-        "fail_safe_checkpoints": fail_safe_checkpoints,
-        "completion_prompt": handoff_bundle["completion_prompt"],
-        "recommended_read_paths": recommended,
-        "next_actions": next_actions,
-        "context_block": handoff_bundle["context_block"],
-        "subagent_session_compact": subagent_refs,
+        "main_context_bundle": parts["main_context_bundle"],
+        "handoff": parts["handoff"],
+        "continue_packet": parts["continue_packet"],
+        "artifact_read_hints": parts["handoff"].get("artifact_read_hints", []),
+        "fail_safe_checkpoints": parts["fail_safe_checkpoints"],
+        "completion_prompt": parts["completion_prompt"],
+        "recommended_read_paths": parts["recommended"],
+        "next_actions": parts["next_actions"],
+        "context_block": parts["context_block"],
+        "subagent_session_compact": parts["subagent_refs"],
         "reserved": runtime_memory_reserved_fields(COMPACT_RESUME_SCHEMA),
     }
 
 
-# LLM: _handoff_bundle builds the human/model handoff pieces from already validated compact artifacts.
-# 函数用途: 生成 completion prompt、handoff 和可复制 context block；不读取或写入额外文件。
-def _handoff_bundle(request: _HandoffBundleRequest) -> dict[str, Any]:
-    completion_prompt = build_compact_completion_prompt(
-        CompactCompletionPromptRequest(
-            apply_id=str(request.metadata.get("apply_id", "")),
-            plan_id=str(request.metadata.get("plan_id", "")),
-            work_state=request.artifacts["work_state"],
-        )
-    )
-    handoff = build_compact_resume_handoff(
-        CompactResumeHandoffRequest(
-            metadata=request.metadata,
-            work_state=request.artifacts["work_state"],
-            consistency=request.consistency,
-            action_guard=request.action_guard,
-            recommended_read_paths=request.recommended,
-            next_actions=request.next_actions,
-            fail_safe_checkpoints=request.fail_safe_checkpoints,
-            completion_prompt=completion_prompt,
+# LLM: _resume_payload_parts derives refs-first resume blocks before the final JSON payload.
+# 函数用途: 统一生成推荐路径、handoff、continue packet 和主代理 context bundle 摘要。
+def _resume_payload_parts(request: _ResumePayloadBuildRequest) -> dict[str, Any]:
+    metadata = request.metadata
+    artifacts = request.artifacts
+    consistency = request.consistency
+    action_guard = request.action_guard
+    fail_safe_checkpoints = collect_fail_safe_checkpoints(artifacts["restore_refs"])
+    recommended = recommended_compact_resume_paths(metadata, artifacts, fail_safe_checkpoints)
+    next_actions = _next_actions(consistency)
+    subagent_refs = _subagent_extension(request.workspace, request.options)
+    # 函数用途: 主代理任务卡只进入恢复引用摘要，不把原始长上下文复制回 prompt。
+    main_context_bundle = compact_context_bundle_summary(metadata.get("main_context_bundle", {}))
+    payload_parts = build_compact_resume_payload_parts(
+        CompactResumePayloadPartsRequest(
+            metadata=metadata,
+            artifacts=artifacts,
+            consistency=consistency,
+            action_guard=action_guard,
+            recommended=recommended,
+            next_actions=next_actions,
+            subagent_refs=subagent_refs,
+            fail_safe_checkpoints=fail_safe_checkpoints,
+            main_context_bundle=main_context_bundle,
         )
     )
     return {
-        "completion_prompt": completion_prompt,
-        "handoff": handoff,
-        "context_block": render_compact_resume_context_block(handoff),
+        "fail_safe_checkpoints": fail_safe_checkpoints,
+        "recommended": recommended,
+        "next_actions": next_actions,
+        "subagent_refs": subagent_refs,
+        "main_context_bundle": main_context_bundle,
+        "handoff": payload_parts.handoff,
+        "completion_prompt": payload_parts.completion_prompt,
+        "context_block": payload_parts.context_block,
+        "continue_packet": payload_parts.continue_packet,
     }
-
-
-# LLM: _continue_packet freezes resume state for manual, semi-auto, and future auto callers.
-# 函数用途: 生成继续工作包；只打包已读取的 compact resume 结果，不再读写任何文件。
-def _continue_packet(request: _ContinuePacketBuildRequest) -> dict[str, Any]:
-    payload_request = request.payload_request
-    return build_compact_continue_packet(
-        CompactContinuePacketRequest(
-            metadata=payload_request.metadata,
-            work_state=payload_request.artifacts["work_state"],
-            consistency=payload_request.consistency,
-            action_guard=payload_request.action_guard,
-            handoff=request.handoff,
-            recommended_read_paths=request.recommended,
-            next_actions=request.next_actions,
-            subagent_owner_refs=request.subagent_refs,
-        )
-    )
 
 
 # LLM: _next_actions keeps manual resume from silently executing tools after context recovery.

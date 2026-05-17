@@ -3,6 +3,14 @@
 ## 已完成
 
 - 2026-05-14 Compact Continue Packet typed envelope 第一片已落地：`memory-resume --from-compact` 返回的 continue packet 仍保留旧字段，同时新增 `typed_envelope.kind=compact_continue_packet`，把 apply/plan、work_state、guard、next_actions 和 recommended_read_paths 转成机器可读恢复包；它仍不执行工具、不改任务状态。
+- 2026-05-17 Main Agent Context Bundle 与手动 compact/resume 对齐已落地：主代理保存型 run 会写 `Main Agent Context Bundle v1`；`memory-compact --apply` 会登记最近一次主代理任务卡，API 可显式传 `main_context_bundle_ref`；`memory-resume --from-compact` 会把这张任务卡放进 `main_context_bundle`、推荐读取路径、handoff/context block 和 continue packet。旧 apply 包没有该字段也可继续恢复。
+- 2026-05-17 Main Agent Context Bundle 合同完整性已落地：context bundle 现在包含 RunScope、ToolManifest、Acceptance Contract、ArtifactRef、自检、schema migration policy、prompt budget 和 subagent-compatible owner model；`memory-compact --apply` 自动绑定最近任务卡前会做 scope match，避免 compact 老任务时误用最新任务卡；新增 `context-bundle latest --json` 只读观测入口。
+- 2026-05-17 Context Bundle / Compact Apply 体积守卫清零：把 context bundle 渲染拆到 `context_bundle_rendering.py`，把 runtime 到 bundle 的桥接拆到 `runtime_context_bundle.py`，把 compact apply restore refs/apply bundle/ledger payload 拆到 `compact_apply_payloads.py`；strict code-size 已回到 `hard=0 high-risk=0 soft=0`。
+- 2026-05-18 主代理执行合同层第一片已落地：新增 `agent/contracts/error_taxonomy.py`、`state_machine.py`、`idempotency.py` 和 `e2e_matrix.py`；ToolManifest failure taxonomy 已改用统一错误代码；这四个合同只描述错误、状态、幂等键和真实 E2E 场景，不直接阻断工作流，避免继续堆 prompt guard。
+- 2026-05-18 执行合同层已接入 create/dispatch：`create_subagents` 输出 `operation_contract`，`current_turn_run_state` 输出 `state_machine_contract` 和 `recovery_recommendations`；显式命名的小傻妞按结构化名字复用，默认泛名仍按 goal/write-root 区分，减少重复创建和重复调度。
+- 2026-05-17 compact/resume 体积边界同步整理：compact apply 的 Markdown 渲染拆到 `compact_apply_rendering.py`，compact resume 的 handoff/continue packet 派生输出拆到 `compact_resume_payloads.py`，新增 context bundle 专项测试拆到独立测试文件，避免主编排文件和大测试文件继续接近 code-size high-risk。
+- 2026-05-17 Tool Output Artifact Refs 第一片已落地：`memory-compact --apply` 会只读扫描 `memory_archive/artifacts/tool_outputs/index.jsonl`，按 request/run/task scope 登记同任务的大工具输出 artifact refs；`work_state_snapshot.artifact_refs` 和 `memory-resume --from-compact recommended_read_paths` 都会带上这些路径。它只登记路径、hash、size 和 call id，不读取 artifact 正文。
+- 2026-05-17 Artifact Read Hints 第一片已落地：`memory-resume --from-compact` 会从 `work_state_snapshot.artifact_refs` 生成 `artifact_read_hints`，在 handoff、context block 和 continue packet 中给出 `read_artifact` 的 `artifact_ref/offset/max_chars`；优先使用 scoped call id，避免恢复模型复制长路径出错。
 - `memory_store/` 已承接长期记忆 JSONL 存储，根层 `memory.py` 保留兼容入口。
 - `memory_routing/` 已有 route index 加载、匹配、校验、上下文读取和 receipt 结构。
 - `memory_archive/` 已有压缩前 snapshot、raw event、每日 hook/raw JSONL、留存和 token 估算骨架。
@@ -116,6 +124,8 @@
 - compact dry-run 解决了“还没压缩前不知道会碰到哪些归档、snapshot、token ledger 和风险”的问题；真实 apply 前可以先审计计划。
 - compact apply 语义拆分解决了“checkpoint_only 和真正 apply 混在一起”的问题；现在 apply 先形成可审计恢复入口和自检报告，明确保留原始内容，后续才能继续做更激进的上下文裁剪。
 - artifact externalizer 解决了“大工具输出只能混在工具上下文或归档摘要里”的问题；现在 compact/resume 能从 index 找到完整 artifact，而 raw archive、token ledger 和 apply metadata 不需要复制大正文。
+- tool-output artifact refs 解决了“外置文件已经存在，但 compact 恢复包没有把它当作一等恢复事实”的问题；现在同 scope 的大工具输出会进入 restore refs、work state artifact refs 和 resume 推荐读取路径，后续接手者能按 artifact 路径窄读正文。
+- artifact read hints 解决了“给了路径但没有告诉模型怎么读”的问题；恢复上下文现在会直接给出 `read_artifact` 分片读取参数，仍不自动读取正文、不执行工具。
 - tool output fail-safe checkpoint 解决了“黑盒大输出外置过程中如果失败，可能没有恢复锚点”的问题；现在 externalizer 前先留下 metadata-only snapshot，后续接管代理至少能看到工具名、hash、大小和建议下一步。
 - ToolContextReducer live prompt 保护解决了“artifact 已经外置，但下一轮 prompt 仍把完整大正文塞回上下文”的问题；现在模型看到的是恢复安全摘要，想读正文必须显式走 artifact 路径。
 - control-plane query 解决了“daily ledger、compact apply、tool output index 和 task/run refs 只能各自散扫”的问题；现在 compact/resume/debug 可以先走统一只读入口，再按 refs 回到权威文件核实。
@@ -318,3 +328,9 @@
 - 旧的未带 `memory_path` 索引记录不会污染隔离 run；这些记录仍可通过原 JSONL/daily 文件链路读取，不作为当前临时记忆文件的 LocalStore 命中。
 - 行为边界不变：LocalStore 仍只是搜索加速和线索入口，权威事实仍在当前 memory JSONL、daily ledger、task/run workspace 和 archive refs。
 - 本轮 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_local_store.py::test_jsonl_memory_local_store_search_is_scoped_by_memory_path -p no:cacheprovider` -> passed。
+
+## 2026-05-17 repeated compact lineage
+- 中文说明：为“长任务多次 compact 不丢状态”补上 `lineage` 链路。每次 `memory-compact --apply` 都会从 append-only ledger 找同一 `plan_id` 的上一包，记录 `cycle_index`、`previous_apply_id`、上一包 metadata/apply bundle 引用和当前包引用。
+- `memory-resume --from-compact` 和 `compact_continue_packet` 会带出同一份 lineage，让手动恢复、半自动恢复和后续自动恢复都能知道“这是第几次压缩、上一轮恢复包在哪里”，不用靠自然语言猜。
+- 行为边界不变：lineage 只读 ledger、只追加新 apply 记录，不删除、不重写、不裁剪 raw/hook/snapshot/token/task/run 文件；旧 apply 包没有 lineage 也能继续恢复。
+- 新增 focused 验收：连续 5 次 apply/resume 同一任务 scope，验证 apply id 不覆盖、cycle 连续递增、previous_apply_id 指向上一包、主代理 context bundle、tool-output artifact read hints、work_state 目标和下一步持续保留。

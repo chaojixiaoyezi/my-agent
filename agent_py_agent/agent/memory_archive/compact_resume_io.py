@@ -23,12 +23,14 @@ def resolve_compact_metadata_path(workspace: Path, apply_ref: str) -> Path:
 # 函数用途: 读取 metadata 指向的 apply bundle、restore refs、work state、self-check 和 compact context。
 def read_compact_apply_artifacts(metadata: dict[str, Any]) -> dict[str, Any]:
     refs = metadata.get("refs", {}) if isinstance(metadata.get("refs"), dict) else {}
+    # 函数用途: main_context_bundle 是恢复任务卡引用，缺失时返回空对象保持旧 apply 包兼容。
     return {
         "apply_bundle": _read_json_path(refs.get("apply_bundle")),
         "restore_refs": _read_json_path(refs.get("restore_refs")),
         "work_state": _read_json_path(refs.get("work_state_snapshot")),
         "self_check": _read_json_path(refs.get("post_compact_self_check")),
         "compact_context": _read_text_path(refs.get("compact_context")),
+        "main_context_bundle": _read_json_path(refs.get("main_context_bundle")),
     }
 
 

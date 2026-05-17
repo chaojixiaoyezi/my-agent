@@ -58,3 +58,5 @@ class AgentRunResult:
     memory_compact_auto_continued: bool = False
     memory_compact_auto_continued_from_apply_id: str = ""
     memory_compact_auto_continuation_depth: int = 0
+    main_context_bundle_path: str = ""
+    main_context_bundle_markdown_path: str = ""

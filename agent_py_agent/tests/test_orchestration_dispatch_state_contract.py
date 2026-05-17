@@ -41,7 +41,12 @@ def test_dispatch_execute_payload_includes_current_turn_run_state():
     tasks = {
         "planning": SimpleNamespace(id="planning", status="PLANNING", verification_status="UNVERIFIED"),
         "running": SimpleNamespace(id="running", status="RUNNING", verification_status="UNVERIFIED"),
-        "blocked": SimpleNamespace(id="blocked", status="BLOCKED", verification_status="UNVERIFIED"),
+        "blocked": SimpleNamespace(
+            id="blocked",
+            status="BLOCKED",
+            verification_status="UNVERIFIED",
+            failure_type="TOOL_UNAVAILABLE",
+        ),
         "done": SimpleNamespace(id="done", status="DONE", verification_status="VERIFIED"),
     }
     payload = json.loads(DispatchSubagentsTool(_dispatch_agent_with_state(tasks)).execute({
@@ -58,6 +63,16 @@ def test_dispatch_execute_payload_includes_current_turn_run_state():
     assert state["verified_run_ids"] == ["done"]
     assert state["next_action"] == "inspect_or_rescue_blocked_run_ids"
     assert state["suggested_tool_call"]["run_ids"] == ["blocked"]
+    assert state["state_machine_contract"] == "state_machine.v1"
+    assert state["recovery_recommendations"] == [{
+        "run_id": "blocked",
+        "status": "BLOCKED",
+        "failure_type": "TOOL_UNAVAILABLE",
+        "recommended_action": "repair_or_request_capability",
+        "allow_new_run": False,
+        "reason": "blocked_tool_unavailable",
+        "recovery_hint": "工具不可用；查看 ToolManifest，换可执行工具或申请能力。",
+    }]
 
 
 # LLM: create_subagents should expose current-turn state immediately, before a later dispatch call.
@@ -77,6 +92,20 @@ def test_create_payload_includes_current_turn_run_state(tmp_path):
     envelope = decode_action_envelope(payload["typed_envelope"])
     assert envelope.current_turn_run_state["dispatchable_run_ids"] == payload["created_run_ids"]
     assert envelope.dispatch_run_ids == payload["dispatch_run_ids"]
+
+
+# LLM: create payload idempotency metadata should be stable facts, not a prompt-only instruction.
+# 函数用途: 重复 create_subagents 时返回同一个幂等键，后续调度层可据此复用而不是扩容。
+def test_create_payload_includes_stable_operation_contract(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    params = {"goal": "写一个高端现代家具品牌首页 index.html", "role": "worker"}
+    first = json.loads(CreateSubagentsTool(agent).execute(params).output)
+    second = json.loads(CreateSubagentsTool(agent).execute(params).output)
+
+    assert first["operation_contract"]["operation"] == "create_subagents"
+    assert first["operation_contract"]["idempotency_key"] == second["operation_contract"]["idempotency_key"]
+    assert first["operation_contract"]["operation_id"] == second["operation_contract"]["operation_id"]
+    assert second["reused_run_ids"] == first["ids"]
 
 
 # LLM: schedule_child_subagents should expose current-turn state for nested parents too.

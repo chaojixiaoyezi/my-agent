@@ -154,6 +154,7 @@ Ctrl+C
 | `memory-archive-search` | 按字段搜索 raw/hook 归档 | 否 | 否 |
 | `memory-resume` | 从归档、LocalStore 和任务目录生成恢复线索 | 否 | 否 |
 | `task-workspace-list` | 查看 home workspace/tasks 任务工作区 | 否 | 否 |
+| `context-bundle` | 查看最新主代理上下文包、scope、自检和工具/运行合同 | 否 | 否 |
 | `memory-artifact-read` | 显式读取已登记 tool-output artifact 正文 | 否 | 否 |
 | `memory-fact-write` | 写入用户确认的 compact resume 补全事实源 | 是 | 否 |
 | `memory-compact` | 预演 memory compact 计划；`--apply` 生成非破坏性恢复产物 | `--apply` 时写 | 否 |
@@ -548,6 +549,20 @@ my-agent memory-fact-write --from-compact apply-xxx --acceptance "..." --constra
 | `--latest-test <text>` | 可重复 | 最近已跑或必须跑的测试状态。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
 
+## `context-bundle`
+
+```powershell
+my-agent context-bundle latest
+my-agent context-bundle latest --json
+```
+
+只读查看最新 `Main Agent Context Bundle v1`。它不会调用模型，也不会写文件。这个命令用于确认最近一次主代理保存型 run 的任务卡是否存在、scope 是否正确、自检是否通过，以及 RunScope、ToolManifest、Acceptance Contract 和 prompt budget 当前是什么。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `latest` | - | 查看最新主代理上下文包。 |
+| `--json` | `false` | 输出机器可读 JSON，方便前端或调试脚本读取。 |
+
 ## `memory-compact`
 
 ```powershell
@@ -555,6 +570,7 @@ my-agent memory-compact
 my-agent memory-compact --session-id sess-xxx --json
 my-agent memory-compact --request-id gwreq-xxx --limit 0
 my-agent memory-compact --apply
+my-agent memory-compact --apply --main-context-bundle-ref ~/.my-agent/memory_archive/snapshots/context_bundles/2026-05-17/example.json
 ```
 
 预演上下文压缩计划。默认 dry-run 会扫描 `memory/raw`、`memory/hooks`、`memory_archive/snapshots` 和 `memory_archive/tokens`，汇总可压缩线索、权威 snapshot、token ledger、风险提示和下一步建议，不删除、不覆盖、不重写任何归档文件。
@@ -573,6 +589,7 @@ my-agent memory-compact --apply
 | `--request-id <id>` | - | 按 request_id 精确过滤 archive 和 snapshot。 |
 | `--run-id <id>` | - | 按 run_id 精确过滤 archive 和 snapshot。 |
 | `--task-id <id>` | - | 按 task_id 精确过滤 archive 和 snapshot。 |
+| `--main-context-bundle-ref <path>` | 自动读取 latest | 显式指定主代理 context bundle；scope 不匹配时仍保留引用但记录 warning。未显式指定时会自动读取 latest，并在 scope 不匹配时跳过绑定，避免串任务。 |
 | `--level <0|1|2|3>` | - | 只扫描指定 `archive_level` 的 raw/hook 记录。 |
 | `--limit <n>` | `50` | 最多纳入多少条归档记录；`0` 表示不限。 |
 | `--json` | `false` | 输出机器可读 JSON。 |

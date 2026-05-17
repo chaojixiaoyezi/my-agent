@@ -47,6 +47,70 @@ def test_saved_run_creates_home_task_workspace(tmp_path: Path):
     assert (task_root / "timeline.jsonl").read_text(encoding="utf-8").strip()
 
 
+# LLM: main context bundle tests pin the root-agent prompt contract before implementation.
+# 函数用途: 验证普通保存 run 会生成主代理 context bundle，并把 refs-only 交接信息注入 prompt。
+def test_saved_run_writes_main_context_bundle_v1(tmp_path: Path):
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
+    agent = SimpleAgent(cfg, repo)
+
+    result = agent.run("做一个购物网站", request_id="req-ctx", run_id="run-ctx", task_id="主代理任务")
+
+    assert "# Main Agent Context Bundle v1" in result.prompt
+    assert result.main_context_bundle_path
+    bundle_path = Path(result.main_context_bundle_path)
+    assert bundle_path.exists()
+    payload = json.loads(bundle_path.read_text(encoding="utf-8"))
+    assert payload["schema"] == "main_context_bundle.v1"
+    assert payload["identity"]["owner_type"] == "main_agent"
+    assert payload["scope"]["request_id"] == "req-ctx"
+    assert payload["scope"]["run_id"] == "run-ctx"
+    assert payload["scope"]["task_id"] == "主代理任务"
+    assert payload["workspace_refs"]["primary_workspace_root"] == str(repo.resolve())
+    assert payload["workspace_refs"]["my_agent_home"] == str(home.resolve())
+    assert payload["task"]["user_prompt_preview"] == "做一个购物网站"
+    assert result.main_context_bundle_markdown_path
+    assert Path(result.main_context_bundle_markdown_path).exists()
+
+
+# LLM: save=False remains a persistence boundary even when the prompt gets an ephemeral context bundle.
+# 函数用途: 验证临时 run 可以看到主代理上下文说明，但不会写 context bundle 文件。
+def test_no_save_run_keeps_main_context_bundle_ephemeral(tmp_path: Path):
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
+    agent = SimpleAgent(cfg, repo)
+
+    result = agent.run("临时诊断", save=False, request_id="req-nosave", run_id="run-nosave", task_id="诊断")
+
+    assert "# Main Agent Context Bundle v1" in result.prompt
+    assert result.main_context_bundle_path == ""
+    assert result.main_context_bundle_markdown_path == ""
+    assert not (home / "memory_archive" / "snapshots" / "context_bundles").exists()
+
+
+# LLM: task-local runs must not inherit main-agent owner context through the new bundle path.
+# 函数用途: 验证子代理/控制面隔离上下文不会注入主代理 context bundle。
+def test_task_local_run_does_not_inject_main_context_bundle(tmp_path: Path):
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
+    agent = SimpleAgent(cfg, repo)
+
+    result = agent.run(
+        "隔离任务",
+        save=False,
+        request_id="req-local",
+        run_id="run-local",
+        task_id="局部任务",
+        context_scope="task_local",
+    )
+
+    assert "# Main Agent Context Bundle v1" not in result.prompt
+    assert result.main_context_bundle_path == ""
+
+
 # LLM: no-save must remain a hard persistence boundary even after home task workspaces are added.
 # 函数用途: 验证 save=False 不会创建任务工作区，也不会写 legacy memory 或 daily mirror。
 def test_no_save_run_does_not_create_task_workspace_or_daily_memory(tmp_path: Path):
