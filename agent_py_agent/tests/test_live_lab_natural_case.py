@@ -15,6 +15,13 @@ from scripts.live_lab.file_repair_wave_case import (
     assert_file_repair_wave_created,
     seed_failed_file_child,
 )
+from scripts.live_lab.markdown_repair_wave_case import (
+    _assert_markdown_report_output,
+    _complete_markdown_report,
+    _natural_markdown_repair_wave_prompt,
+    assert_markdown_repair_wave_created,
+    seed_failed_markdown_child,
+)
 from scripts.live_lab.session import LabSessionManager
 from scripts.live_lab.shop_case import (
     _assert_shop_html_output,
@@ -104,6 +111,21 @@ def test_natural_file_repair_wave_case_is_registered_as_real_opt_in_suite():
     assert "contract" not in prompt.lower()
 
 
+# LLM: Markdown repair expands non-web E2E beyond CSV and static-site outputs.
+# 函数用途: 确认 Markdown 文档修复 case 也是真实模型 opt-in，并保持普通用户话术。
+def test_natural_markdown_repair_wave_case_is_registered_as_real_opt_in_suite():
+    prompt = _natural_markdown_repair_wave_prompt()
+
+    assert SUITES["markdown-repair"] == ["health", "natural_markdown_repair_wave"]
+    assert "natural_markdown_repair_wave" in REAL_CASES
+    assert "小傻妞" in prompt
+    assert "Markdown" in prompt
+    assert "lab_outputs/report/weekly.md" in prompt
+    assert "dispatch" not in prompt.lower()
+    assert "runner" not in prompt.lower()
+    assert "contract" not in prompt.lower()
+
+
 # LLM: The repair-wave seed must look like a real failed child run, not a prose-only fixture.
 # 函数用途: 确认测试台能预置一个待修复购物站 run，并保留机器可读产物、验收失败和写入边界。
 def test_seed_failed_shop_child_creates_rejected_run_with_artifact_refs(tmp_path):
@@ -133,6 +155,23 @@ def test_seed_failed_file_child_creates_rejected_run_with_content_refs(tmp_path)
     report = tmp_path / ".my_agent" / "subagents" / seed.run_id / "reports" / "test_execution.json"
     assert output.exists()
     assert "order_id,customer,total" not in output.read_text(encoding="utf-8")
+    assert task_json.exists()
+    assert report.exists()
+    text = report.read_text(encoding="utf-8")
+    assert '"validation_method": "content_check"' in text
+    assert str(output) in task_json.read_text(encoding="utf-8")
+
+
+# LLM: Markdown repair seed should look like a normal failed document child with content checks.
+# 函数用途: 确认 Markdown 文档失败 seed 有真实 task、坏产物和 content_check 父级失败证据。
+def test_seed_failed_markdown_child_creates_rejected_run_with_content_refs(tmp_path):
+    seed = seed_failed_markdown_child(tmp_path)
+
+    output = tmp_path / "lab_outputs" / "report" / "weekly.md"
+    task_json = tmp_path / ".my_agent" / "subagents" / seed.run_id / "task.json"
+    report = tmp_path / ".my_agent" / "subagents" / seed.run_id / "reports" / "test_execution.json"
+    assert output.exists()
+    assert "# 本周进展" not in output.read_text(encoding="utf-8")
     assert task_json.exists()
     assert report.exists()
     text = report.read_text(encoding="utf-8")
@@ -210,6 +249,40 @@ def test_assert_file_repair_wave_created_requires_verified_repair_sibling(tmp_pa
     )
 
     assert_file_repair_wave_created(tmp_path, seed.run_id)
+
+
+# LLM: Markdown repair completion should require a verified repair sibling and exact document content.
+# 函数用途: 复现 Markdown repair-wave 状态门；只有同目标 DONE/VERIFIED 修复 run 才能通过。
+def test_assert_markdown_repair_wave_created_requires_verified_repair_sibling(tmp_path):
+    seed = seed_failed_markdown_child(tmp_path)
+
+    with pytest.raises(RuntimeError, match="没有发现已验证的 Markdown 修复小傻妞"):
+        assert_markdown_repair_wave_created(tmp_path, seed.run_id)
+
+    repair_dir = tmp_path / ".my_agent" / "subagents" / "subagent-markdown-repair"
+    repair_dir.mkdir(parents=True)
+    output = tmp_path / "lab_outputs" / "report" / "weekly.md"
+    output.write_text(_complete_markdown_report(), encoding="utf-8")
+    (repair_dir / "output.json").write_text(
+        '{"artifacts":[{"path":"' + str(output) + '"}]}',
+        encoding="utf-8",
+    )
+    (repair_dir / "task.json").write_text(
+        "\n".join([
+            "{",
+            '  "id": "subagent-markdown-repair",',
+            '  "status": "DONE",',
+            '  "verification_status": "VERIFIED",',
+            '  "role": "worker",',
+            '  "agent_name": "小傻妞-Markdown修复",',
+            '  "goal": "修复 lab_outputs/report/weekly.md",',
+            '  "output_json": "' + str(repair_dir / "output.json") + '"',
+            "}",
+        ]),
+        encoding="utf-8",
+    )
+
+    assert_markdown_repair_wave_created(tmp_path, seed.run_id)
 
 
 # LLM: Natural Live Lab should not fail long page tasks because of an artificial test harness tool cap.
@@ -290,6 +363,20 @@ def test_assert_order_csv_output_checks_required_content(tmp_path):
 
     output.write_text(_complete_order_csv(), encoding="utf-8")
     _assert_order_csv_output(output)
+
+
+# LLM: Markdown repair artifact gate checks concrete document content.
+# 函数用途: 确认周报 Markdown 缺标题/列表/风险段时失败，完整内容才通过。
+def test_assert_markdown_report_output_checks_required_content(tmp_path):
+    output = tmp_path / "lab_outputs" / "report" / "weekly.md"
+    output.parent.mkdir(parents=True)
+    output.write_text("# 草稿\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Markdown 报告缺少内容"):
+        _assert_markdown_report_output(output)
+
+    output.write_text(_complete_markdown_report(), encoding="utf-8")
+    _assert_markdown_report_output(output)
 
 
 # LLM: Shop helper checks should report exact missing ids/actions for repair workers.

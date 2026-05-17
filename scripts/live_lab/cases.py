@@ -16,6 +16,7 @@ import textwrap
 
 from .constants import REPO_ROOT
 from .file_repair_wave_case import case_natural_file_repair_wave
+from .markdown_repair_wave_case import case_natural_markdown_repair_wave
 from .shop_case import (
     _external_asset_refs,
     _has_disabled_control,
@@ -50,6 +51,8 @@ def run_case(lab, case_name: str) -> None:
         "natural_shop_repair_wave": case_natural_shop_repair_wave,
         # LLM: File repair canary stays split so generic cases.py does not grow CSV-specific assertions.
         "natural_file_repair_wave": case_natural_file_repair_wave,
+        # LLM: Markdown repair canary keeps document checks out of the generic dispatcher.
+        "natural_markdown_repair_wave": case_natural_markdown_repair_wave,
     }
     handlers[case_name](lab)
 

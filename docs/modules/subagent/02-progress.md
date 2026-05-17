@@ -1747,3 +1747,15 @@
 - 真实发现 3：父级网页验收只看常规文件/链接时，容易漏掉业务区块。`static_site_check` 现在支持结构化 `required_dom_ids`，测试项预处理会从 task acceptance 传入这些 id；这仍是通用静态站点验收能力，不是购物站特判。
 - 真实复测：`20260517-shop-repair-wave-03` 使用 MiniMax-M2.7 跑 `--suite shop-repair --real-llm` 返回 `LIVE_LAB_PASS`；最终同一 `lab_outputs/shop-demo/index.html` 被修复，并出现 DONE/VERIFIED 的修复 sibling 覆盖旧失败 run。
 - 下一步：把同样 repair-wave 合同带到非网页场景，例如 Excel/文档/代码仓库，让验收条件、目标 refs 和产品写入根都来自结构化事实，而不是依赖模型复述。
+
+## 2026-05-17 普通文件内容合同与 Markdown repair-wave 第一片
+
+- 中文说明：这一片把 repair-wave 从“网页/购物站”和“单个 CSV seed”继续往普通文件推进。目标不是让模型背术语，而是让用户用自然语言说“下面几行要一字不差”，系统也能变成父级可执行 `content_check`。
+- 对照结论：会话运行时 的工具调用、通道运行时 的 session/run 状态、长期助手 的 delegate handoff 都说明一件事：机器验收要靠结构化 refs 和 tests，不靠最终回复说“我检查过”。这次把普通文件内容也放进同一条合同。
+- 已实现：`required_content_lines.py` 支持 `required_content_lines[file]`、锚定代码块，以及“下面 N 行要一字不差”的中英文自然语言块；多文件 artifact 时只按 per-file 映射生成检查，不把某个文件的要求套到另一个文件上。
+- 已实现：父级验收链路会把 task-level 内容合同传入 `prepare_test_items()`；`execution_inferred_content_items.py` 可为单文件和 per-file 多文件产物生成 `content_check`。
+- 已实现：repair contract 明确要求修复小傻妞写回可执行父级验收项，推荐 `file_check/content_check/static_site_check/command`，避免 repair worker 只写“已修复”。
+- 已实现：新增 `markdown-repair` Live Lab case，预置坏 Markdown 周报，再要求 root 用普通中文安排小傻妞修同一 `lab_outputs/report/weekly.md`。
+- 已测试：`test_subagent_test_item_preparation.py` 覆盖自然语言精确行块、fenced expected block、多文件 per-file 内容映射；`test_parent_acceptance_repair_payload.py` 覆盖 repair contract 的输出测试要求；`test_live_lab_natural_case.py` 覆盖 markdown repair seed、状态门和 artifact gate。
+- 真实复测：`20260517-markdown-repair-wave-01` 使用 MiniMax-M2.7 跑 `--suite markdown-repair --real-llm` 返回 `LIVE_LAB_PASS`。root 通过普通中文提示派出 `小傻妞-周报修复`，最终 `lab_outputs/report/weekly.md` 包含五行要求内容，旧失败 run 被同目标 verified sibling 覆盖。
+- 下一步：把同样的 content contract 带到更复杂的多文件/代码仓库 repair wave；如果失败，优先修 content contract、target refs、run 状态合同，不再加场景专用提示词补丁。

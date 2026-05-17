@@ -9,8 +9,8 @@ from typing import Any
 from .execution_executor import TestExecutor
 from .execution_test_items import TestItemPreparationRequest, prepare_test_items
 from .models import SubAgentTask
+from .parent_acceptance_content_contracts import content_contract_args_for_task
 from .parsing import _dict_list
-from .required_content_lines import required_content_lines_for_task
 from .static_required_files import (
     required_static_dom_ids_for_task,
     required_static_files_for_task,
@@ -45,8 +45,8 @@ def prepared_tests_for_parent_acceptance(
             required_files=required_static_files_for_task(task),
             # LLM: Required DOM ids are explicit task facts, not prose guesses, so preflight can enforce them deterministically.
             required_dom_ids=required_static_dom_ids_for_task(task),
-            # LLM: Required content lines give CSV/TXT/Markdown artifacts the same machine-check path.
-            required_content_lines=required_content_lines_for_task(task),
+            # LLM: Parent preflight gets the same bundled content map as confirmed execution.
+            **content_contract_args_for_task(task),
             site_root_hints=static_site_root_hints_for_task(task),
         )
     )

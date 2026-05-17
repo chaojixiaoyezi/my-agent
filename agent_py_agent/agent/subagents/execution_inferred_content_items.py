@@ -22,6 +22,7 @@ class ContentCheckInferenceRequest:
     workspace_root: Path
     existing_tests: list[dict[str, Any]]
     required_lines: list[str] = field(default_factory=list)
+    required_files: dict[str, list[str]] = field(default_factory=dict)
 
 
 # LLM: inferred_content_check_items converts explicit content-line contracts into file-bound checks.
@@ -29,7 +30,12 @@ class ContentCheckInferenceRequest:
 def inferred_content_check_items(request: ContentCheckInferenceRequest) -> list[dict[str, Any]]:
     """Return inferred content_check tests for one clear plain-file artifact."""
 
-    if not request.required_lines or _has_content_check(request.existing_tests):
+    if _has_content_check(request.existing_tests):
+        return []
+    mapped = _mapped_content_check_items(request)
+    if mapped:
+        return mapped
+    if not request.required_lines:
         return []
     target = _single_content_artifact_path(request.artifact_paths)
     if target is None:
@@ -44,6 +50,64 @@ def inferred_content_check_items(request: ContentCheckInferenceRequest) -> list[
         }
         for index, line in enumerate(_dedupe_texts(request.required_lines), start=1)
     ]
+
+
+# LLM: _mapped_content_check_items honors explicit file-to-lines contracts for multi-file outputs.
+# 函数用途: 多个 artifact 时按文件名或相对路径匹配目标文件，生成对应 content_check；不按顺序猜。
+def _mapped_content_check_items(request: ContentCheckInferenceRequest) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for file_key, lines in request.required_files.items():
+        target = _artifact_path_for_key(file_key, request.artifact_paths, request.workspace_root)
+        if target is None:
+            continue
+        file_path = _relative_or_absolute(target, request.workspace_root)
+        label = Path(file_key).name or "artifact"
+        items.extend(
+            {
+                "name": f"inferred content check {label} {index}",
+                "validation_method": "content_check",
+                "file_path": file_path,
+                "content_pattern": line,
+            }
+            for index, line in enumerate(_dedupe_texts(lines), start=1)
+        )
+    return items
+
+
+# LLM: _artifact_path_for_key resolves a file-scoped content contract without scanning arbitrary files.
+# 函数用途: 用 artifact refs 精确匹配相对路径或唯一 basename；有歧义时返回 None。
+def _artifact_path_for_key(file_key: str, artifact_paths: list[tuple[str, Path]], workspace_root: Path) -> Path | None:
+    key = _normalized_key(file_key)
+    matches = [(_artifact_match_kind(key, raw, path, workspace_root), path) for raw, path in artifact_paths]
+    exact = _paths_for_match(matches, "exact")
+    basename = _paths_for_match(matches, "basename")
+    return _single_path(exact) or (_single_path(basename) if not exact else None)
+
+
+# LLM: _paths_for_match filters precomputed match tuples without nesting path-resolution logic.
+# 函数用途: 从 artifact 匹配结果里提取某类命中的路径，保持主解析函数扁平。
+def _paths_for_match(matches: list[tuple[str, Path]], kind: str) -> list[Path]:
+    return [path for match_kind, path in matches if match_kind == kind]
+
+
+# LLM: _single_path returns a path only when matching was unambiguous.
+# 函数用途: 唯一命中才返回路径；多命中或无命中都交给上层跳过，避免猜错文件。
+def _single_path(paths: list[Path]) -> Path | None:
+    return paths[0] if len(paths) == 1 else None
+
+
+# LLM: _artifact_match_kind keeps path-key matching shallow and explicit for code-size guards.
+# 函数用途: 判断内容合同的文件 key 是精确命中 artifact ref，还是只命中了唯一文件名。
+def _artifact_match_kind(key: str, raw: str, path: Path, workspace_root: Path) -> str:
+    if not _plain_file_artifact(path):
+        return ""
+    raw_key = _normalized_key(raw)
+    rel_key = _normalized_key(_relative_or_absolute(path, workspace_root))
+    if key in {raw_key, rel_key}:
+        return "exact"
+    if key and Path(key).name == path.name:
+        return "basename"
+    return ""
 
 
 # LLM: _has_content_check avoids duplicating runner-declared concrete content validation.
@@ -72,15 +136,27 @@ def _content_pattern_value(item: dict[str, Any]) -> str:
 def _single_content_artifact_path(artifact_paths: list[tuple[str, Path]]) -> Path | None:
     candidates: list[Path] = []
     for _raw, path in artifact_paths:
-        if path.name.startswith("test_") and path.suffix == ".py":
-            continue
-        if path.exists() and path.is_dir():
-            continue
-        if path.suffix.lower() in {".html", ".htm"}:
+        if not _plain_file_artifact(path):
             continue
         if path not in candidates:
             candidates.append(path)
     return candidates[0] if len(candidates) == 1 else None
+
+
+# LLM: _plain_file_artifact keeps content checks away from pytest files, directories and static HTML pages.
+# 函数用途: 判断 artifact 是否适合逐行文本 content_check；HTML 和 test_*.py 走各自专门验收。
+def _plain_file_artifact(path: Path) -> bool:
+    if path.name.startswith("test_") and path.suffix == ".py":
+        return False
+    if path.exists() and path.is_dir():
+        return False
+    return path.suffix.lower() not in {".html", ".htm"}
+
+
+# LLM: _normalized_key compares artifact refs as portable relative path strings.
+# 函数用途: 规范用户写的 file key、artifact raw path 和 workspace 相对路径，供精确匹配。
+def _normalized_key(value: object) -> str:
+    return str(value or "").strip().strip("'\"").replace("\\", "/").lstrip("./")
 
 
 # LLM: _relative_or_absolute keeps reports portable when the inferred file sits below workspace_root.

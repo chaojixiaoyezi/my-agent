@@ -14,6 +14,7 @@ scripts/
     |-- constants.py                   # suite 名、默认目录等常量
     |-- file_repair_wave_case.py       # 普通文件失败后修复闭环真实 case
     |-- log_analysis_replay.py         # LOG 离线 replay 具体流程
+    |-- markdown_repair_wave_case.py   # Markdown 文档失败后修复闭环真实 case
     |-- shop_case.py                   # 购物站业务流真实 case
     `-- shop_repair_wave_case.py       # 购物站失败后修复闭环真实 case
 ```
@@ -26,6 +27,7 @@ scripts/
 - `live_lab/runner.py` 的 `_LabInterface`：兼容旧 case surface；把 `run_root`、`prompts_dir`、`responses_dir`、`summary_path` 等目录属性转发给 case，case 不直接访问 runner/session 私有字段。
 - `live_lab/cases.py`：登记有哪些 case，每个 case 怎么跑。
 - `live_lab/file_repair_wave_case.py`：负责 `file-repair` suite 的坏 CSV seed、自然语言修复 prompt、最终内容 gate 和 verified repair sibling 检查。
+- `live_lab/markdown_repair_wave_case.py`：负责 `markdown-repair` suite 的坏 Markdown seed、自然语言修复 prompt、最终内容 gate 和 verified repair sibling 检查。
 - `live_lab/log_analysis_replay.py`：把 SecurityAlertV1 fixture 跑成 LOG artifacts。
 - `agent_py_agent/tests/test_live_lab_log_analysis_replay.py`：验证 replay 的成功和失败路径。
 
@@ -108,3 +110,12 @@ scripts/
 - `scripts/live_lab/file_repair_wave_case.py`：负责 `seed_failed_file_child()`、`_natural_file_repair_wave_prompt()`、`assert_file_repair_wave_created()` 和最终 CSV 内容 gate。seed 使用真实 `SubAgentManager` 创建 task，并在 acceptance checks 里写结构化 `required_content_lines`。
 - 产品侧依赖：`required_content_lines.py` 从任务验收文本抽取必须出现的字面行，`execution_test_items.py` 在单个普通文件 artifact 上生成 `content_check`。这条路只读 workspace 内真实文件，不相信模型自述。
 - 当前真实验收：`20260517-file-repair-wave-02` 已通过。最终 `orders.csv` 四行一字不差，旧失败 run 的 4 条父级 `content_check` 全部通过；后续可把同一合同扩展到 Excel 导出清单、Markdown 报告和代码生成任务。
+
+## 2026-05-17 markdown-repair structure
+
+- 中文说明：`markdown-repair` suite 是普通文档 repair-wave canary。它把同一套“失败 refs -> 修复小傻妞 -> 真实文件内容门 -> verified sibling 覆盖旧失败 run”的合同从 CSV 扩到 Markdown。
+- `scripts/live_lab/constants.py`：`markdown-repair` suite 显式包含 `health` 和 `natural_markdown_repair_wave`；`natural_markdown_repair_wave` 属于 `REAL_CASES`，必须传 `--real-llm`。
+- `scripts/live_lab/cases.py`：只负责把 `natural_markdown_repair_wave` 分发到拆分模块，避免主 case 文件继续膨胀。
+- `scripts/live_lab/markdown_repair_wave_case.py`：负责 `seed_failed_markdown_child()`、`_natural_markdown_repair_wave_prompt()`、`assert_markdown_repair_wave_created()` 和最终 Markdown 内容 gate。seed 使用真实 `SubAgentManager` 创建 task，并在 acceptance checks 里写 `required_content_lines[weekly.md]`。
+- 产品侧依赖：`required_content_lines.py` 既支持结构化 per-file 内容合同，也支持普通用户“下面 N 行一字不差”这种自然语言块；`execution_test_items.py` 会把目标文件和内容行映射成 `content_check`，仍然只读真实产物文件，不相信口头回复。
+- 当前离线验收：`agent_py_agent/tests/test_live_lab_natural_case.py` 已覆盖 suite 注册、坏 Markdown seed、verified repair sibling 状态门和最终内容 gate。真实 `--suite markdown-repair --real-llm` 是后续 repair-wave 压测入口。

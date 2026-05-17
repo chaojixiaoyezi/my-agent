@@ -14,8 +14,10 @@ _SAME_RUN_ACTIONS = [
     "preserve_original_success_contract",
     "execute_generated_scripts_or_commands_if_needed",
     "verify_target_artifacts",
+    "emit_executable_tests_for_parent_acceptance",
     "report_artifact_and_test_refs",
 ]
+_RECOMMENDED_TEST_METHODS = ["file_check", "content_check", "static_site_check", "command"]
 _MUST_NOT = [
     "create a separate child only to execute the repaired script or command",
     "declare done before target artifacts exist and have been read or tested",
@@ -57,6 +59,7 @@ def repair_contract_acceptance_checks(failure_refs: list[dict[str, object]] | No
         "同一个 repair run 内完成读取 failure refs、修复、必要执行和产物验证",
         "修复后必须重新满足原始完整验收要求，不能只修最近一个症状",
         "如果生成或修改了脚本/命令，必须在本 run 内执行或明确给出不能执行的机器证据",
+        "output.json.tests 必须包含可执行父级验收项：优先 file_check/content_check/static_site_check，必要时才用 command",
         "完成前必须报告目标 artifact/test refs，不要只说已经修好",
     ]
     checks.extend(f"原始验收: {item}" for item in repair_contract_full_success_checks(failure_refs or [])[:8])
@@ -104,6 +107,8 @@ def _repair_contract(request: RepairContractRequest, required_paths: list[str]) 
         "target_artifact_refs": _unique_text(request.target_artifact_refs),
         "full_success_checks": repair_contract_full_success_checks(request.failure_refs),
         "same_run_required_actions": list(_SAME_RUN_ACTIONS),
+        "output_tests_required": True,
+        "recommended_test_methods": list(_RECOMMENDED_TEST_METHODS),
         "must_not": list(_MUST_NOT),
     }
 

@@ -21,8 +21,8 @@ from .parent_acceptance_auto_policy import (
     ParentAcceptanceAutoPolicy,
     build_parent_acceptance_auto_policy,
 )
+from .parent_acceptance_content_contracts import content_contract_args_for_task
 from .parsing import _dict_list
-from .required_content_lines import required_content_lines_for_task
 from .static_required_files import (
     required_static_dom_ids_for_task,
     required_static_files_for_task,
@@ -269,8 +269,8 @@ def _manual_execution_tests(task: SubAgentTask, output: dict[str, object], works
             required_files=required_static_files_for_task(task),
             # LLM: Confirmed test execution enforces the same explicit DOM contract as dry-run preflight.
             required_dom_ids=required_static_dom_ids_for_task(task),
-            # LLM: Confirmed execution also honors non-web content contracts from task facts.
-            required_content_lines=required_content_lines_for_task(task),
+            # LLM: Confirmed execution shares the same bundled plain-file content contract as preflight.
+            **content_contract_args_for_task(task),
             site_root_hints=static_site_root_hints_for_task(task),
         )
     )

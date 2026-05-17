@@ -35,6 +35,8 @@ class TestItemPreparationRequest:
     required_dom_ids: list[str] = field(default_factory=list)
     # LLM: required_content_lines lets parent acceptance validate plain artifacts without trusting model self-reports.
     required_content_lines: list[str] = field(default_factory=list)
+    # LLM: required_content_files maps exact file refs to required lines for multi-artifact outputs.
+    required_content_files: dict[str, list[str]] = field(default_factory=dict)
     site_root_hints: list[object] = field(default_factory=list)
 
 
@@ -87,6 +89,7 @@ def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, An
             workspace_root=workspace_root,
             existing_tests=prepared,
             required_lines=request.required_content_lines,
+            required_files=request.required_content_files,
         )
     )
     if inferred or content_checks:
