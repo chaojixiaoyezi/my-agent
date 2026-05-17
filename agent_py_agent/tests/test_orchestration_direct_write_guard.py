@@ -39,7 +39,7 @@ def test_delegate_only_prompt_blocks_root_write_file_to_deliverables():
     result = maybe_block_delegate_only_direct_write(
         DelegateOnlyDirectWriteGuardRequest(
             agent=_agent(),
-            user_prompt="只能通过子代理完成，root 不能自己直接写购物网站代码。",
+            user_prompt="delegate_only=true\n你自己不要做，只派小傻妞/子代理做。",
             payload={"tool": "write_file", "path": "/tmp/workspace/deliverables/index.html", "content": "..."},
         )
     )
@@ -55,7 +55,7 @@ def test_delegate_only_prompt_blocks_shell_redirection_write():
     result = maybe_block_delegate_only_direct_write(
         DelegateOnlyDirectWriteGuardRequest(
             agent=_agent(),
-            user_prompt="必须通过 builder 子代理实现，root must not write deliverables.",
+            user_prompt="delegate_only=true\n必须通过 builder 子代理实现。",
             payload={"tool": "run_command", "command": "cat > deliverables/index.html <<'EOF'\n...\nEOF"},
         )
     )
@@ -65,8 +65,8 @@ def test_delegate_only_prompt_blocks_shell_redirection_write():
     assert "delegated_direct_write_blocked" in result.output
 
 
-def test_natural_delegate_prompt_blocks_root_write_file_to_deliverables():
-    """自然语言说“不要亲自写页面/安排小傻妞”时，也要阻止 root 偷写产物。"""
+def test_natural_delegate_prompt_does_not_trigger_code_layer_guard():
+    """普通自然语言不再由代码层词表触发 delegate-only，约束要靠模型写结构化字段。"""
     result = maybe_block_delegate_only_direct_write(
         DelegateOnlyDirectWriteGuardRequest(
             agent=_agent(),
@@ -75,9 +75,7 @@ def test_natural_delegate_prompt_blocks_root_write_file_to_deliverables():
         )
     )
 
-    assert result is not None
-    assert result.ok is False
-    assert "delegated_direct_write_blocked" in result.output
+    assert result is None
 
 
 # LLM: recovery wording that asks root to arrange takeover still means delegated product writing.
@@ -87,7 +85,7 @@ def test_natural_recovery_delegate_prompt_blocks_root_product_write():
         DelegateOnlyDirectWriteGuardRequest(
             agent=_agent(),
             user_prompt=(
-                "继续刚才任务。如果有小傻妞超时、卡住，或者页面还没写完，"
+                "delegate_only=true\n继续刚才任务。如果有小傻妞超时、卡住，或者页面还没写完，"
                 "就安排它从上次进度接着写，或者派新的小傻妞接管修复。"
             ),
             payload={"tool": "append_file", "path": "/tmp/workspace/deliverables/index.html", "content": "..."},
@@ -107,7 +105,7 @@ def test_natural_recovery_delegate_prompt_blocks_root_full_rewrite():
         DelegateOnlyDirectWriteGuardRequest(
             agent=_agent(),
             user_prompt=(
-                "继续刚才的高端家具品牌首页任务。你只需要按已有小傻妞任务状态继续推进；"
+                "delegate_only=true\n继续刚才的高端家具品牌首页任务。你只需要按已有小傻妞任务状态继续推进；"
                 "如果有小傻妞超时、卡住，或者页面还没写完，就安排它从上次进度接着写，"
                 "或者派新的小傻妞接管修复。最终网页仍然放到 /tmp/workspace/deliverables/index.html，"
                 "并检查页面完整、链接有效、布局正常。"
@@ -216,7 +214,7 @@ def test_active_delegated_root_allows_explicit_parent_repair_override():
     result = maybe_block_delegate_only_direct_write(
         DelegateOnlyDirectWriteGuardRequest(
             agent=_delegated_root_agent(),
-            user_prompt="先安排小傻妞去做，如果不合格你亲自修复页面。",
+            user_prompt="parent_product_write=allow\n先安排小傻妞去做，如果不合格你亲自修复页面。",
             payload={"tool": "write_file", "path": "/tmp/workspace/deliverables/index.html", "content": "..."},
         )
     )

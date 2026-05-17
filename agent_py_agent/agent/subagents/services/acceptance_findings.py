@@ -10,6 +10,7 @@ from __future__ import annotations
 SubAgentManager 通过 facade 方法委托到这里。
 """
 
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -26,6 +27,10 @@ from .acceptance_role_coverage import required_role_coverage_finding
 
 if TYPE_CHECKING:
     from ..models import SubAgentTask
+
+_STRUCTURED_FIELD_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_\-.]*)\s*:\s*(.*)$")
+_CHILD_SPAWN_BOOL_FIELDS = {"child_spawn_required", "required_child_spawn", "require_child_spawn"}
+_CHILD_SPAWN_COUNT_FIELDS = {"required_child_depth", "required_child_count", "required_children"}
 
 
 # LLM: _dict_list 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -255,28 +260,41 @@ def _required_child_spawn_finding(task, created_at: float) -> AcceptanceReviewFi
     )
 
 
-# LLM: _child_spawn_required keeps the hard check scoped to explicit delegation goals.
-# 函数用途: 从 goal/acceptance 文本识别“必须创建下级”的任务，避免普通 coordinator 被误伤。
+# LLM: _child_spawn_required keeps the hard check scoped to machine fields.
+# 函数用途: 只从 child_spawn_required/required_child_depth 等结构化字段识别必须创建下级。
 def _child_spawn_required(task) -> bool:
     text = " ".join([str(getattr(task, "goal", "") or ""), *[str(item) for item in getattr(task, "acceptance_checks", []) or []]])
-    text = text.lower()
     role = str(getattr(task, "role", "") or "").lower()
     agent_name = str(getattr(task, "agent_name", "") or "").lower()
     leaf_self = role == "leaf_worker" or "leaf" in agent_name
     if leaf_self:
         return False
-    hard_markers = (
-        "create depth=",
-        "spawn depth=",
-        "创建 depth=",
-        "创建depth=",
-        "创建下级",
-        "创建直接下级",
-        "创建 child",
-    )
-    if any(marker in text for marker in hard_markers):
-        return True
-    return (not leaf_self) and "创建 leaf_worker" in text
+    return _structured_child_spawn_required(text)
+
+
+# LLM: _structured_child_spawn_required parses only explicit child-spawn protocol fields.
+# 函数用途: 普通“创建下级/派孙代理”句子不会成为硬验收合同，必须写机器字段才触发。
+def _structured_child_spawn_required(text: str) -> bool:
+    for line in str(text or "").splitlines():
+        match = _STRUCTURED_FIELD_RE.match(line)
+        if not match:
+            continue
+        field = match.group(1).strip().casefold().replace("-", "_")
+        value = match.group(2).strip().casefold()
+        if field in _CHILD_SPAWN_BOOL_FIELDS and value in {"1", "true", "yes", "required"}:
+            return True
+        if field in _CHILD_SPAWN_COUNT_FIELDS and _positive_int(value):
+            return True
+    return False
+
+
+# LLM: _positive_int keeps child-spawn numeric fields conservative.
+# 函数用途: 只有明确大于 0 的结构化数字才表示需要真实 child_ids。
+def _positive_int(value: str) -> bool:
+    try:
+        return int(str(value or "").strip()) > 0
+    except ValueError:
+        return False
 
 
 # LLM: _task_child_ids normalizes persisted child ids without trusting model output refs.

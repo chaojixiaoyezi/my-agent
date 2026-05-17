@@ -126,9 +126,9 @@ def test_required_content_lines_from_structured_acceptance_text():
     ]
 
 
-# LLM: Natural exact-line instructions should become content contracts without exposing internal field names.
-# 函数用途: 用户只说“下面四行一字不差”时，也能抽取后续四行作为普通文件机器验收内容。
-def test_required_content_lines_from_natural_exact_line_count_block():
+# LLM: natural exact-line instructions are no longer parsed by product code.
+# 函数用途: 普通中文说明不能替代 required_content_lines 机器字段，避免代码层靠自然语言猜验收内容。
+def test_required_content_lines_ignores_natural_exact_line_count_block():
     lines = required_content_lines_from_texts([
         """
         下面四行要一字不差出现在 CSV 里：
@@ -140,17 +140,12 @@ def test_required_content_lines_from_natural_exact_line_count_block():
         """
     ])
 
-    assert lines == [
-        "order_id,customer,total,status,notes",
-        "A-1001,Lin Studio,299.00,PAID,first order",
-        "A-1002,North Home,188.50,SHIPPED,priority delivery",
-        "SUMMARY,total_orders=2,total_amount=487.50,status=OK,notes=ready",
-    ]
+    assert lines == []
 
 
-# LLM: Fenced expected content gives users a readable way to define exact file checks.
-# 函数用途: 用户把必须包含的内容放进代码块时，逐行提取代码块内容，但不把外部说明当验收内容。
-def test_required_content_lines_from_fenced_expected_block():
+# LLM: fenced prose without a protocol field is deliberately ignored.
+# 函数用途: 代码块本身不能成为硬验收合同，必须由 required_content_lines 字段承载。
+def test_required_content_lines_ignores_natural_fenced_expected_block():
     lines = required_content_lines_from_texts([
         """
         报告必须包含以下内容：
@@ -163,21 +158,15 @@ def test_required_content_lines_from_fenced_expected_block():
         """
     ])
 
-    assert lines == ["# 周报", "- 完成数据清洗", "- 风险：等待验收"]
+    assert lines == []
 
 
 # LLM: Per-file content contracts are explicit enough for multi-artifact parent checks.
-# 函数用途: 从 `required_content_lines[file]` 和 “文件必须包含以下内容”提取文件到内容行的映射。
-def test_required_content_lines_by_file_from_structured_and_natural_text():
+# 函数用途: 只从 `required_content_lines[file]` 机器字段提取文件到内容行的映射。
+def test_required_content_lines_by_file_from_structured_text():
     mapping = required_content_lines_by_file_from_texts([
         "required_content_lines[orders.csv]: order_id,total | A-1001,299.00",
-        """
-        report.md 必须包含以下内容：
-        ```md
-        # 订单报告
-        - 已核对
-        ```
-        """,
+        "required_content_lines[report.md]: # 订单报告 | - 已核对",
     ])
 
     assert mapping == {

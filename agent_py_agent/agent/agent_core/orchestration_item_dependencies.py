@@ -1,8 +1,9 @@
-# LLM: Item dependency enrichment turns natural sibling pipelines into machine-readable refs.
-# 模块用途: 在 create_subagents items[] 批量派工时，自动把上游产物接到下游 required_read_paths。
+# LLM: Item dependency enrichment turns explicit sibling contracts into machine-readable refs.
+# 模块用途: 在 create_subagents items[] 批量派工时，只根据结构化依赖字段和路径 refs 补齐 required_read_paths。
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -24,8 +25,8 @@ def enrich_item_dependencies(items: list[CreateSubagentItem]) -> list[CreateSuba
     return enriched
 
 
-# LLM: item_dependency_edges maps natural sibling references to prior item indexes.
-# 函数用途: 即使下游没写文件路径，只要提到上游代理结果，也能生成 run 级等待关系。
+# LLM: item_dependency_edges maps explicit sibling references to prior item indexes.
+# 函数用途: 根据 dependencies/depends_on/workflow_depends_on 或路径 refs 生成 run 级等待关系。
 def item_dependency_edges(items: list[CreateSubagentItem]) -> list[list[int]]:
     edges: list[list[int]] = []
     producers: list[_Producer] = []
@@ -60,35 +61,22 @@ class _Producer:
 
 
 # LLM: _inferred_required_refs combines explicit input paths with prior sibling output refs.
-# 函数用途: 既识别 goal 中直接写出的输入路径，也补齐“接收某代理输出”但没写路径的场景。
+# 函数用途: 只把结构化 input refs 和显式 sibling dependency 字段转成 required_read_paths。
 def _inferred_required_refs(item: CreateSubagentItem, producers: list[_Producer]) -> list[str]:
     refs = goal_input_refs(item.goal)
     for producer in producers:
-        if producer.outputs and _depends_on_producer(item, producer):
+        if producer.outputs and _explicit_dependency_matches(item, producer):
             refs.extend(producer.outputs)
     return _merge_refs([_existing_required_paths(item.params), refs])
 
 
-# LLM: _depends_on_producer joins explicit dependencies, path refs, and natural-language producer mentions.
-# 函数用途: 判断当前 item 是否应该等待某个上游 item，避免下游读取上游产物时抢跑。
+# LLM: _depends_on_producer joins explicit dependencies and path refs only.
+# 函数用途: 判断当前 item 是否应该等待某个上游 item；自然语言提到某代理名不再产生硬依赖。
 def _depends_on_producer(item: CreateSubagentItem, producer: _Producer) -> bool:
     return (
-        _mentions_producer_output(item.goal, producer)
-        or _refs_overlap(goal_input_refs(item.goal), producer.outputs)
-        or _explicit_dependency_matches(item.params, producer)
+        _refs_overlap(goal_input_refs(item.goal), producer.outputs)
+        or _explicit_dependency_matches(item, producer)
     )
-
-
-# LLM: _mentions_producer_output recognizes natural references to a previous sibling's deliverable.
-# 函数用途: 判断当前 item 是否在说“接收/读取/基于某个上游代理的输出”。
-def _mentions_producer_output(goal: str, producer: _Producer) -> bool:
-    text = str(goal or "")
-    if producer.agent_name and producer.agent_name in text:
-        return _has_dependency_word(text)
-    short_name = _short_agent_name(producer.agent_name)
-    if short_name and short_name in text:
-        return _has_dependency_word(text)
-    return False
 
 
 # LLM: _with_required_refs returns a copied item so the original parser output remains immutable.
@@ -107,37 +95,13 @@ def _existing_required_paths(params: dict[str, object]) -> list[str]:
     return _merge_refs([params.get("required_read_paths"), manifest_refs])
 
 
-# LLM: _short_agent_name lets "核验翻译" match "小傻妞-核验翻译" without hard-coded roles.
-# 函数用途: 提取 agent_name 的后缀辨识词，兼容模型省略小傻妞前缀的自然表达。
+# LLM: _short_agent_name lets explicit dependency labels use compact generated names.
+# 函数用途: 提取 agent_name 的后缀辨识词，只用于 dependencies 等机器字段匹配。
 def _short_agent_name(agent_name: str) -> str:
     text = str(agent_name or "").strip()
     if "-" in text:
         return text.rsplit("-", 1)[-1].strip()
     return text
-
-
-# LLM: _has_dependency_word keeps sibling inference tied to read/receive semantics.
-# 函数用途: 避免只是提到另一个代理名称就误把它的产物塞进输入依赖。
-def _has_dependency_word(text: str) -> bool:
-    markers = (
-        "接收",
-        "读取",
-        "读",
-        "基于",
-        "根据",
-        "依赖",
-        "引用",
-        "参考",
-        "汇总",
-        "整理",
-        "整合",
-        "分析",
-        "提供",
-        "结果",
-        "输出",
-    )
-    lowered = str(text or "").lower()
-    return any(marker in lowered for marker in markers)
 
 
 # LLM: _refs_overlap treats matching input/output paths as a workflow edge.
@@ -146,10 +110,10 @@ def _refs_overlap(inputs: list[str], outputs: list[str]) -> bool:
     return any(_path_ref_matches(input_ref, output_ref) for input_ref in inputs for output_ref in outputs)
 
 
-# LLM: _explicit_dependency_matches accepts common LLM dependency labels without making users name run ids.
-# 函数用途: 支持 `dependencies: ["data_collection"]` 匹配上游产物 stem、代理短名或完整代理名。
-def _explicit_dependency_matches(params: dict[str, object], producer: _Producer) -> bool:
-    tokens = _dependency_tokens(params)
+# LLM: _explicit_dependency_matches accepts dependency labels from params or protocol fields.
+# 函数用途: 支持 `dependencies: [...]` 参数或 `dependencies: label` goal 字段匹配上游产物 stem、代理短名或完整代理名。
+def _explicit_dependency_matches(item: CreateSubagentItem, producer: _Producer) -> bool:
+    tokens = _dependency_tokens(item.params, item.goal)
     if not tokens:
         return False
     producer_tokens = _producer_dependency_tokens(producer)
@@ -157,12 +121,41 @@ def _explicit_dependency_matches(params: dict[str, object], producer: _Producer)
 
 
 # LLM: _dependency_tokens normalizes explicit item dependency fields into loose labels.
-# 函数用途: 读取 dependencies/depends_on/workflow_depends_on，供 create 阶段转成真实 run 级边。
-def _dependency_tokens(params: dict[str, object]) -> set[str]:
+# 函数用途: 读取 dependencies/depends_on/workflow_depends_on 参数和 goal 机器字段，供 create 阶段转成真实 run 级边。
+def _dependency_tokens(params: dict[str, object], goal: str = "") -> set[str]:
     raw = []
     for key in ("dependencies", "depends_on", "workflow_depends_on"):
         raw.extend(_string_list(params.get(key)))
+    raw.extend(_goal_dependency_values(goal))
     return {_token(value) for value in raw if _token(value)}
+
+
+# LLM: _goal_dependency_values reads dependency protocol fields from goal text.
+# 函数用途: 允许 LLM 在 goal 中写 `dependencies: prior_label`，但普通自然语言不会生成依赖。
+def _goal_dependency_values(goal: str) -> list[str]:
+    values: list[str] = []
+    active = False
+    pattern = re.compile(r"^\s*(?:[-*]\s*)?(dependencies|depends_on|workflow_depends_on)\s*[:=]\s*(.*)$", re.I)
+    for raw in str(goal or "").splitlines():
+        line = raw.strip()
+        match = pattern.match(line)
+        if match:
+            active = True
+            values.extend(_dependency_value_items(match.group(2)))
+            continue
+        if not active:
+            continue
+        if not line.startswith(("-", "*")):
+            active = False
+            continue
+        values.extend(_dependency_value_items(line.lstrip("-* ")))
+    return values
+
+
+# LLM: _dependency_value_items splits compact protocol dependency lists.
+# 函数用途: 兼容逗号、顿号和竖线分隔的依赖标签，不对普通句子做语义分析。
+def _dependency_value_items(value: str) -> list[str]:
+    return [item.strip().strip("'\"`") for item in re.split(r"[,，、|]+", str(value or "")) if item.strip()]
 
 
 # LLM: _producer_dependency_tokens derives labels a downstream item may use for an upstream item.

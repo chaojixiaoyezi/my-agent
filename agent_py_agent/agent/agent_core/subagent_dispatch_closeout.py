@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from ..backends import ModelResponse
+from ..subagents.role_templates import role_template_id_for_role
+from ..subagents.services.qa_role_contract import qa_roles_from_text
 from ._runtime_params import ToolLoopExecuteParams
 from .orchestration_parent_acceptance_repair import parent_acceptance_rejected
 from .orchestration_run_scope import (
@@ -263,44 +265,27 @@ def _missing_required_quality_roles(prompt: str, tasks: list[object]) -> list[st
     return sorted(role for role in required if role not in present)
 
 
-# LLM: _required_quality_roles reads only explicit role-style requirements, not generic quality prose.
-# 函数用途: 从当前用户 prompt 判断是否明确要求 tester/acceptor 角色，避免普通“测试一下”误伤本地收口。
+# LLM: _required_quality_roles reads only required_qa_roles/qa_roles protocol fields.
+# 函数用途: 从当前用户 prompt 的机器字段判断是否要求 tester/acceptor，普通自然语言不参与本地收口判断。
 def _required_quality_roles(prompt: str) -> set[str]:
-    text = " ".join(str(prompt or "").lower().split())
-    if not text:
-        return set()
-    required: set[str] = set()
-    if (
-        "tester" in text
-        or " qa " in f" {text} "
-        or "测试子代理" in text
-        or "测试代理" in text
-        or "派测试" in text
-    ):
-        required.add("tester")
-    if (
-        "acceptor" in text
-        or "验收子代理" in text
-        or "验收代理" in text
-        or "派验收" in text
-    ):
-        required.add("acceptor")
-    return required
+    return set(qa_roles_from_text(prompt))
 
 
-# LLM: _present_role_tokens normalizes role/name fields enough for deterministic closeout gating.
-# 函数用途: 汇总已有子代理的 role 和名字关键词，判断 tester/acceptor 是否已经真正创建过。
+# LLM: _present_role_tokens normalizes role/name fields through template ids for deterministic closeout gating.
+# 函数用途: 汇总已有子代理的 role 和名字模板 id，判断 tester/acceptor 是否已经真正创建过。
 def _present_role_tokens(tasks: list[object]) -> set[str]:
     present: set[str] = set()
     for task in tasks:
-        text = " ".join(
-            [
-                str(getattr(task, "role", "") or ""),
-                str(getattr(task, "agent_name", "") or ""),
-            ]
-        ).lower()
-        if "tester" in text or "test" in text or "测试" in text:
-            present.add("tester")
-        if "acceptor" in text or "accept" in text or "验收" in text:
-            present.add("acceptor")
+        present.update(_quality_role_tokens_for_task(task))
     return present
+
+
+# LLM: _quality_role_tokens_for_task keeps closeout role scanning shallow and template-id based.
+# 函数用途: 从单个 task 的 role/agent_name 提取 tester/acceptor 模板角色，不读取目标自然语言。
+def _quality_role_tokens_for_task(task: object) -> set[str]:
+    values = (getattr(task, "role", ""), getattr(task, "agent_name", ""))
+    return {
+        role
+        for value in values
+        if (role := role_template_id_for_role(str(value or ""), fallback="")) in {"tester", "acceptor"}
+    }

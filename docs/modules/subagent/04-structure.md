@@ -68,11 +68,11 @@ agent_py_agent/agent/
 |   |-- role_templates.py               # role template 加载、校验和查询
 |   |-- role_template_catalog/builtin/  # 内置广义角色模板 JSON
 |   `-- workflow_template_catalog/      # 后续 workflow 模板外置化预留目录
-|-- subagent_workflows/                 # workflow 模型、模板加载、路由、编译和验收规划
+|-- subagent_workflows/                 # workflow 模型、模板加载、结构化路由、编译和验收规划
 |   |-- builtin/                        # 内置 workflow 模板
 |   |-- models.py                       # workflow / 任务 / 质量契约相关模型
 |   |-- store.py                        # 模板加载和覆盖
-|   |-- router.py                       # 根据目标选择 workflow
+|   |-- router.py                       # 根据结构化字段选择 workflow
 |   |-- compiler.py                     # 把 workflow 编译成 worker 派工规格
 |   |-- planner.py                      # dry-run 规划门面
 |   `-- acceptance.py                   # 父级验收计划
@@ -81,7 +81,7 @@ agent_py_agent/agent/
 
 ## 核心文件
 
-- `agent_py_agent/agent/subagent_workflows/router.py`：回答”这个任务适合哪种 workflow”。
+- `agent_py_agent/agent/subagent_workflows/router.py`：只读取 `workflow_task_type`、`workflow_template_id`、`risk_tags` 等结构化字段选择 workflow；普通自然语言目标默认走 single worker，不再靠“代码/报告/界面/修复”等关键词猜模板。
 - `agent_py_agent/agent/subagent_workflows/compiler.py`：把抽象模板变成具体 worker 任务说明。
 - `agent_py_agent/agent/subagent_workflows/acceptance.py`：生成父会话要检查什么。
 - `agent_py_agent/agent/subagents/`：保存真实 subagent 管理、运行、报告和验收相关代码。
@@ -92,6 +92,13 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/model_task.py`：承接 `SubAgentTask`、`EvidencePacket`、`Finding`、`StatusReport`、`SecuritySignal` 等任务树、证据和安全预留合同模型，`models.py` 继续作为兼容导出入口。
 - `agent_py_agent/agent/subagents/model_task.py`：同时定义 `RuntimeIdentity`，记录 service owner、requester、effective principal、conversation、memory namespace 和 config overlay scope；这些字段是隔离和审计口子，不是授权、长期记忆或全局配置事实源。
 - `agent_py_agent/agent/subagents/services/hierarchy_scheduler.py`：定义 `HierarchyScheduleRequest` / `HierarchyChildSpec`，通过显式 bundle dry-run 或创建 child/grandchild run；默认不写任务，`apply=True` 时复用 `create_run`。`max_depth` / `max_children` 只在模型或高级调用方显式传入时生效，默认 `0` 表示不限制，避免普通任务因为流程参数太小被误伤。层级 child 会继承 bounded parent goal/thought；如果模型给下一层的 goal 太短，或只写了 build 路径但丢了父级 required/forbidden 文件清单、4层/depth 命名合同、能力安全合同，scheduler 会把 `继承父级目标/边界` 追加进 child goal，并通过独立策略模块推断 leaf 写文件工具和最小验收兜底。层级命名合同使用精确前缀判断，例如父级写 `小小小傻妞-*` 时，子级只写 `depth=3` 或写错成相似中文不会被视为已继承，系统会补回原始合同。模型把带 orchestration tools 的下一层误标成 `worker` 时按 depth 推断 coordinator role；模型把真实角色写在 `agent_name` 但 `role=child` 时，会先从 identity 中恢复 researcher/tester/acceptor/bug_finder/writer/worker 等角色。父任务明确点名 tester/bug_finder/acceptor 时，scheduler 返回 `quality_advice`，由 LLM 按 refs 选择 QA scope、数量和顺序；系统只守红线，不固定补派完整 QA 流程。`apply=True` 创建前还会走调度幂等合同：同 parent/root/role/goal/write-root 的 direct child 已存在时返回 `reused_run_ids`，并只把 `PLANNING/PENDING` child 放进 `dispatch_run_ids`，避免 runner 重复创建或重复调度已完成后代。层级深度不是固定 4 层：root/parent 可以按任务复杂度直接派 worker，也可以派 coordinator/lead；只有具体 prompt 要求 4 层时才按该场景约束执行。
+
+## 结构化合同边界
+
+- 子代理硬行为优先读机器字段、模板 id、任务状态和 refs，不读普通自然语言关键词。`required_files` / `forbidden_files` / `required_content_lines` / `required_qa_roles` / `required_read_paths` / `output_files` / `dependencies` / `workflow_task_type` / `workflow_template_id` / `delegate_only=true` / `refs_only=true` 是合同；“必须生成”“不要创建”“需要测试”“小傻妞再找小小傻妞”等普通句子只交给 LLM 理解。
+- 角色模板只决定职责倾向，不删基础读写/汇报能力。代码层允许从 `role`、`agent_name`、模板 id、`tasks[]` 和显式 `allowed_tools` 中恢复结构化角色；不再从 `goal` 或当前用户 prompt 的口语里把 worker 强改成 coordinator/tester/repair。
+- 负向验收必须显式写 `match_mode=not_contains`、`expect_absent=true`、`forbidden_files` 等字段；summary 里写“没有/不存在/无”不会自动反转结果。
+- 测试可以用自然语言约束 root，例如“你自己不要做，只派小傻妞/子代理做”，但这只是测试输入，不允许变成 runtime guard。需要确定性委托时使用 `delegate_only=true` 或 `refs_only=true`。
 - `agent_py_agent/agent/subagents/services/hierarchy_qa_ready_refs.py`：QA 波次输入 refs 收集层；只沿父任务子树读取小型 task 字段，找出 ready 的 worker/writer/coder/leaf 实现节点，并输出 run_id、status、artifact_refs、output_refs。`hierarchy_qa_scheduler.py` 用它填充 `ready_work_refs`，并把同一批 refs 写进 tester/bug_finder/acceptor 的 `source_run_ids` / `source_artifact_refs` / `source_output_refs`，避免 QA 从父级自然语言里猜产物。
 - `agent_py_agent/agent/subagents/services/hierarchy_child_context.py`：层级 child context 选择 helper；child spec 携带 repair/context refs 时优先写入 child task，否则沿用父级 context，避免 scheduler 主文件继续膨胀。
 - `agent_py_agent/agent/subagents/services/hierarchy_schedule_idempotency.py`：runner 内层级调度幂等合同层；只扫描当前 parent 的 direct children，按 `parent/root/role/goal/extra_write_roots/status` 判断能否复用，避免跨分支误合并，也避免模型重复调用 `schedule_child_subagents` 时无限扩容。
@@ -343,7 +350,7 @@ agent_py_agent/agent/
 
 1. 先看 `agent_py_agent/cli/subagents.py`，理解用户命令怎么进入程序。
 2. 再看 `planner.py`，理解一个“规划结果”包含哪些部分。
-3. 再看 `router.py`，学习如何把自然语言目标映射到模板。
+3. 再看 `router.py`，学习如何用 `workflow_task_type` / `workflow_template_id` 等结构化字段选择模板；普通自然语言目标不再由代码层猜模板。
 4. 再看 `compiler.py`，学习模板怎样变成具体工作单。
 5. 再看 `agent_py_agent/tests/test_scenario_gateway_resume.py::test_scenario_parent_subagent_cross_day_resume_uses_runner_task_facts`，理解 runner 写回后如何跨天恢复到任务事实源。
 6. 再看 `agent_py_agent/tests/test_subagent_persistence_service.py` 和 `agent_py_agent/tests/test_result_processors_edges.py`，理解 status report、evidence packets 和 findings 如何写回。

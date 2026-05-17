@@ -47,9 +47,9 @@ def test_missing_input_dependencies_still_reports_absent_project_file(tmp_path):
     assert missing_input_dependencies(task) == ["AGENTS.md"]
 
 
-# LLM: Optional read refs are task hints, not upstream dependency blockers.
-# 函数用途: 真实模型把“AGENTS.md 如有则读”写成 required_read_paths 时，缺文件也不应卡住 runner。
-def test_missing_input_dependencies_allows_optional_file_refs(tmp_path):
+# LLM: Structured required refs stay hard even when natural prose says optional.
+# 函数用途: required_read_paths 是硬合同；“如有则读”这类自然语言不能让代码层把缺文件放行。
+def test_missing_input_dependencies_keeps_structured_refs_required(tmp_path):
     workspace = tmp_path / "fixture_project"
     run_dir = workspace / ".my_agent" / "subagents" / "subagent-worker"
     run_dir.mkdir(parents=True)
@@ -60,7 +60,7 @@ def test_missing_input_dependencies_allows_optional_file_refs(tmp_path):
         context_manifest={"required_read_paths": ["AGENTS.md", "SOUL.md"]},
     )
 
-    assert missing_input_dependencies(task) == []
+    assert missing_input_dependencies(task) == ["AGENTS.md", "SOUL.md"]
 
 
 # LLM: Optional subdirectory wording must not make the main file optional.
@@ -86,8 +86,8 @@ def test_output_path_ref_is_not_input_dependency_even_after_dependency_word(tmp_
     run_dir = workspace / ".my_agent" / "subagents" / "subagent-worker"
     run_dir.mkdir(parents=True)
     goal = (
-        "技术：单文件 HTML，不依赖外部图片/字体/脚本，用 CSS 完成视觉效果。"
-        "输出路径：lab_outputs/furniture-home/index.html。请写入完整 HTML 文件后汇报。"
+        "技术：单文件 HTML，不依赖外部图片/字体/脚本，用 CSS 完成视觉效果。\n"
+        "output_files: lab_outputs/furniture-home/index.html"
     )
     task = SimpleNamespace(
         goal=goal,

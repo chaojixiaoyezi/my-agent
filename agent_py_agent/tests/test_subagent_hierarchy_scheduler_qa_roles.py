@@ -19,7 +19,7 @@ ORCHESTRATION_TOOLS = ["schedule_child_subagents", "dispatch_subagents", "subage
 # 函数用途: 构造点名 tester/bug_finder/acceptor 的父任务，复用在 QA advice 测试里。
 def _qa_parent(manager: SubAgentManager, *, extra_write_roots: list[str] | None = None):
     return manager.create_run(
-        goal="购物网站任务必须覆盖 tester / bug_finder / acceptor 三类 QA 子代理。",
+        goal="required_qa_roles: tester, bug_finder, acceptor",
         thought="父级要做真实分工。",
         plan=["delegate"],
         role="coordinator",
@@ -215,6 +215,21 @@ def test_qa_role_tasks_do_not_inherit_their_own_required_role_contract(tmp_path)
         plan=["inspect refs"],
         role="acceptor",
         agent_name="小小傻妞-acceptor",
+    )
+
+    assert qa_roles_required_by_task(task) == []
+
+
+# LLM: natural QA prose should not become code-layer scheduling obligations.
+# 函数用途: 普通中文“记得测试和验收”不能被 Python 硬解析成 tester/acceptor；应由 LLM 基于模板索引自行规划。
+def test_qa_role_contract_ignores_natural_language_role_requests(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    task = manager.create_run(
+        goal="这个购物网站做好后记得测试、找问题、最后验收。",
+        thought="qa",
+        plan=["inspect refs"],
+        role="coordinator",
+        agent_name="小傻妞-coordinator",
     )
 
     assert qa_roles_required_by_task(task) == []

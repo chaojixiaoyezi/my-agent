@@ -9,6 +9,7 @@ from dataclasses import replace
 
 from .models import SubAgentTask
 from .reports import AcceptanceReviewFinding
+from .role_templates import role_template_id_for_role
 
 _DIAGNOSTIC_COMPLETION_STATUSES = frozenset({
     "completed_with_issues",
@@ -56,12 +57,13 @@ def _is_completed_diagnostic_role(task: SubAgentTask, output: dict) -> bool:
     return _normalized_output_status(output) in _DIAGNOSTIC_COMPLETION_STATUSES
 
 
-# LLM: _is_diagnostic_role centralizes lightweight role matching without importing role-template machinery.
-# 函数用途: 识别测试/找茬角色；只匹配诊断角色，不把 acceptor 或普通 worker 放宽。
+# LLM: _is_diagnostic_role centralizes structured role-template matching.
+# 函数用途: 识别 tester/bug_finder 模板角色；不从中文 agent_name 或 goal 文本猜。
 def _is_diagnostic_role(task: SubAgentTask) -> bool:
     role = _normalized_role_text(getattr(task, "role", ""))
     name = str(getattr(task, "agent_name", "") or "").lower()
-    return role in _DIAGNOSTIC_ROLES or role.endswith("_tester") or "测试" in name or "找茬" in name
+    template_role = role_template_id_for_role(role or name, fallback="")
+    return role in _DIAGNOSTIC_ROLES or role.endswith("_tester") or template_role in _DIAGNOSTIC_ROLES
 
 
 # LLM: _normalized_output_status reads status from modern or legacy output shapes.

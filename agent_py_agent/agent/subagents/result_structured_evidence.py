@@ -8,20 +8,6 @@ from .parsing import _string_list
 from .result_artifact_evidence import normalize_artifact_ref
 from .utils import _merge_list, _new_id
 
-_NEGATIVE_EVIDENCE_HINTS = (
-    "无",
-    "没有",
-    "不包含",
-    "不存在",
-    "不得出现",
-    "禁止出现",
-    "must not contain",
-    "does not contain",
-    "not contain",
-    "absent",
-    "no ",
-)
-
 
 # LLM: process_evidence_items keeps simple evidence notes out of result_structured.py.
 # 函数用途: 把 parsed.evidence 中的普通证据写入 task.evidence，并返回新增数量。
@@ -38,7 +24,7 @@ def process_evidence_items(parsed, task: SubAgentTask, now: float) -> int:
                 command=str(item.get("command", "") or ""),
                 path=str(item.get("path", "") or ""),
                 url=str(item.get("url", "") or ""),
-                ok=_evidence_ok(item, summary),
+                ok=_evidence_ok(item),
                 created_at=now,
             )
         )
@@ -149,22 +135,17 @@ def _finding_dict(finding: Finding) -> dict[str, object]:
     }
 
 
-# LLM: _evidence_ok normalizes model-written negative content checks into pass semantics.
-# 函数用途: 子代理把“坏模式没搜到”写成 ok=false 时，结合 summary/content_pattern 判断为负向检查通过。
-def _evidence_ok(item: dict[str, object], summary: str) -> bool:
+# LLM: _evidence_ok trusts explicit evidence fields and avoids natural-language summary heuristics.
+# 函数用途: 只有 match_mode=not_contains 或 expect_absent=true 这类机器字段才会把 ok=false 反转为负向检查通过。
+def _evidence_ok(item: dict[str, object]) -> bool:
     raw_ok = bool(item.get("ok", True))
     if raw_ok:
         return True
     kind = str(item.get("kind", "") or "").lower()
     pattern = str(item.get("content_pattern", "") or "").strip()
-    return kind == "content_check" and bool(pattern) and _negative_evidence_summary(summary)
-
-
-# LLM: _negative_evidence_summary keeps the heuristic narrow and multilingual.
-# 函数用途: 只把明显表达“不得包含/没有某内容”的证据当负向检查，避免普通失败被误放行。
-def _negative_evidence_summary(summary: str) -> bool:
-    text = " ".join(str(summary or "").lower().split())
-    return any(hint in text for hint in _NEGATIVE_EVIDENCE_HINTS)
+    mode = str(item.get("match_mode") or item.get("mode") or "").strip().lower()
+    explicit_absent = bool(item.get("expect_absent") or item.get("negate") or item.get("should_not_contain"))
+    return kind == "content_check" and bool(pattern) and (explicit_absent or mode in {"not_contains", "not_exists", "absent"})
 
 
 # LLM: _string_refs keeps packet/finding reference parsing identical across fields.

@@ -19,7 +19,7 @@ from agent_py_agent.agent.core import SimpleAgent
 def test_workflow_plan_mode_persists_plan_only(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     parent = agent.subagents.create_run(
-        goal="Fix API bug and add regression tests",
+        goal="Fix API bug and add regression tests\nworkflow_task_type: code_or_bugfix",
         thought="先建父工单，再由 dispatch 补做 workflow 规划。",
         plan=["等待规划"],
     )
@@ -46,7 +46,7 @@ def test_workflow_plan_mode_persists_plan_only(tmp_path):
 def test_workflow_auto_mode_spawns_worker_children(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     parent = agent.subagents.create_run(
-        goal="Fix API bug and add regression tests",
+        goal="Fix API bug and add regression tests\nworkflow_task_type: code_or_bugfix",
         thought="让 workflow 自动派出 implementation/tests worker。",
         plan=["等待自动派工"],
         agent_name="小傻妞-api-parent",

@@ -1,5 +1,5 @@
 # LLM: Delegate-only direct-write guard keeps root/parent agents from bypassing assigned workers.
-# 模块用途: 当用户明确要求通过子代理完成时，阻止 root/父级直接写业务产物，要求改走 worker/takeover/repair。
+# 模块用途: 已经进入派工状态后，阻止 root/父级直接写业务产物，要求改走 worker/takeover/repair。
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from ..tools import ToolExecutionResult
-from .orchestration_delegation_intent import prompt_requests_refs_only_delegation
 from .orchestration_run_scope import remembered_orchestration_run_ids
 
 _DIRECT_WRITE_TOOLS = {"write_file", "append_file", "replace_in_file"}
@@ -37,69 +36,7 @@ _WRITE_COMMAND_PATTERNS = (
     r"(^|[;&|]\s*)cp\s+",
     r"(^|[;&|]\s*)mv\s+",
 )
-_DELEGATE_ONLY_PATTERNS = (
-    r"只能.{0,16}(通过|让|由).{0,12}(子代理|subagent|worker|builder)",
-    r"必须.{0,16}(通过|让|由).{0,12}(子代理|subagent|worker|builder)",
-    r"(安排|派|让).{0,24}(小傻妞|子代理|subagent|worker).{0,32}(做|写|继续|接着|接管|修复|完成)",
-    r"(安排它|让它).{0,24}(继续|接着|接管|修复|写|完成)",
-    r"(小傻妞|子代理|subagent|worker).{0,32}(继续|接着|接管|修复|完成|写)",
-    r"不能.{0,12}(自己|直接).{0,12}(写|实现|修改|创建|write|implement|create)",
-    r"不要.{0,12}(自己|直接).{0,12}(写|实现|修改|创建|write|implement|create)",
-    r"root.{0,24}(must not|cannot|do not).{0,24}(write|implement|create)",
-    r"delegate[-_ ]only",
-)
-_PARENT_PRODUCT_WRITE_OVERRIDE_PATTERNS = (
-    r"你.{0,8}(自己|亲自).{0,16}(修复|重写|写|修改|实现|创建)",
-    r"(主代理|父级|root).{0,12}(自己|亲自).{0,16}(修复|重写|写|修改|实现|创建)",
-    r"(you yourself|personally).{0,40}(fix|repair|rewrite|write|implement|create)",
-)
-_PARENT_PRODUCT_WRITE_NEGATION_PATTERNS = (
-    r"(不能|不要|不准|禁止).{0,24}(自己|亲自|root|主代理|父级).{0,24}(修复|重写|写|修改|实现|创建)",
-    r"(root|主代理|父级).{0,16}(不能|不要|不准|禁止).{0,24}(自己|亲自)?.{0,16}(修复|重写|写|修改|实现|创建)",
-    r"(cannot|must not|do not).{0,40}(write|fix|repair|rewrite|implement|create)",
-)
-_PRODUCT_WRITER_ROLE_TOKENS = (
-    "worker",
-    "writer",
-    "coder",
-    "builder",
-    "implementer",
-)
-_NON_PRODUCT_WRITER_ROLE_TOKENS = (
-    "accept",
-    "bug",
-    "coordinator",
-    "critic",
-    "lead",
-    "manager",
-    "planner",
-    "qa",
-    "review",
-    "root",
-    "test",
-    "verifier",
-    "验收",
-    "协调",
-    "测试",
-    "找茬",
-)
 _REPORT_WRITE_SUFFIXES = (".md", ".txt", ".json", ".jsonl")
-_REPORT_WRITE_NAME_MARKERS = (
-    "acceptance",
-    "audit",
-    "bug",
-    "check",
-    "finding",
-    "handoff",
-    "report",
-    "review",
-    "status",
-    "summary",
-    "test",
-    "验收",
-    "报告",
-    "测试",
-)
 
 
 # LLM: DelegateOnlyDirectWriteGuardRequest bundles tool-loop data for direct-write policy checks.
@@ -130,15 +67,13 @@ def maybe_block_delegate_only_direct_write(
     return None
 
 
-# LLM: _user_requested_delegate_only detects explicit current-run delegation constraints.
-# 函数用途: 只在用户明确说不能由 root 直接写/必须通过子代理时触发，避免普通任务误伤。
+# LLM: _user_requested_delegate_only detects protocol-level current-run delegation constraints.
+# 函数用途: 只接受 delegate_only=true 这类机器字段；普通自然语言不在代码层解析。
 def _user_requested_delegate_only(prompt: str) -> bool:
     text = " ".join(str(prompt or "").lower().split())
     if not text:
         return False
-    if prompt_requests_refs_only_delegation(text):
-        return True
-    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _DELEGATE_ONLY_PATTERNS)
+    return "delegate_only=true" in text or "refs_only=true" in text
 
 
 # LLM: _delegate_write_guard_active also protects root after it already dispatched a child.
@@ -151,13 +86,11 @@ def _delegate_write_guard_active(request: DelegateOnlyDirectWriteGuardRequest) -
     return bool(remembered_orchestration_run_ids(request.agent))
 
 
-# LLM: _user_authorized_parent_product_write detects explicit override from the current user.
-# 函数用途: 用户明确说“你亲自修复/你自己写”时，允许 root 接管产物写入；普通“检查/验收”不算。
+# LLM: _user_authorized_parent_product_write detects protocol-level current-run override.
+# 函数用途: 只接受 parent_product_write=allow 机器字段；自然语言授权交给模型规划，不由 guard 猜。
 def _user_authorized_parent_product_write(prompt: str) -> bool:
     compact = " ".join(str(prompt or "").lower().split())
-    if any(re.search(pattern, compact, flags=re.IGNORECASE) for pattern in _PARENT_PRODUCT_WRITE_NEGATION_PATTERNS):
-        return False
-    return any(re.search(pattern, compact, flags=re.IGNORECASE) for pattern in _PARENT_PRODUCT_WRITE_OVERRIDE_PATTERNS)
+    return "parent_product_write=allow" in compact
 
 
 # LLM: _current_runner_can_write_product keeps delegate-only guard scoped to the outer root, not active subagents.
@@ -181,16 +114,6 @@ def _load_current_runner_task(agent: object, run_id: str) -> object | None:
         return load(run_id)
     except Exception:
         return None
-
-
-# LLM: _runner_identity_text normalizes role/name fields for direct-writer role checks.
-# 函数用途: 合并 role 和 agent_name，兼容 leaf_worker、小小傻妞-worker 等自然命名。
-def _runner_identity_text(task: object | None) -> str:
-    if task is None:
-        return ""
-    role = str(getattr(task, "role", "") or "")
-    name = str(getattr(task, "agent_name", "") or "")
-    return f"{role} {name}".lower().replace("-", "_")
 
 
 # LLM: _is_runtime_write lets agents still write their own coordination reports.
@@ -233,16 +156,13 @@ def _has_incomplete_remembered_runs(agent: object) -> bool:
     return False
 
 
-# LLM: _is_report_artifact_write lets reviewer roles leave visible evidence without editing product bodies.
-# 函数用途: 识别 test_report/acceptance_report/status 等小型交接文件；它们是验收证据，不是 worker 负责的业务产物。
+# LLM: _is_report_artifact_write lets parents leave small text evidence after delegated runs finish.
+# 函数用途: 委托 run 全部完成后允许写文本/JSON 交接文件；不靠“验收/report/test”等文件名关键词判断。
 def _is_report_artifact_write(agent: object, payload: dict[str, Any]) -> bool:
     path = _payload_path(agent, payload)
     if path is None:
         return False
-    name = path.name.lower()
-    if not name.endswith(_REPORT_WRITE_SUFFIXES):
-        return False
-    return any(marker in name for marker in _REPORT_WRITE_NAME_MARKERS)
+    return path.name.lower().endswith(_REPORT_WRITE_SUFFIXES)
 
 
 # LLM: _shell_command_writes_product flags shell forms that can create or mutate product files.

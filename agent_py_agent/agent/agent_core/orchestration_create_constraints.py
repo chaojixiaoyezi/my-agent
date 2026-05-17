@@ -13,31 +13,36 @@ from .orchestration_create_target_roots import (
     is_relative_to,
     normalized_write_root,
 )
-from .orchestration_negation_markers import contains_unnegated_marker
 from .parameters import _string_list
-from .spawn_role_seed import is_explicit_root_role
+from .runner_input_dependencies import goal_output_refs
 
-_VAGUE_PRODUCT_TARGET_WORDS = (
-    "目标目录",
-    "同一目录",
-    "当前目录",
-    "任务目录",
-    "产物目录",
-    "输出目录",
-    "build 目录",
-    "build目录",
-    "deliverables 目录",
-    "deliverables目录",
-    "target directory",
-    "same directory",
-    "current directory",
-    "task directory",
-    "output directory",
-)
 _CONCRETE_FILE_TARGET_RE = re.compile(
     r"[\w.-]+\.(?:html|css|js|mjs|cjs|ts|tsx|jsx|py|md|json|yaml|yml|txt|csv|xlsx|xls|pdf|vue|svelte)\b",
     re.IGNORECASE,
 )
+_STRUCTURED_FIELD_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_\-.]*)\s*:\s*(.*)$")
+_PARENT_CONSTRAINT_FIELDS = {"delegation_constraints", "required_constraints", "hard_constraints"}
+_CHILD_RELAXATION_FIELDS = {"constraint_overrides", "constraint_relaxations", "allowed_relaxations"}
+_CONSTRAINT_ALIAS_MAP = {
+    "working_buttons": "working_buttons",
+    "no_dead_buttons": "working_buttons",
+    "no_broken_buttons": "working_buttons",
+    "verified_images": "verified_images",
+    "verified_images_only": "verified_images",
+    "no_broken_images": "verified_images",
+    "no_comments": "no_comments",
+    "comment_free": "no_comments",
+}
+_RELAXATION_ALIAS_MAP = {
+    "allow_dead_buttons": "working_buttons",
+    "dead_buttons_allowed": "working_buttons",
+    "allow_hash_buttons": "working_buttons",
+    "allow_unverified_remote_images": "verified_images",
+    "allow_remote_images": "verified_images",
+    "allow_broken_images": "verified_images",
+    "allow_comments": "no_comments",
+    "comments_allowed": "no_comments",
+}
 _NON_WORKER_ROLES = {
     "acceptor",
     "bug_finder",
@@ -91,7 +96,7 @@ def resolved_extra_write_roots(agent: object, params: dict[str, object], goal: s
     explicit = merged_extra_write_roots(params, goal)
     if explicit:
         return explicit
-    target_roots = context_target_write_roots(agent, params) if _goal_has_product_write_intent(goal) else []
+    target_roots = context_target_write_roots(agent, params) if _has_structured_write_intent(params, goal) else []
     if target_roots:
         return target_roots
     default_root = _default_workspace_product_root(agent, params, goal)
@@ -101,12 +106,9 @@ def resolved_extra_write_roots(agent: object, params: dict[str, object], goal: s
 # LLM: explicit_root_missing_write_root_error prevents product paths from drifting into agent workspaces.
 # 函数用途: 显式 root/coordinator 要交付文件但没带产物写入根时拒绝创建，要求模型带 extra_write_roots 重试。
 def explicit_root_missing_write_root_error(agent: object, params: dict[str, object], goal: str) -> str:
-    role = str(params.get("role") or "worker").strip()
     if resolved_extra_write_roots(agent, params, goal):
         return ""
     if not _goal_has_product_write_intent(goal):
-        return ""
-    if not is_explicit_root_role(role) and not _goal_has_vague_product_target(goal):
         return ""
     return (
         "要交付文件或网站时，必须提供真实产物写入根，"
@@ -134,68 +136,53 @@ def ambiguous_repeated_product_goal_error(goal: str, count: int, role: str) -> s
     )
 
 
-# LLM: delegation_constraint_conflict_error keeps child goals from weakening explicit user constraints.
-# 函数用途: 主代理派工时如果把“不要失灵/不要失效/不要注释”反向改写，直接要求重写目标。
+# LLM: delegation_constraint_conflict_error keeps child goals from weakening machine constraints.
+# 函数用途: 主代理派工时如果结构化 constraint 字段被 child 反向 override，直接要求重写目标。
 def delegation_constraint_conflict_error(agent, goal: str) -> str:
     user_text = str(getattr(agent, "_current_user_prompt", "") or "")
     goal_text = str(goal or "")
-    conflicts: list[str] = []
-    if _user_requires_working_buttons(user_text) and _goal_allows_dead_buttons(goal_text):
-        conflicts.append("用户要求不要有失灵按钮，但子任务目标允许按钮指向 #。")
-    if _user_requires_no_broken_images(user_text) and _goal_requires_unverified_remote_images(goal_text):
-        conflicts.append("用户要求不要出现失效图片链接，但子任务目标要求使用未验证的远程图片 URL。")
-    if _user_requires_no_comments(user_text) and _goal_requests_comments(goal_text):
-        conflicts.append("用户要求不要注释，但子任务目标要求写注释。")
+    conflicts = sorted(
+        _structured_parent_constraints(user_text) & _structured_child_relaxations(goal_text)
+    )
     if not conflicts:
         return ""
+    conflicts_text = ", ".join(conflicts)
     return (
-        "delegation_constraint_conflict: 派工目标不能削弱或反向改写用户原始约束。"
-        + " ".join(conflicts)
-        + "请重新调用 create_subagents：保留用户约束原文，删除冲突要求；"
-        "图片可用 CSS/本地/内联视觉替代，按钮必须执行真实交互或跳到页面内真实锚点。"
+        "delegation_constraint_conflict: 派工目标不能削弱或反向改写父级结构化约束。"
+        f"冲突约束: {conflicts_text}。"
+        "请重新调用 create_subagents：保留 delegation_constraints，删除冲突的 constraint_overrides。"
     )
 
 
 # LLM: _goal_needs_product_write_root detects concrete deliverable tasks without parsing prose too broadly.
 # 函数用途: 判断目标是否像文件/网站交付任务；只用于缺写入根时的保守拦截。
 def _goal_needs_product_write_root(goal: str) -> bool:
-    lowered = goal.lower()
-    product_words = (
-        "交付",
-        "deliver",
-        "build",
-        "网站",
-        "demo",
-        "文件",
-        "报告",
-        "xlsx",
-        "pdf",
-        "修复",
-        "repair",
-        "fix",
-    )
-    if not any(word in lowered for word in product_words):
-        return False
-    return bool(_CONCRETE_FILE_TARGET_RE.search(lowered))
+    return bool(goal_output_refs(goal))
 
 
 # LLM: _goal_has_product_write_intent is broader than missing-root rejection and still local to product tasks.
 # 函数用途: 判断目标是否像真实交付物写入任务，用于决定是否可采用 workspace_root 默认写入根。
 def _goal_has_product_write_intent(goal: str) -> bool:
-    lowered = str(goal or "").lower()
-    write_words = ("写", "创建", "生成", "保存", "输出", "产出", "write", "create", "generate", "save", "output")
-    return _goal_needs_product_write_root(goal) or (
-        _goal_has_vague_product_target(goal)
-        and any(word in lowered for word in write_words)
-        and bool(_CONCRETE_FILE_TARGET_RE.search(lowered))
+    return _goal_needs_product_write_root(goal)
+
+
+# LLM: _has_structured_write_intent enables target roots from output refs or repair contracts only.
+# 函数用途: 有 output_files 或 repair_contract 时才把 required_read_paths 中的产物文件当作写入目标。
+def _has_structured_write_intent(params: dict[str, object], goal: str) -> bool:
+    if _goal_has_product_write_intent(goal):
+        return True
+    if isinstance(params.get("repair_contract"), dict):
+        return True
+    role = str(params.get("role") or "").casefold().replace("-", "_")
+    if "repair" in role:
+        return True
+    packs = params.get("context_packs")
+    if not isinstance(packs, list):
+        return False
+    return any(
+        isinstance(pack, dict) and (pack.get("kind") == "repair_contract" or isinstance(pack.get("contract"), dict))
+        for pack in packs
     )
-
-
-# LLM: _goal_has_vague_product_target blocks path drift before a worker silently writes into task_dir.
-# 函数用途: 识别“目标目录/任务目录”等模糊产物位置。
-def _goal_has_vague_product_target(goal: str) -> bool:
-    lowered = goal.lower()
-    return any(word in lowered for word in _VAGUE_PRODUCT_TARGET_WORDS)
 
 
 # LLM: _default_workspace_product_root refuses mocks/internal subagent dirs and only returns a real workspace path.
@@ -214,58 +201,65 @@ def _default_workspace_product_root(agent: object, params: dict[str, object], go
     return str(root) if any(is_relative_to(root, item) for item in roots) else ""
 
 
-# LLM: _user_requires_working_buttons detects the natural-language no-dead-buttons contract.
-# 函数用途: 识别用户不希望 href=#、空按钮或假交互的约束。
-def _user_requires_working_buttons(text: str) -> bool:
-    lowered = text.lower()
-    return any(marker in lowered for marker in ("不要有失灵按钮", "不要失灵按钮", "no broken buttons", "no dead buttons"))
+# LLM: _structured_parent_constraints reads only protocol fields from root prompt/context.
+# 函数用途: 从 delegation_constraints/required_constraints/hard_constraints 字段读取父级硬约束。
+def _structured_parent_constraints(text: str) -> set[str]:
+    return _structured_tokens(text, _PARENT_CONSTRAINT_FIELDS, _CONSTRAINT_ALIAS_MAP)
 
 
-# LLM: _goal_allows_dead_buttons catches common weakening phrases models add during delegation.
-# 函数用途: 判断派工目标是否允许 # 空链接或假按钮。
-def _goal_allows_dead_buttons(text: str) -> bool:
-    lowered = text.lower()
-    return contains_unnegated_marker(
-        lowered,
-        ('href="#"', "指向 #", "指向#", "可指向 #", "#锚点", "# 锚点", "空锚点", "hash anchor", "can point to #"),
-    )
+# LLM: _structured_child_relaxations reads only protocol fields from child goal/context.
+# 函数用途: 从 constraint_overrides/constraint_relaxations/allowed_relaxations 字段读取 child 的放宽声明。
+def _structured_child_relaxations(text: str) -> set[str]:
+    return _structured_tokens(text, _CHILD_RELAXATION_FIELDS, _RELAXATION_ALIAS_MAP)
 
 
-# LLM: _user_requires_no_broken_images detects image reliability constraints in plain language.
-# 函数用途: 识别用户要求图片不要失效、不要坏链的约束。
-def _user_requires_no_broken_images(text: str) -> bool:
-    lowered = text.lower()
-    return any(marker in lowered for marker in ("不要出现失效图片", "不要有失效图片", "no broken image"))
+# LLM: _structured_tokens parses shallow machine fields without natural-language intent inference.
+# 函数用途: 解析 `field: token, token` 形式；普通句子不产生任何硬约束。
+def _structured_tokens(text: str, fields: set[str], aliases: dict[str, str]) -> set[str]:
+    found: set[str] = set()
+    active = False
+    for line in str(text or "").splitlines():
+        active, values = _structured_token_line(line, active=active, fields=fields, aliases=aliases)
+        found.update(values)
+    return found
 
 
-# LLM: _goal_requires_unverified_remote_images treats remote image mandates as risky unless the user asked for them.
-# 函数用途: 子任务目标主动要求远程图片 URL 时，如果用户要求不失效图片，就拒绝这类弱化约束。
-def _goal_requires_unverified_remote_images(text: str) -> bool:
-    lowered = text.lower()
-    return contains_unnegated_marker(lowered, ("unsplash", "images.unsplash", "图片 url", "image url", "http"))
+# LLM: _structured_token_line keeps multiline protocol parsing shallow for code-size guards.
+# 函数用途: 解析一行结构化 token 字段，返回下一行是否仍处于 active 字段和本行 token 集合。
+def _structured_token_line(
+    line: str,
+    *,
+    active: bool,
+    fields: set[str],
+    aliases: dict[str, str],
+) -> tuple[bool, set[str]]:
+    match = _STRUCTURED_FIELD_RE.match(line)
+    if match:
+        field = match.group(1).strip().casefold().replace("-", "_")
+        is_active = field in fields
+        return is_active, _token_items(match.group(2), aliases) if is_active else set()
+    if active and _is_list_continuation(line):
+        return active, _token_items(line, aliases)
+    return False, set()
 
 
-# LLM: _user_requires_no_comments detects simple no-comment deliverable requests.
-# 函数用途: 识别用户明确不要注释的交付约束。
-def _user_requires_no_comments(text: str) -> bool:
-    lowered = text.lower()
-    return any(
-        marker in lowered
-        for marker in (
-            "不要注释",
-            "不要有注释",
-            "不要写注释",
-            "不写注释",
-            "禁止注释",
-            "no comments",
-            "without comments",
-            "do not write comments",
-        )
-    )
+# LLM: _token_items normalizes machine enum values from one field value.
+# 函数用途: 兼容逗号、顿号、竖线和 bullet 形式，但不把普通自然语言分词当 token。
+def _token_items(value: str, aliases: dict[str, str]) -> set[str]:
+    cleaned = str(value or "").strip().strip("[]")
+    for prefix in ("-", "*"):
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[1:].strip()
+    tokens = re.split(r"[,，、|]+", cleaned)
+    return {
+        mapped
+        for token in tokens
+        if (mapped := aliases.get(token.strip().strip("'\"`").casefold().replace("-", "_")))
+    }
 
 
-# LLM: _goal_requests_comments catches delegated tasks that reintroduce comments.
-# 函数用途: 判断派工目标是否要求代码注释或注释说明。
-def _goal_requests_comments(text: str) -> bool:
-    lowered = text.lower()
-    return contains_unnegated_marker(lowered, ("有注释", "写注释", "代码注释", "with comments"))
+# LLM: _is_list_continuation keeps multiline protocol fields readable.
+# 函数用途: 判断当前行是否是结构化字段下面的 bullet continuation。
+def _is_list_continuation(line: str) -> bool:
+    stripped = str(line or "").strip()
+    return stripped.startswith(("-", "*"))

@@ -1,325 +1,121 @@
-# LLM: Required-file extraction separates must-have filenames from forbidden rename examples.
-# 模块用途: 从任务文本中抽取真正需要交付的文件名，避免把“禁止改成 x.html”里的反例误传给下层。
+# LLM: Structured file-contract extraction reads protocol fields only, never natural prose.
+# 模块用途: 从 required_files / forbidden_files 机器字段中读取产物文件合同；普通中文或英文说明只给模型理解，不由代码猜。
 
 from __future__ import annotations
 
 import re
 
+_FIELD_RE = re.compile(r"^\s*(?:[-*]\s*)?(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(?P<tail>.*)$")
+_BULLET_RE = re.compile(r"^\s*[-*]\s*(?P<value>.*)$")
 _FILE_RE_TEMPLATE = (
-    r"(?<![A-Za-z0-9_./-])([A-Za-z0-9][A-Za-z0-9_.-]*\.(?:{exts}))(?![A-Za-z0-9_-]|\.[A-Za-z0-9])"
+    r"(?<![A-Za-z0-9_./-])"
+    r"((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9][A-Za-z0-9_.-]*\.(?:{exts}))"
+    r"(?![A-Za-z0-9_-]|\.[A-Za-z0-9])"
 )
-_NEGATIVE_HINTS = (
-    "禁止",
-    "不允许",
-    "不要",
-    "不能",
-    "不得",
-    "不写",
-    "不创建",
-    "不生成",
-    "不产出",
-    "不包含",
-    "没有",
-    "不存在",
-    "勿",
-    "无",
-    "do not",
-    "don't",
-    "must not",
-    "not ",
-    "no ",
-    "without",
-)
-# LLM: Negative examples may be introduced by “如/例如/比如”, not only by rename/create verbs.
-# 函数用途: 识别禁止说明里的示例前缀，避免反例文件名进入 required_files。
-_NEGATIVE_TARGET_RE = re.compile(
-    r"(?:改成|改为|改名成|改名为|重命名为|命名为|叫做|叫|创建|生成|包含|产出|写入|写|如|例如|比如|forbidden_files|内部文件污染|文件污染|污染|to|as|create|generate|include|write)\s*[（(]?\s*$",
-    re.IGNORECASE,
-)
-_BARE_NEGATIVE_TARGET_RE = re.compile(
-    r"(?:^|[\s：:，,、])(?:禁止(?:改名|文件名|文件|创建|生成|产出|写入|写)?|不允许|不要|不能|不得|勿|没有|不存在|无(?:任何)?|do not|don't|must not|no)\s*[：:]?\s*$",
-    re.IGNORECASE,
-)
-_NEGATIVE_AFTER_FILE_RE = re.compile(
-    r"^\s*(?:引用|链接|跳转|依赖|包含|出现|存在|refs?|references?|links?)\b",
-    re.IGNORECASE,
-)
-_NEGATIVE_LABEL_RE = re.compile(
-    r"(?:禁止(?:创建|生成|产出|写入|写)?\s*[：:]|禁止(?:创建)?(?:文件名|内部文件|文件/反例名|文件|反例名)"
-    r"[^。；;\n]{0,96}[：:（(】\]]|forbidden(?:_files)?[^。；;\n]{0,96}[：:（(】\]])\s*$",
-    re.IGNORECASE,
-)
-_NEGATIVE_HEADER_RE = re.compile(
-    r"(?:#+\s*禁止(?:创建)?(?:文件名|内部文件|文件/反例名|文件|反例名)\s*$|"
-    r"禁止(?:创建|生成|产出|写入|写)?\s*[：:]|禁止(?:创建)?(?:文件名|内部文件|文件/反例名|文件|反例名)"
-    r"[^。；;\n]{0,96}[：:（(】\]]|forbidden(?:_files)?[^。；;\n]{0,96}[：:（(】\]])\s*$",
-    re.IGNORECASE,
-)
-_NEGATIVE_CHAIN_CONNECTOR_RE = re.compile(r"^(?:[\s,，、/]*|[\s,，、/]*(?:或|或者|or)[\s,，、/]*)$", re.IGNORECASE)
-_BULLET_PREFIX_RE = re.compile(r"^[-*]\s*")
-_LOCATION_TARGET_RE = re.compile(r"(?:放进|放入|放到|放在|置于|移入|inside|under|into)", re.IGNORECASE)
-_FILE_LIKE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9]{1,6}")
-_INTERNAL_REF_FILES = frozenset({
-    "task.json",
-    "execution_context.json",
-    "runner_result.md",
-    "runner_result.json",
-    "latest_continue_packet.json",
-    "checkpoint.json",
-    "summary.md",
-    "context_bundle.json",
-})
-_INTERNAL_REF_HINTS = (
-    "真实",
-    "里的",
-    "里",
-    "状态",
-    "refs",
-    "引用",
-    "读取",
-    "报告",
-    "恢复",
-    "接着",
-    "续跑",
-    "continue",
-    "packet",
-    "checkpoint",
-    "summary",
-    "run",
-    "root",
-    "child",
-)
-_POSITIVE_DELIVERABLE_HINTS = (
-    "交付",
-    "产出",
-    "输出",
-    "创建",
-    "生成",
-    "写入",
-    "写 ",
-    "包含",
-    "required",
-    "deliver",
-    "create",
-    "generate",
-    "write",
-)
-_SOURCE_INPUT_HINTS_BEFORE = (
-    "读取",
-    "读 ",
-    "参考",
-    "结合",
-    "基于",
-    "输入",
-    "资料",
-    "材料",
-    "数据",
-    "source",
-    "input",
-    "context",
-    "read",
-    "reference",
-    "based on",
-)
-_SOURCE_INPUT_HINTS_AFTER = (
-    "是输入",
-    "输入资料",
-    "输入文件",
-    "参考资料",
-    "资料",
-    "材料",
-    "数据",
-    "不是产物",
-    "不是需要创建",
-    "不是要创建",
-    "not a deliverable",
-    "source",
-    "input",
-    "context",
-    "reference",
-)
+_REQUIRED_FIELDS = frozenset({"required_files", "required_file_refs"})
+_FORBIDDEN_FIELDS = frozenset({"forbidden_files"})
 
 
-# LLM: required_file_terms_from_text returns positive deliverable filenames only.
-# 函数用途: 按片段提取文件名，并跳过禁止/反例语境中的目标文件名，保持首次出现顺序。
+# LLM: required_file_terms_from_text returns filenames from structured required_files fields only.
+# 函数用途: 读取 `required_files: index.html, docs/report.md` 这类机器字段；不解析“必须生成”等自然语言。
 def required_file_terms_from_text(text: str, *, extensions: str) -> list[str]:
-    pattern = re.compile(_FILE_RE_TEMPLATE.format(exts=extensions), re.IGNORECASE)
-    terms: list[str] = []
-    for segment in _segments(text):
-        _append_terms(terms, _positive_terms(segment, pattern))
-    return terms
+    return _terms_from_structured_fields(text, extensions=extensions, field_names=_REQUIRED_FIELDS)
 
 
-# LLM: forbidden_file_terms_from_text returns negative-example filenames as a separate machine contract.
-# 函数用途: 提取“禁止改成/不要创建”里的反例文件名，供下层明确知道哪些名字不能当产物。
+# LLM: forbidden_file_terms_from_text returns filenames from structured forbidden_files fields only.
+# 函数用途: 读取 `forbidden_files: product.html, output.json` 这类机器字段；不解析“不要创建”等自然语言。
 def forbidden_file_terms_from_text(text: str, *, extensions: str) -> list[str]:
+    return _terms_from_structured_fields(text, extensions=extensions, field_names=_FORBIDDEN_FIELDS)
+
+
+# LLM: _terms_from_structured_fields is the shared protocol parser for required and forbidden file lists.
+# 函数用途: 扫描结构化字段、inline 列表和后续 bullet/裸文件列表，保持顺序并去重。
+def _terms_from_structured_fields(text: str, *, extensions: str, field_names: frozenset[str]) -> list[str]:
     pattern = re.compile(_FILE_RE_TEMPLATE.format(exts=extensions), re.IGNORECASE)
-    terms: list[str] = []
-    for segment in _segments(text):
-        _append_terms(terms, _forbidden_terms(segment, pattern))
-    return terms
-
-
-# LLM: _append_terms preserves first-seen order across text segments.
-# 函数用途: 将片段内的正向文件名合并进结果列表，避免重复项扰乱交接合同。
-def _append_terms(terms: list[str], values: list[str]) -> None:
-    for value in values:
-        if value not in terms:
-            terms.append(value)
-
-
-# LLM: _positive_terms filters one local segment without growing the public extractor.
-# 函数用途: 返回片段中不属于禁止/反例语境的文件名。
-def _positive_terms(segment: str, pattern: re.Pattern[str]) -> list[str]:
     values: list[str] = []
-    last_end = 0
-    negative_chain_active = False
-    for match in pattern.finditer(segment):
-        connector = segment[last_end : match.start()]
-        direct_negative = _is_negative_target(segment, match.start())
-        chained_negative = negative_chain_active and _is_negative_chain_connector(connector)
-        if (
-            not direct_negative
-            and not chained_negative
-            and not _is_internal_context_reference(segment, match)
-            and not _is_source_input_reference(segment, match)
-        ):
-            values.append(match.group(1))
-        negative_chain_active = direct_negative or chained_negative
-        last_end = match.end()
+    active = False
+    for raw in str(text or "").splitlines():
+        active, terms = _structured_file_terms_line(raw, active=active, field_names=field_names, pattern=pattern)
+        _append_terms(values, terms)
     return values
 
 
-# LLM: _forbidden_terms extracts only filenames that are forbidden targets or chained alternatives.
-# 函数用途: 返回片段中作为禁止目标出现的文件名，不把“不要把 A 改成 B”里的 A 当成禁止项。
-def _forbidden_terms(segment: str, pattern: re.Pattern[str]) -> list[str]:
-    values: list[str] = []
-    last_end = 0
-    negative_chain_active = False
-    for match in pattern.finditer(segment):
-        connector = segment[last_end : match.start()]
-        direct_negative = _is_negative_target(segment, match.start())
-        chained_negative = negative_chain_active and _is_negative_chain_connector(connector)
-        if direct_negative or chained_negative:
-            values.append(match.group(1))
-        negative_chain_active = direct_negative or chained_negative
-        last_end = match.end()
-    return values
+# LLM: _structured_file_terms_line keeps required/forbidden file parsing shallow.
+# 函数用途: 解析一行 structured file contract，返回下一行 active 状态和本行文件名列表。
+def _structured_file_terms_line(
+    raw: str,
+    *,
+    active: bool,
+    field_names: frozenset[str],
+    pattern: re.Pattern[str],
+) -> tuple[bool, list[str]]:
+    line = raw.strip()
+    field = _field_match(line)
+    if field:
+        is_active = field[0] in field_names
+        return is_active, _file_terms_from_value(field[1], pattern) if is_active else []
+    if not active:
+        return False, []
+    continuation = _field_continuation_value(line)
+    return (continuation is not None), _file_terms_from_value(continuation, pattern) if continuation is not None else []
 
 
-# LLM: _segments limits semantic checks to local task lines and clauses.
-# 函数用途: 把长任务拆成短片段，防止一个否定词影响后面无关的必需文件名。
-def _segments(text: str) -> list[str]:
-    normalized = _normalize_file_list_separators(str(text or ""))
-    segments: list[str] = []
-    active_negative_header = ""
-    for raw in re.split(r"[\n。；;]+", normalized):
-        item = raw.strip()
-        if not item:
-            active_negative_header = ""
-            continue
-        if _NEGATIVE_HEADER_RE.search(item):
-            active_negative_header = item
-            segments.append(item)
-            continue
-        if active_negative_header and _BULLET_PREFIX_RE.match(item):
-            segments.append(f"{active_negative_header} {_BULLET_PREFIX_RE.sub('', item)}")
-            continue
-        if active_negative_header and _FILE_LIKE_RE.search(item):
-            segments.append(f"{active_negative_header} {item}")
-            active_negative_header = ""
-            continue
-        active_negative_header = ""
-        segments.append(item)
-    return segments
+# LLM: _field_match accepts machine field names, not translated labels.
+# 函数用途: 解析 `required_files:` / `forbidden_files:` 行，返回标准化字段名和尾部内容。
+def _field_match(line: str) -> tuple[str, str] | None:
+    match = _FIELD_RE.match(line)
+    if not match:
+        return None
+    return match.group("field").strip().lower(), match.group("tail").strip()
 
 
-# LLM: _normalize_file_list_separators keeps slash-separated filename alternatives parseable.
-# 函数用途: 把 `product.html/old.html` 这种文件名列表里的斜杠当分隔符，不影响普通路径分隔。
+# LLM: _field_continuation_value keeps multiline structured lists small and deterministic.
+# 函数用途: 支持字段下一行的 bullet 文件列表，或只包含文件名/分隔符的裸列表行；遇到普通说明就停止。
+def _field_continuation_value(line: str) -> str | None:
+    if not line:
+        return None
+    bullet = _BULLET_RE.match(line)
+    if bullet:
+        return bullet.group("value").strip()
+    return line if _looks_like_file_list_line(line) else None
+
+
+# LLM: _looks_like_file_list_line prevents prose after a field from being swallowed as contract data.
+# 函数用途: 只有纯文件名列表才作为字段续行；包含普通词句的行会结束当前字段。
+def _looks_like_file_list_line(line: str) -> bool:
+    text = str(line or "").strip()
+    if not text or "." not in text:
+        return False
+    cleaned = re.sub(r"[A-Za-z0-9_.\-/]+", "", text)
+    return all(ch in " \t,，、;；|[]()（）'\"" for ch in cleaned)
+
+
+# LLM: _file_terms_from_value extracts literal relative file refs from one structured value.
+# 函数用途: 从 inline 字段、bullet 或纯列表行中提取文件名，支持文件名之间用 `/` 写成短列表。
+def _file_terms_from_value(value: str, pattern: re.Pattern[str]) -> list[str]:
+    normalized = _normalize_file_list_separators(value)
+    return [_clean_term(match.group(1)) for match in pattern.finditer(normalized)]
+
+
+# LLM: _normalize_file_list_separators treats file/file alternatives as list separators, not directories.
+# 函数用途: `style.css/app.js` 解析成两个文件；`docs/report.md` 保持为相对路径。
 def _normalize_file_list_separators(text: str) -> str:
     return re.sub(
-        r"(\.[A-Za-z0-9]{1,6})/(?=[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9]{1,6}(?![A-Za-z0-9_.-]))",
-        r"\1、",
-        text,
+        r"(\.[A-Za-z0-9]{1,8})/(?=[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9]{1,8}(?![A-Za-z0-9_.-]))",
+        r"\1,",
+        str(text or ""),
     )
 
 
-# LLM: _is_negative_target detects filenames used as forbidden alternatives.
-# 函数用途: 判断当前文件名前是否存在“禁止改成/不要创建”等语境，只过滤被禁止的目标名。
-def _is_negative_target(segment: str, start: int) -> bool:
-    before = segment[:start].lower()
-    if not any(hint in before for hint in _NEGATIVE_HINTS):
-        return False
-    window = before[-64:]
-    label_window = before[-128:]
-    target_negative = bool(_NEGATIVE_TARGET_RE.search(window) or _NEGATIVE_LABEL_RE.search(label_window))
-    bare_negative = bool(_BARE_NEGATIVE_TARGET_RE.search(window))
-    if bare_negative and not target_negative and _is_location_rule_source(segment, start):
-        return False
-    return target_negative or bare_negative or _is_absent_reference_target(segment, start)
+# LLM: _clean_term normalizes path separators without resolving the filesystem.
+# 函数用途: 去掉字段值两侧标点和 `./`，保留相对目录结构。
+def _clean_term(value: object) -> str:
+    return str(value or "").strip().strip("`'\".,;:，。；：、").replace("\\", "/").lstrip("./")
 
 
-# LLM: _is_absent_reference_target handles natural acceptance like “无 index4.html 引用”.
-# 函数用途: 识别“没有/不存在/无 xxx.html 引用”这种反向验收，避免把应消失的文件名当成必需产物。
-def _is_absent_reference_target(segment: str, start: int) -> bool:
-    before = segment[:start].lower()
-    if not any(hint in before[-32:] for hint in ("无", "没有", "不存在", "no", "without")):
-        return False
-    after = segment[start:]
-    match = _FILE_LIKE_RE.match(after)
-    if not match:
-        return False
-    return bool(_NEGATIVE_AFTER_FILE_RE.search(after[match.end() :]))
-
-
-# LLM: _is_location_rule_source keeps "do not place style.css under css/" from forbidding style.css itself.
-# 函数用途: 识别“禁止 A.css 放进子目录”这种位置约束，避免把必须产物 A.css 误当禁止文件。
-def _is_location_rule_source(segment: str, start: int) -> bool:
-    after = segment[start:]
-    return bool(_LOCATION_TARGET_RE.search(after))
-
-
-# LLM: _is_internal_context_reference gives adjacent state-ref wording priority over distant create/write verbs.
-# 函数用途: task.json/execution_context.json 在“里的状态/refs/阻塞汇报”等语境里只是内部引用，不是下级要创建的产物。
-def _is_internal_context_reference(segment: str, match: re.Match[str]) -> bool:
-    filename = match.group(1).lower()
-    if filename not in _INTERNAL_REF_FILES:
-        return False
-    before = segment[max(0, match.start() - 48) : match.start()].lower()
-    after = segment[match.end() : match.end() + 48].lower()
-    if any(hint in after[:24] for hint in ("里的", "里", "refs", "阻塞", "汇报", "状态")):
-        return True
-    if any(hint in before for hint in _POSITIVE_DELIVERABLE_HINTS):
-        return False
-    return any(hint in before or hint in after for hint in _INTERNAL_REF_HINTS)
-
-
-# LLM: _is_source_input_reference keeps data/source filenames out of deliverable contracts.
-# 函数用途: 识别“读取/参考 xxx.md，xxx.md 是输入资料”这类输入文件，避免 Context Gate 把资料误当输出。
-def _is_source_input_reference(segment: str, match: re.Match[str]) -> bool:
-    before = segment[max(0, match.start() - 80) : match.start()].lower()
-    after = segment[match.end() : match.end() + 80].lower()
-    if _is_summary_subject_reference(segment, match):
-        return True
-    positive_before = before[-48:]
-    if any(hint in positive_before for hint in _POSITIVE_DELIVERABLE_HINTS):
-        return False
-    return any(hint in before for hint in _SOURCE_INPUT_HINTS_BEFORE) or any(
-        hint in after for hint in _SOURCE_INPUT_HINTS_AFTER
-    )
-
-
-# LLM: _is_summary_subject_reference treats "report README.md summary" as input evidence, not output.
-# 函数用途: 避免 runner 计划里“写报告，说明 README.md 内容摘要”把 README.md 误列为 required_files。
-def _is_summary_subject_reference(segment: str, match: re.Match[str]) -> bool:
-    before = segment[max(0, match.start() - 16) : match.start()].lower()
-    after = segment[match.end() : match.end() + 24].lower()
-    if not any(hint in before for hint in ("报告", "总结", "摘要", "summarize", "summary of")):
-        return False
-    return any(hint in after for hint in ("内容", "摘要", "summary", "content"))
-
-
-# LLM: _is_negative_chain_connector extends one forbidden target across sibling alternatives.
-# 函数用途: 识别“不要创建 a.html、b.html”或“不要改成 a.html 或 b.html”的并列反例。
-def _is_negative_chain_connector(text: str) -> bool:
-    return bool(_NEGATIVE_CHAIN_CONNECTOR_RE.match(text or ""))
+# LLM: _append_terms preserves first-seen order across structured fields.
+# 函数用途: 合并字段中的文件名，跳过空值和重复项。
+def _append_terms(terms: list[str], values: list[str]) -> None:
+    for value in values:
+        if value and value not in terms:
+            terms.append(value)

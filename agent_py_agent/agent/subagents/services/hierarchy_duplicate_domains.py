@@ -52,14 +52,11 @@ def _is_coordination_like(item: Any) -> bool:
     return any(token in text for token in COORDINATION_ROLE_TOKENS)
 
 
-# LLM: _child_domain_tokens extracts stable, human-named task domains from a child spec or task.
-# 函数用途: 从 agent_name/role/goal 中提取 checkout、quality、catalog 等领域词，用于同父级去重。
+# LLM: _child_domain_tokens extracts stable role/name task domains only.
+# 函数用途: 从 agent_name/role 提取 checkout、quality、catalog 等领域词；不从 goal 自然语言兜底。
 def _child_domain_tokens(item: Any) -> set[str]:
     label_text = f"{getattr(item, 'agent_name', '')} {getattr(item, 'role', '')}".lower()
-    label_tokens = _domain_tokens(label_text)
-    if label_tokens:
-        return label_tokens
-    return _domain_tokens(_goal_domain_text(str(getattr(item, "goal", "")).lower()))
+    return _domain_tokens(label_text)
 
 
 # LLM: _domain_tokens removes generic role/path words before duplicate-domain comparison.
@@ -70,18 +67,6 @@ def _domain_tokens(text: str) -> set[str]:
         token for token in tokens
         if token not in DOMAIN_STOPWORDS and not _looks_generated_id_token(token)
     }
-
-
-# LLM: _goal_domain_text strips inherited paths before goal fallback domain detection.
-# 函数用途: duplicate-domain 兜底看 goal 时，去掉共享目录、文件名和继承块。
-def _goal_domain_text(text: str) -> str:
-    head = re.split(r"\n\s*继承父级目标/边界|\n\s*父级必需文件/产物名|\n\s*父级禁止文件/反例名", text, maxsplit=1)[0]
-    without_paths = re.sub(r"(?:~|/)[^\s，。；;、)）]+", " ", head)
-    return re.sub(
-        r"\b[A-Za-z0-9][A-Za-z0-9_.-]*\.(?:html?|css|js|json|md|py|txt|ya?ml)\b",
-        " ",
-        without_paths,
-    )
 
 
 # LLM: _looks_generated_id_token prevents run-id fragments from becoming business domains.

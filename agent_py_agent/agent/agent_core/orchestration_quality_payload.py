@@ -8,18 +8,6 @@ from pathlib import Path
 from typing import Any
 
 _QA_ROLES = {"tester", "bug_finder", "acceptor"}
-_NEGATIVE_TERMS = (
-    "失败",
-    "缺陷",
-    "缺失",
-    "断裂",
-    "不通过",
-    "failed",
-    "failure",
-    "missing",
-    "broken",
-    "error",
-)
 _QUALITY_SCAN_MAX_NODES = 96
 
 
@@ -115,17 +103,22 @@ def _read_output_payload(path: Path | None) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-# LLM: _payload_has_negative_signal is advisory; it never marks a task failed by itself.
-# 函数用途: 判断 QA 输出里是否有失败/缺陷/断裂等线索，供 LLM 决定 repair。
+# LLM: _payload_has_negative_signal is advisory and reads structured status/tests/blockers only.
+# 函数用途: 判断 QA 输出里是否有结构化失败状态、失败测试或 blockers，供 LLM 决定 repair。
 def _payload_has_negative_signal(item: Any, payload: dict[str, Any]) -> bool:
     status = str(getattr(item, "status", "") or "").upper()
     if status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
         return True
+    structured = payload.get("structured_output") if isinstance(payload.get("structured_output"), dict) else {}
+    structured_status = str(structured.get("status") or payload.get("status") or "").upper()
+    if structured_status in {"BLOCKED", "FAILED", "FAIL", "ERROR"}:
+        return True
+    if payload.get("blockers"):
+        return True
     for test in payload.get("tests") or []:
         if isinstance(test, dict) and (test.get("ok") is False or test.get("passed") is False):
             return True
-    text = json.dumps(_textual_signal_payload(payload), ensure_ascii=False).lower()
-    return any(term in text for term in _NEGATIVE_TERMS)
+    return False
 
 
 # LLM: _textual_signal_payload narrows negative-word scanning to model summaries, not artifact bodies.

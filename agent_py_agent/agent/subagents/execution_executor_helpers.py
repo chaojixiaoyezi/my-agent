@@ -93,8 +93,8 @@ def _file_result(path: Path, exists: bool) -> dict[str, Any]:
 def _content_match_record(request: ContentMatchRecordRequest) -> TestExecutionRecord:
     """Return a content_check validation record."""
 
-    # LLM: expect_absent turns natural "no bad pattern" checks into a deterministic not_contains result.
-    # 函数用途: 支持正向包含、全文相等和负向不存在三种内容验收，避免“无 xxx”被反向判定。
+    # LLM: expect_absent is an explicit schema flag for negative content checks.
+    # 函数用途: 支持正向包含、全文相等和负向不存在三种内容验收；负向检查必须由机器字段声明。
     text = request.path.read_text(encoding="utf-8", errors="replace")
     matched = text == request.pattern if request.exact else request.pattern in text
     ok = not matched if request.expect_absent else matched

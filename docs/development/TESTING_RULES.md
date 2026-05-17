@@ -174,6 +174,21 @@ When fixing a bug:
 
 This ensures the bug cannot silently return.
 
+## 9.1 Natural Prompt E2E Discipline / 自然语言 E2E 约束
+
+- Real user-style E2E prompts should avoid internal implementation terms such as
+  `dispatch`, `workflow_template_id`, `run_id`, or `structured contract` unless
+  the test is explicitly a protocol test.
+- For subagent delegation E2E, the prompt may say in plain language:
+  `你自己不要做，你要陪我聊天，你只派小傻妞/子代理做。` This is a test/user
+  instruction for the root model, not a product-code rule.
+- Do not hardcode that sentence, or any similar Chinese/English prose, into
+  runtime guards. If the behavior must become deterministic, first introduce a
+  machine field such as `delegate_only=true` or `refs_only=true`, then test that
+  the natural phrase alone does not trigger the hard guard.
+- Business E2E tasks should be realistic enough to expose orchestration issues.
+  Example baseline: `用单文件html做一个高端现代家具品牌的网站首页，风格高级、简洁、有设计感，适合真实商业品牌使用。只输出完整html，不要注释。`
+
 ---
 
 ## 10. Pre-Release Testing / 发布前测试

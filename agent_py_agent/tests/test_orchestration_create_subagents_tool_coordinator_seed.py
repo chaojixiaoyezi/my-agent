@@ -72,8 +72,8 @@ class TestCreateSubagentsToolCoordinatorSeed:
         assert result.ok is True
         assert params.workflow_mode == "off"
 
-    def test_coordinator_seed_intent_repairs_model_worker_role(self):
-        """模型把 root coordinator 误写成 worker 时，工具层要按目标意图纠偏。"""
+    def test_natural_coordinator_seed_intent_does_not_repair_model_worker_role(self):
+        """模型把 root coordinator 误写成 worker 时，工具层不从自然语言目标纠偏。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -105,11 +105,41 @@ class TestCreateSubagentsToolCoordinatorSeed:
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
+        assert params.role == "worker"
+        assert params.workflow_mode == "auto"
+
+    def test_child_dispatch_tool_grant_repairs_worker_to_coordinator(self):
+        """显式给 schedule/dispatch 工具时，工具层按结构化能力纠偏为 coordinator。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "auto"
+
+        mock_task = MagicMock()
+        mock_task.id = "root_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/root_001"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": "创建第一层 root coordinator。",
+            "role": "worker",
+            "allowed_tools": ["read_file", "write_file", "schedule_child_subagents", "dispatch_subagents"],
+            "workflow_mode": "auto",
+        })
+
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert result.ok is True
         assert params.role == "coordinator"
         assert params.workflow_mode == "off"
 
-    def test_user_style_delegate_to_next_layer_repairs_worker_to_coordinator(self):
-        """用户说小傻妞可再找小小傻妞时，第一层应按带队角色创建。"""
+    def test_user_style_delegate_to_next_layer_does_not_repair_without_structured_signal(self):
+        """用户说小傻妞可再找小小傻妞时，代码层不靠自然语言把 worker 改成 coordinator。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -138,11 +168,11 @@ class TestCreateSubagentsToolCoordinatorSeed:
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
-        assert params.role == "coordinator"
-        assert params.workflow_mode == "off"
+        assert params.role == "worker"
+        assert params.workflow_mode == "auto"
 
-    def test_user_style_if_needed_delegate_repairs_child_to_coordinator(self):
-        """用户说小傻妞必要时找小小傻妞时，role=child 也应变成带队节点。"""
+    def test_user_style_if_needed_delegate_does_not_repair_child_without_structured_signal(self):
+        """用户说小傻妞必要时找小小傻妞时，role=child 不靠自然语言变 coordinator。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -170,9 +200,7 @@ class TestCreateSubagentsToolCoordinatorSeed:
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
-        assert params.role == "coordinator"
-        assert "schedule_child_subagents" in params.allowed_tools
-        assert "dispatch_subagents" in params.allowed_tools
+        assert params.role == "child"
 
 
 class TestCreateSubagentsToolCoordinatorPlan:
@@ -216,8 +244,8 @@ class TestCreateSubagentsToolCoordinatorPlan:
         assert any("分析印尼市场" in item for item in params.plan)
         assert any("泰越研究员" in item for item in params.plan)
 
-    def test_explicit_goal_child_spawn_repairs_worker_to_coordinator(self):
-        """goal 明确要求创建孙代理时，role=worker 也应按带队节点创建。"""
+    def test_explicit_child_dispatch_tools_repair_worker_to_coordinator(self):
+        """显式给子调度工具时，role=worker 按带队节点创建。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()

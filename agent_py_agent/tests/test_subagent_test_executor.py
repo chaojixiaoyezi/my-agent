@@ -132,9 +132,29 @@ def test_test_executor_content_check_matches_literal_pattern(tmp_path):
     assert record.validation_result["matched"] is True
 
 
-# LLM: negative content checks protect repair runs from inverted “no bad ref” assertions.
-# 函数用途: 自然中文“无 xxx 引用”要表示不应包含，而不是必须包含。
-def test_test_executor_content_check_supports_natural_negative_contains(tmp_path):
+# LLM: negative content checks protect repair runs from inverted no-bad-ref assertions.
+# 函数用途: 负向内容检查必须显式写 match_mode=not_contains，不能靠测试名里的自然语言判断。
+def test_test_executor_content_check_supports_explicit_negative_contains(tmp_path):
+    (tmp_path / "page.html").write_text("<a href='index1.html'>首页</a>\n", encoding="utf-8")
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute({
+        "name": "验证无index4.html引用",
+        "validation_method": "content_check",
+        "file_path": "page.html",
+        "content_pattern": "index4.html",
+        "match_mode": "not_contains",
+    })
+
+    assert record.executed is True
+    assert record.passed is True
+    assert record.validation_result["match_mode"] == "not_contains"
+    assert record.validation_result["expect_absent"] is True
+
+
+# LLM: natural-language test names do not define negative content semantics.
+# 函数用途: 用户或模型把 name 写成“无 xxx”时，执行器仍按默认 contains 处理，避免代码层猜语义。
+def test_test_executor_content_check_does_not_infer_negative_from_name(tmp_path):
     (tmp_path / "page.html").write_text("<a href='index1.html'>首页</a>\n", encoding="utf-8")
     executor = TestExecutor(tmp_path)
 
@@ -146,9 +166,9 @@ def test_test_executor_content_check_supports_natural_negative_contains(tmp_path
     })
 
     assert record.executed is True
-    assert record.passed is True
-    assert record.validation_result["match_mode"] == "not_contains"
-    assert record.validation_result["expect_absent"] is True
+    assert record.passed is False
+    assert record.validation_result["match_mode"] == "contains"
+    assert record.validation_result["expect_absent"] is False
 
 
 # LLM: Model-produced negative aliases should not invert no-bad-pattern checks.

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..subagent import SubAgentRunnerResult, SubAgentTask
+from ..subagents.role_templates import role_template_id_for_role
 from ..subagents.services.dispatch_params import DispatchRecordParams
 from .runner_child_summary import runner_child_summary_fields
 from .runner_input_dependencies import input_dependency_ready_candidates
@@ -45,47 +46,32 @@ CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES = {
 DEFAULT_AUTO_RUNNER_CONCURRENCY = 8
 
 
-# LLM: role phase ordering trusts role/name identity before broad inherited goal prose.
-# 函数用途: 给 runner 角色分配执行阶段；coordinator 先拆任务，worker 产出，tester/找错随后检查，acceptor 最后验收。
+# LLM: role phase ordering trusts structured role/name identity only.
+# 函数用途: 给 runner 角色分配执行阶段；coordinator 先拆任务，worker 产出，tester/bug_finder 随后检查，acceptor 最后验收。
 def _runner_role_phase_priority(task: SubAgentTask) -> int:
 
     role = str(getattr(task, "role", "") or "").strip().lower().replace("-", "_")
     identity_text = f"{role} {getattr(task, 'agent_name', '')}".lower().replace("-", "_")
-    full_text = f"{identity_text} {getattr(task, 'goal', '')}".lower().replace("-", "_")
-    if not role:
-        return _runner_text_phase_priority(full_text)
-    if "coordinator" in role or role in {"lead", "planner", "dispatcher"}:
-        return _runner_text_phase_priority(identity_text, default=0)
-    if "accept" in identity_text or any(token in identity_text for token in {"acceptor", "verifier", "verification"}):
+    template_role = role_template_id_for_role(identity_text, fallback="")
+    if template_role == "coordinator" or role in {"lead", "planner", "dispatcher"}:
+        return 0
+    if template_role == "acceptor" or role in {"acceptor", "verifier", "verification"}:
         return 30
-    if (
-        "quality" in identity_text
-        or "test" in identity_text
-        or "bug" in identity_text
-        or "review" in identity_text
-        or "critic" in identity_text
-        or any(token in identity_text for token in {"qa", "checker", "auditor"})
-    ):
+    if template_role in {"tester", "bug_finder"} or role in {"tester", "bug_finder", "qa", "checker", "auditor"}:
         return 20
-    if "worker" in role or role in {"general", "writer", "coder", "researcher", "reporter"}:
+    if template_role in {"worker", "writer", "researcher"} or role in {"worker", "writer", "researcher", "general", "coder", "reporter"}:
         return 10
-    return _runner_text_phase_priority(full_text)
+    return 10
 
 
-# LLM: _runner_text_phase_priority is a fallback for vague roles, not the main source for coordinators.
-# 函数用途: 身份字段不够明确时，从文本里保守推断 runner 阶段，避免继承的父级 QA 合同污染 coordinator。
+# LLM: _runner_text_phase_priority is retained for compatibility and delegates to template ids.
+# 函数用途: 兼容旧测试入口；不从 goal 自然语言猜阶段，只按模板 id/结构化角色词判断。
 def _runner_text_phase_priority(text: str, *, default: int = 10) -> int:
     normalized = str(text or "").lower().replace("-", "_")
-    if "accept" in normalized or any(token in normalized for token in {"acceptor", "verifier", "verification"}):
+    template_role = role_template_id_for_role(normalized, fallback="")
+    if template_role == "acceptor" or normalized in {"verifier", "verification"}:
         return 30
-    if (
-        "quality" in normalized
-        or "test" in normalized
-        or "bug" in normalized
-        or "review" in normalized
-        or "critic" in normalized
-        or any(token in normalized for token in {"qa", "checker", "auditor"})
-    ):
+    if template_role in {"tester", "bug_finder"} or normalized in {"qa", "checker", "auditor"}:
         return 20
     return default
 
@@ -326,16 +312,7 @@ def _blocked_after_capability_grant(task: SubAgentTask) -> bool:
     failure_type = _runner_failure_type(task)
     if failure_type in CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES:
         return True
-    text = " ".join(
-        str(item or "")
-        for item in [
-            getattr(task, "current_step", ""),
-            getattr(task, "result", ""),
-            " ".join(str(blocker or "") for blocker in getattr(task, "blockers", []) or []),
-        ]
-        if str(item or "").strip()
-    ).lower()
-    return any(marker in text for marker in ("capability", "permission", "allowed_write_roots", "授权"))
+    return False
 
 
 # LLM: _runner_active_attempt_id keeps active-runner reentry checks concrete and MagicMock-safe.

@@ -370,14 +370,13 @@ def test_prepare_test_items_merges_task_required_static_files(tmp_path):
     }]
 
 
-# LLM: test_static_required_files_from_texts_extracts_static_web_targets validates task-text oracle input.
-# 函数用途: 从用户目标和验收条件中抽取静态文件名，供父级验收补全 whole-site 必需文件。
-def test_static_required_files_from_texts_extracts_static_web_targets():
+# LLM: test_static_required_files_from_texts_reads_structured_file_contract validates protocol input.
+# 函数用途: 静态站必需文件只从 required_files 机器字段读取，不从自然语言句子里猜。
+def test_static_required_files_from_texts_reads_structured_file_contract():
     files = static_required_files_from_texts([
-        "必须生成 index.html, products.html, product-detail.html, cart.html, checkout.html。",
-        "还要有 style.css 和 app.js；不要把 /Users/xiaoyezi/project/docs.md 当静态站文件。",
-        "不允许把 product-detail.html 改名成 product.html 或 old-product.html，也不要创建 legacy.html、old-detail.html。",
-        "不得改名为 old-detail.html。",
+        "required_files: index.html, products.html, product-detail.html, cart.html, checkout.html",
+        "required_files: style.css, app.js",
+        "forbidden_files: product.html, old-product.html, legacy.html",
     ])
 
     assert files == [
@@ -389,6 +388,17 @@ def test_static_required_files_from_texts_extracts_static_web_targets():
         "style.css",
         "app.js",
     ]
+
+
+# LLM: natural static-site prose is not a code-layer contract source.
+# 函数用途: 普通“必须生成/不要创建”自然语言不能让 Python 生成 required_files。
+def test_static_required_files_from_texts_ignores_natural_language():
+    files = static_required_files_from_texts([
+        "必须生成 index.html, products.html，还要有 style.css 和 app.js。",
+        "不要创建 legacy.html。",
+    ])
+
+    assert files == []
 
 
 # LLM: test_prepare_test_items_keeps_malformed_check_without_machine_fallback preserves conservative failure signals.

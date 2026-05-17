@@ -24,8 +24,8 @@ class TestEstimateTaskComplexity:
         assert result.confidence == 0.6
         assert "plan_steps" in result.factors
 
-    def test_high_complexity_keywords(self, tmp_path: Path):
-        """高复杂度关键词加成。"""
+    def test_goal_keywords_do_not_change_complexity(self, tmp_path: Path):
+        """自然语言关键词不参与代码层复杂度估算。"""
         from agent_py_agent.agent.agent_core.task_complexity import estimate_task_complexity
 
         result = estimate_task_complexity(
@@ -34,12 +34,12 @@ class TestEstimateTaskComplexity:
             allowed_tools=["read", "write", "shell", "git"],
         )
 
-        # 高复杂度关键词（重构、部署）应该增加估算轮数
-        # base_rounds = 5, keyword_bonus >= 6 (重构=3, 部署=3), tool_bonus = 3
+        # base_rounds = 5, tool_bonus = 3；goal 里的“重构/部署”不再额外加分。
         assert result.estimated_rounds > result.factors["plan_steps"]
+        assert result.factors["keyword_bonus"] == 0
 
-    def test_medium_complexity_keywords(self, tmp_path: Path):
-        """中等复杂度关键词加成。"""
+    def test_medium_goal_words_do_not_add_bonus(self, tmp_path: Path):
+        """中等自然语言词也不参与代码层加权。"""
         from agent_py_agent.agent.agent_core.task_complexity import estimate_task_complexity
 
         result = estimate_task_complexity(
@@ -48,8 +48,8 @@ class TestEstimateTaskComplexity:
             allowed_tools=["read", "write"],
         )
 
-        # 中等复杂度关键词（修改）应该增加估算轮数
-        assert result.estimated_rounds >= 1
+        assert result.estimated_rounds == 3
+        assert result.factors["keyword_bonus"] == 0
 
     def test_no_plan_steps(self, tmp_path: Path):
         """无计划步骤时的处理。"""
@@ -114,6 +114,7 @@ class TestEstimateTaskComplexity:
 
         assert "plan_steps" in result.factors
         assert "keyword_bonus" in result.factors
+        assert result.factors["keyword_bonus"] == 0
         assert "tool_bonus" in result.factors
 
 

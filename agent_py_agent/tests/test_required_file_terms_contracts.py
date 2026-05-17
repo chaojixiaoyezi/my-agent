@@ -1,6 +1,6 @@
-"""LLM: focused tests for required/forbidden file term extraction.
+"""LLM: focused tests for structured file-contract extraction.
 
-函数/模块用途: 验证父级文件名合同能正确拆成 required_files 和 forbidden_files，避免下级误创建反例文件。
+函数/模块用途: 验证产品代码只从机器字段读取 required_files/forbidden_files，不再靠中文或英文自然语言猜业务意图。
 """
 
 from __future__ import annotations
@@ -11,544 +11,67 @@ from agent_py_agent.agent.subagents.required_file_terms import (
 )
 
 
-# LLM: test_file_contract_extracts_required_and_forbidden_terms_separately locks the R27 root cause.
-# 函数用途: 父级 prompt 同时包含必需文件和禁止反例时，结构化提取要把两类文件分开。
-def test_file_contract_extracts_required_and_forbidden_terms_separately():
+# LLM: structured required_files fields are the only source of required deliverable filenames.
+# 函数用途: required_files 机器字段里的文件名会进入必需产物合同，逗号、顿号、斜杠和 bullet 写法都可读。
+def test_file_contract_extracts_structured_required_files():
+    text = """
+    required_files: index.html、style.css/app.js, docs/README.md
+    required_files:
+    - checkout.html
+    - reports/final_report.md
+    """
+
+    required = required_file_terms_from_text(text, extensions=r"html?|css|js|md")
+
+    assert required == ["index.html", "style.css", "app.js", "docs/README.md", "checkout.html", "reports/final_report.md"]
+
+
+# LLM: structured forbidden_files fields stay separate from deliverables.
+# 函数用途: forbidden_files 机器字段只进入禁止文件合同，不会污染 required_files。
+def test_file_contract_extracts_structured_forbidden_files():
+    text = """
+    required_files: index.html, product-detail.html
+    forbidden_files: product.html/legacy.html, output.json
+    forbidden_files:
+    - RUNNER_RESULT.md
+    - execution_context.json
+    """
+
+    required = required_file_terms_from_text(text, extensions=r"html?|json|md")
+    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|json|md")
+
+    assert required == ["index.html", "product-detail.html"]
+    assert forbidden == ["product.html", "legacy.html", "output.json", "RUNNER_RESULT.md", "execution_context.json"]
+
+
+# LLM: natural prose is no longer a product-code file contract source.
+# 函数用途: 即便句子里出现“必须/禁止/输出/读取”等自然语言，代码层也不能据此猜 required/forbidden 文件。
+def test_file_contract_ignores_natural_language_file_requirements():
     text = (
-        "必须包含 index.html、products.html、product-detail.html、style.css、app.js。"
-        "不允许把 product-detail.html 改名成 product.html 或 old-product.html；"
-        "不得改名为 legacy.html，也不要创建 obsolete.html。"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js")
-    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js")
-
-    assert required == ["index.html", "products.html", "product-detail.html", "style.css", "app.js"]
-    assert forbidden == ["product.html", "old-product.html", "legacy.html", "obsolete.html"]
-
-
-# LLM: Parent examples like "禁止改名（如 x.html）" must not become required deliverables.
-# 函数用途: 防止 root 用括号举 forbidden 文件名反例时，把 product.html/legacy.html 误传成下级必需文件。
-def test_file_contract_treats_negative_examples_as_forbidden_terms():
-    text = (
-        "必须包含 index.html、products.html、product-detail.html、style.css、app.js。"
-        "文件名禁止改名（如 product.html、old-detail.html、legacy.html 等均不允许）。"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js")
-    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js")
-
-    assert required == ["index.html", "products.html", "product-detail.html", "style.css", "app.js"]
-    assert forbidden == ["product.html", "old-detail.html", "legacy.html"]
-
-
-# LLM: R41 exposed bare negative targets after colon/list wording.
-# 函数用途: 防止“禁止 product.html / 禁止 output.json”这种裸禁止写法再次进入 required_files。
-def test_file_contract_treats_bare_negative_targets_as_forbidden_terms():
-    text = (
-        "必须包含 index.html、register.html、login.html、products.html、product-detail.html、"
-        "cart.html、checkout.html、order-success.html、style.css、app.js。"
-        "文件名禁止改名：不允许 product.html/old-product.html/legacy.html。"
-        "不允许在 build 目录写 output.json、RUNNER_RESULT.md、execution_context.json 或其他内部文件。"
-        "不允许把 style.css/app.js 放进 css/ 或 js/ 子目录。"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-
-    assert required == [
-        "index.html",
-        "register.html",
-        "login.html",
-        "products.html",
-        "product-detail.html",
-        "cart.html",
-        "checkout.html",
-        "order-success.html",
-        "style.css",
-        "app.js",
-    ]
-    assert forbidden == [
-        "product.html",
-        "old-product.html",
-        "legacy.html",
-        "output.json",
-        "RUNNER_RESULT.md",
-        "execution_context.json",
-    ]
-
-
-# LLM: R87 showed natural absence checks can become fake required files during repair loops.
-# 函数用途: “无/没有/不存在 index4.html 引用”这类验收条件只能进入 forbidden_files，不能进入 required_files。
-def test_file_contract_treats_absent_reference_checks_as_forbidden_terms():
-    text = (
-        "必须包含 index1.html、index2.html、index3.html。"
-        "无任何 index4.html 引用；没有 legacy.html 链接；不存在 old.html 跳转。"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js")
-    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js")
-
-    assert required == ["index1.html", "index2.html", "index3.html"]
-    assert forbidden == ["index4.html", "legacy.html", "old.html"]
-
-
-# LLM: R59 used "禁止创建：" and polluted descendant required_files.
-# 函数用途: 确认“禁止创建：a.html、b.json”整段只进入 forbidden_files，不能混入必需产物。
-def test_file_contract_treats_forbidden_create_label_as_forbidden_terms():
-    text = (
-        "必须包含 index.html、register.html、login.html、products.html、product-detail.html、"
-        "cart.html、checkout.html、order-success.html、style.css、app.js。"
-        "禁止创建：product.html、old-product.html、legacy.html、obsolete.html、"
-        "output.json、RUNNER_RESULT.md、execution_context.json。"
+        "必须包含 index.html、style.css、app.js。"
+        "不要创建 product.html，也不要写 output.json。"
+        "最终输出 final_report.md，读取 source.md 作为输入。"
     )
 
     required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
     forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-
-    assert required == [
-        "index.html",
-        "register.html",
-        "login.html",
-        "products.html",
-        "product-detail.html",
-        "cart.html",
-        "checkout.html",
-        "order-success.html",
-        "style.css",
-        "app.js",
-    ]
-    assert forbidden == [
-        "product.html",
-        "old-product.html",
-        "legacy.html",
-        "obsolete.html",
-        "output.json",
-        "RUNNER_RESULT.md",
-        "execution_context.json",
-    ]
-
-
-# LLM: R42 exposed the natural Chinese label "禁止文件名：..." as another forbidden-list form.
-# 函数用途: 防止父级/子级用“禁止文件名”列反例时，下层又把反例当 required_files。
-def test_file_contract_treats_forbidden_filename_label_as_forbidden_terms():
-    text = (
-        "核心文件（必须命名完全一致）：index.html、register.html、login.html、products.html、"
-        "product-detail.html、cart.html、checkout.html、order-success.html、style.css、app.js。"
-        "禁止文件名：product.html/old-product.html/legacy.html/obsolete.html。"
-        "禁止在 build 写 output.json/RUNNER_RESULT.md/execution_context.json。"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-
-    assert required == [
-        "index.html",
-        "register.html",
-        "login.html",
-        "products.html",
-        "product-detail.html",
-        "cart.html",
-        "checkout.html",
-        "order-success.html",
-        "style.css",
-        "app.js",
-    ]
-    assert forbidden == [
-        "product.html",
-        "old-product.html",
-        "legacy.html",
-        "obsolete.html",
-        "output.json",
-        "RUNNER_RESULT.md",
-        "execution_context.json",
-    ]
-
-
-# LLM: R46 showed root-seed machine inheritance labels must stay parseable as forbidden files.
-# 函数用途: 防止“用户原始禁止文件/反例名（禁止创建...）：...”补块被 context bundle 当成 required_files。
-def test_file_contract_treats_root_seed_forbidden_inheritance_block_as_forbidden_terms():
-    text = (
-        "必须文件：index.html、products.html、product-detail.html、style.css、app.js。\n"
-        "用户原始禁止文件/反例名（禁止创建，不得当成 required_files）："
-        "product.html、old-product.html、legacy.html、obsolete.html、"
-        "output.json、RUNNER_RESULT.md、execution_context.json"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-
-    assert required == ["index.html", "products.html", "product-detail.html", "style.css", "app.js"]
-    assert forbidden == [
-        "product.html",
-        "old-product.html",
-        "legacy.html",
-        "obsolete.html",
-        "output.json",
-        "RUNNER_RESULT.md",
-        "execution_context.json",
-    ]
-
-
-# LLM: R47 exposed inherited forbidden headings followed by bullet files.
-# 函数用途: 防止“父级禁止文件/反例名：\n- product.html”这类继承块同时污染 required_files。
-def test_file_contract_carries_negative_header_into_bulleted_forbidden_terms():
-    text = (
-        "父级必需文件/产物名（structured required_files，必须原样传给下一层）：\n"
-        "- index.html\n"
-        "- product-detail.html\n"
-        "- style.css\n"
-        "父级禁止文件/反例名（structured forbidden_files，不得创建，不得当成 required_files）：\n"
-        "- output.json\n"
-        "- RUNNER_RESULT.md\n"
-        "- product.html\n"
-        "- old-product.html\n"
-        "- legacy.html\n"
-        "- obsolete.html\n"
-        "- execution_context.json\n"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-
-    assert required == ["index.html", "product-detail.html", "style.css"]
-    assert forbidden == [
-        "output.json",
-        "RUNNER_RESULT.md",
-        "product.html",
-        "old-product.html",
-        "legacy.html",
-        "obsolete.html",
-        "execution_context.json",
-    ]
-
-
-# LLM: R49 showed positive file labels can contain "禁止改名" without becoming forbidden lists.
-# 函数用途: “必须文件（禁止改名）：index.html...”表示必需且不能改名，不表示这些文件禁止创建。
-def test_file_contract_keeps_required_files_when_positive_label_says_no_rename():
-    text = (
-        "必须文件（禁止改名）：index.html, register.html, login.html, products.html, "
-        "product-detail.html, cart.html, checkout.html, order-success.html, style.css, app.js\n"
-        "禁止：product.html/old-product.html/legacy.html\n"
-        "禁止写 output.json/RUNNER_RESULT.md/execution_context.json"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-
-    assert required == [
-        "index.html",
-        "register.html",
-        "login.html",
-        "products.html",
-        "product-detail.html",
-        "cart.html",
-        "checkout.html",
-        "order-success.html",
-        "style.css",
-        "app.js",
-    ]
-    assert forbidden == [
-        "product.html",
-        "old-product.html",
-        "legacy.html",
-        "output.json",
-        "RUNNER_RESULT.md",
-        "execution_context.json",
-    ]
-
-
-# LLM: R50 showed acceptance checks can state forbidden files as "无 forbidden_files(...)".
-# 函数用途: 验收项里的“无 forbidden_files/无内部文件污染”不能把反例文件加入 required_files。
-def test_file_contract_treats_no_forbidden_files_acceptance_as_forbidden_terms():
-    text = (
-        "必须包含 index.html、products.html、product-detail.html、style.css、app.js。\n"
-        "无 forbidden_files（product.html/old-product.html/legacy.html/obsolete.html）\n"
-        "无内部文件污染（output.json/RUNNER_RESULT.md/execution_context.json）"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-
-    assert required == ["index.html", "products.html", "product-detail.html", "style.css", "app.js"]
-    assert forbidden == [
-        "product.html",
-        "old-product.html",
-        "legacy.html",
-        "obsolete.html",
-        "output.json",
-        "RUNNER_RESULT.md",
-        "execution_context.json",
-    ]
-
-
-# LLM: R51 showed "forbid putting style.css in a subdir" is a placement rule, not a forbidden filename.
-# 函数用途: 防止验收项里的“禁止 style.css/app.js 放进子目录”把两个必需资源误标成 forbidden_files。
-def test_file_contract_keeps_required_files_when_forbidden_location_mentions_them():
-    text = (
-        "必须交付 index.html/register.html/login.html/products.html/product-detail.html/"
-        "cart.html/checkout.html/order-success.html/style.css/app.js 共10个文件\n"
-        "禁止 style.css/app.js 放进 css/ 或 js/ 子目录\n"
-        "禁止写 output.json/RUNNER_RESULT.md/execution_context.json"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-
-    assert required == [
-        "index.html",
-        "register.html",
-        "login.html",
-        "products.html",
-        "product-detail.html",
-        "cart.html",
-        "checkout.html",
-        "order-success.html",
-        "style.css",
-        "app.js",
-    ]
-    assert forbidden == ["output.json", "RUNNER_RESULT.md", "execution_context.json"]
-
-
-# LLM: R51 also showed parent goals can label forbidden files with parentheses instead of colons.
-# 函数用途: 防止“禁止文件名（a.html/b.html）”和“禁止内部文件（output.json）”里的反例进入 required_files。
-def test_file_contract_treats_parenthesized_forbidden_labels_as_forbidden_terms():
-    text = (
-        "必须遵守：10个精确文件名（index.html/register.html/login.html/products.html/"
-        "product-detail.html/cart.html/checkout.html/order-success.html/style.css/app.js），"
-        "禁止文件名（product.html/old-product.html/legacy.html/obsolete.html），"
-        "禁止内部文件（output.json/RUNNER_RESULT.md/execution_context.json）"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-
-    assert required == [
-        "index.html",
-        "register.html",
-        "login.html",
-        "products.html",
-        "product-detail.html",
-        "cart.html",
-        "checkout.html",
-        "order-success.html",
-        "style.css",
-        "app.js",
-    ]
-    assert forbidden == [
-        "product.html",
-        "old-product.html",
-        "legacy.html",
-        "obsolete.html",
-        "output.json",
-        "RUNNER_RESULT.md",
-        "execution_context.json",
-    ]
-
-
-# LLM: R52 showed model summaries often shorten "禁止写 output.json" to "不写output.json".
-# 函数用途: 防止 root 摘要里的“不写output.json/RUNNER_RESULT.md”丢出 forbidden_files 机器合同。
-def test_file_contract_treats_no_write_short_negative_as_forbidden_terms():
-    text = (
-        "【必须交付的文件】index.html、products.html、product-detail.html、style.css、app.js。\n"
-        "【产出约束】- build目录写产物，不写output.json/RUNNER_RESULT.md等内部文件。\n"
-        "不创建 legacy.html，不生成 obsolete.html，不产出 debug.json，不包含 draft.md。"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-
-    assert required == ["index.html", "products.html", "product-detail.html", "style.css", "app.js"]
-    assert forbidden == [
-        "output.json",
-        "RUNNER_RESULT.md",
-        "legacy.html",
-        "obsolete.html",
-        "debug.json",
-        "draft.md",
-    ]
-
-
-# LLM: R54 showed negative headings may be followed by a plain filename line, not bullets.
-# 函数用途: 防止“禁止创建文件（forbidden_files）：\nproduct.html...”这种格式污染 required_files。
-def test_file_contract_carries_negative_header_into_plain_file_list_line():
-    text = (
-        "必须包含文件：index.html、products.html、product-detail.html、style.css、app.js。\n"
-        "禁止创建文件（forbidden_files）：\n"
-        "product.html、old-product.html、legacy.html、obsolete.html、output.json、"
-        "RUNNER_RESULT.md、execution_context.json\n"
-        "你需要继续创建 depth=2 的 child coordinator。"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-
-    assert required == ["index.html", "products.html", "product-detail.html", "style.css", "app.js"]
-    assert forbidden == [
-        "product.html",
-        "old-product.html",
-        "legacy.html",
-        "obsolete.html",
-        "output.json",
-        "RUNNER_RESULT.md",
-        "execution_context.json",
-    ]
-
-
-# LLM: R57 showed bracket-only Chinese labels can omit the colon before forbidden examples.
-# 函数用途: 防止 `【禁止文件名】product.html/...` 这类 root goal 把 forbidden examples 当 required。
-def test_file_contract_treats_bracket_forbidden_labels_as_forbidden_terms():
-    text = (
-        "【必须完成】交付文件：\n"
-        "- index.html\n"
-        "- register.html\n"
-        "- style.css\n"
-        "- app.js\n"
-        "【禁止文件名】product.html/old-product.html/legacy.html/obsolete.html\n"
-        "【禁止内部文件】禁止在 build 写 output.json/RUNNER_RESULT.md/execution_context.json"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-
-    assert required == ["index.html", "register.html", "style.css", "app.js"]
-    assert forbidden == [
-        "product.html",
-        "old-product.html",
-        "legacy.html",
-        "obsolete.html",
-        "output.json",
-        "RUNNER_RESULT.md",
-        "execution_context.json",
-    ]
-
-
-# LLM: R58 showed final required filenames may be followed by sentence punctuation.
-# 函数用途: 必需文件列表最后的 app.js. 要识别为 app.js，但不能把 app.js.map 截断成 app.js。
-def test_file_contract_keeps_required_filename_before_sentence_period():
-    text = (
-        "Required files (exact names only): index.html, register.html, login.html, products.html, "
-        "product-detail.html, cart.html, checkout.html, order-success.html, style.css, app.js. "
-        "Do not treat app.js.map as the deliverable."
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js")
-
-    assert required == [
-        "index.html",
-        "register.html",
-        "login.html",
-        "products.html",
-        "product-detail.html",
-        "cart.html",
-        "checkout.html",
-        "order-success.html",
-        "style.css",
-        "app.js",
-    ]
-
-
-# LLM: R67 showed Markdown negative headings can still pollute inherited required_files.
-# 函数用途: `## 禁止文件` 后面的文件名必须只进入 forbidden_files，不进入 required_files。
-def test_file_contract_treats_markdown_forbidden_heading_as_negative_scope():
-    text = (
-        "## 必须文件（共10个）\n"
-        "index.html, register.html, login.html, products.html, product-detail.html, "
-        "cart.html, checkout.html, order-success.html, style.css, app.js\n\n"
-        "## 禁止文件\n"
-        "product.html, old-product.html, legacy.html, obsolete.html, "
-        "output.json, RUNNER_RESULT.md, execution_context.json\n"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-
-    assert required == [
-        "index.html",
-        "register.html",
-        "login.html",
-        "products.html",
-        "product-detail.html",
-        "cart.html",
-        "checkout.html",
-        "order-success.html",
-        "style.css",
-        "app.js",
-    ]
-    assert forbidden == [
-        "product.html",
-        "old-product.html",
-        "legacy.html",
-        "obsolete.html",
-        "output.json",
-        "RUNNER_RESULT.md",
-        "execution_context.json",
-    ]
-
-
-# LLM: task.json is an internal state reference unless a positive deliverable label owns it.
-# 函数用途: 验收/看板语境里的 `task.json 里的状态` 不能变成下级必须创建的产物。
-def test_file_contract_ignores_internal_state_file_references_without_deliverable_label():
-    text = (
-        "必须包含 index.html、style.css、app.js；购物网站产物完整只是基础通过项。\n"
-        "只有所有真实 task.json 里的 root/child/grandchild 状态一致时，才能说完整通过。\n"
-        "父级状态报告会读取 execution_context.json refs，但这些不是用户产物。"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-
-    assert required == ["index.html", "style.css", "app.js"]
-
-
-# LLM: inherited hierarchy clauses can mention "禁止创建" before task.json without making it a deliverable.
-# 函数用途: 防止 R69 里 `禁止创建 depth>=4 ... task.json 里的状态` 被窗口内“创建”误判成正向交付。
-def test_file_contract_ignores_task_json_inside_hierarchy_state_clause():
-    text = (
-        "必须包含完全命名的文件：index.html、style.css、app.js。\n"
-        "用户原始层级/命名约束（必须原样遵守）：禁止创建 depth>=4 的下级 / "
-        "只有所有真实 task.json 里的 root/child 链路、角色覆盖和验收状态一致时，才能说完整通过"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-
-    assert required == ["index.html", "style.css", "app.js"]
-
-
-# LLM: recovery packet filenames are state refs, not user deliverables.
-# 函数用途: 防止恢复说明里的 latest_continue_packet.json 被继承成 worker 必须创建的业务产物。
-def test_file_contract_ignores_continue_packet_recovery_reference():
-    text = (
-        "必须包含 index.html、app.js、RECOVERY_NOTES.md。\n"
-        "若任何 runner 半路失败或超时，必须优先读取 latest_continue_packet.json / checkpoint / summary 接着跑，"
-        "不要重新理解任务。"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
-
-    assert required == ["index.html", "app.js", "RECOVERY_NOTES.md"]
-
-
-# LLM: Task17 showed source Markdown inputs can be misread as deliverables.
-# 函数用途: “读取/参考 data/.../vietnam.md”只是输入资料，不能进入 required_files；只有明确输出才算产物。
-def test_file_contract_ignores_markdown_source_inputs_when_output_is_not_named():
-    text = (
-        "读取 data/country_packs/vietnam.md，结合 channel_partners.csv 做越南市场进入分析。"
-        "输出市场环境报告，未确认信息标注【未确认】。"
-    )
-
-    required = required_file_terms_from_text(text, extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html")
 
     assert required == []
+    assert forbidden == []
 
 
-# LLM: Source-reference filtering must not remove explicitly named deliverables.
-# 函数用途: 同一句里有输入文件和输出文件时，只保留输出文件，避免把输入/资料路径传给下层当交付物。
-def test_file_contract_keeps_named_output_but_ignores_source_inputs():
-    text = (
-        "读取 data/country_packs/vietnam.md 和 data/channel_partners.csv。"
-        "最终输出 final_report.md，要求包含渠道策略和6个月行动计划。"
-    )
+# LLM: unknown natural labels are deliberately ignored instead of becoming new product rules.
+# 函数用途: 中文标题、英文 prose 和括号解释都不能替代 required_files/forbidden_files 机器字段。
+def test_file_contract_ignores_non_protocol_labels():
+    text = """
+    必须文件（禁止改名）：index.html, register.html
+    禁止文件名：product.html/old-product.html
+    Required files (exact names only): app.js.
+    Do not create output.json.
+    """
 
-    required = required_file_terms_from_text(text, extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html")
+    required = required_file_terms_from_text(text, extensions=r"html?|js|json")
+    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|js|json")
 
-    assert required == ["final_report.md"]
+    assert required == []
+    assert forbidden == []

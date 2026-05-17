@@ -93,53 +93,53 @@ def test_missing_explicit_template_records_issue_and_falls_back():
 
 def test_code_or_bugfix_task_selects_code_feature_split():
     decision = route_workflow(
-        "Fix the API bug and add regression tests",
+        "Fix the API bug and add regression tests\nworkflow_task_type: code_or_bugfix",
         config=_Config("auto"),
         template_store=_store("single_worker_verified", "code_feature_split", "producer_critic_repair"),
     )
 
     assert decision.task_type == "code_or_bugfix"
     assert decision.selected_template_id == "code_feature_split"
-    assert "code_change" in decision.risk_tags
+    assert "explicit_workflow" in decision.risk_tags
 
 
 def test_quality_delivery_task_selects_producer_critic_repair():
     decision = route_workflow(
-        "Prepare a high quality PDF report with UI polish",
+        "Prepare a high quality PDF report with UI polish\nworkflow_task_type: quality_deliverable",
         config=_Config("auto"),
         template_store=_store("single_worker_verified", "code_feature_split", "producer_critic_repair"),
     )
 
     assert decision.task_type == "quality_deliverable"
     assert decision.selected_template_id == "producer_critic_repair"
-    assert "quality_bar" in decision.risk_tags
+    assert "explicit_workflow" in decision.risk_tags
 
 
-def test_chinese_quality_delivery_task_selects_producer_critic_repair():
+def test_natural_language_quality_delivery_does_not_select_special_template():
     decision = route_workflow(
         "把 PDF 论文翻译成高质量正式交付报告",
         config=_Config("auto"),
         template_store=_store("single_worker_verified", "code_feature_split", "producer_critic_repair"),
     )
 
-    assert decision.task_type == "quality_deliverable"
-    assert decision.selected_template_id == "producer_critic_repair"
+    assert decision.task_type == "simple"
+    assert decision.selected_template_id == "single_worker_verified"
 
 
-def test_chinese_log_analysis_development_task_selects_code_feature_split():
+def test_structured_template_field_selects_template_without_keyword_matching():
     decision = route_workflow(
-        "开发日志分析模块的下一步功能并补充测试",
+        "开发日志分析模块的下一步功能并补充测试\nworkflow_template_id: code_feature_split",
         config=_Config("auto"),
         template_store=_store("single_worker_verified", "code_feature_split", "producer_critic_repair"),
     )
 
-    assert decision.task_type == "code_or_bugfix"
+    assert decision.task_type == "simple"
     assert decision.selected_template_id == "code_feature_split"
 
 
 def test_missing_target_template_records_issue_and_falls_back_to_available_template():
     decision = route_workflow(
-        "Fix the API bug and add regression tests",
+        "Fix the API bug and add regression tests\nworkflow_task_type: code_or_bugfix",
         config=_Config("auto"),
         template_store=_store("single_worker_verified"),
     )
