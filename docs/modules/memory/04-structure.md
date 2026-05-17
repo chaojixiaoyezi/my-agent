@@ -9,7 +9,13 @@ agent_py_agent/agent/
 |-- settings/memory.py                # memory 配置、默认值、warning、安全归一化和参数边界
 |-- memory_store/                     # 长期记忆 JSONL 事实流水，可选同步索引到 LocalStore，并可镜像到 home daily
 |-- memory_routing/                   # route index、匹配、required/candidate path、read receipt
+|-- contracts/                        # 错误分类、状态机、幂等键和真实 E2E 矩阵合同
 |-- user_space/home_runtime_query.py   # home daily memory、workspace/tasks 和 home status 只读查询入口
+|-- user_space/context_bundle.py       # 主代理 Main Agent Context Bundle v1 生成和 prompt 摘要
+|-- user_space/context_bundle_contracts.py # RunScope/ToolManifest/Acceptance/self-check 等合同字段
+|-- user_space/context_bundle_artifacts.py # 保存型 run 收尾后按 scope 回填 artifact refs
+|-- user_space/context_bundle_rendering.py # context bundle prompt/Markdown 渲染
+|-- agent_core/runtime_context_bundle.py # runtime loop 到主代理 context bundle 的桥接层
 `-- memory_archive/                   # hook snapshot、raw archive、留存、token 估算、compact 预演
     |-- agent_run_workspace.py         # Phase 1 task-local agent run workspace 骨架
     |-- artifact_registry.py           # Phase 3 artifact manifest summary/hash/path 和 workspace 边界
@@ -17,8 +23,14 @@ agent_py_agent/agent/
     |-- compact_apply.py               # 非破坏性 memory-compact --apply 编排入口
     |-- compact_apply_ids.py           # apply_id / plan_id / scope hash / 风险摘要 helper
     |-- compact_apply_io.py            # compact apply JSON/Markdown/JSONL 写入 helper
+    |-- compact_apply_lineage.py       # 重复 compact 的 cycle/previous apply 链路 helper
+    |-- compact_apply_payloads.py      # restore refs / apply bundle / ledger payload helper
+    |-- compact_apply_rendering.py     # compact apply 恢复上下文 Markdown 渲染 helper
+    |-- compact_artifact_read_hints.py # tool-output artifact 的 read_artifact 分片读取提示 helper
     |-- compact_apply_self_check.py    # compact apply post-check 和失败阻断 payload
     |-- compact_apply_work_state.py    # compact apply work_state_snapshot 恢复基线
+    |-- compact_context_bundle_match.py # compact apply 绑定主任务卡前的 scope match helper
+    |-- compact_context_bundle_refs.py # 主代理 context bundle 引用读取和恢复摘要 helper
     |-- compact_work_state_sources.py  # workspace 内 task/run 验收、约束和测试事实源扫描
     |-- compact_auto.py                # 自动 compact/resume 安全协调器，默认只计划不继续执行工具
     |-- compact_continue_packet.py     # compact resume 后的继续工作包，固定目标/约束/验收/guard 状态
@@ -26,8 +38,10 @@ agent_py_agent/agent/
     |-- compact_resume_blocked.py      # compact apply 缺失时的 schema-compatible 阻断 payload
     |-- compact_resume_completion.py   # 缺失 work_state 字段时的半自动补全提示模板
     |-- compact_resume_handoff.py      # compact resume 交接包和可粘贴上下文块
+    |-- compact_resume_payloads.py     # compact resume handoff/continue packet 派生输出打包 helper
     |-- compact_subagent_owner.py      # compact resume 的子代理 owner/run workspace 只读引用解析
     |-- compact_suggest.py             # 半自动 compact 风险提示和命令建议
+    |-- compact_tool_output_refs.py    # compact apply/resume 的 tool-output artifact refs 扫描 helper
     |-- compact_chain.py               # Phase 4 checkpoint-first compact chain ledger
     |-- control_plane.py               # 统一只读查询 daily/task-run/compact/tool-output 轻量索引
     |-- daily_ledger.py                # Phase 2 daily/YYYY-MM-DD/events.jsonl 事件索引
@@ -52,13 +66,20 @@ agent_py_agent/cli/
 |-- home_runtime_commands.py          # home-status / memory-daily-list / task-workspace-list 只读调试命令
 |-- memory_archive_commands.py        # memory-archive-list/search/resume 命令
 |-- memory_resume_compact_rendering.py # memory-resume --from-compact 人类输出渲染
-`-- memory_compact_commands.py        # memory-compact dry-run 和非破坏性 apply 命令
+|-- memory_compact_commands.py        # memory-compact dry-run 和非破坏性 apply 命令
+`-- context_bundle_commands.py        # context-bundle latest 只读观测命令
 ```
 
 ## 核心文件
 
 - `memory_store/jsonl.py`：读写长期记忆 JSONL，是最朴素的事实落盘层；LocalStore 只是索引，不替代 JSONL。`SimpleAgent` 传入 home daily mirror 后，同一条记录也会追加到 `~/.my-agent/memory/daily/YYYY-MM-DD.jsonl`，便于以后按天恢复和查询；读取侧现在也会把 daily mirror 作为旧 `memory_path` 的补充事实源并去重。
+- `contracts/error_taxonomy.py`、`contracts/state_machine.py`、`contracts/idempotency.py`、`contracts/e2e_matrix.py`：主代理执行合同层。它们分别定义稳定错误代码/恢复建议、运行状态事实判断、幂等键/操作编号和真实端到端测试矩阵；这些模块只输出机器可读事实，不直接阻断工具或固定工作流。当前 `create_subagents` 已写 `operation_contract`，`current_turn_run_state` 已写 `state_machine_contract` 和 `recovery_recommendations`。
 - `user_space/home_runtime_query.py`：提供 `DailyMemoryQuery`、`TaskWorkspaceQuery`、`read_daily_memory_records()`、`list_task_workspaces()`、`home_task_workspace_payload()` 和 `home_runtime_status()`；CLI、doctor 和 resume 通过这一层读取 home runtime，不在各自模块里散扫目录。
+- `user_space/context_bundle.py`：为主代理保存型 run 生成 `Main Agent Context Bundle v1` JSON/Markdown 和 bounded prompt 摘要；它只写结构化 refs，不复制大正文。
+- `user_space/context_bundle_contracts.py`：集中生成 context bundle 的合同字段，包括 schema policy、owner model、RunScope、ToolManifest、ArtifactRef、Acceptance Contract、prompt budget 和 self-check。后续字段扩展优先落在这里，避免各处散拼 JSON。
+- `user_space/context_bundle_artifacts.py`：run 收尾后按 request/run/task scope 从 tool-output index 回填 artifact refs 到本轮 context bundle；只登记 ref/hash/size/call id，不读取 artifact 正文。
+- `user_space/context_bundle_rendering.py`：只负责 context bundle 的 prompt 摘要和 Markdown 镜像渲染；完整 JSON 生成仍在 `context_bundle.py`，这样结构字段和展示格式不会互相拖大。
+- `agent_core/runtime_context_bundle.py`：把 runtime loop 的 request、memory、routing、resume 和工具规格转换成 `MainContextBundleRequest`；task-local/control-plane 会在这一层保持不注入主代理 bundle。
 - `settings/memory.py`：解析配置，处理非法值回退和 warning；会原地更新 AgentConfig-like 对象。
 - `memory_routing/loader.py`：读取 route index；JSON 面向程序稳定性，Markdown 面向人工维护，并兼容常见中英文列表分隔符。
 - `memory_routing/models.py`：定义 route、match、path resolution、read receipt 等票据结构。
@@ -79,14 +100,22 @@ agent_py_agent/cli/
 - `memory_archive/daily_ledger.py`：维护 `daily/YYYY-MM-DD/events.jsonl`，只追加 task/run 状态、摘要、duration、refs、artifact/evidence refs 和检索字段，不存完整上下文或工具输出。
 - `memory_archive/artifact_registry.py`：把 `SubAgentTask.artifact_refs` 规范化为 task/run 两份 `artifacts/manifest.jsonl`，记录 ref、resolved path、exists、size、sha256、summary、kind 和 `resolution_status`；只会读取 legacy task dir、task workspace、agent run workspace 和当前 run 的 `allowed_write_roots` 内的文件，越界绝对路径只登记 blocked 状态，不复制正文也不计算 hash。
 - `memory_archive/compact_chain.py`：在 run `compactions/` 下追加 checkpoint snapshot ledger，写每次 summary/metadata，并把最新 compact refs 回写到 run checkpoint；当前只做恢复链，不删除原始 timeline/artifact。
-- `memory_archive/compact_apply.py`：把 `memory-compact --dry-run` 的计划显式落成非破坏性 apply 产物，写 `compact_applies/<apply_id>.md`、metadata JSON、apply bundle、restore refs、work state snapshot、self-check JSON、可选 self-check failed JSON 和 append-only ledger；它不删除或重写 raw/hook/snapshot/token/task/run 文件。
+- `memory_archive/compact_apply.py`：把 `memory-compact --dry-run` 的计划显式落成非破坏性 apply 产物，写 `compact_applies/<apply_id>.md`、metadata JSON、apply bundle、restore refs、work state snapshot、self-check JSON、可选 self-check failed JSON 和 append-only ledger；它不删除或重写 raw/hook/snapshot/token/task/run 文件。新 apply 会登记最近一次主代理 `Main Agent Context Bundle v1`，让恢复先知道任务 scope、工作区和 refs。重复 apply 同一 plan 时会带 `lineage`，记录第几轮 compact 和上一包引用。
+- `memory_archive/compact_apply_lineage.py`：只读 `compact_applies/ledger.jsonl`，为当前 apply 推导 `cycle_index`、`previous_apply_id`、上一包 metadata/apply bundle 引用和当前包引用；坏 ledger 行会跳过，不阻断新的 compact apply。
+- `memory_archive/compact_apply_payloads.py`：生成 compact apply 的 restore refs、apply bundle 和 ledger 行；它只组装 payload，不写文件，让 `compact_apply.py` 继续只负责编排顺序和自检结果。
+- `memory_archive/compact_artifact_read_hints.py`：把 work state 里的 tool-output artifact refs 转成 `read_artifact` 参数提示；优先 scoped call id，保留 fallback path，不读取 artifact 正文。
+- `memory_archive/compact_apply_rendering.py`：渲染 compact apply 的 Markdown 恢复上下文，让 `compact_apply.py` 继续只管编排、落盘和 self-check。
+- `memory_archive/compact_context_bundle_refs.py`：读取、容错解析并裁剪主代理 context bundle；compact apply/resume 只拿任务卡摘要和路径引用，不复制完整长 prompt。
+- `memory_archive/compact_context_bundle_match.py`：在 compact apply 绑定主代理 context bundle 前做 scope match；自动 latest ref 不匹配时跳过绑定，显式 ref 不匹配时保留但记录 warning，避免老任务 compact 串到最新任务。
 - `memory_archive/compact_apply_ids.py`、`compact_apply_work_state.py`、`compact_work_state_sources.py`、`compact_apply_self_check.py`、`compact_apply_io.py`：分别负责稳定 apply/plan 标识、恢复状态基线、workspace 内 task/run 事实源字段读取、自检/失败报告和落盘 IO，让 compact apply 主流程继续保持薄编排，后续接 `memory-resume --from-compact` 时优先复用这些产物。`compact_apply_work_state.py` 优先读取权威 snapshot；没有 snapshot 文件时，只从本次 `restore_refs` 登记的 hook/raw JSONL 回填真实 run 的 goal/next_step。
-- `memory_archive/compact_resume.py`：只读读取 compact apply metadata、apply bundle、restore refs、work state snapshot、compact context 和 self-check，生成 `memory-resume --from-compact` 的恢复上下文、consistency report、推荐读取路径和 continue packet；它会把 `owner_type/owner_id` 传给子代理 owner resolver，但仍不读写 subagent runner。
+- `memory_archive/compact_resume.py`：只读读取 compact apply metadata、apply bundle、restore refs、work state snapshot、compact context、self-check 和主代理 context bundle refs，生成 `memory-resume --from-compact` 的恢复上下文、consistency report、推荐读取路径和 continue packet；它会把 `owner_type/owner_id` 传给子代理 owner resolver，但仍不读写 subagent runner。
 - `memory_archive/compact_resume_blocked.py`：在 apply metadata 缺失时生成和正常 resume 同 schema 的阻断 payload，包含 action guard 和 subagent owner 边界；主恢复编排不承载错误 payload 细节。
-- `memory_archive/compact_continue_packet.py`：把 handoff、work_state、action guard、推荐读取路径和子代理 owner refs 组装成 `compact_continue_packet`，给手动、半自动和自动续跑流程一个共同继续契约；它只打包已有结果，不读 artifact 正文、不执行工具。
+- `memory_archive/compact_continue_packet.py`：把 handoff、work_state、action guard、推荐读取路径、artifact read hints 和子代理 owner refs 组装成 `compact_continue_packet`，给手动、半自动和自动续跑流程一个共同继续契约；它只打包已有结果，不读 artifact 正文、不执行工具。
 - `memory_archive/compact_resume_completion.py`：当 resume 发现 missing work_state 字段时，生成 `completion_prompt`，说明缺哪些字段、对应人类标签、可复制补全模板和 `memory-fact-write` / 重新 apply / auto resume 建议命令；它只提示，不写 runtime facts。
-- `memory_archive/compact_resume_handoff.py`：把 compact resume 的 work state、action guard、推荐读取路径和下一步动作整理成 `compact_resume_handoff`，并渲染可复制到新会话的上下文块。
+- `memory_archive/compact_resume_handoff.py`：把 compact resume 的 work state、action guard、推荐读取路径、artifact read hints 和下一步动作整理成 `compact_resume_handoff`，并渲染可复制到新会话的上下文块。
+- `memory_archive/compact_resume_payloads.py`：把 compact resume 的 handoff、completion prompt、context block 和 continue packet 派生输出集中打包；主恢复文件只负责读取、校验和 schema assembly。
 - `memory_archive/compact_subagent_owner.py`：为 `subagent_run` / `subagent_session` compact resume 只读解析 `tasks/*/agents/<run_id>/` 和旧 `subagents/<run_id>/`，返回 run workspace、checkpoint、summary、timeline、artifacts、compactions、legacy adapter refs 和 `session_compact_ledger` / `latest_continue_packet` hook；当 `latest_continue_packet.json` 已存在时，父级 resume/status 会看到 `continue_packet_ready=true`，但仍明确 `memory_scope=task_local`、`writes_main_memory=false`、`automatic_tool_execution=none`。
+- `memory_archive/compact_tool_output_refs.py`：只读扫描 `memory_archive/artifacts/tool_outputs/index.jsonl`，按 request/run/task scope 返回 tool-output artifact refs；compact apply 会把它们写进 restore refs，work state 会把它们写进 artifact_refs，resume 推荐路径会按这些 refs 回到完整工具输出。
 - `memory_archive/compact_action_guard.py`：在 compact resume 后生成动作守门报告；`manual` 模式要求人工确认，`auto` 模式必须通过一致性、自检、refs 和 work state 字段检查，否则阻断为 `blocked_*`；字段齐全时只返回 `allow_automated_continue` 机器信号，仍不执行工具。
 - `memory_archive/compact_suggest.py`：根据累计 token、上下文窗口和 compact dry-run plan 生成半自动提示，返回 `status`、`message`、`recommended_commands` 和 `requires_confirmation`；它只提示，不自动 apply，不切换上下文。
 - `memory_archive/compact_auto.py`：串起 compact suggestion、可选非破坏性 apply、auto resume、continue packet 和 action guard；默认 `allow_apply=false` 只返回 `needs_user_confirmation`。配置 `memory_compact_auto_allow_apply=true` 且 guard 放行时，主 agent 会把 continue packet 注入下一轮 prompt 并受控续跑一次；字段缺失、自检失败或 refs 异常时仍停车。
@@ -117,6 +146,7 @@ agent_py_agent/cli/
 - `cli/memory_archive_commands.py`：给用户查看归档列表、搜索归档、生成恢复简报，并提供 `memory-fact-write` 写入用户确认的 compact 补全事实。
 - `cli/memory_resume_compact_rendering.py`：承接 `memory-resume --from-compact` 的 handoff、continue packet、completion prompt 和推荐路径输出，避免 archive CLI 编排继续膨胀。
 - `cli/memory_compact_commands.py`：把 compact plan 暴露为 `memory-compact --dry-run`；显式 `--apply` 时只生成 compact context、metadata、apply bundle、restore refs、work state snapshot、ledger 和 self-check，不做 destructive rewrite。
+- `cli/context_bundle_commands.py`：提供 `context-bundle latest --json`，只读查看最新主代理任务卡、scope、RunScope、ToolManifest、Acceptance Contract、自检和 prompt budget；它不调用模型、不写文件。
 
 ## 数据流
 
@@ -142,12 +172,12 @@ agent_py_agent/cli/
 20. tool context reducer 会在下一轮 live prompt 注入前再次检查 archive record：如果输出已外置，只注入 preview、artifact path、hash、size 和 fail-safe checkpoint；完整正文必须通过 artifact 文件显式读取。
 21. recovery snapshot 的工具调用 metadata 会保留 output hash、size 和 externalized 状态，方便接管代理知道大输出存在且需要读 artifact；snapshot 不保存完整工具输出正文。
 22. `memory-compact --dry-run` 在真实压缩前只读扫描上述事实源，输出计划和风险，不修改文件。
-23. `memory-compact --apply` 把同一 scope 的计划落成非破坏性 compact apply 记录：`compact_context`、metadata、apply bundle、restore refs、work state snapshot、post-compact self-check 和 apply ledger。当前成功状态为 `applied_non_destructive`，只建立恢复入口，不裁剪历史内容；如果 self-check 失败，状态会变成 `blocked_self_check_failed` 并写失败报告。
+23. `memory-compact --apply` 把同一 scope 的计划落成非破坏性 compact apply 记录：`compact_context`、metadata、apply bundle、restore refs、work state snapshot、post-compact self-check 和 apply ledger。当前成功状态为 `applied_non_destructive`，只建立恢复入口，不裁剪历史内容；如果 self-check 失败，状态会变成 `blocked_self_check_failed` 并写失败报告。同一 plan 多次 apply 时，每一包会写 `lineage.cycle_index` 和 `lineage.previous_apply_id`，让长任务多次 compact 后仍能审计和恢复前后关系。自动绑定最新主代理 context bundle 前会做 scope match；scope 不匹配时不会把无关任务卡写进 restore refs。
 24. control-plane query 只读扫描 daily ledger、task/run refs、compact apply ledger 和 tool output index，给 compact/resume/debug 返回统一引用视图；正文核实仍必须回到 task/run workspace、artifact 文件或 raw archive。
 25. `run` 收尾会基于 token ledger 触发默认 plan-only 的 auto compact cycle；达到 70% 以上时会给出 dry-run/apply/resume 命令建议和 `compact_auto` 停车状态。默认仍要求用户确认，不自动执行。
 26. `run_memory_compact_auto_cycle()` 是自动 compact/resume 的第一层协调器：默认只生成 plan 和人工确认建议；显式 `allow_apply=true` 或配置 `memory_compact_auto_allow_apply=true` 时做非破坏性 apply、auto resume 和 continue packet 检查。主 agent 只有在 action guard 放行、字段齐全、refs/self-check 正常时，才把 continue packet 注入下一轮 prompt 并受控续跑一次。
 27. compact apply 生成 `work_state_snapshot` 时，会只读 workspace 内的 task/run 事实源，例如 `subagents/<run_id>/ACCEPTANCE.md`、`CONSTRAINTS.md`、`TEST_CHECKLIST.md`、`task.json`、`memory_archive/runtime_facts/<request_id>/task.json`、`memory_archive/runtime_facts/<session_id>/task.json` 和 `tasks/*/agents/<run_id>/`；读取到的验收、约束和最近测试会进入恢复基线，找不到仍标为 missing。没有权威 snapshot 文件的普通 `run --save` 场景，会从 `restore_refs` 指向的 hook/raw JSONL 回填 goal/next_step，但不会从模型回复里猜验收或测试状态。
-26. `memory-resume --from-compact` 会把 work state、action guard、fail-safe checkpoint refs、completion prompt、推荐读取路径和下一步动作整理成 `compact_resume_handoff` 和 `compact_continue_packet`，上下文块中会分节展示目标、阶段、验收、约束、最近测试、必须读取、fail-safe checkpoints 和下一步动作。
+26. `memory-resume --from-compact` 会把 work state、action guard、fail-safe checkpoint refs、completion prompt、推荐读取路径、compact lineage 和下一步动作整理成 `compact_resume_handoff` 和 `compact_continue_packet`，上下文块中会分节展示目标、阶段、验收、约束、最近测试、必须读取、fail-safe checkpoints 和下一步动作。
 27. compact 的 `allowed_to_continue=true` 只代表恢复上下文自检和 work_state guard 允许主 agent 继续下一步，不代表子代理业务验收通过；父级验收、测试执行、apply acceptance 和 rescue 仍由 parent acceptance controller / auto-policy 单独判断。
 27. 当 compact resume 指定 `owner_type=subagent_run|subagent_session` 时，系统只读解析 task-local run workspace 和 legacy run adapter refs，给未来子代理会话 compact/resume 留稳定 owner 坐标；这一步不把子代理内容写入主代理长期 memory，也不自动执行工具。
 28. Runtime memory 轻量索引记录使用 schema v2：顶层 `version=2`，旁边写 `schema.name/version/reserved_keys`，`reserved` 固定保留 `extensions`、`compat`、`future` 三槽；正式业务字段仍应显式命名，不能把 reserved 当成万能垃圾桶。

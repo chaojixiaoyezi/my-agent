@@ -9,6 +9,10 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from .compact_artifact_read_hints import (
+    artifact_read_hint_lines,
+    artifact_read_hints_from_work_state,
+)
 from .schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_reserved_fields,
@@ -30,6 +34,7 @@ class CompactResumeHandoffRequest:
     next_actions: list[str]
     fail_safe_checkpoints: list[dict[str, Any]]
     completion_prompt: dict[str, Any]
+    main_context_bundle: dict[str, Any]
 
 
 # LLM: build_compact_resume_handoff is read-only and makes resume output easy for humans and agents.
@@ -51,7 +56,9 @@ def build_compact_resume_handoff(request: CompactResumeHandoffRequest) -> dict[s
         "latest_tests": _tests_payload(work_state.get("latest_tests")),
         "changed_files": _string_list(work_state.get("changed_files")),
         "read_files": _string_list(work_state.get("read_files")),
+        "artifact_read_hints": artifact_read_hints_from_work_state(work_state),
         "recommended_read_paths": list(request.recommended_read_paths),
+        "main_context_bundle": dict(request.main_context_bundle),
         "fail_safe_checkpoints": _fail_safe_checkpoint_payloads(request.fail_safe_checkpoints),
         "missing_fields": _string_list(work_state.get("missing_fields")),
         "completion_prompt": dict(request.completion_prompt),
@@ -83,7 +90,9 @@ def render_compact_resume_context_block(handoff: dict[str, Any]) -> str:
     _extend_section(lines, "Constraints", handoff["constraints"]["items"])
     _extend_section(lines, "Latest Tests", handoff["latest_tests"]["items"])
     _extend_section(lines, "Changed Files", handoff["changed_files"])
+    _extend_main_context_bundle(lines, handoff.get("main_context_bundle", {}))
     _extend_section(lines, "Fail Safe Checkpoints", _fail_safe_checkpoint_lines(handoff["fail_safe_checkpoints"]))
+    _extend_section(lines, "Artifact Read Hints", artifact_read_hint_lines(handoff["artifact_read_hints"]))
     _extend_section(lines, "Must Read", handoff["recommended_read_paths"][:12])
     _extend_section(lines, "Next Actions", handoff["next_actions"])
     _extend_completion_prompt(lines, handoff.get("completion_prompt", {}))
@@ -194,6 +203,26 @@ def _extend_completion_prompt(lines: list[str], completion: dict[str, Any]) -> N
     if completion.get("status") != "needs_user_input":
         return
     lines.extend(["## Completion Prompt", "", completion.get("prompt_template", ""), ""])
+
+
+# LLM: _extend_main_context_bundle renders the root run card as refs, not as large task bodies.
+# 函数用途: 在 compact resume 上下文块中展示主代理 context bundle 的路径、任务范围和真实工作区。
+def _extend_main_context_bundle(lines: list[str], payload: dict[str, Any]) -> None:
+    if not isinstance(payload, dict) or not payload.get("ref"):
+        return
+    scope = payload.get("scope", {}) if isinstance(payload.get("scope"), dict) else {}
+    workspace = payload.get("workspace_refs", {}) if isinstance(payload.get("workspace_refs"), dict) else {}
+    lines.extend([
+        "## Main Context Bundle",
+        "",
+        f"- ref: {payload.get('ref', '')}",
+        f"- loaded: {str(bool(payload.get('loaded'))).lower()}",
+        f"- request_id: {scope.get('request_id', '')}",
+        f"- run_id: {scope.get('run_id', '')}",
+        f"- task_id: {scope.get('task_id', '')}",
+        f"- primary_workspace_root: {workspace.get('primary_workspace_root', '')}",
+        "",
+    ])
 
 
 # LLM: _string_list normalizes unknown JSON values into readable short strings.

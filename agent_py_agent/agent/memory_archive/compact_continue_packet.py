@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..action_protocol import CompactContinuePacketEnvelope, PathRef, RunScope
+from .compact_artifact_read_hints import artifact_read_hints_from_work_state
 from .schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_reserved_fields,
@@ -30,6 +31,7 @@ class CompactContinuePacketRequest:
     recommended_read_paths: list[str]
     next_actions: list[str]
     subagent_owner_refs: dict[str, Any]
+    main_context_bundle: dict[str, Any]
 
 
 # LLM: build_compact_continue_packet is pure packaging; it does not read files or run tools.
@@ -43,6 +45,7 @@ def build_compact_continue_packet(request: CompactContinuePacketRequest) -> dict
         "event_type": "compact_continue_packet",
         "apply_id": str(request.metadata.get("apply_id", "")),
         "plan_id": str(request.metadata.get("plan_id", "")),
+        "lineage": _lineage_payload(request.metadata.get("lineage")),
         "owner": dict(guard.get("owner", {})),
         "ready_to_continue": bool(guard.get("allowed_to_continue")),
         "continue_mode": _continue_mode(guard),
@@ -50,7 +53,9 @@ def build_compact_continue_packet(request: CompactContinuePacketRequest) -> dict
         "work_state_snapshot": _work_state_payload(request.work_state, missing),
         "guard": _guard_payload(guard),
         "recommended_read_paths": list(request.recommended_read_paths),
+        "artifact_read_hints": artifact_read_hints_from_work_state(request.work_state),
         "next_actions": list(request.next_actions),
+        "main_context_bundle": _main_context_bundle_payload(request.main_context_bundle),
         "semi_auto": _semi_auto_payload(request.handoff, missing),
         "subagent": _subagent_payload(request.subagent_owner_refs),
         "consistency_status": str(request.consistency.get("status", "")),
@@ -166,6 +171,37 @@ def _subagent_payload(owner_refs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# LLM: _main_context_bundle_payload carries the root run card through resume without reading its body.
+# 函数用途: 摘要主代理 context bundle 路径和任务范围，供自动恢复按机器字段定位任务。
+def _main_context_bundle_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"ref": "", "loaded": False, "scope": {}, "workspace_refs": {}, "error": ""}
+    return {
+        "ref": str(payload.get("ref", "") or ""),
+        "loaded": bool(payload.get("loaded")),
+        "scope": dict(payload.get("scope", {}) if isinstance(payload.get("scope"), dict) else {}),
+        "workspace_refs": dict(
+            payload.get("workspace_refs", {}) if isinstance(payload.get("workspace_refs"), dict) else {}
+        ),
+        "error": str(payload.get("error", "") or ""),
+    }
+
+
+# LLM: _lineage_payload keeps repeated compact cycle state machine-readable in continue packets.
+# 函数用途: 摘要当前 compact 是第几轮、上一轮 apply 是谁，避免自动恢复只能靠自然语言猜。
+def _lineage_payload(value: Any) -> dict[str, Any]:
+    lineage = value if isinstance(value, dict) else {}
+    return {
+        "status": str(lineage.get("status") or ""),
+        "cycle_index": _positive_int(lineage.get("cycle_index")),
+        "current_apply_id": str(lineage.get("current_apply_id") or ""),
+        "previous_apply_id": str(lineage.get("previous_apply_id") or ""),
+        "previous_metadata_ref": str(lineage.get("previous_metadata_ref") or ""),
+        "previous_apply_bundle_ref": str(lineage.get("previous_apply_bundle_ref") or ""),
+        "content_preserved": bool(lineage.get("content_preserved", False)),
+    }
+
+
 # LLM: _resume_instructions gives unattended callers a fixed stop/continue checklist.
 # 函数用途: 根据 guard 状态返回短规则列表，避免上层解析自然语言继续工作。
 def _resume_instructions(guard: dict[str, Any]) -> list[str]:
@@ -220,6 +256,16 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list | tuple):
         return []
     return [text for item in value if (text := str(item).strip())]
+
+
+# LLM: _positive_int normalizes compact lineage counters for packet payloads.
+# 函数用途: 将未知 JSON 值转换为非负整数，避免坏 lineage 影响 resume 包生成。
+def _positive_int(value: Any) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return result if result > 0 else 0
 
 
 __all__ = ["CompactContinuePacketRequest", "build_compact_continue_packet"]

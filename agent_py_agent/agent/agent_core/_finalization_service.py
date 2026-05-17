@@ -18,6 +18,10 @@ from ..memory_archive.snapshots import (
     RecoverySnapshotInput,
 )
 from ..memory_archive.tokens import TurnTokenUsage, append_session_token_usage
+from ..user_space.context_bundle_artifacts import (
+    MainContextBundleArtifactUpdateRequest,
+    update_main_context_bundle_artifacts,
+)
 from ..user_space.run_workspace import EnsureRunWorkspaceRequest, ensure_run_workspace
 from ._runtime_params import (
     ArchiveRunParams,
@@ -67,6 +71,7 @@ class FinalizationService:
         )
         archive_result = self._archive_run_if_needed(archive_params)
         runtime_fact_source = self._write_runtime_fact_source_if_needed(ctx, run_request_id)
+        self._update_main_context_bundle_artifacts(ctx, run_request_id)
 
         recovery_params = WriteRecoverySnapshotParams(
             do_save=ctx.do_save,
@@ -106,6 +111,21 @@ class FinalizationService:
                 next_actions=ctx.recovery_next_actions or [],
                 archive_tool_calls=ctx.archive_tool_calls or [],
                 runtime_injections=tuple(str(item) for item in ctx.runtime_injections or []),
+            )
+        )
+
+    # LLM: _update_main_context_bundle_artifacts links post-tool artifact refs back to the root run card.
+    # 函数用途: run 收尾时把同 scope 的工具输出 artifact refs 写回 context bundle；失败不阻断主流程。
+    def _update_main_context_bundle_artifacts(self, ctx: FinalizeContext, run_request_id: str) -> None:
+        if not ctx.do_save or not ctx.main_context_bundle_path:
+            return
+        update_main_context_bundle_artifacts(
+            MainContextBundleArtifactUpdateRequest(
+                context_bundle_path=ctx.main_context_bundle_path,
+                workspace_root=self._agent.root,
+                request_id=ctx.request_id or run_request_id,
+                run_id=ctx.run_id,
+                task_id=ctx.task_id,
             )
         )
 
@@ -227,6 +247,8 @@ class FinalizationService:
             compression_applied=ctx.compression_applied,
             turn_token_estimate=params.token_ledger["turn"],
             cumulative_token_estimate=params.token_ledger["cumulative"],
+            main_context_bundle_path=ctx.main_context_bundle_path,
+            main_context_bundle_markdown_path=ctx.main_context_bundle_markdown_path,
             **compact_auto_cycle_fields(self._agent, ctx, params.token_ledger, request_id=params.run_request_id),
         )
 

@@ -34,6 +34,7 @@
     artifacts/                    # 大工具输出、外置正文、可恢复 artifact
     compact_applies/              # 手动/自动 compact apply 生成的恢复包和 ledger
     snapshots/                    # 权威恢复快照，compact/resume 前优先读
+      context_bundles/            # 主代理每轮结构化上下文包，记录任务 scope 和恢复 refs
     tokens/                       # token 账本和上下文预算记录
 
   data/                           # 本地索引、gateway、兼容数据和旧路径迁移区
@@ -94,6 +95,7 @@ external_knowledge_database_sources: []
 - `indexes/`：目录卡片和轻量引用，应该分片/按天/按来源存，不把所有内容堆成一个大文件。
 - `compact_applies/`：每次 `memory-compact --apply` 的非破坏性恢复包。它帮新会话恢复，不会删除旧记录。
 - `snapshots/`：权威恢复快照。compact/resume 优先看它，再看 raw/hook。
+- `snapshots/context_bundles/`：主代理每轮运行前生成的 context bundle（上下文包），记录真实工作区、任务范围、memory refs 和恢复 refs；`save=False` 时只临时注入 prompt，不落盘。
 - `artifacts/`：大正文或工具输出外置。默认读预览，必要时显式读取正文，避免 1G 日志直接进 prompt。
 - `providers/*/users|groups/*/memory/`：外部用户/群自己的记忆空间，不和主账号长期记忆混用。
 
@@ -104,6 +106,7 @@ external_knowledge_database_sources: []
 - `agent.user_space.run_workspace`：普通主代理 run 保存时，会在 `workspace/tasks/{date}/{task_slug}/` 下创建 `outputs/`、`runtime/`、`agents/`、`logs/`、`task.yaml`、`state.json` 和 `timeline.jsonl`。
 - `JsonlMemory`：旧 `memory_path` 仍然可读写，同时可按配置镜像到 `memory/daily/YYYY-MM-DD.jsonl`，为后续迁移到按天流水做准备。
 - `PromptBuilder`：home-backed root 每轮会按固定顺序读取 `AGENTS.md`、`SOUL.md`、`USER.md`、`memory.md` 四个入口文件。`AGENTS.md` 先作为启动制度和读文件规则，后面再读人格、用户偏好和关键记忆；`memory/lessons/*.md` 仍只按任务文本匹配有限数量，不会每轮全量读取教训库。
+- `agent.user_space.context_bundle`：普通主代理 run 会生成 `Main Agent Context Bundle v1`，把 request/run/task、工作区、memory refs 和恢复 refs 结构化；`task_local`/`control_plane` 不继承主代理 bundle。
 - `agent.user_space.provider_space`：懒创建 provider 根、外部用户/群空间和配额统计。
 - `agent.user_space.provider_trash`：同空间 trash、scoped audit、按配置清理过期 trash。
 - `agent.external_knowledge.config`：把后端配置转成外部知识库查询 bundle。

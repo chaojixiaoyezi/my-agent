@@ -8,6 +8,7 @@ from dataclasses import fields, replace
 from ..memory_archive import build_auto_resume_context
 from ..memory_routing import RouteContextOptions, build_routed_memory_context
 from .runtime_capabilities import resolve_runtime_capabilities
+from .runtime_context_bundle import build_runtime_main_context_bundle
 from .runtime_loop_models import (
     CompressionLoopResult,
     FinalizeParams,
@@ -111,6 +112,8 @@ def _finalize_params(
         compression_applied=loop_result.compression_applied,
         run_params=run_params,
         tool_rounds=loop_result.tool_rounds,
+        main_context_bundle_path=prepared.main_context_bundle_path,
+        main_context_bundle_markdown_path=prepared.main_context_bundle_markdown_path,
     )
 
 
@@ -136,12 +139,43 @@ def _resolve_tool_sections(agent, allowed_tools, granted_capabilities):
 def _prepare_runtime_context(agent, request: RuntimeContextRequest):
     task_local = _is_task_local_context(request.context_scope)
     memories = [] if task_local else agent.memory.search(request.user_prompt, agent.config.memory_top_k)
+    routed_context = _routed_memory_context_for_request(agent, request, task_local=task_local)
+    resume_context_result, resume_context_section = _resume_context_for_request(
+        agent, request, task_local=task_local,
+    )
+    base_runtime_injections = _base_runtime_injections(request, resume_context_section, routed_context)
+    main_context_bundle = build_runtime_main_context_bundle(
+        agent,
+        request,
+        memories=memories,
+        runtime_injections=base_runtime_injections,
+        routed_context=routed_context,
+        resume_context_injected=bool(resume_context_result.injected),
+        task_local=task_local,
+    )
+    runtime_injections = _runtime_injections_with_bundle(
+        base_runtime_injections, len(request.inject or []), main_context_bundle,
+    )
+    return PreparedRuntimeContext(
+        memories=memories,
+        runtime_injections=runtime_injections,
+        routed_context=routed_context,
+        resume_context_result=resume_context_result,
+        resume_context_section=resume_context_section,
+        main_context_bundle_path=main_context_bundle.json_path if main_context_bundle else "",
+        main_context_bundle_markdown_path=main_context_bundle.markdown_path if main_context_bundle else "",
+    )
+
+
+# LLM: _routed_memory_context_for_request isolates memory routing policy from run preparation.
+# 函数用途: 根据上下文范围和配置生成路由记忆上下文；task-local 运行禁用主代理长期记忆路由。
+def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *, task_local: bool):
     route_mode = str(getattr(agent.config, "memory_rule_routing_mode", "soft") or "soft")
     route_enabled = (
         not task_local and bool(getattr(agent.config, "memory_rule_routing_enabled", True)) and route_mode != "off"
     )
     route_auto_read_limit = int(getattr(agent.config, "memory_rule_auto_read_limit", 3))
-    routed_context = build_routed_memory_context(
+    return build_routed_memory_context(
         agent.root,
         request.user_prompt,
         options=RouteContextOptions(
@@ -151,27 +185,42 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
             limit=max(route_auto_read_limit, 5),
         ),
     )
-    resume_context_result = build_auto_resume_context(
+
+
+# LLM: _resume_context_for_request keeps auto-resume injection shape consistent for context bundles.
+# 函数用途: 构造自动恢复上下文和对应 prompt 片段；task-local 运行不读主代理恢复上下文。
+def _resume_context_for_request(agent, request: RuntimeContextRequest, *, task_local: bool):
+    result = build_auto_resume_context(
         agent,
         request.user_prompt,
         enabled=False if task_local else request.resume_context,
     )
-    resume_context_section = (
-        f"### Auto Recovery Context\n{resume_context_result.context_block}"
-        if resume_context_result.injected else ""
-    )
-    runtime_injections = [
+    section = f"### Auto Recovery Context\n{result.context_block}" if result.injected else ""
+    return result, section
+
+
+# LLM: _base_runtime_injections captures the pre-bundle injection count for diagnostics.
+# 函数用途: 生成 context bundle 写入前的注入列表，用于计数和后续 token 估算。
+def _base_runtime_injections(request: RuntimeContextRequest, resume_context_section: str, routed_context):
+    return [
         *(request.inject or []),
         *([resume_context_section] if resume_context_section else []),
         *routed_context.injected_sections,
     ]
-    return PreparedRuntimeContext(
-        memories=memories,
-        runtime_injections=runtime_injections,
-        routed_context=routed_context,
-        resume_context_result=resume_context_result,
-        resume_context_section=resume_context_section,
-    )
+
+
+# LLM: _runtime_injections_with_bundle pins the order of user inject, bundle, resume, and routed sections.
+# 函数用途: 按固定顺序生成最终运行时注入，避免调用方各自拼接导致 prompt 顺序漂移。
+def _runtime_injections_with_bundle(
+    base_runtime_injections: list,
+    insert_at: int,
+    main_context_bundle,
+):
+    if not main_context_bundle:
+        return base_runtime_injections
+    injections = list(base_runtime_injections)
+    injections.insert(insert_at, main_context_bundle.prompt_section)
+    return injections
 
 
 # LLM: _execute_runtime_loop 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

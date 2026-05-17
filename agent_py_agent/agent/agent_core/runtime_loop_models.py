@@ -42,6 +42,15 @@ class RuntimeContextRequest:
     inject: list[str] | None
     resume_context: bool | None
     context_scope: str = "default"
+    allowed_tools: list[str] | None = None
+    granted_capabilities: list[str] | None = None
+    write_boundary: dict[str, object] | None = None
+    request_id: str = ""
+    run_id: str = ""
+    task_id: str = ""
+    source: str = "run"
+    save: bool | None = None
+    task_attributes: dict | None = None
 
 
 # LLM: RuntimeLoopParams carries prepared prompt context into the tool loop.
@@ -85,6 +94,8 @@ class FinalizeParams:
     compression_applied: bool
     run_params: RunParams
     tool_rounds: int
+    main_context_bundle_path: str = ""
+    main_context_bundle_markdown_path: str = ""
 
 
 # LLM: PreparedRuntimeContext carries memory/routing/resume facts into prompt build.
@@ -96,6 +107,8 @@ class PreparedRuntimeContext:
     routed_context: Any
     resume_context_result: Any
     resume_context_section: str
+    main_context_bundle_path: str = ""
+    main_context_bundle_markdown_path: str = ""
 
 
 # LLM: RuntimeLoopResult records tool-loop results for finalization.

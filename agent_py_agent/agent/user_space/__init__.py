@@ -8,6 +8,12 @@ from __future__ import annotations
 按 user_id 隔离数据目录，为多用户场景打基础。
 """
 
+from .context_bundle import (
+    MainContextBundleRequest,
+    MainContextBundleResult,
+    build_main_context_bundle,
+    latest_main_context_bundle_path,
+)
 from .home_layout import ensure_my_agent_home, home_paths, resolve_my_agent_home
 from .manager import UserSpaceManager
 from .migration import migrate_to_user_space
@@ -21,12 +27,16 @@ __all__ = [
     "UserPaths",
     "UserSpaceManager",
     "EnsureRunWorkspaceRequest",
+    "MainContextBundleRequest",
+    "MainContextBundleResult",
     "RunWorkspacePaths",
+    "build_main_context_bundle",
     "ensure_provider_space",
     "ensure_my_agent_home",
     "ensure_run_workspace",
     "get_user_paths",
     "home_paths",
+    "latest_main_context_bundle_path",
     "migrate_to_user_space",
     "resolve_my_agent_home",
 ]

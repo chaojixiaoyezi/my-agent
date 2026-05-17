@@ -14,6 +14,7 @@ import argparse
 
 from .chat import cmd_chat
 from .common import DEFAULT_CAPABILITY_CONFIG, add_resume_context_switches
+from .context_bundle_commands import cmd_context_bundle
 from .home_runtime_commands import (
     cmd_home_status,
     cmd_memory_daily_list,
@@ -58,6 +59,18 @@ def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
 def add_basic_subcommands(sub: argparse._SubParsersAction) -> None:
     _add_status_timeline_run_commands(sub)
     _add_memory_chat_commands(sub)
+    _add_context_bundle_command(sub)
+
+
+# LLM: _add_context_bundle_command registers refs-only context bundle observability.
+# 函数用途: 增加 `context-bundle latest` 命令，不触发模型调用，只读最新主代理任务卡。
+def _add_context_bundle_command(sub: argparse._SubParsersAction) -> None:
+    parser = sub.add_parser("context-bundle", help="查看主代理 context bundle 任务卡")
+    nested = parser.add_subparsers(dest="context_bundle_action")
+    latest = nested.add_parser("latest", help="查看最新 main context bundle")
+    latest.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    latest.set_defaults(func=cmd_context_bundle)
+    parser.set_defaults(func=cmd_context_bundle, context_bundle_action="latest")
 
 
 # LLM: _add_status_timeline_run_commands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
@@ -196,6 +209,7 @@ def _add_memory_compact_args(parser) -> None:
     parser.add_argument("--task-id", help="按 task_id 精确过滤")
     parser.add_argument("--level", type=int, choices=[0, 1, 2, 3], help="只扫描指定 archive_level")
     parser.add_argument("--limit", type=int, default=None, help="最多纳入多少条归档记录；0 表示不限；默认不截断")
+    parser.add_argument("--main-context-bundle-ref", default="", help="显式指定 main context bundle JSON 路径")
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
 
 

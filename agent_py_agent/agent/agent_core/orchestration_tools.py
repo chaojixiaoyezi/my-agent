@@ -13,6 +13,7 @@ import json
 from typing import TYPE_CHECKING
 
 from ..action_protocol import subagent_schedule_envelope_from_payload
+from ..contracts.idempotency import idempotency_key, operation_id
 from ..subagents.models import SubAgentBoardOptions
 from ..subagents.services.base import CreateRunParams
 from ..tools import BaseTool, ToolExecutionResult
@@ -117,7 +118,7 @@ class CreateSubagentsTool(BaseTool):
         resolutions = self._create_tasks(goal, count, run_params)
         tasks = [item.task for item in resolutions]
         remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
-        payload = self._create_payload(resolutions, allowed_tools)
+        payload = self._create_payload(resolutions, allowed_tools, params)
         return ToolExecutionResult(
             "create_subagents",
             True,
@@ -151,7 +152,7 @@ class CreateSubagentsTool(BaseTool):
         tasks = [item.task for item in resolutions]
         _apply_item_dependency_edges(self.agent.subagents, tasks, dependency_edges)
         remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
-        payload = self._create_payload(resolutions, _payload_allowed_tools(allowed_tool_values))
+        payload = self._create_payload(resolutions, _payload_allowed_tools(allowed_tool_values), {"items": [item.params for item in capped]})
         payload["batch_mode"] = "items"
         return ToolExecutionResult(
             "create_subagents",
@@ -212,6 +213,7 @@ class CreateSubagentsTool(BaseTool):
         self,
         resolutions: list[CreateTaskResolution],
         allowed_tools: list[str] | str | None,
+        request_params: dict[str, object],
     ) -> dict[str, object]:
         tasks = [item.task for item in resolutions]
         created = created_tasks(resolutions)
@@ -224,6 +226,7 @@ class CreateSubagentsTool(BaseTool):
             "reused_run_ids": [task.id for task in reused],
             "dispatch_run_ids": [task.id for task in dispatch],
             "allowed_tools": allowed_tools or "automatic",
+            "operation_contract": _operation_contract(request_params, created, reused, dispatch),
             "next_action": _dispatch_next_action(dispatch),
             "subagent_workspace": str(self.agent.subagents.workspace),
             "tasks": [
@@ -269,6 +272,21 @@ def _payload_allowed_tools(values: list[list[str] | None]) -> list[str] | str | 
     if all(value == first for value in values):
         return first
     return "per_item"
+
+
+# LLM: _operation_contract gives create_subagents a stable idempotency envelope without blocking repeats.
+# 函数用途: 把本次 create 的请求键、操作编号和结果 run ids 写成机器字段，后续调度可复用。
+def _operation_contract(request_params: dict[str, object], created: list, reused: list, dispatch: list) -> dict[str, object]:
+    payload = {"params": request_params}
+    return {
+        "contract": "idempotency.v1",
+        "operation": "create_subagents",
+        "idempotency_key": idempotency_key("create_subagents", payload),
+        "operation_id": operation_id("create_subagents", payload),
+        "created_run_ids": [task.id for task in created],
+        "reused_run_ids": [task.id for task in reused],
+        "dispatch_run_ids": [task.id for task in dispatch],
+    }
 
 
 # LLM: _dispatch_next_action makes create-vs-run explicit for the parent model.

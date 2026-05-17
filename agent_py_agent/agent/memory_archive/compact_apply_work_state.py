@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .compact_tool_output_refs import tool_output_artifact_refs
 from .compact_work_state_sources import WorkStateFieldSourceRequest, build_work_state_field_sources
 from .schema import (
     RuntimeMemorySchemaOptions,
@@ -88,7 +89,7 @@ def _base_snapshot(request: WorkStateSnapshotRequest, source_state: dict[str, An
         "constraints": field_sources.constraints,
         "changed_files": [],
         "read_files": field_sources.read_files,
-        "artifact_refs": [],
+        "artifact_refs": tool_output_artifact_refs(request.restore_refs),
         "restore_refs": _work_state_restore_refs(request.paths, request.restore_refs),
         "refs": _work_state_refs(request.paths, request.restore_refs),
         "git_state": {"status": "not_captured", "changed_files": []},

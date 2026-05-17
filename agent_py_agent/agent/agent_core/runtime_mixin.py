@@ -226,6 +226,8 @@ class SimpleAgentRuntimeMixin:
             tool_rounds=params.tool_rounds,
             compact_auto_continue_depth=rp.compact_auto_continue_depth,
             compact_auto_continue_max_depth=rp.compact_auto_continue_max_depth,
+            main_context_bundle_path=params.main_context_bundle_path,
+            main_context_bundle_markdown_path=params.main_context_bundle_markdown_path,
         )
 
     # LLM: remember 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -291,7 +293,21 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
     with _current_prompt_scope(agent, user_prompt):
         prepared = _prepare_runtime_context(
             agent,
-            RuntimeContextRequest(user_prompt, params.inject, params.resume_context, params.context_scope),
+            RuntimeContextRequest(
+                user_prompt,
+                params.inject,
+                params.resume_context,
+                params.context_scope,
+                allowed_tools=params.allowed_tools,
+                granted_capabilities=params.granted_capabilities,
+                write_boundary=params.write_boundary,
+                request_id=params.request_id,
+                run_id=params.run_id,
+                task_id=params.task_id,
+                source=params.source,
+                save=params.save,
+                task_attributes=params.task_attributes,
+            ),
         )
         loop_result = _execute_runtime_loop(
             agent,

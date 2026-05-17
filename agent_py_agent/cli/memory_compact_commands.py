@@ -14,6 +14,7 @@ import json
 
 from ..agent.memory_archive.compact import MemoryCompactPlanOptions, build_memory_compact_plan
 from ..agent.memory_archive.compact_apply import MemoryCompactApplyOptions, apply_memory_compact
+from ..agent.user_space.context_bundle import latest_main_context_bundle_path
 from .common import make_agent
 
 
@@ -35,9 +36,14 @@ def cmd_memory_compact(args) -> int:
 # 函数用途: 执行 compact apply 命令，写 compact context/self-check/ledger 并按 JSON 或文本输出结果。
 def _cmd_memory_compact_apply(args) -> int:
     agent = make_agent(args)
+    # 函数用途: CLI 默认把最近一次主代理任务卡传给 apply，用户不用手动找 context bundle 路径。
     result = apply_memory_compact(
         agent.root,
-        MemoryCompactApplyOptions(plan_options=_options_from_args(args, agent=agent)),
+        MemoryCompactApplyOptions(
+            plan_options=_options_from_args(args, agent=agent),
+            main_context_bundle_ref=_main_context_bundle_ref_for_args(args, agent),
+            main_context_bundle_ref_explicit=bool(getattr(args, "main_context_bundle_ref", "") or ""),
+        ),
     )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
@@ -71,6 +77,15 @@ def _compact_limit(agent, args) -> int:
     if value is not None:
         return int(value)
     return 0
+
+
+# LLM: _main_context_bundle_ref_for_args separates explicit refs from automatic latest lookup.
+# 函数用途: 用户显式传 ref 时照用；否则才尝试 latest，后续由 apply 做 scope match。
+def _main_context_bundle_ref_for_args(args, agent) -> str:
+    explicit = str(getattr(args, "main_context_bundle_ref", "") or "").strip()
+    if explicit:
+        return explicit
+    return latest_main_context_bundle_path(getattr(agent, "home_paths", None))
 
 
 # LLM: _print_memory_compact_plan 属于memory CLI；改行为前先对齐调用方和快照/单测。
