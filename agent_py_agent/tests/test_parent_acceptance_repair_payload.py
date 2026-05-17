@@ -75,6 +75,41 @@ def test_top_level_rejected_parent_tests_include_repair_child_tool_call(tmp_path
     assert suggested["context_manifest"]["task_pack_refs"] == ["subagent_repair_contract.v1"]
 
 
+# LLM: repair waves must not shrink the original child contract to the latest symptom.
+# 函数用途: 顶层验收修复建议要继承失败 child 的完整验收条件，避免只补最近一个静态错误就误通过。
+def test_top_level_repair_child_inherits_original_acceptance_contract(tmp_path: Path):
+    fixture = _top_level_reject_fixture(tmp_path)
+    original_check = "购物站必须有完整注册、登录、购物车、结算和下单成功流程"
+    _write_original_task_contract(fixture.run_dir, goal="做一个完整购物网站", checks=[original_check])
+
+    payload = dispatch_record_payload(fixture.item)
+
+    advice = payload["parent_acceptance_repair_advice"]
+    failure_ref = advice["failure_refs"][0]
+    suggested = advice["suggested_tool_call"]
+    assert failure_ref["task_ref"] == str(fixture.run_dir / "task.json")
+    assert failure_ref["original_acceptance_checks"] == [original_check]
+    assert original_check in suggested["repair_contract"]["full_success_checks"]
+    assert any(original_check in item for item in suggested["acceptance_checks"])
+    assert original_check in suggested["goal"]
+
+
+# LLM: runner-context repair suggestions need the same full-contract inheritance as top-level root.
+# 函数用途: 父 runner 直接创建修复 child 时，也不能把原始验收要求缩成 failure_refs 的局部错误。
+def test_direct_repair_child_inherits_original_acceptance_contract(tmp_path: Path):
+    reports_dir = _reports_dir(tmp_path, message="父级真实验收测试失败：total=2 failed=1")
+    _write_failed_test_refs(reports_dir)
+    original_check = "最终页面必须包含 register、login、cart、checkout 和 order-confirmation 区域"
+    _write_original_task_contract(reports_dir.parent, goal="做完整购物站首页", checks=[original_check])
+
+    direct = _dispatch_direct_children(_child(reports_dir))
+
+    repair_child = direct["parent_acceptance_repair_advice"]["suggested_tool_call"]["children"][0]
+    assert original_check in repair_child["repair_contract"]["full_success_checks"]
+    assert any(original_check in item for item in repair_child["acceptance_checks"])
+    assert original_check in repair_child["goal"]
+
+
 # LLM: _top_level_reject_fixture keeps the repair-contract test below size limits.
 # 函数用途: 准备顶层 parent acceptance reject 记录和对应 run/test/output refs。
 def _top_level_reject_fixture(tmp_path: Path) -> SimpleNamespace:
@@ -115,6 +150,15 @@ def _write_parent_reject_run_ref(run_dir: Path, product_root: Path) -> None:
             "task_dir": str(run_dir),
             "allowed_write_roots": [str(run_dir), str(product_root)],
         }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+# LLM: _write_original_task_contract records the failed child contract beside run.json.
+# 函数用途: 写 task.json 中的原始 goal/acceptance_checks，模拟真实子代理创建时保留的完整任务合同。
+def _write_original_task_contract(run_dir: Path, *, goal: str, checks: list[str]) -> None:
+    (run_dir / "task.json").write_text(
+        json.dumps({"goal": goal, "acceptance_checks": checks}, ensure_ascii=False),
         encoding="utf-8",
     )
 

@@ -20,6 +20,7 @@ class StaticSiteTestItemsRequest:
     workspace_root: Path
     existing_tests: list[dict[str, Any]]
     required_files: list[str] = field(default_factory=list)
+    required_dom_ids: list[str] = field(default_factory=list)
     site_root_hints: list[object] = field(default_factory=list)
 
 
@@ -56,6 +57,8 @@ def inferred_static_site_items(request: StaticSiteTestItemsRequest) -> list[dict
         # 函数用途: 自动推断静态页验收时默认检查完整 HTML 骨架，防止坏结构被后续修复项掩盖。
         "require_complete_html": True,
     }
+    if request.required_dom_ids:
+        item["required_dom_ids"] = _normalized_required_dom_ids(request.required_dom_ids)
     if len(html_paths) == 1:
         item["html_files"] = required_files
     return [item]
@@ -130,6 +133,21 @@ def _normalized_required_files(values: list[str]) -> list[str]:
         if raw not in files:
             files.append(raw)
     return files
+
+
+# LLM: _normalized_required_dom_ids accepts structured business-section ids without reading HTML bodies.
+# 函数用途: 规整 required_dom_ids；只保留常见 HTML id 字符，避免把长自然语言塞进测试项。
+def _normalized_required_dom_ids(values: list[str]) -> list[str]:
+    ids: list[str] = []
+    for value in values:
+        raw = str(value or "").strip()
+        if not raw or len(raw) > 80:
+            continue
+        if not all(ch.isalnum() or ch in {"-", "_", ":"} for ch in raw):
+            continue
+        if raw not in ids:
+            ids.append(raw)
+    return ids[:50]
 
 
 # LLM: _merged_required_files keeps artifact-observed pages plus task-declared top-level files in one check.

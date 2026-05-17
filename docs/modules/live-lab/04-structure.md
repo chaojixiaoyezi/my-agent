@@ -85,3 +85,13 @@ scripts/
 - 产品侧依赖：`static_site_html_parser.py` / `static_site_dom_checks.py` 负责通用网页控件检查；真实 disabled 控件会被拦截，但 CSS/JS 里的 disabled 字样不会被当成坏按钮。
 - 调度侧依赖：父级验收失败时，`dispatch_subagents` 的外置摘要必须保留 `parent_acceptance_repair_advice` 机器字段；Live Lab shop case 不直接创建 repair child，但真实 E2E 会验证 root 是否能看见这类修复建议。
 - 当前真实验收：`20260517-shop-flow-08-repair-wave` 已通过，证明 shop suite 能跑真实 MiniMax-M2.7、隔离 gateway、子代理产物和最终状态门。后续还需要加“故意失败再修复”case，专门压测 repair wave。
+
+## 2026-05-17 shop-repair structure
+
+- 中文说明：`shop-repair` suite 是失败恢复 canary。它先造一个真实失败的 child 状态，再让 root 用普通用户话术继续处理，验证 root 是否会派 repair child，而不是自己写正文或直接报完成。
+- `scripts/live_lab/constants.py`：`shop-repair` suite 显式包含 `health` 和 `natural_shop_repair_wave`；`natural_shop_repair_wave` 属于 `REAL_CASES`，必须传 `--real-llm`。
+- `scripts/live_lab/cases.py`：只登记 `natural_shop_repair_wave`；具体失败种子、prompt 和验收逻辑放在拆分模块，避免 `cases.py` 继续膨胀。
+- `scripts/live_lab/shop_repair_wave_case.py`：负责 `seed_failed_shop_child()`、`_natural_shop_repair_wave_prompt()`、`assert_shop_repair_wave_created()` 和真实 case。seed 使用产品侧 `SubAgentManager` 创建完整 task，而不是手写不完整状态。
+- `assert_shop_repair_wave_created()` 会读取 `.my_agent/subagents/subagent-*/task.json`，要求出现 DONE/VERIFIED 的修复 run，并用产品侧 closeout resolver 判断旧失败 run 是否被同目标修复 sibling 覆盖。
+- 这个 suite 的目标是压测通用 repair wave：以后 Excel、PDF、代码仓库等任务失败时，也应沿用同一套 parent acceptance refs -> repair child -> dispatch -> verified closeout 的合同。
+- 当前真实验收：`20260517-shop-repair-wave-03` 已通过。前两轮失败分别固化成通用合同：repair 建议必须继承原始成功条件，create/schedule 必须从目标 refs 推导产品写入根，静态站点验收可读取结构化 `required_dom_ids`，不能只修最新报错点。

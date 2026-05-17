@@ -1,5 +1,5 @@
-# LLM: Repair contracts keep fix/execute/verify handoffs machine-readable across repair lanes.
-# 模块用途: 为验收失败和产物失败统一生成修复合同，要求同一个 repair run 读 refs、修复、执行必要步骤并验证产物。
+# LLM: Repair contracts keep fix/execute/verify/full-success handoffs machine-readable across repair lanes.
+# 模块用途: 为验收失败和产物失败统一生成修复合同，要求同一个 repair run 读 refs、修复、执行必要步骤并重新满足原始验收。
 
 from __future__ import annotations
 
@@ -7,9 +7,11 @@ from dataclasses import dataclass
 
 _REF_KEYS = ("acceptance_ref", "test_ref", "followup_ref", "output_ref", "run_ref", "task_ref")
 _CONTRACT_SCHEMA = "subagent_repair_contract.v1"
+_FULL_SUCCESS_KEYS = ("full_success_checks", "original_acceptance_checks", "acceptance_checks")
 _SAME_RUN_ACTIONS = [
     "read_failure_refs",
     "repair_named_scope",
+    "preserve_original_success_contract",
     "execute_generated_scripts_or_commands_if_needed",
     "verify_target_artifacts",
     "report_artifact_and_test_refs",
@@ -18,6 +20,7 @@ _MUST_NOT = [
     "create a separate child only to execute the repaired script or command",
     "declare done before target artifacts exist and have been read or tested",
     "repair unrelated healthy branches",
+    "shrink the original success contract to only the latest failure symptom",
 ]
 
 
@@ -48,13 +51,16 @@ def repair_contract_tool_fields(request: RepairContractRequest) -> dict[str, obj
 
 
 # LLM: repair_contract_acceptance_checks are reusable checks for repair workers.
-# 函数用途: 返回修复子代理的通用验收要求，强调修复、执行和验证必须在同一 run 闭环。
-def repair_contract_acceptance_checks() -> list[str]:
-    return [
+# 函数用途: 返回修复子代理的通用验收要求；有 failure_refs 时附带原始完整验收，防止修复目标被缩小。
+def repair_contract_acceptance_checks(failure_refs: list[dict[str, object]] | None = None) -> list[str]:
+    checks = [
         "同一个 repair run 内完成读取 failure refs、修复、必要执行和产物验证",
+        "修复后必须重新满足原始完整验收要求，不能只修最近一个症状",
         "如果生成或修改了脚本/命令，必须在本 run 内执行或明确给出不能执行的机器证据",
         "完成前必须报告目标 artifact/test refs，不要只说已经修好",
     ]
+    checks.extend(f"原始验收: {item}" for item in repair_contract_full_success_checks(failure_refs or [])[:8])
+    return checks
 
 
 # LLM: repair_contract_goal_suffix is short text for model-visible goals.
@@ -62,8 +68,29 @@ def repair_contract_acceptance_checks() -> list[str]:
 def repair_contract_goal_suffix() -> str:
     return (
         "修复、必要执行和验证必须在同一个 repair run 内闭环；"
-        "不要再创建一个只负责执行脚本/命令的子代理。"
+        "不要再创建一个只负责执行脚本/命令的子代理；"
+        "不要把原始完整验收要求缩小成只修最近一个失败症状。"
     )
+
+
+# LLM: repair_contract_full_success_checks extracts inherited full-success gates from failure refs.
+# 函数用途: 从失败信号中收集原始 acceptance_checks；供 repair_contract、goal 和 suggested_tool_call 统一复用。
+def repair_contract_full_success_checks(failure_refs: list[dict[str, object]]) -> list[str]:
+    values: list[str] = []
+    for item in failure_refs:
+        for key in _FULL_SUCCESS_KEYS:
+            values.extend(_text_values(item.get(key)))
+    return _unique_text(values)
+
+
+# LLM: _text_values normalizes inherited acceptance fields without deep nesting.
+# 函数用途: 把 failure_refs 里的字符串或字符串列表统一成文本列表，供完整成功合同复用。
+def _text_values(raw: object) -> list[str]:
+    if isinstance(raw, list):
+        return [str(value) for value in raw]
+    if isinstance(raw, str):
+        return [raw]
+    return []
 
 
 # LLM: _repair_contract produces the stable machine payload for UI, docs, and future tool runners.
@@ -75,6 +102,7 @@ def _repair_contract(request: RepairContractRequest, required_paths: list[str]) 
         "failed_run_ids": _unique_text(request.failed_run_ids),
         "required_read_paths": required_paths,
         "target_artifact_refs": _unique_text(request.target_artifact_refs),
+        "full_success_checks": repair_contract_full_success_checks(request.failure_refs),
         "same_run_required_actions": list(_SAME_RUN_ACTIONS),
         "must_not": list(_MUST_NOT),
     }
@@ -84,13 +112,14 @@ def _repair_contract(request: RepairContractRequest, required_paths: list[str]) 
 # 函数用途: 把合同摘要放入 Context Packs；runner prompt 会展示它，执行上下文 JSON 也保留完整字段。
 def _repair_context_pack(request: RepairContractRequest, contract: dict[str, object]) -> dict[str, object]:
     targets = contract.get("target_artifact_refs") or []
+    full_checks = contract.get("full_success_checks") or []
     return {
         "kind": "repair_contract",
         "ref": _CONTRACT_SCHEMA,
         "role": "same-run-fix-execute-verify",
         "summary": (
             f"{request.kind}: 同一个 repair run 必须读取失败 refs、修复、执行必要脚本/命令、"
-            f"验证目标产物并报告 refs；目标产物数={len(targets)}。"
+            f"验证目标产物并报告 refs；目标产物数={len(targets)}，原始验收数={len(full_checks)}。"
         ),
         "contract": contract,
     }
@@ -119,6 +148,7 @@ def _unique_text(values: list[str]) -> list[str]:
 __all__ = [
     "RepairContractRequest",
     "repair_contract_acceptance_checks",
+    "repair_contract_full_success_checks",
     "repair_contract_goal_suffix",
     "repair_contract_tool_fields",
 ]

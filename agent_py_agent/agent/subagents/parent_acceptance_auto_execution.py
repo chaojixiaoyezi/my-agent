@@ -22,8 +22,17 @@ from .parent_acceptance_auto_policy import (
     build_parent_acceptance_auto_policy,
 )
 from .parsing import _dict_list
-from .static_required_files import required_static_files_for_task, static_site_root_hints_for_task
+from .static_required_files import (
+    required_static_dom_ids_for_task,
+    required_static_files_for_task,
+    static_site_root_hints_for_task,
+)
 from .utils import _read_json_object
+
+# LLM: Manual execution boundaries are shared by success and blocked results to keep the facade below size limits.
+_MANUAL_EXECUTION_BOUNDARIES = (
+    "manual_confirmed_only", "run_tests_only", "no_acceptance_apply", "no_rescue", "no_task_state_mutation"
+)
 
 
 # LLM: ParentAcceptanceAutoExecutionOptions is the stable bundle for future executor knobs.
@@ -257,6 +266,8 @@ def _manual_execution_tests(task: SubAgentTask, output: dict[str, object], works
             output=output,
             workspace_root=workspace_root,
             required_files=required_static_files_for_task(task),
+            # LLM: Confirmed test execution enforces the same explicit DOM contract as dry-run preflight.
+            required_dom_ids=required_static_dom_ids_for_task(task),
             site_root_hints=static_site_root_hints_for_task(task),
         )
     )
@@ -291,13 +302,7 @@ def _tests_executed_result(params: TestsExecutedResultInput) -> ParentAcceptance
         mutates_task_state=False,
         command=request.recommended_command,
         blocked_by=[],
-        safety_boundaries=[
-            "manual_confirmed_only",
-            "run_tests_only",
-            "no_acceptance_apply",
-            "no_rescue",
-            "no_task_state_mutation",
-        ],
+        safety_boundaries=list(_MANUAL_EXECUTION_BOUNDARIES),
         test_execution_ref=str(report.json_path),
         test_total=report.total_tests,
         test_failed=report.failed,
@@ -339,13 +344,7 @@ def _blocked_manual_result(
         guard_reason="manual execution blocked by guard",
         command=request.recommended_command,
         blocked_by=blockers,
-        safety_boundaries=[
-            "manual_confirmed_only",
-            "run_tests_only",
-            "no_acceptance_apply",
-            "no_rescue",
-            "no_task_state_mutation",
-        ],
+        safety_boundaries=list(_MANUAL_EXECUTION_BOUNDARIES),
     )
 
 

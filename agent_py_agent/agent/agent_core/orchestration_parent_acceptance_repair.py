@@ -56,6 +56,7 @@ def _repair_signal(item: Any) -> dict[str, object]:
     acceptance_ref = _acceptance_ref(item)
     test_ref = _test_ref(item)
     followup_ref = _followup_ref(item)
+    task_ref = _task_ref(item)
     followup = _followup_payload(followup_ref)
     failure_payload = acceptance_test_failure_payload(test_ref) if test_ref.exists() else {}
     return {
@@ -65,6 +66,9 @@ def _repair_signal(item: Any) -> dict[str, object]:
         "acceptance_ref": str(acceptance_ref) if acceptance_ref.exists() else "",
         "test_ref": str(test_ref) if test_ref.exists() else "",
         "followup_ref": str(followup_ref) if followup_ref.exists() else "",
+        "task_ref": str(task_ref) if task_ref.exists() else "",
+        "original_goal": _task_goal(task_ref),
+        "original_acceptance_checks": _task_acceptance_checks(task_ref),
         "test_failure_summary": str(failure_payload.get("parent_acceptance_test_failure_summary") or ""),
         "test_failure_details": list(failure_payload.get("parent_acceptance_test_failure_details") or []),
         "failed_tests": _failed_test_labels(followup),
@@ -95,10 +99,10 @@ def _repair_child_tool_call(signals: list[dict[str, object]]) -> dict[str, objec
                 "goal": _repair_goal(signals),
                 "extra_write_roots": roots,
                 "acceptance_checks": [
-                    "只修复父级验收 failure_refs 点名的问题",
+                    "先修复父级验收 failure_refs 点名的问题，同时保持原任务完整目标",
                     "修复后必须让父级重新 dispatch 并执行验收 tests",
                     "不要改写健康分支或无关产物",
-                    *repair_contract_acceptance_checks(),
+                    *repair_contract_acceptance_checks(signals),
                 ],
                 "allowed_tools": [
                     "subagent_board",
@@ -121,11 +125,13 @@ def _repair_goal(signals: list[dict[str, object]]) -> str:
     ids = ", ".join(str(item.get("run_id") or "") for item in signals if item.get("run_id"))
     refs = _signal_refs(signals)
     failures = _signal_failure_labels(signals)
+    original = _original_contract_goal_text(signals)
     return (
         f"修复父级验收失败的 child runs：{ids}。"
         f"先读取这些 refs：{refs}。"
         f"失败测试/线索：{failures}。"
-        "只修复被父级验收报告点名的问题，优先补全 HTML/交互/文件路径等确定性失败；"
+        f"{original}"
+        "先修复被父级验收报告点名的问题，最终必须重新满足原始完整验收要求；"
         "修复完成后写回证据 refs，等待父级重新执行验收 tests。"
         f"{repair_contract_goal_suffix()}"
     )
@@ -137,7 +143,7 @@ def _signal_refs(signals: list[dict[str, object]]) -> str:
     refs = _unique_text([
         str(signal.get(key) or "")
         for signal in signals
-        for key in ("acceptance_ref", "test_ref", "followup_ref")
+        for key in ("acceptance_ref", "test_ref", "followup_ref", "task_ref")
     ])
     return "; ".join(refs[:9]) or "无可用报告 refs"
 
@@ -163,6 +169,40 @@ def _signal_artifact_refs(signals: list[dict[str, object]]) -> list[str]:
     for signal in signals:
         refs.extend(str(ref) for ref in signal.get("artifact_refs") or [])
     return _unique_text(refs)
+
+
+# LLM: _original_contract_goal_text summarizes inherited success checks for runner-context repair goals.
+# 函数用途: 把失败 child 的原始 goal/acceptance_checks 放进修复目标，避免只修最新错误后误报完成。
+def _original_contract_goal_text(signals: list[dict[str, object]]) -> str:
+    goals = _unique_text([str(item.get("original_goal") or "") for item in signals])
+    checks = _unique_text([
+        str(check)
+        for signal in signals
+        for check in list(signal.get("original_acceptance_checks") or [])
+    ])
+    parts: list[str] = []
+    if goals:
+        parts.append("原始任务目标：" + "；".join(goals[:3]))
+    if checks:
+        parts.append("原始完整验收要求：" + "；".join(checks[:8]))
+    return ("。".join(parts) + "。") if parts else ""
+
+
+# LLM: _task_goal reads the failed child task contract beside reports_dir.
+# 函数用途: 从 task.json 恢复原始 goal；不可读时返回空，不影响调度主流程。
+def _task_goal(path: Path) -> str:
+    payload = _read_json(path)
+    return str(payload.get("goal") or "").strip()
+
+
+# LLM: _task_acceptance_checks reads persisted full-success gates from task.json.
+# 函数用途: 从失败 child 的原始 acceptance_checks 生成 repair_contract.full_success_checks。
+def _task_acceptance_checks(path: Path) -> list[str]:
+    payload = _read_json(path)
+    raw = payload.get("acceptance_checks")
+    if not isinstance(raw, list):
+        return []
+    return _unique_text([str(item) for item in raw])
 
 
 # LLM: _test_target_refs extracts file targets from parent test execution records.
@@ -229,6 +269,15 @@ def _test_ref(item: Any) -> Path:
 # 函数用途: 从 task.reports_dir 推导 parent_acceptance_auto_followup.json。
 def _followup_ref(item: Any) -> Path:
     return _reports_dir(item) / "parent_acceptance_auto_followup.json"
+
+
+# LLM: _task_ref returns the canonical failed child task contract path.
+# 函数用途: 优先使用 task_dir/task.json；否则从 reports_dir 的父目录兜底，兼容旧测试和旧 runner。
+def _task_ref(item: Any) -> Path:
+    raw = str(getattr(item, "task_dir", "") or "")
+    if raw:
+        return Path(raw) / "task.json"
+    return _reports_dir(item).parent / "task.json"
 
 
 # LLM: _reports_dir isolates missing reports_dir handling.

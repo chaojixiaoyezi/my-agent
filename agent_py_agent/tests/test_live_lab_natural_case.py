@@ -19,6 +19,11 @@ from scripts.live_lab.shop_case import (
     _missing_shop_sections,
     _natural_shop_prompt,
 )
+from scripts.live_lab.shop_repair_wave_case import (
+    _natural_shop_repair_wave_prompt,
+    assert_shop_repair_wave_created,
+    seed_failed_shop_child,
+)
 from scripts.live_lab.state_assertions import (
     assert_no_subagent_state_blockers as _assert_no_subagent_state_blockers,
 )
@@ -61,6 +66,76 @@ def test_natural_shop_case_is_registered_as_real_opt_in_suite():
     assert "dispatch" not in prompt.lower()
     assert "runner" not in prompt.lower()
     assert "contract" not in prompt.lower()
+
+
+# LLM: The repair-wave canary should start from a failed child and still use ordinary user wording.
+# 函数用途: 确认购物站失败修复 E2E 是独立 opt-in suite，提示词不靠内部调度术语通过。
+def test_natural_shop_repair_wave_case_is_registered_as_real_opt_in_suite():
+    prompt = _natural_shop_repair_wave_prompt()
+
+    assert SUITES["shop-repair"] == ["health", "natural_shop_repair_wave"]
+    assert "natural_shop_repair_wave" in REAL_CASES
+    assert "小傻妞" in prompt
+    assert "没通过检查" in prompt
+    assert "lab_outputs/shop-demo/index.html" in prompt
+    assert "dispatch" not in prompt.lower()
+    assert "runner" not in prompt.lower()
+    assert "contract" not in prompt.lower()
+
+
+# LLM: The repair-wave seed must look like a real failed child run, not a prose-only fixture.
+# 函数用途: 确认测试台能预置一个待修复购物站 run，并保留机器可读产物、验收失败和写入边界。
+def test_seed_failed_shop_child_creates_rejected_run_with_artifact_refs(tmp_path):
+    seed = seed_failed_shop_child(tmp_path)
+
+    output = tmp_path / "lab_outputs" / "shop-demo" / "index.html"
+    task_json = tmp_path / ".my_agent" / "subagents" / seed.run_id / "task.json"
+    acceptance = tmp_path / ".my_agent" / "subagents" / seed.run_id / "reports" / "acceptance_review.json"
+    assert seed.run_id.startswith("subagent-")
+    assert output.exists()
+    assert "disabled" in output.read_text(encoding="utf-8").lower()
+    assert task_json.exists()
+    assert acceptance.exists()
+    text = task_json.read_text(encoding="utf-8")
+    assert '"status": "AWAITING_ACCEPTANCE"' in text
+    assert '"verification_status": "UNVERIFIED"' in text
+    assert str(output) in text
+
+
+# LLM: The repair-wave assertion should require a verified repair sibling that covers the same product file.
+# 函数用途: 确认失败 seed 不能单独通过；只有同目标修复 run DONE/VERIFIED 后才算修复闭环成立。
+def test_assert_shop_repair_wave_created_requires_verified_repair_sibling(tmp_path):
+    seed = seed_failed_shop_child(tmp_path)
+
+    with pytest.raises(RuntimeError, match="没有发现已验证的修复小傻妞"):
+        assert_shop_repair_wave_created(tmp_path, seed.run_id)
+
+    repair_dir = tmp_path / ".my_agent" / "subagents" / "subagent-repair"
+    repair_dir.mkdir(parents=True)
+    output = tmp_path / "lab_outputs" / "shop-demo" / "index.html"
+    output.write_text(_complete_shop_html(), encoding="utf-8")
+    (repair_dir / "output.json").write_text(
+        '{"artifacts":[{"path":"' + str(output) + '"}]}',
+        encoding="utf-8",
+    )
+    (repair_dir / "task.json").write_text(
+        "\n".join(
+            [
+                "{",
+                '  "id": "subagent-repair",',
+                '  "status": "DONE",',
+                '  "verification_status": "VERIFIED",',
+                '  "role": "worker",',
+                '  "agent_name": "小傻妞-验收修复",',
+                '  "goal": "修复 lab_outputs/shop-demo/index.html",',
+                '  "output_json": "' + str(repair_dir / "output.json") + '"',
+                "}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert_shop_repair_wave_created(tmp_path, seed.run_id)
 
 
 # LLM: Natural Live Lab should not fail long page tasks because of an artificial test harness tool cap.

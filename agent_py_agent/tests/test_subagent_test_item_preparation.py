@@ -4,7 +4,10 @@ from agent_py_agent.agent.subagents.execution_test_items import (
     TestItemPreparationRequest,
     prepare_test_items,
 )
-from agent_py_agent.agent.subagents.static_required_files import static_required_files_from_texts
+from agent_py_agent.agent.subagents.static_required_files import (
+    required_static_dom_ids_from_texts,
+    static_required_files_from_texts,
+)
 
 
 def test_prepare_test_items_infers_single_artifact_working_dir(tmp_path):
@@ -286,6 +289,44 @@ def test_prepare_test_items_infers_static_site_check_for_single_html_artifact(tm
         "require_complete_html": True,
         "html_files": ["index.html"],
     }]
+
+
+# LLM: Required DOM ids should flow into inferred static-site checks as machine fields.
+# 函数用途: 父级从任务合同抽取的业务区域 id 要进入 static_site_check，避免修复任务只补 HTML 骨架。
+def test_prepare_test_items_infers_static_site_check_with_required_dom_ids(tmp_path):
+    site_dir = tmp_path / "deliverables" / "shop" / "build"
+    site_dir.mkdir(parents=True)
+    (site_dir / "index.html").write_text("<main id='catalog'></main>", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[],
+            output={"artifacts": [{"path": str(site_dir / "index.html")}]},
+            workspace_root=tmp_path,
+            required_dom_ids=["register", "login", "catalog"],
+        )
+    )
+
+    assert prepared == [{
+        "name": "inferred static site check",
+        "validation_method": "static_site_check",
+        "site_root": "deliverables/shop/build",
+        "required_files": ["index.html"],
+        "require_complete_html": True,
+        "required_dom_ids": ["register", "login", "catalog"],
+        "html_files": ["index.html"],
+    }]
+
+
+# LLM: Structured required DOM ids in acceptance text should become parent-test inputs.
+# 函数用途: 从 acceptance_checks 中提取 required_dom_ids: ...，供父级 static_site_check 机器验收业务区域。
+def test_required_static_dom_ids_from_structured_acceptance_text():
+    ids = required_static_dom_ids_from_texts([
+        "required_dom_ids: register, login, cart, checkout, order-confirmation",
+        "其他说明不应该被当成 id",
+    ])
+
+    assert ids == ["register", "login", "cart", "checkout", "order-confirmation"]
 
 
 # LLM: test_prepare_test_items_merges_task_required_static_files covers root whole-site required files.
