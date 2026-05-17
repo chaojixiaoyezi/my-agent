@@ -1703,3 +1703,20 @@
 - 已实现：required-file 提取会把“报告 README.md 内容摘要”识别为输入资料摘要，不再把 README.md 放进 `output_contract.required_files` 或 `task_packet.file_contract.required_files`。
 - 已测试：新增 idempotency 和 context-bundle regression；`20260517-subagent-real-04-long-subagent` 真实场景通过，2 个子代理都完成 read/write 并通过父级验收。
 - 下一步：继续把同一套合同带到更大的自然语言 E2E，优先观察 create -> dispatch -> repair/QA -> acceptance 的真实稳定性。
+
+## 2026-05-17 Live Lab 自然语言家具 HTML canary
+- 中文说明：把“用单文件 html 做一个高端现代家具品牌的网站首页”做成正式 Live Lab `natural` suite，而不是只靠一次手工测试。提示词只说“安排小傻妞帮你完成”，不写 dispatch/runner/contract 等内部术语。
+- 对照结论：会话运行时/通道运行时/长期助手 的共同点是把工具事实、session/run 状态和产物 refs 放进控制面；自然语言只负责表达任务。这个 canary 也按这个方向验收：不相信最终口头回复，必须检查真实 `index.html` 文件。
+- 已实现：`scripts/live_lab/cases.py` 新增 `natural_html_subagent`，保存真实模型 response，并检查 `lab_outputs/furniture-home/index.html` 存在、HTML 基础标签完整、没有 `href="#"`、没有 disabled 按钮、没有外部图片/字体/脚本/CSS 背景资源依赖。
+- 已实现：`scripts/live_lab/constants.py` 新增 `natural` suite；它属于真实模型 case，只有显式 `--real-llm` 才会跑，避免普通 smoke 偷偷消耗 API。
+- 已测试：`test_live_lab_natural_case.py` 覆盖提示词不含内部术语、suite 注册、空链接拒绝和完整 HTML 接受；真实 MiniMax-M2.7 run `20260517-natural-html-01` 返回 `LIVE_LAB_PASS`，1 个小傻妞写出 50KB 左右 HTML，并通过父级验收。
+- 暴露的后续问题：第一次页面用了 Google Fonts 和 Unsplash 图片，结构检查通过但不够稳；已把 canary 收紧为离线单文件资源策略。购物网站 E2E 还需要补更强的按钮、表单、图片质量和布局检查。
+- 下一步：继续跑更难的自然语言任务，优先购物网站 E2E；同时把外部资源检查和 QA/验收波次接入，避免页面看似完成但图片、按钮或表单体验出问题。
+
+## 2026-05-17 Natural canary 假绿 / 路径 / 输入输出合同修复
+- 中文说明：后续三轮自然语言真实 E2E 继续把底层洞照出来：一轮是 artifact integrity 去子代理私有目录找公共产物；一轮是 closeout 把还在 PLANNING 的旧 run 算成 done；一轮是“输出路径”被前文“不依赖”误判成输入依赖。
+- 已实现：artifact integrity 相对 `product_write_roots` 现在会从 `.my_agent/subagents/<run>` 推导项目工作区根，和写工具的相对路径语义对齐。
+- 已实现：closeout 的同目标 sibling coverage 只覆盖 `BLOCKED/FAILED/TIMEOUT/TAKEN_OVER` 等已明确失败或接管的旧 run，不再让 `PLANNING/RUNNING` 消失；Live Lab 也会读 `task.json` 做最终状态门。
+- 已实现：runner input dependency 识别 `输出路径/输出文件/保存路径/保存文件/目标文件/产物路径/产物文件`，避免把要写出的文件当成缺失输入。
+- 真实复测：`20260517-natural-html-05-input-output-contract` 通过。root 只创建并 dispatch 1 个 `小傻妞-前端`，没有亲自 `write_file`；小傻妞写出约 16KB 离线单文件 HTML，最终 `DONE/VERIFIED`。
+- 已测试：新增/更新 persisted-state gate、artifact root、closeout PLANNING sibling、input/output dependency 回归测试；下一步可以把同一套自然语言 canary 扩展到更完整的购物网站和 QA/repair/acceptance 链路。

@@ -119,7 +119,8 @@ daemon_execute_runners: false
 daemon_max_runners: 0
 daemon_interval: 1
 runner_failure_policy: "auto"
-max_tool_rounds: 8
+# live lab keeps runner tool rounds unlimited unless a specific stress case overrides it
+max_tool_rounds: 0
 request_timeout: {max(30, int(self.args.timeout))}
 {backend_override}"""
         self.config_path.write_text(base + overrides, encoding="utf-8")

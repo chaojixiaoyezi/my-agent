@@ -64,3 +64,24 @@
 - 已实现：`AnthropicCompatibleBackend` 在两次流式空文本后，会在后端边界做一次非流式 `/v1/messages` 兜底；如果兜底成功，仍按同一 `ModelResponse` 返回，不把 provider 抖动泄漏给上层调度。
 - 已测试：新增 runner input dependency、workspace artifact roots、backend stream fallback 和 Live Lab interface 回归；真实 `step8-real-qa-refs-r4` 已跑通。
 - 下一步：把同样的 real suite 扩到更长的自然语言家具/购物网站 E2E，并继续和 通道运行时/长期助手/会话运行时 的结构化 refs-first 思路对照。
+
+## 2026-05-17 Natural suite 家具 HTML canary
+- 中文说明：新增 `natural` suite，用真实用户风格提示词验证主代理能不能安排小傻妞完成一个网页产物任务。提示词不写 `dispatch`、`runner`、`contract`，避免测试变成背内部术语。
+- 已实现：`natural_html_subagent` case 会启动真实 gateway、发送家具品牌单文件 HTML 任务、保存 response，并检查 `lab_outputs/furniture-home/index.html` 真实存在、HTML 基础标签完整、没有 `href="#"`、没有 disabled 按钮、没有外部图片/字体/脚本/CSS 背景资源依赖。
+- 已实现：`natural` suite 是 opt-in；只有显式 `--suite natural --real-llm` 才会跑，普通 smoke 不会消耗真实模型 API。
+- 已测试：`python3 -m pytest -q agent_py_agent/tests/test_live_lab_natural_case.py agent_py_agent/tests/test_live_lab_runner_interface.py` -> `5 passed`。
+- 真实复测：`python3 scripts/live_agent_lab.py --suite natural --real-llm --runs-dir /Users/example/my-终端应用/real_e2e_next --run-id 20260517-natural-html-01 --timeout 360 --count 2 --max-runners 2 --max-cycles 3 --keep-going` -> `LIVE_LAB_PASS`。MiniMax-M2.7 通过主代理创建 1 个小傻妞，写出约 50KB HTML，并完成父级验收。
+- 后续风险：第一次真实跑出来的 HTML 使用了 Google Fonts 和 Unsplash 图片，说明模型会自然引入外部资源；现在 canary 已收紧为离线单文件资源策略，下一轮真实复测要验证模型是否能按这个策略生成页面。
+
+## 2026-05-17 Natural suite 工具轮数上限修正
+- 中文说明：离线资源策略复测 `20260517-natural-html-02-offline-assets` 暴露 Live Lab 自己的隔离配置太紧：`max_tool_rounds: 8` 会把稍长的单文件 HTML 截断，导致文件缺 `</body></html>`。父级没有误报成功，Live Lab 也正确失败。
+- 已实现：Live Lab 隔离配置默认写 `max_tool_rounds: 0`，表示不限制工具轮数；真实长任务不应该被测试台人为截断，除非某个 stress case 显式覆盖。
+- 已测试：新增 `test_live_lab_config_keeps_tool_rounds_unlimited`，确认隔离配置会写入不限制工具轮数。
+- 真实复测：`20260517-natural-html-03-unlimited-rounds` 暴露 artifact integrity 路径解析仍会把相对产物根拼到子代理私有目录；`20260517-natural-html-04-path-root-fix` 暴露最终 closeout 会把仍在 `PLANNING` 的同目标 sibling 算作完成。
+
+## 2026-05-17 Natural suite 状态门和路径合同修正
+- 中文说明：自然语言 E2E 现在不只看 HTML 文件本身，还会看主代理最终回复和磁盘 `task.json` 是否一致。这样能防止“文件能打开，但子代理控制面其实还有阻塞”的假绿。
+- 已实现：`case_natural_html_subagent()` 增加 `_assert_no_subagent_state_blockers()` 和 `_assert_persisted_subagent_state_clean()`；如果回复里有 `blocking_run_ids`，或持久化任务仍有未解决 run，Live Lab 会失败。
+- 已实现：artifact integrity 相对 `product_write_roots` 按项目工作区根解析；`输出路径/保存路径/产物文件` 这类自然语言写目标不会再被误判成输入依赖。
+- 已测试：新增/更新 `test_live_lab_natural_case.py`、`test_subagent_finalize_helpers.py`、`test_runner_input_dependencies.py` 和 `test_orchestration_dispatch_completion_gate.py` 覆盖这些边界。
+- 真实复测：`python3 scripts/live_agent_lab.py --suite natural --real-llm --runs-dir /Users/example/my-终端应用/real_e2e_next --run-id 20260517-natural-html-05-input-output-contract --timeout 420 --count 2 --max-runners 2 --max-cycles 3 --keep-going` -> `LIVE_LAB_PASS`。这轮 root 只调用 `create_subagents` 和 `dispatch_subagents`，没有亲自 `write_file`；只创建 1 个小傻妞，最终 `DONE/VERIFIED`，HTML 产物约 16KB，无外部资源、无空链接、无 disabled。

@@ -174,3 +174,39 @@ def test_closeout_resolves_explicit_verified_coverage_record():
 
     assert task_resolved_for_closeout(broken, tasks) is True
     assert "bad-leaf" not in blocking_task_ids(tasks)
+
+
+# LLM: sibling target coverage must not hide unstarted PLANNING tasks.
+# 函数用途: 覆盖真实自然语言 E2E：一个旧 worker 仍在 PLANNING，另一个 verified sibling 写了同一文件时，最终收口不能把旧 run 算完成。
+def test_closeout_does_not_resolve_planning_run_by_verified_sibling_target():
+    from agent_py_agent.agent.agent_core.subagent_dispatch_closeout_resolution import (
+        blocking_task_ids,
+        done_verified_count,
+        task_resolved_for_closeout,
+    )
+
+    planned = SimpleNamespace(
+        id="old-worker",
+        status="PLANNING",
+        verification_status="UNVERIFIED",
+        takeover_by="",
+        goal="写入 lab_outputs/furniture-home/index.html",
+        output_json="",
+        result="",
+        attributes={},
+    )
+    verified = SimpleNamespace(
+        id="new-worker",
+        status="DONE",
+        verification_status="VERIFIED",
+        takeover_by="",
+        goal="写入 lab_outputs/furniture-home/index.html",
+        output_json="",
+        result="",
+        attributes={},
+    )
+    tasks = [planned, verified]
+
+    assert task_resolved_for_closeout(planned, tasks) is False
+    assert blocking_task_ids(tasks) == ["old-worker"]
+    assert done_verified_count(tasks) == 1

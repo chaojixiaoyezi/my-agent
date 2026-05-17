@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from ..subagent import SubAgentParsedOutput
+from ..subagents.workspace_roots import derived_workspace_roots_from_subagent_path
 from ..tooling.artifact_integrity import ArtifactIntegrityCheckRequest, check_artifact_integrity
 
 
@@ -191,11 +192,49 @@ def _artifact_resolution_roots(context: object) -> list[Path]:
     if not isinstance(boundary, dict):
         return []
     roots: list[Path] = []
+    workspace_roots = _context_workspace_roots(context)
     for raw_root in [*(boundary.get("product_write_roots") or []), *(boundary.get("allowed_write_roots") or [])]:
-        path = Path(str(raw_root or "").strip())
-        if str(path) and path.is_absolute() and path not in roots:
-            roots.append(path)
+        _append_artifact_root_candidates(roots, raw_root, workspace_roots)
     return roots
+
+
+# LLM: _append_artifact_root_candidates keeps resolution root collection flat for the strict size guard.
+# 函数用途: 把一个 write root 展开并去重追加到 roots，避免主解析函数继续加深嵌套。
+def _append_artifact_root_candidates(roots: list[Path], raw_root: object, workspace_roots: list[Path]) -> None:
+    for path in _artifact_root_candidates(raw_root, workspace_roots):
+        _append_unique_root(roots, path)
+
+
+# LLM: _artifact_root_candidates mirrors the filesystem gateway's relative-root semantics for finalize checks.
+# 函数用途: 绝对产物根原样使用；相对产物根按项目工作区根解析，避免误落到子代理私有 task_dir。
+def _artifact_root_candidates(raw_root: object, workspace_roots: list[Path]) -> list[Path]:
+    text = str(raw_root or "").strip()
+    if not text:
+        return []
+    path = Path(text).expanduser()
+    if path.is_absolute():
+        return [path.resolve(strict=False)]
+    return [(root / path).resolve(strict=False) for root in workspace_roots]
+
+
+# LLM: _context_workspace_roots derives bounded project roots from a run-local subagent task dir.
+# 函数用途: finalize 没有直接 workspace_root 字段时，从 `.my_agent/subagents/<run>` 推导真实项目根。
+def _context_workspace_roots(context: object) -> list[Path]:
+    roots: list[Path] = []
+    for raw in getattr(context, "workspace_roots", []) or []:
+        _append_unique_root(roots, Path(str(raw)).expanduser().resolve(strict=False))
+    task_dir = str(getattr(context, "task_dir", "") or "").strip()
+    if task_dir:
+        for root in derived_workspace_roots_from_subagent_path(Path(task_dir).expanduser().resolve(strict=False)):
+            _append_unique_root(roots, root.resolve(strict=False))
+    return roots
+
+
+# LLM: _append_unique_root keeps derived roots stable and duplicate-free.
+# 函数用途: 追加路径时保持顺序，避免同一个工作区重复参与产物解析。
+def _append_unique_root(roots: list[Path], root: Path) -> None:
+    if str(root) and root not in roots:
+        roots.append(root)
 
 
 # LLM: looks_like_success_closeout recognizes model self-reports that would otherwise move a parent forward.

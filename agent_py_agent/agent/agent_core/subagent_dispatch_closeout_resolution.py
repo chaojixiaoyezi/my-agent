@@ -47,9 +47,11 @@ def done_verified_count(tasks: list[object]) -> int:
     return sum(1 for task in tasks if task_resolved_for_closeout(task, tasks))
 
 
-# LLM: _task_targets_resolved_by_verified_siblings lets verified repair leaves cover stale failed leaves.
-# 函数用途: 如果旧失败任务的具体产物已被其它 DONE/VERIFIED 任务覆盖，就不继续阻塞整棵树。
+# LLM: _task_targets_resolved_by_verified_siblings lets verified repair leaves cover stale terminal work.
+# 函数用途: 如果旧失败或待验收任务的具体产物已被其它 DONE/VERIFIED 任务覆盖，就不继续阻塞整棵树。
 def _task_targets_resolved_by_verified_siblings(task: object, tasks: list[object]) -> bool:
+    if not _status_allows_sibling_target_coverage(task):
+        return False
     targets = task_actual_target_tokens(task)
     if not targets:
         return False
@@ -59,6 +61,23 @@ def _task_targets_resolved_by_verified_siblings(task: object, tasks: list[object
             continue
         verified_targets.update(task_actual_target_tokens(other))
     return bool(verified_targets and targets.issubset(verified_targets))
+
+
+# LLM: _status_allows_sibling_target_coverage prevents unstarted/running work from vanishing at closeout.
+# 函数用途: 已失败/阻塞/待验收/接管的旧 run 可被同目标 verified sibling 覆盖；PLANNING/RUNNING 仍必须调度或显式取消。
+def _status_allows_sibling_target_coverage(task: object) -> bool:
+    status = str(getattr(task, "status", "") or "").upper()
+    return status in {
+        "ABANDONED",
+        "AWAITING_ACCEPTANCE",
+        "BLOCKED",
+        "CANCELED",
+        "CANCELLED",
+        "ERROR",
+        "FAILED",
+        "TAKEN_OVER",
+        "TIMEOUT",
+    }
 
 
 # LLM: _task_explicitly_covered_by_verified_run honors machine coverage_records, not prose fallback.

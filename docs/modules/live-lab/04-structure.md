@@ -63,3 +63,13 @@ scripts/
 - 中文说明：真实 `--suite real --real-llm` 不只依赖 Live Lab 自身，还依赖两个产品侧稳定边界：模型后端遇到 Anthropic-compatible 空流式响应时要能兜底，子代理私有目录要能受控推导项目工作区根来读取 `README.md` / 校验产物 refs。
 - Backend boundary: `agent_py_agent/agent/backends/base.py` keeps stream/no-stream resilience inside `AnthropicCompatibleBackend`, so Live Lab case logic does not special-case provider quirks.
 - Workspace boundary: `agent_py_agent/agent/subagents/workspace_roots.py` is the shared helper for deriving project roots from `.my_agent/subagents/<run>`, `.my-agent/subagents/<run>`, and `data/subagents/<run>` layouts. Live Lab real cases use this through runner input dependency checks and artifact integrity checks.
+
+## 2026-05-17 natural-suite structure
+- 中文说明：`natural` suite 是真实用户语言 canary，不替代固定 `scenario-test`。它的价值是看主代理在没有内部术语提示时，是否仍能用小傻妞完成真实产物、返回 refs，并通过父级验收。
+- `scripts/live_lab/constants.py`：`natural` suite 显式包含 `health` 和 `natural_html_subagent`；`natural_html_subagent` 属于 `REAL_CASES`，必须传 `--real-llm`。
+- `scripts/live_lab/cases.py`：`case_natural_html_subagent()` 负责发自然语言 prompt、保存 response、停止 gateway，并调用 `_assert_natural_html_output()` 验证真实 HTML artifact；`_external_asset_refs()` 只拦截页面渲染依赖的外部资源，不禁止普通外链。
+- `scripts/live_lab/cases.py`：自然 suite 还有两层控制面验收：`_assert_no_subagent_state_blockers()` 检查 gateway 最终回复是否明确报告阻塞；`_assert_persisted_subagent_state_clean()` 读取隔离项目 `.my_agent/subagents/subagent-*/task.json`，用产品侧 closeout resolver 判断是否仍有未解决 run。
+- `scripts/live_lab/session.py`：Live Lab 隔离配置默认 `max_tool_rounds: 0`。真实页面、购物站和长任务 canary 不应该被测试台轮数上限截断；需要测预算/熔断时应由专门 stress case 显式覆盖。
+- `agent_py_agent/tests/test_live_lab_natural_case.py`：锁住三个合同：提示词不含内部调度术语、suite 注册为 real opt-in、HTML artifact gate 不信口头总结。
+- 产品侧依赖：`subagent_finalize_artifact_integrity.py` 必须用和文件工具一致的工作区根解析相对产物根；`runner_input_dependencies.py` 必须把 `输出路径/保存路径/产物文件` 识别为写目标，不当成输入依赖。
+- 当前验收只做轻量结构检查、离线资源检查和子代理状态一致性检查。表单行为、视觉布局、可访问性和图片实际内容质量应作为后续更强 Live Lab case，而不是塞进这个最小 canary。
