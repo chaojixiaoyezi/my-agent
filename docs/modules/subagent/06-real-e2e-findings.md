@@ -8731,3 +8731,128 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Live Lab real subagent rerun `20260517-subagent-real-04-long-subagent` passed: 2 children created, both runners completed read/write evidence, both reached `DONE/VERIFIED`, and 2 scenario output reports were written.
 - Status:
   - Fixed for the Live Lab real subagent flow.
+
+### Finding 178: Natural-language Live Lab canary passes but external resource policy is still loose
+
+- Trigger:
+  - Live Lab real-LLM run `20260517-natural-html-01`.
+  - Prompt was intentionally user-like: ask the root to arrange 小傻妞 to build a high-end modern furniture brand single-file HTML homepage, save it to `lab_outputs/furniture-home/index.html`, and check no empty links or disabled buttons.
+- What happened:
+  - Root created one child run and dispatched it without the test prompt naming `dispatch` / `runner` / `contract`.
+  - The child wrote `/Users/xiaoyezi/my-claude-code/real_e2e_next/20260517-natural-html-01/fixture_project/lab_outputs/furniture-home/index.html`.
+  - Dispatch/acceptance reached `DONE/VERIFIED`, and Live Lab returned `LIVE_LAB_PASS`.
+  - Structural artifact check found valid `<html>/<body>` tags, no `href="#"`, no `disabled`, 8 buttons, and 40 links.
+- 中文解释:
+  - 这次比较接近日常用户说话：用户只说“安排小傻妞帮我做页面”，系统自己完成了创建、调度、验收和收口。
+  - 这说明当前底座已经不只是会跑考试题；它能处理一个真实网页产物任务，并把产物路径作为机器 ref 返回。
+  - 但还不是“购物网站级别完美验收”：页面用了外部字体和 Unsplash 图片，结构检查过了，不代表所有外部图片永远可访问。
+- OpenClaw/Hermes/Codex comparison:
+  - Codex 的优点是工具结果和 artifact refs 是结构化事实；这次我们也只信文件和 refs，不信最终 prose。
+  - OpenClaw 的 session/run 控制面强调当前任务是否真的完成；这次 dispatch/acceptance log 给出了明确 `DONE/VERIFIED`。
+  - Hermes 的 delegate 思路是父级拿 summary/refs，不搬正文；这次 root 返回 artifact refs 和 output refs，未把 50KB HTML 塞回最终回复。
+- Fix:
+  - Added a reusable Live Lab `natural` suite with `natural_html_subagent`.
+  - Added `_assert_natural_html_output()` so the canary checks the concrete artifact, not only the model's summary.
+  - Added focused tests for prompt language, real-LLM gating, empty-link rejection, and complete-page acceptance.
+- Follow-up fix:
+  - Tightened the canary prompt and validator to require an offline single-file page: no remote `src`, stylesheet `<link href=http(s)>`, or CSS `url(http(s)...)` assets.
+  - Normal outbound anchors are still allowed; only page-rendering dependencies are blocked.
+- Status:
+  - Natural suite now enforces the stricter offline single-file resource policy; final verified run is `20260517-natural-html-05-input-output-contract`.
+
+### Finding 179: Live Lab max_tool_rounds=8 can truncate real HTML page work
+
+- Trigger:
+  - Live Lab natural rerun `20260517-natural-html-02-offline-assets` after tightening the prompt to forbid external images/fonts/scripts.
+- Problem:
+  - The child wrote a substantial offline HTML page, but it stopped before `</body></html>`.
+  - Dispatch log and runner reports recorded `工具轮数达上限导致未能完成文件写入和结果输出`.
+  - Root correctly refused to report success, and Live Lab failed with `自然语言 HTML 产物缺少基本标签: ['</html>', '</body>']`.
+- 中文解释:
+  - 小傻妞不是瞎说完成，系统也没有放过坏产物。
+  - 真正的问题是测试台自己把工具轮数卡成 8，长一点的页面需要多次写入/追加，就被中途掐断了。
+  - 这个限制和用户“先完整跑通、后面再谈资源”的原则冲突，应当从 Live Lab 隔离配置里拿掉。
+- OpenClaw/Hermes/Codex comparison:
+  - Hermes release notes强调 inactivity-based timeout，活跃工具调用不应被墙上时间误杀。
+  - OpenClaw/Codex 的稳定点也是把预算/熔断做成明确控制面，而不是让普通任务默认踩很小的测试阈值。
+  - Lesson: ordinary E2E should not inherit stress-test limits; budget/fuse belongs to dedicated stress cases.
+- Fix:
+  - Live Lab isolated config now writes `max_tool_rounds: 0` by default.
+  - Added a regression test proving Live Lab config keeps tool rounds unlimited unless a future stress case overrides it.
+- Status:
+  - Fixed and rerun. `20260517-natural-html-05-input-output-contract` completed in one worker run with `total_runs=1`, `done_verified=1`, and a 16KB offline HTML artifact.
+
+### Finding 180: Artifact integrity used private task_dir for relative product roots
+
+- Trigger:
+  - Live Lab natural rerun `20260517-natural-html-03-unlimited-rounds`.
+  - The child wrote the real file at `fixture_project/lab_outputs/furniture-home/index.html`.
+- Problem:
+  - Runner `output.json` was changed to `BLOCKED` with `artifact_missing` under `.my_agent/subagents/<run>/lab_outputs/furniture-home/index.html`.
+  - The actual artifact existed and passed the lightweight HTML checks.
+  - Root cause: artifact integrity resolved relative `product_write_roots` against the run-local task dir, while filesystem tools had written the same relative path under the project workspace root.
+- 中文解释:
+  - 小傻妞把文件写对地方了，但验收器去错房间找文件。
+  - 写工具知道 `lab_outputs/...` 是项目目录下的产物；收口验收却按“小傻妞自己的私有目录”去拼这个路径。
+  - 这是路径合同不统一，不是提示词问题。
+- OpenClaw/Hermes/Codex comparison:
+  - Codex 的成熟点是工具和产物 refs 走同一套 workspace/run scope，而不是每个模块各猜路径。
+  - Hermes delegate 的 task workspace / artifact refs 也要求父级按 refs 查产物，不从私有目录猜业务路径。
+  - Lesson: write boundary and artifact integrity must share workspace-root semantics.
+- Fix:
+  - `subagent_finalize_artifact_integrity` now derives bounded project roots from `.my_agent/subagents/<run>` and resolves relative product roots from those roots.
+  - Added regression coverage for `product_write_roots=["lab_outputs/furniture-home"]`.
+- Verification:
+  - Focused finalize tests passed.
+  - Later natural rerun reached real artifact validation without the private-task-dir `artifact_missing` false blocker.
+- Status:
+  - Fixed.
+
+### Finding 181: Closeout counted a PLANNING sibling as done because another sibling wrote the same target
+
+- Trigger:
+  - Live Lab natural rerun `20260517-natural-html-04-path-root-fix`.
+- Problem:
+  - Final response claimed `total_runs=2` and `done_verified=2`.
+  - Disk truth showed one run was `DONE/VERIFIED`, while the first run was still `PLANNING/UNVERIFIED`.
+  - Root cause: closeout let same-target verified sibling coverage resolve any task, including tasks that had never started.
+- 中文解释:
+  - 一个新小傻妞把页面写好了，但旧小傻妞还躺在计划中。
+  - 系统不应该说“两个人都完成了”；最多只能说“新的人完成了，旧的人还没处理或被明确取消”。
+  - 未启动、运行中、待验收的 run 不能靠同目标 sibling 自动消失。
+- OpenClaw/Hermes/Codex comparison:
+  - OpenClaw 控制面强调真实 session/run 状态；不能让自然语言或产物存在覆盖掉仍未完成的 job。
+  - Codex 的状态统计应从持久化任务状态出发，coverage 只能是明确机器事实。
+  - Lesson: sibling target coverage is for failed/blocked/taken-over stale runs, not PLANNING/RUNNING work.
+- Fix:
+  - `subagent_dispatch_closeout_resolution` now only allows verified sibling target coverage for explicit stale terminal states such as `BLOCKED`、`FAILED`、`TIMEOUT`、`TAKEN_OVER`.
+  - Live Lab natural case now checks persisted `task.json` state with the same closeout resolver, so final prose cannot hide unfinished runs.
+- Verification:
+  - Added regression tests for PLANNING sibling coverage and Live Lab persisted-state gate.
+- Status:
+  - Fixed.
+
+### Finding 182: "输出路径" was misread as an input dependency after earlier "不依赖"
+
+- Trigger:
+  - Live Lab natural rerun `20260517-natural-html-04-path-root-fix`.
+  - Root created `小傻妞-家具首页` with goal text containing both `不依赖外部图片` and `输出路径：lab_outputs/furniture-home/index.html`.
+- Problem:
+  - The first worker stayed `PLANNING` because dispatch considered `lab_outputs/furniture-home/index.html` a missing input.
+  - Root cause: natural input-ref extraction saw the earlier word `依赖` in the lookback window and treated the later output path as something to read first.
+- 中文解释:
+  - “不依赖外部图片”里的“依赖”把解析器带偏了。
+  - “输出路径：index.html”明明是要写出的文件，不是要先读的文件。
+  - 这种应该靠更近的“输出路径/保存路径/产物文件”词来判断。
+- OpenClaw/Hermes/Codex comparison:
+  - Codex 风格是区分 input refs 和 output refs；自然语言只辅助抽取，不能把两者混成一个。
+  - Hermes delegate 也把输入资料和输出目录分开传递。
+  - Lesson: nearest output marker should beat older read/dependency words in the same sentence window.
+- Fix:
+  - Runner input dependency parsing now recognizes `输出路径`、`输出文件`、`保存路径`、`保存文件`、`目标文件`、`产物路径`、`产物文件` as write-target markers.
+  - Added regression tests confirming this exact furniture-page wording is not treated as a missing input, while "读取某代理的输出 data/x" still waits for upstream output.
+- Verification:
+  - Focused dependency tests passed.
+  - Natural rerun `20260517-natural-html-05-input-output-contract` passed with one `worker` run, no root direct write, `DONE/VERIFIED`, and valid offline HTML.
+- Status:
+  - Fixed.

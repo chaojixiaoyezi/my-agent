@@ -327,6 +327,38 @@ def test_leaf_relative_artifact_with_product_root_suffix(tmp_path: Path):
     assert captured.params.structured_output.failure_type == ""
 
 
+# LLM: relative product roots in real runner contexts must resolve from the project workspace, not task_dir.
+# 函数用途: 复现 Live Lab 中 product_write_roots=lab_outputs/...；finalize 应检查项目根下的产物，不能误拼到 .my_agent/subagents。
+def test_leaf_relative_product_root_uses_derived_workspace_root(tmp_path: Path):
+    workspace_root = tmp_path / "fixture_project"
+    product_root = workspace_root / "lab_outputs" / "furniture-home"
+    artifact = product_root / "index.html"
+    product_root.mkdir(parents=True)
+    artifact.write_text("<html><body><main>done</main></body></html>", encoding="utf-8")
+    task_dir = workspace_root / ".my_agent" / "subagents" / "worker"
+    agent, captured = _agent({"worker": _task("worker", status="RUNNING", verification="UNVERIFIED")})
+    structured = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        status="AWAITING_ACCEPTANCE",
+        summary="页面已完成。",
+        artifacts=[{"path": "lab_outputs/furniture-home/index.html", "kind": "file", "summary": "homepage"}],
+    )
+    context = _context(
+        role="leaf_worker",
+        agent_name="小傻妞-page",
+        task_dir=str(task_dir),
+        write_boundary={"product_write_roots": ["lab_outputs/furniture-home"]},
+    )
+
+    result = record_finalized_runner_result(
+        FinalizedRunnerRecordRequest(agent, _params("worker", context=context), structured, _repair_state())
+    )
+
+    assert result.status == "AWAITING_ACCEPTANCE"
+    assert captured.params.structured_output.failure_type == ""
+
+
 # LLM: _repair_state is the minimum finalize metadata persisted with a runner result.
 # 函数用途: 统一测试里的 finalize repair_state 字段，避免每个用例重复散写。
 def _repair_state() -> dict[str, object]:

@@ -401,7 +401,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - 写入隔离配置，避免污染主仓库数据。
 - 打印并保存发给 `my-agent` 的 prompt。
 - 打印实际命令、stdout、stderr、退出码和耗时。
-- 调用现有 `scenario-test` 跑健康、坏天气、真实 gateway ask 和真实 subagent 长链路。
+- 调用现有 `scenario-test` 跑健康、坏天气、真实 gateway ask、真实 subagent 长链路和自然语言小傻妞 HTML 产物链路。
 
 `scripts/open_live_lab.sh` 会在 macOS 新开 Terminal，让用户能直接看到测试过程。
 
@@ -863,11 +863,12 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - `agent_py_agent/agent/log_analysis/tools.py`: security query/hunt/trace tools accept optional `max_limit`.
 - `agent_py_agent/cli/logs.py`: LOG CLI query commands honor `query_max_limit` from log-analysis config.
 - `scripts/live_lab/log_analysis_replay.py`: offline SecurityAlertV1 replay command that emits case, route, report, forensic package, and replay summary artifacts.
-- `scripts/live_lab/cases.py`: adds the `log_analysis_replay` Live Lab case.
-- `scripts/live_lab/constants.py`: adds the `log-analysis` suite and includes it in the `all` suite.
+- `scripts/live_lab/cases.py`: adds the `log_analysis_replay` Live Lab case; later also owns the natural-language furniture HTML subagent canary, including gateway response blocker checks and persisted `task.json` state gates.
+- `scripts/live_lab/constants.py`: adds the `log-analysis` and `natural` suites and includes replay/natural cases in the `all` suite.
 - `agent_py_agent/agent/subagent_workflows/planner.py`: composes workflow routing, compilation, and parent acceptance into one dry-run planning facade.
 - `agent_py_agent/tests/test_runtime_capabilities.py`: verifies ordinary prompts hide security tools, explicit grants expose them, and English/Chinese security-log prompts auto-grant them.
 - `agent_py_agent/tests/test_live_lab_log_analysis_replay.py`: verifies offline replay artifacts and failure-stage semantics.
+- `agent_py_agent/tests/test_live_lab_natural_case.py`: verifies the natural-language furniture HTML canary prompt, real-LLM gating, artifact validation, response blocker detection, and persisted subagent state checks.
 - `agent_py_agent/tests/test_subagent_workflow_planner.py`: verifies the planner facade for auto, manual, and off workflow modes.
 
 ## 2026-05-08 Tree Update: Acceptance Progress CLI Split
@@ -1114,7 +1115,9 @@ docs/
 - `agent_py_agent/agent/agent_core/orchestration_tools.py`: 顶层 `create_subagents` / `subagent_board` 工具入口；显式 root/coordinator seed 会从当前原始用户 prompt 补回模型摘要漏掉的 required/forbidden 文件合同和 4层/depth 命名约束，并以增强后的 `CreateRunParams.goal` 创建 root。`create_subagents` 同时支持 `goal + count` 单任务兼容模式和 `items/tasks` 多任务结构化模式；系统默认名会补成 `小傻妞-角色-编号`，例如 `小傻妞-worker-1` / `小傻妞-tester-2`；创建后 payload 会给出 `next_action.dispatch_subagents`，避免模型把“已建工单”误当“已执行”；若本次没有可调度 run，下一步转为 `subagent_board`。
 - `agent_py_agent/agent/agent_core/orchestration_root_contract.py`: root/coordinator seed 合同修复 helper；从原始用户 prompt 提取 required/forbidden 文件和精确层级命名合同，避免自然语言摘要把机器合同改写或漏传。
 - `agent_py_agent/agent/agent_core/subagent_finalize_helpers.py`: 子代理 runner 收尾持久化 helper；coordinator 已真实创建并验收 child 时可合成等待父级验收的收口，同时会阻断“没工具调用、没 child refs，只说下一步要 schedule_child_subagents”的假完成，转成 `BLOCKED / needs_child_creation` 让 LLM 继续派工。
-- `agent_py_agent/agent/agent_core/subagent_finalize_artifact_integrity.py`: runner 收尾前的产物完整性检查层；相对 artifact ref 会优先对齐 product write root 尾部，避免 `deliverables/site/index.html` 被误拼成重复目录后标成 `artifact_missing`。
+- `agent_py_agent/agent/agent_core/runner_input_dependencies.py`: runner 输入依赖识别层；会把“输出路径/保存文件/目标文件”等写入目标识别为 output refs，避免自然语言里先出现“不依赖”后又写“输出路径”时被误判成缺失输入。
+- `agent_py_agent/agent/agent_core/subagent_dispatch_closeout_resolution.py`: 顶层 dispatch 收口状态归并层；只允许 `BLOCKED/FAILED/TIMEOUT/AWAITING_ACCEPTANCE/TAKEN_OVER` 等旧问题 run 被已验证 sibling 目标覆盖，`PLANNING/RUNNING` 不再被同目标 sibling 静默算作完成。
+- `agent_py_agent/agent/agent_core/subagent_finalize_artifact_integrity.py`: runner 收尾前的产物完整性检查层；相对 artifact ref 会从 run-local `task_dir` 推导真实项目 workspace，再对齐相对/绝对 product write roots，避免 `lab_outputs/site/index.html` 这类共享产物被误查到私有 `.my_agent/subagents/...` 目录后标成 `artifact_missing`。
 - `agent_py_agent/agent/backends/base.py`: Anthropic-compatible 非流式响应解析会在 thinking-only/no-text 内容块时重试一次；流式响应连续空文本时会在后端边界做一次非流式 `/v1/messages` 兜底，避免真实 E2E 被可恢复的厂商响应形状直接打成 runner 失败；普通空响应仍报错。
 - `agent_py_agent/agent/agent_core/tool_agent_budget.py` / `tool_agent_budget_stage.py`: 单个代理滚动工具预算 helper 和工具循环集成层；默认按 `run_id` 做 10 分钟 50 次限制，没有 `run_id` 的主代理普通聊天不受限，且不做任务树或单次对话的全局预算。
 - `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context `dispatch_subagents` 的直接 child 进度摘要；提示继续调度、恢复阻塞 child 或最新 acceptance review 为 REJECT 的 child，只有 child 都已等待验收/完成且没有 rejected acceptance 时才用 refs-first summary 收口；被父级验收拒绝的 child 会进入 repair lane 并暴露 `parent_acceptance_repair_advice`，避免上层反复读取子产物正文或把验收失败当普通 runner 恢复。
