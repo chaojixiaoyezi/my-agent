@@ -19,7 +19,7 @@ from .orchestration_dispatch_state_contract import dispatch_state_contract_paylo
 from .orchestration_quality_advice_payload import quality_advice_payload
 from .orchestration_run_scope import remember_orchestration_run_ids
 from .orchestration_tool_specs import build_schedule_child_subagents_spec
-from .orchestration_write_guard import external_write_target_error
+from .orchestration_write_guard import ExternalWriteTargetRequest, external_write_target_error
 from .parameters import _bool_param, _non_negative_int, _string_list
 from .runner_context import current_subagent_run_id
 
@@ -259,7 +259,13 @@ def _json_list_param(value: object) -> list[object]:
 # 函数用途: 对每个 child goal/allowed_tools 做越界写入预检，失败时整批阻断。
 def _hierarchy_target_error(agent, specs: list[HierarchyChildSpec]) -> str:
     for spec in specs:
-        target_error = external_write_target_error(agent, spec.goal, spec.allowed_tools)
+        target_error = external_write_target_error(
+            ExternalWriteTargetRequest(
+                agent=agent,
+                allowed_tools=spec.allowed_tools,
+                params={**spec.attributes, "extra_write_roots": list(spec.extra_write_roots)},
+            )
+        )
         if target_error:
             return target_error
     return ""

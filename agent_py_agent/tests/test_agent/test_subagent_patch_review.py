@@ -279,7 +279,7 @@ def test_subagent_patch_apply_rolls_back_when_post_apply_test_fails():
             thought="测试失败时必须恢复原状。",
             plan=["apply", "test", "rollback"],
             extra_write_roots=[str(target)],
-            acceptance_checks=["command: python3 -c \"import sys; sys.exit(1)\""],
+            attributes={"patch_test_commands": ["python3 -c \"import sys; sys.exit(1)\""]},
         )
         Path(task.output_json).write_text(
             json.dumps(

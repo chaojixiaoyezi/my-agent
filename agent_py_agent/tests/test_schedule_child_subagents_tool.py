@@ -51,6 +51,7 @@ def test_runner_context_schedule_without_children_returns_quality_advice(tmp_pat
         plan=["root"],
         role="coordinator",
         extra_write_roots=[str(build)],
+        attributes={"required_qa_roles": ["tester", "bug_finder", "acceptor"]},
     )
     worker = agent.subagents.create_run(
         goal=f"实现购物网站到 {build}",

@@ -1,4 +1,13 @@
-﻿## 2026-05-17 structured contract cleanup
+﻿## 2026-05-18 CI regression contract cleanup
+
+- 本轮按 fast-test / CI 收口方式修复 create_run、create_subagents、runner phase gate、写入预检和验收测试回归；不扩新功能，只把现有结构化合同对齐到代码和测试。
+- `subagents/services/base.py` 的 workflow dry-run 路由改为读取 `attributes.workflow_template_id`、`attributes.workflow_task_type`、`attributes.workflow_risk_tags` 等机器字段，并通过 `_WorkflowPlanAttempt` bundle 传递 `quality_contract`，避免再次出现函数签名漂移和 goal 关键词路由。
+- `agent_core/orchestration_write_guard.py` 改为 `ExternalWriteTargetRequest` bundle 入口；写入目标预检只读取 `extra_write_roots`、`write_roots`、`target_roots`、`output_refs/output_files/artifact_refs` 等结构化字段，不再接收或解析普通 goal 文本。
+- `create_subagents(items=...)`、`schedule_child_subagents` 和 runner phase gate 的测试迁移到结构化 `attributes`、`context_manifest.required_read_paths`、`input_refs/output_refs` 和 `workflow_depends_on`；旧测试不再期待 `acceptance_checks` 或 goal 自然语言触发机器验收。
+- `hierarchy_leaf_targets.py` 的去重目标优先读取 `attributes.output_refs/output_files/artifact_refs`，让 leaf ownership 由机器产物 refs 决定，避免模型自然语言描述被当作系统事实。
+- 验收：`python3 -m pytest -q -m "not slow and not e2e" --tb=short`、`ruff check agent_py_agent`、`python3 -m pytest -q agent_py_agent/tests/test_architecture_guardrails.py --tb=short`、`python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` 和 `git diff --check` 已通过；strict code-size 为 `hard=0 high-risk=0 soft=0`。
+
+## 2026-05-17 structured contract cleanup
 
 - 本轮专项清理了子代理/编排代码层的自然语言关键词硬判断：文件合同、内容合同、QA 角色要求、workflow 路由、复杂度估算、负向内容验收、direct/body read guard、输入依赖、output refs、repair 归属和 create role 纠偏都改为结构化字段、模板 id、状态事实或显式工具授权。
 - `subagent_workflows/router.py` 不再从“代码/修复/报告/界面/高质量”等中文/英文词里自动选模板；需要硬选时由 LLM 或调用方写 `workflow_task_type:` / `workflow_template_id:`。

@@ -27,6 +27,7 @@ class SpawnSubagentsParams:
     count: int | None = None
     role: str = "worker"
     agent_name: str = ""
+    extra_write_roots: list[str] | None = None
 
 
 # LLM: SubagentProbeParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -100,6 +101,7 @@ def spawn_subagents_params(
     count: int | None,
     role: str = "worker",
     agent_name: str = "",
+    extra_write_roots: list[str] | None = None,
 ) -> SpawnSubagentsParams:
     if params is not None:
         if not isinstance(params, SpawnSubagentsParams):
@@ -111,4 +113,5 @@ def spawn_subagents_params(
         count=count,
         role=str(role or "worker"),
         agent_name=str(agent_name or ""),
+        extra_write_roots=list(extra_write_roots or []),
     )

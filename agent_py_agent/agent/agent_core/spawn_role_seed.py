@@ -50,7 +50,7 @@ def is_explicit_root_role(role: str) -> bool:
 # 函数用途: 创建显式 root/coordinator 任务；上层保留 goal 中的产物写根用于检查/接管/救援，但职责上仍优先派给下级执行。
 def spawn_explicit_role_runs(request: SpawnExplicitRoleRequest) -> list[SubAgentTask]:
     role = clean_spawn_role(request.options.role)
-    extra_roots: list[str] = []
+    extra_roots = list(request.options.extra_write_roots or [])
     allowed_tools = _spawn_role_allowed_tools(role, request.allowed_tools)
     tasks: list[SubAgentTask] = []
     for index in range(1, request.count + 1):

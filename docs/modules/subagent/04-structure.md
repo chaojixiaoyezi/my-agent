@@ -664,3 +664,9 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `acceptance_helpers/evidence.py` 是 legacy import 兼容壳，真实验收证据 findings 统一走 `services/acceptance_evidence_findings.py`。`acceptance_helpers/evidence_acceptance_findings.py` 只保留 `_make_finding` / `_has_tool_evidence` 等旧调用兼容工具，不再拥有独立 build 逻辑。
 - `agent_core/orchestration_create_context.py` 会从结构化 `output_refs/output_files/artifact_refs` 生成系统级 `subagent_idempotency_contract.v1`。这让重复 create/schedule 的复用由产物 refs 合同决定，而不是由模型是否记得传 idempotency pack 或 goal 文本是否相似决定。
 - `tests/test_architecture_guardrails.py` 的自然语言事实源门继续作为开发铁律：普通 prompt、goal、summary、acceptance_checks 可以进入模型上下文和人类展示，但不得成为代码层机器判断来源。新增守卫要求 legacy evidence helper 保持 service shim，并禁止 create/schedule 幂等比较 goal 文本。
+- `agent_core/orchestration_write_guard.py` 的写入预检入口固定为 `ExternalWriteTargetRequest` bundle。它只读取 `extra_write_roots`、`write_roots`、`target_roots` 和 output/artifact refs 等机器字段；goal、summary、acceptance_checks 这类自然语言只给模型/人看，不能作为写入边界事实来源。
+- `agent_core/orchestration_tools.py` 的 `CreateSubagentsTool.execute()` 只做薄路由：items 批量入口、count 单任务入口和单任务校验分别落到小 helper；外部写入预检、约束冲突和重复产物检查仍走结构化参数，不从 prompt 文本里猜。
+- `agent_core/hierarchy_tools.py` 调用写入预检时会把 `HierarchyChildSpec.attributes` 和 `extra_write_roots` 合成机器参数。这样 coordinator 给下一层传递普通说明不会触发路径判断，真正的越界目标必须来自结构化写入字段。
+- `subagents/services/base.py` 的 workflow 预览路由使用 `_WorkflowPlanAttempt` bundle，并从 create-run attributes 读取 `workflow_template_id` / `workflow_task_type` / `workflow_risk_tags`。这对齐 会话运行时 式结构化协议：模板选择和质量合同是机器字段，不是自然语言关键词。
+- `subagents/services/hierarchy_leaf_targets.py` 的 leaf target tokens 读取 `attributes.output_refs`、`attributes.output_files` 和 `attributes.artifact_refs`，用于重复 leaf/ownership 判断；普通“读取/引用/总结某文件”的文本不再成为 ownership 事实。
+- 相关测试已经迁移到 `attributes`、`context_manifest.required_read_paths`、`workflow_depends_on` 和 input/output refs；旧 helper 只作为兼容壳存在，不能重新长出独立的自然语言验收逻辑。

@@ -184,6 +184,7 @@ def test_hierarchy_schedule_warns_duplicate_verified_leaf_targets(tmp_path):
                     goal="rewrite register.html and login.html",
                     role="leaf_worker",
                     agent_name="auth-leaf-writer",
+                    attributes={"output_refs": ["deliverables/shop/build/register.html", "deliverables/shop/build/login.html"]},
                 )
             ],
             apply=True,

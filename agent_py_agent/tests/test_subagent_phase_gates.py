@@ -42,6 +42,34 @@ def _runner_task(run_id: str, role: str, agent_name: str = "", goal: str = ""):
     )
 
 
+# LLM: _dispatch_ctx builds runner selection context without repeating unrelated defaults.
+# 函数用途: 让 phase-gate 测试只声明本例关心的 run_ids 和并发数量。
+def _dispatch_ctx(include_run_ids: list[str], max_runners: int = 3) -> DispatchContext:
+    return DispatchContext(
+        cfg=SimpleNamespace(),
+        normalized_workflow_mode="off",
+        apply=True,
+        planner=False,
+        runner_instruction="",
+        max_runners=max_runners,
+        limit=20,
+        reviewer="tester",
+        note="",
+        take_over_by="",
+        locked_files=None,
+        router=SimpleNamespace(),
+        include_run_ids=include_run_ids,
+    )
+
+
+# LLM: _attach_tmp_workspace gives fixture tasks real roots for dependency-ref checks.
+# 函数用途: 批量设置 allowed_write_roots 和 task_dir，避免每个测试重复路径样板。
+def _attach_tmp_workspace(tmp_path, tasks) -> None:
+    for task in tasks:
+        task.allowed_write_roots = [str(tmp_path)]
+        task.task_dir = str(tmp_path / ".my-agent" / "subagents" / task.id)
+
+
 # LLM: test_root_with_coordinators_can_still_create_direct_leaf keeps dispatch policy flexible.
 # 函数用途: root 已创建 coordinator 后，仍可为别的工作分支直接创建 leaf_worker；是否满足层级链路交给验收判断。
 def test_root_with_coordinators_can_still_create_direct_leaf(tmp_path):
@@ -138,24 +166,10 @@ def test_explicit_run_ids_keep_mixed_worker_and_coordinator_targets():
 def test_explicit_run_ids_wait_for_missing_input_refs(tmp_path):
     data = _runner_task("collect", "worker", "小傻妞-数据", "生成 data/weekly_data.json")
     report = _runner_task("report", "worker", "小傻妞-报告", "读取 data/weekly_data.json，生成 final_report.md")
-    for task in [data, report]:
-        task.allowed_write_roots = [str(tmp_path)]
-        task.task_dir = str(tmp_path / ".my-agent" / "subagents" / task.id)
-    ctx = DispatchContext(
-        cfg=SimpleNamespace(),
-        normalized_workflow_mode="off",
-        apply=True,
-        planner=False,
-        runner_instruction="",
-        max_runners=2,
-        limit=20,
-        reviewer="tester",
-        note="",
-        take_over_by="",
-        locked_files=None,
-        router=SimpleNamespace(),
-        include_run_ids=["collect", "report"],
-    )
+    data.attributes = {"output_refs": ["data/weekly_data.json"]}
+    report.context_manifest = SimpleNamespace(required_read_paths=["data/weekly_data.json"])
+    _attach_tmp_workspace(tmp_path, [data, report])
+    ctx = _dispatch_ctx(["collect", "report"], max_runners=2)
 
     selected = _runner_candidates_for_context([data, report], ctx, runner_max_attempts=1)
 
@@ -186,24 +200,12 @@ def test_explicit_run_ids_wait_for_named_upstream_output_refs(tmp_path):
         "小傻妞-生成报告",
         "读取小傻妞-核验翻译的输出 data/github_star_analysis.md，并生成 xlsx/final_report.md",
     )
-    for task in [collect, analysis, report]:
-        task.allowed_write_roots = [str(tmp_path)]
-        task.task_dir = str(tmp_path / ".my-agent" / "subagents" / task.id)
-    ctx = DispatchContext(
-        cfg=SimpleNamespace(),
-        normalized_workflow_mode="off",
-        apply=True,
-        planner=False,
-        runner_instruction="",
-        max_runners=3,
-        limit=20,
-        reviewer="tester",
-        note="",
-        take_over_by="",
-        locked_files=None,
-        router=SimpleNamespace(),
-        include_run_ids=["report", "analysis", "collect"],
-    )
+    collect.attributes = {"output_refs": ["data/github_star_data.md"]}
+    analysis.attributes = {"output_refs": ["data/github_star_analysis.md"]}
+    analysis.context_manifest = SimpleNamespace(required_read_paths=["data/github_star_data.md"])
+    report.context_manifest = SimpleNamespace(required_read_paths=["data/github_star_analysis.md"])
+    _attach_tmp_workspace(tmp_path, [collect, analysis, report])
+    ctx = _dispatch_ctx(["report", "analysis", "collect"])
 
     selected = _runner_candidates_for_context([report, analysis, collect], ctx, runner_max_attempts=1)
 

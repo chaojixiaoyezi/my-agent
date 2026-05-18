@@ -516,9 +516,10 @@ class TestSubAgentAcceptanceTestsAndArtifactFindings(_FindingSetupMixin, _Findin
         internal_report.write_text("internal report", encoding="utf-8")
         task = self._make_findings_task(
             tmp_path,
-            goal="required_files: final_report.md",
+            goal="需要交付最终报告。",
             task_dir=task_dir,
             allowed_write_roots=[str(task_dir), str(product_root)],
+            attributes={"required_files": ["final_report.md"]},
         )
         self._write_findings_files(tmp_path)
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))

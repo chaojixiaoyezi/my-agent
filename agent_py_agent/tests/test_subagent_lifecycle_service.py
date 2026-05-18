@@ -132,20 +132,19 @@ def test_create_run_rebinds_stale_self_output_subagent_path(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     stale_id = "subagent-0000000000-stale"
     task = manager.create_run(
-        goal=f"请把结果写到 data/subagents/{stale_id}/data_collection.md",
-        thought=f"输出路径 data/subagents/{stale_id}/notes.md",
-        plan=[
-            f"读取 data/subagents/{stale_id}/input.md",
-            f"生成 data/subagents/{stale_id}/summary.md",
-        ],
-        acceptance_checks=[f"必须保存到 data/subagents/{stale_id}/summary.md"],
+        goal="请按结构化 output_refs 写数据收集结果。",
+        thought="输出路径由 attributes.output_refs 决定。",
+        plan=["读取输入 refs", "生成摘要 refs"],
+        acceptance_checks=["必须保存到结构化产物 refs。"],
+        attributes={
+            "input_refs": [f"data/subagents/{stale_id}/input.md"],
+            "output_refs": [f"data/subagents/{stale_id}/data_collection.md"],
+            "output_files": [f"data/subagents/{stale_id}/summary.md"],
+        },
     )
     loaded = manager.load(task.id)
 
-    assert stale_id not in loaded.goal
-    assert stale_id not in loaded.thought
-    assert stale_id in loaded.plan[0]
-    assert stale_id not in loaded.plan[1]
-    assert stale_id not in loaded.acceptance_checks[0]
-    assert f"data/subagents/{loaded.id}/data_collection.md" in loaded.goal
+    assert loaded.attributes["input_refs"] == [f"data/subagents/{stale_id}/input.md"]
+    assert loaded.attributes["output_refs"] == [f"data/subagents/{loaded.id}/data_collection.md"]
+    assert loaded.attributes["output_files"] == [f"data/subagents/{loaded.id}/summary.md"]
     assert loaded.attributes["output_ref_rebindings"][0]["from"].startswith("data/subagents/")

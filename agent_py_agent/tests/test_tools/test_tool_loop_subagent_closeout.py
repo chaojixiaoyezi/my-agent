@@ -133,7 +133,7 @@ def test_completed_dispatch_does_not_close_when_prompt_requires_quality_roles():
             max_tool_rounds=4,
         )
         agent = SimpleAgent(cfg, workspace)
-        _done_verified_task(agent)
+        _done_verified_task(agent, required_qa_roles=["tester", "acceptor"])
         agent.backend = _DispatchThenQualityBackend()
 
         result = agent.run("worker 完成后必须继续创建 tester 和 acceptor 做测试验收", save=False)
@@ -239,7 +239,7 @@ def test_final_response_guard_uses_remembered_scope_after_later_tools():
 
 # LLM: _done_verified_task creates a traceable finished subagent for top-level closeout tests.
 # 函数用途: 构造已完成且已验收的子代理任务，并写入最小 output.json，供 dispatch 收口测试复用。
-def _done_verified_task(agent):
+def _done_verified_task(agent, *, required_qa_roles: list[str] | None = None):
     task = agent.subagents.create_run(
         goal="已完成任务 fixture",
         thought="用于测试顶层 dispatch 本地收口。",
@@ -248,6 +248,8 @@ def _done_verified_task(agent):
     )
     task.status = "DONE"
     task.verification_status = "VERIFIED"
+    if required_qa_roles:
+        task.attributes = {"required_qa_roles": required_qa_roles}
     task.evidence.append(VerificationEvidence(
         kind="note",
         summary="任务已有验收证据。",
