@@ -326,3 +326,48 @@ class TestCmdRun:
 
         assert result == 0
         assert capsys.readouterr().out.count("流式最终响应") == 1
+
+    def test_run_prints_final_response_after_streamed_tool_call(self, tmp_path: Path, capsys):
+        """工具调用片段已流式打印时，后续最终答复仍要打印出来。"""
+        from agent_py_agent.cli.local_commands import cmd_run
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.prompt = "测试 prompt"
+        args.inject = None
+        args.prompt_file = None
+        args.save = True
+        args.show_prompt = False
+        args.resume_context = None
+
+        result_payload = SimpleNamespace(
+            response="最终已经完成，文件在当前目录。",
+            prompt="最终的 prompt",
+            backend="test",
+            used_memories=0,
+            tool_rounds=1,
+            memory_route_matches=0,
+            prompt_token_estimate=100,
+            runtime_injection_token_estimate=0,
+            archive_events=0,
+            recovery_snapshot_path=None,
+            recovery_snapshot_error=None,
+            memory_resume_context_injected=False,
+            memory_resume_context_token_estimate=0,
+            memory_compact_suggested=False,
+        )
+
+        class StreamingToolAgent:
+            def run(self, *args, **kwargs):
+                kwargs["on_chunk"]('[TOOL_CALL]\n{"tool":"run_command"}\n[/TOOL_CALL]')
+                return result_payload
+
+        with patch("agent_py_agent.cli.local_commands.make_agent", return_value=StreamingToolAgent()), \
+             patch("agent_py_agent.cli.local_commands.ThinkingSpinner"):
+            result = cmd_run(args)
+
+        output = capsys.readouterr().out
+
+        assert result == 0
+        assert "[TOOL_CALL]" in output
+        assert "最终已经完成" in output

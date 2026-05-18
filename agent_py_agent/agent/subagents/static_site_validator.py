@@ -166,7 +166,7 @@ def _scan_options(test: dict[str, Any]) -> StaticSiteScanOptions:
         check_complete_html=test.get("require_complete_html", False) is True,
         check_controls=test.get("check_inert_controls", True) is not False,
         check_forms=test.get("check_form_bindings", True) is not False,
-        strict_dom_bindings=test.get("strict_dom_bindings", False) is True,
+        strict_dom_bindings=test.get("strict_dom_bindings", True) is not False,
         required_dom_ids=string_list(test.get("required_dom_ids")),
     )
 
