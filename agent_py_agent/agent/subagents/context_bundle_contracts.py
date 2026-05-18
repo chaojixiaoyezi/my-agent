@@ -5,25 +5,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .context_bundle_file_roots import (
+    append_file_root_term,
+    file_level_write_root_terms,
+    is_contract_file_path,
+)
 from .context_bundle_refs import safe_string_ref, workspace_refs
 from .models import SubAgentTask
-from .required_file_terms import forbidden_file_terms_from_text, required_file_terms_from_text
-
-_CONTRACT_FILE_SUFFIXES = {
-    ".py",
-    ".md",
-    ".json",
-    ".yaml",
-    ".yml",
-    ".txt",
-    ".ts",
-    ".tsx",
-    ".js",
-    ".jsx",
-    ".css",
-    ".html",
-    ".htm",
-}
+from .required_file_terms import (
+    forbidden_file_terms_from_text,
+    required_file_terms_from_text,
+    task_contract_forbidden_file_terms_from_text,
+    task_contract_required_file_terms_from_text,
+)
 
 
 # LLM: output_contract tells the runner where durable reports and machine output must land.
@@ -32,6 +26,7 @@ def output_contract(task: SubAgentTask) -> dict[str, object]:
     required_files = required_file_contract(task)
     product_roots = product_write_roots(task)
     required_file_refs = required_product_file_refs(task, required_files, product_roots)
+    source = file_contract_source(task)
     return {
         "product_write_roots": product_roots,
         "required_file_refs": required_file_refs,
@@ -41,7 +36,7 @@ def output_contract(task: SubAgentTask) -> dict[str, object]:
         "output_json_ref": safe_string_ref(task, "output_json"),
         "required_files": required_files,
         "forbidden_files": forbidden_file_contract(task),
-        "file_contract_source": "structured_required_forbidden_fields",
+        "file_contract_source": source,
         "evidence_refs_required": True,
         "tests_ref_style": "refs_only_with_working_dir",
         "artifact_refs_required": True,
@@ -55,6 +50,7 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
     required_files = required_file_contract(task)
     product_roots = product_write_roots(task)
     required_file_refs = required_product_file_refs(task, required_files, product_roots)
+    source = file_contract_source(task)
     return {
         "schema_version": "subagent_task_packet.v1",
         "run_id": task.id,
@@ -70,7 +66,7 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
             "required_files": required_files,
             "required_file_refs": required_file_refs,
             "forbidden_files": forbidden_file_contract(task),
-            "source": "structured_required_forbidden_fields",
+            "source": source,
         },
         "write_contract": {
             "product_write_roots": product_roots,
@@ -104,9 +100,12 @@ def required_file_contract(task: SubAgentTask) -> list[str]:
             *(
                 term
                 for text in _file_contract_texts(task)
-                for term in required_file_terms_from_text(text, extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html")
+                for term in task_contract_required_file_terms_from_text(
+                    text,
+                    extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html",
+                )
             ),
-            *_file_level_write_root_terms(task),
+            *file_level_write_root_terms(task),
         ]
     )
 
@@ -137,13 +136,49 @@ def required_product_file_refs(
     refs: list[str] = []
     for filename in files:
         for ref in _required_product_ref_candidates(str(filename or "").strip(), product_roots):
-            _append_file_root_term(refs, ref)
+            append_file_root_term(refs, ref)
     return refs
 
 
 # LLM: forbidden_file_contract extracts structured forbidden filenames.
 # 函数用途: 从 forbidden_files 机器字段生成禁止文件清单，明确反例不能创建。
 def forbidden_file_contract(task: SubAgentTask) -> list[str]:
+    return _dedupe_file_terms(
+        term
+        for text in _file_contract_texts(task)
+        for term in task_contract_forbidden_file_terms_from_text(
+            text,
+            extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html",
+        )
+    )
+
+
+# LLM: file_contract_source labels whether bundle file contracts came from typed fields only or task-text extraction.
+# 函数用途: 给下游调试/验收说明 file_contract 的来源；自然产物句式出现时标记为 task_text_positive_negative_extraction。
+def file_contract_source(task: SubAgentTask) -> str:
+    structured_required = _structured_required_file_contract(task)
+    structured_forbidden = _structured_forbidden_file_contract(task)
+    task_required = required_file_contract(task)
+    task_forbidden = forbidden_file_contract(task)
+    structured_required_with_roots = _dedupe_file_terms([*structured_required, *file_level_write_root_terms(task)])
+    if task_required != structured_required_with_roots or task_forbidden != structured_forbidden:
+        return "task_text_positive_negative_extraction"
+    return "structured_required_forbidden_fields"
+
+
+# LLM: _structured_required_file_contract preserves the old machine-field-only baseline for source labeling.
+# 函数用途: 只读取 required_files / required_file_refs 字段，不读取自然语言或中文继承标签。
+def _structured_required_file_contract(task: SubAgentTask) -> list[str]:
+    return _dedupe_file_terms(
+        term
+        for text in _file_contract_texts(task)
+        for term in required_file_terms_from_text(text, extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html")
+    )
+
+
+# LLM: _structured_forbidden_file_contract preserves the old machine-field-only forbidden baseline.
+# 函数用途: 只读取 forbidden_files 字段，用于判断是否启用了任务文本正负合同抽取。
+def _structured_forbidden_file_contract(task: SubAgentTask) -> list[str]:
     return _dedupe_file_terms(
         term
         for text in _file_contract_texts(task)
@@ -208,21 +243,6 @@ def _dedupe_file_terms(values) -> list[str]:
     return terms
 
 
-# LLM: _file_level_write_root_terms turns explicit product file grants into required file contracts.
-# 函数用途: 真实 E2E 里父级常只传 `/.../index.html` 写入根；这里补出 `index.html`，避免 Context Gate 误挡。
-def _file_level_write_root_terms(task: SubAgentTask) -> list[str]:
-    terms: list[str] = []
-    task_dir = Path(str(getattr(task, "task_dir", "") or ""))
-    for raw in getattr(task, "allowed_write_roots", []) or []:
-        path = Path(str(raw or "").strip().replace("\\", "/"))
-        if not _is_contract_file_path(path) or _is_internal_task_file(path, task_dir):
-            continue
-        _append_file_root_term(terms, path.name)
-        if len(path.parts) >= 2:
-            _append_file_root_term(terms, "/".join(path.parts[-2:]))
-    return terms
-
-
 # LLM: _preferred_final_report_ref keeps the legacy key useful while separating internal reports.
 # 函数用途: 如果用户明确要求 final_report.md，优先返回 product root 下的真实交付路径；否则保持旧内部报告引用。
 def _preferred_final_report_ref(task: SubAgentTask, required_refs: list[str]) -> str:
@@ -238,7 +258,7 @@ def _resolve_required_file_ref(root: str, file_path: Path) -> str:
     root_path = Path(str(root or "").strip())
     if not str(root_path):
         return ""
-    if _is_contract_file_path(root_path):
+    if is_contract_file_path(root_path):
         normalized_file = file_path.as_posix()
         normalized_root = root_path.as_posix()
         return str(root_path) if root_path.name == file_path.name or normalized_root.endswith("/" + normalized_file) else ""
@@ -306,31 +326,6 @@ def _path_text(value: object) -> str:
 def _resolved_path_text(value: object) -> str:
     text = _path_text(value)
     return str(Path(text).expanduser().resolve(strict=False)) if text else ""
-
-
-# LLM: _is_contract_file_path keeps directory roots out of required_files.
-# 函数用途: 只把带受支持后缀的具体文件路径加入文件合同。
-def _is_contract_file_path(path: Path) -> bool:
-    return bool(path.name and path.suffix.lower() in _CONTRACT_FILE_SUFFIXES)
-
-
-# LLM: _is_internal_task_file filters run-private output/checkpoint files from product contracts.
-# 函数用途: 子代理自己的 task_dir/output.json 不是用户产物，不能因为可写就进入 required_files。
-def _is_internal_task_file(path: Path, task_dir: Path) -> bool:
-    if not str(task_dir):
-        return False
-    try:
-        return path.resolve().is_relative_to(task_dir.resolve())
-    except (OSError, RuntimeError, ValueError):
-        return False
-
-
-# LLM: _append_file_root_term preserves basename and scoped relative forms without duplicates.
-# 函数用途: 让 `index.html` 和 `dir/index.html` 都能匹配不同自然语言写法。
-def _append_file_root_term(terms: list[str], value: str) -> None:
-    text = str(value or "").strip()
-    if text and text not in terms:
-        terms.append(text)
 
 
 # LLM: _compact_list renders short packet arrays for handoff markdown.

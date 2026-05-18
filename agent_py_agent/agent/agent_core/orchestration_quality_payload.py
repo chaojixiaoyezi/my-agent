@@ -103,8 +103,8 @@ def _read_output_payload(path: Path | None) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-# LLM: _payload_has_negative_signal is advisory and reads structured status/tests/blockers only.
-# 函数用途: 判断 QA 输出里是否有结构化失败状态、失败测试或 blockers，供 LLM 决定 repair。
+# LLM: _payload_has_negative_signal is advisory and scans only small QA metadata.
+# 函数用途: 判断 QA 输出里是否有结构化失败状态、失败测试、blockers 或短摘要失败词，供 LLM 决定 repair。
 def _payload_has_negative_signal(item: Any, payload: dict[str, Any]) -> bool:
     status = str(getattr(item, "status", "") or "").upper()
     if status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
@@ -118,7 +118,22 @@ def _payload_has_negative_signal(item: Any, payload: dict[str, Any]) -> bool:
     for test in payload.get("tests") or []:
         if isinstance(test, dict) and (test.get("ok") is False or test.get("passed") is False):
             return True
-    return False
+    return _qa_summary_has_negative_signal(payload)
+
+
+# LLM: _qa_summary_has_negative_signal treats QA summaries as advisory failure refs, not final truth.
+# 函数用途: tester/bug_finder 写出“缺少/断裂/失败”等发现时，父级看到 repair 建议而不是直接收口。
+def _qa_summary_has_negative_signal(payload: dict[str, Any]) -> bool:
+    structured = payload.get("structured_output") if isinstance(payload.get("structured_output"), dict) else {}
+    text = " ".join(
+        str(value or "")
+        for value in [
+            structured.get("summary"),
+            payload.get("summary"),
+            *(payload.get("acceptance") or [] if isinstance(payload.get("acceptance"), list) else []),
+        ]
+    ).lower()
+    return any(token in text for token in ("缺少", "缺失", "断裂", "失败", "没有效果", "发现缺陷", "missing", "broken", "failed", "error"))
 
 
 # LLM: _textual_signal_payload narrows negative-word scanning to model summaries, not artifact bodies.

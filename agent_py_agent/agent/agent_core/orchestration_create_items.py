@@ -83,6 +83,7 @@ def _create_item_params(
         for key, value in base_params.items()
         if key not in {"count", "items", "tasks", "goal", "plan"}
     }
+    merged["_item_allowed_tools_explicit"] = "allowed_tools" in raw
     merged.update(raw)
     merged["goal"] = goal
     merged["count"] = 1

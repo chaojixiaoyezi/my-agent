@@ -1768,3 +1768,12 @@
 - 已测试：`test_subagent_test_item_preparation.py` 覆盖自然语言精确行块、fenced expected block、多文件 per-file 内容映射；`test_parent_acceptance_repair_payload.py` 覆盖 repair contract 的输出测试要求；`test_live_lab_natural_case.py` 覆盖 markdown repair seed、状态门和 artifact gate。
 - 真实复测：`20260517-markdown-repair-wave-01` 使用 MiniMax-M2.7 跑 `--suite markdown-repair --real-llm` 返回 `LIVE_LAB_PASS`。root 通过普通中文提示派出 `小傻妞-周报修复`，最终 `lab_outputs/report/weekly.md` 包含五行要求内容，旧失败 run 被同目标 verified sibling 覆盖。
 - 下一步：把同样的 content contract 带到更复杂的多文件/代码仓库 repair wave；如果失败，优先修 content contract、target refs、run 状态合同，不再加场景专用提示词补丁。
+
+## 2026-05-18 主代理底座回归 / 子代理合同收口
+
+- 中文说明：本轮先不继续堆子代理流程，而是把真实 E2E 暴露的底层合同收紧：派工是否该复用、什么时候必须要真实产物目录、什么时候显式质量角色才算硬要求，都放到机器合同里，不靠 prompt 补丁。
+- 已实现：`create_subagents` 的幂等复用区分“普通显式名”“带编号默认名”和“修复类目标”。普通显式角色可复用同一工作流节点，带编号默认名可同批创建多个 sibling，修复类目标仍按目标文件/合同区分，避免修错同名 run。
+- 已实现：没有真实 workspace 时，只对结构化产物字段（如 `output_files:`）或非 worker 角色的交付任务要求 `extra_write_roots`；旧 items 流水线和普通 worker mock 不被误挡。真实 workspace 存在时，仍优先用 workspace/product root 作为写入根。
+- 已实现：显式 `测试子代理/验收子代理/找茬子代理` 才触发必须创建对应质量角色；普通“安排和验收/汇报验收结果”由父级验收合同满足，不再把自然语言误读成死流程。
+- 已实现：`context_bundle_semantic.py` 和 `static_required_files.py` 统一使用 task-contract 文件名解析，过滤示例、禁用名、输入摘要和标签化合同，避免 README 这类输入资料被塞进必交付文件。
+- 已测试：全量 pytest 通过；ruff 通过。doc sync 继续要求本节和结构文档同步更新，下一步是跑 strict code-size、真实主代理 E2E 小矩阵，再根据失败回到底层合同修。

@@ -653,3 +653,9 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `agent_core/subagent_dispatch_closeout.py` 只把显式 tester/acceptor 角色话术视为必须创建质量子代理；普通“安排和验收 / 汇报验收结果”可由父级验收满足，避免自然语言被死流程带偏。
 - `agent_core/subagent_dispatch_closeout.py` 对父级验收 REJECT 做“两段式”处理：第一次看到同一组 blocking run 且存在 parent-acceptance repair refs 时，给 root 一次按 `parent_acceptance_repair_advice.suggested_tool_call` 创建 repair child 的机会；同一阻塞再次出现才事实收口。`tool_context_repair_summary.py` 会在 dispatch 输出外置后单独保留 repair failed run ids、failure refs、next tool 和 suggested tool call，避免修复建议被长 records 截断。
 - `agent_core/orchestration_dispatch_scope.py` 对模型工具调用固定执行 live runner 的父级验收测试；CLI 直达 `DispatchParams` 仍可人工关闭测试。这个边界保证 LLM 不会误把 `execute_acceptance_tests=false` 当成跳过质量门。
+- `agent_core/orchestration_quality_intent.py` 是显式质量角色识别层：只有用户明确说测试/验收/找茬子代理或对应 role 名时，closeout 才要求创建 tester/acceptor/bug_finder。普通“安排和验收”继续交给父级机器验收，避免自然语言被硬流程拖偏。
+- `agent_core/orchestration_create_idempotency.py` 的 create identity 合同分三类：普通显式名按 role/parent/output root 复用；`小傻妞-worker-1/2` 这类带编号默认名把编号纳入身份键；修复类目标额外比较目标 refs/goal，避免同名修复 run 错复用。
+- `agent_core/orchestration_create_constraints.py` 的缺写入根检查只保护真实产物合同：结构化 `output_files/output_refs/artifact_refs` 或 coordinator/root/tester 等非直接 worker 交付文件时，必须带真实 `extra_write_roots` 或可推导 workspace product root；普通 items 流水线不被没有 mock workspace 的测试误挡。
+- `subagents/context_bundle_semantic.py` 使用 `task_contract_required_file_terms_from_text()` 做 context gate 自检；它只提取真正要求交付的文件名，过滤示例、禁止文件名和输入资料摘要。
+- `subagents/static_required_files.py` 同时读取普通文件名和 `必需文件:`/`required_files:` 等标签化合同；静态站点验收因此能看见用户明确列出的 HTML/CSS/JS 文件，但不会从宽泛自然语言里猜业务文件。
+- `subagent_workflows/router.py` 在有显式 `workflow_template_id` 时不再用自然语言关键词覆盖 task type；模板选择以结构化字段为准，prompt 文字只作为没有字段时的兜底。

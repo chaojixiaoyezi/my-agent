@@ -262,14 +262,15 @@ def _natural_html_prompt() -> str:
 
         请把最终页面保存到 lab_outputs/furniture-home/index.html。
         不要依赖外部图片、外部字体或外部脚本；需要视觉效果就用 CSS、渐变、色块或内联样式完成。
-        完成后你自己检查一下：文件存在、能作为网页打开、页面里没有空链接、没有 disabled 按钮。
+        链接不要写成 /collections 这种需要真实路由的地址；如果要链接，就用页面内真实存在的 #section-id。
+        完成后你自己检查一下：文件存在、能作为网页打开、页面里没有空链接、没有坏链接、没有 disabled 按钮。
         最后告诉我保存路径和检查结果。
         """
     ).strip()
 
 
-# LLM: _assert_natural_html_output validates visible artifact facts, not the model's prose.
-# 函数用途: 检查小傻妞真实写出的 HTML 产物，避免主代理只口头说完成但没有文件。
+# LLM: _assert_natural_html_output validates visible artifact facts, including static-only links, not the model's prose.
+# 函数用途: 检查小傻妞真实写出的 HTML 产物，避免主代理只口头说完成，或交付 /shop 这类单文件页面打不开的坏链接。
 def _assert_natural_html_output(output_path) -> None:
     if not output_path.exists():
         raise RuntimeError(f"自然语言 HTML 产物不存在: {output_path}")
@@ -279,8 +280,8 @@ def _assert_natural_html_output(output_path) -> None:
     missing = [term for term in required_terms if term not in lower]
     if missing:
         raise RuntimeError(f"自然语言 HTML 产物缺少基本标签: {missing}")
-    if "href=\"#\"" in lower or _has_disabled_control(lower):
-        raise RuntimeError("自然语言 HTML 产物包含空链接或 disabled 按钮。")
+    if "href=\"#\"" in lower or 'href="/' in lower or _has_disabled_control(lower):
+        raise RuntimeError("自然语言 HTML 产物包含空链接、根路径坏链接或 disabled 按钮。")
     external_assets = _external_asset_refs(lower)
     if external_assets:
         raise RuntimeError(f"自然语言 HTML 产物依赖外部资源: {external_assets[:5]}")

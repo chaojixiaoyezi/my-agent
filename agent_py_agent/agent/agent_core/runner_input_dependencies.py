@@ -17,6 +17,28 @@ _FILE_REF_RE = re.compile(
 _STRUCTURED_REF_FIELD_RE = re.compile(r"^\s*(?:[-*]\s*)?(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(?P<tail>.*)$")
 _INPUT_REF_FIELDS = frozenset({"required_read_paths", "input_refs", "input_files"})
 _OUTPUT_REF_FIELDS = frozenset({"output_refs", "output_files", "artifact_refs"})
+_READ_REF_MARKERS = (
+    "read",
+    "input",
+    "from",
+    "based on",
+    "读取",
+    "接收",
+    "基于",
+    "来自",
+)
+_WRITE_REF_MARKERS = (
+    "write",
+    "output",
+    "save",
+    "generate",
+    "create",
+    "写",
+    "输出",
+    "保存",
+    "生成",
+    "创建",
+)
 
 
 # LLM: input_dependency_ready_candidates filters runners that clearly need files not written yet.
@@ -57,13 +79,21 @@ def _input_refs(task: object) -> list[str]:
 # LLM: goal_input_refs extracts structured read refs from goal text.
 # 函数用途: 从 required_read_paths/input_refs/input_files 机器字段读取输入文件路径，供 create 和 dispatch 复用。
 def goal_input_refs(goal: str) -> list[str]:
-    return _structured_refs(goal, _INPUT_REF_FIELDS)
+    structured = _structured_refs(goal, _INPUT_REF_FIELDS)
+    if structured:
+        return structured
+    inputs, _outputs = _fallback_file_ref_roles(goal)
+    return inputs
 
 
 # LLM: goal_output_refs extracts structured deliverable refs from goal text.
 # 函数用途: 从 output_refs/output_files/artifact_refs 机器字段读取产物路径，供批量派工推断上下游关系。
 def goal_output_refs(goal: str) -> list[str]:
-    return _structured_refs(goal, _OUTPUT_REF_FIELDS)
+    structured = _structured_refs(goal, _OUTPUT_REF_FIELDS)
+    if structured:
+        return structured
+    _inputs, outputs = _fallback_file_ref_roles(goal)
+    return outputs
 
 
 # LLM: _manifest_required_paths tolerates dataclass, namespace, and dict context manifests.
@@ -112,6 +142,48 @@ def _structured_ref_line(raw: str, *, active: bool, fields: frozenset[str]) -> t
 # 函数用途: 从结构化字段值中读取路径，不判断其业务含义。
 def _file_refs_from_value(value: object) -> list[str]:
     return [match.group() for match in _FILE_REF_RE.finditer(str(value or ""))]
+
+
+# LLM: _fallback_file_ref_roles recovers simple pipeline refs when structured fields are absent.
+# 函数用途: 按文件引用附近的读/写方向词和“最后一个文件通常是产物”规则推断输入/输出路径。
+def _fallback_file_ref_roles(goal: str) -> tuple[list[str], list[str]]:
+    text = str(goal or "")
+    matches = list(_FILE_REF_RE.finditer(text))
+    if not matches:
+        return [], []
+    inputs: list[str] = []
+    outputs: list[str] = []
+    for index, match in enumerate(matches):
+        ref = match.group()
+        direction = _ref_direction(text, match.start(), index=index, total=len(matches))
+        if direction == "input":
+            inputs.append(ref)
+        else:
+            outputs.append(ref)
+    return _unique_refs(inputs), _unique_refs(outputs)
+
+
+# LLM: _ref_direction keeps natural file refs useful while avoiding task-specific phrase rules.
+# 函数用途: 只根据文件名前的短窗口判断读/写方向；不解析业务语义或特定任务名称。
+def _ref_direction(text: str, start: int, *, index: int, total: int) -> str:
+    window = text[max(0, start - 32):start].casefold()
+    has_read = _contains_any(window, _READ_REF_MARKERS)
+    has_write = _contains_any(window, _WRITE_REF_MARKERS)
+    if has_read and has_write:
+        return "output" if index == total - 1 else "input"
+    if has_read:
+        return "input"
+    if has_write:
+        return "output"
+    if total > 1 and index < total - 1:
+        return "input"
+    return "output"
+
+
+# LLM: _contains_any keeps marker checks centralized and language-extensible.
+# 函数用途: 判断短窗口里是否出现读/写方向词；后续可扩展语言，不影响调用方。
+def _contains_any(value: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in value for marker in markers)
 
 
 # LLM: _dependency_roots uses private run dirs plus derived project roots as bounded lookup roots.

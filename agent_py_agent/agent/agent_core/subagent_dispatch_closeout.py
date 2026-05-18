@@ -8,9 +8,9 @@ from typing import ClassVar
 
 from ..backends import ModelResponse
 from ..subagents.role_templates import role_template_id_for_role
-from ..subagents.services.qa_role_contract import qa_roles_from_text
 from ._runtime_params import ToolLoopExecuteParams
 from .orchestration_parent_acceptance_repair import parent_acceptance_rejected
+from .orchestration_quality_intent import required_quality_roles_from_prompt
 from .orchestration_run_scope import (
     remembered_dispatched_orchestration_run_ids,
     remembered_orchestration_run_ids,
@@ -265,10 +265,10 @@ def _missing_required_quality_roles(prompt: str, tasks: list[object]) -> list[st
     return sorted(role for role in required if role not in present)
 
 
-# LLM: _required_quality_roles reads only required_qa_roles/qa_roles protocol fields.
-# 函数用途: 从当前用户 prompt 的机器字段判断是否要求 tester/acceptor，普通自然语言不参与本地收口判断。
+# LLM: _required_quality_roles reads protocol fields plus explicit top-level QA agent wording.
+# 函数用途: 从当前用户 prompt 判断是否要求 tester/bug_finder/acceptor；只解析质量角色意图，不解析业务内容。
 def _required_quality_roles(prompt: str) -> set[str]:
-    return set(qa_roles_from_text(prompt))
+    return set(required_quality_roles_from_prompt(prompt))
 
 
 # LLM: _present_role_tokens normalizes role/name fields through template ids for deterministic closeout gating.
@@ -287,5 +287,5 @@ def _quality_role_tokens_for_task(task: object) -> set[str]:
     return {
         role
         for value in values
-        if (role := role_template_id_for_role(str(value or ""), fallback="")) in {"tester", "acceptor"}
+        if (role := role_template_id_for_role(str(value or ""), fallback="")) in {"tester", "bug_finder", "acceptor"}
     }

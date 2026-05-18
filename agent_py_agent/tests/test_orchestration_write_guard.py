@@ -83,3 +83,35 @@ def test_external_write_guard_ignores_bare_scheme_policy_text(tmp_path):
     )
 
     assert result == ""
+
+
+# LLM: Negative route examples should not be interpreted as external filesystem write targets.
+# 函数用途: 覆盖真实自然语言 E2E：`不要写 /collections` 是链接规则示例，不是要写到系统根目录。
+def test_external_write_guard_ignores_negated_root_route_examples(tmp_path):
+    mock_agent = MagicMock()
+    mock_agent.subagents.workspace_root = tmp_path
+    mock_agent.subagents.workspace_roots = [tmp_path]
+
+    result = external_write_target_error(
+        mock_agent,
+        "保存到 lab_outputs/furniture-home/index.html，链接不要写成 /collections 这种需要真实路由的地址。",
+        ["write_file"],
+    )
+
+    assert result == ""
+
+
+# LLM: Real external output targets should still be blocked after route-example filtering.
+# 函数用途: 确认写入守卫仍会拒绝 `保存到 /tmp/out.html` 这类工作区外真实目标。
+def test_external_write_guard_still_blocks_real_external_targets(tmp_path):
+    mock_agent = MagicMock()
+    mock_agent.subagents.workspace_root = tmp_path
+    mock_agent.subagents.workspace_roots = [tmp_path]
+
+    result = external_write_target_error(
+        mock_agent,
+        "创建页面并保存到 /tmp/outside/index.html。",
+        ["write_file"],
+    )
+
+    assert "子代理写入目标在当前工作区外" in result

@@ -61,6 +61,7 @@ python -m agent_py_agent --help
 | gateway 客户端请求 | `my-agent gateway ask "任务"` | 否，投递到后台 gateway | 是，由后台 gateway 调用 |
 | 真实 runner 调度 | `my-agent subagents-dispatch --apply --execute-runners` | 否 | 是 |
 | 隔离全流程测试 | `my-agent scenario-test` | 临时启动并停止 gateway | 是，除非加 `--dry-run` |
+| 主代理基础 E2E | `my-agent real-e2e --workspace ./.e2e --json` | 否 | 否；真实模型用例会明确跳过，产物可用 `--artifact` 验收 |
 | 子代理单次执行 | `my-agent subagent-run <run_id> --execute` | 否 | 是 |
 
 当前 gateway 第一版已经实现为本地后台进程控制面：它管理 pid、state、heartbeat、stop request、日志和本地请求队列，并在内部复用 daemon/watch 调度。`my-agent` 不带子命令时会自动确保 gateway 存活，然后进入 `chat --gateway`。常驻形态和外部方案对比见 [GATEWAY_DESIGN.md](GATEWAY_DESIGN.md)。
@@ -155,6 +156,7 @@ Ctrl+C
 | `memory-resume` | 从归档、LocalStore 和任务目录生成恢复线索 | 否 | 否 |
 | `task-workspace-list` | 查看 home workspace/tasks 任务工作区 | 否 | 否 |
 | `context-bundle` | 查看最新主代理上下文包、scope、自检和工具/运行合同 | 否 | 否 |
+| `real-e2e` | 运行主代理基础 E2E 矩阵，并可验收真实产物 | 写报告 JSON | 否；当前不会自动调用模型 |
 | `memory-artifact-read` | 显式读取已登记 tool-output artifact 正文 | 否 | 否 |
 | `memory-fact-write` | 写入用户确认的 compact resume 补全事实源 | 是 | 否 |
 | `memory-compact` | 预演 memory compact 计划；`--apply` 生成非破坏性恢复产物 | `--apply` 时写 | 否 |
@@ -187,6 +189,7 @@ Ctrl+C
 | `subagents-dispatch` | 执行父代理调度 | dry-run 写报告；`--apply` 写回；`--execute-acceptance-tests` 只跑父级验收 tests | 只有 `--apply --execute-runners` 会调用模型；`--execute-acceptance-tests` 会执行本地验收 tests |
 | `daemon` | 按 `agent_config.yaml` 的 `daemon_*` 配置启动前台常驻调度 | 取决于配置 | 取决于配置 |
 | `scenario-test` | 跑一轮隔离的 gateway/chat/subagent/runner/验收全流程 | 写临时 fixture 和报告 | 默认调用真实 API，可用 `--dry-run` 跳过 runner |
+| `real-e2e` | 跑主代理基础确定性矩阵，并把指定产物交给 Artifact Acceptance 验收 | 写 refs-first 报告 | 否；真实模型产物由外部真实 run 生成后用 `--artifact` 接入 |
 | `gateway` | 管理后台 gateway 进程 | 写 gateway pid/state/heartbeat/log | 取决于配置 |
 | `adapter` | 外部聊天工具 / TUI 适配器入口 | 写 adapter inbox/outbox | 由后台 gateway 调用 |
 | `subagent-context` | 生成单个 subagent 执行上下文 | 是 | 否 |
@@ -562,6 +565,26 @@ my-agent context-bundle latest --json
 | --- | --- | --- |
 | `latest` | - | 查看最新主代理上下文包。 |
 | `--json` | `false` | 输出机器可读 JSON，方便前端或调试脚本读取。 |
+
+## `real-e2e`
+
+```powershell
+my-agent real-e2e --workspace .\.real-e2e --json
+my-agent real-e2e --workspace .\.real-e2e --artifact .\outputs\index.html --json
+my-agent real-e2e --workspace .\.real-e2e --report .\reports\real-e2e.json
+```
+
+运行主代理基础验收矩阵。当前命令默认只跑不调用模型的确定性用例：工具失败分类、大输出 artifact refs、确定性 E2E matrix；需要真实模型的用例会明确标记 `SKIPPED`，不会把“没跑”说成通过。
+
+如果已经用真实模型生成了产物，可以把文件路径传给 `--artifact`。命令会调用 Artifact Acceptance（产物验收）统一检查 HTML、JSON、CSV、XLSX、PDF 和未知格式的基础质量，并把 findings（问题清单）写进报告。它不展开大文件正文，只写路径、类型和结构化问题。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--workspace <path>` | 当前目录 `.my-agent-real-e2e` | E2E 工作区；命令会把报告和确定性测试证据写到这里。 |
+| `--report <path>` | `<workspace>/real_e2e_report.json` | 报告输出路径。 |
+| `--artifact <path>` | 可重复 | 额外验收真实任务产物。适合先让模型生成文件，再用机器验收确认。 |
+| `--include-real-model` | `false` | 预留真实模型用例标记；当前不会自动发起模型调用。 |
+| `--json` | `false` | 输出完整机器可读 JSON。 |
 
 ## `memory-compact`
 

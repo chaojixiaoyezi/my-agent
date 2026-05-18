@@ -232,10 +232,10 @@ class CreateSubagentsTool(BaseTool):
             "tasks": [
                 {
                     "id": task.id,
-                    "goal": task.goal,
-                    "status": task.status,
-                    "verification_status": task.verification_status,
-                    "task_dir": task.task_dir,
+                    "goal": _task_text(task, "goal"),
+                    "status": _task_text(task, "status"),
+                    "verification_status": _task_text(task, "verification_status"),
+                    "task_dir": _task_text(task, "task_dir"),
                 }
                 for task in tasks
             ],
@@ -312,6 +312,13 @@ def _dispatch_next_action(tasks) -> dict[str, object]:
             "max_runners": 1,
         },
     }
+
+
+# LLM: _task_text keeps create_subagents payloads JSON-safe across real tasks and mock adapters.
+# 函数用途: 读取 task 字段时过滤 MagicMock/非字符串对象，避免旧测试替身或 adapter 让 JSON 序列化失败。
+def _task_text(task: object, field: str) -> str:
+    value = getattr(task, field, "")
+    return value if isinstance(value, str) else ""
 
 
 # LLM: SubagentBoardTool 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

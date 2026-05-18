@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .required_file_terms import required_file_terms_from_text
+from .required_file_terms import task_contract_required_file_terms_from_text
 
 
 # LLM: semantic_context_missing_fields catches structured contracts that lost explicit deliverables.
@@ -29,13 +29,16 @@ def semantic_context_missing_fields(bundle: Any) -> list[str]:
     return missing
 
 
-# LLM: _bundle_required_file_terms uses the same parser as task building for gate self-checks.
-# 函数用途: 从已生成 bundle 的轻量文本字段提取明确产物文件名，避免读取 artifact 正文。
+# LLM: _bundle_required_file_terms reuses task-contract parsing so examples/forbidden names do not become deliverables.
+# 函数用途: 从已生成 bundle 的轻量文本字段提取真正要求交付的文件名，并过滤示例、禁用名和输入摘要。
 def _bundle_required_file_terms(bundle: Any) -> list[str]:
     return _dedupe_file_terms(
         term
         for text in _bundle_file_contract_texts(bundle)
-        for term in required_file_terms_from_text(text, extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html")
+        for term in task_contract_required_file_terms_from_text(
+            text,
+            extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html",
+        )
     )
 
 

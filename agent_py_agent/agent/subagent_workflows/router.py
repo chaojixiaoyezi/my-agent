@@ -213,12 +213,20 @@ def _select_template(request: _TemplateSelectionRequest) -> tuple[str, str]:
 # 函数用途: 从 workflow_task_type、workflow_template_id、risk_tags 这类机器字段选择模板；普通自然语言目标默认走 single worker。
 def _classify_goal(goal: str) -> tuple[str, str, list[str]]:
     fields = _workflow_goal_fields(goal)
-    task_type = fields.get("task_type", "simple")
+    task_type = fields.get("task_type") or ("simple" if fields.get("template_id") else _fallback_task_type(goal))
     preferred = fields.get("template_id") or _TASK_TYPE_TEMPLATE_MAP.get(task_type, SINGLE_WORKER_TEMPLATE_ID)
     risk_tags = fields.get("risk_tags", [])
     if not risk_tags:
         risk_tags = ["explicit_workflow"] if task_type != "simple" or fields.get("template_id") else ["low_scope"]
     return task_type, preferred, risk_tags
+
+
+# LLM: _fallback_task_type is a small workflow router fallback until LLM/template selection is externalized.
+# 函数用途: workflow_mode=plan 时，把明确代码/bugfix/test 任务路由到代码拆分模板；普通任务仍走 single worker。
+def _fallback_task_type(goal: str) -> str:
+    text = str(goal or "").lower()
+    code_tokens = ("bug", "fix", "api", "test", "tests", "code", "refactor", "implement", "function", "class")
+    return "code_or_bugfix" if any(token in text for token in code_tokens) else "simple"
 
 
 # LLM: _workflow_goal_fields extracts shallow protocol fields from a goal without interpreting prose.

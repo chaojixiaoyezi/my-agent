@@ -7,19 +7,25 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .required_file_terms import required_file_terms_from_text
+from .required_file_terms import (
+    labeled_required_file_terms_from_text,
+    required_file_terms_from_text,
+)
 
 _STATIC_FILE_SUFFIXES = {".html", ".htm", ".css", ".js"}
 _REQUIRED_DOM_IDS_RE = re.compile(r"\brequired_dom_ids?\s*[:=]\s*([^\n。；;]+)", re.IGNORECASE)
 
 
-# LLM: static_required_files_from_texts extracts small static-web file expectations from human/task text.
-# 函数用途: 从任务目标、验收条件等文本里提取 index.html/style.css/app.js 这类必需文件名。
+# LLM: static_required_files_from_texts merges generic and labeled task-contract refs without guessing broad prose.
+# 函数用途: 从任务目标、验收条件等文本里提取 index.html/style.css/app.js 这类必需文件名，并支持“必需文件:”等标签化合同。
 def static_required_files_from_texts(texts: list[object]) -> list[str]:
     matches = [
         match
         for value in texts
-        for match in required_file_terms_from_text(str(value or ""), extensions=r"html?|css|js")
+        for match in [
+            *required_file_terms_from_text(str(value or ""), extensions=r"html?|css|js"),
+            *labeled_required_file_terms_from_text(str(value or ""), extensions=r"html?|css|js"),
+        ]
     ]
     return _dedupe(matches)[:50]
 

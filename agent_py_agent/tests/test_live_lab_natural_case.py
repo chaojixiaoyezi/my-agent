@@ -320,6 +320,20 @@ def test_assert_natural_html_output_rejects_empty_links(tmp_path):
         _assert_natural_html_output(output)
 
 
+# LLM: Root-relative links are broken in a static single-file deliverable and should fail fast.
+# 函数用途: 确认自然语言 HTML 验收能拦住 /shop 这类需要真实路由支持的坏链接。
+def test_assert_natural_html_output_rejects_root_route_links(tmp_path):
+    output = tmp_path / "lab_outputs" / "furniture-home" / "index.html"
+    output.parent.mkdir(parents=True)
+    output.write_text(
+        '<html><body><main>高端家具</main><a href="/shop">Shop</a></body></html>',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="空链接"):
+        _assert_natural_html_output(output)
+
+
 # LLM: The shop gate should fail when a generated page lacks key purchase-flow sections.
 # 函数用途: 防止购物站只有漂亮首屏但没有注册、登录、购物车、结算和下单成功这些真实入口。
 def test_assert_shop_html_output_rejects_missing_flow_sections(tmp_path):
@@ -480,7 +494,7 @@ def test_assert_natural_html_output_accepts_complete_page(tmp_path):
     output = tmp_path / "lab_outputs" / "furniture-home" / "index.html"
     output.parent.mkdir(parents=True)
     output.write_text(
-        '<!doctype html><html><body><main>高端家具 Furniture</main><a href="/shop">Shop</a></body></html>',
+        '<!doctype html><html><body><main>高端家具 Furniture</main><section id="shop">Shop</section><a href="#shop">Shop</a></body></html>',
         encoding="utf-8",
     )
 

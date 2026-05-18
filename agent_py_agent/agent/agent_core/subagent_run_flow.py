@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from .subagent_params import (
     SubagentFinalizeParams,
@@ -38,6 +39,7 @@ def run_subagent_flow(agent, options: SubagentRunParams):
         return probe_blocked
 
     context, prompt = _build_prompt(agent, options)
+    _persist_runner_prompt_before_model(agent, options.run_id, prompt)
     return _run_and_finalize_subagent(
         agent,
         SubagentModelTurnBundle(options, active_attempt_id, context, prompt),
@@ -74,6 +76,18 @@ def _probe_subagent_channel(agent, options: SubagentRunParams, active_attempt_id
             options.probe,
         )
     )
+
+
+# LLM: _persist_runner_prompt_before_model leaves recovery evidence even if the model call times out.
+# 函数用途: 在真实 runner 调模型前先写 runner_prompt.md；超时/崩溃后父级和测试台仍能看到当时给子代理的任务。
+def _persist_runner_prompt_before_model(agent, run_id: str, prompt: str) -> None:
+    task = agent.subagents.load(run_id)
+    prompt_file = str(getattr(task, "runner_prompt_file", "") or "")
+    if not prompt_file:
+        return
+    path = Path(prompt_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(prompt, encoding="utf-8")
 
 
 # LLM: _run_and_finalize_subagent scopes active runner context around the model turn.

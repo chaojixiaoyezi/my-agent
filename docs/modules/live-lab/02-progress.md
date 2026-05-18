@@ -128,3 +128,20 @@
 - 真实复测：`20260517-shop-repair-wave-02` 暴露 repair child 读的是目标文件却写到 sibling 目录；已把 required/read target refs 转成产品写入根，并把文件路径归一到父目录。
 - 真实复测：`python3 scripts/live_agent_lab.py --suite shop-repair --real-llm --runs-dir /Users/xiaoyezi/my-claude-code/real_e2e_next --run-id 20260517-shop-repair-wave-03 --timeout 600 --count 1 --max-runners 3 --max-cycles 6 --keep-going` -> `LIVE_LAB_PASS`。MiniMax-M2.7 用普通中文 prompt 派修复小傻妞，修复同一 `lab_outputs/shop-demo/index.html`，最终 `DONE/VERIFIED`。
 - 已测试：`python3 -m pytest agent_py_agent/tests/test_live_lab_natural_case.py -q --tb=short` -> `20 passed`；后续 focused suite 扩展到 repair 合同、写入根、DOM id 验收和静态站点测试项。
+
+## 2026-05-18 Natural suite 单文件链接验收加固
+
+- 中文说明：真实自然语言家具页复测暴露一个用户可见问题：模型会生成 `/collections`、`/shop` 这类需要真实服务器路由的链接。对“单文件 HTML”交付来说，这些链接离线打开会失效，所以 Live Lab 现在把它当坏链接处理。
+- 已实现：`_natural_html_prompt()` 用普通中文要求链接使用页面内真实存在的 `#section-id`，不引入 `dispatch/runner/contract` 等内部术语。
+- 已实现：`_assert_natural_html_output()` 除了拒绝 `href="#"`、外部渲染资源和 disabled 控件，也会拒绝 `href="/..."` 这类根路径路由链接。
+- 已实现：子代理 runner 在真实模型调用前先写入 `runner_prompt.md`；如果请求超时或进程被杀，仍能从磁盘恢复“当时到底发给小傻妞什么任务”。
+- 已测试：`python3 -m pytest -q agent_py_agent/tests/test_agent/test_subagent_worker_pool.py::test_dispatch_parallel_runner_pool_timeout_does_not_block_other_workers agent_py_agent/tests/test_live_lab_natural_case.py --tb=short` -> `30 passed`。
+- 下一步：用新的链接验收口径重跑真实 `natural` suite，观察小傻妞是否能一次交付无坏链接的单文件页面；若仍失败，继续从 artifact/验收合同层修，而不是给某个页面写特判。
+
+## 2026-05-18 Natural suite 派工写入守卫修正
+
+- 中文说明：真实复测 `20260518-main-foundation-natural-02` 没有超时，也生成了页面，但失败在“主代理没有真的派小傻妞”。根因不是模型懒，而是写入守卫把用户说的“链接不要写成 `/collections`”误判成“子代理要写到系统根目录 `/collections`”，于是 `create_subagents` 被拒绝，root 才绕回自己写文件。
+- 已实现：`orchestration_write_guard.py` 只把局部语境像“保存到/写到/在 X 创建”的路径当写入目标；`不要写 /collections`、`do not use /route` 这类否定示例不再触发越权写入拦截。
+- 已实现：仍保留真实越权保护；例如“保存到 `/tmp/outside/index.html`” 这类工作区外真实产物目标仍会被拒绝。
+- 已测试：`python3 -m pytest -q agent_py_agent/tests/test_orchestration_write_guard.py agent_py_agent/tests/test_orchestration_create_subagents_guardrails.py agent_py_agent/tests/test_live_lab_natural_case.py --tb=short` -> `41 passed`。
+- 真实复测：`python3 scripts/live_agent_lab.py --suite natural --real-llm --runs-dir /Users/xiaoyezi/my_agent/live-lab-runs --run-id 20260518-main-foundation-natural-03 --timeout 360 --max-cycles 6 --max-runners 2` -> `LIVE_LAB_PASS`。主代理创建并 dispatch 了 `subagent-1779062763-f27692ec`，最终 `DONE/VERIFIED`，产物为 `lab_outputs/furniture-home/index.html`。

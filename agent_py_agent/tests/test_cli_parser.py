@@ -108,6 +108,18 @@ class TestSubcommandRegistration:
         args = parser.parse_args(["task-show", "task-123"])
         assert args.command == "task-show"
 
+    def test_real_e2e_subcommand_registered(self, tmp_path) -> None:
+        """测试 real-e2e 主代理基础验收命令已注册。"""
+        from agent_py_agent.cli.parser import build_parser
+
+        parser = build_parser()
+        args = parser.parse_args(["real-e2e", "--workspace", str(tmp_path), "--json"])
+
+        assert args.command == "real-e2e"
+        assert args.workspace == str(tmp_path)
+        assert args.json is True
+        assert args.func.__name__ == "cmd_real_e2e"
+
 
 class TestRunSubcommand:
     """测试 run 子命令参数解析。"""

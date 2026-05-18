@@ -148,6 +148,38 @@ class TestToolExecutionResult:
         assert "status=error" in rendered
         assert "文件不存在" in rendered
 
+    # LLM: Tool errors should carry machine-readable recovery facts, not only prose.
+    # 函数用途: 工具失败时自动补 Error Taxonomy 字段，让模型知道该修路径、换工具还是重试。
+    def test_execution_result_error_contract_auto_classifies_failure(self):
+        from agent_py_agent.agent.tooling.models import ToolExecutionResult
+
+        result = ToolExecutionResult(
+            tool="write_file",
+            ok=False,
+            output="写入被阻止: 当前路径 outside workspace /tmp/outside.txt",
+        )
+
+        assert result.error_code == "PATH_OUTSIDE_WORKSPACE"
+        assert result.error_category == "path"
+        assert result.retryable is False
+        assert result.recommended_action == "fix_path_within_allowed_roots"
+        assert "修正路径" in result.recovery_hint
+        rendered = result.render_for_prompt()
+        assert "error_code=PATH_OUTSIDE_WORKSPACE" in rendered
+        assert "recommended_action=fix_path_within_allowed_roots" in rendered
+
+    # LLM: Successful results should not pretend to have a failure contract.
+    # 函数用途: 成功工具结果保持轻量，不给模型注入无意义错误字段。
+    def test_execution_result_ok_has_no_error_contract(self):
+        from agent_py_agent.agent.tooling.models import ToolExecutionResult
+
+        result = ToolExecutionResult(tool="read_file", ok=True, output="hello")
+
+        assert result.error_code == ""
+        assert result.error_category == ""
+        assert result.recommended_action == ""
+        assert "error_code=" not in result.render_for_prompt()
+
 
 class TestToolSearchHit:
     """测试 ToolSearchHit 数据类。"""

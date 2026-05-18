@@ -63,9 +63,9 @@ def _role_from_create_intent(raw_params: dict[str, object], goal: str, agent) ->
         return _role_from_lineage_agent_name(role)
     if is_explicit_root_role(role):
         return role
-    if _has_child_dispatch_tool(raw_params):
-        return "coordinator"
     if _json_task_items(raw_params.get("tasks")):
+        return "coordinator"
+    if role == "worker" and _has_child_dispatch_tool(raw_params) and not _role_identity_is_quality(raw_params):
         return "coordinator"
     return role
 
@@ -73,8 +73,17 @@ def _role_from_create_intent(raw_params: dict[str, object], goal: str, agent) ->
 # LLM: _has_child_dispatch_tool treats explicit tool grants as role intent, not prose.
 # 函数用途: 当 create_subagents 参数已经给出 schedule_child_subagents/dispatch_subagents 时，按带队节点创建。
 def _has_child_dispatch_tool(raw_params: dict[str, object]) -> bool:
+    if raw_params.get("_item_allowed_tools_explicit") is False:
+        return False
     tools = {str(item or "").strip().lower() for item in _string_list(raw_params.get("allowed_tools"))}
     return bool({"schedule_child_subagents", "dispatch_subagents"}.intersection(tools))
+
+
+# LLM: _role_identity_is_quality protects QA templates from being rewritten just because they can inspect boards.
+# 函数用途: tester/bug_finder/acceptor 这类质量角色可拥有调度/看板工具，但角色身份不能被改成 coordinator。
+def _role_identity_is_quality(raw_params: dict[str, object]) -> bool:
+    identity = f"{raw_params.get('role') or ''} {raw_params.get('agent_name') or ''}"
+    return role_template_id_for_role(identity, fallback="") in {"tester", "bug_finder", "acceptor"}
 
 
 # LLM: _should_disable_generic_workflow_for_concrete_worker prevents simple deliverable workers from growing workflow children.

@@ -7,7 +7,11 @@ import re
 from typing import TYPE_CHECKING
 
 from ..models import SubAgentTask
-from ..required_file_terms import forbidden_file_terms_from_text, required_file_terms_from_text
+from ..required_file_terms import (
+    task_contract_forbidden_file_terms_from_text,
+    task_contract_required_file_terms_from_text,
+)
+from .hierarchy_capability_contracts import capability_contract_segments, capability_contract_terms
 
 if TYPE_CHECKING:
     from .hierarchy_scheduler import HierarchyChildSpec
@@ -15,6 +19,7 @@ if TYPE_CHECKING:
 _LINEAGE_CONTRACT_RE = re.compile(r"小+傻妞-\*")
 _STRUCTURED_FIELD_RE = re.compile(r"^\s*(?:[-*]\s*)?(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(?P<tail>.*)$")
 _HIERARCHY_CONTRACT_FIELDS = frozenset({"hierarchy_contracts", "lineage_contracts", "delegation_contracts"})
+_HIERARCHY_CONTRACT_LABELS = frozenset({"父级层级/协作约束", "层级/协作约束", "层级链路要求"})
 
 
 # LLM: inherited_hierarchy_thought gives descendants relevant context without expanding sibling scope.
@@ -99,7 +104,7 @@ def _missing_hierarchy_contract_terms(parent_goal: str, goal: str) -> bool:
 # LLM: _missing_capability_contract_terms prevents delegated agents from dropping tool grants.
 # 函数用途: 父级写明 controlled_exec、capability_request、trash 或 refs 时，child goal 必须继续携带这些硬约束。
 def _missing_capability_contract_terms(parent_goal: str, goal: str) -> bool:
-    required = _capability_contract_terms(parent_goal)
+    required = capability_contract_terms(parent_goal)
     if not required:
         return False
     lowered = str(goal or "").lower()
@@ -109,7 +114,7 @@ def _missing_capability_contract_terms(parent_goal: str, goal: str) -> bool:
 # LLM: _file_terms extracts explicit filenames from compact parent context.
 # 函数用途: 提取 solution.py、test_solution.py、README.md 等验收文件名，用于判断下层交接是否完整。
 def _file_terms(text: str) -> list[str]:
-    return required_file_terms_from_text(
+    return task_contract_required_file_terms_from_text(
         text,
         extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html",
     )
@@ -118,7 +123,7 @@ def _file_terms(text: str) -> list[str]:
 # LLM: _forbidden_file_terms keeps negative filename examples visible without promoting them to deliverables.
 # 函数用途: 提取 product.html/legacy.html 这类禁止反例，给下层明确的“不要创建/不要改名成”清单。
 def _forbidden_file_terms(text: str) -> list[str]:
-    return forbidden_file_terms_from_text(
+    return task_contract_forbidden_file_terms_from_text(
         text,
         extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html",
     )
@@ -160,19 +165,19 @@ def _inherited_goal_context(
     if roots:
         lines.append("允许写入根：")
         lines.extend(roots)
-    file_terms = _file_terms(parent.goal)
+    file_terms = _relevant_file_terms(parent.goal, child_goal)
     if file_terms:
-        lines.append("required_files:")
+        lines.append("父级必需文件/产物名：")
         lines.extend(f"- {item}" for item in file_terms)
     forbidden_file_terms = _forbidden_file_terms(parent.goal)
     if forbidden_file_terms:
-        lines.append("forbidden_files:")
+        lines.append("父级禁止文件/反例名：")
         lines.extend(f"- {item}" for item in forbidden_file_terms)
     hierarchy_contracts = _hierarchy_contract_segments(parent.goal)
     if hierarchy_contracts:
-        lines.append("hierarchy_contracts:")
+        lines.append("父级层级/协作约束：")
         lines.extend(f"- {item}" for item in hierarchy_contracts)
-    capability_contracts = _capability_contract_segments(parent.goal)
+    capability_contracts = capability_contract_segments(parent.goal)
     if capability_contracts:
         lines.append("父级能力/工具/安全约束（必须原样遵守，不能改名或缩水）：")
         lines.extend(f"- {item}" for item in capability_contracts)
@@ -195,6 +200,13 @@ def _write_root_lines(parent: SubAgentTask, *, write_roots: list[str] | None = N
     return [f"- {item}" for item in roots]
 
 
+# LLM: _relevant_file_terms narrows inherited deliverables to the child branch when sibling domains exist.
+# 函数用途: arithmetic child 只继承 arithmetic 文件合同；没有可匹配片段时才继承父级全部产物合同。
+def _relevant_file_terms(parent_goal: str, child_goal: str) -> list[str]:
+    relevant = relevant_parent_context(parent_goal, child_goal)
+    return _file_terms(relevant) or _file_terms(parent_goal)
+
+
 # LLM: _parent_goal_segments splits mixed Chinese/English task descriptions into matchable chunks.
 # 函数用途: 把父级长目标按换行和常见标点切成片段，便于筛掉无关 sibling。
 def _parent_goal_segments(text: str) -> list[str]:
@@ -213,6 +225,7 @@ def _hierarchy_contract_segments(text: str) -> list[str]:
     for raw in str(text or "").splitlines():
         active, items = _hierarchy_contract_line(raw, active=active)
         values.extend(items)
+    values.extend(_implicit_hierarchy_contract_segments(text))
     return _dedupe_contracts(clip_parent_context(item, limit=500) for item in values)
 
 
@@ -224,6 +237,10 @@ def _hierarchy_contract_line(raw: str, *, active: bool) -> tuple[bool, list[str]
     if field:
         is_active = field[0] in _HIERARCHY_CONTRACT_FIELDS
         return is_active, _contract_items(field[1]) if is_active and field[1] else []
+    label = _labeled_contract_field(line)
+    if label:
+        is_active = label[0] in _HIERARCHY_CONTRACT_LABELS
+        return is_active, _contract_items(label[1]) if is_active and label[1] else []
     if active and line.startswith(("-", "*")):
         return active, _contract_items(line.lstrip("-* "))
     return False, []
@@ -251,43 +268,6 @@ def _lineage_contract_terms(segment: str) -> list[str]:
     return terms
 
 
-# LLM: _capability_contract_segments extracts non-droppable tool/shell safety requirements.
-# 函数用途: 把 controlled_exec 授权、命令范围、输出外置和 trash 行为作为硬继承合同传给下层。
-def _capability_contract_segments(text: str) -> list[str]:
-    keywords = _capability_contract_keywords()
-    return [
-        clip_parent_context(segment, limit=500)
-        for segment in _parent_goal_segments(text)
-        if any(keyword in segment.lower() for keyword in keywords)
-    ]
-
-
-# LLM: _capability_contract_terms returns stable anchors for goal completeness checks.
-# 函数用途: 提取父级能力合同关键词，判断 child goal 是否已经完整携带。
-def _capability_contract_terms(text: str) -> list[str]:
-    lowered = str(text or "").lower()
-    return [keyword for keyword in _capability_contract_keywords() if keyword in lowered]
-
-
-# LLM: _capability_contract_keywords centralizes hard delegation terms for future tool gateways.
-# 函数用途: 集中维护不能在层级转述中丢失的能力/工具/安全字段名。
-def _capability_contract_keywords() -> tuple[str, ...]:
-    return (
-        "controlled_exec",
-        "capability_request",
-        "requested_tools",
-        "requested_commands",
-        "path_scope",
-        "output_budget",
-        "task_trash",
-        "move_to_task_trash",
-        "stdout_ref",
-        "audit_ref",
-        "trash_manifest_ref",
-        "grant",
-    )
-
-
 # LLM: _segment_anchor gives structured contract checks a stable short token.
 # 函数用途: 用结构化字段片段的短 token 判断 child goal 是否已经携带同类层级合同，避免重复追加。
 def _segment_anchor(segment: str) -> str:
@@ -305,6 +285,20 @@ def _structured_contract_field(line: str) -> tuple[str, str] | None:
     return match.group("field").strip().lower(), match.group("tail").strip()
 
 
+# LLM: _labeled_contract_field reads exact Chinese hierarchy labels emitted by parent handoff blocks.
+# 函数用途: 支持“父级层级/协作约束：...”续传，不把普通中文标题当机器字段。
+def _labeled_contract_field(raw: str) -> tuple[str, str] | None:
+    line = str(raw or "").strip().lstrip("-* ").strip()
+    for separator in (":", "：", "="):
+        if separator not in line:
+            continue
+        label, tail = line.split(separator, 1)
+        label = label.strip()
+        if label in _HIERARCHY_CONTRACT_LABELS:
+            return label, tail.strip()
+    return None
+
+
 # LLM: _contract_items tokenizes compact structured contract lists.
 # 函数用途: 支持 `hierarchy_contracts: depth=1 | depth=2` 和 bullet 两种写法。
 def _contract_items(value: object) -> list[str]:
@@ -313,6 +307,17 @@ def _contract_items(value: object) -> list[str]:
         return []
     separator = "|" if "|" in text else "、"
     return [item.strip() for item in text.split(separator) if item.strip()]
+
+
+# LLM: _implicit_hierarchy_contract_segments preserves explicit depth/lineage requirements from parent prose.
+# 函数用途: 只提取 4层链路、depth、max_depth、小傻妞前缀这类层级合同词，不解析业务自然语言。
+def _implicit_hierarchy_contract_segments(text: str) -> list[str]:
+    markers = ("4 层链路", "4层链路", "depth=", "max_depth", "小傻妞-*", "小小傻妞-*", "孙孙")
+    return [
+        segment
+        for segment in _parent_goal_segments(text)
+        if any(marker in segment for marker in markers)
+    ]
 
 
 # LLM: _dedupe_contracts preserves contract order.
