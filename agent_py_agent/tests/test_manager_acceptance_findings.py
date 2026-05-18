@@ -273,7 +273,8 @@ class TestSubAgentAcceptanceCapabilityFindings(_FindingSetupMixin, _FindingAsser
             child_ids=["leaf"],
             used_tools=["dispatch_subagents"],
             evidence=[MagicMock(ok=True)],
-            acceptance_checks=["叶子必须用 write_file 写报告"],
+            attributes={"required_tool_evidence": ["write_file"]},
+            acceptance_checks=["自然语言说明不触发工具证据机器验收。"],
         )
         self._write_findings_files(tmp_path)
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
