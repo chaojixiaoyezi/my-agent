@@ -94,11 +94,14 @@ class LabSessionManager:
         """appends isolation overrides while preserving model/API settings."""
         base = self.source_config.read_text(encoding="utf-8")
         fixture = str(self.fixture_root).replace("\\", "/")
+        # LLM: Live Lab must isolate the owner home too, or global daily memory can rewrite the next case.
+        isolated_home = str((self.fixture_root / ".my_agent" / "home").resolve()).replace("\\", "/")
         backend_override = "" if self.args.real_llm else '\nmodel_backend: "echo"\n'
         overrides = f"""
 
 # live-agent-lab isolation overrides
 workspace_root: "{fixture}"
+my_agent_home: "{isolated_home}"
 prompt_files:
 memory_path: ".my_agent/memory.jsonl"
 local_store_path: ".my_agent/local_store/local.db"

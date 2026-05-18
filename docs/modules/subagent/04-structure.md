@@ -643,7 +643,7 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `subagents/result_structured.py` 在结构化结果入口规范模型证据：`kind=content_check`、带 `content_pattern`、summary 明显表达“无/没有/不包含/absent/no”时，`ok=false` 代表坏模式未命中，会转成验收通过语义；普通失败仍保持失败。
 - `subagents/execution_executor.py` / `execution_executor_helpers.py` 的 `content_check` 支持 `match_mode=not_contains`、`expect_absent`、`negate` 和 `should_not_contain`，用于父级生成的机器测试，不再靠自然语言猜正反。
 - `subagents/static_site_validator.py` / `execution_static_site_items.py` 默认把自动推断的 HTML 验收提升为完整骨架检查，并输出 `html_structure_hits`、`repair_hints`；安全可选 DOM 绑定不再触发硬失败。
-- `subagents/static_site_validator.py` 的 `strict_dom_bindings=true` 是完整网页交付物的加强模式：默认验收允许 `const el=getElementById(...); el&&...` 这类可选 hook，但 Live Lab / 最终验收可开启严格模式，要求 JS 里所有 DOM id 引用都能在真实 HTML 中找到，防止多文件项目“文件都在但彼此对不上”。
+- `subagents/static_site_validator.py` 的 `strict_dom_bindings=true` 是完整网页交付物的加强模式：它仍会抓未保护的 JS DOM id 漂移，但不会把 `const el=getElementById(...); if (el) ...` / `el&&...` 这类可选 hook 当硬失败。真正必须存在的业务区块应通过结构化 `required_dom_ids` 声明，防止代码从普通 JS 文本里猜业务事实。
 - `subagents/static_site_html_parser.py` / `static_site_dom_checks.py` 负责通用网页控件校验；真实 `button/input/select/textarea disabled` 会阻塞验收，但 CSS/JS 里描述 disabled 状态不会误判。`subagents/parsing_artifacts.py` 会把顶层 `artifact_refs` 也归一为标准 artifacts；`parent_acceptance_empty_report.py` 会排除 agent-run final report、reports/logs 和 runner JSON 等内部文件，防止内部报告冒充产品交付。
 - `agent_core/orchestration_dispatch_scope.py` 允许真实执行 dispatch 时把模型常用的 `limit` / `runner_limit` 作为 `max_runners` 别名；dry-run/report-only 语义保持原样。
 - `agent_core/runner_prompts.py` 的 real-runner prompt 只内联瘦身执行摘要；完整 execution context、context bundle、TaskEnvelope 和 tool preflight 通过 refs 读取，避免真实模型启动时被大 JSON 拖到超时。

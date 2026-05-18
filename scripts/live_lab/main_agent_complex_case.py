@@ -189,14 +189,14 @@ def _assert_main_web_app_output(output_root: Path) -> None:
     _assert_main_web_app_static_check(output_root)
 
 
-# LLM: _assert_main_web_app_readme checks README facts without requiring one exact phrase.
-# 函数用途: README 只要清楚说明目录、文件和真实页面锚点即可，不因措辞不同误杀。
+# LLM: _assert_main_web_app_readme checks README file refs without making prose wording authoritative.
+# 函数用途: README 只要求列出核心文件 token 和真实页面锚点，不把目录名或自然语言措辞当机器事实。
 def _assert_main_web_app_readme(readme_text: str, html: str) -> None:
     lowered = readme_text.lower()
-    required_terms = ["main-web-app", "index.html", "styles.css", "app.js", "readme.md"]
+    required_terms = ["index.html", "styles.css", "app.js"]
     missing = [term for term in required_terms if term not in lowered]
     if missing:
-        raise RuntimeError(f"主代理 Web app README 缺少目录或文件说明: {missing}")
+        raise RuntimeError(f"主代理 Web app README 缺少核心文件说明: {missing}")
     ids = _html_ids(html)
     missing_anchors = [item for item in _markdown_anchor_refs(readme_text) if item not in ids]
     if missing_anchors:

@@ -1,6 +1,6 @@
 # LLM: Static site validator gives parent acceptance a deterministic check for generated web artifacts.
 # 模块用途: 检查静态站点目录的必需文件、本地链接/资源和模板占位符，不执行 JS、不访问网络。
-# 2026-05-18: strict_dom_bindings lets root/subagent Live Lab require all JS id lookups to match real DOM.
+# 2026-05-18: strict_dom_bindings checks unguarded JS id lookups; required_dom_ids declares mandatory DOM.
 
 from __future__ import annotations
 
