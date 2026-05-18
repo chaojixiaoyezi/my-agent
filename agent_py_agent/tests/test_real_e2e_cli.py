@@ -26,7 +26,7 @@ def test_cmd_real_e2e_writes_report_and_json_output(tmp_path, capsys):
     saved = json.loads(report_path.read_text(encoding="utf-8"))
     printed = json.loads(capsys.readouterr().out)
     assert saved["ok"] is True
-    assert saved["summary"]["total"] == 9
+    assert saved["summary"]["total"] == 12
     assert printed["report_ref"] == str(report_path)
     assert printed["foundation"]["summary"]["failed"] == 0
 
