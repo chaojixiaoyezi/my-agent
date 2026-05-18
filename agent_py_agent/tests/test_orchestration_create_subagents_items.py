@@ -99,13 +99,13 @@ class TestCreateSubagentsItemsMode:
         from agent_py_agent.agent.agent_core import orchestration_tools
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        def fake_target_error(agent, goal, allowed_tools):
-            return "second item invalid" if "竞争" in goal else ""
+        def fake_target_error(request):
+            return "second item invalid" if request.params.get("extra_write_roots") == ["/bad"] else ""
 
         monkeypatch.setattr(orchestration_tools, "external_write_target_error", fake_target_error)
         mock_agent = _agent()
         result = CreateSubagentsTool(mock_agent).execute({
-            "items": [{"goal": "市场"}, {"goal": "竞争"}],
+            "items": [{"goal": "市场"}, {"goal": "竞争", "extra_write_roots": ["/bad"]}],
         })
 
         assert result.ok is False

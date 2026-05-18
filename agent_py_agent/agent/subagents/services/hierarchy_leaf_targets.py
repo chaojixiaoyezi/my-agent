@@ -88,6 +88,7 @@ def _child_target_tokens(item: Any) -> set[str]:
         for root in getattr(item, "extra_write_roots", []) or []
         for token in _target_tokens_from_text(str(root or ""))
     }
+    targets.update(_target_tokens_from_attributes(getattr(item, "attributes", {}) or {}))
     targets.update(_target_tokens_from_output_json(getattr(item, "output_json", "") or ""))
     return targets
 
@@ -95,6 +96,9 @@ def _child_target_tokens(item: Any) -> set[str]:
 # LLM: task_actual_target_tokens prefers structured runner refs before natural-language task goals.
 # 函数用途: 返回任务实际触碰的产物文件名；给看板、收口和去重共享，避免“把 index.html 改成 index1.html”误认旧目标。
 def task_actual_target_tokens(item: Any) -> set[str]:
+    attribute_targets = _target_tokens_from_attributes(getattr(item, "attributes", {}) or {})
+    if attribute_targets:
+        return attribute_targets
     output_targets = _target_tokens_from_output_json(getattr(item, "output_json", "") or "")
     if output_targets:
         return output_targets
@@ -102,6 +106,17 @@ def task_actual_target_tokens(item: Any) -> set[str]:
     if result_targets:
         return result_targets
     return _child_target_tokens(item)
+
+
+# LLM: _target_tokens_from_attributes reads machine output refs for target ownership.
+# 函数用途: 从 attributes.output_refs/output_files/artifact_refs 提取目标文件名；不解析 goal 文本。
+def _target_tokens_from_attributes(attributes: dict[str, object]) -> set[str]:
+    if not isinstance(attributes, dict):
+        return set()
+    targets: set[str] = set()
+    for field in ("output_refs", "output_files", "artifact_refs"):
+        targets.update(_target_tokens_from_output_values(attributes.get(field)))
+    return targets
 
 
 # LLM: _is_explicit_repair_leaf lets parent coordinators create bounded fixes for known bad artifacts.

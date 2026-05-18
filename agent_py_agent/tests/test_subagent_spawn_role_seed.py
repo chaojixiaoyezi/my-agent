@@ -85,6 +85,7 @@ def test_explicit_root_spawn_keeps_product_path_and_write_root(tmp_path: Path):
             count=1,
             role="coordinator",
             agent_name="root-coordinator",
+            extra_write_roots=[str(deliverables)],
         ),
         count=1,
         allowed_tools=None,

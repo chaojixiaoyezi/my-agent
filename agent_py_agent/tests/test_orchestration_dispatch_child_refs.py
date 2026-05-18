@@ -274,6 +274,7 @@ def test_dispatch_payload_suggests_quality_wave_before_closeout():
         task_dir="",
         role="coordinator",
         agent_name="root",
+        attributes={"required_qa_roles": ["tester", "bug_finder", "acceptor"]},
     )
     child = SimpleNamespace(
         id="child-a",

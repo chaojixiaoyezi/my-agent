@@ -456,8 +456,9 @@ def test_create_subagents_rejects_external_write_target_before_task_creation():
         result = agent.tools.execute_call(
             {
                 "tool": "create_subagents",
-                "goal": f"在 {external_dir} 创建一个 txt 文件",
+                "goal": "创建一个 txt 文件",
                 "allowed_tools": ["read_file", "write_file"],
+                "extra_write_roots": [str(external_dir)],
             }
         )
 

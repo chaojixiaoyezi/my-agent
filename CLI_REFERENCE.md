@@ -917,6 +917,8 @@ my-agent subagents-workflow-plan "开发一个可验收的功能" --template-id 
 | --- | --- | --- |
 | `goal` | - | 必填，待路由的父任务目标。 |
 | `--template-id <id>` | - | 强制使用指定 workflow 模板做预览。 |
+| `--task-type <id>` | - | 结构化任务类型，例如 `code_or_bugfix` 或 `quality_deliverable`；用于模板路由，不从 goal 自然语言猜。 |
+| `--risk-tags <tags>` | - | 逗号分隔的结构化风险标签，写入 dry-run 预览供审计。 |
 | `--output-dir <path>` | - | 显式写出 JSON / Markdown dry-run 预览，不创建 subagent。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
 

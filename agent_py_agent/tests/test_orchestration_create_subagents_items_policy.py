@@ -83,18 +83,31 @@ def test_items_path_refs_create_workflow_dependency_edges():
     items = [
         CreateSubagentItem(
             goal="收集项目基础信息，结果写入 data/subagents/data_collection.md",
-            params={"agent_name": "小傻妞-数据收集"},
+            params={
+                "agent_name": "小傻妞-数据收集",
+                "output_refs": ["data/subagents/data_collection.md"],
+            },
         ),
         CreateSubagentItem(
             goal="读取 data/subagents/data_collection.md，写推荐理由到 data/subagents/content_writeup.md",
-            params={"agent_name": "小傻妞-内容编写", "dependencies": ["data_collection"]},
+            params={
+                "agent_name": "小傻妞-内容编写",
+                "dependencies": ["data_collection"],
+                "output_refs": ["data/subagents/content_writeup.md"],
+            },
         ),
         CreateSubagentItem(
             goal=(
                 "读取 data/subagents/data_collection.md 和 data/subagents/content_writeup.md，"
                 "生成 final_report.md"
             ),
-            params={"agent_name": "小傻妞-生成报告"},
+            params={
+                "agent_name": "小傻妞-生成报告",
+                "input_refs": [
+                    "data/subagents/data_collection.md",
+                    "data/subagents/content_writeup.md",
+                ],
+            },
         ),
     ]
 
@@ -114,16 +127,23 @@ def test_items_path_refs_persist_workflow_depends_on():
                 "goal": "收集项目基础信息，结果写入 data/subagents/data_collection.md",
                 "agent_name": "小傻妞-数据收集",
                 "role": "worker",
+                "output_refs": ["data/subagents/data_collection.md"],
             },
             {
                 "goal": "读取 data/subagents/data_collection.md，写推荐理由到 data/subagents/content_writeup.md",
                 "agent_name": "小傻妞-内容编写",
                 "role": "worker",
+                "input_refs": ["data/subagents/data_collection.md"],
+                "output_refs": ["data/subagents/content_writeup.md"],
             },
             {
                 "goal": "读取 data/subagents/data_collection.md 和 data/subagents/content_writeup.md，生成 final_report.md",
                 "agent_name": "小傻妞-生成报告",
                 "role": "worker",
+                "input_refs": [
+                    "data/subagents/data_collection.md",
+                    "data/subagents/content_writeup.md",
+                ],
             },
         ],
     })

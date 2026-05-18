@@ -293,6 +293,7 @@ def test_dispatch_closeout_ignores_unseen_historical_runs(tmp_path):
 def test_dispatch_completion_waits_for_explicit_quality_roles(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     worker = manager.create_run(goal="write three pages", thought="worker", plan=["write"])
+    worker.attributes = {"required_qa_roles": ["tester", "acceptor"]}
     worker.status = "DONE"
     worker.verification_status = "VERIFIED"
     manager.save(worker)

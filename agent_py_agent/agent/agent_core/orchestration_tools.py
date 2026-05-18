@@ -54,7 +54,7 @@ from .orchestration_tool_specs import (
     build_subagent_board_spec,
 )
 from .orchestration_workflow_mode import tool_workflow_mode as _tool_workflow_mode
-from .orchestration_write_guard import external_write_target_error
+from .orchestration_write_guard import ExternalWriteTargetRequest, external_write_target_error
 from .parameters import _positive_int
 
 if TYPE_CHECKING:
@@ -77,39 +77,14 @@ class CreateSubagentsTool(BaseTool):
         if not self.agent.config.enable_subagents:
             return ToolExecutionResult("create_subagents", False, "配置已禁用 subagent。")
 
-        items = create_items_from_params(params)
-        if isinstance(items, str):
-            return ToolExecutionResult("create_subagents", False, items)
-        if items:
-            return self._execute_items(items)
+        items_result = self._items_result(params)
+        if items_result is not None:
+            return items_result
 
-        goal = str(params.get("goal") or "").strip()
-        if not goal:
-            return ToolExecutionResult("create_subagents", False, "缺少必填参数 goal。")
-
-        count = self._requested_count(params)
-        if isinstance(count, ToolExecutionResult):
-            return count
-
-        allowed_tools = subagent_allowed_tools(params)
-        missing_write_root = explicit_root_missing_write_root_error(self.agent, params, goal)
-        if missing_write_root:
-            return ToolExecutionResult("create_subagents", False, missing_write_root)
-        target_error = external_write_target_error(
-            self.agent,
-            goal,
-            allowed_tools or CODING_SUBAGENT_TOOLS,
-        )
-        if target_error:
-            return ToolExecutionResult("create_subagents", False, target_error)
-        constraint_conflict = delegation_constraint_conflict_error(params)
-        if constraint_conflict:
-            return ToolExecutionResult("create_subagents", False, constraint_conflict)
-
-        run_params = create_run_params(self.agent, params, goal, allowed_tools)
-        ambiguous_product_count = ambiguous_repeated_product_goal_error(params, count, run_params.role)
-        if ambiguous_product_count:
-            return ToolExecutionResult("create_subagents", False, ambiguous_product_count)
+        prepared = self._prepare_count_mode(params)
+        if isinstance(prepared, ToolExecutionResult):
+            return prepared
+        goal, count, allowed_tools, run_params = prepared
         resolutions = self._create_tasks(goal, count, run_params)
         tasks = [item.task for item in resolutions]
         remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
@@ -119,6 +94,37 @@ class CreateSubagentsTool(BaseTool):
             True,
             json.dumps(payload, ensure_ascii=False, indent=2),
         )
+
+    # LLM: _items_result routes structured batch mode before count-mode validation.
+    # 函数用途: 解析 items/tasks 入口；返回 None 表示继续单 goal/count 模式。
+    def _items_result(self, params: dict[str, object]) -> ToolExecutionResult | None:
+        items = create_items_from_params(params)
+        if isinstance(items, str):
+            return ToolExecutionResult("create_subagents", False, items)
+        if items:
+            return self._execute_items(items)
+        return None
+
+    # LLM: _prepare_count_mode validates single-goal delegation and builds run params.
+    # 函数用途: 聚合 count 模式的 goal、count、工具和 run 参数，保持 execute 入口薄。
+    def _prepare_count_mode(
+        self, params: dict[str, object]
+    ) -> tuple[str, int, list[str] | None, CreateRunParams] | ToolExecutionResult:
+        goal = str(params.get("goal") or "").strip()
+        if not goal:
+            return ToolExecutionResult("create_subagents", False, "缺少必填参数 goal。")
+        count = self._requested_count(params)
+        if isinstance(count, ToolExecutionResult):
+            return count
+        allowed_tools = subagent_allowed_tools(params)
+        validation = self._validate_single_goal(params, goal, allowed_tools)
+        if validation:
+            return ToolExecutionResult("create_subagents", False, validation)
+        run_params = create_run_params(self.agent, params, goal, allowed_tools)
+        ambiguous = ambiguous_repeated_product_goal_error(params, count, run_params.role)
+        if ambiguous:
+            return ToolExecutionResult("create_subagents", False, ambiguous)
+        return goal, count, allowed_tools, run_params
 
     # LLM: _execute_items is the structured batch path, equivalent to Hermes delegate_task tasks[].
     # 函数用途: 按 items[] 中每个独立 goal 创建子代理，避免 count 复制同一个任务目标。
@@ -180,9 +186,11 @@ class CreateSubagentsTool(BaseTool):
         if missing_write_root:
             return missing_write_root
         target_error = external_write_target_error(
-            self.agent,
-            goal,
-            allowed_tools or CODING_SUBAGENT_TOOLS,
+            ExternalWriteTargetRequest(
+                agent=self.agent,
+                allowed_tools=allowed_tools or CODING_SUBAGENT_TOOLS,
+                params=params,
+            )
         )
         if target_error:
             return target_error

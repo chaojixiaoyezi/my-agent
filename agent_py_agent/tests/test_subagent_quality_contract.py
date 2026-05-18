@@ -143,6 +143,7 @@ def test_create_run_workflow_plan_persists_without_raw_json(tmp_path):
         thought="Let workflow compiler produce the worker contract first.",
         plan=["route", "compile", "review"],
         workflow_mode="plan",
+        attributes={"workflow_task_type": "code_or_bugfix"},
     )
     payload = json.loads((Path(task.task_dir) / "task.json").read_text(encoding="utf-8"))
 

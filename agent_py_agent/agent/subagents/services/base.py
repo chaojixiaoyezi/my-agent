@@ -72,6 +72,17 @@ def _session_identity_fields(run_id: str, parent_task: Any | None) -> dict[str, 
     }
 
 
+# LLM: _create_run_route_attrs exposes workflow route machine facts without parsing the user goal.
+# 函数用途: 从 CreateRunParams.attributes 提取 workflow 模板选择字段；普通 goal/thought 文本不作为机器事实来源。
+def _create_run_route_attrs(params: CreateRunParams) -> dict[str, object]:
+    attrs = params.attributes if isinstance(params.attributes, dict) else {}
+    return {
+        "explicit_template_id": str(attrs.get("workflow_template_id") or "").strip(),
+        "workflow_task_type": str(attrs.get("workflow_task_type") or "").strip(),
+        "workflow_risk_tags": attrs.get("workflow_risk_tags"),
+    }
+
+
 # LLM: SubAgentBaseService 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 类用途: 封装subagent基础服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
 class SubAgentBaseService:
@@ -153,6 +164,7 @@ class SubAgentBaseService:
             _merge_workflow_acceptance_checks,
             _normalize_workflow_mode_value,
             _try_workflow_plan,
+            _WorkflowPlanAttempt,
         )
 
         run_id = self.manager._new_id("subagent")
@@ -162,11 +174,17 @@ class SubAgentBaseService:
         workflow_plan_dict: dict[str, object] | None = None
         merged_acceptance = list(params.acceptance_checks or [])
         if normalized_workflow_mode != "off":
+            route_attrs = _create_run_route_attrs(params)
             workflow_plan_dict = _try_workflow_plan(
-                params.goal,
-                quality_contract=params.quality_contract,
-                context_manifest=params.context_manifest,
-                allowed_write_roots=params.extra_write_roots,
+                _WorkflowPlanAttempt(
+                    goal=params.goal,
+                    explicit_template_id=str(route_attrs["explicit_template_id"]),
+                    workflow_task_type=str(route_attrs["workflow_task_type"]),
+                    workflow_risk_tags=route_attrs["workflow_risk_tags"],
+                    quality_contract=params.quality_contract,
+                    context_manifest=params.context_manifest,
+                    allowed_write_roots=params.extra_write_roots,
+                ),
             )
             merged_acceptance = _merge_workflow_acceptance_checks(merged_acceptance, workflow_plan_dict)
 

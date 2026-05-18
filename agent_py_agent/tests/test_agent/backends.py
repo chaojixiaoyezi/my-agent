@@ -514,7 +514,7 @@ class CoordinatorToolLimitBlockedBackend(BaseBackend):
                 '  "used_skills": [],\n'
                 '  "evidence": [],\n'
                 '  "capability_requests": [\n'
-                '    {"problem": "工具轮数限制导致无法重复读取 proof.txt", "needed_capability": "增加 max_tool_rounds", "expected_output": "确认 proof.txt 内容", "tried": ["read_artifact"], "evidence": [], "constraints": {}}\n'
+                '    {"failure_type": "max_tool_rounds", "problem": "工具轮数限制导致无法重复读取 proof.txt", "needed_capability": "max_tool_rounds", "expected_output": "确认 proof.txt 内容", "tried": ["read_artifact"], "evidence": [], "constraints": {}}\n'
                 "  ],\n"
                 '  "artifacts": [],\n'
                 '  "tests": [],\n'

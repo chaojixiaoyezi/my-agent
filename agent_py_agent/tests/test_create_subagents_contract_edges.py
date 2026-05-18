@@ -42,10 +42,12 @@ def test_items_mode_preserves_absolute_path_dependencies():
             {
                 "goal": f"收集数据，输出到 {root}/data/subagents/data_collection.md",
                 "agent_name": "小傻妞-数据收集",
+                "output_refs": [f"{root}/data/subagents/data_collection.md"],
             },
             {
                 "goal": f"读取 {root}/data/subagents/data_collection.md，写中文解释。",
                 "agent_name": "小傻妞-内容编写",
+                "input_refs": [f"{root}/data/subagents/data_collection.md"],
             },
         ]
     })
