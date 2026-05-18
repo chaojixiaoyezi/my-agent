@@ -61,11 +61,32 @@ def decide_activity_timeout(policy: ActivityTimeoutPolicy, snapshot: ActivitySna
     wall_seconds = max(0.0, float(snapshot.now) - float(snapshot.started_at))
     recovery_refs = _recovery_refs(snapshot)
     if policy.idle_timeout_seconds <= 0:
-        return _decision("keep_running", False, "idle_timeout_disabled", idle_seconds, wall_seconds, recovery_refs)
+        return ActivityTimeoutDecision(
+            action="keep_running",
+            timed_out=False,
+            reason="idle_timeout_disabled",
+            idle_seconds=idle_seconds,
+            wall_seconds=wall_seconds,
+            recovery_refs=recovery_refs,
+        )
     if snapshot.active_tool_count > 0 or idle_seconds <= policy.idle_timeout_seconds:
         reason = "active_tool" if snapshot.active_tool_count > 0 else "recent_activity"
-        return _decision("keep_running", False, reason, idle_seconds, wall_seconds, recovery_refs)
-    return _decision("write_recovery_and_pause", True, "idle_timeout", idle_seconds, wall_seconds, recovery_refs)
+        return ActivityTimeoutDecision(
+            action="keep_running",
+            timed_out=False,
+            reason=reason,
+            idle_seconds=idle_seconds,
+            wall_seconds=wall_seconds,
+            recovery_refs=recovery_refs,
+        )
+    return ActivityTimeoutDecision(
+        action="write_recovery_and_pause",
+        timed_out=True,
+        reason="idle_timeout",
+        idle_seconds=idle_seconds,
+        wall_seconds=wall_seconds,
+        recovery_refs=recovery_refs,
+    )
 
 
 # LLM: _recovery_refs preserves continuation anchors without reading task prose.
@@ -77,26 +98,6 @@ def _recovery_refs(snapshot: ActivitySnapshot) -> dict[str, str]:
     if snapshot.latest_recovery_snapshot_ref:
         refs["latest_recovery_snapshot_ref"] = snapshot.latest_recovery_snapshot_ref
     return refs
-
-
-# LLM: _decision keeps construction of timeout decisions consistent.
-# 函数用途: 统一生成 ActivityTimeoutDecision，避免调用点散落字段拼装。
-def _decision(
-    action: str,
-    timed_out: bool,
-    reason: str,
-    idle_seconds: float,
-    wall_seconds: float,
-    recovery_refs: dict[str, str],
-) -> ActivityTimeoutDecision:
-    return ActivityTimeoutDecision(
-        action=action,
-        timed_out=timed_out,
-        reason=reason,
-        idle_seconds=idle_seconds,
-        wall_seconds=wall_seconds,
-        recovery_refs=recovery_refs,
-    )
 
 
 __all__ = [

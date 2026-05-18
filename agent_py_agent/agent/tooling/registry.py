@@ -21,7 +21,10 @@ from .artifact_read_budget import (
     DEFAULT_ARTIFACT_READ_BUDGET_MAX_CHARS,
     DEFAULT_ARTIFACT_READ_BUDGET_WINDOW_SECONDS,
 )
-from .content_transport_policy import MAX_INLINE_WRITE_CONTENT_CHARS
+from .content_transport_policy import (
+    MAX_INLINE_WRITE_CONTENT_CHARS,
+    tool_content_transport_protocol,
+)
 from .controlled_exec import ControlledExecTool
 from .filesystem import (
     AppendFileTool,
@@ -47,6 +50,7 @@ from .registry_execution import (
     parse_registry_tool_calls,
     security_tools_visible,
 )
+from .registry_prompt import render_tool_catalog_section
 from .shell import ShellTool
 from .web import FetchUrlTool, HttpRequestTool
 
@@ -229,20 +233,9 @@ class ToolRegistry:
             include_orchestration=True,
         )
         entries = render_catalog_entries(specs, self._catalog_render_config())
-        if not entries:
-            entries = ["- none：当前执行上下文没有授权任何工具；缺能力时请上抛 capability_request。"]
-        return (
-            "# Tools\n"
-            "当你需要看文件、改代码、查网页或测接口时，可以调用工具。\n"
-            "工具调用格式必须严格写成：\n"
-            "[TOOL_CALL]\n"
-            '{"tool": "tool_name", "actual_parameter_name": "actual_value"}\n'
-            "[/TOOL_CALL]\n"
-            "必须把工具参数直接放在同一个 JSON 对象里；不要写 param_name 包裹参数。\n"
-            "必须使用 Tool Catalog 里该工具自己的参数名；不要把 path 当作所有工具的默认参数。\n"
-            "可以连续写多个 [TOOL_CALL] 块。拿到工具结果后，再输出最终答案，不要把工具调用块留在最后回复里。\n\n"
-            "# Tool Catalog\n"
-            + "\n".join(entries)
+        return render_tool_catalog_section(
+            entries,
+            tool_content_transport_protocol(self._write_inline_max_chars()),
         )
 
     # LLM: ToolRegistry._catalog_render_config bundles registry fields for the catalog renderer.
@@ -258,6 +251,16 @@ class ToolRegistry:
             show_truncated_notice=self.catalog_show_truncated_notice,
             detail_max_chars=self.tool_detail_max_chars,
         )
+
+    # LLM: ToolRegistry._write_inline_max_chars keeps catalog protocol aligned with registered write tools.
+    # 函数用途: 从已注册 write_file 工具读取 inline 推荐值；缺失时回退到全局默认。
+    def _write_inline_max_chars(self) -> int:
+        tool = self.tools.get("write_file")
+        value = getattr(tool, "max_inline_content_chars", MAX_INLINE_WRITE_CONTENT_CHARS)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return MAX_INLINE_WRITE_CONTENT_CHARS
 
     # LLM: ToolRegistry.find_relevant_specs 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 完成 工具系统 中的 find_relevant_specs 步骤，并保持调用方依赖的数据形状。

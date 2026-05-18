@@ -57,6 +57,40 @@ def test_task_envelope_v1_contains_address_tool_write_and_acceptance(tmp_path: P
     assert payload["acceptance"]["checks"] == ["index.html 存在", "页面没有空链接"]
 
 
+# LLM: granted file-write scopes must be visible in TaskEnvelope, not only in the tool gateway.
+# 函数用途: 复现真实 E2E 中父级已批准 write_file path_scope，但 runner 协议包仍显示没有产品写入根。
+def test_task_envelope_write_contract_includes_granted_filesystem_roots(tmp_path: Path) -> None:
+    from agent_py_agent.agent.subagents.protocol import build_task_envelope
+
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="写页面到 lab_outputs/furniture-home/index.html",
+        thought="等待父级授权产物目录",
+        plan=["写 HTML"],
+        role="worker",
+    )
+    product_root = tmp_path / "lab_outputs"
+    task.acceptance_checks = ["index.html 存在"]
+    task.capability_grants = [
+        CapabilityGrant(
+            id="grant-write",
+            request_id="req-write",
+            grant_to_run_id=task.id,
+            tools=["write_file"],
+            path_scope=[str(product_root)],
+        )
+    ]
+    manager.save(task)
+
+    payload = build_task_envelope(manager.load(task.id), all_tasks=manager.list_runs()).to_dict()
+
+    assert payload["write_contract"]["allowed_write_roots"] == [
+        task.task_dir,
+        str(product_root),
+    ]
+    assert payload["write_contract"]["product_write_roots"] == [str(product_root)]
+
+
 def test_protocol_validation_reports_structured_errors(tmp_path: Path) -> None:
     from agent_py_agent.agent.subagents.protocol import build_task_envelope, validate_task_envelope
 

@@ -3,13 +3,38 @@
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from ..backends import ModelResponse
+from ..tooling.content_transport_policy import (
+    MAX_INLINE_WRITE_CONTENT_CHARS,
+    inline_write_content_limit,
+)
 
 _TOOL_START_MARKERS = ("[TOOL_CALL]", "[SUBAGENT_CALL]")
 _TOOL_END_MARKERS = ("[/TOOL_CALL]", "[/SUBAGENT_CALL]")
+_WRITE_TOOL_NAMES = {"write_file", "append_file"}
+_JSON_TOOL_RE = re.compile(r'"tool"\s*:\s*"(?P<tool>write_file|append_file)"')
+_JSON_PATH_RE = re.compile(r'"path"\s*:\s*"(?P<path>(?:\\.|[^"\\]){0,240})"')
+_JSON_CONTENT_RE = re.compile(r'"content"\s*:\s*"')
+
+
+# LLM: LongToolContentStreamAbort is a structured early-stop signal for oversized write tool streams.
+# 类用途: 表示模型正在输出过长的 write_file/append_file content；上层会把它转成可恢复的分块提示。
+class LongToolContentStreamAbort(RuntimeError):
+    # LLM: __init__ stores structured abort metadata for the parser recovery path.
+    # 函数用途: 记录被中断的工具名、路径、已流式输出字符数和上限，方便后续提示模型分块恢复。
+    def __init__(self, *, tool: str, path: str, chars: int, limit: int) -> None:
+        super().__init__(
+            f"{tool}.content inline content streaming exceeded {limit} chars for {path or '<unknown>'}"
+        )
+        self.tool = tool
+        self.path = path
+        self.chars = chars
+        self.limit = limit
 
 
 # LLM: first_complete_tool_call_cut_index finds the text boundary after the first closed tool block.
@@ -40,6 +65,7 @@ def cut_response_after_first_complete_tool_call(response: ModelResponse) -> tupl
 @dataclass
 class ToolBoundaryChunkFilter:
     on_chunk: Callable[[str], None] | None
+    max_inline_content_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS
     _text: str = ""
     _forwarded: int = 0
     _closed: bool = False
@@ -48,9 +74,14 @@ class ToolBoundaryChunkFilter:
     # LLM: __call__ forwards only text that belongs before or inside the first complete tool block.
     # 函数用途: 接收模型流式片段，实时累计并在工具调用边界后静默丢弃后续可见输出。
     def __call__(self, chunk: str) -> None:
-        if self.on_chunk is None or self._closed:
+        if self._closed:
             return
         self._text += str(chunk or "")
+        abort = long_write_stream_abort(self._text, max_chars=self.max_inline_content_chars)
+        if abort is not None:
+            raise abort
+        if self.on_chunk is None:
+            return
         cut_index = first_complete_tool_call_cut_index(self._text)
         if cut_index is None:
             self._forward_to(len(self._text))
@@ -87,3 +118,99 @@ def _first_marker(text: str, markers: tuple[str, ...], cursor: int) -> tuple[int
         if pos != -1
     ]
     return min(hits, key=lambda item: item[0]) if hits else None
+
+
+# LLM: long_write_stream_abort detects oversized structured write content while a tool call is still open.
+# 函数用途: 根据 TOOL_CALL JSON 字段识别未闭合的大 write_file/append_file，避免等到 provider 超时才失败。
+def long_write_stream_abort(text: str, *, max_chars: int | None = None) -> LongToolContentStreamAbort | None:
+    limit = inline_write_content_limit(max_chars)
+    start_info = _first_marker(text, _TOOL_START_MARKERS, 0)
+    if start_info is None:
+        return None
+    start, marker = start_info
+    if _first_marker(text, _TOOL_END_MARKERS, start + len(marker)) is not None:
+        return None
+    raw = text[start + len(marker) :]
+    tool = _json_tool(raw)
+    if tool not in _WRITE_TOOL_NAMES:
+        return None
+    content_start = _content_value_start(raw)
+    if content_start is None:
+        return None
+    content_chars = _streamed_json_string_chars(raw[content_start:])
+    if content_chars <= limit:
+        return None
+    return LongToolContentStreamAbort(
+        tool=tool,
+        path=_json_path(raw),
+        chars=content_chars,
+        limit=limit,
+    )
+
+
+# LLM: long_write_abort_response reuses the existing parse-error recovery path with bounded raw data.
+# 函数用途: 把流式中断转换成标准 __parse_error__ 工具调用，让后续工具循环进入分块恢复。
+def long_write_abort_response(exc: LongToolContentStreamAbort, *, backend: str) -> ModelResponse:
+    raw = json.dumps(
+        {"tool": exc.tool, "path": exc.path, "content": "...streaming content omitted..."},
+        ensure_ascii=False,
+    )
+    payload = {
+        "tool": "__parse_error__",
+        "error": (
+            f"{exc.tool}.content inline content streaming exceeded {exc.limit} chars; "
+            "工具调用缺少结束标记"
+        ),
+        "raw": raw,
+    }
+    return ModelResponse(
+        text="[TOOL_CALL]\n"
+        f"{json.dumps(payload, ensure_ascii=False)}\n"
+        "[/TOOL_CALL]",
+        backend=backend,
+    )
+
+
+# LLM: _json_tool extracts the structured tool name from incomplete JSON without parsing the body.
+# 函数用途: 从流式片段里取 write_file/append_file 工具名；只看机器字段，不读自然语言描述。
+def _json_tool(raw: str) -> str:
+    match = _JSON_TOOL_RE.search(raw)
+    return match.group("tool") if match is not None else ""
+
+
+# LLM: _content_value_start locates the start of the JSON string value without parsing incomplete JSON.
+# 函数用途: 在未闭合工具调用里找到 content 字符串开头；支持顶层和 filesystem 包裹参数。
+def _content_value_start(raw: str) -> int | None:
+    match = _JSON_CONTENT_RE.search(raw)
+    return match.end() if match is not None else None
+
+
+# LLM: _streamed_json_string_chars counts a partial JSON string value without keeping the full payload.
+# 函数用途: 统计流式 content 已输出的字符数；遇到未转义引号说明字符串闭合并停止。
+def _streamed_json_string_chars(text: str) -> int:
+    count = 0
+    escaped = False
+    for char in text:
+        if escaped:
+            count += 1
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            break
+        count += 1
+    return count
+
+
+# LLM: _json_path decodes a bounded path field from an incomplete structured tool payload.
+# 函数用途: 从未闭合 JSON 里取 path 字段，失败时返回短原文，避免把大正文带进恢复上下文。
+def _json_path(raw: str) -> str:
+    match = _JSON_PATH_RE.search(raw)
+    if match is None:
+        return ""
+    try:
+        return json.loads(f'"{match.group("path")}"')
+    except json.JSONDecodeError:
+        return match.group("path")
