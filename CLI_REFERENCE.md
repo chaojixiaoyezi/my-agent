@@ -571,6 +571,7 @@ my-agent context-bundle latest --json
 ```powershell
 my-agent real-e2e --workspace .\.real-e2e --json
 my-agent real-e2e --workspace .\.real-e2e --artifact .\outputs\index.html --json
+my-agent real-e2e --workspace .\.real-e2e --real-task-suite --real-task-max-workers 4 --json
 my-agent real-e2e --workspace .\.real-e2e --report .\reports\real-e2e.json
 ```
 
@@ -578,12 +579,17 @@ my-agent real-e2e --workspace .\.real-e2e --report .\reports\real-e2e.json
 
 如果已经用真实模型生成了产物，可以把文件路径传给 `--artifact`。命令会调用 Artifact Acceptance（产物验收）统一检查 HTML、JSON、CSV、XLSX、PDF 和未知格式的基础质量，并把 findings（问题清单）写进报告。它不展开大文件正文，只写路径、类型和结构化问题。
 
+如果要准备多主代理真实任务测试，可以加 `--real-task-suite`。命令会生成家具 HTML、购物网站、GitHub 升星 XLSX、DeepSeek 论文翻译 PDF 等任务的 `prompt.md`、`acceptance.json`、`expected_artifacts.json` 和 `suite_report.json`，并给每个任务分配 worker slot（工位）和 timeout（超时）。默认仍然只生成计划，不自动调用模型。
+
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--workspace <path>` | 当前目录 `.my-agent-real-e2e` | E2E 工作区；命令会把报告和确定性测试证据写到这里。 |
 | `--report <path>` | `<workspace>/real_e2e_report.json` | 报告输出路径。 |
 | `--artifact <path>` | 可重复 | 额外验收真实任务产物。适合先让模型生成文件，再用机器验收确认。 |
 | `--include-real-model` | `false` | 预留真实模型用例标记；当前不会自动发起模型调用。 |
+| `--real-task-suite` | `false` | 生成主代理真实任务批量测试计划。报告只放 refs，不内联任务 prompt 或大产物正文。 |
+| `--real-task-max-workers <n>` | `4` | 真实任务计划的最大并发工位；当前用于计划分配，不直接启动进程。 |
+| `--real-task-timeout <seconds>` | `480` | 真实任务计划的单任务超时秒数；后续受控 runner 会读取同一字段。 |
 | `--json` | `false` | 输出完整机器可读 JSON。 |
 
 ## `memory-compact`

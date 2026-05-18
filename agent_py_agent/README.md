@@ -68,6 +68,7 @@ subagents-acceptance        验收等待验收的子代理
 subagents-patches           审核 runner 输出里的 patch 记录
 subagents-dispatch          执行一轮父代理调度
 scenario-test               隔离跑 gateway/派工/runner/验收全流程
+real-e2e                    跑主代理基础验收矩阵，必要时生成真实任务批量测试计划
 gateway                     管理后台 gateway，并向 gateway 投递请求
 adapter                     外部聊天工具 / TUI 文件适配器
 subagent-context            生成单个子代理执行上下文

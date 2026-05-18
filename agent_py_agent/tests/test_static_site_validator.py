@@ -36,7 +36,13 @@ def test_static_site_check_passes_valid_site(tmp_path):
             "name": "shop site",
             "validation_method": "static_site_check",
             "site_root": "site",
-            "required_files": ["index.html", "products.html", "cart.html", "checkout.html", "order-success.html"],
+            "required_files": [
+                "index.html",
+                "products.html",
+                "cart.html",
+                "checkout.html",
+                "order-success.html",
+            ],
         }
     )
 
@@ -504,3 +510,32 @@ def test_static_site_check_rejects_outside_site_root(tmp_path):
     assert record.executed is False
     assert record.passed is False
     assert record.error == "site_root 超出 workspace 边界"
+
+
+# LLM: The validator should compare resolved workspace paths so /tmp symlink aliases stay inside.
+# 函数用途: 验证工作区路径经过符号链接别名传入时，站点目录不会被误判为越界。
+def test_static_site_check_allows_workspace_symlink_alias(tmp_path):
+    from agent_py_agent.agent.subagents.static_site_validator import run_static_site_check
+
+    real_workspace = tmp_path / "real"
+    real_workspace.mkdir()
+    alias_workspace = tmp_path / "alias"
+    alias_workspace.symlink_to(real_workspace, target_is_directory=True)
+    _write_site(
+        real_workspace,
+        {
+            "index.html": '<a href="products.html">Products</a>',
+            "products.html": '<a href="index.html">Home</a>',
+        },
+    )
+    record = run_static_site_check(
+        {
+            "name": "site",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+        },
+        alias_workspace,
+    )
+
+    assert record.executed is True
+    assert record.passed is True

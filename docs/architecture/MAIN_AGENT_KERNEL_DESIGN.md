@@ -207,6 +207,8 @@ agent_py_agent/agent/contracts/
 |-- artifact_acceptance.py # 产物验收 findings，不相信模型自检
 |-- e2e_matrix.py      # 真实 E2E 矩阵的机器可读定义
 |-- e2e_matrix_runner.py # 不调用模型的确定性 E2E runner
+|-- main_agent_real_task_suite.py # 主代理真实任务批量测试计划和报告
+|-- main_agent_real_task_suite_cases.py # 默认真实任务样例和验收合同
 `-- main_agent_foundation_runner.py # 主代理基础 E2E 总入口
 ```
 
@@ -233,6 +235,9 @@ agent_py_agent/agent/contracts/
 - `main_agent_foundation_runner.py` 把主代理基础 1-6 类测试收成一个 refs-first 报告：工具失败合同、真实单代理任务占位、compact/resume 占位、大输出 artifact refs、真实错误恢复占位和确定性 E2E matrix。真实模型项没有跑时必须显示 `SKIPPED`。
 - `artifact_acceptance.py` 提供通用产物验收入口：HTML 能发现 `href="#"`、空链接、`javascript:void(0)`、外部图片和缺失本地图片；JSON/CSV/XLSX/PDF 会做轻量可打开/可解析检查；未知格式至少检查存在和非空。真实测试发现模型产物自称“无坏链”，但机器验收抓到 21 个占位链接；把 findings 交回主代理后，主代理修复到 0 个 findings。
 - `my-agent real-e2e` 已接入 CLI：默认跑确定性主代理基础矩阵，写 `real_e2e_report.json`；传 `--artifact` 时会把真实模型产物接入 Artifact Acceptance。它当前不自动调用模型，避免 CI 或普通提交意外烧 API。
+- `main_agent_real_task_suite` 已接入 `my-agent real-e2e --real-task-suite`：它会为家具 HTML、购物网站、GitHub 升星 XLSX、DeepSeek 论文翻译 PDF 这类真实复杂任务生成受控批量测试计划。计划会写 `prompt.md`、`acceptance.json`、`expected_artifacts.json` 和 `suite_report.json`，报告只带 refs、worker slot、timeout 和结构化验收合同，不直接启动模型进程。
+
+大白话说：以后要开 4 个主代理并行测真实任务，不应该手动乱开终端和进程。先用这套命令生成任务清单、工位、超时和验收合同，再由受控 runner 去执行。这样就算测试很大，也能知道“哪个任务该产出什么、谁在跑、怎么验收、报告在哪里”。
 
 ## 对标其他项目后的原则
 
