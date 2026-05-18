@@ -24,6 +24,17 @@ def test_my_agent_home_uses_env_override(tmp_path: Path, monkeypatch):
     assert resolve_my_agent_home() == home.resolve()
 
 
+# LLM: MY_AGENT_HOME must beat config so parallel real runs can isolate homes without editing user config.
+# 函数用途: 验证配置文件里有默认 my_agent_home 时，测试/多 profile 仍可用环境变量隔离家目录。
+def test_my_agent_home_env_beats_config_value(tmp_path: Path):
+    from agent_py_agent.agent.user_space.home_layout import resolve_my_agent_home
+
+    env_home = tmp_path / "env-home"
+    config_home = tmp_path / "config-home"
+
+    assert resolve_my_agent_home(config_home, env={"MY_AGENT_HOME": str(env_home)}) == env_home.resolve()
+
+
 # LLM: task paths should be date/task scoped and sanitize model-provided task names.
 # 函数用途: 验证 workspace/tasks/{date}/{task_slug} 模板生成稳定安全的任务目录。
 def test_task_workspace_path_template_sanitizes_task_name(tmp_path: Path):

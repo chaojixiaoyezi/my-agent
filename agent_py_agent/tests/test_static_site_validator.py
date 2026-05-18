@@ -365,6 +365,32 @@ def test_static_site_check_blocks_missing_dom_id_targets(tmp_path):
     ]
 
 
+# LLM: DOM binding checks should be on by default for generated apps, not a hidden expert option.
+# 函数用途: 固定购物站真实测试暴露的问题；HTML/JS 的 id 不一致时默认验收失败。
+def test_static_site_check_blocks_missing_dom_id_targets_by_default(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "index.html": '<div id="homeProducts"></div><script src="app.js"></script>',
+            "app.js": "document.getElementById('productGrid').innerHTML = '<p>商品</p>';",
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "generated shop app",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index.html", "app.js"],
+        }
+    )
+
+    assert record.passed is False
+    assert "missing_dom_id_hits=1" in record.error
+    assert record.validation_result["missing_dom_id_hits"] == ["getElementById:productGrid"]
+
+
 # LLM: Explicit required DOM ids let parent acceptance preserve business flow contracts.
 # 函数用途: 当任务声明必须存在某些页面区域时，static_site_check 要检查这些 id，而不是只看 HTML 结构。
 def test_static_site_check_blocks_missing_required_dom_ids(tmp_path):

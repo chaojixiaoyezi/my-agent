@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 
-# LLM: Main foundation runner should expose the six requested categories without model calls by default.
+# LLM: Main foundation runner should expose deterministic contracts without model calls by default.
 # 函数用途: 验证主代理基础测试矩阵有固定入口；本地可确定的用例直接执行，真实模型用例明确跳过。
-def test_main_agent_foundation_runner_reports_six_categories(tmp_path):
+def test_main_agent_foundation_runner_reports_core_categories(tmp_path):
     from agent_py_agent.agent.contracts.main_agent_foundation_runner import (
         MainAgentFoundationRequest,
         run_main_agent_foundation,
@@ -14,10 +14,13 @@ def test_main_agent_foundation_runner_reports_six_categories(tmp_path):
     report = run_main_agent_foundation(MainAgentFoundationRequest(workspace=tmp_path))
 
     assert report.ok is True
-    assert report.summary["total"] == 6
+    assert report.summary["total"] == 9
     assert report.summary["failed"] == 0
     by_id = {item.case_id: item for item in report.results}
     assert by_id["tool_failure_contracts"].status == "PASSED"
+    assert by_id["research_evidence_contracts"].status == "PASSED"
+    assert by_id["web_artifact_validator"].status == "PASSED"
+    assert by_id["activity_timeout_recovery"].status == "PASSED"
     assert by_id["large_output_artifact_refs"].status == "PASSED"
     assert by_id["deterministic_e2e_matrix"].status == "PASSED"
     assert by_id["single_agent_real_tasks"].status == "SKIPPED"
@@ -35,7 +38,7 @@ def test_main_agent_foundation_report_is_refs_first(tmp_path):
 
     payload = run_main_agent_foundation(MainAgentFoundationRequest(workspace=tmp_path)).to_dict()
 
-    assert payload["summary"]["total"] == 6
+    assert payload["summary"]["total"] == 9
     assert "large output row" not in str(payload)
     large_case = next(item for item in payload["results"] if item["case_id"] == "large_output_artifact_refs")
     assert large_case["evidence_refs"]
