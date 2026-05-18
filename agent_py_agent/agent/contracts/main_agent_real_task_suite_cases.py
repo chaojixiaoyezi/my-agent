@@ -31,7 +31,10 @@ def _furniture_homepage_case() -> MainAgentRealTaskCase:
             "failure_codes": ["HTML_PLACEHOLDER_LINK", "HTML_EXTERNAL_IMAGE_REF"],
             "quality_requirements": {
                 "clickable_links_must_resolve": True,
+                "complete_html_document": True,
                 "images_must_be_local_or_inline": True,
+                "min_size_bytes": 4000,
+                "single_file_no_external_assets": True,
             },
         },
     )

@@ -159,7 +159,7 @@ def test_cmd_real_e2e_revalidates_existing_real_task_report(tmp_path, capsys):
         / "outputs/furniture_homepage/index.html"
     )
     artifact.parent.mkdir(parents=True)
-    artifact.write_text("<!doctype html><html><body>ok</body></html>", encoding="utf-8")
+    artifact.write_text(_valid_furniture_homepage_html(), encoding="utf-8")
     args = argparse.Namespace(
         workspace=str(workspace),
         report="",
@@ -182,3 +182,67 @@ def test_cmd_real_e2e_revalidates_existing_real_task_report(tmp_path, capsys):
     assert exit_code == 0
     assert revalidation["execution_mode"] == "revalidate"
     assert revalidation["summary"]["completed"] == 1
+
+
+# LLM: _valid_furniture_homepage_html mirrors the structured real-task artifact contract.
+# 函数用途: 为 revalidation 测试生成完整、无外链、大小足够的 HTML，避免旧 tiny fixture 绕开真实验收合同。
+def _valid_furniture_homepage_html() -> str:
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AUREL Home</title>
+  <style>
+    body {{ margin:0; font-family:Inter, system-ui, sans-serif; color:#191715; background:#f8f5ef; }}
+    header {{ min-height:72vh; display:grid; place-items:end start; padding:48px; background:linear-gradient(135deg,#efe7dc,#c7b69f); }}
+    nav {{ position:fixed; inset:0 0 auto 0; display:flex; justify-content:space-between; padding:20px 48px; background:rgba(248,245,239,.82); backdrop-filter:blur(14px); }}
+    a {{ color:#191715; text-decoration:none; }}
+    h1 {{ max-width:820px; font-size:76px; line-height:.92; margin:0 0 22px; letter-spacing:0; }}
+    .lead {{ max-width:620px; font-size:20px; line-height:1.7; }}
+    .actions {{ display:flex; gap:16px; margin-top:28px; }}
+    .button {{ border:1px solid #191715; padding:14px 18px; }}
+    main {{ padding:72px 48px; }}
+    .collection {{ display:grid; grid-template-columns:minmax(0,1fr) 280px; gap:32px; padding:34px 0; border-bottom:1px solid #ded4c7; }}
+    .collection-visual {{ min-height:180px; background:radial-gradient(circle at 40% 30%, #876f55, transparent 31%), linear-gradient(145deg,#d8ccb9,#9a846b); }}
+    footer {{ padding:44px 48px; background:#191715; color:#f8f5ef; }}
+  </style>
+</head>
+<body>
+  <nav><strong>AUREL Home</strong><a href="#collections">Collections</a></nav>
+  <header>
+    <div>
+      <h1>Modern furniture with hotel-level restraint.</h1>
+      <p class="lead">A refined homepage for a premium furniture brand, built as a single self-contained HTML artifact with complete structure and no broken external references.</p>
+      <div class="actions"><a class="button" href="#collections">View collections</a><a class="button" href="#studio">Book studio visit</a></div>
+    </div>
+  </header>
+  <main id="collections">
+    {_furniture_homepage_sections()}
+    <section id="studio"><h2>Private studio appointments</h2><p>Design advisors prepare material boards, room plans, and delivery timing before each visit.</p></section>
+  </main>
+  <footer>© AUREL Home. Crafted for calm commercial interiors.</footer>
+</body>
+</html>
+"""
+
+
+# LLM: _furniture_homepage_sections keeps the reusable HTML fixture below strict size limits.
+# 函数用途: 生成足够丰富的家具首页区块内容，让产物大小合同能真实覆盖复验路径。
+def _furniture_homepage_sections() -> str:
+    return "\n".join(_furniture_homepage_section(index) for index in range(1, 9))
+
+
+# LLM: _furniture_homepage_section produces one self-contained section with no external refs.
+# 函数用途: 构造单个家具系列区块；避免 fixture 引入外链图片或占位链接。
+def _furniture_homepage_section(index: int) -> str:
+    return f"""
+        <section class="collection" id="collection-{index}">
+          <div class="collection-copy">
+            <p class="eyebrow">Collection {index}</p>
+            <h2>Quiet luxury for lived-in rooms</h2>
+            <p>Layered walnut, boucle, linen, and smoked glass create a calm residential showroom with practical navigation, editorial spacing, and polished commercial copy.</p>
+          </div>
+          <div class="collection-visual" aria-label="Abstract furniture vignette {index}"></div>
+        </section>
+        """

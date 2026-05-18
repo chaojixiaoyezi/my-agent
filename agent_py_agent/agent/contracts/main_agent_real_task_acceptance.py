@@ -100,7 +100,11 @@ def _validate_artifact_item(
     path = _artifact_path(item, task_workspace)
     validator = _validator_name(item)
     report = validate_artifact(
-        ArtifactAcceptanceRequest(path=path, workspace_root=task_workspace)
+        ArtifactAcceptanceRequest(
+            path=path,
+            workspace_root=task_workspace,
+            validation_contract=_validation_contract(item),
+        )
     ).to_dict()
     return RealTaskArtifactAcceptance(
         artifact_id=artifact_id,
@@ -127,6 +131,13 @@ def _validator_name(item: dict[str, object]) -> str:
     if not isinstance(contract, dict):
         return "artifact_acceptance"
     return str(contract.get("validator") or "artifact_acceptance")
+
+
+# LLM: _validation_contract passes structured expected-artifact options to generic validators.
+# 函数用途: 从 expected_artifacts.json 取 validation_contract；验收行为不再只看文件后缀。
+def _validation_contract(item: dict[str, object]) -> dict[str, object]:
+    contract = item.get("validation_contract")
+    return dict(contract) if isinstance(contract, dict) else {}
 
 
 # LLM: _summary counts artifact validation outcomes for case-level status.

@@ -28,7 +28,8 @@ class _DeliveryContractBackend:
                 text=(
                     "[TOOL_CALL]\n"
                     '{"tool":"write_file","path":"outputs/furniture_homepage/index.html",'
-                    '"content":"<!doctype html><html><body><a href=\\"#story\\">Story</a>'
+                    '"content":"<!doctype html><html><head><title>Maison</title></head><body>'
+                    '<a href=\\"#story\\">Story</a>'
                     '<section id=\\"story\\">Done</section></body></html>"}\n'
                     "[/TOOL_CALL]"
                 ),
@@ -62,6 +63,32 @@ class _FailedDeliveryContractBackend:
         return ModelResponse(text="已收到结构化修复反馈。", backend=self.name)
 
 
+# LLM: _IncompleteDeliveryContractBackend reproduces a truncated HTML file that used to close out too early.
+# 类用途: 写出半截单文件 HTML；第二轮确认系统返回机器验收失败而不是完成标记。
+class _IncompleteDeliveryContractBackend:
+    name = "fake_incomplete_delivery_contract_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    '{"tool":"write_file","path":"outputs/furniture_homepage/index.html",'
+                    '"content":"<!doctype html><html><head><link rel=\\"stylesheet\\" '
+                    'href=\\"https://fonts.example/font.css\\"><style>body{color:#111}"}\n'
+                    "[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        assert "HTML_INCOMPLETE_DOCUMENT" in prompt
+        assert "HTML_EXTERNAL_RESOURCE_REF" in prompt
+        return ModelResponse(text="已收到不完整 HTML 的结构化反馈。", backend=self.name)
+
+
 # LLM: _delivery_contract_prompt renders the same structured marker used by real task execution.
 # 函数用途: 构造带机器交付合同的用户 prompt；自然语言部分不作为完成事实来源。
 def _delivery_contract_prompt() -> str:
@@ -73,7 +100,13 @@ def _delivery_contract_prompt() -> str:
                 "kind": "html",
                 "preferred_path": "outputs/furniture_homepage/index.html",
                 "required": True,
-                "validation_contract": {"validator": "artifact_acceptance"},
+                "validation_contract": {
+                    "validator": "artifact_acceptance",
+                    "quality_requirements": {
+                        "complete_html_document": True,
+                        "single_file_no_external_assets": True,
+                    },
+                },
             }
         ],
     }
@@ -123,3 +156,23 @@ def test_tool_loop_does_not_close_out_when_delivery_contract_fails():
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
         assert report["ok"] is False
         assert report["artifacts"][0]["acceptance_report"]["findings"][0]["code"] == "HTML_PLACEHOLDER_LINK"
+
+
+# LLM: Incomplete contracted artifacts must not trigger delivery completion.
+# 函数用途: 覆盖真实家具 E2E 中半截 HTML 被误收口的问题，要求 contract findings 进入下一轮。
+def test_tool_loop_rejects_incomplete_delivery_contract_artifact():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=5)
+        agent = SimpleAgent(cfg, workspace)
+        backend = _IncompleteDeliveryContractBackend()
+        agent.backend = backend
+
+        result = agent.run(_delivery_contract_prompt(), save=False)
+        report = json.loads((workspace / ".agent_delivery/closeout.json").read_text(encoding="utf-8"))
+        codes = [item["code"] for item in report["artifacts"][0]["acceptance_report"]["findings"]]
+
+        assert backend.calls == 2
+        assert result.response == "已收到不完整 HTML 的结构化反馈。"
+        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
+        assert {"HTML_INCOMPLETE_DOCUMENT", "HTML_EXTERNAL_RESOURCE_REF"} <= set(codes)

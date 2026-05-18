@@ -36,6 +36,23 @@ def _event_types(path: Path) -> list[str]:
     ]
 
 
+# LLM: _valid_furniture_html produces a realistic artifact that satisfies the strict furniture contract.
+# 函数用途: 给真实任务验收测试写完整、无外链、体量足够的 HTML，避免旧的几行 fixture 误代表合格产物。
+def _valid_furniture_html() -> str:
+    sections = "\n".join(
+        f'<section id="collection-{idx}"><h2>Collection {idx}</h2><p>{"高级家具体验 " * 24}</p></section>'
+        for idx in range(16)
+    )
+    return (
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<title>Maison Furniture</title><style>body{font-family:serif;color:#222}"
+        "section{padding:32px;border-bottom:1px solid #ddd}</style></head><body>"
+        '<header><nav><a href="#story">Story</a><a href="#collection-1">Collection</a></nav></header>'
+        '<main><section id="story"><h1>Maison</h1><p>高端现代家具品牌首页。</p></section>'
+        f"{sections}</main><footer id=\"contact\">Contact</footer></body></html>"
+    )
+
+
 # LLM: The real task suite should write task prompts and contracts as refs, not inline report bodies.
 # 函数用途: 验证主代理真实任务套件以结构化文件描述任务，报告里只放引用、工位和验收摘要。
 def test_main_agent_real_task_suite_plan_is_refs_first(tmp_path):
@@ -199,11 +216,7 @@ def test_main_agent_real_task_execution_accepts_expected_artifact(tmp_path):
         / "outputs/furniture_homepage/index.html"
     )
     artifact.parent.mkdir(parents=True)
-    artifact.write_text(
-        "<!doctype html><html><head><title>Maison</title></head>"
-        '<body><a href="#story">Story</a><section id="story">Done</section></body></html>',
-        encoding="utf-8",
-    )
+    artifact.write_text(_valid_furniture_html(), encoding="utf-8")
 
     report = run_main_agent_real_task_execution(
         MainAgentRealTaskExecutionRequest(
@@ -249,10 +262,7 @@ def test_main_agent_real_task_execution_revalidates_existing_report(tmp_path):
         / "outputs/furniture_homepage/index.html"
     )
     artifact.parent.mkdir(parents=True)
-    artifact.write_text(
-        '<!doctype html><html><body><a href="/story">Story</a></body></html>',
-        encoding="utf-8",
-    )
+    artifact.write_text(_valid_furniture_html(), encoding="utf-8")
 
     revalidated = revalidate_main_agent_real_task_execution(
         tmp_path / report.report_ref,
@@ -296,10 +306,7 @@ def test_main_agent_real_task_revalidation_marks_valid_timeout_artifact(tmp_path
         / "outputs/furniture_homepage/index.html"
     )
     artifact.parent.mkdir(parents=True)
-    artifact.write_text(
-        '<!doctype html><html><body><a href="#story">Story</a><section id="story">Done</section></body></html>',
-        encoding="utf-8",
-    )
+    artifact.write_text(_valid_furniture_html(), encoding="utf-8")
 
     revalidated = revalidate_main_agent_real_task_execution(report_path, workspace=tmp_path)
 
@@ -322,10 +329,7 @@ def test_main_agent_real_task_timeout_accepts_valid_artifact(tmp_path, monkeypat
         / "outputs/furniture_homepage/index.html"
     )
     artifact.parent.mkdir(parents=True)
-    artifact.write_text(
-        '<!doctype html><html><body><a href="#story">Story</a><section id="story">Done</section></body></html>',
-        encoding="utf-8",
-    )
+    artifact.write_text(_valid_furniture_html(), encoding="utf-8")
 
     def _timeout(*args, **kwargs):
         raise subprocess.TimeoutExpired(

@@ -106,7 +106,13 @@ def _validate_artifact_item(item: dict[str, Any], workspace_root: Path) -> dict[
     path = _artifact_path(raw_path, workspace_root)
     if path is None:
         return _path_failure(item, raw_path, "ARTIFACT_PATH_INVALID")
-    report = validate_artifact(ArtifactAcceptanceRequest(path=path, workspace_root=workspace_root)).to_dict()
+    report = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=path,
+            workspace_root=workspace_root,
+            validation_contract=_validation_contract(item),
+        )
+    ).to_dict()
     return {
         "artifact_id": str(item.get("artifact_id") or ""),
         "kind": str(item.get("kind") or report.get("artifact_kind") or ""),
@@ -140,6 +146,13 @@ def _path_failure(item: dict[str, Any], raw_path: str, code: str) -> dict[str, A
         "location": raw_path,
         "value": raw_path,
     }
+
+
+# LLM: _validation_contract extracts machine-only artifact acceptance options from one contract item.
+# 函数用途: 将 expected_artifacts 里的 validation_contract 传给底层验收器，不解析自然语言说明。
+def _validation_contract(item: dict[str, Any]) -> dict[str, object]:
+    value = item.get("validation_contract")
+    return dict(value) if isinstance(value, dict) else {}
     return {
         "artifact_id": str(item.get("artifact_id") or ""),
         "kind": str(item.get("kind") or ""),

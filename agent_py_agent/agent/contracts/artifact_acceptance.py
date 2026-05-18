@@ -7,11 +7,12 @@ import csv
 import hashlib
 import json
 from dataclasses import dataclass, field
-from html.parser import HTMLParser
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
 from ..action_protocol_core import ArtifactRef
+from .artifact_html_contract import html_contract_findings, record_resource_ref
+from .artifact_html_refs import image_ref_findings, placeholder_link_findings, scan_html_refs
 
 
 # LLM: ArtifactAcceptanceRequest bundles one artifact validation request.
@@ -20,6 +21,7 @@ from ..action_protocol_core import ArtifactRef
 class ArtifactAcceptanceRequest:
     path: Path
     workspace_root: Path | None = None
+    validation_contract: dict[str, object] | None = None
 
 
 # LLM: ArtifactFinding is a machine-readable issue for repair prompts and QA reports.
@@ -80,26 +82,6 @@ def artifact_ref_payload(path: str | Path, kind: str = "") -> ArtifactRef:
     )
 
 
-# LLM: _HTMLAcceptanceParser collects actionable HTML refs without needing external parser packages.
-# 类用途: 使用标准库解析 HTML 标签，提取链接、图片和按钮等验收事实。
-class _HTMLAcceptanceParser(HTMLParser):
-    # LLM: __init__ initializes small ref collections for validation.
-    # 函数用途: 准备链接、图片和按钮事实列表；不做文件 I/O。
-    def __init__(self) -> None:
-        super().__init__()
-        self.links: list[tuple[str, str]] = []
-        self.images: list[tuple[str, str]] = []
-
-    # LLM: handle_starttag records only refs relevant to generic HTML acceptance.
-    # 函数用途: 读取 a/img 标签的关键属性，供后续判断坏链和外部图片风险。
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        values = {key.lower(): value or "" for key, value in attrs}
-        if tag.lower() == "a":
-            self.links.append(("href", values.get("href", "")))
-        if tag.lower() == "img":
-            self.images.append(("src", values.get("src", "")))
-
-
 # LLM: validate_html_artifact performs generic HTML checks that model self-reports often miss.
 # 函数用途: 验收 HTML 产物里的占位链接、外部图片引用和缺失本地图片，返回结构化 findings。
 def validate_html_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
@@ -112,12 +94,15 @@ def validate_html_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAccept
             location=str(path),
         )
         return ArtifactAcceptanceReport(ok=False, artifact_ref=str(path), findings=[finding])
-    parser = _HTMLAcceptanceParser()
-    parser.feed(path.read_text(encoding="utf-8", errors="replace"))
-    findings = [
-        *_placeholder_link_findings(parser),
-        *_image_ref_findings(parser, path=path, workspace_root=request.workspace_root),
-    ]
+    text = path.read_text(encoding="utf-8", errors="replace")
+    refs = scan_html_refs(text)
+    findings = _finding_records(
+        [
+            *placeholder_link_findings(refs),
+            *image_ref_findings(refs, path=path, workspace_root=request.workspace_root),
+            *html_contract_findings(text, refs.resources, request.validation_contract),
+        ]
+    )
     return ArtifactAcceptanceReport(
         ok=not any(item.severity == "hard" for item in findings),
         artifact_ref=str(path),
@@ -278,82 +263,10 @@ def _artifact_id(path: Path, digest: str) -> str:
     return f"artifact:{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:16]}"
 
 
-# LLM: _placeholder_link_findings catches href placeholders that look clickable but go nowhere.
-# 函数用途: 找出 `href="#"`、空 href 或 javascript:void(0) 这类假链接/假按钮。
-def _placeholder_link_findings(parser: _HTMLAcceptanceParser) -> list[ArtifactFinding]:
-    findings: list[ArtifactFinding] = []
-    for attr, value in parser.links:
-        normalized = value.strip().lower()
-        if normalized in {"", "#", "javascript:void(0)", "javascript:void(0);"}:
-            findings.append(
-                ArtifactFinding(
-                    code="HTML_PLACEHOLDER_LINK",
-                    severity="hard",
-                    message="Clickable link uses a placeholder target.",
-                    location=f"a[{attr}]",
-                    value=value,
-                )
-            )
-    return findings
-
-
-# LLM: _image_ref_findings keeps image reliability checks separate from unrelated CSS/font links.
-# 函数用途: 标记外部图片和缺失本地图片；不把 Google Fonts 等样式链接误判为图片问题。
-def _image_ref_findings(
-    parser: _HTMLAcceptanceParser,
-    *,
-    path: Path,
-    workspace_root: Path | None,
-) -> list[ArtifactFinding]:
-    findings = [
-        finding
-        for attr, value in parser.images
-        if (finding := _image_ref_finding(attr, value, path=path, workspace_root=workspace_root)) is not None
-    ]
-    return findings
-
-
-# LLM: _image_ref_finding classifies one image ref without deepening the batch loop.
-# 函数用途: 判断单个 img[src] 是外部图片、缺失本地图片还是可接受引用。
-def _image_ref_finding(
-    attr: str,
-    value: str,
-    *,
-    path: Path,
-    workspace_root: Path | None,
-) -> ArtifactFinding | None:
-    src = value.strip()
-    if src.lower().startswith(("http://", "https://")):
-        return ArtifactFinding(
-            code="HTML_EXTERNAL_IMAGE_REF",
-            severity="hard",
-            message="Image uses an external URL; local/offline validation cannot guarantee it will render.",
-            location=f"img[{attr}]",
-            value=src,
-        )
-    if src and not _local_image_ref_exists(src, path=path, workspace_root=workspace_root):
-        return ArtifactFinding(
-            code="HTML_LOCAL_IMAGE_MISSING",
-            severity="hard",
-            message="Image points to a local file that does not exist.",
-            location=f"img[{attr}]",
-            value=src,
-        )
-    return None
-
-
-# LLM: _local_image_ref_exists resolves relative image paths against artifact and workspace roots.
-# 函数用途: 判断本地图片引用是否存在，支持相对 HTML 文件和相对 workspace 两种常见写法。
-def _local_image_ref_exists(src: str, *, path: Path, workspace_root: Path | None) -> bool:
-    if src.startswith(("data:", "#")):
-        return True
-    candidate = Path(src)
-    if candidate.is_absolute():
-        return candidate.exists()
-    candidates = [path.parent / candidate]
-    if workspace_root is not None:
-        candidates.append(Path(workspace_root) / candidate)
-    return any(item.exists() for item in candidates)
+# LLM: _finding_records converts JSON-shaped helper findings into public report objects.
+# 函数用途: 保持专门校验模块独立，同时让公开报告继续使用统一 ArtifactFinding 类型。
+def _finding_records(items: list[dict[str, str]]) -> list[ArtifactFinding]:
+    return [ArtifactFinding(**item) for item in items]
 
 
 __all__ = [

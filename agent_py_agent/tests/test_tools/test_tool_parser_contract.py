@@ -337,6 +337,22 @@ def test_tool_call_parser_recovers_complete_json_without_closing_marker():
     ]
 
 
+# LLM: malformed opener recovery covers real model drift where `[TOOL_CALL` misses `]`.
+# 函数用途: 工具协议开头坏掉时，系统应给 parse-error 纠偏，而不是把坏工具块当最终回答。
+def test_tool_call_parser_reports_malformed_opening_marker():
+    registry = make_tool_registry(Path.cwd())
+    calls = registry.parse_tool_calls(
+        '[TOOL_CALL\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
+    )
+
+    result = registry.execute_call(calls[0])
+
+    assert calls[0]["tool"] == "__parse_error__"
+    assert "开始标记格式错误" in calls[0]["error"]
+    assert result.ok is False
+    assert "[TOOL_CALL]" in result.output
+
+
 # LLM: test_parse_error_hint_recommends_append_for_truncated_write covers long generated CSS/HTML writes.
 # 函数用途: 写文件内容太长被截断时，错误提示要引导模型用 append_file 分块写，避免重复失败。
 def test_parse_error_hint_recommends_append_for_truncated_write():

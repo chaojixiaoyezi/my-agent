@@ -42,6 +42,54 @@ def test_html_acceptance_flags_external_images_without_flagging_fonts(tmp_path):
     assert "HTML_EXTERNAL_STYLESHEET" not in codes
 
 
+# LLM: Contracted single-file HTML should reject remote runtime resources, not only broken images.
+# 函数用途: 验证单文件网页合同时，外部字体/CSS/脚本资源会被结构化 finding 拦住。
+def test_html_acceptance_contract_rejects_external_resources_for_single_file(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_html_artifact,
+    )
+
+    path = tmp_path / "index.html"
+    path.write_text(
+        '<!doctype html><html><head><link rel="stylesheet" href="https://fonts.example/font.css"></head>'
+        "<body><main>Furniture</main></body></html>",
+        encoding="utf-8",
+    )
+
+    report = validate_html_artifact(
+        ArtifactAcceptanceRequest(
+            path=path,
+            validation_contract={"quality_requirements": {"single_file_no_external_assets": True}},
+        )
+    )
+
+    assert report.ok is False
+    assert any(item.code == "HTML_EXTERNAL_RESOURCE_REF" for item in report.findings)
+
+
+# LLM: Contracted complete HTML should catch truncated files before delivery closeout.
+# 函数用途: 验证要求完整 HTML 文档时，缺少 body/html 关闭标签的半截文件不能通过。
+def test_html_acceptance_contract_rejects_incomplete_html_document(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_html_artifact,
+    )
+
+    path = tmp_path / "index.html"
+    path.write_text("<!doctype html><html><head><style>body{color:#111}", encoding="utf-8")
+
+    report = validate_html_artifact(
+        ArtifactAcceptanceRequest(
+            path=path,
+            validation_contract={"quality_requirements": {"complete_html_document": True}},
+        )
+    )
+
+    assert report.ok is False
+    assert any(item.code == "HTML_INCOMPLETE_DOCUMENT" for item in report.findings)
+
+
 # LLM: Acceptance reports must be JSON friendly for future QA and repair agents.
 # 函数用途: 确认验收报告可以作为结构化 findings 传给修复流程，不需要解析自然语言。
 def test_html_acceptance_report_to_dict(tmp_path):
