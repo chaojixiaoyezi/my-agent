@@ -8,6 +8,33 @@ from pathlib import Path
 import pytest
 
 
+# LLM: _write_echo_config keeps subprocess config setup shared across runner tests.
+# 函数用途: 写最小 echo backend 配置，让测试关注执行合同而不是重复 YAML 内容。
+def _write_echo_config(path: Path) -> Path:
+    path.write_text(
+        "\n".join(
+            [
+                'agent_name: "echo-test"',
+                'model_backend: "echo"',
+                'system_prompt: "你是测试用 echo agent。"',
+                "prompt_files: []",
+                "auto_save_memory: false",
+                "enable_subagents: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+# LLM: _event_types reads the per-case event ledger without exposing event payload details.
+# 函数用途: 从 events.jsonl 提取事件类型，验证长任务观察账本顺序。
+def _event_types(path: Path) -> list[str]:
+    return [
+        json.loads(line)["event_type"] for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+
+
 # LLM: The real task suite should write task prompts and contracts as refs, not inline report bodies.
 # 函数用途: 验证主代理真实任务套件以结构化文件描述任务，报告里只放引用、工位和验收摘要。
 def test_main_agent_real_task_suite_plan_is_refs_first(tmp_path):
@@ -91,20 +118,7 @@ def test_main_agent_real_task_execution_runs_echo_subset(tmp_path):
         run_main_agent_real_task_execution,
     )
 
-    base_config = tmp_path / "base_config.yaml"
-    base_config.write_text(
-        "\n".join(
-            [
-                'agent_name: "echo-test"',
-                'model_backend: "echo"',
-                'system_prompt: "你是测试用 echo agent。"',
-                "prompt_files: []",
-                "auto_save_memory: false",
-                "enable_subagents: true",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    base_config = _write_echo_config(tmp_path / "base_config.yaml")
 
     report = run_main_agent_real_task_execution(
         MainAgentRealTaskExecutionRequest(
@@ -125,6 +139,12 @@ def test_main_agent_real_task_execution_runs_echo_subset(tmp_path):
     assert payload["concurrency"]["case_count"] == 1
     assert first_case["exit_code"] == 0
     assert first_case["acceptance_summary"]["failed"] == 1
+    assert _event_types(tmp_path / first_case["events_ref"]) == [
+        "case_prepared",
+        "case_started",
+        "case_finished",
+        "case_acceptance_failed",
+    ]
     assert (tmp_path / first_case["stdout_ref"]).exists()
     assert (tmp_path / first_case["stderr_ref"]).exists()
 

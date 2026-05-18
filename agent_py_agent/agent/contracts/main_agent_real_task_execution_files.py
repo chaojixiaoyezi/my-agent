@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 from .main_agent_real_task_execution_models import MainAgentRealTaskExecutionRequest
@@ -79,6 +80,7 @@ def case_paths(workspace: Path, case_id: str) -> dict[str, Path]:
         "stdout": root / "stdout.txt",
         "stderr": root / "stderr.txt",
         "acceptance_report": root / "acceptance_report.json",
+        "events": root / "events.jsonl",
     }
 
 
@@ -106,6 +108,19 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
     )
 
 
+# LLM: append_event writes one bounded machine event for real task observability.
+# 函数用途: 给每个 case 的 events.jsonl 追加结构化事件，方便长任务运行中只读观察。
+def append_event(path: Path, event_type: str, payload: dict[str, object] | None = None) -> None:
+    event = {
+        "event_type": event_type,
+        "timestamp_unix": round(time.time(), 3),
+        "payload": dict(payload or {}),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+
+
 # LLM: rel stores portable refs within the selected workspace.
 # 函数用途: 把绝对路径转成相对工作区引用，避免报告绑定某台机器的路径。
 def rel(path: Path, base: Path) -> str:
@@ -119,6 +134,7 @@ __all__ = [
     "case_paths",
     "command_for_case",
     "execution_root",
+    "append_event",
     "package_root",
     "rel",
     "write_case_config",

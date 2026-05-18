@@ -15,6 +15,7 @@ from .main_agent_real_task_acceptance import (
     validate_real_task_artifacts,
 )
 from .main_agent_real_task_execution_files import (
+    append_event,
     case_paths,
     command_for_case,
     execution_root,
@@ -121,6 +122,7 @@ def _prepare_or_execute(
     write_case_config(config_path, request.base_config_path, task_workspace)
     command = command_for_case(case, request, config_path=config_path, workspace=workspace)
     write_json(paths["command"], {"argv": command, "cwd": str(package_root(request))})
+    append_event(paths["events"], "case_prepared", {"case_id": case.case_id})
     runtime = _CaseRuntime(
         case=case,
         request=request,
@@ -137,6 +139,7 @@ def _prepare_or_execute(
 # 函数用途: 启动一次主代理 run，捕获输出文件；超时和非零退出都会进结构化 issues。
 def _run_case(runtime: _CaseRuntime) -> MainAgentRealTaskExecutionCaseResult:
     start = time.monotonic()
+    append_event(runtime.paths["events"], "case_started", {"case_id": runtime.case.case_id})
     try:
         completed = subprocess.run(
             runtime.command,
@@ -146,35 +149,65 @@ def _run_case(runtime: _CaseRuntime) -> MainAgentRealTaskExecutionCaseResult:
             timeout=runtime.request.task_timeout_seconds,
             check=False,
         )
-        duration = time.monotonic() - start
-        runtime.paths["stdout"].write_text(completed.stdout, encoding="utf-8")
-        runtime.paths["stderr"].write_text(completed.stderr, encoding="utf-8")
-        acceptance = _validate_case_artifacts(runtime)
-        status = "COMPLETED" if completed.returncode == 0 and acceptance.ok else "FAILED"
-        issues = _case_issues(completed.returncode, acceptance)
-        return _case_result(
-            _CaseResultBundle(
-                runtime=runtime,
-                status=status,
-                acceptance=acceptance,
-                exit_code=completed.returncode,
-                duration_seconds=duration,
-                issues=issues,
-            )
-        )
+        return _completed_case_result(runtime, completed, duration=time.monotonic() - start)
     except subprocess.TimeoutExpired as exc:
-        duration = time.monotonic() - start
-        runtime.paths["stdout"].write_text(str(exc.stdout or ""), encoding="utf-8")
-        runtime.paths["stderr"].write_text(str(exc.stderr or ""), encoding="utf-8")
-        return _case_result(
-            _CaseResultBundle(
-                runtime=runtime,
-                status="FAILED",
-                exit_code=124,
-                duration_seconds=duration,
-                issues=("timeout",),
-            )
+        return _timeout_case_result(runtime, exc, duration=time.monotonic() - start)
+
+
+# LLM: _completed_case_result converts one subprocess completion into report facts.
+# 函数用途: 写 stdout/stderr、验收产物、追加事件，并返回最终 case 结果。
+def _completed_case_result(
+    runtime: _CaseRuntime,
+    completed: subprocess.CompletedProcess[str],
+    *,
+    duration: float,
+) -> MainAgentRealTaskExecutionCaseResult:
+    runtime.paths["stdout"].write_text(completed.stdout, encoding="utf-8")
+    runtime.paths["stderr"].write_text(completed.stderr, encoding="utf-8")
+    append_event(
+        runtime.paths["events"],
+        "case_finished",
+        {"case_id": runtime.case.case_id, "exit_code": completed.returncode},
+    )
+    acceptance = _validate_case_artifacts(runtime)
+    status = "COMPLETED" if completed.returncode == 0 and acceptance.ok else "FAILED"
+    _append_acceptance_event(runtime, acceptance)
+    return _case_result(
+        _CaseResultBundle(
+            runtime=runtime,
+            status=status,
+            acceptance=acceptance,
+            exit_code=completed.returncode,
+            duration_seconds=duration,
+            issues=_case_issues(completed.returncode, acceptance),
         )
+    )
+
+
+# LLM: _timeout_case_result keeps timeout handling separate from normal completion.
+# 函数用途: 记录 timeout stdout/stderr 和事件，返回稳定失败结果。
+def _timeout_case_result(
+    runtime: _CaseRuntime,
+    exc: subprocess.TimeoutExpired,
+    *,
+    duration: float,
+) -> MainAgentRealTaskExecutionCaseResult:
+    runtime.paths["stdout"].write_text(str(exc.stdout or ""), encoding="utf-8")
+    runtime.paths["stderr"].write_text(str(exc.stderr or ""), encoding="utf-8")
+    append_event(
+        runtime.paths["events"],
+        "case_timeout",
+        {"case_id": runtime.case.case_id, "timeout_seconds": runtime.request.task_timeout_seconds},
+    )
+    return _case_result(
+        _CaseResultBundle(
+            runtime=runtime,
+            status="FAILED",
+            exit_code=124,
+            duration_seconds=duration,
+            issues=("timeout",),
+        )
+    )
 
 
 # LLM: _case_result converts per-case files into the execution report shape.
@@ -194,6 +227,7 @@ def _case_result(bundle: _CaseResultBundle) -> MainAgentRealTaskExecutionCaseRes
         stdout_ref=rel(runtime.paths["stdout"], runtime.workspace),
         stderr_ref=rel(runtime.paths["stderr"], runtime.workspace),
         acceptance_report_ref=rel(runtime.paths["acceptance_report"], runtime.workspace),
+        events_ref=rel(runtime.paths["events"], runtime.workspace),
         acceptance_summary=dict(acceptance.summary if acceptance else {}),
         exit_code=bundle.exit_code,
         duration_seconds=bundle.duration_seconds,
@@ -210,6 +244,23 @@ def _validate_case_artifacts(runtime: _CaseRuntime) -> RealTaskAcceptanceReport:
             task_workspace=runtime.paths["workspace"],
             report_path=runtime.paths["acceptance_report"],
         )
+    )
+
+
+# LLM: _append_acceptance_event records case-level validation outcome for live observation.
+# 函数用途: 将产物验收通过/失败写进 events.jsonl，长任务未结束时也能看出卡点。
+def _append_acceptance_event(
+    runtime: _CaseRuntime,
+    acceptance: RealTaskAcceptanceReport,
+) -> None:
+    append_event(
+        runtime.paths["events"],
+        "case_acceptance_passed" if acceptance.ok else "case_acceptance_failed",
+        {
+            "case_id": runtime.case.case_id,
+            "summary": dict(acceptance.summary),
+            "report_ref": rel(runtime.paths["acceptance_report"], runtime.workspace),
+        },
     )
 
 
