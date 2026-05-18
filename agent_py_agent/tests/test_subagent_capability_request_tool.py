@@ -8,7 +8,10 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.capability_request_tool import CapabilityRequestTool
+from agent_py_agent.agent.agent_core.capability_request_tool import (
+    CapabilityRequestTool,
+    build_capability_request_spec,
+)
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagents.manager import SubAgentManager
@@ -135,6 +138,41 @@ def test_top_level_worker_can_request_capability(tmp_path):
 
     assert result.ok is True
     assert manager.load(task.id).capability_requests[0].requested_tools == ["fetch_url"]
+
+
+def test_capability_request_tool_discloses_skill_and_mcp_fields():
+    spec = build_capability_request_spec()
+
+    assert "requested_skills" in spec.parameters
+    assert "requested_mcp_tools" in spec.parameters
+    assert "requested_skills" in spec.parameter_details
+    assert "requested_mcp_tools" in spec.parameter_details
+
+
+def test_capability_request_infers_skill_and_mcp_types(tmp_path):
+    agent, manager, task = _agent_with_current_run(tmp_path)
+    tool = CapabilityRequestTool(agent)
+
+    skill_result = tool.execute(
+        {
+            "problem": "需要专用调试流程。",
+            "requested_skills": ["python-debug"],
+        }
+    )
+    mcp_result = tool.execute(
+        {
+            "problem": "需要浏览器 MCP 截图。",
+            "requested_mcp_tools": ["browser.screenshot"],
+        }
+    )
+
+    assert skill_result.ok is True
+    assert mcp_result.ok is True
+    loaded = manager.load(task.id)
+    assert loaded.capability_requests[0].capability_type == "skill"
+    assert loaded.capability_requests[0].requested_skills == ["python-debug"]
+    assert loaded.capability_requests[1].capability_type == "mcp"
+    assert loaded.capability_requests[1].requested_mcp_tools == ["browser.screenshot"]
 
 
 # LLM: test_capability_request_tool_is_registered_for_simple_agent proves runners can see the tool.

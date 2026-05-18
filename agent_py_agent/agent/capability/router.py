@@ -9,13 +9,16 @@ from __future__ import annotations
 后续无论是父代理给子代理下发 skill，还是下发 tool，都可以走同一套路由协议。
 """
 
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..tools import ToolSpec
 from .config import CapabilityConfig
+from .grants import CapabilityGrantScope, filter_cards_by_grant_scope
+from .mcp import McpToolDescriptor, from_mcp_tool
+from .scoring import score_card, tokenize
 from .skills import SkillCard, SkillRegistry
+from .usage import CapabilityUsageStore
 
 _PLAYWRIGHT_CAPABILITIES = [
     "playwright",
@@ -101,6 +104,32 @@ class CapabilityCard:
             return text[:max_chars] + "\n  ... 已截断"
         return text
 
+    # LLM: CapabilityCard.render_detail is for disclosure only; it must not imply authorization or execution.
+    # 函数用途: 渲染能力详情，给 CLI 和 capability 描述工具披露能力边界。
+    def render_detail(self, *, max_chars: int = 0) -> str:
+        lines = [
+            f"# {self.kind}:{self.name}",
+            f"id: {self.id}",
+            f"risk_level: {self.risk_level}",
+            f"source: {self.source or '-'}",
+            "",
+            self.description,
+        ]
+        if self.capabilities:
+            lines.extend(["", "capabilities:", *[f"- {item}" for item in self.capabilities]])
+        if self.when_to_use:
+            lines.extend(["", "when_to_use:", *[f"- {item}" for item in self.when_to_use]])
+        if self.not_when_to_use:
+            lines.extend(["", "not_when_to_use:", *[f"- {item}" for item in self.not_when_to_use]])
+        if self.side_effects:
+            lines.extend(["", "side_effects:", *[f"- {item}" for item in self.side_effects]])
+        if self.keywords:
+            lines.extend(["", f"keywords: {', '.join(self.keywords)}"])
+        text = "\n".join(lines)
+        if max_chars and len(text) > max_chars:
+            return text[:max_chars].rstrip() + "\n... 已截断"
+        return text
+
 
 # LLM: CapabilitySearchHit is a 能力路由 boundary object; coordinate field or method changes with callers, docs, and focused tests.
 # 类用途: 能力检索命中结果。
@@ -130,9 +159,13 @@ class CapabilityRouter:
         skill_registry: SkillRegistry | None = None,
         tool_specs: list[ToolSpec] | None = None,
         extra_cards: list[CapabilityCard] | None = None,
+        usage_store: CapabilityUsageStore | None = None,
+        grant_scope: CapabilityGrantScope | None = None,
     ):
         self.config = config or CapabilityConfig()
         self._cards: dict[str, CapabilityCard] = {}
+        self.usage_store = usage_store
+        self.grant_scope = grant_scope
         if skill_registry is not None:
             for card in skill_registry.cards():
                 self.register(from_skill_card(card))
@@ -157,8 +190,52 @@ class CapabilityRouter:
 
         cards = list(self._cards.values())
         if kinds is None:
-            return cards
-        return [card for card in cards if card.kind in kinds]
+            return filter_cards_by_grant_scope(cards, self.grant_scope)
+        return filter_cards_by_grant_scope([card for card in cards if card.kind in kinds], self.grant_scope)
+
+    # LLM: CapabilityRouter.get supports disclosure by stable id or unambiguous name without reading skill bodies.
+    # 函数用途: 按 id、kind:name 或唯一 name 查找能力卡。
+    def get(self, identifier: str) -> CapabilityCard | None:
+        key = str(identifier or "").strip()
+        if not key:
+            return None
+        if key in self._cards:
+            return self._cards[key]
+        matches = [
+            card
+            for card in self._cards.values()
+            if card.name == key or f"{card.kind}:{card.name}" == key
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    # LLM: CapabilityRouter.describe exposes capability boundaries; it does not grant or execute anything.
+    # 函数用途: 渲染单张能力卡的详情，供用户/模型确认何时使用。
+    def describe(self, identifier: str, *, max_chars: int = 0) -> str:
+        card = self.get(identifier)
+        if card is None:
+            raise KeyError(f"未知 capability: {identifier}")
+        return card.render_detail(max_chars=max_chars)
+
+    # LLM: CapabilityRouter.render_catalog gives a bounded visible inventory for CLI and model-facing catalog tools.
+    # 函数用途: 输出能力目录摘要，支持按 kind 过滤和数量上限。
+    def render_catalog(
+        self,
+        *,
+        kinds: set[str] | None = None,
+        limit: int = 0,
+        max_chars: int = 0,
+    ) -> str:
+        cards = sorted(self.cards(kinds=kinds), key=lambda item: (item.kind, item.name, item.id))
+        if limit > 0:
+            cards = cards[:limit]
+        if not cards:
+            return "# Capability Catalog\n当前没有匹配的 capability card。"
+        text = "# Capability Catalog\n" + "\n\n".join(card.render_compact() for card in cards)
+        if max_chars and len(text) > max_chars:
+            return text[:max_chars].rstrip() + "\n... 已截断"
+        return text
 
     # LLM: CapabilityRouter.search belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 检索候选能力。 `limit=None` 时使用配置里的 `capability_candidate_limit`。 `limit=0` 表示不限制。。
@@ -178,12 +255,31 @@ class CapabilityRouter:
         hits: list[CapabilitySearchHit] = []
         for card in self.cards(kinds=kinds):
             score, reasons = score_card(query, card)
+            score, reasons = self._apply_usage_feedback(card, score, reasons)
             if score > 0:
                 hits.append(CapabilitySearchHit(card=card, score=score, reasons=reasons[:4]))
         hits.sort(key=lambda item: (-item.score, item.card.kind, item.card.name))
         if effective_limit == 0:
             return hits
         return hits[:effective_limit]
+
+    # LLM: _apply_usage_feedback lets routing learn from accepted/rejected choices without changing base keyword scoring.
+    # 函数用途: 根据能力使用记录调整分数，并追加可解释原因。
+    def _apply_usage_feedback(
+        self,
+        card: CapabilityCard,
+        score: float,
+        reasons: list[str],
+    ) -> tuple[float, list[str]]:
+        if self.usage_store is None:
+            return score, reasons
+        stats = self.usage_store.stats_for(card.id)
+        bonus = stats.score_bonus
+        if bonus > 0:
+            return score + bonus, [*reasons, f"历史成功 +{stats.successes}"]
+        if bonus < 0:
+            return score + bonus, [*reasons, f"历史失败 +{stats.failures}"]
+        return score, reasons
 
     # LLM: CapabilityRouter.render_candidates belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 把候选能力渲染成给代理看的短说明。。
@@ -300,85 +396,3 @@ def classify_tool_risk(spec: ToolSpec) -> tuple[list[str], str]:
     if spec.category == "filesystem":
         return ["filesystem_read"], "low"
     return [], "low"
-
-
-# LLM: score_card belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 用可解释的关键词规则给能力卡打分。。
-def score_card(query: str, card: CapabilityCard) -> tuple[float, list[str]]:
-    """用可解释的关键词规则给能力卡打分。"""
-
-    tokens = tokenize(query)
-    if not tokens:
-        return 0.0, []
-    haystacks = {
-        "name": card.name.lower(),
-        "kind": card.kind.lower(),
-        "description": card.description.lower(),
-        "capabilities": " ".join(card.capabilities).lower(),
-        "keywords": " ".join(card.keywords).lower(),
-        "when_to_use": " ".join(card.when_to_use).lower(),
-        "not_when_to_use": " ".join(card.not_when_to_use).lower(),
-    }
-    score = 0.0
-    reasons: list[str] = []
-    for token in tokens:
-        token_score = 0.0
-        if token in haystacks["name"]:
-            token_score += 6.0
-            reasons.append(f"命中名称'{token}'")
-        if token in haystacks["capabilities"]:
-            token_score += 5.0
-            reasons.append(f"命中能力'{token}'")
-        if token in haystacks["keywords"]:
-            token_score += 4.0
-            reasons.append(f"命中关键词'{token}'")
-        if token in haystacks["kind"]:
-            token_score += 2.0
-            reasons.append(f"命中类型'{token}'")
-        if token in haystacks["description"] or token in haystacks["when_to_use"]:
-            token_score += 1.5
-            reasons.append(f"命中描述'{token}'")
-        score += token_score
-    return score, _dedupe(reasons)
-
-
-# LLM: tokenize belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 把查询切成适合粗检索的 token。。
-def tokenize(text: str) -> list[str]:
-    """把查询切成适合粗检索的 token。"""
-
-    lowered = text.lower()
-    tokens = re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]+", lowered)
-    expanded: list[str] = []
-    for token in tokens:
-        expanded.append(token)
-        if re.fullmatch(r"[\u4e00-\u9fff]+", token):
-            expanded.extend(_chinese_ngrams(token))
-    return _dedupe(expanded)
-
-
-# LLM: _chinese_ngrams belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 提取中文字符的 n-gram（2-4 gram）。。
-def _chinese_ngrams(token: str) -> list[str]:
-    """提取中文字符的 n-gram（2-4 gram）。"""
-
-    ngrams: list[str] = []
-    for size in (2, 3, 4):
-        for idx in range(0, max(len(token) - size + 1, 0)):
-            ngrams.append(token[idx : idx + size])
-    return ngrams
-
-
-# LLM: _dedupe belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
-# 函数用途: 保持顺序去重。。
-def _dedupe(items: list[str]) -> list[str]:
-    """保持顺序去重。"""
-
-    seen: set[str] = set()
-    result: list[str] = []
-    for item in items:
-        if item in seen:
-            continue
-        seen.add(item)
-        result.append(item)
-    return result

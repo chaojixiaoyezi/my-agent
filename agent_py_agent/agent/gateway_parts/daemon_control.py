@@ -33,9 +33,13 @@ from .scoped_locks import (
     _get_lock_dir,
     _get_scope_lock_path,
     _release_lock_if_stale,
-    acquire_scoped_lock,
     release_all_scoped_locks,
-    release_scoped_lock,
+)
+from .scoped_locks import (
+    acquire_scoped_lock as _scoped_locks_acquire_scoped_lock,
+)
+from .scoped_locks import (
+    release_scoped_lock as _scoped_locks_release_scoped_lock,
 )
 
 # Exit code to signal service manager should restart (长期助手: EX_TEMPFAIL = 75)
@@ -173,6 +177,35 @@ def remove_pid_file_if_owned(pid_path: Path) -> None:
 
 
 # 鈹€鈹€ Scoped locks and runtime status are re-exported from focused modules. 鈹€鈹€鈹€
+
+
+# LLM: acquire_scoped_lock preserves the legacy daemon_control patch point for lock-dir tests.
+# 函数用途: 通过 daemon_control 暴露 scoped lock 获取，同时让本模块的 _get_lock_dir 覆盖生效。
+def acquire_scoped_lock(
+    scope: str, identity: str, metadata: dict[str, object] | None = None
+) -> tuple[bool, dict | None]:
+    return _with_scoped_lock_dir_override(
+        lambda: _scoped_locks_acquire_scoped_lock(scope, identity, metadata)
+    )
+
+
+# LLM: release_scoped_lock preserves the legacy daemon_control patch point for lock-dir tests.
+# 函数用途: 通过 daemon_control 暴露 scoped lock 释放，同时让本模块的 _get_lock_dir 覆盖生效。
+def release_scoped_lock(scope: str, identity: str) -> None:
+    _with_scoped_lock_dir_override(lambda: _scoped_locks_release_scoped_lock(scope, identity))
+
+
+# LLM: _with_scoped_lock_dir_override bridges old facade tests to the focused scoped_locks module.
+# 函数用途: 在一次调用期间把 scoped_locks 的锁目录解析切到 daemon_control 的可 patch 函数。
+def _with_scoped_lock_dir_override(action):
+    from . import scoped_locks
+
+    original = scoped_locks._get_lock_dir
+    scoped_locks._get_lock_dir = _get_lock_dir
+    try:
+        return action()
+    finally:
+        scoped_locks._get_lock_dir = original
 
 
 # 鈹€鈹€ Legacy API compatibility 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€

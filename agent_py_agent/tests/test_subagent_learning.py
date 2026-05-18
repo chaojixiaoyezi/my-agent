@@ -118,7 +118,9 @@ def test_learn_cli_lists_accepts_rejects_and_reports_stats(tmp_path, capsys):
     assert args.func(args) == 0
     output = capsys.readouterr().out
     assert f"accepted {candidate.id}" in output
+    assert "未生成 SKILL.md" in output
     assert agent.subagents.load_learning_candidate(candidate.id).status == "accepted"
+    assert not list((tmp_path / "data" / "learning_drafts").glob("**/SKILL.md"))
 
     args = parser.parse_args(["--config", str(config_path), "learn", "stats", "--json"])
     assert args.func(args) == 0

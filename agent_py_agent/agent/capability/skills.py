@@ -75,7 +75,7 @@ class SkillRegistry:
         for skill_dir in self.skill_dirs:
             if not skill_dir.exists():
                 continue
-            for skill_file in sorted(skill_dir.glob("*/SKILL.md")):
+            for skill_file in _iter_skill_files(skill_dir):
                 card = parse_skill_file(skill_file, source=str(skill_dir))
                 cards[card.name] = card
         self._cards = cards
@@ -95,6 +95,44 @@ class SkillRegistry:
 
         return self._cards.get(name)
 
+    # LLM: SkillRegistry.resolve_path belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
+    # 函数用途: 安全返回已索引 skill 的磁盘路径；只允许按已扫描 name 解析。
+    def resolve_path(self, name: str) -> Path:
+        """安全返回已索引 skill 的磁盘路径。"""
+
+        card = self.get(name)
+        if card is None:
+            raise KeyError(f"未知 skill: {name}")
+        return card.path
+
+    # LLM: SkillRegistry.search belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
+    # 函数用途: 在轻量 card 元数据中检索 skill，不读取完整正文。
+    def search(self, query: str, *, limit: int = 10) -> list[SkillCard]:
+        """在轻量 card 元数据中检索 skill，不读取完整正文。"""
+
+        words = _query_words(query)
+        if not words:
+            return self.cards() if limit == 0 else self.cards()[:limit]
+
+        scored: list[tuple[int, SkillCard]] = []
+        for card in self.cards():
+            haystack = _card_search_text(card)
+            score = sum(1 for word in words if word in haystack)
+            if query.strip().lower() in haystack:
+                score += 3
+            if score:
+                scored.append((score, card))
+        hits = [card for _, card in sorted(scored, key=lambda item: (-item[0], item[1].name))]
+        return hits if limit == 0 else hits[:limit]
+
+    # LLM: SkillRegistry.render_catalog belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
+    # 函数用途: 渲染可给模型看的 skill catalog；可选 query 时只渲染命中 card。
+    def render_catalog(self, query: str | None = None, *, limit: int = 10) -> str:
+        """渲染可给模型看的 skill catalog。"""
+
+        cards = self.search(query, limit=limit) if query else (self.cards() if limit == 0 else self.cards()[:limit])
+        return "\n".join(card.render_compact() for card in cards)
+
     # LLM: SkillRegistry.load_body belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 读取某个 skill 的正文。 `max_chars=0` 表示不限制长度。这里先用字符数兜底，后续接 tokenizer 时可以替换成真正的 token 截断。。
     def load_body(self, name: str, *, max_chars: int = 0) -> str:
@@ -110,6 +148,15 @@ class SkillRegistry:
         if max_chars and len(body) > max_chars:
             return body[:max_chars] + "\n... 已截断"
         return body
+
+
+# LLM: _iter_skill_files belongs to 能力路由; keep scan order deterministic because duplicate skill names intentionally override.
+# 函数用途: 枚举常见 skill 布局，支持一层 skill 和 plugin/group 两层 skill。
+def _iter_skill_files(skill_dir: Path) -> list[Path]:
+    files: list[Path] = []
+    for pattern in ("*/SKILL.md", "*/*/SKILL.md"):
+        files.extend(sorted(skill_dir.glob(pattern)))
+    return files
 
 
 # LLM: parse_skill_file belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
@@ -219,6 +266,33 @@ def _as_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     return [str(value).strip()]
+
+
+# LLM: _query_words belongs to 能力路由; keep matching simple and body-free for catalog retrieval.
+# 函数用途: 把用户查询拆成稳定的小写关键词。
+def _query_words(query: str) -> list[str]:
+    """把用户查询拆成稳定的小写关键词。"""
+
+    return [word for word in query.lower().replace("-", " ").split() if word]
+
+
+# LLM: _card_search_text belongs to 能力路由; keep this metadata-only so catalog search does not load full skill bodies.
+# 函数用途: 汇总 SkillCard 可检索字段，不读取 `SKILL.md` 正文。
+def _card_search_text(card: SkillCard) -> str:
+    """汇总 SkillCard 可检索字段，不读取 `SKILL.md` 正文。"""
+
+    fields = [
+        card.name,
+        card.description,
+        card.when_to_use,
+        card.scope,
+        card.risk_level,
+        card.source,
+        *card.tags,
+        *card.capabilities,
+        *card.tools_required,
+    ]
+    return " ".join(fields).lower()
 
 
 # LLM: _first_paragraph belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.

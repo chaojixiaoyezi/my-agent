@@ -200,8 +200,11 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
 # LLM: _build_tool_registry 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
 # 函数用途: 按工具配置创建 ToolRegistry 并注入工作区边界。
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
+    from .capability.mcp_config import mcp_registry_config_from_agent_config
+
     workspace_root = agent.root.parent if (agent.root / "__main__.py").exists() else agent.root
     workspace_roots = [workspace_root, *[root for root in agent.workspace_roots if root != agent.root]]
+    mcp_config = mcp_registry_config_from_agent_config(config)
     return ToolRegistry(
         ToolRegistryParams(
             workspace_root=workspace_root,
@@ -227,6 +230,9 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             artifact_read_budget_window_seconds=config.tool_artifact_read_budget_window_seconds,
             artifact_read_budget_max_chars=config.tool_artifact_read_budget_max_chars,
             artifact_default_read_chars=config.memory_artifact_default_read_chars,
+            mcp_tools=mcp_config.descriptors,
+            mcp_executor=mcp_config.executor,
+            capability_grant_scope=mcp_config.grant_scope,
         )
     )
 

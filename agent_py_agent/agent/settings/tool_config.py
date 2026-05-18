@@ -43,3 +43,8 @@ class ToolConfig:
     tool_detail_max_chars: int = 4000
     tool_retrieval_limit: int = 3
     tool_vector_search_enabled: bool = True
+    mcp_stdio_servers: list[dict[str, object]] = field(default_factory=list)
+    mcp_tool_descriptors: list[dict[str, object]] = field(default_factory=list)
+    capability_grant_tools: list[str] = field(default_factory=list)
+    capability_grant_skills: list[str] = field(default_factory=list)
+    capability_grant_mcp_tools: list[str] = field(default_factory=list)

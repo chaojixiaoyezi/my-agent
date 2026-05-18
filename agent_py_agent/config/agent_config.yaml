@@ -452,6 +452,25 @@ tool_retrieval_limit: 3
 # 当前代码已经把接口留好了；未接真实向量索引前仍以关键词检索为主
 tool_vector_search_enabled: true
 
+# MCP stdio server 配置：
+# - 默认空列表，不启动任何外部 MCP 进程。
+# - 每项是 {name, command, cwd, env, startup_timeout_seconds, request_timeout_seconds}。
+# - command 建议用 argv 列表，避免 shell 转义差异。
+mcp_stdio_servers: []
+
+# MCP tool 描述：
+# - 默认空列表，不向模型披露外部 MCP 能力。
+# - 每项描述一个 server/name tool，字段包括 description、capabilities、keywords、risk_level 等。
+# - 真正执行仍会走 ToolRegistry 和 capability grant scope。
+mcp_tool_descriptors: []
+
+# capability 可见范围：
+# - 三个列表全空表示不额外过滤能力目录。
+# - 填了任意项后，capability_search / capability_describe 只披露对应 tool、skill 或 MCP tool。
+capability_grant_tools: []
+capability_grant_skills: []
+capability_grant_mcp_tools: []
+
 # Chat / CLI 默认展示和读取预算：
 # - 这些配置控制命令默认显示多少、交互历史带多少、长文本折叠多少。
 # - 后续前端配置页也应读取这些真实后端字段，而不是另写一套默认值。

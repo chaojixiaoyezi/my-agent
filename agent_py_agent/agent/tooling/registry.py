@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..log_analysis.capabilities import SECURITY_TOOL_NAMES
 from .artifact import ReadArtifactTool
@@ -42,6 +42,7 @@ from .models import (
     ToolSpec,
     VectorToolSearchProvider,
 )
+from .registry_capability_catalog import register_capability_catalog_tools
 from .registry_catalog import CatalogRenderConfig, render_catalog_entries
 from .registry_execution import (
     ExecuteRegistryCallParams,
@@ -53,6 +54,11 @@ from .registry_execution import (
 from .registry_prompt import render_tool_catalog_section
 from .shell import ShellTool
 from .web import FetchUrlTool, HttpRequestTool
+
+if TYPE_CHECKING:
+    from ..capability.grants import CapabilityGrantScope
+    from ..capability.mcp import McpToolDescriptor
+    from ..capability.mcp_runtime import InMemoryMcpExecutor
 
 _allowed_tool_set = allowed_tool_set
 
@@ -82,6 +88,9 @@ class ToolRegistryParams:
     tool_detail_max_chars: int = 0
     tool_write_inline_max_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS
     expose_security_tools: bool = False
+    mcp_tools: list[McpToolDescriptor] | None = None
+    mcp_executor: InMemoryMcpExecutor | None = None
+    capability_grant_scope: CapabilityGrantScope | None = None
     artifact_read_budget_window_seconds: int = DEFAULT_ARTIFACT_READ_BUDGET_WINDOW_SECONDS
     artifact_read_budget_max_chars: int = DEFAULT_ARTIFACT_READ_BUDGET_MAX_CHARS
     artifact_default_read_chars: int = 4000
@@ -159,6 +168,32 @@ def _register_security_tools(registry: ToolRegistry) -> None:
     registry.register(SecurityTraceCaseTool(registry.workspace_root))
 
 
+# LLM: _register_mcp_tools keeps external MCP registration scoped and catalog-friendly.
+# 函数用途: 按授权范围注册 MCP tool，并保存对应 capability cards 供目录披露。
+def _register_mcp_tools(registry: ToolRegistry, params: ToolRegistryParams) -> None:
+    from ..capability.mcp import from_mcp_tool
+    from ..capability.mcp_runtime import InMemoryMcpExecutor, McpTool
+
+    descriptors = params.mcp_tools or []
+    if not descriptors:
+        return
+    executor = params.mcp_executor or InMemoryMcpExecutor()
+    registry.capability_mcp_executor = executor
+    for descriptor in descriptors:
+        server = descriptor.server.strip()
+        name = descriptor.name.strip()
+        if params.capability_grant_scope is not None and not params.capability_grant_scope.allows_mcp_tool(server, name):
+            continue
+        registry.register(
+            McpTool(
+                descriptor=descriptor,
+                executor=executor,
+                grant_scope=params.capability_grant_scope,
+            )
+        )
+        registry.capability_extra_cards.append(from_mcp_tool(descriptor))
+
+
 # LLM: ToolRegistry 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
 # 类用途: ToolRegistry 数据模型，集中保存 工具系统 的结构化状态。
 class ToolRegistry:
@@ -184,9 +219,14 @@ class ToolRegistry:
         self.tool_detail_max_chars = max(0, params.tool_detail_max_chars)
         self.retrieval_limit = params.retrieval_limit
         self.retriever = _build_tool_retriever(params)
+        self.capability_grant_scope = params.capability_grant_scope
+        self.capability_extra_cards = []
+        self.capability_mcp_executor = None
         _register_filesystem_tools(self, params)
         _register_network_tools(self, params)
         _register_security_tools(self)
+        _register_mcp_tools(self, params)
+        register_capability_catalog_tools(self)
 
     # LLM: ToolRegistry.register 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 完成 工具系统 中的 register 步骤，并保持调用方依赖的数据形状。
@@ -251,6 +291,14 @@ class ToolRegistry:
             show_truncated_notice=self.catalog_show_truncated_notice,
             detail_max_chars=self.tool_detail_max_chars,
         )
+
+    # LLM: ToolRegistry.close releases optional runtime resources owned by registered tools.
+    # 函数用途: 关闭注册表持有的外部 capability executor，例如 MCP stdio 子进程。
+    def close(self) -> None:
+        executor = self.capability_mcp_executor
+        close = getattr(executor, "close", None)
+        if callable(close):
+            close()
 
     # LLM: ToolRegistry._write_inline_max_chars keeps catalog protocol aligned with registered write tools.
     # 函数用途: 从已注册 write_file 工具读取 inline 推荐值；缺失时回退到全局默认。

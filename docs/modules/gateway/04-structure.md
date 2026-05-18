@@ -174,3 +174,8 @@ memory-resume 或 run(auto resume)
 - 中文说明：gateway 相关默认等待、join timeout、service command timeout 进入 `AgentConfig`，由 `agent_config.yaml` 作为真实后端配置源。
 - CLI 层应在 `make_agent()` 后解析这些默认值；不要在 `gateway_client.py`、`chat.py` 或 gateway process helper 里再写一套独立数字策略。
 - 结构边界不变：gateway 文件队列协议、request/response JSON 和 worker 认领流程没有因为配置抽取改变。
+
+## 2026-05-18 scoped-lock facade structure update
+- 中文说明：`gateway_parts/scoped_locks.py` 仍是 scoped lock 的真实实现；`gateway_parts/daemon_control.py` 只保留兼容 wrapper，确保旧测试或调用方 patch `daemon_control._get_lock_dir` 时，底层锁路径解析同步使用这个覆盖。
+- wrapper 不改变锁文件 schema、stale lock 判断、PID start_time 校验或释放规则；它只是把历史 facade patch 点桥接到拆分后的 focused module。
+- 新增或调整 gateway facade 时，要继续确认 patch 点、re-export 名称和 focused module 的真实实现之间没有脱节。

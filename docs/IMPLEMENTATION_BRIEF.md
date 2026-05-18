@@ -113,7 +113,7 @@ runner 输出的 lessons 只写到 output.json 和 DEBRIEF.md，无法聚合、�
 
 4. **CLI 命令**：
    - `my-agent learn list`：查看所有候选
-   - `my-agent learn accept <id>`：确认写入 skill（生成 `SKILL.md` 草稿）
+   - `my-agent learn accept <id>`：只把 learning draft 标记为 `accepted`，不生成 `SKILL.md`，不安装正式 skill
    - `my-agent learn reject <id>`：拒绝候选
    - `my-agent learn stats`：统计候选数量、接受率
 
@@ -121,10 +121,11 @@ runner 输出的 lessons 只写到 output.json 和 DEBRIEF.md，无法聚合、�
 
 ### 约束
 
-- **设计原则**：必须走"生成候选草稿 → 用户确认 → 进入 skill"路径，不能自动提升。
+- **设计原则**：必须走"生成候选草稿 → 用户确认 → 显式导出/安装"路径，不能自动提升。
 - `enable_self_learning` 配置开关已存在，默认关闭。只在开关打开时才生成候选。
 - 不改变现有 skill 加载和路由逻辑，只新增候选生成和确认流程。
 - 候选草稿必须记录来源证据（run_id、output.json 路径），方便审计。
+- 当前 `learn accept` 只做 review/status gate；生成 skill draft 走 memory gate 的显式 `subagents-memory-gate --export-skill` 流程。
 
 ### 关键文件
 
@@ -140,7 +141,7 @@ runner 输出的 lessons 只写到 output.json 和 DEBRIEF.md，无法聚合、�
 - [ ] runner 完成且 `enable_self_learning=true` 时，lessons 自动写入 `learning_drafts/`
 - [ ] 相同 lessons 去重合并，置信度提升
 - [ ] `my-agent learn list` 展示候选列表
-- [ ] `my-agent learn accept <id>` 生成 `SKILL.md` 草稿
+- [ ] `my-agent learn accept <id>` 标记 accepted，且明确不生成 `SKILL.md`
 - [ ] `my-agent learn reject <id>` 标记拒绝
 - [ ] `enable_self_learning=false` 时不生成候选
 - [ ] `python3 -m pytest -q` 全量通过

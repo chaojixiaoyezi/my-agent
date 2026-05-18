@@ -124,6 +124,8 @@ def _is_root_run(agent: object, run_id: str) -> bool:
 def _record_params(params: dict[str, object], problem: str) -> RecordCapabilityRequestParams:
     requested_commands = _string_list(params.get("requested_commands"))
     requested_tools = _string_list(params.get("requested_tools"))
+    requested_skills = _string_list(params.get("requested_skills"))
+    requested_mcp_tools = _string_list(params.get("requested_mcp_tools"))
     needed = _needed_capability(params, requested_tools, requested_commands)
     return RecordCapabilityRequestParams(
         problem=problem,
@@ -134,8 +136,8 @@ def _record_params(params: dict[str, object], problem: str) -> RecordCapabilityR
         evidence=_string_list(params.get("evidence")),
         constraints=_string_dict(params.get("constraints")),
         requested_tools=requested_tools,
-        requested_skills=_string_list(params.get("requested_skills")),
-        requested_mcp_tools=_string_list(params.get("requested_mcp_tools")),
+        requested_skills=requested_skills,
+        requested_mcp_tools=requested_mcp_tools,
         requested_commands=requested_commands,
         cwd_scope=_string_list(params.get("cwd_scope")),
         path_scope=_string_list(params.get("path_scope")),
@@ -177,12 +179,20 @@ def _needed_capability(params: dict[str, object], tools: list[str], commands: li
 
 # LLM: _capability_type keeps shell/tool/skill/MCP routing hints narrow and predictable.
 # 函数用途: 生成 capability_type；显式值优先，否则根据 requested 字段保守推断。
-def _capability_type(params: dict[str, object], tools: list[str], commands: list[str]) -> str:
+def _capability_type(
+    params: dict[str, object],
+    tools: list[str],
+    commands: list[str],
+) -> str:
     explicit = str(params.get("capability_type") or "").strip()
     if explicit:
         return explicit
     if commands or "controlled_exec" in tools:
         return "shell"
+    if _string_list(params.get("requested_skills")):
+        return "skill"
+    if _string_list(params.get("requested_mcp_tools")):
+        return "mcp"
     return "generic"
 
 
@@ -216,6 +226,8 @@ def _capability_request_parameters() -> dict[str, str]:
         "needed_capability": "能力名，例如 controlled_exec、network_api、playwright、skill:xxx",
         "capability_type": "shell/tool/skill/mcp/network/generic",
         "requested_tools": "希望父级授权的工具名列表",
+        "requested_skills": "希望父级授权或注入的 skill 名列表",
+        "requested_mcp_tools": "希望父级授权的 MCP tool 名列表，例如 browser.screenshot",
         "requested_commands": "希望受控执行的命令名列表，例如 pwd、python3、pytest",
         "path_scope": "需要访问的目录或文件范围",
         "output_budget": "stdout/stderr/文件输出预算",
@@ -231,6 +243,8 @@ def _capability_request_parameter_details() -> dict[str, str]:
         "needed_capability": "父级用它做路由检索；能具体就具体。",
         "capability_type": "shell 表示命令执行；tool 表示内置工具；skill 表示知识/流程；mcp/network 分别表示 MCP 或网络能力。",
         "requested_tools": "只列真正需要的工具；申请 shell 命令优先写 controlled_exec，不要申请裸 rm。",
+        "requested_skills": "只列真正需要的 skill 名；父级会先走 capability route，不会自动安装新 skill。",
+        "requested_mcp_tools": "只列 MCP tool 名或 server.tool 名；父级需要确认连接和权限后才能 grant。",
         "requested_commands": "只列命令名，不写完整危险 shell；具体参数留给后续受控 exec grant。",
         "path_scope": "限定在任务目录、产物目录或父级允许的目录；不要写系统根目录。",
         "output_budget": "例如 {\"stdout_bytes\":65536,\"stderr_bytes\":32768}；避免巨大日志撑爆上下文。",

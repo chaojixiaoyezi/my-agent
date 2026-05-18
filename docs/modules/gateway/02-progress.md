@@ -94,6 +94,11 @@
 - 中文说明：gateway/chat 入口的默认等待和默认 memory 展示数量继续收回后端配置；`cmd_default` 不再写死 chat memory limit，而是交给 `cmd_chat` 从 `AgentConfig` 解析。
 - `gateway_ready_timeout_seconds` 现在控制前台 chat/gateway client 等待 gateway 存活确认的默认时间；显式 CLI timeout 仍优先。
 - worker join、service command/stop timeout 也已在 `agent_config.yaml` 定义为后端配置字段，后续继续把剩余 service wrapper 调用切到这些字段。
+
+## 2026-05-18 daemon scoped-lock facade compatibility
+- 中文说明：`daemon_control.py` 继续作为 scoped lock 的兼容门面；通过该模块调用 `acquire_scoped_lock` / `release_scoped_lock` 时，本模块的 `_get_lock_dir` patch 点仍会传递给底层 `gateway_parts/scoped_locks.py`。
+- 这次不改变 gateway 文件队列、锁文件格式、PID 记录或用户命令，只修复 facade 拆分后测试和旧调用方依赖的锁目录覆盖语义。
+- focused 验证覆盖 daemon scoped-lock 兼容测试，并随本轮全量 `agent_py_agent/tests` 回归一起通过。
 ## 2026-05-06 code-size cleanup
 - 中文说明：这一轮把 gateway 请求执行、IO、lease、恢复、supervisor 和 adapter helper 继续拆薄。用户可见行为不变，主要是降低 gateway 大文件继续膨胀和并发路径难调试的风险。
 - Split gateway request execution out of the request worker and flattened gateway IO, lease, recovery, supervisor, and adapter helpers.

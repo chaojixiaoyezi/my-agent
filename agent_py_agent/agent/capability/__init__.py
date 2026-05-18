@@ -11,12 +11,23 @@ from __future__ import annotations
 """
 
 from .config import CapabilityConfig, load_capability_config
+from .grants import CapabilityGrantScope, filter_cards_by_grant_scope
+from .mcp_config import McpRegistryConfig, mcp_registry_config_from_agent_config
+from .mcp_runtime import (
+    InMemoryMcpExecutor,
+    McpExecutionRequest,
+    McpStdioServerSpec,
+    McpTool,
+    StdioMcpExecutor,
+)
 from .router import (
     CapabilityCard,
     CapabilityRouter,
     CapabilitySearchHit,
+    McpToolDescriptor,
     classify_tool_risk,
     default_capability_cards,
+    from_mcp_tool,
     from_skill_card,
     from_tool_spec,
     score_card,
@@ -35,6 +46,12 @@ from .runtime_config import (
     reload_capability_config_if_changed,
 )
 from .skills import SkillCard, SkillRegistry, parse_skill_file
+from .usage import (
+    CapabilityUsageRecord,
+    CapabilityUsageStats,
+    CapabilityUsageStore,
+    JsonlCapabilityUsageStore,
+)
 
 __all__ = [
     "CapabilityCard",
@@ -46,17 +63,32 @@ __all__ = [
     "CapabilityRouter",
     "CapabilitySearchHit",
     "CapabilityConfigSnapshot",
+    "CapabilityGrantScope",
+    "CapabilityUsageRecord",
+    "CapabilityUsageStats",
+    "CapabilityUsageStore",
+    "JsonlCapabilityUsageStore",
+    "InMemoryMcpExecutor",
+    "McpExecutionRequest",
+    "McpRegistryConfig",
+    "McpStdioServerSpec",
+    "McpTool",
+    "McpToolDescriptor",
     "SkillCard",
     "SkillRegistry",
+    "StdioMcpExecutor",
     "apply_capability_config_patch",
     "capability_config_version",
     "classify_tool_risk",
     "default_capability_cards",
     "default_capability_config_path",
+    "filter_cards_by_grant_scope",
+    "from_mcp_tool",
     "from_skill_card",
     "from_tool_spec",
     "load_capability_config",
     "load_capability_config_snapshot",
+    "mcp_registry_config_from_agent_config",
     "parse_skill_file",
     "reload_capability_config_if_changed",
     "score_card",

@@ -57,6 +57,7 @@ def cmd_learn_accept(args) -> int:
         f"accepted {candidate.id} confidence={candidate.confidence:.2f} "
         f"occurrences={candidate.occurrence_count}"
     )
+    print("状态已标记为 accepted；未生成 SKILL.md，也未安装正式 skill。")
     return 0
 
 
