@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -109,6 +110,8 @@ def test_main_agent_real_task_execution_plan_writes_command_refs(tmp_path):
     assert payload["concurrency"]["effective_max_workers"] == 2
     assert "MACHINE_DELIVERY_CONTRACT_JSON" in prompt_arg
     assert "outputs/furniture_homepage/index.html" in prompt_arg
+    assert "HTML_PLACEHOLDER_LINK" in prompt_arg
+    assert "forbidden_hrefs" in prompt_arg
     assert (tmp_path / first_case["command_ref"]).exists()
     assert (tmp_path / first_case["config_ref"]).exists()
     assert not (tmp_path / first_case["stdout_ref"]).exists()
@@ -262,3 +265,142 @@ def test_main_agent_real_task_execution_revalidates_existing_report(tmp_path):
     assert payload["ok"] is True
     assert first_case["status"] == "COMPLETED"
     assert first_case["acceptance_summary"]["passed"] == 1
+
+
+# LLM: Revalidation should keep timeout diagnostics aligned with live execution.
+# 函数用途: 验证旧报告 exit_code=124 但产物复验通过时，issues 不再显示普通失败码。
+def test_main_agent_real_task_revalidation_marks_valid_timeout_artifact(tmp_path):
+    from agent_py_agent.agent.contracts.main_agent_real_task_execution import (
+        MainAgentRealTaskExecutionRequest,
+        revalidate_main_agent_real_task_execution,
+        run_main_agent_real_task_execution,
+    )
+
+    report = run_main_agent_real_task_execution(
+        MainAgentRealTaskExecutionRequest(
+            workspace=tmp_path,
+            max_workers=1,
+            task_timeout_seconds=30,
+            execute=True,
+            case_ids=("furniture_homepage_html",),
+            package_root=Path.cwd(),
+        )
+    )
+    report_path = tmp_path / report.report_ref
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    payload["cases"][0]["exit_code"] = 124
+    report_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    artifact = (
+        tmp_path
+        / "main_agent_real_task_execution/tasks/furniture_homepage_html/workspace"
+        / "outputs/furniture_homepage/index.html"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(
+        '<!doctype html><html><body><a href="#story">Story</a><section id="story">Done</section></body></html>',
+        encoding="utf-8",
+    )
+
+    revalidated = revalidate_main_agent_real_task_execution(report_path, workspace=tmp_path)
+
+    first_case = revalidated.to_dict()["cases"][0]
+    assert first_case["status"] == "COMPLETED"
+    assert first_case["issues"] == ["process_timeout_after_valid_artifact"]
+
+
+# LLM: Timeout should not hide a valid deliverable; the machine artifact contract is authoritative.
+# 函数用途: 验证进程没及时退出但产物已通过验收时，真实任务报告按结构化产物合同判完成。
+def test_main_agent_real_task_timeout_accepts_valid_artifact(tmp_path, monkeypatch):
+    from agent_py_agent.agent.contracts.main_agent_real_task_execution import (
+        MainAgentRealTaskExecutionRequest,
+        run_main_agent_real_task_execution,
+    )
+
+    artifact = (
+        tmp_path
+        / "main_agent_real_task_execution/tasks/furniture_homepage_html/workspace"
+        / "outputs/furniture_homepage/index.html"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(
+        '<!doctype html><html><body><a href="#story">Story</a><section id="story">Done</section></body></html>',
+        encoding="utf-8",
+    )
+
+    def _timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd=["my-agent", "run"],
+            timeout=30,
+            output=b"partial stdout",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(subprocess, "run", _timeout)
+
+    report = run_main_agent_real_task_execution(
+        MainAgentRealTaskExecutionRequest(
+            workspace=tmp_path,
+            max_workers=1,
+            task_timeout_seconds=30,
+            execute=True,
+            case_ids=("furniture_homepage_html",),
+            package_root=Path.cwd(),
+        )
+    )
+
+    payload = report.to_dict()
+    first_case = payload["cases"][0]
+    assert payload["ok"] is True
+    assert first_case["status"] == "COMPLETED"
+    assert first_case["exit_code"] == 124
+    assert first_case["acceptance_summary"]["passed"] == 1
+    assert first_case["issues"] == ["process_timeout_after_valid_artifact"]
+
+
+# LLM: Timeout logs must preserve subprocess bytes as readable refs for debugging real model runs.
+# 函数用途: 验证真实任务超时时 stdout/stderr 会解码为文本，不把 Python bytes 表示写进日志。
+def test_main_agent_real_task_timeout_decodes_partial_output(tmp_path):
+    from agent_py_agent.agent.contracts.main_agent_real_task_execution import (
+        _CaseRuntime,
+        _timeout_case_result,
+    )
+    from agent_py_agent.agent.contracts.main_agent_real_task_execution_files import case_paths
+    from agent_py_agent.agent.contracts.main_agent_real_task_execution_models import (
+        MainAgentRealTaskExecutionRequest,
+    )
+    from agent_py_agent.agent.contracts.main_agent_real_task_suite import MainAgentRealTaskCasePlan
+
+    paths = case_paths(tmp_path, "timeout_case")
+    for path in paths.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+    runtime = _CaseRuntime(
+        case=MainAgentRealTaskCasePlan(
+            case_id="timeout_case",
+            title="Timeout Case",
+            status="PLANNED",
+            worker_slot=1,
+            timeout_seconds=1,
+            prompt_ref="prompt.md",
+            acceptance_ref="acceptance.json",
+            expected_artifacts_ref="artifacts.json",
+        ),
+        request=MainAgentRealTaskExecutionRequest(
+            workspace=tmp_path,
+            task_timeout_seconds=1,
+        ),
+        paths=paths,
+        command=["my-agent", "run"],
+        workspace=tmp_path,
+    )
+    exc = subprocess.TimeoutExpired(
+        cmd=["my-agent", "run"],
+        timeout=1,
+        output="你好".encode(),
+        stderr=b"partial error",
+    )
+
+    result = _timeout_case_result(runtime, exc, duration=1.25)
+
+    assert result.exit_code == 124
+    assert paths["stdout"].read_text(encoding="utf-8") == "你好"
+    assert paths["stderr"].read_text(encoding="utf-8") == "partial error"

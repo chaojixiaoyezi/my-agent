@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from ._filesystem_helpers import _int_param, _required_path, _text_param
+from ._filesystem_helpers import _int_param, _text_param
 from .file_write_session_io import (
     append_envelope,
     chunk_param_failure,
@@ -18,7 +18,6 @@ from .file_write_session_io import (
     load_manifest,
     missing_chunk_indexes,
     missing_payload,
-    path_record,
     remove_empty_session_root,
     session_id_param,
     sha256_text,
@@ -34,6 +33,13 @@ from .file_write_session_models import (
     FileWriteSessionPaths,
     FileWriteSessionServiceContext,
     InitialManifestRequest,
+)
+from .file_write_session_recovery import (
+    append_split_chunks,
+    auto_start_session,
+    initial_manifest,
+    target_from_params,
+    write_chunk,
 )
 from .models import ToolExecutionResult
 
@@ -68,7 +74,7 @@ class FileWriteSessionService:
     # LLM: begin resolves the final target before any content is accepted.
     # 函数用途: 创建 session 目录、temp 文件和 manifest，并返回结构化路径记录。
     def begin(self, params: dict[str, Any]) -> ToolExecutionResult:
-        target = _target_from_params(self.context, params)
+        target = target_from_params(self.context, params)
         if isinstance(target, ToolExecutionResult):
             return target
         raw_target_path, resolved_target = target
@@ -89,15 +95,24 @@ class FileWriteSessionService:
         return success("begin", begin_envelope(session_id, manifest, paths))
 
     # LLM: append stores chunks by index so retries and out-of-order writes are recoverable.
-    # 函数用途: 校验 session、chunk_index 和 content，写入 chunk 文件并更新 manifest。
+    # 函数用途: 校验或自动创建 session，必要时自动拆分大 content，再写入 chunk 文件并更新 manifest。
     def append(self, params: dict[str, Any]) -> ToolExecutionResult:
-        session_id, paths, manifest, error = load_open_session(self.context, params)
+        session_id, paths, manifest, error, auto_started = load_or_auto_start_session(
+            self.context,
+            params,
+        )
         if error:
             return error
         chunk = append_chunk_request(params, session_id, self.context.max_chunk_chars)
         if isinstance(chunk, ToolExecutionResult):
             return chunk
         chunk_index, content, content_hash = chunk
+        if len(content) > self.context.max_chunk_chars:
+            return append_split_chunks(
+                ChunkWriteRequest(paths, manifest, chunk_index, content, content_hash),
+                max_chunk_chars=self.context.max_chunk_chars,
+                auto_started=auto_started,
+            )
         existing_result = existing_chunk_result(
             ExistingChunkRequest(manifest, paths, chunk_index, content, content_hash)
         )
@@ -105,7 +120,10 @@ class FileWriteSessionService:
             return existing_result
         write_chunk(ChunkWriteRequest(paths, manifest, chunk_index, content, content_hash))
         write_manifest(paths.manifest_path, manifest)
-        return success("append", append_envelope(manifest, paths, chunk_index, duplicate=False))
+        envelope = append_envelope(manifest, paths, chunk_index, duplicate=False)
+        if auto_started:
+            envelope["auto_started"] = True
+        return success("append", envelope)
 
     # LLM: finish is the only branch that moves staged content into the target path.
     # 函数用途: 校验 chunk 连续性，组装 temp 文件，并通过 os.replace 原子提交到目标文件。
@@ -144,19 +162,6 @@ class FileWriteSessionService:
         shutil.rmtree(paths.session_dir, ignore_errors=True)
         remove_empty_session_root(paths.session_dir.parent)
         return success("abort", {"session_id": session_id, "status": "aborted"})
-
-
-# LLM: _target_from_params validates the final target before session creation.
-# 函数用途: 读取 target_path 并检查工作区边界；失败返回结构化工具错误。
-def _target_from_params(
-    context: FileWriteSessionServiceContext,
-    params: dict[str, Any],
-) -> tuple[str, Path] | ToolExecutionResult:
-    try:
-        raw_target_path = _required_path(params.get("target_path"), name="target_path")
-        return raw_target_path, context.resolve_path(raw_target_path)
-    except ValueError as exc:
-        return failure("PATH_OUTSIDE_WORKSPACE", "PATH_OUTSIDE_WORKSPACE", str(exc))
 
 
 # LLM: paths_for_session ensures session ids never become arbitrary filesystem paths.
@@ -213,6 +218,23 @@ def load_open_session(
     return session_id, paths, manifest, None
 
 
+# LLM: load_or_auto_start_session absorbs recoverable begin/append ordering mistakes from real models.
+# 函数用途: append 找不到 session 但带 target_path 时，用调用方 session_id 自动创建 open session。
+def load_or_auto_start_session(
+    context: FileWriteSessionServiceContext,
+    params: dict[str, Any],
+) -> tuple[str, FileWriteSessionPaths, dict[str, Any], ToolExecutionResult | None, bool]:
+    session_id, paths, manifest, error = load_open_session(context, params)
+    if not error:
+        return session_id, paths, manifest, None, False
+    if error.result_envelope.get("code") != "SESSION_NOT_FOUND" or params.get("target_path") is None:
+        return session_id, paths, manifest, error, False
+    manifest, start_error = auto_start_session(context, params, session_id=session_id, paths=paths)
+    if start_error:
+        return session_id, paths, manifest, start_error, False
+    return session_id, paths, manifest, None, True
+
+
 # LLM: append_chunk_request normalizes append params and chunk identity.
 # 函数用途: 读取 chunk_index/content，并返回可写入 manifest 的 hash。
 def append_chunk_request(
@@ -220,6 +242,7 @@ def append_chunk_request(
     session_id: str,
     max_chunk_chars: int,
 ) -> tuple[int, str, str] | ToolExecutionResult:
+    payload_limit = max(max_chunk_chars, 1_000_000)
     try:
         chunk_index = _int_param(
             params.get("chunk_index"), name="chunk_index", default=-1, min_value=0
@@ -227,25 +250,12 @@ def append_chunk_request(
         content = _text_param(
             params.get("content"),
             name="content",
-            max_chars=max_chunk_chars,
+            max_chars=payload_limit,
             allow_empty=True,
         )
     except ValueError as exc:
         return chunk_param_failure(exc, session_id, max_chunk_chars)
     return chunk_index, content, sha256_text(content)
-
-
-# LLM: write_chunk persists one validated chunk and updates manifest in memory.
-# 函数用途: 将 chunk 写到 session/chunks，并登记 index/file/hash/size。
-def write_chunk(request: ChunkWriteRequest) -> None:
-    chunk_name = f"{request.chunk_index:08d}.chunk"
-    (request.paths.chunks_dir / chunk_name).write_text(request.content, encoding="utf-8")
-    request.manifest["chunks"][str(request.chunk_index)] = {
-        "index": request.chunk_index,
-        "file": f"chunks/{chunk_name}",
-        "sha256": request.content_hash,
-        "size": len(request.content),
-    }
 
 
 # LLM: resolved_target revalidates the stored final target before commit.
@@ -264,25 +274,6 @@ def resolved_target(
             str(exc),
             {"session_id": session_id},
         )
-
-
-# LLM: initial_manifest writes raw/display/resolved target facts for audit and recovery.
-# 函数用途: 生成 begin 后的 manifest 初始结构。
-def initial_manifest(request: InitialManifestRequest) -> dict[str, Any]:
-    return {
-        "version": 1,
-        "session_id": request.session_id,
-        "status": "open",
-        "target_path": {
-            "raw": request.raw_path,
-            "display": request.context.display_path(request.target),
-            "resolved": str(request.target),
-        },
-        "temp_path": path_record(request.paths.temp_path, request.context.workspace_root),
-        "manifest_path": path_record(request.paths.manifest_path, request.context.workspace_root),
-        "chunks": {},
-    }
-
 
 # LLM: begin_envelope keeps begin success output compact and stable.
 # 函数用途: 返回 session_id、目标路径和下一 chunk 下标。

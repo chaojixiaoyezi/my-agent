@@ -114,19 +114,60 @@ class TestFileWriteSessionTool:
         assert finish.result_envelope["code"] == "SESSION_NOT_FOUND"
         assert not (workspace / "out" / "large.txt").exists()
 
-    # LLM: The session tool must keep large chunks out of a single tool call even though final files may be large.
-    # 函数用途: 验证超过单 chunk 上限时拒绝并返回结构化错误码。
-    def test_rejects_oversized_chunk(self, tmp_path: Path):
+    # LLM: The session tool accepts fuzzy model chunk sizing by splitting payloads into bounded chunks.
+    # 函数用途: 验证超过单 chunk 上限时自动拆分，避免真实模型因为块大小估算不准而卡住。
+    def test_accepts_oversized_chunk_by_auto_splitting(self, tmp_path: Path):
         workspace = tmp_path / "workspace"
         tool = _tool(workspace, max_chunk_chars=4)
         session_id = _begin(tool)
 
         result = tool.execute({"action": "append", "session_id": session_id, "chunk_index": 0, "content": "abcde"})
 
-        assert result.ok is False
-        assert result.error_code == "TOOL_INVALID_ARGUMENTS"
-        assert result.result_envelope["code"] == "CHUNK_TOO_LARGE"
+        assert result.ok is True
+        assert result.result_envelope["auto_split"] is True
         assert result.result_envelope["max_chunk_chars"] == 4
+
+    # LLM: Real models may recover from invalid inline writes by appending with a target path first.
+    # 函数用途: 验证 append 带 target_path 时可自动创建 session，避免 begin/append 顺序稍错就卡死。
+    def test_append_with_target_path_auto_starts_missing_session(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        tool = _tool(workspace, max_chunk_chars=16)
+
+        append = tool.execute(
+            {
+                "action": "append",
+                "session_id": "homepage-v1",
+                "target_path": "out/index.html",
+                "chunk_index": 0,
+                "content": "<!doctype html>",
+            }
+        )
+        finish = tool.execute({"action": "finish", "session_id": "homepage-v1"})
+
+        assert append.ok is True
+        assert append.result_envelope["auto_started"] is True
+        assert append.result_envelope["target_path"]["display"] == "out/index.html"
+        assert finish.ok is True
+        assert (workspace / "out" / "index.html").read_text(encoding="utf-8") == "<!doctype html>"
+
+    # LLM: Oversized append payloads should become multiple chunks because model output limits are fuzzy.
+    # 函数用途: 验证 append 超过 chunk 上限时自动拆分成连续 chunk，而不是直接失败。
+    def test_append_auto_splits_oversized_content(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        tool = _tool(workspace, max_chunk_chars=4)
+        session_id = _begin(tool)
+
+        result = tool.execute(
+            {"action": "append", "session_id": session_id, "chunk_index": 0, "content": "abcdefghijkl"}
+        )
+        finish = tool.execute({"action": "finish", "session_id": session_id})
+
+        assert result.ok is True
+        assert result.result_envelope["auto_split"] is True
+        assert result.result_envelope["chunk_index"] == 0
+        assert result.result_envelope["received_chunks"] == [0, 1, 2]
+        assert finish.ok is True
+        assert (workspace / "out" / "large.txt").read_text(encoding="utf-8") == "abcdefghijkl"
 
     # LLM: Begin is the path boundary gate because it resolves the final target before staging content.
     # 函数用途: 验证目标路径越过工作区时拒绝，不创建 session 状态。

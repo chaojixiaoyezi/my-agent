@@ -111,10 +111,13 @@ def _payload_concurrency(
 # 函数用途: 复验时重算产物失败摘要；详细 findings 仍在 acceptance_report_ref。
 def _case_issues(exit_code: int, summary: dict[str, int]) -> list[str]:
     issues: list[str] = []
+    failed = int(summary.get("failed", 0))
+    if exit_code == 124 and not failed:
+        return ["process_timeout_after_valid_artifact"]
     if exit_code != 0:
         issues.append(f"exit_code={exit_code}")
-    if summary.get("failed", 0):
-        issues.append(f"artifact_acceptance_failed={summary['failed']}")
+    if failed:
+        issues.append(f"artifact_acceptance_failed={failed}")
     return issues
 
 

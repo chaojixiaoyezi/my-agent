@@ -24,7 +24,16 @@ def _furniture_homepage_case() -> MainAgentRealTaskCase:
         artifact_id="homepage_html",
         kind="html",
         preferred_path="outputs/furniture_homepage/index.html",
-        validation_contract={"validator": "artifact_acceptance", "required_suffix": ".html"},
+        validation_contract={
+            "validator": "artifact_acceptance",
+            "required_suffix": ".html",
+            "forbidden_hrefs": ["", "#", "javascript:void(0)", "javascript:void(0);"],
+            "failure_codes": ["HTML_PLACEHOLDER_LINK", "HTML_EXTERNAL_IMAGE_REF"],
+            "quality_requirements": {
+                "clickable_links_must_resolve": True,
+                "images_must_be_local_or_inline": True,
+            },
+        },
     )
     return MainAgentRealTaskCase(
         case_id="furniture_homepage_html",

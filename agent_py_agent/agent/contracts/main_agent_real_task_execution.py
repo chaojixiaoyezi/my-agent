@@ -193,22 +193,44 @@ def _timeout_case_result(
     *,
     duration: float,
 ) -> MainAgentRealTaskExecutionCaseResult:
-    runtime.paths["stdout"].write_text(str(exc.stdout or ""), encoding="utf-8")
-    runtime.paths["stderr"].write_text(str(exc.stderr or ""), encoding="utf-8")
+    runtime.paths["stdout"].write_text(_subprocess_text(exc.stdout), encoding="utf-8")
+    runtime.paths["stderr"].write_text(_subprocess_text(exc.stderr), encoding="utf-8")
+    acceptance = _validate_case_artifacts(runtime)
     append_event(
         runtime.paths["events"],
         "case_timeout",
         {"case_id": runtime.case.case_id, "timeout_seconds": runtime.request.task_timeout_seconds},
     )
+    _append_acceptance_event(runtime, acceptance)
+    status = "COMPLETED" if acceptance.ok else "FAILED"
     return _case_result(
         _CaseResultBundle(
             runtime=runtime,
-            status="FAILED",
+            status=status,
+            acceptance=acceptance,
             exit_code=124,
             duration_seconds=duration,
-            issues=("timeout",),
+            issues=_timeout_issues(acceptance),
         )
     )
+
+
+# LLM: _subprocess_text decodes partial timeout output without leaking Python bytes reprs.
+# 函数用途: 把 subprocess 的 str/bytes/None 输出统一成 UTF-8 文本，方便真实任务日志复盘。
+def _subprocess_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+# LLM: _timeout_issues separates hard timeouts from already-valid deliverables.
+# 函数用途: 超时时根据产物验收结果输出稳定 issue code，避免有效产物被误判失败。
+def _timeout_issues(acceptance: RealTaskAcceptanceReport) -> tuple[str, ...]:
+    if acceptance.ok:
+        return ("process_timeout_after_valid_artifact",)
+    return ("timeout",)
 
 
 # LLM: _case_result converts per-case files into the execution report shape.
