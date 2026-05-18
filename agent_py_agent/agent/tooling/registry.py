@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from ..capability.grants import CapabilityGrantScope
     from ..capability.mcp import McpToolDescriptor
     from ..capability.mcp_runtime import InMemoryMcpExecutor
+    from ..capability.skills import SkillLifecycleStore, SkillRegistry
 
 _allowed_tool_set = allowed_tool_set
 
@@ -91,6 +92,7 @@ class ToolRegistryParams:
     mcp_tools: list[McpToolDescriptor] | None = None
     mcp_executor: InMemoryMcpExecutor | None = None
     capability_grant_scope: CapabilityGrantScope | None = None
+    skill_lifecycle_store: SkillLifecycleStore | None = None
     artifact_read_budget_window_seconds: int = DEFAULT_ARTIFACT_READ_BUDGET_WINDOW_SECONDS
     artifact_read_budget_max_chars: int = DEFAULT_ARTIFACT_READ_BUDGET_MAX_CHARS
     artifact_default_read_chars: int = 4000
@@ -194,6 +196,21 @@ def _register_mcp_tools(registry: ToolRegistry, params: ToolRegistryParams) -> N
         registry.capability_extra_cards.append(from_mcp_tool(descriptor))
 
 
+# LLM: _register_skill_lifecycle_tools connects draft/active skills to tools and catalog disclosure.
+# 函数用途: 注册 skill 生命周期工具，并让 active lifecycle skills 进入 capability catalog。
+def _register_skill_lifecycle_tools(registry: ToolRegistry, params: ToolRegistryParams) -> None:
+    from ..capability.skills import SkillRegistry
+    from .skill_lifecycle_tools import SkillDraftFromTaskTool, SkillLifecycleTool
+
+    store = params.skill_lifecycle_store
+    if store is None:
+        return
+    registry.capability_skill_registry = SkillRegistry([store.active_dir])
+    registry.capability_skill_registry.scan()
+    registry.register(SkillLifecycleTool(store))
+    registry.register(SkillDraftFromTaskTool(store))
+
+
 # LLM: ToolRegistry 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
 # 类用途: ToolRegistry 数据模型，集中保存 工具系统 的结构化状态。
 class ToolRegistry:
@@ -222,10 +239,12 @@ class ToolRegistry:
         self.capability_grant_scope = params.capability_grant_scope
         self.capability_extra_cards = []
         self.capability_mcp_executor = None
+        self.capability_skill_registry = None
         _register_filesystem_tools(self, params)
         _register_network_tools(self, params)
         _register_security_tools(self)
         _register_mcp_tools(self, params)
+        _register_skill_lifecycle_tools(self, params)
         register_capability_catalog_tools(self)
 
     # LLM: ToolRegistry.register 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。

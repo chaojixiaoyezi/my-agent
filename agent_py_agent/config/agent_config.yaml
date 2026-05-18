@@ -452,6 +452,12 @@ tool_retrieval_limit: 3
 # 当前代码已经把接口留好了；未接真实向量索引前仍以关键词检索为主
 tool_vector_search_enabled: true
 
+# Skill lifecycle/self-learning:
+# - 草稿、active 版本、禁用和回滚都写在此目录下。
+# - 模型可通过 skill_draft_from_task 创建草稿，但不会自动启用。
+skill_lifecycle_tools_enabled: true
+skill_lifecycle_root: data/skills/lifecycle
+
 # MCP stdio server 配置：
 # - 默认空列表，不启动任何外部 MCP 进程。
 # - 每项是 {name, command, cwd, env, startup_timeout_seconds, request_timeout_seconds}。

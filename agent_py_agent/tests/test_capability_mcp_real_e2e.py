@@ -192,7 +192,7 @@ def test_simple_agent_auto_discovers_mcp_tools_list_schema(tmp_path: Path) -> No
 
     payload = json.loads(detail.output)
     assert "mcp.demo.echo" in specs
-    assert specs["mcp.demo.echo"].parameter_details["message"] == "string"
+    assert specs["mcp.demo.echo"].parameter_details["message"] == "string; required"
     assert payload["detail"]["metadata"]["input_schema"]["properties"]["message"]["type"] == "string"
 
 

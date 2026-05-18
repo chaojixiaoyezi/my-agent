@@ -139,7 +139,11 @@ def _merge_discovered_descriptors(
 ) -> list[McpToolDescriptor]:
     merged = {(item.server, item.name): item for item in descriptors}
     for server in servers:
-        for raw_tool in executor.list_tools(server.name):
+        try:
+            raw_tools = executor.list_tools(server.name)
+        except (TimeoutError, KeyError, ValueError, OSError, RuntimeError):
+            continue
+        for raw_tool in raw_tools:
             descriptor = _descriptor_from_discovered_tool(server.name, raw_tool)
             merged.setdefault((descriptor.server, descriptor.name), descriptor)
     return list(merged.values())

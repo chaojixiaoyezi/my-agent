@@ -49,6 +49,8 @@ def tool_call_envelope_from_execution_payload(
         return payload
     if not isinstance(payload, dict) or "kind" not in payload:
         return None
+    if "tool" in payload:
+        return None
     if payload.get("kind") != "tool_call":
         return ToolExecutionResult("unknown", False, "expected tool_call envelope for execution")
     return ToolCallEnvelope.from_dict(payload)

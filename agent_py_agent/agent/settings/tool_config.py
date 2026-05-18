@@ -43,6 +43,8 @@ class ToolConfig:
     tool_detail_max_chars: int = 4000
     tool_retrieval_limit: int = 3
     tool_vector_search_enabled: bool = True
+    skill_lifecycle_tools_enabled: bool = True
+    skill_lifecycle_root: str = "data/skills/lifecycle"
     mcp_auto_discover_tools: bool = True
     mcp_stdio_servers: list[dict[str, object]] = field(default_factory=list)
     mcp_tool_descriptors: list[dict[str, object]] = field(default_factory=list)

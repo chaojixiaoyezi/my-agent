@@ -75,6 +75,7 @@ class StdioMcpExecutor:
     def __init__(self, servers: list[McpStdioServerSpec]):
         self._server_specs = {server.name: server for server in servers}
         self._sessions: dict[str, _McpStdioSession] = {}
+        self._tool_cache: dict[str, list[dict[str, Any]]] = {}
 
     # LLM: StdioMcpExecutor.execute delegates one tool call to the named server session.
     # 函数用途: 执行真实 MCP tools/call 请求，server 未配置时抛 KeyError。
@@ -84,9 +85,20 @@ class StdioMcpExecutor:
 
     # LLM: StdioMcpExecutor.list_tools discovers tool schemas from a configured MCP server.
     # 函数用途: 调用真实 MCP tools/list，并返回 server 原始 tools 列表。
-    def list_tools(self, server: str) -> list[dict[str, Any]]:
+    def list_tools(self, server: str, *, force_refresh: bool = False) -> list[dict[str, Any]]:
+        key = str(server or "").strip()
+        if not force_refresh and key in self._tool_cache:
+            return [dict(tool) for tool in self._tool_cache[key]]
+        tools = self.refresh_tools(key)
+        return [dict(tool) for tool in tools]
+
+    # LLM: StdioMcpExecutor.refresh_tools reloads tools/list metadata for long-running agents.
+    # 函数用途: 强制刷新某个 MCP server 的 tool schema 缓存。
+    def refresh_tools(self, server: str) -> list[dict[str, Any]]:
         session = self._session(server)
-        return session.list_tools()
+        tools = session.list_tools()
+        self._tool_cache[str(server or "").strip()] = [dict(tool) for tool in tools]
+        return tools
 
     # LLM: StdioMcpExecutor.close terminates all lazy-started server processes.
     # 函数用途: 关闭已启动的 MCP stdio 会话，供测试和长生命周期清理使用。
@@ -377,8 +389,38 @@ def _schema_parameter_details(schema: dict[str, object]) -> dict[str, str]:
     properties = schema.get("properties") if isinstance(schema, dict) else None
     if not isinstance(properties, dict):
         return {}
+    required = {str(item) for item in schema.get("required", [])} if isinstance(schema.get("required"), list) else set()
     details: dict[str, str] = {}
     for key, value in properties.items():
         if isinstance(value, dict):
-            details[str(key)] = str(value.get("type") or value.get("description") or "object")
+            details[str(key)] = _schema_detail(value, required=str(key) in required)
     return details
+
+
+# LLM: _schema_detail renders one JSON Schema property into compact parameter guidance.
+# 函数用途: 输出 MCP 参数的类型、required、enum、描述和嵌套摘要。
+def _schema_detail(value: dict[str, object], *, required: bool) -> str:
+    type_name = str(value.get("type") or "object")
+    pieces = [_nested_object_detail(value) if type_name == "object" else type_name]
+    if required:
+        pieces.append("required")
+    enum = value.get("enum")
+    if isinstance(enum, list) and enum:
+        pieces.append("enum=" + "|".join(str(item) for item in enum))
+    description = str(value.get("description") or "").strip()
+    if description:
+        pieces.append(description)
+    return "; ".join(piece for piece in pieces if piece)
+
+
+# LLM: _nested_object_detail summarizes one-level object properties for prompt guidance.
+# 函数用途: 将嵌套 object schema 渲染成简短字段摘要。
+def _nested_object_detail(value: dict[str, object]) -> str:
+    properties = value.get("properties")
+    if not isinstance(properties, dict):
+        return "object"
+    nested: list[str] = []
+    for key, child in properties.items():
+        if isinstance(child, dict):
+            nested.append(f"{key}:{child.get('type') or 'object'}")
+    return "object{" + ", ".join(nested) + "}" if nested else "object"

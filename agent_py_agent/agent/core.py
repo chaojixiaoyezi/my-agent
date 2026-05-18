@@ -201,10 +201,12 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
 # 函数用途: 按工具配置创建 ToolRegistry 并注入工作区边界。
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
     from .capability.mcp_config import mcp_registry_config_from_agent_config
+    from .capability.skills import SkillLifecycleStore
 
     workspace_root = agent.root.parent if (agent.root / "__main__.py").exists() else agent.root
     workspace_roots = [workspace_root, *[root for root in agent.workspace_roots if root != agent.root]]
     mcp_config = mcp_registry_config_from_agent_config(config)
+    skill_store = _skill_lifecycle_store(config, workspace_root, SkillLifecycleStore)
     return ToolRegistry(
         ToolRegistryParams(
             workspace_root=workspace_root,
@@ -233,8 +235,20 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             mcp_tools=mcp_config.descriptors,
             mcp_executor=mcp_config.executor,
             capability_grant_scope=mcp_config.grant_scope,
+            skill_lifecycle_store=skill_store,
         )
     )
+
+
+# LLM: _skill_lifecycle_store wires optional draft-skill storage into tool registration.
+# 函数用途: 根据配置解析 skill 生命周期根目录，关闭开关时返回 None。
+def _skill_lifecycle_store(config: AgentConfig, workspace_root: Path, store_type):
+    if not bool(getattr(config, "skill_lifecycle_tools_enabled", True)):
+        return None
+    root = Path(str(getattr(config, "skill_lifecycle_root", "data/skills/lifecycle") or "")).expanduser()
+    if not root.is_absolute():
+        root = workspace_root / root
+    return store_type(root)
 
 
 # LLM: _register_orchestration_tools 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。

@@ -21,6 +21,7 @@ def register_capability_catalog_tools(registry: ToolRegistry) -> None:
     registry.register(
         CapabilitySearchTool(
             tool_specs=visible_specs,
+            skill_registry=registry.capability_skill_registry,
             extra_cards=registry.capability_extra_cards,
             grant_scope=registry.capability_grant_scope,
         )
@@ -28,6 +29,7 @@ def register_capability_catalog_tools(registry: ToolRegistry) -> None:
     registry.register(
         CapabilityDescribeTool(
             tool_specs=visible_specs,
+            skill_registry=registry.capability_skill_registry,
             extra_cards=registry.capability_extra_cards,
             grant_scope=registry.capability_grant_scope,
         )

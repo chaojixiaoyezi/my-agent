@@ -58,6 +58,16 @@ def test_capability_search_tool_uses_visible_registry_specs(tmp_path: Path) -> N
     assert "security_query" not in names
 
 
+def test_capability_search_flat_kind_param_does_not_conflict_with_action_envelope(tmp_path: Path) -> None:
+    registry = _registry(tmp_path)
+
+    result = registry.execute_call({"tool": "capability_search", "query": "read file", "kind": "tool", "limit": 5})
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert all(item["kind"] == "tool" for item in payload["results"])
+
+
 def test_capability_describe_tool_does_not_describe_hidden_security_tools(tmp_path: Path) -> None:
     registry = _registry(tmp_path)
 

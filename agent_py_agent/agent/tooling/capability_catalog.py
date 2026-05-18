@@ -146,8 +146,13 @@ class _CapabilityCatalog:
         grant_scope: CapabilityGrantScope | None,
         usage_store: CapabilityUsageStore | None,
     ):
-        self._visible_cards = _visible_cards(tool_specs, skill_registry, extra_cards, grant_scope)
-        self._visible_ids = set(self._visible_cards)
+        self._tool_specs = list(tool_specs)
+        self._skill_registry = skill_registry
+        self._extra_cards = list(extra_cards or [])
+        self._grant_scope = grant_scope
+        self._usage_store = usage_store
+        self._visible_cards: dict[str, CapabilityCard] = {}
+        self._visible_ids: set[str] = set()
         self._router = CapabilityRouter(
             skill_registry=skill_registry,
             tool_specs=tool_specs,
@@ -155,10 +160,12 @@ class _CapabilityCatalog:
             grant_scope=grant_scope,
             usage_store=usage_store,
         )
+        self._refresh()
 
     # LLM: _CapabilityCatalog.search filters router hits back to the visible snapshot.
     # 函数用途: 查询能力卡并按 limit 返回可见命中。
     def search(self, params: CapabilitySearchParams):
+        self._refresh()
         kinds = {params.kind} if params.kind else None
         visible_hits = []
         for hit in self._router.search(params.query, limit=0, kinds=kinds):
@@ -171,6 +178,7 @@ class _CapabilityCatalog:
     # LLM: _CapabilityCatalog.describe returns only cards present in the visible snapshot.
     # 函数用途: 按 capability id 获取可见详情卡。
     def describe(self, capability_id: str) -> CapabilityCard | None:
+        self._refresh()
         if capability_id not in self._visible_ids:
             return None
         return self._visible_cards[capability_id]
@@ -179,6 +187,26 @@ class _CapabilityCatalog:
     # 函数用途: 判断 capability id 是否属于当前可见目录。
     def is_visible(self, capability_id: str) -> bool:
         return capability_id in self._visible_ids
+
+    # LLM: _CapabilityCatalog._refresh keeps runtime-promoted skills visible without rebuilding ToolRegistry.
+    # 函数用途: 重新扫描 skill registry 并刷新可见 card/router 快照。
+    def _refresh(self) -> None:
+        if self._skill_registry is not None and self._skill_registry.skill_dirs:
+            self._skill_registry.scan()
+        self._visible_cards = _visible_cards(
+            self._tool_specs,
+            self._skill_registry,
+            self._extra_cards,
+            self._grant_scope,
+        )
+        self._visible_ids = set(self._visible_cards)
+        self._router = CapabilityRouter(
+            skill_registry=self._skill_registry,
+            tool_specs=self._tool_specs,
+            extra_cards=self._extra_cards,
+            grant_scope=self._grant_scope,
+            usage_store=self._usage_store,
+        )
 
 
 # LLM: build_capability_search_spec keeps the model-facing search tool metadata narrow.

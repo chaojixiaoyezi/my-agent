@@ -8,6 +8,16 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .router import CapabilityCard
 
+_SEMANTIC_ALIASES = {
+    "网页": ["browser", "web", "frontend"],
+    "浏览器": ["browser", "web", "frontend"],
+    "截图": ["screenshot", "image", "capture"],
+    "验收": ["test", "check", "validation"],
+    "接口": ["api", "http", "request"],
+    "文件": ["file", "filesystem"],
+    "搜索": ["search", "query", "find"],
+}
+
 
 # LLM: score_card belongs to capability routing; keep score weights explainable and deterministic.
 # 函数用途: 用可解释的关键词规则给能力卡打分。
@@ -28,6 +38,10 @@ def score_card(query: str, card: CapabilityCard) -> tuple[float, list[str]]:
     reasons: list[str] = []
     for token in tokens:
         token_score = 0.0
+        alias_hits = _semantic_alias_hits(token, haystacks)
+        if alias_hits:
+            token_score += 3.0 * len(alias_hits)
+            reasons.append(f"语义别名'{token}'->" + ",".join(alias_hits[:3]))
         if token in haystacks["name"]:
             token_score += 6.0
             reasons.append(f"命中名称'{token}'")
@@ -58,6 +72,16 @@ def tokenize(text: str) -> list[str]:
         if re.fullmatch(r"[\u4e00-\u9fff]+", token):
             expanded.extend(_chinese_ngrams(token))
     return _dedupe(expanded)
+
+
+# LLM: _semantic_alias_hits adds a small auditable recall boost without vector dependencies.
+# 函数用途: 根据固定别名表判断查询词是否能映射到能力卡文本。
+def _semantic_alias_hits(token: str, haystacks: dict[str, str]) -> list[str]:
+    aliases = _SEMANTIC_ALIASES.get(token, [])
+    if not aliases:
+        return []
+    text = " ".join(haystacks.values())
+    return [alias for alias in aliases if alias in text]
 
 
 # LLM: _chinese_ngrams expands Chinese query tokens for coarse matching.

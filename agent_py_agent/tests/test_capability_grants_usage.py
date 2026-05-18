@@ -123,3 +123,22 @@ def test_router_uses_usage_history_and_grant_scope_to_rank_visible_cards():
 
     assert [hit.card.id for hit in hits] == ["tool:read_file"]
     assert any("历史成功" in reason for reason in hits[0].reasons)
+
+
+def test_router_expands_common_semantic_aliases_without_vector_dependency():
+    router = CapabilityRouter(
+        extra_cards=[
+            CapabilityCard(
+                id="mcp:browser:screenshot",
+                kind="mcp_tool",
+                name="screenshot",
+                description="Capture browser image evidence",
+                keywords=["browser", "screenshot"],
+            )
+        ]
+    )
+
+    hits = router.search("网页截图验收", limit=3, kinds={"mcp_tool"})
+
+    assert [hit.card.id for hit in hits] == ["mcp:browser:screenshot"]
+    assert any("语义别名" in reason for reason in hits[0].reasons)
