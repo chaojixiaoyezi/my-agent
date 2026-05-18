@@ -82,8 +82,8 @@ def test_main_agent_real_task_execution_plan_writes_command_refs(tmp_path):
     assert not (tmp_path / first_case["stdout_ref"]).exists()
 
 
-# LLM: The controlled runner should be able to execute one main-agent task through an echo backend.
-# 函数用途: 用离线 echo 配置真实启动一次 `my-agent run`，验证工位、超时、日志和退出码记录链路。
+# LLM: The controlled runner should execute echo tasks but still fail missing artifacts.
+# 函数用途: 用离线 echo 配置真实启动一次 `my-agent run`，验证日志落盘且产物缺失不会误判完成。
 def test_main_agent_real_task_execution_runs_echo_subset(tmp_path):
     from agent_py_agent.agent.contracts.main_agent_real_task_execution import (
         MainAgentRealTaskExecutionRequest,
@@ -119,8 +119,76 @@ def test_main_agent_real_task_execution_runs_echo_subset(tmp_path):
 
     payload = report.to_dict()
     first_case = payload["cases"][0]
-    assert payload["ok"] is True
-    assert payload["summary"]["completed"] == 1
+    assert payload["ok"] is False
+    assert payload["summary"]["failed"] == 1
     assert first_case["exit_code"] == 0
+    assert first_case["acceptance_summary"]["failed"] == 1
     assert (tmp_path / first_case["stdout_ref"]).exists()
     assert (tmp_path / first_case["stderr_ref"]).exists()
+
+
+# LLM: Execution success must not hide missing required artifacts.
+# 函数用途: 验证主代理进程退出码为 0 但没有产物时，真实任务执行报告仍然失败。
+def test_main_agent_real_task_execution_fails_missing_expected_artifact(tmp_path):
+    from agent_py_agent.agent.contracts.main_agent_real_task_execution import (
+        MainAgentRealTaskExecutionRequest,
+        run_main_agent_real_task_execution,
+    )
+
+    report = run_main_agent_real_task_execution(
+        MainAgentRealTaskExecutionRequest(
+            workspace=tmp_path,
+            max_workers=1,
+            task_timeout_seconds=30,
+            execute=True,
+            case_ids=("furniture_homepage_html",),
+            package_root=Path.cwd(),
+        )
+    )
+
+    payload = report.to_dict()
+    first_case = payload["cases"][0]
+    acceptance_path = tmp_path / first_case["acceptance_report_ref"]
+    acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
+    assert payload["ok"] is False
+    assert first_case["status"] == "FAILED"
+    assert first_case["acceptance_summary"]["failed"] == 1
+    assert acceptance["artifacts"][0]["report"]["findings"][0]["code"] == "ARTIFACT_MISSING"
+
+
+# LLM: Expected artifact validation should pass when the structured preferred path exists.
+# 函数用途: 验证 runner 会按 expected_artifacts.json 的 preferred_path 验收真实文件。
+def test_main_agent_real_task_execution_accepts_expected_artifact(tmp_path):
+    from agent_py_agent.agent.contracts.main_agent_real_task_execution import (
+        MainAgentRealTaskExecutionRequest,
+        run_main_agent_real_task_execution,
+    )
+
+    artifact = (
+        tmp_path
+        / "main_agent_real_task_execution/tasks/furniture_homepage_html/workspace"
+        / "outputs/furniture_homepage/index.html"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(
+        "<!doctype html><html><head><title>Maison</title></head>"
+        '<body><a href="#story">Story</a><section id="story">Done</section></body></html>',
+        encoding="utf-8",
+    )
+
+    report = run_main_agent_real_task_execution(
+        MainAgentRealTaskExecutionRequest(
+            workspace=tmp_path,
+            max_workers=1,
+            task_timeout_seconds=30,
+            execute=True,
+            case_ids=("furniture_homepage_html",),
+            package_root=Path.cwd(),
+        )
+    )
+
+    payload = report.to_dict()
+    first_case = payload["cases"][0]
+    assert payload["ok"] is True
+    assert first_case["status"] == "COMPLETED"
+    assert first_case["acceptance_summary"]["passed"] == 1

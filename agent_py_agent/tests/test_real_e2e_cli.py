@@ -89,8 +89,8 @@ def test_cmd_real_e2e_includes_main_agent_real_task_suite_plan(tmp_path, capsys)
     assert saved["main_agent_real_task_suite"]["ok"] is True
 
 
-# LLM: real-e2e should expose controlled execution separately from the planning contract.
-# 函数用途: 验证 CLI 显式请求真实任务执行时，会返回执行报告和日志 refs。
+# LLM: real-e2e should expose controlled execution and artifact acceptance separately.
+# 函数用途: 验证 CLI 显式执行 echo 任务时，会返回日志 refs，并因缺少产物给出失败退出码。
 def test_cmd_real_e2e_runs_controlled_echo_real_task(tmp_path, capsys):
     from agent_py_agent.cli.real_e2e_commands import cmd_real_e2e
 
@@ -127,7 +127,8 @@ def test_cmd_real_e2e_runs_controlled_echo_real_task(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     execution = payload["main_agent_real_task_execution"]
     first_case = execution["cases"][0]
-    assert exit_code == 0
-    assert execution["summary"]["completed"] == 1
+    assert exit_code == 2
+    assert execution["summary"]["failed"] == 1
     assert first_case["exit_code"] == 0
+    assert first_case["acceptance_summary"]["failed"] == 1
     assert (tmp_path / "workspace" / first_case["stdout_ref"]).exists()

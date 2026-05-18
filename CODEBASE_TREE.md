@@ -1005,6 +1005,7 @@ docs/
 - `agent_py_agent/agent/contracts/e2e_matrix_runner.py`: 不调用模型的确定性 E2E runner；当前验证中文路径写读、大输出 artifact metadata 和工具失败分类。
 - `agent_py_agent/agent/contracts/main_agent_foundation_runner.py`: 主代理基础测试 1-6 类总入口；默认真实模型用例标记 `SKIPPED`，避免 focused tests 冒充真实模型验收。
 - `agent_py_agent/agent/contracts/artifact_acceptance.py`: 通用产物验收合同；HTML/JSON/CSV/XLSX/PDF/未知格式都输出结构化 findings，模型自检不再作为唯一证据。
+- `agent_py_agent/agent/contracts/main_agent_real_task_acceptance.py`: 主代理真实任务执行后的 expected artifact 验收入口；只读取结构化产物合同，不相信模型自述。
 - `agent_py_agent/agent/contracts/main_agent_real_task_execution.py`: 主代理真实任务受控执行入口；显式 `--run-real-tasks` 时并发启动隔离主代理任务，默认不烧真实 API。
 - `agent_py_agent/agent/contracts/main_agent_real_task_execution_files.py`: 主代理真实任务执行的命令、配置、日志和 refs helper，保证每个 case 有独立 workspace。
 - `agent_py_agent/agent/contracts/main_agent_real_task_execution_models.py`: 主代理真实任务执行请求、单项结果和总报告 bundle；报告只写 stdout/stderr refs。

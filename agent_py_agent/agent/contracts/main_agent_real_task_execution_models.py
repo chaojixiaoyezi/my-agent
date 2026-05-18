@@ -36,6 +36,8 @@ class MainAgentRealTaskExecutionCaseResult:
     command_ref: str
     stdout_ref: str
     stderr_ref: str
+    acceptance_report_ref: str
+    acceptance_summary: dict[str, int] = field(default_factory=dict)
     exit_code: int | None = None
     duration_seconds: float = 0.0
     issues: list[str] = field(default_factory=list)
@@ -54,6 +56,8 @@ class MainAgentRealTaskExecutionCaseResult:
             "command_ref": self.command_ref,
             "stdout_ref": self.stdout_ref,
             "stderr_ref": self.stderr_ref,
+            "acceptance_report_ref": self.acceptance_report_ref,
+            "acceptance_summary": dict(self.acceptance_summary),
             "exit_code": self.exit_code,
             "duration_seconds": round(self.duration_seconds, 3),
             "issues": list(self.issues),

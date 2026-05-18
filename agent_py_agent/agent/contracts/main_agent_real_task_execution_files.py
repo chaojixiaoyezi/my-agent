@@ -78,6 +78,7 @@ def case_paths(workspace: Path, case_id: str) -> dict[str, Path]:
         "command": root / "command.json",
         "stdout": root / "stdout.txt",
         "stderr": root / "stderr.txt",
+        "acceptance_report": root / "acceptance_report.json",
     }
 
 

@@ -582,7 +582,7 @@ my-agent real-e2e --workspace .\.real-e2e --report .\reports\real-e2e.json
 
 如果要准备多主代理真实任务测试，可以加 `--real-task-suite`。命令会生成家具 HTML、购物网站、GitHub 升星 XLSX、DeepSeek 论文翻译 PDF 等任务的 `prompt.md`、`acceptance.json`、`expected_artifacts.json` 和 `suite_report.json`，并给每个任务分配 worker slot（工位）和 timeout（超时）。默认仍然只生成计划，不自动调用模型。
 
-如果要真的启动这些主代理任务，必须显式加 `--run-real-tasks`。执行器会给每个 case 写独立 `config.yaml`、`command.json`、`stdout.txt`、`stderr.txt` 和专属 workspace，并按 `--real-task-max-workers` 并发启动。没有传 `--real-task-base-config` 时使用离线 echo 配置，适合 CI 和调试；要烧真实 API，必须显式传真实配置文件。
+如果要真的启动这些主代理任务，必须显式加 `--run-real-tasks`。执行器会给每个 case 写独立 `config.yaml`、`command.json`、`stdout.txt`、`stderr.txt`、`acceptance_report.json` 和专属 workspace，并按 `--real-task-max-workers` 并发启动。执行成功不等于任务成功：runner 会继续按 `expected_artifacts.json` 验收产物，缺文件或机器验收失败都会让 case 失败。没有传 `--real-task-base-config` 时使用离线 echo 配置，适合 CI 和调试；要烧真实 API，必须显式传真实配置文件。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |

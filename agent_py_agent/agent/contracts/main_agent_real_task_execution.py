@@ -9,6 +9,11 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .main_agent_real_task_acceptance import (
+    RealTaskAcceptanceReport,
+    RealTaskAcceptanceRequest,
+    validate_real_task_artifacts,
+)
 from .main_agent_real_task_execution_files import (
     case_paths,
     command_for_case,
@@ -48,6 +53,7 @@ class _CaseRuntime:
 class _CaseResultBundle:
     runtime: _CaseRuntime
     status: str
+    acceptance: RealTaskAcceptanceReport | None = None
     exit_code: int | None = None
     duration_seconds: float = 0.0
     issues: tuple[str, ...] = field(default_factory=tuple)
@@ -142,12 +148,14 @@ def _run_case(runtime: _CaseRuntime) -> MainAgentRealTaskExecutionCaseResult:
         duration = time.monotonic() - start
         runtime.paths["stdout"].write_text(completed.stdout, encoding="utf-8")
         runtime.paths["stderr"].write_text(completed.stderr, encoding="utf-8")
-        status = "COMPLETED" if completed.returncode == 0 else "FAILED"
-        issues = () if completed.returncode == 0 else (f"exit_code={completed.returncode}",)
+        acceptance = _validate_case_artifacts(runtime)
+        status = "COMPLETED" if completed.returncode == 0 and acceptance.ok else "FAILED"
+        issues = _case_issues(completed.returncode, acceptance)
         return _case_result(
             _CaseResultBundle(
                 runtime=runtime,
                 status=status,
+                acceptance=acceptance,
                 exit_code=completed.returncode,
                 duration_seconds=duration,
                 issues=issues,
@@ -172,6 +180,7 @@ def _run_case(runtime: _CaseRuntime) -> MainAgentRealTaskExecutionCaseResult:
 # 函数用途: 汇总单个任务的引用字段和执行状态，保持 stdout/stderr 外置。
 def _case_result(bundle: _CaseResultBundle) -> MainAgentRealTaskExecutionCaseResult:
     runtime = bundle.runtime
+    acceptance = bundle.acceptance
     return MainAgentRealTaskExecutionCaseResult(
         case_id=runtime.case.case_id,
         title=runtime.case.title,
@@ -183,10 +192,39 @@ def _case_result(bundle: _CaseResultBundle) -> MainAgentRealTaskExecutionCaseRes
         command_ref=rel(runtime.paths["command"], runtime.workspace),
         stdout_ref=rel(runtime.paths["stdout"], runtime.workspace),
         stderr_ref=rel(runtime.paths["stderr"], runtime.workspace),
+        acceptance_report_ref=rel(runtime.paths["acceptance_report"], runtime.workspace),
+        acceptance_summary=dict(acceptance.summary if acceptance else {}),
         exit_code=bundle.exit_code,
         duration_seconds=bundle.duration_seconds,
         issues=list(bundle.issues),
     )
+
+
+# LLM: _validate_case_artifacts connects subprocess completion to artifact acceptance.
+# 函数用途: 读取该 case 的 expected_artifacts_ref，并在任务 workspace 内验收产物。
+def _validate_case_artifacts(runtime: _CaseRuntime) -> RealTaskAcceptanceReport:
+    return validate_real_task_artifacts(
+        RealTaskAcceptanceRequest(
+            expected_artifacts_path=runtime.workspace / runtime.case.expected_artifacts_ref,
+            task_workspace=runtime.paths["workspace"],
+            report_path=runtime.paths["acceptance_report"],
+        )
+    )
+
+
+# LLM: _case_issues merges process and artifact failures into structured short issue codes.
+# 函数用途: 生成 case 级失败摘要；详细 findings 留在 acceptance_report_ref。
+def _case_issues(
+    exit_code: int,
+    acceptance: RealTaskAcceptanceReport,
+) -> tuple[str, ...]:
+    issues: list[str] = []
+    if exit_code != 0:
+        issues.append(f"exit_code={exit_code}")
+    failed = int(acceptance.summary.get("failed", 0))
+    if failed:
+        issues.append(f"artifact_acceptance_failed={failed}")
+    return tuple(issues)
 
 
 # LLM: _select_cases filters by structured case ids, never by prompt text.
