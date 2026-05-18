@@ -35,9 +35,14 @@ def form_binding_hits(form_ids: set[str], script_text: str) -> list[str]:
 
 
 # LLM: missing_dom_id_hits catches JS selectors that point at absent local ids.
-# 函数用途: 检查 `getElementById` 和 `querySelector('#id')` 的目标是否存在。
-def missing_dom_id_hits(element_ids: set[str], script_text: str) -> list[str]:
-    hits = _missing_get_element_hits(element_ids, script_text)
+# 函数用途: 检查 `getElementById` 和 `querySelector('#id')` 的目标是否存在；严格模式下可选保护也要对齐真实 DOM。
+def missing_dom_id_hits(
+    element_ids: set[str],
+    script_text: str,
+    *,
+    allow_optional_missing: bool = True,
+) -> list[str]:
+    hits = _missing_get_element_hits(element_ids, script_text, allow_optional_missing=allow_optional_missing)
     hits.extend(_missing_query_selector_hits(element_ids, script_text))
     return hits
 
@@ -52,12 +57,19 @@ def inert_control_hits(request: InertControlCheckRequest) -> list[str]:
     return hits
 
 
-# LLM: _missing_get_element_hits filters optional guarded lookups before reporting hard misses.
-# 函数用途: `const x=getElementById(...); x && ...` 这种可选 DOM hook 不算硬失败。
-def _missing_get_element_hits(element_ids: set[str], script_text: str) -> list[str]:
+# LLM: _missing_get_element_hits filters optional guarded lookups unless strict validation asks for all hooks.
+# 函数用途: 默认允许可选 DOM hook；严格模式用于 Live Lab 这类完整交付物一致性检查。
+def _missing_get_element_hits(
+    element_ids: set[str],
+    script_text: str,
+    *,
+    allow_optional_missing: bool,
+) -> list[str]:
     hits: list[str] = []
     for target in sorted(set(_GET_ELEMENT_BY_ID_RE.findall(script_text or ""))):
-        if target in element_ids or _is_optionally_guarded_dom_lookup(script_text, target):
+        if target in element_ids:
+            continue
+        if allow_optional_missing and _is_optionally_guarded_dom_lookup(script_text, target):
             continue
         hits.append(f"getElementById:{target}")
     return hits

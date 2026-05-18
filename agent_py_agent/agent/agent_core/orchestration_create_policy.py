@@ -9,14 +9,13 @@ from ..subagents.role_templates import role_template_id_for_role
 from ..subagents.services.base import CreateRunParams
 from .coordinator_seed_tools import explicit_root_allowed_tools
 from .orchestration_create_constraints import (
-    goal_has_concrete_file_target,
     resolved_extra_write_roots,
     role_allows_direct_product_work,
 )
 from .orchestration_create_context import create_context_manifest, create_context_packs
-from .orchestration_root_contract import explicit_root_goal_with_user_contract
 from .orchestration_workflow_mode import tool_workflow_mode as _tool_workflow_mode
 from .parameters import _positive_int, _string_list
+from .runner_input_dependencies import params_output_refs
 from .spawn_role_seed import is_explicit_root_role
 
 
@@ -34,7 +33,6 @@ def create_run_params(
     if is_explicit_root:
         workflow_mode = "off"
         allowed_tools = explicit_root_allowed_tools(allowed_tools)
-        goal = explicit_root_goal_with_user_contract(agent, goal)
     elif _should_disable_generic_workflow_for_concrete_worker(raw_params, goal, role, workflow_mode):
         workflow_mode = "off"
     return CreateRunParams(
@@ -52,6 +50,7 @@ def create_run_params(
         context_manifest=create_context_manifest(raw_params),
         context_packs=create_context_packs(raw_params),
         workflow_mode=workflow_mode,
+        attributes=_create_attributes(raw_params),
     )
 
 
@@ -100,7 +99,54 @@ def _should_disable_generic_workflow_for_concrete_worker(
         return False
     if _positive_int(raw_params.get("count"), default=1) <= 0:
         return False
-    return goal_has_concrete_file_target(goal)
+    return bool(params_output_refs(raw_params))
+
+
+# LLM: _create_attributes persists create-time machine facts beside the human-facing goal.
+# 函数用途: 把 output/input/QA/static/content 等结构化工具参数写入 task.attributes，运行期不再解析 goal。
+def _create_attributes(raw_params: dict[str, object]) -> dict[str, object]:
+    attrs = dict(raw_params.get("attributes") or {}) if isinstance(raw_params.get("attributes"), dict) else {}
+    for key in _LIST_ATTRIBUTE_FIELDS:
+        values = _string_list(raw_params.get(key))
+        if values and key not in attrs:
+            attrs[key] = values
+    for key in _SCALAR_ATTRIBUTE_FIELDS:
+        value = str(raw_params.get(key) or "").strip()
+        if value and key not in attrs:
+            attrs[key] = value
+    for key in _MAPPING_ATTRIBUTE_FIELDS:
+        value = raw_params.get(key)
+        if isinstance(value, dict) and key not in attrs:
+            attrs[key] = dict(value)
+    return attrs
+
+
+_LIST_ATTRIBUTE_FIELDS = (
+    "artifact_refs",
+    "forbidden_files",
+    "input_files",
+    "input_refs",
+    "output_files",
+    "output_refs",
+    "qa_roles",
+    "domain_scopes",
+    "forbidden_child_scopes",
+    "hierarchy_contracts",
+    "capability_contracts",
+    "required_content_lines",
+    "required_dom_ids",
+    "required_files",
+    "required_qa_roles",
+    "required_read_paths",
+    "workflow_risk_tags",
+)
+_MAPPING_ATTRIBUTE_FIELDS = ("required_content_files",)
+_SCALAR_ATTRIBUTE_FIELDS = (
+    "preferred_workflow_template",
+    "subagent_workflow_template",
+    "workflow_task_type",
+    "workflow_template_id",
+)
 
 
 # LLM: _role_field_is_lineage_agent_name catches display names leaked into structured role.

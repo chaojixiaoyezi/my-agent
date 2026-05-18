@@ -274,6 +274,34 @@ def test_static_site_check_allows_optional_missing_dom_binding(tmp_path):
     assert record.validation_result["missing_dom_id_hits"] == []
 
 
+# LLM: Strict DOM mode is for complete deliverables where optional-looking stale hooks should still be fixed.
+# 函数用途: 验证 strict_dom_bindings 会把被 `v&&...` 保护但实际不存在的 JS id 当成一致性问题。
+def test_static_site_check_strict_mode_blocks_optional_missing_dom_binding(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "index.html": (
+                "<main id='home'>Home</main>"
+                "<script>const v=document.getElementById('view-btn');v&&v.addEventListener('click',()=>{});</script>"
+            ),
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "strict optional dom hook",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index.html"],
+            "strict_dom_bindings": True,
+        }
+    )
+
+    assert record.passed is False
+    assert record.validation_result["missing_dom_id_hits"] == ["getElementById:view-btn"]
+
+
 # LLM: DOM id binding mismatches catch generated buttons that look clickable but break at runtime.
 # 函数用途: app.js 读取不存在的按钮 id 时，父级静态验收要失败并给出具体缺失 id。
 def test_static_site_check_blocks_missing_dom_id_targets(tmp_path):

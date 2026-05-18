@@ -63,10 +63,11 @@ def test_plan_workflow_for_goal_composes_router_compiler_and_parent_gate():
     )
 
     result = plan_workflow_for_goal(
-        "Fix the API bug and add regression tests\nworkflow_task_type: code_or_bugfix",
+        "Fix the API bug and add regression tests",
         constraints=WorkflowPlanConstraints(
             config=_Config("auto"),
             template_store=_store("single_worker_verified", "code_feature_split"),
+            workflow_task_type="code_or_bugfix",
             quality_contract=contract,
             allowed_write_roots=["agent_py_agent/agent/example.py"],
         ),
@@ -119,16 +120,17 @@ def test_plan_workflow_for_goal_manual_mode_marks_confirmation():
 
 def test_workflow_planning_result_serializes_audit_preview():
     result = plan_workflow_for_goal(
-        "Fix the API bug and add regression tests\nworkflow_task_type: code_or_bugfix",
+        "Fix the API bug and add regression tests",
         constraints=WorkflowPlanConstraints(
             config=_Config("auto"),
             template_store=_store("single_worker_verified", "code_feature_split"),
+            workflow_task_type="code_or_bugfix",
         ),
     )
 
     payload = result.to_dict()
 
-    assert payload["goal"] == "Fix the API bug and add regression tests\nworkflow_task_type: code_or_bugfix"
+    assert payload["goal"] == "Fix the API bug and add regression tests"
     assert payload["selected_template_id"] == "code_feature_split"
     assert payload["mode"] == "auto"
     assert payload["needs_confirmation"] is False
@@ -156,7 +158,9 @@ def test_subagents_workflow_plan_cli_json_previews_without_dispatch(tmp_path, ca
             "--config",
             str(config_path),
             "subagents-workflow-plan",
-            "Fix API bug and add tests\nworkflow_task_type: code_or_bugfix",
+            "Fix API bug and add tests",
+            "--task-type",
+            "code_or_bugfix",
             "--json",
         ]
     )
@@ -186,7 +190,9 @@ def test_subagents_workflow_plan_cli_writes_preview_files(tmp_path, capsys):
             "--config",
             str(config_path),
             "subagents-workflow-plan",
-            "Fix API bug and add tests\nworkflow_task_type: code_or_bugfix",
+            "Fix API bug and add tests",
+            "--task-type",
+            "code_or_bugfix",
             "--output-dir",
             str(output_dir),
         ]
@@ -204,7 +210,7 @@ def test_subagents_workflow_plan_cli_writes_preview_files(tmp_path, capsys):
     assert markdown_path.exists()
     assert "preview_json=" in output
     assert "preview_markdown=" in output
-    assert payload["goal"] == "Fix API bug and add tests\nworkflow_task_type: code_or_bugfix"
+    assert payload["goal"] == "Fix API bug and add tests"
     assert payload["selected_template_id"] == "code_feature_split"
     assert payload["worker_count"] >= 1
     assert "# Subagent Workflow Plan Preview" in markdown
@@ -220,7 +226,9 @@ def test_subagents_workflow_plan_cli_json_reports_written_preview_paths(tmp_path
             "--config",
             str(config_path),
             "subagents-workflow-plan",
-            "Fix API bug and add tests\nworkflow_task_type: code_or_bugfix",
+            "Fix API bug and add tests",
+            "--task-type",
+            "code_or_bugfix",
             "--output-dir",
             str(output_dir),
             "--json",
@@ -243,7 +251,9 @@ def test_subagents_workflow_plan_cli_accepts_template_override(tmp_path, capsys)
             "--config",
             str(config_path),
             "subagents-workflow-plan",
-            "Fix API bug and add tests\nworkflow_task_type: code_or_bugfix",
+            "Fix API bug and add tests",
+            "--task-type",
+            "code_or_bugfix",
             "--template-id",
             "single_worker_verified",
             "--json",
@@ -263,9 +273,10 @@ def test_subagents_dispatch_cli_plan_writes_workflow_plan_into_existing_task(tmp
     config_path = _write_config(tmp_path, mode="off")
     agent = SimpleAgent(load_config(config_path), tmp_path)
     parent = agent.subagents.create_run(
-        goal="Fix API bug and add regression tests\nworkflow_task_type: code_or_bugfix",
+        goal="Fix API bug and add regression tests",
         thought="等待 CLI dispatch 补做 workflow 规划。",
         plan=["等待规划"],
+        attributes={"workflow_task_type": "code_or_bugfix"},
     )
 
     parser = build_parser()
@@ -295,9 +306,10 @@ def test_subagents_dispatch_cli_auto_spawns_workflow_workers(tmp_path):
     config_path = _write_config(tmp_path, mode="off")
     agent = SimpleAgent(load_config(config_path), tmp_path)
     parent = agent.subagents.create_run(
-        goal="Fix API bug and add regression tests\nworkflow_task_type: code_or_bugfix",
+        goal="Fix API bug and add regression tests",
         thought="等待 CLI dispatch 自动派工。",
         plan=["等待自动派工"],
+        attributes={"workflow_task_type": "code_or_bugfix"},
     )
 
     parser = build_parser()

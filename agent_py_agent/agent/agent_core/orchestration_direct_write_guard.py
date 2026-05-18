@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from ..tools import ToolExecutionResult
+from .orchestration_delegation_intent import (
+    parent_product_write_allowed,
+    refs_only_delegation_enabled,
+)
 from .orchestration_run_scope import remembered_orchestration_run_ids
 
 _DIRECT_WRITE_TOOLS = {"write_file", "append_file", "replace_in_file"}
@@ -46,6 +50,7 @@ class DelegateOnlyDirectWriteGuardRequest:
     agent: object
     payload: object
     user_prompt: str = ""
+    task_attributes: dict | None = None
 
 
 # LLM: maybe_block_delegate_only_direct_write is a tool-loop preflight for delegated task boundaries.
@@ -67,30 +72,14 @@ def maybe_block_delegate_only_direct_write(
     return None
 
 
-# LLM: _user_requested_delegate_only detects protocol-level current-run delegation constraints.
-# 函数用途: 只接受 delegate_only=true 这类机器字段；普通自然语言不在代码层解析。
-def _user_requested_delegate_only(prompt: str) -> bool:
-    text = " ".join(str(prompt or "").lower().split())
-    if not text:
-        return False
-    return "delegate_only=true" in text or "refs_only=true" in text
-
-
 # LLM: _delegate_write_guard_active also protects root after it already dispatched a child.
-# 函数用途: 用户没说“只读报告”但 root 本轮已派工时，默认不让 root 自己写业务产物，除非用户明确要求亲自修复。
+# 函数用途: 结构化字段要求 delegate-only 或 root 本轮已派工时，默认不让 root 自己写业务产物。
 def _delegate_write_guard_active(request: DelegateOnlyDirectWriteGuardRequest) -> bool:
-    if _user_authorized_parent_product_write(request.user_prompt):
+    if parent_product_write_allowed(request.task_attributes):
         return False
-    if _user_requested_delegate_only(request.user_prompt):
+    if refs_only_delegation_enabled(request.task_attributes):
         return True
     return bool(remembered_orchestration_run_ids(request.agent))
-
-
-# LLM: _user_authorized_parent_product_write detects protocol-level current-run override.
-# 函数用途: 只接受 parent_product_write=allow 机器字段；自然语言授权交给模型规划，不由 guard 猜。
-def _user_authorized_parent_product_write(prompt: str) -> bool:
-    compact = " ".join(str(prompt or "").lower().split())
-    return "parent_product_write=allow" in compact
 
 
 # LLM: _current_runner_can_write_product keeps delegate-only guard scoped to the outer root, not active subagents.

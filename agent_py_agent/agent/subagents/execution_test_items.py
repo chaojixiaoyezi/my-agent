@@ -50,7 +50,7 @@ class TestItemPreparationContext:
 
     artifact_dirs: dict[str, Path]
     artifact_paths: list[tuple[str, Path]]
-    artifact_summaries: dict[Path, str]
+    artifact_expected_content: dict[Path, str]
     fallback_dir: Path | None
     workspace_root: Path
 
@@ -65,7 +65,7 @@ def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, An
     context = TestItemPreparationContext(
         artifact_dirs=artifact_dirs,
         artifact_paths=_artifact_paths(request.output, workspace_root),
-        artifact_summaries=_artifact_summaries_by_path(request.output, workspace_root),
+        artifact_expected_content=_artifact_expected_content_by_path(request.output, workspace_root),
         fallback_dir=_single_artifact_dir(artifact_dirs),
         workspace_root=workspace_root,
     )
@@ -110,7 +110,7 @@ def _prepared_test_item(
         CatContentCheckRequest(
             item=item,
             workspace_root=context.workspace_root,
-            artifact_summaries=context.artifact_summaries,
+            artifact_expected_content=context.artifact_expected_content,
         )
     )
     if not _needs_working_dir(item):
@@ -238,9 +238,9 @@ def _artifact_paths(output: dict[str, object], workspace_root: Path) -> list[tup
     return values
 
 
-# LLM: _artifact_summaries_by_path indexes artifact descriptions without reading artifact bodies.
-# 函数用途: 让常见“cat 文件，内容应为 X”的模型测试能从 artifact 摘要里恢复期望内容。
-def _artifact_summaries_by_path(output: dict[str, object], workspace_root: Path) -> dict[Path, str]:
+# LLM: _artifact_expected_content_by_path indexes exact artifact assertions only.
+# 函数用途: 从 output.artifacts 的结构化期望字段读取 cat->content_check 的内容，不解析 summary 文案。
+def _artifact_expected_content_by_path(output: dict[str, object], workspace_root: Path) -> dict[Path, str]:
     values: dict[Path, str] = {}
     for artifact in output.get("artifacts") or []:
         if not isinstance(artifact, dict):
@@ -248,10 +248,20 @@ def _artifact_summaries_by_path(output: dict[str, object], workspace_root: Path)
         path = _workspace_path(artifact.get("path"), workspace_root)
         if path is None:
             continue
-        summary = str(artifact.get("summary") or "").strip()
-        if summary:
-            values[path] = summary
+        expected = _artifact_expected_content(artifact)
+        if expected:
+            values[path] = expected
     return values
+
+
+# LLM: _artifact_expected_content reads closed schema keys, not human summaries.
+# 函数用途: 兼容 artifact 级 content_equals/expected_content 等字段作为机器验收合同。
+def _artifact_expected_content(artifact: dict[str, object]) -> str:
+    for key in ("content_equals", "expected_content", "content_pattern", "expected_stdout", "expected_output"):
+        value = str(artifact.get(key) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 # LLM: _workspace_path resolves artifact paths as literals and rejects paths outside the configured workspace.

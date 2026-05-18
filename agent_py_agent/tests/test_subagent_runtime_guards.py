@@ -356,9 +356,16 @@ def test_dispatch_round_grants_one_parent_acceptance_repair_turn(tmp_path):
 # 函数用途: root 已经调度 worker/tester 但缺少用户明确要求的验收子代理时，最终回复守卫必须拦住口头完成。
 def test_final_response_guard_blocks_missing_explicit_acceptor_role(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
+    coordinator = manager.create_run(
+        goal="coordinate page",
+        thought="coordinator",
+        plan=["coordinate"],
+        role="coordinator",
+        attributes={"required_qa_roles": ["acceptor"]},
+    )
     worker = manager.create_run(goal="write page", thought="worker", plan=["write"], role="worker")
     tester = manager.create_run(goal="test page", thought="tester", plan=["test"], role="tester")
-    for task in (worker, tester):
+    for task in (coordinator, worker, tester):
         task.status = "DONE"
         task.verification_status = "VERIFIED"
         manager.save(task)
@@ -366,7 +373,7 @@ def test_final_response_guard_blocks_missing_explicit_acceptor_role(tmp_path):
         subagents=manager,
         _current_subagent_run_id="",
         _current_user_prompt="请安排小傻妞做页面，最后必须派验收子代理收口。",
-        _orchestration_run_ids_seen={worker.id, tester.id},
+        _orchestration_run_ids_seen={coordinator.id, worker.id, tester.id},
     )
 
     response = subagent_dispatch_final_response_guard(

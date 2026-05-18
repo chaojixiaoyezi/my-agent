@@ -247,8 +247,9 @@ class TestCreateSubagentsToolTemplatePolicy:
 
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({
-            "goal": "写一个极简单文件。\noutput_files: index.html",
+            "goal": "写一个极简单文件。",
             "role": "writer",
+            "output_files": ["index.html"],
         })
 
         assert result.ok is False
@@ -328,25 +329,22 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         result = CreateSubagentsTool(mock_agent).execute({
             "items": [
                 {
-                    "goal": "整理三周 GitHub star 数据。\noutput_files: data/github_star_data.md",
+                    "goal": "整理三周 GitHub star 数据。",
+                    "output_files": ["data/github_star_data.md"],
                     "agent_name": "小傻妞-数据搜集",
                     "role": "worker",
                 },
                 {
-                    "goal": (
-                        "核验并翻译。\n"
-                        "dependencies: 小傻妞-数据搜集\n"
-                        "output_files: data/github_star_analysis.md"
-                    ),
+                    "goal": "核验并翻译。",
+                    "dependencies": ["小傻妞-数据搜集"],
+                    "output_files": ["data/github_star_analysis.md"],
                     "agent_name": "小傻妞-核验翻译",
                     "role": "worker",
                 },
                 {
-                    "goal": (
-                        "生成报告。\n"
-                        "required_read_paths: data/github_star_analysis.md\n"
-                        "output_files: xlsx/final_report.md"
-                    ),
+                    "goal": "生成报告。",
+                    "required_read_paths": ["data/github_star_analysis.md"],
+                    "output_files": ["xlsx/final_report.md"],
                     "agent_name": "小傻妞-生成报告",
                     "role": "worker",
                 },
@@ -370,13 +368,17 @@ class TestCreateSubagentsToolWorkspaceDefaults:
 
         result = CreateSubagentsTool(mock_agent).execute({
             "items": [
-                {"goal": "收集项目数据。\noutput_files: data_collection.md", "agent_name": "小傻妞-数据收集"},
+                {"goal": "收集项目数据。", "output_files": ["data_collection.md"], "agent_name": "小傻妞-数据收集"},
                 {
-                    "goal": "写中文解释。\nrequired_read_paths: data_collection.md\noutput_files: content_writeup.md",
+                    "goal": "写中文解释。",
+                    "required_read_paths": ["data_collection.md"],
+                    "output_files": ["content_writeup.md"],
                     "agent_name": "小傻妞-内容编写",
                 },
                 {
-                    "goal": "生成报告。\nrequired_read_paths: data_collection.md, content_writeup.md\noutput_files: final_report.md",
+                    "goal": "生成报告。",
+                    "required_read_paths": ["data_collection.md", "content_writeup.md"],
+                    "output_files": ["final_report.md"],
                     "agent_name": "小傻妞-生成报告",
                 },
             ]
@@ -399,20 +401,22 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         result = CreateSubagentsTool(mock_agent).execute({
             "items": [
                 {
-                    "goal": "收集数据。\noutput_files: data/subagents/subagent_data_collection/results.md",
+                    "goal": "收集数据。",
+                    "output_files": ["data/subagents/subagent_data_collection/results.md"],
                     "agent_name": "小傻妞-数据收集",
                 },
                 {
-                    "goal": "编写内容。\noutput_files: data/subagents/subagent_content_writer/results.md",
+                    "goal": "编写内容。",
+                    "output_files": ["data/subagents/subagent_content_writer/results.md"],
                     "agent_name": "小傻妞-内容编写",
                 },
                 {
-                    "goal": (
-                        "整合结果。\n"
-                        "required_read_paths: data/subagents/subagent_data_collection/results.md, "
-                        "data/subagents/subagent_content_writer/results.md\n"
-                        "output_files: final_report.md"
-                    ),
+                    "goal": "整合结果。",
+                    "required_read_paths": [
+                        "data/subagents/subagent_data_collection/results.md",
+                        "data/subagents/subagent_content_writer/results.md",
+                    ],
+                    "output_files": ["final_report.md"],
                     "agent_name": "小傻妞-生成报告",
                 },
             ]
@@ -483,6 +487,7 @@ class TestCreateSubagentsToolWorkerWorkflow:
             "role": "小傻妞",
             "workflow_mode": "auto",
             "extra_write_roots": ["/tmp/project"],
+            "output_files": ["index1.html"],
         })
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
@@ -516,6 +521,7 @@ class TestCreateSubagentsToolWorkerWorkflow:
             "role": "child_worker",
             "workflow_mode": "auto",
             "extra_write_roots": ["/tmp/project/artifacts"],
+            "output_files": ["index1.html"],
         })
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
@@ -544,6 +550,7 @@ class TestCreateSubagentsToolWorkerWorkflow:
             "role": "leaf_worker",
             "workflow_mode": "auto",
             "extra_write_roots": ["/tmp/project/artifacts"],
+            "output_files": ["index1.html", "index2.html"],
         })
 
         assert result.ok is False

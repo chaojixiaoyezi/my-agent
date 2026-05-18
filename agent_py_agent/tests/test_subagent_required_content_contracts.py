@@ -1,11 +1,15 @@
 """测试普通文件内容合同和父级 content_check 推断。"""
 
+from types import SimpleNamespace
+
 from agent_py_agent.agent.subagents.execution_test_items import (
     TestItemPreparationRequest,
     prepare_test_items,
 )
 from agent_py_agent.agent.subagents.required_content_lines import (
+    required_content_lines_by_file_for_task,
     required_content_lines_by_file_from_texts,
+    required_content_lines_for_task,
     required_content_lines_from_texts,
 )
 
@@ -173,3 +177,55 @@ def test_required_content_lines_by_file_from_structured_text():
         "orders.csv": ["order_id,total", "A-1001,299.00"],
         "report.md": ["# 订单报告", "- 已核对"],
     }
+
+
+# LLM: task-level content contracts must come from attributes, not goal/acceptance prose.
+# 函数用途: 确认运行时验收不会从普通 task 文本里解析 required_content_lines。
+def test_required_content_for_task_ignores_text_fields_and_reads_attributes():
+    task = SimpleNamespace(
+        goal="required_content_lines: should-not-count",
+        thought="required_content_lines[report.md]: should-not-count",
+        acceptance_checks=["required_content_lines: should-not-count"],
+        attributes={
+            "required_content_lines": ["order_id,total", "A-1001,299.00"],
+            "required_content_files": {"report.md": ["# 订单报告"]},
+        },
+    )
+
+    assert required_content_lines_for_task(task) == ["order_id,total", "A-1001,299.00"]
+    assert required_content_lines_by_file_for_task(task) == {"report.md": ["# 订单报告"]}
+
+
+# LLM: text-only task fields are no longer machine facts for content acceptance.
+# 函数用途: 即便 goal/acceptance_checks 写了 required_content_lines，缺 attributes 时也不生成验收合同。
+def test_required_content_for_task_does_not_parse_goal_or_acceptance_checks():
+    task = SimpleNamespace(
+        goal="required_content_lines: should-not-count",
+        thought="required_content_lines[report.md]: should-not-count",
+        acceptance_checks=["required_content_lines: should-not-count"],
+        attributes={},
+    )
+
+    assert required_content_lines_for_task(task) == []
+    assert required_content_lines_by_file_for_task(task) == {}
+
+
+# LLM: create_run should persist structured content contracts without text-field parsing.
+# 函数用途: 验证子代理创建入口能直接接收 attributes，后续父级验收从这里读内容合同。
+def test_create_run_persists_required_content_attributes(tmp_path):
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+
+    manager = SubAgentManager(tmp_path / "subs")
+    task = manager.create_run(
+        goal="写订单报表",
+        thought="普通说明不承载机器验收事实。",
+        plan=["write"],
+        attributes={
+            "required_content_lines": ["order_id,total"],
+            "required_content_files": {"orders.csv": ["A-1001,299.00"]},
+        },
+    )
+    loaded = manager.load(task.id)
+
+    assert required_content_lines_for_task(loaded) == ["order_id,total"]
+    assert required_content_lines_by_file_for_task(loaded) == {"orders.csv": ["A-1001,299.00"]}

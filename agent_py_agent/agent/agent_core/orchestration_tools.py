@@ -12,8 +12,6 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from ..action_protocol import subagent_schedule_envelope_from_payload
-from ..contracts.idempotency import idempotency_key, operation_id
 from ..subagents.models import SubAgentBoardOptions
 from ..subagents.services.base import CreateRunParams
 from ..tools import BaseTool, ToolExecutionResult
@@ -35,16 +33,13 @@ from .orchestration_create_constraints import (
 )
 from .orchestration_create_idempotency import (
     CreateTaskResolution,
-    created_tasks,
-    dispatchable_tasks,
     resolve_create_run,
-    reused_tasks,
 )
 from .orchestration_create_items import CreateSubagentItem, create_items_from_params
+from .orchestration_create_payload import create_subagents_payload
 from .orchestration_create_policy import (
     create_run_params,
 )
-from .orchestration_dispatch_state_contract import dispatch_state_contract_payload
 from .orchestration_dispatch_tool import DispatchSubagentsTool
 from .orchestration_item_dependencies import enrich_item_dependencies, item_dependency_edges
 from .orchestration_lineage_names import indexed_count_params, indexed_item_params
@@ -107,18 +102,18 @@ class CreateSubagentsTool(BaseTool):
         )
         if target_error:
             return ToolExecutionResult("create_subagents", False, target_error)
-        constraint_conflict = delegation_constraint_conflict_error(self.agent, goal)
+        constraint_conflict = delegation_constraint_conflict_error(params)
         if constraint_conflict:
             return ToolExecutionResult("create_subagents", False, constraint_conflict)
 
         run_params = create_run_params(self.agent, params, goal, allowed_tools)
-        ambiguous_product_count = ambiguous_repeated_product_goal_error(goal, count, run_params.role)
+        ambiguous_product_count = ambiguous_repeated_product_goal_error(params, count, run_params.role)
         if ambiguous_product_count:
             return ToolExecutionResult("create_subagents", False, ambiguous_product_count)
         resolutions = self._create_tasks(goal, count, run_params)
         tasks = [item.task for item in resolutions]
         remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
-        payload = self._create_payload(resolutions, allowed_tools, params)
+        payload = create_subagents_payload(self.agent, resolutions, allowed_tools, params)
         return ToolExecutionResult(
             "create_subagents",
             True,
@@ -152,7 +147,12 @@ class CreateSubagentsTool(BaseTool):
         tasks = [item.task for item in resolutions]
         _apply_item_dependency_edges(self.agent.subagents, tasks, dependency_edges)
         remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
-        payload = self._create_payload(resolutions, _payload_allowed_tools(allowed_tool_values), {"items": [item.params for item in capped]})
+        payload = create_subagents_payload(
+            self.agent,
+            resolutions,
+            _payload_allowed_tools(allowed_tool_values),
+            {"items": [item.params for item in capped]},
+        )
         payload["batch_mode"] = "items"
         return ToolExecutionResult(
             "create_subagents",
@@ -186,7 +186,7 @@ class CreateSubagentsTool(BaseTool):
         )
         if target_error:
             return target_error
-        return delegation_constraint_conflict_error(self.agent, goal)
+        return delegation_constraint_conflict_error(params)
 
     # LLM: _requested_count 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 发送requested数量请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
@@ -206,49 +206,6 @@ class CreateSubagentsTool(BaseTool):
             task_params = indexed_count_params(run_params, index=index, count=count)
             resolutions.append(resolve_create_run(self.agent.subagents, task_params))
         return resolutions
-
-    # LLM: _create_payload 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 构建载荷所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
-    def _create_payload(
-        self,
-        resolutions: list[CreateTaskResolution],
-        allowed_tools: list[str] | str | None,
-        request_params: dict[str, object],
-    ) -> dict[str, object]:
-        tasks = [item.task for item in resolutions]
-        created = created_tasks(resolutions)
-        reused = reused_tasks(resolutions)
-        dispatch = dispatchable_tasks(tasks)
-        payload: dict[str, object] = {
-            "created": len(created),
-            "ids": [task.id for task in tasks],
-            "created_run_ids": [task.id for task in created],
-            "reused_run_ids": [task.id for task in reused],
-            "dispatch_run_ids": [task.id for task in dispatch],
-            "allowed_tools": allowed_tools or "automatic",
-            "operation_contract": _operation_contract(request_params, created, reused, dispatch),
-            "next_action": _dispatch_next_action(dispatch),
-            "subagent_workspace": str(self.agent.subagents.workspace),
-            "tasks": [
-                {
-                    "id": task.id,
-                    "goal": _task_text(task, "goal"),
-                    "status": _task_text(task, "status"),
-                    "verification_status": _task_text(task, "verification_status"),
-                    "task_dir": _task_text(task, "task_dir"),
-                }
-                for task in tasks
-            ],
-        }
-        # LLM: expose the same state contract immediately after create, before the parent calls dispatch.
-        # 函数用途: root 刚创建小傻妞就能看到哪些 run 可调度，避免下一轮凭自然语言记忆猜。
-        payload.update(dispatch_state_contract_payload(self.agent))
-        payload["typed_envelope"] = subagent_schedule_envelope_from_payload(
-            payload,
-            tool="create_subagents",
-        ).to_dict()
-        return payload
-
 
 # LLM: _apply_item_dependency_edges persists batch sibling ordering as workflow-style phase refs.
 # 函数用途: items[] 下游自然引用上游代理时，写入 run 级依赖，dispatch 显式 run_ids 也不能抢跑。
@@ -272,53 +229,6 @@ def _payload_allowed_tools(values: list[list[str] | None]) -> list[str] | str | 
     if all(value == first for value in values):
         return first
     return "per_item"
-
-
-# LLM: _operation_contract gives create_subagents a stable idempotency envelope without blocking repeats.
-# 函数用途: 把本次 create 的请求键、操作编号和结果 run ids 写成机器字段，后续调度可复用。
-def _operation_contract(request_params: dict[str, object], created: list, reused: list, dispatch: list) -> dict[str, object]:
-    payload = {"params": request_params}
-    return {
-        "contract": "idempotency.v1",
-        "operation": "create_subagents",
-        "idempotency_key": idempotency_key("create_subagents", payload),
-        "operation_id": operation_id("create_subagents", payload),
-        "created_run_ids": [task.id for task in created],
-        "reused_run_ids": [task.id for task in reused],
-        "dispatch_run_ids": [task.id for task in dispatch],
-    }
-
-
-# LLM: _dispatch_next_action makes create-vs-run explicit for the parent model.
-# 函数用途: 告诉模型 create_subagents 只创建任务记录；下一步默认先推进 1 个，流水线依赖由 dispatch 再判断。
-def _dispatch_next_action(tasks) -> dict[str, object]:
-    run_ids = [task.id for task in tasks]
-    if not run_ids:
-        return {
-            "tool": "subagent_board",
-            "reason": "create_subagents 没有可调度的新 run；请读取看板/状态后决定是否汇报或进入验收。",
-            "params": {"limit": 20},
-        }
-    return {
-        "tool": "dispatch_subagents",
-        "reason": (
-            "create_subagents 只创建任务记录；要让子代理真正开始工作，请调度这些 run_id。"
-            "默认 max_runners=1，确认任务彼此独立时再提高并发。"
-        ),
-        "params": {
-            "apply": True,
-            "execute_runners": True,
-            "run_ids": run_ids,
-            "max_runners": 1,
-        },
-    }
-
-
-# LLM: _task_text keeps create_subagents payloads JSON-safe across real tasks and mock adapters.
-# 函数用途: 读取 task 字段时过滤 MagicMock/非字符串对象，避免旧测试替身或 adapter 让 JSON 序列化失败。
-def _task_text(task: object, field: str) -> str:
-    value = getattr(task, field, "")
-    return value if isinstance(value, str) else ""
 
 
 # LLM: SubagentBoardTool 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

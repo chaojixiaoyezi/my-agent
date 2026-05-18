@@ -14,6 +14,7 @@ scripts/
     |-- constants.py                   # suite 名、默认目录等常量
     |-- file_repair_wave_case.py       # 普通文件失败后修复闭环真实 case
     |-- log_analysis_replay.py         # LOG 离线 replay 具体流程
+    |-- main_agent_complex_case.py     # 主代理自己完成复杂任务的真实 case
     |-- markdown_repair_wave_case.py   # Markdown 文档失败后修复闭环真实 case
     |-- shop_case.py                   # 购物站业务流真实 case
     `-- shop_repair_wave_case.py       # 购物站失败后修复闭环真实 case
@@ -27,6 +28,7 @@ scripts/
 - `live_lab/runner.py` 的 `_LabInterface`：兼容旧 case surface；把 `run_root`、`prompts_dir`、`responses_dir`、`summary_path` 等目录属性转发给 case，case 不直接访问 runner/session 私有字段。
 - `live_lab/cases.py`：登记有哪些 case，每个 case 怎么跑。
 - `live_lab/file_repair_wave_case.py`：负责 `file-repair` suite 的坏 CSV seed、自然语言修复 prompt、最终内容 gate 和 verified repair sibling 检查。
+- `live_lab/main_agent_complex_case.py`：负责 `main-complex` suite 的主代理复杂任务测试，会临时关闭子代理，只测 root 自己的工具、产物和恢复能力。
 - `live_lab/markdown_repair_wave_case.py`：负责 `markdown-repair` suite 的坏 Markdown seed、自然语言修复 prompt、最终内容 gate 和 verified repair sibling 检查。
 - `live_lab/log_analysis_replay.py`：把 SecurityAlertV1 fixture 跑成 LOG artifacts。
 - `agent_py_agent/tests/test_live_lab_log_analysis_replay.py`：验证 replay 的成功和失败路径。
@@ -122,3 +124,14 @@ scripts/
 - `scripts/live_lab/markdown_repair_wave_case.py`：负责 `seed_failed_markdown_child()`、`_natural_markdown_repair_wave_prompt()`、`assert_markdown_repair_wave_created()` 和最终 Markdown 内容 gate。seed 使用真实 `SubAgentManager` 创建 task，并在 acceptance checks 里写 `required_content_lines[weekly.md]`。
 - 产品侧依赖：`required_content_lines.py` 既支持结构化 per-file 内容合同，也支持普通用户“下面 N 行一字不差”这种自然语言块；`execution_test_items.py` 会把目标文件和内容行映射成 `content_check`，仍然只读真实产物文件，不相信口头回复。
 - 当前离线验收：`agent_py_agent/tests/test_live_lab_natural_case.py` 已覆盖 suite 注册、坏 Markdown seed、verified repair sibling 状态门和最终内容 gate。真实 `--suite markdown-repair --real-llm` 是后续 repair-wave 压测入口。
+
+## 2026-05-18 main-complex structure
+
+- 中文说明：`main-complex` suite 是主代理底座 canary。它回答一个更基础的问题：不靠小傻妞时，my-agent 自己能不能完成多文件项目、遇到工具失败后恢复、审计大文件。
+- `scripts/live_lab/constants.py`：`main-complex` suite 包含 `health`、`main_direct_web_app`、`main_tool_failure_recovery`、`main_large_log_audit`；三个主 case 都属于 `REAL_CASES`，必须传 `--real-llm`。
+- `scripts/live_lab/main_agent_complex_case.py`：`_ensure_main_agent_only()` 会把 `enable_subagents: false` 追加到本轮隔离配置，确保测试的是主代理自己，不污染用户配置。
+- `main_direct_web_app`：要求主代理写 `index.html`、`styles.css`、`app.js`、`README.md`，并用通用静态产物门检查文件引用、坏链接、外部渲染资源和基础交互。
+- `main_tool_failure_recovery`：要求主代理先读一个不存在的文件，再改读真实素材。这个 case 用来观察工具失败是否能被模型当成可恢复事件，而不是直接卡死或假装成功。
+- `main_large_log_audit`：生成 100MB 日志，只要求报告关键证据和建议。它的目的不是测日志内容本身，而是测大输出/大文件场景下是否保持 refs-first（只拿引用和证据，不把全文塞进上下文）。
+- 底层合同依赖：`main-complex` 的产物验收现在和父级验收共享 `contracts/artifact_acceptance.py` / `contracts/acceptance_contract.py` / `contracts/state_machine.py` / 结构化工具 envelope。Web case 会额外开启 `strict_dom_bindings`，确保 HTML/JS/README 不是“文件都在但互相对不上”。
+- 后续扩展：compact/resume 多次续接、验收失败后自动修复、真实资料整理 xlsx/论文翻译等可以继续拆成同目录的新 case，不要塞回 `cases.py`。

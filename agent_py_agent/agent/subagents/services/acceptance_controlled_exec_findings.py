@@ -21,7 +21,7 @@ _TOOL_OUTPUT_REF_PATTERN = re.compile(
 )
 
 
-# LLM: controlled_exec_contract_finding blocks fake shell completion when goal required the gateway.
+# LLM: controlled_exec_contract_finding blocks fake shell completion when a structured contract requires it.
 # 函数用途: 目标要求 controlled_exec 时，验收必须看到真实工具使用和 stdout/audit/trash refs。
 def controlled_exec_contract_finding(task, output: dict, created_at: float) -> AcceptanceReviewFinding:
     if not _controlled_exec_contract_required(task):
@@ -46,11 +46,47 @@ def controlled_exec_contract_finding(task, output: dict, created_at: float) -> A
     )
 
 
-# LLM: _controlled_exec_contract_required reads goal/check text only, not model self-claims.
-# 函数用途: 判断任务是否要求受控 shell 合同；普通写文件任务不受影响。
+# LLM: _controlled_exec_contract_required trusts only structured task attributes, never prose.
+# 函数用途: 判断任务是否要求受控 shell 合同；只读机器字段，避免从 goal/acceptance 文本里猜事实。
 def _controlled_exec_contract_required(task) -> bool:
-    text = " ".join([str(getattr(task, "goal", "") or ""), *[str(item) for item in task.acceptance_checks]])
-    return "controlled_exec" in text.lower()
+    attributes = getattr(task, "attributes", {})
+    if not isinstance(attributes, dict):
+        return False
+    bool_keys = (
+        "controlled_exec_contract_required",
+        "require_controlled_exec_contract",
+        "controlled_exec_required",
+    )
+    if any(_truthy_machine_bool(attributes.get(key)) for key in bool_keys):
+        return True
+    required_tools: list[str] = []
+    for key in ("required_tool_evidence", "acceptance_required_tools", "required_tools"):
+        required_tools.extend(_string_list(attributes.get(key)))
+    return "controlled_exec" in {_canonical_tool_name(item) for item in required_tools}
+
+
+# LLM: _truthy_machine_bool accepts explicit structured booleans and numeric flags only.
+# 函数用途: 读取 attributes 中的机器布尔值；普通自然语言句子不会被当成 true。
+def _truthy_machine_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+# LLM: _canonical_tool_name normalizes exact tool ids without parsing prose.
+# 函数用途: 把结构化 required_tools 里的工具 ID 归一；不从普通句子中抽关键词。
+def _canonical_tool_name(value: object) -> str:
+    text = str(value or "").strip().lower()
+    aliases = {
+        "shell": "controlled_exec",
+        "exec": "controlled_exec",
+        "controlled_exec": "controlled_exec",
+    }
+    return aliases.get(text, text)
 
 
 # LLM: _actual_tool_names merges persisted and output-side tool facts for acceptance checks.

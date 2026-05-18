@@ -25,7 +25,7 @@ from .patch import (
     PatchReviewOptions,
     PatchReviewService,
 )
-from .patch.patch_apply_helpers import extract_patch_test_command, validate_patch_test_command
+from .patch.patch_apply_helpers import validate_patch_test_command
 from .patch.patch_apply_task import ApplyPatchTaskParams
 from .patch.patch_renderer import build_unified_diff
 from .utils import _read_json_object  # noqa: F401 - re-exported for backward compat
@@ -162,12 +162,6 @@ class _SubAgentPatchFacade:
     @staticmethod
     def _build_unified_diff(path: str, before_text: str, after_text: str) -> str:
         return build_unified_diff(path, before_text, after_text)
-
-    # LLM: _extract_patch_test_command 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 处理extract补丁testcommand相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
-    @staticmethod
-    def _extract_patch_test_command(check: str) -> str:
-        return extract_patch_test_command(check)
 
     # LLM: _validate_patch_test_command 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
     # 函数用途: 校验补丁testcommand需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。

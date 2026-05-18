@@ -1,5 +1,5 @@
 # LLM: Runner input dependency gates keep structured pipeline tasks from racing missing file refs.
-# 模块用途: 根据 context_manifest 和 goal 里的机器字段判断 runner 是否可以启动，不从自然语言里猜输入/输出。
+# 模块用途: 根据 context_manifest 和 task.attributes 里的机器字段判断 runner 是否可以启动，不从自然语言里猜输入/输出。
 
 from __future__ import annotations
 
@@ -14,31 +14,8 @@ _FILE_REF_RE = re.compile(
     r"(?:json|md|csv|txt|xlsx|xls|pdf|html|htm|py|yaml|yml)\b",
     re.IGNORECASE,
 )
-_STRUCTURED_REF_FIELD_RE = re.compile(r"^\s*(?:[-*]\s*)?(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(?P<tail>.*)$")
 _INPUT_REF_FIELDS = frozenset({"required_read_paths", "input_refs", "input_files"})
 _OUTPUT_REF_FIELDS = frozenset({"output_refs", "output_files", "artifact_refs"})
-_READ_REF_MARKERS = (
-    "read",
-    "input",
-    "from",
-    "based on",
-    "读取",
-    "接收",
-    "基于",
-    "来自",
-)
-_WRITE_REF_MARKERS = (
-    "write",
-    "output",
-    "save",
-    "generate",
-    "create",
-    "写",
-    "输出",
-    "保存",
-    "生成",
-    "创建",
-)
 
 
 # LLM: input_dependency_ready_candidates filters runners that clearly need files not written yet.
@@ -56,44 +33,43 @@ def missing_input_dependencies(task: object, *, dependency_tasks: list | None = 
     roots = _dependency_roots(task)
     if not roots:
         return []
-    goal = str(getattr(task, "goal", "") or "")
     return [
         ref for ref in refs
         if (
             not _ref_exists(ref, roots)
             and not ref_satisfied_by_dependency_artifact(ref, task, dependency_tasks)
-            and not _ref_marked_optional(goal, ref)
         )
     ]
 
 
-# LLM: _input_refs combines context_manifest required_read_paths with structured goal fields.
-# 函数用途: 识别机器字段里的输入文件提示；普通自然语言派工不由代码猜。
+# LLM: _input_refs combines context_manifest required_read_paths with task attributes.
+# 函数用途: 识别已持久化的输入文件机器字段；普通自然语言派工不由代码猜。
 def _input_refs(task: object) -> list[str]:
     refs: list[str] = []
     refs.extend(_manifest_required_paths(getattr(task, "context_manifest", None)))
-    refs.extend(goal_input_refs(str(getattr(task, "goal", "") or "")))
+    refs.extend(_attributes_refs(task, _INPUT_REF_FIELDS))
     return _unique_refs(refs)
 
 
-# LLM: goal_input_refs extracts structured read refs from goal text.
-# 函数用途: 从 required_read_paths/input_refs/input_files 机器字段读取输入文件路径，供 create 和 dispatch 复用。
-def goal_input_refs(goal: str) -> list[str]:
-    structured = _structured_refs(goal, _INPUT_REF_FIELDS)
-    if structured:
-        return structured
-    inputs, _outputs = _fallback_file_ref_roles(goal)
-    return inputs
+# LLM: params_input_refs reads create/schedule tool parameters before task persistence.
+# 函数用途: 从 required_read_paths/input_refs/input_files 等工具参数读取输入 refs，不解析 goal。
+def params_input_refs(params: dict[str, object]) -> list[str]:
+    manifest = params.get("context_manifest")
+    manifest_refs = manifest.get("required_read_paths") if isinstance(manifest, dict) else None
+    refs = [manifest_refs, *(params.get(field) for field in _INPUT_REF_FIELDS)]
+    return _unique_refs([item for value in refs for item in _string_refs(value)])
 
 
-# LLM: goal_output_refs extracts structured deliverable refs from goal text.
-# 函数用途: 从 output_refs/output_files/artifact_refs 机器字段读取产物路径，供批量派工推断上下游关系。
-def goal_output_refs(goal: str) -> list[str]:
-    structured = _structured_refs(goal, _OUTPUT_REF_FIELDS)
-    if structured:
-        return structured
-    _inputs, outputs = _fallback_file_ref_roles(goal)
-    return outputs
+# LLM: params_output_refs reads create/schedule tool parameters before task persistence.
+# 函数用途: 从 output_refs/output_files/artifact_refs 等工具参数读取产物 refs，不解析 goal。
+def params_output_refs(params: dict[str, object]) -> list[str]:
+    return _unique_refs([item for field in _OUTPUT_REF_FIELDS for item in _string_refs(params.get(field))])
+
+
+# LLM: task_output_refs reads persisted output refs from task attributes.
+# 函数用途: 子代理创建后统一从 attributes 读取产物 refs，供调度、上下文包和验收复用。
+def task_output_refs(task: object) -> list[str]:
+    return _attributes_refs(task, _OUTPUT_REF_FIELDS)
 
 
 # LLM: _manifest_required_paths tolerates dataclass, namespace, and dict context manifests.
@@ -108,82 +84,28 @@ def _manifest_required_paths(manifest: object) -> list[str]:
     return []
 
 
-# LLM: _ref_marked_optional is disabled for structured required refs.
-# 函数用途: required_read_paths 是硬合同；可选输入以后应放 optional_read_paths，不在自然语言窗口里猜。
-def _ref_marked_optional(text: str, ref: str) -> bool:
-    return False
-
-
-# LLM: _structured_refs reads multiline protocol fields.
-# 函数用途: 支持 `required_read_paths: a.json, b.md`、`output_files:` 和后续 bullet 文件列表。
-def _structured_refs(text: str, fields: frozenset[str]) -> list[str]:
-    refs: list[str] = []
-    active = False
-    for raw in str(text or "").splitlines():
-        active, values = _structured_ref_line(raw, active=active, fields=fields)
-        refs.extend(values)
-    return _unique_refs(refs)
-
-
-# LLM: _structured_ref_line keeps required/input/output field parsing one-line bounded.
-# 函数用途: 解析一行 required_read_paths/output_files 等字段，返回 active 状态和本行路径 refs。
-def _structured_ref_line(raw: str, *, active: bool, fields: frozenset[str]) -> tuple[bool, list[str]]:
-    line = raw.strip()
-    match = _STRUCTURED_REF_FIELD_RE.match(line)
-    if match:
-        is_active = match.group("field").strip().lower() in fields
-        return is_active, _file_refs_from_value(match.group("tail")) if is_active else []
-    if active and line.startswith(("-", "*")):
-        return active, _file_refs_from_value(line.lstrip("-* "))
-    return False, []
-
-
 # LLM: _file_refs_from_value extracts file refs from one protocol value.
 # 函数用途: 从结构化字段值中读取路径，不判断其业务含义。
 def _file_refs_from_value(value: object) -> list[str]:
     return [match.group() for match in _FILE_REF_RE.finditer(str(value or ""))]
 
 
-# LLM: _fallback_file_ref_roles recovers simple pipeline refs when structured fields are absent.
-# 函数用途: 按文件引用附近的读/写方向词和“最后一个文件通常是产物”规则推断输入/输出路径。
-def _fallback_file_ref_roles(goal: str) -> tuple[list[str], list[str]]:
-    text = str(goal or "")
-    matches = list(_FILE_REF_RE.finditer(text))
-    if not matches:
-        return [], []
-    inputs: list[str] = []
-    outputs: list[str] = []
-    for index, match in enumerate(matches):
-        ref = match.group()
-        direction = _ref_direction(text, match.start(), index=index, total=len(matches))
-        if direction == "input":
-            inputs.append(ref)
-        else:
-            outputs.append(ref)
-    return _unique_refs(inputs), _unique_refs(outputs)
+# LLM: _attributes_refs reads persisted machine refs without touching task prose.
+# 函数用途: 从 task.attributes 里的路径字段抽取文件 refs；非 dict attributes 按空处理。
+def _attributes_refs(task: object, fields: frozenset[str]) -> list[str]:
+    attrs = getattr(task, "attributes", {}) or {}
+    if not isinstance(attrs, dict):
+        return []
+    return _unique_refs([item for field in fields for item in _string_refs(attrs.get(field))])
 
 
-# LLM: _ref_direction keeps natural file refs useful while avoiding task-specific phrase rules.
-# 函数用途: 只根据文件名前的短窗口判断读/写方向；不解析业务语义或特定任务名称。
-def _ref_direction(text: str, start: int, *, index: int, total: int) -> str:
-    window = text[max(0, start - 32):start].casefold()
-    has_read = _contains_any(window, _READ_REF_MARKERS)
-    has_write = _contains_any(window, _WRITE_REF_MARKERS)
-    if has_read and has_write:
-        return "output" if index == total - 1 else "input"
-    if has_read:
-        return "input"
-    if has_write:
-        return "output"
-    if total > 1 and index < total - 1:
-        return "input"
-    return "output"
-
-
-# LLM: _contains_any keeps marker checks centralized and language-extensible.
-# 函数用途: 判断短窗口里是否出现读/写方向词；后续可扩展语言，不影响调用方。
-def _contains_any(value: str, markers: tuple[str, ...]) -> bool:
-    return any(marker in value for marker in markers)
+# LLM: _string_refs normalizes ref parameter values that are already structured fields.
+# 函数用途: 支持字符串、列表和元组；不从普通描述段落里抽路径。
+def _string_refs(value: object) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        return [item for raw in value for item in _string_refs(raw)]
+    text = str(value or "").strip()
+    return _file_refs_from_value(text) if text else []
 
 
 # LLM: _dependency_roots uses private run dirs plus derived project roots as bounded lookup roots.

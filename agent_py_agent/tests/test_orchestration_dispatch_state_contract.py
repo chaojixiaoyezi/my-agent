@@ -94,8 +94,8 @@ def test_create_payload_includes_current_turn_run_state(tmp_path):
     assert envelope.dispatch_run_ids == payload["dispatch_run_ids"]
 
 
-# LLM: create payload idempotency metadata should be stable facts, not a prompt-only instruction.
-# 函数用途: 重复 create_subagents 时返回同一个幂等键，后续调度层可据此复用而不是扩容。
+# LLM: create payload idempotency metadata is audit data; reuse needs an explicit child contract.
+# 函数用途: 重复 create_subagents 时 operation_contract 仍稳定，但不会仅凭 goal 文本自动复用 run。
 def test_create_payload_includes_stable_operation_contract(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     params = {"goal": "写一个高端现代家具品牌首页 index.html", "role": "worker"}
@@ -105,7 +105,8 @@ def test_create_payload_includes_stable_operation_contract(tmp_path):
     assert first["operation_contract"]["operation"] == "create_subagents"
     assert first["operation_contract"]["idempotency_key"] == second["operation_contract"]["idempotency_key"]
     assert first["operation_contract"]["operation_id"] == second["operation_contract"]["operation_id"]
-    assert second["reused_run_ids"] == first["ids"]
+    assert second["reused_run_ids"] == []
+    assert second["created_run_ids"]
 
 
 # LLM: schedule_child_subagents should expose current-turn state for nested parents too.

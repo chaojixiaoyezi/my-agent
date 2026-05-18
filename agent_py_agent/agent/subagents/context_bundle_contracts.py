@@ -13,10 +13,7 @@ from .context_bundle_file_roots import (
 from .context_bundle_refs import safe_string_ref, workspace_refs
 from .models import SubAgentTask
 from .required_file_terms import (
-    forbidden_file_terms_from_text,
-    required_file_terms_from_text,
-    task_contract_forbidden_file_terms_from_text,
-    task_contract_required_file_terms_from_text,
+    clean_file_contract_term,
 )
 
 
@@ -92,19 +89,12 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
     }
 
 
-# LLM: required_file_contract extracts exact deliverable filenames from structured fields and write roots.
-# 函数用途: 从 required_files 机器字段和文件级写入根生成必需文件清单；不读取产物正文。
+# LLM: required_file_contract extracts exact deliverable filenames from task attributes and write roots.
+# 函数用途: 从 task.attributes.required_files 和文件级写入根生成必需文件清单；不读取 goal/acceptance 文本。
 def required_file_contract(task: SubAgentTask) -> list[str]:
     return _dedupe_file_terms(
         [
-            *(
-                term
-                for text in _file_contract_texts(task)
-                for term in task_contract_required_file_terms_from_text(
-                    text,
-                    extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html",
-                )
-            ),
+            *_structured_required_file_contract(task),
             *file_level_write_root_terms(task),
         ]
     )
@@ -140,50 +130,33 @@ def required_product_file_refs(
     return refs
 
 
-# LLM: forbidden_file_contract extracts structured forbidden filenames.
-# 函数用途: 从 forbidden_files 机器字段生成禁止文件清单，明确反例不能创建。
+# LLM: forbidden_file_contract extracts structured forbidden filenames from task attributes only.
+# 函数用途: 从 task.attributes.forbidden_files 生成禁止文件清单，明确反例不能创建。
 def forbidden_file_contract(task: SubAgentTask) -> list[str]:
-    return _dedupe_file_terms(
-        term
-        for text in _file_contract_texts(task)
-        for term in task_contract_forbidden_file_terms_from_text(
-            text,
-            extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html",
-        )
-    )
+    return _structured_forbidden_file_contract(task)
 
 
-# LLM: file_contract_source labels whether bundle file contracts came from typed fields only or task-text extraction.
-# 函数用途: 给下游调试/验收说明 file_contract 的来源；自然产物句式出现时标记为 task_text_positive_negative_extraction。
+# LLM: file_contract_source labels bundle file contracts as task-attribute based.
+# 函数用途: 给下游调试/验收说明 file_contract 的来源；不再存在 task text extraction 模式。
 def file_contract_source(task: SubAgentTask) -> str:
-    structured_required = _structured_required_file_contract(task)
-    structured_forbidden = _structured_forbidden_file_contract(task)
-    task_required = required_file_contract(task)
-    task_forbidden = forbidden_file_contract(task)
-    structured_required_with_roots = _dedupe_file_terms([*structured_required, *file_level_write_root_terms(task)])
-    if task_required != structured_required_with_roots or task_forbidden != structured_forbidden:
-        return "task_text_positive_negative_extraction"
-    return "structured_required_forbidden_fields"
+    del task
+    return "attributes_required_forbidden_fields"
 
 
-# LLM: _structured_required_file_contract preserves the old machine-field-only baseline for source labeling.
-# 函数用途: 只读取 required_files / required_file_refs 字段，不读取自然语言或中文继承标签。
+# LLM: _structured_required_file_contract reads required files from task attributes only.
+# 函数用途: 只读取 attributes.required_files / required_file_refs，不读取自然语言或中文继承标签。
 def _structured_required_file_contract(task: SubAgentTask) -> list[str]:
-    return _dedupe_file_terms(
-        term
-        for text in _file_contract_texts(task)
-        for term in required_file_terms_from_text(text, extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html")
-    )
+    attrs = _task_attributes(task)
+    return _dedupe_file_terms([
+        *_file_contract_list(attrs.get("required_files")),
+        *_file_contract_list(attrs.get("required_file_refs")),
+    ])
 
 
-# LLM: _structured_forbidden_file_contract preserves the old machine-field-only forbidden baseline.
-# 函数用途: 只读取 forbidden_files 字段，用于判断是否启用了任务文本正负合同抽取。
+# LLM: _structured_forbidden_file_contract reads forbidden files from task attributes only.
+# 函数用途: 只读取 attributes.forbidden_files，不读取 goal/thought/acceptance_checks 文本。
 def _structured_forbidden_file_contract(task: SubAgentTask) -> list[str]:
-    return _dedupe_file_terms(
-        term
-        for text in _file_contract_texts(task)
-        for term in forbidden_file_terms_from_text(text, extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html")
-    )
+    return _dedupe_file_terms(_file_contract_list(_task_attributes(task).get("forbidden_files")))
 
 
 # LLM: render_output_contract_lines makes machine file contracts visible in handoff markdown.
@@ -225,11 +198,22 @@ def _context_bundle_json_ref(refs: dict[str, str]) -> str:
     return str(Path(workspace) / "context_bundle.json") if workspace else ""
 
 
-# LLM: _file_contract_texts keeps contract extraction bounded to lightweight persisted task facts.
-# 函数用途: 收集可用于文件契约的短文本字段，不读取 output/artifact 正文。
-def _file_contract_texts(task: SubAgentTask) -> list[str]:
-    values: list[object] = [task.goal, task.thought, getattr(task, "description", ""), *(task.acceptance_checks or [])]
-    return [str(value or "") for value in values if str(value or "").strip()]
+# LLM: _task_attributes normalizes task attributes for file-contract reads.
+# 函数用途: 读取 task.attributes 字典；缺失或类型不对时返回空，不做文本兜底。
+def _task_attributes(task: SubAgentTask) -> dict[str, object]:
+    attrs = getattr(task, "attributes", {})
+    return attrs if isinstance(attrs, dict) else {}
+
+
+# LLM: _file_contract_list normalizes explicit file refs without parsing prose.
+# 函数用途: 支持 list/tuple 或单字符串；不会按逗号、顿号或自然语言拆分。
+def _file_contract_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list | tuple):
+        return [term for item in value if (term := clean_file_contract_term(item))]
+    term = clean_file_contract_term(value)
+    return [term] if term else []
 
 
 # LLM: _dedupe_file_terms preserves user-mentioned order for required/forbidden contract lists.

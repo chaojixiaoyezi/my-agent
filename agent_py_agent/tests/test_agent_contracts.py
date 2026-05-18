@@ -45,6 +45,32 @@ def test_run_state_machine_dispatch_closeout_and_recovery_decisions() -> None:
     assert failed.allow_new_run is True
 
 
+# LLM: State machine snapshots should normalize legacy task objects into one contract shape.
+# 函数用途: 验证调度层可以从任意 task-like 对象得到统一状态、错误类型和 closeout 结果。
+def test_run_state_snapshot_from_task_like_object() -> None:
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.contracts.state_machine import run_state_snapshot_from_task
+
+    snapshot = run_state_snapshot_from_task(
+        SimpleNamespace(
+            id="run-1",
+            status="timeout",
+            verification_status="needs_acceptance",
+            runner_last_error="tool timed out after 240 seconds",
+            runner_attempts="2",
+        )
+    )
+
+    assert snapshot["run_id"] == "run-1"
+    assert snapshot["status"] == "TIMEOUT"
+    assert snapshot["verification_status"] == "NEEDS_ACCEPTANCE"
+    assert snapshot["failure_type"] == "TOOL_TIMEOUT"
+    assert snapshot["can_dispatch"] is False
+    assert snapshot["can_closeout"] is False
+    assert snapshot["recovery_decision"]["action"] == "manual_review"
+
+
 # LLM: Idempotency keys make duplicate model calls safe without hardcoding workflow guards.
 # 函数用途: 验证幂等键对 dict/list 顺序稳定，并能生成 create/dispatch/compact 的通用操作键。
 def test_idempotency_contract_stable_keys_and_operation_shapes() -> None:
@@ -90,3 +116,46 @@ def test_real_e2e_matrix_contains_required_scenarios() -> None:
     assert "subagent_reuses_main_kernel" in ids
     assert all(item.execution_mode in {"deterministic", "real_model"} for item in REAL_E2E_MATRIX)
     assert all(item.acceptance for item in REAL_E2E_MATRIX)
+
+
+# LLM: Acceptance contracts should combine artifacts, tests, and run state into one final gate.
+# 函数用途: 验证任务完成判断能用结构化产物报告、真实测试记录和状态机结果统一判定。
+def test_acceptance_contract_evaluates_artifacts_tests_and_state(tmp_path) -> None:
+    from agent_py_agent.agent.contracts.acceptance_contract import (
+        AcceptanceContract,
+        AcceptanceInput,
+        evaluate_acceptance_contract,
+    )
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_artifact,
+    )
+    from agent_py_agent.agent.contracts.state_machine import RunStateFacts
+    from agent_py_agent.agent.subagents.execution_records import TestExecutionRecord
+
+    artifact = tmp_path / "report.json"
+    artifact.write_text('{"ok": true}', encoding="utf-8")
+    report = validate_artifact(ArtifactAcceptanceRequest(path=artifact, workspace_root=tmp_path))
+    test_record = TestExecutionRecord(
+        test_name="json-valid",
+        executed=True,
+        validation_method="artifact_acceptance",
+        validation_result={"ok": True},
+    )
+
+    result = evaluate_acceptance_contract(
+        AcceptanceInput(
+            contract=AcceptanceContract(items=["report exists"], required_artifact_kinds=["json"]),
+            artifact_reports=[report],
+            test_records=[test_record],
+            run_state=RunStateFacts(status="DONE", verification_status="VERIFIED"),
+        )
+    )
+
+    assert result.ok is True
+    assert result.status == "accepted"
+    assert {item["code"] for item in result.findings} >= {
+        "ACCEPTANCE_STATE_OK",
+        "ACCEPTANCE_ARTIFACTS_OK",
+        "ACCEPTANCE_TESTS_OK",
+    }

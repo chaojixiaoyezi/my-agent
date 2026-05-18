@@ -3,19 +3,9 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 from ..models import SubAgentTask
-
-_FILE_REF_RE = re.compile(
-    r"(?<![\w.-])/?(?:[\w.-]+/)*[\w.-]+\."
-    r"(?:json|md|csv|txt|xlsx|xls|pdf|html|htm|py|yaml|yml)\b",
-    re.IGNORECASE,
-)
-_OUTPUT_REF_FIELD_RE = re.compile(r"^\s*(?:[-*]\s*)?(?:output_refs|output_files|artifact_refs)\s*[:=]", re.IGNORECASE)
-_OUTPUT_CONTEXT_MARKERS = ("写到", "写入", "输出", "输出路径", "生成", "保存到", "交付", "output", "write", "save")
-_INPUT_CONTEXT_MARKERS = ("读取", "读入", "输入", "read", "input", "source")
 
 
 # LLM: OutputRefRebinding records one machine-auditable replacement for later E2E diagnosis.
@@ -32,70 +22,47 @@ class OutputRefRebinding:
         return {"field": self.field, "from": self.from_ref, "to": self.to_ref}
 
 
-# LLM: rebind_task_output_refs_to_run mutates only current-task output refs, never input refs.
-# 函数用途: 创建 run 后修正 goal/thought/plan/acceptance_checks 里的自写 data/subagents/<旧id>/ 路径。
+# LLM: rebind_task_output_refs_to_run mutates only structured output attributes, never prose.
+# 函数用途: 创建 run 后修正 attributes 里的 output_refs/output_files/artifact_refs 自写路径。
 def rebind_task_output_refs_to_run(task: SubAgentTask) -> list[OutputRefRebinding]:
     rewrites: list[OutputRefRebinding] = []
-    task.goal = _rewrite_field("goal", task.goal, task.id, rewrites)
-    task.thought = _rewrite_field("thought", task.thought, task.id, rewrites)
-    task.plan = _rewrite_list_field("plan", task.plan, task.id, rewrites)
-    task.acceptance_checks = _rewrite_list_field("acceptance_checks", task.acceptance_checks, task.id, rewrites)
+    task.attributes = _rewrite_attribute_output_refs(task.attributes, task.id, rewrites)
     if rewrites:
         _store_rebindings(task, rewrites)
     return rewrites
 
 
-# LLM: _rewrite_list_field preserves list order while rebinding each text item independently.
-# 函数用途: 处理 plan 和 acceptance_checks 这类字符串列表字段。
-def _rewrite_list_field(
-    field: str,
-    values: list[str],
+# LLM: _rewrite_attribute_output_refs walks only known structured output ref fields.
+# 函数用途: 替换 task.attributes.output_files/output_refs/artifact_refs 中猜错的 subagent run id。
+def _rewrite_attribute_output_refs(
+    attributes: dict[str, object],
     run_id: str,
     rewrites: list[OutputRefRebinding],
-) -> list[str]:
-    return [_rewrite_field(field, str(item), run_id, rewrites) for item in values]
+) -> dict[str, object]:
+    attrs = dict(attributes or {})
+    for field in ("output_refs", "output_files", "artifact_refs"):
+        if field in attrs:
+            attrs[field] = _rewrite_attribute_value(field, attrs.get(field), run_id, rewrites)
+    return attrs
 
 
-# LLM: _rewrite_field replaces only refs inside structured output fields.
-# 函数用途: 遍历文本中的文件路径；只有 output_refs/output_files/artifact_refs 行里的旧 subagent run id 才替换。
-def _rewrite_field(field: str, text: str, run_id: str, rewrites: list[OutputRefRebinding]) -> str:
-    source = str(text or "")
-    result = source
-    for ref, start in _file_refs(source):
-        if not _path_ref_is_output(source, start):
-            continue
-        rebound = _rebound_subagent_ref(ref, run_id)
-        if rebound and rebound != ref:
-            result = result.replace(ref, rebound)
-            rewrites.append(OutputRefRebinding(field, ref, rebound))
-    return result
-
-
-# LLM: _file_refs returns lightweight path candidates and their offsets in current text.
-# 函数用途: 找出可能的文件路径，供写入语义和 run_id 重绑定继续判断。
-def _file_refs(text: str):
-    for match in _FILE_REF_RE.finditer(str(text or "")):
-        yield match.group(), match.start()
-
-
-# LLM: _path_ref_is_output checks structured fields plus local write-context markers.
-# 函数用途: 判断路径是否属于当前任务自写产物；读取/输入路径保留旧 id，写入/输出/保存路径重绑定到真实 run_id。
-def _path_ref_is_output(text: str, start: int) -> bool:
-    line_start = str(text or "").rfind("\n", 0, start) + 1
-    line = str(text or "")[line_start: str(text or "").find("\n", start) if "\n" in str(text or "")[start:] else len(str(text or ""))]
-    if _OUTPUT_REF_FIELD_RE.match(str(text or "")[line_start:start]):
-        return True
-    prefix = str(text or "")[line_start:start].lower()
-    if any(marker in prefix for marker in _INPUT_CONTEXT_MARKERS) and not any(marker in prefix for marker in _OUTPUT_CONTEXT_MARKERS):
-        return False
-    return any(marker in prefix for marker in _OUTPUT_CONTEXT_MARKERS) or _line_has_output_field_label(line)
-
-
-# LLM: _line_has_output_field_label handles labels that appear before full-width punctuation or prose.
-# 函数用途: 兼容“输出路径 data/...”“保存到 data/...”这类短合同句，不读取文件内容。
-def _line_has_output_field_label(line: str) -> bool:
-    lowered = str(line or "").lower()
-    return any(marker in lowered for marker in _OUTPUT_CONTEXT_MARKERS)
+# LLM: _rewrite_attribute_value preserves the caller's shallow value shape.
+# 函数用途: 支持字符串和列表形式的 output ref 字段，非字符串值保持原样。
+def _rewrite_attribute_value(
+    field: str,
+    value: object,
+    run_id: str,
+    rewrites: list[OutputRefRebinding],
+) -> object:
+    if isinstance(value, list):
+        return [_rewrite_attribute_value(field, item, run_id, rewrites) for item in value]
+    if not isinstance(value, str):
+        return value
+    rebound = _rebound_subagent_ref(value, run_id)
+    if rebound and rebound != value:
+        rewrites.append(OutputRefRebinding(field, value, rebound))
+        return rebound
+    return value
 
 
 # LLM: _rebound_subagent_ref swaps the segment after data/subagents when it is a concrete run id.

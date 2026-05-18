@@ -248,24 +248,23 @@ class TestSubAgentFailureAnalyzerPersistentCases:
         assert "步骤4" in suggestions[1]
 
     def test_suggest_splits_without_plan(self, analyzer: SubAgentFailureAnalyzer, sample_task: SubAgentTask) -> None:
-        """测试没有 plan 时生成拆分建议。"""
+        """测试没有足够 plan 时生成通用拆分建议，不从 goal 自然语言猜任务类型。"""
         sample_task.plan = ["步骤1", "步骤2"]
         sample_task.goal = "翻译这个文档"
 
         suggestions = analyzer._suggest_splits(sample_task)
 
         assert len(suggestions) >= 1
-        assert "翻译" in suggestions[0]
+        assert suggestions == ["执行第一部分", "执行第二部分"]
 
     def test_split_suggestions_refactor(self, analyzer: SubAgentFailureAnalyzer, sample_task: SubAgentTask) -> None:
-        """测试重构任务的拆分建议。"""
+        """测试短 plan 不会按 goal 自然语言生成专项拆分建议。"""
         sample_task.plan = ["步骤1"]
         sample_task.goal = "重构这个模块"
 
         suggestions = analyzer._suggest_splits(sample_task)
 
-        assert len(suggestions) >= 2
-        assert any("重构" in s for s in suggestions)
+        assert suggestions == ["执行第一部分", "执行第二部分"]
 
 
 if __name__ == "__main__":
@@ -344,4 +343,3 @@ class TestFailureAnalyzerMutationCoverage:
         # At max_timeout, should suggest split_task, not increase_timeout_and_retry
         assert result.suggested_action == "split_task", f"Expected split_task at max_timeout, got {result.suggested_action}"
         assert not result.should_retry
-

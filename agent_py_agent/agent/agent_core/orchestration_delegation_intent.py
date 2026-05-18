@@ -1,73 +1,59 @@
-# LLM: Delegation intent helpers combine protocol flags with broad user delegation wording.
-# 模块用途: 集中读取 refs_only/subagent_delegation 机器字段，并识别“派小傻妞/子代理协作”这类普通用户说法。
+# LLM: Delegation intent helpers read structured protocol attributes only.
+# 模块用途: 集中读取 refs_only/subagent_delegation 机器字段；普通用户说法由模型规划，不由代码判断。
 
 from __future__ import annotations
 
 
-# LLM: prompt_requests_refs_only_delegation distinguishes explicit delegation from ordinary acceptance wording.
-# 函数用途: 只接受 refs_only=true 或 delegate_only=true 机器字段，启用顶层 root 读正文保护。
-def prompt_requests_refs_only_delegation(prompt: str) -> bool:
-    compact = " ".join(str(prompt or "").lower().split())
-    if not compact:
-        return False
-    return (
-        "refs_only=true" in compact
-        or "delegate_only=true" in compact
-        or (_mentions_delegate_actor(compact) and _mentions_parent_should_not_do_body(compact))
+# LLM: refs_only_delegation_enabled distinguishes explicit delegation from ordinary acceptance wording.
+# 函数用途: 只接受 task_attributes 里的 refs_only/delegate_only 机器字段，启用顶层 root 读正文保护。
+def refs_only_delegation_enabled(attributes: dict | None) -> bool:
+    return _truthy_field(attributes, "refs_only", "delegate_only")
+
+
+# LLM: subagent_delegation_enabled accepts only explicit machine fields.
+# 函数用途: 识别 task_attributes.subagent_delegation/delegate_only，用于派工前少读正文策略。
+def subagent_delegation_enabled(attributes: dict | None) -> bool:
+    return _truthy_field(attributes, "subagent_delegation", "delegate_only")
+
+
+# LLM: parent_body_read_allowed recognizes explicit current-run machine override fields.
+# 函数用途: 只接受 task_attributes.parent_body_read=allow 或 parent_body_read_allowed=true，临时允许父级读正文。
+def parent_body_read_allowed(attributes: dict | None) -> bool:
+    return _field_mode_is(attributes, "parent_body_read", "allow") or _truthy_field(
+        attributes,
+        "parent_body_read_allowed",
     )
 
 
-# LLM: prompt_requests_subagent_delegation catches normal user wording for "let agents help".
-# 函数用途: 识别机器字段和普通“组织小傻妞/子代理协作完成”意图，用于派工前少读正文策略。
-def prompt_requests_subagent_delegation(prompt: str) -> bool:
-    compact = " ".join(str(prompt or "").lower().split())
-    if not compact:
-        return False
-    return (
-        "subagent_delegation=true" in compact
-        or "delegate_only=true" in compact
-        or (_mentions_delegate_actor(compact) and _mentions_delegation_action(compact))
+# LLM: parent_product_write_allowed recognizes explicit current-run machine override fields.
+# 函数用途: 只接受 task_attributes.parent_product_write=allow 或 parent_product_write_allowed=true，临时允许父级写产物。
+def parent_product_write_allowed(attributes: dict | None) -> bool:
+    return _field_mode_is(attributes, "parent_product_write", "allow") or _truthy_field(
+        attributes,
+        "parent_product_write_allowed",
     )
 
 
-# LLM: user_authorized_parent_body_read recognizes explicit current-run user override phrases.
-# 函数用途: 只接受 parent_body_read=allow 机器字段，临时允许父级读正文。
-def user_authorized_parent_body_read(prompt: str) -> bool:
-    compact = " ".join(str(prompt or "").lower().split())
-    if not compact:
-        return False
-    return "parent_body_read=allow" in compact
+# LLM: _truthy_field reads exact bool-like protocol values without scanning prose.
+# 函数用途: 从结构化 attributes 读取布尔字段；不解析 prompt、goal、summary 或普通句子。
+def _truthy_field(attributes: dict | None, *keys: str) -> bool:
+    attrs = attributes if isinstance(attributes, dict) else {}
+    return any(_boolish(attrs.get(key)) for key in keys)
 
 
-# LLM: _mentions_delegate_actor is intentionally broad and task-agnostic.
-# 函数用途: 只判断用户是否在谈子代理/小傻妞这类执行主体，不解析具体业务内容。
-def _mentions_delegate_actor(text: str) -> bool:
-    return any(marker in text for marker in ("小傻妞", "子代理", "subagent", "child agent"))
+# LLM: _field_mode_is compares explicit enum-style protocol fields.
+# 函数用途: 读取 allow/deny 这类短枚举字段，保持大小写和连接符容错。
+def _field_mode_is(attributes: dict | None, key: str, expected: str) -> bool:
+    attrs = attributes if isinstance(attributes, dict) else {}
+    actual = str(attrs.get(key) or "").strip().casefold().replace("-", "_")
+    return actual == expected.casefold().replace("-", "_")
 
 
-# LLM: _mentions_delegation_action separates active delegation from casual discussion.
-# 函数用途: 判断用户是在要求安排/组织/派工，而不是单纯询问子代理概念。
-def _mentions_delegation_action(text: str) -> bool:
-    return any(
-        marker in text
-        for marker in (
-            "派",
-            "安排",
-            "组织",
-            "协作",
-            "帮",
-            "做",
-            "完成",
-            "处理",
-            "执行",
-            "delegate",
-            "dispatch",
-            "work on",
-        )
-    )
-
-
-# LLM: _mentions_parent_should_not_do_body catches user refs-only wording without internal flags.
-# 函数用途: 用户说“你不要亲自写/只看报告”时，父级验收前继续保持 refs-only。
-def _mentions_parent_should_not_do_body(text: str) -> bool:
-    return any(marker in text for marker in ("不要亲自", "不要你自己", "你自己不要", "只根据", "只看报告"))
+# LLM: _boolish is deliberately tiny and closed for protocol fields.
+# 函数用途: 把 true/1/yes/on/allow 归一成 True；其它值不当作自然语言判断。
+def _boolish(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return bool(value)
+    return str(value or "").strip().casefold() in {"1", "true", "yes", "y", "on", "allow", "allowed"}

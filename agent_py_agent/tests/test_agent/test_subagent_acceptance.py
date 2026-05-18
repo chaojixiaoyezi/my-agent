@@ -196,8 +196,8 @@ def test_subagent_acceptance_rejects_missing_evidence_without_apply():
         assert loaded.status == "AWAITING_ACCEPTANCE"
 
 
-def test_subagent_acceptance_enforces_required_write_file_evidence():
-    """LLM: Verifies acceptance rejects when acceptance_checks require write_file evidence but only read_file exists."""
+def test_subagent_acceptance_enforces_structured_required_write_file_evidence():
+    """LLM: Verifies acceptance rejects when machine fields require write_file evidence but only read_file exists."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
@@ -205,8 +205,9 @@ def test_subagent_acceptance_enforces_required_write_file_evidence():
         task = agent.subagents.create_run(
             goal="缺少写文件证据", thought="runner 只读了文件，但验收要求写文件。",
             plan=["读取", "写入", "等待验收"],
-            acceptance_checks=["必须有 read_file 证据；必须有 write_file 证据"],
+            acceptance_checks=["普通说明提到 read_file/write_file 不能触发机器验收。"],
         )
+        task.attributes["required_tool_evidence"] = ["read_file", "write_file"]
         task.status = "AWAITING_ACCEPTANCE"
         task.verification_status = "NEEDS_ACCEPTANCE"
         task.channel_status = "OK"
@@ -233,6 +234,40 @@ def test_subagent_acceptance_enforces_required_write_file_evidence():
         assert any(item.name == "acceptance_requires_write_file" and not item.ok for item in report.records[0].findings)
 
 
+def test_subagent_acceptance_checks_text_does_not_require_tool_evidence():
+    """LLM: Tool evidence gates must come from structured fields, not acceptance_checks prose."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        task = agent.subagents.create_run(
+            goal="自然语言验收说明",
+            thought="runner 只读了文件，文本里提到 write_file。",
+            plan=["读取", "等待验收"],
+            acceptance_checks=["必须有 read_file 证据；必须有 write_file 证据"],
+        )
+        task.status = "AWAITING_ACCEPTANCE"
+        task.verification_status = "NEEDS_ACCEPTANCE"
+        task.channel_status = "OK"
+        task.used_tools = ["read_file"]
+        task.evidence.append(VerificationEvidence(
+            kind="read_file", summary="成功读取 README.md", path="README.md", ok=True, created_at=time.time(),
+        ))
+        agent.subagents.save(task)
+        Path(task.output_json).write_text(json.dumps({
+            "run_id": task.id, "status": "AWAITING_ACCEPTANCE",
+            "tests": [], "artifacts": [], "patches": [], "blockers": [],
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        Path(task.runner_result_json).write_text(json.dumps({
+            "run_id": task.id, "structured_output_found": True,
+            "structured_output_ok": True, "structured_parse_error": "",
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        report = agent.subagents.write_acceptance_review_report(run_ids=[task.id], apply=False, reviewer="tester")
+
+        assert all(item.name != "acceptance_requires_write_file" for item in report.records[0].findings)
+
+
 def test_subagent_acceptance_uses_actual_tool_evidence_from_runner():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -243,8 +278,10 @@ def test_subagent_acceptance_uses_actual_tool_evidence_from_runner():
             thought="runner 的自然语言证据没有写工具名，但系统有 actual_tools。",
             plan=["读取", "写入", "等待验收"],
             allowed_tools=["read_file", "write_file"],
-            acceptance_checks=["必须有 read_file 证据；必须有 write_file 证据"],
+            acceptance_checks=["普通说明提到 read_file/write_file 不能触发机器验收。"],
         )
+        task.attributes["required_tool_evidence"] = ["read_file", "write_file"]
+        agent.subagents.save(task)
         Path(task.task_dir, "README.md").write_text("read ok\n", encoding="utf-8")
         Path(task.task_dir, "scenario_outputs").mkdir(parents=True, exist_ok=True)
         Path(task.task_dir, "scenario_outputs", "demo.md").write_text("write ok\n", encoding="utf-8")

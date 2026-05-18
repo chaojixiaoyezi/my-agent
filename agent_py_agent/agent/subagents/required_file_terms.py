@@ -16,39 +16,6 @@ _REQUIRED_FIELDS = frozenset({"required_files", "required_file_refs"})
 _FORBIDDEN_FIELDS = frozenset({"forbidden_files"})
 _LABELED_REQUIRED_FIELDS = frozenset({"父级必需文件/产物名", "必需文件/产物名", "父级必需文件", "父级产物名"})
 _LABELED_FORBIDDEN_FIELDS = frozenset({"父级禁止文件/反例名", "禁止文件/反例名", "父级禁止文件", "禁止文件名"})
-_NEGATIVE_MARKERS = (
-    "禁止",
-    "不允许",
-    "不得",
-    "不要",
-    "不能",
-    "forbidden",
-    "do not",
-    "must not",
-)
-_POSITIVE_MARKERS = (
-    "必须包含",
-    "必须包括",
-    "必须交付",
-    "必须输出",
-    "必须写",
-    "核心产物",
-    "交付文件",
-    "交付物",
-    "产物写至",
-    "输出到",
-    "输出为",
-    "写入",
-    "写到",
-    "创建",
-    "生成",
-    "保存到",
-    "required files",
-    "deliver to",
-    "write to",
-    "output to",
-)
-_RENAME_MARKERS = ("改名成", "改名为", "改成", "rename to", "renamed to")
 
 
 # LLM: required_file_terms_from_text returns filenames from structured required_files fields only.
@@ -69,30 +36,22 @@ def labeled_required_file_terms_from_text(text: str, *, extensions: str) -> list
     return _terms_from_labeled_fields(text, extensions=extensions, labels=_LABELED_REQUIRED_FIELDS)
 
 
-# LLM: task_contract_required_file_terms_from_text adds conservative deliverable extraction for handoff contracts.
-# 函数用途: 给 context bundle / hierarchy 使用，合并机器字段、内部标签和明确“输出到/必须包含”等产物句式。
+# LLM: task_contract_required_file_terms_from_text reads only machine fields and internal labels.
+# 函数用途: 给 context bundle / hierarchy 使用，合并 required_files 和内部系统标签；不解析“输出到/必须包含”等自然语言句式。
 def task_contract_required_file_terms_from_text(text: str, *, extensions: str) -> list[str]:
-    pattern = re.compile(_FILE_RE_TEMPLATE.format(exts=extensions), re.IGNORECASE)
-    values = [
+    return _dedupe([
         *required_file_terms_from_text(text, extensions=extensions),
         *labeled_required_file_terms_from_text(text, extensions=extensions),
-    ]
-    for segment in _contract_segments(text):
-        _append_terms(values, _positive_contract_terms(segment, pattern))
-    return values
+    ])
 
 
-# LLM: task_contract_forbidden_file_terms_from_text extracts negative filename examples without polluting required files.
-# 函数用途: 给 context bundle / hierarchy 使用，读取内部禁止标签和“不得创建/改名成”这类明确反例。
+# LLM: task_contract_forbidden_file_terms_from_text reads only forbidden machine fields and internal labels.
+# 函数用途: 给 context bundle / hierarchy 使用，读取 forbidden_files 和内部禁止标签；不解析“不得创建/改名成”等自然语言反例。
 def task_contract_forbidden_file_terms_from_text(text: str, *, extensions: str) -> list[str]:
-    pattern = re.compile(_FILE_RE_TEMPLATE.format(exts=extensions), re.IGNORECASE)
-    values = [
+    return _dedupe([
         *forbidden_file_terms_from_text(text, extensions=extensions),
         *_terms_from_labeled_fields(text, extensions=extensions, labels=_LABELED_FORBIDDEN_FIELDS),
-    ]
-    for segment in _contract_segments(text):
-        _append_terms(values, _negative_contract_terms(segment, pattern))
-    return values
+    ])
 
 
 # LLM: _terms_from_structured_fields is the shared protocol parser for required and forbidden file lists.
@@ -196,81 +155,6 @@ def _labeled_line_segments(raw: str) -> list[str]:
     return [item.strip() for item in re.split(r"[。；;]+", str(raw or "")) if item.strip()]
 
 
-# LLM: _contract_segments keeps positive/negative extraction local to short task-contract clauses.
-# 函数用途: 按常见中英文标点切分合同文本，避免一个读文件句子污染后面的输出句子。
-def _contract_segments(text: str) -> list[str]:
-    return [item.strip() for item in re.split(r"[\n。；;]+", str(text or "")) if item.strip()]
-
-
-# LLM: _positive_contract_terms extracts files only after explicit deliverable markers.
-# 函数用途: 从“必须包含 index.html / 输出到 final_report.md”这类短句提取产物名；读取句子不算。
-def _positive_contract_terms(segment: str, pattern: re.Pattern[str]) -> list[str]:
-    if _contains_marker(segment, _NEGATIVE_MARKERS):
-        segment = _before_first_marker(segment, _NEGATIVE_MARKERS)
-    values: list[str] = []
-    for marker in _POSITIVE_MARKERS:
-        tail = _tail_after_marker(segment, marker)
-        if tail:
-            _append_terms(values, _file_terms_from_value(_positive_tail(marker, tail), pattern))
-    return values
-
-
-# LLM: _negative_contract_terms extracts forbidden refs and rename targets from explicit negative clauses.
-# 函数用途: 从“不允许把 A 改名成 B”只提取 B；从“禁止创建 output.json”提取 output.json。
-def _negative_contract_terms(segment: str, pattern: re.Pattern[str]) -> list[str]:
-    if not _contains_marker(segment, _NEGATIVE_MARKERS):
-        return []
-    tail = _tail_after_any_marker(segment, _RENAME_MARKERS) or _tail_after_any_marker(segment, _NEGATIVE_MARKERS)
-    return _file_terms_from_value(tail, pattern) if tail else []
-
-
-# LLM: _contains_marker does case-insensitive marker checks for mixed Chinese/English contracts.
-# 函数用途: 判断片段是否包含任一合同触发词。
-def _contains_marker(text: str, markers: tuple[str, ...]) -> bool:
-    lowered = str(text or "").lower()
-    return any(marker.lower() in lowered for marker in markers)
-
-
-# LLM: _before_first_marker trims a segment before the earliest negative clause.
-# 函数用途: 防止“必须包含 A。不允许 B”类混合片段把禁止文件也归入 required。
-def _before_first_marker(text: str, markers: tuple[str, ...]) -> str:
-    lowered = str(text or "").lower()
-    indexes = [idx for marker in markers if (idx := lowered.find(marker.lower())) >= 0]
-    return str(text or "")[: min(indexes)] if indexes else str(text or "")
-
-
-# LLM: _tail_after_any_marker returns the text after the earliest matching marker.
-# 函数用途: 给负向/改名合同取尾部文件列表。
-def _tail_after_any_marker(text: str, markers: tuple[str, ...]) -> str:
-    lowered = str(text or "").lower()
-    candidates = [
-        (idx, len(marker))
-        for marker in markers
-        if (idx := lowered.find(marker.lower())) >= 0
-    ]
-    if not candidates:
-        return ""
-    idx, length = min(candidates, key=lambda item: item[0])
-    return str(text or "")[idx + length :]
-
-
-# LLM: _tail_after_marker returns text after one marker, preserving original characters for regex extraction.
-# 函数用途: 支持中英文 marker 的大小写无关匹配。
-def _tail_after_marker(text: str, marker: str) -> str:
-    lowered = str(text or "").lower()
-    idx = lowered.find(marker.lower())
-    return str(text or "")[idx + len(marker) :] if idx >= 0 else ""
-
-
-# LLM: _positive_tail bounds action-style file targets before explanatory clauses.
-# 函数用途: `写入 <run_id>.md，报告 README.md 摘要` 只看逗号前的写入目标，不把输入主题当产物。
-def _positive_tail(marker: str, tail: str) -> str:
-    action_markers = {"输出到", "输出为", "写入", "写到", "保存到", "deliver to", "write to", "output to"}
-    if marker not in action_markers:
-        return tail
-    return re.split(r"[,，]", str(tail or ""), maxsplit=1)[0]
-
-
 # LLM: _field_continuation_value keeps multiline structured lists small and deterministic.
 # 函数用途: 支持字段下一行的 bullet 文件列表，或只包含文件名/分隔符的裸列表行；遇到普通说明就停止。
 def _field_continuation_value(line: str) -> str | None:
@@ -312,6 +196,12 @@ def _normalize_file_list_separators(text: str) -> str:
 # LLM: _clean_term normalizes path separators without resolving the filesystem.
 # 函数用途: 去掉字段值两侧标点和 `./`，保留相对目录结构。
 def _clean_term(value: object) -> str:
+    return clean_file_contract_term(value)
+
+
+# LLM: clean_file_contract_term is the attribute-side normalizer for already structured file refs.
+# 函数用途: 清理 attributes.required_files/forbidden_files 的单项值，不解析普通自然语言。
+def clean_file_contract_term(value: object) -> str:
     text = str(value or "").strip().strip("`'\".,;:，。；：、").replace("\\", "/")
     return text[2:] if text.startswith("./") else text
 
@@ -322,3 +212,11 @@ def _append_terms(terms: list[str], values: list[str]) -> None:
     for value in values:
         if value and value not in terms:
             terms.append(value)
+
+
+# LLM: _dedupe preserves first-seen order for already-structured file contract values.
+# 函数用途: 合并 required/forbidden 文件名列表，跳过空值和重复项，不解析普通自然语言。
+def _dedupe(values: list[str]) -> list[str]:
+    terms: list[str] = []
+    _append_terms(terms, values)
+    return terms

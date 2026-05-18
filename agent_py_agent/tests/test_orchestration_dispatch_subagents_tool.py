@@ -303,8 +303,8 @@ class TestDispatchSubagentsToolTopLevelWorkflow:
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
         assert call_kwargs["params"].workflow_mode == "off"
 
-    def test_top_level_dispatch_does_not_auto_workflow_concrete_worker_file_task(self):
-        """顶层推进明确文件交付 worker 时，模型误传 auto 也不应扩成通用 workflow。"""
+    def test_top_level_dispatch_does_not_treat_prose_file_path_as_workflow_fact(self):
+        """顶层推进时，普通 goal 里的文件路径不再作为关闭 workflow 的机器事实。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
         mock_report = MagicMock()
@@ -332,7 +332,7 @@ class TestDispatchSubagentsToolTopLevelWorkflow:
 
         assert result.ok is True
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
-        assert call_kwargs["params"].workflow_mode == "off"
+        assert call_kwargs["params"].workflow_mode == "auto"
 
 
 

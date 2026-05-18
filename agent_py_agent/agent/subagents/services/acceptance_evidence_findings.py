@@ -24,10 +24,10 @@ _CURRENT_ATTEMPT_TIME_EPSILON = 0.001
 # 函数用途: 构建证据findings所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def build_evidence_findings(task: SubAgentTask, created_at: float) -> list[AcceptanceReviewFinding]:
     findings = _base_evidence_findings(task, created_at)
-    acceptance_text = ";".join(task.acceptance_checks).lower()
-    if "read_file" in acceptance_text:
+    required_tools = _required_tool_evidence(task)
+    if "read_file" in required_tools:
         findings.append(_required_read_file_finding(task, created_at))
-    if "write_file" in acceptance_text:
+    if "write_file" in required_tools:
         findings.append(_required_write_file_finding(task, created_at))
     return findings
 
@@ -109,9 +109,9 @@ def _required_read_file_finding(task: SubAgentTask, created_at: float) -> Accept
         ok=has_read,
         severity="P0",
         message=(
-            f"acceptance_checks 要求 read_file，且已有{_scope_label(scope)}对应工具和证据。"
+            f"结构化工具证据合同要求 read_file，且已有{_scope_label(scope)}对应工具和证据。"
             if has_read
-            else "acceptance_checks 要求 read_file，但缺少对应工具执行或证据。"
+            else "结构化工具证据合同要求 read_file，但缺少对应工具执行或证据。"
         ),
         evidence_path=task.acceptance_file,
         created_at=created_at,
@@ -128,9 +128,9 @@ def _required_write_file_finding(task: SubAgentTask, created_at: float) -> Accep
         ok=has_write,
         severity="P0",
         message=(
-            f"acceptance_checks 要求 write_file，且已有{_scope_label(scope)}对应工具和证据。"
+            f"结构化工具证据合同要求 write_file，且已有{_scope_label(scope)}对应工具和证据。"
             if has_write
-            else "acceptance_checks 要求 write_file，但缺少对应工具执行或证据。"
+            else "结构化工具证据合同要求 write_file，但缺少对应工具执行或证据。"
         ),
         evidence_path=task.acceptance_file,
         created_at=created_at,
@@ -161,6 +161,38 @@ def _has_tool_evidence(used_tools: list[str], evidence: list, tool_name: str, al
         )
         for item in evidence
     )
+
+
+# LLM: _required_tool_evidence reads tool gates from machine fields only.
+# 函数用途: 从 task.attributes.required_tool_evidence 等结构化字段读取工具证据要求；不解析 acceptance_checks 文本。
+def _required_tool_evidence(task: SubAgentTask) -> set[str]:
+    attrs = getattr(task, "attributes", {})
+    attrs = attrs if isinstance(attrs, dict) else {}
+    return {
+        _canonical_tool_name(item)
+        for value in (
+            attrs.get("required_tool_evidence"),
+            attrs.get("acceptance_required_tools"),
+            attrs.get("required_tools"),
+        )
+        for item in _string_list(value)
+        if _canonical_tool_name(item)
+    }
+
+
+# LLM: _canonical_tool_name keeps aliases explicit and closed.
+# 函数用途: 只接受工具 id 或工具 id 别名，不把自然语言句子切词。
+def _canonical_tool_name(value: object) -> str:
+    text = str(value or "").strip().casefold().replace("-", "_")
+    aliases = {
+        "read_file": "read_file",
+        "file_read": "read_file",
+        "file_content": "read_file",
+        "write_file": "write_file",
+        "file_write": "write_file",
+        "file_written": "write_file",
+    }
+    return aliases.get(text, "")
 
 
 # LLM: _descendant_task_records scans exact persisted descendants, never globbing arbitrary ids.

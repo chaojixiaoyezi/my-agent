@@ -1996,3 +1996,13 @@ def example(...):
 - `read_artifact` 仍不允许读取任意文件；当模型只抄错 artifact path 前缀但文件名在 index 中唯一时，reader 会修复到登记记录，然后继续做 trusted tool-output 目录检查和 sha256 校验。
 - `dispatch_subagents` 顶层 payload 新增 `runner_selection_recovery`，`subagent_board` 顶层新增 `actionable_run_ids` 并截断长 goal，降低真实 runner 在大报告/外置摘要里看不到关键 id 的概率。
 - 下一步：R9 用干净 runtime/deliverables 复测 cart 分支是否能被 drift guard 纠回 `/build`，再继续做 producer/quality 阶段依赖和完整购物站静态验收。
+
+## 2026-05-18 Natural-language fact source ban
+
+状态：已落地，持续守卫
+
+摘要：
+- 新增架构铁律：代码不得依赖普通自然语言文本作为机器事实来源。自然语言可以给 LLM/人理解，但路由、权限、验收、恢复、派工、产物归属和状态流转必须读结构化字段、状态码、refs、schema、工具记录或文件系统事实。
+- 已迁移子代理关键旧兜底：workflow route、input/output refs、写入根、repair identity、QA 硬要求、domain/scope、leaf target、root/coordinator seed 都不再从 goal/prompt/summary 的普通句子里抽硬规则。
+- 新增/强化 `test_code_does_not_use_plain_language_as_machine_facts`，把已删除的旧入口列入架构守卫，后续同类回归要先加结构化字段和测试，不能再补关键词表。
+- 下一步：主代理复杂任务 E2E 继续按这条铁律压测；如果真实模型说法变化导致失败，优先补 protocol/schema/refs，不补自然语言关键词。

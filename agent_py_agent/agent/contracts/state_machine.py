@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .error_taxonomy import classify_error, error_contract
+
 DISPATCHABLE_STATES = {"PLANNING", "PENDING"}
 ACTIVE_STATES = {"RUNNING", "WAITING_FOR_TOOL", "WAITING_FOR_CHILD", "WAITING_FOR_USER", "REPAIRING", "TAKING_OVER"}
 TERMINAL_STATES = {"DONE", "FAILED", "CANCELLED", "ABANDONED"}
@@ -89,6 +91,55 @@ def recovery_decision(facts: RunStateFacts) -> RecoveryDecision:
     return RecoveryDecision("manual_review", False, f"unhandled_state_{status.lower()}")
 
 
+# LLM: run_state_snapshot_from_task adapts legacy task objects into the shared state-machine contract.
+# 函数用途: 从任意 task-like 对象读取状态、验收、错误和尝试次数，输出机器可读调度/恢复事实。
+def run_state_snapshot_from_task(task: object) -> dict[str, object]:
+    facts = RunStateFacts(
+        status=normalize_status(getattr(task, "status", "")),
+        verification_status=normalize_verification(getattr(task, "verification_status", "")),
+        failure_type=_failure_type_from_task(task),
+        attempts=_int_attr(task, "runner_attempts"),
+        max_attempts=_int_attr(task, "runner_max_attempts"),
+        has_progress=bool(getattr(task, "has_progress", True)),
+    )
+    decision = recovery_decision(facts)
+    return {
+        "run_id": str(getattr(task, "id", "") or ""),
+        "status": normalize_status(facts.status),
+        "verification_status": normalize_verification(facts.verification_status),
+        "failure_type": error_contract(facts.failure_type or "UNKNOWN_ERROR").code,
+        "attempts": facts.attempts,
+        "max_attempts": facts.max_attempts,
+        "can_dispatch": can_dispatch(facts),
+        "can_closeout": can_closeout(facts),
+        "can_repair": can_repair(facts),
+        "recovery_decision": {
+            "action": decision.action,
+            "allow_new_run": decision.allow_new_run,
+            "reason": decision.reason,
+        },
+    }
+
+
+# LLM: _failure_type_from_task prefers structured failure_type and falls back to taxonomy classification.
+# 函数用途: 从任务对象中提取稳定错误类型，避免状态合同只看到自然语言错误。
+def _failure_type_from_task(task: object) -> str:
+    raw = str(getattr(task, "failure_type", "") or "").strip()
+    if raw:
+        return error_contract(raw).code
+    message = str(getattr(task, "runner_last_error", "") or getattr(task, "error", "") or "").strip()
+    return classify_error(message).code if message else "UNKNOWN_ERROR"
+
+
+# LLM: _int_attr keeps snapshots tolerant of legacy string counters.
+# 函数用途: 读取 task 上的整数字段；缺失或坏值按 0 处理。
+def _int_attr(task: object, name: str) -> int:
+    try:
+        return int(getattr(task, name, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 __all__ = [
     "RunStateFacts",
     "RecoveryDecision",
@@ -98,4 +149,5 @@ __all__ = [
     "normalize_status",
     "normalize_verification",
     "recovery_decision",
+    "run_state_snapshot_from_task",
 ]

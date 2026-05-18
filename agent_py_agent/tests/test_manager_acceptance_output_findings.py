@@ -59,8 +59,33 @@ def _coverage_task_attributes() -> dict[str, object]:
 class TestSubAgentAcceptanceOutputMiscFindings(_FindingSetupMixin, _FindingAssertMixin, _FindingReportMixin):
     """Misc output and artifact acceptance tests."""
 
-    def test_required_child_goal_without_child_ids_blocks_acceptance(self, tmp_path: Path):
-        """任务要求创建下级时，不能只在结构化结果里伪造 child_run_ids。"""
+    def test_required_child_attribute_without_child_ids_blocks_acceptance(self, tmp_path: Path):
+        """任务机器字段要求创建下级时，不能只在结构化结果里伪造 child_run_ids。"""
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
+
+        class MockManager(SubAgentAcceptanceFindingMixin):
+            def __init__(self):
+                self.workspace = tmp_path
+
+        manager = MockManager()
+        task = self._make_findings_task(
+            tmp_path,
+            goal="普通说明里提到 child_spawn_required: true 也不能当机器合同。",
+            attributes={"child_spawn_required": True, "required_child_depth": 3},
+            child_ids=[],
+        )
+        output = {"artifacts": [], "structured_output": {"status": "COMPLETED"}}
+        self._write_findings_files(tmp_path, output)
+        manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
+
+        findings = manager._acceptance_findings(task, output, {}, time.time())
+
+        self._assert_finding(findings, "required_child_spawned", expected_ok=False)
+
+    def test_child_spawn_text_fields_do_not_require_child_ids(self, tmp_path: Path):
+        """普通 goal/acceptance_checks 文本里的 child_spawn_required 不再触发机器验收门禁。"""
         from agent_py_agent.agent.subagents.manager_acceptance_findings import (
             SubAgentAcceptanceFindingMixin,
         )
@@ -73,6 +98,7 @@ class TestSubAgentAcceptanceOutputMiscFindings(_FindingSetupMixin, _FindingAsser
         task = self._make_findings_task(
             tmp_path,
             goal="child_spawn_required: true\nrequired_child_depth: 3",
+            acceptance_checks=["required_child_count: 2"],
             child_ids=[],
         )
         output = {"artifacts": [], "structured_output": {"status": "COMPLETED"}}
@@ -81,7 +107,7 @@ class TestSubAgentAcceptanceOutputMiscFindings(_FindingSetupMixin, _FindingAsser
 
         findings = manager._acceptance_findings(task, output, {}, time.time())
 
-        self._assert_finding(findings, "required_child_spawned", expected_ok=False)
+        self._assert_finding(findings, "required_child_spawned", expected_ok=True)
 
     def test_leaf_self_creation_text_does_not_require_child_ids(self, tmp_path: Path):
         """leaf 的验收文案出现“创建 leaf_worker”时，不应误判它还要创建下级。"""
@@ -162,9 +188,10 @@ class TestSubAgentAcceptanceRoleCoverageFindings(_FindingSetupMixin, _FindingAss
         )
         task = self._make_findings_task(
             tmp_path,
-            goal="required_qa_roles: tester, bug_finder, acceptor",
+            goal="父级要做真实分工，完成后需要质量检查。",
             role="coordinator",
             child_ids=["child"],
+            attributes={"required_qa_roles": ["tester", "bug_finder", "acceptor"]},
         )
         output = {"artifacts": [], "structured_output": {"status": "COMPLETED"}}
         self._write_findings_files(tmp_path, output)
@@ -200,9 +227,10 @@ class TestSubAgentAcceptanceRoleCoverageFindings(_FindingSetupMixin, _FindingAss
         )
         task = self._make_findings_task(
             tmp_path,
-            goal="required_qa_roles: tester, bug_finder, acceptor",
+            goal="父级要做真实分工，完成后需要质量检查。",
             role="coordinator",
             child_ids=["child"],
+            attributes={"required_qa_roles": ["tester", "bug_finder", "acceptor"]},
         )
         output = {"artifacts": [], "structured_output": {"status": "COMPLETED"}}
         self._write_findings_files(tmp_path, output)
@@ -233,9 +261,10 @@ class TestSubAgentAcceptanceRoleCoverageFindings(_FindingSetupMixin, _FindingAss
             (tmp_path / run_id / "task.json").write_text(json.dumps(record), encoding="utf-8")
         task = self._make_findings_task(
             tmp_path,
-            goal="required_qa_roles: tester, bug_finder, acceptor",
+            goal="父级要做真实分工，完成后需要质量检查。",
             role="coordinator",
             child_ids=["tester", "bug", "accept"],
+            attributes={"required_qa_roles": ["tester", "bug_finder", "acceptor"]},
         )
         output = {"artifacts": [], "structured_output": {"status": "COMPLETED"}}
         self._write_findings_files(tmp_path, output)
@@ -272,9 +301,10 @@ class TestSubAgentAcceptanceRoleCoverageFindings(_FindingSetupMixin, _FindingAss
         )
         task = self._make_findings_task(
             tmp_path,
-            goal="required_qa_roles: tester, bug_finder, acceptor",
+            goal="父级要做真实分工，完成后需要质量检查。",
             role="coordinator",
             child_ids=["tester"],
+            attributes={"required_qa_roles": ["tester", "bug_finder", "acceptor"]},
         )
         output = {"artifacts": [], "structured_output": {"status": "COMPLETED"}}
         self._write_findings_files(tmp_path, output)
@@ -311,9 +341,10 @@ class TestSubAgentAcceptanceRoleCoverageFindings(_FindingSetupMixin, _FindingAss
             )
         task = self._make_findings_task(
             tmp_path,
-            goal="required_qa_roles: tester, bug_finder, acceptor",
+            goal="父级要做真实分工，完成后需要质量检查。",
             role="coordinator",
             child_ids=["tester", "bug", "accept"],
+            attributes={"required_qa_roles": ["tester", "bug_finder", "acceptor"]},
         )
         output = {"artifacts": [], "structured_output": {"status": "COMPLETED"}}
         self._write_findings_files(tmp_path, output)
@@ -442,6 +473,29 @@ class TestSubAgentAcceptanceTestsAndArtifactFindings(_FindingSetupMixin, _Findin
         findings = manager._acceptance_findings(task, {"artifacts": [{"path": "/tmp/exists.txt"}]}, {}, time.time())
 
         self._assert_finding(findings, "artifact_paths_exist", expected_ok=True)
+
+    # LLM: Parent acceptance should validate artifact quality through the shared artifact contract.
+    # 函数用途: output.json 上报坏 JSON 产物时，验收不能只看路径存在，还要给出 artifact_acceptance 失败。
+    def test_artifact_acceptance_blocks_invalid_artifact_content(self, tmp_path: Path):
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
+
+        class MockManager(SubAgentAcceptanceFindingMixin):
+            def __init__(self):
+                self.workspace = tmp_path
+
+        manager = MockManager()
+        bad_json = tmp_path / "broken.json"
+        bad_json.write_text("{bad", encoding="utf-8")
+        task = self._make_findings_task(tmp_path)
+        self._write_findings_files(tmp_path)
+        manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
+
+        findings = manager._acceptance_findings(task, {"artifacts": [{"path": str(bad_json)}]}, {}, time.time())
+
+        self._assert_finding(findings, "artifact_paths_exist", expected_ok=True)
+        self._assert_finding(findings, "artifact_acceptance_passed", expected_ok=False)
 
     # LLM: This regression prevents internal runner final_report.md from satisfying user deliverables.
     # 函数用途: 验收必须看到 product root 下的 final_report.md，不能只接受 agent-run 内部交接报告。

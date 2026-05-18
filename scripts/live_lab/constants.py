@@ -18,6 +18,7 @@ DEFAULT_RUNS_DIR = REPO_ROOT / "validation" / "live_lab"
 
 # Suite map is part of the public Live Lab CLI contract; keep docs/modules/live-lab in sync when it changes.
 # LLM: web, file, and document repair suites validate seeded failure recovery through the same refs-first repair contract.
+# 2026-05-18: main-complex is the root-agent-only complex task suite; it disables subagents in its case module.
 SUITES = {
     "health": ["health"],
     "bad-weather": ["bad_weather"],
@@ -28,6 +29,12 @@ SUITES = {
     "shop-repair": ["health", "natural_shop_repair_wave"],
     "file-repair": ["health", "natural_file_repair_wave"],
     "markdown-repair": ["health", "natural_markdown_repair_wave"],
+    "main-complex": [
+        "health",
+        "main_direct_web_app",
+        "main_tool_failure_recovery",
+        "main_large_log_audit",
+    ],
     "real": ["health", "gateway_ask", "long_subagent"],
     "all": [
         "health",
@@ -51,4 +58,7 @@ REAL_CASES = {
     "natural_shop_repair_wave",
     "natural_file_repair_wave",
     "natural_markdown_repair_wave",
+    "main_direct_web_app",
+    "main_tool_failure_recovery",
+    "main_large_log_audit",
 }

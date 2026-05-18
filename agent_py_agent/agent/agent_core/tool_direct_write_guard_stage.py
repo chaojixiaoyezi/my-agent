@@ -37,6 +37,7 @@ def maybe_block_delegate_only_direct_write_stage(
             agent=request.agent,
             payload=request.payload,
             user_prompt=execute_request.params.user_prompt,
+            task_attributes=execute_request.params.task_attributes,
         )
     )
     if result is None:

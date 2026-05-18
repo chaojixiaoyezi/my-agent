@@ -40,27 +40,24 @@ def required_static_dom_ids_from_texts(texts: list[object]) -> list[str]:
     return _dedupe(ids)[:50]
 
 
-# LLM: required_static_files_for_task centralizes task text fields used by parent acceptance.
-# 函数用途: 从 task 的目标、思考、说明和验收条件里抽取静态站点必需文件；不读取任何产物正文。
+# LLM: required_static_files_for_task reads runtime static contracts from task attributes only.
+# 函数用途: 从 task.attributes.required_files 读取静态站点必需文件；不解析 goal/acceptance 文本。
 def required_static_files_for_task(task: Any) -> list[str]:
-    files = static_required_files_from_texts([
-        getattr(task, "goal", ""),
-        getattr(task, "thought", ""),
-        getattr(task, "description", ""),
-        *(getattr(task, "acceptance_checks", []) or []),
-    ])
+    files = _string_list(_task_attributes(task).get("required_files"))
     return _scope_to_allowed_write_files(files, getattr(task, "allowed_write_roots", []) or [])
 
 
-# LLM: required_static_dom_ids_for_task centralizes explicit DOM section contracts.
-# 函数用途: 从 task 的验收文本里提取 required_dom_ids，交给父级 static_site_check 做机器验收。
+# LLM: required_static_dom_ids_for_task reads explicit DOM contracts from task attributes only.
+# 函数用途: 从 task.attributes.required_dom_ids 读取业务区域 id，交给父级 static_site_check 做机器验收。
 def required_static_dom_ids_for_task(task: Any) -> list[str]:
-    return required_static_dom_ids_from_texts([
-        getattr(task, "goal", ""),
-        getattr(task, "thought", ""),
-        getattr(task, "description", ""),
-        *(getattr(task, "acceptance_checks", []) or []),
-    ])
+    return _dedupe(_string_list(_task_attributes(task).get("required_dom_ids")))[:50]
+
+
+# LLM: _task_attributes normalizes task attributes for runtime contract reads.
+# 函数用途: 读取 task.attributes 字典；缺失或类型不对时返回空，避免从文本兜底。
+def _task_attributes(task: Any) -> dict[str, Any]:
+    attributes = getattr(task, "attributes", {})
+    return attributes if isinstance(attributes, dict) else {}
 
 
 # LLM: static_site_root_hints_for_task exposes write-root refs to parent static-site acceptance.
@@ -115,6 +112,17 @@ def _dom_id_items(value: str) -> list[str]:
         if text and all(ch.isalnum() or ch in {"-", "_", ":"} for ch in text):
             items.append(text)
     return items
+
+
+# LLM: _string_list normalizes structured list/scalar fields without splitting prose.
+# 函数用途: 读取 attributes 中的列表或单值；不会按逗号/空白拆普通句子。
+def _string_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list | tuple):
+        return [str(item).strip() for item in value if str(item or "").strip()]
+    text = str(value or "").strip()
+    return [text] if text else []
 
 
 # LLM: _dedupe preserves first-seen file order from user/task text.

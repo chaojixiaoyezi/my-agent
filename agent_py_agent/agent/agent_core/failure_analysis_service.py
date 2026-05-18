@@ -45,19 +45,6 @@ def _suggest_splits(task: SubAgentTask) -> list[str]:
     if task.plan and len(task.plan) > 3:
         mid = len(task.plan) // 2
         return [f"前 {mid} 步：{task.plan[:mid]}", f"后 {len(task.plan) - mid} 步：{task.plan[mid:]}"]
-    return _goal_based_split_suggestions(task.goal or "")
-
-
-# LLM: _goal_based_split_suggestions 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理目标basedsplitsuggestions相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
-def _goal_based_split_suggestions(goal: str) -> list[str]:
-    goal_lower = goal.lower()
-    if "翻译" in goal_lower:
-        return ["翻译前半部分", "翻译后半部分"]
-    if "重构" in goal_lower:
-        return ["重构数据结构", "重构业务逻辑"]
-    if "分析" in goal_lower:
-        return ["分析输入数据", "分析结果总结"]
     return ["执行第一部分", "执行第二部分"]
 
 

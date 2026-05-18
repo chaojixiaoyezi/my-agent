@@ -1,11 +1,10 @@
 # LLM: Normalize model-written content assertions into bounded parent-acceptance content checks.
-# 模块用途: 处理 runner 常写的 `cat file` 验收形式，把它改成安全的 content_check，不放开 shell 工具。
+# 模块用途: 处理 runner 常写的 `cat file` 验收形式；只有结构化期望字段存在时才改成 content_check。
 
 from __future__ import annotations
 
 """Helpers for turning simple file-content commands into content_check tests."""
 
-import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +21,7 @@ class CatContentCheckRequest:
 
     item: dict[str, Any]
     workspace_root: Path
-    artifact_summaries: dict[Path, str]
+    artifact_expected_content: dict[Path, str]
 
 
 # LLM: normalize_cat_content_check never executes cat; it rewrites narrow assertions into content_check.
@@ -37,7 +36,7 @@ def normalize_cat_content_check(request: CatContentCheckRequest) -> dict[str, An
     path = _cat_command_path(str(item.get("command") or ""), request.workspace_root)
     if path is None:
         return item
-    expected = _expected_content_for_cat_item(item, path, request.artifact_summaries)
+    expected = _expected_content_for_cat_item(item, path, request.artifact_expected_content)
     if not expected:
         return item
     item["validation_method"] = "content_check"
@@ -76,45 +75,19 @@ def _workspace_path(value: object, workspace_root: Path) -> Path | None:
     return path
 
 
-# LLM: _expected_content_for_cat_item prefers schema fields before conservative prose extraction.
-# 函数用途: 为 cat->content_check 提取明确期望值；没有清晰字面值时不猜，继续走命令安全闸门。
+# LLM: _expected_content_for_cat_item reads exact expectations from machine fields only.
+# 函数用途: 为 cat->content_check 提取结构化期望值；没有字段时不从 name/summary/artifact 文案里猜。
 def _expected_content_for_cat_item(
     item: dict[str, Any],
     path: Path,
-    artifact_summaries: dict[Path, str],
+    artifact_expected_content: dict[Path, str],
 ) -> str:
     for key in ("content_equals", "expected_content", "content_pattern", "expected_stdout", "expected_output"):
         value = str(item.get(key) or "").strip()
         if _usable_expected_literal(value, path):
             return value
-    texts = [
-        str(item.get("summary") or ""),
-        str(item.get("name") or ""),
-        artifact_summaries.get(path, ""),
-    ]
-    for text in texts:
-        value = _expected_literal_from_text(text, path)
-        if value:
-            return value
-    return ""
-
-
-# LLM: _expected_literal_from_text is intentionally narrow so prose cannot become fake exact content.
-# 函数用途: 从“内容应为 X / must be X / `X`”这类短提示中提取字面期望值。
-def _expected_literal_from_text(text: str, path: Path) -> str:
-    for quoted in re.findall(r"`([^`\n]{1,200})`", text):
-        value = quoted.strip()
-        if _usable_expected_literal(value, path):
-            return value
-    patterns = [
-        r"(?:内容|content)[^。\n;；]{0,60}?(?:是否为|应为|必须为|必须是|为|是|equals?|must be|should be)\s*[`\"']?([^`\"'，。；;\s]+)",
-        r"(?:expected(?: content)?|must be|should be|equals?)\s*[:：]?\s*[`\"']?([^`\"'，。；;\s]+)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if match and _usable_expected_literal(match.group(1), path):
-            return match.group(1).strip()
-    return ""
+    fallback = artifact_expected_content.get(path, "")
+    return fallback if _usable_expected_literal(fallback, path) else ""
 
 
 # LLM: _usable_expected_literal filters paths and filenames out of exact content guesses.

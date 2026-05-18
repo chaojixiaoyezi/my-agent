@@ -16,6 +16,11 @@ import textwrap
 
 from .constants import REPO_ROOT
 from .file_repair_wave_case import case_natural_file_repair_wave
+from .main_agent_complex_case import (
+    case_main_direct_web_app,
+    case_main_large_log_audit,
+    case_main_tool_failure_recovery,
+)
 from .markdown_repair_wave_case import case_natural_markdown_repair_wave
 from .shop_case import (
     _external_asset_refs,
@@ -30,6 +35,7 @@ from .state_assertions import (
 
 # LLM: Case imports stay explicit so adding a real canary also updates docs and tests in one place.
 # 函数用途: 下面的 run_case 字典是 CLI suite 字符串到真实 case 函数的公开调度表。
+# 2026-05-18: main-complex cases stay imported here only for suite dispatch; their task logic lives in main_agent_complex_case.py.
 
 # LLM: run_case 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
 # 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
@@ -49,6 +55,9 @@ def run_case(lab, case_name: str) -> None:
         "natural_html_subagent": case_natural_html_subagent,
         "natural_shop_subagent": case_natural_shop_subagent,
         "natural_shop_repair_wave": case_natural_shop_repair_wave,
+        "main_direct_web_app": case_main_direct_web_app,
+        "main_tool_failure_recovery": case_main_tool_failure_recovery,
+        "main_large_log_audit": case_main_large_log_audit,
         # LLM: File repair canary stays split so generic cases.py does not grow CSV-specific assertions.
         "natural_file_repair_wave": case_natural_file_repair_wave,
         # LLM: Markdown repair canary keeps document checks out of the generic dispatcher.

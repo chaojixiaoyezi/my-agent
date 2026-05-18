@@ -18,14 +18,17 @@ def test_hierarchy_schedule_preserves_shopping_file_contract_when_child_goal_onl
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
     root = manager.create_run(
-        goal=(
-            f"在 {build} 里产出静态购物网站，必须包含 index.html、register.html、login.html、"
-            "products.html、product-detail.html、cart.html、checkout.html、order-success.html、style.css、app.js。"
-            "本轮必须至少覆盖一条 4 层链路：root -> 子 -> 孙 -> 孙孙。"
-        ),
+        goal="购物站需要完整页面结构和 4 层链路。",
         thought="root only dispatches.",
         plan=["plan"],
         extra_write_roots=[str(build)],
+        attributes={
+            "required_files": [
+                "index.html", "register.html", "login.html", "products.html", "product-detail.html",
+                "cart.html", "checkout.html", "order-success.html", "style.css", "app.js",
+            ],
+            "hierarchy_contracts": ["4 层链路", "depth=1 小傻妞-*", "depth=2 小小傻妞-*", "depth=3 小小小傻妞-*"],
+        },
     )
 
     result = manager.schedule_child_runs(
@@ -56,49 +59,50 @@ def test_hierarchy_schedule_preserves_shopping_file_contract_when_child_goal_onl
 def test_hierarchy_schedule_preserves_forbidden_file_contract_when_child_goal_summarizes_constraints(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
-    root = manager.create_run(
-        goal=(
-            f"交付购物站到 {build}。核心产物：index.html、register.html、login.html、products.html、"
-            "product-detail.html、cart.html、checkout.html、order-success.html、style.css、app.js。"
-            "禁止文件名：product.html/old-product.html/legacy.html/obsolete.html。"
-            "禁止在 build 写 output.json/RUNNER_RESULT.md/execution_context.json。"
-        ),
+    root = _forbidden_file_contract_root(manager, build)
+    result = _schedule_forbidden_contract_child(manager, root.id, build)
+    child = manager.load(result.created_run_ids[0])
+
+    assert child.attributes["forbidden_files"] == [
+        "product.html", "old-product.html", "legacy.html", "obsolete.html",
+        "output.json", "RUNNER_RESULT.md", "execution_context.json",
+    ]
+
+
+def _forbidden_file_contract_root(manager: SubAgentManager, build):
+    return manager.create_run(
+        goal="购物站需要完整页面结构，并禁止旧文件名。",
         thought="root only dispatches.",
         plan=["plan"],
         extra_write_roots=[str(build)],
-    )
-
-    result = manager.schedule_child_runs(
-        params=HierarchyScheduleRequest(
-            parent_run_id=root.id,
-            child_specs=[
-                HierarchyChildSpec(
-                    goal=(
-                        f"交付静态购物网站页面到 {build}。核心产物必须同名：index.html、register.html、"
-                        "login.html、products.html、product-detail.html、cart.html、checkout.html、"
-                        "order-success.html、style.css、app.js。约束：禁止文件名改、禁止 output.json。"
-                    ),
-                    role="child_coordinator",
-                    agent_name="小傻妞-页面协调",
-                    allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
-                )
+        attributes={
+            "required_files": [
+                "index.html", "register.html", "login.html", "products.html", "product-detail.html",
+                "cart.html", "checkout.html", "order-success.html", "style.css", "app.js",
             ],
-            apply=True,
-        )
+            "forbidden_files": [
+                "product.html", "old-product.html", "legacy.html", "obsolete.html",
+                "output.json", "RUNNER_RESULT.md", "execution_context.json",
+            ],
+        },
     )
-    child = manager.load(result.created_run_ids[0])
 
-    assert "父级禁止文件/反例名" in child.goal
-    for filename in [
-        "product.html",
-        "old-product.html",
-        "legacy.html",
-        "obsolete.html",
-        "output.json",
-        "RUNNER_RESULT.md",
-        "execution_context.json",
-    ]:
-        assert f"- {filename}" in child.goal
+
+def _schedule_forbidden_contract_child(manager: SubAgentManager, root_id: str, build):
+    return manager.schedule_child_runs(params=HierarchyScheduleRequest(
+        parent_run_id=root_id,
+        child_specs=[HierarchyChildSpec(
+            goal=(
+                f"交付静态购物网站页面到 {build}。核心产物必须同名：index.html、register.html、"
+                "login.html、products.html、product-detail.html、cart.html、checkout.html、"
+                "order-success.html、style.css、app.js。约束：禁止文件名改、禁止 output.json。"
+            ),
+            role="child_coordinator",
+            agent_name="小傻妞-页面协调",
+            allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
+        )],
+        apply=True,
+    ))
 
 
 # LLM: R70 showed schedule-time chain forcing over-constrained otherwise valid implementation children.
@@ -108,7 +112,7 @@ def test_hierarchy_schedule_preserves_no_space_four_layer_contract_without_forci
     build = tmp_path / "deliverables" / "shop" / "build"
     child = _create_no_space_four_layer_child(manager, build)
 
-    assert "父级层级/协作约束" in child.goal
+    assert "hierarchy_contracts:" in child.goal
     assert "4层链路要求" in child.goal
     assert "depth=3" in child.goal
 
@@ -130,17 +134,16 @@ def test_hierarchy_schedule_preserves_no_space_four_layer_contract_without_forci
 # 函数用途: 创建带“4层”中文无空格约束的 root 和第一层 coordinator。
 def _create_no_space_four_layer_child(manager: SubAgentManager, build):
     root = manager.create_run(
-        goal=(
-            f"交付购物站到 {build}。核心产物：index.html、products.html、product-detail.html、style.css、app.js。\n"
-            "## 4层链路要求\n"
-            "- depth=1 用“小傻妞-*”\n"
-            "- depth=2 用“小小傻妞-*”\n"
-            "- depth=3 用“小小小傻妞-*”\n"
-            "- max_depth=3，禁止创建 depth>=4"
-        ),
+        goal="购物站需要指定文件和 4 层链路。",
         thought="root only dispatches.",
         plan=["plan"],
         extra_write_roots=[str(build)],
+        attributes={
+            "required_files": ["index.html", "products.html", "product-detail.html", "style.css", "app.js"],
+            "hierarchy_contracts": [
+                "4层链路要求", "depth=1 小傻妞-*", "depth=2 小小傻妞-*", "depth=3 小小小傻妞-*", "max_depth=3",
+            ],
+        },
     )
     child_result = manager.schedule_child_runs(
         params=HierarchyScheduleRequest(
@@ -168,14 +171,14 @@ def test_hierarchy_file_contract_skips_forbidden_rename_targets(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
     root = manager.create_run(
-        goal=(
-            f"在 {build} 交付购物站。必须包含 index.html、products.html、product-detail.html、style.css、app.js。"
-            "不允许把 product-detail.html 改名成 product.html 或 old-product.html。"
-            "不得改名为 legacy.html。"
-        ),
+        goal="购物站需要指定文件，并禁止旧文件名。",
         thought="root",
         plan=["plan"],
         extra_write_roots=[str(build)],
+        attributes={
+            "required_files": ["index.html", "products.html", "product-detail.html", "style.css", "app.js"],
+            "forbidden_files": ["product.html", "old-product.html", "legacy.html"],
+        },
     )
 
     result = manager.schedule_child_runs(
@@ -186,16 +189,16 @@ def test_hierarchy_file_contract_skips_forbidden_rename_targets(tmp_path):
         )
     )
     child = manager.load(result.created_run_ids[0])
-    required_section = child.goal.split("父级禁止文件/反例名", 1)[0]
+    required_section = child.goal.split("forbidden_files:", 1)[0]
 
     assert "\n- product-detail.html\n" in required_section
     assert "\n- product.html\n" not in required_section
     assert "\n- old-product.html\n" not in required_section
     assert "\n- legacy.html\n" not in required_section
-    assert "父级禁止文件/反例名" in child.goal
+    assert "forbidden_files:" in child.goal
     assert "\n- product.html\n" in child.goal
     assert "\n- old-product.html\n" in child.goal
-    assert "\n- legacy.html\n" in child.goal
+    assert "\n- legacy.html" in child.goal
 
 # LLM: test_hierarchy_schedule_blocks_leaf_before_explicit_four_layer_chain_reaches_depth_three covers root-only E2E.
 # 函数用途: 父级明确要求 4 层链路时，深度未到孙孙层前不能直接创建 leaf/worker 跳层。

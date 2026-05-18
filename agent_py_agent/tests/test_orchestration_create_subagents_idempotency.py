@@ -1,6 +1,6 @@
-"""LLM: create_subagents must be idempotent for same-parent named children.
+"""LLM: create_subagents must be idempotent only for explicit machine contracts.
 
-函数/模块用途: 覆盖真实 E2E 中 root 重复创建同一批小傻妞的问题；工具层应复用已有 run 并返回调度合同。
+函数/模块用途: 覆盖真实 E2E 中 root 重复创建同一批小傻妞的问题；只有 idempotency_contract 才能复用已有 run。
 """
 
 from __future__ import annotations
@@ -23,9 +23,9 @@ def _workspace_agent(tmp_path: Path):
     return agent
 
 
-# LLM: Repeated natural-language batch creation should reuse named planning children instead of growing the tree.
-# 函数用途: 同一父级下同名小傻妞已存在时，第二次 create_subagents 返回 reused_run_ids 和 dispatch_run_ids，不再创建新 run。
-def test_items_mode_reuses_existing_named_children_and_returns_dispatch_contract(tmp_path):
+# LLM: Repeated batch creation should reuse children only through explicit idempotency contracts.
+# 函数用途: 同一父级下同一幂等合同已存在时，第二次 create_subagents 返回 reused_run_ids 和 dispatch_run_ids。
+def test_items_mode_reuses_existing_contract_children_and_returns_dispatch_contract(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _workspace_agent(tmp_path)
@@ -118,9 +118,9 @@ def test_items_mode_indexed_generic_names_create_distinct_siblings(tmp_path):
     assert payload["reused_run_ids"] == []
 
 
-# LLM: Generic workers still need idempotency when the model repeats the same create call.
-# 函数用途: 没有明确 agent_name 的普通 worker 第二次创建同一合同，应复用已有 run，避免 root 复读时不断扩容。
-def test_generic_single_worker_reuses_same_contract(tmp_path):
+# LLM: Generic workers need an explicit idempotency contract to replay safely.
+# 函数用途: 带 idempotency_contract 的普通 worker 第二次创建同一合同，应复用已有 run。
+def test_generic_single_worker_reuses_explicit_idempotency_contract(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _workspace_agent(tmp_path)
@@ -128,6 +128,7 @@ def test_generic_single_worker_reuses_same_contract(tmp_path):
         "goal": "在 artifacts/index.html 写一个现代家具品牌首页。",
         "role": "worker",
         "extra_write_roots": [str(tmp_path / "artifacts")],
+        "context_packs": [_idempotency_pack("furniture-home", "artifacts/index.html")],
     }
     first = json.loads(CreateSubagentsTool(agent).execute(params).output)
     second = json.loads(CreateSubagentsTool(agent).execute(params).output)
@@ -154,9 +155,9 @@ def test_generic_default_name_does_not_reuse_different_goal(tmp_path):
     assert len(agent.subagents.list_runs()) == 2
 
 
-# LLM: Repeated count fanout should reuse each indexed child, not create a second batch.
-# 函数用途: count=2 第二次重复调用应复用“子任务1/子任务2”，防止父级模型重复 create 后从 2 个扩成 4 个。
-def test_repeated_count_fanout_reuses_indexed_children(tmp_path):
+# LLM: Repeated count fanout should reuse each indexed child when an explicit contract exists.
+# 函数用途: count=2 第二次重复调用在同一幂等合同下按 agent_name 区分并复用“子任务1/子任务2”。
+def test_repeated_count_fanout_reuses_indexed_children_with_contract(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _workspace_agent(tmp_path)
@@ -165,6 +166,7 @@ def test_repeated_count_fanout_reuses_indexed_children(tmp_path):
         "count": 2,
         "role": "worker",
         "agent_name": "小傻妞-隔离测试",
+        "context_packs": [_idempotency_pack("fixture-fanout", "fixture-output")],
     }
     first = json.loads(CreateSubagentsTool(agent).execute(params).output)
     second = json.loads(CreateSubagentsTool(agent).execute(params).output)
@@ -204,16 +206,19 @@ def _pipeline_items(output_name: str) -> list[dict[str, object]]:
             "agent_name": "小傻妞-数据收集",
             "goal": f"收集 GitHub star 数据，写到 data/subagents/subagent_data_collection/{output_name}",
             "role": "worker",
+            "context_packs": [_idempotency_pack("task18-data-collection", "data_collection")],
         },
         {
             "agent_name": "小傻妞-内容编写",
             "goal": "基于数据收集结果写中文解释，输出 project_explanations.md",
             "role": "worker",
+            "context_packs": [_idempotency_pack("task18-explanations", "project_explanations")],
         },
         {
             "agent_name": "小傻妞-生成报告",
             "goal": "整合前两步生成 xlsx 和 final_report.md",
             "role": "worker",
+            "context_packs": [_idempotency_pack("task18-final-report", "final_report")],
         },
     ]
 
@@ -227,4 +232,18 @@ def _fixture_worker_item(agent_name: str) -> dict[str, object]:
         "role": "worker",
         "acceptance_checks": ["必须有 read_file 证据", "必须有 write_file 证据", "必须等待父代理验收"],
         "plan": "读取 README.md；写入 task_dir/scenario_outputs/<run_id>.md；等待验收",
+    }
+
+
+# LLM: _idempotency_pack builds the explicit replay contract used by these tests.
+# 函数用途: 生成 subagent_idempotency_contract.v1 context pack，避免测试继续靠 goal/agent_name 文本复用。
+def _idempotency_pack(key: str, *scope_refs: str) -> dict[str, object]:
+    return {
+        "kind": "idempotency_contract",
+        "contract": {
+            "schema": "subagent_idempotency_contract.v1",
+            "kind": "test",
+            "idempotency_key": key,
+            "scope_refs": list(scope_refs),
+        },
     }

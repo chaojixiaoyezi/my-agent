@@ -93,7 +93,7 @@ def _can_rerun_from_recovery_instruction(task: object) -> bool:
     verification = str(getattr(task, "verification_status", "") or "").upper()
     if status not in {"BLOCKED", "FAILED"} or verification == "VERIFIED":
         return False
-    if _terminal_recovery_blocker(task):
+    if _terminal_recovery_code_present(task):
         return False
     if str(getattr(task, "channel_status", "") or "").upper() == "BROKEN":
         return False
@@ -104,17 +104,12 @@ def _can_rerun_from_recovery_instruction(task: object) -> bool:
     return True
 
 
-# LLM: terminal recovery blockers must report upward instead of burning another runner attempt.
-# 函数用途: 判断当前 BLOCKED 是否已经到达接管链路熔断等终局状态；命中时禁止显式 packet 恢复重跑。
-def _terminal_recovery_blocker(task: object) -> bool:
+# LLM: terminal recovery codes must report upward instead of burning another runner attempt.
+# 函数用途: 只读取结构化 failure_type 代码；不从 current_step/result 普通文本推断终局状态。
+def _terminal_recovery_code_present(task: object) -> bool:
     failure_type = str(getattr(task, "failure_type", "") or "").strip().lower()
-    current_step = str(getattr(task, "current_step", "") or "").strip().lower()
-    result = str(getattr(task, "result", "") or "").strip().lower()
-    markers = (
+    terminal_codes = {
         "takeover_chain_exhausted",
-        "takeover chain exhausted",
         "no_progress_fuse",
-        "no-progress fuse",
-    )
-    haystack = " ".join(item for item in [failure_type, current_step, result] if item)
-    return any(marker in haystack for marker in markers)
+    }
+    return failure_type in terminal_codes

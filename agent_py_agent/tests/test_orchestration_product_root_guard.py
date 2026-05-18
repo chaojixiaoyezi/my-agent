@@ -9,8 +9,8 @@ from unittest.mock import MagicMock
 from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
 
-# LLM: This regression captures R30 where root invented an internal build path after missing extra_write_roots.
-# 函数用途: 显式 root/coordinator 交付文件时必须带产物写入根，缺失时拒绝创建并要求模型重试。
+# LLM: This regression uses structured output_files because prose is not a machine fact source.
+# 函数用途: 显式 root/coordinator 交付结构化产物文件时必须带产物写入根，缺失时拒绝创建并要求模型重试。
 def test_explicit_coordinator_product_delivery_requires_write_root():
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
@@ -18,7 +18,8 @@ def test_explicit_coordinator_product_delivery_requires_write_root():
 
     tool = CreateSubagentsTool(mock_agent)
     result = tool.execute({
-        "goal": "交付购物网站文件到 build 目录：index.html style.css app.js。",
+        "goal": "交付购物网站。",
+        "output_files": ["build/index.html", "build/style.css", "build/app.js"],
         "role": "coordinator",
     })
 

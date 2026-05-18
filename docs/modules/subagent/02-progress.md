@@ -1759,13 +1759,13 @@
 
 ## 2026-05-17 普通文件内容合同与 Markdown repair-wave 第一片
 
-- 中文说明：这一片把 repair-wave 从“网页/购物站”和“单个 CSV seed”继续往普通文件推进。目标不是让模型背术语，而是让用户用自然语言说“下面几行要一字不差”，系统也能变成父级可执行 `content_check`。
+- 中文说明：这一片把 repair-wave 从“网页/购物站”和“单个 CSV seed”继续往普通文件推进。早期曾尝试让系统从自然语言“下面几行要一字不差”里生成 `content_check`，后续已按铁律收口：这类内容验收必须进入 `required_content_lines` / `required_content_files` 结构化字段。
 - 对照结论：Codex 的工具调用、OpenClaw 的 session/run 状态、Hermes 的 delegate handoff 都说明一件事：机器验收要靠结构化 refs 和 tests，不靠最终回复说“我检查过”。这次把普通文件内容也放进同一条合同。
-- 已实现：`required_content_lines.py` 支持 `required_content_lines[file]`、锚定代码块，以及“下面 N 行要一字不差”的中英文自然语言块；多文件 artifact 时只按 per-file 映射生成检查，不把某个文件的要求套到另一个文件上。
+- 已实现：`required_content_lines.py` 只支持 `required_content_lines`、`required_content_lines[file]` 和字段锚定的 bullet/fence 续行；没有字段锚点的普通自然语言块不会生成机器验收。
 - 已实现：父级验收链路会把 task-level 内容合同传入 `prepare_test_items()`；`execution_inferred_content_items.py` 可为单文件和 per-file 多文件产物生成 `content_check`。
 - 已实现：repair contract 明确要求修复小傻妞写回可执行父级验收项，推荐 `file_check/content_check/static_site_check/command`，避免 repair worker 只写“已修复”。
 - 已实现：新增 `markdown-repair` Live Lab case，预置坏 Markdown 周报，再要求 root 用普通中文安排小傻妞修同一 `lab_outputs/report/weekly.md`。
-- 已测试：`test_subagent_test_item_preparation.py` 覆盖自然语言精确行块、fenced expected block、多文件 per-file 内容映射；`test_parent_acceptance_repair_payload.py` 覆盖 repair contract 的输出测试要求；`test_live_lab_natural_case.py` 覆盖 markdown repair seed、状态门和 artifact gate。
+- 已测试：`test_subagent_required_content_contracts.py` 覆盖普通自然语言精确行块和无字段 fence 会被忽略、多文件 per-file 内容映射仍可用；`test_parent_acceptance_repair_payload.py` 覆盖 repair contract 的输出测试要求；`test_live_lab_natural_case.py` 覆盖 markdown repair seed、状态门和 artifact gate。
 - 真实复测：`20260517-markdown-repair-wave-01` 使用 MiniMax-M2.7 跑 `--suite markdown-repair --real-llm` 返回 `LIVE_LAB_PASS`。root 通过普通中文提示派出 `小傻妞-周报修复`，最终 `lab_outputs/report/weekly.md` 包含五行要求内容，旧失败 run 被同目标 verified sibling 覆盖。
 - 下一步：把同样的 content contract 带到更复杂的多文件/代码仓库 repair wave；如果失败，优先修 content contract、target refs、run 状态合同，不再加场景专用提示词补丁。
 
@@ -1777,3 +1777,13 @@
 - 已实现：显式 `测试子代理/验收子代理/找茬子代理` 才触发必须创建对应质量角色；普通“安排和验收/汇报验收结果”由父级验收合同满足，不再把自然语言误读成死流程。
 - 已实现：`context_bundle_semantic.py` 和 `static_required_files.py` 统一使用 task-contract 文件名解析，过滤示例、禁用名、输入摘要和标签化合同，避免 README 这类输入资料被塞进必交付文件。
 - 已测试：全量 pytest 通过；ruff 通过。doc sync 继续要求本节和结构文档同步更新，下一步是跑 strict code-size、真实主代理 E2E 小矩阵，再根据失败回到底层合同修。
+- 2026-05-18 主代理复杂任务真实测试暴露多文件 Web 产物会出现 HTML/JS/README 三方不一致：文件都存在，但 JS 查找的 id 与 HTML 不同，README 还写了不存在的页面锚点。已给通用 `static_site_check` 增加 `strict_dom_bindings` 模式，完整交付物可以要求所有 JS DOM id 引用都对齐真实页面；默认模式仍允许可选 protected hook，避免日常验收过度严格。
+- 2026-05-18 四块底层通用合同收口：工具结果 envelope 现在继承原工具调用 `operation_id`，同一次工具调用和结果在机器层可追踪；产物验收报告现在输出结构化 `ArtifactRef`（path/kind/hash/size），不是只有路径字符串；状态机新增 `run_state_snapshot_from_task()`，dispatch 状态摘要复用同一状态判断；新增 `acceptance_contract.py`，把 DONE/VERIFIED 状态、真实测试记录和 artifact acceptance 合成统一完成结论。普通父级验收的 artifact finding 也接入格式/质量验收，坏 JSON/XLSX/PDF/HTML 不会因路径存在而被当成合格产物。
+
+## 2026-05-18 自然语言事实源铁律收口
+
+- 中文说明：本轮把“代码不得依赖普通自然语言文本作为机器事实来源”写成开发铁律，并把子代理链路里残留的自然语言兜底迁到结构化字段。大白话说：用户和模型可以用自然语言表达想法，但代码做硬判断时只信机器字段、状态、refs、schema、工具记录和文件系统事实。
+- 已实现：workflow 路由只读 `workflow_task_type` / `workflow_template_id` 等字段；input/output refs 只读 `required_read_paths` / `input_refs` / `output_files` / `output_refs` / `artifact_refs`；写入根只来自 `extra_write_roots`、workspace/product root 或 refs；repair 复用必须来自 repair contract；QA 硬要求必须写 `required_qa_roles` / `qa_roles`。
+- 已实现：root/coordinator seed 不再从普通 prompt 或 goal 里抽产品路径；scope/domain guard 不再从 goal 里兜底提取领域词；required/forbidden/content/static files 只读对应结构化字段或内部精确标签；`cat file` 验收归一化也不再从 `summary/name` 文案里抠“内容应为”。普通“修复/测试/验收/必须生成/不要创建/输出路径”都只交给 LLM 理解，不触发代码层硬规则。
+- 已测试：新增架构守卫 `test_code_does_not_use_plain_language_as_machine_facts` 覆盖已移除的旧入口；focused tests 覆盖 input/output refs、workflow router、dispatch、hierarchy write/scope/context、repair/acceptance 相关回归。
+- 下一步：继续把主代理真实复杂任务 E2E 接到这套铁律上，优先验证多次 compact/resume、大 artifact、工具失败恢复、验收失败修复和多文件 Web app，不再用自然语言关键词补临时规则。

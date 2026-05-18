@@ -130,6 +130,161 @@ JUNK_FILE_NAMES = {
     "utils.py",
 }
 
+NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
+    "agent_py_agent/agent/subagent_workflows/router.py": [
+        "_fallback_task_type",
+        "_classify_goal",
+        "_workflow_goal_fields",
+        "_STRUCTURED_ROUTE_FIELD_RE",
+    ],
+    "agent_py_agent/agent/agent_core/runner_input_dependencies.py": [
+        "_fallback_file_ref_roles",
+        "_READ_REF_MARKERS",
+        "_WRITE_REF_MARKERS",
+        "goal_input_refs",
+        "goal_output_refs",
+        "_structured_refs",
+    ],
+    "agent_py_agent/agent/subagents/services/base.py": [
+        "_extract_write_dirs",
+        "_DIR_PATTERN",
+        "_WINDOWS_DIR_PATTERN",
+        "_HOME_DIR_PATTERN",
+    ],
+    "agent_py_agent/agent/agent_core/orchestration_create_constraints.py": [
+        "goal_has_concrete_file_target",
+        "goal_has_single_concrete_file_target",
+        "_CONCRETE_FILE_TARGET_RE",
+        "getattr(agent, \"_current_user_prompt\"",
+        "_structured_parent_constraints(user_text)",
+    ],
+    "agent_py_agent/agent/agent_core/orchestration_write_guard.py": [
+        "_goal_has_write_intent",
+        "_path_candidate_is_write_target",
+        "_WRITE_INTENT_WORDS",
+        "_NEGATED_WRITE_MARKERS",
+        "_TARGET_LEFT_MARKERS",
+    ],
+    "agent_py_agent/agent/agent_core/orchestration_dispatch_scope.py": [
+        "_CONCRETE_FILE_TARGET_RE",
+        "_is_active_concrete_worker_task",
+    ],
+    "agent_py_agent/agent/agent_core/subagent_finalize_helpers.py": [
+        "_structured_next_step_text",
+        "_looks_like_tool_round_limit_text",
+    ],
+    "agent_py_agent/agent/subagents/manager_normalize.py": [
+        "_extract_write_dirs",
+        "_iter_write_dir_matches",
+        "_write_dir_candidate_matches",
+    ],
+    "agent_py_agent/agent/subagents/services/hierarchy_write_policy.py": [
+        "_extract_write_dirs",
+    ],
+    "agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py": [
+        "_extract_write_dirs",
+    ],
+    "agent_py_agent/agent/agent_core/spawn_role_seed.py": [
+        "_extract_write_dirs",
+    ],
+    "agent_py_agent/agent/subagents/services/hierarchy_leaf_targets.py": [
+        "_goal_target_tokens",
+    ],
+    "agent_py_agent/agent/subagents/services/output_ref_rebinding.py": [
+        "_OUTPUT_CONTEXT_MARKERS",
+        "_INPUT_CONTEXT_MARKERS",
+        "_line_has_output_field_label",
+        "_rewrite_list_field",
+        "_rewrite_field",
+        "_file_refs",
+    ],
+    "agent_py_agent/agent/subagents/services/hierarchy_scope_domains.py": [
+        "_natural_forbidden_scope_terms",
+        "_is_forbidden_scope_segment",
+        "_explicit_responsibility_domains",
+        "_explicit_leaf_domain_terms",
+        "_domain_tokens",
+        "_child_scope_text",
+    ],
+    "agent_py_agent/agent/agent_core/orchestration_delegation_intent.py": [
+        "_mentions_delegate_actor",
+        "_mentions_delegation_action",
+        "_mentions_parent_should_not_do_body",
+        "prompt_requests_refs_only_delegation",
+        "prompt_requests_subagent_delegation",
+        "user_authorized_parent_body_read",
+        "prompt: str",
+        "str(prompt",
+        "user_prompt",
+    ],
+    "agent_py_agent/agent/agent_core/orchestration_direct_write_guard.py": [
+        "_user_requested_delegate_only",
+        "_user_authorized_parent_product_write",
+        "delegate_only=true",
+        "parent_product_write=allow",
+    ],
+    "agent_py_agent/agent/agent_core/orchestration_quality_intent.py": [
+        "_natural_quality_roles",
+        "_mentions_agent_role",
+        "_mentions_agent_word",
+        "required_quality_roles_from_prompt",
+    ],
+    "agent_py_agent/agent/subagents/services/hierarchy_context.py": [
+        "_missing_relevant_file_terms",
+        "_missing_forbidden_file_terms",
+        "_missing_hierarchy_contract_terms",
+        "_missing_capability_contract_terms",
+        "_implicit_hierarchy_contract_segments",
+        "_labeled_contract_field",
+        "_scope_tokens",
+        "_segment_score",
+        "hierarchy_contract_present",
+    ],
+    "agent_py_agent/agent/agent_core/orchestration_root_contract.py": [
+        "_missing_terms",
+        "_missing_hierarchy_contracts",
+    ],
+    "agent_py_agent/agent/subagents/patch/patch_apply_helpers.py": [
+        "extract_patch_test_command",
+    ],
+    "agent_py_agent/agent/subagents/services/patch_apply_test_commands.py": [
+        "for check in task.acceptance_checks",
+    ],
+    "agent_py_agent/agent/agent_core/failure_analysis_service.py": [
+        "_goal_based_split_suggestions",
+    ],
+    "agent_py_agent/agent/subagents/services/acceptance_controlled_exec_findings.py": [
+        "getattr(task, \"goal\", \"\")",
+        "for item in task.acceptance_checks",
+    ],
+    "agent_py_agent/agent/agent_core/orchestration_create_idempotency.py": [
+        "_normalized_goal",
+        "goal_output_refs(params.goal)",
+        "goal_output_refs(candidate.goal)",
+    ],
+    "agent_py_agent/agent/subagents/services/hierarchy_schedule_idempotency.py": [
+        "_normalized_goal",
+        "request.goal == task.goal",
+        "goal_output_refs(request.goal)",
+    ],
+    "agent_py_agent/agent/subagents/services/acceptance_findings.py": [
+        "_child_spawn_required_from_text",
+        "_child_spawn_text",
+        "required_child_depth:",
+    ],
+    "agent_py_agent/agent/subagents/execution_content_checks.py": [
+        "_expected_literal_from_text",
+        "item.get(\"summary\")",
+        "item.get(\"name\")",
+        "内容应为",
+        "must be|should be",
+    ],
+    "agent_py_agent/agent/subagents/execution_test_items.py": [
+        "artifact_summaries",
+        "_artifact_summaries_by_path",
+    ],
+}
+
 
 def _tracked_files() -> list[str]:
     """Get list of tracked files, with fallback for non-git environments."""
@@ -237,6 +392,31 @@ def test_no_new_junk_filenames() -> None:
         offenders.append(relative_path)
 
     assert offenders == []
+
+
+def test_code_does_not_use_plain_language_as_machine_facts() -> None:
+    """Runtime facts must come from structured fields, not prose keyword guesses."""
+
+    assert _plain_language_fact_source_offenders() == []
+
+
+def _plain_language_fact_source_offenders() -> list[str]:
+    """Return removed prose-fact helper markers that reappeared in source."""
+
+    offenders: list[str] = []
+    for relative_path, markers in NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS.items():
+        offenders.extend(_forbidden_marker_hits(relative_path, markers))
+    return offenders
+
+
+def _forbidden_marker_hits(relative_path: str, markers: list[str]) -> list[str]:
+    """Check one source file for forbidden helper names or constants."""
+
+    path = REPO_ROOT / relative_path
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    return [f"{relative_path}: {marker}" for marker in markers if marker in text]
 
 
 def test_compileall_succeeds() -> None:

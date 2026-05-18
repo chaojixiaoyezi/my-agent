@@ -12,7 +12,7 @@ from .base import CreateRunParams
 from .hierarchy_acceptance import scheduled_child_acceptance_checks
 from .hierarchy_agent_names import scheduled_child_agent_name
 from .hierarchy_child_context import child_context_manifest, child_context_packs
-from .hierarchy_context import inherited_hierarchy_thought, scheduled_child_goal
+from .hierarchy_context import inherited_hierarchy_attributes, inherited_hierarchy_thought, scheduled_child_goal
 from .hierarchy_qa_scheduler import qa_orchestration_advice
 from .hierarchy_schedule_idempotency import (
     ScheduledChildResolution,
@@ -295,6 +295,7 @@ def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParam
         context_packs=child_context_packs(parent, spec),
         extra_write_roots=request.extra_write_roots,
         workflow_mode="off",
+        attributes=inherited_hierarchy_attributes(parent, spec),
     )
 
 

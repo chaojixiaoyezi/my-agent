@@ -26,6 +26,9 @@ class HierarchyChildSpec:
     # 参数说明: context_manifest/context_packs 直接写入 child task，用于 repair/execute/verify 同 run 闭环。
     context_manifest: dict[str, object] = field(default_factory=dict)
     context_packs: list[dict[str, object]] = field(default_factory=list)
+    # LLM: attributes carries machine contracts such as required_files/domain_scopes without parsing goal text.
+    # 参数说明: 运行期事实放在 attributes；goal 只给模型阅读，不作为代码层判断依据。
+    attributes: dict[str, object] = field(default_factory=dict)
 
 
 # LLM: HierarchyScheduleRequest is the only business entrypoint for hierarchy materialization.

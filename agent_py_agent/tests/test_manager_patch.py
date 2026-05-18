@@ -6,9 +6,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
+
+from agent_py_agent.agent.subagents.services.patch_apply_test_commands import PatchApplyTestCommands
 
 
 class TestBuildUnifiedDiff:
@@ -49,45 +52,6 @@ class TestBuildUnifiedDiff:
         result = SubAgentPatchMixin._build_unified_diff("delete.txt", before, after)
 
         assert "-old content" in result
-
-
-class TestExtractPatchTestCommand:
-    """测试补丁测试命令提取函数。"""
-
-    def test_extract_with_command_prefix(self):
-        """测试带 command: 前缀的提取。"""
-        from agent_py_agent.agent.subagents.manager_patch import SubAgentPatchMixin
-
-        result = SubAgentPatchMixin._extract_patch_test_command("command: pytest test.py")
-        assert result == "pytest test.py"
-
-    def test_extract_with_test_prefix(self):
-        """测试带 test: 前缀的提取。"""
-        from agent_py_agent.agent.subagents.manager_patch import SubAgentPatchMixin
-
-        result = SubAgentPatchMixin._extract_patch_test_command("test: python -m pytest")
-        assert result == "python -m pytest"
-
-    def test_extract_with_run_prefix(self):
-        """测试带 run: 前缀的提取。"""
-        from agent_py_agent.agent.subagents.manager_patch import SubAgentPatchMixin
-
-        result = SubAgentPatchMixin._extract_patch_test_command("run: pytest")
-        assert result == "pytest"
-
-    def test_extract_with_backticks(self):
-        """测试带反引号的提取。"""
-        from agent_py_agent.agent.subagents.manager_patch import SubAgentPatchMixin
-
-        result = SubAgentPatchMixin._extract_patch_test_command("`pytest test.py`")
-        assert result == "pytest test.py"
-
-    def test_extract_no_prefix(self):
-        """测试无前缀的原始命令。"""
-        from agent_py_agent.agent.subagents.manager_patch import SubAgentPatchMixin
-
-        result = SubAgentPatchMixin._extract_patch_test_command("pytest test.py")
-        assert result == ""
 
 
 class TestValidatePatchTestCommand:
@@ -190,6 +154,32 @@ class TestValidatePatchTestCommand:
 
         assert results[0]["ok"] is True
         assert captured["argv"][:3] == ["python3", "-m", "pytest"]
+
+    def test_patch_apply_test_commands_read_structured_attributes_only(self):
+        """补丁测试命令只能来自 attributes，不从 acceptance_checks 普通文案里抽 shell。"""
+
+        task = SimpleNamespace(
+            acceptance_checks=["command: pytest tests/from_acceptance.py"],
+            attributes={"patch_test_commands": ["pytest tests/from_attributes.py"]},
+        )
+
+        commands, blocked = PatchApplyTestCommands.extract(task, output={})
+
+        assert commands == ["pytest tests/from_attributes.py"]
+        assert blocked == []
+
+    def test_patch_apply_test_commands_keep_output_report_commands(self):
+        """子代理 output.json 里的结构化 tests[].command 仍可作为补丁验证命令。"""
+
+        task = SimpleNamespace(acceptance_checks=["test: pytest ignored.py"], attributes={})
+
+        commands, blocked = PatchApplyTestCommands.extract(
+            task,
+            output={"tests": [{"command": "python -m pytest tests/from_output.py"}]},
+        )
+
+        assert commands == ["python -m pytest tests/from_output.py"]
+        assert blocked == []
 
 
 class TestRollbackPatchApply:

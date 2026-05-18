@@ -191,6 +191,8 @@ def cmd_subagents_workflow_plan(args) -> int:
         constraints=WorkflowPlanConstraints(
             config=config,
             explicit_template_id=args.template_id or "",
+            workflow_task_type=args.task_type or "",
+            workflow_risk_tags=args.risk_tags or None,
         ),
     )
     payload = result.to_dict()

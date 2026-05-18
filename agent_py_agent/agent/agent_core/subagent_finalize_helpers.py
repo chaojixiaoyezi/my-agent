@@ -198,18 +198,13 @@ def _looks_like_analysis_only_child_plan(request: FinalizedRunnerRecordRequest, 
     status = str(getattr(structured, "status", "") or "").strip().upper()
     if status not in {"", "AWAITING_ACCEPTANCE", "DONE", "COMPLETED", "SUCCESS"}:
         return False
-    return "schedule_child_subagents" in _structured_next_step_text(structured)
+    return "schedule_child_subagents" in _structured_next_action_codes(structured)
 
 
-# LLM: _structured_next_step_text searches only result fields intended to guide the next action.
-# 函数用途: 从 summary/next_actions 中找派工意图，不读取大正文，保持判断可解释。
-def _structured_next_step_text(structured: object) -> str:
-    return " ".join(
-        [
-            str(getattr(structured, "summary", "") or ""),
-            *[str(item) for item in (getattr(structured, "next_actions", []) or [])],
-        ]
-    )
+# LLM: _structured_next_action_codes reads exact next action machine codes.
+# 函数用途: 只从 next_actions 结构化字段读取动作代码；summary 普通文本不参与系统判断。
+def _structured_next_action_codes(structured: object) -> set[str]:
+    return {str(item or "").strip() for item in (getattr(structured, "next_actions", []) or []) if str(item or "").strip()}
 
 
 # LLM: _looks_like_tool_limit_cleanup avoids overriding real capability or business blockers.
@@ -236,39 +231,20 @@ def _capability_requests_are_tool_limit_cleanup(structured: object) -> bool:
     if not requests:
         return False
     for request in requests:
-        text = _capability_request_text(request)
-        if not _looks_like_tool_round_limit_text(text):
+        if not _capability_request_is_tool_limit_cleanup(request):
             return False
     return True
 
 
-# LLM: _capability_request_text reads small structured fields from dict or dataclass requests.
-# 函数用途: 汇总能力申请的 problem/needed/expected 字段，不读取产物正文。
-def _capability_request_text(request: object) -> str:
-    values: list[str] = []
+# LLM: _capability_request_is_tool_limit_cleanup reads exact capability failure codes.
+# 函数用途: 只接受 failure_type / needed_capability 的机器码，不从 problem/expected_output 文本猜原因。
+def _capability_request_is_tool_limit_cleanup(request: object) -> bool:
     if isinstance(request, dict):
-        keys = ("problem", "needed_capability", "expected_output", "failure_type")
-        values.extend(str(request.get(key, "") or "") for key in keys)
+        values = [request.get("failure_type"), request.get("needed_capability")]
     else:
-        keys = ("problem", "needed_capability", "expected_output", "failure_type")
-        values.extend(str(getattr(request, key, "") or "") for key in keys)
-    return " ".join(value for value in values if value.strip()).lower()
-
-
-# LLM: _looks_like_tool_round_limit_text recognizes infrastructure cleanup limits, not product failures.
-# 函数用途: 判断能力申请是否只是工具轮数/重复读取证明造成的收尾清理问题。
-def _looks_like_tool_round_limit_text(text: str) -> bool:
-    return any(
-        marker in text
-        for marker in (
-            "max_tool_rounds",
-            "tool_round_limit",
-            "tool round",
-            "工具轮数",
-            "工具上限",
-            "轮数限制",
-        )
-    )
+        values = [getattr(request, "failure_type", ""), getattr(request, "needed_capability", "")]
+    codes = {str(value or "").strip().lower() for value in values if str(value or "").strip()}
+    return bool(codes & {"max_tool_rounds", "tool_round_limit", "max_tool_round_limit"})
 
 
 # LLM: _verified_direct_child_refs checks refs-only child status before synthesizing coordinator completion.

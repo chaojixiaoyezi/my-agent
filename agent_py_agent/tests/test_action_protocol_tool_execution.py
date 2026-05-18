@@ -24,6 +24,26 @@ def test_tool_registry_executes_typed_tool_call_envelope(tmp_path):
     assert result.result_envelope["scope"]["run_id"] == "run-1"
 
 
+# LLM: Tool result envelopes must keep the same operation id as the call envelope.
+# 函数用途: 验证工具调用和工具结果在机器层属于同一个操作，恢复/重放时不能只靠 call_id 猜。
+def test_tool_registry_result_envelope_preserves_call_operation_id(tmp_path):
+    (tmp_path / "notes.txt").write_text("hello typed protocol", encoding="utf-8")
+    registry = make_tool_registry(tmp_path)
+    envelope = ToolCallEnvelope(
+        call_id="call-read-2",
+        source="legacy_text_protocol",
+        tool="read_file",
+        args={"path": "notes.txt"},
+        operation_id="op:read_file:stable-123",
+        scope=RunScope(task_id="task-1", run_id="run-1"),
+    )
+
+    result = registry.execute_call(envelope)
+
+    assert result.ok is True
+    assert result.result_envelope["operation_id"] == "op:read_file:stable-123"
+
+
 def test_tool_registry_rejects_non_tool_call_envelope_kind(tmp_path):
     registry = make_tool_registry(tmp_path)
     envelope = {

@@ -8,14 +8,12 @@ from typing import Any
 
 from ..contracts.state_machine import RunStateFacts, can_dispatch
 from ..subagents.services.base import CreateRunParams
+from ..subagents.services.idempotency_contract_identity import (
+    idempotency_contract_identity_from_context_packs,
+)
 from ..subagents.services.repair_contract_identity import (
     repair_contract_identity_from_context_packs,
 )
-from ..subagents.services.repair_goal_identity import (
-    repair_goal_targets,
-    repair_goal_targets_overlap,
-)
-from .runner_input_dependencies import goal_output_refs
 
 _REUSABLE_STATUSES = {"PLANNING", "PENDING", "RUNNING", "DONE", "COMPLETED", "BLOCKED", "PAUSED"}
 _GENERIC_AGENT_NAMES = {
@@ -68,35 +66,14 @@ def find_reusable_named_child(manager: Any, params: CreateRunParams):
     repair_identity = repair_contract_identity_from_context_packs(params.context_packs)
     if repair_identity:
         return find_reusable_repair_child(manager, params, repair_identity)
-    repair_targets = repair_goal_targets(params)
-    if repair_targets:
-        return find_reusable_repair_goal_child(manager, params, repair_targets)
+    idempotency_identity = idempotency_contract_identity_from_context_packs(params.context_packs)
+    if idempotency_identity:
+        return find_reusable_idempotency_child(manager, params, idempotency_identity)
     name = _normalized_name(params.agent_name)
     if _is_generic_agent_name(name):
-        return find_reusable_contract_child(manager, params)
+        return None
     if _is_indexed_generic_agent_name(name):
-        return find_reusable_indexed_contract_child(manager, params, name)
-    for task in reversed(_safe_list_runs(manager)):
-        if _same_create_scope(task, params, name):
-            return task
-    return None
-
-
-# LLM: find_reusable_contract_child covers default-named workers without merging unrelated goals.
-# 函数用途: 对“小傻妞-worker”这类默认名，用 parent/root/role/goal/写入根合同精确复用，避免 root 复读时无限扩容。
-def find_reusable_contract_child(manager: Any, params: CreateRunParams):
-    for task in reversed(_safe_list_runs(manager)):
-        if _same_contract_scope(task, params):
-            return task
-    return None
-
-
-# LLM: find_reusable_indexed_contract_child keeps system-named siblings distinct while replay-safe.
-# 函数用途: 小傻妞-worker-1/2 这类默认编号名按“编号+合同”复用，避免同批 worker 被压成一个。
-def find_reusable_indexed_contract_child(manager: Any, params: CreateRunParams, name: str):
-    for task in reversed(_safe_list_runs(manager)):
-        if _same_indexed_contract_scope(task, params, name):
-            return task
+        return None
     return None
 
 
@@ -109,11 +86,11 @@ def find_reusable_repair_child(manager: Any, params: CreateRunParams, repair_ide
     return None
 
 
-# LLM: find_reusable_repair_goal_child is the fallback when LLM omitted formal repair_contract.
-# 函数用途: 同一父级下修同一目标文件时，复用现有 repair owner，避免精准修复/收尾修复无限扩容。
-def find_reusable_repair_goal_child(manager: Any, params: CreateRunParams, repair_targets: tuple[str, ...]):
+# LLM: find_reusable_idempotency_child keys generic replay safety by explicit idempotency contract.
+# 函数用途: 同一父级下重复提交同一个结构化幂等合同才复用；普通 goal 文本不参与。
+def find_reusable_idempotency_child(manager: Any, params: CreateRunParams, idempotency_identity: tuple[object, ...]):
     for task in reversed(_safe_list_runs(manager)):
-        if _same_repair_goal_scope(task, params, repair_targets):
+        if _same_idempotency_scope(task, params, idempotency_identity):
             return task
     return None
 
@@ -140,59 +117,7 @@ def dispatchable_tasks(tasks: list[Any]) -> list[Any]:
     ]
 
 
-# LLM: _same_create_scope checks parent/root/name/role without comparing fragile natural-language goal text.
-# 函数用途: 判断一个已有 task 是否就是这次 create_subagents 想创建的同一位小傻妞；自定义名也要合同一致才复用。
-def _same_create_scope(task: Any, params: CreateRunParams, name: str) -> bool:
-    if _normalized_name(getattr(task, "agent_name", "")) != name:
-        return False
-    if _status(task) not in _REUSABLE_STATUSES:
-        return False
-    if _text(getattr(task, "parent_id", "")) != _text(params.parent_id):
-        return False
-    if _requested_root_id(params) and _text(getattr(task, "root_id", "")) != _requested_root_id(params):
-        return False
-    if not _compatible_role(getattr(task, "role", ""), params.role):
-        return False
-    if _requires_goal_identity(name) and _normalized_goal(getattr(task, "goal", "")) != _normalized_goal(params.goal):
-        return False
-    if _requires_goal_identity_for_explicit_name(name) and _normalized_goal(getattr(task, "goal", "")) != _normalized_goal(params.goal):
-        return False
-    if _identity_fields(task) != _params_identity_fields(params):
-        return False
-    return _external_write_roots(task) == _params_extra_write_roots(params)
-
-
-# LLM: _same_contract_scope is the fallback idempotency key for generic/default display names.
-# 函数用途: 默认名字不可靠时，按精确任务合同复用；目标不同或产物根不同就创建新 run。
-def _same_contract_scope(task: Any, params: CreateRunParams) -> bool:
-    if _status(task) not in _REUSABLE_STATUSES:
-        return False
-    if _text(getattr(task, "parent_id", "")) != _text(params.parent_id):
-        return False
-    if _requested_root_id(params) and _text(getattr(task, "root_id", "")) != _requested_root_id(params):
-        return False
-    if not _compatible_role(getattr(task, "role", ""), params.role):
-        return False
-    if _normalized_goal(getattr(task, "goal", "")) != _normalized_goal(params.goal):
-        return False
-    if _identity_fields(task) != _params_identity_fields(params):
-        return False
-    return _external_write_roots(task) == _params_extra_write_roots(params)
-
-
-# LLM: _same_indexed_contract_scope adds generated sibling names to the generic contract key.
-# 函数用途: 带编号默认名既不能只按 goal 合并，也不能只按名字复用不同任务。
-def _same_indexed_contract_scope(task: Any, params: CreateRunParams, name: str) -> bool:
-    if not _same_create_scope(task, params, name):
-        return False
-    if _normalized_goal(getattr(task, "goal", "")) != _normalized_goal(params.goal):
-        return False
-    if _identity_fields(task) != _params_identity_fields(params):
-        return False
-    return _external_write_roots(task) == _params_extra_write_roots(params)
-
-
-# LLM: _same_repair_scope compares stable repair_contract identity before falling back to natural goals.
+# LLM: _same_repair_scope compares stable repair_contract identity only.
 # 函数用途: 防止 “小傻妞-验收修复” 这种固定名字把不同失败对象误合并。
 def _same_repair_scope(task: Any, params: CreateRunParams, repair_identity: tuple[object, ...]) -> bool:
     if _status(task) not in _REUSABLE_STATUSES:
@@ -208,9 +133,9 @@ def _same_repair_scope(task: Any, params: CreateRunParams, repair_identity: tupl
     return repair_contract_identity_from_context_packs(getattr(task, "context_packs", [])) == repair_identity
 
 
-# LLM: _same_repair_goal_scope compares fallback repair targets only inside the same parent/root scope.
-# 函数用途: 没有 repair_contract 时，按修复目标文件交集复用；普通 worker 不走这条路径。
-def _same_repair_goal_scope(task: Any, params: CreateRunParams, repair_targets: tuple[str, ...]) -> bool:
+# LLM: _same_idempotency_scope compares explicit idempotency contracts inside parent/root scope.
+# 函数用途: 幂等复用只看结构化合同，避免普通 goal 文案成为系统事实来源。
+def _same_idempotency_scope(task: Any, params: CreateRunParams, idempotency_identity: tuple[object, ...]) -> bool:
     if _status(task) not in _REUSABLE_STATUSES:
         return False
     if _text(getattr(task, "parent_id", "")) != _text(params.parent_id):
@@ -219,9 +144,11 @@ def _same_repair_goal_scope(task: Any, params: CreateRunParams, repair_targets: 
         return False
     if not _compatible_role(getattr(task, "role", ""), params.role):
         return False
+    if _normalized_name(getattr(task, "agent_name", "")) != _normalized_name(params.agent_name):
+        return False
     if _external_write_roots(task) != _params_extra_write_roots(params):
         return False
-    return repair_goal_targets_overlap(repair_goal_targets(task), repair_targets)
+    return idempotency_contract_identity_from_context_packs(getattr(task, "context_packs", [])) == idempotency_identity
 
 
 # LLM: _requested_root_id treats an omitted root as top-level create scope, not a literal empty root_id.
@@ -240,22 +167,6 @@ def _compatible_role(existing: object, requested: object) -> bool:
     return existing_text == requested_text
 
 
-# LLM: _identity_fields keeps ownership-sensitive tasks from being accidentally reused across supervisors.
-# 函数用途: 提取 task 的 owner/supervisor/final_owner 三元组，用作默认名复用的合同字段。
-def _identity_fields(task: Any) -> tuple[str, str, str]:
-    return (
-        _text(getattr(task, "owner", "")),
-        _text(getattr(task, "supervisor", "")),
-        _text(getattr(task, "final_owner", "")),
-    )
-
-
-# LLM: _params_identity_fields mirrors task ownership fields before persistence.
-# 函数用途: 提取 CreateRunParams 的 owner/supervisor/final_owner 三元组，用作默认名复用的合同字段。
-def _params_identity_fields(params: CreateRunParams) -> tuple[str, str, str]:
-    return (_text(params.owner), _text(params.supervisor), _text(params.final_owner))
-
-
 # LLM: _external_write_roots ignores the task's private runtime dir when comparing user deliverable scope.
 # 函数用途: 从 allowed_write_roots 中去掉 task_dir，只比较用户/父级授权的产物根。
 def _external_write_roots(task: Any) -> tuple[str, ...]:
@@ -272,18 +183,6 @@ def _external_write_roots(task: Any) -> tuple[str, ...]:
 # 函数用途: 规范化 CreateRunParams.extra_write_roots，确保同一产物根顺序不同也能复用。
 def _params_extra_write_roots(params: CreateRunParams) -> tuple[str, ...]:
     return tuple(sorted(dict.fromkeys(_normalized_path(item) for item in params.extra_write_roots or [] if _text(item))))
-
-
-# LLM: _normalized_goal is strict enough for idempotency but tolerant of model whitespace.
-# 函数用途: 压缩空白后比较 goal；不做语义猜测，避免把不同任务合并。
-def _normalized_goal(value: object) -> str:
-    return " ".join(_text(value).split())
-
-
-# LLM: _goal_ref_identity separates same-name repair owners by concrete file refs.
-# 函数用途: 同名“小傻妞-修复”修不同 index1/index2 时不能复用同一个 run；没有文件 ref 时保持旧名字幂等。
-def _goal_ref_identity(goal: object) -> tuple[str, ...]:
-    return tuple(sorted(dict.fromkeys(goal_output_refs(str(goal or "")))))
 
 
 # LLM: _normalized_path keeps write-root comparison stable without resolving nonexistent paths.
@@ -330,19 +229,6 @@ def _is_indexed_generic_agent_name(value: object) -> bool:
     prefix = parts[0]
     role = "-".join(parts[1:-1])
     return _is_lineage_prefix(prefix) and role in _GENERIC_LINEAGE_ROLES
-
-
-# LLM: _requires_goal_identity keeps generic names distinct while letting explicit names be stable ids.
-# 函数用途: 默认名/泛角色名要用 goal 区分；用户或系统给出的语义名字则作为结构化身份复用。
-def _requires_goal_identity(name: str) -> bool:
-    return _is_generic_agent_name(name) or _is_indexed_generic_agent_name(name)
-
-
-# LLM: _requires_goal_identity_for_explicit_name keeps repair-like owners from merging different targets.
-# 函数用途: 没有 repair_contract 时，显式“小傻妞-修复”这类名字仍按完整目标区分，避免不同修复文件复用同一 run。
-def _requires_goal_identity_for_explicit_name(name: str) -> bool:
-    lowered = _normalized_name(name).replace("_", "-")
-    return any(marker in lowered for marker in ("repair", "fix", "修复", "补齐", "验收修复"))
 
 
 # LLM: _is_lineage_prefix recognizes generated 小傻妞 depth markers.

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-"""Extract explicit required content lines from structured task text."""
+"""Extract explicit required content lines from structured contracts."""
 
 import re
 from typing import Any
@@ -42,31 +42,66 @@ def required_content_lines_by_file_from_texts(texts: list[object]) -> dict[str, 
     return dict(list(merged.items())[:50])
 
 
-# LLM: required_content_lines_for_task centralizes task fields used by parent content checks.
-# 函数用途: 从 task 的目标、说明和验收条件里提取 content_check 需要的结构化字面内容行。
+# LLM: required_content_lines_for_task reads runtime contracts from task attributes only.
+# 函数用途: 从 task.attributes 读取 content_check 需要的结构化字面内容行，不解析 goal/acceptance 文本。
 def required_content_lines_for_task(task: Any) -> list[str]:
     """Return explicit content-line contracts from a subagent task."""
 
-    return required_content_lines_from_texts(_task_texts(task))
+    return _dedupe(_string_list(_task_attributes(task).get("required_content_lines")))[:100]
 
 
-# LLM: required_content_lines_by_file_for_task centralizes per-file content checks for multi-artifact tasks.
-# 函数用途: 从 task 的目标、说明和验收条件里提取普通文件到 required lines 的结构化映射。
+# LLM: required_content_lines_by_file_for_task reads per-file runtime contracts from attributes only.
+# 函数用途: 从 task.attributes.required_content_files 读取文件到 required lines 的映射。
 def required_content_lines_by_file_for_task(task: Any) -> dict[str, list[str]]:
     """Return explicit per-file content contracts from a subagent task."""
 
-    return required_content_lines_by_file_from_texts(_task_texts(task))
+    return _content_files_from_attributes(_task_attributes(task))
 
 
-# LLM: _task_texts keeps all public task wrappers aligned.
-# 函数用途: 收集轻量任务文本字段，不读取 artifact 正文。
-def _task_texts(task: Any) -> list[object]:
-    return [
-        getattr(task, "goal", ""),
-        getattr(task, "thought", ""),
-        getattr(task, "description", ""),
-        *(getattr(task, "acceptance_checks", []) or []),
-    ]
+# LLM: _task_attributes normalizes task attributes across dataclass and namespace tests.
+# 函数用途: 读取 task.attributes 字典；没有或类型不对时返回空字典。
+def _task_attributes(task: Any) -> dict[str, Any]:
+    attributes = getattr(task, "attributes", {})
+    return attributes if isinstance(attributes, dict) else {}
+
+
+# LLM: _content_files_from_attributes returns explicit per-file content contracts.
+# 函数用途: 支持 required_content_files 字典或列表形式，保持文件名和值都是字面结构化字段。
+def _content_files_from_attributes(attributes: dict[str, Any]) -> dict[str, list[str]]:
+    raw = attributes.get("required_content_files")
+    if isinstance(raw, dict):
+        return _content_files_from_mapping(raw)
+    if isinstance(raw, list):
+        return _content_files_from_rows(raw)
+    return {}
+
+
+# LLM: _content_files_from_mapping keeps dict-shaped contracts deterministic and bounded.
+# 函数用途: 将 {"file.md": ["line"]} 归一成去重、限量的 per-file 内容合同。
+def _content_files_from_mapping(raw: dict[object, object]) -> dict[str, list[str]]:
+    items: dict[str, list[str]] = {}
+    for key, value in raw.items():
+        file_key = _clean_file_key(key)
+        lines = _dedupe(_string_list(value))[:100]
+        if file_key and lines:
+            items[file_key] = lines
+    return dict(list(items.items())[:50])
+
+
+# LLM: _content_files_from_rows supports config-friendly list rows without parsing prose.
+# 函数用途: 支持 [{"path": "a.md", "lines": [...]}] 或 {"file": ..., "required_content_lines": ...}。
+def _content_files_from_rows(rows: list[object]) -> dict[str, list[str]]:
+    items: dict[str, list[str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        file_key = _clean_file_key(row.get("path") or row.get("file") or row.get("file_path"))
+        lines = _dedupe(
+            _string_list(row.get("lines") or row.get("required_content_lines") or row.get("required_lines"))
+        )[:100]
+        if file_key and lines:
+            items[file_key] = lines
+    return dict(list(items.items())[:50])
 
 
 # LLM: _required_lines_from_text scans unscoped structured content fields.
@@ -202,6 +237,17 @@ def _clean_file_key(value: object) -> str:
 # 函数用途: 清理 required_content_lines 的单条字面内容。
 def _clean_item(value: object) -> str:
     return str(value or "").strip().strip("`").strip()
+
+
+# LLM: _string_list normalizes structured scalar/list values without splitting prose.
+# 函数用途: 将 attributes 里的字符串或列表转成字符串列表；不会按逗号、空格或自然语言拆分。
+def _string_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list | tuple):
+        return [_clean_item(item) for item in value if _clean_item(item)]
+    text = _clean_item(value)
+    return [text] if text else []
 
 
 # LLM: _dedupe preserves first-seen order for generated content checks.
