@@ -102,9 +102,13 @@ def test_main_agent_real_task_execution_plan_writes_command_refs(tmp_path):
 
     payload = report.to_dict()
     first_case = payload["cases"][0]
+    command_payload = json.loads((tmp_path / first_case["command_ref"]).read_text(encoding="utf-8"))
+    prompt_arg = command_payload["argv"][-2]
     assert payload["ok"] is True
     assert payload["summary"]["planned"] == payload["summary"]["total"]
     assert payload["concurrency"]["effective_max_workers"] == 2
+    assert "MACHINE_DELIVERY_CONTRACT_JSON" in prompt_arg
+    assert "outputs/furniture_homepage/index.html" in prompt_arg
     assert (tmp_path / first_case["command_ref"]).exists()
     assert (tmp_path / first_case["config_ref"]).exists()
     assert not (tmp_path / first_case["stdout_ref"]).exists()
