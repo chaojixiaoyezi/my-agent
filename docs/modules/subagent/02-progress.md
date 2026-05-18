@@ -1787,3 +1787,10 @@
 - 已实现：root/coordinator seed 不再从普通 prompt 或 goal 里抽产品路径；scope/domain guard 不再从 goal 里兜底提取领域词；required/forbidden/content/static files 只读对应结构化字段或内部精确标签；`cat file` 验收归一化也不再从 `summary/name` 文案里抠“内容应为”。普通“修复/测试/验收/必须生成/不要创建/输出路径”都只交给 LLM 理解，不触发代码层硬规则。
 - 已测试：新增架构守卫 `test_code_does_not_use_plain_language_as_machine_facts` 覆盖已移除的旧入口；focused tests 覆盖 input/output refs、workflow router、dispatch、hierarchy write/scope/context、repair/acceptance 相关回归。
 - 下一步：继续把主代理真实复杂任务 E2E 接到这套铁律上，优先验证多次 compact/resume、大 artifact、工具失败恢复、验收失败修复和多文件 Web app，不再用自然语言关键词补临时规则。
+
+## 2026-05-18 静态站点验收可选 DOM hook 修正
+
+- 中文说明：主代理复杂 Web E2E 暴露一个通用验收误杀：模型写了 `getElementById('menu-toggle')`，并用 `if (menuBtn && nav)` 做了空值保护；页面没有移动菜单按钮时不会崩，但旧 `strict_dom_bindings` 仍把它当硬失败。
+- 已实现：`static_site_dom_checks.py` 把“已空值保护的 DOM 查询”视为可选 hook；如果某个元素必须存在，调用方必须通过结构化 `required_dom_ids` 声明。这样机器事实来自显式合同，而不是从 JS 文本里猜业务必需区块。
+- 已实现：`main-complex` 的 README gate 同步避免目录名硬要求；核心文件、锚点、产物路径仍由真实文件系统和结构化静态检查验证。
+- 已测试：`test_static_site_validator.py` 新增 group guard 回归；真实 `main-complex-isolated-20260518-135442` 通过 MiniMax-M2.7 复测。

@@ -129,9 +129,12 @@ scripts/
 
 - 中文说明：`main-complex` suite 是主代理底座 canary。它回答一个更基础的问题：不靠小傻妞时，my-agent 自己能不能完成多文件项目、遇到工具失败后恢复、审计大文件。
 - `scripts/live_lab/constants.py`：`main-complex` suite 包含 `health`、`main_direct_web_app`、`main_tool_failure_recovery`、`main_large_log_audit`；三个主 case 都属于 `REAL_CASES`，必须传 `--real-llm`。
+- `scripts/live_lab/session.py`：隔离配置会同时设置 `workspace_root` 和 `my_agent_home`。`my_agent_home` 指向本轮 `fixture_project/.my_agent/home`，避免真实 case 读取或写入用户全局 `~/.my-agent`，也避免上一轮 daily memory 把下一轮任务带偏。
 - `scripts/live_lab/main_agent_complex_case.py`：`_ensure_main_agent_only()` 会把 `enable_subagents: false` 追加到本轮隔离配置，确保测试的是主代理自己，不污染用户配置。
 - `main_direct_web_app`：要求主代理写 `index.html`、`styles.css`、`app.js`、`README.md`，并用通用静态产物门检查文件引用、坏链接、外部渲染资源和基础交互。
+- `main_direct_web_app` 的 README gate 只检查核心文件 token 和真实页面锚点；目录名、说明措辞、章节标题都不当作机器事实来源，避免自然语言表达不同导致误杀。
 - `main_tool_failure_recovery`：要求主代理先读一个不存在的文件，再改读真实素材。这个 case 用来观察工具失败是否能被模型当成可恢复事件，而不是直接卡死或假装成功。
 - `main_large_log_audit`：生成 100MB 日志，只要求报告关键证据和建议。它的目的不是测日志内容本身，而是测大输出/大文件场景下是否保持 refs-first（只拿引用和证据，不把全文塞进上下文）。
-- 底层合同依赖：`main-complex` 的产物验收现在和父级验收共享 `contracts/artifact_acceptance.py` / `contracts/acceptance_contract.py` / `contracts/state_machine.py` / 结构化工具 envelope。Web case 会额外开启 `strict_dom_bindings`，确保 HTML/JS/README 不是“文件都在但互相对不上”。
+- 底层合同依赖：`main-complex` 的产物验收现在和父级验收共享 `contracts/artifact_acceptance.py` / `contracts/acceptance_contract.py` / `contracts/state_machine.py` / 结构化工具 envelope。Web case 复用 `static_site_check`；强制业务区块应使用结构化 `required_dom_ids`，而 `getElementById` 已经做空值保护的可选 hook 不算硬失败。
+- 当前真实验收：`main-complex-isolated-20260518-135442` 已用 MiniMax-M2.7 跑通。它验证了主代理多文件 Web app、工具失败恢复、100MB 大日志审计和 Live Lab 家目录隔离。
 - 后续扩展：compact/resume 多次续接、验收失败后自动修复、真实资料整理 xlsx/论文翻译等可以继续拆成同目录的新 case，不要塞回 `cases.py`。

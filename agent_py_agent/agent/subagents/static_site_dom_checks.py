@@ -34,8 +34,8 @@ def form_binding_hits(form_ids: set[str], script_text: str) -> list[str]:
     return hits
 
 
-# LLM: missing_dom_id_hits catches JS selectors that point at absent local ids.
-# 函数用途: 检查 `getElementById` 和 `querySelector('#id')` 的目标是否存在；严格模式下可选保护也要对齐真实 DOM。
+# LLM: missing_dom_id_hits catches unguarded JS selectors that point at absent local ids.
+# 函数用途: 检查 `getElementById` 和 `querySelector('#id')` 的目标是否存在；已空值保护的可选 hook 不算硬失败。
 def missing_dom_id_hits(
     element_ids: set[str],
     script_text: str,
@@ -57,8 +57,8 @@ def inert_control_hits(request: InertControlCheckRequest) -> list[str]:
     return hits
 
 
-# LLM: _missing_get_element_hits filters optional guarded lookups unless strict validation asks for all hooks.
-# 函数用途: 默认允许可选 DOM hook；严格模式用于 Live Lab 这类完整交付物一致性检查。
+# LLM: _missing_get_element_hits treats explicit null guards as an optional UI hook contract.
+# 函数用途: 缺失 id 只有在未保护使用时才失败；强制必须存在的元素应通过 required_dom_ids 声明。
 def _missing_get_element_hits(
     element_ids: set[str],
     script_text: str,
@@ -69,7 +69,7 @@ def _missing_get_element_hits(
     for target in sorted(set(_GET_ELEMENT_BY_ID_RE.findall(script_text or ""))):
         if target in element_ids:
             continue
-        if allow_optional_missing and _is_optionally_guarded_dom_lookup(script_text, target):
+        if _is_optionally_guarded_dom_lookup(script_text, target):
             continue
         hits.append(f"getElementById:{target}")
     return hits

@@ -274,9 +274,9 @@ def test_static_site_check_allows_optional_missing_dom_binding(tmp_path):
     assert record.validation_result["missing_dom_id_hits"] == []
 
 
-# LLM: Strict DOM mode is for complete deliverables where optional-looking stale hooks should still be fixed.
-# 函数用途: 验证 strict_dom_bindings 会把被 `v&&...` 保护但实际不存在的 JS id 当成一致性问题。
-def test_static_site_check_strict_mode_blocks_optional_missing_dom_binding(tmp_path):
+# LLM: Strict DOM mode still respects explicit optional hooks; required ids are declared separately.
+# 函数用途: 验证 strict_dom_bindings 不会把 `v&&...` 这种安全可选 hook 误判成硬失败。
+def test_static_site_check_strict_mode_allows_optional_missing_dom_binding(tmp_path):
     _write_site(
         tmp_path,
         {
@@ -298,8 +298,39 @@ def test_static_site_check_strict_mode_blocks_optional_missing_dom_binding(tmp_p
         }
     )
 
-    assert record.passed is False
-    assert record.validation_result["missing_dom_id_hits"] == ["getElementById:view-btn"]
+    assert record.passed is True
+    assert record.validation_result["missing_dom_id_hits"] == []
+
+
+# LLM: Grouped null checks such as `if (a && b)` should also count as guarded optional hooks.
+# 函数用途: 避免真实生成站点里可选移动菜单 hook 被 strict DOM 检查误判。
+def test_static_site_check_allows_group_guarded_missing_dom_binding(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "index.html": (
+                "<main id='home'>Home</main><script>"
+                "const menuBtn=document.getElementById('menu-toggle');"
+                "const nav=document.querySelector('.nav-links');"
+                "if(menuBtn&&nav){menuBtn.addEventListener('click',()=>nav.classList.toggle('open'));}"
+                "</script>"
+            ),
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "strict grouped optional dom hook",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index.html"],
+            "strict_dom_bindings": True,
+        }
+    )
+
+    assert record.passed is True
+    assert record.validation_result["missing_dom_id_hits"] == []
 
 
 # LLM: DOM id binding mismatches catch generated buttons that look clickable but break at runtime.

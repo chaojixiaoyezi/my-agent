@@ -62,6 +62,7 @@ def test_main_complex_config_disables_subagents_in_isolated_config(tmp_path):
     text = session.config_path.read_text(encoding="utf-8")
     assert "# main-agent-complex overrides" in text
     assert "enable_subagents: false" in text
+    assert f'my_agent_home: "{session.fixture_root / ".my_agent" / "home"}"' in text
     assert source.read_text(encoding="utf-8") == "model_backend: echo\nenable_subagents: true\n"
 
 
@@ -87,8 +88,7 @@ def _write_complete_web_app(tmp_path) -> None:
     (web_root / "styles.css").write_text("body { color: #111; }\n", encoding="utf-8")
     (web_root / "app.js").write_text("document.addEventListener('click', function () {});\n", encoding="utf-8")
     (web_root / "README.md").write_text(
-        "产物在 lab_outputs/main-web-app。\n"
-        "文件包含 index.html、styles.css、app.js、README.md。\n"
+        "文件包含 index.html、styles.css 和 app.js。\n"
         "页面锚点包含 `#showroom`。\n",
         encoding="utf-8",
     )

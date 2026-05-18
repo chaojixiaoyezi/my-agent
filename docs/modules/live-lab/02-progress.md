@@ -155,3 +155,12 @@
 - 已实现：底层四块合同进入主代理复杂任务验收口径。工具调用/结果靠 operation_id 和 RunScope 绑定；状态摘要走统一 state machine；artifact report 包含 path/kind/hash/size；最终完成结论可由 acceptance contract 汇总状态、测试和产物验收。
 - 已测试：新增单测锁住 suite 注册、自然语言提示词、隔离配置和三类产物 gate；真实模型执行入口为 `python3 scripts/live_agent_lab.py --suite main-complex --real-llm ...`。
 - 下一步：跑真实 MiniMax-M2.7 的 `main-complex` 第一批；如果暴露问题，先判断是工具网关、状态/记忆、产物验收还是 prompt 模板问题，再做通用底层修复。
+
+## 2026-05-18 Main-complex 真实模型第一轮通过
+
+- 中文说明：真实 MiniMax-M2.7 第一轮先暴露两个误杀点和一个隔离漏洞，修完后 `main-complex` 完整通过。大白话说：主代理自己能写多文件 Web app、能从文件不存在里恢复、能审计 100MB 日志，但测试台也必须完全隔离，不能偷读用户全局记忆。
+- 发现并修复：Web README gate 不再强制要求写出 `main-web-app` 目录名；README 只要求说明核心文件 token，并校验它写到的页面锚点真实存在。目录名这类自然语言措辞不能成为机器事实来源。
+- 发现并修复：`static_site_check` 不再把 `const el = getElementById(...); if (el) ...` 这类安全可选 DOM hook 当硬失败；真正必须存在的 DOM 应通过结构化 `required_dom_ids` 声明。
+- 发现并修复：Live Lab 之前只隔离 `workspace_root/memory_path`，但 `my_agent_home` 仍指向 `~/.my-agent`，导致真实 case 读取全局 daily memory 后串成上一条任务。现在 `session.py` 会把 `my_agent_home` 指到本轮 `fixture_project/.my_agent/home`，避免污染用户家目录，也避免历史任务改写当前任务。
+- 真实复测：`python3 scripts/live_agent_lab.py --suite main-complex --real-llm --timeout 900 --run-id main-complex-isolated-20260518-135442` -> `LIVE_LAB_PASS`。结果：`health` 1.79s、`main_direct_web_app` 402.48s、`main_tool_failure_recovery` 67.45s、`main_large_log_audit` 97.82s。
+- 下一步：继续主代理底座真实测试，优先多次 compact/resume、验收失败后自动修复、大 artifact 读回、完整购物网站/资料整理 E2E。
