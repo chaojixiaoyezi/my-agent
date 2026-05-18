@@ -80,6 +80,7 @@ def run_main_agent_real_task_execution(
         schema_version=SCHEMA_VERSION,
         execution_mode="execute" if request.execute else "plan_only",
         summary=_summary(results),
+        concurrency=_concurrency_summary(request, selected),
         suite_report_ref=suite.report_ref,
         report_ref=rel(execution_root(workspace) / "execution_report.json", workspace),
         cases=results,
@@ -247,6 +248,19 @@ def _summary(cases: list[MainAgentRealTaskExecutionCaseResult]) -> dict[str, int
         "planned": sum(case.status == "PLANNED" for case in cases),
         "completed": sum(case.status == "COMPLETED" for case in cases),
         "failed": sum(case.status == "FAILED" for case in cases),
+    }
+
+
+# LLM: _concurrency_summary records effective worker limits for later real API smoke runs.
+# 函数用途: 把请求并发和实际执行工位写进报告，方便观察 4 主代理并发是否按合同运行。
+def _concurrency_summary(
+    request: MainAgentRealTaskExecutionRequest,
+    cases: list[MainAgentRealTaskCasePlan],
+) -> dict[str, int]:
+    return {
+        "requested_max_workers": request.max_workers,
+        "effective_max_workers": max(1, min(request.max_workers, len(cases) or 1)),
+        "case_count": len(cases),
     }
 
 

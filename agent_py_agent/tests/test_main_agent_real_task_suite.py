@@ -77,6 +77,7 @@ def test_main_agent_real_task_execution_plan_writes_command_refs(tmp_path):
     first_case = payload["cases"][0]
     assert payload["ok"] is True
     assert payload["summary"]["planned"] == payload["summary"]["total"]
+    assert payload["concurrency"]["effective_max_workers"] == 2
     assert (tmp_path / first_case["command_ref"]).exists()
     assert (tmp_path / first_case["config_ref"]).exists()
     assert not (tmp_path / first_case["stdout_ref"]).exists()
@@ -121,6 +122,7 @@ def test_main_agent_real_task_execution_runs_echo_subset(tmp_path):
     first_case = payload["cases"][0]
     assert payload["ok"] is False
     assert payload["summary"]["failed"] == 1
+    assert payload["concurrency"]["case_count"] == 1
     assert first_case["exit_code"] == 0
     assert first_case["acceptance_summary"]["failed"] == 1
     assert (tmp_path / first_case["stdout_ref"]).exists()

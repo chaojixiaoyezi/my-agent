@@ -72,6 +72,7 @@ class MainAgentRealTaskExecutionReport:
     schema_version: str
     execution_mode: str
     summary: dict[str, int]
+    concurrency: dict[str, int]
     suite_report_ref: str
     report_ref: str
     cases: list[MainAgentRealTaskExecutionCaseResult]
@@ -84,6 +85,7 @@ class MainAgentRealTaskExecutionReport:
             "schema_version": self.schema_version,
             "execution_mode": self.execution_mode,
             "summary": dict(self.summary),
+            "concurrency": dict(self.concurrency),
             "suite_report_ref": self.suite_report_ref,
             "report_ref": self.report_ref,
             "cases": [case.to_dict() for case in self.cases],
