@@ -8,6 +8,10 @@ from typing import ClassVar
 
 from ..backends import ModelResponse
 from ._runtime_params import ToolLoopExecuteParams
+from .main_agent_delivery_closeout import (
+    MainAgentDeliveryCloseoutRequest,
+    main_agent_delivery_closeout_response,
+)
 from .subagent_dispatch_closeout import (
     DispatchCompletionRequest,
     subagent_dispatch_completion_response,
@@ -39,6 +43,14 @@ def completion_response_after_tool_round(
         return subagent_output_json_response(request.agent, request.response)
     if progress_response := subagent_progress_closeout_response(request.agent, request.response):
         return progress_response
+    if delivery_response := main_agent_delivery_closeout_response(
+        MainAgentDeliveryCloseoutRequest(
+            agent=request.agent,
+            params=request.params,
+            backend=request.response.backend,
+        )
+    ):
+        return delivery_response
     dispatch_request = DispatchCompletionRequest(
         agent=request.agent,
         params=request.params,
