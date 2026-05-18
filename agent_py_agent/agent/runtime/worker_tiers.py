@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+# LLM: Worker tier contracts separate TaskAgent, weak subagent, and pure tool execution.
+# 模块用途: 根据任务复杂度和反馈需求选择执行层级，并构造结构化 worker 上下文。
 from enum import StrEnum
 from typing import Any
 
 
+ # LLM: WorkerTier is persisted into TaskCard metadata and must remain stable.
+ # 类用途: 表示任务应该由工具、弱子代理或后台 TaskAgent 执行。
 class WorkerTier(StrEnum):
     TOOL_WORKER = "tool_worker"
     WEAK_SUBAGENT = "weak_subagent"
     TASK_AGENT = "task_agent"
 
 
+ # LLM: choose_worker_tier maps machine facts to an execution tier without prompt parsing.
+ # 函数用途: 根据复杂度、用户记忆和反馈需求选择 worker 层级。
 def choose_worker_tier(
     *,
     complexity: str,
@@ -24,6 +30,8 @@ def choose_worker_tier(
     return WorkerTier.WEAK_SUBAGENT
 
 
+ # LLM: build_worker_context creates the structured context envelope for a worker tier.
+ # 函数用途: 为不同 worker 层级生成可落盘、可测试的上下文合同。
 def build_worker_context(
     tier: WorkerTier,
     *,

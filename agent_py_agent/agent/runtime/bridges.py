@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# LLM: Runtime bridges map existing gateway/session/notification facts into Card and Message contracts.
+# 模块用途: 提供适配器消息、通知、gateway 响应和 task_registry 记录到新 runtime 合同的薄转换。
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +11,8 @@ from ..messages import MessageCard, MessageStore, MessageTarget, MessageTool
 from ..notification.models import Notification
 
 
+ # LLM: incoming_to_message normalizes external adapter input into an internal inbox message.
+ # 函数用途: 把 IncomingMessage 写入目标 session 的内部消息收件箱。
 def incoming_to_message(incoming: IncomingMessage, *, messages_root: str | Path) -> MessageCard:
     session_id = str(incoming.metadata.get("session_id") or incoming.metadata.get("active_session_id") or incoming.user_id)
     tool = MessageTool(MessageStore(messages_root))
@@ -27,6 +31,8 @@ def incoming_to_message(incoming: IncomingMessage, *, messages_root: str | Path)
     )
 
 
+ # LLM: notification_to_message preserves notification delivery as an idempotent internal message.
+ # 函数用途: 把 Notification 转为发往原 session 的内部通知消息。
 def notification_to_message(notification: Notification, *, messages_root: str | Path) -> MessageCard:
     tool = MessageTool(MessageStore(messages_root))
     return tool.send_message(
@@ -45,6 +51,8 @@ def notification_to_message(notification: Notification, *, messages_root: str | 
     )
 
 
+ # LLM: gateway_response_to_message turns gateway results into frontstage-visible messages.
+ # 函数用途: 把 gateway response 转为 session inbox 中的结果消息。
 def gateway_response_to_message(response: dict[str, Any], *, messages_root: str | Path) -> MessageCard:
     metadata = dict(response.get("metadata") or {})
     task_id = str(metadata.get("task_id") or response.get("task_id") or "")
@@ -69,6 +77,8 @@ def gateway_response_to_message(response: dict[str, Any], *, messages_root: str 
     )
 
 
+ # LLM: task_registry_record_to_card projects existing SQLite task rows into TaskCard snapshots.
+ # 函数用途: 把 task_registry 查询结果转换为 TaskCard，不修改原 schema。
 def task_registry_record_to_card(record: dict[str, Any]) -> TaskCard:
     created_at = float(record.get("created_at") or 0.0)
     updated_at = float(record.get("updated_at") or created_at)
