@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+from ..cards import (
+    CardStore,
+    NotificationRouteCard,
+    ProgressPolicyCard,
+    TaskCard,
+    TaskStatus,
+    new_card_id,
+)
+from ..messages import MessageTarget, MessageTool
+from .worker_tiers import build_worker_context, choose_worker_tier
+
+
+class TaskRuntime:
+    def __init__(self, cards: CardStore, messages: MessageTool):
+        self.cards = cards
+        self.messages = messages
+
+    def create_task(
+        self,
+        *,
+        goal: str,
+        user_id: str,
+        session_id: str,
+        complexity: str = "medium",
+        progress_interval_seconds: int | None = None,
+        acceptance: list[str] | None = None,
+    ) -> TaskCard:
+        worker_tier = choose_worker_tier(
+            complexity=complexity,
+            requires_user_memory=complexity in {"large", "complex"},
+            requires_feedback=bool(progress_interval_seconds),
+        )
+        worker_context = build_worker_context(
+            worker_tier,
+            task_id="pending",
+            goal=goal,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        task = self.cards.create_task(
+            goal=goal,
+            user_id=user_id,
+            session_id=session_id,
+            acceptance=acceptance,
+            metadata={
+                "complexity": complexity,
+                "worker_tier": worker_tier.value,
+                "worker_context": worker_context,
+            },
+        )
+        task.metadata["worker_context"]["task_id"] = task.task_id
+        self.cards.save_task(task)
+        self.cards.save_notification_route(
+            NotificationRouteCard(
+                route_id=new_card_id("route"),
+                task_id=task.task_id,
+                user_id=user_id,
+                channel="internal",
+                target=f"session:{session_id}",
+            )
+        )
+        mode = "interval" if progress_interval_seconds else "completion_only"
+        self.cards.save_progress_policy(
+            ProgressPolicyCard(
+                policy_id=new_card_id("progress"),
+                task_id=task.task_id,
+                mode=mode,
+                interval_seconds=progress_interval_seconds,
+            )
+        )
+        return task
+
+    def complete_task(self, task_id: str, *, artifact_refs: list[str] | None = None) -> TaskCard:
+        task = self.cards.get_task(task_id)
+        task.artifact_refs = list(artifact_refs or [])
+        self.cards.save_task(task)
+        completed = self.cards.update_task_status(task_id, TaskStatus.COMPLETED)
+        route = self.cards.get_notification_route(task_id)
+        if route is not None:
+            target = MessageTarget.parse(route.target)
+            self.messages.send_message(
+                sender=MessageTarget(kind="task", identifier=task_id),
+                target=target,
+                content=f"Task completed: {completed.goal}",
+                task_id=task_id,
+                message_type="completion",
+                idempotency_key=f"{task_id}:completion:{route.route_id}",
+                metadata={"artifact_refs": completed.artifact_refs, "task_id": task_id},
+            )
+        return completed
+
+    def recover_expired_tasks(self) -> list[str]:
+        recovered: list[str] = []
+        for task in self.cards.list_tasks():
+            if task.status != TaskStatus.RUNNING:
+                continue
+            active_lease = self.cards.get_active_lease("task", task.task_id)
+            if active_lease is None:
+                task.status = TaskStatus.QUEUED
+                self.cards.save_task(task)
+                self.cards.append_event("task.recovered", task.task_id, {"from_status": TaskStatus.RUNNING, "to_status": TaskStatus.QUEUED})
+                recovered.append(task.task_id)
+        return recovered
+
+    def list_queued_tasks(self) -> list[TaskCard]:
+        return [task for task in self.cards.list_tasks() if task.status == TaskStatus.QUEUED]
