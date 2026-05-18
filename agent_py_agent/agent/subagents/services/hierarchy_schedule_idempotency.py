@@ -1,5 +1,5 @@
 # LLM: schedule_child_subagents idempotency keeps child scheduling tied to task facts, not model memory.
-# 模块用途: 在层级调度创建 child 前按 parent/root/role/goal/write-root 合同复用已有 direct child。
+# 模块用途: 在层级调度创建 child 前按 parent/root/role/name/write-root/幂等合同复用已有 direct child。
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .base import CreateRunParams
+from .idempotency_contract_identity import idempotency_contract_identity_from_context_packs
 from .repair_contract_identity import repair_contract_identity_from_context_packs
 
 _REUSABLE_STATUSES = {"PLANNING", "PENDING", "RUNNING", "AWAITING_ACCEPTANCE", "DONE", "COMPLETED", "BLOCKED", "PAUSED"}
@@ -21,8 +22,8 @@ class ScheduledChildResolution:
     reused: bool = False
 
 
-# LLM: resolve_scheduled_child reuses an existing direct child when the schedule contract is identical.
-# 函数用途: 同父级同 root/role/goal/write-root 已有可复用 child 时返回它；否则调用 manager.create_run。
+# LLM: resolve_scheduled_child reuses an existing direct child when the structured schedule contract is identical.
+# 函数用途: 同父级同 root/role/name/write-root/幂等合同已有可复用 child 时返回它；否则调用 manager.create_run。
 def resolve_scheduled_child(manager: Any, params: CreateRunParams) -> ScheduledChildResolution:
     existing = find_reusable_scheduled_child(manager, params)
     if existing is not None:
@@ -71,16 +72,19 @@ def _same_schedule_contract(task: Any, params: CreateRunParams) -> bool:
         return False
     if _normalized_role(getattr(task, "role", "")) != _normalized_role(params.role):
         return False
+    if _normalized_name(getattr(task, "agent_name", "")) != _normalized_name(params.agent_name):
+        return False
     if _external_write_roots(task) != _params_extra_write_roots(params):
         return False
-    # LLM: repair contracts override prose-goal comparison so one repair owner can fix/execute/verify.
+    # LLM: repair contracts override display text so one repair owner can fix/execute/verify.
     # 函数用途: 有 repair_contract 时按失败 run/目标产物复用，不因 goal 改写而拆出新 child。
     repair_identity = repair_contract_identity_from_context_packs(params.context_packs)
     if repair_identity:
         return repair_contract_identity_from_context_packs(getattr(task, "context_packs", [])) == repair_identity
-    if _normalized_goal(getattr(task, "goal", "")) != _normalized_goal(params.goal):
-        return False
-    return True
+    idempotency_identity = idempotency_contract_identity_from_context_packs(params.context_packs)
+    if idempotency_identity:
+        return idempotency_contract_identity_from_context_packs(getattr(task, "context_packs", [])) == idempotency_identity
+    return False
 
 
 # LLM: _direct_children loads parent child_ids instead of scanning unrelated branches.
@@ -117,15 +121,15 @@ def _params_extra_write_roots(params: CreateRunParams) -> tuple[str, ...]:
     return tuple(sorted(dict.fromkeys(_normalized_path(item) for item in params.extra_write_roots or [] if _text(item))))
 
 
-# LLM: _normalized_goal compares concrete task contracts without semantic guessing.
-# 函数用途: 压缩空白后比较 goal；不同目标必须创建新 child。
-def _normalized_goal(value: object) -> str:
-    return " ".join(_text(value).split())
-
-
 # LLM: _normalized_role keeps role comparison stable across underscore/dash variants.
 # 函数用途: role 比较只做格式归一，不把 tester/worker 这类不同职责合并。
 def _normalized_role(value: object) -> str:
+    return _text(value).replace("_", "-").casefold()
+
+
+# LLM: _normalized_name makes explicit child names comparable without reading task prose.
+# 函数用途: 规范化 agent_name；不对名称做语义聚类。
+def _normalized_name(value: object) -> str:
     return _text(value).replace("_", "-").casefold()
 
 

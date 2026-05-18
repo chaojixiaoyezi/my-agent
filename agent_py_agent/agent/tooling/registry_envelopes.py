@@ -70,6 +70,7 @@ def attach_result_envelope(
         output=result.output if not result.ok else "",
         error="" if result.ok else result.output,
         scope=envelope.scope,
+        operation_id=envelope.operation_id,
         reserved={
             "source": envelope.source,
             "action_created_at": envelope.created_at,

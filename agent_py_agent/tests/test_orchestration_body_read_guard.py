@@ -60,6 +60,7 @@ def test_predelegation_root_can_read_brief_before_subagents_created():
         DelegatingBodyReadGuardRequest(
             agent=_predelegation_agent(),
             user_prompt="subagent_delegation=true\n请安排小傻妞协作完成这个任务。",
+            task_attributes={"subagent_delegation": True},
             payload={"tool": "read_file", "path": "/tmp/workspace/README.md"},
         )
     )
@@ -74,6 +75,7 @@ def test_predelegation_root_blocks_data_body_before_subagents_created():
         DelegatingBodyReadGuardRequest(
             agent=_predelegation_agent(),
             user_prompt="subagent_delegation=true\n请安排小傻妞协作完成这个任务。",
+            task_attributes={"subagent_delegation": True},
             payload={"tool": "read_file", "path": "/tmp/workspace/data/company_profile.md"},
         )
     )
@@ -92,6 +94,7 @@ def test_predelegation_root_blocks_bundled_data_body_before_subagents_created():
         DelegatingBodyReadGuardRequest(
             agent=_predelegation_agent(),
             user_prompt="subagent_delegation=true\n请安排小傻妞协作完成这个任务。",
+            task_attributes={"subagent_delegation": True},
             payload={
                 "tool": "read_file",
                 "filesystem": {"path": "/tmp/workspace/data/company_profile.md"},
@@ -111,6 +114,7 @@ def test_predelegation_root_blocks_plain_artifact_before_subagents_created():
         DelegatingBodyReadGuardRequest(
             agent=_predelegation_agent(),
             user_prompt="subagent_delegation=true\n请安排小傻妞协作完成这个任务。",
+            task_attributes={"subagent_delegation": True},
             payload={"tool": "read_artifact", "artifact_ref": "read_file-12-1-abc.json"},
         )
     )
@@ -127,6 +131,7 @@ def test_predelegation_root_can_shell_list_directories_before_subagents_created(
         DelegatingBodyReadGuardRequest(
             agent=_predelegation_agent(),
             user_prompt="subagent_delegation=true\n请安排小傻妞协作完成这个任务。",
+            task_attributes={"subagent_delegation": True},
             payload={"tool": "run_command", "command": "find /tmp/workspace -maxdepth 2 -type f"},
         )
     )
@@ -142,6 +147,7 @@ def test_predelegation_root_ignores_historical_runs_when_blocking_data_body():
         DelegatingBodyReadGuardRequest(
             agent=agent,
             user_prompt="subagent_delegation=true\n当前目录里是一套材料，请组织多层小傻妞协作完成。",
+            task_attributes={"subagent_delegation": True},
             payload={"tool": "read_file", "path": "/tmp/workspace/data/company_profile.md"},
         )
     )
@@ -364,6 +370,7 @@ def test_user_can_explicitly_authorize_parent_body_read_for_acceptance():
         DelegatingBodyReadGuardRequest(
             agent=_agent(tasks),
             user_prompt="parent_body_read=allow\n子代理做完之后，你自己做一下验收，你亲自看一下页面。",
+            task_attributes={"parent_body_read": "allow"},
             payload={"tool": "read_file", "path": "/tmp/workspace/deliverables/app.js"},
         )
     )
@@ -398,6 +405,7 @@ def test_top_level_refs_only_root_cannot_read_product_body_before_acceptor_done(
         DelegatingBodyReadGuardRequest(
             agent=_top_level_agent(tasks),
             user_prompt="refs_only=true\nroot 只能创建和调度下级，并读 refs/报告；不要直接读取业务产物正文。",
+            task_attributes={"refs_only": True},
             payload={"tool": "read_file", "path": "/tmp/workspace/deliverables/index.html"},
         )
     )
@@ -418,6 +426,7 @@ def test_top_level_natural_report_only_prompt_blocks_product_body_before_accepto
         DelegatingBodyReadGuardRequest(
             agent=_top_level_agent(tasks),
             user_prompt="refs_only=true\n请不要亲自写页面，安排小傻妞完成后你只根据小傻妞的报告做收口。",
+            task_attributes={"refs_only": True},
             payload={"tool": "read_file", "path": "/tmp/workspace/deliverables/index.html"},
         )
     )
@@ -436,6 +445,7 @@ def test_top_level_delegate_only_prompt_with_you_directly_write_text_blocks_prod
         DelegatingBodyReadGuardRequest(
             agent=_top_level_agent(tasks),
             user_prompt="refs_only=true\n请你安排小傻妞来完成，不要你自己直接写页面正文。",
+            task_attributes={"refs_only": True},
             payload={"tool": "read_file", "path": "/tmp/workspace/deliverables/index.html"},
         )
     )
@@ -454,6 +464,7 @@ def test_top_level_natural_report_only_prompt_blocks_shell_tail_product_body():
         DelegatingBodyReadGuardRequest(
             agent=_top_level_agent(tasks),
             user_prompt="refs_only=true\n请不要亲自写页面，安排小傻妞完成后你只根据小傻妞的报告做收口。",
+            task_attributes={"refs_only": True},
             payload={"tool": "run_command", "command": "tail -20 /tmp/workspace/deliverables/index.html"},
         )
     )
@@ -473,6 +484,7 @@ def test_top_level_natural_report_only_prompt_blocks_shell_cd_grep_product_body(
         DelegatingBodyReadGuardRequest(
             agent=_top_level_agent(tasks),
             user_prompt="refs_only=true\n请不要亲自写页面，安排小傻妞完成后你只根据小傻妞的报告做收口。",
+            task_attributes={"refs_only": True},
             payload={
                 "tool": "run_command",
                 "command": "cd /tmp/workspace/deliverables && grep -c 'href=\"#\"' index.html",
@@ -494,6 +506,7 @@ def test_top_level_refs_only_root_can_shell_read_orchestration_metadata():
         DelegatingBodyReadGuardRequest(
             agent=_top_level_agent(tasks),
             user_prompt="refs_only=true\n请不要亲自写页面，安排小傻妞完成后你只根据小傻妞的报告做收口。",
+            task_attributes={"refs_only": True},
             payload={
                 "tool": "run_command",
                 "command": "cat /tmp/workspace/_runtime/subagents/subagent_dispatch_report.json",
@@ -516,6 +529,7 @@ def test_top_level_refs_only_root_can_read_product_body_after_acceptor_done():
         DelegatingBodyReadGuardRequest(
             agent=_top_level_agent(tasks),
             user_prompt="refs_only=true\nroot 只能创建和调度下级，并读 refs/报告；不要直接读取业务产物正文。",
+            task_attributes={"refs_only": True},
             payload={"tool": "read_file", "path": "/tmp/workspace/deliverables/index.html"},
         )
     )
@@ -537,6 +551,7 @@ def test_top_level_scope_ignores_old_acceptor_when_blocking_product_body():
         DelegatingBodyReadGuardRequest(
             agent=agent,
             user_prompt="refs_only=true\n请不要亲自写页面，安排小傻妞完成后你只根据小傻妞的报告做收口。",
+            task_attributes={"refs_only": True},
             payload={"tool": "read_file", "path": "/tmp/workspace/deliverables/index.html"},
         )
     )

@@ -78,6 +78,7 @@ class _FindingSetupMixin:
         task.used_tools = overrides.get("used_tools", [])
         task.child_ids = overrides.get("child_ids", [])
         task.allowed_write_roots = overrides.get("allowed_write_roots", [])
+        task.attributes = overrides.get("attributes", {})
         task.reports_dir = str(tmp_path / "reports")
         return task
 

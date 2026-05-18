@@ -13,7 +13,7 @@ from typing import Any
 from .acceptance import ParentAcceptancePlan, plan_parent_acceptance
 from .compiler import WorkflowDispatchPlan, compile_workflow
 from .models import WorkflowTemplate
-from .router import WorkflowRouteDecision, route_workflow
+from .router import WorkflowRouteDecision, WorkflowRouteRequest, route_workflow
 from .store import WorkflowTemplateStore, load_template_store
 
 
@@ -26,6 +26,8 @@ class WorkflowPlanConstraints:
     config: Any = None
     template_store: WorkflowTemplateStore | None = None
     explicit_template_id: str = ""
+    workflow_task_type: str = ""
+    workflow_risk_tags: object = None
     quality_contract: Any = None
     context_manifest: Any = None
     allowed_write_roots: list[str] | None = None
@@ -163,12 +165,14 @@ def plan_workflow_for_goal(
     """
     _c = constraints
     store = _c.template_store or load_template_store()
-    decision = route_workflow(
-        goal,
+    decision = route_workflow(WorkflowRouteRequest(
+        goal=goal,
         config=_c.config,
         template_store=store,
         explicit_template_id=_c.explicit_template_id,
-    )
+        workflow_task_type=_c.workflow_task_type,
+        workflow_risk_tags=_c.workflow_risk_tags,
+    ))
     issues = list(decision.issues)
 
     if decision.mode == "off" or not decision.selected_template_id:

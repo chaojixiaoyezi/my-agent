@@ -70,6 +70,8 @@ def _add_agents_basic_subcommands(sub):
     workflow_plan = sub.add_parser("subagents-workflow-plan", help="Preview automatic subagent workflow routing")
     workflow_plan.add_argument("goal", help="Parent goal to route into a workflow")
     workflow_plan.add_argument("--template-id", help="Force a workflow template id for the preview")
+    workflow_plan.add_argument("--task-type", help="Structured workflow task type, e.g. code_or_bugfix")
+    workflow_plan.add_argument("--risk-tags", help="Comma-separated structured workflow risk tags")
     workflow_plan.add_argument("--output-dir", help="Write JSON and Markdown dry-run previews to this directory")
     workflow_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     workflow_plan.set_defaults(func=cmd_subagents_workflow_plan)

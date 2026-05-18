@@ -9,7 +9,6 @@ from typing import Any
 
 from ..models import SubAgentTask
 from ..role_templates import role_template_id_for_role
-from .base import _extract_write_dirs
 from .hierarchy_duplicate_domains import duplicate_child_domain_warnings
 from .hierarchy_leaf_targets import LeafTargetDedupeRequest, duplicate_verified_leaf_target_warnings
 from .hierarchy_scope_domains import domain_mismatch_reason, forbidden_child_scope_reason
@@ -230,11 +229,11 @@ def _child_write_root_drift_reason(parent: SubAgentTask, request: Any) -> str:
     return ""
 
 
-# LLM: _invalid_child_write_roots compares model-proposed roots against inherited product roots literally.
-# 函数用途: 找出 child goal/extra_write_roots 里不在父级产物根下的本地路径。
+# LLM: _invalid_child_write_roots compares structured child roots against inherited product roots literally.
+# 函数用途: 找出 child extra_write_roots 里不在父级产物根下的本地路径；不从普通 goal 文本猜路径。
 def _invalid_child_write_roots(spec: Any, valid_roots: list[str], internal_roots: list[str] | None = None) -> list[str]:
     invalid: list[str] = []
-    for raw in [*getattr(spec, "extra_write_roots", []), *_extract_write_dirs(getattr(spec, "goal", ""))]:
+    for raw in getattr(spec, "extra_write_roots", []):
         text = str(raw or "").rstrip("/")
         if (
             text

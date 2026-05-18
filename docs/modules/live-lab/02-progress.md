@@ -145,3 +145,13 @@
 - 已实现：仍保留真实越权保护；例如“保存到 `/tmp/outside/index.html`” 这类工作区外真实产物目标仍会被拒绝。
 - 已测试：`python3 -m pytest -q agent_py_agent/tests/test_orchestration_write_guard.py agent_py_agent/tests/test_orchestration_create_subagents_guardrails.py agent_py_agent/tests/test_live_lab_natural_case.py --tb=short` -> `41 passed`。
 - 真实复测：`python3 scripts/live_agent_lab.py --suite natural --real-llm --runs-dir /Users/example/my_agent/live-lab-runs --run-id 20260518-main-foundation-natural-03 --timeout 360 --max-cycles 6 --max-runners 2` -> `LIVE_LAB_PASS`。主代理创建并 dispatch 了 `subagent-1779062763-f27692ec`，最终 `DONE/VERIFIED`，产物为 `lab_outputs/furniture-home/index.html`。
+
+## 2026-05-18 Main-complex suite 主代理复杂任务第一批
+
+- 中文说明：新增 `main-complex` suite，专门测“主代理自己干活”，不是测小傻妞链路。case 会在隔离配置里临时写 `enable_subagents: false`，不改用户真实配置。
+- 已实现：`main_direct_web_app` 用普通中文要求主代理自己交付 `lab_outputs/main-web-app/` 下的多文件家具品牌 Web app，检查 HTML/CSS/JS/README、坏链接、外部资源和基础交互。
+- 已实现：`main_tool_failure_recovery` 让主代理先读一个不存在的文件，再改读真实素材，并把恢复过程写到 `lab_outputs/tool-recovery/report.md`。
+- 已实现：`main_large_log_audit` 会生成约 100MB 的 `logs/huge_app.log`，要求主代理不要把全文塞回上下文，而是找付款、购物车、trace id 等关键线索并写报告。
+- 已实现：底层四块合同进入主代理复杂任务验收口径。工具调用/结果靠 operation_id 和 RunScope 绑定；状态摘要走统一 state machine；artifact report 包含 path/kind/hash/size；最终完成结论可由 acceptance contract 汇总状态、测试和产物验收。
+- 已测试：新增单测锁住 suite 注册、自然语言提示词、隔离配置和三类产物 gate；真实模型执行入口为 `python3 scripts/live_agent_lab.py --suite main-complex --real-llm ...`。
+- 下一步：跑真实 MiniMax-M2.7 的 `main-complex` 第一批；如果暴露问题，先判断是工具网关、状态/记忆、产物验收还是 prompt 模板问题，再做通用底层修复。

@@ -329,10 +329,11 @@ def test_hierarchy_schedule_carries_parent_boundary_into_vague_child_goal(tmp_pa
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
     root = manager.create_run(
-        goal=f"必须让 leaf 写到 {deliverables}/leaf_outputs/proof/solution.py，coordinator 不得代写。",
+        goal="需要 proof 目录里的 solution.py。",
         thought="root thought",
         plan=["plan"],
         extra_write_roots=[str(deliverables)],
+        attributes={"required_files": [str(deliverables / "leaf_outputs" / "proof" / "solution.py")]},
     )
 
     child_result = _schedule_vague_child(manager, root.id)
@@ -355,14 +356,14 @@ def test_hierarchy_schedule_keeps_sibling_scope_out_of_child_handoff(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
     root = manager.create_run(
-        goal=(
-            f"arithmetic leaf 必须写 {deliverables}/leaf_outputs/leaf_worker_arithmetic/solution.py。"
-            f"text leaf 必须写 {deliverables}/leaf_outputs/leaf_worker_text/solution.py。"
-            "root 不得直接写产物。"
-        ),
+        goal="只负责 arithmetic 领域，并交付 solution.py。",
         thought="root 只做分派。",
         plan=["plan"],
         extra_write_roots=[str(deliverables)],
+        attributes={
+            "domain_scopes": ["arithmetic"],
+            "required_files": [str(deliverables / "leaf_outputs" / "leaf_worker_arithmetic" / "solution.py")],
+        },
     )
 
     result = manager.schedule_child_runs(
@@ -393,15 +394,17 @@ def test_hierarchy_schedule_keeps_exact_file_contract_when_child_goal_only_has_d
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
     root = manager.create_run(
-        goal=(
-            f"arithmetic leaf 必须写 {deliverables}/leaf_outputs/leaf_worker_arithmetic/solution.py、"
-            "test_solution.py、README.md，实现 add(a,b) 和 multiply(a,b)。"
-            f"text leaf 必须写 {deliverables}/leaf_outputs/leaf_worker_text/solution.py、"
-            "test_solution.py、README.md，实现 normalize_text(text)。"
-        ),
+        goal="只负责 arithmetic 领域，并交付指定文件。",
         thought="root 只做分派。",
         plan=["plan"],
         extra_write_roots=[str(deliverables)],
+        attributes={
+            "required_files": [
+                str(deliverables / "leaf_outputs" / "leaf_worker_arithmetic" / "solution.py"),
+                "test_solution.py",
+                "README.md",
+            ]
+        },
     )
 
     child_result = manager.schedule_child_runs(
@@ -444,15 +447,17 @@ def test_hierarchy_schedule_keeps_controlled_exec_contract_for_leaf(tmp_path):
     early_leaf_result = _schedule_vague_leaf(manager, child_result.created_run_ids[0])
     assert early_leaf_result.blocked is False
     early_leaf = manager.load(early_leaf_result.created_run_ids[0])
-    assert "controlled_exec" in early_leaf.goal
-    assert "task_trash" in early_leaf.goal
+    assert early_leaf.attributes["controlled_exec_contract_required"] is True
+    assert "controlled_exec" in early_leaf.attributes["required_tools"]
+    assert any("task_trash" in item for item in early_leaf.attributes["capability_contracts"])
     leaf = _schedule_controlled_exec_contract_leaf(manager, child_result.created_run_ids[0])
 
-    assert "capability_request" in leaf.goal
-    assert "controlled_exec" in leaf.goal
-    assert "requested_commands" in leaf.goal
-    assert "task_trash" in leaf.goal
-    assert "stdout_ref" in leaf.goal
+    assert leaf.attributes["controlled_exec_contract_required"] is True
+    assert "controlled_exec" in leaf.attributes["required_tools"]
+    assert any("capability_request" in item for item in leaf.attributes["capability_contracts"])
+    assert any("requested_commands" in item for item in leaf.attributes["capability_contracts"])
+    assert any("task_trash" in item for item in leaf.attributes["capability_contracts"])
+    assert any("stdout_ref" in item for item in leaf.attributes["capability_contracts"])
 
 
 
@@ -471,6 +476,16 @@ def _controlled_exec_contract_root(manager: SubAgentManager, deliverables):
         thought="root 只观察，不替 leaf 执行。",
         plan=["plan"],
         extra_write_roots=[str(deliverables)],
+        attributes={
+            "controlled_exec_contract_required": True,
+            "required_tools": ["controlled_exec"],
+            "capability_contracts": [
+                'capability_request: requested_tools=["controlled_exec"], requested_commands=["pwd","python3","rm"]',
+                "path_scope=task_dir; output_budget=stdout_bytes/stderr_bytes",
+                "trash_policy: rm must use task_trash/move_to_task_trash",
+                "refs_required: stdout_ref, audit_ref, trash_manifest_ref",
+            ],
+        },
     )
 
 

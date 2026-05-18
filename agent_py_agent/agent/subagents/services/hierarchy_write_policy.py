@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .base import _extract_write_dirs
-
 if TYPE_CHECKING:
     from ..models import SubAgentTask
 
@@ -22,8 +20,8 @@ class ScheduledWriteRootRequest:
     leaf_write_intent: bool
 
 
-# LLM: ChildWriteRootRequest gathers parent, explicit, and model-written path sources.
-# 类用途: 计算 child 可委派写入根时，把父级继承、spec.extra_write_roots 和 spec.goal 里的路径放在同一入口。
+# LLM: ChildWriteRootRequest carries only structured child roots and inherited parent authority.
+# 类用途: 计算 child 可委派写入根时，只认 spec.extra_write_roots 和父级 allowed_write_roots，不从普通 goal 文本猜路径。
 @dataclass(frozen=True)
 class ChildWriteRootRequest:
     parent: SubAgentTask
@@ -44,7 +42,6 @@ def requested_child_write_roots(request: ChildWriteRootRequest) -> list[str]:
     for item in [
         *request.explicit_roots,
         *inherited_extra_write_roots(request.parent),
-        *_extract_write_dirs(request.spec_goal),
     ]:
         text = str(item or "").rstrip("/")
         if text and text not in roots:
@@ -52,20 +49,14 @@ def requested_child_write_roots(request: ChildWriteRootRequest) -> list[str]:
     return roots
 
 
-# LLM: inherited_extra_write_roots forwards product roots for delegation without copying parent internals.
-# 函数用途: 从父节点授权根和 goal 路径提取可委派产物根，跳过父工单目录本身。
+# LLM: inherited_extra_write_roots forwards structured product roots without parsing prose.
+# 函数用途: 从父节点 allowed_write_roots 提取可委派产物根，跳过父工单目录本身。
 def inherited_extra_write_roots(parent: SubAgentTask) -> list[str]:
     parent_task_dir = str(parent.task_dir or "").rstrip("/")
     roots: list[str] = []
     authorized_roots = _non_task_allowed_roots(parent, parent_task_dir)
     for item in authorized_roots:
         text = str(item or "").rstrip("/")
-        if text and text != parent_task_dir and text not in roots:
-            roots.append(str(item))
-    for item in _extract_write_dirs(parent.goal):
-        text = str(item or "").rstrip("/")
-        if _covered_by_authorized_root(text, authorized_roots):
-            continue
         if text and text != parent_task_dir and text not in roots:
             roots.append(str(item))
     return roots

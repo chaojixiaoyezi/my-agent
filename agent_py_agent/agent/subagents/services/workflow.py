@@ -43,6 +43,19 @@ class _WorkflowAgentNameSpec:
     role: str
 
 
+# LLM: _WorkflowPlanAttempt bundles route facts and parent context for one planning try.
+# 类用途: 给 _try_workflow_plan 传递一个参数包，避免 workflow 规划入口继续膨胀。
+@dataclass(frozen=True)
+class _WorkflowPlanAttempt:
+    goal: str
+    explicit_template_id: str = ""
+    workflow_task_type: str = ""
+    workflow_risk_tags: object = None
+    quality_contract: object | None = None
+    context_manifest: object | None = None
+    allowed_write_roots: list[str] | None = None
+
+
 # LLM: _normalize_workflow_mode_value 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 函数用途: 解析并归一化工作流modevalue的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _normalize_workflow_mode_value(value: object) -> str:
@@ -99,23 +112,20 @@ def _iter_workflow_workers(workers: object):
 
 # LLM: _try_workflow_plan 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 函数用途: 处理try工作流计划相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
-def _try_workflow_plan(
-    goal: str,
-    *,
-    quality_contract: object | None = None,
-    context_manifest: object | None = None,
-    allowed_write_roots: list[str] | None = None,
-) -> dict[str, object] | None:
+def _try_workflow_plan(request: _WorkflowPlanAttempt) -> dict[str, object] | None:
     """Try to run workflow planning, return None on failure."""
     try:
         from ...subagent_workflows.planner import WorkflowPlanConstraints, plan_workflow_for_goal
 
         result = plan_workflow_for_goal(
-            goal,
+            request.goal,
             constraints=WorkflowPlanConstraints(
-                quality_contract=quality_contract,
-                context_manifest=context_manifest,
-                allowed_write_roots=allowed_write_roots,
+                explicit_template_id=request.explicit_template_id,
+                workflow_task_type=request.workflow_task_type,
+                workflow_risk_tags=request.workflow_risk_tags,
+                quality_contract=request.quality_contract,
+                context_manifest=request.context_manifest,
+                allowed_write_roots=request.allowed_write_roots,
             ),
         )
         return result.to_dict()
@@ -141,6 +151,19 @@ def _workflow_child_agent_name(parent: SubAgentTask, phase_id: str, role: str) -
     )
 
 
+# LLM: _workflow_attr reads workflow route facts from task attributes only.
+# 函数用途: workflow 模板选择由 attributes 承载；不从 goal 或 prompt 里解析机器事实。
+def _workflow_attr(task: SubAgentTask, key: str) -> object:
+    attrs = getattr(task, "attributes", {}) or {}
+    return attrs.get(key) if isinstance(attrs, dict) else None
+
+
+# LLM: _workflow_attr_text returns one string workflow attribute.
+# 函数用途: 读取 workflow_template_id/workflow_task_type 这类标量机器字段。
+def _workflow_attr_text(task: SubAgentTask, key: str) -> str:
+    return str(_workflow_attr(task, key) or "").strip()
+
+
 # LLM: SubAgentWorkflowService 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 类用途: 封装subagent工作流服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
 class SubAgentWorkflowService:
@@ -162,12 +185,15 @@ class SubAgentWorkflowService:
             self.manager.save(task)
             return task
 
-        plan_dict = _try_workflow_plan(
-            task.goal,
+        plan_dict = _try_workflow_plan(_WorkflowPlanAttempt(
+            goal=task.goal,
+            explicit_template_id=_workflow_attr_text(task, "workflow_template_id"),
+            workflow_task_type=_workflow_attr_text(task, "workflow_task_type"),
+            workflow_risk_tags=_workflow_attr(task, "workflow_risk_tags"),
             quality_contract=task.quality_contract,
             context_manifest=task.context_manifest,
             allowed_write_roots=_workflow_extra_write_roots(task),
-        ) or {}
+        )) or {}
         task.workflow_mode = normalized
         task.workflow_template_id = str(plan_dict.get("selected_template_id") or "")
         task.workflow_plan = plan_dict

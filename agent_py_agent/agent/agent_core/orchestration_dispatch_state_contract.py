@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-from ..contracts.error_taxonomy import classify_error, error_contract
-from ..contracts.state_machine import RunStateFacts, can_closeout, can_dispatch, recovery_decision
+from ..contracts.error_taxonomy import error_contract
+from ..contracts.state_machine import run_state_snapshot_from_task
 from .orchestration_run_scope import remembered_orchestration_run_ids
 
 _RUNNING_STATUSES = {"RUNNING"}
@@ -78,24 +78,18 @@ def _empty_state_buckets() -> dict[str, object]:
 # 函数用途: 把单个任务的状态加入 dispatchable/running/blocked/verified/unfinished 等桶。
 def _append_task_state(buckets: dict[str, object], task: object) -> None:
     run_id = _run_id(task)
-    status = _status(task)
-    verification = _verification(task)
-    facts = RunStateFacts(
-        status=status,
-        verification_status=verification,
-        failure_type=_failure_type(task),
-        attempts=_attempts(task),
-    )
+    snapshot = run_state_snapshot_from_task(task)
+    status = str(snapshot["status"])
     by_status = buckets["by_status"]
     by_status[status] = by_status.get(status, 0) + 1
-    _append_if(buckets["dispatchable"], run_id, can_dispatch(facts))
+    _append_if(buckets["dispatchable"], run_id, bool(snapshot["can_dispatch"]))
     _append_if(buckets["running"], run_id, status in _RUNNING_STATUSES)
     _append_if(buckets["blocked"], run_id, status in _BLOCKED_STATUSES)
-    verified = can_closeout(facts)
+    verified = bool(snapshot["can_closeout"])
     _append_if(buckets["verified"], run_id, verified)
     _append_if(buckets["unfinished"], run_id, not verified)
     if status in _BLOCKED_STATUSES:
-        _append_recovery_recommendation(buckets, run_id, facts)
+        _append_recovery_recommendation(buckets, snapshot)
 
 
 # LLM: _append_if keeps bucket mutation compact and empty-id safe.
@@ -107,19 +101,20 @@ def _append_if(values: object, run_id: str, condition: bool) -> None:
 
 # LLM: _append_recovery_recommendation exposes recovery facts without forcing the parent action.
 # 函数用途: 把失败/阻塞 run 的错误类型、建议动作和中文提示写进状态合同，供父级判断下一步。
-def _append_recovery_recommendation(buckets: dict[str, object], run_id: str, facts: RunStateFacts) -> None:
+def _append_recovery_recommendation(buckets: dict[str, object], snapshot: dict[str, object]) -> None:
     values = buckets["recovery_recommendations"]
+    run_id = str(snapshot.get("run_id") or "").strip()
     if not run_id or not isinstance(values, list):
         return
-    decision = recovery_decision(facts)
-    contract = error_contract(facts.failure_type or "UNKNOWN_ERROR")
+    decision = dict(snapshot.get("recovery_decision") or {})
+    contract = error_contract(str(snapshot.get("failure_type") or "UNKNOWN_ERROR"))
     values.append({
         "run_id": run_id,
-        "status": _status_from_facts(facts),
+        "status": str(snapshot.get("status") or ""),
         "failure_type": contract.code,
-        "recommended_action": decision.action,
-        "allow_new_run": decision.allow_new_run,
-        "reason": decision.reason,
+        "recommended_action": str(decision.get("action") or ""),
+        "allow_new_run": bool(decision.get("allow_new_run")),
+        "reason": str(decision.get("reason") or ""),
         "recovery_hint": contract.recovery_hint,
     })
 
@@ -177,42 +172,3 @@ def _clean_ids(values: list[object]) -> list[str]:
 # 函数用途: 安全返回 task.id。
 def _run_id(task: object) -> str:
     return str(getattr(task, "id", "") or "").strip()
-
-
-# LLM: _status normalizes task lifecycle strings for status buckets.
-# 函数用途: 安全返回大写 task.status，缺失时为 UNKNOWN。
-def _status(task: object) -> str:
-    return str(getattr(task, "status", "") or "UNKNOWN").strip().upper()
-
-
-# LLM: _verification normalizes task verification status for done/verified checks.
-# 函数用途: 安全返回大写 task.verification_status。
-def _verification(task: object) -> str:
-    return str(getattr(task, "verification_status", "") or "").strip().upper()
-
-
-# LLM: _failure_type normalizes persisted failure strings into the shared error taxonomy.
-# 函数用途: 优先使用结构化 failure_type；缺失时从 runner_last_error 粗分类，避免父级只看到“失败了”。
-def _failure_type(task: object) -> str:
-    raw = str(getattr(task, "failure_type", "") or "").strip()
-    if raw:
-        return error_contract(raw).code
-    message = str(getattr(task, "runner_last_error", "") or "").strip()
-    if message:
-        return classify_error(message).code
-    return "UNKNOWN_ERROR"
-
-
-# LLM: _attempts keeps recovery decisions aware of repeated failures when the task exposes attempts.
-# 函数用途: 从 task.runner_attempts 读取尝试次数；没有字段时保持 0。
-def _attempts(task: object) -> int:
-    try:
-        return int(getattr(task, "runner_attempts", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-# LLM: _status_from_facts keeps recommendation payload construction independent of task objects.
-# 函数用途: 返回状态事实里的原始状态文本，供 recovery_recommendations 展示。
-def _status_from_facts(facts: RunStateFacts) -> str:
-    return str(facts.status or "").strip().upper()

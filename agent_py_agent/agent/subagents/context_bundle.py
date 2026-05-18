@@ -281,9 +281,19 @@ def _reserved(task: SubAgentTask) -> dict[str, object]:
     attributes = getattr(task, "attributes", {})
     attributes = attributes if isinstance(attributes, dict) else {}
     preflight = attributes.get("runner_recovery_preflight")
-    if not isinstance(preflight, dict):
+    reserved: dict[str, object] = _file_contract_reserved(attributes)
+    if isinstance(preflight, dict):
+        reserved["runner_recovery_preflight"] = dict(preflight)
+    return reserved
+
+
+# LLM: _file_contract_reserved gives the semantic gate an attribute-side expectation snapshot.
+# 函数用途: 把 required_files 的机器期望带进 reserved，避免 gate 从 goal/acceptance 文本重解析。
+def _file_contract_reserved(attributes: dict[str, object]) -> dict[str, object]:
+    required = attributes.get("required_files")
+    if not isinstance(required, list):
         return {}
-    return {"runner_recovery_preflight": dict(preflight)}
+    return {"expected_required_files": [str(item).strip() for item in required if str(item or "").strip()]}
 
 # LLM: _is_missing defines the minimum useful handoff signal for gate checks.
 # 函数用途: 判断字符串、列表、字典等字段是否为空；用于缺字段报告。

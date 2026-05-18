@@ -10,20 +10,12 @@ from __future__ import annotations
 SubAgentManager 通过 facade 方法委托到这里。
 """
 
-import re
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..models import ContextManifest, QualityContract, SubAgentCard, SubAgentTask
-
-
-# LLM: patterns for extracting directory paths from user goal text.
-_DIR_PATTERN = re.compile(r"(?<![\w.\-])(?:/[\w.\-]+){2,}")
-_WINDOWS_DIR_PATTERN = re.compile(r"(?<![\w])[A-Za-z]:[\\/][^\s\"'<>|]+")
-_HOME_DIR_PATTERN = re.compile(r"(?:~/[\w.\-]+(?:/[\w.\-]+)*)")
-_URL_PATTERN = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s\"'<>]+")
 
 
 # LLM: CreateRunParams 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -52,51 +44,7 @@ class CreateRunParams:
     extra_write_roots: list[str] | None = None
     workflow_mode: str = "off"
     normalize_role: bool = True
-
-
-# LLM: _extract_write_dirs 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 从目标文本提取本地目录写入根，跳过 URL，避免图片/API 地址被误当成本地授权路径。
-def _extract_write_dirs(goal: str) -> list[str]:
-    """Extract directory paths from user goal text for automatic subagent write permission."""
-    dirs: list[str] = []
-    for path in _iter_write_dir_matches(goal):
-        if path and path not in dirs:
-            dirs.append(path)
-    return dirs
-
-
-# LLM: _iter_write_dir_matches ignores URLs before yielding local path candidates.
-# 函数用途: 遍历本地目录候选；URL 内部的 `s:/`、`//host/path` 等片段不应进入写入根。
-def _iter_write_dir_matches(goal: str):
-    url_spans = _url_spans(goal)
-    for match in _write_dir_candidate_matches(goal):
-        if not _overlaps_url(match.start(), match.end(), url_spans):
-            yield _trim_write_dir_candidate(match.group())
-
-
-# LLM: _write_dir_candidate_matches keeps regex iteration shallow for code-size guard.
-# 函数用途: 统一产出目录候选 match，让 URL 过滤和正则遍历分开。
-def _write_dir_candidate_matches(goal: str):
-    for pattern in [_WINDOWS_DIR_PATTERN, _DIR_PATTERN, _HOME_DIR_PATTERN]:
-        yield from pattern.finditer(goal)
-
-
-# LLM: _url_spans records URL ranges so path extraction does not grant network locations as directories.
-# 函数用途: 返回 goal 中 URL 的字符范围，供目录候选过滤使用。
-def _url_spans(goal: str) -> list[tuple[int, int]]:
-    return [(match.start(), match.end()) for match in _URL_PATTERN.finditer(goal)]
-
-
-# LLM: _overlaps_url checks if a path candidate came from a URL.
-# 函数用途: 判断目录候选是否落在 URL 范围内；落入则不参与自动写入根。
-def _overlaps_url(start: int, end: int, spans: list[tuple[int, int]]) -> bool:
-    return any(start < span_end and end > span_start for span_start, span_end in spans)
-
-
-# LLM: _trim_write_dir_candidate keeps punctuation out of auto-granted write roots.
-# 函数用途: 清理从 goal 文本里提取的目录候选，避免句号、逗号混进写入边界。
-def _trim_write_dir_candidate(raw: str) -> str:
-    return raw.strip().rstrip(".,;:，。；：、)]}）】")
+    attributes: dict[str, object] | None = None
 
 
 # LLM: _load_parent_task keeps inheritance manifest creation best-effort and non-blocking.
@@ -148,7 +96,6 @@ class SubAgentBaseService:
 
         Currently uses template-based splitting for simplicity.
         """
-        extra_roots = _extract_write_dirs(goal)
         count = max(1, count)
         tasks: list[SubAgentTask] = []
         for i in range(1, count + 1):
@@ -159,7 +106,7 @@ class SubAgentBaseService:
                     plan=["理解目标", "列出交付物", "执行最小验证", "汇报结果和证据"],
                     role="worker",
                     allowed_tools=list(allowed_tools) if allowed_tools else None,
-                    extra_write_roots=extra_roots,
+                    extra_write_roots=[],
                     workflow_mode=workflow_mode,
                 ),
             )
@@ -276,6 +223,7 @@ class SubAgentBaseService:
             workflow_mode=prepared["normalized_workflow_mode"],
             workflow_template_id=str((workflow_plan_dict or {}).get("selected_template_id") or ""),
             workflow_plan=workflow_plan_dict or {},
+            attributes=dict(params.attributes or {}),
             **prepared["paths"],
         )
         task.inheritance_manifest = build_inheritance_manifest(parent_task, task)

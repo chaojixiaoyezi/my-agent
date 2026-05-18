@@ -30,7 +30,8 @@ def test_items_mode_payload_rebinds_stale_self_output_run_id(tmp_path):
 
     result = CreateSubagentsTool(mock_agent).execute({
         "items": [{
-            "goal": f"收集项目数据。\noutput_files: data/subagents/{stale_id}/data_collection.md",
+            "goal": "收集项目数据。",
+            "output_files": [f"data/subagents/{stale_id}/data_collection.md"],
             "agent_name": "小傻妞-数据收集",
             "role": "worker",
         }],
@@ -40,8 +41,8 @@ def test_items_mode_payload_rebinds_stale_self_output_run_id(tmp_path):
     loaded = mock_agent.subagents.load(run_id)
 
     assert result.ok is True
-    assert stale_id not in payload["tasks"][0]["goal"]
-    assert f"data/subagents/{run_id}/data_collection.md" in payload["tasks"][0]["goal"]
+    assert stale_id not in payload["tasks"][0]["attributes"]["output_files"][0]
+    assert payload["tasks"][0]["attributes"]["output_files"][0].endswith(f"data_collection.md")
     assert loaded.attributes["output_ref_rebindings"][0]["to"].endswith("/data_collection.md")
 
 
@@ -66,8 +67,9 @@ def test_structured_output_worker_defaults_to_workspace_root():
     mock_agent.subagents.create_run.return_value = mock_task
 
     result = CreateSubagentsTool(mock_agent).execute({
-        "goal": "生成一个完整文件。\noutput_files: index.html",
+        "goal": "生成一个完整文件。",
         "role": "writer",
+        "output_files": ["index.html"],
     })
     params = mock_agent.subagents.create_run.call_args.kwargs["params"]
 
@@ -96,8 +98,9 @@ def test_repair_file_task_with_output_ref_defaults_to_workspace_root():
     mock_agent.subagents.create_run.return_value = mock_task
 
     result = CreateSubagentsTool(mock_agent).execute({
-        "goal": "修复页面内链接问题。\noutput_files: index1.html",
+        "goal": "修复页面内链接问题。",
         "role": "repair",
+        "output_files": ["index1.html"],
     })
     params = mock_agent.subagents.create_run.call_args.kwargs["params"]
 
@@ -130,8 +133,8 @@ def test_repair_task_uses_required_read_target_as_product_root(tmp_path):
     ]
 
 
-# LLM: Absolute target files in natural goals should become directory write roots.
-# 函数用途: 防止 create_subagents 从“目标文件:/.../index.html”提取出文件本身作为 allowed_write_root。
+# LLM: Absolute target files in structured roots should become directory write roots.
+# 函数用途: 防止 create_subagents 从 extra_write_roots 文件路径持久化出文件本身作为 allowed_write_root。
 def test_goal_absolute_target_file_normalizes_write_root_to_parent(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -139,9 +142,10 @@ def test_goal_absolute_target_file_normalizes_write_root_to_parent(tmp_path):
     target = tmp_path / "lab_outputs" / "shop-demo" / "index.html"
 
     result = CreateSubagentsTool(agent).execute({
-        "goal": f"修复购物站验收失败问题。目标文件：{target}",
+        "goal": "修复购物站验收失败问题。",
         "agent_name": "小傻妞-修复购物站",
         "role": "worker",
+        "extra_write_roots": [str(target)],
     })
     payload = json.loads(result.output)
     task = agent.subagents.load(payload["ids"][0])
@@ -206,6 +210,51 @@ def test_repair_contract_idempotency_reuses_same_scope_with_reworded_goal(tmp_pa
     assert second["created_run_ids"] == []
     assert second["reused_run_ids"] == first["created_run_ids"]
     assert second["dispatch_run_ids"] == first["created_run_ids"]
+
+
+def test_generic_worker_without_idempotency_contract_does_not_reuse_by_goal_text(tmp_path):
+    """LLM: Repeating identical goal prose is not a machine fact for create_subagents reuse."""
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _mock_workspace_agent(tmp_path)
+    tool = CreateSubagentsTool(agent)
+
+    first = json.loads(tool.execute({"goal": "写一个家具品牌首页", "role": "worker"}).output)
+    second = json.loads(tool.execute({"goal": "写一个家具品牌首页", "role": "worker"}).output)
+
+    assert first["created_run_ids"]
+    assert second["created_run_ids"]
+    assert second["reused_run_ids"] == []
+    assert first["ids"] != second["ids"]
+
+
+def test_generic_worker_reuses_structured_idempotency_contract_despite_reworded_goal(tmp_path):
+    """LLM: Reuse requires an explicit idempotency contract, not the natural-language goal."""
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _mock_workspace_agent(tmp_path)
+    tool = CreateSubagentsTool(agent)
+    contract = {
+        "schema": "subagent_idempotency_contract.v1",
+        "kind": "implementation_slice",
+        "idempotency_key": "home-page-worker",
+        "scope_refs": ["deliverables/home/index.html"],
+    }
+
+    first = json.loads(tool.execute({
+        "goal": "写一个家具品牌首页",
+        "role": "worker",
+        "context_packs": [{"kind": "idempotency_contract", "contract": contract}],
+    }).output)
+    second = json.loads(tool.execute({
+        "goal": "继续完成高端家具首页",
+        "role": "worker",
+        "context_packs": [{"kind": "idempotency_contract", "contract": contract}],
+    }).output)
+
+    assert first["created_run_ids"]
+    assert second["created_run_ids"] == []
+    assert second["reused_run_ids"] == first["created_run_ids"]
 
 
 # LLM: repair identity no longer guesses scope from natural goals without repair_contract.
@@ -302,6 +351,32 @@ def test_schedule_child_repair_contract_reuses_same_scope_with_reworded_goal(tmp
     assert second["created_run_ids"] == []
     assert second["reused_run_ids"] == first["created_run_ids"]
     assert second["dispatch_run_ids"] == first["created_run_ids"]
+
+
+def test_schedule_child_without_idempotency_contract_does_not_reuse_by_goal_text(tmp_path):
+    """LLM: schedule_child_subagents cannot use matching goal prose as a reuse key."""
+    from agent_py_agent.agent.agent_core.hierarchy_tools import ScheduleChildSubagentsTool
+    from agent_py_agent.agent.config import AgentConfig
+    from agent_py_agent.agent.core import SimpleAgent
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
+    parent = agent.subagents.create_run(goal="parent", thought="parent", plan=["parent"], parent_id=root.id, root_id=root.id)
+    agent._current_subagent_run_id = parent.id
+    tool = ScheduleChildSubagentsTool(agent)
+
+    first = json.loads(tool.execute({
+        "apply": True,
+        "children": [{"goal": "写一个家具品牌首页", "role": "worker", "agent_name": "小小傻妞-worker"}],
+    }).output)
+    second = json.loads(tool.execute({
+        "apply": True,
+        "children": [{"goal": "写一个家具品牌首页", "role": "worker", "agent_name": "小小傻妞-worker"}],
+    }).output)
+
+    assert first["created_run_ids"]
+    assert second["created_run_ids"]
+    assert second["reused_run_ids"] == []
 
 
 # LLM: _repair_create_params mirrors the repair suggested_tool_call shape used by parent acceptance.

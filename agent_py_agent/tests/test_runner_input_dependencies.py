@@ -8,9 +8,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.runner_input_dependencies import (
-    goal_input_refs,
-    goal_output_refs,
     missing_input_dependencies,
+    params_input_refs,
+    params_output_refs,
 )
 
 
@@ -79,23 +79,22 @@ def test_missing_input_dependencies_keeps_main_file_required_when_subdirs_option
     assert missing_input_dependencies(task) == ["README.md"]
 
 
-# LLM: Output-path wording must beat earlier "dependency" words in the same natural-language goal.
-# 函数用途: 复现家具页 E2E：前文“不依赖外部图片”，后文“输出路径 index.html”不能把产物路径误判为缺失输入。
-def test_output_path_ref_is_not_input_dependency_even_after_dependency_word(tmp_path):
+# LLM: Output refs must come from tool parameters, not natural-language goal text.
+# 函数用途: 复现家具页 E2E：普通描述里的路径不参与依赖判断，output_files 参数才是机器事实。
+def test_output_path_ref_is_parameter_fact_not_goal_fact(tmp_path):
     workspace = tmp_path / "fixture_project"
     run_dir = workspace / ".my_agent" / "subagents" / "subagent-worker"
     run_dir.mkdir(parents=True)
-    goal = (
-        "技术：单文件 HTML，不依赖外部图片/字体/脚本，用 CSS 完成视觉效果。\n"
-        "output_files: lab_outputs/furniture-home/index.html"
-    )
     task = SimpleNamespace(
-        goal=goal,
+        goal="技术：单文件 HTML，不依赖外部图片/字体/脚本，用 CSS 完成视觉效果。",
         task_dir=str(run_dir),
         allowed_write_roots=[str(workspace)],
         context_manifest={},
+        attributes={"output_files": ["lab_outputs/furniture-home/index.html"]},
     )
 
-    assert goal_input_refs(goal) == []
-    assert goal_output_refs(goal) == ["lab_outputs/furniture-home/index.html"]
+    assert params_input_refs({"goal": "required_read_paths: should-not-count.md"}) == []
+    assert params_output_refs({"output_files": ["lab_outputs/furniture-home/index.html"]}) == [
+        "lab_outputs/furniture-home/index.html"
+    ]
     assert missing_input_dependencies(task) == []

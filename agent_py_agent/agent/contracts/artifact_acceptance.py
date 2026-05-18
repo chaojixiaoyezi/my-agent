@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
+
+from ..action_protocol_core import ArtifactRef
 
 
 # LLM: ArtifactAcceptanceRequest bundles one artifact validation request.
@@ -56,9 +59,25 @@ class ArtifactAcceptanceReport:
         return {
             "ok": self.ok,
             "artifact_ref": self.artifact_ref,
+            "artifact_ref_payload": artifact_ref_payload(self.artifact_ref, self.artifact_kind).to_dict(),
             "artifact_kind": self.artifact_kind,
             "findings": [item.to_dict() for item in self.findings],
         }
+
+
+# LLM: artifact_ref_payload turns a validated file into the shared ArtifactRef contract.
+# 函数用途: 根据产物路径生成 artifact_id、kind、hash 和 size，后续恢复/QA 不再解析自然语言路径。
+def artifact_ref_payload(path: str | Path, kind: str = "") -> ArtifactRef:
+    artifact_path = Path(path)
+    digest = _artifact_hash(artifact_path)
+    suffix_kind = kind or _kind_for_path(artifact_path)
+    return ArtifactRef(
+        artifact_id=_artifact_id(artifact_path, digest),
+        path=str(artifact_path),
+        kind=suffix_kind,
+        hash=digest,
+        reserved={"size_bytes": _artifact_size(artifact_path)},
+    )
 
 
 # LLM: _HTMLAcceptanceParser collects actionable HTML refs without needing external parser packages.
@@ -234,6 +253,31 @@ def _kind_for_path(path: Path) -> str:
     return path.suffix.lower().lstrip(".") or "generic"
 
 
+# LLM: _artifact_hash keeps artifact refs content-addressable when the file exists.
+# 函数用途: 生成 sha256；缺失或不可读时返回空字符串，让 missing report 仍可序列化。
+def _artifact_hash(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+# LLM: _artifact_size records size as ref metadata without reading bodies into prompt.
+# 函数用途: 返回文件字节数；缺失时为 0。
+def _artifact_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+# LLM: _artifact_id is stable across runs for the same resolved path and content hash.
+# 函数用途: 生成短 artifact_id，便于 ledger/UI 展示和去重。
+def _artifact_id(path: Path, digest: str) -> str:
+    seed = f"{path.resolve(strict=False)}:{digest}"
+    return f"artifact:{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:16]}"
+
+
 # LLM: _placeholder_link_findings catches href placeholders that look clickable but go nowhere.
 # 函数用途: 找出 `href="#"`、空 href 或 javascript:void(0) 这类假链接/假按钮。
 def _placeholder_link_findings(parser: _HTMLAcceptanceParser) -> list[ArtifactFinding]:
@@ -316,6 +360,7 @@ __all__ = [
     "ArtifactAcceptanceReport",
     "ArtifactAcceptanceRequest",
     "ArtifactFinding",
+    "artifact_ref_payload",
     "validate_artifact",
     "validate_html_artifact",
 ]

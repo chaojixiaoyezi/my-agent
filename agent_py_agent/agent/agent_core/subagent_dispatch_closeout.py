@@ -8,9 +8,9 @@ from typing import ClassVar
 
 from ..backends import ModelResponse
 from ..subagents.role_templates import role_template_id_for_role
+from ..subagents.services.qa_role_contract import qa_roles_required_by_task
 from ._runtime_params import ToolLoopExecuteParams
 from .orchestration_parent_acceptance_repair import parent_acceptance_rejected
-from .orchestration_quality_intent import required_quality_roles_from_prompt
 from .orchestration_run_scope import (
     remembered_dispatched_orchestration_run_ids,
     remembered_orchestration_run_ids,
@@ -47,7 +47,7 @@ def subagent_dispatch_completion_response(request: DispatchCompletionRequest) ->
     tasks = _subagent_tasks(request.agent)
     if not tasks or not all_tasks_done_verified(tasks):
         return None
-    if _prompt_requires_uncreated_quality_roles(request.params.user_prompt, tasks):
+    if _task_scope_requires_uncreated_quality_roles(tasks):
         return None
     return ModelResponse(text=dispatch_completion_text(tasks), backend=request.backend)
 
@@ -91,8 +91,7 @@ def subagent_dispatch_final_response_guard(
     if not _has_closeout_scope(agent, executed_tools):
         return response
     tasks = _subagent_tasks(agent)
-    prompt = str(getattr(agent, "_current_user_prompt", "") or "")
-    missing_quality_roles = _missing_required_quality_roles(prompt, tasks)
+    missing_quality_roles = _missing_required_quality_roles(tasks)
     if missing_quality_roles:
         return ModelResponse(
             text=dispatch_missing_quality_roles_notice(tasks, missing_quality_roles),
@@ -249,26 +248,29 @@ def _task_in_scope(task: object, seen: set[str], root_ids: set[str]) -> bool:
     return bool(root_id and root_id in root_ids)
 
 
-# LLM: _prompt_requires_uncreated_quality_roles preserves explicit tester/acceptor workflow contracts.
-# 函数用途: 用户要求 worker 后继续创建测试/验收角色时，顶层不能因现有任务全绿而提前本地收口。
-def _prompt_requires_uncreated_quality_roles(prompt: str, tasks: list[object]) -> bool:
-    return bool(_missing_required_quality_roles(prompt, tasks))
+# LLM: _task_scope_requires_uncreated_quality_roles preserves explicit tester/acceptor workflow contracts.
+# 函数用途: 父任务 attributes.required_qa_roles 要求后续测试/验收时，顶层不能因现有任务全绿而提前本地收口。
+def _task_scope_requires_uncreated_quality_roles(tasks: list[object]) -> bool:
+    return bool(_missing_required_quality_roles(tasks))
 
 
-# LLM: _missing_required_quality_roles turns prompt intent into concrete missing role tokens.
-# 函数用途: 找出用户明确要求但尚未真实创建的 tester/acceptor 角色，防止 root 只靠口头总结跳过验收链路。
-def _missing_required_quality_roles(prompt: str, tasks: list[object]) -> list[str]:
-    required = _required_quality_roles(prompt)
+# LLM: _missing_required_quality_roles compares persisted task contracts to concrete role tokens.
+# 函数用途: 找出父任务结构化要求但尚未真实创建的 tester/acceptor 角色，防止 root 只靠口头总结跳过验收链路。
+def _missing_required_quality_roles(tasks: list[object]) -> list[str]:
+    required = _required_quality_roles(tasks)
     if not required:
         return []
     present = _present_role_tokens(tasks)
     return sorted(role for role in required if role not in present)
 
 
-# LLM: _required_quality_roles reads protocol fields plus explicit top-level QA agent wording.
-# 函数用途: 从当前用户 prompt 判断是否要求 tester/bug_finder/acceptor；只解析质量角色意图，不解析业务内容。
-def _required_quality_roles(prompt: str) -> set[str]:
-    return set(required_quality_roles_from_prompt(prompt))
+# LLM: _required_quality_roles reads only task.attributes QA role contracts.
+# 函数用途: 从本轮任务范围中读取 required_qa_roles / qa_roles，不解析用户 prompt 或任务 goal。
+def _required_quality_roles(tasks: list[object]) -> set[str]:
+    roles: set[str] = set()
+    for task in tasks:
+        roles.update(qa_roles_required_by_task(task))
+    return roles
 
 
 # LLM: _present_role_tokens normalizes role/name fields through template ids for deterministic closeout gating.

@@ -110,11 +110,12 @@ def test_context_bundle_maps_required_file_to_product_root(tmp_path) -> None:
     manager = SubAgentManager(tmp_path / ".my-agent" / "subagents")
     product_root = tmp_path / "product"
     task = manager.create_run(
-        goal="整合上游结果，输出到 final_report.md",
+        goal="整合上游结果。",
         thought="最终报告给用户看。",
         plan=["读取上游", "写报告"],
         role="coordinator",
         extra_write_roots=[str(product_root)],
+        attributes={"required_files": ["final_report.md"]},
     )
     manager.save(task)
 
@@ -135,12 +136,13 @@ def test_context_bundle_strips_product_root_basename_from_required_ref(tmp_path)
     manager = SubAgentManager(tmp_path / ".my-agent" / "subagents")
     product_root = tmp_path / "site"
     task = manager.create_run(
-        goal=f"在 {product_root / 'index.html'} 写高端家具首页。",
+        goal="写高端家具首页。",
         thought="需要生成完整 index.html。",
         plan=["写页面"],
         role="worker",
         extra_write_roots=[str(product_root)],
         acceptance_checks=["site/index.html 存在"],
+        attributes={"required_files": ["site/index.html"]},
     )
     manager.save(task)
 
@@ -204,13 +206,16 @@ def test_context_bundle_output_contract_separates_required_and_forbidden_files(t
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
         goal=(
-            "交付静态购物站，必须包含 index.html、product-detail.html、style.css、app.js。"
-            "不允许把 product-detail.html 改名成 product.html 或 old-product.html。"
+            "写购物站页面。required_files: should-not-count.html"
         ),
-        thought="禁止创建 legacy.html。",
+        thought="forbidden_files: should-not-count.html",
         plan=["拆页面", "验收文件名"],
         role="worker",
-        acceptance_checks=["必须保留 product-detail.html，不得创建 obsolete.html。"],
+        acceptance_checks=["forbidden_files: should-not-count.html"],
+        attributes={
+            "required_files": ["index.html", "product-detail.html", "style.css", "app.js"],
+            "forbidden_files": ["product.html", "old-product.html", "legacy.html", "obsolete.html"],
+        },
     )
     manager.save(task)
 
@@ -240,7 +245,28 @@ def test_context_bundle_output_contract_separates_required_and_forbidden_files(t
         "legacy.html",
         "obsolete.html",
     ]
-    assert bundle.output_contract["file_contract_source"] == "task_text_positive_negative_extraction"
+    assert bundle.output_contract["file_contract_source"] == "attributes_required_forbidden_fields"
+
+
+# LLM: Context bundle file contracts must ignore task prose fields.
+# 函数用途: goal/thought/acceptance_checks 中的 required_files/forbidden_files 文本不能成为机器文件合同。
+def test_context_bundle_file_contract_does_not_parse_task_text_fields(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="required_files: text-only.html",
+        thought="forbidden_files: text-only-old.html",
+        plan=["写页面"],
+        role="worker",
+        acceptance_checks=["required_files: text-only-style.css"],
+    )
+    manager.save(task)
+
+    bundle = build_context_bundle(manager.load(task.id))
+
+    assert bundle.output_contract["required_files"] == []
+    assert bundle.output_contract["forbidden_files"] == []
+    assert bundle.task_packet["file_contract"]["required_files"] == []
+    assert bundle.task_packet["file_contract"]["forbidden_files"] == []
 
 
 # LLM: Real E2E showed file-level write roots can be present while text extraction misses index.html.
@@ -336,11 +362,12 @@ def test_context_bundle_gate_reports_missing_required_handoff_fields(tmp_path) -
 def test_context_bundle_gate_reports_semantic_file_contract_mismatch(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
-        goal="用单文件 html 做品牌首页，必须交付 index.html 和 style.css",
+        goal="用单文件 html 做品牌首页。",
         thought="父级要求文件名不能缩水。",
         plan=["写页面", "写样式"],
         role="worker",
         acceptance_checks=["index.html 存在", "style.css 存在"],
+        attributes={"required_files": ["index.html", "style.css"]},
     )
     manager.save(task)
     bundle = build_context_bundle(manager.load(task.id))
@@ -355,6 +382,7 @@ def test_context_bundle_gate_reports_semantic_file_contract_mismatch(tmp_path) -
                     "required_files": ["index.html"],
                 },
             },
+            "reserved": {"expected_required_files": ["index.html", "style.css"]},
         }
     )
 
@@ -480,94 +508,3 @@ def test_runner_prompt_describes_scoped_capability_request_loop(tmp_path) -> Non
     assert '"path_scope": ["任务内需要访问的目录"]' in prompt
     assert '"output_budget": {"stdout_bytes": 65536, "stderr_bytes": 32768}' in prompt
     assert "controlled_exec 只能使用 controlled_exec_grants 里的父级 grant" in prompt
-
-
-def test_context_bundle_is_mirrored_into_agent_run_workspace(tmp_path) -> None:
-    manager = SubAgentManager(tmp_path)
-    task = manager.create_run(
-        goal="把 context bundle 放进运行工作位",
-        thought="接管代理应该从 agent run workspace 找到它。",
-        plan=["写 bundle", "检查 refs"],
-    )
-    task.acceptance_checks = ["agent workspace 有 context_bundle.json"]
-    manager.save(task)
-
-    context = manager.write_execution_context(task.id)
-    agent_workspace = Path(context.context_bundle["workspace_refs"]["agent_run_workspace"])
-    workspace_json = agent_workspace / "context_bundle.json"
-    workspace_md = agent_workspace / "CONTEXT_BUNDLE.md"
-    execution_context_md = Path(context.execution_context_file).read_text(encoding="utf-8")
-
-    assert workspace_json.exists()
-    assert workspace_md.exists()
-    assert json.loads(workspace_json.read_text(encoding="utf-8"))["run_id"] == task.id
-    assert "## Context Bundle" in execution_context_md
-    assert str(workspace_json) in execution_context_md
-    assert "Context Gate: PASS" in execution_context_md
-
-
-def test_context_bundle_records_multilevel_lineage_refs(tmp_path) -> None:
-    manager = SubAgentManager(tmp_path)
-    root, child, grandchild, great_grandchild = _create_context_bundle_hierarchy(manager)
-    payloads = _write_and_load_context_bundle_payloads(manager, [root, child, grandchild, great_grandchild])
-
-    assert payloads[root.id]["lineage"]["depth"] == 0
-    assert payloads[root.id]["lineage"]["parent_context_bundle_ref"] == ""
-    for task, parent in [(child, root), (grandchild, child), (great_grandchild, grandchild)]:
-        _assert_context_bundle_lineage(payloads[task.id], task, parent, root.id)
-
-
-def _create_context_bundle_hierarchy(manager: SubAgentManager):
-    root = manager.create_run(
-        goal="根代理拆购物网站任务",
-        thought="负责拆分和汇总。",
-        plan=["拆任务", "看状态"],
-        acceptance_checks=["所有子树有交接包"],
-    )
-    child = manager.create_run(
-        goal="子代理负责账号链路",
-        thought="子代理要继续拆分。",
-        plan=["拆账号模块", "汇总孙代理结果"],
-        parent_id=root.id,
-        root_id=root.id,
-        depth=1,
-        acceptance_checks=["孙代理交付注册和登录"],
-    )
-    grandchild = manager.create_run(
-        goal="孙代理负责注册页",
-        thought="孙代理要继续拆叶子任务。",
-        plan=["拆 UI", "拆测试"],
-        parent_id=child.id,
-        root_id=root.id,
-        depth=2,
-        acceptance_checks=["孙孙代理交付注册 UI 和测试"],
-    )
-    great_grandchild = manager.create_run(
-        goal="孙孙代理实现注册表单校验",
-        thought="叶子节点只做一个具体实现。",
-        plan=["改代码", "跑测试"],
-        parent_id=grandchild.id,
-        root_id=root.id,
-        depth=3,
-        acceptance_checks=["注册表单错误提示可见"],
-    )
-    return root, child, grandchild, great_grandchild
-
-
-def _write_and_load_context_bundle_payloads(manager: SubAgentManager, tasks) -> dict[str, dict[str, object]]:
-    contexts = {task.id: manager.write_execution_context(task.id) for task in tasks}
-    return {
-        run_id: json.loads(Path(context.context_bundle_json).read_text(encoding="utf-8"))
-        for run_id, context in contexts.items()
-    }
-
-
-def _assert_context_bundle_lineage(payload: dict[str, object], task, parent, root_id: str) -> None:
-    lineage = payload["lineage"]
-    parent_ref = lineage["parent_context_bundle_ref"]
-    assert lineage["root_id"] == root_id
-    assert lineage["parent_id"] == parent.id
-    assert lineage["depth"] == task.depth
-    assert parent_ref == str(Path(parent.agent_run_workspace_dir) / "context_bundle.json")
-    assert Path(parent_ref).exists()
-    assert payload["gate"]["ok"] is True

@@ -147,58 +147,14 @@ class TestNormalizeContextPacks:
         assert len(result) == 1
 
 
-class TestExtractWriteDirs:
-    """测试 _extract_write_dirs() 函数。"""
+class TestNoNaturalWriteDirExtraction:
+    """确认 manager_base 不再从自然语言目标里抽写入根。"""
 
-    def test_extracts_absolute_paths(self):
-        """提取绝对路径。"""
-        from agent_py_agent.agent.subagents.manager_base import _extract_write_dirs
+    def test_extract_write_dirs_api_removed(self):
+        """写入根必须来自 extra_write_roots/workspace/refs，不再有自然语言兜底 API。"""
+        import agent_py_agent.agent.subagents.manager_base as manager_base
 
-        goal = "在 /Users/test/project 和 /tmp/output 目录下操作"
-        result = _extract_write_dirs(goal)
-        assert "/Users/test/project" in result
-        assert "/tmp/output" in result
-
-    def test_extracts_home_paths(self):
-        """提取 home 目录路径。"""
-        from agent_py_agent.agent.subagents.manager_base import _extract_write_dirs
-
-        goal = "在 ~/Documents 和 ~/Downloads 目录工作"
-        result = _extract_write_dirs(goal)
-        assert "~/Documents" in result
-        assert "~/Downloads" in result
-
-    def test_deduplicates(self):
-        """去重。"""
-        from agent_py_agent.agent.subagents.manager_base import _extract_write_dirs
-
-        goal = "/tmp/dir /tmp/dir /tmp/dir"
-        result = _extract_write_dirs(goal)
-        assert len(result) == 1
-
-    def test_ignores_slash_separated_deliverable_labels(self):
-        """requirements/research-brief 这类标签串不是 Unix 绝对路径。"""
-        from agent_py_agent.agent.subagents.manager_base import _extract_write_dirs
-
-        goal = (
-            "deliverables: requirements/research-brief/implementation/README/"
-            "bug-report/test-report/acceptance-verdict"
-        )
-        result = _extract_write_dirs(goal)
-
-        assert result == []
-
-    def test_ignores_url_paths_when_extracting_write_dirs(self):
-        """图片/API URL 不是本地写入根。"""
-        from agent_py_agent.agent.subagents.manager_base import _extract_write_dirs
-
-        goal = (
-            "在 /Users/test/project/build 写页面，商品图片可用 https://picsum.photos/300/200 "
-            "或 https://images.unsplash.com/photo-1.jpg。"
-        )
-        result = _extract_write_dirs(goal)
-
-        assert result == ["/Users/test/project/build"]
+        assert not hasattr(manager_base, "_extract_write_dirs")
 
 
 class TestBuildWorkOrderPaths:

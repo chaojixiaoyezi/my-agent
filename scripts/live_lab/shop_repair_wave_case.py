@@ -14,6 +14,7 @@ from agent_py_agent.agent.agent_core.subagent_dispatch_closeout_resolution impor
     blocking_task_ids,
     task_resolved_for_closeout,
 )
+from agent_py_agent.agent.subagents.services.hierarchy_leaf_targets import task_actual_target_tokens
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.manager_base import SubAgentManagerInitParams
 
@@ -107,8 +108,8 @@ def seed_failed_shop_child(fixture_root: Path) -> ShopRepairSeed:
         extra_write_roots=[str(output.parent)],
         acceptance_checks=[
             "购物站必须有完整注册、登录、购物车、结算和下单成功流程",
-            "required_dom_ids: register, login, catalog, cart, checkout, order-confirmation",
         ],
+        attributes={"required_dom_ids": ["register", "login", "catalog", "cart", "checkout", "order-confirmation"]},
     )
     task.status = "AWAITING_ACCEPTANCE"
     task.verification_status = "UNVERIFIED"
@@ -125,7 +126,7 @@ def seed_failed_shop_child(fixture_root: Path) -> ShopRepairSeed:
 def assert_shop_repair_wave_created(fixture_root: Path, seed_run_id: str) -> None:
     tasks = _task_snapshots(Path(fixture_root))
     seed = _task_by_id(tasks, seed_run_id)
-    repairs = [task for task in tasks if _is_verified_repair(task, seed_run_id)]
+    repairs = [task for task in tasks if seed and _is_verified_repair(task, seed)]
     if not repairs:
         raise RuntimeError("没有发现已验证的修复小傻妞。")
     if seed and not task_resolved_for_closeout(seed, tasks):
@@ -228,17 +229,18 @@ def _task_snapshots(root: Path) -> list[SimpleNamespace]:
     return tasks
 
 
-# LLM: _is_verified_repair requires terminal status plus repair intent and target overlap.
-# 函数用途: 判断某个 run 是否真的是修复 sibling，而不是另一个无关完成任务。
-def _is_verified_repair(task: SimpleNamespace, seed_run_id: str) -> bool:
-    if str(getattr(task, "id", "") or "") == seed_run_id:
+# LLM: _is_verified_repair requires terminal status plus structured artifact target overlap.
+# 函数用途: 判断某个 run 是否覆盖同一个失败购物站产物；不再从名称或 goal 里猜“修复”字样。
+def _is_verified_repair(task: SimpleNamespace, seed: SimpleNamespace) -> bool:
+    if str(getattr(task, "id", "") or "") == str(getattr(seed, "id", "") or ""):
         return False
     if str(getattr(task, "status", "") or "").upper() != "DONE":
         return False
     if str(getattr(task, "verification_status", "") or "").upper() != "VERIFIED":
         return False
-    text = " ".join([str(getattr(task, "agent_name", "") or ""), str(getattr(task, "goal", "") or "")]).lower()
-    return any(token in text for token in ("修复", "补齐", "fix", "repair", "patch"))
+    seed_targets = task_actual_target_tokens(seed)
+    task_targets = task_actual_target_tokens(task)
+    return bool(seed_targets and task_targets and seed_targets.issubset(task_targets))
 
 
 # LLM: _task_by_id performs exact lookup so user-provided ids never become glob patterns.

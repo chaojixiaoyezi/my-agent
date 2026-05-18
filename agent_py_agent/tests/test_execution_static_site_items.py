@@ -6,7 +6,10 @@ from agent_py_agent.agent.subagents.execution_test_items import (
     TestItemPreparationRequest,
     prepare_test_items,
 )
-from agent_py_agent.agent.subagents.static_required_files import required_static_files_for_task
+from agent_py_agent.agent.subagents.static_required_files import (
+    required_static_dom_ids_for_task,
+    required_static_files_for_task,
+)
 
 
 # LLM: Missing artifact lists from real runners must still produce static web checks.
@@ -93,13 +96,30 @@ def test_required_static_files_scope_to_concrete_allowed_write_file(tmp_path):
     site.mkdir()
     task = SimpleNamespace(
         goal=(
-            "创建 artifacts/index1.html。"
-            "父级必需文件/产物名：index1.html、index2.html。"
+            "创建 artifacts/index1.html。required_files: index1.html,index2.html"
         ),
         thought="",
         description="",
-        acceptance_checks=["文件路径：" + str(site / "index1.html")],
+        acceptance_checks=["required_dom_ids: should-not-count"],
         allowed_write_roots=[str(site / "index1.html")],
+        attributes={"required_files": ["index1.html", "index2.html"], "required_dom_ids": ["hero"]},
     )
 
     assert required_static_files_for_task(task) == ["index1.html"]
+    assert required_static_dom_ids_for_task(task) == ["hero"]
+
+
+# LLM: task-level static contracts must ignore goal and acceptance text.
+# 函数用途: required_files/required_dom_ids 写在普通文本字段里时，不再成为运行时机器验收事实。
+def test_required_static_contracts_for_task_do_not_parse_text_fields(tmp_path):
+    task = SimpleNamespace(
+        goal="required_files: index.html",
+        thought="required_dom_ids: hero",
+        description="required_files: app.js",
+        acceptance_checks=["required_dom_ids: catalog"],
+        allowed_write_roots=[str(tmp_path / "index.html")],
+        attributes={},
+    )
+
+    assert required_static_files_for_task(task) == []
+    assert required_static_dom_ids_for_task(task) == []

@@ -193,7 +193,11 @@ def test_tool_loop_blocks_predelegation_source_body_read():
         agent = SimpleAgent(cfg, workspace)
         agent.backend = _PredelegationSourceReadBackend()
 
-        result = agent.run("请组织多层小傻妞协作完成。", save=False)
+        result = agent.run(
+            "请组织多层小傻妞协作完成。",
+            save=False,
+            task_attributes={"subagent_delegation": True},
+        )
 
         assert result.response == "已改为把资料路径交给小傻妞。"
         assert result.tool_rounds == 1

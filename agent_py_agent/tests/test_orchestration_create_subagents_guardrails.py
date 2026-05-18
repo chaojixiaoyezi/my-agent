@@ -15,15 +15,16 @@ class TestCreateSubagentsToolDelegationGuard:
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent.config.subagent_workflow_mode = "auto"
-        mock_agent._current_user_prompt = "delegation_constraints: working_buttons"
         mock_agent.subagents.workspace_root = Path("/tmp/project")
         mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
 
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({
-            "goal": "创建 index1.html。\nconstraint_overrides: allow_dead_buttons",
+            "goal": "创建 index1.html。",
             "role": "worker",
             "extra_write_roots": ["/tmp/project/artifacts"],
+            "delegation_constraints": ["working_buttons"],
+            "constraint_overrides": ["allow_dead_buttons"],
         })
 
         assert result.ok is False
@@ -67,15 +68,16 @@ class TestCreateSubagentsToolDelegationGuard:
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent.config.subagent_workflow_mode = "auto"
-        mock_agent._current_user_prompt = "delegation_constraints: verified_images"
         mock_agent.subagents.workspace_root = Path("/tmp/project")
         mock_agent.subagents.workspace_roots = [Path("/tmp/project")]
 
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({
-            "goal": "创建 index1.html。\nconstraint_overrides: allow_unverified_remote_images",
+            "goal": "创建 index1.html。",
             "role": "worker",
             "extra_write_roots": ["/tmp/project/artifacts"],
+            "delegation_constraints": ["verified_images"],
+            "constraint_overrides": ["allow_unverified_remote_images"],
         })
 
         assert result.ok is False
@@ -114,19 +116,14 @@ class TestCreateSubagentsToolRawPromptRepair:
         assert params.agent_name == "小傻妞-coordinator"
 
     def test_explicit_coordinator_seed_inherits_raw_user_file_and_hierarchy_contract(self):
-        """主代理摘要 root goal 时，工具层要补回原始用户 prompt 的机器字段合同。"""
+        """root/coordinator 机器合同必须来自工具参数 attributes，而不是原始用户 prompt。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent.config.subagent_workflow_mode = "off"
-        mock_agent._current_user_prompt = (
-            "required_files: index.html, products.html, product-detail.html, style.css, app.js\n"
-            "forbidden_files: product.html, old-product.html, legacy.html, obsolete.html, "
-            "output.json, RUNNER_RESULT.md, execution_context.json\n"
-            "hierarchy_contracts: depth=1 小傻妞-* | depth=2 小小傻妞-* | depth=3 小小小傻妞-* | max_depth=3"
-        )
+        mock_agent._current_user_prompt = "用户自然语言里提到 product.html 和 depth=3 都不能被代码当事实。"
 
         mock_task = MagicMock()
         mock_task.id = "root_001"
@@ -144,28 +141,28 @@ class TestCreateSubagentsToolRawPromptRepair:
             ),
             "role": "coordinator",
             "extra_write_roots": ["/tmp/shop/build"],
+            "required_files": ["index.html", "products.html", "product-detail.html", "style.css", "app.js"],
+            "forbidden_files": [
+                "product.html", "old-product.html", "legacy.html", "obsolete.html",
+                "output.json", "RUNNER_RESULT.md", "execution_context.json",
+            ],
+            "hierarchy_contracts": ["depth=1 小傻妞-*", "depth=2 小小傻妞-*", "depth=3 小小小傻妞-*", "max_depth=3"],
         })
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
-        assert "forbidden_files:" in params.goal
-        assert "product.html" in params.goal
-        assert "RUNNER_RESULT.md" in params.goal
-        assert "hierarchy_contracts:" in params.goal
-        assert "depth=3" in params.goal
+        assert params.attributes["forbidden_files"][-2:] == ["RUNNER_RESULT.md", "execution_context.json"]
+        assert "depth=3 小小小傻妞-*" in params.attributes["hierarchy_contracts"]
 
     def test_explicit_coordinator_seed_repairs_wrong_lineage_summary_from_raw_prompt(self):
-        """模型写错层级前缀时，root seed 必须保留用户原始结构化命名合同。"""
+        """模型写错层级前缀时，root seed 必须保留工具参数里的结构化命名合同。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent.config.subagent_workflow_mode = "off"
-        mock_agent._current_user_prompt = (
-            "hierarchy_contracts: depth=1 小傻妞-* | depth=2 小小傻妞-* | "
-            "depth=3 小小小傻妞-* | max_depth=3 | forbidden_depth>=4 小小小小傻妞-*"
-        )
+        mock_agent._current_user_prompt = "自然语言里提到小小小傻妞不应成为机器事实。"
 
         mock_task = MagicMock()
         mock_task.id = "root_001"
@@ -182,10 +179,16 @@ class TestCreateSubagentsToolRawPromptRepair:
                 "depth=3 用“小小的傻妞-*”；本轮 max_depth=3，禁止创建“小小小傻妞-*”节点。"
             ),
             "role": "coordinator",
+            "hierarchy_contracts": [
+                "depth=1 小傻妞-*",
+                "depth=2 小小傻妞-*",
+                "depth=3 小小小傻妞-*",
+                "max_depth=3",
+                "forbidden_depth>=4 小小小小傻妞-*",
+            ],
         })
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
-        assert "hierarchy_contracts:" in params.goal
-        assert "小小小傻妞-*" in params.goal
-        assert "小小小小傻妞-*" in params.goal
+        assert "depth=3 小小小傻妞-*" in params.attributes["hierarchy_contracts"]
+        assert "forbidden_depth>=4 小小小小傻妞-*" in params.attributes["hierarchy_contracts"]

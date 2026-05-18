@@ -4,7 +4,7 @@
 """Patch apply test validation and execution helpers.
 
 Human version:
-这个模块处理 patch apply 相关的测试命令提取、验证和执行。
+这个模块处理 patch apply 相关的测试命令验证和执行。
 不涉及文件写入或边界检查。
 """
 
@@ -37,21 +37,6 @@ def _patch_test_argv(command: str) -> list[str]:
     if os.name == "nt" and argv and argv[0] == "python3":
         argv[0] = sys.executable
     return argv
-
-
-# LLM: extract_patch_test_command 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
-# 函数用途: 处理extract补丁testcommand相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持补丁文件、预演结果和应用报告上的返回值和副作用边界稳定。
-def extract_patch_test_command(check: str) -> str:
-    """Extract test command from acceptance check string."""
-
-    text = str(check or "").strip()
-    lowered = text.lower()
-    for prefix in ("command:", "test:", "run:"):
-        if lowered.startswith(prefix):
-            return text[len(prefix):].strip()
-    if text.startswith("`") and text.endswith("`") and len(text) > 2:
-        return text[1:-1].strip()
-    return ""
 
 
 # LLM: validate_patch_test_command 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。

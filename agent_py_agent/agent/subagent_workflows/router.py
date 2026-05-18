@@ -5,7 +5,6 @@ from __future__ import annotations
 
 """route parent goals to reusable workflow templates without mutating task state."""
 
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -48,6 +47,18 @@ class _RouteDecisionFields:
     issues: list[str]
 
 
+# LLM: WorkflowRouteRequest bundles workflow route inputs for the public router boundary.
+# 类用途: 让 workflow 路由只接收一个结构化参数包，避免继续增加散参。
+@dataclass(frozen=True)
+class WorkflowRouteRequest:
+    goal: str
+    config: Any = None
+    template_store: WorkflowTemplateStore | None = None
+    explicit_template_id: str = ""
+    workflow_task_type: str = ""
+    workflow_risk_tags: object = None
+
+
 # LLM: _TemplateSelectionRequest 属于子代理工作流编排的类边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
 # 类用途: 集中保存模板selection请求字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发模板选择、步骤编译和验收策略相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
@@ -73,14 +84,6 @@ class _RouteFieldsRequest:
     reason: str = "Subagent workflow routing is disabled by config."
 
 
-_STRUCTURED_ROUTE_FIELD_RE = re.compile(
-    r"^\s*(?:[-*]\s*)?(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(?P<tail>.*)$"
-)
-_WORKFLOW_TEMPLATE_FIELD_NAMES = frozenset(
-    {"workflow_template_id", "preferred_workflow_template", "subagent_workflow_template"}
-)
-_WORKFLOW_TASK_TYPE_FIELD_NAMES = frozenset({"workflow_task_type", "task_type"})
-_WORKFLOW_RISK_TAGS_FIELD_NAMES = frozenset({"workflow_risk_tags", "risk_tags"})
 _TASK_TYPE_TEMPLATE_MAP = {
     "quality_deliverable": PRODUCER_CRITIC_TEMPLATE_ID,
     "code_or_bugfix": CODE_FEATURE_TEMPLATE_ID,
@@ -91,23 +94,25 @@ _TASK_TYPE_TEMPLATE_MAP = {
 # LLM: route_workflow 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
 # 函数用途: 处理route工作流相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def route_workflow(
-    goal: str,
-    *,
-    config: Any = None,
-    template_store: WorkflowTemplateStore | None = None,
-    explicit_template_id: str = "",
+    request: WorkflowRouteRequest,
 ) -> WorkflowRouteDecision:
     """Choose a workflow template for a parent goal."""
 
-    store, available_template_ids, issues, mode = _workflow_route_inputs(config, template_store)
-    task_type, preferred_template_id, risk_tags = _classify_goal(goal)
+    store, available_template_ids, issues, mode = _workflow_route_inputs(request.config, request.template_store)
+    task_type = _workflow_task_type(request.workflow_task_type)
+    preferred_template_id = _TASK_TYPE_TEMPLATE_MAP.get(task_type, SINGLE_WORKER_TEMPLATE_ID)
+    risk_tags = _workflow_risk_tags(
+        request.workflow_risk_tags,
+        task_type=task_type,
+        explicit_template_id=request.explicit_template_id,
+    )
 
     if mode == "off":
         return _disabled_route_decision(_route_fields(_RouteFieldsRequest(mode, "", task_type, risk_tags, available_template_ids, issues)))
 
     selected_template_id, reason = _select_template(
         _TemplateSelectionRequest(
-            explicit_template_id=explicit_template_id,
+            explicit_template_id=request.explicit_template_id,
             preferred_template_id=preferred_template_id,
             store=store,
             available_template_ids=available_template_ids,
@@ -209,69 +214,30 @@ def _select_template(request: _TemplateSelectionRequest) -> tuple[str, str]:
     return "", "No workflow template could be selected."
 
 
-# LLM: _classify_goal reads only structured workflow fields; the LLM can choose templates, but code must not infer them from prose keywords.
-# 函数用途: 从 workflow_task_type、workflow_template_id、risk_tags 这类机器字段选择模板；普通自然语言目标默认走 single worker。
-def _classify_goal(goal: str) -> tuple[str, str, list[str]]:
-    fields = _workflow_goal_fields(goal)
-    task_type = fields.get("task_type") or ("simple" if fields.get("template_id") else _fallback_task_type(goal))
-    preferred = fields.get("template_id") or _TASK_TYPE_TEMPLATE_MAP.get(task_type, SINGLE_WORKER_TEMPLATE_ID)
-    risk_tags = fields.get("risk_tags", [])
-    if not risk_tags:
-        risk_tags = ["explicit_workflow"] if task_type != "simple" or fields.get("template_id") else ["low_scope"]
-    return task_type, preferred, risk_tags
+# LLM: _workflow_task_type normalizes explicit machine task-type values only.
+# 函数用途: 从 WorkflowPlanConstraints.workflow_task_type 读取模板类型；普通 goal 文本不参与路由。
+def _workflow_task_type(value: object) -> str:
+    task_type = str(value or "").strip().lower().replace("-", "_")
+    return task_type if task_type in _TASK_TYPE_TEMPLATE_MAP else "simple"
 
 
-# LLM: _fallback_task_type is a small workflow router fallback until LLM/template selection is externalized.
-# 函数用途: workflow_mode=plan 时，把明确代码/bugfix/test 任务路由到代码拆分模板；普通任务仍走 single worker。
-def _fallback_task_type(goal: str) -> str:
-    text = str(goal or "").lower()
-    code_tokens = ("bug", "fix", "api", "test", "tests", "code", "refactor", "implement", "function", "class")
-    return "code_or_bugfix" if any(token in text for token in code_tokens) else "simple"
+# LLM: _workflow_risk_tags preserves explicit structured risk tags without route guessing.
+# 函数用途: 从 workflow_risk_tags 参数读取审计标签；缺省时只标记是否显式 workflow。
+def _workflow_risk_tags(value: object, *, task_type: str, explicit_template_id: str) -> list[str]:
+    tags = _token_list(value)
+    if tags:
+        return tags
+    return ["explicit_workflow"] if task_type != "simple" or str(explicit_template_id or "").strip() else ["low_scope"]
 
 
-# LLM: _workflow_goal_fields extracts shallow protocol fields from a goal without interpreting prose.
-# 函数用途: 支持 `workflow_task_type: code_or_bugfix`、`workflow_template_id: ...` 和 `risk_tags: a,b`。
-def _workflow_goal_fields(goal: str) -> dict[str, Any]:
-    fields: dict[str, Any] = {}
-    for raw in str(goal or "").splitlines():
-        match = _STRUCTURED_ROUTE_FIELD_RE.match(raw.strip())
-        if match:
-            _apply_workflow_goal_field(fields, match.group("field"), match.group("tail"))
-    return fields
-
-
-# LLM: _apply_workflow_goal_field maps one protocol field to the router field dict.
-# 函数用途: 把 workflow 字段归一到 template_id/task_type/risk_tags，保持主解析循环浅。
-def _apply_workflow_goal_field(fields: dict[str, Any], field_name: str, value: str) -> None:
-    field = field_name.strip().lower()
-    tail = value.strip()
-    if not tail:
-        return
-    if field in _WORKFLOW_TEMPLATE_FIELD_NAMES:
-        fields["template_id"] = _first_token(tail)
-        return
-    if field in _WORKFLOW_TASK_TYPE_FIELD_NAMES:
-        fields["task_type"] = _first_token(tail)
-        return
-    if field in _WORKFLOW_RISK_TAGS_FIELD_NAMES:
-        fields["risk_tags"] = _list_tokens(tail)
-
-
-# LLM: _first_token keeps workflow field values machine-shaped.
-# 函数用途: 从结构化字段里取第一个 id；忽略普通句子，避免把自然语言当模板 id。
-def _first_token(value: str) -> str:
-    tokens = _list_tokens(value)
-    return tokens[0] if tokens else ""
-
-
-# LLM: _list_tokens accepts identifier-like route values only.
-# 函数用途: 解析逗号、顿号、竖线分隔的机器 token；中文长句不会生成 workflow 决策 token。
-def _list_tokens(value: str) -> list[str]:
-    return [
-        item
-        for item in re.split(r"[\s,，、|/]+", str(value or "").strip().lower())
-        if re.fullmatch(r"[a-zA-Z0-9_-]+", item or "")
-    ]
+# LLM: _token_list normalizes already-structured route fields.
+# 函数用途: 支持字符串、列表、元组形式的机器 token；不扫描 goal/prompt 自然语言。
+def _token_list(value: object) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        values = [str(item or "").strip().lower().replace("-", "_") for item in value]
+    else:
+        values = [str(value or "").strip().lower().replace("-", "_")]
+    return [item for item in values if item and all(ch.isalnum() or ch == "_" for ch in item)]
 
 
 # LLM: _format_store_issue 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。

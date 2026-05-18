@@ -1,5 +1,6 @@
 # LLM: Static site validator gives parent acceptance a deterministic check for generated web artifacts.
 # 模块用途: 检查静态站点目录的必需文件、本地链接/资源和模板占位符，不执行 JS、不访问网络。
+# 2026-05-18: strict_dom_bindings lets root/subagent Live Lab require all JS id lookups to match real DOM.
 
 from __future__ import annotations
 
@@ -90,6 +91,7 @@ class StaticSiteScanOptions:
     check_complete_html: bool
     check_controls: bool
     check_forms: bool
+    strict_dom_bindings: bool
     required_dom_ids: list[str]
 
 
@@ -164,6 +166,7 @@ def _scan_options(test: dict[str, Any]) -> StaticSiteScanOptions:
         check_complete_html=test.get("require_complete_html", False) is True,
         check_controls=test.get("check_inert_controls", True) is not False,
         check_forms=test.get("check_form_bindings", True) is not False,
+        strict_dom_bindings=test.get("strict_dom_bindings", False) is True,
         required_dom_ids=string_list(test.get("required_dom_ids")),
     )
 
@@ -209,7 +212,13 @@ def _finalize_dom_checks(
     combined_script_text = "\n".join(state.script_texts)
     if options.check_forms:
         result.form_binding_hits.extend(form_binding_hits(state.form_ids, combined_script_text))
-    result.missing_dom_id_hits.extend(missing_dom_id_hits(state.element_ids, combined_script_text))
+    result.missing_dom_id_hits.extend(
+        missing_dom_id_hits(
+            state.element_ids,
+            combined_script_text,
+            allow_optional_missing=not options.strict_dom_bindings,
+        )
+    )
     result.missing_dom_id_hits.extend(_missing_required_dom_id_hits(state.element_ids, options.required_dom_ids))
 
 

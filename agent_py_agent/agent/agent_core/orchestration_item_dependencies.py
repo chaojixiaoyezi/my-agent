@@ -9,11 +9,11 @@ from pathlib import Path
 
 from .orchestration_create_items import CreateSubagentItem
 from .parameters import _string_list
-from .runner_input_dependencies import goal_input_refs, goal_output_refs
+from .runner_input_dependencies import params_input_refs, params_output_refs
 
 
 # LLM: enrich_item_dependencies preserves item order while adding refs-first sibling dependencies.
-# 函数用途: 根据 items[] 里的 agent_name/goal 推断上游输出和下游输入，避免下游子代理抢跑。
+# 函数用途: 根据 items[] 里的依赖字段、agent_name 和 output refs 推断上游输出和下游输入，避免下游子代理抢跑。
 def enrich_item_dependencies(items: list[CreateSubagentItem]) -> list[CreateSubagentItem]:
     enriched: list[CreateSubagentItem] = []
     producers: list[_Producer] = []
@@ -21,7 +21,7 @@ def enrich_item_dependencies(items: list[CreateSubagentItem]) -> list[CreateSuba
         refs = _inferred_required_refs(item, producers)
         next_item = _with_required_refs(item, refs) if refs else item
         enriched.append(next_item)
-        producers.append(_Producer.from_item(index, item, goal_output_refs(item.goal)))
+        producers.append(_Producer.from_item(index, item, params_output_refs(item.params)))
     return enriched
 
 
@@ -33,18 +33,17 @@ def item_dependency_edges(items: list[CreateSubagentItem]) -> list[list[int]]:
     for index, item in enumerate(items):
         deps = [producer.index for producer in producers if _depends_on_producer(item, producer)]
         edges.append(deps)
-        producers.append(_Producer.from_item(index, item, goal_output_refs(item.goal)))
+        producers.append(_Producer.from_item(index, item, params_output_refs(item.params)))
     return edges
 
 
-# LLM: _Producer keeps only the lightweight facts needed to connect later item goals.
-# 类用途: 记录一个已声明产物的上游子代理名称、目标和输出路径，供后续 item 依赖推断。
+# LLM: _Producer keeps only lightweight facts needed to connect explicit dependency fields.
+# 类用途: 记录一个已声明产物的上游子代理名称、角色和输出路径，供后续 item 依赖推断。
 @dataclass(frozen=True)
 class _Producer:
     index: int
     agent_name: str
     role: str
-    goal: str
     outputs: list[str]
 
     # LLM: from_item normalizes producer identity without depending on persisted SubAgentTask.
@@ -55,7 +54,6 @@ class _Producer:
             index=index,
             agent_name=str(item.params.get("agent_name") or "").strip(),
             role=str(item.params.get("role") or "").strip(),
-            goal=item.goal,
             outputs=outputs,
         )
 
@@ -63,7 +61,7 @@ class _Producer:
 # LLM: _inferred_required_refs combines explicit input paths with prior sibling output refs.
 # 函数用途: 只把结构化 input refs 和显式 sibling dependency 字段转成 required_read_paths。
 def _inferred_required_refs(item: CreateSubagentItem, producers: list[_Producer]) -> list[str]:
-    refs = goal_input_refs(item.goal)
+    refs = params_input_refs(item.params)
     for producer in producers:
         if producer.outputs and _explicit_dependency_matches(item, producer):
             refs.extend(producer.outputs)
@@ -74,7 +72,7 @@ def _inferred_required_refs(item: CreateSubagentItem, producers: list[_Producer]
 # 函数用途: 判断当前 item 是否应该等待某个上游 item；自然语言提到某代理名不再产生硬依赖。
 def _depends_on_producer(item: CreateSubagentItem, producer: _Producer) -> bool:
     return (
-        _refs_overlap(goal_input_refs(item.goal), producer.outputs)
+        _refs_overlap(params_input_refs(item.params), producer.outputs)
         or _explicit_dependency_matches(item, producer)
     )
 
@@ -110,10 +108,10 @@ def _refs_overlap(inputs: list[str], outputs: list[str]) -> bool:
     return any(_path_ref_matches(input_ref, output_ref) for input_ref in inputs for output_ref in outputs)
 
 
-# LLM: _explicit_dependency_matches accepts dependency labels from params or protocol fields.
-# 函数用途: 支持 `dependencies: [...]` 参数或 `dependencies: label` goal 字段匹配上游产物 stem、代理短名或完整代理名。
+# LLM: _explicit_dependency_matches accepts dependency labels from params only.
+# 函数用途: 支持 dependencies/depends_on/workflow_depends_on 参数匹配上游产物 stem、代理短名或完整代理名。
 def _explicit_dependency_matches(item: CreateSubagentItem, producer: _Producer) -> bool:
-    tokens = _dependency_tokens(item.params, item.goal)
+    tokens = _dependency_tokens(item.params)
     if not tokens:
         return False
     producer_tokens = _producer_dependency_tokens(producer)
@@ -121,35 +119,12 @@ def _explicit_dependency_matches(item: CreateSubagentItem, producer: _Producer) 
 
 
 # LLM: _dependency_tokens normalizes explicit item dependency fields into loose labels.
-# 函数用途: 读取 dependencies/depends_on/workflow_depends_on 参数和 goal 机器字段，供 create 阶段转成真实 run 级边。
-def _dependency_tokens(params: dict[str, object], goal: str = "") -> set[str]:
+# 函数用途: 读取 dependencies/depends_on/workflow_depends_on 参数，供 create 阶段转成真实 run 级边。
+def _dependency_tokens(params: dict[str, object]) -> set[str]:
     raw = []
     for key in ("dependencies", "depends_on", "workflow_depends_on"):
         raw.extend(_string_list(params.get(key)))
-    raw.extend(_goal_dependency_values(goal))
     return {_token(value) for value in raw if _token(value)}
-
-
-# LLM: _goal_dependency_values reads dependency protocol fields from goal text.
-# 函数用途: 允许 LLM 在 goal 中写 `dependencies: prior_label`，但普通自然语言不会生成依赖。
-def _goal_dependency_values(goal: str) -> list[str]:
-    values: list[str] = []
-    active = False
-    pattern = re.compile(r"^\s*(?:[-*]\s*)?(dependencies|depends_on|workflow_depends_on)\s*[:=]\s*(.*)$", re.I)
-    for raw in str(goal or "").splitlines():
-        line = raw.strip()
-        match = pattern.match(line)
-        if match:
-            active = True
-            values.extend(_dependency_value_items(match.group(2)))
-            continue
-        if not active:
-            continue
-        if not line.startswith(("-", "*")):
-            active = False
-            continue
-        values.extend(_dependency_value_items(line.lstrip("-* ")))
-    return values
 
 
 # LLM: _dependency_value_items splits compact protocol dependency lists.

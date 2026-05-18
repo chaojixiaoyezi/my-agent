@@ -19,12 +19,13 @@ ORCHESTRATION_TOOLS = ["schedule_child_subagents", "dispatch_subagents", "subage
 # 函数用途: 构造点名 tester/bug_finder/acceptor 的父任务，复用在 QA advice 测试里。
 def _qa_parent(manager: SubAgentManager, *, extra_write_roots: list[str] | None = None):
     return manager.create_run(
-        goal="required_qa_roles: tester, bug_finder, acceptor",
+        goal="父级要做真实分工，完成后需要质量检查。",
         thought="父级要做真实分工。",
         plan=["delegate"],
         role="coordinator",
         allowed_tools=ORCHESTRATION_TOOLS,
         extra_write_roots=extra_write_roots or [],
+        attributes={"required_qa_roles": ["tester", "bug_finder", "acceptor"]},
     )
 
 

@@ -145,8 +145,8 @@ def test_hierarchy_schedule_recovers_report_role_from_child_agent_name(tmp_path)
     assert str(deliverables) in writer.allowed_write_roots
 
 
-# LLM: test_hierarchy_schedule_grants_worker_path_written_by_child_spec covers real coordinator output.
-# 函数用途: coordinator 给 worker 的 goal 自己写出产物目录时，worker 应拿到该目录写权限。
+# LLM: test_hierarchy_schedule_grants_worker_structured_write_root covers real coordinator output.
+# 函数用途: coordinator 给 worker 的结构化 extra_write_roots 写出产物目录时，worker 应拿到该目录写权限。
 def test_hierarchy_schedule_grants_worker_path_written_by_child_spec(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -164,9 +164,10 @@ def test_hierarchy_schedule_grants_worker_path_written_by_child_spec(tmp_path):
             parent_run_id=coordinator.id,
             child_specs=[
                 HierarchyChildSpec(
-                    goal=f"创建购物车页面，目标产物路径：{deliverables}/build，写 cart.html。",
+                    goal="创建购物车页面，写 cart.html。",
                     agent_name="cart-checkout-worker",
                     role="worker",
+                    extra_write_roots=[str(deliverables / "build")],
                 )
             ],
             apply=True,
@@ -180,17 +181,18 @@ def test_hierarchy_schedule_grants_worker_path_written_by_child_spec(tmp_path):
 
 
 # LLM: test_hierarchy_schedule_blocks_sibling_path_drift protects exact deliverable-root propagation.
-# 函数用途: coordinator 把 build 猜成 sibling 目录时，调度层应阻断并要求重写 child goal。
+# 函数用途: coordinator 把结构化 write root 指到 sibling 目录时，调度层应阻断并要求重写 child spec。
 def test_hierarchy_schedule_blocks_sibling_path_drift(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables" / "case"
     parent = manager.create_run(
-        goal=f"在 {deliverables}/build 目录创建购物车页面。",
+        goal="创建购物车页面。",
         thought="delegate",
         plan=["plan"],
         agent_name="cart-coordinator",
         role="coordinator",
         allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
+        extra_write_roots=[str(deliverables / "build")],
     )
 
     result = manager.schedule_child_runs(
@@ -198,9 +200,10 @@ def test_hierarchy_schedule_blocks_sibling_path_drift(tmp_path):
             parent_run_id=parent.id,
             child_specs=[
                 HierarchyChildSpec(
-                    goal=f"在 {deliverables}/stage7_r8_build 目录创建 cart.html。",
+                    goal="创建 cart.html。",
                     agent_name="cart-worker",
                     role="worker",
+                    extra_write_roots=[str(deliverables / "stage7_r8_build")],
                 )
             ],
             apply=True,
@@ -214,18 +217,19 @@ def test_hierarchy_schedule_blocks_sibling_path_drift(tmp_path):
     assert str(deliverables / "build") in result.reason
 
 
-# LLM: test_hierarchy_schedule_allows_child_path_under_parent_root keeps valid nested output dirs working.
-# 函数用途: child 在父级 build 目录下写具体文件或子目录时不能被漂移 guard 误挡。
+# LLM: test_hierarchy_schedule_allows_child_root_under_parent_root keeps valid nested output dirs working.
+# 函数用途: child 的结构化写入根在父级 build 目录下时不能被漂移 guard 误挡。
 def test_hierarchy_schedule_allows_child_path_under_parent_root(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables" / "case"
     parent = manager.create_run(
-        goal=f"在 {deliverables}/build 目录创建购物网站。",
+        goal="创建购物网站。",
         thought="delegate",
         plan=["plan"],
         agent_name="cart-coordinator",
         role="coordinator",
         allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
+        extra_write_roots=[str(deliverables / "build")],
     )
 
     result = manager.schedule_child_runs(
@@ -233,9 +237,10 @@ def test_hierarchy_schedule_allows_child_path_under_parent_root(tmp_path):
             parent_run_id=parent.id,
             child_specs=[
                 HierarchyChildSpec(
-                    goal=f"在 {deliverables}/build/cart.html 写购物车页面。",
+                    goal="写购物车页面。",
                     agent_name="cart-worker",
                     role="worker",
+                    extra_write_roots=[str(deliverables / "build")],
                 )
             ],
             apply=True,
@@ -247,8 +252,8 @@ def test_hierarchy_schedule_allows_child_path_under_parent_root(tmp_path):
     assert str(deliverables / "build") in worker.allowed_write_roots
 
 
-# LLM: test_hierarchy_schedule_ignores_url_image_sources_in_write_roots covers real shopping E2E URLs.
-# 函数用途: worker goal 里出现图片 CDN URL 时，scheduler 不能把 URL 片段当成本地写入根并拒绝创建。
+# LLM: test_hierarchy_schedule_ignores_url_image_sources_in_goal covers real shopping E2E URLs.
+# 函数用途: worker goal 里出现图片 CDN URL 时，scheduler 不能把普通文本 URL 当成本地写入根。
 def test_hierarchy_schedule_ignores_url_image_sources_in_write_roots(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -267,12 +272,13 @@ def test_hierarchy_schedule_ignores_url_image_sources_in_write_roots(tmp_path):
             child_specs=[
                 HierarchyChildSpec(
                     goal=(
-                        f"在 {deliverables}/build/product-list.html 写商品列表，"
+                        "写商品列表，"
                         "图片可使用 https://picsum.photos/300/200 和 "
                         "https://images.unsplash.com/photo-1.jpg。"
                     ),
                     agent_name="catalog-page-worker",
                     role="worker",
+                    extra_write_roots=[str(deliverables / "build" / "product-list.html")],
                 )
             ],
             apply=True,

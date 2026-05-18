@@ -4,7 +4,13 @@
 from __future__ import annotations
 
 from ..subagents.services.dispatch_params import DispatchRecordParams
-from ..subagents.services.workflow import _try_workflow_plan, _workflow_extra_write_roots
+from ..subagents.services.workflow import (
+    _try_workflow_plan,
+    _workflow_attr,
+    _workflow_attr_text,
+    _workflow_extra_write_roots,
+    _WorkflowPlanAttempt,
+)
 from .dispatch_record_params import DryRunWorkflowRecordParams, WorkflowRecordParams
 
 
@@ -41,12 +47,15 @@ def _task_allows_dispatch_workflow(task, override_task_off: bool = False) -> boo
 def _build_single_workflow_records(agent, task, workflow_mode, apply):
     preview = (
         task.workflow_plan
-        or _try_workflow_plan(
-            task.goal,
+        or _try_workflow_plan(_WorkflowPlanAttempt(
+            goal=task.goal,
+            explicit_template_id=_workflow_attr_text(task, "workflow_template_id"),
+            workflow_task_type=_workflow_attr_text(task, "workflow_task_type"),
+            workflow_risk_tags=_workflow_attr(task, "workflow_risk_tags"),
             quality_contract=task.quality_contract,
             context_manifest=task.context_manifest,
             allowed_write_roots=_workflow_extra_write_roots(task),
-        )
+        ))
         or {}
     )
     worker_count = len(preview.get("workers") or []) if isinstance(preview, dict) else 0

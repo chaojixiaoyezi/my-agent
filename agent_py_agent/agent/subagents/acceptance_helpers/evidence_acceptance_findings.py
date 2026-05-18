@@ -132,13 +132,13 @@ def _build_tool_requirement_findings(
     created_at: float,
 ) -> list[AcceptanceReviewFinding]:
     findings: list[AcceptanceReviewFinding] = []
-    acceptance_text = "；".join(task.acceptance_checks).lower()
+    required_tools = _required_tool_evidence(task)
 
-    if "read_file" in acceptance_text:
+    if "read_file" in required_tools:
         findings.append(
             _build_read_file_requirement_finding(task, created_at)
         )
-    if "write_file" in acceptance_text:
+    if "write_file" in required_tools:
         findings.append(
             _build_write_file_requirement_finding(task, created_at)
         )
@@ -165,9 +165,9 @@ def _build_read_file_requirement_finding(
         ok=has_read,
         severity="P0",
         message=(
-            "acceptance_checks 要求 read_file，且已有对应工具和证据。"
+            "结构化工具证据合同要求 read_file，且已有对应工具和证据。"
             if has_read
-            else "acceptance_checks 要求 read_file，但缺少对应工具执行或证据。"
+            else "结构化工具证据合同要求 read_file，但缺少对应工具执行或证据。"
         ),
         evidence_path=task.acceptance_file,
         created_at=created_at,
@@ -193,10 +193,52 @@ def _build_write_file_requirement_finding(
         ok=has_write,
         severity="P0",
         message=(
-            "acceptance_checks 要求 write_file，且已有对应工具和证据。"
+            "结构化工具证据合同要求 write_file，且已有对应工具和证据。"
             if has_write
-            else "acceptance_checks 要求 write_file，但缺少对应工具执行或证据。"
+            else "结构化工具证据合同要求 write_file，但缺少对应工具执行或证据。"
         ),
         evidence_path=task.acceptance_file,
         created_at=created_at,
     )
+
+
+# LLM: _required_tool_evidence keeps the legacy helper aligned with the structured contract.
+# 函数用途: 只从 task.attributes 中读取工具证据要求；普通 acceptance_checks 文案不会触发机器门禁。
+def _required_tool_evidence(task: SubAgentTask) -> set[str]:
+    attrs = getattr(task, "attributes", {})
+    attrs = attrs if isinstance(attrs, dict) else {}
+    return {
+        _canonical_tool_name(item)
+        for value in (
+            attrs.get("required_tool_evidence"),
+            attrs.get("acceptance_required_tools"),
+            attrs.get("required_tools"),
+        )
+        for item in _string_list(value)
+        if _canonical_tool_name(item)
+    }
+
+
+# LLM: _canonical_tool_name maps exact tool ids and aliases without tokenizing prose.
+# 函数用途: 把结构化工具别名归一到 read_file/write_file。
+def _canonical_tool_name(value: object) -> str:
+    text = str(value or "").strip().casefold().replace("-", "_")
+    aliases = {
+        "read_file": "read_file",
+        "file_read": "read_file",
+        "file_content": "read_file",
+        "write_file": "write_file",
+        "file_write": "write_file",
+        "file_written": "write_file",
+    }
+    return aliases.get(text, "")
+
+
+# LLM: _string_list normalizes machine list fields only.
+# 函数用途: 兼容字符串或列表配置，不拆分一句普通自然语言。
+def _string_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if item not in (None, "")]
+    if value in (None, ""):
+        return []
+    return [str(value)]

@@ -9,7 +9,7 @@ from typing import Any
 
 from ..tools import ToolExecutionResult
 from .orchestration_body_read_refs import BODY_READ_TOOLS, is_orchestration_artifact_read
-from .orchestration_delegation_intent import prompt_requests_subagent_delegation
+from .orchestration_delegation_intent import subagent_delegation_enabled
 from .orchestration_run_scope import remembered_orchestration_run_ids
 from .runner_context import current_subagent_run_id
 
@@ -34,6 +34,7 @@ class PreDelegationReadGuardRequest:
     agent: object
     payload: object
     user_prompt: str = ""
+    task_attributes: dict | None = None
 
 
 # LLM: maybe_block_predelegation_source_read keeps roots refs-first before initial subagent creation.
@@ -54,13 +55,13 @@ def maybe_block_predelegation_source_read(
 
 
 # LLM: _is_predelegation_root_turn limits this policy to top-level roots before current dispatch ids exist.
-# 函数用途: 只在 root 当前轮尚未创建/记住 run_id、且用户确实要求派工时启用。
+# 函数用途: 只在 root 当前轮尚未创建/记住 run_id、且结构化字段要求派工时启用。
 def _is_predelegation_root_turn(request: PreDelegationReadGuardRequest) -> bool:
     if current_subagent_run_id(request.agent):
         return False
     if remembered_orchestration_run_ids(request.agent):
         return False
-    return prompt_requests_subagent_delegation(request.user_prompt)
+    return subagent_delegation_enabled(request.task_attributes)
 
 
 # LLM: _allowed_predelegation_read lets roots inspect brief files and orchestration summaries.

@@ -17,8 +17,8 @@ from .orchestration_body_read_refs import (
     looks_like_runtime_path,
 )
 from .orchestration_delegation_intent import (
-    prompt_requests_refs_only_delegation,
-    user_authorized_parent_body_read,
+    parent_body_read_allowed,
+    refs_only_delegation_enabled,
 )
 from .orchestration_predelegation_read_guard import (
     PreDelegationReadGuardRequest,
@@ -38,6 +38,7 @@ class DelegatingBodyReadGuardRequest:
     agent: object
     payload: object
     user_prompt: str = ""
+    task_attributes: dict | None = None
 
 
 # LLM: _TopLevelDelegationParent mirrors a CLI root that has child runs but no current subagent id.
@@ -61,19 +62,20 @@ def maybe_block_delegating_body_read(request: DelegatingBodyReadGuardRequest) ->
         return None
     parent = _current_parent_task(request.agent)
     if parent is None:
-        parent = _top_level_delegation_parent(request.agent, request.user_prompt)
+        parent = _top_level_delegation_parent(request.agent, request.task_attributes)
     if parent is None or not _has_delegated_children(parent):
         predelegation = maybe_block_predelegation_source_read(
             PreDelegationReadGuardRequest(
                 agent=request.agent,
                 payload=request.payload,
                 user_prompt=request.user_prompt,
+                task_attributes=request.task_attributes,
             )
         )
         if predelegation is not None:
             return predelegation
         return None
-    if user_authorized_parent_body_read(request.user_prompt):
+    if parent_body_read_allowed(request.task_attributes):
         return None
     if _has_completed_acceptor(request.agent, parent):
         return None
@@ -102,10 +104,10 @@ def _current_parent_task(agent: object):
         return None
 
 
-# LLM: _top_level_delegation_parent protects normal CLI roots when the user explicitly asks for refs-only delegation.
+# LLM: _top_level_delegation_parent protects normal CLI roots when refs-only is a machine field.
 # 函数用途: root 不是子代理 run 时，从 manager.list_runs 构造一个临时父节点，让验收前读正文保护仍生效。
-def _top_level_delegation_parent(agent: object, prompt: str) -> _TopLevelDelegationParent | None:
-    if not prompt_requests_refs_only_delegation(prompt):
+def _top_level_delegation_parent(agent: object, attributes: dict | None) -> _TopLevelDelegationParent | None:
+    if not refs_only_delegation_enabled(attributes):
         return None
     tasks = _top_level_child_tasks(agent)
     child_ids = [str(getattr(task, "id", "") or "") for task in tasks if str(getattr(task, "id", "") or "").strip()]

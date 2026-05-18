@@ -10,14 +10,14 @@ from __future__ import annotations
 SubAgentManager 通过 facade 方法委托到这里。
 """
 
-import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ...contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
 from ..capability_status import is_pending_capability_status
 from ..execution_report import TestExecutionReport, load_test_execution_report
 from ..reports import AcceptanceReviewFinding
-from .acceptance_artifacts import artifact_exists
+from .acceptance_artifacts import artifact_exists, resolve_artifact_path
 from .acceptance_controlled_exec_findings import controlled_exec_contract_finding
 from .acceptance_descendant_health import descendant_health_finding
 from .acceptance_evidence_findings import build_evidence_findings
@@ -28,7 +28,6 @@ from .acceptance_role_coverage import required_role_coverage_finding
 if TYPE_CHECKING:
     from ..models import SubAgentTask
 
-_STRUCTURED_FIELD_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_\-.]*)\s*:\s*(.*)$")
 _CHILD_SPAWN_BOOL_FIELDS = {"child_spawn_required", "required_child_spawn", "require_child_spawn"}
 _CHILD_SPAWN_COUNT_FIELDS = {"required_child_depth", "required_child_count", "required_children"}
 
@@ -179,6 +178,7 @@ class SubAgentAcceptanceFindingService:
                     if not missing_artifacts else f"存在 {len(missing_artifacts)} 个 artifact 路径不存在: {missing_artifacts[0]}",
             evidence_path=task.output_json, created_at=created_at,
         ))
+        findings.append(self._artifact_acceptance_finding(task, artifacts, created_at))
         findings.extend(
             patch_findings(
                 _dict_list(output.get("patches", [])),
@@ -187,6 +187,43 @@ class SubAgentAcceptanceFindingService:
             )
         )
         return findings
+
+    # LLM: _artifact_acceptance_finding validates resolved artifacts through the shared contract layer.
+    # 函数用途: 对真实存在的产物做格式/质量机器验收；无法解析路径时交给 artifact_paths_exist finding 阻断。
+    def _artifact_acceptance_finding(
+        self,
+        task: SubAgentTask,
+        artifacts: list[dict[str, object]],
+        created_at: float,
+    ) -> AcceptanceReviewFinding:
+        reports = [
+            validate_artifact(ArtifactAcceptanceRequest(path=path, workspace_root=self._workspace_root()))
+            for item in artifacts
+            if (path := self._artifact_path(task, str(item.get("path", "") or ""))) is not None
+        ]
+        failed = [report.artifact_ref for report in reports if not report.ok]
+        return AcceptanceReviewFinding(
+            name="artifact_acceptance_passed",
+            ok=not failed,
+            severity="P1",
+            message=(
+                f"已通过 {len(reports)} 个 artifact 的格式/质量验收。"
+                if not failed else f"存在 {len(failed)} 个 artifact 验收失败: {failed[0]}"
+            ),
+            evidence_path=task.output_json,
+            created_at=created_at,
+        )
+
+    # LLM: _artifact_path resolves one output artifact using the same roots as artifact existence checks.
+    # 函数用途: 返回真实文件路径，供通用 artifact acceptance 读取；外部 URL/空路径返回 None。
+    def _artifact_path(self, task: SubAgentTask, raw_path: str) -> Path | None:
+        return resolve_artifact_path(self.manager, task, raw_path)
+
+    # LLM: _workspace_root exposes the manager workspace root to artifact validators when available.
+    # 函数用途: 为 HTML 本地图片等相对路径检查提供 workspace 根目录。
+    def _workspace_root(self) -> Path | None:
+        root = getattr(self.manager, "workspace_root", None)
+        return Path(root) if root else None
 
     # LLM: acceptance_findings 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
     # 函数用途: 处理验收findings相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
@@ -263,38 +300,37 @@ def _required_child_spawn_finding(task, created_at: float) -> AcceptanceReviewFi
 # LLM: _child_spawn_required keeps the hard check scoped to machine fields.
 # 函数用途: 只从 child_spawn_required/required_child_depth 等结构化字段识别必须创建下级。
 def _child_spawn_required(task) -> bool:
-    text = " ".join([str(getattr(task, "goal", "") or ""), *[str(item) for item in getattr(task, "acceptance_checks", []) or []]])
     role = str(getattr(task, "role", "") or "").lower()
     agent_name = str(getattr(task, "agent_name", "") or "").lower()
     leaf_self = role == "leaf_worker" or "leaf" in agent_name
     if leaf_self:
         return False
-    return _structured_child_spawn_required(text)
-
-
-# LLM: _structured_child_spawn_required parses only explicit child-spawn protocol fields.
-# 函数用途: 普通“创建下级/派孙代理”句子不会成为硬验收合同，必须写机器字段才触发。
-def _structured_child_spawn_required(text: str) -> bool:
-    for line in str(text or "").splitlines():
-        match = _STRUCTURED_FIELD_RE.match(line)
-        if not match:
-            continue
-        field = match.group(1).strip().casefold().replace("-", "_")
-        value = match.group(2).strip().casefold()
-        if field in _CHILD_SPAWN_BOOL_FIELDS and value in {"1", "true", "yes", "required"}:
+    attrs = getattr(task, "attributes", {})
+    attrs = attrs if isinstance(attrs, dict) else {}
+    for field in _CHILD_SPAWN_BOOL_FIELDS:
+        if _truthy_machine_bool(attrs.get(field)):
             return True
-        if field in _CHILD_SPAWN_COUNT_FIELDS and _positive_int(value):
+    for field in _CHILD_SPAWN_COUNT_FIELDS:
+        if _positive_int(attrs.get(field)):
             return True
     return False
 
 
 # LLM: _positive_int keeps child-spawn numeric fields conservative.
 # 函数用途: 只有明确大于 0 的结构化数字才表示需要真实 child_ids。
-def _positive_int(value: str) -> bool:
+def _positive_int(value: object) -> bool:
     try:
         return int(str(value or "").strip()) > 0
     except ValueError:
         return False
+
+
+# LLM: _truthy_machine_bool accepts exact structured booleans only.
+# 函数用途: 识别 attributes 里的 true/1/required，不读取 goal 或 acceptance 文本。
+def _truthy_machine_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().casefold() in {"1", "true", "yes", "required"}
 
 
 # LLM: _task_child_ids normalizes persisted child ids without trusting model output refs.

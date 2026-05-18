@@ -494,7 +494,35 @@ def test_prepare_test_items_normalizes_pytest_method_with_command(tmp_path):
 
 
 def test_prepare_test_items_converts_cat_content_assertion_to_content_check(tmp_path):
-    """LLM: Verifies model-style cat checks become bounded exact content checks."""
+    """LLM: Verifies model-style cat checks need structured expected content."""
+    target_dir = tmp_path / "deliverables" / "leaf"
+    target_dir.mkdir(parents=True)
+    artifact = target_dir / "proof.txt"
+    artifact.write_text("context-lineage-ok", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[{
+                "name": "leaf_worker_proof_content",
+                "validation_method": "command",
+                "command": f"cat {artifact}",
+                "expected_content": "context-lineage-ok",
+            }],
+            output={"artifacts": [{
+                "path": str(artifact),
+            }]},
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert prepared[0]["validation_method"] == "content_check"
+    assert prepared[0]["file_path"] == "deliverables/leaf/proof.txt"
+    assert prepared[0]["content_equals"] == "context-lineage-ok"
+    assert prepared[0]["match_mode"] == "exact"
+
+
+def test_prepare_test_items_does_not_parse_summary_for_cat_content(tmp_path):
+    """LLM: Human summaries must not become exact machine acceptance facts."""
     target_dir = tmp_path / "deliverables" / "leaf"
     target_dir.mkdir(parents=True)
     artifact = target_dir / "proof.txt"
@@ -516,7 +544,5 @@ def test_prepare_test_items_converts_cat_content_assertion_to_content_check(tmp_
         )
     )
 
-    assert prepared[0]["validation_method"] == "content_check"
-    assert prepared[0]["file_path"] == "deliverables/leaf/proof.txt"
-    assert prepared[0]["content_equals"] == "context-lineage-ok"
-    assert prepared[0]["match_mode"] == "exact"
+    assert prepared[0]["validation_method"] == "command"
+    assert "content_equals" not in prepared[0]

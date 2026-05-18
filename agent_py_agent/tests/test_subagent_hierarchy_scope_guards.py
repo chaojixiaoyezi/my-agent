@@ -19,11 +19,7 @@ def test_hierarchy_schedule_blocks_forbidden_sibling_scope(tmp_path):
     deliverables = tmp_path / "deliverables"
     root = manager.create_run(goal="root", thought="root", plan=["root"], extra_write_roots=[str(deliverables)])
     parent = manager.create_run(
-        goal=(
-            "作为 text-lead coordinator，只负责 text 领域任务。"
-            f"创建 leaf_worker_text，写入 {deliverables}/leaf_outputs/leaf_worker_text/solution.py。"
-            "不得创建 arithmetic 相关任务。"
-        ),
+        goal="只负责 text 领域任务。",
         thought="text only",
         plan=["plan"],
         parent_id=root.id,
@@ -31,12 +27,19 @@ def test_hierarchy_schedule_blocks_forbidden_sibling_scope(tmp_path):
         depth=1,
         allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
         extra_write_roots=[str(deliverables)],
+        attributes={"domain_scopes": ["text"], "forbidden_child_scopes": ["arithmetic"]},
     )
 
     result = manager.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
-            child_specs=[HierarchyChildSpec(goal="创建 leaf_worker_arithmetic 并写 solution.py")],
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="创建 arithmetic worker。",
+                    agent_name="arithmetic-worker",
+                    attributes={"domain_scopes": ["arithmetic"]},
+                )
+            ],
             apply=True,
         )
     )
@@ -262,11 +265,7 @@ def test_hierarchy_schedule_blocks_implicit_domain_mismatch(tmp_path):
     deliverables = tmp_path / "deliverables"
     root = manager.create_run(goal="root", thought="root", plan=["root"], extra_write_roots=[str(deliverables)])
     parent = manager.create_run(
-        goal=(
-            "创建 text leaf_worker，写入 "
-            f"{deliverables}/leaf_outputs/leaf_worker_text/solution.py，"
-            "实现 normalize_text(text)。"
-        ),
+        goal="只负责 text 领域任务。",
         thought="text only",
         plan=["plan"],
         agent_name="text-lead",
@@ -276,12 +275,13 @@ def test_hierarchy_schedule_blocks_implicit_domain_mismatch(tmp_path):
         depth=1,
         allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
         extra_write_roots=[str(deliverables)],
+        attributes={"domain_scopes": ["text"]},
     )
 
     result = manager.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
-            child_specs=[HierarchyChildSpec(goal="创建 arithmetic leaf_worker，写入 solution.py")],
+            child_specs=[HierarchyChildSpec(goal="创建 arithmetic worker。", attributes={"domain_scopes": ["arithmetic"]})],
             apply=True,
         )
     )

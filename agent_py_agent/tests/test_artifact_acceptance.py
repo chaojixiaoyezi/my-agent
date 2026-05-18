@@ -92,6 +92,26 @@ def test_validate_artifact_routes_common_formats(tmp_path):
     assert {report.artifact_kind for report in reports} == {"json", "csv", "xlsx", "pdf"}
 
 
+# LLM: Artifact acceptance reports should expose a structured ArtifactRef, not only a path string.
+# 函数用途: 验证产物验收报告包含 artifact_id、path、kind、hash、size，后续恢复和 QA 不用解析自然语言。
+def test_validate_artifact_report_contains_structured_artifact_ref(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_artifact,
+    )
+
+    path = tmp_path / "report.json"
+    path.write_text('{"ok": true}', encoding="utf-8")
+
+    payload = validate_artifact(ArtifactAcceptanceRequest(path=path, workspace_root=tmp_path)).to_dict()
+
+    ref = payload["artifact_ref_payload"]
+    assert ref["path"] == str(path)
+    assert ref["kind"] == "json"
+    assert ref["hash"]
+    assert ref["reserved"]["size_bytes"] == path.stat().st_size
+
+
 # LLM: Generic validators should turn broken files into repairable machine findings.
 # 函数用途: 验证坏 JSON 会产生稳定错误码，而不是只在 CLI 输出一段自然语言。
 def test_validate_artifact_reports_invalid_json(tmp_path):

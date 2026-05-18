@@ -180,6 +180,11 @@ before changing code.
 
 ## 7.2 Structured Contract Boundary / 结构化合同边界
 
+- Iron rule: product code must not depend on ordinary natural-language prose as a
+  machine fact source. User prompts, model summaries, reports, and display text
+  may guide an LLM or a human, but routing, permission, acceptance, recovery,
+  dispatch, artifact ownership, and state transitions must read structured
+  fields, status codes, refs, schemas, tool records, or filesystem facts.
 - Product code must not make hard business decisions from broad natural-language
   keyword lists. Examples of banned behavior: "用户说了测试就必须创建 tester",
   "goal 里出现修复就强制 repair", "summary 里有没有/不存在就反转验收结果",
