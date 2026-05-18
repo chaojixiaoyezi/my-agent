@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.backend import ModelResponse
 from agent_py_agent.agent.subagent import parse_subagent_runner_output
@@ -34,10 +36,13 @@ def _write_echo_config(tmp_path: Path) -> Path:
 
 
 def _write_real_model_config(tmp_path: Path) -> Path | None:
-    """Write a config for real model testing; return None if AGENT_API_KEY is missing."""
+    """Write a config for real model testing; return None unless explicit real E2E is enabled."""
+    if os.environ.get("MY_AGENT_RUN_REAL_MODEL_TESTS", "").strip() not in {"1", "true", "yes"}:
+        return None
     api_key = os.environ.get("AGENT_API_KEY", "").strip()
     if not api_key:
         return None
+    request_timeout = os.environ.get("MY_AGENT_REAL_MODEL_TEST_REQUEST_TIMEOUT", "240").strip() or "240"
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
         'workspace_root: "workspace"\n'
@@ -45,7 +50,7 @@ def _write_real_model_config(tmp_path: Path) -> Path | None:
         'api_base: "https://api.minimaxi.com/anthropic"\n'
         'api_key_env: "AGENT_API_KEY"\n'
         'model_name: "MiniMax-M2.7"\n'
-        'request_timeout: 60\n'
+        f"request_timeout: {request_timeout}\n"
         'max_tokens: 1024\n'
         'temperature: 0.2\n'
         'anthropic_version: "2023-06-01"\n'
@@ -229,13 +234,14 @@ def test_scenario_parent_subagent_cross_day_resume_uses_runner_task_facts(tmp_pa
     assert "SCENARIO_PASS" in output
 
 
+@pytest.mark.slow
+@pytest.mark.e2e
 def test_scenario_real_model_recovery_smoke(tmp_path, capsys):
     """The scenario case should prove a real model API round-trip survives cross-day recovery."""
 
     config_path = _write_real_model_config(tmp_path)
     if config_path is None:
-        import pytest
-        pytest.skip("AGENT_API_KEY not configured; skipping real model smoke test")
+        pytest.skip("set MY_AGENT_RUN_REAL_MODEL_TESTS=1 and AGENT_API_KEY to run real model smoke test")
 
     parser = build_parser()
     args = parser.parse_args(

@@ -8,6 +8,9 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+from agent_py_agent.agent.agent_core.subagent_progress_closeout import (
+    subagent_progress_closeout_response,
+)
 from agent_py_agent.agent.agent_core.tool_round_execution import (
     ToolRoundExecutionRequest,
     execute_tool_round,
@@ -141,3 +144,49 @@ def test_subagent_output_json_response_does_not_hide_bad_packet(tmp_path):
     written = json.loads(output_json.read_text(encoding="utf-8"))
 
     assert written == original
+
+
+# LLM: ready task-local progress should close the runner without one more free-form model turn.
+# 函数用途: 复现真实 E2E 中 HTML 已写完并通过结构检查，但模型还没写 output.json 导致父级一直等待。
+def test_subagent_progress_closeout_response_uses_latest_tool_progress(tmp_path):
+    artifact = tmp_path / "lab_outputs" / "furniture-home" / "index.html"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("<html><body><main id='home'>done</main></body></html>", encoding="utf-8")
+    workspace = tmp_path / "tasks" / "worker" / "agents" / "worker"
+    progress_dir = workspace / "progress"
+    progress_dir.mkdir(parents=True)
+    progress_ref = progress_dir / "latest_tool_progress.json"
+    progress_ref.write_text(
+        json.dumps(
+            {
+                "schema_version": "subagent_tool_progress.v1",
+                "kind": "subagent_tool_progress",
+                "run_id": "worker",
+                "latest_written_path": str(artifact),
+                "artifact_integrity": {
+                    "kind": "html",
+                    "ok": True,
+                    "blocker_codes": [],
+                    "warning_codes": [],
+                    "issues": [],
+                },
+                "latest_tool_progress_ref": str(progress_ref),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    task = SimpleNamespace(
+        id="worker",
+        agent_run_workspace_dir=str(workspace),
+        output_json=str(tmp_path / ".my_agent" / "subagents" / "worker" / "output.json"),
+    )
+    agent = SimpleNamespace(_current_subagent_run_id="worker", subagents=SimpleNamespace(load=lambda _: task))
+
+    response = subagent_progress_closeout_response(agent, ModelResponse(text="fallback", backend="test"))
+
+    assert response is not None
+    assert "[SUBAGENT_RESULT]" in response.text
+    assert '"status": "AWAITING_ACCEPTANCE"' in response.text
+    assert str(artifact) in response.text
+    assert str(progress_ref) in response.text

@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 from dataclasses import field as dataclass_field
 
 from .models import SubAgentTask
+from .protocol_write_contract import build_write_contract
 
 
 # LLM: ProtocolIssue is the shared machine-readable error shape for address/envelope/tool contract checks.
@@ -129,7 +130,7 @@ def build_task_envelope(task: SubAgentTask, *, all_tasks: list[SubAgentTask] | N
         display_name=_task_text(task, "agent_name"),
         plan=_task_list(task, "plan"),
         tool_contract=_tool_contract(task),
-        write_contract=_write_contract(task),
+        write_contract=build_write_contract(task),
         acceptance=_acceptance_contract(task),
         context_refs=_context_refs(task),
         audit={"created_at": _task_float(task, "created_at"), "updated_at": _task_float(task, "updated_at"), "contract_version": "v1"},
@@ -239,49 +240,6 @@ def _tool_contract(task: SubAgentTask) -> dict[str, object]:
         "grant_count": len(_task_list(task, "capability_grants")),
         "gap_count": len(_task_list(task, "capability_gaps")),
     }
-
-
-# LLM: _write_contract keeps path boundaries in one protocol field.
-# 函数用途: 暴露允许写入、禁止写入和锁定文件，供 preflight/recovery/QA 共用。
-def _write_contract(task: SubAgentTask) -> dict[str, object]:
-    product_roots = _product_write_roots(task)
-    return {
-        "internal_task_root": _task_text(task, "task_dir"),
-        "product_write_roots": product_roots,
-        "allowed_write_roots": _task_list(task, "allowed_write_roots"),
-        "forbidden_write_roots": _task_list(task, "forbidden_write_roots"),
-        "locked_files": _task_list(task, "locked_files"),
-    }
-
-
-# LLM: _product_write_roots separates user deliverable roots from the run's private scratch space.
-# 函数用途: 过滤掉子代理自己的内部任务目录，避免把能写日志误判成能写用户产物。
-def _product_write_roots(task: SubAgentTask) -> list[str]:
-    internal_roots = {
-        _normalize_path(_task_text(task, "task_dir")),
-        _normalize_path(_task_text(task, "data_dir")),
-        _normalize_path(_task_text(task, "output_dir")),
-        _normalize_path(_task_text(task, "tests_dir")),
-        _normalize_path(_task_text(task, "reports_dir")),
-        _normalize_path(_task_text(task, "logs_dir")),
-        _normalize_path(_task_text(task, "scratch_dir")),
-    }
-    task_root = _normalize_path(_task_text(task, "task_dir"))
-    result: list[str] = []
-    for root in _task_list(task, "allowed_write_roots"):
-        normalized = _normalize_path(root)
-        if not normalized or normalized in internal_roots:
-            continue
-        if task_root and normalized.startswith(f"{task_root}/"):
-            continue
-        result.append(root)
-    return result
-
-
-# LLM: _normalize_path gives protocol checks stable string comparisons without touching the filesystem.
-# 函数用途: 规范化路径字符串用于内部目录过滤；不存在的目录也不会报错。
-def _normalize_path(value: str) -> str:
-    return str(value or "").rstrip("/")
 
 
 # LLM: _acceptance_contract makes parent acceptance checks a protocol field, not only prompt text.

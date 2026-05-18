@@ -16,8 +16,10 @@ from .runner_stage_trace import (
     trace_runner_model_response_received,
 )
 from .tool_stream_boundary import (
+    LongToolContentStreamAbort,
     ToolBoundaryChunkFilter,
     cut_response_after_first_complete_tool_call,
+    long_write_abort_response,
 )
 
 
@@ -50,9 +52,17 @@ def generate_model_response(request: ModelGenerateParams):
             prompt=request.prompt,
         )
     )
-    chunk_filter = ToolBoundaryChunkFilter(request.params.effective_on_chunk)
+    chunk_filter = ToolBoundaryChunkFilter(
+        request.params.effective_on_chunk,
+        max_inline_content_chars=_tool_write_inline_max_chars(request.agent),
+    )
     try:
         response = _generate_with_wall_timeout(request, chunk_filter)
+    except LongToolContentStreamAbort as exc:
+        response = long_write_abort_response(
+            exc,
+            backend=str(getattr(request.agent.backend, "name", "") or ""),
+        )
     except Exception as exc:
         trace_runner_model_request_failed(
             RunnerModelStageTraceRequest(
@@ -86,7 +96,7 @@ def generate_model_response(request: ModelGenerateParams):
 # 函数用途: 给任意 backend.generate 增加 request_timeout 总时长保护；后端正常返回时保持原响应对象。
 def _generate_with_wall_timeout(request: ModelGenerateParams, chunk_filter: ToolBoundaryChunkFilter):
     timeout = _model_request_timeout_seconds(request.agent)
-    on_chunk = chunk_filter if request.params.effective_on_chunk is not None else None
+    on_chunk = chunk_filter
     if timeout <= 0:
         return request.agent.backend.generate(request.prompt, on_chunk=on_chunk)
 
@@ -129,3 +139,9 @@ def _model_request_timeout_seconds(agent: object) -> float:
     except (TypeError, ValueError):
         return 0.0
     return timeout if timeout > 0 else 0.0
+
+
+# LLM: _tool_write_inline_max_chars keeps streaming guard aligned with write_file/append_file config.
+# 函数用途: 从 config 读取单次 inline 写入上限；无效值由工具内容策略回退默认值。
+def _tool_write_inline_max_chars(agent: object) -> int | None:
+    return getattr(getattr(agent, "config", None), "tool_write_inline_max_chars", None)

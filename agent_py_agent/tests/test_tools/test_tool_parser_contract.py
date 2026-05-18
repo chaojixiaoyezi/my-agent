@@ -117,6 +117,19 @@ def test_tool_catalog_format_example_does_not_bias_to_path_param():
     assert "不要写 param_name" in catalog
 
 
+# LLM: long content protocol must be visible before compact catalog entries can hide write-file details.
+# 函数用途: 验证工具目录顶部始终提示大 HTML/JS/报告要分块写入，避免真实模型先走超大 write_file。
+def test_tool_catalog_includes_global_large_content_protocol():
+    registry = _registry()
+
+    catalog = registry.render_catalog_section()
+
+    assert "# Tool Content Transport Protocol" in catalog
+    assert "不要把完整大文件正文塞进一个 JSON 工具参数" in catalog
+    assert "write_file 写短骨架" in catalog
+    assert "append_file 分块追加" in catalog
+
+
 def test_tool_catalog_uses_configured_categories_offset_and_notice():
     registry = ToolRegistry(
         ToolRegistryParams(

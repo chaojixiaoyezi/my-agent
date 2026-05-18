@@ -25,6 +25,9 @@ _CREATE_PARAMETERS = {
     "context_manifest": "refs-first 上下文清单；可放 required_read_paths/task_pack_refs/omitted_context",
     "context_packs": "refs-only 上下文包列表；每项只放摘要和 path/ref，不放大正文",
     "required_read_paths": "简写：子代理必须自己读取的资料路径列表；会进入 context_manifest.required_read_paths",
+    "output_files": "子代理必须写出的目标文件路径列表；知道文件名时必须填，系统会把它写入机器合同",
+    "output_refs": "output_files 的语义别名，用于引用交付物路径或产物 ref",
+    "artifact_refs": "交付物 refs 列表；适合引用已经存在或后续要验收的产物",
     "workflow_mode": "off/plan/auto；决定是否在建工单时挂 workflow 计划",
     "extra_write_roots": "额外写入目录列表；通常省略，系统会把当前任务 workspace_root 作为默认产物根；只有写到其它工作区内目录时才填",
 }
@@ -65,6 +68,13 @@ _CREATE_PARAMETER_DETAILS = {
         "当资料路径很多时用这个简写，例如 [\"README.md\",\"data/market.md\"]。"
         "这不是 root 要立刻读取的清单，而是交给对应小傻妞读取和分析的清单。"
     ),
+    "output_files": (
+        "只要用户给了明确保存路径，就把路径放进这里，例如 [\"lab_outputs/furniture-home/index.html\"]。"
+        "不要只把保存路径写在 goal 里；goal 是给人看的任务描述，output_files 才是系统后续调度、验收、"
+        "恢复和去重会读取的机器事实。"
+    ),
+    "output_refs": "同 output_files；当上游系统已经叫它 refs 时可用这个字段，系统会统一归入 task.attributes。",
+    "artifact_refs": "用于交付物已经有 ref 或需要跨任务传递的情况；普通写新文件优先用 output_files。",
     "workflow_mode": "默认建议省略或写 off。只有用户明确要求 workflow/工作流时才写 plan/auto；明确文件交付 worker 会强制 off。",
     "extra_write_roots": (
         "JSON 数组，例如 [\"C:/Users/you/Desktop/work\"]；只给本次子代理任务增加写入边界。"
@@ -74,6 +84,11 @@ _CREATE_PARAMETER_DETAILS = {
     ),
 }
 _CREATE_EXAMPLES = [
+    (
+        '{"tool":"create_subagents","items":[{"goal":"用单文件 HTML 做一个高端现代家具品牌首页",'
+        '"role":"worker","agent_name":"小傻妞-家具网页",'
+        '"output_files":["lab_outputs/furniture-home/index.html"]}]}'
+    ),
     (
         '{"tool":"create_subagents","items":['
         '{"goal":"研究市场环境并输出证据摘要","role":"worker","agent_name":"小傻妞-市场"},'

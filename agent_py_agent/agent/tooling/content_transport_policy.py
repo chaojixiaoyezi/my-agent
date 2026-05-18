@@ -90,6 +90,23 @@ def append_file_content_parameter_detail(max_inline_chars: int = MAX_INLINE_WRIT
     )
 
 
+# LLM: tool_content_transport_protocol keeps large-body tool guidance visible even in compact catalogs.
+# 函数用途: 生成工具目录顶部的大内容传输协议，防止模型把完整网页/脚本塞进单个 JSON 参数。
+def tool_content_transport_protocol(max_inline_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS) -> str:
+    limit = inline_write_content_limit(max_inline_chars)
+    return (
+        "# Tool Content Transport Protocol\n"
+        f"- 大内容边界：write_file/append_file 的 content 单次推荐不超过 {limit} 字符。\n"
+        "- 如果要生成完整 HTML/CSS/JS、长脚本、长报告或大段数据，不要把完整大文件正文塞进一个 JSON 工具参数。\n"
+        "- 正确做法：先用 write_file 写短骨架，再用 append_file 分块追加；"
+        f"正常分块每块 {RECOMMENDED_WRITE_CHUNK_CHARS} 字符。\n"
+        f"- 如果上一轮工具调用解析失败、超时或被截断，下一轮每块降到 {RECOVERY_WRITE_CHUNK_CHARS} 字符以内，"
+        "闭合工具调用后等待结果。\n"
+        "- 修改已有文件时优先用 replace_in_file/patch 风格小 diff；已有 controlled_exec 授权时，"
+        "可在授权目录内运行脚本生成大文件，只返回 stdout_ref/audit_ref。"
+    )
+
+
 # LLM: check_inline_write_content treats the configured value as a recommended transport size, not a data-loss boundary.
 # 函数用途: 判断正文是否超过推荐 inline 尺寸；超过时仍允许合法调用落盘，但返回后续分块提示。
 def check_inline_write_content(request: InlineContentPolicyRequest) -> InlineContentPolicyDecision:

@@ -12,12 +12,7 @@ from ..subagents.static_site_validator import run_static_site_check
 from .activity_timeout import ActivitySnapshot, ActivityTimeoutPolicy, decide_activity_timeout
 from .e2e_matrix_runner import E2ERunnerRequest, run_e2e_matrix
 from .error_taxonomy import classify_error
-from .evidence_contract import (
-    EvidenceClaim,
-    EvidenceContractRequest,
-    EvidenceSourceRef,
-    evaluate_evidence_contract,
-)
+from .main_agent_foundation_research import research_evidence_contract_case
 
 REAL_MODEL_CASE_IDS = {
     "single_agent_real_tasks",
@@ -144,64 +139,7 @@ def _case_tool_failure_contracts(workspace: Path) -> MainAgentFoundationCaseResu
 # LLM: _case_research_evidence_contracts blocks fabricated table data without source refs.
 # 函数用途: 用一正一反两组资料 claim 证明关键统计字段必须挂结构化来源。
 def _case_research_evidence_contracts(workspace: Path) -> MainAgentFoundationCaseResult:
-    valid = evaluate_evidence_contract(
-        EvidenceContractRequest(
-            source_refs=[
-                EvidenceSourceRef(
-                    source_id="github-api-openclaw",
-                    source_type="api",
-                    uri="https://api.github.com/repos/openclaw/openclaw",
-                    retrieved_at="2026-05-18T10:00:00Z",
-                )
-            ],
-            claims=[
-                EvidenceClaim(
-                    claim_id="openclaw-stars",
-                    field="stargazers_count",
-                    value=372838,
-                    source_ids=["github-api-openclaw"],
-                )
-            ],
-            required_fields=["stargazers_count"],
-        )
-    )
-    invalid = evaluate_evidence_contract(
-        EvidenceContractRequest(
-            claims=[
-                EvidenceClaim(
-                    claim_id="repo-weekly-growth",
-                    field="weekly_star_growth",
-                    value=581200,
-                    source_ids=[],
-                )
-            ],
-            required_fields=["weekly_star_growth"],
-        )
-    )
-    evidence = workspace / "research_evidence_contracts" / "report.json"
-    evidence.parent.mkdir(parents=True, exist_ok=True)
-    evidence.write_text(
-        json.dumps(
-            {"valid": valid.to_dict(), "invalid": invalid.to_dict()},
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
-    issues: list[str] = []
-    if not valid.ok:
-        issues.append("valid sourced claim failed")
-    if invalid.ok:
-        issues.append("unsourced claim passed")
-    return MainAgentFoundationCaseResult(
-        case_id="research_evidence_contracts",
-        title="资料证据合同测试",
-        status="FAILED" if issues else "PASSED",
-        summary="关键资料字段必须有 source_ref；无来源统计不能通过验收。",
-        evidence_refs=[str(evidence)],
-        issues=issues,
-    )
+    return MainAgentFoundationCaseResult(**research_evidence_contract_case(workspace))
 
 
 # LLM: _case_web_artifact_validator proves generated web apps are checked by DOM facts.

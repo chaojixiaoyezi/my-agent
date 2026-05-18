@@ -13,6 +13,7 @@ from .subagent_dispatch_closeout import (
     subagent_dispatch_completion_response,
     subagent_dispatch_repair_required_response,
 )
+from .subagent_progress_closeout import subagent_progress_closeout_response
 from .tool_round_execution import subagent_output_json_response
 
 
@@ -36,6 +37,8 @@ def completion_response_after_tool_round(
 ) -> ModelResponse | None:
     if request.subagent_output_written:
         return subagent_output_json_response(request.agent, request.response)
+    if progress_response := subagent_progress_closeout_response(request.agent, request.response):
+        return progress_response
     dispatch_request = DispatchCompletionRequest(
         agent=request.agent,
         params=request.params,
