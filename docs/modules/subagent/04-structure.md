@@ -661,3 +661,6 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `subagents/context_bundle_semantic.py` 使用 `task_contract_required_file_terms_from_text()` 做 context gate 自检；它只提取真正要求交付的文件名，过滤示例、禁止文件名和输入资料摘要。
 - `subagents/static_required_files.py` 同时读取 `required_files:` 和内部 `必需文件/产物名:` 这类标签化合同；静态站点验收因此能看见用户明确列出的 HTML/CSS/JS 文件，但不会从宽泛自然语言里猜业务文件。
 - `subagent_workflows/router.py` 在有显式 `workflow_template_id` 时不再用自然语言关键词覆盖 task type；模板选择以结构化字段为准；没有字段时默认 single worker，而不是按 prompt 关键词猜。
+- `acceptance_helpers/evidence.py` 是 legacy import 兼容壳，真实验收证据 findings 统一走 `services/acceptance_evidence_findings.py`。`acceptance_helpers/evidence_acceptance_findings.py` 只保留 `_make_finding` / `_has_tool_evidence` 等旧调用兼容工具，不再拥有独立 build 逻辑。
+- `agent_core/orchestration_create_context.py` 会从结构化 `output_refs/output_files/artifact_refs` 生成系统级 `subagent_idempotency_contract.v1`。这让重复 create/schedule 的复用由产物 refs 合同决定，而不是由模型是否记得传 idempotency pack 或 goal 文本是否相似决定。
+- `tests/test_architecture_guardrails.py` 的自然语言事实源门继续作为开发铁律：普通 prompt、goal、summary、acceptance_checks 可以进入模型上下文和人类展示，但不得成为代码层机器判断来源。新增守卫要求 legacy evidence helper 保持 service shim，并禁止 create/schedule 幂等比较 goal 文本。

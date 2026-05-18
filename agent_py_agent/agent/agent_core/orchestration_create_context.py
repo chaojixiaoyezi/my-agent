@@ -5,7 +5,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 
+from ..subagents.services.idempotency_contract_identity import (
+    idempotency_contract_identity_from_context_packs,
+)
 from .parameters import _string_list
+from .runner_input_dependencies import params_output_refs
 
 
 # LLM: create_context_manifest preserves refs-first source paths as machine-readable child context.
@@ -20,13 +24,33 @@ def create_context_manifest(raw_params: dict[str, object]) -> dict[str, object]:
 
 
 # LLM: create_context_packs normalizes refs-only context pack hints without reading their bodies.
-# 函数用途: 保留父级传下来的 context_packs；简写 refs 会变成 path pack，供 runner prompt 展示。
+# 函数用途: 保留父级传下来的 context_packs；产物 refs 明确时补系统幂等合同，避免重复创建依赖模型主动传。
 def create_context_packs(raw_params: dict[str, object]) -> list[dict[str, object]]:
     packs = _dict_list_param(raw_params.get("context_packs"))
     for ref in _string_list(raw_params.get("context_pack_refs")):
         if not _pack_has_ref(packs, ref):
             packs.append({"kind": "context_ref", "path": ref})
+    _append_system_idempotency_pack(packs, raw_params)
     return packs
+
+
+# LLM: _append_system_idempotency_pack derives replay safety from structured output refs only.
+# 函数用途: 当模型没有主动传幂等合同，但工具参数已有明确产物 refs 时，系统生成可复用合同；普通 goal 文本不参与。
+def _append_system_idempotency_pack(packs: list[dict[str, object]], raw_params: dict[str, object]) -> None:
+    if idempotency_contract_identity_from_context_packs(packs):
+        return
+    refs = params_output_refs(raw_params)
+    if not refs:
+        return
+    packs.append({
+        "kind": "idempotency_contract",
+        "contract": {
+            "schema": "subagent_idempotency_contract.v1",
+            "kind": "system_derived_output_scope",
+            "idempotency_key": "create_subagents.output_refs",
+            "scope_refs": refs,
+        },
+    })
 
 
 # LLM: _required_read_paths merges the accepted source-path aliases for child reads.

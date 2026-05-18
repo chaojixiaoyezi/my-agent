@@ -1,4 +1,4 @@
-# LLM: Hierarchy scheduler creates child runs through explicit bundles, never from free-form runner text.
+# LLM: Hierarchy scheduler creates child runs through explicit bundles and shared schedule idempotency helpers.
 # 模块用途: 受控创建子代理/孙代理层级，统一限制深度、数量和 dry-run/apply 边界。
 
 from __future__ import annotations
@@ -8,11 +8,11 @@ from typing import Any
 
 from ..debug_trace import trace_hierarchy_schedule
 from ..models import SubAgentTask
+from . import hierarchy_context as hctx
 from .base import CreateRunParams
 from .hierarchy_acceptance import scheduled_child_acceptance_checks
 from .hierarchy_agent_names import scheduled_child_agent_name
 from .hierarchy_child_context import child_context_manifest, child_context_packs
-from .hierarchy_context import inherited_hierarchy_attributes, inherited_hierarchy_thought, scheduled_child_goal
 from .hierarchy_qa_scheduler import qa_orchestration_advice
 from .hierarchy_schedule_idempotency import (
     ScheduledChildResolution,
@@ -208,7 +208,7 @@ def _child_create_params(
             explicit_roots=list(spec.extra_write_roots),
         )
     )
-    role_probe_goal = scheduled_child_goal(parent, spec, write_roots=requested_write_roots)
+    role_probe_goal = hctx.scheduled_child_goal(parent, spec, write_roots=requested_write_roots)
     role = scheduled_child_role(parent, spec, requested_write_roots, goal=role_probe_goal)
     extra_write_roots = scheduled_child_extra_write_roots(
         ScheduledWriteRootRequest(
@@ -224,7 +224,7 @@ def _child_create_params(
             ),
         )
     )
-    goal = scheduled_child_goal(parent, spec, write_roots=extra_write_roots)
+    goal = hctx.scheduled_child_goal(parent, spec, write_roots=extra_write_roots)
     return _create_child_params(
         HierarchyCreateChildRequest(
             parent=parent,
@@ -259,7 +259,7 @@ def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParam
     agent_name = scheduled_child_agent_name(parent, spec, sibling_index=request.sibling_index)
     return CreateRunParams(
         goal=request.goal,
-        thought=spec.thought or inherited_hierarchy_thought(parent, child_goal=request.goal),
+        thought=spec.thought or hctx.inherited_hierarchy_thought(parent, child_goal=request.goal),
         plan=spec.plan or ["读取父级 refs", "执行小切片", "写回状态和证据 refs", "等待父级验收"],
         agent_name=agent_name,
         role=request.role,
@@ -295,7 +295,7 @@ def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParam
         context_packs=child_context_packs(parent, spec),
         extra_write_roots=request.extra_write_roots,
         workflow_mode="off",
-        attributes=inherited_hierarchy_attributes(parent, spec),
+        attributes=hctx.inherited_hierarchy_attributes(parent, spec),
     )
 
 
@@ -318,10 +318,10 @@ def _planned_items(parent: SubAgentTask, request: HierarchyScheduleRequest) -> l
                         explicit_roots=list(spec.extra_write_roots),
                     )
                 ),
-                goal=scheduled_child_goal(parent, spec),
+                goal=hctx.scheduled_child_goal(parent, spec),
             ),
             agent_name=scheduled_child_agent_name(parent, spec, sibling_index=index),
-            goal=scheduled_child_goal(parent, spec),
+            goal=hctx.scheduled_child_goal(parent, spec),
             created=False,
             reason="planned",
         )

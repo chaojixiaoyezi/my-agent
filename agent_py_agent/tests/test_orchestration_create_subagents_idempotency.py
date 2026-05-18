@@ -139,6 +139,31 @@ def test_generic_single_worker_reuses_explicit_idempotency_contract(tmp_path):
     assert len(agent.subagents.list_runs()) == 1
 
 
+# LLM: Structured output refs should create a system idempotency contract even if the model forgot one.
+# 函数用途: 防止真实 E2E 中模型只传 output_files 时重复创建同一个交付 worker。
+def test_generic_worker_reuses_system_derived_output_ref_contract(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _workspace_agent(tmp_path)
+    tool = CreateSubagentsTool(agent)
+    first = json.loads(tool.execute({
+        "goal": "写一个现代家具品牌首页。",
+        "role": "worker",
+        "output_files": ["artifacts/index.html"],
+        "extra_write_roots": [str(tmp_path / "artifacts")],
+    }).output)
+    second = json.loads(tool.execute({
+        "goal": "把首页做得更高级，仍然输出同一个文件。",
+        "role": "worker",
+        "output_files": ["artifacts/index.html"],
+        "extra_write_roots": [str(tmp_path / "artifacts")],
+    }).output)
+
+    assert second["created_run_ids"] == []
+    assert second["reused_run_ids"] == first["ids"]
+    assert len(agent.subagents.list_runs()) == 1
+
+
 # LLM: Default role display names are generic and must not merge unrelated goals.
 # 函数用途: 两个未显式命名的小傻妞-worker 目标不同，应创建两个 run，不能只靠默认名字误复用。
 def test_generic_default_name_does_not_reuse_different_goal(tmp_path):

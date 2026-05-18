@@ -164,3 +164,18 @@
 - 发现并修复：Live Lab 之前只隔离 `workspace_root/memory_path`，但 `my_agent_home` 仍指向 `~/.my-agent`，导致真实 case 读取全局 daily memory 后串成上一条任务。现在 `session.py` 会把 `my_agent_home` 指到本轮 `fixture_project/.my_agent/home`，避免污染用户家目录，也避免历史任务改写当前任务。
 - 真实复测：`python3 scripts/live_agent_lab.py --suite main-complex --real-llm --timeout 900 --run-id main-complex-isolated-20260518-135442` -> `LIVE_LAB_PASS`。结果：`health` 1.79s、`main_direct_web_app` 402.48s、`main_tool_failure_recovery` 67.45s、`main_large_log_audit` 97.82s。
 - 下一步：继续主代理底座真实测试，优先多次 compact/resume、验收失败后自动修复、大 artifact 读回、完整购物网站/资料整理 E2E。
+
+## 2026-05-18 Main-artifact 长输出读回 canary
+
+- 中文说明：新增 `main-artifact` suite，专门测“主代理自己读一个比较长的资料文件，发现一次读不完或只拿到片段时，能不能继续按证据找完整”。它不测小傻妞，只测主代理的大输出读回和续接能力。
+- 已实现：`main_artifact_readback` 会生成约 96KB 的 `data/artifact-readback/source.txt`，把 `ALPHA-ANCHOR`、`OMEGA-ANCHOR`、`TRACE-ARTIFACT-991` 三处证据放在相隔很远的位置。
+- 已实现：提示词仍然是普通中文，只说“资料比较长，如果系统一次只给你一部分内容，请继续按线索读完整，不要猜”，不使用 `dispatch`、`runner`、`contract` 等内部术语。
+- 已实现：最终验收只读真实 `lab_outputs/artifact-readback/report.md`，要求三处远距离证据都出现，并且报告必须包含解释、风险和下一步建议；不相信主代理最终口头说“我已经完成”。
+- 已实现：`main-complex` 也纳入 `main_artifact_readback`，但单独提供 `main-artifact` 小 suite，方便快速真实复测这一类大输出/外置产物读回问题。
+- 已实现：新增 `main_compact_resume_roundtrip`，紧跟长输出读回 case 执行。它先用 `memory-fact-write` 写结构化验收/约束/测试事实，再按同一 request id 执行 `memory-compact --apply` 和 `memory-resume --compact-resume-mode auto`，验证交接包可以继续。
+- 已实现：compact/resume gate 只读 JSON 结构化字段：`work_state_snapshot.missing_fields` 必须为空，`acceptance/constraints/latest_tests` 必须来自 `runtime_facts/*/task.json`，action guard 必须返回 `allow_automated_continue`，并且不自动执行工具。
+- 发现并修复：第一次加入 compact/resume roundtrip 后，`memory-compact --apply --request-id <run-id>` 找不到本轮 tool-output artifact refs。根因是普通 `run` 到 finalization 才生成 `request_id`，而大工具输出在工具循环阶段已经外置，索引里 scope 为空。
+- 已实现：`SimpleAgent.run()` 会在进入 context bundle、工具循环和 finalization 之前生成稳定 `run-...` request id；tool-output artifact index、runtime facts 和 context bundle 使用同一个结构化 id，不再靠收尾阶段补齐。
+- 已测试：`python3 -m pytest -q agent_py_agent/tests/test_tools/test_tool_loop.py::test_saved_run_generates_request_id_before_externalized_tool_outputs agent_py_agent/tests/test_live_lab_main_complex_case.py --tb=short` -> `4 passed`。
+- 真实复测：`python3 scripts/live_agent_lab.py --suite main-artifact --real-llm --timeout 600 --run-id main-artifact-20260518-early-request-id` -> `LIVE_LAB_PASS`。MiniMax-M2.7 先 `read_file` 触发 tool-output artifact，再 `read_artifact` 读回完整资料，随后 `memory-fact-write`、`memory-compact --apply`、`memory-resume --compact-resume-mode auto` 全部通过；work_state 已携带 `artifact_refs` 和 `allow_automated_continue`。
+- 下一步：继续主代理底座真实测试，优先验收失败后自动修复、完整 Web/app 或资料整理 E2E，以及多次 compact/resume 的连续续接。

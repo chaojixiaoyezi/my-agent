@@ -863,17 +863,21 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - `agent_py_agent/agent/log_analysis/tools.py`: security query/hunt/trace tools accept optional `max_limit`.
 - `agent_py_agent/cli/logs.py`: LOG CLI query commands honor `query_max_limit` from log-analysis config.
 - `scripts/live_lab/log_analysis_replay.py`: offline SecurityAlertV1 replay command that emits case, route, report, forensic package, and replay summary artifacts.
-- `scripts/live_lab/cases.py`: adds the `log_analysis_replay` Live Lab case; later also owns the natural-language furniture HTML canary and dispatches shop-flow/repair-wave/file-repair/markdown-repair through split helpers.
+- `scripts/live_lab/cases.py`: adds the `log_analysis_replay` Live Lab case; later also owns the natural-language furniture HTML canary and dispatches shop-flow/repair-wave/file-repair/markdown-repair/main-complex through split helpers.
+- `scripts/live_lab/main_agent_artifact_case.py`: owns the root-agent-only long artifact readback and compact/resume roundtrip canaries for large output/ref continuation.
+- `scripts/live_lab/main_agent_complex_case.py`: owns root-agent-only complex Live Lab canaries for multi-file web delivery, tool-failure recovery, and 100MB log audit.
 - `scripts/live_lab/shop_case.py`: owns the shopping-flow prompt, HTML business-flow gate, disabled-control check, external-asset check, and `static_site_check` bridge.
 - `scripts/live_lab/shop_repair_wave_case.py`: owns the seeded failed-shop child, repair-wave natural prompt, verified repair sibling assertion, and business-flow success contract for failure-to-repair Live Lab canaries.
 - `scripts/live_lab/file_repair_wave_case.py`: owns the seeded failed CSV child, natural repair prompt, required content-line checks, and verified repair sibling assertion for non-web file repair canaries.
 - `scripts/live_lab/markdown_repair_wave_case.py`: owns the seeded failed Markdown child, natural repair prompt, required content-line checks, and verified repair sibling assertion for document repair canaries.
 - `scripts/live_lab/state_assertions.py`: owns gateway response blocker checks and persisted `task.json` state gates shared by natural and shop Live Lab cases.
-- `scripts/live_lab/constants.py`: adds the `log-analysis`, `natural`, `shop`, `shop-repair`, `file-repair`, and `markdown-repair` suites and includes replay/natural/shop/repair/file-repair/markdown-repair cases in the `all` suite.
+- `scripts/live_lab/constants.py`: adds the `log-analysis`, `natural`, `shop`, `shop-repair`, `file-repair`, `markdown-repair`, `main-artifact`, and `main-complex` suites and includes replay/natural/shop/repair/file-repair/markdown-repair cases in the `all` suite.
 - `agent_py_agent/agent/subagent_workflows/planner.py`: composes workflow routing, compilation, and parent acceptance into one dry-run planning facade.
 - `agent_py_agent/tests/test_runtime_capabilities.py`: verifies ordinary prompts hide security tools, explicit grants expose them, and English/Chinese security-log prompts auto-grant them.
+- `agent_py_agent/tests/test_runtime_request_id_contract.py`: verifies saved root runs generate request_id before tool-output externalization, so context bundle, runtime facts, and compact/resume scope stay aligned.
 - `agent_py_agent/tests/test_live_lab_log_analysis_replay.py`: verifies offline replay artifacts and failure-stage semantics.
 - `agent_py_agent/tests/test_live_lab_natural_case.py`: verifies the natural-language furniture HTML, shop-flow, shop-repair, file-repair, and markdown-repair canary prompts, real-LLM gating, artifact validation, response blocker detection, and persisted subagent state checks.
+- `agent_py_agent/tests/test_subagent_machine_fact_contracts.py`: verifies legacy acceptance helpers stay service-backed and create/schedule idempotency does not compare goal prose.
 - `agent_py_agent/tests/test_subagent_workflow_planner.py`: verifies the planner facade for auto, manual, and off workflow modes.
 
 ## 2026-05-08 Tree Update: Acceptance Progress CLI Split

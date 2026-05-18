@@ -7,13 +7,13 @@ from __future__ import annotations
 # LLM: refs_only_delegation_enabled distinguishes explicit delegation from ordinary acceptance wording.
 # 函数用途: 只接受 task_attributes 里的 refs_only/delegate_only 机器字段，启用顶层 root 读正文保护。
 def refs_only_delegation_enabled(attributes: dict | None) -> bool:
-    return _truthy_field(attributes, "refs_only", "delegate_only")
+    return _truthy_field(attributes, ("refs_only", "delegate_only"))
 
 
 # LLM: subagent_delegation_enabled accepts only explicit machine fields.
 # 函数用途: 识别 task_attributes.subagent_delegation/delegate_only，用于派工前少读正文策略。
 def subagent_delegation_enabled(attributes: dict | None) -> bool:
-    return _truthy_field(attributes, "subagent_delegation", "delegate_only")
+    return _truthy_field(attributes, ("subagent_delegation", "delegate_only"))
 
 
 # LLM: parent_body_read_allowed recognizes explicit current-run machine override fields.
@@ -21,7 +21,7 @@ def subagent_delegation_enabled(attributes: dict | None) -> bool:
 def parent_body_read_allowed(attributes: dict | None) -> bool:
     return _field_mode_is(attributes, "parent_body_read", "allow") or _truthy_field(
         attributes,
-        "parent_body_read_allowed",
+        ("parent_body_read_allowed",),
     )
 
 
@@ -30,13 +30,13 @@ def parent_body_read_allowed(attributes: dict | None) -> bool:
 def parent_product_write_allowed(attributes: dict | None) -> bool:
     return _field_mode_is(attributes, "parent_product_write", "allow") or _truthy_field(
         attributes,
-        "parent_product_write_allowed",
+        ("parent_product_write_allowed",),
     )
 
 
 # LLM: _truthy_field reads exact bool-like protocol values without scanning prose.
 # 函数用途: 从结构化 attributes 读取布尔字段；不解析 prompt、goal、summary 或普通句子。
-def _truthy_field(attributes: dict | None, *keys: str) -> bool:
+def _truthy_field(attributes: dict | None, keys: tuple[str, ...]) -> bool:
     attrs = attributes if isinstance(attributes, dict) else {}
     return any(_boolish(attrs.get(key)) for key in keys)
 
