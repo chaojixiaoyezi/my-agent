@@ -13,6 +13,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .skill_lifecycle import (
+    SkillDraftRequest,
+    SkillLifecycleEvent,
+    SkillLifecycleResult,
+    SkillLifecycleStore,
+)
+
 
 # LLM: SkillCard is a 能力路由 boundary object; coordinate field or method changes with callers, docs, and focused tests.
 # 类用途: 一个 skill 的轻量索引卡。 Card 只放路由需要的短信息，不直接装进完整 `SKILL.md`。 这样即使未来有一万个 skill，也可以先检索 card，再按需加载正文。
@@ -305,3 +312,14 @@ def _first_paragraph(body: str) -> str:
         if text and not text.startswith("#"):
             return " ".join(text.split())
     return ""
+
+
+__all__ = [
+    "SkillCard",
+    "SkillDraftRequest",
+    "SkillLifecycleEvent",
+    "SkillLifecycleResult",
+    "SkillLifecycleStore",
+    "SkillRegistry",
+    "parse_skill_file",
+]

@@ -456,6 +456,7 @@ tool_vector_search_enabled: true
 # - 默认空列表，不启动任何外部 MCP 进程。
 # - 每项是 {name, command, cwd, env, startup_timeout_seconds, request_timeout_seconds}。
 # - command 建议用 argv 列表，避免 shell 转义差异。
+mcp_auto_discover_tools: true
 mcp_stdio_servers: []
 
 # MCP tool 描述：

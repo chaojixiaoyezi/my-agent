@@ -18,6 +18,7 @@ class McpToolDescriptor:
     keywords: list[str] = field(default_factory=list)
     risk_level: str = "medium"
     source: str = "mcp"
+    input_schema: dict[str, object] = field(default_factory=dict)
 
 
 # LLM: from_mcp_tool maps external MCP tool metadata into the same routable card shape without execution hooks.
@@ -42,5 +43,5 @@ def from_mcp_tool(descriptor: McpToolDescriptor):
         keywords=[server, name, *descriptor.keywords, *descriptor.capabilities],
         risk_level=descriptor.risk_level or "medium",
         source=descriptor.source or "mcp",
-        metadata={"server": server},
+        metadata={"server": server, "input_schema": dict(descriptor.input_schema)},
     )

@@ -45,7 +45,15 @@ from .runtime_config import (
     load_capability_config_snapshot,
     reload_capability_config_if_changed,
 )
-from .skills import SkillCard, SkillRegistry, parse_skill_file
+from .skills import (
+    SkillCard,
+    SkillDraftRequest,
+    SkillLifecycleEvent,
+    SkillLifecycleResult,
+    SkillLifecycleStore,
+    SkillRegistry,
+    parse_skill_file,
+)
 from .usage import (
     CapabilityUsageRecord,
     CapabilityUsageStats,
@@ -75,6 +83,10 @@ __all__ = [
     "McpTool",
     "McpToolDescriptor",
     "SkillCard",
+    "SkillDraftRequest",
+    "SkillLifecycleEvent",
+    "SkillLifecycleResult",
+    "SkillLifecycleStore",
     "SkillRegistry",
     "StdioMcpExecutor",
     "apply_capability_config_patch",

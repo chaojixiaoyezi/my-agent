@@ -10,6 +10,22 @@ Skill 扫描本质上属于能力路由的一部分，所以真实实现已经�
 旧入口继续保留。
 """
 
-from .capability.skills import SkillCard, SkillRegistry, parse_skill_file
+from .capability.skills import (
+    SkillCard,
+    SkillDraftRequest,
+    SkillLifecycleEvent,
+    SkillLifecycleResult,
+    SkillLifecycleStore,
+    SkillRegistry,
+    parse_skill_file,
+)
 
-__all__ = ["SkillCard", "SkillRegistry", "parse_skill_file"]
+__all__ = [
+    "SkillCard",
+    "SkillDraftRequest",
+    "SkillLifecycleEvent",
+    "SkillLifecycleResult",
+    "SkillLifecycleStore",
+    "SkillRegistry",
+    "parse_skill_file",
+]

@@ -25,10 +25,13 @@ class McpRegistryConfig:
 def mcp_registry_config_from_agent_config(config: object) -> McpRegistryConfig:
     descriptors = [_descriptor_from_raw(item) for item in _raw_list(config, "mcp_tool_descriptors")]
     servers = [_server_spec_from_raw(item) for item in _raw_list(config, "mcp_stdio_servers")]
+    executor = StdioMcpExecutor(servers) if servers else None
+    if executor is not None and bool(getattr(config, "mcp_auto_discover_tools", True)):
+        descriptors = _merge_discovered_descriptors(descriptors, executor, servers)
     grant_scope = _grant_scope_from_config(config)
     return McpRegistryConfig(
         descriptors=descriptors,
-        executor=StdioMcpExecutor(servers) if servers else None,
+        executor=executor,
         grant_scope=grant_scope,
     )
 
@@ -52,6 +55,7 @@ def _descriptor_from_raw(raw: object) -> McpToolDescriptor:
         keywords=_string_list(raw.get("keywords")),
         risk_level=str(raw.get("risk_level") or "medium"),
         source=str(raw.get("source") or "mcp"),
+        input_schema=raw.get("input_schema") if isinstance(raw.get("input_schema"), dict) else {},
     )
 
 
@@ -124,3 +128,37 @@ def _float(value: object, *, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+# LLM: _merge_discovered_descriptors adds tools/list metadata without overwriting explicit descriptors.
+# 函数用途: 从 MCP server 自动发现 tool schema，并和手写 descriptor 合并。
+def _merge_discovered_descriptors(
+    descriptors: list[McpToolDescriptor],
+    executor: StdioMcpExecutor,
+    servers: list[McpStdioServerSpec],
+) -> list[McpToolDescriptor]:
+    merged = {(item.server, item.name): item for item in descriptors}
+    for server in servers:
+        for raw_tool in executor.list_tools(server.name):
+            descriptor = _descriptor_from_discovered_tool(server.name, raw_tool)
+            merged.setdefault((descriptor.server, descriptor.name), descriptor)
+    return list(merged.values())
+
+
+# LLM: _descriptor_from_discovered_tool converts MCP tools/list entries into routable descriptors.
+# 函数用途: 把 MCP tools/list 的 name/description/inputSchema 转成 McpToolDescriptor。
+def _descriptor_from_discovered_tool(server: str, raw_tool: dict[str, Any]) -> McpToolDescriptor:
+    name = str(raw_tool.get("name") or "").strip()
+    if not name:
+        raise ValueError(f"MCP server {server!r} returned tool without name")
+    input_schema = raw_tool.get("inputSchema")
+    return McpToolDescriptor(
+        server=server,
+        name=name,
+        description=str(raw_tool.get("description") or name),
+        capabilities=["mcp", server, name],
+        keywords=[server, name],
+        risk_level="medium",
+        source="mcp_discovered",
+        input_schema=input_schema if isinstance(input_schema, dict) else {},
+    )

@@ -82,6 +82,12 @@ class StdioMcpExecutor:
         session = self._session(server)
         return session.call_tool(name, arguments)
 
+    # LLM: StdioMcpExecutor.list_tools discovers tool schemas from a configured MCP server.
+    # 函数用途: 调用真实 MCP tools/list，并返回 server 原始 tools 列表。
+    def list_tools(self, server: str) -> list[dict[str, Any]]:
+        session = self._session(server)
+        return session.list_tools()
+
     # LLM: StdioMcpExecutor.close terminates all lazy-started server processes.
     # 函数用途: 关闭已启动的 MCP stdio 会话，供测试和长生命周期清理使用。
     def close(self) -> None:
@@ -135,6 +141,13 @@ class _McpStdioSession:
             {"name": str(name or "").strip(), "arguments": dict(arguments)},
             timeout=self.spec.request_timeout_seconds,
         )
+
+    # LLM: _McpStdioSession.list_tools sends the standard MCP tools/list request.
+    # 函数用途: 读取 MCP server 暴露的 tool 名称、描述和 inputSchema。
+    def list_tools(self) -> list[dict[str, Any]]:
+        result = self._request("tools/list", {}, timeout=self.spec.request_timeout_seconds)
+        tools = result.get("tools") if isinstance(result, dict) else None
+        return [tool for tool in tools if isinstance(tool, dict)] if isinstance(tools, list) else []
 
     # LLM: _McpStdioSession.close stops the subprocess without raising cleanup noise.
     # 函数用途: 终止 MCP 子进程，并尽量回收资源。
@@ -292,6 +305,7 @@ class McpTool(BaseTool):
 def _mcp_tool_spec(descriptor: McpToolDescriptor) -> ToolSpec:
     server = descriptor.server.strip()
     name = descriptor.name.strip()
+    schema_details = _schema_parameter_details(descriptor.input_schema)
     return ToolSpec(
         name=f"mcp.{server}.{name}",
         category="mcp",
@@ -299,8 +313,8 @@ def _mcp_tool_spec(descriptor: McpToolDescriptor) -> ToolSpec:
         use_cases=list(descriptor.when_to_use) or [descriptor.description.strip() or name],
         avoid_when=list(descriptor.not_when_to_use),
         keywords=[server, name, *descriptor.keywords, *descriptor.capabilities],
-        parameters={"arguments": "MCP tool 参数对象"},
-        parameter_details={"arguments": "传给 MCP server 的 JSON object 参数；不接受字符串或数组。"},
+        parameters={"arguments": "MCP tool 参数对象", **schema_details},
+        parameter_details={"arguments": "传给 MCP server 的 JSON object 参数；不接受字符串或数组。", **schema_details},
         examples=[json.dumps({"tool": f"mcp.{server}.{name}", "arguments": {}}, ensure_ascii=False)],
     )
 
@@ -355,3 +369,16 @@ def _merged_env(extra: dict[str, str]) -> dict[str, str]:
     env = dict(os.environ)
     env.update({str(key): str(value) for key, value in extra.items()})
     return env
+
+
+# LLM: _schema_parameter_details exposes MCP inputSchema properties as compact tool details.
+# 函数用途: 从 MCP JSON schema 提取一层参数名和类型，帮助模型少写错 arguments。
+def _schema_parameter_details(schema: dict[str, object]) -> dict[str, str]:
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(properties, dict):
+        return {}
+    details: dict[str, str] = {}
+    for key, value in properties.items():
+        if isinstance(value, dict):
+            details[str(key)] = str(value.get("type") or value.get("description") or "object")
+    return details

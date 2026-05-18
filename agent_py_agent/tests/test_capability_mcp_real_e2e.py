@@ -19,6 +19,62 @@ from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
 
+_DEMO_MCP_SERVER_SOURCE = r'''
+import json
+import sys
+
+
+def send(payload):
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    request_id = message.get("id")
+    if method == "initialize":
+        send({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "protocolVersion": message.get("params", {}).get("protocolVersion", "2024-11-05"),
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "demo", "version": "test"},
+            },
+        })
+    elif method == "notifications/initialized":
+        continue
+    elif method == "tools/list":
+        send({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "tools": [{
+                    "name": "echo",
+                    "description": "Echo through a real MCP stdio server",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string"}},
+                        "required": ["message"],
+                    },
+                }]
+            },
+        })
+    elif method == "tools/call":
+        arguments = message.get("params", {}).get("arguments", {})
+        send({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "content": [{"type": "text", "text": "真实 MCP pong: " + str(arguments.get("message", ""))}],
+                "isError": False,
+            },
+        })
+    else:
+        send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "method not found"}})
+'''.lstrip()
+
 
 # LLM: _McpToolLoopBackend simulates model choices while leaving MCP execution real.
 # 类用途: 测试专用后端，按模型轮次先查目录、再调用 MCP、最后根据工具结果收口。
@@ -110,6 +166,36 @@ def test_simple_agent_uses_configured_real_stdio_mcp_server_end_to_end(tmp_path:
     assert result.tool_rounds == 2
 
 
+def test_simple_agent_auto_discovers_mcp_tools_list_schema(tmp_path: Path) -> None:
+    server = _write_demo_mcp_server(tmp_path)
+    config = AgentConfig(
+        model_backend="echo",
+        max_tool_rounds=1,
+        tool_vector_search_enabled=False,
+        mcp_auto_discover_tools=True,
+        mcp_stdio_servers=[
+            {
+                "name": "demo",
+                "command": [sys.executable, "-u", str(server)],
+                "request_timeout_seconds": 5,
+            }
+        ],
+        capability_grant_mcp_tools=["demo:echo"],
+    )
+    agent = SimpleAgent(config, tmp_path)
+
+    try:
+        specs = {spec.name: spec for spec in agent.tools.specs(include_orchestration=True)}
+        detail = agent.tools.execute_call({"tool": "capability_describe", "id": "mcp:demo:echo"})
+    finally:
+        agent.tools.close()
+
+    payload = json.loads(detail.output)
+    assert "mcp.demo.echo" in specs
+    assert specs["mcp.demo.echo"].parameter_details["message"] == "string"
+    assert payload["detail"]["metadata"]["input_schema"]["properties"]["message"]["type"] == "string"
+
+
 # LLM: _registry builds a focused registry with one real-process MCP tool.
 # 函数用途: 构造测试用 ToolRegistry，注入 stdio executor 和授权范围。
 def _registry(root: Path, executor: StdioMcpExecutor) -> ToolRegistry:
@@ -150,53 +236,5 @@ def _tool_call(payload: dict[str, object]) -> str:
 # 函数用途: 生成测试子进程脚本，支持 initialize、initialized notification 和 tools/call。
 def _write_demo_mcp_server(tmp_path: Path) -> Path:
     server = tmp_path / "demo_mcp_server.py"
-    server.write_text(
-        r'''
-import json
-import sys
-
-
-def send(payload):
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
-
-
-for line in sys.stdin:
-    message = json.loads(line)
-    method = message.get("method")
-    request_id = message.get("id")
-    if method == "initialize":
-        send({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "protocolVersion": message.get("params", {}).get("protocolVersion", "2024-11-05"),
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "demo", "version": "test"},
-            },
-        })
-    elif method == "notifications/initialized":
-        continue
-    elif method == "tools/call":
-        params = message.get("params", {})
-        arguments = params.get("arguments", {})
-        send({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "content": [
-                    {"type": "text", "text": "真实 MCP pong: " + str(arguments.get("message", ""))}
-                ],
-                "isError": False,
-            },
-        })
-    else:
-        send({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "error": {"code": -32601, "message": "method not found"},
-        })
-'''.lstrip(),
-        encoding="utf-8",
-    )
+    server.write_text(_DEMO_MCP_SERVER_SOURCE, encoding="utf-8")
     return server
