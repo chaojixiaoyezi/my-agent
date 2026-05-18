@@ -14,9 +14,9 @@ from agent_py_agent.agent.agent_core.subagent_dispatch_closeout_resolution impor
     blocking_task_ids,
     task_resolved_for_closeout,
 )
-from agent_py_agent.agent.subagents.services.hierarchy_leaf_targets import task_actual_target_tokens
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.manager_base import SubAgentManagerInitParams
+from agent_py_agent.agent.subagents.services.hierarchy_leaf_targets import task_actual_target_tokens
 
 from .state_assertions import (
     assert_no_subagent_state_blockers,

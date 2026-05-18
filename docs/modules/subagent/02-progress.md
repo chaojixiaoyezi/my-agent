@@ -1794,3 +1794,12 @@
 - 已实现：`static_site_dom_checks.py` 把“已空值保护的 DOM 查询”视为可选 hook；如果某个元素必须存在，调用方必须通过结构化 `required_dom_ids` 声明。这样机器事实来自显式合同，而不是从 JS 文本里猜业务必需区块。
 - 已实现：`main-complex` 的 README gate 同步避免目录名硬要求；核心文件、锚点、产物路径仍由真实文件系统和结构化静态检查验证。
 - 已测试：`test_static_site_validator.py` 新增 group guard 回归；真实 `main-complex-isolated-20260518-135442` 通过 MiniMax-M2.7 复测。
+
+## 2026-05-18 验收 helper / 幂等合同收口
+
+- 中文说明：针对代码审查指出的“旧测试还在靠 acceptance_checks 文案触发机器验收”“legacy helper 和 service 双轨”“幂等合同依赖模型主动传”做收口。现在普通自然语言仍给人和 LLM 看，机器判断只看结构化字段、refs 和状态。
+- 已实现：`acceptance_helpers/evidence.py` 只作为兼容入口，实际 `build_evidence_findings()` 委托 `services/acceptance_evidence_findings.py`。旧 `evidence_acceptance_findings.py` 不再保留独立 presence/tool-requirement 实现，避免一边改 service、一边漏 helper。
+- 已实现：测试合同同步为结构化 `attributes.required_tool_evidence`；`acceptance_checks` 里出现 `read_file/write_file` 只作为人类说明，不会触发 `acceptance_requires_*` 机器 finding。
+- 已实现：`create_context_packs()` 会在没有显式 idempotency contract、但工具参数已有 `output_refs/output_files/artifact_refs` 时，自动补 `subagent_idempotency_contract.v1`。这样真实 E2E 里模型忘写幂等包时，同一个结构化产物目标也能复用旧 run；没有结构化产物 refs 时仍不会用 goal 文本去重。
+- 已实现：架构守卫新增两条硬门：legacy evidence helper 必须保持 service shim；create/schedule 幂等不得比较 goal 文本。`test_code_does_not_use_plain_language_as_machine_facts` 继续覆盖自然语言事实源铁律。
+- 已测试：`test_acceptance_helpers_class.py::TestBuildEvidenceFindings`、`test_acceptance_evidence_contracts.py`、`test_orchestration_create_subagents_idempotency.py`、`test_architecture_guardrails.py`、Live Lab 注册/自然语言 focused tests 和 ruff 已通过。真实 E2E 硬门仍分为本地/手动真实模型矩阵，避免远端 CI 默认消耗 API。

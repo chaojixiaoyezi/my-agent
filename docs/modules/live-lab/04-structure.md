@@ -14,6 +14,7 @@ scripts/
     |-- constants.py                   # suite 名、默认目录等常量
     |-- file_repair_wave_case.py       # 普通文件失败后修复闭环真实 case
     |-- log_analysis_replay.py         # LOG 离线 replay 具体流程
+    |-- main_agent_artifact_case.py    # 主代理长输出读回真实 case
     |-- main_agent_complex_case.py     # 主代理自己完成复杂任务的真实 case
     |-- markdown_repair_wave_case.py   # Markdown 文档失败后修复闭环真实 case
     |-- shop_case.py                   # 购物站业务流真实 case
@@ -28,7 +29,8 @@ scripts/
 - `live_lab/runner.py` 的 `_LabInterface`：兼容旧 case surface；把 `run_root`、`prompts_dir`、`responses_dir`、`summary_path` 等目录属性转发给 case，case 不直接访问 runner/session 私有字段。
 - `live_lab/cases.py`：登记有哪些 case，每个 case 怎么跑。
 - `live_lab/file_repair_wave_case.py`：负责 `file-repair` suite 的坏 CSV seed、自然语言修复 prompt、最终内容 gate 和 verified repair sibling 检查。
-- `live_lab/main_agent_complex_case.py`：负责 `main-complex` suite 的主代理复杂任务测试，会临时关闭子代理，只测 root 自己的工具、产物和恢复能力。
+- `live_lab/main_agent_artifact_case.py`：负责 `main-artifact` suite 的长输出读回测试，专门测主代理是否能从长资料里续读远距离证据。
+- `live_lab/main_agent_complex_case.py`：负责 `main-complex` suite 里的 Web app、工具失败恢复和大日志审计测试，会临时关闭子代理，只测 root 自己的工具、产物和恢复能力。
 - `live_lab/markdown_repair_wave_case.py`：负责 `markdown-repair` suite 的坏 Markdown seed、自然语言修复 prompt、最终内容 gate 和 verified repair sibling 检查。
 - `live_lab/log_analysis_replay.py`：把 SecurityAlertV1 fixture 跑成 LOG artifacts。
 - `agent_py_agent/tests/test_live_lab_log_analysis_replay.py`：验证 replay 的成功和失败路径。
@@ -125,16 +127,21 @@ scripts/
 - 产品侧依赖：`required_content_lines.py` 既支持结构化 per-file 内容合同，也支持普通用户“下面 N 行一字不差”这种自然语言块；`execution_test_items.py` 会把目标文件和内容行映射成 `content_check`，仍然只读真实产物文件，不相信口头回复。
 - 当前离线验收：`agent_py_agent/tests/test_live_lab_natural_case.py` 已覆盖 suite 注册、坏 Markdown seed、verified repair sibling 状态门和最终内容 gate。真实 `--suite markdown-repair --real-llm` 是后续 repair-wave 压测入口。
 
-## 2026-05-18 main-complex structure
+## 2026-05-18 main-complex / main-artifact structure
 
 - 中文说明：`main-complex` suite 是主代理底座 canary。它回答一个更基础的问题：不靠小傻妞时，my-agent 自己能不能完成多文件项目、遇到工具失败后恢复、审计大文件。
-- `scripts/live_lab/constants.py`：`main-complex` suite 包含 `health`、`main_direct_web_app`、`main_tool_failure_recovery`、`main_large_log_audit`；三个主 case 都属于 `REAL_CASES`，必须传 `--real-llm`。
+- `scripts/live_lab/constants.py`：`main-complex` suite 包含 `health`、`main_direct_web_app`、`main_tool_failure_recovery`、`main_artifact_readback`、`main_compact_resume_roundtrip`、`main_large_log_audit`；五个主 case 都属于 `REAL_CASES`，必须传 `--real-llm`。
+- `scripts/live_lab/constants.py`：`main-artifact` 是快速复测小套件，只包含 `health`、`main_artifact_readback` 和 `main_compact_resume_roundtrip`；用于单独压测大输出/外置产物读回和 compact/resume 交接包，不用每次重跑 100MB 日志和多文件 Web app。
 - `scripts/live_lab/session.py`：隔离配置会同时设置 `workspace_root` 和 `my_agent_home`。`my_agent_home` 指向本轮 `fixture_project/.my_agent/home`，避免真实 case 读取或写入用户全局 `~/.my-agent`，也避免上一轮 daily memory 把下一轮任务带偏。
 - `scripts/live_lab/main_agent_complex_case.py`：`_ensure_main_agent_only()` 会把 `enable_subagents: false` 追加到本轮隔离配置，确保测试的是主代理自己，不污染用户配置。
+- `scripts/live_lab/main_agent_artifact_case.py`：复用 `_ensure_main_agent_only()`，但把长输出读回 case 单独拆出，避免主复杂 case 文件继续膨胀。
 - `main_direct_web_app`：要求主代理写 `index.html`、`styles.css`、`app.js`、`README.md`，并用通用静态产物门检查文件引用、坏链接、外部渲染资源和基础交互。
 - `main_direct_web_app` 的 README gate 只检查核心文件 token 和真实页面锚点；目录名、说明措辞、章节标题都不当作机器事实来源，避免自然语言表达不同导致误杀。
 - `main_tool_failure_recovery`：要求主代理先读一个不存在的文件，再改读真实素材。这个 case 用来观察工具失败是否能被模型当成可恢复事件，而不是直接卡死或假装成功。
+- `main_artifact_readback`：生成约 96KB 的长资料，把三处证据放在远距离位置；它要求主代理继续按证据读回并写报告，用来压测大输出外置、分片续读和报告验收。
+- `main_compact_resume_roundtrip`：读取上一个真实 run 的 `runtime_facts` request id，写入用户确认的验收/约束/测试事实，执行 `memory-compact --apply` 和 `memory-resume --compact-resume-mode auto`，要求 auto guard 只放行续接、不自动执行工具。
 - `main_large_log_audit`：生成 100MB 日志，只要求报告关键证据和建议。它的目的不是测日志内容本身，而是测大输出/大文件场景下是否保持 refs-first（只拿引用和证据，不把全文塞进上下文）。
 - 底层合同依赖：`main-complex` 的产物验收现在和父级验收共享 `contracts/artifact_acceptance.py` / `contracts/acceptance_contract.py` / `contracts/state_machine.py` / 结构化工具 envelope。Web case 复用 `static_site_check`；强制业务区块应使用结构化 `required_dom_ids`，而 `getElementById` 已经做空值保护的可选 hook 不算硬失败。
 - 当前真实验收：`main-complex-isolated-20260518-135442` 已用 MiniMax-M2.7 跑通。它验证了主代理多文件 Web app、工具失败恢复、100MB 大日志审计和 Live Lab 家目录隔离。
+- 当前真实验收：`main-artifact-20260518-early-request-id` 已用 MiniMax-M2.7 跑通。它验证了主代理在长资料读回时能先接收外置 tool-output artifact，再用 `read_artifact` 续读并写出证据报告；同一 run 的 `request_id` 会提前进入 context bundle、tool-output index、runtime facts，随后 compact/resume roundtrip 能带回 `artifact_refs` 并放行 `allow_automated_continue`。
 - 后续扩展：compact/resume 多次续接、验收失败后自动修复、真实资料整理 xlsx/论文翻译等可以继续拆成同目录的新 case，不要塞回 `cases.py`。

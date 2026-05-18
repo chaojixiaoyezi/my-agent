@@ -42,7 +42,7 @@ def test_items_mode_payload_rebinds_stale_self_output_run_id(tmp_path):
 
     assert result.ok is True
     assert stale_id not in payload["tasks"][0]["attributes"]["output_files"][0]
-    assert payload["tasks"][0]["attributes"]["output_files"][0].endswith(f"data_collection.md")
+    assert payload["tasks"][0]["attributes"]["output_files"][0].endswith("data_collection.md")
     assert loaded.attributes["output_ref_rebindings"][0]["to"].endswith("/data_collection.md")
 
 

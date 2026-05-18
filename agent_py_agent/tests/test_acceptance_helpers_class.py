@@ -124,6 +124,27 @@ class TestBuildReadinessFindings:
         assert structured_finding.ok is True  # 未记录不算失败
 
 
+# LLM: evidence helper tests must provide the structured task fields used by the service implementation.
+# 函数用途: 构造验收证据测试任务；工具要求只放 attributes，acceptance_checks 只作为给人看的说明。
+def _evidence_task(
+    tmp_path: Path,
+    data: dict[str, object] | None = None,
+):
+    data = data or {}
+    task = MagicMock()
+    task.evidence = data.get("evidence", [])
+    task.evidence_packets = []
+    task.acceptance_checks = data.get("acceptance_checks", [])
+    task.used_tools = data.get("used_tools", [])
+    task.attributes = data.get("attributes", {})
+    task.acceptance_file = str(tmp_path / "acceptance.json")
+    task.output_json = str(tmp_path / "output.json")
+    task.task_dir = str(tmp_path / "run")
+    task.child_ids = []
+    task.runner_last_attempt_at = 0.0
+    return task
+
+
 class TestBuildEvidenceFindings:
     """测试 _build_evidence_findings 函数。"""
 
@@ -131,11 +152,7 @@ class TestBuildEvidenceFindings:
         """有可用验收证据。"""
         from agent_py_agent.agent.subagents.acceptance_helpers import _build_evidence_findings
 
-        task = MagicMock()
-        task.evidence = [MagicMock(ok=True), MagicMock(ok=True)]
-        task.acceptance_checks = []
-        task.used_tools = []
-        task.acceptance_file = str(tmp_path / "acceptance.json")
+        task = _evidence_task(tmp_path, {"evidence": [MagicMock(ok=True), MagicMock(ok=True)]})
 
         findings = _build_evidence_findings(task, 1234567890.0)
 
@@ -146,11 +163,7 @@ class TestBuildEvidenceFindings:
         """缺少验收证据。"""
         from agent_py_agent.agent.subagents.acceptance_helpers import _build_evidence_findings
 
-        task = MagicMock()
-        task.evidence = []
-        task.acceptance_checks = []
-        task.used_tools = []
-        task.acceptance_file = str(tmp_path / "acceptance.json")
+        task = _evidence_task(tmp_path)
 
         findings = _build_evidence_findings(task, 1234567890.0)
 
@@ -161,11 +174,7 @@ class TestBuildEvidenceFindings:
         """没有失败证据。"""
         from agent_py_agent.agent.subagents.acceptance_helpers import _build_evidence_findings
 
-        task = MagicMock()
-        task.evidence = [MagicMock(ok=True)]
-        task.acceptance_checks = []
-        task.used_tools = []
-        task.acceptance_file = str(tmp_path / "acceptance.json")
+        task = _evidence_task(tmp_path, {"evidence": [MagicMock(ok=True)]})
 
         findings = _build_evidence_findings(task, 1234567890.0)
 
@@ -176,11 +185,7 @@ class TestBuildEvidenceFindings:
         """存在失败证据。"""
         from agent_py_agent.agent.subagents.acceptance_helpers import _build_evidence_findings
 
-        task = MagicMock()
-        task.evidence = [MagicMock(ok=True), MagicMock(ok=False)]
-        task.acceptance_checks = []
-        task.used_tools = []
-        task.acceptance_file = str(tmp_path / "acceptance.json")
+        task = _evidence_task(tmp_path, {"evidence": [MagicMock(ok=True), MagicMock(ok=False)]})
 
         findings = _build_evidence_findings(task, 1234567890.0)
 
@@ -188,21 +193,20 @@ class TestBuildEvidenceFindings:
         assert not_failed_finding.ok is False
 
     def test_acceptance_requires_read_file_with_evidence(self, tmp_path: Path):
-        """acceptance_checks 要求 read_file 且有证据。"""
+        """结构化 attributes 要求 read_file 且有证据。"""
         from agent_py_agent.agent.subagents.acceptance_helpers import _build_evidence_findings
 
-        task = MagicMock()
-        task.evidence = [
-            MagicMock(
-                ok=True,
-                kind="read_file",
-                command="read_file /path",
-                summary="read file",
-            )
-        ]
-        task.acceptance_checks = ["read_file 验证"]
-        task.used_tools = ["read_file"]
-        task.acceptance_file = str(tmp_path / "acceptance.json")
+        task = _evidence_task(
+            tmp_path,
+            {
+                "evidence": [
+                    MagicMock(ok=True, kind="read_file", command="read_file /path", summary="read file")
+                ],
+                "used_tools": ["read_file"],
+                "attributes": {"required_tool_evidence": ["read_file"]},
+                "acceptance_checks": ["自然语言里说 read_file 不作为机器事实来源。"],
+            },
+        )
 
         findings = _build_evidence_findings(task, 1234567890.0)
 
@@ -211,14 +215,17 @@ class TestBuildEvidenceFindings:
         assert read_finding.ok is True
 
     def test_acceptance_requires_read_file_without_evidence(self, tmp_path: Path):
-        """acceptance_checks 要求 read_file 但缺少证据。"""
+        """结构化 attributes 要求 read_file 但缺少证据。"""
         from agent_py_agent.agent.subagents.acceptance_helpers import _build_evidence_findings
 
-        task = MagicMock()
-        task.evidence = []
-        task.acceptance_checks = ["read_file 验证"]
-        task.used_tools = ["read_file"]
-        task.acceptance_file = str(tmp_path / "acceptance.json")
+        task = _evidence_task(
+            tmp_path,
+            {
+                "used_tools": ["read_file"],
+                "attributes": {"required_tool_evidence": ["read_file"]},
+                "acceptance_checks": ["自然语言里说 read_file 不作为机器事实来源。"],
+            },
+        )
 
         findings = _build_evidence_findings(task, 1234567890.0)
 
@@ -226,21 +233,20 @@ class TestBuildEvidenceFindings:
         assert read_finding.ok is False
 
     def test_acceptance_requires_write_file_with_evidence(self, tmp_path: Path):
-        """acceptance_checks 要求 write_file 且有证据。"""
+        """结构化 attributes 要求 write_file 且有证据。"""
         from agent_py_agent.agent.subagents.acceptance_helpers import _build_evidence_findings
 
-        task = MagicMock()
-        task.evidence = [
-            MagicMock(
-                ok=True,
-                kind="write_file",
-                command="write_file /path",
-                summary="写入文件",
-            )
-        ]
-        task.acceptance_checks = ["write_file 验证"]
-        task.used_tools = ["write_file"]
-        task.acceptance_file = str(tmp_path / "acceptance.json")
+        task = _evidence_task(
+            tmp_path,
+            {
+                "evidence": [
+                    MagicMock(ok=True, kind="write_file", command="write_file /path", summary="写入文件")
+                ],
+                "used_tools": ["write_file"],
+                "attributes": {"required_tool_evidence": ["write_file"]},
+                "acceptance_checks": ["自然语言里说 write_file 不作为机器事实来源。"],
+            },
+        )
 
         findings = _build_evidence_findings(task, 1234567890.0)
 
@@ -252,13 +258,15 @@ class TestBuildEvidenceFindings:
         """summary 里提到 read_file 不等于真实工具证据。"""
         from agent_py_agent.agent.subagents.acceptance_helpers import _build_evidence_findings
 
-        task = MagicMock()
-        task.evidence = [
-            MagicMock(ok=True, kind="note", command="", summary="I used read_file")
-        ]
-        task.acceptance_checks = ["read_file 验证"]
-        task.used_tools = ["read_file"]
-        task.acceptance_file = str(tmp_path / "acceptance.json")
+        task = _evidence_task(
+            tmp_path,
+            {
+                "evidence": [MagicMock(ok=True, kind="note", command="", summary="I used read_file")],
+                "used_tools": ["read_file"],
+                "attributes": {"required_tool_evidence": ["read_file"]},
+                "acceptance_checks": ["自然语言里说 read_file 不作为机器事实来源。"],
+            },
+        )
 
         findings = _build_evidence_findings(task, 1234567890.0)
 
@@ -270,13 +278,15 @@ class TestBuildEvidenceFindings:
         """summary 里提到写入不等于真实工具证据。"""
         from agent_py_agent.agent.subagents.acceptance_helpers import _build_evidence_findings
 
-        task = MagicMock()
-        task.evidence = [
-            MagicMock(ok=True, kind="note", command="", summary="写入文件")
-        ]
-        task.acceptance_checks = ["write_file 验证"]
-        task.used_tools = ["write_file"]
-        task.acceptance_file = str(tmp_path / "acceptance.json")
+        task = _evidence_task(
+            tmp_path,
+            {
+                "evidence": [MagicMock(ok=True, kind="note", command="", summary="写入文件")],
+                "used_tools": ["write_file"],
+                "attributes": {"required_tool_evidence": ["write_file"]},
+                "acceptance_checks": ["自然语言里说 write_file 不作为机器事实来源。"],
+            },
+        )
 
         findings = _build_evidence_findings(task, 1234567890.0)
 

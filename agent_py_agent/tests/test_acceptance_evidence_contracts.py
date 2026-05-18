@@ -29,6 +29,12 @@ def test_legacy_acceptance_helper_does_not_read_acceptance_check_text_as_tool_re
         ],
         used_tools=["read_file"],
         attributes={},
+        evidence_packets=[],
+        output_json=str(tmp_path / "output.json"),
+        task_dir=str(tmp_path / "run"),
+        reports_dir=str(tmp_path / "reports"),
+        child_ids=[],
+        runner_last_attempt_at=0.0,
     )
 
     findings = build_evidence_findings(task, time.time())

@@ -6,16 +6,17 @@ from __future__ import annotations
 """build evidence presence and tool-requirement findings.
 
 新手说明:
-检查是否有可用验收证据、是否有失败证据，以及 acceptance_checks 要求的
-read_file / write_file 工具是否已有对应证据。
+这个文件只保留旧 import 路径；真正的证据判断统一走 service 层。
+read_file / write_file 这类机器验收只能来自 attributes.required_tool_evidence 等结构化字段，
+不能从 acceptance_checks 普通文案里猜。
 """
 
 from ..models import SubAgentTask
 from ..reports import AcceptanceReviewFinding
+from ..services.acceptance_evidence_findings import build_evidence_findings
 from .evidence_acceptance_findings import (
     _has_tool_evidence,
     _make_finding,
-    build_evidence_findings,
 )
 
 __all__ = ["_build_evidence_findings", "_has_tool_evidence", "_make_finding"]

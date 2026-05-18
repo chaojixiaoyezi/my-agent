@@ -11,6 +11,7 @@ from __future__ import annotations
 Facade pattern: delegates to service classes in runtime_services.py.
 """
 
+import time as time_module
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 
@@ -271,7 +272,7 @@ def _run_params_from_compat(params: RunParams, fields: _RunCompatibilityFields) 
 # LLM: _run_with_params keeps the public run() compatibility shim under code-size limits.
 # 函数用途: 执行已归一化的 RunParams，串接准备上下文、工具循环和 finalization。
 def _run_with_params(agent, user_prompt: str, params: RunParams):
-    current_params = params
+    current_params = _run_params_with_request_id(params)
     result = _run_once_with_params(agent, user_prompt, current_params)
     while True:
         decision = compact_auto_continuation_decision(
@@ -285,6 +286,14 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
         continued = _run_once_with_params(agent, decision.user_prompt, next_params)
         result = mark_compact_auto_continued(continued, result, depth=next_params.compact_auto_continue_depth)
         current_params = next_params
+
+
+# LLM: request_id must exist before context-bundle and tool-output artifact writes.
+# 函数用途: 普通 run 没有显式 request_id 时提前生成稳定运行标识，保证工具输出、runtime facts 和 compact scope 可对齐。
+def _run_params_with_request_id(params: RunParams) -> RunParams:
+    if params.request_id:
+        return params
+    return replace(params, request_id=f"run-{time_module.time_ns()}")
 
 
 # LLM: _run_once_with_params contains one normal model/tool/finalize pass for reuse by auto continuation.

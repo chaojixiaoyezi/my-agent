@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
+
 # LLM: semantic_context_missing_fields catches structured contracts that lost explicit deliverables.
 # 函数用途: 从 bundle.reserved.expected_required_files 读取机器期望，并校验 output_contract 与 task_packet 都完整携带。
 def semantic_context_missing_fields(bundle: Any) -> list[str]:

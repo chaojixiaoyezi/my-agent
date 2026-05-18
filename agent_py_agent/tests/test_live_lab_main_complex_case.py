@@ -5,6 +5,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from scripts.live_lab.constants import REAL_CASES, SUITES
+from scripts.live_lab.main_agent_artifact_case import (
+    _assert_artifact_readback_report,
+    _assert_compact_resume_roundtrip_payload,
+    _main_artifact_readback_prompt,
+)
 from scripts.live_lab.main_agent_complex_case import (
     _assert_large_log_report,
     _assert_main_web_app_output,
@@ -24,15 +29,25 @@ def test_main_complex_case_is_registered_as_real_opt_in_suite():
         _main_direct_web_app_prompt(),
         _main_tool_failure_prompt(),
         _main_large_log_prompt(),
+        _main_artifact_readback_prompt(),
     ]
 
     assert SUITES["main-complex"] == [
         "health",
         "main_direct_web_app",
         "main_tool_failure_recovery",
+        "main_artifact_readback",
+        "main_compact_resume_roundtrip",
         "main_large_log_audit",
     ]
-    assert {"main_direct_web_app", "main_tool_failure_recovery", "main_large_log_audit"} <= REAL_CASES
+    assert SUITES["main-artifact"] == ["health", "main_artifact_readback", "main_compact_resume_roundtrip"]
+    assert {
+        "main_direct_web_app",
+        "main_tool_failure_recovery",
+        "main_artifact_readback",
+        "main_compact_resume_roundtrip",
+        "main_large_log_audit",
+    } <= REAL_CASES
     for prompt in prompts:
         assert "这次你自己完成，不要派小傻妞" in prompt
         assert "dispatch" not in prompt.lower()
@@ -71,6 +86,8 @@ def test_main_complex_config_disables_subagents_in_isolated_config(tmp_path):
 def test_main_complex_artifact_gates_accept_complete_outputs(tmp_path):
     _write_complete_web_app(tmp_path)
     _write_tool_recovery_report(tmp_path)
+    _write_artifact_readback_report(tmp_path)
+    _assert_compact_resume_roundtrip_payload(_compact_apply_payload(), _compact_resume_payload())
     _write_large_log_report(tmp_path)
 
 
@@ -108,6 +125,22 @@ def _write_tool_recovery_report(tmp_path) -> None:
     _assert_tool_recovery_report(recovery)
 
 
+# LLM: _write_artifact_readback_report builds a report that proves far-apart artifact sections were recovered.
+# 函数用途: 写出测试用 artifact 读回报告，并立即走主代理 artifact 续接 gate。
+def _write_artifact_readback_report(tmp_path) -> None:
+    report = tmp_path / "lab_outputs" / "artifact-readback" / "report.md"
+    report.parent.mkdir(parents=True)
+    report.write_text(
+        "报告证明读取了 ALPHA-ANCHOR、OMEGA-ANCHOR 和 TRACE-ARTIFACT-991。\n"
+        "ALPHA-ANCHOR 说明北区门店库存偏低，风险是新品展示不足。\n"
+        "OMEGA-ANCHOR 说明预约系统周末排队延迟，风险是客户到店体验下降。\n"
+        "TRACE-ARTIFACT-991 说明售后回访里有面料色差反馈，风险是同批次质量问题扩大。\n"
+        "下一步建议分别核对库存、排查预约峰值、抽检对应批次。",
+        encoding="utf-8",
+    )
+    _assert_artifact_readback_report(report)
+
+
 # LLM: _write_large_log_report builds a realistic enough audit report fixture.
 # 函数用途: 写出测试用大日志审计报告，并立即走关键证据 gate。
 def _write_large_log_report(tmp_path) -> None:
@@ -128,3 +161,31 @@ def _write_large_log_report(tmp_path) -> None:
         encoding="utf-8",
     )
     _assert_large_log_report(log_report)
+
+
+# LLM: _compact_apply_payload builds the minimum structured apply facts expected after manual fact completion.
+# 函数用途: 构造 compact apply 测试 payload，验证 roundtrip gate 只读结构化字段。
+def _compact_apply_payload() -> dict:
+    source = "/tmp/runtime_facts/task.json"
+    return {
+        "ok": True,
+        "post_compact_self_check": {"ok": True},
+        "work_state_snapshot": {
+            "missing_fields": [],
+            "artifact_refs": [{"path": "/tmp/tool-output.json", "tool": "read_file"}],
+            "acceptance": {"source_status": "recorded", "items": ["报告包含三处证据"], "source_paths": [source]},
+            "constraints": {"source_status": "recorded", "items": ["不得猜测"], "source_paths": [source]},
+            "latest_tests": {"status": "recorded", "items": ["Live Lab passed"], "source_paths": [source]},
+        },
+    }
+
+
+# LLM: _compact_resume_payload builds the minimum auto-guard handoff expected from memory-resume.
+# 函数用途: 构造 compact resume 测试 payload，确认 auto guard 放行和推荐路径存在。
+def _compact_resume_payload() -> dict:
+    return {
+        "ok": True,
+        "recommended_read_paths": ["/tmp/compact_context.md"],
+        "action_guard": {"status": "allow_automated_continue", "allowed_to_continue": True},
+        "handoff": {"missing_fields": []},
+    }
