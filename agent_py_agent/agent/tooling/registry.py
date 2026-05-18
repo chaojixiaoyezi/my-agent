@@ -26,6 +26,7 @@ from .content_transport_policy import (
     tool_content_transport_protocol,
 )
 from .controlled_exec import ControlledExecTool
+from .file_write_session import FileWriteSessionTool
 from .filesystem import (
     AppendFileTool,
     ListFilesTool,
@@ -127,6 +128,7 @@ def _register_filesystem_tools(registry: ToolRegistry, params: ToolRegistryParam
             max_inline_content_chars=params.tool_write_inline_max_chars,
         )
     )
+    registry.register(FileWriteSessionTool(registry.workspace_root, workspace_roots))
     registry.register(ReplaceInFileTool(registry.workspace_root, workspace_roots))
 
 

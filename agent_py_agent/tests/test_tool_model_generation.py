@@ -16,6 +16,7 @@ import pytest
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.tool_model_generation import (
     ModelGenerateParams,
+    _effective_model_request_timeout_seconds,
     generate_model_response,
 )
 from agent_py_agent.agent.backend import ModelResponse
@@ -67,6 +68,21 @@ class _StreamingLongWriteBackend:
             if on_chunk is not None:
                 on_chunk(part)
         return ModelResponse(text=text, backend=self.name)
+
+
+# LLM: _StreamingTokenBackend emits one chunk so tests can verify first-token ledger facts.
+# 类用途: 测试专用模型后端；通过 on_chunk 模拟真实流式首 token 到达。
+class _StreamingTokenBackend:
+    name = "streaming-token-test-backend"
+    model_name = "test-model"
+    max_tokens = 64
+
+    # LLM: generate emits a normal chunk and returns a final response.
+    # 函数用途: 模拟一次成功模型调用，供账本测试读取 first_token 和 finished 事件。
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        if on_chunk is not None:
+            on_chunk("hello")
+        return ModelResponse(text="hello world", backend=self.name)
 
 
 # LLM: _tool_loop_params returns the smallest valid tool-loop bundle for generation tests.
@@ -143,3 +159,56 @@ def test_model_generate_aborts_streaming_write_file_content_over_inline_limit():
     assert '"tool": "__parse_error__"' in response.text
     assert "write_file.content inline content streaming exceeded" in response.text
     assert "site/index.html" in response.text
+
+
+# LLM: model generation should leave structured timing facts for timeout tuning and recovery.
+# 函数用途: 验证正常流式模型调用会写入 started/first_token/finished 账本，不依赖响应自然语言。
+def test_model_generate_records_model_call_ledger_for_streaming_response():
+    backend = _StreamingTokenBackend()
+    agent = SimpleNamespace(
+        backend=backend,
+        config=SimpleNamespace(
+            request_timeout=10,
+            dynamic_timeout_min=1,
+            dynamic_timeout_max=20,
+            dynamic_timeout_safety_margin=1.2,
+        ),
+        _current_subagent_run_id="",
+    )
+
+    response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=_tool_loop_params(),
+            prompt="hello",
+            tool_rounds=2,
+        )
+    )
+
+    records = agent._model_call_ledger.records()
+    assert response.text == "hello world"
+    assert len(records) == 1
+    assert records[0].status == "finished"
+    assert records[0].events == ("started", "first_token", "finished")
+    assert records[0].backend == backend.name
+    assert records[0].model == "test-model"
+    assert records[0].metadata["tool_rounds"] == 2
+    assert "first_token_timeout_estimate" in records[0].metadata
+
+
+# LLM: dynamic model timeout extends only agents that expose dynamic timeout config.
+# 函数用途: 验证旧 fake agent 仍只用 request_timeout，而真实配置可按首 token 估算抬高预算。
+def test_effective_model_timeout_uses_dynamic_config_only_when_present():
+    legacy_agent = SimpleNamespace(config=SimpleNamespace(request_timeout=1), backend=SimpleNamespace())
+    dynamic_agent = SimpleNamespace(
+        config=SimpleNamespace(
+            request_timeout=1,
+            dynamic_timeout_min=1,
+            dynamic_timeout_max=60,
+            dynamic_timeout_safety_margin=2,
+        ),
+        backend=SimpleNamespace(),
+    )
+
+    assert _effective_model_request_timeout_seconds(legacy_agent, 30) == 1
+    assert _effective_model_request_timeout_seconds(dynamic_agent, 30) == 30

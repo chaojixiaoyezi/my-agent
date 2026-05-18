@@ -207,9 +207,14 @@ search_text
 write_file
 append_file
 replace_in_file
+file_write_session
 fetch_url
 http_request
 ```
+
+`file_write_session` 用于大文件分块写入：先 `begin`，再按 `chunk_index` 多次
+`append`，最后 `finish` 原子提交；中途失败可以重试同一个 chunk，不需要把长正文反复塞进
+`write_file` 的单次工具 JSON。
 
 工具系统有两层 prompt：
 - Tool Catalog：中等详细度工具目录。

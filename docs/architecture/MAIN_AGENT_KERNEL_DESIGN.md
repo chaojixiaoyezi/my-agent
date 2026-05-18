@@ -202,6 +202,8 @@ agent_py_agent/agent/contracts/
 |-- error_taxonomy.py   # 统一错误分类和恢复建议
 |-- state_machine.py    # 统一运行状态事实和调度/收口判断
 |-- idempotency.py      # 统一幂等键和操作编号
+|-- tool_protocol_v2.py # 工具调用/工具结果 envelope 和错误映射
+|-- model_call_ledger.py # 模型请求 started/first-token/finished/timeout 账本
 |-- artifact_acceptance.py # 产物验收 findings，不相信模型自检
 |-- e2e_matrix.py      # 真实 E2E 矩阵的机器可读定义
 |-- e2e_matrix_runner.py # 不调用模型的确定性 E2E runner
@@ -224,6 +226,9 @@ agent_py_agent/agent/contracts/
 - `dispatch_subagents` / `create_subagents` 的 `current_turn_run_state` 复用统一 State Machine，输出 `state_machine_contract` 和 `recovery_recommendations`。父级能看到 blocked/failed run 的错误类型、建议动作和中文恢复提示，不必从自然语言摘要里猜。
 - 显式命名的小傻妞现在把名字当作结构化身份；默认泛名仍用 goal/write-root 等字段区分。这避免“同一个小傻妞目标文字稍微变了就重复创建”，也避免默认 worker 把不同任务误合并。
 - `ToolExecutionResult` 现在会在失败时自动带 `error_code`、`error_category`、`retryable`、`recommended_action`、`recovery_hint`。typed tool result envelope 也同步这些字段；这只是恢复事实，不改变工具是否允许执行。
+- `tool_protocol_v2` 已接入 registry result envelope：每次工具执行会同步一份 `schema=tool_protocol.v2` 的结构化结果，包含 operation id、idempotency key、error taxonomy、artifact refs 和 output preview。机器事实读这个 envelope，不再从工具输出自然语言里猜。
+- `model_call_ledger` 已接入公共模型调用路径：每次 `backend.generate` 会记录 started、first_token、finished 或 timeout。动态超时预算由结构化输入 token 和首 token 观测生成；provider wall timeout 会抛 `ProviderTimeoutError`，让恢复层知道这是模型上游/请求超时，不是工具失败或验收失败。
+- `file_write_session` 已作为大文件写入工具注册：长 HTML/CSS/JS、长报告或大文本可以走 `begin -> append -> finish`，chunk 写入有 manifest、sha256、幂等重复提交和原子提交。公开工具类只保留模型目录和入口，具体状态机在 service/IO/model 三层里，避免再次长成一个难维护大类。
 - `e2e_matrix_runner.py` 提供 deterministic runner 第一片：当前可跑中文路径写读、大工具输出 artifact 元数据、工具失败分类；真实模型用例会明确 `SKIPPED`，避免单测假装覆盖真实链路。
 - `main_agent_foundation_runner.py` 把主代理基础 1-6 类测试收成一个 refs-first 报告：工具失败合同、真实单代理任务占位、compact/resume 占位、大输出 artifact refs、真实错误恢复占位和确定性 E2E matrix。真实模型项没有跑时必须显示 `SKIPPED`。
 - `artifact_acceptance.py` 提供通用产物验收入口：HTML 能发现 `href="#"`、空链接、`javascript:void(0)`、外部图片和缺失本地图片；JSON/CSV/XLSX/PDF 会做轻量可打开/可解析检查；未知格式至少检查存在和非空。真实测试发现模型产物自称“无坏链”，但机器验收抓到 21 个占位链接；把 findings 交回主代理后，主代理修复到 0 个 findings。
