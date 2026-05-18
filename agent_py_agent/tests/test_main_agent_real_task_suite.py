@@ -214,3 +214,47 @@ def test_main_agent_real_task_execution_accepts_expected_artifact(tmp_path):
     assert payload["ok"] is True
     assert first_case["status"] == "COMPLETED"
     assert first_case["acceptance_summary"]["passed"] == 1
+
+
+# LLM: Revalidation should re-check existing artifacts without rerunning model subprocesses.
+# 函数用途: 验证已有 execution report 可以只读复验，适合真实 API 跑完后反复检查产物。
+def test_main_agent_real_task_execution_revalidates_existing_report(tmp_path):
+    from agent_py_agent.agent.contracts.main_agent_real_task_execution import (
+        MainAgentRealTaskExecutionRequest,
+        revalidate_main_agent_real_task_execution,
+        run_main_agent_real_task_execution,
+    )
+
+    report = run_main_agent_real_task_execution(
+        MainAgentRealTaskExecutionRequest(
+            workspace=tmp_path,
+            max_workers=1,
+            task_timeout_seconds=30,
+            execute=True,
+            case_ids=("furniture_homepage_html",),
+            package_root=Path.cwd(),
+        )
+    )
+    case = report.to_dict()["cases"][0]
+    artifact = (
+        tmp_path
+        / "main_agent_real_task_execution/tasks/furniture_homepage_html/workspace"
+        / "outputs/furniture_homepage/index.html"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(
+        '<!doctype html><html><body><a href="/story">Story</a></body></html>',
+        encoding="utf-8",
+    )
+
+    revalidated = revalidate_main_agent_real_task_execution(
+        tmp_path / report.report_ref,
+        workspace=tmp_path,
+    )
+
+    payload = revalidated.to_dict()
+    first_case = payload["cases"][0]
+    assert case["status"] == "FAILED"
+    assert payload["ok"] is True
+    assert first_case["status"] == "COMPLETED"
+    assert first_case["acceptance_summary"]["passed"] == 1

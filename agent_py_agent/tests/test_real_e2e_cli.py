@@ -132,3 +132,53 @@ def test_cmd_real_e2e_runs_controlled_echo_real_task(tmp_path, capsys):
     assert first_case["exit_code"] == 0
     assert first_case["acceptance_summary"]["failed"] == 1
     assert (tmp_path / "workspace" / first_case["stdout_ref"]).exists()
+
+
+# LLM: real-e2e should revalidate stored execution reports without launching new subprocesses.
+# 函数用途: 验证 CLI 可以只读复验已有真实任务执行报告，适合真实 API 任务结束后反复验收。
+def test_cmd_real_e2e_revalidates_existing_real_task_report(tmp_path, capsys):
+    from agent_py_agent.agent.contracts.main_agent_real_task_execution import (
+        MainAgentRealTaskExecutionRequest,
+        run_main_agent_real_task_execution,
+    )
+    from agent_py_agent.cli.real_e2e_commands import cmd_real_e2e
+
+    workspace = tmp_path / "workspace"
+    report = run_main_agent_real_task_execution(
+        MainAgentRealTaskExecutionRequest(
+            workspace=workspace,
+            max_workers=1,
+            task_timeout_seconds=30,
+            execute=True,
+            case_ids=("furniture_homepage_html",),
+        )
+    )
+    artifact = (
+        workspace
+        / "main_agent_real_task_execution/tasks/furniture_homepage_html/workspace"
+        / "outputs/furniture_homepage/index.html"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("<!doctype html><html><body>ok</body></html>", encoding="utf-8")
+    args = argparse.Namespace(
+        workspace=str(workspace),
+        report="",
+        json=True,
+        include_real_model=False,
+        artifact=[],
+        real_task_suite=False,
+        run_real_tasks=False,
+        real_task_case=[],
+        real_task_max_workers=1,
+        real_task_timeout=30,
+        real_task_base_config="",
+        revalidate_real_task_report=str(workspace / report.report_ref),
+    )
+
+    exit_code = cmd_real_e2e(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    revalidation = payload["main_agent_real_task_revalidation"]
+    assert exit_code == 0
+    assert revalidation["execution_mode"] == "revalidate"
+    assert revalidation["summary"]["completed"] == 1

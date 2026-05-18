@@ -573,6 +573,7 @@ my-agent real-e2e --workspace .\.real-e2e --json
 my-agent real-e2e --workspace .\.real-e2e --artifact .\outputs\index.html --json
 my-agent real-e2e --workspace .\.real-e2e --real-task-suite --real-task-max-workers 4 --json
 my-agent real-e2e --workspace .\.real-e2e --run-real-tasks --real-task-case furniture_homepage_html --real-task-base-config .\agent_py_agent\config\agent_config.yaml --json
+my-agent real-e2e --workspace .\.real-e2e --revalidate-real-task-report .\.real-e2e\main_agent_real_task_execution\execution_report.json --json
 my-agent real-e2e --workspace .\.real-e2e --report .\reports\real-e2e.json
 ```
 
@@ -584,6 +585,8 @@ my-agent real-e2e --workspace .\.real-e2e --report .\reports\real-e2e.json
 
 如果要真的启动这些主代理任务，必须显式加 `--run-real-tasks`。执行器会给每个 case 写独立 `config.yaml`、`command.json`、`stdout.txt`、`stderr.txt`、`acceptance_report.json` 和专属 workspace，并按 `--real-task-max-workers` 并发启动，报告里会写 `concurrency` 说明请求并发和实际并发。执行成功不等于任务成功：runner 会继续按 `expected_artifacts.json` 验收产物，缺文件或机器验收失败都会让 case 失败。没有传 `--real-task-base-config` 时使用离线 echo 配置，适合 CI 和调试；要烧真实 API，必须显式传真实配置文件。
 
+如果真实任务已经跑完，只想重新检查产物，可以用 `--revalidate-real-task-report` 指向之前的 `execution_report.json`。它不会重启主代理，也不会重新调用模型，只会按 report 里的 refs 回到 task workspace 和 expected artifact 合同重新验收。
+
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--workspace <path>` | 当前目录 `.my-agent-real-e2e` | E2E 工作区；命令会把报告和确定性测试证据写到这里。 |
@@ -594,6 +597,7 @@ my-agent real-e2e --workspace .\.real-e2e --report .\reports\real-e2e.json
 | `--run-real-tasks` | `false` | 显式执行真实任务套件；默认关闭，避免普通验证意外调用模型或长期占用进程。 |
 | `--real-task-case <case_id>` | 可重复 | 只计划/执行指定 case，例如 `furniture_homepage_html`。不传则覆盖全部默认 case。 |
 | `--real-task-base-config <path>` | 空 | 执行真实任务使用的基础配置文件；为空时使用离线 echo 配置，传真实配置才会调用真实模型。 |
+| `--revalidate-real-task-report <path>` | 空 | 只读复验已有真实任务执行报告；不启动模型进程，只重新跑产物验收。 |
 | `--real-task-max-workers <n>` | `4` | 真实任务计划/执行的最大并发工位。 |
 | `--real-task-timeout <seconds>` | `480` | 真实任务执行的单任务超时秒数；超时会写结构化失败和 stderr/stdout refs。 |
 | `--json` | `false` | 输出完整机器可读 JSON。 |

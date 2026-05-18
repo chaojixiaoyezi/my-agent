@@ -1,0 +1,138 @@
+# LLM: Real task revalidation re-checks artifacts from a stored execution report.
+# 模块用途: 读取已有真实任务执行报告，只复验产物合同，不重新启动模型或工具进程。
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from .main_agent_real_task_acceptance import (
+    RealTaskAcceptanceRequest,
+    validate_real_task_artifacts,
+)
+from .main_agent_real_task_execution_files import case_paths, rel, write_json
+from .main_agent_real_task_execution_models import (
+    SCHEMA_VERSION,
+    MainAgentRealTaskExecutionCaseResult,
+    MainAgentRealTaskExecutionReport,
+)
+
+
+# LLM: revalidate_main_agent_real_task_execution re-checks artifacts without rerunning commands.
+# 函数用途: 读取已有 execution_report.json，只复验 expected artifact 合同并重写验收报告。
+def revalidate_main_agent_real_task_execution(
+    report_path: Path,
+    *,
+    workspace: Path | None = None,
+) -> MainAgentRealTaskExecutionReport:
+    base = Path(workspace).expanduser().resolve() if workspace else Path(report_path).parent.parent
+    payload = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    cases = [_revalidate_case(item, workspace=base) for item in _payload_cases(payload)]
+    report = MainAgentRealTaskExecutionReport(
+        ok=not any(case.status == "FAILED" for case in cases),
+        schema_version=SCHEMA_VERSION,
+        execution_mode="revalidate",
+        summary=_summary(cases),
+        concurrency=_payload_concurrency(payload, cases),
+        suite_report_ref=str(payload.get("suite_report_ref") or ""),
+        report_ref=rel(Path(report_path), base),
+        cases=cases,
+    )
+    write_json(Path(report_path), report.to_dict())
+    return report
+
+
+# LLM: _revalidate_case reconstructs one case result from refs and artifact contracts.
+# 函数用途: 不执行 command，只从 case_id/ref 找 expected_artifacts.json 和 workspace 后重跑验收。
+def _revalidate_case(
+    item: dict[str, object],
+    *,
+    workspace: Path,
+) -> MainAgentRealTaskExecutionCaseResult:
+    case_id = str(item.get("case_id") or "")
+    paths = case_paths(workspace, case_id)
+    acceptance = validate_real_task_artifacts(
+        RealTaskAcceptanceRequest(
+            expected_artifacts_path=workspace / _expected_artifacts_ref(item),
+            task_workspace=paths["workspace"],
+            report_path=paths["acceptance_report"],
+        )
+    )
+    return MainAgentRealTaskExecutionCaseResult(
+        case_id=case_id,
+        title=str(item.get("title") or ""),
+        status="COMPLETED" if acceptance.ok else "FAILED",
+        worker_slot=int(item.get("worker_slot") or 0),
+        timeout_seconds=int(item.get("timeout_seconds") or 0),
+        prompt_ref=str(item.get("prompt_ref") or ""),
+        config_ref=str(item.get("config_ref") or rel(paths["config"], workspace)),
+        command_ref=str(item.get("command_ref") or rel(paths["command"], workspace)),
+        stdout_ref=str(item.get("stdout_ref") or rel(paths["stdout"], workspace)),
+        stderr_ref=str(item.get("stderr_ref") or rel(paths["stderr"], workspace)),
+        acceptance_report_ref=rel(paths["acceptance_report"], workspace),
+        events_ref=str(item.get("events_ref") or rel(paths["events"], workspace)),
+        acceptance_summary=dict(acceptance.summary),
+        exit_code=_optional_int(item.get("exit_code")),
+        duration_seconds=float(item.get("duration_seconds") or 0.0),
+        issues=_case_issues(int(item.get("exit_code") or 0), acceptance.summary),
+    )
+
+
+# LLM: _expected_artifacts_ref derives the structured artifact contract ref from the prompt ref.
+# 函数用途: 根据 suite 目录结构定位 expected_artifacts.json，不解析 prompt 自然语言。
+def _expected_artifacts_ref(item: dict[str, object]) -> str:
+    prompt_ref = Path(str(item.get("prompt_ref") or ""))
+    if prompt_ref.name == "prompt.md":
+        return str(prompt_ref.with_name("expected_artifacts.json"))
+    case_id = str(item.get("case_id") or "")
+    return f"main_agent_real_task_suite/tasks/{case_id}/expected_artifacts.json"
+
+
+# LLM: _payload_cases returns only dict case records from a stored report.
+# 函数用途: 容忍旧报告字段缺失，复验入口只处理结构化 cases 列表。
+def _payload_cases(payload: object) -> list[dict[str, object]]:
+    cases = payload.get("cases") if isinstance(payload, dict) else None
+    return [dict(item) for item in cases] if isinstance(cases, list) else []
+
+
+# LLM: _payload_concurrency preserves old concurrency metadata during revalidation.
+# 函数用途: 复验报告沿用已有并发事实；旧报告没有该字段时生成最小摘要。
+def _payload_concurrency(
+    payload: object,
+    cases: list[MainAgentRealTaskExecutionCaseResult],
+) -> dict[str, int]:
+    value = payload.get("concurrency") if isinstance(payload, dict) else None
+    if isinstance(value, dict):
+        return {str(key): int(raw) for key, raw in value.items() if isinstance(raw, int)}
+    return {"requested_max_workers": 1, "effective_max_workers": 1, "case_count": len(cases)}
+
+
+# LLM: _case_issues creates short issue codes from process and artifact facts.
+# 函数用途: 复验时重算产物失败摘要；详细 findings 仍在 acceptance_report_ref。
+def _case_issues(exit_code: int, summary: dict[str, int]) -> list[str]:
+    issues: list[str] = []
+    if exit_code != 0:
+        issues.append(f"exit_code={exit_code}")
+    if summary.get("failed", 0):
+        issues.append(f"artifact_acceptance_failed={summary['failed']}")
+    return issues
+
+
+# LLM: _optional_int keeps restored exit_code compatible with JSON null values.
+# 函数用途: 从旧报告恢复可选退出码，非整数值返回 None。
+def _optional_int(value: object) -> int | None:
+    return value if isinstance(value, int) else None
+
+
+# LLM: _summary counts planned and executed case statuses for CLI display.
+# 函数用途: 汇总复验报告状态，和执行报告保持同一 summary shape。
+def _summary(cases: list[MainAgentRealTaskExecutionCaseResult]) -> dict[str, int]:
+    return {
+        "total": len(cases),
+        "planned": sum(case.status == "PLANNED" for case in cases),
+        "completed": sum(case.status == "COMPLETED" for case in cases),
+        "failed": sum(case.status == "FAILED" for case in cases),
+    }
+
+
+__all__ = ["revalidate_main_agent_real_task_execution"]

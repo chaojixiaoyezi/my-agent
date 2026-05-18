@@ -18,6 +18,7 @@ from ..agent.contracts.main_agent_foundation_runner import (
 )
 from ..agent.contracts.main_agent_real_task_execution import (
     MainAgentRealTaskExecutionRequest,
+    revalidate_main_agent_real_task_execution,
     run_main_agent_real_task_execution,
 )
 from ..agent.contracts.main_agent_real_task_suite import (
@@ -36,6 +37,7 @@ class RealE2EPayloadRequest:
     artifacts: list[dict[str, object]]
     real_task_suite: dict[str, object] | None = None
     real_task_execution: dict[str, object] | None = None
+    real_task_revalidation: dict[str, object] | None = None
 
 
 # LLM: add_real_e2e_subcommand registers the formal main-agent E2E test entrypoint.
@@ -72,6 +74,11 @@ def add_real_e2e_subcommand(
     parser.add_argument(
         "--real-task-base-config", default="", help="真实任务执行使用的基础配置文件"
     )
+    parser.add_argument(
+        "--revalidate-real-task-report",
+        default="",
+        help="只读复验已有真实任务执行报告，不重新启动模型进程",
+    )
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     parser.set_defaults(func=cmd_real_e2e)
 
@@ -89,18 +96,21 @@ def cmd_real_e2e(args) -> int:
     artifact_reports = _artifact_reports(getattr(args, "artifact", []) or [], workspace=workspace)
     real_task_suite = _real_task_suite(args, workspace=workspace)
     real_task_execution = _real_task_execution(args, workspace=workspace)
+    real_task_revalidation = _real_task_revalidation(args, workspace=workspace)
     ok = foundation.ok and all(item.get("ok") for item in artifact_reports)
     report_path = _report_path(getattr(args, "report", ""), workspace=workspace)
     payload = _payload(
         RealE2EPayloadRequest(
             ok=ok
             and _real_task_suite_ok(real_task_suite)
-            and _real_task_suite_ok(real_task_execution),
+            and _real_task_suite_ok(real_task_execution)
+            and _real_task_suite_ok(real_task_revalidation),
             report_path=report_path,
             foundation=foundation.to_dict(),
             artifacts=artifact_reports,
             real_task_suite=real_task_suite,
             real_task_execution=real_task_execution,
+            real_task_revalidation=real_task_revalidation,
         )
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -176,6 +186,16 @@ def _real_task_execution(args, *, workspace: Path) -> dict[str, object] | None:
     return report.to_dict()
 
 
+# LLM: _real_task_revalidation rechecks stored execution reports without launching workers.
+# 函数用途: 当用户传 --revalidate-real-task-report 时，只读复验产物合同并返回报告。
+def _real_task_revalidation(args, *, workspace: Path) -> dict[str, object] | None:
+    value = str(getattr(args, "revalidate_real_task_report", "") or "").strip()
+    if not value:
+        return None
+    report = revalidate_main_agent_real_task_execution(Path(value).expanduser(), workspace=workspace)
+    return report.to_dict()
+
+
 # LLM: _payload gives CLI, docs, and frontend one stable report shape.
 # 函数用途: 组合基础测试结果、产物验收结果和报告引用，保留 summary 便于旧调用方读取。
 def _payload(request: RealE2EPayloadRequest) -> dict[str, object]:
@@ -194,6 +214,8 @@ def _payload(request: RealE2EPayloadRequest) -> dict[str, object]:
         payload["main_agent_real_task_suite"] = request.real_task_suite
     if request.real_task_execution is not None:
         payload["main_agent_real_task_execution"] = request.real_task_execution
+    if request.real_task_revalidation is not None:
+        payload["main_agent_real_task_revalidation"] = request.real_task_revalidation
     return payload
 
 

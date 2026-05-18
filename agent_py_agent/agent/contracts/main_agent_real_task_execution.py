@@ -30,6 +30,7 @@ from .main_agent_real_task_execution_models import (
     MainAgentRealTaskExecutionReport,
     MainAgentRealTaskExecutionRequest,
 )
+from .main_agent_real_task_revalidation import revalidate_main_agent_real_task_execution
 from .main_agent_real_task_suite import (
     MainAgentRealTaskCasePlan,
     MainAgentRealTaskSuiteRequest,
@@ -319,5 +320,6 @@ __all__ = [
     "MainAgentRealTaskExecutionCaseResult",
     "MainAgentRealTaskExecutionReport",
     "MainAgentRealTaskExecutionRequest",
+    "revalidate_main_agent_real_task_execution",
     "run_main_agent_real_task_execution",
 ]
