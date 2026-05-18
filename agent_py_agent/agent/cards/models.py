@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# LLM: Card runtime models define durable task/session/worker facts; keep field names stable for JSON stores.
+# 模块用途: 定义 Card runtime 的持久化数据模型，让会话、任务、租约、恢复点和通知路线有统一结构。
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -7,6 +9,8 @@ from enum import StrEnum
 from typing import Any
 
 
+ # LLM: TaskStatus is serialized into TaskCard files and event payloads; add values only with transition tests.
+ # 类用途: 表示任务生命周期状态，给队列、恢复和通知逻辑做稳定判断。
 class TaskStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
@@ -33,20 +37,28 @@ VALID_TASK_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
 }
 
 
+ # LLM: new_card_id generates local durable ids without depending on prompt text.
+ # 函数用途: 生成 Card 层对象 id，避免任务、租约、事件等记录撞名。
 def new_card_id(prefix: str) -> str:
     return f"{prefix}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
 
 
+ # LLM: now_ts centralizes wall-clock timestamps for card records.
+ # 函数用途: 返回当前时间戳，供 Card 创建、更新和过期判断使用。
 def now_ts() -> float:
     return time.time()
 
 
+ # LLM: CardModel is the shared serialization base for card records.
+ # 类用途: 提供创建时间、更新时间、metadata 和 to_dict 序列化能力。
 @dataclass
 class CardModel:
     created_at: float = field(default_factory=now_ts)
     updated_at: float = field(default_factory=now_ts)
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    # LLM: CardModel.to_dict keeps enum values JSON-friendly for file persistence.
+    # 函数用途: 把 Card 数据转换成可写入 JSON 的字典。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         for key, value in list(payload.items()):
@@ -55,6 +67,8 @@ class CardModel:
         return payload
 
 
+ # LLM: SessionCard records the conversation window without doing agent work.
+ # 类用途: 保存 session 与用户、渠道、活跃任务之间的绑定关系。
 @dataclass
 class SessionCard(CardModel):
     session_id: str = ""
@@ -62,6 +76,8 @@ class SessionCard(CardModel):
     channel: str = "chat"
     active_task_ids: list[str] = field(default_factory=list)
 
+    # LLM: SessionCard.from_dict accepts persisted JSON while preserving default compatibility.
+    # 函数用途: 从磁盘字典恢复 SessionCard，兼容缺省字段。
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> SessionCard:
         return cls(
@@ -75,6 +91,8 @@ class SessionCard(CardModel):
         )
 
 
+ # LLM: TaskCard is the durable task order, not the worker that executes it.
+ # 类用途: 记录任务目标、状态、父子关系、验收条件和产物引用。
 @dataclass
 class TaskCard(CardModel):
     task_id: str = ""
@@ -87,6 +105,8 @@ class TaskCard(CardModel):
     acceptance: list[str] = field(default_factory=list)
     artifact_refs: list[str] = field(default_factory=list)
 
+    # LLM: TaskCard.from_dict normalizes persisted status strings back to TaskStatus.
+    # 函数用途: 从磁盘字典恢复 TaskCard，并把状态字段转成枚举。
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> TaskCard:
         return cls(
@@ -105,6 +125,8 @@ class TaskCard(CardModel):
         )
 
 
+ # LLM: WorkerCard describes an executor heartbeat without owning the task permanently.
+ # 类用途: 记录执行者类型、当前任务、心跳和运行状态。
 @dataclass
 class WorkerCard(CardModel):
     worker_id: str = ""
@@ -114,6 +136,8 @@ class WorkerCard(CardModel):
     status: str = "idle"
 
 
+ # LLM: LeaseCard guards exclusive resource claims across local workers.
+ # 类用途: 表示任务、文件、worker slot 等资源的限时占用凭证。
 @dataclass
 class LeaseCard(CardModel):
     lease_id: str = ""
@@ -124,10 +148,14 @@ class LeaseCard(CardModel):
     expires_at: float = 0.0
     released_at: float | None = None
 
+    # LLM: LeaseCard.is_active is the concurrency gate used by stores and worker pools.
+    # 函数用途: 判断租约是否仍有效且未释放。
     @property
     def is_active(self) -> bool:
         return self.released_at is None and self.expires_at > now_ts()
 
+    # LLM: LeaseCard.from_dict restores lease state for stale-worker recovery.
+    # 函数用途: 从磁盘字典恢复 LeaseCard，保留过期和释放信息。
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> LeaseCard:
         return cls(
@@ -144,6 +172,8 @@ class LeaseCard(CardModel):
         )
 
 
+ # LLM: CheckpointCard stores resumable task progress separate from chat history.
+ # 类用途: 记录任务恢复点、阶段名和恢复所需 payload。
 @dataclass
 class CheckpointCard(CardModel):
     checkpoint_id: str = ""
@@ -151,6 +181,8 @@ class CheckpointCard(CardModel):
     step: str = ""
     payload: dict[str, Any] = field(default_factory=dict)
 
+    # LLM: CheckpointCard.from_dict restores checkpoint payloads for supervisor recovery.
+    # 函数用途: 从磁盘字典恢复 CheckpointCard。
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> CheckpointCard:
         return cls(
@@ -164,6 +196,8 @@ class CheckpointCard(CardModel):
         )
 
 
+ # LLM: EventCard is the append-only audit fact for task/runtime changes.
+ # 类用途: 记录任务创建、状态变化、租约和恢复等事件。
 @dataclass
 class EventCard(CardModel):
     event_id: str = ""
@@ -171,6 +205,8 @@ class EventCard(CardModel):
     event_type: str = ""
     payload: dict[str, Any] = field(default_factory=dict)
 
+    # LLM: EventCard.from_dict keeps event log replay tolerant of missing optional fields.
+    # 函数用途: 从 JSONL 行恢复 EventCard。
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> EventCard:
         return cls(
@@ -184,6 +220,8 @@ class EventCard(CardModel):
         )
 
 
+ # LLM: NotificationRouteCard stores where completion/progress should return.
+ # 类用途: 保存任务通知的用户、渠道和结构化目标地址。
 @dataclass
 class NotificationRouteCard(CardModel):
     route_id: str = ""
@@ -192,6 +230,8 @@ class NotificationRouteCard(CardModel):
     channel: str = "internal"
     target: str = ""
 
+    # LLM: NotificationRouteCard.from_dict restores return-address snapshots for dispatch.
+    # 函数用途: 从磁盘字典恢复 NotificationRouteCard。
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> NotificationRouteCard:
         return cls(
@@ -206,6 +246,8 @@ class NotificationRouteCard(CardModel):
         )
 
 
+ # LLM: ProgressPolicyCard controls feedback cadence without relying on prompt text.
+ # 类用途: 记录任务是否只完成通知，或按固定间隔汇报进度。
 @dataclass
 class ProgressPolicyCard(CardModel):
     policy_id: str = ""
@@ -213,6 +255,8 @@ class ProgressPolicyCard(CardModel):
     mode: str = "completion_only"
     interval_seconds: int | None = None
 
+    # LLM: ProgressPolicyCard.from_dict restores progress cadence after restarts.
+    # 函数用途: 从磁盘字典恢复 ProgressPolicyCard。
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> ProgressPolicyCard:
         return cls(

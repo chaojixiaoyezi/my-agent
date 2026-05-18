@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# LLM: TaskRuntime composes CardStore and MessageTool into durable task lifecycle operations.
+# 模块用途: 创建任务、记录通知路线、选择执行层级、完成任务和恢复过期任务。
 from ..cards import (
     CardStore,
     NotificationRouteCard,
@@ -12,11 +14,17 @@ from ..messages import MessageTarget, MessageTool
 from .worker_tiers import build_worker_context, choose_worker_tier
 
 
+ # LLM: TaskRuntime is a thin coordinator; execution still belongs to workers.
+ # 类用途: 串接任务 Card、进度策略、通知消息和恢复扫描。
 class TaskRuntime:
+    # LLM: TaskRuntime.__init__ wires card persistence and internal messaging.
+    # 函数用途: 初始化任务运行时依赖。
     def __init__(self, cards: CardStore, messages: MessageTool):
         self.cards = cards
         self.messages = messages
 
+    # LLM: create_task records a task order plus route, policy, and worker-tier metadata.
+    # 函数用途: 创建任务并写入通知路线、进度策略和执行层级。
     def create_task(
         self,
         *,
@@ -72,6 +80,8 @@ class TaskRuntime:
         )
         return task
 
+    # LLM: complete_task finalizes a task and sends an idempotent completion message.
+    # 函数用途: 标记任务完成、保存产物引用，并通知原 session。
     def complete_task(self, task_id: str, *, artifact_refs: list[str] | None = None) -> TaskCard:
         task = self.cards.get_task(task_id)
         task.artifact_refs = list(artifact_refs or [])
@@ -91,6 +101,8 @@ class TaskRuntime:
             )
         return completed
 
+    # LLM: recover_expired_tasks requeues running tasks that no longer have an active lease.
+    # 函数用途: 扫描失去有效租约的 running 任务并放回队列。
     def recover_expired_tasks(self) -> list[str]:
         recovered: list[str] = []
         for task in self.cards.list_tasks():
@@ -104,5 +116,7 @@ class TaskRuntime:
                 recovered.append(task.task_id)
         return recovered
 
+    # LLM: list_queued_tasks exposes queue snapshots for worker dispatchers.
+    # 函数用途: 列出当前 queued 状态任务。
     def list_queued_tasks(self) -> list[TaskCard]:
         return [task for task in self.cards.list_tasks() if task.status == TaskStatus.QUEUED]
