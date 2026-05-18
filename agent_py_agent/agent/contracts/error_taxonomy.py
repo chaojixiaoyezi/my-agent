@@ -128,6 +128,8 @@ def classify_error(message: str) -> ErrorContract:
         return error_contract("TOOL_TIMEOUT")
     if "path" in text and ("invalid" in text or "missing" in text):
         return error_contract("PATH_INVALID")
+    if "文件不存在" in text or "路径不存在" in text or "目标不是文件" in text:
+        return error_contract("PATH_INVALID")
     return error_contract("UNKNOWN_ERROR")
 
 

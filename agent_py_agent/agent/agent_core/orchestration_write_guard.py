@@ -33,6 +33,26 @@ _WRITE_INTENT_WORDS = (
     "save",
     "modify",
 )
+_NEGATED_WRITE_MARKERS = (
+    "不要",
+    "不能",
+    "禁止",
+    "别",
+    "do not",
+    "don't",
+    "avoid",
+    "not ",
+    "no ",
+)
+_TARGET_LEFT_MARKERS = (
+    "到",
+    "至",
+    "在",
+    "into",
+    "to",
+    "under",
+    "inside",
+)
 
 
 # LLM: external_write_target_error 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -81,10 +101,41 @@ def _external_absolute_paths(goal: str, workspace_roots: Path | list[Path]) -> l
     for match in _ABSOLUTE_PATH_RE.finditer(goal):
         if overlaps_spans(match.start(), match.end(), spans):
             continue
+        if not _path_candidate_is_write_target(goal, match.start(), match.end()):
+            continue
         raw = _trim_path_candidate(match.group())
         if raw and _is_external_absolute_path(raw, roots) and raw not in external:
             external.append(raw)
     return external
+
+
+# LLM: _path_candidate_is_write_target avoids treating negative route examples as filesystem writes.
+# 函数用途: 只拦截局部语境像“写到/保存到/在 X 创建”的路径；`不要写 /collections` 这类示例不算写入目标。
+def _path_candidate_is_write_target(goal: str, start: int, end: int) -> bool:
+    before = goal[max(0, start - 36) : start].casefold()
+    after = goal[end : min(len(goal), end + 36)].casefold()
+    if _negated_near_path(before):
+        return False
+    return _left_marks_target(before) or _right_marks_write(after)
+
+
+# LLM: _negated_near_path recognizes "do not write /route" style examples before path guard checks.
+# 函数用途: 过滤中文/英文否定语境，避免写入守卫把禁止示例当真实目标。
+def _negated_near_path(before: str) -> bool:
+    return any(marker in before for marker in _NEGATED_WRITE_MARKERS)
+
+
+# LLM: _left_marks_target keeps path target syntax explicit without parsing full natural language.
+# 函数用途: 判断路径左侧是否有“到/在/to/under”这类目标提示。
+def _left_marks_target(before: str) -> bool:
+    stripped = before.rstrip()
+    return any(stripped.endswith(marker) or stripped.endswith(f"{marker} ") for marker in _TARGET_LEFT_MARKERS)
+
+
+# LLM: _right_marks_write supports "在 /path 创建" ordering without global write-intent leakage.
+# 函数用途: 判断路径右侧短窗口是否出现创建、保存、写入等动作词。
+def _right_marks_write(after: str) -> bool:
+    return any(word in after for word in _WRITE_INTENT_WORDS)
 
 
 # LLM: _trim_path_candidate 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

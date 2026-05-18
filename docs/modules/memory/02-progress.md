@@ -8,6 +8,7 @@
 - 2026-05-17 Context Bundle / Compact Apply 体积守卫清零：把 context bundle 渲染拆到 `context_bundle_rendering.py`，把 runtime 到 bundle 的桥接拆到 `runtime_context_bundle.py`，把 compact apply restore refs/apply bundle/ledger payload 拆到 `compact_apply_payloads.py`；strict code-size 已回到 `hard=0 high-risk=0 soft=0`。
 - 2026-05-18 主代理执行合同层第一片已落地：新增 `agent/contracts/error_taxonomy.py`、`state_machine.py`、`idempotency.py` 和 `e2e_matrix.py`；ToolManifest failure taxonomy 已改用统一错误代码；这四个合同只描述错误、状态、幂等键和真实 E2E 场景，不直接阻断工作流，避免继续堆 prompt guard。
 - 2026-05-18 执行合同层已接入 create/dispatch：`create_subagents` 输出 `operation_contract`，`current_turn_run_state` 输出 `state_machine_contract` 和 `recovery_recommendations`；显式命名的小傻妞按结构化名字复用，默认泛名仍按 goal/write-root 区分，减少重复创建和重复调度。
+- 2026-05-18 工具结果与 E2E 矩阵继续接入合同层：`ToolExecutionResult` 失败时自动带 `error_code/recommended_action/recovery_hint`，typed tool result envelope 同步这些字段；新增 `e2e_matrix_runner.py` deterministic runner 第一片，先跑中文路径、大输出 artifact 元数据和工具失败分类，真实模型用例明确标为 skipped。
 - 2026-05-17 compact/resume 体积边界同步整理：compact apply 的 Markdown 渲染拆到 `compact_apply_rendering.py`，compact resume 的 handoff/continue packet 派生输出拆到 `compact_resume_payloads.py`，新增 context bundle 专项测试拆到独立测试文件，避免主编排文件和大测试文件继续接近 code-size high-risk。
 - 2026-05-17 Tool Output Artifact Refs 第一片已落地：`memory-compact --apply` 会只读扫描 `memory_archive/artifacts/tool_outputs/index.jsonl`，按 request/run/task scope 登记同任务的大工具输出 artifact refs；`work_state_snapshot.artifact_refs` 和 `memory-resume --from-compact recommended_read_paths` 都会带上这些路径。它只登记路径、hash、size 和 call id，不读取 artifact 正文。
 - 2026-05-17 Artifact Read Hints 第一片已落地：`memory-resume --from-compact` 会从 `work_state_snapshot.artifact_refs` 生成 `artifact_read_hints`，在 handoff、context block 和 continue packet 中给出 `read_artifact` 的 `artifact_ref/offset/max_chars`；优先使用 scoped call id，避免恢复模型复制长路径出错。
@@ -334,3 +335,10 @@
 - `memory-resume --from-compact` 和 `compact_continue_packet` 会带出同一份 lineage，让手动恢复、半自动恢复和后续自动恢复都能知道“这是第几次压缩、上一轮恢复包在哪里”，不用靠自然语言猜。
 - 行为边界不变：lineage 只读 ledger、只追加新 apply 记录，不删除、不重写、不裁剪 raw/hook/snapshot/token/task/run 文件；旧 apply 包没有 lineage 也能继续恢复。
 - 新增 focused 验收：连续 5 次 apply/resume 同一任务 scope，验证 apply id 不覆盖、cycle 连续递增、previous_apply_id 指向上一包、主代理 context bundle、tool-output artifact read hints、work_state 目标和下一步持续保留。
+
+## 2026-05-18 main-agent foundation and artifact acceptance
+- 中文说明：主代理基础测试新增固定入口 `main_agent_foundation_runner.py`。默认只跑不调用模型的确定性测试：工具失败分类、大输出 artifact refs、确定性 E2E matrix；真实模型用例明确 `SKIPPED`，不把未测试说成通过。
+- 真实模型隔离测试跑在 `/Users/example/my-终端应用/main-agent-foundation-20260518_010636/`，使用独立 `home/` 和 `workspace/`，禁用 subagent。主代理独立完成 HTML 产物、路径记错后的 CSV 整理、手动 compact/resume、带 resume context 继续写交接说明。
+- 真实测试发现：模型回复里说 HTML 已自检“无坏链”，但机器扫描发现 21 个 `href="#"` 占位链接。新增 `artifact_acceptance.py`，把 HTML 产物问题变成结构化 findings；主代理读取 findings 后修复同一文件，再次验收 `after_findings=0`。
+- 对标吸收：会话运行时 的结构化工具输出和输出截断测试、通道运行时 的 E2E/live/docker/package acceptance、长期助手 的“live path 前必须 E2E”和动态 toolset 可用性过滤。my-agent 采用“模型自检只是说明，机器验收才是证据”的原则。
+- 2026-05-18 继续收口：新增 `my-agent real-e2e` 正式 CLI，默认跑主代理基础确定性矩阵并写 refs-first 报告；`--artifact` 可把真实模型产物接入统一验收。`artifact_acceptance.py` 扩展为通用入口，当前覆盖 HTML、JSON、CSV、XLSX、PDF 和未知格式非空检查，后续浏览器/Excel/PDF 渲染验收可继续挂在同一合同下。

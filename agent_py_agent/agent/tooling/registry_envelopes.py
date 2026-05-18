@@ -75,6 +75,8 @@ def attach_result_envelope(
             "action_created_at": envelope.created_at,
         },
     ).to_dict()
+    if not result.ok:
+        result.result_envelope.update(_error_contract_payload(result))
     return result
 
 
@@ -84,6 +86,18 @@ def payload_from_tool_call_envelope(envelope: ToolCallEnvelope) -> dict[str, Any
     return {
         "tool": envelope.tool,
         **dict(envelope.args),
+    }
+
+
+# LLM: _error_contract_payload mirrors ToolExecutionResult failure facts into typed envelopes.
+# 函数用途: 让 action protocol 的工具失败结果也带 error_code/recovery_hint，供恢复和 UI 使用。
+def _error_contract_payload(result: ToolExecutionResult) -> dict[str, object]:
+    return {
+        "error_code": result.error_code,
+        "error_category": result.error_category,
+        "retryable": result.retryable,
+        "recommended_action": result.recommended_action,
+        "recovery_hint": result.recovery_hint,
     }
 
 

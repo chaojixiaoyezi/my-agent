@@ -43,10 +43,25 @@ def _included_normal_runner_tasks(
     runner_max_attempts: int,
     dependency_tasks: list,
 ) -> list:
-    selected = [task for task in tasks if _is_dispatch_runner_candidate(task, runner_max_attempts=runner_max_attempts)]
+    selected = _requested_candidate_tasks(tasks, ctx, runner_max_attempts)
     selected = input_dependency_ready_candidates(selected, dependency_tasks=dependency_tasks)
     selected = workflow_dependency_ready_candidates(selected, dependency_tasks)
     return selected[: max(0, int(ctx.max_runners or 0))]
+
+
+# LLM: _requested_candidate_tasks keeps explicit include_run_ids exact and ordered.
+# 函数用途: 按父级指定的 run_id 顺序挑选可启动任务，避免无关候选混入同一轮 dispatch。
+def _requested_candidate_tasks(tasks: list, ctx: DispatchContext, runner_max_attempts: int) -> list:
+    requested = requested_include_ids(ctx)
+    by_id = {str(getattr(task, "id", "") or ""): task for task in tasks}
+    return [
+        task
+        for run_id in requested
+        if (
+            (task := by_id.get(run_id)) is not None
+            and _is_dispatch_runner_candidate(task, runner_max_attempts=runner_max_attempts)
+        )
+    ]
 
 
 # LLM: _is_explicit_recovery_dispatch keeps forced reruns tied to control-plane recovery refs.

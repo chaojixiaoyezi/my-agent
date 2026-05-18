@@ -89,6 +89,7 @@ def _child_target_tokens(item: Any) -> set[str]:
         for token in _target_tokens_from_text(str(root or ""))
     }
     targets.update(_target_tokens_from_output_json(getattr(item, "output_json", "") or ""))
+    targets.update(_goal_target_tokens(item))
     return targets
 
 
@@ -107,7 +108,23 @@ def task_actual_target_tokens(item: Any) -> set[str]:
 # LLM: _is_explicit_repair_leaf lets parent coordinators create bounded fixes for known bad artifacts.
 # 函数用途: 只通过 repair_contract/context_packs 判断修复任务；不从“修复/fix”等自然语言猜。
 def _is_explicit_repair_leaf(item: Any) -> bool:
-    return bool(repair_contract_identity_from_context_packs(getattr(item, "context_packs", [])))
+    return bool(repair_contract_identity_from_context_packs(getattr(item, "context_packs", [])) or _identity_has_repair_marker(item))
+
+
+# LLM: _goal_target_tokens reads explicit write/fix target names from pending leaf specs.
+# 函数用途: 对 `rewrite login.html` 这类 leaf 产物声明生成重复 warning；引用共享 app.js 不算 ownership。
+def _goal_target_tokens(item: Any) -> set[str]:
+    text = str(getattr(item, "goal", "") or "").lower()
+    if not any(marker in text for marker in ("write", "rewrite", "fix", "create", "修复", "创建", "生成", "写")):
+        return set()
+    return set(_target_tokens_from_text(text))
+
+
+# LLM: _identity_has_repair_marker treats explicit repair names as bounded repair tasks.
+# 函数用途: app-js-repair-worker 这种结构化名字不触发重复产物 warning。
+def _identity_has_repair_marker(item: Any) -> bool:
+    text = f"{getattr(item, 'role', '')} {getattr(item, 'agent_name', '')}".lower().replace("_", "-")
+    return "repair" in text
 
 
 # LLM: _target_tokens_from_output_json reads artifact path refs without expanding artifact contents.

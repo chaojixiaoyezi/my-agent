@@ -73,7 +73,7 @@ agent_py_agent/cli/
 ## 核心文件
 
 - `memory_store/jsonl.py`：读写长期记忆 JSONL，是最朴素的事实落盘层；LocalStore 只是索引，不替代 JSONL。`SimpleAgent` 传入 home daily mirror 后，同一条记录也会追加到 `~/.my-agent/memory/daily/YYYY-MM-DD.jsonl`，便于以后按天恢复和查询；读取侧现在也会把 daily mirror 作为旧 `memory_path` 的补充事实源并去重。
-- `contracts/error_taxonomy.py`、`contracts/state_machine.py`、`contracts/idempotency.py`、`contracts/e2e_matrix.py`：主代理执行合同层。它们分别定义稳定错误代码/恢复建议、运行状态事实判断、幂等键/操作编号和真实端到端测试矩阵；这些模块只输出机器可读事实，不直接阻断工具或固定工作流。当前 `create_subagents` 已写 `operation_contract`，`current_turn_run_state` 已写 `state_machine_contract` 和 `recovery_recommendations`。
+- `contracts/error_taxonomy.py`、`contracts/state_machine.py`、`contracts/idempotency.py`、`contracts/e2e_matrix.py`、`contracts/e2e_matrix_runner.py`：主代理执行合同层。它们分别定义稳定错误代码/恢复建议、运行状态事实判断、幂等键/操作编号、真实端到端测试矩阵和 deterministic runner；这些模块只输出机器可读事实，不直接阻断工具或固定工作流。当前 `create_subagents` 已写 `operation_contract`，`current_turn_run_state` 已写 `state_machine_contract` 和 `recovery_recommendations`，`ToolExecutionResult` 已带错误合同字段。
 - `user_space/home_runtime_query.py`：提供 `DailyMemoryQuery`、`TaskWorkspaceQuery`、`read_daily_memory_records()`、`list_task_workspaces()`、`home_task_workspace_payload()` 和 `home_runtime_status()`；CLI、doctor 和 resume 通过这一层读取 home runtime，不在各自模块里散扫目录。
 - `user_space/context_bundle.py`：为主代理保存型 run 生成 `Main Agent Context Bundle v1` JSON/Markdown 和 bounded prompt 摘要；它只写结构化 refs，不复制大正文。
 - `user_space/context_bundle_contracts.py`：集中生成 context bundle 的合同字段，包括 schema policy、owner model、RunScope、ToolManifest、ArtifactRef、Acceptance Contract、prompt budget 和 self-check。后续字段扩展优先落在这里，避免各处散拼 JSON。

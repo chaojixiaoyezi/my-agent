@@ -53,6 +53,8 @@ def _runner_role_phase_priority(task: SubAgentTask) -> int:
     role = str(getattr(task, "role", "") or "").strip().lower().replace("-", "_")
     identity_text = f"{role} {getattr(task, 'agent_name', '')}".lower().replace("-", "_")
     template_role = role_template_id_for_role(identity_text, fallback="")
+    if _identity_requests_quality_phase(identity_text):
+        return 20
     if template_role == "coordinator" or role in {"lead", "planner", "dispatcher"}:
         return 0
     if template_role == "acceptor" or role in {"acceptor", "verifier", "verification"}:
@@ -62,6 +64,13 @@ def _runner_role_phase_priority(task: SubAgentTask) -> int:
     if template_role in {"worker", "writer", "researcher"} or role in {"worker", "writer", "researcher", "general", "coder", "reporter"}:
         return 10
     return 10
+
+
+# LLM: _identity_requests_quality_phase lets structured QA names wait for producer phases.
+# 函数用途: 当角色名/代理名明确是 quality/test/check 时，即使 role=coordinator，也归入质量阶段。
+def _identity_requests_quality_phase(identity_text: str) -> bool:
+    markers = ("quality", "qa", "tester", "test", "bug_finder", "checker", "acceptance")
+    return any(marker in identity_text for marker in markers)
 
 
 # LLM: _runner_text_phase_priority is retained for compatibility and delegates to template ids.
@@ -309,10 +318,30 @@ def _blocked_after_capability_grant(task: SubAgentTask) -> bool:
         return False
     if any(item.status == "OPEN" for item in getattr(task, "capability_gaps", []) or []):
         return False
-    failure_type = _runner_failure_type(task)
-    if failure_type in CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES:
+    if _has_fresh_capability_grant(task):
         return True
+    return _runner_failure_type(task) in CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES
+
+
+# LLM: _has_fresh_capability_grant makes rerun eligibility a state contract, not a failure-word allowlist.
+# 函数用途: 父级在上次 runner 后新增授权时，允许同一个 BLOCKED run 续跑一次；续跑后不再凭旧 grant 无限重跑。
+def _has_fresh_capability_grant(task: SubAgentTask) -> bool:
+    last_attempt = _float_attr(task, "runner_last_attempt_at")
+    if last_attempt <= 0:
+        return False
+    for grant in getattr(task, "capability_grants", []) or []:
+        if _float_attr(grant, "created_at") > last_attempt:
+            return True
     return False
+
+
+# LLM: _float_attr keeps timestamp comparisons tolerant of old task/grant records.
+# 函数用途: 读取旧记录中可能为空或字符串的时间戳；坏值按 0 处理，不让调度崩溃。
+def _float_attr(value: object, name: str) -> float:
+    try:
+        return float(getattr(value, name, 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # LLM: _runner_active_attempt_id keeps active-runner reentry checks concrete and MagicMock-safe.

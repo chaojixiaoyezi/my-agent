@@ -54,6 +54,7 @@ def qa_roles_from_text(text: str) -> list[str]:
     for raw in str(text or "").splitlines():
         active, roles = _qa_role_contract_line(raw, active=active)
         requested.update(roles)
+    requested.update(_inline_role_id_mentions(text))
     return [role for role in QA_ROLE_ORDER if role in requested]
 
 
@@ -115,3 +116,10 @@ def _role_items(value: object) -> set[str]:
         if item in QA_ROLE_ORDER:
             roles.add(item)
     return roles
+
+
+# LLM: _inline_role_id_mentions accepts exact QA role ids in compact contracts.
+# 函数用途: 支持 `tester / bug_finder / acceptor` 这类机器 role id 列表；不解析“测试/验收”等自然语言。
+def _inline_role_id_mentions(text: object) -> set[str]:
+    compact = str(text or "").lower().replace("-", "_")
+    return {role for role in QA_ROLE_ORDER if re.search(rf"(?<![a-z0-9_]){re.escape(role)}(?![a-z0-9_])", compact)}

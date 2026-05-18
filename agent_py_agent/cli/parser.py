@@ -31,6 +31,7 @@ from .commands.subagents import add_subagents_subcommands
 from .commands.tasks import add_task_subcommands
 from .common import DEFAULT_CONFIG, configure_stdio
 from .gateway_client import cmd_default
+from .real_e2e_commands import add_real_e2e_subcommand
 
 
 # LLM: build_parser 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
@@ -72,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_adapter_subcommand(subparsers)
     add_task_subcommands(subparsers)
     add_operations_subcommands(subparsers)
+    add_real_e2e_subcommand(subparsers)
 
     return parser
 

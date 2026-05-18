@@ -110,6 +110,13 @@ def explicit_root_missing_write_root_error(agent: object, params: dict[str, obje
         return ""
     if not _goal_has_product_write_intent(goal):
         return ""
+    role = str(params.get("role") or "worker").strip().casefold().replace("-", "_")
+    if not (
+        _manager_has_real_workspace(agent)
+        or _goal_has_structured_product_contract(goal)
+        or not role_allows_direct_product_work(role)
+    ):
+        return ""
     return (
         "要交付文件或网站时，必须提供真实产物写入根，"
         "否则下级会误把 agent-run workspace 当成 build 目录。"
@@ -166,6 +173,12 @@ def _goal_has_product_write_intent(goal: str) -> bool:
     return _goal_needs_product_write_root(goal)
 
 
+# LLM: _goal_has_structured_product_contract distinguishes protocol refs from casual prose refs.
+# 函数用途: 识别 output_files/output_refs/artifact_refs 这类机器字段；没有 workspace 时也必须要求真实写入根。
+def _goal_has_structured_product_contract(goal: str) -> bool:
+    return bool(re.search(r"^\s*(?:[-*]\s*)?(?:output_refs|output_files|artifact_refs)\s*[:=]", str(goal or ""), re.IGNORECASE | re.MULTILINE))
+
+
 # LLM: _has_structured_write_intent enables target roots from output refs or repair contracts only.
 # 函数用途: 有 output_files 或 repair_contract 时才把 required_read_paths 中的产物文件当作写入目标。
 def _has_structured_write_intent(params: dict[str, object], goal: str) -> bool:
@@ -199,6 +212,13 @@ def _default_workspace_product_root(agent: object, params: dict[str, object], go
         return ""
     roots = agent_workspace_roots(agent, root)
     return str(root) if any(is_relative_to(root, item) for item in roots) else ""
+
+
+# LLM: _manager_has_real_workspace distinguishes real managers from loose mocks and old adapters.
+# 函数用途: 只有存在可解析 workspace_root 时，缺写入根才值得阻断；普通 mock/旧 adapter 保持兼容创建。
+def _manager_has_real_workspace(agent: object) -> bool:
+    raw = getattr(getattr(agent, "subagents", None), "workspace_root", None)
+    return isinstance(raw, str | Path)
 
 
 # LLM: _structured_parent_constraints reads only protocol fields from root prompt/context.

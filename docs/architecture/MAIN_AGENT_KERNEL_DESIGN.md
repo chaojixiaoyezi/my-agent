@@ -202,7 +202,10 @@ agent_py_agent/agent/contracts/
 |-- error_taxonomy.py   # 统一错误分类和恢复建议
 |-- state_machine.py    # 统一运行状态事实和调度/收口判断
 |-- idempotency.py      # 统一幂等键和操作编号
-`-- e2e_matrix.py      # 真实 E2E 矩阵的机器可读定义
+|-- artifact_acceptance.py # 产物验收 findings，不相信模型自检
+|-- e2e_matrix.py      # 真实 E2E 矩阵的机器可读定义
+|-- e2e_matrix_runner.py # 不调用模型的确定性 E2E runner
+`-- main_agent_foundation_runner.py # 主代理基础 E2E 总入口
 ```
 
 这些文件不是写死工作流。它们只提供事实和合同：
@@ -210,6 +213,7 @@ agent_py_agent/agent/contracts/
 - Error Taxonomy（错误分类体系）：把路径错误、写入禁止、工具不可用、模型上游失败、产物缺失、验收失败、compact 引用缺失等失败分成稳定代码，并给出恢复建议。它不自动替模型决定重试，只告诉上层“这类失败是什么”。
 - State Machine（状态机）：把 `PLANNING`、`RUNNING`、`WAITING_FOR_TOOL`、`BLOCKED`、`FAILED`、`DONE`、`VERIFIED` 等状态变成统一事实判断。它不规定每个任务必须走固定流程，只回答“现在能不能 dispatch、能不能 closeout、该等、修、接管还是人工看”。
 - Idempotency Contract（幂等合同）：给 create/schedule/dispatch/compact/resume/artifact write 这类动作提供稳定 key。模型多调用一次工具时，系统可以复用已有 run 或跳过已完成项，而不是无限创建重复任务。
+- Artifact Acceptance（产物验收）：把 HTML/PDF/XLSX/代码等产物的质量问题变成结构化 findings。模型可以自检，但不能把“我检查过了”当作通过；验收器输出才是 repair（修复）和最终验收的输入。
 - Real E2E Matrix（真实端到端测试矩阵）：把必须长期跑的真实链路做成数据合同，例如中文路径写文件、大工具输出 artifact、compact 后 resume、工具失败分类、验收失败后修复、长任务中断恢复、单代理完整任务、子代理复用主代理 kernel。
 
 大白话说：这四个合同不是给代理套枷锁，而是让系统在出问题时有统一语言。它们回答“坏在哪、现在是什么状态、这个操作是不是重复、真实链路有没有测过”。
@@ -219,6 +223,21 @@ agent_py_agent/agent/contracts/
 - `create_subagents` 输出 `operation_contract`，包含 `idempotency_key`、`operation_id`、created/reused/dispatch run ids。它不阻止重复调用，只把“这是同一个操作”的事实写出来，方便后续调度层复用。
 - `dispatch_subagents` / `create_subagents` 的 `current_turn_run_state` 复用统一 State Machine，输出 `state_machine_contract` 和 `recovery_recommendations`。父级能看到 blocked/failed run 的错误类型、建议动作和中文恢复提示，不必从自然语言摘要里猜。
 - 显式命名的小傻妞现在把名字当作结构化身份；默认泛名仍用 goal/write-root 等字段区分。这避免“同一个小傻妞目标文字稍微变了就重复创建”，也避免默认 worker 把不同任务误合并。
+- `ToolExecutionResult` 现在会在失败时自动带 `error_code`、`error_category`、`retryable`、`recommended_action`、`recovery_hint`。typed tool result envelope 也同步这些字段；这只是恢复事实，不改变工具是否允许执行。
+- `e2e_matrix_runner.py` 提供 deterministic runner 第一片：当前可跑中文路径写读、大工具输出 artifact 元数据、工具失败分类；真实模型用例会明确 `SKIPPED`，避免单测假装覆盖真实链路。
+- `main_agent_foundation_runner.py` 把主代理基础 1-6 类测试收成一个 refs-first 报告：工具失败合同、真实单代理任务占位、compact/resume 占位、大输出 artifact refs、真实错误恢复占位和确定性 E2E matrix。真实模型项没有跑时必须显示 `SKIPPED`。
+- `artifact_acceptance.py` 提供通用产物验收入口：HTML 能发现 `href="#"`、空链接、`javascript:void(0)`、外部图片和缺失本地图片；JSON/CSV/XLSX/PDF 会做轻量可打开/可解析检查；未知格式至少检查存在和非空。真实测试发现模型产物自称“无坏链”，但机器验收抓到 21 个占位链接；把 findings 交回主代理后，主代理修复到 0 个 findings。
+- `my-agent real-e2e` 已接入 CLI：默认跑确定性主代理基础矩阵，写 `real_e2e_report.json`；传 `--artifact` 时会把真实模型产物接入 Artifact Acceptance。它当前不自动调用模型，避免 CI 或普通提交意外烧 API。
+
+## 对标其他项目后的原则
+
+这轮对照了 `/Users/example/Downloads/会话运行时-main`、`/Users/example/Downloads/通道运行时-main`、`/Users/example/Downloads/长期助手-agent-main` 后，主代理内核采用下面几条：
+
+- 会话运行时 的做法：工具结果走结构化输出，shell 结果会整理出 exit code、wall time 和 output；大输出有截断和聚合测试。my-agent 对应做法是 tool result envelope、Error Taxonomy 和 artifact refs，不让模型从一段自然语言里猜。
+- 通道运行时 的做法：安全和运行时行为不只靠静态扫描，而是有 `test:e2e`、`test:live`、`test:docker:all`、package acceptance 等真实链路。my-agent 对应做法是 Main Agent Foundation Runner + 真实模型 E2E，不能用 focused tests 冒充真实可用。
+- 长期助手 的做法：工具/skill 暴露要按当前可用 toolset 动态过滤，禁止工具描述引用不可用工具；新能力接 live path 前必须 E2E，测试要隔离 home。my-agent 对应做法是 ToolManifest、temp home 真实测试、产物验收 findings，而不是靠 prompt 里写“请自检”。
+
+大白话说：模型的自检只算“它自己的说明”，不算验收证据。真正验收要靠工具、测试、产物扫描、浏览器检查、文件存在性、hash/size/ref 和结构化 findings。
 
 ## 当前已落地
 

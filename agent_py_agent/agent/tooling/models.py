@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..contracts.error_taxonomy import classify_error, error_contract
+
 
 # LLM: ToolSpec 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
 # 类用途: 工具元数据模型，描述工具用途、参数、示例和检索关键词。
@@ -94,13 +96,38 @@ class ToolExecutionResult:
     output: str
     call_id: str = ""
     result_envelope: dict[str, Any] = field(default_factory=dict)
+    error_code: str = ""
+    error_category: str = ""
+    retryable: bool = False
+    recommended_action: str = ""
+    recovery_hint: str = ""
+
+    # LLM: __post_init__ attaches advisory error facts without changing tool success/failure semantics.
+    # 函数用途: 失败结果自动补统一错误合同字段；成功结果保持空字段，避免多余 prompt 噪音。
+    def __post_init__(self) -> None:
+        if self.ok:
+            self.error_code = ""
+            self.error_category = ""
+            self.retryable = False
+            self.recommended_action = ""
+            self.recovery_hint = ""
+            return
+        contract = error_contract(self.error_code) if self.error_code else classify_error(self.output)
+        self.error_code = contract.code
+        self.error_category = contract.category
+        self.retryable = contract.retryable
+        self.recommended_action = contract.recommended_action
+        self.recovery_hint = contract.recovery_hint
 
     # LLM: ToolExecutionResult.render_for_prompt 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 把 render_for_prompt 转成人或模型可读的展示文本。
     def render_for_prompt(self) -> str:
 
         status = "ok" if self.ok else "error"
-        return f"[tool={self.tool}; status={status}]\n{self.output}"
+        fields = f"tool={self.tool}; status={status}"
+        if not self.ok and self.error_code:
+            fields = f"{fields}; error_code={self.error_code}; recommended_action={self.recommended_action}"
+        return f"[{fields}]\n{self.output}"
 
 
 # LLM: ToolSearchHit 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。

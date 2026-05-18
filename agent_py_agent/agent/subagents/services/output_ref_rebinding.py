@@ -14,6 +14,8 @@ _FILE_REF_RE = re.compile(
     re.IGNORECASE,
 )
 _OUTPUT_REF_FIELD_RE = re.compile(r"^\s*(?:[-*]\s*)?(?:output_refs|output_files|artifact_refs)\s*[:=]", re.IGNORECASE)
+_OUTPUT_CONTEXT_MARKERS = ("写到", "写入", "输出", "输出路径", "生成", "保存到", "交付", "output", "write", "save")
+_INPUT_CONTEXT_MARKERS = ("读取", "读入", "输入", "read", "input", "source")
 
 
 # LLM: OutputRefRebinding records one machine-auditable replacement for later E2E diagnosis.
@@ -76,11 +78,24 @@ def _file_refs(text: str):
         yield match.group(), match.start()
 
 
-# LLM: _path_ref_is_output checks machine output-ref fields only.
-# 函数用途: 判断路径所在行是否为 output_refs/output_files/artifact_refs，避免把自然语言里的旧 run 文件误改掉。
+# LLM: _path_ref_is_output checks structured fields plus local write-context markers.
+# 函数用途: 判断路径是否属于当前任务自写产物；读取/输入路径保留旧 id，写入/输出/保存路径重绑定到真实 run_id。
 def _path_ref_is_output(text: str, start: int) -> bool:
     line_start = str(text or "").rfind("\n", 0, start) + 1
-    return bool(_OUTPUT_REF_FIELD_RE.match(str(text or "")[line_start:start]))
+    line = str(text or "")[line_start: str(text or "").find("\n", start) if "\n" in str(text or "")[start:] else len(str(text or ""))]
+    if _OUTPUT_REF_FIELD_RE.match(str(text or "")[line_start:start]):
+        return True
+    prefix = str(text or "")[line_start:start].lower()
+    if any(marker in prefix for marker in _INPUT_CONTEXT_MARKERS) and not any(marker in prefix for marker in _OUTPUT_CONTEXT_MARKERS):
+        return False
+    return any(marker in prefix for marker in _OUTPUT_CONTEXT_MARKERS) or _line_has_output_field_label(line)
+
+
+# LLM: _line_has_output_field_label handles labels that appear before full-width punctuation or prose.
+# 函数用途: 兼容“输出路径 data/...”“保存到 data/...”这类短合同句，不读取文件内容。
+def _line_has_output_field_label(line: str) -> bool:
+    lowered = str(line or "").lower()
+    return any(marker in lowered for marker in _OUTPUT_CONTEXT_MARKERS)
 
 
 # LLM: _rebound_subagent_ref swaps the segment after data/subagents when it is a concrete run id.

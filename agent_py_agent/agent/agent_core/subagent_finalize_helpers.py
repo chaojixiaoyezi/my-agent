@@ -224,7 +224,51 @@ def _looks_like_tool_limit_cleanup(structured: object) -> bool:
     if status not in {"BLOCKED", "FAILED", "TIMEOUT"} and not has_capability_requests:
         return False
     failure_type = str(getattr(structured, "failure_type", "") or "").strip().lower()
-    return failure_type in {"max_tool_rounds", "tool_round_limit", "max_tool_round_limit"}
+    return failure_type in {"max_tool_rounds", "tool_round_limit", "max_tool_round_limit"} or (
+        has_capability_requests and _capability_requests_are_tool_limit_cleanup(structured)
+    )
+
+
+# LLM: _capability_requests_are_tool_limit_cleanup keeps coordinator completion from being blocked by a late cleanup read.
+# 函数用途: 只把“增加工具轮数/重复验证”这类清理型能力申请视为可忽略；真实业务缺能力仍保持 BLOCKED。
+def _capability_requests_are_tool_limit_cleanup(structured: object) -> bool:
+    requests = getattr(structured, "capability_requests", []) or []
+    if not requests:
+        return False
+    for request in requests:
+        text = _capability_request_text(request)
+        if not _looks_like_tool_round_limit_text(text):
+            return False
+    return True
+
+
+# LLM: _capability_request_text reads small structured fields from dict or dataclass requests.
+# 函数用途: 汇总能力申请的 problem/needed/expected 字段，不读取产物正文。
+def _capability_request_text(request: object) -> str:
+    values: list[str] = []
+    if isinstance(request, dict):
+        keys = ("problem", "needed_capability", "expected_output", "failure_type")
+        values.extend(str(request.get(key, "") or "") for key in keys)
+    else:
+        keys = ("problem", "needed_capability", "expected_output", "failure_type")
+        values.extend(str(getattr(request, key, "") or "") for key in keys)
+    return " ".join(value for value in values if value.strip()).lower()
+
+
+# LLM: _looks_like_tool_round_limit_text recognizes infrastructure cleanup limits, not product failures.
+# 函数用途: 判断能力申请是否只是工具轮数/重复读取证明造成的收尾清理问题。
+def _looks_like_tool_round_limit_text(text: str) -> bool:
+    return any(
+        marker in text
+        for marker in (
+            "max_tool_rounds",
+            "tool_round_limit",
+            "tool round",
+            "工具轮数",
+            "工具上限",
+            "轮数限制",
+        )
+    )
 
 
 # LLM: _verified_direct_child_refs checks refs-only child status before synthesizing coordinator completion.

@@ -15,6 +15,7 @@ from ..subagents.services.repair_goal_identity import (
     repair_goal_targets,
     repair_goal_targets_overlap,
 )
+from .runner_input_dependencies import goal_output_refs
 
 _REUSABLE_STATUSES = {"PLANNING", "PENDING", "RUNNING", "DONE", "COMPLETED", "BLOCKED", "PAUSED"}
 _GENERIC_AGENT_NAMES = {
@@ -154,6 +155,8 @@ def _same_create_scope(task: Any, params: CreateRunParams, name: str) -> bool:
         return False
     if _requires_goal_identity(name) and _normalized_goal(getattr(task, "goal", "")) != _normalized_goal(params.goal):
         return False
+    if _requires_goal_identity_for_explicit_name(name) and _normalized_goal(getattr(task, "goal", "")) != _normalized_goal(params.goal):
+        return False
     if _identity_fields(task) != _params_identity_fields(params):
         return False
     return _external_write_roots(task) == _params_extra_write_roots(params)
@@ -277,6 +280,12 @@ def _normalized_goal(value: object) -> str:
     return " ".join(_text(value).split())
 
 
+# LLM: _goal_ref_identity separates same-name repair owners by concrete file refs.
+# 函数用途: 同名“小傻妞-修复”修不同 index1/index2 时不能复用同一个 run；没有文件 ref 时保持旧名字幂等。
+def _goal_ref_identity(goal: object) -> tuple[str, ...]:
+    return tuple(sorted(dict.fromkeys(goal_output_refs(str(goal or "")))))
+
+
 # LLM: _normalized_path keeps write-root comparison stable without resolving nonexistent paths.
 # 函数用途: 清理路径字符串里的尾部斜杠和空格；不访问文件系统。
 def _normalized_path(value: object) -> str:
@@ -327,6 +336,13 @@ def _is_indexed_generic_agent_name(value: object) -> bool:
 # 函数用途: 默认名/泛角色名要用 goal 区分；用户或系统给出的语义名字则作为结构化身份复用。
 def _requires_goal_identity(name: str) -> bool:
     return _is_generic_agent_name(name) or _is_indexed_generic_agent_name(name)
+
+
+# LLM: _requires_goal_identity_for_explicit_name keeps repair-like owners from merging different targets.
+# 函数用途: 没有 repair_contract 时，显式“小傻妞-修复”这类名字仍按完整目标区分，避免不同修复文件复用同一 run。
+def _requires_goal_identity_for_explicit_name(name: str) -> bool:
+    lowered = _normalized_name(name).replace("_", "-")
+    return any(marker in lowered for marker in ("repair", "fix", "修复", "补齐", "验收修复"))
 
 
 # LLM: _is_lineage_prefix recognizes generated 小傻妞 depth markers.

@@ -39,3 +39,25 @@ def test_tool_registry_rejects_non_tool_call_envelope_kind(tmp_path):
     assert result.ok is False
     assert result.tool == "unknown"
     assert "tool_call envelope" in result.output
+
+
+# LLM: Tool result envelopes should carry Error Taxonomy fields for recovery logic.
+# 函数用途: typed 工具执行失败时，result_envelope 也要带 error_code/recommended_action，不能只给自然语言。
+def test_tool_registry_error_envelope_includes_error_contract(tmp_path):
+    registry = make_tool_registry(tmp_path)
+    envelope = ToolCallEnvelope(
+        call_id="call-missing-1",
+        source="legacy_text_protocol",
+        tool="read_file",
+        args={"path": "missing.txt"},
+        scope=RunScope(task_id="task-1", run_id="run-1"),
+    )
+
+    result = registry.execute_call(envelope)
+
+    assert result.ok is False
+    assert result.error_code == "PATH_INVALID"
+    assert result.result_envelope["error_code"] == "PATH_INVALID"
+    assert result.result_envelope["error_category"] == "path"
+    assert result.result_envelope["recommended_action"] == "fix_path_or_read_refs"
+    assert "修正路径" in result.result_envelope["recovery_hint"]
