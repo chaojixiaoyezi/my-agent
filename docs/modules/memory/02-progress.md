@@ -344,3 +344,4 @@
 - 对标吸收：会话运行时 的结构化工具输出和输出截断测试、通道运行时 的 E2E/live/docker/package acceptance、长期助手 的“live path 前必须 E2E”和动态 toolset 可用性过滤。my-agent 采用“模型自检只是说明，机器验收才是证据”的原则。
 - 2026-05-18 继续收口：新增 `my-agent real-e2e` 正式 CLI，默认跑主代理基础确定性矩阵并写 refs-first 报告；`--artifact` 可把真实模型产物接入统一验收。`artifact_acceptance.py` 扩展为通用入口，当前覆盖 HTML、JSON、CSV、XLSX、PDF 和未知格式非空检查，后续浏览器/Excel/PDF 渲染验收可继续挂在同一合同下。
 - 2026-05-18 主代理真实任务批量测试计划第一片已落地：新增 `main_agent_real_task_suite.py` 和 `main_agent_real_task_suite_cases.py`，`my-agent real-e2e --real-task-suite` 会生成家具 HTML、购物站点、GitHub 升星 XLSX、DeepSeek 论文翻译 PDF 的 prompt refs、acceptance refs、expected artifact refs、worker slot 和 timeout；默认只规划不调用模型，避免继续手动乱开多个长期进程。
+- 2026-05-18 主代理真实任务受控执行第一片已落地：新增 `main_agent_real_task_execution.py` 三件套，`my-agent real-e2e --run-real-tasks` 会给每个 case 写独立配置、命令、stdout/stderr 和 workspace，并按 `--real-task-max-workers` 并发执行。未传 `--real-task-base-config` 时使用离线 echo 配置；传真实配置才会调用真实模型。

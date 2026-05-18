@@ -16,6 +16,10 @@ from ..agent.contracts.main_agent_foundation_runner import (
     MainAgentFoundationRequest,
     run_main_agent_foundation,
 )
+from ..agent.contracts.main_agent_real_task_execution import (
+    MainAgentRealTaskExecutionRequest,
+    run_main_agent_real_task_execution,
+)
 from ..agent.contracts.main_agent_real_task_suite import (
     MainAgentRealTaskSuiteRequest,
     plan_main_agent_real_task_suite,
@@ -31,6 +35,7 @@ class RealE2EPayloadRequest:
     foundation: dict[str, object]
     artifacts: list[dict[str, object]]
     real_task_suite: dict[str, object] | None = None
+    real_task_execution: dict[str, object] | None = None
 
 
 # LLM: add_real_e2e_subcommand registers the formal main-agent E2E test entrypoint.
@@ -60,6 +65,13 @@ def add_real_e2e_subcommand(
     parser.add_argument(
         "--real-task-timeout", type=int, default=480, help="真实任务计划的单任务超时秒数"
     )
+    parser.add_argument("--run-real-tasks", action="store_true", help="显式执行受控真实任务")
+    parser.add_argument(
+        "--real-task-case", action="append", default=[], help="可重复：只执行/计划指定 case_id"
+    )
+    parser.add_argument(
+        "--real-task-base-config", default="", help="真实任务执行使用的基础配置文件"
+    )
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     parser.set_defaults(func=cmd_real_e2e)
 
@@ -76,15 +88,19 @@ def cmd_real_e2e(args) -> int:
     )
     artifact_reports = _artifact_reports(getattr(args, "artifact", []) or [], workspace=workspace)
     real_task_suite = _real_task_suite(args, workspace=workspace)
+    real_task_execution = _real_task_execution(args, workspace=workspace)
     ok = foundation.ok and all(item.get("ok") for item in artifact_reports)
     report_path = _report_path(getattr(args, "report", ""), workspace=workspace)
     payload = _payload(
         RealE2EPayloadRequest(
-            ok=ok and _real_task_suite_ok(real_task_suite),
+            ok=ok
+            and _real_task_suite_ok(real_task_suite)
+            and _real_task_suite_ok(real_task_execution),
             report_path=report_path,
             foundation=foundation.to_dict(),
             artifacts=artifact_reports,
             real_task_suite=real_task_suite,
+            real_task_execution=real_task_execution,
         )
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -92,7 +108,7 @@ def cmd_real_e2e(args) -> int:
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
     )
     _print_payload(payload, json_output=bool(getattr(args, "json", False)))
-    return 0 if ok else 2
+    return 0 if payload.get("ok") else 2
 
 
 # LLM: _workspace_path keeps generated E2E files isolated from user project files by default.
@@ -140,6 +156,26 @@ def _real_task_suite_ok(value: dict[str, object] | None) -> bool:
     return True if value is None else bool(value.get("ok"))
 
 
+# LLM: _real_task_execution optionally runs controlled main-agent tasks behind an explicit flag.
+# 函数用途: 只有用户传 --run-real-tasks 时，才按结构化计划启动主代理任务并收集日志引用。
+def _real_task_execution(args, *, workspace: Path) -> dict[str, object] | None:
+    if not bool(getattr(args, "run_real_tasks", False)):
+        return None
+    config_value = str(getattr(args, "real_task_base_config", "") or "").strip()
+    base_config = Path(config_value).expanduser() if config_value else None
+    report = run_main_agent_real_task_execution(
+        MainAgentRealTaskExecutionRequest(
+            workspace=workspace,
+            max_workers=int(getattr(args, "real_task_max_workers", 4)),
+            task_timeout_seconds=int(getattr(args, "real_task_timeout", 480)),
+            execute=True,
+            case_ids=tuple(getattr(args, "real_task_case", []) or ()),
+            base_config_path=base_config,
+        )
+    )
+    return report.to_dict()
+
+
 # LLM: _payload gives CLI, docs, and frontend one stable report shape.
 # 函数用途: 组合基础测试结果、产物验收结果和报告引用，保留 summary 便于旧调用方读取。
 def _payload(request: RealE2EPayloadRequest) -> dict[str, object]:
@@ -156,6 +192,8 @@ def _payload(request: RealE2EPayloadRequest) -> dict[str, object]:
     }
     if request.real_task_suite is not None:
         payload["main_agent_real_task_suite"] = request.real_task_suite
+    if request.real_task_execution is not None:
+        payload["main_agent_real_task_execution"] = request.real_task_execution
     return payload
 
 

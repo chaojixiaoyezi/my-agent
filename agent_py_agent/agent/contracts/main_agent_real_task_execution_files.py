@@ -1,0 +1,125 @@
+# LLM: Real task execution file helpers keep config, command, and report writes deterministic.
+# 模块用途: 为真实任务执行器提供路径、配置文件、命令 JSON 和 refs-first 写入工具。
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+from .main_agent_real_task_execution_models import MainAgentRealTaskExecutionRequest
+from .main_agent_real_task_suite import MainAgentRealTaskCasePlan
+
+
+# LLM: command_for_case builds an argv list and never shells through natural language.
+# 函数用途: 根据 prompt ref 和隔离配置生成 `python -m agent_py_agent ... run` 命令。
+def command_for_case(
+    case: MainAgentRealTaskCasePlan,
+    request: MainAgentRealTaskExecutionRequest,
+    *,
+    config_path: Path,
+    workspace: Path,
+) -> list[str]:
+    prompt = (workspace / case.prompt_ref).read_text(encoding="utf-8")
+    return [
+        sys.executable,
+        "-m",
+        "agent_py_agent",
+        "--config",
+        str(config_path),
+        "run",
+        prompt,
+        "--save",
+    ]
+
+
+# LLM: write_case_config creates an isolated agent config for one real task.
+# 函数用途: 从基础配置复制或生成 echo 配置，并覆盖 workspace_root，保证任务写入专属目录。
+def write_case_config(path: Path, base_config_path: Path | None, task_workspace: Path) -> None:
+    if base_config_path:
+        text = Path(base_config_path).expanduser().read_text(encoding="utf-8")
+    else:
+        text = default_config_text()
+    text = without_config_key(text, "workspace_root")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'{text.rstrip()}\nworkspace_root: "{task_workspace}"\n', encoding="utf-8")
+
+
+# LLM: default_config_text keeps plan-only and echo tests independent from user secrets.
+# 函数用途: 生成最小离线配置；真实 API 测试应显式传 base_config_path。
+def default_config_text() -> str:
+    return "\n".join(
+        [
+            'agent_name: "real-task-suite"',
+            'model_backend: "echo"',
+            'system_prompt: "你是受控真实任务测试里的主代理。"',
+            "prompt_files: []",
+            "auto_save_memory: false",
+            "enable_subagents: true",
+        ]
+    )
+
+
+# LLM: without_config_key removes one top-level simple YAML key before appending overrides.
+# 函数用途: 删除基础配置里的 workspace_root，避免同一文件里出现多个冲突工作区。
+def without_config_key(text: str, key: str) -> str:
+    prefix = f"{key}:"
+    return "\n".join(line for line in text.splitlines() if not line.strip().startswith(prefix))
+
+
+# LLM: case_paths returns all per-case runtime paths in the workspace.
+# 函数用途: 集中定义每个真实任务的 workspace/config/log/command 文件位置。
+def case_paths(workspace: Path, case_id: str) -> dict[str, Path]:
+    root = execution_root(workspace) / "tasks" / case_id
+    return {
+        "root": root,
+        "workspace": root / "workspace",
+        "config": root / "config.yaml",
+        "command": root / "command.json",
+        "stdout": root / "stdout.txt",
+        "stderr": root / "stderr.txt",
+    }
+
+
+# LLM: execution_root keeps execution artifacts separate from suite prompt/contracts.
+# 函数用途: 返回真实任务执行记录根目录，避免污染计划目录和用户产物目录。
+def execution_root(workspace: Path) -> Path:
+    return workspace / "main_agent_real_task_execution"
+
+
+# LLM: package_root resolves where `python -m agent_py_agent` should be launched.
+# 函数用途: 解析包根目录；测试可传入 Path.cwd，默认按当前文件向上定位仓库根。
+def package_root(request: MainAgentRealTaskExecutionRequest) -> Path:
+    if request.package_root:
+        return Path(request.package_root).expanduser().resolve()
+    return Path(__file__).resolve().parents[3]
+
+
+# LLM: write_json centralizes deterministic UTF-8 JSON writing for execution records.
+# 函数用途: 写命令和总报告文件，字段排序便于 diff、恢复和审计。
+def write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+# LLM: rel stores portable refs within the selected workspace.
+# 函数用途: 把绝对路径转成相对工作区引用，避免报告绑定某台机器的路径。
+def rel(path: Path, base: Path) -> str:
+    try:
+        return str(path.relative_to(base))
+    except ValueError:
+        return str(path)
+
+
+__all__ = [
+    "case_paths",
+    "command_for_case",
+    "execution_root",
+    "package_root",
+    "rel",
+    "write_case_config",
+    "write_json",
+]

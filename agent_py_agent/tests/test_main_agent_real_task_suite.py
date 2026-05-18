@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -52,3 +53,74 @@ def test_main_agent_real_task_suite_rejects_invalid_controls(tmp_path):
         plan_main_agent_real_task_suite(
             MainAgentRealTaskSuiteRequest(workspace=tmp_path, task_timeout_seconds=0)
         )
+
+
+# LLM: Real-task execution planning should produce per-case commands and isolated config refs.
+# 函数用途: 验证受控执行入口默认只落运行命令和隔离配置，不启动模型进程。
+def test_main_agent_real_task_execution_plan_writes_command_refs(tmp_path):
+    from agent_py_agent.agent.contracts.main_agent_real_task_execution import (
+        MainAgentRealTaskExecutionRequest,
+        run_main_agent_real_task_execution,
+    )
+
+    report = run_main_agent_real_task_execution(
+        MainAgentRealTaskExecutionRequest(
+            workspace=tmp_path,
+            max_workers=2,
+            task_timeout_seconds=333,
+            execute=False,
+            package_root=Path.cwd(),
+        )
+    )
+
+    payload = report.to_dict()
+    first_case = payload["cases"][0]
+    assert payload["ok"] is True
+    assert payload["summary"]["planned"] == payload["summary"]["total"]
+    assert (tmp_path / first_case["command_ref"]).exists()
+    assert (tmp_path / first_case["config_ref"]).exists()
+    assert not (tmp_path / first_case["stdout_ref"]).exists()
+
+
+# LLM: The controlled runner should be able to execute one main-agent task through an echo backend.
+# 函数用途: 用离线 echo 配置真实启动一次 `my-agent run`，验证工位、超时、日志和退出码记录链路。
+def test_main_agent_real_task_execution_runs_echo_subset(tmp_path):
+    from agent_py_agent.agent.contracts.main_agent_real_task_execution import (
+        MainAgentRealTaskExecutionRequest,
+        run_main_agent_real_task_execution,
+    )
+
+    base_config = tmp_path / "base_config.yaml"
+    base_config.write_text(
+        "\n".join(
+            [
+                'agent_name: "echo-test"',
+                'model_backend: "echo"',
+                'system_prompt: "你是测试用 echo agent。"',
+                "prompt_files: []",
+                "auto_save_memory: false",
+                "enable_subagents: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    report = run_main_agent_real_task_execution(
+        MainAgentRealTaskExecutionRequest(
+            workspace=tmp_path,
+            max_workers=1,
+            task_timeout_seconds=30,
+            execute=True,
+            case_ids=("furniture_homepage_html",),
+            base_config_path=base_config,
+            package_root=Path.cwd(),
+        )
+    )
+
+    payload = report.to_dict()
+    first_case = payload["cases"][0]
+    assert payload["ok"] is True
+    assert payload["summary"]["completed"] == 1
+    assert first_case["exit_code"] == 0
+    assert (tmp_path / first_case["stdout_ref"]).exists()
+    assert (tmp_path / first_case["stderr_ref"]).exists()

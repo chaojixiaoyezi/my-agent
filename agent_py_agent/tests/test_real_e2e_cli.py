@@ -67,6 +67,8 @@ def test_cmd_real_e2e_includes_main_agent_real_task_suite_plan(tmp_path, capsys)
         include_real_model=False,
         artifact=[],
         real_task_suite=True,
+        run_real_tasks=False,
+        real_task_case=[],
         real_task_max_workers=2,
         real_task_timeout=333,
     )
@@ -85,3 +87,47 @@ def test_cmd_real_e2e_includes_main_agent_real_task_suite_plan(tmp_path, capsys)
     assert "高端现代家具" not in json.dumps(payload, ensure_ascii=False)
     assert (tmp_path / "workspace" / first_case["prompt_ref"]).exists()
     assert saved["main_agent_real_task_suite"]["ok"] is True
+
+
+# LLM: real-e2e should expose controlled execution separately from the planning contract.
+# 函数用途: 验证 CLI 显式请求真实任务执行时，会返回执行报告和日志 refs。
+def test_cmd_real_e2e_runs_controlled_echo_real_task(tmp_path, capsys):
+    from agent_py_agent.cli.real_e2e_commands import cmd_real_e2e
+
+    base_config = tmp_path / "base_config.yaml"
+    base_config.write_text(
+        "\n".join(
+            [
+                'agent_name: "echo-test"',
+                'model_backend: "echo"',
+                'system_prompt: "你是测试用 echo agent。"',
+                "prompt_files: []",
+                "auto_save_memory: false",
+                "enable_subagents: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        workspace=str(tmp_path / "workspace"),
+        report="",
+        json=True,
+        include_real_model=False,
+        artifact=[],
+        real_task_suite=True,
+        run_real_tasks=True,
+        real_task_case=["furniture_homepage_html"],
+        real_task_max_workers=1,
+        real_task_timeout=30,
+        real_task_base_config=str(base_config),
+    )
+
+    exit_code = cmd_real_e2e(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    execution = payload["main_agent_real_task_execution"]
+    first_case = execution["cases"][0]
+    assert exit_code == 0
+    assert execution["summary"]["completed"] == 1
+    assert first_case["exit_code"] == 0
+    assert (tmp_path / "workspace" / first_case["stdout_ref"]).exists()
