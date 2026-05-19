@@ -288,7 +288,7 @@ def test_main_agent_real_task_execution_accepts_expected_artifact(tmp_path):
         / "main_agent_real_task_execution/tasks/furniture_homepage_html/workspace"
         / "outputs/furniture_homepage/index.html"
     )
-    artifact.parent.mkdir(parents=True)
+    artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_text(_valid_furniture_html(), encoding="utf-8")
 
     report = run_main_agent_real_task_execution(
@@ -334,7 +334,7 @@ def test_main_agent_real_task_execution_revalidates_existing_report(tmp_path):
         / "main_agent_real_task_execution/tasks/furniture_homepage_html/workspace"
         / "outputs/furniture_homepage/index.html"
     )
-    artifact.parent.mkdir(parents=True)
+    artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_text(_valid_furniture_html(), encoding="utf-8")
 
     revalidated = revalidate_main_agent_real_task_execution(
@@ -378,7 +378,7 @@ def test_main_agent_real_task_revalidation_marks_valid_timeout_artifact(tmp_path
         / "main_agent_real_task_execution/tasks/furniture_homepage_html/workspace"
         / "outputs/furniture_homepage/index.html"
     )
-    artifact.parent.mkdir(parents=True)
+    artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_text(_valid_furniture_html(), encoding="utf-8")
 
     revalidated = revalidate_main_agent_real_task_execution(report_path, workspace=tmp_path)
@@ -467,6 +467,8 @@ def test_main_agent_real_task_timeout_blocks_open_file_write_session(tmp_path, m
     assert first_case["issues"] == ["timeout", "artifact_acceptance_failed=1"]
     assert acceptance["runtime_findings"][0]["code"] == "OPEN_FILE_WRITE_SESSION"
     assert acceptance["runtime_findings"][0]["session_id"] == "session-open"
+    assert acceptance["runtime_findings"][0]["resume_action"] == "append_from_next_chunk_then_finish"
+    assert acceptance["runtime_findings"][0]["chunk_content_read_required"] is False
 
 
 # LLM: Exit code zero with no tools and repetitive output is a runtime symptom, not success.

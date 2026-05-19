@@ -16,7 +16,7 @@ system_prompt: "你是一个谨慎、可扩展、会记录记忆、会在必要�
 auto_detect_work_on_startup: true
 
 # 工作区根目录：
-# - 留空时使用项目默认根目录，保持普通开发体验。
+# - 留空时使用当前启动 my-agent 的目录，和 会话运行时/通道运行时 这类工具一样把“你在哪个任务目录启动”视为本轮工作区。
 # - 场景测试、外部聊天工具或未来多项目模式可以把它指向某个独立目录。
 # - memory_path、subagent_workspace、gateway_workspace、prompt_files 和文件工具都会以这个目录为基础。
 # - 这就是“测试不能影响当前开发仓库”的关键开关。

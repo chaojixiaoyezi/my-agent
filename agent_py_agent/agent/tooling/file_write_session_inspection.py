@@ -27,13 +27,27 @@ def _open_session_summary(path: Path) -> dict[str, Any] | None:
     if not manifest or manifest.get("status") != "open":
         return None
     chunks = _chunk_indexes(manifest.get("chunks"))
+    preview_path = _preview_path(path, manifest)
     return {
         "session_id": str(manifest.get("session_id") or path.parent.name),
         "status": "open",
         "target_path": manifest.get("target_path") or {},
         "manifest_path": str(path),
+        "preview_path": str(preview_path),
+        "preview_materialized": preview_path.exists() and not _missing_chunk_indexes(chunks),
         "received_chunks": chunks,
         "next_chunk_index": (max(chunks) + 1) if chunks else 0,
+        "continue_tool_call": {
+            "tool": "file_write_session",
+            "action": "append",
+            "session_id": str(manifest.get("session_id") or path.parent.name),
+            "chunk_index": (max(chunks) + 1) if chunks else 0,
+        },
+        "finish_tool_call": {
+            "tool": "file_write_session",
+            "action": "finish",
+            "session_id": str(manifest.get("session_id") or path.parent.name),
+        },
     }
 
 
@@ -59,3 +73,19 @@ def _chunk_indexes(value: object) -> list[int]:
         except (TypeError, ValueError):
             continue
     return sorted(indexes)
+
+
+# LLM: _missing_chunk_indexes checks only integer chunk indexes from the manifest.
+# 函数用途: 判断 preview 是否由连续 chunks 组装，避免把缺块 temp 当完整状态。
+def _missing_chunk_indexes(indexes: list[int]) -> list[int]:
+    if not indexes:
+        return []
+    return [index for index in range(max(indexes) + 1) if index not in set(indexes)]
+
+
+# LLM: _preview_path resolves the staged preview path without trusting prose output.
+# 函数用途: 优先使用 manifest.temp_path.resolved，缺失时回退到 session 目录下 write.tmp。
+def _preview_path(manifest_path: Path, manifest: dict[str, Any]) -> Path:
+    temp_path = manifest.get("temp_path") if isinstance(manifest.get("temp_path"), dict) else {}
+    resolved = str(temp_path.get("resolved") or "")
+    return Path(resolved) if resolved else manifest_path.parent / "write.tmp"

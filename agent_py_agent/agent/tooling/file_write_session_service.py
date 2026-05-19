@@ -16,6 +16,7 @@ from .file_write_session_io import (
     existing_chunk_result,
     failure,
     load_manifest,
+    materialize_preview_if_complete,
     missing_chunk_indexes,
     missing_payload,
     remove_empty_session_root,
@@ -78,8 +79,20 @@ class FileWriteSessionService:
         if isinstance(target, ToolExecutionResult):
             return target
         raw_target_path, resolved_target = target
-        session_id = uuid.uuid4().hex
+        session_id, id_error = begin_session_id(params)
+        if id_error:
+            return id_error
         paths = paths_for_session(self.context.workspace_root, session_id)
+        existing = reusable_begin_result(session_id, paths, resolved_target)
+        if existing:
+            return existing
+        target_conflict = open_target_session_result(
+            self.context,
+            requested_session_id=session_id,
+            resolved_target=resolved_target,
+        )
+        if target_conflict:
+            return target_conflict
         paths.chunks_dir.mkdir(parents=True, exist_ok=False)
         paths.temp_path.touch()
         manifest = initial_manifest(
@@ -119,6 +132,7 @@ class FileWriteSessionService:
         if existing_result:
             return existing_result
         write_chunk(ChunkWriteRequest(paths, manifest, chunk_index, content, content_hash))
+        materialize_preview_if_complete(paths, manifest)
         write_manifest(paths.manifest_path, manifest)
         envelope = append_envelope(manifest, paths, chunk_index, duplicate=False)
         if auto_started:
@@ -159,6 +173,9 @@ class FileWriteSessionService:
                 "session not found",
                 {"session_id": session_id},
             )
+        protected = protected_abort_result(params, session_id, paths)
+        if protected:
+            return protected
         shutil.rmtree(paths.session_dir, ignore_errors=True)
         remove_empty_session_root(paths.session_dir.parent)
         return success("abort", {"session_id": session_id, "status": "aborted"})
@@ -174,6 +191,99 @@ def paths_for_session(workspace_root: Path, session_id: str) -> FileWriteSession
         session_dir / "write.tmp",
         session_dir / "chunks",
     )
+
+
+# LLM: begin_session_id treats caller-provided session ids as stable operation keys.
+# 函数用途: begin 可复用调用方传入的 session_id；未传时才生成随机 id。
+def begin_session_id(params: dict[str, Any]) -> tuple[str, ToolExecutionResult | None]:
+    if params.get("session_id") is None:
+        return uuid.uuid4().hex, None
+    try:
+        return session_id_param(params.get("session_id")), None
+    except ValueError as exc:
+        return "", failure("TOOL_INVALID_ARGUMENTS", "INVALID_SESSION_ID", str(exc))
+
+
+# LLM: reusable_begin_result makes begin idempotent for the same open target.
+# 函数用途: 重复 begin 同一 session/target 时返回已有会话；同 id 不同目标则结构化失败。
+def reusable_begin_result(
+    session_id: str,
+    paths: FileWriteSessionPaths,
+    resolved_target: Path,
+) -> ToolExecutionResult | None:
+    if not paths.session_dir.exists():
+        return None
+    if not paths.manifest_path.exists():
+        return failure(
+            "TOOL_INVALID_ARGUMENTS",
+            "SESSION_MANIFEST_MISSING",
+            "session directory exists without manifest",
+            {"session_id": session_id, "session_dir": str(paths.session_dir)},
+        )
+    manifest, error = load_manifest(session_id, paths)
+    if error:
+        return error
+    if manifest.get("status") != "open":
+        return failure(
+            "TOOL_INVALID_ARGUMENTS",
+            "SESSION_NOT_OPEN",
+            "session is not open",
+            {"session_id": session_id, "status": manifest.get("status")},
+        )
+    if str(resolved_target) != str(manifest.get("target_path", {}).get("resolved", "")):
+        return failure(
+            "TOOL_INVALID_ARGUMENTS",
+            "SESSION_TARGET_CONFLICT",
+            "session_id already belongs to a different target",
+            {
+                "session_id": session_id,
+                "existing_target_path": manifest.get("target_path"),
+                "requested_target_path": str(resolved_target),
+            },
+        )
+    envelope = begin_envelope(session_id, manifest, paths)
+    envelope["duplicate"] = True
+    envelope["reused"] = True
+    return success("begin", envelope)
+
+
+# LLM: open_target_session_result prevents duplicate open sessions for the same final artifact path.
+# 函数用途: begin 新 session 前扫描已有 open manifest；同目标已打开时返回推荐 session 供续写。
+def open_target_session_result(
+    context: FileWriteSessionServiceContext,
+    *,
+    requested_session_id: str,
+    resolved_target: Path,
+) -> ToolExecutionResult | None:
+    root = context.workspace_root / SESSION_ROOT_NAME
+    if not root.exists():
+        return None
+    for session_dir in root.iterdir():
+        if not session_dir.is_dir() or session_dir.name == requested_session_id:
+            continue
+        paths = paths_for_session(context.workspace_root, session_dir.name)
+        if not paths.manifest_path.exists():
+            continue
+        manifest, error = load_manifest(session_dir.name, paths)
+        if error or manifest.get("status") != "open":
+            continue
+        if str(resolved_target) != str(manifest.get("target_path", {}).get("resolved", "")):
+            continue
+        return failure(
+            "TOOL_INVALID_ARGUMENTS",
+            "TARGET_HAS_OPEN_SESSION",
+            "target already has an open file_write_session",
+            {
+                "requested_session_id": requested_session_id,
+                "recommended_session_id": session_dir.name,
+                "target_path": manifest.get("target_path") or {},
+                "manifest_path": str(paths.manifest_path),
+                "received_chunks": received_chunk_indexes(manifest),
+                "next_chunk_index": next_chunk_index(manifest),
+                "resume_action": "append_from_next_chunk_then_finish",
+            },
+        )
+    return None
 
 
 # LLM: load_open_session centralizes session lookup and manifest validation.
@@ -288,8 +398,51 @@ def begin_envelope(
         "target_path": manifest["target_path"],
         "temp_path": str(paths.temp_path),
         "manifest_path": str(paths.manifest_path),
-        "next_chunk_index": 0,
+        "next_chunk_index": next_chunk_index(manifest),
     }
+
+
+# LLM: next_chunk_index derives append guidance from manifest chunk facts.
+# 函数用途: 根据已接收的 chunks 返回下一个建议下标；不解析自然语言进度。
+def next_chunk_index(manifest: dict[str, Any]) -> int:
+    chunks = manifest.get("chunks") or {}
+    if not chunks:
+        return 0
+    return max(int(index) for index in chunks) + 1
+
+
+# LLM: received_chunk_indexes derives progress from manifest chunks.
+# 函数用途: 返回已接收 chunk 下标，供重复 begin 冲突响应给模型续写。
+def received_chunk_indexes(manifest: dict[str, Any]) -> list[int]:
+    chunks = manifest.get("chunks") or {}
+    return sorted(int(index) for index in chunks)
+
+
+# LLM: protected_abort_result keeps staged progress from being discarded by an accidental abort.
+# 函数用途: 非空 open session 默认拒绝 abort；调用方必须传 discard_chunks=true 才会丢弃已有 chunks。
+def protected_abort_result(
+    params: dict[str, Any],
+    session_id: str,
+    paths: FileWriteSessionPaths,
+) -> ToolExecutionResult | None:
+    if bool(params.get("discard_chunks")):
+        return None
+    if not paths.manifest_path.exists():
+        return None
+    manifest, error = load_manifest(session_id, paths)
+    if error or manifest.get("status") != "open" or not manifest.get("chunks"):
+        return None
+    return failure(
+        "TOOL_INVALID_ARGUMENTS",
+        "SESSION_HAS_CHUNKS",
+        "session has staged chunks; finish it or pass discard_chunks=true",
+        {
+            "session_id": session_id,
+            "received_chunks": received_chunk_indexes(manifest),
+            "next_chunk_index": next_chunk_index(manifest),
+            "resume_action": "append_from_next_chunk_then_finish",
+        },
+    )
 
 
 # LLM: commit_session atomically moves staged content into the target path and cleans session state.

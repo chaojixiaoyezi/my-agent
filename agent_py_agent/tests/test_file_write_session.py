@@ -42,6 +42,10 @@ class TestFileWriteSessionTool:
         assert append_0.ok is True
         assert append_1.ok is True
         assert target.exists() is False
+        assert append_1.result_envelope["staging_contract"]["fact_source"] == "preview_and_chunks"
+        assert append_1.result_envelope["staging_contract"]["commit_action"] == "finish"
+        assert append_1.result_envelope["staging_contract"]["preview_materialized_after_append"] is True
+        assert append_1.result_envelope["staging_contract"]["temp_path_materialized_on_finish"] is False
         assert manifest["target_path"]["display"] == "out/large.txt"
         assert manifest["chunks"]["0"]["size"] == 6
         assert manifest["chunks"]["1"]["size"] == 5
@@ -69,6 +73,44 @@ class TestFileWriteSessionTool:
         assert duplicate.result_envelope["duplicate"] is True
         assert (workspace / "out" / "large.txt").read_text(encoding="utf-8") == "abc"
         assert finish.result_envelope["chunks_committed"] == 1
+
+    # LLM: Staged previews make long writes recoverable even when a model times out before finish.
+    # 函数用途: 验证每次 append 后都会组装可读取的 preview，并给出 finish/continue 的结构化下一步。
+    def test_append_materializes_recoverable_preview_and_next_actions(self, tmp_path: Path):
+        from agent_py_agent.agent.tooling.file_write_session_inspection import (
+            open_file_write_sessions,
+        )
+
+        workspace = tmp_path / "workspace"
+        tool = _tool(workspace, max_chunk_chars=32)
+        session_id = _begin(tool)
+
+        append_0 = tool.execute({"action": "append", "session_id": session_id, "chunk_index": 0, "content": "hello "})
+        append_1 = tool.execute({"action": "append", "session_id": session_id, "chunk_index": 1, "content": "world"})
+
+        preview_path = Path(append_1.result_envelope["preview_path"])
+        assert append_0.ok is True
+        assert append_1.ok is True
+        assert preview_path.read_text(encoding="utf-8") == "hello world"
+        assert append_1.result_envelope["preview_materialized"] is True
+        assert append_1.result_envelope["next_chunk_index"] == 2
+        assert append_1.result_envelope["finish_tool_call"] == {
+            "tool": "file_write_session",
+            "action": "finish",
+            "session_id": session_id,
+        }
+        assert append_1.result_envelope["continue_tool_call"] == {
+            "tool": "file_write_session",
+            "action": "append",
+            "session_id": session_id,
+            "chunk_index": 2,
+        }
+        sessions = open_file_write_sessions(workspace, limit=5)
+        assert sessions[0]["preview_path"] == str(preview_path)
+        assert sessions[0]["preview_materialized"] is True
+        assert sessions[0]["finish_tool_call"] == append_1.result_envelope["finish_tool_call"]
+        assert append_1.result_envelope["staging_contract"]["fact_source"] == "preview_and_chunks"
+        assert append_1.result_envelope["staging_contract"]["preview_materialized_after_append"] is True
 
     # LLM: Out-of-order chunks can be staged, but finish must reject gaps using a structured code.
     # 函数用途: 验证乱序提交可恢复，缺 chunk 时 finish 返回机器可读错误。
@@ -103,7 +145,7 @@ class TestFileWriteSessionTool:
         append = tool.execute({"action": "append", "session_id": session_id, "chunk_index": 0, "content": "abc"})
         manifest_path = Path(append.result_envelope["manifest_path"])
 
-        abort = tool.execute({"action": "abort", "session_id": session_id})
+        abort = tool.execute({"action": "abort", "session_id": session_id, "discard_chunks": True})
         finish = tool.execute({"action": "finish", "session_id": session_id})
 
         assert append.ok is True
@@ -113,6 +155,22 @@ class TestFileWriteSessionTool:
         assert finish.ok is False
         assert finish.result_envelope["code"] == "SESSION_NOT_FOUND"
         assert not (workspace / "out" / "large.txt").exists()
+
+    # LLM: Abort must not discard already staged chunks unless the caller explicitly asks.
+    # 函数用途: 验证已有 chunk 的 session 默认不能 abort，避免真实模型误删续跑进度。
+    def test_abort_rejects_nonempty_session_without_discard_flag(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        tool = _tool(workspace)
+        session_id = _begin(tool)
+        append = tool.execute({"action": "append", "session_id": session_id, "chunk_index": 0, "content": "abc"})
+
+        abort = tool.execute({"action": "abort", "session_id": session_id})
+
+        assert append.ok is True
+        assert abort.ok is False
+        assert abort.result_envelope["code"] == "SESSION_HAS_CHUNKS"
+        assert abort.result_envelope["session_id"] == session_id
+        assert abort.result_envelope["next_chunk_index"] == 1
 
     # LLM: The session tool accepts fuzzy model chunk sizing by splitting payloads into bounded chunks.
     # 函数用途: 验证超过单 chunk 上限时自动拆分，避免真实模型因为块大小估算不准而卡住。
@@ -149,6 +207,87 @@ class TestFileWriteSessionTool:
         assert append.result_envelope["target_path"]["display"] == "out/index.html"
         assert finish.ok is True
         assert (workspace / "out" / "index.html").read_text(encoding="utf-8") == "<!doctype html>"
+
+    # LLM: Model-chosen session ids act as idempotency keys, matching 会话运行时 stable operation ids.
+    # 函数用途: 验证 begin 接受调用方提供的 session_id；重复 begin 同目标返回同一 open session，避免随机 id 让后续 append 丢失。
+    def test_begin_accepts_stable_session_id_and_reuses_same_target(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        tool = _tool(workspace, max_chunk_chars=16)
+
+        first = tool.execute({
+            "action": "begin",
+            "session_id": "homepage-001",
+            "target_path": "out/index.html",
+        })
+        second = tool.execute({
+            "action": "begin",
+            "session_id": "homepage-001",
+            "target_path": "out/index.html",
+        })
+        append = tool.execute({
+            "action": "append",
+            "session_id": "homepage-001",
+            "chunk_index": 0,
+            "content": "<!doctype html>",
+        })
+
+        assert first.ok is True
+        assert second.ok is True
+        assert first.result_envelope["session_id"] == "homepage-001"
+        assert second.result_envelope["duplicate"] is True
+        assert append.ok is True
+
+    # LLM: Stable session ids are operation keys, so one id cannot silently switch targets.
+    # 函数用途: 验证相同 session_id 指向不同 target_path 时返回结构化冲突，避免写错文件。
+    def test_begin_rejects_same_session_id_for_different_target(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        tool = _tool(workspace, max_chunk_chars=16)
+
+        first = tool.execute({
+            "action": "begin",
+            "session_id": "homepage-001",
+            "target_path": "out/index.html",
+        })
+        conflict = tool.execute({
+            "action": "begin",
+            "session_id": "homepage-001",
+            "target_path": "out/other.html",
+        })
+
+        assert first.ok is True
+        assert conflict.ok is False
+        assert conflict.result_envelope["code"] == "SESSION_TARGET_CONFLICT"
+        assert conflict.result_envelope["session_id"] == "homepage-001"
+
+    # LLM: A target can have only one open write session, regardless of model-chosen ids.
+    # 函数用途: 验证同一目标文件已有 open session 时，新 session_id 的 begin 会返回已有 session 供续写。
+    def test_begin_rejects_new_session_when_target_already_has_open_session(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        tool = _tool(workspace, max_chunk_chars=16)
+
+        first = tool.execute({
+            "action": "begin",
+            "session_id": "homepage-001",
+            "target_path": "out/index.html",
+        })
+        append = tool.execute({
+            "action": "append",
+            "session_id": "homepage-001",
+            "chunk_index": 0,
+            "content": "<!doctype html>",
+        })
+        second = tool.execute({
+            "action": "begin",
+            "session_id": "homepage-002",
+            "target_path": "out/index.html",
+        })
+
+        assert first.ok is True
+        assert append.ok is True
+        assert second.ok is False
+        assert second.result_envelope["code"] == "TARGET_HAS_OPEN_SESSION"
+        assert second.result_envelope["recommended_session_id"] == "homepage-001"
+        assert second.result_envelope["next_chunk_index"] == 1
 
     # LLM: Oversized append payloads should become multiple chunks because model output limits are fuzzy.
     # 函数用途: 验证 append 超过 chunk 上限时自动拆分成连续 chunk，而不是直接失败。

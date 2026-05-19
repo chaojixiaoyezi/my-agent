@@ -239,7 +239,9 @@ def _timeout_issues(
 # 函数用途: 真实任务如果长时间没有日志或文件活动，就提前停止并保留 checkpoint/日志证据。
 def _activity_timeout_seconds(task_timeout_seconds: int) -> int:
     total = max(1, int(task_timeout_seconds))
-    return min(total, max(180, min(420, total // 2)))
+    if total <= 600:
+        return total
+    return min(total, max(600, total // 2))
 
 
 # LLM: _case_result converts per-case files into the execution report shape.

@@ -74,6 +74,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action="read_or_rebuild_artifact_ref",
         recovery_hint="产物引用缺失；先按 refs 查找，找不到再重建产物。",
     ),
+    "TARGET_PENDING_FILE_WRITE_SESSION": ErrorContract(
+        code="TARGET_PENDING_FILE_WRITE_SESSION",
+        category="artifact",
+        retryable=True,
+        recommended_action="continue_pending_file_write_session",
+        recovery_hint="目标文件尚未 materialize；继续推荐的 file_write_session 并 finish 后再读取最终文件。",
+    ),
     "ACCEPTANCE_FAILED": ErrorContract(
         code="ACCEPTANCE_FAILED",
         category="acceptance",
@@ -87,6 +94,27 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=False,
         recommended_action="fallback_to_checkpoint_or_summary",
         recovery_hint="compact 引用缺失；降级读 checkpoint、summary、raw archive，不要继续自动执行。",
+    ),
+    "SPREADSHEET_SOURCE_MISSING": ErrorContract(
+        code="SPREADSHEET_SOURCE_MISSING",
+        category="artifact",
+        retryable=True,
+        recommended_action="write_or_fix_structured_source_data",
+        recovery_hint="表格源数据缺失；先写 source_data.json 或直接传 sheets，再重新生成 workbook。",
+    ),
+    "SPREADSHEET_SOURCE_INVALID": ErrorContract(
+        code="SPREADSHEET_SOURCE_INVALID",
+        category="artifact",
+        retryable=True,
+        recommended_action="repair_structured_source_json",
+        recovery_hint="表格源 JSON 无法解析；修复 JSON 结构后重新生成 workbook。",
+    ),
+    "SPREADSHEET_SOURCE_NO_ROWS": ErrorContract(
+        code="SPREADSHEET_SOURCE_NO_ROWS",
+        category="artifact",
+        retryable=True,
+        recommended_action="collect_non_empty_rows_before_workbook",
+        recovery_hint="表格源数据没有非空行；先补齐 rows/sheets 数据，再调用 data_to_workbook。",
     ),
     "UNKNOWN_ERROR": ErrorContract(
         code="UNKNOWN_ERROR",
@@ -145,8 +173,12 @@ def tool_failure_taxonomy() -> list[str]:
         "TOOL_TIMEOUT",
         "MODEL_UPSTREAM_FAILED",
         "ARTIFACT_MISSING",
+        "TARGET_PENDING_FILE_WRITE_SESSION",
         "ACCEPTANCE_FAILED",
         "COMPACT_REF_MISSING",
+        "SPREADSHEET_SOURCE_MISSING",
+        "SPREADSHEET_SOURCE_INVALID",
+        "SPREADSHEET_SOURCE_NO_ROWS",
         "UNKNOWN_ERROR",
     ]
 

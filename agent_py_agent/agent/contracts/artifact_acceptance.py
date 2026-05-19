@@ -18,6 +18,7 @@ from .artifact_acceptance_models import (
 from .artifact_html_contract import html_contract_findings, record_resource_ref
 from .artifact_html_refs import image_ref_findings, placeholder_link_findings, scan_html_refs
 from .artifact_static_site_contract import validate_static_site_artifact
+from .artifact_xlsx_contract import xlsx_contract_findings
 
 
 # LLM: validate_html_artifact performs generic HTML checks that model self-reports often miss.
@@ -65,7 +66,7 @@ def validate_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceR
     if suffix == ".csv":
         return _validate_csv(path)
     if suffix == ".xlsx":
-        return _validate_xlsx(path)
+        return _validate_xlsx(path, request.validation_contract)
     if suffix == ".pdf":
         return _validate_pdf(path)
     return _validate_generic(path)
@@ -133,7 +134,10 @@ def _validate_csv(path: Path) -> ArtifactAcceptanceReport:
 
 # LLM: _validate_xlsx performs a lightweight workbook integrity check without new dependencies.
 # 函数用途: 验证 xlsx 是可打开的 zip 工作簿，并且至少包含 workbook 和 worksheet 文件。
-def _validate_xlsx(path: Path) -> ArtifactAcceptanceReport:
+def _validate_xlsx(
+    path: Path,
+    validation_contract: dict[str, object] | None = None,
+) -> ArtifactAcceptanceReport:
     try:
         with ZipFile(path) as workbook:
             names = set(workbook.namelist())
@@ -147,7 +151,13 @@ def _validate_xlsx(path: Path) -> ArtifactAcceptanceReport:
             message="XLSX lacks workbook or worksheet parts.",
         )
         return _report_with_finding(path, "xlsx", finding)
-    return ArtifactAcceptanceReport(ok=True, artifact_ref=str(path), artifact_kind="xlsx")
+    findings = xlsx_contract_findings(path, validation_contract)
+    return ArtifactAcceptanceReport(
+        ok=not any(item.severity == "hard" for item in findings),
+        artifact_ref=str(path),
+        artifact_kind="xlsx",
+        findings=findings,
+    )
 
 
 # LLM: _validate_pdf catches obviously corrupt PDF deliverables before human review.

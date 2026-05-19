@@ -41,6 +41,7 @@ class ProcessTimingSnapshot:
     now: float
     started: float
     last_activity: float
+    observed_activity: bool = False
 
 
 # LLM: run_real_task_subprocess executes without shell and keeps logs observable while the task runs.
@@ -51,6 +52,8 @@ def run_real_task_subprocess(request: RealTaskSubprocessRequest) -> RealTaskSubp
     request.stderr_path.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["PYTHONUNBUFFERED"] = "1"
+    env["MY_AGENT_TOOL_DEADLINE_UNIX"] = f"{time.time() + max(1, request.timeout_seconds):.3f}"
+    env.setdefault("MY_AGENT_TOOL_DEADLINE_MARGIN_SECONDS", "10")
     with request.stdout_path.open("w", encoding="utf-8") as stdout_handle:
         with request.stderr_path.open("w", encoding="utf-8") as stderr_handle:
             process = subprocess.Popen(
@@ -74,6 +77,7 @@ def _wait_for_process(
 ) -> RealTaskSubprocessResult:
     last_activity = time.monotonic()
     last_marker = _activity_marker(request)
+    observed_activity = False
     while True:
         exit_code = process.poll()
         if exit_code is not None:
@@ -83,8 +87,14 @@ def _wait_for_process(
         if marker != last_marker:
             last_marker = marker
             last_activity = now
+            observed_activity = True
         timeout_reason = _timeout_reason(
-            ProcessTimingSnapshot(now=now, started=started, last_activity=last_activity),
+            ProcessTimingSnapshot(
+                now=now,
+                started=started,
+                last_activity=last_activity,
+                observed_activity=observed_activity,
+            ),
             request,
         )
         if timeout_reason:
@@ -102,7 +112,8 @@ def _timeout_reason(
     if timing.now - timing.started >= max(1, request.timeout_seconds):
         return "timeout"
     if (
-        request.activity_timeout_seconds > 0
+        timing.observed_activity
+        and request.activity_timeout_seconds > 0
         and timing.now - timing.last_activity >= request.activity_timeout_seconds
     ):
         return "activity_timeout"

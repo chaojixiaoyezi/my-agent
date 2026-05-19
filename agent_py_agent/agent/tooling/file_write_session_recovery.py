@@ -11,6 +11,7 @@ from ._filesystem_helpers import _required_path
 from .file_write_session_io import (
     append_envelope,
     failure,
+    materialize_preview_if_complete,
     path_record,
     sha256_text,
     success,
@@ -125,6 +126,7 @@ def append_split_chunks(
     for chunk_index, piece, content_hash in planned:
         if chunk_index not in duplicate_indexes:
             write_chunk(ChunkWriteRequest(request.paths, request.manifest, chunk_index, piece, content_hash))
+    materialize_preview_if_complete(request.paths, request.manifest)
     write_manifest(request.paths.manifest_path, request.manifest)
     envelope = append_envelope(request.manifest, request.paths, request.chunk_index, duplicate=False)
     envelope.update(

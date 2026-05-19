@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from ..settings.tool_config import DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
 
 MAX_INLINE_WRITE_CONTENT_CHARS = DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
+STREAMING_INLINE_WRITE_ABORT_CHARS = 4000
 RECOMMENDED_WRITE_CHUNK_CHARS = "1500-2000"
 RECOVERY_WRITE_CHUNK_CHARS = 800
 
@@ -48,8 +49,8 @@ class LongContentTransportHintRequest:
 # 函数用途: 生成写入工具的“什么时候不要整段写入”说明；供公开和内部工具入口复用。
 def long_content_avoidance_rule() -> str:
     return (
-        "内容很长、CSS/JS/HTML 很大或容易被模型输出截断时，先写短骨架再用 "
-        "append_file 分块追加；"
+        "内容很长、CSS/JS/HTML 很大或容易被模型输出截断时，完整单文件优先用 "
+        "WRITE_FILE_RAW 结构化块提交；需要可恢复分块时再用 file_write_session；"
         f"正常分块单次 content 建议 {RECOMMENDED_WRITE_CHUNK_CHARS} 字符，"
         f"解析失败后再降到 {RECOVERY_WRITE_CHUNK_CHARS} 字符以内。"
     )
@@ -98,7 +99,19 @@ def tool_content_transport_protocol(max_inline_chars: int = MAX_INLINE_WRITE_CON
         "# Tool Content Transport Protocol\n"
         f"- 大内容边界：write_file/append_file 的 content 单次推荐不超过 {limit} 字符。\n"
         "- 如果要生成完整 HTML/CSS/JS、长脚本、长报告或大段数据，不要把完整大文件正文塞进一个 JSON 工具参数。\n"
-        "- 正确做法：先用 write_file 写短骨架，再用 append_file 分块追加；"
+        "- 写完整单文件成品时优先用 WRITE_FILE_RAW，一次提交整份文件，避免 JSON 转义、chunk 错位和忘记 finish：\n"
+        "[WRITE_FILE_RAW path=\"outputs/file.html\"]\n"
+        "<!doctype html>\n"
+        "...\n"
+        "[/WRITE_FILE_RAW]\n"
+        "- WRITE_FILE_RAW 会被系统转换成 write_file；正文只按机器 marker 边界读取，不做自然语言判断。\n"
+        "- 只有需要可恢复分块或超大文件时才使用 file_write_session，并用结构化 raw block 承载正文：\n"
+        "[FILE_WRITE_SESSION_APPEND session_id=\"stable-id\" target_path=\"outputs/file.html\" chunk_index=0]\n"
+        "<!doctype html>\n"
+        "...\n"
+        "[/FILE_WRITE_SESSION_APPEND]\n"
+        "- raw block 会被系统转换成 file_write_session.append；随后调用 file_write_session finish 提交。\n"
+        "- 备选做法：先用 write_file 写短骨架，再用 append_file 分块追加；"
         f"正常分块每块 {RECOMMENDED_WRITE_CHUNK_CHARS} 字符。\n"
         f"- 如果上一轮工具调用解析失败、超时或被截断，下一轮每块降到 {RECOVERY_WRITE_CHUNK_CHARS} 字符以内，"
         "闭合工具调用后等待结果。\n"
@@ -142,6 +155,12 @@ def inline_write_content_limit(value: int | None = None) -> int:
     if limit <= 0:
         return MAX_INLINE_WRITE_CONTENT_CHARS
     return limit
+
+
+# LLM: streaming_inline_write_abort_limit keeps slow unfinished tool calls bounded before execution.
+# 函数用途: 计算未闭合 write_file/append_file 流式内容的早停阈值；完整闭合工具调用仍按 inline_write_content_limit 处理。
+def streaming_inline_write_abort_limit(value: int | None = None) -> int:
+    return min(inline_write_content_limit(value), STREAMING_INLINE_WRITE_ABORT_CHARS)
 
 
 # LLM: long_content_transport_hint teaches the model the durable fix while the tool still preserves valid content.

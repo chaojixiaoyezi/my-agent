@@ -158,7 +158,7 @@ def test_cmd_real_e2e_revalidates_existing_real_task_report(tmp_path, capsys):
         / "main_agent_real_task_execution/tasks/furniture_homepage_html/workspace"
         / "outputs/furniture_homepage/index.html"
     )
-    artifact.parent.mkdir(parents=True)
+    artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_text(_valid_furniture_homepage_html(), encoding="utf-8")
     args = argparse.Namespace(
         workspace=str(workspace),

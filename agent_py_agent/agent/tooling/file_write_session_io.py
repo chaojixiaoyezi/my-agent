@@ -74,6 +74,17 @@ def write_temp_from_chunks(paths: FileWriteSessionPaths, manifest: dict[str, Any
             temp_file.write(verified_chunk_text(paths, chunks[str(index)], index))
 
 
+# LLM: materialize_preview_if_complete refreshes preview only from continuous chunk facts.
+# 函数用途: chunk 连续时组装 write.tmp；缺 chunk 时保留已有状态，等待后续补齐。
+def materialize_preview_if_complete(
+    paths: FileWriteSessionPaths,
+    manifest: dict[str, Any],
+) -> None:
+    if missing_chunk_indexes(manifest.get("chunks") or {}):
+        return
+    write_temp_from_chunks(paths, manifest)
+
+
 # LLM: verified_chunk_text reads and checks one staged chunk.
 # 函数用途: 验证 chunk 文件 hash，防止损坏 session 被 finish。
 def verified_chunk_text(paths: FileWriteSessionPaths, chunk: dict[str, Any], index: int) -> str:
@@ -116,15 +127,34 @@ def append_envelope(
     *,
     duplicate: bool,
 ) -> dict[str, Any]:
+    next_index = _next_chunk_index(manifest)
+    preview_materialized = paths.temp_path.exists() and not missing_chunk_indexes(
+        manifest["chunks"]
+    )
     return {
         "session_id": manifest["session_id"],
         "status": manifest["status"],
         "target_path": manifest["target_path"],
         "manifest_path": str(paths.manifest_path),
         "temp_path": str(paths.temp_path),
+        "preview_path": str(paths.temp_path),
+        "preview_materialized": preview_materialized,
         "chunk_index": chunk_index,
         "duplicate": duplicate,
         "received_chunks": sorted(int(index) for index in manifest["chunks"]),
+        "next_chunk_index": next_index,
+        "continue_tool_call": {
+            "tool": "file_write_session",
+            "action": "append",
+            "session_id": manifest["session_id"],
+            "chunk_index": next_index,
+        },
+        "finish_tool_call": {
+            "tool": "file_write_session",
+            "action": "finish",
+            "session_id": manifest["session_id"],
+        },
+        "staging_contract": _staging_contract(),
     }
 
 
@@ -195,6 +225,26 @@ def success(action: str, envelope: dict[str, Any]) -> ToolExecutionResult:
         json.dumps(result_envelope, ensure_ascii=False, sort_keys=True),
         result_envelope=result_envelope,
     )
+
+
+# LLM: _next_chunk_index derives append guidance from manifest chunk facts.
+# 函数用途: 根据已接收 chunks 返回下一个建议下标；不解析任何文本。
+def _next_chunk_index(manifest: dict[str, Any]) -> int:
+    chunks = manifest.get("chunks") or {}
+    if not chunks:
+        return 0
+    return max(int(index) for index in chunks) + 1
+
+
+# LLM: _staging_contract makes chunk and preview state authoritative for recovery.
+# 函数用途: 明确 file_write_session 的事实来源、预览落盘时机和提交动作。
+def _staging_contract() -> dict[str, Any]:
+    return {
+        "fact_source": "preview_and_chunks",
+        "commit_action": "finish",
+        "preview_materialized_after_append": True,
+        "temp_path_materialized_on_finish": False,
+    }
 
 
 # LLM: failure separates stable machine codes from human-readable diagnostic text.

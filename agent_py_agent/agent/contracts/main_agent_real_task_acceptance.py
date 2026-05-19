@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ..tooling.file_write_session_inspection import open_file_write_sessions
 from .artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
+from .artifact_candidate_paths import report_with_candidate_paths
 
 
 # LLM: RealTaskAcceptanceRequest bundles the files needed to validate one executed case.
@@ -67,12 +68,16 @@ class RealTaskAcceptanceReport:
 # LLM: validate_real_task_artifacts is the public post-run acceptance entrypoint.
 # 函数用途: 按 expected_artifacts.json 中的 preferred_path 和 validator 验收产物，不读 prompt 文本。
 def validate_real_task_artifacts(request: RealTaskAcceptanceRequest) -> RealTaskAcceptanceReport:
+    expected = _expected_artifacts(request.expected_artifacts_path)
     artifacts = [
         _validate_artifact_item(item, request.task_workspace)
-        for item in _expected_artifacts(request.expected_artifacts_path)
+        for item in expected
         if item.get("required") is not False
     ]
-    runtime_findings = _runtime_findings(request.task_workspace)
+    runtime_findings = [
+        *_staged_checkpoint_findings(expected, request.task_workspace),
+        *_runtime_findings(request.task_workspace),
+    ]
     report = RealTaskAcceptanceReport(
         ok=all(item.ok for item in artifacts) and not runtime_findings,
         summary=_summary(artifacts, runtime_findings),
@@ -110,6 +115,12 @@ def _validate_artifact_item(
             workspace_root=task_workspace,
             validation_contract=_validation_contract(item),
         )
+    )
+    report = report_with_candidate_paths(
+        report,
+        path,
+        task_workspace,
+        validation_contract=_validation_contract(item),
     ).to_dict()
     return RealTaskArtifactAcceptance(
         artifact_id=artifact_id,
@@ -127,6 +138,80 @@ def _artifact_path(item: dict[str, object], task_workspace: Path) -> Path:
     if preferred.is_absolute():
         return preferred
     return (task_workspace / preferred).resolve()
+
+
+# LLM: _staged_checkpoint_findings validates machine-declared intermediate outputs.
+# 函数用途: 检查 staging_contract.checkpoint_refs，避免长任务只到最后才发现数据为空或脚本缺失。
+def _staged_checkpoint_findings(
+    items: list[dict[str, object]],
+    task_workspace: Path,
+) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    preferred_paths = {str(item.get("preferred_path") or item.get("path") or "") for item in items}
+    for item in items:
+        for ref_text in _staging_refs_for_item(item, preferred_paths):
+            findings.extend(_one_staged_checkpoint_findings(ref_text, task_workspace))
+    return findings
+
+
+# LLM: _staging_refs_for_item extracts checkpoint refs while filtering final artifact paths.
+# 函数用途: 从单个 artifact 的 staging_contract 取需要单独验收的阶段产物 refs。
+def _staging_refs_for_item(item: dict[str, object], preferred_paths: set[str]) -> list[str]:
+    contract = item.get("validation_contract")
+    staging = contract.get("staging_contract") if isinstance(contract, dict) else None
+    refs = staging.get("checkpoint_refs") if isinstance(staging, dict) else None
+    if not isinstance(refs, list):
+        return []
+    return [
+        ref_text
+        for ref in refs
+        if (ref_text := str(ref)).strip() and ref_text not in preferred_paths
+    ]
+
+
+# LLM: _one_staged_checkpoint_findings checks existence and lightweight data quality for one checkpoint.
+# 函数用途: 针对 JSON/脚本等阶段产物给出稳定错误码，供恢复包精确续接。
+def _one_staged_checkpoint_findings(ref: str, task_workspace: Path) -> list[dict[str, object]]:
+    path = _artifact_path({"preferred_path": ref}, task_workspace)
+    if not path.exists():
+        return [_staged_finding("STAGED_ARTIFACT_MISSING", ref, path, "Staged checkpoint does not exist.")]
+    if path.suffix.lower() == ".json" and not _json_has_rows(path):
+        return [_staged_finding("STAGED_JSON_NO_ROWS", ref, path, "Staged JSON checkpoint has no data rows.")]
+    if path.is_file() and path.stat().st_size <= 0:
+        return [_staged_finding("STAGED_ARTIFACT_EMPTY", ref, path, "Staged checkpoint is empty.")]
+    return []
+
+
+# LLM: _json_has_rows recognizes common structured data containers without natural-language parsing.
+# 函数用途: 判断 JSON 里是否包含非空 list 数据，适配 top10/rows/projects/items 等常见机器字段。
+def _json_has_rows(path: Path) -> bool:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return _contains_nonempty_list(value)
+
+
+# LLM: _contains_nonempty_list recursively checks data shape, not prose content.
+# 函数用途: 递归判断 JSON 对象/数组中是否有非空列表，避免把空数据 checkpoint 当成有效。
+def _contains_nonempty_list(value: object) -> bool:
+    if isinstance(value, list):
+        return bool(value)
+    if isinstance(value, dict):
+        return any(_contains_nonempty_list(item) for item in value.values())
+    return False
+
+
+# LLM: _staged_finding creates one machine-readable checkpoint issue.
+# 函数用途: 统一生成 staging checkpoint finding，报告里同时保留 ref 和绝对位置。
+def _staged_finding(code: str, ref: str, path: Path, message: str) -> dict[str, object]:
+    return {
+        "code": code,
+        "severity": "hard",
+        "stage_ref": ref,
+        "location": str(path),
+        "message": message,
+    }
 
 
 # LLM: _validator_name extracts display metadata, not behavior branching.
@@ -160,8 +245,15 @@ def _open_session_finding(session: dict[str, object]) -> dict[str, object]:
         "session_id": str(session.get("session_id") or ""),
         "target_path": session.get("target_path") or {},
         "manifest_path": str(session.get("manifest_path") or ""),
+        "preview_path": str(session.get("preview_path") or ""),
+        "preview_materialized": bool(session.get("preview_materialized")),
         "received_chunks": list(session.get("received_chunks") or []),
         "next_chunk_index": int(session.get("next_chunk_index") or 0),
+        "continue_tool_call": session.get("continue_tool_call") or {},
+        "finish_tool_call": session.get("finish_tool_call") or {},
+        "resume_action": "append_from_next_chunk_then_finish",
+        "chunk_content_read_required": False,
+        "existing_chunks_authoritative": True,
     }
 
 

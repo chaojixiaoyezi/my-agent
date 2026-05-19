@@ -25,24 +25,12 @@ from .content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
     tool_content_transport_protocol,
 )
-from .controlled_exec import ControlledExecTool
-from .file_write_session import FileWriteSessionTool
-from .filesystem import (
-    AppendFileTool,
-    ListFilesTool,
-    ReadFileTool,
-    ReplaceInFileTool,
-    SearchTextTool,
-    WriteFileTool,
-)
 from .models import (
     BaseTool,
-    HybridToolRetriever,
-    KeywordToolSearchProvider,
     ToolExecutionResult,
     ToolSpec,
-    VectorToolSearchProvider,
 )
+from .registry_bootstrap import build_tool_retriever, register_base_tools
 from .registry_catalog import CatalogRenderConfig, render_catalog_entries
 from .registry_execution import (
     ExecuteRegistryCallParams,
@@ -51,9 +39,8 @@ from .registry_execution import (
     parse_registry_tool_calls,
     security_tools_visible,
 )
+from .registry_list_tools import ListToolsTool
 from .registry_prompt import render_tool_catalog_section
-from .shell import ShellTool
-from .web import FetchUrlTool, HttpRequestTool
 
 _allowed_tool_set = allowed_tool_set
 
@@ -87,80 +74,6 @@ class ToolRegistryParams:
     artifact_read_budget_max_chars: int = DEFAULT_ARTIFACT_READ_BUDGET_MAX_CHARS
     artifact_default_read_chars: int = 4000
 
-
-# LLM: _build_tool_retriever centralizes catalog retrieval setup so ToolRegistry.__init__ stays small.
-# 函数用途: 根据配置创建关键词/向量混合工具检索器。
-def _build_tool_retriever(params: ToolRegistryParams) -> HybridToolRetriever:
-    return HybridToolRetriever(
-        [
-            KeywordToolSearchProvider(),
-            VectorToolSearchProvider(enabled=params.vector_search_enabled),
-        ]
-    )
-
-
-# LLM: _register_filesystem_tools keeps constructor size stable as file-tool config grows.
-# 函数用途: 注册文件系统工具，并把用户配置的读取/写入上限传给对应工具。
-def _register_filesystem_tools(registry: ToolRegistry, params: ToolRegistryParams) -> None:
-    workspace_roots = registry.workspace_roots
-    registry.register(ListFilesTool(registry.workspace_root, params.max_entries, workspace_roots))
-    registry.register(ReadFileTool(registry.workspace_root, params.max_chars, workspace_roots))
-    registry.register(SearchTextTool(registry.workspace_root, params.max_matches, workspace_roots))
-    registry.register(
-        ReadArtifactTool(
-            registry.workspace_root,
-            artifact_read_budget_window_seconds=params.artifact_read_budget_window_seconds,
-            artifact_read_budget_max_chars=params.artifact_read_budget_max_chars,
-            default_read_chars=params.artifact_default_read_chars,
-        )
-    )
-    registry.register(
-        WriteFileTool(
-            registry.workspace_root,
-            workspace_roots,
-            max_inline_content_chars=params.tool_write_inline_max_chars,
-        )
-    )
-    registry.register(
-        AppendFileTool(
-            registry.workspace_root,
-            workspace_roots,
-            max_inline_content_chars=params.tool_write_inline_max_chars,
-        )
-    )
-    registry.register(FileWriteSessionTool(registry.workspace_root, workspace_roots))
-    registry.register(ReplaceInFileTool(registry.workspace_root, workspace_roots))
-
-
-# LLM: _register_network_tools isolates non-filesystem tool setup from constructor policy.
-# 函数用途: 注册网页、HTTP、shell 和受控执行工具，保持工具初始化顺序稳定。
-def _register_network_tools(registry: ToolRegistry, params: ToolRegistryParams) -> None:
-    registry.register(FetchUrlTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
-    registry.register(HttpRequestTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
-    registry.register(
-        ShellTool(
-            registry.workspace_root,
-            default_timeout=params.shell_tool_timeout,
-            max_output_chars=params.shell_tool_output_max_chars,
-        )
-    )
-    registry.register(ControlledExecTool())
-
-
-# LLM: _register_security_tools keeps optional security tool registration easy to audit.
-# 函数用途: 延迟导入并注册安全分析工具，避免主注册流程继续增长。
-def _register_security_tools(registry: ToolRegistry) -> None:
-    from ..log_analysis.tools import (
-        SecurityHuntIpTool,
-        SecurityQueryTool,
-        SecurityTraceCaseTool,
-    )
-
-    registry.register(SecurityQueryTool(registry.workspace_root))
-    registry.register(SecurityHuntIpTool(registry.workspace_root))
-    registry.register(SecurityTraceCaseTool(registry.workspace_root))
-
-
 # LLM: ToolRegistry 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
 # 类用途: ToolRegistry 数据模型，集中保存 工具系统 的结构化状态。
 class ToolRegistry:
@@ -185,10 +98,9 @@ class ToolRegistry:
         self.catalog_show_truncated_notice = params.catalog_show_truncated_notice
         self.tool_detail_max_chars = max(0, params.tool_detail_max_chars)
         self.retrieval_limit = params.retrieval_limit
-        self.retriever = _build_tool_retriever(params)
-        _register_filesystem_tools(self, params)
-        _register_network_tools(self, params)
-        _register_security_tools(self)
+        self.retriever = build_tool_retriever(params)
+        register_base_tools(self, params)
+        self.register(ListToolsTool(self))
 
     # LLM: ToolRegistry.register 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 完成 工具系统 中的 register 步骤，并保持调用方依赖的数据形状。
@@ -338,14 +250,14 @@ class ToolRegistry:
     ) -> ToolExecutionResult:
         return execute_registry_call(
             ExecuteRegistryCallParams(
-            payload=payload,
-            tools=self.tools,
-            workspace_root=self.workspace_root,
-            workspace_roots=self.workspace_roots,
-            expose_security_tools=self.expose_security_tools,
-            security_tool_names=self.security_tool_names,
-            allowed_tools=allowed_tools,
-            granted_capabilities=granted_capabilities,
-            write_boundary=write_boundary,
+                payload=payload,
+                tools=self.tools,
+                workspace_root=self.workspace_root,
+                workspace_roots=self.workspace_roots,
+                expose_security_tools=self.expose_security_tools,
+                security_tool_names=self.security_tool_names,
+                allowed_tools=allowed_tools,
+                granted_capabilities=granted_capabilities,
+                write_boundary=write_boundary,
             )
         )

@@ -25,10 +25,14 @@ from .runner_stage_trace import (
     trace_runner_model_response_received,
 )
 from .tool_stream_boundary import (
+    CompleteToolCallStreamAbort,
     LongToolContentStreamAbort,
+    MalformedToolProtocolStreamAbort,
     ToolBoundaryChunkFilter,
+    complete_tool_call_abort_response,
     cut_response_after_first_complete_tool_call,
     long_write_abort_response,
+    malformed_tool_protocol_abort_response,
 )
 
 
@@ -83,8 +87,18 @@ def generate_model_response(request: ModelGenerateParams):
             state.on_chunk,
             state.first_token_timeout_seconds,
         )
+    except CompleteToolCallStreamAbort as exc:
+        response = complete_tool_call_abort_response(
+            exc,
+            backend=str(getattr(request.agent.backend, "name", "") or ""),
+        )
     except LongToolContentStreamAbort as exc:
         response = long_write_abort_response(
+            exc,
+            backend=str(getattr(request.agent.backend, "name", "") or ""),
+        )
+    except MalformedToolProtocolStreamAbort as exc:
+        response = malformed_tool_protocol_abort_response(
             exc,
             backend=str(getattr(request.agent.backend, "name", "") or ""),
         )

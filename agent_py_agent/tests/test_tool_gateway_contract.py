@@ -70,3 +70,60 @@ def test_tool_gateway_canonicalizes_read_artifact_aliases(tmp_path: Path):
 
     assert payload["artifact_ref"] == "run-1:2-1"
     assert payload["max_chars"] == 123
+
+
+# LLM: file_write_session raw blocks avoid forcing large HTML through escaped JSON strings.
+# 函数用途: 验证结构化 raw content block 会变成 file_write_session.append，不依赖自然语言续写。
+def test_tool_gateway_parses_file_write_session_raw_content_block(tmp_path: Path):
+    registry = _registry(tmp_path)
+    html = "<!doctype html>\n<html><body><h1>ARCA</h1></body></html>"
+
+    calls = registry.parse_tool_calls(
+        '[FILE_WRITE_SESSION_APPEND session_id="homepage-1" target_path="out/index.html" chunk_index=0]\n'
+        f"{html}\n"
+        "[/FILE_WRITE_SESSION_APPEND]"
+    )
+
+    assert calls == [
+        {
+            "tool": "file_write_session",
+            "action": "append",
+            "session_id": "homepage-1",
+            "target_path": "out/index.html",
+            "chunk_index": 0,
+            "content": html,
+        }
+    ]
+    append = registry.execute_call(calls[0])
+    finish = registry.execute_call({
+        "tool": "file_write_session",
+        "action": "finish",
+        "session_id": "homepage-1",
+    })
+    assert append.ok is True
+    assert finish.ok is True
+    assert (tmp_path / "out" / "index.html").read_text(encoding="utf-8") == html
+
+
+# LLM: WRITE_FILE_RAW gives single-file deliverables a one-shot structured commit path.
+# 函数用途: 验证完整单文件 raw content block 会直接转成 write_file，不再要求模型手工管理 chunk。
+def test_tool_gateway_parses_write_file_raw_content_block(tmp_path: Path):
+    registry = _registry(tmp_path)
+    html = "<!doctype html>\n<html><body><h1>ARCA</h1></body></html>"
+
+    calls = registry.parse_tool_calls(
+        '[WRITE_FILE_RAW path="out/index.html"]\n'
+        f"{html}\n"
+        "[/WRITE_FILE_RAW]"
+    )
+
+    assert calls == [
+        {
+            "tool": "write_file",
+            "path": "out/index.html",
+            "content": html,
+        }
+    ]
+    result = registry.execute_call(calls[0])
+    assert result.ok is True
+    assert (tmp_path / "out" / "index.html").read_text(encoding="utf-8") == html

@@ -93,6 +93,16 @@ def _github_star_workbook_case() -> MainAgentRealTaskCase:
             "validator": "spreadsheet_acceptance",
             "required_sheets_min": 2,
             "required_columns": ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"],
+            "staging_contract": {
+                "strategy": "data_then_tool_builder_then_workbook",
+                "builder_tool": "data_to_workbook",
+                "source_json_ref": "outputs/github_star_growth/source_data.json",
+                "workbook_ref": "outputs/github_star_growth/github_star_growth.xlsx",
+                "checkpoint_refs": [
+                    "outputs/github_star_growth/source_data.json",
+                    "outputs/github_star_growth/github_star_growth.xlsx",
+                ],
+            },
         },
     )
     return MainAgentRealTaskCase(

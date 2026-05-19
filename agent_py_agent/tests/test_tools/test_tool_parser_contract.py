@@ -128,6 +128,8 @@ def test_tool_catalog_includes_global_large_content_protocol():
     assert "不要把完整大文件正文塞进一个 JSON 工具参数" in catalog
     assert "write_file 写短骨架" in catalog
     assert "append_file 分块追加" in catalog
+    assert "[WRITE_FILE_RAW" in catalog
+    assert "[FILE_WRITE_SESSION_APPEND" in catalog
 
 
 def test_tool_catalog_uses_configured_categories_offset_and_notice():
