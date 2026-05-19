@@ -9,9 +9,31 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent_py_agent.cli.parser import build_parser
+
 
 class TestCmdScenarioTest:
     """测试 cmd_scenario_test 命令。"""
+
+    def test_parser_accepts_all_registered_scenario_cases(self, tmp_path: Path):
+        """CLI choices must include every scenario runner exposed by cmd_scenario_test."""
+        parser = build_parser()
+        cases = [
+            "gateway-processing-stop",
+            "real-model-recovery-multi-round",
+        ]
+
+        for case in cases:
+            args = parser.parse_args(
+                [
+                    "scenario-test",
+                    "--case",
+                    case,
+                    "--workspace",
+                    str(tmp_path / case),
+                ]
+            )
+            assert args.case == case
 
     def test_scenario_test_invalid_count(self, tmp_path: Path):
         """count <= 0 时返回错误。"""

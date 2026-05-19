@@ -37,6 +37,8 @@ class TestItemPreparationRequest:
     required_content_lines: list[str] = field(default_factory=list)
     # LLM: required_content_files maps exact file refs to required lines for multi-artifact outputs.
     required_content_files: dict[str, list[str]] = field(default_factory=dict)
+    # LLM: require_script is an explicit machine contract for interactive static pages.
+    require_script: bool = False
     site_root_hints: list[object] = field(default_factory=list)
 
 
@@ -80,6 +82,7 @@ def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, An
             existing_tests=prepared,
             required_files=request.required_files,
             required_dom_ids=request.required_dom_ids,
+            require_script=request.require_script,
             site_root_hints=request.site_root_hints,
         )
     )
@@ -105,6 +108,7 @@ def _prepared_test_item(
 ) -> dict[str, Any]:
     item = dict(test)
     _normalize_validation_method(item)
+    _fill_artifact_integrity_path(item, context)
     _normalize_leading_cd_command(item, context.workspace_root)
     item = normalize_cat_content_check(
         CatContentCheckRequest(
@@ -124,6 +128,24 @@ def _prepared_test_item(
         return item
     item["working_dir"] = _relative_or_absolute(inferred, context.workspace_root)
     return item
+
+
+# LLM: Artifact integrity tests can be compact because output.artifacts already carries the product ref.
+# 函数用途: 当 runner 只声明 validation_method=artifact_integrity 时，从唯一 artifact ref 补 file_path，不读正文。
+def _fill_artifact_integrity_path(item: dict[str, Any], context: TestItemPreparationContext) -> None:
+    method = str(item.get("validation_method") or "command").strip().lower()
+    if method != "artifact_integrity" or _has_artifact_integrity_path(item):
+        return
+    if len(context.artifact_paths) != 1:
+        return
+    _raw, path = context.artifact_paths[0]
+    item["file_path"] = _relative_or_absolute(path, context.workspace_root)
+
+
+# LLM: _has_artifact_integrity_path is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _has_artifact_integrity_path(item: dict[str, Any]) -> bool:
+    return any(str(item.get(key) or "").strip() for key in ("file_path", "path", "artifact_path"))
 
 
 # LLM: _normalize_validation_method repairs common runner aliases before bounded execution.

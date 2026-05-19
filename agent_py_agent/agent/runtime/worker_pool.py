@@ -16,25 +16,30 @@ class WorkerPool:
 
     # LLM: acquire_task_agent_slot consumes one available TaskAgent slot lease.
     # 函数用途: 为 worker 获取一个后台 TaskAgent 工位；满额时返回 None。
-    def acquire_task_agent_slot(self, worker_id: str) -> LeaseCard | None:
-        active = [
-            lease
-            for lease in self.cards.list_leases()
-            if lease.resource_type == "worker_slot"
-            and lease.resource_id.startswith("task_agent:")
-            and lease.is_active
-        ]
-        if len(active) >= self.max_task_agent_slots:
-            return None
-        active_slot_ids = {str(lease.metadata.get("slot_id")) for lease in active}
-        slot_id = next((index for index in range(self.max_task_agent_slots) if str(index) not in active_slot_ids), len(active))
-        return self.cards.acquire_lease(
-            "worker_slot",
-            f"task_agent:{slot_id}",
-            worker_id,
-            ttl_seconds=3600,
-            metadata={"slot_type": "task_agent", "slot_id": slot_id},
-        )
+    def acquire_task_agent_slot(self, worker_id: str, *, task_id: str | None = None) -> LeaseCard | None:
+        with self.cards.lock("worker_pool:task_agent"):
+            active = [
+                lease
+                for lease in self.cards.list_leases()
+                if lease.resource_type == "worker_slot"
+                and lease.resource_id.startswith("task_agent:")
+                and lease.is_active
+            ]
+            if len(active) >= self.max_task_agent_slots:
+                return None
+            active_slot_ids = {str(lease.metadata.get("slot_id")) for lease in active}
+            slot_id = next((index for index in range(self.max_task_agent_slots) if str(index) not in active_slot_ids), len(active))
+            lease = self.cards.acquire_lease(
+                "worker_slot",
+                f"task_agent:{slot_id}",
+                worker_id,
+                task_id=task_id,
+                ttl_seconds=3600,
+                metadata={"slot_type": "task_agent", "slot_id": slot_id},
+            )
+            if lease is not None and task_id:
+                self.cards.create_worker_run(task_id=task_id, worker_id=worker_id, lease_id=lease.lease_id)
+            return lease
 
     # LLM: release_slot frees a worker slot without deleting lease history.
     # 函数用途: 释放指定 worker slot 租约。

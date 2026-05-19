@@ -174,6 +174,7 @@ class SubAgentActionService:
             # LLM: apply logs preserve the rescue/escalation decision that led here.
             **action_rescue_record_fields(params.action),
             evidence_paths=params.evidence_paths or [params.task.work_log_file],
+            created_run_ids=params.created_run_ids or [],
             created_at=time.time(),
         )
 

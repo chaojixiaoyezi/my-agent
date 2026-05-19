@@ -28,14 +28,42 @@ def case_main_artifact_readback(lab) -> None:
     _seed_artifact_readback_source(source)
     prompt = _main_artifact_readback_prompt()
     lab.record_prompt("main_artifact_readback", prompt)
+    contract_path = _main_artifact_readback_delivery_contract(lab)
     response = lab.run_command(
-        lab.agent_command("run", prompt, "--save"),
+        lab.agent_command(
+            "run",
+            prompt,
+            "--save",
+            "--delivery-contract-file",
+            str(contract_path),
+            "--delivery-repair-attempts",
+            "1",
+        ),
         timeout=lab.args.timeout + 150,
     )
     (lab.responses_dir / "main_artifact_readback.stdout.txt").write_text(response.stdout, encoding="utf-8")
     output = lab.fixture_root / "lab_outputs" / "artifact-readback" / "report.md"
     _assert_artifact_readback_report(output)
     lab.log(f"artifact_readback_report={output}")
+
+
+# LLM: _main_artifact_readback_delivery_contract gives artifact readback a machine artifact gate.
+# 函数用途: 生成长资料读回报告的交付合同，确保真实报告文件存在后才算通过。
+def _main_artifact_readback_delivery_contract(lab) -> Path:
+    path = lab.run_root / "contracts" / "main_artifact_readback_delivery_contract.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "checks": [
+            {
+                "name": "artifact-readback-report",
+                "method": "artifact",
+                "path": "lab_outputs/artifact-readback/report.md",
+            }
+        ]
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    lab.log(f"main_artifact_readback_delivery_contract={path}")
+    return path
 
 
 # LLM: case_main_compact_resume_roundtrip verifies compact apply and auto resume after a real root-agent run.
@@ -93,8 +121,10 @@ def _main_artifact_readback_prompt() -> str:
         data/artifact-readback/source.txt 这个资料比较长。
         请你找出 ALPHA-ANCHOR、OMEGA-ANCHOR、TRACE-ARTIFACT-991 三处附近分别在说什么。
         如果系统一次只给你一部分内容，或者提示内容已经放到外置文件里，请继续按线索读完整，不要猜。
+        如果工具提示了 read_artifact 的 search 模式，请分别用 mode=search 搜索这三个锚点，不要只靠 offset 翻页。
 
         最终把三处证据、你的中文解释、风险判断和下一步建议写到 lab_outputs/artifact-readback/report.md。
+        每处证据都要保留源文件里的关键原文片段，不能把行业、对象或地点替换成别的内容。
         报告要让普通人能看懂，不能只列三个词。
         """
     ).strip()
@@ -134,6 +164,22 @@ def _assert_artifact_readback_report(output: Path) -> None:
     missing = [item for item in required if item not in lowered]
     if missing:
         raise RuntimeError(f"长输出读回报告缺少远距离证据: {missing}")
+    required_source_fragments = [
+        "北区门店",
+        "高端家具库存",
+        "连续三周偏低",
+        "新品展示",
+        "线上预约系统",
+        "周末高峰",
+        "排队延迟",
+        "到店体验",
+        "售后回访",
+        "同一批次",
+        "沙发面料色差",
+    ]
+    missing_fragments = [item for item in required_source_fragments if item not in content]
+    if missing_fragments:
+        raise RuntimeError(f"长输出读回报告缺少源文件事实片段: {missing_fragments}")
     if len(content.strip()) < 180:
         raise RuntimeError("长输出读回报告过短，不足以说明证据、风险和建议。")
 

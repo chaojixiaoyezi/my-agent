@@ -21,6 +21,7 @@ class StaticSiteTestItemsRequest:
     existing_tests: list[dict[str, Any]]
     required_files: list[str] = field(default_factory=list)
     required_dom_ids: list[str] = field(default_factory=list)
+    require_script: bool = False
     site_root_hints: list[object] = field(default_factory=list)
 
 
@@ -59,6 +60,8 @@ def inferred_static_site_items(request: StaticSiteTestItemsRequest) -> list[dict
     }
     if request.required_dom_ids:
         item["required_dom_ids"] = _normalized_required_dom_ids(request.required_dom_ids)
+    if request.require_script:
+        item["require_script"] = True
     if len(html_paths) == 1:
         item["html_files"] = required_files
     return [item]

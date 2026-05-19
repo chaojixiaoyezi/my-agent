@@ -48,6 +48,7 @@ def run_params_from_values(
     recovery_next_actions: list[str] | None = None,
     on_chunk: object = None,
     context_scope: str | None = None,
+    model_request_timeout_seconds: float | None = None,
 ) -> RunParams:
     if params is None:
         params = RunParams()
@@ -86,6 +87,8 @@ def _runtime_loop_params(
         task_id=params.task_id,
         source=params.source,
         context_scope=params.context_scope,
+        background_intake=params.background_intake,
+        model_request_timeout_seconds=params.model_request_timeout_seconds,
     )
 
 
@@ -307,4 +310,6 @@ def _tool_loop_execute_params(seed: RuntimeToolLoopSeed) -> ToolLoopExecuteParam
         archive_tool_calls=archive_tool_calls,
         tool_rounds=tool_rounds,
         context_scope=params.context_scope,
+        background_intake=params.background_intake,
+        model_request_timeout_seconds=params.model_request_timeout_seconds,
     )

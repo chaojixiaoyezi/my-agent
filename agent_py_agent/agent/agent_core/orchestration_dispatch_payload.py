@@ -170,6 +170,7 @@ def _top_level_repair_tool_call(
         "agent_name": "小傻妞-验收修复",
         "workflow_mode": "off",
         "goal": _repair_goal(item, refs),
+        **_lineage_fields(refs.task_ref),
         "extra_write_roots": _product_write_roots(refs.run_ref),
         "acceptance_checks": [
             "先修复父级验收 failure_refs 点名的问题，同时保持原任务完整目标",
@@ -187,6 +188,30 @@ def _top_level_repair_tool_call(
         ],
         **contract_fields,
     }
+
+
+# LLM: parent-acceptance repair suggested calls should be explicit about failed-run lineage.
+# 函数用途: 从失败 run 的 task.json 生成 parent/root/depth，避免 root 把修复任务建成新的顶层任务。
+def _lineage_fields(task_ref: str) -> dict[str, object]:
+    payload = _read_json_object(task_ref)
+    run_id = str(payload.get("id") or "").strip()
+    if not run_id:
+        return {}
+    depth = _int_value(payload.get("depth")) + 1
+    return {
+        "parent_id": run_id,
+        "root_id": str(payload.get("root_id") or run_id).strip(),
+        "depth": depth,
+    }
+
+
+# LLM: _int_value is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _int_value(value: object) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 # LLM: _repair_goal keeps top-level repair work grounded in machine refs instead of natural summaries.

@@ -46,6 +46,9 @@ class StaticSiteCheckResult:
     inert_control_hits: list[str] = field(default_factory=list)
     form_binding_hits: list[str] = field(default_factory=list)
     missing_dom_id_hits: list[str] = field(default_factory=list)
+    empty_app_shell_hits: list[str] = field(default_factory=list)
+    empty_body_hits: list[str] = field(default_factory=list)
+    missing_script_hits: list[str] = field(default_factory=list)
     repair_hints: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -61,6 +64,9 @@ class StaticSiteCheckResult:
             or self.inert_control_hits
             or self.form_binding_hits
             or self.missing_dom_id_hits
+            or self.empty_app_shell_hits
+            or self.empty_body_hits
+            or self.missing_script_hits
         )
 
     # LLM: to_dict keeps result serialization stable and bounded for reports.
@@ -77,6 +83,9 @@ class StaticSiteCheckResult:
             "inert_control_hits": self.inert_control_hits,
             "form_binding_hits": self.form_binding_hits,
             "missing_dom_id_hits": self.missing_dom_id_hits,
+            "empty_app_shell_hits": self.empty_app_shell_hits,
+            "empty_body_hits": self.empty_body_hits,
+            "missing_script_hits": self.missing_script_hits,
             "repair_hints": self.repair_hints,
             "warnings": self.warnings,
         }
@@ -93,6 +102,7 @@ class StaticSiteScanOptions:
     check_forms: bool
     strict_dom_bindings: bool
     required_dom_ids: list[str]
+    require_script: bool
 
 
 # LLM: StaticSiteScanState accumulates cross-file IDs and script text for bounded checks.
@@ -129,6 +139,7 @@ def run_static_site_check(test: dict[str, Any], workspace_root: Path) -> TestExe
 # LLM: _resolve_site_root enforces workspace bounds before any directory walk.
 # 函数用途: 解析 site_root/root_dir/file_path，保证静态检查不能扫描工作区外部。
 def _resolve_site_root(test: dict[str, Any], workspace_root: Path) -> tuple[Path, str]:
+    workspace_root = workspace_root.expanduser().resolve()
     raw = str(test.get("site_root") or test.get("root_dir") or test.get("file_path") or ".").strip()
     candidate = Path(raw).expanduser()
     path = candidate.resolve() if candidate.is_absolute() else (workspace_root / candidate).resolve()
@@ -168,6 +179,7 @@ def _scan_options(test: dict[str, Any]) -> StaticSiteScanOptions:
         check_forms=test.get("check_form_bindings", True) is not False,
         strict_dom_bindings=test.get("strict_dom_bindings", True) is not False,
         required_dom_ids=string_list(test.get("required_dom_ids")),
+        require_script=test.get("require_script", False) is True,
     )
 
 
@@ -181,6 +193,9 @@ def _scan_html_file(request: StaticSiteHtmlScanRequest) -> None:
         result.placeholder_hits.append(rel(path, site_root))
     if options.check_complete_html:
         result.html_structure_hits.extend(_html_structure_hits(text, path, site_root))
+        result.empty_body_hits.extend(_empty_body_hits(text, path, site_root))
+    if options.require_script and not _has_script_tag(text):
+        result.missing_script_hits.append(f"{rel(path, site_root)}:script")
     parser = StaticSiteHTMLParser()
     parser.feed(text)
     state.form_ids.update(parser.form_ids)
@@ -200,6 +215,7 @@ def _scan_html_file(request: StaticSiteHtmlScanRequest) -> None:
                 )
             )
         )
+    result.empty_app_shell_hits.extend(_empty_app_shell_hits(text, parser, path, site_root))
 
 
 # LLM: _finalize_dom_checks runs cross-file DOM checks after every HTML file is scanned.
@@ -284,9 +300,91 @@ def _html_structure_hits(text: str, html_file: Path, site_root: Path) -> list[st
         closes = lower.count(f"</{tag}>")
         if opens != closes:
             hits.append(f"{rel_path}:unbalanced_{tag}")
+    for tag in ("html", "head", "body"):
+        opens = len(re.findall(rf"<{tag}\b", lower))
+        closes = lower.count(f"</{tag}>")
+        if opens > 1:
+            hits.append(f"{rel_path}:multiple_{tag}_open")
+        if tag == "head" and closes > 1:
+            hits.append(f"{rel_path}:multiple_head_close")
     if lower.find("<body") != -1 and lower.find("</head>") != -1 and lower.find("<body") < lower.find("</head>"):
         hits.append(f"{rel_path}:body_before_head_close")
     return hits
+
+
+# LLM: _empty_app_shell_hits catches static app shells that define data but never render visible DOM.
+# 函数用途: 拦截只有空 #app/#root 挂载点、没有渲染动作的半成品页面，避免通用静态验收假绿。
+def _empty_app_shell_hits(text: str, parser: StaticSiteHTMLParser, html_file: Path, site_root: Path) -> list[str]:
+    if _has_renderer_marker(text) or _has_visible_site_structure(text):
+        return []
+    if parser.controls or parser.form_ids:
+        return []
+    rel_path = rel(html_file, site_root)
+    return [f"{rel_path}:empty_app_shell:{item}" for item in ("app", "root", "mount") if _has_empty_mount(text, item)]
+
+
+# LLM: _empty_body_hits is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _empty_body_hits(text: str, html_file: Path, site_root: Path) -> list[str]:
+    body = _body_inner_html(text)
+    if body is None:
+        return []
+    visible = re.sub(r"<(script|style)\b[^>]*>.*?</\1>", "", body, flags=re.IGNORECASE | re.DOTALL)
+    visible = re.sub(r"<!--.*?-->", "", visible, flags=re.DOTALL).strip()
+    has_visible_tag = bool(re.search(r"<(main|section|article|nav|header|footer|div|form|button|a|ul|ol|p|h[1-6])\b", visible, re.I))
+    plain_text = re.sub(r"<[^>]+>", "", visible).strip()
+    if has_visible_tag or plain_text:
+        return []
+    return [f"{rel(html_file, site_root)}:empty_body"]
+
+
+# LLM: _body_inner_html is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _body_inner_html(text: str) -> str | None:
+    match = re.search(r"<body\b[^>]*>(?P<body>.*?)</body>", text, flags=re.IGNORECASE | re.DOTALL)
+    return match.group("body") if match else None
+
+
+# LLM: _has_script_tag is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _has_script_tag(text: str) -> bool:
+    return bool(re.search(r"<script\b", text or "", flags=re.IGNORECASE))
+
+
+# LLM: _has_renderer_marker is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _has_renderer_marker(text: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(innerHTML|appendChild|replaceChildren|insertAdjacentHTML|createElement)\b|"
+            r"\.textContent\s*=|\.append\s*\(",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+# LLM: _has_visible_site_structure is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _has_visible_site_structure(text: str) -> bool:
+    visible_markup = re.sub(r"<(script|style)\b[^>]*>.*?</\1>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    return bool(re.search(r"<(button|form|section|article|main|nav|a)\b", visible_markup, flags=re.IGNORECASE))
+
+
+# LLM: _has_empty_mount is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _has_empty_mount(text: str, element_id: str) -> bool:
+    pattern = (
+        rf"<(?P<tag>div|main|section)\b(?=[^>]*\bid\s*=\s*"
+        rf"(?P<quote>['\"]){re.escape(element_id)}(?P=quote))[^>]*>"
+        rf"(?P<body>.*?)</(?P=tag)>"
+    )
+    for match in re.finditer(pattern, text, flags=re.IGNORECASE | re.DOTALL):
+        body = re.sub(r"<!--.*?-->", "", match.group("body"), flags=re.DOTALL).strip()
+        if not body:
+            return True
+    return False
+
 
 # LLM: _repair_hints turns validation facts into short action hints for parent repair dispatch.
 # 函数用途: 给父级/修复子代理一组不用读正文也能理解的修复方向，避免只靠自然语言猜。
@@ -300,6 +398,12 @@ def _repair_hints(result: StaticSiteCheckResult) -> list[str]:
         hints.append("form_bindings: create the referenced form id or update validateForm(...) to the existing form id")
     if result.missing_dom_id_hits:
         hints.append("missing_dom_ids: add the referenced id to a real element or remove the stale unguarded JS lookup")
+    if result.empty_app_shell_hits:
+        hints.append("empty_app_shell: render real visible sections into the app/root mount or ship static DOM directly")
+    if result.empty_body_hits:
+        hints.append("empty_body: add the requested visible page sections inside body before reporting completion")
+    if result.missing_script_hits:
+        hints.append("missing_script: include inline or local JavaScript when the task requires browser interactions")
     return hints[:6]
 
 # LLM: _static_site_record converts validator facts into the common TestExecutionRecord contract.
@@ -340,6 +444,12 @@ def _failure_summary(result: StaticSiteCheckResult) -> str:
         parts.append(f"form_binding_hits={len(result.form_binding_hits)}")
     if result.missing_dom_id_hits:
         parts.append(f"missing_dom_id_hits={len(result.missing_dom_id_hits)}")
+    if result.empty_app_shell_hits:
+        parts.append(f"empty_app_shell_hits={len(result.empty_app_shell_hits)}")
+    if result.empty_body_hits:
+        parts.append(f"empty_body_hits={len(result.empty_body_hits)}")
+    if result.missing_script_hits:
+        parts.append(f"missing_script_hits={len(result.missing_script_hits)}")
     return "; ".join(parts)
 
 

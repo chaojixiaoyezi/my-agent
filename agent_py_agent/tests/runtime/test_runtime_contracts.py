@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from agent_py_agent.agent.cards import CardStore, TaskStatus
 from agent_py_agent.agent.messages import MessageStore, MessageTarget, MessageTool
@@ -21,6 +22,32 @@ def test_worker_pool_limits_active_slots(tmp_path):
 
     pool.release_slot(first.lease_id)
     assert pool.acquire_task_agent_slot("worker-3") is not None
+
+
+def test_worker_pool_concurrent_claims_respect_slot_limit(tmp_path):
+    cards = CardStore(tmp_path / "cards")
+    pool = WorkerPool(cards, max_task_agent_slots=2)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        leases = list(executor.map(lambda index: pool.acquire_task_agent_slot(f"worker-{index}"), range(16)))
+
+    assert len([lease for lease in leases if lease is not None]) == 2
+    assert len([lease for lease in cards.list_leases() if lease.is_active]) == 2
+
+
+def test_worker_pool_records_worker_run_when_task_id_is_supplied(tmp_path):
+    cards = CardStore(tmp_path / "cards")
+    messages = MessageTool(MessageStore(tmp_path / "messages"))
+    runtime = TaskRuntime(cards, messages)
+    pool = WorkerPool(cards, max_task_agent_slots=1)
+    task = runtime.create_task(goal="background work", user_id="user-1", session_id="sess-1")
+
+    lease = pool.acquire_task_agent_slot("worker-1", task_id=task.task_id)
+
+    worker_runs = cards.list_worker_runs(task.task_id)
+    assert lease is not None
+    assert len(worker_runs) == 1
+    assert worker_runs[0].lease_id == lease.lease_id
 
 
 def test_runtime_creates_task_with_route_policy_and_completion_message(tmp_path):

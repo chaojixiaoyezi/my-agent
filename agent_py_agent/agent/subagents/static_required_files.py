@@ -53,6 +53,12 @@ def required_static_dom_ids_for_task(task: Any) -> list[str]:
     return _dedupe(_string_list(_task_attributes(task).get("required_dom_ids")))[:50]
 
 
+# LLM: required_static_script_for_task reads an explicit boolean contract for interactive static pages.
+# 函数用途: 从 task.attributes.require_script 读取机器布尔值，不从“交互/购物车”等自然语言推断。
+def required_static_script_for_task(task: Any) -> bool:
+    return _structured_bool(_task_attributes(task).get("require_script"))
+
+
 # LLM: _task_attributes normalizes task attributes for runtime contract reads.
 # 函数用途: 读取 task.attributes 字典；缺失或类型不对时返回空，避免从文本兜底。
 def _task_attributes(task: Any) -> dict[str, Any]:
@@ -123,6 +129,16 @@ def _string_list(value: object) -> list[str]:
         return [str(item).strip() for item in value if str(item or "").strip()]
     text = str(value or "").strip()
     return [text] if text else []
+
+
+# LLM: _structured_bool is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _structured_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return value == 1
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 # LLM: _dedupe preserves first-seen file order from user/task text.

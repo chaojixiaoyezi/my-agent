@@ -62,11 +62,12 @@ def _detect_gateway_state(paths, summary):
 # 函数用途: 统计遗留 processing 请求并记录请求 id。
 def _detect_processing_requests(paths, summary):
     """获取 processing 请求列表。"""
-    from .gateway import gateway_request_counts
-    request_counts = gateway_request_counts(paths)
-    summary.stale_request_count = request_counts.get("processing", 0)
-    if paths.processing.exists():
-        summary.processing_requests = [f.stem for f in paths.processing.glob("*.json")]
+    from .gateway import gateway_stale_processing
+
+    timeout = _safe_int(getattr(getattr(summary, "config", None), "gateway_processing_timeout_seconds", 0))
+    stale = gateway_stale_processing(paths, timeout_seconds=timeout or 900)
+    summary.stale_request_count = len(stale)
+    summary.processing_requests = [str(item.get("request_id") or "") for item in stale if str(item.get("request_id") or "")]
 
 
 # LLM: _detect_active_tasks 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -80,23 +81,108 @@ def _detect_active_tasks(agent, summary):
                 include_child_status_counts=False,
             )
         )
-        final_statuses = {"DONE", "FAILED", "CANCELLED", "TIMEOUT"}
-        active_tasks = [item for item in board.hot_list if item.status not in final_statuses]
-        summary.active_task_count = len(active_tasks)
-        summary.recent_tasks = [
+        runtime_tasks = _runtime_active_task_cards(agent)
+        summary.active_task_count = _active_task_count_from_board(board) + len(runtime_tasks)
+        board_recent = [
             {
                 "id": item.id,
                 "goal": item.goal,
                 "status": item.status,
                 "verification_status": item.verification_status,
-                "created_at": item.created_at,
-                "updated_at": item.updated_at,
+                "created_at": getattr(item, "created_at", 0),
+                "updated_at": getattr(item, "updated_at", 0),
             }
             for item in board.recent[:3]
         ]
+        runtime_recent = [
+            {
+                "id": task.task_id,
+                "goal": task.goal,
+                "status": str(task.status),
+                "verification_status": "",
+                "created_at": task.created_at,
+                "updated_at": task.updated_at,
+            }
+            for task in runtime_tasks[:3]
+        ]
+        summary.recent_tasks = (board_recent + runtime_recent)[:3]
     except (AttributeError, TypeError):
         summary.active_task_count = 0
         summary.recent_tasks = []
+
+
+# LLM: _runtime_active_task_cards includes gateway/main-agent TaskCards in startup recovery.
+# 函数用途: 读取 runtime CardStore 中未结束的任务卡，让前台启动检测能看到后台主代理任务。
+def _runtime_active_task_cards(agent) -> list:
+    root = getattr(agent, "runtime_cards_root", None)
+    if root is None:
+        return []
+    try:
+        from .cards import CardStore
+        from .cards.models import TERMINAL_STATUSES
+
+        tasks = CardStore(root).list_tasks()
+    except Exception:
+        return []
+    active = [task for task in tasks if task.status not in TERMINAL_STATUSES]
+    return sorted(active, key=lambda task: (task.updated_at, task.task_id), reverse=True)
+
+
+# LLM: active work must count running task cards even when they are not risky enough for hot_list.
+# 函数用途: 优先从看板 summary 的状态计数统计活跃任务，避免 status 显示“没有任务”但子代理仍 RUNNING。
+def _active_task_count_from_board(board) -> int:
+    summary = getattr(board, "summary", {}) or {}
+    by_status = summary.get("by_status") if isinstance(summary, dict) else None
+    if isinstance(by_status, dict):
+        count = _active_status_count(by_status)
+        if count:
+            return count
+    if isinstance(summary, dict):
+        count = _active_status_count(summary)
+        if count:
+            return count
+    return len(_active_items_from_board(board))
+
+
+# LLM: _active_status_count is a structured status counter, not a natural-language classifier.
+# 函数用途: 只统计已知生命周期状态中的未收口状态，忽略 verification/channel 等非任务状态计数。
+def _active_status_count(counts: dict) -> int:
+    active_statuses = {"PLANNING", "RUNNING", "BLOCKED", "PAUSED"}
+    total = 0
+    for status, value in counts.items():
+        if str(status).upper() not in active_statuses:
+            continue
+        try:
+            total += int(value or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+# LLM: _safe_int normalizes optional config values without throwing during startup checks.
+# 函数用途: 把可能为空或非法的配置值转换成整数，失败时返回 0。
+def _safe_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+# LLM: _active_items_from_board falls back to visible board rows when summaries are missing.
+# 函数用途: 从看板 hot/recent 条目中找出非终态任务，供启动恢复统计。
+def _active_items_from_board(board) -> list:
+    final_statuses = {"DONE", "FAILED", "CANCELLED", "TIMEOUT", "ABANDONED", "TAKEN_OVER"}
+    items = []
+    seen = set()
+    for source in (getattr(board, "hot_list", []) or [], getattr(board, "recent", []) or []):
+        for item in source:
+            item_id = str(getattr(item, "id", "") or "")
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            if str(getattr(item, "status", "") or "").upper() not in final_statuses:
+                items.append(item)
+    return items
 
 
 # LLM: _detect_pending_notifications 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -141,6 +227,7 @@ def detect_active_work(agent: SimpleAgent) -> ActiveWorkSummary:
 
     paths = gateway_paths(agent)
     summary = ActiveWorkSummary()
+    summary.config = agent.config
 
     _detect_gateway_state(paths, summary)
     _detect_processing_requests(paths, summary)

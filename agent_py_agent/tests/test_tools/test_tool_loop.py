@@ -12,6 +12,7 @@ from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParam
 from agent_py_agent.agent.agent_core._tool_loop_service import ToolLoopService
 from agent_py_agent.agent.agent_core.tool_round_execution import ToolCallExecuteParams
 from agent_py_agent.agent.backend import ModelResponse
+from agent_py_agent.agent.backends.errors import ProviderTimeoutError
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.tools import ToolExecutionResult
@@ -108,6 +109,66 @@ class _EmptyThenFinalAfterToolBackend:
         assert "上一轮模型接口返回了空文本" in prompt
         assert "hello empty repair" in prompt
         return ModelResponse(text="已根据工具结果继续完成。", backend=self.name)
+
+
+# LLM: _EmptyThenFinalBeforeToolBackend reproduces provider blank text before any tool can run.
+# 类用途: 第一轮模型空文本时，验证主循环会重试原始请求，而不是在 0 个工具轮直接失败。
+class _EmptyThenFinalBeforeToolBackend:
+    name = "fake_empty_then_final_before_tool_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("Anthropic-compatible 流式响应没有文本内容")
+        assert "原始用户请求仍未处理" in prompt
+        return ModelResponse(text="第一轮空响应后已重新处理。", backend=self.name)
+
+
+# LLM: _TimeoutThenFinalAfterToolBackend reproduces provider timeout after artifact/search tool results.
+# 类用途: 第一次请求工具，第二次模型续写超时，第三次基于恢复上下文正常收口。
+class _TimeoutThenFinalAfterToolBackend:
+    name = "fake_timeout_then_final_after_tool_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"read_file","path":"notes.txt"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        if self.calls == 2:
+            raise ProviderTimeoutError("模型接口请求超时: request_timeout=300s")
+        assert "上一轮模型接口请求超时" in prompt
+        assert "hello timeout repair" in prompt
+        return ModelResponse(text="已根据超时前的工具结果继续完成。", backend=self.name)
+
+
+# LLM: _TimeoutThenToolBeforeToolBackend reproduces provider timeout before any tool is emitted.
+# 类用途: 第一轮模型超时，第二轮必须继续原始请求并先做工具调用，第三轮基于工具结果收口。
+class _TimeoutThenToolBeforeToolBackend:
+    name = "fake_timeout_then_tool_before_tool_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            raise ProviderTimeoutError("模型接口请求超时: request_timeout=300s")
+        if self.calls == 2:
+            assert "本轮还没有任何工具调用被执行" in prompt
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"read_file","path":"notes.txt"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        assert "hello first timeout repair" in prompt
+        return ModelResponse(text="首轮超时后已继续完成。", backend=self.name)
 
 
 # LLM: _LongAppendPromptWindowBackend reproduces a productive runner whose live tool transcript grows every round.
@@ -235,6 +296,56 @@ def test_tool_loop_retries_once_when_final_model_response_is_empty_after_tool():
         result = agent.run("读取 notes 后继续总结", save=False, allowed_tools=["read_file"])
 
         assert result.response == "已根据工具结果继续完成。"
+        assert result.executed_tools == ["read_file"]
+        assert agent.backend.calls == 3
+
+
+# LLM: provider blank text before tools should not permanently lose the user's first request.
+# 函数用途: 覆盖真实 gateway 长请求第一轮空流式响应时，没有子代理任务落盘也没有最终文本的失败路径。
+def test_tool_loop_retries_once_when_first_model_response_is_empty():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = _EmptyThenFinalBeforeToolBackend()
+
+        result = agent.run("安排子代理处理长任务", save=False)
+
+        assert result.response == "第一轮空响应后已重新处理。"
+        assert result.tool_rounds == 0
+        assert agent.backend.calls == 2
+
+
+# LLM: provider timeout after tools should get one continuation attempt before failing the whole run.
+# 函数用途: 覆盖真实长资料 read_artifact 后续写超时，确保已读工具结果不会因为一次 provider 抖动丢失。
+def test_tool_loop_retries_once_when_provider_timeout_after_tool():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        (workspace / "notes.txt").write_text("hello timeout repair", encoding="utf-8")
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = _TimeoutThenFinalAfterToolBackend()
+
+        result = agent.run("读取 notes 后继续总结", save=False, allowed_tools=["read_file"])
+
+        assert result.response == "已根据超时前的工具结果继续完成。"
+        assert result.executed_tools == ["read_file"]
+        assert agent.backend.calls == 3
+
+
+# LLM: provider timeout before tools should get one bounded retry instead of losing the whole request.
+# 函数用途: 覆盖真实 MiniMax 第一轮长请求超时，没有任何工具结果落盘时 CLI 直接失败的问题。
+def test_tool_loop_retries_once_when_provider_timeout_before_tool():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        (workspace / "notes.txt").write_text("hello first timeout repair", encoding="utf-8")
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = _TimeoutThenToolBeforeToolBackend()
+
+        result = agent.run("读取 notes 后继续总结", save=False, allowed_tools=["read_file"])
+
+        assert result.response == "首轮超时后已继续完成。"
         assert result.executed_tools == ["read_file"]
         assert agent.backend.calls == 3
 

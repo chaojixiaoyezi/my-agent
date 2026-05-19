@@ -224,10 +224,15 @@ gateway_request_timeout: 300
 gateway_request_poll_interval: 1
 # gateway request worker 池：
 # - gateway_request_workers 控制本地 ask 队列并发处理数。
-# - 1 是最保守默认值；调大后每个 worker 都会创建自己的 agent/backend。
+# - gateway_foreground_reserved_workers 保留前台同步请求通道，避免 no-wait 长任务占满用户聊天。
+# - 默认 2 + 保留 1：一个 worker 可处理长任务，另一个 worker 仍能响应用户追问。
+# - 调大后每个 worker 都会创建自己的 agent/backend。
+# - gateway_background_model_request_timeout 是 no-wait 后台请求的单次模型请求预算；0 表示沿用 request_timeout。
 # - gateway_processing_timeout_seconds 用来判断 processing 请求是否已经卡死。
 # - gateway_request_max_attempts 控制卡死请求最多自动重试几次，超过后归档到 failed。
-gateway_request_workers: 1
+gateway_request_workers: 2
+gateway_foreground_reserved_workers: 1
+gateway_background_model_request_timeout: 900
 gateway_processing_timeout_seconds: 900
 gateway_request_max_attempts: 2
 gateway_worker_join_timeout_seconds: 2
@@ -392,8 +397,8 @@ tool_artifact_read_budget_max_chars: 240000
 tool_read_max_chars: 50000
 
 # write_file / append_file 单次 inline content 推荐值
-# 默认 12000；超过推荐值的合法工具调用仍会落盘，但工具会提示后续改用分块，避免模型反复长写。
-tool_write_inline_max_chars: 12000
+# 默认 4000；超过推荐值的合法工具调用仍会落盘，但工具会提示后续改用分块，避免模型反复长写。
+tool_write_inline_max_chars: 4000
 
 # list_files 工具最多列出多少条结果
 tool_list_max_entries: 200

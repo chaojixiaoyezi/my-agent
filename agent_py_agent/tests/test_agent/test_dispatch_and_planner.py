@@ -550,20 +550,10 @@ def test_subagent_dispatch_retries_transient_runner_failure(monkeypatch):
         after_first = agent.subagents.load(task.id)
 
         assert any(item.step == "runner" and item.action == "execute_runner" and not item.ok for item in first.records)
-        assert after_first.status == "BLOCKED"
-        assert after_first.failure_type == "runner_error"
-        assert after_first.runner_attempts == 1
-        assert "temporary runner backend outage" in after_first.runner_last_error
-
-        second = _dispatch_runner_once(agent, router)
-        loaded = agent.subagents.load(task.id)
-
-        assert any(item.step == "runner" and item.action == "retry_runner" and item.ok for item in second.records)
-        assert any(item.step == "acceptance" and item.applied and item.ok for item in second.records)
-        # Backend called 3 times: (1) first runner attempt fails, (2) failure introspection, (3) retry succeeds
+        assert any(item.step == "runner" and item.action == "retry_runner" and item.ok for item in first.records)
+        assert any(item.step == "acceptance" and item.applied and item.ok for item in first.records)
         assert backend.calls == 3
-        assert loaded.status == "DONE"
-        assert loaded.verification_status == "VERIFIED"
-        assert loaded.runner_attempts == 2
-        assert loaded.runner_last_error == ""
-
+        assert after_first.status == "DONE"
+        assert after_first.verification_status == "VERIFIED"
+        assert after_first.runner_attempts == 2
+        assert after_first.runner_last_error == ""

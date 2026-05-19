@@ -282,8 +282,8 @@ class TestCreateSubagentsToolCoordinatorPlan:
         assert result.ok is True
         assert params.role == "coordinator"
 
-    def test_lineage_agent_name_in_role_field_becomes_name_not_role(self):
-        """模型把“小傻妞-root-coordinator”写进 role 时，应拆成标准 role 和显示名。"""
+    def test_display_name_in_role_field_only_recovers_machine_role_token(self):
+        """role 字段只允许机器角色 token；显示名不能反向变成 agent_name。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -309,5 +309,34 @@ class TestCreateSubagentsToolCoordinatorPlan:
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
         assert params.role == "coordinator"
-        assert params.agent_name == "小傻妞-root-coordinator"
+        assert params.agent_name == "小傻妞-coordinator"
         assert params.workflow_mode == "off"
+
+    def test_display_name_without_machine_role_token_falls_back_to_worker(self):
+        """role 字段里的中文展示词不参与角色推断。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "auto"
+
+        mock_task = MagicMock()
+        mock_task.id = "worker_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/worker_001"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": "研究市场材料。",
+            "role": "小傻妞-市场环境",
+            "workflow_mode": "auto",
+        })
+
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert result.ok is True
+        assert params.role == "worker"
+        assert params.agent_name == "小傻妞-worker-1"

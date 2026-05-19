@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.messages.runtime_tool import MessageRuntimeTool
 
 
@@ -60,3 +62,12 @@ def test_message_runtime_tool_rejects_unknown_target_shape(tmp_path):
 
     assert result.ok is False
     assert result.error_code
+
+
+def test_message_runtime_tool_is_registered_on_main_agent(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+
+    names = {spec.name for spec in agent.tools.specs()}
+
+    assert "message_runtime" in names
+    assert agent.runtime_messages_root == tmp_path / "data" / "runtime" / "messages"

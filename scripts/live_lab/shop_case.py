@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 import textwrap
+import time
+from pathlib import Path
 
 from .state_assertions import (
     assert_no_subagent_state_blockers,
@@ -27,16 +30,23 @@ def case_natural_shop_subagent(lab) -> None:
                 "gateway",
                 "ask",
                 prompt,
-                "--timeout",
-                str(lab.args.timeout),
+                "--no-wait",
                 "--json",
             ),
-            timeout=lab.args.timeout + 180,
+            timeout=60,
+        )
+        request_id, response_json_path = _parse_gateway_no_wait(response.stdout)
+        lab.log(f"async_request_id={request_id}")
+        lab.log(f"async_response={response_json_path}")
+        response_payload = _wait_for_async_gateway_response(
+            lab,
+            response_json_path,
+            timeout_seconds=_async_gateway_wait_budget(lab),
         )
         response_path = lab.responses_dir / "natural_shop_subagent.stdout.json"
-        response_path.write_text(response.stdout, encoding="utf-8")
+        response_path.write_text(json.dumps(response_payload, ensure_ascii=False, indent=2), encoding="utf-8")
         lab.log(f"response_file={response_path}")
-        assert_no_subagent_state_blockers(response.stdout)
+        assert_no_subagent_state_blockers(json.dumps(response_payload, ensure_ascii=False))
     finally:
         lab.run_command(
             lab.agent_command("gateway", "stop", "--timeout", "15", "--kill", "--reason", "live lab done"),
@@ -48,6 +58,70 @@ def case_natural_shop_subagent(lab) -> None:
     _assert_static_site_check_clean(lab.fixture_root, output_path.parent)
     assert_persisted_subagent_state_clean(lab.fixture_root)
     lab.log(f"natural_shop_output={output_path}")
+
+
+# LLM: _parse_gateway_no_wait keeps async long-task tests on structured refs from gateway ask.
+# 函数用途: 从 gateway ask --no-wait 输出解析 request_id 和响应文件路径，避免长任务占住前台进程。
+def _parse_gateway_no_wait(stdout: str) -> tuple[str, Path]:
+    request_id = ""
+    response_path = Path("")
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        if line.startswith("queued request_id="):
+            request_id = line.split("=", 1)[1].strip()
+        elif line.startswith("response: "):
+            response_path = Path(line.split("response: ", 1)[1].strip())
+    if not request_id or not response_path:
+        raise RuntimeError(f"无法解析 gateway async 输出: {stdout!r}")
+    return request_id, response_path
+
+
+# LLM: _wait_for_async_gateway_response polls the response artifact instead of blocking the foreground CLI.
+# 函数用途: 长任务用 gateway 后台执行，Live Lab 定期读取 response 文件，避免宿主杀掉同步等待进程。
+def _wait_for_async_gateway_response(lab, response_path: Path, *, timeout_seconds: float) -> dict:
+    deadline = time.monotonic() + max(1.0, float(timeout_seconds))
+    last_note = 0.0
+    last_probe = 0.0
+    while time.monotonic() < deadline:
+        if response_path.exists():
+            try:
+                payload = json.loads(response_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                time.sleep(1.0)
+                continue
+            if payload:
+                return payload
+        now = time.monotonic()
+        if now - last_note >= 30:
+            lab.log(f"等待 async gateway response: {response_path}")
+            last_note = now
+        if now - last_probe >= 60:
+            _probe_foreground_main_agent(lab)
+            last_probe = now
+        time.sleep(2.0)
+    raise RuntimeError(f"gateway async response 未在 {timeout_seconds:g}s 内生成: {response_path}")
+
+
+# LLM: _async_gateway_wait_budget allows no-wait requests to survive multiple backend/tool rounds.
+# 函数用途: 异步长任务不占前台 subprocess；等待预算按 max_cycles 放大，覆盖分块写入和恢复轮次。
+def _async_gateway_wait_budget(lab) -> float:
+    cycles = max(1, int(getattr(lab.args, "max_cycles", 1) or 1))
+    return max(float(lab.args.timeout) + 180.0, float(lab.args.timeout) * cycles + 180.0)
+
+
+# LLM: _probe_foreground_main_agent verifies the chat lane stays responsive while background work runs.
+# 函数用途: 长任务异步执行期间，定时让主代理简短汇报状态；失败写日志，暴露 worker 池/会话解耦问题。
+def _probe_foreground_main_agent(lab) -> None:
+    prompt = "后台购物站任务现在什么状态？请只用一句话回复，不要创建新任务，不要改文件。"
+    result = lab.run_command(
+        lab.agent_command("gateway", "ask", prompt, "--timeout", "45", "--context-scope", "control_plane", "--json"),
+        timeout=60,
+        allow_fail=True,
+    )
+    if result.returncode == 0:
+        lab.log("foreground_probe=pass")
+        return
+    lab.log(f"foreground_probe=fail exit_code={result.returncode}")
 
 
 # LLM: _natural_shop_prompt keeps the stronger E2E phrased like a non-technical user request.
@@ -62,6 +136,7 @@ def _natural_shop_prompt() -> str:
 
         请把最终页面保存到 lab_outputs/shop-demo/index.html。
         页面里必须有真实的商品卡片、购物车区域、注册表单、登录表单、结算表单和下单成功区域。
+        这些业务区域请使用稳定 id：register、login、catalog、cart、checkout、order-confirmation。
         所有按钮都要能对应到真实动作，不要空链接、不要 disabled 按钮、不要只写一个摆设按钮。
         完成后请安排检查，确认文件存在、能作为网页打开、没有失效控件、没有外部资源依赖。
         最后告诉我保存路径和检查结果。
@@ -114,7 +189,15 @@ def _missing_shop_actions(lower_content: str) -> list[str]:
         "register": ("data-action=\"register", "data-action='register", "handleregister", "registeruser", "注册"),
         "login": ("data-action=\"login", "data-action='login", "handlelogin", "loginuser", "登录"),
         "add-to-cart": ("data-action=\"add-to-cart", "data-action='add-to-cart", "addtocart", "加入购物车"),
-        "checkout": ("data-action=\"checkout", "data-action='checkout", "proceedtocheckout", "handlecheckout", "去结算"),
+        "checkout": (
+            "data-action=\"checkout",
+            "data-action='checkout",
+            "proceedtocheckout",
+            "handlecheckout",
+            "getelementbyid('checkout-btn')",
+            'getelementbyid("checkout-btn")',
+            "去结算",
+        ),
         "place-order": ("data-action=\"place-order", "data-action='place-order", "placeorder", "handlecheckout", "下单成功"),
     }
     return [label for label, markers in required.items() if not _contains_any(lower_content, markers)]
@@ -143,6 +226,8 @@ def _assert_static_site_check_clean(fixture_root, site_root) -> None:
             "site_root": str(site_root),
             "required_files": ["index.html"],
             "require_complete_html": True,
+            "require_script": True,
+            "required_dom_ids": ["register", "login", "catalog", "cart", "checkout", "order-confirmation"],
         },
         fixture_root,
     )

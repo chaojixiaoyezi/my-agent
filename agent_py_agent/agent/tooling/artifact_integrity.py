@@ -150,14 +150,44 @@ def _check_html_text(text: str, *, require_complete: bool) -> ArtifactIntegrityD
         issues.append(_issue("multiple_body_close", "HTML 出现多个 </body> 结束标签。"))
     if html_count > 1:
         issues.append(_issue("multiple_html_close", "HTML 出现多个 </html> 结束标签。"))
+    if require_complete:
+        issues.extend(_html_skeleton_issues(lowered))
     if body_count and html_count and lowered.rfind("</body>") > lowered.rfind("</html>"):
         issues.append(_issue("body_close_after_html_close", "</body> 出现在 </html> 之后。"))
     if html_count:
         html_end = lowered.rfind("</html>") + len("</html>")
         if text[html_end:].strip():
             issues.append(_issue("content_after_html_close", "</html> 后面还有非空内容。"))
+    if require_complete:
+        issues.extend(_html_balanced_tag_issues(lowered))
     issues.extend(_html_link_issues(text))
     return _decision("html", issues)
+
+
+# LLM: _html_skeleton_issues is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _html_skeleton_issues(lowered: str) -> list[ArtifactIntegrityIssue]:
+    issues: list[ArtifactIntegrityIssue] = []
+    for tag in ("html", "head", "body"):
+        opens = len(re.findall(rf"<{tag}\b", lowered))
+        closes = lowered.count(f"</{tag}>")
+        if opens > 1:
+            issues.append(_issue(f"multiple_{tag}_open", f"HTML 出现多个 <{tag}> 起始标签。"))
+        if tag == "head" and closes > 1:
+            issues.append(_issue("multiple_head_close", "HTML 出现多个 </head> 结束标签。"))
+    return issues
+
+
+# LLM: _html_balanced_tag_issues is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _html_balanced_tag_issues(lowered: str) -> list[ArtifactIntegrityIssue]:
+    issues: list[ArtifactIntegrityIssue] = []
+    for tag in ("style", "script"):
+        opens = len(re.findall(rf"<{tag}\b", lowered))
+        closes = lowered.count(f"</{tag}>")
+        if opens != closes:
+            issues.append(_issue(f"unbalanced_{tag}", f"HTML 的 <{tag}> 和 </{tag}> 数量不一致。"))
+    return issues
 
 
 # LLM: _html_link_issues catches fake in-page links without turning this into a full browser validator.

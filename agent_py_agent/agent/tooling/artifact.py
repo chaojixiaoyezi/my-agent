@@ -50,6 +50,7 @@ class ReadArtifactTool(BaseTool):
         },
         examples=[
             '{"tool": "read_artifact", "artifact_ref": "C:/repo/memory_archive/artifacts/tool_outputs/read_file-call-abc.json", "offset": 0, "max_chars": 4000}',
+            '{"tool": "read_artifact", "artifact_ref": "run-1:1-1", "mode": "search", "query": "ALPHA-ANCHOR", "max_chars": 4000}',
         ],
     )
 

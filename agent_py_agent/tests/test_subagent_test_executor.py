@@ -132,6 +132,43 @@ def test_test_executor_content_check_matches_literal_pattern(tmp_path):
     assert record.validation_result["matched"] is True
 
 
+def test_test_executor_treats_artifact_integrity_check_as_real_validation(tmp_path):
+    (tmp_path / "index.html").write_text("<html><body><button>买入</button></body></html>", encoding="utf-8")
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute({
+        "name": "artifact integrity",
+        "validation_method": "artifact_integrity",
+        "file_path": "index.html",
+    })
+
+    assert record.executed is True
+    assert record.passed is True
+    assert record.exit_code == 0
+    assert record.validation_method == "artifact_integrity"
+    assert record.validation_result["ok"] is True
+    assert record.validation_result["kind"] == "html"
+    assert record.validation_result["blocker_codes"] == []
+
+
+def test_test_executor_artifact_integrity_reports_machine_codes(tmp_path):
+    (tmp_path / "index.html").write_text("<html><body><main>未完成", encoding="utf-8")
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute({
+        "name": "artifact integrity",
+        "validation_method": "artifact_integrity",
+        "file_path": "index.html",
+    })
+
+    assert record.executed is True
+    assert record.passed is False
+    assert record.exit_code == 1
+    assert record.validation_result["ok"] is False
+    assert record.validation_result["blocker_codes"] == ["missing_body_close", "missing_html_close"]
+    assert "missing_body_close" in record.error
+
+
 # LLM: negative content checks protect repair runs from inverted no-bad-ref assertions.
 # 函数用途: 负向内容检查必须显式写 match_mode=not_contains，不能靠测试名里的自然语言判断。
 def test_test_executor_content_check_supports_explicit_negative_contains(tmp_path):

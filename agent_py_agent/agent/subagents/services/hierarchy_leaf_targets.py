@@ -114,7 +114,7 @@ def _target_tokens_from_attributes(attributes: dict[str, object]) -> set[str]:
     if not isinstance(attributes, dict):
         return set()
     targets: set[str] = set()
-    for field in ("output_refs", "output_files", "artifact_refs"):
+    for field in ("output_refs", "output_files", "artifact_refs", "required_read_paths"):
         targets.update(_target_tokens_from_output_values(attributes.get(field)))
     return targets
 

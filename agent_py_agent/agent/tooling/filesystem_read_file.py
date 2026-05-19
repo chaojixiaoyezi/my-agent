@@ -10,6 +10,10 @@ from .filesystem_artifact_guard import allowed_tools_hint_param, tool_output_art
 from .filesystem_structured_read import structured_read_summary
 from .models import ToolExecutionResult
 
+_LARGE_FILE_DIRECT_READ_BYTES = 2 * 1024 * 1024
+_LOG_SEARCH_QUERIES = "ERROR,WARN,trace,timeout,exception,failed"
+_DEFAULT_SEARCH_QUERIES = "TODO,FIXME,error,warning,trace,failed"
+
 
 # LLM: execute_read_file carries the full read_file behavior for FileSystemTool subclasses.
 # 函数用途: 解析 read_file 参数、校验 artifact 读取边界、读取文本并按行号/字符预算返回结果。
@@ -30,6 +34,9 @@ def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolExecu
         return ToolExecutionResult("read_file", False, f"文件不存在: {tool.display_path(target)}")
     if not target.is_file():
         return ToolExecutionResult("read_file", False, f"目标不是文件: {tool.display_path(target)}")
+    large_file_summary = _large_file_read_summary(tool, target, params)
+    if large_file_summary:
+        return ToolExecutionResult("read_file", True, large_file_summary)
     try:
         content = target.read_text(encoding="utf-8")
     except UnicodeDecodeError:
@@ -38,6 +45,49 @@ def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolExecu
     if summary:
         return ToolExecutionResult("read_file", True, summary)
     return _numbered_text_result(content, params, max_chars)
+
+
+# LLM: _large_file_read_summary blocks wasteful direct reads and returns a structured next-step policy.
+# 函数用途: 对未指定行号的大文件返回搜索/行号读取建议，避免把无效开头塞进模型上下文。
+def _large_file_read_summary(tool, target, params: dict[str, Any]) -> str:
+    if _has_explicit_line_range(params):
+        return ""
+    try:
+        size_bytes = target.stat().st_size
+    except OSError:
+        return ""
+    if size_bytes <= _LARGE_FILE_DIRECT_READ_BYTES:
+        return ""
+    return "\n".join(
+        [
+            "large_file_summary=true",
+            f"path={tool.display_path(target)}",
+            f"size_bytes={size_bytes}",
+            f"direct_read_limit_bytes={_LARGE_FILE_DIRECT_READ_BYTES}",
+            "read_policy=large_file_use_search_or_line_range",
+            "suggested_next_tools=search_text,read_file",
+            f"suggested_search_queries={_suggested_large_file_queries(target)}",
+            "search_text_params=path:<this_file>, query:<keyword>, context:2, limit:20",
+            "read_file_params=path:<this_file>, start_line:<line>, end_line:<line>",
+        ]
+    )
+
+
+# LLM: _has_explicit_line_range keeps intentional paged reads from being intercepted by large-file policy.
+# 函数用途: 判断调用方是否明确给了 start_line/end_line；显式行号读取仍按普通 read_file 执行。
+def _has_explicit_line_range(params: dict[str, Any]) -> bool:
+    return (
+        _bundled_filesystem_param(params, "start_line") is not None
+        or _bundled_filesystem_param(params, "end_line") is not None
+    )
+
+
+# LLM: _suggested_large_file_queries maps file shape to deterministic search seeds.
+# 函数用途: 按文件扩展名给出结构化搜索关键词，不从用户自然语言里推断执行规则。
+def _suggested_large_file_queries(target) -> str:
+    if target.suffix.lower() in {".log", ".out", ".err"}:
+        return _LOG_SEARCH_QUERIES
+    return _DEFAULT_SEARCH_QUERIES
 
 
 # LLM: _numbered_text_result turns raw text into bounded line-aware output.

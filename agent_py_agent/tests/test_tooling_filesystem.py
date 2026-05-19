@@ -276,6 +276,28 @@ class TestReadFileTool:
         assert result.ok is True
         assert "已截断" in result.output
 
+    def test_read_file_large_log_returns_search_policy_without_bulk_read(self, tmp_path: Path):
+        """大日志默认返回结构化读取策略，避免模型读到无效开头后卡死。"""
+        from agent_py_agent.agent.tooling.filesystem import ReadFileTool
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        huge_log = workspace / "huge.log"
+        huge_log.write_text(
+            "warmup filler\n" * 220_000
+            + "ERROR service=payment trace=trace-9f42 code=PAYMENT_TIMEOUT\n",
+            encoding="utf-8",
+        )
+
+        result = ReadFileTool(workspace, max_chars=2000).execute({"path": "huge.log"})
+
+        assert result.ok is True
+        assert "large_file_summary=true" in result.output
+        assert "read_policy=large_file_use_search_or_line_range" in result.output
+        assert "suggested_next_tools=search_text,read_file" in result.output
+        assert "suggested_search_queries=ERROR,WARN,trace,timeout,exception,failed" in result.output
+        assert "1: warmup filler" not in result.output
+
     def test_read_file_empty(self, tmp_path: Path):
         """读取空文件。"""
         from agent_py_agent.agent.tooling.filesystem import ReadFileTool

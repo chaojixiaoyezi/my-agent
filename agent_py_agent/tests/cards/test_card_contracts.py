@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -10,7 +11,9 @@ from agent_py_agent.agent.cards import (
     NotificationRouteCard,
     ProgressPolicyCard,
     SessionCard,
+    SubagentRunCard,
     TaskStatus,
+    WorkerRunCard,
 )
 
 
@@ -147,3 +150,82 @@ def test_session_card_persists_active_task_links(tmp_path):
     reloaded = store.get_session("sess-1")
     assert reloaded.user_id == "user-1"
     assert reloaded.active_task_ids == [task.task_id]
+
+
+def test_terminal_task_is_removed_from_session_active_list(tmp_path):
+    store = CardStore(tmp_path)
+    store.save_session(SessionCard(session_id="sess-1", user_id="user-1", channel="chat"))
+    task = store.create_task(goal="long task", user_id="user-1", session_id="sess-1")
+    store.attach_task_to_session("sess-1", task.task_id)
+
+    store.update_task_status(task.task_id, TaskStatus.COMPLETED)
+
+    assert store.get_session("sess-1").active_task_ids == []
+    assert store.list_events(task.task_id)[-2].event_type == "session.task_detached"
+
+
+def test_concurrent_session_attach_keeps_all_task_links(tmp_path):
+    store = CardStore(tmp_path)
+    store.save_session(SessionCard(session_id="sess-1", user_id="user-1", channel="chat"))
+    tasks = [
+        store.create_task(goal=f"task {index}", user_id="user-1", session_id="sess-1")
+        for index in range(12)
+    ]
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(lambda task: store.attach_task_to_session("sess-1", task.task_id), tasks))
+
+    assert set(store.get_session("sess-1").active_task_ids) == {task.task_id for task in tasks}
+
+
+def test_worker_run_card_persists_execution_attempt(tmp_path):
+    store = CardStore(tmp_path)
+    task = store.create_task(goal="background work", user_id="user-1", session_id="sess-1")
+    worker_run = store.create_worker_run(
+        task_id=task.task_id,
+        worker_id="worker-1",
+        worker_type="task_agent",
+        lease_id="lease-1",
+    )
+
+    reloaded = store.get_worker_run(worker_run.worker_run_id)
+
+    assert isinstance(reloaded, WorkerRunCard)
+    assert reloaded.task_id == task.task_id
+    assert reloaded.worker_id == "worker-1"
+    assert store.list_worker_runs(task.task_id)[0].lease_id == "lease-1"
+
+
+def test_subagent_run_record_tracks_child_session_and_pending_delivery(tmp_path):
+    store = CardStore(tmp_path)
+    run = store.create_subagent_run(
+        requester_session_id="sess-parent",
+        child_session_id="sess-child",
+        task_id="task-1",
+        goal="research and write",
+        controller_session_id="sess-parent",
+        label="researcher",
+        mode="session",
+        context_mode="fork",
+        expects_completion_message=True,
+        metadata={"spawn_depth": 1},
+    )
+
+    store.mark_subagent_started(run.run_id)
+    ended = store.mark_subagent_completed(
+        run.run_id,
+        outcome="ok",
+        artifact_refs=["artifact://report"],
+        pending_final_delivery=True,
+    )
+
+    reloaded = store.get_subagent_run(run.run_id)
+    assert isinstance(reloaded, SubagentRunCard)
+    assert reloaded.child_session_id == "sess-child"
+    assert reloaded.requester_session_id == "sess-parent"
+    assert reloaded.status == "completed"
+    assert reloaded.outcome == "ok"
+    assert reloaded.artifact_refs == ["artifact://report"]
+    assert ended.pending_final_delivery is True
+    assert store.list_subagent_runs(requester_session_id="sess-parent") == [reloaded]
+    assert store.list_pending_final_delivery()[0].run_id == run.run_id

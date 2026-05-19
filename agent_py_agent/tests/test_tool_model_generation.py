@@ -69,9 +69,21 @@ class _StreamingLongWriteBackend:
         return ModelResponse(text=text, backend=self.name)
 
 
+class _CapturingTimeoutBackend:
+    name = "capturing-timeout-test-backend"
+
+    def __init__(self) -> None:
+        self.request_timeout = 3
+        self.seen_timeout = None
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.seen_timeout = self.request_timeout
+        return ModelResponse(text=f"timeout={self.request_timeout}", backend=self.name)
+
+
 # LLM: _tool_loop_params returns the smallest valid tool-loop bundle for generation tests.
 # 函数用途: 构造 generate_model_response 所需参数包，避免每个测试重复填一长串字段。
-def _tool_loop_params() -> ToolLoopExecuteParams:
+def _tool_loop_params(*, model_request_timeout_seconds: float | None = None) -> ToolLoopExecuteParams:
     return ToolLoopExecuteParams(
         user_prompt="",
         memories=[],
@@ -91,6 +103,7 @@ def _tool_loop_params() -> ToolLoopExecuteParams:
         one_shot_tool_calls=set(),
         executed_tools=[],
         archive_tool_calls=[],
+        model_request_timeout_seconds=model_request_timeout_seconds,
     )
 
 
@@ -117,6 +130,28 @@ def test_model_generate_enforces_request_timeout_when_backend_blocks():
 
     assert backend.entered.is_set()
     assert time.monotonic() - started < 0.06
+
+
+def test_model_generate_uses_per_run_timeout_for_background_requests():
+    backend = _CapturingTimeoutBackend()
+    agent = SimpleNamespace(
+        backend=backend,
+        config=SimpleNamespace(request_timeout=1, tool_write_inline_max_chars=0),
+        _current_subagent_run_id="",
+    )
+
+    response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=_tool_loop_params(model_request_timeout_seconds=42),
+            prompt="hello",
+            tool_rounds=0,
+        )
+    )
+
+    assert response.text == "timeout=42"
+    assert backend.seen_timeout == 42
+    assert backend.request_timeout == 3
 
 
 # LLM: large write_file payloads fail before the tool layer can help unless the stream boundary intervenes.

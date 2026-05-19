@@ -9,9 +9,12 @@ from .models import (
     NotificationRouteCard,
     ProgressPolicyCard,
     SessionCard,
+    SubagentRunCard,
+    SubagentRunStatus,
     TaskCard,
     TaskStatus,
     WorkerCard,
+    WorkerRunCard,
     new_card_id,
 )
 from .store import CardStore
@@ -24,8 +27,11 @@ __all__ = [
     "NotificationRouteCard",
     "ProgressPolicyCard",
     "SessionCard",
+    "SubagentRunCard",
+    "SubagentRunStatus",
     "TaskCard",
     "TaskStatus",
     "WorkerCard",
+    "WorkerRunCard",
     "new_card_id",
 ]

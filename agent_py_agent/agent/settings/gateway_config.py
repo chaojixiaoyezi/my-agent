@@ -22,7 +22,9 @@ class GatewayConfig:
     gateway_stop_timeout: int = 20
     gateway_request_timeout: int = 300
     gateway_request_poll_interval: int = 1
-    gateway_request_workers: int = 1
+    gateway_request_workers: int = 2
+    gateway_foreground_reserved_workers: int = 1
+    gateway_background_model_request_timeout: int = 900
     gateway_processing_timeout_seconds: int = 900
     gateway_request_max_attempts: int = 2
     gateway_port: int = 8420

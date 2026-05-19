@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from agent_py_agent.agent.agent_core.orchestration_tool_specs import build_create_subagents_spec
+
 
 class TestCreateSubagentsToolDelegationGuard:
     """测试派工目标不能反转父级结构化交付约束。"""
@@ -88,6 +90,21 @@ class TestCreateSubagentsToolDelegationGuard:
 class TestCreateSubagentsToolRawPromptRepair:
     """测试 root seed 能从原始用户 prompt 补回结构化硬合同。"""
 
+    def test_create_subagents_spec_exposes_static_contract_fields(self):
+        """网页验收字段必须在工具 schema 中可见，模型才会把自然需求翻译成机器合同。"""
+        spec = build_create_subagents_spec()
+
+        assert "required_files" in spec.parameters
+        assert "required_dom_ids" in spec.parameters
+        assert "require_script" in spec.parameters
+        assert "required_files" in spec.parameter_details
+        assert "required_dom_ids" in spec.parameter_details
+        assert "require_script" in spec.parameter_details
+        assert "不要只把路径/id/交互要求写进 goal" in spec.description
+        assert "多个不同事项必须一次传 items/tasks" in spec.description
+        assert "不要只放在 goal" in spec.parameter_details["required_dom_ids"]
+        assert "注册、登录、购物车、结算" in spec.parameter_details["require_script"]
+
     def test_explicit_coordinator_seed_without_name_gets_lineage_prefix(self):
         """模型没传 agent_name 时，第一层 root/coordinator 也必须有小傻妞前缀。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
@@ -142,6 +159,7 @@ class TestCreateSubagentsToolRawPromptRepair:
             "role": "coordinator",
             "extra_write_roots": ["/tmp/shop/build"],
             "required_files": ["index.html", "products.html", "product-detail.html", "style.css", "app.js"],
+            "require_script": True,
             "forbidden_files": [
                 "product.html", "old-product.html", "legacy.html", "obsolete.html",
                 "output.json", "RUNNER_RESULT.md", "execution_context.json",
@@ -152,6 +170,7 @@ class TestCreateSubagentsToolRawPromptRepair:
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
         assert params.attributes["forbidden_files"][-2:] == ["RUNNER_RESULT.md", "execution_context.json"]
+        assert params.attributes["require_script"] is True
         assert "depth=3 小小小傻妞-*" in params.attributes["hierarchy_contracts"]
 
     def test_explicit_coordinator_seed_repairs_wrong_lineage_summary_from_raw_prompt(self):

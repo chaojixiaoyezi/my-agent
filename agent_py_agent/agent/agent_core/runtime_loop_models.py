@@ -32,6 +32,8 @@ class RunParams:
     compact_auto_continue_depth: int = 0
     compact_auto_continue_max_depth: int = 1
     context_scope: str = "default"
+    background_intake: bool = False
+    model_request_timeout_seconds: float | None = None
 
 
 # LLM: RuntimeContextRequest bundles runtime context preparation inputs.
@@ -74,6 +76,8 @@ class RuntimeLoopParams:
     task_id: str = ""
     source: str = "run"
     context_scope: str = "default"
+    background_intake: bool = False
+    model_request_timeout_seconds: float | None = None
 
 
 # LLM: FinalizeParams carries finalization facts after a run loop completes.

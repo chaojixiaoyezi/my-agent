@@ -115,6 +115,13 @@ def _issue_weight(issue: DueCheckIssue) -> int:
         "missing_work_order_files": 90,
         "fake_done_risk": 85,
         "run_timeout": 80,
+        "status_provider_timeout": 80,
+        "status_artifact_integrity_failed": 79,
+        "artifact_repair_failed": 79,
+        "artifact_integrity_repair_completed": 78,
+        "parent_acceptance_test_failed": 79,
+        "parent_acceptance_repair_failed": 79,
+        "parent_acceptance_repair_completed": 78,
         "no_progress_fuse": 78,
         "coordinator_needs_leadership_recovery": 77,
         "heartbeat_stale": 70,
@@ -150,8 +157,20 @@ def _action_for_issue(issue: DueCheckIssue) -> tuple[str, int, str]:
         return "reopen_for_evidence", 940, "BLOCKED"
     if kind == "unverified_done":
         return "run_acceptance", 760, ""
-    if kind in {"run_timeout", "heartbeat_stale", "status_timeout"}:
+    if kind in {"run_timeout", "heartbeat_stale", "status_timeout", "status_provider_timeout"}:
         return "takeover_or_reassign", 900, "TIMEOUT"
+    if kind == "artifact_repair_failed":
+        return "takeover_or_reassign", 900, "BLOCKED"
+    if kind == "status_artifact_integrity_failed":
+        return "create_repair_child_from_artifact_integrity_refs", 890, "BLOCKED"
+    if kind == "artifact_integrity_repair_completed":
+        return "close_parent_from_verified_repair_child", 880, "DONE"
+    if kind == "parent_acceptance_test_failed":
+        return "create_repair_child_from_parent_acceptance_refs", 890, "BLOCKED"
+    if kind == "parent_acceptance_repair_failed":
+        return "takeover_or_reassign", 900, "BLOCKED"
+    if kind == "parent_acceptance_repair_completed":
+        return "close_parent_from_verified_repair_child", 880, "DONE"
     if kind == "no_progress_fuse":
         return "stop_no_progress_and_escalate", 990, ""
     if kind == "coordinator_needs_leadership_recovery":
@@ -256,7 +275,11 @@ def _capability_kind_limit_reached(
 # LLM: _capability_hit_is_confident 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 函数用途: 处理能力hitisconfident相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _capability_hit_is_confident(hit: CapabilitySearchHit) -> bool:
-    return hit.score >= 4.0
+    if hit.score >= 5.0:
+        return True
+    if hit.score < 4.0:
+        return False
+    return any(not str(reason or "").startswith("命中描述") for reason in getattr(hit, "reasons", []) or [])
 # LLM: _route_card_payload 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 函数用途: 处理routecard载荷相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _route_card_payload(hit: CapabilitySearchHit) -> dict[str, str]:

@@ -21,8 +21,7 @@ _MAX_FAILED_LABELS = 6
 # LLM: parent_acceptance_repair_advice_payload is advisory and never creates child tasks itself.
 # 函数用途: 扫描直接 child 的 acceptance/test/followup refs；有父级验收拒绝时返回 scoped repair 建议。
 def parent_acceptance_repair_advice_payload(children: list[Any]) -> dict[str, object]:
-    signals = [_repair_signal(item) for item in children]
-    signals = [item for item in signals if item]
+    signals = parent_acceptance_repair_signals_from_tasks(children)
     if not signals:
         return {}
     failed_ids = [str(item["run_id"]) for item in signals if item.get("run_id")]
@@ -46,6 +45,13 @@ def parent_acceptance_repair_advice_payload(children: list[Any]) -> dict[str, ob
 def parent_acceptance_rejected(item: Any) -> bool:
     payload = _read_json(_acceptance_ref(item))
     return str(payload.get("decision") or "").upper() == "REJECT"
+
+
+# LLM: parent_acceptance_repair_signals_from_tasks exposes the same refs-first facts to action apply.
+# 函数用途: 让 due-check/action handler 复用父级验收失败信号，避免一套给模型、一套给系统。
+def parent_acceptance_repair_signals_from_tasks(children: list[Any]) -> list[dict[str, object]]:
+    signals = [_repair_signal(item) for item in children]
+    return [item for item in signals if item]
 
 
 # LLM: _repair_signal extracts bounded facts from one rejected child.
@@ -216,6 +222,10 @@ def _test_target_refs(path: Path) -> list[str]:
         result = record.get("validation_result")
         if isinstance(result, dict):
             refs.append(str(result.get("path") or ""))
+            root = str(result.get("checked_root") or "").strip()
+            for file_name in result.get("checked_files") or []:
+                if root and file_name:
+                    refs.append(str(Path(root) / str(file_name)))
     return _unique_text(refs)
 
 
@@ -316,4 +326,5 @@ def _unique_text(values: list[str]) -> list[str]:
 __all__ = [
     "parent_acceptance_rejected",
     "parent_acceptance_repair_advice_payload",
+    "parent_acceptance_repair_signals_from_tasks",
 ]

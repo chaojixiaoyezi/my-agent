@@ -14,7 +14,7 @@ import argparse
 import subprocess
 import sys
 
-from .constants import DEFAULT_CONFIG, DEFAULT_RUNS_DIR, SUITES
+from .constants import DEFAULT_CAPABILITY_CONFIG, DEFAULT_CONFIG, DEFAULT_RUNS_DIR, SUITES
 from .runner import LiveLab
 
 
@@ -43,6 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="允许调用当前配置里的真实模型后端；不传时会临时覆盖成 echo。",
     )
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="源配置文件，默认使用项目 agent_config.yaml。")
+    parser.add_argument(
+        "--capability-config",
+        default=str(DEFAULT_CAPABILITY_CONFIG),
+        help="源能力配置文件，Live Lab 会复制到本轮隔离目录后再运行。",
+    )
     parser.add_argument("--runs-dir", default=str(DEFAULT_RUNS_DIR), help="Live Lab 输出根目录。")
     parser.add_argument("--run-id", help="指定本轮输出目录名；默认用时间戳。")
     parser.add_argument("--timeout", type=float, default=300.0, help="单个 gateway ask / scenario 等待秒数。")
@@ -105,3 +110,7 @@ def main(argv: list[str] | None = None) -> int:
             return lab.write_summary()
         print(f"Live Lab 启动失败: {exc}", file=sys.stderr)
         return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

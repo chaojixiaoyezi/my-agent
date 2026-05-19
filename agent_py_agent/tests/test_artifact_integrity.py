@@ -58,6 +58,40 @@ def test_artifact_integrity_detects_content_after_html_close(tmp_path: Path) -> 
     assert "content_after_html_close" in result.blocker_codes
 
 
+# LLM: artifact integrity must catch CSS blocks left open before static site acceptance.
+# 函数用途: 复现真实购物站产物 `<style>` 未闭合，防止坏 HTML 进入更晚的父级验收才暴露。
+def test_artifact_integrity_detects_unbalanced_style_tag(tmp_path: Path) -> None:
+    artifact = tmp_path / "artifacts" / "index.html"
+    artifact.parent.mkdir()
+    artifact.write_text(
+        "<!doctype html><html><head><style>.hero{display:block}</head><body>done</body></html>",
+        encoding="utf-8",
+    )
+
+    result = check_artifact_integrity(ArtifactIntegrityCheckRequest(path=artifact, require_complete=True))
+
+    assert not result.ok
+    assert "unbalanced_style" in result.blocker_codes
+
+
+def test_artifact_integrity_detects_duplicate_html_skeleton(tmp_path: Path) -> None:
+    artifact = tmp_path / "artifacts" / "index.html"
+    artifact.parent.mkdir()
+    artifact.write_text(
+        (
+            "<!doctype html><html><head><title>One</title></head><body><main>One</main>"
+            "<head><title>Two</title></head><body><main>Two</main></body></html>"
+        ),
+        encoding="utf-8",
+    )
+
+    result = check_artifact_integrity(ArtifactIntegrityCheckRequest(path=artifact, require_complete=True))
+
+    assert not result.ok
+    assert "multiple_head_open" in result.blocker_codes
+    assert "multiple_body_open" in result.blocker_codes
+
+
 # LLM: post-write feedback should point models at fake hash links before parent acceptance.
 # 函数用途: 写 HTML 后即时提示 href="#"，减少 runner 写完后继续空转或把假链接报成完成。
 def test_html_post_write_note_warns_placeholder_hash_links(tmp_path: Path) -> None:

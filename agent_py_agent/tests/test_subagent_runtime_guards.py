@@ -202,6 +202,30 @@ def test_dispatch_closeout_treats_verified_repair_target_as_resolved(tmp_path):
     assert "done_verified: 2" in response.text
 
 
+# LLM: required_read_paths is a structured repair target and should participate in sibling coverage.
+# 函数用途: 复现真实购物站 E2E：旧验收修复任务只记录 required_read_paths，后续 verified 修复已覆盖同一 index.html。
+def test_dispatch_closeout_treats_required_read_path_target_as_resolved(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    stale = manager.create_run(goal="repair validation failure", thought="old repair", plan=["fix"])
+    verified = manager.create_run(goal="rewrite index", thought="new repair", plan=["fix"])
+    artifact = tmp_path / "lab_outputs" / "shop-demo" / "index.html"
+    stale.attributes = {"required_read_paths": [str(artifact)]}
+    verified.attributes = {"output_files": ["lab_outputs/shop-demo/index.html"]}
+    stale.status = "TIMEOUT"
+    stale.verification_status = "UNVERIFIED"
+    verified.status = "DONE"
+    verified.verification_status = "VERIFIED"
+    manager.save(stale)
+    manager.save(verified)
+    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id="")
+
+    response = subagent_dispatch_limit_response(agent, backend="test")
+
+    assert response is not None
+    assert "blocking_run_ids: (none)" in response.text
+    assert "done_verified: 2" in response.text
+
+
 # LLM: Broad repair output files_modified refs should resolve stale originals once all touched files are verified.
 # 函数用途: 一个修复代理改了多个页面后，即使自身仍停在待验收，若页面已有 VERIFIED 覆盖，也不能拖住最终账本。
 def test_dispatch_closeout_treats_multi_file_repair_as_resolved_by_verified_outputs(tmp_path):
@@ -351,6 +375,33 @@ def test_dispatch_round_grants_one_parent_acceptance_repair_turn(tmp_path):
     assert "尚未完整通过" in second.text
     assert "不能按完成汇报" in second.text
     assert task.id in second.text
+
+
+# LLM: Background intake must release the gateway request worker after deferred dispatch.
+# 函数用途: no-wait 后台接单允许多轮创建任务卡，但 dispatch 后不能继续占住 request worker 跑自由模型收口。
+def test_background_intake_closes_after_dispatch_tool_round():
+    base = _tool_loop_params("安排后台长任务")
+    params = ToolLoopExecuteParams(
+        **{
+            **base.__dict__,
+            "background_intake": True,
+            "executed_tools": ["dispatch_subagents"],
+        }
+    )
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=SimpleNamespace(),
+            params=params,
+            response=ModelResponse(text="[TOOL_CALL dispatch_subagents]", backend="test"),
+            before_executed_count=0,
+            subagent_output_written=False,
+        )
+    )
+
+    assert response is not None
+    assert "background_intake" in response.text
+    assert "dispatch_subagents" in response.text
 
 
 # LLM: Final model text must not claim completion when a requested acceptor role never ran.

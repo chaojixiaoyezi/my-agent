@@ -212,6 +212,31 @@ def test_repair_contract_idempotency_reuses_same_scope_with_reworded_goal(tmp_pa
     assert second["dispatch_run_ids"] == first["created_run_ids"]
 
 
+# LLM: Top-level repair create calls must preserve the failed run lineage.
+# 函数用途: root 按 parent_acceptance repair_contract 调用 create_subagents 时，工具层应自动把 repair 挂到失败 run 下。
+def test_repair_contract_create_infers_failed_run_as_parent(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _mock_workspace_agent(tmp_path)
+    failed = agent.subagents.create_run(goal="原购物站 worker", thought="old", plan=["write"])
+    failed.status = "AWAITING_ACCEPTANCE"
+    failed.verification_status = "NEEDS_ACCEPTANCE"
+    agent.subagents.save(failed)
+
+    payload = json.loads(
+        CreateSubagentsTool(agent)
+        .execute(_repair_create_params(failed.id, "lab_outputs/shop-demo/index.html"))
+        .output
+    )
+    repair = agent.subagents.load(payload["created_run_ids"][0])
+    reloaded_failed = agent.subagents.load(failed.id)
+
+    assert repair.parent_id == failed.id
+    assert repair.root_id == failed.root_id
+    assert repair.depth == failed.depth + 1
+    assert repair.id in reloaded_failed.child_ids
+
+
 def test_generic_worker_without_idempotency_contract_does_not_reuse_by_goal_text(tmp_path):
     """LLM: Repeating identical goal prose is not a machine fact for create_subagents reuse."""
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool

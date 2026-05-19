@@ -47,6 +47,9 @@ def mock_manager(tmp_path):
         def save(self, task: SubAgentTask) -> None:
             self._tasks[task.id] = task
 
+        def list_runs(self):
+            return list(self._tasks.values())
+
         def _build_work_order_paths(self, run_id: str, task_dir=None):
             return {}
 
@@ -188,6 +191,54 @@ def test_record_runner_result_with_parsed_output(mock_manager, sample_task):
 
     assert result.ok is True
     assert result.structured_output_found is True
+
+
+def test_record_runner_result_abandons_superseded_artifact_repair_child(mock_manager, sample_task, tmp_path):
+    mock_manager._tasks[sample_task.id] = sample_task
+    sample_task.status = "BLOCKED"
+    sample_task.failure_type = "artifact_integrity_failed"
+    sample_task.child_ids = ["repair-1"]
+
+    repair = SubAgentTask(
+        id="repair-1",
+        goal="修复产物",
+        thought="",
+        plan=[],
+        parent_id=sample_task.id,
+        root_id=sample_task.id,
+        status="PLANNING",
+        verification_status="UNVERIFIED",
+        attributes={
+            "repair_kind": "artifact_integrity",
+            "repair_source_run_id": sample_task.id,
+        },
+    )
+    repair.task_dir = str(tmp_path / "repair-1")
+    repair.work_log_file = str(tmp_path / "repair-1" / "WORK_LOG.md")
+    mock_manager._tasks[repair.id] = repair
+
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="AWAITING_ACCEPTANCE",
+        summary="源 run 后续已产生完整产物",
+        artifacts=[{"path": str(tmp_path / "index.html"), "kind": "file"}],
+        tests=[{"name": "artifact integrity", "validation_method": "artifact_integrity", "ok": True}],
+    )
+
+    result = mock_manager.record_runner_result(_rrr(
+        run_id=sample_task.id,
+        dry_run=False,
+        ok=True,
+        message="完成",
+        structured_output=parsed,
+    ))
+
+    assert result.status == "AWAITING_ACCEPTANCE"
+    assert repair.status == "ABANDONED"
+    assert repair.verification_status == "VERIFIED"
+    assert repair.attributes["superseded_by_run_id"] == sample_task.id
 
 
 # LLM: A runner that claims a missing artifact must not enter the parent-readable acceptance lane.

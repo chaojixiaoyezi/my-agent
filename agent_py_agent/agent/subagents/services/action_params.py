@@ -26,3 +26,4 @@ class RecordAfterTaskActionParams:
     before_channel_status: str
     message: str
     evidence_paths: list[str] | None = None
+    created_run_ids: list[str] | None = None

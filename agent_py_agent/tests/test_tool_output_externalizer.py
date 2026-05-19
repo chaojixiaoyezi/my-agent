@@ -79,6 +79,7 @@ def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) ->
     assert "output_call_id: 1-1" in params.tool_context[-1]
     assert "output_scoped_call_id: run-tool:1-1" in params.tool_context[-1]
     assert f'read_artifact", "artifact_ref": "{artifact_path}"' in params.tool_context[-1]
+    assert '"mode": "search"' in params.tool_context[-1]
     assert '"run_id": "run-tool"' in params.tool_context[-1]
     assert "完整工具输出已外置" in params.tool_context[-1]
     assert record["fail_safe_checkpoint_path"] in params.tool_context[-1]

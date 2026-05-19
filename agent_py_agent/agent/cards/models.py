@@ -22,6 +22,16 @@ class TaskStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+# LLM: SubagentRunStatus is serialized into SubagentRunCard records and event payloads.
+# 类用途: 表示 session 化子代理运行记录的生命周期状态。
+class SubagentRunStatus(StrEnum):
+    CREATED = "created"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    KILLED = "killed"
+
+
 TERMINAL_STATUSES = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
 
 
@@ -134,6 +144,88 @@ class WorkerCard(CardModel):
     active_task_id: str | None = None
     heartbeat_at: float = field(default_factory=now_ts)
     status: str = "idle"
+
+
+ # LLM: WorkerRunCard records one concrete execution attempt for a logical task.
+ # 类用途: 把“哪个 worker 在什么时候跑了哪个 task”落成可恢复、可审计的运行记录。
+@dataclass
+class WorkerRunCard(CardModel):
+    worker_run_id: str = ""
+    task_id: str = ""
+    worker_id: str = ""
+    worker_type: str = "task_agent"
+    lease_id: str | None = None
+    status: str = "running"
+    started_at: float = field(default_factory=now_ts)
+    finished_at: float | None = None
+
+    # LLM: WorkerRunCard.from_dict restores execution attempts for recovery dashboards.
+    # 函数用途: 从磁盘字典恢复 WorkerRunCard。
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> WorkerRunCard:
+        return cls(
+            worker_run_id=str(payload.get("worker_run_id", "")),
+            task_id=str(payload.get("task_id", "")),
+            worker_id=str(payload.get("worker_id", "")),
+            worker_type=str(payload.get("worker_type", "task_agent")),
+            lease_id=payload.get("lease_id"),
+            status=str(payload.get("status", "running")),
+            started_at=float(payload.get("started_at", now_ts())),
+            finished_at=payload.get("finished_at"),
+            created_at=float(payload.get("created_at", now_ts())),
+            updated_at=float(payload.get("updated_at", now_ts())),
+            metadata=dict(payload.get("metadata") or {}),
+        )
+
+
+# LLM: SubagentRunCard mirrors the 通道运行时 subagent run registry in local card form.
+# 类用途: 记录父 session、子 session、任务、产物和最终交付状态，防止子代理假完成或失联。
+@dataclass
+class SubagentRunCard(CardModel):
+    run_id: str = ""
+    requester_session_id: str = ""
+    child_session_id: str = ""
+    controller_session_id: str = ""
+    task_id: str = ""
+    goal: str = ""
+    label: str = ""
+    mode: str = "run"
+    context_mode: str = "isolated"
+    cleanup: str = "keep"
+    status: SubagentRunStatus = SubagentRunStatus.CREATED
+    outcome: str = ""
+    artifact_refs: list[str] = field(default_factory=list)
+    expects_completion_message: bool = False
+    pending_final_delivery: bool = False
+    started_at: float | None = None
+    ended_at: float | None = None
+
+    # LLM: SubagentRunCard.from_dict restores persisted subagent run facts for recovery and control-plane reads.
+    # 函数用途: 从磁盘字典恢复 session 化子代理运行记录。
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> SubagentRunCard:
+        return cls(
+            run_id=str(payload.get("run_id", "")),
+            requester_session_id=str(payload.get("requester_session_id", "")),
+            child_session_id=str(payload.get("child_session_id", "")),
+            controller_session_id=str(payload.get("controller_session_id", "")),
+            task_id=str(payload.get("task_id", "")),
+            goal=str(payload.get("goal", "")),
+            label=str(payload.get("label", "")),
+            mode=str(payload.get("mode", "run")),
+            context_mode=str(payload.get("context_mode", "isolated")),
+            cleanup=str(payload.get("cleanup", "keep")),
+            status=SubagentRunStatus(str(payload.get("status", SubagentRunStatus.CREATED))),
+            outcome=str(payload.get("outcome", "")),
+            artifact_refs=list(payload.get("artifact_refs") or []),
+            expects_completion_message=bool(payload.get("expects_completion_message", False)),
+            pending_final_delivery=bool(payload.get("pending_final_delivery", False)),
+            started_at=payload.get("started_at"),
+            ended_at=payload.get("ended_at"),
+            created_at=float(payload.get("created_at", now_ts())),
+            updated_at=float(payload.get("updated_at", now_ts())),
+            metadata=dict(payload.get("metadata") or {}),
+        )
 
 
  # LLM: LeaseCard guards exclusive resource claims across local workers.
