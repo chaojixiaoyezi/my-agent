@@ -4,82 +4,20 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
-from dataclasses import dataclass, field
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
-from ..action_protocol_core import ArtifactRef
+from .artifact_acceptance_models import (
+    ArtifactAcceptanceReport,
+    ArtifactAcceptanceRequest,
+    ArtifactFinding,
+    artifact_ref_payload,
+    kind_for_path,
+)
 from .artifact_html_contract import html_contract_findings, record_resource_ref
 from .artifact_html_refs import image_ref_findings, placeholder_link_findings, scan_html_refs
-
-
-# LLM: ArtifactAcceptanceRequest bundles one artifact validation request.
-# 类用途: 描述要验收的产物路径和可选根目录，后续扩展更多格式时继续走 bundle。
-@dataclass(frozen=True)
-class ArtifactAcceptanceRequest:
-    path: Path
-    workspace_root: Path | None = None
-    validation_contract: dict[str, object] | None = None
-
-
-# LLM: ArtifactFinding is a machine-readable issue for repair prompts and QA reports.
-# 类用途: 保存产物验收发现的问题代码、严重级别、位置和说明，避免只靠自然语言自检。
-@dataclass(frozen=True)
-class ArtifactFinding:
-    code: str
-    severity: str
-    message: str
-    location: str = ""
-    value: str = ""
-
-    # LLM: to_dict keeps findings easy to serialize into reports or repair packets.
-    # 函数用途: 转成普通 dict，供 JSON 报告、前端或修复提示使用。
-    def to_dict(self) -> dict[str, str]:
-        return {
-            "code": self.code,
-            "severity": self.severity,
-            "message": self.message,
-            "location": self.location,
-            "value": self.value,
-        }
-
-
-# LLM: ArtifactAcceptanceReport is the refs-first outcome for one artifact validation.
-# 类用途: 保存产物验收是否通过和结构化 findings；不复制产物正文。
-@dataclass(frozen=True)
-class ArtifactAcceptanceReport:
-    ok: bool
-    artifact_ref: str
-    artifact_kind: str = "generic"
-    findings: list[ArtifactFinding] = field(default_factory=list)
-
-    # LLM: to_dict keeps acceptance reports stable across CLI, docs, and future QA agents.
-    # 函数用途: 输出机器可读报告，方便 repair worker 或主代理按 findings 修复。
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "ok": self.ok,
-            "artifact_ref": self.artifact_ref,
-            "artifact_ref_payload": artifact_ref_payload(self.artifact_ref, self.artifact_kind).to_dict(),
-            "artifact_kind": self.artifact_kind,
-            "findings": [item.to_dict() for item in self.findings],
-        }
-
-
-# LLM: artifact_ref_payload turns a validated file into the shared ArtifactRef contract.
-# 函数用途: 根据产物路径生成 artifact_id、kind、hash 和 size，后续恢复/QA 不再解析自然语言路径。
-def artifact_ref_payload(path: str | Path, kind: str = "") -> ArtifactRef:
-    artifact_path = Path(path)
-    digest = _artifact_hash(artifact_path)
-    suffix_kind = kind or _kind_for_path(artifact_path)
-    return ArtifactRef(
-        artifact_id=_artifact_id(artifact_path, digest),
-        path=str(artifact_path),
-        kind=suffix_kind,
-        hash=digest,
-        reserved={"size_bytes": _artifact_size(artifact_path)},
-    )
+from .artifact_static_site_contract import validate_static_site_artifact
 
 
 # LLM: validate_html_artifact performs generic HTML checks that model self-reports often miss.
@@ -115,10 +53,12 @@ def validate_html_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAccept
 # 函数用途: 根据文件后缀选择 HTML/JSON/CSV/XLSX/PDF/通用验收器，统一返回结构化 findings。
 def validate_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
     path = Path(request.path)
+    if _validator_name(request.validation_contract) == "static_site_check":
+        return validate_static_site_artifact(request)
     if path.suffix.lower() in {".html", ".htm"}:
         return validate_html_artifact(request)
     if not path.exists():
-        return _missing_report(path, kind=_kind_for_path(path))
+        return _missing_report(path, kind=kind_for_path(path))
     suffix = path.suffix.lower()
     if suffix == ".json":
         return _validate_json(path)
@@ -129,6 +69,13 @@ def validate_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceR
     if suffix == ".pdf":
         return _validate_pdf(path)
     return _validate_generic(path)
+
+
+# LLM: _validator_name reads the validator selector from validation_contract only.
+# 函数用途: 获取结构化 validator 名称；普通 prompt 文本不会参与产物验收路由。
+def _validator_name(validation_contract: dict[str, object] | None) -> str:
+    value = (validation_contract or {}).get("validator")
+    return str(value or "").strip().lower()
 
 
 # LLM: _missing_report preserves one missing-file shape for every validator.
@@ -222,45 +169,14 @@ def _validate_pdf(path: Path) -> ArtifactAcceptanceReport:
 def _validate_generic(path: Path) -> ArtifactAcceptanceReport:
     if path.stat().st_size <= 0:
         finding = ArtifactFinding(code="ARTIFACT_EMPTY", severity="hard", message="Artifact is empty.")
-        return _report_with_finding(path, _kind_for_path(path), finding)
-    return ArtifactAcceptanceReport(ok=True, artifact_ref=str(path), artifact_kind=_kind_for_path(path))
+        return _report_with_finding(path, kind_for_path(path), finding)
+    return ArtifactAcceptanceReport(ok=True, artifact_ref=str(path), artifact_kind=kind_for_path(path))
 
 
 # LLM: _report_with_finding avoids repeating one-error report construction in validators.
 # 函数用途: 构造只有一个 hard finding 的验收报告。
 def _report_with_finding(path: Path, kind: str, finding: ArtifactFinding) -> ArtifactAcceptanceReport:
     return ArtifactAcceptanceReport(ok=False, artifact_ref=str(path), artifact_kind=kind, findings=[finding])
-
-
-# LLM: _kind_for_path gives reports a stable kind even for unknown suffixes.
-# 函数用途: 根据后缀生成 artifact_kind；无后缀时返回 generic。
-def _kind_for_path(path: Path) -> str:
-    return path.suffix.lower().lstrip(".") or "generic"
-
-
-# LLM: _artifact_hash keeps artifact refs content-addressable when the file exists.
-# 函数用途: 生成 sha256；缺失或不可读时返回空字符串，让 missing report 仍可序列化。
-def _artifact_hash(path: Path) -> str:
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return ""
-
-
-# LLM: _artifact_size records size as ref metadata without reading bodies into prompt.
-# 函数用途: 返回文件字节数；缺失时为 0。
-def _artifact_size(path: Path) -> int:
-    try:
-        return path.stat().st_size
-    except OSError:
-        return 0
-
-
-# LLM: _artifact_id is stable across runs for the same resolved path and content hash.
-# 函数用途: 生成短 artifact_id，便于 ledger/UI 展示和去重。
-def _artifact_id(path: Path, digest: str) -> str:
-    seed = f"{path.resolve(strict=False)}:{digest}"
-    return f"artifact:{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:16]}"
 
 
 # LLM: _finding_records converts JSON-shaped helper findings into public report objects.

@@ -13,12 +13,16 @@ MAX_TOOL_FIELD_NAME_CHARS = 128
 MAX_TOOL_NAME_CHARS = 128
 MAX_PARSE_ERROR_RAW_CHARS = 1000
 MODEL_WRAPPER_PARAM_KEYS = {
+    "actual_parameter_name",
     "api",
+    "arguments",
     "filesystem",
     "log_analysis",
     "memory",
     "orchestration",
     "param_name",
+    "parameters",
+    "params",
     "system",
     "web",
 }

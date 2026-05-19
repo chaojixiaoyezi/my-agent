@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..tooling.file_write_session_inspection import open_file_write_sessions
 from .artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
 
 
@@ -49,6 +50,7 @@ class RealTaskAcceptanceReport:
     summary: dict[str, int]
     report_ref: str
     artifacts: list[RealTaskArtifactAcceptance] = field(default_factory=list)
+    runtime_findings: list[dict[str, object]] = field(default_factory=list)
 
     # LLM: to_dict emits a stable machine report for the execution runner.
     # 函数用途: 转成 JSON，便于 CLI 和未来 Card Runtime 读取验收结果。
@@ -58,6 +60,7 @@ class RealTaskAcceptanceReport:
             "summary": dict(self.summary),
             "report_ref": self.report_ref,
             "artifacts": [artifact.to_dict() for artifact in self.artifacts],
+            "runtime_findings": [dict(finding) for finding in self.runtime_findings],
         }
 
 
@@ -69,11 +72,13 @@ def validate_real_task_artifacts(request: RealTaskAcceptanceRequest) -> RealTask
         for item in _expected_artifacts(request.expected_artifacts_path)
         if item.get("required") is not False
     ]
+    runtime_findings = _runtime_findings(request.task_workspace)
     report = RealTaskAcceptanceReport(
-        ok=all(item.ok for item in artifacts),
-        summary=_summary(artifacts),
+        ok=all(item.ok for item in artifacts) and not runtime_findings,
+        summary=_summary(artifacts, runtime_findings),
         report_ref=str(request.report_path),
         artifacts=artifacts,
+        runtime_findings=runtime_findings,
     )
     _write_report(request.report_path, report.to_dict())
     return report
@@ -140,14 +145,37 @@ def _validation_contract(item: dict[str, object]) -> dict[str, object]:
     return dict(contract) if isinstance(contract, dict) else {}
 
 
-# LLM: _summary counts artifact validation outcomes for case-level status.
+# LLM: _runtime_findings adds non-artifact machine facts that still block completion.
+# 函数用途: 检查真实任务工作区里的运行时合同问题，例如未 finish 的分块写入会话。
+def _runtime_findings(task_workspace: Path) -> list[dict[str, object]]:
+    return [_open_session_finding(session) for session in open_file_write_sessions(task_workspace, limit=20)]
+
+
+# LLM: _open_session_finding turns a write-session manifest summary into a stable acceptance finding.
+# 函数用途: 将 open file_write_session 作为机器验收失败项记录，避免超时后误判产物已完成。
+def _open_session_finding(session: dict[str, object]) -> dict[str, object]:
+    return {
+        "code": "OPEN_FILE_WRITE_SESSION",
+        "severity": "hard",
+        "session_id": str(session.get("session_id") or ""),
+        "target_path": session.get("target_path") or {},
+        "manifest_path": str(session.get("manifest_path") or ""),
+        "received_chunks": list(session.get("received_chunks") or []),
+        "next_chunk_index": int(session.get("next_chunk_index") or 0),
+    }
+
+
+# LLM: _summary counts artifact and runtime contract outcomes for case-level status.
 # 函数用途: 生成 passed/failed/total 汇总，执行器据此决定任务是否真正完成。
-def _summary(artifacts: list[RealTaskArtifactAcceptance]) -> dict[str, int]:
+def _summary(
+    artifacts: list[RealTaskArtifactAcceptance],
+    runtime_findings: list[dict[str, object]],
+) -> dict[str, int]:
     failed = sum(not item.ok for item in artifacts)
     return {
-        "total": len(artifacts),
+        "total": len(artifacts) + len(runtime_findings),
         "passed": len(artifacts) - failed,
-        "failed": failed,
+        "failed": failed + len(runtime_findings),
     }
 
 

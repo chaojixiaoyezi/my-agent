@@ -152,7 +152,12 @@ def effective_model_request_timeout_seconds(agent: object, first_token_timeout_s
         return 0.0
     if not has_dynamic_timeout_config(agent):
         return base_timeout
-    return max(base_timeout, max(0.0, float(first_token_timeout_seconds)))
+    options = first_token_timeout_options(agent)
+    dynamic_timeout = _clamp_dynamic_request_timeout(
+        max(0.0, float(first_token_timeout_seconds)) + _output_generation_timeout_seconds(agent),
+        options,
+    )
+    return max(base_timeout, dynamic_timeout)
 
 
 # LLM: model_request_timeout_seconds resolves the public request_timeout setting for the guard layer.
@@ -222,6 +227,23 @@ def max_output_tokens(agent: object) -> int:
         return max(0, int(raw))
     except (TypeError, ValueError):
         return 0
+
+
+# LLM: _output_generation_timeout_seconds estimates completion time from structured output token budget.
+# 函数用途: 给 request_timeout 总墙预留输出阶段时间，避免只按首 token 预算导致长回复被提前切断。
+def _output_generation_timeout_seconds(agent: object) -> float:
+    tokens = max_output_tokens(agent)
+    if tokens <= 0:
+        return 0.0
+    return tokens / 30.0
+
+
+# LLM: _clamp_dynamic_request_timeout keeps dynamic wall budgets within existing timeout config bounds.
+# 函数用途: 复用 dynamic_timeout_min/max，不新增用户配置；请求总墙仍有上限可控。
+def _clamp_dynamic_request_timeout(value: float, options: FirstTokenTimeoutOptions) -> float:
+    minimum = max(0.0, float(options.min_timeout_seconds))
+    maximum = max(minimum, float(options.max_timeout_seconds))
+    return max(minimum, min(maximum, float(value)))
 
 
 # LLM: float_config reads numeric config fields with safe fallback.

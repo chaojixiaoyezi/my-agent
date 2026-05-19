@@ -184,6 +184,74 @@ def test_cmd_real_e2e_revalidates_existing_real_task_report(tmp_path, capsys):
     assert revalidation["summary"]["completed"] == 1
 
 
+# LLM: real-e2e resume should launch execution from a recovery packet without requiring a fresh case prompt.
+# 函数用途: 验证 CLI 把 --resume-real-task-recovery-packet 传入结构化执行请求。
+def test_cmd_real_e2e_passes_recovery_packet_to_execution(tmp_path, capsys, monkeypatch):
+    from agent_py_agent.cli import real_e2e_commands
+
+    captured = {}
+    packet = tmp_path / "recovery_packet.json"
+    packet.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        real_e2e_commands,
+        "run_main_agent_real_task_execution",
+        _fake_execution(captured),
+    )
+    args = _resume_real_task_args(tmp_path, packet)
+
+    exit_code = real_e2e_commands.cmd_real_e2e(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["main_agent_real_task_execution"]["ok"] is True
+    assert captured["request"].recovery_packet_path == packet
+    assert captured["request"].execute is True
+
+
+class _FakeExecutionReport:
+    def to_dict(self):
+        return {
+            "ok": True,
+            "schema_version": "main-agent-real-task-execution.v1",
+            "execution_mode": "execute",
+            "summary": {"total": 1, "completed": 1, "failed": 0, "planned": 0},
+            "concurrency": {
+                "case_count": 1,
+                "effective_max_workers": 1,
+                "requested_max_workers": 1,
+            },
+            "suite_report_ref": "",
+            "report_ref": "",
+            "cases": [],
+        }
+
+
+def _fake_execution(captured: dict):
+    def _fake_execute(request):
+        captured["request"] = request
+        return _FakeExecutionReport()
+
+    return _fake_execute
+
+
+def _resume_real_task_args(tmp_path, packet):
+    return argparse.Namespace(
+        workspace=str(tmp_path / "workspace"),
+        report="",
+        json=True,
+        include_real_model=False,
+        artifact=[],
+        real_task_suite=False,
+        run_real_tasks=False,
+        real_task_case=[],
+        real_task_max_workers=1,
+        real_task_timeout=30,
+        real_task_base_config="",
+        revalidate_real_task_report="",
+        resume_real_task_recovery_packet=str(packet),
+    )
+
+
 # LLM: _valid_furniture_homepage_html mirrors the structured real-task artifact contract.
 # 函数用途: 为 revalidation 测试生成完整、无外链、大小足够的 HTML，避免旧 tiny fixture 绕开真实验收合同。
 def _valid_furniture_homepage_html() -> str:

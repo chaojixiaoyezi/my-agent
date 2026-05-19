@@ -5,6 +5,7 @@
 """
 
 import json
+import re
 import tempfile
 from pathlib import Path
 
@@ -92,6 +93,57 @@ class _IncompleteDeliveryContractBackend:
         return ModelResponse(text="已收到不完整 HTML 的结构化反馈。", backend=self.name)
 
 
+# LLM: _OpenWriteSessionDeliveryBackend creates a valid-looking artifact while leaving staged writes open.
+# 类用途: 复现真实 E2E 中目录验收提前收口的问题；系统必须先处理 open file_write_session。
+class _OpenWriteSessionDeliveryBackend:
+    name = "fake_open_write_session_delivery_backend"
+
+    def __init__(self):
+        self.calls = 0
+        self.saw_open_session_context = False
+        self.session_id = ""
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        session_id = _session_id_from_prompt(prompt)
+        if self.calls == 1:
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    '{"tool":"file_write_session","action":"begin",'
+                    '"target_path":"outputs/shopping_site/app.js"}\n'
+                    "[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        if self.calls == 2:
+            self.saw_open_session_context = True
+            assert "delivery-contract-open-file-write-sessions" in prompt
+            assert "open_file_write_sessions" in prompt
+            self.session_id = session_id
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    f'{{"tool":"file_write_session","action":"append","session_id":"{session_id}",'
+                    '"chunk_index":0,"content":"console.log(\\"shop ready\\");"}}\n'
+                    "[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        if self.calls == 3:
+            assert "delivery-contract-open-file-write-sessions" in prompt
+            session_id = session_id or self.session_id
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    f'{{"tool":"file_write_session","action":"finish","session_id":"{session_id}"}}\n'
+                    "[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        raise AssertionError("delivery should close out after open session is finished")
+
+
 # LLM: _delivery_contract_prompt returns only user-visible task prose.
 # 函数用途: 构造普通用户任务文本；机器合同由 RunParams.delivery_contract 传入。
 def _delivery_contract_prompt() -> str:
@@ -119,6 +171,33 @@ def _delivery_contract() -> dict[str, object]:
             }
         ],
     }
+
+
+# LLM: _web_project_delivery_contract validates directory artifacts through static_site_check.
+# 函数用途: 生成目录型 Web 产物合同，要求 index.html 和 app.js 都真实存在。
+def _web_project_delivery_contract() -> dict[str, object]:
+    return {
+        "case_id": "shopping_site_flow",
+        "artifacts": [
+            {
+                "artifact_id": "shopping_site_root",
+                "kind": "web_project",
+                "preferred_path": "outputs/shopping_site",
+                "required": True,
+                "validation_contract": {
+                    "validator": "static_site_check",
+                    "required_files": ["index.html", "app.js"],
+                },
+            }
+        ],
+    }
+
+
+# LLM: _session_id_from_prompt reads structured tool result JSON from the previous model/tool turn.
+# 函数用途: 测试后端从 file_write_session begin 回执里取 session_id，不靠自然语言描述。
+def _session_id_from_prompt(prompt: str) -> str:
+    match = re.search(r'"session_id":\s*"([^"]+)"', prompt)
+    return match.group(1) if match else ""
 
 
 # LLM: Real-task delivery contracts should stop successful runs before extra model turns.
@@ -210,3 +289,32 @@ def test_tool_loop_rejects_incomplete_delivery_contract_artifact():
         assert result.response == "已收到不完整 HTML 的结构化反馈。"
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
         assert {"HTML_INCOMPLETE_DOCUMENT", "HTML_EXTERNAL_RESOURCE_REF"} <= set(codes)
+
+
+# LLM: Delivery closeout must not pass while any chunked write session remains open.
+# 函数用途: 有 open file_write_session manifest 时，即使目录已存在也不能输出完成标记。
+def test_tool_loop_delivery_closeout_blocks_open_file_write_sessions():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        (workspace / "outputs/shopping_site").mkdir(parents=True)
+        (workspace / "outputs/shopping_site/index.html").write_text(
+            "<!doctype html><html><body><main>Shop</main></body></html>",
+            encoding="utf-8",
+        )
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=3)
+        agent = SimpleAgent(cfg, workspace)
+        backend = _OpenWriteSessionDeliveryBackend()
+        agent.backend = backend
+
+        result = agent.run(
+            "做一个购物网站。",
+            params=RunParams(delivery_contract=_web_project_delivery_contract(), save=False),
+            allowed_tools=["file_write_session"],
+        )
+
+        assert backend.calls == 3
+        assert backend.saw_open_session_context is True
+        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
+        assert (workspace / "outputs/shopping_site/app.js").read_text(encoding="utf-8") == (
+            'console.log("shop ready");'
+        )

@@ -79,6 +79,11 @@ def add_real_e2e_subcommand(
         default="",
         help="只读复验已有真实任务执行报告，不重新启动模型进程",
     )
+    parser.add_argument(
+        "--resume-real-task-recovery-packet",
+        default="",
+        help="按 recovery_packet.json 续跑同一个真实任务 case",
+    )
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     parser.set_defaults(func=cmd_real_e2e)
 
@@ -169,10 +174,12 @@ def _real_task_suite_ok(value: dict[str, object] | None) -> bool:
 # LLM: _real_task_execution optionally runs controlled main-agent tasks behind an explicit flag.
 # 函数用途: 只有用户传 --run-real-tasks 时，才按结构化计划启动主代理任务并收集日志引用。
 def _real_task_execution(args, *, workspace: Path) -> dict[str, object] | None:
-    if not bool(getattr(args, "run_real_tasks", False)):
+    recovery_value = str(getattr(args, "resume_real_task_recovery_packet", "") or "").strip()
+    if not bool(getattr(args, "run_real_tasks", False)) and not recovery_value:
         return None
     config_value = str(getattr(args, "real_task_base_config", "") or "").strip()
     base_config = Path(config_value).expanduser() if config_value else None
+    recovery_packet = Path(recovery_value).expanduser() if recovery_value else None
     report = run_main_agent_real_task_execution(
         MainAgentRealTaskExecutionRequest(
             workspace=workspace,
@@ -181,6 +188,7 @@ def _real_task_execution(args, *, workspace: Path) -> dict[str, object] | None:
             execute=True,
             case_ids=tuple(getattr(args, "real_task_case", []) or ()),
             base_config_path=base_config,
+            recovery_packet_path=recovery_packet,
         )
     )
     return report.to_dict()

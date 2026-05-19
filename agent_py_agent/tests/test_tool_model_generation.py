@@ -85,6 +85,28 @@ class _StreamingTokenBackend:
         return ModelResponse(text="hello world", backend=self.name)
 
 
+# LLM: _TimeoutAwareBackend records the backend request_timeout visible during generate.
+# 类用途: 测试动态 timeout 是否真正传入 HTTP backend 层，而不是只停在外层 guard。
+class _TimeoutAwareBackend:
+    name = "timeout-aware-test-backend"
+    model_name = "test-model"
+    max_tokens = 1200
+
+    # LLM: __init__ starts with an unrealistically low backend timeout to expose missing overrides.
+    # 函数用途: 初始化 request_timeout 和观测字段，验证 generate 期间能看到动态预算。
+    def __init__(self) -> None:
+        self.request_timeout = 1
+        self.seen_timeout = 0
+
+    # LLM: generate captures request_timeout and returns immediately.
+    # 函数用途: 不发网络请求，只记录调用期间后端超时字段是否被提升。
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.seen_timeout = self.request_timeout
+        if on_chunk is not None:
+            on_chunk("ok")
+        return ModelResponse(text="ok", backend=self.name)
+
+
 # LLM: _tool_loop_params returns the smallest valid tool-loop bundle for generation tests.
 # 函数用途: 构造 generate_model_response 所需参数包，避免每个测试重复填一长串字段。
 def _tool_loop_params() -> ToolLoopExecuteParams:
@@ -212,3 +234,48 @@ def test_effective_model_timeout_uses_dynamic_config_only_when_present():
 
     assert _effective_model_request_timeout_seconds(legacy_agent, 30) == 1
     assert _effective_model_request_timeout_seconds(dynamic_agent, 30) == 30
+
+
+# LLM: Wall timeout must reserve output generation time, not only prefill/first-token time.
+# 函数用途: 验证动态模型请求总超时会把 max_tokens 对应的输出时间纳入预算，避免长回复被 240s 墙过早杀掉。
+def test_effective_model_timeout_includes_output_generation_budget():
+    dynamic_agent = SimpleNamespace(
+        config=SimpleNamespace(
+            request_timeout=1,
+            dynamic_timeout_min=1,
+            dynamic_timeout_max=120,
+            dynamic_timeout_safety_margin=2,
+        ),
+        backend=SimpleNamespace(max_tokens=1200),
+    )
+
+    assert _effective_model_request_timeout_seconds(dynamic_agent, 30) == 70
+
+
+# LLM: Dynamic timeout must reach the backend stream deadline, not only the outer guard thread.
+# 函数用途: 验证模型调用边界会把结构化动态总超时写进后端请求层，防止流式 SSE 仍按旧 240s 截断。
+def test_model_generate_applies_dynamic_timeout_to_backend_request():
+    backend = _TimeoutAwareBackend()
+    agent = SimpleNamespace(
+        backend=backend,
+        config=SimpleNamespace(
+            request_timeout=1,
+            dynamic_timeout_min=1,
+            dynamic_timeout_max=120,
+            dynamic_timeout_safety_margin=2,
+        ),
+        _current_subagent_run_id="",
+    )
+
+    response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=_tool_loop_params(),
+            prompt="hello",
+            tool_rounds=0,
+        )
+    )
+
+    assert response.text == "ok"
+    assert backend.seen_timeout > 40
+    assert backend.request_timeout == 1

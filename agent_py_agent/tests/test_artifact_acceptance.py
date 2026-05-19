@@ -176,3 +176,35 @@ def test_validate_artifact_reports_invalid_json(tmp_path):
     assert report.ok is False
     assert report.artifact_kind == "json"
     assert report.findings[0].code == "JSON_INVALID"
+
+
+# LLM: Web project directories must be validated by their declared static-site contract, not as generic folders.
+# 函数用途: 验证 web_project 目录缺少 validation_contract.required_files 时不能因为目录存在就通过。
+def test_validate_artifact_static_site_contract_rejects_missing_required_files(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_artifact,
+    )
+
+    site = tmp_path / "outputs" / "shopping_site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text(
+        "<!doctype html><html><body><main id='home'>Shop</main></body></html>",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=site,
+            workspace_root=tmp_path,
+            validation_contract={
+                "validator": "static_site_check",
+                "required_files": ["index.html", "app.js"],
+            },
+        )
+    )
+
+    assert report.ok is False
+    assert report.artifact_kind == "web_project"
+    assert any(item.code == "STATIC_SITE_MISSING_REQUIRED_FILES" for item in report.findings)
+    assert any(item.value == "app.js" for item in report.findings)

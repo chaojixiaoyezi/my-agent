@@ -10,6 +10,7 @@ from typing import Any
 
 from ..backends import ModelResponse
 from ..contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
+from ..tooling.file_write_session_inspection import open_file_write_sessions
 from ._runtime_params import ToolLoopExecuteParams
 
 CLOSEOUT_DIR = ".agent_delivery"
@@ -43,6 +44,9 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     if not artifacts:
         return None
     workspace_root = _workspace_root(request.agent)
+    if open_sessions := open_file_write_sessions(workspace_root):
+        _append_open_session_context(request.params, open_sessions)
+        return None
     report = _validate_contract_artifacts(
         DeliveryContractValidationRequest(
             contract=contract,
@@ -143,13 +147,6 @@ def _path_failure(item: dict[str, Any], raw_path: str, code: str) -> dict[str, A
         "location": raw_path,
         "value": raw_path,
     }
-
-
-# LLM: _validation_contract extracts machine-only artifact acceptance options from one contract item.
-# 函数用途: 将 expected_artifacts 里的 validation_contract 传给底层验收器，不解析自然语言说明。
-def _validation_contract(item: dict[str, Any]) -> dict[str, object]:
-    value = item.get("validation_contract")
-    return dict(value) if isinstance(value, dict) else {}
     return {
         "artifact_id": str(item.get("artifact_id") or ""),
         "kind": str(item.get("kind") or ""),
@@ -157,6 +154,13 @@ def _validation_contract(item: dict[str, Any]) -> dict[str, object]:
         "ok": False,
         "acceptance_report": {"ok": False, "artifact_ref": raw_path, "artifact_kind": "", "findings": [finding]},
     }
+
+
+# LLM: _validation_contract extracts machine-only artifact acceptance options from one contract item.
+# 函数用途: 将 expected_artifacts 里的 validation_contract 传给底层验收器，不解析自然语言说明。
+def _validation_contract(item: dict[str, Any]) -> dict[str, object]:
+    value = item.get("validation_contract")
+    return dict(value) if isinstance(value, dict) else {}
 
 
 # LLM: _write_report persists the latest delivery check for audit and resume without embedding artifact bodies.
@@ -178,6 +182,23 @@ def _append_failed_contract_context(params: ToolLoopExecuteParams, report: dict[
                 "ok": False,
                 "report_ref": report.get("report_ref", ""),
                 "failed_artifacts": [item for item in report["artifacts"] if not item["ok"]],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+
+
+# LLM: _append_open_session_context blocks delivery completion from open file-write manifests.
+# 函数用途: 有未 finish/abort 的分块写入时，只追加结构化 session 事实，让下一轮先处理这些会话。
+def _append_open_session_context(params: ToolLoopExecuteParams, sessions: list[dict[str, Any]]) -> None:
+    params.tool_context.append(
+        "[delivery-contract-open-file-write-sessions]\n"
+        + json.dumps(
+            {
+                "ok": False,
+                "reason": "open_file_write_sessions",
+                "open_file_write_sessions": sessions,
             },
             ensure_ascii=False,
             sort_keys=True,

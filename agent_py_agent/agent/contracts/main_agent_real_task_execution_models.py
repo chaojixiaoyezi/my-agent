@@ -20,6 +20,7 @@ class MainAgentRealTaskExecutionRequest:
     case_ids: tuple[str, ...] = ()
     base_config_path: Path | None = None
     package_root: Path | None = None
+    recovery_packet_path: Path | None = None
 
 
 # LLM: MainAgentRealTaskExecutionCaseResult records one planned or executed subprocess.
@@ -38,6 +39,7 @@ class MainAgentRealTaskExecutionCaseResult:
     stderr_ref: str
     acceptance_report_ref: str
     events_ref: str
+    recovery_packet_ref: str = ""
     acceptance_summary: dict[str, int] = field(default_factory=dict)
     exit_code: int | None = None
     duration_seconds: float = 0.0
@@ -59,6 +61,7 @@ class MainAgentRealTaskExecutionCaseResult:
             "stderr_ref": self.stderr_ref,
             "acceptance_report_ref": self.acceptance_report_ref,
             "events_ref": self.events_ref,
+            "recovery_packet_ref": self.recovery_packet_ref,
             "acceptance_summary": dict(self.acceptance_summary),
             "exit_code": self.exit_code,
             "duration_seconds": round(self.duration_seconds, 3),

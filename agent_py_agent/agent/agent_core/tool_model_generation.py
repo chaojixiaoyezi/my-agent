@@ -222,7 +222,7 @@ def _generate_with_wall_timeout(
         try:
             results.put(
                 _BackendGenerateResult(
-                    response=request.agent.backend.generate(request.prompt, on_chunk=on_chunk)
+                    response=_generate_backend_response(request, on_chunk, timeout)
                 )
             )
         except BaseException as exc:  # pragma: no cover - exercised through queue result.
@@ -237,6 +237,24 @@ def _generate_with_wall_timeout(
     if result.exc is not None:
         raise result.exc
     return result.response
+
+
+# LLM: _generate_backend_response applies the same dynamic timeout to backend HTTP deadlines.
+# 函数用途: 临时提升 backend.request_timeout，使内部流式 SSE deadline 与外层总墙使用同一结构化预算。
+def _generate_backend_response(request: ModelGenerateParams, on_chunk, timeout: float):
+    backend = request.agent.backend
+    original = getattr(backend, "request_timeout", None)
+    if timeout <= 0 or original is None:
+        return backend.generate(request.prompt, on_chunk=on_chunk)
+    try:
+        effective = max(float(original), float(timeout))
+    except (TypeError, ValueError):
+        effective = float(timeout)
+    try:
+        backend.request_timeout = effective
+        return backend.generate(request.prompt, on_chunk=on_chunk)
+    finally:
+        backend.request_timeout = original
 
 
 # LLM: _tool_write_inline_max_chars keeps streaming guard aligned with write_file/append_file config.

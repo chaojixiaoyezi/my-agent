@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -50,6 +49,77 @@ def _valid_furniture_html() -> str:
         '<header><nav><a href="#story">Story</a><a href="#collection-1">Collection</a></nav></header>'
         '<main><section id="story"><h1>Maison</h1><p>高端现代家具品牌首页。</p></section>'
         f"{sections}</main><footer id=\"contact\">Contact</footer></body></html>"
+    )
+
+
+# LLM: _patch_subprocess_timeout makes timeout-path tests share the same process failure.
+# 函数用途: 把真实任务 subprocess runner 临时替换成固定超时，避免测试启动真实长进程。
+def _patch_subprocess_timeout(monkeypatch) -> None:
+    from agent_py_agent.agent.contracts import main_agent_real_task_execution as execution
+    from agent_py_agent.agent.contracts.main_agent_real_task_subprocess import (
+        RealTaskSubprocessResult,
+    )
+
+    def _timeout(request):
+        request.stdout_path.write_text("partial stdout", encoding="utf-8")
+        request.stderr_path.write_text("", encoding="utf-8")
+        return RealTaskSubprocessResult(
+            exit_code=124,
+            duration_seconds=1.25,
+            timed_out=True,
+            timeout_reason="timeout",
+        )
+
+    monkeypatch.setattr(execution, "run_real_task_subprocess", _timeout)
+
+
+# LLM: _write_open_file_write_manifest creates a structured open session fact for acceptance tests.
+# 函数用途: 写一个未关闭的 file_write_session manifest，用来验证真实任务超时不会误判完成。
+def _write_open_file_write_manifest(workspace: Path, target_display: str) -> None:
+    session_manifest = workspace / ".agent_file_write_sessions/session-open/manifest.json"
+    session_manifest.parent.mkdir(parents=True)
+    session_manifest.write_text(
+        json.dumps(
+            {
+                "session_id": "session-open",
+                "status": "open",
+                "target_path": {"display": target_display},
+                "chunks": {"0": {"index": 0}},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+# LLM: _timeout_runtime builds a minimal case runtime for timeout result helpers.
+# 函数用途: 创建只测超时收口所需的 CaseRuntime，避免测试函数重复大段样板字段。
+def _timeout_runtime(tmp_path: Path):
+    from agent_py_agent.agent.contracts.main_agent_real_task_execution_files import case_paths
+    from agent_py_agent.agent.contracts.main_agent_real_task_execution_models import (
+        MainAgentRealTaskExecutionRequest,
+    )
+    from agent_py_agent.agent.contracts.main_agent_real_task_execution_state import CaseRuntime
+    from agent_py_agent.agent.contracts.main_agent_real_task_suite import MainAgentRealTaskCasePlan
+
+    paths = case_paths(tmp_path, "timeout_case")
+    for path in paths.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+    return CaseRuntime(
+        case=MainAgentRealTaskCasePlan(
+            case_id="timeout_case",
+            title="Timeout Case",
+            status="PLANNED",
+            worker_slot=1,
+            timeout_seconds=1,
+            prompt_ref="prompt.md",
+            acceptance_ref="acceptance.json",
+            expected_artifacts_ref="artifacts.json",
+        ),
+        request=MainAgentRealTaskExecutionRequest(workspace=tmp_path, task_timeout_seconds=1),
+        paths=paths,
+        command=["my-agent", "run"],
+        workspace=tmp_path,
     )
 
 
@@ -334,15 +404,7 @@ def test_main_agent_real_task_timeout_accepts_valid_artifact(tmp_path, monkeypat
     artifact.parent.mkdir(parents=True)
     artifact.write_text(_valid_furniture_html(), encoding="utf-8")
 
-    def _timeout(*args, **kwargs):
-        raise subprocess.TimeoutExpired(
-            cmd=["my-agent", "run"],
-            timeout=30,
-            output=b"partial stdout",
-            stderr=b"",
-        )
-
-    monkeypatch.setattr(subprocess, "run", _timeout)
+    _patch_subprocess_timeout(monkeypatch)
 
     report = run_main_agent_real_task_execution(
         MainAgentRealTaskExecutionRequest(
@@ -364,50 +426,153 @@ def test_main_agent_real_task_timeout_accepts_valid_artifact(tmp_path, monkeypat
     assert first_case["issues"] == ["process_timeout_after_valid_artifact"]
 
 
-# LLM: Timeout logs must preserve subprocess bytes as readable refs for debugging real model runs.
-# 函数用途: 验证真实任务超时时 stdout/stderr 会解码为文本，不把 Python bytes 表示写进日志。
-def test_main_agent_real_task_timeout_decodes_partial_output(tmp_path):
+# LLM: Open write sessions are machine runtime facts, so valid artifacts alone cannot complete a timed-out run.
+# 函数用途: 验证真实任务超时时若仍有未 finish 的分块写入会话，即便目标产物合格也不能误判完成。
+def test_main_agent_real_task_timeout_blocks_open_file_write_session(tmp_path, monkeypatch):
     from agent_py_agent.agent.contracts.main_agent_real_task_execution import (
-        _CaseRuntime,
+        MainAgentRealTaskExecutionRequest,
+        run_main_agent_real_task_execution,
+    )
+
+    artifact = (
+        tmp_path
+        / "main_agent_real_task_execution/tasks/furniture_homepage_html/workspace"
+        / "outputs/furniture_homepage/index.html"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(_valid_furniture_html(), encoding="utf-8")
+    _write_open_file_write_manifest(
+        tmp_path / "main_agent_real_task_execution/tasks/furniture_homepage_html/workspace",
+        "outputs/furniture_homepage/app.js",
+    )
+
+    _patch_subprocess_timeout(monkeypatch)
+
+    report = run_main_agent_real_task_execution(
+        MainAgentRealTaskExecutionRequest(
+            workspace=tmp_path,
+            max_workers=1,
+            task_timeout_seconds=30,
+            execute=True,
+            case_ids=("furniture_homepage_html",),
+            package_root=Path.cwd(),
+        )
+    )
+
+    payload = report.to_dict()
+    first_case = payload["cases"][0]
+    acceptance = json.loads((tmp_path / first_case["acceptance_report_ref"]).read_text(encoding="utf-8"))
+    assert payload["ok"] is False
+    assert first_case["status"] == "FAILED"
+    assert first_case["issues"] == ["timeout", "artifact_acceptance_failed=1"]
+    assert acceptance["runtime_findings"][0]["code"] == "OPEN_FILE_WRITE_SESSION"
+    assert acceptance["runtime_findings"][0]["session_id"] == "session-open"
+
+
+# LLM: Exit code zero with no tools and repetitive output is a runtime symptom, not success.
+# 函数用途: 验证真实任务没有产物但模型返回空转复读时，执行报告给出结构化诊断 issue。
+def test_main_agent_real_task_reports_no_progress_output(tmp_path, monkeypatch):
+    from agent_py_agent.agent.contracts import main_agent_real_task_execution as execution
+    from agent_py_agent.agent.contracts.main_agent_real_task_execution import (
+        MainAgentRealTaskExecutionRequest,
+        run_main_agent_real_task_execution,
+    )
+    from agent_py_agent.agent.contracts.main_agent_real_task_subprocess import (
+        RealTaskSubprocessResult,
+    )
+
+    def _no_progress(request):
+        repeated = "\n".join(["Wait now."] * 40)
+        request.stdout_path.write_text(
+            f"{repeated}\n[backend=echo; tool_rounds=0; prompt_tokens≈10]",
+            encoding="utf-8",
+        )
+        request.stderr_path.write_text("", encoding="utf-8")
+        return RealTaskSubprocessResult(exit_code=0, duration_seconds=1.0)
+
+    monkeypatch.setattr(execution, "run_real_task_subprocess", _no_progress)
+
+    report = run_main_agent_real_task_execution(
+        MainAgentRealTaskExecutionRequest(
+            workspace=tmp_path,
+            max_workers=1,
+            task_timeout_seconds=30,
+            execute=True,
+            case_ids=("furniture_homepage_html",),
+            package_root=Path.cwd(),
+        )
+    )
+
+    issues = report.to_dict()["cases"][0]["issues"]
+    assert "artifact_acceptance_failed=1" in issues
+    assert "model_no_tool_progress" in issues
+    assert "model_repetitive_output" in issues
+
+
+# LLM: Timeout logs stay on disk when the streamed subprocess runner stops a case.
+# 函数用途: 验证真实任务超时时已有 stdout/stderr 文件会被保留，报告只写结构化超时状态。
+def test_main_agent_real_task_timeout_preserves_streamed_output(tmp_path):
+    from agent_py_agent.agent.contracts.main_agent_real_task_execution import (
         _timeout_case_result,
     )
-    from agent_py_agent.agent.contracts.main_agent_real_task_execution_files import case_paths
-    from agent_py_agent.agent.contracts.main_agent_real_task_execution_models import (
-        MainAgentRealTaskExecutionRequest,
-    )
-    from agent_py_agent.agent.contracts.main_agent_real_task_suite import MainAgentRealTaskCasePlan
-
-    paths = case_paths(tmp_path, "timeout_case")
-    for path in paths.values():
-        path.parent.mkdir(parents=True, exist_ok=True)
-    runtime = _CaseRuntime(
-        case=MainAgentRealTaskCasePlan(
-            case_id="timeout_case",
-            title="Timeout Case",
-            status="PLANNED",
-            worker_slot=1,
-            timeout_seconds=1,
-            prompt_ref="prompt.md",
-            acceptance_ref="acceptance.json",
-            expected_artifacts_ref="artifacts.json",
-        ),
-        request=MainAgentRealTaskExecutionRequest(
-            workspace=tmp_path,
-            task_timeout_seconds=1,
-        ),
-        paths=paths,
-        command=["my-agent", "run"],
-        workspace=tmp_path,
-    )
-    exc = subprocess.TimeoutExpired(
-        cmd=["my-agent", "run"],
-        timeout=1,
-        output="你好".encode(),
-        stderr=b"partial error",
+    from agent_py_agent.agent.contracts.main_agent_real_task_subprocess import (
+        RealTaskSubprocessResult,
     )
 
-    result = _timeout_case_result(runtime, exc, duration=1.25)
+    runtime = _timeout_runtime(tmp_path)
+    paths = runtime.paths
+    paths["stdout"].write_text("你好", encoding="utf-8")
+    paths["stderr"].write_text("partial error", encoding="utf-8")
+
+    result = _timeout_case_result(
+        runtime,
+        RealTaskSubprocessResult(
+            exit_code=124,
+            duration_seconds=1.25,
+            timed_out=True,
+            timeout_reason="timeout",
+        ),
+    )
 
     assert result.exit_code == 124
     assert paths["stdout"].read_text(encoding="utf-8") == "你好"
     assert paths["stderr"].read_text(encoding="utf-8") == "partial error"
+
+
+# LLM: Failed real tasks need a structured recovery packet, not only long stdout logs.
+# 函数用途: 验证真实任务超时失败后会写 recovery_packet.json，后续续跑可按 refs 接着查证。
+def test_main_agent_real_task_timeout_writes_recovery_packet(tmp_path):
+    from agent_py_agent.agent.contracts.main_agent_real_task_execution import (
+        _timeout_case_result,
+    )
+    from agent_py_agent.agent.contracts.main_agent_real_task_subprocess import (
+        RealTaskSubprocessResult,
+    )
+
+    runtime = _timeout_runtime(tmp_path)
+    paths = runtime.paths
+    paths["stdout"].write_text("partial stdout", encoding="utf-8")
+    paths["stderr"].write_text("", encoding="utf-8")
+
+    result = _timeout_case_result(
+        runtime,
+        RealTaskSubprocessResult(
+            exit_code=124,
+            duration_seconds=2.0,
+            timed_out=True,
+            timeout_reason="timeout",
+        ),
+    )
+
+    recovery_ref = result.to_dict()["recovery_packet_ref"]
+    packet_path = tmp_path / recovery_ref
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert recovery_ref.endswith("recovery_packet.json")
+    assert packet["schema_version"] == "main-agent-real-task-recovery.v1"
+    assert packet["case_id"] == "timeout_case"
+    assert packet["status"] == "FAILED"
+    assert packet["recovery_required"] is True
+    assert packet["reason_codes"] == ["timeout", "artifact_acceptance_failed=1"]
+    assert packet["refs"]["stdout_ref"] == result.stdout_ref
+    assert packet["refs"]["acceptance_report_ref"] == result.acceptance_report_ref
+    assert packet["acceptance"]["summary"]["failed"] == 1

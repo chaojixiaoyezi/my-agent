@@ -201,6 +201,33 @@ def test_tool_executor_unwraps_model_filesystem_bundle(tmp_path: Path):
     assert "category bundle recovered" in result.output
 
 
+# LLM: model function-call wrappers should flatten before aliases and required-param checks.
+# 函数用途: 覆盖真实 E2E 暴露的 actual_parameter_name 包装，避免 run_command 误报 command 为空。
+def test_tool_call_parser_unwraps_actual_parameter_name_bundle():
+    registry = make_tool_registry(Path.cwd())
+
+    calls = registry.parse_tool_calls(
+        '[TOOL_CALL]\n'
+        '{"tool":"run_command","actual_parameter_name":{"command":"echo ok","working_dir":"/tmp"}}\n'
+        '[/TOOL_CALL]'
+    )
+
+    assert calls == [{"tool": "run_command", "command": "echo ok", "working_dir": "/tmp"}]
+
+
+# LLM: direct execution should use the same wrapper normalization as text parsing.
+# 函数用途: 验证 arguments 这类函数调用参数外壳会被解包，再执行真实工具。
+def test_tool_executor_unwraps_arguments_bundle(tmp_path: Path):
+    registry = make_tool_registry(tmp_path)
+
+    result = registry.execute_call(
+        {"tool": "write_file", "arguments": {"path": "notes.txt", "content": "wrapped"}}
+    )
+
+    assert result.ok
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "wrapped"
+
+
 # LLM: test_tool_call_parser_canonicalizes_json_tool_and_param_aliases covers non-XML model drift.
 # 函数用途: 标准 JSON 工具块里写 write/file_path 这类别名时，协议层应归一成 write_file/path。
 def test_tool_call_parser_canonicalizes_json_tool_and_param_aliases():
