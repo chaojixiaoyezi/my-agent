@@ -17,6 +17,9 @@ from agent_py_agent.agent.agent_core.tool_stream_boundary import (
     long_write_abort_response,
     malformed_tool_protocol_abort_response,
 )
+from agent_py_agent.agent.agent_core.tool_stream_boundary_models import (
+    LongToolContentAbortPayload,
+)
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.tooling.content_transport_policy import (
     STREAMING_INLINE_WRITE_ABORT_CHARS,
@@ -118,14 +121,16 @@ def test_tool_boundary_aborts_file_write_session_after_session_chunk_limit():
 def test_long_file_write_session_abort_response_salvages_append_prefix():
     response = long_write_abort_response(
         LongToolContentStreamAbort(
-            tool="file_write_session",
-            path="session_id=s1",
-            chars=DEFAULT_MAX_SESSION_CHUNK_CHARS + 1,
-            limit=DEFAULT_MAX_SESSION_CHUNK_CHARS,
-            action="append",
-            session_id="s1",
-            chunk_index=3,
-            content_prefix="hello\nworldhello\nworld",
+            LongToolContentAbortPayload(
+                tool="file_write_session",
+                path="session_id=s1",
+                chars=DEFAULT_MAX_SESSION_CHUNK_CHARS + 1,
+                limit=DEFAULT_MAX_SESSION_CHUNK_CHARS,
+                action="append",
+                session_id="s1",
+                chunk_index=3,
+                content_prefix="hello\nworldhello\nworld",
+            )
         ),
         backend="test-backend",
     )
@@ -145,11 +150,13 @@ def test_long_file_write_session_abort_response_salvages_append_prefix():
 def test_long_write_file_abort_response_salvages_prefix_to_file_write_session():
     response = long_write_abort_response(
         LongToolContentStreamAbort(
-            tool="write_file",
-            path="outputs/site/index.html",
-            chars=5000,
-            limit=4000,
-            content_prefix="<!doctype html>\n<html>",
+            LongToolContentAbortPayload(
+                tool="write_file",
+                path="outputs/site/index.html",
+                chars=5000,
+                limit=4000,
+                content_prefix="<!doctype html>\n<html>",
+            )
         ),
         backend="test-backend",
     )

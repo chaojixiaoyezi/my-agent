@@ -208,6 +208,11 @@ class TestFileWriteSessionTool:
         assert finish.ok is True
         assert (workspace / "out" / "index.html").read_text(encoding="utf-8") == "<!doctype html>"
 
+
+# LLM: Stable id and path-boundary tests are kept in a separate class so the contract suite stays under code-size limits.
+# 类用途: 覆盖 session_id 幂等、目标冲突、自动拆分和路径边界等补充场景。
+class TestFileWriteSessionToolIdentityAndGuards:
+
     # LLM: Model-chosen session ids act as idempotency keys, matching 会话运行时 stable operation ids.
     # 函数用途: 验证 begin 接受调用方提供的 session_id；重复 begin 同目标返回同一 open session，避免随机 id 让后续 append 丢失。
     def test_begin_accepts_stable_session_id_and_reuses_same_target(self, tmp_path: Path):
