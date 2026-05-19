@@ -80,7 +80,7 @@ def resolve_workspace_roots(config, config_path: str | Path, *, current_dir: str
 
     raw_value = getattr(config, "workspace_root", "")
     raw_roots = _raw_workspace_roots(raw_value)
-    cwd = Path(current_dir).expanduser().resolve() if current_dir is not None else Path.cwd().resolve()
+    cwd = Path(current_dir).expanduser().resolve() if current_dir is not None else ROOT
     roots: list[Path] = []
     for raw in raw_roots:
         candidate = _resolve_one_workspace_root(raw, config_path, current_dir=cwd)
@@ -115,7 +115,8 @@ def _resolve_one_workspace_root(
         candidate = Path(config_path).expanduser().resolve().parent / candidate
     return candidate.resolve()
 
-
+# LLM: _is_foreign_windows_absolute_path keeps CLI path parsing from treating foreign drive roots as local workspaces.
+# 函数用途: 判断一个看起来像 Windows 绝对路径的字符串，避免在当前平台被错误解析成可用 workspace 路径。
 def _is_foreign_windows_absolute_path(raw: str) -> bool:
     path = Path(raw)
     if path.is_absolute():

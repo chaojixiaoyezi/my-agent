@@ -575,6 +575,7 @@ my-agent real-e2e --workspace .\.real-e2e --artifact .\outputs\index.html --json
 my-agent real-e2e --workspace .\.real-e2e --real-task-suite --real-task-max-workers 4 --json
 my-agent real-e2e --workspace .\.real-e2e --run-real-tasks --real-task-case furniture_homepage_html --real-task-base-config .\agent_py_agent\config\agent_config.yaml --json
 my-agent real-e2e --workspace .\.real-e2e --revalidate-real-task-report .\.real-e2e\main_agent_real_task_execution\execution_report.json --json
+my-agent real-e2e --workspace .\.real-e2e --resume-real-task-recovery-packet .\.real-e2e\main_agent_real_task_execution\furniture_homepage_html\recovery_packet.json --json
 my-agent real-e2e --workspace .\.real-e2e --report .\reports\real-e2e.json
 ```
 
@@ -588,6 +589,8 @@ my-agent real-e2e --workspace .\.real-e2e --report .\reports\real-e2e.json
 
 如果真实任务已经跑完，只想重新检查产物，可以用 `--revalidate-real-task-report` 指向之前的 `execution_report.json`。它不会重启主代理，也不会重新调用模型，只会按 report 里的 refs 回到 task workspace 和 expected artifact 合同重新验收。
 
+如果某个真实任务 case 中途失败，但已经留下 `recovery_packet.json`，可以传 `--resume-real-task-recovery-packet` 按同一个 case 的恢复包续跑。它会复用原 task workspace、acceptance 合同和 artifact refs，不会重新生成一套平行任务目录。
+
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--workspace <path>` | 当前目录 `.my-agent-real-e2e` | E2E 工作区；命令会把报告和确定性测试证据写到这里。 |
@@ -599,6 +602,7 @@ my-agent real-e2e --workspace .\.real-e2e --report .\reports\real-e2e.json
 | `--real-task-case <case_id>` | 可重复 | 只计划/执行指定 case，例如 `furniture_homepage_html`。不传则覆盖全部默认 case。 |
 | `--real-task-base-config <path>` | 空 | 执行真实任务使用的基础配置文件；为空时使用离线 echo 配置，传真实配置才会调用真实模型。 |
 | `--revalidate-real-task-report <path>` | 空 | 只读复验已有真实任务执行报告；不启动模型进程，只重新跑产物验收。 |
+| `--resume-real-task-recovery-packet <path>` | 空 | 按已有 `recovery_packet.json` 续跑同一个真实任务 case，复用原 task workspace 和验收合同。 |
 | `--real-task-max-workers <n>` | `4` | 真实任务计划/执行的最大并发工位。 |
 | `--real-task-timeout <seconds>` | `480` | 真实任务执行的单任务超时秒数；超时会写结构化失败和 stderr/stdout refs。 |
 | `--json` | `false` | 输出完整机器可读 JSON。 |

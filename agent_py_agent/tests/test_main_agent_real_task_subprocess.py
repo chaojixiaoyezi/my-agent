@@ -5,11 +5,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from agent_py_agent.agent.contracts.main_agent_real_task_execution import _activity_timeout_seconds
 from agent_py_agent.agent.contracts.main_agent_real_task_subprocess import (
     RealTaskSubprocessRequest,
     run_real_task_subprocess,
 )
-from agent_py_agent.agent.contracts.main_agent_real_task_execution import _activity_timeout_seconds
 
 
 # LLM: _request builds a tiny subprocess contract for live-log runner tests.
