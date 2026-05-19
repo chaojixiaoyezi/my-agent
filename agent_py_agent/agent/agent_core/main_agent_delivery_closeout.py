@@ -12,7 +12,6 @@ from ..backends import ModelResponse
 from ..contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
 from ._runtime_params import ToolLoopExecuteParams
 
-CONTRACT_MARKER = "MACHINE_DELIVERY_CONTRACT_JSON:"
 CLOSEOUT_DIR = ".agent_delivery"
 CLOSEOUT_REPORT = "closeout.json"
 
@@ -37,9 +36,9 @@ class DeliveryContractValidationRequest:
 
 
 # LLM: main_agent_delivery_closeout_response returns a deterministic final response only after all required refs pass.
-# 函数用途: 根据 MACHINE_DELIVERY_CONTRACT_JSON 验收必交产物；通过则停止工具循环，失败则写结构化反馈让模型修复。
+# 函数用途: 根据结构化 delivery_contract 验收必交产物；通过则停止工具循环，失败则写结构化反馈让模型修复。
 def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequest) -> ModelResponse | None:
-    contract = _delivery_contract(request.params.user_prompt)
+    contract = _delivery_contract(request.params)
     artifacts = _required_artifacts(contract)
     if not artifacts:
         return None
@@ -61,17 +60,15 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     return ModelResponse(text=_closeout_text(report), backend=request.backend)
 
 
-# LLM: _delivery_contract parses only the marked JSON block, never free-form task prose.
-# 函数用途: 从用户 prompt 里提取机器合同；没有标记或 JSON 非对象时返回空合同。
-def _delivery_contract(user_prompt: str) -> dict[str, Any]:
-    if CONTRACT_MARKER not in user_prompt:
-        return {}
-    raw = user_prompt.split(CONTRACT_MARKER, 1)[1].lstrip()
-    try:
-        value, _ = json.JSONDecoder().raw_decode(raw)
-    except json.JSONDecodeError:
-        return {}
-    return value if isinstance(value, dict) else {}
+# LLM: _delivery_contract reads machine contracts from runtime fields, never from prompt prose.
+# 函数用途: 优先读取 ToolLoopExecuteParams.delivery_contract；兼容读取 task_attributes.delivery_contract。
+def _delivery_contract(params: ToolLoopExecuteParams) -> dict[str, Any]:
+    value = params.delivery_contract
+    if isinstance(value, dict):
+        return dict(value)
+    attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
+    value = attrs.get("delivery_contract")
+    return dict(value) if isinstance(value, dict) else {}
 
 
 # LLM: _required_artifacts keeps optional outputs from forcing deterministic closeout.

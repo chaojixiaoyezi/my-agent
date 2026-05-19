@@ -21,6 +21,7 @@ class RunParams:
     run_id: str = ""
     task_id: str = ""
     task_attributes: dict | None = None
+    delivery_contract: dict | None = None
     system_prompt_override: str | None = None
     source: str = "run"
     recovery_snapshot: bool | None = None
@@ -67,6 +68,7 @@ class RuntimeLoopParams:
     prompt_files: list | None = None
     write_boundary: dict | None = None
     task_attributes: dict | None = None
+    delivery_contract: dict | None = None
     system_prompt_override: str | None = None
     on_chunk: object = None
     request_id: str = ""

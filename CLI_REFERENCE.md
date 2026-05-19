@@ -265,6 +265,7 @@ my-agent run "总结这个项目" --no-save
 | `--save` | 保存本次对话到记忆。 |
 | `--no-save` | 不保存本次对话到记忆。 |
 | `--show-prompt` | 打印最终拼装后的 prompt。 |
+| `--delivery-contract-file <path>` | 读取结构化交付合同 JSON，供主代理按机器字段验收产物，不把合同塞进用户 prompt。 |
 | `--resume-context` | 本次请求临时启用恢复上下文注入，不用改配置文件。 |
 | `--no-resume-context` | 本次请求临时关闭恢复上下文注入。 |
 

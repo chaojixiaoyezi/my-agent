@@ -121,14 +121,17 @@ def test_main_agent_real_task_execution_plan_writes_command_refs(tmp_path):
     payload = report.to_dict()
     first_case = payload["cases"][0]
     command_payload = json.loads((tmp_path / first_case["command_ref"]).read_text(encoding="utf-8"))
-    prompt_arg = command_payload["argv"][-2]
+    argv = command_payload["argv"]
+    prompt_arg = argv[argv.index("run") + 1]
+    contract_path = Path(argv[argv.index("--delivery-contract-file") + 1])
+    contract_payload = json.loads(contract_path.read_text(encoding="utf-8"))
     assert payload["ok"] is True
     assert payload["summary"]["planned"] == payload["summary"]["total"]
     assert payload["concurrency"]["effective_max_workers"] == 2
-    assert "MACHINE_DELIVERY_CONTRACT_JSON" in prompt_arg
-    assert "outputs/furniture_homepage/index.html" in prompt_arg
-    assert "HTML_PLACEHOLDER_LINK" in prompt_arg
-    assert "forbidden_hrefs" in prompt_arg
+    assert "MACHINE_DELIVERY_CONTRACT_JSON" not in prompt_arg
+    assert contract_payload["artifacts"][0]["preferred_path"] == "outputs/furniture_homepage/index.html"
+    assert "HTML_PLACEHOLDER_LINK" in json.dumps(contract_payload, ensure_ascii=False)
+    assert "forbidden_hrefs" in contract_payload["artifacts"][0]["validation_contract"]
     assert (tmp_path / first_case["command_ref"]).exists()
     assert (tmp_path / first_case["config_ref"]).exists()
     assert not (tmp_path / first_case["stdout_ref"]).exists()

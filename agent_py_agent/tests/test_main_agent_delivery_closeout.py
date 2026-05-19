@@ -8,6 +8,7 @@ import json
 import tempfile
 from pathlib import Path
 
+from agent_py_agent.agent.agent_core.runtime_loop_models import RunParams
 from agent_py_agent.agent.backend import ModelResponse
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
@@ -89,10 +90,16 @@ class _IncompleteDeliveryContractBackend:
         return ModelResponse(text="已收到不完整 HTML 的结构化反馈。", backend=self.name)
 
 
-# LLM: _delivery_contract_prompt renders the same structured marker used by real task execution.
-# 函数用途: 构造带机器交付合同的用户 prompt；自然语言部分不作为完成事实来源。
+# LLM: _delivery_contract_prompt returns only user-visible task prose.
+# 函数用途: 构造普通用户任务文本；机器合同由 RunParams.delivery_contract 传入。
 def _delivery_contract_prompt() -> str:
-    contract = {
+    return "用单文件 html 做一个高端家具品牌首页。"
+
+
+# LLM: _delivery_contract is the machine-only contract fixture shared by prompt and RunParams tests.
+# 函数用途: 生成主代理交付收口需要的结构化合同；测试不从普通自然语言里推断产物要求。
+def _delivery_contract() -> dict[str, object]:
+    return {
         "case_id": "furniture_homepage_html",
         "artifacts": [
             {
@@ -110,13 +117,6 @@ def _delivery_contract_prompt() -> str:
             }
         ],
     }
-    return "\n\n".join(
-        [
-            "用单文件 html 做一个高端家具品牌首页。",
-            "MACHINE_DELIVERY_CONTRACT_JSON:",
-            json.dumps(contract, ensure_ascii=False, indent=2),
-        ]
-    )
 
 
 # LLM: Real-task delivery contracts should stop successful runs before extra model turns.
@@ -129,12 +129,35 @@ def test_tool_loop_closes_out_after_delivery_contract_passes():
         backend = _DeliveryContractBackend()
         agent.backend = backend
 
-        result = agent.run(_delivery_contract_prompt(), save=False)
+        result = agent.run(
+            _delivery_contract_prompt(),
+            params=RunParams(delivery_contract=_delivery_contract(), save=False),
+        )
 
         assert backend.calls == 1
         assert result.tool_rounds == 1
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert (workspace / "outputs/furniture_homepage/index.html").exists()
+        assert (workspace / ".agent_delivery/closeout.json").exists()
+
+
+# LLM: Delivery closeout must use RunParams contracts without requiring prompt markers.
+# 函数用途: 验证系统交付合同可以通过结构化运行参数传入，不依赖 user_prompt 中的机器 JSON 标记。
+def test_tool_loop_closes_out_from_structured_run_params_delivery_contract():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=5)
+        agent = SimpleAgent(cfg, workspace)
+        backend = _DeliveryContractBackend()
+        agent.backend = backend
+
+        result = agent.run(
+            "用单文件 html 做一个高端家具品牌首页。",
+            params=RunParams(delivery_contract=_delivery_contract(), save=False),
+        )
+
+        assert backend.calls == 1
+        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert (workspace / ".agent_delivery/closeout.json").exists()
 
 
@@ -148,7 +171,10 @@ def test_tool_loop_does_not_close_out_when_delivery_contract_fails():
         backend = _FailedDeliveryContractBackend()
         agent.backend = backend
 
-        result = agent.run(_delivery_contract_prompt(), save=False)
+        result = agent.run(
+            _delivery_contract_prompt(),
+            params=RunParams(delivery_contract=_delivery_contract(), save=False),
+        )
         report = json.loads((workspace / ".agent_delivery/closeout.json").read_text(encoding="utf-8"))
 
         assert backend.calls == 2
@@ -168,7 +194,10 @@ def test_tool_loop_rejects_incomplete_delivery_contract_artifact():
         backend = _IncompleteDeliveryContractBackend()
         agent.backend = backend
 
-        result = agent.run(_delivery_contract_prompt(), save=False)
+        result = agent.run(
+            _delivery_contract_prompt(),
+            params=RunParams(delivery_contract=_delivery_contract(), save=False),
+        )
         report = json.loads((workspace / ".agent_delivery/closeout.json").read_text(encoding="utf-8"))
         codes = [item["code"] for item in report["artifacts"][0]["acceptance_report"]["findings"]]
 
