@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import json
+
 from ..prompting_parts.builder import ToolSections
 from ._runtime_params import ToolLoopExecuteParams
 from .tool_context_window import window_tool_context_params
@@ -16,7 +18,7 @@ def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     return agent.prompts.build(
         params.user_prompt,
         params.memories,
-        inject=params.runtime_injections,
+        inject=_runtime_injections_with_delivery_contract(params),
         prompt_files=params.prompt_files,
         system_prompt_override=params.system_prompt_override,
         context_scope=params.context_scope,
@@ -26,6 +28,22 @@ def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
             tool_context=params.tool_context,
         ),
     )
+
+
+# LLM: _runtime_injections_with_delivery_contract makes machine contracts visible without using prompt as storage.
+# 函数用途: 将 RunParams.delivery_contract 渲染给模型执行；系统验收仍只读结构化参数字段。
+def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams) -> list:
+    if not isinstance(params.delivery_contract, dict):
+        return params.runtime_injections
+    payload = json.dumps(params.delivery_contract, ensure_ascii=False, sort_keys=True)
+    section = "\n".join(
+        [
+            "[tool-system delivery-contract]",
+            payload,
+            "按以上机器合同交付产物；产物路径、必需文件和验收要求以 JSON 字段为准。",
+        ]
+    )
+    return [*params.runtime_injections, section]
 
 
 # LLM: next_tool_loop_model_response returns both rendered prompt and provider response.
