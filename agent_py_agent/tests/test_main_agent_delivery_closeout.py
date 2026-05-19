@@ -161,6 +161,7 @@ def test_tool_loop_closes_out_from_structured_run_params_delivery_contract():
         assert backend.calls == 1
         assert "outputs/furniture_homepage/index.html" in backend.prompts[0]
         assert "[tool-system delivery-contract]" in backend.prompts[0]
+        assert "不得引用 http/https 外部" in backend.prompts[0]
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert (workspace / ".agent_delivery/closeout.json").exists()
 

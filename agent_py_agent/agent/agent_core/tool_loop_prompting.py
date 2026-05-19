@@ -3,10 +3,9 @@
 
 from __future__ import annotations
 
-import json
-
 from ..prompting_parts.builder import ToolSections
 from ._runtime_params import ToolLoopExecuteParams
+from .delivery_contract_prompting import render_delivery_contract_section
 from .tool_context_window import window_tool_context_params
 from .tool_model_generation import ModelGenerateParams, generate_model_response
 
@@ -35,15 +34,7 @@ def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
 def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams) -> list:
     if not isinstance(params.delivery_contract, dict):
         return params.runtime_injections
-    payload = json.dumps(params.delivery_contract, ensure_ascii=False, sort_keys=True)
-    section = "\n".join(
-        [
-            "[tool-system delivery-contract]",
-            payload,
-            "按以上机器合同交付产物；产物路径、必需文件和验收要求以 JSON 字段为准。",
-        ]
-    )
-    return [*params.runtime_injections, section]
+    return [*params.runtime_injections, render_delivery_contract_section(params.delivery_contract)]
 
 
 # LLM: next_tool_loop_model_response returns both rendered prompt and provider response.
