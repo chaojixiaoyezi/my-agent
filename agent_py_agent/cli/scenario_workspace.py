@@ -76,6 +76,7 @@ gateway_workspace: ".my_agent/gateway"
 max_subagents: {request.max_subagents}
 gateway_request_timeout: {int(request.request_timeout)}
 gateway_request_poll_interval: 1
+gateway_port: 0
 daemon_planner: false
 daemon_apply: false
 daemon_execute_runners: false

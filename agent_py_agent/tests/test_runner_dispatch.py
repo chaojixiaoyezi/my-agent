@@ -388,6 +388,75 @@ class TestRunnerTaskTimeout:
 
         assert get_task_timeout(task, 8.0, config) >= 30.0
 
+    # LLM: timeout closeout must preserve task-local product refs instead of collapsing to generic TIMEOUT.
+    # 函数用途: 复现真实 MiniMax 购物站第二轮超时：HTML 已闭合但残留 href="#"，超时应生成 artifact_integrity 修复合同。
+    def test_timeout_with_progress_artifact_records_repairable_structured_result(self, tmp_path: Path):
+        from agent_py_agent.agent.agent_core.runner_worker import (
+            RunSubagentWorkerParams,
+            _run_subagent_worker_with_timeout,
+        )
+
+        artifact = tmp_path / "lab_outputs" / "shop-demo" / "index.html"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text(
+            "<html><body><a href='#'>立即注册</a></body></html>",
+            encoding="utf-8",
+        )
+        workspace = tmp_path / "tasks" / "run-1" / "agents" / "run-1"
+        progress_dir = workspace / "progress"
+        progress_dir.mkdir(parents=True)
+        (progress_dir / "latest_tool_progress.json").write_text(
+            (
+                "{"
+                f'"latest_written_path": {artifact.as_posix()!r},'
+                f'"latest_tool_progress_ref": {(progress_dir / "latest_tool_progress.json").as_posix()!r},'
+                '"artifact_integrity": {'
+                '"kind": "html", "ok": true, "blocker_codes": [],'
+                '"warning_codes": ["placeholder_hash_link"],'
+                '"issues": [{"code": "placeholder_hash_link", "severity": "warning", "count": 1, "examples": ["立即注册 href=#"]}]'
+                "}"
+                "}"
+            ).replace("'", '"'),
+            encoding="utf-8",
+        )
+        task = SimpleNamespace(
+            id="run-1",
+            agent_run_workspace_dir=str(workspace),
+            output_json=str(tmp_path / "subs" / "run-1" / "output.json"),
+        )
+        captured = {}
+        worker = MagicMock()
+        worker.subagents.prepare_runner_attempt.return_value = SimpleNamespace(runner_active_attempt_id="attempt-1")
+        worker.subagents.load.return_value = task
+        worker.subagents.record_runner_result.side_effect = lambda params: captured.setdefault("params", params) or SimpleNamespace(status="BLOCKED")
+        worker.run_subagent.side_effect = lambda params: __import__("time").sleep(1)
+
+        _run_subagent_worker_with_timeout(
+            worker,
+            RunSubagentWorkerParams(
+                config=MagicMock(),
+                root=tmp_path,
+                run_id="run-1",
+                instruction="",
+                dry_run=False,
+                max_cards=0,
+                probe=False,
+                retry_reason="",
+                timeout_seconds=0.01,
+            ),
+        )
+
+        params = captured["params"]
+        assert params.status == ""
+        assert params.failure_type == ""
+        assert params.structured_output.status == "BLOCKED"
+        assert params.structured_output.failure_type == "artifact_integrity_failed"
+        assert str(artifact) in params.structured_output.blocked_reason
+        assert params.structured_output.artifacts[0]["path"] == str(artifact)
+        worker.subagents.abandon_runner_attempt.assert_called_once_with(
+            "run-1", "attempt-1", reason="runner timed out after 0.01s"
+        )
+
 
 class TestIsDispatchRunnerCandidate:
     """测试 _is_dispatch_runner_candidate() 函数。"""

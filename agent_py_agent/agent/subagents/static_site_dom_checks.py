@@ -9,6 +9,7 @@ from dataclasses import dataclass
 _VALIDATE_FORM_CALL_RE = re.compile(r"validateForm\(\s*['\"]([^'\"]+)['\"]\s*\)")
 _GET_ELEMENT_BY_ID_RE = re.compile(r"getElementById\(\s*['\"]([^'\"]+)['\"]\s*\)")
 _QUERY_SELECTOR_ID_RE = re.compile(r"querySelector(?:All)?\(\s*['\"]#([A-Za-z0-9_-]+)['\"]\s*\)")
+_ONCLICK_FUNCTION_CALL_RE = re.compile(r"^\s*([A-Za-z_$][\w$]*)\s*\(")
 _ASSIGNED_GET_ELEMENT_RE = re.compile(
     r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*document\.getElementById\(\s*['\"]([^'\"]+)['\"]\s*\)\s*;"
 )
@@ -122,9 +123,33 @@ def _inert_control_hit(
         return [f"{request.rel_path}:{tag}:{text or '<empty>'} disabled"]
     if tag == "a" and not onclick and _anchor_is_inert(href, request.element_ids):
         return [f"{request.rel_path}:a:{text or '<empty>'} href={href or '<empty>'}"]
+    if onclick and _onclick_named_handler_missing(onclick, request.html_text):
+        handler = _onclick_handler_name(onclick)
+        return [f"{request.rel_path}:{tag}:{text or '<empty>'} onclick={handler}"]
     if tag == "button" and not onclick and button_type not in {"submit", "reset"} and not has_script_handlers:
         return [f"{request.rel_path}:button:{text or '<empty>'}"]
     return []
+
+
+# LLM: _onclick_named_handler_missing is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _onclick_named_handler_missing(onclick: str, html_text: str) -> bool:
+    handler = _onclick_handler_name(onclick)
+    if not handler:
+        return False
+    text = html_text or ""
+    escaped = re.escape(handler)
+    return not re.search(
+        rf"\bfunction\s+{escaped}\s*\(|\b(?:const|let|var)\s+{escaped}\s*=|window\.{escaped}\s*=",
+        text,
+    )
+
+
+# LLM: _onclick_handler_name is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _onclick_handler_name(onclick: str) -> str:
+    match = _ONCLICK_FUNCTION_CALL_RE.match(onclick or "")
+    return match.group(1) if match else ""
 
 
 # LLM: _anchor_is_inert separates real in-page anchors from placeholder or missing hash links.

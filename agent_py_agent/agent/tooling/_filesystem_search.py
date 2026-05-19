@@ -11,6 +11,7 @@ from typing import Any
 from ._filesystem_helpers import (
     _MAX_SEARCH_LINE_CHARS,
     _MAX_SEARCH_QUERY_CHARS,
+    _bool_param,
     _bundled_filesystem_param,
     _int_param,
     _optional_path,
@@ -48,14 +49,16 @@ class SearchTextTool(FileSystemTool):
                 "offset": "跳过前多少条匹配，用于分页，默认 0",
                 "file_glob": "只搜索匹配 glob 的文件，例如 *.py",
                 "context": "每条命中前后额外展示多少行上下文，默认 0",
+                "case_sensitive": "是否区分大小写，默认 false",
             },
             parameter_details={
-                "query": "必填，直接按文本包含关系匹配，不做正则解析。",
+                "query": "必填，直接按文本包含关系匹配，不做正则解析；默认大小写不敏感。",
                 "path": "可选，把搜索范围缩小到某个子目录时更高效。",
                 "limit": "分页大小；命中很多时先看小批量，再用 next_offset 继续。",
                 "offset": "上一页返回 next_offset 后，下一次传入这里继续看。",
                 "file_glob": "按文件名或工作区相对路径过滤，例如 *.py、docs/*.md。",
                 "context": "需要看命中附近内容时传 1 或 2；越大越占 prompt。",
+                "case_sensitive": "需要精确大小写匹配时传 true；日志和自然语言检索通常保持默认 false。",
             },
             examples=[
                 '{"tool": "search_text", "query": "PromptBuilder"}',
@@ -87,7 +90,7 @@ class SearchTextTool(FileSystemTool):
                 continue
             if request.file_glob and not self._matches_file_glob(item, request.file_glob):
                 continue
-            found = self._search_item_for_query(item, request.query, matches, state)
+            found = self._search_item_for_query(item, request, matches, state)
             if found == "full":
                 return ToolExecutionResult("search_text", True, "\n".join(matches))
         return ToolExecutionResult("search_text", True, "\n".join(matches) or "没有找到匹配项")
@@ -103,7 +106,7 @@ class SearchTextTool(FileSystemTool):
     def _search_item_for_query(
         self,
         item: Path,
-        query: str,
+        request: _SearchRequest,
         matches: list[str],
         state: dict[str, int],
     ) -> str:
@@ -113,7 +116,7 @@ class SearchTextTool(FileSystemTool):
             return ""
         try:
             return self._search_lines(
-                _SearchLineRequest(item=item, safe_item=safe_item, query=query, state=state),
+                _SearchLineRequest(item=item, safe_item=safe_item, request=request, state=state),
                 matches,
             )
         except UnicodeDecodeError:
@@ -127,8 +130,10 @@ class SearchTextTool(FileSystemTool):
         matches: list[str],
     ) -> str:
         lines = request.safe_item.read_text(encoding="utf-8").splitlines()
+        query = request.request.query if request.request.case_sensitive else request.request.query.lower()
         for idx, line in enumerate(lines, start=1):
-            if request.query not in line:
+            haystack = line if request.request.case_sensitive else line.lower()
+            if query not in haystack:
                 continue
             if _skip_seen_match(request.state):
                 continue
@@ -189,6 +194,7 @@ class _SearchRequest:
     offset: int
     context: int
     file_glob: str
+    case_sensitive: bool
 
 
 # LLM: _SearchLineRequest bundles one file scan so line parsing does not grow a long signature.
@@ -197,7 +203,7 @@ class _SearchRequest:
 class _SearchLineRequest:
     item: Path
     safe_item: Path
-    query: str
+    request: _SearchRequest
     state: dict[str, int]
 
 
@@ -237,6 +243,7 @@ def _search_request_from_params(params: dict[str, Any], max_matches: int) -> _Se
             allow_empty=True,
             strip=True,
         ),
+        case_sensitive=_bool_param(_bundled_filesystem_param(params, "case_sensitive", False), default=False),
     )
 
 

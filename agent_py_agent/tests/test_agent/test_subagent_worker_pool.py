@@ -308,12 +308,13 @@ def test_dispatch_parallel_runner_pool_timeout_does_not_block_other_workers(monk
     loaded = [agent.subagents.load(task.id) for task in tasks]
     statuses = sorted(item.status for item in loaded)
     runner_records = [item for item in report.records if item.step == "runner"]
-    timeout_task = next(item for item in loaded if item.status == "TIMEOUT")
+    timeout_task = next(item for item in loaded if item.failure_type == "runner_timeout")
 
-    assert len(runner_records) == 2
-    assert any(item.status == "TIMEOUT" for item in loaded)
+    assert len(runner_records) == 3
+    assert timeout_task.status == "TAKEN_OVER"
     assert any(item.status == "DONE" for item in loaded)
-    assert statuses == ["DONE", "TIMEOUT"]
+    assert statuses == ["DONE", "TAKEN_OVER"]
     assert Path(timeout_task.runner_prompt_file).exists()
     assert any(not item.ok and "timed out" in item.message for item in runner_records)
     assert any(item.ok for item in runner_records)
+    assert any(item.step == "action_apply" and item.action == "takeover_or_reassign" and item.ok for item in report.records)

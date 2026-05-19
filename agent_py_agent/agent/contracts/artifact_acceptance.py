@@ -87,7 +87,7 @@ class _HTMLAcceptanceParser(HTMLParser):
     # 函数用途: 准备链接、图片和按钮事实列表；不做文件 I/O。
     def __init__(self) -> None:
         super().__init__()
-        self.links: list[tuple[str, str]] = []
+        self.links: list[dict[str, str]] = []
         self.images: list[tuple[str, str]] = []
 
     # LLM: handle_starttag records only refs relevant to generic HTML acceptance.
@@ -95,7 +95,7 @@ class _HTMLAcceptanceParser(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = {key.lower(): value or "" for key, value in attrs}
         if tag.lower() == "a":
-            self.links.append(("href", values.get("href", "")))
+            self.links.append(values)
         if tag.lower() == "img":
             self.images.append(("src", values.get("src", "")))
 
@@ -282,7 +282,13 @@ def _artifact_id(path: Path, digest: str) -> str:
 # 函数用途: 找出 `href="#"`、空 href 或 javascript:void(0) 这类假链接/假按钮。
 def _placeholder_link_findings(parser: _HTMLAcceptanceParser) -> list[ArtifactFinding]:
     findings: list[ArtifactFinding] = []
-    for attr, value in parser.links:
+    for link in parser.links:
+        if "href" not in link:
+            if link.get("onclick", "").strip() or link.get("role", "").strip().lower() == "button":
+                continue
+            value = ""
+        else:
+            value = link.get("href", "")
         normalized = value.strip().lower()
         if normalized in {"", "#", "javascript:void(0)", "javascript:void(0);"}:
             findings.append(
@@ -290,7 +296,7 @@ def _placeholder_link_findings(parser: _HTMLAcceptanceParser) -> list[ArtifactFi
                     code="HTML_PLACEHOLDER_LINK",
                     severity="hard",
                     message="Clickable link uses a placeholder target.",
-                    location=f"a[{attr}]",
+                    location="a[href]",
                     value=value,
                 )
             )

@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ..agent.gateway_parts.background_projection import gateway_background_request_snapshots
 from .shared_progress import shared_progress_for_board
 
 
@@ -64,6 +65,7 @@ def build_status_payload(ctx: StatusPayloadContext) -> dict:
             "heartbeat_age_seconds": round(ctx.heartbeat_age, 1) if ctx.heartbeat_age else 0,
             "request_counts": ctx.request_counts,
             "workspace": str(ctx.paths.root),
+            "background_requests": gateway_background_request_snapshots(ctx.paths, limit=10),
         },
         "local_store": ctx.local_stats,
         "subagents": _subagents_payload(ctx),

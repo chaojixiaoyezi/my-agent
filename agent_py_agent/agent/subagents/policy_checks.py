@@ -116,6 +116,13 @@ def _issue_weight(issue: DueCheckIssue) -> int:
         "missing_work_order_files": 90,
         "fake_done_risk": 85,
         "run_timeout": 80,
+        "status_provider_timeout": 80,
+        "status_artifact_integrity_failed": 79,
+        "artifact_repair_failed": 79,
+        "artifact_integrity_repair_completed": 78,
+        "parent_acceptance_test_failed": 79,
+        "parent_acceptance_repair_failed": 79,
+        "parent_acceptance_repair_completed": 78,
         "no_progress_fuse": 78,
         "coordinator_needs_leadership_recovery": 77,
         "heartbeat_stale": 70,
@@ -150,8 +157,20 @@ def _action_for_issue(issue: DueCheckIssue) -> tuple[str, int, str]:
         return "reopen_for_evidence", 940, "BLOCKED"
     if kind == "unverified_done":
         return "run_acceptance", 760, ""
-    if kind in {"run_timeout", "heartbeat_stale", "status_timeout"}:
+    if kind in {"run_timeout", "heartbeat_stale", "status_timeout", "status_provider_timeout"}:
         return "takeover_or_reassign", 900, "TIMEOUT"
+    if kind == "artifact_repair_failed":
+        return "takeover_or_reassign", 900, "BLOCKED"
+    if kind == "status_artifact_integrity_failed":
+        return "create_repair_child_from_artifact_integrity_refs", 890, "BLOCKED"
+    if kind == "artifact_integrity_repair_completed":
+        return "close_parent_from_verified_repair_child", 880, "DONE"
+    if kind == "parent_acceptance_test_failed":
+        return "create_repair_child_from_parent_acceptance_refs", 890, "BLOCKED"
+    if kind == "parent_acceptance_repair_failed":
+        return "takeover_or_reassign", 900, "BLOCKED"
+    if kind == "parent_acceptance_repair_completed":
+        return "close_parent_from_verified_repair_child", 880, "DONE"
     if kind == "no_progress_fuse":
         return "stop_no_progress_and_escalate", 990, ""
     if kind == "coordinator_needs_leadership_recovery":

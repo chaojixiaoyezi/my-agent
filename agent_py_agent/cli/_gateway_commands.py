@@ -46,7 +46,7 @@ from ._gateway_state_helpers import (
     _write_gateway_stop_request,
 )
 from ._gateway_stop_helpers import _force_kill_gateway
-from .common import ROOT, make_agent, make_capability_router
+from .common import DEFAULT_CAPABILITY_CONFIG, ROOT, make_agent, make_capability_router
 from .daemon import _resolve_daemon_options
 from .gateway_service import (
     install_service,
@@ -97,7 +97,11 @@ def _resolve_gateway_options(agent, args):
 # LLM: _gateway_start_options_from_args 属于gateway CLI；改行为前先对齐调用方和快照/单测。
 # 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _gateway_start_options_from_args(args) -> GatewayStartOptions:
-    return GatewayStartOptions(config=Path(args.config), force_lock=bool(args.force_lock))
+    return GatewayStartOptions(
+        config=Path(args.config),
+        force_lock=bool(args.force_lock),
+        capability_config=Path(getattr(args, "capability_config", DEFAULT_CAPABILITY_CONFIG)),
+    )
 
 
 # LLM: _gateway_run_context_from_args 生成 gateway 主循环上下文。
@@ -314,6 +318,7 @@ def cmd_gateway_restart(args) -> int:
         return stop_code
     start_args = argparse.Namespace(
         config=args.config,
+        capability_config=getattr(args, "capability_config", DEFAULT_CAPABILITY_CONFIG),
         force=True,
         force_lock=getattr(args, "force_lock", False),
     )

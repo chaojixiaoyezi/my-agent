@@ -32,7 +32,7 @@ from ..agent.gateway import (
     wait_for_gateway_running,
 )
 from .chat import cmd_chat
-from .common import make_agent, resume_context_override
+from .common import DEFAULT_CAPABILITY_CONFIG, make_agent, resume_context_override
 from .gateway_process import cmd_gateway_start
 from .thinking_spinner import ThinkingSpinner
 
@@ -80,6 +80,7 @@ def ensure_gateway_started(args) -> int:
         return 0
     start_args = argparse.Namespace(
         config=args.config,
+        capability_config=getattr(args, "capability_config", DEFAULT_CAPABILITY_CONFIG),
         force=False,
         force_lock=False,
     )
@@ -256,6 +257,10 @@ def cmd_gateway_ask(args) -> int:
     if not alive:
         print("gateway 未在运行。请先执行: my-agent gateway start", file=sys.stderr)
         return 2
+    contract_error = _gateway_contract_file_error(args)
+    if contract_error:
+        print(contract_error, file=sys.stderr)
+        return 2
 
     request_id, request_path, response_path = submit_gateway_ask(
         paths,
@@ -265,7 +270,10 @@ def cmd_gateway_ask(args) -> int:
             prompt_files=args.prompt_file or [],
             save=not args.no_save,
             include_prompt=bool(args.show_prompt),
+            client_wait=not bool(args.no_wait),
+            context_scope=str(getattr(args, "context_scope", "default") or "default"),
             resume_context=resume_context_override(args),
+            task_attributes=_gateway_task_attributes_from_args(args),
             agent=agent,
         ),
     )
@@ -291,6 +299,30 @@ def cmd_gateway_ask(args) -> int:
     if not response:
         return _handle_gateway_timeout(ask_ctx)
     return print_gateway_response(response, json_mode=args.json, show_prompt=args.show_prompt)
+
+
+# LLM: gateway ask accepts explicit task contracts as structured args, never by prompt parsing.
+# 函数用途: 将 CLI 参数转换成 run task_attributes，供 delivery_contract 等机器合同使用。
+def _gateway_task_attributes_from_args(args) -> dict:
+    attrs: dict[str, object] = {}
+    contract_file = str(getattr(args, "delivery_contract_file", "") or "").strip()
+    if contract_file:
+        attrs["delivery_contract_file"] = contract_file
+        attrs["max_tool_rounds"] = 32
+        attrs["parent_product_write"] = "allow"
+        attrs["parent_body_read"] = "allow"
+    return attrs
+
+
+# LLM: gateway contract files must fail before queueing, otherwise background requests fail after doing work.
+# 函数用途: 校验显式 delivery_contract_file 是否存在；只看结构化 CLI 参数，不解析 prompt 自然语言。
+def _gateway_contract_file_error(args) -> str:
+    contract_file = str(getattr(args, "delivery_contract_file", "") or "").strip()
+    if not contract_file:
+        return ""
+    if Path(contract_file).expanduser().is_file():
+        return ""
+    return f"delivery contract 文件不存在: {contract_file}"
 
 
 # LLM: cmd_gateway_result 属于gateway CLI；改行为前先对齐调用方和快照/单测。

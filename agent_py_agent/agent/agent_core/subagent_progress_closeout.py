@@ -22,6 +22,22 @@ def subagent_progress_closeout_response(agent, fallback: ModelResponse) -> Model
     return _closeout_response(_progress_closeout_payload(progress, task), fallback)
 
 
+# LLM: subagent_progress_timeout_closeout_response salvages timed-out runners from machine progress facts.
+# 函数用途: runner 超时前已写产物时，转成等待验收或精准修复合同，避免只留下泛化 TIMEOUT。
+def subagent_progress_timeout_closeout_response(agent, run_id: str, fallback: ModelResponse) -> ModelResponse | None:
+    try:
+        task = agent.subagents.load(run_id)
+    except Exception:
+        return None
+    progress = _latest_progress_payload(task)
+    if _progress_ready_for_closeout(progress, task):
+        return _closeout_response(_progress_closeout_payload(progress, task), fallback)
+    repair_payload = _progress_repair_payload(progress, task)
+    if repair_payload:
+        return _closeout_response(repair_payload, fallback)
+    return None
+
+
 # LLM: _current_subagent_task loads only the active runner task for progress closeout.
 # 函数用途: 只在子代理 runner 上下文里工作；主代理普通工具轮不会触发自动收口。
 def _current_subagent_task(agent) -> object | None:
@@ -61,6 +77,59 @@ def _progress_ready_for_closeout(progress: dict[str, object], task) -> bool:
     if integrity.get("ok") is not True:
         return False
     return not (integrity.get("blocker_codes") or integrity.get("warning_codes"))
+
+
+# LLM: _progress_repair_payload turns known artifact integrity issues into a repairable runner result.
+# 函数用途: 超时发生时保留最新产物 ref 和机器 issue codes，供父级创建精准 repair worker。
+def _progress_repair_payload(progress: dict[str, object], task) -> dict[str, object]:
+    artifact_ref = str(progress.get("latest_written_path") or "").strip()
+    if not artifact_ref or _same_path(artifact_ref, getattr(task, "output_json", "")):
+        return {}
+    if not Path(artifact_ref).is_file():
+        return {}
+    integrity = progress.get("artifact_integrity")
+    if not isinstance(integrity, dict) or integrity.get("kind") != "html":
+        return {}
+    codes = _progress_repair_codes(integrity)
+    if not codes:
+        return {}
+    progress_ref = str(progress.get("latest_tool_progress_ref") or "").strip()
+    blocker = f"artifact_integrity_failed:{artifact_ref}:{','.join(codes[:6])}"
+    return {
+        "status": "BLOCKED",
+        "summary": "task-local progress found a product artifact that needs bounded artifact repair after runner timeout.",
+        "used_tools": [],
+        "used_skills": [],
+        "evidence": _progress_evidence(progress_ref),
+        "evidence_packets": _progress_evidence_packets(artifact_ref, [ref for ref in [progress_ref] if ref], task),
+        "coverage_records": [],
+        "capability_requests": [],
+        "artifacts": _progress_artifacts(artifact_ref),
+        "tests": [
+            {
+                "name": "artifact integrity",
+                "validation_method": "artifact_integrity",
+                "ok": False,
+                "summary": ",".join(codes[:6]),
+            }
+        ],
+        "patches": [],
+        "lessons": [],
+        "next_actions": ["repair_artifacts", "rerun_artifact_integrity_check"],
+        "blocked_reason": blocker,
+        "failure_type": "artifact_integrity_failed",
+    }
+
+
+# LLM: _progress_repair_codes is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _progress_repair_codes(integrity: dict[str, object]) -> list[str]:
+    codes = [str(code) for code in integrity.get("blocker_codes") or [] if str(code or "").strip()]
+    for code in integrity.get("warning_codes") or []:
+        text = str(code or "").strip()
+        if text in {"placeholder_hash_link", "missing_hash_target"} and text not in codes:
+            codes.append(text)
+    return codes
 
 
 # LLM: _progress_closeout_payload is the synthetic SUBAGENT_RESULT contract for ready artifacts.
@@ -167,4 +236,3 @@ def _same_path(first: object, second: object) -> bool:
         return Path(left).resolve(strict=False) == Path(right).resolve(strict=False)
     except OSError:
         return left == right
-

@@ -96,14 +96,16 @@ def add_scenario_subcommand(sub: argparse._SubParsersAction) -> None:
             "gateway-delayed-response",
             "gateway-multi-worker",
             "gateway-stale-lease",
+            "gateway-processing-stop",
             "parent-subagent-cross-day-resume",
             "real-model-recovery",
+            "real-model-recovery-multi-round",
             "structured-repair",
             "runner-retry",
             "all",
         ],
         default="happy",
-        help="场景类型：happy 跑真实全流程；verification 测验收防作弊；gateway-restart 测重启恢复；gateway-cross-day-resume 测真实 gateway 请求跨天恢复；gateway-delayed-response 测响应先到后请求副本归档；gateway-multi-worker 测多 request worker 并发抢占；gateway-stale-lease 测 processing stale lease 重排恢复；parent-subagent-cross-day-resume 测真实 runner 写回后的跨天恢复；real-model-recovery 测真实模型 API 的 parent/subagent 跨天恢复；structured-repair 测坏结构化输出修复；runner-retry 测 runner 失败重试；all 连续运行",
+        help="场景类型：happy 跑真实全流程；verification 测验收防作弊；gateway-restart 测重启恢复；gateway-cross-day-resume 测真实 gateway 请求跨天恢复；gateway-delayed-response 测响应先到后请求副本归档；gateway-multi-worker 测多 request worker 并发抢占；gateway-stale-lease 测 processing stale lease 重排恢复；gateway-processing-stop 测处理进程停止后的请求恢复；parent-subagent-cross-day-resume 测真实 runner 写回后的跨天恢复；real-model-recovery 测真实模型 API 的 parent/subagent 跨天恢复；real-model-recovery-multi-round 测真实模型多轮工具调用后的恢复；structured-repair 测坏结构化输出修复；runner-retry 测 runner 失败重试；all 连续运行",
     )
     scenario.add_argument("--workspace", help="保存场景测试结果的父目录；不传则使用系统临时目录")
     scenario.add_argument("--count", type=int, default=2, help="本场景创建多少个子代理")
@@ -125,6 +127,7 @@ def add_scenario_subcommand(sub: argparse._SubParsersAction) -> None:
 # 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _add_gateway_start_stop_subcommands(gateway_sub):
     gateway_start = gateway_sub.add_parser("start", help="启动后台 gateway")
+    _add_capability_config_arg(gateway_start)
     gateway_start.add_argument("--force", action="store_true", help="已有 gateway 运行时先尝试停止再启动")
     gateway_start.add_argument("--force-lock", action="store_true", help="传给内部 daemon，强制覆盖已有 dispatch watch lock")
     gateway_start.set_defaults(func=cmd_gateway_start)
@@ -136,6 +139,7 @@ def _add_gateway_start_stop_subcommands(gateway_sub):
     gateway_stop.set_defaults(func=cmd_gateway_stop)
 
     gateway_restart = gateway_sub.add_parser("restart", help="重启 gateway")
+    _add_capability_config_arg(gateway_restart)
     gateway_restart.add_argument("--timeout", type=float, help="等待正常停止的秒数，默认使用配置")
     gateway_restart.add_argument("--force", action="store_true", help="停止超时后强制终止旧进程")
     gateway_restart.add_argument("--force-lock", action="store_true", help="传给内部 daemon，强制覆盖已有 dispatch watch lock")
@@ -190,6 +194,8 @@ def _add_gateway_ask_result_subcommands(gateway_sub):
     gateway_ask.add_argument("--show-prompt", action="store_true", help="响应返回时打印最终 prompt")
     gateway_ask.add_argument("--timeout", type=float, help="等待 gateway 响应的秒数，默认使用配置")
     gateway_ask.add_argument("--no-wait", action="store_true", help="只投递请求并立即返回 request_id，适合长任务")
+    gateway_ask.add_argument("--context-scope", choices=["default", "control_plane", "task_local"], default="default", help="本次请求使用的上下文范围")
+    gateway_ask.add_argument("--delivery-contract-file", help="后台 run 使用的显式 delivery_contract JSON")
     gateway_ask.add_argument("--json", action="store_true", help="输出完整响应 JSON，方便脚本或聊天适配器读取")
     add_resume_context_switches(gateway_ask)
     gateway_ask.set_defaults(func=cmd_gateway_ask)

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from queue import Empty, Queue
 from threading import Thread
@@ -95,7 +97,7 @@ def generate_model_response(request: ModelGenerateParams):
 # LLM: _generate_with_wall_timeout prevents a stuck provider call from trapping the whole runner.
 # 函数用途: 给任意 backend.generate 增加 request_timeout 总时长保护；后端正常返回时保持原响应对象。
 def _generate_with_wall_timeout(request: ModelGenerateParams, chunk_filter: ToolBoundaryChunkFilter):
-    timeout = _model_request_timeout_seconds(request.agent)
+    timeout = _model_request_timeout_seconds(request)
     on_chunk = chunk_filter
     if timeout <= 0:
         return request.agent.backend.generate(request.prompt, on_chunk=on_chunk)
@@ -106,11 +108,12 @@ def _generate_with_wall_timeout(request: ModelGenerateParams, chunk_filter: Tool
     # 函数用途: 执行真实模型请求并把返回值或异常放回队列；超时后线程不会阻塞当前 run 退出。
     def _target() -> None:
         try:
-            results.put(
-                _BackendGenerateResult(
-                    response=request.agent.backend.generate(request.prompt, on_chunk=on_chunk)
+            with _backend_request_timeout_override(request.agent, timeout):
+                results.put(
+                    _BackendGenerateResult(
+                        response=request.agent.backend.generate(request.prompt, on_chunk=on_chunk)
+                    )
                 )
-            )
         except BaseException as exc:  # pragma: no cover - exercised through queue result.
             results.put(_BackendGenerateResult(exc=exc))
 
@@ -129,16 +132,40 @@ def _generate_with_wall_timeout(request: ModelGenerateParams, chunk_filter: Tool
 
 # LLM: _model_request_timeout_seconds resolves the public request_timeout setting for the guard layer.
 # 函数用途: 从 agent.config 或 backend 上读取 request_timeout；无效或关闭时返回 0 表示不启用总时长保护。
-def _model_request_timeout_seconds(agent: object) -> float:
-    config = getattr(agent, "config", None)
+def _model_request_timeout_seconds(request: ModelGenerateParams) -> float:
+    raw = getattr(request.params, "model_request_timeout_seconds", None)
+    if raw is not None:
+        try:
+            timeout = float(raw)
+        except (TypeError, ValueError):
+            timeout = 0.0
+        if timeout > 0:
+            return timeout
+    config = getattr(request.agent, "config", None)
     raw = getattr(config, "request_timeout", None)
     if raw is None:
-        raw = getattr(getattr(agent, "backend", None), "request_timeout", 0)
+        raw = getattr(getattr(request.agent, "backend", None), "request_timeout", 0)
     try:
         timeout = float(raw)
     except (TypeError, ValueError):
         return 0.0
     return timeout if timeout > 0 else 0.0
+
+
+# LLM: backend request timeouts must follow per-run overrides, not only the outer wall-clock guard.
+# 函数用途: 在单次 generate 调用期间同步覆盖 backend.request_timeout；无该属性的后端保持原样。
+@contextmanager
+def _backend_request_timeout_override(agent: object, timeout: float) -> Iterator[None]:
+    backend = getattr(agent, "backend", None)
+    if backend is None or not hasattr(backend, "request_timeout") or timeout <= 0:
+        yield
+        return
+    previous = backend.request_timeout
+    try:
+        backend.request_timeout = int(timeout) if float(timeout).is_integer() else timeout
+        yield
+    finally:
+        backend.request_timeout = previous
 
 
 # LLM: _tool_write_inline_max_chars keeps streaming guard aligned with write_file/append_file config.

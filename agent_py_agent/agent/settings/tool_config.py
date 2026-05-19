@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 __all__ = ["DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS", "ToolConfig"]
 
-DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS = 12_000
+DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS = 4_000
 
 
 # LLM: ToolConfig 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。

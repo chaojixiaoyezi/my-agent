@@ -29,6 +29,7 @@ class LabSessionManager:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.source_config = Path(args.config).expanduser().resolve()
+        self.source_capability_config = Path(args.capability_config).expanduser().resolve()
         self.runs_dir = Path(args.runs_dir).expanduser().resolve()
         stamp = args.run_id or time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
         self.run_root = self.runs_dir / stamp
@@ -36,6 +37,7 @@ class LabSessionManager:
         self.prompts_dir = self.run_root / "prompts"
         self.responses_dir = self.run_root / "responses"
         self.config_path = self.run_root / "live_agent_config.yaml"
+        self.capability_config_path = self.run_root / "live_capability_config.yaml"
         self.transcript_path = self.run_root / "TRANSCRIPT.md"
         self.summary_path = self.run_root / "live_lab_summary.json"
         self.stop_file = self.run_root / "STOP"
@@ -52,6 +54,7 @@ class LabSessionManager:
         self.responses_dir.mkdir(parents=True, exist_ok=True)
         self.write_fixture()
         self.write_config()
+        self.write_capability_config()
         self.prepare_runtime_dirs()
         self.created = True
 
@@ -97,6 +100,7 @@ class LabSessionManager:
         # LLM: Live Lab must isolate the owner home too, or global daily memory can rewrite the next case.
         isolated_home = str((self.fixture_root / ".my_agent" / "home").resolve()).replace("\\", "/")
         backend_override = "" if self.args.real_llm else '\nmodel_backend: "echo"\n'
+        max_subagents = _live_lab_max_subagents(self.args)
         overrides = f"""
 
 # live-agent-lab isolation overrides
@@ -110,23 +114,48 @@ local_store_events_path: ".my_agent/local_store/events.jsonl"
 subagent_workspace: ".my_agent/subagents"
 gateway_workspace: ".my_agent/gateway"
 adapter_workspace: ".my_agent/adapters/file"
-max_subagents: {max(self.args.count, 1)}
+max_subagents: {max_subagents}
 gateway_request_timeout: {int(self.args.timeout)}
 gateway_request_poll_interval: 1
-gateway_request_workers: 1
+gateway_request_workers: {max(2, int(getattr(self.args, "max_runners", 1) or 1) + 2)}
+gateway_foreground_reserved_workers: 1
+gateway_background_model_request_timeout: {min(3600, max(600, int(self.args.timeout) * 5))}
 gateway_processing_timeout_seconds: {max(int(self.args.timeout) + 120, 180)}
 gateway_request_max_attempts: 2
+gateway_port: 0
 daemon_planner: false
-daemon_apply: false
-daemon_execute_runners: false
-daemon_max_runners: 0
+daemon_apply: true
+daemon_execute_runners: true
+daemon_max_runners: {max(1, int(getattr(self.args, "max_runners", 1) or 1))}
 daemon_interval: 1
 runner_failure_policy: "auto"
+runner_timeout_seconds: {max(60, int(self.args.timeout))}
 # live lab keeps runner tool rounds unlimited unless a specific stress case overrides it
 max_tool_rounds: 0
 request_timeout: {max(30, int(self.args.timeout))}
 {backend_override}"""
         self.config_path.write_text(base + overrides, encoding="utf-8")
+
+    # LLM: write_capability_config keeps real Live Lab recovery thresholds isolated from developer defaults.
+    # 函数用途: 复制本轮能力配置并写入真实测试专用的子代理失联/运行超时阈值。
+    def write_capability_config(self) -> None:
+        """writes per-run capability config so stale real runners can be recovered."""
+        if self.source_capability_config.exists():
+            base = self.source_capability_config.read_text(encoding="utf-8")
+        else:
+            base = "enable_capability_routing: true\ncapability_grant_expires_after_task: true\n"
+        timeout = int(self.args.timeout)
+        heartbeat_timeout = max(60, min(timeout // 3, 180))
+        run_timeout = max(timeout * 3, heartbeat_timeout * 3)
+        overrides = f"""
+
+# live-agent-lab recovery overrides
+subagent_heartbeat_timeout: {heartbeat_timeout}
+subagent_run_timeout: {run_timeout}
+subagent_min_evidence_for_done: 1
+subagent_no_progress_attempt_limit: 3
+"""
+        self.capability_config_path.write_text(base + overrides, encoding="utf-8")
 
     # LLM: prepare_runtime_dirs 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
     # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
@@ -135,3 +164,12 @@ request_timeout: {max(30, int(self.args.timeout))}
         event_path = self.fixture_root / ".my_agent" / "local_store" / "events.jsonl"
         event_path.parent.mkdir(parents=True, exist_ok=True)
         event_path.touch(exist_ok=True)
+
+
+# LLM: Live Lab fan-out must cover multi-request and bundle scenarios, not only the legacy count flag.
+# 函数用途: 生成真实测试专用的子代理上限，避免复杂场景被隔离配置误截断。
+def _live_lab_max_subagents(args: argparse.Namespace) -> int:
+    count = max(1, int(getattr(args, "count", 1) or 1))
+    runners = max(1, int(getattr(args, "max_runners", 1) or 1))
+    cycles = max(1, int(getattr(args, "max_cycles", 2) or 2))
+    return max(count, runners * cycles * 4, 8)

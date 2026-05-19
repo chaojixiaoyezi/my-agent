@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import subprocess
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -75,6 +76,8 @@ class TestExecutor:
         if method == "static_site_check":
             # LLM: Static-site validation is read-only and workspace-bound like file/content checks.
             return run_static_site_check(test, self.workspace_root)
+        if method == "artifact_integrity":
+            return self._check_artifact_integrity(test)
         return TestExecutionRecord(
             test_name=_test_name(test),
             validation_method=method,
@@ -172,6 +175,39 @@ class TestExecutor:
             )
         )
 
+    # LLM: _check_artifact_integrity runs the shared structural artifact gate as a real parent test.
+    # 函数用途: 让 validation_method=artifact_integrity 走同一套 workspace 边界和机器码结果。
+    def _check_artifact_integrity(self, test: dict[str, Any]) -> TestExecutionRecord:
+        from ..tooling.artifact_integrity import (
+            ArtifactIntegrityCheckRequest,
+            check_artifact_integrity,
+        )
+
+        path, error = self._resolve_test_path(_artifact_integrity_path(test))
+        if error:
+            return _file_record(test, "artifact_integrity", error=error)
+        decision = check_artifact_integrity(ArtifactIntegrityCheckRequest(path=path, require_complete=True))
+        blocker_codes = decision.blocker_codes
+        warning_codes = decision.warning_codes
+        result = {
+            "ok": decision.ok,
+            "path": str(path),
+            "kind": decision.kind,
+            "exists": path.exists() and path.is_file(),
+            "blocker_codes": blocker_codes,
+            "warning_codes": warning_codes,
+            "issues": [asdict(issue) for issue in decision.issues],
+        }
+        return TestExecutionRecord(
+            test_name=_test_name(test),
+            executed=True,
+            exit_code=0 if decision.ok else 1,
+            executed_at=_utc_now_iso(),
+            validation_method="artifact_integrity",
+            validation_result=result,
+            error="" if decision.ok else ",".join(blocker_codes or warning_codes),
+        )
+
     # LLM: _resolve_test_path enforces that file validations cannot escape the executor workspace.
     # 函数用途: 把测试项里的相对路径解析为 workspace 内绝对路径；越界路径会返回错误。
     def _resolve_test_path(self, value: object) -> tuple[Path, str]:
@@ -209,6 +245,16 @@ def _validation_method(test: dict[str, Any]) -> str:
     if method in {"pytest", "unittest"} and str(test.get("command") or "").strip():
         return "command"
     return method
+
+
+# LLM: _artifact_integrity_path is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _artifact_integrity_path(test: dict[str, Any]) -> object:
+    for key in ("file_path", "path", "artifact_path"):
+        value = test.get(key)
+        if str(value or "").strip():
+            return value
+    return ""
 
 
 # LLM: _content_pattern accepts newer exact-content field names while preserving legacy content_pattern.

@@ -9,6 +9,9 @@ from __future__ import annotations
 这里把单任务巡检拆出 board.py，用一个上下文对象承载重复参数，避免每个检查函数都有长参数列表。
 """
 
+import json
+from pathlib import Path
+
 from .board_due_models import (
     DueInspectionContext,
     DueIssueSpec,
@@ -22,6 +25,20 @@ from .board_due_timeout_checks import (
 )
 from .board_parent_timeout import check_parent_timeout_child_issues
 from .recovery_strategy import SubagentRecoveryStrategyRequest, build_subagent_recovery_strategy
+
+
+# LLM: artifact repair runs are one-shot deterministic recovery attempts; failed attempts must hand off.
+# 函数用途: 判断当前 task 是否已经是 artifact_integrity 修复任务，避免 repair child 递归套娃。
+def _is_artifact_integrity_repair_task(task) -> bool:
+    attrs = getattr(task, "attributes", {}) or {}
+    return isinstance(attrs, dict) and attrs.get("repair_kind") == "artifact_integrity"
+
+
+# LLM: _is_parent_acceptance_repair_task is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _is_parent_acceptance_repair_task(task) -> bool:
+    attrs = getattr(task, "attributes", {}) or {}
+    return isinstance(attrs, dict) and attrs.get("repair_kind") == "parent_acceptance"
 
 
 # LLM: _check_work_order_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -45,11 +62,61 @@ def _check_work_order_issues(ctx: DueInspectionContext, validation):
 
 # LLM: _check_status_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 函数用途: 校验状态issues需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
-def _check_status_issues(ctx: DueInspectionContext):
+def _check_status_issues(ctx: DueInspectionContext, manager):
     """Check for failed/timeout/channel error/blocked status issues."""
     task = ctx.task
     if task.status not in {"FAILED", "TIMEOUT", "CHANNEL_ERROR", "BLOCKED"}:
         return []
+    failure_type = str(getattr(task, "failure_type", "") or "").lower()
+    if task.status == "BLOCKED" and failure_type == "provider_timeout":
+        return [
+            _single_issue(
+                ctx,
+                DueIssueSpec(
+                    "P1",
+                    "status_provider_timeout",
+                    "任务因模型接口超时阻塞；应基于已有 task refs 接管或重试，而不是只做人工分类。",
+                    "takeover_or_reassign",
+                ),
+            )
+        ]
+    if task.status == "BLOCKED" and failure_type == "artifact_integrity_failed":
+        if _is_artifact_integrity_repair_task(task):
+            return [
+                _single_issue(
+                    ctx,
+                    DueIssueSpec(
+                        "P1",
+                        "artifact_repair_failed",
+                        "artifact repair 任务仍未修好；应创建 takeover run 继承 refs 继续，不能再创建同类 repair child。",
+                        "takeover_or_reassign",
+                    ),
+                )
+            ]
+        if repair := _verified_repair_child(manager, task, "artifact_integrity"):
+            return [
+                _single_issue(
+                    ctx,
+                    DueIssueSpec(
+                        "P1",
+                        "artifact_integrity_repair_completed",
+                        "产物修复子任务已通过验收；应把父任务从 BLOCKED 收口为已完成，避免重复创建修复子任务。",
+                        "close_parent_from_verified_repair_child",
+                        related_refs=[repair.task_dir, repair.output_json],
+                    ),
+                )
+            ]
+        return [
+            _single_issue(
+                ctx,
+                DueIssueSpec(
+                    "P1",
+                    "status_artifact_integrity_failed",
+                    "任务产物结构检查失败；应创建 scoped repair worker 读取 failure refs 修复产物。",
+                    "create_repair_child_from_artifact_integrity_refs",
+                ),
+            )
+        ]
     severity = {"FAILED": "P0", "TIMEOUT": "P0", "CHANNEL_ERROR": "P0", "BLOCKED": "P1"}[task.status]
     action = {
         "FAILED": "inspect_failure_and_reassign_or_takeover",
@@ -68,6 +135,36 @@ def _check_status_issues(ctx: DueInspectionContext):
             ),
         )
     ]
+
+
+# LLM: _verified_repair_child is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _verified_repair_child(manager, task, repair_kind: str):
+    target_refs = _normalized_ref_set(getattr(task, "artifact_refs", []) or [])
+    for candidate in manager.list_runs():
+        attrs = getattr(candidate, "attributes", {}) or {}
+        if attrs.get("repair_kind") != repair_kind:
+            continue
+        if attrs.get("repair_source_run_id") != task.id:
+            continue
+        if candidate.status != "DONE" or candidate.verification_status != "VERIFIED":
+            continue
+        candidate_refs = _normalized_ref_set(attrs.get("target_artifact_refs", []) or [])
+        if target_refs and candidate_refs and target_refs != candidate_refs:
+            continue
+        return candidate
+    return None
+
+
+# LLM: _normalized_ref_set is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _normalized_ref_set(values: object) -> set[str]:
+    refs: set[str] = set()
+    for item in values if isinstance(values, list) else []:
+        text = str(item or "").strip()
+        if text:
+            refs.add(str(Path(text).resolve(strict=False)))
+    return refs
 
 
 # LLM: _check_no_progress_fuse_issues lifts recovery-strategy fuse decisions into due-check reports.
@@ -231,6 +328,66 @@ def _check_done_verification_issues(ctx: DueInspectionContext):
     ]
 
 
+# LLM: _check_parent_acceptance_repair_issues_with_manager promotes failed parent tests into deterministic repair work.
+# 函数用途: 父级验收已 REJECT 时生成修复动作；如果修复子任务已通过，则先收口父任务。
+def _check_parent_acceptance_repair_issues_with_manager(ctx: DueInspectionContext, manager):
+    if not _parent_acceptance_rejected(ctx.task):
+        return []
+    if _is_parent_acceptance_repair_task(ctx.task):
+        return [
+            _single_issue(
+                ctx,
+                DueIssueSpec(
+                    "P1",
+                    "parent_acceptance_repair_failed",
+                    "parent acceptance repair 任务仍未修好；应创建 takeover run 继承 refs 继续，不能再创建同类 repair child。",
+                    "takeover_or_reassign",
+                ),
+            )
+        ]
+    if repair := _verified_repair_child(manager, ctx.task, "parent_acceptance"):
+        return [
+            _single_issue(
+                ctx,
+                DueIssueSpec(
+                    "P1",
+                    "parent_acceptance_repair_completed",
+                    "父级验收修复子任务已通过验收；应把父任务收口为已完成，避免重复创建验收修复子任务。",
+                    "close_parent_from_verified_repair_child",
+                    related_refs=[repair.task_dir, repair.output_json],
+                ),
+            )
+        ]
+    return _parent_acceptance_repair_issue_specs(ctx)
+
+
+# LLM: _parent_acceptance_repair_issue_specs is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _parent_acceptance_repair_issue_specs(ctx: DueInspectionContext):
+    return [
+        _single_issue(
+            ctx,
+            DueIssueSpec(
+                "P1",
+                "parent_acceptance_test_failed",
+                "父级真实验收已拒绝该任务；应创建 scoped repair worker 读取 acceptance/test refs 修复被点名问题。",
+                "create_repair_child_from_parent_acceptance_refs",
+            ),
+        )
+    ]
+
+
+# LLM: _parent_acceptance_rejected stays local to due-check to avoid importing agent_core during service init.
+# 函数用途: 只读取 acceptance_review.json 的机器决策字段，避免从自然语言状态推断。
+def _parent_acceptance_rejected(task) -> bool:
+    path = Path(getattr(task, "reports_dir", "") or "") / "acceptance_review.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and str(payload.get("decision") or "").upper() == "REJECT"
+
+
 # LLM: _check_capability_request_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 函数用途: 校验能力请求issues需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _check_capability_request_issues(ctx: DueInspectionContext):
@@ -288,13 +445,14 @@ def inspect_single_task_due(request: InspectTaskDueRequest):
     validation = request.manager.validate_work_order(task.id)
     issues = []
     issues.extend(_check_work_order_issues(ctx, validation))
+    issues.extend(_check_parent_acceptance_repair_issues_with_manager(ctx, request.manager))
     no_progress_issues = _check_no_progress_fuse_issues(ctx, request.settings.no_progress_attempt_limit)
     leadership_issues = (
         []
         if no_progress_issues
         else _check_leadership_recovery_issues(ctx, request.settings.no_progress_attempt_limit)
     )
-    issues.extend(no_progress_issues or leadership_issues or _check_status_issues(ctx))
+    issues.extend(no_progress_issues or leadership_issues or _check_status_issues(ctx, request.manager))
     issues.extend(check_parent_timeout_child_issues(ctx))
     issues.extend(_check_channel_broken_issues(ctx))
     issues.extend(_check_channel_degraded_issues(ctx))

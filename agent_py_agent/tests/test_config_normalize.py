@@ -59,9 +59,9 @@ class TestNormalizeAgentConfig:
 
     def test_normalize_request_timeout_too_high(self):
         """验证过大的 request_timeout 回退。"""
-        data = {"request_timeout": 999}
+        data = {"request_timeout": 7200}
         normalized, warnings = normalize_agent_config(data)
-        assert normalized["request_timeout"] == 240  # 默认值（上限600）
+        assert normalized["request_timeout"] == 240  # 默认值（上限3600）
         assert len(warnings) > 0
 
     def test_normalize_max_tokens_valid(self):

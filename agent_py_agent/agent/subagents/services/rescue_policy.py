@@ -66,8 +66,12 @@ def action_rescue_record_fields(action) -> dict[str, object]:
 # LLM: _strategy_and_target 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 函数用途: 处理strategytarget相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _strategy_and_target(kind: str, action: str) -> tuple[str, str]:
-    if kind in {"run_timeout", "heartbeat_stale", "status_timeout"}:
+    if kind in {"run_timeout", "heartbeat_stale", "status_timeout", "status_provider_timeout"}:
         return "takeover_or_shrink_scope_before_retry", "parent"
+    if kind == "artifact_repair_failed":
+        return "takeover_after_failed_artifact_repair", "parent"
+    if kind == "status_artifact_integrity_failed":
+        return "create_scoped_repair_worker_from_artifact_refs", "parent"
     # LLM: parent-timeout child recovery is guidance-only until a human selects a handoff path.
     if kind == "parent_timeout_with_unfinished_children":
         return "recover_unfinished_children_after_parent_timeout", "parent"

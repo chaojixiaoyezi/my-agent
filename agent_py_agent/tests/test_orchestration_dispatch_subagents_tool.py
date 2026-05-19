@@ -68,6 +68,29 @@ class TestDispatchSubagentsToolExecute:
 
         assert result.ok is True
 
+    def test_background_intake_clamps_execute_runners_to_deferred_dispatch(self):
+        """后台接单模式只创建/更新任务卡，runner 执行交给 gateway daemon。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        mock_report = MagicMock()
+        mock_report.dry_run = False
+        mock_report.summary = {}
+        mock_report.records = []
+
+        mock_agent = MagicMock()
+        mock_agent._current_background_intake = True
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent.tools.specs.return_value = []
+        mock_agent.dispatch_subagents.return_value = mock_report
+        mock_agent.subagents.workspace = Path("/tmp/workspace")
+
+        result = DispatchSubagentsTool(mock_agent).execute({"apply": True, "execute_runners": True})
+
+        assert result.ok is True
+        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
+        assert call_kwargs["params"].apply is True
+        assert call_kwargs["params"].execute_runners is False
+
     def test_top_level_execute_runners_defaults_acceptance_test_closure(self):
         """顶层真实跑 runner 时，默认进入受控验收测试和通过后自动闭环。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool

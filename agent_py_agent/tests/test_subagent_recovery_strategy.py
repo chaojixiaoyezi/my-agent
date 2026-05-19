@@ -95,15 +95,64 @@ def test_recovery_strategy_stops_after_repeated_failures(tmp_path: Path) -> None
     assert "不要继续自动重试" in result.runner_instruction
 
 
-# LLM: test_recovery_strategy_suggests_takeover_for_dead_worker covers dead run handoff.
-# 函数用途: 原 run 超时或通道失败时，策略建议创建接管 run，并继续使用同一任务目录和 artifacts refs。
-def test_recovery_strategy_suggests_takeover_for_dead_worker(tmp_path: Path) -> None:
+# LLM: test_recovery_strategy_takeover_timeout_worker_when_packet_is_ready covers dead-run recovery.
+# 函数用途: 原 run 超时即使已有 continue packet，也创建 takeover 读取 packet，避免复用不可信执行槽。
+def test_recovery_strategy_takeover_timeout_worker_when_packet_is_ready(tmp_path: Path) -> None:
     _, task = _saved_task(tmp_path, status="TIMEOUT")
     task.failure_type = "runner_timeout"
 
     result = build_subagent_recovery_strategy(SubagentRecoveryStrategyRequest(task=task))
 
     assert result.recommended_action == "create_takeover_run_from_continue_packet"
+    assert result.uses_continue_packet is True
+    assert "latest_continue_packet.json" in result.runner_instruction
+
+
+def test_recovery_strategy_repairs_artifact_integrity_instead_of_rerunning_original(tmp_path: Path) -> None:
+    _, task = _saved_task(tmp_path, status="BLOCKED")
+    artifact = tmp_path / "lab_outputs" / "shop-demo" / "index.html"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("<html><body>unfinished", encoding="utf-8")
+    task.failure_type = "artifact_integrity_failed"
+    task.blockers = [f"artifact_integrity_failed:{artifact}:missing_body_close,missing_html_close"]
+    task.artifact_refs = [str(artifact)]
+
+    result = build_subagent_recovery_strategy(SubagentRecoveryStrategyRequest(task=task))
+
+    assert result.recommended_action == "create_repair_child_from_artifact_integrity_refs"
+    assert result.uses_continue_packet is False
+    assert "不要继续原 run" in result.runner_instruction
+
+
+def test_recovery_strategy_does_not_chain_artifact_repair_children(tmp_path: Path) -> None:
+    _, task = _saved_task(tmp_path, status="BLOCKED")
+    artifact = tmp_path / "lab_outputs" / "shop-demo" / "index.html"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("<html><head></head><body><head></head><body></body></html>", encoding="utf-8")
+    task.failure_type = "artifact_integrity_failed"
+    task.blockers = [f"artifact_integrity_failed:{artifact}:multiple_body_open"]
+    task.artifact_refs = [str(artifact)]
+    task.attributes = {
+        "repair_kind": "artifact_integrity",
+        "repair_source_run_id": "source-run",
+        "target_artifact_refs": [str(artifact)],
+    }
+
+    result = build_subagent_recovery_strategy(SubagentRecoveryStrategyRequest(task=task))
+
+    assert result.recommended_action.startswith("create_takeover_run")
+    assert result.recommended_action != "create_repair_child_from_artifact_integrity_refs"
+    assert "接管" in result.runner_instruction
+
+
+def test_recovery_strategy_suggests_takeover_for_dead_worker_without_packet(tmp_path: Path) -> None:
+    _, task = _saved_task(tmp_path, status="TIMEOUT")
+    task.failure_type = "runner_timeout"
+    Path(task.agent_run_latest_session_continue_packet_json).unlink()
+
+    result = build_subagent_recovery_strategy(SubagentRecoveryStrategyRequest(task=task))
+
+    assert result.recommended_action == "create_takeover_run_from_checkpoint"
     assert task.task_dir in result.takeover_refs
     assert task.agent_run_artifacts_dir in result.takeover_refs
     assert "同一个任务目录" in result.runner_instruction

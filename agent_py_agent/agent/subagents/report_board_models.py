@@ -172,6 +172,7 @@ class ActionApplyRecord:
     # LLM: apply records preserve the rescue packet that justified the action.
     rescue_packet: dict[str, object] = field(default_factory=dict)
     evidence_paths: list[str] = field(default_factory=list)
+    created_run_ids: list[str] = field(default_factory=list)
     created_at: float = 0.0
 
 

@@ -71,6 +71,50 @@ def test_prepare_test_items_ignores_out_of_workspace_artifacts(tmp_path):
     assert "working_dir" not in prepared[0]
 
 
+def test_prepare_test_items_fills_artifact_integrity_path_from_single_artifact(tmp_path):
+    site_dir = tmp_path / "site"
+    site_dir.mkdir()
+    artifact = site_dir / "index.html"
+    artifact.write_text("<html><body>ok</body></html>", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[{
+                "name": "artifact integrity",
+                "validation_method": "artifact_integrity",
+            }],
+            output={"artifacts": [{"path": str(artifact)}]},
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert prepared[0]["validation_method"] == "artifact_integrity"
+    assert prepared[0]["file_path"] == "site/index.html"
+
+
+def test_prepare_test_items_does_not_guess_artifact_integrity_path_for_multiple_artifacts(tmp_path):
+    site_dir = tmp_path / "site"
+    site_dir.mkdir()
+    for name in ("index.html", "cart.html"):
+        (site_dir / name).write_text("<html><body>ok</body></html>", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[{
+                "name": "artifact integrity",
+                "validation_method": "artifact_integrity",
+            }],
+            output={"artifacts": [
+                {"path": str(site_dir / "index.html")},
+                {"path": str(site_dir / "cart.html")},
+            ]},
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert "file_path" not in prepared[0]
+
+
 def test_prepare_test_items_keeps_workspace_cwd_when_command_names_relative_artifact(tmp_path):
     target_dir = tmp_path / "grandchild_sorting_edge"
     target_dir.mkdir()

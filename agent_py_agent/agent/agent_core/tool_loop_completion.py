@@ -37,6 +37,8 @@ def completion_response_after_tool_round(
 ) -> ModelResponse | None:
     if request.subagent_output_written:
         return subagent_output_json_response(request.agent, request.response)
+    if background_response := _background_intake_completion_response(request):
+        return background_response
     if progress_response := subagent_progress_closeout_response(request.agent, request.response):
         return progress_response
     dispatch_request = DispatchCompletionRequest(
@@ -48,4 +50,24 @@ def completion_response_after_tool_round(
     return (
         subagent_dispatch_completion_response(dispatch_request)
         or subagent_dispatch_repair_required_response(dispatch_request)
+    )
+
+
+# LLM: _background_intake_completion_response is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _background_intake_completion_response(request: ToolRoundCompletionRequest) -> ModelResponse | None:
+    if not request.params.background_intake:
+        return None
+    tools = list(request.params.executed_tools[request.before_executed_count :])
+    intake_tools = [tool for tool in tools if tool == "dispatch_subagents"]
+    if not intake_tools:
+        return None
+    return ModelResponse(
+        text=(
+            "[background_intake_complete]\n"
+            f"accepted_tools: {', '.join(intake_tools)}\n"
+            "status: task cards accepted; runner execution is deferred to gateway daemon/worker pool.\n"
+            "[/background_intake_complete]"
+        ),
+        backend=request.response.backend,
     )

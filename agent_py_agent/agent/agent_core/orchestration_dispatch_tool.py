@@ -63,6 +63,8 @@ class DispatchSubagentsTool(BaseTool):
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         apply = dispatch_apply_default(self.agent, params)
         execute_runners = dispatch_execute_runners_default(self.agent, params, apply=apply)
+        if execute_runners and _background_intake_active(self.agent):
+            execute_runners = False
         if execute_runners and not apply:
             return ToolExecutionResult(
                 "dispatch_subagents",
@@ -156,6 +158,12 @@ class DispatchSubagentsTool(BaseTool):
         payload.update(direct_children_progress_payload(self.agent))
         payload["typed_envelope"] = subagent_dispatch_envelope_from_payload(payload).to_dict()
         return payload
+
+
+# LLM: _background_intake_active is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _background_intake_active(agent: object) -> bool:
+    return getattr(agent, "_current_background_intake", False) is True
 
 
 # LLM: _dispatch_capability_config aligns model-facing due-check with runner timeout policy.

@@ -174,6 +174,8 @@ def _action_apply_dispatch_record(agent: Any, item):
             before_status=item.before_status,
             after_status=item.after_status,
             evidence_paths=item.evidence_paths,
+            runner_created_child_count=len(item.created_run_ids or []),
+            runner_created_child_ids=item.created_run_ids or [],
         ),
     )
 

@@ -26,6 +26,7 @@ from .main_agent_complex_case import (
     case_main_tool_failure_recovery,
 )
 from .markdown_repair_wave_case import case_natural_markdown_repair_wave
+from .multi_complex_case import case_multi_complex_subagents
 from .shop_case import (
     _external_asset_refs,
     _has_disabled_control,
@@ -68,6 +69,7 @@ def run_case(lab, case_name: str) -> None:
         "natural_file_repair_wave": case_natural_file_repair_wave,
         # LLM: Markdown repair canary keeps document checks out of the generic dispatcher.
         "natural_markdown_repair_wave": case_natural_markdown_repair_wave,
+        "multi_complex_subagents": case_multi_complex_subagents,
     }
     handlers[case_name](lab)
 

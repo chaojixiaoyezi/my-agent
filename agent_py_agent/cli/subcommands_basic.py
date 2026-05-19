@@ -97,6 +97,8 @@ def _add_status_timeline_run_commands(sub: argparse._SubParsersAction) -> None:
     run.add_argument("--save", action="store_true", default=None, help="保存本次对话到记忆")
     run.add_argument("--no-save", action="store_false", dest="save", help="不保存本次对话到记忆")
     run.add_argument("--show-prompt", action="store_true", help="打印最终拼装后的 prompt")
+    run.add_argument("--delivery-contract-file", help="运行后按结构化 JSON 合同验收产物")
+    run.add_argument("--delivery-repair-attempts", type=int, default=0, help="产物合同失败时自动修复次数")
     add_resume_context_switches(run)
     run.set_defaults(func=cmd_run)
 

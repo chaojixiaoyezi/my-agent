@@ -122,6 +122,43 @@ def test_dispatch_payload_includes_acceptance_followup():
     assert payload["records"][0]["followup_command"].endswith("--take-over-by <agent>")
 
 
+# LLM: parent-acceptance repair advice should make lineage machine-readable.
+# 函数用途: dispatch 输出里的修复建议需要显式 parent/root/depth，避免 root 创建新的顶层修复任务。
+def test_parent_acceptance_repair_tool_call_includes_failed_run_lineage(tmp_path):
+    run_dir = tmp_path / ".my-agent" / "subagents" / "leaf-1"
+    reports = run_dir / "reports"
+    reports.mkdir(parents=True)
+    task_ref = run_dir / "task.json"
+    test_ref = reports / "test_execution.json"
+    output_ref = run_dir / "output.json"
+    run_ref = run_dir / "run.json"
+    task_ref.write_text(json.dumps({"id": "leaf-1", "root_id": "root-1", "depth": 1}), encoding="utf-8")
+    test_ref.write_text(json.dumps({"records": []}), encoding="utf-8")
+    output_ref.write_text(json.dumps({"artifacts": []}), encoding="utf-8")
+    run_ref.write_text(json.dumps({"task_dir": str(run_dir), "allowed_write_roots": [str(tmp_path)]}), encoding="utf-8")
+    record = SimpleNamespace(
+        step="acceptance",
+        action="reject",
+        run_id="leaf-1",
+        ok=False,
+        dry_run=True,
+        applied=False,
+        message="验收失败。",
+        before_status="AWAITING_ACCEPTANCE",
+        after_status="AWAITING_ACCEPTANCE",
+        parent_acceptance_auto_execution_test_ref=str(test_ref),
+        parent_acceptance_auto_execution_test_failed=1,
+    )
+
+    payload = _dispatch_payload_for_record(record)
+    call = payload["records"][0]["parent_acceptance_repair_advice"]["suggested_tool_call"]
+
+    assert call["tool"] == "create_subagents"
+    assert call["parent_id"] == "leaf-1"
+    assert call["root_id"] == "root-1"
+    assert call["depth"] == 2
+
+
 # LLM: dispatch payload should tell models when only audit/classify actions remain.
 # 函数用途: 防止父模型看到重复 due-check/classify 记录后继续无限调用 dispatch_subagents。
 def test_dispatch_payload_marks_no_progress_terminal_actions():

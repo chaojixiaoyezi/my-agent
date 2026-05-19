@@ -8,6 +8,7 @@ from ..tools import ToolSpec
 
 _CREATE_USE_CASES = [
     "用户要求拆分任务、派多个子代理、开工单或让子代理分别处理事项",
+    "网页交付任务里用户给出保存路径、DOM id 或交互流程时，必须把这些作为 output_files/required_dom_ids/require_script 机器合同参数传入",
     "需要把聊天里的计划落盘，后续由 dispatch_subagents 推进和验收",
     "材料很多且用户要求派工时，先读 README/目标/评分/目录等最小必要信息，再用 items/tasks 派小傻妞分别读取和分析正文",
 ]
@@ -28,6 +29,9 @@ _CREATE_PARAMETERS = {
     "output_files": "子代理必须写出的目标文件路径列表；知道文件名时必须填，系统会把它写入机器合同",
     "output_refs": "output_files 的语义别名，用于引用交付物路径或产物 ref",
     "artifact_refs": "交付物 refs 列表；适合引用已经存在或后续要验收的产物",
+    "required_files": "静态站点或文件任务必须存在的产物文件名列表；会进入机器验收合同",
+    "required_dom_ids": "静态网页必须存在的 DOM id 列表；用于父级 static_site_check 做业务区域验收",
+    "require_script": "布尔值；交互式静态网页必须包含本地或内联脚本时设为 true",
     "workflow_mode": "off/plan/auto；决定是否在建工单时挂 workflow 计划",
     "extra_write_roots": "额外写入目录列表；通常省略，系统会把当前任务 workspace_root 作为默认产物根；只有写到其它工作区内目录时才填",
 }
@@ -48,6 +52,7 @@ _CREATE_PARAMETER_DETAILS = {
         "create_subagents 只创建任务记录；返回后要调用 dispatch_subagents 才会真实执行。"
         "如果任务材料很多，不要由 root 先读完所有正文再派工；root 只读最小必要信息，"
         "把具体正文、数据表和长报告的读取分析写进各 item 的 goal。"
+        "如果 item 是网页/文件交付，output_files、required_files、required_dom_ids、require_script 必须写在该 item 对象里。"
     ),
     "tasks": "items 的兼容别名，字段规则相同。",
     "role": "优先用模板角色，而不是临时造小角色。可用角色模板索引：\n{role_template_index}",
@@ -75,6 +80,20 @@ _CREATE_PARAMETER_DETAILS = {
     ),
     "output_refs": "同 output_files；当上游系统已经叫它 refs 时可用这个字段，系统会统一归入 task.attributes。",
     "artifact_refs": "用于交付物已经有 ref 或需要跨任务传递的情况；普通写新文件优先用 output_files。",
+    "required_files": (
+        "当用户明确要求某些最终文件必须存在时填写，例如 [\"index.html\",\"app.js\"]。"
+        "这是验收机器事实，不要只写进 goal。"
+    ),
+    "required_dom_ids": (
+        "当网页任务明确有固定业务区域或流程节点时填写，例如 [\"register\",\"login\",\"cart\",\"checkout\"]。"
+        "这不是自然语言描述，必须是页面里将真实出现的 id。"
+        "如果用户明确列出 id，必须逐个原样复制到本字段；不要只放在 goal/acceptance_checks 里。"
+        "系统不会从 goal 正文猜这些 id，漏填会导致父级验收合同变弱。"
+    ),
+    "require_script": (
+        "交互式网页、流程演示、表单/购物车等需要浏览器行为时填 true；父级验收会检查 script 标签。"
+        "用户要求注册、登录、购物车、结算、按钮真实动作时，本字段必须是 true；不要只在 goal 里写 JavaScript。"
+    ),
     "workflow_mode": "默认建议省略或写 off。只有用户明确要求 workflow/工作流时才写 plan/auto；明确文件交付 worker 会强制 off。",
     "extra_write_roots": (
         "JSON 数组，例如 [\"C:/Users/you/Desktop/work\"]；只给本次子代理任务增加写入边界。"
@@ -85,9 +104,13 @@ _CREATE_PARAMETER_DETAILS = {
 }
 _CREATE_EXAMPLES = [
     (
-        '{"tool":"create_subagents","items":[{"goal":"用单文件 HTML 做一个高端现代家具品牌首页",'
-        '"role":"worker","agent_name":"小傻妞-家具网页",'
-        '"output_files":["lab_outputs/furniture-home/index.html"]}]}'
+        '{"tool":"create_subagents","items":[{"goal":"统计 GitHub 周榜并输出 XLSX",'
+        '"role":"worker","agent_name":"小傻妞-GitHub",'
+        '"output_files":["lab_outputs/github-stars/weekly_top20.xlsx"],"required_files":["weekly_top20.xlsx"]},'
+        '{"goal":"用单文件 HTML 做购物站",'
+        '"role":"worker","agent_name":"小傻妞-购物站",'
+        '"output_files":["lab_outputs/shop-demo/index.html"],'
+        '"required_files":["index.html"],"required_dom_ids":["register","login","cart"],"require_script":true}]}'
     ),
     (
         '{"tool":"create_subagents","items":['
@@ -104,7 +127,7 @@ _CREATE_EXAMPLES = [
         '"agent_name":"小傻妞-竞争","required_read_paths":["data/competition.md","rubric.md"]}]}'
     ),
     '{"tool":"create_subagents","goal":"在隔离 fixture 项目里实现三个小功能并写报告","count":3,"role":"worker","workflow_mode":"off","acceptance_checks":["必须有文件证据","必须说明测试结果"]}',
-    '{"tool":"create_subagents","goal":"在 /workspace/deliverables/shop/build 实现购物网站 HTML 骨架和 products.json","count":1,"role":"worker","agent_name":"小傻妞-基础结构","extra_write_roots":["/workspace/deliverables/shop/build"]}',
+    '{"tool":"create_subagents","goal":"在 /workspace/deliverables/shop/build 实现购物网站 HTML 骨架和 products.json","count":1,"role":"worker","agent_name":"小傻妞-基础结构","extra_write_roots":["/workspace/deliverables/shop/build"],"required_files":["index.html"],"required_dom_ids":["register","login","catalog","cart","checkout","order-confirmation"],"require_script":true}',
     '{"tool":"create_subagents","goal":"在 /workspace/deliverables/shop/build 实现购物网站 styles.css 和 app.js 交互","count":1,"role":"worker","agent_name":"小傻妞-样式交互","extra_write_roots":["/workspace/deliverables/shop/build"]}',
     '{"tool":"create_subagents","goal":"检查多个 worker 的购物网站实现","count":1,"role":"bug_finder"}',
     '{"tool":"create_subagents","goal":"验收购物网站从注册到下单的完整流程","count":1,"role":"acceptor"}',
@@ -209,7 +232,11 @@ def build_create_subagents_spec() -> ToolSpec:
     return ToolSpec(
         name="create_subagents",
         category="orchestration",
-        description="创建一个或多个子代理任务记录。不同工作切片优先用 items/tasks；创建后必须 dispatch_subagents 才会真实执行。",
+        description=(
+            "创建一个或多个子代理任务记录；多个不同事项必须一次传 items/tasks，不要多轮逐个创建。"
+            "网页交付不要只把路径/id/交互要求写进 goal；"
+            "必须填 output_files/required_dom_ids/require_script 等机器合同参数。创建后必须 dispatch_subagents 才会真实执行。"
+        ),
         use_cases=_CREATE_USE_CASES,
         avoid_when=["只是解释思路、不需要真正创建任务时，不要调用；先直接回答即可"],
         keywords=_CREATE_KEYWORDS,

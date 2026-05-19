@@ -10,6 +10,7 @@ from __future__ import annotations
 这样能先把“单个 my-agent 是否足够硬”测出来，再决定什么时候继续压子代理链路。
 """
 
+import json
 import re
 import textwrap
 from dataclasses import dataclass
@@ -36,14 +37,46 @@ def case_main_direct_web_app(lab) -> None:
     _ensure_main_agent_only(lab)
     prompt = _main_direct_web_app_prompt()
     lab.record_prompt("main_direct_web_app", prompt)
+    contract_path = _main_web_app_delivery_contract(lab)
     response = lab.run_command(
-        lab.agent_command("run", prompt, "--save"),
+        lab.agent_command(
+            "run",
+            prompt,
+            "--save",
+            "--delivery-contract-file",
+            str(contract_path),
+            "--delivery-repair-attempts",
+            "1",
+        ),
         timeout=lab.args.timeout + 120,
     )
     (lab.responses_dir / "main_direct_web_app.stdout.txt").write_text(response.stdout, encoding="utf-8")
     output_root = lab.fixture_root / "lab_outputs" / "main-web-app"
     _assert_main_web_app_output(output_root)
     lab.log(f"main_web_app_output={output_root}")
+
+
+# LLM: _main_web_app_delivery_contract gives root-agent web runs a machine gate before final assertions.
+# 函数用途: 生成结构化产物合同；run 命令按该 JSON 自动验收和修复，不靠 prompt 文字判断。
+def _main_web_app_delivery_contract(lab) -> Path:
+    path = lab.run_root / "contracts" / "main_web_app_delivery_contract.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "checks": [
+            {
+                "name": "main-web-app-static-site",
+                "method": "static_site_check",
+                "site_root": "lab_outputs/main-web-app",
+                "required_files": ["index.html", "styles.css", "app.js", "README.md"],
+                "require_complete_html": True,
+                "strict_dom_bindings": True,
+                "auto_repair": True,
+            }
+        ]
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    lab.log(f"main_web_app_delivery_contract={path}")
+    return path
 
 
 # LLM: case_main_tool_failure_recovery makes a real tool miss recoverable instead of terminal.
@@ -53,14 +86,42 @@ def case_main_tool_failure_recovery(lab) -> None:
     _ensure_main_agent_only(lab)
     prompt = _main_tool_failure_prompt()
     lab.record_prompt("main_tool_failure_recovery", prompt)
+    contract_path = _main_tool_failure_delivery_contract(lab)
     response = lab.run_command(
-        lab.agent_command("run", prompt, "--save"),
+        lab.agent_command(
+            "run",
+            prompt,
+            "--save",
+            "--delivery-contract-file",
+            str(contract_path),
+            "--delivery-repair-attempts",
+            "1",
+        ),
         timeout=lab.args.timeout + 120,
     )
     (lab.responses_dir / "main_tool_failure_recovery.stdout.txt").write_text(response.stdout, encoding="utf-8")
     output = lab.fixture_root / "lab_outputs" / "tool-recovery" / "report.md"
     _assert_tool_recovery_report(output)
     lab.log(f"tool_recovery_report={output}")
+
+
+# LLM: _main_tool_failure_delivery_contract is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _main_tool_failure_delivery_contract(lab) -> Path:
+    path = lab.run_root / "contracts" / "main_tool_failure_delivery_contract.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "checks": [
+            {
+                "name": "tool-recovery-report",
+                "method": "artifact",
+                "path": "lab_outputs/tool-recovery/report.md",
+            }
+        ]
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    lab.log(f"main_tool_failure_delivery_contract={path}")
+    return path
 
 
 # LLM: case_main_large_log_audit checks that big files are searched/audited by evidence, not pasted into context.
@@ -72,14 +133,42 @@ def case_main_large_log_audit(lab) -> None:
     _seed_large_log(log_path)
     prompt = _main_large_log_prompt()
     lab.record_prompt("main_large_log_audit", prompt)
+    contract_path = _main_large_log_delivery_contract(lab)
     response = lab.run_command(
-        lab.agent_command("run", prompt, "--save"),
+        lab.agent_command(
+            "run",
+            prompt,
+            "--save",
+            "--delivery-contract-file",
+            str(contract_path),
+            "--delivery-repair-attempts",
+            "1",
+        ),
         timeout=lab.args.timeout + 180,
     )
     (lab.responses_dir / "main_large_log_audit.stdout.txt").write_text(response.stdout, encoding="utf-8")
     output = lab.fixture_root / "lab_outputs" / "large-log-audit" / "report.md"
     _assert_large_log_report(output)
     lab.log(f"large_log_report={output}")
+
+
+# LLM: _main_large_log_delivery_contract gives large-log audit a machine artifact gate.
+# 函数用途: 生成大日志审计报告的交付合同，防止只口头完成而没有真实 report.md。
+def _main_large_log_delivery_contract(lab) -> Path:
+    path = lab.run_root / "contracts" / "main_large_log_delivery_contract.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "checks": [
+            {
+                "name": "large-log-audit-report",
+                "method": "artifact",
+                "path": "lab_outputs/large-log-audit/report.md",
+            }
+        ]
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    lab.log(f"main_large_log_delivery_contract={path}")
+    return path
 
 
 # LLM: _ensure_main_agent_only appends deterministic isolation overrides without touching user config.
@@ -119,8 +208,10 @@ def _main_direct_web_app_prompt() -> str:
         - README.md
 
         页面要高级、简洁、有设计感；不能用外部图片、外部字体、外部脚本。
+        请做成精简但完整的演示版本，先保证四个文件一次交付齐全，不要反复扩写页面内容。
         页面里的按钮和导航不能失灵，链接只允许指向本页面真实存在的区域。
-        做完后你自己检查文件是否齐全、页面引用是否正确、有没有空链接或坏链接。
+        Logo、返回顶部、卡片按钮也不能使用 href="#" 这种空链接；如果要回到顶部，请链接到真实存在的 #hero。
+        做完后轻量检查文件是否齐全、页面引用是否正确、有没有空链接或坏链接；不要反复读取文件正文，检查完成立刻汇报保存路径和结果。
         """
     ).strip()
 
@@ -231,7 +322,19 @@ def _html_ids(html: str) -> set[str]:
 # LLM: _markdown_anchor_refs extracts README in-page refs such as `#hero`.
 # 函数用途: 找出 README 写给用户看的页面锚点，避免文档和真实页面对不上。
 def _markdown_anchor_refs(readme_text: str) -> list[str]:
-    return sorted(set(re.findall(r"`#([A-Za-z0-9_-]+)`", readme_text or "")))
+    return sorted(
+        {
+            item
+            for item in re.findall(r"`#([A-Za-z0-9_-]+)`", readme_text or "")
+            if not _looks_like_hex_color(item)
+        }
+    )
+
+
+# LLM: _looks_like_hex_color is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _looks_like_hex_color(value: str) -> bool:
+    return bool(re.fullmatch(r"[0-9A-Fa-f]{3}(?:[0-9A-Fa-f]{3})?", value or ""))
 
 
 # LLM: _assert_tool_recovery_report checks recovery evidence from the real output file.

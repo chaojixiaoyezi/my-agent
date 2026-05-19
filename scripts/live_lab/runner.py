@@ -73,7 +73,10 @@ class LabRunner:
     # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def agent_command(self, *parts: str) -> list[str]:
         """builds a Python module invocation against the isolated config."""
-        return [sys.executable, "-m", "agent_py_agent", "--config", str(self._session.config_path), *parts]
+        command = [sys.executable, "-m", "agent_py_agent", "--config", str(self._session.config_path), *parts]
+        if _supports_capability_config(parts):
+            command.extend(["--capability-config", str(self._session.capability_config_path)])
+        return command
 
     # LLM: run_command 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
     # 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
@@ -331,6 +334,18 @@ def _utf8_env() -> dict[str, str]:
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
     return env
+
+
+# LLM: Live Lab only appends --capability-config where the target argparse subcommand accepts it.
+# 函数用途: 避免 gateway ask/result 等客户端命令收到未知参数，同时让 gateway start/run 和 scenario-test 使用隔离恢复阈值。
+def _supports_capability_config(parts: tuple[str, ...]) -> bool:
+    if not parts:
+        return False
+    if parts[0] in {"scenario-test", "daemon", "subagents-dispatch", "subagents-due-check", "subagents-plan-actions"}:
+        return True
+    if parts[0] == "gateway" and len(parts) > 1 and parts[1] in {"start", "restart", "run"}:
+        return True
+    return False
 
 
 # LLM: _run_case_wrapper 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。

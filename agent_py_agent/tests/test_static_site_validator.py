@@ -140,6 +140,59 @@ def test_static_site_check_blocks_disabled_html_controls(tmp_path):
     assert record.validation_result["inert_control_hits"] == ["index.html:button:去结算 disabled"]
 
 
+def test_static_site_check_blocks_missing_onclick_function_handler(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "index.html": '<button onclick="checkout()">去结算</button>',
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "missing onclick handler",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index.html"],
+        }
+    )
+
+    assert record.executed is True
+    assert record.passed is False
+    assert "inert_control_hits=1" in record.error
+    assert record.validation_result["inert_control_hits"] == ["index.html:button:去结算 onclick=checkout"]
+
+
+def test_static_site_check_blocks_duplicate_complete_html_skeleton(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "index.html": (
+                "<!doctype html><html><head><title>One</title></head><body><main>One</main>"
+                "<head><title>Two</title></head><body><main>Two</main></body></html>"
+            ),
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "duplicate html skeleton",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index.html"],
+            "require_complete_html": True,
+        }
+    )
+
+    assert record.executed is True
+    assert record.passed is False
+    assert "html_structure_hits=" in record.error
+    assert "index.html:multiple_head_open" in record.validation_result["html_structure_hits"]
+    assert "index.html:multiple_body_open" in record.validation_result["html_structure_hits"]
+
+
 # LLM: CSS pseudo-classes and runtime JS disabled assignments are not initial disabled controls.
 # 函数用途: 只拦截 HTML 初始 disabled 属性，不误伤样式选择器或运行时状态切换代码。
 def test_static_site_check_ignores_css_and_runtime_disabled_mentions(tmp_path):
@@ -452,6 +505,103 @@ def test_static_site_check_blocks_malformed_complete_html(tmp_path):
     assert record.validation_result["repair_hints"][0] == (
         "html_structure: repair or regenerate a complete HTML skeleton before DOM/id fixes"
     )
+
+
+# LLM: Static-site acceptance must reject generated app shells that never render user-visible DOM.
+# 函数用途: 覆盖真实购物站 E2E 假绿：只有空 #app 和 JS 数据时，不能算完整静态站点。
+def test_static_site_check_blocks_empty_app_shell_without_renderer(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "index.html": """
+            <!doctype html>
+            <html>
+              <body>
+                <div id="app"><!-- 动态内容区域 --></div>
+                <script>
+                const state = { products: [{ name: 'wallet' }], cart: [] };
+                </script>
+              </body>
+            </html>
+            """,
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "empty app shell",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index.html"],
+        }
+    )
+
+    assert record.passed is False
+    assert "empty_app_shell_hits=1" in record.error
+    assert record.validation_result["empty_app_shell_hits"] == ["index.html:empty_app_shell:app"]
+
+
+# LLM: Complete generated pages must contain visible body content, not just a closed skeleton.
+# 函数用途: 覆盖真实购物站 E2E 假绿：只有 head/style 和空 body 的 HTML 不能通过父级验收。
+def test_static_site_check_blocks_empty_complete_body(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "index.html": """
+            <!doctype html>
+            <html>
+              <head><style>body{background:#111}</style></head>
+              <body>
+              </body>
+            </html>
+            """,
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "empty body",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index.html"],
+            "require_complete_html": True,
+        }
+    )
+
+    assert record.passed is False
+    assert "empty_body_hits=1" in record.error
+    assert record.validation_result["empty_body_hits"] == ["index.html:empty_body"]
+    assert record.validation_result["repair_hints"] == [
+        "empty_body: add the requested visible page sections inside body before reporting completion"
+    ]
+
+
+# LLM: Interactive browser demos can explicitly require JavaScript without natural-language parsing.
+# 函数用途: 当父级机器合同声明 require_script 时，空结构页或纯静态页不能冒充交互式应用。
+def test_static_site_check_blocks_missing_script_when_required(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "index.html": "<!doctype html><html><body><main>购物车</main></body></html>",
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "interactive page",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index.html"],
+            "require_script": True,
+        }
+    )
+
+    assert record.passed is False
+    assert "missing_script_hits=1" in record.error
+    assert record.validation_result["missing_script_hits"] == ["index.html:script"]
 
 
 # LLM: test_static_site_check_allows_javascript_template_literals preserves real shop pages.

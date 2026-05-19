@@ -9,6 +9,7 @@ from agent_py_agent.agent.subagents.execution_test_items import (
 from agent_py_agent.agent.subagents.static_required_files import (
     required_static_dom_ids_for_task,
     required_static_files_for_task,
+    required_static_script_for_task,
 )
 
 
@@ -107,6 +108,7 @@ def test_required_static_files_scope_to_concrete_allowed_write_file(tmp_path):
 
     assert required_static_files_for_task(task) == ["index1.html"]
     assert required_static_dom_ids_for_task(task) == ["hero"]
+    assert required_static_script_for_task(task) is False
 
 
 # LLM: task-level static contracts must ignore goal and acceptance text.
@@ -123,3 +125,43 @@ def test_required_static_contracts_for_task_do_not_parse_text_fields(tmp_path):
 
     assert required_static_files_for_task(task) == []
     assert required_static_dom_ids_for_task(task) == []
+
+
+# LLM: require_script is a structured task attribute, not inferred from shopping/form prose.
+# 函数用途: 交互式静态页如果声明 require_script，父级 inferred static_site_check 必须带上同一机器合同。
+def test_prepare_items_infers_static_check_with_required_script_contract(tmp_path):
+    site = tmp_path / "artifacts"
+    site.mkdir()
+    (site / "index.html").write_text("<!doctype html><html><body><main id='app'></main></body></html>", encoding="utf-8")
+
+    items = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[],
+            output={"artifacts": [{"path": str(site / "index.html"), "kind": "file"}]},
+            workspace_root=tmp_path,
+            required_files=["index.html"],
+            require_script=True,
+        )
+    )
+
+    assert items == [
+        {
+            "name": "inferred static site check",
+            "validation_method": "static_site_check",
+            "site_root": "artifacts",
+            "required_files": ["index.html"],
+            "require_complete_html": True,
+            "require_script": True,
+            "html_files": ["index.html"],
+        }
+    ]
+
+
+def test_required_static_script_for_task_reads_only_structured_attribute():
+    task = SimpleNamespace(
+        goal="这是交互式购物车页面",
+        acceptance_checks=["必须有 JavaScript"],
+        attributes={"require_script": True},
+    )
+
+    assert required_static_script_for_task(task) is True

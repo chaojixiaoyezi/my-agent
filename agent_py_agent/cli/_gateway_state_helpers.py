@@ -117,6 +117,8 @@ def _gateway_start_command(options: GatewayStartOptions) -> list[str]:
         "gateway",
         "run",
     ]
+    if options.capability_config:
+        command.extend(["--capability-config", str(options.capability_config.expanduser().resolve())])
     if options.force_lock:
         command.append("--force-lock")
     return command
