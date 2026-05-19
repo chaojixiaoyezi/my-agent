@@ -34,6 +34,7 @@ class ScenarioPaths:
     run_root: Path
     fixture_root: Path
     config: Path
+    capability_config: Path
     summary_json: Path
     summary_md: Path
 
@@ -67,6 +68,7 @@ def create_scenario_workspace(args) -> ScenarioPaths:
         run_root=run_root,
         fixture_root=fixture_root,
         config=config_path,
+        capability_config=Path(args.capability_config).expanduser().resolve(),
         summary_json=run_root / "scenario_summary.json",
         summary_md=run_root / "SCENARIO_SUMMARY.md",
     )
@@ -149,7 +151,22 @@ def build_scenario_runner_instruction() -> str:
 # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def scenario_command(paths: ScenarioPaths, *parts: str) -> list[str]:
 
-    return [sys.executable, "-m", "agent_py_agent", "--config", str(paths.config), *parts]
+    command = [sys.executable, "-m", "agent_py_agent", "--config", str(paths.config), *parts]
+    if _scenario_command_supports_capability_config(parts):
+        command.extend(["--capability-config", str(paths.capability_config)])
+    return command
+
+
+# LLM: scenario subprocesses only pass capability config to subcommands that accept it.
+# 函数用途: 让 gateway start/run 继承 scenario 的恢复阈值，同时避免 gateway ask/stop 解析未知参数。
+def _scenario_command_supports_capability_config(parts: tuple[str, ...]) -> bool:
+    if not parts:
+        return False
+    if parts[0] in {"subagents-dispatch", "subagents-due-check", "subagents-plan-actions"}:
+        return True
+    if parts[0] == "gateway" and len(parts) > 1 and parts[1] in {"start", "restart", "run"}:
+        return True
+    return False
 
 
 # LLM: run_scenario_gateway_ask 属于scenario CLI；改行为前先对齐调用方和快照/单测。

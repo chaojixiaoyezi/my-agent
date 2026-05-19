@@ -37,6 +37,10 @@ from .dispatch_record_params import (
     AcceptanceRecordParams,
     PatchReviewRecordParams,
 )
+from .dispatch_recovery_followup import (
+    PostRunnerRecoveryFollowupParams,
+    run_post_runner_recovery_followup,
+)
 from .dispatch_runner_batches import execute_runner_jobs
 
 if TYPE_CHECKING:
@@ -204,6 +208,7 @@ class SimpleAgentDispatchMixin(
 
         records = run_dispatch_runner_stage(request=DispatchRunnerStageRequest(self, ctx, params, records))
         records = run_post_runner_capability_followup(PostRunnerCapabilityFollowupParams(self, ctx, params, records))
+        records = run_post_runner_recovery_followup(PostRunnerRecoveryFollowupParams(self, ctx, params, records))
         ctx.records = records
         records = self._finalize_dispatch(_dispatch_finalize_params(params, records))
         return self._build_and_write_report(records, params.apply)

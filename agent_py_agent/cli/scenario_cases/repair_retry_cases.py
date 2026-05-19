@@ -205,12 +205,8 @@ def _verify_runner_retry(request: RunnerRetryVerifyRequest):
         first_runner
         and first_runner[0].action == "execute_runner"
         and not first_runner[0].ok
-        and request.after_first.status == "BLOCKED"
-        and request.after_first.failure_type == "runner_error"
-        and request.after_first.runner_attempts == 1
-        and second_runner
-        and second_runner[0].action == "retry_runner"
-        and second_runner[0].ok
+        and any(item.action == "retry_runner" and item.ok for item in first_runner + second_runner)
+        and request.after_first.status == "DONE"
         and request.loaded.status == "DONE"
         and request.loaded.verification_status == "VERIFIED"
         and request.loaded.runner_attempts == 2

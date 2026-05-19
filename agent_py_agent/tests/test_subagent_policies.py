@@ -418,6 +418,19 @@ def test_select_capability_hits_filters_low_confidence():
     assert len(selected) == 0
 
 
+def test_select_capability_hits_filters_generic_description_only_match():
+    """通用描述词不能单独授权不存在的能力。"""
+    config = CapabilityConfig()
+    card = CapabilityCard(id="t1", kind="tool", name="message_runtime", description="")
+    hit = CapabilitySearchHit(
+        card=card,
+        score=4.5,
+        reasons=["命中描述'任务'", "命中描述'需要'", "命中描述'完成'"],
+    )
+    selected = _select_capability_hits([hit], config)
+    assert selected == []
+
+
 # ── _route_card_payload 测试 ──────────────────────────────────────────────
 
 def test_route_card_payload_basic():

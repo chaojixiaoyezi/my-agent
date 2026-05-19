@@ -174,6 +174,33 @@ def test_task_local_write_progress_completed_html_prompts_output_json_closeout(t
     assert packet["work_progress"]["next_action"] == snapshot["next_action"]
 
 
+# LLM: relative write paths must resolve through task write roots before integrity checks run.
+# 函数用途: 复现真实购物站 E2E 中 payload.path=lab_outputs/... 被误判 artifact_missing 的问题。
+def test_task_local_write_progress_resolves_relative_artifact_path_from_write_roots(tmp_path: Path) -> None:
+    task = _progress_task(tmp_path)
+    workspace = tmp_path / "fixture"
+    artifact = workspace / "lab_outputs" / "shop-demo" / "index.html"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("<html><body><main id='top'>Shop</main></body></html>", encoding="utf-8")
+    task.allowed_write_roots = [str(tmp_path / "internal"), str(workspace)]
+
+    snapshot = record_subagent_tool_progress(
+        SubagentToolProgressRequest(
+            task=task,
+            tool="append_file",
+            payload={"path": "lab_outputs/shop-demo/index.html", "content": "</body></html>"},
+            output="已追加文件: lab_outputs/shop-demo/index.html",
+            ok=True,
+            tool_round=5,
+            tool_index=1,
+        )
+    )
+
+    assert snapshot["latest_written_path"] == str(artifact)
+    assert snapshot["artifact_integrity"]["ok"] is True
+    assert "artifact_missing" not in snapshot["summary"]
+
+
 # LLM: fake hash links should keep the runner in repair mode before structured closeout.
 # 函数用途: 复现家具页真实产物残留 href="#"；进度包应提示先修复明显失效链接，再写 output.json。
 def test_task_local_write_progress_placeholder_hash_link_prompts_repair(tmp_path: Path) -> None:

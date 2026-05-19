@@ -262,6 +262,17 @@ class TestGatewayAskCommand:
         args = parser.parse_args(["gateway", "ask", "测试", "--json"])
         assert args.json is True
 
+    def test_gateway_ask_has_context_scope_flag(self):
+        """测试 gateway ask 命令有 --context-scope 标志。"""
+        from agent_py_agent.cli.subcommands_gateway import add_gateway_subcommands
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="gateway_command")
+        add_gateway_subcommands(sub)
+
+        args = parser.parse_args(["gateway", "ask", "测试", "--context-scope", "control_plane"])
+        assert args.context_scope == "control_plane"
+
 
 class TestGatewayResultCommand:
     """测试 gateway result 命令。"""

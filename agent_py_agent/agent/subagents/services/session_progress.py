@@ -123,7 +123,7 @@ def _snapshot_payload(
     previous: dict[str, Any],
     refs: _ProgressRefs,
 ) -> dict[str, Any]:
-    path = str(request.payload.get("path") or "")
+    path = _resolve_progress_path(request.task, request.payload.get("path"))
     headings = _merge_unique(_string_list(previous.get("headings")) + _headings_from_payload(request.payload))
     written_paths = _merge_unique(_string_list(previous.get("written_paths")) + ([path] if path else []))
     if _is_internal_output_path(request.task, path) and previous:
@@ -152,6 +152,55 @@ def _snapshot_payload(
         "output_preview": _clip(request.output, 300),
         "reserved": {},
     }
+
+
+# LLM: Tool payload paths can be relative to the task workspace; persist absolute product refs for recovery.
+# 函数用途: 把 write/append/replace 的相对路径解析到 allowed_write_roots 内，避免完整性检查把真实产物误判为 missing。
+def _resolve_progress_path(task: SubAgentTask, raw_path: object) -> str:
+    raw = str(raw_path or "").strip()
+    if not raw:
+        return ""
+    path = Path(raw).expanduser()
+    if path.is_absolute():
+        return str(path.resolve(strict=False))
+    roots = _progress_path_roots(task)
+    for root in roots:
+        candidate = (root / path).resolve(strict=False)
+        if candidate.exists():
+            return str(candidate)
+    if roots:
+        return str((roots[0] / path).resolve(strict=False))
+    return raw
+
+
+# LLM: _progress_path_roots is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _progress_path_roots(task: SubAgentTask) -> list[Path]:
+    roots: list[Path] = []
+    for value in reversed(list(getattr(task, "allowed_write_roots", []) or [])):
+        _append_progress_root(roots, value)
+    for value in (
+        getattr(task, "task_dir", ""),
+        getattr(task, "output_dir", ""),
+        getattr(task, "task_workspace_artifacts_dir", ""),
+        getattr(task, "agent_run_artifacts_dir", ""),
+    ):
+        _append_progress_root(roots, value)
+    return roots
+
+
+# LLM: _append_progress_root is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _append_progress_root(roots: list[Path], value: object) -> None:
+    text = str(value or "").strip()
+    if not text:
+        return
+    try:
+        path = Path(text).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return
+    if path not in roots:
+        roots.append(path)
 
 
 # LLM: _output_closeout_snapshot preserves product progress when the runner writes internal output.json.

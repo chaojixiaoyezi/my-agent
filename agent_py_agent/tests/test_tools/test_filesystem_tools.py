@@ -367,6 +367,24 @@ def test_search_text_supports_limit_offset_and_glob(tmp_path: Path):
     assert "next_offset" not in result.output
 
 
+def test_search_text_matches_case_insensitively_by_default(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "app.log").write_text("code=PAYMENT_TIMEOUT\ncode=CART_STUCK\n", encoding="utf-8")
+    tool = SearchTextTool(workspace, max_matches=10)
+
+    payment = tool.execute({"query": "payment", "path": "app.log"})
+    cart = tool.execute({"query": "cart", "path": "app.log"})
+    exact = tool.execute({"query": "payment", "path": "app.log", "case_sensitive": True})
+
+    assert payment.ok
+    assert "PAYMENT_TIMEOUT" in payment.output
+    assert cart.ok
+    assert "CART_STUCK" in cart.output
+    assert exact.ok
+    assert "没有找到匹配项" in exact.output
+
+
 def test_list_files_supports_limit_offset_depth_and_glob(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

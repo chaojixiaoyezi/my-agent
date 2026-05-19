@@ -12,6 +12,9 @@ from typing import TYPE_CHECKING, Any
 
 from .action_context import ActionHandlerContext
 from .action_handlers import (
+    apply_close_parent_from_verified_repair_child,
+    apply_create_artifact_repair_child,
+    apply_create_parent_acceptance_repair_child,
     apply_probe_or_repair_channel,
     apply_record_only_action,
     apply_reopen_for_evidence,
@@ -47,6 +50,9 @@ ACTION_DISPATCH = {
     "inspect_failure": apply_record_only_action,
     "classify_blocker": apply_record_only_action,
     "stop_no_progress_and_escalate": apply_stop_no_progress_and_escalate,
+    "create_repair_child_from_artifact_integrity_refs": apply_create_artifact_repair_child,
+    "close_parent_from_verified_repair_child": apply_close_parent_from_verified_repair_child,
+    "create_repair_child_from_parent_acceptance_refs": apply_create_parent_acceptance_repair_child,
 }
 
 

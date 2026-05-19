@@ -22,15 +22,25 @@ from scripts.live_lab.markdown_repair_wave_case import (
     assert_markdown_repair_wave_created,
     seed_failed_markdown_child,
 )
-from scripts.live_lab.session import LabSessionManager
+from scripts.live_lab.multi_complex_case import (
+    _assert_contract_coverage,
+    _bundle_contracts,
+    _bundle_prompt,
+    _complex_contracts,
+)
+from scripts.live_lab.session import LabSessionManager, _live_lab_max_subagents
 from scripts.live_lab.shop_case import (
     _assert_shop_html_output,
     _assert_static_site_check_clean,
+    _async_gateway_wait_budget,
     _external_asset_refs,
     _has_disabled_control,
     _missing_shop_actions,
     _missing_shop_sections,
     _natural_shop_prompt,
+    _parse_gateway_no_wait,
+    _probe_foreground_main_agent,
+    _wait_for_async_gateway_response,
 )
 from scripts.live_lab.shop_repair_wave_case import (
     _natural_shop_repair_wave_prompt,
@@ -79,6 +89,162 @@ def test_natural_shop_case_is_registered_as_real_opt_in_suite():
     assert "dispatch" not in prompt.lower()
     assert "runner" not in prompt.lower()
     assert "contract" not in prompt.lower()
+
+
+# LLM: Multi-complex canary must stay real-LLM gated and verify structured task-card contracts.
+# 函数用途: 确认多复杂任务测试覆盖多个主请求和单主请求多 worker 的结构化合同，不靠任务描述过关。
+def test_multi_complex_case_is_registered_as_real_opt_in_suite():
+    contracts = _complex_contracts()
+    bundle_contracts = _bundle_contracts(contracts)
+
+    assert SUITES["multi-complex"] == ["health", "multi_complex_subagents"]
+    assert "multi_complex_subagents" in REAL_CASES
+    assert [contract.case_id for contract in contracts] == ["deepseek_papers", "github_stars", "shop", "articles"]
+    assert [contract.case_id for contract in bundle_contracts] == [
+        "bundle_deepseek_papers",
+        "bundle_github_stars",
+        "bundle_shop",
+        "bundle_articles",
+    ]
+    assert contracts[2].required_dom_ids == ["register", "login", "catalog", "cart", "checkout", "order-confirmation"]
+    assert contracts[2].require_script is True
+    assert _output_files(contracts).isdisjoint(_output_files(bundle_contracts))
+    assert all(path.startswith("lab_outputs/bundle/") for path in _output_files(bundle_contracts))
+    assert "items/tasks 批量参数一次性创建 4 个 item" in _bundle_prompt(bundle_contracts)
+
+
+def _output_files(contracts):
+    return {path for contract in contracts for path in contract.output_files}
+
+
+# LLM: Multi-complex contract checks must read task attributes, not prose in goal.
+# 函数用途: 防止测试误把 goal 正文里的路径/id 当作系统已经具备机器合同。
+def test_multi_complex_contract_coverage_requires_attributes():
+    contracts = _complex_contracts()
+    cards = [
+        {
+            "goal": contract.prompt,
+            "attributes": {
+                "output_files": contract.output_files,
+                "required_files": contract.required_files,
+                "required_dom_ids": contract.required_dom_ids,
+                **({"require_script": contract.require_script} if contract.require_script is not None else {}),
+            },
+        }
+        for contract in contracts
+    ]
+
+    _assert_contract_coverage(cards, contracts)
+    broken_cards = [dict(card) for card in cards]
+    broken_cards[2] = {"goal": contracts[2].prompt, "attributes": {"output_files": contracts[2].output_files}}
+    with pytest.raises(RuntimeError, match="required_dom_ids"):
+        _assert_contract_coverage(broken_cards, contracts)
+
+
+# LLM: Shop Live Lab must queue long work asynchronously instead of blocking the foreground ask process.
+# 函数用途: 确认 gateway ask --no-wait 的稳定输出能解析成 request_id 和 response 路径。
+def test_parse_gateway_no_wait_output():
+    request_id, response_path = _parse_gateway_no_wait(
+        "queued request_id=gw-123\n"
+        "request: /tmp/run/.my_agent/gateway/requests/pending/gw-123.json\n"
+        "response: /tmp/run/.my_agent/gateway/responses/gw-123.json\n"
+    )
+
+    assert request_id == "gw-123"
+    assert str(response_path).endswith("/responses/gw-123.json")
+
+
+# LLM: Async wait budget should scale with max_cycles because long tasks use multiple tool/model rounds.
+# 函数用途: 防止真实购物站测试只等一轮 request_timeout，误杀后台分块写入任务。
+def test_async_gateway_wait_budget_scales_with_max_cycles():
+    lab = SimpleNamespace(args=SimpleNamespace(timeout=240, max_cycles=4))
+
+    assert _async_gateway_wait_budget(lab) == 1140.0
+
+
+# LLM: Live Lab real tasks need a runner wrapper timeout so stuck child workers become recoverable facts.
+# 函数用途: 确认真实测试隔离配置会写入 runner_timeout_seconds，不让子代理无限 RUNNING 拖死 E2E。
+def test_live_lab_config_sets_runner_timeout(tmp_path):
+    source_config = tmp_path / "agent_config.yaml"
+    source_config.write_text("model_backend: echo\n", encoding="utf-8")
+    source_capability = tmp_path / "capability.yaml"
+    source_capability.write_text("enable_capability_routing: true\n", encoding="utf-8")
+    args = SimpleNamespace(
+        config=source_config,
+        capability_config=source_capability,
+        runs_dir=tmp_path / "runs",
+        run_id="run-timeout",
+        real_llm=False,
+        count=1,
+        max_runners=1,
+        max_cycles=2,
+        timeout=45,
+    )
+    lab = LabSessionManager(args)
+    lab.setup()
+
+    text = lab.config_path.read_text(encoding="utf-8")
+    assert "gateway_request_workers: 3" in text
+    assert "max_subagents: 8" in text
+    assert "gateway_foreground_reserved_workers: 1" in text
+    assert "daemon_apply: true" in text
+    assert "daemon_execute_runners: true" in text
+    assert "daemon_max_runners: 1" in text
+    assert "runner_timeout_seconds: 60" in text
+    assert "request_timeout: 45" in text
+
+
+# LLM: Multi-complex Live Lab needs enough headroom for separate requests plus a bundle batch.
+# 函数用途: 锁定真实复杂测试的任务卡上限，避免 count=1 把批量 items 截成单任务。
+def test_live_lab_max_subagents_scales_for_bundle_cases():
+    args = SimpleNamespace(count=1, max_runners=2, max_cycles=4)
+
+    assert _live_lab_max_subagents(args) == 32
+
+
+# LLM: Async shop waiting should actively probe the foreground lane while background work runs.
+# 函数用途: 验证长任务等待循环会定时检查前台 main agent 是否还能响应。
+def test_async_gateway_wait_probes_foreground_lane(tmp_path, monkeypatch):
+    response_path = tmp_path / "response.json"
+    probes: list[str] = []
+
+    class Lab:
+        def log(self, message):
+            pass
+
+    def fake_probe(lab):
+        probes.append("called")
+
+    def fake_sleep(seconds):
+        response_path.write_text('{"ok": true}', encoding="utf-8")
+
+    monkeypatch.setattr("scripts.live_lab.shop_case._probe_foreground_main_agent", fake_probe)
+    monkeypatch.setattr("scripts.live_lab.shop_case.time.sleep", fake_sleep)
+
+    payload = _wait_for_async_gateway_response(Lab(), response_path, timeout_seconds=3)
+
+    assert payload == {"ok": True}
+    assert probes == ["called"]
+
+
+# LLM: Foreground probe failures should be visible in lab logs instead of silently passing.
+# 函数用途: 验证前台对话被后台长任务堵住时，Live Lab 会留下明确失败日志。
+def test_probe_foreground_main_agent_logs_failure():
+    logs: list[str] = []
+
+    class Lab:
+        def agent_command(self, *parts):
+            return ("my-agent", *parts)
+
+        def run_command(self, *args, **kwargs):
+            return SimpleNamespace(returncode=7)
+
+        def log(self, message):
+            logs.append(message)
+
+    _probe_foreground_main_agent(Lab())
+
+    assert logs == ["foreground_probe=fail exit_code=7"]
 
 
 # LLM: The repair-wave canary should start from a failed child and still use ordinary user wording.
@@ -292,6 +458,7 @@ def test_live_lab_config_keeps_tool_rounds_unlimited(tmp_path):
     source.write_text("model_backend: echo\n", encoding="utf-8")
     args = SimpleNamespace(
         config=str(source),
+        capability_config=str(tmp_path / "missing_capability_config.yaml"),
         runs_dir=str(tmp_path / "runs"),
         run_id="natural-config",
         real_llm=False,
@@ -304,6 +471,42 @@ def test_live_lab_config_keeps_tool_rounds_unlimited(tmp_path):
 
     text = session.config_path.read_text(encoding="utf-8")
     assert "max_tool_rounds: 0" in text
+    assert "gateway_port: 0" in text
+    capability_text = session.capability_config_path.read_text(encoding="utf-8")
+    assert "subagent_heartbeat_timeout: 60" in capability_text
+    assert "subagent_run_timeout: 540" in capability_text
+
+
+# LLM: Live Lab must pass its isolated capability config into commands that accept it.
+# 函数用途: 确认真实测试的 gateway/scenario 调度使用隔离超时策略，而不是仓库默认无限超时。
+def test_live_lab_agent_command_injects_capability_config_for_supported_commands(tmp_path):
+    from scripts.live_lab.reporter import LabReporter
+    from scripts.live_lab.runner import LabRunner
+
+    source = tmp_path / "agent_config.yaml"
+    source.write_text("model_backend: echo\n", encoding="utf-8")
+    args = SimpleNamespace(
+        config=str(source),
+        capability_config=str(tmp_path / "missing_capability_config.yaml"),
+        runs_dir=str(tmp_path / "runs"),
+        run_id="natural-config",
+        real_llm=False,
+        count=1,
+        timeout=120,
+    )
+    session = LabSessionManager(args)
+    session.setup()
+    runner = LabRunner(session, LabReporter(session, args), args)
+
+    gateway_start = runner.agent_command("gateway", "start", "--force")
+    scenario_test = runner.agent_command("scenario-test", "--case", "happy")
+    gateway_ask = runner.agent_command("gateway", "ask", "hi")
+
+    assert "--capability-config" in gateway_start
+    assert str(session.capability_config_path) in gateway_start
+    assert "--capability-config" in scenario_test
+    assert str(session.capability_config_path) in scenario_test
+    assert "--capability-config" not in gateway_ask
 
 
 # LLM: Natural E2E validation checks concrete artifact facts instead of trusting the final prose.
@@ -400,6 +603,23 @@ def test_shop_missing_helpers_report_exact_contract_parts():
 
     assert _missing_shop_sections(lower) == ["register", "login", "cart", "checkout", "order-confirmation"]
     assert _missing_shop_actions(lower) == ["register", "login", "checkout", "place-order"]
+
+
+# LLM: The shop canary should accept real DOM event bindings, not only data-action attributes.
+# 函数用途: 覆盖真实购物站产物中 checkout-btn 通过 addEventListener 绑定点击事件的合法写法。
+def test_shop_missing_actions_accepts_checkout_button_event_binding():
+    lower = """
+    <button data-action="register">注册</button>
+    <button data-action="login">登录</button>
+    <button data-action="add-to-cart">加入购物车</button>
+    <button id="checkout-btn" type="button">结算</button>
+    <button data-action="place-order">下单</button>
+    <script>
+    document.getElementById('checkout-btn').addEventListener('click', () => {});
+    </script>
+    """.lower()
+
+    assert _missing_shop_actions(lower) == []
 
 
 # LLM: The natural canary must fail when the gateway response says the subagent chain is still blocked.

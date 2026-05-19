@@ -74,6 +74,7 @@ class GatewayStartOptions:
 
     config: Path
     force_lock: bool
+    capability_config: Path = Path("")
 
 
 # LLM: GatewayRunContext 是CLI 命令层的数据契约；字段名会被调用方和测试读取。

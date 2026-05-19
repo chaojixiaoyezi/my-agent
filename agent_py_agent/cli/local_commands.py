@@ -13,8 +13,14 @@ from __future__ import annotations
 import json
 import sys
 import time
+from pathlib import Path
 
 from ..agent.backends import ProviderTimeoutError, provider_timeout_report
+from ..agent.contracts.delivery_contract import (
+    delivery_repair_prompt,
+    repair_delivery_contract,
+    run_delivery_contract,
+)
 from ..agent.gateway import (
     gateway_paths,
     gateway_request_counts,
@@ -142,6 +148,7 @@ def cmd_run(args) -> int:
             prompt_files=args.prompt_file or [],
             save=args.save,
             source="cli_run",
+            task_attributes=_run_task_attributes(args),
             resume_context=resume_context_override(args),
             recovery_next_actions=["如需恢复本次单轮 run，先查看 memory-resume 和 LocalStore 记录。"],
             on_chunk=on_chunk,
@@ -151,8 +158,77 @@ def cmd_run(args) -> int:
         return 2
     finally:
         spinner.stop()
+    delivery_exit = _run_delivery_contract_flow(agent, args)
     _print_run_result(result, show_prompt=args.show_prompt, streamed_text=str(stream_state["text"]))
-    return 0
+    return delivery_exit
+
+
+# LLM: _run_delivery_contract_flow keeps optional root-agent artifact gates out of the main runtime loop.
+# 函数用途: 根据显式 delivery_contract JSON 验收并可自动修复；决策只读合同报告，不解析 prompt 自然语言。
+def _run_delivery_contract_flow(agent, args) -> int:
+    contract_file = _optional_path_arg(args, "delivery_contract_file")
+    if not contract_file:
+        return 0
+    attempts = max(0, int(getattr(args, "delivery_repair_attempts", 0) or 0))
+    report = _print_delivery_report(contract_file, workspace_root=_agent_workspace_root(agent))
+    if not report.ok:
+        report = repair_delivery_contract(contract_file, workspace_root=_agent_workspace_root(agent))
+        print("delivery_contract_auto_repair_report=" + json.dumps(report.to_dict(), ensure_ascii=False, sort_keys=True))
+    for index in range(attempts):
+        if report.ok:
+            return 0
+        print(f"delivery_contract_repair_attempt={index + 1}")
+        agent.run(
+            delivery_repair_prompt(report),
+            save=getattr(args, "save", None),
+            source="cli_run_delivery_repair",
+            recovery_next_actions=["继续读取 delivery_contract_report 并修复未通过的结构化产物检查。"],
+        )
+        report = _print_delivery_report(contract_file, workspace_root=_agent_workspace_root(agent))
+    return 0 if report.ok else 2
+
+
+# LLM: _print_delivery_report is the CLI bridge from a structured contract file to terminal JSON.
+# 函数用途: 执行一次 delivery contract 验收并打印机器可读报告。
+def _print_delivery_report(contract_file: str, *, workspace_root: Path) -> object:
+    report = run_delivery_contract(contract_file, workspace_root=workspace_root)
+    print("delivery_contract_report=" + json.dumps(report.to_dict(), ensure_ascii=False, sort_keys=True))
+    return report
+
+
+# LLM: _run_task_attributes adds only explicit structured run attributes from CLI options.
+# 函数用途: 把 delivery contract 路径传给运行时工具循环，不从 prompt 文本推断合同。
+def _run_task_attributes(args) -> dict[str, object] | None:
+    contract_file = _optional_path_arg(args, "delivery_contract_file")
+    if not contract_file:
+        return None
+    return {
+        "delivery_contract_file": contract_file,
+        "max_tool_rounds": 32,
+        "parent_product_write": "allow",
+        "parent_body_read": "allow",
+    }
+
+
+# LLM: _agent_workspace_root normalizes the agent root shape used by real and test agents.
+# 函数用途: 从 agent 的 workspace_root/root/workspace_roots 中解析产物合同的工作区根目录。
+def _agent_workspace_root(agent) -> Path:
+    value = getattr(agent, "workspace_root", None) or getattr(agent, "root", None)
+    if value:
+        return Path(value)
+    roots = getattr(agent, "workspace_roots", []) or []
+    return Path(roots[0]) if roots else Path(".")
+
+
+# LLM: _optional_path_arg keeps mocked argparse objects from enabling optional file flows.
+# 函数用途: 只接受真实字符串或 Path 参数，避免测试 MagicMock 被误当作合同文件路径。
+def _optional_path_arg(args, name: str) -> str:
+    value = getattr(args, name, None)
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, str):
+        return value.strip()
+    return ""
 
 
 # LLM: _make_run_chunk_writer keeps streaming stdout state out of cmd_run.

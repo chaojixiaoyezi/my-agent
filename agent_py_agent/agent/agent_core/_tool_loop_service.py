@@ -4,9 +4,11 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from ..backends import ModelResponse
+from ..contracts.delivery_contract import repair_delivery_contract, run_delivery_contract
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
 from ..prompting_parts.builder import ToolSections
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
@@ -31,8 +33,8 @@ from .tool_context_window import window_tool_context_params
 from .tool_loop_completion import ToolRoundCompletionRequest, completion_response_after_tool_round
 from .tool_loop_empty_response import (
     empty_model_response_fallback,
-    empty_model_response_retry_context,
-    should_retry_empty_model_response,
+    retry_context_for_model_response_error,
+    should_retry_model_response_error,
 )
 from .tool_loop_orchestration_scope import executed_subagent_orchestration
 from .tool_loop_recovery import (
@@ -150,7 +152,10 @@ class ToolLoopService:
             if action.action == "continue":
                 continue
             if action.action == "break":
-                final_response = action.response
+                contract_break = self._delivery_contract_break_response(params, action.response)
+                if contract_break is None:
+                    continue
+                final_response = contract_break
                 break
             final_prompt, final_response, tool_rounds = self._tool_step_or_limit(
                 _ToolStepRequest(
@@ -186,8 +191,8 @@ class ToolLoopService:
             prompt, response = _next_model_response(self._agent, params, tool_rounds)
             return prompt, response, False, False, empty_response_repairs
         except Exception as exc:
-            if should_retry_empty_model_response(params, exc, empty_response_repairs):
-                params.tool_context.append(empty_model_response_retry_context(params))
+            if should_retry_model_response_error(params, exc, empty_response_repairs):
+                params.tool_context.append(retry_context_for_model_response_error(params, exc))
                 return _build_prompt(self._agent, params), None, False, True, empty_response_repairs + 1
             fallback = empty_model_response_fallback(
                 self._agent,
@@ -249,7 +254,63 @@ class ToolLoopService:
                 subagent_output_written,
             )
         )
+        if final_response is None:
+            final_response = self._delivery_contract_response(request.params)
         return request.tool_rounds, final_response
+
+    # LLM: _delivery_contract_response lets explicit root-agent delivery contracts stop runaway tool loops.
+    # 函数用途: 每轮工具后按 task_attributes.delivery_contract_file 验收；通过即确定性收口，失败只回填 JSON findings。
+    def _delivery_contract_response(self, params: ToolLoopExecuteParams):
+        attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
+        contract_file = str(attrs.get("delivery_contract_file") or "").strip()
+        if not contract_file:
+            return None
+        workspace_root = _agent_workspace_root(self._agent)
+        report = run_delivery_contract(contract_file, workspace_root=workspace_root)
+        if attrs.get("_delivery_contract_auto_repair_tried") is not True and _delivery_contract_has_checked_files(report):
+            attrs["_delivery_contract_auto_repair_tried"] = True
+            report = repair_delivery_contract(contract_file, workspace_root=workspace_root)
+        payload = json.dumps(report.to_dict(), ensure_ascii=False, sort_keys=True)
+        if attrs.get("_delivery_contract_last_report") != payload:
+            attrs["_delivery_contract_last_report"] = payload
+            params.tool_context.append("[delivery-contract-report]\n" + payload)
+        if not report.ok:
+            return None
+        backend = str(getattr(getattr(self._agent, "backend", None), "name", "") or "")
+        return ModelResponse(
+            text=(
+                "delivery_contract=pass\n"
+                "结构化产物合同已通过，停止继续工具循环。"
+            ),
+            backend=backend,
+        )
+
+    # LLM: _delivery_contract_break_response is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+    # 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+    def _delivery_contract_break_response(self, params: ToolLoopExecuteParams, response):
+        attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
+        contract_file = str(attrs.get("delivery_contract_file") or "").strip()
+        if not contract_file:
+            return response
+        workspace_root = _agent_workspace_root(self._agent)
+        report = repair_delivery_contract(contract_file, workspace_root=workspace_root)
+        payload = json.dumps(report.to_dict(), ensure_ascii=False, sort_keys=True)
+        if report.ok:
+            backend = str(getattr(getattr(self._agent, "backend", None), "name", "") or "")
+            return ModelResponse(
+                text=(
+                    "delivery_contract=pass\n"
+                    "结构化产物合同已通过，停止继续工具循环。"
+                ),
+                backend=backend,
+            )
+        attempts = int(attrs.get("_delivery_contract_final_repair_count") or 0)
+        if attempts < 1:
+            attrs["_delivery_contract_final_repair_count"] = attempts + 1
+            params.tool_context.append("[delivery-contract-report]\n" + payload)
+            return None
+        backend = str(getattr(getattr(self._agent, "backend", None), "name", "") or "")
+        return ModelResponse(text="delivery_contract=fail\n" + payload, backend=backend)
 
     # LLM: _tool_round_limit_reached 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 处理工具round限制reached相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
@@ -261,6 +322,9 @@ class ToolLoopService:
     # 函数用途: 处理final响应after工具限制相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def _final_response_after_tool_limit(self, params: ToolLoopExecuteParams, tool_rounds: int):
         params.tool_context.append("[tool-system]\n已达到最大工具轮数限制，停止继续调用工具。")
+        contract_response = self._delivery_contract_limit_response(params)
+        if contract_response is not None:
+            return _build_prompt(self._agent, params), contract_response
         if executed_subagent_orchestration(params):
             backend = str(getattr(self._agent.backend, "name", "") or "")
             deterministic = subagent_dispatch_limit_response(self._agent, backend=backend)
@@ -278,6 +342,32 @@ class ToolLoopService:
         final_response = without_tool_call_after_limit(self._agent, final_response)
         return final_prompt, final_response
 
+    # LLM: _delivery_contract_limit_response is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+    # 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+    def _delivery_contract_limit_response(self, params: ToolLoopExecuteParams):
+        attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
+        contract_file = str(attrs.get("delivery_contract_file") or "").strip()
+        if not contract_file:
+            return None
+        report = repair_delivery_contract(contract_file, workspace_root=_agent_workspace_root(self._agent))
+        payload = json.dumps(report.to_dict(), ensure_ascii=False, sort_keys=True)
+        backend = str(getattr(getattr(self._agent, "backend", None), "name", "") or "")
+        if report.ok:
+            return ModelResponse(
+                text=(
+                    "delivery_contract=pass\n"
+                    "结构化产物合同已通过，停止继续工具循环。"
+                ),
+                backend=backend,
+            )
+        return ModelResponse(
+            text=(
+                "delivery_contract=fail\n"
+                f"{payload}"
+            ),
+            backend=backend,
+        )
+
     # LLM: _execute_one_tool_call 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 推进one工具call的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _execute_one_tool_call(self, request: ToolCallExecuteParams):
@@ -291,10 +381,15 @@ class ToolLoopService:
         )
         trace_runner_tool_call_started(trace_request)
         runtime_request = ToolCallRuntimeRequest(self._agent, request, payload, trace_request)
-        guard_result = guarded_tool_call_result(runtime_request)
-        if guard_result is not None:
-            return guard_result
-        return execute_traced_tool_call(runtime_request)
+        previous_background_intake = getattr(self._agent, "_current_background_intake", False)
+        self._agent._current_background_intake = bool(request.params.background_intake)
+        try:
+            guard_result = guarded_tool_call_result(runtime_request)
+            if guard_result is not None:
+                return guard_result
+            return execute_traced_tool_call(runtime_request)
+        finally:
+            self._agent._current_background_intake = previous_background_intake
 
     # LLM: _record_tool_call 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 写入工具call的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
@@ -350,3 +445,24 @@ def _task_local_progress_context(progress: dict[str, object]) -> str:
             "If next_action mentions output.json, stop product-body writes and close out with structured refs.",
         ]
     )
+
+
+# LLM: _agent_workspace_root is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _agent_workspace_root(agent) -> object:
+    value = getattr(agent, "workspace_root", None) or getattr(agent, "root", None)
+    if value:
+        return value
+    roots = getattr(agent, "workspace_roots", []) or []
+    return roots[0] if roots else "."
+
+
+# LLM: _delivery_contract_has_checked_files is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _delivery_contract_has_checked_files(report) -> bool:
+    for check in getattr(report, "checks", []) or []:
+        details = getattr(check, "details", {}) or {}
+        validation = details.get("validation_result") if isinstance(details, dict) else {}
+        if isinstance(validation, dict) and validation.get("checked_files"):
+            return True
+    return False

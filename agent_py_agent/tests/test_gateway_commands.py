@@ -263,10 +263,14 @@ class TestGatewayRunStateHelpers:
         from agent_py_agent.cli.models import GatewayStartOptions
 
         config = tmp_path / "config.yaml"
-        command = _gateway_start_command(GatewayStartOptions(config=config, force_lock=True))
+        capability_config = tmp_path / "capability.yaml"
+        command = _gateway_start_command(
+            GatewayStartOptions(config=config, force_lock=True, capability_config=capability_config)
+        )
 
-        assert command[-2:] == ["run", "--force-lock"]
+        assert command[-1] == "--force-lock"
         assert command[command.index("--config") + 1] == str(config.resolve())
+        assert command[command.index("--capability-config") + 1] == str(capability_config.resolve())
 
     def test_run_gateway_watch_uses_context_bundle(self):
         from agent_py_agent.cli._gateway_state_helpers import _run_gateway_watch

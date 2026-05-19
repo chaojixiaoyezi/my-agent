@@ -40,7 +40,10 @@ class GatewayAskParams:
     prompt_files: list[str] | None = None
     save: bool = True
     include_prompt: bool = False
+    client_wait: bool = True
+    context_scope: str = "default"
     resume_context: bool | None = None
+    task_attributes: dict | None = None
     agent: SimpleAgent | None = field(default=None, repr=False)
 
 
@@ -76,6 +79,9 @@ def submit_gateway_ask(
         "prompt_files": params.prompt_files or [],
         "save": params.save,
         "include_prompt": params.include_prompt,
+        "client_wait": params.client_wait,
+        "context_scope": params.context_scope,
+        "task_attributes": dict(params.task_attributes or {}),
         "created_at": time.time(),
         "client_pid": 0,
         "status": "pending",
@@ -83,8 +89,9 @@ def submit_gateway_ask(
     }
     if params.resume_context is not None:
         payload["resume_context"] = bool(params.resume_context)
-    request_path = write_gateway_request(paths, payload)
     response_path = gateway_response_path(paths, request_id)
+    _attach_runtime_task_card(payload, params=params, response_path=response_path)
+    request_path = write_gateway_request(paths, payload)
     if params.agent is not None:
         audit_request_queued(
             params.agent,
@@ -93,6 +100,53 @@ def submit_gateway_ask(
             response_path,
         )
     return request_id, request_path, response_path
+
+
+# LLM: _attach_runtime_task_card projects no-wait gateway requests into durable TaskCards at enqueue time.
+# 函数用途: 为后台 gateway 请求创建可恢复任务卡，并把 task_id 写回请求机器字段。
+def _attach_runtime_task_card(
+    payload: dict,
+    *,
+    params: GatewayAskParams,
+    response_path: Path,
+) -> None:
+    if params.agent is None or params.client_wait:
+        return
+    cards_root = getattr(params.agent, "runtime_cards_root", None)
+    messages_root = getattr(params.agent, "runtime_messages_root", None)
+    if cards_root is None or messages_root is None:
+        return
+    from ..cards import CardStore, SessionCard
+    from ..messages import MessageStore, MessageTool
+    from ..runtime import TaskRuntime
+
+    cards = CardStore(cards_root)
+    user_id = str(getattr(getattr(params.agent, "config", None), "user_id", "") or "admin")
+    session_id = f"gateway-{user_id}"
+    try:
+        cards.get_session(session_id)
+    except KeyError:
+        cards.save_session(SessionCard(session_id=session_id, user_id=user_id, channel="gateway"))
+    runtime = TaskRuntime(cards, MessageTool(MessageStore(messages_root)))
+    attrs = dict(params.task_attributes or {})
+    task = runtime.create_task(
+        goal=params.prompt,
+        user_id=user_id,
+        session_id=session_id,
+        complexity="complex",
+        acceptance=[],
+    )
+    task.metadata.update(
+        {
+            "gateway_request_id": payload["id"],
+            "gateway_response_path": str(response_path),
+            **attrs,
+        }
+    )
+    cards.save_task(task)
+    cards.attach_task_to_session(session_id, task.task_id)
+    payload["runtime_task_id"] = task.task_id
+    payload["runtime_session_id"] = session_id
 
 
 # LLM: wait_for_gateway_response 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
@@ -113,10 +167,57 @@ def wait_for_gateway_response(paths: GatewayPaths, request_id: str, timeout: flo
 def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths, *, worker_id: str = "gw-worker") -> int:
     ensure_gateway_folders(paths)
     processed = 0
-    for request_path in sorted(paths.inbox.glob("*.json")):
+    for request_path in _pending_request_paths_for_worker(agent, paths, worker_id):
         if _process_gateway_request_path(agent, paths, request_path, worker_id):
             processed += 1
     return processed
+
+
+# LLM: _pending_request_paths_for_worker keeps one gateway worker reserved for interactive asks.
+# 函数用途: 多 worker 时让 gw-worker-0 只消费前台请求，避免 no-wait 长任务占满用户聊天通道。
+def _pending_request_paths_for_worker(agent: SimpleAgent, paths: GatewayPaths, worker_id: str) -> list[Path]:
+    request_paths = sorted(paths.inbox.glob("*.json"), key=lambda path: (_request_lane_sort_key(path), path.name))
+    if not _worker_reserved_for_foreground(agent, worker_id):
+        return request_paths
+    return [path for path in request_paths if _request_is_foreground(path)]
+
+
+# LLM: _worker_reserved_for_foreground derives reservation from the stable worker id and config.
+# 函数用途: 只有多 worker 网关才保留 0 号前台 worker；单 worker 仍兼容处理全部请求。
+def _worker_reserved_for_foreground(agent: SimpleAgent, worker_id: str) -> bool:
+    try:
+        worker_count = int(getattr(agent.config, "gateway_request_workers", 1) or 1)
+    except (TypeError, ValueError):
+        worker_count = 1
+    try:
+        reserved_count = int(getattr(agent.config, "gateway_foreground_reserved_workers", 1) or 0)
+    except (TypeError, ValueError):
+        reserved_count = 1
+    index = _worker_index(worker_id)
+    return worker_count > 1 and reserved_count > 0 and index is not None and index < min(worker_count, reserved_count)
+
+
+# LLM: _worker_index parses stable gateway worker ids without adding queue metadata.
+# 函数用途: 从 gw-worker-N 取出 N，用于前台保留 worker 判断；解析失败时不保留。
+def _worker_index(worker_id: str) -> int | None:
+    suffix = str(worker_id or "").strip().rsplit("-", 1)[-1]
+    try:
+        return int(suffix)
+    except ValueError:
+        return None
+
+
+# LLM: _request_lane_sort_key prioritizes synchronous client waits without changing queue format.
+# 函数用途: 其它 worker 也优先处理前台请求；没有 client_wait 的旧请求按前台兼容。
+def _request_lane_sort_key(path: Path) -> int:
+    return 0 if _request_is_foreground(path) else 1
+
+
+# LLM: _request_is_foreground reads a machine flag, not prompt wording.
+# 函数用途: client_wait=false 表示 ask --no-wait 后台长任务；缺省为 True 兼容旧请求。
+def _request_is_foreground(path: Path) -> bool:
+    payload = read_json_file(path) or {}
+    return bool(payload.get("client_wait", True))
 
 
 # LLM: _process_gateway_request_path 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。

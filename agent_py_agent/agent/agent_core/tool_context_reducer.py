@@ -46,8 +46,13 @@ def render_tool_result_for_live_prompt(result: ToolExecutionResult, archive_reco
 # 函数用途: 给下一轮模型一个可复制的 read_artifact 示例；包含 run/task/request 作用域，避免 `17-1` 串到旧任务。
 def _read_artifact_hint(ref: str, archive_record: dict[str, object]) -> str:
     payload = {"tool": "read_artifact", "artifact_ref": ref, "offset": 0, "max_chars": 4000}
+    search_payload = {"tool": "read_artifact", "artifact_ref": ref, "mode": "search", "query": "<keyword>", "max_chars": 4000}
     for key in ("run_id", "task_id", "request_id"):
         value = str(archive_record.get(key) or "")
         if value:
             payload[key] = value
-    return json.dumps(payload, ensure_ascii=False)
+            search_payload[key] = value
+    return (
+        f"slice={json.dumps(payload, ensure_ascii=False)}; "
+        f"search_known_anchor={json.dumps(search_payload, ensure_ascii=False)}"
+    )

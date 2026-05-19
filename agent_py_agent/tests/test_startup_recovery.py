@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from agent_py_agent.agent.cards import CardStore
 from agent_py_agent.agent.startup_recovery import (
     ActiveWorkSummary,
     detect_active_work,
@@ -151,6 +152,22 @@ class TestDetectActiveWork:
         assert summary.active_task_count == 0
         assert summary.stale_request_count == 0
 
+    def test_runtime_task_cards_count_as_active_work(self, mock_agent, mock_paths, tmp_path):
+        mock_paths.pid.write_text("12345")
+        mock_paths.state.write_text('{"status": "running"}')
+        mock_agent.subagents.build_board.return_value = Mock(hot_list=[], recent=[], summary={})
+        mock_agent.runtime_cards_root = tmp_path / "runtime_cards"
+        cards = CardStore(mock_agent.runtime_cards_root)
+        cards.create_task(goal="background task", user_id="user-1", session_id="sess-1")
+
+        with patch('agent_py_agent.agent.gateway.gateway_paths', return_value=mock_paths), \
+             patch('agent_py_agent.agent.gateway.gateway_running', return_value=(12345, True)), \
+             patch('agent_py_agent.agent.gateway.gateway_request_counts', return_value={"pending": 0, "processing": 0, "done": 0, "failed": 0}):
+            summary = detect_active_work(mock_agent)
+
+        assert summary.active_task_count == 1
+        assert summary.recent_tasks[0]["status"] == "queued"
+
     def test_has_active_tasks(self, mock_agent, mock_paths, sample_board):
         """测试有活跃任务时的返回值。"""
         # 创建 pid 和 state 文件
@@ -177,9 +194,9 @@ class TestDetectActiveWork:
         mock_paths.state.write_text('{"status": "running"}')
         # 创建 processing 目录和文件
         mock_paths.processing.mkdir(parents=True)
-        (mock_paths.processing / "req-001.json").write_text("{}")
-        (mock_paths.processing / "req-002.json").write_text("{}")
-        (mock_paths.processing / "req-003.json").write_text("{}")
+        (mock_paths.processing / "req-001.json").write_text('{"id":"req-001","lease_heartbeat_at":1}')
+        (mock_paths.processing / "req-002.json").write_text('{"id":"req-002","lease_heartbeat_at":1}')
+        (mock_paths.processing / "req-003.json").write_text('{"id":"req-003","lease_heartbeat_at":1}')
 
         mock_agent.subagents.build_board.return_value = Mock(
             hot_list=[], recent=[], summary={}
@@ -202,7 +219,7 @@ class TestDetectActiveWork:
         mock_paths.state.write_text('{"status": "running"}')
         # 创建 processing 目录和文件
         mock_paths.processing.mkdir(parents=True)
-        (mock_paths.processing / "req-001.json").write_text("{}")
+        (mock_paths.processing / "req-001.json").write_text('{"id":"req-001","lease_heartbeat_at":1}')
 
         mock_agent.subagents.build_board.return_value = sample_board
 
@@ -457,7 +474,7 @@ class TestIntegrationScenarios:
         mock_paths.state.write_text('{"status": "running"}')
         # 创建 processing 目录和文件
         mock_paths.processing.mkdir(parents=True)
-        (mock_paths.processing / "req-001.json").write_text("{}")
+        (mock_paths.processing / "req-001.json").write_text('{"id":"req-001","lease_heartbeat_at":1}')
 
         mock_agent.subagents.build_board.return_value = sample_board
 

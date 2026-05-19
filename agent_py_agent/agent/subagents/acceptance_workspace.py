@@ -24,6 +24,8 @@ def acceptance_workspace_root_for_task(
     scoped = _roots_containing_refs(roots, refs)
     if scoped:
         return scoped[0]
+    if fallback := _fallback_root_from_refs(refs):
+        return fallback
     return roots[0]
 
 
@@ -88,6 +90,40 @@ def _runtime_ref(value: object, task_dir: Path | None) -> bool:
 def _roots_containing_refs(roots: list[Path], refs: list[Path]) -> list[Path]:
     matches = [root for root in roots if any(_path_under(ref, root) for ref in refs)]
     return sorted(matches, key=lambda item: len(str(item)), reverse=True)
+
+
+# LLM: _fallback_root_from_refs is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _fallback_root_from_refs(refs: list[Path]) -> Path | None:
+    dirs = [_artifact_dir(ref) for ref in refs]
+    dirs = [item for item in dirs if item is not None]
+    if not dirs:
+        return None
+    common = Path(str(dirs[0]))
+    for item in dirs[1:]:
+        common = _common_parent(common, item)
+    return common
+
+
+# LLM: _artifact_dir is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _artifact_dir(path: Path) -> Path | None:
+    if path.suffix:
+        return path.parent
+    return path
+
+
+# LLM: _common_parent is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _common_parent(left: Path, right: Path) -> Path:
+    left_parts = left.parts
+    right_parts = right.parts
+    shared: list[str] = []
+    for left_part, right_part in zip(left_parts, right_parts, strict=False):
+        if left_part != right_part:
+            break
+        shared.append(left_part)
+    return Path(*shared) if shared else left.anchor and Path(left.anchor) or left
 
 
 # LLM: _append_path_ref normalizes literal paths while ignoring empty or URL-like values.

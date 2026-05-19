@@ -177,8 +177,12 @@ def _recommended_action(
 ) -> str:
     if no_progress_fuse:
         return "stop_no_progress_and_escalate"
+    if _needs_artifact_integrity_repair(task):
+        return "create_repair_child_from_artifact_integrity_refs"
     if _needs_leadership_recovery(task):
         return "recover_coordinator_leadership"
+    if packet.status == "ready" and _should_continue_dead_runner(task):
+        return "rerun_original_from_continue_packet"
     if _needs_takeover(task):
         return _takeover_action(packet)
     if packet.status == "ready" and _is_recoverable(task):
@@ -204,6 +208,12 @@ def _runner_instruction(
         return (
             "coordinator/lead 已失联或失败：请调用 subagents-leadership-recovery-plan 选择新 leader，"
             "再分批接管其 child_run_ids，不要重复重启失联 coordinator。"
+        )
+    if action == "create_repair_child_from_artifact_integrity_refs":
+        return (
+            "产物完整性失败：不要继续原 run，也不要从头重做任务；"
+            "请创建 scoped repair worker，只读取 artifact_refs/blockers/latest_tool_progress，"
+            "修复列出的产物文件后重新运行 artifact_integrity 和父级验收。"
         )
     if action.startswith("create_takeover_run"):
         return _takeover_instruction(task, packet, fallback_refs)
@@ -318,7 +328,50 @@ def _needs_leadership_recovery(task: SubAgentTask) -> bool:
 # LLM: _needs_takeover detects dead worker-style runs that should be replaced.
 # 函数用途: 超时、断通道或 runner_timeout 时建议接管 run，而不是重复唤醒挂死 run。
 def _needs_takeover(task: SubAgentTask) -> bool:
+    if _is_artifact_integrity_repair_task(task) and _is_recoverable(task):
+        return True
     return _is_dead(task) and not _needs_leadership_recovery(task)
+
+
+# LLM: _needs_artifact_integrity_repair is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _needs_artifact_integrity_repair(task: SubAgentTask) -> bool:
+    if _is_artifact_integrity_repair_task(task):
+        return False
+    failure_type = task_text(task, "failure_type").lower()
+    if failure_type == "artifact_integrity_failed":
+        return True
+    return any("artifact_integrity_failed:" in str(item or "") for item in task_list(task, "blockers"))
+
+
+# LLM: _is_artifact_integrity_repair_task is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _is_artifact_integrity_repair_task(task: SubAgentTask) -> bool:
+    attrs = getattr(task, "attributes", {}) or {}
+    return isinstance(attrs, dict) and attrs.get("repair_kind") == "artifact_integrity"
+
+
+# LLM: _should_continue_dead_runner keeps same-run retry away from timed-out or broken workers.
+# 函数用途: 只允许非死锁的临时失败原地重试；超时/断通道必须走 takeover 或其他恢复动作。
+def _should_continue_dead_runner(task: SubAgentTask) -> bool:
+    if not _is_recoverable(task):
+        return False
+    status = task_status(task)
+    if status in {"TIMEOUT", "CHANNEL_ERROR"}:
+        return False
+    if str(getattr(task, "channel_status", "") or "").upper() == "BROKEN":
+        return False
+    failure_type = task_text(task, "failure_type").lower()
+    if failure_type in {"runner_timeout", "provider_timeout", "channel_error", "runner_channel_failed"}:
+        return False
+    return status in {"FAILED", "BLOCKED", "ERROR"} and failure_type in {
+        "",
+        "runner_error",
+        "model_error",
+        "tool_failure",
+        "structured_output_parse_error",
+        "unknown",
+    }
 
 
 # LLM: _is_dead classifies statuses and failure types that imply the old process is gone.
@@ -326,7 +379,12 @@ def _needs_takeover(task: SubAgentTask) -> bool:
 def _is_dead(task: SubAgentTask) -> bool:
     status = task_status(task)
     failure_type = task_text(task, "failure_type").lower()
-    return status in _DEAD_STATUSES or failure_type in {"runner_timeout", "channel_error", "runner_channel_failed"}
+    return status in _DEAD_STATUSES or failure_type in {
+        "runner_timeout",
+        "channel_error",
+        "runner_channel_failed",
+        "provider_timeout",
+    }
 
 
 # LLM: _is_recoverable keeps retry logic scoped to known incomplete states.

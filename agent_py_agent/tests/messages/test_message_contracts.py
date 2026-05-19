@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+
 from agent_py_agent.agent.messages import MessageStore, MessageTarget, MessageTool
 
 
@@ -40,6 +44,30 @@ def test_delivery_idempotency_prevents_duplicate_inbox_rows(tmp_path):
     inbox = tool.read_inbox(target)
     assert len(inbox) == 1
     assert inbox[0].content == "done"
+
+
+def test_concurrent_idempotent_delivery_creates_one_message(tmp_path):
+    tool = MessageTool(MessageStore(tmp_path))
+    target = MessageTarget(kind="session", identifier="sess-b")
+
+    def send_once(index: int):
+        return tool.send_message(
+            sender=MessageTarget(kind="task", identifier=f"task-{index}"),
+            target=target,
+            content=f"done {index}",
+            idempotency_key="task-1:complete:route-1",
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        messages = list(pool.map(send_once, range(20)))
+
+    assert len({message.message_id for message in messages}) == 1
+    assert len(tool.read_inbox(target)) == 1
+
+
+def test_message_target_rejects_empty_identifier():
+    with pytest.raises(ValueError, match="invalid message target"):
+        MessageTarget.parse("session:")
 
 
 def test_ack_message_marks_delivery_read(tmp_path):

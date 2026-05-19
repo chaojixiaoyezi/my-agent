@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
+from ..subagents.role_contracts import normalize_subagent_role
 from ..subagents.role_templates import role_template_id_for_role
 from ..subagents.services.base import CreateRunParams
 from .coordinator_seed_tools import explicit_root_allowed_tools
@@ -30,6 +32,9 @@ def create_run_params(
     workflow_mode = _tool_workflow_mode(raw_params.get("workflow_mode"), agent.config.subagent_workflow_mode)
     role = _role_from_create_intent(raw_params, goal, agent)
     is_explicit_root = is_explicit_root_role(role)
+    context_manifest = create_context_manifest(raw_params)
+    context_packs = create_context_packs(raw_params)
+    parent_id, root_id, depth = _lineage_from_params_or_repair_contract(agent, raw_params, context_packs)
     if is_explicit_root:
         workflow_mode = "off"
         allowed_tools = explicit_root_allowed_tools(allowed_tools)
@@ -41,25 +46,66 @@ def create_run_params(
         plan=_create_plan(raw_params),
         agent_name=_root_agent_name(raw_params, role),
         role=role,
+        parent_id=parent_id,
+        root_id=root_id,
+        depth=depth,
         allowed_tools=allowed_tools,
         owner=str(raw_params.get("owner") or "").strip(),
         supervisor=str(raw_params.get("supervisor") or "parent").strip(),
         final_owner=str(raw_params.get("final_owner") or "").strip(),
         acceptance_checks=_string_list(raw_params.get("acceptance_checks")),
         extra_write_roots=resolved_extra_write_roots(agent, raw_params, goal),
-        context_manifest=create_context_manifest(raw_params),
-        context_packs=create_context_packs(raw_params),
+        context_manifest=context_manifest,
+        context_packs=context_packs,
         workflow_mode=workflow_mode,
         attributes=_create_attributes(raw_params),
     )
 
 
+# LLM: repair create calls inherit failed-run lineage from machine repair contracts.
+# 函数用途: 顶层 root 用 create_subagents 创建修复任务时，自动挂到失败 run 下，避免形成重复 root。
+def _lineage_from_params_or_repair_contract(agent, raw_params: dict[str, object], context_packs: list[dict[str, object]]):
+    parent_id = str(raw_params.get("parent_id") or "").strip()
+    root_id = str(raw_params.get("root_id") or "").strip()
+    depth = _positive_int(raw_params.get("depth"), default=0)
+    if parent_id:
+        return parent_id, root_id, depth
+    failed_run_id = _single_repair_failed_run_id(context_packs)
+    if not failed_run_id:
+        return "", root_id, depth
+    try:
+        failed = agent.subagents.load(failed_run_id)
+    except (AttributeError, FileNotFoundError, OSError, TypeError, ValueError):
+        return "", root_id, depth
+    return (
+        failed_run_id,
+        str(getattr(failed, "root_id", "") or getattr(failed, "id", "") or ""),
+        int(getattr(failed, "depth", 0) or 0) + 1,
+    )
+
+
+# LLM: only explicit repair_contract.failed_run_ids may drive repair lineage.
+# 函数用途: 从 context_packs 的结构化合同读取单一失败 run；不从 goal 文本猜父子关系。
+def _single_repair_failed_run_id(context_packs: list[dict[str, object]]) -> str:
+    for pack in context_packs:
+        contract = pack.get("contract") if isinstance(pack, dict) else None
+        if not _is_repair_contract(contract):
+            continue
+        failed_ids = _string_list(contract.get("failed_run_ids"))
+        return failed_ids[0] if len(failed_ids) == 1 else ""
+    return ""
+
+
+# LLM: _is_repair_contract is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _is_repair_contract(contract: Any) -> bool:
+    return isinstance(contract, dict) and str(contract.get("schema") or "") == "subagent_repair_contract.v1"
+
+
 # LLM: _role_from_create_intent repairs structured-argument slips before workflow expansion.
 # 函数用途: 只按 role、agent_name 和 tasks 这类结构化参数纠偏；不从 goal/用户 prompt 的自然语言猜角色。
 def _role_from_create_intent(raw_params: dict[str, object], goal: str, agent) -> str:
-    role = str(raw_params.get("role") or "worker").strip() or "worker"
-    if _role_field_is_lineage_agent_name(role):
-        return _role_from_lineage_agent_name(role)
+    role = _structured_role_token(raw_params.get("role"))
     if is_explicit_root_role(role):
         return role
     if _json_task_items(raw_params.get("tasks")):
@@ -83,6 +129,25 @@ def _has_child_dispatch_tool(raw_params: dict[str, object]) -> bool:
 def _role_identity_is_quality(raw_params: dict[str, object]) -> bool:
     identity = f"{raw_params.get('role') or ''} {raw_params.get('agent_name') or ''}"
     return role_template_id_for_role(identity, fallback="") in {"tester", "bug_finder", "acceptor"}
+
+
+# LLM: _structured_role_token normalizes role as a protocol field, not as display prose.
+# 函数用途: role 只接受 ASCII 机器 token；带展示前缀的值只可通过其中模板 id 恢复，中文职责不参与判断。
+def _structured_role_token(value: object) -> str:
+    text = str(value or "worker").strip() or "worker"
+    normalized = normalize_subagent_role(text)
+    cleaned = normalized.strip().lower().replace("-", "_")
+    if _is_ascii_role_token(cleaned):
+        return cleaned
+    template_role = role_template_id_for_role(cleaned, fallback="")
+    return template_role or "worker"
+
+
+# LLM: _is_ascii_role_token is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _is_ascii_role_token(value: str) -> bool:
+    allowed = set("abcdefghijklmnopqrstuvwxyz0123456789_")
+    return bool(value) and all(ch in allowed for ch in value)
 
 
 # LLM: _should_disable_generic_workflow_for_concrete_worker prevents simple deliverable workers from growing workflow children.
@@ -118,6 +183,9 @@ def _create_attributes(raw_params: dict[str, object]) -> dict[str, object]:
         value = raw_params.get(key)
         if isinstance(value, dict) and key not in attrs:
             attrs[key] = dict(value)
+    for key in _BOOL_ATTRIBUTE_FIELDS:
+        if key in raw_params and key not in attrs:
+            attrs[key] = _bool_attribute(raw_params.get(key))
     return attrs
 
 
@@ -141,6 +209,7 @@ _LIST_ATTRIBUTE_FIELDS = (
     "workflow_risk_tags",
 )
 _MAPPING_ATTRIBUTE_FIELDS = ("required_content_files",)
+_BOOL_ATTRIBUTE_FIELDS = ("require_script",)
 _SCALAR_ATTRIBUTE_FIELDS = (
     "preferred_workflow_template",
     "subagent_workflow_template",
@@ -149,20 +218,14 @@ _SCALAR_ATTRIBUTE_FIELDS = (
 )
 
 
-# LLM: _role_field_is_lineage_agent_name catches display names leaked into structured role.
-# 函数用途: 判断模型是否把“小傻妞-xxx”这类代理名字误填进 role 字段。
-def _role_field_is_lineage_agent_name(role: str) -> bool:
-    text = str(role or "").strip()
-    return "小傻妞" in text
-
-
-# LLM: _role_from_lineage_agent_name maps leaked display names through template ids.
-# 函数用途: 把带层级前缀的代理名字按模板 id 还原成标准 role；不按中文职责词猜。
-def _role_from_lineage_agent_name(role: str) -> str:
-    text = str(role or "").strip().lower().replace("-", "_")
-    parts = [part for part in text.split("_") if part and part not in {"小傻妞", "小小傻妞", "agent", "subagent"}]
-    template_role = role_template_id_for_role("_".join(parts), fallback="")
-    return template_role or "worker"
+# LLM: _bool_attribute is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _bool_attribute(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return value == 1
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 # LLM: _root_agent_name gives top-level spawned agents the same lineage naming contract as descendants.
@@ -171,22 +234,10 @@ def _root_agent_name(raw_params: dict[str, object], role: str) -> str:
     explicit = str(raw_params.get("agent_name") or "").strip().strip("-")
     if explicit:
         return explicit
-    role_name = _agent_name_from_role_field(raw_params)
-    if role_name:
-        return role_name
     suffix = str(role or "worker").strip().replace("_", "-").strip("-") or "worker"
     if suffix in {"general", "child"}:
         suffix = "worker"
     return f"小傻妞-{suffix}"
-
-
-# LLM: _agent_name_from_role_field preserves user-facing lineage names when the model used role wrongly.
-# 函数用途: 如果 role 字段里其实是“小傻妞-xxx”显示名，就转存为 agent_name。
-def _agent_name_from_role_field(raw_params: dict[str, object]) -> str:
-    role_text = str(raw_params.get("role") or "").strip().strip("-")
-    if not _role_field_is_lineage_agent_name(role_text):
-        return ""
-    return role_text.replace("_", "-")
 
 
 # LLM: _create_plan prevents global batch plans from leaking into every item child.

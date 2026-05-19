@@ -69,6 +69,7 @@ from .capability.runtime_config import default_capability_config_path
 from .config import AgentConfig
 from .local_store import LocalStore
 from .memory import JsonlMemory
+from .messages import MessageRuntimeTool
 from .prompting import PromptBuilder
 from .subagent import SubAgentManager
 from .tooling.registry import ToolRegistry, ToolRegistryParams
@@ -162,6 +163,8 @@ class SimpleAgent(
         self.prompts = PromptBuilder(config, self.root, home_paths=self.home_paths)
         self.backend = get_backend(config.model_backend, config)
         self.subagents = _build_subagent_manager(self, paths)
+        self.runtime_cards_root = Path(paths["memory_path"]).parent / "runtime" / "cards"
+        self.runtime_messages_root = Path(paths["memory_path"]).parent / "runtime" / "messages"
         self.tools = _build_tool_registry(self, config)
         _register_orchestration_tools(self)
 
@@ -234,6 +237,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
 # LLM: _register_orchestration_tools 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
 # 函数用途: 把创建子代理、看板和 dispatch 编排工具注册到主代理工具表。
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
+    agent.tools.register(MessageRuntimeTool(agent.runtime_messages_root))
     agent.tools.register(CreateSubagentsTool(agent))
     agent.tools.register(CapabilityRequestTool(agent))
     agent.tools.register(CapabilityConfigPatchTool(agent))

@@ -6,6 +6,8 @@ from ..cards import (
     CardStore,
     NotificationRouteCard,
     ProgressPolicyCard,
+    SessionCard,
+    SubagentRunCard,
     TaskCard,
     TaskStatus,
     new_card_id,
@@ -120,3 +122,161 @@ class TaskRuntime:
     # 函数用途: 列出当前 queued 状态任务。
     def list_queued_tasks(self) -> list[TaskCard]:
         return [task for task in self.cards.list_tasks() if task.status == TaskStatus.QUEUED]
+
+    # LLM: spawn_subagent_session creates an OpenClaw-style child session backed by cards and inbox messages.
+    # 函数用途: 创建子代理 session、子任务、运行记录和初始任务消息，并按结构化层级限制派生。
+    def spawn_subagent_session(
+        self,
+        *,
+        requester_session_id: str,
+        parent_task_id: str,
+        goal: str,
+        label: str = "",
+        mode: str = "run",
+        context_mode: str = "isolated",
+        cleanup: str = "keep",
+        max_spawn_depth: int = 2,
+    ) -> SubagentRunCard:
+        parent_session = self.cards.get_session(requester_session_id)
+        parent_task = self.cards.get_task(parent_task_id)
+        parent_depth = int(parent_session.metadata.get("spawn_depth") or 0)
+        max_depth = max(1, int(max_spawn_depth))
+        if parent_depth >= max_depth:
+            raise ValueError("subagent spawn depth exceeded")
+        child_depth = parent_depth + 1
+        child_role = "leaf" if child_depth >= max_depth else "orchestrator"
+        child_control_scope = "none" if child_role == "leaf" else "children"
+        child_session_id = new_card_id("subagent_session")
+        child_session = SessionCard(
+            session_id=child_session_id,
+            user_id=parent_session.user_id,
+            channel="subagent",
+            metadata={
+                "parent_session_id": requester_session_id,
+                "parent_task_id": parent_task_id,
+                "label": label,
+                "mode": mode,
+                "context_mode": context_mode,
+                "spawn_depth": child_depth,
+                "subagent_role": child_role,
+                "subagent_control_scope": child_control_scope,
+                "max_spawn_depth": max_depth,
+            },
+        )
+        self.cards.save_session(child_session)
+        child_task = self.cards.create_task(
+            goal=goal,
+            user_id=parent_task.user_id,
+            session_id=child_session_id,
+            acceptance=parent_task.acceptance,
+            parent_task_id=parent_task_id,
+            metadata={
+                "worker_tier": "weak_subagent",
+                "subagent_label": label,
+                "parent_session_id": requester_session_id,
+                "context_mode": context_mode,
+            },
+        )
+        self.cards.attach_task_to_session(child_session_id, child_task.task_id)
+        run = self.cards.create_subagent_run(
+            requester_session_id=requester_session_id,
+            child_session_id=child_session_id,
+            task_id=child_task.task_id,
+            goal=goal,
+            controller_session_id=requester_session_id,
+            label=label,
+            mode=mode,
+            context_mode=context_mode,
+            cleanup=cleanup,
+            expects_completion_message=True,
+            metadata={
+                "parent_task_id": parent_task_id,
+                "user_id": parent_task.user_id,
+                "spawn_depth": child_depth,
+                "subagent_role": child_role,
+                "subagent_control_scope": child_control_scope,
+                "max_spawn_depth": max_depth,
+            },
+        )
+        self.messages.send_message(
+            sender=MessageTarget(kind="session", identifier=requester_session_id),
+            target=MessageTarget(kind="session", identifier=child_session_id),
+            content=goal,
+            task_id=child_task.task_id,
+            message_type="task_assignment",
+            idempotency_key=f"{run.run_id}:task_assignment",
+            metadata={
+                "run_id": run.run_id,
+                "parent_task_id": parent_task_id,
+                "context_mode": context_mode,
+            },
+        )
+        return run
+
+    # LLM: send_to_subagent routes parent steer/follow-up messages to a child session inbox.
+    # 函数用途: 根据 run_id 给子代理 session 发送结构化消息，避免靠共享文本状态追踪。
+    def send_to_subagent(
+        self,
+        *,
+        run_id: str,
+        message: str,
+        message_type: str = "message",
+    ):
+        run = self.cards.get_subagent_run(run_id)
+        return self.messages.send_message(
+            sender=MessageTarget(kind="session", identifier=run.requester_session_id),
+            target=MessageTarget(kind="session", identifier=run.child_session_id),
+            content=message,
+            task_id=run.task_id,
+            message_type=message_type,
+            idempotency_key=f"{run_id}:{message_type}:{message}",
+            metadata={"run_id": run_id, "child_session_id": run.child_session_id},
+        )
+
+    # LLM: complete_subagent_run records child outcome and delivers the final result back to the parent session.
+    # 函数用途: 标记子代理完成、发送最终交付消息并清除 pending_final_delivery。
+    def complete_subagent_run(
+        self,
+        run_id: str,
+        *,
+        outcome: str,
+        artifact_refs: list[str] | None = None,
+        summary: str = "",
+    ) -> SubagentRunCard:
+        completed = self.cards.mark_subagent_completed(
+            run_id,
+            outcome=outcome,
+            artifact_refs=artifact_refs,
+            pending_final_delivery=True,
+        )
+        target = MessageTarget(kind="session", identifier=completed.requester_session_id)
+        self.messages.send_message(
+            sender=MessageTarget(kind="session", identifier=completed.child_session_id),
+            target=target,
+            content=summary or f"Subagent completed: {completed.label or completed.child_session_id}",
+            task_id=completed.task_id,
+            message_type="subagent_completion",
+            idempotency_key=f"{run_id}:subagent_completion",
+            metadata={
+                "run_id": run_id,
+                "child_session_id": completed.child_session_id,
+                "outcome": outcome,
+                "artifact_refs": list(artifact_refs or []),
+            },
+        )
+        return self.cards.mark_subagent_final_delivered(run_id)
+
+    # LLM: kill_subagent_run implements the parent control-plane kill action for child sessions.
+    # 函数用途: 终止子代理运行记录，并向子 session 投递 kill 控制消息。
+    def kill_subagent_run(self, run_id: str, *, reason: str = "") -> SubagentRunCard:
+        killed = self.cards.mark_subagent_killed(run_id, reason=reason)
+        self.messages.send_message(
+            sender=MessageTarget(kind="session", identifier=killed.requester_session_id),
+            target=MessageTarget(kind="session", identifier=killed.child_session_id),
+            content=reason or "Subagent run was killed by the controller.",
+            task_id=killed.task_id,
+            message_type="kill",
+            idempotency_key=f"{run_id}:kill",
+            metadata={"run_id": run_id, "reason": reason},
+        )
+        return killed

@@ -48,8 +48,8 @@ class TestWriteFileTool:
         assert str(MAX_INLINE_WRITE_CONTENT_CHARS) in tool.spec.parameter_details["content"]
 
     # LLM: The inline write threshold is a model-facing recommendation; valid parsed content must not be discarded.
-    # 函数用途: 固定 write_file 推荐 inline 尺寸；超过推荐值时仍写入并提示后续分块。
-    def test_write_file_allows_trial_12k_inline_content(self, tmp_path: Path):
+    # 函数用途: 验证历史 12K 级合法内容仍会落盘，同时按当前推荐上限提示后续分块。
+    def test_write_file_allows_legacy_12k_inline_content(self, tmp_path: Path):
         from agent_py_agent.agent.tooling.filesystem_write import WriteFileTool
 
         workspace = tmp_path / "workspace"
@@ -61,8 +61,9 @@ class TestWriteFileTool:
             "content": "A" * 12_000,
         })
 
-        assert MAX_INLINE_WRITE_CONTENT_CHARS == 12_000
+        assert MAX_INLINE_WRITE_CONTENT_CHARS < 12_000
         assert result.ok is True
+        assert "inline content 超过推荐值" in result.output
         assert (workspace / "site" / "style.css").read_text() == "A" * 12_000
 
     # LLM: Per-tool inline write limits guide future model behavior without dropping already parsed content.

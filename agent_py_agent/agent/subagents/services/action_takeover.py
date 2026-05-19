@@ -40,6 +40,7 @@ def apply_takeover_or_reassign(service, action, task, ctx: ActionHandlerContext)
 def _apply_takeover_run(service, action, task, ctx: ActionHandlerContext):
     from .takeover_run import TakeoverRunRequest
 
+    _mark_abandoned_attempt_before_takeover(service, action, task)
     result = service.manager.create_takeover_run(
         TakeoverRunRequest(source_run_id=action.run_id, reason=action.reason)
     )
@@ -54,6 +55,7 @@ def _apply_takeover_run(service, action, task, ctx: ActionHandlerContext):
             ctx.before_channel_status,
             message,
             evidence_paths=_takeover_action_evidence(service, task, result),
+            created_run_ids=[result.takeover_run_id] if result.takeover_run_id else [],
         )
     )
 
@@ -153,6 +155,7 @@ def _needs_coordinator_handoff_action(task) -> bool:
         "runner_timeout",
         "channel_error",
         "runner_channel_failed",
+        "provider_timeout",
     }
 
 
@@ -160,7 +163,9 @@ def _needs_coordinator_handoff_action(task) -> bool:
 # 函数用途: 超时/断通道/runner_timeout 应创建新 run 继承 refs；普通手动 reassign 仍走显式 take_over_by。
 def _should_create_takeover_run(action, task) -> bool:
     triggers = {item for item in str(getattr(action, "rescue_trigger", "") or "").split(",") if item}
-    if triggers & {"run_timeout", "heartbeat_stale", "status_timeout"}:
+    if triggers & {"run_timeout", "heartbeat_stale", "status_timeout", "status_provider_timeout"}:
+        return True
+    if triggers & {"artifact_repair_failed", "parent_acceptance_repair_failed"}:
         return True
     status = str(getattr(task, "status", "") or "").upper()
     failure_type = str(getattr(task, "failure_type", "") or "").lower()
@@ -168,7 +173,35 @@ def _should_create_takeover_run(action, task) -> bool:
         "runner_timeout",
         "channel_error",
         "runner_channel_failed",
+        "provider_timeout",
     }
+
+
+# LLM: stale RUNNING takeover first closes the active attempt so replacement work cannot race a ghost runner.
+# 函数用途: gateway/worker 进程被杀时，RUNNING 会残留 active attempt；接管前先记录 TIMEOUT 并废弃 attempt。
+def _mark_abandoned_attempt_before_takeover(service, action, task) -> None:
+    active_attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
+    if not active_attempt_id:
+        return
+    triggers = {item for item in str(getattr(action, "rescue_trigger", "") or "").split(",") if item}
+    if not triggers & {"run_timeout", "heartbeat_stale", "status_timeout", "status_provider_timeout"}:
+        return
+    from ..manager_runner_result_payload import RecordRunnerResultParams
+
+    message = f"active runner attempt abandoned before takeover: {active_attempt_id}"
+    service.manager.record_runner_result(
+        RecordRunnerResultParams(
+            run_id=task.id,
+            attempt_id=active_attempt_id,
+            dry_run=False,
+            ok=False,
+            message=message,
+            status="TIMEOUT",
+            verification_status="UNVERIFIED",
+            failure_type="runner_timeout",
+        )
+    )
+    service.manager.abandon_runner_attempt(task.id, active_attempt_id, reason=message)
 
 
 # LLM: _takeover_action_evidence keeps source and takeover refs visible in the apply record.

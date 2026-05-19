@@ -32,6 +32,8 @@ class MessageTarget:
     @classmethod
     def parse(cls, value: str) -> MessageTarget:
         kind, _, identifier = value.partition(":")
+        if not kind.strip() or not identifier.strip():
+            raise ValueError(f"invalid message target: {value}")
         return cls(kind=kind, identifier=identifier)
 
 

@@ -20,6 +20,31 @@ def test_html_acceptance_flags_placeholder_links(tmp_path):
     assert any(item.code == "HTML_PLACEHOLDER_LINK" for item in report.findings)
 
 
+# LLM: JS-driven anchors can be valid controls even when they do not use href navigation.
+# 函数用途: 避免把 onclick/role=button 的真实交互 a 标签误判成空 href 占位链接。
+def test_html_acceptance_allows_js_driven_anchor_controls(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_html_artifact,
+    )
+
+    path = tmp_path / "index.html"
+    path.write_text(
+        (
+            "<html><body>"
+            "<a onclick=\"showSection('login')\">登录</a>"
+            "<a role=\"button\" onclick=\"showSection('register')\">注册</a>"
+            "</body></html>"
+        ),
+        encoding="utf-8",
+    )
+
+    report = validate_html_artifact(ArtifactAcceptanceRequest(path=path))
+
+    assert report.ok is True
+    assert not any(item.code == "HTML_PLACEHOLDER_LINK" for item in report.findings)
+
+
 # LLM: HTML validator should distinguish image refs from unrelated external resources like fonts.
 # 函数用途: 验证 HTML 图片坏链风险会被标记，但 Google Fonts 这类非图片链接不会误判为图片坏链。
 def test_html_acceptance_flags_external_images_without_flagging_fonts(tmp_path):

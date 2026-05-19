@@ -4,10 +4,13 @@ from __future__ import annotations
 # 模块用途: 验证主代理复杂任务测试入口、隔离配置和真实产物 gate。
 from types import SimpleNamespace
 
+import pytest
+
 from scripts.live_lab.constants import REAL_CASES, SUITES
 from scripts.live_lab.main_agent_artifact_case import (
     _assert_artifact_readback_report,
     _assert_compact_resume_roundtrip_payload,
+    _main_artifact_readback_delivery_contract,
     _main_artifact_readback_prompt,
 )
 from scripts.live_lab.main_agent_complex_case import (
@@ -16,6 +19,7 @@ from scripts.live_lab.main_agent_complex_case import (
     _assert_tool_recovery_report,
     _ensure_main_agent_only,
     _main_direct_web_app_prompt,
+    _main_large_log_delivery_contract,
     _main_large_log_prompt,
     _main_tool_failure_prompt,
 )
@@ -41,6 +45,9 @@ def test_main_complex_case_is_registered_as_real_opt_in_suite():
         "main_large_log_audit",
     ]
     assert SUITES["main-artifact"] == ["health", "main_artifact_readback", "main_compact_resume_roundtrip"]
+    assert SUITES["main-log"] == ["health", "main_large_log_audit"]
+    assert SUITES["main-tool"] == ["health", "main_tool_failure_recovery"]
+    assert SUITES["main-web"] == ["health", "main_direct_web_app"]
     assert {
         "main_direct_web_app",
         "main_tool_failure_recovery",
@@ -53,6 +60,13 @@ def test_main_complex_case_is_registered_as_real_opt_in_suite():
         assert "dispatch" not in prompt.lower()
         assert "runner" not in prompt.lower()
         assert "contract" not in prompt.lower()
+    web_prompt = _main_direct_web_app_prompt()
+    assert "Logo" in web_prompt
+    assert "href=\"#\"" in web_prompt
+    assert "精简但完整" in web_prompt
+    assert "不要反复扩写" in web_prompt
+    assert "不要反复读取文件正文" in web_prompt
+    assert "立刻汇报" in web_prompt
 
 
 # LLM: Main-complex cases append isolation overrides without mutating the source config.
@@ -67,6 +81,7 @@ def test_main_complex_config_disables_subagents_in_isolated_config(tmp_path):
         real_llm=False,
         count=1,
         timeout=180,
+        capability_config=str(tmp_path / "missing_capability_config.yaml"),
     )
     session = LabSessionManager(args)
     session.setup()
@@ -81,6 +96,26 @@ def test_main_complex_config_disables_subagents_in_isolated_config(tmp_path):
     assert source.read_text(encoding="utf-8") == "model_backend: echo\nenable_subagents: true\n"
 
 
+def test_main_large_log_case_has_delivery_contract(tmp_path):
+    lab = SimpleNamespace(run_root=tmp_path / "run", log=lambda _message: None)
+
+    contract = _main_large_log_delivery_contract(lab)
+
+    text = contract.read_text(encoding="utf-8")
+    assert "large-log-audit-report" in text
+    assert "lab_outputs/large-log-audit/report.md" in text
+
+
+def test_main_artifact_readback_case_has_delivery_contract(tmp_path):
+    lab = SimpleNamespace(run_root=tmp_path / "run", log=lambda _message: None)
+
+    contract = _main_artifact_readback_delivery_contract(lab)
+
+    text = contract.read_text(encoding="utf-8")
+    assert "artifact-readback-report" in text
+    assert "lab_outputs/artifact-readback/report.md" in text
+
+
 # LLM: Main-complex artifact gates should inspect concrete root-agent outputs.
 # 函数用途: 确认主代理复杂测试的 Web、恢复报告和大日志报告验收都不相信口头回复。
 def test_main_complex_artifact_gates_accept_complete_outputs(tmp_path):
@@ -89,6 +124,24 @@ def test_main_complex_artifact_gates_accept_complete_outputs(tmp_path):
     _write_artifact_readback_report(tmp_path)
     _assert_compact_resume_roundtrip_payload(_compact_apply_payload(), _compact_resume_payload())
     _write_large_log_report(tmp_path)
+
+
+# LLM: The artifact gate must reject reports that keep anchors but swap the source evidence.
+# 函数用途: 复现真实模型把家具库存证据串成轮胎风险时，验收不能误判通过。
+def test_artifact_readback_gate_rejects_anchor_only_hallucinated_report(tmp_path):
+    report = tmp_path / "lab_outputs" / "artifact-readback" / "report.md"
+    report.parent.mkdir(parents=True)
+    report.write_text(
+        "报告证明读取了 ALPHA-ANCHOR、OMEGA-ANCHOR 和 TRACE-ARTIFACT-991。\n"
+        "ALPHA-ANCHOR 说明某型号轮胎在华南雨季存在打滑风险，已在前期检测报告中记录。\n"
+        "OMEGA-ANCHOR 说明线上预约系统在周末高峰出现排队延迟，影响客户到店体验。\n"
+        "TRACE-ARTIFACT-991 说明售后回访里反复出现同一批次沙发面料色差反馈。\n"
+        "下一步建议分别召回轮胎、优化预约系统、抽检对应批次。",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="缺少源文件事实片段"):
+        _assert_artifact_readback_report(report)
 
 
 # LLM: _write_complete_web_app builds a compact valid multi-file site fixture.
@@ -106,7 +159,8 @@ def _write_complete_web_app(tmp_path) -> None:
     (web_root / "app.js").write_text("document.addEventListener('click', function () {});\n", encoding="utf-8")
     (web_root / "README.md").write_text(
         "文件包含 index.html、styles.css 和 app.js。\n"
-        "页面锚点包含 `#showroom`。\n",
+        "页面锚点包含 `#showroom`。\n"
+        "颜色变量包含 `#FAFAF8`，这不是页面锚点。\n",
         encoding="utf-8",
     )
     _assert_main_web_app_output(web_root)
@@ -132,9 +186,10 @@ def _write_artifact_readback_report(tmp_path) -> None:
     report.parent.mkdir(parents=True)
     report.write_text(
         "报告证明读取了 ALPHA-ANCHOR、OMEGA-ANCHOR 和 TRACE-ARTIFACT-991。\n"
-        "ALPHA-ANCHOR 说明北区门店库存偏低，风险是新品展示不足。\n"
-        "OMEGA-ANCHOR 说明预约系统周末排队延迟，风险是客户到店体验下降。\n"
-        "TRACE-ARTIFACT-991 说明售后回访里有面料色差反馈，风险是同批次质量问题扩大。\n"
+        "ALPHA-ANCHOR 说明北区门店的高端家具库存连续三周偏低，风险是影响新品展示。\n"
+        "OMEGA-ANCHOR 说明线上预约系统在周末高峰出现排队延迟，风险是客户到店体验下降。\n"
+        "TRACE-ARTIFACT-991 说明售后回访里反复出现同一批次沙发面料色差反馈，"
+        "风险是同批次质量问题扩大。\n"
         "下一步建议分别核对库存、排查预约峰值、抽检对应批次。",
         encoding="utf-8",
     )

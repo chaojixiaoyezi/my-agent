@@ -14,6 +14,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = REPO_ROOT / "agent_py_agent" / "config" / "agent_config.yaml"
+DEFAULT_CAPABILITY_CONFIG = REPO_ROOT / "agent_py_agent" / "config" / "capability_config.yaml"
 DEFAULT_RUNS_DIR = REPO_ROOT / "validation" / "live_lab"
 
 # Suite map is part of the public Live Lab CLI contract; keep docs/modules/live-lab in sync when it changes.
@@ -31,6 +32,10 @@ SUITES = {
     "file-repair": ["health", "natural_file_repair_wave"],
     "markdown-repair": ["health", "natural_markdown_repair_wave"],
     "main-artifact": ["health", "main_artifact_readback", "main_compact_resume_roundtrip"],
+    "main-log": ["health", "main_large_log_audit"],
+    "main-tool": ["health", "main_tool_failure_recovery"],
+    "main-web": ["health", "main_direct_web_app"],
+    "multi-complex": ["health", "multi_complex_subagents"],
     "main-complex": [
         "health",
         "main_direct_web_app",
@@ -62,6 +67,7 @@ REAL_CASES = {
     "natural_shop_repair_wave",
     "natural_file_repair_wave",
     "natural_markdown_repair_wave",
+    "multi_complex_subagents",
     "main_direct_web_app",
     "main_tool_failure_recovery",
     "main_artifact_readback",

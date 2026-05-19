@@ -211,6 +211,7 @@ class _SubAgentRunnerResultFacade:
             result,
             _PostResultSideEffectParams(output_payload, params.dry_run, extracted.parsed, extracted.lessons),
         )
+        _abandon_superseded_artifact_repair_children(self, task, result, now)
         # LLM: save=False runner compact signals are persisted only as task-local package refs.
         session_refs = write_subagent_session_compact(
             SubagentSessionCompactRequest(task, params.session_compact or {}, output_payload)
@@ -302,6 +303,80 @@ def _task_list_attr(task, name: str) -> list[str]:
     if not isinstance(value, list | tuple | set):
         return []
     return [str(item) for item in value if str(item or "").strip()]
+
+
+# LLM: A later successful source attempt supersedes stale artifact-repair children created from an older blocker.
+# 函数用途: 同一个 run 后续已产出可验收结果时，把旧的产物修复子任务收口为 ABANDONED，避免过期后代卡住父级验收。
+def _abandon_superseded_artifact_repair_children(
+    manager: object,
+    task: SubAgentTask,
+    result: SubAgentRunnerResult,
+    now: float,
+) -> None:
+    if not _source_result_supersedes_artifact_repairs(task, result):
+        return
+    for child in _artifact_repair_children_for_source(manager, task.id):
+        if str(getattr(child, "status", "") or "").upper() in {"DONE", "VERIFIED", "TAKEN_OVER", "ABANDONED"}:
+            continue
+        child.status = "ABANDONED"
+        child.verification_status = "VERIFIED"
+        child.failure_type = ""
+        child.result = "已由源 run 后续成功结果覆盖，修复任务不再需要执行。"
+        child.abandoned_at = now
+        child.ended_at = now
+        child.updated_at = now
+        attrs = getattr(child, "attributes", None)
+        if not isinstance(attrs, dict):
+            attrs = {}
+            child.attributes = attrs
+        attrs["superseded_by_run_id"] = task.id
+        attrs["superseded_reason"] = "source_run_later_awaiting_acceptance"
+        manager.save(child)
+        _append_superseded_child_log(manager, child, task.id)
+
+
+# LLM: _source_result_supersedes_artifact_repairs is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _source_result_supersedes_artifact_repairs(task: SubAgentTask, result: SubAgentRunnerResult) -> bool:
+    if not result.ok:
+        return False
+    if str(getattr(task, "failure_type", "") or "").strip():
+        return False
+    if any("artifact_integrity_failed:" in item for item in _task_list_attr(task, "blockers")):
+        return False
+    return str(getattr(task, "status", "") or "").upper() in {"AWAITING_ACCEPTANCE", "DONE"}
+
+
+# LLM: _artifact_repair_children_for_source is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _artifact_repair_children_for_source(manager: object, source_run_id: str) -> list[SubAgentTask]:
+    children: list[SubAgentTask] = []
+    for candidate in manager.list_runs():
+        attrs = getattr(candidate, "attributes", {}) or {}
+        if not isinstance(attrs, dict):
+            continue
+        if attrs.get("repair_kind") != "artifact_integrity":
+            continue
+        if attrs.get("repair_source_run_id") != source_run_id:
+            continue
+        if str(getattr(candidate, "parent_id", "") or "") != source_run_id:
+            continue
+        children.append(candidate)
+    return children
+
+
+# LLM: _append_superseded_child_log is part of this module's structured runtime path; keep callers and tests aligned before changing it.
+# 函数用途: 完成本模块中的转换、校验或状态整理，供相邻流程继续使用。
+def _append_superseded_child_log(manager: object, child: SubAgentTask, source_run_id: str) -> None:
+    message = (
+        "runner_result: 已标记为 ABANDONED，"
+        f"因为源 run {source_run_id} 后续成功结果已覆盖这次 artifact repair。"
+    )
+    try:
+        manager._append_task_work_log(child, message)
+    except AttributeError:
+        with Path(child.work_log_file).open("a", encoding="utf-8") as handle:
+            handle.write(f"- {message}\n")
 
 
 # LLM: SubAgentRunnerResultMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

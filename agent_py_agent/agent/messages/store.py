@@ -3,7 +3,9 @@ from __future__ import annotations
 # LLM: MessageStore persists internal messages, inbox deliveries, and externalized large bodies.
 # 模块用途: 提供内部消息的发送、读取、确认、幂等投递和大段正文外部化存储。
 import json
+import os
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from ..gateway_parts.io import read_json_file, write_json_file_atomic
@@ -26,6 +28,40 @@ class MessageStore:
     # LLM: MessageStore.send creates one message and one target delivery atomically enough for local runtime use.
     # 函数用途: 发送内部消息，写入消息文件、目标 inbox 和幂等索引。
     def send(
+        self,
+        *,
+        sender: MessageTarget,
+        target: MessageTarget,
+        content: str,
+        message_type: str = "text",
+        task_id: str | None = None,
+        idempotency_key: str | None = None,
+        metadata: dict | None = None,
+    ) -> MessageCard:
+        if idempotency_key:
+            with _file_lock(self.root / "locks" / f"idempotency-{_safe_name(idempotency_key)}.lock"):
+                return self._send_locked(
+                    sender=sender,
+                    target=target,
+                    content=content,
+                    message_type=message_type,
+                    task_id=task_id,
+                    idempotency_key=idempotency_key,
+                    metadata=metadata,
+                )
+        return self._send_locked(
+            sender=sender,
+            target=target,
+            content=content,
+            message_type=message_type,
+            task_id=task_id,
+            idempotency_key=idempotency_key,
+            metadata=metadata,
+        )
+
+    # LLM: MessageStore._send_locked writes one message after optional idempotency locking.
+    # 函数用途: 保持普通发送和幂等发送共用同一落盘逻辑。
+    def _send_locked(
         self,
         *,
         sender: MessageTarget,
@@ -95,16 +131,18 @@ class MessageStore:
             paths = sorted(inbox_dir.glob("*.json"))
         except OSError:
             return []
-        messages: list[MessageCard] = []
+        messages: list[tuple[float, float, str, MessageCard]] = []
         for path in paths:
             delivery = DeliveryCard.from_dict(read_json_file(path))
             if unread_only and delivery.status == "read":
                 continue
             try:
-                messages.append(self.get_message(delivery.message_id))
+                message = self.get_message(delivery.message_id)
             except KeyError:
                 continue
-        return messages
+            messages.append((delivery.created_at, message.created_at, message.message_id, message))
+        messages.sort(key=lambda item: (item[0], item[1], item[2]))
+        return [item[3] for item in messages]
 
     # LLM: MessageStore.ack marks a delivery read without deleting history.
     # 函数用途: 确认某个目标已读指定消息。
@@ -170,3 +208,27 @@ class MessageStore:
  # 函数用途: 把消息目标或 key 转成可用作文件名的字符串。
 def _safe_name(value: str) -> str:
     return "".join(char if char.isalnum() or char in ("-", "_", ".") else "_" for char in value)
+
+
+# LLM: _file_lock gives local message idempotency a small cross-thread/process guard without dependencies.
+# 函数用途: 用 O_EXCL lock 文件保护幂等索引读写，避免并发发送同 key 产生多条消息。
+@contextmanager
+def _file_lock(path: Path, *, timeout_seconds: float = 5.0):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.time() + timeout_seconds
+    fd: int | None = None
+    while fd is None:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if time.time() >= deadline:
+                raise TimeoutError(f"timed out waiting for lock: {path}") from None
+            time.sleep(0.005)
+    try:
+        yield
+    finally:
+        os.close(fd)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass

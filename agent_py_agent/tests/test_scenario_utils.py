@@ -8,8 +8,10 @@ from pathlib import Path
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.cli.scenario_utils import (
+    ScenarioPaths,
     build_scenario_runner_instruction,
     collect_scenario_report_files,
+    scenario_command,
 )
 from agent_py_agent.cli.scenario_workspace import ScenarioConfigRequest, write_scenario_config
 
@@ -74,3 +76,24 @@ def test_write_scenario_config_persists_runner_stress_overrides(tmp_path):
     assert 'runner_concurrency: "5"' in text
     assert 'runner_start_rate: "10"' in text
     assert "request_timeout: 240" in text
+    assert "gateway_port: 0" in text
+
+
+# LLM: scenario gateway subprocesses must inherit the scenario capability config for stale runner recovery.
+# 函数用途: 确认 scenario-test 启动 gateway 时会透传能力配置，但 ask/stop 不会收到未知参数。
+def test_scenario_command_injects_capability_config_only_for_supported_commands(tmp_path):
+    paths = ScenarioPaths(
+        run_root=tmp_path,
+        fixture_root=tmp_path / "fixture",
+        config=tmp_path / "agent_config.yaml",
+        capability_config=tmp_path / "capability_config.yaml",
+        summary_json=tmp_path / "summary.json",
+        summary_md=tmp_path / "SUMMARY.md",
+    )
+
+    start = scenario_command(paths, "gateway", "start", "--force")
+    ask = scenario_command(paths, "gateway", "ask", "hi")
+
+    assert "--capability-config" in start
+    assert str(paths.capability_config) in start
+    assert "--capability-config" not in ask
