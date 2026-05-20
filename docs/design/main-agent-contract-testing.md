@@ -702,3 +702,24 @@ TaskTree 是多 Agent 前置能力，不是真正启动子 Agent。第一版只�
 - 单 case 默认最长 900 秒，避免小验收变成长任务调试。
 
 大型真实任务只有在阶段 10 通过后再开始。
+
+阶段 10 现在有可执行的预真实任务 runner：
+
+- `agent_py_agent/agent/contracts/small_real_acceptance_runner.py`
+- `agent_py_agent/agent/contracts/failure_sample_capture.py`
+- `agent_py_agent/agent/contracts/task_tree_scenario.py`
+- `agent_py_agent/agent/contracts/long_task_recovery_scenario.py`
+- `agent_py_agent/agent/contracts/medium_real_acceptance_runner.py`
+- `agent_py_agent/agent/contracts/pre_real_task_validation.py`
+- `agent_py_agent/tests/test_pre_real_task_validation.py`
+
+对应 1-6 步：
+
+1. 小真实验收 runner 就绪，先证明它能写 refs-first 报告。
+2. 小真实批次跑 `read_file` 真实 wrapper、`controlled_exec` dry-run wrapper 和 Shadow runtime。
+3. 失败 case 通过 `failure_sample_capture` 转成合同 fixture、fake tool trace、fake LLM trace、replay spec 和回归测试 ref。
+4. TaskTree 小场景写父子账本、节点状态、产物 ref 和事件流水，再跑 `task_tree_ledger_contract`。
+5. 长任务恢复小场景写 RunScope、checkpoint、state、artifact、compact apply、resume packet 和 idempotency ledger，再跑 `long_task_recovery_contract`。
+6. 中型验收批次在小真实报告通过后跑多文件项目和静态站点项目，仍然只允许 read-only/dry-run 事实，不执行真实副作用。
+
+这一步参考了三类成熟做法：通道运行时 的运行状态/heartbeat 思路、长期助手 的 `resume_pending` 可恢复状态字段、会话运行时 的 JSONL 事件输出和 refs-first 事件处理。落地到本仓库时只保留通用合同：状态、refs、事件、恢复、失败样本，不把任何具体业务任务写死进生产代码。

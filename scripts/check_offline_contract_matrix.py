@@ -147,6 +147,30 @@ REQUIRED_AREAS = {
         "agent_py_agent/agent/contracts/small_real_acceptance_gate.py",
         "agent_py_agent/tests/test_small_real_acceptance_gate.py",
     ),
+    "small_real_acceptance_runner": (
+        "agent_py_agent/agent/contracts/small_real_acceptance_runner.py",
+        "agent_py_agent/tests/test_pre_real_task_validation.py",
+    ),
+    "failure_sample_capture": (
+        "agent_py_agent/agent/contracts/failure_sample_capture.py",
+        "agent_py_agent/tests/test_pre_real_task_validation.py",
+    ),
+    "task_tree_scenario": (
+        "agent_py_agent/agent/contracts/task_tree_scenario.py",
+        "agent_py_agent/tests/test_pre_real_task_validation.py",
+    ),
+    "long_task_recovery_scenario": (
+        "agent_py_agent/agent/contracts/long_task_recovery_scenario.py",
+        "agent_py_agent/tests/test_pre_real_task_validation.py",
+    ),
+    "medium_real_acceptance_runner": (
+        "agent_py_agent/agent/contracts/medium_real_acceptance_runner.py",
+        "agent_py_agent/tests/test_pre_real_task_validation.py",
+    ),
+    "pre_real_task_validation": (
+        "agent_py_agent/agent/contracts/pre_real_task_validation.py",
+        "agent_py_agent/tests/test_pre_real_task_validation.py",
+    ),
 }
 
 
