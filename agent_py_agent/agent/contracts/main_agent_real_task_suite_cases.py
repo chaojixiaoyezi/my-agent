@@ -82,33 +82,7 @@ def _shopping_site_case() -> MainAgentRealTaskCase:
 # LLM: _github_star_workbook_case covers long repository-metrics research with spreadsheet deliverables.
 # 函数用途: 定义仓库增长指标整理任务，验收为 xlsx 产物和结构化字段要求。
 def _github_star_workbook_case() -> MainAgentRealTaskCase:
-    artifact = MainAgentRealTaskArtifact(
-        artifact_id="github_star_growth_workbook",
-        kind="xlsx",
-        preferred_path="outputs/github_star_growth/github_star_growth.xlsx",
-        validation_contract={
-            "validator": "spreadsheet_acceptance",
-            "required_sheets_min": 2,
-            "required_columns": ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"],
-            "evidence_contract": {
-                "required_fields": ["项目名", "地址", "上升 star 数"],
-                "require_verified": True,
-            },
-            "staging_contract": {
-                "strategy": "data_then_tool_builder_then_workbook",
-                "builder_tool": "data_to_workbook",
-                "source_json_ref": "outputs/github_star_growth/source_data.json",
-                "workbook_ref": "outputs/github_star_growth/github_star_growth.xlsx",
-                "checkpoint_shape_hints": {
-                    "outputs/github_star_growth/source_data.json": '{"sheets":[{"name":"本周榜单","columns":["项目名","地址","上升 star 数","中文解释","推荐理由"],"rows":[{"项目名":"..."}]}]}'
-                },
-                "checkpoint_refs": [
-                    "outputs/github_star_growth/source_data.json",
-                    "outputs/github_star_growth/github_star_growth.xlsx",
-                ],
-            },
-        },
-    )
+    artifact = _github_star_workbook_artifact()
     return MainAgentRealTaskCase(
         case_id="github_weekly_star_growth_xlsx",
         title="GitHub 周升星项目 XLSX",
@@ -131,6 +105,50 @@ def _github_star_workbook_case() -> MainAgentRealTaskCase:
             ),
         ),
     )
+
+
+# LLM: _github_star_workbook_artifact defines the spreadsheet artifact and validation contract.
+# 函数用途: 将 GitHub workbook 产物合同从 case 构造中拆出，保持任务 case 薄而清楚。
+def _github_star_workbook_artifact() -> MainAgentRealTaskArtifact:
+    return MainAgentRealTaskArtifact(
+        artifact_id="github_star_growth_workbook",
+        kind="xlsx",
+        preferred_path="outputs/github_star_growth/github_star_growth.xlsx",
+        validation_contract=_github_star_workbook_validation_contract(),
+    )
+
+
+# LLM: _github_star_workbook_validation_contract keeps workbook requirements machine-readable.
+# 函数用途: 定义 workbook 的 sheet/列/evidence/staging 合同，不从任务 prompt 推断验收事实。
+def _github_star_workbook_validation_contract() -> dict[str, object]:
+    return {
+        "validator": "spreadsheet_acceptance",
+        "required_sheets_min": 2,
+        "required_columns": ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"],
+        "evidence_contract": {
+            "required_fields": ["项目名", "地址", "上升 star 数"],
+            "require_verified": True,
+        },
+        "staging_contract": _github_star_workbook_staging_contract(),
+    }
+
+
+# LLM: _github_star_workbook_staging_contract describes the source-data to workbook build path.
+# 函数用途: 固化 source JSON、builder tool、workbook ref 和 checkpoint 结构提示。
+def _github_star_workbook_staging_contract() -> dict[str, object]:
+    return {
+        "strategy": "data_then_tool_builder_then_workbook",
+        "builder_tool": "data_to_workbook",
+        "source_json_ref": "outputs/github_star_growth/source_data.json",
+        "workbook_ref": "outputs/github_star_growth/github_star_growth.xlsx",
+        "checkpoint_shape_hints": {
+            "outputs/github_star_growth/source_data.json": '{"sheets":[{"name":"本周榜单","columns":["项目名","地址","上升 star 数","中文解释","推荐理由"],"rows":[{"项目名":"..."}]}]}'
+        },
+        "checkpoint_refs": [
+            "outputs/github_star_growth/source_data.json",
+            "outputs/github_star_growth/github_star_growth.xlsx",
+        ],
+    }
 
 
 # LLM: _research_document_translation_case covers research, translation, and formatted document output.

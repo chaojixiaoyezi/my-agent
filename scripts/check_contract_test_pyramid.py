@@ -109,16 +109,18 @@ def _check_production_needles(root: Path, findings: list[dict[str, str]]) -> Non
         findings.append(_finding("PRODUCTION_ROOT_MISSING", str(production_root), "production agent root is missing"))
         return
     for path in production_root.rglob("*.py"):
-        text = path.read_text(encoding="utf-8", errors="replace").lower()
-        for needle in PRODUCTION_TASK_SPECIFIC_NEEDLES:
-            if needle in text:
-                findings.append(
-                    _finding(
-                        "PRODUCTION_TASK_SPECIFIC_CONTRACT",
-                        str(path.relative_to(root)),
-                        needle,
-                    )
-                )
+        findings.extend(_production_task_specific_findings(root, path))
+
+
+# LLM: _production_task_specific_findings scans one production file for banned task-specific markers.
+# 函数用途: 返回专项任务词命中 finding；调用方负责聚合，不在循环里嵌套多层分支。
+def _production_task_specific_findings(root: Path, path: Path) -> list[dict[str, str]]:
+    text = path.read_text(encoding="utf-8", errors="replace").lower()
+    return [
+        _finding("PRODUCTION_TASK_SPECIFIC_CONTRACT", str(path.relative_to(root)), needle)
+        for needle in PRODUCTION_TASK_SPECIFIC_NEEDLES
+        if needle in text
+    ]
 
 
 # LLM: _finding keeps pyramid gate failures compact, stable, and easy to diff in CI.
@@ -149,16 +151,23 @@ def main(argv: list[str] | None = None) -> int:
         "findings": list(report.findings),
         "reference_projects_checked": list(report.reference_projects_checked),
     }
-    if args.json:
+    _print_report(payload, report, json_output=bool(args.json))
+    return 0 if report.ok else 1
+
+
+# LLM: _print_report keeps CLI rendering separate from validation and exit-code decisions.
+# 函数用途: 根据 --json 或 ok/fail 状态打印报告，避免 main 函数承载嵌套输出逻辑。
+def _print_report(payload: dict[str, object], report: ContractPyramidReport, *, json_output: bool) -> None:
+    if json_output:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
-    elif report.ok:
+        return
+    if report.ok:
         checked = ", ".join(report.reference_projects_checked)
         print(f"contract test pyramid ok; checked references: {checked}")
-    else:
-        print("contract test pyramid failed")
-        for item in report.findings:
-            print(f"- {item['code']}: {item['location']} :: {item['detail']}")
-    return 0 if report.ok else 1
+        return
+    print("contract test pyramid failed")
+    for item in report.findings:
+        print(f"- {item['code']}: {item['location']} :: {item['detail']}")
 
 
 __all__ = ["ContractPyramidReport", "check_contract_test_pyramid", "main"]

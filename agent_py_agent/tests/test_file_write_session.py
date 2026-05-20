@@ -176,6 +176,10 @@ class TestFileWriteSessionTool:
             {"name": "demo"}
         ]
 
+
+# LLM: Structured-target validation tests stay in their own class to keep write-session contracts readable.
+# 类用途: 覆盖 JSON checkpoint 提交前的结构校验和 open-session 保留行为。
+class TestFileWriteSessionToolStructuredValidation:
     # LLM: Workbook-style JSON checkpoints must not commit duplicate sheet identities.
     # 函数用途: 验证 sheets/rows 这类通用表格 JSON 在提交前会检查机器结构，避免重复 sheet 进入下游 builder。
     def test_finish_rejects_duplicate_json_sheet_names_and_keeps_session_open(self, tmp_path: Path):

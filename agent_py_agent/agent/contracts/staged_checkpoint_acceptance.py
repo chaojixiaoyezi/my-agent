@@ -5,14 +5,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 from .evidence_contract import (
-    EvidenceClaim,
     EvidenceContractRequest,
-    EvidenceSourceRef,
     evaluate_evidence_contract,
 )
+from .staged_checkpoint_evidence_payloads import claims, source_refs, string_list
 
 
 # LLM: staged_checkpoint_findings inspects only machine-declared checkpoint refs and emits stable findings.
@@ -34,9 +32,9 @@ def staged_checkpoint_findings(
 def one_staged_checkpoint_findings(ref: str, task_workspace: Path) -> list[dict[str, object]]:
     path = artifact_path(ref, task_workspace)
     if not path.exists():
-        return [_finding("STAGED_ARTIFACT_MISSING", ref, path, "Staged checkpoint does not exist.")]
+        return [_finding("STAGED_ARTIFACT_MISSING", ref, path, {"message": "Staged checkpoint does not exist."})]
     if path.is_file() and path.stat().st_size <= 0:
-        return [_finding("STAGED_ARTIFACT_EMPTY", ref, path, "Staged checkpoint is empty.")]
+        return [_finding("STAGED_ARTIFACT_EMPTY", ref, path, {"message": "Staged checkpoint is empty."})]
     if path.suffix.lower() != ".json":
         return []
     status = json_checkpoint_status(path)
@@ -46,8 +44,10 @@ def one_staged_checkpoint_findings(ref: str, task_workspace: Path) -> list[dict[
                 "STAGED_JSON_INVALID",
                 ref,
                 path,
-                "Staged JSON checkpoint is invalid or truncated.",
-                {"parse_error": status.get("parse_error", "")},
+                {
+                    "message": "Staged JSON checkpoint is invalid or truncated.",
+                    "parse_error": status.get("parse_error", ""),
+                },
             )
         ]
     if status["code"] == "STAGED_JSON_NO_ROWS":
@@ -56,7 +56,7 @@ def one_staged_checkpoint_findings(ref: str, task_workspace: Path) -> list[dict[
                 "STAGED_JSON_NO_ROWS",
                 ref,
                 path,
-                "Staged JSON checkpoint has no data rows.",
+                {"message": "Staged JSON checkpoint has no data rows."},
             )
         ]
     return []
@@ -82,9 +82,9 @@ def staged_json_evidence_findings(
         return []
     report = evaluate_evidence_contract(
         EvidenceContractRequest(
-            source_refs=_source_refs(value.get("source_refs")),
-            claims=_claims(value.get("claims")),
-            required_fields=_string_list(evidence_contract.get("required_fields")),
+            source_refs=source_refs(value.get("source_refs")),
+            claims=claims(value.get("claims")),
+            required_fields=string_list(evidence_contract.get("required_fields")),
             require_verified=bool(evidence_contract.get("require_verified", True)),
         )
     )
@@ -124,61 +124,6 @@ def json_checkpoint_status(path: Path, required_columns: list[str] | None = None
     if shape_issue := _tabular_json_shape_issue(value, required_columns=required_columns):
         return shape_issue
     return {"code": "OK"}
-
-
-# LLM: _source_refs converts JSON source_refs into EvidenceSourceRef records without trusting prose.
-# 函数用途: 从阶段 JSON 的 source_refs 数组读取机器来源引用，坏项自然变成不可读来源。
-def _source_refs(value: object) -> list[EvidenceSourceRef]:
-    if not isinstance(value, list):
-        return []
-    refs: list[EvidenceSourceRef] = []
-    for item in value:
-        if not isinstance(item, dict):
-            continue
-        refs.append(
-            EvidenceSourceRef(
-                source_id=str(item.get("source_id") or ""),
-                source_type=str(item.get("source_type") or ""),
-                uri=str(item.get("uri") or ""),
-                retrieved_at=str(item.get("retrieved_at") or ""),
-                artifact_ref=str(item.get("artifact_ref") or ""),
-                content_sha256=str(item.get("content_sha256") or ""),
-                status=str(item.get("status") or "AVAILABLE"),
-                reserved=dict(item.get("reserved")) if isinstance(item.get("reserved"), dict) else {},
-            )
-        )
-    return refs
-
-
-# LLM: _claims converts JSON claims into EvidenceClaim records for evidence validation.
-# 函数用途: 从阶段 JSON 的 claims 数组读取 field/value/source_ids，不解析说明文本。
-def _claims(value: object) -> list[EvidenceClaim]:
-    if not isinstance(value, list):
-        return []
-    claims: list[EvidenceClaim] = []
-    for index, item in enumerate(value):
-        if not isinstance(item, dict):
-            continue
-        claims.append(
-            EvidenceClaim(
-                claim_id=str(item.get("claim_id") or f"claim-{index}"),
-                field=str(item.get("field") or ""),
-                value=item.get("value"),
-                source_ids=_string_list(item.get("source_ids")),
-                confidence=float(item.get("confidence", 1.0) or 0.0),
-                verification_status=str(item.get("verification_status") or "VERIFIED"),
-                reserved=dict(item.get("reserved")) if isinstance(item.get("reserved"), dict) else {},
-            )
-        )
-    return claims
-
-
-# LLM: _string_list normalizes machine-declared string arrays.
-# 函数用途: 提取 required_fields/source_ids 等结构化字符串列表，忽略空值。
-def _string_list(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [text for item in value if (text := str(item).strip())]
 
 
 # LLM: _staging_refs_for_item extracts checkpoint refs while filtering the final artifact path itself.
@@ -343,20 +288,15 @@ def _scalar_has_data(value: object) -> bool:
 
 # LLM: _finding keeps staged checkpoint findings compact and machine-readable.
 # 函数用途: 统一生成阶段文件 finding，必要时带上额外字段，例如 parse_error。
-def _finding(
-    code: str,
-    ref: str,
-    path: Path,
-    message: str,
-    extras: dict[str, Any] | None = None,
-) -> dict[str, object]:
+def _finding(code: str, ref: str, path: Path, detail: dict[str, object] | None = None) -> dict[str, object]:
+    payload = detail or {}
     return {
         "code": code,
         "severity": "hard",
         "stage_ref": ref,
         "location": str(path),
-        "message": message,
-        **(extras or {}),
+        "message": str(payload.get("message") or "Staged checkpoint failed."),
+        **{key: value for key, value in payload.items() if key != "message"},
     }
 
 

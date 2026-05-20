@@ -51,44 +51,10 @@ def test_local_progress_guard_resets_when_work_progress_fingerprint_changes(tmp_
     agent = SimpleNamespace(root=tmp_path)
     exploratory_calls = [{"tool": "read_artifact", "artifact_ref": "memory_archive/artifacts/tool_outputs/demo.json"}]
 
-    _write_closeout(
-        tmp_path,
-        {
-            "ok": False,
-            "delivery_progress": {
-                "failure_fingerprint": "same-failure",
-                "work_progress_fingerprint": "progress-a",
-                "recovery_actions": [
-                    {
-                        "code": "STAGED_JSON_NO_ROWS",
-                        "recommended_action": "write_non_empty_structured_rows",
-                        "checkpoint_ref": "outputs/report/source.json",
-                    }
-                ],
-                "pending_materialization_targets": [],
-            },
-        },
-    )
+    _write_closeout(tmp_path, _closeout_payload(work_progress_fingerprint="progress-a"))
     assert has_required_local_progress_guard(agent, params, exploratory_calls) is False
 
-    _write_closeout(
-        tmp_path,
-        {
-            "ok": False,
-            "delivery_progress": {
-                "failure_fingerprint": "same-failure",
-                "work_progress_fingerprint": "progress-b",
-                "recovery_actions": [
-                    {
-                        "code": "STAGED_JSON_NO_ROWS",
-                        "recommended_action": "write_non_empty_structured_rows",
-                        "checkpoint_ref": "outputs/report/source.json",
-                    }
-                ],
-                "pending_materialization_targets": [],
-            },
-        },
-    )
+    _write_closeout(tmp_path, _closeout_payload(work_progress_fingerprint="progress-b"))
     assert has_required_local_progress_guard(agent, params, exploratory_calls) is False
 
 
@@ -163,3 +129,23 @@ def _write_closeout(root: Path, payload: dict[str, object]) -> None:
     path = root / ".agent_delivery" / "closeout.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# LLM: _closeout_payload returns a minimal structured closeout report for local-progress guard tests.
+# 函数用途: 生成带 failure/work 指纹和 write-first recovery action 的机器报告。
+def _closeout_payload(*, work_progress_fingerprint: str) -> dict[str, object]:
+    return {
+        "ok": False,
+        "delivery_progress": {
+            "failure_fingerprint": "same-failure",
+            "work_progress_fingerprint": work_progress_fingerprint,
+            "recovery_actions": [
+                {
+                    "code": "STAGED_JSON_NO_ROWS",
+                    "recommended_action": "write_non_empty_structured_rows",
+                    "checkpoint_ref": "outputs/report/source.json",
+                }
+            ],
+            "pending_materialization_targets": [],
+        },
+    }

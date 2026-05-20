@@ -460,12 +460,8 @@ def test_agent_can_delegate_to_subagents_from_tool_call():
         result = agent.run("请创建两个子代理做隔离 coding 场景测试", save=False)
         tasks = agent.subagents.list_runs()
         board = agent.tools.execute_call({"tool": "subagent_board", "limit": 5})
-        dry_dispatch = agent.tools.execute_call(
-            {"tool": "dispatch_subagents", "apply": False, "max_runners": 1}
-        )
-        blocked_dispatch = agent.tools.execute_call(
-            {"tool": "dispatch_subagents", "execute_runners": True, "apply": False}
-        )
+        dry_dispatch = agent.tools.execute_call({"tool": "dispatch_subagents", "apply": False, "max_runners": 1})
+        blocked_dispatch = agent.tools.execute_call({"tool": "dispatch_subagents", "execute_runners": True, "apply": False})
 
         assert result.response == "已创建子代理任务并等待调度。"
         assert result.tool_rounds == 1

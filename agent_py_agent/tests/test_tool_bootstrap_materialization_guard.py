@@ -12,40 +12,7 @@ def test_bootstrap_materialization_context_includes_startup_actions_and_shape_hi
         bootstrap_materialization_context,
     )
 
-    params = _params(
-        delivery_contract={
-            "bootstrap_contract": {
-                "materialization_targets": [
-                    {
-                        "artifact_id": "report",
-                        "kind": "xlsx",
-                        "target_type": "checkpoint",
-                        "workspace_relative_path": "outputs/report/source_data.json",
-                    }
-                ],
-                "startup_actions": [
-                    {
-                        "action": "materialize_checkpoint",
-                        "checkpoint_ref": "outputs/report/source_data.json",
-                        "priority": 1,
-                    }
-                ],
-            },
-            "artifacts": [
-                {
-                    "artifact_id": "report",
-                    "kind": "xlsx",
-                    "validation_contract": {
-                        "staging_contract": {
-                            "checkpoint_shape_hints": {
-                                "outputs/report/source_data.json": '{"sheets":[{"name":"榜单","rows":[{"项目名":"..."}]}]}'
-                            }
-                        }
-                    },
-                }
-            ],
-        }
-    )
+    params = _params(delivery_contract=_delivery_contract_with_shape_hint())
     agent = SimpleNamespace(root=tmp_path)
 
     context = bootstrap_materialization_context(agent, params, repairs=0)
@@ -55,6 +22,51 @@ def test_bootstrap_materialization_context_includes_startup_actions_and_shape_hi
     assert payload["startup_actions"][0]["action"] == "materialize_checkpoint"
     assert payload["pending_materialization_targets"][0]["checkpoint_shape_hint"]
     assert payload["checkpoint_shape_hints"]["outputs/report/source_data.json"]
+
+
+# LLM: _delivery_contract_with_shape_hint is the structured bootstrap fixture for shape-hint tests.
+# 函数用途: 声明一个 checkpoint target、startup action 和对应的 checkpoint_shape_hints。
+def _delivery_contract_with_shape_hint() -> dict[str, object]:
+    return {
+        "bootstrap_contract": {
+            "materialization_targets": [_checkpoint_target()],
+            "startup_actions": [
+                {
+                    "action": "materialize_checkpoint",
+                    "checkpoint_ref": "outputs/report/source_data.json",
+                    "priority": 1,
+                }
+            ],
+        },
+        "artifacts": [_artifact_with_shape_hint()],
+    }
+
+
+# LLM: _checkpoint_target returns the bootstrap materialization target fixture.
+# 函数用途: 给测试提供一个机器声明的 checkpoint 目标路径。
+def _checkpoint_target() -> dict[str, object]:
+    return {
+        "artifact_id": "report",
+        "kind": "xlsx",
+        "target_type": "checkpoint",
+        "workspace_relative_path": "outputs/report/source_data.json",
+    }
+
+
+# LLM: _artifact_with_shape_hint returns the artifact staging contract fixture.
+# 函数用途: 给 bootstrap guard 提供 checkpoint_shape_hints，不依赖自然语言提示。
+def _artifact_with_shape_hint() -> dict[str, object]:
+    return {
+        "artifact_id": "report",
+        "kind": "xlsx",
+        "validation_contract": {
+            "staging_contract": {
+                "checkpoint_shape_hints": {
+                    "outputs/report/source_data.json": '{"sheets":[{"name":"榜单","rows":[{"项目名":"..."}]}]}'
+                }
+            }
+        },
+    }
 
 
 def _params(delivery_contract: dict[str, object]):

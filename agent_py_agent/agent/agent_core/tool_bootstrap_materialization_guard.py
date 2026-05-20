@@ -230,17 +230,23 @@ def _startup_actions(bootstrap: object) -> list[dict[str, object]]:
 def _checkpoint_shape_hints(contract: dict[str, object]) -> dict[str, str]:
     hints: dict[str, str] = {}
     for artifact in _artifact_items(contract):
-        validation = artifact.get("validation_contract") if isinstance(artifact.get("validation_contract"), dict) else {}
-        staging = validation.get("staging_contract") if isinstance(validation.get("staging_contract"), dict) else {}
-        raw_hints = staging.get("checkpoint_shape_hints")
-        if not isinstance(raw_hints, dict):
-            continue
-        for key, value in raw_hints.items():
-            ref = str(key or "").strip()
-            hint = str(value or "").strip()
-            if ref and hint:
-                hints[ref] = hint
+        hints.update(_shape_hints_from_artifact(artifact))
     return hints
+
+
+# LLM: _shape_hints_from_artifact extracts checkpoint hints from one artifact contract.
+# 函数用途: 将嵌套 validation/staging 读取封装起来，避免 bootstrap 汇总函数出现深层分支。
+def _shape_hints_from_artifact(artifact: dict[str, object]) -> dict[str, str]:
+    validation = artifact.get("validation_contract") if isinstance(artifact.get("validation_contract"), dict) else {}
+    staging = validation.get("staging_contract") if isinstance(validation.get("staging_contract"), dict) else {}
+    raw_hints = staging.get("checkpoint_shape_hints")
+    if not isinstance(raw_hints, dict):
+        return {}
+    return {
+        ref: hint
+        for key, value in raw_hints.items()
+        if (ref := str(key or "").strip()) and (hint := str(value or "").strip())
+    }
 
 
 # LLM: _artifact_items extracts only structured artifact records from the delivery contract.

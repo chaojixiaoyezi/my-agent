@@ -62,10 +62,10 @@ def maybe_block_repeated_tool_failure(agent: object, params: object, payload: di
 
 # LLM: record_tool_guard_observation updates the exact-failure ledger after each tool result.
 # 函数用途: 记录工具调用成功或失败，成功清零、失败递增，为下一轮 guard 提供状态。
-def record_tool_guard_observation(agent: object, params: object, payload: object, result: ToolExecutionResult) -> None:
+def record_tool_guard_observation(agent: object, runtime_params: object, payload: object, result: ToolExecutionResult) -> None:
     if not isinstance(payload, dict):
         return
-    signature = _signature(params, payload)
+    signature = _signature(runtime_params, payload)
     if not signature.tool_name or result.error_code == _BLOCK_CODE:
         return
     failures = _failure_state(agent)
