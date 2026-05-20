@@ -16,6 +16,20 @@
 - 用 fake tool / fake LLM / replay 把真实 LLM 失败样本落进这些合同。
 - 真环境测试只做最终验收和失败样本来源，不再作为主要开发循环。
 
+## 2026-05-21 / 主代理 Phase 2.5 阶段 5 Shadow Mode 合同
+
+状态：已落地第一版
+
+摘要：
+- 新增 `shadow_mode_contract`，把影子模式定义为“真实分析 + 只读/干跑工具 + 建议/草稿/证据/人工复核记录”，但禁止任何真实副作用动作。
+- 合同要求风险评分、证据来源、建议动作、dry-run 结果、审批草稿、operator review ref 和 human review 都是结构化字段。
+- 人工不同意 Agent 建议时，必须给 `mismatch_reason_codes` 或 `missing_evidence_codes`，方便后续改业务合同，而不是回头读自然语言聊天记录猜原因。
+- 已把 `shadow_mode` 加入离线合同矩阵 gate，防止后续只做 dry-run 但漏掉人工对比账本。
+
+后续方向：
+- 阶段 6 可以进入 TaskTree 前置账本：先做单代理任务树和阶段节点，不急着恢复多 Agent。
+- Shadow Mode 真实试跑产生的新偏差，要沉淀成 fake tool / fake LLM / replay 样本。
+
 ## 2026-05-21 / 主代理状态机补 waiting_reason 与 terminal_outcome
 
 状态：部分落地

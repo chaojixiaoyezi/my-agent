@@ -566,3 +566,31 @@
 - 副作用工具是否强制幂等键
 
 这一步不是某个工具专项逻辑，而是所有真实只读工具和 dry-run 工具共用的上线门槛。
+
+### 阶段 5：Shadow Mode 影子模式
+
+新增合同：
+
+- `agent_py_agent/agent/contracts/shadow_mode_contract.py`
+- `agent_py_agent/tests/test_shadow_mode_contract.py`
+
+Shadow Mode 的定位：
+
+- Agent 可以真实分析。
+- Agent 可以调用真实只读工具。
+- Agent 可以生成风险评分、证据链、建议动作、审批卡片草稿、工单草稿、dry-run 结果。
+- Agent 不能真实执行副作用动作。
+- 人工复核必须结构化记录，用来比较 Agent 建议和人的实际判断。
+
+当前机器合同检查：
+
+- `mode` 必须是 `shadow`。
+- 风险评分必须是结构化 `risk.score`，范围 0-100。
+- 证据必须有 `source_type` 和 `source_ref`。
+- 建议动作只能是 `recommend` / `draft` / `dry_run` 这类可复核模式。
+- `mutating` / `dangerous` 动作必须有 `operator_review_ref`。
+- `dangerous` 动作必须有匹配的 dry-run 成功结果和审批草稿 ref。
+- `executed_actions` 必须为空。
+- `human_review` 必须有 `review_id`、`review_ref`、`decision`、`agreement`；如果人工不同意，必须给结构化原因。
+
+这一步学习 通道运行时 的可信元数据/工具策略边界，也学习 长期助手 的运行状态和人工可复核记录；但代码只保留通用影子账本合同，不引入“封禁 IP、告警、工单”等业务专项判断。

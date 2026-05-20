@@ -119,6 +119,10 @@ REQUIRED_AREAS = {
         "agent_py_agent/agent/contracts/tool_adapter_readiness_contract.py",
         "agent_py_agent/tests/test_tool_adapter_readiness_contract.py",
     ),
+    "shadow_mode": (
+        "agent_py_agent/agent/contracts/shadow_mode_contract.py",
+        "agent_py_agent/tests/test_shadow_mode_contract.py",
+    ),
 }
 
 
