@@ -1,3 +1,6 @@
+# LLM: Runtime card contracts keep long-task ownership, routing, and checkpoint facts machine-checkable.
+# 模块用途: 提供最小运行时卡片校验，确保任务、worker、消息和通知路由具备可恢复所需的结构化字段。
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -6,6 +9,8 @@ LONG_TASK_STATUSES = {"RUNNING", "WAITING", "WAITING_FOR_TOOL", "WAITING_FOR_CHI
 MESSAGE_TO_USER_DIRECTIONS = {"TO_USER", "USER"}
 
 
+# LLM: RuntimeCard is the shared record shape for task/worker/message/runtime route facts.
+# 类用途: 表示一张运行时卡片，承载任务、执行者、消息或通知路由的最小结构化身份字段。
 @dataclass(frozen=True)
 class RuntimeCard:
     kind: str
@@ -18,6 +23,8 @@ class RuntimeCard:
     refs: dict[str, object] = field(default_factory=dict)
 
 
+# LLM: RuntimeCardValidation is the stable public result for runtime card checks.
+# 类用途: 汇总运行时卡片校验结果，向调用方返回是否通过、错误码和逐项 finding。
 @dataclass(frozen=True)
 class RuntimeCardValidation:
     ok: bool
@@ -25,6 +32,8 @@ class RuntimeCardValidation:
     findings: tuple[dict[str, str], ...]
 
 
+# LLM: validate_runtime_card_set is the public runtime-card verifier used by tests and future runtime hooks.
+# 函数用途: 校验一组运行时卡片是否满足长任务恢复、通知路由和 worker 归属的最小合同。
 def validate_runtime_card_set(cards: list[RuntimeCard]) -> RuntimeCardValidation:
     findings: list[dict[str, str]] = []
     route_task_ids = {
@@ -48,6 +57,8 @@ def validate_runtime_card_set(cards: list[RuntimeCard]) -> RuntimeCardValidation
     )
 
 
+# LLM: _validate_common enforces fields that every runtime card must carry regardless of kind.
+# 函数用途: 检查所有卡片共享的最小身份字段，例如 card_id 和 owner_user_id。
 def _validate_common(card: RuntimeCard, findings: list[dict[str, str]]) -> None:
     if not card.card_id:
         findings.append(_finding("CARD_ID_MISSING", card.kind, "card_id is required"))
@@ -55,6 +66,8 @@ def _validate_common(card: RuntimeCard, findings: list[dict[str, str]]) -> None:
         findings.append(_finding("CARD_OWNER_MISSING", card.card_id, "owner_user_id is required"))
 
 
+# LLM: _validate_task adds long-task-specific recovery requirements on top of common card fields.
+# 函数用途: 校验长任务卡片是否具备 checkpoint_ref 和 notification route，避免后台任务无法恢复或通知用户。
 def _validate_task(card: RuntimeCard, route_task_ids: set[str], findings: list[dict[str, str]]) -> None:
     if _status(card) not in LONG_TASK_STATUSES:
         return
@@ -64,25 +77,35 @@ def _validate_task(card: RuntimeCard, route_task_ids: set[str], findings: list[d
         findings.append(_finding("TASK_NOTIFICATION_ROUTE_MISSING", card.card_id, "long task needs notification route"))
 
 
+# LLM: _validate_worker ensures each worker card is anchored to a task before runtime dispatch.
+# 函数用途: 检查 worker 是否绑定 task_id，避免游离执行者无法被任务账本接管。
 def _validate_worker(card: RuntimeCard, findings: list[dict[str, str]]) -> None:
     if not card.task_id:
         findings.append(_finding("WORKER_TASK_ID_MISSING", card.card_id, "worker must be attached to a task"))
 
 
+# LLM: _validate_message keeps user-facing messages routable without reading free-form chat text.
+# 函数用途: 校验发给用户的消息卡片必须带 session_id 或 notification_route_id。
 def _validate_message(card: RuntimeCard, findings: list[dict[str, str]]) -> None:
     direction = str(card.refs.get("direction") or "").upper()
     if direction in MESSAGE_TO_USER_DIRECTIONS and not card.session_id and not card.refs.get("notification_route_id"):
         findings.append(_finding("MESSAGE_ROUTE_MISSING", card.card_id, "message to user needs session or route"))
 
 
+# LLM: _kind canonicalizes runtime card kind values into a stable uppercase comparison key.
+# 函数用途: 把 card.kind 归一成大写字符串，供验证逻辑按统一枚举比较。
 def _kind(card: RuntimeCard) -> str:
     return str(card.kind or "").upper()
 
 
+# LLM: _status canonicalizes runtime card status values before validation decisions.
+# 函数用途: 把 card.status 归一成大写字符串，避免大小写差异影响合同判断。
 def _status(card: RuntimeCard) -> str:
     return str(card.status or "").upper()
 
 
+# LLM: _finding builds compact machine-readable runtime-card findings for reports and tests.
+# 函数用途: 统一生成运行时卡片校验 finding，保持 code/location/detail 风格稳定。
 def _finding(code: str, card_id: str, detail: str) -> dict[str, str]:
     return {"code": code, "card_id": card_id, "detail": detail}
 

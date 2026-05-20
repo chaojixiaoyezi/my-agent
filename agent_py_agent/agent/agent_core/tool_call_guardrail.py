@@ -15,16 +15,22 @@ _DEFAULT_EXACT_FAILURE_BLOCK_AFTER = 3
 _BLOCK_CODE = "TOOL_REPEATED_EXACT_FAILURE"
 
 
+# LLM: ToolCallSignature is the normalized identity for one tool call within a scoped failure ledger.
+# 类用途: 封装工具名、参数指纹和作用域，作为重复失败 guard 的稳定键。
 @dataclass(frozen=True)
 class ToolCallSignature:
     tool_name: str
     args_hash: str
     scope: str
 
+    # LLM: key returns the tuple form used by the persisted failure counter map.
+    # 函数用途: 把签名对象转成可哈希键，供重复失败计数表读写。
     def key(self) -> tuple[str, str, str]:
         return (self.scope, self.tool_name, self.args_hash)
 
 
+# LLM: maybe_block_repeated_tool_failure blocks exact same failing calls after the configured threshold.
+# 函数用途: 在同一作用域里相同工具+参数连续失败达到阈值时，返回结构化阻断结果。
 def maybe_block_repeated_tool_failure(agent: object, params: object, payload: dict[str, object]):
     signature = _signature(params, payload)
     if not signature.tool_name:
@@ -54,6 +60,8 @@ def maybe_block_repeated_tool_failure(agent: object, params: object, payload: di
     )
 
 
+# LLM: record_tool_guard_observation updates the exact-failure ledger after each tool result.
+# 函数用途: 记录工具调用成功或失败，成功清零、失败递增，为下一轮 guard 提供状态。
 def record_tool_guard_observation(agent: object, params: object, payload: object, result: ToolExecutionResult) -> None:
     if not isinstance(payload, dict):
         return
@@ -68,6 +76,8 @@ def record_tool_guard_observation(agent: object, params: object, payload: object
     failures[key] = failures.get(key, 0) + 1
 
 
+# LLM: _failure_state provides the task-local mutable ledger used by the exact-failure guard.
+# 函数用途: 获取或初始化 agent 上的失败计数字典，避免重复失败状态散落在别处。
 def _failure_state(agent: object) -> dict[tuple[str, str, str], int]:
     state = getattr(agent, _STATE_ATTR, None)
     if not isinstance(state, dict):
@@ -76,16 +86,22 @@ def _failure_state(agent: object) -> dict[tuple[str, str, str], int]:
     return state
 
 
+# LLM: _signature builds the guardrail identity from structured params and tool payload.
+# 函数用途: 根据 payload 和运行参数构造 ToolCallSignature，统一重复失败的比较口径。
 def _signature(params: object, payload: dict[str, object]) -> ToolCallSignature:
     tool_name = str(payload.get("tool") or "").strip()
     return ToolCallSignature(tool_name=tool_name, args_hash=_args_hash(payload), scope=_scope(params))
 
 
+# LLM: _args_hash gives tool payloads a stable digest so repeated exact failures are detected even across dict ordering changes.
+# 函数用途: 对工具调用参数生成稳定哈希，供重复失败 guard 比较“是不是同一组参数”。
 def _args_hash(payload: dict[str, object]) -> str:
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+# LLM: _scope chooses the narrowest available runtime identifier so failures do not leak across unrelated runs.
+# 函数用途: 优先使用 run_id/request_id/task_id 构造 guard 作用域，避免不同任务互相污染失败计数。
 def _scope(params: object) -> str:
     for name in ("run_id", "request_id", "task_id"):
         value = str(getattr(params, name, "") or "").strip()
@@ -94,6 +110,8 @@ def _scope(params: object) -> str:
     return "agent"
 
 
+# LLM: _block_after reads the configurable exact-failure threshold while keeping a safe default.
+# 函数用途: 从任务属性里读取重复失败阻断阈值；缺失或非法时回退默认值。
 def _block_after(params: object) -> int:
     attrs = getattr(params, "task_attributes", None)
     if isinstance(attrs, dict):

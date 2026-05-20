@@ -101,6 +101,8 @@ def local_progress_guard_block_response(agent: object) -> ModelResponse | None:
     )
 
 
+# LLM: _guard_payload extracts the no-progress facts that justify redirecting the model back to local work.
+# 函数用途: 从 closeout 报告里提取 failure/work-progress 指纹、恢复动作和待物化目标。
 def _guard_payload(agent: object) -> dict[str, object]:
     report = _closeout_report(agent)
     if not report or report.get("ok") is True:
@@ -128,6 +130,8 @@ def _guard_payload(agent: object) -> dict[str, object]:
     }
 
 
+# LLM: _closeout_report reads the machine closeout report that local-progress decisions are based on.
+# 函数用途: 读取 .agent_delivery/closeout.json；缺失或损坏时安全回退为空对象。
 def _closeout_report(agent: object) -> dict[str, object]:
     path = Path(getattr(agent, "root", ".")).resolve() / ".agent_delivery" / "closeout.json"
     if not path.exists():
@@ -139,10 +143,14 @@ def _closeout_report(agent: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
+# LLM: _state_path keeps local-progress guard counters in one deterministic task-local file.
+# 函数用途: 计算 local-progress guard 状态文件路径，供多轮探索计数复用。
 def _state_path(agent: object) -> Path:
     return Path(getattr(agent, "root", ".")).resolve() / _STATE_DIR / _STATE_FILE
 
 
+# LLM: _load_state reads persisted no-progress counters without letting bad JSON break the loop.
+# 函数用途: 读取 local-progress guard 的状态；不存在或坏文件时返回空状态。
 def _load_state(agent: object) -> dict[str, object]:
     path = _state_path(agent)
     if not path.exists():
@@ -154,12 +162,16 @@ def _load_state(agent: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
+# LLM: _write_state persists local-progress guard counters after each guarded turn.
+# 函数用途: 写入 local-progress guard 状态，记录连续无本地推进的探索轮次。
 def _write_state(agent: object, payload: dict[str, object]) -> None:
     path = _state_path(agent)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
+# LLM: _is_local_progressive_call checks whether any tool call advances checkpoint/draft/builder work locally.
+# 函数用途: 判断一轮工具调用里是否包含 builder 或本地写入动作，从而重置 no-progress 计数。
 def _is_local_progressive_call(payload: dict[str, object], calls: list[dict[str, object]] | None) -> bool:
     if not calls:
         return False
@@ -172,6 +184,8 @@ def _is_local_progressive_call(payload: dict[str, object], calls: list[dict[str,
     return any(_call_is_local_progressive(call, productive_tools) for call in calls)
 
 
+# LLM: _call_is_local_progressive classifies one call as genuine local progress rather than exploration.
+# 函数用途: 识别单个工具调用是否属于本地推进动作，例如写文件、调用 builder 或执行本地变更命令。
 def _call_is_local_progressive(call: dict[str, object], productive_tools: set[str]) -> bool:
     tool = str(call.get("tool") or "").strip()
     if tool in productive_tools:
@@ -184,12 +198,16 @@ def _call_is_local_progressive(call: dict[str, object], productive_tools: set[st
     return any(command.startswith(prefix) for prefix in _RUN_COMMAND_LOCAL_MUTATION_PREFIXES) or ">" in command
 
 
+# LLM: _is_exploration_only_call detects turns that stayed entirely in fetch/read/list mode.
+# 函数用途: 判断一轮调用是否全是探索动作；若是，就继续累计无本地推进轮次。
 def _is_exploration_only_call(calls: list[dict[str, object]] | None) -> bool:
     if not calls:
         return True
     return all(_call_is_exploration_only(call) for call in calls)
 
 
+# LLM: _call_is_exploration_only classifies one call as remote/read-only exploration for no-progress accounting.
+# 函数用途: 识别单个工具调用是否属于只读/抓取类探索动作。
 def _call_is_exploration_only(call: dict[str, object]) -> bool:
     tool = str(call.get("tool") or "").strip()
     if tool in _EXPLORATION_TOOL_NAMES:
@@ -202,6 +220,8 @@ def _call_is_exploration_only(call: dict[str, object]) -> bool:
     return any(command.startswith(prefix) for prefix in _RUN_COMMAND_EXPLORATION_PREFIXES)
 
 
+# LLM: _call_command extracts a normalized shell command string for both local-progress and exploration classifiers.
+# 函数用途: 从工具调用里统一取出 command 文本，兼容 shell 嵌套参数结构。
 def _call_command(call: dict[str, object]) -> str:
     command = str(call.get("command") or "").strip().lower()
     if command:

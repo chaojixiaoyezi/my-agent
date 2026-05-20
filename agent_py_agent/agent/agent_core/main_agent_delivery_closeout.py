@@ -750,6 +750,8 @@ def _append_checkpoint_quality_action(
     actions.append(action)
 
 
+# LLM: _checkpoint_shape_hint reads per-checkpoint structure hints so recovery actions can tell the model what shape to write.
+# 函数用途: 从 staging_contract.checkpoint_shape_hints 中取出指定 checkpoint 的结构提示文本。
 def _checkpoint_shape_hint(staging: dict[str, Any], checkpoint_ref: str) -> str:
     hints = staging.get("checkpoint_shape_hints")
     if not isinstance(hints, dict):
@@ -757,6 +759,8 @@ def _checkpoint_shape_hint(staging: dict[str, Any], checkpoint_ref: str) -> str:
     return str(hints.get(checkpoint_ref) or "").strip()
 
 
+# LLM: _append_staged_evidence_actions converts staged evidence findings into structured recovery actions.
+# 函数用途: 把 source_refs/claims 这类阶段证据问题写成 recovery_actions，供 closeout 和 repair guard 复用。
 def _append_staged_evidence_actions(
     actions: list[dict[str, object]],
     seen: set[str],

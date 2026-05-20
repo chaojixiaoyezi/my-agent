@@ -34,7 +34,6 @@ TOOL_NAME_ALIASES = {
     "bash": "run_command",
     "cat": "read_file",
     "command": "run_command",
-    "controlled_exec": "run_command",
     "exec": "run_command",
     "fetch": "fetch_url",
     "grep": "search_text",

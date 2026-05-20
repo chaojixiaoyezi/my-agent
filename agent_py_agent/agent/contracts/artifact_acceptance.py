@@ -267,6 +267,8 @@ def _finding_records(items: list[dict[str, str]]) -> list[ArtifactFinding]:
     return [ArtifactFinding(**item) for item in items]
 
 
+# LLM: _evidence_finding_records adapts evidence-contract helper findings into public ArtifactFinding records.
+# 函数用途: 把阶段证据校验的扩展字段折叠进统一 ArtifactFinding 结构，保持公开报告格式稳定。
 def _evidence_finding_records(items: list[dict[str, object]]) -> list[ArtifactFinding]:
     records: list[ArtifactFinding] = []
     public_keys = {"code", "severity", "message", "location", "value"}

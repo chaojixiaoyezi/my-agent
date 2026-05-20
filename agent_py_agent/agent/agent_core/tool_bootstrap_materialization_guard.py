@@ -133,15 +133,21 @@ def _bootstrap_payload(agent: object, params: ToolLoopExecuteParams) -> dict[str
     }
 
 
+# LLM: _workspace_root resolves the write boundary root used to evaluate bootstrap target existence.
+# 函数用途: 获取当前 agent 的工作区根目录，作为 bootstrap target 解析和越界校验的基准。
 def _workspace_root(agent: object) -> Path:
     root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", ".")
     return Path(root).expanduser().resolve()
 
 
+# LLM: _state_path keeps bootstrap guard counters in one deterministic task-local file.
+# 函数用途: 计算 bootstrap guard 状态文件路径，保证多轮判断使用同一份任务本地状态。
 def _state_path(agent: object) -> Path:
     return Path(getattr(agent, "root", ".")).resolve() / _STATE_DIR / _STATE_FILE
 
 
+# LLM: _load_state reads bootstrap guard counters defensively so bad JSON never crashes the loop.
+# 函数用途: 读取 bootstrap guard 的状态计数；文件缺失或损坏时回退为空状态。
 def _load_state(agent: object) -> dict[str, object]:
     path = _state_path(agent)
     if not path.exists():
@@ -153,12 +159,16 @@ def _load_state(agent: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
+# LLM: _write_state persists bootstrap guard counters after each exploration/materialization turn.
+# 函数用途: 写入 bootstrap guard 的任务本地状态，供下一轮判断是否继续重定向或阻断。
 def _write_state(agent: object, payload: dict[str, object]) -> None:
     path = _state_path(agent)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
+# LLM: _clear_state resets bootstrap guard bookkeeping once bootstrap targets are already materialized.
+# 函数用途: 清理 bootstrap guard 状态文件，避免后续正常阶段继续沿用开工计数。
 def _clear_state(agent: object) -> None:
     path = _state_path(agent)
     try:
@@ -169,6 +179,8 @@ def _clear_state(agent: object) -> None:
         return
 
 
+# LLM: _should_block converts persisted exploration counters into a deterministic startup-loop block decision.
+# 函数用途: 根据连续探索轮次和重复探索次数判断是否该阻断开工阶段空转。
 def _should_block(state: dict[str, object]) -> bool:
     return (
         int(state.get("exploration_rounds_without_materialization") or 0) >= _EXPLORATION_BLOCK_THRESHOLD
@@ -204,6 +216,8 @@ def _target_record(item: object, workspace_root: Path, shape_hints: dict[str, st
     return record
 
 
+# LLM: _startup_actions normalizes optional bootstrap startup actions into a stable list for prompting.
+# 函数用途: 提取 bootstrap_contract.startup_actions，过滤成结构化动作列表供模型参考。
 def _startup_actions(bootstrap: object) -> list[dict[str, object]]:
     actions = bootstrap.get("startup_actions") if isinstance(bootstrap, dict) else None
     if not isinstance(actions, list):
@@ -211,6 +225,8 @@ def _startup_actions(bootstrap: object) -> list[dict[str, object]]:
     return [dict(item) for item in actions if isinstance(item, dict)]
 
 
+# LLM: _checkpoint_shape_hints collects per-checkpoint shape hints from artifact contracts without reading prompt prose.
+# 函数用途: 汇总 staged checkpoint 的结构提示，帮助 bootstrap 阶段生成最小正确骨架。
 def _checkpoint_shape_hints(contract: dict[str, object]) -> dict[str, str]:
     hints: dict[str, str] = {}
     for artifact in _artifact_items(contract):
@@ -227,6 +243,8 @@ def _checkpoint_shape_hints(contract: dict[str, object]) -> dict[str, str]:
     return hints
 
 
+# LLM: _artifact_items extracts only structured artifact records from the delivery contract.
+# 函数用途: 从 delivery_contract.artifacts 中挑出合法 artifact 项，供 shape hint 和目标扫描复用。
 def _artifact_items(contract: dict[str, object]) -> list[dict[str, object]]:
     artifacts = contract.get("artifacts")
     if not isinstance(artifacts, list):
@@ -252,10 +270,14 @@ def _call_is_bootstrap_productive(call: dict[str, object]) -> bool:
     return not any(command.startswith(prefix) for prefix in _RUN_COMMAND_INSPECTION_PREFIXES)
 
 
+# LLM: _is_bootstrap_exploration_only_call checks whether the whole call batch stayed in inspection/fetch mode.
+# 函数用途: 判断一轮工具调用是否全部属于 bootstrap 阶段的探索动作，而没有任何真实物化行为。
 def _is_bootstrap_exploration_only_call(calls: list[dict[str, object]]) -> bool:
     return all(_call_is_bootstrap_exploration_only(call) for call in calls)
 
 
+# LLM: _call_is_bootstrap_exploration_only classifies one call as inspection/fetch-only during startup.
+# 函数用途: 把单个工具调用识别成 bootstrap 探索动作，供空转计数和重复指纹使用。
 def _call_is_bootstrap_exploration_only(call: dict[str, object]) -> bool:
     tool = str(call.get("tool") or "").strip()
     if tool in {"fetch_url", "http_request", "list_files", "list_tools", "read_artifact", "read_file", "search"}:
@@ -270,12 +292,16 @@ def _call_is_bootstrap_exploration_only(call: dict[str, object]) -> bool:
     )
 
 
+# LLM: _calls_fingerprint gives repeated startup exploration a stable machine signature across turns.
+# 函数用途: 为一批 bootstrap 调用生成指纹，便于识别“同样的探索动作又来了一轮”。
 def _calls_fingerprint(calls: list[dict[str, object]] | None) -> str:
     if not calls:
         return "NO_TOOL_CALL"
     return "|".join(_call_fingerprint(call) for call in calls)
 
 
+# LLM: _call_fingerprint keeps one call's identifying shape small enough for state persistence and comparison.
+# 函数用途: 为单个工具调用生成短指纹，尤其在 run_command 场景下保留首行命令特征。
 def _call_fingerprint(call: dict[str, object]) -> str:
     tool = str(call.get("tool") or "").strip()
     if tool != "run_command":
@@ -286,6 +312,8 @@ def _call_fingerprint(call: dict[str, object]) -> str:
     return f"{tool}:{command.splitlines()[0].strip()[:120]}"
 
 
+# LLM: _call_command extracts a normalized shell command string from either direct or nested payload fields.
+# 函数用途: 统一读取工具调用中的 command 文本，兼容 shell 嵌套参数结构。
 def _call_command(call: dict[str, object]) -> str:
     command = str(call.get("command") or "").strip().lower()
     if command:

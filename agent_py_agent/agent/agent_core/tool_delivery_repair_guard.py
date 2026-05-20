@@ -165,12 +165,16 @@ def _call_is_productive(
     return tool not in inspection_only_tools
 
 
+# LLM: _productive_tools decides which tools count as progress for the current staged-repair phase.
+# 函数用途: 根据 strict_write_required 和 builder_tool 集合计算本轮允许视为“有效修复推进”的工具名集合。
 def _productive_tools(payload: dict[str, object], builder_tools: set[str]) -> set[str]:
     if bool(payload.get("strict_write_required")):
         return {tool for tool in builder_tools if tool} | _STRICT_REPAIR_PRODUCTIVE_TOOLS
     return {tool for tool in builder_tools if tool} | _PRODUCTIVE_TOOL_NAMES
 
 
+# LLM: _strict_write_required upgrades the guard once unchanged failures have reached the no-progress threshold.
+# 函数用途: 根据 unchanged_failure_count 和 no_progress_block_threshold 判断是否必须切到严格写入模式。
 def _strict_write_required(progress: dict[str, object]) -> bool:
     try:
         unchanged = int(progress.get("unchanged_failure_count") or 0)

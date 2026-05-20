@@ -178,10 +178,14 @@ def _runtime_findings(
     ]
 
 
+# LLM: _accepted_artifact_targets tracks which final artifact paths are already accepted and should not be blocked by stale sessions.
+# 函数用途: 收集通过验收的产物绝对路径，用来放行同目标的旧 file_write_session。
 def _accepted_artifact_targets(artifacts: list[TaskRunArtifactAcceptance]) -> set[str]:
     return {str(Path(item.path).resolve()) for item in artifacts if item.ok}
 
 
+# LLM: _session_target resolves one open file-write session to its target path for runtime finding de-duplication.
+# 函数用途: 从 file_write_session 摘出最终写入目标路径，便于和已验收产物做同目标比较。
 def _session_target(session: dict[str, object]) -> str:
     target = session.get("target_path")
     if not isinstance(target, dict):

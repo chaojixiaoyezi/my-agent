@@ -1,3 +1,7 @@
+#!/usr/bin/env python3
+# LLM: Contract-test pyramid checks keep production code generic while requiring local fast-test layers to exist.
+# 模块用途: 审核合同测试目录、参考项目映射和生产代码专项词，防止真实任务专项逻辑重新渗回生产层。
+
 from __future__ import annotations
 
 import argparse
@@ -41,6 +45,8 @@ PRODUCTION_TASK_SPECIFIC_NEEDLES = (
 )
 
 
+# LLM: ContractPyramidReport is the stable machine result for pyramid coverage and hygiene checks.
+# 类用途: 表示合同测试金字塔检查结果，包含错误码、finding 列表和已映射参考项目。
 @dataclass(frozen=True)
 class ContractPyramidReport:
     ok: bool
@@ -49,6 +55,8 @@ class ContractPyramidReport:
     reference_projects_checked: tuple[str, ...]
 
 
+# LLM: check_contract_test_pyramid is the public gate that validates local fast-test layers and production hygiene.
+# 函数用途: 检查合同测试目录是否齐全、文档是否映射参考项目，以及生产代码中是否混入专项任务词。
 def check_contract_test_pyramid(repo_root: Path) -> ContractPyramidReport:
     root = Path(repo_root)
     findings: list[dict[str, str]] = []
@@ -64,6 +72,8 @@ def check_contract_test_pyramid(repo_root: Path) -> ContractPyramidReport:
     )
 
 
+# LLM: _check_required_test_dirs verifies the local fast-test pyramid exists before real-environment validation.
+# 函数用途: 校验 contracts/fake_tools/fake_llm/replay/scenario_packs 目录存在且不为空。
 def _check_required_test_dirs(root: Path, findings: list[dict[str, str]]) -> None:
     for rel in REQUIRED_TEST_DIRS:
         path = root / rel
@@ -74,6 +84,8 @@ def _check_required_test_dirs(root: Path, findings: list[dict[str, str]]) -> Non
             findings.append(_finding("CONTRACT_TEST_DIR_EMPTY", rel, "required test pyramid directory has no fixtures"))
 
 
+# LLM: _check_reference_map ensures the contract-testing design doc still cites the chosen external reference repos.
+# 函数用途: 检查设计文档是否覆盖既定参考项目，避免后续开发脱离对照来源。
 def _check_reference_map(root: Path, findings: list[dict[str, str]]) -> list[str]:
     path = root / "docs/design/main-agent-contract-testing.md"
     if not path.exists():
@@ -89,6 +101,8 @@ def _check_reference_map(root: Path, findings: list[dict[str, str]]) -> list[str
     return checked
 
 
+# LLM: _check_production_needles guards against task-specific words leaking into production contract code.
+# 函数用途: 扫描生产 agent 代码中的专项任务词，提示需要继续去专项化的实现。
 def _check_production_needles(root: Path, findings: list[dict[str, str]]) -> None:
     production_root = root / "agent_py_agent" / "agent"
     if not production_root.exists():
@@ -107,10 +121,14 @@ def _check_production_needles(root: Path, findings: list[dict[str, str]]) -> Non
                 )
 
 
+# LLM: _finding keeps pyramid gate failures compact, stable, and easy to diff in CI.
+# 函数用途: 统一生成合同测试金字塔检查 finding，保持 code/location/detail 结构稳定。
 def _finding(code: str, location: str, detail: str) -> dict[str, str]:
     return {"code": code, "location": location, "detail": detail}
 
 
+# LLM: main exposes the pyramid gate as a small CLI for CI and local verification.
+# 函数用途: 解析命令行参数并输出合同测试金字塔检查结果，供脚本或 CI 直接调用。
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate contract test pyramid coverage and production contract hygiene.")
     parser.add_argument(

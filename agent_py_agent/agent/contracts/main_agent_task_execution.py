@@ -145,6 +145,8 @@ def _prepare_or_execute(
     return _run_case(runtime)
 
 
+# LLM: _ensure_case_contract_refs lazily re-materializes suite files when a selected case is missing contract refs.
+# 函数用途: 确保 prompt/acceptance/expected_artifacts 这些 case 依赖文件已经在工作区落地。
 def _ensure_case_contract_refs(
     case: MainAgentTaskCasePlan,
     request: MainAgentTaskExecutionRequest,
@@ -246,6 +248,8 @@ def _timeout_case_result(
     return _case_result(bundle)
 
 
+# LLM: _should_auto_resume decides whether a failed case should be retried from its freshly written recovery packet.
+# 函数用途: 根据失败状态、recovery packet 和当前请求上下文判断是否触发一次自动续跑。
 def _should_auto_resume(bundle: CaseResultBundle) -> bool:
     runtime = bundle.runtime
     if _AUTO_RECOVERY_ATTEMPTS <= 0:
@@ -257,6 +261,8 @@ def _should_auto_resume(bundle: CaseResultBundle) -> bool:
     )
 
 
+# LLM: _auto_resume_case re-enters the normal execution path with a structured recovery packet instead of ad hoc retry logic.
+# 函数用途: 使用刚生成的 recovery packet 重建请求，再走同一套 case 准备和执行流程。
 def _auto_resume_case(bundle: CaseResultBundle) -> MainAgentTaskExecutionCaseResult:
     runtime = bundle.runtime
     packet_path = (runtime.workspace / bundle.recovery_packet_ref).resolve()

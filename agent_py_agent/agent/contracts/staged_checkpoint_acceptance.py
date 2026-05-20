@@ -233,6 +233,8 @@ def _tabular_json_shape_issue(value: object, *, required_columns: list[str] | No
     return {}
 
 
+# LLM: _tabular_sheet_candidates normalizes flexible JSON table shapes into sheet-like records for shape validation.
+# 函数用途: 把 rows/sheets/键值映射等表格 JSON 结构统一成 sheet 候选列表，供后续列和行校验复用。
 def _tabular_sheet_candidates(value: object, *, required_columns: list[str]) -> list[dict[str, object]]:
     if isinstance(value, list):
         return [{"name": "Sheet1", "rows": value}] if required_columns else []
