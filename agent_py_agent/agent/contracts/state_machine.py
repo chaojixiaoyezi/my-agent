@@ -132,6 +132,10 @@ def recovery_decision(facts: RunStateFacts) -> RecoveryDecision:
         return RecoveryDecision("wait_for_local_progress", False, "running_without_local_progress")
     if status in ACTIVE_STATES:
         return RecoveryDecision("wait_or_observe", False, "already_active")
+    if failure == "APPROVAL_REQUIRED":
+        return RecoveryDecision("request_approval_or_stop", False, "approval_required")
+    if failure == "NO_PROGRESS":
+        return RecoveryDecision("change_strategy_or_stop", False, "no_progress")
     if status == "BLOCKED" and failure in {"TOOL_UNAVAILABLE", "WRITE_FORBIDDEN", "PATH_OUTSIDE_WORKSPACE"}:
         return RecoveryDecision("repair_or_request_capability", False, f"blocked_{failure.lower()}")
     if can_repair(facts):

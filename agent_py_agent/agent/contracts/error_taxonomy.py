@@ -39,6 +39,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action="request_permission_or_choose_allowed_root",
         recovery_hint="写入被禁止；改写到 allowed_write_roots，或上报需要授权。",
     ),
+    "APPROVAL_REQUIRED": ErrorContract(
+        code="APPROVAL_REQUIRED",
+        category="permission",
+        retryable=True,
+        recommended_action="request_approval_or_choose_safe_action",
+        recovery_hint="当前动作需要审批；先走审批链路，或者改成不需要高危权限的安全动作。",
+    ),
     "TOOL_UNAVAILABLE": ErrorContract(
         code="TOOL_UNAVAILABLE",
         category="tool",
@@ -186,6 +193,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action="fallback_to_checkpoint_or_summary",
         recovery_hint="compact 引用缺失；降级读 checkpoint、summary、raw archive，不要继续自动执行。",
     ),
+    "NO_PROGRESS": ErrorContract(
+        code="NO_PROGRESS",
+        category="orchestration",
+        retryable=True,
+        recommended_action="change_strategy_or_stop",
+        recovery_hint="连续多轮没有新进展；不要原样重复，改策略、缩小范围、换工具，或者明确阻塞后停下。",
+    ),
     "SPREADSHEET_SOURCE_MISSING": ErrorContract(
         code="SPREADSHEET_SOURCE_MISSING",
         category="artifact",
@@ -227,6 +241,10 @@ def error_contract(code: str) -> ErrorContract:
 # 函数用途: 把工具/模型/compact 的失败文本归类为稳定错误类型，给后续恢复策略使用。
 def classify_error(message: str) -> ErrorContract:
     text = str(message or "").lower()
+    if "approval_required" in text or "approval required" in text or "requires approval" in text:
+        return error_contract("APPROVAL_REQUIRED")
+    if "no_progress" in text or "no progress" in text or "without progress" in text:
+        return error_contract("NO_PROGRESS")
     if "outside workspace" in text or "path_outside_workspace" in text:
         return error_contract("PATH_OUTSIDE_WORKSPACE")
     if "permission" in text or "forbidden" in text or "denied" in text or "write_forbidden" in text:

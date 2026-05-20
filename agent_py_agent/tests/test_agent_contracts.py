@@ -19,6 +19,14 @@ def test_error_taxonomy_classifies_failures_and_recommends_recovery() -> None:
     assert contract.category == "artifact"
     assert contract.recommended_action == "read_or_rebuild_artifact_ref"
 
+    approval = classify_error("dangerous command blocked: approval required before execution")
+    assert approval.code == "APPROVAL_REQUIRED"
+    assert approval.retryable is True
+
+    no_progress = error_contract("NO_PROGRESS")
+    assert no_progress.category == "orchestration"
+    assert no_progress.recommended_action == "change_strategy_or_stop"
+
 
 # LLM: State machine decisions must be facts, not prompt-specific guard prose.
 # 函数用途: 验证统一状态机能判断是否可调度、是否可收口、失败后应修复还是接管。
@@ -39,6 +47,14 @@ def test_run_state_machine_dispatch_closeout_and_recovery_decisions() -> None:
     blocked = recovery_decision(RunStateFacts(status="BLOCKED", failure_type="TOOL_UNAVAILABLE"))
     assert blocked.action == "repair_or_request_capability"
     assert blocked.allow_new_run is False
+
+    approval = recovery_decision(RunStateFacts(status="FAILED", failure_type="APPROVAL_REQUIRED"))
+    assert approval.action == "request_approval_or_stop"
+    assert approval.allow_new_run is False
+
+    no_progress = recovery_decision(RunStateFacts(status="BLOCKED", failure_type="NO_PROGRESS"))
+    assert no_progress.action == "change_strategy_or_stop"
+    assert no_progress.allow_new_run is False
 
     failed = recovery_decision(RunStateFacts(status="FAILED", attempts=3, max_attempts=3))
     assert failed.action == "takeover_or_stop"
