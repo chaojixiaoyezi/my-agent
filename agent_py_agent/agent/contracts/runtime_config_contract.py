@@ -84,6 +84,8 @@ def _validate_dangerous_combinations(config: dict[str, Any], findings: list[dict
     root = str(config.get("workspace_root") or "").strip()
     if root and Path(root).expanduser() == Path("/"):
         findings.append(_finding("CONFIG_WORKSPACE_ROOT_DANGEROUS", "workspace_root", "root_workspace_forbidden"))
+    _validate_artifact_dir_boundary(config, findings)
+    _validate_allowed_write_roots(config, findings)
     if bool(config.get("allow_shell")):
         findings.append(_finding("CONFIG_ALLOW_SHELL_ENABLED", "allow_shell", "shell_requires_explicit_review"))
     if bool(config.get("allow_dangerous_actions")) and config.get("approval_required") is False:
@@ -94,6 +96,63 @@ def _validate_dangerous_combinations(config: dict[str, Any], findings: list[dict
                 "dangerous_actions_need_approval",
             )
         )
+
+
+# LLM: _validate_artifact_dir_boundary keeps artifact output inside workspace_root.
+# 函数用途: artifact_dir 可相对 workspace_root，也可绝对路径，但最终必须落在 workspace_root 内。
+def _validate_artifact_dir_boundary(config: dict[str, Any], findings: list[dict[str, str]]) -> None:
+    workspace = _path_or_none(config.get("workspace_root"))
+    artifact_dir = _path_or_none(config.get("artifact_dir"))
+    if workspace is None or artifact_dir is None:
+        return
+    resolved = artifact_dir if artifact_dir.is_absolute() else workspace / artifact_dir
+    if _path_inside(resolved, workspace):
+        return
+    findings.append(_finding("CONFIG_ARTIFACT_DIR_OUTSIDE_WORKSPACE", "artifact_dir", "artifact_dir_must_stay_in_workspace"))
+
+
+# LLM: _validate_allowed_write_roots rejects broad or escaping write roots.
+# 函数用途: allowed_write_roots 不能包含 /，也不能指向 workspace_root 外部。
+def _validate_allowed_write_roots(config: dict[str, Any], findings: list[dict[str, str]]) -> None:
+    workspace = _path_or_none(config.get("workspace_root"))
+    roots = config.get("allowed_write_roots")
+    if workspace is None or not isinstance(roots, list):
+        return
+    for index, root in enumerate(roots):
+        path = _path_or_none(root)
+        if path is None:
+            continue
+        if path.expanduser() == Path("/"):
+            findings.append(_finding("CONFIG_ALLOWED_WRITE_ROOT_DANGEROUS", f"allowed_write_roots[{index}]", "root_write_forbidden"))
+            continue
+        resolved = path if path.is_absolute() else workspace / path
+        if not _path_inside(resolved, workspace):
+            findings.append(
+                _finding(
+                    "CONFIG_ALLOWED_WRITE_ROOT_OUTSIDE_WORKSPACE",
+                    f"allowed_write_roots[{index}]",
+                    "write_root_must_stay_in_workspace",
+                )
+            )
+
+
+# LLM: _path_inside checks resolved path containment without requiring paths to exist.
+# 函数用途: 判断目标路径是否在 base 内，供启动配置 doctor 复用。
+def _path_inside(path: Path, base: Path) -> bool:
+    try:
+        path.expanduser().resolve(strict=False).relative_to(base.expanduser().resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+# LLM: _path_or_none converts non-empty config strings to Path objects.
+# 函数用途: 空值或非法类型返回 None，缺失错误由必填字段校验负责。
+def _path_or_none(value: object) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return Path(text).expanduser()
 
 
 # LLM: _finding keeps config diagnostics stable and compact.

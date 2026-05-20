@@ -36,13 +36,15 @@ def test_cmd_real_e2e_writes_report_and_json_output(tmp_path, capsys):
 def test_cmd_real_e2e_includes_artifact_acceptance_findings(tmp_path, capsys):
     from agent_py_agent.cli.real_e2e_commands import cmd_real_e2e
 
-    artifact = tmp_path / "index.html"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "index.html"
     artifact.write_text(
         '<!doctype html><html><head><link rel="stylesheet" href="https://fonts.example/font.css"></head><body><main>Bad</main>',
         encoding="utf-8",
     )
     args = argparse.Namespace(
-        workspace=str(tmp_path / "workspace"),
+        workspace=str(workspace),
         report="",
         json=True,
         include_real_model=False,

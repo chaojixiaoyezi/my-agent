@@ -254,6 +254,8 @@ def test_main_agent_real_task_execution_fails_missing_expected_artifact(tmp_path
         run_main_agent_real_task_execution,
     )
 
+    base_config = _write_echo_config(tmp_path / "base_config.yaml")
+
     report = run_main_agent_real_task_execution(
         MainAgentRealTaskExecutionRequest(
             workspace=tmp_path,
@@ -261,6 +263,7 @@ def test_main_agent_real_task_execution_fails_missing_expected_artifact(tmp_path
             task_timeout_seconds=30,
             execute=True,
             case_ids=("furniture_homepage_html",),
+            base_config_path=base_config,
             package_root=Path.cwd(),
         )
     )
