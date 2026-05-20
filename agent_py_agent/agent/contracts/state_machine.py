@@ -9,7 +9,7 @@ from .error_taxonomy import classify_error, error_contract
 
 DISPATCHABLE_STATES = {"PLANNING", "PENDING"}
 ACTIVE_STATES = {"RUNNING", "WAITING_FOR_TOOL", "WAITING_FOR_CHILD", "WAITING_FOR_USER", "REPAIRING", "TAKING_OVER"}
-TERMINAL_STATES = {"DONE", "FAILED", "CANCELLED", "ABANDONED"}
+TERMINAL_STATES = {"DONE", "FAILED", "CANCELLED", "ABANDONED", "TIMEOUT", "CHANNEL_ERROR"}
 REPAIRABLE_STATES = {"BLOCKED", "FAILED"}
 VERIFIED_STATES = {"VERIFIED"}
 HEALTHY_CHANNEL_STATES = {"", "OK", "UNKNOWN"}
@@ -47,6 +47,8 @@ def normalize_status(value: object) -> str:
         return "PENDING"
     if text == "COMPLETED":
         return "DONE"
+    if text == "ERROR":
+        return "FAILED"
     return text or "PLANNING"
 
 
@@ -86,26 +88,68 @@ def can_repair(facts: RunStateFacts) -> bool:
         return True
     if status == "BLOCKED":
         return True
+    if status in {"TIMEOUT", "CHANNEL_ERROR"}:
+        return True
     return status == "FAILED" and (facts.max_attempts <= 0 or facts.attempts < facts.max_attempts)
+
+
+# LLM: waiting_reason exposes why execution is paused without asking callers to parse status prose.
+# 函数用途: 把等待用户、等待工具、等待验收和等待本地进展整理成稳定原因字段，供控制面和 UI 统一使用。
+def waiting_reason(facts: RunStateFacts) -> str:
+    status = normalize_status(facts.status)
+    verification = normalize_verification(facts.verification_status)
+    failure = str(facts.failure_type or "").upper()
+    if failure == "APPROVAL_REQUIRED":
+        return "approval"
+    if status == "WAITING_FOR_USER":
+        return "user"
+    if status == "WAITING_FOR_TOOL":
+        return "tool"
+    if status == "WAITING_FOR_CHILD":
+        return "child"
+    if status == "DONE" and verification not in VERIFIED_STATES:
+        return "acceptance"
+    if status == "RUNNING" and not facts.has_progress:
+        return "local_progress"
+    return "none"
+
+
+# LLM: terminal_outcome separates active/blocked/completed/timed_out meanings from raw status spelling.
+# 函数用途: 给终态和等待态补一个统一结果标签，避免上层只看 status 文本就误判 run 是否真的完成。
+def terminal_outcome(facts: RunStateFacts) -> str:
+    status = normalize_status(facts.status)
+    if can_closeout(facts):
+        return "completed"
+    if status == "TIMEOUT":
+        return "timed_out"
+    if status in {"CANCELLED", "ABANDONED"}:
+        return "cancelled"
+    if status in {"BLOCKED", "DONE"}:
+        return "blocked"
+    if status in {"FAILED", "CHANNEL_ERROR"} or normalize_channel(facts.channel_status) == "BROKEN":
+        return "failed"
+    return "active"
 
 
 # LLM: lifecycle_phase projects shared status facts into a stable orchestration-facing phase.
 # 函数用途: 把状态、验收、通道和进展规整成 WAITING/VERIFYING/BLOCKED/DONE 这类统一生命周期阶段。
 def lifecycle_phase(facts: RunStateFacts) -> str:
     status = normalize_status(facts.status)
-    verification = normalize_verification(facts.verification_status)
     channel = normalize_channel(facts.channel_status)
+    reason = waiting_reason(facts)
     if channel == "BROKEN":
         return "BLOCKED"
-    if status == "DONE" and verification not in VERIFIED_STATES:
-        return "VERIFYING"
-    if status == "RUNNING" and not facts.has_progress:
-        return "WAITING_FOR_LOCAL_PROGRESS"
-    if status == "WAITING_FOR_TOOL":
-        return "WAITING_FOR_TOOL"
-    if status == "WAITING_FOR_USER":
+    if status in {"TIMEOUT", "CHANNEL_ERROR"}:
+        return "BLOCKED"
+    if reason in {"approval", "user"}:
         return "WAITING_FOR_USER"
-    if status == "WAITING_FOR_CHILD":
+    if reason == "acceptance":
+        return "VERIFYING"
+    if reason == "local_progress":
+        return "WAITING_FOR_LOCAL_PROGRESS"
+    if reason == "tool":
+        return "WAITING_FOR_TOOL"
+    if reason == "child":
         return "WAITING_FOR_CHILD"
     if status in {"BLOCKED", "FAILED", "CANCELLED", "ABANDONED"}:
         return "BLOCKED"
@@ -164,6 +208,8 @@ def run_state_snapshot_from_task(task: object) -> dict[str, object]:
         "verification_status": normalize_verification(facts.verification_status),
         "channel_status": normalize_channel(facts.channel_status),
         "lifecycle_phase": lifecycle_phase(facts),
+        "waiting_reason": waiting_reason(facts),
+        "terminal_outcome": terminal_outcome(facts),
         "failure_type": error_contract(facts.failure_type or "UNKNOWN_ERROR").code,
         "attempts": facts.attempts,
         "max_attempts": facts.max_attempts,
@@ -209,4 +255,6 @@ __all__ = [
     "normalize_verification",
     "recovery_decision",
     "run_state_snapshot_from_task",
+    "terminal_outcome",
+    "waiting_reason",
 ]

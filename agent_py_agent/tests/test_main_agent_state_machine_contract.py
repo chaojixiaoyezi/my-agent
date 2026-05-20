@@ -74,3 +74,61 @@ def test_run_state_snapshot_projects_verified_done_to_done():
     assert snapshot["lifecycle_phase"] == "DONE"
     assert snapshot["recovery_decision"]["action"] == "closeout"
     assert snapshot["can_closeout"] is True
+
+
+def test_run_state_snapshot_projects_approval_wait_to_waiting_for_user():
+    from agent_py_agent.agent.contracts.state_machine import run_state_snapshot_from_task
+
+    task = SimpleNamespace(
+        id="run-5",
+        status="BLOCKED",
+        verification_status="UNVERIFIED",
+        channel_status="OK",
+        failure_type="APPROVAL_REQUIRED",
+        has_progress=True,
+    )
+
+    snapshot = run_state_snapshot_from_task(task)
+
+    assert snapshot["lifecycle_phase"] == "WAITING_FOR_USER"
+    assert snapshot["waiting_reason"] == "approval"
+    assert snapshot["terminal_outcome"] == "blocked"
+    assert snapshot["recovery_decision"]["action"] == "request_approval_or_stop"
+
+
+def test_run_state_snapshot_projects_waiting_for_tool_to_tool_wait_reason():
+    from agent_py_agent.agent.contracts.state_machine import run_state_snapshot_from_task
+
+    task = SimpleNamespace(
+        id="run-6",
+        status="WAITING_FOR_TOOL",
+        verification_status="UNVERIFIED",
+        channel_status="OK",
+        has_progress=True,
+    )
+
+    snapshot = run_state_snapshot_from_task(task)
+
+    assert snapshot["lifecycle_phase"] == "WAITING_FOR_TOOL"
+    assert snapshot["waiting_reason"] == "tool"
+    assert snapshot["terminal_outcome"] == "active"
+
+
+def test_run_state_snapshot_projects_timeout_to_timeout_terminal_outcome():
+    from agent_py_agent.agent.contracts.state_machine import run_state_snapshot_from_task
+
+    task = SimpleNamespace(
+        id="run-7",
+        status="TIMEOUT",
+        verification_status="UNVERIFIED",
+        channel_status="OK",
+        runner_last_error="tool timed out after 240 seconds",
+        has_progress=False,
+    )
+
+    snapshot = run_state_snapshot_from_task(task)
+
+    assert snapshot["lifecycle_phase"] == "BLOCKED"
+    assert snapshot["waiting_reason"] == "none"
+    assert snapshot["terminal_outcome"] == "timed_out"
+    assert snapshot["recovery_decision"]["action"] == "repair"

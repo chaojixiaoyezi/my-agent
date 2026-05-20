@@ -84,7 +84,7 @@ def test_run_state_snapshot_from_task_like_object() -> None:
     assert snapshot["failure_type"] == "TOOL_TIMEOUT"
     assert snapshot["can_dispatch"] is False
     assert snapshot["can_closeout"] is False
-    assert snapshot["recovery_decision"]["action"] == "manual_review"
+    assert snapshot["recovery_decision"]["action"] == "repair"
 
 
 # LLM: Idempotency keys make duplicate model calls safe without hardcoding workflow guards.

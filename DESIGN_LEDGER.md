@@ -1,5 +1,15 @@
 # 设计思路台账
 
+## 2026-05-21 / 主代理状态机补 waiting_reason 与 terminal_outcome
+
+状态：部分落地
+
+摘要：
+- 共享状态机现在不只给 `lifecycle_phase`，还补了 `waiting_reason` 和 `terminal_outcome`，把“在等工具/等用户审批/等验收/等本地进展”和“真完成/超时/阻塞/仍活跃”拆成机器字段。
+- `APPROVAL_REQUIRED` 不再只落在 `recovery_decision` 里，投影时会直接归到 `WAITING_FOR_USER`；`DONE 未验收` 统一进 `VERIFYING`；`TIMEOUT/CHANNEL_ERROR` 统一进 `BLOCKED`。
+- 这一步借了参考项目的思路但没照搬名字：通道运行时 把 `status` 与 `terminalOutcome/deliveryStatus` 分开，会话运行时 把 runtime status 和事件流分开；我们这里先做轻量版通用底座。
+- 后续方向：继续把更多上层控制面、进度展示和恢复决策改成直接消费这些结构化字段，减少从 `status` 单字段和自然语言提示里二次猜。
+
 ## 2026-05-21 / 主代理合同测试底座扩到 runtime issue 与 replay 快照
 
 状态：部分落地
