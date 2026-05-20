@@ -478,3 +478,91 @@
 - 还没有把这周的真实任务问题全部沉淀进去
 
 所以后续第一优先级不是再盲跑真实环境，而是把这套底座补齐。
+
+---
+
+## 9. Phase 2.5：主代理核心稳定化阶段 1-4
+
+这四步来自 `/Users/example/study-agent/all-agent/2.txt` 的路线收束：先把单个主代理跑硬，再扩大真实任务和子代理。
+
+参考项目对照：
+
+- 通道运行时：学习它的 effective tool policy pipeline。工具权限和可见性由可信 session / config / sandbox 元数据合并，不从模型文本里猜。
+- 长期助手：学习它的 inactivity-based timeout、工具边界活动记录、运行状态持久化和原子写入。
+- 会话运行时：学习它的结构化工具事件和 approval/patch/exec 边界。
+
+### 阶段 1：冻结主代理核心入口
+
+新增合同：
+
+- `agent_py_agent/agent/contracts/main_agent_core_entrypoints.py`
+- `agent_py_agent/tests/test_main_agent_core_entrypoints.py`
+
+它冻结这些核心入口：
+
+- 状态机
+- 工具执行器
+- 验收闸门
+- RunLog
+- ToolTrace
+- ApprovalGate
+- effective contract 快照
+
+核心不变量：
+
+- 成功必须经过验收。
+- 工具调用必须经过统一 executor。
+- 状态修改只能走事件式合同。
+- 机器事实只能来自结构化字段。
+
+### 阶段 2：固定 dry-run 主线
+
+新增合同：
+
+- `agent_py_agent/agent/contracts/dry_run_mainline_contract.py`
+- `agent_py_agent/tests/test_dry_run_mainline_contract.py`
+
+测试 fixture 使用告警分析 dry-run，但产品代码保持通用：只看 `required_inputs`、`tool_results`、`artifact_refs`、`evidence_refs`、`action_intents` 和 `executed_actions` 这些结构字段。
+
+它解决的问题：
+
+- 模型说完成但没有证据。
+- 工具失败但继续报喜。
+- dry-run 被误当真实执行。
+- 真实副作用混入 dry-run 主线。
+
+### 阶段 3：真实 LLM + Fake Tools 行为验证
+
+新增合同：
+
+- `agent_py_agent/agent/contracts/live_llm_fake_tool_contract.py`
+- `agent_py_agent/tests/test_live_llm_fake_tool_contract.py`
+
+它不直接调用模型，而是规定真实模型试跑必须落下可回放事实：
+
+- prompt ref
+- response ref
+- tool trace ref
+- contract hash
+- verifier 结果
+- unknown tool / schema error / fake completion / dry-run claimed real 指标
+
+这样以后真实 LLM 试跑的问题，可以先变成离线回归，再修底座。
+
+### 阶段 4：只读 / dry-run 工具适配器就绪合同
+
+新增合同：
+
+- `agent_py_agent/agent/contracts/tool_adapter_readiness_contract.py`
+- `agent_py_agent/tests/test_tool_adapter_readiness_contract.py`
+
+它要求工具适配器在暴露给真实任务前先声明：
+
+- effect：`read_only`、`mutating`、`dangerous`
+- result schema ref
+- read-only 常见失败覆盖：成功、超时、鉴权失败、空结果、大输出、脱敏
+- dry-run mode 字段
+- 真实执行是否需要审批
+- 副作用工具是否强制幂等键
+
+这一步不是某个工具专项逻辑，而是所有真实只读工具和 dry-run 工具共用的上线门槛。

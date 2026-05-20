@@ -1,5 +1,21 @@
 # 设计思路台账
 
+## 2026-05-21 / 主代理 Phase 2.5 阶段 1-4 合同化
+
+状态：已落地第一版
+
+摘要：
+- 新增 `main_agent_core_entrypoints` 合同，冻结主代理状态机、工具执行器、验收闸门、RunLog、ToolTrace、ApprovalGate 和 effective contract 这些核心入口，并要求机器事实来自结构化字段。
+- 新增 `dry_run_mainline_contract`，用通用字段校验 dry-run 主线的输入、工具结果、产物 refs、证据 refs 和副作用隔离；告警分析只是测试 fixture，不进入生产专项分支。
+- 新增 `live_llm_fake_tool_contract`，规定真实 LLM + 假工具试跑必须保存 prompt/response/tool-trace/contract refs 和工具边界违规指标，方便回放和回归。
+- 新增 `tool_adapter_readiness_contract`，把真实只读工具和 dry-run 工具上线前要满足的 effect、schema、测试覆盖、审批、幂等和 mode 字段做成通用合同。
+- 已把四个区域加入 `check_offline_contract_matrix.py`，后续离线合同矩阵会防止这些入口被漏掉。
+- 对照来源：通道运行时 的 effective tool policy pipeline、长期助手 的 inactivity/status/atomic write、会话运行时 的结构化工具与审批边界；本仓库只吸收结构化合同思想，不复制专项任务逻辑。
+
+后续方向：
+- 用 fake tool / fake LLM / replay 把真实 LLM 失败样本落进这些合同。
+- 真环境测试只做最终验收和失败样本来源，不再作为主要开发循环。
+
 ## 2026-05-21 / 主代理状态机补 waiting_reason 与 terminal_outcome
 
 状态：部分落地

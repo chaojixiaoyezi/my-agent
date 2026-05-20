@@ -103,6 +103,22 @@ REQUIRED_AREAS = {
         "agent_py_agent/agent/contracts/offline_combination_failure_contract.py",
         "agent_py_agent/tests/test_offline_combination_failure_contract.py",
     ),
+    "main_agent_core_entrypoints": (
+        "agent_py_agent/agent/contracts/main_agent_core_entrypoints.py",
+        "agent_py_agent/tests/test_main_agent_core_entrypoints.py",
+    ),
+    "dry_run_mainline": (
+        "agent_py_agent/agent/contracts/dry_run_mainline_contract.py",
+        "agent_py_agent/tests/test_dry_run_mainline_contract.py",
+    ),
+    "live_llm_fake_tool": (
+        "agent_py_agent/agent/contracts/live_llm_fake_tool_contract.py",
+        "agent_py_agent/tests/test_live_llm_fake_tool_contract.py",
+    ),
+    "tool_adapter_readiness": (
+        "agent_py_agent/agent/contracts/tool_adapter_readiness_contract.py",
+        "agent_py_agent/tests/test_tool_adapter_readiness_contract.py",
+    ),
 }
 
 

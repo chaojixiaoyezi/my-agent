@@ -1017,6 +1017,10 @@ docs/
 - `agent_py_agent/agent/contracts/main_agent_real_task_execution_files.py`: 主代理真实任务执行的命令、配置、日志和 refs helper，保证每个 case 有独立 workspace。
 - `agent_py_agent/agent/contracts/main_agent_real_task_execution_models.py`: 主代理真实任务执行请求、单项结果和总报告 bundle；报告只写 stdout/stderr refs。
 - `agent_py_agent/agent/contracts/main_agent_real_task_revalidation.py`: 主代理真实任务报告复验入口；只重跑 artifact acceptance，不重新启动模型进程。
+- `agent_py_agent/agent/contracts/main_agent_core_entrypoints.py`: 主代理核心入口冻结合同；要求状态机、工具执行、验收、日志、审批和 effective contract 都以结构化入口存在。
+- `agent_py_agent/agent/contracts/dry_run_mainline_contract.py`: 通用 dry-run 主线合同；校验输入、工具结果、产物 refs、证据 refs 和副作用隔离，不写具体任务专项规则。
+- `agent_py_agent/agent/contracts/live_llm_fake_tool_contract.py`: 真实 LLM + fake tools 试跑记录合同；要求保存 prompt/response/tool-trace/contract refs 和工具边界违规指标。
+- `agent_py_agent/agent/contracts/tool_adapter_readiness_contract.py`: 真实只读/dry-run 工具适配器上线前的 effect、schema、测试覆盖、审批、幂等和 mode 字段合同。
 - `agent_py_agent/cli/real_e2e_commands.py`: `my-agent real-e2e` CLI；运行主代理基础矩阵，可通过 `--artifact` 验收真实模型产物，也可显式执行受控真实任务。
 - `agent_py_agent/agent/local_storage/control_plane_models.py`: 定义 agent run、agent event、task rollup、runtime query context 和任务树查询结果的数据结构，保留 `metadata` / `reserved` 给后续继承策略、共享面板和失败交接扩展。
 - `agent_py_agent/agent/local_storage/control_plane.py`: 给 LocalStore 增加控制面 API，支持 upsert run、记录事件、重建 rollup、查询 root task 树、查询子树、blocked runs、takeover candidates 和带 requester/scope 的 runtime query；`takeover_candidates` 覆盖 BLOCKED / FAILED / ERROR / TIMEOUT，避免超时孙代理漏出接管视图。
