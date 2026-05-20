@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ipaddress
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
@@ -30,6 +31,7 @@ def validate_security_boundary_events(
     allowed_private_hosts: tuple[str, ...] = (),
 ) -> OfflineSecurityBoundaryValidation:
     findings: list[dict[str, object]] = []
+    _validate_path_events(events, findings)
     _validate_network_events(events, set(allowed_private_hosts), findings)
     _validate_external_text_events(events, findings)
     _validate_secret_redaction(events, findings)
@@ -51,9 +53,27 @@ def _validate_network_events(
     for index, event in enumerate(events):
         if _event_type(event) != "network_request":
             continue
+        if _scheme(event.get("url")) == "file":
+            findings.append(_finding("NETWORK_FILE_URL_BLOCKED", index, event))
+            continue
         host = _host(event.get("url"))
         if host and host not in allowed_private_hosts and _is_private_host(host):
             findings.append(_finding("NETWORK_PRIVATE_HOST_BLOCKED", index, event, {"host": host}))
+
+
+# LLM: _validate_path_events blocks resolved paths outside the declared workspace root.
+# 函数用途: 用 path_access.resolved_path 与 workspace_root 校验 symlink/规范化后的越界访问。
+def _validate_path_events(
+    events: tuple[dict[str, Any], ...],
+    findings: list[dict[str, object]],
+) -> None:
+    for index, event in enumerate(events):
+        if _event_type(event) != "path_access":
+            continue
+        root = _posix_path(event.get("workspace_root"))
+        resolved = _posix_path(event.get("resolved_path"))
+        if root and resolved and not _is_relative_to(resolved, root):
+            findings.append(_finding("PATH_SYMLINK_ESCAPE_BLOCKED", index, event, {"resolved_path": resolved}))
 
 
 # LLM: _validate_external_text_events prevents untrusted text from becoming machine contract facts.
@@ -141,6 +161,9 @@ def _is_private_host(host: str) -> bool:
     normalized = host.strip().lower().strip("[]")
     if normalized in PRIVATE_HOSTS:
         return True
+    numeric = _numeric_ipv4_host(normalized)
+    if numeric:
+        normalized = numeric
     try:
         address = ipaddress.ip_address(normalized)
     except ValueError:
@@ -153,6 +176,39 @@ def _is_private_host(host: str) -> bool:
 def _host(value: object) -> str:
     parsed = urlparse(_text(value))
     return _text(parsed.hostname)
+
+
+# LLM: _scheme extracts URL scheme for exact policy dispatch.
+# 函数用途: 识别 file:// 等禁止协议，不发起网络请求。
+def _scheme(value: object) -> str:
+    return _text(urlparse(_text(value)).scheme).lower()
+
+
+# LLM: _numeric_ipv4_host converts integer IPv4 host encodings to dotted form.
+# 函数用途: 识别 2130706433 这类 localhost 绕过写法。
+def _numeric_ipv4_host(value: str) -> str:
+    if not value.isdigit():
+        return ""
+    try:
+        address = ipaddress.ip_address(int(value))
+    except ValueError:
+        return ""
+    return str(address)
+
+
+# LLM: _posix_path normalizes path strings without touching the filesystem.
+# 函数用途: 规范化结构化路径字段，用于离线 symlink/resolved_path 合同测试。
+def _posix_path(value: object) -> str:
+    text_value = _text(value)
+    return PurePosixPath(text_value).as_posix() if text_value else ""
+
+
+# LLM: _is_relative_to checks posix path containment by parts.
+# 函数用途: 确认 resolved_path 是否仍在 workspace_root 下。
+def _is_relative_to(path: str, root: str) -> bool:
+    path_parts = PurePosixPath(path).parts
+    root_parts = PurePosixPath(root).parts
+    return path_parts[: len(root_parts)] == root_parts
 
 
 # LLM: _value_is_redacted recognizes approved redaction sentinels only.

@@ -51,6 +51,58 @@ REQUIRED_AREAS = {
         "agent_py_agent/agent/contracts/runtime_config_contract.py",
         "agent_py_agent/tests/test_offline_security_config_idempotency_contract.py",
     ),
+    "contract_doctor": (
+        "agent_py_agent/agent/contracts/contract_doctor.py",
+        "agent_py_agent/tests/test_contract_doctor.py",
+    ),
+    "effective_contract_snapshot": (
+        "agent_py_agent/agent/contracts/effective_contract_snapshot.py",
+        "agent_py_agent/tests/test_effective_contract_snapshot.py",
+    ),
+    "verifier_integrity": (
+        "agent_py_agent/agent/contracts/offline_verifier_integrity_contract.py",
+        "agent_py_agent/tests/test_offline_verifier_integrity_contract.py",
+    ),
+    "plan_contract": (
+        "agent_py_agent/agent/contracts/offline_plan_contract.py",
+        "agent_py_agent/tests/test_offline_plan_contract.py",
+    ),
+    "event_order": (
+        "agent_py_agent/agent/contracts/offline_event_order_contract.py",
+        "agent_py_agent/tests/test_offline_event_order_contract.py",
+    ),
+    "persistence_consistency": (
+        "agent_py_agent/agent/contracts/offline_persistence_contract.py",
+        "agent_py_agent/tests/test_offline_persistence_contract.py",
+    ),
+    "side_effect": (
+        "agent_py_agent/agent/contracts/offline_side_effect_contract.py",
+        "agent_py_agent/tests/test_offline_side_effect_contract.py",
+    ),
+    "prompt_context": (
+        "agent_py_agent/agent/contracts/offline_prompt_context_contract.py",
+        "agent_py_agent/tests/test_offline_prompt_context_contract.py",
+    ),
+    "model_adapter": (
+        "agent_py_agent/agent/contracts/offline_model_adapter_contract.py",
+        "agent_py_agent/tests/test_offline_model_adapter_contract.py",
+    ),
+    "scheduler_resource": (
+        "agent_py_agent/agent/contracts/offline_scheduler_resource_contract.py",
+        "agent_py_agent/tests/test_offline_scheduler_resource_contract.py",
+    ),
+    "channel_browser": (
+        "agent_py_agent/agent/contracts/offline_channel_browser_contract.py",
+        "agent_py_agent/tests/test_offline_channel_browser_contract.py",
+    ),
+    "defense_audit_observability": (
+        "agent_py_agent/agent/contracts/offline_defense_audit_observability_contract.py",
+        "agent_py_agent/tests/test_offline_defense_audit_observability_contract.py",
+    ),
+    "combination_failure": (
+        "agent_py_agent/agent/contracts/offline_combination_failure_contract.py",
+        "agent_py_agent/tests/test_offline_combination_failure_contract.py",
+    ),
 }
 
 

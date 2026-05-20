@@ -84,3 +84,31 @@ def test_replayed_message_or_artifact_write_uses_idempotency_key() -> None:
 
     assert result.ok is False
     assert result.error_codes == ("IDEMPOTENCY_KEY_REQUIRED", "SIDE_EFFECT_REPLAY_BLOCKED")
+
+
+# LLM: Path and URL normalization should catch symlink escapes, file URLs, and localhost variants.
+# 函数用途: 验证符号链接越界、file://、IPv6 localhost 和数字 localhost 会被安全边界合同拦截。
+def test_advanced_path_and_url_boundary_blocks_escape_variants() -> None:
+    from agent_py_agent.agent.contracts.offline_security_boundary_contract import (
+        validate_security_boundary_events,
+    )
+
+    result = validate_security_boundary_events(
+        (
+            {
+                "type": "path_access",
+                "path": "/workspace/link",
+                "resolved_path": "/etc/passwd",
+                "workspace_root": "/workspace",
+            },
+            {"type": "network_request", "url": "file:///etc/passwd"},
+            {"type": "network_request", "url": "http://[::1]/admin"},
+            {"type": "network_request", "url": "http://2130706433/admin"},
+        )
+    )
+
+    assert result.error_codes == (
+        "PATH_SYMLINK_ESCAPE_BLOCKED",
+        "NETWORK_FILE_URL_BLOCKED",
+        "NETWORK_PRIVATE_HOST_BLOCKED",
+    )
