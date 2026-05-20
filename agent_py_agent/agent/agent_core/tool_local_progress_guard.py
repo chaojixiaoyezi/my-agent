@@ -1,0 +1,212 @@
+# LLM: local-progress guard stops endless remote exploration when closeout machine facts show no new local work progress.
+# 模块用途: 基于 closeout.json 的结构化失败/进展指纹，限制“连续多轮只抓资料、不回本地写 checkpoint/draft/builder”的空转。
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from ..backend import ModelResponse
+from ._runtime_params import ToolLoopExecuteParams
+
+_STATE_DIR = ".agent_delivery"
+_STATE_FILE = "local_progress_guard.json"
+_MAX_REDIRECTS = 2
+_EXPLORATION_ROUND_THRESHOLD = 2
+_LOCAL_PROGRESS_TOOL_NAMES = {
+    "append_file",
+    "data_to_workbook",
+    "file_write_session",
+    "replace_in_file",
+    "write_file",
+}
+_EXPLORATION_TOOL_NAMES = {
+    "fetch_url",
+    "http_request",
+    "list_files",
+    "list_tools",
+    "read_artifact",
+    "read_file",
+    "search",
+}
+_RUN_COMMAND_LOCAL_MUTATION_PREFIXES = ("mkdir ", "mkdir -p", "touch ", "cp ", "mv ", "tee ")
+_RUN_COMMAND_EXPLORATION_PREFIXES = ("curl ", "find ", "ls", "pwd", "rg ", "cat ", "wget ")
+
+
+# LLM: has_required_local_progress_guard increments a task-local exploration counter and activates only after repeated non-local turns with unchanged progress.
+# 函数用途: 若 closeout 一直显示同一失败和同一本地进展指纹，而模型连续多轮只做远程/只读探索，则触发回到本地推进的通用守门。
+def has_required_local_progress_guard(agent: object, params: ToolLoopExecuteParams, calls: list[dict[str, object]] | None) -> bool:
+    payload = _guard_payload(agent)
+    if not payload:
+        return False
+    state = _load_state(agent)
+    fingerprint = str(payload.get("work_progress_fingerprint") or "")
+    failure_fingerprint = str(payload.get("failure_fingerprint") or "")
+    if (
+        str(state.get("work_progress_fingerprint") or "") != fingerprint
+        or str(state.get("failure_fingerprint") or "") != failure_fingerprint
+    ):
+        state = {
+            "failure_fingerprint": failure_fingerprint,
+            "exploration_rounds_without_local_progress": 0,
+            "work_progress_fingerprint": fingerprint,
+        }
+    if _is_local_progressive_call(payload, calls):
+        state["exploration_rounds_without_local_progress"] = 0
+        _write_state(agent, state)
+        return False
+    if not _is_exploration_only_call(calls):
+        _write_state(agent, state)
+        return False
+    count = int(state.get("exploration_rounds_without_local_progress") or 0) + 1
+    state["exploration_rounds_without_local_progress"] = count
+    _write_state(agent, state)
+    return count >= _EXPLORATION_ROUND_THRESHOLD
+
+
+# LLM: local_progress_guard_context exposes structured no-progress facts so the next model turn knows it must switch from exploration to local work.
+# 函数用途: 当 guard 触发时，把连续探索轮次、待处理恢复动作和缺失目标作为结构化提示喂给下一轮模型。
+def local_progress_guard_context(agent: object, redirects: int) -> str:
+    payload = _guard_payload(agent)
+    if not payload or redirects >= _MAX_REDIRECTS:
+        return ""
+    state = _load_state(agent)
+    envelope = {
+        "exploration_rounds_without_local_progress": int(state.get("exploration_rounds_without_local_progress") or 0),
+        "failure_fingerprint": payload.get("failure_fingerprint", ""),
+        "pending_materialization_targets": payload.get("pending_materialization_targets", []),
+        "recovery_actions": payload.get("recovery_actions", []),
+        "work_progress_fingerprint": payload.get("work_progress_fingerprint", ""),
+    }
+    return "\n".join(
+        [
+            "[tool-system local-progress-guard]",
+            json.dumps(envelope, ensure_ascii=False, sort_keys=True),
+            "结构化交付状态显示你已经连续多轮只做远程/只读探索，而 outputs/scripts/data 没有新的本地推进。"
+            "下一轮必须优先执行本地推进动作，例如补 checkpoint、写 draft、调用 builder tool，"
+            "不要继续只读 artifact、抓网页或重复只读检查。",
+        ]
+    )
+
+
+# LLM: local_progress_guard_block_response ends the loop only after the model ignored repeated local-progress redirects.
+# 函数用途: 连续收到 local-progress guard 仍不切回本地推进时，给出确定性阻断，避免真实任务一直空转到超时。
+def local_progress_guard_block_response(agent: object) -> ModelResponse | None:
+    payload = _guard_payload(agent)
+    if not payload:
+        return None
+    return ModelResponse(
+        text="[LOCAL_PROGRESS_GUARD_BLOCKED] 结构化交付状态显示本地工作区连续没有新的推进，且模型仍持续停留在远程/只读探索，已停止本轮以避免继续空转。",
+        backend=str(getattr(getattr(agent, "backend", None), "name", "") or ""),
+    )
+
+
+def _guard_payload(agent: object) -> dict[str, object]:
+    report = _closeout_report(agent)
+    if not report or report.get("ok") is True:
+        return {}
+    progress = report.get("delivery_progress")
+    if not isinstance(progress, dict):
+        return {}
+    fingerprint = str(progress.get("work_progress_fingerprint") or "")
+    failure_fingerprint = str(progress.get("failure_fingerprint") or "")
+    if not fingerprint or not failure_fingerprint:
+        return {}
+    recovery_actions = progress.get("recovery_actions")
+    pending_targets = progress.get("pending_materialization_targets")
+    if not isinstance(recovery_actions, list):
+        recovery_actions = []
+    if not isinstance(pending_targets, list):
+        pending_targets = []
+    if not recovery_actions and not pending_targets:
+        return {}
+    return {
+        "failure_fingerprint": failure_fingerprint,
+        "pending_materialization_targets": pending_targets,
+        "recovery_actions": [item for item in recovery_actions if isinstance(item, dict)],
+        "work_progress_fingerprint": fingerprint,
+    }
+
+
+def _closeout_report(agent: object) -> dict[str, object]:
+    path = Path(getattr(agent, "root", ".")).resolve() / ".agent_delivery" / "closeout.json"
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _state_path(agent: object) -> Path:
+    return Path(getattr(agent, "root", ".")).resolve() / _STATE_DIR / _STATE_FILE
+
+
+def _load_state(agent: object) -> dict[str, object]:
+    path = _state_path(agent)
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _write_state(agent: object, payload: dict[str, object]) -> None:
+    path = _state_path(agent)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _is_local_progressive_call(payload: dict[str, object], calls: list[dict[str, object]] | None) -> bool:
+    if not calls:
+        return False
+    builder_tools = {
+        str(item.get("builder_tool") or "").strip()
+        for item in payload.get("recovery_actions", [])
+        if isinstance(item, dict)
+    }
+    productive_tools = {tool for tool in builder_tools if tool} | _LOCAL_PROGRESS_TOOL_NAMES
+    return any(_call_is_local_progressive(call, productive_tools) for call in calls)
+
+
+def _call_is_local_progressive(call: dict[str, object], productive_tools: set[str]) -> bool:
+    tool = str(call.get("tool") or "").strip()
+    if tool in productive_tools:
+        return True
+    if tool != "run_command":
+        return False
+    command = _call_command(call)
+    if not command:
+        return False
+    return any(command.startswith(prefix) for prefix in _RUN_COMMAND_LOCAL_MUTATION_PREFIXES) or ">" in command
+
+
+def _is_exploration_only_call(calls: list[dict[str, object]] | None) -> bool:
+    if not calls:
+        return True
+    return all(_call_is_exploration_only(call) for call in calls)
+
+
+def _call_is_exploration_only(call: dict[str, object]) -> bool:
+    tool = str(call.get("tool") or "").strip()
+    if tool in _EXPLORATION_TOOL_NAMES:
+        return True
+    if tool != "run_command":
+        return False
+    command = _call_command(call)
+    if not command:
+        return False
+    return any(command.startswith(prefix) for prefix in _RUN_COMMAND_EXPLORATION_PREFIXES)
+
+
+def _call_command(call: dict[str, object]) -> str:
+    command = str(call.get("command") or "").strip().lower()
+    if command:
+        return command
+    shell = call.get("shell")
+    if isinstance(shell, dict):
+        return str(shell.get("command") or "").strip().lower()
+    return ""

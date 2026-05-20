@@ -1,0 +1,52 @@
+{
+  "name": "fake_done_regression_pack",
+  "cases": [
+    {
+      "case_id": "missing_artifact_contract",
+      "kind": "contract",
+      "contract_ref": "../contracts/missing_artifact_should_fail.json",
+      "final_status": "SUCCEEDED",
+      "tool_trace": [
+        {
+          "tool": "write_file"
+        }
+      ],
+      "expect_error_codes": [
+        "ARTIFACT_MISSING",
+        "FINAL_STATUS_REJECTED"
+      ]
+    },
+    {
+      "case_id": "fake_llm_empty_artifact",
+      "kind": "fake_llm",
+      "fixture_ref": "../fake_llm/write_empty_artifact.json",
+      "expect_error_codes": [
+        "ARTIFACT_TOO_SMALL"
+      ]
+    },
+    {
+      "case_id": "fake_llm_staged_json_no_rows",
+      "kind": "fake_llm",
+      "fixture_ref": "../fake_llm/staged_json_no_rows_then_success.json",
+      "expect_error_codes": [
+        "REQUIRED_JSON_COLLECTION_EMPTY",
+        "FINAL_STATUS_REJECTED"
+      ]
+    },
+    {
+      "case_id": "replay_builder_not_called",
+      "kind": "replay",
+      "trace_ref": "../replay/builder_not_called_success.jsonl",
+      "expect_error_codes": [
+        "REQUIRED_SUCCESSFUL_TOOL_CALL_MISSING",
+        "FINAL_STATUS_REJECTED"
+      ]
+    },
+    {
+      "case_id": "replay_repeated_tool",
+      "kind": "replay",
+      "trace_ref": "../replay/repeated_tool_should_block.jsonl",
+      "expect_block_reason": "TOOL_REPEATED_EXACT_FAILURE"
+    }
+  ]
+}

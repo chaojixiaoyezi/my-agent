@@ -128,6 +128,8 @@ def test_tool_catalog_includes_global_large_content_protocol():
     assert "不要把完整大文件正文塞进一个 JSON 工具参数" in catalog
     assert "write_file 写短骨架" in catalog
     assert "append_file 分块追加" in catalog
+    assert "[WRITE_FILE_RAW" in catalog
+    assert "[FILE_WRITE_SESSION_APPEND" in catalog
 
 
 def test_tool_catalog_uses_configured_categories_offset_and_notice():
@@ -199,6 +201,33 @@ def test_tool_executor_unwraps_model_filesystem_bundle(tmp_path: Path):
 
     assert result.ok
     assert "category bundle recovered" in result.output
+
+
+# LLM: model function-call wrappers should flatten before aliases and required-param checks.
+# 函数用途: 覆盖真实 E2E 暴露的 actual_parameter_name 包装，避免 run_command 误报 command 为空。
+def test_tool_call_parser_unwraps_actual_parameter_name_bundle():
+    registry = make_tool_registry(Path.cwd())
+
+    calls = registry.parse_tool_calls(
+        '[TOOL_CALL]\n'
+        '{"tool":"run_command","actual_parameter_name":{"command":"echo ok","working_dir":"/tmp"}}\n'
+        '[/TOOL_CALL]'
+    )
+
+    assert calls == [{"tool": "run_command", "command": "echo ok", "working_dir": "/tmp"}]
+
+
+# LLM: direct execution should use the same wrapper normalization as text parsing.
+# 函数用途: 验证 arguments 这类函数调用参数外壳会被解包，再执行真实工具。
+def test_tool_executor_unwraps_arguments_bundle(tmp_path: Path):
+    registry = make_tool_registry(tmp_path)
+
+    result = registry.execute_call(
+        {"tool": "write_file", "arguments": {"path": "notes.txt", "content": "wrapped"}}
+    )
+
+    assert result.ok
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "wrapped"
 
 
 # LLM: test_tool_call_parser_canonicalizes_json_tool_and_param_aliases covers non-XML model drift.
@@ -335,6 +364,22 @@ def test_tool_call_parser_recovers_complete_json_without_closing_marker():
     assert calls == [
         {"tool": "write_file", "path": "index.html", "content": "<main>ok</main>"}
     ]
+
+
+# LLM: malformed opener recovery covers real model drift where `[TOOL_CALL` misses `]`.
+# 函数用途: 工具协议开头坏掉时，系统应给 parse-error 纠偏，而不是把坏工具块当最终回答。
+def test_tool_call_parser_reports_malformed_opening_marker():
+    registry = make_tool_registry(Path.cwd())
+    calls = registry.parse_tool_calls(
+        '[TOOL_CALL\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
+    )
+
+    result = registry.execute_call(calls[0])
+
+    assert calls[0]["tool"] == "__parse_error__"
+    assert "开始标记格式错误" in calls[0]["error"]
+    assert result.ok is False
+    assert "[TOOL_CALL]" in result.output
 
 
 # LLM: test_parse_error_hint_recommends_append_for_truncated_write covers long generated CSS/HTML writes.

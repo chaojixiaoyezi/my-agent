@@ -56,6 +56,7 @@ from .cli.common import (
     make_agent,
     make_capability_router,
     resolve_workspace_root,
+    resolve_workspace_roots,
 )
 from .cli.daemon import (
     _resolve_daemon_max_runners,

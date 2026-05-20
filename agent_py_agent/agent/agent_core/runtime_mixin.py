@@ -69,6 +69,7 @@ class _RunCompatibilityFields:
     run_id: str | None = None
     task_id: str | None = None
     task_attributes: dict | None = None
+    delivery_contract: dict | None = None
     system_prompt_override: str | None = None
     source: str | None = None
     recovery_snapshot: bool | None = None
@@ -162,6 +163,7 @@ class SimpleAgentRuntimeMixin:
         allowed_tools: list[str] | None = None, granted_capabilities: list[str] | None = None,
         write_boundary: dict[str, object] | None = None, request_id: str | None = None,
         run_id: str | None = None, task_id: str | None = None, task_attributes: dict | None = None,
+        delivery_contract: dict | None = None,
         system_prompt_override: str | None = None, source: str | None = None,
         recovery_snapshot: bool | None = None, resume_context: bool | None = None,
         recovery_task_refs: list[str] | None = None, recovery_content_paths: list[str] | None = None,
@@ -183,6 +185,7 @@ class SimpleAgentRuntimeMixin:
                 run_id=run_id,
                 task_id=task_id,
                 task_attributes=task_attributes,
+                delivery_contract=delivery_contract,
                 system_prompt_override=system_prompt_override,
                 source=source,
                 recovery_snapshot=recovery_snapshot,
@@ -257,6 +260,7 @@ def _run_params_from_compat(params: RunParams, fields: _RunCompatibilityFields) 
         run_id=fields.run_id,
         task_id=fields.task_id,
         task_attributes=fields.task_attributes,
+        delivery_contract=fields.delivery_contract,
         system_prompt_override=fields.system_prompt_override,
         source=fields.source,
         recovery_snapshot=fields.recovery_snapshot,

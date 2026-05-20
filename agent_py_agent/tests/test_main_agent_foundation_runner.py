@@ -14,13 +14,16 @@ def test_main_agent_foundation_runner_reports_core_categories(tmp_path):
     report = run_main_agent_foundation(MainAgentFoundationRequest(workspace=tmp_path))
 
     assert report.ok is True
-    assert report.summary["total"] == 9
+    assert report.summary["total"] == 12
     assert report.summary["failed"] == 0
     by_id = {item.case_id: item for item in report.results}
     assert by_id["tool_failure_contracts"].status == "PASSED"
     assert by_id["research_evidence_contracts"].status == "PASSED"
     assert by_id["web_artifact_validator"].status == "PASSED"
     assert by_id["activity_timeout_recovery"].status == "PASSED"
+    assert by_id["model_call_ledger_timeout"].status == "PASSED"
+    assert by_id["tool_protocol_v2_envelope"].status == "PASSED"
+    assert by_id["file_write_session_contract"].status == "PASSED"
     assert by_id["large_output_artifact_refs"].status == "PASSED"
     assert by_id["deterministic_e2e_matrix"].status == "PASSED"
     assert by_id["single_agent_real_tasks"].status == "SKIPPED"
@@ -38,9 +41,12 @@ def test_main_agent_foundation_report_is_refs_first(tmp_path):
 
     payload = run_main_agent_foundation(MainAgentFoundationRequest(workspace=tmp_path)).to_dict()
 
-    assert payload["summary"]["total"] == 9
+    assert payload["summary"]["total"] == 12
     assert "large output row" not in str(payload)
-    large_case = next(item for item in payload["results"] if item["case_id"] == "large_output_artifact_refs")
+    assert "hello world" not in str(payload)
+    large_case = next(
+        item for item in payload["results"] if item["case_id"] == "large_output_artifact_refs"
+    )
     assert large_case["evidence_refs"]
 
 
@@ -58,7 +64,11 @@ def test_main_agent_foundation_tool_failure_contracts_are_specific(tmp_path):
     assert item.status == "PASSED"
     assert not item.issues
     evidence = item.evidence_refs[0]
-    text = tmp_path.joinpath(evidence).read_text(encoding="utf-8") if not evidence.startswith("/") else __import__("pathlib").Path(evidence).read_text(encoding="utf-8")
+    text = (
+        tmp_path.joinpath(evidence).read_text(encoding="utf-8")
+        if not evidence.startswith("/")
+        else __import__("pathlib").Path(evidence).read_text(encoding="utf-8")
+    )
     assert "PATH_INVALID" in text
     assert "TOOL_TIMEOUT" in text
     assert "MODEL_UPSTREAM_FAILED" in text

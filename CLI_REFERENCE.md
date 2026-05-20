@@ -265,6 +265,7 @@ my-agent run "总结这个项目" --no-save
 | `--save` | 保存本次对话到记忆。 |
 | `--no-save` | 不保存本次对话到记忆。 |
 | `--show-prompt` | 打印最终拼装后的 prompt。 |
+| `--delivery-contract-file <path>` | 读取结构化交付合同 JSON，供主代理按机器字段验收产物，不把合同塞进用户 prompt。 |
 | `--resume-context` | 本次请求临时启用恢复上下文注入，不用改配置文件。 |
 | `--no-resume-context` | 本次请求临时关闭恢复上下文注入。 |
 
@@ -571,6 +572,10 @@ my-agent context-bundle latest --json
 ```powershell
 my-agent real-e2e --workspace .\.real-e2e --json
 my-agent real-e2e --workspace .\.real-e2e --artifact .\outputs\index.html --json
+my-agent real-e2e --workspace .\.real-e2e --real-task-suite --real-task-max-workers 4 --json
+my-agent real-e2e --workspace .\.real-e2e --run-real-tasks --real-task-case furniture_homepage_html --real-task-base-config .\agent_py_agent\config\agent_config.yaml --json
+my-agent real-e2e --workspace .\.real-e2e --revalidate-real-task-report .\.real-e2e\main_agent_real_task_execution\execution_report.json --json
+my-agent real-e2e --workspace .\.real-e2e --resume-real-task-recovery-packet .\.real-e2e\main_agent_real_task_execution\furniture_homepage_html\recovery_packet.json --json
 my-agent real-e2e --workspace .\.real-e2e --report .\reports\real-e2e.json
 ```
 
@@ -578,12 +583,28 @@ my-agent real-e2e --workspace .\.real-e2e --report .\reports\real-e2e.json
 
 如果已经用真实模型生成了产物，可以把文件路径传给 `--artifact`。命令会调用 Artifact Acceptance（产物验收）统一检查 HTML、JSON、CSV、XLSX、PDF 和未知格式的基础质量，并把 findings（问题清单）写进报告。它不展开大文件正文，只写路径、类型和结构化问题。
 
+如果要准备多主代理真实任务测试，可以加 `--real-task-suite`。命令会生成家具 HTML、购物网站、GitHub 升星 XLSX、DeepSeek 论文翻译 PDF 等任务的 `prompt.md`、`acceptance.json`、`expected_artifacts.json` 和 `suite_report.json`，并给每个任务分配 worker slot（工位）和 timeout（超时）。默认仍然只生成计划，不自动调用模型。
+
+如果要真的启动这些主代理任务，必须显式加 `--run-real-tasks`。执行器会给每个 case 写独立 `config.yaml`、`command.json`、`stdout.txt`、`stderr.txt`、`acceptance_report.json` 和专属 workspace，并按 `--real-task-max-workers` 并发启动，报告里会写 `concurrency` 说明请求并发和实际并发。执行成功不等于任务成功：runner 会继续按 `expected_artifacts.json` 验收产物，缺文件或机器验收失败都会让 case 失败。没有传 `--real-task-base-config` 时使用离线 echo 配置，适合 CI 和调试；要烧真实 API，必须显式传真实配置文件。
+
+如果真实任务已经跑完，只想重新检查产物，可以用 `--revalidate-real-task-report` 指向之前的 `execution_report.json`。它不会重启主代理，也不会重新调用模型，只会按 report 里的 refs 回到 task workspace 和 expected artifact 合同重新验收。
+
+如果某个真实任务 case 中途失败，但已经留下 `recovery_packet.json`，可以传 `--resume-real-task-recovery-packet` 按同一个 case 的恢复包续跑。它会复用原 task workspace、acceptance 合同和 artifact refs，不会重新生成一套平行任务目录。
+
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--workspace <path>` | 当前目录 `.my-agent-real-e2e` | E2E 工作区；命令会把报告和确定性测试证据写到这里。 |
 | `--report <path>` | `<workspace>/real_e2e_report.json` | 报告输出路径。 |
 | `--artifact <path>` | 可重复 | 额外验收真实任务产物。适合先让模型生成文件，再用机器验收确认。 |
 | `--include-real-model` | `false` | 预留真实模型用例标记；当前不会自动发起模型调用。 |
+| `--real-task-suite` | `false` | 生成主代理真实任务批量测试计划。报告只放 refs，不内联任务 prompt 或大产物正文。 |
+| `--run-real-tasks` | `false` | 显式执行真实任务套件；默认关闭，避免普通验证意外调用模型或长期占用进程。 |
+| `--real-task-case <case_id>` | 可重复 | 只计划/执行指定 case，例如 `furniture_homepage_html`。不传则覆盖全部默认 case。 |
+| `--real-task-base-config <path>` | 空 | 执行真实任务使用的基础配置文件；为空时使用离线 echo 配置，传真实配置才会调用真实模型。 |
+| `--revalidate-real-task-report <path>` | 空 | 只读复验已有真实任务执行报告；不启动模型进程，只重新跑产物验收。 |
+| `--resume-real-task-recovery-packet <path>` | 空 | 按已有 `recovery_packet.json` 续跑同一个真实任务 case，复用原 task workspace 和验收合同。 |
+| `--real-task-max-workers <n>` | `4` | 真实任务计划/执行的最大并发工位。 |
+| `--real-task-timeout <seconds>` | `480` | 真实任务执行的单任务超时秒数；超时会写结构化失败和 stderr/stdout refs。 |
 | `--json` | `false` | 输出完整机器可读 JSON。 |
 
 ## `memory-compact`

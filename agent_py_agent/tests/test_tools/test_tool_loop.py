@@ -70,6 +70,24 @@ class _UnlimitedRoundsBackend:
         return ModelResponse(text="无限轮数配置已正常收口", backend=self.name)
 
 
+class _RepeatedMissingReadBackend:
+    name = "fake_repeated_missing_read_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None):
+        self.calls += 1
+        if self.calls <= 3:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"read_file","path":"missing.txt"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        assert "TOOL_REPEATED_EXACT_FAILURE" in prompt
+        assert "change_tool_arguments_or_strategy" in prompt
+        return ModelResponse(text="检测到重复失败，已停止原样重试。", backend=self.name)
+
+
 # LLM: _EmptyAfterToolBackend reproduces provider empty final text after a successful tool call.
 # 类用途: 第一次请求工具，第二次模拟 MiniMax/Anthropic-compatible 空流式响应，验证工具结果不被异常吞掉。
 class _EmptyAfterToolBackend:
@@ -296,6 +314,27 @@ def test_tool_loop_enforces_per_agent_tool_budget_for_run_id():
         assert result.tool_rounds == 2
         assert agent.backend.calls == 3
         assert result.executed_tools == ["read_file"]
+
+
+def test_tool_loop_blocks_repeated_identical_tool_failures_before_reexecuting():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=6)
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = _RepeatedMissingReadBackend()
+
+        result = agent.run(
+            "重复读不存在文件时应改变策略",
+            save=False,
+            allowed_tools=["read_file"],
+            run_id="run-tool-guard",
+            task_attributes={"tool_guard_exact_failure_block_after": 2},
+        )
+
+        assert result.response == "检测到重复失败，已停止原样重试。"
+        assert result.tool_rounds == 3
+        assert agent.backend.calls == 4
+        assert result.executed_tools == []
 
 
 # LLM: long-running writers should keep working without making every old tool record part of the live prompt.

@@ -9,6 +9,15 @@ from threading import Thread
 
 from ..backends.errors import ProviderTimeoutError
 from ._runtime_params import ToolLoopExecuteParams
+from .model_call_runtime import (
+    effective_model_request_timeout_seconds as _effective_model_request_timeout_seconds,
+)
+from .model_call_runtime import (
+    observed_chunk_filter,
+    record_model_call_finished,
+    record_model_call_timeout,
+    start_model_call_record,
+)
 from .runner_stage_trace import (
     RunnerModelStageTraceRequest,
     trace_runner_model_request_failed,
@@ -16,10 +25,14 @@ from .runner_stage_trace import (
     trace_runner_model_response_received,
 )
 from .tool_stream_boundary import (
+    CompleteToolCallStreamAbort,
     LongToolContentStreamAbort,
+    MalformedToolProtocolStreamAbort,
     ToolBoundaryChunkFilter,
+    complete_tool_call_abort_response,
     cut_response_after_first_complete_tool_call,
     long_write_abort_response,
+    malformed_tool_protocol_abort_response,
 )
 
 
@@ -41,9 +54,74 @@ class _BackendGenerateResult:
     exc: BaseException | None = None
 
 
+# LLM: _ProviderTimeoutRecord bundles timeout trace facts to keep helper interfaces small.
+# 类用途: 保存 provider_wall 超时记录需要的 request、ledger、call_id 和异常对象。
+@dataclass(frozen=True)
+class _ProviderTimeoutRecord:
+    request: ModelGenerateParams
+    ledger: object
+    call_id: str
+    first_token_timeout_seconds: float
+    exc: ProviderTimeoutError
+
+
+# LLM: _ModelGenerationState carries per-call ledger and stream-filter state through the wrapper.
+# 类用途: 保存一次模型请求的 chunk_filter、账本、call_id、首 token 预算和 on_chunk 回调。
+@dataclass(frozen=True)
+class _ModelGenerationState:
+    chunk_filter: ToolBoundaryChunkFilter
+    ledger: object
+    call_id: str
+    first_token_timeout_seconds: float
+    on_chunk: object
+
+
 # LLM: generate_model_response wraps backend calls with refs-only runner stage trace events.
 # 函数用途: 在模型请求前后写 runner 阶段心跳；普通主代理没有 runner id 时不会写 trace。
 def generate_model_response(request: ModelGenerateParams):
+    _trace_model_start(request)
+    state = _start_model_generation(request)
+    try:
+        response = _generate_with_wall_timeout(
+            request,
+            state.on_chunk,
+            state.first_token_timeout_seconds,
+        )
+    except CompleteToolCallStreamAbort as exc:
+        response = complete_tool_call_abort_response(
+            exc,
+            backend=str(getattr(request.agent.backend, "name", "") or ""),
+        )
+    except LongToolContentStreamAbort as exc:
+        response = long_write_abort_response(
+            exc,
+            backend=str(getattr(request.agent.backend, "name", "") or ""),
+        )
+    except MalformedToolProtocolStreamAbort as exc:
+        response = malformed_tool_protocol_abort_response(
+            exc,
+            backend=str(getattr(request.agent.backend, "name", "") or ""),
+        )
+    except ProviderTimeoutError as exc:
+        _record_provider_timeout(
+            _ProviderTimeoutRecord(
+                request=request,
+                ledger=state.ledger,
+                call_id=state.call_id,
+                first_token_timeout_seconds=state.first_token_timeout_seconds,
+                exc=exc,
+            )
+        )
+        raise
+    except Exception as exc:
+        _trace_model_failure(request, exc)
+        raise
+    return _finish_model_generation(request, state, response)
+
+
+# LLM: _trace_model_start isolates runner trace setup from model-call control flow.
+# 函数用途: 记录模型请求开始事件；无 runner id 时底层 trace 函数会跳过。
+def _trace_model_start(request: ModelGenerateParams) -> None:
     trace_runner_model_request_started(
         RunnerModelStageTraceRequest(
             agent=request.agent,
@@ -52,35 +130,34 @@ def generate_model_response(request: ModelGenerateParams):
             prompt=request.prompt,
         )
     )
-    chunk_filter = ToolBoundaryChunkFilter(
-        request.params.effective_on_chunk,
-        max_inline_content_chars=_tool_write_inline_max_chars(request.agent),
+
+
+# LLM: _start_model_generation creates ledger and stream observer state before the provider call.
+# 函数用途: 初始化模型调用账本、首 token 预算和工具边界流式过滤器。
+def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationState:
+    chunk_filter = _build_tool_boundary_chunk_filter(request)
+    ledger, call_id, first_token_estimate = start_model_call_record(request)
+    on_chunk = observed_chunk_filter(
+        ledger=ledger,
+        call_id=call_id,
+        chunk_filter=chunk_filter,
+        first_token_estimate=first_token_estimate,
     )
-    try:
-        response = _generate_with_wall_timeout(request, chunk_filter)
-    except LongToolContentStreamAbort as exc:
-        response = long_write_abort_response(
-            exc,
-            backend=str(getattr(request.agent.backend, "name", "") or ""),
-        )
-    except Exception as exc:
-        trace_runner_model_request_failed(
-            RunnerModelStageTraceRequest(
-                agent=request.agent,
-                params=request.params,
-                tool_rounds=request.tool_rounds,
-                exc=exc,
-            )
-        )
-        raise
-    chunk_filter.finish()
-    response, cut = cut_response_after_first_complete_tool_call(response)
-    if cut:
-        request.params.tool_context.append(
-            "[tool-system]\n"
-            "模型回复在第一个完整工具调用后仍继续输出内容；系统已只保留第一个工具调用，"
-            "后续正文不会作为工具结果、事实或下一轮上下文。"
-        )
+    return _ModelGenerationState(
+        chunk_filter=chunk_filter,
+        ledger=ledger,
+        call_id=call_id,
+        first_token_timeout_seconds=first_token_estimate.timeout_seconds,
+        on_chunk=on_chunk,
+    )
+
+
+# LLM: _finish_model_generation records success facts before returning the final response.
+# 函数用途: 写 finished 账本、结束 chunk 过滤、截断多余工具后正文，并写响应 trace。
+def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerationState, response):
+    record_model_call_finished(state.ledger, state.call_id, response)
+    state.chunk_filter.finish()
+    response = _apply_tool_boundary_cut(request, response)
     trace_runner_model_response_received(
         RunnerModelStageTraceRequest(
             agent=request.agent,
@@ -92,11 +169,62 @@ def generate_model_response(request: ModelGenerateParams):
     return response
 
 
+# LLM: _build_tool_boundary_chunk_filter centralizes stream filtering around tool-call boundaries.
+# 函数用途: 创建流式输出过滤器，限制模型把超长 write 内容塞进单次工具调用。
+def _build_tool_boundary_chunk_filter(request: ModelGenerateParams) -> ToolBoundaryChunkFilter:
+    return ToolBoundaryChunkFilter(
+        request.params.effective_on_chunk,
+        max_inline_content_chars=_tool_write_inline_max_chars(request.agent),
+    )
+
+
+# LLM: _record_provider_timeout keeps timeout ledger facts and runner trace in the same branch.
+# 函数用途: 记录模型请求总时长超时，并写 runner 失败 trace。
+def _record_provider_timeout(record: _ProviderTimeoutRecord) -> None:
+    record_model_call_timeout(
+        ledger=record.ledger,
+        call_id=record.call_id,
+        timeout_seconds=_effective_model_request_timeout_seconds(
+            record.request.agent,
+            record.first_token_timeout_seconds,
+        ),
+        timeout_stage="provider_wall",
+    )
+    _trace_model_failure(record.request, record.exc)
+
+
+# LLM: _trace_model_failure is shared by timeout and generic model-call failures.
+# 函数用途: 用统一 runner stage trace 记录模型请求失败。
+def _trace_model_failure(request: ModelGenerateParams, exc: BaseException) -> None:
+    trace_runner_model_request_failed(
+        RunnerModelStageTraceRequest(
+            agent=request.agent,
+            params=request.params,
+            tool_rounds=request.tool_rounds,
+            exc=exc,
+        )
+    )
+
+
+# LLM: _apply_tool_boundary_cut turns extra prose after a complete tool call into a prompt note only.
+# 函数用途: 截断首个完整工具调用后的多余模型输出，避免自然语言变成工具事实来源。
+def _apply_tool_boundary_cut(request: ModelGenerateParams, response):
+    response, cut = cut_response_after_first_complete_tool_call(response)
+    if cut:
+        request.params.tool_context.append(
+            "[tool-system]\n"
+            "模型回复在第一个完整工具调用后仍继续输出内容；系统已只保留第一个工具调用，"
+            "后续正文不会作为工具结果、事实或下一轮上下文。"
+        )
+    return response
+
+
 # LLM: _generate_with_wall_timeout prevents a stuck provider call from trapping the whole runner.
 # 函数用途: 给任意 backend.generate 增加 request_timeout 总时长保护；后端正常返回时保持原响应对象。
-def _generate_with_wall_timeout(request: ModelGenerateParams, chunk_filter: ToolBoundaryChunkFilter):
-    timeout = _model_request_timeout_seconds(request.agent)
-    on_chunk = chunk_filter
+def _generate_with_wall_timeout(
+    request: ModelGenerateParams, on_chunk, first_token_timeout_seconds: float = 0.0
+):
+    timeout = _effective_model_request_timeout_seconds(request.agent, first_token_timeout_seconds)
     if timeout <= 0:
         return request.agent.backend.generate(request.prompt, on_chunk=on_chunk)
 
@@ -108,7 +236,7 @@ def _generate_with_wall_timeout(request: ModelGenerateParams, chunk_filter: Tool
         try:
             results.put(
                 _BackendGenerateResult(
-                    response=request.agent.backend.generate(request.prompt, on_chunk=on_chunk)
+                    response=_generate_backend_response(request, on_chunk, timeout)
                 )
             )
         except BaseException as exc:  # pragma: no cover - exercised through queue result.
@@ -119,26 +247,28 @@ def _generate_with_wall_timeout(request: ModelGenerateParams, chunk_filter: Tool
     try:
         result = results.get(timeout=timeout)
     except Empty as exc:
-        raise ProviderTimeoutError(
-            f"模型接口请求超时: request_timeout={timeout:g}s"
-        ) from exc
+        raise ProviderTimeoutError(f"模型接口请求超时: request_timeout={timeout:g}s") from exc
     if result.exc is not None:
         raise result.exc
     return result.response
 
 
-# LLM: _model_request_timeout_seconds resolves the public request_timeout setting for the guard layer.
-# 函数用途: 从 agent.config 或 backend 上读取 request_timeout；无效或关闭时返回 0 表示不启用总时长保护。
-def _model_request_timeout_seconds(agent: object) -> float:
-    config = getattr(agent, "config", None)
-    raw = getattr(config, "request_timeout", None)
-    if raw is None:
-        raw = getattr(getattr(agent, "backend", None), "request_timeout", 0)
+# LLM: _generate_backend_response applies the same dynamic timeout to backend HTTP deadlines.
+# 函数用途: 临时提升 backend.request_timeout，使内部流式 SSE deadline 与外层总墙使用同一结构化预算。
+def _generate_backend_response(request: ModelGenerateParams, on_chunk, timeout: float):
+    backend = request.agent.backend
+    original = getattr(backend, "request_timeout", None)
+    if timeout <= 0 or original is None:
+        return backend.generate(request.prompt, on_chunk=on_chunk)
     try:
-        timeout = float(raw)
+        effective = max(float(original), float(timeout))
     except (TypeError, ValueError):
-        return 0.0
-    return timeout if timeout > 0 else 0.0
+        effective = float(timeout)
+    try:
+        backend.request_timeout = effective
+        return backend.generate(request.prompt, on_chunk=on_chunk)
+    finally:
+        backend.request_timeout = original
 
 
 # LLM: _tool_write_inline_max_chars keeps streaming guard aligned with write_file/append_file config.

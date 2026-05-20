@@ -5,13 +5,22 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..subagents.static_site_validator import run_static_site_check
 from .activity_timeout import ActivitySnapshot, ActivityTimeoutPolicy, decide_activity_timeout
 from .e2e_matrix_runner import E2ERunnerRequest, run_e2e_matrix
 from .error_taxonomy import classify_error
+from .main_agent_foundation_contract_cases import (
+    case_file_write_session_contract,
+    case_model_call_ledger_timeout,
+    case_tool_protocol_v2_envelope,
+)
+from .main_agent_foundation_models import (
+    MainAgentFoundationCaseResult,
+    MainAgentFoundationReport,
+    MainAgentFoundationRequest,
+)
 from .main_agent_foundation_research import research_evidence_contract_case
 
 REAL_MODEL_CASE_IDS = {
@@ -19,56 +28,6 @@ REAL_MODEL_CASE_IDS = {
     "compact_resume_real_cycle",
     "tool_error_recovery_real",
 }
-
-
-# LLM: MainAgentFoundationRequest bundles test runner options without adding end-user config knobs.
-# 类用途: 描述主代理基础测试的工作区和是否纳入真实模型结果；默认只跑本地确定性用例。
-@dataclass(frozen=True)
-class MainAgentFoundationRequest:
-    workspace: Path
-    include_real_model: bool = False
-
-
-# LLM: MainAgentFoundationCaseResult is one test category outcome with evidence refs.
-# 类用途: 保存单个主代理基础测试类别的状态、中文说明、证据路径和问题列表。
-@dataclass(frozen=True)
-class MainAgentFoundationCaseResult:
-    case_id: str
-    title: str
-    status: str
-    summary: str
-    evidence_refs: list[str] = field(default_factory=list)
-    issues: list[str] = field(default_factory=list)
-
-    # LLM: to_dict keeps reports stable for CLI/frontend/doc display.
-    # 函数用途: 转成普通 dict，避免调用方依赖 dataclass 内部结构。
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "case_id": self.case_id,
-            "title": self.title,
-            "status": self.status,
-            "summary": self.summary,
-            "evidence_refs": list(self.evidence_refs),
-            "issues": list(self.issues),
-        }
-
-
-# LLM: MainAgentFoundationReport summarizes all categories without hiding skipped real-model tests.
-# 类用途: 保存主代理基础测试总报告；ok 只要求已执行用例没有失败。
-@dataclass(frozen=True)
-class MainAgentFoundationReport:
-    ok: bool
-    summary: dict[str, int]
-    results: list[MainAgentFoundationCaseResult]
-
-    # LLM: to_dict returns a refs-first payload safe for prompt injection and JSON reports.
-    # 函数用途: 输出摘要、状态和证据引用，不携带大文件正文。
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "ok": self.ok,
-            "summary": dict(self.summary),
-            "results": [item.to_dict() for item in self.results],
-        }
 
 
 # LLM: run_main_agent_foundation executes deterministic checks and records real-model gaps honestly.
@@ -81,6 +40,9 @@ def run_main_agent_foundation(request: MainAgentFoundationRequest) -> MainAgentF
         _case_research_evidence_contracts(workspace),
         _case_web_artifact_validator(workspace),
         _case_activity_timeout_recovery(workspace),
+        case_model_call_ledger_timeout(workspace),
+        case_tool_protocol_v2_envelope(workspace),
+        case_file_write_session_contract(workspace),
         _real_model_placeholder(
             "single_agent_real_tasks",
             "单代理真实任务测试",
@@ -122,10 +84,14 @@ def _case_tool_failure_contracts(workspace: Path) -> MainAgentFoundationCaseResu
         "MODEL_UPSTREAM_FAILED": "anthropic compatible provider returned 502",
     }
     observed = {expected: classify_error(message).code for expected, message in samples.items()}
-    issues = [f"{expected}->{actual}" for expected, actual in observed.items() if actual != expected]
+    issues = [
+        f"{expected}->{actual}" for expected, actual in observed.items() if actual != expected
+    ]
     evidence = workspace / "tool_failure_contracts" / "classification.json"
     evidence.parent.mkdir(parents=True, exist_ok=True)
-    evidence.write_text(json.dumps(observed, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    evidence.write_text(
+        json.dumps(observed, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
+    )
     return MainAgentFoundationCaseResult(
         case_id="tool_failure_contracts",
         title="工具失败测试",
@@ -147,8 +113,12 @@ def _case_research_evidence_contracts(workspace: Path) -> MainAgentFoundationCas
 def _case_web_artifact_validator(workspace: Path) -> MainAgentFoundationCaseResult:
     site = workspace / "web_artifact_validator" / "site"
     site.mkdir(parents=True, exist_ok=True)
-    (site / "index.html").write_text('<div id="homeProducts"></div><script src="app.js"></script>', encoding="utf-8")
-    (site / "app.js").write_text("document.getElementById('productGrid').innerHTML = '<p>商品</p>';", encoding="utf-8")
+    (site / "index.html").write_text(
+        '<div id="homeProducts"></div><script src="app.js"></script>', encoding="utf-8"
+    )
+    (site / "app.js").write_text(
+        "document.getElementById('productGrid').innerHTML = '<p>商品</p>';", encoding="utf-8"
+    )
     record = run_static_site_check(
         {
             "name": "generated web app",
@@ -159,9 +129,17 @@ def _case_web_artifact_validator(workspace: Path) -> MainAgentFoundationCaseResu
         workspace / "web_artifact_validator",
     )
     evidence = workspace / "web_artifact_validator" / "validation.json"
-    evidence.write_text(json.dumps(record.to_dict(), ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    expected_hit = record.validation_result.get("missing_dom_id_hits") == ["getElementById:productGrid"]
-    issues = [] if record.executed and not record.passed and expected_hit else ["web validator did not catch missing DOM id"]
+    evidence.write_text(
+        json.dumps(record.to_dict(), ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    expected_hit = record.validation_result.get("missing_dom_id_hits") == [
+        "getElementById:productGrid"
+    ]
+    issues = (
+        []
+        if record.executed and not record.passed and expected_hit
+        else ["web validator did not catch missing DOM id"]
+    )
     return MainAgentFoundationCaseResult(
         case_id="web_artifact_validator",
         title="Web 产物机器验收测试",
@@ -192,7 +170,12 @@ def _case_activity_timeout_recovery(workspace: Path) -> MainAgentFoundationCaseR
     evidence = workspace / "activity_timeout_recovery" / "decisions.json"
     evidence.parent.mkdir(parents=True, exist_ok=True)
     evidence.write_text(
-        json.dumps({"active": active.to_dict(), "idle": idle.to_dict()}, ensure_ascii=False, indent=2, sort_keys=True),
+        json.dumps(
+            {"active": active.to_dict(), "idle": idle.to_dict()},
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ),
         encoding="utf-8",
     )
     issues: list[str] = []
@@ -225,7 +208,9 @@ def _case_large_output_artifact_refs(workspace: Path) -> MainAgentFoundationCase
         "read_hint": {"offset": 0, "max_chars": 4000},
     }
     evidence = artifact.with_suffix(".meta.json")
-    evidence.write_text(json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    evidence.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
+    )
     return MainAgentFoundationCaseResult(
         case_id="large_output_artifact_refs",
         title="大文件/大输出测试",
@@ -241,7 +226,9 @@ def _case_deterministic_e2e_matrix(workspace: Path) -> MainAgentFoundationCaseRe
     report = run_e2e_matrix(E2ERunnerRequest(workspace=workspace / "deterministic_e2e_matrix"))
     evidence = workspace / "deterministic_e2e_matrix" / "report.json"
     evidence.parent.mkdir(parents=True, exist_ok=True)
-    evidence.write_text(json.dumps(report.to_dict(), ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    evidence.write_text(
+        json.dumps(report.to_dict(), ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
+    )
     return MainAgentFoundationCaseResult(
         case_id="deterministic_e2e_matrix",
         title="E2E Matrix 确定性测试",

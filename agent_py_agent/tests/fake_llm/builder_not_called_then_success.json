@@ -1,0 +1,17 @@
+{
+  "contract_ref": "../contracts/builder_not_called_cannot_complete.json",
+  "model_steps": [
+    {
+      "type": "tool_call",
+      "tool": "write_file",
+      "params": {
+        "path": "source_data.json",
+        "content": "{\"sheets\":[{\"name\":\"Week01\",\"rows\":[{\"repo\":\"demo\",\"stars\":123}]}]}"
+      }
+    },
+    {
+      "type": "final",
+      "status": "SUCCEEDED"
+    }
+  ]
+}

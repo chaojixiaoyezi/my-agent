@@ -73,13 +73,15 @@ agent_py_agent/cli/
 ## 核心文件
 
 - `memory_store/jsonl.py`：读写长期记忆 JSONL，是最朴素的事实落盘层；LocalStore 只是索引，不替代 JSONL。`SimpleAgent` 传入 home daily mirror 后，同一条记录也会追加到 `~/.my-agent/memory/daily/YYYY-MM-DD.jsonl`，便于以后按天恢复和查询；读取侧现在也会把 daily mirror 作为旧 `memory_path` 的补充事实源并去重。
-- `contracts/error_taxonomy.py`、`contracts/state_machine.py`、`contracts/idempotency.py`、`contracts/e2e_matrix.py`、`contracts/e2e_matrix_runner.py`：主代理执行合同层。它们分别定义稳定错误代码/恢复建议、运行状态事实判断、幂等键/操作编号、真实端到端测试矩阵和 deterministic runner；这些模块只输出机器可读事实，不直接阻断工具或固定工作流。当前 `create_subagents` 已写 `operation_contract`，`current_turn_run_state` 已写 `state_machine_contract` 和 `recovery_recommendations`，`ToolExecutionResult` 已带错误合同字段。
+- `contracts/error_taxonomy.py`、`contracts/state_machine.py`、`contracts/idempotency.py`、`contracts/tool_protocol_v2.py`、`contracts/model_call_ledger.py`、`contracts/e2e_matrix.py`、`contracts/e2e_matrix_runner.py`：主代理执行合同层。它们分别定义稳定错误代码/恢复建议、运行状态事实判断、幂等键/操作编号、工具调用/工具结果 envelope、模型调用 started/first-token/finished/timeout 账本、真实端到端测试矩阵和 deterministic runner；这些模块只输出机器可读事实，不直接阻断工具或固定工作流。当前 `create_subagents` 已写 `operation_contract`，`current_turn_run_state` 已写 `state_machine_contract` 和 `recovery_recommendations`，`ToolExecutionResult` 已带错误合同字段，registry 会同步镜像 `tool_protocol_v2` 结构化结果。
 - `user_space/home_runtime_query.py`：提供 `DailyMemoryQuery`、`TaskWorkspaceQuery`、`read_daily_memory_records()`、`list_task_workspaces()`、`home_task_workspace_payload()` 和 `home_runtime_status()`；CLI、doctor 和 resume 通过这一层读取 home runtime，不在各自模块里散扫目录。
 - `user_space/context_bundle.py`：为主代理保存型 run 生成 `Main Agent Context Bundle v1` JSON/Markdown 和 bounded prompt 摘要；它只写结构化 refs，不复制大正文。
 - `user_space/context_bundle_contracts.py`：集中生成 context bundle 的合同字段，包括 schema policy、owner model、RunScope、ToolManifest、ArtifactRef、Acceptance Contract、prompt budget 和 self-check。后续字段扩展优先落在这里，避免各处散拼 JSON。
 - `user_space/context_bundle_artifacts.py`：run 收尾后按 request/run/task scope 从 tool-output index 回填 artifact refs 到本轮 context bundle；只登记 ref/hash/size/call id，不读取 artifact 正文。
 - `user_space/context_bundle_rendering.py`：只负责 context bundle 的 prompt 摘要和 Markdown 镜像渲染；完整 JSON 生成仍在 `context_bundle.py`，这样结构字段和展示格式不会互相拖大。
 - `agent_core/runtime_context_bundle.py`：把 runtime loop 的 request、memory、routing、resume 和工具规格转换成 `MainContextBundleRequest`；task-local/control-plane 会在这一层保持不注入主代理 bundle。
+- `agent_core/model_call_runtime.py` / `agent_core/model_call_monitor.py`：记录真实模型调用账本，按输入 token、首 token 观测和配置生成动态超时预算；超时会落成结构化 `ProviderTimeoutError` 路径，不让卡住的 provider call 无限占住主代理。
+- `tooling/file_write_session.py`、`tooling/file_write_session_service.py`、`tooling/file_write_session_io.py`、`tooling/file_write_session_models.py`：大文件写入 session 工具。公开工具只展示目录和入口，服务层负责 begin/append/finish/abort 状态机，IO 层负责 manifest、chunk hash 和结果 envelope；这避免长 HTML/CSS/日志内容反复塞进单次 `write_file`。
 - `settings/memory.py`：解析配置，处理非法值回退和 warning；会原地更新 AgentConfig-like 对象。
 - `memory_routing/loader.py`：读取 route index；JSON 面向程序稳定性，Markdown 面向人工维护，并兼容常见中英文列表分隔符。
 - `memory_routing/models.py`：定义 route、match、path resolution、read receipt 等票据结构。

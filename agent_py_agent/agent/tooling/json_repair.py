@@ -16,6 +16,9 @@ def load_tool_block_json(raw: str) -> Any:
         repaired = _load_json_with_trailing_brace_repair(raw)
         if repaired is not None:
             return repaired
+        repaired = _load_write_file_json_with_trailing_body(raw)
+        if repaired is not None:
+            return repaired
         raise exc
 
 
@@ -30,3 +33,23 @@ def _load_json_with_trailing_brace_repair(raw: str) -> Any | None:
     if tail and set(tail) <= {"}"}:
         return payload
     return None
+
+
+# LLM: _load_write_file_json_with_trailing_body bridges common raw-body file-write drift into one canonical payload.
+# 函数用途: 当模型先输出写文件 JSON 头、再把正文直接跟在后面时，把尾部内容并回 content 字段。
+def _load_write_file_json_with_trailing_body(raw: str) -> Any | None:
+    try:
+        payload, end = json.JSONDecoder().raw_decode(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    tool = str(payload.get("tool") or "").strip().lower()
+    if tool not in {"write_file", "write_file_raw", "write"}:
+        return None
+    if str(payload.get("content") or "").strip():
+        return None
+    tail = raw[end:].lstrip("\r\n")
+    if not tail.strip():
+        return None
+    return {**payload, "content": tail}

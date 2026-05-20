@@ -3,21 +3,21 @@
 from __future__ import annotations
 
 
-# LLM: HTML validator should catch placeholder links that models often call "working" by mistake.
-# 函数用途: 验证 HTML 产物验收能发现 `href="#"` 这类假按钮/假链接，不能只相信模型自检。
-def test_html_acceptance_flags_placeholder_links(tmp_path):
+# LLM: Generic HTML acceptance should focus on structural/resource facts, not task-specific link style rules.
+# 函数用途: 验证通用 HTML 验收不会因为 `href="#"` 这类页面实现细节直接判死，只保留通用结构和资源检查。
+def test_html_acceptance_does_not_fail_placeholder_links_by_default(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,
         validate_html_artifact,
     )
 
     path = tmp_path / "index.html"
-    path.write_text('<html><body><a href="#">More</a></body></html>', encoding="utf-8")
+    path.write_text('<!doctype html><html><head><title>X</title></head><body><a href="#">More</a></body></html>', encoding="utf-8")
 
     report = validate_html_artifact(ArtifactAcceptanceRequest(path=path))
 
-    assert report.ok is False
-    assert any(item.code == "HTML_PLACEHOLDER_LINK" for item in report.findings)
+    assert report.ok is True
+    assert report.findings == []
 
 
 # LLM: HTML validator should distinguish image refs from unrelated external resources like fonts.
@@ -42,8 +42,56 @@ def test_html_acceptance_flags_external_images_without_flagging_fonts(tmp_path):
     assert "HTML_EXTERNAL_STYLESHEET" not in codes
 
 
-# LLM: Acceptance reports must be JSON friendly for future QA and repair agents.
-# 函数用途: 确认验收报告可以作为结构化 findings 传给修复流程，不需要解析自然语言。
+# LLM: Contracted single-file HTML should reject remote runtime resources, not only broken images.
+# 函数用途: 验证单文件网页合同时，外部字体/CSS/脚本资源会被结构化 finding 拦住。
+def test_html_acceptance_contract_rejects_external_resources_for_single_file(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_html_artifact,
+    )
+
+    path = tmp_path / "index.html"
+    path.write_text(
+        '<!doctype html><html><head><link rel="stylesheet" href="https://fonts.example/font.css"></head>'
+        "<body><main>Furniture</main></body></html>",
+        encoding="utf-8",
+    )
+
+    report = validate_html_artifact(
+        ArtifactAcceptanceRequest(
+            path=path,
+            validation_contract={"quality_requirements": {"single_file_no_external_assets": True}},
+        )
+    )
+
+    assert report.ok is False
+    assert any(item.code == "HTML_EXTERNAL_RESOURCE_REF" for item in report.findings)
+
+
+# LLM: Contracted complete HTML should catch truncated files before delivery closeout.
+# 函数用途: 验证要求完整 HTML 文档时，缺少 body/html 关闭标签的半截文件不能通过。
+def test_html_acceptance_contract_rejects_incomplete_html_document(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_html_artifact,
+    )
+
+    path = tmp_path / "index.html"
+    path.write_text("<!doctype html><html><head><style>body{color:#111}", encoding="utf-8")
+
+    report = validate_html_artifact(
+        ArtifactAcceptanceRequest(
+            path=path,
+            validation_contract={"quality_requirements": {"complete_html_document": True}},
+        )
+    )
+
+    assert report.ok is False
+    assert any(item.code == "HTML_INCOMPLETE_DOCUMENT" for item in report.findings)
+
+
+# LLM: Acceptance reports must stay JSON friendly even when HTML passes default generic checks.
+# 函数用途: 确认验收报告仍可结构化输出，后续 QA/修复链路不需要解析自然语言。
 def test_html_acceptance_report_to_dict(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,
@@ -51,12 +99,12 @@ def test_html_acceptance_report_to_dict(tmp_path):
     )
 
     path = tmp_path / "index.html"
-    path.write_text("<html><body><a href=\"#\">Bad</a></body></html>", encoding="utf-8")
+    path.write_text("<!doctype html><html><head><title>X</title></head><body><a href=\"#\">Bad</a></body></html>", encoding="utf-8")
 
     payload = validate_html_artifact(ArtifactAcceptanceRequest(path=path)).to_dict()
 
-    assert payload["ok"] is False
-    assert payload["findings"][0]["code"] == "HTML_PLACEHOLDER_LINK"
+    assert payload["ok"] is True
+    assert payload["findings"] == []
 
 
 # LLM: Generic artifact acceptance should route common formats through one contract.
@@ -128,3 +176,35 @@ def test_validate_artifact_reports_invalid_json(tmp_path):
     assert report.ok is False
     assert report.artifact_kind == "json"
     assert report.findings[0].code == "JSON_INVALID"
+
+
+# LLM: Web project directories must be validated by their declared static-site contract, not as generic folders.
+# 函数用途: 验证 web_project 目录缺少 validation_contract.required_files 时不能因为目录存在就通过。
+def test_validate_artifact_static_site_contract_rejects_missing_required_files(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_artifact,
+    )
+
+    site = tmp_path / "outputs" / "shopping_site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text(
+        "<!doctype html><html><body><main id='home'>Shop</main></body></html>",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=site,
+            workspace_root=tmp_path,
+            validation_contract={
+                "validator": "static_site_check",
+                "required_files": ["index.html", "app.js"],
+            },
+        )
+    )
+
+    assert report.ok is False
+    assert report.artifact_kind == "web_project"
+    assert any(item.code == "STATIC_SITE_MISSING_REQUIRED_FILES" for item in report.findings)
+    assert any(item.value == "app.js" for item in report.findings)

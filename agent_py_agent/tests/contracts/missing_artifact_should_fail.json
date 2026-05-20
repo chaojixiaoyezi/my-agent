@@ -1,0 +1,23 @@
+{
+  "name": "missing_artifact_should_fail",
+  "artifacts": {
+    "required": [
+      {
+        "path": "output.md",
+        "min_size": 1
+      }
+    ]
+  },
+  "tools": {
+    "required_calls": [
+      "write_file"
+    ]
+  },
+  "final_status": {
+    "allow_succeeded_only_if": [
+      "artifact_exists",
+      "artifact_non_empty",
+      "required_tool_calls_present"
+    ]
+  }
+}

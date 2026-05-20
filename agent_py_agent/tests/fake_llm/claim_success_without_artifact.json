@@ -1,0 +1,9 @@
+{
+  "contract_ref": "../contracts/missing_artifact_should_fail.json",
+  "model_steps": [
+    {
+      "type": "final",
+      "status": "SUCCEEDED"
+    }
+  ]
+}

@@ -68,6 +68,7 @@ subagents-acceptance        验收等待验收的子代理
 subagents-patches           审核 runner 输出里的 patch 记录
 subagents-dispatch          执行一轮父代理调度
 scenario-test               隔离跑 gateway/派工/runner/验收全流程
+real-e2e                    跑主代理基础验收矩阵，必要时生成真实任务批量测试计划
 gateway                     管理后台 gateway，并向 gateway 投递请求
 adapter                     外部聊天工具 / TUI 文件适配器
 subagent-context            生成单个子代理执行上下文
@@ -207,9 +208,14 @@ search_text
 write_file
 append_file
 replace_in_file
+file_write_session
 fetch_url
 http_request
 ```
+
+`file_write_session` 用于大文件分块写入：先 `begin`，再按 `chunk_index` 多次
+`append`，最后 `finish` 原子提交；中途失败可以重试同一个 chunk，不需要把长正文反复塞进
+`write_file` 的单次工具 JSON。
 
 工具系统有两层 prompt：
 - Tool Catalog：中等详细度工具目录。

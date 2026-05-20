@@ -31,6 +31,8 @@ from .models import (
     VectorToolSearchProvider,
 )
 from .registry import ToolRegistry, ToolRegistryParams
+from .registry_list_tools import ListToolsTool
+from .spreadsheet_builder import DataWorkbookTool
 from .web import FetchUrlTool, HttpRequestTool
 from .write_boundary import WRITE_TOOL_NAMES, validate_write_boundary
 
@@ -40,10 +42,12 @@ __all__ = [
     "BaseToolSearchProvider",
     "FetchUrlTool",
     "FileSystemTool",
+    "DataWorkbookTool",
     "HttpRequestTool",
     "HybridToolRetriever",
     "KeywordToolSearchProvider",
     "ListFilesTool",
+    "ListToolsTool",
     "ReadFileTool",
     "ReadArtifactTool",
     "ReplaceInFileTool",

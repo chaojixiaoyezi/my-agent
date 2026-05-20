@@ -22,6 +22,8 @@ def test_tool_registry_executes_typed_tool_call_envelope(tmp_path):
     assert result.result_envelope["call_id"] == "call-read-1"
     assert result.result_envelope["tool"] == "read_file"
     assert result.result_envelope["scope"]["run_id"] == "run-1"
+    assert result.result_envelope["tool_protocol_v2"]["schema_version"] == "tool_protocol.v2"
+    assert result.result_envelope["tool_protocol_v2"]["operation_id"] == result.result_envelope["operation_id"]
 
 
 # LLM: Tool result envelopes must keep the same operation id as the call envelope.
@@ -81,3 +83,5 @@ def test_tool_registry_error_envelope_includes_error_contract(tmp_path):
     assert result.result_envelope["error_category"] == "path"
     assert result.result_envelope["recommended_action"] == "fix_path_or_read_refs"
     assert "修正路径" in result.result_envelope["recovery_hint"]
+    assert result.result_envelope["tool_protocol_v2"]["error_type"] == "PATH_INVALID"
+    assert result.result_envelope["tool_protocol_v2"]["retry_hint"] == "fix_path_or_read_refs"

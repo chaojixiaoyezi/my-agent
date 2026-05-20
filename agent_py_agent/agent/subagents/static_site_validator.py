@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .execution_executor_helpers import _test_name, _utc_now_iso
 from .execution_records import TestExecutionRecord
 from .static_site_dom_checks import (
     InertControlCheckRequest,
@@ -29,6 +28,7 @@ from .static_site_path_checks import (
     string_list,
     unique_paths,
 )
+from .static_site_records import static_site_failure_summary, static_site_record
 
 
 # LLM: StaticSiteCheckResult is the compact facts payload persisted in test_execution.json.
@@ -120,20 +120,23 @@ class StaticSiteHtmlScanRequest:
 def run_static_site_check(test: dict[str, Any], workspace_root: Path) -> TestExecutionRecord:
     site_root, error = _resolve_site_root(test, workspace_root)
     if error:
-        return _static_site_record(test, StaticSiteCheckResult(str(site_root)), executed=False, error=error)
+        return static_site_record(
+            test, StaticSiteCheckResult(str(site_root)), executed=False, error=error
+        )
     result = _scan_site(test, site_root)
-    error_text = "" if result.ok else _failure_summary(result)
-    return _static_site_record(test, result, executed=True, error=error_text)
+    error_text = "" if result.ok else static_site_failure_summary(result)
+    return static_site_record(test, result, executed=True, error=error_text)
 
 
 # LLM: _resolve_site_root enforces workspace bounds before any directory walk.
 # 函数用途: 解析 site_root/root_dir/file_path，保证静态检查不能扫描工作区外部。
 def _resolve_site_root(test: dict[str, Any], workspace_root: Path) -> tuple[Path, str]:
     raw = str(test.get("site_root") or test.get("root_dir") or test.get("file_path") or ".").strip()
+    workspace = workspace_root.expanduser().resolve()
     candidate = Path(raw).expanduser()
-    path = candidate.resolve() if candidate.is_absolute() else (workspace_root / candidate).resolve()
+    path = candidate.resolve() if candidate.is_absolute() else (workspace / candidate).resolve()
     try:
-        path.relative_to(workspace_root)
+        path.relative_to(workspace)
     except ValueError:
         return path, "site_root 超出 workspace 边界"
     if not path.exists() or not path.is_dir():
@@ -185,7 +188,9 @@ def _scan_html_file(request: StaticSiteHtmlScanRequest) -> None:
     parser.feed(text)
     state.form_ids.update(parser.form_ids)
     state.element_ids.update(parser.element_ids)
-    local_script_text = "\n".join(small_text(item) for item in unique_paths(local_script_refs(parser.refs, path, site_root)))
+    local_script_text = "\n".join(
+        small_text(item) for item in unique_paths(local_script_refs(parser.refs, path, site_root))
+    )
     state.script_texts.extend([text, local_script_text])
     if options.check_refs:
         result.broken_local_refs.extend(broken_refs(parser.refs, path, site_root))
@@ -219,12 +224,16 @@ def _finalize_dom_checks(
             allow_optional_missing=not options.strict_dom_bindings,
         )
     )
-    result.missing_dom_id_hits.extend(_missing_required_dom_id_hits(state.element_ids, options.required_dom_ids))
+    result.missing_dom_id_hits.extend(
+        _missing_required_dom_id_hits(state.element_ids, options.required_dom_ids)
+    )
 
 
 # LLM: _check_required_files records missing pages/assets without opening arbitrary paths.
 # 函数用途: 检查调用方声明的 required_files；相对路径必须仍在站点根目录内。
-def _check_required_files(result: StaticSiteCheckResult, test: dict[str, Any], site_root: Path) -> None:
+def _check_required_files(
+    result: StaticSiteCheckResult, test: dict[str, Any], site_root: Path
+) -> None:
     for item in string_list(test.get("required_files")):
         path = (site_root / item).resolve()
         if not inside(path, site_root) or not path.exists() or not path.is_file():
@@ -247,7 +256,11 @@ def _scoped_html_files(test: dict[str, Any], site_root: Path) -> list[Path]:
     paths: list[Path] = []
     for item in string_list(test.get("html_files") or test.get("check_files")):
         candidate = (site_root / item).resolve()
-        if inside(candidate, site_root) and candidate.is_file() and candidate.suffix.lower() in {".html", ".htm"}:
+        if (
+            inside(candidate, site_root)
+            and candidate.is_file()
+            and candidate.suffix.lower() in {".html", ".htm"}
+        ):
             paths.append(candidate)
     return sorted(dict.fromkeys(paths))
 
@@ -284,67 +297,42 @@ def _html_structure_hits(text: str, html_file: Path, site_root: Path) -> list[st
         closes = lower.count(f"</{tag}>")
         if opens != closes:
             hits.append(f"{rel_path}:unbalanced_{tag}")
-    if lower.find("<body") != -1 and lower.find("</head>") != -1 and lower.find("<body") < lower.find("</head>"):
+    if (
+        lower.find("<body") != -1
+        and lower.find("</head>") != -1
+        and lower.find("<body") < lower.find("</head>")
+    ):
         hits.append(f"{rel_path}:body_before_head_close")
     return hits
+
 
 # LLM: _repair_hints turns validation facts into short action hints for parent repair dispatch.
 # 函数用途: 给父级/修复子代理一组不用读正文也能理解的修复方向，避免只靠自然语言猜。
 def _repair_hints(result: StaticSiteCheckResult) -> list[str]:
     hints: list[str] = []
     if result.html_structure_hits:
-        hints.append("html_structure: repair or regenerate a complete HTML skeleton before DOM/id fixes")
+        hints.append(
+            "html_structure: repair or regenerate a complete HTML skeleton before DOM/id fixes"
+        )
     if result.inert_control_hits:
-        hints.append("inert_controls: add real href targets, onclick handlers, or matching anchor sections for listed controls")
+        hints.append(
+            "inert_controls: add real href targets, onclick handlers, or matching anchor sections for listed controls"
+        )
     if result.form_binding_hits:
-        hints.append("form_bindings: create the referenced form id or update validateForm(...) to the existing form id")
+        hints.append(
+            "form_bindings: create the referenced form id or update validateForm(...) to the existing form id"
+        )
     if result.missing_dom_id_hits:
-        hints.append("missing_dom_ids: add the referenced id to a real element or remove the stale unguarded JS lookup")
+        hints.append(
+            "missing_dom_ids: add the referenced id to a real element or remove the stale unguarded JS lookup"
+        )
     return hints[:6]
-
-# LLM: _static_site_record converts validator facts into the common TestExecutionRecord contract.
-# 函数用途: 构造 static_site_check 执行记录；失败原因放摘要，详细列表放 validation_result。
-def _static_site_record(
-    test: dict[str, Any],
-    result: StaticSiteCheckResult,
-    *,
-    executed: bool,
-    error: str,
-) -> TestExecutionRecord:
-    return TestExecutionRecord(
-        test_name=_test_name(test),
-        executed=executed,
-        exit_code=0 if result.ok and executed else 1,
-        executed_at=_utc_now_iso(),
-        error=error,
-        validation_method="static_site_check",
-        validation_result=result.to_dict(),
-    )
-
-
-# LLM: _failure_summary keeps the top-level error concise while detailed facts stay in validation_result.
-# 函数用途: 生成父级看板易读的静态站点失败摘要。
-def _failure_summary(result: StaticSiteCheckResult) -> str:
-    parts: list[str] = []
-    if result.missing_required_files:
-        parts.append(f"missing_required_files={len(result.missing_required_files)}")
-    if result.placeholder_hits:
-        parts.append(f"placeholder_hits={len(result.placeholder_hits)}")
-    if result.broken_local_refs:
-        parts.append(f"broken_local_refs={len(result.broken_local_refs)}")
-    if result.html_structure_hits:
-        parts.append(f"html_structure_hits={len(result.html_structure_hits)}")
-    if result.inert_control_hits:
-        parts.append(f"inert_control_hits={len(result.inert_control_hits)}")
-    if result.form_binding_hits:
-        parts.append(f"form_binding_hits={len(result.form_binding_hits)}")
-    if result.missing_dom_id_hits:
-        parts.append(f"missing_dom_id_hits={len(result.missing_dom_id_hits)}")
-    return "; ".join(parts)
 
 
 # LLM: _has_visible_template_placeholder separates real leftover HTML placeholders from JS template literals.
 # 函数用途: 检查页面可见/标记区域是否残留 `${...}`；会先剔除 script/style，避免误伤正常 JavaScript 模板字符串。
 def _has_visible_template_placeholder(text: str) -> bool:
-    visible_text = re.sub(r"<(script|style)\b[^>]*>.*?</\1>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    visible_text = re.sub(
+        r"<(script|style)\b[^>]*>.*?</\1>", "", text, flags=re.IGNORECASE | re.DOTALL
+    )
     return "${" in visible_text

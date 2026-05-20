@@ -1,0 +1,33 @@
+{
+  "name": "staged_json_no_rows_cannot_complete",
+  "task_type": "structured_data_artifact",
+  "artifacts": {
+    "required": [
+      {
+        "path": "source_data.json",
+        "min_size": 10,
+        "json_requirements": {
+          "required_keys": [
+            "sheets"
+          ],
+          "required_non_empty_paths": [
+            "sheets[0].rows"
+          ]
+        }
+      }
+    ]
+  },
+  "tools": {
+    "required_calls": [
+      "write_file"
+    ]
+  },
+  "final_status": {
+    "allow_succeeded_only_if": [
+      "artifact_exists",
+      "artifact_non_empty",
+      "json_requirements_present",
+      "required_tool_calls_present"
+    ]
+  }
+}

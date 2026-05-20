@@ -39,6 +39,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action="request_permission_or_choose_allowed_root",
         recovery_hint="写入被禁止；改写到 allowed_write_roots，或上报需要授权。",
     ),
+    "APPROVAL_REQUIRED": ErrorContract(
+        code="APPROVAL_REQUIRED",
+        category="permission",
+        retryable=True,
+        recommended_action="request_approval_or_choose_safe_action",
+        recovery_hint="当前动作需要审批；先走审批链路，或者改成不需要高危权限的安全动作。",
+    ),
     "TOOL_UNAVAILABLE": ErrorContract(
         code="TOOL_UNAVAILABLE",
         category="tool",
@@ -60,6 +67,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action="retry_with_smaller_scope_or_longer_timeout",
         recovery_hint="工具超时；缩小读取/搜索范围，或使用更合适的超时配置。",
     ),
+    "TOOL_REPEATED_EXACT_FAILURE": ErrorContract(
+        code="TOOL_REPEATED_EXACT_FAILURE",
+        category="tool",
+        retryable=True,
+        recommended_action="change_tool_arguments_or_strategy",
+        recovery_hint="同一工具同一参数连续失败；不要原样重试，先改参数、换工具或记录明确阻塞原因。",
+    ),
     "MODEL_UPSTREAM_FAILED": ErrorContract(
         code="MODEL_UPSTREAM_FAILED",
         category="model",
@@ -74,6 +88,97 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action="read_or_rebuild_artifact_ref",
         recovery_hint="产物引用缺失；先按 refs 查找，找不到再重建产物。",
     ),
+    "STAGED_ARTIFACT_MISSING": ErrorContract(
+        code="STAGED_ARTIFACT_MISSING",
+        category="artifact",
+        retryable=True,
+        recommended_action="materialize_checkpoint",
+        recovery_hint="阶段产物缺失；先真实写出 checkpoint，再继续后续 builder 或最终产物。",
+    ),
+    "STAGED_ARTIFACT_EMPTY": ErrorContract(
+        code="STAGED_ARTIFACT_EMPTY",
+        category="artifact",
+        retryable=True,
+        recommended_action="rewrite_checkpoint",
+        recovery_hint="阶段产物为空；补齐最小有效内容后，再继续后续阶段。",
+    ),
+    "STAGED_JSON_INVALID": ErrorContract(
+        code="STAGED_JSON_INVALID",
+        category="artifact",
+        retryable=True,
+        recommended_action="repair_structured_checkpoint_json",
+        recovery_hint="阶段 JSON 无法解析或已截断；先修成完整可解析 JSON，再继续后续阶段。",
+    ),
+    "STAGED_JSON_NO_ROWS": ErrorContract(
+        code="STAGED_JSON_NO_ROWS",
+        category="artifact",
+        retryable=True,
+        recommended_action="write_non_empty_structured_rows",
+        recovery_hint="阶段 JSON 没有有效 rows/sheets 数据；先补齐非空结构化数据，再继续 builder。",
+    ),
+    "STAGED_JSON_DUPLICATE_SHEET_NAMES": ErrorContract(
+        code="STAGED_JSON_DUPLICATE_SHEET_NAMES",
+        category="artifact",
+        retryable=True,
+        recommended_action="repair_structured_checkpoint_json",
+        recovery_hint="阶段 JSON 的表格 sheet 身份重复；修正为唯一 sheet 后再继续 builder。",
+    ),
+    "STAGED_JSON_TABLE_SHAPE_INVALID": ErrorContract(
+        code="STAGED_JSON_TABLE_SHAPE_INVALID",
+        category="artifact",
+        retryable=True,
+        recommended_action="repair_structured_checkpoint_json",
+        recovery_hint="阶段 JSON 的表格结构不一致；修正 sheets、columns、rows 后再继续 builder。",
+    ),
+    "STAGED_JSON_REQUIRED_COLUMNS_MISSING": ErrorContract(
+        code="STAGED_JSON_REQUIRED_COLUMNS_MISSING",
+        category="artifact",
+        retryable=True,
+        recommended_action="repair_structured_checkpoint_json",
+        recovery_hint="阶段 JSON 缺少合同声明的必需列；补齐 required_columns 后再继续 builder。",
+    ),
+    "EVIDENCE_SOURCE_UNREADABLE": ErrorContract(
+        code="EVIDENCE_SOURCE_UNREADABLE",
+        category="evidence",
+        retryable=True,
+        recommended_action="repair_evidence_refs",
+        recovery_hint="证据来源缺少可审计的 source_id、uri 或 artifact_ref；补齐结构化 source_refs 后再继续。",
+    ),
+    "EVIDENCE_CLAIM_UNSOURCED": ErrorContract(
+        code="EVIDENCE_CLAIM_UNSOURCED",
+        category="evidence",
+        retryable=True,
+        recommended_action="repair_evidence_refs",
+        recovery_hint="证据 claim 没有关联 source_ids；把关键字段 claim 绑定到结构化来源后再继续。",
+    ),
+    "EVIDENCE_SOURCE_MISSING": ErrorContract(
+        code="EVIDENCE_SOURCE_MISSING",
+        category="evidence",
+        retryable=True,
+        recommended_action="repair_evidence_refs",
+        recovery_hint="证据 claim 引用了不存在的 source_id；修正 source_refs 和 claim.source_ids 后再继续。",
+    ),
+    "EVIDENCE_CLAIM_UNVERIFIED": ErrorContract(
+        code="EVIDENCE_CLAIM_UNVERIFIED",
+        category="evidence",
+        retryable=True,
+        recommended_action="repair_evidence_refs",
+        recovery_hint="关键 claim 尚未标记 VERIFIED；完成可审计验证并更新 verification_status 后再继续。",
+    ),
+    "EVIDENCE_REQUIRED_FIELD_MISSING": ErrorContract(
+        code="EVIDENCE_REQUIRED_FIELD_MISSING",
+        category="evidence",
+        retryable=True,
+        recommended_action="repair_evidence_refs",
+        recovery_hint="必需字段缺少结构化 claim；为 required_fields 补齐 claims/source_ids 后再继续。",
+    ),
+    "TARGET_PENDING_FILE_WRITE_SESSION": ErrorContract(
+        code="TARGET_PENDING_FILE_WRITE_SESSION",
+        category="artifact",
+        retryable=True,
+        recommended_action="continue_pending_file_write_session",
+        recovery_hint="目标文件尚未 materialize；继续推荐的 file_write_session 并 finish 后再读取最终文件。",
+    ),
     "ACCEPTANCE_FAILED": ErrorContract(
         code="ACCEPTANCE_FAILED",
         category="acceptance",
@@ -87,6 +192,34 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=False,
         recommended_action="fallback_to_checkpoint_or_summary",
         recovery_hint="compact 引用缺失；降级读 checkpoint、summary、raw archive，不要继续自动执行。",
+    ),
+    "NO_PROGRESS": ErrorContract(
+        code="NO_PROGRESS",
+        category="orchestration",
+        retryable=True,
+        recommended_action="change_strategy_or_stop",
+        recovery_hint="连续多轮没有新进展；不要原样重复，改策略、缩小范围、换工具，或者明确阻塞后停下。",
+    ),
+    "SPREADSHEET_SOURCE_MISSING": ErrorContract(
+        code="SPREADSHEET_SOURCE_MISSING",
+        category="artifact",
+        retryable=True,
+        recommended_action="write_or_fix_structured_source_data",
+        recovery_hint="表格源数据缺失；先写 source_data.json 或直接传 sheets，再重新生成 workbook。",
+    ),
+    "SPREADSHEET_SOURCE_INVALID": ErrorContract(
+        code="SPREADSHEET_SOURCE_INVALID",
+        category="artifact",
+        retryable=True,
+        recommended_action="repair_structured_source_json",
+        recovery_hint="表格源 JSON 无法解析；修复 JSON 结构后重新生成 workbook。",
+    ),
+    "SPREADSHEET_SOURCE_NO_ROWS": ErrorContract(
+        code="SPREADSHEET_SOURCE_NO_ROWS",
+        category="artifact",
+        retryable=True,
+        recommended_action="collect_non_empty_rows_before_workbook",
+        recovery_hint="表格源数据没有非空行；先补齐 rows/sheets 数据，再调用 data_to_workbook。",
     ),
     "UNKNOWN_ERROR": ErrorContract(
         code="UNKNOWN_ERROR",
@@ -108,6 +241,10 @@ def error_contract(code: str) -> ErrorContract:
 # 函数用途: 把工具/模型/compact 的失败文本归类为稳定错误类型，给后续恢复策略使用。
 def classify_error(message: str) -> ErrorContract:
     text = str(message or "").lower()
+    if "approval_required" in text or "approval required" in text or "requires approval" in text:
+        return error_contract("APPROVAL_REQUIRED")
+    if "no_progress" in text or "no progress" in text or "without progress" in text:
+        return error_contract("NO_PROGRESS")
     if "outside workspace" in text or "path_outside_workspace" in text:
         return error_contract("PATH_OUTSIDE_WORKSPACE")
     if "permission" in text or "forbidden" in text or "denied" in text or "write_forbidden" in text:
@@ -140,13 +277,32 @@ def tool_failure_taxonomy() -> list[str]:
         "PATH_INVALID",
         "PATH_OUTSIDE_WORKSPACE",
         "WRITE_FORBIDDEN",
+        "APPROVAL_REQUIRED",
         "TOOL_UNAVAILABLE",
         "TOOL_INVALID_ARGUMENTS",
         "TOOL_TIMEOUT",
+        "TOOL_REPEATED_EXACT_FAILURE",
         "MODEL_UPSTREAM_FAILED",
         "ARTIFACT_MISSING",
+        "STAGED_ARTIFACT_MISSING",
+        "STAGED_ARTIFACT_EMPTY",
+        "STAGED_JSON_INVALID",
+        "STAGED_JSON_NO_ROWS",
+        "STAGED_JSON_DUPLICATE_SHEET_NAMES",
+        "STAGED_JSON_TABLE_SHAPE_INVALID",
+        "STAGED_JSON_REQUIRED_COLUMNS_MISSING",
+        "EVIDENCE_SOURCE_UNREADABLE",
+        "EVIDENCE_CLAIM_UNSOURCED",
+        "EVIDENCE_SOURCE_MISSING",
+        "EVIDENCE_CLAIM_UNVERIFIED",
+        "EVIDENCE_REQUIRED_FIELD_MISSING",
+        "TARGET_PENDING_FILE_WRITE_SESSION",
         "ACCEPTANCE_FAILED",
         "COMPACT_REF_MISSING",
+        "NO_PROGRESS",
+        "SPREADSHEET_SOURCE_MISSING",
+        "SPREADSHEET_SOURCE_INVALID",
+        "SPREADSHEET_SOURCE_NO_ROWS",
         "UNKNOWN_ERROR",
     ]
 

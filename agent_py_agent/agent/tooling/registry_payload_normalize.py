@@ -13,20 +13,28 @@ MAX_TOOL_FIELD_NAME_CHARS = 128
 MAX_TOOL_NAME_CHARS = 128
 MAX_PARSE_ERROR_RAW_CHARS = 1000
 MODEL_WRAPPER_PARAM_KEYS = {
+    "args",
+    "actual_parameter_name",
     "api",
+    "arguments",
     "filesystem",
     "log_analysis",
     "memory",
     "orchestration",
     "param_name",
+    "parameters",
+    "params",
+    "shell",
     "system",
     "web",
 }
 TOOL_NAME_ALIASES = {
+    "WRITE_FILE_RAW": "write_file",
     "append": "append_file",
     "bash": "run_command",
     "cat": "read_file",
     "command": "run_command",
+    "controlled_exec": "run_command",
     "exec": "run_command",
     "fetch": "fetch_url",
     "grep": "search_text",
@@ -41,6 +49,7 @@ TOOL_NAME_ALIASES = {
     "sh": "run_command",
     "shell": "run_command",
     "write": "write_file",
+    "write_file_raw": "write_file",
 }
 FILESYSTEM_PATH_PARAM_ALIASES = {
     "dir": "path",
@@ -215,7 +224,7 @@ def _canonical_tool_name(value: object) -> object:
     if not isinstance(value, str):
         return value
     name = value.strip()
-    return TOOL_NAME_ALIASES.get(name, name)
+    return TOOL_NAME_ALIASES.get(name, TOOL_NAME_ALIASES.get(name.lower(), name))
 
 
 # LLM: _truncate bounds raw parse-error previews for prompt safety.

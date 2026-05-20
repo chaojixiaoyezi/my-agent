@@ -24,6 +24,7 @@ from ..agent.gateway import (
 )
 from ..agent.subagents.models import SubAgentBoardOptions
 from .common import format_local_time, make_agent, resume_context_override
+from .delivery_contracts import delivery_contract_from_file
 from .local_doctor import build_status_suggestions
 from .local_repair_commands import (
     build_local_doctor_report,
@@ -142,6 +143,7 @@ def cmd_run(args) -> int:
             prompt_files=args.prompt_file or [],
             save=args.save,
             source="cli_run",
+            delivery_contract=delivery_contract_from_file(getattr(args, "delivery_contract_file", "")),
             resume_context=resume_context_override(args),
             recovery_next_actions=["如需恢复本次单轮 run，先查看 memory-resume 和 LocalStore 记录。"],
             on_chunk=on_chunk,

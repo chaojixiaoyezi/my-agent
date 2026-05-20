@@ -15,6 +15,7 @@ from .tool_body_read_guard_stage import (
     ToolBodyReadGuardStageRequest,
     maybe_block_delegating_body_read_stage,
 )
+from .tool_call_guardrail import maybe_block_repeated_tool_failure
 from .tool_direct_write_guard_stage import (
     ToolDirectWriteGuardStageRequest,
     maybe_block_delegate_only_direct_write_stage,
@@ -42,6 +43,13 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
     if one_shot_key and one_shot_key in request.params.one_shot_tool_calls:
         result = _duplicate_one_shot_result(payload)
         return _trace_finished_result(trace_request, result)
+    repeated_failure_result = maybe_block_repeated_tool_failure(
+        runtime_request.agent,
+        request.params,
+        payload,
+    )
+    if repeated_failure_result is not None:
+        return _trace_finished_result(trace_request, repeated_failure_result)
     stale_result = stale_subagent_attempt_result(runtime_request.agent, payload)
     if stale_result is not None:
         return _trace_finished_result(trace_request, stale_result)

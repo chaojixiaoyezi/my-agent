@@ -15,6 +15,7 @@ from ..action_protocol import (
     ToolCallResultEnvelope,
     tool_call_envelope_from_payload,
 )
+from ..contracts.tool_protocol_v2 import normalize_tool_result
 from .models import ToolExecutionResult
 
 
@@ -76,6 +77,7 @@ def attach_result_envelope(
             "action_created_at": envelope.created_at,
         },
     ).to_dict()
+    result.result_envelope["tool_protocol_v2"] = _tool_protocol_v2_payload(result, envelope)
     if not result.ok:
         result.result_envelope.update(_error_contract_payload(result))
     return result
@@ -100,6 +102,31 @@ def _error_contract_payload(result: ToolExecutionResult) -> dict[str, object]:
         "recommended_action": result.recommended_action,
         "recovery_hint": result.recovery_hint,
     }
+
+
+# LLM: _tool_protocol_v2_payload mirrors registry results into the newer machine contract.
+# 函数用途: 将现有 ToolExecutionResult + action envelope 转成 tool_protocol.v2 结构，供恢复/审计统一读取。
+def _tool_protocol_v2_payload(result: ToolExecutionResult, envelope: ToolCallEnvelope) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "operation_id": envelope.operation_id,
+        "tool_name": result.tool,
+        "idempotency_key": str(envelope.reserved.get("idempotency_key") or ""),
+        "status": "succeeded" if result.ok else "failed",
+        "output": "" if result.ok else result.output,
+        "metadata": {
+            "call_id": envelope.call_id,
+            "source": envelope.source,
+            "scope": envelope.scope.to_dict(),
+        },
+    }
+    if not result.ok:
+        payload["error"] = {
+            "error_type": result.error_code,
+            "message": result.output,
+            "retry_hint": result.recommended_action,
+            "retryable": result.retryable,
+        }
+    return normalize_tool_result(payload).to_dict()
 
 
 # LLM: _dedupe_legacy_tool_payloads prevents XML-ish nested blocks from becoming duplicate actions.

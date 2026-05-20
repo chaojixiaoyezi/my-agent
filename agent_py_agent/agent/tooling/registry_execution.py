@@ -29,7 +29,12 @@ from .registry_envelopes import (
     payload_from_tool_call_envelope,
     tool_call_envelope_from_execution_payload,
 )
+from .registry_file_write_blocks import (
+    parse_file_write_session_raw_blocks,
+    parse_write_file_raw_blocks,
+)
 from .registry_invoke import RegistryToolInvokeRequest, invoke_registry_tool
+from .registry_malformed_markers import malformed_tool_marker_calls
 from .registry_markers import next_tool_block_end, next_tool_block_start
 from .registry_payload_normalize import (
     normalize_tool_payload,
@@ -96,6 +101,9 @@ def parse_registry_tool_calls(text: str) -> list[dict[str, Any]]:
         calls.append((start, parse_tool_block_payload(raw)))
         cursor = end + len(marker_end)
 
+    calls.extend(malformed_tool_marker_calls(scan_text))
+    calls.extend(parse_write_file_raw_blocks(scan_text))
+    calls.extend(parse_file_write_session_raw_blocks(scan_text))
     calls.extend(parse_xmlish_tool_calls(scan_text))
     calls.sort(key=lambda item: item[0])
     return [payload for _, payload in calls]

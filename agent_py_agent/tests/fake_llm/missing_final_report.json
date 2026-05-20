@@ -1,0 +1,13 @@
+{
+  "contract_ref": "../contracts/simple_file_summary.json",
+  "model_steps": [
+    {
+      "type": "tool_call",
+      "tool": "write_file",
+      "params": {
+        "path": "output.md",
+        "content": "Summary\nA short valid summary.\nChecked Files\ninput.txt\n"
+      }
+    }
+  ]
+}

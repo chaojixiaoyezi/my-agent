@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,8 @@ from .models import BaseTool, ToolExecutionResult, ToolSpec
 
 _MAX_COMMAND_CHARS = 2000
 _DEFAULT_MAX_OUTPUT_CHARS = 12_000
+_TOOL_DEADLINE_UNIX_ENV = "MY_AGENT_TOOL_DEADLINE_UNIX"
+_TOOL_DEADLINE_MARGIN_SECONDS_ENV = "MY_AGENT_TOOL_DEADLINE_MARGIN_SECONDS"
 
 _DANGEROUS_COMMANDS = [
     r"^rm\s+-rf\s+/",
@@ -52,17 +55,46 @@ def _validate_command(command: str) -> str:
     return text
 
 
-# LLM: _timeout_from_params 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 工具系统 中的 timeout_from_params 步骤，并保持调用方依赖的数据形状。
+# LLM: _timeout_from_params applies structured run deadlines before launching shell work.
+# 函数用途: 从工具参数读取超时，并按外层任务 deadline 自动收紧，避免单个命令吃完整个任务预算。
 def _timeout_from_params(params: dict[str, Any], default_timeout: int) -> int:
     raw_timeout = params.get("timeout")
     if raw_timeout is None:
-        return default_timeout
+        timeout = default_timeout
+    else:
+        try:
+            timeout = int(raw_timeout)
+        except (ValueError, TypeError):
+            timeout = default_timeout
+    return _apply_tool_deadline(timeout if timeout > 0 else default_timeout)
+
+
+# LLM: _apply_tool_deadline mirrors 会话运行时 exec expiration at the tool boundary.
+# 函数用途: 根据 MY_AGENT_TOOL_DEADLINE_UNIX 和安全余量收紧命令超时；0 表示不应再启动命令。
+def _apply_tool_deadline(timeout: int) -> int:
+    deadline = _float_env(_TOOL_DEADLINE_UNIX_ENV)
+    if deadline <= 0:
+        return timeout
+    remaining = deadline - time.time() - _tool_deadline_margin_seconds()
+    if remaining <= 0:
+        return 0
+    return min(timeout, max(1, int(remaining)))
+
+
+# LLM: _tool_deadline_margin_seconds keeps shell completion inside the parent task envelope.
+# 函数用途: 读取工具 deadline 安全余量；配置异常时使用保守默认值。
+def _tool_deadline_margin_seconds() -> float:
+    margin = _float_env(_TOOL_DEADLINE_MARGIN_SECONDS_ENV)
+    return margin if margin >= 0 else 10.0
+
+
+# LLM: _float_env parses runtime deadline env vars without treating prose as facts.
+# 函数用途: 将结构化环境变量转为 float，缺失或非法时返回 0。
+def _float_env(name: str) -> float:
     try:
-        timeout = int(raw_timeout)
+        return float(os.environ.get(name, "0") or 0)
     except (ValueError, TypeError):
-        return default_timeout
-    return timeout if timeout > 0 else default_timeout
+        return 0.0
 
 
 # LLM: _working_dir_from_params 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -171,6 +203,13 @@ class ShellTool(BaseTool):
             return ToolExecutionResult(self.spec.name, False, f"危险命令被系统拒绝: {command[:50]}...")
 
         timeout = _timeout_from_params(params, self.default_timeout)
+        if timeout <= 0:
+            return ToolExecutionResult(
+                self.spec.name,
+                False,
+                "TOOL_DEADLINE_EXCEEDED: 外层任务剩余时间不足，系统没有启动新的 shell 命令。",
+                error_code="TOOL_TIMEOUT",
+            )
         target = _working_dir_from_params(params, self.workspace_root)
         try:
             result = self._run_command(command, target, timeout)

@@ -11,30 +11,31 @@ from dataclasses import dataclass, field
 from ..backends import ModelResponse
 from ..tooling.content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
-    inline_write_content_limit,
+)
+from .tool_stream_boundary_models import (
+    CompleteToolCallStreamAbort,
+    LongToolContentStreamAbort,
+    MalformedToolProtocolStreamAbort,
+)
+from .tool_stream_boundary_write_abort import (
+    long_write_stream_abort,
+    recovered_write_abort_payload,
 )
 
 _TOOL_START_MARKERS = ("[TOOL_CALL]", "[SUBAGENT_CALL]")
 _TOOL_END_MARKERS = ("[/TOOL_CALL]", "[/SUBAGENT_CALL]")
-_WRITE_TOOL_NAMES = {"write_file", "append_file"}
-_JSON_TOOL_RE = re.compile(r'"tool"\s*:\s*"(?P<tool>write_file|append_file)"')
-_JSON_PATH_RE = re.compile(r'"path"\s*:\s*"(?P<path>(?:\\.|[^"\\]){0,240})"')
-_JSON_CONTENT_RE = re.compile(r'"content"\s*:\s*"')
-
-
-# LLM: LongToolContentStreamAbort is a structured early-stop signal for oversized write tool streams.
-# 类用途: 表示模型正在输出过长的 write_file/append_file content；上层会把它转成可恢复的分块提示。
-class LongToolContentStreamAbort(RuntimeError):
-    # LLM: __init__ stores structured abort metadata for the parser recovery path.
-    # 函数用途: 记录被中断的工具名、路径、已流式输出字符数和上限，方便后续提示模型分块恢复。
-    def __init__(self, *, tool: str, path: str, chars: int, limit: int) -> None:
-        super().__init__(
-            f"{tool}.content inline content streaming exceeded {limit} chars for {path or '<unknown>'}"
-        )
-        self.tool = tool
-        self.path = path
-        self.chars = chars
-        self.limit = limit
+_MACHINE_BLOCK_PATTERNS = (
+    re.compile(r"\[TOOL_CALL\].*?\[/TOOL_CALL\]", re.DOTALL),
+    re.compile(r"\[SUBAGENT_CALL\].*?\[/SUBAGENT_CALL\]", re.DOTALL),
+    re.compile(r"\[WRITE_FILE_RAW[^\]]*\].*?\[/WRITE_FILE_RAW\]", re.DOTALL),
+    re.compile(
+        r"\[FILE_WRITE_SESSION_APPEND[^\]]*\].*?\[/FILE_WRITE_SESSION_APPEND\]",
+        re.DOTALL,
+    ),
+)
+_MAX_UNCLOSED_TOOL_START_MARKERS = 1
+_MAX_NEAR_TOOL_PROTOCOL_LINES = 7
+_NEAR_TOOL_PROTOCOL_LINE_RE = re.compile(r"(?m)^\s*(?:\[|<)?\s*TOOL(?:\b|_|\])")
 
 
 # LLM: first_complete_tool_call_cut_index finds the text boundary after the first closed tool block.
@@ -51,13 +52,39 @@ def first_complete_tool_call_cut_index(text: str) -> int | None:
     return end + len(end_marker)
 
 
-# LLM: cut_response_after_first_complete_tool_call removes model prose after an executable tool block.
-# 函数用途: 把模型回复裁到第一个完整工具调用结束处，防止后续伪造 tool-output-record 或多余调用被采纳。
+# LLM: cut_response_after_first_complete_tool_call preserves machine blocks and removes surrounding prose.
+# 函数用途: 模型回复包含工具块时，只保留结构化机器块，防止普通自然语言成为控制流事实。
 def cut_response_after_first_complete_tool_call(response: ModelResponse) -> tuple[ModelResponse, bool]:
-    cut_index = first_complete_tool_call_cut_index(response.text)
-    if cut_index is None or cut_index >= len(response.text):
+    ranges = _complete_machine_block_ranges(response.text)
+    if not ranges:
         return response, False
-    return ModelResponse(text=response.text[:cut_index], backend=response.backend), True
+    machine_text = "\n".join(response.text[start:end].strip() for start, end in ranges)
+    if machine_text == response.text.strip():
+        return response, False
+    return ModelResponse(text=machine_text, backend=response.backend), True
+
+
+# LLM: _complete_machine_block_ranges finds explicit executable protocol blocks only.
+# 函数用途: 提取 TOOL_CALL、SUBAGENT_CALL 和 raw-write blocks 的范围；不读取普通文本语义。
+def _complete_machine_block_ranges(text: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    for pattern in _MACHINE_BLOCK_PATTERNS:
+        ranges.extend((match.start(), match.end()) for match in pattern.finditer(text))
+    ranges.sort(key=lambda item: item[0])
+    return _non_overlapping_ranges(ranges)
+
+
+# LLM: _non_overlapping_ranges avoids double-counting nested or overlapping protocol matches.
+# 函数用途: 按文本顺序保留不重叠机器块，保持工具执行顺序稳定。
+def _non_overlapping_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    kept: list[tuple[int, int]] = []
+    last_end = -1
+    for start, end in ranges:
+        if start < last_end:
+            continue
+        kept.append((start, end))
+        last_end = end
+    return kept
 
 
 # LLM: ToolBoundaryChunkFilter hides streamed text after the first complete tool-call boundary.
@@ -77,18 +104,28 @@ class ToolBoundaryChunkFilter:
         if self._closed:
             return
         self._text += str(chunk or "")
-        abort = long_write_stream_abort(self._text, max_chars=self.max_inline_content_chars)
+        protocol_abort = malformed_tool_protocol_stream_abort(self._text)
+        if protocol_abort is not None:
+            raise protocol_abort
+        start_info = _first_marker(self._text, _TOOL_START_MARKERS, 0)
+        abort = long_write_stream_abort(
+            self._text,
+            max_chars=self.max_inline_content_chars,
+            start_info=start_info,
+            first_end_marker=lambda cursor: _first_marker(self._text, _TOOL_END_MARKERS, cursor),
+        )
         if abort is not None:
             raise abort
-        if self.on_chunk is None:
-            return
         cut_index = first_complete_tool_call_cut_index(self._text)
         if cut_index is None:
-            self._forward_to(len(self._text))
+            if self.on_chunk is not None:
+                self._forward_to(len(self._text))
             return
         self.cut_detected = True
-        self._forward_to(cut_index)
+        if self.on_chunk is not None:
+            self._forward_to(cut_index)
         self._closed = True
+        raise CompleteToolCallStreamAbort(text=self._text[:cut_index], cut_index=cut_index)
 
     # LLM: finish flushes any ordinary non-tool response that never crossed a tool boundary.
     # 函数用途: 模型没有工具调用时，确保最后残留文本仍能正常显示；已截断时不再输出后续文本。
@@ -120,37 +157,99 @@ def _first_marker(text: str, markers: tuple[str, ...], cursor: int) -> tuple[int
     return min(hits, key=lambda item: item[0]) if hits else None
 
 
-# LLM: long_write_stream_abort detects oversized structured write content while a tool call is still open.
-# 函数用途: 根据 TOOL_CALL JSON 字段识别未闭合的大 write_file/append_file，避免等到 provider 超时才失败。
-def long_write_stream_abort(text: str, *, max_chars: int | None = None) -> LongToolContentStreamAbort | None:
-    limit = inline_write_content_limit(max_chars)
+# LLM: malformed_tool_protocol_stream_abort detects repeated unclosed tool start markers from the machine protocol.
+# 函数用途: 如果模型反复输出 TOOL_CALL/SUBAGENT_CALL 开始标记但没有任何结束标记，提前中断防止拖到总超时。
+def malformed_tool_protocol_stream_abort(text: str) -> MalformedToolProtocolStreamAbort | None:
     start_info = _first_marker(text, _TOOL_START_MARKERS, 0)
+    near_count = _near_tool_protocol_line_count(text)
     if start_info is None:
-        return None
+        if near_count <= _MAX_NEAR_TOOL_PROTOCOL_LINES:
+            return None
+        return MalformedToolProtocolStreamAbort(
+            start_marker="TOOL_PROTOCOL_LINE",
+            marker_count=near_count,
+            limit=_MAX_NEAR_TOOL_PROTOCOL_LINES,
+        )
     start, marker = start_info
-    if _first_marker(text, _TOOL_END_MARKERS, start + len(marker)) is not None:
+    first_end = _first_marker(text, _TOOL_END_MARKERS, start + len(marker))
+    next_start = _first_marker(text, _TOOL_START_MARKERS, start + len(marker))
+    if next_start is not None and (first_end is None or next_start[0] < first_end[0]):
+        return MalformedToolProtocolStreamAbort(
+            start_marker=marker,
+            marker_count=sum(text.count(item) for item in _TOOL_START_MARKERS),
+            limit=_MAX_UNCLOSED_TOOL_START_MARKERS,
+        )
+    if first_end is not None:
         return None
-    raw = text[start + len(marker) :]
-    tool = _json_tool(raw)
-    if tool not in _WRITE_TOOL_NAMES:
+    count = sum(text.count(item) for item in _TOOL_START_MARKERS)
+    if count > _MAX_UNCLOSED_TOOL_START_MARKERS:
+        return MalformedToolProtocolStreamAbort(
+            start_marker=marker,
+            marker_count=count,
+            limit=_MAX_UNCLOSED_TOOL_START_MARKERS,
+        )
+    if near_count <= _MAX_NEAR_TOOL_PROTOCOL_LINES:
         return None
-    content_start = _content_value_start(raw)
-    if content_start is None:
-        return None
-    content_chars = _streamed_json_string_chars(raw[content_start:])
-    if content_chars <= limit:
-        return None
-    return LongToolContentStreamAbort(
-        tool=tool,
-        path=_json_path(raw),
-        chars=content_chars,
-        limit=limit,
+    return MalformedToolProtocolStreamAbort(
+        start_marker="TOOL_PROTOCOL_LINE",
+        marker_count=near_count,
+        limit=_MAX_NEAR_TOOL_PROTOCOL_LINES,
     )
+
+
+# LLM: _near_tool_protocol_line_count catches protocol-shaped marker storms that are not valid openers.
+# 函数用途: 统计行首 TOOL/[TOOL/<TOOL 这类机器协议碎片；不匹配普通大小写自然语言 Tool 文本。
+def _near_tool_protocol_line_count(text: str) -> int:
+    return len(_NEAR_TOOL_PROTOCOL_LINE_RE.findall(text))
+
+
+# LLM: malformed_tool_protocol_abort_response reports protocol marker storms through the normal parser recovery tool.
+# 函数用途: 把连续未闭合工具标记转为标准 __parse_error__，避免把半截协议文本当成事实或继续展示给用户。
+def malformed_tool_protocol_abort_response(
+    exc: MalformedToolProtocolStreamAbort, *, backend: str
+) -> ModelResponse:
+    payload = {
+        "tool": "__parse_error__",
+        "error": (
+            f"模型连续输出 {exc.marker_count} 个未闭合 {exc.start_marker} 工具协议标记；"
+            "工具调用缺少结束标记"
+        ),
+        "raw": json.dumps(
+            {
+                "start_marker": exc.start_marker,
+                "marker_count": exc.marker_count,
+                "limit": exc.limit,
+            },
+            ensure_ascii=False,
+        ),
+    }
+    return ModelResponse(
+        text="[TOOL_CALL]\n"
+        f"{json.dumps(payload, ensure_ascii=False)}\n"
+        "[/TOOL_CALL]",
+        backend=backend,
+    )
+
+
+# LLM: complete_tool_call_abort_response returns the first executable tool block after stream early-stop.
+# 函数用途: 把完整工具块早停信号转成普通 ModelResponse，让后续工具循环按既有解析路径执行工具。
+def complete_tool_call_abort_response(
+    exc: CompleteToolCallStreamAbort, *, backend: str
+) -> ModelResponse:
+    return ModelResponse(text=exc.text, backend=backend)
 
 
 # LLM: long_write_abort_response reuses the existing parse-error recovery path with bounded raw data.
 # 函数用途: 把流式中断转换成标准 __parse_error__ 工具调用，让后续工具循环进入分块恢复。
 def long_write_abort_response(exc: LongToolContentStreamAbort, *, backend: str) -> ModelResponse:
+    recovered = recovered_write_abort_payload(exc)
+    if recovered is not None:
+        return ModelResponse(
+            text="[TOOL_CALL]\n"
+            f"{json.dumps(recovered, ensure_ascii=False)}\n"
+            "[/TOOL_CALL]",
+            backend=backend,
+        )
     raw = json.dumps(
         {"tool": exc.tool, "path": exc.path, "content": "...streaming content omitted..."},
         ensure_ascii=False,
@@ -169,48 +268,3 @@ def long_write_abort_response(exc: LongToolContentStreamAbort, *, backend: str) 
         "[/TOOL_CALL]",
         backend=backend,
     )
-
-
-# LLM: _json_tool extracts the structured tool name from incomplete JSON without parsing the body.
-# 函数用途: 从流式片段里取 write_file/append_file 工具名；只看机器字段，不读自然语言描述。
-def _json_tool(raw: str) -> str:
-    match = _JSON_TOOL_RE.search(raw)
-    return match.group("tool") if match is not None else ""
-
-
-# LLM: _content_value_start locates the start of the JSON string value without parsing incomplete JSON.
-# 函数用途: 在未闭合工具调用里找到 content 字符串开头；支持顶层和 filesystem 包裹参数。
-def _content_value_start(raw: str) -> int | None:
-    match = _JSON_CONTENT_RE.search(raw)
-    return match.end() if match is not None else None
-
-
-# LLM: _streamed_json_string_chars counts a partial JSON string value without keeping the full payload.
-# 函数用途: 统计流式 content 已输出的字符数；遇到未转义引号说明字符串闭合并停止。
-def _streamed_json_string_chars(text: str) -> int:
-    count = 0
-    escaped = False
-    for char in text:
-        if escaped:
-            count += 1
-            escaped = False
-            continue
-        if char == "\\":
-            escaped = True
-            continue
-        if char == '"':
-            break
-        count += 1
-    return count
-
-
-# LLM: _json_path decodes a bounded path field from an incomplete structured tool payload.
-# 函数用途: 从未闭合 JSON 里取 path 字段，失败时返回短原文，避免把大正文带进恢复上下文。
-def _json_path(raw: str) -> str:
-    match = _JSON_PATH_RE.search(raw)
-    if match is None:
-        return ""
-    try:
-        return json.loads(f'"{match.group("path")}"')
-    except json.JSONDecodeError:
-        return match.group("path")
