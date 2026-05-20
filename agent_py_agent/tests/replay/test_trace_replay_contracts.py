@@ -25,3 +25,14 @@ def test_trace_replay_blocks_repeated_identical_tool_calls(tmp_path: Path):
     assert result.blocked is True
     assert result.block_reason == "TOOL_REPEATED_EXACT_FAILURE"
 
+
+def test_trace_replay_rejects_missing_builder_call(tmp_path: Path):
+    from agent_py_agent.tests.support.trace_replay import replay_contract_trace
+
+    trace = Path(__file__).parent / "builder_not_called_success.jsonl"
+
+    result = replay_contract_trace(trace, tmp_path)
+
+    assert result.contract_result.ok is False
+    assert "REQUIRED_SUCCESSFUL_TOOL_CALL_MISSING" in result.contract_result.error_codes
+    assert "FINAL_STATUS_REJECTED" in result.contract_result.error_codes

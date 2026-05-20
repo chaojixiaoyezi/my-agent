@@ -94,6 +94,7 @@ agent_py_agent/
     |-- fake_llm/                             # 假模型输出样本，用于验证“模型胡说时框架也不能被骗”
     |-- fake_tools/                           # 假工具场景，用于工具成功/失败/空结果等可重复测试
     |-- replay/                               # golden trace / 回放测试，承接真实环境失败样本
+    |-- scenario_packs/                       # 把 contract/fake_llm/replay 组合成可一键复跑的回归包
     `-- support/                              # 合同 runner、fake tool、fake LLM、trace replay 等测试辅助模块
 frontend/
 |-- config/                                   # 前端集中配置；backend-config-catalog.json 由后端 YAML 生成

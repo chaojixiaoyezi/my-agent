@@ -1,0 +1,30 @@
+{
+  "contract_ref": "../contracts/missing_artifact_should_fail.json",
+  "model_steps": [
+    {
+      "type": "tool_call",
+      "tool": "read_file",
+      "params": {
+        "path": "missing.txt"
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "read_file",
+      "params": {
+        "path": "missing.txt"
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "read_file",
+      "params": {
+        "path": "missing.txt"
+      }
+    },
+    {
+      "type": "final",
+      "status": "BLOCKED"
+    }
+  ]
+}

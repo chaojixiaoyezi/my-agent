@@ -255,6 +255,7 @@
 - `agent_py_agent/tests/fake_tools/`
 - `agent_py_agent/tests/fake_llm/`
 - `agent_py_agent/tests/replay/`
+- `agent_py_agent/tests/scenario_packs/`
 - `agent_py_agent/tests/support/`
 
 完成标准：
@@ -372,6 +373,7 @@
 - contract fixture
 - fake LLM case
 - replay case
+- 对同一类回归，再组合一个 `scenario_pack`
 
 ---
 
@@ -412,6 +414,7 @@
 - 已有 `tests/contracts`
 - 已有 `tests/fake_llm`
 - 已有 `tests/replay`
+- 已有 `tests/scenario_packs`
 - 已有 `tests/support` 里的最小 runner
 
 但还不够完整：

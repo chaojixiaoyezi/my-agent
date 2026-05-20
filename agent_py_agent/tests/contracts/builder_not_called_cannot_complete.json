@@ -1,0 +1,37 @@
+{
+  "name": "builder_not_called_cannot_complete",
+  "task_type": "builder_backed_artifact",
+  "artifacts": {
+    "required": [
+      {
+        "path": "source_data.json",
+        "min_size": 10,
+        "json_requirements": {
+          "required_keys": [
+            "sheets"
+          ],
+          "required_non_empty_paths": [
+            "sheets[0].rows"
+          ]
+        }
+      }
+    ]
+  },
+  "tools": {
+    "required_calls": [
+      "write_file"
+    ],
+    "required_successful_calls": [
+      "data_to_workbook"
+    ]
+  },
+  "final_status": {
+    "allow_succeeded_only_if": [
+      "artifact_exists",
+      "artifact_non_empty",
+      "json_requirements_present",
+      "required_tool_calls_present",
+      "required_successful_tool_calls_present"
+    ]
+  }
+}

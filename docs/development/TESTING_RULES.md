@@ -58,6 +58,7 @@ Recommended subdirectories for the contract-driven main-agent workflow:
 - `agent_py_agent/tests/fake_tools/`：fake tool 测试
 - `agent_py_agent/tests/fake_llm/`：fake LLM 测试
 - `agent_py_agent/tests/replay/`：trace replay / golden trace 测试
+- `agent_py_agent/tests/scenario_packs/`：把 contract/fake_llm/replay 组合成一键回归包
 - `agent_py_agent/tests/support/`：测试 runner、fixture loader、replay helper
 
 ---
