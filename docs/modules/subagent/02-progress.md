@@ -1,4 +1,10 @@
-﻿## 2026-05-18 CI regression contract cleanup
+﻿## 2026-05-20 parent oracle wording cleanup
+
+- 本轮只清理父级静态流程站点 oracle 的生产侧说明文字：`shop_web_parent_oracle.py` 不再把具体真实验收样本写成生产合同描述，改为“静态交易流程站点”这一类通用网页流程验收。
+- 机器合同保持不变：父级 oracle 仍检查 section/action/local asset/responsive layout 等结构化事实，专项真实任务语义只允许留在测试 fixture 和最终真实验收样本。
+- 相关门禁：`check_contract_test_pyramid` 会扫描生产 `agent_py_agent/agent`，阻止 DeepSeek、论文翻译、购物网站、最热文章等专项任务词进入生产合同层。
+
+## 2026-05-18 CI regression contract cleanup
 
 - 本轮按 fast-test / CI 收口方式修复 create_run、create_subagents、runner phase gate、写入预检和验收测试回归；不扩新功能，只把现有结构化合同对齐到代码和测试。
 - `subagents/services/base.py` 的 workflow dry-run 路由改为读取 `attributes.workflow_template_id`、`attributes.workflow_task_type`、`attributes.workflow_risk_tags` 等机器字段，并通过 `_WorkflowPlanAttempt` bundle 传递 `quality_contract`，避免再次出现函数签名漂移和 goal 关键词路由。

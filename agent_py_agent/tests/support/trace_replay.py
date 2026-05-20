@@ -14,14 +14,20 @@ class TraceReplayResult:
     blocked: bool
     block_reason: str
     contract_result: ContractFixtureResult
+    replay_error_codes: tuple[str, ...] = ()
+    state_snapshots: tuple[dict[str, object], ...] = ()
+    acceptance_reports: tuple[dict[str, object], ...] = ()
 
 
 def replay_contract_trace(trace_path: Path, run_dir: Path) -> TraceReplayResult:
     events = _events(trace_path)
     contract = _contract(events, trace_path.parent)
     tool_trace = [event for event in events if event.get("type") == "tool_result"]
+    state_snapshots = tuple(event for event in events if event.get("type") == "state_snapshot")
+    acceptance_reports = tuple(event for event in events if event.get("type") == "acceptance_report")
     final_status = _final_status(events)
     block_reason = _repeated_failure_block_reason(tool_trace)
+    replay_errors = _replay_error_codes(final_status, state_snapshots, acceptance_reports)
     contract_result = verify_contract_fixture(
         run_dir,
         contract,
@@ -33,6 +39,9 @@ def replay_contract_trace(trace_path: Path, run_dir: Path) -> TraceReplayResult:
         blocked=bool(block_reason),
         block_reason=block_reason,
         contract_result=contract_result,
+        replay_error_codes=replay_errors,
+        state_snapshots=state_snapshots,
+        acceptance_reports=acceptance_reports,
     )
 
 
@@ -83,6 +92,26 @@ def _repeated_failure_block_reason(tool_trace: list[dict[str, object]]) -> str:
         if counts[key] >= 3:
             return "TOOL_REPEATED_EXACT_FAILURE"
     return ""
+
+
+def _replay_error_codes(
+    final_status: str,
+    state_snapshots: tuple[dict[str, object], ...],
+    acceptance_reports: tuple[dict[str, object], ...],
+) -> tuple[str, ...]:
+    errors: list[str] = []
+    if str(final_status).upper() == "SUCCEEDED":
+        if _last_status(state_snapshots) in {"BLOCKED", "FAILED"}:
+            errors.append("STATE_SNAPSHOT_FINAL_CONFLICT")
+        if acceptance_reports and not bool(acceptance_reports[-1].get("ok")):
+            errors.append("ACCEPTANCE_REPORT_FINAL_CONFLICT")
+    return tuple(errors)
+
+
+def _last_status(state_snapshots: tuple[dict[str, object], ...]) -> str:
+    if not state_snapshots:
+        return ""
+    return str(state_snapshots[-1].get("status") or "").upper()
 
 
 def _tool_failure_key(event: dict[str, object]) -> str:

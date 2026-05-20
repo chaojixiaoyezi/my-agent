@@ -1,5 +1,5 @@
-# LLM: Parent-owned static shopping webapp contract generator for real shared-repo E2E.
-# 模块用途: 给购物网站 E2E 写父级验收 pytest 和 parent_test_pack，检查按钮、图片、流程入口和布局线索。
+# LLM: Parent-owned static flow webapp contract generator for real shared-repo E2E.
+# 模块用途: 给静态交易流程站点 E2E 写父级验收 pytest 和 parent_test_pack，检查按钮、图片、流程入口和布局线索。
 
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ def test_layout_has_grid_and_responsive_breakpoint():
 
 
 # LLM: ShopWebParentOracleRequest bundles where the oracle test lives and how subagents-tests should run it.
-# 类用途: 保存购物网站父级测试包写入上下文；共享仓库 E2E 只需要传 webapp 和 reports 目录。
+# 类用途: 保存静态交易流程站点父级测试包写入上下文；共享仓库 E2E 只需要传 webapp 和 reports 目录。
 @dataclass(frozen=True)
 class ShopWebParentOracleRequest:
     """Bundle for writing a shop-webapp parent oracle."""
@@ -141,4 +141,3 @@ def write_shop_web_parent_oracle(request: ShopWebParentOracleRequest) -> Path:
             },
         )
     )
-

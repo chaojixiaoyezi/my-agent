@@ -86,7 +86,7 @@
 - “没进展”要靠活动/产物/状态判断
 - 长任务要能恢复，不要轻易误杀
 
-### 终端应用-main
+### 终端应用-main / 模型助手 Code
 
 重点学习：
 
@@ -158,12 +158,24 @@
 
 - 记忆要分层、可索引、可压缩、可落盘为可读文件
 
-### 终端交互 / 代理运行时 / langchain
+### 终端交互-main / openclaude-main / langchain-master
 
 这些作为补充参考：
 
 - 看模块拆分、任务层、hook chain、service 化方向
 - 不作为第一优先主参照
+
+### my-agent-architecture-review-20260519-clean / my-agent-feature-card-message-runtime
+
+重点学习：
+
+- 当前架构问题基线
+- Card / Message / Task / Worker 的近似目标形态
+
+我们借鉴的方向：
+
+- 后续只把通用 runtime card 和 message route 变成机器合同
+- 专项真实任务只留在测试 fixture 和最终验收，不进入生产合同
 
 ---
 

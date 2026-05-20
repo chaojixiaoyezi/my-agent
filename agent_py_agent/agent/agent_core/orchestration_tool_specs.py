@@ -104,10 +104,10 @@ _CREATE_EXAMPLES = [
         '"agent_name":"小傻妞-竞争","required_read_paths":["data/competition.md","rubric.md"]}]}'
     ),
     '{"tool":"create_subagents","goal":"在隔离 fixture 项目里实现三个小功能并写报告","count":3,"role":"worker","workflow_mode":"off","acceptance_checks":["必须有文件证据","必须说明测试结果"]}',
-    '{"tool":"create_subagents","goal":"在 /workspace/deliverables/shop/build 实现购物网站 HTML 骨架和 products.json","count":1,"role":"worker","agent_name":"小傻妞-基础结构","extra_write_roots":["/workspace/deliverables/shop/build"]}',
-    '{"tool":"create_subagents","goal":"在 /workspace/deliverables/shop/build 实现购物网站 styles.css 和 app.js 交互","count":1,"role":"worker","agent_name":"小傻妞-样式交互","extra_write_roots":["/workspace/deliverables/shop/build"]}',
-    '{"tool":"create_subagents","goal":"检查多个 worker 的购物网站实现","count":1,"role":"bug_finder"}',
-    '{"tool":"create_subagents","goal":"验收购物网站从注册到下单的完整流程","count":1,"role":"acceptor"}',
+    '{"tool":"create_subagents","goal":"在 /workspace/deliverables/flow/build 实现静态交易流程站点 HTML 骨架和 data.json","count":1,"role":"worker","agent_name":"小傻妞-基础结构","extra_write_roots":["/workspace/deliverables/flow/build"]}',
+    '{"tool":"create_subagents","goal":"在 /workspace/deliverables/flow/build 实现静态交易流程站点 styles.css 和 app.js 交互","count":1,"role":"worker","agent_name":"小傻妞-样式交互","extra_write_roots":["/workspace/deliverables/flow/build"]}',
+    '{"tool":"create_subagents","goal":"检查多个 worker 的静态交易流程站点实现","count":1,"role":"bug_finder"}',
+    '{"tool":"create_subagents","goal":"验收静态交易流程站点从账号入口到最终确认前的完整流程","count":1,"role":"acceptor"}',
 ]
 
 _BOARD_PARAMETERS = {

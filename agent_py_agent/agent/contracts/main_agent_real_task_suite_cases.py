@@ -1,5 +1,5 @@
 # LLM: Main-agent real task suite cases stay separate from runner plumbing for code-size safety.
-# 模块用途: 定义默认真实任务样例，覆盖网页、表格、资料整理和文档翻译等主代理复杂场景。
+# 模块用途: 定义默认真实任务样例，覆盖网页、表格、资料整理和格式化文档等主代理复杂场景。
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ def default_main_agent_real_task_cases() -> list[MainAgentRealTaskCase]:
         _furniture_homepage_case(),
         _shopping_site_case(),
         _github_star_workbook_case(),
-        _deepseek_papers_translation_case(),
+        _research_document_translation_case(),
     ]
 
 
@@ -50,8 +50,8 @@ def _furniture_homepage_case() -> MainAgentRealTaskCase:
     )
 
 
-# LLM: _shopping_site_case covers multi-step web app delivery and no-database constraints.
-# 函数用途: 定义购物站点完整流程任务，验收重点是前端流程产物和静态站点机器检查。
+# LLM: _shopping_site_case covers multi-step static web app delivery and no-database constraints.
+# 函数用途: 定义静态交易流程站点任务，验收重点是前端流程产物和静态站点机器检查。
 def _shopping_site_case() -> MainAgentRealTaskCase:
     artifact = MainAgentRealTaskArtifact(
         artifact_id="shopping_site_root",
@@ -64,10 +64,10 @@ def _shopping_site_case() -> MainAgentRealTaskCase:
     )
     return MainAgentRealTaskCase(
         case_id="shopping_site_flow",
-        title="无数据库购物网站流程",
+        title="无数据库静态交易流程站点",
         user_prompt=(
-            "做一个购物网站，不要改变现有环境，不要用数据库。登录、浏览商品、加入购物车、"
-            "填写收货信息、到付款前确认订单这些流程都要能走通，按钮不要失灵。"
+            "做一个静态交易流程站点，不要改变现有环境，不要用数据库。账号入口、条目浏览、"
+            "选择条目、填写联系信息、到最终确认前这些流程都要能走通，按钮不要失灵。"
         ),
         artifacts=(artifact,),
         acceptance_checks=(
@@ -79,8 +79,8 @@ def _shopping_site_case() -> MainAgentRealTaskCase:
     )
 
 
-# LLM: _github_star_workbook_case covers long research with spreadsheet deliverables.
-# 函数用途: 定义 GitHub 升星项目整理任务，验收为 xlsx 产物和结构化字段要求。
+# LLM: _github_star_workbook_case covers long repository-metrics research with spreadsheet deliverables.
+# 函数用途: 定义仓库增长指标整理任务，验收为 xlsx 产物和结构化字段要求。
 def _github_star_workbook_case() -> MainAgentRealTaskCase:
     artifact = MainAgentRealTaskArtifact(
         artifact_id="github_star_growth_workbook",
@@ -133,13 +133,13 @@ def _github_star_workbook_case() -> MainAgentRealTaskCase:
     )
 
 
-# LLM: _deepseek_papers_translation_case covers research, translation, and formatted document output.
-# 函数用途: 定义论文翻译 PDF 任务，验收为 PDF 产物、来源清单和格式检查合同。
-def _deepseek_papers_translation_case() -> MainAgentRealTaskCase:
+# LLM: _research_document_translation_case covers research, translation, and formatted document output.
+# 函数用途: 定义研究文档翻译任务，验收为 PDF 产物、来源清单和格式检查合同。
+def _research_document_translation_case() -> MainAgentRealTaskCase:
     artifact = MainAgentRealTaskArtifact(
-        artifact_id="deepseek_translation_pdf",
+        artifact_id="research_translation_pdf",
         kind="pdf",
-        preferred_path="outputs/deepseek_papers/deepseek_papers_zh.pdf",
+        preferred_path="outputs/research_documents/research_documents_zh.pdf",
         validation_contract={
             "validator": "document_acceptance",
             "required_suffix": ".pdf",
@@ -147,28 +147,28 @@ def _deepseek_papers_translation_case() -> MainAgentRealTaskCase:
             "staging_contract": {
                 "strategy": "source_index_then_translation_draft_then_pdf",
                 "checkpoint_shape_hints": {
-                    "outputs/deepseek_papers/source_index.json": '[{"title":"...","authors":["..."],"date":"...","url":"...","abstract":"...","translated":false}]'
+                    "outputs/research_documents/source_index.json": '[{"title":"...","authors":["..."],"date":"...","url":"...","abstract":"...","translated":false}]'
                 },
                 "checkpoint_refs": [
-                    "outputs/deepseek_papers/source_index.json",
-                    "outputs/deepseek_papers/deepseek_papers_zh.md",
-                    "outputs/deepseek_papers/deepseek_papers_zh.pdf",
+                    "outputs/research_documents/source_index.json",
+                    "outputs/research_documents/research_documents_zh.md",
+                    "outputs/research_documents/research_documents_zh.pdf",
                 ],
             },
         },
     )
     return MainAgentRealTaskCase(
-        case_id="deepseek_papers_translation_pdf",
-        title="DeepSeek 论文中文翻译 PDF",
+        case_id="research_documents_translation_pdf",
+        title="研究文档中文翻译 PDF",
         user_prompt=(
-            "找到2025年之后 DeepSeek 发布的所有论文并翻译成中文，正文翻译准确，专业术语可以保留英文。"
-            "最终成品需要是 PDF，排版要正确、清楚、好看，并附来源清单。"
+            "找到指定主题和时间范围内的研究文档并翻译成中文，正文翻译准确，专业术语可以保留英文。"
+            "最终成品需要是 PDF，排版要正确、清楚、好看，并附来源清单。主题和范围由调用方输入。"
         ),
         artifacts=(artifact,),
         acceptance_checks=(
-            _artifact_check("deepseek_pdf_exists", "artifact_exists", "deepseek_translation_pdf"),
+            _artifact_check("research_pdf_exists", "artifact_exists", "research_translation_pdf"),
             _artifact_check(
-                "deepseek_pdf_format", "document_acceptance", "deepseek_translation_pdf"
+                "research_pdf_format", "document_acceptance", "research_translation_pdf"
             ),
         ),
     )

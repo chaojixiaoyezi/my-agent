@@ -78,7 +78,7 @@ def validate_real_task_artifacts(request: RealTaskAcceptanceRequest) -> RealTask
     ]
     runtime_findings = [
         *_staged_checkpoint_findings(expected, request.task_workspace),
-        *_runtime_findings(request.task_workspace),
+        *_runtime_findings(request.task_workspace, artifacts),
     ]
     report = RealTaskAcceptanceReport(
         ok=all(item.ok for item in artifacts) and not runtime_findings,
@@ -166,8 +166,30 @@ def _validation_contract(item: dict[str, object]) -> dict[str, object]:
 
 # LLM: _runtime_findings adds non-artifact machine facts that still block completion.
 # 函数用途: 检查真实任务工作区里的运行时合同问题，例如未 finish 的分块写入会话。
-def _runtime_findings(task_workspace: Path) -> list[dict[str, object]]:
-    return [_open_session_finding(session) for session in open_file_write_sessions(task_workspace, limit=20)]
+def _runtime_findings(
+    task_workspace: Path,
+    artifacts: list[RealTaskArtifactAcceptance],
+) -> list[dict[str, object]]:
+    accepted_targets = _accepted_artifact_targets(artifacts)
+    return [
+        _open_session_finding(session)
+        for session in open_file_write_sessions(task_workspace, limit=20)
+        if _session_target(session) not in accepted_targets
+    ]
+
+
+def _accepted_artifact_targets(artifacts: list[RealTaskArtifactAcceptance]) -> set[str]:
+    return {str(Path(item.path).resolve()) for item in artifacts if item.ok}
+
+
+def _session_target(session: dict[str, object]) -> str:
+    target = session.get("target_path")
+    if not isinstance(target, dict):
+        return ""
+    value = target.get("resolved") or target.get("raw")
+    if not value:
+        return ""
+    return str(Path(str(value)).resolve())
 
 
 # LLM: _open_session_finding turns a write-session manifest summary into a stable acceptance finding.

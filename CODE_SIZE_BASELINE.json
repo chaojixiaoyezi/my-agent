@@ -1,13 +1,272 @@
 {
-  "generated_at": "2026-05-05T13:00:11.757937+00:00",
-  "total_findings": 1,
+  "generated_at": "2026-05-20T16:08:21.928207+00:00",
+  "total_findings": 38,
   "findings": [
     {
-      "identity": "class:agent_py_agent/agent/subagents/manager_capabilities.py:SubAgentCapabilityMixin",
+      "identity": "file:agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py:main_agent_delivery_closeout.py",
       "severity": "hard",
+      "kind": "file",
+      "path": "agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py",
+      "name": "main_agent_delivery_closeout.py"
+    },
+    {
+      "identity": "file:agent_py_agent/tests/test_main_agent_delivery_closeout.py:test_main_agent_delivery_closeout.py",
+      "severity": "hard",
+      "kind": "file",
+      "path": "agent_py_agent/tests/test_main_agent_delivery_closeout.py",
+      "name": "test_main_agent_delivery_closeout.py"
+    },
+    {
+      "identity": "class:agent_py_agent/tests/test_file_write_session.py:TestFileWriteSessionTool",
+      "severity": "high-risk",
       "kind": "class",
-      "path": "agent_py_agent/agent/subagents/manager_capabilities.py",
-      "name": "SubAgentCapabilityMixin"
+      "path": "agent_py_agent/tests/test_file_write_session.py",
+      "name": "TestFileWriteSessionTool"
+    },
+    {
+      "identity": "file:agent_py_agent/agent/agent_core/delivery_contract_prompting.py:delivery_contract_prompting.py",
+      "severity": "high-risk",
+      "kind": "file",
+      "path": "agent_py_agent/agent/agent_core/delivery_contract_prompting.py",
+      "name": "delivery_contract_prompting.py"
+    },
+    {
+      "identity": "file:agent_py_agent/agent/agent_core/tool_loop_response_decision.py:tool_loop_response_decision.py",
+      "severity": "high-risk",
+      "kind": "file",
+      "path": "agent_py_agent/agent/agent_core/tool_loop_response_decision.py",
+      "name": "tool_loop_response_decision.py"
+    },
+    {
+      "identity": "file:agent_py_agent/agent/contracts/main_agent_real_task_execution_files.py:main_agent_real_task_execution_files.py",
+      "severity": "soft",
+      "kind": "file",
+      "path": "agent_py_agent/agent/contracts/main_agent_real_task_execution_files.py",
+      "name": "main_agent_real_task_execution_files.py"
+    },
+    {
+      "identity": "file:agent_py_agent/agent/contracts/main_agent_task_execution.py:main_agent_task_execution.py",
+      "severity": "high-risk",
+      "kind": "file",
+      "path": "agent_py_agent/agent/contracts/main_agent_task_execution.py",
+      "name": "main_agent_task_execution.py"
+    },
+    {
+      "identity": "file:agent_py_agent/agent/contracts/main_agent_task_execution_files.py:main_agent_task_execution_files.py",
+      "severity": "soft",
+      "kind": "file",
+      "path": "agent_py_agent/agent/contracts/main_agent_task_execution_files.py",
+      "name": "main_agent_task_execution_files.py"
+    },
+    {
+      "identity": "file:agent_py_agent/agent/contracts/staged_checkpoint_acceptance.py:staged_checkpoint_acceptance.py",
+      "severity": "high-risk",
+      "kind": "file",
+      "path": "agent_py_agent/agent/contracts/staged_checkpoint_acceptance.py",
+      "name": "staged_checkpoint_acceptance.py"
+    },
+    {
+      "identity": "file:agent_py_agent/tests/test_tools/test_tool_loop.py:test_tool_loop.py",
+      "severity": "high-risk",
+      "kind": "file",
+      "path": "agent_py_agent/tests/test_tools/test_tool_loop.py",
+      "name": "test_tool_loop.py"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py:_contract_recovery_actions",
+      "severity": "soft",
+      "kind": "function",
+      "path": "agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py",
+      "name": "_contract_recovery_actions"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py:_enrich_delivery_progress",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py",
+      "name": "_enrich_delivery_progress"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/contracts/main_agent_real_task_suite_cases.py:_github_star_workbook_case",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/agent/contracts/main_agent_real_task_suite_cases.py",
+      "name": "_github_star_workbook_case"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/contracts/main_agent_task_suite_cases.py:_github_star_workbook_case",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/agent/contracts/main_agent_task_suite_cases.py",
+      "name": "_github_star_workbook_case"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_main_agent_delivery_closeout.py:test_delivery_closeout_adds_generic_staging_builder_action_for_ready_source",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_main_agent_delivery_closeout.py",
+      "name": "test_delivery_closeout_adds_generic_staging_builder_action_for_ready_source"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_main_agent_delivery_closeout.py:test_delivery_closeout_rejects_non_tabular_checkpoint_when_columns_required",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_main_agent_delivery_closeout.py",
+      "name": "test_delivery_closeout_rejects_non_tabular_checkpoint_when_columns_required"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_main_agent_delivery_closeout.py:test_delivery_closeout_requires_staged_json_evidence_before_builder",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_main_agent_delivery_closeout.py",
+      "name": "test_delivery_closeout_requires_staged_json_evidence_before_builder"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_tool_bootstrap_materialization_guard.py:test_bootstrap_materialization_context_includes_startup_actions_and_shape_hints",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_tool_bootstrap_materialization_guard.py",
+      "name": "test_bootstrap_materialization_context_includes_startup_actions_and_shape_hints"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_tool_local_progress_guard.py:test_local_progress_guard_resets_when_work_progress_fingerprint_changes",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_tool_local_progress_guard.py",
+      "name": "test_local_progress_guard_resets_when_work_progress_fingerprint_changes"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/agent_core/delivery_contract_prompting.py:_startup_action_lines",
+      "severity": "soft",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/agent_core/delivery_contract_prompting.py",
+      "name": "_startup_action_lines"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py:_contract_recovery_actions",
+      "severity": "soft",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py",
+      "name": "_contract_recovery_actions"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py:_failure_fingerprint",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py",
+      "name": "_failure_fingerprint"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py:_recovery_actions",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py",
+      "name": "_recovery_actions"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/agent_core/tool_bootstrap_materialization_guard.py:_checkpoint_shape_hints",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/agent_core/tool_bootstrap_materialization_guard.py",
+      "name": "_checkpoint_shape_hints"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/contracts/main_agent_real_task_execution_files.py:_startup_actions",
+      "severity": "soft",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/contracts/main_agent_real_task_execution_files.py",
+      "name": "_startup_actions"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/contracts/main_agent_task_execution_files.py:_startup_actions",
+      "severity": "soft",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/contracts/main_agent_task_execution_files.py",
+      "name": "_startup_actions"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/contracts/runtime_cards.py:validate_runtime_card_set",
+      "severity": "soft",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/contracts/runtime_cards.py",
+      "name": "validate_runtime_card_set"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/support/contract_fixture_runner.py:_artifact_conditions",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/support/contract_fixture_runner.py",
+      "name": "_artifact_conditions"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/support/contract_fixture_runner.py:_lookup_json_path",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/support/contract_fixture_runner.py",
+      "name": "_lookup_json_path"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/support/contract_fixture_runner.py:_split_json_path",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/support/contract_fixture_runner.py",
+      "name": "_split_json_path"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/support/fake_llm_runner.py:run",
+      "severity": "soft",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/support/fake_llm_runner.py",
+      "name": "run"
+    },
+    {
+      "identity": "nesting:scripts/check_contract_test_pyramid.py:_check_production_needles",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "scripts/check_contract_test_pyramid.py",
+      "name": "_check_production_needles"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py:_append_checkpoint_quality_action",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py",
+      "name": "_append_checkpoint_quality_action"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py:_append_staged_evidence_actions",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py",
+      "name": "_append_staged_evidence_actions"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/agent_core/tool_call_guardrail.py:record_tool_guard_observation",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/agent/agent_core/tool_call_guardrail.py",
+      "name": "record_tool_guard_observation"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/contracts/staged_checkpoint_acceptance.py:_finding",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/agent/contracts/staged_checkpoint_acceptance.py",
+      "name": "_finding"
+    },
+    {
+      "identity": "params:agent_py_agent/tests/support/contract_fixture_runner.py:_artifact_conditions",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/tests/support/contract_fixture_runner.py",
+      "name": "_artifact_conditions"
+    },
+    {
+      "identity": "params:agent_py_agent/tests/support/contract_fixture_runner.py:_tool_conditions",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/tests/support/contract_fixture_runner.py",
+      "name": "_tool_conditions"
     }
   ]
 }

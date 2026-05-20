@@ -36,3 +36,20 @@ def test_trace_replay_rejects_missing_builder_call(tmp_path: Path):
     assert result.contract_result.ok is False
     assert "REQUIRED_SUCCESSFUL_TOOL_CALL_MISSING" in result.contract_result.error_codes
     assert "FINAL_STATUS_REJECTED" in result.contract_result.error_codes
+
+
+def test_trace_replay_rejects_success_conflicting_with_blocked_state(tmp_path: Path):
+    from agent_py_agent.tests.support.trace_replay import replay_contract_trace
+
+    trace = Path(__file__).parent / "state_snapshot_conflicts_success.jsonl"
+    (tmp_path / "output.md").write_text(
+        "## Summary\nDone\n\n## Checked Files\n- input.txt\n",
+        encoding="utf-8",
+    )
+
+    result = replay_contract_trace(trace, tmp_path)
+
+    assert result.contract_result.ok is True
+    assert "STATE_SNAPSHOT_FINAL_CONFLICT" in result.replay_error_codes
+    assert result.state_snapshots[-1]["status"] == "BLOCKED"
+    assert result.acceptance_reports[-1]["ok"] is False
