@@ -136,6 +136,78 @@ class TestFileWriteSessionTool:
         assert finish.ok is True
         assert (workspace / "out" / "large.txt").read_text(encoding="utf-8") == "hello world"
 
+    # LLM: Structured checkpoints must not commit invalid JSON because downstream recovery depends on parseable files.
+    # 函数用途: 验证 .json 目标在 finish 前会做结构化校验；坏 JSON 要返回机器错误并保留 open session 继续修复。
+    def test_finish_rejects_invalid_json_target_and_keeps_session_open(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        tool = _tool(workspace, max_chunk_chars=128)
+        session_id = _begin(tool, target_path="out/data.json")
+
+        append = tool.execute(
+            {
+                "action": "append",
+                "session_id": session_id,
+                "chunk_index": 0,
+                "content": '[{"name":"demo"}',
+            }
+        )
+        finish = tool.execute({"action": "finish", "session_id": session_id})
+
+        assert append.ok is True
+        assert finish.ok is False
+        assert finish.result_envelope["code"] == "STRUCTURED_FILE_INVALID"
+        assert finish.result_envelope["format"] == "json"
+        assert finish.result_envelope["session_id"] == session_id
+        assert not (workspace / "out" / "data.json").exists()
+
+        repaired = tool.execute(
+            {
+                "action": "append",
+                "session_id": session_id,
+                "chunk_index": 1,
+                "content": "]",
+            }
+        )
+        repaired_finish = tool.execute({"action": "finish", "session_id": session_id})
+
+        assert repaired.ok is True
+        assert repaired_finish.ok is True
+        assert json.loads((workspace / "out" / "data.json").read_text(encoding="utf-8")) == [
+            {"name": "demo"}
+        ]
+
+    # LLM: Workbook-style JSON checkpoints must not commit duplicate sheet identities.
+    # 函数用途: 验证 sheets/rows 这类通用表格 JSON 在提交前会检查机器结构，避免重复 sheet 进入下游 builder。
+    def test_finish_rejects_duplicate_json_sheet_names_and_keeps_session_open(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        tool = _tool(workspace, max_chunk_chars=2048)
+        session_id = _begin(tool, target_path="out/source_data.json")
+        duplicate_sheet_payload = json.dumps(
+            {
+                "sheets": [
+                    {"name": "week-1", "columns": ["project"], "rows": [{"project": "a"}]},
+                    {"name": "week-1", "columns": ["project"], "rows": [{"project": "b"}]},
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+        append = tool.execute(
+            {
+                "action": "append",
+                "session_id": session_id,
+                "chunk_index": 0,
+                "content": duplicate_sheet_payload,
+            }
+        )
+        finish = tool.execute({"action": "finish", "session_id": session_id})
+
+        assert append.ok is True
+        assert finish.ok is False
+        assert finish.result_envelope["code"] == "STAGED_JSON_DUPLICATE_SHEET_NAMES"
+        assert finish.result_envelope["recommended_action"] == "repair_structured_checkpoint_json"
+        assert not (workspace / "out" / "source_data.json").exists()
+
     # LLM: Abort must clean staged state and prevent accidental final writes.
     # 函数用途: 验证 abort 删除 session 临时目录，后续 finish 失败且目标文件不存在。
     def test_abort_removes_session_state(self, tmp_path: Path):

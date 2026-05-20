@@ -139,6 +139,8 @@ def append_envelope(
         "temp_path": str(paths.temp_path),
         "preview_path": str(paths.temp_path),
         "preview_materialized": preview_materialized,
+        "preview_char_count": _preview_char_count(paths.temp_path) if preview_materialized else 0,
+        "preview_tail": _preview_tail(paths.temp_path) if preview_materialized else "",
         "chunk_index": chunk_index,
         "duplicate": duplicate,
         "received_chunks": sorted(int(index) for index in manifest["chunks"]),
@@ -245,6 +247,27 @@ def _staging_contract() -> dict[str, Any]:
         "preview_materialized_after_append": True,
         "temp_path_materialized_on_finish": False,
     }
+
+
+# LLM: _preview_char_count tells the model roughly how much staged content already exists.
+# 函数用途: 读取预览文件字符数，帮助续写时估计当前位置，不需要把全量正文塞回上下文。
+def _preview_char_count(path: Path) -> int:
+    try:
+        return len(path.read_text(encoding="utf-8"))
+    except OSError:
+        return 0
+
+
+# LLM: _preview_tail gives append callers a bounded continuation anchor from the staged preview.
+# 函数用途: 返回已组装预览文件末尾少量文本，让模型从正确位置续写而不是重复或乱接。
+def _preview_tail(path: Path, *, max_chars: int = 400) -> str:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]
 
 
 # LLM: failure separates stable machine codes from human-readable diagnostic text.

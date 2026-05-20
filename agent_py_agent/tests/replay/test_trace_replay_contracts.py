@@ -1,0 +1,27 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+
+def test_trace_replay_rejects_missing_artifact_success(tmp_path: Path):
+    from agent_py_agent.tests.support.trace_replay import replay_contract_trace
+
+    trace = Path(__file__).parent / "missing_artifact_success.jsonl"
+
+    result = replay_contract_trace(trace, tmp_path)
+
+    assert result.contract_result.ok is False
+    assert "ARTIFACT_MISSING" in result.contract_result.error_codes
+    assert "FINAL_STATUS_REJECTED" in result.contract_result.error_codes
+
+
+def test_trace_replay_blocks_repeated_identical_tool_calls(tmp_path: Path):
+    from agent_py_agent.tests.support.trace_replay import replay_contract_trace
+
+    trace = Path(__file__).parent / "repeated_tool_should_block.jsonl"
+
+    result = replay_contract_trace(trace, tmp_path)
+
+    assert result.blocked is True
+    assert result.block_reason == "TOOL_REPEATED_EXACT_FAILURE"
+

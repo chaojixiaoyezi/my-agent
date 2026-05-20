@@ -44,4 +44,5 @@ def open_write_session_block_response(agent: object) -> ModelResponse | None:
 # LLM: _agent_root keeps repair helpers tolerant of lightweight test harnesses.
 # 函数用途: 从 agent 对象读取工作区根目录。
 def _agent_root(agent: object) -> Path:
-    return Path(getattr(agent, "root", ".")).resolve()
+    root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", ".")
+    return Path(root).resolve()

@@ -17,6 +17,7 @@ from .runner_stage_trace import (
 from .subagent_attempt_guard import stale_subagent_attempt_message
 from .subagent_dispatch_closeout import subagent_dispatch_final_response_guard
 from .tool_call_context_reducer import render_tool_payload_for_live_prompt
+from .tool_call_guardrail import record_tool_guard_observation
 from .tool_call_runtime import (
     ToolCallRuntimeRequest,
     execute_traced_tool_call,
@@ -256,6 +257,7 @@ class ToolLoopService:
     # LLM: _record_tool_call 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 写入工具call的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
     def _record_tool_call(self, record: ToolCallRecordParams) -> None:
+        record_tool_guard_observation(self._agent, record.params, record.payload, record.result)
         if record.result.ok and record.result.tool not in {"__parse_error__", "unknown"}:
             record.params.executed_tools.append(record.result.tool)
         archive_record = self._archive_tool_call_record(record)

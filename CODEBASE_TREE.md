@@ -90,6 +90,11 @@ agent_py_agent/
 |-- config/                                   # 默认配置样例
 |-- prompts/                                  # 默认 prompt 规则
 `-- tests/                                    # 回归测试；不强制每个测试函数双层注释
+    |-- contracts/                            # 主代理合同 fixture 和 verifier 回归样本
+    |-- fake_llm/                             # 假模型输出样本，用于验证“模型胡说时框架也不能被骗”
+    |-- fake_tools/                           # 假工具场景，用于工具成功/失败/空结果等可重复测试
+    |-- replay/                               # golden trace / 回放测试，承接真实环境失败样本
+    `-- support/                              # 合同 runner、fake tool、fake LLM、trace replay 等测试辅助模块
 frontend/
 |-- config/                                   # 前端集中配置；backend-config-catalog.json 由后端 YAML 生成
 |-- scripts/                                  # 前端同步/检查脚本，例如 sync-backend-config.mjs
@@ -135,6 +140,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   `-- subagent/                          # subagent 讨论、进度、结构、计划、真实 E2E 问题台账
 |   `-- design/                                # 模块设计文档
 |       |-- log-analysis.md                    # 日志分析模块设计
+|       |-- main-agent-contract-testing.md     # 主代理合同驱动测试与第一到第五阶段计划
 |       `-- subagent-quality-contract.md       # subagent 质量契约
 |-- scripts/                                   # 开发辅助脚本和治理检查工具
 |   |-- code_size_report.py                    # 代码规模检查 Markdown 报告渲染辅助模块

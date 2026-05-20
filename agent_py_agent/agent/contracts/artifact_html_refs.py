@@ -48,21 +48,6 @@ def scan_html_refs(text: str) -> HtmlArtifactRefs:
     return parser.refs
 
 
-# LLM: placeholder_link_findings catches href placeholders that look clickable but go nowhere.
-# 函数用途: 找出 `href="#"`、空 href 或 javascript:void(0) 这类假链接/假按钮。
-def placeholder_link_findings(refs: HtmlArtifactRefs) -> list[dict[str, str]]:
-    return [
-        _finding(
-            "HTML_PLACEHOLDER_LINK",
-            "Clickable link uses a placeholder target.",
-            location=f"a[{attr}]",
-            value=value,
-        )
-        for attr, value in refs.links
-        if value.strip().lower() in {"", "#", "javascript:void(0)", "javascript:void(0);"}
-    ]
-
-
 # LLM: image_ref_findings marks external or missing local image refs.
 # 函数用途: 标记外部图片和缺失本地图片；不把 Google Fonts 等非图片链接误判为图片问题。
 def image_ref_findings(refs: HtmlArtifactRefs, *, path: Path, workspace_root: Path | None) -> list[dict[str, str]]:
@@ -115,4 +100,4 @@ def _finding(code: str, message: str, *, location: str = "", value: str = "") ->
     return {"code": code, "severity": "hard", "message": message, "location": location, "value": value}
 
 
-__all__ = ["HtmlArtifactRefs", "image_ref_findings", "placeholder_link_findings", "scan_html_refs"]
+__all__ = ["HtmlArtifactRefs", "image_ref_findings", "scan_html_refs"]

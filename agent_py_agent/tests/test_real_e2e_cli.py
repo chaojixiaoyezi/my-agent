@@ -37,7 +37,10 @@ def test_cmd_real_e2e_includes_artifact_acceptance_findings(tmp_path, capsys):
     from agent_py_agent.cli.real_e2e_commands import cmd_real_e2e
 
     artifact = tmp_path / "index.html"
-    artifact.write_text('<html><body><a href="#">Bad</a></body></html>', encoding="utf-8")
+    artifact.write_text(
+        '<!doctype html><html><head><link rel="stylesheet" href="https://fonts.example/font.css"></head><body><main>Bad</main>',
+        encoding="utf-8",
+    )
     args = argparse.Namespace(
         workspace=str(tmp_path / "workspace"),
         report="",
@@ -51,7 +54,8 @@ def test_cmd_real_e2e_includes_artifact_acceptance_findings(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert exit_code == 2
     assert payload["ok"] is False
-    assert payload["artifact_acceptance"][0]["findings"][0]["code"] == "HTML_PLACEHOLDER_LINK"
+    codes = {item["code"] for item in payload["artifact_acceptance"][0]["findings"]}
+    assert "HTML_INCOMPLETE_DOCUMENT" in codes
 
 
 # LLM: real-e2e real task suite must be a controlled plan, not an uncontrolled model launcher.

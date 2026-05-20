@@ -17,16 +17,19 @@ def test_render_delivery_contract_section_includes_staging_refs():
                     "kind": "xlsx",
                     "preferred_path": "outputs/github_star_growth/github_star_growth.xlsx",
                     "validation_contract": {
-                        "staging_contract": {
-                            "strategy": "data_then_tool_builder_then_workbook",
-                            "builder_tool": "data_to_workbook",
-                            "source_json_ref": "outputs/github_star_growth/source_data.json",
-                            "workbook_ref": "outputs/github_star_growth/github_star_growth.xlsx",
-                            "checkpoint_refs": [
-                                "outputs/github_star_growth/source_data.json",
-                                "outputs/github_star_growth/github_star_growth.xlsx",
-                            ],
-                        }
+                    "staging_contract": {
+                        "strategy": "data_then_tool_builder_then_workbook",
+                        "builder_tool": "data_to_workbook",
+                        "source_json_ref": "outputs/github_star_growth/source_data.json",
+                        "workbook_ref": "outputs/github_star_growth/github_star_growth.xlsx",
+                        "checkpoint_shape_hints": {
+                            "outputs/github_star_growth/source_data.json": '{"sheets":[{"name":"本周榜单","rows":[{"项目名":"..."}]}]}'
+                        },
+                        "checkpoint_refs": [
+                            "outputs/github_star_growth/source_data.json",
+                            "outputs/github_star_growth/github_star_growth.xlsx",
+                        ],
+                    }
                     },
                 }
             ]
@@ -37,11 +40,106 @@ def test_render_delivery_contract_section_includes_staging_refs():
     assert "outputs/github_star_growth/source_data.json" in text
     assert "阶段构建工具: data_to_workbook" in text
     assert "source_json_path=outputs/github_star_growth/source_data.json" in text
+    assert "本周榜单" in text
+    assert "项目名" in text
 
 
-# LLM: HTML validation fields should reach the model before it writes the first artifact.
-# 函数用途: 验证 forbidden_hrefs 这类结构化验收字段会渲染成执行提示，减少先写坏再修的真实任务耗时。
-def test_render_delivery_contract_section_includes_html_forbidden_href_rules():
+# LLM: bootstrap contract guidance should push the model to materialize targets before repeated inspection.
+# 函数用途: 验证通用开工合同会渲染结构化目标路径和 builder tool，而不是按任务专项写提示。
+def test_render_delivery_contract_section_includes_bootstrap_targets():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    text = render_delivery_contract_section(
+        {
+            "bootstrap_contract": {
+                "materialization_targets": [
+                    {
+                        "target_type": "checkpoint",
+                        "workspace_relative_path": "outputs/github_star_growth/source_data.json",
+                    },
+                    {
+                        "target_type": "required_file",
+                        "workspace_relative_path": "outputs/shopping_site/index.html",
+                    },
+                ],
+                "startup_actions": [
+                    {"action": "materialize_target", "priority": 1},
+                    {
+                        "action": "materialize_checkpoint",
+                        "priority": 1,
+                        "checkpoint_ref": "outputs/github_star_growth/source_data.json",
+                    },
+                    {
+                        "action": "invoke_builder_tool",
+                        "priority": 2,
+                        "builder_tool": "data_to_workbook",
+                        "source_ref": "outputs/github_star_growth/source_data.json",
+                        "output_ref": "outputs/github_star_growth/github_star_growth.xlsx",
+                    },
+                ],
+            }
+        }
+    )
+
+    assert "开工顺序" in text
+    assert "checkpoint: outputs/github_star_growth/source_data.json" in text
+    assert "required_file: outputs/shopping_site/index.html" in text
+    assert "不要连续两轮只做目录查看" in text
+    assert "先真实写出 checkpoint: outputs/github_star_growth/source_data.json" in text
+    assert "先给 outputs/github_star_growth/source_data.json 写最小有效骨架" in text
+    assert "最小有效骨架" in text
+    assert "data_to_workbook" in text
+
+
+# LLM: staged JSON hints should come from per-checkpoint contract fields instead of leaking workbook-only shapes into unrelated tasks.
+# 函数用途: 验证 source_index 这类数组索引文件会渲染自己的 shape hint，而不是默认提示成 sheets/rows。
+def test_render_delivery_contract_section_uses_checkpoint_shape_hint_for_non_workbook_json():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    text = render_delivery_contract_section(
+        {
+            "artifacts": [
+                {
+                    "kind": "pdf",
+                    "preferred_path": "outputs/deepseek_papers/deepseek_papers_zh.pdf",
+                    "validation_contract": {
+                        "staging_contract": {
+                            "checkpoint_refs": [
+                                "outputs/deepseek_papers/source_index.json",
+                                "outputs/deepseek_papers/deepseek_papers_zh.md",
+                                "outputs/deepseek_papers/deepseek_papers_zh.pdf",
+                            ],
+                            "checkpoint_shape_hints": {
+                                "outputs/deepseek_papers/source_index.json": '[{"title":"...","authors":["..."],"date":"...","url":"...","abstract":"...","translated":false}]'
+                            },
+                        }
+                    },
+                }
+            ],
+            "recovery": {
+                "acceptance": {
+                    "runtime_findings": [
+                        {
+                            "code": "STAGED_JSON_NO_ROWS",
+                            "stage_ref": "outputs/deepseek_papers/source_index.json",
+                        }
+                    ]
+                }
+            },
+        }
+    )
+
+    assert '[{"title":"...","authors":["..."],"date":"...","url":"...","abstract":"...","translated":false}]' in text
+    assert '{"sheets":[{"name":"...","columns":[...],"rows":[{...}]}]}' not in text
+
+
+# LLM: HTML validation guidance should stay generic and avoid task-specific link rules.
+# 函数用途: 验证 prompt 只渲染通用 HTML 结构/资源要求，不再携带占位 href 这类专项规则。
+def test_render_delivery_contract_section_includes_generic_html_rules_only():
     from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
         render_delivery_contract_section,
     )
@@ -53,9 +151,7 @@ def test_render_delivery_contract_section_includes_html_forbidden_href_rules():
                     "kind": "html",
                     "preferred_path": "outputs/furniture_homepage/index.html",
                     "validation_contract": {
-                        "forbidden_hrefs": ["", "#", "javascript:void(0)"],
                         "quality_requirements": {
-                            "clickable_links_must_resolve": True,
                             "complete_html_document": True,
                             "single_file_no_external_assets": True,
                         },
@@ -65,9 +161,9 @@ def test_render_delivery_contract_section_includes_html_forbidden_href_rules():
         }
     )
 
-    assert "HTML 链接不得使用这些 href 占位值" in text
-    assert "#, javascript:void(0)" in text
-    assert "所有 a[href] 必须指向真实页面锚点" in text
+    assert "HTML 必须包含完整 doctype/html/head/body 闭合结构" in text
+    assert "单文件产物不得引用 http/https 外部 CSS、字体、图片或脚本" in text
+    assert "HTML 链接不得使用这些 href 占位值" not in text
 
 
 # LLM: recovery runtime findings should reach the model as structured continuation hints.
@@ -126,6 +222,8 @@ def test_render_delivery_contract_section_recommends_one_duplicate_open_write_se
     assert "duplicate_open_file_write_sessions" in text
     assert "recommended_session_id=fetch-v3" in text
     assert "abort_duplicate_session_ids=empty-session" in text
+    assert "staged_json_invalid" in text
+    assert "Unterminated string starting at" in text
     assert "staged_json_no_rows" in text
     assert "required_columns=项目名, 地址" in text
     assert "data_to_workbook" in text
@@ -184,6 +282,11 @@ def _duplicate_open_session_contract() -> dict[str, object]:
                     _open_write_session("empty-session", 0, []),
                     _open_write_session("fetch-v3", 2, [0, 1]),
                     {
+                        "code": "STAGED_JSON_INVALID",
+                        "stage_ref": "outputs/github_star_growth/source_data.json",
+                        "parse_error": "Unterminated string starting at: line 12 column 9",
+                    },
+                    {
                         "code": "STAGED_JSON_NO_ROWS",
                         "stage_ref": "outputs/github_star_growth/source_data.json",
                     },
@@ -203,6 +306,9 @@ def _xlsx_artifact_contract() -> dict[str, object]:
             "required_columns": ["项目名", "地址"],
             "staging_contract": {
                 "builder_tool": "data_to_workbook",
+                "checkpoint_shape_hints": {
+                    "outputs/github_star_growth/source_data.json": '{"sheets":[{"name":"本周榜单","rows":[{"项目名":"..."}]}]}'
+                },
                 "source_json_ref": "outputs/github_star_growth/source_data.json",
                 "workbook_ref": "outputs/github_star_growth/github_star_growth.xlsx",
                 "checkpoint_refs": [

@@ -60,6 +60,36 @@ class _UnfinishedWriteSessionBackend:
         return ModelResponse(text="分块文件已提交。", backend=self.name)
 
 
+# LLM: _WrongRootOpenSessionBackend reproduces task workspaces that differ from the agent root.
+# 类用途: 第一轮打开分块写入；第二轮故意 list_files。系统必须按 tools.workspace_root 找到 open session 并拦截。
+class _WrongRootOpenSessionBackend:
+    name = "fake_wrong_root_open_session_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        session_id = _session_id_from_prompt(prompt)
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"file_write_session","action":"begin","target_path":"big.html"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        if self.calls == 2:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"list_files","path":"."}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        if self.calls == 3:
+            assert "open_file_write_sessions" in prompt
+            assert session_id
+            return ModelResponse(text=_append_call(session_id), backend=self.name)
+        if self.calls == 4:
+            return ModelResponse(text=_finish_call(session_id), backend=self.name)
+        return ModelResponse(text="分块文件已提交。", backend=self.name)
+
+
 # LLM: malformed tool markers must not become user-visible final answers.
 # 函数用途: 复现真实 E2E 中 `[TOOL_CALL` 少写 `]` 后被当最终回复的问题。
 def test_tool_loop_recovers_malformed_tool_opening_marker():
@@ -89,6 +119,29 @@ def test_tool_loop_requires_finish_for_open_file_write_session():
 
         assert result.response == "分块文件已提交。"
         assert result.tool_rounds == 3
+        assert agent.backend.calls == 5
+        assert (workspace / "big.html").read_text(encoding="utf-8") == "<html><body>ok</body></html>"
+
+
+# LLM: open-session guards must use the real tool workspace, not a stale agent root.
+# 函数用途: 复现真实任务隔离目录下 agent.root 与 tools.workspace_root 不一致时，open session 被旁路检查绕过的问题。
+def test_tool_loop_open_session_guard_uses_tool_workspace_root():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td) / "task-workspace"
+        unrelated_root = Path(td) / "unrelated-root"
+        unrelated_root.mkdir()
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=5)
+        agent = SimpleAgent(cfg, workspace)
+        agent.root = unrelated_root
+        agent.backend = _WrongRootOpenSessionBackend()
+
+        result = agent.run(
+            "写一个较大的 HTML 文件",
+            save=False,
+            allowed_tools=["file_write_session", "list_files"],
+        )
+
+        assert result.response == "分块文件已提交。"
         assert agent.backend.calls == 5
         assert (workspace / "big.html").read_text(encoding="utf-8") == "<html><body>ok</body></html>"
 

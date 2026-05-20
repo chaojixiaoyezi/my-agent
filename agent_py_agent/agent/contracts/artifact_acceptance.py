@@ -16,13 +16,18 @@ from .artifact_acceptance_models import (
     kind_for_path,
 )
 from .artifact_html_contract import html_contract_findings, record_resource_ref
-from .artifact_html_refs import image_ref_findings, placeholder_link_findings, scan_html_refs
+from .artifact_html_refs import image_ref_findings, scan_html_refs
 from .artifact_static_site_contract import validate_static_site_artifact
+from .artifact_validator_registry import (
+    ArtifactValidator,
+    resolve_artifact_validator,
+)
 from .artifact_xlsx_contract import xlsx_contract_findings
+from .staged_checkpoint_acceptance import staged_json_evidence_findings
 
 
 # LLM: validate_html_artifact performs generic HTML checks that model self-reports often miss.
-# 函数用途: 验收 HTML 产物里的占位链接、外部图片引用和缺失本地图片，返回结构化 findings。
+# 函数用途: 验收 HTML 产物里的结构完整性、图片引用和合同声明的资源规则，返回结构化 findings。
 def validate_html_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
     path = Path(request.path)
     if not path.exists():
@@ -37,7 +42,6 @@ def validate_html_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAccept
     refs = scan_html_refs(text)
     findings = _finding_records(
         [
-            *placeholder_link_findings(refs),
             *image_ref_findings(refs, path=path, workspace_root=request.workspace_root),
             *html_contract_findings(text, refs.resources, request.validation_contract),
         ]
@@ -54,29 +58,46 @@ def validate_html_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAccept
 # 函数用途: 根据文件后缀选择 HTML/JSON/CSV/XLSX/PDF/通用验收器，统一返回结构化 findings。
 def validate_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
     path = Path(request.path)
-    if _validator_name(request.validation_contract) == "static_site_check":
-        return validate_static_site_artifact(request)
-    if path.suffix.lower() in {".html", ".htm"}:
-        return validate_html_artifact(request)
     if not path.exists():
         return _missing_report(path, kind=kind_for_path(path))
-    suffix = path.suffix.lower()
-    if suffix == ".json":
-        return _validate_json(path)
-    if suffix == ".csv":
-        return _validate_csv(path)
-    if suffix == ".xlsx":
-        return _validate_xlsx(path, request.validation_contract)
-    if suffix == ".pdf":
-        return _validate_pdf(path)
-    return _validate_generic(path)
+    validator = resolve_artifact_validator(
+        request,
+        named_validators=_named_validators(),
+        kind_validators=_kind_validators(),
+        fallback=_validate_generic_request,
+    )
+    return validator(request)
 
 
-# LLM: _validator_name reads the validator selector from validation_contract only.
-# 函数用途: 获取结构化 validator 名称；普通 prompt 文本不会参与产物验收路由。
-def _validator_name(validation_contract: dict[str, object] | None) -> str:
-    value = (validation_contract or {}).get("validator")
-    return str(value or "").strip().lower()
+# LLM: _named_validators keeps explicit validator selectors registered in one place.
+# 函数用途: 返回按 validation_contract.validator 映射的验收器，避免 validate_artifact 继续写死分支。
+def _named_validators() -> dict[str, ArtifactValidator]:
+    return {
+        "artifact_acceptance": validate_by_artifact_kind,
+        "static_site_check": validate_static_site_artifact,
+        "spreadsheet_acceptance": _validate_xlsx_request,
+        "document_acceptance": _validate_pdf_request,
+    }
+
+
+# LLM: _kind_validators keeps default per-kind validators registered separately from contract names.
+# 函数用途: 返回按 artifact kind 映射的默认验收器，让 html/xlsx/pdf 只是插件项。
+def _kind_validators() -> dict[str, ArtifactValidator]:
+    return {
+        "html": validate_html_artifact,
+        "htm": validate_html_artifact,
+        "json": _validate_json_request,
+        "csv": _validate_csv_request,
+        "xlsx": _validate_xlsx_request,
+        "pdf": _validate_pdf_request,
+    }
+
+
+# LLM: validate_by_artifact_kind routes through registered kind validators when the contract stays generic.
+# 函数用途: 在 validator=artifact_acceptance 时仍按产物类型选默认验收器，不让上层关心具体格式。
+def validate_by_artifact_kind(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
+    path = Path(request.path)
+    return _kind_validators().get(kind_for_path(path), _validate_generic_request)(request)
 
 
 # LLM: _missing_report preserves one missing-file shape for every validator.
@@ -89,6 +110,36 @@ def _missing_report(path: Path, *, kind: str) -> ArtifactAcceptanceReport:
         location=str(path),
     )
     return ArtifactAcceptanceReport(ok=False, artifact_ref=str(path), artifact_kind=kind, findings=[finding])
+
+
+# LLM: _validate_json_request adapts the path-based validator to the shared request shape.
+# 函数用途: 保持注册表只处理 ArtifactAcceptanceRequest，不暴露内部 path-only helper。
+def _validate_json_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
+    return _validate_json(Path(request.path))
+
+
+# LLM: _validate_csv_request adapts the path-based validator to the shared request shape.
+# 函数用途: 保持注册表只处理 ArtifactAcceptanceRequest，不暴露内部 path-only helper。
+def _validate_csv_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
+    return _validate_csv(Path(request.path))
+
+
+# LLM: _validate_xlsx_request passes validation_contract through the registry entrypoint.
+# 函数用途: 让 xlsx 验收既可按后缀触发，也可按 validator 名称触发。
+def _validate_xlsx_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
+    return _validate_xlsx(Path(request.path), request.validation_contract, workspace_root=request.workspace_root)
+
+
+# LLM: _validate_pdf_request adapts the path-based validator to the shared request shape.
+# 函数用途: 保持注册表只处理 ArtifactAcceptanceRequest，不暴露内部 path-only helper。
+def _validate_pdf_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
+    return _validate_pdf(Path(request.path))
+
+
+# LLM: _validate_generic_request keeps unknown artifact kinds on the generic fallback path.
+# 函数用途: 对未注册的后缀或 validator 统一走最小存在性检查。
+def _validate_generic_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
+    return _validate_generic(Path(request.path))
 
 
 # LLM: _validate_json checks machine-readable reports before downstream agents trust them.
@@ -137,6 +188,8 @@ def _validate_csv(path: Path) -> ArtifactAcceptanceReport:
 def _validate_xlsx(
     path: Path,
     validation_contract: dict[str, object] | None = None,
+    *,
+    workspace_root: Path | None = None,
 ) -> ArtifactAcceptanceReport:
     try:
         with ZipFile(path) as workbook:
@@ -151,12 +204,31 @@ def _validate_xlsx(
             message="XLSX lacks workbook or worksheet parts.",
         )
         return _report_with_finding(path, "xlsx", finding)
-    findings = xlsx_contract_findings(path, validation_contract)
+    findings = [
+        *xlsx_contract_findings(path, validation_contract),
+        *_staged_source_evidence_findings(validation_contract or {}, workspace_root or path.parent),
+    ]
     return ArtifactAcceptanceReport(
         ok=not any(item.severity == "hard" for item in findings),
         artifact_ref=str(path),
         artifact_kind="xlsx",
         findings=findings,
+    )
+
+
+# LLM: _staged_source_evidence_findings ties final workbooks back to source JSON evidence contracts.
+# 函数用途: 如果 validation_contract 声明了 evidence_contract，则最终 xlsx 也必须继承 source_data.json 的来源证据验收。
+def _staged_source_evidence_findings(
+    validation_contract: dict[str, object],
+    workspace_root: Path,
+) -> list[ArtifactFinding]:
+    evidence_contract = validation_contract.get("evidence_contract")
+    staging = validation_contract.get("staging_contract")
+    source_ref = staging.get("source_json_ref") if isinstance(staging, dict) else ""
+    if not isinstance(evidence_contract, dict) or not source_ref:
+        return []
+    return _evidence_finding_records(
+        staged_json_evidence_findings(str(source_ref), workspace_root, evidence_contract)
     )
 
 
@@ -193,6 +265,26 @@ def _report_with_finding(path: Path, kind: str, finding: ArtifactFinding) -> Art
 # 函数用途: 保持专门校验模块独立，同时让公开报告继续使用统一 ArtifactFinding 类型。
 def _finding_records(items: list[dict[str, str]]) -> list[ArtifactFinding]:
     return [ArtifactFinding(**item) for item in items]
+
+
+def _evidence_finding_records(items: list[dict[str, object]]) -> list[ArtifactFinding]:
+    records: list[ArtifactFinding] = []
+    public_keys = {"code", "severity", "message", "location", "value"}
+    for item in items:
+        details = {key: value for key, value in item.items() if key not in public_keys}
+        value = item.get("value")
+        if value is None and details:
+            value = json.dumps(details, ensure_ascii=False, sort_keys=True)
+        records.append(
+            ArtifactFinding(
+                code=str(item.get("code") or ""),
+                severity=str(item.get("severity") or "hard"),
+                message=str(item.get("message") or ""),
+                location=str(item.get("location") or ""),
+                value=str(value or ""),
+            )
+        )
+    return records
 
 
 __all__ = [

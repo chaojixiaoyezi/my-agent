@@ -27,6 +27,7 @@ from .file_write_session_models import (
 )
 from .file_write_session_recovery import auto_start_session
 from .models import ToolExecutionResult
+from .structured_commit_validation import validate_structured_commit
 
 
 # LLM: paths_for_session ensures session ids never become arbitrary filesystem paths.
@@ -277,6 +278,13 @@ def commit_session(
 ) -> ToolExecutionResult:
     try:
         write_temp_from_chunks(paths, manifest)
+        validation_error = validate_structured_commit(
+            session_id=session_id,
+            target=target,
+            temp_path=paths.temp_path,
+        )
+        if validation_error is not None:
+            return validation_error
         target.parent.mkdir(parents=True, exist_ok=True)
         os.replace(paths.temp_path, target)
     except OSError as exc:

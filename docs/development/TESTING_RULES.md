@@ -18,6 +18,28 @@ degrade.  This project enforces both functional correctness and structural hygie
 | **Architecture**  | Structural guardrails: imports, naming, sizes  | Fast    | Every commit         |
 | **E2E / Stress**  | Full dispatch flow, concurrency, memory push   | Slow    | Before release       |
 
+## 1.1 Default Testing Strategy / 默认测试策略
+
+The repository no longer treats real-environment runs as the primary development loop.
+
+本仓库后续不再把真实环境测试当作主要开发方式。
+
+Default order:
+
+默认顺序：
+
+1. Contract / verifier / state-machine unit tests
+2. Fake tool tests
+3. Fake LLM tests
+4. Replay / regression tests
+5. Small focused integration tests
+6. Real-environment acceptance only at the end
+
+Use real tasks to discover new failures, then immediately convert them into a
+repeatable fixture or replay case.
+
+真实任务只负责暴露新问题；一旦发现问题，必须尽快沉淀成可重复跑的 fixture 或 replay case。
+
 ---
 
 ## 2. Test File Naming and Location / 测试文件命名与位置
@@ -27,6 +49,16 @@ degrade.  This project enforces both functional correctness and structural hygie
 - Class naming: `Test<ClassName>` or `Test<FeatureDescription>`.
 - Function naming: `test_<behavior_description>`.
 - Architecture guardrails: `test_architecture_guardrails.py` (single file, do not split).
+
+Recommended subdirectories for the contract-driven main-agent workflow:
+
+主代理合同驱动测试推荐使用这些子目录：
+
+- `agent_py_agent/tests/contracts/`：合同 fixture 和 verifier 测试
+- `agent_py_agent/tests/fake_tools/`：fake tool 测试
+- `agent_py_agent/tests/fake_llm/`：fake LLM 测试
+- `agent_py_agent/tests/replay/`：trace replay / golden trace 测试
+- `agent_py_agent/tests/support/`：测试 runner、fixture loader、replay helper
 
 ---
 
@@ -173,6 +205,34 @@ When fixing a bug:
 4. Name the test: `test_<module>_<bug_description>`.
 
 This ensures the bug cannot silently return.
+
+## 9.2 Contract-Driven Failure Samples / 合同驱动失败样本
+
+Every real failure that matters should become at least one of these:
+
+每个重要的真实失败，后续都应该至少沉淀成下面之一：
+
+- a contract fixture in `tests/contracts/`
+- a fake LLM case in `tests/fake_llm/`
+- a fake tool case in `tests/fake_tools/`
+- a replay case in `tests/replay/`
+
+Typical first-batch samples:
+
+首批建议样本：
+
+- `missing_artifact_should_fail`
+- `empty_artifact_should_fail`
+- `tool_failed_cannot_complete`
+- `bootstrap_materialization_required`
+- `repeated_exploration_should_redirect_or_block`
+- `staged_json_no_rows_cannot_complete`
+- `builder_not_called_cannot_complete`
+- `model_claims_done_without_evidence_should_fail`
+
+Do not keep a real-environment failure only in a Markdown note or chat log.
+
+不要让真实失败只存在于 Markdown 台账或聊天记录里。
 
 ## 9.1 Natural Prompt E2E Discipline / 自然语言 E2E 约束
 

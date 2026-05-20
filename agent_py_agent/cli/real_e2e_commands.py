@@ -16,15 +16,23 @@ from ..agent.contracts.main_agent_foundation_runner import (
     MainAgentFoundationRequest,
     run_main_agent_foundation,
 )
-from ..agent.contracts.main_agent_real_task_execution import (
-    MainAgentRealTaskExecutionRequest,
-    revalidate_main_agent_real_task_execution,
-    run_main_agent_real_task_execution,
+from ..agent.contracts.main_agent_task_execution import (
+    MainAgentTaskExecutionRequest,
+    revalidate_main_agent_task_execution,
+    run_main_agent_task_execution,
 )
-from ..agent.contracts.main_agent_real_task_suite import (
-    MainAgentRealTaskSuiteRequest,
-    plan_main_agent_real_task_suite,
+from ..agent.contracts.main_agent_task_suite import (
+    MainAgentTaskSuiteRequest,
+    plan_main_agent_task_suite,
 )
+
+# LLM: Legacy aliases keep existing tests and scripts working while the runtime moves to generic task contracts.
+# 模块用途: 提供旧符号名的兼容入口；真正实现已经迁到通用任务合同模块。
+run_main_agent_real_task_execution = run_main_agent_task_execution
+revalidate_main_agent_real_task_execution = revalidate_main_agent_task_execution
+plan_main_agent_real_task_suite = plan_main_agent_task_suite
+MainAgentRealTaskExecutionRequest = MainAgentTaskExecutionRequest
+MainAgentRealTaskSuiteRequest = MainAgentTaskSuiteRequest
 
 
 # LLM: RealE2EPayloadRequest bundles report parts before JSON serialization.
@@ -219,10 +227,13 @@ def _payload(request: RealE2EPayloadRequest) -> dict[str, object]:
         "artifact_acceptance": request.artifacts,
     }
     if request.real_task_suite is not None:
+        payload["main_agent_task_suite"] = request.real_task_suite
         payload["main_agent_real_task_suite"] = request.real_task_suite
     if request.real_task_execution is not None:
+        payload["main_agent_task_execution"] = request.real_task_execution
         payload["main_agent_real_task_execution"] = request.real_task_execution
     if request.real_task_revalidation is not None:
+        payload["main_agent_task_revalidation"] = request.real_task_revalidation
         payload["main_agent_real_task_revalidation"] = request.real_task_revalidation
     return payload
 

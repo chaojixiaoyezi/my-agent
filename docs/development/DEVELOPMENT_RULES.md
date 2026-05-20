@@ -1,5 +1,15 @@
 # Development Rules / 开发规则
 
+## Contract Hard Rules / 合同硬规则
+
+- 禁止做任何专项合同。
+- 合同层只能抽象通用能力，例如：状态机、执行、恢复、交付、验收、工具清单、错误分类、权限边界、ArtifactRef。
+- 任务样例、测试样例、行业样例、格式样例可以存在，但它们只能作为数据或注册项，不能反向长进底层合同代码。
+- 如果某个修复只能解释为“为了家具页/购物站/xlsx/PDF/某个 case 特判”，默认不允许进入合同层。
+- 允许的做法是：把该问题上升为通用契约、通用状态、通用 validator 注册项、通用 recovery action，或者通用执行策略。
+- 代码不得依赖普通自然语言文本作为机器事实来源。
+- 中文或其他自然语言提示只允许作为软约束；真正的机器判断必须基于结构化字段、状态、refs、schema、工具记录、文件系统事实或显式配置。
+
 These rules keep the my-agent codebase maintainable, auditable, and safe for
 multi-agent workflows.  Every contributor (human or LLM) must check these rules
 before changing code.

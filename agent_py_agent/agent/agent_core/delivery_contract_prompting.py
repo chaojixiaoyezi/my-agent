@@ -13,10 +13,32 @@ def render_delivery_contract_section(contract: dict[str, object]) -> str:
         [
             "[tool-system delivery-contract]",
             json.dumps(contract, ensure_ascii=False, sort_keys=True),
+            *_bootstrap_guidance_lines(contract),
             *_artifact_guidance_lines(contract),
             *_recovery_guidance_lines(contract),
         ]
     )
+
+
+# LLM: _bootstrap_guidance_lines turns structured startup targets into concise first-round execution hints.
+# 函数用途: 根据 bootstrap_contract 渲染通用开工顺序，避免模型前几轮一直只读检查目录。
+def _bootstrap_guidance_lines(contract: dict[str, object]) -> list[str]:
+    bootstrap = contract.get("bootstrap_contract")
+    if not isinstance(bootstrap, dict):
+        return []
+    targets = _bootstrap_targets(bootstrap.get("materialization_targets"))
+    actions = _bootstrap_actions(bootstrap.get("startup_actions"))
+    if not targets and not actions:
+        return []
+    lines = ["开工顺序："]
+    if targets:
+        lines.append("- 前两轮至少让下面这些结构化目标中的一个真实出现，不要连续两轮只做目录查看。")
+        lines.extend(f"  - {target}" for target in targets[:6])
+        lines.append("- 阶段目标允许先写最小有效骨架：例如空 JSON 数组、带标题的 Markdown 草稿、最小可运行脚本或基础 HTML 壳子，后续再补全内容。")
+    if actions:
+        lines.extend(_startup_action_lines(actions))
+    lines.append("- 如果暂时不确定具体工具，可以先 list_tools 一次，但紧接着就开始物化目标路径。")
+    return lines
 
 
 # LLM: _artifact_guidance_lines turns artifact machine fields into concise model guidance.
@@ -25,7 +47,59 @@ def _artifact_guidance_lines(contract: dict[str, object]) -> list[str]:
     lines = ["执行要求："]
     for artifact in _artifact_items(contract):
         lines.extend(_one_artifact_lines(artifact))
+    lines.append("- 如果 required artifact 还不存在，前两轮优先对该 artifact 的目标路径动手：创建目录、开始写入或补齐阶段产物。")
+    lines.append("- 不要把前两轮都花在只读检查上；先让 required artifact 或阶段产物出现，再继续精修。")
     lines.append("如果内容较长，使用 file_write_session 分块写入，并在最终答复前 finish。")
+    return lines
+
+
+# LLM: _bootstrap_targets formats materialization targets for model-visible startup hints.
+# 函数用途: 把 bootstrap_contract.materialization_targets 里的结构化路径压缩成简短提示行。
+def _bootstrap_targets(items: object) -> list[str]:
+    if not isinstance(items, list):
+        return []
+    lines: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        relative = str(item.get("workspace_relative_path") or "").strip()
+        target_type = str(item.get("target_type") or "").strip()
+        if relative:
+            lines.append(f"{target_type or 'target'}: {relative}")
+    return lines
+
+
+# LLM: _bootstrap_actions normalizes startup action objects from the generic delivery contract.
+# 函数用途: 读取 bootstrap_contract.startup_actions，过滤非对象项。
+def _bootstrap_actions(items: object) -> list[dict[str, object]]:
+    if not isinstance(items, list):
+        return []
+    return [dict(item) for item in items if isinstance(item, dict)]
+
+
+# LLM: _startup_action_lines keeps startup guidance generic and based on structured action codes only.
+# 函数用途: 渲染 materialize_target / invoke_builder_tool 等开工动作，不靠任务文案推断。
+def _startup_action_lines(actions: list[dict[str, object]]) -> list[str]:
+    lines: list[str] = []
+    for action in sorted(actions, key=lambda item: int(item.get("priority", 0))):
+        code = str(action.get("action") or "").strip()
+        if code == "materialize_target":
+            lines.append("- 先创建目录并开始写入第一个目标路径，再继续补齐其余内容。")
+            continue
+        if code == "materialize_checkpoint":
+            checkpoint_ref = str(action.get("checkpoint_ref") or "").strip()
+            if checkpoint_ref:
+                lines.append(f"- 先真实写出 checkpoint: {checkpoint_ref}")
+                lines.append(f"- 如果资料还没收全，先给 {checkpoint_ref} 写最小有效骨架，再继续抓取/整理。")
+            continue
+        if code == "invoke_builder_tool":
+            builder = str(action.get("builder_tool") or "").strip()
+            source_ref = str(action.get("source_ref") or "").strip()
+            output_ref = str(action.get("output_ref") or "").strip()
+            if builder and source_ref and output_ref:
+                lines.append(f"- 阶段数据就绪后，优先调用 {builder}: source_json_path={source_ref}, path={output_ref}")
+            elif builder:
+                lines.append(f"- 阶段数据就绪后，优先调用 {builder} 生成后续产物。")
     return lines
 
 
@@ -41,23 +115,10 @@ def _one_artifact_lines(artifact: dict[str, object]) -> list[str]:
         lines.append("- HTML 必须包含完整 doctype/html/head/body 闭合结构。")
     if requirements.get("single_file_no_external_assets"):
         lines.append("- 单文件产物不得引用 http/https 外部 CSS、字体、图片或脚本。")
-    if requirements.get("clickable_links_must_resolve"):
-        lines.append("- 所有 a[href] 必须指向真实页面锚点、mailto/tel 或有效 URL，不能使用空链接。")
-    forbidden_hrefs = _string_list(contract.get("forbidden_hrefs"))
-    if forbidden_hrefs:
-        lines.append(f"- HTML 链接不得使用这些 href 占位值: {', '.join(forbidden_hrefs)}")
     if requirements.get("min_size_bytes"):
         lines.append(f"- 产物体量至少 {requirements.get('min_size_bytes')} bytes，但不要无意义膨胀。")
     lines.extend(_staging_lines(contract))
     return lines
-
-
-# LLM: _string_list normalizes optional string arrays from validation_contract.
-# 函数用途: 读取 forbidden_hrefs 等结构化列表字段；非字符串或空值会被忽略。
-def _string_list(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item) for item in value if str(item).strip()]
 
 
 # LLM: _staging_lines renders structured checkpoint refs for long-running deliverables.
@@ -78,6 +139,7 @@ def _staging_lines(contract: dict[str, object]) -> list[str]:
     workbook_ref = str(staging.get("workbook_ref") or "").strip()
     if source_ref and workbook_ref and builder_tool:
         lines.append(f"- 生成表格时优先调用 {builder_tool}: source_json_path={source_ref}, path={workbook_ref}")
+        lines.append("- source_json_path 可以先写最小有效 JSON 骨架，再逐步补齐行数据；不要等资料全齐才第一次落盘。")
     return lines
 
 
@@ -171,6 +233,8 @@ def _one_runtime_finding_lines(finding: dict[str, object], contract: dict[str, o
     code = str(finding.get("code") or "").strip()
     if code == "OPEN_FILE_WRITE_SESSION":
         return _open_write_session_lines(finding)
+    if code == "STAGED_JSON_INVALID":
+        return _staged_json_invalid_lines(finding, contract)
     if code == "STAGED_JSON_NO_ROWS":
         return _staged_json_no_rows_lines(finding, contract)
     location = str(finding.get("location") or finding.get("stage_ref") or "").strip()
@@ -261,6 +325,8 @@ def _open_write_session_lines(finding: dict[str, object]) -> list[str]:
         f"  - manifest_path={manifest}",
         f"  - preview_path={preview}",
         f"  - preview_materialized={_json_bool(finding.get('preview_materialized'), default=False)}",
+        f"  - preview_char_count={finding.get('preview_char_count') or 0}",
+        f"  - preview_tail={json.dumps(str(finding.get('preview_tail') or ''), ensure_ascii=False)}",
         f"  - resume_action={finding.get('resume_action') or 'append_from_next_chunk_then_finish'}",
         "  - staged_fact_source=preview_and_chunks",
         "  - preview_materialized_after_append=true",
@@ -289,11 +355,32 @@ def _staged_json_no_rows_lines(
     return [
         "- staged_json_no_rows:",
         f"  - source_json_ref={staging.get('source_json_ref') or stage_ref}",
-        "  - write_shape={\"sheets\":[{\"name\":\"...\",\"columns\":[...],\"rows\":[{...}]}]}",
+        f"  - write_shape={_checkpoint_shape_hint(stage_ref, staging)}",
         f"  - required_columns={', '.join(str(item) for item in columns)}",
         f"  - builder_tool={staging.get('builder_tool') or ''}",
         f"  - workbook_ref={staging.get('workbook_ref') or ''}",
         "  - source_json_ref 有非空 rows/sheets 后，再调用 builder_tool；不要把空 JSON 当完成。",
+    ]
+
+
+# LLM: _staged_json_invalid_lines renders checkpoint-repair guidance from structured refs only.
+# 函数用途: 当阶段 JSON 语法坏掉或被截断时，提示模型先修复结构化 JSON，再继续 builder/下一阶段产物。
+def _staged_json_invalid_lines(
+    finding: dict[str, object], contract: dict[str, object]
+) -> list[str]:
+    stage_ref = str(finding.get("stage_ref") or finding.get("location") or "")
+    artifact = _artifact_for_stage_ref(contract, stage_ref)
+    validation = artifact.get("validation_contract") if isinstance(artifact.get("validation_contract"), dict) else {}
+    staging = validation.get("staging_contract") if isinstance(validation.get("staging_contract"), dict) else {}
+    parse_error = str(finding.get("parse_error") or "")
+    return [
+        "- staged_json_invalid:",
+        f"  - source_json_ref={staging.get('source_json_ref') or stage_ref}",
+        f"  - required_shape={_checkpoint_shape_hint(stage_ref, staging)}",
+        f"  - parse_error={json.dumps(parse_error, ensure_ascii=False)}",
+        f"  - builder_tool={staging.get('builder_tool') or ''}",
+        f"  - workbook_ref={staging.get('workbook_ref') or ''}",
+        "  - 先把 source_json_ref 修成可解析的完整 JSON，再继续 builder_tool 或下一阶段产物。",
     ]
 
 
@@ -307,6 +394,17 @@ def _artifact_for_stage_ref(contract: dict[str, object], stage_ref: str) -> dict
         if stage_ref in refs or stage_ref == str(staging.get("source_json_ref") or ""):
             return artifact
     return {}
+
+
+# LLM: _checkpoint_shape_hint lets each staged checkpoint describe its own generic JSON shape without hard-coding one task's schema.
+# 函数用途: 优先读取 staging_contract.checkpoint_shape_hints；缺失时回退到宽松通用 JSON 形状提示。
+def _checkpoint_shape_hint(stage_ref: str, staging: dict[str, object]) -> str:
+    hints = staging.get("checkpoint_shape_hints")
+    if isinstance(hints, dict):
+        hint = str(hints.get(stage_ref) or "").strip()
+        if hint:
+            return hint
+    return "[] 或 {\"rows\":[...]} 或 {\"sheets\":[{\"name\":\"...\",\"rows\":[...]}]} 这类非空结构化 JSON"
 
 
 # LLM: _target_display extracts a stable target path from structured file_write_session findings.

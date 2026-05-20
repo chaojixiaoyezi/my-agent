@@ -200,8 +200,8 @@ def test_main_agent_real_task_execution_plan_writes_command_refs(tmp_path):
     assert payload["concurrency"]["effective_max_workers"] == 2
     assert "MACHINE_DELIVERY_CONTRACT_JSON" not in prompt_arg
     assert contract_payload["artifacts"][0]["preferred_path"] == "outputs/furniture_homepage/index.html"
-    assert "HTML_PLACEHOLDER_LINK" in json.dumps(contract_payload, ensure_ascii=False)
-    assert "forbidden_hrefs" in contract_payload["artifacts"][0]["validation_contract"]
+    assert "complete_html_document" in json.dumps(contract_payload, ensure_ascii=False)
+    assert "forbidden_hrefs" not in contract_payload["artifacts"][0]["validation_contract"]
     assert (tmp_path / first_case["command_ref"]).exists()
     assert (tmp_path / first_case["config_ref"]).exists()
     assert not (tmp_path / first_case["stdout_ref"]).exists()
@@ -271,7 +271,7 @@ def test_main_agent_real_task_execution_fails_missing_expected_artifact(tmp_path
     acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
     assert payload["ok"] is False
     assert first_case["status"] == "FAILED"
-    assert first_case["acceptance_summary"]["failed"] == 1
+    assert first_case["acceptance_summary"]["failed"] >= 1
     assert acceptance["artifacts"][0]["report"]["findings"][0]["code"] == "ARTIFACT_MISSING"
 
 

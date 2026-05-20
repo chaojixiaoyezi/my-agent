@@ -66,8 +66,67 @@ def test_main_agent_real_task_delivery_contract_binds_artifact_paths(tmp_path):
     assert artifact["path_contract"]["resolved_path"] == str(
         paths["workspace"] / "outputs/github_star_growth/github_star_growth.xlsx"
     )
+    targets = payload["bootstrap_contract"]["materialization_targets"]
+    target_paths = {item["workspace_relative_path"] for item in targets}
+    assert "outputs/github_star_growth/source_data.json" in target_paths
+    assert "outputs/github_star_growth/github_star_growth.xlsx" in target_paths
+    startup_actions = payload["bootstrap_contract"]["startup_actions"]
+    checkpoint_actions = [item for item in startup_actions if item.get("action") == "materialize_checkpoint"]
+    assert checkpoint_actions
+    assert checkpoint_actions[0]["checkpoint_ref"] == "outputs/github_star_growth/source_data.json"
     assert (paths["workspace"] / "outputs/github_star_growth").is_dir()
     assert (paths["workspace"] / ".my_agent_artifact_paths.json").is_file()
+
+
+# LLM: directory-style deliverables should expose required files as generic materialization targets.
+# 函数用途: 验证 web_project 这类目录产物不会只给一个目录路径，而会给出结构化的关键文件目标。
+def test_main_agent_real_task_web_project_bootstrap_targets_required_files(tmp_path):
+    from agent_py_agent.agent.contracts.main_agent_task_execution_files import (
+        case_paths,
+        command_for_case,
+    )
+    from agent_py_agent.agent.contracts.main_agent_task_execution_models import (
+        MainAgentTaskExecutionRequest,
+    )
+    from agent_py_agent.agent.contracts.main_agent_task_suite import (
+        MainAgentTaskSuiteRequest,
+        plan_main_agent_task_suite,
+    )
+
+    suite = plan_main_agent_task_suite(
+        MainAgentTaskSuiteRequest(workspace=tmp_path, max_workers=1)
+    )
+    case = next(item for item in suite.cases if item.case_id == "shopping_site_flow")
+    paths = case_paths(tmp_path, case.case_id)
+
+    command_for_case(
+        case,
+        MainAgentTaskExecutionRequest(workspace=tmp_path),
+        config_path=tmp_path / "config.yaml",
+        workspace=tmp_path,
+        delivery_contract_path=paths["delivery_contract"],
+    )
+    payload = json.loads(paths["delivery_contract"].read_text(encoding="utf-8"))
+    targets = payload["bootstrap_contract"]["materialization_targets"]
+    target_paths = {item["workspace_relative_path"] for item in targets}
+
+    assert "outputs/shopping_site/index.html" in target_paths
+    assert "outputs/shopping_site/app.js" in target_paths
+
+
+# LLM: real task execution should inherit the repo default backend instead of silently downgrading to echo.
+# 函数用途: 验证未显式传 base_config_path 时，生成的 case config 仍沿用项目默认 model_backend。
+def test_main_agent_real_task_case_config_uses_repo_default_backend(tmp_path):
+    from agent_py_agent.agent.contracts.main_agent_task_execution_files import (
+        write_case_config,
+    )
+
+    config_path = tmp_path / "task" / "config.yaml"
+    write_case_config(config_path, None, tmp_path / "task" / "workspace")
+    text = config_path.read_text(encoding="utf-8")
+
+    assert 'model_backend: "anthropic_compatible"' in text
+    assert 'model_backend: "echo"' not in text
 
 
 # LLM: command preparation should reconcile duplicate write sessions before the resumed model run starts.
@@ -236,6 +295,69 @@ def test_real_task_acceptance_validates_staged_checkpoints(tmp_path):
     codes = {item["code"] for item in report.runtime_findings}
 
     assert "STAGED_JSON_NO_ROWS" in codes
+
+
+# LLM: Skeleton-only staged JSON with empty nested collections must not count as ready row data.
+# 函数用途: 验证只有 sheet 骨架和 metadata、没有真实项目行时，阶段 JSON 仍然会被标记为无数据。
+def test_real_task_acceptance_treats_skeleton_only_staged_json_as_no_rows(tmp_path):
+    from agent_py_agent.agent.contracts.main_agent_real_task_acceptance import (
+        RealTaskAcceptanceRequest,
+        validate_real_task_artifacts,
+    )
+
+    workspace = tmp_path / "task"
+    stage_dir = workspace / "outputs" / "github_star_growth"
+    stage_dir.mkdir(parents=True)
+    (stage_dir / "source_data.json").write_text(
+        json.dumps(
+            {
+                "generated_date": "2026-05-20",
+                "sheets": [{"week": "2026-W01", "projects": []}],
+                "metadata": {"total_weeks": 20},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    expected = _write_staged_expected_artifacts(tmp_path)
+
+    report = validate_real_task_artifacts(
+        RealTaskAcceptanceRequest(
+            expected_artifacts_path=expected,
+            task_workspace=workspace,
+            report_path=tmp_path / "acceptance_report.json",
+        )
+    )
+    codes = {item["code"] for item in report.runtime_findings}
+
+    assert "STAGED_JSON_NO_ROWS" in codes
+
+
+# LLM: invalid staged JSON must be reported as truncated/invalid, not as merely empty data.
+# 函数用途: 验证阶段 JSON 语法坏掉时会产出 STAGED_JSON_INVALID，避免恢复链误判为空数据。
+def test_real_task_acceptance_reports_invalid_staged_json(tmp_path):
+    from agent_py_agent.agent.contracts.main_agent_real_task_acceptance import (
+        RealTaskAcceptanceRequest,
+        validate_real_task_artifacts,
+    )
+
+    workspace = tmp_path / "task"
+    stage_dir = workspace / "outputs" / "github_star_growth"
+    stage_dir.mkdir(parents=True)
+    (stage_dir / "source_data.json").write_text('[{"项目名":"demo","语言":"Py', encoding="utf-8")
+    expected = _write_staged_expected_artifacts(tmp_path)
+
+    report = validate_real_task_artifacts(
+        RealTaskAcceptanceRequest(
+            expected_artifacts_path=expected,
+            task_workspace=workspace,
+            report_path=tmp_path / "acceptance_report.json",
+        )
+    )
+    finding = next(item for item in report.runtime_findings if item["code"] == "STAGED_JSON_INVALID")
+
+    assert "parse_error" in finding
+    assert finding["stage_ref"] == "outputs/github_star_growth/source_data.json"
 
 
 # LLM: _write_staged_expected_artifacts keeps the staging test focused on assertions.

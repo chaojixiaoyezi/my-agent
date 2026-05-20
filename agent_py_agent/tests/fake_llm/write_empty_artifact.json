@@ -1,0 +1,17 @@
+{
+  "contract_ref": "../contracts/empty_artifact_should_fail.json",
+  "model_steps": [
+    {
+      "type": "tool_call",
+      "tool": "write_file",
+      "params": {
+        "path": "output.md",
+        "content": ""
+      }
+    },
+    {
+      "type": "final",
+      "status": "SUCCEEDED"
+    }
+  ]
+}

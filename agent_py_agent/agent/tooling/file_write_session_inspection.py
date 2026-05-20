@@ -28,13 +28,16 @@ def _open_session_summary(path: Path) -> dict[str, Any] | None:
         return None
     chunks = _chunk_indexes(manifest.get("chunks"))
     preview_path = _preview_path(path, manifest)
+    preview_materialized = preview_path.exists() and not _missing_chunk_indexes(chunks)
     return {
         "session_id": str(manifest.get("session_id") or path.parent.name),
         "status": "open",
         "target_path": manifest.get("target_path") or {},
         "manifest_path": str(path),
         "preview_path": str(preview_path),
-        "preview_materialized": preview_path.exists() and not _missing_chunk_indexes(chunks),
+        "preview_materialized": preview_materialized,
+        "preview_char_count": _preview_char_count(preview_path) if preview_materialized else 0,
+        "preview_tail": _preview_tail(preview_path) if preview_materialized else "",
         "received_chunks": chunks,
         "next_chunk_index": (max(chunks) + 1) if chunks else 0,
         "continue_tool_call": {
@@ -89,3 +92,24 @@ def _preview_path(manifest_path: Path, manifest: dict[str, Any]) -> Path:
     temp_path = manifest.get("temp_path") if isinstance(manifest.get("temp_path"), dict) else {}
     resolved = str(temp_path.get("resolved") or "")
     return Path(resolved) if resolved else manifest_path.parent / "write.tmp"
+
+
+# LLM: _preview_char_count keeps open-session summaries bounded while still exposing staged size.
+# 函数用途: 返回预览文件字符数，帮助模型知道已写入的大致长度。
+def _preview_char_count(path: Path) -> int:
+    try:
+        return len(path.read_text(encoding="utf-8"))
+    except OSError:
+        return 0
+
+
+# LLM: _preview_tail gives continuation context from staged content without loading the whole artifact.
+# 函数用途: 返回预览尾部少量文本，供恢复/续写时对齐当前位置。
+def _preview_tail(path: Path, *, max_chars: int = 400) -> str:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]

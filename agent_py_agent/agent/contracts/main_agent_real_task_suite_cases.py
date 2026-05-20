@@ -27,10 +27,7 @@ def _furniture_homepage_case() -> MainAgentRealTaskCase:
         validation_contract={
             "validator": "artifact_acceptance",
             "required_suffix": ".html",
-            "forbidden_hrefs": ["", "#", "javascript:void(0)", "javascript:void(0);"],
-            "failure_codes": ["HTML_PLACEHOLDER_LINK", "HTML_EXTERNAL_IMAGE_REF"],
             "quality_requirements": {
-                "clickable_links_must_resolve": True,
                 "complete_html_document": True,
                 "images_must_be_local_or_inline": True,
                 "min_size_bytes": 4000,
@@ -93,11 +90,18 @@ def _github_star_workbook_case() -> MainAgentRealTaskCase:
             "validator": "spreadsheet_acceptance",
             "required_sheets_min": 2,
             "required_columns": ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"],
+            "evidence_contract": {
+                "required_fields": ["项目名", "地址", "上升 star 数"],
+                "require_verified": True,
+            },
             "staging_contract": {
                 "strategy": "data_then_tool_builder_then_workbook",
                 "builder_tool": "data_to_workbook",
                 "source_json_ref": "outputs/github_star_growth/source_data.json",
                 "workbook_ref": "outputs/github_star_growth/github_star_growth.xlsx",
+                "checkpoint_shape_hints": {
+                    "outputs/github_star_growth/source_data.json": '{"sheets":[{"name":"本周榜单","columns":["项目名","地址","上升 star 数","中文解释","推荐理由"],"rows":[{"项目名":"..."}]}]}'
+                },
                 "checkpoint_refs": [
                     "outputs/github_star_growth/source_data.json",
                     "outputs/github_star_growth/github_star_growth.xlsx",
@@ -140,6 +144,17 @@ def _deepseek_papers_translation_case() -> MainAgentRealTaskCase:
             "validator": "document_acceptance",
             "required_suffix": ".pdf",
             "requires_source_index": True,
+            "staging_contract": {
+                "strategy": "source_index_then_translation_draft_then_pdf",
+                "checkpoint_shape_hints": {
+                    "outputs/deepseek_papers/source_index.json": '[{"title":"...","authors":["..."],"date":"...","url":"...","abstract":"...","translated":false}]'
+                },
+                "checkpoint_refs": [
+                    "outputs/deepseek_papers/source_index.json",
+                    "outputs/deepseek_papers/deepseek_papers_zh.md",
+                    "outputs/deepseek_papers/deepseek_papers_zh.pdf",
+                ],
+            },
         },
     )
     return MainAgentRealTaskCase(

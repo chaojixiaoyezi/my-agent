@@ -41,6 +41,10 @@ def normalize_status(value: object) -> str:
     text = str(value or "").strip().upper()
     if text == "WAIT_CHILD":
         return "WAITING_FOR_CHILD"
+    if text == "QUEUED":
+        return "PENDING"
+    if text == "COMPLETED":
+        return "DONE"
     return text or "PLANNING"
 
 

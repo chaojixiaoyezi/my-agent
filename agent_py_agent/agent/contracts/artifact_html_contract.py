@@ -16,7 +16,7 @@ def record_resource_ref(resources: list[tuple[str, str, str]], tag: str, values:
 
 
 # LLM: html_contract_findings applies structured HTML quality requirements from delivery contracts.
-# 函数用途: 返回 finding 字典，调用方再转成本模块自己的 ArtifactFinding 类型，避免循环导入。
+# 函数用途: 返回 finding 字典，调用方再转成本模块自己的 ArtifactFinding 类型，避免循环导入；完整 HTML 结构检查默认开启。
 def html_contract_findings(
     text: str,
     resources: list[tuple[str, str, str]],
@@ -24,7 +24,7 @@ def html_contract_findings(
 ) -> list[dict[str, str]]:
     requirements = _quality_requirements(validation_contract)
     findings: list[dict[str, str]] = []
-    if requirements.get("complete_html_document"):
+    if requirements.get("complete_html_document", True):
         findings.extend(_complete_html_findings(text))
     if requirements.get("single_file_no_external_assets"):
         findings.extend(_external_resource_findings(resources))

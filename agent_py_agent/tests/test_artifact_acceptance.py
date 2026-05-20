@@ -3,21 +3,21 @@
 from __future__ import annotations
 
 
-# LLM: HTML validator should catch placeholder links that models often call "working" by mistake.
-# 函数用途: 验证 HTML 产物验收能发现 `href="#"` 这类假按钮/假链接，不能只相信模型自检。
-def test_html_acceptance_flags_placeholder_links(tmp_path):
+# LLM: Generic HTML acceptance should focus on structural/resource facts, not task-specific link style rules.
+# 函数用途: 验证通用 HTML 验收不会因为 `href="#"` 这类页面实现细节直接判死，只保留通用结构和资源检查。
+def test_html_acceptance_does_not_fail_placeholder_links_by_default(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,
         validate_html_artifact,
     )
 
     path = tmp_path / "index.html"
-    path.write_text('<html><body><a href="#">More</a></body></html>', encoding="utf-8")
+    path.write_text('<!doctype html><html><head><title>X</title></head><body><a href="#">More</a></body></html>', encoding="utf-8")
 
     report = validate_html_artifact(ArtifactAcceptanceRequest(path=path))
 
-    assert report.ok is False
-    assert any(item.code == "HTML_PLACEHOLDER_LINK" for item in report.findings)
+    assert report.ok is True
+    assert report.findings == []
 
 
 # LLM: HTML validator should distinguish image refs from unrelated external resources like fonts.
@@ -90,8 +90,8 @@ def test_html_acceptance_contract_rejects_incomplete_html_document(tmp_path):
     assert any(item.code == "HTML_INCOMPLETE_DOCUMENT" for item in report.findings)
 
 
-# LLM: Acceptance reports must be JSON friendly for future QA and repair agents.
-# 函数用途: 确认验收报告可以作为结构化 findings 传给修复流程，不需要解析自然语言。
+# LLM: Acceptance reports must stay JSON friendly even when HTML passes default generic checks.
+# 函数用途: 确认验收报告仍可结构化输出，后续 QA/修复链路不需要解析自然语言。
 def test_html_acceptance_report_to_dict(tmp_path):
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,
@@ -99,12 +99,12 @@ def test_html_acceptance_report_to_dict(tmp_path):
     )
 
     path = tmp_path / "index.html"
-    path.write_text("<html><body><a href=\"#\">Bad</a></body></html>", encoding="utf-8")
+    path.write_text("<!doctype html><html><head><title>X</title></head><body><a href=\"#\">Bad</a></body></html>", encoding="utf-8")
 
     payload = validate_html_artifact(ArtifactAcceptanceRequest(path=path)).to_dict()
 
-    assert payload["ok"] is False
-    assert payload["findings"][0]["code"] == "HTML_PLACEHOLDER_LINK"
+    assert payload["ok"] is True
+    assert payload["findings"] == []
 
 
 # LLM: Generic artifact acceptance should route common formats through one contract.

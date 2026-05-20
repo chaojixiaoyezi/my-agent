@@ -63,3 +63,47 @@ def test_xlsx_acceptance_rejects_missing_required_columns(tmp_path: Path) -> Non
     assert not report.ok
     assert "XLSX_TOO_FEW_SHEETS" in codes
     assert "XLSX_MISSING_REQUIRED_COLUMNS" in codes
+
+
+# LLM: Workbook acceptance must reject fact tables whose source JSON has no machine evidence refs.
+# 函数用途: 验证 xlsx 即使生成成功，只要 staging source 缺结构化来源证据，也不能通过机器验收。
+def test_xlsx_acceptance_rejects_unsourced_staged_source_json(tmp_path: Path) -> None:
+    source = tmp_path / "source_data.json"
+    source.write_text(
+        """
+{
+  "sheets": [
+    {
+      "name": "weekly",
+      "columns": ["项目名", "地址", "上升 star 数"],
+      "rows": [{"项目名": "demo", "地址": "https://example.com/demo", "上升 star 数": 42}]
+    }
+  ]
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    tool = DataWorkbookTool(tmp_path)
+    result = tool.execute({"path": "report.xlsx", "source_json_path": "source_data.json"})
+    assert result.ok
+
+    report = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=tmp_path / "report.xlsx",
+            workspace_root=tmp_path,
+            validation_contract={
+                "required_columns": ["项目名", "地址", "上升 star 数"],
+                "staging_contract": {
+                    "source_json_ref": "source_data.json",
+                },
+                "evidence_contract": {
+                    "required_fields": ["上升 star 数"],
+                    "require_verified": True,
+                },
+            },
+        )
+    )
+
+    codes = {finding.code for finding in report.findings}
+    assert not report.ok
+    assert "EVIDENCE_REQUIRED_FIELD_MISSING" in codes

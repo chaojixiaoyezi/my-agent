@@ -28,6 +28,10 @@ def test_list_tools_returns_runtime_tool_manifest(tmp_path: Path) -> None:
     assert result.ok, result.output
     payload = json.loads(result.output)
     names = {item["name"] for item in payload["tools"]}
+    assert "TOOL_UNAVAILABLE" in payload["tool_failure_taxonomy"]
     assert "run_command" in names
     assert "data_to_workbook" in names
     assert "list_tools" in names
+    list_tools = next(item for item in payload["tools"] if item["name"] == "list_tools")
+    assert list_tools["visible_in_context"] is True
+    assert list_tools["executable_in_context"] is True

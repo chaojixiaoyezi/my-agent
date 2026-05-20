@@ -83,6 +83,7 @@ def delivery_contract_for_case(
         "artifacts": _artifacts_with_path_contracts(artifacts.get("artifacts", []), task_workspace),
         "acceptance": acceptance,
     }
+    payload["bootstrap_contract"] = _bootstrap_contract(payload["artifacts"])
     recovery = recovery_delivery_contract_payload(recovery_packet_path, workspace=workspace)
     if recovery:
         payload["recovery"] = recovery
@@ -172,6 +173,163 @@ def _artifact_manifest_entries(payload: dict[str, object]) -> list[dict[str, str
     return entries
 
 
+# LLM: _bootstrap_contract derives generic start-work targets from structured artifact facts only.
+# 函数用途: 生成通用开工合同，让主代理前几轮围绕产物/阶段路径物化，而不是反复只读查看目录。
+def _bootstrap_contract(items: object) -> dict[str, object]:
+    if not isinstance(items, list):
+        return {"materialization_targets": [], "startup_actions": []}
+    targets = _dedupe_materialization_targets(
+        [
+            *[_artifact_materialization_target(item) for item in items if isinstance(item, dict)],
+            *[
+                target
+                for item in items
+                if isinstance(item, dict)
+                for target in _required_file_targets(item)
+            ],
+            *[
+                target
+                for item in items
+                if isinstance(item, dict)
+                for target in _checkpoint_targets(item)
+            ],
+        ]
+    )
+    actions = _startup_actions(items)
+    return {"materialization_targets": targets, "startup_actions": actions}
+
+
+# LLM: _artifact_materialization_target turns one artifact path contract into the first delivery target.
+# 函数用途: 给每个 artifact 生成一个最基础的“先让这个路径出现”的结构化目标。
+def _artifact_materialization_target(item: dict[str, object]) -> dict[str, str]:
+    path_contract = item.get("path_contract")
+    if not isinstance(path_contract, dict):
+        return {}
+    return {
+        "artifact_id": str(item.get("artifact_id") or ""),
+        "kind": str(item.get("kind") or ""),
+        "target_type": "artifact",
+        "workspace_relative_path": str(path_contract.get("workspace_relative_path") or ""),
+        "resolved_path": str(path_contract.get("resolved_path") or ""),
+        "parent_dir": str(path_contract.get("parent_dir") or ""),
+    }
+
+
+# LLM: _required_file_targets expands directory-style validators into concrete early file targets.
+# 函数用途: 如果验收合同声明 required_files，就把目录里的关键文件转成通用物化目标。
+def _required_file_targets(item: dict[str, object]) -> list[dict[str, str]]:
+    path_contract = item.get("path_contract")
+    contract = item.get("validation_contract")
+    if not isinstance(path_contract, dict) or not isinstance(contract, dict):
+        return []
+    required_files = contract.get("required_files")
+    if not isinstance(required_files, list):
+        return []
+    root = Path(str(path_contract.get("resolved_path") or ""))
+    relative_root = str(path_contract.get("workspace_relative_path") or "")
+    targets: list[dict[str, str]] = []
+    for name in required_files:
+        file_name = str(name).strip()
+        if not file_name:
+            continue
+        relative = str(Path(relative_root) / file_name).replace("\\", "/")
+        resolved = root / file_name
+        targets.append(
+            {
+                "artifact_id": str(item.get("artifact_id") or ""),
+                "kind": str(item.get("kind") or ""),
+                "target_type": "required_file",
+                "workspace_relative_path": relative,
+                "resolved_path": str(resolved),
+                "parent_dir": str(resolved.parent),
+            }
+        )
+    return targets
+
+
+# LLM: _checkpoint_targets expands staged checkpoint contracts into early deliverable targets.
+# 函数用途: 把 staging_contract.checkpoint_paths 变成结构化物化目标，供长任务先落阶段产物。
+def _checkpoint_targets(item: dict[str, object]) -> list[dict[str, str]]:
+    contract = item.get("validation_contract")
+    if not isinstance(contract, dict):
+        return []
+    staging = contract.get("staging_contract")
+    checkpoint_paths = staging.get("checkpoint_paths") if isinstance(staging, dict) else None
+    if not isinstance(checkpoint_paths, list):
+        return []
+    targets: list[dict[str, str]] = []
+    for checkpoint in checkpoint_paths:
+        if not isinstance(checkpoint, dict):
+            continue
+        targets.append(
+            {
+                "artifact_id": str(item.get("artifact_id") or ""),
+                "kind": str(item.get("kind") or ""),
+                "target_type": "checkpoint",
+                "workspace_relative_path": str(checkpoint.get("workspace_relative_path") or ""),
+                "resolved_path": str(checkpoint.get("resolved_path") or ""),
+                "parent_dir": str(checkpoint.get("parent_dir") or ""),
+            }
+        )
+    return targets
+
+
+# LLM: _dedupe_materialization_targets keeps bootstrap contracts compact and stable across retries.
+# 函数用途: 按 resolved_path 去重，避免 artifact 本身和 checkpoint/required_file 重复显示。
+def _dedupe_materialization_targets(items: list[dict[str, str]]) -> list[dict[str, str]]:
+    seen: set[str] = set()
+    deduped: list[dict[str, str]] = []
+    for item in items:
+        resolved = str(item.get("resolved_path") or "").strip()
+        if not resolved or resolved in seen:
+            continue
+        seen.add(resolved)
+        deduped.append(item)
+    return deduped
+
+
+# LLM: _startup_actions derives generic start-order hints from staged tool builders and target paths.
+# 函数用途: 生成结构化开工动作，例如先物化 checkpoint，再调用 builder_tool，不依赖任务自然语言。
+def _startup_actions(items: object) -> list[dict[str, object]]:
+    if not isinstance(items, list):
+        return []
+    actions: list[dict[str, object]] = [{"action": "materialize_target", "priority": 1}]
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        contract = item.get("validation_contract")
+        staging = contract.get("staging_contract") if isinstance(contract, dict) else None
+        if not isinstance(staging, dict):
+            continue
+        checkpoint_refs = staging.get("checkpoint_refs")
+        if isinstance(checkpoint_refs, list):
+            for ref in checkpoint_refs:
+                ref_text = str(ref or "").strip()
+                if not ref_text:
+                    continue
+                actions.append(
+                    {
+                        "action": "materialize_checkpoint",
+                        "priority": 1,
+                        "checkpoint_ref": ref_text,
+                    }
+                )
+        builder_tool = str(staging.get("builder_tool") or "").strip()
+        source_json_ref = str(staging.get("source_json_ref") or "").strip()
+        workbook_ref = str(staging.get("workbook_ref") or "").strip()
+        if builder_tool:
+            actions.append(
+                {
+                    "action": "invoke_builder_tool",
+                    "priority": 2,
+                    "builder_tool": builder_tool,
+                    "source_ref": source_json_ref,
+                    "output_ref": workbook_ref,
+                }
+            )
+    return actions
+
+
 # LLM: _checkpoint_manifest_entries normalizes staged path contracts for the manifest.
 # 函数用途: 收集 source_data/build_script/final_artifact 等阶段路径，统一预创建父目录。
 def _checkpoint_manifest_entries(items: object) -> list[dict[str, str]]:
@@ -214,7 +372,7 @@ def _json_payload(path: Path) -> dict[str, object]:
 
 
 # LLM: write_case_config creates an isolated agent config for one real task.
-# 函数用途: 从基础配置复制或生成 echo 配置，并覆盖 workspace_root，保证任务写入专属目录。
+# 函数用途: 从基础配置或仓库默认 agent_config 复制，并覆盖 workspace_root，保证真实任务继承正常模型后端。
 def write_case_config(path: Path, base_config_path: Path | None, task_workspace: Path) -> None:
     if base_config_path:
         text = Path(base_config_path).expanduser().read_text(encoding="utf-8")
@@ -225,19 +383,23 @@ def write_case_config(path: Path, base_config_path: Path | None, task_workspace:
     path.write_text(f'{text.rstrip()}\nworkspace_root: "{task_workspace}"\n', encoding="utf-8")
 
 
-# LLM: default_config_text keeps plan-only and echo tests independent from user secrets.
-# 函数用途: 生成最小离线配置；真实 API 测试应显式传 base_config_path。
+# LLM: default_config_text reuses the repo default agent config so controlled runs match real runtime defaults.
+# 函数用途: 读取仓库默认 agent_config.yaml；只有读不到时才回退到最小 anthropic_compatible 配置。
 def default_config_text() -> str:
-    return "\n".join(
-        [
-            'agent_name: "real-task-suite"',
-            'model_backend: "echo"',
-            'system_prompt: "你是受控真实任务测试里的主代理。"',
-            "prompt_files: []",
-            "auto_save_memory: false",
-            "enable_subagents: true",
-        ]
-    )
+    config_path = Path(__file__).resolve().parents[2] / "config" / "agent_config.yaml"
+    try:
+        return config_path.read_text(encoding="utf-8")
+    except OSError:
+        return "\n".join(
+            [
+                'agent_name: "real-task-suite"',
+                'model_backend: "anthropic_compatible"',
+                'system_prompt: "你是受控真实任务测试里的主代理。"',
+                "prompt_files: []",
+                "auto_save_memory: false",
+                "enable_subagents: true",
+            ]
+        )
 
 
 # LLM: without_config_key removes one top-level simple YAML key before appending overrides.

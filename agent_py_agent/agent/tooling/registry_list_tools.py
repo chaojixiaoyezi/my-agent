@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ..contracts.error_taxonomy import tool_failure_taxonomy
 from .models import BaseTool, ToolExecutionResult, ToolSpec
 
 
@@ -37,7 +38,10 @@ class ListToolsTool(BaseTool):
     # 函数用途: 返回 name/category/parameters/description 等结构化工具事实。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         specs = self.registry.specs(include_orchestration=True)
-        payload = {"tools": [_tool_manifest_item(spec) for spec in specs]}
+        payload = {
+            "tool_failure_taxonomy": tool_failure_taxonomy(),
+            "tools": [_tool_manifest_item(spec) for spec in specs],
+        }
         return ToolExecutionResult("list_tools", True, json.dumps(payload, ensure_ascii=False))
 
 
@@ -49,6 +53,12 @@ def _tool_manifest_item(spec: ToolSpec) -> dict[str, object]:
         "category": spec.category,
         "description": spec.description,
         "parameters": list(spec.parameters.keys()),
+        "parameter_details": dict(spec.parameter_details),
+        "examples": list(spec.examples[:2]),
+        "visible_in_context": True,
+        "executable_in_context": True,
+        "permission_mode": "workspace_bounded",
+        "orchestration_tool": spec.category == "orchestration",
     }
 
 
