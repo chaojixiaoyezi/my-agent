@@ -35,6 +35,7 @@ def validate_compact_resume_bundle(bundle: dict[str, Any]) -> OfflineCompactResu
     _validate_tool_result_refs(pre_compact, compact, findings)
     _validate_failed_operations(bundle, compact, findings)
     _validate_side_effect_replay(compact, _event_list(bundle.get("resume_events")), findings)
+    _validate_no_progress_replay(compact, _event_list(bundle.get("resume_events")), findings)
     _validate_summary(compact, findings)
     return OfflineCompactResumeValidation(
         ok=not findings,
@@ -127,6 +128,25 @@ def _validate_side_effect_replay(
     )
     if replayed:
         findings.append(_finding("DANGEROUS_OPERATION_REPLAYED", {"operation_ids": replayed}))
+
+
+# LLM: _validate_no_progress_replay blocks compact resume from repeating known stalled fingerprints.
+# 函数用途: compact 记录 no_progress_fingerprints 后，resume_events 不能再次执行同 fingerprint。
+def _validate_no_progress_replay(
+    compact: dict[str, Any],
+    resume_events: tuple[dict[str, Any], ...],
+    findings: list[dict[str, object]],
+) -> None:
+    stalled = set(_string_list(compact.get("no_progress_fingerprints")))
+    if not stalled:
+        return
+    repeated = sorted(
+        _text(event.get("progress_fingerprint"))
+        for event in resume_events
+        if _event_type(event) == "tool_call" and _text(event.get("progress_fingerprint")) in stalled
+    )
+    if repeated:
+        findings.append(_finding("COMPACT_NO_PROGRESS_LOOP_REPEATED", {"progress_fingerprints": repeated}))
 
 
 # LLM: _validate_summary checks the compact prompt section has enough machine-addressable anchors.

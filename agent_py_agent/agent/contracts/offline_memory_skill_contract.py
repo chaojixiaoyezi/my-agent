@@ -36,6 +36,7 @@ def validate_memory_skill_contract(contract: dict[str, Any]) -> OfflineMemorySki
         _record_list(contract.get("memory_uses")),
         findings,
     )
+    _validate_memory_retrievals(_record_list(contract.get("memory_retrievals")), findings)
     _validate_skill_manifests(
         _record_list(contract.get("skill_manifests")),
         _section(contract.get("tool_manifest")),
@@ -80,6 +81,25 @@ def _validate_memory_uses(
         record = records_by_ref.get(memory_ref, {})
         if usage in CURRENT_FACT_USAGES and record.get("is_stale") is True:
             findings.append(_finding("MEMORY_FACT_STALE", {"memory_ref": memory_ref, "usage": usage}))
+
+
+# LLM: _validate_memory_retrievals checks recall results against structured expected/irrelevant refs.
+# 函数用途: memory_retrievals 可声明 expected_refs/irrelevant_refs，用于离线测试召回准确性。
+def _validate_memory_retrievals(
+    retrievals: tuple[dict[str, Any], ...],
+    findings: list[dict[str, object]],
+) -> None:
+    for retrieval in retrievals:
+        query_ref = _text(retrieval.get("query_ref"))
+        selected = set(_string_list(retrieval.get("selected_refs")))
+        expected = set(_string_list(retrieval.get("expected_refs")))
+        irrelevant = set(_string_list(retrieval.get("irrelevant_refs")))
+        missing = sorted(expected - selected)
+        noisy = sorted(selected & irrelevant)
+        if missing:
+            findings.append(_finding("MEMORY_RECALL_EXPECTED_MISSING", {"query_ref": query_ref, "missing_refs": missing}))
+        if noisy:
+            findings.append(_finding("MEMORY_RECALL_IRRELEVANT_SELECTED", {"query_ref": query_ref, "irrelevant_refs": noisy}))
 
 
 # LLM: _validate_skill_manifests checks machine-readable skill activation, inputs, safety, and tools.

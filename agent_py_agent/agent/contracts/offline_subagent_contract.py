@@ -118,6 +118,9 @@ def _validate_required_children(
         if child is None:
             findings.append(_finding("CHILD_MISSING", {"child_run_id": child_id}))
             continue
+        if _status(child.get("status")) in {"TIMEOUT", "TIMED_OUT"}:
+            findings.append(_finding("CHILD_TIMEOUT", {"child_run_id": child_id}))
+            continue
         if _status(child.get("status")) not in SUCCESS_STATUSES:
             findings.append(
                 _finding(

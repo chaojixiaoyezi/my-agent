@@ -95,6 +95,39 @@ class FakeToolRunner:
             "error_code": "APPROVAL_REQUIRED",
         }
 
+    def _tool_send_message(self, params: dict[str, object]) -> dict[str, object]:
+        target = str(params.get("target") or "").strip()
+        idempotency_key = str(params.get("idempotency_key") or "").strip()
+        if not target or not idempotency_key:
+            return {"tool": "send_message", "ok": False, "error_code": "MESSAGE_CONTRACT_INVALID"}
+        return {
+            "tool": "send_message",
+            "ok": True,
+            "delivery_id": f"msg-{abs(hash((target, idempotency_key))) % 100000}",
+            "idempotency_key": idempotency_key,
+        }
+
+    def _tool_block_ip(self, params: dict[str, object]) -> dict[str, object]:
+        ip = str(params.get("ip") or "").strip()
+        mode = str(params.get("mode") or "dry_run").strip()
+        if not ip:
+            return {"tool": "block_ip", "ok": False, "error_code": "IP_REQUIRED"}
+        if mode != "dry_run" and not params.get("approval_id"):
+            return {"tool": "block_ip", "ok": False, "error_code": "APPROVAL_REQUIRED", "ip": ip}
+        return {"tool": "block_ip", "ok": True, "ip": ip, "mode": mode, "ticket": f"FW-{ip.replace('.', '-')}"}
+
+    def _tool_browser_open(self, params: dict[str, object]) -> dict[str, object]:
+        url = str(params.get("url") or "").strip()
+        if not url:
+            return {"tool": "browser_open", "ok": False, "error_code": "URL_REQUIRED"}
+        return {"tool": "browser_open", "ok": True, "url": url, "dom_ref": "artifact://browser/dom-snapshot.json"}
+
+    def _tool_create_ticket(self, params: dict[str, object]) -> dict[str, object]:
+        title = str(params.get("title") or "").strip()
+        if not title:
+            return {"tool": "create_ticket", "ok": False, "error_code": "TICKET_TITLE_REQUIRED"}
+        return {"tool": "create_ticket", "ok": True, "ticket_id": f"TICKET-{abs(hash(title)) % 100000}"}
+
     def _fixture_result(self, tool: str, params: dict[str, object]) -> object:
         fixture = self.fixtures.get(tool)
         if not isinstance(fixture, dict):

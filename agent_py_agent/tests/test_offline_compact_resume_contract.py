@@ -109,6 +109,33 @@ def test_compact_resume_cannot_repeat_dangerous_operation() -> None:
     assert result.error_codes == ("DANGEROUS_OPERATION_REPLAYED",)
 
 
+# LLM: Resume after compact must not repeat a previously stalled progress fingerprint.
+# 函数用途: 验证 compact 记录的 no_progress_fingerprints 在 resume 中再次出现会被拦截。
+def test_compact_resume_cannot_repeat_no_progress_loop() -> None:
+    from agent_py_agent.agent.contracts.offline_compact_resume_contract import (
+        validate_compact_resume_bundle,
+    )
+
+    result = validate_compact_resume_bundle(
+        {
+            "compact": {
+                "current_status": "RUNNING",
+                "tool_result_refs": [],
+                "failed_operation_ids": [],
+                "executed_side_effect_operation_ids": [],
+                "no_progress_fingerprints": ["read:a:unchanged"],
+                "summary": _complete_summary(),
+            },
+            "resume_events": [
+                {"type": "tool_call", "tool": "read_file", "progress_fingerprint": "read:a:unchanged"},
+            ],
+        }
+    )
+
+    assert result.ok is False
+    assert result.error_codes == ("COMPACT_NO_PROGRESS_LOOP_REPEATED",)
+
+
 # LLM: Compact summary quality is a structured checklist, not a prose style judgment.
 # 函数用途: 验证 summary 缺少状态、完成动作、未完成动作、证据 refs、下一步限制时会失败。
 def test_compact_summary_quality_requires_state_done_next_and_refs() -> None:

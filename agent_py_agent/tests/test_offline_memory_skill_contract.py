@@ -80,6 +80,34 @@ def test_stale_memory_cannot_be_used_as_current_fact() -> None:
     assert result.error_codes == ("MEMORY_FACT_STALE",)
 
 
+# LLM: Memory retrieval quality should be testable from selected and expected refs.
+# 函数用途: 验证召回缺少 expected_refs 或选中 irrelevant_refs 时会返回结构化 finding。
+def test_memory_retrieval_rejects_missing_expected_and_irrelevant_refs() -> None:
+    from agent_py_agent.agent.contracts.offline_memory_skill_contract import (
+        validate_memory_skill_contract,
+    )
+
+    result = validate_memory_skill_contract(
+        {
+            "memory_writes": [],
+            "memory_uses": [],
+            "memory_retrievals": [
+                {
+                    "query_ref": "query://task",
+                    "selected_refs": ["memory://old", "memory://noise"],
+                    "expected_refs": ["memory://current"],
+                    "irrelevant_refs": ["memory://noise"],
+                }
+            ],
+            "skill_manifests": [],
+            "tool_manifest": {"visible_tools": []},
+        }
+    )
+
+    assert result.ok is False
+    assert result.error_codes == ("MEMORY_RECALL_EXPECTED_MISSING", "MEMORY_RECALL_IRRELEVANT_SELECTED")
+
+
 # LLM: Skill manifests need machine-readable triggers and input contracts, not only prose docs.
 # 函数用途: 验证 skill_manifest 缺少 trigger 或 input_contract 时会被合同拒绝。
 def test_skill_manifest_requires_trigger_and_input_contract() -> None:
