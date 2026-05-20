@@ -137,6 +137,18 @@ def test_fake_llm_no_progress_runtime_issue_is_recorded_and_blocks_success(tmp_p
     assert "RUNTIME_ISSUE_SUCCESS_CONFLICT" in result.contract_result.error_codes
 
 
+def test_fake_llm_dry_run_result_cannot_satisfy_real_execution_contract(tmp_path: Path):
+    from agent_py_agent.tests.support.fake_llm_runner import FakeLLMRunner
+
+    runner = FakeLLMRunner.from_fixture(_fixture("dry_run_then_success.json"))
+
+    result = runner.run(tmp_path)
+
+    assert result.contract_result.ok is False
+    assert "REQUIRED_REAL_TOOL_CALL_MISSING" in result.contract_result.error_codes
+    assert "FINAL_STATUS_REJECTED" in result.contract_result.error_codes
+
+
 def _fixture(name: str) -> dict[str, object]:
     path = Path(__file__).parent / name
     return json.loads(path.read_text(encoding="utf-8"))

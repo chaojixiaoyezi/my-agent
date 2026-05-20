@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .contract_fixture_tool_checks import tool_conditions as _tool_conditions
+
 
 @dataclass(frozen=True)
 class ContractFixtureResult:
@@ -77,31 +79,48 @@ def _artifact_conditions(
     non_empty = True
     sections_present = True
     json_requirements_present = True
+    evidence_source_present = True
+    path_inside_run_dir = True
     for artifact in _required_artifacts(contract):
-        path = run_dir / str(artifact.get("path") or "")
-        artifact_state = _evaluate_artifact(artifact, path, evaluation)
+        artifact_state = _evaluate_artifact(run_dir, artifact, evaluation)
         exists = exists and artifact_state["artifact_exists"]
         non_empty = non_empty and artifact_state["artifact_non_empty"]
         sections_present = sections_present and artifact_state["required_sections_present"]
         json_requirements_present = json_requirements_present and artifact_state["json_requirements_present"]
+        evidence_source_present = evidence_source_present and artifact_state["evidence_source_present"]
+        path_inside_run_dir = path_inside_run_dir and artifact_state["artifact_path_inside_run_dir"]
     return {
         "artifact_exists": exists,
         "artifact_non_empty": non_empty,
+        "artifact_path_inside_run_dir": path_inside_run_dir,
+        "evidence_source_present": evidence_source_present,
         "json_requirements_present": json_requirements_present,
         "required_sections_present": sections_present,
     }
 
 
 def _evaluate_artifact(
+    run_dir: Path,
     artifact: dict[str, object],
-    path: Path,
     evaluation: _FixtureEvaluation,
 ) -> dict[str, bool]:
+    path = _artifact_path(run_dir, artifact, evaluation)
+    if path is None:
+        return {
+            "artifact_exists": False,
+            "artifact_non_empty": False,
+            "artifact_path_inside_run_dir": False,
+            "evidence_source_present": False,
+            "json_requirements_present": False,
+            "required_sections_present": False,
+        }
     if not path.exists():
         evaluation.add("ARTIFACT_MISSING", str(path), "required artifact is missing")
         return {
             "artifact_exists": False,
             "artifact_non_empty": False,
+            "artifact_path_inside_run_dir": True,
+            "evidence_source_present": False,
             "json_requirements_present": False,
             "required_sections_present": False,
         }
@@ -111,6 +130,8 @@ def _evaluate_artifact(
     return {
         "artifact_exists": True,
         "artifact_non_empty": non_empty,
+        "artifact_path_inside_run_dir": True,
+        "evidence_source_present": _evidence_source_conditions(artifact, path, evaluation),
         "json_requirements_present": _json_conditions(artifact, path, evaluation),
         "required_sections_present": sections_present,
     }
@@ -143,37 +164,6 @@ def _artifact_has_required_sections(
     return ok
 
 
-def _tool_conditions(
-    contract: dict[str, object],
-    tool_trace: list[dict[str, object]],
-    evaluation: _FixtureEvaluation,
-) -> dict[str, bool]:
-    required_calls = _string_list(_tools_contract(contract).get("required_calls"))
-    required_successful_calls = _string_list(_tools_contract(contract).get("required_successful_calls"))
-    if not tool_trace:
-        evaluation.add("TOOL_TRACE_EMPTY", "tool_trace", "tool trace is empty")
-    called = {str(item.get("tool") or "") for item in tool_trace if isinstance(item, dict)}
-    missing = [name for name in required_calls if name not in called]
-    for name in missing:
-        evaluation.add("REQUIRED_TOOL_CALL_MISSING", "tool_trace", f"required tool call missing: {name}")
-    successful = {
-        str(item.get("tool") or "")
-        for item in tool_trace
-        if isinstance(item, dict) and bool(_tool_result(item).get("ok"))
-    }
-    missing_success = [name for name in required_successful_calls if name not in successful]
-    for name in missing_success:
-        evaluation.add(
-            "REQUIRED_SUCCESSFUL_TOOL_CALL_MISSING",
-            "tool_trace",
-            f"required successful tool call missing: {name}",
-        )
-    return {
-        "required_successful_tool_calls_present": not missing_success and bool(tool_trace or not required_successful_calls),
-        "required_tool_calls_present": not missing and bool(tool_trace or not required_calls),
-    }
-
-
 def _json_conditions(
     artifact: dict[str, object],
     path: Path,
@@ -197,6 +187,34 @@ def _json_conditions(
         if value is _MISSING or not _value_is_non_empty(value):
             ok = False
             evaluation.add("REQUIRED_JSON_COLLECTION_EMPTY", str(path), f"json path empty {key}: {path}")
+    return ok
+
+
+def _evidence_source_conditions(
+    artifact: dict[str, object],
+    path: Path,
+    evaluation: _FixtureEvaluation,
+) -> bool:
+    requirements = artifact.get("evidence")
+    if not isinstance(requirements, dict):
+        return True
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        evaluation.add("ARTIFACT_JSON_INVALID", str(path), f"artifact json invalid: {path}")
+        return False
+    evidence = _lookup_json_path(payload, str(requirements.get("json_path") or "evidence"))
+    if evidence is _MISSING or not _value_is_non_empty(evidence):
+        evaluation.add("EVIDENCE_MISSING", str(path), "structured evidence is missing")
+        return False
+    if not bool(requirements.get("require_source")):
+        return True
+    ok = True
+    for index, item in enumerate(_evidence_items(evidence)):
+        if _evidence_item_has_source(item):
+            continue
+        ok = False
+        evaluation.add("EVIDENCE_SOURCE_MISSING", f"{path}:evidence[{index}]", "evidence item needs source ref")
     return ok
 
 
@@ -239,11 +257,6 @@ def _required_artifacts(contract: dict[str, object]) -> list[dict[str, object]]:
     return [dict(item) for item in required] if isinstance(required, list) else []
 
 
-def _tools_contract(contract: dict[str, object]) -> dict[str, object]:
-    tools = contract.get("tools")
-    return dict(tools) if isinstance(tools, dict) else {}
-
-
 def _runtime_contract(contract: dict[str, object]) -> dict[str, object]:
     runtime = contract.get("runtime")
     return dict(runtime) if isinstance(runtime, dict) else {}
@@ -272,17 +285,59 @@ def _finding(code: str, location: str, message: str) -> dict[str, object]:
     return {"code": code, "location": location, "message": message, "severity": "hard"}
 
 
-def _tool_result(item: dict[str, object]) -> dict[str, object]:
-    result = item.get("result")
-    return dict(result) if isinstance(result, dict) else {}
-
-
 def _runtime_issue_codes(items: list[dict[str, object]]) -> set[str]:
     return {
         code
         for item in items
         if isinstance(item, dict) and (code := str(item.get("code") or "").strip())
     }
+
+
+def _artifact_path(
+    run_dir: Path,
+    artifact: dict[str, object],
+    evaluation: _FixtureEvaluation,
+) -> Path | None:
+    raw_path = str(artifact.get("path") or "").strip()
+    path = Path(raw_path)
+    root = run_dir.resolve()
+    candidate = path if path.is_absolute() else run_dir / path
+    resolved = candidate.resolve()
+    if not _is_relative_to(resolved, root):
+        evaluation.add("ARTIFACT_PATH_OUTSIDE_RUN_DIR", raw_path or str(candidate), "artifact path escapes run dir")
+        return None
+    return resolved
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _evidence_items(value: object) -> list[object]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        return [value]
+    return []
+
+
+def _evidence_item_has_source(item: object) -> bool:
+    if not isinstance(item, dict):
+        return False
+    return any(_value_is_non_empty(item.get(key)) for key in _EVIDENCE_SOURCE_KEYS)
+
+
+_EVIDENCE_SOURCE_KEYS = (
+    "artifact_ref",
+    "source",
+    "source_ref",
+    "tool_call_id",
+    "trace_ref",
+)
 
 
 _MISSING = object()

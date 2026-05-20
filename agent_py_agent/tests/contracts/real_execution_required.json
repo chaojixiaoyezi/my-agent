@@ -1,0 +1,34 @@
+{
+  "name": "real_execution_required",
+  "task_type": "side_effecting_action",
+  "artifacts": {
+    "required": [
+      {
+        "path": "report.md",
+        "min_size": 10
+      }
+    ]
+  },
+  "tools": {
+    "required_calls": [
+      "write_file",
+      "block_ip"
+    ],
+    "required_successful_calls": [
+      "write_file",
+      "block_ip"
+    ],
+    "required_real_successful_calls": [
+      "block_ip"
+    ]
+  },
+  "final_status": {
+    "allow_succeeded_only_if": [
+      "artifact_exists",
+      "artifact_non_empty",
+      "required_tool_calls_present",
+      "required_successful_tool_calls_present",
+      "required_real_tool_calls_present"
+    ]
+  }
+}

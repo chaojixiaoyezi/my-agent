@@ -17,7 +17,6 @@ _TRANSITIONS: dict[str, tuple[str, ...]] = {
         "VERIFYING",
         "BLOCKED",
         "FAILED",
-        "DONE",
         "TIMEOUT",
         "CHANNEL_ERROR",
         "CANCELLED",

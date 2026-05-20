@@ -2,36 +2,69 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agent_py_agent.agent.contracts.tool_call_policy import (
+    ToolCallPolicy,
+    validate_tool_call_policy,
+)
 from agent_py_agent.agent.tooling.spreadsheet_builder import DataWorkbookTool
 
 
 class FakeToolRunner:
-    def __init__(self, run_dir: Path, *, fixtures: dict[str, object] | None = None):
+    def __init__(
+        self,
+        run_dir: Path,
+        *,
+        fixtures: dict[str, object] | None = None,
+        policy: ToolCallPolicy | None = None,
+    ):
         self.run_dir = run_dir
         self.fixtures = fixtures or {}
+        self.policy = policy
         self.trace: list[dict[str, object]] = []
 
     def execute(self, tool: str, params: dict[str, object]) -> dict[str, object]:
-        fixture_result = self._fixture_result(tool, params)
-        if fixture_result is not None:
-            result = fixture_result
+        policy_error = self._policy_error(tool, params)
+        if policy_error is not None:
+            result = policy_error
         else:
-            handler = getattr(self, f"_tool_{tool}", None)
-            if handler is None:
-                result = {"tool": tool, "ok": False, "error_code": "TOOL_NOT_FOUND"}
-            else:
-                result = handler(params)
+            result = self._execute_allowed(tool, params)
         self.trace.append({"tool": tool, "params": dict(params), "result": dict(result)})
         return result
 
+    def _policy_error(self, tool: str, params: dict[str, object]) -> dict[str, object] | None:
+        if self.policy is None:
+            return None
+        decision = validate_tool_call_policy({"tool": tool, "args": params}, self.policy)
+        if decision.ok:
+            return None
+        return {
+            "tool": tool,
+            "ok": False,
+            "error_code": decision.error_code,
+            "findings": list(decision.findings),
+        }
+
+    def _execute_allowed(self, tool: str, params: dict[str, object]) -> dict[str, object]:
+        fixture_result = self._fixture_result(tool, params)
+        if fixture_result is not _NO_FIXTURE:
+            return _normalize_result(tool, fixture_result)
+        handler = getattr(self, f"_tool_{tool}", None)
+        if handler is None:
+            return {"tool": tool, "ok": False, "error_code": "TOOL_NOT_FOUND"}
+        return _normalize_result(tool, handler(params))
+
     def _tool_write_file(self, params: dict[str, object]) -> dict[str, object]:
-        path = self.run_dir / str(params.get("path") or "")
+        path = _resolve_run_path(self.run_dir, params.get("path"))
+        if path is None:
+            return {"tool": "write_file", "ok": False, "error_code": "PATH_OUTSIDE_RUN_DIR"}
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(str(params.get("content") or ""), encoding="utf-8")
         return {"tool": "write_file", "ok": True, "path": str(path)}
 
     def _tool_read_file(self, params: dict[str, object]) -> dict[str, object]:
-        path = self.run_dir / str(params.get("path") or "")
+        path = _resolve_run_path(self.run_dir, params.get("path"))
+        if path is None:
+            return {"tool": "read_file", "ok": False, "error_code": "PATH_OUTSIDE_RUN_DIR"}
         if not path.exists():
             return {"tool": "read_file", "ok": False, "error_code": "PATH_NOT_FOUND"}
         return {"tool": "read_file", "ok": True, "content": path.read_text(encoding="utf-8")}
@@ -62,18 +95,18 @@ class FakeToolRunner:
             "error_code": "APPROVAL_REQUIRED",
         }
 
-    def _fixture_result(self, tool: str, params: dict[str, object]) -> dict[str, object] | None:
+    def _fixture_result(self, tool: str, params: dict[str, object]) -> object:
         fixture = self.fixtures.get(tool)
         if not isinstance(fixture, dict):
-            return None
+            return _NO_FIXTURE
         for key in _fixture_lookup_keys(params):
-            value = fixture.get(key)
-            if isinstance(value, dict):
-                return {"tool": tool, **value}
+            if key in fixture:
+                value = fixture[key]
+                return {"tool": tool, **value} if isinstance(value, dict) else value
         default = fixture.get("__default__") or fixture.get("default")
         if isinstance(default, dict):
             return {"tool": tool, **default}
-        return None
+        return default if default is not None else _NO_FIXTURE
 
 
 def _fixture_lookup_keys(params: dict[str, object]) -> list[str]:
@@ -83,3 +116,24 @@ def _fixture_lookup_keys(params: dict[str, object]) -> list[str]:
         if value and value not in keys:
             keys.append(value)
     return keys
+
+
+def _normalize_result(tool: str, value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return {"tool": tool, **value}
+    return {"tool": tool, "ok": False, "error_code": "TOOL_RESULT_INVALID"}
+
+
+def _resolve_run_path(run_dir: Path, value: object) -> Path | None:
+    raw = str(value or "").strip()
+    candidate = Path(raw)
+    path = candidate if candidate.is_absolute() else run_dir / candidate
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(run_dir.resolve())
+        return resolved
+    except ValueError:
+        return None
+
+
+_NO_FIXTURE = object()

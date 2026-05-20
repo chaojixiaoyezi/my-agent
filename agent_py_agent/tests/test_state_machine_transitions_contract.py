@@ -25,14 +25,26 @@ def test_transition_contract_rejects_pending_to_done():
     assert contract.required_condition == "final_artifact_ready"
 
 
+# LLM: completion must pass through VERIFYING so runtime state cannot skip acceptance.
+# 函数用途: 验证 RUNNING 不能直接进入 DONE，确保任务完成必须先进入验收态。
+def test_transition_contract_rejects_running_directly_to_done():
+    from agent_py_agent.agent.contracts.state_machine_transitions import transition_contract
+
+    contract = transition_contract("RUNNING", "DONE")
+
+    assert contract.allowed is False
+    assert contract.reason == "disallowed_transition"
+    assert contract.required_condition == "final_artifact_ready"
+
+
 # LLM: first_invalid_transition must pinpoint the earliest broken hop in a replay sequence.
-# 函数用途: 验证序列中出现 RUNNING -> DONE -> RUNNING 这种非法回跳时，会返回第一处冲突。
+# 函数用途: 验证序列中出现 RUNNING -> DONE 这种跳过验收的迁移时，会返回第一处冲突。
 def test_first_invalid_transition_reports_earliest_invalid_hop():
     from agent_py_agent.agent.contracts.state_machine_transitions import first_invalid_transition
 
     contract = first_invalid_transition(["PLANNING", "RUNNING", "DONE", "RUNNING"])
 
     assert contract is not None
-    assert contract.from_status == "DONE"
-    assert contract.to_status == "RUNNING"
+    assert contract.from_status == "RUNNING"
+    assert contract.to_status == "DONE"
     assert contract.reason == "disallowed_transition"

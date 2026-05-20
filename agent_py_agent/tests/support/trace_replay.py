@@ -90,10 +90,14 @@ def _final_status(events: list[dict[str, object]]) -> str:
 def _tool_trace_item(event: dict[str, object]) -> dict[str, object]:
     return {
         "tool": str(event.get("tool") or ""),
+        "operation_id": str(event.get("operation_id") or ""),
         "params": dict(event.get("params")) if isinstance(event.get("params"), dict) else {},
         "result": {
             "ok": bool(event.get("ok")),
             "error_code": str(event.get("error_code") or ""),
+            "duration_ms": event.get("duration_ms"),
+            "dry_run": bool(event.get("dry_run")),
+            "mode": str(event.get("mode") or ""),
         },
     }
 

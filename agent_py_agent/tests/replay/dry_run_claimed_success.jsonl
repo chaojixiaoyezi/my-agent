@@ -1,0 +1,4 @@
+{"type":"contract_ref","path":"../contracts/real_execution_required.json"}
+{"type":"tool_result","tool":"write_file","ok":true,"error_code":"","operation_id":"op-write","duration_ms":7,"params":{"path":"report.md"}}
+{"type":"tool_result","tool":"block_ip","ok":true,"error_code":"","operation_id":"op-block","duration_ms":9,"mode":"dry_run","params":{"ip":"203.0.113.10"}}
+{"type":"final","status":"SUCCEEDED"}

@@ -1,0 +1,20 @@
+{
+  "name": "dry_run_claimed_success",
+  "trace": "dry_run_claimed_success.jsonl",
+  "setup_files": [
+    {
+      "path": "report.md",
+      "content": "Summary\nDry-run plan only\n"
+    }
+  ],
+  "expected": {
+    "contract_ok": false,
+    "blocked": false,
+    "block_reason": "",
+    "replay_error_codes": [],
+    "contract_error_codes": [
+      "REQUIRED_REAL_TOOL_CALL_MISSING",
+      "FINAL_STATUS_REJECTED"
+    ]
+  }
+}

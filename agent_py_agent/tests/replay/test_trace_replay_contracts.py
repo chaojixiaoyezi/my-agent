@@ -97,3 +97,16 @@ def test_trace_replay_rejects_invalid_state_transition_sequence(tmp_path: Path):
 
     assert result.contract_result.ok is True
     assert "STATE_TRANSITION_SEQUENCE_CONFLICT" in result.replay_error_codes
+
+
+def test_trace_replay_rejects_dry_run_claimed_as_real_success(tmp_path: Path):
+    from agent_py_agent.tests.support.trace_replay import replay_contract_trace
+
+    trace = Path(__file__).parent / "dry_run_claimed_success.jsonl"
+    (tmp_path / "report.md").write_text("Summary\nDry-run plan only\n", encoding="utf-8")
+
+    result = replay_contract_trace(trace, tmp_path)
+
+    assert result.contract_result.ok is False
+    assert "REQUIRED_REAL_TOOL_CALL_MISSING" in result.contract_result.error_codes
+    assert "FINAL_STATUS_REJECTED" in result.contract_result.error_codes

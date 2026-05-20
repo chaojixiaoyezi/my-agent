@@ -73,6 +73,67 @@ def test_fake_tool_runner_can_inject_write_failure_from_fixture(tmp_path: Path):
     assert not (tmp_path / "output.md").exists()
 
 
+def test_fake_file_tool_rejects_write_path_outside_run_dir(tmp_path: Path):
+    from agent_py_agent.tests.support.fake_tools import FakeToolRunner
+
+    runner = FakeToolRunner(tmp_path)
+
+    result = runner.execute("write_file", {"path": "../escape.md", "content": "bad"})
+
+    assert result["ok"] is False
+    assert result["error_code"] == "PATH_OUTSIDE_RUN_DIR"
+    assert not (tmp_path.parent / "escape.md").exists()
+
+
+def test_fake_file_tool_rejects_read_path_outside_run_dir(tmp_path: Path):
+    from agent_py_agent.tests.support.fake_tools import FakeToolRunner
+
+    outside = tmp_path.parent / "secret.txt"
+    outside.write_text("secret", encoding="utf-8")
+    runner = FakeToolRunner(tmp_path)
+
+    result = runner.execute("read_file", {"path": "../secret.txt"})
+
+    assert result["ok"] is False
+    assert result["error_code"] == "PATH_OUTSIDE_RUN_DIR"
+    assert result.get("content") is None
+
+
+def test_fake_tool_runner_wraps_invalid_tool_result_as_structured_error(tmp_path: Path):
+    from agent_py_agent.tests.support.fake_tools import FakeToolRunner
+
+    runner = FakeToolRunner(tmp_path, fixtures={"read_file": {"broken.txt": None}})
+
+    result = runner.execute("read_file", {"path": "broken.txt"})
+
+    assert result["ok"] is False
+    assert result["error_code"] == "TOOL_RESULT_INVALID"
+    assert runner.trace[-1]["result"]["error_code"] == "TOOL_RESULT_INVALID"
+
+
+def test_fake_tool_runner_applies_structured_tool_policy_before_execution(tmp_path: Path):
+    from agent_py_agent.agent.contracts.tool_call_policy import ToolCallPolicy
+    from agent_py_agent.tests.support.fake_tools import FakeToolRunner
+
+    runner = FakeToolRunner(
+        tmp_path,
+        policy=ToolCallPolicy(
+            available_tools=("read_file", "write_file"),
+            allowed_tools=("read_file",),
+            required_parameters={"read_file": ("path",)},
+        ),
+    )
+
+    missing_param = runner.execute("read_file", {})
+    not_allowed = runner.execute("write_file", {"path": "out.md", "content": "demo"})
+
+    assert missing_param["ok"] is False
+    assert missing_param["error_code"] == "TOOL_PARAMETER_REQUIRED"
+    assert not_allowed["ok"] is False
+    assert not_allowed["error_code"] == "TOOL_NOT_ALLOWED"
+    assert not (tmp_path / "out.md").exists()
+
+
 def _fixture(name: str) -> dict[str, object]:
     path = Path(__file__).parents[1] / "contracts" / name
     return json.loads(path.read_text(encoding="utf-8"))
