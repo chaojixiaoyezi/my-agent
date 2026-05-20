@@ -246,6 +246,48 @@ def test_real_task_acceptance_rejects_invalid_candidate_artifact(tmp_path):
     assert "ARTIFACT_CANDIDATE_PATH" not in codes
 
 
+# LLM: Accepted artifacts should not be re-blocked by stale open sessions that point to the same finished target.
+# 函数用途: 验证目标产物已经通过验收时，同目标旧 open file_write_session 不会再把真实任务卡成 runtime finding。
+def test_real_task_acceptance_ignores_open_session_for_accepted_target(tmp_path):
+    from agent_py_agent.agent.contracts.main_agent_real_task_acceptance import (
+        RealTaskAcceptanceRequest,
+        validate_real_task_artifacts,
+    )
+    from agent_py_agent.agent.tooling.spreadsheet_builder import DataWorkbookTool
+
+    workspace = tmp_path / "task"
+    DataWorkbookTool(workspace).execute(
+        {
+            "path": "outputs/github_star_growth/github_star_growth.xlsx",
+            "sheets": [
+                {"name": "summary", "rows": [{"项目名": "demo", "地址": "https://example.com"}]},
+                {"name": "details", "rows": [{"项目名": "demo", "地址": "https://example.com"}]},
+            ],
+        }
+    )
+    workbook = workspace / "outputs/github_star_growth/github_star_growth.xlsx"
+    _write_open_session_target_manifest(
+        workspace,
+        session_id="session-workbook",
+        relative_target="outputs/github_star_growth/github_star_growth.xlsx",
+        resolved_target=workbook,
+    )
+    expected = tmp_path / "expected_artifacts.json"
+    _write_candidate_expected_artifacts(expected)
+
+    report = validate_real_task_artifacts(
+        RealTaskAcceptanceRequest(
+            expected_artifacts_path=expected,
+            task_workspace=workspace,
+            report_path=tmp_path / "acceptance_report.json",
+        )
+    )
+
+    assert report.ok is True
+    assert report.runtime_findings == []
+    assert report.artifacts[0].ok is True
+
+
 # LLM: _write_candidate_expected_artifacts keeps invalid-candidate tests compact.
 # 函数用途: 写一个要求两张表和必需列的 expected_artifacts.json。
 def _write_candidate_expected_artifacts(path: Path) -> None:
@@ -426,6 +468,32 @@ def _write_open_session_manifest(task_workspace: Path, session_id: str, chunks: 
                 "status": "open",
                 "target_path": {"display": "outputs/github_star_growth/fetch.py"},
                 "chunks": chunks,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_open_session_target_manifest(
+    task_workspace: Path,
+    session_id: str,
+    relative_target: str,
+    resolved_target: Path,
+) -> Path:
+    path = task_workspace / ".agent_file_write_sessions" / session_id / "manifest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "session_id": session_id,
+                "status": "open",
+                "target_path": {
+                    "raw": relative_target,
+                    "resolved": str(resolved_target.resolve()),
+                    "display": relative_target,
+                },
+                "chunks": {"0": {"index": 0}},
             }
         ),
         encoding="utf-8",

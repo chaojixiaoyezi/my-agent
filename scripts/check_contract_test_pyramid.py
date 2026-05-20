@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -109,4 +111,40 @@ def _finding(code: str, location: str, detail: str) -> dict[str, str]:
     return {"code": code, "location": location, "detail": detail}
 
 
-__all__ = ["ContractPyramidReport", "check_contract_test_pyramid"]
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Validate contract test pyramid coverage and production contract hygiene.")
+    parser.add_argument(
+        "--repo-root",
+        default=".",
+        help="Repository root to validate. Defaults to the current working directory.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the full report as JSON.",
+    )
+    args = parser.parse_args(argv)
+    report = check_contract_test_pyramid(Path(args.repo_root).resolve())
+    payload = {
+        "ok": report.ok,
+        "error_codes": list(report.error_codes),
+        "findings": list(report.findings),
+        "reference_projects_checked": list(report.reference_projects_checked),
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif report.ok:
+        checked = ", ".join(report.reference_projects_checked)
+        print(f"contract test pyramid ok; checked references: {checked}")
+    else:
+        print("contract test pyramid failed")
+        for item in report.findings:
+            print(f"- {item['code']}: {item['location']} :: {item['detail']}")
+    return 0 if report.ok else 1
+
+
+__all__ = ["ContractPyramidReport", "check_contract_test_pyramid", "main"]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

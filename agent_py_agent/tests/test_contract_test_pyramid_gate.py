@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def test_contract_test_pyramid_gate_passes_current_repo() -> None:
-    from scripts.check_contract_test_pyramid import check_contract_test_pyramid
+    from scripts.check_contract_test_pyramid import check_contract_test_pyramid, main
 
     repo_root = Path(__file__).resolve().parents[2]
 
@@ -15,6 +15,7 @@ def test_contract_test_pyramid_gate_passes_current_repo() -> None:
     assert "openclaw-main" in report.reference_projects_checked
     assert "hermes-agent-main" in report.reference_projects_checked
     assert "codex-main" in report.reference_projects_checked
+    assert main(["--repo-root", str(repo_root), "--json"]) == 0
 
 
 def test_contract_test_pyramid_gate_rejects_production_task_specific_needles(tmp_path: Path) -> None:
