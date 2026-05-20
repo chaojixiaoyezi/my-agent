@@ -481,9 +481,9 @@
 
 ---
 
-## 9. Phase 2.5：主代理核心稳定化阶段 1-4
+## 9. Phase 2.5：主代理核心稳定化阶段 1-6
 
-这四步来自 `/Users/example/study-agent/all-agent/2.txt` 的路线收束：先把单个主代理跑硬，再扩大真实任务和子代理。
+这些阶段来自 `/Users/example/study-agent/all-agent/2.txt` 的路线收束：先把单个主代理跑硬，再扩大真实任务和子代理。
 
 参考项目对照：
 
@@ -567,7 +567,38 @@
 
 这一步不是某个工具专项逻辑，而是所有真实只读工具和 dry-run 工具共用的上线门槛。
 
-### 阶段 5：Shadow Mode 影子模式
+### 阶段 5：真实工具 dry-run 验证
+
+新增合同：
+
+- `agent_py_agent/agent/contracts/real_tool_dry_run_contract.py`
+- `agent_py_agent/tests/test_real_tool_dry_run_contract.py`
+
+这一阶段和阶段 4 的区别：
+
+- 阶段 4 检查 adapter 元数据和覆盖声明是否齐。
+- 阶段 5 要实际跑过真实工具包装层，至少证明只读工具和 dry-run 工具都经过统一工具执行器。
+
+当前本地可验证入口：
+
+- `read_file` 通过 `ToolRegistry.execute_call` 真实读取隔离 workspace 内文本文件。
+- `controlled_exec` 通过 `ToolRegistry.execute_call` 和父级 `controlled_exec_grants` 真实生成 shell dry-run plan，不执行 shell。
+
+机器合同检查：
+
+- 每个 probe 必须有 `probe_id`、`operation_id`、`tool`。
+- 每个 probe 必须记录可信 `tool_executor_ref`，例如 `tool_registry.execute_call`。
+- 每个 probe 必须记录 `result_schema_ref` 和结构化 `result.ok`。
+- `read_only` 工具只能以 `read_only` 模式出现，不能记录 `executed_actions` 或副作用 refs。
+- `mutating` / `dangerous` 工具在阶段 5 只能以 `dry_run` 模式出现，result payload 的 `mode` 也必须是 `dry_run`。
+- 副作用工具必须保留 `idempotency_key` 和 `args_hash`，方便重试、回放和去重。
+- 任何真实执行动作都会被 `REAL_TOOL_SIDE_EFFECT_EXECUTED` 阻断。
+
+这一步学习 会话运行时 的统一工具执行入口，学习 通道运行时 的工具策略元数据合并，也学习 长期助手 的执行活动记录；产品代码只保留通用 probe 合同，不写“日志平台、飞书、防火墙”等业务专项规则。
+
+外部真实工具如飞书测试机器人、真实日志查询、真实防火墙 dry-run，需要等对应环境和凭据进入隔离配置后补 live probe；它们接入时也必须走同一 `real_tool_dry_run_contract`，不能绕过统一工具执行器。
+
+### 阶段 6 预备：Shadow Mode 影子模式
 
 新增合同：
 

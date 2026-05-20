@@ -16,7 +16,22 @@
 - 用 fake tool / fake LLM / replay 把真实 LLM 失败样本落进这些合同。
 - 真环境测试只做最终验收和失败样本来源，不再作为主要开发循环。
 
-## 2026-05-21 / 主代理 Phase 2.5 阶段 5 Shadow Mode 合同
+## 2026-05-21 / 主代理 Phase 2.5 阶段 5 真实工具 dry-run 合同
+
+状态：已落地第一版
+
+摘要：
+- 纠正阶段号：Shadow Mode 属于动作 6 预备；动作 5 应该先证明真实只读 / dry-run 工具能通过统一工具执行器跑起来。
+- 新增 `real_tool_dry_run_contract`，用通用 probe 字段校验 `probe_id`、`operation_id`、`tool_executor_ref`、`result_schema_ref`、`effect`、`mode`、`result.ok`、幂等键和参数 hash。
+- Focused 测试实际跑了 `ToolRegistry.execute_call` 下的 `read_file` 只读工具和 `controlled_exec` dry-run 计划入口，不再只看 adapter readiness 声明。
+- 合同阻断 direct SDK 绕行、read-only probe 带副作用、dry-run 结果变成 real execution、缺幂等键或缺 args hash。
+- 已把 `real_tool_dry_run` 加入离线合同矩阵 gate；外部飞书 / 日志平台 / 防火墙 dry-run 以后接入时必须沿用同一个 probe 合同。
+
+后续方向：
+- 外部真实工具进入隔离环境后，补 live probe 记录，但不把业务名和业务流程写进生产合同。
+- Shadow Mode 只能建立在阶段 5 真实工具 wrapper probe 通过之后。
+
+## 2026-05-21 / 主代理 Phase 2.5 阶段 6 预备 Shadow Mode 合同
 
 状态：已落地第一版
 
@@ -27,7 +42,7 @@
 - 已把 `shadow_mode` 加入离线合同矩阵 gate，防止后续只做 dry-run 但漏掉人工对比账本。
 
 后续方向：
-- 阶段 6 可以进入 TaskTree 前置账本：先做单代理任务树和阶段节点，不急着恢复多 Agent。
+- 后续可以进入 TaskTree 前置账本：先做单代理任务树和阶段节点，不急着恢复多 Agent。
 - Shadow Mode 真实试跑产生的新偏差，要沉淀成 fake tool / fake LLM / replay 样本。
 
 ## 2026-05-21 / 主代理状态机补 waiting_reason 与 terminal_outcome

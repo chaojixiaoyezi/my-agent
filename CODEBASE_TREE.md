@@ -1021,7 +1021,8 @@ docs/
 - `agent_py_agent/agent/contracts/dry_run_mainline_contract.py`: 通用 dry-run 主线合同；校验输入、工具结果、产物 refs、证据 refs 和副作用隔离，不写具体任务专项规则。
 - `agent_py_agent/agent/contracts/live_llm_fake_tool_contract.py`: 真实 LLM + fake tools 试跑记录合同；要求保存 prompt/response/tool-trace/contract refs 和工具边界违规指标。
 - `agent_py_agent/agent/contracts/tool_adapter_readiness_contract.py`: 真实只读/dry-run 工具适配器上线前的 effect、schema、测试覆盖、审批、幂等和 mode 字段合同。
-- `agent_py_agent/agent/contracts/shadow_mode_contract.py`: Shadow Mode 影子模式合同；记录风险评分、证据、建议、dry-run、人工复核，同时禁止真实副作用执行。
+- `agent_py_agent/agent/contracts/real_tool_dry_run_contract.py`: 真实工具 dry-run probe 合同；校验 probe 必须经过可信工具执行器，read_only 不能有副作用，mutating/dangerous 只能记录 dry_run 并保留幂等键和参数 hash。
+- `agent_py_agent/agent/contracts/shadow_mode_contract.py`: Shadow Mode 影子模式合同；记录风险评分、证据、建议、dry-run、人工复核，同时禁止真实副作用执行；它是阶段 6 预备，不替代阶段 5 真实工具 wrapper probe。
 - `agent_py_agent/cli/real_e2e_commands.py`: `my-agent real-e2e` CLI；运行主代理基础矩阵，可通过 `--artifact` 验收真实模型产物，也可显式执行受控真实任务。
 - `agent_py_agent/agent/local_storage/control_plane_models.py`: 定义 agent run、agent event、task rollup、runtime query context 和任务树查询结果的数据结构，保留 `metadata` / `reserved` 给后续继承策略、共享面板和失败交接扩展。
 - `agent_py_agent/agent/local_storage/control_plane.py`: 给 LocalStore 增加控制面 API，支持 upsert run、记录事件、重建 rollup、查询 root task 树、查询子树、blocked runs、takeover candidates 和带 requester/scope 的 runtime query；`takeover_candidates` 覆盖 BLOCKED / FAILED / ERROR / TIMEOUT，避免超时孙代理漏出接管视图。
