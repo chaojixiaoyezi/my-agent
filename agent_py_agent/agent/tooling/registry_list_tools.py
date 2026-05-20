@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..contracts.error_taxonomy import tool_failure_taxonomy
+from ..contracts.tool_manifest_contract import tool_manifest_payload
 from .models import BaseTool, ToolExecutionResult, ToolSpec
 
 
@@ -38,28 +38,9 @@ class ListToolsTool(BaseTool):
     # 函数用途: 返回 name/category/parameters/description 等结构化工具事实。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         specs = self.registry.specs(include_orchestration=True)
-        payload = {
-            "tool_failure_taxonomy": tool_failure_taxonomy(),
-            "tools": [_tool_manifest_item(spec) for spec in specs],
-        }
+        payload = tool_manifest_payload(specs, owner_type="main_agent")
+        payload["tool_failure_taxonomy"] = payload["failure_taxonomy"]
         return ToolExecutionResult("list_tools", True, json.dumps(payload, ensure_ascii=False))
-
-
-# LLM: _tool_manifest_item keeps list_tools output compact and stable.
-# 函数用途: 将 ToolSpec 转为模型可读但机器结构化的清单项。
-def _tool_manifest_item(spec: ToolSpec) -> dict[str, object]:
-    return {
-        "name": spec.name,
-        "category": spec.category,
-        "description": spec.description,
-        "parameters": list(spec.parameters.keys()),
-        "parameter_details": dict(spec.parameter_details),
-        "examples": list(spec.examples[:2]),
-        "visible_in_context": True,
-        "executable_in_context": True,
-        "permission_mode": "workspace_bounded",
-        "orchestration_tool": spec.category == "orchestration",
-    }
 
 
 __all__ = ["ListToolsTool"]

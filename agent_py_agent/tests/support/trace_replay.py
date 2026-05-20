@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
+from agent_py_agent.agent.contracts.state_machine_transitions import first_invalid_transition
+
 from .contract_fixture_runner import ContractFixtureResult, FixtureRunFacts, verify_contract_fixture
 
 
@@ -122,6 +124,8 @@ def _replay_error_codes(
             errors.append("CLOSEOUT_SNAPSHOT_FINAL_CONFLICT")
         if facts.acceptance_reports and not bool(facts.acceptance_reports[-1].get("ok")):
             errors.append("ACCEPTANCE_REPORT_FINAL_CONFLICT")
+    if _has_invalid_transition(facts.state_snapshots):
+        errors.append("STATE_TRANSITION_SEQUENCE_CONFLICT")
     return tuple(errors)
 
 
@@ -148,6 +152,11 @@ def _replay_facts(events: list[dict[str, object]]) -> _ReplayEventFacts:
         closeout_snapshots=tuple(event for event in events if event.get("type") == "closeout_snapshot"),
         acceptance_reports=tuple(event for event in events if event.get("type") == "acceptance_report"),
     )
+
+
+def _has_invalid_transition(state_snapshots: tuple[dict[str, object], ...]) -> bool:
+    statuses = [item.get("status") for item in state_snapshots]
+    return first_invalid_transition(statuses) is not None
 
 
 def _tool_failure_key(event: dict[str, object]) -> str:

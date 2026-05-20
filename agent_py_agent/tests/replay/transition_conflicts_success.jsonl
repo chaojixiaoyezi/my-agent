@@ -1,0 +1,8 @@
+{"type":"contract_ref","path":"../contracts/simple_file_summary.json"}
+{"type":"tool_result","tool":"read_file","ok":true,"params":{"path":"input.txt"}}
+{"type":"tool_result","tool":"write_file","ok":true,"params":{"path":"output.md"}}
+{"type":"state_snapshot","status":"PLANNING"}
+{"type":"state_snapshot","status":"RUNNING"}
+{"type":"state_snapshot","status":"DONE"}
+{"type":"state_snapshot","status":"RUNNING"}
+{"type":"final","status":"SUCCEEDED"}

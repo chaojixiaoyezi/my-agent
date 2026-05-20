@@ -1,0 +1,20 @@
+{
+  "name": "builder_not_called_success",
+  "trace": "builder_not_called_success.jsonl",
+  "setup_files": [
+    {
+      "path": "source_data.json",
+      "content": "{\"sheets\":[{\"name\":\"Week01\",\"rows\":[{\"repo\":\"demo\",\"stars\":123}]}]}"
+    }
+  ],
+  "expected": {
+    "contract_ok": false,
+    "blocked": false,
+    "block_reason": "",
+    "replay_error_codes": [],
+    "contract_error_codes": [
+      "REQUIRED_SUCCESSFUL_TOOL_CALL_MISSING",
+      "FINAL_STATUS_REJECTED"
+    ]
+  }
+}

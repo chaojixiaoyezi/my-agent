@@ -82,3 +82,18 @@ def test_trace_replay_rejects_success_conflicting_with_closeout_snapshot(tmp_pat
     assert result.contract_result.ok is True
     assert "CLOSEOUT_SNAPSHOT_FINAL_CONFLICT" in result.replay_error_codes
     assert result.closeout_snapshots[-1]["ok"] is False
+
+
+def test_trace_replay_rejects_invalid_state_transition_sequence(tmp_path: Path):
+    from agent_py_agent.tests.support.trace_replay import replay_contract_trace
+
+    trace = Path(__file__).parent / "transition_conflicts_success.jsonl"
+    (tmp_path / "output.md").write_text(
+        "## Summary\nDone\n\n## Checked Files\n- input.txt\n",
+        encoding="utf-8",
+    )
+
+    result = replay_contract_trace(trace, tmp_path)
+
+    assert result.contract_result.ok is True
+    assert "STATE_TRANSITION_SEQUENCE_CONFLICT" in result.replay_error_codes

@@ -2038,3 +2038,14 @@ def example(...):
 - 这次拆分没有引入专项合同；所有新增 helper 都只读结构化 artifact、staging_contract、recovery finding 和 reconciliation groups。没有从任务文案或 stdout 摘要里反推机器事实。
 - 验证链路：focused tests 覆盖了 staging、delivery prompting、bootstrap guard、delivery closeout；`ruff`、`check_doc_sync`、`check_code_size --baseline`、`git diff --check` 也一起过了。
 - 结果：被这次 touched 的 execution-files soft 项已消掉，`delivery_contract_prompting.py` 的 touched-file high-risk 也通过模块拆分收掉。仓库仍有历史 `main_agent_delivery_closeout.py` 软项，后续继续在 closeout/recovery 这层做通用拆分。
+
+## 2026-05-21 Main-agent phases A/B/C completed
+
+状态：已落地，已验证
+
+摘要：
+- 阶段 A（统一状态机）完成：新增 `state_machine_transitions.py`，把允许状态流向、迁移条件和非法状态序列检查做成共享机器合同。`trace_replay.py` 现在会把非法 `state_snapshot` 序列标成 `STATE_TRANSITION_SEQUENCE_CONFLICT`。
+- 阶段 B（工具与错误合同）完成：新增 `tool_manifest_contract.py`，统一输出 `visible_tools`、`executable_tools`、`permission_mode`、`failure_taxonomy` 和 `failure_contracts`。主代理 context bundle 和 `list_tools` 已改成共用这份 payload。
+- 阶段 C（Replay 正式化）完成：新增 declarative replay specs `agent_py_agent/tests/replay/specs/*.json`、共享 runner `replay_case_runner.py` 和 gate 脚本 `scripts/check_replay_contracts.py`。Replay 不再只是零散单测，而是可以批量执行、JSON 汇总和单独验收的固定资产。
+- 验证链路：focused tests 覆盖状态机迁移、tool manifest、context bundle、list_tools、replay trace、replay case runner 和 replay gate；随后全量 fast suite、`ruff check agent_py_agent scripts`、`check_doc_sync`、`check_code_size --mode strict --baseline`、`git diff --check` 也全部通过。
+- 下一步：继续拆 `main_agent_delivery_closeout.py` 的历史 soft/high-risk，把 recovery action 组装和 closeout 判定进一步拆成共享模块；真实复杂任务仍放在后面统一验收，不回到边跑边改。

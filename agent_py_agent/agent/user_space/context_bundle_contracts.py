@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ..contracts.error_taxonomy import tool_failure_taxonomy
+from ..contracts.tool_manifest_contract import tool_manifest_payload
 
 MAIN_CONTEXT_BUNDLE_PROMPT_MAX_CHARS = 1600
 MAIN_CONTEXT_BUNDLE_REQUIRED_FIELDS = [
@@ -94,20 +94,15 @@ def _run_scope(request: Any) -> dict[str, Any]:
 # LLM: _tool_manifest separates visible tools from executable tools and records failure taxonomy.
 # 函数用途: 给恢复/接管方明确工具可见范围、实际可执行范围、权限模式和常见失败分类。
 def _tool_manifest(request: Any) -> dict[str, Any]:
-    specs = [_tool_spec_payload(item) for item in _sequence(getattr(request, "tool_specs", ()))]
-    spec_names = [item["name"] for item in specs if item["name"]]
-    allowed = _string_list(getattr(request, "allowed_tools", ()))
-    visible = allowed or spec_names
-    executable = [name for name in visible if not spec_names or name in spec_names]
-    return {
-        "visible_tools": visible,
-        "executable_tools": executable,
-        "permission_mode": "same_as_root_agent" if _owner_type(request) == "main_agent" else "owner_scoped",
-        "granted_capabilities": _string_list(getattr(request, "granted_capabilities", ())),
-        "tool_specs": specs,
-        "failure_taxonomy": tool_failure_taxonomy(),
-        "reserved": {},
-    }
+    payload = tool_manifest_payload(
+        list(_sequence(getattr(request, "tool_specs", ()))),
+        allowed_tools=_string_list(getattr(request, "allowed_tools", ())),
+        granted_capabilities=_string_list(getattr(request, "granted_capabilities", ())),
+        owner_type=_owner_type(request),
+    )
+    payload["tool_specs"] = payload["tools"]
+    payload["reserved"] = {}
+    return payload
 
 
 # LLM: _artifact_refs gives main context bundles a refs-first artifact surface.
@@ -209,20 +204,6 @@ def _task_workspace_refs(home_paths: Any | None) -> dict[str, str]:
     if home_paths is None:
         return {}
     return {"workspace_tasks_root": str(Path(home_paths.workspace_tasks_dir).resolve())}
-
-
-# LLM: _tool_spec_payload trims full tool specs to stable machine fields for bundle JSON.
-# 函数用途: 保存工具名、类别和参数名，不复制完整工具手册。
-def _tool_spec_payload(value: object) -> dict[str, Any]:
-    if isinstance(value, dict):
-        name = _text(value.get("name"))
-        category = _text(value.get("category"))
-        parameters = _dict(value.get("parameters"))
-    else:
-        name = _text(getattr(value, "name", ""))
-        category = _text(getattr(value, "category", ""))
-        parameters = _dict(getattr(value, "parameters", {}))
-    return {"name": name, "category": category, "parameters": sorted(str(key) for key in parameters), "reserved": {}}
 
 
 # LLM: _exists_check returns diagnostic records instead of raising on missing paths.

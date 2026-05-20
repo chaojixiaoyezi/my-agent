@@ -35,3 +35,5 @@ def test_list_tools_returns_runtime_tool_manifest(tmp_path: Path) -> None:
     list_tools = next(item for item in payload["tools"] if item["name"] == "list_tools")
     assert list_tools["visible_in_context"] is True
     assert list_tools["executable_in_context"] is True
+    failure_contracts = {item["code"]: item for item in payload["failure_contracts"]}
+    assert failure_contracts["TOOL_TIMEOUT"]["recommended_action"] == "retry_with_smaller_scope_or_longer_timeout"

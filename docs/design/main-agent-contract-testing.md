@@ -310,6 +310,10 @@
 
 ### 第三阶段：统一状态机
 
+当前状态：
+
+- 已完成（2026-05-21）
+
 目标：
 
 - 主代理生命周期统一到一套结构化状态机
@@ -330,8 +334,14 @@
 
 - 每个状态迁移都有结构化条件
 - 不能靠自然语言文本决定关键状态
+- `state_machine_transitions.py` 提供共享状态迁移合同
+- replay 会检查 `state_snapshot` 序列是否合法
 
 ### 第四阶段：工具与错误合同
+
+当前状态：
+
+- 已完成（2026-05-21）
 
 目标：
 
@@ -353,8 +363,14 @@
 
 - 系统知道失败后该重试、回退、阻塞还是等待
 - 不靠 prompt 文案兜底
+- `tool_manifest_contract.py` 统一输出 visible/executable tools、failure taxonomy 和 failure contracts
+- context bundle 与 `list_tools` 使用同一份共享 tool manifest payload
 
 ### 第五阶段：Replay 正式化
+
+当前状态：
+
+- 已完成（2026-05-21）
 
 目标：
 
@@ -376,6 +392,8 @@
 
 - 真实环境出现的新失败，24 小时内要变成 replay case
 - 修复后 replay 必过，再上真实环境
+- `tests/replay/specs/*.json` 成为 declarative replay case
+- `scripts/check_replay_contracts.py` 成为 replay gate
 
 ---
 

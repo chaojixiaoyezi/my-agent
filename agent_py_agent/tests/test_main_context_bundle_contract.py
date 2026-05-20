@@ -57,6 +57,9 @@ def test_main_context_bundle_contains_contract_surfaces_and_self_check(tmp_path:
     assert payload["tool_manifest"]["visible_tools"] == ["read_file", "write_file"]
     assert payload["tool_manifest"]["executable_tools"] == ["read_file", "write_file"]
     assert "WRITE_FORBIDDEN" in payload["tool_manifest"]["failure_taxonomy"]
+    failure_contracts = {item["code"]: item for item in payload["tool_manifest"]["failure_contracts"]}
+    assert failure_contracts["WRITE_FORBIDDEN"]["recommended_action"] == "request_permission_or_choose_allowed_root"
+    assert payload["tool_manifest"]["tool_specs"][0]["visible_in_context"] is True
     assert payload["artifact_refs"]["items"][0]["ref"].endswith("outputs/index.html")
     assert payload["acceptance_contract"]["items"] == ["有登录", "有购买"]
     assert payload["acceptance_contract"]["constraints"] == ["单文件 HTML"]

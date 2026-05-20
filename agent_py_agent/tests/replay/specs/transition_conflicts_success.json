@@ -1,0 +1,19 @@
+{
+  "name": "transition_conflicts_success",
+  "trace": "transition_conflicts_success.jsonl",
+  "setup_files": [
+    {
+      "path": "output.md",
+      "content": "## Summary\nDone\n\n## Checked Files\n- input.txt\n"
+    }
+  ],
+  "expected": {
+    "contract_ok": true,
+    "blocked": false,
+    "block_reason": "",
+    "replay_error_codes": [
+      "STATE_TRANSITION_SEQUENCE_CONFLICT"
+    ],
+    "contract_error_codes": []
+  }
+}
