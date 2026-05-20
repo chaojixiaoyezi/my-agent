@@ -1,0 +1,32 @@
+{
+  "name": "tool_failed_cannot_complete",
+  "task_type": "single_file_artifact",
+  "artifacts": {
+    "required": [
+      {
+        "path": "output.md",
+        "min_size": 20,
+        "required_sections": [
+          "Summary"
+        ]
+      }
+    ]
+  },
+  "tools": {
+    "required_calls": [
+      "write_file"
+    ],
+    "required_successful_calls": [
+      "write_file"
+    ]
+  },
+  "final_status": {
+    "allow_succeeded_only_if": [
+      "artifact_exists",
+      "artifact_non_empty",
+      "required_sections_present",
+      "required_tool_calls_present",
+      "required_successful_tool_calls_present"
+    ]
+  }
+}

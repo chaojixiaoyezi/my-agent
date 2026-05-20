@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
-from .contract_fixture_runner import ContractFixtureResult, verify_contract_fixture
+from .contract_fixture_runner import ContractFixtureResult, FixtureRunFacts, verify_contract_fixture
 
 
 @dataclass(frozen=True)
@@ -15,24 +15,36 @@ class TraceReplayResult:
     block_reason: str
     contract_result: ContractFixtureResult
     replay_error_codes: tuple[str, ...] = ()
+    runtime_issues: tuple[dict[str, object], ...] = ()
     state_snapshots: tuple[dict[str, object], ...] = ()
+    closeout_snapshots: tuple[dict[str, object], ...] = ()
     acceptance_reports: tuple[dict[str, object], ...] = ()
+
+
+@dataclass(frozen=True)
+class _ReplayEventFacts:
+    runtime_issues: tuple[dict[str, object], ...]
+    state_snapshots: tuple[dict[str, object], ...]
+    closeout_snapshots: tuple[dict[str, object], ...]
+    acceptance_reports: tuple[dict[str, object], ...]
 
 
 def replay_contract_trace(trace_path: Path, run_dir: Path) -> TraceReplayResult:
     events = _events(trace_path)
     contract = _contract(events, trace_path.parent)
     tool_trace = [event for event in events if event.get("type") == "tool_result"]
-    state_snapshots = tuple(event for event in events if event.get("type") == "state_snapshot")
-    acceptance_reports = tuple(event for event in events if event.get("type") == "acceptance_report")
+    replay_facts = _replay_facts(events)
     final_status = _final_status(events)
     block_reason = _repeated_failure_block_reason(tool_trace)
-    replay_errors = _replay_error_codes(final_status, state_snapshots, acceptance_reports)
+    replay_errors = _replay_error_codes(final_status, replay_facts)
     contract_result = verify_contract_fixture(
         run_dir,
         contract,
-        tool_trace=[_tool_trace_item(event) for event in tool_trace],
-        final_status=final_status,
+        FixtureRunFacts(
+            tool_trace=tuple(_tool_trace_item(event) for event in tool_trace),
+            final_status=final_status,
+            runtime_issues=replay_facts.runtime_issues,
+        ),
     )
     return TraceReplayResult(
         final_status=final_status,
@@ -40,8 +52,10 @@ def replay_contract_trace(trace_path: Path, run_dir: Path) -> TraceReplayResult:
         block_reason=block_reason,
         contract_result=contract_result,
         replay_error_codes=replay_errors,
-        state_snapshots=state_snapshots,
-        acceptance_reports=acceptance_reports,
+        runtime_issues=replay_facts.runtime_issues,
+        state_snapshots=replay_facts.state_snapshots,
+        closeout_snapshots=replay_facts.closeout_snapshots,
+        acceptance_reports=replay_facts.acceptance_reports,
     )
 
 
@@ -96,14 +110,17 @@ def _repeated_failure_block_reason(tool_trace: list[dict[str, object]]) -> str:
 
 def _replay_error_codes(
     final_status: str,
-    state_snapshots: tuple[dict[str, object], ...],
-    acceptance_reports: tuple[dict[str, object], ...],
+    facts: _ReplayEventFacts,
 ) -> tuple[str, ...]:
     errors: list[str] = []
     if str(final_status).upper() == "SUCCEEDED":
-        if _last_status(state_snapshots) in {"BLOCKED", "FAILED"}:
+        if _has_blocking_runtime_issue(facts.runtime_issues):
+            errors.append("RUNTIME_ISSUE_FINAL_CONFLICT")
+        if _last_status(facts.state_snapshots) in {"BLOCKED", "FAILED"}:
             errors.append("STATE_SNAPSHOT_FINAL_CONFLICT")
-        if acceptance_reports and not bool(acceptance_reports[-1].get("ok")):
+        if facts.closeout_snapshots and not bool(facts.closeout_snapshots[-1].get("ok")):
+            errors.append("CLOSEOUT_SNAPSHOT_FINAL_CONFLICT")
+        if facts.acceptance_reports and not bool(facts.acceptance_reports[-1].get("ok")):
             errors.append("ACCEPTANCE_REPORT_FINAL_CONFLICT")
     return tuple(errors)
 
@@ -112,6 +129,25 @@ def _last_status(state_snapshots: tuple[dict[str, object], ...]) -> str:
     if not state_snapshots:
         return ""
     return str(state_snapshots[-1].get("status") or "").upper()
+
+
+def _has_blocking_runtime_issue(runtime_issues: tuple[dict[str, object], ...]) -> bool:
+    for item in runtime_issues:
+        if bool(item.get("blocks_success")):
+            return True
+        severity = str(item.get("severity") or "").strip().lower()
+        if severity in {"hard", "error", "fatal"}:
+            return True
+    return False
+
+
+def _replay_facts(events: list[dict[str, object]]) -> _ReplayEventFacts:
+    return _ReplayEventFacts(
+        runtime_issues=tuple(event for event in events if event.get("type") == "runtime_issue"),
+        state_snapshots=tuple(event for event in events if event.get("type") == "state_snapshot"),
+        closeout_snapshots=tuple(event for event in events if event.get("type") == "closeout_snapshot"),
+        acceptance_reports=tuple(event for event in events if event.get("type") == "acceptance_report"),
+    )
 
 
 def _tool_failure_key(event: dict[str, object]) -> str:

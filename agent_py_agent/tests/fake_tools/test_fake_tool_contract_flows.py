@@ -5,7 +5,10 @@ from pathlib import Path
 
 
 def test_failed_write_tool_cannot_be_counted_as_successful_artifact_work(tmp_path: Path):
-    from agent_py_agent.tests.support.contract_fixture_runner import verify_contract_fixture
+    from agent_py_agent.tests.support.contract_fixture_runner import (
+        FixtureRunFacts,
+        verify_contract_fixture,
+    )
 
     contract = _fixture("missing_artifact_should_fail.json")
     tool_trace = [
@@ -16,7 +19,11 @@ def test_failed_write_tool_cannot_be_counted_as_successful_artifact_work(tmp_pat
         }
     ]
 
-    result = verify_contract_fixture(tmp_path, contract, tool_trace=tool_trace, final_status="SUCCEEDED")
+    result = verify_contract_fixture(
+        tmp_path,
+        contract,
+        FixtureRunFacts(tool_trace=tuple(tool_trace), final_status="SUCCEEDED"),
+    )
 
     assert result.ok is False
     assert "ARTIFACT_MISSING" in result.error_codes
@@ -49,6 +56,21 @@ def test_fake_tool_runner_covers_fetch_workbook_dangerous_and_timeout(tmp_path: 
     assert (tmp_path / "report.xlsx").exists()
     assert dangerous["ok"] is False
     assert dangerous["error_code"] == "APPROVAL_REQUIRED"
+
+
+def test_fake_tool_runner_can_inject_write_failure_from_fixture(tmp_path: Path):
+    from agent_py_agent.tests.support.fake_tools import FakeToolRunner
+
+    runner = FakeToolRunner(
+        tmp_path,
+        fixtures={"write_file": {"output.md": {"ok": False, "error_code": "PATH_PERMISSION_DENIED"}}},
+    )
+
+    result = runner.execute("write_file", {"path": "output.md", "content": "demo"})
+
+    assert result["ok"] is False
+    assert result["error_code"] == "PATH_PERMISSION_DENIED"
+    assert not (tmp_path / "output.md").exists()
 
 
 def _fixture(name: str) -> dict[str, object]:

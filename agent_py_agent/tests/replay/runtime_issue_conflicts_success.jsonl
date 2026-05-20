@@ -1,0 +1,3 @@
+{"type":"contract_ref","path":"../contracts/bootstrap_materialization_required.json"}
+{"type":"runtime_issue","code":"BOOTSTRAP_MATERIALIZATION_REQUIRED","severity":"hard","blocks_success":true}
+{"type":"final","status":"SUCCEEDED"}

@@ -12,11 +12,15 @@ class FakeToolRunner:
         self.trace: list[dict[str, object]] = []
 
     def execute(self, tool: str, params: dict[str, object]) -> dict[str, object]:
-        handler = getattr(self, f"_tool_{tool}", None)
-        if handler is None:
-            result = {"tool": tool, "ok": False, "error_code": "TOOL_NOT_FOUND"}
+        fixture_result = self._fixture_result(tool, params)
+        if fixture_result is not None:
+            result = fixture_result
         else:
-            result = handler(params)
+            handler = getattr(self, f"_tool_{tool}", None)
+            if handler is None:
+                result = {"tool": tool, "ok": False, "error_code": "TOOL_NOT_FOUND"}
+            else:
+                result = handler(params)
         self.trace.append({"tool": tool, "params": dict(params), "result": dict(result)})
         return result
 
@@ -57,3 +61,25 @@ class FakeToolRunner:
             "command": str(params.get("command") or ""),
             "error_code": "APPROVAL_REQUIRED",
         }
+
+    def _fixture_result(self, tool: str, params: dict[str, object]) -> dict[str, object] | None:
+        fixture = self.fixtures.get(tool)
+        if not isinstance(fixture, dict):
+            return None
+        for key in _fixture_lookup_keys(params):
+            value = fixture.get(key)
+            if isinstance(value, dict):
+                return {"tool": tool, **value}
+        default = fixture.get("__default__") or fixture.get("default")
+        if isinstance(default, dict):
+            return {"tool": tool, **default}
+        return None
+
+
+def _fixture_lookup_keys(params: dict[str, object]) -> list[str]:
+    keys: list[str] = []
+    for field in ("path", "source_json_path", "url", "command"):
+        value = str(params.get(field) or "").strip()
+        if value and value not in keys:
+            keys.append(value)
+    return keys

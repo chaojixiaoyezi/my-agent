@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
-from .contract_fixture_runner import ContractFixtureResult, verify_contract_fixture
+from .contract_fixture_runner import ContractFixtureResult, FixtureRunFacts, verify_contract_fixture
 from .fake_tools import FakeToolRunner
 
 
@@ -16,6 +16,21 @@ class FakeLLMRunResult:
     contract_result: ContractFixtureResult
     blocked: bool = False
     block_reason: str = ""
+    runtime_issues: tuple[dict[str, object], ...] = ()
+    state_snapshots: tuple[dict[str, object], ...] = ()
+    closeout_snapshots: tuple[dict[str, object], ...] = ()
+    acceptance_reports: tuple[dict[str, object], ...] = ()
+
+
+@dataclass
+class _FakeLLMPlayback:
+    final_status: str = "UNKNOWN"
+    block_reason: str = ""
+    failure_counts: dict[str, int] | None = None
+    runtime_issues: list[dict[str, object]] | None = None
+    state_snapshots: list[dict[str, object]] | None = None
+    closeout_snapshots: list[dict[str, object]] | None = None
+    acceptance_reports: list[dict[str, object]] | None = None
 
 
 class FakeLLMRunner:
@@ -29,29 +44,30 @@ class FakeLLMRunner:
         return cls(fixture, root)
 
     def run(self, run_dir: Path) -> FakeLLMRunResult:
-        tools = FakeToolRunner(run_dir)
-        final_status = "UNKNOWN"
-        failure_counts: dict[str, int] = {}
-        block_reason = ""
+        tools = FakeToolRunner(run_dir, fixtures=_dict(self.fixture.get("tool_fixtures")))
+        playback = _playback()
         for step in self._steps():
-            step_type = str(step.get("type") or "")
-            if step_type == "tool_call":
-                result = tools.execute(str(step.get("tool") or ""), _dict(step.get("params")))
-                if not bool(result.get("ok")):
-                    key = _failure_key(tools.trace[-1])
-                    failure_counts[key] = failure_counts.get(key, 0) + 1
-                    if failure_counts[key] >= 3 and not block_reason:
-                        block_reason = "TOOL_REPEATED_EXACT_FAILURE"
-            elif step_type == "final":
-                final_status = str(step.get("status") or "UNKNOWN")
+            _apply_step(step, tools, playback)
         contract = self._contract()
-        result = verify_contract_fixture(run_dir, contract, tool_trace=tools.trace, final_status=final_status)
+        result = verify_contract_fixture(
+            run_dir,
+            contract,
+            FixtureRunFacts(
+                tool_trace=tuple(tools.trace),
+                final_status=playback.final_status,
+                runtime_issues=tuple(playback.runtime_issues or []),
+            ),
+        )
         return FakeLLMRunResult(
-            final_status=final_status,
+            final_status=playback.final_status,
             tool_trace=tuple(tools.trace),
             contract_result=result,
-            blocked=bool(block_reason),
-            block_reason=block_reason,
+            blocked=bool(playback.block_reason),
+            block_reason=playback.block_reason,
+            runtime_issues=tuple(playback.runtime_issues or []),
+            state_snapshots=tuple(playback.state_snapshots or []),
+            closeout_snapshots=tuple(playback.closeout_snapshots or []),
+            acceptance_reports=tuple(playback.acceptance_reports or []),
         )
 
     def _steps(self) -> list[dict[str, object]]:
@@ -82,3 +98,51 @@ def _result_error_code(trace_item: dict[str, object]) -> str:
     if not isinstance(result, dict):
         return ""
     return str(result.get("error_code") or "")
+
+
+def _playback() -> _FakeLLMPlayback:
+    return _FakeLLMPlayback(
+        failure_counts={},
+        runtime_issues=[],
+        state_snapshots=[],
+        closeout_snapshots=[],
+        acceptance_reports=[],
+    )
+
+
+def _apply_step(step: dict[str, object], tools: FakeToolRunner, playback: _FakeLLMPlayback) -> None:
+    step_type = str(step.get("type") or "")
+    if step_type == "tool_call":
+        _apply_tool_call(step, tools, playback)
+        return
+    if step_type == "final":
+        playback.final_status = str(step.get("status") or "UNKNOWN")
+        return
+    target = _step_bucket(playback, step_type)
+    if target is not None:
+        target.append(dict(step))
+
+
+def _apply_tool_call(step: dict[str, object], tools: FakeToolRunner, playback: _FakeLLMPlayback) -> None:
+    result = tools.execute(str(step.get("tool") or ""), _dict(step.get("params")))
+    if bool(result.get("ok")):
+        return
+    key = _failure_key(tools.trace[-1])
+    counts = playback.failure_counts
+    if counts is None:
+        counts = {}
+        playback.failure_counts = counts
+    counts[key] = counts.get(key, 0) + 1
+    if counts[key] >= 3 and not playback.block_reason:
+        playback.block_reason = "TOOL_REPEATED_EXACT_FAILURE"
+
+
+def _step_bucket(playback: _FakeLLMPlayback, step_type: str) -> list[dict[str, object]] | None:
+    buckets = {
+        "acceptance_report": playback.acceptance_reports,
+        "closeout_snapshot": playback.closeout_snapshots,
+        "runtime_issue": playback.runtime_issues,
+        "state_snapshot": playback.state_snapshots,
+    }
+    bucket = buckets.get(step_type)
+    return bucket if isinstance(bucket, list) else None

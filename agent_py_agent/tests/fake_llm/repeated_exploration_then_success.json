@@ -1,0 +1,30 @@
+{
+  "contract_ref": "../contracts/repeated_exploration_should_redirect_or_block.json",
+  "model_steps": [
+    {
+      "type": "tool_call",
+      "tool": "fetch_url",
+      "params": {
+        "url": "https://example.com/source"
+      }
+    },
+    {
+      "type": "runtime_issue",
+      "code": "NO_PROGRESS",
+      "severity": "hard",
+      "blocks_success": true
+    },
+    {
+      "type": "closeout_snapshot",
+      "ok": false,
+      "delivery_progress": {
+        "failure_fingerprint": "same",
+        "work_progress_fingerprint": "same"
+      }
+    },
+    {
+      "type": "final",
+      "status": "SUCCEEDED"
+    }
+  ]
+}

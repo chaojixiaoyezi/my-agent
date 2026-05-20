@@ -36,20 +36,10 @@ class RuntimeCardValidation:
 # 函数用途: 校验一组运行时卡片是否满足长任务恢复、通知路由和 worker 归属的最小合同。
 def validate_runtime_card_set(cards: list[RuntimeCard]) -> RuntimeCardValidation:
     findings: list[dict[str, str]] = []
-    route_task_ids = {
-        card.task_id
-        for card in cards
-        if _kind(card) == "NOTIFICATION_ROUTE" and _status(card) in {"ACTIVE", "PENDING"} and card.task_id
-    }
+    route_task_ids = _route_task_ids(cards)
     for card in cards:
         _validate_common(card, findings)
-        kind = _kind(card)
-        if kind == "TASK":
-            _validate_task(card, route_task_ids, findings)
-        elif kind == "WORKER":
-            _validate_worker(card, findings)
-        elif kind == "MESSAGE":
-            _validate_message(card, findings)
+        _apply_kind_validation(card, route_task_ids, findings)
     return RuntimeCardValidation(
         ok=not findings,
         error_codes=tuple(dict.fromkeys(item["code"] for item in findings)),
@@ -79,14 +69,14 @@ def _validate_task(card: RuntimeCard, route_task_ids: set[str], findings: list[d
 
 # LLM: _validate_worker ensures each worker card is anchored to a task before runtime dispatch.
 # 函数用途: 检查 worker 是否绑定 task_id，避免游离执行者无法被任务账本接管。
-def _validate_worker(card: RuntimeCard, findings: list[dict[str, str]]) -> None:
+def _validate_worker(card: RuntimeCard, route_task_ids: set[str], findings: list[dict[str, str]]) -> None:
     if not card.task_id:
         findings.append(_finding("WORKER_TASK_ID_MISSING", card.card_id, "worker must be attached to a task"))
 
 
 # LLM: _validate_message keeps user-facing messages routable without reading free-form chat text.
 # 函数用途: 校验发给用户的消息卡片必须带 session_id 或 notification_route_id。
-def _validate_message(card: RuntimeCard, findings: list[dict[str, str]]) -> None:
+def _validate_message(card: RuntimeCard, route_task_ids: set[str], findings: list[dict[str, str]]) -> None:
     direction = str(card.refs.get("direction") or "").upper()
     if direction in MESSAGE_TO_USER_DIRECTIONS and not card.session_id and not card.refs.get("notification_route_id"):
         findings.append(_finding("MESSAGE_ROUTE_MISSING", card.card_id, "message to user needs session or route"))
@@ -108,6 +98,32 @@ def _status(card: RuntimeCard) -> str:
 # 函数用途: 统一生成运行时卡片校验 finding，保持 code/location/detail 风格稳定。
 def _finding(code: str, card_id: str, detail: str) -> dict[str, str]:
     return {"code": code, "card_id": card_id, "detail": detail}
+
+
+# LLM: _route_task_ids indexes active notification routes so long-task checks can stay machine-driven.
+# 函数用途: 收集当前有效通知路由关联的 task_id，供长任务校验判断是否具备可用通知出口。
+def _route_task_ids(cards: list[RuntimeCard]) -> set[str]:
+    return {
+        card.task_id
+        for card in cards
+        if _kind(card) == "NOTIFICATION_ROUTE" and _status(card) in {"ACTIVE", "PENDING"} and card.task_id
+    }
+
+
+# LLM: _apply_kind_validation dispatches each card to its kind-specific validator without free-form branching elsewhere.
+# 函数用途: 按卡片 kind 分派到任务、worker 或消息校验器，保持公共入口简洁且便于后续扩展。
+def _apply_kind_validation(
+    card: RuntimeCard,
+    route_task_ids: set[str],
+    findings: list[dict[str, str]],
+) -> None:
+    validator = {
+        "TASK": _validate_task,
+        "WORKER": _validate_worker,
+        "MESSAGE": _validate_message,
+    }.get(_kind(card))
+    if validator is not None:
+        validator(card, route_task_ids, findings)
 
 
 __all__ = ["RuntimeCard", "RuntimeCardValidation", "validate_runtime_card_set"]

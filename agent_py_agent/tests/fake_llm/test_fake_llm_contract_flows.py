@@ -89,6 +89,54 @@ def test_fake_llm_missing_final_report_is_rejected(tmp_path: Path):
     assert "FINAL_STATUS_MISSING" in result.contract_result.error_codes
 
 
+def test_fake_llm_failed_write_cannot_be_claimed_as_success(tmp_path: Path):
+    from agent_py_agent.tests.support.fake_llm_runner import FakeLLMRunner
+
+    runner = FakeLLMRunner.from_fixture(_fixture("tool_failed_then_success.json"))
+
+    result = runner.run(tmp_path)
+
+    assert result.contract_result.ok is False
+    assert "REQUIRED_SUCCESSFUL_TOOL_CALL_MISSING" in result.contract_result.error_codes
+    assert "FINAL_STATUS_REJECTED" in result.contract_result.error_codes
+
+
+def test_fake_llm_done_without_evidence_is_rejected(tmp_path: Path):
+    from agent_py_agent.tests.support.fake_llm_runner import FakeLLMRunner
+
+    runner = FakeLLMRunner.from_fixture(_fixture("done_without_evidence.json"))
+
+    result = runner.run(tmp_path)
+
+    assert result.contract_result.ok is False
+    assert "REQUIRED_JSON_COLLECTION_EMPTY" in result.contract_result.error_codes
+    assert "FINAL_STATUS_REJECTED" in result.contract_result.error_codes
+
+
+def test_fake_llm_bootstrap_runtime_issue_is_recorded_and_blocks_success(tmp_path: Path):
+    from agent_py_agent.tests.support.fake_llm_runner import FakeLLMRunner
+
+    runner = FakeLLMRunner.from_fixture(_fixture("bootstrap_materialization_then_success.json"))
+
+    result = runner.run(tmp_path)
+
+    assert {item["code"] for item in result.runtime_issues} == {"BOOTSTRAP_MATERIALIZATION_REQUIRED"}
+    assert "RUNTIME_ISSUE_SUCCESS_CONFLICT" in result.contract_result.error_codes
+    assert "FINAL_STATUS_REJECTED" in result.contract_result.error_codes
+
+
+def test_fake_llm_no_progress_runtime_issue_is_recorded_and_blocks_success(tmp_path: Path):
+    from agent_py_agent.tests.support.fake_llm_runner import FakeLLMRunner
+
+    runner = FakeLLMRunner.from_fixture(_fixture("repeated_exploration_then_success.json"))
+
+    result = runner.run(tmp_path)
+
+    assert {item["code"] for item in result.runtime_issues} == {"NO_PROGRESS"}
+    assert result.closeout_snapshots[-1]["ok"] is False
+    assert "RUNTIME_ISSUE_SUCCESS_CONFLICT" in result.contract_result.error_codes
+
+
 def _fixture(name: str) -> dict[str, object]:
     path = Path(__file__).parent / name
     return json.loads(path.read_text(encoding="utf-8"))

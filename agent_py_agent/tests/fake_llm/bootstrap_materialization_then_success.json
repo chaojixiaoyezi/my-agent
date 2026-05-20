@@ -1,0 +1,27 @@
+{
+  "contract_ref": "../contracts/bootstrap_materialization_required.json",
+  "model_steps": [
+    {
+      "type": "tool_call",
+      "tool": "list_files",
+      "params": {
+        "path": "."
+      }
+    },
+    {
+      "type": "runtime_issue",
+      "code": "BOOTSTRAP_MATERIALIZATION_REQUIRED",
+      "severity": "hard",
+      "blocks_success": true
+    },
+    {
+      "type": "state_snapshot",
+      "status": "BLOCKED",
+      "lifecycle_phase": "PLANNING"
+    },
+    {
+      "type": "final",
+      "status": "SUCCEEDED"
+    }
+  ]
+}

@@ -1,5 +1,16 @@
 # 设计思路台账
 
+## 2026-05-21 / 主代理合同测试底座扩到 runtime issue 与 replay 快照
+
+状态：部分落地
+
+摘要：
+- 合同 fixture 不再只校验 artifact 和 tool trace，开始接收通用 `runtime_issue` 事实；fixture 可以声明 `required_issue_codes` 和 `forbid_succeeded_when_issue_codes_present`。
+- fake LLM / replay 现在都能携带 `runtime_issue`、`state_snapshot`、`closeout_snapshot`、`acceptance_report` 这几类机器事件，不再只剩 `tool_result + final`。
+- replay 的成功态冲突判断扩展到三层：`runtime_issue`、`state_snapshot`、`closeout_snapshot`；如果最终写的是 `SUCCEEDED`，但这些结构化事实仍显示阻塞或未收口，就会报冲突。
+- 第一批新增失败样本继续保持通用底座，不引入任务专项分支：`tool_failed_cannot_complete`、`bootstrap_materialization_required`、`repeated_exploration_should_redirect_or_block`、`model_claims_done_without_evidence_should_fail`。
+- 后续方向：把主代理真实任务里新暴露的问题优先沉淀成这四层样本（contract/fake_llm/replay/scenario_pack），然后再回真实环境验收。
+
 ## 2026-05-08 principal/conversation/config isolation reserve
 状态：已落地第一版
 摘要：

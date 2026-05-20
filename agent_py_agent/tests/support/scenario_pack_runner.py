@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from .contract_fixture_runner import verify_contract_fixture
+from .contract_fixture_runner import FixtureRunFacts, verify_contract_fixture
 from .fake_llm_runner import FakeLLMRunner
 from .trace_replay import replay_contract_trace
 
@@ -48,8 +48,10 @@ def _run_contract_case(case: dict[str, object], manifest_root: Path, run_dir: Pa
     result = verify_contract_fixture(
         run_dir,
         contract,
-        tool_trace=_list_of_dicts(case.get("tool_trace")),
-        final_status=str(case.get("final_status") or "UNKNOWN"),
+        FixtureRunFacts(
+            tool_trace=tuple(_list_of_dicts(case.get("tool_trace"))),
+            final_status=str(case.get("final_status") or "UNKNOWN"),
+        ),
     )
     return _case_result(case, result.error_codes)
 
@@ -58,22 +60,34 @@ def _run_fake_llm_case(case: dict[str, object], manifest_root: Path, run_dir: Pa
     fixture_path = (manifest_root / str(case.get("fixture_ref") or "")).resolve()
     fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
     result = FakeLLMRunner.from_fixture(fixture, fixture_root=fixture_path.parent).run(run_dir)
-    return _case_result(case, result.contract_result.error_codes)
+    expected_runtime_issue_codes = set(_string_list(case.get("expect_runtime_issue_codes")))
+    actual_runtime_issue_codes = _issue_codes(result.runtime_issues)
+    payload = _case_result(case, result.contract_result.error_codes)
+    payload["runtime_issue_codes"] = sorted(actual_runtime_issue_codes)
+    payload["ok"] = bool(payload["ok"]) and expected_runtime_issue_codes.issubset(actual_runtime_issue_codes)
+    return payload
 
 
 def _run_replay_case(case: dict[str, object], manifest_root: Path, run_dir: Path) -> dict[str, object]:
     result = replay_contract_trace((manifest_root / str(case.get("trace_ref") or "")).resolve(), run_dir)
     expected = str(case.get("expect_block_reason") or "")
     expected_error_codes = set(_string_list(case.get("expect_error_codes")))
+    expected_runtime_issue_codes = set(_string_list(case.get("expect_runtime_issue_codes")))
+    expected_replay_error_codes = set(_string_list(case.get("expect_replay_error_codes")))
+    actual_runtime_issue_codes = _issue_codes(result.runtime_issues)
     return {
         "case_id": str(case.get("case_id") or ""),
         "kind": "replay",
         "ok": (
             (not expected or result.block_reason == expected)
             and expected_error_codes.issubset(set(result.contract_result.error_codes))
+            and expected_runtime_issue_codes.issubset(actual_runtime_issue_codes)
+            and expected_replay_error_codes.issubset(set(result.replay_error_codes))
         ),
         "block_reason": result.block_reason,
         "error_codes": sorted(set(result.contract_result.error_codes)),
+        "runtime_issue_codes": sorted(actual_runtime_issue_codes),
+        "replay_error_codes": sorted(set(result.replay_error_codes)),
     }
 
 
@@ -96,3 +110,11 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for raw in value if (item := str(raw).strip())]
+
+
+def _issue_codes(items: tuple[dict[str, object], ...] | list[dict[str, object]]) -> set[str]:
+    return {
+        code
+        for item in items
+        if isinstance(item, dict) and (code := str(item.get("code") or "").strip())
+    }

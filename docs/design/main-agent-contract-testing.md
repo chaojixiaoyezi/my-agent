@@ -237,6 +237,16 @@
 - final
 - 后续可扩展 state/event closeout 快照
 
+当前推荐最小事件类型：
+
+- `contract_ref`
+- `tool_result`
+- `runtime_issue`
+- `state_snapshot`
+- `closeout_snapshot`
+- `acceptance_report`
+- `final`
+
 目标：
 
 - 不重跑真实环境，也能复现已知失败
@@ -276,6 +286,7 @@
 - 能跑 fake tool
 - 能跑 fake LLM
 - 能跑 replay case
+- fixture / fake / replay 都能表达 runtime issue、state snapshot、closeout snapshot 这些机器事实
 
 ### 第二阶段：主代理通用合同
 
@@ -387,6 +398,17 @@
 - fake LLM case
 - replay case
 - 对同一类回归，再组合一个 `scenario_pack`
+
+建议合同字段继续保持通用：
+
+- `artifacts.required[*].required_sections`
+- `artifacts.required[*].json_requirements.required_keys`
+- `artifacts.required[*].json_requirements.required_non_empty_paths`
+- `tools.required_calls`
+- `tools.required_successful_calls`
+- `runtime.required_issue_codes`
+- `runtime.forbid_succeeded_when_issue_codes_present`
+- `final_status.allow_succeeded_only_if`
 
 ---
 
