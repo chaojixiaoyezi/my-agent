@@ -126,16 +126,16 @@ def recovery_decision(facts: RunStateFacts) -> RecoveryDecision:
         return RecoveryDecision("repair_or_probe_channel", False, "channel_broken")
     if status == "DONE" and normalize_verification(facts.verification_status) not in VERIFIED_STATES:
         return RecoveryDecision("wait_for_acceptance", False, "done_unverified")
+    if failure == "APPROVAL_REQUIRED":
+        return RecoveryDecision("request_approval_or_stop", False, "approval_required")
+    if failure == "NO_PROGRESS":
+        return RecoveryDecision("change_strategy_or_stop", False, "no_progress")
     if status in DISPATCHABLE_STATES:
         return RecoveryDecision("dispatch", False, "not_started")
     if status == "RUNNING" and not facts.has_progress:
         return RecoveryDecision("wait_for_local_progress", False, "running_without_local_progress")
     if status in ACTIVE_STATES:
         return RecoveryDecision("wait_or_observe", False, "already_active")
-    if failure == "APPROVAL_REQUIRED":
-        return RecoveryDecision("request_approval_or_stop", False, "approval_required")
-    if failure == "NO_PROGRESS":
-        return RecoveryDecision("change_strategy_or_stop", False, "no_progress")
     if status == "BLOCKED" and failure in {"TOOL_UNAVAILABLE", "WRITE_FORBIDDEN", "PATH_OUTSIDE_WORKSPACE"}:
         return RecoveryDecision("repair_or_request_capability", False, f"blocked_{failure.lower()}")
     if can_repair(facts):
