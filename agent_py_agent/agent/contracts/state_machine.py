@@ -12,6 +12,7 @@ ACTIVE_STATES = {"RUNNING", "WAITING_FOR_TOOL", "WAITING_FOR_CHILD", "WAITING_FO
 TERMINAL_STATES = {"DONE", "FAILED", "CANCELLED", "ABANDONED"}
 REPAIRABLE_STATES = {"BLOCKED", "FAILED"}
 VERIFIED_STATES = {"VERIFIED"}
+HEALTHY_CHANNEL_STATES = {"", "OK", "UNKNOWN"}
 
 
 # LLM: RunStateFacts is a small typed snapshot for dispatch/recovery decisions.
@@ -20,6 +21,7 @@ VERIFIED_STATES = {"VERIFIED"}
 class RunStateFacts:
     status: str
     verification_status: str = ""
+    channel_status: str = ""
     failure_type: str = ""
     attempts: int = 0
     max_attempts: int = 0
@@ -54,6 +56,12 @@ def normalize_verification(value: object) -> str:
     return str(value or "UNVERIFIED").strip().upper() or "UNVERIFIED"
 
 
+# LLM: normalize_channel keeps closeout and repair decisions independent from spelling variants.
+# 函数用途: 规整通道状态；缺失值按 UNKNOWN 处理，只有明确 BROKEN 才会阻止 closeout。
+def normalize_channel(value: object) -> str:
+    return str(value or "UNKNOWN").strip().upper() or "UNKNOWN"
+
+
 # LLM: can_dispatch answers whether a run is eligible to start now.
 # 函数用途: 判断 run 是否能 dispatch；RUNNING/DONE/BLOCKED 不会被重复启动。
 def can_dispatch(facts: RunStateFacts) -> bool:
@@ -63,27 +71,65 @@ def can_dispatch(facts: RunStateFacts) -> bool:
 # LLM: can_closeout answers whether parent/root can report the run as actually complete.
 # 函数用途: 只有 DONE 且 VERIFIED 才允许 closeout，避免完成和验收混淆。
 def can_closeout(facts: RunStateFacts) -> bool:
-    return normalize_status(facts.status) == "DONE" and normalize_verification(facts.verification_status) in VERIFIED_STATES
+    return (
+        normalize_status(facts.status) == "DONE"
+        and normalize_verification(facts.verification_status) in VERIFIED_STATES
+        and normalize_channel(facts.channel_status) in HEALTHY_CHANNEL_STATES
+    )
 
 
 # LLM: can_repair answers whether a run should be repaired before creating unrelated new work.
 # 函数用途: 判断失败/阻塞 run 是否适合进入 repair，而不是被父级误当完成或无限扩容。
 def can_repair(facts: RunStateFacts) -> bool:
     status = normalize_status(facts.status)
+    if normalize_channel(facts.channel_status) == "BROKEN":
+        return True
     if status == "BLOCKED":
         return True
     return status == "FAILED" and (facts.max_attempts <= 0 or facts.attempts < facts.max_attempts)
+
+
+# LLM: lifecycle_phase projects shared status facts into a stable orchestration-facing phase.
+# 函数用途: 把状态、验收、通道和进展规整成 WAITING/VERIFYING/BLOCKED/DONE 这类统一生命周期阶段。
+def lifecycle_phase(facts: RunStateFacts) -> str:
+    status = normalize_status(facts.status)
+    verification = normalize_verification(facts.verification_status)
+    channel = normalize_channel(facts.channel_status)
+    if channel == "BROKEN":
+        return "BLOCKED"
+    if status == "DONE" and verification not in VERIFIED_STATES:
+        return "VERIFYING"
+    if status == "RUNNING" and not facts.has_progress:
+        return "WAITING_FOR_LOCAL_PROGRESS"
+    if status == "WAITING_FOR_TOOL":
+        return "WAITING_FOR_TOOL"
+    if status == "WAITING_FOR_USER":
+        return "WAITING_FOR_USER"
+    if status == "WAITING_FOR_CHILD":
+        return "WAITING_FOR_CHILD"
+    if status in {"BLOCKED", "FAILED", "CANCELLED", "ABANDONED"}:
+        return "BLOCKED"
+    if status in {"PLANNING", "PENDING", "RUNNING"}:
+        return status
+    return "DONE" if can_closeout(facts) else status
 
 
 # LLM: recovery_decision is deliberately advisory; workflow choice remains with the caller/LLM.
 # 函数用途: 根据状态事实返回修复、接管、等待或停止建议，不直接改变任务状态。
 def recovery_decision(facts: RunStateFacts) -> RecoveryDecision:
     status = normalize_status(facts.status)
+    channel = normalize_channel(facts.channel_status)
     failure = str(facts.failure_type or "").upper()
     if can_closeout(facts):
         return RecoveryDecision("closeout", False, "done_verified")
+    if channel == "BROKEN":
+        return RecoveryDecision("repair_or_probe_channel", False, "channel_broken")
+    if status == "DONE" and normalize_verification(facts.verification_status) not in VERIFIED_STATES:
+        return RecoveryDecision("wait_for_acceptance", False, "done_unverified")
     if status in DISPATCHABLE_STATES:
         return RecoveryDecision("dispatch", False, "not_started")
+    if status == "RUNNING" and not facts.has_progress:
+        return RecoveryDecision("wait_for_local_progress", False, "running_without_local_progress")
     if status in ACTIVE_STATES:
         return RecoveryDecision("wait_or_observe", False, "already_active")
     if status == "BLOCKED" and failure in {"TOOL_UNAVAILABLE", "WRITE_FORBIDDEN", "PATH_OUTSIDE_WORKSPACE"}:
@@ -101,6 +147,7 @@ def run_state_snapshot_from_task(task: object) -> dict[str, object]:
     facts = RunStateFacts(
         status=normalize_status(getattr(task, "status", "")),
         verification_status=normalize_verification(getattr(task, "verification_status", "")),
+        channel_status=normalize_channel(getattr(task, "channel_status", "")),
         failure_type=_failure_type_from_task(task),
         attempts=_int_attr(task, "runner_attempts"),
         max_attempts=_int_attr(task, "runner_max_attempts"),
@@ -111,6 +158,8 @@ def run_state_snapshot_from_task(task: object) -> dict[str, object]:
         "run_id": str(getattr(task, "id", "") or ""),
         "status": normalize_status(facts.status),
         "verification_status": normalize_verification(facts.verification_status),
+        "channel_status": normalize_channel(facts.channel_status),
+        "lifecycle_phase": lifecycle_phase(facts),
         "failure_type": error_contract(facts.failure_type or "UNKNOWN_ERROR").code,
         "attempts": facts.attempts,
         "max_attempts": facts.max_attempts,
@@ -150,6 +199,8 @@ __all__ = [
     "can_closeout",
     "can_dispatch",
     "can_repair",
+    "lifecycle_phase",
+    "normalize_channel",
     "normalize_status",
     "normalize_verification",
     "recovery_decision",
