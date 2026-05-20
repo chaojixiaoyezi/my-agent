@@ -1023,6 +1023,11 @@ docs/
 - `agent_py_agent/agent/contracts/tool_adapter_readiness_contract.py`: 真实只读/dry-run 工具适配器上线前的 effect、schema、测试覆盖、审批、幂等和 mode 字段合同。
 - `agent_py_agent/agent/contracts/real_tool_dry_run_contract.py`: 真实工具 dry-run probe 合同；校验 probe 必须经过可信工具执行器，read_only 不能有副作用，mutating/dangerous 只能记录 dry_run 并保留幂等键和参数 hash。
 - `agent_py_agent/agent/contracts/shadow_mode_contract.py`: Shadow Mode 影子模式合同；记录风险评分、证据、建议、dry-run、人工复核，同时禁止真实副作用执行；它是阶段 6 预备，不替代阶段 5 真实工具 wrapper probe。
+- `agent_py_agent/agent/contracts/shadow_mode_runtime_contract.py`: Shadow Mode 运行闭环合同；要求 shadow run 引用阶段 5 真实工具 probe、人工对比 artifact，且 runtime 层无 executed actions。
+- `agent_py_agent/agent/contracts/task_tree_ledger_contract.py`: TaskTree 前置账本合同；校验父子任务、依赖、状态、产物 refs、验收 refs，阻断关键子任务未完成时父任务成功。
+- `agent_py_agent/agent/contracts/long_task_recovery_contract.py`: 单 Agent 长任务恢复合同；校验 run scope、checkpoint、compact/resume、latest resume packet 和副作用幂等账本。
+- `agent_py_agent/agent/contracts/failure_sample_library_contract.py`: 失败样本库合同；要求失败样本具备合同 fixture、fake tool/LLM trace、replay spec、expected error 和回归测试 ref。
+- `agent_py_agent/agent/contracts/small_real_acceptance_gate.py`: 小型真实验收闸门；大型真实任务前只允许隔离、限时、只读/dry-run、可验收和可 replay 的 bounded case。
 - `agent_py_agent/cli/real_e2e_commands.py`: `my-agent real-e2e` CLI；运行主代理基础矩阵，可通过 `--artifact` 验收真实模型产物，也可显式执行受控真实任务。
 - `agent_py_agent/agent/local_storage/control_plane_models.py`: 定义 agent run、agent event、task rollup、runtime query context 和任务树查询结果的数据结构，保留 `metadata` / `reserved` 给后续继承策略、共享面板和失败交接扩展。
 - `agent_py_agent/agent/local_storage/control_plane.py`: 给 LocalStore 增加控制面 API，支持 upsert run、记录事件、重建 rollup、查询 root task 树、查询子树、blocked runs、takeover candidates 和带 requester/scope 的 runtime query；`takeover_candidates` 覆盖 BLOCKED / FAILED / ERROR / TIMEOUT，避免超时孙代理漏出接管视图。

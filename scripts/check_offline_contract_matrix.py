@@ -127,6 +127,26 @@ REQUIRED_AREAS = {
         "agent_py_agent/agent/contracts/shadow_mode_contract.py",
         "agent_py_agent/tests/test_shadow_mode_contract.py",
     ),
+    "shadow_mode_runtime": (
+        "agent_py_agent/agent/contracts/shadow_mode_runtime_contract.py",
+        "agent_py_agent/tests/test_shadow_mode_runtime_contract.py",
+    ),
+    "task_tree_ledger": (
+        "agent_py_agent/agent/contracts/task_tree_ledger_contract.py",
+        "agent_py_agent/tests/test_task_tree_ledger_contract.py",
+    ),
+    "long_task_recovery": (
+        "agent_py_agent/agent/contracts/long_task_recovery_contract.py",
+        "agent_py_agent/tests/test_long_task_recovery_contract.py",
+    ),
+    "failure_sample_library": (
+        "agent_py_agent/agent/contracts/failure_sample_library_contract.py",
+        "agent_py_agent/tests/test_failure_sample_library_contract.py",
+    ),
+    "small_real_acceptance_gate": (
+        "agent_py_agent/agent/contracts/small_real_acceptance_gate.py",
+        "agent_py_agent/tests/test_small_real_acceptance_gate.py",
+    ),
 }
 
 

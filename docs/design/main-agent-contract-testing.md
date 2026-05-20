@@ -625,3 +625,80 @@ Shadow Mode 的定位：
 - `human_review` 必须有 `review_id`、`review_ref`、`decision`、`agreement`；如果人工不同意，必须给结构化原因。
 
 这一步学习 通道运行时 的可信元数据/工具策略边界，也学习 长期助手 的运行状态和人工可复核记录；但代码只保留通用影子账本合同，不引入“封禁 IP、告警、工单”等业务专项判断。
+
+阶段 6 真正跑起来还需要运行闭环合同：
+
+- `agent_py_agent/agent/contracts/shadow_mode_runtime_contract.py`
+- `agent_py_agent/tests/test_shadow_mode_runtime_contract.py`
+
+它补上静态 Shadow 合同没有覆盖的一层：Shadow run 必须引用阶段 5 的真实工具 probe，必须有人工对比 artifact，且 runtime 层同样不能出现 `executed_actions`。这样可以防止“只写了一份影子报告，但其实没经过真实只读/dry-run wrapper”的假影子模式。
+
+### 阶段 7：TaskTree 前置账本
+
+新增合同：
+
+- `agent_py_agent/agent/contracts/task_tree_ledger_contract.py`
+- `agent_py_agent/tests/test_task_tree_ledger_contract.py`
+
+TaskTree 是多 Agent 前置能力，不是真正启动子 Agent。第一版只做父子任务结构：
+
+- 父任务知道 `child_ids`。
+- 子任务有 `parent_id`。
+- 节点有 `task_contract_ref`、`artifact_refs`、`acceptance_result_ref`、`state_ref`。
+- 依赖只能指向同一棵树里的真实 task id。
+- 父任务进入 `SUCCEEDED` / `VERIFIED` 前，关键子任务必须也完成或验收通过。
+
+这一步参考 通道运行时 的 task/run registry 和控制面，但保留本仓库通用字段，不引入真实业务专项节点类型。
+
+### 阶段 8：单 Agent 长任务恢复闭环
+
+新增合同：
+
+- `agent_py_agent/agent/contracts/long_task_recovery_contract.py`
+- `agent_py_agent/tests/test_long_task_recovery_contract.py`
+
+真实复杂任务前，主代理自己要能恢复长任务。机器合同检查：
+
+- 必须有 `run_scope_ref`。
+- 必须有 checkpoint refs、state refs、artifact refs。
+- compact cycle 必须同时有 `bundle_ref`、`apply_ref`、`resume_ref`。
+- latest resume packet 必须有恢复状态 refs 和下一步 action refs。
+- side effect ledger 必须有 idempotency state，且恢复后不能重放已执行副作用。
+
+这一步借鉴 长期助手 的长任务活动记录和 会话运行时 的 resume/refs-only 思路。
+
+### 阶段 9：Replay / 失败样本库补硬
+
+新增合同：
+
+- `agent_py_agent/agent/contracts/failure_sample_library_contract.py`
+- `agent_py_agent/tests/test_failure_sample_library_contract.py`
+
+每个真实或合成失败样本必须能离线复现：
+
+- `contract_fixture_ref`
+- `fake_tool_trace_ref`
+- `fake_llm_trace_ref`
+- `replay_spec_ref`
+- `expected_error_codes`
+- `regression_test_ref`
+
+真实环境新问题不能只留在聊天记录或日志里，必须沉淀成可 replay 的失败样本。
+
+### 阶段 10：小型真实验收闸门
+
+新增合同：
+
+- `agent_py_agent/agent/contracts/small_real_acceptance_gate.py`
+- `agent_py_agent/tests/test_small_real_acceptance_gate.py`
+
+进入大型真实任务前，先跑小型真实验收。case 必须满足：
+
+- `complexity` 只能是 `small` 或 `medium`。
+- 必须有隔离 workspace ref。
+- 只允许 `read_only` / `dry_run` 工具模式。
+- 不允许真实副作用执行。
+- 必须有 expected artifact contract、verification refs 和 replay capture。
+- 单 case 默认最长 900 秒，避免小验收变成长任务调试。
+
+大型真实任务只有在阶段 10 通过后再开始。

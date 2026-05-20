@@ -45,6 +45,22 @@
 - 后续可以进入 TaskTree 前置账本：先做单代理任务树和阶段节点，不急着恢复多 Agent。
 - Shadow Mode 真实试跑产生的新偏差，要沉淀成 fake tool / fake LLM / replay 样本。
 
+## 2026-05-21 / 主代理 Phase 2.5 阶段 6-10 真实测试前闸门
+
+状态：已落地第一版
+
+摘要：
+- 新增 `shadow_mode_runtime_contract`，要求 Shadow run 必须引用阶段 5 真实工具 probe，并落人工对比 artifact；静态 Shadow 报告不再等同于“影子模式已跑”。
+- 新增 `task_tree_ledger_contract`，先把父子任务、依赖、状态、产物 refs 和验收 refs 收成 TaskTree 账本；父任务成功前必须检查关键子任务状态。
+- 新增 `long_task_recovery_contract`，把长任务的 run scope、checkpoint、compact/resume、恢复状态和副作用幂等账本做成机器闸门。
+- 新增 `failure_sample_library_contract`，要求失败样本必须有 contract fixture、fake tool trace、fake LLM trace、replay spec、expected errors 和 regression test ref。
+- 新增 `small_real_acceptance_gate`，大型真实任务前只允许 bounded 小型真实验收：隔离 workspace、只读/dry-run、无真实副作用、可验收、可 replay。
+- 这些合同已加入离线合同矩阵；测试 fixture 只是通用结构样本，不把购物站、论文翻译、GitHub xlsx 等专项任务写进生产合同。
+
+参考与约束：
+- 对照 `/Users/example/study-agent/all-agent/2.txt`：阶段 6 是 Shadow Mode，之后先做 TaskTree，不直接恢复真实多 Agent。
+- 参考 通道运行时 的 task/run registry、长期助手 的长任务活动/恢复记录、会话运行时 的结构化工具和 refs-only 恢复；只吸收架构策略，不复制业务专项逻辑。
+
 ## 2026-05-21 / 主代理状态机补 waiting_reason 与 terminal_outcome
 
 状态：部分落地
