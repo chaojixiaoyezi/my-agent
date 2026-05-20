@@ -2027,3 +2027,14 @@ def example(...):
 - 已迁移子代理关键旧兜底：workflow route、input/output refs、写入根、repair identity、QA 硬要求、domain/scope、leaf target、root/coordinator seed 都不再从 goal/prompt/summary 的普通句子里抽硬规则。
 - 新增/强化 `test_code_does_not_use_plain_language_as_machine_facts`，把已删除的旧入口列入架构守卫，后续同类回归要先加结构化字段和测试，不能再补关键词表。
 - 下一步：主代理复杂任务 E2E 继续按这条铁律压测；如果真实模型说法变化导致失败，优先补 protocol/schema/refs，不补自然语言关键词。
+
+## 2026-05-21 Main-agent contract substrate split for startup and recovery
+
+状态：已落地，已验证
+
+摘要：
+- `main_agent_task_execution_files.py` 和 `main_agent_real_task_execution_files.py` 里原来重复的 artifact/path/bootstrap 组装逻辑，已经抽到共享模块 `main_agent_execution_contract_artifacts.py`。主代理 task/real-task 现在共用一套 artifact path contract、checkpoint path contract、bootstrap target 和 startup action 生成逻辑。
+- `delivery_contract_prompting.py` 继续保持“主渲染入口”职责，但 recovery continuation 那一半已经拆到 `delivery_contract_prompting_recovery.py`。这样 bootstrap / artifact quality / recovery continuation 三层职责分开，后面继续改 closeout/recovery 时不会再把主 prompting 文件堆胖。
+- 这次拆分没有引入专项合同；所有新增 helper 都只读结构化 artifact、staging_contract、recovery finding 和 reconciliation groups。没有从任务文案或 stdout 摘要里反推机器事实。
+- 验证链路：focused tests 覆盖了 staging、delivery prompting、bootstrap guard、delivery closeout；`ruff`、`check_doc_sync`、`check_code_size --baseline`、`git diff --check` 也一起过了。
+- 结果：被这次 touched 的 execution-files soft 项已消掉，`delivery_contract_prompting.py` 的 touched-file high-risk 也通过模块拆分收掉。仓库仍有历史 `main_agent_delivery_closeout.py` 软项，后续继续在 closeout/recovery 这层做通用拆分。
