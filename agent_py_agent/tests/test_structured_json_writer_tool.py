@@ -166,6 +166,25 @@ def test_structured_json_tool_uses_sheets_when_data_is_empty(tmp_path: Path) -> 
     assert data["sheets"][0]["rows"][0]["项目名"] == "demo"
 
 
+# LLM: Non-empty metadata in data must not silently discard sibling sheets/rows.
+# 函数用途: 验证同一次 write_structured_json 可同时写 completion_evidence/source_refs 和 sheets。
+def test_structured_json_tool_merges_nonempty_data_with_sheets(tmp_path: Path) -> None:
+    tool = StructuredJsonTool(tmp_path)
+
+    result = tool.execute(
+        {
+            "path": "outputs/report/source_data.json",
+            "data": {"completion_evidence": {"scope": "fixture"}},
+            "sheets": [{"name": "榜单", "rows": [{"项目名": "demo"}]}],
+        }
+    )
+
+    assert result.ok, result.output
+    data = json.loads((tmp_path / "outputs/report/source_data.json").read_text(encoding="utf-8"))
+    assert data["completion_evidence"]["scope"] == "fixture"
+    assert data["sheets"][0]["rows"][0]["项目名"] == "demo"
+
+
 # LLM: Some model adapters stringify nested JSON args; the writer should normalize that machine payload.
 # 函数用途: 验证 data 为 JSON 字符串时仍按结构化对象落地，避免 metadata/completion_evidence 被丢弃。
 def test_structured_json_tool_accepts_json_string_data_payload(tmp_path: Path) -> None:

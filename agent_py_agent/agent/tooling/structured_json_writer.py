@@ -49,7 +49,7 @@ class StructuredJsonTool(FileSystemTool):
             },
             parameter_details={
                 "path": "相对工作区的 .json 输出路径；父目录会自动创建。",
-                "data": "dict/list；适合 source_index 这类数组或对象。",
+                "data": "dict/list；适合 source_index 这类数组或对象；dict 可和 rows/sheets 同次提交写元数据。",
                 "rows": "非空数组；适合单表 source_data。",
                 "sheets": "非空数组，每个 sheet 需要非空 rows。",
                 "merge_existing": "可选布尔值；为 true 时 upsert JSON，对 rows/sheets 做追加合并，适合大表分批写入。",
@@ -97,6 +97,8 @@ def _json_value_from_params(params: dict[str, Any]) -> object:
     value = _data_value(params.get("data"))
     if not isinstance(value, (dict, list)):
         raise ValueError("TOOL_INVALID_ARGUMENTS: data 必须是对象或数组")
+    if _has_shape_payload(params):
+        return _data_with_shape_value(value, params)
     if _should_use_data_value(value, params):
         return value
     return _shape_value_from_params(params)
@@ -131,6 +133,28 @@ def _shape_value_from_params(params: dict[str, Any]) -> object:
             payload["name"] = name
         return payload
     raise ValueError("TOOL_INVALID_ARGUMENTS: 需要 data、rows 或 sheets")
+
+
+# LLM: _data_with_shape_value merges metadata data with sibling rows/sheets without silent loss.
+# 函数用途: 允许 data 写 completion_evidence/source_refs，同时由 rows/sheets 写真实数据；冲突时返回参数错误。
+def _data_with_shape_value(data: object, params: dict[str, Any]) -> object:
+    if not data:
+        return _shape_value_from_params(params)
+    if not isinstance(data, dict):
+        raise ValueError("TOOL_INVALID_ARGUMENTS: data 数组不能和 rows/sheets 同时使用")
+    shape = _shape_value_from_params(params)
+    if not isinstance(shape, dict):
+        raise ValueError("TOOL_INVALID_ARGUMENTS: rows/sheets 形状无效")
+    return _merge_inline_shape(data, shape)
+
+
+def _merge_inline_shape(data: dict[str, object], shape: dict[str, object]) -> dict[str, object]:
+    merged = dict(data)
+    for key, value in shape.items():
+        if key in merged and merged[key] != value:
+            raise ValueError(f"TOOL_INVALID_ARGUMENTS: data 与 rows/sheets 同时声明了 {key}")
+        merged[key] = value
+    return merged
 
 
 # LLM: _has_shape_payload keeps this runtime helper grounded in structured fields.
