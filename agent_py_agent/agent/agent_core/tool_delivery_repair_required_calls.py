@@ -5,6 +5,23 @@ from __future__ import annotations
 
 import json
 
+_CREATE_OR_REPLACE_FINDING_CODES = frozenset(
+    {
+        "ARTIFACT_MISSING",
+        "STATIC_SITE_MISSING_REQUIRED_FILES",
+    }
+)
+_FULL_REWRITE_FINDING_CODES = frozenset(
+    {
+        "STATIC_SITE_FORM_BINDING_HITS",
+        "STATIC_SITE_HTML_STRUCTURE_HITS",
+        "STATIC_SITE_INERT_CONTROL_HITS",
+        "STATIC_SITE_MISSING_DOM_ID_HITS",
+        "STATIC_SITE_MISSING_JS_API_HITS",
+    }
+)
+_MAX_REPAIR_FINDING_VALUES = 64
+
 
 # LLM: required_tool_calls returns compact tool skeletons derived from recovery action fields only.
 # 函数用途: 将 writer_tool/builder_tool、checkpoint/source/output refs 转成可执行工具调用模板。
@@ -53,7 +70,8 @@ def _builder_call(action: dict[str, object]) -> dict[str, object]:
 def _artifact_repair_calls(action: dict[str, object]) -> list[dict[str, object]]:
     if str(action.get("recommended_action") or "") != "repair_artifact_against_findings":
         return []
-    tool = _artifact_repair_tool(action)
+    intent = _artifact_repair_intent(action)
+    tool = _artifact_repair_tool(action, intent=intent)
     if not tool:
         return []
     targets = action.get("repair_targets")
@@ -64,20 +82,41 @@ def _artifact_repair_calls(action: dict[str, object]) -> list[dict[str, object]]
     findings = action.get("finding_values")
     finding_values = [str(item) for item in findings if str(item)] if isinstance(findings, list) else []
     return [
-        {"tool": tool, "path": target, "finding_values": finding_values[:20]}
+        {
+            "tool": tool,
+            "path": target,
+            "finding_values": finding_values[:_MAX_REPAIR_FINDING_VALUES],
+            "mutation_intent": intent,
+        }
         for target in target_values[:4]
     ]
 
 
 # LLM: _artifact_repair_tool picks a deterministic patch-capable tool from the action manifest.
-# 函数用途: 优先用 replace_in_file，其次 write_file/file_write_session，完全由 write_tools 结构化字段决定。
-def _artifact_repair_tool(action: dict[str, object]) -> str:
+# 函数用途: 根据结构化 finding code 选择局部替换、创建或整文件重写工具，不读验收文案。
+def _artifact_repair_tool(action: dict[str, object], *, intent: str) -> str:
     tools = action.get("write_tools")
     values = [str(item) for item in tools if str(item)] if isinstance(tools, list) else []
+    if intent in {"create_or_replace", "rewrite"}:
+        for candidate in ("write_file", "file_write_session"):
+            if candidate in values:
+                return candidate
     for candidate in ("replace_in_file", "write_file", "file_write_session"):
         if candidate in values:
             return candidate
     return values[0] if values else ""
+
+
+# LLM: _artifact_repair_intent classifies the mutation shape from stable finding codes.
+# 函数用途: 缺文件要创建，HTML 结构损坏要整文件重写，其他问题默认局部修补。
+def _artifact_repair_intent(action: dict[str, object]) -> str:
+    raw_codes = action.get("finding_codes")
+    codes = {str(code) for code in raw_codes if str(code)} if isinstance(raw_codes, list) else set()
+    if codes & _CREATE_OR_REPLACE_FINDING_CODES:
+        return "create_or_replace"
+    if codes & _FULL_REWRITE_FINDING_CODES:
+        return "rewrite"
+    return "patch"
 
 
 # LLM: _source_param_name keeps this runtime helper grounded in structured fields.

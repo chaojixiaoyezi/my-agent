@@ -34,6 +34,7 @@ from .main_agent_delivery_closeout_staging import (
 )
 
 _REPAIR_TARGET_SUFFIXES = {".css", ".html", ".htm", ".js", ".json", ".md", ".txt", ".yaml", ".yml"}
+_MAX_FINDING_VALUES_PER_ACTION = 64
 
 
 # LLM: _recovery_actions lifts failed finding codes into generic next-step hints instead of task-specific prose.
@@ -110,7 +111,7 @@ def _finding_values(findings: list[dict[str, Any]], key: str) -> list[str]:
         value = str(finding.get(key) or "").strip()
         if value and value not in values:
             values.append(value)
-    return values[:20]
+    return values[:_MAX_FINDING_VALUES_PER_ACTION]
 
 
 # LLM: _repair_targets turns validator locations into candidate local files for generic repair.

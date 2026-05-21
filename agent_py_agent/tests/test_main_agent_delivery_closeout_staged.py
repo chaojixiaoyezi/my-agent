@@ -329,6 +329,41 @@ def test_delivery_closeout_does_not_treat_dotted_api_findings_as_file_targets():
         assert not any(item.endswith("/app.goBrowse") for item in action["repair_targets"])
 
 
+# LLM: Recovery actions must not drop larger structured validator batches.
+# 函数用途: 验证多项 DOM 绑定 finding 会完整进入恢复动作，避免续跑只修前 20 个字段。
+def test_delivery_closeout_keeps_larger_static_site_finding_batches():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td).resolve()
+        contract = {
+            "artifacts": [
+                {
+                    "artifact_id": "site",
+                    "kind": "web_project",
+                    "path": str(workspace / "outputs/site"),
+                    "validation_contract": {
+                        "validator": "static_site_check",
+                        "required_files": ["index.html", "app.js"],
+                    },
+                }
+            ]
+        }
+        site = workspace / "outputs/site"
+        site.mkdir(parents=True)
+        (site / "index.html").write_text(
+            '<!doctype html><html><body><script src="app.js"></script></body></html>',
+            encoding="utf-8",
+        )
+        js_refs = "\n".join(f"document.getElementById('field{i}');" for i in range(24))
+        (site / "app.js").write_text(js_refs, encoding="utf-8")
+
+        _, actions = _enriched_report(workspace, contract)
+
+        action = actions["ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED"]
+        assert "getElementById:field0" in action["finding_values"]
+        assert "getElementById:field23" in action["finding_values"]
+        assert len(action["finding_values"]) >= 24
+
+
 # LLM: _actions_for_source writes source_data.json and returns closeout recovery actions by code.
 # 函数用途: 将 staged JSON 场景压成一个 helper，测试只断言结构化恢复动作。
 def _actions_for_source(source_content: str, *, contract: dict[str, object] | None = None) -> dict[str, dict[str, object]]:
