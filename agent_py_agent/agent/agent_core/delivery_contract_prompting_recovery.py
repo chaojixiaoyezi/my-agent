@@ -283,19 +283,41 @@ def _collection_contract_lines(validation: dict[str, object]) -> list[str]:
     evidence = validation.get("evidence_contract")
     lines: list[str] = []
     if isinstance(collection, dict):
-        for key in ("groups_path", "items_path", "min_groups", "min_items_per_group"):
-            if value := collection.get(key):
-                lines.append(f"  - {key}={value}")
-        fields = collection.get("required_item_fields")
-        if isinstance(fields, list) and fields:
-            lines.append(f"  - required_item_fields={', '.join(str(item) for item in fields)}")
+        lines.extend(_collection_shape_lines(collection))
+        lines.extend(_item_evidence_contract_lines(collection, evidence))
     if isinstance(evidence, dict):
-        if evidence.get("require_verified") is not None:
-            lines.append(f"  - require_verified_evidence={_json_bool(evidence.get('require_verified'), default=False)}")
-        fields = evidence.get("required_fields")
-        if isinstance(fields, list) and fields:
-            lines.append(f"  - evidence_required_fields={', '.join(str(item) for item in fields)}")
+        lines.extend(_evidence_contract_lines(evidence))
     return lines
+
+
+def _collection_shape_lines(collection: dict[str, object]) -> list[str]:
+    lines = [f"  - {key}={value}" for key in ("groups_path", "items_path", "min_groups", "min_items_per_group") if (value := collection.get(key))]
+    fields = collection.get("required_item_fields")
+    if isinstance(fields, list) and fields:
+        lines.append(f"  - required_item_fields={', '.join(str(item) for item in fields)}")
+    return lines
+
+
+def _evidence_contract_lines(evidence: dict[str, object]) -> list[str]:
+    lines: list[str] = []
+    if evidence.get("require_verified") is not None:
+        lines.append(f"  - require_verified_evidence={_json_bool(evidence.get('require_verified'), default=False)}")
+    fields = evidence.get("required_fields")
+    if isinstance(fields, list) and fields:
+        lines.append(f"  - evidence_required_fields={', '.join(str(item) for item in fields)}")
+    return lines
+
+
+def _item_evidence_contract_lines(collection: dict[str, object], evidence: object) -> list[str]:
+    evidence_fields = collection.get("required_item_evidence_fields")
+    if not isinstance(evidence_fields, list) and isinstance(evidence, dict) and collection.get("require_item_evidence") is not False:
+        evidence_fields = evidence.get("required_fields")
+    if not isinstance(evidence_fields, list) or not evidence_fields:
+        return []
+    return [
+        f"  - item_evidence_required_fields={', '.join(str(item) for item in evidence_fields)}",
+        "  - item_evidence_shape=field_source_ids 或 row-scoped claims.reserved.item_path",
+    ]
 
 
 # LLM: _checkpoint_shape_hint lets each staged checkpoint describe its own generic JSON shape without hard-coding one task's schema.

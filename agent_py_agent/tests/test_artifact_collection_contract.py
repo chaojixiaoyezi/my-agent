@@ -193,7 +193,68 @@ def test_collection_contract_rejects_required_item_value_mismatch(tmp_path: Path
     assert "COLLECTION_ITEM_VALUE_MISMATCH" in {finding.code for finding in report.findings}
 
 
-def _sheet(name: str, count: int) -> dict[str, object]:
+def test_collection_contract_rejects_global_claims_without_row_field_sources(tmp_path: Path) -> None:
+    _write_source_workbook(tmp_path, {"sheets": [_sheet("week-1", 2)], "source_refs": [_source_ref("src-1")], "claims": [_claim("上升 star 数", "src-1")]})
+    report = _validate_row_evidence_workbook(tmp_path, min_items=2)
+
+    assert not report.ok
+    assert "COLLECTION_ITEM_EVIDENCE_FIELD_MISSING" in {finding.code for finding in report.findings}
+
+
+def test_collection_contract_accepts_row_field_sources(tmp_path: Path) -> None:
+    _write_source_workbook(
+        tmp_path,
+        {"sheets": [_sheet("week-1", 2, source_id="src-1")], "source_refs": [_source_ref("src-1")], "claims": [_claim("上升 star 数", "src-1")]},
+    )
+    report = _validate_row_evidence_workbook(tmp_path, min_items=2)
+
+    assert report.ok, report.to_dict()
+
+
+def test_collection_contract_accepts_row_scoped_claims(tmp_path: Path) -> None:
+    _write_source_workbook(
+        tmp_path,
+        {"sheets": [_sheet("week-1", 1)], "source_refs": [_source_ref("src-1")], "claims": [_row_claim("上升 star 数", 0, "src-1")]},
+    )
+    report = _validate_row_evidence_workbook(tmp_path, min_items=1)
+
+    assert report.ok, report.to_dict()
+
+
+def _write_source_workbook(tmp_path: Path, payload: dict[str, object]) -> None:
+    (tmp_path / "source_data.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    assert DataWorkbookTool(tmp_path).execute({"path": "report.xlsx", "source_json_path": "source_data.json"}).ok
+
+
+def _validate_row_evidence_workbook(tmp_path: Path, *, min_items: int):
+    return validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=tmp_path / "report.xlsx",
+            workspace_root=tmp_path,
+            validation_contract={
+                "required_columns": ["项目名", "地址", "上升 star 数"],
+                "staging_contract": {"source_json_ref": "source_data.json"},
+                "evidence_contract": {"required_fields": ["上升 star 数"], "require_verified": True},
+                "collection_contract": _row_evidence_collection_contract(min_items),
+            },
+        )
+    )
+
+
+def _row_evidence_collection_contract(min_items: int) -> dict[str, object]:
+    return {
+        "source_json_ref": "source_data.json",
+        "groups_path": "sheets",
+        "items_path": "rows",
+        "min_groups": 1,
+        "min_items_per_group": min_items,
+        "required_item_fields": ["项目名", "地址", "上升 star 数"],
+        "require_item_evidence": True,
+        "required_item_evidence_fields": ["上升 star 数"],
+    }
+
+
+def _sheet(name: str, count: int, *, source_id: str = "") -> dict[str, object]:
     return {
         "name": name,
         "columns": ["项目名", "地址", "上升 star 数"],
@@ -202,6 +263,7 @@ def _sheet(name: str, count: int) -> dict[str, object]:
                 "项目名": f"repo-{index}",
                 "地址": f"https://example.com/repo-{index}",
                 "上升 star 数": index,
+                **({"field_source_ids": {"上升 star 数": [source_id]}} if source_id else {}),
             }
             for index in range(count)
         ],
@@ -214,3 +276,7 @@ def _source_ref(source_id: str) -> dict[str, str]:
 
 def _claim(field: str, source_id: str) -> dict[str, object]:
     return {"claim_id": f"claim-{field}", "field": field, "source_ids": [source_id], "verification_status": "VERIFIED"}
+
+
+def _row_claim(field: str, value: object, source_id: str) -> dict[str, object]:
+    return {**_claim(field, source_id), "value": value, "reserved": {"item_path": "sheets[0].rows[0]"}}

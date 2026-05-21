@@ -149,7 +149,9 @@ def _github_star_workbook_staging_contract() -> dict[str, object]:
             "outputs/github_star_growth/source_data.json": (
                 '{"completion_evidence":{"scope":"year_to_date","retrieved_at":"...","method":"..."},'
                 '"sheets":[{"name":"YYYY-WW","columns":["项目名","地址","上升 star 数","中文解释","推荐理由"],'
-                '"rows":[{"项目名":"...","地址":"...","上升 star 数":"..."}]}]}'
+                '"rows":[{"项目名":"...","地址":"...","上升 star 数":"...",'
+                '"field_source_ids":{"项目名":["src-id"],"地址":["src-id"],"上升 star 数":["src-id"]}}]}],'
+                '"source_refs":[{"source_id":"src-id","uri":"https://...","retrieved_at":"..."}]}'
             )
         },
         "checkpoint_refs": [

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifact_acceptance_models import ArtifactFinding
+from .artifact_collection_evidence import item_evidence_findings
 from .artifact_structured_contracts import positive_int, string_list
 
 
@@ -34,6 +35,7 @@ def collection_contract_findings(
         *_item_findings(value, contract, source_ref),
         *_completion_evidence_findings(value, contract, source_ref),
         *_source_claim_count_findings(value, contract, source_ref),
+        *item_evidence_findings(value, contract, validation_contract or {}, source_ref),
         *_mapping_findings(value, contract, source_ref, workspace_root),
     ]
 
@@ -192,6 +194,8 @@ def _source_claim_count_findings(value: object, contract: dict[str, object], sou
     return findings
 
 
+# LLM: item evidence checks bind factual row fields to machine source refs instead of global prose claims.
+# 函数用途: 校验每个结构化条目的关键字段都有 source_id/claim_id 覆盖，防止一份全局 claim 冒充整张表来源。
 def _mapping_findings(
     value: object,
     contract: dict[str, object],
@@ -325,6 +329,5 @@ def _finding(code: str, message: str, location: str = "", value: str = "") -> Ar
 
 def _compact_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
 
 __all__ = ["collection_contract_finding_dicts", "collection_contract_findings"]

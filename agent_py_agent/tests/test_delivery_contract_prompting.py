@@ -270,6 +270,7 @@ def test_render_delivery_contract_section_recommends_one_duplicate_open_write_se
     assert "min_groups=21" in text
     assert "min_items_per_group=10" in text
     assert "required_item_fields=项目名, 地址, 上升 star 数" in text
+    assert "item_evidence_required_fields=项目名, 地址, 上升 star 数" in text
     assert "require_verified_evidence=true" in text
     assert "data_to_workbook" in text
 
