@@ -2,6 +2,8 @@ from __future__ import annotations
 
 # LLM: Main-complex Live Lab tests stay separate from natural subagent canaries to keep both files small.
 # 模块用途: 验证主代理复杂任务测试入口、隔离配置和真实产物 gate。
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from scripts.live_lab.constants import REAL_CASES, SUITES
@@ -18,6 +20,7 @@ from scripts.live_lab.main_agent_complex_case import (
     _main_direct_web_app_prompt,
     _main_large_log_prompt,
     _main_tool_failure_prompt,
+    case_main_direct_web_app,
 )
 from scripts.live_lab.session import LabSessionManager
 
@@ -81,6 +84,24 @@ def test_main_complex_config_disables_subagents_in_isolated_config(tmp_path):
     assert source.read_text(encoding="utf-8") == "model_backend: echo\nenable_subagents: true\n"
 
 
+# LLM: The Web app case must put static_site_check inside the agent repair loop, not only after-run assertions.
+# 函数用途: 验证主代理 Web 真实测试通过结构化 delivery_contract_file 传入通用网页验收合同。
+def test_main_web_app_case_passes_static_site_contract_to_run(tmp_path):
+    lab = _FakeMainWebAppLab(tmp_path)
+
+    case_main_direct_web_app(lab)
+
+    command = lab.commands[0]
+    assert "--delivery-contract-file" in command
+    contract_path = Path(command[command.index("--delivery-contract-file") + 1])
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    artifact = contract["artifacts"][0]
+    assert artifact["preferred_path"] == "lab_outputs/main-web-app"
+    assert artifact["validation_contract"]["validator"] == "static_site_check"
+    assert artifact["validation_contract"]["required_files"] == ["index.html", "styles.css", "app.js", "README.md"]
+    assert artifact["validation_contract"]["strict_dom_bindings"] is True
+
+
 # LLM: Main-complex artifact gates should inspect concrete root-agent outputs.
 # 函数用途: 确认主代理复杂测试的 Web、恢复报告和大日志报告验收都不相信口头回复。
 def test_main_complex_artifact_gates_accept_complete_outputs(tmp_path):
@@ -89,6 +110,36 @@ def test_main_complex_artifact_gates_accept_complete_outputs(tmp_path):
     _write_artifact_readback_report(tmp_path)
     _assert_compact_resume_roundtrip_payload(_compact_apply_payload(), _compact_resume_payload())
     _write_large_log_report(tmp_path)
+
+
+# LLM: _FakeMainWebAppLab records the command while creating a valid output fixture for the after-run gate.
+# 类用途: 避免单测调用真实模型，只观察 Live Lab case 是否把结构化合同传给 CLI。
+class _FakeMainWebAppLab:
+    def __init__(self, root: Path) -> None:
+        self.fixture_root = root
+        self.responses_dir = root / "responses"
+        self.responses_dir.mkdir(parents=True, exist_ok=True)
+        self.config_path = root / "agent_config.yaml"
+        self.config_path.write_text("model_backend: echo\nenable_subagents: true\n", encoding="utf-8")
+        self.args = SimpleNamespace(timeout=180)
+        self.commands: list[list[str]] = []
+
+    def section(self, _title: str) -> None:
+        return None
+
+    def record_prompt(self, _case_name: str, _prompt: str) -> Path:
+        return self.fixture_root / "prompt.txt"
+
+    def agent_command(self, *parts: str) -> list[str]:
+        return ["agent_py_agent", *parts]
+
+    def run_command(self, command: list[str], *, timeout: int) -> SimpleNamespace:
+        self.commands.append(command)
+        _write_complete_web_app(self.fixture_root)
+        return SimpleNamespace(stdout="", stderr="", returncode=0, elapsed_seconds=0.0)
+
+    def log(self, _message: str = "") -> None:
+        return None
 
 
 # LLM: _write_complete_web_app builds a compact valid multi-file site fixture.

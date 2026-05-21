@@ -10,6 +10,7 @@ from __future__ import annotations
 这样能先把“单个 my-agent 是否足够硬”测出来，再决定什么时候继续压子代理链路。
 """
 
+import json
 import re
 import textwrap
 from dataclasses import dataclass
@@ -36,14 +37,57 @@ def case_main_direct_web_app(lab) -> None:
     _ensure_main_agent_only(lab)
     prompt = _main_direct_web_app_prompt()
     lab.record_prompt("main_direct_web_app", prompt)
+    contract_path = _write_main_web_app_delivery_contract(lab)
     response = lab.run_command(
-        lab.agent_command("run", prompt, "--save"),
+        lab.agent_command("run", prompt, "--delivery-contract-file", str(contract_path), "--save"),
         timeout=lab.args.timeout + 120,
     )
     (lab.responses_dir / "main_direct_web_app.stdout.txt").write_text(response.stdout, encoding="utf-8")
     output_root = lab.fixture_root / "lab_outputs" / "main-web-app"
     _assert_main_web_app_output(output_root)
     lab.log(f"main_web_app_output={output_root}")
+
+
+# LLM: _write_main_web_app_delivery_contract puts the web QA contract into the main-agent repair loop.
+# 函数用途: 把多文件网页验收合同写成 JSON 文件，供 CLI 通过 --delivery-contract-file 传给主代理。
+def _write_main_web_app_delivery_contract(lab) -> Path:
+    path = lab.fixture_root / ".my_agent" / "delivery_contracts" / "main_direct_web_app.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(_main_web_app_delivery_contract(), ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return path
+
+
+# LLM: _main_web_app_delivery_contract is a structured web-project contract, not prompt-derived logic.
+# 函数用途: 定义 Live Lab 主代理网页产物必须经过 static_site_check 的机器验收字段。
+def _main_web_app_delivery_contract() -> dict[str, object]:
+    required_files = ["index.html", "styles.css", "app.js", "README.md"]
+    return {
+        "case_id": "main_direct_web_app",
+        "bootstrap_contract": {
+            "materialization_targets": [
+                {"target_type": "file", "workspace_relative_path": f"lab_outputs/main-web-app/{name}"}
+                for name in required_files
+            ],
+            "startup_actions": [{"action": "materialize_target", "priority": 1}],
+        },
+        "artifacts": [
+            {
+                "artifact_id": "main_web_app_root",
+                "kind": "web_project",
+                "preferred_path": "lab_outputs/main-web-app",
+                "required": True,
+                "validation_contract": {
+                    "validator": "static_site_check",
+                    "required_files": required_files,
+                    "require_complete_html": True,
+                    "strict_dom_bindings": True,
+                },
+            }
+        ],
+    }
 
 
 # LLM: case_main_tool_failure_recovery makes a real tool miss recoverable instead of terminal.
