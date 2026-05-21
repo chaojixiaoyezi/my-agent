@@ -100,3 +100,89 @@ def test_evidence_contract_rejects_missing_or_unreadable_sources():
         "EVIDENCE_SOURCE_UNREADABLE",
         "EVIDENCE_SOURCE_MISSING",
     ]
+
+
+# LLM: Estimated facts are acceptable only when the contract explicitly allows them and the method is structured.
+# 函数用途: 验证真实世界拿不到精确值时，可以用 estimated claim，但必须有来源、方法和置信度，不靠正文解释。
+def test_evidence_contract_accepts_declared_estimates_with_methodology():
+    from agent_py_agent.agent.contracts.evidence_contract import (
+        EvidenceClaim,
+        EvidenceContractRequest,
+        EvidenceSourceRef,
+        evaluate_evidence_contract,
+    )
+
+    report = evaluate_evidence_contract(
+        EvidenceContractRequest(
+            source_refs=[
+                EvidenceSourceRef(
+                    source_id="star-history-weekly",
+                    source_type="web",
+                    uri="https://www.star-history.com/",
+                    retrieved_at="2026-05-22T00:00:00Z",
+                )
+            ],
+            claims=[
+                EvidenceClaim(
+                    claim_id="repo-weekly-growth-estimate",
+                    field="weekly_star_growth",
+                    value="~1,500-1,600",
+                    source_ids=["star-history-weekly"],
+                    confidence=0.78,
+                    verification_status="VERIFIED",
+                    value_type="estimated",
+                    methodology="weekly ranking overlap plus current GitHub snapshot",
+                )
+            ],
+            required_fields=["weekly_star_growth"],
+            allowed_value_types=["exact", "estimated"],
+            min_confidence=0.5,
+            require_methodology_for_estimates=True,
+        )
+    )
+
+    assert report.ok is True
+    assert report.findings == []
+    claim = report.to_dict()["claims"][0]
+    assert claim["value_type"] == "estimated"
+    assert claim["methodology"]
+
+
+# LLM: Estimates without a machine-readable method should not satisfy numeric evidence contracts.
+# 函数用途: 验证模型不能只在表格或说明里写“估算”，必须把估算口径写入 claim 机器字段。
+def test_evidence_contract_rejects_estimates_without_methodology():
+    from agent_py_agent.agent.contracts.evidence_contract import (
+        EvidenceClaim,
+        EvidenceContractRequest,
+        EvidenceSourceRef,
+        evaluate_evidence_contract,
+    )
+
+    report = evaluate_evidence_contract(
+        EvidenceContractRequest(
+            source_refs=[
+                EvidenceSourceRef(
+                    source_id="star-history-weekly",
+                    source_type="web",
+                    uri="https://www.star-history.com/",
+                )
+            ],
+            claims=[
+                EvidenceClaim(
+                    claim_id="repo-weekly-growth-estimate",
+                    field="weekly_star_growth",
+                    value="~1,500-1,600",
+                    source_ids=["star-history-weekly"],
+                    confidence=0.78,
+                    verification_status="VERIFIED",
+                    value_type="estimated",
+                )
+            ],
+            required_fields=["weekly_star_growth"],
+            allowed_value_types=["exact", "estimated"],
+            require_methodology_for_estimates=True,
+        )
+    )
+
+    assert report.ok is False
+    assert [item["code"] for item in report.findings] == ["EVIDENCE_ESTIMATE_METHOD_MISSING"]

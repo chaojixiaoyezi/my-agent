@@ -145,6 +145,45 @@ def test_delivery_closeout_adds_generic_staging_builder_action_for_ready_source(
     assert actions["STAGING_BUILDER_READY"]["source_ref"] == "outputs/github_star_growth/source_data.json"
 
 
+# LLM: Failed builder outputs should be regenerated from the staged source instead of manually patched.
+# 函数用途: 验证 workbook 已存在但验收失败时，恢复动作仍会给出 data_to_workbook 的 builder 调用合同。
+def test_delivery_closeout_adds_builder_action_for_failed_existing_workbook():
+    from agent_py_agent.agent.tooling.spreadsheet_builder import DataWorkbookTool
+
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td).resolve()
+        contract = xlsx_delivery_contract()
+        _write_source(workspace, _valid_rows_json())
+        result = DataWorkbookTool(workspace).execute(
+            {
+                "path": "outputs/github_star_growth/github_star_growth.xlsx",
+                "sheets": [
+                    {
+                        "name": "week-1",
+                        "columns": ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"],
+                        "rows": [
+                            {
+                                "项目名": "",
+                                "地址": "https://example.com",
+                                "上升 star 数": 10,
+                                "中文解释": "demo",
+                                "推荐理由": "demo",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+        assert result.ok
+
+        _, actions = _enriched_report(workspace, contract)
+
+        assert actions["STAGING_BUILDER_READY"]["recommended_action"] == "invoke_builder_tool"
+        assert actions["STAGING_BUILDER_READY"]["builder_tool"] == "data_to_workbook"
+        assert actions["STAGING_BUILDER_READY"]["source_ref"] == "outputs/github_star_growth/source_data.json"
+        assert actions["STAGING_BUILDER_READY"]["output_ref"] == "outputs/github_star_growth/github_star_growth.xlsx"
+
+
 # LLM: Invalid staged JSON should produce a repair action with parse context instead of a builder action.
 # 函数用途: 验证阶段 JSON 损坏时，closeout 会要求先修 JSON，而不是继续下游构建。
 def test_delivery_closeout_reports_invalid_checkpoint_json():
@@ -156,6 +195,27 @@ def test_delivery_closeout_reports_invalid_checkpoint_json():
     assert "parse_error" in actions["STAGED_JSON_INVALID"]
     assert actions["STAGED_JSON_INVALID"]["writer_tool"] == "write_structured_json"
     assert "STAGING_BUILDER_READY" not in actions
+
+
+# LLM: Builder outputs should be built by the declared builder, not treated as manual checkpoints while the source is bad.
+# 函数用途: 验证 source checkpoint 未修好时，恢复动作不会再要求手工物化 workbook/pdf 这类 builder output。
+def test_delivery_closeout_does_not_materialize_builder_output_before_source_is_ready():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td).resolve()
+        contract = xlsx_delivery_contract()
+        report, _ = _enriched_report_for_source(workspace, '[{"项目名":"demo","地址":"https://example.com"', contract)
+        actions = report["delivery_progress"]["recovery_actions"]
+
+        builder_output_refs = {
+            item["validation_contract"]["staging_contract"]["workbook_ref"]
+            for item in contract["artifacts"]
+        }
+        assert not [
+            action
+            for action in actions
+            if action.get("recommended_action") == "materialize_checkpoint"
+            and action.get("checkpoint_ref") in builder_output_refs
+        ]
 
 
 # LLM: Repeated staged JSON failures should route into repair guard before no-progress closeout blocks.
@@ -241,113 +301,6 @@ def test_delivery_closeout_adds_document_builder_action_for_ready_markdown_sourc
         assert actions["STAGING_BUILDER_READY"]["builder_tool"] == "markdown_to_pdf"
         assert actions["STAGING_BUILDER_READY"]["source_ref"] == "outputs/research_documents/research_documents_zh.md"
         assert actions["STAGING_BUILDER_READY"]["output_ref"] == "outputs/research_documents/research_documents_zh.pdf"
-
-
-# LLM: Artifact mapping failures should repair the mapped text artifact, not the final binary wrapper.
-# 函数用途: 验证 mapping finding 的 location 会成为 repair target，PDF/图片等二进制产物不会误导修复链路。
-def test_delivery_closeout_uses_finding_location_as_repair_target_for_mapping_failures():
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td).resolve()
-        contract = _research_pdf_contract()
-        validation_contract = contract["artifacts"][0]["validation_contract"]
-        validation_contract["collection_contract"] = {
-            "source_json_ref": "outputs/research_documents/source_index.json",
-            "items_path": "rows",
-            "min_items_total": 2,
-            "required_item_fields": ["title", "url", "date"],
-            "require_completion_evidence": True,
-            "mapping": {
-                "artifact_ref": "outputs/research_documents/research_documents_zh.md",
-                "key_fields": ["title"],
-                "min_mapped_items": 2,
-            },
-        }
-        _write_valid_pdf(workspace / "outputs/research_documents/research_documents_zh.pdf")
-        _write_json_file(
-            workspace / "outputs/research_documents/source_index.json",
-            {
-                "completion_evidence": {"scope": "complete"},
-                "rows": [
-                    {"title": "Paper A", "url": "https://example.com/a", "date": "2026-01-01"},
-                    {"title": "Paper B", "url": "https://example.com/b", "date": "2026-01-02"},
-                ],
-            },
-        )
-        draft = workspace / "outputs/research_documents/research_documents_zh.md"
-        draft.write_text("# 翻译正文\n\n这里没有精确标题映射。", encoding="utf-8")
-
-        _, actions = _enriched_report(workspace, contract)
-
-        action = actions["ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED"]
-        assert str(draft) in action["repair_targets"]
-
-
-# LLM: JSON pointer fragments identify rows, not filesystem names.
-# 函数用途: 验证 `source_index.json#1:field` 这类 finding location 会解析到真实 JSON 文件，不会拼出重复目录。
-def test_delivery_closeout_strips_json_fragment_from_repair_target_locations():
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td).resolve()
-        contract = _research_pdf_contract()
-        validation_contract = contract["artifacts"][0]["validation_contract"]
-        validation_contract["collection_contract"] = {
-            "source_json_ref": "outputs/research_documents/source_index.json",
-            "items_path": "rows",
-            "min_items_total": 2,
-            "required_item_fields": ["title", "url", "date", "translated"],
-            "required_item_values": {"translated": True},
-        }
-        _write_valid_pdf(workspace / "outputs/research_documents/research_documents_zh.pdf")
-        source = workspace / "outputs/research_documents/source_index.json"
-        _write_json_file(
-            source,
-            {
-                "rows": [
-                    {"title": "Paper A", "url": "https://example.com/a", "date": "2026-01-01", "translated": True},
-                    {"title": "Paper B", "url": "https://example.com/b", "date": "2026-01-02", "translated": False},
-                ],
-            },
-        )
-
-        _, actions = _enriched_report(workspace, contract)
-
-        action = actions["ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED"]
-        assert str(source) in action["repair_targets"]
-        assert not any("source_index.json#1" in item for item in action["repair_targets"])
-        assert not any("outputs/research_documents/outputs/research_documents" in item for item in action["repair_targets"])
-
-
-# LLM: dotted API names are finding facts, not files to patch.
-# 函数用途: 验证 `app.goBrowse` 这类 JS API finding value 不会被 closeout 拼成假 repair target。
-def test_delivery_closeout_does_not_treat_dotted_api_findings_as_file_targets():
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td).resolve()
-        contract = {
-            "artifacts": [
-                {
-                    "artifact_id": "site",
-                    "kind": "web_project",
-                    "path": str(workspace / "outputs/site"),
-                    "validation_contract": {
-                        "validator": "static_site_check",
-                        "required_files": ["index.html", "app.js"],
-                    },
-                }
-            ]
-        }
-        site = workspace / "outputs/site"
-        site.mkdir(parents=True)
-        (site / "index.html").write_text(
-            '<!doctype html><html><head></head><body><button onclick="app.goBrowse()">Go</button><script src="app.js"></script></body></html>',
-            encoding="utf-8",
-        )
-        (site / "app.js").write_text("const app = {};", encoding="utf-8")
-
-        _, actions = _enriched_report(workspace, contract)
-
-        action = actions["ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED"]
-        assert str(site / "index.html") in action["repair_targets"]
-        assert str(site / "app.js") in action["repair_targets"]
-        assert not any(item.endswith("/app.goBrowse") for item in action["repair_targets"])
 
 
 # LLM: Recovery actions must not drop larger structured validator batches.

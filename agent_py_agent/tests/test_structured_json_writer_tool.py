@@ -75,6 +75,48 @@ def test_structured_json_tool_merges_existing_checkpoint_metadata(tmp_path: Path
     assert data["claims"][0]["field"] == "项目名"
 
 
+# LLM: Evidence repair should add missing evidence without discarding earlier claims.
+# 函数用途: 验证 merge_existing 对 claims/source_refs 做追加去重，避免修证据时覆盖已有表格证据。
+def test_structured_json_tool_appends_evidence_metadata_when_merging(tmp_path: Path) -> None:
+    tool = StructuredJsonTool(tmp_path)
+    target = tmp_path / "outputs/report/source_data.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        json.dumps(
+            {
+                "sheets": [{"name": "榜单", "rows": [{"项目名": "demo"}]}],
+                "source_refs": [{"source_id": "src-1", "uri": "https://example.com/old"}],
+                "claims": [{"field": "项目名", "source_ids": ["src-1"], "value": "demo"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = tool.execute(
+        {
+            "path": "outputs/report/source_data.json",
+            "merge_existing": True,
+            "data": {
+                "source_refs": [
+                    {"source_id": "src-1", "uri": "https://example.com/old"},
+                    {"source_id": "src-2", "uri": "https://example.com/new"},
+                ],
+                "claims": [
+                    {"field": "地址", "source_ids": ["src-2"], "value": "https://example.com/new"},
+                    {"field": "项目名", "source_ids": ["src-1"], "value": "demo"},
+                ],
+            },
+        }
+    )
+
+    assert result.ok, result.output
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert [item["source_id"] for item in data["source_refs"]] == ["src-1", "src-2"]
+    assert [item["field"] for item in data["claims"]] == ["项目名", "地址"]
+    assert data["sheets"][0]["rows"][0]["项目名"] == "demo"
+
+
 # LLM: large spreadsheet-style checkpoints should be extendable one sheet at a time.
 # 函数用途: 验证 merge_existing 对 sheets 使用追加/同名合并，而不是浅替换整份阶段数据。
 def test_structured_json_tool_appends_sheets_when_merging_existing_checkpoint(tmp_path: Path) -> None:

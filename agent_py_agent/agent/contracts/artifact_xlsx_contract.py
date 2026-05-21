@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
-import re
-from html import unescape
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
 from .artifact_acceptance_models import ArtifactFinding
+from .artifact_xlsx_reader import (
+    required_columns_with_blank_values,
+    workbook_text,
+    worksheet_tables,
+)
 
 
 # LLM: xlsx_contract_findings returns schema findings derived only from validation_contract.
@@ -19,11 +22,13 @@ def xlsx_contract_findings(path: Path, validation_contract: dict[str, object] | 
     try:
         with ZipFile(path) as workbook:
             names = set(workbook.namelist())
-            workbook_text = _workbook_text(workbook, names)
+            text = workbook_text(workbook, names)
+            tables = worksheet_tables(workbook, names)
     except (BadZipFile, OSError):
         return findings
     findings.extend(_sheet_count_findings(path, names, contract))
-    findings.extend(_required_column_findings(path, workbook_text, contract))
+    findings.extend(_required_column_findings(path, text, contract))
+    findings.extend(_required_column_value_findings(path, tables, contract))
     return findings
 
 
@@ -75,28 +80,28 @@ def _required_column_findings(
     ]
 
 
-# LLM: _workbook_text extracts visible text from worksheets and shared strings.
-# 函数用途: 从 xlsx XML 中提取单元格文本，支持 inline strings 和 sharedStrings。
-def _workbook_text(workbook: ZipFile, names: set[str]) -> str:
-    parts = [
-        name
-        for name in sorted(names)
-        if name == "xl/sharedStrings.xml" or name.startswith("xl/worksheets/")
+# LLM: _required_column_value_findings checks required spreadsheet fields contain values in data rows.
+# 函数用途: 对已声明 required_columns 的表格，拒绝表头存在但数据行空值的 workbook。
+def _required_column_value_findings(
+    path: Path,
+    worksheet_tables: list[list[list[str]]],
+    contract: dict[str, object],
+) -> list[ArtifactFinding]:
+    required_columns = _required_columns(contract.get("required_columns"))
+    if not required_columns:
+        return []
+    blank_columns = required_columns_with_blank_values(worksheet_tables, required_columns)
+    if not blank_columns:
+        return []
+    return [
+        ArtifactFinding(
+            code="XLSX_REQUIRED_COLUMN_EMPTY_VALUES",
+            severity="hard",
+            message="Workbook has blank values in required columns.",
+            location=str(path),
+            value=",".join(blank_columns),
+        )
     ]
-    return "\n".join(_xml_text(workbook.read(name).decode("utf-8", errors="replace")) for name in parts)
-
-
-# LLM: _xml_text extracts text nodes from XML without depending on spreadsheet libraries.
-# 函数用途: 读取 <t> 和 <v> 节点文本，用于轻量 schema 验收。
-def _xml_text(xml: str) -> str:
-    values = re.findall(r"<(?:t|v)(?:\\s[^>]*)?>(.*?)</(?:t|v)>", xml, flags=re.DOTALL)
-    return "\n".join(unescape(_strip_xml_tags(value)) for value in values)
-
-
-# LLM: _strip_xml_tags removes rich-text child tags from extracted text fragments.
-# 函数用途: 兼容 sharedStrings 富文本节点，保留人可见文本。
-def _strip_xml_tags(value: str) -> str:
-    return re.sub(r"<[^>]+>", "", value)
 
 
 # LLM: _required_columns normalizes contract column labels.

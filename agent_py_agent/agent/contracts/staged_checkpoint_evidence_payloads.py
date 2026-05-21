@@ -61,6 +61,8 @@ def _claim(index: int, item: dict[str, Any]) -> EvidenceClaim:
         source_ids=string_list(item.get("source_ids")),
         confidence=float(item.get("confidence", 1.0) or 0.0),
         verification_status=str(item.get("verification_status") or "VERIFIED"),
+        value_type=str(item.get("value_type") or "exact"),
+        methodology=str(item.get("methodology") or ""),
         reserved=dict(item.get("reserved")) if isinstance(item.get("reserved"), dict) else {},
     )
 

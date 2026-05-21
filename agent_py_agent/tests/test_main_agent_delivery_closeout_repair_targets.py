@@ -1,0 +1,129 @@
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+
+from agent_py_agent.tests.test_main_agent_delivery_closeout_staged import (
+    _enriched_report,
+    _research_pdf_contract,
+    _write_json_file,
+    _write_valid_pdf,
+)
+
+
+# LLM: Artifact mapping failures should repair the mapped text artifact, not the final binary wrapper.
+# 函数用途: 验证 mapping finding 的 location 会成为 repair target，PDF/图片等二进制产物不会误导修复链路。
+def test_delivery_closeout_uses_finding_location_as_repair_target_for_mapping_failures() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td).resolve()
+        contract = _research_pdf_contract()
+        validation_contract = contract["artifacts"][0]["validation_contract"]
+        validation_contract["collection_contract"] = _mapping_collection_contract()
+        _write_valid_pdf(workspace / "outputs/research_documents/research_documents_zh.pdf")
+        _write_json_file(workspace / "outputs/research_documents/source_index.json", _mapped_rows_payload())
+        draft = workspace / "outputs/research_documents/research_documents_zh.md"
+        draft.write_text("# 翻译正文\n\n这里没有精确标题映射。", encoding="utf-8")
+
+        _, actions = _enriched_report(workspace, contract)
+
+        assert str(draft) in actions["ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED"]["repair_targets"]
+
+
+def _mapping_collection_contract() -> dict[str, object]:
+    return {
+        "source_json_ref": "outputs/research_documents/source_index.json",
+        "items_path": "rows",
+        "min_items_total": 2,
+        "required_item_fields": ["title", "url", "date"],
+        "require_completion_evidence": True,
+        "mapping": {
+            "artifact_ref": "outputs/research_documents/research_documents_zh.md",
+            "key_fields": ["title"],
+            "min_mapped_items": 2,
+        },
+    }
+
+
+def _mapped_rows_payload() -> dict[str, object]:
+    return {
+        "completion_evidence": {"scope": "complete"},
+        "rows": [
+            {"title": "Paper A", "url": "https://example.com/a", "date": "2026-01-01"},
+            {"title": "Paper B", "url": "https://example.com/b", "date": "2026-01-02"},
+        ],
+    }
+
+
+# LLM: JSON pointer fragments identify rows, not filesystem names.
+# 函数用途: 验证 `source_index.json#1:field` 这类 finding location 会解析到真实 JSON 文件。
+def test_delivery_closeout_strips_json_fragment_from_repair_target_locations() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td).resolve()
+        contract = _research_pdf_contract()
+        validation_contract = contract["artifacts"][0]["validation_contract"]
+        validation_contract["collection_contract"] = _translated_collection_contract()
+        source = workspace / "outputs/research_documents/source_index.json"
+        _write_valid_pdf(workspace / "outputs/research_documents/research_documents_zh.pdf")
+        _write_json_file(source, _translated_rows_payload())
+
+        _, actions = _enriched_report(workspace, contract)
+
+        action = actions["ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED"]
+        assert str(source) in action["repair_targets"]
+        assert not any("source_index.json#1" in item for item in action["repair_targets"])
+        assert not any("outputs/research_documents/outputs/research_documents" in item for item in action["repair_targets"])
+
+
+def _translated_collection_contract() -> dict[str, object]:
+    return {
+        "source_json_ref": "outputs/research_documents/source_index.json",
+        "items_path": "rows",
+        "min_items_total": 2,
+        "required_item_fields": ["title", "url", "date", "translated"],
+        "required_item_values": {"translated": True},
+    }
+
+
+def _translated_rows_payload() -> dict[str, object]:
+    return {
+        "rows": [
+            {"title": "Paper A", "url": "https://example.com/a", "date": "2026-01-01", "translated": True},
+            {"title": "Paper B", "url": "https://example.com/b", "date": "2026-01-02", "translated": False},
+        ],
+    }
+
+
+# LLM: dotted API names are finding facts, not files to patch.
+# 函数用途: 验证 `app.goBrowse` 这类 JS API finding value 不会被 closeout 拼成假 repair target。
+def test_delivery_closeout_does_not_treat_dotted_api_findings_as_file_targets() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td).resolve()
+        contract = _static_site_contract(workspace)
+        site = workspace / "outputs/site"
+        site.mkdir(parents=True)
+        (site / "index.html").write_text(_site_html(), encoding="utf-8")
+        (site / "app.js").write_text("const app = {};", encoding="utf-8")
+
+        _, actions = _enriched_report(workspace, contract)
+
+        action = actions["ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED"]
+        assert str(site / "index.html") in action["repair_targets"]
+        assert str(site / "app.js") in action["repair_targets"]
+        assert not any(item.endswith("/app.goBrowse") for item in action["repair_targets"])
+
+
+def _static_site_contract(workspace: Path) -> dict[str, object]:
+    return {
+        "artifacts": [
+            {
+                "artifact_id": "site",
+                "kind": "web_project",
+                "path": str(workspace / "outputs/site"),
+                "validation_contract": {"validator": "static_site_check", "required_files": ["index.html", "app.js"]},
+            }
+        ]
+    }
+
+
+def _site_html() -> str:
+    return '<!doctype html><html><body><button onclick="app.goBrowse()">Go</button><script src="app.js"></script></body></html>'

@@ -81,7 +81,9 @@ def _evidence_writer_fields(checkpoint_ref: str) -> dict[str, object]:
         "writer_tool": "write_structured_json",
         "evidence_shape_hint": (
             '{"source_refs":[{"source_id":"src-1","uri":"https://...","retrieved_at":"..."}],'
-            '"claims":[{"field":"...","value":"...","source_ids":["src-1"],"verification_status":"VERIFIED"}]}'
+            '"claims":[{"field":"...","value":"...","source_ids":["src-1"],'
+            '"verification_status":"VERIFIED","value_type":"exact","confidence":1.0,'
+            '"methodology":"how this value was obtained"}]}'
         ),
     }
 

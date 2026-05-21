@@ -14,6 +14,7 @@ from .tool_bootstrap_materialization_guard import (
     is_bootstrap_materialization_evidence_call,
     is_bootstrap_materialization_productive_call,
 )
+from .tool_delivery_repair_call_normalizer import normalize_delivery_repair_calls
 from .tool_delivery_repair_guard import (
     delivery_repair_block_response,
     delivery_repair_context,
@@ -133,12 +134,17 @@ def _tool_calls_decision(
     open_session_tools = open_session_tool_call_decision(_open_session_request(request, calls))
     if open_session_tools is not None:
         return _open_session_decision(open_session_tools)
-    bootstrap_decision = _bootstrap_materialization_tool_call_decision(request, calls)
-    if bootstrap_decision is not None:
-        return bootstrap_decision
+    calls = normalize_delivery_repair_calls(request.agent, calls, request.params)
+    delivery_repair_active = has_required_delivery_repair(request.agent, request.params)
     delivery_repair_tools = _delivery_repair_tool_call_decision(request, calls)
     if delivery_repair_tools is not None:
         return delivery_repair_tools
+    if delivery_repair_active:
+        clean_response = sanitize_reserved_tool_record_response(request.response)
+        return ToolLoopResponseDecision("run_tools", clean_response, calls, request.counters)
+    bootstrap_decision = _bootstrap_materialization_tool_call_decision(request, calls)
+    if bootstrap_decision is not None:
+        return bootstrap_decision
     local_progress_tools = _local_progress_tool_call_decision(request, calls)
     if local_progress_tools is not None:
         return local_progress_tools
@@ -155,12 +161,12 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
     open_session_decision = open_write_session_decision(_open_session_request(request, []))
     if open_session_decision is not None:
         return _open_session_decision(open_session_decision)
-    bootstrap_decision = _bootstrap_materialization_no_tool_call_decision(request)
-    if bootstrap_decision is not None:
-        return bootstrap_decision
     delivery_repair_decision = _delivery_repair_no_tool_call_decision(request)
     if delivery_repair_decision is not None:
         return delivery_repair_decision
+    bootstrap_decision = _bootstrap_materialization_no_tool_call_decision(request)
+    if bootstrap_decision is not None:
+        return bootstrap_decision
     local_progress_decision = _local_progress_no_tool_call_decision(request)
     if local_progress_decision is not None:
         return local_progress_decision

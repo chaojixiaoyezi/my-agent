@@ -66,6 +66,39 @@ def test_xlsx_acceptance_rejects_missing_required_columns(tmp_path: Path) -> Non
     assert "XLSX_MISSING_REQUIRED_COLUMNS" in codes
 
 
+# LLM: Required spreadsheet columns are value contracts, not only header labels.
+# 函数用途: 验证 xlsx 里必填列存在但数据行为空时不能通过机器验收。
+def test_xlsx_acceptance_rejects_blank_required_column_values(tmp_path: Path) -> None:
+    tool = DataWorkbookTool(tmp_path)
+    result = tool.execute(
+        {
+            "path": "report.xlsx",
+            "sheets": [
+                {
+                    "name": "weekly",
+                    "columns": ["项目名", "地址", "上升 star 数"],
+                    "rows": [{"项目名": "", "地址": "https://example.com/demo", "上升 star 数": "42"}],
+                }
+            ],
+        }
+    )
+    assert result.ok
+
+    report = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=tmp_path / "report.xlsx",
+            workspace_root=tmp_path,
+            validation_contract={
+                "required_columns": ["项目名", "地址", "上升 star 数"],
+            },
+        )
+    )
+    codes = {finding.code for finding in report.findings}
+
+    assert not report.ok
+    assert "XLSX_REQUIRED_COLUMN_EMPTY_VALUES" in codes
+
+
 # LLM: Workbook acceptance must reject fact tables whose source JSON has no machine evidence refs.
 # 函数用途: 验证 xlsx 即使生成成功，只要 staging source 缺结构化来源证据，也不能通过机器验收。
 def test_xlsx_acceptance_rejects_unsourced_staged_source_json(tmp_path: Path) -> None:
@@ -110,6 +143,42 @@ def test_xlsx_acceptance_rejects_unsourced_staged_source_json(tmp_path: Path) ->
     assert "EVIDENCE_REQUIRED_FIELD_MISSING" in codes
 
 
+# LLM: Staged source JSON should reject blank required cell values before the workbook builder runs.
+# 函数用途: 验证 source_data.json 的必填列空值会在阶段验收中失败，避免生成空单元格 xlsx。
+def test_staged_checkpoint_rejects_blank_required_column_values(tmp_path: Path) -> None:
+    source = tmp_path / "outputs/github_star_growth/source_data.json"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        """
+{
+  "sheets": [
+    {
+      "name": "汇总",
+      "columns": ["项目名", "地址", "上升 star 数"],
+      "rows": [{"项目名": "", "地址": "https://example.com", "上升 star 数": "估算"}]
+    }
+  ]
+}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    findings = staged_checkpoint_findings(
+        [
+            {
+                "preferred_path": "outputs/github_star_growth/github_star_growth.xlsx",
+                "validation_contract": {
+                    "required_columns": ["项目名", "地址", "上升 star 数"],
+                    "staging_contract": {"checkpoint_refs": ["outputs/github_star_growth/source_data.json"]},
+                },
+            }
+        ],
+        tmp_path,
+    )
+
+    assert {finding["code"] for finding in findings} == {"STAGED_JSON_REQUIRED_COLUMN_EMPTY_VALUES"}
+
+
 # LLM: staged checkpoint acceptance must use the same sheet/evidence contract as final artifact checks.
 # 函数用途: 验证真实任务 acceptance 的 runtime_findings 不会丢掉 staged source 的结构和证据问题。
 def test_staged_checkpoint_findings_use_validation_contract_shape_and_evidence(tmp_path: Path) -> None:
@@ -143,3 +212,63 @@ def test_staged_checkpoint_findings_use_validation_contract_shape_and_evidence(t
     codes = {finding["code"] for finding in findings}
     assert "STAGED_JSON_TOO_FEW_SHEETS" in codes
     assert "EVIDENCE_REQUIRED_FIELD_MISSING" in codes
+
+
+# LLM: Staged evidence should support declared estimated values without weakening source/ref checks.
+# 函数用途: 验证 source_data.json 可用 value_type/methodology 表达估算口径，并通过同一阶段证据合同。
+def test_staged_checkpoint_evidence_accepts_declared_estimates(tmp_path: Path) -> None:
+    _write_estimated_source(tmp_path)
+
+    findings = staged_checkpoint_findings([_estimated_evidence_contract_item()], tmp_path)
+
+    assert findings == []
+
+
+def _write_estimated_source(root: Path) -> None:
+    source = root / "outputs/github_star_growth/source_data.json"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        """
+{
+  "sheets": [
+    {
+      "name": "汇总",
+      "columns": ["项目名", "地址", "上升 star 数"],
+      "rows": [{"项目名": "demo", "地址": "https://example.com", "上升 star 数": "~100-120"}]
+    }
+  ],
+  "source_refs": [{"source_id": "src-1", "uri": "https://example.com/ranking"}],
+  "claims": [
+    {
+      "claim_id": "growth-1",
+      "field": "上升 star 数",
+      "value": "~100-120",
+      "source_ids": ["src-1"],
+      "confidence": 0.7,
+      "verification_status": "VERIFIED",
+      "value_type": "estimated",
+      "methodology": "weekly ranking overlap and current repository snapshot"
+    }
+  ]
+}
+""".strip(),
+        encoding="utf-8",
+    )
+
+
+def _estimated_evidence_contract_item() -> dict[str, object]:
+    return {
+        "preferred_path": "outputs/github_star_growth/github_star_growth.xlsx",
+        "validation_contract": {
+            "required_sheets_min": 1,
+            "required_columns": ["项目名", "地址", "上升 star 数"],
+            "staging_contract": {"checkpoint_refs": ["outputs/github_star_growth/source_data.json"]},
+            "evidence_contract": {
+                "allowed_value_types": ["exact", "estimated"],
+                "min_confidence": 0.5,
+                "require_methodology_for_estimates": True,
+                "require_verified": True,
+                "required_fields": ["上升 star 数"],
+            },
+        },
+    }

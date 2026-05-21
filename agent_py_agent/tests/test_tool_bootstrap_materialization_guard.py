@@ -127,6 +127,100 @@ def test_bootstrap_materialization_still_redirects_inspection_tool_calls(tmp_pat
     assert any("bootstrap-materialization" in item for item in params.tool_context)
 
 
+# LLM: Existing delivery repair actions must own the next turn before bootstrap startup redirects.
+# 函数用途: 验证 closeout 已经声明阶段修复动作时，开工 guard 不能抢先覆盖恢复门。
+def test_delivery_repair_has_priority_over_bootstrap_materialization(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_loop_repair_counters import ToolLoopRepairCounters
+    from agent_py_agent.agent.agent_core.tool_loop_response_decision import (
+        ToolLoopResponseDecisionRequest,
+        tool_loop_response_decision,
+    )
+    from agent_py_agent.agent.backend import ModelResponse
+    from agent_py_agent.tests.tool_delivery_repair_fixtures import _write_closeout
+
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "recovery_actions": [
+                    {
+                        "code": "STAGING_CHECKPOINT_MISSING",
+                        "recommended_action": "materialize_checkpoint",
+                        "checkpoint_ref": "outputs/report/source_data.json",
+                        "checkpoint_shape_hint": '{"sheets":[{"rows":[{"项目名":"..."}]}]}',
+                        "writer_tool": "write_structured_json",
+                    }
+                ]
+            },
+        },
+    )
+    agent = _agent(tmp_path, {"CALL_LIST": [{"tool": "list_files", "path": "."}]})
+    params = _params(delivery_contract=_delivery_contract_with_shape_hint())
+
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="CALL_LIST", backend="fake"),
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+
+    assert decision.action == "continue"
+    assert decision.calls == []
+    assert decision.counters.delivery_repair_redirects == 1
+    assert any("delivery-required-repair" in item for item in params.tool_context)
+    assert not any("bootstrap-materialization" in item for item in params.tool_context)
+
+
+# LLM: No-tool recovery turns also need delivery repair guidance before startup materialization guidance.
+# 函数用途: 验证模型空回复/聊天时，已存在的阶段修复动作优先成为下一轮上下文。
+def test_delivery_repair_no_tool_context_has_priority_over_bootstrap(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_loop_repair_counters import ToolLoopRepairCounters
+    from agent_py_agent.agent.agent_core.tool_loop_response_decision import (
+        ToolLoopResponseDecisionRequest,
+        tool_loop_response_decision,
+    )
+    from agent_py_agent.agent.backend import ModelResponse
+    from agent_py_agent.tests.tool_delivery_repair_fixtures import _write_closeout
+
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "recovery_actions": [
+                    {
+                        "code": "STAGING_CHECKPOINT_MISSING",
+                        "recommended_action": "materialize_checkpoint",
+                        "checkpoint_ref": "outputs/report/source_data.json",
+                        "checkpoint_shape_hint": '{"sheets":[{"rows":[{"项目名":"..."}]}]}',
+                        "writer_tool": "write_structured_json",
+                    }
+                ]
+            },
+        },
+    )
+    agent = _agent(tmp_path, {})
+    params = _params(delivery_contract=_delivery_contract_with_shape_hint())
+
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="我继续想想", backend="fake"),
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+
+    assert decision.action == "continue"
+    assert decision.calls == []
+    assert decision.counters.delivery_repair_redirects == 1
+    assert any("delivery-required-repair" in item for item in params.tool_context)
+    assert not any("bootstrap-materialization" in item for item in params.tool_context)
+
+
 # LLM: _delivery_contract_with_shape_hint is the structured bootstrap fixture for shape-hint tests.
 # 函数用途: 声明一个 checkpoint target、startup action 和对应的 checkpoint_shape_hints。
 def _delivery_contract_with_shape_hint() -> dict[str, object]:

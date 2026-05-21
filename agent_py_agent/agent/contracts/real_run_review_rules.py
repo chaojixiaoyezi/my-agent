@@ -13,7 +13,12 @@ TAG_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("staged_checkpoint_empty", ("STAGED_JSON_NO_ROWS",)),
     (
         "structured_columns_missing",
-        ("XLSX_MISSING_REQUIRED_COLUMNS", "STAGED_JSON_REQUIRED_COLUMNS_MISSING"),
+        (
+            "XLSX_MISSING_REQUIRED_COLUMNS",
+            "XLSX_REQUIRED_COLUMN_EMPTY_VALUES",
+            "STAGED_JSON_REQUIRED_COLUMNS_MISSING",
+            "STAGED_JSON_REQUIRED_COLUMN_EMPTY_VALUES",
+        ),
     ),
     (
         "evidence_claims_missing",

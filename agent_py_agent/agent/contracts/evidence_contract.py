@@ -45,6 +45,8 @@ class EvidenceClaim:
     source_ids: list[str] = field(default_factory=list)
     confidence: float = 1.0
     verification_status: str = "VERIFIED"
+    value_type: str = "exact"
+    methodology: str = ""
     reserved: dict[str, Any] = field(default_factory=dict)
 
     # LLM: to_dict serializes claims without assuming value type.
@@ -57,6 +59,8 @@ class EvidenceClaim:
             "source_ids": list(self.source_ids),
             "confidence": self.confidence,
             "verification_status": self.verification_status,
+            "value_type": self.value_type,
+            "methodology": self.methodology,
             "reserved": dict(self.reserved),
         }
 
@@ -69,6 +73,9 @@ class EvidenceContractRequest:
     claims: list[EvidenceClaim] = field(default_factory=list)
     required_fields: list[str] = field(default_factory=list)
     require_verified: bool = True
+    allowed_value_types: list[str] = field(default_factory=lambda: ["exact"])
+    min_confidence: float = 0.0
+    require_methodology_for_estimates: bool = False
     reserved: dict[str, Any] = field(default_factory=dict)
 
 
@@ -94,13 +101,24 @@ class EvidenceContractReport:
         }
 
 
+# LLM: _ClaimValidationContext holds evidence claim validation policy in one object.
+# 类用途: 避免 claim 检查函数靠多参数散传，保持合同字段集中可扩展。
+@dataclass(frozen=True)
+class _ClaimValidationContext:
+    sources_by_id: dict[str, EvidenceSourceRef]
+    allowed_value_types: set[str]
+    min_confidence: float
+    require_methodology_for_estimates: bool
+    require_verified: bool
+
+
 # LLM: evaluate_evidence_contract validates sources and claim links without reading prose.
 # 函数用途: 检查来源是否可读、claim 是否有来源、必需字段是否存在；不把自然语言说明当证据。
 def evaluate_evidence_contract(request: EvidenceContractRequest) -> EvidenceContractReport:
     sources_by_id = {item.source_id: item for item in request.source_refs if item.source_id}
     findings: list[dict[str, Any]] = []
     findings.extend(_source_findings(request.source_refs))
-    findings.extend(_claim_findings(request.claims, sources_by_id, require_verified=request.require_verified))
+    findings.extend(_claim_findings(request.claims, _claim_validation_context(request, sources_by_id)))
     findings.extend(_required_field_findings(request.required_fields, request.claims))
     return EvidenceContractReport(
         ok=not findings,
@@ -130,44 +148,92 @@ def _source_findings(source_refs: list[EvidenceSourceRef]) -> list[dict[str, Any
 
 # LLM: _claim_findings verifies claim-to-source edges using source ids as machine truth.
 # 函数用途: 检查 claim 是否缺来源、引用未知来源或未被验证。
-def _claim_findings(
-    claims: list[EvidenceClaim],
-    sources_by_id: dict[str, EvidenceSourceRef],
-    *,
-    require_verified: bool,
-) -> list[dict[str, Any]]:
+def _claim_findings(claims: list[EvidenceClaim], context: _ClaimValidationContext) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     for claim in claims:
         if not claim.source_ids:
-            findings.append(
-                _finding(
-                    "EVIDENCE_CLAIM_UNSOURCED",
-                    "hard",
-                    "claim has no source ids",
-                    details={"claim_id": claim.claim_id},
-                )
-            )
+            findings.append(_claim_finding("EVIDENCE_CLAIM_UNSOURCED", "claim has no source ids", claim))
             continue
-        missing = [source_id for source_id in claim.source_ids if source_id not in sources_by_id]
+        missing = [source_id for source_id in claim.source_ids if source_id not in context.sources_by_id]
         if missing:
-            findings.append(
-                _finding(
-                    "EVIDENCE_SOURCE_MISSING",
-                    "hard",
-                    "claim references missing source ids",
-                    details={"claim_id": claim.claim_id, "missing_source_ids": missing},
-                )
-            )
-        if require_verified and claim.verification_status != "VERIFIED":
-            findings.append(
-                _finding(
-                    "EVIDENCE_CLAIM_UNVERIFIED",
-                    "hard",
-                    "claim verification_status is not VERIFIED",
-                    details={"claim_id": claim.claim_id},
-                )
-            )
+            findings.append(_claim_finding("EVIDENCE_SOURCE_MISSING", "claim references missing source ids", claim, missing_source_ids=missing))
+        findings.extend(_claim_policy_findings(claim, context))
     return findings
+
+
+# LLM: _claim_validation_context normalizes evidence policy from the request.
+# 函数用途: 将 allowed_value_types 等合同字段转成 claim 检查用的稳定上下文。
+def _claim_validation_context(
+    request: EvidenceContractRequest,
+    sources_by_id: dict[str, EvidenceSourceRef],
+) -> _ClaimValidationContext:
+    allowed_types = {str(item).strip() for item in request.allowed_value_types if str(item).strip()} or {"exact"}
+    return _ClaimValidationContext(
+        sources_by_id=sources_by_id,
+        allowed_value_types=allowed_types,
+        min_confidence=request.min_confidence,
+        require_methodology_for_estimates=request.require_methodology_for_estimates,
+        require_verified=request.require_verified,
+    )
+
+
+# LLM: _claim_policy_findings checks verification, value type, confidence, and estimate methodology.
+# 函数用途: 将每条 claim 的策略类 finding 拆小，便于扩展更多机器字段。
+def _claim_policy_findings(claim: EvidenceClaim, context: _ClaimValidationContext) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    if context.require_verified and claim.verification_status != "VERIFIED":
+        findings.append(_claim_finding("EVIDENCE_CLAIM_UNVERIFIED", "claim verification_status is not VERIFIED", claim))
+    findings.extend(_claim_value_type_findings(claim, context))
+    findings.extend(_claim_confidence_findings(claim, context))
+    findings.extend(_claim_estimate_method_findings(claim, context))
+    return findings
+
+
+# LLM: _claim_value_type_findings enforces allowed evidence value types.
+# 函数用途: 防止估算值冒充精确事实。
+def _claim_value_type_findings(claim: EvidenceClaim, context: _ClaimValidationContext) -> list[dict[str, Any]]:
+    value_type = str(claim.value_type or "exact").strip()
+    if value_type in context.allowed_value_types:
+        return []
+    return [
+        _claim_finding(
+            "EVIDENCE_VALUE_TYPE_NOT_ALLOWED",
+            "claim value_type is not allowed by the evidence contract",
+            claim,
+            value_type=value_type,
+        )
+    ]
+
+
+# LLM: _claim_confidence_findings enforces numeric confidence thresholds.
+# 函数用途: 估算或弱证据低于合同阈值时拒绝通过。
+def _claim_confidence_findings(claim: EvidenceClaim, context: _ClaimValidationContext) -> list[dict[str, Any]]:
+    if context.min_confidence <= 0 or claim.confidence >= context.min_confidence:
+        return []
+    return [
+        _claim_finding(
+            "EVIDENCE_CLAIM_LOW_CONFIDENCE",
+            "claim confidence is below the required minimum",
+            claim,
+            confidence=claim.confidence,
+            min_confidence=context.min_confidence,
+        )
+    ]
+
+
+# LLM: _claim_estimate_method_findings requires methodology for declared estimates.
+# 函数用途: 估算类 claim 必须说明结构化计算/采样口径。
+def _claim_estimate_method_findings(claim: EvidenceClaim, context: _ClaimValidationContext) -> list[dict[str, Any]]:
+    value_type = str(claim.value_type or "exact").strip()
+    if not context.require_methodology_for_estimates or value_type != "estimated" or claim.methodology.strip():
+        return []
+    return [_claim_finding("EVIDENCE_ESTIMATE_METHOD_MISSING", "estimated claim lacks machine-readable methodology", claim)]
+
+
+# LLM: _claim_finding adds claim_id to evidence findings consistently.
+# 函数用途: 构造 claim 级 finding，附加字段只来自机器参数。
+def _claim_finding(code: str, message: str, claim: EvidenceClaim, **details: Any) -> dict[str, Any]:
+    return _finding(code, "hard", message, details={"claim_id": claim.claim_id, **details})
 
 
 # LLM: _required_field_findings ensures required output columns are present as structured claims.

@@ -137,6 +137,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action="repair_structured_checkpoint_json",
         recovery_hint="阶段 JSON 缺少合同声明的必需列；补齐 required_columns 后再继续 builder。",
     ),
+    "STAGED_JSON_REQUIRED_COLUMN_EMPTY_VALUES": ErrorContract(
+        code="STAGED_JSON_REQUIRED_COLUMN_EMPTY_VALUES",
+        category="artifact",
+        retryable=True,
+        recommended_action="repair_structured_checkpoint_json",
+        recovery_hint="阶段 JSON 的必填列存在空值；补齐 required_columns 的非空值后再继续 builder。",
+    ),
     "STAGED_JSON_TOO_FEW_SHEETS": ErrorContract(
         code="STAGED_JSON_TOO_FEW_SHEETS",
         category="artifact",

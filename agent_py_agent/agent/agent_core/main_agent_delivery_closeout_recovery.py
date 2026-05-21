@@ -16,6 +16,10 @@ from .main_agent_delivery_closeout_artifacts import (
     _required_artifacts,
     _validation_contract,
 )
+from .main_agent_delivery_closeout_builder_repair import (
+    BuilderRepairRequest,
+    append_failed_builder_output_actions,
+)
 from .main_agent_delivery_closeout_checkpoint_quality import (
     append_checkpoint_quality_action,
     checkpoint_writer_fields,
@@ -48,7 +52,7 @@ def _recovery_actions(
 ) -> list[dict[str, object]]:
     ledger = RecoveryActionLedger(actions=[], seen=set())
     ledger.actions.extend(_contract_recovery_actions(contract, workspace_root=workspace_root, seen=ledger.seen))
-    _append_failure_recovery_actions(report, ledger)
+    _append_failure_recovery_actions(report, ledger, contract=contract, workspace_root=workspace_root)
     if ledger.actions:
         return ledger.actions
     return [_generic_recovery_action("ACCEPTANCE_FAILED")]
@@ -56,7 +60,22 @@ def _recovery_actions(
 
 # LLM: _append_failure_recovery_actions maps validator finding codes through the shared error taxonomy.
 # 函数用途: 将验收器返回的结构化 code 转成 retryable/category/action/hint，不读取 message 文案。
-def _append_failure_recovery_actions(report: dict[str, Any], ledger: RecoveryActionLedger) -> None:
+def _append_failure_recovery_actions(
+    report: dict[str, Any],
+    ledger: RecoveryActionLedger,
+    *,
+    contract: dict[str, Any],
+    workspace_root: Path,
+) -> None:
+    append_failed_builder_output_actions(
+        BuilderRepairRequest(
+            report=report,
+            contract=contract,
+            workspace_root=workspace_root,
+            ledger=ledger,
+            staging_context=_staging_action_context,
+        )
+    )
     append_artifact_finding_repair_actions(report, ledger)
     for finding in failed_findings(report):
         recovery_contract = error_contract(_recovery_error_code(str(finding.get("code") or "")))
@@ -210,11 +229,19 @@ def _builder_ready(context: StagingActionContext) -> bool:
 # 函数用途: 按 checkpoint_refs 检查缺失或坏 JSON 的阶段文件，缺第一个就提示先物化它。
 def _append_checkpoint_actions(context: StagingActionContext) -> None:
     for ref_text in staging_checkpoint_refs(context.staging):
+        if _is_builder_output_ref(context, ref_text):
+            break
         checkpoint_path = _artifact_path(ref_text, context.workspace_root)
         if _handle_existing_checkpoint(context, ref_text, checkpoint_path):
             continue
         _append_missing_checkpoint_action(context, ref_text)
         break
+
+
+# LLM: Builder outputs are materialized by their declared builder tool, not by generic checkpoint writers.
+# 函数用途: 避免 workbook/pdf 这类最终构建产物在 source 未就绪时生成误导性的 materialize_checkpoint 动作。
+def _is_builder_output_ref(context: StagingActionContext, ref_text: str) -> bool:
+    return bool(context.builder_tool and context.output_ref and ref_text == context.output_ref)
 
 
 # LLM: _handle_existing_checkpoint validates already-materialized JSON checkpoint refs.

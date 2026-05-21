@@ -58,11 +58,12 @@ def delivery_repair_payload(
     if enforce_contract_scope and not report_matches_current_contract(report, current_contract):
         return {}
     progress = report.get("delivery_progress")
+    agent_root = Path(getattr(agent, "root", ".")).resolve()
     actions = _required_actions(progress)
+    actions = _merge_required_actions(actions, _refreshed_required_actions(report, current_contract, agent_root))
     if not isinstance(progress, dict) or not actions:
         return {}
     pending_targets = progress.get("pending_materialization_targets")
-    agent_root = Path(getattr(agent, "root", ".")).resolve()
     return {
         "pending_materialization_targets": pending_targets if isinstance(pending_targets, list) else [],
         "report_ref": str(report.get("report_ref") or ""),
@@ -71,6 +72,52 @@ def delivery_repair_payload(
         "required_tool_calls": required_tool_calls(actions),
         "strict_write_required": strict_write_required(progress, agent_root=agent_root),
     }
+
+
+# LLM: _refreshed_required_actions derives current executable repairs from the active delivery contract.
+# 函数用途: 旧 closeout 的 recovery_actions 可能缺少新门补出的 builder/action；用当前合同重新推导一次并合并。
+def _refreshed_required_actions(
+    report: dict[str, object],
+    current_contract: object | None,
+    agent_root: Path,
+) -> list[dict[str, object]]:
+    if not isinstance(current_contract, dict) or not current_contract:
+        return []
+    try:
+        from .main_agent_delivery_closeout_recovery import _recovery_actions
+
+        refreshed = _recovery_actions(report, contract=current_contract, workspace_root=agent_root)
+    except Exception:
+        return []
+    return _required_actions({"recovery_actions": refreshed})
+
+
+# LLM: _merge_required_actions preserves persisted repair actions while adding fresher contract-derived actions.
+# 函数用途: 按结构化 action identity 去重合并，不用自然语言提示判断哪个动作重要。
+def _merge_required_actions(
+    existing: list[dict[str, object]],
+    refreshed: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    merged: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for action in [*existing, *refreshed]:
+        identity = _action_identity(action)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        merged.append(action)
+    return merged
+
+
+# LLM: _action_identity uses stable machine fields to dedupe delivery repairs.
+# 函数用途: 把同类 checkpoint/output/artifact 恢复动作折叠成一个，避免重复 required_tool_calls。
+def _action_identity(action: dict[str, object]) -> tuple[str, str, str, str]:
+    return (
+        str(action.get("recommended_action") or ""),
+        str(action.get("checkpoint_ref") or ""),
+        str(action.get("output_ref") or ""),
+        str(action.get("artifact_path") or ""),
+    )
 
 
 # LLM: _required_actions 是 agent_py_agent/agent/agent_core/tool_delivery_repair_payload.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。

@@ -11,6 +11,7 @@ from typing import Any
 from ._filesystem_helpers import _required_path, _text_param
 from ._filesystem_read import FileSystemTool
 from .models import ToolExecutionResult, ToolSpec
+from .structured_json_merge import merge_json_objects
 
 
 # LLM: StructuredJsonTool writes non-empty JSON checkpoints from structured params.
@@ -186,49 +187,7 @@ def _merged_json_value(target: Path, value: object) -> object:
     existing = _read_existing_json(target)
     if not isinstance(existing, dict) or not isinstance(value, dict):
         raise ValueError("TOOL_INVALID_ARGUMENTS: merge_existing 只支持对象合并")
-    return _merge_json_objects(existing, value)
-
-
-# LLM: _merge_json_objects gives checkpoint writes append semantics for tabular data.
-# 函数用途: 合并 metadata 时保留旧字段；rows/sheets 用追加/同名 sheet 合并，支撑大 JSON 分批落盘。
-def _merge_json_objects(existing: dict[str, object], value: dict[str, object]) -> dict[str, object]:
-    merged = {**existing, **value}
-    if isinstance(existing.get("rows"), list) and isinstance(value.get("rows"), list):
-        merged["rows"] = [*existing["rows"], *value["rows"]]
-    if isinstance(existing.get("sheets"), list) and isinstance(value.get("sheets"), list):
-        merged["sheets"] = _merge_sheet_lists(existing["sheets"], value["sheets"])
-    return merged
-
-
-# LLM: _merge_sheet_lists uses sheet names as stable structural IDs when available.
-# 函数用途: 不解析普通文本；只按 sheet.name 结构字段合并同名表，否则追加新表。
-def _merge_sheet_lists(existing: list[object], incoming: list[object]) -> list[object]:
-    merged = [dict(sheet) if isinstance(sheet, dict) else sheet for sheet in existing]
-    by_name = {
-        str(sheet.get("name")): index
-        for index, sheet in enumerate(merged)
-        if isinstance(sheet, dict) and str(sheet.get("name") or "").strip()
-    }
-    for sheet in incoming:
-        if not isinstance(sheet, dict):
-            merged.append(sheet)
-            continue
-        name = str(sheet.get("name") or "").strip()
-        if name and name in by_name and isinstance(merged[by_name[name]], dict):
-            merged[by_name[name]] = _merge_sheet(merged[by_name[name]], sheet)
-            continue
-        by_name[name] = len(merged) if name else by_name.get(name, len(merged))
-        merged.append(dict(sheet))
-    return merged
-
-
-# LLM: _merge_sheet appends rows while allowing later chunks to refresh columns/metadata.
-# 函数用途: 同一 sheet 分批写入时追加 rows，其他结构字段按后来的 chunk 覆盖。
-def _merge_sheet(existing: dict[str, object], incoming: dict[str, object]) -> dict[str, object]:
-    merged = {**existing, **incoming}
-    if isinstance(existing.get("rows"), list) and isinstance(incoming.get("rows"), list):
-        merged["rows"] = [*existing["rows"], *incoming["rows"]]
-    return merged
+    return merge_json_objects(existing, value)
 
 
 # LLM: _read_existing_json keeps this runtime helper grounded in structured fields.
