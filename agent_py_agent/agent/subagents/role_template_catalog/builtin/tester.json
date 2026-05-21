@@ -8,7 +8,7 @@
   "handles_multiple_targets": true,
   "use_when_zh": ["需要回归测试、E2E 测试、功能测试、文档检查或批量验证。"],
   "do_not_use_when_zh": ["只是主观判断是否喜欢时不要用测试角色。"],
-  "default_tools": ["list_files", "read_file", "search_text", "read_artifact", "fetch_url", "http_request", "write_file", "append_file", "replace_in_file", "capability_request"],
+  "default_tools": ["list_files", "read_file", "search_text", "read_artifact", "fetch_url", "http_request", "write_file", "append_file", "replace_in_file", "file_write_session", "write_structured_json", "data_to_workbook", "markdown_to_pdf", "capability_request"],
   "can_write": true,
   "can_accept": false,
   "can_run_tests": true,

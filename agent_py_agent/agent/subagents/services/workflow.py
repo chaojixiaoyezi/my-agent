@@ -31,6 +31,10 @@ _CODING_SUBAGENT_TOOLS = [
     "write_file",
     "append_file",
     "replace_in_file",
+    "file_write_session",
+    "write_structured_json",
+    "data_to_workbook",
+    "markdown_to_pdf",
 ]
 _READ_ONLY_SUBAGENT_TOOLS = list(_CODING_SUBAGENT_TOOLS)
 

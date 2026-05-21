@@ -16,8 +16,9 @@ from .role_template_resolution import resolve_role_template_id
 WEB_TOOLS = ["fetch_url", "http_request"]
 READ_ONLY_TOOLS = ["list_files", "read_file", "search_text", "read_artifact", *WEB_TOOLS]
 WORKER_READ_TOOLS = ["list_files", "read_file", "search_text", "read_artifact", *WEB_TOOLS]
-WORKER_WRITE_TOOLS = ["write_file", "append_file", "replace_in_file"]
-REPORT_WRITE_TOOLS = ["write_file", "append_file", "replace_in_file"]
+ARTIFACT_BUILDER_TOOLS = ["file_write_session", "write_structured_json", "data_to_workbook", "markdown_to_pdf"]
+WORKER_WRITE_TOOLS = ["write_file", "append_file", "replace_in_file", *ARTIFACT_BUILDER_TOOLS]
+REPORT_WRITE_TOOLS = ["write_file", "append_file", "replace_in_file", *ARTIFACT_BUILDER_TOOLS]
 CAPABILITY_REQUEST_TOOL = "capability_request"
 ROLE_BASE_TOOLS = [*READ_ONLY_TOOLS, *REPORT_WRITE_TOOLS, CAPABILITY_REQUEST_TOOL]
 COORDINATOR_TOOLS = [

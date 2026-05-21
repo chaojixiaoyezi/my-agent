@@ -21,6 +21,7 @@ from .tool_direct_write_guard_stage import (
     maybe_block_delegate_only_direct_write_stage,
 )
 from .tool_round_execution import ToolCallExecuteParams
+from .tool_staged_writer_contract import staged_writer_contract_result
 
 
 # LLM: ToolCallRuntimeRequest bundles one parsed tool call with its trace metadata.
@@ -53,6 +54,9 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
     stale_result = stale_subagent_attempt_result(runtime_request.agent, payload)
     if stale_result is not None:
         return _trace_finished_result(trace_request, stale_result)
+    staged_writer_result = staged_writer_contract_result(request.params, payload)
+    if staged_writer_result is not None:
+        return _trace_finished_result(trace_request, staged_writer_result)
     body_read_result = maybe_block_delegating_body_read_stage(
         ToolBodyReadGuardStageRequest(runtime_request.agent, request, payload)
     )
