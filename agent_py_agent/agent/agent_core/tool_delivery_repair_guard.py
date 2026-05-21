@@ -45,7 +45,7 @@ _EVIDENCE_GATHERING_TOOL_NAMES = {
     "search",
 }
 _STRICT_REPAIR_PRODUCTIVE_TOOLS = {
-    "append_file",
+    "__parse_error__", "append_file",
     "data_to_workbook",
     "file_write_session",
     "markdown_to_pdf",
