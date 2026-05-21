@@ -293,6 +293,9 @@ class ToolLoopService:
         output_record = externalize_tool_output_record(request)
         output_record.update(fail_safe)
         output_record["parameters"] = record.payload
+        runtime_gate = _runtime_gate_from_result(record.result)
+        if runtime_gate:
+            output_record["runtime_gate"] = runtime_gate
         return output_record
 
 
@@ -322,3 +325,13 @@ def _append_initial_delivery_repair_context(agent: object, params: ToolLoopExecu
     if any(str(item).startswith("[tool-system delivery-required-repair]") for item in params.tool_context):
         return
     params.tool_context.append(context)
+
+
+# LLM: _runtime_gate_from_result carries runtime gate evidence into replayable archives.
+# 函数用途: 只读取 ToolExecutionResult.result_envelope.runtime_gate 结构字段，不从输出文本推断。
+def _runtime_gate_from_result(result: object) -> dict[str, object]:
+    envelope = getattr(result, "result_envelope", None)
+    if not isinstance(envelope, dict):
+        return {}
+    gate = envelope.get("runtime_gate")
+    return dict(gate) if isinstance(gate, dict) else {}

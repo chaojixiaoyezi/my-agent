@@ -166,6 +166,8 @@ def streaming_inline_write_abort_limit(value: int | None = None) -> int:
     return max(limit, STREAMING_INLINE_WRITE_ABORT_CHARS)
 
 
+# LLM: _explicit_small_stream_limit detects caller-supplied small test limits.
+# 函数用途: 区分真实默认大内容流控和测试/调用方显式设置的小上限。
 def _explicit_small_stream_limit(value: int | None) -> bool:
     if value is None:
         return False

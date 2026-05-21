@@ -53,6 +53,8 @@ def _action_fields(payload: dict[str, Any]) -> dict[str, object]:
     }
 
 
+# LLM: _has_error_fact decides whether a compact action summary is needed.
+# 函数用途: 检查结果和 envelope 是否带错误、修复动作或 artifact_integrity 结构事实。
 def _has_error_fact(result: object, payload: dict[str, Any]) -> bool:
     return bool(
         not getattr(result, "ok", True)
@@ -62,6 +64,8 @@ def _has_error_fact(result: object, payload: dict[str, Any]) -> bool:
     )
 
 
+# LLM: _top_level_lines renders top-level machine fields for prompt recovery.
+# 函数用途: 把 error_code/recommended_action 等结构字段转成短上下文行。
 def _top_level_lines(payload: dict[str, Any], result: object) -> list[str]:
     lines: list[str] = []
     for key in _TOP_LEVEL_KEYS:
@@ -77,6 +81,8 @@ def _top_level_lines(payload: dict[str, Any], result: object) -> list[str]:
     return lines
 
 
+# LLM: _artifact_integrity_lines summarizes artifact integrity fields.
+# 函数用途: 输出 blocker/warning/issue code，不把产物正文塞回 prompt。
 def _artifact_integrity_lines(value: object) -> list[str]:
     if not isinstance(value, dict):
         return []
@@ -90,6 +96,8 @@ def _artifact_integrity_lines(value: object) -> list[str]:
     return lines
 
 
+# LLM: _issue_codes extracts compact artifact issue codes.
+# 函数用途: 从 artifact_integrity.issues 列表中取 code 字段，限制数量防止上下文膨胀。
 def _issue_codes(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -100,6 +108,8 @@ def _issue_codes(value: object) -> list[str]:
     return codes
 
 
+# LLM: _tool_call_lines renders suggested tool call fields in stable key order.
+# 函数用途: 把 reset/abort/continue 等结构化工具调用字段写成短行。
 def _tool_call_lines(fields: dict[str, object]) -> list[str]:
     lines: list[str] = []
     for key in sorted(fields):
@@ -107,6 +117,8 @@ def _tool_call_lines(fields: dict[str, object]) -> list[str]:
     return lines
 
 
+# LLM: _archive_lines renders output artifact refs from the archive record.
+# 函数用途: 给下一轮模型提供 output_path/artifact_ref/hash 等结构化恢复锚点。
 def _archive_lines(record: dict[str, object]) -> list[str]:
     return [
         f"- output_path: {record.get('output_path', '')}",
@@ -117,6 +129,8 @@ def _archive_lines(record: dict[str, object]) -> list[str]:
     ]
 
 
+# LLM: _json_object parses JSON output envelopes without fallback prose heuristics.
+# 函数用途: 只接受合法 JSON object，解析失败返回 None。
 def _json_object(text: str) -> dict[str, Any] | None:
     try:
         value = json.loads(text)
@@ -125,6 +139,8 @@ def _json_object(text: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+# LLM: _json_inline renders bounded JSON snippets for live prompt context.
+# 函数用途: 将结构化值压成单行，超过预算时截断并保留标记。
 def _json_inline(value: object) -> str:
     try:
         text = json.dumps(value, ensure_ascii=False, sort_keys=True)

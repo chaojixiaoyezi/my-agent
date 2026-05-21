@@ -13,21 +13,20 @@ from __future__ import annotations
 import json
 import re
 import textwrap
-from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
 
+from .main_agent_complex_large_log import (
+    assert_large_log_report,
+    main_large_log_prompt,
+    seed_large_log,
+)
 from .shop_case import _external_asset_refs, _has_disabled_control
 
-LOG_SIZE_BYTES = 100 * 1024 * 1024
-
-
-# LLM: _LargeLogMarker makes seeded large-log findings data-driven instead of nested writer logic.
-# 类用途: 描述一条要插入大日志的错误线索，以及它应出现的大致字节位置。
-@dataclass(frozen=True)
-class _LargeLogMarker:
-    offset: int
-    line: bytes
+# LLM: Compatibility aliases keep existing tests importing old private helper names.
+# 模块用途: 大日志逻辑已拆到 main_agent_complex_large_log，这里保留旧入口避免调用方断裂。
+_main_large_log_prompt = main_large_log_prompt
+_seed_large_log = seed_large_log
+_assert_large_log_report = assert_large_log_report
 
 
 # LLM: case_main_direct_web_app checks multi-file delivery through the root agent only.
@@ -113,8 +112,8 @@ def case_main_large_log_audit(lab) -> None:
     lab.section("CASE main_large_log_audit")
     _ensure_main_agent_only(lab)
     log_path = lab.fixture_root / "logs" / "huge_app.log"
-    _seed_large_log(log_path)
-    prompt = _main_large_log_prompt()
+    seed_large_log(log_path)
+    prompt = main_large_log_prompt()
     lab.record_prompt("main_large_log_audit", prompt)
     response = lab.run_command(
         lab.agent_command("run", prompt, "--save"),
@@ -122,7 +121,7 @@ def case_main_large_log_audit(lab) -> None:
     )
     (lab.responses_dir / "main_large_log_audit.stdout.txt").write_text(response.stdout, encoding="utf-8")
     output = lab.fixture_root / "lab_outputs" / "large-log-audit" / "report.md"
-    _assert_large_log_report(output)
+    assert_large_log_report(output)
     lab.log(f"large_log_report={output}")
 
 
@@ -180,22 +179,6 @@ def _main_tool_failure_prompt() -> str:
         如果这个文件不存在，不要停，也不要假装读到了；请改读 notes/small_task.md 和 README.md。
         然后把你怎么恢复、最终读到了什么、下一步建议，写到 lab_outputs/tool-recovery/report.md。
         报告要让普通人能看懂，别只写一句话。
-        """
-    ).strip()
-
-
-# LLM: _main_large_log_prompt asks for evidence-first auditing of a large file.
-# 函数用途: 生成 100MB 日志审计提示词，要求主代理找线索并外置写报告。
-def _main_large_log_prompt() -> str:
-    return textwrap.dedent(
-        """
-        这次你自己完成，不要派小傻妞。
-
-        logs/huge_app.log 是一个很大的日志文件。请不要把日志全文复制到回复里。
-        你要帮我找里面最重要的异常线索，重点关注付款、购物车、超时、trace id。
-        最终把审计结果写到 lab_outputs/large-log-audit/report.md。
-
-        报告里要包含：发现了哪些问题、关键证据、可能影响、建议怎么排查。
         """
     ).strip()
 
@@ -291,78 +274,6 @@ def _assert_tool_recovery_report(output: Path) -> None:
         raise RuntimeError("工具失败恢复报告没有提到替代读取的真实素材。")
     if len(content.strip()) < 120:
         raise RuntimeError("工具失败恢复报告过短，不足以说明恢复过程。")
-
-
-# LLM: _seed_large_log creates deterministic large evidence without relying on external files.
-# 函数用途: 生成约 100MB 的日志文件，并把关键错误放在不同位置，测试搜索和审计能力。
-def _seed_large_log(path: Path) -> None:
-    if path.exists() and path.stat().st_size >= LOG_SIZE_BYTES:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    markers = _large_log_markers()
-    written = 0
-    with path.open("wb") as fh:
-        for marker in markers:
-            written = _write_until_large_log_offset(fh, written, marker.offset)
-            fh.write(marker.line)
-            written += len(marker.line)
-        _write_until_large_log_offset(fh, written, LOG_SIZE_BYTES)
-
-
-# LLM: _large_log_chunk centralizes the repeated filler row for deterministic 100MB logs.
-# 函数用途: 返回大日志填充块；真实关键信息由 marker 单独插入，方便测试定位。
-def _large_log_chunk() -> bytes:
-    return (
-        "2026-05-18T10:00:00Z INFO service=shop trace=warmup status=ok message=normal checkout heartbeat\n"
-        * 1024
-    ).encode("utf-8")
-
-
-# LLM: _write_until_large_log_offset keeps large-log seeding flat and easy to audit.
-# 函数用途: 往日志里写普通填充块直到达到目标偏移，返回已写字节数。
-def _write_until_large_log_offset(fh: BinaryIO, written: int, target: int) -> int:
-    chunk = _large_log_chunk()
-    while written < target:
-        fh.write(chunk)
-        written += len(chunk)
-    return written
-
-
-# LLM: _large_log_markers defines seeded failures as data so the writer loop stays simple.
-# 函数用途: 返回固定错误线索及其大致插入位置，供审计 case 和验收口径共享。
-def _large_log_markers() -> list[_LargeLogMarker]:
-    return [
-        _LargeLogMarker(
-            LOG_SIZE_BYTES // 4,
-            b"2026-05-18T10:17:42Z ERROR service=payment trace=trace-9f42 "
-            b"code=PAYMENT_TIMEOUT message=payment provider timeout after 30s\n",
-        ),
-        _LargeLogMarker(
-            LOG_SIZE_BYTES // 2,
-            b"2026-05-18T10:31:05Z WARN service=cart trace=trace-cart-77 "
-            b"code=CART_STUCK message=cart update retried 8 times\n",
-        ),
-        _LargeLogMarker(
-            LOG_SIZE_BYTES * 3 // 4,
-            b"2026-05-18T10:45:19Z ERROR service=checkout trace=trace-checkout-18 "
-            b"code=ORDER_CONFIRMATION_DELAY message=order confirmation delayed\n",
-        ),
-    ]
-
-
-# LLM: _assert_large_log_report validates that the audit found the seeded high-signal failures.
-# 函数用途: 检查日志审计报告是否抓到付款、购物车和 trace 证据。
-def _assert_large_log_report(output: Path) -> None:
-    if not output.exists():
-        raise RuntimeError(f"大日志审计报告不存在: {output}")
-    content = output.read_text(encoding="utf-8", errors="replace")
-    lowered = content.lower()
-    required = ["payment_timeout", "cart_stuck", "trace-9f42"]
-    missing = [item for item in required if item not in lowered]
-    if missing:
-        raise RuntimeError(f"大日志审计报告缺少关键线索: {missing}")
-    if len(content.strip()) < 200:
-        raise RuntimeError("大日志审计报告过短，不足以说明影响和建议。")
 
 
 __all__ = [

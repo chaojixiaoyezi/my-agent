@@ -184,6 +184,32 @@ def test_tool_call_record_summarizes_large_payload_for_live_prompt(tmp_path: Pat
     assert huge_html not in live_context
 
 
+# LLM: Runtime gate facts must travel with tool archive records for replay and audit.
+# 函数用途: 验证工具执行入口产生的 runtime_gate 会落进归档记录，而不是只留在当前 prompt 输出里。
+def test_tool_call_archive_keeps_runtime_gate_for_replay(tmp_path: Path) -> None:
+    service = ToolLoopService(SimpleNamespace(root=tmp_path))
+    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
+
+    service._record_tool_call(
+        ToolCallRecordParams(
+            params=params,
+            tool_rounds=1,
+            idx=1,
+            payload={"tool": "read_file", "path": "README.md"},
+            result=ToolExecutionResult(
+                "read_file",
+                True,
+                "ok",
+                result_envelope={"runtime_gate": {"status": "ALLOW", "allowed": True}},
+            ),
+        )
+    )
+
+    record = params.archive_tool_calls[0]
+    assert record["runtime_gate"]["status"] == "ALLOW"
+    assert record["runtime_gate"]["allowed"] is True
+
+
 # LLM: parse-error recovery mode must survive payload summarization and guide the next model turn.
 # 函数用途: 验证长 write_file 工具块被截断后，工具循环会追加稳定降级策略，而不只是一条错误文本。
 def test_tool_loop_enters_long_content_recovery_after_truncated_write_parse_error(

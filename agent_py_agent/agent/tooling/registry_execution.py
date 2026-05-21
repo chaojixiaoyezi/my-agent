@@ -18,6 +18,7 @@ from ..action_protocol import (
     RunScope,
     ToolCallEnvelope,
 )
+from ..contracts.gates import GateDecision, ToolGatePolicy, evaluate_tool_call_gate
 from ..log_analysis.capabilities import SECURITY_TOOL_NAMES, has_security_tool_capability
 from .models import BaseTool, ToolExecutionResult
 from .parse_error_hint import parse_error_message
@@ -142,44 +143,22 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
     envelope = tool_call_envelope_from_execution_payload(call.payload)
     if isinstance(envelope, ToolExecutionResult):
         return envelope
-    prepared = _prepare_tool_payload(envelope or call.payload)
-    if isinstance(prepared, ToolExecutionResult):
-        return attach_result_envelope(prepared, envelope)
-    normalized_payload = prepared
-
-    if normalized_payload.get("tool") == "__parse_error__":
-        return attach_result_envelope(
-            ToolExecutionResult(
-                "__parse_error__",
-                False,
-                parse_error_message(normalized_payload),
-            ),
-            envelope,
-        )
-
+    normalized_payload = _normalized_payload_or_error(call, envelope)
+    if isinstance(normalized_payload, ToolExecutionResult):
+        return normalized_payload
+    gate_decision = _tool_call_gate_decision(normalized_payload, call)
+    if not gate_decision.allowed:
+        return _runtime_gate_block_result(normalized_payload, gate_decision, envelope)
     try:
         tool_name = normalize_tool_name(normalized_payload.get("tool"))
     except ValueError as exc:
         return attach_result_envelope(ToolExecutionResult("unknown", False, str(exc)), envelope)
-
     auth_error = _registry_auth_error(tool_name, call)
     if auth_error:
         return attach_result_envelope(ToolExecutionResult(tool_name, False, auth_error), envelope)
-
-    return attach_result_envelope(
-        invoke_registry_tool(
-            RegistryToolInvokeRequest(
-                tool_name=tool_name,
-                payload=normalized_payload,
-                tools=call.tools,
-                workspace_root=call.workspace_root,
-                workspace_roots=call.workspace_roots,
-                allowed_tools=call.allowed_tools,
-                write_boundary=call.write_boundary,
-            )
-        ),
-        envelope,
-    )
+    result = _invoke_registry_with_envelope(call, envelope, tool_name, normalized_payload)
+    _attach_runtime_gate(result, gate_decision)
+    return result
 
 
 # LLM: _prepare_tool_payload 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -192,6 +171,58 @@ def _prepare_tool_payload(payload: object) -> dict[str, Any] | ToolExecutionResu
         return ToolExecutionResult("unknown", False, payload_error)
     assert normalized_payload is not None
     return normalized_payload
+
+
+# LLM: _normalized_payload_or_error bundles parse and payload normalization failures.
+# 函数用途: 将执行 payload 归一为 dict；解析失败时直接返回带 envelope 的工具错误。
+def _normalized_payload_or_error(
+    call: ExecuteRegistryCallParams,
+    envelope: ToolCallEnvelope | None,
+) -> dict[str, Any] | ToolExecutionResult:
+    prepared = _prepare_tool_payload(envelope or call.payload)
+    if isinstance(prepared, ToolExecutionResult):
+        return attach_result_envelope(prepared, envelope)
+    if prepared.get("tool") == "__parse_error__":
+        return attach_result_envelope(
+            ToolExecutionResult("__parse_error__", False, parse_error_message(prepared)),
+            envelope,
+        )
+    return prepared
+
+
+# LLM: _tool_call_gate_decision evaluates mandatory tool protocol and side-effect gates.
+# 函数用途: 在注册表鉴权和真实工具调用之前得到 runtime gate 决策。
+def _tool_call_gate_decision(payload: dict[str, Any], call: ExecuteRegistryCallParams) -> GateDecision:
+    return evaluate_tool_call_gate(
+        payload,
+        available_tools=call.tools.keys(),
+        allowed_tools=call.allowed_tools,
+        policy=_tool_gate_policy(call.write_boundary),
+    )
+
+
+# LLM: _invoke_registry_with_envelope invokes the selected tool and preserves call envelope refs.
+# 函数用途: 把 RegistryToolInvokeRequest 的构造从主入口拆出，降低执行入口复杂度。
+def _invoke_registry_with_envelope(
+    call: ExecuteRegistryCallParams,
+    envelope: ToolCallEnvelope | None,
+    tool_name: str,
+    payload: dict[str, Any],
+) -> ToolExecutionResult:
+    return attach_result_envelope(
+        invoke_registry_tool(
+            RegistryToolInvokeRequest(
+                tool_name=tool_name,
+                payload=payload,
+                tools=call.tools,
+                workspace_root=call.workspace_root,
+                workspace_roots=call.workspace_roots,
+                allowed_tools=call.allowed_tools,
+                write_boundary=call.write_boundary,
+            )
+        ),
+        envelope,
+    )
 
 
 # LLM: _registry_auth_error 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -265,3 +296,64 @@ def _security_tool_call_authorized(
         or (allowed is not None and tool_name in allowed)
         or has_security_tool_capability(granted_capabilities)
     )
+
+
+# LLM: _runtime_gate_block_result turns mandatory gate denials into normal tool results.
+# 函数用途: 工具执行前 gate 拒绝时，返回统一 ToolExecutionResult 并把 gate 决策写进 result_envelope。
+def _runtime_gate_block_result(
+    payload: dict[str, Any],
+    decision: GateDecision,
+    envelope: ToolCallEnvelope | None,
+) -> ToolExecutionResult:
+    result = ToolExecutionResult(
+        str(decision.evidence.get("tool_name") or payload.get("tool") or "unknown"),
+        False,
+        _gate_output(decision),
+    )
+    result = attach_result_envelope(result, envelope)
+    _attach_runtime_gate(result, decision)
+    return result
+
+
+# LLM: _attach_runtime_gate preserves gate facts for replay and acceptance without changing prompt output shape.
+# 函数用途: 把运行时 gate 决策挂到工具结果 envelope；旧调用没有 envelope 时也保留 runtime_gate 字段。
+def _attach_runtime_gate(result: ToolExecutionResult, decision: GateDecision) -> None:
+    envelope = dict(result.result_envelope or {})
+    envelope["runtime_gate"] = decision.to_dict()
+    result.result_envelope = envelope
+
+
+# LLM: _gate_output renders a compact denial message while machine facts stay in result_envelope.
+# 函数用途: 给旧 prompt 输出保留可读错误，真正判断仍读取 runtime_gate 结构字段。
+def _gate_output(decision: GateDecision) -> str:
+    codes = ",".join(decision.finding_codes) or "RUNTIME_GATE_DENIED"
+    return f"runtime gate denied: gate={decision.gate}; status={decision.status}; findings={codes}; 工具未授权或未通过运行时门"
+
+
+# LLM: _tool_gate_policy builds a trusted side-effect policy from write_boundary.
+# 函数用途: 把 write_boundary 里的 tool_effects/tool_modes/approved_actions 收成 ToolGatePolicy。
+def _tool_gate_policy(boundary: dict[str, object] | None) -> ToolGatePolicy | None:
+    effects = _boundary_mapping(boundary, "tool_effects")
+    modes = _boundary_mapping(boundary, "tool_modes")
+    approvals = _boundary_list(boundary, "approved_actions")
+    if not effects and not modes and not approvals:
+        return None
+    return ToolGatePolicy(tool_effects=effects or {}, tool_modes=modes or {}, approved_actions=tuple(approvals))
+
+
+# LLM: _boundary_mapping reads a mapping-valued write_boundary field.
+# 函数用途: 安全读取工具 gate 的结构化映射配置，字段不是 dict 时返回 None。
+def _boundary_mapping(boundary: dict[str, object] | None, key: str) -> dict[str, object] | None:
+    if not isinstance(boundary, dict):
+        return None
+    value = boundary.get(key)
+    return value if isinstance(value, dict) else None
+
+
+# LLM: _boundary_list reads a list-valued write_boundary field.
+# 函数用途: 安全读取 approved_actions 等结构化列表，字段不是 list 时返回空列表。
+def _boundary_list(boundary: dict[str, object] | None, key: str) -> list[object]:
+    if not isinstance(boundary, dict):
+        return []
+    value = boundary.get(key)
+    return value if isinstance(value, list) else []

@@ -1,5 +1,12 @@
 # Live Lab：开发推进记录
 
+## 2026-05-22 runtime gate / large-log helper sync
+
+- 中文说明：本轮 Live Lab 只做通用底座验证配套，不新增专项任务合同。`main-complex` 的 100MB 大日志生成、提示词和报告验收已从 `main_agent_complex_case.py` 拆到 `main_agent_complex_large_log.py`，让复杂 case 主文件继续保持编排层职责。
+- 已实现：`main_agent_complex_case.py` 保留旧私有 helper 名称的兼容别名，避免已有测试或外部脚本导入断裂；真实大日志 case 仍写 `lab_outputs/large-log-audit/report.md`，验收仍检查付款、购物车和 trace 证据。
+- 已实现：运行时 gate 合同已进入工具调用、工具结果归档和 delivery closeout 的结构化证据链；Live Lab 后续真实任务可以从 tool archive / closeout 里看到 `runtime_gate`，不需要从最终自然语言回复猜工具是否通过门。
+- 已测试：runtime gate focused tests、Live Lab focused tests、ruff、doc sync、code-size strict、fast pytest 和 high-risk/soft offline matrix 已纳入提交前验证。
+
 ## 2026-05-21 gateway timeout budget split
 
 - Live Lab 把 `--timeout` 明确为单次模型请求/场景步骤基准；`session.py` 现在派生 `model_request_timeout`、`gateway_wait_timeout` 和 `gateway_processing_timeout` 三个预算。

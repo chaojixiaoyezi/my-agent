@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..backends import ModelResponse
+from ..contracts.gates import evaluate_acceptance_closeout_gate, evaluate_delivery_closeout_gate
 from ..tooling.file_write_session_inspection import open_file_write_sessions
 from ._runtime_params import ToolLoopExecuteParams
 from .main_agent_delivery_closeout_artifacts import (
@@ -51,8 +52,18 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     report = _delivery_report(request, contract, artifacts, workspace_root)
     report_ref = _write_report(workspace_root, report)
     report["report_ref"] = _relative_report_ref(report_ref, workspace_root)
+    gate_decision = evaluate_delivery_closeout_gate(report)
+    report["runtime_gate"] = gate_decision.to_dict()
+    acceptance_decision = evaluate_acceptance_closeout_gate(
+        {
+            "final_status": "DONE",
+            "verification_status": "PASSED" if gate_decision.allowed else "FAILED",
+            "runtime_gate": gate_decision.to_dict(),
+        }
+    )
+    report["acceptance_gate"] = acceptance_decision.to_dict()
     _write_report(workspace_root, report)
-    if not report["ok"]:
+    if not gate_decision.allowed or not acceptance_decision.allowed:
         return _failed_delivery_response(request, report, contract, workspace_root)
     return ModelResponse(text=_closeout_text(report), backend=request.backend)
 

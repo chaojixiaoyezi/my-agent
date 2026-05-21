@@ -22,6 +22,7 @@ scripts/
     |-- log_analysis_replay.py         # LOG 离线 replay 具体流程
     |-- main_agent_artifact_case.py    # 主代理长输出读回真实 case
     |-- main_agent_complex_case.py     # 主代理自己完成复杂任务的真实 case
+    |-- main_agent_complex_large_log.py # 主代理 100MB 日志 fixture 和报告 gate
     |-- markdown_repair_wave_case.py   # Markdown 文档失败后修复闭环真实 case
     |-- shop_case.py                   # 购物站业务流真实 case
     `-- shop_repair_wave_case.py       # 购物站失败后修复闭环真实 case
@@ -37,6 +38,7 @@ scripts/
 - `live_lab/file_repair_wave_case.py`：负责 `file-repair` suite 的坏 CSV seed、自然语言修复 prompt、最终内容 gate 和 verified repair sibling 检查。
 - `live_lab/main_agent_artifact_case.py`：负责 `main-artifact` suite 的长输出读回测试，专门测主代理是否能从长资料里续读远距离证据。
 - `live_lab/main_agent_complex_case.py`：负责 `main-complex` suite 里的 Web app、工具失败恢复和大日志审计测试，会临时关闭子代理，只测 root 自己的工具、产物和恢复能力。
+- `live_lab/main_agent_complex_large_log.py`：负责 100MB 日志 fixture、主代理大日志审计 prompt 和报告 gate；`main_agent_complex_case.py` 只调用这些 helper，并保留旧 helper 别名做兼容。
 - `live_lab/markdown_repair_wave_case.py`：负责 `markdown-repair` suite 的坏 Markdown seed、自然语言修复 prompt、最终内容 gate 和 verified repair sibling 检查。
 - `live_lab/log_analysis_replay.py`：把 SecurityAlertV1 fixture 跑成 LOG artifacts。
 - `agent_py_agent/tests/test_live_lab_log_analysis_replay.py`：验证 replay 的成功和失败路径。
@@ -147,8 +149,16 @@ scripts/
 - `main_artifact_readback`：生成约 96KB 的长资料，把三处证据放在远距离位置；它要求主代理继续按证据读回并写报告，用来压测大输出外置、分片续读和报告验收。
 - `main_compact_resume_roundtrip`：读取上一个真实 run 的 `runtime_facts` request id，写入用户确认的验收/约束/测试事实，执行 `memory-compact --apply` 和 `memory-resume --compact-resume-mode auto`，要求 auto guard 只放行续接、不自动执行工具。
 - `main_large_log_audit`：生成 100MB 日志，只要求报告关键证据和建议。它的目的不是测日志内容本身，而是测大输出/大文件场景下是否保持 refs-first（只拿引用和证据，不把全文塞进上下文）。
+- `main_agent_complex_large_log.py`：承载 `main_large_log_audit` 的日志生成、提示词和报告 gate；这是结构拆分，不改变真实 case 的输出目录或验收口径。
 - 底层合同依赖：`main-complex` 的产物验收现在和父级验收共享 `contracts/artifact_acceptance.py` / `contracts/acceptance_contract.py` / `contracts/state_machine.py` / 结构化工具 envelope。Web case 复用 `static_site_check`；强制业务区块应使用结构化 `required_dom_ids`，而 `getElementById` 已经做空值保护的可选 hook 不算硬失败。
 - 当前真实验收：`main-complex-isolated-20260518-135442` 已用 MiniMax-M2.7 跑通。它验证了主代理多文件 Web app、工具失败恢复、100MB 大日志审计和 Live Lab 家目录隔离。
 - 当前真实验收：`main-artifact-20260518-early-request-id` 已用 MiniMax-M2.7 跑通。它验证了主代理在长资料读回时能先接收外置 tool-output artifact，再用 `read_artifact` 续读并写出证据报告；同一 run 的 `request_id` 会提前进入 context bundle、tool-output index、runtime facts，随后 compact/resume roundtrip 能带回 `artifact_refs` 并放行 `allow_automated_continue`。
 - 后续扩展：compact/resume 多次续接、验收失败后自动修复、真实资料整理 xlsx/论文翻译等可以继续拆成同目录的新 case，不要塞回 `cases.py`。
 - `scripts/live_lab/session.py` 的 `model_request_timeout` 表示单次模型调用预算，`gateway_wait_timeout` 表示一轮 gateway ask 的总等待预算；二者都从结构化配置读取，真实测试如果要调整慢模型输入/输出等待，应改配置或 timeout policy，不要在 case prompt 里写自然语言硬约束。
+
+## 2026-05-22 runtime-gate structure update
+
+- 中文说明：运行时 gate 是产品侧硬门，不是 Live Lab 自己的专项判断。Live Lab 的作用是后续真实任务能观察这些结构化证据是否贯穿工具调用、归档和最终收口。
+- 产品侧依赖：`agent_py_agent/agent/contracts/gates/` 定义 gate decision、tool side-effect policy、artifact gate、recovery/replay gate 和 runtime report helpers。
+- 产品侧依赖：`agent_py_agent/agent/tooling/registry_execution.py` 在真实工具执行前调用 tool gate；拒绝结果写成普通 `ToolExecutionResult`，机器事实保存在 `result_envelope.runtime_gate`。
+- 产品侧依赖：`agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py` 把 runtime gate 和 acceptance gate 写进最终 closeout，后续真实 LLM case 不能只靠口头回复判断完成。

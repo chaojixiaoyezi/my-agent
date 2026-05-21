@@ -32,6 +32,8 @@ def record_finish_error(
     write_manifest(paths.manifest_path, manifest)
 
 
+# LLM: _reset_tool_call builds the structured repair action for a failed session finish.
+# 函数用途: 返回可直接给工具系统执行的 file_write_session reset 调用。
 def _reset_tool_call(session_id: str) -> dict[str, object]:
     return {
         "tool": "file_write_session",
@@ -41,6 +43,8 @@ def _reset_tool_call(session_id: str) -> dict[str, object]:
     }
 
 
+# LLM: _abort_tool_call builds the structured abort action for a failed session finish.
+# 函数用途: 返回可直接给工具系统执行的 file_write_session abort 调用。
 def _abort_tool_call(session_id: str) -> dict[str, object]:
     return {
         "tool": "file_write_session",
@@ -48,4 +52,3 @@ def _abort_tool_call(session_id: str) -> dict[str, object]:
         "session_id": session_id,
         "discard_chunks": True,
     }
-
