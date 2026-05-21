@@ -1,5 +1,5 @@
 # LLM: File write session service owns staged chunk state and delegates manifest IO to helpers.
-# 模块用途: 执行大文件 begin/append/finish/abort 分块写入，公开工具类只负责模型目录展示。
+# 模块用途: 执行大文件 begin/append/finish/reset/abort 分块写入，公开工具类只负责模型目录展示。
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ from .models import ToolExecutionResult
 
 
 # LLM: FileWriteSessionService performs side effects for staged large-file writes.
-# 类用途: 提供 begin/append/finish/abort 操作；工具类只负责目录展示和参数入口。
+# 类用途: 提供 begin/append/finish/reset/abort 操作；工具类只负责目录展示和参数入口。
 class FileWriteSessionService:
     # LLM: __init__ stores the path boundary context used by every action.
     # 函数用途: 初始化 session 服务，不创建目录、不写文件。
@@ -72,6 +72,8 @@ class FileWriteSessionService:
             return self.append(params)
         if action == "finish":
             return self.finish(params)
+        if action == "reset":
+            return self.reset(params)
         if action == "abort":
             return self.abort(params)
         return failure("TOOL_INVALID_ARGUMENTS", "INVALID_ACTION", f"unsupported action: {action}")
@@ -163,6 +165,31 @@ class FileWriteSessionService:
             return target
         return commit_session(session_id, paths, manifest, target)
 
+    # LLM: reset preserves target identity while discarding bad chunks after a failed finish.
+    # 函数用途: 清空 open session 的 chunks/temp，保留 manifest.target_path 和 scope 供模型从 chunk 0 重写。
+    def reset(self, params: dict[str, Any]) -> ToolExecutionResult:
+        session_id, paths, manifest, error = load_open_session(self.context, params)
+        if error:
+            return error
+        if manifest.get("chunks") and not bool(params.get("discard_chunks")):
+            return failure(
+                "TOOL_INVALID_ARGUMENTS",
+                "SESSION_HAS_CHUNKS",
+                "reset would discard staged chunks; pass discard_chunks=true",
+                _reset_requires_discard_payload(session_id),
+            )
+        shutil.rmtree(paths.chunks_dir, ignore_errors=True)
+        paths.chunks_dir.mkdir(parents=True, exist_ok=True)
+        paths.temp_path.write_text("", encoding="utf-8")
+        previous_error = manifest.pop("last_finish_error", {})
+        manifest["chunks"] = {}
+        manifest["reset_count"] = int(manifest.get("reset_count") or 0) + 1
+        write_manifest(paths.manifest_path, manifest)
+        envelope = begin_envelope(session_id, manifest, paths)
+        envelope["reset"] = True
+        envelope["previous_finish_error"] = previous_error
+        return success("reset", envelope)
+
     # LLM: abort removes staged content without touching the final target.
     # 函数用途: 删除 session 临时目录并返回 abort 状态，允许重复清理缺失 session。
     def abort(self, params: dict[str, Any]) -> ToolExecutionResult:
@@ -216,6 +243,20 @@ def next_chunk_index(manifest: dict[str, Any]) -> int:
 def received_chunk_indexes(manifest: dict[str, Any]) -> list[int]:
     chunks = manifest.get("chunks") or {}
     return sorted(int(index) for index in chunks)
+
+
+# LLM: _reset_requires_discard_payload keeps destructive intent explicit for staged rewrites.
+# 函数用途: reset 有 chunks 时要求 discard_chunks=true，并返回可直接复用的结构化工具调用。
+def _reset_requires_discard_payload(session_id: str) -> dict[str, object]:
+    return {
+        "session_id": session_id,
+        "reset_tool_call": {
+            "tool": "file_write_session",
+            "action": "reset",
+            "session_id": session_id,
+            "discard_chunks": True,
+        },
+    }
 
 
 # LLM: _runtime_scope mirrors request/run/task ids into new file-write manifests.

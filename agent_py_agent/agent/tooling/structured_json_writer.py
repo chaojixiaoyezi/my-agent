@@ -148,6 +148,8 @@ def _data_with_shape_value(data: object, params: dict[str, Any]) -> object:
     return _merge_inline_shape(data, shape)
 
 
+# LLM: _merge_inline_shape 是 agent_py_agent/agent/tooling/structured_json_writer.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 merge inline shape 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _merge_inline_shape(data: dict[str, object], shape: dict[str, object]) -> dict[str, object]:
     merged = dict(data)
     for key, value in shape.items():

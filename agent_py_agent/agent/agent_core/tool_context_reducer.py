@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 
 from ..tools import ToolExecutionResult
+from .tool_context_action_summary import actionable_tool_result_summary
 from .tool_context_orchestration_summary import orchestration_live_summary
 
 
@@ -19,6 +20,9 @@ def render_tool_result_for_live_prompt(result: ToolExecutionResult, archive_reco
     orchestration_summary = orchestration_live_summary(result, archive_record)
     if orchestration_summary:
         return orchestration_summary
+    action_summary = actionable_tool_result_summary(result, archive_record)
+    if action_summary:
+        return action_summary
     status = "ok" if result.ok else "error"
     artifact_ref = str(archive_record.get("artifact_ref") or archive_record.get("output_path") or "")
     call_id = str(archive_record.get("id") or "")

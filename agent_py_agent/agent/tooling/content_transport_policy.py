@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from ..settings.tool_config import DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
 
 MAX_INLINE_WRITE_CONTENT_CHARS = DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
-STREAMING_INLINE_WRITE_ABORT_CHARS = 4000
+STREAMING_INLINE_WRITE_ABORT_CHARS = 32_000
 RECOMMENDED_WRITE_CHUNK_CHARS = "1500-2000"
 RECOVERY_WRITE_CHUNK_CHARS = 800
 
@@ -157,10 +157,22 @@ def inline_write_content_limit(value: int | None = None) -> int:
     return limit
 
 
-# LLM: streaming_inline_write_abort_limit keeps slow unfinished tool calls bounded before execution.
-# 函数用途: 计算未闭合 write_file/append_file 流式内容的早停阈值；完整闭合工具调用仍按 inline_write_content_limit 处理。
+# LLM: streaming_inline_write_abort_limit keeps slow unfinished tool calls bounded without cutting normal pages early.
+# 函数用途: 默认给网页/脚本完整闭合机会；显式小测试上限仍按调用方配置，失控流才早停恢复。
 def streaming_inline_write_abort_limit(value: int | None = None) -> int:
-    return min(inline_write_content_limit(value), STREAMING_INLINE_WRITE_ABORT_CHARS)
+    limit = inline_write_content_limit(value)
+    if _explicit_small_stream_limit(value):
+        return limit
+    return max(limit, STREAMING_INLINE_WRITE_ABORT_CHARS)
+
+
+def _explicit_small_stream_limit(value: int | None) -> bool:
+    if value is None:
+        return False
+    try:
+        return 0 < int(value) < MAX_INLINE_WRITE_CONTENT_CHARS
+    except (TypeError, ValueError):
+        return False
 
 
 # LLM: long_content_transport_hint teaches the model the durable fix while the tool still preserves valid content.

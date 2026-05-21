@@ -1,5 +1,5 @@
 # LLM: file_write_session is a thin public tool wrapper; staged write mechanics live in the service module.
-# 模块用途: 暴露大文件分块写入工具规格，并把 begin/append/finish/abort 委托给服务层。
+# 模块用途: 暴露大文件分块写入工具规格，并把 begin/append/finish/reset/abort 委托给服务层。
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ class FileWriteSessionTool(FileSystemTool):
         )
 
     # LLM: execute preserves the public Tool interface while delegating all action semantics.
-    # 函数用途: 执行 file_write_session 的 begin/append/finish/abort 请求并返回结构化结果。
+    # 函数用途: 执行 file_write_session 的 begin/append/finish/reset/abort 请求并返回结构化结果。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         return self._service.execute(params)
 
@@ -51,7 +51,7 @@ def _build_spec(max_chunk_chars: int) -> ToolSpec:
     return ToolSpec(
         name="file_write_session",
         category="filesystem",
-        description="用 begin/append/finish/abort 分块写入大文本文件，finish 时原子提交。",
+        description="用 begin/append/finish/reset/abort 分块写入大文本文件，finish 时原子提交。",
         use_cases=[
             "要写入超过 write_file 推荐 inline 尺寸的大文件",
             "需要可重试、可幂等追加 chunk 的生成文件流程",
@@ -69,14 +69,14 @@ def _build_spec(max_chunk_chars: int) -> ToolSpec:
             "分块写入",
         ],
         parameters={
-            "action": "必填，begin、append、finish 或 abort",
+            "action": "必填，begin、append、finish、reset 或 abort",
             "target_path": "begin 时必填，最终提交的工作区内目标文件路径",
             "session_id": "append、finish、abort 时必填，由 begin 返回",
             "chunk_index": "append 时必填，从 0 开始的整数；相同 index+content 可安全重试",
             "content": "append 时必填，单 chunk 文本内容",
         },
         parameter_details={
-            "action": "begin 创建 session；append 写入一个 chunk；finish 检查 chunk 连续后原子提交；abort 删除临时状态。",
+            "action": "begin 创建 session；append 写入 chunk；finish 原子提交；reset 清空 chunks 以便重写；abort 删除临时状态。",
             "target_path": "结构化记录在 manifest.target_path 中，必须位于允许工作区内。",
             "session_id": "begin 返回的稳定 id；不是路径，不能自行拼接。",
             "chunk_index": "同一个 chunk_index 只能对应同一份内容；重复提交同内容会返回 duplicate=true。",
@@ -86,5 +86,6 @@ def _build_spec(max_chunk_chars: int) -> ToolSpec:
             '{"tool": "file_write_session", "action": "begin", "target_path": "dist/big.txt"}',
             '{"tool": "file_write_session", "action": "append", "session_id": "...", "chunk_index": 0, "content": "..."}',
             '{"tool": "file_write_session", "action": "finish", "session_id": "..."}',
+            '{"tool": "file_write_session", "action": "reset", "session_id": "...", "discard_chunks": true}',
         ],
     )

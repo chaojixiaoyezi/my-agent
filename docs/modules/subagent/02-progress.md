@@ -1830,3 +1830,9 @@
 - 中文说明：本轮没有改变子代理执行器行为，只补齐 `execution_executor.py` 中 artifact integrity helper 的 LLM/人类用途注释，让代码审计能看清“产物完整性结果”仍来自结构化执行事实。
 - 已实现：注释明确 artifact integrity helper 只处理结构化字段和执行结果，不从普通自然语言文本推断机器事实。
 - 已测试：annotation coverage、ruff、code-size strict、contract pyramid 和 full fast pytest 均纳入本轮验证。
+
+## 2026-05-22 子代理静态站点 JS API 注释同步
+
+- 中文说明：本轮没有改变子代理静态站点验收行为，只补齐 `static_site_js_api_checks.py` 的函数级 LLM/人类用途注释。
+- 已实现：注释明确 JS API 检查只比较 `app.method()` 调用和结构化导出集合，不从普通页面文案或任务描述推断业务事实。
+- 已测试：annotation coverage、ruff、code-size strict、contract pyramid、离线矩阵、replay 和 fast pytest 已纳入本轮验证。

@@ -290,6 +290,8 @@ def _collection_contract_lines(validation: dict[str, object]) -> list[str]:
     return lines
 
 
+# LLM: _collection_shape_lines 是 agent_py_agent/agent/agent_core/delivery_contract_prompting_recovery.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 collection shape lines 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _collection_shape_lines(collection: dict[str, object]) -> list[str]:
     lines = [f"  - {key}={value}" for key in ("groups_path", "items_path", "min_groups", "min_items_per_group") if (value := collection.get(key))]
     fields = collection.get("required_item_fields")
@@ -298,6 +300,8 @@ def _collection_shape_lines(collection: dict[str, object]) -> list[str]:
     return lines
 
 
+# LLM: _evidence_contract_lines 是 agent_py_agent/agent/agent_core/delivery_contract_prompting_recovery.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 evidence contract lines 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _evidence_contract_lines(evidence: dict[str, object]) -> list[str]:
     lines: list[str] = []
     if evidence.get("require_verified") is not None:
@@ -308,6 +312,8 @@ def _evidence_contract_lines(evidence: dict[str, object]) -> list[str]:
     return lines
 
 
+# LLM: _item_evidence_contract_lines 是 agent_py_agent/agent/agent_core/delivery_contract_prompting_recovery.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 item evidence contract lines 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _item_evidence_contract_lines(collection: dict[str, object], evidence: object) -> list[str]:
     evidence_fields = collection.get("required_item_evidence_fields")
     if not isinstance(evidence_fields, list) and isinstance(evidence, dict) and collection.get("require_item_evidence") is not False:

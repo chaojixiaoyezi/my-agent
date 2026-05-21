@@ -69,7 +69,7 @@ def open_session_tool_call_decision(request: OpenSessionDecisionRequest) -> Open
         tool = str(call.get("tool") or "").strip()
         action = str(call.get("action") or "").strip().lower()
         session_id = str(call.get("session_id") or "").strip()
-        if tool != "file_write_session" or action not in {"append", "finish", "abort"} or session_id not in open_ids:
+        if tool != "file_write_session" or action not in {"append", "finish", "reset", "abort"} or session_id not in open_ids:
             return _invalid_open_session_tool_call(request)
     return None
 

@@ -102,11 +102,15 @@ def _artifact_repair_tool(action: dict[str, object], *, intent: str) -> str:
     return _first_write_tool(values, candidates) or (values[0] if values else "")
 
 
+# LLM: _write_tool_values 是 agent_py_agent/agent/agent_core/tool_delivery_repair_required_calls.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 write tool values 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _write_tool_values(action: dict[str, object]) -> list[str]:
     tools = action.get("write_tools")
     return [str(item) for item in tools if str(item)] if isinstance(tools, list) else []
 
 
+# LLM: _first_write_tool 是 agent_py_agent/agent/agent_core/tool_delivery_repair_required_calls.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 first write tool 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _first_write_tool(values: list[str], candidates: tuple[str, ...]) -> str:
     for candidate in candidates:
         if candidate in values:

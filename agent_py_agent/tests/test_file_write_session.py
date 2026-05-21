@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from agent_py_agent.agent.tooling.file_write_session import FileWriteSessionTool
+from agent_py_agent.agent.tooling.file_write_session_inspection import open_file_write_sessions
 
 
 # LLM: Tests read envelopes instead of prose so session failures stay machine-actionable.
@@ -77,10 +78,6 @@ class TestFileWriteSessionTool:
     # LLM: Staged previews make long writes recoverable even when a model times out before finish.
     # 函数用途: 验证每次 append 后都会组装可读取的 preview，并给出 finish/continue 的结构化下一步。
     def test_append_materializes_recoverable_preview_and_next_actions(self, tmp_path: Path):
-        from agent_py_agent.agent.tooling.file_write_session_inspection import (
-            open_file_write_sessions,
-        )
-
         workspace = tmp_path / "workspace"
         tool = _tool(workspace, max_chunk_chars=32)
         session_id = _begin(tool)
@@ -286,7 +283,7 @@ class TestFileWriteSessionToolStructuredValidation:
                 "session_id": "homepage-v1",
                 "target_path": "out/index.html",
                 "chunk_index": 0,
-                "content": "<!doctype html>",
+                "content": "<!doctype html><html><body>ok</body></html>",
             }
         )
         finish = tool.execute({"action": "finish", "session_id": "homepage-v1"})
@@ -295,7 +292,7 @@ class TestFileWriteSessionToolStructuredValidation:
         assert append.result_envelope["auto_started"] is True
         assert append.result_envelope["target_path"]["display"] == "out/index.html"
         assert finish.ok is True
-        assert (workspace / "out" / "index.html").read_text(encoding="utf-8") == "<!doctype html>"
+        assert (workspace / "out" / "index.html").read_text(encoding="utf-8").endswith("</html>")
 
 
 # LLM: Stable id and path-boundary tests are kept in a separate class so the contract suite stays under code-size limits.
@@ -415,3 +412,82 @@ class TestFileWriteSessionToolIdentityAndGuards:
         assert result.result_envelope["code"] == "PATH_OUTSIDE_WORKSPACE"
         assert not (tmp_path / "outside.txt").exists()
         assert not (workspace / ".agent_file_write_sessions").exists()
+
+    # LLM: HTML sessions must not commit visibly broken pages after a long write is recovered.
+    # 函数用途: 验证 finish 会拒绝结构损坏和假 hash 链接，保留 session 供模型继续修复。
+    def test_finish_rejects_invalid_html_target_and_keeps_session_open(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        tool = _tool(workspace, max_chunk_chars=2048)
+        session_id = _begin(tool, target_path="out/index.html")
+
+        append = tool.execute(
+            {
+                "action": "append",
+                "session_id": session_id,
+                "chunk_index": 0,
+                "content": (
+                    "<!doctype html><html><body><main id='home'>ok</main>"
+                    "<a href='#'>咨询</a></body></html><section>late</section>"
+                ),
+            }
+        )
+        finish = tool.execute({"action": "finish", "session_id": session_id})
+
+        assert append.ok is True
+        assert finish.ok is False
+        assert finish.error_code == "TOOL_INVALID_ARGUMENTS"
+        assert finish.result_envelope["code"] == "ARTIFACT_INTEGRITY_FAILED"
+        assert finish.result_envelope["format"] == "html"
+        assert finish.result_envelope["session_id"] == session_id
+        assert "content_after_html_close" in finish.result_envelope["artifact_integrity"]["blocker_codes"]
+        assert "placeholder_hash_link" in finish.result_envelope["artifact_integrity"]["blocker_codes"]
+        assert finish.result_envelope["abort_tool_call"] == {
+            "tool": "file_write_session",
+            "action": "abort",
+            "session_id": session_id,
+            "discard_chunks": True,
+        }
+        assert not (workspace / "out" / "index.html").exists()
+        assert Path(finish.result_envelope["temp_path"]).exists()
+
+    # LLM: Reset lets a model rewrite a bad staged artifact without deleting session identity or target scope.
+    # 函数用途: 验证 finish 失败会落 last_finish_error，reset 清空 chunks 后可从 0 重写并成功提交。
+    def test_reset_rewrites_failed_html_session(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        tool = _tool(workspace, max_chunk_chars=2048)
+        session_id = _begin(tool, target_path="out/index.html")
+        tool.execute(
+            {
+                "action": "append",
+                "session_id": session_id,
+                "chunk_index": 0,
+                "content": "<html><body><a href='#'>bad</a></body></html><p>late</p>",
+            }
+        )
+
+        failed = tool.execute({"action": "finish", "session_id": session_id})
+        summary = open_file_write_sessions(workspace)[0]
+        reset = tool.execute({"action": "reset", "session_id": session_id, "discard_chunks": True})
+        rewritten = tool.execute(
+            {
+                "action": "append",
+                "session_id": session_id,
+                "chunk_index": 0,
+                "content": "<!doctype html><html><body><main id='home'>ok</main></body></html>",
+            }
+        )
+        finished = tool.execute({"action": "finish", "session_id": session_id})
+
+        assert failed.ok is False
+        assert summary["last_finish_error"]["code"] == "ARTIFACT_INTEGRITY_FAILED"
+        assert summary["reset_tool_call"] == {
+            "tool": "file_write_session",
+            "action": "reset",
+            "session_id": session_id,
+            "discard_chunks": True,
+        }
+        assert reset.ok is True
+        assert reset.result_envelope["next_chunk_index"] == 0
+        assert rewritten.ok is True
+        assert finished.ok is True
+        assert (workspace / "out" / "index.html").read_text(encoding="utf-8").endswith("</html>")

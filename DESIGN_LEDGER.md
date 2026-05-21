@@ -1,5 +1,20 @@
 # 设计思路台账
 
+## 2026-05-22 / 主代理六步稳定化执行规程
+
+状态：设计落地到文档，代码验证进行中
+
+摘要：
+- 在 `docs/design/main-agent-contract-testing.md` 固化当前六步执行规程：离线测试门、主代理 fast 验证、P0 合同硬点、少量真实 LLM canary、复杂真实任务并行、真实问题沉淀为离线回归。
+- 这次不是新增一套架构，而是把已有 Phase 2.5 路线变成当前开发纪律：不频繁提交，真实任务不作为主要调试方式，发现问题先参考 `/Users/example/study-agent/all-agent/` 下的项目，再做通用底座修复。
+- 继续遵守两条铁律：禁止专项合同；代码不得依赖普通自然语言文本作为机器事实来源。
+- 参考方向：通道运行时 的 task/run/control-plane 思路，长期助手 的活动记录与恢复边界，会话运行时 的结构化事件和 refs-first 验收。只吸收通用架构策略，不复制业务专项逻辑。
+- 2026-05-22 已完成第一轮小型真实 LLM canary：`main-artifact` suite 在 `/Users/example/my_agent/live-lab-runs/20260522-main-artifact-canary-01` 通过，主代理完成大输出 artifact 读回、报告写入、compact apply 和 resume handoff。
+
+后续方向：
+- 先跑离线矩阵、replay、code-size 和 fast tests；失败则先做离线 regression，再改通用合同层。
+- 只有离线门禁和主代理 fast 验证稳定后，才进入真实 LLM canary 和复杂真实任务并行。
+
 ## 2026-05-21 / 主代理 Phase 2.5 阶段 1-4 合同化
 
 状态：已落地第一版
@@ -2110,3 +2125,17 @@ def example(...):
 - 阶段 C（Replay 正式化）完成：新增 declarative replay specs `agent_py_agent/tests/replay/specs/*.json`、共享 runner `replay_case_runner.py` 和 gate 脚本 `scripts/check_replay_contracts.py`。Replay 不再只是零散单测，而是可以批量执行、JSON 汇总和单独验收的固定资产。
 - 验证链路：focused tests 覆盖状态机迁移、tool manifest、context bundle、list_tools、replay trace、replay case runner 和 replay gate；随后全量 fast suite、`ruff check agent_py_agent scripts`、`check_doc_sync`、`check_code_size --mode strict --baseline`、`git diff --check` 也全部通过。
 - 下一步：继续拆 `main_agent_delivery_closeout.py` 的历史 soft/high-risk，把 recovery action 组装和 closeout 判定进一步拆成共享模块；真实复杂任务仍放在后面统一验收，不回到边跑边改。
+
+## 2026-05-22 Main-complex canary HTML commit gate
+
+状态：已落地，web-only 真 LLM 复验通过
+
+摘要：
+- `main-complex` 真实 LLM suite 里 5 个 case 通过，`main_direct_web_app` 暴露一个通用提交边界问题：长 HTML 被 `file_write_session` 恢复后，`finish` 只校验 JSON，不校验 HTML 完整性。
+- 修复落在通用工具提交边界：`.html/.htm` 在 `file_write_session finish` 前复用 `artifact_integrity`，结构损坏、`href="#"` 和缺失 hash target 会返回 `ARTIFACT_INTEGRITY_FAILED`，不会把坏页面提交为最终事实。
+- 第二轮 `main-complex` 复验确认坏页面不再提交，但暴露默认流式写入边界过窄：普通 `write_file` 在约 4K 时过早切入 staged writer，模型混用直接写入和 session 写入后被 open-session guard 阻断。
+- 修复落在通用传输策略：默认 streaming inline write abort 上限放宽到 32K，显式小阈值仍可用于测试/策略覆盖。常见完整 HTML/CSS/JS 写入能自然收尾，失控长流仍会进入 staged writer 恢复。
+- 新增离线回归覆盖坏 HTML 不能提交、目标文件不落地、session reset 后可重写、外置工具结果仍保留 `reset_tool_call` 这类机器动作字段、默认写入流能越过旧 4K 边界；同时保留 JSON checkpoint 预提交校验。
+- 长期助手 对照已用隔离 `长期助手_HOME`/venv 跑同题 Web app，产物通过本仓库静态验收；它本轮成功主要来自一次性完整写入和主动搜索检查，`write_file` 对 HTML 仍是 lint skipped，所以本仓库选择把校验放在工具提交边界。
+- 真 LLM 复验：`20260522-main-web-only-04` 只跑 `health` + `main_direct_web_app`，`LIVE_LAB_PASS`，Web 任务 245.40 秒完成并生成 `index.html`、`styles.css`、`app.js`、`README.md`。
+- 验证链路：`test_file_write_session.py`、`test_artifact_integrity.py`、`test_tool_stream_boundary.py`、`test_tool_loop_write_sessions.py`、目标 `ruff` 和 `check_code_size --mode strict --baseline` 已通过，`high-risk=0`、`soft=0`。

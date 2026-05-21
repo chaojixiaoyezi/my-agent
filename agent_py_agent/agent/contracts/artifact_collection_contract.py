@@ -53,6 +53,8 @@ def collection_contract_finding_dicts(
 
 # LLM: _collection_contract returns the nested machine contract or an empty contract.
 # 函数用途: 只读取 collection_contract 结构字段，不从 prompt 或报告文字里推断任务范围。
+# LLM: _ItemFindingContext 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化数据载体；修改字段时同步检查调用方和合同测试。
+# 类用途: 保存 ItemFindingContext 相关的机器事实，供合同、验收或恢复流程复用。
 @dataclass(frozen=True)
 class _ItemFindingContext:
     contract: dict[str, object]
@@ -60,6 +62,8 @@ class _ItemFindingContext:
     required_fields: list[str]
 
 
+# LLM: _collection_contract 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 collection contract 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _collection_contract(validation_contract: dict[str, object]) -> dict[str, object]:
     contract = validation_contract.get("collection_contract")
     return dict(contract) if isinstance(contract, dict) else {}
@@ -74,6 +78,8 @@ def _staging_source_ref(validation_contract: dict[str, object] | object) -> str:
     return str(staging.get("source_json_ref") or "")
 
 
+# LLM: _read_json 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 read json 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _read_json(path: Path) -> tuple[object, ArtifactFinding | None]:
     if not path.exists():
         return None, _finding("COLLECTION_SOURCE_MISSING", "collection source JSON does not exist.", str(path))
@@ -83,6 +89,8 @@ def _read_json(path: Path) -> tuple[object, ArtifactFinding | None]:
         return None, _finding("COLLECTION_SOURCE_INVALID", f"collection source JSON is invalid: {exc}", str(path))
 
 
+# LLM: _group_findings 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 group findings 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _group_findings(value: object, contract: dict[str, object], source_ref: str) -> list[ArtifactFinding]:
     groups = _groups(value, contract)
     min_groups = positive_int(contract.get("min_groups"))
@@ -93,6 +101,8 @@ def _group_findings(value: object, contract: dict[str, object], source_ref: str)
     return findings
 
 
+# LLM: _min_group_findings 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 min group findings 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _min_group_findings(groups: list[object], min_groups: int, source_ref: str) -> list[ArtifactFinding]:
     if not min_groups or len(groups) >= min_groups:
         return []
@@ -106,6 +116,8 @@ def _min_group_findings(groups: list[object], min_groups: int, source_ref: str) 
     ]
 
 
+# LLM: _group_item_count_findings 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 group item count findings 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _group_item_count_findings(
     groups: list[object],
     contract: dict[str, object],
@@ -124,6 +136,8 @@ def _group_item_count_findings(
     ]
 
 
+# LLM: _item_findings 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 item findings 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _item_findings(value: object, contract: dict[str, object], source_ref: str) -> list[ArtifactFinding]:
     items = _all_items(value, contract)
     min_total = positive_int(contract.get("min_items_total"))
@@ -134,6 +148,8 @@ def _item_findings(value: object, contract: dict[str, object], source_ref: str) 
     return findings
 
 
+# LLM: _min_item_findings 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 min item findings 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _min_item_findings(items: list[object], min_total: int, source_ref: str) -> list[ArtifactFinding]:
     if not min_total or len(items) >= min_total:
         return []
@@ -147,6 +163,8 @@ def _min_item_findings(items: list[object], min_total: int, source_ref: str) -> 
     ]
 
 
+# LLM: _item_shape_and_field_findings 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 item shape and field findings 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _item_shape_and_field_findings(
     items: list[object],
     contract: dict[str, object],
@@ -160,6 +178,8 @@ def _item_shape_and_field_findings(
     return findings
 
 
+# LLM: _single_item_findings 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 single item findings 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _single_item_findings(
     item: object,
     index: int,
@@ -172,6 +192,8 @@ def _single_item_findings(
     return findings
 
 
+# LLM: _required_item_field_findings 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 required item field findings 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _required_item_field_findings(
     item: dict[str, object],
     source_ref: str,
@@ -220,6 +242,8 @@ def _required_item_value_findings(
     return findings
 
 
+# LLM: _completion_evidence_findings 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 completion evidence findings 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _completion_evidence_findings(value: object, contract: dict[str, object], source_ref: str) -> list[ArtifactFinding]:
     if not bool(contract.get("require_completion_evidence")):
         return []
@@ -236,6 +260,8 @@ def _completion_evidence_findings(value: object, contract: dict[str, object], so
     ]
 
 
+# LLM: _source_claim_count_findings 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 source claim count findings 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _source_claim_count_findings(value: object, contract: dict[str, object], source_ref: str) -> list[ArtifactFinding]:
     findings: list[ArtifactFinding] = []
     min_sources = positive_int(contract.get("min_source_refs"))
@@ -249,6 +275,8 @@ def _source_claim_count_findings(value: object, contract: dict[str, object], sou
     return findings
 
 
+# LLM: _groups 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 groups 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _groups(value: object, contract: dict[str, object]) -> list[object]:
     groups_path = str(contract.get("groups_path") or "").strip()
     if not groups_path:
@@ -257,6 +285,8 @@ def _groups(value: object, contract: dict[str, object]) -> list[object]:
     return list(groups) if isinstance(groups, list) else []
 
 
+# LLM: _all_items 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 all items 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _all_items(value: object, contract: dict[str, object]) -> list[object]:
     groups = _groups(value, contract)
     if groups:
@@ -268,6 +298,8 @@ def _all_items(value: object, contract: dict[str, object]) -> list[object]:
     return list(value) if isinstance(value, list) else []
 
 
+# LLM: _items_from_group 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 items from group 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _items_from_group(group: object, contract: dict[str, object]) -> list[object]:
     items_path = str(contract.get("items_path") or "rows")
     items = _lookup_path(group, items_path)
@@ -276,6 +308,8 @@ def _items_from_group(group: object, contract: dict[str, object]) -> list[object
     return list(group) if isinstance(group, list) else []
 
 
+# LLM: _lookup_path 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 lookup path 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _lookup_path(value: object, path: str) -> object:
     current = value
     for part in [item for item in path.split(".") if item]:
@@ -286,11 +320,15 @@ def _lookup_path(value: object, path: str) -> object:
     return current
 
 
+# LLM: _workspace_path 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 workspace path 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _workspace_path(ref: str, workspace_root: Path) -> Path:
     path = Path(ref)
     return path if path.is_absolute() else (workspace_root / path).resolve()
 
 
+# LLM: _inside_workspace 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 inside workspace 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _inside_workspace(path: Path, workspace_root: Path) -> bool:
     try:
         path.resolve(strict=False).relative_to(workspace_root.resolve(strict=False))
@@ -299,6 +337,8 @@ def _inside_workspace(path: Path, workspace_root: Path) -> bool:
         return False
 
 
+# LLM: _has_value 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 has value 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _has_value(value: object) -> bool:
     if value is None:
         return False
@@ -307,6 +347,8 @@ def _has_value(value: object) -> bool:
     return True
 
 
+# LLM: _has_structured_data 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 has structured data 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _has_structured_data(value: object) -> bool:
     if isinstance(value, dict):
         return any(_has_structured_data(item) for item in value.values())
@@ -315,16 +357,22 @@ def _has_structured_data(value: object) -> bool:
     return _has_value(value)
 
 
+# LLM: _group_location 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 group location 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _group_location(source_ref: str, group: object, index: int) -> str:
     if isinstance(group, dict) and group.get("name"):
         return f"{source_ref}:{group.get('name')}"
     return f"{source_ref}#{index}"
 
 
+# LLM: _finding 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 finding 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _finding(code: str, message: str, location: str = "", value: str = "") -> ArtifactFinding:
     return ArtifactFinding(code=code, severity="hard", message=message, location=location, value=value)
 
 
+# LLM: _compact_json 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 compact json 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _compact_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 

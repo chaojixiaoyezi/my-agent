@@ -23,8 +23,10 @@ def open_write_session_repair_context(agent: object, repairs: int, params: objec
         [
             "[tool-system open-file-write-session]",
             json.dumps(payload, ensure_ascii=False, sort_keys=True),
-            "你还有未提交的 file_write_session。下一轮必须先调用 file_write_session finish "
-            "提交目标文件；如果决定放弃该产物，必须使用 payload.abort_tool_call。处理完之前不要给最终答复。",
+            "你还有未提交的 file_write_session。下一轮必须先处理这些 session："
+            "如果 last_finish_error 存在，优先使用 payload.reset_tool_call 清空坏 chunks 后从 chunk_index=0 重写；"
+            "如果只是未提交，调用 payload.finish_tool_call；如果放弃该产物，使用 payload.abort_tool_call。"
+            "处理完之前不要给最终答复。",
         ]
     )
 

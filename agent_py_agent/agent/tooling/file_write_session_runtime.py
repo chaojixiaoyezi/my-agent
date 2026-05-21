@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ._filesystem_helpers import _int_param, _text_param
+from .file_write_session_finish_error import record_finish_error
 from .file_write_session_io import (
     chunk_param_failure,
     failure,
@@ -290,6 +291,7 @@ def commit_session(
             temp_path=paths.temp_path,
         )
         if validation_error is not None:
+            record_finish_error(session_id, paths, manifest, validation_error)
             return validation_error
         target.parent.mkdir(parents=True, exist_ok=True)
         os.replace(paths.temp_path, target)

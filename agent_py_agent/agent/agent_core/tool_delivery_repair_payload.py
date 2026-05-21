@@ -65,6 +65,8 @@ def delivery_repair_payload(agent: object) -> dict[str, object]:
     }
 
 
+# LLM: _required_actions 是 agent_py_agent/agent/agent_core/tool_delivery_repair_payload.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 required actions 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _required_actions(progress: object) -> list[dict[str, object]]:
     if not isinstance(progress, dict):
         return []
@@ -79,6 +81,8 @@ def _required_actions(progress: object) -> list[dict[str, object]]:
     ]
 
 
+# LLM: _required_action 是 agent_py_agent/agent/agent_core/tool_delivery_repair_payload.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 required action 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _required_action(item: object) -> dict[str, object]:
     if not isinstance(item, dict):
         return {}

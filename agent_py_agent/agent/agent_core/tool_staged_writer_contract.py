@@ -21,6 +21,8 @@ _BUILDER_OUTPUT_KEYS = ("workbook_ref", "pdf_ref", "output_ref")
 class WriterContractIndex:
     required_tools_by_ref: dict[str, set[str]] = field(default_factory=dict)
 
+    # LLM: add 是 agent_py_agent/agent/agent_core/tool_staged_writer_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+    # 函数用途: 处理 add 相关的结构化数据、路径或 finding，供当前合同链路调用。
     def add(self, ref: object, tool_name: object) -> None:
         ref_text = _ref_text(ref)
         tool_text = _tool_text(tool_name)
@@ -176,6 +178,8 @@ def _target_path_for_tool(tool: str, payload: dict[str, object]) -> str:
     return ""
 
 
+# LLM: _first_path 是 agent_py_agent/agent/agent_core/tool_staged_writer_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 first path 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _first_path(payload: dict[str, object], keys: tuple[str, ...]) -> str:
     for key in keys:
         value = _ref_text(payload.get(key))
@@ -184,10 +188,14 @@ def _first_path(payload: dict[str, object], keys: tuple[str, ...]) -> str:
     return ""
 
 
+# LLM: _tool_text 是 agent_py_agent/agent/agent_core/tool_staged_writer_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 tool text 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _tool_text(value: object) -> str:
     return str(value or "").strip()
 
 
+# LLM: _ref_text 是 agent_py_agent/agent/agent_core/tool_staged_writer_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 ref text 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _ref_text(value: object) -> str:
     return str(value or "").strip().replace("\\", "/")
 
@@ -204,6 +212,8 @@ def _same_path_ref(path: str, ref: str) -> bool:
     )
 
 
+# LLM: _display_required_tools 是 agent_py_agent/agent/agent_core/tool_staged_writer_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 display required tools 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _display_required_tools(required_tools: set[str]) -> str:
     return ",".join(sorted(required_tools))
 

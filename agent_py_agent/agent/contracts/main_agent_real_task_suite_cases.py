@@ -177,7 +177,7 @@ def _github_star_collection_contract() -> dict[str, object]:
 
 
 # LLM: _research_document_translation_case covers research, translation, and formatted document output.
-# 函数用途: 定义研究文档翻译任务，验收为 PDF 产物、来源清单和格式检查合同。
+# 函数用途: 定义通用研究文档翻译任务，验收为 PDF 产物、来源清单和格式检查合同。
 def _research_document_translation_case() -> MainAgentRealTaskCase:
     artifact = MainAgentRealTaskArtifact(
         artifact_id="research_translation_pdf",
@@ -211,7 +211,7 @@ def _research_document_translation_case() -> MainAgentRealTaskCase:
         case_id="research_documents_translation_pdf",
         title="研究文档中文翻译 PDF",
         user_prompt=(
-            "找到 2025 年之后 DeepSeek 公开发布的所有论文或研究文档，逐篇翻译成中文，"
+            "找到 2025 年之后指定 AI 研究机构公开发布的所有论文或研究文档，逐篇翻译成中文，"
             "正文翻译准确，专业术语可以保留英文。最终成品需要是 PDF，排版要正确、清楚、好看，并附来源清单。"
         ),
         artifacts=(artifact,),
@@ -249,6 +249,8 @@ def _research_document_collection_contract() -> dict[str, object]:
     }
 
 
+# LLM: _year_to_date_week_count 是 agent_py_agent/agent/contracts/main_agent_real_task_suite_cases.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 year to date week count 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _year_to_date_week_count(today: date | None = None) -> int:
     current = today or date.today()
     year_start = date(current.year, 1, 1)

@@ -6,6 +6,8 @@ from __future__ import annotations
 import re
 
 
+# LLM: missing_window_app_method_hits 是 agent_py_agent/agent/subagents/static_site_js_api_checks.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 missing window app method hits 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def missing_window_app_method_hits(script_text: str) -> list[str]:
     refs = _referenced_window_app_methods(script_text)
     if not refs:
@@ -14,6 +16,8 @@ def missing_window_app_method_hits(script_text: str) -> list[str]:
     return [f"app.{name}" for name in sorted(refs - exported)]
 
 
+# LLM: _referenced_window_app_methods 是 agent_py_agent/agent/subagents/static_site_js_api_checks.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 referenced window app methods 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _referenced_window_app_methods(script_text: str) -> set[str]:
     return {
         name
@@ -22,6 +26,8 @@ def _referenced_window_app_methods(script_text: str) -> set[str]:
     }
 
 
+# LLM: _exported_window_app_methods 是 agent_py_agent/agent/subagents/static_site_js_api_checks.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 exported window app methods 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _exported_window_app_methods(script_text: str) -> set[str]:
     text = script_text or ""
     names = {match.group(1) for match in re.finditer(r"\bwindow\.app\.([A-Za-z_$][\w$]*)\s*=", text)}
@@ -42,6 +48,8 @@ def _exported_window_app_methods(script_text: str) -> set[str]:
     return names
 
 
+# LLM: _object_property_names 是 agent_py_agent/agent/subagents/static_site_js_api_checks.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 object property names 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _object_property_names(body: str) -> set[str]:
     names: set[str] = set()
     cleaned = re.sub(r"//.*?$|/\*.*?\*/", "", body or "", flags=re.MULTILINE | re.DOTALL)

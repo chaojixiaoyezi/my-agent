@@ -10,6 +10,8 @@ from .artifact_acceptance_models import ArtifactFinding
 from .staged_checkpoint_acceptance import staged_json_evidence_findings
 
 
+# LLM: staged_source_evidence_findings 是 agent_py_agent/agent/contracts/artifact_staged_evidence.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 staged source evidence findings 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def staged_source_evidence_findings(
     validation_contract: dict[str, object],
     workspace_root: Path,
@@ -22,6 +24,8 @@ def staged_source_evidence_findings(
     return _evidence_finding_records(staged_json_evidence_findings(str(source_ref), workspace_root, evidence_contract))
 
 
+# LLM: _evidence_finding_records 是 agent_py_agent/agent/contracts/artifact_staged_evidence.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 evidence finding records 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _evidence_finding_records(items: list[dict[str, object]]) -> list[ArtifactFinding]:
     records: list[ArtifactFinding] = []
     public_keys = {"code", "severity", "message", "location", "value"}

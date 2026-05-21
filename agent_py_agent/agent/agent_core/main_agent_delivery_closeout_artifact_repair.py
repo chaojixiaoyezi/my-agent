@@ -12,6 +12,8 @@ _REPAIR_TARGET_SUFFIXES = {".css", ".html", ".htm", ".js", ".json", ".md", ".txt
 _MAX_FINDING_VALUES_PER_ACTION = 64
 
 
+# LLM: append_artifact_finding_repair_actions 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 append artifact finding repair actions 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def append_artifact_finding_repair_actions(report: dict[str, Any], ledger: RecoveryActionLedger) -> None:
     for item in report.get("artifacts", []):
         if not isinstance(item, dict) or item.get("ok"):
@@ -26,6 +28,8 @@ def append_artifact_finding_repair_actions(report: dict[str, Any], ledger: Recov
         ledger.actions.append(_artifact_finding_repair_action(item, findings))
 
 
+# LLM: failed_findings 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 failed findings 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def failed_findings(report: dict[str, Any]):
     for item in report.get("artifacts", []):
         if item.get("ok"):
@@ -33,11 +37,15 @@ def failed_findings(report: dict[str, Any]):
         yield from artifact_findings(item)
 
 
+# LLM: artifact_findings 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 artifact findings 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def artifact_findings(item: dict[str, Any]):
     findings = item.get("acceptance_report", {}).get("findings", [])
     yield from (finding for finding in findings if isinstance(finding, dict))
 
 
+# LLM: _artifact_finding_repair_action 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 artifact finding repair action 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _artifact_finding_repair_action(
     item: dict[str, Any],
     findings: list[dict[str, Any]],
@@ -58,6 +66,8 @@ def _artifact_finding_repair_action(
     }
 
 
+# LLM: _finding_values 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 finding values 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _finding_values(findings: list[dict[str, Any]], key: str) -> list[str]:
     values: list[str] = []
     for finding in findings:
@@ -67,6 +77,8 @@ def _finding_values(findings: list[dict[str, Any]], key: str) -> list[str]:
     return values[:_MAX_FINDING_VALUES_PER_ACTION]
 
 
+# LLM: _repair_targets 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 repair targets 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _repair_targets(item: dict[str, Any], findings: list[dict[str, Any]]) -> list[str]:
     artifact_path = Path(str(item.get("path") or "")).expanduser()
     candidates = _finding_file_targets(artifact_path, findings)
@@ -77,6 +89,8 @@ def _repair_targets(item: dict[str, Any], findings: list[dict[str, Any]]) -> lis
     return _unique_paths(candidates)[:8]
 
 
+# LLM: _finding_file_targets 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 finding file targets 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _finding_file_targets(artifact_path: Path, findings: list[dict[str, Any]]) -> list[Path]:
     targets: list[Path] = []
     for value in [*_finding_values(findings, "location"), *_finding_values(findings, "value")]:
@@ -89,11 +103,15 @@ def _finding_file_targets(artifact_path: Path, findings: list[dict[str, Any]]) -
     return targets
 
 
+# LLM: _file_ref_head 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 file ref head 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _file_ref_head(value: str) -> str:
     head = value.split(":", 1)[0].split("#", 1)[0].strip()
     return head.replace("\\", "/")
 
 
+# LLM: _existing_text_targets 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 existing text targets 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _existing_text_targets(artifact_path: Path) -> list[Path]:
     try:
         files = [
@@ -106,6 +124,8 @@ def _existing_text_targets(artifact_path: Path) -> list[Path]:
     return sorted(files, key=lambda path: (len(path.parts), str(path)))[:8]
 
 
+# LLM: _safe_artifact_child 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 safe artifact child 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _safe_artifact_child(artifact_path: Path, rel: str) -> Path | None:
     if Path(rel).is_absolute():
         return None
@@ -118,6 +138,8 @@ def _safe_artifact_child(artifact_path: Path, rel: str) -> Path | None:
     return candidate
 
 
+# LLM: _safe_artifact_related_path 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 safe artifact related path 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _safe_artifact_related_path(artifact_path: Path, rel: str) -> Path | None:
     if Path(rel).is_absolute() or _has_parent_ref(rel):
         return None
@@ -132,16 +154,22 @@ def _safe_artifact_related_path(artifact_path: Path, rel: str) -> Path | None:
     return _safe_artifact_child(artifact_path, rel)
 
 
+# LLM: _candidate_repair_roots 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 candidate repair roots 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _candidate_repair_roots(artifact_path: Path) -> list[Path]:
     start = artifact_path if artifact_path.is_dir() else artifact_path.parent
     roots = [start, *list(start.parents)]
     return roots[:8]
 
 
+# LLM: _has_parent_ref 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 has parent ref 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _has_parent_ref(rel: str) -> bool:
     return any(part == ".." for part in Path(rel).parts)
 
 
+# LLM: _unique_paths 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 unique paths 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _unique_paths(paths: list[Path]) -> list[str]:
     seen: set[str] = set()
     values: list[str] = []

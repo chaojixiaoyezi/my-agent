@@ -683,3 +683,4 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `subagents/services/hierarchy_leaf_targets.py` 的 leaf target tokens 读取 `attributes.output_refs`、`attributes.output_files` 和 `attributes.artifact_refs`，用于重复 leaf/ownership 判断；普通“读取/引用/总结某文件”的文本不再成为 ownership 事实。
 - 相关测试已经迁移到 `attributes`、`context_manifest.required_read_paths`、`workflow_depends_on` 和 input/output refs；旧 helper 只作为兼容壳存在，不能重新长出独立的自然语言验收逻辑。
 - `subagents/execution_executor.py` 的 artifact integrity helper 只负责把执行后的结构化 artifact facts 汇总成验收结果；注释同步后，后续维护仍应保持“执行记录、artifact refs、文件系统事实”为唯一机器依据，不要把 runner summary 或普通回复当完成事实。
+- `subagents/static_site_js_api_checks.py` 负责静态比较页面脚本里的 `app.method()` 调用和 `window.app` / local `app` 导出的函数名。它只处理 JS 代码结构和方法集合，不从普通自然语言页面内容、goal 或 summary 推断业务事实；2026-05-22 已补齐函数级 LLM/人类用途注释，后续改动需继续保持这个边界。

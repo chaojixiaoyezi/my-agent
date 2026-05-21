@@ -56,7 +56,7 @@ class _UnfinishedWriteSessionBackend:
             return ModelResponse(text="文件已经写好了。", backend=self.name)
         if self.calls == 4:
             assert "open_file_write_sessions" in prompt
-            assert "必须先调用 file_write_session finish" in prompt
+            assert "payload.finish_tool_call" in prompt
             return ModelResponse(text=_finish_call(session_id), backend=self.name)
         return ModelResponse(text="分块文件已提交。", backend=self.name)
 
@@ -140,6 +140,37 @@ class _UnrelatedWriteAfterStaleSessionBackend:
                 backend=self.name,
             )
         return ModelResponse(text="新任务完成。", backend=self.name)
+
+
+# LLM: _RepairFailedHtmlSessionBackend reproduces a staged commit failure followed by reset rewrite.
+# 类用途: 先写坏 HTML 并触发 finish 失败，再根据 manifest last_finish_error 使用 reset 重写。
+class _RepairFailedHtmlSessionBackend:
+    name = "fake_repair_failed_html_session_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        session_id = _session_id_from_prompt(prompt)
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"file_write_session","action":"begin","target_path":"big.html"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        if self.calls == 2:
+            return ModelResponse(text=_bad_html_append_call(session_id), backend=self.name)
+        if self.calls == 3:
+            return ModelResponse(text=_finish_call(session_id), backend=self.name)
+        if self.calls == 4:
+            assert "ARTIFACT_INTEGRITY_FAILED" in prompt
+            assert "reset_tool_call" in prompt
+            return ModelResponse(text=_reset_call(session_id), backend=self.name)
+        if self.calls == 5:
+            return ModelResponse(text=_append_call(session_id), backend=self.name)
+        if self.calls == 6:
+            return ModelResponse(text=_finish_call(session_id), backend=self.name)
+        return ModelResponse(text="坏 HTML 已重写并提交。", backend=self.name)
 
 
 # LLM: malformed tool markers must not become user-visible final answers.
@@ -259,6 +290,22 @@ def test_tool_loop_ignores_stale_scoped_open_file_write_session_for_new_run():
         assert (workspace / "fresh.txt").read_text(encoding="utf-8") == "ok"
 
 
+# LLM: failed staged commits must be repairable by reset without deleting the target contract.
+# 函数用途: 验证 finish 失败后，工具循环把 last_finish_error 暴露给模型，模型可 reset 后从 chunk 0 重写。
+def test_tool_loop_repairs_failed_html_session_with_reset():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=8)
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = _RepairFailedHtmlSessionBackend()
+
+        result = agent.run("写一个较大的 HTML 文件", save=False, allowed_tools=["file_write_session"])
+
+        assert result.response == "坏 HTML 已重写并提交。"
+        assert agent.backend.calls == 7
+        assert (workspace / "big.html").read_text(encoding="utf-8") == "<html><body>ok</body></html>"
+
+
 # LLM: _append_call keeps the fake backend body small while preserving exact tool JSON.
 # 函数用途: 构造追加 chunk 的 file_write_session 工具调用。
 def _append_call(session_id: str) -> str:
@@ -266,6 +313,27 @@ def _append_call(session_id: str) -> str:
         "[TOOL_CALL]\n"
         f'{{"tool":"file_write_session","action":"append","session_id":"{session_id}",'
         '"chunk_index":0,"content":"<html><body>ok</body></html>"}}\n'
+        "[/TOOL_CALL]"
+    )
+
+
+# LLM: _bad_html_append_call creates a real artifact-integrity failure, not a prompt-only branch.
+# 函数用途: 构造带 href="#" 且 </html> 后有正文的坏 HTML chunk。
+def _bad_html_append_call(session_id: str) -> str:
+    return (
+        "[TOOL_CALL]\n"
+        f'{{"tool":"file_write_session","action":"append","session_id":"{session_id}",'
+        '"chunk_index":0,"content":"<html><body><a href=\'#\'>bad</a></body></html><p>late</p>"}}\n'
+        "[/TOOL_CALL]"
+    )
+
+
+# LLM: _reset_call keeps reset repair tests tied to the public file_write_session contract.
+# 函数用途: 构造清空 chunks 但保留 session/target 的 reset 工具调用。
+def _reset_call(session_id: str) -> str:
+    return (
+        "[TOOL_CALL]\n"
+        f'{{"tool":"file_write_session","action":"reset","session_id":"{session_id}","discard_chunks":true}}\n'
         "[/TOOL_CALL]"
     )
 

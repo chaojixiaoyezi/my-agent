@@ -87,9 +87,18 @@ def test_tool_boundary_aborts_nested_filesystem_large_write_content_stream():
         raise AssertionError("expected nested filesystem large write stream abort")
 
 
-# LLM: unclosed write streams use a stricter transport threshold than fully parsed write_file calls.
-# 函数用途: 验证 12K 完整写入仍可配置，但未闭合流式工具调用会在较小内部阈值早停，避免真实模型输出阶段拖死。
-def test_tool_boundary_uses_streaming_abort_threshold_even_when_inline_limit_is_larger():
+# LLM: default write streams allow common complete HTML/tool bodies to close before recovery.
+# 函数用途: 验证默认写入流不会在旧 4K 小阈值处过早切断，避免半截 HTML 变成 open session。
+def test_tool_boundary_allows_default_write_file_past_inline_recommendation():
+    boundary = ToolBoundaryChunkFilter(None, max_inline_content_chars=MAX_INLINE_WRITE_CONTENT_CHARS)
+
+    boundary('[TOOL_CALL]\n{"tool":"write_file","path":"site/index.html","content":"')
+    boundary("A" * (MAX_INLINE_WRITE_CONTENT_CHARS + 1))
+
+
+# LLM: runaway write streams still stop at the expanded streaming cap.
+# 函数用途: 验证未闭合 write_file 过长时仍会抛出可恢复中断，防止模型输出阶段无限拖延。
+def test_tool_boundary_aborts_write_file_at_expanded_streaming_threshold():
     boundary = ToolBoundaryChunkFilter(None, max_inline_content_chars=12_000)
 
     boundary('[TOOL_CALL]\n{"tool":"write_file","path":"scripts/collect.py","content":"')

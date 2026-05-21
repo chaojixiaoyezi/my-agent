@@ -753,3 +753,170 @@ TaskTree 是多 Agent 前置能力，不是真正启动子 Agent。第一版只�
 - 缺少 1-6 预真实任务报告时，总门禁必须失败。
 - Canary case 只能包含 prompt ref 和结构化验收字段，不能内联普通自然语言 prompt 作为系统事实。
 - 超时预算必须来自结构化模型调用账本。
+
+---
+
+## 10. 2026-05-22 六步执行规程
+
+这一节是当前继续开发时的工作顺序，用来防止再次跑偏。
+
+核心原则：
+
+- 不频繁提交代码；只有完成一个稳定批次、验证通过后再提交。
+- 真实任务不是主要调试方式；真实任务只做最终验收和失败样本来源。
+- 发现问题先看 `/Users/example/study-agent/all-agent/` 下的参考项目，再做本仓库通用修复。
+- 禁止专项合同；产品代码不能为了某个网页、表格、论文、站点或 prompt 样例写专门分支。
+- 禁止代码依赖普通自然语言文本作为机器事实来源；机器判断必须来自结构化字段、状态、refs、schema、工具记录、文件系统事实或显式配置。
+
+### 第 1 步：补离线测试门
+
+目标：
+
+- 先确认合同单测、fake tool、fake LLM、replay、离线矩阵和代码尺寸门禁还在工作。
+
+建议命令：
+
+```bash
+python3 scripts/check_contract_test_pyramid.py
+python3 scripts/check_offline_contract_matrix.py --repo-root /Users/example/my_agent/my-agent-main --json
+python3 scripts/check_replay_contracts.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+```
+
+完成标准：
+
+- `high-risk=0`、`soft=0`。
+- 缺失区域必须先补测试或补合同登记。
+- 如果失败来自真实任务历史样本，先转成 fake/replay regression，再修产品代码。
+
+### 第 2 步：跑主代理 fast 验证
+
+目标：
+
+- 在不调用真实 LLM 的前提下，验证主代理核心合同、工具协议、状态机、恢复、产物验收和 replay 闭环没有回归。
+
+建议命令：
+
+```bash
+python3 -m pytest -q -m "not slow and not e2e" --tb=short
+ruff check agent_py_agent scripts
+git diff --check
+```
+
+完成标准：
+
+- fast tests 通过。
+- ruff 通过。
+- 不出现新的架构 guardrail 问题。
+
+### 第 3 步：补 P0 合同硬点
+
+目标：
+
+- 优先补会导致假完成、越权、丢状态、重复副作用、无法恢复的硬合同。
+
+当前优先检查：
+
+- 合同 schema / 合同冲突 / effective contract 快照。
+- Verifier 防伪证据。
+- 事件重复、乱序、迟到。
+- Prompt / Context 组装不能丢合同。
+- 工具副作用分类、dry-run / real-run 隔离、审批参数 hash。
+- symlink / Unicode 路径越界。
+- 通道消息去重和重复审批。
+
+完成标准：
+
+- 每个修复都有离线 regression。
+- 修复点落在通用合同、通用状态、通用工具协议、通用恢复动作或通用 validator 注册项。
+- 不新增自然语言关键字判断。
+
+### 第 4 步：做少量真实 LLM canary
+
+目标：
+
+- 用很小的真实 LLM 任务验证模型适配器、工具调用、trace capture、artifact refs 和验收报告能串起来。
+
+硬要求：
+
+- 只跑隔离 workspace。
+- 一次 prompt 后只观察，不手动替被测主代理补产物。
+- 必须保存 `llm_input_ref`、`llm_output_ref`、`tool_trace_ref`、`state_events_ref`、`artifact_refs`、`acceptance_report_ref`、`replay_spec_ref`。
+- 失败必须转成 fake/replay/contract regression。
+
+完成标准：
+
+- canary 产物由被测主代理自己生成。
+- 验收报告基于结构化事实通过或失败。
+- 失败时有可重放样本，不需要人读长日志猜原因。
+
+2026-05-22 执行记录：
+
+- 命令：`python3 scripts/live_agent_lab.py --suite main-artifact --real-llm --runs-dir /Users/example/my_agent/live-lab-runs --run-id 20260522-main-artifact-canary-01 --timeout 600 --keep-going`
+- 结果：`LIVE_LAB_PASS`。
+- 通过 case：`health`、`main_artifact_readback`、`main_compact_resume_roundtrip`。
+- 证据根：`/Users/example/my_agent/live-lab-runs/20260522-main-artifact-canary-01`。
+- 关键产物：`fixture_project/lab_outputs/artifact-readback/report.md`。
+- 关键观察：主代理自己调用 `read_file`，再按结构化 `artifact_ref` 调用 `read_artifact` 读回外置大输出，随后写报告；compact apply 与 resume handoff 都生成 refs-first 结构化恢复线索。
+
+### 第 5 步：上复杂真实任务并行
+
+目标：
+
+- 在 canary 通过后，再让多个主代理并行跑不同复杂任务，验证并发、长任务、产物验收和恢复。
+
+执行纪律：
+
+- 多主代理可以并行，但每个主代理必须有独立 workspace、run id、artifact root、recovery packet。
+- 监督者只能观察日志、合同、产物和验收结果，不能替被测主代理完成任务。
+- 复杂任务必须允许阶段产物：数据 checkpoint、脚本 checkpoint、draft artifact、最终 artifact 都要有 refs。
+
+完成标准：
+
+- 每个任务不是只看 exit code，而是看 artifact contract、tool trace、acceptance report 和 recovery packet。
+- 未完成不算失败修好了；必须明确是 `BLOCKED`、`FAILED`、`TIMEOUT`、`NEEDS_RECOVERY` 还是 `SUCCEEDED`。
+
+2026-05-22 执行记录：
+
+- 命令：`python3 scripts/live_agent_lab.py --suite main-complex --real-llm --runs-dir /Users/example/my_agent/live-lab-runs --run-id 20260522-main-complex-01 --timeout 900 --keep-going`
+- 结果：5 个 case 通过，`main_direct_web_app` 失败。
+- 通过 case：`health`、`main_tool_failure_recovery`、`main_artifact_readback`、`main_compact_resume_roundtrip`、`main_large_log_audit`。
+- 失败证据根：`/Users/example/my_agent/live-lab-runs/20260522-main-complex-01/fixture_project/lab_outputs/main-web-app`。
+- 根因：长 HTML 写入被恢复到 `file_write_session` 后，提交边界只校验 JSON，没有在 `finish` 前复用 HTML artifact integrity；因此结构损坏、`href="#"` 和缺失锚点能落成最终文件。
+- 通用修复：`file_write_session finish` 现在对 `.html/.htm` 做 artifact integrity 预提交校验；结构 blocker 和可操作本地链接 warning 会变成 `ARTIFACT_INTEGRITY_FAILED`，session 保持 open 供继续修复或显式 abort。
+- 参考项目借鉴：长期助手 的隔离 `长期助手_HOME`、一次性工具轨迹和原子写入思路；通道运行时 的运行态/工具边界可见性；会话运行时 的工具提交边界先验收再落事实。
+- 命令：`python3 scripts/live_agent_lab.py --suite main-complex --real-llm --runs-dir /Users/example/my_agent/live-lab-runs --run-id 20260522-main-complex-03 --timeout 900 --keep-going`
+- 结果：5 个 case 通过，`main_direct_web_app` 仍失败，但坏页面不再提交。
+- 新根因：默认 `write_file` 长内容在约 4K 时被流式边界过早切到 `file_write_session`，模型随后混用直接写入和 session 写入，触发 `[OPEN_FILE_WRITE_SESSION_BLOCKED]`。这不是 HTML 专项问题，而是默认大块工具输入的流式边界过窄。
+- 通用修复：默认流式 inline 写入边界放宽到 32K，同时保留显式小阈值测试入口；常见完整 HTML/CSS/JS 可以自然收尾，真正失控的长流仍会进入 staged writer 恢复。
+- 复验命令：web-only 真 LLM 复验，run id `20260522-main-web-only-04`，只跑 `health` 和 `main_direct_web_app`。
+- 复验结果：`LIVE_LAB_PASS`，`main_direct_web_app` 245.40 秒完成，产物目录 `lab_outputs/main-web-app` 下生成 `index.html`、`styles.css`、`app.js`、`README.md`，本仓库静态验收通过。
+
+长期助手 对照：
+
+- 隔离目录：`/Users/example/my_agent/长期助手-lab/20260522-main-web-app`。
+- 运行方式：源码版 长期助手，隔离 `长期助手_HOME`、`HOME`、`XDG_STATE_HOME`，一次性 venv，只安装缺失依赖，不读取或修改正式 `~/.长期助手`。
+- 同题结果：长期助手 用同一 MiniMax 模型完成 `lab_outputs/main-web-app` 的 4 个文件。
+- 我们的静态验收器结果：`OUR_STATIC_VALIDATOR=PASS`，artifact integrity `ok=True`。
+- 对照观察：长期助手 产物本轮通过，主要靠模型一次性写出完整文件并主动用工具检查引用；它的 `write_file` 对 HTML 显示 `lint skipped`，所以我们仍需要把 HTML 完整性放到自己的工具提交边界，而不是只学习 prompt 或最终回复。
+
+### 第 6 步：真实问题沉淀为离线回归
+
+目标：
+
+- 真实环境暴露的问题不能只留在日志或聊天里，必须沉淀为可重复运行的离线资产。
+
+每个问题至少生成：
+
+- `contract_fixture_ref`
+- `fake_tool_trace_ref`
+- `fake_llm_trace_ref`
+- `replay_spec_ref`
+- `expected_error_codes`
+- `regression_test_ref`
+
+完成标准：
+
+- 新问题能在真实环境之外复现。
+- 产品修复后离线 regression 先变绿，再做真实验收。
+- 若参考项目已有成熟做法，文档里记录借鉴点和取舍；若参考项目也兜不住，记录本仓库为什么要扩展。

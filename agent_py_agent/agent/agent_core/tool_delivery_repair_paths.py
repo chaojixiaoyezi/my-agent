@@ -106,6 +106,8 @@ def repair_target_snapshot(target: str, agent_root: Path, *, max_chars: int) -> 
     return _attach_text_preview(snapshot, path, max_chars=max_chars)
 
 
+# LLM: _file_snapshot_base 是 agent_py_agent/agent/agent_core/tool_delivery_repair_paths.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 file snapshot base 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _file_snapshot_base(path: Path, target: str) -> dict[str, object]:
     try:
         size = path.stat().st_size
@@ -114,6 +116,8 @@ def _file_snapshot_base(path: Path, target: str) -> dict[str, object]:
     return {"path": target, "exists": True, "kind": "file", "size_bytes": size}
 
 
+# LLM: _attach_text_preview 是 agent_py_agent/agent/agent_core/tool_delivery_repair_paths.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
+# 函数用途: 处理 attach text preview 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _attach_text_preview(snapshot: dict[str, object], path: Path, *, max_chars: int) -> dict[str, object]:
     try:
         snapshot["preview"] = path.read_text(encoding="utf-8")[:max(0, max_chars)]

@@ -203,6 +203,10 @@ def test_quality_role_contracts_use_template_defaults(tmp_path):
         "write_file",
         "append_file",
         "replace_in_file",
+        "file_write_session",
+        "write_structured_json",
+        "data_to_workbook",
+        "markdown_to_pdf",
         "capability_request",
     ]
     assert "write_file" in tester.allowed_tools

@@ -51,6 +51,7 @@ def _open_session_summary(path: Path) -> dict[str, Any] | None:
         "scope": _manifest_scope(manifest),
         "received_chunks": chunks,
         "next_chunk_index": (max(chunks) + 1) if chunks else 0,
+        "last_finish_error": _last_finish_error(manifest),
         "continue_tool_call": {
             "tool": "file_write_session",
             "action": "append",
@@ -62,6 +63,12 @@ def _open_session_summary(path: Path) -> dict[str, Any] | None:
             "action": "finish",
             "session_id": str(manifest.get("session_id") or path.parent.name),
         },
+        "reset_tool_call": {
+            "tool": "file_write_session",
+            "action": "reset",
+            "session_id": str(manifest.get("session_id") or path.parent.name),
+            "discard_chunks": True,
+        },
         "abort_requires_discard_chunks": bool(chunks),
         "abort_tool_call": {
             "tool": "file_write_session",
@@ -70,6 +77,13 @@ def _open_session_summary(path: Path) -> dict[str, Any] | None:
             "discard_chunks": True,
         },
     }
+
+
+# LLM: _last_finish_error exposes only bounded structured failure facts from manifest state.
+# 函数用途: 返回最近一次 finish 失败的错误码、完整性 codes 和修复工具调用，不读取 staged 正文。
+def _last_finish_error(manifest: dict[str, Any]) -> dict[str, Any]:
+    value = manifest.get("last_finish_error")
+    return value if isinstance(value, dict) else {}
 
 
 # LLM: _scope_matches keeps write-session repairs bound to the current machine run scope.
