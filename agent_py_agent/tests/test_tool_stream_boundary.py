@@ -22,6 +22,7 @@ from agent_py_agent.agent.agent_core.tool_stream_boundary_models import (
 )
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.tooling.content_transport_policy import (
+    MAX_INLINE_WRITE_CONTENT_CHARS,
     STREAMING_INLINE_WRITE_ABORT_CHARS,
 )
 from agent_py_agent.agent.tooling.file_write_session_models import (
@@ -101,6 +102,19 @@ def test_tool_boundary_uses_streaming_abort_threshold_even_when_inline_limit_is_
         assert exc.limit == STREAMING_INLINE_WRITE_ABORT_CHARS
     else:  # pragma: no cover - keeps assertion message clear.
         raise AssertionError("expected streaming threshold abort")
+
+
+# LLM: structured JSON uses a machine-data channel, so default streaming should not cut it at write_file's tiny threshold.
+# 函数用途: 验证大型 rows/sheets checkpoint 默认不会在 4K 左右被早停截断。
+def test_tool_boundary_allows_structured_json_beyond_write_file_streaming_threshold():
+    boundary = ToolBoundaryChunkFilter(None, max_inline_content_chars=MAX_INLINE_WRITE_CONTENT_CHARS)
+
+    boundary(
+        '[TOOL_CALL]\n'
+        '{"tool":"write_structured_json","path":"outputs/data.json","sheets":['
+    )
+
+    boundary("{" + '"rows":[' + "A" * (STREAMING_INLINE_WRITE_ABORT_CHARS + 1))
 
 
 # LLM: file_write_session is the large-body channel, so it must not inherit write_file's tiny stream cutoff.
