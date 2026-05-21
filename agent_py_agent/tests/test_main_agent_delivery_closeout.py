@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 
 from agent_py_agent.agent.agent_core.runtime_loop_models import RunParams
+from agent_py_agent.agent.backend import ModelResponse
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.tests.support.main_agent_delivery_closeout_fixtures import (
@@ -180,6 +181,24 @@ def test_tool_loop_blocks_after_repeated_unchanged_delivery_failure():
         assert "ACCEPTANCE_FAILED" in {item["code"] for item in actions}
 
 
+# LLM: A failed delivery contract is scoped to the run that carried that contract, not every later run.
+# 函数用途: 防止 workspace 里的旧 closeout.json 把后续无 delivery_contract 的普通任务强制拉回旧产物修复。
+def test_delivery_repair_context_does_not_leak_into_uncontracted_later_run():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        _write_stale_delivery_closeout(workspace)
+        backend = UncontractedFollowupBackend()
+
+        result = _agent(workspace, backend).run(
+            "把当前任务的说明写到 lab_outputs/tool-recovery/report.md。",
+            params=RunParams(save=False),
+        )
+
+        assert backend.calls == 2
+        assert "[DELIVERY_REQUIRED_REPAIR_BLOCKED]" not in result.response
+        assert (workspace / "lab_outputs/tool-recovery/report.md").exists()
+
+
 # LLM: Missing bootstrap targets should delay no-progress blocking for multi-file artifacts.
 # 函数用途: 覆盖真实多文件任务中“先有 index、后补 app.js/source_data”的中段阶段。
 def test_tool_loop_keeps_running_while_bootstrap_targets_are_still_missing():
@@ -322,6 +341,60 @@ def _write_site_index(workspace: Path) -> None:
 # 函数用途: 测试只读取 closeout.json 里的机器字段，不解析模型自然语言回复。
 def _closeout_report(workspace: Path) -> dict[str, object]:
     return json.loads((workspace / ".agent_delivery/closeout.json").read_text(encoding="utf-8"))
+
+
+# LLM: _write_stale_delivery_closeout creates an old failed contract report from a different task.
+# 函数用途: 构造 workspace 里已经存在的旧交付失败报告，用来测试新 run 的范围隔离。
+def _write_stale_delivery_closeout(workspace: Path) -> None:
+    path = workspace / ".agent_delivery" / "closeout.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "case_id": "main_direct_web_app",
+                "ok": False,
+                "delivery_progress": {
+                    "recovery_actions": [
+                        {
+                            "code": "ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED",
+                            "recommended_action": "repair_artifact_against_findings",
+                            "artifact_path": "lab_outputs/main-web-app",
+                            "finding_values": ["getElementById:email"],
+                            "write_tools": ["write_file", "replace_in_file"],
+                        }
+                    ],
+                    "unchanged_failure_count": 4,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+# LLM: UncontractedFollowupBackend fails fast if old delivery repair context is injected.
+# 类用途: 模拟同一 workspace 后续普通任务；它不带 delivery_contract，因此不应看到旧修复合同。
+class UncontractedFollowupBackend:
+    name = "fake_uncontracted_followup_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None):
+        assert "delivery-required-repair" not in prompt
+        assert "getElementById:email" not in prompt
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    '{"tool":"write_file","path":"lab_outputs/tool-recovery/report.md",'
+                    '"content":"# 当前任务说明\\n\\n这是后续普通任务的报告，不应继承旧网页修复合同。"}\n'
+                    "[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        return ModelResponse(text="当前任务已完成。", backend=self.name)
 
 
 # LLM: _closeout_finding_codes returns validator finding codes from the first artifact.

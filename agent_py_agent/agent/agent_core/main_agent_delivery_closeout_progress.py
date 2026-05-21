@@ -10,6 +10,7 @@ from typing import Any
 
 from .main_agent_delivery_closeout_artifacts import _artifact_path
 from .main_agent_delivery_closeout_recovery import _recovery_actions
+from .main_agent_delivery_progress_roots import work_progress_roots
 
 _WRITE_FIRST_RECOVERY_ACTIONS = {
     "invoke_builder_tool",
@@ -29,7 +30,7 @@ def _enrich_delivery_progress(
     *,
     contract: dict[str, Any],
 ) -> dict[str, Any]:
-    progress = _initial_progress(workspace_root)
+    progress = _initial_progress(workspace_root, contract)
     if report["ok"]:
         report["delivery_progress"] = progress
         return report
@@ -74,10 +75,10 @@ def _should_block_on_no_progress(
 
 # LLM: _initial_progress builds the default progress envelope for every closeout run.
 # 函数用途: 初始化 delivery_progress 的稳定字段，保证成功和失败报告结构一致。
-def _initial_progress(workspace_root: Path) -> dict[str, object]:
+def _initial_progress(workspace_root: Path, contract: dict[str, Any]) -> dict[str, object]:
     return {
         "failure_fingerprint": "",
-        "work_progress_fingerprint": _work_progress_fingerprint(workspace_root),
+        "work_progress_fingerprint": _work_progress_fingerprint(workspace_root, contract),
         "unchanged_failure_count": 0,
         "recovery_actions": [],
         "pending_materialization_targets": [],
@@ -263,9 +264,9 @@ def _finding_fingerprint_rows(item: dict[str, Any]) -> list[dict[str, str]]:
 
 # LLM: _work_progress_fingerprint tracks only user-work roots so memory/log churn does not fake progress.
 # 函数用途: 只看 outputs、scripts、data 等工作根目录的文件状态，忽略 memory/archive 噪音，供无进展判断使用。
-def _work_progress_fingerprint(workspace_root: Path) -> str:
+def _work_progress_fingerprint(workspace_root: Path, contract: dict[str, Any] | None = None) -> str:
     rows: list[dict[str, object]] = []
-    for root in [workspace_root / "outputs", workspace_root / "scripts", workspace_root / "data"]:
+    for root in work_progress_roots(workspace_root, contract or {}):
         rows.extend(_work_progress_rows_for_root(root, workspace_root))
     payload = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return sha256(payload.encode("utf-8")).hexdigest()
@@ -276,6 +277,8 @@ def _work_progress_fingerprint(workspace_root: Path) -> str:
 def _work_progress_rows_for_root(root: Path, workspace_root: Path) -> list[dict[str, object]]:
     if not root.exists():
         return [{"root": root.name, "exists": False}]
+    if root.is_file():
+        return [_file_progress_row(root, workspace_root)]
     rows = [_directory_progress_row(root, workspace_root)]
     rows.extend(_directory_progress_row(path, workspace_root) for path in sorted(root.rglob("*")) if path.is_dir())
     rows.extend(_file_progress_row(path, workspace_root) for path in sorted(root.rglob("*")) if path.is_file())

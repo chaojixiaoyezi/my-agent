@@ -319,7 +319,7 @@ def _task_local_progress_context(progress: dict[str, object]) -> str:
 # LLM: _append_initial_delivery_repair_context makes active recovery contracts visible before the first retry turn.
 # 函数用途: 续跑一开始就注入 closeout 的 required_actions/required_tool_calls，而不是等模型先犯一次空转。
 def _append_initial_delivery_repair_context(agent: object, params: ToolLoopExecuteParams) -> None:
-    context = delivery_repair_context(agent, repairs=0)
+    context = delivery_repair_context(agent, repairs=0, runtime_params=params)
     if not context:
         return
     if any(str(item).startswith("[tool-system delivery-required-repair]") for item in params.tool_context):

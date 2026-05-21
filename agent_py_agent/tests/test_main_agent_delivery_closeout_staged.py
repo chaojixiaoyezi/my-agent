@@ -179,6 +179,27 @@ def test_delivery_closeout_defers_no_progress_block_when_write_first_repair_exis
         assert _should_block_on_no_progress(enriched, contract=contract, workspace_root=workspace) is False
 
 
+# LLM: Delivery progress must watch contract-declared artifact roots, not only built-in outputs/.
+# 函数用途: 复现 Live Lab 使用 lab_outputs 时，真实文件变化曾被误判为无进展而过早阻断的问题。
+def test_delivery_progress_tracks_contract_declared_artifact_roots():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td).resolve()
+        contract = _lab_outputs_web_contract()
+        report = _failed_lab_outputs_web_report(workspace)
+
+        from agent_py_agent.agent.agent_core.main_agent_delivery_closeout import (
+            _enrich_delivery_progress,
+        )
+
+        first = _enrich_delivery_progress(report, {}, workspace, contract=contract)
+        target = workspace / "lab_outputs/main-web-app/index.html"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("<!doctype html><html><body><input id='email'></body></html>", encoding="utf-8")
+        second = _enrich_delivery_progress(report, first, workspace, contract=contract)
+
+        assert second["delivery_progress"]["unchanged_failure_count"] == 1
+
+
 # LLM: A valid final file cannot bypass invalid staged checkpoints declared by the same contract.
 # 函数用途: 验证 PDF 签名有效但 source_index.json 为空时，closeout 仍按阶段合同失败，不误发完成标记。
 def test_delivery_closeout_rejects_valid_final_artifact_when_staged_checkpoint_is_empty():
@@ -423,6 +444,56 @@ def _enriched_report(
     enriched = _enrich_delivery_progress(report, {}, workspace, contract=contract)
     actions = {item["code"]: item for item in enriched["delivery_progress"]["recovery_actions"]}
     return enriched, actions
+
+
+# LLM: _lab_outputs_web_contract mirrors Live Lab's non-default artifact root without copying its prompt.
+# 函数用途: 构造使用 lab_outputs 的结构化网页合同，验证进展指纹按合同根目录扩展。
+def _lab_outputs_web_contract() -> dict[str, object]:
+    return {
+        "case_id": "main_direct_web_app",
+        "bootstrap_contract": {
+            "materialization_targets": [
+                {"workspace_relative_path": f"lab_outputs/main-web-app/{name}"}
+                for name in ("index.html", "styles.css", "app.js", "README.md")
+            ]
+        },
+        "artifacts": [
+            {
+                "artifact_id": "main_web_app_root",
+                "kind": "web_project",
+                "preferred_path": "lab_outputs/main-web-app",
+                "required": True,
+                "validation_contract": {"validator": "static_site_check"},
+            }
+        ],
+    }
+
+
+# LLM: _failed_lab_outputs_web_report keeps the progress test focused on fingerprinting.
+# 函数用途: 生成一个稳定失败报告；测试关注文件变化是否重置 unchanged_failure_count。
+def _failed_lab_outputs_web_report(workspace: Path) -> dict[str, object]:
+    return {
+        "case_id": "main_direct_web_app",
+        "ok": False,
+        "artifacts": [
+            {
+                "artifact_id": "main_web_app_root",
+                "kind": "web_project",
+                "path": str(workspace / "lab_outputs/main-web-app"),
+                "ok": False,
+                "acceptance_report": {
+                    "findings": [
+                        {
+                            "code": "STATIC_SITE_MISSING_DOM_ID_HITS",
+                            "location": "missing_dom_id_hits",
+                            "value": "getElementById:email",
+                        }
+                    ],
+                    "ok": False,
+                },
+            }
+        ],
+    }
 
 
 # LLM: _write_source materializes the staged JSON checkpoint under the task workspace.

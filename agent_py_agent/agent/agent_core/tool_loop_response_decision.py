@@ -180,13 +180,17 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
 def _delivery_repair_no_tool_call_decision(
     request: _NoToolCallsRequest,
 ) -> ToolLoopResponseDecision | None:
-    if not has_required_delivery_repair(request.agent):
+    if not has_required_delivery_repair(request.agent, request.params):
         return None
-    repair_context = delivery_repair_context(request.agent, request.counters.delivery_repair_redirects)
+    repair_context = delivery_repair_context(
+        request.agent,
+        request.counters.delivery_repair_redirects,
+        request.params,
+    )
     if repair_context:
         request.params.tool_context.append(repair_context)
         return ToolLoopResponseDecision("continue", None, [], _inc_delivery_repair(request.counters))
-    block = delivery_repair_block_response(request.agent)
+    block = delivery_repair_block_response(request.agent, request.params)
     return ToolLoopResponseDecision("break", block or request.response, [], request.counters)
 
 
@@ -279,17 +283,18 @@ def _delivery_repair_tool_call_decision(
     request: ToolLoopResponseDecisionRequest,
     calls: list[dict[str, object]],
 ) -> ToolLoopResponseDecision | None:
-    if is_delivery_repair_productive_call(request.agent, calls):
+    if is_delivery_repair_productive_call(request.agent, calls, request.params):
         return None
     repair_context = delivery_repair_rejection_context(
         request.agent,
         calls,
         request.counters.delivery_repair_redirects,
+        request.params,
     )
     if repair_context:
         request.params.tool_context.append(repair_context)
         return ToolLoopResponseDecision("continue", None, [], _inc_delivery_repair(request.counters))
-    block = delivery_repair_block_response(request.agent)
+    block = delivery_repair_block_response(request.agent, request.params)
     return ToolLoopResponseDecision("break", block or request.response, [], request.counters)
 
 

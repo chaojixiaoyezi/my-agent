@@ -9,6 +9,7 @@ from pathlib import Path
 from .tool_delivery_repair_attempt import strict_write_required
 from .tool_delivery_repair_paths import repair_target_snapshots
 from .tool_delivery_repair_required_calls import required_tool_calls
+from .tool_delivery_repair_scope import report_matches_current_contract
 
 _WRITE_FIRST_ACTIONS = {
     "invoke_builder_tool",
@@ -45,9 +46,16 @@ _TEXT_FIELDS = (
 
 # LLM: delivery_repair_payload extracts only active write-first recovery actions from closeout.json.
 # 函数用途: 读取 closeout 报告并筛选写入/构建优先级恢复动作；不读取自然语言日志。
-def delivery_repair_payload(agent: object) -> dict[str, object]:
+def delivery_repair_payload(
+    agent: object,
+    current_contract: object | None = None,
+    *,
+    enforce_contract_scope: bool = False,
+) -> dict[str, object]:
     report = _closeout_report(agent)
     if not report or report.get("ok") is True:
+        return {}
+    if enforce_contract_scope and not report_matches_current_contract(report, current_contract):
         return {}
     progress = report.get("delivery_progress")
     actions = _required_actions(progress)
@@ -106,6 +114,5 @@ def _closeout_report(agent: object) -> dict[str, object]:
     except (OSError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
-
 
 __all__ = ["delivery_repair_payload"]
