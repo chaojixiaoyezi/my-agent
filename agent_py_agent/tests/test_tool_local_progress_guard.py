@@ -8,7 +8,6 @@ from types import SimpleNamespace
 # LLM: repeated remote-style exploration with unchanged closeout fingerprints should activate the local-progress guard.
 # 函数用途: 验证连续两轮只读 artifact 且本地进展指纹没变时，会触发“回到本地写入/构建”的通用守门。
 def test_local_progress_guard_redirects_after_repeated_exploration_without_local_progress(tmp_path: Path):
-    from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
     from agent_py_agent.agent.agent_core.tool_local_progress_guard import (
         has_required_local_progress_guard,
     )
@@ -39,10 +38,28 @@ def test_local_progress_guard_redirects_after_repeated_exploration_without_local
     assert has_required_local_progress_guard(agent, params, exploratory_calls) is True
 
 
+# LLM: closeout no-progress threshold is the machine contract for how many exploration turns are allowed.
+# 函数用途: 验证 local-progress guard 使用 closeout 里的结构化阈值，而不是硬编码拦截次数。
+def test_local_progress_guard_uses_closeout_no_progress_threshold(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_local_progress_guard import (
+        has_required_local_progress_guard,
+    )
+
+    payload = _closeout_payload(work_progress_fingerprint="same-progress")
+    payload["delivery_progress"]["no_progress_block_threshold"] = 5
+    _write_closeout(tmp_path, payload)
+    params = _params()
+    agent = SimpleNamespace(root=tmp_path)
+    exploratory_calls = [{"tool": "fetch_url", "url": "https://example.test/data.json"}]
+
+    for _ in range(4):
+        assert has_required_local_progress_guard(agent, params, exploratory_calls) is False
+    assert has_required_local_progress_guard(agent, params, exploratory_calls) is True
+
+
 # LLM: a changed work-progress fingerprint should reset the guard budget instead of carrying old exploration debt forever.
 # 函数用途: 验证只要 closeout 报告里的本地进展指纹变化了，local-progress guard 会重置计数，避免误伤后续合理探索。
 def test_local_progress_guard_resets_when_work_progress_fingerprint_changes(tmp_path: Path):
-    from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
     from agent_py_agent.agent.agent_core.tool_local_progress_guard import (
         has_required_local_progress_guard,
     )
@@ -61,7 +78,6 @@ def test_local_progress_guard_resets_when_work_progress_fingerprint_changes(tmp_
 # LLM: local write/build actions should not be treated as remote exploration debt.
 # 函数用途: 验证 builder 或写文件这类本地推进动作不会触发 local-progress guard。
 def test_local_progress_guard_allows_local_progressive_calls(tmp_path: Path):
-    from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
     from agent_py_agent.agent.agent_core.tool_local_progress_guard import (
         has_required_local_progress_guard,
     )
@@ -97,6 +113,43 @@ def test_local_progress_guard_allows_local_progressive_calls(tmp_path: Path):
         )
         is False
     )
+
+
+# LLM: writer_tool and document builder actions should reset local-progress debt through structured tool names.
+# 函数用途: 验证 write_structured_json/markdown_to_pdf 这类通用构建工具不会被误判成空转。
+def test_local_progress_guard_allows_writer_and_document_builder_tools(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_local_progress_guard import (
+        has_required_local_progress_guard,
+    )
+
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "failure_fingerprint": "same-failure",
+                "work_progress_fingerprint": "same-progress",
+                "recovery_actions": [
+                    {
+                        "code": "STAGED_JSON_NO_ROWS",
+                        "recommended_action": "write_non_empty_structured_rows",
+                        "writer_tool": "write_structured_json",
+                    },
+                    {
+                        "code": "STAGING_BUILDER_READY",
+                        "recommended_action": "invoke_builder_tool",
+                        "builder_tool": "markdown_to_pdf",
+                    },
+                ],
+                "pending_materialization_targets": [],
+            },
+        },
+    )
+    params = _params()
+    agent = SimpleNamespace(root=tmp_path)
+
+    assert has_required_local_progress_guard(agent, params, [{"tool": "write_structured_json", "rows": [{"a": 1}]}]) is False
+    assert has_required_local_progress_guard(agent, params, [{"tool": "markdown_to_pdf", "path": "out.pdf"}]) is False
 
 
 def _params():

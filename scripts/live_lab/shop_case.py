@@ -22,16 +22,18 @@ def case_natural_shop_subagent(lab) -> None:
     lab.record_prompt("natural_shop_subagent", prompt)
     lab.run_command(lab.agent_command("gateway", "start", "--force"), timeout=90)
     try:
+        # LLM: Shop E2E can span several model/tool turns, so use gateway wait budget at the harness boundary.
+        # 函数用途: 购物站真实 case 等完整 gateway 链路，不让单次模型 timeout 截断业务流程。
         response = lab.run_command(
             lab.agent_command(
                 "gateway",
                 "ask",
                 prompt,
                 "--timeout",
-                str(lab.args.timeout),
+                str(lab.gateway_wait_timeout),
                 "--json",
             ),
-            timeout=lab.args.timeout + 180,
+            timeout=lab.gateway_wait_timeout + 180,
         )
         response_path = lab.responses_dir / "natural_shop_subagent.stdout.json"
         response_path.write_text(response.stdout, encoding="utf-8")

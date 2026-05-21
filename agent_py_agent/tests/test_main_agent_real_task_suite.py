@@ -234,7 +234,7 @@ def test_main_agent_real_task_execution_runs_echo_subset(tmp_path):
     assert payload["ok"] is False
     assert payload["summary"]["failed"] == 1
     assert payload["concurrency"]["case_count"] == 1
-    assert first_case["exit_code"] == 0
+    assert first_case["exit_code"] == 2
     assert first_case["acceptance_summary"]["failed"] == 1
     assert _event_types(tmp_path / first_case["events_ref"]) == [
         "case_prepared",

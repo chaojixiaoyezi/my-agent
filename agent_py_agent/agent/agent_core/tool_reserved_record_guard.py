@@ -56,4 +56,6 @@ def reserved_tool_record_block_response(backend: str) -> ModelResponse:
             "或读取现有 task/subagent 状态后再汇报。"
         ),
         backend=backend,
+        runtime_status="blocked",
+        runtime_reason="RESERVED_TOOL_RECORD",
     )

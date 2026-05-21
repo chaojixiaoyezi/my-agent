@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
+from ..contracts.staged_checkpoint_acceptance import staged_checkpoint_findings
 from ._runtime_params import ToolLoopExecuteParams
 
 CLOSEOUT_DIR = ".agent_delivery"
@@ -77,6 +78,7 @@ def _validate_artifact_item(item: dict[str, Any], workspace_root: Path) -> dict[
             validation_contract=_validation_contract(item),
         )
     ).to_dict()
+    report = _with_staged_checkpoint_findings(report, item, workspace_root)
     return {
         "artifact_id": str(item.get("artifact_id") or ""),
         "kind": str(item.get("kind") or report.get("artifact_kind") or ""),
@@ -124,6 +126,44 @@ def _path_failure(item: dict[str, Any], raw_path: str, code: str) -> dict[str, A
 def _validation_contract(item: dict[str, Any]) -> dict[str, object]:
     value = item.get("validation_contract")
     return dict(value) if isinstance(value, dict) else {}
+
+
+# LLM: Staged checkpoint findings are part of the final artifact contract, not a separate prompt rule.
+# 函数用途: 将 validation_contract.staging_contract 的阶段文件验收结果合并进最终产物报告，避免 PDF/XLSX 已存在但来源数据为空时误收口。
+def _with_staged_checkpoint_findings(
+    report: dict[str, Any],
+    item: dict[str, Any],
+    workspace_root: Path,
+) -> dict[str, Any]:
+    staged_findings = staged_checkpoint_findings([item], workspace_root)
+    if not staged_findings:
+        return report
+    findings = report.get("findings")
+    merged_findings = list(findings) if isinstance(findings, list) else []
+    merged_findings.extend(_public_staged_finding(finding) for finding in staged_findings)
+    updated = dict(report)
+    updated["findings"] = merged_findings
+    updated["ok"] = bool(report.get("ok")) and not any(
+        str(finding.get("severity") or "hard") == "hard" for finding in staged_findings
+    )
+    return updated
+
+
+# LLM: Closeout reports keep validator-specific details in value while preserving the public finding shape.
+# 函数用途: 把阶段验收 finding 规整成 code/severity/message/location/value，扩展字段用 JSON value 保存给恢复链路读取。
+def _public_staged_finding(finding: dict[str, object]) -> dict[str, str]:
+    public_keys = {"code", "severity", "message", "location", "value"}
+    details = {key: value for key, value in finding.items() if key not in public_keys}
+    value = finding.get("value")
+    if value is None and details:
+        value = json.dumps(details, ensure_ascii=False, sort_keys=True)
+    return {
+        "code": str(finding.get("code") or ""),
+        "severity": str(finding.get("severity") or "hard"),
+        "message": str(finding.get("message") or ""),
+        "location": str(finding.get("location") or ""),
+        "value": str(value or ""),
+    }
 
 
 # LLM: _write_report persists the latest delivery check for audit and resume without embedding artifact bodies.

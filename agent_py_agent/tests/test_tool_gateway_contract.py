@@ -105,6 +105,42 @@ def test_tool_gateway_parses_file_write_session_raw_content_block(tmp_path: Path
     assert (tmp_path / "out" / "index.html").read_text(encoding="utf-8") == html
 
 
+# LLM: Malformed raw write markers must feed the repair loop instead of becoming final prose.
+# 函数用途: 模型把 FILE_WRITE_SESSION_APPEND 写坏时，网关返回 parse-error，让主循环继续修复。
+def test_tool_gateway_reports_malformed_file_write_session_raw_marker(tmp_path: Path):
+    registry = _registry(tmp_path)
+
+    calls = registry.parse_tool_calls(
+        "准备写文件\n"
+        "[FILE_WRITE_SESSION_APPEND]\n"
+        '{"tool":"file_write_session","action":"begin","target_path":"out/index.html"}\n'
+        "[/TOOL_CALL]"
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["tool"] == "__parse_error__"
+    assert "FILE_WRITE_SESSION_APPEND" in calls[0]["error"]
+    result = registry.execute_call(calls[0])
+    assert result.ok is False
+    assert "请重新输出标准工具调用格式" in result.output
+
+
+# LLM: Valid raw blocks with missing attrs already have a single structured parse error.
+# 函数用途: 确认完整闭合但缺 header 的 raw block 不会被 malformed scanner 重复报错。
+def test_tool_gateway_reports_single_error_for_closed_raw_block_missing_attrs(tmp_path: Path):
+    registry = _registry(tmp_path)
+
+    calls = registry.parse_tool_calls(
+        "[WRITE_FILE_RAW]\n"
+        "hello\n"
+        "[/WRITE_FILE_RAW]"
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["tool"] == "__parse_error__"
+    assert calls[0]["error"] == "WRITE_FILE_RAW 缺少结构化属性: path"
+
+
 # LLM: WRITE_FILE_RAW gives single-file deliverables a one-shot structured commit path.
 # 函数用途: 验证完整单文件 raw content block 会直接转成 write_file，不再要求模型手工管理 chunk。
 def test_tool_gateway_parses_write_file_raw_content_block(tmp_path: Path):

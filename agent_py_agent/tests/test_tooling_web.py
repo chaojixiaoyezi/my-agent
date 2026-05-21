@@ -51,6 +51,29 @@ class TestFetchUrlTool:
         assert "已截断" in result.output
 
     @patch("urllib.request.urlopen")
+    def test_fetch_url_html_preview_prioritizes_visible_body_text(self, mock_urlopen, tmp_path: Path):
+        """长 HTML 的 head/script 不应挤掉 body 里的可读正文。"""
+        from agent_py_agent.agent.tooling.web import FetchUrlTool
+
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.headers = {"Content-Type": "text/html; charset=utf-8"}
+        noisy_head = "<script>" + ("var ignored = 1;" * 300) + "</script>"
+        visible_body = "<body><main><a href='/owner/project'>owner/project</a><p>1,234 stars this week</p></main></body>"
+        mock_response.read.return_value = f"<html><head>{noisy_head}</head>{visible_body}</html>".encode()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
+
+        tool = FetchUrlTool(max_chars=400, timeout=10)
+        result = tool.execute({"url": "https://example.com/trending"})
+
+        assert result.ok is True
+        assert "visible_text_preview:" in result.output
+        assert "owner/project" in result.output
+        assert "1,234 stars this week" in result.output
+
+    @patch("urllib.request.urlopen")
     def test_fetch_url_with_http_error(self, mock_urlopen, tmp_path: Path):
         """HTTP 错误响应处理。"""
         import urllib.error

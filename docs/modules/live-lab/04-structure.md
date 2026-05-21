@@ -1,5 +1,11 @@
 # Live Lab：结构树和详细说明
 
+## 2026-05-21 timeout budget structure
+
+- `scripts/live_lab/session.py` 是 timeout 预算事实源：`live_lab_model_request_timeout()` 负责单次模型请求，`live_lab_gateway_wait_timeout()` 负责完整 gateway ask，`live_lab_gateway_processing_timeout()` 负责后台 stale-processing 上限。
+- `scripts/live_lab/runner.py` 的 `LiveLab` 和 `_LabInterface` 只暴露 `gateway_wait_timeout` 给 case，case 不直接读 `_session` 私有字段。
+- `scripts/live_lab/*_case.py` 的真实 gateway ask 都使用 `lab.gateway_wait_timeout`；这保持测试台等待策略通用，不为某个具体真实任务写专项超时。
+
 ## 模块结构
 
 ```text

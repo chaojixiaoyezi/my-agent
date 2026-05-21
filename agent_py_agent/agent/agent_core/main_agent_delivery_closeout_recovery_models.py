@@ -28,6 +28,7 @@ class StagingActionContext:
     output_ref: str
     source_path: Path | None
     required_columns: list[str]
+    required_sheets_min: int
     source_shape_hint: str
     workspace_root: Path
 
@@ -40,6 +41,7 @@ class CheckpointQualityActionRequest:
     checkpoint_ref: str
     checkpoint_path: Path
     required_columns: list[str] | None = None
+    required_sheets_min: int = 0
     checkpoint_shape_hint: str = ""
 
 

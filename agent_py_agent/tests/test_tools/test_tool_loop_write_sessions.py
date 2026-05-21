@@ -90,6 +90,27 @@ class _WrongRootOpenSessionBackend:
         return ModelResponse(text="分块文件已提交。", backend=self.name)
 
 
+# LLM: _NeverFinishesWriteSessionBackend keeps an open session until the deterministic block path fires.
+# 类用途: 复现真实任务里模型连续忽略 finish/abort 后，run 结果必须带机器阻断状态。
+class _NeverFinishesWriteSessionBackend:
+    name = "fake_never_finishes_write_session_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        session_id = _session_id_from_prompt(prompt)
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"file_write_session","action":"begin","target_path":"big.html"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        if self.calls == 2:
+            return ModelResponse(text=_append_call(session_id), backend=self.name)
+        return ModelResponse(text="文件已经写好了。", backend=self.name)
+
+
 # LLM: malformed tool markers must not become user-visible final answers.
 # 函数用途: 复现真实 E2E 中 `[TOOL_CALL` 少写 `]` 后被当最终回复的问题。
 def test_tool_loop_recovers_malformed_tool_opening_marker():
@@ -144,6 +165,22 @@ def test_tool_loop_open_session_guard_uses_tool_workspace_root():
         assert result.response == "分块文件已提交。"
         assert agent.backend.calls == 5
         assert (workspace / "big.html").read_text(encoding="utf-8") == "<html><body>ok</body></html>"
+
+
+# LLM: deterministic open-session blocks must flow through AgentRunResult machine status.
+# 函数用途: 防止真实 CLI 把 open session 阻断当 exit 0 成功。
+def test_tool_loop_open_session_block_sets_runtime_status():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=8)
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = _NeverFinishesWriteSessionBackend()
+
+        result = agent.run("写一个较大的 HTML 文件", save=False, allowed_tools=["file_write_session"])
+
+        assert "[OPEN_FILE_WRITE_SESSION_BLOCKED]" in result.response
+        assert result.runtime_status == "blocked"
+        assert result.runtime_reason == "OPEN_FILE_WRITE_SESSION"
 
 
 # LLM: _append_call keeps the fake backend body small while preserving exact tool JSON.

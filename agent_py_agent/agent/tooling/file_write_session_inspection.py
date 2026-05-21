@@ -51,6 +51,13 @@ def _open_session_summary(path: Path) -> dict[str, Any] | None:
             "action": "finish",
             "session_id": str(manifest.get("session_id") or path.parent.name),
         },
+        "abort_requires_discard_chunks": bool(chunks),
+        "abort_tool_call": {
+            "tool": "file_write_session",
+            "action": "abort",
+            "session_id": str(manifest.get("session_id") or path.parent.name),
+            "discard_chunks": True,
+        },
     }
 
 

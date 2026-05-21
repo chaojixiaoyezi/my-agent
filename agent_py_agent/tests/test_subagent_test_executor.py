@@ -208,3 +208,44 @@ def test_test_executor_content_check_supports_exact_match(tmp_path):
     assert record.passed is False
     assert record.validation_result["match_mode"] == "exact"
     assert record.error == "内容不相等"
+
+
+# LLM: artifact_integrity is a native parent-acceptance method, not an unknown model checklist item.
+# 函数用途: 确认父级验收能执行通用产物完整性检查，避免真实产物已写出却卡在未知验证方式。
+def test_test_executor_runs_artifact_integrity_check(tmp_path):
+    (tmp_path / "index.html").write_text(
+        "<!doctype html><html><body><a href='#hero'>首页</a><main id='hero'></main></body></html>",
+        encoding="utf-8",
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute({
+        "name": "artifact integrity",
+        "validation_method": "artifact_integrity",
+        "file_path": "index.html",
+    })
+
+    assert record.executed is True
+    assert record.passed is True
+    assert record.validation_method == "artifact_integrity"
+    assert record.validation_result["kind"] == "html"
+    assert record.validation_result["blocker_codes"] == []
+    assert record.validation_result["warning_codes"] == []
+
+
+# LLM: artifact_integrity should fail with structured codes when product HTML is incomplete.
+# 函数用途: 缺闭合标签这类明显坏产物必须被机器验收拦住，不能靠模型总结通过。
+def test_test_executor_artifact_integrity_rejects_incomplete_html(tmp_path):
+    (tmp_path / "index.html").write_text("<html><body><main>", encoding="utf-8")
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute({
+        "name": "artifact integrity",
+        "validation_method": "artifact_integrity",
+        "file_path": "index.html",
+    })
+
+    assert record.executed is True
+    assert record.passed is False
+    assert "missing_body_close" in record.validation_result["blocker_codes"]
+    assert "missing_html_close" in record.validation_result["blocker_codes"]

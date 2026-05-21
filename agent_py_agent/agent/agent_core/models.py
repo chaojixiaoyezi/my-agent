@@ -60,3 +60,5 @@ class AgentRunResult:
     memory_compact_auto_continuation_depth: int = 0
     main_context_bundle_path: str = ""
     main_context_bundle_markdown_path: str = ""
+    runtime_status: str = "ok"
+    runtime_reason: str = ""

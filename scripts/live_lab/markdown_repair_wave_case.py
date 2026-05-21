@@ -52,16 +52,18 @@ def case_natural_markdown_repair_wave(lab) -> None:
     lab.log(f"seed_failed_run_id={seed.run_id}")
     lab.run_command(lab.agent_command("gateway", "start", "--force"), timeout=90)
     try:
+        # LLM: Markdown repair-wave may include state read, dispatch, file repair, and acceptance in one gateway ask.
+        # 函数用途: Markdown 修复真实 case 使用 gateway 总预算等待完整恢复闭环。
         response = lab.run_command(
             lab.agent_command(
                 "gateway",
                 "ask",
                 prompt,
                 "--timeout",
-                str(lab.args.timeout),
+                str(lab.gateway_wait_timeout),
                 "--json",
             ),
-            timeout=lab.args.timeout + 240,
+            timeout=lab.gateway_wait_timeout + 240,
         )
         response_path = lab.responses_dir / "natural_markdown_repair_wave.stdout.json"
         response_path.write_text(response.stdout, encoding="utf-8")

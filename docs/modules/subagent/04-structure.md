@@ -1,4 +1,10 @@
-﻿## 2026-05-20 parent oracle contract boundary
+﻿## 2026-05-21 parent acceptance test item structure
+
+- `agent_py_agent/agent/subagents/execution_test_items.py` 继续是父级验收测试项的编排入口：先归一 runner 显式 tests，再按结构化 artifact refs 补通用完整性检查、静态站点检查和内容检查。
+- `agent_py_agent/agent/subagents/execution_pytest_items.py` 承接 workspace 内 `test_*.py` artifact 到 pytest test item 的推断；只用路径元数据，不读取自然语言说明。
+- `agent_py_agent/agent/subagents/execution_artifact_integrity_items.py` 承接 artifact integrity test items；它的事实源是 artifact path、size、hash/存在性等机器字段，不依赖 runner 总结。
+
+## 2026-05-20 parent oracle contract boundary
 
 - `agent_py_agent/agent/subagents/shop_web_parent_oracle.py` 仍是父级验收 oracle 生成器，但生产说明口径改为通用“静态交易流程站点”，不把某个真实任务样本写成生产合同。
 - 该 oracle 的事实源是生成的 pytest：必需区块、按钮 action、本地资源和响应式布局。验收结论来自文件、DOM 和 asset 事实，不来自任务 prompt 里的业务名称。

@@ -10,11 +10,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
+from .execution_artifact_integrity_items import expand_artifact_integrity_items
 from .execution_content_checks import CatContentCheckRequest, normalize_cat_content_check
 from .execution_inferred_content_items import (
     ContentCheckInferenceRequest,
     inferred_content_check_items,
 )
+from .execution_pytest_items import artifact_pytest_items
 from .execution_static_site_items import StaticSiteTestItemsRequest, inferred_static_site_items
 from .execution_test_checklists import drop_non_executable_model_checklist_items
 
@@ -69,10 +71,16 @@ def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, An
         fallback_dir=_single_artifact_dir(artifact_dirs),
         workspace_root=workspace_root,
     )
-    # LLM: Static-site inference appends refs-only checks after runner tests are normalized.
     prepared = _artifact_pytest_items(context) if not request.tests else [
         _prepared_test_item(test, context) for test in request.tests
     ]
+    # LLM: Artifact integrity checks are inferred from artifact refs, not runner prose.
+    # 函数用途: 在父级验收前补齐通用产物完整性检查，避免空测试清单直接假绿。
+    prepared = expand_artifact_integrity_items(
+        prepared,
+        artifact_paths=context.artifact_paths,
+        workspace_root=workspace_root,
+    )
     inferred = inferred_static_site_items(
         StaticSiteTestItemsRequest(
             artifact_paths=context.artifact_paths,
@@ -83,6 +91,7 @@ def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, An
             site_root_hints=request.site_root_hints,
         )
     )
+    # LLM: Static-site inference appends refs-only checks after runner tests are normalized.
     content_checks = inferred_content_check_items(
         ContentCheckInferenceRequest(
             artifact_paths=context.artifact_paths,
@@ -284,25 +293,7 @@ def _workspace_path(value: object, workspace_root: Path) -> Path | None:
 # LLM: _artifact_pytest_items gives parent acceptance a bounded fallback when runners omit tests.
 # 函数用途: 从 workspace 内 test_*.py artifact 生成 pytest 命令；只用路径元数据，不执行或读取文件正文。
 def _artifact_pytest_items(context: TestItemPreparationContext) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    seen: set[Path] = set()
-    for _raw, path in context.artifact_paths:
-        if path in seen or not _is_pytest_artifact(path):
-            continue
-        seen.add(path)
-        items.append({
-            "name": f"artifact pytest {path.name}",
-            "validation_method": "command",
-            "command": f"python3 -m pytest {path.name} -q",
-            "working_dir": _relative_or_absolute(path.parent, context.workspace_root),
-        })
-    return items
-
-
-# LLM: _is_pytest_artifact keeps inferred tests narrow to conventional Python test files.
-# 函数用途: 判断 artifact 是否是可安全自动执行的 pytest 文件；普通源码和非 Python 文件不会被推断。
-def _is_pytest_artifact(path: Path) -> bool:
-    return path.is_file() and path.suffix == ".py" and path.name.startswith("test_")
+    return artifact_pytest_items(context.artifact_paths, workspace_root=context.workspace_root)
 
 
 # LLM: _find_workspace_suffix recovers model-reported relative artifact paths from nested run directories.

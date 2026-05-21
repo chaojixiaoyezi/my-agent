@@ -371,3 +371,44 @@ class TestCmdRun:
         assert result == 0
         assert "[TOOL_CALL]" in output
         assert "最终已经完成" in output
+
+    def test_run_returns_nonzero_for_structured_blocked_status(self, tmp_path: Path):
+        """系统级阻断要通过机器状态变成非零退出码，不能靠读取最终中文文本。"""
+        from agent_py_agent.cli.local_commands import cmd_run
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.prompt = "测试 prompt"
+        args.inject = None
+        args.prompt_file = None
+        args.save = True
+        args.show_prompt = False
+        args.resume_context = None
+
+        result_payload = SimpleNamespace(
+            response="[OPEN_FILE_WRITE_SESSION_BLOCKED] blocked",
+            prompt="最终的 prompt",
+            backend="test",
+            used_memories=0,
+            tool_rounds=1,
+            memory_route_matches=0,
+            prompt_token_estimate=100,
+            runtime_injection_token_estimate=0,
+            archive_events=0,
+            recovery_snapshot_path=None,
+            recovery_snapshot_error=None,
+            memory_resume_context_injected=False,
+            memory_resume_context_token_estimate=0,
+            memory_compact_suggested=False,
+            runtime_status="blocked",
+            runtime_reason="OPEN_FILE_WRITE_SESSION",
+        )
+
+        mock_agent = MagicMock()
+        mock_agent.run.return_value = result_payload
+
+        with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli.local_commands.ThinkingSpinner"):
+            result = cmd_run(args)
+
+        assert result == 2

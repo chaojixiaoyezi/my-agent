@@ -80,7 +80,7 @@ def resolve_workspace_roots(config, config_path: str | Path, *, current_dir: str
 
     raw_value = getattr(config, "workspace_root", "")
     raw_roots = _raw_workspace_roots(raw_value)
-    cwd = Path(current_dir).expanduser().resolve() if current_dir is not None else ROOT
+    cwd = Path(current_dir).expanduser().resolve() if current_dir is not None else Path.cwd().resolve()
     roots: list[Path] = []
     for raw in raw_roots:
         candidate = _resolve_one_workspace_root(raw, config_path, current_dir=cwd)

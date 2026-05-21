@@ -24,7 +24,7 @@ def open_write_session_repair_context(agent: object, repairs: int) -> str:
             "[tool-system open-file-write-session]",
             json.dumps(payload, ensure_ascii=False, sort_keys=True),
             "你还有未提交的 file_write_session。下一轮必须先调用 file_write_session finish "
-            "提交目标文件；如果决定放弃该产物，必须调用 abort。处理完之前不要给最终答复。",
+            "提交目标文件；如果决定放弃该产物，必须使用 payload.abort_tool_call。处理完之前不要给最终答复。",
         ]
     )
 
@@ -38,6 +38,8 @@ def open_write_session_block_response(agent: object) -> ModelResponse | None:
     return ModelResponse(
         text="[OPEN_FILE_WRITE_SESSION_BLOCKED] 分块写入会话仍未 finish/abort，已停止最终收口。",
         backend=str(getattr(getattr(agent, "backend", None), "name", "") or ""),
+        runtime_status="blocked",
+        runtime_reason="OPEN_FILE_WRITE_SESSION",
     )
 
 

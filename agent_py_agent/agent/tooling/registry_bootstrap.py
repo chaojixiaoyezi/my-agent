@@ -7,6 +7,7 @@ from typing import Any
 
 from .artifact import ReadArtifactTool
 from .controlled_exec import ControlledExecTool
+from .document_pdf_builder import MarkdownPdfTool
 from .file_write_session import FileWriteSessionTool
 from .filesystem import (
     AppendFileTool,
@@ -19,6 +20,7 @@ from .filesystem import (
 from .models import HybridToolRetriever, KeywordToolSearchProvider, VectorToolSearchProvider
 from .shell import ShellTool
 from .spreadsheet_builder import DataWorkbookTool
+from .structured_json_writer import StructuredJsonTool
 from .web import FetchUrlTool, HttpRequestTool
 
 
@@ -72,7 +74,9 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
     )
     registry.register(FileWriteSessionTool(registry.workspace_root, workspace_roots))
     registry.register(ReplaceInFileTool(registry.workspace_root, workspace_roots))
+    registry.register(StructuredJsonTool(registry.workspace_root, workspace_roots))
     registry.register(DataWorkbookTool(registry.workspace_root, workspace_roots))
+    registry.register(MarkdownPdfTool(registry.workspace_root, workspace_roots))
 
 
 # LLM: _register_network_tools isolates non-filesystem tool setup from constructor policy.

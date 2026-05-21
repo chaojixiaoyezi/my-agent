@@ -93,6 +93,47 @@ def test_render_delivery_contract_section_includes_bootstrap_targets():
     assert "data_to_workbook" in text
 
 
+# LLM: document builder prompts must use the source parameter declared by the tool schema.
+# 函数用途: 验证 markdown_to_pdf 渲染 source_markdown_path，而不是 workbook 专用 source_json_path。
+def test_render_delivery_contract_section_uses_document_builder_source_param():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    text = render_delivery_contract_section(
+        {
+            "bootstrap_contract": {
+                "startup_actions": [
+                    {
+                        "action": "invoke_builder_tool",
+                        "priority": 2,
+                        "builder_tool": "markdown_to_pdf",
+                        "source_ref": "outputs/docs/draft.md",
+                        "output_ref": "outputs/docs/final.pdf",
+                    }
+                ]
+            },
+            "artifacts": [
+                {
+                    "kind": "pdf",
+                    "preferred_path": "outputs/docs/final.pdf",
+                    "validation_contract": {
+                        "staging_contract": {
+                            "builder_tool": "markdown_to_pdf",
+                            "source_markdown_ref": "outputs/docs/draft.md",
+                            "pdf_ref": "outputs/docs/final.pdf",
+                            "checkpoint_refs": ["outputs/docs/source_index.json", "outputs/docs/draft.md"],
+                        }
+                    },
+                }
+            ],
+        }
+    )
+
+    assert "markdown_to_pdf: source_markdown_path=outputs/docs/draft.md, path=outputs/docs/final.pdf" in text
+    assert "source_json_path=outputs/docs/draft.md" not in text
+
+
 # LLM: staged JSON hints should come from per-checkpoint contract fields instead of leaking workbook-only shapes into unrelated tasks.
 # 函数用途: 验证 source_index 这类数组索引文件会渲染自己的 shape hint，而不是默认提示成 sheets/rows。
 def test_render_delivery_contract_section_uses_checkpoint_shape_hint_for_non_workbook_json():

@@ -179,7 +179,12 @@ class DeliveryRepairRedirectBackend:
             return ModelResponse(text='[TOOL_CALL]\n{"tool":"read_file","path":"outputs/github_star_growth/source_data.json"}\n[/TOOL_CALL]', backend=self.name)
         if self.calls == 3:
             assert "delivery-required-repair" in prompt
-            return _write_file_response("outputs/github_star_growth/source_data.json", _valid_workbook_source_json(), self.name)
+            assert "rejected_tool_calls" in prompt
+            return _write_structured_json_response(
+                "outputs/github_star_growth/source_data.json",
+                _valid_workbook_source_json(),
+                self.name,
+            )
         if self.calls == 4:
             assert "STAGING_BUILDER_READY" in prompt
             return _workbook_builder_response(self.name)
@@ -244,11 +249,32 @@ class LocalProgressRedirectBackend:
         if self.calls in {2, 3}:
             return ModelResponse(text=f'[TOOL_CALL]\n{{"tool":"read_artifact","artifact_ref":"{artifact_ref}","offset":0,"max_chars":2000}}\n[/TOOL_CALL]', backend=self.name)
         if self.calls == 4:
-            assert "local-progress-guard" in prompt
+            assert "local-progress-guard" in prompt or "delivery-required-repair" in prompt
             return _write_file_response("outputs/github_star_growth/source_data.json", _valid_workbook_source_json(), self.name)
         if self.calls == 5:
             return _workbook_builder_response(self.name)
         raise AssertionError("local-progress guard should redirect remote exploration back to local staged work")
+
+
+# LLM: RecoveryAttemptRepairBackend proves fresh recovery attempts do not inherit stale no-progress debt.
+# 类用途: 先故意只读一次恢复上下文；系统应走阶段修复合同，而不是被旧 local-progress 计数直接阻断。
+class RecoveryAttemptRepairBackend:
+    name = "fake_recovery_attempt_repair_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(text='[TOOL_CALL]\n{"tool":"read_file","path":"recovery_packet.json"}\n[/TOOL_CALL]', backend=self.name)
+        if self.calls == 2:
+            assert "delivery-required-repair" in prompt
+            assert "LOCAL_PROGRESS_GUARD_BLOCKED" not in prompt
+            return _write_file_response("outputs/github_star_growth/source_data.json", _valid_workbook_source_json(), self.name)
+        if self.calls == 3:
+            return _workbook_builder_response(self.name)
+        raise AssertionError("fresh recovery attempt should repair before local-progress block")
 
 
 # LLM: WrongToolDuringOpenSessionBackend proves open sessions block unrelated new write tools.
@@ -389,6 +415,15 @@ def _xlsx_validation_contract() -> dict[str, object]:
 def _write_file_response(path: str, content: str, backend: str) -> ModelResponse:
     escaped = content.replace("\\", "\\\\").replace('"', '\\"')
     return ModelResponse(text=f'[TOOL_CALL]\n{{"tool":"write_file","path":"{path}","content":"{escaped}"}}\n[/TOOL_CALL]', backend=backend)
+
+
+# LLM: _write_structured_json_response builds the generic JSON checkpoint writer call.
+# 函数用途: 在测试中按机器 writer_tool 合同写阶段 JSON，不绕回普通文本写入。
+def _write_structured_json_response(path: str, json_payload: str, backend: str) -> ModelResponse:
+    return ModelResponse(
+        text=f'[TOOL_CALL]\n{{"tool":"write_structured_json","path":"{path}","data":{json_payload}}}\n[/TOOL_CALL]',
+        backend=backend,
+    )
 
 
 # LLM: _session_append_response builds one file_write_session append call response.

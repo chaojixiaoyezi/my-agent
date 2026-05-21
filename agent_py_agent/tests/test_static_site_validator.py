@@ -494,6 +494,37 @@ def test_static_site_check_allows_javascript_template_literals(tmp_path):
     assert record.validation_result["placeholder_hits"] == []
 
 
+# LLM: JS-rendered static apps should not fail just because ids live in local templates.
+# 函数用途: 验证 index.html + app.js 这类静态应用可把 id 写在 JS 模板字符串里，DOM 绑定验收仍能通过。
+def test_static_site_check_allows_dom_ids_declared_in_javascript_templates(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "index.html": '<html><body><div id="app"></div><script src="app.js"></script></body></html>',
+            "app.js": """
+                const html = `<button id="btn-submit">提交</button><div id="contact-error"></div>`;
+                document.getElementById('app').innerHTML = html;
+                document.getElementById('btn-submit').addEventListener('click', () => {
+                  document.getElementById('contact-error').textContent = '';
+                });
+            """,
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "dynamic static app",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["index.html", "app.js"],
+        }
+    )
+
+    assert record.passed is True
+    assert record.validation_result["missing_dom_id_hits"] == []
+
+
 # LLM: The validator must never scan outside the configured workspace.
 # 函数用途: 验证 site_root 越界时返回未执行失败记录，而不是读取外部目录。
 def test_static_site_check_rejects_outside_site_root(tmp_path):

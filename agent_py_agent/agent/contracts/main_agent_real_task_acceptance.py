@@ -211,6 +211,8 @@ def _open_session_finding(session: dict[str, object]) -> dict[str, object]:
         "next_chunk_index": int(session.get("next_chunk_index") or 0),
         "continue_tool_call": session.get("continue_tool_call") or {},
         "finish_tool_call": session.get("finish_tool_call") or {},
+        "abort_tool_call": session.get("abort_tool_call") or {},
+        "abort_requires_discard_chunks": bool(session.get("abort_requires_discard_chunks")),
         "resume_action": "append_from_next_chunk_then_finish",
         "chunk_content_read_required": False,
         "existing_chunks_authoritative": True,

@@ -27,6 +27,8 @@ class ModelResponse:
 
     text: str
     backend: str
+    runtime_status: str = "ok"
+    runtime_reason: str = ""
 
 
 # LLM: BackendOptions 属于模型后端请求的类边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。

@@ -122,7 +122,7 @@ def _builder_startup_lines(action: dict[str, object]) -> list[str]:
     source_ref = str(action.get("source_ref") or "").strip()
     output_ref = str(action.get("output_ref") or "").strip()
     if source_ref and output_ref:
-        return [f"- 阶段数据就绪后，优先调用 {builder}: source_json_path={source_ref}, path={output_ref}"]
+        return [f"- 阶段数据就绪后，优先调用 {builder}: {_builder_source_param(builder)}={source_ref}, path={output_ref}"]
     return [f"- 阶段数据就绪后，优先调用 {builder} 生成后续产物。"]
 
 
@@ -158,12 +158,42 @@ def _staging_lines(contract: dict[str, object]) -> list[str]:
     builder_tool = str(staging.get("builder_tool") or "").strip()
     if builder_tool:
         lines.append(f"- 阶段构建工具: {builder_tool}")
-    source_ref = str(staging.get("source_json_ref") or "").strip()
-    workbook_ref = str(staging.get("workbook_ref") or "").strip()
-    if source_ref and workbook_ref and builder_tool:
-        lines.append(f"- 生成表格时优先调用 {builder_tool}: source_json_path={source_ref}, path={workbook_ref}")
-        lines.append("- source_json_path 可以先写最小有效 JSON 骨架，再逐步补齐行数据；不要等资料全齐才第一次落盘。")
+    source_ref = _staging_source_ref(staging)
+    output_ref = _staging_output_ref(staging)
+    if source_ref and output_ref and builder_tool:
+        source_param = _builder_source_param(builder_tool)
+        lines.append(f"- 阶段输入就绪后优先调用 {builder_tool}: {source_param}={source_ref}, path={output_ref}")
+        if source_ref.lower().endswith(".json"):
+            lines.append("- JSON checkpoint 优先用 write_structured_json 写入 rows/sheets/data；不要手写大型 JSON 字符串。")
     return lines
+
+
+# LLM: _builder_source_param maps builder tools to their structured source parameter names.
+# 函数用途: 渲染工具调用提示时使用工具 schema 参数名，而不是固定 source_json_path。
+def _builder_source_param(builder_tool: str) -> str:
+    if builder_tool == "markdown_to_pdf":
+        return "source_markdown_path"
+    if builder_tool == "data_to_workbook":
+        return "source_json_path"
+    return "source_ref"
+
+
+# LLM: _staging_source_ref reads all supported staged source aliases.
+# 函数用途: 同时支持 JSON、Markdown 和未来通用 source_ref。
+def _staging_source_ref(staging: dict[str, object]) -> str:
+    for key in ("source_json_ref", "source_markdown_ref", "source_ref"):
+        if value := str(staging.get(key) or "").strip():
+            return value
+    return ""
+
+
+# LLM: _staging_output_ref reads all supported staged output aliases.
+# 函数用途: 同时支持 workbook、PDF 和未来通用 output_ref。
+def _staging_output_ref(staging: dict[str, object]) -> str:
+    for key in ("workbook_ref", "pdf_ref", "output_ref"):
+        if value := str(staging.get(key) or "").strip():
+            return value
+    return ""
 
 
 # LLM: _artifact_items normalizes contract artifacts without reading prompt text.

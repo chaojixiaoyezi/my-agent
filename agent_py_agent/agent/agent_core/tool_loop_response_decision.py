@@ -6,17 +6,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
-from ..tooling.file_write_session_inspection import open_file_write_sessions
 from ._runtime_params import ToolLoopExecuteParams
 from .tool_bootstrap_materialization_guard import (
     bootstrap_materialization_block_response,
     bootstrap_materialization_context,
     has_required_bootstrap_materialization,
+    is_bootstrap_materialization_evidence_call,
     is_bootstrap_materialization_productive_call,
 )
 from .tool_delivery_repair_guard import (
     delivery_repair_block_response,
     delivery_repair_context,
+    delivery_repair_rejection_context,
     has_required_delivery_repair,
     is_delivery_repair_productive_call,
 )
@@ -25,17 +26,24 @@ from .tool_local_progress_guard import (
     local_progress_guard_block_response,
     local_progress_guard_context,
 )
+from .tool_loop_exploration_decision import (
+    ExplorationFuseDecision,
+    ExplorationFuseDecisionRequest,
+    exploration_fuse_no_tool_call_decision,
+    exploration_fuse_tool_call_decision,
+)
+from .tool_loop_open_session_decision import (
+    OpenSessionDecision,
+    OpenSessionDecisionRequest,
+    open_session_tool_call_decision,
+    open_write_session_decision,
+)
 from .tool_loop_repair_counters import (
     ToolLoopRepairCounters,
     _inc_bootstrap_materialization,
     _inc_delivery_repair,
     _inc_local_progress,
-    _inc_open_session,
     _inc_reserved,
-)
-from .tool_open_write_session_repair import (
-    open_write_session_block_response,
-    open_write_session_repair_context,
 )
 from .tool_reserved_record_guard import (
     contains_reserved_tool_record,
@@ -95,20 +103,7 @@ def tool_loop_response_decision(
 
     calls = request.agent.tools.parse_tool_calls(request.response.text)
     if calls:
-        open_session_tools = _open_session_tool_call_decision(request, calls)
-        if open_session_tools is not None:
-            return open_session_tools
-        bootstrap_decision = _bootstrap_materialization_tool_call_decision(request, calls)
-        if bootstrap_decision is not None:
-            return bootstrap_decision
-        local_progress_tools = _local_progress_tool_call_decision(request, calls)
-        if local_progress_tools is not None:
-            return local_progress_tools
-        delivery_repair_tools = _delivery_repair_tool_call_decision(request, calls)
-        if delivery_repair_tools is not None:
-            return delivery_repair_tools
-        clean_response = sanitize_reserved_tool_record_response(request.response)
-        return ToolLoopResponseDecision("run_tools", clean_response, calls, request.counters)
+        return _tool_calls_decision(request, calls)
 
     return _no_tool_calls_decision(
         _NoToolCallsRequest(
@@ -129,85 +124,55 @@ def _disabled_tools_response(response, has_reserved_record: bool):
     return reserved_tool_record_block_response(response.backend)
 
 
+# LLM: _tool_calls_decision applies pre-execution guards before real tools run.
+# 函数用途: 让主入口保持薄层分发；open-session/bootstrap/local/delivery/exploration 都在真实执行前处理。
+def _tool_calls_decision(
+    request: ToolLoopResponseDecisionRequest,
+    calls: list[dict[str, object]],
+) -> ToolLoopResponseDecision:
+    open_session_tools = open_session_tool_call_decision(_open_session_request(request, calls))
+    if open_session_tools is not None:
+        return _open_session_decision(open_session_tools)
+    bootstrap_decision = _bootstrap_materialization_tool_call_decision(request, calls)
+    if bootstrap_decision is not None:
+        return bootstrap_decision
+    delivery_repair_tools = _delivery_repair_tool_call_decision(request, calls)
+    if delivery_repair_tools is not None:
+        return delivery_repair_tools
+    local_progress_tools = _local_progress_tool_call_decision(request, calls)
+    if local_progress_tools is not None:
+        return local_progress_tools
+    exploration_fuse = exploration_fuse_tool_call_decision(_exploration_request(request, calls))
+    if exploration_fuse is not None:
+        return _exploration_decision(exploration_fuse)
+    clean_response = sanitize_reserved_tool_record_response(request.response)
+    return ToolLoopResponseDecision("run_tools", clean_response, calls, request.counters)
+
+
 # LLM: _no_tool_calls_decision prevents spoof-only reserved records from becoming final answers.
 # 函数用途: 无真实工具调用时，普通回复直接收口；伪造工具回执先纠偏一次，再重复就阻断。
 def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision:
-    open_session_decision = _open_write_session_decision(request)
+    open_session_decision = open_write_session_decision(_open_session_request(request, []))
     if open_session_decision is not None:
-        return open_session_decision
+        return _open_session_decision(open_session_decision)
     bootstrap_decision = _bootstrap_materialization_no_tool_call_decision(request)
     if bootstrap_decision is not None:
         return bootstrap_decision
-    local_progress_decision = _local_progress_no_tool_call_decision(request)
-    if local_progress_decision is not None:
-        return local_progress_decision
     delivery_repair_decision = _delivery_repair_no_tool_call_decision(request)
     if delivery_repair_decision is not None:
         return delivery_repair_decision
+    local_progress_decision = _local_progress_no_tool_call_decision(request)
+    if local_progress_decision is not None:
+        return local_progress_decision
+    exploration_fuse_decision = exploration_fuse_no_tool_call_decision(_exploration_request(request, []))
+    if exploration_fuse_decision is not None:
+        return _exploration_decision(exploration_fuse_decision)
     if not request.has_reserved_record:
         return ToolLoopResponseDecision("break", request.response, [], request.counters)
     if request.counters.reserved_record_repairs < 1:
         return ToolLoopResponseDecision("continue", None, [], _inc_reserved(request.counters))
     final = reserved_tool_record_block_response(request.response.backend)
     return ToolLoopResponseDecision("break", final, [], request.counters)
-
-
-# LLM: _open_write_session_decision blocks final prose while chunked writes remain open.
-# 函数用途: 基于 manifest 事实判断是否需要继续 finish/abort 分块写入会话。
-def _open_write_session_decision(
-    request: _NoToolCallsRequest,
-) -> ToolLoopResponseDecision | None:
-    open_session_context = open_write_session_repair_context(
-        request.agent,
-        request.counters.open_write_session_repairs,
-    )
-    if open_session_context:
-        request.params.tool_context.append(open_session_context)
-        return ToolLoopResponseDecision("continue", None, [], _inc_open_session(request.counters))
-    if request.counters.open_write_session_repairs:
-        block = open_write_session_block_response(request.agent)
-        if block is not None:
-            return ToolLoopResponseDecision("break", block, [], request.counters)
-    return None
-
-
-# LLM: _open_session_tool_call_decision enforces that open staged writes must be continued or finished before new writes start.
-# 函数用途: 只要有 open file_write_session，下一轮工具调用就只能继续对应 session；否则先纠偏，再重复就阻断。
-def _open_session_tool_call_decision(
-    request: ToolLoopResponseDecisionRequest,
-    calls: list[dict[str, object]],
-) -> ToolLoopResponseDecision | None:
-    sessions = open_file_write_sessions(_agent_root(request.agent))
-    if not sessions:
-        return None
-    open_ids = {str(item.get("session_id") or "") for item in sessions if str(item.get("session_id") or "")}
-    for call in calls:
-        tool = str(call.get("tool") or "").strip()
-        action = str(call.get("action") or "").strip().lower()
-        session_id = str(call.get("session_id") or "").strip()
-        if tool != "file_write_session":
-            return _invalid_open_session_tool_call(request)
-        if action not in {"append", "finish", "abort"}:
-            return _invalid_open_session_tool_call(request)
-        if session_id not in open_ids:
-            return _invalid_open_session_tool_call(request)
-    return None
-
-
-# LLM: _invalid_open_session_tool_call turns ignored staged-write contracts into deterministic repair or block outcomes.
-# 函数用途: 模型在 open session 存在时仍想开新写入链路，就先给一次修正机会，再继续就阻断。
-def _invalid_open_session_tool_call(
-    request: ToolLoopResponseDecisionRequest,
-) -> ToolLoopResponseDecision:
-    open_session_context = open_write_session_repair_context(
-        request.agent,
-        request.counters.open_write_session_repairs,
-    )
-    if open_session_context:
-        request.params.tool_context.append(open_session_context)
-        return ToolLoopResponseDecision("continue", None, [], _inc_open_session(request.counters))
-    block = open_write_session_block_response(request.agent)
-    return ToolLoopResponseDecision("break", block or request.response, [], request.counters)
 
 
 # LLM: _delivery_repair_no_tool_call_decision prevents staged-repair tasks from ending or chatting while write-first recovery actions remain.
@@ -262,8 +227,8 @@ def _local_progress_no_tool_call_decision(
     return ToolLoopResponseDecision("break", block or request.response, [], request.counters)
 
 
-# LLM: _bootstrap_materialization_tool_call_decision redirects pure inspection or fetch-only startup turns until one target is materialized.
-# 函数用途: 当 bootstrap 目标一个都没出现时，模型必须先做创建/写入动作；否则只给纠偏机会，不执行空转工具。
+# LLM: _bootstrap_materialization_tool_call_decision permits evidence gathering while redirecting pure inspection startup turns.
+# 函数用途: bootstrap 目标缺失时允许先抓取真实证据，但纯检查仍先纠偏；重复无进展达到阈值后阻断。
 def _bootstrap_materialization_tool_call_decision(
     request: ToolLoopResponseDecisionRequest,
     calls: list[dict[str, object]],
@@ -271,6 +236,11 @@ def _bootstrap_materialization_tool_call_decision(
     if not has_required_bootstrap_materialization(request.agent, request.params, calls):
         return None
     if is_bootstrap_materialization_productive_call(calls):
+        return None
+    if is_bootstrap_materialization_evidence_call(calls):
+        block = bootstrap_materialization_block_response(request.agent, request.params)
+        if block is not None:
+            return ToolLoopResponseDecision("break", block, [], request.counters)
         return None
     repair_context = bootstrap_materialization_context(
         request.agent,
@@ -311,7 +281,11 @@ def _delivery_repair_tool_call_decision(
 ) -> ToolLoopResponseDecision | None:
     if is_delivery_repair_productive_call(request.agent, calls):
         return None
-    repair_context = delivery_repair_context(request.agent, request.counters.delivery_repair_redirects)
+    repair_context = delivery_repair_rejection_context(
+        request.agent,
+        calls,
+        request.counters.delivery_repair_redirects,
+    )
     if repair_context:
         request.params.tool_context.append(repair_context)
         return ToolLoopResponseDecision("continue", None, [], _inc_delivery_repair(request.counters))
@@ -319,10 +293,31 @@ def _delivery_repair_tool_call_decision(
     return ToolLoopResponseDecision("break", block or request.response, [], request.counters)
 
 
-# LLM: _agent_root keeps open-session checks tolerant of lightweight test harnesses.
-# 函数用途: 从 agent 读取真实工作区根目录，供 open file_write_session 检查复用。
-def _agent_root(agent: object):
-    from pathlib import Path
+# LLM: _exploration_decision adapts the split exploration module into this module's public decision type.
+# 函数用途: 保持 tool_loop_response_decision 的返回类型稳定，同时让 exploration 分支独立演进。
+def _exploration_decision(decision: ExplorationFuseDecision) -> ToolLoopResponseDecision:
+    return ToolLoopResponseDecision(decision.action, decision.response, decision.calls, decision.counters)
 
-    root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", ".")
-    return Path(root).resolve()
+
+# LLM: _exploration_request adapts either request shape into the exploration module contract.
+# 函数用途: 统一 tool-call 和 no-tool 分支传入 exploration fuse 的字段。
+def _exploration_request(
+    request: ToolLoopResponseDecisionRequest | _NoToolCallsRequest,
+    calls: list[dict[str, object]],
+) -> ExplorationFuseDecisionRequest:
+    return ExplorationFuseDecisionRequest(request.agent, request.params, request.response, request.counters, calls)
+
+
+# LLM: _open_session_request adapts either tool-call or no-tool requests into the split module shape.
+# 函数用途: 复用 open-session 分支的 request dataclass，避免主决策函数继续扩展参数。
+def _open_session_request(
+    request: ToolLoopResponseDecisionRequest | _NoToolCallsRequest,
+    calls: list[dict[str, object]],
+) -> OpenSessionDecisionRequest:
+    return OpenSessionDecisionRequest(request.agent, request.params, request.response, request.counters, calls)
+
+
+# LLM: _open_session_decision adapts the split open-session module into this module's public decision type.
+# 函数用途: 保持 tool_loop_response_decision 对外返回类型不变。
+def _open_session_decision(decision: OpenSessionDecision) -> ToolLoopResponseDecision:
+    return ToolLoopResponseDecision(decision.action, decision.response, decision.calls, decision.counters)

@@ -192,6 +192,8 @@ def _open_write_session_lines(finding: dict[str, object]) -> list[str]:
         "  - preview_materialized_after_append=true",
         f"  - chunk_content_read_required={_json_bool(finding.get('chunk_content_read_required'), default=False)}",
         f"  - existing_chunks_authoritative={_json_bool(finding.get('existing_chunks_authoritative'), default=True)}",
+        f"  - finish_tool_call={json.dumps(finding.get('finish_tool_call') or {}, ensure_ascii=False, sort_keys=True)}",
+        f"  - abort_tool_call={json.dumps(finding.get('abort_tool_call') or {}, ensure_ascii=False, sort_keys=True)}",
         "  - 先继续 append 缺失 chunk 并 finish，或 abort 后重新按阶段产物合同写入；不要重复 begin 新 session。",
     ]
 
@@ -217,8 +219,10 @@ def _staged_json_no_rows_lines(
         f"  - source_json_ref={staging.get('source_json_ref') or stage_ref}",
         f"  - write_shape={_checkpoint_shape_hint(stage_ref, staging)}",
         f"  - required_columns={', '.join(str(item) for item in columns)}",
+        f"  - writer_tool={finding.get('writer_tool') or 'write_structured_json'}",
         f"  - builder_tool={staging.get('builder_tool') or ''}",
         f"  - workbook_ref={staging.get('workbook_ref') or ''}",
+        "  - 优先用 writer_tool 写 path/rows/sheets/data，避免手写大型 JSON 字符串。",
         "  - source_json_ref 有非空 rows/sheets 后，再调用 builder_tool；不要把空 JSON 当完成。",
     ]
 
@@ -238,8 +242,10 @@ def _staged_json_invalid_lines(
         f"  - source_json_ref={staging.get('source_json_ref') or stage_ref}",
         f"  - required_shape={_checkpoint_shape_hint(stage_ref, staging)}",
         f"  - parse_error={json.dumps(parse_error, ensure_ascii=False)}",
+        f"  - writer_tool={finding.get('writer_tool') or 'write_structured_json'}",
         f"  - builder_tool={staging.get('builder_tool') or ''}",
         f"  - workbook_ref={staging.get('workbook_ref') or ''}",
+        "  - 优先用 writer_tool 重写 path/rows/sheets/data，避免手动修补截断 JSON。",
         "  - 先把 source_json_ref 修成可解析的完整 JSON，再继续 builder_tool 或下一阶段产物。",
     ]
 
@@ -253,9 +259,19 @@ def _artifact_for_stage_ref(
         validation = artifact.get("validation_contract") if isinstance(artifact.get("validation_contract"), dict) else {}
         staging = validation.get("staging_contract") if isinstance(validation.get("staging_contract"), dict) else {}
         refs = staging.get("checkpoint_refs") if isinstance(staging.get("checkpoint_refs"), list) else []
-        if stage_ref in refs or stage_ref == str(staging.get("source_json_ref") or ""):
+        if stage_ref in refs or stage_ref in _staging_refs(staging):
             return artifact
     return {}
+
+
+# LLM: _staging_refs returns source/output aliases that can identify an artifact's staged contract.
+# 函数用途: 让恢复提示支持 JSON、Markdown、PDF、workbook 等通用 ref，不再只匹配 source_json_ref。
+def _staging_refs(staging: dict[str, object]) -> set[str]:
+    return {
+        str(staging.get(key) or "").strip()
+        for key in ("source_json_ref", "source_markdown_ref", "source_ref", "workbook_ref", "pdf_ref", "output_ref")
+        if str(staging.get(key) or "").strip()
+    }
 
 
 # LLM: _checkpoint_shape_hint lets each staged checkpoint describe its own generic JSON shape without hard-coding one task's schema.

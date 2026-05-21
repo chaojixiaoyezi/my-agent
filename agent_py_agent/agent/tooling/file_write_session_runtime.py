@@ -264,6 +264,12 @@ def protected_abort_result(
             "received_chunks": received_chunk_indexes(manifest),
             "next_chunk_index": next_chunk_index(manifest),
             "resume_action": "append_from_next_chunk_then_finish",
+            "abort_tool_call": {
+                "tool": "file_write_session",
+                "action": "abort",
+                "session_id": session_id,
+                "discard_chunks": True,
+            },
         },
     )
 

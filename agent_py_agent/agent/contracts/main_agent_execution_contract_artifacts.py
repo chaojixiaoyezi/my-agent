@@ -277,10 +277,28 @@ def _builder_startup_actions(staging: dict[str, object]) -> list[dict[str, objec
             "action": "invoke_builder_tool",
             "priority": 2,
             "builder_tool": builder_tool,
-            "source_ref": str(staging.get("source_json_ref") or "").strip(),
-            "output_ref": str(staging.get("workbook_ref") or "").strip(),
+            "source_ref": _staging_source_ref(staging),
+            "output_ref": _staging_output_ref(staging),
         }
     ]
+
+
+# LLM: _staging_source_ref supports every structured source key used by builder contracts.
+# 函数用途: 让 xlsx/pdf 等 builder 的 startup action 都带正确 source_ref。
+def _staging_source_ref(staging: dict[str, object]) -> str:
+    for key in ("source_json_ref", "source_markdown_ref", "source_ref"):
+        if value := str(staging.get(key) or "").strip():
+            return value
+    return ""
+
+
+# LLM: _staging_output_ref supports every structured output key used by builder contracts.
+# 函数用途: 让 workbook/pdf/output_ref 都能进入 startup action。
+def _staging_output_ref(staging: dict[str, object]) -> str:
+    for key in ("workbook_ref", "pdf_ref", "output_ref"):
+        if value := str(staging.get(key) or "").strip():
+            return value
+    return ""
 
 
 # LLM: _checkpoint_manifest_entries normalizes staged path contracts for the manifest.

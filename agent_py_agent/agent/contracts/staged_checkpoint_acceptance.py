@@ -10,6 +10,7 @@ from .evidence_contract import (
     EvidenceContractRequest,
     evaluate_evidence_contract,
 )
+from .staged_checkpoint_contract_options import staged_checkpoint_contexts
 from .staged_checkpoint_evidence_payloads import claims, source_refs, string_list
 
 
@@ -22,14 +23,28 @@ def staged_checkpoint_findings(
     findings: list[dict[str, object]] = []
     preferred_paths = {str(item.get("preferred_path") or item.get("path") or "") for item in items}
     for item in items:
-        for ref_text in _staging_refs_for_item(item, preferred_paths):
-            findings.extend(one_staged_checkpoint_findings(ref_text, task_workspace))
+        for context in staged_checkpoint_contexts(item, preferred_paths):
+            findings.extend(
+                one_staged_checkpoint_findings(
+                    context.ref,
+                    task_workspace,
+                    required_columns=context.required_columns,
+                    required_sheets_min=context.required_sheets_min,
+                )
+            )
+            findings.extend(staged_json_evidence_findings(context.ref, task_workspace, context.evidence_contract))
     return findings
 
 
 # LLM: one_staged_checkpoint_findings validates one checkpoint file with generic shape-aware rules.
 # 函数用途: 单独检查一个阶段文件，区分缺失、空文件、JSON 非法、JSON 无有效数据等通用错误。
-def one_staged_checkpoint_findings(ref: str, task_workspace: Path) -> list[dict[str, object]]:
+def one_staged_checkpoint_findings(
+    ref: str,
+    task_workspace: Path,
+    *,
+    required_columns: list[str] | None = None,
+    required_sheets_min: int = 0,
+) -> list[dict[str, object]]:
     path = artifact_path(ref, task_workspace)
     if not path.exists():
         return [_finding("STAGED_ARTIFACT_MISSING", ref, path, {"message": "Staged checkpoint does not exist."})]
@@ -37,7 +52,11 @@ def one_staged_checkpoint_findings(ref: str, task_workspace: Path) -> list[dict[
         return [_finding("STAGED_ARTIFACT_EMPTY", ref, path, {"message": "Staged checkpoint is empty."})]
     if path.suffix.lower() != ".json":
         return []
-    status = json_checkpoint_status(path)
+    status = json_checkpoint_status(
+        path,
+        required_columns=required_columns,
+        required_sheets_min=required_sheets_min,
+    )
     if status["code"] == "STAGED_JSON_INVALID":
         return [
             _finding(
@@ -59,6 +78,8 @@ def one_staged_checkpoint_findings(ref: str, task_workspace: Path) -> list[dict[
                 {"message": "Staged JSON checkpoint has no data rows."},
             )
         ]
+    if status["code"] != "OK":
+        return [_finding(status["code"], ref, path, dict(status))]
     return []
 
 
@@ -112,7 +133,11 @@ def artifact_path(ref: str, task_workspace: Path) -> Path:
 
 # LLM: json_checkpoint_status separates invalid JSON from valid-but-empty structured data.
 # 函数用途: 返回阶段 JSON 的结构状态，避免把被截断的 JSON 误判成“只是没有数据”。
-def json_checkpoint_status(path: Path, required_columns: list[str] | None = None) -> dict[str, str]:
+def json_checkpoint_status(
+    path: Path,
+    required_columns: list[str] | None = None,
+    required_sheets_min: int = 0,
+) -> dict[str, str]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -121,24 +146,13 @@ def json_checkpoint_status(path: Path, required_columns: list[str] | None = None
         return {"code": "STAGED_JSON_INVALID", "parse_error": str(exc)}
     if not _contains_nonempty_list(value):
         return {"code": "STAGED_JSON_NO_ROWS"}
-    if shape_issue := _tabular_json_shape_issue(value, required_columns=required_columns):
+    if shape_issue := _tabular_json_shape_issue(
+        value,
+        required_columns=required_columns,
+        required_sheets_min=required_sheets_min,
+    ):
         return shape_issue
     return {"code": "OK"}
-
-
-# LLM: _staging_refs_for_item extracts checkpoint refs while filtering the final artifact path itself.
-# 函数用途: 从单个 artifact 的 staging_contract 里取 checkpoint_refs，避免把最终产物路径重复当阶段文件检查。
-def _staging_refs_for_item(item: dict[str, object], preferred_paths: set[str]) -> list[str]:
-    contract = item.get("validation_contract")
-    staging = contract.get("staging_contract") if isinstance(contract, dict) else None
-    refs = staging.get("checkpoint_refs") if isinstance(staging, dict) else None
-    if not isinstance(refs, list):
-        return []
-    return [
-        ref_text
-        for ref in refs
-        if (ref_text := str(ref)).strip() and ref_text not in preferred_paths
-    ]
 
 
 # LLM: _contains_nonempty_list checks structured data shape recursively without depending on prose content.
@@ -153,13 +167,24 @@ def _contains_nonempty_list(value: object) -> bool:
 
 # LLM: _tabular_json_shape_issue validates generic sheets/rows checkpoint structure before builder tools consume it.
 # 函数用途: 对机器声明的表格 JSON 结构做通用检查：sheet 身份唯一、rows 非空、columns 与 row 字段一致。
-def _tabular_json_shape_issue(value: object, *, required_columns: list[str] | None = None) -> dict[str, str]:
+def _tabular_json_shape_issue(
+    value: object,
+    *,
+    required_columns: list[str] | None = None,
+    required_sheets_min: int = 0,
+) -> dict[str, str]:
     required = required_columns or []
-    if not required and (not isinstance(value, dict) or "sheets" not in value):
+    if not required and not required_sheets_min and (not isinstance(value, dict) or "sheets" not in value):
         return {}
     sheets = _tabular_sheet_candidates(value, required_columns=required)
     if not sheets:
         return {"code": "STAGED_JSON_NO_ROWS"}
+    if required_sheets_min > 0 and len(sheets) < required_sheets_min:
+        return {
+            "code": "STAGED_JSON_TOO_FEW_SHEETS",
+            "sheet_count": str(len(sheets)),
+            "required_sheets_min": str(required_sheets_min),
+        }
     seen_names: set[str] = set()
     for index, sheet in enumerate(sheets):
         if not isinstance(sheet, dict):

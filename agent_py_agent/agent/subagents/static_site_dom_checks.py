@@ -9,6 +9,7 @@ from dataclasses import dataclass
 _VALIDATE_FORM_CALL_RE = re.compile(r"validateForm\(\s*['\"]([^'\"]+)['\"]\s*\)")
 _GET_ELEMENT_BY_ID_RE = re.compile(r"getElementById\(\s*['\"]([^'\"]+)['\"]\s*\)")
 _QUERY_SELECTOR_ID_RE = re.compile(r"querySelector(?:All)?\(\s*['\"]#([A-Za-z0-9_-]+)['\"]\s*\)")
+_TEMPLATE_ID_ATTR_RE = re.compile(r"\bid\s*=\s*['\"]([A-Za-z0-9_-]+)['\"]")
 _ASSIGNED_GET_ELEMENT_RE = re.compile(
     r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*document\.getElementById\(\s*['\"]([^'\"]+)['\"]\s*\)\s*;"
 )
@@ -42,9 +43,16 @@ def missing_dom_id_hits(
     *,
     allow_optional_missing: bool = True,
 ) -> list[str]:
-    hits = _missing_get_element_hits(element_ids, script_text, allow_optional_missing=allow_optional_missing)
-    hits.extend(_missing_query_selector_hits(element_ids, script_text))
+    available_ids = set(element_ids) | template_declared_dom_ids(script_text)
+    hits = _missing_get_element_hits(available_ids, script_text, allow_optional_missing=allow_optional_missing)
+    hits.extend(_missing_query_selector_hits(available_ids, script_text))
     return hits
+
+
+# LLM: template_declared_dom_ids treats JS-rendered static templates as available DOM candidates.
+# 函数用途: 静态站点常用 JS 模板渲染页面片段；验收时把脚本文本中的 id="..." 纳入候选集合，避免误报动态静态页。
+def template_declared_dom_ids(script_text: str) -> set[str]:
+    return {item for item in _TEMPLATE_ID_ATTR_RE.findall(script_text or "") if item}
 
 
 # LLM: inert_control_hits finds controls that are unavailable or have no target/handler.

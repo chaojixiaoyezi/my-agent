@@ -291,6 +291,25 @@ def test_prepare_test_items_infers_static_site_check_for_single_html_artifact(tm
     }]
 
 
+# LLM: artifact_integrity test items need explicit workspace-local file refs before executor runs.
+# 函数用途: runner 只声明 artifact_integrity 方法时，父级从 output.artifacts 补 file_path，而不是读取测试名文案猜路径。
+def test_prepare_test_items_fills_artifact_integrity_file_path(tmp_path):
+    output_path = tmp_path / "deliverables" / "site" / "index.html"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_text("<html><body></body></html>", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[{"name": "artifact integrity", "validation_method": "artifact_integrity"}],
+            output={"artifacts": [{"path": str(output_path)}]},
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert prepared[0]["validation_method"] == "artifact_integrity"
+    assert prepared[0]["file_path"] == "deliverables/site/index.html"
+
+
 # LLM: Required DOM ids should flow into inferred static-site checks as machine fields.
 # 函数用途: 父级从任务合同抽取的业务区域 id 要进入 static_site_check，避免修复任务只补 HTML 骨架。
 def test_prepare_test_items_infers_static_site_check_with_required_dom_ids(tmp_path):

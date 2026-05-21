@@ -50,6 +50,12 @@ def command_for_case(
         delivery_contract_path,
         delivery_contract,
     )
+    _write_recovery_attempt_marker(
+        task_workspace,
+        request.recovery_packet_path,
+        workspace=workspace,
+        delivery_contract_path=delivery_contract_path,
+    )
     prepare_artifact_workspace(delivery_contract_path, artifact_manifest_path)
     return [
         sys.executable,
@@ -107,6 +113,52 @@ def write_case_config(path: Path, base_config_path: Path | None, task_workspace:
     text = without_config_key(text, "workspace_root")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f'{text.rstrip()}\nworkspace_root: "{task_workspace}"\n', encoding="utf-8")
+
+
+# LLM: Recovery attempts get a machine marker so guards can distinguish a new attempt from stale closeout debt.
+# 函数用途: 续跑开始时写结构化 attempt 标记；repair guard 用它给新 attempt 一个有限检查窗口。
+def _write_recovery_attempt_marker(
+    task_workspace: Path,
+    packet_path: Path | None,
+    *,
+    workspace: Path,
+    delivery_contract_path: Path,
+) -> None:
+    if packet_path is None:
+        return
+    marker = task_workspace / ".agent_delivery" / "recovery_attempt.json"
+    write_json(
+        marker,
+        {
+            "schema_version": "delivery-recovery-attempt.v1",
+            "packet_ref": rel(Path(packet_path).expanduser().resolve(), workspace),
+            "delivery_contract_ref": rel(delivery_contract_path, workspace),
+            **_recovery_attempt_baseline(task_workspace),
+            "inspection_round_budget": 4,
+            "started_at_unix": round(time.time(), 3),
+        },
+    )
+
+
+def _recovery_attempt_baseline(task_workspace: Path) -> dict[str, object]:
+    closeout = task_workspace / ".agent_delivery" / "closeout.json"
+    try:
+        payload = json.loads(closeout.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"baseline_failure_fingerprint": "", "baseline_unchanged_failure_count": 0}
+    progress = payload.get("delivery_progress") if isinstance(payload, dict) else {}
+    progress_payload = progress if isinstance(progress, dict) else {}
+    return {
+        "baseline_failure_fingerprint": str(progress_payload.get("failure_fingerprint") or ""),
+        "baseline_unchanged_failure_count": _safe_int(progress_payload.get("unchanged_failure_count")),
+    }
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 # LLM: default_config_text reuses the repo default agent config so controlled runs match real runtime defaults.

@@ -249,6 +249,8 @@ class FinalizationService:
             cumulative_token_estimate=params.token_ledger["cumulative"],
             main_context_bundle_path=ctx.main_context_bundle_path,
             main_context_bundle_markdown_path=ctx.main_context_bundle_markdown_path,
+            runtime_status=str(getattr(ctx.final_response, "runtime_status", "ok") or "ok"),
+            runtime_reason=str(getattr(ctx.final_response, "runtime_reason", "") or ""),
             **compact_auto_cycle_fields(self._agent, ctx, params.token_ledger, request_id=params.run_request_id),
         )
 

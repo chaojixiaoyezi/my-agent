@@ -137,6 +137,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action="repair_structured_checkpoint_json",
         recovery_hint="阶段 JSON 缺少合同声明的必需列；补齐 required_columns 后再继续 builder。",
     ),
+    "STAGED_JSON_TOO_FEW_SHEETS": ErrorContract(
+        code="STAGED_JSON_TOO_FEW_SHEETS",
+        category="artifact",
+        retryable=True,
+        recommended_action="repair_structured_checkpoint_json",
+        recovery_hint="阶段 JSON 的 sheet 数少于合同要求；补齐 sheets 后再继续 builder。",
+    ),
     "EVIDENCE_SOURCE_UNREADABLE": ErrorContract(
         code="EVIDENCE_SOURCE_UNREADABLE",
         category="evidence",
@@ -221,6 +228,20 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action="collect_non_empty_rows_before_workbook",
         recovery_hint="表格源数据没有非空行；先补齐 rows/sheets 数据，再调用 data_to_workbook。",
     ),
+    "MARKDOWN_SOURCE_MISSING": ErrorContract(
+        code="MARKDOWN_SOURCE_MISSING",
+        category="artifact",
+        retryable=True,
+        recommended_action="write_or_fix_markdown_source",
+        recovery_hint="Markdown 源文档缺失；先写出 source_markdown_path，再调用 markdown_to_pdf。",
+    ),
+    "MARKDOWN_SOURCE_EMPTY": ErrorContract(
+        code="MARKDOWN_SOURCE_EMPTY",
+        category="artifact",
+        retryable=True,
+        recommended_action="write_non_empty_markdown_source",
+        recovery_hint="Markdown 源文档为空；补齐正文后再调用 markdown_to_pdf。",
+    ),
     "UNKNOWN_ERROR": ErrorContract(
         code="UNKNOWN_ERROR",
         category="unknown",
@@ -273,38 +294,7 @@ def classify_error(message: str) -> ErrorContract:
 # LLM: tool_failure_taxonomy exposes stable codes for ToolManifest without duplicating constants.
 # 函数用途: 返回工具清单要展示的错误分类代码列表，供 context bundle 和工具网关复用。
 def tool_failure_taxonomy() -> list[str]:
-    return [
-        "PATH_INVALID",
-        "PATH_OUTSIDE_WORKSPACE",
-        "WRITE_FORBIDDEN",
-        "APPROVAL_REQUIRED",
-        "TOOL_UNAVAILABLE",
-        "TOOL_INVALID_ARGUMENTS",
-        "TOOL_TIMEOUT",
-        "TOOL_REPEATED_EXACT_FAILURE",
-        "MODEL_UPSTREAM_FAILED",
-        "ARTIFACT_MISSING",
-        "STAGED_ARTIFACT_MISSING",
-        "STAGED_ARTIFACT_EMPTY",
-        "STAGED_JSON_INVALID",
-        "STAGED_JSON_NO_ROWS",
-        "STAGED_JSON_DUPLICATE_SHEET_NAMES",
-        "STAGED_JSON_TABLE_SHAPE_INVALID",
-        "STAGED_JSON_REQUIRED_COLUMNS_MISSING",
-        "EVIDENCE_SOURCE_UNREADABLE",
-        "EVIDENCE_CLAIM_UNSOURCED",
-        "EVIDENCE_SOURCE_MISSING",
-        "EVIDENCE_CLAIM_UNVERIFIED",
-        "EVIDENCE_REQUIRED_FIELD_MISSING",
-        "TARGET_PENDING_FILE_WRITE_SESSION",
-        "ACCEPTANCE_FAILED",
-        "COMPACT_REF_MISSING",
-        "NO_PROGRESS",
-        "SPREADSHEET_SOURCE_MISSING",
-        "SPREADSHEET_SOURCE_INVALID",
-        "SPREADSHEET_SOURCE_NO_ROWS",
-        "UNKNOWN_ERROR",
-    ]
+    return list(ERROR_CONTRACTS)
 
 
 __all__ = ["ERROR_CONTRACTS", "ErrorContract", "classify_error", "error_contract", "tool_failure_taxonomy"]

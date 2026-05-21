@@ -22,7 +22,12 @@ from scripts.live_lab.markdown_repair_wave_case import (
     assert_markdown_repair_wave_created,
     seed_failed_markdown_child,
 )
-from scripts.live_lab.session import LabSessionManager
+from scripts.live_lab.session import (
+    LabSessionManager,
+    live_lab_gateway_processing_timeout,
+    live_lab_gateway_wait_timeout,
+    live_lab_model_request_timeout,
+)
 from scripts.live_lab.shop_case import (
     _assert_shop_html_output,
     _assert_static_site_check_clean,
@@ -304,6 +309,38 @@ def test_live_lab_config_keeps_tool_rounds_unlimited(tmp_path):
 
     text = session.config_path.read_text(encoding="utf-8")
     assert "max_tool_rounds: 0" in text
+
+
+# LLM: Live Lab must not reuse one model-call timeout as the whole gateway lifecycle budget.
+# 函数用途: 确认真实多轮任务有独立 gateway 等待预算，避免父子模型调用被测试台提前杀掉。
+def test_live_lab_config_separates_model_and_gateway_timeouts(tmp_path):
+    source = tmp_path / "agent_config.yaml"
+    source.write_text("model_backend: echo\n", encoding="utf-8")
+    args = SimpleNamespace(
+        config=str(source),
+        runs_dir=str(tmp_path / "runs"),
+        run_id="timeout-budget",
+        real_llm=False,
+        count=1,
+        timeout=180,
+        max_cycles=3,
+    )
+
+    session = LabSessionManager(args)
+    session.setup()
+
+    model_timeout = live_lab_model_request_timeout(args)
+    gateway_timeout = live_lab_gateway_wait_timeout(args)
+    processing_timeout = live_lab_gateway_processing_timeout(args)
+    text = session.config_path.read_text(encoding="utf-8")
+    assert model_timeout == 180
+    assert gateway_timeout >= model_timeout * 4
+    assert processing_timeout > gateway_timeout
+    assert session.model_request_timeout == model_timeout
+    assert session.gateway_wait_timeout == gateway_timeout
+    assert f"request_timeout: {model_timeout}" in text
+    assert f"gateway_request_timeout: {gateway_timeout}" in text
+    assert f"gateway_processing_timeout_seconds: {processing_timeout}" in text
 
 
 # LLM: Natural E2E validation checks concrete artifact facts instead of trusting the final prose.

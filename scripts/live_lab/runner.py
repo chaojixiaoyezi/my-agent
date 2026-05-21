@@ -257,6 +257,12 @@ class LiveLab:
     def config_path(self) -> Path:
         return self._session.config_path
 
+    # LLM: gateway_wait_timeout is the case-facing total wait budget, distinct from model request timeout.
+    # 函数用途: 给 Live Lab case 暴露统一等待预算，避免 case 直接读 session 私有字段。
+    @property
+    def gateway_wait_timeout(self) -> int:
+        return self._session.gateway_wait_timeout
+
     # LLM: stop_file 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
     # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     @property
@@ -396,6 +402,12 @@ class _LabInterface:
     @property
     def config_path(self) -> Path:
         return self._session.config_path
+
+    # LLM: _LabInterface forwards the same gateway budget used by LiveLab.
+    # 函数用途: 兼容拆分前 case surface，让旧 case 能安全读取总等待预算。
+    @property
+    def gateway_wait_timeout(self) -> int:
+        return self._session.gateway_wait_timeout
 
     # LLM: stop_file 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
     # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。

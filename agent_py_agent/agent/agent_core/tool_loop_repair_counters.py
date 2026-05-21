@@ -18,6 +18,7 @@ class ToolLoopRepairCounters:
     bootstrap_materialization_redirects: int = 0
     local_progress_redirects: int = 0
     delivery_repair_redirects: int = 0
+    exploration_fuse_redirects: int = 0
 
 
 # LLM: _inc_reserved returns a new counters bundle after fake-record repair.
@@ -29,6 +30,7 @@ def _inc_reserved(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
         bootstrap_materialization_redirects=counters.bootstrap_materialization_redirects,
         local_progress_redirects=counters.local_progress_redirects,
         delivery_repair_redirects=counters.delivery_repair_redirects,
+        exploration_fuse_redirects=counters.exploration_fuse_redirects,
     )
 
 
@@ -41,6 +43,7 @@ def _inc_open_session(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounter
         bootstrap_materialization_redirects=counters.bootstrap_materialization_redirects,
         local_progress_redirects=counters.local_progress_redirects,
         delivery_repair_redirects=counters.delivery_repair_redirects,
+        exploration_fuse_redirects=counters.exploration_fuse_redirects,
     )
 
 
@@ -53,6 +56,7 @@ def _inc_local_progress(counters: ToolLoopRepairCounters) -> ToolLoopRepairCount
         bootstrap_materialization_redirects=counters.bootstrap_materialization_redirects,
         local_progress_redirects=counters.local_progress_redirects + 1,
         delivery_repair_redirects=counters.delivery_repair_redirects,
+        exploration_fuse_redirects=counters.exploration_fuse_redirects,
     )
 
 
@@ -65,6 +69,7 @@ def _inc_bootstrap_materialization(counters: ToolLoopRepairCounters) -> ToolLoop
         bootstrap_materialization_redirects=counters.bootstrap_materialization_redirects + 1,
         local_progress_redirects=counters.local_progress_redirects,
         delivery_repair_redirects=counters.delivery_repair_redirects,
+        exploration_fuse_redirects=counters.exploration_fuse_redirects,
     )
 
 
@@ -77,6 +82,20 @@ def _inc_delivery_repair(counters: ToolLoopRepairCounters) -> ToolLoopRepairCoun
         bootstrap_materialization_redirects=counters.bootstrap_materialization_redirects,
         local_progress_redirects=counters.local_progress_redirects,
         delivery_repair_redirects=counters.delivery_repair_redirects + 1,
+        exploration_fuse_redirects=counters.exploration_fuse_redirects,
+    )
+
+
+# LLM: _inc_exploration_fuse returns a new immutable counters bundle after one exploration redirect.
+# 函数用途: 增加探索空转纠偏次数，连续忽略后进入确定性阻断。
+def _inc_exploration_fuse(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
+    return ToolLoopRepairCounters(
+        reserved_record_repairs=counters.reserved_record_repairs,
+        open_write_session_repairs=counters.open_write_session_repairs,
+        bootstrap_materialization_redirects=counters.bootstrap_materialization_redirects,
+        local_progress_redirects=counters.local_progress_redirects,
+        delivery_repair_redirects=counters.delivery_repair_redirects,
+        exploration_fuse_redirects=counters.exploration_fuse_redirects + 1,
     )
 
 
@@ -84,6 +103,7 @@ __all__ = [
     "ToolLoopRepairCounters",
     "_inc_bootstrap_materialization",
     "_inc_delivery_repair",
+    "_inc_exploration_fuse",
     "_inc_local_progress",
     "_inc_open_session",
     "_inc_reserved",

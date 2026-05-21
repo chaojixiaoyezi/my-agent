@@ -127,6 +127,10 @@ def _assert_resume_contract(command: list[str]) -> None:
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
     assert contract["recovery"]["schema_version"] == "main-agent-task-recovery.v1"
     assert contract["recovery"]["recommended_action"] == "repair_then_resume_same_case"
+    marker = contract_path.parents[2] / "workspace/.agent_delivery/recovery_attempt.json"
+    marker_payload = json.loads(marker.read_text(encoding="utf-8"))
+    assert marker_payload["schema_version"] == "delivery-recovery-attempt.v1"
+    assert marker_payload["packet_ref"].endswith("recovery_packet.json")
 
 
 def _assert_resume_command_still_uses_suite_workspace(command: list[str], workspace: Path) -> None:

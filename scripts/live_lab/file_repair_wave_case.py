@@ -51,16 +51,18 @@ def case_natural_file_repair_wave(lab) -> None:
     lab.log(f"seed_failed_run_id={seed.run_id}")
     lab.run_command(lab.agent_command("gateway", "start", "--force"), timeout=90)
     try:
+        # LLM: Repair-wave prompts use gateway wait budget because setup, dispatch, repair, and closeout are one ask.
+        # 函数用途: 文件修复真实 case 等待完整 gateway 链路，不把单次模型预算当整轮预算。
         response = lab.run_command(
             lab.agent_command(
                 "gateway",
                 "ask",
                 prompt,
                 "--timeout",
-                str(lab.args.timeout),
+                str(lab.gateway_wait_timeout),
                 "--json",
             ),
-            timeout=lab.args.timeout + 240,
+            timeout=lab.gateway_wait_timeout + 240,
         )
         response_path = lab.responses_dir / "natural_file_repair_wave.stdout.json"
         response_path.write_text(response.stdout, encoding="utf-8")

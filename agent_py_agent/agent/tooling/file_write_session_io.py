@@ -156,6 +156,7 @@ def append_envelope(
             "action": "finish",
             "session_id": manifest["session_id"],
         },
+        "abort_tool_call": _abort_tool_call(manifest["session_id"]),
         "staging_contract": _staging_contract(),
     }
 
@@ -246,6 +247,17 @@ def _staging_contract() -> dict[str, Any]:
         "commit_action": "finish",
         "preview_materialized_after_append": True,
         "temp_path_materialized_on_finish": False,
+    }
+
+
+# LLM: _abort_tool_call makes discard intent explicit so recovery cannot accidentally drop staged chunks.
+# 函数用途: 生成带 discard_chunks=true 的结构化 abort 动作，供模型放弃坏 session 时直接复用。
+def _abort_tool_call(session_id: str) -> dict[str, Any]:
+    return {
+        "tool": "file_write_session",
+        "action": "abort",
+        "session_id": session_id,
+        "discard_chunks": True,
     }
 
 

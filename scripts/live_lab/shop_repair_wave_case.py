@@ -45,16 +45,18 @@ def case_natural_shop_repair_wave(lab) -> None:
     lab.log(f"seed_failed_run_id={seed.run_id}")
     lab.run_command(lab.agent_command("gateway", "start", "--force"), timeout=90)
     try:
+        # LLM: Shop repair-wave includes stale state discovery and repair dispatch inside one gateway ask.
+        # 函数用途: 购物修复真实 case 使用总等待预算，覆盖发现旧失败、派工、修复和验收。
         response = lab.run_command(
             lab.agent_command(
                 "gateway",
                 "ask",
                 prompt,
                 "--timeout",
-                str(lab.args.timeout),
+                str(lab.gateway_wait_timeout),
                 "--json",
             ),
-            timeout=lab.args.timeout + 240,
+            timeout=lab.gateway_wait_timeout + 240,
         )
         response_path = lab.responses_dir / "natural_shop_repair_wave.stdout.json"
         response_path.write_text(response.stdout, encoding="utf-8")

@@ -24,6 +24,7 @@ from agent_py_agent.tests.support.main_agent_delivery_closeout_fixtures import (
     NoProgressDeliveryBackend,
     OpenWriteSessionDeliveryBackend,
     PendingTargetsDeliveryBackend,
+    RecoveryAttemptRepairBackend,
     WrongToolDuringOpenSessionBackend,
     delivery_contract,
     delivery_contract_prompt,
@@ -108,10 +109,15 @@ def test_tool_loop_does_not_close_out_when_delivery_contract_fails():
         )
         codes = _closeout_finding_codes(workspace)
 
-        assert backend.calls == 2
-        assert result.response == "已收到结构化修复反馈。"
+        assert backend.calls == 4
+        assert "[DELIVERY_REQUIRED_REPAIR_BLOCKED]" in result.response
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
         assert {"HTML_INCOMPLETE_DOCUMENT", "HTML_EXTERNAL_RESOURCE_REF"} <= set(codes)
+        actions = _closeout_report(workspace)["delivery_progress"]["recovery_actions"]
+        repair = next(item for item in actions if item["code"] == "ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED")
+        assert repair["recommended_action"] == "repair_artifact_against_findings"
+        assert "write_file" in repair["write_tools"]
+        assert "HTML_INCOMPLETE_DOCUMENT" in repair["finding_codes"]
 
 
 # LLM: Incomplete contracted artifacts must not trigger delivery completion.
@@ -238,12 +244,45 @@ def test_tool_loop_redirects_inspection_only_calls_during_required_delivery_repa
         result = _agent(workspace, backend, max_tool_rounds=6).run(
             "整理 GitHub 周升星项目并生成表格。",
             params=RunParams(delivery_contract=xlsx_delivery_contract(), save=False),
-            allowed_tools=["write_file", "read_file", "data_to_workbook"],
+            allowed_tools=["write_file", "read_file", "write_structured_json", "data_to_workbook"],
         )
 
         assert backend.calls == 4
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert _closeout_report(workspace)["ok"] is True
+        assert (workspace / "outputs/github_star_growth/github_star_growth.xlsx").exists()
+
+
+# LLM: Recovery attempt identity should reset stale no-progress counters before staged repair runs.
+# 函数用途: 覆盖真实续跑中旧 local-progress 计数继承到新 attempt，导致阶段修复还没开始就被阻断的问题。
+def test_recovery_attempt_uses_repair_contract_before_stale_local_progress_guard():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        _write_stale_xlsx_closeout(workspace)
+        _write_stale_local_progress_state(workspace)
+        backend = RecoveryAttemptRepairBackend()
+        contract = xlsx_delivery_contract()
+        contract["recovery"] = {
+            "schema_version": "main-agent-real-task-recovery.v1",
+            "case_id": "github_weekly_star_growth_xlsx",
+            "status": "FAILED",
+            "recommended_action": "repair_then_resume_same_case",
+            "reason_codes": ["exit_code=2", "artifact_acceptance_failed=2"],
+            "packet_ref": "main_agent_task_execution/tasks/github_weekly_star_growth_xlsx/recovery_packet.json",
+        }
+
+        result = _agent(workspace, backend, max_tool_rounds=6).run(
+            "继续恢复上一轮失败的表格任务。",
+            params=RunParams(delivery_contract=contract, save=False),
+            allowed_tools=["read_file", "write_file", "data_to_workbook"],
+        )
+
+        state = json.loads((workspace / ".agent_delivery/local_progress_guard.json").read_text(encoding="utf-8"))
+        assert backend.calls == 3
+        assert "[LOCAL_PROGRESS_GUARD_BLOCKED]" not in result.response
+        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
+        assert state["exploration_rounds_without_local_progress"] == 0
+        assert state["recovery_signature"]
         assert (workspace / "outputs/github_star_growth/github_star_growth.xlsx").exists()
 
 
@@ -287,3 +326,49 @@ def _closeout_report(workspace: Path) -> dict[str, object]:
 def _closeout_finding_codes(workspace: Path) -> list[str]:
     report = _closeout_report(workspace)
     return [item["code"] for item in report["artifacts"][0]["acceptance_report"]["findings"]]
+
+
+# LLM: _write_stale_xlsx_closeout creates machine recovery facts without depending on prompt prose.
+# 函数用途: 构造“缺 workbook、source_data 为空”的通用阶段修复状态。
+def _write_stale_xlsx_closeout(workspace: Path) -> None:
+    report = {
+        "ok": False,
+        "delivery_progress": {
+            "failure_fingerprint": "failed-xlsx",
+            "work_progress_fingerprint": "empty-source",
+            "pending_materialization_targets": [
+                {"workspace_relative_path": "outputs/github_star_growth/github_star_growth.xlsx", "exists": False}
+            ],
+            "recovery_actions": [
+                {
+                    "category": "artifact",
+                    "checkpoint_ref": "outputs/github_star_growth/source_data.json",
+                    "code": "STAGED_JSON_NO_ROWS",
+                    "recommended_action": "write_non_empty_structured_rows",
+                    "required_columns": ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"],
+                    "retryable": True,
+                }
+            ],
+            "unchanged_failure_count": 1,
+            "no_progress_block_threshold": 5,
+        },
+    }
+    path = workspace / ".agent_delivery/closeout.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+
+
+# LLM: _write_stale_local_progress_state simulates a previous failed attempt's accumulated exploration debt.
+# 函数用途: 构造续跑前已经到达阻断阈值的 local-progress 状态文件。
+def _write_stale_local_progress_state(workspace: Path) -> None:
+    (workspace / ".agent_delivery/local_progress_guard.json").write_text(
+        json.dumps(
+            {
+                "failure_fingerprint": "failed-xlsx",
+                "work_progress_fingerprint": "empty-source",
+                "exploration_rounds_without_local_progress": 7,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )

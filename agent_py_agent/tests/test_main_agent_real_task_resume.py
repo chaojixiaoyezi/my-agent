@@ -145,6 +145,10 @@ def _assert_recovery_contract(command: list[str]) -> None:
     assert contract["recovery"]["case_id"] == "furniture_homepage_html"
     assert contract["recovery"]["reason_codes"] == ["timeout", "artifact_acceptance_failed=1"]
     assert "old failed stdout evidence" not in json.dumps(contract, ensure_ascii=False)
+    marker = Path(contract_path).parents[2] / "workspace/.agent_delivery/recovery_attempt.json"
+    marker_payload = json.loads(marker.read_text(encoding="utf-8"))
+    assert marker_payload["schema_version"] == "delivery-recovery-attempt.v1"
+    assert marker_payload["packet_ref"].endswith("recovery_packet.json")
 
 
 # LLM: _write_valid_furniture_artifact creates a realistic artifact for the strict validator.

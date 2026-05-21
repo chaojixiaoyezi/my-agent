@@ -105,10 +105,17 @@ class TestFileWriteSessionTool:
             "session_id": session_id,
             "chunk_index": 2,
         }
+        assert append_1.result_envelope["abort_tool_call"] == {
+            "tool": "file_write_session",
+            "action": "abort",
+            "session_id": session_id,
+            "discard_chunks": True,
+        }
         sessions = open_file_write_sessions(workspace, limit=5)
         assert sessions[0]["preview_path"] == str(preview_path)
         assert sessions[0]["preview_materialized"] is True
         assert sessions[0]["finish_tool_call"] == append_1.result_envelope["finish_tool_call"]
+        assert sessions[0]["abort_tool_call"] == append_1.result_envelope["abort_tool_call"]
         assert append_1.result_envelope["staging_contract"]["fact_source"] == "preview_and_chunks"
         assert append_1.result_envelope["staging_contract"]["preview_materialized_after_append"] is True
 
@@ -247,6 +254,12 @@ class TestFileWriteSessionToolStructuredValidation:
         assert abort.result_envelope["code"] == "SESSION_HAS_CHUNKS"
         assert abort.result_envelope["session_id"] == session_id
         assert abort.result_envelope["next_chunk_index"] == 1
+        assert abort.result_envelope["abort_tool_call"] == {
+            "tool": "file_write_session",
+            "action": "abort",
+            "session_id": session_id,
+            "discard_chunks": True,
+        }
 
     # LLM: The session tool accepts fuzzy model chunk sizing by splitting payloads into bounded chunks.
     # 函数用途: 验证超过单 chunk 上限时自动拆分，避免真实模型因为块大小估算不准而卡住。

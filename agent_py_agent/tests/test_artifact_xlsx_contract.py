@@ -4,6 +4,7 @@ from pathlib import Path
 
 from agent_py_agent.agent.contracts.artifact_acceptance import validate_artifact
 from agent_py_agent.agent.contracts.artifact_acceptance_models import ArtifactAcceptanceRequest
+from agent_py_agent.agent.contracts.staged_checkpoint_acceptance import staged_checkpoint_findings
 from agent_py_agent.agent.tooling.spreadsheet_builder import DataWorkbookTool
 
 
@@ -106,4 +107,39 @@ def test_xlsx_acceptance_rejects_unsourced_staged_source_json(tmp_path: Path) ->
 
     codes = {finding.code for finding in report.findings}
     assert not report.ok
+    assert "EVIDENCE_REQUIRED_FIELD_MISSING" in codes
+
+
+# LLM: staged checkpoint acceptance must use the same sheet/evidence contract as final artifact checks.
+# 函数用途: 验证真实任务 acceptance 的 runtime_findings 不会丢掉 staged source 的结构和证据问题。
+def test_staged_checkpoint_findings_use_validation_contract_shape_and_evidence(tmp_path: Path) -> None:
+    source = tmp_path / "outputs/github_star_growth/source_data.json"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        '{"sheets":[{"name":"汇总","rows":[{"项目名":"demo","地址":"https://example.com","上升 star 数":"估算"}]}]}',
+        encoding="utf-8",
+    )
+
+    findings = staged_checkpoint_findings(
+        [
+            {
+                "preferred_path": "outputs/github_star_growth/github_star_growth.xlsx",
+                "validation_contract": {
+                    "required_sheets_min": 2,
+                    "required_columns": ["项目名", "地址", "上升 star 数"],
+                    "staging_contract": {
+                        "checkpoint_refs": [
+                            "outputs/github_star_growth/source_data.json",
+                            "outputs/github_star_growth/github_star_growth.xlsx",
+                        ]
+                    },
+                    "evidence_contract": {"required_fields": ["项目名", "地址", "上升 star 数"], "require_verified": True},
+                },
+            }
+        ],
+        tmp_path,
+    )
+
+    codes = {finding["code"] for finding in findings}
+    assert "STAGED_JSON_TOO_FEW_SHEETS" in codes
     assert "EVIDENCE_REQUIRED_FIELD_MISSING" in codes

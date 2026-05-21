@@ -164,6 +164,9 @@ def _research_document_translation_case() -> MainAgentRealTaskCase:
             "requires_source_index": True,
             "staging_contract": {
                 "strategy": "source_index_then_translation_draft_then_pdf",
+                "builder_tool": "markdown_to_pdf",
+                "source_markdown_ref": "outputs/research_documents/research_documents_zh.md",
+                "pdf_ref": "outputs/research_documents/research_documents_zh.pdf",
                 "checkpoint_shape_hints": {
                     "outputs/research_documents/source_index.json": '[{"title":"...","authors":["..."],"date":"...","url":"...","abstract":"...","translated":false}]'
                 },
@@ -179,8 +182,8 @@ def _research_document_translation_case() -> MainAgentRealTaskCase:
         case_id="research_documents_translation_pdf",
         title="研究文档中文翻译 PDF",
         user_prompt=(
-            "找到指定主题和时间范围内的研究文档并翻译成中文，正文翻译准确，专业术语可以保留英文。"
-            "最终成品需要是 PDF，排版要正确、清楚、好看，并附来源清单。主题和范围由调用方输入。"
+            "找到 2025 年之后 DeepSeek 公开发布或官方关联的研究论文，翻译成中文，正文翻译准确，专业术语可以保留英文。"
+            "最终成品需要是 PDF，排版要正确、清楚、好看，并附来源清单。"
         ),
         artifacts=(artifact,),
         acceptance_checks=(

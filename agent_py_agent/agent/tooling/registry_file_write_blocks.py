@@ -17,6 +17,7 @@ _WRITE_FILE_BLOCK_RE = re.compile(
     r"\[WRITE_FILE_RAW(?P<attrs>[^\]]*)\](?P<content>.*?)\[/WRITE_FILE_RAW\]",
     re.DOTALL,
 )
+_RAW_BLOCK_MARKERS = ("FILE_WRITE_SESSION_APPEND", "WRITE_FILE_RAW")
 _ATTR_RE = re.compile(
     r"(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*=\s*"
     r"(?:\"(?P<double>(?:\\.|[^\"\\])*)\"|'(?P<single>(?:\\.|[^'\\])*)'|(?P<bare>[^\s\]]+))"
@@ -49,6 +50,16 @@ def parse_write_file_raw_blocks(text: str) -> list[tuple[int, dict[str, Any]]]:
             continue
         calls.append((match.start(), _write_file_payload(attrs, match.group("content"))))
     return calls
+
+
+# LLM: malformed_file_write_raw_block_calls prevents broken write markers from becoming final prose.
+# 函数用途: 模型明显开始写文件 raw block 但没按机器协议闭合时，生成 parse-error 触发下一轮修复。
+def malformed_file_write_raw_block_calls(text: str) -> list[tuple[int, dict[str, Any]]]:
+    valid_ranges = _valid_raw_block_ranges(text)
+    calls: list[tuple[int, dict[str, Any]]] = []
+    for marker in _RAW_BLOCK_MARKERS:
+        calls.extend(_malformed_raw_marker_calls(text, marker, valid_ranges))
+    return sorted(calls, key=lambda item: item[0])
 
 
 # LLM: _parse_attrs keeps the block header as a small structured map.
@@ -129,4 +140,78 @@ def _block_content(content: str) -> str:
     return content
 
 
-__all__ = ["parse_file_write_session_raw_blocks", "parse_write_file_raw_blocks"]
+# LLM: _valid_raw_block_ranges lets malformed detection ignore blocks handled by the normal parsers.
+# 函数用途: 标记已经完整闭合的 raw block 区间，避免一个坏属性块被重复报两次错误。
+def _valid_raw_block_ranges(text: str) -> list[tuple[int, int]]:
+    ranges = [(match.start(), match.end()) for match in _APPEND_BLOCK_RE.finditer(text)]
+    ranges.extend((match.start(), match.end()) for match in _WRITE_FILE_BLOCK_RE.finditer(text))
+    return ranges
+
+
+# LLM: _position_in_ranges keeps scanner logic independent from regex match internals.
+# 函数用途: 判断某个 marker 位置是否已经属于完整 raw block。
+def _position_in_ranges(pos: int, ranges: list[tuple[int, int]]) -> bool:
+    return any(start <= pos < end for start, end in ranges)
+
+
+# LLM: _malformed_raw_marker_calls handles one marker type so the public scanner stays flat.
+# 函数用途: 返回某种 raw 写文件 marker 的坏协议 parse-error 列表。
+def _malformed_raw_marker_calls(
+    text: str,
+    marker: str,
+    valid_ranges: list[tuple[int, int]],
+) -> list[tuple[int, dict[str, Any]]]:
+    opener = f"[{marker}"
+    return [
+        (pos, parse_error_payload(_malformed_raw_block_error(marker), _raw_block_sample(text, pos)))
+        for pos in _raw_marker_positions(text, opener)
+        if not _position_in_ranges(pos, valid_ranges) and _looks_like_raw_block_opener(text, pos, opener)
+    ]
+
+
+# LLM: _raw_marker_positions is a tiny literal scanner for machine marker starts.
+# 函数用途: 找到某个 raw marker 的所有出现位置；是否有效由调用方继续判断。
+def _raw_marker_positions(text: str, opener: str) -> list[int]:
+    positions: list[int] = []
+    cursor = 0
+    while True:
+        pos = text.find(opener, cursor)
+        if pos == -1:
+            return positions
+        positions.append(pos)
+        cursor = pos + len(opener)
+
+
+# LLM: _looks_like_raw_block_opener mirrors tool marker filtering without reading prose as facts.
+# 函数用途: 只把行首 raw 写文件协议形状当机器协议，避免文档里的普通说明误触发。
+def _looks_like_raw_block_opener(text: str, pos: int, opener: str) -> bool:
+    line_start = text.rfind("\n", 0, pos) + 1
+    if text[line_start:pos].strip():
+        return False
+    next_char = text[pos + len(opener) : pos + len(opener) + 1]
+    return not next_char or next_char.isspace() or next_char in {"]", ":"}
+
+
+# LLM: _malformed_raw_block_error returns stable protocol diagnostics for model recovery.
+# 函数用途: 用固定错误码式描述告诉下一轮这不是最终答案，而是坏机器块。
+def _malformed_raw_block_error(marker: str) -> str:
+    return f"{marker} 原文块格式错误，缺少完整结构化 header 或结束标记 [/{marker}]"
+
+
+# LLM: _raw_block_sample bounds the broken protocol sample in parse diagnostics.
+# 函数用途: 提取坏 raw block 片段，优先在其它机器结束标记处截断，避免污染下一轮上下文。
+def _raw_block_sample(text: str, pos: int) -> str:
+    candidates = [
+        idx + len(marker)
+        for marker in ("[/FILE_WRITE_SESSION_APPEND]", "[/WRITE_FILE_RAW]", "[/TOOL_CALL]", "[/SUBAGENT_CALL]")
+        if (idx := text.find(marker, pos)) != -1
+    ]
+    end = min(candidates) if candidates else len(text)
+    return text[pos:end].strip()
+
+
+__all__ = [
+    "malformed_file_write_raw_block_calls",
+    "parse_file_write_session_raw_blocks",
+    "parse_write_file_raw_blocks",
+]

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ..backend import ModelResponse
 from ._runtime_params import ToolLoopExecuteParams
+from .tool_shell_command_classifier import command_has_local_mutation
 
 _STATE_DIR = ".agent_delivery"
 _STATE_FILE = "bootstrap_materialization_guard.json"
@@ -15,11 +16,15 @@ _EXPLORATION_BLOCK_THRESHOLD = 6
 _REPEATED_EXPLORATION_BLOCK_THRESHOLD = 4
 _BOOTSTRAP_PRODUCTIVE_TOOLS = {
     "append_file",
+    "data_to_workbook",
     "file_write_session",
+    "markdown_to_pdf",
     "replace_in_file",
     "run_command",
+    "write_structured_json",
     "write_file",
 }
+_BOOTSTRAP_EVIDENCE_TOOLS = {"fetch_url", "http_request", "read_artifact", "search"}
 _RUN_COMMAND_INSPECTION_PREFIXES = ("find ", "ls", "pwd")
 
 
@@ -58,6 +63,8 @@ def bootstrap_materialization_block_response(agent: object, params: ToolLoopExec
     return ModelResponse(
         text="[BOOTSTRAP_MATERIALIZATION_BLOCKED] bootstrap 目标一个都还没物化，且模型连续没有执行创建/写入动作，已停止本轮以避免继续空转。",
         backend=str(getattr(getattr(agent, "backend", None), "name", "") or ""),
+        runtime_status="blocked",
+        runtime_reason="BOOTSTRAP_MATERIALIZATION",
     )
 
 
@@ -108,6 +115,12 @@ def has_required_bootstrap_materialization(
 # 函数用途: 只有明显会创建目录/文件的动作才算推进 bootstrap；纯检查和抓取不算。
 def is_bootstrap_materialization_productive_call(calls: list[dict[str, object]]) -> bool:
     return any(_call_is_bootstrap_productive(call) for call in calls)
+
+
+# LLM: evidence-gathering calls may be needed before non-empty checkpoint materialization.
+# 函数用途: 允许 bootstrap 阶段先获取真实资料，再用 writer 写非空 checkpoint；重复无进展仍由计数熔断。
+def is_bootstrap_materialization_evidence_call(calls: list[dict[str, object]]) -> bool:
+    return bool(calls) and all(_call_is_bootstrap_evidence(call) for call in calls)
 
 
 # LLM: _bootstrap_payload extracts missing startup targets from the machine delivery contract.
@@ -262,7 +275,7 @@ def _artifact_items(contract: dict[str, object]) -> list[dict[str, object]]:
 # 函数用途: bootstrap 阶段只把明确创建目录/文件的工具调用视为推进动作。
 def _call_is_bootstrap_productive(call: dict[str, object]) -> bool:
     tool = str(call.get("tool") or "").strip()
-    if tool in {"append_file", "file_write_session", "replace_in_file", "write_file"}:
+    if tool in _BOOTSTRAP_PRODUCTIVE_TOOLS - {"run_command"}:
         return True
     if tool != "run_command":
         return False
@@ -273,6 +286,8 @@ def _call_is_bootstrap_productive(call: dict[str, object]) -> bool:
             command = str(shell.get("command") or "").strip().lower()
     if not command:
         return False
+    if command_has_local_mutation(command):
+        return True
     return not any(command.startswith(prefix) for prefix in _RUN_COMMAND_INSPECTION_PREFIXES)
 
 
@@ -296,6 +311,16 @@ def _call_is_bootstrap_exploration_only(call: dict[str, object]) -> bool:
     return any(command.startswith(prefix) for prefix in _RUN_COMMAND_INSPECTION_PREFIXES) or command.startswith(
         ("curl ", "rg ", "cat ", "wget ")
     )
+
+
+def _call_is_bootstrap_evidence(call: dict[str, object]) -> bool:
+    tool = str(call.get("tool") or "").strip()
+    if tool in _BOOTSTRAP_EVIDENCE_TOOLS:
+        return True
+    if tool != "run_command":
+        return False
+    command = _call_command(call)
+    return command.startswith(("curl ", "wget "))
 
 
 # LLM: _calls_fingerprint gives repeated startup exploration a stable machine signature across turns.

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .models import BaseTool, ToolExecutionResult, ToolSpec
+from .web_html_preview import format_html_response, is_html_response
 
 _MAX_URL_CHARS = 4096
 _MAX_BODY_CHARS = 1_000_000
@@ -92,6 +93,9 @@ def _normalize_method(value: Any) -> str:
 # LLM: _format_response 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
 # 函数用途: 把 format_response 转成人或模型可读的展示文本。
 def _format_response(parts: _ResponseParts, max_chars: int) -> ToolExecutionResult:
+    if is_html_response(parts.headers):
+        output = format_html_response(status=parts.status, headers=parts.headers, body=parts.body, max_chars=max_chars)
+        return ToolExecutionResult(parts.tool, True, output)
     result = (
         f"status={parts.status}\n"
         f"content_type={parts.headers.get('Content-Type', '')}\n\n"

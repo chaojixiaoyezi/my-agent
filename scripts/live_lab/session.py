@@ -15,6 +15,39 @@ import uuid
 from pathlib import Path
 
 
+# LLM: The per-model timeout is one provider request budget, not the whole user task lifecycle.
+# 函数用途: 从 CLI timeout 派生单次模型调用预算，并保持最小安全值。
+def live_lab_model_request_timeout(args: argparse.Namespace) -> int:
+    """Return the per-model-call timeout used by the isolated Live Lab config."""
+
+    return max(30, int(getattr(args, "timeout", 300) or 300))
+
+
+# LLM: Gateway ask can contain root, tool-result, child runner, and final-response model calls.
+# 函数用途: 根据单次模型预算和 runner 周期估算完整 gateway ask 的等待上限。
+def live_lab_gateway_wait_timeout(args: argparse.Namespace) -> int:
+    """Return the total wait budget for a gateway request.
+
+    A single user request can include several model calls: the root turn,
+    tool-result follow-up turns, child runner turns, and a final response. Keep
+    this budget separate from the per-call model timeout so the harness does not
+    kill valid multi-step work before the model request budget has even elapsed.
+    """
+
+    per_call = live_lab_model_request_timeout(args)
+    max_cycles = max(1, int(getattr(args, "max_cycles", 1) or 1))
+    estimated_model_calls = max(4, max_cycles + 2)
+    return per_call * estimated_model_calls + 120
+
+
+# LLM: Gateway processing timeout must be wider than the client wait budget.
+# 函数用途: 给隔离 gateway 后台处理留出收尾空间，避免客户端刚等完后台就被判 stale。
+def live_lab_gateway_processing_timeout(args: argparse.Namespace) -> int:
+    """Return the stale-processing timeout for the isolated gateway."""
+
+    return max(live_lab_gateway_wait_timeout(args) + 120, 180)
+
+
 # LLM: LabSessionManager 是Live Lab 验收的数据契约；字段名会被调用方和测试读取。
 # 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 class LabSessionManager:
@@ -54,6 +87,18 @@ class LabSessionManager:
         self.write_config()
         self.prepare_runtime_dirs()
         self.created = True
+
+    @property
+    def model_request_timeout(self) -> int:
+        """Per-model-call timeout configured for this isolated run."""
+
+        return live_lab_model_request_timeout(self.args)
+
+    @property
+    def gateway_wait_timeout(self) -> int:
+        """Total wait budget for one gateway ask in this isolated run."""
+
+        return live_lab_gateway_wait_timeout(self.args)
 
     # LLM: write_fixture 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
     # 函数用途: 把报告、摘要或状态写入磁盘，保持输出路径和 JSON 字段稳定。
@@ -97,6 +142,9 @@ class LabSessionManager:
         # LLM: Live Lab must isolate the owner home too, or global daily memory can rewrite the next case.
         isolated_home = str((self.fixture_root / ".my_agent" / "home").resolve()).replace("\\", "/")
         backend_override = "" if self.args.real_llm else '\nmodel_backend: "echo"\n'
+        request_timeout = live_lab_model_request_timeout(self.args)
+        gateway_timeout = live_lab_gateway_wait_timeout(self.args)
+        processing_timeout = live_lab_gateway_processing_timeout(self.args)
         overrides = f"""
 
 # live-agent-lab isolation overrides
@@ -111,10 +159,10 @@ subagent_workspace: ".my_agent/subagents"
 gateway_workspace: ".my_agent/gateway"
 adapter_workspace: ".my_agent/adapters/file"
 max_subagents: {max(self.args.count, 1)}
-gateway_request_timeout: {int(self.args.timeout)}
+gateway_request_timeout: {gateway_timeout}
 gateway_request_poll_interval: 1
 gateway_request_workers: 1
-gateway_processing_timeout_seconds: {max(int(self.args.timeout) + 120, 180)}
+gateway_processing_timeout_seconds: {processing_timeout}
 gateway_request_max_attempts: 2
 daemon_planner: false
 daemon_apply: false
@@ -124,7 +172,7 @@ daemon_interval: 1
 runner_failure_policy: "auto"
 # live lab keeps runner tool rounds unlimited unless a specific stress case overrides it
 max_tool_rounds: 0
-request_timeout: {max(30, int(self.args.timeout))}
+request_timeout: {request_timeout}
 {backend_override}"""
         self.config_path.write_text(base + overrides, encoding="utf-8")
 

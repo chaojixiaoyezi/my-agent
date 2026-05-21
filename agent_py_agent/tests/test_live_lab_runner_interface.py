@@ -17,6 +17,7 @@ def test_lab_interface_exposes_case_workspace_dirs(tmp_path):
         transcript_path=tmp_path / "run" / "TRANSCRIPT.md",
         summary_path=tmp_path / "run" / "live_lab_summary.json",
         stop_file=tmp_path / "run" / "STOP",
+        gateway_wait_timeout=960,
     )
     runner = SimpleNamespace(
         _session=session,
@@ -30,3 +31,4 @@ def test_lab_interface_exposes_case_workspace_dirs(tmp_path):
     assert lab.prompts_dir == session.prompts_dir
     assert lab.responses_dir == session.responses_dir
     assert lab.summary_path == session.summary_path
+    assert lab.gateway_wait_timeout == 960

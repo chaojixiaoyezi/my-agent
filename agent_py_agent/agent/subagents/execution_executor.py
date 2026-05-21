@@ -5,6 +5,7 @@ from __future__ import annotations
 
 """Bounded executor for real parent-acceptance validation items."""
 
+import importlib
 import subprocess
 import time
 from pathlib import Path
@@ -75,6 +76,8 @@ class TestExecutor:
         if method == "static_site_check":
             # LLM: Static-site validation is read-only and workspace-bound like file/content checks.
             return run_static_site_check(test, self.workspace_root)
+        if method == "artifact_integrity":
+            return self._check_artifact_integrity(test)
         return TestExecutionRecord(
             test_name=_test_name(test),
             validation_method=method,
@@ -172,6 +175,27 @@ class TestExecutor:
             )
         )
 
+    # LLM: _check_artifact_integrity runs the shared bounded artifact gate as a parent-acceptance test item.
+    # 函数用途: 执行 artifact_integrity 验收项，检查 workspace 内产物结构，不读取或信任模型总结文案。
+    def _check_artifact_integrity(self, test: dict[str, Any]) -> TestExecutionRecord:
+        path, error = self._resolve_test_path(test.get("file_path") or test.get("path"))
+        if error:
+            return _file_record(test, "artifact_integrity", error=error, path=path)
+        artifact_integrity = importlib.import_module("agent_py_agent.agent.tooling.artifact_integrity")
+        decision = artifact_integrity.check_artifact_integrity(
+            artifact_integrity.ArtifactIntegrityCheckRequest(path=path, require_complete=True)
+        )
+        result = _artifact_integrity_result(path, decision)
+        return TestExecutionRecord(
+            test_name=_test_name(test),
+            executed=True,
+            exit_code=0 if decision.ok else 1,
+            executed_at=_utc_now_iso(),
+            error="" if decision.ok else "产物完整性检查失败",
+            validation_method="artifact_integrity",
+            validation_result=result,
+        )
+
     # LLM: _resolve_test_path enforces that file validations cannot escape the executor workspace.
     # 函数用途: 把测试项里的相对路径解析为 workspace 内绝对路径；越界路径会返回错误。
     def _resolve_test_path(self, value: object) -> tuple[Path, str]:
@@ -209,6 +233,26 @@ def _validation_method(test: dict[str, Any]) -> str:
     if method in {"pytest", "unittest"} and str(test.get("command") or "").strip():
         return "command"
     return method
+
+
+def _artifact_integrity_result(path: Path, decision: Any) -> dict[str, Any]:
+    return {
+        "ok": decision.ok,
+        "path": str(path),
+        "kind": decision.kind,
+        "blocker_codes": decision.blocker_codes,
+        "warning_codes": decision.warning_codes,
+        "issues": [
+            {
+                "code": issue.code,
+                "message": issue.message,
+                "severity": issue.severity,
+                "count": issue.count,
+                "examples": list(issue.examples),
+            }
+            for issue in decision.issues
+        ],
+    }
 
 
 # LLM: _content_pattern accepts newer exact-content field names while preserving legacy content_pattern.

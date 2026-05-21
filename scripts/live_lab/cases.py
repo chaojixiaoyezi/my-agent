@@ -163,17 +163,19 @@ def case_gateway_ask(lab) -> None:
     lab.record_prompt("gateway_ask", prompt)
     lab.run_command(lab.agent_command("gateway", "start", "--force"), timeout=90)
     try:
+        # LLM: Gateway wait budget covers multi-turn ask orchestration; request_timeout remains per model call.
+        # 函数用途: 真实 gateway case 使用总等待预算，避免多工具轮任务被测试台提前杀掉。
         response = lab.run_command(
             lab.agent_command(
                 "gateway",
                 "ask",
                 prompt,
                 "--timeout",
-                str(lab.args.timeout),
+                str(lab.gateway_wait_timeout),
                 "--no-save",
                 "--json",
             ),
-            timeout=lab.args.timeout + 60,
+            timeout=lab.gateway_wait_timeout + 60,
         )
         response_path = lab.responses_dir / "gateway_ask.stdout.json"
         response_path.write_text(response.stdout, encoding="utf-8")
@@ -239,16 +241,18 @@ def case_natural_html_subagent(lab) -> None:
     lab.record_prompt("natural_html_subagent", prompt)
     lab.run_command(lab.agent_command("gateway", "start", "--force"), timeout=90)
     try:
+        # LLM: Natural HTML case may span several model/tool turns, so the harness waits on gateway budget.
+        # 函数用途: 让普通中文网页任务按 gateway 总预算等待，不把单次模型超时误当整条链路超时。
         response = lab.run_command(
             lab.agent_command(
                 "gateway",
                 "ask",
                 prompt,
                 "--timeout",
-                str(lab.args.timeout),
+                str(lab.gateway_wait_timeout),
                 "--json",
             ),
-            timeout=lab.args.timeout + 120,
+            timeout=lab.gateway_wait_timeout + 120,
         )
         response_path = lab.responses_dir / "natural_html_subagent.stdout.json"
         response_path.write_text(response.stdout, encoding="utf-8")

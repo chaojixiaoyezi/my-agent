@@ -1,5 +1,11 @@
 # Live Lab：开发推进记录
 
+## 2026-05-21 gateway timeout budget split
+
+- Live Lab 把 `--timeout` 明确为单次模型请求/场景步骤基准；`session.py` 现在派生 `model_request_timeout`、`gateway_wait_timeout` 和 `gateway_processing_timeout` 三个预算。
+- `gateway ask`、家具页、购物站、file/markdown/shop repair-wave case 都改为使用 `lab.gateway_wait_timeout` 等完整 gateway 链路，避免真实多工具轮任务被测试台按单次模型超时提前杀掉。
+- 隔离配置仍把 `request_timeout` 写成单次模型调用预算；gateway request/processing timeout 是更宽的总链路预算，便于后续真实 E2E 复现慢模型和多轮工具场景。
+
 ## 已完成
 
 - `scripts/live_agent_lab.py` 已作为 Live Lab 薄入口。

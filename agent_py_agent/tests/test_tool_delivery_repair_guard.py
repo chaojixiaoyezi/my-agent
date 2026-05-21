@@ -113,6 +113,159 @@ def test_delivery_repair_guard_requires_write_action_after_repeated_no_progress(
         )
         is True
     )
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "write_structured_json", "path": "outputs/github_star_growth/source_data.json", "rows": [{"项目名": "demo"}]}],
+        )
+        is True
+    )
+
+
+# LLM: writer_tool is an executable machine contract for structured checkpoints, not just a hint.
+# 函数用途: 验证已指定 write_structured_json 的阶段修复不能用 write_file 绕过结构化校验。
+def test_delivery_repair_guard_requires_declared_writer_tool_for_structured_checkpoint(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "recovery_actions": [
+                    {
+                        "code": "STAGED_JSON_TOO_FEW_SHEETS",
+                        "recommended_action": "repair_structured_checkpoint_json",
+                        "checkpoint_ref": "outputs/github_star_growth/source_data.json",
+                        "writer_tool": "write_structured_json",
+                    }
+                ]
+            },
+        },
+    )
+    agent = SimpleNamespace(root=tmp_path)
+
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "write_file", "path": "outputs/github_star_growth/source_data.json", "content": "{}"}],
+        )
+        is False
+    )
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "write_structured_json", "path": "outputs/github_star_growth/source_data.json", "rows": [{"项目名": "demo"}]}],
+        )
+        is True
+    )
+
+
+# LLM: evidence repairs require source_refs/claims machine fields, not arbitrary table rows.
+# 函数用途: 验证缺证据恢复动作不会把普通 rows/sheets 写入误判成完成了证据修复。
+def test_delivery_repair_guard_requires_evidence_shape_for_evidence_repair(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_closeout(tmp_path, _evidence_repair_closeout())
+    agent = SimpleNamespace(root=tmp_path)
+
+    assert is_delivery_repair_productive_call(agent, [_sheet_only_write_call()]) is False
+    assert is_delivery_repair_productive_call(agent, [_structured_evidence_write_call()]) is True
+
+
+# LLM: Structural checkpoint repair may precede evidence repair for the same file.
+# 函数用途: 验证同一 checkpoint 同时缺表格结构和证据时，补 sheets 的写入不会被 evidence guard 误拦。
+def test_delivery_repair_guard_allows_structural_write_before_evidence_merge(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_closeout(tmp_path, _structure_and_evidence_repair_closeout())
+    agent = SimpleNamespace(root=tmp_path)
+
+    assert is_delivery_repair_productive_call(agent, [_sheet_only_write_call()]) is True
+
+
+# LLM: run_command must be classified by side effect, not by tool name alone.
+# 函数用途: 验证阶段修复期间 ls/find/cat 等 shell 检查不会被误判为本地推进。
+def test_delivery_repair_guard_treats_inspection_run_command_as_nonproductive(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "recovery_actions": [
+                    {
+                        "code": "STAGED_JSON_TOO_FEW_SHEETS",
+                        "recommended_action": "repair_structured_checkpoint_json",
+                        "checkpoint_ref": "outputs/github_star_growth/source_data.json",
+                        "writer_tool": "write_structured_json",
+                    }
+                ]
+            },
+        },
+    )
+    agent = SimpleNamespace(root=tmp_path)
+
+    assert is_delivery_repair_productive_call(agent, [{"tool": "run_command", "command": "ls -la outputs"}]) is False
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "run_command", "command": "ls outputs; mkdir -p outputs/github_star_growth"}],
+        )
+        is False
+    )
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "run_command", "command": "printf '{}' > outputs/github_star_growth/source_data.json"}],
+        )
+        is True
+    )
+
+
+def test_delivery_repair_guard_allows_evidence_gathering_before_strict_write_mode(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "unchanged_failure_count": 1,
+                "no_progress_block_threshold": 5,
+                "recovery_actions": [
+                    {
+                        "code": "STAGED_JSON_NO_ROWS",
+                        "recommended_action": "write_non_empty_structured_rows",
+                        "checkpoint_ref": "outputs/report/source_data.json",
+                    }
+                ],
+            },
+        },
+    )
+    agent = SimpleNamespace(root=tmp_path)
+
+    assert is_delivery_repair_productive_call(agent, [{"tool": "fetch_url", "url": "https://example.com/data"}]) is True
+    assert is_delivery_repair_productive_call(agent, [{"tool": "search", "query": "release notes"}]) is True
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "read_artifact", "artifact_ref": "memory_archive/artifacts/tool_outputs/fetch-1.json"}],
+        )
+        is True
+    )
+    assert is_delivery_repair_productive_call(agent, [{"tool": "list_files", "path": "outputs/report"}]) is False
 
 
 def test_delivery_repair_context_includes_checkpoint_shape_hint(tmp_path: Path):
@@ -133,6 +286,7 @@ def test_delivery_repair_context_includes_checkpoint_shape_hint(tmp_path: Path):
                         "checkpoint_shape_hint": '{"sheets":[{"name":"榜单","rows":[{"项目名":"..."}]}]}',
                         "required_columns": ["项目名", "地址"],
                         "missing_columns": "项目名,地址",
+                        "writer_tool": "write_structured_json",
                     }
                 ],
             },
@@ -145,6 +299,218 @@ def test_delivery_repair_context_includes_checkpoint_shape_hint(tmp_path: Path):
     assert "checkpoint_shape_hint" in context
     assert "required_columns" in context
     assert "missing_columns" in context
+    assert "required_tool_calls" in context
+    assert '"tool": "write_structured_json"' in context
+    assert '"path": "outputs/report/source_data.json"' in context
+
+
+# LLM: rejected repair calls should come back as machine-readable feedback, not disappear silently.
+# 函数用途: 验证阶段修复时被拦截的检查类调用会生成结构化拒绝上下文，下一轮可直接看到 required_tool_calls。
+def test_delivery_repair_rejection_context_names_rejected_and_required_calls(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        delivery_repair_rejection_context,
+    )
+
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "recovery_actions": [
+                    {
+                        "code": "STAGING_CHECKPOINT_MISSING",
+                        "recommended_action": "materialize_checkpoint",
+                        "checkpoint_ref": "outputs/report/source_data.json",
+                        "checkpoint_shape_hint": '{"sheets":[{"name":"榜单","rows":[{"项目名":"..."}]}]}',
+                        "writer_tool": "write_structured_json",
+                    }
+                ],
+            },
+        },
+    )
+    agent = SimpleNamespace(root=tmp_path, backend=SimpleNamespace(name="fake"))
+
+    context = delivery_repair_rejection_context(
+        agent,
+        [{"tool": "list_files", "path": "outputs/report"}],
+        repairs=0,
+    )
+    payload = json.loads(context.splitlines()[1])
+
+    assert "delivery-required-repair-rejected" in context
+    assert payload["rejected_tool_calls"] == [{"path": "outputs/report", "tool": "list_files"}]
+    assert payload["required_tool_calls"][0]["tool"] == "write_structured_json"
+    assert payload["required_tool_calls"][0]["path"] == "outputs/report/source_data.json"
+
+
+# LLM: evidence repair context should keep structured source/claim shape details visible to the model.
+# 函数用途: 验证 repair guard 不会把 closeout 里的 required_fields/evidence_shape_hint 裁掉。
+def test_delivery_repair_context_includes_evidence_repair_shape(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        delivery_repair_context,
+    )
+
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "recovery_actions": [
+                    {
+                        "code": "EVIDENCE_REQUIRED_FIELD_MISSING",
+                        "recommended_action": "repair_evidence_refs",
+                        "checkpoint_ref": "outputs/report/source_data.json",
+                        "required_fields": ["项目名", "地址"],
+                        "writer_tool": "write_structured_json",
+                        "evidence_shape_hint": '{"source_refs":[],"claims":[]}',
+                    }
+                ],
+            },
+        },
+    )
+    agent = SimpleNamespace(root=tmp_path)
+
+    context = delivery_repair_context(agent, repairs=0)
+
+    assert "required_fields" in context
+    assert "write_structured_json" in context
+    assert "evidence_shape_hint" in context
+    assert '"merge_existing": true' in context
+
+
+# LLM: acceptance finding repair allows one inspection phase before strict write mode.
+# 函数用途: 验证产物修复初期可以读取目标文件定位补丁；连续无进展后再强制真实写入类工具推进。
+def test_delivery_repair_guard_allows_artifact_read_before_strict_finding_repair(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        delivery_repair_context,
+        is_delivery_repair_productive_call,
+    )
+
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "recovery_actions": [
+                    {
+                        "code": "ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED",
+                        "recommended_action": "repair_artifact_against_findings",
+                        "artifact_id": "site",
+                        "artifact_path": "outputs/site",
+                        "finding_codes": ["STATIC_SITE_MISSING_DOM_ID_HITS"],
+                        "finding_values": ["getElementById:app"],
+                        "write_tools": ["write_file", "replace_in_file"],
+                    }
+                ]
+            },
+        },
+    )
+    agent = SimpleNamespace(root=tmp_path)
+
+    assert is_delivery_repair_productive_call(agent, [{"tool": "read_file", "path": "outputs/site/index.html"}]) is True
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "replace_in_file", "path": "outputs/site/index.html", "old": "<body>", "new": '<body><div id="app">'}],
+        )
+        is True
+    )
+    context = delivery_repair_context(agent, repairs=0)
+    assert "repair_artifact_against_findings" in context
+    assert "getElementById:app" in context
+
+
+def test_delivery_repair_guard_requires_write_after_repeated_artifact_finding_failure(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "unchanged_failure_count": 4,
+                "no_progress_block_threshold": 4,
+                "recovery_actions": [
+                    {
+                        "code": "ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED",
+                        "recommended_action": "repair_artifact_against_findings",
+                        "artifact_id": "site",
+                        "artifact_path": "outputs/site",
+                        "finding_values": ["index.html:button:登录"],
+                        "write_tools": ["write_file", "replace_in_file"],
+                    }
+                ],
+            },
+        },
+    )
+    agent = SimpleNamespace(root=tmp_path)
+
+    assert is_delivery_repair_productive_call(agent, [{"tool": "read_file", "path": "outputs/site/index.html"}]) is False
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "write_file", "path": "outputs/site/app.js", "content": "console.log('ok')"}],
+        )
+        is True
+    )
+
+
+def _evidence_repair_closeout() -> dict[str, object]:
+    return {
+        "ok": False,
+        "delivery_progress": {
+            "recovery_actions": [
+                {
+                    "code": "EVIDENCE_REQUIRED_FIELD_MISSING",
+                    "recommended_action": "repair_evidence_refs",
+                    "checkpoint_ref": "outputs/report/source_data.json",
+                    "required_fields": ["项目名", "地址"],
+                    "writer_tool": "write_structured_json",
+                }
+            ]
+        },
+    }
+
+
+def _structure_and_evidence_repair_closeout() -> dict[str, object]:
+    closeout = _evidence_repair_closeout()
+    actions = closeout["delivery_progress"]["recovery_actions"]
+    actions.insert(
+        0,
+        {
+            "code": "STAGED_JSON_TOO_FEW_SHEETS",
+            "recommended_action": "repair_structured_checkpoint_json",
+            "checkpoint_ref": "outputs/report/source_data.json",
+            "required_columns": ["项目名", "地址"],
+            "writer_tool": "write_structured_json",
+        },
+    )
+    return closeout
+
+
+def _sheet_only_write_call() -> dict[str, object]:
+    return {
+        "tool": "write_structured_json",
+        "path": "outputs/report/source_data.json",
+        "sheets": [{"name": "榜单", "rows": [{"项目名": "demo", "地址": "https://example.com"}]}],
+    }
+
+
+def _structured_evidence_write_call() -> dict[str, object]:
+    return {
+        "tool": "write_structured_json",
+        "path": "outputs/report/source_data.json",
+        "data": {
+            "sheets": [{"name": "榜单", "rows": [{"项目名": "demo", "地址": "https://example.com"}]}],
+            "source_refs": [{"source_id": "src-1", "uri": "https://example.com"}],
+            "claims": [
+                {"field": "项目名", "value": "demo", "source_ids": ["src-1"], "verification_status": "VERIFIED"},
+                {"field": "地址", "value": "https://example.com", "source_ids": ["src-1"], "verification_status": "VERIFIED"},
+            ],
+        },
+    }
 
 
 # LLM: _write_closeout keeps the delivery-repair fixture tiny and grounded in the same machine report the runtime uses.

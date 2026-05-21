@@ -1,4 +1,10 @@
-﻿## 2026-05-20 parent oracle wording cleanup
+﻿## 2026-05-21 artifact integrity test item split
+
+- 父级验收测试项预处理现在会从结构化 artifact refs 推断通用 artifact integrity 检查，并把 pytest artifact 推断拆到 `execution_pytest_items.py`、产物完整性推断拆到 `execution_artifact_integrity_items.py`。
+- 这不是某个网页、Excel 或 PDF 的专项合同：tests 为空时仍按机器产物 refs 补充可执行检查，模型口头说“我测过了”不算机器事实。
+- 同步门：`execution_test_items.py` 保持为薄编排层；新增/修改这类父级验收推断时必须同步 `02-progress.md` 和 `04-structure.md`。
+
+## 2026-05-20 parent oracle wording cleanup
 
 - 本轮只清理父级静态流程站点 oracle 的生产侧说明文字：`shop_web_parent_oracle.py` 不再把具体真实验收样本写成生产合同描述，改为“静态交易流程站点”这一类通用网页流程验收。
 - 机器合同保持不变：父级 oracle 仍检查 section/action/local asset/responsive layout 等结构化事实，专项真实任务语义只允许留在测试 fixture 和最终真实验收样本。
