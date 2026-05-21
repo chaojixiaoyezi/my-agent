@@ -46,6 +46,26 @@ def test_tool_boundary_aborts_unclosed_large_write_content_stream():
         raise AssertionError("expected large write stream abort")
 
 
+# LLM: structured JSON checkpoints can be large too; unfinished payload streams need the same early stop.
+# 函数用途: 验证 write_structured_json 的 sheets/data/rows 大参数没闭合时会提前中断，而不是拖到模型总超时。
+def test_tool_boundary_aborts_unclosed_large_structured_json_stream():
+    boundary = ToolBoundaryChunkFilter(None, max_inline_content_chars=12)
+
+    boundary(
+        '[TOOL_CALL]\n'
+        '{"tool":"write_structured_json","path":"outputs/data.json","sheets":['
+    )
+
+    try:
+        boundary("{" + '"rows":[' + "A" * 13)
+    except LongToolContentStreamAbort as exc:
+        assert exc.tool == "write_structured_json"
+        assert exc.path == "outputs/data.json"
+        assert exc.limit == 12
+    else:  # pragma: no cover - keeps assertion message clear.
+        raise AssertionError("expected structured JSON stream abort")
+
+
 # LLM: real models sometimes wrap filesystem parameters under a nested object before normalization runs.
 # 函数用途: 验证流式边界也能识别 {"tool":"write_file","filesystem":{"path":...,"content":...}} 这种真实输出。
 def test_tool_boundary_aborts_nested_filesystem_large_write_content_stream():

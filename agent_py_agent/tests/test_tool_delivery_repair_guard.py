@@ -414,6 +414,7 @@ def test_delivery_repair_rejection_context_names_rejected_and_required_calls(tmp
     assert payload["rejected_tool_calls"] == [{"path": "outputs/report", "tool": "list_files"}]
     assert payload["required_tool_calls"][0]["tool"] == "write_structured_json"
     assert payload["required_tool_calls"][0]["path"] == "outputs/report/source_data.json"
+    assert payload["required_tool_calls"][0]["merge_existing"] is True
 
 
 # LLM: evidence repair context should keep structured source/claim shape details visible to the model.

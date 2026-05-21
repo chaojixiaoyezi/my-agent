@@ -84,9 +84,10 @@ def parse_registry_tool_calls(text: str) -> list[dict[str, Any]]:
         if start_info is None:
             break
         start, marker_start = start_info
-        end_info = next_tool_block_end(scan_text, start + len(marker_start))
+        body_start = start + len(marker_start)
+        end_info = next_tool_block_end(scan_text, body_start)
         if end_info is None:
-            raw = scan_text[start + len(marker_start) :].strip().strip("`")
+            raw = scan_text[body_start:].strip().strip("`")
             payload = parse_tool_block_payload(raw)
             calls.append(
                 (
@@ -98,8 +99,16 @@ def parse_registry_tool_calls(text: str) -> list[dict[str, Any]]:
             )
             break
         end, marker_end = end_info
-        raw = scan_text[start + len(marker_start) : end].strip().strip("`")
-        calls.append((start, parse_tool_block_payload(raw)))
+        raw = scan_text[body_start:end].strip().strip("`")
+        payload = parse_tool_block_payload(raw)
+        nested_start_info = next_tool_block_start(scan_text, body_start)
+        if payload.get("tool") == "__parse_error__" and nested_start_info and nested_start_info[0] < end:
+            nested_start = nested_start_info[0]
+            malformed_raw = scan_text[body_start:nested_start].strip().strip("`")
+            calls.append((start, parse_error_payload("工具调用缺少结束标记 [/TOOL_CALL]", malformed_raw)))
+            cursor = nested_start
+            continue
+        calls.append((start, payload))
         cursor = end + len(marker_end)
 
     calls.extend(malformed_tool_marker_calls(scan_text))

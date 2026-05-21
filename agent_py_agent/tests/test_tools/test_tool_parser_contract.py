@@ -504,3 +504,21 @@ def test_tool_call_parser_and_executor_reject_non_object_payloads():
     assert "JSON 对象" in parsed_result.output
     assert not direct_result.ok
     assert "JSON 对象" in direct_result.output
+
+
+# LLM: A malformed unfinished tool block must not swallow the next independent tool call.
+# 函数用途: 复现真实模型输出大 JSON 工具块中途断开后，后续正常 TOOL_CALL 被坏块污染的问题。
+def test_tool_call_parser_recovers_next_block_after_unclosed_nested_start():
+    registry = make_tool_registry(Path.cwd())
+
+    calls = registry.parse_tool_calls(
+        "[TOOL_CALL]\n"
+        '{"tool":"write_structured_json","path":"outputs/data.json","sheets":[{"rows":[\n'
+        "[TOOL_CALL]\n"
+        '{"tool":"run_command","command":"mkdir -p outputs"}\n'
+        "[/TOOL_CALL]"
+    )
+
+    assert calls[0]["tool"] == "__parse_error__"
+    assert "缺少结束标记" in calls[0]["error"]
+    assert calls[1] == {"tool": "run_command", "command": "mkdir -p outputs"}

@@ -75,6 +75,79 @@ def test_structured_json_tool_merges_existing_checkpoint_metadata(tmp_path: Path
     assert data["claims"][0]["field"] == "项目名"
 
 
+# LLM: large spreadsheet-style checkpoints should be extendable one sheet at a time.
+# 函数用途: 验证 merge_existing 对 sheets 使用追加/同名合并，而不是浅替换整份阶段数据。
+def test_structured_json_tool_appends_sheets_when_merging_existing_checkpoint(tmp_path: Path) -> None:
+    tool = StructuredJsonTool(tmp_path)
+    target = tmp_path / "outputs/report/source_data.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        json.dumps(
+            {"sheets": [{"name": "2026-W01", "rows": [{"项目名": "demo-1"}]}]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = tool.execute(
+        {
+            "path": "outputs/report/source_data.json",
+            "merge_existing": True,
+            "sheets": [{"name": "2026-W02", "rows": [{"项目名": "demo-2"}]}],
+        }
+    )
+
+    assert result.ok, result.output
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert [sheet["name"] for sheet in data["sheets"]] == ["2026-W01", "2026-W02"]
+    assert data["sheets"][1]["rows"][0]["项目名"] == "demo-2"
+
+
+# LLM: retries for the same sheet should append rows without discarding previous rows.
+# 函数用途: 验证同名 sheet 的 merge_existing 按 rows 追加，支撑大表分批写入。
+def test_structured_json_tool_appends_rows_for_same_sheet_name(tmp_path: Path) -> None:
+    tool = StructuredJsonTool(tmp_path)
+    target = tmp_path / "outputs/report/source_data.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        json.dumps(
+            {"sheets": [{"name": "2026-W01", "rows": [{"项目名": "demo-1"}]}]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = tool.execute(
+        {
+            "path": "outputs/report/source_data.json",
+            "merge_existing": True,
+            "sheets": [{"name": "2026-W01", "rows": [{"项目名": "demo-2"}]}],
+        }
+    )
+
+    assert result.ok, result.output
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert data["sheets"][0]["rows"] == [{"项目名": "demo-1"}, {"项目名": "demo-2"}]
+
+
+# LLM: merge_existing should behave as an upsert so the first chunk can create the checkpoint.
+# 函数用途: 验证分批写入第一块时目标不存在也能创建，后续块再 merge 追加。
+def test_structured_json_tool_merge_existing_creates_missing_checkpoint(tmp_path: Path) -> None:
+    tool = StructuredJsonTool(tmp_path)
+
+    result = tool.execute(
+        {
+            "path": "outputs/report/source_data.json",
+            "merge_existing": True,
+            "sheets": [{"name": "2026-W01", "rows": [{"项目名": "demo"}]}],
+        }
+    )
+
+    assert result.ok, result.output
+    data = json.loads((tmp_path / "outputs/report/source_data.json").read_text(encoding="utf-8"))
+    assert data["sheets"][0]["rows"][0]["项目名"] == "demo"
+
+
 # LLM: Empty data should not mask non-empty rows/sheets supplied in the same tool call.
 # 函数用途: 验证模型误带 data={} 时，工具仍可使用同次调用里的非空 sheets 写出 checkpoint。
 def test_structured_json_tool_uses_sheets_when_data_is_empty(tmp_path: Path) -> None:

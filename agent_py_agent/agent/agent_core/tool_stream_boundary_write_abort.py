@@ -14,13 +14,17 @@ from .tool_stream_boundary_models import (
     LongToolContentStreamAbort,
 )
 
-_WRITE_TOOL_NAMES = {"write_file", "append_file", "file_write_session"}
-_JSON_TOOL_RE = re.compile(r'"tool"\s*:\s*"(?P<tool>write_file|append_file|file_write_session)"')
+_WRITE_TOOL_NAMES = {"write_file", "append_file", "file_write_session", "write_structured_json"}
+_STRUCTURED_JSON_TOOL = "write_structured_json"
+_JSON_TOOL_RE = re.compile(
+    r'"tool"\s*:\s*"(?P<tool>write_file|append_file|file_write_session|write_structured_json)"'
+)
 _JSON_ACTION_RE = re.compile(r'"action"\s*:\s*"(?P<action>(?:\\.|[^"\\]){0,32})"')
 _JSON_PATH_RE = re.compile(r'"(?:path|target_path)"\s*:\s*"(?P<path>(?:\\.|[^"\\]){0,240})"')
 _JSON_SESSION_RE = re.compile(r'"session_id"\s*:\s*"(?P<session_id>(?:\\.|[^"\\]){0,80})"')
 _JSON_CHUNK_INDEX_RE = re.compile(r'"chunk_index"\s*:\s*(?P<chunk_index>\d{1,9})')
 _JSON_CONTENT_RE = re.compile(r'"content"\s*:\s*"')
+_JSON_STRUCTURED_FIELD_RE = re.compile(r'"(?:data|rows|sheets)"\s*:')
 
 
 # LLM: long_write_stream_abort detects oversized structured write content while a tool call is still open.
@@ -42,6 +46,8 @@ def long_write_stream_abort(
     if tool not in _WRITE_TOOL_NAMES:
         return None
     limit = _streaming_write_abort_limit(tool, max_chars)
+    if tool == _STRUCTURED_JSON_TOOL:
+        return _long_structured_json_stream_abort(raw, limit)
     content_start = _content_value_start(raw)
     if content_start is None:
         return None
@@ -60,6 +66,25 @@ def long_write_stream_abort(
             content_prefix=_streamed_json_string_prefix(
                 raw[content_start:], max_chars=limit + 2048
             ),
+        )
+    )
+
+
+# LLM: structured JSON writer payloads can be large even without a content string.
+# 函数用途: 识别未闭合 write_structured_json 的 data/rows/sheets 大参数流，提前转入可恢复错误。
+def _long_structured_json_stream_abort(raw: str, limit: int) -> LongToolContentStreamAbort | None:
+    match = _JSON_STRUCTURED_FIELD_RE.search(raw)
+    if match is None:
+        return None
+    payload_chars = max(0, len(raw) - match.end())
+    if payload_chars <= limit:
+        return None
+    return LongToolContentStreamAbort(
+        LongToolContentAbortPayload(
+            tool=_STRUCTURED_JSON_TOOL,
+            path=_json_path(raw),
+            chars=payload_chars,
+            limit=limit,
         )
     )
 

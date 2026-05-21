@@ -46,7 +46,7 @@ def _writer_call(action: dict[str, object]) -> dict[str, object]:
     call: dict[str, object] = {"tool": tool, "path": path}
     if hint := _json_hint(action):
         call["data"] = hint
-    if str(action.get("recommended_action") or "") == "repair_evidence_refs":
+    if tool == "write_structured_json" or str(action.get("recommended_action") or "") == "repair_evidence_refs":
         call["merge_existing"] = True
     return call
 
