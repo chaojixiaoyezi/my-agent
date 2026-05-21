@@ -135,7 +135,8 @@ def test_cmd_real_e2e_runs_controlled_echo_real_task(tmp_path, capsys):
     first_case = execution["cases"][0]
     assert exit_code == 2
     assert execution["summary"]["failed"] == 1
-    assert first_case["exit_code"] == 0
+    assert first_case["exit_code"] == 2
+    assert "exit_code=2" in first_case["issues"]
     assert first_case["acceptance_summary"]["failed"] == 1
     assert (tmp_path / "workspace" / first_case["stdout_ref"]).exists()
 

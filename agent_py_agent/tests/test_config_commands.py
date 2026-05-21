@@ -118,16 +118,16 @@ class TestResolveWorkspaceRoot:
         ]
         assert resolve_workspace_root(config, str(config_path)) == roots[0]
 
-    def test_resolve_workspace_roots_list_empty_keeps_default_root(self, tmp_path: Path):
-        """An empty list item means keep the default project workspace."""
-        from agent_py_agent.cli.common import ROOT, resolve_workspace_roots
+    def test_resolve_workspace_roots_list_empty_keeps_current_workspace(self, tmp_path: Path):
+        """An empty list item means keep the current CLI workspace."""
+        from agent_py_agent.cli.common import resolve_workspace_roots
 
         config = MagicMock()
         config.workspace_root = ["", "extra"]
         config_path = tmp_path / "config.yaml"
 
         roots = resolve_workspace_roots(config, str(config_path))
-        assert roots == [ROOT, (tmp_path / "extra").resolve()]
+        assert roots == [Path.cwd().resolve(), (tmp_path / "extra").resolve()]
 
     def test_resolve_workspace_root_expanduser(self, tmp_path: Path):
         """测试 ~ 展开。"""

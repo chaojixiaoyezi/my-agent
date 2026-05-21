@@ -31,6 +31,8 @@ def render_delivery_repair_rejection_context(
     )
 
 
+# LLM: _compact_call keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _compact_call(call: dict[str, object]) -> dict[str, object]:
     record: dict[str, object] = {"tool": str(call.get("tool") or "").strip()}
     _copy_compact_field(record, call, "path", 240)
@@ -42,6 +44,8 @@ def _compact_call(call: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in record.items() if value}
 
 
+# LLM: _copy_compact_field keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _copy_compact_field(record: dict[str, object], call: dict[str, object], key: str, limit: int) -> None:
     value = str(call.get(key) or "").strip()
     if not value:

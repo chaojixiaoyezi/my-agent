@@ -99,6 +99,8 @@ def _artifact_finding_repair_action(
     }
 
 
+# LLM: _finding_values keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _finding_values(findings: list[dict[str, Any]], key: str) -> list[str]:
     values: list[str] = []
     for finding in findings:

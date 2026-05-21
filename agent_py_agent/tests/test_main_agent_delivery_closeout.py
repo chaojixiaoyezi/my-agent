@@ -132,8 +132,8 @@ def test_tool_loop_rejects_incomplete_delivery_contract_artifact():
         )
         codes = _closeout_finding_codes(workspace)
 
-        assert backend.calls == 2
-        assert result.response == "已收到不完整 HTML 的结构化反馈。"
+        assert backend.calls == 4
+        assert "[DELIVERY_REQUIRED_REPAIR_BLOCKED]" in result.response
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
         assert {"HTML_INCOMPLETE_DOCUMENT", "HTML_EXTERNAL_RESOURCE_REF"} <= set(codes)
 
@@ -174,7 +174,9 @@ def test_tool_loop_blocks_after_repeated_unchanged_delivery_failure():
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
         assert report["ok"] is False
         assert report["delivery_progress"]["unchanged_failure_count"] >= 4
-        assert report["delivery_progress"]["recovery_actions"][0]["code"] == "ACCEPTANCE_FAILED"
+        actions = report["delivery_progress"]["recovery_actions"]
+        assert actions[0]["code"] == "ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED"
+        assert "ACCEPTANCE_FAILED" in {item["code"] for item in actions}
 
 
 # LLM: Missing bootstrap targets should delay no-progress blocking for multi-file artifacts.

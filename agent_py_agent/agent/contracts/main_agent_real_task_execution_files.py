@@ -140,6 +140,8 @@ def _write_recovery_attempt_marker(
     )
 
 
+# LLM: _recovery_attempt_baseline keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _recovery_attempt_baseline(task_workspace: Path) -> dict[str, object]:
     closeout = task_workspace / ".agent_delivery" / "closeout.json"
     try:
@@ -154,6 +156,8 @@ def _recovery_attempt_baseline(task_workspace: Path) -> dict[str, object]:
     }
 
 
+# LLM: _safe_int keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _safe_int(value: object) -> int:
     try:
         return int(value or 0)

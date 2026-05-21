@@ -60,6 +60,8 @@ def format_html_response(*, status: int, headers: Any, body: str, max_chars: int
     return "\n".join(lines)
 
 
+# LLM: visible_html_text keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def visible_html_text(body: str) -> str:
     parser = _VisibleHtmlParser()
     try:
@@ -73,11 +75,15 @@ def visible_html_text(body: str) -> str:
 # LLM: _VisibleHtmlParser extracts text and hrefs without executing page code.
 # 类用途: 从 HTML 中提取可见文本和链接引用，供工具结果预览使用。
 class _VisibleHtmlParser(HTMLParser):
+    # LLM: __init__ initializes parser state without reading HTML text as a runtime fact.
+    # 函数用途: 初始化可见文本片段和跳过深度，供后续标签回调按结构化状态更新。
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self._skip_depth = 0
 
+    # LLM: handle_starttag keeps this runtime helper grounded in structured fields.
+    # 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized = tag.lower()
         if normalized in _HTML_SKIP_TAGS:
@@ -92,6 +98,8 @@ class _VisibleHtmlParser(HTMLParser):
             if href:
                 self.parts.append(f" [href={href}] ")
 
+    # LLM: handle_endtag keeps this runtime helper grounded in structured fields.
+    # 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
     def handle_endtag(self, tag: str) -> None:
         normalized = tag.lower()
         if normalized in _HTML_SKIP_TAGS and self._skip_depth:
@@ -100,6 +108,8 @@ class _VisibleHtmlParser(HTMLParser):
         if not self._skip_depth and normalized in _HTML_BLOCK_TAGS:
             self.parts.append("\n")
 
+    # LLM: handle_data keeps this runtime helper grounded in structured fields.
+    # 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
     def handle_data(self, data: str) -> None:
         if self._skip_depth:
             return
@@ -108,6 +118,8 @@ class _VisibleHtmlParser(HTMLParser):
             self.parts.append(text)
 
 
+# LLM: _attr_value keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _attr_value(attrs: list[tuple[str, str | None]], name: str) -> str:
     for key, value in attrs:
         if key.lower() == name and value:

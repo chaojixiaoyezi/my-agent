@@ -27,7 +27,7 @@ class MarkdownPdfTool(FileSystemTool):
             description="把工作区内 Markdown 文档转换成 PDF 文件。",
             use_cases=[
                 "已经有 .md 草稿，需要交付 .pdf 文档",
-                "论文翻译、报告、说明书等长文档先写 Markdown 再生成 PDF",
+                "研究材料、报告、说明书等长文档先写 Markdown 再生成 PDF",
             ],
             avoid_when=[
                 "还没有 Markdown 正文时，先收集资料并写 source markdown",

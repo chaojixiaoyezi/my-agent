@@ -26,6 +26,8 @@ def _within_recovery_attempt_inspection_budget(progress: dict[str, object], *, a
     return _fresh_recovery_attempt_by_mtime(agent_root)
 
 
+# LLM: _recovery_attempt_marker keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _recovery_attempt_marker(agent_root: Path) -> dict[str, object]:
     marker = agent_root / ".agent_delivery" / "recovery_attempt.json"
     try:
@@ -37,6 +39,8 @@ def _recovery_attempt_marker(agent_root: Path) -> dict[str, object]:
     return value
 
 
+# LLM: _progress_delta_within_budget keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _progress_delta_within_budget(progress: dict[str, object], marker: dict[str, object]) -> bool:
     unchanged = _safe_int(progress.get("unchanged_failure_count"))
     baseline = _safe_int(marker.get("baseline_unchanged_failure_count"))
@@ -44,6 +48,8 @@ def _progress_delta_within_budget(progress: dict[str, object], marker: dict[str,
     return budget > 0 and unchanged <= baseline + budget
 
 
+# LLM: _fresh_recovery_attempt_by_mtime keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _fresh_recovery_attempt_by_mtime(agent_root: Path) -> bool:
     closeout = agent_root / ".agent_delivery" / "closeout.json"
     marker = agent_root / ".agent_delivery" / "recovery_attempt.json"
@@ -53,6 +59,8 @@ def _fresh_recovery_attempt_by_mtime(agent_root: Path) -> bool:
         return False
 
 
+# LLM: _safe_int keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _safe_int(value: object) -> int:
     try:
         return int(value or 0)

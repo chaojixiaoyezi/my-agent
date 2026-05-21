@@ -211,6 +211,8 @@ def _is_local_progressive_call(payload: dict[str, object], calls: list[dict[str,
     return any(_call_is_local_progressive(call, productive_tools) for call in calls)
 
 
+# LLM: _exploration_round_threshold keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _exploration_round_threshold(payload: dict[str, object]) -> int:
     try:
         value = int(payload.get("no_progress_block_threshold") or 0)

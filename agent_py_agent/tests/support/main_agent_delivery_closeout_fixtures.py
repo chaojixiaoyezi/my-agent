@@ -250,7 +250,11 @@ class LocalProgressRedirectBackend:
             return ModelResponse(text=f'[TOOL_CALL]\n{{"tool":"read_artifact","artifact_ref":"{artifact_ref}","offset":0,"max_chars":2000}}\n[/TOOL_CALL]', backend=self.name)
         if self.calls == 4:
             assert "local-progress-guard" in prompt or "delivery-required-repair" in prompt
-            return _write_file_response("outputs/github_star_growth/source_data.json", _valid_workbook_source_json(), self.name)
+            return _write_structured_json_response(
+                "outputs/github_star_growth/source_data.json",
+                _valid_workbook_source_json(),
+                self.name,
+            )
         if self.calls == 5:
             return _workbook_builder_response(self.name)
         raise AssertionError("local-progress guard should redirect remote exploration back to local staged work")

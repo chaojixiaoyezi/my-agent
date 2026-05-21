@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+# LLM: StagedCheckpointContext stores structured runtime facts for the surrounding contract logic.
+# 类用途: 保存当前模块使用的结构化字段，避免后续流程从普通自然语言推断机器事实。
 @dataclass(frozen=True)
 class StagedCheckpointContext:
     ref: str
@@ -38,6 +40,8 @@ def staged_checkpoint_contexts(
     ]
 
 
+# LLM: _evidence_contract keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _evidence_contract(contract: dict[str, object], ref: str, source_ref: str) -> dict[str, object]:
     if source_ref and ref != source_ref:
         return {}
@@ -45,10 +49,14 @@ def _evidence_contract(contract: dict[str, object], ref: str, source_ref: str) -
     return dict(evidence) if isinstance(evidence, dict) else {}
 
 
+# LLM: _string_list keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _string_list(value: object) -> list[str]:
     return [text for item in value if (text := str(item).strip())] if isinstance(value, list) else []
 
 
+# LLM: _positive_int keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _positive_int(value: object) -> int:
     try:
         parsed = int(value or 0)

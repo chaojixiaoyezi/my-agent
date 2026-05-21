@@ -1824,3 +1824,9 @@
 - 已实现：`create_context_packs()` 会在没有显式 idempotency contract、但工具参数已有 `output_refs/output_files/artifact_refs` 时，自动补 `subagent_idempotency_contract.v1`。这样真实 E2E 里模型忘写幂等包时，同一个结构化产物目标也能复用旧 run；没有结构化产物 refs 时仍不会用 goal 文本去重。
 - 已实现：架构守卫新增两条硬门：legacy evidence helper 必须保持 service shim；create/schedule 幂等不得比较 goal 文本。`test_code_does_not_use_plain_language_as_machine_facts` 继续覆盖自然语言事实源铁律。
 - 已测试：`test_acceptance_helpers_class.py::TestBuildEvidenceFindings`、`test_acceptance_evidence_contracts.py`、`test_orchestration_create_subagents_idempotency.py`、`test_architecture_guardrails.py`、Live Lab 注册/自然语言 focused tests 和 ruff 已通过。真实 E2E 硬门仍分为本地/手动真实模型矩阵，避免远端 CI 默认消耗 API。
+
+## 2026-05-21 子代理执行验收注释同步
+
+- 中文说明：本轮没有改变子代理执行器行为，只补齐 `execution_executor.py` 中 artifact integrity helper 的 LLM/人类用途注释，让代码审计能看清“产物完整性结果”仍来自结构化执行事实。
+- 已实现：注释明确 artifact integrity helper 只处理结构化字段和执行结果，不从普通自然语言文本推断机器事实。
+- 已测试：annotation coverage、ruff、code-size strict、contract pyramid 和 full fast pytest 均纳入本轮验证。

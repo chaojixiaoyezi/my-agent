@@ -235,6 +235,8 @@ def _validation_method(test: dict[str, Any]) -> str:
     return method
 
 
+# LLM: _artifact_integrity_result keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _artifact_integrity_result(path: Path, decision: Any) -> dict[str, Any]:
     return {
         "ok": decision.ok,

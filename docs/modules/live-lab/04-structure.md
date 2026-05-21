@@ -151,3 +151,4 @@ scripts/
 - 当前真实验收：`main-complex-isolated-20260518-135442` 已用 MiniMax-M2.7 跑通。它验证了主代理多文件 Web app、工具失败恢复、100MB 大日志审计和 Live Lab 家目录隔离。
 - 当前真实验收：`main-artifact-20260518-early-request-id` 已用 MiniMax-M2.7 跑通。它验证了主代理在长资料读回时能先接收外置 tool-output artifact，再用 `read_artifact` 续读并写出证据报告；同一 run 的 `request_id` 会提前进入 context bundle、tool-output index、runtime facts，随后 compact/resume roundtrip 能带回 `artifact_refs` 并放行 `allow_automated_continue`。
 - 后续扩展：compact/resume 多次续接、验收失败后自动修复、真实资料整理 xlsx/论文翻译等可以继续拆成同目录的新 case，不要塞回 `cases.py`。
+- `scripts/live_lab/session.py` 的 `model_request_timeout` 表示单次模型调用预算，`gateway_wait_timeout` 表示一轮 gateway ask 的总等待预算；二者都从结构化配置读取，真实测试如果要调整慢模型输入/输出等待，应改配置或 timeout policy，不要在 case prompt 里写自然语言硬约束。

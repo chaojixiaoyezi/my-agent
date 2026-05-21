@@ -102,6 +102,8 @@ def _json_value_from_params(params: dict[str, Any]) -> object:
     return _shape_value_from_params(params)
 
 
+# LLM: _shape_value_from_params keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _shape_value_from_params(params: dict[str, Any]) -> object:
     if isinstance(params.get("sheets"), list):
         return {"sheets": params["sheets"]}
@@ -116,19 +118,27 @@ def _shape_value_from_params(params: dict[str, Any]) -> object:
     raise ValueError("TOOL_INVALID_ARGUMENTS: 需要 data、rows 或 sheets")
 
 
+# LLM: _has_shape_payload keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _has_shape_payload(params: dict[str, Any]) -> bool:
     return isinstance(params.get("sheets"), list) or isinstance(params.get("rows"), list)
 
 
+# LLM: _should_use_data_value keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _should_use_data_value(value: object, params: dict[str, Any]) -> bool:
     return bool(value) or not _has_shape_payload(params)
 
 
+# LLM: _merge_existing keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _merge_existing(params: dict[str, Any]) -> bool:
     value = params.get("merge_existing")
     return value is True or str(value).strip().lower() in {"1", "true", "yes"}
 
 
+# LLM: _merged_json_value keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _merged_json_value(target: Path, value: object) -> object:
     if not target.exists():
         raise ValueError("STAGED_JSON_MERGE_TARGET_MISSING: merge_existing 需要目标 JSON 已存在")
@@ -138,6 +148,8 @@ def _merged_json_value(target: Path, value: object) -> object:
     return {**existing, **value}
 
 
+# LLM: _read_existing_json keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _read_existing_json(target: Path) -> object:
     try:
         return json.loads(target.read_text(encoding="utf-8"))

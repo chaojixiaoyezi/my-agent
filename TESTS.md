@@ -1,5 +1,11 @@
 # 测试文档
 
+## 近期新增验证
+
+- `agent_py_agent/tests/test_real_run_review_contract.py`：覆盖真实运行复盘合同，验证 acceptance/report 结构化错误码、runtime bracketed marker、非失败 marker 过滤、失败聚类和 Markdown 输出。
+- `agent_py_agent/tests/test_real_run_review_script.py`：覆盖 `scripts/review_real_runs.py`，验证脚本会写 `real-run-review.json`、`real-run-review.jsonl` 和 `real-run-review.md`，并在发现失败 run 时返回非零码。
+- `scripts/review_real_runs.py --runs-root ... --glob '*20260521*' --out-dir docs/reports`：用于把真实任务输出转成可追踪的失败样本候选，真实外部系统只作为输入来源，日常修复仍回到离线合同测试。
+
 ## 测试概览
 
 | 指标 | 数值 |

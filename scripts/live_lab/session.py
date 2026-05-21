@@ -88,12 +88,16 @@ class LabSessionManager:
         self.prepare_runtime_dirs()
         self.created = True
 
+    # LLM: model_request_timeout keeps this runtime helper grounded in structured fields.
+    # 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
     @property
     def model_request_timeout(self) -> int:
         """Per-model-call timeout configured for this isolated run."""
 
         return live_lab_model_request_timeout(self.args)
 
+    # LLM: gateway_wait_timeout keeps this runtime helper grounded in structured fields.
+    # 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
     @property
     def gateway_wait_timeout(self) -> int:
         """Total wait budget for one gateway ask in this isolated run."""

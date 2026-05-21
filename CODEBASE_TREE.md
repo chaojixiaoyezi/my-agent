@@ -124,6 +124,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |-- TESTING_POLICY.md                          # 测试分层和规范
 |-- CLEAN_PACKAGE_POLICY.md                    # 打包洁净度规范
 |-- docs/                                      # 长篇项目文档目录
+|   |-- reports/                              # 真实运行复盘、验收快照和审计可读输出
 |   |-- ROADMAP.md                             # 待做/进行中功能清单，开工前必读
 |   |-- COMPLETED.md                           # 已落地功能清单，收工后必改
 |   |-- architecture/                          # 架构文档
@@ -148,6 +149,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |-- check_code_size.py                     # 代码规模检查（warn/strict 模式，支持 baseline）
 |   |-- check_clean_package.py                 # 脏文件检查（目录和 tar.gz）
 |   |-- check_doc_sync.py                      # 文档同步检查
+|   |-- review_real_runs.py                    # 扫描真实运行目录，生成 refs-first 失败聚类和复盘报告
 |   |-- live_agent_lab.py                      # Live Lab 薄入口，启动可见真实环境测试台
 |   |-- live_lab/                              # Live Lab 参数解析、运行器、case 和常量
 |   |-- open_live_lab.sh                       # macOS 新开可见 Terminal 跑 Live Lab
@@ -931,6 +933,7 @@ docs/
 ## 2026-04-30 文档同步门补充
 
 - `scripts/check_doc_sync.py`: 检查 covered module 的代码改动是否同步更新 `docs/modules/<module>/02-progress.md` 和 `04-structure.md`，并要求实现代码改动同文件维护双层注释。
+- `scripts/review_real_runs.py`: 真实运行复盘脚本，把 run 目录里的结构化报告和机器标记转换成 JSON/JSONL/Markdown 聚类结果。
 - 当前 covered module：`log-analysis`、`subagent`、`memory`、`gateway`、`live-lab`。
 - `agent_py_agent/tests/test_doc_sync.py`: 覆盖同步门规则、必需文档存在性和缺注释/缺文档的失败路径。
 
@@ -1027,8 +1030,13 @@ docs/
 - `agent_py_agent/agent/contracts/task_tree_ledger_contract.py`: TaskTree 前置账本合同；校验父子任务、依赖、状态、产物 refs、验收 refs，阻断关键子任务未完成时父任务成功。
 - `agent_py_agent/agent/contracts/long_task_recovery_contract.py`: 单 Agent 长任务恢复合同；校验 run scope、checkpoint、compact/resume、latest resume packet 和副作用幂等账本。
 - `agent_py_agent/agent/contracts/failure_sample_library_contract.py`: 失败样本库合同；要求失败样本具备合同 fixture、fake tool/LLM trace、replay spec、expected error 和回归测试 ref。
+- `agent_py_agent/agent/contracts/real_run_review.py`: 真实运行复盘合同；只读取结构化报告、错误码和 bracketed runtime markers，聚类失败模式并输出离线回归建议。
+- `agent_py_agent/agent/contracts/real_run_review_models.py`: 真实运行复盘的记录、聚类和总报告模型，供脚本和测试共享。
+- `agent_py_agent/agent/contracts/real_run_review_render.py`: 真实运行复盘 Markdown 渲染器，只展示结构化 review 字段。
+- `agent_py_agent/agent/contracts/real_run_review_rules.py`: 真实运行复盘错误码前缀、阶段映射和 P0/P1 优先级规则。
 - `agent_py_agent/agent/contracts/small_real_acceptance_gate.py`: 小型真实验收闸门；大型真实任务前只允许隔离、限时、只读/dry-run、可验收和可 replay 的 bounded case。
 - `agent_py_agent/cli/real_e2e_commands.py`: `my-agent real-e2e` CLI；运行主代理基础矩阵，可通过 `--artifact` 验收真实模型产物，也可显式执行受控真实任务。
+- `docs/reports/real-run-review.md`: 最近真实运行复盘的人类可读报告；JSON/JSONL 同目录保留机器可读快照。
 - `agent_py_agent/agent/local_storage/control_plane_models.py`: 定义 agent run、agent event、task rollup、runtime query context 和任务树查询结果的数据结构，保留 `metadata` / `reserved` 给后续继承策略、共享面板和失败交接扩展。
 - `agent_py_agent/agent/local_storage/control_plane.py`: 给 LocalStore 增加控制面 API，支持 upsert run、记录事件、重建 rollup、查询 root task 树、查询子树、blocked runs、takeover candidates 和带 requester/scope 的 runtime query；`takeover_candidates` 覆盖 BLOCKED / FAILED / ERROR / TIMEOUT，避免超时孙代理漏出接管视图。
 - `agent_py_agent/agent/local_storage/control_plane_panel.py`: 给 LocalStore 增加共享进度面板查询，把 runtime query、rollup、blocked runs 和 inheritance refs 组合成上级/接管代理可读状态包。

@@ -682,3 +682,4 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `subagents/services/base.py` 的 workflow 预览路由使用 `_WorkflowPlanAttempt` bundle，并从 create-run attributes 读取 `workflow_template_id` / `workflow_task_type` / `workflow_risk_tags`。这对齐 会话运行时 式结构化协议：模板选择和质量合同是机器字段，不是自然语言关键词。
 - `subagents/services/hierarchy_leaf_targets.py` 的 leaf target tokens 读取 `attributes.output_refs`、`attributes.output_files` 和 `attributes.artifact_refs`，用于重复 leaf/ownership 判断；普通“读取/引用/总结某文件”的文本不再成为 ownership 事实。
 - 相关测试已经迁移到 `attributes`、`context_manifest.required_read_paths`、`workflow_depends_on` 和 input/output refs；旧 helper 只作为兼容壳存在，不能重新长出独立的自然语言验收逻辑。
+- `subagents/execution_executor.py` 的 artifact integrity helper 只负责把执行后的结构化 artifact facts 汇总成验收结果；注释同步后，后续维护仍应保持“执行记录、artifact refs、文件系统事实”为唯一机器依据，不要把 runner summary 或普通回复当完成事实。

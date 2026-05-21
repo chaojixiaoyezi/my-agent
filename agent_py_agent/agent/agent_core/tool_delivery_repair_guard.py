@@ -56,6 +56,8 @@ _STRICT_REPAIR_PRODUCTIVE_TOOLS = {
 _RUN_COMMAND_INSPECTION_PREFIXES = ("cat ", "curl ", "find ", "ls", "pwd", "rg ", "wget ")
 
 
+# LLM: _ProductivityContext stores structured runtime facts for the surrounding contract logic.
+# 类用途: 保存当前模块使用的结构化字段，避免后续流程从普通自然语言推断机器事实。
 @dataclass(frozen=True)
 class _ProductivityContext:
     productive_tools: set[str]
@@ -227,6 +229,8 @@ def _call_is_productive(
     return tool not in context.inspection_only_tools
 
 
+# LLM: _violates_declared_writer_tool keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _violates_declared_writer_tool(call: dict[str, object], required_actions: list[dict[str, object]]) -> bool:
     tool = str(call.get("tool") or "").strip()
     path = _call_path(call)
@@ -240,6 +244,8 @@ def _violates_declared_writer_tool(call: dict[str, object], required_actions: li
     return False
 
 
+# LLM: _call_path keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _call_path(call: dict[str, object]) -> str:
     for key in ("path", "file_path", "target_path"):
         if value := str(call.get(key) or "").strip():
@@ -247,12 +253,16 @@ def _call_path(call: dict[str, object]) -> str:
     return ""
 
 
+# LLM: _same_path_ref keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _same_path_ref(path: str, ref: str) -> bool:
     normalized_path = path.replace("\\", "/").rstrip("/")
     normalized_ref = ref.replace("\\", "/").strip("/")
     return normalized_path == normalized_ref or normalized_path.endswith(f"/{normalized_ref}")
 
 
+# LLM: _run_command_is_productive keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _run_command_is_productive(call: dict[str, object], context: _ProductivityContext) -> bool:
     command = _call_command(call)
     if not command:
@@ -269,6 +279,8 @@ def _run_command_is_productive(call: dict[str, object], context: _ProductivityCo
     return not any(command.startswith(prefix) for prefix in _RUN_COMMAND_INSPECTION_PREFIXES)
 
 
+# LLM: _declared_writer_refs keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _declared_writer_refs(required_actions: list[dict[str, object]]) -> list[str]:
     return [
         str(action.get("checkpoint_ref") or "").strip()
@@ -277,6 +289,8 @@ def _declared_writer_refs(required_actions: list[dict[str, object]]) -> list[str
     ]
 
 
+# LLM: _command_references_ref keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _command_references_ref(command: str, ref: str) -> bool:
     normalized_command = command.replace("\\", "/")
     normalized_ref = ref.replace("\\", "/").strip("/")
@@ -311,10 +325,14 @@ def _has_builder_ready_action(required_actions: list[dict[str, object]]) -> bool
     return any(str(item.get("recommended_action") or "") == "invoke_builder_tool" for item in required_actions)
 
 
+# LLM: _has_artifact_finding_repair_action keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _has_artifact_finding_repair_action(required_actions: list[dict[str, object]]) -> bool:
     return any(str(item.get("recommended_action") or "") == "repair_artifact_against_findings" for item in required_actions)
 
 
+# LLM: _call_command keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _call_command(call: dict[str, object]) -> str:
     command = str(call.get("command") or "").strip().lower()
     if command:

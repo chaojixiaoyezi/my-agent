@@ -313,6 +313,8 @@ def _call_is_bootstrap_exploration_only(call: dict[str, object]) -> bool:
     )
 
 
+# LLM: _call_is_bootstrap_evidence keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _call_is_bootstrap_evidence(call: dict[str, object]) -> bool:
     tool = str(call.get("tool") or "").strip()
     if tool in _BOOTSTRAP_EVIDENCE_TOOLS:

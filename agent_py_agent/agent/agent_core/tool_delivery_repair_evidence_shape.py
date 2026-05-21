@@ -25,6 +25,8 @@ def violates_evidence_repair_shape(
     return False
 
 
+# LLM: _has_matching_structural_repair keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _has_matching_structural_repair(
     required_actions: list[dict[str, object]],
     path: str,
@@ -38,6 +40,8 @@ def _has_matching_structural_repair(
     )
 
 
+# LLM: _is_matching_writer_action keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _is_matching_writer_action(
     action: dict[str, object],
     path: str,
@@ -50,6 +54,8 @@ def _is_matching_writer_action(
     return bool(writer_tool == tool and checkpoint_ref and callable(path_matches) and path_matches(path, checkpoint_ref))
 
 
+# LLM: _has_tabular_payload keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _has_tabular_payload(call: dict[str, object]) -> bool:
     if isinstance(call.get("sheets"), list) or isinstance(call.get("rows"), list):
         return True
@@ -57,6 +63,8 @@ def _has_tabular_payload(call: dict[str, object]) -> bool:
     return isinstance(data, dict) and (isinstance(data.get("sheets"), list) or isinstance(data.get("rows"), list))
 
 
+# LLM: _is_matching_evidence_repair keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _is_matching_evidence_repair(
     action: dict[str, object],
     path: str,
@@ -69,11 +77,15 @@ def _is_matching_evidence_repair(
     return _is_matching_writer_action(action, path, tool, path_matches=path_matches)
 
 
+# LLM: _structured_json_data keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _structured_json_data(call: dict[str, object]) -> object:
     data = call.get("data")
     return data if isinstance(data, dict) else {}
 
 
+# LLM: _evidence_repair_payload_is_complete keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _evidence_repair_payload_is_complete(payload: object, action: dict[str, object]) -> bool:
     if not isinstance(payload, dict):
         return False
@@ -91,6 +103,8 @@ def _evidence_repair_payload_is_complete(payload: object, action: dict[str, obje
     return all(field in claimed_fields for field in required_fields) if required_fields else bool(claimed_fields)
 
 
+# LLM: _claim_has_valid_source keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _claim_has_valid_source(item: object, source_ids: set[str]) -> bool:
     if not isinstance(item, dict):
         return False

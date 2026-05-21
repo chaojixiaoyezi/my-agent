@@ -18,6 +18,8 @@ def required_tool_calls(required_actions: list[dict[str, object]]) -> list[dict[
     return calls
 
 
+# LLM: _writer_call keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _writer_call(action: dict[str, object]) -> dict[str, object]:
     tool = str(action.get("writer_tool") or "").strip()
     path = str(action.get("checkpoint_ref") or "").strip()
@@ -31,6 +33,8 @@ def _writer_call(action: dict[str, object]) -> dict[str, object]:
     return call
 
 
+# LLM: _builder_call keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _builder_call(action: dict[str, object]) -> dict[str, object]:
     tool = str(action.get("builder_tool") or "").strip()
     output_ref = str(action.get("output_ref") or "").strip()
@@ -43,6 +47,8 @@ def _builder_call(action: dict[str, object]) -> dict[str, object]:
     return call
 
 
+# LLM: _source_param_name keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _source_param_name(tool: str) -> str:
     return {
         "data_to_workbook": "source_json_path",
@@ -50,6 +56,8 @@ def _source_param_name(tool: str) -> str:
     }.get(tool, "source_path")
 
 
+# LLM: _json_hint keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _json_hint(action: dict[str, object]) -> object:
     for key in ("evidence_shape_hint", "checkpoint_shape_hint"):
         if value := _parse_json_text(str(action.get(key) or "").strip()):
@@ -57,6 +65,8 @@ def _json_hint(action: dict[str, object]) -> object:
     return {}
 
 
+# LLM: _parse_json_text keeps this runtime helper grounded in structured fields.
+# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _parse_json_text(text: str) -> object:
     if not text:
         return {}

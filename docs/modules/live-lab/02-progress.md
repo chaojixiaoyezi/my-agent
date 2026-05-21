@@ -185,3 +185,9 @@
 - 已测试：`python3 -m pytest -q agent_py_agent/tests/test_tools/test_tool_loop.py::test_saved_run_generates_request_id_before_externalized_tool_outputs agent_py_agent/tests/test_live_lab_main_complex_case.py --tb=short` -> `4 passed`。
 - 真实复测：`python3 scripts/live_agent_lab.py --suite main-artifact --real-llm --timeout 600 --run-id main-artifact-20260518-early-request-id` -> `LIVE_LAB_PASS`。MiniMax-M2.7 先 `read_file` 触发 tool-output artifact，再 `read_artifact` 读回完整资料，随后 `memory-fact-write`、`memory-compact --apply`、`memory-resume --compact-resume-mode auto` 全部通过；work_state 已携带 `artifact_refs` 和 `allow_automated_continue`。
 - 下一步：继续主代理底座真实测试，优先验收失败后自动修复、完整 Web/app 或资料整理 E2E，以及多次 compact/resume 的连续续接。
+
+## 2026-05-21 Live Lab timeout 注释同步
+
+- 中文说明：本轮没有改变 Live Lab 超时语义，只补齐 `session.py` 中 `model_request_timeout` 和 `gateway_wait_timeout` 的注释，让审计时能区分“单次模型请求预算”和“gateway 等待预算”。
+- 已实现：timeout 属性继续只读取结构化 args/config 字段，不从 prompt 或日志文字推断。
+- 已测试：annotation coverage、ruff、code-size strict、doc sync 和 full fast pytest 纳入本轮验证。
