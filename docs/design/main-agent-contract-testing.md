@@ -723,3 +723,33 @@ TaskTree 是多 Agent 前置能力，不是真正启动子 Agent。第一版只�
 6. 中型验收批次在小真实报告通过后跑多文件项目和静态站点项目，仍然只允许 read-only/dry-run 事实，不执行真实副作用。
 
 这一步参考了三类成熟做法：通道运行时 的运行状态/heartbeat 思路、长期助手 的 `resume_pending` 可恢复状态字段、会话运行时 的 JSONL 事件输出和 refs-first 事件处理。落地到本仓库时只保留通用合同：状态、refs、事件、恢复、失败样本，不把任何具体业务任务写死进生产代码。
+
+### 阶段 11：LLM 上场前 1-7 总闸门
+
+新增合同：
+
+- `agent_py_agent/agent/contracts/llm_activation_readiness.py`
+- `agent_py_agent/tests/test_llm_activation_readiness.py`
+
+这个阶段不是直接调用真实 LLM，而是确认真实 LLM canary 开始前的七个入口都已经可审计：
+
+1. 模型适配器入口合同：检查 `tool_call_id`、流式半截 JSON、重试预算和模型切换 schema。
+2. Prompt / Context 组装合同：检查 `contract_hash`、`allowed_tools`、`required_artifacts`、`acceptance_contract_ref`、`run_scope_ref` 和 `tool_manifest_ref` 没被截断或丢失。
+3. 工具副作用闸门：检查工具 `effect`、副作用幂等键、replay 阻断和 dry-run / real-run 隔离。
+4. 小型 LLM canary 设计：只保存 `prompt_ref`、workspace ref、预期产物 ref 和验收 ref，不把 prompt 正文当机器事实。
+5. LLM trace / replay capture：真实 LLM 后续必须保存 `llm_input_ref`、`llm_output_ref`、`tool_trace_ref`、`state_events_ref`、`artifact_refs`、`acceptance_report_ref`、`replay_spec_ref` 和 `failure_sample_ref`。
+6. 模型输入阶段超时预算：用 `ModelCallLedger` 的 5K / 10K probe 样本估算首 token 超时，不把缓存命中当正常输入速度。
+7. 总门禁：只有 `pre_real_task_validation` 通过后，才允许进入真实 LLM canary。
+
+参考项目对照：
+
+- 通道运行时：借鉴它的 active run / heartbeat / busy 状态由结构化字段发布，而不是从日志文本猜系统是否还在工作。
+- 会话运行时：借鉴它的 JSONL event processor，把工具、状态、错误和 token 用量都落成事件。
+- LangGraph：借鉴 checkpoint / serde 版本化思路，恢复和 replay 看快照/ref，不看自然语言总结。
+
+完成标准：
+
+- `run_llm_activation_readiness()` 能写出 refs-first 的 7 阶段报告。
+- 缺少 1-6 预真实任务报告时，总门禁必须失败。
+- Canary case 只能包含 prompt ref 和结构化验收字段，不能内联普通自然语言 prompt 作为系统事实。
+- 超时预算必须来自结构化模型调用账本。

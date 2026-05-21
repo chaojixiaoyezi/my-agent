@@ -171,6 +171,10 @@ REQUIRED_AREAS = {
         "agent_py_agent/agent/contracts/pre_real_task_validation.py",
         "agent_py_agent/tests/test_pre_real_task_validation.py",
     ),
+    "llm_activation_readiness": (
+        "agent_py_agent/agent/contracts/llm_activation_readiness.py",
+        "agent_py_agent/tests/test_llm_activation_readiness.py",
+    ),
 }
 
 
