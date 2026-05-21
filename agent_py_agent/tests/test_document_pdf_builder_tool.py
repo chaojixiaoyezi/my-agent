@@ -104,3 +104,25 @@ def test_research_pdf_startup_action_uses_markdown_source_and_pdf_output(tmp_pat
             "output_ref": "outputs/research_documents/research_documents_zh.pdf",
         }
     ]
+
+
+# LLM: research translation tasks need collection completeness and mapping contracts.
+# 函数用途: 验证 PDF 任务不再只要求一个 PDF，而要求 source index、完整性证据和正文映射。
+def test_research_pdf_case_has_collection_completeness_contract(tmp_path: Path) -> None:
+    from agent_py_agent.agent.contracts.main_agent_real_task_suite import (
+        MainAgentRealTaskSuiteRequest,
+        plan_main_agent_real_task_suite,
+    )
+
+    suite = plan_main_agent_real_task_suite(MainAgentRealTaskSuiteRequest(workspace=tmp_path, max_workers=1))
+    case = next(item for item in suite.cases if item.case_id == "research_documents_translation_pdf")
+    artifacts = json.loads((tmp_path / case.expected_artifacts_ref).read_text(encoding="utf-8"))
+    contract = artifacts["artifacts"][0]["validation_contract"]["collection_contract"]
+
+    assert contract["source_json_ref"] == "outputs/research_documents/source_index.json"
+    assert contract["items_path"] == "rows"
+    assert contract["min_items_total"] >= 3
+    assert contract["required_item_values"] == {"translated": True}
+    assert contract["require_completion_evidence"] is True
+    assert contract["mapping"]["artifact_ref"] == "outputs/research_documents/research_documents_zh.md"
+    assert contract["mapping"]["key_fields"] == ["title"]

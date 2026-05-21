@@ -101,6 +101,7 @@ _STATIC_SITE_FINDING_CODES = {
     "inert_control_hits": "STATIC_SITE_INERT_CONTROL_HITS",
     "form_binding_hits": "STATIC_SITE_FORM_BINDING_HITS",
     "missing_dom_id_hits": "STATIC_SITE_MISSING_DOM_ID_HITS",
+    "missing_js_api_hits": "STATIC_SITE_MISSING_JS_API_HITS",
 }
 
 

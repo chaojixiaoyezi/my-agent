@@ -54,7 +54,7 @@ from .main_agent_task_suite import (
     plan_main_agent_task_suite,
 )
 
-_AUTO_RECOVERY_ATTEMPTS = 1
+_AUTO_RECOVERY_ATTEMPTS = 3
 
 
 # LLM: run_main_agent_task_execution is the public controlled runner entrypoint.
@@ -246,16 +246,15 @@ def _timeout_case_result(
     return case_result(bundle)
 
 
-# LLM: _should_auto_resume decides whether a failed case should be retried from its freshly written recovery packet.
-# 函数用途: 根据失败状态、recovery packet 和当前请求上下文判断是否触发一次自动续跑。
+# LLM: _should_auto_resume retries bounded recovery packets until a case passes or the attempt budget is spent.
+# 函数用途: 根据失败状态、recovery packet 和 attempt-N 结构化路径决定是否继续自动续跑。
 def _should_auto_resume(bundle: CaseResultBundle) -> bool:
-    runtime = bundle.runtime
     if _AUTO_RECOVERY_ATTEMPTS <= 0:
         return False
     return bool(
         bundle.status == "FAILED"
         and bundle.recovery_packet_ref
-        and runtime.request.recovery_packet_path is None
+        and _recovery_attempt_index(bundle.recovery_packet_ref) < _AUTO_RECOVERY_ATTEMPTS
     )
 
 
@@ -274,5 +273,25 @@ def _auto_resume_case(bundle: CaseResultBundle) -> MainAgentTaskExecutionCaseRes
         replace(runtime.request, recovery_packet_path=packet_path),
         workspace=runtime.workspace,
     )
+
+
+# LLM: _recovery_attempt_index reads attempt depth from refs, not subprocess stdout.
+# 函数用途: 将 `resumes/attempt-002/recovery_packet.json` 解析成 2；根 recovery_packet 记为 0。
+def _recovery_attempt_index(packet_ref: str) -> int:
+    values = [
+        _attempt_number(part)
+        for part in Path(str(packet_ref)).parts
+        if part.startswith("attempt-")
+    ]
+    return max(values) if values else 0
+
+
+# LLM: _attempt_number keeps attempt parsing bounded to the stable attempt-N path segment.
+# 函数用途: 解析机器生成的 attempt 目录名，坏值按 0 处理。
+def _attempt_number(part: str) -> int:
+    try:
+        return int(part.removeprefix("attempt-"))
+    except ValueError:
+        return 0
 
 __all__ = ["MainAgentTaskExecutionCaseResult", "MainAgentTaskExecutionReport", "MainAgentTaskExecutionRequest", "revalidate_main_agent_task_execution", "run_main_agent_task_execution"]

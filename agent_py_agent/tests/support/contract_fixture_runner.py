@@ -4,6 +4,10 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent_py_agent.agent.contracts.artifact_collection_contract import (
+    collection_contract_finding_dicts,
+)
+
 from .contract_fixture_tool_checks import tool_conditions as _tool_conditions
 
 
@@ -79,6 +83,7 @@ def _artifact_conditions(
     non_empty = True
     sections_present = True
     json_requirements_present = True
+    collection_contract_present = True
     evidence_source_present = True
     path_inside_run_dir = True
     for artifact in _required_artifacts(contract):
@@ -87,12 +92,14 @@ def _artifact_conditions(
         non_empty = non_empty and artifact_state["artifact_non_empty"]
         sections_present = sections_present and artifact_state["required_sections_present"]
         json_requirements_present = json_requirements_present and artifact_state["json_requirements_present"]
+        collection_contract_present = collection_contract_present and artifact_state["collection_contract_present"]
         evidence_source_present = evidence_source_present and artifact_state["evidence_source_present"]
         path_inside_run_dir = path_inside_run_dir and artifact_state["artifact_path_inside_run_dir"]
     return {
         "artifact_exists": exists,
         "artifact_non_empty": non_empty,
         "artifact_path_inside_run_dir": path_inside_run_dir,
+        "collection_contract_present": collection_contract_present,
         "evidence_source_present": evidence_source_present,
         "json_requirements_present": json_requirements_present,
         "required_sections_present": sections_present,
@@ -110,6 +117,7 @@ def _evaluate_artifact(
             "artifact_exists": False,
             "artifact_non_empty": False,
             "artifact_path_inside_run_dir": False,
+            "collection_contract_present": False,
             "evidence_source_present": False,
             "json_requirements_present": False,
             "required_sections_present": False,
@@ -120,6 +128,7 @@ def _evaluate_artifact(
             "artifact_exists": False,
             "artifact_non_empty": False,
             "artifact_path_inside_run_dir": True,
+            "collection_contract_present": False,
             "evidence_source_present": False,
             "json_requirements_present": False,
             "required_sections_present": False,
@@ -131,10 +140,29 @@ def _evaluate_artifact(
         "artifact_exists": True,
         "artifact_non_empty": non_empty,
         "artifact_path_inside_run_dir": True,
+        "collection_contract_present": _collection_contract_conditions(run_dir, artifact, evaluation),
         "evidence_source_present": _evidence_source_conditions(artifact, path, evaluation),
         "json_requirements_present": _json_conditions(artifact, path, evaluation),
         "required_sections_present": sections_present,
     }
+
+
+def _collection_contract_conditions(
+    run_dir: Path,
+    artifact: dict[str, object],
+    evaluation: _FixtureEvaluation,
+) -> bool:
+    contract = artifact.get("validation_contract")
+    if not isinstance(contract, dict) or "collection_contract" not in contract:
+        return True
+    findings = collection_contract_finding_dicts(contract, run_dir)
+    for finding in findings:
+        evaluation.add(
+            str(finding.get("code") or "COLLECTION_CONTRACT_FAILED"),
+            str(finding.get("location") or "collection_contract"),
+            str(finding.get("message") or "collection contract failed"),
+        )
+    return not findings
 
 
 def _artifact_meets_min_size(

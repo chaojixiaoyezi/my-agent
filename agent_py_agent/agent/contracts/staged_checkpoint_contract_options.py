@@ -14,6 +14,7 @@ class StagedCheckpointContext:
     required_columns: list[str]
     required_sheets_min: int
     evidence_contract: dict[str, object]
+    validation_contract: dict[str, object]
 
 
 # LLM: staged_checkpoint_contexts binds each staged ref to the artifact validation options it must satisfy.
@@ -34,6 +35,7 @@ def staged_checkpoint_contexts(
             required_columns=_string_list(contract.get("required_columns")),
             required_sheets_min=_positive_int(contract.get("required_sheets_min")),
             evidence_contract=_evidence_contract(contract, ref_text, source_ref),
+            validation_contract=dict(contract),
         )
         for ref in refs
         if (ref_text := str(ref).strip()) and ref_text not in preferred_paths

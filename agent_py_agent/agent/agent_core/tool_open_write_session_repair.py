@@ -14,8 +14,8 @@ _MAX_REPAIRS = 2
 
 # LLM: open_write_session_repair_context is based on manifest facts, not model prose.
 # 函数用途: 如果存在未 finish 的分块写入 session，则返回下一轮模型必须处理的结构化提示。
-def open_write_session_repair_context(agent: object, repairs: int) -> str:
-    sessions = open_file_write_sessions(_agent_root(agent))
+def open_write_session_repair_context(agent: object, repairs: int, params: object | None = None) -> str:
+    sessions = _open_sessions(agent, params)
     if not sessions or repairs >= _MAX_REPAIRS:
         return ""
     payload = {"open_file_write_sessions": sessions}
@@ -31,8 +31,8 @@ def open_write_session_repair_context(agent: object, repairs: int) -> str:
 
 # LLM: open_write_session_block_response gives a deterministic stop after repeated ignored repair prompts.
 # 函数用途: 模型多次忽略 open session 合同时，返回明确失败，避免无限空转。
-def open_write_session_block_response(agent: object) -> ModelResponse | None:
-    sessions = open_file_write_sessions(_agent_root(agent))
+def open_write_session_block_response(agent: object, params: object | None = None) -> ModelResponse | None:
+    sessions = _open_sessions(agent, params)
     if not sessions:
         return None
     return ModelResponse(
@@ -48,3 +48,18 @@ def open_write_session_block_response(agent: object) -> ModelResponse | None:
 def _agent_root(agent: object) -> Path:
     root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", ".")
     return Path(root).resolve()
+
+
+# LLM: _open_sessions applies request/run/task filters when the tool loop has them.
+# 函数用途: 同一 run 内继续阻止未提交分块写入，旧 run 留下的会话只交给 doctor/recovery 处理。
+def _open_sessions(agent: object, params: object | None) -> list[dict[str, object]]:
+    if params is None:
+        return open_file_write_sessions(_agent_root(agent))
+    return open_file_write_sessions(
+        _agent_root(agent),
+        scope={
+            "request_id": str(getattr(params, "request_id", "") or ""),
+            "run_id": str(getattr(params, "run_id", "") or ""),
+            "task_id": str(getattr(params, "task_id", "") or ""),
+        },
+    )

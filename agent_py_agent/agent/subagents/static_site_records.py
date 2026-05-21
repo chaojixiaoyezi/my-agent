@@ -41,6 +41,7 @@ def static_site_failure_summary(result: Any) -> str:
         "inert_control_hits",
         "form_binding_hits",
         "missing_dom_id_hits",
+        "missing_js_api_hits",
     ):
         values = getattr(result, field, [])
         if values:

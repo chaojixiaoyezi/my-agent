@@ -30,13 +30,24 @@ def without_tool_call_after_limit(agent, response: ModelResponse) -> ModelRespon
 # LLM: payload_with_runtime_scope injects current runner ids into scoped tools without model involvement.
 # 函数用途: 让 read_artifact 短引用按当前 run/task/request 解析，避免同号 artifact 跨 run 串线。
 def payload_with_runtime_scope(agent, params: ToolLoopExecuteParams, payload: object) -> object:
-    if not isinstance(payload, dict) or str(payload.get("tool") or "") != "read_artifact":
+    if not isinstance(payload, dict):
         return payload
-    scoped = dict(payload)
-    scoped.setdefault("run_id", runtime_run_id(agent, params))
-    scoped.setdefault("task_id", params.task_id)
-    scoped.setdefault("request_id", params.request_id)
-    return scoped
+    tool = str(payload.get("tool") or "")
+    if tool == "read_artifact":
+        scoped = dict(payload)
+        scoped.setdefault("run_id", runtime_run_id(agent, params))
+        scoped.setdefault("task_id", params.task_id)
+        scoped.setdefault("request_id", params.request_id)
+        return scoped
+    if tool == "file_write_session":
+        scoped = dict(payload)
+        scoped["_runtime_scope"] = {
+            "request_id": params.request_id,
+            "run_id": runtime_run_id(agent, params),
+            "task_id": params.task_id,
+        }
+        return scoped
+    return payload
 
 
 # LLM: runtime_run_id falls back to active subagent context for nested runner tool records.

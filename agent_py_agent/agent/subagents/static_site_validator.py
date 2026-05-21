@@ -46,6 +46,7 @@ class StaticSiteCheckResult:
     inert_control_hits: list[str] = field(default_factory=list)
     form_binding_hits: list[str] = field(default_factory=list)
     missing_dom_id_hits: list[str] = field(default_factory=list)
+    missing_js_api_hits: list[str] = field(default_factory=list)
     repair_hints: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -61,6 +62,7 @@ class StaticSiteCheckResult:
             or self.inert_control_hits
             or self.form_binding_hits
             or self.missing_dom_id_hits
+            or self.missing_js_api_hits
         )
 
     # LLM: to_dict keeps result serialization stable and bounded for reports.
@@ -77,6 +79,7 @@ class StaticSiteCheckResult:
             "inert_control_hits": self.inert_control_hits,
             "form_binding_hits": self.form_binding_hits,
             "missing_dom_id_hits": self.missing_dom_id_hits,
+            "missing_js_api_hits": self.missing_js_api_hits,
             "repair_hints": self.repair_hints,
             "warnings": self.warnings,
         }
@@ -227,6 +230,7 @@ def _finalize_dom_checks(
     result.missing_dom_id_hits.extend(
         _missing_required_dom_id_hits(state.element_ids, options.required_dom_ids)
     )
+    result.missing_js_api_hits.extend(_missing_window_app_method_hits(combined_script_text))
 
 
 # LLM: _check_required_files records missing pages/assets without opening arbitrary paths.
@@ -275,6 +279,64 @@ def _missing_required_dom_id_hits(element_ids: set[str], required_dom_ids: list[
     ]
 
 
+# LLM: window.app API checks catch inline handlers that call methods never exported by app.js.
+# 函数用途: 检查 `app.method()` 调用是否能在 window.app 的结构化导出中找到，避免按钮看起来可点但运行时报错。
+def _missing_window_app_method_hits(script_text: str) -> list[str]:
+    refs = _referenced_window_app_methods(script_text)
+    if not refs:
+        return []
+    exported = _exported_window_app_methods(script_text)
+    return [f"app.{name}" for name in sorted(refs - exported)]
+
+
+def _referenced_window_app_methods(script_text: str) -> set[str]:
+    return {
+        name
+        for name in re.findall(r"\bapp\.([A-Za-z_$][\w$]*)\s*\(", script_text or "")
+        if name not in {"addEventListener"}
+    }
+
+
+def _exported_window_app_methods(script_text: str) -> set[str]:
+    text = script_text or ""
+    names = {
+        match.group(1)
+        for match in re.finditer(r"\bwindow\.app\.([A-Za-z_$][\w$]*)\s*=", text)
+    }
+    for body in re.findall(r"\bwindow\.app\s*=\s*\{(?P<body>.*?)\}\s*;", text, flags=re.DOTALL):
+        names.update(_object_property_names(body))
+    for body in re.findall(
+        r"\b(?:const|let|var)\s+app\s*=\s*\{(?P<body>.*?)\}\s*;",
+        text,
+        flags=re.DOTALL,
+    ):
+        names.update(_object_property_names(body))
+    for body in re.findall(
+        r"\b(?:const|let|var)\s+app\s*=\s*\{(?P<body>.*?)\}\s*;\s*window\.app\s*=\s*app\s*;",
+        text,
+        flags=re.DOTALL,
+    ):
+        names.update(_object_property_names(body))
+    return names
+
+
+def _object_property_names(body: str) -> set[str]:
+    names: set[str] = set()
+    cleaned = re.sub(r"//.*?$|/\*.*?\*/", "", body or "", flags=re.MULTILINE | re.DOTALL)
+    for chunk in cleaned.split(","):
+        item = chunk.strip()
+        if not item:
+            continue
+        match = re.match(r"([A-Za-z_$][\w$]*)\s*:", item)
+        if match:
+            names.add(match.group(1))
+            continue
+        match = re.match(r"([A-Za-z_$][\w$]*)\s*(?:\(|$)", item)
+        if match:
+            names.add(match.group(1))
+    return names
+
+
 # LLM: _html_structure_hits catches malformed full-page HTML without requiring a browser.
 # 函数用途: 对声明为完整 HTML 的产物做轻量结构检查，避免正文落进 style/script 这类明显坏页通过验收。
 def _html_structure_hits(text: str, html_file: Path, site_root: Path) -> list[str]:
@@ -297,6 +359,13 @@ def _html_structure_hits(text: str, html_file: Path, site_root: Path) -> list[st
         closes = lower.count(f"</{tag}>")
         if opens != closes:
             hits.append(f"{rel_path}:unbalanced_{tag}")
+    for tag in ("html", "body"):
+        closes = lower.count(f"</{tag}>")
+        if closes > 1:
+            hits.append(f"{rel_path}:duplicate_{tag}_close")
+    html_close = lower.find("</html>")
+    if html_close != -1 and re.search(r"<[A-Za-z][^>]*>", lower[html_close + len("</html>") :]):
+        hits.append(f"{rel_path}:trailing_markup_after_html_close")
     if (
         lower.find("<body") != -1
         and lower.find("</head>") != -1
@@ -325,6 +394,10 @@ def _repair_hints(result: StaticSiteCheckResult) -> list[str]:
     if result.missing_dom_id_hits:
         hints.append(
             "missing_dom_ids: add the referenced id to a real element or remove the stale unguarded JS lookup"
+        )
+    if result.missing_js_api_hits:
+        hints.append(
+            "missing_js_api: export referenced window.app methods or update inline handlers/templates"
         )
     return hints[:6]
 

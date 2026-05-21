@@ -19,6 +19,23 @@ from .main_agent_real_task_execution_models import MainAgentRealTaskExecutionReq
 from .main_agent_real_task_recovery_reconcile import reconcile_recovery_open_write_sessions
 from .main_agent_real_task_recovery_resume import recovery_delivery_contract_payload
 from .main_agent_real_task_suite import MainAgentRealTaskCasePlan
+from .main_agent_task_execution_files import (
+    isolated_runtime_config,
+    recovery_attempt_inspection_budget,
+    without_config_keys,
+)
+
+_RUNTIME_ISOLATION_KEYS = (
+    "workspace_root",
+    "my_agent_home",
+    "memory_path",
+    "local_store_path",
+    "local_store_files_dir",
+    "local_store_events_path",
+    "subagent_workspace",
+    "gateway_workspace",
+    "adapter_workspace",
+)
 
 
 # LLM: command_for_case builds an argv list and never shells through natural language.
@@ -110,9 +127,9 @@ def write_case_config(path: Path, base_config_path: Path | None, task_workspace:
         text = Path(base_config_path).expanduser().read_text(encoding="utf-8")
     else:
         text = default_config_text()
-    text = without_config_key(text, "workspace_root")
+    text = without_config_keys(text, _RUNTIME_ISOLATION_KEYS)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f'{text.rstrip()}\nworkspace_root: "{task_workspace}"\n', encoding="utf-8")
+    path.write_text(f"{text.rstrip()}\n{isolated_runtime_config(task_workspace)}\n", encoding="utf-8")
 
 
 # LLM: Recovery attempts get a machine marker so guards can distinguish a new attempt from stale closeout debt.
@@ -134,7 +151,7 @@ def _write_recovery_attempt_marker(
             "packet_ref": rel(Path(packet_path).expanduser().resolve(), workspace),
             "delivery_contract_ref": rel(delivery_contract_path, workspace),
             **_recovery_attempt_baseline(task_workspace),
-            "inspection_round_budget": 4,
+            "inspection_round_budget": recovery_attempt_inspection_budget(task_workspace),
             "started_at_unix": round(time.time(), 3),
         },
     )
@@ -182,13 +199,6 @@ def default_config_text() -> str:
                 "enable_subagents: true",
             ]
         )
-
-
-# LLM: without_config_key removes one top-level simple YAML key before appending overrides.
-# 函数用途: 删除基础配置里的 workspace_root，避免同一文件里出现多个冲突工作区。
-def without_config_key(text: str, key: str) -> str:
-    prefix = f"{key}:"
-    return "\n".join(line for line in text.splitlines() if not line.strip().startswith(prefix))
 
 
 # LLM: case_paths returns all per-case runtime paths in the workspace.

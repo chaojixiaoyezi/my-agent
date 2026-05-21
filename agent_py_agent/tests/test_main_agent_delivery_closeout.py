@@ -118,6 +118,7 @@ def test_tool_loop_does_not_close_out_when_delivery_contract_fails():
         assert repair["recommended_action"] == "repair_artifact_against_findings"
         assert "write_file" in repair["write_tools"]
         assert "HTML_INCOMPLETE_DOCUMENT" in repair["finding_codes"]
+        assert any(str(path).endswith("outputs/furniture_homepage/index.html") for path in repair["repair_targets"])
 
 
 # LLM: Incomplete contracted artifacts must not trigger delivery completion.

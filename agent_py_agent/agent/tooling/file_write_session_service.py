@@ -106,6 +106,7 @@ class FileWriteSessionService:
                 raw_path=raw_target_path,
                 target=resolved_target,
                 paths=paths,
+                runtime_scope=_runtime_scope(params),
             )
         )
         write_manifest(paths.manifest_path, manifest)
@@ -215,6 +216,20 @@ def next_chunk_index(manifest: dict[str, Any]) -> int:
 def received_chunk_indexes(manifest: dict[str, Any]) -> list[int]:
     chunks = manifest.get("chunks") or {}
     return sorted(int(index) for index in chunks)
+
+
+# LLM: _runtime_scope mirrors request/run/task ids into new file-write manifests.
+# 函数用途: begin 创建的 open session 带机器 scope，后续 run 只处理自己留下的未提交写入。
+def _runtime_scope(params: dict[str, Any]) -> dict[str, str]:
+    value = params.get("_runtime_scope")
+    if not isinstance(value, dict):
+        return {}
+    scope = {
+        "request_id": str(value.get("request_id") or ""),
+        "run_id": str(value.get("run_id") or ""),
+        "task_id": str(value.get("task_id") or ""),
+    }
+    return {key: item for key, item in scope.items() if item}
 
 
 __all__ = [

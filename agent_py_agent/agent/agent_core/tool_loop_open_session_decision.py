@@ -46,12 +46,13 @@ def open_write_session_decision(request: OpenSessionDecisionRequest) -> OpenSess
     context = open_write_session_repair_context(
         request.agent,
         request.counters.open_write_session_repairs,
+        request.params,
     )
     if context:
         request.params.tool_context.append(context)
         return OpenSessionDecision("continue", None, [], _inc_open_session(request.counters))
     if request.counters.open_write_session_repairs:
-        block = open_write_session_block_response(request.agent)
+        block = open_write_session_block_response(request.agent, request.params)
         if block is not None:
             return OpenSessionDecision("break", block, [], request.counters)
     return None
@@ -60,7 +61,7 @@ def open_write_session_decision(request: OpenSessionDecisionRequest) -> OpenSess
 # LLM: open_session_tool_call_decision enforces continuation of existing staged writes.
 # 函数用途: open session 存在时，下一轮工具调用只能继续/finish/abort 对应 session。
 def open_session_tool_call_decision(request: OpenSessionDecisionRequest) -> OpenSessionDecision | None:
-    sessions = open_file_write_sessions(_agent_root(request.agent))
+    sessions = _open_sessions_for_request(request)
     if not sessions:
         return None
     open_ids = {str(item.get("session_id") or "") for item in sessions if str(item.get("session_id") or "")}
@@ -79,11 +80,12 @@ def _invalid_open_session_tool_call(request: OpenSessionDecisionRequest) -> Open
     context = open_write_session_repair_context(
         request.agent,
         request.counters.open_write_session_repairs,
+        request.params,
     )
     if context:
         request.params.tool_context.append(context)
         return OpenSessionDecision("continue", None, [], _inc_open_session(request.counters))
-    block = open_write_session_block_response(request.agent)
+    block = open_write_session_block_response(request.agent, request.params)
     return OpenSessionDecision("break", block or request.response, [], request.counters)
 
 
@@ -92,6 +94,20 @@ def _invalid_open_session_tool_call(request: OpenSessionDecisionRequest) -> Open
 def _agent_root(agent: object) -> Path:
     root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", ".")
     return Path(root).resolve()
+
+
+# LLM: _open_sessions_for_request scopes open write repairs to the active machine request ids.
+# 函数用途: 避免旧 run 崩溃留下的 open session 阻断后续独立主代理任务。
+def _open_sessions_for_request(request: OpenSessionDecisionRequest) -> list[dict[str, object]]:
+    params = request.params
+    return open_file_write_sessions(
+        _agent_root(request.agent),
+        scope={
+            "request_id": str(getattr(params, "request_id", "") or ""),
+            "run_id": str(getattr(params, "run_id", "") or ""),
+            "task_id": str(getattr(params, "task_id", "") or ""),
+        },
+    )
 
 
 __all__ = [

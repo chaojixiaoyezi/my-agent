@@ -29,6 +29,11 @@ def test_main_agent_real_task_xlsx_case_has_staged_artifact_contract(tmp_path):
         "outputs/github_star_growth/source_data.json",
         "outputs/github_star_growth/github_star_growth.xlsx",
     ]
+    assert contract["collection_contract"]["source_json_ref"] == "outputs/github_star_growth/source_data.json"
+    assert contract["collection_contract"]["groups_path"] == "sheets"
+    assert contract["collection_contract"]["items_path"] == "rows"
+    assert contract["collection_contract"]["min_groups"] >= 20
+    assert contract["collection_contract"]["min_items_per_group"] == 10
 
 
 # LLM: real tasks need resolved artifact path contracts so models do not infer roots from old files.
@@ -107,9 +112,11 @@ def test_main_agent_real_task_web_project_bootstrap_targets_required_files(tmp_p
         delivery_contract_path=paths["delivery_contract"],
     )
     payload = json.loads(paths["delivery_contract"].read_text(encoding="utf-8"))
+    validation_contract = payload["artifacts"][0]["validation_contract"]
     targets = payload["bootstrap_contract"]["materialization_targets"]
     target_paths = {item["workspace_relative_path"] for item in targets}
 
+    assert validation_contract["require_complete_html"] is True
     assert "outputs/shopping_site/index.html" in target_paths
     assert "outputs/shopping_site/app.js" in target_paths
 
@@ -127,6 +134,44 @@ def test_main_agent_real_task_case_config_uses_repo_default_backend(tmp_path):
 
     assert 'model_backend: "anthropic_compatible"' in text
     assert 'model_backend: "echo"' not in text
+
+
+# LLM: controlled task subprocesses need owner-home isolation just like Live Lab sessions.
+# 函数用途: 验证每个真实任务 case 的状态、gateway、记忆和子代理目录都关在本 case workspace 内。
+def test_main_agent_real_task_case_config_isolates_runtime_home(tmp_path):
+    from agent_py_agent.agent.contracts.main_agent_task_execution_files import (
+        write_case_config,
+    )
+
+    base_config = tmp_path / "base.yaml"
+    base_config.write_text(
+        "\n".join(
+            [
+                'agent_name: "base"',
+                'model_backend: "echo"',
+                'workspace_root: "/old/workspace"',
+                'my_agent_home: "/old/home"',
+                'local_store_path: "/old/local.db"',
+                'gateway_workspace: "/old/gateway"',
+                'subagent_workspace: "/old/subagents"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    task_workspace = tmp_path / "task" / "workspace"
+    config_path = tmp_path / "task" / "config.yaml"
+
+    write_case_config(config_path, base_config, task_workspace)
+
+    text = config_path.read_text(encoding="utf-8")
+    assert f'workspace_root: "{task_workspace}"' in text
+    assert f'my_agent_home: "{task_workspace / ".my_agent" / "home"}"' in text
+    assert 'local_store_path: ".my_agent/local_store/local.db"' in text
+    assert 'gateway_workspace: ".my_agent/gateway"' in text
+    assert 'subagent_workspace: ".my_agent/subagents"' in text
+    assert "/old/workspace" not in text
+    assert "/old/home" not in text
+    assert "/old/local.db" not in text
 
 
 # LLM: command preparation should reconcile duplicate write sessions before the resumed model run starts.

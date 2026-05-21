@@ -24,6 +24,7 @@ from .tool_call_runtime import (
     guarded_tool_call_result,
 )
 from .tool_context_reducer import render_tool_result_for_live_prompt
+from .tool_delivery_repair_guard import delivery_repair_context
 from .tool_limit_closeout import final_response_after_tool_limit
 from .tool_loop_completion import ToolRoundCompletionRequest, completion_response_after_tool_round
 from .tool_loop_empty_response import (
@@ -92,6 +93,7 @@ class ToolLoopService:
         tool_rounds = params.tool_rounds
         repair_counters = ToolLoopRepairCounters()
         empty_response_repairs = 0
+        _append_initial_delivery_repair_context(self._agent, params)
 
         while True:
             (
@@ -309,3 +311,14 @@ def _task_local_progress_context(progress: dict[str, object]) -> str:
             "If next_action mentions output.json, stop product-body writes and close out with structured refs.",
         ]
     )
+
+
+# LLM: _append_initial_delivery_repair_context makes active recovery contracts visible before the first retry turn.
+# 函数用途: 续跑一开始就注入 closeout 的 required_actions/required_tool_calls，而不是等模型先犯一次空转。
+def _append_initial_delivery_repair_context(agent: object, params: ToolLoopExecuteParams) -> None:
+    context = delivery_repair_context(agent, repairs=0)
+    if not context:
+        return
+    if any(str(item).startswith("[tool-system delivery-required-repair]") for item in params.tool_context):
+        return
+    params.tool_context.append(context)

@@ -173,6 +173,7 @@ def _delivery_repair_payload(agent: object) -> dict[str, object]:
             "artifact_path": str(item.get("artifact_path") or ""),
             "finding_codes": item.get("finding_codes") if isinstance(item.get("finding_codes"), list) else [],
             "finding_values": item.get("finding_values") if isinstance(item.get("finding_values"), list) else [],
+            "repair_targets": item.get("repair_targets") if isinstance(item.get("repair_targets"), list) else [],
             "write_tools": item.get("write_tools") if isinstance(item.get("write_tools"), list) else [],
         }
         for item in actions
@@ -182,12 +183,14 @@ def _delivery_repair_payload(agent: object) -> dict[str, object]:
     if not required_actions:
         return {}
     pending_targets = progress.get("pending_materialization_targets")
+    agent_root = Path(getattr(agent, "root", ".")).resolve()
     return {
             "pending_materialization_targets": pending_targets if isinstance(pending_targets, list) else [],
             "report_ref": str(report.get("report_ref") or ""),
             "required_actions": required_actions,
+            "repair_target_snapshots": _repair_target_snapshots(required_actions, agent_root),
             "required_tool_calls": required_tool_calls(required_actions),
-            "strict_write_required": strict_write_required(progress, agent_root=Path(getattr(agent, "root", ".")).resolve()),
+            "strict_write_required": strict_write_required(progress, agent_root=agent_root),
         }
 
 
@@ -211,6 +214,12 @@ def _call_is_productive(
     context: _ProductivityContext,
 ) -> bool:
     tool = str(call.get("tool") or "").strip()
+    if _is_declared_repair_target_read(call, context.required_actions):
+        return True
+    if _is_checkpoint_repair_read(call, context.required_actions):
+        return True
+    if _is_evidence_repair_gathering(call, context.required_actions):
+        return True
     if _violates_declared_writer_tool(call, context.required_actions):
         return False
     if violates_evidence_repair_shape(
@@ -244,6 +253,46 @@ def _violates_declared_writer_tool(call: dict[str, object], required_actions: li
     return False
 
 
+# LLM: _is_checkpoint_repair_read allows one structured checkpoint inspection before rewriting it.
+# 函数用途: 修复结构化 JSON checkpoint 时，读取同一 checkpoint_ref 是获取机器数据，不是验收产物空转。
+def _is_checkpoint_repair_read(call: dict[str, object], required_actions: list[dict[str, object]]) -> bool:
+    if str(call.get("tool") or "").strip() != "read_file":
+        return False
+    path = _call_path(call)
+    if not path:
+        return False
+    repair_actions = {"repair_evidence_refs", "repair_structured_checkpoint_json", "write_non_empty_structured_rows"}
+    return any(
+        str(action.get("recommended_action") or "") in repair_actions
+        and _same_path_ref(path, str(action.get("checkpoint_ref") or ""))
+        for action in required_actions
+    )
+
+
+# LLM: declared repair targets create a bounded read allowance before a mutation.
+# 函数用途: 只允许读取 closeout 机器字段列出的 repair_targets/checkpoint_ref/artifact_path，避免修复前检查退化成随意探索。
+def _is_declared_repair_target_read(call: dict[str, object], required_actions: list[dict[str, object]]) -> bool:
+    if str(call.get("tool") or "").strip() != "read_file":
+        return False
+    path = _call_path(call)
+    if not path:
+        return False
+    return any(_same_path_ref(path, target) for target in _repair_target_values(required_actions))
+
+
+# LLM: _is_evidence_repair_gathering allows source collection when claims/source_refs are the failed contract.
+# 函数用途: 证据修复可以先调用抓取/检索工具补 source_refs，但仍由后续 verifier 要求写入结构化 claims。
+def _is_evidence_repair_gathering(call: dict[str, object], required_actions: list[dict[str, object]]) -> bool:
+    tool = str(call.get("tool") or "").strip()
+    if tool not in _EVIDENCE_GATHERING_TOOL_NAMES:
+        return False
+    return any(
+        str(action.get("recommended_action") or "") == "repair_evidence_refs"
+        and bool(action.get("required_fields"))
+        for action in required_actions
+    )
+
+
 # LLM: _call_path keeps this runtime helper grounded in structured fields.
 # 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _call_path(call: dict[str, object]) -> str:
@@ -258,7 +307,11 @@ def _call_path(call: dict[str, object]) -> str:
 def _same_path_ref(path: str, ref: str) -> bool:
     normalized_path = path.replace("\\", "/").rstrip("/")
     normalized_ref = ref.replace("\\", "/").strip("/")
-    return normalized_path == normalized_ref or normalized_path.endswith(f"/{normalized_ref}")
+    return (
+        normalized_path == normalized_ref
+        or normalized_path.endswith(f"/{normalized_ref}")
+        or normalized_ref.endswith(f"/{normalized_path}")
+    )
 
 
 # LLM: _run_command_is_productive keeps this runtime helper grounded in structured fields.
@@ -310,7 +363,7 @@ def _productive_tools(payload: dict[str, object], action_tools: set[str]) -> set
 def _inspection_only_tools(required_actions: list[dict[str, object]], strict_write_required: bool) -> set[str]:
     tools = set(_INSPECTION_ONLY_TOOL_NAMES)
     if not strict_write_required and _has_artifact_finding_repair_action(required_actions):
-        tools.difference_update({"list_files", "read_file"})
+        tools.difference_update(_allowed_artifact_repair_inspection_tools(required_actions))
     if not strict_write_required and not _has_builder_ready_action(required_actions):
         return tools
     tools.update(_EVIDENCE_GATHERING_TOOL_NAMES)
@@ -331,6 +384,21 @@ def _has_artifact_finding_repair_action(required_actions: list[dict[str, object]
     return any(str(item.get("recommended_action") or "") == "repair_artifact_against_findings" for item in required_actions)
 
 
+# LLM: Artifact repair only treats inspection as progress when the artifact is still missing.
+# 函数用途: 已存在但验收失败的产物需要写入/替换推进；重复 read_file 不再算修复动作。
+def _allowed_artifact_repair_inspection_tools(required_actions: list[dict[str, object]]) -> set[str]:
+    codes = {
+        str(code)
+        for action in required_actions
+        if str(action.get("recommended_action") or "") == "repair_artifact_against_findings"
+        for code in action.get("finding_codes", [])
+        if isinstance(action.get("finding_codes"), list)
+    }
+    if codes and codes.issubset({"ARTIFACT_MISSING"}):
+        return {"list_files"}
+    return set()
+
+
 # LLM: _call_command keeps this runtime helper grounded in structured fields.
 # 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _call_command(call: dict[str, object]) -> str:
@@ -341,3 +409,65 @@ def _call_command(call: dict[str, object]) -> str:
     if isinstance(shell, dict):
         return str(shell.get("command") or "").strip().lower()
     return ""
+
+
+# LLM: _repair_target_snapshots gives the model bounded file facts when read_file is rejected during repair.
+# 函数用途: 对 required repair_targets 读取小预览，避免模型为了获取补丁上下文反复调用检查工具。
+def _repair_target_snapshots(required_actions: list[dict[str, object]], agent_root: Path) -> list[dict[str, object]]:
+    targets = _repair_target_values(required_actions)
+    snapshots: list[dict[str, object]] = []
+    budget = 6000
+    for target in targets[:4]:
+        snapshot = _repair_target_snapshot(target, agent_root, max_chars=min(2400, budget))
+        if snapshot:
+            budget -= len(str(snapshot.get("preview") or ""))
+            snapshots.append(snapshot)
+        if budget <= 0:
+            break
+    return snapshots
+
+
+# LLM: _repair_target_values collects candidate files from structured recovery actions.
+# 函数用途: 只读取 repair_targets/checkpoint_ref/artifact_path 等机器字段，不解析提示词或日志正文。
+def _repair_target_values(required_actions: list[dict[str, object]]) -> list[str]:
+    values: list[str] = []
+    for action in required_actions:
+        targets = action.get("repair_targets")
+        if isinstance(targets, list):
+            values.extend(str(item) for item in targets if str(item))
+        for key in ("checkpoint_ref", "artifact_path"):
+            value = str(action.get(key) or "").strip()
+            if value:
+                values.append(value)
+    return list(dict.fromkeys(values))
+
+
+# LLM: _repair_target_snapshot reads a bounded text preview for one local repair target.
+# 函数用途: 快照只面向小型文本文件；目录、大文件和二进制文件只返回存在性事实。
+def _repair_target_snapshot(target: str, agent_root: Path, *, max_chars: int) -> dict[str, object]:
+    path = _resolve_repair_target(target, agent_root)
+    if not path.exists():
+        return {"path": target, "exists": False}
+    if path.is_dir():
+        return {"path": target, "exists": True, "kind": "directory"}
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return {"path": target, "exists": True, "readable": False}
+    snapshot: dict[str, object] = {"path": target, "exists": True, "kind": "file", "size_bytes": size}
+    if size > 12000:
+        return snapshot
+    try:
+        snapshot["preview"] = path.read_text(encoding="utf-8")[:max(0, max_chars)]
+    except UnicodeDecodeError:
+        snapshot["text"] = False
+    except OSError:
+        snapshot["readable"] = False
+    return snapshot
+
+
+# LLM: _resolve_repair_target keeps snapshot reads scoped to the current agent root for relative refs.
+# 函数用途: 支持 absolute repair_targets，同时让相对 ref 按 workspace root 解析。
+def _resolve_repair_target(target: str, agent_root: Path) -> Path:
+    path = Path(target).expanduser()
+    return path if path.is_absolute() else agent_root / path

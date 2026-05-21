@@ -45,6 +45,46 @@ def test_main_agent_task_execution_auto_resumes_once_from_recovery_packet(tmp_pa
     assert "resumes/attempt-001/stdout.txt" in case.stdout_ref
 
 
+# LLM: Auto recovery should handle chained findings without user intervention.
+# 函数用途: 验证首次续跑仍失败时，runner 会继续使用新的 recovery_packet 开下一次 attempt。
+def test_main_agent_task_execution_auto_resumes_multiple_attempts(tmp_path, monkeypatch):
+    from agent_py_agent.agent.contracts import main_agent_task_execution as execution
+    from agent_py_agent.agent.contracts.main_agent_task_execution import (
+        MainAgentTaskExecutionRequest,
+        run_main_agent_task_execution,
+    )
+    from agent_py_agent.agent.contracts.main_agent_task_subprocess import (
+        TaskRunSubprocessResult,
+    )
+
+    calls = {"count": 0}
+
+    def _run(request):
+        calls["count"] += 1
+        if calls["count"] == 3:
+            _assert_resume_contract(request.command)
+            _write_valid_furniture_artifact(tmp_path)
+        return TaskRunSubprocessResult(exit_code=0, duration_seconds=1.0)
+
+    monkeypatch.setattr(execution, "run_task_subprocess", _run)
+
+    report = run_main_agent_task_execution(
+        MainAgentTaskExecutionRequest(
+            workspace=tmp_path,
+            max_workers=1,
+            task_timeout_seconds=30,
+            execute=True,
+            case_ids=("furniture_homepage_html",),
+        )
+    )
+
+    case = report.cases[0]
+    assert calls["count"] == 3
+    assert report.ok is True
+    assert case.status == "DONE"
+    assert "resumes/attempt-002/stdout.txt" in case.stdout_ref
+
+
 def test_main_agent_task_execution_materializes_suite_contracts_before_acceptance(tmp_path, monkeypatch):
     from agent_py_agent.agent.contracts import main_agent_task_execution as execution
     from agent_py_agent.agent.contracts.main_agent_task_execution import (

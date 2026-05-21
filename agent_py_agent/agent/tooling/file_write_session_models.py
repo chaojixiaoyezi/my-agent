@@ -63,3 +63,4 @@ class InitialManifestRequest:
     raw_path: str
     target: Path
     paths: FileWriteSessionPaths
+    runtime_scope: dict[str, str] | None = None

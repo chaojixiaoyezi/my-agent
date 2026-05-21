@@ -93,6 +93,30 @@ def test_structured_json_tool_uses_sheets_when_data_is_empty(tmp_path: Path) -> 
     assert data["sheets"][0]["rows"][0]["项目名"] == "demo"
 
 
+# LLM: Some model adapters stringify nested JSON args; the writer should normalize that machine payload.
+# 函数用途: 验证 data 为 JSON 字符串时仍按结构化对象落地，避免 metadata/completion_evidence 被丢弃。
+def test_structured_json_tool_accepts_json_string_data_payload(tmp_path: Path) -> None:
+    tool = StructuredJsonTool(tmp_path)
+
+    result = tool.execute(
+        {
+            "path": "outputs/docs/source_index.json",
+            "data": json.dumps(
+                {
+                    "completion_evidence": {"scope": "all-public-documents"},
+                    "rows": [{"title": "Paper", "url": "https://example.com", "date": "2026-01-01"}],
+                },
+                ensure_ascii=False,
+            ),
+        }
+    )
+
+    assert result.ok, result.output
+    data = json.loads((tmp_path / "outputs/docs/source_index.json").read_text(encoding="utf-8"))
+    assert data["completion_evidence"]["scope"] == "all-public-documents"
+    assert data["rows"][0]["title"] == "Paper"
+
+
 # LLM: Tool registry visibility lets staged repair actions point to the writer tool.
 # 函数用途: 验证主代理默认可以检索到 write_structured_json。
 def test_tool_registry_registers_structured_json_tool(tmp_path: Path) -> None:

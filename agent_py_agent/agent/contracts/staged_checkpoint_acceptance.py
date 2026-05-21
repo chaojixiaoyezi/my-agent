@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .artifact_collection_contract import collection_contract_finding_dicts
 from .evidence_contract import (
     EvidenceContractRequest,
     evaluate_evidence_contract,
@@ -23,7 +24,8 @@ def staged_checkpoint_findings(
     findings: list[dict[str, object]] = []
     preferred_paths = {str(item.get("preferred_path") or item.get("path") or "") for item in items}
     for item in items:
-        for context in staged_checkpoint_contexts(item, preferred_paths):
+        contexts = staged_checkpoint_contexts(item, preferred_paths)
+        for context in contexts:
             findings.extend(
                 one_staged_checkpoint_findings(
                     context.ref,
@@ -33,6 +35,8 @@ def staged_checkpoint_findings(
                 )
             )
             findings.extend(staged_json_evidence_findings(context.ref, task_workspace, context.evidence_contract))
+        if contexts:
+            findings.extend(collection_contract_finding_dicts(contexts[0].validation_contract, task_workspace))
     return findings
 
 

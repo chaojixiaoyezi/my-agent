@@ -63,6 +63,7 @@ def auto_start_session(
             raw_path=raw_target_path,
             target=resolved_target,
             paths=paths,
+            runtime_scope=_runtime_scope(params),
         )
     )
     write_manifest(paths.manifest_path, manifest)
@@ -72,7 +73,7 @@ def auto_start_session(
 # LLM: initial_manifest writes raw/display/resolved target facts for audit and recovery.
 # 函数用途: 生成 begin 后的 manifest 初始结构。
 def initial_manifest(request: InitialManifestRequest) -> dict[str, Any]:
-    return {
+    manifest = {
         "version": 1,
         "session_id": request.session_id,
         "status": "open",
@@ -85,6 +86,23 @@ def initial_manifest(request: InitialManifestRequest) -> dict[str, Any]:
         "manifest_path": path_record(request.paths.manifest_path, request.context.workspace_root),
         "chunks": {},
     }
+    if request.runtime_scope:
+        manifest["scope"] = dict(request.runtime_scope)
+    return manifest
+
+
+# LLM: _runtime_scope copies machine run ids from tool payloads into open write manifests.
+# 函数用途: 让未 finish 的 file_write_session 只约束原 request，避免旧会话污染后续独立任务。
+def _runtime_scope(params: dict[str, Any]) -> dict[str, str]:
+    value = params.get("_runtime_scope")
+    if not isinstance(value, dict):
+        return {}
+    scope = {
+        "request_id": str(value.get("request_id") or ""),
+        "run_id": str(value.get("run_id") or ""),
+        "task_id": str(value.get("task_id") or ""),
+    }
+    return {key: item for key, item in scope.items() if item}
 
 
 # LLM: write_chunk persists one validated chunk and updates manifest in memory.

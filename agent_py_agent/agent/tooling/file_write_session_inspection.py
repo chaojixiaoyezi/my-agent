@@ -12,12 +12,22 @@ from .file_write_session_models import SESSION_ROOT_NAME
 
 # LLM: open_file_write_sessions reads only manifests, never staged chunk bodies.
 # 函数用途: 返回当前工作区未 finish/abort 的分块写入会话，用于提示模型继续 finish。
-def open_file_write_sessions(workspace_root: Path, *, limit: int = 5) -> list[dict[str, Any]]:
+def open_file_write_sessions(
+    workspace_root: Path,
+    *,
+    limit: int = 5,
+    scope: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     session_root = workspace_root / SESSION_ROOT_NAME
     if not session_root.exists():
         return []
     sessions = [_open_session_summary(path) for path in sorted(session_root.glob("*/manifest.json"))]
-    return [item for item in sessions if item is not None][: max(0, limit)]
+    filtered = [
+        item
+        for item in sessions
+        if item is not None and _scope_matches(item, scope=scope)
+    ]
+    return filtered[: max(0, limit)]
 
 
 # LLM: _open_session_summary normalizes one manifest into a prompt-safe status record.
@@ -38,6 +48,7 @@ def _open_session_summary(path: Path) -> dict[str, Any] | None:
         "preview_materialized": preview_materialized,
         "preview_char_count": _preview_char_count(preview_path) if preview_materialized else 0,
         "preview_tail": _preview_tail(preview_path) if preview_materialized else "",
+        "scope": _manifest_scope(manifest),
         "received_chunks": chunks,
         "next_chunk_index": (max(chunks) + 1) if chunks else 0,
         "continue_tool_call": {
@@ -58,6 +69,32 @@ def _open_session_summary(path: Path) -> dict[str, Any] | None:
             "session_id": str(manifest.get("session_id") or path.parent.name),
             "discard_chunks": True,
         },
+    }
+
+
+# LLM: _scope_matches keeps write-session repairs bound to the current machine run scope.
+# 函数用途: 如果调用方给了 request/run/task id，只返回同 scope 的 open session；旧无 scope 会话不污染新任务。
+def _scope_matches(item: dict[str, Any], *, scope: dict[str, str] | None) -> bool:
+    filters = {
+        "request_id": str((scope or {}).get("request_id") or ""),
+        "run_id": str((scope or {}).get("run_id") or ""),
+        "task_id": str((scope or {}).get("task_id") or ""),
+    }
+    active = {key: value for key, value in filters.items() if value}
+    if not active:
+        return True
+    scope = item.get("scope") if isinstance(item.get("scope"), dict) else {}
+    return any(str(scope.get(key) or "") == value for key, value in active.items())
+
+
+# LLM: _manifest_scope copies only machine ids needed for run-scoped open-session repair.
+# 函数用途: 从 manifest.scope 取 request_id/run_id/task_id；不读取目标文件内容或提示词。
+def _manifest_scope(manifest: dict[str, Any]) -> dict[str, str]:
+    value = manifest.get("scope") if isinstance(manifest.get("scope"), dict) else {}
+    return {
+        key: str(value.get(key) or "")
+        for key in ("request_id", "run_id", "task_id")
+        if str(value.get(key) or "")
     }
 
 

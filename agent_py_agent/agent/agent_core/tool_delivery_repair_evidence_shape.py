@@ -17,27 +17,10 @@ def violates_evidence_repair_shape(
     path = str(call_path(call) or "").strip() if callable(call_path) else ""
     if tool != "write_structured_json" or not path:
         return False
-    if _has_matching_structural_repair(required_actions, path, tool, path_matches) and _has_tabular_payload(call):
-        return False
     for action in required_actions:
         if _is_matching_evidence_repair(action, path, tool, path_matches=path_matches):
             return not _evidence_repair_payload_is_complete(_structured_json_data(call), action)
     return False
-
-
-# LLM: _has_matching_structural_repair keeps this runtime helper grounded in structured fields.
-# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
-def _has_matching_structural_repair(
-    required_actions: list[dict[str, object]],
-    path: str,
-    tool: str,
-    path_matches: object,
-) -> bool:
-    return any(
-        _is_matching_writer_action(action, path, tool, path_matches=path_matches)
-        and str(action.get("recommended_action") or "") != "repair_evidence_refs"
-        for action in required_actions
-    )
 
 
 # LLM: _is_matching_writer_action keeps this runtime helper grounded in structured fields.
@@ -52,15 +35,6 @@ def _is_matching_writer_action(
     writer_tool = str(action.get("writer_tool") or "").strip()
     checkpoint_ref = str(action.get("checkpoint_ref") or "").strip()
     return bool(writer_tool == tool and checkpoint_ref and callable(path_matches) and path_matches(path, checkpoint_ref))
-
-
-# LLM: _has_tabular_payload keeps this runtime helper grounded in structured fields.
-# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
-def _has_tabular_payload(call: dict[str, object]) -> bool:
-    if isinstance(call.get("sheets"), list) or isinstance(call.get("rows"), list):
-        return True
-    data = call.get("data")
-    return isinstance(data, dict) and (isinstance(data.get("sheets"), list) or isinstance(data.get("rows"), list))
 
 
 # LLM: _is_matching_evidence_repair keeps this runtime helper grounded in structured fields.

@@ -110,3 +110,22 @@ def test_trace_replay_rejects_dry_run_claimed_as_real_success(tmp_path: Path):
     assert result.contract_result.ok is False
     assert "REQUIRED_REAL_TOOL_CALL_MISSING" in result.contract_result.error_codes
     assert "FINAL_STATUS_REJECTED" in result.contract_result.error_codes
+
+
+# LLM: replay should preserve collection coverage failures from real complex-task traces.
+# 函数用途: 验证历史 trace 里最终状态成功但结构化采集范围不足时，回放仍按旧合同拒绝。
+def test_trace_replay_rejects_short_collection_coverage_success(tmp_path: Path):
+    from agent_py_agent.tests.support.trace_replay import replay_contract_trace
+
+    trace = Path(__file__).parent / "collection_coverage_short_success.jsonl"
+    (tmp_path / "source_data.json").write_text(
+        '{"sheets":[{"name":"week-1","rows":[{"project":"demo","url":"https://example.com/demo"}]}]}',
+        encoding="utf-8",
+    )
+
+    result = replay_contract_trace(trace, tmp_path)
+
+    assert result.contract_result.ok is False
+    assert "COLLECTION_TOO_FEW_GROUPS" in result.contract_result.error_codes
+    assert "COLLECTION_GROUP_TOO_FEW_ITEMS" in result.contract_result.error_codes
+    assert "FINAL_STATUS_REJECTED" in result.contract_result.error_codes

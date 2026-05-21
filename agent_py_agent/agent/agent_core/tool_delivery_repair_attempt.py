@@ -10,6 +10,9 @@ from pathlib import Path
 # LLM: strict_write_required upgrades the guard once unchanged failures have reached the no-progress threshold.
 # 函数用途: 根据 unchanged_failure_count 和 no_progress_block_threshold 判断是否必须切到严格写入模式。
 def strict_write_required(progress: dict[str, object], *, agent_root: Path) -> bool:
+    marker_payload = _recovery_attempt_marker(agent_root)
+    if _marker_requires_immediate_write(marker_payload):
+        return True
     if _within_recovery_attempt_inspection_budget(progress, agent_root=agent_root):
         return False
     unchanged = _safe_int(progress.get("unchanged_failure_count"))
@@ -37,6 +40,12 @@ def _recovery_attempt_marker(agent_root: Path) -> dict[str, object]:
     if not isinstance(value, dict) or value.get("schema_version") != "delivery-recovery-attempt.v1":
         return {}
     return value
+
+
+# LLM: marker budget zero means the recovery packet already points to a direct mutation.
+# 函数用途: 让结构化 attempt marker 可以立即切到写入模式，不等 unchanged_failure_count 达阈值。
+def _marker_requires_immediate_write(marker: dict[str, object]) -> bool:
+    return bool(marker) and _safe_int(marker.get("inspection_round_budget")) <= 0
 
 
 # LLM: _progress_delta_within_budget keeps this runtime helper grounded in structured fields.

@@ -177,9 +177,9 @@ def test_delivery_repair_guard_requires_evidence_shape_for_evidence_repair(tmp_p
     assert is_delivery_repair_productive_call(agent, [_structured_evidence_write_call()]) is True
 
 
-# LLM: Structural checkpoint repair may precede evidence repair for the same file.
-# 函数用途: 验证同一 checkpoint 同时缺表格结构和证据时，补 sheets 的写入不会被 evidence guard 误拦。
-def test_delivery_repair_guard_allows_structural_write_before_evidence_merge(tmp_path: Path):
+# LLM: Structure+evidence repair must happen as one machine checkpoint update.
+# 函数用途: 验证同一 checkpoint 同时缺表格结构和证据时，不能只写 rows/sheets 而漏掉 source_refs/claims。
+def test_delivery_repair_guard_requires_evidence_shape_for_combined_checkpoint_repair(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
         is_delivery_repair_productive_call,
     )
@@ -187,7 +187,80 @@ def test_delivery_repair_guard_allows_structural_write_before_evidence_merge(tmp
     _write_closeout(tmp_path, _structure_and_evidence_repair_closeout())
     agent = SimpleNamespace(root=tmp_path)
 
-    assert is_delivery_repair_productive_call(agent, [_sheet_only_write_call()]) is True
+    assert is_delivery_repair_productive_call(agent, [_sheet_only_write_call()]) is False
+    assert is_delivery_repair_productive_call(agent, [_structured_evidence_write_call()]) is True
+
+
+# LLM: Invalid artifact repair should move to mutation instead of repeated reads.
+# 函数用途: 验证 artifact 已存在但结构无效时，read_file 不算修复推进，避免真实任务陷入读文件循环。
+def test_delivery_repair_guard_treats_existing_invalid_artifact_read_as_nonproductive(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "unchanged_failure_count": 0,
+                "no_progress_block_threshold": 4,
+                "recovery_actions": [
+                    {
+                        "code": "ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED",
+                        "recommended_action": "repair_artifact_against_findings",
+                        "artifact_id": "homepage_html",
+                        "artifact_path": "outputs/site/index.html",
+                        "finding_codes": ["HTML_INCOMPLETE_DOCUMENT"],
+                        "finding_values": ["unbalanced_style"],
+                        "write_tools": ["write_file", "replace_in_file", "file_write_session"],
+                    }
+                ],
+            },
+        },
+    )
+    agent = SimpleNamespace(root=tmp_path)
+
+    assert is_delivery_repair_productive_call(agent, [{"tool": "read_file", "path": "outputs/site/other.html"}]) is False
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "write_file", "path": "outputs/site/index.html", "content": "<!doctype html><html></html>"}],
+        )
+        is True
+    )
+
+
+# LLM: repair-target reads are bounded inspection, not open-ended exploration.
+# 函数用途: 验证模型可先读取结构化 repair_targets 指向的文件，但不能把任意 read_file 当修复进展。
+def test_delivery_repair_guard_allows_reading_declared_repair_targets(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "recovery_actions": [
+                    {
+                        "code": "ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED",
+                        "recommended_action": "repair_artifact_against_findings",
+                        "artifact_id": "site",
+                        "artifact_path": "outputs/site/index.html",
+                        "repair_targets": ["outputs/site/index.html", "outputs/site/app.js"],
+                        "finding_codes": ["STATIC_SITE_MISSING_JS_API_HITS"],
+                        "write_tools": ["write_file", "replace_in_file"],
+                    }
+                ],
+            },
+        },
+    )
+    agent = SimpleNamespace(root=tmp_path)
+
+    assert is_delivery_repair_productive_call(agent, [{"tool": "read_file", "path": "outputs/site/index.html"}]) is True
+    assert is_delivery_repair_productive_call(agent, [{"tool": "read_file", "path": "outputs/site/other.html"}]) is False
 
 
 # LLM: run_command must be classified by side effect, not by tool name alone.
@@ -378,9 +451,9 @@ def test_delivery_repair_context_includes_evidence_repair_shape(tmp_path: Path):
     assert '"merge_existing": true' in context
 
 
-# LLM: acceptance finding repair allows one inspection phase before strict write mode.
-# 函数用途: 验证产物修复初期可以读取目标文件定位补丁；连续无进展后再强制真实写入类工具推进。
-def test_delivery_repair_guard_allows_artifact_read_before_strict_finding_repair(tmp_path: Path):
+# LLM: acceptance finding repair requires mutation, not repeated inspection.
+# 函数用途: 验证产物验收已经给出结构化 finding 后，read_file 不再算修复推进，避免真实任务读文件空转。
+def test_delivery_repair_guard_requires_mutation_for_artifact_finding_repair(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
         delivery_repair_context,
         is_delivery_repair_productive_call,
@@ -407,7 +480,7 @@ def test_delivery_repair_guard_allows_artifact_read_before_strict_finding_repair
     )
     agent = SimpleNamespace(root=tmp_path)
 
-    assert is_delivery_repair_productive_call(agent, [{"tool": "read_file", "path": "outputs/site/index.html"}]) is True
+    assert is_delivery_repair_productive_call(agent, [{"tool": "read_file", "path": "outputs/site/index.html"}]) is False
     assert (
         is_delivery_repair_productive_call(
             agent,
@@ -455,6 +528,113 @@ def test_delivery_repair_guard_requires_write_after_repeated_artifact_finding_fa
         )
         is True
     )
+
+
+# LLM: artifact finding repair contexts must include concrete patch tool skeletons.
+# 函数用途: 验证目录型产物失败时 required_tool_calls 不为空，模型能看到应修改的文件路径。
+def test_delivery_repair_context_includes_artifact_repair_tool_calls(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        delivery_repair_context,
+    )
+
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "recovery_actions": [
+                    {
+                        "code": "ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED",
+                        "recommended_action": "repair_artifact_against_findings",
+                        "artifact_id": "site",
+                        "artifact_path": "outputs/site",
+                        "finding_values": ["index.html:href=styles.css", "getElementById:app"],
+                        "repair_targets": ["outputs/site/index.html", "outputs/site/app.js"],
+                        "write_tools": ["write_file", "replace_in_file"],
+                    }
+                ],
+            },
+        },
+    )
+    agent = SimpleNamespace(root=tmp_path)
+    target = tmp_path / "outputs/site/index.html"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("<button disabled>提交</button>", encoding="utf-8")
+
+    payload = json.loads(delivery_repair_context(agent, repairs=0).splitlines()[1])
+
+    assert payload["required_tool_calls"][0]["tool"] == "replace_in_file"
+    assert payload["required_tool_calls"][0]["path"] == "outputs/site/index.html"
+    assert "getElementById:app" in payload["required_tool_calls"][0]["finding_values"]
+    assert payload["repair_target_snapshots"][0]["preview"] == "<button disabled>提交</button>"
+
+
+# LLM: structured checkpoint repair may inspect the checkpoint it is about to rewrite.
+# 函数用途: 验证严格修复模式下只放行 checkpoint_ref 本身的 read_file，不放行普通 artifact 检查。
+def test_delivery_repair_guard_allows_checkpoint_read_for_structured_repair(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "unchanged_failure_count": 5,
+                "no_progress_block_threshold": 5,
+                "recovery_actions": [
+                    {
+                        "code": "STAGED_JSON_TOO_FEW_SHEETS",
+                        "recommended_action": "repair_structured_checkpoint_json",
+                        "checkpoint_ref": "outputs/report/source_data.json",
+                        "writer_tool": "write_structured_json",
+                    }
+                ],
+            },
+        },
+    )
+    agent = SimpleNamespace(root=tmp_path)
+
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "read_file", "path": "outputs/report/source_data.json"}],
+        )
+        is True
+    )
+    assert is_delivery_repair_productive_call(agent, [{"tool": "read_file", "path": "outputs/site/index.html"}]) is False
+
+
+# LLM: evidence repair may gather fresh sources before writing claims.
+# 函数用途: 验证 strict repair 不会拦住为 source_refs/claims 收集证据的结构化抓取工具。
+def test_delivery_repair_guard_allows_evidence_gathering_for_evidence_repair(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "unchanged_failure_count": 5,
+                "no_progress_block_threshold": 5,
+                "recovery_actions": [
+                    {
+                        "code": "EVIDENCE_REQUIRED_FIELD_MISSING",
+                        "recommended_action": "repair_evidence_refs",
+                        "checkpoint_ref": "outputs/report/source_data.json",
+                        "required_fields": ["项目名"],
+                        "writer_tool": "write_structured_json",
+                    }
+                ],
+            },
+        },
+    )
+    agent = SimpleNamespace(root=tmp_path)
+
+    assert is_delivery_repair_productive_call(agent, [{"tool": "fetch_url", "url": "https://example.com"}]) is True
 
 
 def _evidence_repair_closeout() -> dict[str, object]:

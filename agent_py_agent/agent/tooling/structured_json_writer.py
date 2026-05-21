@@ -94,12 +94,27 @@ class StructuredJsonTool(FileSystemTool):
 def _json_value_from_params(params: dict[str, Any]) -> object:
     if "data" not in params:
         return _shape_value_from_params(params)
-    value = params.get("data")
+    value = _data_value(params.get("data"))
     if not isinstance(value, (dict, list)):
         raise ValueError("TOOL_INVALID_ARGUMENTS: data 必须是对象或数组")
     if _should_use_data_value(value, params):
         return value
     return _shape_value_from_params(params)
+
+
+# LLM: _data_value normalizes model-adapter JSON-string payloads into machine data.
+# 函数用途: 兼容模型把嵌套 JSON 参数串化的情况，只解析 JSON 对象/数组，不把普通文本当事实。
+def _data_value(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return value
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return value
+    return parsed if isinstance(parsed, (dict, list)) else value
 
 
 # LLM: _shape_value_from_params keeps this runtime helper grounded in structured fields.

@@ -1,0 +1,330 @@
+# LLM: Collection contracts validate scope, counts, and source-to-artifact mapping for complex outputs.
+# 模块用途: 校验表格、PDF、资料整理等复杂产物的结构化覆盖范围，避免“有一个文件”被误判为完整完成。
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from .artifact_acceptance_models import ArtifactFinding
+from .artifact_structured_contracts import positive_int, string_list
+
+
+# LLM: collection_contract_findings reads only structured contract fields and JSON checkpoints.
+# 函数用途: 根据 collection_contract 检查 source JSON 的分组数量、条目数量、必需字段、完整性证据和产物映射。
+def collection_contract_findings(
+    validation_contract: dict[str, object] | None,
+    workspace_root: Path,
+) -> list[ArtifactFinding]:
+    contract = _collection_contract(validation_contract or {})
+    if not contract:
+        return []
+    source_ref = str(contract.get("source_json_ref") or _staging_source_ref(validation_contract or "")).strip()
+    if not source_ref:
+        return [_finding("COLLECTION_SOURCE_REF_MISSING", "collection_contract.source_json_ref is required.")]
+    source_path = _workspace_path(source_ref, workspace_root)
+    if not _inside_workspace(source_path, workspace_root):
+        return [_finding("COLLECTION_SOURCE_OUTSIDE_WORKSPACE", "collection source is outside workspace_root.", source_ref)]
+    value, parse_finding = _read_json(source_path)
+    if parse_finding is not None:
+        return [parse_finding]
+    return [
+        *_group_findings(value, contract, source_ref),
+        *_item_findings(value, contract, source_ref),
+        *_completion_evidence_findings(value, contract, source_ref),
+        *_source_claim_count_findings(value, contract, source_ref),
+        *_mapping_findings(value, contract, source_ref, workspace_root),
+    ]
+
+
+# LLM: collection_contract_finding_dicts adapts collection findings to runtime checkpoint reports.
+# 函数用途: 给 staged checkpoint acceptance 复用同一套集合完整性验收，不让最终产物和阶段产物双轨分裂。
+def collection_contract_finding_dicts(
+    validation_contract: dict[str, object] | None,
+    workspace_root: Path,
+) -> list[dict[str, object]]:
+    return [item.to_dict() for item in collection_contract_findings(validation_contract, workspace_root)]
+
+
+# LLM: _collection_contract returns the nested machine contract or an empty contract.
+# 函数用途: 只读取 collection_contract 结构字段，不从 prompt 或报告文字里推断任务范围。
+def _collection_contract(validation_contract: dict[str, object]) -> dict[str, object]:
+    contract = validation_contract.get("collection_contract")
+    return dict(contract) if isinstance(contract, dict) else {}
+
+
+# LLM: _staging_source_ref lets collection contracts reuse the declared staging source when omitted.
+# 函数用途: 兼容已经声明 staging_contract.source_json_ref 的产物合同，减少重复配置。
+def _staging_source_ref(validation_contract: dict[str, object] | object) -> str:
+    staging = validation_contract.get("staging_contract") if isinstance(validation_contract, dict) else None
+    if not isinstance(staging, dict):
+        return ""
+    return str(staging.get("source_json_ref") or "")
+
+
+def _read_json(path: Path) -> tuple[object, ArtifactFinding | None]:
+    if not path.exists():
+        return None, _finding("COLLECTION_SOURCE_MISSING", "collection source JSON does not exist.", str(path))
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, _finding("COLLECTION_SOURCE_INVALID", f"collection source JSON is invalid: {exc}", str(path))
+
+
+def _group_findings(value: object, contract: dict[str, object], source_ref: str) -> list[ArtifactFinding]:
+    groups = _groups(value, contract)
+    min_groups = positive_int(contract.get("min_groups"))
+    findings: list[ArtifactFinding] = []
+    if min_groups and len(groups) < min_groups:
+        findings.append(
+            _finding(
+                "COLLECTION_TOO_FEW_GROUPS",
+                f"collection has {len(groups)} groups, expected at least {min_groups}.",
+                source_ref,
+                str(len(groups)),
+            )
+        )
+    min_items = positive_int(contract.get("min_items_per_group"))
+    if min_items:
+        for index, group in enumerate(groups):
+            item_count = len(_items_from_group(group, contract))
+            if item_count < min_items:
+                findings.append(
+                    _finding(
+                        "COLLECTION_GROUP_TOO_FEW_ITEMS",
+                        f"collection group has {item_count} items, expected at least {min_items}.",
+                        _group_location(source_ref, group, index),
+                        str(item_count),
+                    )
+                )
+    return findings
+
+
+def _item_findings(value: object, contract: dict[str, object], source_ref: str) -> list[ArtifactFinding]:
+    items = _all_items(value, contract)
+    min_total = positive_int(contract.get("min_items_total"))
+    findings: list[ArtifactFinding] = []
+    if min_total and len(items) < min_total:
+        findings.append(
+            _finding(
+                "COLLECTION_TOO_FEW_ITEMS",
+                f"collection has {len(items)} items, expected at least {min_total}.",
+                source_ref,
+                str(len(items)),
+            )
+        )
+    required_fields = string_list(contract.get("required_item_fields"))
+    if required_fields:
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                findings.append(_finding("COLLECTION_ITEM_SHAPE_INVALID", "collection item must be an object.", source_ref, str(index)))
+                continue
+            missing = [field for field in required_fields if not _has_value(item.get(field))]
+            if missing:
+                findings.append(
+                    _finding(
+                        "COLLECTION_ITEM_REQUIRED_FIELD_MISSING",
+                        "collection item is missing required fields.",
+                        f"{source_ref}#{index}",
+                        ",".join(missing),
+                    )
+                )
+            findings.extend(_required_item_value_findings(item, contract, source_ref, index))
+    return findings
+
+
+# LLM: item value rules are structured predicates for row-level completion flags.
+# 函数用途: 校验每个清单行里的机器字段值，例如 translated=true 或 status=VERIFIED，不依赖报告自然语言。
+def _required_item_value_findings(
+    item: dict[str, object],
+    contract: dict[str, object],
+    source_ref: str,
+    index: int,
+) -> list[ArtifactFinding]:
+    rules = contract.get("required_item_values")
+    if not isinstance(rules, dict):
+        return []
+    findings: list[ArtifactFinding] = []
+    for path, expected in sorted(rules.items()):
+        path_text = str(path).strip()
+        if not path_text:
+            continue
+        actual = _lookup_path(item, path_text)
+        if actual != expected:
+            findings.append(
+                _finding(
+                    "COLLECTION_ITEM_VALUE_MISMATCH",
+                    "collection item field value does not match the required machine contract.",
+                    f"{source_ref}#{index}:{path_text}",
+                    _compact_json({"expected": expected, "actual": actual}),
+                )
+            )
+    return findings
+
+
+def _completion_evidence_findings(value: object, contract: dict[str, object], source_ref: str) -> list[ArtifactFinding]:
+    if not bool(contract.get("require_completion_evidence")):
+        return []
+    evidence_path = str(contract.get("completion_evidence_path") or "completion_evidence")
+    evidence = _lookup_path(value, evidence_path)
+    if _has_structured_data(evidence):
+        return []
+    return [
+        _finding(
+            "COLLECTION_COMPLETENESS_EVIDENCE_MISSING",
+            "collection completeness evidence is required.",
+            f"{source_ref}:{evidence_path}",
+        )
+    ]
+
+
+def _source_claim_count_findings(value: object, contract: dict[str, object], source_ref: str) -> list[ArtifactFinding]:
+    findings: list[ArtifactFinding] = []
+    min_sources = positive_int(contract.get("min_source_refs"))
+    min_claims = positive_int(contract.get("min_claims"))
+    source_refs = _lookup_path(value, "source_refs")
+    claims = _lookup_path(value, "claims")
+    if min_sources and (not isinstance(source_refs, list) or len(source_refs) < min_sources):
+        findings.append(_finding("COLLECTION_TOO_FEW_SOURCE_REFS", "collection has too few source refs.", source_ref, str(len(source_refs) if isinstance(source_refs, list) else 0)))
+    if min_claims and (not isinstance(claims, list) or len(claims) < min_claims):
+        findings.append(_finding("COLLECTION_TOO_FEW_CLAIMS", "collection has too few evidence claims.", source_ref, str(len(claims) if isinstance(claims, list) else 0)))
+    return findings
+
+
+def _mapping_findings(
+    value: object,
+    contract: dict[str, object],
+    source_ref: str,
+    workspace_root: Path,
+) -> list[ArtifactFinding]:
+    mapping = contract.get("mapping")
+    if not isinstance(mapping, dict):
+        return []
+    artifact_ref = str(mapping.get("artifact_ref") or "").strip()
+    key_fields = string_list(mapping.get("key_fields"))
+    if not artifact_ref or not key_fields:
+        return [_finding("ARTIFACT_MAPPING_CONTRACT_INVALID", "mapping requires artifact_ref and key_fields.", source_ref)]
+    artifact_path = _workspace_path(artifact_ref, workspace_root)
+    if not _inside_workspace(artifact_path, workspace_root):
+        return [_finding("ARTIFACT_MAPPING_OUTSIDE_WORKSPACE", "mapping artifact is outside workspace_root.", artifact_ref)]
+    try:
+        text = artifact_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [_finding("ARTIFACT_MAPPING_TARGET_MISSING", "mapping artifact does not exist.", artifact_ref)]
+    items = [item for item in _all_items(value, contract) if isinstance(item, dict)]
+    mapped = [item for item in items if _item_mapped(item, key_fields, text)]
+    required = positive_int(mapping.get("min_mapped_items")) or len(items)
+    if len(mapped) >= required:
+        return []
+    missing_keys = [_item_key_values(item, key_fields) for item in items if not _item_mapped(item, key_fields, text)]
+    return [
+        _finding(
+            "ARTIFACT_MAPPING_MISSING",
+            f"artifact maps {len(mapped)} source items, expected at least {required}.",
+            artifact_ref,
+            _compact_json(
+                {
+                    "mapped": len(mapped),
+                    "required": required,
+                    "missing_keys": missing_keys[:10],
+                }
+            ),
+        )
+    ]
+
+
+def _groups(value: object, contract: dict[str, object]) -> list[object]:
+    groups_path = str(contract.get("groups_path") or "").strip()
+    if not groups_path:
+        return []
+    groups = _lookup_path(value, groups_path)
+    return list(groups) if isinstance(groups, list) else []
+
+
+def _all_items(value: object, contract: dict[str, object]) -> list[object]:
+    groups = _groups(value, contract)
+    if groups:
+        return [item for group in groups for item in _items_from_group(group, contract)]
+    items_path = str(contract.get("items_path") or "rows")
+    items = _lookup_path(value, items_path)
+    if isinstance(items, list):
+        return list(items)
+    return list(value) if isinstance(value, list) else []
+
+
+def _items_from_group(group: object, contract: dict[str, object]) -> list[object]:
+    items_path = str(contract.get("items_path") or "rows")
+    items = _lookup_path(group, items_path)
+    if isinstance(items, list):
+        return list(items)
+    return list(group) if isinstance(group, list) else []
+
+
+def _lookup_path(value: object, path: str) -> object:
+    current = value
+    for part in [item for item in path.split(".") if item]:
+        if isinstance(current, dict):
+            current = current.get(part)
+            continue
+        return None
+    return current
+
+
+def _item_mapped(item: dict[str, object], key_fields: list[str], text: str) -> bool:
+    keys = [str(item.get(field) or "").strip() for field in key_fields]
+    return bool(keys) and all(key and key in text for key in keys)
+
+
+def _item_key_values(item: dict[str, object], key_fields: list[str]) -> dict[str, str]:
+    return {
+        field: str(item.get(field) or "").strip()
+        for field in key_fields
+        if str(item.get(field) or "").strip()
+    }
+
+
+def _workspace_path(ref: str, workspace_root: Path) -> Path:
+    path = Path(ref)
+    return path if path.is_absolute() else (workspace_root / path).resolve()
+
+
+def _inside_workspace(path: Path, workspace_root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(workspace_root.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+def _has_value(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
+def _has_structured_data(value: object) -> bool:
+    if isinstance(value, dict):
+        return any(_has_structured_data(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_structured_data(item) for item in value)
+    return _has_value(value)
+
+
+def _group_location(source_ref: str, group: object, index: int) -> str:
+    if isinstance(group, dict) and group.get("name"):
+        return f"{source_ref}:{group.get('name')}"
+    return f"{source_ref}#{index}"
+
+
+def _finding(code: str, message: str, location: str = "", value: str = "") -> ArtifactFinding:
+    return ArtifactFinding(code=code, severity="hard", message=message, location=location, value=value)
+
+
+def _compact_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+__all__ = ["collection_contract_finding_dicts", "collection_contract_findings"]

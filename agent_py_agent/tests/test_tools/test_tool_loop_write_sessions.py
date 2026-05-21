@@ -4,6 +4,7 @@
 这个文件只放工具循环里和协议修复、分块写入收口相关的测试，避免主 test_tool_loop 文件继续变大。
 """
 
+import json
 import re
 import tempfile
 from pathlib import Path
@@ -111,6 +112,36 @@ class _NeverFinishesWriteSessionBackend:
         return ModelResponse(text="文件已经写好了。", backend=self.name)
 
 
+# LLM: _BeginOnlyWriteSessionBackend opens a session so tests can inspect manifest scope.
+# 类用途: 只创建分块写入会话，不提交，用于验证工具循环注入机器 request/run/task id。
+class _BeginOnlyWriteSessionBackend:
+    name = "fake_begin_only_write_session_backend"
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        return ModelResponse(
+            text='[TOOL_CALL]\n{"tool":"file_write_session","action":"begin","target_path":"big.html"}\n[/TOOL_CALL]',
+            backend=self.name,
+        )
+
+
+# LLM: _UnrelatedWriteAfterStaleSessionBackend proves stale sessions do not poison later runs.
+# 类用途: 旧 run 留下 open file_write_session 时，新 run 仍然可以写入不相关目标。
+class _UnrelatedWriteAfterStaleSessionBackend:
+    name = "fake_unrelated_write_after_stale_session_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"write_file","path":"fresh.txt","content":"ok"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        return ModelResponse(text="新任务完成。", backend=self.name)
+
+
 # LLM: malformed tool markers must not become user-visible final answers.
 # 函数用途: 复现真实 E2E 中 `[TOOL_CALL` 少写 `]` 后被当最终回复的问题。
 def test_tool_loop_recovers_malformed_tool_opening_marker():
@@ -183,6 +214,51 @@ def test_tool_loop_open_session_block_sets_runtime_status():
         assert result.runtime_reason == "OPEN_FILE_WRITE_SESSION"
 
 
+# LLM: new file_write_session manifests must carry the active run scope.
+# 函数用途: 后续 open session 修复只依赖 manifest.scope 机器字段，不靠提示词或历史 stdout 判断归属。
+def test_tool_loop_writes_runtime_scope_into_file_write_session_manifest():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=1)
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = _BeginOnlyWriteSessionBackend()
+
+        agent.run(
+            "打开一个分块写入会话",
+            save=False,
+            allowed_tools=["file_write_session"],
+            request_id="scope-request",
+            run_id="scope-run",
+            task_id="scope-task",
+        )
+
+        manifests = sorted((workspace / ".agent_file_write_sessions").glob("*/manifest.json"))
+        assert len(manifests) == 1
+        scope = json.loads(manifests[0].read_text(encoding="utf-8"))["scope"]
+        assert scope == {
+            "request_id": "scope-request",
+            "run_id": "scope-run",
+            "task_id": "scope-task",
+        }
+
+
+# LLM: stale open sessions must be scoped to their original request.
+# 函数用途: 旧 run 崩溃留下的分块写入不能阻止后续独立任务调用普通写入工具。
+def test_tool_loop_ignores_stale_scoped_open_file_write_session_for_new_run():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        _write_open_session_manifest(workspace, request_id="old-request")
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=5)
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = _UnrelatedWriteAfterStaleSessionBackend()
+
+        result = agent.run("写一个新文件", save=False, allowed_tools=["write_file"])
+
+        assert result.response == "新任务完成。"
+        assert agent.backend.calls == 2
+        assert (workspace / "fresh.txt").read_text(encoding="utf-8") == "ok"
+
+
 # LLM: _append_call keeps the fake backend body small while preserving exact tool JSON.
 # 函数用途: 构造追加 chunk 的 file_write_session 工具调用。
 def _append_call(session_id: str) -> str:
@@ -209,3 +285,26 @@ def _finish_call(session_id: str) -> str:
 def _session_id_from_prompt(prompt: str) -> str:
     match = re.search(r'"session_id":\s*"([^"]+)"', prompt)
     return match.group(1) if match else ""
+
+
+# LLM: _write_open_session_manifest creates a scoped stale manifest without invoking tools.
+# 函数用途: 构造旧 request 留下的 open file_write_session，验证新 run 按 scope 隔离。
+def _write_open_session_manifest(workspace: Path, *, request_id: str) -> None:
+    session = workspace / ".agent_file_write_sessions" / "stale-session"
+    session.mkdir(parents=True)
+    (session / "manifest.json").write_text(
+        (
+            '{"version":1,"session_id":"stale-session","status":"open",'
+            '"target_path":{"raw":"old.txt","display":"old.txt","resolved":"'
+            + str(workspace / "old.txt")
+            + '"},'
+            '"temp_path":{"resolved":"'
+            + str(session / "write.tmp")
+            + '"},'
+            '"scope":{"request_id":"'
+            + request_id
+            + '","run_id":"","task_id":""},'
+            '"chunks":{}}'
+        ),
+        encoding="utf-8",
+    )

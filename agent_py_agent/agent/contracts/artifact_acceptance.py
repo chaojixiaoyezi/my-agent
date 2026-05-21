@@ -15,6 +15,7 @@ from .artifact_acceptance_models import (
     artifact_ref_payload,
     kind_for_path,
 )
+from .artifact_collection_contract import collection_contract_findings
 from .artifact_html_contract import html_contract_findings, record_resource_ref
 from .artifact_html_refs import image_ref_findings, scan_html_refs
 from .artifact_static_site_contract import validate_static_site_artifact
@@ -170,7 +171,11 @@ def _validate_xlsx_request(request: ArtifactAcceptanceRequest) -> ArtifactAccept
 # LLM: _validate_pdf_request adapts the path-based validator to the shared request shape.
 # 函数用途: 保持注册表只处理 ArtifactAcceptanceRequest，不暴露内部 path-only helper。
 def _validate_pdf_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
-    return _validate_pdf(Path(request.path))
+    return _validate_pdf(
+        Path(request.path),
+        request.validation_contract,
+        workspace_root=request.workspace_root,
+    )
 
 
 # LLM: _validate_generic_request keeps unknown artifact kinds on the generic fallback path.
@@ -273,6 +278,7 @@ def _validate_xlsx(
     findings = [
         *xlsx_contract_findings(path, validation_contract),
         *_staged_source_evidence_findings(validation_contract or {}, workspace_root or path.parent),
+        *collection_contract_findings(validation_contract or {}, workspace_root or path.parent),
     ]
     return ArtifactAcceptanceReport(
         ok=not any(item.severity == "hard" for item in findings),
@@ -300,7 +306,12 @@ def _staged_source_evidence_findings(
 
 # LLM: _validate_pdf catches obviously corrupt PDF deliverables before human review.
 # 函数用途: 用轻量文件签名检查 PDF，不替代后续更强的渲染验收。
-def _validate_pdf(path: Path) -> ArtifactAcceptanceReport:
+def _validate_pdf(
+    path: Path,
+    validation_contract: dict[str, object] | None = None,
+    *,
+    workspace_root: Path | None = None,
+) -> ArtifactAcceptanceReport:
     data = path.read_bytes()
     if not data.startswith(b"%PDF-") or b"%%EOF" not in data[-2048:]:
         finding = ArtifactFinding(
@@ -309,7 +320,13 @@ def _validate_pdf(path: Path) -> ArtifactAcceptanceReport:
             message="PDF is missing %PDF header or EOF marker.",
         )
         return _report_with_finding(path, "pdf", finding)
-    return ArtifactAcceptanceReport(ok=True, artifact_ref=str(path), artifact_kind="pdf")
+    findings = collection_contract_findings(validation_contract or {}, workspace_root or path.parent)
+    return ArtifactAcceptanceReport(
+        ok=not any(item.severity == "hard" for item in findings),
+        artifact_ref=str(path),
+        artifact_kind="pdf",
+        findings=findings,
+    )
 
 
 # LLM: _validate_generic keeps unknown artifact types from passing when empty or missing.

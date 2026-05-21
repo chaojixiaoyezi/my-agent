@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from .main_agent_task_suite import MainAgentTaskArtifact, MainAgentTaskCase
 
 
@@ -60,6 +62,7 @@ def _shopping_site_case() -> MainAgentTaskCase:
         validation_contract={
             "validator": "static_site_check",
             "required_files": ["index.html", "app.js"],
+            "require_complete_html": True,
         },
     )
     return MainAgentTaskCase(
@@ -129,6 +132,7 @@ def _github_star_workbook_validation_contract() -> dict[str, object]:
             "required_fields": ["项目名", "地址", "上升 star 数"],
             "require_verified": True,
         },
+        "collection_contract": _github_star_collection_contract(),
         "staging_contract": _github_star_workbook_staging_contract(),
     }
 
@@ -142,12 +146,31 @@ def _github_star_workbook_staging_contract() -> dict[str, object]:
         "source_json_ref": "outputs/github_star_growth/source_data.json",
         "workbook_ref": "outputs/github_star_growth/github_star_growth.xlsx",
         "checkpoint_shape_hints": {
-            "outputs/github_star_growth/source_data.json": '{"sheets":[{"name":"本周榜单","columns":["项目名","地址","上升 star 数","中文解释","推荐理由"],"rows":[{"项目名":"..."}]}]}'
+            "outputs/github_star_growth/source_data.json": (
+                '{"completion_evidence":{"scope":"year_to_date","retrieved_at":"...","method":"..."},'
+                '"sheets":[{"name":"YYYY-WW","columns":["项目名","地址","上升 star 数","中文解释","推荐理由"],'
+                '"rows":[{"项目名":"...","地址":"...","上升 star 数":"..."}]}]}'
+            )
         },
         "checkpoint_refs": [
             "outputs/github_star_growth/source_data.json",
             "outputs/github_star_growth/github_star_growth.xlsx",
         ],
+    }
+
+
+# LLM: _github_star_collection_contract encodes year-to-date weekly coverage as machine fields.
+# 函数用途: 计算本年度到今天的最小周分组数量，并要求每个分组至少 10 条结构化记录。
+def _github_star_collection_contract() -> dict[str, object]:
+    return {
+        "source_json_ref": "outputs/github_star_growth/source_data.json",
+        "groups_path": "sheets",
+        "items_path": "rows",
+        "min_groups": _year_to_date_week_count(),
+        "min_items_per_group": 10,
+        "required_item_fields": ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"],
+        "require_completion_evidence": True,
+        "completion_evidence_path": "completion_evidence",
     }
 
 
@@ -162,13 +185,17 @@ def _research_document_translation_case() -> MainAgentTaskCase:
             "validator": "document_acceptance",
             "required_suffix": ".pdf",
             "requires_source_index": True,
+            "collection_contract": _research_document_collection_contract(),
             "staging_contract": {
                 "strategy": "source_index_then_translation_draft_then_pdf",
                 "builder_tool": "markdown_to_pdf",
                 "source_markdown_ref": "outputs/research_documents/research_documents_zh.md",
                 "pdf_ref": "outputs/research_documents/research_documents_zh.pdf",
                 "checkpoint_shape_hints": {
-                    "outputs/research_documents/source_index.json": '[{"title":"...","authors":["..."],"date":"...","url":"...","abstract":"...","translated":false}]'
+                    "outputs/research_documents/source_index.json": (
+                        '{"completion_evidence":{"scope":"all_public_documents_after_2025","method":"...","retrieved_at":"..."},'
+                        '"rows":[{"title":"...","authors":["..."],"date":"...","url":"...","abstract":"...","translated":true}]}'
+                    )
                 },
                 "checkpoint_refs": [
                     "outputs/research_documents/source_index.json",
@@ -182,8 +209,8 @@ def _research_document_translation_case() -> MainAgentTaskCase:
         case_id="research_documents_translation_pdf",
         title="研究文档中文翻译 PDF",
         user_prompt=(
-            "找到 2025 年之后指定研究方向公开发布的代表性研究文档，翻译成中文，正文翻译准确，专业术语可以保留英文。"
-            "最终成品需要是 PDF，排版要正确、清楚、好看，并附来源清单。"
+            "找到 2025 年之后 DeepSeek 公开发布的所有论文或研究文档，逐篇翻译成中文，"
+            "正文翻译准确，专业术语可以保留英文。最终成品需要是 PDF，排版要正确、清楚、好看，并附来源清单。"
         ),
         artifacts=(artifact,),
         acceptance_checks=(
@@ -199,6 +226,31 @@ def _research_document_translation_case() -> MainAgentTaskCase:
 # 函数用途: 生成通用 artifact 验收项，避免在代码里解析任务 prompt 的自然语言。
 def _artifact_check(check_id: str, kind: str, artifact_id: str) -> dict[str, object]:
     return {"check_id": check_id, "kind": kind, "artifact_id": artifact_id}
+
+
+# LLM: _research_document_collection_contract keeps source-index completeness generic.
+# 函数用途: 要求 source index 有多条记录、完整性证据，并能映射到 Markdown 翻译稿。
+def _research_document_collection_contract() -> dict[str, object]:
+    return {
+        "source_json_ref": "outputs/research_documents/source_index.json",
+        "items_path": "rows",
+        "min_items_total": 3,
+        "required_item_fields": ["title", "url", "date", "translated"],
+        "required_item_values": {"translated": True},
+        "require_completion_evidence": True,
+        "completion_evidence_path": "completion_evidence",
+        "mapping": {
+            "artifact_ref": "outputs/research_documents/research_documents_zh.md",
+            "key_fields": ["title"],
+            "min_mapped_items": 3,
+        },
+    }
+
+
+def _year_to_date_week_count(today: date | None = None) -> int:
+    current = today or date.today()
+    year_start = date(current.year, 1, 1)
+    return ((current - year_start).days // 7) + 1
 
 
 __all__ = ["default_main_agent_task_cases"]

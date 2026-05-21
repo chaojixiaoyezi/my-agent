@@ -222,6 +222,113 @@ def test_delivery_closeout_adds_document_builder_action_for_ready_markdown_sourc
         assert actions["STAGING_BUILDER_READY"]["output_ref"] == "outputs/research_documents/research_documents_zh.pdf"
 
 
+# LLM: Artifact mapping failures should repair the mapped text artifact, not the final binary wrapper.
+# 函数用途: 验证 mapping finding 的 location 会成为 repair target，PDF/图片等二进制产物不会误导修复链路。
+def test_delivery_closeout_uses_finding_location_as_repair_target_for_mapping_failures():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td).resolve()
+        contract = _research_pdf_contract()
+        validation_contract = contract["artifacts"][0]["validation_contract"]
+        validation_contract["collection_contract"] = {
+            "source_json_ref": "outputs/research_documents/source_index.json",
+            "items_path": "rows",
+            "min_items_total": 2,
+            "required_item_fields": ["title", "url", "date"],
+            "require_completion_evidence": True,
+            "mapping": {
+                "artifact_ref": "outputs/research_documents/research_documents_zh.md",
+                "key_fields": ["title"],
+                "min_mapped_items": 2,
+            },
+        }
+        _write_valid_pdf(workspace / "outputs/research_documents/research_documents_zh.pdf")
+        _write_json_file(
+            workspace / "outputs/research_documents/source_index.json",
+            {
+                "completion_evidence": {"scope": "complete"},
+                "rows": [
+                    {"title": "Paper A", "url": "https://example.com/a", "date": "2026-01-01"},
+                    {"title": "Paper B", "url": "https://example.com/b", "date": "2026-01-02"},
+                ],
+            },
+        )
+        draft = workspace / "outputs/research_documents/research_documents_zh.md"
+        draft.write_text("# 翻译正文\n\n这里没有精确标题映射。", encoding="utf-8")
+
+        _, actions = _enriched_report(workspace, contract)
+
+        action = actions["ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED"]
+        assert str(draft) in action["repair_targets"]
+
+
+# LLM: JSON pointer fragments identify rows, not filesystem names.
+# 函数用途: 验证 `source_index.json#1:field` 这类 finding location 会解析到真实 JSON 文件，不会拼出重复目录。
+def test_delivery_closeout_strips_json_fragment_from_repair_target_locations():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td).resolve()
+        contract = _research_pdf_contract()
+        validation_contract = contract["artifacts"][0]["validation_contract"]
+        validation_contract["collection_contract"] = {
+            "source_json_ref": "outputs/research_documents/source_index.json",
+            "items_path": "rows",
+            "min_items_total": 2,
+            "required_item_fields": ["title", "url", "date", "translated"],
+            "required_item_values": {"translated": True},
+        }
+        _write_valid_pdf(workspace / "outputs/research_documents/research_documents_zh.pdf")
+        source = workspace / "outputs/research_documents/source_index.json"
+        _write_json_file(
+            source,
+            {
+                "rows": [
+                    {"title": "Paper A", "url": "https://example.com/a", "date": "2026-01-01", "translated": True},
+                    {"title": "Paper B", "url": "https://example.com/b", "date": "2026-01-02", "translated": False},
+                ],
+            },
+        )
+
+        _, actions = _enriched_report(workspace, contract)
+
+        action = actions["ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED"]
+        assert str(source) in action["repair_targets"]
+        assert not any("source_index.json#1" in item for item in action["repair_targets"])
+        assert not any("outputs/research_documents/outputs/research_documents" in item for item in action["repair_targets"])
+
+
+# LLM: dotted API names are finding facts, not files to patch.
+# 函数用途: 验证 `app.goBrowse` 这类 JS API finding value 不会被 closeout 拼成假 repair target。
+def test_delivery_closeout_does_not_treat_dotted_api_findings_as_file_targets():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td).resolve()
+        contract = {
+            "artifacts": [
+                {
+                    "artifact_id": "site",
+                    "kind": "web_project",
+                    "path": str(workspace / "outputs/site"),
+                    "validation_contract": {
+                        "validator": "static_site_check",
+                        "required_files": ["index.html", "app.js"],
+                    },
+                }
+            ]
+        }
+        site = workspace / "outputs/site"
+        site.mkdir(parents=True)
+        (site / "index.html").write_text(
+            '<!doctype html><html><head></head><body><button onclick="app.goBrowse()">Go</button><script src="app.js"></script></body></html>',
+            encoding="utf-8",
+        )
+        (site / "app.js").write_text("const app = {};", encoding="utf-8")
+
+        _, actions = _enriched_report(workspace, contract)
+
+        action = actions["ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED"]
+        assert str(site / "index.html") in action["repair_targets"]
+        assert str(site / "app.js") in action["repair_targets"]
+        assert not any(item.endswith("/app.goBrowse") for item in action["repair_targets"])
+
+
 # LLM: _actions_for_source writes source_data.json and returns closeout recovery actions by code.
 # 函数用途: 将 staged JSON 场景压成一个 helper，测试只断言结构化恢复动作。
 def _actions_for_source(source_content: str, *, contract: dict[str, object] | None = None) -> dict[str, dict[str, object]]:
@@ -296,6 +403,13 @@ def _write_source(workspace: Path, source_content: str) -> None:
 def _write_valid_pdf(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n")
+
+
+# LLM: _write_json_file writes deterministic fixture JSON for staged contract tests.
+# 函数用途: 写入测试用结构化 JSON，避免每个场景手写 JSON 字符串。
+def _write_json_file(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
 # LLM: _research_pdf_contract mirrors a generic source-index -> draft -> PDF staged delivery flow.

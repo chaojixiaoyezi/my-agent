@@ -42,7 +42,10 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     if not artifacts:
         return None
     workspace_root = _workspace_root(request.agent)
-    if open_sessions := open_file_write_sessions(workspace_root):
+    if open_sessions := open_file_write_sessions(
+        workspace_root,
+        scope=_runtime_scope(request.params),
+    ):
         _append_open_session_context(request.params, open_sessions)
         return None
     report = _delivery_report(request, contract, artifacts, workspace_root)
@@ -194,6 +197,16 @@ def _failed_artifact_payload(item: dict[str, Any]) -> dict[str, object]:
 def _workspace_root(agent: object) -> Path:
     root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", ".")
     return Path(root).expanduser().resolve()
+
+
+# LLM: _runtime_scope bundles closeout identity fields for file-write session inspection.
+# 函数用途: 按 request/run/task 机器字段筛选未提交分块写入，避免旧 run 状态污染新任务。
+def _runtime_scope(params: object) -> dict[str, str]:
+    return {
+        "request_id": str(getattr(params, "request_id", "") or ""),
+        "run_id": str(getattr(params, "run_id", "") or ""),
+        "task_id": str(getattr(params, "task_id", "") or ""),
+    }
 
 
 __all__ = [

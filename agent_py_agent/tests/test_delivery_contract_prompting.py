@@ -155,7 +155,7 @@ def test_render_delivery_contract_section_uses_checkpoint_shape_hint_for_non_wor
                                 "outputs/deepseek_papers/deepseek_papers_zh.pdf",
                             ],
                             "checkpoint_shape_hints": {
-                                "outputs/deepseek_papers/source_index.json": '[{"title":"...","authors":["..."],"date":"...","url":"...","abstract":"...","translated":false}]'
+                                "outputs/deepseek_papers/source_index.json": '[{"title":"...","authors":["..."],"date":"...","url":"...","abstract":"...","translated":true}]'
                             },
                         }
                     },
@@ -174,7 +174,7 @@ def test_render_delivery_contract_section_uses_checkpoint_shape_hint_for_non_wor
         }
     )
 
-    assert '[{"title":"...","authors":["..."],"date":"...","url":"...","abstract":"...","translated":false}]' in text
+    assert '[{"title":"...","authors":["..."],"date":"...","url":"...","abstract":"...","translated":true}]' in text
     assert '{"sheets":[{"name":"...","columns":[...],"rows":[{...}]}]}' not in text
 
 
