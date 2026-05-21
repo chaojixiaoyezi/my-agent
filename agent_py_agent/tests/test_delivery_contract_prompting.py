@@ -267,6 +267,10 @@ def test_render_delivery_contract_section_recommends_one_duplicate_open_write_se
     assert "Unterminated string starting at" in text
     assert "staged_json_no_rows" in text
     assert "required_columns=项目名, 地址" in text
+    assert "min_groups=21" in text
+    assert "min_items_per_group=10" in text
+    assert "required_item_fields=项目名, 地址, 上升 star 数" in text
+    assert "require_verified_evidence=true" in text
     assert "data_to_workbook" in text
 
 
@@ -344,6 +348,17 @@ def _xlsx_artifact_contract() -> dict[str, object]:
         "kind": "xlsx",
         "preferred_path": "outputs/github_star_growth/github_star_growth.xlsx",
         "validation_contract": {
+            "collection_contract": {
+                "groups_path": "sheets",
+                "items_path": "rows",
+                "min_groups": 21,
+                "min_items_per_group": 10,
+                "required_item_fields": ["项目名", "地址", "上升 star 数"],
+            },
+            "evidence_contract": {
+                "require_verified": True,
+                "required_fields": ["项目名", "地址", "上升 star 数"],
+            },
             "required_columns": ["项目名", "地址"],
             "staging_contract": {
                 "builder_tool": "data_to_workbook",

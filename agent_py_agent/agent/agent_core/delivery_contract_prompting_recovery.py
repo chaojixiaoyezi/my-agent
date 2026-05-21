@@ -214,7 +214,7 @@ def _staged_json_no_rows_lines(
     validation = artifact.get("validation_contract") if isinstance(artifact.get("validation_contract"), dict) else {}
     staging = validation.get("staging_contract") if isinstance(validation.get("staging_contract"), dict) else {}
     columns = validation.get("required_columns") if isinstance(validation.get("required_columns"), list) else []
-    return [
+    lines = [
         "- staged_json_no_rows:",
         f"  - source_json_ref={staging.get('source_json_ref') or stage_ref}",
         f"  - write_shape={_checkpoint_shape_hint(stage_ref, staging)}",
@@ -225,6 +225,8 @@ def _staged_json_no_rows_lines(
         "  - 优先用 writer_tool 写 path/rows/sheets/data，避免手写大型 JSON 字符串。",
         "  - source_json_ref 有非空 rows/sheets 后，再调用 builder_tool；不要把空 JSON 当完成。",
     ]
+    lines.extend(_collection_contract_lines(validation))
+    return lines
 
 
 # LLM: _staged_json_invalid_lines renders checkpoint-repair guidance from structured refs only.
@@ -272,6 +274,28 @@ def _staging_refs(staging: dict[str, object]) -> set[str]:
         for key in ("source_json_ref", "source_markdown_ref", "source_ref", "workbook_ref", "pdf_ref", "output_ref")
         if str(staging.get(key) or "").strip()
     }
+
+
+# LLM: _collection_contract_lines exposes generic coverage and evidence facts from the machine contract.
+# 函数用途: 从 collection_contract/evidence_contract 渲染最小组数、每组条数和证据要求，不从任务文案推断。
+def _collection_contract_lines(validation: dict[str, object]) -> list[str]:
+    collection = validation.get("collection_contract")
+    evidence = validation.get("evidence_contract")
+    lines: list[str] = []
+    if isinstance(collection, dict):
+        for key in ("groups_path", "items_path", "min_groups", "min_items_per_group"):
+            if value := collection.get(key):
+                lines.append(f"  - {key}={value}")
+        fields = collection.get("required_item_fields")
+        if isinstance(fields, list) and fields:
+            lines.append(f"  - required_item_fields={', '.join(str(item) for item in fields)}")
+    if isinstance(evidence, dict):
+        if evidence.get("require_verified") is not None:
+            lines.append(f"  - require_verified_evidence={_json_bool(evidence.get('require_verified'), default=False)}")
+        fields = evidence.get("required_fields")
+        if isinstance(fields, list) and fields:
+            lines.append(f"  - evidence_required_fields={', '.join(str(item) for item in fields)}")
+    return lines
 
 
 # LLM: _checkpoint_shape_hint lets each staged checkpoint describe its own generic JSON shape without hard-coding one task's schema.

@@ -229,6 +229,8 @@ def _call_is_productive(
         call_path=_call_path,
     ):
         return False
+    if _violates_non_empty_rows_repair(call, context.required_actions):
+        return False
     if tool == "run_command":
         return _run_command_is_productive(call, context)
     if tool in context.productive_tools:
@@ -250,6 +252,41 @@ def _violates_declared_writer_tool(call: dict[str, object], required_actions: li
         checkpoint_ref = str(action.get("checkpoint_ref") or "").strip()
         if writer_tool and checkpoint_ref and tool != writer_tool and _same_path_ref(path, checkpoint_ref):
             return True
+    return False
+
+
+# LLM: STAGED_JSON_NO_ROWS repair requires actual structured rows, not just touching the checkpoint path.
+# 函数用途: 对 write_non_empty_structured_rows 恢复动作做机器级校验，空 sheets/rows 不能算有效修复推进。
+def _violates_non_empty_rows_repair(call: dict[str, object], required_actions: list[dict[str, object]]) -> bool:
+    if str(call.get("tool") or "").strip() != "write_structured_json":
+        return False
+    path = _call_path(call)
+    if not path:
+        return False
+    for action in required_actions:
+        if str(action.get("recommended_action") or "") != "write_non_empty_structured_rows":
+            continue
+        if _same_path_ref(path, str(action.get("checkpoint_ref") or "")):
+            return not _has_non_empty_structured_rows(call)
+    return False
+
+
+# LLM: _has_non_empty_structured_rows checks table payload shape without reading prose.
+# 函数用途: 在 write_structured_json 参数中识别 rows/sheets/data 的非空行，支持分批写入和嵌套 data 包装。
+def _has_non_empty_structured_rows(value: object) -> bool:
+    if isinstance(value, list):
+        return bool(value)
+    if not isinstance(value, dict):
+        return False
+    rows = value.get("rows")
+    if isinstance(rows, list) and rows:
+        return True
+    sheets = value.get("sheets")
+    if isinstance(sheets, list) and any(_has_non_empty_structured_rows(item) for item in sheets):
+        return True
+    data = value.get("data")
+    if isinstance(data, (dict, list)):
+        return _has_non_empty_structured_rows(data)
     return False
 
 

@@ -163,6 +163,60 @@ def test_delivery_repair_guard_requires_declared_writer_tool_for_structured_chec
     )
 
 
+# LLM: empty structured writer calls must not satisfy a non-empty rows repair action.
+# 函数用途: 验证 STAGED_JSON_NO_ROWS 这类修复必须真正提交非空 rows/sheets，而不能用空骨架骗过修复守门。
+def test_delivery_repair_guard_rejects_empty_structured_rows_for_no_rows_action(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "recovery_actions": [
+                    {
+                        "code": "STAGED_JSON_NO_ROWS",
+                        "recommended_action": "write_non_empty_structured_rows",
+                        "checkpoint_ref": "outputs/report/source_data.json",
+                        "writer_tool": "write_structured_json",
+                    }
+                ],
+            },
+        },
+    )
+    agent = SimpleNamespace(root=tmp_path)
+
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [
+                {
+                    "tool": "write_structured_json",
+                    "path": "outputs/report/source_data.json",
+                    "sheets": [{"name": "W01", "rows": []}],
+                }
+            ],
+        )
+        is False
+    )
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [
+                {
+                    "tool": "write_structured_json",
+                    "path": "outputs/report/source_data.json",
+                    "merge_existing": True,
+                    "sheets": [{"name": "W01", "rows": [{"项目名": "demo"}]}],
+                }
+            ],
+        )
+        is True
+    )
+
+
 # LLM: evidence repairs require source_refs/claims machine fields, not arbitrary table rows.
 # 函数用途: 验证缺证据恢复动作不会把普通 rows/sheets 写入误判成完成了证据修复。
 def test_delivery_repair_guard_requires_evidence_shape_for_evidence_repair(tmp_path: Path):

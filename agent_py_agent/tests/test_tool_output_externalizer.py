@@ -220,6 +220,38 @@ def test_tool_loop_enters_long_content_recovery_after_truncated_write_parse_erro
     assert "site/app.js" in live_context
 
 
+# LLM: structured JSON parse failures should recover through batched machine writes.
+# 函数用途: 验证超长 write_structured_json 截断后，下一轮提示转为小批量 merge_existing 写入，而不是继续塞整份 JSON。
+def test_tool_loop_enters_structured_json_recovery_after_truncated_parse_error(
+    tmp_path: Path,
+) -> None:
+    service = ToolLoopService(SimpleNamespace(root=tmp_path))
+    params = _tool_loop_params(request_id="req-json", run_id="run-json", task_id="task-json")
+    payload = {
+        "tool": "__parse_error__",
+        "error": "工具调用缺少结束标记 [/TOOL_CALL]",
+        "raw": '{"tool":"write_structured_json","path":"outputs/report/source_data.json","sheets":[{"rows":[',
+    }
+    output = "工具调用缺少结束标记 [/TOOL_CALL]。write_structured_json 参数太长。"
+
+    service._record_tool_call(
+        ToolCallRecordParams(
+            params=params,
+            tool_rounds=2,
+            idx=1,
+            payload=payload,
+            result=ToolExecutionResult("__parse_error__", False, output),
+        )
+    )
+
+    live_context = "\n".join(params.tool_context)
+    assert "structured_json_recovery_mode" in live_context
+    assert "write_structured_json" in live_context
+    assert "merge_existing=true" in live_context
+    assert "每次只写一个小批次" in live_context
+    assert "outputs/report/source_data.json" in live_context
+
+
 # LLM: write-tool long-content failures should trigger the same reusable recovery mode as parser failures.
 # 函数用途: 验证长 content 写入失败后，下一轮 prompt 会明确要求小块追加，避免模型原样重试。
 def test_tool_loop_enters_long_content_recovery_after_inline_write_rejection(
