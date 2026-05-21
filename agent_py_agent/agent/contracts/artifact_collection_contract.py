@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .artifact_acceptance_models import ArtifactFinding
 from .artifact_collection_evidence import item_evidence_findings
+from .artifact_collection_mapping import mapping_findings
 from .artifact_structured_contracts import positive_int, string_list
 
 
@@ -36,7 +38,7 @@ def collection_contract_findings(
         *_completion_evidence_findings(value, contract, source_ref),
         *_source_claim_count_findings(value, contract, source_ref),
         *item_evidence_findings(value, contract, validation_contract or {}, source_ref),
-        *_mapping_findings(value, contract, source_ref, workspace_root),
+        *mapping_findings(_all_items(value, contract), contract, source_ref, workspace_root),
     ]
 
 
@@ -51,6 +53,13 @@ def collection_contract_finding_dicts(
 
 # LLM: _collection_contract returns the nested machine contract or an empty contract.
 # 函数用途: 只读取 collection_contract 结构字段，不从 prompt 或报告文字里推断任务范围。
+@dataclass(frozen=True)
+class _ItemFindingContext:
+    contract: dict[str, object]
+    source_ref: str
+    required_fields: list[str]
+
+
 def _collection_contract(validation_contract: dict[str, object]) -> dict[str, object]:
     contract = validation_contract.get("collection_contract")
     return dict(contract) if isinstance(contract, dict) else {}
@@ -77,63 +86,109 @@ def _read_json(path: Path) -> tuple[object, ArtifactFinding | None]:
 def _group_findings(value: object, contract: dict[str, object], source_ref: str) -> list[ArtifactFinding]:
     groups = _groups(value, contract)
     min_groups = positive_int(contract.get("min_groups"))
-    findings: list[ArtifactFinding] = []
-    if min_groups and len(groups) < min_groups:
-        findings.append(
-            _finding(
-                "COLLECTION_TOO_FEW_GROUPS",
-                f"collection has {len(groups)} groups, expected at least {min_groups}.",
-                source_ref,
-                str(len(groups)),
-            )
-        )
+    findings = _min_group_findings(groups, min_groups, source_ref)
     min_items = positive_int(contract.get("min_items_per_group"))
     if min_items:
-        for index, group in enumerate(groups):
-            item_count = len(_items_from_group(group, contract))
-            if item_count < min_items:
-                findings.append(
-                    _finding(
-                        "COLLECTION_GROUP_TOO_FEW_ITEMS",
-                        f"collection group has {item_count} items, expected at least {min_items}.",
-                        _group_location(source_ref, group, index),
-                        str(item_count),
-                    )
-                )
+        findings.extend(_group_item_count_findings(groups, contract, source_ref, min_items))
     return findings
+
+
+def _min_group_findings(groups: list[object], min_groups: int, source_ref: str) -> list[ArtifactFinding]:
+    if not min_groups or len(groups) >= min_groups:
+        return []
+    return [
+        _finding(
+            "COLLECTION_TOO_FEW_GROUPS",
+            f"collection has {len(groups)} groups, expected at least {min_groups}.",
+            source_ref,
+            str(len(groups)),
+        )
+    ]
+
+
+def _group_item_count_findings(
+    groups: list[object],
+    contract: dict[str, object],
+    source_ref: str,
+    min_items: int,
+) -> list[ArtifactFinding]:
+    return [
+        _finding(
+            "COLLECTION_GROUP_TOO_FEW_ITEMS",
+            f"collection group has {item_count} items, expected at least {min_items}.",
+            _group_location(source_ref, group, index),
+            str(item_count),
+        )
+        for index, group in enumerate(groups)
+        if (item_count := len(_items_from_group(group, contract))) < min_items
+    ]
 
 
 def _item_findings(value: object, contract: dict[str, object], source_ref: str) -> list[ArtifactFinding]:
     items = _all_items(value, contract)
     min_total = positive_int(contract.get("min_items_total"))
-    findings: list[ArtifactFinding] = []
-    if min_total and len(items) < min_total:
-        findings.append(
-            _finding(
-                "COLLECTION_TOO_FEW_ITEMS",
-                f"collection has {len(items)} items, expected at least {min_total}.",
-                source_ref,
-                str(len(items)),
-            )
-        )
+    findings = _min_item_findings(items, min_total, source_ref)
     required_fields = string_list(contract.get("required_item_fields"))
     if required_fields:
-        for index, item in enumerate(items):
-            if not isinstance(item, dict):
-                findings.append(_finding("COLLECTION_ITEM_SHAPE_INVALID", "collection item must be an object.", source_ref, str(index)))
-                continue
-            missing = [field for field in required_fields if not _has_value(item.get(field))]
-            if missing:
-                findings.append(
-                    _finding(
-                        "COLLECTION_ITEM_REQUIRED_FIELD_MISSING",
-                        "collection item is missing required fields.",
-                        f"{source_ref}#{index}",
-                        ",".join(missing),
-                    )
-                )
-            findings.extend(_required_item_value_findings(item, contract, source_ref, index))
+        findings.extend(_item_shape_and_field_findings(items, contract, source_ref, required_fields))
     return findings
+
+
+def _min_item_findings(items: list[object], min_total: int, source_ref: str) -> list[ArtifactFinding]:
+    if not min_total or len(items) >= min_total:
+        return []
+    return [
+        _finding(
+            "COLLECTION_TOO_FEW_ITEMS",
+            f"collection has {len(items)} items, expected at least {min_total}.",
+            source_ref,
+            str(len(items)),
+        )
+    ]
+
+
+def _item_shape_and_field_findings(
+    items: list[object],
+    contract: dict[str, object],
+    source_ref: str,
+    required_fields: list[str],
+) -> list[ArtifactFinding]:
+    context = _ItemFindingContext(contract=contract, source_ref=source_ref, required_fields=required_fields)
+    findings: list[ArtifactFinding] = []
+    for index, item in enumerate(items):
+        findings.extend(_single_item_findings(item, index, context))
+    return findings
+
+
+def _single_item_findings(
+    item: object,
+    index: int,
+    context: _ItemFindingContext,
+) -> list[ArtifactFinding]:
+    if not isinstance(item, dict):
+        return [_finding("COLLECTION_ITEM_SHAPE_INVALID", "collection item must be an object.", context.source_ref, str(index))]
+    findings = _required_item_field_findings(item, context.source_ref, index, context.required_fields)
+    findings.extend(_required_item_value_findings(item, context.contract, context.source_ref, index))
+    return findings
+
+
+def _required_item_field_findings(
+    item: dict[str, object],
+    source_ref: str,
+    index: int,
+    required_fields: list[str],
+) -> list[ArtifactFinding]:
+    missing = [field for field in required_fields if not _has_value(item.get(field))]
+    if not missing:
+        return []
+    return [
+        _finding(
+            "COLLECTION_ITEM_REQUIRED_FIELD_MISSING",
+            "collection item is missing required fields.",
+            f"{source_ref}#{index}",
+            ",".join(missing),
+        )
+    ]
 
 
 # LLM: item value rules are structured predicates for row-level completion flags.
@@ -194,50 +249,6 @@ def _source_claim_count_findings(value: object, contract: dict[str, object], sou
     return findings
 
 
-# LLM: item evidence checks bind factual row fields to machine source refs instead of global prose claims.
-# 函数用途: 校验每个结构化条目的关键字段都有 source_id/claim_id 覆盖，防止一份全局 claim 冒充整张表来源。
-def _mapping_findings(
-    value: object,
-    contract: dict[str, object],
-    source_ref: str,
-    workspace_root: Path,
-) -> list[ArtifactFinding]:
-    mapping = contract.get("mapping")
-    if not isinstance(mapping, dict):
-        return []
-    artifact_ref = str(mapping.get("artifact_ref") or "").strip()
-    key_fields = string_list(mapping.get("key_fields"))
-    if not artifact_ref or not key_fields:
-        return [_finding("ARTIFACT_MAPPING_CONTRACT_INVALID", "mapping requires artifact_ref and key_fields.", source_ref)]
-    artifact_path = _workspace_path(artifact_ref, workspace_root)
-    if not _inside_workspace(artifact_path, workspace_root):
-        return [_finding("ARTIFACT_MAPPING_OUTSIDE_WORKSPACE", "mapping artifact is outside workspace_root.", artifact_ref)]
-    try:
-        text = artifact_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return [_finding("ARTIFACT_MAPPING_TARGET_MISSING", "mapping artifact does not exist.", artifact_ref)]
-    items = [item for item in _all_items(value, contract) if isinstance(item, dict)]
-    mapped = [item for item in items if _item_mapped(item, key_fields, text)]
-    required = positive_int(mapping.get("min_mapped_items")) or len(items)
-    if len(mapped) >= required:
-        return []
-    missing_keys = [_item_key_values(item, key_fields) for item in items if not _item_mapped(item, key_fields, text)]
-    return [
-        _finding(
-            "ARTIFACT_MAPPING_MISSING",
-            f"artifact maps {len(mapped)} source items, expected at least {required}.",
-            artifact_ref,
-            _compact_json(
-                {
-                    "mapped": len(mapped),
-                    "required": required,
-                    "missing_keys": missing_keys[:10],
-                }
-            ),
-        )
-    ]
-
-
 def _groups(value: object, contract: dict[str, object]) -> list[object]:
     groups_path = str(contract.get("groups_path") or "").strip()
     if not groups_path:
@@ -273,19 +284,6 @@ def _lookup_path(value: object, path: str) -> object:
             continue
         return None
     return current
-
-
-def _item_mapped(item: dict[str, object], key_fields: list[str], text: str) -> bool:
-    keys = [str(item.get(field) or "").strip() for field in key_fields]
-    return bool(keys) and all(key and key in text for key in keys)
-
-
-def _item_key_values(item: dict[str, object], key_fields: list[str]) -> dict[str, str]:
-    return {
-        field: str(item.get(field) or "").strip()
-        for field in key_fields
-        if str(item.get(field) or "").strip()
-    }
 
 
 def _workspace_path(ref: str, workspace_root: Path) -> Path:

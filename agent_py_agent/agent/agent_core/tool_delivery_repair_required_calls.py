@@ -95,16 +95,23 @@ def _artifact_repair_calls(action: dict[str, object]) -> list[dict[str, object]]
 # LLM: _artifact_repair_tool picks a deterministic patch-capable tool from the action manifest.
 # 函数用途: 根据结构化 finding code 选择局部替换、创建或整文件重写工具，不读验收文案。
 def _artifact_repair_tool(action: dict[str, object], *, intent: str) -> str:
-    tools = action.get("write_tools")
-    values = [str(item) for item in tools if str(item)] if isinstance(tools, list) else []
+    values = _write_tool_values(action)
+    candidates = ("replace_in_file", "write_file", "file_write_session")
     if intent in {"create_or_replace", "rewrite"}:
-        for candidate in ("write_file", "file_write_session"):
-            if candidate in values:
-                return candidate
-    for candidate in ("replace_in_file", "write_file", "file_write_session"):
+        candidates = ("write_file", "file_write_session", *candidates)
+    return _first_write_tool(values, candidates) or (values[0] if values else "")
+
+
+def _write_tool_values(action: dict[str, object]) -> list[str]:
+    tools = action.get("write_tools")
+    return [str(item) for item in tools if str(item)] if isinstance(tools, list) else []
+
+
+def _first_write_tool(values: list[str], candidates: tuple[str, ...]) -> str:
+    for candidate in candidates:
         if candidate in values:
             return candidate
-    return values[0] if values else ""
+    return ""
 
 
 # LLM: _artifact_repair_intent classifies the mutation shape from stable finding codes.

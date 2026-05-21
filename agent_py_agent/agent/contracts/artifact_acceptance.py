@@ -18,6 +18,7 @@ from .artifact_acceptance_models import (
 from .artifact_collection_contract import collection_contract_findings
 from .artifact_html_contract import html_contract_findings, record_resource_ref
 from .artifact_html_refs import image_ref_findings, scan_html_refs
+from .artifact_staged_evidence import staged_source_evidence_findings
 from .artifact_static_site_contract import validate_static_site_artifact
 from .artifact_structured_contracts import (
     csv_contract_findings,
@@ -30,7 +31,6 @@ from .artifact_validator_registry import (
     resolve_artifact_validator,
 )
 from .artifact_xlsx_contract import xlsx_contract_findings
-from .staged_checkpoint_acceptance import staged_json_evidence_findings
 
 
 # LLM: validate_html_artifact performs generic HTML checks that model self-reports often miss.
@@ -277,7 +277,7 @@ def _validate_xlsx(
         return _report_with_finding(path, "xlsx", finding)
     findings = [
         *xlsx_contract_findings(path, validation_contract),
-        *_staged_source_evidence_findings(validation_contract or {}, workspace_root or path.parent),
+        *staged_source_evidence_findings(validation_contract or {}, workspace_root or path.parent),
         *collection_contract_findings(validation_contract or {}, workspace_root or path.parent),
     ]
     return ArtifactAcceptanceReport(
@@ -285,22 +285,6 @@ def _validate_xlsx(
         artifact_ref=str(path),
         artifact_kind="xlsx",
         findings=findings,
-    )
-
-
-# LLM: _staged_source_evidence_findings ties final workbooks back to source JSON evidence contracts.
-# 函数用途: 如果 validation_contract 声明了 evidence_contract，则最终 xlsx 也必须继承 source_data.json 的来源证据验收。
-def _staged_source_evidence_findings(
-    validation_contract: dict[str, object],
-    workspace_root: Path,
-) -> list[ArtifactFinding]:
-    evidence_contract = validation_contract.get("evidence_contract")
-    staging = validation_contract.get("staging_contract")
-    source_ref = staging.get("source_json_ref") if isinstance(staging, dict) else ""
-    if not isinstance(evidence_contract, dict) or not source_ref:
-        return []
-    return _evidence_finding_records(
-        staged_json_evidence_findings(str(source_ref), workspace_root, evidence_contract)
     )
 
 
@@ -348,28 +332,6 @@ def _report_with_finding(path: Path, kind: str, finding: ArtifactFinding) -> Art
 # 函数用途: 保持专门校验模块独立，同时让公开报告继续使用统一 ArtifactFinding 类型。
 def _finding_records(items: list[dict[str, str]]) -> list[ArtifactFinding]:
     return [ArtifactFinding(**item) for item in items]
-
-
-# LLM: _evidence_finding_records adapts evidence-contract helper findings into public ArtifactFinding records.
-# 函数用途: 把阶段证据校验的扩展字段折叠进统一 ArtifactFinding 结构，保持公开报告格式稳定。
-def _evidence_finding_records(items: list[dict[str, object]]) -> list[ArtifactFinding]:
-    records: list[ArtifactFinding] = []
-    public_keys = {"code", "severity", "message", "location", "value"}
-    for item in items:
-        details = {key: value for key, value in item.items() if key not in public_keys}
-        value = item.get("value")
-        if value is None and details:
-            value = json.dumps(details, ensure_ascii=False, sort_keys=True)
-        records.append(
-            ArtifactFinding(
-                code=str(item.get("code") or ""),
-                severity=str(item.get("severity") or "hard"),
-                message=str(item.get("message") or ""),
-                location=str(item.get("location") or ""),
-                value=str(value or ""),
-            )
-        )
-    return records
 
 
 __all__ = [

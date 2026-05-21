@@ -173,13 +173,16 @@ class DeliveryRepairRedirectBackend:
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
-            return _write_file_response("outputs/github_star_growth/source_data.json", '{"generated_at":"2026-05-20","weeks":[],"note":"数据收集中..."}', self.name)
+            return _write_structured_json_response(
+                "outputs/github_star_growth/source_data.json",
+                '{"generated_at":"2026-05-20","sheets":[{"name":"本周榜单","rows":[]}]}',
+                self.name,
+            )
         if self.calls == 2:
             assert "STAGED_JSON_NO_ROWS" in prompt
             return ModelResponse(text='[TOOL_CALL]\n{"tool":"read_file","path":"outputs/github_star_growth/source_data.json"}\n[/TOOL_CALL]', backend=self.name)
         if self.calls == 3:
-            assert "delivery-required-repair" in prompt
-            assert "rejected_tool_calls" in prompt
+            assert "STAGED_JSON_NO_ROWS" in prompt
             return _write_structured_json_response(
                 "outputs/github_star_growth/source_data.json",
                 _valid_workbook_source_json(),
@@ -275,7 +278,11 @@ class RecoveryAttemptRepairBackend:
         if self.calls == 2:
             assert "delivery-required-repair" in prompt
             assert "LOCAL_PROGRESS_GUARD_BLOCKED" not in prompt
-            return _write_file_response("outputs/github_star_growth/source_data.json", _valid_workbook_source_json(), self.name)
+            return _write_structured_json_response(
+                "outputs/github_star_growth/source_data.json",
+                _valid_workbook_source_json(),
+                self.name,
+            )
         if self.calls == 3:
             return _workbook_builder_response(self.name)
         raise AssertionError("fresh recovery attempt should repair before local-progress block")

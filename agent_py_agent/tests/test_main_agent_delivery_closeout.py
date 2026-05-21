@@ -277,7 +277,7 @@ def test_recovery_attempt_uses_repair_contract_before_stale_local_progress_guard
         result = _agent(workspace, backend, max_tool_rounds=6).run(
             "继续恢复上一轮失败的表格任务。",
             params=RunParams(delivery_contract=contract, save=False),
-            allowed_tools=["read_file", "write_file", "data_to_workbook"],
+            allowed_tools=["read_file", "write_structured_json", "data_to_workbook"],
         )
 
         state = json.loads((workspace / ".agent_delivery/local_progress_guard.json").read_text(encoding="utf-8"))

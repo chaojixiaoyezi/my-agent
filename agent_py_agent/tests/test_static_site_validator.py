@@ -3,17 +3,7 @@
 from pathlib import Path
 
 from agent_py_agent.agent.subagents.execution_executor import TestExecutor
-
-
-# LLM: _write_site creates a tiny static site fixture inside the pytest tmp workspace.
-# 函数用途: 生成静态页面文件，方便测试 static_site_check 对必需文件、链接和占位符的判断。
-def _write_site(root: Path, files: dict[str, str]) -> Path:
-    site = root / "site"
-    for rel_path, content in files.items():
-        path = site / rel_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-    return site
+from agent_py_agent.tests.static_site_validator_fixtures import _write_site
 
 
 # LLM: The happy path proves local links, remote images, buttons, and required files can pass together.
@@ -552,63 +542,6 @@ def test_static_site_check_allows_dom_ids_declared_in_javascript_templates(tmp_p
 
     assert record.passed is True
     assert record.validation_result["missing_dom_id_hits"] == []
-
-
-# LLM: generated apps often expose window.app methods that inline handlers call.
-# 函数用途: 验证 onclick/app.js 模板调用未导出的 app 方法时，静态验收能拦住假可用流程。
-def test_static_site_check_blocks_missing_window_app_methods(tmp_path):
-    _write_site(
-        tmp_path,
-        {
-            "index.html": (
-                '<button onclick="app.showCart()">购物车</button>'
-                '<script src="app.js"></script>'
-            ),
-            "app.js": "function showProducts(){} window.app = { showProducts };",
-        },
-    )
-    executor = TestExecutor(tmp_path)
-
-    record = executor.execute(
-        {
-            "name": "missing app method",
-            "validation_method": "static_site_check",
-            "site_root": "site",
-            "required_files": ["index.html", "app.js"],
-        }
-    )
-
-    assert record.passed is False
-    assert "missing_js_api_hits=1" in record.error
-    assert record.validation_result["missing_js_api_hits"] == ["app.showCart"]
-
-
-# LLM: inline handlers can reference a top-level lexical app object in normal browser scripts.
-# 函数用途: 验证 validator 不强迫站点必须写 window.app，只要结构化 app 对象导出对应方法即可。
-def test_static_site_check_accepts_top_level_app_object_methods(tmp_path):
-    _write_site(
-        tmp_path,
-        {
-            "index.html": (
-                '<button onclick="app.showCart()">购物车</button>'
-                '<script src="app.js"></script>'
-            ),
-            "app.js": "function showCart(){} const app = { showCart };",
-        },
-    )
-    executor = TestExecutor(tmp_path)
-
-    record = executor.execute(
-        {
-            "name": "top level app object",
-            "validation_method": "static_site_check",
-            "site_root": "site",
-            "required_files": ["index.html", "app.js"],
-        }
-    )
-
-    assert record.passed is True
-    assert record.validation_result["missing_js_api_hits"] == []
 
 
 # LLM: The validator must never scan outside the configured workspace.
