@@ -63,6 +63,8 @@ def build_capability_request_spec() -> ToolSpec:
     return ToolSpec(
         name=_TOOL_NAME,
         category="orchestration",
+        effect="mutating",
+        requires_idempotency=True,
         description="为当前 subagent run 记录一条待父级路由的能力申请；不授权也不执行工具。",
         use_cases=[
             "runner 需要 controlled_exec、shell 命令、网络、MCP、skill 或新工具才能继续",

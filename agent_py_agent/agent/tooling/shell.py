@@ -159,6 +159,8 @@ class ShellTool(BaseTool):
         self.spec = ToolSpec(
             name="run_command",
             category="shell",
+            effect="mutating",
+            requires_idempotency=True,
             description="Execute one shell command in the workspace.",
             use_cases=[
                 "Run a project build script such as make or npm run.",

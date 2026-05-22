@@ -179,6 +179,10 @@ REQUIRED_AREAS = {
         "agent_py_agent/agent/contracts/real_run_review.py",
         "agent_py_agent/tests/test_real_run_review_contract.py",
     ),
+    "runtime_gate_ledger": (
+        "agent_py_agent/agent/local_storage/runtime_gate_ledger.py",
+        "agent_py_agent/tests/test_runtime_gate_ledger.py",
+    ),
 }
 
 

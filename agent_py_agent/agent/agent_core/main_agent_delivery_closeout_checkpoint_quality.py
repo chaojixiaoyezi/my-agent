@@ -30,7 +30,7 @@ def append_checkpoint_quality_action(request: CheckpointQualityActionRequest) ->
 # 函数用途: 让 staged recovery 推荐 write_structured_json，而不是诱导模型手写大 JSON 字符串。
 def checkpoint_writer_fields(ref_text: str) -> dict[str, object]:
     if ref_text.lower().endswith(".json"):
-        return {"writer_tool": "write_structured_json"}
+        return {"writer_tool": "write_structured_json", "write_tools": ["write_structured_json", "api_json_collection"]}
     return {}
 
 
@@ -78,8 +78,46 @@ def _checkpoint_optional_fields(
     for key in ("parse_error", "missing_columns", "sheet_count"):
         if value := str(status.get(key) or ""):
             fields[key] = value
-    fields.update(checkpoint_writer_fields(request.checkpoint_ref))
+    fields.update(_checkpoint_writer_fields(request))
     return fields
+
+
+# LLM: Collection source checkpoints must route to source collection first, not manual JSON patching.
+# 函数用途: 当坏掉的 checkpoint 是 collection_contract 声明的 source_json_ref 时，优先暴露 api_json_collection 采集门。
+def _checkpoint_writer_fields(request: CheckpointQualityActionRequest) -> dict[str, object]:
+    validation_contract = request.validation_contract if isinstance(request.validation_contract, dict) else {}
+    collection = validation_contract.get("collection_contract")
+    if isinstance(collection, dict) and _same_path_ref(request.checkpoint_ref, str(collection.get("source_json_ref") or "")):
+        return {
+            "collection_contract": _compact_collection_contract(collection),
+            "writer_tool": "api_json_collection",
+            "write_tools": ["api_json_collection", "write_structured_json"],
+        }
+    return checkpoint_writer_fields(request.checkpoint_ref)
+
+
+def _compact_collection_contract(collection: dict[str, object]) -> dict[str, object]:
+    keys = (
+        "source_json_ref",
+        "groups_path",
+        "items_path",
+        "min_groups",
+        "min_items_per_group",
+        "required_item_fields",
+        "require_completion_evidence",
+        "completion_evidence_path",
+    )
+    return {key: collection[key] for key in keys if key in collection}
+
+
+def _same_path_ref(path: str, ref: str) -> bool:
+    normalized_path = str(path or "").strip().replace("\\", "/").strip("/")
+    normalized_ref = str(ref or "").strip().replace("\\", "/").strip("/")
+    return bool(normalized_ref) and (
+        normalized_path == normalized_ref
+        or normalized_path.endswith(f"/{normalized_ref}")
+        or normalized_ref.endswith(f"/{normalized_path}")
+    )
 
 
 __all__ = ["append_checkpoint_quality_action", "checkpoint_writer_fields", "required_sheets_min"]

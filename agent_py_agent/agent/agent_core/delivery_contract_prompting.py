@@ -107,6 +107,13 @@ def _materialize_checkpoint_lines(action: dict[str, object]) -> list[str]:
     checkpoint_ref = str(action.get("checkpoint_ref") or "").strip()
     if not checkpoint_ref:
         return []
+    if action.get("requires_auditable_source_evidence") is True:
+        fields = ", ".join(str(item) for item in action.get("required_structured_fields", []) if str(item).strip())
+        suffix = f"，必须包含 {fields}" if fields else ""
+        return [
+            f"- 先真实写出 checkpoint: {checkpoint_ref}",
+            f"- 这是来源型 checkpoint，优先用采集/转换工具物化{suffix}。",
+        ]
     return [
         f"- 先真实写出 checkpoint: {checkpoint_ref}",
         f"- 如果资料还没收全，先给 {checkpoint_ref} 写最小有效骨架，再继续抓取/整理。",
@@ -165,6 +172,11 @@ def _staging_lines(contract: dict[str, object]) -> list[str]:
         lines.append(f"- 阶段输入就绪后优先调用 {builder_tool}: {source_param}={source_ref}, path={output_ref}")
         if source_ref.lower().endswith(".json"):
             lines.append("- JSON checkpoint 优先用 write_structured_json 写入 rows/sheets/data；不要手写大型 JSON 字符串。")
+            lines.append("- 大批量表格可用 write_structured_json.generated_rows 声明 count/columns/fields/sheets，由工具生成 rows。")
+            lines.append(
+                "- 多个 JSON API 来源要汇成表格时，可用 api_json_collection 直接生成带 source_refs/claims 的 checkpoint；"
+                "大量同形日期/分页请求优先用 request_ranges，避免手写长 JSON。"
+            )
     return lines
 
 

@@ -16,6 +16,7 @@ from .main_agent_delivery_closeout_recovery_models import RecoveryActionLedger, 
 from .main_agent_delivery_closeout_staging import (
     StagingPrerequisiteRequest,
     staged_input_ready,
+    staging_checkpoint_refs,
     staging_prerequisites_ready,
 )
 
@@ -120,20 +121,52 @@ def _failed_builder_output_ready(context: StagingActionContext) -> bool:
 def _source_repair_pending(context: StagingActionContext) -> bool:
     source_actions = {
         "materialize_checkpoint",
+        "repair_artifact_against_findings",
         "repair_evidence_refs",
         "repair_structured_checkpoint_json",
         "write_non_empty_structured_rows",
     }
-    return any(_is_source_repair_action(action, context.source_ref, source_actions) for action in context.ledger.actions)
+    target_refs = _pre_builder_checkpoint_refs(context)
+    return any(_is_source_repair_action(action, target_refs, source_actions) for action in context.ledger.actions)
 
 
 # LLM: _is_source_repair_action checks whether one recovery action targets the staged source.
 # 函数用途: 只按 recommended_action 和 checkpoint_ref 机器字段判断是否需要先修 source。
-def _is_source_repair_action(action: dict[str, object], source_ref: str, source_actions: set[str]) -> bool:
-    return (
-        str(action.get("recommended_action") or "") in source_actions
-        and str(action.get("checkpoint_ref") or "") == source_ref
-    )
+def _is_source_repair_action(action: dict[str, object], target_refs: set[str], source_actions: set[str]) -> bool:
+    recommended = str(action.get("recommended_action") or "")
+    if recommended not in source_actions:
+        return False
+    checkpoint_ref = str(action.get("checkpoint_ref") or "")
+    if checkpoint_ref in target_refs:
+        return True
+    return bool(_repair_targets_hit_source(action, target_refs))
+
+
+def _repair_targets_hit_source(action: dict[str, object], target_refs: set[str]) -> bool:
+    targets = action.get("repair_targets")
+    if not isinstance(targets, list):
+        return False
+    normalized = {_normalize_ref(value) for value in target_refs}
+    return any(_target_matches_ref(_normalize_ref(value), normalized) for value in targets)
+
+
+def _target_matches_ref(target: str, refs: set[str]) -> bool:
+    return any(target == ref or target.endswith(f"/{ref}") for ref in refs)
+
+
+def _normalize_ref(value: object) -> str:
+    return str(value or "").replace("\\", "/").strip()
+
+
+# LLM: _pre_builder_checkpoint_refs returns every checkpoint that must be healthy before the builder output.
+# 函数用途: 防止 source_index.json 等前置证据文件待修时，仍然重建 markdown/pdf/xlsx 终产物。
+def _pre_builder_checkpoint_refs(context: StagingActionContext) -> set[str]:
+    refs: set[str] = {context.source_ref}
+    for ref_text in staging_checkpoint_refs(context.staging):
+        if ref_text == context.output_ref:
+            break
+        refs.add(ref_text)
+    return refs
 
 
 # LLM: _append_builder_repair_action emits the executable builder contract used for missing outputs.

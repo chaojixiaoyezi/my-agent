@@ -18,11 +18,21 @@ from ..action_protocol import (
     RunScope,
     ToolCallEnvelope,
 )
-from ..contracts.gates import GateDecision, ToolGatePolicy, evaluate_tool_call_gate
-from ..log_analysis.capabilities import SECURITY_TOOL_NAMES, has_security_tool_capability
+from ..contracts.gates import (
+    GateDecision,
+    PathUrlCommandFacts,
+    evaluate_path_url_command_gate,
+    evaluate_tool_call_gate,
+)
 from .models import BaseTool, ToolExecutionResult
 from .parse_error_hint import parse_error_message
 from .parser import parse_xmlish_tool_calls
+from .registry_auth import (
+    ToolAuthContext,
+    allowed_tool_set,
+    registry_auth_error,
+    security_tools_visible,
+)
 from .registry_control_ranges import mask_protected_control_ranges
 from .registry_envelopes import (
     attach_result_envelope,
@@ -35,6 +45,13 @@ from .registry_file_write_blocks import (
     parse_file_write_session_raw_blocks,
     parse_write_file_raw_blocks,
 )
+from .registry_gate_policy import (
+    boundary_bool,
+    boundary_path_roots,
+    boundary_strings,
+    tool_gate_policy,
+    tool_manifest_decision,
+)
 from .registry_invoke import RegistryToolInvokeRequest, invoke_registry_tool
 from .registry_malformed_markers import malformed_tool_marker_calls
 from .registry_markers import next_tool_block_end, next_tool_block_start
@@ -46,6 +63,7 @@ from .registry_payload_normalize import (
 from .registry_payload_normalize import (
     tool_name as normalize_tool_name,
 )
+from .registry_runtime_gate_results import attach_runtime_gate, runtime_gate_block_result
 
 
 # LLM: ExecuteRegistryCallParams 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
@@ -61,16 +79,6 @@ class ExecuteRegistryCallParams:
     allowed_tools: list[str] | None = None
     granted_capabilities: list[str] | None = None
     write_boundary: dict[str, object] | None = None
-
-
-# LLM: _ToolAuthContext 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: 工具授权上下文，保存安全工具可见性和允许调用集合。
-@dataclass(frozen=True)
-class _ToolAuthContext:
-    allowed: set[str] | None
-    granted_capabilities: list[str] | None
-    expose_security_tools: bool
-    security_tool_names: set[str]
 
 
 # LLM: parse_registry_tool_calls 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -148,7 +156,7 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
         return normalized_payload
     gate_decision = _tool_call_gate_decision(normalized_payload, call)
     if not gate_decision.allowed:
-        return _runtime_gate_block_result(normalized_payload, gate_decision, envelope)
+        return runtime_gate_block_result(normalized_payload, gate_decision, envelope)
     try:
         tool_name = normalize_tool_name(normalized_payload.get("tool"))
     except ValueError as exc:
@@ -157,7 +165,7 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
     if auth_error:
         return attach_result_envelope(ToolExecutionResult(tool_name, False, auth_error), envelope)
     result = _invoke_registry_with_envelope(call, envelope, tool_name, normalized_payload)
-    _attach_runtime_gate(result, gate_decision)
+    attach_runtime_gate(result, gate_decision)
     return result
 
 
@@ -193,12 +201,53 @@ def _normalized_payload_or_error(
 # LLM: _tool_call_gate_decision evaluates mandatory tool protocol and side-effect gates.
 # 函数用途: 在注册表鉴权和真实工具调用之前得到 runtime gate 决策。
 def _tool_call_gate_decision(payload: dict[str, Any], call: ExecuteRegistryCallParams) -> GateDecision:
-    return evaluate_tool_call_gate(
+    base_decision = evaluate_tool_call_gate(
         payload,
         available_tools=call.tools.keys(),
         allowed_tools=call.allowed_tools,
-        policy=_tool_gate_policy(call.write_boundary),
+        policy=None,
     )
+    if not base_decision.allowed:
+        return base_decision
+    tool_name = str(base_decision.evidence.get("tool_name") or payload.get("tool") or "").strip()
+    manifest_decision = tool_manifest_decision(tool_name, call.tools)
+    if not manifest_decision.allowed:
+        return manifest_decision
+    path_decision = evaluate_path_url_command_gate(
+        PathUrlCommandFacts(
+            payload=payload,
+            workspace_root=call.workspace_root,
+            workspace_roots=_path_gate_roots(call),
+            allowed_private_hosts=boundary_strings(call.write_boundary, "allowed_private_hosts"),
+            allow_shell_operators=boundary_bool(call.write_boundary, "allow_shell_operators"),
+        )
+    )
+    if not path_decision.allowed:
+        return path_decision
+    effect_decision = evaluate_tool_call_gate(
+        payload,
+        available_tools=call.tools.keys(),
+        allowed_tools=call.allowed_tools,
+        policy=tool_gate_policy(call.write_boundary, call.tools.get(tool_name)),
+    )
+    if not effect_decision.allowed:
+        return effect_decision
+    return GateDecision.allow(
+        "tool_execution",
+        evidence={
+            **dict(effect_decision.evidence),
+            "manifest_gate": manifest_decision.to_dict(),
+            "path_url_command_gate": path_decision.to_dict(),
+        },
+    )
+
+
+# LLM: _path_gate_roots combines configured workspace roots with parent-granted path roots.
+# 函数用途: path gate 在工具执行前同时尊重 workspace_roots 和 write_boundary 的结构化 root grant。
+def _path_gate_roots(call: ExecuteRegistryCallParams) -> list[Path]:
+    roots = list(call.workspace_roots or [])
+    roots.extend(Path(item) for item in boundary_path_roots(call.write_boundary))
+    return roots
 
 
 # LLM: _invoke_registry_with_envelope invokes the selected tool and preserves call envelope refs.
@@ -228,132 +277,12 @@ def _invoke_registry_with_envelope(
 # LLM: _registry_auth_error 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
 # 函数用途: 完成 工具系统 中的 registry_auth_error 步骤，并保持调用方依赖的数据形状。
 def _registry_auth_error(tool_name: str, call: ExecuteRegistryCallParams) -> str:
-    return _tool_auth_error(
+    return registry_auth_error(
         tool_name,
-        _ToolAuthContext(
+        ToolAuthContext(
             allowed=allowed_tool_set(call.allowed_tools),
             granted_capabilities=call.granted_capabilities,
             expose_security_tools=call.expose_security_tools,
             security_tool_names=call.security_tool_names,
         ),
     )
-
-
-# LLM: allowed_tool_set 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 整理工具调用的 allowed_tool_set 信息，供注册表鉴权或执行使用。
-def allowed_tool_set(allowed_tools: list[str] | None) -> set[str] | None:
-
-    if allowed_tools is None:
-        return None
-    return {str(item) for item in allowed_tools if str(item).strip()}
-
-
-# LLM: security_tools_visible 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 整理工具调用的 security_tools_visible 信息，供注册表鉴权或执行使用。
-def security_tools_visible(
-    expose_security_tools: bool,
-    *,
-    allowed: set[str] | None,
-    granted_capabilities: list[str] | None,
-) -> bool:
-    return bool(
-        expose_security_tools
-        or (allowed is not None and bool(allowed.intersection(SECURITY_TOOL_NAMES)))
-        or has_security_tool_capability(granted_capabilities)
-    )
-
-# LLM: _tool_auth_error 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 整理工具调用的 tool_auth_error 信息，供注册表鉴权或执行使用。
-def _tool_auth_error(
-    tool_name: str,
-    context: _ToolAuthContext,
-) -> str:
-    if context.allowed is not None and tool_name not in context.allowed:
-        return f"工具未授权: {tool_name}"
-    if tool_name not in context.security_tool_names:
-        return ""
-    if _security_tool_call_authorized(
-        tool_name,
-        context.expose_security_tools,
-        allowed=context.allowed,
-        granted_capabilities=context.granted_capabilities,
-    ):
-        return ""
-    return f"tool not authorized: {tool_name}"
-
-
-# LLM: _security_tool_call_authorized 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 整理工具调用的 security_tool_call_authorized 信息，供注册表鉴权或执行使用。
-def _security_tool_call_authorized(
-    tool_name: str,
-    expose_security_tools: bool,
-    *,
-    allowed: set[str] | None,
-    granted_capabilities: list[str] | None,
-) -> bool:
-    return bool(
-        expose_security_tools
-        or (allowed is not None and tool_name in allowed)
-        or has_security_tool_capability(granted_capabilities)
-    )
-
-
-# LLM: _runtime_gate_block_result turns mandatory gate denials into normal tool results.
-# 函数用途: 工具执行前 gate 拒绝时，返回统一 ToolExecutionResult 并把 gate 决策写进 result_envelope。
-def _runtime_gate_block_result(
-    payload: dict[str, Any],
-    decision: GateDecision,
-    envelope: ToolCallEnvelope | None,
-) -> ToolExecutionResult:
-    result = ToolExecutionResult(
-        str(decision.evidence.get("tool_name") or payload.get("tool") or "unknown"),
-        False,
-        _gate_output(decision),
-    )
-    result = attach_result_envelope(result, envelope)
-    _attach_runtime_gate(result, decision)
-    return result
-
-
-# LLM: _attach_runtime_gate preserves gate facts for replay and acceptance without changing prompt output shape.
-# 函数用途: 把运行时 gate 决策挂到工具结果 envelope；旧调用没有 envelope 时也保留 runtime_gate 字段。
-def _attach_runtime_gate(result: ToolExecutionResult, decision: GateDecision) -> None:
-    envelope = dict(result.result_envelope or {})
-    envelope["runtime_gate"] = decision.to_dict()
-    result.result_envelope = envelope
-
-
-# LLM: _gate_output renders a compact denial message while machine facts stay in result_envelope.
-# 函数用途: 给旧 prompt 输出保留可读错误，真正判断仍读取 runtime_gate 结构字段。
-def _gate_output(decision: GateDecision) -> str:
-    codes = ",".join(decision.finding_codes) or "RUNTIME_GATE_DENIED"
-    return f"runtime gate denied: gate={decision.gate}; status={decision.status}; findings={codes}; 工具未授权或未通过运行时门"
-
-
-# LLM: _tool_gate_policy builds a trusted side-effect policy from write_boundary.
-# 函数用途: 把 write_boundary 里的 tool_effects/tool_modes/approved_actions 收成 ToolGatePolicy。
-def _tool_gate_policy(boundary: dict[str, object] | None) -> ToolGatePolicy | None:
-    effects = _boundary_mapping(boundary, "tool_effects")
-    modes = _boundary_mapping(boundary, "tool_modes")
-    approvals = _boundary_list(boundary, "approved_actions")
-    if not effects and not modes and not approvals:
-        return None
-    return ToolGatePolicy(tool_effects=effects or {}, tool_modes=modes or {}, approved_actions=tuple(approvals))
-
-
-# LLM: _boundary_mapping reads a mapping-valued write_boundary field.
-# 函数用途: 安全读取工具 gate 的结构化映射配置，字段不是 dict 时返回 None。
-def _boundary_mapping(boundary: dict[str, object] | None, key: str) -> dict[str, object] | None:
-    if not isinstance(boundary, dict):
-        return None
-    value = boundary.get(key)
-    return value if isinstance(value, dict) else None
-
-
-# LLM: _boundary_list reads a list-valued write_boundary field.
-# 函数用途: 安全读取 approved_actions 等结构化列表，字段不是 list 时返回空列表。
-def _boundary_list(boundary: dict[str, object] | None, key: str) -> list[object]:
-    if not isinstance(boundary, dict):
-        return []
-    value = boundary.get(key)
-    return value if isinstance(value, list) else []

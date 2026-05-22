@@ -19,6 +19,7 @@ class ToolLoopRepairCounters:
     local_progress_redirects: int = 0
     delivery_repair_redirects: int = 0
     exploration_fuse_redirects: int = 0
+    unresolved_runtime_issue_redirects: int = 0
 
 
 # LLM: _inc_reserved returns a new counters bundle after fake-record repair.
@@ -31,6 +32,7 @@ def _inc_reserved(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
         local_progress_redirects=counters.local_progress_redirects,
         delivery_repair_redirects=counters.delivery_repair_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects,
+        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
     )
 
 
@@ -44,6 +46,7 @@ def _inc_open_session(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounter
         local_progress_redirects=counters.local_progress_redirects,
         delivery_repair_redirects=counters.delivery_repair_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects,
+        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
     )
 
 
@@ -57,6 +60,7 @@ def _inc_local_progress(counters: ToolLoopRepairCounters) -> ToolLoopRepairCount
         local_progress_redirects=counters.local_progress_redirects + 1,
         delivery_repair_redirects=counters.delivery_repair_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects,
+        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
     )
 
 
@@ -70,6 +74,7 @@ def _inc_bootstrap_materialization(counters: ToolLoopRepairCounters) -> ToolLoop
         local_progress_redirects=counters.local_progress_redirects,
         delivery_repair_redirects=counters.delivery_repair_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects,
+        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
     )
 
 
@@ -83,6 +88,7 @@ def _inc_delivery_repair(counters: ToolLoopRepairCounters) -> ToolLoopRepairCoun
         local_progress_redirects=counters.local_progress_redirects,
         delivery_repair_redirects=counters.delivery_repair_redirects + 1,
         exploration_fuse_redirects=counters.exploration_fuse_redirects,
+        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
     )
 
 
@@ -96,6 +102,19 @@ def _inc_exploration_fuse(counters: ToolLoopRepairCounters) -> ToolLoopRepairCou
         local_progress_redirects=counters.local_progress_redirects,
         delivery_repair_redirects=counters.delivery_repair_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects + 1,
+        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
+    )
+
+
+def _inc_unresolved_runtime_issue(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
+    return ToolLoopRepairCounters(
+        reserved_record_repairs=counters.reserved_record_repairs,
+        open_write_session_repairs=counters.open_write_session_repairs,
+        bootstrap_materialization_redirects=counters.bootstrap_materialization_redirects,
+        local_progress_redirects=counters.local_progress_redirects,
+        delivery_repair_redirects=counters.delivery_repair_redirects,
+        exploration_fuse_redirects=counters.exploration_fuse_redirects,
+        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects + 1,
     )
 
 
@@ -107,4 +126,5 @@ __all__ = [
     "_inc_local_progress",
     "_inc_open_session",
     "_inc_reserved",
+    "_inc_unresolved_runtime_issue",
 ]

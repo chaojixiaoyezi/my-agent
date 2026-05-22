@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,45 @@ def append_artifact_finding_repair_actions(report: dict[str, Any], ledger: Recov
         ledger.actions.append(_artifact_finding_repair_action(item, findings))
 
 
+# LLM: append_collection_value_repair_actions converts row-value findings into checkpoint updates.
+# 函数用途: 将 COLLECTION_ITEM_VALUE_MISMATCH 这类机器 finding 转成 write_structured_json 可执行更新，不让模型猜 JSON 文本。
+def append_collection_value_repair_actions(
+    report: dict[str, Any],
+    contract: dict[str, Any],
+    ledger: RecoveryActionLedger,
+) -> None:
+    for action in _collection_value_repair_actions(report, contract):
+        action_key = f"{action['code']}:{action['checkpoint_ref']}"
+        if action_key in ledger.seen:
+            continue
+        ledger.seen.add(action_key)
+        ledger.actions.append(action)
+
+
+def _collection_value_repair_actions(
+    report: dict[str, Any],
+    contract: dict[str, Any],
+):
+    for item in report.get("artifacts", []):
+        yield from _collection_value_repair_actions_for_item(item, contract)
+
+
+def _collection_value_repair_actions_for_item(item: object, contract: dict[str, Any]):
+    if not isinstance(item, dict) or item.get("ok"):
+        return
+    collection_contract = _collection_contract_for_item(item, contract)
+    if not collection_contract:
+        return
+    for checkpoint_ref, updates in _collection_updates_by_ref(artifact_findings(item), collection_contract).items():
+        yield _collection_value_repair_action(checkpoint_ref, updates, collection_contract)
+
+
+def _collection_contract_for_item(item: dict[str, Any], contract: dict[str, Any]) -> dict[str, object]:
+    validation_contract = _artifact_validation_contract(item, contract)
+    collection_contract = validation_contract.get("collection_contract")
+    return dict(collection_contract) if isinstance(collection_contract, dict) else {}
+
+
 # LLM: failed_findings 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
 # 函数用途: 处理 failed findings 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def failed_findings(report: dict[str, Any]):
@@ -42,6 +82,130 @@ def failed_findings(report: dict[str, Any]):
 def artifact_findings(item: dict[str, Any]):
     findings = item.get("acceptance_report", {}).get("findings", [])
     yield from (finding for finding in findings if isinstance(finding, dict))
+
+
+# LLM: _artifact_validation_contract matches a closeout artifact to its original machine contract.
+# 函数用途: 通过 artifact_id 回到 delivery_contract.artifacts，不从自然语言报告推断合同。
+def _artifact_validation_contract(item: dict[str, Any], contract: dict[str, Any]) -> dict[str, object]:
+    artifact_id = str(item.get("artifact_id") or "").strip()
+    for artifact in contract.get("artifacts", []):
+        if not isinstance(artifact, dict):
+            continue
+        if artifact_id and artifact_id == str(artifact.get("artifact_id") or "").strip():
+            return _validation_contract(artifact)
+    return {}
+
+
+def _validation_contract(artifact: dict[str, object]) -> dict[str, object]:
+    value = artifact.get("validation_contract")
+    return dict(value) if isinstance(value, dict) else {}
+
+
+# LLM: _collection_updates_by_ref groups row fixes by source checkpoint.
+# 函数用途: 解析 finding.location 和 finding.value 的机器字段，形成去重后的集合更新列表。
+def _collection_updates_by_ref(
+    findings: Any,
+    collection_contract: dict[str, object],
+) -> dict[str, list[dict[str, object]]]:
+    updates_by_ref: dict[str, list[dict[str, object]]] = {}
+    seen: set[tuple[str, int, str]] = set()
+    for finding in findings:
+        update = _collection_update_from_finding(finding, collection_contract)
+        if not update:
+            continue
+        checkpoint_ref = str(update.pop("checkpoint_ref"))
+        key = (checkpoint_ref, int(update["item_index"]), str(update["field_path"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        updates_by_ref.setdefault(checkpoint_ref, []).append(update)
+    return updates_by_ref
+
+
+# LLM: _collection_update_from_finding reads only structured code/location/value fields.
+# 函数用途: 从 source.json#row:field 和 {"expected":...} 中提取集合字段修复，不读取 message 文案。
+def _collection_update_from_finding(
+    finding: dict[str, Any],
+    collection_contract: dict[str, object],
+) -> dict[str, object]:
+    if str(finding.get("code") or "") != "COLLECTION_ITEM_VALUE_MISMATCH":
+        return {}
+    location = _parse_collection_location(str(finding.get("location") or ""))
+    expected = _expected_value(finding.get("value"))
+    if not location or expected is _NO_EXPECTED_VALUE:
+        return {}
+    checkpoint_ref = str(location["checkpoint_ref"])
+    declared_ref = str(collection_contract.get("source_json_ref") or "").strip()
+    if declared_ref and _normalized_ref(checkpoint_ref) != _normalized_ref(declared_ref):
+        return {}
+    return {
+        "checkpoint_ref": checkpoint_ref,
+        "item_index": location["item_index"],
+        "field_path": location["field_path"],
+        "value": expected,
+    }
+
+
+def _parse_collection_location(location: str) -> dict[str, object]:
+    checkpoint_ref, marker, tail = location.partition("#")
+    if not marker:
+        return {}
+    index_text, sep, field_path = tail.partition(":")
+    if not sep:
+        return {}
+    try:
+        item_index = int(index_text)
+    except ValueError:
+        return {}
+    if item_index < 0 or not field_path.strip():
+        return {}
+    return {
+        "checkpoint_ref": checkpoint_ref.strip().replace("\\", "/"),
+        "item_index": item_index,
+        "field_path": field_path.strip(),
+    }
+
+
+_NO_EXPECTED_VALUE = object()
+
+
+def _expected_value(value: object) -> object:
+    if not isinstance(value, str):
+        return _NO_EXPECTED_VALUE
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return _NO_EXPECTED_VALUE
+    if not isinstance(parsed, dict) or "expected" not in parsed:
+        return _NO_EXPECTED_VALUE
+    return parsed["expected"]
+
+
+def _normalized_ref(value: str) -> str:
+    return value.strip().replace("\\", "/")
+
+
+def _collection_value_repair_action(
+    checkpoint_ref: str,
+    updates: list[dict[str, object]],
+    collection_contract: dict[str, object],
+) -> dict[str, object]:
+    action: dict[str, object] = {
+        "code": "COLLECTION_ITEM_VALUE_MISMATCH",
+        "category": "artifact",
+        "retryable": True,
+        "recommended_action": "repair_collection_item_values",
+        "checkpoint_ref": checkpoint_ref,
+        "writer_tool": "write_structured_json",
+        "write_tools": ["write_structured_json"],
+        "items_path": str(collection_contract.get("items_path") or "rows"),
+        "collection_item_updates": updates,
+        "recovery_hint": "集合 JSON 的行级机器字段不符合合同；按 collection_item_updates 更新 checkpoint 后重新验收。",
+    }
+    groups_path = str(collection_contract.get("groups_path") or "").strip()
+    if groups_path:
+        action["groups_path"] = groups_path
+    return action
 
 
 # LLM: _artifact_finding_repair_action 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
@@ -183,6 +347,7 @@ def _unique_paths(paths: list[Path]) -> list[str]:
 
 __all__ = [
     "append_artifact_finding_repair_actions",
+    "append_collection_value_repair_actions",
     "artifact_findings",
     "failed_findings",
 ]

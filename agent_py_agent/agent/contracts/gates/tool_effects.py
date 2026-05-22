@@ -3,10 +3,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+import hashlib
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from .approval_binding import ApprovalBindingFacts, evaluate_approval_binding_gate
+from .idempotency_ledger import IdempotencyLedgerFacts, evaluate_idempotency_ledger_gate
 from .models import GateDecision
 
 
@@ -28,6 +32,8 @@ class ToolGatePolicy:
     tool_effects: Mapping[str, object] = field(default_factory=dict)
     tool_modes: Mapping[str, object] = field(default_factory=dict)
     approved_actions: tuple[object, ...] = ()
+    idempotency_ledger: tuple[object, ...] = ()
+    run_id: str = ""
 
 
 # LLM: evaluate_tool_effect_gate rejects unsafe side-effect calls before execution.
@@ -63,13 +69,43 @@ def tool_effect_decision(payload: object, call: Any, policy: ToolGatePolicy | No
     effect = policy.tool_effects.get(call.tool_name)
     if effect is None:
         return None
-    return evaluate_tool_effect_gate(
+    mode = mode_for_call(payload, call.tool_name, policy.tool_modes, effect)
+    args_hash = args_hash_for_call(call.input)
+    approval_id = ""
+    if str(effect or "").strip().lower() == "dangerous" and normalized_tool_mode(mode, effect) == "real":
+        approval_decision = evaluate_approval_binding_gate(
+            ApprovalBindingFacts(
+                tool_name=call.tool_name,
+                run_id=_run_id_for_call(payload, policy),
+                operation_id=call.operation_id,
+                idempotency_key=call.idempotency_key,
+                args_hash=args_hash,
+                approved_actions=policy.approved_actions,
+            )
+        )
+        if approval_decision.status == "DENY":
+            return approval_decision
+        if approval_decision.allowed:
+            approval_id = str(approval_decision.evidence.get("approval_id") or "")
+    effect_decision = evaluate_tool_effect_gate(
         ToolEffectFacts(
             tool_name=call.tool_name,
             effect=effect,
-            mode=mode_for_call(payload, call.tool_name, policy.tool_modes, effect),
+            mode=mode,
             idempotency_key=call.idempotency_key,
-            approval_id=approved_action_id(call.tool_name, call.idempotency_key, policy.approved_actions),
+            approval_id=approval_id,
+        )
+    )
+    if not effect_decision.allowed:
+        return effect_decision
+    return evaluate_idempotency_ledger_gate(
+        IdempotencyLedgerFacts(
+            tool_name=call.tool_name,
+            effect=effect,
+            idempotency_key=call.idempotency_key,
+            args_hash=args_hash,
+            operation_id=call.operation_id,
+            ledger_records=policy.idempotency_ledger,
         )
     )
 
@@ -104,11 +140,18 @@ def normalized_tool_mode(mode: object, effect: object) -> str:
 
 # LLM: approved_action_id matches an approved action by tool and idempotency key.
 # 函数用途: 防止模型伪造 approval 文本；只有可信 approved_actions 里的匹配项才能放行 real dangerous action。
-def approved_action_id(tool_name: str, idempotency_key: str, approved_actions: Iterable[object]) -> str:
-    for item in approved_actions:
-        if _approved_action_matches(item, tool_name, idempotency_key):
+def approved_action_id(facts: ApprovalBindingFacts) -> str:
+    for item in facts.approved_actions:
+        if _approved_action_matches(item, facts):
             return str(item.get("approval_id") or item.get("id") or "").strip()
     return ""
+
+
+# LLM: args_hash_for_call produces the approval/idempotency hash from normalized tool input.
+# 函数用途: 对 ToolCallEnvelope.input 做稳定 JSON hash，避免审批和幂等比较读取自然语言。
+def args_hash_for_call(input_payload: object) -> str:
+    encoded = json.dumps(input_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 # LLM: _effect_facts normalizes mapping and dataclass inputs for the public gate.
@@ -136,22 +179,47 @@ def _explicit_payload_mode(payload: dict[str, object]) -> object:
 
 # LLM: _approved_action_matches checks one trusted approval record.
 # 函数用途: 校验审批状态、工具名和幂等键都匹配，避免审批对象被替换。
-def _approved_action_matches(item: object, tool_name: str, idempotency_key: str) -> bool:
+def _approved_action_matches(
+    item: object,
+    facts: ApprovalBindingFacts,
+) -> bool:
     if not isinstance(item, Mapping):
         return False
     status = str(item.get("status") or "").strip().upper()
     if status and status != "APPROVED":
         return False
-    if str(item.get("tool") or item.get("tool_name") or "").strip() != tool_name:
+    if str(item.get("tool") or item.get("tool_name") or "").strip() != facts.tool_name:
         return False
     key = str(item.get("idempotency_key") or "").strip()
-    return bool(key and key == idempotency_key)
+    if not key or key != facts.idempotency_key:
+        return False
+    if facts.run_id or item.get("run_id"):
+        if str(item.get("run_id") or "").strip() != facts.run_id:
+            return False
+    if facts.operation_id or item.get("operation_id"):
+        if str(item.get("operation_id") or "").strip() != facts.operation_id:
+            return False
+    if facts.args_hash or item.get("args_hash"):
+        if str(item.get("args_hash") or "").strip() != facts.args_hash:
+            return False
+    return True
+
+
+# LLM: _run_id_for_call prefers structured payload scope then policy scope.
+# 函数用途: 从 payload.run_id 或 ToolGatePolicy.run_id 获取审批绑定的 run_id。
+def _run_id_for_call(payload: object, policy: ToolGatePolicy) -> str:
+    if isinstance(payload, Mapping):
+        value = payload.get("run_id")
+        if value:
+            return str(value)
+    return str(policy.run_id or "")
 
 
 __all__ = [
     "ToolEffectFacts",
     "ToolGatePolicy",
     "approved_action_id",
+    "args_hash_for_call",
     "evaluate_tool_effect_gate",
     "mode_for_call",
     "normalized_tool_mode",

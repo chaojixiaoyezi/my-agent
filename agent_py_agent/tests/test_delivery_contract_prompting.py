@@ -42,6 +42,7 @@ def test_render_delivery_contract_section_includes_staging_refs():
     assert "source_json_path=outputs/github_star_growth/source_data.json" in text
     assert "本周榜单" in text
     assert "项目名" in text
+    assert "generated_rows" in text
 
 
 # LLM: bootstrap contract guidance should push the model to materialize targets before repeated inspection.
@@ -91,6 +92,35 @@ def test_render_delivery_contract_section_includes_bootstrap_targets():
     assert "先给 outputs/github_star_growth/source_data.json 写最小有效骨架" in text
     assert "最小有效骨架" in text
     assert "data_to_workbook" in text
+
+
+# LLM: source-evidence checkpoints should not be rendered as skeleton-first recovery work.
+# 函数用途: 验证需要来源证据的 checkpoint 会提示先采集/绑定 source refs，而不是写空骨架。
+def test_render_delivery_contract_section_avoids_skeleton_hint_for_source_evidence_checkpoint():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    text = render_delivery_contract_section(
+        {
+            "bootstrap_contract": {
+                "startup_actions": [
+                    {
+                        "action": "materialize_checkpoint",
+                        "checkpoint_materialization_mode": "source_evidence_first",
+                        "checkpoint_ref": "outputs/github_star_growth/source_data.json",
+                        "requires_auditable_source_evidence": True,
+                        "required_structured_fields": ["source_refs", "claims", "completion_evidence"],
+                    }
+                ]
+            }
+        }
+    )
+
+    assert "先真实写出 checkpoint: outputs/github_star_growth/source_data.json" in text
+    assert "source_refs" in text
+    assert "claims" in text
+    assert "最小有效骨架" not in text
 
 
 # LLM: document builder prompts must use the source parameter declared by the tool schema.

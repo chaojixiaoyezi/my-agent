@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
+from ..contracts.gates import artifact_provenance_from_archive
 from ..contracts.staged_checkpoint_acceptance import staged_checkpoint_findings
 from ._runtime_params import ToolLoopExecuteParams
 
@@ -38,7 +39,15 @@ def _required_artifacts(contract: dict[str, Any]) -> list[dict[str, Any]]:
 # LLM: _validate_contract_artifacts converts artifact refs into a single machine-readable delivery report.
 # 函数用途: 对每个必交产物按结构化路径验收，汇总 ok、finding 和运行范围字段。
 def _validate_contract_artifacts(request: DeliveryContractValidationRequest) -> dict[str, Any]:
-    results = [_validate_artifact_item(item, request.workspace_root) for item in request.artifacts]
+    results = [
+        _validate_artifact_item(
+            item,
+            request.workspace_root,
+            archive_tool_calls=list(getattr(request.params, "archive_tool_calls", []) or []),
+            run_id=str(getattr(request.params, "run_id", "") or ""),
+        )
+        for item in request.artifacts
+    ]
     return {
         "schema_version": "main_agent_delivery_closeout.v1",
         "ok": all(item["ok"] for item in results),
@@ -66,7 +75,13 @@ def _existing_report(workspace_root: Path) -> dict[str, Any]:
 
 # LLM: _validate_artifact_item validates one contract artifact without reading natural-language acceptance prose.
 # 函数用途: 解析 preferred_path/path，执行通用产物验收，并把报告转成稳定 JSON 字段。
-def _validate_artifact_item(item: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+def _validate_artifact_item(
+    item: dict[str, Any],
+    workspace_root: Path,
+    *,
+    archive_tool_calls: list[Any] | None = None,
+    run_id: str = "",
+) -> dict[str, Any]:
     raw_path = str(item.get("preferred_path") or item.get("path") or "")
     path = _artifact_path(raw_path, workspace_root)
     if path is None:
@@ -79,13 +94,20 @@ def _validate_artifact_item(item: dict[str, Any], workspace_root: Path) -> dict[
         )
     ).to_dict()
     report = _with_staged_checkpoint_findings(report, item, workspace_root)
-    return {
+    artifact = {
         "artifact_id": str(item.get("artifact_id") or ""),
         "kind": str(item.get("kind") or report.get("artifact_kind") or ""),
         "path": str(path),
         "ok": bool(report.get("ok")),
         "acceptance_report": report,
     }
+    artifact["provenance"] = artifact_provenance_from_archive(
+        artifact,
+        list(archive_tool_calls or []),
+        run_id=run_id,
+        workspace_root=workspace_root,
+    )
+    return artifact
 
 
 # LLM: _artifact_path keeps contract paths bounded to the current workspace.

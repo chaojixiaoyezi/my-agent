@@ -15,6 +15,7 @@ _MAX_REDIRECTS = 2
 _EXPLORATION_ROUND_THRESHOLD = 2
 _LOCAL_PROGRESS_TOOL_NAMES = {
     "append_file",
+    "api_json_collection",
     "data_to_workbook",
     "file_write_session",
     "markdown_to_pdf",
@@ -106,6 +107,21 @@ def local_progress_guard_block_response(agent: object) -> ModelResponse | None:
         backend=str(getattr(getattr(agent, "backend", None), "name", "") or ""),
         runtime_status="blocked",
         runtime_reason="LOCAL_PROGRESS_GUARD",
+    )
+
+
+# LLM: reset_local_progress_guard clears stale no-progress debt after a successful machine closeout.
+# 函数用途: 任务已通过结构化收口时重置本地进展计数，避免旧失败状态污染后续恢复 attempt。
+def reset_local_progress_guard(agent: object, params: ToolLoopExecuteParams | None = None) -> None:
+    recovery_signature = _recovery_signature(params) if params is not None else ""
+    _write_state(
+        agent,
+        {
+            "failure_fingerprint": "",
+            "exploration_rounds_without_local_progress": 0,
+            "recovery_signature": recovery_signature,
+            "work_progress_fingerprint": "",
+        },
     )
 
 

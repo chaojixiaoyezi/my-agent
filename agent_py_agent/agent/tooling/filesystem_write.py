@@ -45,6 +45,8 @@ class WriteFileTool(FileSystemTool):
         self.spec = ToolSpec(
             name="write_file",
             category="filesystem",
+            effect="mutating",
+            requires_idempotency=True,
             description="写入或覆盖文本文件；缺失父目录会自动创建。",
             use_cases=[
                 "新建代码文件、配置文件或文档",
@@ -118,6 +120,8 @@ class AppendFileTool(FileSystemTool):
         self.spec = ToolSpec(
             name="append_file",
             category="filesystem",
+            effect="mutating",
+            requires_idempotency=True,
             description="向文本文件末尾追加内容；缺失父目录会自动创建。",
             use_cases=[
                 "往日志、Markdown、结果汇总文件后面追加一段内容",
@@ -191,6 +195,8 @@ class ReplaceInFileTool(FileSystemTool):
         self.spec = ToolSpec(
             name="replace_in_file",
             category="filesystem",
+            effect="mutating",
+            requires_idempotency=True,
             description="在文本文件中精确替换一段已有内容，适合小范围改代码和改配置。",
             use_cases=[
                 "只改一个函数、一段注释、一行配置或一小段文档",

@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, field
 from html import unescape
 from pathlib import Path
+from typing import Any
 
 
 # LLM: ArtifactIntegrityCheckRequest keeps validation inputs bundled for future file types.
@@ -91,6 +92,47 @@ def check_artifact_integrity(request: ArtifactIntegrityCheckRequest) -> Artifact
     else:
         text = request.text
     return _check_html_text(text, require_complete=request.require_complete)
+
+
+# LLM: check_web_project_post_write attaches static-site validation to generic web asset writes.
+# 函数用途: 写入 HTML/CSS/JS 后按目录静态站点门检查 DOM 绑定和本地引用，不读取用户自然语言。
+def check_web_project_post_write(path: Path, workspace_root: Path) -> ArtifactIntegrityDecision:
+    from .web_project_integrity import check_web_project_post_write as _check
+
+    return _check(path, workspace_root)
+
+
+# LLM: artifact_integrity_payload serializes integrity decisions for tool envelopes.
+# 函数用途: 将文件/站点完整性结果转成结构化小字段，避免模型只看自然语言错误。
+def artifact_integrity_payload(decision: ArtifactIntegrityDecision, path: Path) -> dict[str, Any]:
+    return {
+        "kind": decision.kind,
+        "path": str(Path(path)),
+        "ok": decision.ok,
+        "blocker_codes": decision.blocker_codes,
+        "warning_codes": decision.warning_codes,
+        "issues": [
+            {
+                "code": issue.code,
+                "severity": issue.severity,
+                "count": issue.count,
+                "examples": issue.examples[:3],
+            }
+            for issue in decision.issues[:12]
+        ],
+    }
+
+
+# LLM: web_project_post_write_note renders bounded site-check failures for the next model turn.
+# 函数用途: 给模型短反馈和稳定 codes；最终机器事实仍在 result_envelope.artifact_integrity。
+def web_project_post_write_note(decision: ArtifactIntegrityDecision) -> str:
+    if decision.kind != "web_project" or decision.ok:
+        return ""
+    codes = ", ".join(issue.code for issue in decision.issues[:6])
+    return (
+        "Web 项目完整性失败: web_project_integrity_failed=true "
+        f"codes={codes}。请修复这些结构化问题后再声明完成。"
+    )
 
 
 # LLM: check_html_append_allowed blocks the exact failure mode where chunks continue after </html>.

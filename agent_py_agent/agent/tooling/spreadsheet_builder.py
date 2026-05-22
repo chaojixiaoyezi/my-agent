@@ -26,6 +26,8 @@ class DataWorkbookTool(FileSystemTool):
         self.spec = ToolSpec(
             name="data_to_workbook",
             category="artifact",
+            effect="mutating",
+            requires_idempotency=True,
             description="把结构化 JSON 数据或 sheets 参数生成 xlsx 工作簿。",
             use_cases=[
                 "已经有 rows/source_data.json，需要稳定生成 Excel/xlsx",

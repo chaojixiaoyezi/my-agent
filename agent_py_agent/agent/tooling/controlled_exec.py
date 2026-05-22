@@ -37,6 +37,9 @@ class ControlledExecTool(BaseTool):
     spec = ToolSpec(
         name="controlled_exec",
         category="shell",
+        effect="mutating",
+        requires_idempotency=True,
+        requires_approval=False,
         description="Plan or run a parent-granted shell command inside scoped task roots.",
         use_cases=[
             "Run a command only after the parent granted command/path/network scope.",

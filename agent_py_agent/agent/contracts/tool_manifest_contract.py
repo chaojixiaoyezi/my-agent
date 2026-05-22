@@ -53,6 +53,12 @@ def _tool_item(value: object) -> dict[str, object]:
         parameters = value.get("parameters")
         details = value.get("parameter_details")
         examples = value.get("examples")
+        effect = str(value.get("effect") or "")
+        default_mode = str(value.get("default_mode") or "")
+        requires_idempotency = value.get("requires_idempotency") is True
+        requires_approval = value.get("requires_approval") is True
+        timeout_seconds = _int_or_zero(value.get("timeout_seconds"))
+        output_refs = value.get("output_refs")
     else:
         name = str(getattr(value, "name", "") or "")
         category = str(getattr(value, "category", "") or "")
@@ -60,12 +66,24 @@ def _tool_item(value: object) -> dict[str, object]:
         parameters = getattr(value, "parameters", {})
         details = getattr(value, "parameter_details", {})
         examples = getattr(value, "examples", ())
+        effect = str(getattr(value, "effect", "") or "")
+        default_mode = str(getattr(value, "default_mode", "") or "")
+        requires_idempotency = getattr(value, "requires_idempotency", False) is True
+        requires_approval = getattr(value, "requires_approval", False) is True
+        timeout_seconds = _int_or_zero(getattr(value, "timeout_seconds", 0))
+        output_refs = getattr(value, "output_refs", ())
     param_map = parameters if isinstance(parameters, dict) else {}
     detail_map = details if isinstance(details, dict) else {}
     return {
         "name": name,
         "category": category,
         "description": description,
+        "effect": effect,
+        "default_mode": default_mode,
+        "requires_idempotency": requires_idempotency,
+        "requires_approval": requires_approval,
+        "timeout_seconds": timeout_seconds,
+        "output_refs": _string_list(output_refs),
         "parameters": sorted(str(key) for key in param_map),
         "parameter_details": {str(key): str(val) for key, val in detail_map.items()},
         "examples": [str(item) for item in list(examples or ())[:2]],
@@ -113,6 +131,17 @@ def _string_list(items: object) -> list[str]:
         if text and text not in result:
             result.append(text)
     return result
+
+
+# LLM: _int_or_zero keeps manifest rendering deterministic for optional numeric fields.
+# 函数用途: 将 timeout_seconds 这类可选数字字段规整成 int，非法值暴露为 0 供执行门再拒绝。
+def _int_or_zero(value: object) -> int:
+    if value in (None, ""):
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 __all__ = ["tool_manifest_payload"]

@@ -24,6 +24,8 @@ class MarkdownPdfTool(FileSystemTool):
         self.spec = ToolSpec(
             name="markdown_to_pdf",
             category="artifact",
+            effect="mutating",
+            requires_idempotency=True,
             description="把工作区内 Markdown 文档转换成 PDF 文件。",
             use_cases=[
                 "已经有 .md 草稿，需要交付 .pdf 文档",

@@ -51,6 +51,8 @@ def _build_spec(max_chunk_chars: int) -> ToolSpec:
     return ToolSpec(
         name="file_write_session",
         category="filesystem",
+        effect="mutating",
+        requires_idempotency=True,
         description="用 begin/append/finish/reset/abort 分块写入大文本文件，finish 时原子提交。",
         use_cases=[
             "要写入超过 write_file 推荐 inline 尺寸的大文件",

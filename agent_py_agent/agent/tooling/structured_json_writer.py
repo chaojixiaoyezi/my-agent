@@ -11,6 +11,11 @@ from typing import Any
 from ._filesystem_helpers import _required_path, _text_param
 from ._filesystem_read import FileSystemTool
 from .models import ToolExecutionResult, ToolSpec
+from .structured_json_collection_patch import (
+    collection_item_updated_value,
+    has_collection_item_updates,
+)
+from .structured_json_generation import generated_rows_checkpoint, has_generated_rows
 from .structured_json_merge import merge_json_objects
 
 
@@ -21,47 +26,7 @@ class StructuredJsonTool(FileSystemTool):
     # 函数用途: 初始化 write_structured_json 工具规格。
     def __init__(self, workspace_root: Path, workspace_roots: list[Path] | None = None):
         super().__init__(workspace_root, workspace_roots)
-        self.spec = ToolSpec(
-            name="write_structured_json",
-            category="artifact",
-            description="把结构化 data/rows/sheets 写成工作区内 JSON checkpoint。",
-            use_cases=[
-                "需要写 source_data.json、source_index.json、claims.json 等机器可读阶段文件",
-                "避免把大型 JSON 当字符串手写导致引号、逗号或截断错误",
-            ],
-            avoid_when=["只写普通 Markdown/HTML 文本时用 write_file 或 file_write_session"],
-            keywords=[
-                "json",
-                "source_data",
-                "source_index",
-                "rows",
-                "sheets",
-                "checkpoint",
-                "结构化数据",
-                "写 JSON",
-            ],
-            parameters={
-                "path": "要写出的 JSON 路径",
-                "data": "可选，任意 dict/list JSON 数据",
-                "rows": "可选，对象数组；会写成 {'rows': rows}",
-                "sheets": "可选，工作表数组；会写成 {'sheets': sheets}",
-                "name": "可选，rows 模式下的表名",
-                "columns": "可选，rows 模式下的列名数组",
-            },
-            parameter_details={
-                "path": "相对工作区的 .json 输出路径；父目录会自动创建。",
-                "data": "dict/list；适合 source_index 这类数组或对象；dict 可和 rows/sheets 同次提交写元数据。",
-                "rows": "非空数组；适合单表 source_data。",
-                "sheets": "非空数组，每个 sheet 需要非空 rows。",
-                "merge_existing": "可选布尔值；为 true 时 upsert JSON，对 rows/sheets 做追加合并，适合大表分批写入。",
-                "name": "rows 模式下写入 JSON 的 name 字段。",
-                "columns": "rows 模式下写入 JSON 的 columns 字段。",
-            },
-            examples=[
-                '{"tool": "write_structured_json", "path": "outputs/report/source_data.json", "sheets": [{"name": "榜单", "rows": [{"项目名": "demo"}]}]}',
-                '{"tool": "write_structured_json", "path": "outputs/docs/source_index.json", "data": [{"title": "paper", "url": "https://example.com"}]}',
-            ],
-        )
+        self.spec = _structured_json_tool_spec()
 
     # LLM: execute validates structured shape before writing a JSON checkpoint.
     # 函数用途: 生成有效 JSON 文件；空数据或越界路径会返回稳定错误码。
@@ -69,8 +34,12 @@ class StructuredJsonTool(FileSystemTool):
         try:
             raw_path = _required_path(params.get("path"))
             target = self.resolve_path(raw_path)
-            value = _json_value_from_params(params)
-            if _merge_existing(params):
+            value = (
+                collection_item_updated_value(target, params)
+                if has_collection_item_updates(params)
+                else _json_value_from_params(params)
+            )
+            if _merge_existing(params) and not has_collection_item_updates(params):
                 value = _merged_json_value(target, value)
             _validate_non_empty_checkpoint(value)
         except ValueError as exc:
@@ -90,19 +59,82 @@ class StructuredJsonTool(FileSystemTool):
         )
 
 
+# LLM: _structured_json_tool_spec keeps the constructor small and the tool schema auditable.
+# 函数用途: 返回 write_structured_json 的工具说明、参数和示例。
+def _structured_json_tool_spec() -> ToolSpec:
+    return ToolSpec(
+        name="write_structured_json",
+        category="artifact",
+        effect="mutating",
+        requires_idempotency=True,
+        description="把结构化 data/rows/sheets 写成工作区内 JSON checkpoint。",
+        use_cases=[
+            "需要写 source_data.json、source_index.json、claims.json 等机器可读阶段文件",
+            "避免把大型 JSON 当字符串手写导致引号、逗号或截断错误",
+        ],
+        avoid_when=["只写普通 Markdown/HTML 文本时用 write_file 或 file_write_session"],
+        keywords=["json", "source_data", "source_index", "rows", "sheets", "checkpoint", "结构化数据", "写 JSON"],
+        parameters=_structured_json_parameters(),
+        parameter_details=_structured_json_parameter_details(),
+        examples=[
+            '{"tool": "write_structured_json", "path": "outputs/report/source_data.json", "sheets": [{"name": "榜单", "rows": [{"项目名": "demo"}]}]}',
+            '{"tool": "write_structured_json", "path": "outputs/docs/source_index.json", "data": [{"title": "paper", "url": "https://example.com"}]}',
+            '{"tool": "write_structured_json", "path": "outputs/report/source_data.json", "generated_rows": {"count": 1000, "columns": ["订单ID"], "fields": {"订单ID": {"format": "ORD-{index:04d}", "start": 1}}, "sheets": {"count": 3, "prefix": "数据"}}}',
+        ],
+    )
+
+
+# LLM: _structured_json_parameters lists public tool fields from one place.
+# 函数用途: 返回工具参数摘要，便于检索和提示渲染。
+def _structured_json_parameters() -> dict[str, str]:
+    return {
+        "path": "要写出的 JSON 路径",
+        "data": "可选，任意 dict/list JSON 数据",
+        "rows": "可选，对象数组；会写成 {'rows': rows}",
+        "sheets": "可选，工作表数组；会写成 {'sheets': sheets}",
+        "generated_rows": "可选，按 count/fields/columns/sheets 生成大表 rows，不需要手写每一行",
+        "collection_item_updates": "可选，按 item_index/field_path/value 更新已有集合 JSON 行",
+        "name": "可选，rows 模式下的表名",
+        "columns": "可选，rows 模式下的列名数组",
+    }
+
+
+# LLM: _structured_json_parameter_details documents generation rules without changing runtime facts.
+# 函数用途: 返回工具参数细节，帮助模型选择 rows/sheets/generated_rows。
+def _structured_json_parameter_details() -> dict[str, str]:
+    return {
+        "path": "相对工作区的 .json 输出路径；父目录会自动创建。",
+        "data": "dict/list；适合 source_index 这类数组或对象；dict 可和 rows/sheets 同次提交写元数据。",
+        "rows": "非空数组；适合单表 source_data。",
+        "sheets": "非空数组，每个 sheet 需要非空 rows。",
+        "generated_rows": "对象；count 为行数，columns 为列名，fields 支持 value/cycle/number/format/multiply，sheets.count 可把生成行拆成多个同形 sheet。",
+        "collection_item_updates": "对象数组；每项用 item_index、field_path、value 更新 rows/list/groups 中的已有条目。",
+        "items_path": "collection_item_updates 可选字段；集合行所在对象路径，默认 rows。",
+        "groups_path": "collection_item_updates 可选字段；分组数组所在对象路径，分组内按 items_path 定位 rows。",
+        "merge_existing": "可选布尔值；为 true 时 upsert JSON，对 rows/sheets 做追加合并，适合大表分批写入。",
+        "name": "rows 模式下写入 JSON 的 name 字段。",
+        "columns": "rows 模式下写入 JSON 的 columns 字段。",
+    }
+
+
 # LLM: _json_value_from_params accepts common checkpoint shapes without parsing prose.
 # 函数用途: 按 data、sheets、rows 优先级构造 JSON 顶层对象。
 def _json_value_from_params(params: dict[str, Any]) -> object:
+    metadata = _top_level_metadata(params)
     if "data" not in params:
-        return _shape_value_from_params(params)
+        return _merge_metadata_with_shape(metadata, _shape_value_from_params(params))
     value = _data_value(params.get("data"))
     if not isinstance(value, (dict, list)):
         raise ValueError("TOOL_INVALID_ARGUMENTS: data 必须是对象或数组")
+    if metadata:
+        if not isinstance(value, dict):
+            raise ValueError("TOOL_INVALID_ARGUMENTS: 顶层 metadata 只能和对象 data 同时使用")
+        value = _merge_inline_shape(metadata, value)
     if _has_shape_payload(params):
         return _data_with_shape_value(value, params)
     if _should_use_data_value(value, params):
         return value
-    return _shape_value_from_params(params)
+    return _merge_metadata_with_shape(metadata, _shape_value_from_params(params))
 
 
 # LLM: _data_value normalizes model-adapter JSON-string payloads into machine data.
@@ -123,6 +155,8 @@ def _data_value(value: object) -> object:
 # LLM: _shape_value_from_params keeps this runtime helper grounded in structured fields.
 # 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _shape_value_from_params(params: dict[str, Any]) -> object:
+    if has_generated_rows(params):
+        return generated_rows_checkpoint(params.get("generated_rows"))
     if isinstance(params.get("sheets"), list):
         return {"sheets": params["sheets"]}
     if isinstance(params.get("rows"), list):
@@ -134,6 +168,27 @@ def _shape_value_from_params(params: dict[str, Any]) -> object:
             payload["name"] = name
         return payload
     raise ValueError("TOOL_INVALID_ARGUMENTS: 需要 data、rows 或 sheets")
+
+
+# LLM: _top_level_metadata keeps source/evidence facts structured when adapters flatten tool args.
+# 函数用途: 提取顶层 completion_evidence/source_refs/claims，避免 rows/sheets 模式静默丢验收元数据。
+def _top_level_metadata(params: dict[str, Any]) -> dict[str, object]:
+    metadata: dict[str, object] = {}
+    for key in ("completion_evidence", "source_refs", "claims"):
+        value = params.get(key)
+        if isinstance(value, (dict, list)) and bool(value):
+            metadata[key] = value
+    return metadata
+
+
+# LLM: _merge_metadata_with_shape combines machine metadata with rows/sheets checkpoints.
+# 函数用途: 顶层 metadata 和 shape 冲突时返回参数错误，避免覆盖机器事实。
+def _merge_metadata_with_shape(metadata: dict[str, object], shape: object) -> object:
+    if not metadata:
+        return shape
+    if not isinstance(shape, dict):
+        raise ValueError("TOOL_INVALID_ARGUMENTS: 顶层 metadata 只能和对象 checkpoint 同时使用")
+    return _merge_inline_shape(metadata, shape)
 
 
 # LLM: _data_with_shape_value merges metadata data with sibling rows/sheets without silent loss.
@@ -163,7 +218,7 @@ def _merge_inline_shape(data: dict[str, object], shape: dict[str, object]) -> di
 # LLM: _has_shape_payload keeps this runtime helper grounded in structured fields.
 # 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _has_shape_payload(params: dict[str, Any]) -> bool:
-    return isinstance(params.get("sheets"), list) or isinstance(params.get("rows"), list)
+    return has_generated_rows(params) or isinstance(params.get("sheets"), list) or isinstance(params.get("rows"), list)
 
 
 # LLM: _should_use_data_value keeps this runtime helper grounded in structured fields.

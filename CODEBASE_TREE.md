@@ -35,6 +35,7 @@ agent_py_agent/
 |   |-- backends/                             # 模型后端适配、流式解析和 ProviderTimeoutError 等错误边界
 |   |-- capability/                           # skill/tool/capability 配置、路由和 card 解析
 |   |-- concurrency/                          # 乐观锁、任务锁和透明重试
+|   |-- contracts/                            # 主代理合同、离线矩阵、产物验收、runtime gate 和恢复 replay 合同
 |   |-- extensions/                           # 插件/扩展声明和加载边界
 |   |-- gateway_parts/                        # 文件协议 gateway：路径、队列、HTTP、worker、恢复、supervisor
 |   |-- io/                                   # 底层 JSONL/文件 IO 原语
@@ -264,6 +265,9 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |   |-- filesystem_structured_read.py # read_file 对 latest_continue_packet 等机器文件的结构化摘要策略
 |   |   |   |-- registry_control_ranges.py    # 屏蔽 SUBAGENT_RESULT 等结果块，避免摘要里的协议标记误触发工具
 |   |   |   |-- registry_envelopes.py         # ToolCallEnvelope 去重、执行前展开和结果 envelope 关联
+|   |   |   |-- registry_auth.py              # allowed_tools、安全工具可见性和 capability grant 鉴权 helper
+|   |   |   |-- registry_gate_policy.py       # 从 ToolSpec/write_boundary 构造 manifest、路径和副作用 gate policy
+|   |   |   |-- registry_runtime_gate_results.py # 把 runtime gate 决策写回 ToolExecutionResult envelope
 |   |   |   |-- registry_invoke.py            # 已授权工具的最终参数准备、写边界检查、父级授权产物根临时注入和执行分发
 |   |   |   |-- registry_markers.py           # 旧 [TOOL_CALL]/[SUBAGENT_CALL] 标记扫描 helper
 |   |   |   |-- registry_payload_normalize.py # 工具 JSON payload 校验、工具名/参数名别名归一
@@ -360,7 +364,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 这次额外预留了混合检索框架：
 - 当前真正生效的是关键词检索。
 - 向量检索接口已经留好，后续接 embedding 时不用重写核心流程。
-- `agent_py_agent/agent/tooling/registry_execution.py` 承接工具调用块解析、payload 规范化、授权检查、写边界检查和异常格式化，避免注册表类继续膨胀；解析失败会通过 `parse_error_hint.py` 返回标准 `[TOOL_CALL]` JSON 重试提示，不回显坏工具正文。
+- `agent_py_agent/agent/tooling/registry_execution.py` 承接工具调用块解析、payload 规范化、runtime gate 编排、授权检查和执行分发；具体鉴权、gate policy 和 gate result envelope 已拆到 `registry_auth.py`、`registry_gate_policy.py`、`registry_runtime_gate_results.py`。
 
 当前内置工具包括：
 - `list_files`：列目录，适合先摸清项目结构。
@@ -1035,6 +1039,14 @@ docs/
 - `agent_py_agent/agent/contracts/real_run_review_render.py`: 真实运行复盘 Markdown 渲染器，只展示结构化 review 字段。
 - `agent_py_agent/agent/contracts/real_run_review_rules.py`: 真实运行复盘错误码前缀、阶段映射和 P0/P1 优先级规则。
 - `agent_py_agent/agent/contracts/small_real_acceptance_gate.py`: 小型真实验收闸门；大型真实任务前只允许隔离、限时、只读/dry-run、可验收和可 replay 的 bounded case。
+- `agent_py_agent/agent/contracts/gates/run_contract.py`: Run Contract Gate；收口前校验 request/run/task/workspace 和 effective contract hash，避免空 scope 或旧合同进入完成路径。
+- `agent_py_agent/agent/contracts/gates/artifact_provenance.py`: Artifact Provenance Gate；从 archive_tool_calls 的 runtime_gate 和 tool_result_refs 证明当前 run 生成了产物，旧文件不能冒充本轮成果。
+- `agent_py_agent/agent/contracts/gates/runtime_reports.py`: Runtime report gates；包含 acceptance closeout、final closeout、runtime audit、recovery replay 和旧产物 lineage 校验。
+- `agent_py_agent/agent/contracts/gates/tool_manifest.py`: Tool Manifest Gate；执行前校验工具 effect、参数 schema、幂等策略、审批策略和输出 refs 声明。
+- `agent_py_agent/agent/contracts/gates/path_url_command.py`: Path / URL / Command Gate；统一阻断 workspace/symlink 越界、私网 URL、file URL 和未授权 shell 操作符。
+- `agent_py_agent/agent/contracts/gates/approval_binding.py`: Approval Binding Gate；dangerous real action 必须绑定 tool/run/operation/idempotency_key/args_hash，防审批对象被替换。
+- `agent_py_agent/agent/contracts/gates/idempotency_ledger.py`: Idempotency Ledger Gate；副作用工具同 key 同 args 复用旧结果，同 key 不同 args 拒绝。
+- `agent_py_agent/agent/contracts/gates/state_event_ledger.py`: State/Event Ledger Gate；校验状态事件链、终态 dispatch 和过期 lease 结果，防止乱序事件改写任务事实。
 - `agent_py_agent/cli/real_e2e_commands.py`: `my-agent real-e2e` CLI；运行主代理基础矩阵，可通过 `--artifact` 验收真实模型产物，也可显式执行受控真实任务。
 - `docs/reports/real-run-review.md`: 最近真实运行复盘的人类可读报告；JSON/JSONL 同目录保留机器可读快照。
 - `agent_py_agent/agent/local_storage/control_plane_models.py`: 定义 agent run、agent event、task rollup、runtime query context 和任务树查询结果的数据结构，保留 `metadata` / `reserved` 给后续继承策略、共享面板和失败交接扩展。
@@ -1043,6 +1055,7 @@ docs/
 - `agent_py_agent/agent/local_storage/control_plane_codec.py`: 集中维护控制面 SQLite SQL、参数组装和行转换，避免公开 mixin 因 SQL 细节膨胀。
 - `agent_py_agent/cli/shared_progress.py`: 给 `status` 和 `subagents` CLI 生成共享进度摘要，展示 blocked、failure handoff refs 和 takeover packet refs 数量，不读取正文。
 - `agent_py_agent/agent/agent_core/tool_output_failsafe.py`: 大工具输出写 artifact 前写 fail-safe recovery snapshot，只记录工具名、hash、大小和恢复建议。
+- `agent_py_agent/agent/agent_core/tool_call_archive_record.py`: 工具调用归档记录生成层；外置大输出，同时保留 runtime_gate、tool_result_refs 和 compact result envelope，供 closeout/replay 做机器验收。
 - `agent_py_agent/agent/agent_core/tool_context_reducer.py`: 大工具输出进入下一轮 live prompt 前只注入 artifact 摘要和 checkpoint refs，小输出仍保留原工具结果；调度类输出会交给 orchestration summary 只保留 next_action/run refs。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_refs.py`: 汇总 dispatch 触达 run 的 artifact/evidence refs，并生成 `result_refs_by_run`；它会从 child `output.json.artifacts[]` 提取主产物路径和短摘要，父级先读 summary/refs 再按需读正文。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_state_contract.py`: 当前轮状态合同层；create/schedule/dispatch 共用，仅读取 remembered run ids，输出 `current_turn_run_state` 的 status buckets、dispatchable/running/blocked/verified ids 和下一步建议，避免 root 读大 records 或重复调度。
@@ -1111,12 +1124,15 @@ docs/
 - `agent_py_agent/agent/tooling/filesystem_structured_read.py`: `read_file` 的结构化读取策略；默认把 `latest_continue_packet.json` 渲染成状态、work_progress、session_compact 和推荐读取路径摘要，显式行号读取仍返回原始文本。
 - `agent_py_agent/agent/tooling/shell.py`: `run_command` 的执行器；除危险命令拦截和超时外，会按 `tool_shell_output_max_chars` 返回 stdout/stderr 有界预览、总字符数和截断标记，防止大日志直接进入 live prompt。
 - `agent_py_agent/agent/tooling/registry_control_ranges.py`: 工具解析前屏蔽 `SUBAGENT_RESULT` / `PARENT_PLANNER_RESULT` 等结构化结果块，确保结果摘要里提到的协议标记不会被误当作真实工具调用。
-- `agent_py_agent/agent/tooling/registry_execution.py`: 旧文本 `[TOOL_CALL]` 解析后先转成 `ToolCallEnvelope`，执行结果挂回 `call_id/result_envelope`；非 `tool_call` envelope 会明确拒绝执行。envelope helper、最终执行、marker 扫描和 payload 归一已分别拆到 `registry_envelopes.py` / `registry_invoke.py` / `registry_markers.py` / `registry_payload_normalize.py`。
+- `agent_py_agent/agent/tooling/registry_execution.py`: 旧文本 `[TOOL_CALL]` 解析后先转成 `ToolCallEnvelope`，再顺序经过 tool protocol、manifest、path/url/command、side-effect/idempotency gates，执行结果挂回 `call_id/result_envelope`；非 `tool_call` envelope 会明确拒绝执行。envelope helper、授权、gate policy、gate result、最终执行、marker 扫描和 payload 归一已分别拆到 `registry_envelopes.py` / `registry_auth.py` / `registry_gate_policy.py` / `registry_runtime_gate_results.py` / `registry_invoke.py` / `registry_markers.py` / `registry_payload_normalize.py`。
+- `agent_py_agent/agent/tooling/registry_auth.py`: registry 鉴权 helper；统一 allowed_tools、安全工具可见性和 capability grants，不和工具执行/解析耦合。
+- `agent_py_agent/agent/tooling/registry_gate_policy.py`: registry runtime gate policy helper；从 ToolSpec 和 write_boundary 生成 tool manifest、path roots、approval/idempotency policy。
+- `agent_py_agent/agent/tooling/registry_runtime_gate_results.py`: registry gate 结果写回层；gate 拒绝时返回普通 ToolExecutionResult，同时在 result_envelope.runtime_gate 保留机器事实。
 - `agent_py_agent/agent/tooling/registry_invoke.py`: 工具执行前的参数准备、写边界校验和临时工作根注入层；当父级明确授权外部 product/artifact 目录时，同一工具调用内会把这些目录加入文件工具 read/list/search/write 根，调用结束后恢复原工具状态。
 - `agent_py_agent/agent/tooling/registry_payload_normalize.py`: 对标准 JSON 工具块做 payload 校验、工具名别名归一和参数别名归一；支持 shell/cmd/cwd 与 read_artifact ref/limit 等常见模型漂移，冲突参数明确报错，不静默猜测。
 - `agent_py_agent/agent/tooling/artifact.py`: 注册 `read_artifact` 工具，给模型提供受控 artifact slice/head/tail/search 读取入口。
 - `agent_py_agent/agent/tooling/artifact_read_budget.py`: `read_artifact` 的单 run 正文读取预算器，按 `run_id` 统计滚动窗口字符数，避免子代理反复展开大 artifact。
-- `agent_py_agent/agent/tooling/controlled_exec.py`: 注册 `controlled_exec` 工具包装；只从 `write_boundary.controlled_exec_grants` 读取父级 shell grant，dry-run 返回 plan，显式 apply 才调用 bounded shell execution 或 task trash；`apply/execute/run/full` 字符串也会被识别为执行意图，delete-to-trash dry-run 作为有效计划返回，但 prompt/验收会要求真实 stdout/audit/trash refs 才算完成。执行后的 shell decision/audit 会标记 `dry_run=false`，避免模型把真实执行误读成计划。
+- `agent_py_agent/agent/tooling/controlled_exec.py`: 注册 `controlled_exec` 受控 mutating adapter；只从 `write_boundary.controlled_exec_grants` 读取父级 shell grant，dry-run 返回 plan，显式 apply 才调用 bounded shell execution 或 task trash；`apply/execute/run/full` 字符串也会被识别为执行意图，delete-to-trash dry-run 作为有效计划返回，但 prompt/验收会要求真实 stdout/audit/trash refs 才算完成。执行后的 shell decision/audit 会标记 `dry_run=false`，避免模型把真实执行误读成计划。
 - `agent_py_agent/agent/tooling/registry_params.py`: 工具执行参数准备 helper，给 `read_file` 注入只用于恢复提示的 allowed_tools 上下文，让主 registry execution 继续保持薄。
 - `agent_py_agent/agent/tooling/registry_tool_dispatch.py`: 工具已解析、授权和写边界校验后的最终分发层；普通工具走 `tool.execute()`，registry-aware 工具如 `controlled_exec` 在这里读取注入上下文。
 - `agent_py_agent/cli/memory_artifact_commands.py`: 提供 `memory-artifact-read` 命令，保持 artifact 正文读取和 archive resume/search CLI 分离。

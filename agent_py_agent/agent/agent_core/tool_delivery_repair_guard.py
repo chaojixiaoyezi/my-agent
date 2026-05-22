@@ -6,6 +6,10 @@ from __future__ import annotations
 import json
 
 from ..backend import ModelResponse
+from .tool_delivery_repair_declared_reads import (
+    declared_repair_reads_exhausted,
+    reset_declared_read_allowance,
+)
 from .tool_delivery_repair_evidence_shape import violates_evidence_repair_shape
 from .tool_delivery_repair_paths import (
     call_command,
@@ -114,6 +118,10 @@ def is_delivery_repair_productive_call(
         strict_write_required=strict_write_required,
         required_actions=required_actions,
     )
+    if any(_call_resets_declared_read_allowance(call, context) for call in calls):
+        reset_declared_read_allowance(agent)
+    if declared_repair_reads_exhausted(agent, payload, calls, required_actions):
+        return False
     return any(_call_is_productive(call, context) for call in calls)
 
 
@@ -183,10 +191,21 @@ def _violates_declared_writer_tool(call: dict[str, object], required_actions: li
         return False
     for action in required_actions:
         writer_tool = str(action.get("writer_tool") or "").strip()
+        allowed_tools = _declared_writer_tools(action, writer_tool)
         checkpoint_ref = str(action.get("checkpoint_ref") or "").strip()
-        if writer_tool and checkpoint_ref and tool != writer_tool and same_path_ref(path, checkpoint_ref):
+        if allowed_tools and checkpoint_ref and tool not in allowed_tools and same_path_ref(path, checkpoint_ref):
             return True
     return False
+
+
+# LLM: _declared_writer_tools lets one checkpoint have multiple structured writer tools.
+# 函数用途: 将 writer_tool 和 write_tools 合并成允许集合，避免 API 来源 writer 被单一 writer_tool 误拦。
+def _declared_writer_tools(action: dict[str, object], writer_tool: str) -> set[str]:
+    tools = {writer_tool} if writer_tool else set()
+    raw = action.get("write_tools")
+    if isinstance(raw, list):
+        tools.update(str(item).strip() for item in raw if str(item).strip())
+    return tools
 
 
 # LLM: STAGED_JSON_NO_ROWS repair requires actual structured rows, not just touching the checkpoint path.
@@ -198,11 +217,21 @@ def _violates_non_empty_rows_repair(call: dict[str, object], required_actions: l
     if not path:
         return False
     for action in required_actions:
-        if str(action.get("recommended_action") or "") != "write_non_empty_structured_rows":
+        if not _requires_non_empty_checkpoint_write(action):
             continue
         if same_path_ref(path, str(action.get("checkpoint_ref") or "")):
             return not _has_non_empty_structured_rows(call)
     return False
+
+
+def _requires_non_empty_checkpoint_write(action: dict[str, object]) -> bool:
+    recommended = str(action.get("recommended_action") or "")
+    if recommended == "write_non_empty_structured_rows":
+        return True
+    return (
+        recommended == "materialize_checkpoint"
+        and str(action.get("checkpoint_materialization_mode") or "") == "source_evidence_first"
+    )
 
 
 # LLM: _has_non_empty_structured_rows checks table payload shape without reading prose.
@@ -232,7 +261,12 @@ def _is_checkpoint_repair_read(call: dict[str, object], required_actions: list[d
     path = call_path(call)
     if not path:
         return False
-    repair_actions = {"repair_evidence_refs", "repair_structured_checkpoint_json", "write_non_empty_structured_rows"}
+    repair_actions = {
+        "repair_collection_item_values",
+        "repair_evidence_refs",
+        "repair_structured_checkpoint_json",
+        "write_non_empty_structured_rows",
+    }
     return any(
         str(action.get("recommended_action") or "") in repair_actions
         and same_path_ref(path, str(action.get("checkpoint_ref") or ""))
@@ -262,6 +296,18 @@ def _is_evidence_repair_gathering(call: dict[str, object], required_actions: lis
         and bool(action.get("required_fields"))
         for action in required_actions
     )
+
+
+def _call_resets_declared_read_allowance(
+    call: dict[str, object],
+    context: DeliveryRepairProductivityContext,
+) -> bool:
+    tool = str(call.get("tool") or "").strip()
+    if tool in context.productive_tools and tool not in context.inspection_only_tools and tool not in EVIDENCE_GATHERING_TOOL_NAMES:
+        return True
+    if tool != "run_command":
+        return False
+    return _run_command_is_productive(call, context)
 
 
 # LLM: _run_command_is_productive keeps this runtime helper grounded in structured fields.

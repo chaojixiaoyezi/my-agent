@@ -211,6 +211,43 @@ def test_collection_contract_accepts_row_field_sources(tmp_path: Path) -> None:
     assert report.ok, report.to_dict()
 
 
+def test_collection_contract_rejects_unaudited_row_field_source(tmp_path: Path) -> None:
+    _write_source_workbook(
+        tmp_path,
+        {
+            "claims": [_claim("上升 star 数", "src-1")],
+            "sheets": [_sheet("week-1", 1, source_id="src-1")],
+            "source_refs": [{"source_id": "src-1", "status": "AVAILABLE", "uri": "https://example.com"}],
+        },
+    )
+    report = _validate_row_evidence_workbook(tmp_path, min_items=1)
+
+    assert not report.ok
+    assert "COLLECTION_ITEM_EVIDENCE_SOURCE_UNAUDITED" in {finding.code for finding in report.findings}
+
+
+def test_collection_contract_rejects_content_hash_without_source_binding(tmp_path: Path) -> None:
+    _write_source_workbook(
+        tmp_path,
+        {
+            "claims": [_claim("上升 star 数", "src-1")],
+            "sheets": [_sheet("week-1", 1, source_id="src-1")],
+            "source_refs": [
+                {
+                    "content_sha256": "abc123",
+                    "source_id": "src-1",
+                    "status": "AVAILABLE",
+                    "uri": "https://example.com",
+                }
+            ],
+        },
+    )
+    report = _validate_row_evidence_workbook(tmp_path, min_items=1)
+
+    assert not report.ok
+    assert "COLLECTION_ITEM_EVIDENCE_SOURCE_UNAUDITED" in {finding.code for finding in report.findings}
+
+
 def test_collection_contract_accepts_row_scoped_claims(tmp_path: Path) -> None:
     _write_source_workbook(
         tmp_path,
@@ -270,8 +307,14 @@ def _sheet(name: str, count: int, *, source_id: str = "") -> dict[str, object]:
     }
 
 
-def _source_ref(source_id: str) -> dict[str, str]:
-    return {"source_id": source_id, "uri": "https://example.com", "status": "AVAILABLE"}
+def _source_ref(source_id: str) -> dict[str, object]:
+    return {
+        "content_sha256": "abc123",
+        "source_id": source_id,
+        "uri": "https://example.com",
+        "status": "AVAILABLE",
+        "reserved": {"tool_call_id": f"call-{source_id}"},
+    }
 
 
 def _claim(field: str, source_id: str) -> dict[str, object]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .artifact_provenance import evaluate_artifact_provenance_gate
 from .models import GateDecision, GateFinding
 
 
@@ -16,7 +17,8 @@ def evaluate_delivery_closeout_gate(report: dict[str, Any]) -> GateDecision:
     artifacts = report.get("artifacts")
     if not isinstance(artifacts, list):
         return GateDecision.deny("delivery_closeout", "CLOSEOUT_ARTIFACTS_MISSING")
-    failed = [_artifact_item_gate(item) for item in artifacts if isinstance(item, dict)]
+    run_id = str(report.get("run_id") or "").strip()
+    failed = [_artifact_item_gate(item, run_id=run_id) for item in artifacts if isinstance(item, dict)]
     failed = [decision for decision in failed if not decision.allowed]
     if report.get("ok") is not True or failed:
         findings = [finding for decision in failed for finding in decision.findings]
@@ -48,14 +50,29 @@ def evaluate_artifact_report_gate(report: dict[str, Any]) -> GateDecision:
 
 # LLM: _artifact_item_gate normalizes delivery artifact rows into artifact reports.
 # 函数用途: 把 closeout artifact item 的 path/kind/ok 补到 acceptance_report 后再复用产物门。
-def _artifact_item_gate(item: dict[str, Any]) -> GateDecision:
+def _artifact_item_gate(item: dict[str, Any], *, run_id: str = "") -> GateDecision:
     report = item.get("acceptance_report")
     payload = dict(report) if isinstance(report, dict) else {}
     payload.setdefault("ok", item.get("ok"))
     payload.setdefault("artifact_ref", item.get("path"))
     payload.setdefault("artifact_kind", item.get("kind"))
     decision = evaluate_artifact_report_gate(payload)
-    return decision if decision.allowed else _with_artifact_context(item, decision)
+    provenance_decision = evaluate_artifact_provenance_gate(item, run_id=run_id)
+    failed = [child for child in (decision, provenance_decision) if not child.allowed]
+    if not failed:
+        return decision
+    findings = [finding for child in failed for finding in child.findings]
+    return _with_artifact_context(
+        item,
+        GateDecision.repair(
+            "artifact_report",
+            findings,
+            evidence={
+                "artifact_report_allowed": decision.allowed,
+                "artifact_provenance_allowed": provenance_decision.allowed,
+            },
+        ),
+    )
 
 
 # LLM: _with_artifact_context preserves artifact identity on failed finding rows.

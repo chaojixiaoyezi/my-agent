@@ -11,16 +11,21 @@ from .parameters import _one_shot_tool_call_key
 from .runner_stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_call_finished
 from .subagent_attempt_guard import stale_subagent_attempt_result
 from .tool_agent_budget_stage import ToolAgentBudgetStageRequest, maybe_block_tool_agent_budget
+from .tool_api_collection_contract import api_collection_contract_result
 from .tool_body_read_guard_stage import (
     ToolBodyReadGuardStageRequest,
     maybe_block_delegating_body_read_stage,
 )
-from .tool_call_guardrail import maybe_block_repeated_tool_failure
+from .tool_call_guardrail import (
+    maybe_block_repeated_tool_failure,
+    maybe_block_repeated_tool_no_progress,
+)
 from .tool_direct_write_guard_stage import (
     ToolDirectWriteGuardStageRequest,
     maybe_block_delegate_only_direct_write_stage,
 )
 from .tool_round_execution import ToolCallExecuteParams
+from .tool_runtime_ledger import write_boundary_with_runtime_ledger
 from .tool_staged_writer_contract import staged_writer_contract_result
 
 
@@ -44,6 +49,13 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
     if one_shot_key and one_shot_key in request.params.one_shot_tool_calls:
         result = _duplicate_one_shot_result(payload)
         return _trace_finished_result(trace_request, result)
+    repeated_no_progress_result = maybe_block_repeated_tool_no_progress(
+        runtime_request.agent,
+        request.params,
+        payload,
+    )
+    if repeated_no_progress_result is not None:
+        return _trace_finished_result(trace_request, repeated_no_progress_result)
     repeated_failure_result = maybe_block_repeated_tool_failure(
         runtime_request.agent,
         request.params,
@@ -57,6 +69,9 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
     staged_writer_result = staged_writer_contract_result(request.params, payload)
     if staged_writer_result is not None:
         return _trace_finished_result(trace_request, staged_writer_result)
+    api_collection_result = api_collection_contract_result(request.params, payload)
+    if api_collection_result is not None:
+        return _trace_finished_result(trace_request, api_collection_result)
     body_read_result = maybe_block_delegating_body_read_stage(
         ToolBodyReadGuardStageRequest(runtime_request.agent, request, payload)
     )
@@ -78,7 +93,7 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         runtime_request.payload,
         allowed_tools=runtime_request.request.params.allowed_tools,
         granted_capabilities=runtime_request.request.params.granted_capabilities,
-        write_boundary=runtime_request.request.params.write_boundary,
+        write_boundary=write_boundary_with_runtime_ledger(runtime_request.agent, runtime_request.request.params),
     )
     if one_shot_key and _one_shot_result_consumes_key(result):
         runtime_request.request.params.one_shot_tool_calls.add(one_shot_key)

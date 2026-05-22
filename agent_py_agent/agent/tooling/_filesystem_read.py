@@ -105,6 +105,7 @@ class ListFilesTool(FileSystemTool):
         self.spec = ToolSpec(
             name="list_files",
             category="filesystem",
+            effect="read_only",
             description="列出目录中的文件和子目录，适合先摸清项目结构。",
             use_cases=[
                 "刚接手一个项目，先看看目录树大概长什么样",
@@ -258,6 +259,7 @@ class ReadFileTool(FileSystemTool):
         self.spec = ToolSpec(
             name="read_file",
             category="filesystem",
+            effect="read_only",
             description="读取文本文件内容，适合看代码、配置和文档。",
             use_cases=[
                 "查看某个 Python 文件、配置文件或 Markdown 文档",

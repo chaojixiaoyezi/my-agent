@@ -10,6 +10,7 @@ from __future__ import annotations
 外部如果想直接用工具系统，可以从这里导入公开类；老的 `agent.tools` 入口也会继续兼容。
 """
 
+from .api_json_collection import ApiJsonCollectionTool
 from .artifact import ReadArtifactTool
 from .filesystem import (
     AppendFileTool,
@@ -38,6 +39,7 @@ from .write_boundary import WRITE_TOOL_NAMES, validate_write_boundary
 
 __all__ = [
     "AppendFileTool",
+    "ApiJsonCollectionTool",
     "BaseTool",
     "BaseToolSearchProvider",
     "FetchUrlTool",

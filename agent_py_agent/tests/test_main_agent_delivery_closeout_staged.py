@@ -99,6 +99,35 @@ def test_delivery_closeout_requires_staged_json_evidence_before_builder():
     assert "STAGING_BUILDER_READY" not in actions
 
 
+# LLM: Missing source checkpoints with evidence contracts must point at source collection, not empty skeletons.
+# 函数用途: 验证缺失的来源型 checkpoint 恢复动作优先要求 api_json_collection 和结构化来源证据。
+def test_delivery_closeout_missing_source_checkpoint_prefers_auditable_collection_tool():
+    contract = xlsx_delivery_contract()
+    artifact = contract["artifacts"][0]
+    artifact["validation_contract"]["collection_contract"] = {
+        "source_json_ref": "outputs/github_star_growth/source_data.json",
+        "required_item_evidence_fields": ["项目名", "地址", "上升 star 数"],
+        "require_completion_evidence": True,
+        "require_item_evidence": True,
+    }
+    artifact["validation_contract"]["evidence_contract"] = {
+        "required_fields": ["项目名", "地址", "上升 star 数"],
+        "require_verified": True,
+    }
+
+    with tempfile.TemporaryDirectory() as td:
+        _, actions = _enriched_report(Path(td).resolve(), contract)
+
+    action = actions["STAGING_CHECKPOINT_MISSING"]
+    assert action["checkpoint_ref"] == "outputs/github_star_growth/source_data.json"
+    assert action["checkpoint_materialization_mode"] == "source_evidence_first"
+    assert action["requires_auditable_source_evidence"] is True
+    assert action["writer_tool"] == "api_json_collection"
+    assert action["write_tools"] == ["api_json_collection", "write_structured_json"]
+    assert "source_refs" in action["required_structured_fields"]
+    assert "claims" in action["required_structured_fields"]
+
+
 # LLM: Evidence recovery should carry every missing required field in one machine action.
 # 函数用途: 验证 closeout 不会只暴露第一个缺证据字段，避免下一轮模型反复局部修。
 def test_delivery_closeout_aggregates_missing_evidence_fields():
@@ -301,6 +330,41 @@ def test_delivery_closeout_adds_document_builder_action_for_ready_markdown_sourc
         assert actions["STAGING_BUILDER_READY"]["builder_tool"] == "markdown_to_pdf"
         assert actions["STAGING_BUILDER_READY"]["source_ref"] == "outputs/research_documents/research_documents_zh.md"
         assert actions["STAGING_BUILDER_READY"]["output_ref"] == "outputs/research_documents/research_documents_zh.pdf"
+
+
+# LLM: Evidence repair for document flows must target the structured source index, not the markdown builder input.
+# 函数用途: 验证 source_markdown_ref 作为 builder 输入时，collection_contract.source_json_ref 仍能生成证据修复动作。
+def test_delivery_closeout_repairs_collection_source_evidence_before_document_builder():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td).resolve()
+        contract = _research_pdf_contract()
+        artifact = contract["artifacts"][0]
+        artifact["validation_contract"]["collection_contract"] = {
+            "source_json_ref": "outputs/research_documents/source_index.json",
+        }
+        artifact["validation_contract"]["evidence_contract"] = {
+            "required_fields": ["title", "url", "date"],
+            "require_verified": True,
+        }
+        _write_json_file(
+            workspace / "outputs/research_documents/source_index.json",
+            {
+                "rows": [{"title": "demo", "url": "https://example.com", "date": "2026-01-01"}],
+                "source_refs": [{"source_id": "src-1", "uri": "https://example.com"}],
+                "claims": [{"field": "title", "value": "demo", "source_ids": ["src-1"]}],
+            },
+        )
+        draft = workspace / "outputs/research_documents/research_documents_zh.md"
+        draft.write_text("# 翻译正文\n\n这是已经完成的中文草稿。", encoding="utf-8")
+
+        _, actions = _enriched_report(workspace, contract)
+
+        action = actions["EVIDENCE_REQUIRED_FIELD_MISSING"]
+        assert action["recommended_action"] == "repair_evidence_refs"
+        assert action["checkpoint_ref"] == "outputs/research_documents/source_index.json"
+        assert action["required_fields"] == ["date", "url"]
+        assert action["writer_tool"] == "write_structured_json"
+        assert "STAGING_BUILDER_READY" not in actions
 
 
 # LLM: Recovery actions must not drop larger structured validator batches.

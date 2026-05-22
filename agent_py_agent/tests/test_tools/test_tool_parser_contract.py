@@ -293,6 +293,31 @@ def test_tool_call_parser_recovers_single_extra_trailing_brace():
     assert calls == [{"tool": "read_file", "path": "README.md"}]
 
 
+# LLM: Detached top-level metadata should be repaired before parse-error recovery.
+# 函数用途: 验证模型把 source_refs/claims 误写到 premature-close 后面时，解析器能合回同一个工具调用。
+def test_tool_call_parser_recovers_detached_top_level_fields():
+    registry = make_tool_registry(Path.cwd())
+
+    calls = registry.parse_tool_calls(
+        '[TOOL_CALL]\n'
+        '{"tool":"write_structured_json","path":"outputs/source_index.json",'
+        '"data":{"rows":[{"title":"Paper","translated":true}]}}'
+        ', "source_refs":[{"source_id":"src-1","uri":"https://example.com"}],'
+        ' "claims":[{"field":"title","source_ids":["src-1"],"value":"Paper"}]}\n'
+        '[/TOOL_CALL]'
+    )
+
+    assert calls == [
+        {
+            "tool": "write_structured_json",
+            "path": "outputs/source_index.json",
+            "data": {"rows": [{"title": "Paper", "translated": True}]},
+            "source_refs": [{"source_id": "src-1", "uri": "https://example.com"}],
+            "claims": [{"field": "title", "source_ids": ["src-1"], "value": "Paper"}],
+        }
+    ]
+
+
 # LLM: test_parse_error_result_includes_retry_format_hint covers malformed XML-ish tool-call recovery.
 # 函数用途: 模型工具调用格式坏掉时，执行结果要明确告诉它下一轮用标准 JSON 工具块重试。
 def test_parse_error_result_includes_retry_format_hint():

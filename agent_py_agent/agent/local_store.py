@@ -26,10 +26,12 @@ from .local_storage import (
     LocalStoreEventMixin,
     LocalStoreMaintenanceMixin,
     LocalStoreRecordMixin,
+    LocalStoreRuntimeGateLedgerMixin,
     LocalStoreSchemaMixin,
     LocalStoreSearchMixin,
     LocalStoreSharedProgressPanelMixin,
     LocalTimelineItem,
+    RuntimeGateLedgerRecord,
     SharedProgressPanel,
     TaskRollupRecord,
 )
@@ -45,6 +47,7 @@ class LocalStore(
     LocalStoreEventMixin,
     LocalStoreControlPlaneMixin,
     LocalStoreSharedProgressPanelMixin,
+    LocalStoreRuntimeGateLedgerMixin,
     LocalStoreMaintenanceMixin,
 ):
     """composes LocalStore persistence, search, events, and maintenance APIs.
@@ -109,6 +112,7 @@ __all__ = [
     "LocalStoreEvent",
     "LocalTimelineItem",
     "PREVIEW_CHARS",
+    "RuntimeGateLedgerRecord",
     "SharedProgressPanel",
     "TaskRollupRecord",
     "TaskRegistry",

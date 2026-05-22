@@ -11,6 +11,7 @@ from ._runtime_params import ToolLoopExecuteParams
 
 _DIRECT_FILE_WRITE_TOOLS = {"append_file", "file_write_session", "replace_in_file", "write_file"}
 _STRUCTURED_JSON_WRITER = "write_structured_json"
+_STRUCTURED_JSON_SOURCE_WRITERS = frozenset({_STRUCTURED_JSON_WRITER, "api_json_collection"})
 _JSON_SOURCE_KEYS = ("source_json_ref",)
 _BUILDER_OUTPUT_KEYS = ("workbook_ref", "pdf_ref", "output_ref")
 
@@ -102,13 +103,13 @@ def _index_artifact_staging_contracts(index: WriterContractIndex, artifacts: obj
 # 函数用途: 将 source_json_ref 和 JSON checkpoint_refs 绑定到 write_structured_json。
 def _index_json_sources(index: WriterContractIndex, staging: dict[str, object]) -> None:
     for key in _JSON_SOURCE_KEYS:
-        index.add(staging.get(key), _STRUCTURED_JSON_WRITER)
+        _add_json_source_writers(index, staging.get(key))
     checkpoint_refs = staging.get("checkpoint_refs")
     if not isinstance(checkpoint_refs, list):
         return
     for ref in checkpoint_refs:
         if _ref_text(ref).lower().endswith(".json"):
-            index.add(ref, _STRUCTURED_JSON_WRITER)
+            _add_json_source_writers(index, ref)
 
 
 # LLM: Shape hints are structured writer facts for JSON checkpoints.
@@ -119,7 +120,14 @@ def _index_shape_hint_json_checkpoints(index: WriterContractIndex, staging: dict
         return
     for ref in hints:
         if _ref_text(ref).lower().endswith(".json"):
-            index.add(ref, _STRUCTURED_JSON_WRITER)
+            _add_json_source_writers(index, ref)
+
+
+# LLM: JSON checkpoints can be produced by either direct structured data or API-backed collection tools.
+# 函数用途: 将 JSON checkpoint ref 绑定到所有声明的结构化来源写入工具。
+def _add_json_source_writers(index: WriterContractIndex, ref: object) -> None:
+    for tool_name in _STRUCTURED_JSON_SOURCE_WRITERS:
+        index.add(ref, tool_name)
 
 
 # LLM: Builder output refs are protected by the declared builder tool.
@@ -143,7 +151,7 @@ def _index_bootstrap_actions(index: WriterContractIndex, bootstrap: object) -> N
             continue
         checkpoint_ref = _ref_text(action.get("checkpoint_ref"))
         if checkpoint_ref.lower().endswith(".json"):
-            index.add(checkpoint_ref, _STRUCTURED_JSON_WRITER)
+            _add_json_source_writers(index, checkpoint_ref)
         if _tool_text(action.get("builder_tool")):
             index.add(action.get("output_ref"), action.get("builder_tool"))
 
@@ -173,7 +181,7 @@ def _index_declared_actions(index: WriterContractIndex, value: object) -> None:
 def _target_path_for_tool(tool: str, payload: dict[str, object]) -> str:
     if tool in _DIRECT_FILE_WRITE_TOOLS:
         return _first_path(payload, ("path", "file_path", "target_path"))
-    if tool in {_STRUCTURED_JSON_WRITER, "data_to_workbook", "markdown_to_pdf"}:
+    if tool in {*_STRUCTURED_JSON_SOURCE_WRITERS, "data_to_workbook", "markdown_to_pdf"}:
         return _first_path(payload, ("path", "output_path"))
     return ""
 

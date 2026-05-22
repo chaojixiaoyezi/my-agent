@@ -209,6 +209,8 @@ def build_create_subagents_spec() -> ToolSpec:
     return ToolSpec(
         name="create_subagents",
         category="orchestration",
+        effect="mutating",
+        requires_idempotency=True,
         description="创建一个或多个子代理任务记录。不同工作切片优先用 items/tasks；创建后必须 dispatch_subagents 才会真实执行。",
         use_cases=_CREATE_USE_CASES,
         avoid_when=["只是解释思路、不需要真正创建任务时，不要调用；先直接回答即可"],
@@ -225,6 +227,7 @@ def build_subagent_board_spec() -> ToolSpec:
     return ToolSpec(
         name="subagent_board",
         category="orchestration",
+        effect="read_only",
         description="查看当前子代理看板和状态摘要，用来判断任务是否待执行、待验收或卡住。",
         use_cases=["用户问当前任务进度、有哪些子代理、哪些任务卡住或完成", "调度前先查看任务树状态，避免重复派工"],
         avoid_when=["已经知道具体 run_id 且只需要执行 dispatch 时，可以直接调用 dispatch_subagents"],
@@ -240,6 +243,8 @@ def build_dispatch_subagents_spec() -> ToolSpec:
     return ToolSpec(
         name="dispatch_subagents",
         category="orchestration",
+        effect="mutating",
+        requires_idempotency=True,
         description="执行一轮子代理调度，可 dry-run，也可 apply 并调用真实 runner。",
         use_cases=["已经创建子代理后，用户要求推进、开跑、验收、处理卡住项", "需要让父代理检查 due-check、路由能力、执行 runner、审核 patch 或验收结果"],
         avoid_when=["只是创建任务时先用 create_subagents；没有明确推进意图时默认 dry-run 更稳"],
@@ -262,6 +267,8 @@ def build_schedule_child_subagents_spec() -> ToolSpec:
     return ToolSpec(
         name="schedule_child_subagents",
         category="orchestration",
+        effect="mutating",
+        requires_idempotency=True,
         description="在当前 subagent runner 的名下创建下一层 child runs，保持层级树可恢复。"
         + _SCHEDULE_CHILD_COORDINATOR_RULES,
         use_cases=_SCHEDULE_CHILD_USE_CASES,

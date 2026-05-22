@@ -16,6 +16,7 @@ _EXPLORATION_BLOCK_THRESHOLD = 6
 _REPEATED_EXPLORATION_BLOCK_THRESHOLD = 4
 _BOOTSTRAP_PRODUCTIVE_TOOLS = {
     "append_file",
+    "api_json_collection",
     "data_to_workbook",
     "file_write_session",
     "markdown_to_pdf",

@@ -17,8 +17,11 @@ from ._filesystem_helpers import (
 from ._filesystem_read import FileSystemTool
 from .artifact_integrity import (
     HtmlAppendGuardRequest,
+    artifact_integrity_payload,
     check_html_append_allowed,
+    check_web_project_post_write,
     html_post_write_note,
+    web_project_post_write_note,
 )
 from .content_transport_policy import (
     InlineContentPolicyRequest,
@@ -50,6 +53,8 @@ class WriteFileTool(FileSystemTool):
         self.spec = ToolSpec(
             name="write_file",
             category="filesystem",
+            effect="mutating",
+            requires_idempotency=True,
             description="写入或覆盖文本文件；缺失父目录会自动创建。",
             use_cases=[
                 "新建代码文件、配置文件或文档",
@@ -102,16 +107,13 @@ class WriteFileTool(FileSystemTool):
         target = self.resolve_path(target)
         target.write_text(content, encoding="utf-8")
         integrity_note = html_post_write_note(target, content)
+        web_decision = check_web_project_post_write(target, self.workspace_root)
         output = f"已写入文件: {self.display_path(target)}"
         if content_policy.message:
             output = f"{output}\n{content_policy.message}"
         if integrity_note:
             output = f"{output}\n{integrity_note}"
-        return ToolExecutionResult(
-            "write_file",
-            True,
-            output,
-        )
+        return _write_result("write_file", target, output, web_decision)
 
 
 # LLM: AppendFileTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
@@ -132,6 +134,8 @@ class AppendFileTool(FileSystemTool):
         self.spec = ToolSpec(
             name="append_file",
             category="filesystem",
+            effect="mutating",
+            requires_idempotency=True,
             description="向文本文件末尾追加内容；缺失父目录会自动创建。",
             use_cases=[
                 "往日志、Markdown、结果汇总文件后面追加一段内容",
@@ -192,17 +196,15 @@ class AppendFileTool(FileSystemTool):
             return ToolExecutionResult("append_file", False, append_guard.message)
         with target.open("a", encoding="utf-8") as file:
             file.write(content)
-        integrity_note = html_post_write_note(target, f"{existing_text}{content}")
+        updated_text = f"{existing_text}{content}"
+        integrity_note = html_post_write_note(target, updated_text)
+        web_decision = check_web_project_post_write(target, self.workspace_root)
         output = f"已追加文件: {self.display_path(target)}"
         if content_policy.message:
             output = f"{output}\n{content_policy.message}"
         if integrity_note:
             output = f"{output}\n{integrity_note}"
-        return ToolExecutionResult(
-            "append_file",
-            True,
-            output,
-        )
+        return _write_result("append_file", target, output, web_decision)
 
 
 # LLM: ReplaceInFileTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
@@ -216,6 +218,8 @@ class ReplaceInFileTool(FileSystemTool):
         self.spec = ToolSpec(
             name="replace_in_file",
             category="filesystem",
+            effect="mutating",
+            requires_idempotency=True,
             description="在文本文件中精确替换一段已有内容，适合小范围改代码和改配置。",
             use_cases=[
                 "只改一个函数、一段注释、一行配置或一小段文档",
@@ -282,7 +286,33 @@ class ReplaceInFileTool(FileSystemTool):
         updated = content.replace(old_text, new_text, replace_count)
         changed = min(matches, replace_count)
         target.write_text(updated, encoding="utf-8")
-        return ToolExecutionResult(
-            "replace_in_file", True,
-            f"已修改文件: {self.display_path(target)}；替换 {changed} 处；原文共命中 {matches} 处",
+        web_decision = check_web_project_post_write(target, self.workspace_root)
+        output = f"已修改文件: {self.display_path(target)}；替换 {changed} 处；原文共命中 {matches} 处"
+        return _write_result(
+            "replace_in_file",
+            target,
+            output,
+            web_decision,
         )
+
+
+# LLM: _write_result keeps web-project validation attached to every mutating file write.
+# 函数用途: 写入已发生但站点验收失败时返回结构化失败，促使模型修复而不是假完成。
+def _write_result(tool: str, target: Path, output: str, web_decision: Any) -> ToolExecutionResult:
+    envelope = _artifact_integrity_envelope(web_decision, target)
+    web_note = web_project_post_write_note(web_decision)
+    if not web_note:
+        return ToolExecutionResult(tool, True, output, result_envelope=envelope)
+    return ToolExecutionResult(
+        tool,
+        False,
+        f"{output}\n{web_note}",
+        result_envelope=envelope,
+        error_code="ACCEPTANCE_FAILED",
+    )
+
+
+def _artifact_integrity_envelope(web_decision: Any, target: Path) -> dict[str, object]:
+    if getattr(web_decision, "kind", "generic") == "generic":
+        return {}
+    return {"artifact_integrity": artifact_integrity_payload(web_decision, target)}

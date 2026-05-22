@@ -32,6 +32,12 @@ class ToolSpec:
     parameters: dict[str, str]
     parameter_details: dict[str, str] = field(default_factory=dict)
     examples: list[str] = field(default_factory=list)
+    effect: str = ""
+    default_mode: str = ""
+    requires_idempotency: bool = False
+    requires_approval: bool = False
+    timeout_seconds: int = 0
+    output_refs: list[str] = field(default_factory=list)
 
     # LLM: ToolSpec.render_catalog_entry 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 把 render_catalog_entry 转成人或模型可读的展示文本。

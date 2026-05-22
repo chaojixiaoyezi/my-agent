@@ -28,6 +28,28 @@ def evaluate_acceptance_closeout_gate(report: dict[str, Any]) -> GateDecision:
     return GateDecision.allow("acceptance_closeout", evidence={"final_status": status, "verification_status": verification})
 
 
+# LLM: evaluate_final_closeout_gate checks the mandatory child gate set before final success.
+# 函数用途: 最终完成只能由 run/runtime/state/quality/acceptance 五个结构化 gate 共同放行，不能跳过任何一门。
+def evaluate_final_closeout_gate(report: dict[str, Any]) -> GateDecision:
+    findings: list[GateFinding] = []
+    for key in ("run_contract_gate", "runtime_gate", "state_gate", "delivery_quality_gate", "acceptance_gate"):
+        _require_allowed_child_gate(report, key, findings)
+    if findings:
+        return GateDecision.repair("final_closeout", findings, evidence={"missing_count": len(findings)})
+    return GateDecision.allow(
+        "final_closeout",
+        evidence={
+            "child_gates": [
+                "run_contract_gate",
+                "runtime_gate",
+                "state_gate",
+                "delivery_quality_gate",
+                "acceptance_gate",
+            ],
+        },
+    )
+
+
 # LLM: evaluate_runtime_audit_gate confirms replay records include gate and parameters.
 # 函数用途: 工具审计记录必须带 runtime_gate 和 parameters，否则恢复链路进入 RECOVERING。
 def evaluate_runtime_audit_gate(records: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> GateDecision:
@@ -58,6 +80,9 @@ def evaluate_recovery_replay_gate(snapshot: dict[str, Any]) -> GateDecision:
     _require_text(snapshot, "runlog_ref", findings)
     if findings:
         return GateDecision.recovering("recovery_replay", findings, evidence={"missing_count": len(findings)})
+    lineage = evaluate_recovery_lineage_gate(snapshot)
+    if not lineage.allowed:
+        return lineage
     return GateDecision.allow(
         "recovery_replay",
         evidence={
@@ -66,6 +91,34 @@ def evaluate_recovery_replay_gate(snapshot: dict[str, Any]) -> GateDecision:
             "effective_contract_hash": str(snapshot.get("effective_contract_hash") or ""),
         },
     )
+
+
+# LLM: evaluate_recovery_lineage_gate validates inherited artifacts before recovery trusts them.
+# 函数用途: 旧产物只有带 source_run_id 和 operation_id 的结构化 lineage 才能进入恢复链路。
+def evaluate_recovery_lineage_gate(snapshot: dict[str, Any]) -> GateDecision:
+    refs = snapshot.get("previous_artifact_refs")
+    if refs is None:
+        return GateDecision.allow("recovery_lineage", evidence={"previous_artifact_count": 0})
+    if not isinstance(refs, list):
+        return GateDecision.recovering("recovery_lineage", [GateFinding("RECOVERY_ARTIFACT_REFS_INVALID")])
+    findings: list[GateFinding] = []
+    for index, ref in enumerate(refs):
+        if not isinstance(ref, dict):
+            findings.append(GateFinding("RECOVERY_ARTIFACT_LINEAGE_INVALID", evidence={"index": index}))
+            continue
+        source_run_id = str(ref.get("source_run_id") or ref.get("run_id") or "").strip()
+        operation_id = str(ref.get("operation_id") or ref.get("source_operation_id") or "").strip()
+        path = str(ref.get("path") or ref.get("artifact_ref") or "").strip()
+        if not path or not source_run_id or not operation_id:
+            findings.append(
+                GateFinding(
+                    "RECOVERY_ARTIFACT_LINEAGE_MISSING",
+                    evidence={"index": index, "has_path": bool(path), "has_source_run_id": bool(source_run_id), "has_operation_id": bool(operation_id)},
+                )
+            )
+    if findings:
+        return GateDecision.recovering("recovery_lineage", findings, evidence={"previous_artifact_count": len(refs)})
+    return GateDecision.allow("recovery_lineage", evidence={"previous_artifact_count": len(refs)})
 
 
 # LLM: gate_payload_findings copies child gate findings without parsing human text.
@@ -91,6 +144,25 @@ def validate_tool_audit_record(index: int, record: dict[str, Any], findings: lis
         findings.append(GateFinding("AUDIT_RUNTIME_GATE_MISSING", evidence={"index": index}))
     if not isinstance(record.get("parameters"), dict):
         findings.append(GateFinding("AUDIT_PARAMETERS_MISSING", evidence={"index": index}))
+
+
+# LLM: _require_allowed_child_gate records missing or failed final closeout child gates.
+# 函数用途: 从 gate payload 的 allowed 字段判断子门结果，不读取 message 文本。
+def _require_allowed_child_gate(report: dict[str, Any], key: str, findings: list[GateFinding]) -> None:
+    payload = report.get(key)
+    code_prefix = "FINAL_CLOSEOUT_" + key.removesuffix("_gate").upper()
+    if not isinstance(payload, dict):
+        findings.append(GateFinding(f"{code_prefix}_GATE_MISSING"))
+        return
+    if payload.get("allowed") is not True:
+        child_findings = gate_payload_findings(payload, fallback=f"{code_prefix}_GATE_FAILED")
+        findings.extend(
+            GateFinding(
+                f"{code_prefix}_GATE_FAILED",
+                evidence={"child_gate": key, "child_code": finding.code, **finding.evidence},
+            )
+            for finding in child_findings
+        )
 
 
 # LLM: _gate_payload_finding maps one child gate finding into this gate's finding format.
@@ -122,6 +194,8 @@ def _require_mapping(snapshot: dict[str, Any], key: str, findings: list[GateFind
 
 __all__ = [
     "evaluate_acceptance_closeout_gate",
+    "evaluate_final_closeout_gate",
+    "evaluate_recovery_lineage_gate",
     "evaluate_recovery_replay_gate",
     "evaluate_runtime_audit_gate",
     "gate_payload_findings",

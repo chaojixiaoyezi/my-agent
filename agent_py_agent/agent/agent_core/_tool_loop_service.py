@@ -7,7 +7,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..backends import ModelResponse
-from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
 from ._runtime_params import ToolLoopExecuteParams
 from .runner_stage_trace import (
@@ -16,6 +15,7 @@ from .runner_stage_trace import (
 )
 from .subagent_attempt_guard import stale_subagent_attempt_message
 from .subagent_dispatch_closeout import subagent_dispatch_final_response_guard
+from .tool_call_archive_record import archive_tool_call_record
 from .tool_call_context_reducer import render_tool_payload_for_live_prompt
 from .tool_call_guardrail import record_tool_guard_observation
 from .tool_call_runtime import (
@@ -37,20 +37,19 @@ from .tool_loop_prompting import build_tool_loop_prompt, next_tool_loop_model_re
 from .tool_loop_recovery import (
     append_long_content_recovery_context,
     payload_with_runtime_scope,
-    runtime_run_id,
 )
 from .tool_loop_response_decision import (
     ToolLoopRepairCounters,
     ToolLoopResponseDecisionRequest,
     tool_loop_response_decision,
 )
-from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 from .tool_round_execution import (
     ToolCallExecuteParams,
     ToolCallRecordParams,
     ToolRoundExecutionRequest,
     execute_tool_round,
 )
+from .tool_runtime_ledger import persist_tool_runtime_ledger
 
 
 # LLM: _ToolStepRequest bundles one tool-step transition for the loop service.
@@ -263,6 +262,7 @@ class ToolLoopService:
         if record.result.ok and record.result.tool not in {"__parse_error__", "unknown"}:
             record.params.executed_tools.append(record.result.tool)
         archive_record = self._archive_tool_call_record(record)
+        persist_tool_runtime_ledger(self._agent, archive_record)
         record.params.archive_tool_calls.append(archive_record)
         record.params.tool_context.append(
             f"[tool-record round={record.tool_rounds} index={record.idx}]\n"
@@ -278,25 +278,7 @@ class ToolLoopService:
     # LLM: _archive_tool_call_record 属于 SimpleAgent 核心运行的函数边界；工具输出归档格式变化会影响 raw archive 和 compact。
     # 函数用途: 生成可归档的工具调用记录，大输出外置为 artifact，当前工具上下文仍保留完整结果。
     def _archive_tool_call_record(self, record: ToolCallRecordParams) -> dict[str, object]:
-        call_id = f"{record.tool_rounds}-{record.idx}"
-        request = ExternalizeToolOutputRequest(
-            root=self._agent.root,
-            tool=record.result.tool,
-            call_id=call_id,
-            output=record.result.output,
-            ok=record.result.ok,
-            request_id=record.params.request_id,
-            run_id=runtime_run_id(self._agent, record.params),
-            task_id=record.params.task_id,
-        )
-        fail_safe = write_tool_output_fail_safe_checkpoint(request)
-        output_record = externalize_tool_output_record(request)
-        output_record.update(fail_safe)
-        output_record["parameters"] = record.payload
-        runtime_gate = _runtime_gate_from_result(record.result)
-        if runtime_gate:
-            output_record["runtime_gate"] = runtime_gate
-        return output_record
+        return archive_tool_call_record(self._agent, record)
 
 
 # LLM: _task_local_progress_context gives the next runner turn a tiny progress anchor after writes.
@@ -325,13 +307,3 @@ def _append_initial_delivery_repair_context(agent: object, params: ToolLoopExecu
     if any(str(item).startswith("[tool-system delivery-required-repair]") for item in params.tool_context):
         return
     params.tool_context.append(context)
-
-
-# LLM: _runtime_gate_from_result carries runtime gate evidence into replayable archives.
-# 函数用途: 只读取 ToolExecutionResult.result_envelope.runtime_gate 结构字段，不从输出文本推断。
-def _runtime_gate_from_result(result: object) -> dict[str, object]:
-    envelope = getattr(result, "result_envelope", None)
-    if not isinstance(envelope, dict):
-        return {}
-    gate = envelope.get("runtime_gate")
-    return dict(gate) if isinstance(gate, dict) else {}

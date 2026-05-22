@@ -8,7 +8,7 @@ import re
 from hashlib import sha256
 
 from ..tooling.content_transport_policy import (
-    MAX_INLINE_WRITE_CONTENT_CHARS,
+    inline_write_content_limit,
     streaming_inline_write_abort_limit,
 )
 from ..tooling.file_write_session_models import DEFAULT_MAX_SESSION_CHUNK_CHARS
@@ -95,23 +95,12 @@ def _long_structured_json_stream_abort(raw: str, limit: int) -> LongToolContentS
 # LLM: file_write_session is the structured large-file channel and gets a larger stream ceiling than write_file.
 # 函数用途: 根据工具类型计算未闭合 content 早停阈值；普通写入早停，大文件 session 按 chunk 上限早停。
 def _streaming_write_abort_limit(tool: str, max_chars: int | None) -> int:
+    if tool == _STRUCTURED_JSON_TOOL:
+        return inline_write_content_limit(max_chars)
     limit = streaming_inline_write_abort_limit(max_chars)
     if tool != "file_write_session":
-        if tool == _STRUCTURED_JSON_TOOL and _uses_default_or_larger_inline_budget(max_chars):
-            return max(limit, DEFAULT_MAX_SESSION_CHUNK_CHARS)
         return limit
     return max(limit, DEFAULT_MAX_SESSION_CHUNK_CHARS)
-
-
-# LLM: structured JSON is machine data, not free-form file content, so default runs get a larger stream window.
-# 函数用途: 只有默认或更宽预算下放大 write_structured_json 阈值；显式小阈值测试仍可早停。
-def _uses_default_or_larger_inline_budget(max_chars: int | None) -> bool:
-    if max_chars is None:
-        return True
-    try:
-        return int(max_chars) >= MAX_INLINE_WRITE_CONTENT_CHARS
-    except (TypeError, ValueError):
-        return True
 
 
 # LLM: recovered_write_abort_payload converts an abort into the best follow-up tool call.

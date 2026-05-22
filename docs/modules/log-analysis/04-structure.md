@@ -33,6 +33,7 @@ agent_py_agent/agent/log_analysis/
 - `storage/__init__.py`：使用 lazy import 解决 `query → evidence → base` 循环依赖。
 - `storage/local_store.py` 和 `storage/query.py`：保存事件并按条件查回来。
 - `tools.py`：把 query、hunt、trace 包装成 agent 工具，只返回摘要、预览行和 evidence refs。
+- `tools/tool_classes.py` 和 `tools_handlers.py`：query、hunt、trace 的 BaseTool 入口；每个工具 spec 都声明 `effect=read_only`，供统一 Tool Manifest Gate 和 side-effect gate 消费。
 - `analytics/detectors.py`：从事件里找可疑 finding。
 - `cases/case_store.py` 和 `reports.py`：把 finding 汇成 case，再变成可读报告。
 - `dispatch/work_orders.py`：把 case 翻译成 analyst/reviewer 可执行的受控工作单。
@@ -92,3 +93,7 @@ agent_py_agent/agent/log_analysis/
 - Module structure docs now treat the definition-level double-layer comments as part of the code architecture: `LLM:` records model-facing contract/caller/side-effect notes, and `函数用途:` / `类用途:` records beginner-readable purpose and edit guidance.
 - New files, services, bundles, or facade methods must update both this structure page and the in-code comments at the same time.
 - The global file tree in `CODEBASE_TREE.md` now includes a current architecture map for CLI, agent core, gateway, memory, log-analysis, subagent, tooling, and settings boundaries.
+
+## 2026-05-22 runtime manifest structure update
+- 中文说明：LOG 工具现在把副作用类型作为机器字段写进 `ToolSpec.effect`，并保持两个 BaseTool 入口同步。registry 执行前的 Tool Manifest Gate 直接读取该字段，不从工具描述或 prompt 文本推断。
+- `security_query`、`security_hunt_ip` 和 `security_trace_case` 都是 read-only evidence query wrappers；如果后续新增会写文件、发消息或执行处置的 LOG 工具，必须显式声明 mutating/dangerous、幂等键和审批策略。

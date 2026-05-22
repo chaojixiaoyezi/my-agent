@@ -9,7 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from ..backends import ModelResponse
-from ..contracts.gates import evaluate_acceptance_closeout_gate, evaluate_delivery_closeout_gate
+from ..contracts.gates import (
+    evaluate_acceptance_closeout_gate,
+    evaluate_delivery_closeout_gate,
+    evaluate_final_closeout_gate,
+    evaluate_run_contract_gate,
+    evaluate_state_transition_gate,
+)
 from ..tooling.file_write_session_inspection import open_file_write_sessions
 from ._runtime_params import ToolLoopExecuteParams
 from .main_agent_delivery_closeout_artifacts import (
@@ -24,6 +30,8 @@ from .main_agent_delivery_closeout_progress import (
     _enrich_delivery_progress,
     _should_block_on_no_progress,
 )
+from .main_agent_delivery_closeout_quality import delivery_quality_decision
+from .tool_local_progress_guard import reset_local_progress_guard
 
 
 # LLM: MainAgentDeliveryCloseoutRequest bundles post-tool-loop state for contract validation.
@@ -33,6 +41,16 @@ class MainAgentDeliveryCloseoutRequest:
     agent: object
     params: ToolLoopExecuteParams
     backend: str
+
+
+# LLM: CloseoutGateRequest bundles gate attachment inputs.
+# 类用途: 避免 closeout gate helper 参数膨胀，把 report/contract/workspace 放进一个结构化请求。
+@dataclass(frozen=True)
+class CloseoutGateRequest:
+    closeout: MainAgentDeliveryCloseoutRequest
+    report: dict[str, Any]
+    contract: dict[str, Any]
+    workspace_root: Path
 
 
 # LLM: main_agent_delivery_closeout_response returns a deterministic final response only after all required refs pass.
@@ -52,8 +70,40 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     report = _delivery_report(request, contract, artifacts, workspace_root)
     report_ref = _write_report(workspace_root, report)
     report["report_ref"] = _relative_report_ref(report_ref, workspace_root)
-    gate_decision = evaluate_delivery_closeout_gate(report)
-    report["runtime_gate"] = gate_decision.to_dict()
+    decisions = _attach_closeout_gates(CloseoutGateRequest(request, report, contract, workspace_root))
+    _write_report(workspace_root, report)
+    if not _all_gates_allowed(decisions):
+        return _failed_delivery_response(request, report, contract, workspace_root)
+    reset_local_progress_guard(request.agent, request.params)
+    return ModelResponse(text=_closeout_text(report), backend=request.backend)
+
+
+# LLM: _attach_closeout_gates writes every mandatory gate payload into the closeout report.
+# 函数用途: 统一添加 run/runtime/state/acceptance/final gate，主流程只看 gate 决策，不读自然语言。
+def _attach_closeout_gates(request: CloseoutGateRequest) -> list[Any]:
+    closeout = request.closeout
+    run_contract_decision = evaluate_run_contract_gate(
+        request.contract,
+        scope={
+            "request_id": closeout.params.request_id,
+            "run_id": closeout.params.run_id,
+            "task_id": closeout.params.task_id,
+            "workspace_root": str(request.workspace_root),
+        },
+    )
+    request.report["run_contract_gate"] = run_contract_decision.to_dict()
+    gate_decision = evaluate_delivery_closeout_gate(request.report)
+    request.report["runtime_gate"] = gate_decision.to_dict()
+    state_decision = evaluate_state_transition_gate("RUNNING", "VERIFYING")
+    request.report["state_gate"] = state_decision.to_dict()
+    contract_hash = str(run_contract_decision.evidence.get("effective_contract_hash") or "")
+    quality_decision = delivery_quality_decision(
+        contract=request.contract,
+        report=request.report,
+        workspace_root=request.workspace_root,
+        contract_hash=contract_hash,
+    )
+    request.report["delivery_quality_gate"] = quality_decision.to_dict()
     acceptance_decision = evaluate_acceptance_closeout_gate(
         {
             "final_status": "DONE",
@@ -61,11 +111,16 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
             "runtime_gate": gate_decision.to_dict(),
         }
     )
-    report["acceptance_gate"] = acceptance_decision.to_dict()
-    _write_report(workspace_root, report)
-    if not gate_decision.allowed or not acceptance_decision.allowed:
-        return _failed_delivery_response(request, report, contract, workspace_root)
-    return ModelResponse(text=_closeout_text(report), backend=request.backend)
+    request.report["acceptance_gate"] = acceptance_decision.to_dict()
+    final_decision = evaluate_final_closeout_gate(request.report)
+    request.report["final_closeout_gate"] = final_decision.to_dict()
+    return [run_contract_decision, gate_decision, state_decision, quality_decision, acceptance_decision, final_decision]
+
+
+# LLM: _all_gates_allowed keeps final closeout branching tied to gate decisions.
+# 函数用途: 汇总 GateDecision.allowed 字段，不读取 findings/message 文本。
+def _all_gates_allowed(decisions: list[Any]) -> bool:
+    return all(bool(getattr(decision, "allowed", False)) for decision in decisions)
 
 
 # LLM: _delivery_report validates artifacts and attaches progress state from the previous closeout report.

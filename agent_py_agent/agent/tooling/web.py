@@ -145,6 +145,7 @@ class FetchUrlTool(BaseTool):
         self.spec = ToolSpec(
             name="fetch_url",
             category="web",
+            effect="read_only",
             description="抓取网页或文本接口内容，适合查在线文档、网页说明和纯文本页面。",
             use_cases=[
                 "查看在线文档、普通网页正文或文本接口响应",
@@ -203,6 +204,8 @@ class HttpRequestTool(BaseTool):
         self.spec = ToolSpec(
             name="http_request",
             category="api",
+            effect="mutating",
+            requires_idempotency=True,
             description="发送通用 HTTP 请求，适合调 REST API、Webhook 和普通接口。",
             use_cases=[
                 "测试 GET/POST/PUT/DELETE 等接口返回是否正常",

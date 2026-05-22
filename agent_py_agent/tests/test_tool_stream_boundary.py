@@ -113,9 +113,9 @@ def test_tool_boundary_aborts_write_file_at_expanded_streaming_threshold():
         raise AssertionError("expected streaming threshold abort")
 
 
-# LLM: structured JSON uses a machine-data channel, so default streaming should not cut it at write_file's tiny threshold.
-# 函数用途: 验证大型 rows/sheets checkpoint 默认不会在 4K 左右被早停截断。
-def test_tool_boundary_allows_structured_json_beyond_write_file_streaming_threshold():
+# LLM: structured JSON is not an unbounded generation channel; unfinished large payloads must recover early.
+# 函数用途: 验证大型 rows/sheets checkpoint 没闭合时按通用流式阈值早停，不拖到模型请求超时。
+def test_tool_boundary_aborts_structured_json_at_write_streaming_threshold():
     boundary = ToolBoundaryChunkFilter(None, max_inline_content_chars=MAX_INLINE_WRITE_CONTENT_CHARS)
 
     boundary(
@@ -123,7 +123,14 @@ def test_tool_boundary_allows_structured_json_beyond_write_file_streaming_thresh
         '{"tool":"write_structured_json","path":"outputs/data.json","sheets":['
     )
 
-    boundary("{" + '"rows":[' + "A" * (STREAMING_INLINE_WRITE_ABORT_CHARS + 1))
+    try:
+        boundary("{" + '"rows":[' + "A" * (MAX_INLINE_WRITE_CONTENT_CHARS + 1))
+    except LongToolContentStreamAbort as exc:
+        assert exc.tool == "write_structured_json"
+        assert exc.path == "outputs/data.json"
+        assert exc.limit == MAX_INLINE_WRITE_CONTENT_CHARS
+    else:  # pragma: no cover - keeps assertion message clear.
+        raise AssertionError("expected structured JSON stream abort")
 
 
 # LLM: file_write_session is the large-body channel, so it must not inherit write_file's tiny stream cutoff.

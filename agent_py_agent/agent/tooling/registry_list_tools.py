@@ -21,6 +21,7 @@ class ListToolsTool(BaseTool):
         self.spec = ToolSpec(
             name="list_tools",
             category="system",
+            effect="read_only",
             description="列出当前执行上下文可见的工具清单。",
             use_cases=[
                 "不确定当前有哪些工具时，先查询机器可读工具清单",

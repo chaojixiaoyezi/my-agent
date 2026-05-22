@@ -11,8 +11,31 @@ from typing import Any
 from ..tooling import ToolExecutionResult
 
 _STATE_ATTR = "_tool_call_guardrail_failures"
+_NO_PROGRESS_STATE_ATTR = "_tool_call_guardrail_no_progress"
 _DEFAULT_EXACT_FAILURE_BLOCK_AFTER = 3
+_DEFAULT_NO_PROGRESS_BLOCK_AFTER = 2
 _BLOCK_CODE = "TOOL_REPEATED_EXACT_FAILURE"
+_NO_PROGRESS_BLOCK_CODE = "TOOL_REPEATED_NO_PROGRESS"
+_READ_ONLY_TOOL_NAMES = {
+    "fetch_url",
+    "http_request",
+    "list_files",
+    "list_tools",
+    "read_artifact",
+    "read_file",
+    "search",
+    "search_text",
+}
+_LOCAL_PROGRESS_TOOL_NAMES = {
+    "append_file",
+    "api_json_collection",
+    "data_to_workbook",
+    "file_write_session",
+    "markdown_to_pdf",
+    "replace_in_file",
+    "write_file",
+    "write_structured_json",
+}
 
 
 # LLM: ToolCallSignature is the normalized identity for one tool call within a scoped failure ledger.
@@ -60,11 +83,42 @@ def maybe_block_repeated_tool_failure(agent: object, params: object, payload: di
     )
 
 
+def maybe_block_repeated_tool_no_progress(agent: object, params: object, payload: dict[str, object]):
+    signature = _signature(params, payload)
+    if not signature.tool_name or not _is_read_only_tool(signature.tool_name):
+        return None
+    record = _no_progress_state(agent).get(signature.key())
+    if not isinstance(record, dict) or int(record.get("count") or 0) < _no_progress_block_after(params):
+        return None
+    return ToolExecutionResult(
+        signature.tool_name,
+        False,
+        json.dumps(
+            {
+                "error": "repeated identical read-only tool call returned unchanged results",
+                "guardrail": {
+                    "code": _NO_PROGRESS_BLOCK_CODE,
+                    "action": "block",
+                    "tool_name": signature.tool_name,
+                    "count": int(record.get("count") or 0),
+                    "args_hash": signature.args_hash,
+                    "result_hash": str(record.get("result_hash") or ""),
+                    "scope": signature.scope,
+                },
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+        error_code=_NO_PROGRESS_BLOCK_CODE,
+    )
+
+
 # LLM: record_tool_guard_observation updates the exact-failure ledger after each tool result.
-# 函数用途: 记录工具调用成功或失败，成功清零、失败递增，为下一轮 guard 提供状态。
+# 函数用途: 记录工具调用成功或失败；失败递增，同结果只读成功递增，本地推进成功会清理无进展计数。
 def record_tool_guard_observation(agent: object, runtime_params: object, payload: object, result: ToolExecutionResult) -> None:
     if not isinstance(payload, dict):
         return
+    _record_no_progress_observation(agent, runtime_params, payload, result)
     signature = _signature(runtime_params, payload)
     if not signature.tool_name or result.error_code == _BLOCK_CODE:
         return
@@ -76,6 +130,30 @@ def record_tool_guard_observation(agent: object, runtime_params: object, payload
     failures[key] = failures.get(key, 0) + 1
 
 
+def _record_no_progress_observation(
+    agent: object,
+    runtime_params: object,
+    payload: dict[str, object],
+    result: ToolExecutionResult,
+) -> None:
+    signature = _signature(runtime_params, payload)
+    if not signature.tool_name or result.error_code == _NO_PROGRESS_BLOCK_CODE:
+        return
+    state = _no_progress_state(agent)
+    if result.ok and _is_local_progress_tool(signature.tool_name):
+        state.clear()
+        return
+    if not (result.ok and _is_read_only_tool(signature.tool_name)):
+        return
+    result_hash = _result_hash(result.output)
+    key = signature.key()
+    record = state.get(key)
+    if isinstance(record, dict) and record.get("result_hash") == result_hash:
+        record["count"] = int(record.get("count") or 0) + 1
+        return
+    state[key] = {"count": 1, "result_hash": result_hash}
+
+
 # LLM: _failure_state provides the task-local mutable ledger used by the exact-failure guard.
 # 函数用途: 获取或初始化 agent 上的失败计数字典，避免重复失败状态散落在别处。
 def _failure_state(agent: object) -> dict[tuple[str, str, str], int]:
@@ -83,6 +161,14 @@ def _failure_state(agent: object) -> dict[tuple[str, str, str], int]:
     if not isinstance(state, dict):
         state = {}
         setattr(agent, _STATE_ATTR, state)
+    return state
+
+
+def _no_progress_state(agent: object) -> dict[tuple[str, str, str], dict[str, object]]:
+    state = getattr(agent, _NO_PROGRESS_STATE_ATTR, None)
+    if not isinstance(state, dict):
+        state = {}
+        setattr(agent, _NO_PROGRESS_STATE_ATTR, state)
     return state
 
 
@@ -100,6 +186,11 @@ def _args_hash(payload: dict[str, object]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _result_hash(value: object) -> str:
+    text = str(value or "")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 # LLM: _scope chooses the narrowest available runtime identifier so failures do not leak across unrelated runs.
 # 函数用途: 优先使用 run_id/request_id/task_id 构造 guard 作用域，避免不同任务互相污染失败计数。
 def _scope(params: object) -> str:
@@ -108,6 +199,14 @@ def _scope(params: object) -> str:
         if value:
             return f"{name}:{value}"
     return "agent"
+
+
+def _is_read_only_tool(tool_name: str) -> bool:
+    return tool_name in _READ_ONLY_TOOL_NAMES
+
+
+def _is_local_progress_tool(tool_name: str) -> bool:
+    return tool_name in _LOCAL_PROGRESS_TOOL_NAMES
 
 
 # LLM: _block_after reads the configurable exact-failure threshold while keeping a safe default.
@@ -125,4 +224,21 @@ def _block_after(params: object) -> int:
     return _DEFAULT_EXACT_FAILURE_BLOCK_AFTER
 
 
-__all__ = ["maybe_block_repeated_tool_failure", "record_tool_guard_observation"]
+def _no_progress_block_after(params: object) -> int:
+    attrs = getattr(params, "task_attributes", None)
+    if isinstance(attrs, dict):
+        value: Any = attrs.get("tool_guard_no_progress_block_after")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = 0
+        if parsed > 0:
+            return parsed
+    return _DEFAULT_NO_PROGRESS_BLOCK_AFTER
+
+
+__all__ = [
+    "maybe_block_repeated_tool_failure",
+    "maybe_block_repeated_tool_no_progress",
+    "record_tool_guard_observation",
+]

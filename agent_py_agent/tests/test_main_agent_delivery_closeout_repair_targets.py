@@ -74,6 +74,30 @@ def test_delivery_closeout_strips_json_fragment_from_repair_target_locations() -
         assert not any("outputs/research_documents/outputs/research_documents" in item for item in action["repair_targets"])
 
 
+# LLM: Collection value mismatch findings should become structured JSON updates, not generic PDF edits.
+# 函数用途: 验证 translated/status 这类集合机器字段不匹配时，closeout 生成可执行 checkpoint 更新动作。
+def test_delivery_closeout_emits_collection_item_value_repair_action() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td).resolve()
+        contract = _research_pdf_contract()
+        validation_contract = contract["artifacts"][0]["validation_contract"]
+        validation_contract["collection_contract"] = _translated_collection_contract()
+        source = workspace / "outputs/research_documents/source_index.json"
+        _write_valid_pdf(workspace / "outputs/research_documents/research_documents_zh.pdf")
+        _write_json_file(source, _translated_rows_payload())
+
+        _, actions = _enriched_report(workspace, contract)
+
+        action = actions["COLLECTION_ITEM_VALUE_MISMATCH"]
+        assert action["recommended_action"] == "repair_collection_item_values"
+        assert action["checkpoint_ref"] == "outputs/research_documents/source_index.json"
+        assert action["writer_tool"] == "write_structured_json"
+        assert action["items_path"] == "rows"
+        assert action["collection_item_updates"] == [
+            {"item_index": 1, "field_path": "translated", "value": True},
+        ]
+
+
 def _translated_collection_contract() -> dict[str, object]:
     return {
         "source_json_ref": "outputs/research_documents/source_index.json",

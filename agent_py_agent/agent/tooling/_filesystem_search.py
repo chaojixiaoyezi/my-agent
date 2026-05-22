@@ -32,6 +32,7 @@ class SearchTextTool(FileSystemTool):
         self.spec = ToolSpec(
             name="search_text",
             category="filesystem",
+            effect="read_only",
             description="在工作区里搜索纯文本，适合找函数名、配置项和关键字。",
             use_cases=[
                 "想找某个函数、类、配置项出现在哪些文件里",

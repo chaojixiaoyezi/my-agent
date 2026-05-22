@@ -74,6 +74,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action="change_tool_arguments_or_strategy",
         recovery_hint="同一工具同一参数连续失败；不要原样重试，先改参数、换工具或记录明确阻塞原因。",
     ),
+    "TOOL_REPEATED_NO_PROGRESS": ErrorContract(
+        code="TOOL_REPEATED_NO_PROGRESS",
+        category="tool",
+        retryable=True,
+        recommended_action="change_tool_arguments_or_materialize_progress",
+        recovery_hint="同一只读工具同一参数连续返回相同结果；不要继续原样读取，先写 checkpoint、换参数或记录阻塞原因。",
+    ),
     "MODEL_UPSTREAM_FAILED": ErrorContract(
         code="MODEL_UPSTREAM_FAILED",
         category="model",
@@ -143,6 +150,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action="repair_structured_checkpoint_json",
         recovery_hint="阶段 JSON 的必填列存在空值；补齐 required_columns 的非空值后再继续 builder。",
+    ),
+    "API_JSON_EMPTY_EVIDENCE_FIELD": ErrorContract(
+        code="API_JSON_EMPTY_EVIDENCE_FIELD",
+        category="tool",
+        retryable=True,
+        recommended_action="repair_tool_arguments",
+        recovery_hint="API 映射出的证据字段为空；为该字段补 default/default_template，或改成非空来源路径后重试。",
     ),
     "STAGED_JSON_TOO_FEW_SHEETS": ErrorContract(
         code="STAGED_JSON_TOO_FEW_SHEETS",

@@ -77,6 +77,257 @@ def test_staged_writer_contract_allows_declared_builder_output_tool():
     assert result is None
 
 
+def test_api_collection_contract_blocks_missing_required_field_mappings():
+    from agent_py_agent.agent.agent_core.tool_api_collection_contract import (
+        api_collection_contract_result,
+    )
+
+    result = api_collection_contract_result(
+        _params(_xlsx_delivery_contract()),
+        {
+            "fields": {"项目名": "full_name", "地址": "html_url"},
+            "path": "outputs/report/source_data.json",
+            "request_ranges": [{"end_date": "2026-05-22", "start_date": "2026-01-01", "step_days": 7}],
+            "tool": "api_json_collection",
+        },
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert "missing field mappings" in result.output
+    assert "template/default_template" in result.output
+
+
+def test_api_collection_contract_blocks_too_few_planned_groups():
+    from agent_py_agent.agent.agent_core.tool_api_collection_contract import (
+        api_collection_contract_result,
+    )
+
+    result = api_collection_contract_result(
+        _params(_xlsx_delivery_contract()),
+        {
+            "fields": {"项目名": "full_name", "地址": "html_url", "上升 star 数": "stargazers_count"},
+            "path": "outputs/report/source_data.json",
+            "request_ranges": [{"end_date": "2026-01-14", "start_date": "2026-01-01", "step_days": 7}],
+            "tool": "api_json_collection",
+        },
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert "planned groups 2 below required 20" in result.output
+
+
+def test_structured_json_source_checkpoint_blocks_missing_row_evidence():
+    from agent_py_agent.agent.agent_core.tool_api_collection_contract import (
+        api_collection_contract_result,
+    )
+
+    result = api_collection_contract_result(
+        _params(_sourced_xlsx_delivery_contract()),
+        {
+            "path": "outputs/report/source_data.json",
+            "rows": [{"项目名": "org/demo", "地址": "https://github.com/org/demo"}],
+            "tool": "write_structured_json",
+        },
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert "source checkpoint requires auditable source_refs and claims" in result.output
+
+
+def test_structured_json_source_checkpoint_blocks_unbound_source_refs():
+    from agent_py_agent.agent.agent_core.tool_api_collection_contract import (
+        api_collection_contract_result,
+    )
+
+    result = api_collection_contract_result(
+        _params(_sourced_xlsx_delivery_contract()),
+        {
+            "claims": [{"field": "项目名", "source_ids": ["src-1"], "value": "org/demo"}],
+            "completion_evidence": {"scope": "fixture"},
+            "path": "outputs/report/source_data.json",
+            "source_refs": [{"content_sha256": "abc", "source_id": "src-1", "uri": "https://example.test/data.json"}],
+            "tool": "write_structured_json",
+        },
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert "artifact_ref or reserved.tool_call_id" in result.output
+
+
+def test_structured_json_source_checkpoint_blocks_unrecorded_tool_call_binding():
+    from agent_py_agent.agent.agent_core.tool_api_collection_contract import (
+        api_collection_contract_result,
+    )
+
+    result = api_collection_contract_result(
+        _params(_sourced_xlsx_delivery_contract()),
+        {
+            "claims": [{"field": "项目名", "source_ids": ["src-1"], "value": "org/demo"}],
+            "completion_evidence": {"scope": "fixture"},
+            "path": "outputs/report/source_data.json",
+            "source_refs": [
+                {
+                    "reserved": {"tool_call_id": "missing-call"},
+                    "source_id": "src-1",
+                    "uri": "https://example.test/data.json",
+                }
+            ],
+            "tool": "write_structured_json",
+        },
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert "reserved.tool_call_id must match previous archive_tool_calls" in result.output
+
+
+def test_structured_json_source_checkpoint_blocks_missing_required_claim_fields():
+    from agent_py_agent.agent.agent_core.tool_api_collection_contract import (
+        api_collection_contract_result,
+    )
+
+    result = api_collection_contract_result(
+        _params(_sourced_xlsx_delivery_contract()),
+        {
+            "claims": [{"field": "项目名", "source_ids": ["src-1"], "value": "org/demo"}],
+            "completion_evidence": {"scope": "fixture"},
+            "path": "outputs/report/source_data.json",
+            "source_refs": [{"artifact_ref": "artifacts/raw.json", "source_id": "src-1"}],
+            "tool": "write_structured_json",
+        },
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert "missing required claim fields" in result.output
+    assert "上升 star 数" in result.output
+    assert "地址" in result.output
+
+
+def test_structured_json_source_checkpoint_blocks_unverified_claims_when_required():
+    from agent_py_agent.agent.agent_core.tool_api_collection_contract import (
+        api_collection_contract_result,
+    )
+
+    result = api_collection_contract_result(
+        _params(_sourced_xlsx_delivery_contract()),
+        {
+            "claims": [
+                {"field": "项目名", "source_ids": ["src-1"], "value": "org/demo", "verification_status": "PENDING"},
+                {"field": "地址", "source_ids": ["src-1"], "value": "https://github.com/org/demo"},
+                {"field": "上升 star 数", "source_ids": ["src-1"], "value": 100},
+            ],
+            "completion_evidence": {"scope": "fixture"},
+            "path": "outputs/report/source_data.json",
+            "source_refs": [{"artifact_ref": "artifacts/raw.json", "source_id": "src-1"}],
+            "tool": "write_structured_json",
+        },
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert "claims must be VERIFIED" in result.output
+
+
+# LLM: JSON checkpoint evidence rules apply even when the builder source is a markdown file.
+# 函数用途: 验证 collection_contract.source_json_ref 也受来源绑定门保护，不只保护 staging.source_json_ref。
+def test_structured_json_collection_checkpoint_blocks_unrecorded_binding_without_source_json_ref():
+    from agent_py_agent.agent.agent_core.tool_api_collection_contract import (
+        api_collection_contract_result,
+    )
+
+    result = api_collection_contract_result(
+        _params(_sourced_document_delivery_contract()),
+        {
+            "claims": [{"field": "title", "source_ids": ["src-1"], "value": "demo"}],
+            "completion_evidence": {"scope": "fixture"},
+            "path": "outputs/docs/source_index.json",
+            "source_refs": [
+                {
+                    "reserved": {"tool_call_id": "placeholder"},
+                    "source_id": "src-1",
+                    "uri": "https://example.test/paper",
+                }
+            ],
+            "tool": "write_structured_json",
+        },
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert "reserved.tool_call_id must match previous archive_tool_calls" in result.output
+
+
+def test_structured_json_source_checkpoint_allows_recorded_tool_call_binding():
+    from agent_py_agent.agent.agent_core.tool_api_collection_contract import (
+        api_collection_contract_result,
+    )
+
+    params = _params(_sourced_xlsx_delivery_contract())
+    params.archive_tool_calls.append({"call_id": "1-1", "ok": True, "tool": "fetch_url"})
+    result = api_collection_contract_result(
+        params,
+        {
+            "claims": _project_claims("src-1"),
+            "completion_evidence": {"scope": "fixture"},
+            "path": "outputs/report/source_data.json",
+            "source_refs": [
+                {
+                    "reserved": {"tool_call_id": "1-1"},
+                    "source_id": "src-1",
+                    "uri": "https://example.test/data.json",
+                }
+            ],
+            "tool": "write_structured_json",
+        },
+    )
+
+    assert result is None
+
+
+def test_structured_json_source_checkpoint_blocks_missing_completion_evidence():
+    from agent_py_agent.agent.agent_core.tool_api_collection_contract import (
+        api_collection_contract_result,
+    )
+
+    result = api_collection_contract_result(
+        _params(_sourced_xlsx_delivery_contract()),
+        {
+            "claims": [{"field": "项目名", "source_ids": ["src-1"], "value": "org/demo"}],
+            "path": "outputs/report/source_data.json",
+            "source_refs": [{"artifact_ref": "artifacts/raw.json", "source_id": "src-1"}],
+            "tool": "write_structured_json",
+        },
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert "completion_evidence" in result.output
+
+
+def test_structured_json_source_checkpoint_allows_bound_source_evidence():
+    from agent_py_agent.agent.agent_core.tool_api_collection_contract import (
+        api_collection_contract_result,
+    )
+
+    result = api_collection_contract_result(
+        _params(_sourced_xlsx_delivery_contract()),
+        {
+            "claims": _project_claims("src-1"),
+            "completion_evidence": {"scope": "fixture"},
+            "path": "outputs/report/source_data.json",
+            "source_refs": [{"artifact_ref": "artifacts/raw.json", "source_id": "src-1"}],
+            "tool": "write_structured_json",
+        },
+    )
+
+    assert result is None
+
+
 # LLM: Subagent default tools must mirror main-agent artifact builders for staged deliverables.
 # 函数用途: 验证子代理基础工具包包含结构化 checkpoint、workbook 和 PDF 构建工具。
 def test_subagent_default_tool_grants_include_structured_artifact_builders():
@@ -122,6 +373,13 @@ def _xlsx_delivery_contract() -> dict[str, object]:
                 "artifact_id": "report",
                 "preferred_path": "outputs/report/report.xlsx",
                 "validation_contract": {
+                    "collection_contract": {
+                        "groups_path": "sheets",
+                        "items_path": "rows",
+                        "min_groups": 20,
+                        "required_item_fields": ["项目名", "地址", "上升 star 数"],
+                    },
+                    "required_columns": ["项目名", "地址", "上升 star 数"],
                     "staging_contract": {
                         "builder_tool": "data_to_workbook",
                         "source_json_ref": "outputs/report/source_data.json",
@@ -151,4 +409,61 @@ def _xlsx_delivery_contract() -> dict[str, object]:
                 },
             ]
         },
+    }
+
+
+def _sourced_xlsx_delivery_contract() -> dict[str, object]:
+    contract = _xlsx_delivery_contract()
+    validation = contract["artifacts"][0]["validation_contract"]
+    validation["evidence_contract"] = {
+        "require_verified": True,
+        "required_fields": ["项目名", "地址", "上升 star 数"],
+    }
+    validation["collection_contract"] = {
+        **validation["collection_contract"],
+        "require_completion_evidence": True,
+        "require_item_evidence": True,
+        "required_item_evidence_fields": ["项目名", "地址"],
+    }
+    return contract
+
+
+def _project_claims(source_id: str) -> list[dict[str, object]]:
+    return [
+        {"field": "项目名", "source_ids": [source_id], "value": "org/demo"},
+        {"field": "地址", "source_ids": [source_id], "value": "https://github.com/org/demo"},
+        {"field": "上升 star 数", "source_ids": [source_id], "value": 100},
+    ]
+
+
+def _sourced_document_delivery_contract() -> dict[str, object]:
+    return {
+        "artifacts": [
+            {
+                "artifact_id": "document_pdf",
+                "preferred_path": "outputs/docs/report.pdf",
+                "validation_contract": {
+                    "collection_contract": {
+                        "source_json_ref": "outputs/docs/source_index.json",
+                        "require_completion_evidence": True,
+                        "require_item_evidence": True,
+                        "required_item_evidence_fields": ["title", "url", "date"],
+                    },
+                    "evidence_contract": {
+                        "require_verified": True,
+                        "required_fields": ["title", "url", "date"],
+                    },
+                    "staging_contract": {
+                        "builder_tool": "markdown_to_pdf",
+                        "source_markdown_ref": "outputs/docs/report.md",
+                        "pdf_ref": "outputs/docs/report.pdf",
+                        "checkpoint_refs": [
+                            "outputs/docs/source_index.json",
+                            "outputs/docs/report.md",
+                            "outputs/docs/report.pdf",
+                        ],
+                    },
+                },
+            }
+        ]
     }

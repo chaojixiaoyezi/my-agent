@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 PRODUCTIVE_TOOL_NAMES = {
     "append_file",
+    "api_json_collection",
     "data_to_workbook",
     "file_write_session",
     "markdown_to_pdf",
@@ -29,6 +30,7 @@ EVIDENCE_GATHERING_TOOL_NAMES = {
 STRICT_REPAIR_PRODUCTIVE_TOOLS = {
     "__parse_error__",
     "append_file",
+    "api_json_collection",
     "data_to_workbook",
     "file_write_session",
     "markdown_to_pdf",

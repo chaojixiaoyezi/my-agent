@@ -292,12 +292,15 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
         current_params = next_params
 
 
-# LLM: request_id must exist before context-bundle and tool-output artifact writes.
-# 函数用途: 普通 run 没有显式 request_id 时提前生成稳定运行标识，保证工具输出、runtime facts 和 compact scope 可对齐。
+# LLM: request/run/task ids must exist before context-bundle and tool-output artifact writes.
+# 函数用途: 普通 run 没有显式 scope 时提前生成稳定运行标识，保证工具输出、runtime facts 和 compact scope 可对齐。
 def _run_params_with_request_id(params: RunParams) -> RunParams:
-    if params.request_id:
+    request_id = params.request_id or f"run-{time_module.time_ns()}"
+    run_id = params.run_id or request_id
+    task_id = params.task_id or run_id
+    if params.request_id == request_id and params.run_id == run_id and params.task_id == task_id:
         return params
-    return replace(params, request_id=f"run-{time_module.time_ns()}")
+    return replace(params, request_id=request_id, run_id=run_id, task_id=task_id)
 
 
 # LLM: _run_once_with_params contains one normal model/tool/finalize pass for reuse by auto continuation.

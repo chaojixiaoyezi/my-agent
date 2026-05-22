@@ -43,12 +43,90 @@ def _writer_call(action: dict[str, object]) -> dict[str, object]:
     path = str(action.get("checkpoint_ref") or "").strip()
     if not tool or not path:
         return {}
+    if tool == "api_json_collection":
+        return _api_json_collection_call(action, path)
     call: dict[str, object] = {"tool": tool, "path": path}
+    if updates := _collection_item_updates(action):
+        call["collection_item_updates"] = updates
+        if items_path := str(action.get("items_path") or "").strip():
+            call["items_path"] = items_path
+        if groups_path := str(action.get("groups_path") or "").strip():
+            call["groups_path"] = groups_path
     if hint := _json_hint(action):
         call["data"] = hint
     if tool == "write_structured_json" or str(action.get("recommended_action") or "") == "repair_evidence_refs":
         call["merge_existing"] = True
     return call
+
+
+# LLM: api_json_collection required calls are source-collection skeletons, not checkpoint JSON payloads.
+# 函数用途: 从 collection_contract 和 required_columns 生成可填写的 API 采集工具骨架，避免把 shape hint 塞进无效 data 字段。
+def _api_json_collection_call(action: dict[str, object], path: str) -> dict[str, object]:
+    columns = _api_collection_columns(action)
+    call: dict[str, object] = {
+        "tool": "api_json_collection",
+        "path": path,
+        "columns": columns,
+        "fields": _api_collection_field_skeleton(columns),
+        "evidence_fields": columns,
+        "completion_evidence": {
+            "method": "api_json_collection",
+            "scope": _completion_scope(action),
+        },
+    }
+    collection = action.get("collection_contract")
+    if isinstance(collection, dict):
+        call["collection_contract"] = collection
+    return call
+
+
+def _api_collection_columns(action: dict[str, object]) -> list[str]:
+    columns = _string_list(action.get("required_columns"))
+    collection = action.get("collection_contract")
+    if isinstance(collection, dict):
+        columns.extend(_string_list(collection.get("required_item_fields")))
+    if not columns and (hint := _json_hint(action)):
+        columns.extend(_columns_from_shape_hint(hint))
+    return list(dict.fromkeys(columns))
+
+
+def _api_collection_field_skeleton(columns: list[str]) -> dict[str, object]:
+    return {
+        column: {"path": "__FILL_JSON_PATH__", "default_template": f"__FILL_{index}_{column}__"}
+        for index, column in enumerate(columns, start=1)
+    }
+
+
+def _completion_scope(action: dict[str, object]) -> str:
+    hint = _json_hint(action)
+    evidence = hint.get("completion_evidence") if isinstance(hint, dict) else {}
+    return _scope_from_evidence(evidence) or "declared_collection_contract"
+
+
+def _scope_from_evidence(evidence: object) -> str:
+    return str(evidence.get("scope") or "").strip() if isinstance(evidence, dict) else ""
+
+
+def _columns_from_shape_hint(value: object) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    return _columns_from_sheets(value.get("sheets")) or _columns_from_rows(value.get("rows"))
+
+
+def _columns_from_sheets(sheets: object) -> list[str]:
+    if not isinstance(sheets, list):
+        return []
+    for sheet in sheets:
+        columns = _string_list(sheet.get("columns")) if isinstance(sheet, dict) else []
+        if columns:
+            return columns
+    return []
+
+
+def _columns_from_rows(rows: object) -> list[str]:
+    if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+        return []
+    return [str(key) for key in rows[0] if str(key) != "field_source_ids"]
 
 
 # LLM: _builder_call keeps this runtime helper grounded in structured fields.
@@ -107,6 +185,15 @@ def _artifact_repair_tool(action: dict[str, object], *, intent: str) -> str:
 def _write_tool_values(action: dict[str, object]) -> list[str]:
     tools = action.get("write_tools")
     return [str(item) for item in tools if str(item)] if isinstance(tools, list) else []
+
+
+def _collection_item_updates(action: dict[str, object]) -> list[object]:
+    updates = action.get("collection_item_updates")
+    return list(updates) if isinstance(updates, list) else []
+
+
+def _string_list(value: object) -> list[str]:
+    return [text for item in value if (text := str(item).strip())] if isinstance(value, list) else []
 
 
 # LLM: _first_write_tool 是 agent_py_agent/agent/agent_core/tool_delivery_repair_required_calls.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。

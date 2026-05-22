@@ -109,6 +109,8 @@ def build_subagent_message_spec() -> ToolSpec:
     return ToolSpec(
         name=_TOOL_NAME,
         category="orchestration",
+        effect="mutating",
+        requires_idempotency=True,
         description="给当前层级下属发定向消息，或把统一变更写到 task shared board 广播。",
         use_cases=[
             "coordinator 发现少数 child 路径、需求或验收条件传错，需要一对一纠偏",

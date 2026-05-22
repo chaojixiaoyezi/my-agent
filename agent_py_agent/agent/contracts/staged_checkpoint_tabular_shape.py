@@ -156,15 +156,15 @@ def _first_row_columns_issue(
         if not isinstance(row, dict):
             return _shape_issue("sheet.rows", sheet_index, row_index=row_index)
         if missing := [column for column in columns if column not in row]:
-            return _row_issue("STAGED_JSON_TABLE_SHAPE_INVALID", sheet_index, row_index, missing_columns=missing)
+            return _row_issue("STAGED_JSON_TABLE_SHAPE_INVALID", sheet_index, row_index, {"missing_columns": missing})
         if empty := [column for column in required_columns if column in columns and not _cell_value_present(row.get(column))]:
-            return _row_issue("STAGED_JSON_REQUIRED_COLUMN_EMPTY_VALUES", sheet_index, row_index, empty_columns=empty)
+            return _row_issue("STAGED_JSON_REQUIRED_COLUMN_EMPTY_VALUES", sheet_index, row_index, {"empty_columns": empty})
     return {}
 
 
 # LLM: _row_issue formats row-level table findings.
 # 函数用途: 统一 missing_columns 和 empty_columns 的机器字段。
-def _row_issue(code: str, sheet_index: int, row_index: int, **fields: list[str]) -> dict[str, str]:
+def _row_issue(code: str, sheet_index: int, row_index: int, fields: dict[str, list[str]]) -> dict[str, str]:
     issue = {"code": code, "sheet_index": str(sheet_index), "row_index": str(row_index)}
     issue.update({key: ",".join(value) for key, value in fields.items()})
     return issue

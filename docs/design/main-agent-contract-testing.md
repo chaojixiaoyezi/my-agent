@@ -183,6 +183,67 @@
 
 后续测试按五层执行。
 
+### 运行硬门阶段 0-6
+
+2026-05-22 已把“门必须装在运行边界上”落到代码里，作为真实 LLM 测试前的基础线。
+
+阶段 0：参考项目对照。先看 `/Users/example/study-agent/all-agent/` 的 xlsx 索引，再看源码；主要借 长期助手 的集中工具守门、通道运行时 的结构化产物记录、终端交互 的路径权限边界、会话运行时 的结构化工具协议。
+
+阶段 1：Run Contract Gate。每次 closeout 都必须带 request/run/task/workspace 和 effective contract hash。
+
+阶段 2：Tool Gateway Gate 证据保留。工具归档记录必须保存 runtime_gate、operation_id、idempotency_key 和小型 result refs。
+
+阶段 3：Artifact Provenance Gate。产物验收通过不等于任务完成，还必须证明该产物由当前 run 的工具调用生成。
+
+阶段 4：State Transition Gate。完成前必须有结构化状态门，不能从 running 直接口头成功。
+
+阶段 5：Final Closeout Gate。最终成功只认 run contract、runtime、state、acceptance 四个子门都允许。
+
+阶段 6：Recovery Lineage Gate。恢复任务继承旧产物必须显式带 source_run_id、operation_id 和 artifact/path ref。
+
+这 7 个阶段仍然是通用底座，不写购物站、论文、GitHub 表格等专项规则；这些只能出现在测试 fixture 和真实验收任务里。
+
+### Runtime Tool Gateway 缺口 1-4
+
+2026-05-22 继续把四个高风险缺口前移到 `execute_registry_call`，作为真实工具执行前的统一硬门：
+
+1. Tool Manifest Gate：工具注册必须带 effect、参数 schema、幂等策略、审批策略和输出 ref 声明。read_only / mutating / dangerous 是机器枚举，不从说明文本推断。
+2. Path / URL / Command Gate：所有工具 payload 里的 path/url/command 字段统一过边界检查。路径必须落在 workspace_roots 内；symlink 解析后越界要拒绝；file URL、私网 URL 和未显式允许的 shell 操作符默认拒绝。
+3. Approval Binding Gate：dangerous + real action 必须匹配可信 approved_actions，绑定 tool、run_id、operation_id、idempotency_key 和 args_hash。
+4. Idempotency Ledger Gate：mutating / dangerous 调用必须带 idempotency_key；同 key 同 args 的完成记录只能复用，不重新执行；同 key 不同 args 拒绝。
+
+这四个门的共同点：
+
+- 装在工具入口，不等 final verifier 事后补救。
+- 输出 `runtime_gate` 结构化证据，后续 closeout、replay、audit 都读这个字段。
+- `tool_manifest_payload` 和 registry 使用同一批 ToolSpec 字段，避免模型可见工具清单和真实执行策略分裂。
+- 不写任务专项逻辑；路径、URL、命令、审批、幂等都是通用运行合同。
+
+### Delivery Quality Gate 阶段 0-6
+
+2026-05-22 增加了 `delivery_quality` 门，目的是解决“文件存在但交付质量不可靠”的问题。这个门不是 GitHub、论文、购物站等专项合同，而是对所有资料整理、表格、报告、PDF、网页等交付都能复用的数据质量门。
+
+阶段 0：参考项目对照。先读 `/Users/example/study-agent/all-agent/` 的 长期助手/通道运行时/终端交互 合同索引，再看源码入口。共同结论是：成熟项目会把门装在运行边界上，例如 长期助手 的工具/审批/重复调用守卫，通道运行时 的 provider/approval/workspace/task runtime 合同，终端交互 的权限/路径/只读执行校验。
+
+阶段 1：数据合同入口。任务如果声明 `delivery_quality_contract`、`quality_contract` 或 `data_contract`，closeout 必须执行质量门；没有声明时门显式 `ALLOW` 并写明 `declared=false`，避免隐式猜测。
+
+阶段 2：质量 payload 来源。质量门只从 `delivery_quality_payload_ref`、`quality_payload_ref`、`source_data_ref` 或 artifact 的 `validation_contract.staging_contract` JSON ref 读取机器数据，不从用户 prompt、final prose、报告正文里抽事实。
+
+阶段 3：指标口径门。`metric_contracts` 通过结构化 `field`、`expected_kind`、`required_window`、`allow_estimated`、`require_limitations_for_estimates` 表达要求。比如 `time_window_delta` 必须来自 claim/source 的 `metric_kind=time_window_delta`，不能用 `point_in_time_total` 冒充。
+
+阶段 4：证据与估算门。复用 `evidence_contract` 检查 `source_refs` 和 `claims`；估算值必须显式 `value_type=estimated`，并按合同提供 `methodology` 和 `reserved.limitations`，不能把“不确定”藏在自然语言说明里。
+
+阶段 5：语言字段门。`language_contract` 只检查合同声明的字段，例如 `target_language=zh`、`fields=["summary_zh"]`。它用字符统计做确定性检查，不用 LLM 打分，也不从 prompt 猜哪些字段应该是中文。
+
+阶段 6：合同 hash 绑定与 trace。质量门把 closeout 产物绑定到当前 `effective_contract_hash`；旧合同验收过的产物不能在新合同下直接收口。每次质量门结果追加到 `.agent_delivery/delivery_quality_gate.jsonl`，真实 run 复盘能直接看到 `finding_codes`。
+
+这套门的开发铁律：
+
+- 代码层不得依赖普通自然语言文本作为机器事实来源。
+- 任务专项只允许出现在测试 fixture、真实任务 prompt 和任务生成的数据合同里。
+- 生产合同代码只做通用检查机：字段、来源、口径、语言、hash、trace。
+- 发现真实任务问题时，先把失败转成结构化合同测试，再修通用门。
+
 ### 第 1 层：合同/纯函数单测
 
 验证这些：
@@ -920,3 +981,12 @@ git diff --check
 - 新问题能在真实环境之外复现。
 - 产品修复后离线 regression 先变绿，再做真实验收。
 - 若参考项目已有成熟做法，文档里记录借鉴点和取舍；若参考项目也兜不住，记录本仓库为什么要扩展。
+
+2026-05-22 执行记录：
+
+- 问题来源：4 个普通 `my-agent run` 并行复杂任务里，GitHub/PDF 任务停在探索熔断，数据分析任务只写出几百行 CSV/JSON 却声称完成，Web 任务产物存在但缺关键 DOM。
+- 根因归类：复杂任务没有进入受控 `delivery_contract` 入口时，系统只能靠探索熔断阻止空转，不能持续按机器合同修到最终产物合格。
+- 通用修复：主代理真实任务 runner 继续坚持“一次普通自然语言 prompt”，但 prompt 和机器交付合同分离；命令只传一个 prompt，结构化 `delivery_contract.json` 由 runner 单独传入并落盘。
+- 新增通用任务形状：`data_analysis_package`，覆盖 `source_data.json`、`analysis.xlsx`、`report.pdf`、`dashboard.html` 四类产物；验收只读 artifact kind、path、staging、collection、row count、required columns 等结构化字段。
+- 新增回归：`test_main_agent_task_data_analysis_rejects_partial_source_rows` 复现“几百行冒充一千行”的失败，要求 collection gate 返回 `COLLECTION_TOO_FEW_ITEMS`。
+- 参考取舍：沿用 长期助手/通道运行时/会话运行时 共同的“少数强制门”做法，把约束放在 runner、tool gateway、artifact acceptance 和 delivery closeout，而不是把更多中文约束塞进 prompt。

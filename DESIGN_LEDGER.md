@@ -1,5 +1,45 @@
 # 设计思路台账
 
+## 2026-05-22 / 主代理阶段 0-6 运行硬门补齐
+
+状态：已落地第一版，focused gate/closeout 测试通过，code-size hard/high-risk/soft 清零
+
+摘要：
+- 阶段 0：先看 `/Users/example/study-agent/all-agent/` 的 xlsx 索引和源码，再动本仓库。重点参考 长期助手 的集中 tool guard / approval、通道运行时 的结构化 artifact records、终端交互 的路径/权限边界、会话运行时 的结构化 tool protocol 和恢复 refs。
+- 阶段 1：新增 `Run Contract Gate`，收口前必须有 request/run/task/workspace 和有效合同 hash；普通 run 缺 run/task 时在运行入口补齐，不让 closeout 继续靠空 scope。
+- 阶段 2：工具归档新增 compact result envelope 和 `tool_result_refs`，把 runtime_gate 的 operation/idempotency/effect 证据保进 `archive_tool_calls`。
+- 阶段 3：新增 `Artifact Provenance Gate`，产物即使内容验收通过，也必须能从当前 run 的工具归档记录证明“是谁、哪次 operation、哪个 idempotency_key 写出来的”；旧文件不能冒充本轮产物。
+- 阶段 4：closeout 报告新增 `state_gate`，完成必须先有 `RUNNING -> VERIFYING` 的结构化状态门。
+- 阶段 5：新增 `Final Closeout Gate`，最终成功只认 `run_contract_gate + runtime_gate + state_gate + acceptance_gate` 四个子门同时放行。
+- 阶段 6：新增 `Recovery Lineage Gate`，恢复链路继承旧产物时必须带 `source_run_id + operation_id + path/artifact_ref`，不能把旧产物静默算作当前 run 成果。
+
+约束：
+- 这轮没有新增 GitHub/PDF/XLSX/购物站等专项合同；测试里的具体文件名只作为 fixture。
+- 机器事实来源只读结构化字段：contract、scope、archive_tool_calls、runtime_gate、tool_result_refs、acceptance_report、recovery lineage。
+- 成功 closeout 后重置 local-progress 计数但保留本次 recovery signature，避免旧失败债污染新 attempt，同时保留恢复审计归属。
+
+验证：
+- `python3 -m pytest -q agent_py_agent/tests/test_runtime_gate_contracts.py agent_py_agent/tests/test_runtime_gate_integration.py agent_py_agent/tests/test_main_agent_delivery_closeout.py --tb=short`
+- `ruff check ...`
+- `python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`
+
+## 2026-05-22 / Runtime tool gateway 缺口 1-4 硬门
+
+状态：已落地第一版，registry focused tests 已通过
+
+摘要：
+- 参考 通道运行时 的 typed tool descriptor / plan executor 检查、长期助手 的集中工具守门、终端交互 的结构化权限上下文后，把缺口 1-4 放到工具入口，而不是继续放在最终 verifier 里补救。
+- 缺口 1：`Tool Manifest Gate`。每个可执行工具必须声明 effect、参数 schema 和副作用幂等策略；mutating/dangerous 工具缺 idempotency policy 不能进执行。
+- 缺口 2：`Path / URL / Command Gate`。工具调用里的 path/url/command 字段在执行前统一检查，阻断 symlink 越界、workspace 外写入、私网 URL、file URL 和未显式允许的 shell 操作符。
+- 缺口 3：`Approval Binding Gate`。dangerous + real action 不能只看“有审批”，审批必须绑定 tool/run/operation/idempotency_key/args_hash，防止审批 A 后执行 B。
+- 缺口 4：`Idempotency Ledger Gate`。副作用工具必须带幂等键；同 key 同 args 已完成时复用旧结果，同 key 不同 args 直接拒绝。
+- `execute_registry_call` 现在先过 protocol/manifest/path/side-effect/approval/idempotency 门，再进入 registry 鉴权和真实工具执行；门的结果写入 `runtime_gate`，供 replay、closeout 和审计读取。
+- `tool_manifest_payload` 同步暴露 effect/default_mode/requires_idempotency/requires_approval/timeout/output_refs，避免 context bundle/list_tools 和实际执行门事实不一致。
+
+约束：
+- 这轮仍然不增加 GitHub、论文、购物站等专项合同；产物类型 schema 可以存在，任务业务规则不能写进生产门。
+- 机器判断只读取 ToolSpec、payload、write_boundary、approved_actions、idempotency_ledger 和 workspace_roots 等结构字段，不扫描普通自然语言。
+
 ## 2026-05-22 / 主代理六步稳定化执行规程
 
 状态：设计落地到文档，代码验证进行中
@@ -2139,3 +2179,15 @@ def example(...):
 - 长期助手 对照已用隔离 `长期助手_HOME`/venv 跑同题 Web app，产物通过本仓库静态验收；它本轮成功主要来自一次性完整写入和主动搜索检查，`write_file` 对 HTML 仍是 lint skipped，所以本仓库选择把校验放在工具提交边界。
 - 真 LLM 复验：`20260522-main-web-only-04` 只跑 `health` + `main_direct_web_app`，`LIVE_LAB_PASS`，Web 任务 245.40 秒完成并生成 `index.html`、`styles.css`、`app.js`、`README.md`。
 - 验证链路：`test_file_write_session.py`、`test_artifact_integrity.py`、`test_tool_stream_boundary.py`、`test_tool_loop_write_sessions.py`、目标 `ruff` 和 `check_code_size --mode strict --baseline` 已通过，`high-risk=0`、`soft=0`。
+
+## 2026-05-22 Complex task entry contract and data package gate
+
+状态：已落地，待真实 4 并行复验
+
+摘要：
+- 4 个普通并行复杂任务暴露的共性不是某个任务不会写，而是“普通 run 没有结构化交付合同时，系统只能拦空转，不能按产物合同驱动修到合格”。
+- 受控主代理任务 runner 现在把“一次普通自然语言 prompt”和 `delivery_contract.json` 分离固定：命令层只给被测主代理一个 prompt，机器事实通过独立合同文件进入运行参数和 closeout。
+- 新增通用 `data_analysis_package` case，不写销售专项 gate，而是用 `source_data.json`、`analysis.xlsx`、`report.pdf`、`dashboard.html` 四种产物类型和 `collection_contract` 约束 row count、必填列、staging builder、HTML 完整性。
+- 新增回归覆盖“只有几百行却声称至少一千行”：即使 workbook 已存在，只要 `source_data.json.rows` 少于 1000，artifact acceptance 必须返回 `COLLECTION_TOO_FEW_ITEMS`。
+- 参考项目取舍：学习 长期助手/通道运行时/会话运行时 的 mandatory gate 思路，把约束挂在 runner、tool gateway、artifact validator、delivery closeout，而不是解析 prompt 或最终回复里的普通自然语言。
+- 下一步：跑离线门控链路后，先单个复杂任务真实复验，再用 4 个主代理并行跑 GitHub、论文、购物站、数据分析包。

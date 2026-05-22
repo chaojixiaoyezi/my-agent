@@ -156,7 +156,7 @@ def _claim_findings(claims: list[EvidenceClaim], context: _ClaimValidationContex
             continue
         missing = [source_id for source_id in claim.source_ids if source_id not in context.sources_by_id]
         if missing:
-            findings.append(_claim_finding("EVIDENCE_SOURCE_MISSING", "claim references missing source ids", claim, missing_source_ids=missing))
+            findings.append(_claim_finding("EVIDENCE_SOURCE_MISSING", "claim references missing source ids", claim, {"missing_source_ids": missing}))
         findings.extend(_claim_policy_findings(claim, context))
     return findings
 
@@ -200,7 +200,7 @@ def _claim_value_type_findings(claim: EvidenceClaim, context: _ClaimValidationCo
             "EVIDENCE_VALUE_TYPE_NOT_ALLOWED",
             "claim value_type is not allowed by the evidence contract",
             claim,
-            value_type=value_type,
+            {"value_type": value_type},
         )
     ]
 
@@ -215,8 +215,7 @@ def _claim_confidence_findings(claim: EvidenceClaim, context: _ClaimValidationCo
             "EVIDENCE_CLAIM_LOW_CONFIDENCE",
             "claim confidence is below the required minimum",
             claim,
-            confidence=claim.confidence,
-            min_confidence=context.min_confidence,
+            {"confidence": claim.confidence, "min_confidence": context.min_confidence},
         )
     ]
 
@@ -232,8 +231,8 @@ def _claim_estimate_method_findings(claim: EvidenceClaim, context: _ClaimValidat
 
 # LLM: _claim_finding adds claim_id to evidence findings consistently.
 # 函数用途: 构造 claim 级 finding，附加字段只来自机器参数。
-def _claim_finding(code: str, message: str, claim: EvidenceClaim, **details: Any) -> dict[str, Any]:
-    return _finding(code, "hard", message, details={"claim_id": claim.claim_id, **details})
+def _claim_finding(code: str, message: str, claim: EvidenceClaim, details: dict[str, Any] | None = None) -> dict[str, Any]:
+    return _finding(code, "hard", message, details={"claim_id": claim.claim_id, **(details or {})})
 
 
 # LLM: _required_field_findings ensures required output columns are present as structured claims.

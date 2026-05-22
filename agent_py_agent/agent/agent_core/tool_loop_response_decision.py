@@ -46,6 +46,11 @@ from .tool_loop_repair_counters import (
     _inc_local_progress,
     _inc_reserved,
 )
+from .tool_loop_unresolved_runtime_issue_decision import (
+    UnresolvedRuntimeIssueDecision,
+    UnresolvedRuntimeIssueDecisionRequest,
+    unresolved_runtime_issue_no_tool_call_decision,
+)
 from .tool_reserved_record_guard import (
     contains_reserved_tool_record,
     reserved_tool_record_block_response,
@@ -170,6 +175,11 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
     local_progress_decision = _local_progress_no_tool_call_decision(request)
     if local_progress_decision is not None:
         return local_progress_decision
+    unresolved_issue_decision = unresolved_runtime_issue_no_tool_call_decision(
+        _unresolved_runtime_issue_request(request)
+    )
+    if unresolved_issue_decision is not None:
+        return _unresolved_runtime_issue_decision(unresolved_issue_decision)
     exploration_fuse_decision = exploration_fuse_no_tool_call_decision(_exploration_request(request, []))
     if exploration_fuse_decision is not None:
         return _exploration_decision(exploration_fuse_decision)
@@ -308,6 +318,16 @@ def _delivery_repair_tool_call_decision(
 # 函数用途: 保持 tool_loop_response_decision 的返回类型稳定，同时让 exploration 分支独立演进。
 def _exploration_decision(decision: ExplorationFuseDecision) -> ToolLoopResponseDecision:
     return ToolLoopResponseDecision(decision.action, decision.response, decision.calls, decision.counters)
+
+
+def _unresolved_runtime_issue_decision(decision: UnresolvedRuntimeIssueDecision) -> ToolLoopResponseDecision:
+    return ToolLoopResponseDecision(decision.action, decision.response, decision.calls, decision.counters)
+
+
+def _unresolved_runtime_issue_request(
+    request: _NoToolCallsRequest,
+) -> UnresolvedRuntimeIssueDecisionRequest:
+    return UnresolvedRuntimeIssueDecisionRequest(request.agent, request.params, request.response, request.counters)
 
 
 # LLM: _exploration_request adapts either request shape into the exploration module contract.

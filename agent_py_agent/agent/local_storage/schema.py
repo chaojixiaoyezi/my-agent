@@ -140,6 +140,30 @@ _CONTROL_PLANE_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_task_rollups_updated ON task_rollups(updated_at)",
 )
 
+_RUNTIME_GATE_LEDGER_SQL = (
+    """
+    CREATE TABLE IF NOT EXISTS runtime_gate_ledger (
+        run_id TEXT NOT NULL,
+        task_id TEXT NOT NULL DEFAULT '',
+        operation_id TEXT NOT NULL,
+        tool TEXT NOT NULL DEFAULT '',
+        parameters_json TEXT NOT NULL DEFAULT '{}',
+        runtime_gate_json TEXT NOT NULL DEFAULT '{}',
+        idempotency_key TEXT NOT NULL DEFAULT '',
+        args_hash TEXT NOT NULL DEFAULT '',
+        approval_id TEXT NOT NULL DEFAULT '',
+        result_ref TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        PRIMARY KEY(run_id, operation_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_runtime_gate_ledger_run ON runtime_gate_ledger(run_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_runtime_gate_ledger_task ON runtime_gate_ledger(task_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_runtime_gate_ledger_idem ON runtime_gate_ledger(run_id, idempotency_key)",
+)
+
 
 # LLM: LocalStoreSchemaMixin 属于 LocalStore 本地事实索引 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
 # 类用途: LocalStoreSchemaMixin 封装 LocalStore 本地事实索引 的一组相关操作，供上层组合调用。
@@ -155,6 +179,7 @@ class LocalStoreSchemaMixin:
             self._execute_schema(conn, _BASE_SCHEMA_SQL)
             self._execute_schema(conn, _TASK_REGISTRY_SQL)
             self._execute_schema(conn, _CONTROL_PLANE_SQL)
+            self._execute_schema(conn, _RUNTIME_GATE_LEDGER_SQL)
             if self.enable_fts:
                 self._init_fts_schema(conn)
             conn.commit()

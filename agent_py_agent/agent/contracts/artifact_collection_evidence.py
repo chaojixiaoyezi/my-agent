@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 
 from .artifact_acceptance_models import ArtifactFinding
+from .artifact_collection_source_refs import source_ref_is_audited, source_refs_by_id
 from .artifact_structured_contracts import string_list
 
 
@@ -34,7 +35,7 @@ def item_evidence_findings(
     scope = _EvidenceScope(
         source_ref=source_ref,
         validation_contract=validation_contract,
-        sources_by_id=_source_refs_by_id(value),
+        sources_by_id=source_refs_by_id(value, _lookup_path),
         claims=_claim_records(value),
     )
     findings: list[ArtifactFinding] = []
@@ -74,16 +75,22 @@ def _field_evidence_finding(
     source_ids = _item_field_source_ids(item, field)
     if source_ids:
         missing = [source_id for source_id in source_ids if source_id not in scope.sources_by_id]
-        return (
-            _finding(
+        if missing:
+            return _finding(
                 "COLLECTION_ITEM_EVIDENCE_SOURCE_MISSING",
                 "collection item field references unknown source ids.",
                 _item_location(scope.source_ref, context, field),
                 _compact_json({"field": field, "missing_source_ids": missing}),
             )
-            if missing
-            else None
-        )
+        unaudited = [source_id for source_id in source_ids if not source_ref_is_audited(scope.sources_by_id[source_id])]
+        if unaudited:
+            return _finding(
+                "COLLECTION_ITEM_EVIDENCE_SOURCE_UNAUDITED",
+                "collection item field source lacks tool/audit binding.",
+                _item_location(scope.source_ref, context, field),
+                _compact_json({"field": field, "source_ids": unaudited}),
+            )
+        return None
     if _has_scoped_claim(field, item.get(field), context, scope):
         return None
     return _finding(
@@ -180,27 +187,6 @@ def _items_from_group(group: object, contract: dict[str, object]) -> list[object
     return list(group) if isinstance(group, list) else []
 
 
-# LLM: _source_refs_by_id 是 agent_py_agent/agent/contracts/artifact_collection_evidence.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
-# 函数用途: 处理 source refs by id 相关的结构化数据、路径或 finding，供当前合同链路调用。
-def _source_refs_by_id(value: object) -> dict[str, dict[str, object]]:
-    refs = _lookup_path(value, "source_refs")
-    if not isinstance(refs, list):
-        return {}
-    result: dict[str, dict[str, object]] = {}
-    for item in refs:
-        if isinstance(item, dict):
-            _add_source_ref(result, item)
-    return result
-
-
-# LLM: _add_source_ref 是 agent_py_agent/agent/contracts/artifact_collection_evidence.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
-# 函数用途: 处理 add source ref 相关的结构化数据、路径或 finding，供当前合同链路调用。
-def _add_source_ref(result: dict[str, dict[str, object]], item: dict[str, object]) -> None:
-    source_id = str(item.get("source_id") or "").strip()
-    if source_id and (str(item.get("uri") or "").strip() or str(item.get("artifact_ref") or "").strip()):
-        result[source_id] = item
-
-
 # LLM: _claim_records 是 agent_py_agent/agent/contracts/artifact_collection_evidence.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
 # 函数用途: 处理 claim records 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _claim_records(value: object) -> list[dict[str, object]]:
@@ -265,6 +251,8 @@ def _claim_covers_item_field(
         return False
     source_ids = _string_refs(claim.get("source_ids"))
     if not source_ids or any(source_id not in scope.sources_by_id for source_id in source_ids):
+        return False
+    if any(not source_ref_is_audited(scope.sources_by_id[source_id]) for source_id in source_ids):
         return False
     if _requires_verified(scope.validation_contract) and str(claim.get("verification_status") or "VERIFIED") != "VERIFIED":
         return False

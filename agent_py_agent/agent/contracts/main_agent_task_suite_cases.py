@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import date
 
 from .main_agent_task_suite import MainAgentTaskArtifact, MainAgentTaskCase
+from .main_agent_task_suite_data_analysis import data_analysis_package_case
 
 
 # LLM: default_main_agent_task_cases defines broad real E2E tasks as prompt refs plus contracts.
@@ -16,6 +17,7 @@ def default_main_agent_task_cases() -> list[MainAgentTaskCase]:
         _shopping_site_case(),
         _github_star_workbook_case(),
         _research_document_translation_case(),
+        data_analysis_package_case(),
     ]
 
 
@@ -183,35 +185,13 @@ def _research_document_translation_case() -> MainAgentTaskCase:
         artifact_id="research_translation_pdf",
         kind="pdf",
         preferred_path="outputs/research_documents/research_documents_zh.pdf",
-        validation_contract={
-            "validator": "document_acceptance",
-            "required_suffix": ".pdf",
-            "requires_source_index": True,
-            "collection_contract": _research_document_collection_contract(),
-            "staging_contract": {
-                "strategy": "source_index_then_translation_draft_then_pdf",
-                "builder_tool": "markdown_to_pdf",
-                "source_markdown_ref": "outputs/research_documents/research_documents_zh.md",
-                "pdf_ref": "outputs/research_documents/research_documents_zh.pdf",
-                "checkpoint_shape_hints": {
-                    "outputs/research_documents/source_index.json": (
-                        '{"completion_evidence":{"scope":"all_public_documents_after_2025","method":"...","retrieved_at":"..."},'
-                        '"rows":[{"title":"...","authors":["..."],"date":"...","url":"...","abstract":"...","translated":true}]}'
-                    )
-                },
-                "checkpoint_refs": [
-                    "outputs/research_documents/source_index.json",
-                    "outputs/research_documents/research_documents_zh.md",
-                    "outputs/research_documents/research_documents_zh.pdf",
-                ],
-            },
-        },
+        validation_contract=_research_document_validation_contract(),
     )
     return MainAgentTaskCase(
         case_id="research_documents_translation_pdf",
         title="研究文档中文翻译 PDF",
         user_prompt=(
-            "找到 2025 年之后指定 AI 研究机构公开发布的所有论文或研究文档，逐篇翻译成中文，"
+            "找到 DeepSeek 在 2025 年之后公开发布的所有论文或研究文档，逐篇翻译成中文，"
             "正文翻译准确，专业术语可以保留英文。最终成品需要是 PDF，排版要正确、清楚、好看，并附来源清单。"
         ),
         artifacts=(artifact,),
@@ -230,6 +210,45 @@ def _artifact_check(check_id: str, kind: str, artifact_id: str) -> dict[str, obj
     return {"check_id": check_id, "kind": kind, "artifact_id": artifact_id}
 
 
+# LLM: _research_document_validation_contract groups PDF, source-index, and evidence requirements.
+# 函数用途: 将研究 PDF 产物的验收合同从 case 构造拆出，避免任务函数膨胀。
+def _research_document_validation_contract() -> dict[str, object]:
+    return {
+        "validator": "document_acceptance",
+        "required_suffix": ".pdf",
+        "requires_source_index": True,
+        "evidence_contract": {"required_fields": ["title", "url", "date"], "require_verified": True},
+        "collection_contract": _research_document_collection_contract(),
+        "staging_contract": _research_document_staging_contract(),
+    }
+
+
+def _research_document_staging_contract() -> dict[str, object]:
+    return {
+        "strategy": "source_index_then_translation_draft_then_pdf",
+        "builder_tool": "markdown_to_pdf",
+        "source_markdown_ref": "outputs/research_documents/research_documents_zh.md",
+        "pdf_ref": "outputs/research_documents/research_documents_zh.pdf",
+        "checkpoint_shape_hints": {"outputs/research_documents/source_index.json": _research_source_index_shape_hint()},
+        "checkpoint_refs": [
+            "outputs/research_documents/source_index.json",
+            "outputs/research_documents/research_documents_zh.md",
+            "outputs/research_documents/research_documents_zh.pdf",
+        ],
+    }
+
+
+def _research_source_index_shape_hint() -> str:
+    return (
+        '{"completion_evidence":{"scope":"all_public_documents_after_2025","method":"...","retrieved_at":"..."},'
+        '"rows":[{"title":"...","authors":["..."],"date":"...","url":"...","abstract":"...","translated":true,'
+        '"field_source_ids":{"title":["src-id"],"url":["src-id"],"date":["src-id"]}}],'
+        '"source_refs":[{"source_id":"src-id","uri":"https://...","reserved":{"tool_call_id":"..."}}],'
+        '"claims":[{"field":"title","source_ids":["src-id"],"value":"...","verification_status":"VERIFIED",'
+        '"reserved":{"item_index":0}}]}'
+    )
+
+
 # LLM: _research_document_collection_contract keeps source-index completeness generic.
 # 函数用途: 要求 source index 有多条记录、完整性证据，并能映射到 Markdown 翻译稿。
 def _research_document_collection_contract() -> dict[str, object]:
@@ -241,6 +260,8 @@ def _research_document_collection_contract() -> dict[str, object]:
         "required_item_values": {"translated": True},
         "require_completion_evidence": True,
         "completion_evidence_path": "completion_evidence",
+        "require_item_evidence": True,
+        "required_item_evidence_fields": ["title", "url", "date"],
         "mapping": {
             "artifact_ref": "outputs/research_documents/research_documents_zh.md",
             "key_fields": ["title"],

@@ -124,5 +124,7 @@ def test_research_pdf_case_has_collection_completeness_contract(tmp_path: Path) 
     assert contract["min_items_total"] >= 3
     assert contract["required_item_values"] == {"translated": True}
     assert contract["require_completion_evidence"] is True
+    assert contract["require_item_evidence"] is True
+    assert contract["required_item_evidence_fields"] == ["title", "url", "date"]
     assert contract["mapping"]["artifact_ref"] == "outputs/research_documents/research_documents_zh.md"
     assert contract["mapping"]["key_fields"] == ["title"]

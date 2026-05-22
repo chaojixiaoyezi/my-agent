@@ -37,6 +37,8 @@ class SecurityQueryTool(BaseTool):
         self.spec = ToolSpec(
             name="security_query",
             category="log_analysis",
+            # LLM: LOG query tools are read-only; registry Tool Manifest Gate depends on this machine field.
+            effect="read_only",
             description="Run a bounded local security-event query and return summary, preview rows, and evidence refs.",
             use_cases=[
                 "Investigate logs with explicit time bounds and filters",
@@ -97,6 +99,8 @@ class SecurityHuntIpTool(BaseTool):
         self.spec = ToolSpec(
             name="security_hunt_ip",
             category="log_analysis",
+            # LLM: LOG hunt tools read local evidence only; they must not be treated as mutating actions.
+            effect="read_only",
             description="Hunt a single IP as attacker, victim, or both with bounded security queries.",
             use_cases=[
                 "Pivot from an IP in a case summary",
@@ -142,6 +146,8 @@ class SecurityTraceCaseTool(BaseTool):
         self.spec = ToolSpec(
             name="security_trace_case",
             category="log_analysis",
+            # LLM: Trace-case expansion is a read-only query wrapper; side-effect gates consume this flag.
+            effect="read_only",
             description="Trace case entities with bounded queries and return evidence refs plus compact summaries.",
             use_cases=[
                 "Expand a known case into auditable query refs",

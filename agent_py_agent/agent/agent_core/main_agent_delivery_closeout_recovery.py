@@ -9,6 +9,7 @@ from typing import Any
 from ..contracts.error_taxonomy import error_contract
 from .main_agent_delivery_closeout_artifact_repair import (
     append_artifact_finding_repair_actions,
+    append_collection_value_repair_actions,
     failed_findings,
 )
 from .main_agent_delivery_closeout_artifacts import (
@@ -22,15 +23,19 @@ from .main_agent_delivery_closeout_builder_repair import (
 )
 from .main_agent_delivery_closeout_checkpoint_quality import (
     append_checkpoint_quality_action,
-    checkpoint_writer_fields,
     required_sheets_min,
 )
 from .main_agent_delivery_closeout_evidence import append_staged_evidence_actions
+from .main_agent_delivery_closeout_recovery_codes import recovery_error_code
 from .main_agent_delivery_closeout_recovery_models import (
     CheckpointQualityActionRequest,
     RecoveryActionLedger,
     StagedEvidenceActionRequest,
     StagingActionContext,
+)
+from .main_agent_delivery_closeout_source_checkpoint import (
+    checkpoint_materialization_fields,
+    missing_checkpoint_recovery_hint,
 )
 from .main_agent_delivery_closeout_staging import (
     StagingPrerequisiteRequest,
@@ -67,6 +72,8 @@ def _append_failure_recovery_actions(
     contract: dict[str, Any],
     workspace_root: Path,
 ) -> None:
+    append_collection_value_repair_actions(report, contract, ledger)
+    append_artifact_finding_repair_actions(report, ledger)
     append_failed_builder_output_actions(
         BuilderRepairRequest(
             report=report,
@@ -76,9 +83,8 @@ def _append_failure_recovery_actions(
             staging_context=_staging_action_context,
         )
     )
-    append_artifact_finding_repair_actions(report, ledger)
     for finding in failed_findings(report):
-        recovery_contract = error_contract(_recovery_error_code(str(finding.get("code") or "")))
+        recovery_contract = error_contract(recovery_error_code(str(finding.get("code") or "")))
         if recovery_contract.code in ledger.seen:
             continue
         ledger.seen.add(recovery_contract.code)
@@ -119,7 +125,7 @@ def _contract_recovery_actions(
         evidence_repaired = _append_source_actions(context, _validation_contract(artifact))
         if not evidence_repaired:
             _append_builder_ready_action(context)
-        _append_checkpoint_actions(context)
+        _append_checkpoint_actions(context, _validation_contract(artifact))
     return ledger.actions
 
 
@@ -154,10 +160,11 @@ def _staging_action_context(
 # LLM: _append_source_actions handles existing source checkpoint quality and evidence repair before builder actions.
 # 函数用途: 如果 source_json_ref 已存在，先检查 JSON/列/证据质量；存在证据问题时暂缓 builder。
 def _append_source_actions(context: StagingActionContext, validation_contract: dict[str, object]) -> bool:
+    evidence_repaired = _append_collection_source_evidence_action(context, validation_contract)
     if context.source_path is None or not context.source_path.exists():
-        return False
+        return evidence_repaired
     if context.source_path.suffix.lower() != ".json":
-        return False
+        return evidence_repaired
     append_checkpoint_quality_action(
         CheckpointQualityActionRequest(
             context.ledger,
@@ -166,16 +173,51 @@ def _append_source_actions(context: StagingActionContext, validation_contract: d
             required_columns=context.required_columns,
             required_sheets_min=context.required_sheets_min,
             checkpoint_shape_hint=context.source_shape_hint,
+            validation_contract=validation_contract,
         )
     )
+    return (
+        append_staged_evidence_actions(
+            StagedEvidenceActionRequest(
+                context.ledger,
+                context.source_ref,
+                context.workspace_root,
+                validation_contract,
+            )
+        )
+        or evidence_repaired
+    )
+
+
+# LLM: Collection source evidence can live in a JSON checkpoint that is separate from the builder source.
+# 函数用途: 支持 source_index.json -> markdown -> pdf 这类链路先修证据 JSON，再进入 builder。
+def _append_collection_source_evidence_action(
+    context: StagingActionContext,
+    validation_contract: dict[str, object],
+) -> bool:
+    source_ref = _collection_source_ref(validation_contract)
+    if not source_ref or source_ref == context.source_ref:
+        return False
+    source_path = _artifact_path(source_ref, context.workspace_root)
+    if source_path is None or not source_path.exists() or source_path.suffix.lower() != ".json":
+        return False
     return append_staged_evidence_actions(
         StagedEvidenceActionRequest(
             context.ledger,
-            context.source_ref,
+            source_ref,
             context.workspace_root,
             validation_contract,
         )
     )
+
+
+# LLM: _collection_source_ref reads the source JSON ref declared by collection contracts.
+# 函数用途: 从结构化 collection_contract 中取证据源 checkpoint，不从报告文字猜路径。
+def _collection_source_ref(validation_contract: dict[str, object]) -> str:
+    contract = validation_contract.get("collection_contract")
+    if not isinstance(contract, dict):
+        return ""
+    return str(contract.get("source_json_ref") or "").strip()
 
 
 # LLM: _append_builder_ready_action emits builder readiness only after source JSON is structurally valid.
@@ -227,14 +269,14 @@ def _builder_ready(context: StagingActionContext) -> bool:
 
 # LLM: _append_checkpoint_actions emits repair steps for declared checkpoint refs.
 # 函数用途: 按 checkpoint_refs 检查缺失或坏 JSON 的阶段文件，缺第一个就提示先物化它。
-def _append_checkpoint_actions(context: StagingActionContext) -> None:
+def _append_checkpoint_actions(context: StagingActionContext, validation_contract: dict[str, object]) -> None:
     for ref_text in staging_checkpoint_refs(context.staging):
         if _is_builder_output_ref(context, ref_text):
             break
         checkpoint_path = _artifact_path(ref_text, context.workspace_root)
-        if _handle_existing_checkpoint(context, ref_text, checkpoint_path):
+        if _handle_existing_checkpoint(context, ref_text, checkpoint_path, validation_contract):
             continue
-        _append_missing_checkpoint_action(context, ref_text)
+        _append_missing_checkpoint_action(context, ref_text, validation_contract)
         break
 
 
@@ -246,7 +288,12 @@ def _is_builder_output_ref(context: StagingActionContext, ref_text: str) -> bool
 
 # LLM: _handle_existing_checkpoint validates already-materialized JSON checkpoint refs.
 # 函数用途: 已存在的 JSON checkpoint 进入质量检查；不存在的 checkpoint 留给缺失动作处理。
-def _handle_existing_checkpoint(context: StagingActionContext, ref_text: str, checkpoint_path: Path | None) -> bool:
+def _handle_existing_checkpoint(
+    context: StagingActionContext,
+    ref_text: str,
+    checkpoint_path: Path | None,
+    validation_contract: dict[str, object],
+) -> bool:
     if checkpoint_path is None:
         return True
     if not checkpoint_path.exists():
@@ -260,6 +307,7 @@ def _handle_existing_checkpoint(context: StagingActionContext, ref_text: str, ch
                 required_columns=context.required_columns,
                 required_sheets_min=context.required_sheets_min,
                 checkpoint_shape_hint=_checkpoint_shape_hint(context.staging, ref_text),
+                validation_contract=validation_contract,
             )
         )
     return True
@@ -267,7 +315,11 @@ def _handle_existing_checkpoint(context: StagingActionContext, ref_text: str, ch
 
 # LLM: _append_missing_checkpoint_action reports the first missing staged checkpoint as a materialization task.
 # 函数用途: 生成 materialize_checkpoint 恢复动作，并带上结构提示帮助下一轮写出最小有效骨架。
-def _append_missing_checkpoint_action(context: StagingActionContext, ref_text: str) -> None:
+def _append_missing_checkpoint_action(
+    context: StagingActionContext,
+    ref_text: str,
+    validation_contract: dict[str, object],
+) -> None:
     action_code = "STAGING_CHECKPOINT_MISSING"
     if action_code in context.ledger.seen:
         return
@@ -279,9 +331,9 @@ def _append_missing_checkpoint_action(context: StagingActionContext, ref_text: s
             "retryable": True,
             "recommended_action": "materialize_checkpoint",
             "checkpoint_ref": ref_text,
-            "recovery_hint": "先把缺失的阶段文件真实写出来，可以先写最小有效骨架，再继续补内容。",
+            "recovery_hint": missing_checkpoint_recovery_hint(ref_text, validation_contract),
             "checkpoint_shape_hint": _checkpoint_shape_hint(context.staging, ref_text),
-            **checkpoint_writer_fields(ref_text),
+            **checkpoint_materialization_fields(ref_text, validation_contract),
         }
     )
 
@@ -301,16 +353,3 @@ def _required_columns(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [column for item in value if (column := str(item).strip())]
-
-
-# LLM: _recovery_error_code groups validator-specific findings under generic recovery contracts.
-# 函数用途: 把 HTML/XLSX/PDF 等专用 finding code 归并到通用错误类型，避免再长专项合同分支。
-def _recovery_error_code(code: str) -> str:
-    upper = str(code or "").upper()
-    if upper in {"ARTIFACT_MISSING", "ARTIFACT_EMPTY"}:
-        return "ARTIFACT_MISSING"
-    if upper.startswith(("STAGED_", "PATH_", "SPREADSHEET_SOURCE_", "EVIDENCE_")):
-        return upper
-    if upper.startswith(("XLSX_", "CSV_", "JSON_", "PDF_", "HTML_")):
-        return "ACCEPTANCE_FAILED"
-    return "ACCEPTANCE_FAILED"

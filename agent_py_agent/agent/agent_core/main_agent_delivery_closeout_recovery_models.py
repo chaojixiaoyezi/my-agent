@@ -43,6 +43,7 @@ class CheckpointQualityActionRequest:
     required_columns: list[str] | None = None
     required_sheets_min: int = 0
     checkpoint_shape_hint: str = ""
+    validation_contract: dict[str, object] | None = None
 
 
 # LLM: StagedEvidenceActionRequest bundles staged evidence validation action inputs.

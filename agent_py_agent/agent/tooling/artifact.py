@@ -28,6 +28,7 @@ class ReadArtifactTool(BaseTool):
     spec = ToolSpec(
         name="read_artifact",
         category="memory",
+        effect="read_only",
         description="显式读取已外置 tool-output artifact 的正文切片；不能读取任意文件路径。",
         use_cases=[
             "memory-resume 只给出 artifact path/hash/size 后，需要显式查看正文片段",

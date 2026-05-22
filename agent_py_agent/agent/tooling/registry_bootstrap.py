@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .api_json_collection import ApiJsonCollectionTool
 from .artifact import ReadArtifactTool
 from .controlled_exec import ControlledExecTool
 from .document_pdf_builder import MarkdownPdfTool
@@ -75,6 +76,7 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
     registry.register(FileWriteSessionTool(registry.workspace_root, workspace_roots))
     registry.register(ReplaceInFileTool(registry.workspace_root, workspace_roots))
     registry.register(StructuredJsonTool(registry.workspace_root, workspace_roots))
+    registry.register(ApiJsonCollectionTool(registry.workspace_root, workspace_roots, timeout=params.http_timeout))
     registry.register(DataWorkbookTool(registry.workspace_root, workspace_roots))
     registry.register(MarkdownPdfTool(registry.workspace_root, workspace_roots))
 

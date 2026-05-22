@@ -15,6 +15,7 @@ _WRITE_FIRST_ACTIONS = {
     "invoke_builder_tool",
     "materialize_checkpoint",
     "repair_artifact_against_findings",
+    "repair_collection_item_values",
     "repair_evidence_refs",
     "repair_structured_checkpoint_json",
     "write_non_empty_structured_rows",
@@ -22,21 +23,28 @@ _WRITE_FIRST_ACTIONS = {
 _LIST_FIELDS = {
     "finding_codes",
     "finding_values",
+    "collection_item_updates",
     "repair_targets",
     "required_columns",
     "required_fields",
     "write_tools",
+}
+_DICT_FIELDS = {
+    "collection_contract",
 }
 _TEXT_FIELDS = (
     "artifact_id",
     "artifact_path",
     "builder_tool",
     "category",
+    "checkpoint_materialization_mode",
     "checkpoint_ref",
     "checkpoint_shape_hint",
     "code",
     "evidence_shape_hint",
     "missing_columns",
+    "groups_path",
+    "items_path",
     "output_ref",
     "recommended_action",
     "source_ref",
@@ -145,6 +153,7 @@ def _required_action(item: object) -> dict[str, object]:
         return {}
     payload = {field: str(item.get(field) or "") for field in _TEXT_FIELDS}
     payload.update({field: item.get(field) if isinstance(item.get(field), list) else [] for field in _LIST_FIELDS})
+    payload.update({field: item.get(field) if isinstance(item.get(field), dict) else {} for field in _DICT_FIELDS})
     payload["required_sheets_min"] = item.get("required_sheets_min") or 0
     payload["retryable"] = bool(item.get("retryable", True))
     return payload

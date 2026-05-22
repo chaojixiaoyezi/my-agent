@@ -65,6 +65,8 @@ def build_capability_config_patch_spec() -> ToolSpec:
     return ToolSpec(
         name=_TOOL_NAME,
         category="orchestration",
+        effect="mutating",
+        requires_idempotency=True,
         description=(
             "安全调整 capability_config.yaml 的结构化补丁工具；"
             "适合配置明显阻塞子代理调度、超时、能力包大小或候选数量时使用。"

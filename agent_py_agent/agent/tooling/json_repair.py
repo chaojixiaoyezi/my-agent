@@ -16,6 +16,9 @@ def load_tool_block_json(raw: str) -> Any:
         repaired = _load_json_with_trailing_brace_repair(raw)
         if repaired is not None:
             return repaired
+        repaired = _load_json_with_detached_top_level_fields(raw)
+        if repaired is not None:
+            return repaired
         repaired = _load_write_file_json_with_trailing_body(raw)
         if repaired is not None:
             return repaired
@@ -33,6 +36,32 @@ def _load_json_with_trailing_brace_repair(raw: str) -> Any | None:
     if tail and set(tail) <= {"}"}:
         return payload
     return None
+
+
+# LLM: _load_json_with_detached_top_level_fields repairs premature object close before sibling fields.
+# 函数用途: 模型把 source_refs/claims 等顶层参数误放到多余 `}` 后面时，按 JSON 结构合回同一工具调用。
+def _load_json_with_detached_top_level_fields(raw: str) -> Any | None:
+    try:
+        payload, end = json.JSONDecoder().raw_decode(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    tail = raw[end:].strip()
+    if not tail.startswith(","):
+        return None
+    candidate = "{" + tail.lstrip(",").strip()
+    try:
+        extra = json.loads(candidate)
+    except json.JSONDecodeError:
+        extra = _load_json_with_trailing_brace_repair(candidate)
+    if extra is None:
+        return None
+    if not isinstance(extra, dict) or "tool" in extra:
+        return None
+    if set(payload).intersection(extra):
+        return None
+    return {**payload, **extra}
 
 
 # LLM: _load_write_file_json_with_trailing_body bridges common raw-body file-write drift into one canonical payload.

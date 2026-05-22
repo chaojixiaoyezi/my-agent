@@ -223,6 +223,9 @@ def _staged_json_no_rows_lines(
         f"  - builder_tool={staging.get('builder_tool') or ''}",
         f"  - workbook_ref={staging.get('workbook_ref') or ''}",
         "  - 优先用 writer_tool 写 path/rows/sheets/data，避免手写大型 JSON 字符串。",
+        "  - 如果 min_items_total 很大，优先用 writer_tool 的 generated_rows 结构化参数生成 rows 和多 sheet。",
+        "  - 如果数据来自多个 JSON API，可用 api_json_collection 一次生成带 source_refs/claims 的 source_json_ref；"
+        "大量同形日期/分页请求优先用 request_ranges，避免手写长 JSON。",
         "  - source_json_ref 有非空 rows/sheets 后，再调用 builder_tool；不要把空 JSON 当完成。",
     ]
     lines.extend(_collection_contract_lines(validation))

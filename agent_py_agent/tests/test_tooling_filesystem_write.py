@@ -212,6 +212,34 @@ class TestWriteFileTool:
 
         assert result.ok is False
 
+# LLM: Web asset writes should surface static-site validation failures immediately.
+# 函数用途: 验证普通主代理写 HTML/JS/CSS 时也会走通用静态站点门，而不是只检查文件存在。
+def test_write_web_asset_blocks_missing_dom_binding(tmp_path: Path):
+    from agent_py_agent.agent.tooling.filesystem import WriteFileTool
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "index.html").write_text(
+        "<!doctype html><html><head></head><body>"
+        "<main id='productList'></main><script src='app.js'></script>"
+        "</body></html>",
+        encoding="utf-8",
+    )
+
+    tool = WriteFileTool(workspace)
+    result = tool.execute(
+        {
+            "path": "app.js",
+            "content": "document.getElementById('product-list').innerHTML = 'ok';",
+        }
+    )
+
+    assert result.ok is False
+    assert "STATIC_SITE_MISSING_DOM_ID_HITS" in result.output
+    assert result.error_code == "ACCEPTANCE_FAILED"
+    assert result.result_envelope["artifact_integrity"]["kind"] == "web_project"
+    assert (workspace / "app.js").is_file()
+
 
 class TestAppendFileTool:
     """测试 AppendFileTool 文件追加。"""
