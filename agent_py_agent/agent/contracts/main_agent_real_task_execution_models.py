@@ -21,6 +21,8 @@ class MainAgentRealTaskExecutionRequest:
     base_config_path: Path | None = None
     package_root: Path | None = None
     recovery_packet_path: Path | None = None
+    max_auto_recovery_attempts: int = 3
+    auto_recovery_active: bool = False
 
 
 # LLM: MainAgentRealTaskExecutionCaseResult records one planned or executed subprocess.

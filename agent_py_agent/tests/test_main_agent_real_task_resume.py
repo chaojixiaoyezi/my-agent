@@ -33,7 +33,7 @@ def test_main_agent_real_task_resume_uses_recovery_packet_contract(tmp_path, mon
 
     resumed_case = resumed.cases[0]
     assert resumed.ok is True
-    assert resumed_case.status == "COMPLETED"
+    assert resumed_case.status == "DONE"
     assert "resumes/attempt-001/stdout.txt" in resumed_case.stdout_ref
     assert first_stdout.read_text(encoding="utf-8") == "old failed stdout evidence"
 
@@ -108,6 +108,7 @@ def _timeout_report_with_recovery_packet(tmp_path, monkeypatch):
             task_timeout_seconds=1,
             execute=True,
             case_ids=("furniture_homepage_html",),
+            max_auto_recovery_attempts=0,
         )
     )
 

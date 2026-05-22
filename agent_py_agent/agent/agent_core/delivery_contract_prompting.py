@@ -7,6 +7,8 @@ import json
 
 from .delivery_contract_prompting_recovery import render_recovery_guidance_lines
 
+DELIVERY_PREFLIGHT_FINDINGS_KEY = "_preflight_findings"
+
 
 # LLM: render_delivery_contract_section keeps delivery instructions derived from JSON fields.
 # 函数用途: 渲染交付合同提示段，帮助模型执行路径/格式/资源约束，不让系统从提示反向取事实。
@@ -20,6 +22,51 @@ def render_delivery_contract_section(contract: dict[str, object]) -> str:
             *render_recovery_guidance_lines(contract, _artifact_items(contract)),
         ]
     )
+
+
+# LLM: delivery_contract_preflight_findings reports malformed delivery-contract shapes before prompt rendering.
+# 函数用途: 让 CLI/runner 产生机器可读 schema finding，避免 prompt renderer 对坏结构静默降级。
+def delivery_contract_preflight_findings(contract: dict[str, object]) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    artifacts = contract.get("artifacts")
+    if artifacts is not None and not isinstance(artifacts, list):
+        findings.append(
+            _preflight_finding(
+                "DELIVERY_CONTRACT_ARTIFACTS_INVALID",
+                "artifacts",
+                "delivery_contract.artifacts must be a list of artifact objects.",
+            )
+        )
+        return findings
+    if isinstance(artifacts, list):
+        for index, item in enumerate(artifacts):
+            if not isinstance(item, dict):
+                findings.append(
+                    _preflight_finding(
+                        "DELIVERY_CONTRACT_ARTIFACT_INVALID",
+                        f"artifacts[{index}]",
+                        "delivery_contract artifact entries must be objects.",
+                    )
+                )
+                continue
+            if not _artifact_target_path(item):
+                findings.append(
+                    _preflight_finding(
+                        "DELIVERY_CONTRACT_ARTIFACT_TARGET_MISSING",
+                        f"artifacts[{index}]",
+                        "delivery_contract artifact entries must declare path or preferred_path.",
+                    )
+                )
+    return findings
+
+
+def _preflight_finding(code: str, location: str, message: str) -> dict[str, object]:
+    return {
+        "code": code,
+        "severity": "warning",
+        "location": location,
+        "message": message,
+    }
 
 
 # LLM: _bootstrap_guidance_lines turns structured startup targets into concise first-round execution hints.
@@ -151,6 +198,10 @@ def _one_artifact_lines(artifact: dict[str, object]) -> list[str]:
     return lines
 
 
+def _artifact_target_path(artifact: dict[str, object]) -> str:
+    return str(artifact.get("preferred_path") or artifact.get("path") or "").strip()
+
+
 # LLM: _staging_lines renders structured checkpoint refs for long-running deliverables.
 # 函数用途: 把 validation_contract.staging_contract 展示给模型，帮助按数据/脚本/最终产物分段执行。
 def _staging_lines(contract: dict[str, object]) -> list[str]:
@@ -215,4 +266,8 @@ def _artifact_items(contract: dict[str, object]) -> list[dict[str, object]]:
     return [dict(item) for item in items if isinstance(item, dict)] if isinstance(items, list) else []
 
 
-__all__ = ["render_delivery_contract_section"]
+__all__ = [
+    "DELIVERY_PREFLIGHT_FINDINGS_KEY",
+    "delivery_contract_preflight_findings",
+    "render_delivery_contract_section",
+]

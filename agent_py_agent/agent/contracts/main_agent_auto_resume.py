@@ -1,0 +1,113 @@
+# LLM: Auto-resume policy stores bounded recovery attempts as runtime facts.
+# 模块用途: 让 task/real_task 共用恢复预算和 per-case ledger，避免从路径或提示词推断恢复次数。
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
+
+from .state_machine import normalize_status
+
+SCHEMA_VERSION = "main-agent-auto-resume-ledger.v1"
+DEFAULT_AUTO_RECOVERY_ATTEMPTS = 3
+
+
+class _RuntimeLike(Protocol):
+    paths: dict[str, Path]
+    request: object
+    case: object
+    workspace: Path
+
+
+class _BundleLike(Protocol):
+    runtime: _RuntimeLike
+    status: str
+    recovery_packet_ref: str
+
+
+@dataclass(frozen=True)
+class AutoResumeDecision:
+    allowed: bool
+    attempts: int
+    max_attempts: int
+    reason: str
+
+
+# LLM: auto_resume_decision reads the durable ledger before another recovery attempt starts.
+# 函数用途: 判断是否允许续跑，依据结构化 request 上限和 per-case ledger，不依赖 stdout 或自然语言。
+def auto_resume_decision(bundle: _BundleLike) -> AutoResumeDecision:
+    request = bundle.runtime.request
+    max_attempts = auto_resume_limit(request)
+    attempts = _ledger_attempts(_ledger_path(bundle.runtime.paths))
+    if max_attempts <= 0:
+        return AutoResumeDecision(False, attempts, max_attempts, "auto_resume_disabled")
+    if not bool(getattr(request, "execute", False)):
+        return AutoResumeDecision(False, attempts, max_attempts, "not_execute_mode")
+    if getattr(request, "recovery_packet_path", None) is not None and not bool(
+        getattr(request, "auto_recovery_active", False)
+    ):
+        return AutoResumeDecision(False, attempts, max_attempts, "explicit_resume")
+    if normalize_status(bundle.status) != "FAILED":
+        return AutoResumeDecision(False, attempts, max_attempts, "status_not_failed")
+    if not str(bundle.recovery_packet_ref or "").strip():
+        return AutoResumeDecision(False, attempts, max_attempts, "missing_recovery_packet")
+    if attempts >= max_attempts:
+        return AutoResumeDecision(False, attempts, max_attempts, "attempts_exhausted")
+    return AutoResumeDecision(True, attempts, max_attempts, "allowed")
+
+
+# LLM: record_auto_resume_attempt updates one case ledger before recursive execution.
+# 函数用途: 每次自动续跑前写 attempt ledger，让失败重入不会无限覆盖产物或只靠路径计数。
+def record_auto_resume_attempt(bundle: _BundleLike) -> dict[str, object]:
+    path = _ledger_path(bundle.runtime.paths)
+    payload = _read_ledger(path)
+    attempts = int(payload.get("attempts", 0)) + 1
+    packet_refs = [str(item) for item in payload.get("packet_refs", []) if str(item)]
+    packet_refs.append(str(bundle.recovery_packet_ref))
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "case_id": str(getattr(bundle.runtime.case, "case_id", "") or ""),
+        "attempts": attempts,
+        "max_attempts": auto_resume_limit(bundle.runtime.request),
+        "packet_refs": packet_refs,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    return payload
+
+
+# LLM: auto_resume_limit keeps the default small while allowing tests/CLI to narrow it.
+# 函数用途: 从 request.max_auto_recovery_attempts 读取结构化预算，非法值回退默认值。
+def auto_resume_limit(request: object) -> int:
+    value = getattr(request, "max_auto_recovery_attempts", DEFAULT_AUTO_RECOVERY_ATTEMPTS)
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return DEFAULT_AUTO_RECOVERY_ATTEMPTS
+
+
+def _ledger_path(paths: dict[str, Path]) -> Path:
+    return paths["root"] / "auto_recovery_ledger.json"
+
+
+def _ledger_attempts(path: Path) -> int:
+    return int(_read_ledger(path).get("attempts", 0))
+
+
+def _read_ledger(path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"schema_version": SCHEMA_VERSION, "attempts": 0, "packet_refs": []}
+    return payload if isinstance(payload, dict) else {"schema_version": SCHEMA_VERSION, "attempts": 0, "packet_refs": []}
+
+
+__all__ = [
+    "AutoResumeDecision",
+    "DEFAULT_AUTO_RECOVERY_ATTEMPTS",
+    "SCHEMA_VERSION",
+    "auto_resume_decision",
+    "auto_resume_limit",
+    "record_auto_resume_attempt",
+]

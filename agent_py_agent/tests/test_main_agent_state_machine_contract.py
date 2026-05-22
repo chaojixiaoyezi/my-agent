@@ -76,6 +76,24 @@ def test_run_state_snapshot_projects_verified_done_to_done():
     assert snapshot["can_closeout"] is True
 
 
+def test_run_state_snapshot_normalizes_legacy_planned_status_to_planning():
+    from agent_py_agent.agent.contracts.state_machine import run_state_snapshot_from_task
+
+    task = SimpleNamespace(
+        id="run-legacy-planned",
+        status="PLANNED",
+        verification_status="UNVERIFIED",
+        channel_status="OK",
+        has_progress=True,
+    )
+
+    snapshot = run_state_snapshot_from_task(task)
+
+    assert snapshot["status"] == "PLANNING"
+    assert snapshot["lifecycle_phase"] == "PLANNING"
+    assert snapshot["can_dispatch"] is True
+
+
 def test_run_state_snapshot_projects_approval_wait_to_waiting_for_user():
     from agent_py_agent.agent.contracts.state_machine import run_state_snapshot_from_task
 

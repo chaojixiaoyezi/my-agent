@@ -179,6 +179,32 @@ def test_staged_checkpoint_rejects_blank_required_column_values(tmp_path: Path) 
     assert {finding["code"] for finding in findings} == {"STAGED_JSON_REQUIRED_COLUMN_EMPTY_VALUES"}
 
 
+# LLM: Non-JSON staged checkpoints should enter the same generic artifact validator as final artifacts.
+# 函数用途: 验证 CSV checkpoint 不能只凭存在/非空通过；结构问题必须返回统一产物验收 finding。
+def test_staged_checkpoint_routes_non_json_csv_through_artifact_validator(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "outputs/github_star_growth/source_data.csv"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_text("project,stars\n", encoding="utf-8")
+
+    findings = staged_checkpoint_findings(
+        [
+            {
+                "preferred_path": "outputs/github_star_growth/github_star_growth.xlsx",
+                "validation_contract": {
+                    "staging_contract": {
+                        "checkpoint_refs": ["outputs/github_star_growth/source_data.csv"],
+                    },
+                    "min_data_rows": 1,
+                    "required_columns": ["project", "stars"],
+                },
+            }
+        ],
+        tmp_path,
+    )
+
+    assert any(finding["code"] == "CSV_INSUFFICIENT_DATA_ROWS" for finding in findings)
+
+
 # LLM: staged checkpoint acceptance must use the same sheet/evidence contract as final artifact checks.
 # 函数用途: 验证真实任务 acceptance 的 runtime_findings 不会丢掉 staged source 的结构和证据问题。
 def test_staged_checkpoint_findings_use_validation_contract_shape_and_evidence(tmp_path: Path) -> None:

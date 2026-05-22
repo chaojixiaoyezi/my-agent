@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
+from .main_agent_auto_resume import auto_resume_decision, record_auto_resume_attempt
 from .main_agent_real_task_acceptance import (
     RealTaskAcceptanceReport,
     RealTaskAcceptanceRequest,
@@ -54,6 +56,7 @@ from .main_agent_real_task_suite import (
     MainAgentRealTaskSuiteRequest,
     plan_main_agent_real_task_suite,
 )
+from .state_machine import normalize_status
 
 
 # LLM: run_main_agent_real_task_execution is the public controlled runner entrypoint.
@@ -115,6 +118,7 @@ def _prepare_or_execute(
     *,
     workspace: Path,
 ) -> MainAgentRealTaskExecutionCaseResult:
+    _ensure_case_contract_refs(case, request, workspace=workspace)
     paths = case_paths(workspace, case.case_id)
     paths = resume_attempt_paths(paths, request.recovery_packet_path)
     task_workspace = paths["workspace"]
@@ -137,8 +141,29 @@ def _prepare_or_execute(
         workspace=workspace,
     )
     if not request.execute:
-        return _case_result(CaseResultBundle(runtime=runtime, status="PLANNED"))
+        return _case_result(CaseResultBundle(runtime=runtime, status="PLANNING"))
     return _run_case(runtime)
+
+
+# LLM: _ensure_case_contract_refs keeps real_task on the same lazy materialization contract as task execution.
+# 函数用途: 当旧工作区缺少 prompt/acceptance/expected_artifacts 时，按 suite 结构重新落盘合同。
+def _ensure_case_contract_refs(
+    case: MainAgentRealTaskCasePlan,
+    request: MainAgentRealTaskExecutionRequest,
+    *,
+    workspace: Path,
+) -> None:
+    refs = [case.prompt_ref, case.acceptance_ref, case.expected_artifacts_ref]
+    if all((workspace / ref).exists() for ref in refs if ref):
+        return
+    plan_main_agent_real_task_suite(
+        MainAgentRealTaskSuiteRequest(
+            workspace=workspace,
+            max_workers=request.max_workers,
+            task_timeout_seconds=request.task_timeout_seconds,
+            execute=request.execute,
+        )
+    )
 
 
 # LLM: _run_case executes the subprocess without shell expansion and stores bounded refs.
@@ -173,7 +198,7 @@ def _completed_case_result(
         {"case_id": runtime.case.case_id, "exit_code": process.exit_code},
     )
     acceptance = _validate_case_artifacts(runtime)
-    status = "COMPLETED" if process.exit_code == 0 and acceptance.ok else "FAILED"
+    status = "DONE" if process.exit_code == 0 and acceptance.ok else "FAILED"
     _append_acceptance_event(runtime, acceptance)
     issues = _case_issues(runtime, process.exit_code, acceptance)
     bundle = CaseResultBundle(
@@ -185,6 +210,8 @@ def _completed_case_result(
         issues=issues,
     )
     bundle.recovery_packet_ref = _write_recovery_packet_ref(bundle)
+    if _should_auto_resume(bundle):
+        return _auto_resume_case(bundle)
     return _case_result(bundle)
 
 
@@ -205,7 +232,7 @@ def _timeout_case_result(
         },
     )
     _append_acceptance_event(runtime, acceptance)
-    status = "COMPLETED" if acceptance.ok else "FAILED"
+    status = "DONE" if acceptance.ok else "FAILED"
     issues = _timeout_issues(acceptance, timeout_reason=process.timeout_reason)
     bundle = CaseResultBundle(
         runtime=runtime,
@@ -216,6 +243,8 @@ def _timeout_case_result(
         issues=issues,
     )
     bundle.recovery_packet_ref = _write_recovery_packet_ref(bundle)
+    if _should_auto_resume(bundle):
+        return _auto_resume_case(bundle)
     return _case_result(bundle)
 
 
@@ -318,7 +347,7 @@ def _case_issues(
 def _write_recovery_packet_ref(bundle: CaseResultBundle) -> str:
     runtime = bundle.runtime
     acceptance = bundle.acceptance
-    if bundle.status == "COMPLETED" or acceptance is None:
+    if normalize_status(bundle.status) == "DONE" or acceptance is None:
         return ""
     return write_real_task_recovery_packet(
         RealTaskRecoveryPacketRequest(
@@ -333,6 +362,35 @@ def _write_recovery_packet_ref(bundle: CaseResultBundle) -> str:
             refs=real_task_recovery_refs(runtime.paths, runtime.case),
             acceptance=acceptance,
         )
+    )
+
+
+# LLM: _should_auto_resume shares the same per-case ledger and request budget as task execution.
+# 函数用途: 判断真实任务失败是否能自动续跑，不再让 real_task 直接缺失恢复能力。
+def _should_auto_resume(bundle: CaseResultBundle) -> bool:
+    return auto_resume_decision(bundle).allowed
+
+
+# LLM: _auto_resume_case re-enters real_task execution with a structured recovery packet.
+# 函数用途: 失败后按 ledger 记录一次恢复，再走同一 prepare/execute 路径，避免独立临时重试逻辑。
+def _auto_resume_case(bundle: CaseResultBundle) -> MainAgentRealTaskExecutionCaseResult:
+    runtime = bundle.runtime
+    packet_path = (runtime.workspace / bundle.recovery_packet_ref).resolve()
+    ledger = record_auto_resume_attempt(bundle)
+    append_event(
+        runtime.paths["events"],
+        "case_auto_resume_started",
+        {
+            "case_id": runtime.case.case_id,
+            "recovery_packet_ref": bundle.recovery_packet_ref,
+            "attempts": ledger.get("attempts"),
+            "max_attempts": ledger.get("max_attempts"),
+        },
+    )
+    return _prepare_or_execute(
+        runtime.case,
+        replace(runtime.request, recovery_packet_path=packet_path, auto_recovery_active=True),
+        workspace=runtime.workspace,
     )
 
 

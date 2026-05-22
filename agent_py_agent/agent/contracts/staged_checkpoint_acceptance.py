@@ -53,6 +53,7 @@ def staged_checkpoint_findings(
                     task_workspace,
                     required_columns=context.required_columns,
                     required_sheets_min=context.required_sheets_min,
+                    validation_contract=context.validation_contract,
                 )
             )
             findings.extend(
@@ -78,6 +79,7 @@ def one_staged_checkpoint_findings(
     *,
     required_columns: list[str] | None = None,
     required_sheets_min: int = 0,
+    validation_contract: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
     try:
         path = artifact_path(ref, task_workspace)
@@ -88,13 +90,47 @@ def one_staged_checkpoint_findings(
     if path.is_file() and path.stat().st_size <= 0:
         return [_finding("STAGED_ARTIFACT_EMPTY", ref, path, {"message": "Staged checkpoint is empty."})]
     if path.suffix.lower() != ".json":
-        return []
+        return _artifact_validation_findings(ref, path, task_workspace, validation_contract or {})
     return _json_checkpoint_findings(
         ref,
         path,
         required_columns=required_columns,
         required_sheets_min=required_sheets_min,
     )
+
+
+# LLM: _artifact_validation_findings routes non-JSON checkpoints through the shared artifact validator.
+# 函数用途: CSV/XLSX/PDF/TXT 阶段文件不再只检查存在；统一复用产物注册表输出结构化 findings。
+def _artifact_validation_findings(
+    ref: str,
+    path: Path,
+    task_workspace: Path,
+    validation_contract: dict[str, object],
+) -> list[dict[str, object]]:
+    from .artifact_acceptance import validate_artifact
+    from .artifact_acceptance_models import ArtifactAcceptanceRequest
+
+    checkpoint_contract = dict(validation_contract)
+    checkpoint_contract.pop("validator", None)
+    report = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=path,
+            workspace_root=task_workspace,
+            validation_contract=checkpoint_contract,
+        )
+    )
+    return [
+        with_contract_trace(
+            {
+                **finding.to_dict(),
+                "stage_ref": ref,
+                "artifact_kind": report.artifact_kind,
+            },
+            trace_entry("staged_checkpoint_acceptance", ref=ref, path=path),
+            trace_entry("artifact_acceptance", code=finding.code),
+        )
+        for finding in report.findings
+    ]
 
 
 # LLM: staged_json_evidence_findings validates source/claim refs for factual staged data.

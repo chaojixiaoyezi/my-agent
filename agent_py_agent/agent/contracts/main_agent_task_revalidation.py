@@ -16,6 +16,7 @@ from .main_agent_task_execution_models import (
     MainAgentTaskExecutionCaseResult,
     MainAgentTaskExecutionReport,
 )
+from .state_machine import normalize_status
 
 
 # LLM: revalidate_main_agent_task_execution re-checks artifacts without rerunning commands.
@@ -179,15 +180,16 @@ def _optional_int(value: object) -> int | None:
 # LLM: _summary counts planned and executed case statuses for CLI display.
 # 函数用途: 汇总复验报告状态，和执行报告保持同一 summary shape。
 def _summary(cases: list[MainAgentTaskExecutionCaseResult]) -> dict[str, int]:
-    planning = sum(case.status == "PLANNING" for case in cases)
-    done = sum(case.status == "DONE" for case in cases)
+    statuses = [normalize_status(case.status) for case in cases]
+    planning = sum(status == "PLANNING" for status in statuses)
+    done = sum(status == "DONE" for status in statuses)
     return {
         "total": len(cases),
         "planning": planning,
         "planned": planning,
         "done": done,
         "completed": done,
-        "failed": sum(case.status == "FAILED" for case in cases),
+        "failed": sum(status == "FAILED" for status in statuses),
     }
 
 
