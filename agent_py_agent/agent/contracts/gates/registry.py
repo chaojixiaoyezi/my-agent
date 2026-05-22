@@ -21,6 +21,11 @@ class GateRegistry:
     def register(self, phase: str, validator: GateValidator) -> None:
         self._validators[str(phase)].append(validator)
 
+    # LLM: GateRegistry.has_validators reports whether a gate/phase is actually wired.
+    # 函数用途: 供上层 pipeline 区分“无注册必须失败关闭”和“注册后执行结果允许”。
+    def has_validators(self, phase: str) -> bool:
+        return bool(self._validators.get(str(phase)))
+
     # LLM: GateRegistry.evaluate runs phase validators and merges blocking decisions.
     # 函数用途: 执行一个 phase 的所有 gate，任一失败则返回合并 finding。
     def evaluate(self, context: GateContext) -> GateDecision:
@@ -33,6 +38,8 @@ class GateRegistry:
                 context.phase,
                 evidence={"gate_count": len(decisions), "gates": [item.gate for item in decisions]},
             )
+        if len(blocking) == 1:
+            return blocking[0]
         findings: list[GateFinding] = []
         for decision in blocking:
             findings.extend(decision.findings)

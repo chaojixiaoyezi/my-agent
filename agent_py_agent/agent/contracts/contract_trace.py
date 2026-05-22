@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,7 @@ def trace_entry(
 # 函数用途: 给 finding 附加 bounded trace；旧 trace 保留前缀，新 trace 追加到最多三项。
 def with_contract_trace(
     finding: dict[str, Any],
-    *entries: dict[str, object],
+    entries: Iterable[dict[str, object]] = (),
     max_depth: int = MAX_TRACE_DEPTH,
 ) -> dict[str, object]:
     merged = dict(finding)
@@ -43,6 +44,8 @@ def with_contract_trace(
     return merged
 
 
+# LLM: _trace_items keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _trace_items(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []

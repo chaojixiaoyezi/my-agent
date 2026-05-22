@@ -156,6 +156,7 @@ Ctrl+C
 | `memory-resume` | 从归档、LocalStore 和任务目录生成恢复线索 | 否 | 否 |
 | `task-workspace-list` | 查看 home workspace/tasks 任务工作区 | 否 | 否 |
 | `context-bundle` | 查看最新主代理上下文包、scope、自检和工具/运行合同 | 否 | 否 |
+| `contracts` | 查看合同 finding 状态或迁移旧合同 JSON | status 只读；migrate 仅在 `--output` 或 `--in-place` 时写 | 否 |
 | `real-e2e` | 运行主代理基础 E2E 矩阵，并可验收真实产物 | 写报告 JSON | 否；当前不会自动调用模型 |
 | `memory-artifact-read` | 显式读取已登记 tool-output artifact 正文 | 否 | 否 |
 | `memory-fact-write` | 写入用户确认的 compact resume 补全事实源 | 是 | 否 |

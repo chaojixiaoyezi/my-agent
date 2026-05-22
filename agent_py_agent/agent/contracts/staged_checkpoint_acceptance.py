@@ -16,24 +16,37 @@ from .evidence_contract import (
 from .gates.delivery_quality_metrics import delivery_quality_metric_findings
 from .staged_checkpoint_contract_options import staged_checkpoint_contexts
 from .staged_checkpoint_evidence_payloads import claims, source_refs, string_list
-from .staged_checkpoint_tabular_shape import (
-    contains_nonempty_list,
-    tabular_json_shape_issue,
-)
+from .staged_checkpoint_files import artifact_path, json_checkpoint_status
 
 
+# LLM: StagedEvidenceOptions keeps this contract helper structure-first and stable.
+# 类用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 @dataclass(frozen=True)
 class StagedEvidenceOptions:
     phase: str = "staged"
     emit_path_findings: bool = True
 
 
+# LLM: StagedEvidenceRequest keeps this contract helper structure-first and stable.
+# 类用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 @dataclass(frozen=True)
 class StagedEvidenceRequest:
     ref: str
     task_workspace: Path
     evidence_contract: dict[str, object]
     options: StagedEvidenceOptions = StagedEvidenceOptions()
+
+
+# LLM: StagedCheckpointOptions carries optional shape checks for one checkpoint.
+# 类用途: 将列、sheet 和 validation_contract 打包，避免函数参数继续膨胀。
+@dataclass(frozen=True)
+class StagedCheckpointOptions:
+    required_columns: list[str] | None = None
+    required_sheets_min: int = 0
+    validation_contract: dict[str, object] | None = None
+
+
+_DEFAULT_STAGED_CHECKPOINT_OPTIONS = StagedCheckpointOptions()
 
 
 # LLM: staged_checkpoint_findings inspects only machine-declared checkpoint refs and emits stable findings.
@@ -51,9 +64,11 @@ def staged_checkpoint_findings(
                 one_staged_checkpoint_findings(
                     context.ref,
                     task_workspace,
-                    required_columns=context.required_columns,
-                    required_sheets_min=context.required_sheets_min,
-                    validation_contract=context.validation_contract,
+                    StagedCheckpointOptions(
+                        context.required_columns,
+                        context.required_sheets_min,
+                        context.validation_contract,
+                    ),
                 )
             )
             findings.extend(
@@ -76,10 +91,7 @@ def staged_checkpoint_findings(
 def one_staged_checkpoint_findings(
     ref: str,
     task_workspace: Path,
-    *,
-    required_columns: list[str] | None = None,
-    required_sheets_min: int = 0,
-    validation_contract: dict[str, object] | None = None,
+    options: StagedCheckpointOptions = _DEFAULT_STAGED_CHECKPOINT_OPTIONS,
 ) -> list[dict[str, object]]:
     try:
         path = artifact_path(ref, task_workspace)
@@ -90,12 +102,11 @@ def one_staged_checkpoint_findings(
     if path.is_file() and path.stat().st_size <= 0:
         return [_finding("STAGED_ARTIFACT_EMPTY", ref, path, {"message": "Staged checkpoint is empty."})]
     if path.suffix.lower() != ".json":
-        return _artifact_validation_findings(ref, path, task_workspace, validation_contract or {})
+        return _artifact_validation_findings(ref, path, task_workspace, options.validation_contract or {})
     return _json_checkpoint_findings(
         ref,
         path,
-        required_columns=required_columns,
-        required_sheets_min=required_sheets_min,
+        options,
     )
 
 
@@ -126,8 +137,10 @@ def _artifact_validation_findings(
                 "stage_ref": ref,
                 "artifact_kind": report.artifact_kind,
             },
-            trace_entry("staged_checkpoint_acceptance", ref=ref, path=path),
-            trace_entry("artifact_acceptance", code=finding.code),
+            (
+                trace_entry("staged_checkpoint_acceptance", ref=ref, path=path),
+                trace_entry("artifact_acceptance", code=finding.code),
+            ),
         )
         for finding in report.findings
     ]
@@ -168,6 +181,8 @@ def staged_json_evidence_findings(request: StagedEvidenceRequest) -> list[dict[s
     return findings
 
 
+# LLM: _staged_json_dict keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _staged_json_dict(path: Path) -> dict[str, object] | None:
     if not path.exists() or path.suffix.lower() != ".json":
         return None
@@ -178,6 +193,8 @@ def _staged_json_dict(path: Path) -> dict[str, object] | None:
     return value if isinstance(value, dict) else None
 
 
+# LLM: _evaluate_staged_evidence keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _evaluate_staged_evidence(
     evidence_contract: dict[str, object],
     source_records: list[dict[str, object]],
@@ -198,6 +215,8 @@ def _evaluate_staged_evidence(
     )
 
 
+# LLM: _evidence_finding_dicts keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _evidence_finding_dicts(report: object, ref: str, path: Path) -> list[dict[str, object]]:
     return [
         with_contract_trace(
@@ -209,13 +228,17 @@ def _evidence_finding_dicts(report: object, ref: str, path: Path) -> list[dict[s
                 "message": str(item.get("message") or "Evidence contract failed."),
                 **{key: val for key, val in item.items() if key not in {"code", "severity", "message"}},
             },
-            trace_entry("staged_json_evidence", ref=ref, path=path),
-            trace_entry("evidence_contract", code=str(item.get("code") or "")),
+            (
+                trace_entry("staged_json_evidence", ref=ref, path=path),
+                trace_entry("evidence_contract", code=str(item.get("code") or "")),
+            ),
         )
         for item in report.findings
     ]
 
 
+# LLM: _metric_finding_dicts keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _metric_finding_dicts(findings: object, ref: str, path: Path) -> list[dict[str, object]]:
     return [
         with_contract_trace(
@@ -227,24 +250,26 @@ def _metric_finding_dicts(findings: object, ref: str, path: Path) -> list[dict[s
                 "message": item.message or "Metric quality contract failed.",
                 **({"evidence": item.evidence} if item.evidence else {}),
             },
-            trace_entry("staged_metric_quality", ref=ref, path=path),
-            trace_entry("metric_contract", code=str(item.code)),
+            (
+                trace_entry("staged_metric_quality", ref=ref, path=path),
+                trace_entry("metric_contract", code=str(item.code)),
+            ),
         )
         for item in findings
     ]
 
 
+# LLM: _json_checkpoint_findings keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _json_checkpoint_findings(
     ref: str,
     path: Path,
-    *,
-    required_columns: list[str] | None,
-    required_sheets_min: int,
+    options: StagedCheckpointOptions,
 ) -> list[dict[str, object]]:
     status = json_checkpoint_status(
         path,
-        required_columns=required_columns,
-        required_sheets_min=required_sheets_min,
+        required_columns=options.required_columns,
+        required_sheets_min=options.required_sheets_min,
     )
     code = status["code"]
     if code == "STAGED_JSON_INVALID":
@@ -256,42 +281,6 @@ def _json_checkpoint_findings(
     return []
 
 
-# LLM: artifact_path resolves one workspace-relative checkpoint ref without accepting prose-derived paths.
-# 函数用途: 把阶段 ref 解析到任务工作区里的绝对路径，保持和主验收一致的路径语义。
-def artifact_path(ref: str, task_workspace: Path) -> Path:
-    preferred = Path(str(ref or ""))
-    path = preferred.resolve(strict=False) if preferred.is_absolute() else (task_workspace / preferred).resolve(strict=False)
-    try:
-        path.relative_to(task_workspace.resolve(strict=False))
-    except ValueError as exc:
-        raise ValueError("staged artifact path outside task workspace") from exc
-    return path
-
-
-# LLM: json_checkpoint_status separates invalid JSON from valid-but-empty structured data.
-# 函数用途: 返回阶段 JSON 的结构状态，避免把被截断的 JSON 误判成“只是没有数据”。
-def json_checkpoint_status(
-    path: Path,
-    required_columns: list[str] | None = None,
-    required_sheets_min: int = 0,
-) -> dict[str, str]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except OSError as exc:
-        return {"code": "STAGED_JSON_INVALID", "parse_error": str(exc)}
-    except json.JSONDecodeError as exc:
-        return {"code": "STAGED_JSON_INVALID", "parse_error": str(exc)}
-    if not contains_nonempty_list(value):
-        return {"code": "STAGED_JSON_NO_ROWS"}
-    if shape_issue := tabular_json_shape_issue(
-        value,
-        required_columns=required_columns,
-        required_sheets_min=required_sheets_min,
-    ):
-        return shape_issue
-    return {"code": "OK"}
-
-
 # LLM: _float_value normalizes optional numeric evidence contract thresholds.
 # 函数用途: 从 evidence_contract.min_confidence 读取浮点阈值，坏值按 0 处理。
 def _float_value(value: object) -> float:
@@ -301,6 +290,8 @@ def _float_value(value: object) -> float:
         return 0.0
 
 
+# LLM: _requires_verified keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _requires_verified(evidence_contract: dict[str, object], phase: str) -> bool:
     if phase == "staged":
         return bool(
@@ -312,11 +303,15 @@ def _requires_verified(evidence_contract: dict[str, object], phase: str) -> bool
     return bool(evidence_contract.get("require_verified", True))
 
 
+# LLM: _display_path keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _display_path(ref: str, task_workspace: Path) -> Path:
     preferred = Path(str(ref or ""))
     return preferred.resolve(strict=False) if preferred.is_absolute() else (task_workspace / preferred).resolve(strict=False)
 
 
+# LLM: _path_outside_workspace_finding keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _path_outside_workspace_finding(ref: str, task_workspace: Path, message: str) -> dict[str, object]:
     return _finding(
         "STAGED_ARTIFACT_PATH_OUTSIDE_WORKSPACE",
@@ -339,13 +334,14 @@ def _finding(code: str, ref: str, path: Path, detail: dict[str, object] | None =
             "message": str(payload.get("message") or "Staged checkpoint failed."),
             **{key: value for key, value in payload.items() if key != "message"},
         },
-        trace_entry("staged_checkpoint_acceptance", ref=ref, path=path, code=code),
+        (trace_entry("staged_checkpoint_acceptance", ref=ref, path=path, code=code),),
     )
 
 
 __all__ = [
     "StagedEvidenceOptions",
     "StagedEvidenceRequest",
+    "StagedCheckpointOptions",
     "artifact_path",
     "json_checkpoint_status",
     "one_staged_checkpoint_findings",

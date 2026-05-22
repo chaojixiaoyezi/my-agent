@@ -14,6 +14,8 @@ SCHEMA_VERSION = "main-agent-auto-resume-ledger.v1"
 DEFAULT_AUTO_RECOVERY_ATTEMPTS = 3
 
 
+# LLM: _RuntimeLike keeps this contract helper structure-first and stable.
+# 类用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 class _RuntimeLike(Protocol):
     paths: dict[str, Path]
     request: object
@@ -21,12 +23,16 @@ class _RuntimeLike(Protocol):
     workspace: Path
 
 
+# LLM: _BundleLike keeps this contract helper structure-first and stable.
+# 类用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 class _BundleLike(Protocol):
     runtime: _RuntimeLike
     status: str
     recovery_packet_ref: str
 
 
+# LLM: AutoResumeDecision keeps this contract helper structure-first and stable.
+# 类用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 @dataclass(frozen=True)
 class AutoResumeDecision:
     allowed: bool
@@ -87,14 +93,20 @@ def auto_resume_limit(request: object) -> int:
         return DEFAULT_AUTO_RECOVERY_ATTEMPTS
 
 
+# LLM: _ledger_path keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _ledger_path(paths: dict[str, Path]) -> Path:
     return paths["root"] / "auto_recovery_ledger.json"
 
 
+# LLM: _ledger_attempts keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _ledger_attempts(path: Path) -> int:
     return int(_read_ledger(path).get("attempts", 0))
 
 
+# LLM: _read_ledger keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _read_ledger(path: Path) -> dict[str, object]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))

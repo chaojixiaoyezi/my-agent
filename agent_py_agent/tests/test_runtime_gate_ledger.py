@@ -10,6 +10,7 @@ from agent_py_agent.agent.agent_core.tool_call_runtime import (
     execute_traced_tool_call,
 )
 from agent_py_agent.agent.agent_core.tool_round_execution import ToolCallRecordParams
+from agent_py_agent.agent.agent_core.tool_runtime_ledger import write_boundary_with_runtime_ledger
 from agent_py_agent.agent.local_storage import RuntimeGateLedgerRecord
 from agent_py_agent.agent.local_store import LocalStore
 from agent_py_agent.agent.tooling.models import ToolExecutionResult
@@ -170,6 +171,38 @@ def test_execute_traced_tool_call_injects_persisted_idempotency_ledger(tmp_path)
             "args_hash": "sha256:old",
             "status": "completed",
             "result_ref": "artifact://run-1/op-old",
+        },
+    )
+
+
+def test_write_boundary_injects_tool_rate_limit_records(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    store.record_runtime_gate_ledger(
+        RuntimeGateLedgerRecord(
+            run_id="run-1",
+            task_id="task-1",
+            operation_id="op-old",
+            tool="fetch_url",
+            parameters={"url": "https://example.test/a"},
+            runtime_gate={"gate": "tool_execution", "allowed": False},
+            args_hash="sha256:fetch-a",
+            status="failed",
+            created_at=10.0,
+        )
+    )
+    agent = SimpleNamespace(local_store=store)
+
+    boundary = write_boundary_with_runtime_ledger(agent, _loop_params(run_id="run-1", write_boundary={}))
+
+    assert boundary["tool_rate_limit_records"] == (
+        {
+            "tool_name": "fetch_url",
+            "args_hash": "sha256:fetch-a",
+            "attempt_timestamps": [10.0],
+            "consecutive_failures": 1,
+            "last_failure_at": 10.0,
+            "last_success_at": 0.0,
+            "total_failures": 1,
         },
     )
 

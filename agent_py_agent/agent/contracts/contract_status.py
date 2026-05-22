@@ -13,6 +13,8 @@ MAX_SCAN_FILES = 1000
 MAX_REPORT_BYTES = 2_000_000
 
 
+# LLM: ContractStatusReport keeps this contract helper structure-first and stable.
+# 类用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 @dataclass(frozen=True)
 class ContractStatusReport:
     root: str
@@ -24,10 +26,14 @@ class ContractStatusReport:
     by_severity: dict[str, int]
     recent_findings: tuple[dict[str, object], ...]
 
+    # LLM: ok keeps this contract helper structure-first and stable.
+    # 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
     @property
     def ok(self) -> bool:
         return self.finding_count == 0
 
+    # LLM: to_dict keeps this contract helper structure-first and stable.
+    # 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
     def to_dict(self) -> dict[str, object]:
         return {
             "ok": self.ok,
@@ -42,6 +48,8 @@ class ContractStatusReport:
         }
 
 
+# LLM: _StatusAccumulator keeps this contract helper structure-first and stable.
+# 类用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 @dataclass
 class _StatusAccumulator:
     by_code: Counter[str]
@@ -86,6 +94,8 @@ def summarize_contract_status(
     )
 
 
+# LLM: _json_paths keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _json_paths(root: Path, *, max_files: int) -> list[Path]:
     if root.is_file():
         return [root] if root.suffix.lower() == ".json" else []
@@ -100,6 +110,8 @@ def _json_paths(root: Path, *, max_files: int) -> list[Path]:
     return paths[:max(0, max_files)]
 
 
+# LLM: _file_too_large keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _file_too_large(path: Path, max_file_bytes: int) -> bool:
     try:
         return path.stat().st_size > max_file_bytes
@@ -107,6 +119,8 @@ def _file_too_large(path: Path, max_file_bytes: int) -> bool:
         return True
 
 
+# LLM: _read_json keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _read_json(path: Path) -> object | None:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -114,6 +128,8 @@ def _read_json(path: Path) -> object | None:
         return None
 
 
+# LLM: _findings_from_file keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _findings_from_file(path: Path, max_file_bytes: int) -> tuple[list[dict[str, Any]], bool]:
     if _file_too_large(path, max_file_bytes):
         return [], True
@@ -121,6 +137,8 @@ def _findings_from_file(path: Path, max_file_bytes: int) -> tuple[list[dict[str,
     return (_findings(payload), False) if payload is not None else ([], True)
 
 
+# LLM: _tally_findings keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _tally_findings(
     path: Path,
     findings: list[dict[str, Any]],
@@ -135,6 +153,8 @@ def _tally_findings(
             accumulator.recent.append(_recent_finding(path, finding, code, severity))
 
 
+# LLM: _findings keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _findings(payload: object) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     stack: list[tuple[object, int]] = [(payload, 0)]
@@ -147,12 +167,16 @@ def _findings(payload: object) -> list[dict[str, Any]]:
     return findings
 
 
+# LLM: _direct_findings keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _direct_findings(value: object) -> list[dict[str, Any]]:
     if not isinstance(value, dict) or not isinstance(value.get("findings"), list):
         return []
     return [dict(item) for item in value["findings"] if isinstance(item, dict) and _text(item.get("code"))]
 
 
+# LLM: _child_values keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _child_values(value: object) -> list[object]:
     if isinstance(value, dict):
         return [item for key, item in value.items() if key != "findings" and isinstance(item, (dict, list))]
@@ -161,6 +185,8 @@ def _child_values(value: object) -> list[object]:
     return []
 
 
+# LLM: _recent_finding keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _recent_finding(path: Path, finding: dict[str, Any], code: str, severity: str) -> dict[str, object]:
     return {
         "file": str(path),
@@ -172,10 +198,14 @@ def _recent_finding(path: Path, finding: dict[str, Any], code: str, severity: st
     }
 
 
+# LLM: _optional_field keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _optional_field(payload: dict[str, Any], key: str) -> dict[str, object]:
     return {key: payload[key]} if key in payload else {}
 
 
+# LLM: _text keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _text(value: object) -> str:
     return str(value or "").strip()
 

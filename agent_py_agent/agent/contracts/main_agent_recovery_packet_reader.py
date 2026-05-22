@@ -86,10 +86,14 @@ def invalid_recovery_packet(
     }
 
 
+# LLM: is_invalid_recovery_packet keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def is_invalid_recovery_packet(payload: dict[str, object]) -> bool:
     return str(payload.get("status") or "") == "invalid_recovery_packet"
 
 
+# LLM: first_recovery_reason_code keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def first_recovery_reason_code(payload: dict[str, object]) -> str:
     codes = payload.get("reason_codes")
     return str(codes[0]) if isinstance(codes, list) and codes else "RECOVERY_PACKET_INVALID"

@@ -10,6 +10,7 @@ from agent_py_agent.agent.agent_core.main_agent_delivery_closeout import (
     main_agent_delivery_closeout_response,
 )
 from agent_py_agent.agent.contracts.gates.tool_effects import args_hash_for_call
+from agent_py_agent.agent.contracts.tool_protocol_v2 import normalize_tool_call
 from agent_py_agent.agent.tooling.models import BaseTool, ToolExecutionResult, ToolSpec
 from agent_py_agent.agent.tooling.registry_execution import (
     ExecuteRegistryCallParams,
@@ -80,6 +81,36 @@ def test_registry_execution_records_runtime_gate_allow_for_executed_tool(tmp_pat
     assert result.ok is True
     assert result.result_envelope["runtime_gate"]["status"] == "ALLOW"
     assert result.result_envelope["runtime_gate"]["evidence"]["tool_name"] == "echo"
+    assert "tool_rate_limit" in result.result_envelope["runtime_gate"]["evidence"]["executed_gates"]
+
+
+def test_registry_execution_blocks_when_runtime_rate_limit_is_exhausted(tmp_path):
+    payload = {"tool": "echo", "value": 1}
+    result = execute_registry_call(
+        ExecuteRegistryCallParams(
+            payload=payload,
+            tools={"echo": EchoTool()},
+            workspace_root=tmp_path,
+            workspace_roots=[tmp_path],
+            expose_security_tools=False,
+            security_tool_names=set(),
+            write_boundary={
+                "now": 10.0,
+                "tool_rate_limit_policy": {"max_calls": 1, "window_seconds": 60},
+                "tool_rate_limit_records": [
+                    {
+                        "tool_name": "echo",
+                        "args_hash": _args_hash_for_legacy_payload(payload),
+                        "attempt_timestamps": [9.0],
+                    }
+                ],
+            },
+        )
+    )
+
+    assert result.ok is False
+    assert result.result_envelope["runtime_gate"]["gate"] == "tool_rate_limit"
+    assert result.result_envelope["runtime_gate"]["findings"][0]["code"] == "TOOL_RATE_LIMIT_EXCEEDED"
 
 
 def test_registry_execution_blocks_tool_with_incomplete_manifest(tmp_path):
@@ -450,3 +481,8 @@ def _write_file_archive_record() -> dict[str, object]:
             },
         },
     }
+
+
+def _args_hash_for_legacy_payload(payload: dict[str, object]) -> str:
+    args = {key: value for key, value in payload.items() if key not in {"tool", "kind"}}
+    return args_hash_for_call(normalize_tool_call({**payload, "args": args}).input)

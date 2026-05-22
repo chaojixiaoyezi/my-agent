@@ -8,11 +8,6 @@ from dataclasses import replace
 from pathlib import Path
 
 from .main_agent_auto_resume import auto_resume_decision, record_auto_resume_attempt
-from .main_agent_real_task_acceptance import (
-    RealTaskAcceptanceReport,
-    RealTaskAcceptanceRequest,
-    validate_real_task_artifacts,
-)
 from .main_agent_real_task_execution_files import (
     append_event,
     case_paths,
@@ -29,23 +24,26 @@ from .main_agent_real_task_execution_models import (
     MainAgentRealTaskExecutionReport,
     MainAgentRealTaskExecutionRequest,
 )
+from .main_agent_real_task_execution_results import (
+    activity_timeout_seconds,
+    append_acceptance_event,
+    case_issues,
+    case_result,
+    timeout_issues,
+    validate_case_artifacts,
+    write_recovery_packet_ref,
+)
 from .main_agent_real_task_execution_state import CaseResultBundle, CaseRuntime
 from .main_agent_real_task_execution_summary import (
     concurrency_summary,
     execution_summary,
     select_cases,
 )
-from .main_agent_real_task_recovery_packet import (
-    RealTaskRecoveryPacketRequest,
-    real_task_recovery_refs,
-    write_real_task_recovery_packet,
-)
 from .main_agent_real_task_recovery_resume import (
     case_ids_for_recovery_request,
     resume_attempt_paths,
 )
 from .main_agent_real_task_revalidation import revalidate_main_agent_real_task_execution
-from .main_agent_real_task_runtime_issues import case_issue_codes
 from .main_agent_real_task_subprocess import (
     RealTaskSubprocessRequest,
     RealTaskSubprocessResult,
@@ -56,7 +54,6 @@ from .main_agent_real_task_suite import (
     MainAgentRealTaskSuiteRequest,
     plan_main_agent_real_task_suite,
 )
-from .state_machine import normalize_status
 
 
 # LLM: run_main_agent_real_task_execution is the public controlled runner entrypoint.
@@ -178,7 +175,7 @@ def _run_case(runtime: CaseRuntime) -> MainAgentRealTaskExecutionCaseResult:
             stderr_path=runtime.paths["stderr"],
             workspace=runtime.paths["workspace"],
             timeout_seconds=runtime.request.task_timeout_seconds,
-            activity_timeout_seconds=_activity_timeout_seconds(runtime.request.task_timeout_seconds),
+            activity_timeout_seconds=activity_timeout_seconds(runtime.request.task_timeout_seconds),
         )
     )
     if process.timed_out:
@@ -197,10 +194,10 @@ def _completed_case_result(
         "case_finished",
         {"case_id": runtime.case.case_id, "exit_code": process.exit_code},
     )
-    acceptance = _validate_case_artifacts(runtime)
+    acceptance = validate_case_artifacts(runtime)
     status = "DONE" if process.exit_code == 0 and acceptance.ok else "FAILED"
-    _append_acceptance_event(runtime, acceptance)
-    issues = _case_issues(runtime, process.exit_code, acceptance)
+    append_acceptance_event(runtime, acceptance)
+    issues = case_issues(runtime, process.exit_code, acceptance)
     bundle = CaseResultBundle(
         runtime=runtime,
         status=status,
@@ -209,10 +206,10 @@ def _completed_case_result(
         duration_seconds=process.duration_seconds,
         issues=issues,
     )
-    bundle.recovery_packet_ref = _write_recovery_packet_ref(bundle)
+    bundle.recovery_packet_ref = write_recovery_packet_ref(bundle)
     if _should_auto_resume(bundle):
         return _auto_resume_case(bundle)
-    return _case_result(bundle)
+    return case_result(bundle)
 
 
 # LLM: _timeout_case_result keeps timeout handling separate from normal completion.
@@ -221,7 +218,7 @@ def _timeout_case_result(
     runtime: CaseRuntime,
     process: RealTaskSubprocessResult,
 ) -> MainAgentRealTaskExecutionCaseResult:
-    acceptance = _validate_case_artifacts(runtime)
+    acceptance = validate_case_artifacts(runtime)
     append_event(
         runtime.paths["events"],
         "case_timeout" if process.timeout_reason == "timeout" else "case_activity_timeout",
@@ -231,9 +228,9 @@ def _timeout_case_result(
             "timeout_seconds": runtime.request.task_timeout_seconds,
         },
     )
-    _append_acceptance_event(runtime, acceptance)
+    append_acceptance_event(runtime, acceptance)
     status = "DONE" if acceptance.ok else "FAILED"
-    issues = _timeout_issues(acceptance, timeout_reason=process.timeout_reason)
+    issues = timeout_issues(acceptance, timeout_reason=process.timeout_reason)
     bundle = CaseResultBundle(
         runtime=runtime,
         status=status,
@@ -242,127 +239,10 @@ def _timeout_case_result(
         duration_seconds=process.duration_seconds,
         issues=issues,
     )
-    bundle.recovery_packet_ref = _write_recovery_packet_ref(bundle)
+    bundle.recovery_packet_ref = write_recovery_packet_ref(bundle)
     if _should_auto_resume(bundle):
         return _auto_resume_case(bundle)
-    return _case_result(bundle)
-
-
-# LLM: _timeout_issues separates hard timeouts from already-valid deliverables.
-# 函数用途: 超时时根据产物验收结果输出稳定 issue code，避免有效产物被误判失败。
-def _timeout_issues(
-    acceptance: RealTaskAcceptanceReport,
-    *,
-    timeout_reason: str,
-) -> tuple[str, ...]:
-    if acceptance.ok:
-        return ("process_timeout_after_valid_artifact",)
-    failed = int(acceptance.summary.get("failed", 0))
-    issues = [timeout_reason or "timeout"]
-    if failed:
-        issues.append(f"artifact_acceptance_failed={failed}")
-    return tuple(issues)
-
-
-# LLM: _activity_timeout_seconds derives a live-observation bound from the total case timeout.
-# 函数用途: 真实任务如果长时间没有日志或文件活动，就提前停止并保留 checkpoint/日志证据。
-def _activity_timeout_seconds(task_timeout_seconds: int) -> int:
-    total = max(1, int(task_timeout_seconds))
-    if total <= 600:
-        return total
-    return min(total, max(600, total // 2))
-
-
-# LLM: _case_result converts per-case files into the execution report shape.
-# 函数用途: 汇总单个任务的引用字段和执行状态，保持 stdout/stderr 外置。
-def _case_result(bundle: CaseResultBundle) -> MainAgentRealTaskExecutionCaseResult:
-    runtime = bundle.runtime
-    acceptance = bundle.acceptance
-    return MainAgentRealTaskExecutionCaseResult(
-        case_id=runtime.case.case_id,
-        title=runtime.case.title,
-        status=bundle.status,
-        worker_slot=runtime.case.worker_slot,
-        timeout_seconds=runtime.case.timeout_seconds,
-        prompt_ref=runtime.case.prompt_ref,
-        config_ref=rel(runtime.paths["config"], runtime.workspace),
-        command_ref=rel(runtime.paths["command"], runtime.workspace),
-        stdout_ref=rel(runtime.paths["stdout"], runtime.workspace),
-        stderr_ref=rel(runtime.paths["stderr"], runtime.workspace),
-        acceptance_report_ref=rel(runtime.paths["acceptance_report"], runtime.workspace),
-        events_ref=rel(runtime.paths["events"], runtime.workspace),
-        recovery_packet_ref=bundle.recovery_packet_ref,
-        acceptance_summary=dict(acceptance.summary if acceptance else {}),
-        exit_code=bundle.exit_code,
-        duration_seconds=bundle.duration_seconds,
-        issues=list(bundle.issues),
-    )
-
-
-# LLM: _validate_case_artifacts connects subprocess completion to artifact acceptance.
-# 函数用途: 读取该 case 的 expected_artifacts_ref，并在任务 workspace 内验收产物。
-def _validate_case_artifacts(runtime: CaseRuntime) -> RealTaskAcceptanceReport:
-    return validate_real_task_artifacts(
-        RealTaskAcceptanceRequest(
-            expected_artifacts_path=runtime.workspace / runtime.case.expected_artifacts_ref,
-            task_workspace=runtime.paths["workspace"],
-            report_path=runtime.paths["acceptance_report"],
-        )
-    )
-
-
-# LLM: _append_acceptance_event records case-level validation outcome for live observation.
-# 函数用途: 将产物验收通过/失败写进 events.jsonl，长任务未结束时也能看出卡点。
-def _append_acceptance_event(
-    runtime: CaseRuntime,
-    acceptance: RealTaskAcceptanceReport,
-) -> None:
-    append_event(
-        runtime.paths["events"],
-        "case_acceptance_passed" if acceptance.ok else "case_acceptance_failed",
-        {
-            "case_id": runtime.case.case_id,
-            "summary": dict(acceptance.summary),
-            "report_ref": rel(runtime.paths["acceptance_report"], runtime.workspace),
-        },
-    )
-
-
-# LLM: _case_issues merges process and artifact failures into structured short issue codes.
-# 函数用途: 生成 case 级失败摘要；详细 findings 留在 acceptance_report_ref。
-def _case_issues(
-    runtime: CaseRuntime,
-    exit_code: int,
-    acceptance: RealTaskAcceptanceReport,
-) -> tuple[str, ...]:
-    return case_issue_codes(
-        exit_code=exit_code,
-        acceptance=acceptance,
-        stdout_path=runtime.paths["stdout"],
-    )
-
-
-# LLM: _write_recovery_packet_ref materializes continuation facts for failed real tasks.
-# 函数用途: 失败/超时时写 recovery_packet.json；完成任务不写恢复包，避免制造噪音。
-def _write_recovery_packet_ref(bundle: CaseResultBundle) -> str:
-    runtime = bundle.runtime
-    acceptance = bundle.acceptance
-    if normalize_status(bundle.status) == "DONE" or acceptance is None:
-        return ""
-    return write_real_task_recovery_packet(
-        RealTaskRecoveryPacketRequest(
-            case_id=runtime.case.case_id,
-            title=runtime.case.title,
-            status=bundle.status,
-            exit_code=bundle.exit_code,
-            duration_seconds=bundle.duration_seconds,
-            reason_codes=bundle.issues,
-            workspace_root=runtime.workspace,
-            packet_path=runtime.paths["recovery_packet"],
-            refs=real_task_recovery_refs(runtime.paths, runtime.case),
-            acceptance=acceptance,
-        )
-    )
+    return case_result(bundle)
 
 
 # LLM: _should_auto_resume shares the same per-case ledger and request budget as task execution.

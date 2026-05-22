@@ -9,13 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .command_policy import evaluate_command_policy
 from .models import GateDecision, GateFinding
 
 _PATH_KEYS = {"path", "file_path", "target_path", "output_path", "working_dir", "cwd", "directory"}
 _URL_KEYS = {"url", "endpoint", "webhook_url"}
 _COMMAND_KEYS = {"command", "cmd", "argv"}
 _PRIVATE_HOSTS = {"localhost"}
-_SHELL_OPERATOR_MARKERS = ("&&", "||", ";", "|", "`", "$(", "\n", "\r", ">", "<")
 
 # LLM: PathUrlCommandFacts is the trusted input bundle for path, URL, and command gates.
 # 类用途: 保存工具 payload、workspace roots 和 gate policy，避免函数参数继续变宽。
@@ -66,16 +66,14 @@ def _collect_url_findings(
 
 
 # LLM: _collect_command_findings treats command fields as executable payloads, not explanatory text.
-# 函数用途: 阻断 shell 控制符，除非调用方显式声明该入口允许 shell 操作符。
+# 函数用途: 复用共享 command policy 阻断危险 executable、危险参数模式和 shell 控制符。
 def _collect_command_findings(
     data: Mapping[object, object],
     allow_shell_operators: bool,
     findings: list[GateFinding],
 ) -> None:
     for key, value in _matching_fields(data, _COMMAND_KEYS):
-        finding = _command_finding(str(key), value, allow_shell_operators)
-        if finding:
-            findings.append(finding)
+        findings.extend(_command_findings(str(key), value, allow_shell_operators))
 
 
 # LLM: _path_finding checks one path-like field value.
@@ -115,19 +113,15 @@ def _url_finding(field: str, raw_url: object, allowed_private_hosts: set[str]) -
     return None
 
 
-# LLM: _command_finding checks command fields as executable payloads.
-# 函数用途: argv 只允许非空无 NUL 字符，string command 默认拒绝 shell 控制符。
-def _command_finding(field: str, value: object, allow_shell_operators: bool) -> GateFinding | None:
-    if isinstance(value, list):
-        return None if _valid_argv(value) else GateFinding("COMMAND_ARGV_INVALID", evidence={"field": field})
-    command = _text(value)
-    if not command:
-        return None
-    if "\x00" in command:
-        return GateFinding("COMMAND_ARGV_INVALID", evidence={"field": field})
-    if not allow_shell_operators and any(marker in command for marker in _SHELL_OPERATOR_MARKERS):
-        return GateFinding("COMMAND_SHELL_OPERATOR_BLOCKED", evidence={"field": field})
-    return None
+# LLM: _command_findings adapts shared command policy findings into GateFinding records.
+# 函数用途: 给 path/url/command gate 输出统一 GateFinding，同时保留字段名和 policy evidence。
+def _command_findings(field: str, value: object, allow_shell_operators: bool) -> list[GateFinding]:
+    decision = evaluate_command_policy(value, allow_shell_operators=allow_shell_operators)
+    return [
+        GateFinding(finding.code, evidence={"field": field, **finding.evidence})
+        for finding in decision.findings
+        if finding.code != "COMMAND_EMPTY"
+    ]
 
 
 # LLM: _normalized_roots resolves workspace roots once so every field uses the same path policy.
@@ -161,12 +155,6 @@ def _resolve_path(path: Path) -> Path | None:
         return path.resolve(strict=False)
     except (OSError, RuntimeError):
         return None
-
-
-# LLM: _valid_argv validates argv-style command fields without shell parsing.
-# 函数用途: 确保数组命令每一段都是非空且不含 NUL 字符。
-def _valid_argv(value: list[object]) -> bool:
-    return all(_text(item) and "\x00" not in _text(item) for item in value)
 
 
 # LLM: _is_private_host handles localhost, IPv4 shorthand, IPv6, private, loopback, and link-local hosts.

@@ -18,12 +18,6 @@ from ..action_protocol import (
     RunScope,
     ToolCallEnvelope,
 )
-from ..contracts.gates import (
-    GateDecision,
-    PathUrlCommandFacts,
-    evaluate_path_url_command_gate,
-    evaluate_tool_call_gate,
-)
 from .models import BaseTool, ToolExecutionResult
 from .parse_error_hint import parse_error_message
 from .parser import parse_xmlish_tool_calls
@@ -45,13 +39,6 @@ from .registry_file_write_blocks import (
     parse_file_write_session_raw_blocks,
     parse_write_file_raw_blocks,
 )
-from .registry_gate_policy import (
-    boundary_bool,
-    boundary_path_roots,
-    boundary_strings,
-    tool_gate_policy,
-    tool_manifest_decision,
-)
 from .registry_invoke import RegistryToolInvokeRequest, invoke_registry_tool
 from .registry_malformed_markers import malformed_tool_marker_calls
 from .registry_markers import next_tool_block_end, next_tool_block_start
@@ -63,6 +50,7 @@ from .registry_payload_normalize import (
 from .registry_payload_normalize import (
     tool_name as normalize_tool_name,
 )
+from .registry_runtime_gate_pipeline import tool_call_gate_decision
 from .registry_runtime_gate_results import attach_runtime_gate, runtime_gate_block_result
 
 
@@ -154,7 +142,7 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
     normalized_payload = _normalized_payload_or_error(call, envelope)
     if isinstance(normalized_payload, ToolExecutionResult):
         return normalized_payload
-    gate_decision = _tool_call_gate_decision(normalized_payload, call)
+    gate_decision = tool_call_gate_decision(normalized_payload, call)
     if not gate_decision.allowed:
         return runtime_gate_block_result(normalized_payload, gate_decision, envelope)
     try:
@@ -196,58 +184,6 @@ def _normalized_payload_or_error(
             envelope,
         )
     return prepared
-
-
-# LLM: _tool_call_gate_decision evaluates mandatory tool protocol and side-effect gates.
-# 函数用途: 在注册表鉴权和真实工具调用之前得到 runtime gate 决策。
-def _tool_call_gate_decision(payload: dict[str, Any], call: ExecuteRegistryCallParams) -> GateDecision:
-    base_decision = evaluate_tool_call_gate(
-        payload,
-        available_tools=call.tools.keys(),
-        allowed_tools=call.allowed_tools,
-        policy=None,
-    )
-    if not base_decision.allowed:
-        return base_decision
-    tool_name = str(base_decision.evidence.get("tool_name") or payload.get("tool") or "").strip()
-    manifest_decision = tool_manifest_decision(tool_name, call.tools)
-    if not manifest_decision.allowed:
-        return manifest_decision
-    path_decision = evaluate_path_url_command_gate(
-        PathUrlCommandFacts(
-            payload=payload,
-            workspace_root=call.workspace_root,
-            workspace_roots=_path_gate_roots(call),
-            allowed_private_hosts=boundary_strings(call.write_boundary, "allowed_private_hosts"),
-            allow_shell_operators=boundary_bool(call.write_boundary, "allow_shell_operators"),
-        )
-    )
-    if not path_decision.allowed:
-        return path_decision
-    effect_decision = evaluate_tool_call_gate(
-        payload,
-        available_tools=call.tools.keys(),
-        allowed_tools=call.allowed_tools,
-        policy=tool_gate_policy(call.write_boundary, call.tools.get(tool_name)),
-    )
-    if not effect_decision.allowed:
-        return effect_decision
-    return GateDecision.allow(
-        "tool_execution",
-        evidence={
-            **dict(effect_decision.evidence),
-            "manifest_gate": manifest_decision.to_dict(),
-            "path_url_command_gate": path_decision.to_dict(),
-        },
-    )
-
-
-# LLM: _path_gate_roots combines configured workspace roots with parent-granted path roots.
-# 函数用途: path gate 在工具执行前同时尊重 workspace_roots 和 write_boundary 的结构化 root grant。
-def _path_gate_roots(call: ExecuteRegistryCallParams) -> list[Path]:
-    roots = list(call.workspace_roots or [])
-    roots.extend(Path(item) for item in boundary_path_roots(call.write_boundary))
-    return roots
 
 
 # LLM: _invoke_registry_with_envelope invokes the selected tool and preserves call envelope refs.

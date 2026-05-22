@@ -27,39 +27,52 @@ def render_delivery_contract_section(contract: dict[str, object]) -> str:
 # LLM: delivery_contract_preflight_findings reports malformed delivery-contract shapes before prompt rendering.
 # 函数用途: 让 CLI/runner 产生机器可读 schema finding，避免 prompt renderer 对坏结构静默降级。
 def delivery_contract_preflight_findings(contract: dict[str, object]) -> list[dict[str, object]]:
-    findings: list[dict[str, object]] = []
     artifacts = contract.get("artifacts")
     if artifacts is not None and not isinstance(artifacts, list):
-        findings.append(
+        return [
             _preflight_finding(
                 "DELIVERY_CONTRACT_ARTIFACTS_INVALID",
                 "artifacts",
                 "delivery_contract.artifacts must be a list of artifact objects.",
             )
-        )
-        return findings
-    if isinstance(artifacts, list):
-        for index, item in enumerate(artifacts):
-            if not isinstance(item, dict):
-                findings.append(
-                    _preflight_finding(
-                        "DELIVERY_CONTRACT_ARTIFACT_INVALID",
-                        f"artifacts[{index}]",
-                        "delivery_contract artifact entries must be objects.",
-                    )
-                )
-                continue
-            if not _artifact_target_path(item):
-                findings.append(
-                    _preflight_finding(
-                        "DELIVERY_CONTRACT_ARTIFACT_TARGET_MISSING",
-                        f"artifacts[{index}]",
-                        "delivery_contract artifact entries must declare path or preferred_path.",
-                    )
-                )
+        ]
+    return _artifact_preflight_findings(artifacts) if isinstance(artifacts, list) else []
+
+
+# LLM: _artifact_preflight_findings checks artifact object shape item by item.
+# 函数用途: 混入脏 artifact 不会丢掉整段合同，只对具体坏项产出结构化 finding。
+def _artifact_preflight_findings(artifacts: list[object]) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    for index, item in enumerate(artifacts):
+        findings.extend(_one_artifact_preflight_findings(index, item))
     return findings
 
 
+# LLM: _one_artifact_preflight_findings validates one artifact entry.
+# 函数用途: 只读 artifacts[index] 的结构字段，输出无效对象或目标路径缺失 finding。
+def _one_artifact_preflight_findings(index: int, item: object) -> list[dict[str, object]]:
+    location = f"artifacts[{index}]"
+    if not isinstance(item, dict):
+        return [
+            _preflight_finding(
+                "DELIVERY_CONTRACT_ARTIFACT_INVALID",
+                location,
+                "delivery_contract artifact entries must be objects.",
+            )
+        ]
+    if _artifact_target_path(item):
+        return []
+    return [
+        _preflight_finding(
+            "DELIVERY_CONTRACT_ARTIFACT_TARGET_MISSING",
+            location,
+            "delivery_contract artifact entries must declare path or preferred_path.",
+        )
+    ]
+
+
+# LLM: _preflight_finding keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _preflight_finding(code: str, location: str, message: str) -> dict[str, object]:
     return {
         "code": code,
@@ -198,6 +211,8 @@ def _one_artifact_lines(artifact: dict[str, object]) -> list[str]:
     return lines
 
 
+# LLM: _artifact_target_path keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _artifact_target_path(artifact: dict[str, object]) -> str:
     return str(artifact.get("preferred_path") or artifact.get("path") or "").strip()
 

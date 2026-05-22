@@ -52,7 +52,8 @@ def test_shell_gateway_dry_run_blocks_dangerous_rm_even_if_granted(tmp_path) -> 
     )
 
     assert decision.allowed is False
-    assert decision.blockers == ["blocked_dangerous_command:rm"]
+    assert decision.blockers == ["COMMAND_DANGEROUS_EXECUTABLE_BLOCKED"]
+    assert decision.audit["command_policy_findings"][0]["evidence"]["executable"] == "rm"
 
 
 def test_shell_gateway_dry_run_blocks_shell_metacharacters(tmp_path) -> None:
@@ -65,7 +66,21 @@ def test_shell_gateway_dry_run_blocks_shell_metacharacters(tmp_path) -> None:
     )
 
     assert decision.allowed is False
-    assert "blocked_shell_metacharacter" in decision.blockers
+    assert "COMMAND_SHELL_OPERATOR_BLOCKED" in decision.blockers
+
+
+def test_shell_gateway_reuses_command_policy_for_dangerous_patterns(tmp_path) -> None:
+    decision = plan_shell_command(
+        ShellGatewayRequest(
+            command="chmod 777 file.txt",
+            workspace_root=tmp_path,
+            command_allowlist=["chmod"],
+        )
+    )
+
+    assert decision.allowed is False
+    assert decision.blockers == ["COMMAND_DANGEROUS_PATTERN_BLOCKED"]
+    assert decision.audit["command_policy_findings"][0]["evidence"]["pattern"] == "CHMOD_WORLD_WRITABLE"
 
 
 def test_shell_gateway_allows_quoted_python_statement_separators(tmp_path) -> None:
@@ -212,4 +227,4 @@ def test_shell_gateway_execute_does_not_run_blocked_command(tmp_path) -> None:
     )
 
     assert result.executed is False
-    assert result.decision.blockers == ["blocked_dangerous_command:rm"]
+    assert result.decision.blockers == ["COMMAND_DANGEROUS_EXECUTABLE_BLOCKED"]

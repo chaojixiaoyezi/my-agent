@@ -21,6 +21,8 @@ def cmd_contracts(args: argparse.Namespace) -> int:
     return _cmd_contracts_status(args)
 
 
+# LLM: add_contracts_subcommand keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def add_contracts_subcommand(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("contracts", help="查看或迁移结构化合同")
     nested = parser.add_subparsers(dest="contracts_action")
@@ -42,6 +44,8 @@ def add_contracts_subcommand(subparsers: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=cmd_contracts, contracts_action="status", root=".", limit=20, max_files=1000, json=False)
 
 
+# LLM: _cmd_contracts_status keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _cmd_contracts_status(args: argparse.Namespace) -> int:
     report = summarize_contract_status(
         Path(str(getattr(args, "root", ".") or ".")),
@@ -58,6 +62,8 @@ def _cmd_contracts_status(args: argparse.Namespace) -> int:
     return 0
 
 
+# LLM: _cmd_contracts_migrate keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _cmd_contracts_migrate(args: argparse.Namespace) -> int:
     input_path = Path(str(getattr(args, "input", "") or "")).expanduser()
     output_arg = str(getattr(args, "output", "") or "")
@@ -73,6 +79,8 @@ def _cmd_contracts_migrate(args: argparse.Namespace) -> int:
     return 0
 
 
+# LLM: _migrate_path keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _migrate_path(input_path: Path, output_path: Path | None, *, in_place: bool) -> list[dict[str, object]]:
     if input_path.is_dir():
         return [
@@ -83,12 +91,16 @@ def _migrate_path(input_path: Path, output_path: Path | None, *, in_place: bool)
     return [_migrate_file(input_path, output_path, in_place=in_place)]
 
 
+# LLM: _directory_output keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _directory_output(path: Path, root: Path, output_path: Path | None) -> Path | None:
     if output_path is None:
         return None
     return output_path / path.relative_to(root)
 
 
+# LLM: _migrate_file keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _migrate_file(input_path: Path, output_path: Path | None, *, in_place: bool) -> dict[str, object]:
     payload = _read_contract(input_path)
     migrated = migrate_contract(payload)
@@ -106,6 +118,8 @@ def _migrate_file(input_path: Path, output_path: Path | None, *, in_place: bool)
     }
 
 
+# LLM: _read_contract keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _read_contract(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))

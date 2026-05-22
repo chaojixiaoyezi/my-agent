@@ -97,7 +97,7 @@ def test_path_url_command_gate_blocks_escape_private_url_and_shell_operators(tmp
     path_escape = _path_gate({"tool": "read_file", "path": "link"}, workspace)
     private_url = _path_gate({"tool": "fetch_url", "url": "http://127.1/admin"}, workspace)
     file_url = _path_gate({"tool": "fetch_url", "url": "file:///etc/passwd"}, workspace)
-    command_operator = _path_gate({"tool": "run_command", "command": "python build.py && rm -rf dist"}, workspace)
+    command_operator = _path_gate({"tool": "run_command", "command": "python build.py && python test.py"}, workspace)
     passed = _path_gate({"tool": "run_command", "command": ["python3", "--version"], "working_dir": "."}, workspace)
 
     assert path_escape.finding_codes == ("PATH_SYMLINK_ESCAPE_BLOCKED",)
@@ -105,6 +105,26 @@ def test_path_url_command_gate_blocks_escape_private_url_and_shell_operators(tmp
     assert file_url.finding_codes == ("NETWORK_FILE_URL_BLOCKED",)
     assert command_operator.finding_codes == ("COMMAND_SHELL_OPERATOR_BLOCKED",)
     assert passed.allowed is True
+
+
+def test_path_url_command_gate_blocks_argv_dangerous_executable(tmp_path: Path):
+    decision = _path_gate({"tool": "run_command", "argv": ["sudo", "ls"]}, tmp_path)
+
+    assert decision.finding_codes == ("COMMAND_DANGEROUS_EXECUTABLE_BLOCKED",)
+    assert decision.findings[0].evidence["executable"] == "sudo"
+
+
+def test_path_url_command_gate_blocks_string_dangerous_pattern(tmp_path: Path):
+    decision = _path_gate({"tool": "run_command", "command": "chmod 777 app.py"}, tmp_path)
+
+    assert decision.finding_codes == ("COMMAND_DANGEROUS_PATTERN_BLOCKED",)
+    assert decision.findings[0].evidence["pattern"] == "CHMOD_WORLD_WRITABLE"
+
+
+def test_path_url_command_gate_allows_read_only_command(tmp_path: Path):
+    decision = _path_gate({"tool": "run_command", "command": "git status --short"}, tmp_path)
+
+    assert decision.allowed is True
 
 
 def test_approval_binding_gate_rejects_mismatched_args_hash_or_run():

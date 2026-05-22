@@ -33,12 +33,14 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     run_id = _text(getattr(params, "run_id", ""))
     if not run_id:
         return boundary
-    persisted = store.runtime_idempotency_ledger(run_id=run_id)
-    if not persisted:
-        return boundary
     merged = dict(boundary) if isinstance(boundary, dict) else {}
-    merged["idempotency_ledger"] = _merged_idempotency_rows(merged.get("idempotency_ledger"), persisted)
-    return merged
+    persisted = store.runtime_idempotency_ledger(run_id=run_id)
+    if persisted:
+        merged["idempotency_ledger"] = _merged_idempotency_rows(merged.get("idempotency_ledger"), persisted)
+    rate_rows = _runtime_tool_rate_limit_rows(store, run_id)
+    if rate_rows:
+        merged["tool_rate_limit_records"] = _merged_rate_limit_rows(merged.get("tool_rate_limit_records"), rate_rows)
+    return merged or boundary
 
 
 # LLM: runtime_gate_ledger_record_from_archive converts one archive row into a durable ledger row.
@@ -146,6 +148,78 @@ def _merged_idempotency_rows(existing: object, persisted: tuple[dict[str, str], 
             "status": _text(item.get("status")),
             "result_ref": _text(item.get("result_ref")),
         })
+    return tuple(rows)
+
+
+# LLM: _runtime_tool_rate_limit_rows projects durable tool attempts into rate-limit gate records.
+# 函数用途: 用运行账本里的 tool/args_hash/status/created_at 构造限流和熔断门的结构化历史。
+def _runtime_tool_rate_limit_rows(store: object, run_id: str) -> tuple[dict[str, object], ...]:
+    if not hasattr(store, "list_runtime_gate_ledger"):
+        return ()
+    records = store.list_runtime_gate_ledger(run_id=run_id, limit=500)
+    by_identity: dict[tuple[str, str], dict[str, object]] = {}
+    for record in records:
+        identity = _rate_limit_identity(record)
+        if identity is None:
+            continue
+        row = by_identity.setdefault(identity, _new_rate_limit_row(identity))
+        _apply_rate_limit_record(row, record)
+    return tuple(by_identity.values())
+
+
+# LLM: _rate_limit_identity extracts the durable tool+args_hash key from one ledger row.
+# 函数用途: 缺少 tool 或 args_hash 的记录不参与限流事实，避免写入不可匹配身份。
+def _rate_limit_identity(record: object) -> tuple[str, str] | None:
+    tool = _text(getattr(record, "tool", ""))
+    args_hash = _text(getattr(record, "args_hash", ""))
+    return (tool, args_hash) if tool and args_hash else None
+
+
+# LLM: _new_rate_limit_row builds the initial projected rate-limit row.
+# 函数用途: 统一 tool_rate_limit_records 的字段形状，供 gate 直接读取。
+def _new_rate_limit_row(identity: tuple[str, str]) -> dict[str, object]:
+    tool, args_hash = identity
+    return {
+        "tool_name": tool,
+        "args_hash": args_hash,
+        "attempt_timestamps": [],
+        "consecutive_failures": 0,
+        "last_failure_at": 0.0,
+        "last_success_at": 0.0,
+        "total_failures": 0,
+    }
+
+
+# LLM: _apply_rate_limit_record folds one runtime ledger row into a projected rate-limit row.
+# 函数用途: 根据 status 更新尝试时间、连续失败、成功时间，不解析工具输出文本。
+def _apply_rate_limit_record(row: dict[str, object], record: object) -> None:
+    timestamp = float(getattr(record, "created_at", 0.0) or getattr(record, "updated_at", 0.0) or 0.0)
+    if timestamp > 0:
+        row["attempt_timestamps"].append(timestamp)
+    status = _text(getattr(record, "status", "")).lower()
+    if status == "failed":
+        row["consecutive_failures"] = int(row["consecutive_failures"]) + 1
+        row["total_failures"] = int(row["total_failures"]) + 1
+        row["last_failure_at"] = timestamp
+    if status == "completed":
+        row["consecutive_failures"] = 0
+        row["last_success_at"] = timestamp
+
+
+# LLM: _merged_rate_limit_rows keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
+def _merged_rate_limit_rows(existing: object, persisted: tuple[dict[str, object], ...]) -> tuple[dict[str, object], ...]:
+    rows: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in [*(existing if isinstance(existing, (list, tuple)) else ()), *persisted]:
+        if not isinstance(item, Mapping):
+            continue
+        tool = _text(item.get("tool_name") or item.get("tool"))
+        args_hash = _text(item.get("args_hash"))
+        if not tool or not args_hash or (tool, args_hash) in seen:
+            continue
+        seen.add((tool, args_hash))
+        rows.append(dict(item))
     return tuple(rows)
 
 

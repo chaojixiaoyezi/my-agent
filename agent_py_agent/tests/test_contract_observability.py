@@ -45,10 +45,12 @@ def test_contract_trace_is_bounded() -> None:
 
     finding = with_contract_trace(
         {"code": "CHECK_FAILED"},
-        trace_entry("one"),
-        trace_entry("two"),
-        trace_entry("three"),
-        trace_entry("four"),
+        (
+            trace_entry("one"),
+            trace_entry("two"),
+            trace_entry("three"),
+            trace_entry("four"),
+        ),
     )
 
     assert finding["trace"] == [

@@ -5,27 +5,14 @@ from __future__ import annotations
 
 """Dry-run shell gateway for scoped subagent capability grants."""
 
-import shlex
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-_BLOCKED_SHELL_OPERATOR_TOKENS = frozenset({"|", "&", ";", ">", "<", "$"})
-_BLOCKED_COMMANDS = frozenset({
-    "rm",
-    "rmdir",
-    "sudo",
-    "su",
-    "dd",
-    "mkfs",
-    "mount",
-    "umount",
-    "shutdown",
-    "reboot",
-    "kill",
-    "pkill",
-    "chmod",
-    "chown",
-})
+from agent_py_agent.agent.contracts.gates.command_policy import (
+    CommandPolicyDecision,
+    command_name,
+    evaluate_command_policy,
+)
 
 
 # LLM: ShellGatewayRequest is the stable bundle for all future shell dry-run/execute checks.
@@ -64,12 +51,13 @@ class ShellGatewayDecision:
 # LLM: plan_shell_command validates a command under a scoped grant but intentionally does not run it.
 # 函数用途: 对 shell 请求做 dry-run 判断，返回允许或拒绝原因；当前阶段不创建进程、不写文件。
 def plan_shell_command(request: ShellGatewayRequest) -> ShellGatewayDecision:
-    argv, parse_error = _parse_command(request.command)
+    command_policy = evaluate_command_policy(request.command)
+    argv = list(command_policy.argv)
     workspace = Path(request.workspace_root).expanduser().resolve()
     cwd, cwd_error = _resolve_cwd(request.cwd, workspace)
     roots = _resolve_allowed_roots(workspace, request.allowed_roots)
-    blockers = _collect_blockers(_BlockerCheck(request, argv, parse_error, cwd, cwd_error, roots))
-    executable = _command_name(argv[0]) if argv else ""
+    blockers = _collect_blockers(_BlockerCheck(request, argv, command_policy, cwd, cwd_error, roots))
+    executable = command_name(argv[0]) if argv else ""
     allowed = not blockers
     budget = _normalize_output_budget(request.output_budget)
     return ShellGatewayDecision(
@@ -89,6 +77,7 @@ def plan_shell_command(request: ShellGatewayRequest) -> ShellGatewayDecision:
             "allowed_roots": [str(root) for root in roots],
             "network_allowlist": list(request.network_allowlist),
             "dry_run": bool(request.dry_run),
+            "command_policy_findings": [finding.to_dict() for finding in command_policy.findings],
         },
     )
 
@@ -105,59 +94,37 @@ def decision_to_dict(decision: ShellGatewayDecision) -> dict[str, object]:
 class _BlockerCheck:
     request: ShellGatewayRequest
     argv: list[str]
-    parse_error: str
+    command_policy: CommandPolicyDecision
     cwd: Path
     cwd_error: str
     roots: list[Path]
 
 
 # LLM: _collect_blockers centralizes dry-run policy so execute v1 can reuse the same gate.
-# 函数用途: 汇总命令解析、危险字符、危险命令、白名单、cwd 和网络范围的阻断原因。
+# 函数用途: 汇总共享 command policy、白名单、cwd 和网络范围的阻断原因。
 def _collect_blockers(check: _BlockerCheck) -> list[str]:
     blockers: list[str] = []
-    if check.parse_error:
-        blockers.append(check.parse_error)
-        return blockers
     blockers.extend(_command_policy_blockers(check.request, check.argv))
+    if check.command_policy.findings:
+        return [finding.code for finding in check.command_policy.findings]
     blockers.extend(_cwd_policy_blockers(check.cwd, check.cwd_error, check.roots))
     blockers.extend(_network_policy_blockers(check.request, check.argv))
     return blockers
 
 
-# LLM: _command_policy_blockers blocks shell syntax and requires explicit parent allowlist grants.
-# 函数用途: 校验命令字符串安全、危险命令和授权白名单。
+# LLM: _command_policy_blockers requires explicit parent allowlist grants after shared policy passes.
+# 函数用途: 共享 command policy 先 deny；通过后再校验父级授权白名单。
 def _command_policy_blockers(request: ShellGatewayRequest, argv: list[str]) -> list[str]:
     if not argv:
-        return ["empty_command"]
-    if isinstance(request.command, str) and _has_shell_operator_token(request.command):
-        return ["blocked_shell_metacharacter"]
-    executable = _command_name(argv[0])
-    if executable in _BLOCKED_COMMANDS:
-        return [f"blocked_dangerous_command:{executable}"]
-    allowed = {_command_name(item) for item in request.command_allowlist if str(item).strip()}
+        return ["COMMAND_EMPTY"]
+    executable = command_name(argv[0])
+    allowed = {command_name(item) for item in request.command_allowlist if str(item).strip()}
     allowed.update(str(item).strip() for item in request.command_allowlist if str(item).strip())
     if not allowed:
         return ["missing_command_allowlist"]
     if executable not in allowed and str(argv[0]) not in allowed:
         return [f"command_not_granted:{executable}"]
     return []
-
-
-# LLM: _has_shell_operator_token blocks unquoted shell separators without rejecting Python code strings.
-# 函数用途: 用 shlex punctuation tokens 识别未引用的 shell 操作符；`python -c "a;b"` 这种引号内分号仍允许。
-def _has_shell_operator_token(raw: str) -> bool:
-    try:
-        lexer = shlex.shlex(str(raw or ""), posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        tokens = list(lexer)
-    except ValueError:
-        return True
-    for token in tokens:
-        if token in _BLOCKED_SHELL_OPERATOR_TOKENS:
-            return True
-        if token and set(token).issubset(_BLOCKED_SHELL_OPERATOR_TOKENS):
-            return True
-    return False
 
 
 # LLM: _cwd_policy_blockers keeps subprocess cwd inside workspace-local allowed roots.
@@ -175,7 +142,7 @@ def _cwd_policy_blockers(cwd: Path, cwd_error: str, roots: list[Path]) -> list[s
 # LLM: _network_policy_blockers requires explicit network scope for curl-like commands.
 # 函数用途: 对 curl 等网络命令检查 URL 是否落在授权网络范围；无 URL 的版本查询不阻断。
 def _network_policy_blockers(request: ShellGatewayRequest, argv: list[str]) -> list[str]:
-    if not argv or _command_name(argv[0]) not in {"curl"}:
+    if not argv or command_name(argv[0]) not in {"curl"}:
         return []
     urls = [item for item in argv[1:] if item.startswith(("http://", "https://"))]
     if not urls:
@@ -188,20 +155,6 @@ def _network_policy_blockers(request: ShellGatewayRequest, argv: list[str]) -> l
         if not any(normalized.startswith(prefix) for prefix in allowed):
             return [f"network_scope_denied:{url}"]
     return []
-
-
-# LLM: _parse_command accepts string or argv list but never invokes a shell.
-# 函数用途: 解析 shell 网关请求里的命令，失败时返回阻断原因。
-def _parse_command(command: str | list[str]) -> tuple[list[str], str]:
-    if isinstance(command, list):
-        argv = [str(item) for item in command if str(item).strip()]
-        return argv, "" if argv else "empty_command"
-    try:
-        argv = shlex.split(str(command))
-    except ValueError as exc:
-        return [], f"command_parse_error:{exc}"
-    return argv, "" if argv else "empty_command"
-
 
 # LLM: _resolve_cwd resolves cwd relative to workspace and blocks escape at the planning layer.
 # 函数用途: 把 cwd 解析成绝对路径；未指定时使用 workspace 根目录。
@@ -246,12 +199,6 @@ def _positive_int(value: object, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
-
-
-# LLM: _command_name compares basename only so absolute executable paths can be granted intentionally.
-# 函数用途: 提取命令名用于危险命令和 allowlist 判断。
-def _command_name(value: str) -> str:
-    return Path(value).name.lower()
 
 
 # LLM: _is_relative_to preserves Python compatibility and avoids exception-heavy policy branches.
