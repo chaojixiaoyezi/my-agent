@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .contract_validation_recovery import recovery_for_findings
+
 TERMINAL_APPROVAL_STATUSES = {"APPROVED", "REJECTED", "EXPIRED", "CANCELLED"}
 
 
@@ -16,6 +18,7 @@ class OfflineConcurrencyValidation:
     ok: bool
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, str], ...]
+    recovery: dict[str, object] | None = None
 
 
 # LLM: validate_concurrency_events checks run ownership and side-effect idempotency without runtime locks.
@@ -29,6 +32,7 @@ def validate_concurrency_events(events: tuple[dict[str, Any], ...]) -> OfflineCo
         ok=not findings,
         error_codes=tuple(dict.fromkeys(item["code"] for item in findings)),
         findings=tuple(findings),
+        recovery=recovery_for_findings("offline_concurrency", findings),
     )
 
 

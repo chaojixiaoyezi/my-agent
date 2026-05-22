@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .contract_validation_recovery import recovery_for_findings
+
 
 # LLM: OfflinePlanValidation reports plan/contract mismatches.
 # 类用途: 返回计划合同是否通过、错误码和结构化 finding。
@@ -14,6 +16,7 @@ class OfflinePlanValidation:
     ok: bool
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, object], ...]
+    recovery: dict[str, object] | None = None
 
 
 # LLM: validate_plan_contract checks explicit plan fields against explicit contract fields.
@@ -34,6 +37,7 @@ def validate_plan_contract(
         ok=not findings,
         error_codes=tuple(dict.fromkeys(_text(item.get("code")) for item in findings)),
         findings=tuple(findings),
+        recovery=recovery_for_findings("offline_plan", findings),
     )
 
 

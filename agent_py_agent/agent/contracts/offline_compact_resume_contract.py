@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .contract_validation_recovery import recovery_for_findings
+
 WAITING_STATUSES = {"WAITING_FOR_TOOL", "WAITING_FOR_USER", "WAITING_FOR_CHILD", "WAITING_HUMAN"}
 SUMMARY_REQUIRED_FIELDS = (
     "current_status",
@@ -23,6 +25,7 @@ class OfflineCompactResumeValidation:
     ok: bool
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, object], ...]
+    recovery: dict[str, object] | None = None
 
 
 # LLM: validate_compact_resume_bundle checks one structured compact bundle and resume event list.
@@ -41,6 +44,7 @@ def validate_compact_resume_bundle(bundle: dict[str, Any]) -> OfflineCompactResu
         ok=not findings,
         error_codes=tuple(dict.fromkeys(_text(item.get("code")) for item in findings)),
         findings=tuple(findings),
+        recovery=recovery_for_findings("offline_compact_resume", findings),
     )
 
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .contract_validation_recovery import recovery_for_findings
+
 LONG_TASK_STATUSES = {"RUNNING", "WAITING", "WAITING_FOR_TOOL", "WAITING_FOR_CHILD", "REPAIRING"}
 MESSAGE_TO_USER_DIRECTIONS = {"TO_USER", "USER"}
 
@@ -30,6 +32,7 @@ class RuntimeCardValidation:
     ok: bool
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, str], ...]
+    recovery: dict[str, object] | None = None
 
 
 # LLM: validate_runtime_card_set is the public runtime-card verifier used by tests and future runtime hooks.
@@ -44,6 +47,7 @@ def validate_runtime_card_set(cards: list[RuntimeCard]) -> RuntimeCardValidation
         ok=not findings,
         error_codes=tuple(dict.fromkeys(item["code"] for item in findings)),
         findings=tuple(findings),
+        recovery=recovery_for_findings("runtime_cards", findings),
     )
 
 

@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .contract_validation_recovery import recovery_for_findings
+
 
 # LLM: OfflineContractValidation is a generic machine-readable validation result.
 # 类用途: 返回合同是否通过、错误码、逐项 finding 和可选忽略事件 ID。
@@ -15,6 +17,7 @@ class OfflineContractValidation:
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, object], ...]
     ignored_event_ids: tuple[str, ...] = ()
+    recovery: dict[str, object] | None = None
 
 
 # LLM: validation_report builds a stable validation object from findings.
@@ -29,6 +32,7 @@ def validation_report(
         error_codes=tuple(dict.fromkeys(text(item.get("code")) for item in findings)),
         findings=tuple(findings),
         ignored_event_ids=ignored_event_ids,
+        recovery=recovery_for_findings("offline_contract", findings),
     )
 
 

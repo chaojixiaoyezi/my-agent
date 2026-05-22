@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .contract_validation_recovery import recovery_for_findings
+
 
 # LLM: OfflineToolGuardrailValidation reports tool-loop and fake-tool findings.
 # 类用途: 返回工具 guardrail 离线合同是否通过、错误码和逐项结构化 finding。
@@ -14,6 +16,7 @@ class OfflineToolGuardrailValidation:
     ok: bool
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, object], ...]
+    recovery: dict[str, object] | None = None
 
 
 # LLM: validate_tool_guardrail_events checks structured tool_result events only.
@@ -32,6 +35,7 @@ def validate_tool_guardrail_events(
         ok=not findings,
         error_codes=tuple(dict.fromkeys(_text(item.get("code")) for item in findings)),
         findings=tuple(findings),
+        recovery=recovery_for_findings("offline_tool_guardrail", findings),
     )
 
 

@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .contract_validation_recovery import recovery_for_findings
+
 CURRENT_VERSION = 2
 DEFAULT_KNOWN_VERIFIERS = ("artifact_acceptance", "tool_trace", "approval_gate")
 IMPOSSIBLE_MIN_SIZE = 100_000_000_000
@@ -18,6 +20,7 @@ class ContractDoctorReport:
     ok: bool
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, object], ...]
+    recovery: dict[str, object] | None = None
 
 
 # LLM: lint_contract rejects malformed or conflicting structured contracts.
@@ -38,6 +41,7 @@ def lint_contract(
         ok=not findings,
         error_codes=tuple(dict.fromkeys(_text(item.get("code")) for item in findings)),
         findings=tuple(findings),
+        recovery=recovery_for_findings("contract_doctor", findings),
     )
 
 

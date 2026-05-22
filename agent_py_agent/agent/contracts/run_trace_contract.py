@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .contract_validation_recovery import recovery_for_findings
 from .state_machine_transitions import transition_contract
 
 
@@ -16,6 +17,7 @@ class RunTraceValidation:
     ok: bool
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, str], ...]
+    recovery: dict[str, object] | None = None
 
 
 # LLM: validate_run_trace_events checks state/tool events without using final prose summaries.
@@ -32,6 +34,7 @@ def validate_run_trace_events(events: tuple[dict[str, Any], ...]) -> RunTraceVal
         ok=not findings,
         error_codes=tuple(dict.fromkeys(item["code"] for item in findings)),
         findings=tuple(findings),
+        recovery=recovery_for_findings("run_trace", findings),
     )
 
 

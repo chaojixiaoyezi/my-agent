@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .contract_validation_recovery import recovery_for_findings
+
 SUCCESS_STATUSES = {"SUCCEEDED", "VERIFIED", "DONE"}
 ACTIVE_PARENT_CLOSEOUT_STATUSES = {"VERIFYING", "SUCCEEDED", "VERIFIED", "DONE"}
 
@@ -17,6 +19,7 @@ class OfflineSubagentValidation:
     ok: bool
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, object], ...]
+    recovery: dict[str, object] | None = None
 
 
 # LLM: validate_subagent_contract checks one parent task and its child run records.
@@ -34,6 +37,7 @@ def validate_subagent_contract(contract: dict[str, Any]) -> OfflineSubagentValid
         ok=not findings,
         error_codes=tuple(dict.fromkeys(_text(item.get("code")) for item in findings)),
         findings=tuple(findings),
+        recovery=recovery_for_findings("offline_subagent", findings),
     )
 
 

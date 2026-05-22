@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .contract_validation_recovery import recovery_for_findings
+
 
 # LLM: RuntimeConfigValidation is the machine-readable doctor result for runtime settings.
 # 类用途: 返回配置是否通过、错误码和逐项 finding，方便 CLI/测试直接消费。
@@ -15,6 +17,7 @@ class RuntimeConfigValidation:
     ok: bool
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, str], ...]
+    recovery: dict[str, object] | None = None
 
 
 # LLM: validate_runtime_config checks required fields and dangerous switches without reading prompt prose.
@@ -30,6 +33,7 @@ def validate_runtime_config(config: dict[str, Any]) -> RuntimeConfigValidation:
         ok=not findings,
         error_codes=tuple(dict.fromkeys(item["code"] for item in findings)),
         findings=tuple(findings),
+        recovery=recovery_for_findings("runtime_config", findings),
     )
 
 

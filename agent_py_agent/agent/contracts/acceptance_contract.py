@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .artifact_acceptance import ArtifactAcceptanceReport
+from .contract_validation_recovery import recovery_for_findings
 from .state_machine import RunStateFacts, can_closeout
 
 
@@ -38,11 +39,16 @@ class AcceptanceResult:
     ok: bool
     status: str
     findings: list[dict[str, Any]] = field(default_factory=list)
+    recovery: dict[str, object] | None = None
 
     # LLM: to_dict keeps the acceptance verdict stable for JSON reports.
     # 函数用途: 转成普通 dict，避免调用方依赖 dataclass 内部结构。
     def to_dict(self) -> dict[str, Any]:
-        return {"ok": self.ok, "status": self.status, "findings": list(self.findings)}
+        payload = {"ok": self.ok, "status": self.status, "findings": list(self.findings)}
+        recovery = self.recovery or recovery_for_findings("acceptance_contract", _failed_findings(self.findings))
+        if recovery is not None:
+            payload["recovery"] = recovery
+        return payload
 
 
 # LLM: evaluate_acceptance_contract is the single machine gate for task completion.
@@ -55,7 +61,12 @@ def evaluate_acceptance_contract(request: AcceptanceInput) -> AcceptanceResult:
         _criteria_finding(request.contract),
     ]
     ok = all(item["ok"] for item in findings if item["severity"] == "hard")
-    return AcceptanceResult(ok=ok, status="accepted" if ok else "rejected", findings=findings)
+    return AcceptanceResult(
+        ok=ok,
+        status="accepted" if ok else "rejected",
+        findings=findings,
+        recovery=recovery_for_findings("acceptance_contract", _failed_findings(findings)),
+    )
 
 
 # LLM: _state_finding requires DONE/VERIFIED before final completion.
@@ -112,6 +123,10 @@ def _criteria_finding(contract: AcceptanceContract) -> dict[str, Any]:
         "severity": "soft",
         "message": "acceptance criteria recorded" if ok else "acceptance criteria not recorded",
     }
+
+
+def _failed_findings(findings: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
+    return tuple(item for item in findings if item.get("ok") is not True and item.get("severity") == "hard")
 
 
 __all__ = [

@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .contract_validation_recovery import recovery_for_findings
+
 
 # LLM: OfflineOutputFormatValidation reports output-format contract findings.
 # 类用途: 返回输出格式离线合同是否通过、错误码和逐项结构化 finding。
@@ -15,6 +17,7 @@ class OfflineOutputFormatValidation:
     ok: bool
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, object], ...]
+    recovery: dict[str, object] | None = None
 
 
 # LLM: validate_output_format_contract checks output records without reading task prose.
@@ -31,6 +34,7 @@ def validate_output_format_contract(contract: dict[str, Any]) -> OfflineOutputFo
         ok=not findings,
         error_codes=tuple(dict.fromkeys(_text(item.get("code")) for item in findings)),
         findings=tuple(findings),
+        recovery=recovery_for_findings("offline_output_format", findings),
     )
 
 

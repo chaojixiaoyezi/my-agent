@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .contract_validation_recovery import recovery_for_findings
+
 
 # LLM: OfflineVerifierIntegrityValidation reports verifier-integrity findings.
 # 类用途: 返回验收器完整性是否通过、错误码和结构化 finding。
@@ -14,6 +16,7 @@ class OfflineVerifierIntegrityValidation:
     ok: bool
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, object], ...]
+    recovery: dict[str, object] | None = None
 
 
 # LLM: validate_verifier_integrity checks structured verifier facts and evidence refs.
@@ -27,6 +30,7 @@ def validate_verifier_integrity(facts: dict[str, Any]) -> OfflineVerifierIntegri
         ok=not findings,
         error_codes=tuple(dict.fromkeys(_text(item.get("code")) for item in findings)),
         findings=tuple(findings),
+        recovery=recovery_for_findings("offline_verifier_integrity", findings),
     )
 
 

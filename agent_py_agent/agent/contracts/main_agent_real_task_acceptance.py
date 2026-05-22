@@ -10,6 +10,7 @@ from pathlib import Path
 from ..tooling.file_write_session_inspection import open_file_write_sessions
 from .artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
 from .artifact_candidate_paths import report_with_candidate_paths
+from .contract_validation_recovery import recovery_for_findings
 from .staged_checkpoint_acceptance import artifact_path as staged_artifact_path
 from .staged_checkpoint_acceptance import staged_checkpoint_findings
 
@@ -54,17 +55,25 @@ class RealTaskAcceptanceReport:
     report_ref: str
     artifacts: list[RealTaskArtifactAcceptance] = field(default_factory=list)
     runtime_findings: list[dict[str, object]] = field(default_factory=list)
+    recovery: dict[str, object] | None = None
 
     # LLM: to_dict emits a stable machine report for the execution runner.
     # 函数用途: 转成 JSON，便于 CLI 和未来 Card Runtime 读取验收结果。
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload = {
             "ok": self.ok,
             "summary": dict(self.summary),
             "report_ref": self.report_ref,
             "artifacts": [artifact.to_dict() for artifact in self.artifacts],
             "runtime_findings": [dict(finding) for finding in self.runtime_findings],
         }
+        recovery = self.recovery or recovery_for_findings(
+            "real_task_acceptance",
+            _acceptance_recovery_findings(self.artifacts, self.runtime_findings),
+        )
+        if recovery is not None:
+            payload["recovery"] = recovery
+        return payload
 
 
 # LLM: validate_real_task_artifacts is the public post-run acceptance entrypoint.
@@ -86,6 +95,7 @@ def validate_real_task_artifacts(request: RealTaskAcceptanceRequest) -> RealTask
         report_ref=str(request.report_path),
         artifacts=artifacts,
         runtime_findings=runtime_findings,
+        recovery=recovery_for_findings("real_task_acceptance", _acceptance_recovery_findings(artifacts, runtime_findings)),
     )
     _write_report(request.report_path, report.to_dict())
     return report
@@ -131,6 +141,24 @@ def _validate_artifact_item(
         ok=bool(report.get("ok")),
         report=report,
     )
+
+
+def _acceptance_recovery_findings(
+    artifacts: list[RealTaskArtifactAcceptance],
+    runtime_findings: list[dict[str, object]],
+) -> tuple[dict[str, object], ...]:
+    findings = [dict(item) for item in runtime_findings]
+    findings.extend(
+        {
+            "code": "ARTIFACT_ACCEPTANCE_FAILED",
+            "artifact_id": item.artifact_id,
+            "path": item.path,
+            "validator": item.validator,
+        }
+        for item in artifacts
+        if not item.ok
+    )
+    return tuple(findings)
 
 
 # LLM: _artifact_path resolves preferred_path inside the task workspace.

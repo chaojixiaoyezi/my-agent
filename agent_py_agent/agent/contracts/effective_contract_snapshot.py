@@ -8,6 +8,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from .contract_validation_recovery import recovery_for_findings
+
 
 # LLM: EffectiveContractSnapshot stores a canonical effective contract and hash.
 # 类用途: 返回生效合同、稳定 hash、建议持久化 ref 和逐项 finding。
@@ -20,6 +22,7 @@ class EffectiveContractSnapshot:
     effective_contract_ref: str
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, object], ...]
+    recovery: dict[str, object] | None = None
 
 
 # LLM: EffectiveContractValidation reports snapshot/runlog consistency findings.
@@ -29,6 +32,7 @@ class EffectiveContractValidation:
     ok: bool
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, object], ...]
+    recovery: dict[str, object] | None = None
 
 
 # LLM: build_effective_contract_snapshot merges explicit contract layers into one canonical contract.
@@ -54,6 +58,7 @@ def build_effective_contract_snapshot(
         effective_contract_ref=f"runs/{run_id}/effective_contract.json",
         error_codes=(),
         findings=tuple(findings),
+        recovery=recovery_for_findings("effective_contract_snapshot", findings),
     )
 
 
@@ -154,10 +159,12 @@ def _contract_hash(contract: dict[str, Any]) -> str:
 # LLM: _validation creates a compact validation report from error codes.
 # 函数用途: 统一生成 ok、error_codes 和 finding 列表。
 def _validation(codes: tuple[str, ...]) -> EffectiveContractValidation:
+    findings = tuple({"code": code} for code in codes)
     return EffectiveContractValidation(
         ok=not codes,
         error_codes=codes,
-        findings=tuple({"code": code} for code in codes),
+        findings=findings,
+        recovery=recovery_for_findings("effective_contract_snapshot", findings),
     )
 
 

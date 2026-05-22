@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .contract_validation_recovery import recovery_for_findings
+
 SECRET_FIELD_NAMES = {
     "api_key",
     "authorization",
@@ -24,6 +26,7 @@ class OfflineMemorySkillValidation:
     ok: bool
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, object], ...]
+    recovery: dict[str, object] | None = None
 
 
 # LLM: validate_memory_skill_contract checks structured memory and skill records in one fixture.
@@ -46,6 +49,7 @@ def validate_memory_skill_contract(contract: dict[str, Any]) -> OfflineMemorySki
         ok=not findings,
         error_codes=tuple(dict.fromkeys(_text(item.get("code")) for item in findings)),
         findings=tuple(findings),
+        recovery=recovery_for_findings("offline_memory_skill", findings),
     )
 
 

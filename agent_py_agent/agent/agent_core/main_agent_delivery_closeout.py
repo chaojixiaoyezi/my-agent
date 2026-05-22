@@ -35,6 +35,7 @@ from .main_agent_delivery_closeout_progress import (
     _should_block_on_no_progress,
 )
 from .main_agent_delivery_closeout_quality import delivery_quality_decision
+from .main_agent_delivery_tool_failure_recovery import attach_tool_failure_recovery_actions
 from .tool_local_progress_guard import reset_local_progress_guard
 
 
@@ -145,7 +146,17 @@ def _delivery_report(
             params=closeout.params,
         )
     )
-    return _enrich_delivery_progress(report, _existing_report(workspace_root), workspace_root, contract=contract)
+    enriched = _enrich_delivery_progress(
+        report,
+        _existing_report(workspace_root),
+        workspace_root,
+        contract=contract,
+    )
+    return attach_tool_failure_recovery_actions(
+        enriched,
+        list(getattr(closeout.params, "archive_tool_calls", []) or []),
+        workspace_root,
+    )
 
 
 # LLM: _failed_delivery_response decides whether to repair in-place or terminate no-progress loops.

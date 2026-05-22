@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..action_protocol_core import ArtifactRef
+from .contract_validation_recovery import recovery_for_findings
 
 
 # LLM: ArtifactAcceptanceRequest bundles one artifact validation request.
@@ -49,17 +50,22 @@ class ArtifactAcceptanceReport:
     artifact_ref: str
     artifact_kind: str = "generic"
     findings: list[ArtifactFinding] = field(default_factory=list)
+    recovery: dict[str, object] | None = None
 
     # LLM: to_dict keeps acceptance reports stable across CLI, docs, and future QA agents.
     # 函数用途: 输出机器可读报告，方便 repair worker 或主代理按 findings 修复。
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload = {
             "ok": self.ok,
             "artifact_ref": self.artifact_ref,
             "artifact_ref_payload": artifact_ref_payload(self.artifact_ref, self.artifact_kind).to_dict(),
             "artifact_kind": self.artifact_kind,
             "findings": [item.to_dict() for item in self.findings],
         }
+        recovery = self.recovery or recovery_for_findings("artifact_acceptance", payload["findings"])
+        if recovery is not None:
+            payload["recovery"] = recovery
+        return payload
 
 
 # LLM: artifact_ref_payload turns a validated file into the shared ArtifactRef contract.

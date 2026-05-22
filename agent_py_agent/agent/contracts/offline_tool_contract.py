@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .contract_validation_recovery import recovery_for_findings
+
 SECRET_FIELD_NAMES = {"api_key", "authorization", "cookie", "password", "secret", "token"}
 REDACTED_VALUES = {"[redacted]", "<redacted>", "***", "redacted"}
 
@@ -17,6 +19,7 @@ class OfflineToolValidation:
     ok: bool
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, object], ...]
+    recovery: dict[str, object] | None = None
 
 
 # LLM: validate_tool_events checks tool_result rows from fake tools, real traces, or replay fixtures.
@@ -33,6 +36,7 @@ def validate_tool_events(
         ok=not findings,
         error_codes=tuple(dict.fromkeys(_text(item.get("code")) for item in findings)),
         findings=tuple(findings),
+        recovery=recovery_for_findings("offline_tool", findings),
     )
 
 

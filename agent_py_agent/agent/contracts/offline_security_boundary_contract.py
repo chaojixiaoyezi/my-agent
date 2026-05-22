@@ -9,6 +9,8 @@ from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
+from .contract_validation_recovery import recovery_for_findings
+
 SECRET_FIELD_NAMES = {"api_key", "authorization", "cookie", "password", "secret", "token"}
 REDACTED_VALUES = {"[redacted]", "<redacted>", "***", "redacted"}
 PRIVATE_HOSTS = {"localhost"}
@@ -21,6 +23,7 @@ class OfflineSecurityBoundaryValidation:
     ok: bool
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, object], ...]
+    recovery: dict[str, object] | None = None
 
 
 # LLM: validate_security_boundary_events checks structured security events without network access.
@@ -40,6 +43,7 @@ def validate_security_boundary_events(
         ok=not findings,
         error_codes=tuple(dict.fromkeys(_text(item.get("code")) for item in findings)),
         findings=tuple(findings),
+        recovery=recovery_for_findings("offline_security_boundary", findings),
     )
 
 

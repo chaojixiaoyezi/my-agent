@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .contract_validation_recovery import recovery_for_findings
+
 
 # LLM: EvidenceSourceRef describes one source that can be re-read or audited.
 # 类用途: 保存 API、网页、文件或 artifact 来源的稳定 id、地址和抓取时间。
@@ -88,17 +90,22 @@ class EvidenceContractReport:
     findings: list[dict[str, Any]] = field(default_factory=list)
     source_refs: list[EvidenceSourceRef] = field(default_factory=list)
     claims: list[EvidenceClaim] = field(default_factory=list)
+    recovery: dict[str, object] | None = None
 
     # LLM: to_dict gives CLI/tests a stable machine-readable payload.
     # 函数用途: 输出摘要、findings、source_refs 和 claims，方便定位哪个字段缺证据。
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "ok": self.ok,
             "summary": dict(self.summary),
             "findings": list(self.findings),
             "source_refs": [item.to_dict() for item in self.source_refs],
             "claims": [item.to_dict() for item in self.claims],
         }
+        recovery = self.recovery or recovery_for_findings("evidence_contract", self.findings)
+        if recovery is not None:
+            payload["recovery"] = recovery
+        return payload
 
 
 # LLM: _ClaimValidationContext holds evidence claim validation policy in one object.
@@ -126,6 +133,7 @@ def evaluate_evidence_contract(request: EvidenceContractRequest) -> EvidenceCont
         findings=findings,
         source_refs=list(request.source_refs),
         claims=list(request.claims),
+        recovery=recovery_for_findings("evidence_contract", findings),
     )
 
 
