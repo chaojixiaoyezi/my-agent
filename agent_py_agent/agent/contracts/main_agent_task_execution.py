@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
+from .main_agent_auto_resume import auto_resume_decision, record_auto_resume_attempt
 from .main_agent_task_execution_files import (
     append_event,
     case_paths,
@@ -53,8 +54,6 @@ from .main_agent_task_suite import (
     MainAgentTaskSuiteRequest,
     plan_main_agent_task_suite,
 )
-
-_AUTO_RECOVERY_ATTEMPTS = 3
 
 
 # LLM: run_main_agent_task_execution is the public controlled runner entrypoint.
@@ -249,13 +248,7 @@ def _timeout_case_result(
 # LLM: _should_auto_resume retries bounded recovery packets until a case passes or the attempt budget is spent.
 # 函数用途: 根据失败状态、recovery packet 和 attempt-N 结构化路径决定是否继续自动续跑。
 def _should_auto_resume(bundle: CaseResultBundle) -> bool:
-    if _AUTO_RECOVERY_ATTEMPTS <= 0:
-        return False
-    return bool(
-        bundle.status == "FAILED"
-        and bundle.recovery_packet_ref
-        and _recovery_attempt_index(bundle.recovery_packet_ref) < _AUTO_RECOVERY_ATTEMPTS
-    )
+    return auto_resume_decision(bundle).allowed
 
 
 # LLM: _auto_resume_case re-enters the normal execution path with a structured recovery packet instead of ad hoc retry logic.
@@ -263,35 +256,20 @@ def _should_auto_resume(bundle: CaseResultBundle) -> bool:
 def _auto_resume_case(bundle: CaseResultBundle) -> MainAgentTaskExecutionCaseResult:
     runtime = bundle.runtime
     packet_path = (runtime.workspace / bundle.recovery_packet_ref).resolve()
+    ledger = record_auto_resume_attempt(bundle)
     append_event(
         runtime.paths["events"],
         "case_auto_resume_started",
-        {"case_id": runtime.case.case_id, "recovery_packet_ref": bundle.recovery_packet_ref},
+        {
+            "case_id": runtime.case.case_id,
+            "recovery_packet_ref": bundle.recovery_packet_ref,
+            "attempts": ledger.get("attempts"),
+            "max_attempts": ledger.get("max_attempts"),
+        },
     )
     return _prepare_or_execute(
         runtime.case,
-        replace(runtime.request, recovery_packet_path=packet_path),
+        replace(runtime.request, recovery_packet_path=packet_path, auto_recovery_active=True),
         workspace=runtime.workspace,
     )
-
-
-# LLM: _recovery_attempt_index reads attempt depth from refs, not subprocess stdout.
-# 函数用途: 将 `resumes/attempt-002/recovery_packet.json` 解析成 2；根 recovery_packet 记为 0。
-def _recovery_attempt_index(packet_ref: str) -> int:
-    values = [
-        _attempt_number(part)
-        for part in Path(str(packet_ref)).parts
-        if part.startswith("attempt-")
-    ]
-    return max(values) if values else 0
-
-
-# LLM: _attempt_number keeps attempt parsing bounded to the stable attempt-N path segment.
-# 函数用途: 解析机器生成的 attempt 目录名，坏值按 0 处理。
-def _attempt_number(part: str) -> int:
-    try:
-        return int(part.removeprefix("attempt-"))
-    except ValueError:
-        return 0
-
 __all__ = ["MainAgentTaskExecutionCaseResult", "MainAgentTaskExecutionReport", "MainAgentTaskExecutionRequest", "revalidate_main_agent_task_execution", "run_main_agent_task_execution"]

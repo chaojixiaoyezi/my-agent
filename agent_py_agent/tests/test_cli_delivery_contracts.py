@@ -28,3 +28,20 @@ def test_delivery_contract_from_file_loads_json_object(tmp_path) -> None:
         "schema_version": "delivery.v1",
         "artifacts": [],
     }
+
+
+# LLM: Delivery contract loading should leave machine-readable findings for malformed contract shapes.
+# 函数用途: 验证 schema preflight 不把坏 artifacts 列表静默交给 prompt renderer 降级。
+def test_delivery_contract_from_file_attaches_preflight_findings(tmp_path, caplog) -> None:
+    from agent_py_agent.cli.delivery_contracts import delivery_contract_from_file
+
+    path = tmp_path / "delivery_contract.json"
+    path.write_text('{"schema_version": "delivery.v1", "artifacts": ["bad"]}', encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        payload = delivery_contract_from_file(str(path))
+
+    assert payload is not None
+    findings = payload["_preflight_findings"]
+    assert findings[0]["code"] == "DELIVERY_CONTRACT_ARTIFACT_INVALID"
+    assert "delivery contract preflight findings" in caplog.text

@@ -180,7 +180,7 @@ def _write_case_plan(request: MainAgentRealTaskCasePlanRequest) -> MainAgentReal
     return MainAgentRealTaskCasePlan(
         case_id=case.case_id,
         title=case.title,
-        status="QUEUED" if request.execute else "PLANNED",
+        status="PENDING" if request.execute else "PLANNING",
         worker_slot=request.worker_slot,
         timeout_seconds=request.timeout_seconds,
         prompt_ref=_rel(prompt_path, request.root.parent),
@@ -215,10 +215,14 @@ def _artifact_payload(case: MainAgentRealTaskCase) -> dict[str, object]:
 # LLM: _summary counts planned/queued/failed cases for fast CLI and CI display.
 # 函数用途: 汇总真实任务套件状态，让用户知道准备跑多少任务、是否已经请求执行。
 def _summary(cases: list[MainAgentRealTaskCasePlan]) -> dict[str, int]:
+    planning = sum(case.status == "PLANNING" for case in cases)
+    pending = sum(case.status == "PENDING" for case in cases)
     return {
         "total": len(cases),
-        "planned": sum(case.status == "PLANNED" for case in cases),
-        "queued": sum(case.status == "QUEUED" for case in cases),
+        "planning": planning,
+        "pending": pending,
+        "planned": planning,
+        "queued": pending,
         "failed": sum(case.status == "FAILED" for case in cases),
     }
 

@@ -308,18 +308,27 @@ def test_main_agent_real_task_execution_accepts_expected_artifact(tmp_path):
     payload = report.to_dict()
     first_case = payload["cases"][0]
     assert payload["ok"] is True
-    assert first_case["status"] == "COMPLETED"
+    assert first_case["status"] == "DONE"
     assert first_case["acceptance_summary"]["passed"] == 1
 
 
 # LLM: Revalidation should re-check existing artifacts without rerunning model subprocesses.
 # 函数用途: 验证已有 execution report 可以只读复验，适合真实 API 跑完后反复检查产物。
-def test_main_agent_real_task_execution_revalidates_existing_report(tmp_path):
+def test_main_agent_real_task_execution_revalidates_existing_report(tmp_path, monkeypatch):
+    from agent_py_agent.agent.contracts import main_agent_real_task_execution as execution
     from agent_py_agent.agent.contracts.main_agent_real_task_execution import (
         MainAgentRealTaskExecutionRequest,
         revalidate_main_agent_real_task_execution,
         run_main_agent_real_task_execution,
     )
+    from agent_py_agent.agent.contracts.main_agent_real_task_subprocess import (
+        RealTaskSubprocessResult,
+    )
+
+    def _complete_without_artifact(request):
+        return RealTaskSubprocessResult(exit_code=0, duration_seconds=1.0)
+
+    monkeypatch.setattr(execution, "run_real_task_subprocess", _complete_without_artifact)
 
     report = run_main_agent_real_task_execution(
         MainAgentRealTaskExecutionRequest(
@@ -329,6 +338,7 @@ def test_main_agent_real_task_execution_revalidates_existing_report(tmp_path):
             execute=True,
             case_ids=("furniture_homepage_html",),
             package_root=Path.cwd(),
+            max_auto_recovery_attempts=0,
         )
     )
     case = report.to_dict()["cases"][0]
@@ -349,7 +359,7 @@ def test_main_agent_real_task_execution_revalidates_existing_report(tmp_path):
     first_case = payload["cases"][0]
     assert case["status"] == "FAILED"
     assert payload["ok"] is True
-    assert first_case["status"] == "COMPLETED"
+    assert first_case["status"] == "DONE"
     assert first_case["acceptance_summary"]["passed"] == 1
 
 
@@ -387,7 +397,7 @@ def test_main_agent_real_task_revalidation_marks_valid_timeout_artifact(tmp_path
     revalidated = revalidate_main_agent_real_task_execution(report_path, workspace=tmp_path)
 
     first_case = revalidated.to_dict()["cases"][0]
-    assert first_case["status"] == "COMPLETED"
+    assert first_case["status"] == "DONE"
     assert first_case["issues"] == ["process_timeout_after_valid_artifact"]
 
 
@@ -423,7 +433,7 @@ def test_main_agent_real_task_timeout_accepts_valid_artifact(tmp_path, monkeypat
     payload = report.to_dict()
     first_case = payload["cases"][0]
     assert payload["ok"] is True
-    assert first_case["status"] == "COMPLETED"
+    assert first_case["status"] == "DONE"
     assert first_case["exit_code"] == 124
     assert first_case["acceptance_summary"]["passed"] == 1
     assert first_case["issues"] == ["process_timeout_after_valid_artifact"]

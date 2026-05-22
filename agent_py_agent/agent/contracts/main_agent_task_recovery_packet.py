@@ -15,6 +15,7 @@ from .recovery_actions import (
     ACTION_RESUME_SAME_CASE_AFTER_IDLE_TIMEOUT,
     ACTION_RESUME_SAME_CASE_AFTER_TIMEOUT,
 )
+from .state_machine import normalize_status
 
 SCHEMA_VERSION = "main-agent-task-recovery.v1"
 
@@ -76,7 +77,7 @@ def _packet_payload(request: TaskRunRecoveryPacketRequest) -> dict[str, object]:
         "case_id": request.case_id,
         "title": request.title,
         "status": request.status,
-        "recovery_required": request.status != "DONE",
+        "recovery_required": normalize_status(request.status) != "DONE",
         "recommended_action": _recommended_action(request),
         "exit_code": request.exit_code,
         "duration_seconds": round(request.duration_seconds, 3),
@@ -89,7 +90,7 @@ def _packet_payload(request: TaskRunRecoveryPacketRequest) -> dict[str, object]:
 # LLM: _recommended_action maps structured outcomes to stable runtime action codes.
 # 函数用途: 根据状态和原因码返回续跑动作码；不检查 stdout 或用户 prompt 内容。
 def _recommended_action(request: TaskRunRecoveryPacketRequest) -> str:
-    if request.status == "DONE":
+    if normalize_status(request.status) == "DONE":
         return ACTION_NONE
     if "activity_timeout" in request.reason_codes:
         return ACTION_RESUME_SAME_CASE_AFTER_IDLE_TIMEOUT

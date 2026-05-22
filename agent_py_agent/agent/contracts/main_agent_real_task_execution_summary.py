@@ -8,6 +8,7 @@ from .main_agent_real_task_execution_models import (
     MainAgentRealTaskExecutionRequest,
 )
 from .main_agent_real_task_suite import MainAgentRealTaskCasePlan
+from .state_machine import normalize_status
 
 
 # LLM: select_cases filters by structured case ids, never by prompt text.
@@ -25,11 +26,16 @@ def select_cases(
 # LLM: execution_summary counts planned and executed case statuses for CLI display.
 # 函数用途: 汇总执行报告状态，方便用户快速看计划/成功/失败数量。
 def execution_summary(cases: list[MainAgentRealTaskExecutionCaseResult]) -> dict[str, int]:
+    statuses = [normalize_status(case.status) for case in cases]
+    planning = sum(status == "PLANNING" for status in statuses)
+    done = sum(status == "DONE" for status in statuses)
     return {
         "total": len(cases),
-        "planned": sum(case.status == "PLANNED" for case in cases),
-        "completed": sum(case.status == "COMPLETED" for case in cases),
-        "failed": sum(case.status == "FAILED" for case in cases),
+        "planning": planning,
+        "planned": planning,
+        "done": done,
+        "completed": done,
+        "failed": sum(status == "FAILED" for status in statuses),
     }
 
 
