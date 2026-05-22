@@ -212,7 +212,7 @@ def _staging_output_ref(staging: dict[str, object]) -> str:
 # 函数用途: 从结构化合同读取 artifact 列表；非对象条目会被忽略。
 def _artifact_items(contract: dict[str, object]) -> list[dict[str, object]]:
     items = contract.get("artifacts")
-    return [dict(item) for item in items] if isinstance(items, list) and all(isinstance(item, dict) for item in items) else []
+    return [dict(item) for item in items if isinstance(item, dict)] if isinstance(items, list) else []
 
 
 __all__ = ["render_delivery_contract_section"]

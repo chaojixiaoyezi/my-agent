@@ -53,7 +53,97 @@ def delivery_quality_contract(contract: dict[str, Any]) -> dict[str, Any]:
         value = contract.get(key)
         if isinstance(value, dict):
             return dict(value)
-    return {}
+    return _artifact_validation_quality_contract(contract)
+
+
+def _artifact_validation_quality_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for item in _required_artifacts(contract):
+        validation = item.get("validation_contract")
+        if not isinstance(validation, dict):
+            continue
+        quality = _validation_quality_contract(validation)
+        if quality:
+            merged = _merge_quality_contract(merged, quality)
+    return merged
+
+
+def _validation_quality_contract(validation: dict[str, Any]) -> dict[str, Any]:
+    quality: dict[str, Any] = {}
+    for key in ("evidence_contract", "language_contract"):
+        value = validation.get(key)
+        if isinstance(value, dict):
+            quality[key] = dict(value)
+    metrics = validation.get("metric_contracts")
+    if isinstance(metrics, list):
+        quality["metric_contracts"] = [dict(item) for item in metrics if isinstance(item, dict)]
+    return quality
+
+
+def _merge_quality_contract(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    if evidence := _merge_evidence_contract(merged.get("evidence_contract"), incoming.get("evidence_contract")):
+        merged["evidence_contract"] = evidence
+    if language := _merge_language_contract(merged.get("language_contract"), incoming.get("language_contract")):
+        merged["language_contract"] = language
+    metrics = _dict_list(merged.get("metric_contracts"))
+    metrics.extend(_dict_list(incoming.get("metric_contracts")))
+    if metrics:
+        merged["metric_contracts"] = metrics
+    return merged
+
+
+def _merge_evidence_contract(base: object, incoming: object) -> dict[str, Any]:
+    if not isinstance(base, dict) and not isinstance(incoming, dict):
+        return {}
+    merged = dict(base) if isinstance(base, dict) else {}
+    new = dict(incoming) if isinstance(incoming, dict) else {}
+    merged.update(new)
+    merged["required_fields"] = _merged_string_list(base, incoming, "required_fields")
+    if allowed := _merged_string_list(base, incoming, "allowed_value_types"):
+        merged["allowed_value_types"] = allowed
+    merged["require_verified"] = bool(_dict_bool(base, "require_verified") or _dict_bool(incoming, "require_verified"))
+    merged["require_methodology_for_estimates"] = bool(
+        _dict_bool(base, "require_methodology_for_estimates")
+        or _dict_bool(incoming, "require_methodology_for_estimates")
+    )
+    merged["min_confidence"] = max(_dict_float(base, "min_confidence"), _dict_float(incoming, "min_confidence"))
+    return {key: value for key, value in merged.items() if value not in (None, "", [])}
+
+
+def _merge_language_contract(base: object, incoming: object) -> dict[str, Any]:
+    if not isinstance(base, dict) and not isinstance(incoming, dict):
+        return {}
+    merged = dict(base) if isinstance(base, dict) else {}
+    new = dict(incoming) if isinstance(incoming, dict) else {}
+    merged.update(new)
+    merged["fields"] = _merged_string_list(base, incoming, "fields")
+    return {key: value for key, value in merged.items() if value not in (None, "", [])}
+
+
+def _merged_string_list(base: object, incoming: object, key: str) -> list[str]:
+    values: list[str] = []
+    for source in (base, incoming):
+        if isinstance(source, dict):
+            values.extend(str(item).strip() for item in source.get(key, []) if str(item).strip())
+    return sorted(set(values))
+
+
+def _dict_list(value: object) -> list[dict[str, Any]]:
+    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _dict_bool(value: object, key: str) -> bool:
+    return bool(value.get(key)) if isinstance(value, dict) else False
+
+
+def _dict_float(value: object, key: str) -> float:
+    if not isinstance(value, dict):
+        return 0.0
+    try:
+        return float(value.get(key) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # LLM: load_delivery_quality_payload loads source JSON declared by contract refs.

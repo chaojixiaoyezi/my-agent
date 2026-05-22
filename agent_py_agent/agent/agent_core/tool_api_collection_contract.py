@@ -9,6 +9,7 @@ from typing import Any
 from ..tools import ToolExecutionResult
 from ._runtime_params import ToolLoopExecuteParams
 from .tool_api_collection_claim_contract import claim_contract_findings
+from .tool_api_collection_request_reserved import missing_request_reserved_metadata
 
 
 def api_collection_contract_result(
@@ -26,7 +27,11 @@ def api_collection_contract_result(
     contract = _matching_validation_contract(_delivery_contract(params), path)
     if not contract:
         return None
-    findings = [*_missing_field_mappings(payload, contract), *_too_few_planned_groups(payload, contract)]
+    findings = [
+        *_missing_field_mappings(payload, contract),
+        *_too_few_planned_groups(payload, contract),
+        *missing_request_reserved_metadata(payload, contract),
+    ]
     if not findings:
         return None
     return ToolExecutionResult(

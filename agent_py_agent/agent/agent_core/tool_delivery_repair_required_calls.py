@@ -68,17 +68,59 @@ def _api_json_collection_call(action: dict[str, object], path: str) -> dict[str,
         "tool": "api_json_collection",
         "path": path,
         "columns": columns,
-        "fields": _api_collection_field_skeleton(columns),
-        "evidence_fields": columns,
+        "fields": _api_collection_fields(action, columns),
+        "evidence_fields": _api_collection_evidence_fields(action, columns),
         "completion_evidence": {
             "method": "api_json_collection",
             "scope": _completion_scope(action),
         },
     }
+    call.update(_api_collection_request_fields(action))
     collection = action.get("collection_contract")
     if isinstance(collection, dict):
         call["collection_contract"] = collection
     return call
+
+
+def _api_collection_fields(action: dict[str, object], columns: list[str]) -> dict[str, object]:
+    request = _api_collection_request(action)
+    fields = request.get("fields") if isinstance(request, dict) else None
+    if isinstance(fields, dict) and fields:
+        return {str(key): value for key, value in fields.items() if str(key).strip()}
+    return _api_collection_field_skeleton(columns)
+
+
+def _api_collection_evidence_fields(action: dict[str, object], columns: list[str]) -> list[str]:
+    request = _api_collection_request(action)
+    if isinstance(request, dict):
+        values = _string_list(request.get("evidence_fields"))
+        if values:
+            return values
+    return columns
+
+
+def _api_collection_request_fields(action: dict[str, object]) -> dict[str, object]:
+    request = _api_collection_request(action)
+    if not isinstance(request, dict):
+        return {}
+    keys = (
+        "request_ranges",
+        "requests",
+        "source_artifacts",
+        "url_template",
+        "item_path",
+        "limit_per_request",
+        "request_delay_seconds",
+    )
+    return {key: request[key] for key in keys if key in request}
+
+
+def _api_collection_request(action: dict[str, object]) -> dict[str, object]:
+    collection = action.get("collection_contract")
+    if not isinstance(collection, dict):
+        return {}
+    request = collection.get("api_request")
+    return dict(request) if isinstance(request, dict) else {}
 
 
 def _api_collection_columns(action: dict[str, object]) -> list[str]:
@@ -86,6 +128,9 @@ def _api_collection_columns(action: dict[str, object]) -> list[str]:
     collection = action.get("collection_contract")
     if isinstance(collection, dict):
         columns.extend(_string_list(collection.get("required_item_fields")))
+        request = collection.get("api_request")
+        if isinstance(request, dict) and isinstance(request.get("fields"), dict):
+            columns.extend(str(key) for key in request["fields"] if str(key).strip())
     if not columns and (hint := _json_hint(action)):
         columns.extend(_columns_from_shape_hint(hint))
     return list(dict.fromkeys(columns))

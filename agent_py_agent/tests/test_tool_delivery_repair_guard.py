@@ -166,6 +166,58 @@ def test_delivery_repair_context_renders_collection_item_update_call(tmp_path: P
     }
 
 
+# LLM: API collection repair calls should carry executable collection request hints from the contract.
+# 函数用途: 验证返工上下文不会只给空字段骨架，而会传递结构化 request_ranges/url_template/fields。
+def test_delivery_repair_context_renders_api_collection_request_hints(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        delivery_repair_context,
+    )
+
+    action = _api_collection_action()
+    action["collection_contract"] = {**action["collection_contract"], "api_request": _api_collection_request_hints()}
+    _write_actions(tmp_path, [action])
+
+    payload = delivery_repair_context(_agent(tmp_path), repairs=0).splitlines()[1]
+    required_call = json.loads(payload)["required_tool_calls"][0]
+
+    assert required_call["tool"] == "api_json_collection"
+    assert required_call["request_ranges"][0]["name_template"] == "2026-W{week}"
+    assert required_call["request_ranges"][0]["reserved"]["window_start"] == "{start_date}"
+    assert required_call["item_path"] == "items"
+    assert required_call["limit_per_request"] == 10
+    assert required_call["fields"]["项目名"] == "full_name"
+    assert required_call["fields"]["中文解释"]["default_template"] == "{full_name}：{language}"
+    assert required_call["evidence_fields"] == ["项目名", "地址", "上升 star 数"]
+
+
+def _api_collection_request_hints() -> dict[str, object]:
+    return {
+        "request_ranges": [_api_collection_range_hint()],
+        "item_path": "items",
+        "limit_per_request": 10,
+        "fields": {
+            "项目名": "full_name",
+            "地址": "html_url",
+            "上升 star 数": "stargazers_count",
+            "中文解释": {"path": "description", "default_template": "{full_name}：{language}"},
+            "推荐理由": {"template": "stars={stargazers_count}; topics={topics}"},
+        },
+        "evidence_fields": ["项目名", "地址", "上升 star 数"],
+    }
+
+
+def _api_collection_range_hint() -> dict[str, object]:
+    return {
+        "start_date": "2026-01-01",
+        "end_date": "2026-01-14",
+        "step_days": 7,
+        "name_template": "2026-W{week}",
+        "reserved": {"metric_kind": "time_window_delta", "window_end": "{end_date}", "window_start": "{start_date}"},
+        "source_id_template": "github-week-{week}",
+        "url_template": "https://api.example.test/items?from={start}&to={end}",
+    }
+
+
 def _no_rows_action() -> dict[str, object]:
     return {
         "code": "STAGED_JSON_NO_ROWS",

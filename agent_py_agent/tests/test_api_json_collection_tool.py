@@ -252,6 +252,44 @@ def test_api_json_collection_expands_date_range_and_defaults(
     assert checkpoint["sheets"][0]["rows"][0]["中文解释"] == "Repository org/project-1-a uses Python"
 
 
+# LLM: Request-scope metadata must travel with expanded range sources so metric gates see machine facts.
+# 函数用途: 验证批量 API 请求的 window/kind 元数据进入 source_refs，后续口径门不靠自然语言猜。
+def test_api_json_collection_preserves_range_reserved_metadata_for_metric_gate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_py_agent.agent.tooling.api_json_collection import ApiJsonCollectionTool
+
+    _install_range_urlopen(monkeypatch)
+    params = _range_collection_params()
+    ranges = params["request_ranges"]
+    assert isinstance(ranges, list)
+    ranges[0]["reserved"] = {
+        "metric_kind": "time_window_delta",
+        "time_window": {"end": "{end_date}", "start": "{start_date}"},
+        "window_end": "{end_date}",
+        "window_start": "{start_date}",
+    }
+
+    result = ApiJsonCollectionTool(tmp_path, timeout=3).execute(params)
+
+    assert result.ok is True
+    checkpoint = json.loads((tmp_path / "outputs/source_data.json").read_text(encoding="utf-8"))
+    assert checkpoint["source_refs"][0]["reserved"]["metric_kind"] == "time_window_delta"
+    assert checkpoint["source_refs"][0]["reserved"]["window_start"] == "2026-01-01"
+    assert checkpoint["source_refs"][0]["reserved"]["window_end"] == "2026-01-07"
+    contract = _validation_contract()
+    contract["staging_contract"]["checkpoint_refs"] = ["outputs/source_data.json"]
+    contract["metric_contracts"] = [
+        {"expected_kind": "time_window_delta", "field": "上升 star 数", "required_window": True}
+    ]
+    findings = staged_checkpoint_findings(
+        [{"preferred_path": "unused.xlsx", "validation_contract": contract}],
+        tmp_path,
+    )
+    assert findings == []
+
+
 def test_api_json_collection_applies_top_level_url_template_to_ranges(
     tmp_path: Path,
     monkeypatch,

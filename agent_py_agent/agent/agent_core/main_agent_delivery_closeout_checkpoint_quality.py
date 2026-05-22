@@ -117,6 +117,7 @@ def _compact_collection_contract(collection: dict[str, object]) -> dict[str, obj
         "required_item_fields",
         "require_completion_evidence",
         "completion_evidence_path",
+        "api_request",
     )
     return {key: collection[key] for key in keys if key in collection}
 

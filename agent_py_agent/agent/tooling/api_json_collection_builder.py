@@ -223,7 +223,7 @@ def _source_ref(spec: dict[str, Any], response: dict[str, object]) -> dict[str, 
             "source_type": "artifact_json",
             "status": "AVAILABLE",
             "uri": str(spec["artifact_ref"]),
-            "reserved": {"group_name": spec["name"]},
+            "reserved": _source_reserved(spec, {"group_name": spec["name"]}),
         }
     return {
         "content_sha256": str(response.get("sha256") or ""),
@@ -232,8 +232,14 @@ def _source_ref(spec: dict[str, Any], response: dict[str, object]) -> dict[str, 
         "source_type": "api_json",
         "status": "AVAILABLE",
         "uri": str(spec["url"]),
-        "reserved": {"http_status": response.get("status"), "group_name": spec["name"]},
+        "reserved": _source_reserved(spec, {"group_name": spec["name"], "http_status": response.get("status")}),
     }
+
+
+def _source_reserved(spec: dict[str, Any], extra: dict[str, object]) -> dict[str, object]:
+    reserved = dict(spec["reserved"]) if isinstance(spec.get("reserved"), dict) else {}
+    reserved.update(extra)
+    return reserved
 
 
 def _items_at_path(value: object, path: str) -> list[object]:

@@ -118,6 +118,42 @@ def test_api_collection_contract_blocks_too_few_planned_groups():
     assert "planned groups 2 below required 20" in result.output
 
 
+# LLM: API collection calls must preserve request-level metadata declared by the contract.
+# 函数用途: 验证 metric/window 这类机器字段不能在模型重写 request_ranges 时丢失。
+def test_api_collection_contract_blocks_missing_declared_request_reserved_metadata():
+    from agent_py_agent.agent.agent_core.tool_api_collection_contract import (
+        api_collection_contract_result,
+    )
+
+    contract = _xlsx_delivery_contract()
+    validation = contract["artifacts"][0]["validation_contract"]
+    validation["collection_contract"]["api_request"] = {
+        "request_ranges": [
+            {
+                "reserved": {
+                    "metric_kind": "time_window_delta",
+                    "window_end": "{end_date}",
+                    "window_start": "{start_date}",
+                }
+            }
+        ]
+    }
+
+    result = api_collection_contract_result(
+        _params(contract),
+        {
+            "fields": {"项目名": "full_name", "地址": "html_url", "上升 star 数": "stargazers_count"},
+            "path": "outputs/report/source_data.json",
+            "request_ranges": [{"end_date": "2026-05-22", "start_date": "2026-01-01", "step_days": 7}],
+            "tool": "api_json_collection",
+        },
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert "missing request reserved metadata" in result.output
+
+
 def test_structured_json_source_checkpoint_blocks_missing_row_evidence():
     from agent_py_agent.agent.agent_core.tool_api_collection_contract import (
         api_collection_contract_result,

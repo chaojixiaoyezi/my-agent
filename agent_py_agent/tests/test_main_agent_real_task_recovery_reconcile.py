@@ -81,6 +81,37 @@ def test_reconcile_recovery_open_write_sessions_reports_already_aborted_stale_pa
     assert _read_json(current_manifest)["status"] == "open"
 
 
+# LLM: Bad runtime_finding entries must not erase valid recovery facts from the same packet.
+# 函数用途: 验证 runtime_findings 混入脏项时只忽略脏项，仍保留可用 OPEN_FILE_WRITE_SESSION finding。
+def test_reconcile_recovery_open_write_sessions_skips_bad_runtime_finding_items(tmp_path):
+    from agent_py_agent.agent.contracts.main_agent_real_task_recovery_reconcile import (
+        reconcile_recovery_open_write_sessions as reconcile_real,
+    )
+    from agent_py_agent.agent.contracts.main_agent_task_recovery_packet import (
+        SCHEMA_VERSION as TASK_SCHEMA_VERSION,
+    )
+    from agent_py_agent.agent.contracts.main_agent_task_recovery_reconcile import (
+        reconcile_recovery_open_write_sessions as reconcile_task,
+    )
+
+    real_workspace = tmp_path / "real-e2e"
+    task_workspace = tmp_path / "task-e2e"
+
+    real_summary = reconcile_real(
+        _write_dirty_runtime_findings_packet(real_workspace, SCHEMA_VERSION),
+        workspace=real_workspace,
+    )
+    task_summary = reconcile_task(
+        _write_dirty_runtime_findings_packet(task_workspace, TASK_SCHEMA_VERSION),
+        workspace=task_workspace,
+    )
+
+    assert real_summary["groups"][0]["kept_session_id"] == "kept-session"
+    assert real_summary["groups"][0]["retired_session_ids"] == ["old-session"]
+    assert task_summary["groups"][0]["kept_session_id"] == "kept-session"
+    assert task_summary["groups"][0]["retired_session_ids"] == ["old-session"]
+
+
 # LLM: _write_manifest creates the minimal file_write_session manifest used by reconciliation tests.
 # 函数用途: 在测试工作区写一个 open manifest，模拟真实超时后遗留的分块写入会话。
 def _write_manifest(
@@ -119,6 +150,41 @@ def _write_packet(workspace: Path, task_workspace: Path, manifests: list[Path]) 
         encoding="utf-8",
     )
     return packet
+
+
+def _write_dirty_runtime_findings_packet(workspace: Path, schema_version: str) -> Path:
+    task_workspace = workspace / "task-workspace"
+    packet = workspace / "dirty_recovery_packet.json"
+    packet.parent.mkdir(parents=True, exist_ok=True)
+    packet.write_text(
+        json.dumps(
+            {
+                "schema_version": schema_version,
+                "case_id": "case",
+                "refs": {"task_workspace_ref": str(task_workspace.relative_to(workspace))},
+                "acceptance": {
+                    "runtime_findings": [
+                        "bad-finding-entry",
+                        _runtime_finding("old-session", "outputs/report.py", 1),
+                        _runtime_finding("kept-session", "outputs/report.py", 3),
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return packet
+
+
+def _runtime_finding(session_id: str, target: str, next_chunk: int) -> dict[str, object]:
+    return {
+        "code": "OPEN_FILE_WRITE_SESSION",
+        "manifest_path": f".agent_file_write_sessions/{session_id}/manifest.json",
+        "next_chunk_index": next_chunk,
+        "received_chunks": list(range(next_chunk)),
+        "session_id": session_id,
+        "target_path": {"display": target},
+    }
 
 
 # LLM: _finding derives one runtime finding from the manifest JSON object.

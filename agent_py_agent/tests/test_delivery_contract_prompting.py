@@ -45,6 +45,37 @@ def test_render_delivery_contract_section_includes_staging_refs():
     assert "generated_rows" in text
 
 
+# LLM: One malformed artifact entry must not erase valid contract guidance.
+# 函数用途: 验证 artifacts 混入脏项时只忽略脏项，仍渲染其它结构化 artifact。
+def test_render_delivery_contract_section_skips_bad_artifact_items():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    text = render_delivery_contract_section(
+        {
+            "artifacts": [
+                "bad-artifact-entry",
+                {
+                    "kind": "xlsx",
+                    "preferred_path": "outputs/report.xlsx",
+                    "validation_contract": {
+                        "staging_contract": {
+                            "builder_tool": "data_to_workbook",
+                            "source_json_ref": "outputs/source_data.json",
+                            "workbook_ref": "outputs/report.xlsx",
+                            "checkpoint_refs": ["outputs/source_data.json", "outputs/report.xlsx"],
+                        }
+                    },
+                },
+            ]
+        }
+    )
+
+    assert "- 阶段产物:" in text
+    assert "- 阶段构建工具: data_to_workbook" in text
+
+
 # LLM: bootstrap contract guidance should push the model to materialize targets before repeated inspection.
 # 函数用途: 验证通用开工合同会渲染结构化目标路径和 builder tool，而不是按任务专项写提示。
 def test_render_delivery_contract_section_includes_bootstrap_targets():

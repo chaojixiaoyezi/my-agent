@@ -93,6 +93,7 @@ def _range_request(
         "item_path": str(item.get("item_path") or "").strip(),
         "limit": item.get("limit"),
         "name": _render_range_template(item.get("name_template"), f"Group{window.index}", values),
+        "reserved": _range_reserved(item, defaults, values),
         "source_id": _render_range_template(item.get("source_id_template"), f"src-{window.index:03d}", values),
         "url": _render_range_template(url_template, "", values),
     }
@@ -121,6 +122,37 @@ def _range_template_values(index: int, start: date, end: date) -> dict[str, obje
         "year": str(start.year),
         "yyyy": str(start.year),
     }
+
+
+def _range_reserved(
+    item: dict[str, object],
+    defaults: dict[str, Any],
+    values: dict[str, object],
+) -> dict[str, object]:
+    reserved: dict[str, object] = {}
+    default_reserved = defaults.get("request_reserved")
+    if isinstance(default_reserved, dict):
+        reserved.update(_render_reserved_templates(default_reserved, values))
+    item_reserved = item.get("reserved")
+    if item_reserved not in (None, "") and not isinstance(item_reserved, dict):
+        raise ValueError("TOOL_INVALID_ARGUMENTS: request_ranges reserved must be an object")
+    if isinstance(item_reserved, dict):
+        reserved.update(_render_reserved_templates(item_reserved, values))
+    return reserved
+
+
+def _render_reserved_templates(value: object, values: dict[str, object]) -> object:
+    if isinstance(value, str):
+        return _render_range_template(value, "", values)
+    if isinstance(value, list):
+        return [_render_reserved_templates(item, values) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _render_reserved_templates(item, values)
+            for key, item in value.items()
+            if str(key).strip()
+        }
+    return value
 
 
 def _range_step_days(value: object) -> int:
@@ -163,15 +195,25 @@ def _request_spec(item: object, index: int) -> dict[str, Any]:
             "item_path": str(item.get("item_path") or "").strip(),
             "limit": _bounded_limit(item.get("limit")),
             "name": _text_param(item.get("name", f"Group{index}"), name="name", max_chars=80, strip=True),
+            "reserved": _request_reserved(item.get("reserved")),
             "source_id": _text_param(item.get("source_id", f"src-{index:03d}"), name="source_id", max_chars=120, strip=True),
         }
     return {
         "item_path": str(item.get("item_path") or "").strip(),
         "limit": _bounded_limit(item.get("limit")),
         "name": _text_param(item.get("name", f"Group{index}"), name="name", max_chars=80, strip=True),
+        "reserved": _request_reserved(item.get("reserved")),
         "source_id": _text_param(item.get("source_id", f"src-{index:03d}"), name="source_id", max_chars=120, strip=True),
         "url": _normalize_url(item.get("url")),
     }
+
+
+def _request_reserved(value: object) -> dict[str, object]:
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("TOOL_INVALID_ARGUMENTS: requests reserved must be an object")
+    return {str(key): item for key, item in value.items() if str(key).strip()}
 
 
 def _columns(value: object, fields: dict[str, object]) -> list[str]:

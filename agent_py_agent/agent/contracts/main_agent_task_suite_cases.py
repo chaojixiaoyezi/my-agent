@@ -153,7 +153,9 @@ def _github_star_workbook_staging_contract() -> dict[str, object]:
                 '"sheets":[{"name":"YYYY-WW","columns":["项目名","地址","上升 star 数","中文解释","推荐理由"],'
                 '"rows":[{"项目名":"...","地址":"...","上升 star 数":"...",'
                 '"field_source_ids":{"项目名":["src-id"],"地址":["src-id"],"上升 star 数":["src-id"]}}]}],'
-                '"source_refs":[{"source_id":"src-id","uri":"https://...","retrieved_at":"..."}]}'
+                '"source_refs":[{"source_id":"src-id","uri":"https://...","retrieved_at":"...",'
+                '"reserved":{"metric_kind":"time_window_delta","window_start":"YYYY-MM-DD","window_end":"YYYY-MM-DD"}}],'
+                '"claims":[{"field":"上升 star 数","source_ids":["src-id"],"verification_status":"VERIFIED"}]}'
             )
         },
         "checkpoint_refs": [
@@ -175,7 +177,58 @@ def _github_star_collection_contract() -> dict[str, object]:
         "required_item_fields": ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"],
         "require_completion_evidence": True,
         "completion_evidence_path": "completion_evidence",
+        "api_request": _github_star_api_request(),
     }
+
+
+# LLM: GitHub collection uses a structured API request plan instead of relying on prompt prose.
+# 函数用途: 给 api_json_collection 提供可执行的周窗口、字段映射和来源证据字段。
+def _github_star_api_request(today: date | None = None) -> dict[str, object]:
+    return {
+        "request_ranges": _github_star_request_ranges(today),
+        "item_path": "items",
+        "limit_per_request": 10,
+        "fields": {
+            "项目名": "full_name",
+            "地址": "html_url",
+            "上升 star 数": "stargazers_count",
+            "中文解释": {
+                "path": "description",
+                "default_template": "{full_name}：主要语言 {language}，主题 {topics}",
+            },
+            "推荐理由": {
+                "template": "窗口内 stars={stargazers_count}；forks={forks_count}；语言={language}；主题={topics}",
+            },
+        },
+        "evidence_fields": ["项目名", "地址", "上升 star 数"],
+        "completion_evidence": {"scope": "year_to_date_weekly_collection", "method": "github_search_api"},
+    }
+
+
+# LLM: _github_star_request_ranges returns one bounded weekly API range spec.
+# 函数用途: 将年度到今天的周窗口变成结构化 request_ranges，api_json_collection 会展开成多个 requests。
+def _github_star_request_ranges(today: date | None = None) -> list[dict[str, object]]:
+    current = today or date.today()
+    year_start = date(current.year, 1, 1)
+    return [
+        {
+            "start_date": year_start.isoformat(),
+            "end_date": current.isoformat(),
+            "step_days": 7,
+            "name_template": "{yyyy}-W{week}",
+            "reserved": {
+                "metric_kind": "time_window_delta",
+                "time_window": {"end": "{end_date}", "start": "{start_date}"},
+                "window_end": "{end_date}",
+                "window_start": "{start_date}",
+            },
+            "source_id_template": "github-week-{yyyy}-{week}",
+            "url_template": (
+                "https://api.github.com/search/repositories"
+                "?q=created:{start}..{end}&sort=stars&order=desc&per_page=10"
+            ),
+        }
+    ]
 
 
 # LLM: _research_document_translation_case covers research, translation, and formatted document output.

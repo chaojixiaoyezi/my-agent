@@ -286,6 +286,81 @@ def test_delivery_closeout_blocks_metric_quality_contract_mismatch(tmp_path):
     assert report["final_closeout_gate"]["allowed"] is False
 
 
+# LLM: Artifact validation contracts are quality gates, not optional prompt hints.
+# 函数用途: 验证 artifact.validation_contract 里的 staged metric 合同会自动进入 closeout quality gate。
+def test_delivery_closeout_derives_quality_gate_from_artifact_validation_contract(tmp_path):
+    output = tmp_path / "out.txt"
+    output.write_text("finished artifact", encoding="utf-8")
+    _write_point_in_time_quality_source(tmp_path)
+    params = _delivery_closeout_params(archive_tool_calls=[_write_file_archive_record()])
+    params.delivery_contract["artifacts"][0]["validation_contract"] = _staged_metric_validation_contract()
+    agent = SimpleNamespace(root=tmp_path, tools=SimpleNamespace(workspace_root=tmp_path))
+
+    response = main_agent_delivery_closeout_response(
+        MainAgentDeliveryCloseoutRequest(agent=agent, params=params, backend="test")
+    )
+    report = json.loads((Path(tmp_path) / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+
+    assert response is None
+    assert report["delivery_quality_gate"]["status"] == "NEED_REPAIR"
+    assert report["delivery_quality_gate"]["findings"][0]["code"] == "METRIC_KIND_MISMATCH"
+    assert report["delivery_quality_gate"]["evidence"]["source_count"] == 1
+
+
+# LLM: Multi-artifact closeout must not stop at the first quality contract.
+# 函数用途: 验证多个 artifact 各自声明质量合同时，后续 artifact 的 metric 合同也会进入质量门。
+def test_delivery_closeout_merges_quality_contracts_from_all_artifacts(tmp_path):
+    output = tmp_path / "out.txt"
+    output.write_text("finished artifact", encoding="utf-8")
+    _write_point_in_time_quality_source(tmp_path)
+    params = _delivery_closeout_params(archive_tool_calls=[_write_file_archive_record()])
+    params.delivery_contract["artifacts"] = [
+        {
+            "artifact_id": "out",
+            "kind": "txt",
+            "path": "out.txt",
+            "validation_contract": {
+                "evidence_contract": {"require_verified": True, "required_fields": ["safe_field"]},
+                "staging_contract": {"source_json_ref": "source_data.json"},
+            },
+        },
+        {
+            "artifact_id": "out-2",
+            "kind": "txt",
+            "path": "out.txt",
+            "validation_contract": _staged_metric_validation_contract(),
+        },
+    ]
+    agent = SimpleNamespace(root=tmp_path, tools=SimpleNamespace(workspace_root=tmp_path))
+
+    response = main_agent_delivery_closeout_response(
+        MainAgentDeliveryCloseoutRequest(agent=agent, params=params, backend="test")
+    )
+    report = json.loads((Path(tmp_path) / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+
+    assert response is None
+    codes = {item["code"] for item in report["delivery_quality_gate"]["findings"]}
+    assert "METRIC_KIND_MISMATCH" in codes
+
+
+def _staged_metric_validation_contract() -> dict[str, object]:
+    return {
+        "staging_contract": {"checkpoint_refs": ["source_data.json"], "source_json_ref": "source_data.json"},
+        "evidence_contract": {
+            "allowed_value_types": ["exact"],
+            "require_verified": True,
+            "required_fields": ["growth_count"],
+        },
+        "metric_contracts": [
+            {
+                "expected_kind": "time_window_delta",
+                "field": "growth_count",
+                "required_window": True,
+            }
+        ],
+    }
+
+
 def _write_point_in_time_quality_source(root: Path) -> None:
     (root / "source_data.json").write_text(json.dumps(_point_in_time_quality_payload(), ensure_ascii=False), encoding="utf-8")
 

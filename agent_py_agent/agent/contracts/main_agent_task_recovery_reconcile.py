@@ -38,7 +38,7 @@ def reconcile_recovery_open_write_sessions(
 def _runtime_findings(payload: dict[str, object]) -> list[dict[str, object]]:
     acceptance = payload.get("acceptance")
     findings = acceptance.get("runtime_findings") if isinstance(acceptance, dict) else None
-    return [dict(item) for item in findings] if isinstance(findings, list) and all(isinstance(item, dict) for item in findings) else []
+    return [dict(item) for item in findings if isinstance(item, dict)] if isinstance(findings, list) else []
 
 
 # LLM: _workspace_findings adds current open write sessions that may have appeared after the packet.
