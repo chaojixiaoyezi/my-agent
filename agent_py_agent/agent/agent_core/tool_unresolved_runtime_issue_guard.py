@@ -87,6 +87,7 @@ def _apply_issue_event(
 def _record_issue_facts(record: dict[str, object]) -> list[dict[str, object]]:
     facts: list[dict[str, object]] = []
     facts.extend(_artifact_integrity_facts(record))
+    facts.extend(_successful_artifact_write_facts(record))
     return facts
 
 
@@ -97,7 +98,12 @@ def _artifact_integrity_facts(record: dict[str, object]) -> list[dict[str, objec
     key = _artifact_issue_key(integrity)
     if bool(integrity.get("ok")):
         return [{"issue_key": key, "clears_issue": True}]
-    codes = _string_list(integrity.get("blocker_codes")) or _issue_codes(integrity.get("issues"))
+    codes = _string_list(integrity.get("blocker_codes")) or _issue_codes(
+        integrity.get("issues"),
+        severity="blocker",
+    )
+    if not codes:
+        return []
     return [
         {
             "issue_key": key,
@@ -114,15 +120,96 @@ def _artifact_integrity_facts(record: dict[str, object]) -> list[dict[str, objec
 def _artifact_integrity(record: dict[str, object]) -> dict[str, object]:
     envelope = record.get("tool_result_envelope")
     if isinstance(envelope, dict) and isinstance(envelope.get("artifact_integrity"), dict):
-        return dict(envelope["artifact_integrity"])
+        return _artifact_integrity_with_path(envelope, record)
     value = record.get("artifact_integrity")
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _artifact_integrity_with_path(
+    envelope: dict[str, object],
+    record: dict[str, object],
+) -> dict[str, object]:
+    integrity = dict(envelope["artifact_integrity"])
+    if str(integrity.get("path") or "").strip():
+        return integrity
+    refs = _target_refs(envelope) or _target_refs(record)
+    if refs:
+        integrity["path"] = refs[0]
+    return integrity
 
 
 def _artifact_issue_key(integrity: dict[str, object]) -> str:
     kind = str(integrity.get("kind") or "artifact")
     target = str(integrity.get("path") or integrity.get("target_path") or "")
     return f"artifact_integrity:{kind}:{target}"
+
+
+def _successful_artifact_write_facts(record: dict[str, object]) -> list[dict[str, object]]:
+    if not bool(record.get("ok")):
+        return []
+    envelope = record.get("tool_result_envelope")
+    if not isinstance(envelope, dict):
+        return []
+    if not _is_successful_artifact_write(record, envelope):
+        return []
+    facts: list[dict[str, object]] = []
+    for target in _target_refs(envelope):
+        for kind in _artifact_kinds_for_path(target):
+            facts.append({
+                "issue_key": f"artifact_integrity:{kind}:{target}",
+                "clears_issue": True,
+            })
+    return facts
+
+
+def _is_successful_artifact_write(record: dict[str, object], envelope: dict[str, object]) -> bool:
+    tool = str(record.get("tool") or "")
+    status = str(envelope.get("status") or "")
+    action = str(envelope.get("action") or "")
+    if tool == "file_write_session":
+        return action == "finish" and status == "finished"
+    return bool(_target_refs(envelope))
+
+
+def _target_refs(payload: dict[str, object]) -> list[str]:
+    refs: list[str] = []
+    for key in ("path", "target_path", "output_path"):
+        refs.extend(_path_values(payload.get(key)))
+    return _dedupe_refs(refs)
+
+
+def _path_values(value: object) -> list[str]:
+    if isinstance(value, dict):
+        ordered = [
+            value.get("resolved"),
+            value.get("path"),
+            value.get("raw"),
+            value.get("display"),
+            value.get("artifact_ref"),
+        ]
+        return [str(item) for item in ordered if str(item or "").strip()]
+    text = str(value or "").strip()
+    return [text] if text else []
+
+
+def _artifact_kinds_for_path(path: str) -> list[str]:
+    lowered = path.lower()
+    if lowered.endswith((".html", ".htm")):
+        return ["html", "artifact"]
+    if lowered.endswith(".json"):
+        return ["json", "artifact"]
+    return ["artifact"]
+
+
+def _dedupe_refs(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    refs: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            refs.append(text)
+    return refs
 
 
 def _issue_payload(fact: dict[str, object], record: dict[str, object]) -> dict[str, object]:
@@ -139,13 +226,17 @@ def _issue_payload(fact: dict[str, object], record: dict[str, object]) -> dict[s
     return {key: value for key, value in payload.items() if value not in ("", [], {}, None)}
 
 
-def _issue_codes(value: object) -> list[str]:
+def _issue_codes(value: object, *, severity: str = "") -> list[str]:
     if not isinstance(value, list):
         return []
     return [
         str(item.get("code"))
         for item in value
-        if isinstance(item, dict) and str(item.get("code") or "").strip()
+        if (
+            isinstance(item, dict)
+            and str(item.get("code") or "").strip()
+            and (not severity or str(item.get("severity") or "") == severity)
+        )
     ]
 
 

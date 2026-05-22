@@ -11,8 +11,6 @@ from .artifact_integrity import ArtifactIntegrityCheckRequest, check_artifact_in
 from .file_write_session_io import failure
 from .models import ToolExecutionResult
 
-_HTML_COMMIT_BLOCKING_WARNINGS = frozenset({"placeholder_hash_link", "missing_hash_target"})
-
 
 # LLM: validate_structured_commit is the generic pre-commit hook for session-backed structured files.
 # 函数用途: 在 file_write_session finish 前校验临时文件是否满足结构化格式；失败时返回结构化错误并保持 session 打开。
@@ -63,7 +61,7 @@ def validate_structured_commit(
 
 
 # LLM: HTML commit validation reuses artifact integrity codes instead of prompt-only web rules.
-# 函数用途: 在 staged HTML 原子提交前拦住结构损坏、占位链接和缺失锚点，避免坏页面成为最终事实。
+# 函数用途: 在 staged HTML 原子提交前拦住结构损坏；链接质量 warning 留给交付/验收合同判定。
 def _validate_html_commit(
     *,
     session_id: str,
@@ -89,7 +87,7 @@ def _validate_html_commit(
             "format": "html",
             "target_path": str(target),
             "temp_path": str(temp_path),
-            "artifact_integrity": _html_integrity_payload(decision, blocking_codes),
+            "artifact_integrity": _html_integrity_payload(target, decision, blocking_codes),
             "recommended_action": "repair_artifact_before_finish",
             "reset_tool_call": {
                 "tool": "file_write_session",
@@ -107,20 +105,23 @@ def _validate_html_commit(
     )
 
 
-# LLM: _html_commit_blocking_codes makes warning promotion explicit and reusable.
-# 函数用途: 返回 HTML 提交必须阻塞的完整性 code，包含结构 blocker 和可操作链接 warning。
+# LLM: _html_commit_blocking_codes keeps staging atomicity separate from delivery quality gates.
+# 函数用途: 返回 HTML 提交必须阻塞的结构损坏 code；普通 warning 不阻断目标文件落盘。
 def _html_commit_blocking_codes(decision) -> list[str]:
-    return [
-        *decision.blocker_codes,
-        *(code for code in decision.warning_codes if code in _HTML_COMMIT_BLOCKING_WARNINGS),
-    ]
+    return list(decision.blocker_codes)
 
 
 # LLM: _html_integrity_payload bounds artifact diagnostics before they enter tool output.
 # 函数用途: 将完整性检查结果压成结构化小包，供模型修复和测试断言使用。
-def _html_integrity_payload(decision, blocking_codes: list[str]) -> dict[str, object]:
+def _html_integrity_payload(
+    target: Path,
+    decision,
+    blocking_codes: list[str],
+) -> dict[str, object]:
     return {
         "kind": decision.kind,
+        "path": str(target),
+        "ok": False,
         "blocker_codes": blocking_codes,
         "warning_codes": decision.warning_codes,
         "issues": [

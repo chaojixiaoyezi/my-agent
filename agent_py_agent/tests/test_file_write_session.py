@@ -413,8 +413,12 @@ class TestFileWriteSessionToolIdentityAndGuards:
         assert not (tmp_path / "outside.txt").exists()
         assert not (workspace / ".agent_file_write_sessions").exists()
 
-    # LLM: HTML sessions must not commit visibly broken pages after a long write is recovered.
-    # 函数用途: 验证 finish 会拒绝结构损坏和假 hash 链接，保留 session 供模型继续修复。
+
+# LLM: HTML commit-gate tests live apart from identity guards to keep each contract class small.
+# 类用途: 覆盖 HTML 分块写入提交门、warning 分层和失败后 reset 重写。
+class TestFileWriteSessionHtmlCommitGate:
+    # LLM: HTML sessions must not commit structurally broken pages after a long write is recovered.
+    # 函数用途: 验证 finish 会拒绝结构损坏的 HTML，保留 session 供模型继续修复。
     def test_finish_rejects_invalid_html_target_and_keeps_session_open(self, tmp_path: Path):
         workspace = tmp_path / "workspace"
         tool = _tool(workspace, max_chunk_chars=2048)
@@ -440,7 +444,7 @@ class TestFileWriteSessionToolIdentityAndGuards:
         assert finish.result_envelope["format"] == "html"
         assert finish.result_envelope["session_id"] == session_id
         assert "content_after_html_close" in finish.result_envelope["artifact_integrity"]["blocker_codes"]
-        assert "placeholder_hash_link" in finish.result_envelope["artifact_integrity"]["blocker_codes"]
+        assert "placeholder_hash_link" in finish.result_envelope["artifact_integrity"]["warning_codes"]
         assert finish.result_envelope["abort_tool_call"] == {
             "tool": "file_write_session",
             "action": "abort",
@@ -449,6 +453,33 @@ class TestFileWriteSessionToolIdentityAndGuards:
         }
         assert not (workspace / "out" / "index.html").exists()
         assert Path(finish.result_envelope["temp_path"]).exists()
+
+    # LLM: Link quality warnings belong to delivery/acceptance gates, not the atomic staging commit gate.
+    # 函数用途: 验证只有 hash 链接 warning 的 HTML 可以落到目标文件，避免修复后的主体产物卡在临时区。
+    def test_finish_allows_html_link_warnings_and_commits_target(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        tool = _tool(workspace, max_chunk_chars=2048)
+        session_id = _begin(tool, target_path="out/index.html")
+        html = (
+            "<!doctype html><html><body><main id='home'>"
+            "<a href='#'>WeChat</a><a href='#missing'>Missing</a>"
+            "</main></body></html>"
+        )
+
+        append = tool.execute(
+            {
+                "action": "append",
+                "session_id": session_id,
+                "chunk_index": 0,
+                "content": html,
+            }
+        )
+        finish = tool.execute({"action": "finish", "session_id": session_id})
+
+        assert append.ok is True
+        assert finish.ok is True
+        assert (workspace / "out" / "index.html").read_text(encoding="utf-8") == html
+        assert open_file_write_sessions(workspace) == []
 
     # LLM: Reset lets a model rewrite a bad staged artifact without deleting session identity or target scope.
     # 函数用途: 验证 finish 失败会落 last_finish_error，reset 清空 chunks 后可从 0 重写并成功提交。
