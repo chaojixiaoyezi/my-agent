@@ -6,7 +6,10 @@ from __future__ import annotations
 from typing import Any
 
 from ..contracts.error_taxonomy import error_contract
-from ..contracts.staged_checkpoint_acceptance import staged_json_evidence_findings
+from ..contracts.staged_checkpoint_acceptance import (
+    StagedEvidenceRequest,
+    staged_json_evidence_findings,
+)
 from .main_agent_delivery_closeout_recovery_models import (
     RecoveryActionLedger,
     StagedEvidenceActionRequest,
@@ -19,7 +22,9 @@ def append_staged_evidence_actions(request: StagedEvidenceActionRequest) -> bool
     evidence_contract = request.validation_contract.get("evidence_contract")
     if not isinstance(evidence_contract, dict):
         return False
-    findings = staged_json_evidence_findings(request.checkpoint_ref, request.workspace_root, evidence_contract)
+    findings = staged_json_evidence_findings(
+        StagedEvidenceRequest(request.checkpoint_ref, request.workspace_root, evidence_contract)
+    )
     for action in _evidence_actions(request.checkpoint_ref, findings):
         _append_evidence_action(request.ledger, action)
     return bool(findings)

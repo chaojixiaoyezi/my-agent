@@ -214,6 +214,89 @@ def test_staged_checkpoint_findings_use_validation_contract_shape_and_evidence(t
     assert "EVIDENCE_REQUIRED_FIELD_MISSING" in codes
 
 
+# LLM: Staged checkpoint paths must fail closed inside the task workspace even when refs are absolute.
+# 函数用途: 验证阶段产物绝对路径越界时返回结构化 finding，不读取工作区外文件。
+def test_staged_checkpoint_rejects_absolute_path_outside_workspace(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside-source.json"
+    outside.write_text('{"rows":[{"name":"outside"}]}', encoding="utf-8")
+
+    findings = staged_checkpoint_findings(
+        [
+            {
+                "preferred_path": "outputs/report.xlsx",
+                "validation_contract": {
+                    "staging_contract": {"checkpoint_refs": [str(outside)]},
+                },
+            }
+        ],
+        tmp_path,
+    )
+
+    assert [finding["code"] for finding in findings] == ["STAGED_ARTIFACT_PATH_OUTSIDE_WORKSPACE"]
+
+
+# LLM: Staging evidence should allow sourced pending claims while final delivery can still require VERIFIED.
+# 函数用途: 验证阶段证据不会因为尚未标注 VERIFIED 提前卡死，除非合同显式要求 staging 也 verified。
+def test_staged_checkpoint_evidence_allows_pending_claims_until_final_gate(tmp_path: Path) -> None:
+    _write_pending_source(tmp_path)
+    base_item = _pending_evidence_contract_item()
+
+    findings = staged_checkpoint_findings([base_item], tmp_path)
+
+    assert "EVIDENCE_CLAIM_UNVERIFIED" not in {finding["code"] for finding in findings}
+
+    strict_item = {
+        **base_item,
+        "validation_contract": {
+            **base_item["validation_contract"],
+            "evidence_contract": {
+                "required_fields": ["上升 star 数"],
+                "require_verified": True,
+                "staging_require_verified": True,
+            },
+        },
+    }
+    strict_findings = staged_checkpoint_findings([strict_item], tmp_path)
+    assert "EVIDENCE_CLAIM_UNVERIFIED" in {finding["code"] for finding in strict_findings}
+
+
+def _pending_evidence_contract_item() -> dict[str, object]:
+    return {
+        "preferred_path": "outputs/github_star_growth/github_star_growth.xlsx",
+        "validation_contract": {
+            "staging_contract": {
+                "checkpoint_refs": ["outputs/github_star_growth/source_data.json"],
+                "source_json_ref": "outputs/github_star_growth/source_data.json",
+            },
+            "evidence_contract": {"required_fields": ["上升 star 数"], "require_verified": True},
+        },
+    }
+
+
+def _write_pending_source(root: Path) -> None:
+    source = root / "outputs/github_star_growth/source_data.json"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        """
+{
+  "source_refs": [{"source_id": "src-1", "uri": "https://example.com/ranking"}],
+  "claims": [
+    {
+      "claim_id": "growth-1",
+      "field": "上升 star 数",
+      "value": "120",
+      "source_ids": ["src-1"],
+      "verification_status": "PENDING",
+      "value_type": "exact"
+    }
+  ],
+  "rows": [{"项目名": "demo", "地址": "https://example.com", "上升 star 数": "120"}]
+}
+""".strip(),
+        encoding="utf-8",
+    )
+
+
 # LLM: Metric quality must apply to staged source data before a workbook can pass.
 # 函数用途: 验证 source_data.json 里的当前总量不能冒充时间窗口增量，即使字段和来源都存在。
 def test_staged_checkpoint_rejects_metric_kind_mismatch(tmp_path: Path) -> None:

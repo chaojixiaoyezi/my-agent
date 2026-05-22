@@ -3,16 +3,33 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from .error_taxonomy import classify_error, error_contract
+from .recovery_actions import (
+    ACTION_CHANGE_STRATEGY_OR_STOP,
+    ACTION_CLOSEOUT,
+    ACTION_DISPATCH,
+    ACTION_MANUAL_REVIEW,
+    ACTION_REPAIR,
+    ACTION_REPAIR_OR_PROBE_CHANNEL,
+    ACTION_REPAIR_OR_REQUEST_CAPABILITY,
+    ACTION_REQUEST_APPROVAL_OR_STOP,
+    ACTION_TAKEOVER_OR_STOP,
+    ACTION_WAIT_FOR_ACCEPTANCE,
+    ACTION_WAIT_FOR_LOCAL_PROGRESS,
+    ACTION_WAIT_OR_OBSERVE,
+)
 
+SCHEMA_VERSION = "state_machine.v1"
 DISPATCHABLE_STATES = {"PLANNING", "PENDING"}
 ACTIVE_STATES = {"RUNNING", "WAITING_FOR_TOOL", "WAITING_FOR_CHILD", "WAITING_FOR_USER", "REPAIRING", "TAKING_OVER"}
 TERMINAL_STATES = {"DONE", "FAILED", "CANCELLED", "ABANDONED", "TIMEOUT", "CHANNEL_ERROR"}
 REPAIRABLE_STATES = {"BLOCKED", "FAILED"}
 VERIFIED_STATES = {"VERIFIED"}
 HEALTHY_CHANNEL_STATES = {"", "OK", "UNKNOWN"}
+LOGGER = logging.getLogger(__name__)
 
 
 # LLM: RunStateFacts is a small typed snapshot for dispatch/recovery decisions.
@@ -66,8 +83,13 @@ def normalize_channel(value: object) -> str:
 
 # LLM: can_dispatch answers whether a run is eligible to start now.
 # 函数用途: 判断 run 是否能 dispatch；RUNNING/DONE/BLOCKED 不会被重复启动。
-def can_dispatch(facts: RunStateFacts) -> bool:
-    return normalize_status(facts.status) in DISPATCHABLE_STATES
+def can_dispatch(facts: RunStateFacts, *, force: bool = False) -> bool:
+    status = normalize_status(facts.status)
+    if status in DISPATCHABLE_STATES:
+        return True
+    if not force:
+        return False
+    return status in {"FAILED", "ABANDONED"} and _attempts_available(facts)
 
 
 # LLM: can_closeout answers whether parent/root can report the run as actually complete.
@@ -85,12 +107,12 @@ def can_closeout(facts: RunStateFacts) -> bool:
 def can_repair(facts: RunStateFacts) -> bool:
     status = normalize_status(facts.status)
     if normalize_channel(facts.channel_status) == "BROKEN":
-        return True
+        return _attempts_available(facts)
     if status == "BLOCKED":
-        return True
+        return _attempts_available(facts)
     if status in {"TIMEOUT", "CHANNEL_ERROR"}:
-        return True
-    return status == "FAILED" and (facts.max_attempts <= 0 or facts.attempts < facts.max_attempts)
+        return _attempts_available(facts)
+    return status == "FAILED" and _attempts_available(facts)
 
 
 # LLM: waiting_reason exposes why execution is paused without asking callers to parse status prose.
@@ -165,28 +187,35 @@ def recovery_decision(facts: RunStateFacts) -> RecoveryDecision:
     channel = normalize_channel(facts.channel_status)
     failure = str(facts.failure_type or "").upper()
     if can_closeout(facts):
-        return RecoveryDecision("closeout", False, "done_verified")
+        return RecoveryDecision(ACTION_CLOSEOUT, False, "done_verified")
     if channel == "BROKEN":
-        return RecoveryDecision("repair_or_probe_channel", False, "channel_broken")
+        return RecoveryDecision(ACTION_REPAIR_OR_PROBE_CHANNEL, False, "channel_broken")
     if status == "DONE" and normalize_verification(facts.verification_status) not in VERIFIED_STATES:
-        return RecoveryDecision("wait_for_acceptance", False, "done_unverified")
-    if failure == "APPROVAL_REQUIRED":
-        return RecoveryDecision("request_approval_or_stop", False, "approval_required")
+        return RecoveryDecision(ACTION_WAIT_FOR_ACCEPTANCE, False, "done_unverified")
     if failure == "NO_PROGRESS":
-        return RecoveryDecision("change_strategy_or_stop", False, "no_progress")
+        return RecoveryDecision(ACTION_CHANGE_STRATEGY_OR_STOP, False, "no_progress")
+    if failure == "APPROVAL_REQUIRED":
+        return RecoveryDecision(ACTION_REQUEST_APPROVAL_OR_STOP, False, "approval_required")
     if status in DISPATCHABLE_STATES:
-        return RecoveryDecision("dispatch", False, "not_started")
+        return RecoveryDecision(ACTION_DISPATCH, False, "not_started")
     if status == "RUNNING" and not facts.has_progress:
-        return RecoveryDecision("wait_for_local_progress", False, "running_without_local_progress")
+        return RecoveryDecision(ACTION_WAIT_FOR_LOCAL_PROGRESS, False, "running_without_local_progress")
     if status in ACTIVE_STATES:
-        return RecoveryDecision("wait_or_observe", False, "already_active")
+        return RecoveryDecision(ACTION_WAIT_OR_OBSERVE, False, "already_active")
     if status == "BLOCKED" and failure in {"TOOL_UNAVAILABLE", "WRITE_FORBIDDEN", "PATH_OUTSIDE_WORKSPACE"}:
-        return RecoveryDecision("repair_or_request_capability", False, f"blocked_{failure.lower()}")
+        if can_repair(facts):
+            return RecoveryDecision(ACTION_REPAIR_OR_REQUEST_CAPABILITY, False, f"blocked_{failure.lower()}")
+        return RecoveryDecision(ACTION_TAKEOVER_OR_STOP, True, "attempts_exhausted")
+    if status == "BLOCKED" and _structured_repair_action(failure):
+        if can_repair(facts):
+            return RecoveryDecision(_structured_repair_action(failure), False, f"blocked_{failure.lower()}")
+        return RecoveryDecision(ACTION_TAKEOVER_OR_STOP, True, "attempts_exhausted")
     if can_repair(facts):
-        return RecoveryDecision("repair", False, "repairable_failure")
-    if status == "FAILED":
-        return RecoveryDecision("takeover_or_stop", True, "attempts_exhausted")
-    return RecoveryDecision("manual_review", False, f"unhandled_state_{status.lower()}")
+        return RecoveryDecision(ACTION_REPAIR, False, "repairable_failure")
+    if status in {"BLOCKED", "FAILED"}:
+        return RecoveryDecision(ACTION_TAKEOVER_OR_STOP, True, "attempts_exhausted")
+    LOGGER.warning("unhandled recovery state: status=%s failure=%s", status, failure)
+    return RecoveryDecision(ACTION_MANUAL_REVIEW, False, f"unhandled_state_{status.lower()}")
 
 
 # LLM: run_state_snapshot_from_task adapts legacy task objects into the shared state-machine contract.
@@ -203,6 +232,7 @@ def run_state_snapshot_from_task(task: object) -> dict[str, object]:
     )
     decision = recovery_decision(facts)
     return {
+        "schema_version": SCHEMA_VERSION,
         "run_id": str(getattr(task, "id", "") or ""),
         "status": normalize_status(facts.status),
         "verification_status": normalize_verification(facts.verification_status),
@@ -243,7 +273,25 @@ def _int_attr(task: object, name: str) -> int:
         return 0
 
 
+# LLM: _attempts_available applies the same retry ceiling across failed and blocked states.
+# 函数用途: 判断是否还有修复尝试次数，避免 BLOCKED 任务无限 repair。
+def _attempts_available(facts: RunStateFacts) -> bool:
+    return facts.max_attempts <= 0 or facts.attempts < facts.max_attempts
+
+
+# LLM: _structured_repair_action maps known failure contracts into repair-loop action names.
+# 函数用途: 从 error_contract 读取推荐动作，让 evidence/staged-json 等错误不落到泛化 repair。
+def _structured_repair_action(failure: str) -> str:
+    contract = error_contract(failure)
+    if contract.code == "UNKNOWN_ERROR":
+        return ""
+    if contract.category in {"artifact", "evidence", "tool", "path", "acceptance", "compact", "model", "orchestration"}:
+        return contract.recommended_action
+    return ""
+
+
 __all__ = [
+    "SCHEMA_VERSION",
     "RunStateFacts",
     "RecoveryDecision",
     "can_closeout",

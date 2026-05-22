@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .error_classification_rules import matched_error_codes
+
 
 # LLM: ErrorContract is the machine-readable description of one failure type.
 # 类用途: 保存错误代码、分类、是否可重试和推荐恢复动作，供工具/状态机/上下文包复用。
@@ -66,6 +68,27 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action="retry_with_smaller_scope_or_longer_timeout",
         recovery_hint="工具超时；缩小读取/搜索范围，或使用更合适的超时配置。",
+    ),
+    "RATE_LIMITED": ErrorContract(
+        code="RATE_LIMITED",
+        category="model",
+        retryable=True,
+        recommended_action="retry_after_backoff_or_switch_backend",
+        recovery_hint="请求触发速率限制；退避后重试，或切换可用后端。",
+    ),
+    "QUOTA_EXCEEDED": ErrorContract(
+        code="QUOTA_EXCEEDED",
+        category="model",
+        retryable=False,
+        recommended_action="switch_backend_or_request_quota",
+        recovery_hint="配额耗尽；切换可用模型/账号，或请求补充配额。",
+    ),
+    "MAINTENANCE": ErrorContract(
+        code="MAINTENANCE",
+        category="model",
+        retryable=True,
+        recommended_action="wait_or_switch_backend",
+        recovery_hint="上游处于维护窗口；等待恢复或切换后端。",
     ),
     "TOOL_REPEATED_EXACT_FAILURE": ErrorContract(
         code="TOOL_REPEATED_EXACT_FAILURE",
@@ -282,40 +305,23 @@ def error_contract(code: str) -> ErrorContract:
 # LLM: classify_error maps common raw failure text to a stable error contract.
 # 函数用途: 把工具/模型/compact 的失败文本归类为稳定错误类型，给后续恢复策略使用。
 def classify_error(message: str) -> ErrorContract:
-    text = str(message or "").lower()
-    if "approval_required" in text or "approval required" in text or "requires approval" in text:
-        return error_contract("APPROVAL_REQUIRED")
-    if "no_progress" in text or "no progress" in text or "without progress" in text:
-        return error_contract("NO_PROGRESS")
-    if "outside workspace" in text or "path_outside_workspace" in text:
-        return error_contract("PATH_OUTSIDE_WORKSPACE")
-    if "permission" in text or "forbidden" in text or "denied" in text or "write_forbidden" in text:
-        return error_contract("WRITE_FORBIDDEN")
-    if "invalid argument" in text or "invalid_parameters" in text or "schema" in text:
-        return error_contract("TOOL_INVALID_ARGUMENTS")
-    if "tool unavailable" in text or "unknown tool" in text or "not found tool" in text:
-        return error_contract("TOOL_UNAVAILABLE")
-    if "artifact" in text and ("missing" in text or "not found" in text):
-        return error_contract("ARTIFACT_MISSING")
-    if "acceptance" in text and ("failed" in text or "not passed" in text):
-        return error_contract("ACCEPTANCE_FAILED")
-    if "compact" in text and ("missing" in text or "ref" in text):
-        return error_contract("COMPACT_REF_MISSING")
-    if "provider" in text or "upstream" in text or "anthropic" in text or "model" in text:
-        return error_contract("MODEL_UPSTREAM_FAILED")
-    if "timeout" in text or "timed out" in text:
-        return error_contract("TOOL_TIMEOUT")
-    if "path" in text and ("invalid" in text or "missing" in text):
-        return error_contract("PATH_INVALID")
-    if "文件不存在" in text or "路径不存在" in text or "目标不是文件" in text:
-        return error_contract("PATH_INVALID")
+    matches = matched_error_codes(str(message or ""), ERROR_CONTRACTS.keys())
+    if matches:
+        _, code = sorted(matches, key=lambda item: (-item[0], item[1]))[0]
+        return error_contract(code)
     return error_contract("UNKNOWN_ERROR")
 
 
 # LLM: tool_failure_taxonomy exposes stable codes for ToolManifest without duplicating constants.
 # 函数用途: 返回工具清单要展示的错误分类代码列表，供 context bundle 和工具网关复用。
 def tool_failure_taxonomy() -> list[str]:
-    return list(ERROR_CONTRACTS)
+    return sorted(ERROR_CONTRACTS)
 
 
-__all__ = ["ERROR_CONTRACTS", "ErrorContract", "classify_error", "error_contract", "tool_failure_taxonomy"]
+__all__ = [
+    "ERROR_CONTRACTS",
+    "ErrorContract",
+    "classify_error",
+    "error_contract",
+    "tool_failure_taxonomy",
+]

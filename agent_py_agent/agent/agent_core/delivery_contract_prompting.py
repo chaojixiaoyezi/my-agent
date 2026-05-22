@@ -36,7 +36,7 @@ def _bootstrap_guidance_lines(contract: dict[str, object]) -> list[str]:
     if targets:
         lines.append("- 前两轮至少让下面这些结构化目标中的一个真实出现，不要连续两轮只做目录查看。")
         lines.extend(f"  - {target}" for target in targets[:6])
-        lines.append("- 阶段目标允许先写最小有效骨架：例如空 JSON 数组、带标题的 Markdown 草稿、最小可运行脚本或基础 HTML 壳子，后续再补全内容。")
+        lines.append("- 阶段目标允许先写最小有效骨架，但 JSON checkpoint 必须是可验收的非空结构，不能只写空数组或空对象。")
     if actions:
         lines.extend(_startup_action_lines(actions))
     lines.append("- 如果暂时不确定具体工具，可以先 list_tools 一次，但紧接着就开始物化目标路径。")
@@ -116,7 +116,7 @@ def _materialize_checkpoint_lines(action: dict[str, object]) -> list[str]:
         ]
     return [
         f"- 先真实写出 checkpoint: {checkpoint_ref}",
-        f"- 如果资料还没收全，先给 {checkpoint_ref} 写最小有效骨架，再继续抓取/整理。",
+        f"- 如果资料还没收全，先给 {checkpoint_ref} 写可验收的非空结构骨架，再继续抓取/整理。",
     ]
 
 

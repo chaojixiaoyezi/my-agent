@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NamedTuple
 
 from .context_bundle_file_roots import (
     append_file_root_term,
@@ -17,23 +18,28 @@ from .required_file_terms import (
 )
 
 
+class _TaskContractComponents(NamedTuple):
+    required_files: list[str]
+    product_roots: list[str]
+    required_file_refs: list[str]
+    forbidden_files: list[str]
+    source: str
+
+
 # LLM: output_contract tells the runner where durable reports and machine output must land.
 # 函数用途: 约定子代理最终报告、结构化输出、证据、测试和产物引用，避免只返回自然语言。
 def output_contract(task: SubAgentTask) -> dict[str, object]:
-    required_files = required_file_contract(task)
-    product_roots = product_write_roots(task)
-    required_file_refs = required_product_file_refs(task, required_files, product_roots)
-    source = file_contract_source(task)
+    components = task_contract_components(task)
     return {
-        "product_write_roots": product_roots,
-        "required_file_refs": required_file_refs,
-        "final_report_ref": _preferred_final_report_ref(task, required_file_refs),
+        "product_write_roots": components.product_roots,
+        "required_file_refs": components.required_file_refs,
+        "final_report_ref": _preferred_final_report_ref(task, components.required_file_refs),
         "agent_run_final_report_ref": safe_string_ref(task, "agent_run_final_report_md") or safe_string_ref(task, "debrief_file"),
         "runner_result_ref": safe_string_ref(task, "runner_result_json"),
         "output_json_ref": safe_string_ref(task, "output_json"),
-        "required_files": required_files,
-        "forbidden_files": forbidden_file_contract(task),
-        "file_contract_source": source,
+        "required_files": components.required_files,
+        "forbidden_files": components.forbidden_files,
+        "file_contract_source": components.source,
         "evidence_refs_required": True,
         "tests_ref_style": "refs_only_with_working_dir",
         "artifact_refs_required": True,
@@ -44,10 +50,7 @@ def output_contract(task: SubAgentTask) -> dict[str, object]:
 # 函数用途: 生成子代理/接管代理优先读取的结构化任务包，避免从自然语言摘要里猜路径。
 def task_packet(task: SubAgentTask) -> dict[str, object]:
     refs = workspace_refs(task)
-    required_files = required_file_contract(task)
-    product_roots = product_write_roots(task)
-    required_file_refs = required_product_file_refs(task, required_files, product_roots)
-    source = file_contract_source(task)
+    components = task_contract_components(task)
     return {
         "schema_version": "subagent_task_packet.v1",
         "run_id": task.id,
@@ -60,14 +63,14 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
         "plan": list(task.plan or []),
         "acceptance_checks": list(task.acceptance_checks or []),
         "file_contract": {
-            "required_files": required_files,
-            "required_file_refs": required_file_refs,
-            "forbidden_files": forbidden_file_contract(task),
-            "source": source,
+            "required_files": components.required_files,
+            "required_file_refs": components.required_file_refs,
+            "forbidden_files": components.forbidden_files,
+            "source": components.source,
         },
         "write_contract": {
-            "product_write_roots": product_roots,
-            "required_file_refs": required_file_refs,
+            "product_write_roots": components.product_roots,
+            "required_file_refs": components.required_file_refs,
             "allowed_write_roots": list(task.allowed_write_roots or []),
             "forbidden_write_roots": list(task.forbidden_write_roots or []),
             "locked_files": list(task.locked_files or []),
@@ -87,6 +90,20 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
         },
         "reserved": {},
     }
+
+
+# LLM: task_contract_components is the single source for task_packet/output_contract shared file facts.
+# 函数用途: 集中计算 required/product/forbidden 文件合同，避免两个出口出现细微分叉。
+def task_contract_components(task: SubAgentTask) -> _TaskContractComponents:
+    required_files = required_file_contract(task)
+    product_roots = product_write_roots(task)
+    return _TaskContractComponents(
+        required_files=required_files,
+        product_roots=product_roots,
+        required_file_refs=required_product_file_refs(task, required_files, product_roots),
+        forbidden_files=forbidden_file_contract(task),
+        source=file_contract_source(task),
+    )
 
 
 # LLM: required_file_contract extracts exact deliverable filenames from task attributes and write roots.

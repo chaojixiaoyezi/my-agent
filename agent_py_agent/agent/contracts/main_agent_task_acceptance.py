@@ -11,7 +11,6 @@ from ..tooling.file_write_session_inspection import open_file_write_sessions
 from .artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
 from .artifact_candidate_paths import report_with_candidate_paths
 from .contract_validation_recovery import recovery_for_findings
-from .staged_checkpoint_acceptance import artifact_path as staged_artifact_path
 from .staged_checkpoint_acceptance import staged_checkpoint_findings
 
 
@@ -164,7 +163,9 @@ def _acceptance_recovery_findings(
 # LLM: _artifact_path resolves preferred_path inside the task workspace.
 # 函数用途: 把结构化 preferred_path 转成绝对路径，拒绝把相对路径解析到任务目录外。
 def _artifact_path(item: dict[str, object], task_workspace: Path) -> Path:
-    return staged_artifact_path(str(item.get("preferred_path") or ""), task_workspace)
+    raw = str(item.get("preferred_path") or "")
+    candidate = Path(raw)
+    return candidate.resolve(strict=False) if candidate.is_absolute() else (task_workspace / candidate).resolve(strict=False)
 
 
 # LLM: _staged_checkpoint_findings validates machine-declared intermediate outputs.

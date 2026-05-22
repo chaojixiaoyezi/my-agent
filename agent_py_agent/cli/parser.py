@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 
 from .commands.bench import add_bench_model_command
+from .commands.contracts import add_contracts_subcommand
 from .commands.core import (
     add_basic_subcommands,
     add_local_store_subcommands,
@@ -62,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_basic_subcommands(subparsers)
     add_bench_model_command(subparsers)
+    add_contracts_subcommand(subparsers)
     add_memory_subcommands(subparsers)
     add_local_store_subcommands(subparsers)
     add_logs_subcommands(subparsers)

@@ -9,6 +9,12 @@ from pathlib import Path
 
 from .main_agent_task_acceptance import TaskRunAcceptanceReport
 from .main_agent_task_suite import MainAgentTaskCasePlan
+from .recovery_actions import (
+    ACTION_NONE,
+    ACTION_REPAIR_THEN_RESUME_SAME_CASE,
+    ACTION_RESUME_SAME_CASE_AFTER_IDLE_TIMEOUT,
+    ACTION_RESUME_SAME_CASE_AFTER_TIMEOUT,
+)
 
 SCHEMA_VERSION = "main-agent-task-recovery.v1"
 
@@ -84,12 +90,12 @@ def _packet_payload(request: TaskRunRecoveryPacketRequest) -> dict[str, object]:
 # 函数用途: 根据状态和原因码返回续跑动作码；不检查 stdout 或用户 prompt 内容。
 def _recommended_action(request: TaskRunRecoveryPacketRequest) -> str:
     if request.status == "DONE":
-        return "none"
+        return ACTION_NONE
     if "activity_timeout" in request.reason_codes:
-        return "resume_same_case_after_idle_timeout"
+        return ACTION_RESUME_SAME_CASE_AFTER_IDLE_TIMEOUT
     if "timeout" in request.reason_codes:
-        return "resume_same_case_after_timeout"
-    return "repair_then_resume_same_case"
+        return ACTION_RESUME_SAME_CASE_AFTER_TIMEOUT
+    return ACTION_REPAIR_THEN_RESUME_SAME_CASE
 
 
 # LLM: _refs_payload normalizes all recovery anchors to workspace-relative refs.

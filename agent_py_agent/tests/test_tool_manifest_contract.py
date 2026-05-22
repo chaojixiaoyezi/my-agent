@@ -9,7 +9,8 @@ def test_tool_manifest_payload_includes_failure_contracts():
     assert payload["visible_tools"] == ["read_file", "write_file"]
     assert payload["executable_tools"] == ["read_file", "write_file"]
     assert payload["permission_mode"] == "same_as_root_agent"
-    assert payload["failure_taxonomy"][0] == "PATH_INVALID"
+    assert payload["failure_taxonomy"] == sorted(payload["failure_taxonomy"])
+    assert "PATH_INVALID" in payload["failure_taxonomy"]
     failure_contracts = {item["code"]: item for item in payload["failure_contracts"]}
     assert failure_contracts["TOOL_UNAVAILABLE"]["recommended_action"] == "request_capability_or_choose_available_tool"
     assert failure_contracts["APPROVAL_REQUIRED"]["retryable"] is True

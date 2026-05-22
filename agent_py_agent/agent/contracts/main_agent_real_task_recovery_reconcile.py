@@ -19,6 +19,8 @@ def reconcile_recovery_open_write_sessions(
     workspace: Path,
 ) -> dict[str, object]:
     payload = recovery_packet_payload(packet_path)
+    if _is_invalid_packet(payload):
+        return _invalid_packet_summary(payload, "real-task-recovery-reconcile.v1")
     task_workspace = _task_workspace(payload, workspace)
     findings = _dedupe_findings([*_workspace_findings(task_workspace), *_runtime_findings(payload)])
     groups = _duplicate_groups(findings)
@@ -122,6 +124,9 @@ def _reconcile_group(
     already_closed_session_ids = [
         str(item["session_id"]) for item in retired if item.get("action") == "already_closed"
     ]
+    invalid_manifest_ref_session_ids = [
+        str(item["session_id"]) for item in retired if item.get("action") == "invalid_manifest_ref"
+    ]
     return {
         "target_path": target,
         "kept_session_id": str(chosen.get("session_id") or ""),
@@ -130,13 +135,23 @@ def _reconcile_group(
         "retired_session_ids": [str(item["session_id"]) for item in retired if item.get("session_id")],
         "aborted_session_ids": aborted_session_ids,
         "already_closed_session_ids": already_closed_session_ids,
+        "invalid_manifest_ref_session_ids": invalid_manifest_ref_session_ids,
     }
 
 
 # LLM: _retire_manifest records every non-kept duplicate so stale packets cannot revive it.
 # 函数用途: open manifest 会被标为 aborted；已经 closed/aborted 的 manifest 会作为 retired 结构化返回。
 def _retire_manifest(finding: dict[str, object], task_workspace: Path) -> dict[str, str]:
-    path = _manifest_path(finding, task_workspace)
+    try:
+        path = _manifest_path(finding, task_workspace)
+    except ValueError as exc:
+        return {
+            "session_id": str(finding.get("session_id") or ""),
+            "action": "invalid_manifest_ref",
+            "status": "invalid",
+            "error_code": "MANIFEST_PATH_OUTSIDE_WORKSPACE",
+            "error": str(exc),
+        }
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -166,6 +181,20 @@ def _manifest_path(finding: dict[str, object], task_workspace: Path) -> Path:
     except ValueError as exc:
         raise ValueError("manifest_path outside task workspace") from exc
     return path
+
+
+def _is_invalid_packet(payload: dict[str, object]) -> bool:
+    return str(payload.get("status") or "") == "invalid_recovery_packet"
+
+
+def _invalid_packet_summary(payload: dict[str, object], schema_version: str) -> dict[str, object]:
+    return {
+        "schema_version": schema_version,
+        "status": "invalid_recovery_packet",
+        "recommended_action": payload.get("recommended_action") or "write_new_recovery_packet_or_restart_case",
+        "reason_codes": list(payload.get("reason_codes") or []),
+        "findings": list(payload.get("findings") or []),
+    }
 
 
 # LLM: _progress ranks sessions by received chunks and next chunk index.

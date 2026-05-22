@@ -116,12 +116,20 @@ def _test_finding(records: list[Any]) -> dict[str, Any]:
 # LLM: _criteria_finding records whether the contract carried explicit completion criteria.
 # 函数用途: 把验收条目是否存在写进结果；缺失时为软提示，避免假装没有风险。
 def _criteria_finding(contract: AcceptanceContract) -> dict[str, Any]:
-    ok = bool(contract.items or contract.required_artifact_kinds or contract.latest_tests)
+    criteria = [str(item) for item in contract.items if str(item).strip()]
+    constraints = [str(item) for item in contract.constraints if str(item).strip()]
+    latest_tests = [str(item) for item in contract.latest_tests if str(item).strip()]
+    required_artifact_kinds = [str(item) for item in contract.required_artifact_kinds if str(item).strip()]
+    ok = bool(criteria or constraints or required_artifact_kinds or latest_tests)
     return {
         "code": "ACCEPTANCE_CRITERIA_RECORDED" if ok else "ACCEPTANCE_CRITERIA_MISSING",
         "ok": ok,
         "severity": "soft",
         "message": "acceptance criteria recorded" if ok else "acceptance criteria not recorded",
+        "items": criteria,
+        "constraints": constraints,
+        "latest_tests": latest_tests,
+        "required_artifact_kinds": required_artifact_kinds,
     }
 
 

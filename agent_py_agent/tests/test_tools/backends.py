@@ -59,10 +59,16 @@ class UnclosedWriteFileBackend(BaseBackend):
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
-                text='[TOOL_CALL]\n{"tool":"write_file","path":"index.html","content":"<main>ok</main>"}',
+                text=(
+                    "[TOOL_CALL]\n"
+                    '{"tool":"write_file","path":"index.html",'
+                    '"content":"<!doctype html><html><head><title>OK</title></head><body><main>ok</main></body></html>"}'
+                ),
                 backend=self.name,
             )
-        assert (self.workspace / "index.html").read_text(encoding="utf-8") == "<main>ok</main>"
+        assert (self.workspace / "index.html").read_text(encoding="utf-8") == (
+            "<!doctype html><html><head><title>OK</title></head><body><main>ok</main></body></html>"
+        )
         assert "已写入文件" in prompt
         return ModelResponse(text="写入完成", backend=self.name)
 

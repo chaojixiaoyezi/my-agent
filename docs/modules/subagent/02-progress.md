@@ -1836,3 +1836,9 @@
 - 中文说明：本轮没有改变子代理静态站点验收行为，只补齐 `static_site_js_api_checks.py` 的函数级 LLM/人类用途注释。
 - 已实现：注释明确 JS API 检查只比较 `app.method()` 调用和结构化导出集合，不从普通页面文案或任务描述推断业务事实。
 - 已测试：annotation coverage、ruff、code-size strict、contract pyramid、离线矩阵、replay 和 fast pytest 已纳入本轮验证。
+
+## 2026-05-23 子代理任务合同组件去重
+
+- 中文说明：`output_contract()` 和 `task_packet()` 之前各自重新计算 required/product/forbidden 文件合同，容易以后一个入口改了另一个漏。现在改为共用 `task_contract_components()`，让文件合同只在一个结构化 helper 里计算。
+- 已实现：`subagents/context_bundle_contracts.py` 新增 `_TaskContractComponents` 和 `task_contract_components()`；`output_contract()` 与 `task_packet()` 共享同一组 required files、product write roots、required refs、forbidden files 和 source。
+- 边界说明：这只是去重合同计算，不新增自然语言路径解析；机器事实仍来自 `required_files`、`output_refs`、`artifact_refs`、product roots 等结构化字段。

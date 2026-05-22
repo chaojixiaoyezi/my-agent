@@ -140,6 +140,27 @@ def test_validate_artifact_routes_common_formats(tmp_path):
     assert {report.artifact_kind for report in reports} == {"json", "csv", "xlsx", "pdf"}
 
 
+# LLM: CSV data-row strictness should be a structured contract threshold, not a one-size hard stop.
+# 函数用途: 验证最终 CSV 默认仍要求数据行，但阶段性表头文件可用 min_data_rows=0 明确放行。
+def test_validate_artifact_csv_data_row_threshold_is_contract_driven(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_artifact,
+    )
+
+    path = tmp_path / "draft.csv"
+    path.write_text("name,value\n", encoding="utf-8")
+
+    strict = validate_artifact(ArtifactAcceptanceRequest(path=path))
+    staged = validate_artifact(
+        ArtifactAcceptanceRequest(path=path, validation_contract={"min_data_rows": 0})
+    )
+
+    assert strict.ok is False
+    assert strict.findings[0].code == "CSV_INSUFFICIENT_DATA_ROWS"
+    assert staged.ok is True
+
+
 # LLM: Artifact acceptance reports should expose a structured ArtifactRef, not only a path string.
 # 函数用途: 验证产物验收报告包含 artifact_id、path、kind、hash、size，后续恢复和 QA 不用解析自然语言。
 def test_validate_artifact_report_contains_structured_artifact_ref(tmp_path):
@@ -176,6 +197,28 @@ def test_validate_artifact_reports_invalid_json(tmp_path):
     assert report.ok is False
     assert report.artifact_kind == "json"
     assert report.findings[0].code == "JSON_INVALID"
+
+
+# LLM: Generic binary acceptance should reject known extensions with impossible signatures.
+# 函数用途: 验证未知格式的 fallback 也会检查常见二进制签名，避免坏图片/压缩包只因非空而通过。
+def test_validate_generic_artifact_checks_known_binary_signatures(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_artifact,
+    )
+
+    png_path = tmp_path / "preview.png"
+    png_path.write_bytes(b"not-a-real-png")
+    zip_path = tmp_path / "bundle.zip"
+    zip_path.write_bytes(b"not-a-real-zip")
+
+    png_report = validate_artifact(ArtifactAcceptanceRequest(path=png_path))
+    zip_report = validate_artifact(ArtifactAcceptanceRequest(path=zip_path))
+
+    assert png_report.ok is False
+    assert png_report.findings[0].code == "ARTIFACT_INVALID_SIGNATURE"
+    assert zip_report.ok is False
+    assert zip_report.findings[0].code == "ARTIFACT_INVALID_SIGNATURE"
 
 
 # LLM: Web project directories must be validated by their declared static-site contract, not as generic folders.

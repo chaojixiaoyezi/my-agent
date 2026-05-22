@@ -26,7 +26,11 @@ def revalidate_main_agent_real_task_execution(
     workspace: Path | None = None,
 ) -> MainAgentRealTaskExecutionReport:
     base = Path(workspace).expanduser().resolve() if workspace else Path(report_path).parent.parent
-    payload = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    payload, load_error = _read_report_payload(Path(report_path))
+    if load_error:
+        report = _invalid_report(Path(report_path), base, load_error)
+        write_json(Path(report_path), report.to_dict())
+        return report
     cases = [_revalidate_case(item, workspace=base) for item in _payload_cases(payload)]
     report = MainAgentRealTaskExecutionReport(
         ok=not any(case.status == "FAILED" for case in cases),
@@ -40,6 +44,51 @@ def revalidate_main_agent_real_task_execution(
     )
     write_json(Path(report_path), report.to_dict())
     return report
+
+
+# LLM: _read_report_payload turns corrupt report files into a structured error record.
+# 函数用途: 读取 execution_report.json；坏 JSON/非对象报告不抛原始异常，交给 revalidate 写失败报告。
+def _read_report_payload(report_path: Path) -> tuple[dict[str, object], dict[str, str] | None]:
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return {}, {"code": "REVALIDATION_REPORT_INVALID_JSON", "message": exc.msg}
+    except OSError as exc:
+        return {}, {"code": "REVALIDATION_REPORT_UNREADABLE", "message": str(exc)}
+    if not isinstance(payload, dict):
+        return {}, {"code": "REVALIDATION_REPORT_NOT_OBJECT", "message": "execution report must be a JSON object"}
+    return payload, None
+
+
+# LLM: _invalid_report preserves the public report shape when revalidation cannot read the old report.
+# 函数用途: 用一个 synthetic failed case 承载读报告失败码，避免 CLI/恢复链路被异常截断。
+def _invalid_report(report_path: Path, workspace: Path, error: dict[str, str]) -> MainAgentRealTaskExecutionReport:
+    case = MainAgentRealTaskExecutionCaseResult(
+        case_id="__report__",
+        title="Invalid execution report",
+        status="FAILED",
+        worker_slot=0,
+        timeout_seconds=0,
+        prompt_ref="",
+        config_ref="",
+        command_ref="",
+        stdout_ref="",
+        stderr_ref="",
+        acceptance_report_ref="",
+        events_ref="",
+        acceptance_summary={"passed": 0, "failed": 1},
+        issues=[str(error.get("code") or "REVALIDATION_REPORT_INVALID")],
+    )
+    return MainAgentRealTaskExecutionReport(
+        ok=False,
+        schema_version=SCHEMA_VERSION,
+        execution_mode="revalidate",
+        summary=_summary([case]),
+        concurrency={"requested_max_workers": 1, "effective_max_workers": 1, "case_count": 1},
+        suite_report_ref="",
+        report_ref=rel(report_path, workspace),
+        cases=[case],
+    )
 
 
 # LLM: _revalidate_case reconstructs one case result from refs and artifact contracts.

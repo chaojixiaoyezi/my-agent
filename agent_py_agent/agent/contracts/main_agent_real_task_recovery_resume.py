@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from .main_agent_real_task_recovery_packet import SCHEMA_VERSION
+
+LOGGER = logging.getLogger(__name__)
 
 
 # LLM: recovery_packet_payload validates the packet schema before any resume run starts.
@@ -14,13 +17,25 @@ from .main_agent_real_task_recovery_packet import SCHEMA_VERSION
 def recovery_packet_payload(packet_path: Path | None) -> dict[str, object]:
     if packet_path is None:
         return {}
-    payload = json.loads(Path(packet_path).expanduser().read_text(encoding="utf-8"))
+    path = Path(packet_path).expanduser()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return _invalid_packet(path, "RECOVERY_PACKET_INVALID_JSON", exc.msg)
+    except OSError as exc:
+        return _invalid_packet(path, "RECOVERY_PACKET_UNREADABLE", str(exc))
     if not isinstance(payload, dict):
-        raise ValueError("recovery packet must be a JSON object")
+        return _invalid_packet(path, "RECOVERY_PACKET_NOT_OBJECT", "recovery packet must be a JSON object")
     if payload.get("schema_version") != SCHEMA_VERSION:
-        raise ValueError("unsupported recovery packet schema_version")
+        LOGGER.warning(
+            "unsupported recovery packet schema_version: expected=%s actual=%s path=%s",
+            SCHEMA_VERSION,
+            payload.get("schema_version"),
+            path,
+        )
+        return _invalid_packet(path, "RECOVERY_PACKET_UNSUPPORTED_SCHEMA", "unsupported recovery packet schema_version")
     if not str(payload.get("case_id") or "").strip():
-        raise ValueError("recovery packet missing case_id")
+        return _invalid_packet(path, "RECOVERY_PACKET_MISSING_CASE_ID", "recovery packet missing case_id")
     return payload
 
 
@@ -37,6 +52,10 @@ def case_ids_for_recovery_request(
     requested_case_ids: tuple[str, ...],
     packet_path: Path | None,
 ) -> tuple[str, ...]:
+    payload = recovery_packet_payload(packet_path)
+    if _is_invalid_packet(payload):
+        code = _first_reason_code(payload)
+        raise ValueError(code)
     resume_case_id = recovery_case_id(packet_path)
     if not resume_case_id:
         return requested_case_ids
@@ -56,6 +75,15 @@ def recovery_delivery_contract_payload(
         return {}
     path = Path(packet_path).expanduser().resolve()
     payload = recovery_packet_payload(path)
+    if _is_invalid_packet(payload):
+        return {
+            "schema_version": payload.get("schema_version"),
+            "status": payload.get("status"),
+            "recommended_action": payload.get("recommended_action"),
+            "reason_codes": list(payload.get("reason_codes") or []),
+            "packet_ref": _rel(path, workspace),
+            "findings": list(payload.get("findings") or []),
+        }
     return {
         "schema_version": payload.get("schema_version"),
         "case_id": payload.get("case_id"),
@@ -107,6 +135,36 @@ def _rel(path: Path, base: Path) -> str:
         return str(path.relative_to(base))
     except ValueError:
         return str(path)
+
+
+# LLM: _invalid_packet keeps corrupt recovery inputs machine-readable for reconcile and delivery gates.
+# 函数用途: 将坏 recovery_packet 归一成结构化 payload，避免 JSONDecodeError 或 schema ValueError 泄漏到上层。
+def _invalid_packet(path: Path, code: str, message: str) -> dict[str, object]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "case_id": "",
+        "status": "invalid_recovery_packet",
+        "recommended_action": "write_new_recovery_packet_or_restart_case",
+        "reason_codes": [code],
+        "packet_path": str(path),
+        "findings": [
+            {
+                "code": code,
+                "severity": "hard",
+                "message": message,
+                "packet_path": str(path),
+            }
+        ],
+    }
+
+
+def _is_invalid_packet(payload: dict[str, object]) -> bool:
+    return str(payload.get("status") or "") == "invalid_recovery_packet"
+
+
+def _first_reason_code(payload: dict[str, object]) -> str:
+    codes = payload.get("reason_codes")
+    return str(codes[0]) if isinstance(codes, list) and codes else "RECOVERY_PACKET_INVALID"
 
 
 __all__ = [

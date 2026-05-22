@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import csv
 import json
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
@@ -15,13 +14,14 @@ from .artifact_acceptance_models import (
     artifact_ref_payload,
     kind_for_path,
 )
+from .artifact_binary_signature import binary_signature_finding
 from .artifact_collection_contract import collection_contract_findings
+from .artifact_csv_acceptance import validate_csv_artifact
 from .artifact_html_contract import html_contract_findings, record_resource_ref
 from .artifact_html_refs import image_ref_findings, scan_html_refs
 from .artifact_staged_evidence import staged_source_evidence_findings
 from .artifact_static_site_contract import validate_static_site_artifact
 from .artifact_structured_contracts import (
-    csv_contract_findings,
     json_contract_findings,
     markdown_section_findings,
     text_size_findings,
@@ -159,7 +159,7 @@ def _validate_markdown_request(request: ArtifactAcceptanceRequest) -> ArtifactAc
 # LLM: _validate_csv_request adapts the path-based validator to the shared request shape.
 # 函数用途: 保持注册表只处理 ArtifactAcceptanceRequest，不暴露内部 path-only helper。
 def _validate_csv_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
-    return _validate_csv(Path(request.path), request.validation_contract)
+    return validate_csv_artifact(Path(request.path), request.validation_contract)
 
 
 # LLM: _validate_xlsx_request passes validation_contract through the registry entrypoint.
@@ -230,30 +230,6 @@ def _validate_markdown(
     )
 
 
-# LLM: _validate_csv ensures table-like outputs have at least a header and one data row.
-# 函数用途: 验证 CSV 能被标准库解析、不是空表，并满足合同声明的 required_columns。
-def _validate_csv(path: Path, validation_contract: dict[str, object] | None = None) -> ArtifactAcceptanceReport:
-    try:
-        rows = list(csv.reader(path.read_text(encoding="utf-8-sig").splitlines()))
-    except csv.Error as exc:
-        finding = ArtifactFinding(code="CSV_INVALID", severity="hard", message=f"Invalid CSV: {exc}")
-        return _report_with_finding(path, "csv", finding)
-    if len(rows) < 2 or not any(cell.strip() for cell in rows[0]):
-        finding = ArtifactFinding(
-            code="CSV_EMPTY_OR_HEADERLESS",
-            severity="hard",
-            message="CSV must include a header and data row.",
-        )
-        return _report_with_finding(path, "csv", finding)
-    findings = csv_contract_findings(path, rows, validation_contract or {})
-    return ArtifactAcceptanceReport(
-        ok=not any(item.severity == "hard" for item in findings),
-        artifact_ref=str(path),
-        artifact_kind="csv",
-        findings=findings,
-    )
-
-
 # LLM: _validate_xlsx performs a lightweight workbook integrity check without new dependencies.
 # 函数用途: 验证 xlsx 是可打开的 zip 工作簿，并且至少包含 workbook 和 worksheet 文件。
 def _validate_xlsx(
@@ -318,6 +294,9 @@ def _validate_pdf(
 def _validate_generic(path: Path) -> ArtifactAcceptanceReport:
     if path.stat().st_size <= 0:
         finding = ArtifactFinding(code="ARTIFACT_EMPTY", severity="hard", message="Artifact is empty.")
+        return _report_with_finding(path, kind_for_path(path), finding)
+    finding = binary_signature_finding(path)
+    if finding is not None:
         return _report_with_finding(path, kind_for_path(path), finding)
     return ArtifactAcceptanceReport(ok=True, artifact_ref=str(path), artifact_kind=kind_for_path(path))
 

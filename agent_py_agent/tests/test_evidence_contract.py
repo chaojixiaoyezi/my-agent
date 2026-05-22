@@ -41,6 +41,53 @@ def test_evidence_contract_accepts_sourced_claims():
     assert report.to_dict()["summary"]["verified_claims"] == 1
 
 
+# LLM: The shared evidence primitive should not force final-delivery verification by default.
+# 函数用途: 验证基础证据合同默认只要求有来源；最终交付严格性由上层合同显式 require_verified 控制。
+def test_evidence_contract_default_allows_sourced_pending_claims():
+    from agent_py_agent.agent.contracts.evidence_contract import (
+        EvidenceClaim,
+        EvidenceContractRequest,
+        EvidenceSourceRef,
+        evaluate_evidence_contract,
+    )
+
+    report = evaluate_evidence_contract(
+        EvidenceContractRequest(
+            source_refs=[EvidenceSourceRef(source_id="src-1", uri="https://example.com")],
+            claims=[
+                EvidenceClaim(
+                    claim_id="claim-1",
+                    field="weekly_star_growth",
+                    value=120,
+                    source_ids=["src-1"],
+                    verification_status="PENDING",
+                )
+            ],
+            required_fields=["weekly_star_growth"],
+        )
+    )
+    strict_report = evaluate_evidence_contract(
+        EvidenceContractRequest(
+            source_refs=[EvidenceSourceRef(source_id="src-1", uri="https://example.com")],
+            claims=[
+                EvidenceClaim(
+                    claim_id="claim-1",
+                    field="weekly_star_growth",
+                    value=120,
+                    source_ids=["src-1"],
+                    verification_status="PENDING",
+                )
+            ],
+            required_fields=["weekly_star_growth"],
+            require_verified=True,
+        )
+    )
+
+    assert report.ok is True
+    assert strict_report.ok is False
+    assert [item["code"] for item in strict_report.findings] == ["EVIDENCE_CLAIM_UNVERIFIED"]
+
+
 # LLM: Generated tables must not pass when key numeric fields have no source ref.
 # 函数用途: 固定 GitHub star XLSX 真实测试暴露的问题；没有证据的增长数字不能当真。
 def test_evidence_contract_rejects_unsourced_required_claims():

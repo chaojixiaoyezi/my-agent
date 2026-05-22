@@ -289,7 +289,9 @@ def test_tool_loop_executes_complete_unclosed_write_file_tool_call():
         assert result.response == "写入完成"
         assert result.tool_rounds == 1
         assert agent.backend.calls == 2
-        assert (workspace / "index.html").read_text(encoding="utf-8") == "<main>ok</main>"
+        assert (workspace / "index.html").read_text(encoding="utf-8") == (
+            "<!doctype html><html><head><title>OK</title></head><body><main>ok</main></body></html>"
+        )
 
 
 # LLM: per-agent budget should block repeated tool calls only for the active run id.

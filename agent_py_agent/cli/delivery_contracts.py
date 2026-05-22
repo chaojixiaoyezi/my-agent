@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
+
+LOGGER = logging.getLogger(__name__)
 
 
 # LLM: delivery_contract_from_file loads JSON object contracts for RunParams.
@@ -15,7 +18,8 @@ def delivery_contract_from_file(value: str) -> dict[str, object] | None:
         return None
     try:
         payload = json.loads(Path(path_text).expanduser().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        LOGGER.warning("failed to read delivery contract: %s", exc)
         return None
     return payload if isinstance(payload, dict) else None
 

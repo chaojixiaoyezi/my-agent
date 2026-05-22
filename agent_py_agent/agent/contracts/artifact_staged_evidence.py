@@ -7,7 +7,11 @@ import json
 from pathlib import Path
 
 from .artifact_acceptance_models import ArtifactFinding
-from .staged_checkpoint_acceptance import staged_json_evidence_findings
+from .staged_checkpoint_acceptance import (
+    StagedEvidenceOptions,
+    StagedEvidenceRequest,
+    staged_json_evidence_findings,
+)
 
 
 # LLM: staged_source_evidence_findings 是 agent_py_agent/agent/contracts/artifact_staged_evidence.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
@@ -21,7 +25,16 @@ def staged_source_evidence_findings(
     source_ref = staging.get("source_json_ref") if isinstance(staging, dict) else ""
     if not isinstance(evidence_contract, dict) or not source_ref:
         return []
-    return _evidence_finding_records(staged_json_evidence_findings(str(source_ref), workspace_root, evidence_contract))
+    return _evidence_finding_records(
+        staged_json_evidence_findings(
+            StagedEvidenceRequest(
+                str(source_ref),
+                workspace_root,
+                evidence_contract,
+                StagedEvidenceOptions(phase="final"),
+            )
+        )
+    )
 
 
 # LLM: _evidence_finding_records 是 agent_py_agent/agent/contracts/artifact_staged_evidence.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。

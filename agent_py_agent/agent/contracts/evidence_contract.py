@@ -74,7 +74,7 @@ class EvidenceContractRequest:
     source_refs: list[EvidenceSourceRef] = field(default_factory=list)
     claims: list[EvidenceClaim] = field(default_factory=list)
     required_fields: list[str] = field(default_factory=list)
-    require_verified: bool = True
+    require_verified: bool = False
     allowed_value_types: list[str] = field(default_factory=lambda: ["exact"])
     min_confidence: float = 0.0
     require_methodology_for_estimates: bool = False

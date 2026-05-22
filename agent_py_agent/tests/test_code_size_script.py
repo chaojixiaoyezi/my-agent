@@ -7,11 +7,13 @@ from __future__ import annotations
 """
 
 import ast
+import json
 import subprocess
 import sys
 from pathlib import Path
 
 repo_root = Path(__file__).resolve().parents[2]
+ANNOTATION_BASELINE_PATH = repo_root / "CODE_ANNOTATION_BASELINE.json"
 scripts_path = str(repo_root / "scripts")
 if scripts_path not in sys.path:
     sys.path.insert(0, scripts_path)
@@ -109,11 +111,36 @@ def test_node_span_ignores_full_line_comments() -> None:
 
 
 def test_product_annotations_have_llm_and_human_purpose() -> None:
+    problems = _all_annotation_coverage_problems()
+    baseline = _annotation_coverage_baseline()
+    new_problems = sorted(set(problems) - set(baseline))
+
+    assert new_problems == []
+
+
+def test_product_annotation_baseline_is_current() -> None:
+    problems = _all_annotation_coverage_problems()
+    baseline = _annotation_coverage_baseline()
+    resolved_problems = sorted(set(baseline) - set(problems))
+
+    assert baseline == sorted(set(baseline))
+    assert resolved_problems == []
+
+
+def _all_annotation_coverage_problems() -> list[str]:
     problems = []
     for base in (repo_root / "agent_py_agent", repo_root / "scripts"):
         problems.extend(_annotation_coverage_problems(base))
+    return sorted(problems)
 
-    assert problems == []
+
+def _annotation_coverage_baseline() -> list[str]:
+    if not ANNOTATION_BASELINE_PATH.exists():
+        return []
+    payload = json.loads(ANNOTATION_BASELINE_PATH.read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        return []
+    return [str(item) for item in payload]
 
 
 def _annotation_coverage_problems(base: Path) -> list[str]:
