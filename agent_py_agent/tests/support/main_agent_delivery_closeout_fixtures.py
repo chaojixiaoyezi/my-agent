@@ -87,6 +87,68 @@ class IncompleteDeliveryContractBackend:
         return ModelResponse(text="已收到不完整 HTML 的结构化反馈。", backend=self.name)
 
 
+# LLM: ArtifactFindingRepairBackend proves failed artifact findings can be repaired and revalidated.
+# 类用途: 第一轮写出不合格 HTML；第二轮必须收到结构化 repair_required 后写合格文件并自动收口。
+class ArtifactFindingRepairBackend:
+    name = "fake_artifact_finding_repair_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    '{"tool":"write_file","path":"outputs/furniture_homepage/index.html",'
+                    '"content":"<!doctype html><html><head><link rel=\\"stylesheet\\" '
+                    'href=\\"https://fonts.example/font.css\\"></head><body><main>Bad</main>"}\n'
+                    "[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        if self.calls == 2:
+            assert "delivery-contract-check" in prompt
+            assert "HTML_INCOMPLETE_DOCUMENT" in prompt
+            assert "HTML_EXTERNAL_RESOURCE_REF" in prompt
+            assert "repair_required" in prompt
+            return _write_file_response(
+                "outputs/furniture_homepage/index.html",
+                '<!doctype html><html><head><title>Maison</title><style>body{color:#111}</style></head><body><main>Ready</main></body></html>',
+                self.name,
+            )
+        raise AssertionError("artifact finding repair should close out after the repaired write")
+
+
+# LLM: MissingArtifactRepairBackend proves wrong-path output is repaired through artifact refs.
+# 类用途: 第一轮写到错误路径；第二轮必须收到 ARTIFACT_MISSING recovery 后写到合同路径并通过验收。
+class MissingArtifactRepairBackend:
+    name = "fake_missing_artifact_repair_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return _write_file_response(
+                "outputs/wrong_homepage/index.html",
+                '<!doctype html><html><head><title>Wrong</title></head><body><main>Wrong path</main></body></html>',
+                self.name,
+            )
+        if self.calls == 2:
+            assert "delivery-contract-check" in prompt
+            assert "ARTIFACT_MISSING" in prompt
+            assert "repair_required" in prompt
+            return _write_file_response(
+                "outputs/furniture_homepage/index.html",
+                '<!doctype html><html><head><title>Maison</title></head><body><main>Correct path</main></body></html>',
+                self.name,
+            )
+        raise AssertionError("missing artifact repair should close out after writing the contracted path")
+
+
 # LLM: OpenWriteSessionDeliveryBackend creates a valid-looking artifact while leaving staged writes open.
 # 类用途: 复现真实 E2E 中目录验收提前收口的问题；系统必须先处理 open file_write_session。
 class OpenWriteSessionDeliveryBackend:

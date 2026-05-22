@@ -6,10 +6,10 @@ from __future__ import annotations
 
 def action_status(status: str, code: str) -> str:
     upper_status = str(status or "").strip().upper()
-    if code in {"APPROVAL_REQUIRED", "APPROVAL_BINDING_MISMATCH", "TOOL_NOT_ALLOWED"} or upper_status == "NEED_APPROVAL":
-        return "needs_user_input"
     if hard_stop_code(code):
         return "blocked"
+    if code.startswith("APPROVAL_") or code == "TOOL_NOT_ALLOWED" or upper_status in {"NEED_APPROVAL", "WAITING_HUMAN"}:
+        return "needs_user_input"
     if upper_status == "RECOVERING" or recovering_code(code):
         return "recovering"
     if upper_status in {"NEED_REPAIR", "DENY", "BLOCKED"} and repairable_code(code):

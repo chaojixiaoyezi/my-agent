@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from agent_py_agent.agent.contracts.acceptance_contract import AcceptanceResult
+from agent_py_agent.agent.contracts.approval_gate import ApprovalGateDecision
 from agent_py_agent.agent.contracts.artifact_acceptance_models import (
     ArtifactAcceptanceReport,
     ArtifactFinding,
@@ -11,6 +12,7 @@ from agent_py_agent.agent.contracts.effective_contract_snapshot import (
     validate_replay_effective_contract,
 )
 from agent_py_agent.agent.contracts.evidence_contract import EvidenceContractReport
+from agent_py_agent.agent.contracts.gates import GateDecision, GateFinding
 from agent_py_agent.agent.contracts.main_agent_real_task_acceptance import (
     RealTaskAcceptanceReport,
 )
@@ -118,3 +120,27 @@ def test_acceptance_reports_include_recovery_when_rejected() -> None:
 
     for report in reports:
         _assert_recovery(report)
+
+
+def test_approval_waiting_failures_request_user_input_instead_of_blocking() -> None:
+    for decision in [
+        ApprovalGateDecision(False, "WAITING_HUMAN", "APPROVAL_NOT_FOUND", "approval-1"),
+        ApprovalGateDecision(False, "WAITING_HUMAN", "APPROVAL_PENDING", "approval-1"),
+    ]:
+        recovery = decision.to_dict()["recovery"]
+        assert recovery["status"] == "needs_user_input"
+        assert recovery["requires_user"] is True
+        assert recovery["next_status"] == "WAITING_APPROVAL"
+
+
+def test_gate_decision_failures_use_consistent_recovery_statuses() -> None:
+    rows = [
+        (GateDecision.repair("artifact_gate", [GateFinding("ARTIFACT_MISSING")]), "repair_required"),
+        (GateDecision.need_approval("approval_gate"), "needs_user_input"),
+        (GateDecision.recovering("runlog_gate", [GateFinding("RUNLOG_STATE_MISSING")]), "recovering"),
+        (GateDecision.block("state_gate", "STATE_CHECKSUM_MISMATCH"), "blocked"),
+    ]
+    for decision, expected_status in rows:
+        recovery = decision.to_dict()["recovery"]
+        assert recovery["status"] == expected_status
+        assert recovery["actions"]

@@ -15,6 +15,7 @@ from agent_py_agent.agent.backend import ModelResponse
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.tests.support.main_agent_delivery_closeout_fixtures import (
+    ArtifactFindingRepairBackend,
     BootstrapMaterializationProgressiveBackend,
     BootstrapMaterializationRedirectBackend,
     DeliveryContractBackend,
@@ -22,6 +23,7 @@ from agent_py_agent.tests.support.main_agent_delivery_closeout_fixtures import (
     FailedDeliveryContractBackend,
     IncompleteDeliveryContractBackend,
     LocalProgressRedirectBackend,
+    MissingArtifactRepairBackend,
     NoProgressDeliveryBackend,
     OpenWriteSessionDeliveryBackend,
     PendingTargetsDeliveryBackend,
@@ -120,6 +122,39 @@ def test_tool_loop_does_not_close_out_when_delivery_contract_fails():
         assert "write_file" in repair["write_tools"]
         assert "HTML_INCOMPLETE_DOCUMENT" in repair["finding_codes"]
         assert any(str(path).endswith("outputs/furniture_homepage/index.html") for path in repair["repair_targets"])
+
+
+# LLM: Failed artifact findings should repair in the next model turn and then close out.
+# 函数用途: 覆盖“合同失败 -> recovery 注入 -> 模型返工 -> 再验收通过”的完整闭环。
+def test_tool_loop_repairs_failed_artifact_findings_before_closeout():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        backend = ArtifactFindingRepairBackend()
+        result = _agent(workspace, backend, max_tool_rounds=4).run(
+            delivery_contract_prompt(),
+            params=RunParams(delivery_contract=delivery_contract(), save=False),
+        )
+
+        assert backend.calls == 2
+        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
+        assert _closeout_report(workspace)["ok"] is True
+
+
+# LLM: Missing artifact refs should repair via the contracted path rather than stop after one failure.
+# 函数用途: 覆盖模型写错路径时，delivery closeout 通过结构化 recovery 打回到正确产物路径。
+def test_tool_loop_repairs_missing_artifact_to_contract_path_before_closeout():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        backend = MissingArtifactRepairBackend()
+        result = _agent(workspace, backend, max_tool_rounds=4).run(
+            delivery_contract_prompt(),
+            params=RunParams(delivery_contract=delivery_contract(), save=False),
+        )
+
+        assert backend.calls == 2
+        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
+        assert (workspace / "outputs/furniture_homepage/index.html").exists()
+        assert _closeout_report(workspace)["ok"] is True
 
 
 # LLM: Incomplete contracted artifacts must not trigger delivery completion.
