@@ -5,7 +5,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from agent_py_agent.agent.contracts.main_agent_real_task_execution import _activity_timeout_seconds
+from agent_py_agent.agent.contracts.main_agent_real_task_execution_results import (
+    activity_timeout_seconds,
+)
 from agent_py_agent.agent.contracts.main_agent_real_task_subprocess import (
     RealTaskSubprocessRequest,
     run_real_task_subprocess,
@@ -67,5 +69,5 @@ def test_real_task_subprocess_waits_for_initial_activity_before_idle_timeout(tmp
 # LLM: Real model calls can be quiet after a tool result, so short task E2E uses total timeout as the idle floor.
 # 函数用途: 验证真实任务 runner 的自动 activity timeout 不会比总超时短，避免慢模型首 token 被误杀。
 def test_real_task_activity_timeout_uses_total_timeout_for_short_cases():
-    assert _activity_timeout_seconds(240) == 240
-    assert _activity_timeout_seconds(300) == 300
+    assert activity_timeout_seconds(240) == 240
+    assert activity_timeout_seconds(300) == 300
