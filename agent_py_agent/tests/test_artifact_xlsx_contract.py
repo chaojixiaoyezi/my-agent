@@ -214,6 +214,16 @@ def test_staged_checkpoint_findings_use_validation_contract_shape_and_evidence(t
     assert "EVIDENCE_REQUIRED_FIELD_MISSING" in codes
 
 
+# LLM: Metric quality must apply to staged source data before a workbook can pass.
+# 函数用途: 验证 source_data.json 里的当前总量不能冒充时间窗口增量，即使字段和来源都存在。
+def test_staged_checkpoint_rejects_metric_kind_mismatch(tmp_path: Path) -> None:
+    _write_metric_mismatch_source(tmp_path)
+
+    findings = staged_checkpoint_findings([_metric_mismatch_contract_item()], tmp_path)
+
+    assert "METRIC_KIND_MISMATCH" in {finding["code"] for finding in findings}
+
+
 # LLM: Staged evidence should support declared estimated values without weakening source/ref checks.
 # 函数用途: 验证 source_data.json 可用 value_type/methodology 表达估算口径，并通过同一阶段证据合同。
 def test_staged_checkpoint_evidence_accepts_declared_estimates(tmp_path: Path) -> None:
@@ -254,6 +264,60 @@ def _write_estimated_source(root: Path) -> None:
 """.strip(),
         encoding="utf-8",
     )
+
+
+def _write_metric_mismatch_source(root: Path) -> None:
+    source = root / "outputs/github_star_growth/source_data.json"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        """
+{
+  "sheets": [
+    {
+      "name": "汇总",
+      "rows": [{"项目名": "demo", "地址": "https://example.com", "上升 star 数": 4991}]
+    }
+  ],
+  "source_refs": [
+    {
+      "source_id": "src-current",
+      "uri": "https://api.example.invalid/repos/demo",
+      "reserved": {"metric_kind": "point_in_time_total"}
+    }
+  ],
+  "claims": [
+    {
+      "claim_id": "claim-growth",
+      "field": "上升 star 数",
+      "value": 4991,
+      "source_ids": ["src-current"],
+      "verification_status": "VERIFIED",
+      "value_type": "exact",
+      "reserved": {"metric_kind": "point_in_time_total"}
+    }
+  ]
+}
+""".strip(),
+        encoding="utf-8",
+    )
+
+
+def _metric_mismatch_contract_item() -> dict[str, object]:
+    return {
+        "preferred_path": "outputs/github_star_growth/github_star_growth.xlsx",
+        "validation_contract": {
+            "required_columns": ["项目名", "地址", "上升 star 数"],
+            "staging_contract": {"checkpoint_refs": ["outputs/github_star_growth/source_data.json"]},
+            "evidence_contract": {"required_fields": ["上升 star 数"], "require_verified": True},
+            "metric_contracts": [
+                {
+                    "field": "上升 star 数",
+                    "expected_kind": "time_window_delta",
+                    "required_window": True,
+                }
+            ],
+        },
+    }
 
 
 def _estimated_evidence_contract_item() -> dict[str, object]:

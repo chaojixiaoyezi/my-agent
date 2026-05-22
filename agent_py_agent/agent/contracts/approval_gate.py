@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from .recovery_envelope import RecoveryEnvelopeRequest, recovery_envelope_from_gate_payload
+
 
 # LLM: ApprovalRequest carries the exact structured action binding that needs approval.
 # 类用途: 保存待审批动作、参数哈希、run_id 和审批 id，供审批门只按机器字段判断。
@@ -47,6 +49,30 @@ class ApprovalGateDecision:
     error_code: str = ""
     approval_id: str = ""
     recommended_action: str = ""
+
+    # LLM: to_dict preserves approval recovery as structure; message_zh is readable feedback only.
+    # 函数用途: 序列化审批门结果；失败时附通用 recovery 返工/等待用户信息。
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "allowed": self.allowed,
+            "status": self.status,
+            "error_code": self.error_code,
+            "approval_id": self.approval_id,
+            "recommended_action": self.recommended_action,
+        }
+        recovery = recovery_envelope_from_gate_payload(
+            RecoveryEnvelopeRequest(
+                gate="approval_gate",
+                status=self.status,
+                allowed=self.allowed,
+                findings=({"code": self.error_code},) if self.error_code else (),
+                recommended_action=self.recommended_action,
+                evidence={"approval_id": self.approval_id} if self.approval_id else {},
+            )
+        )
+        if recovery is not None:
+            payload["recovery"] = recovery.to_dict()
+        return payload
 
 
 # LLM: evaluate_approval_gate validates dangerous actions against exact approval records.

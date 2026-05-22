@@ -26,6 +26,7 @@ EVIDENCE_GATHERING_TOOL_NAMES = {
     "http_request",
     "read_artifact",
     "search",
+    "web_search",
 }
 STRICT_REPAIR_PRODUCTIVE_TOOLS = {
     "__parse_error__",

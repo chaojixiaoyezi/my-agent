@@ -132,6 +132,14 @@ def _github_star_workbook_validation_contract() -> dict[str, object]:
             "required_fields": ["项目名", "地址", "上升 star 数"],
             "require_verified": True,
         },
+        "metric_contracts": [
+            {
+                "field": "上升 star 数",
+                "expected_kind": "time_window_delta",
+                "required_window": True,
+                "allow_estimated": False,
+            }
+        ],
         "collection_contract": _github_star_collection_contract(),
         "staging_contract": _github_star_workbook_staging_contract(),
     }
@@ -151,7 +159,10 @@ def _github_star_workbook_staging_contract() -> dict[str, object]:
                 '"sheets":[{"name":"YYYY-WW","columns":["项目名","地址","上升 star 数","中文解释","推荐理由"],'
                 '"rows":[{"项目名":"...","地址":"...","上升 star 数":"...",'
                 '"field_source_ids":{"项目名":["src-id"],"地址":["src-id"],"上升 star 数":["src-id"]}}]}],'
-                '"source_refs":[{"source_id":"src-id","uri":"https://...","retrieved_at":"..."}]}'
+                '"source_refs":[{"source_id":"src-id","uri":"https://...","retrieved_at":"...",'
+                '"reserved":{"metric_kind":"time_window_delta","window_start":"YYYY-MM-DD","window_end":"YYYY-MM-DD"}}],'
+                '"claims":[{"field":"上升 star 数","source_ids":["src-id"],"verification_status":"VERIFIED",'
+                '"reserved":{"metric_kind":"time_window_delta","window_start":"YYYY-MM-DD","window_end":"YYYY-MM-DD"}}]}'
             )
         },
         "checkpoint_refs": [
@@ -189,7 +200,7 @@ def _research_document_translation_case() -> MainAgentRealTaskCase:
         case_id="research_documents_translation_pdf",
         title="研究文档中文翻译 PDF",
         user_prompt=(
-            "找到 DeepSeek 在 2025 年之后公开发布的所有论文或研究文档，逐篇翻译成中文，"
+            "找到指定开源大模型项目在 2025 年之后公开发布的所有论文或研究文档，逐篇翻译成中文，"
             "正文翻译准确，专业术语可以保留英文。最终成品需要是 PDF，排版要正确、清楚、好看，并附来源清单。"
         ),
         artifacts=(artifact,),

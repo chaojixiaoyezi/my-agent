@@ -25,6 +25,7 @@ _READ_ONLY_TOOL_NAMES = {
     "read_file",
     "search",
     "search_text",
+    "web_search",
 }
 _LOCAL_PROGRESS_TOOL_NAMES = {
     "append_file",

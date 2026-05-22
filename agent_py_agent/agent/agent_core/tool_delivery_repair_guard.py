@@ -241,6 +241,11 @@ def _has_non_empty_structured_rows(value: object) -> bool:
         return bool(value)
     if not isinstance(value, dict):
         return False
+    generated_rows = value.get("generated_rows")
+    if isinstance(generated_rows, list):
+        return bool(generated_rows)
+    if isinstance(generated_rows, dict) and _positive_generated_row_count(generated_rows):
+        return True
     rows = value.get("rows")
     if isinstance(rows, list) and rows:
         return True
@@ -251,6 +256,13 @@ def _has_non_empty_structured_rows(value: object) -> bool:
     if isinstance(data, (dict, list)):
         return _has_non_empty_structured_rows(data)
     return False
+
+
+def _positive_generated_row_count(value: dict[str, object]) -> bool:
+    try:
+        return int(value.get("count") or 0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 # LLM: _is_checkpoint_repair_read allows one structured checkpoint inspection before rewriting it.

@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .recovery_envelope import RecoveryEnvelopeRequest, recovery_envelope_from_gate_payload
 from .tool_protocol_v2 import normalize_tool_call
 
 
@@ -30,6 +31,29 @@ class ToolCallPolicyDecision:
     tool_name: str
     error_code: str = ""
     findings: tuple[str, ...] = ()
+
+    # LLM: to_dict gives tool-policy callers a repair envelope without parsing output prose.
+    # 函数用途: 序列化工具策略结果；失败时附 recovery，机器字段决定返工动作，中文只给模型阅读。
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "ok": self.ok,
+            "tool_name": self.tool_name,
+            "error_code": self.error_code,
+            "findings": list(self.findings),
+        }
+        recovery = recovery_envelope_from_gate_payload(
+            RecoveryEnvelopeRequest(
+                gate="tool_call_policy",
+                status="ALLOW" if self.ok else "NEED_REPAIR",
+                allowed=self.ok,
+                findings=_finding_payloads(self.error_code, self.findings),
+                recommended_action="continue" if self.ok else "repair_tool_call",
+                evidence={"tool_name": self.tool_name} if self.tool_name else {},
+            )
+        )
+        if recovery is not None:
+            payload["recovery"] = recovery.to_dict()
+        return payload
 
 
 # LLM: validate_tool_call_policy checks one tool call without executing tools or reading prompt prose.
@@ -151,6 +175,13 @@ def _decision(
     findings: tuple[str, ...] = (),
 ) -> ToolCallPolicyDecision:
     return ToolCallPolicyDecision(ok=ok, tool_name=tool_name, error_code=error_code, findings=findings)
+
+
+def _finding_payloads(error_code: str, findings: tuple[str, ...]) -> tuple[dict[str, object], ...]:
+    if not error_code:
+        return ()
+    evidence = {"fields": list(findings)} if findings else {}
+    return ({"code": error_code, "evidence": evidence},)
 
 
 __all__ = ["ToolCallPolicy", "ToolCallPolicyDecision", "validate_tool_call_policy"]

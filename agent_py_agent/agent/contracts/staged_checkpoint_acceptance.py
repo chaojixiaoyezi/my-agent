@@ -11,6 +11,7 @@ from .evidence_contract import (
     EvidenceContractRequest,
     evaluate_evidence_contract,
 )
+from .gates.delivery_quality_metrics import delivery_quality_metric_findings
 from .staged_checkpoint_contract_options import staged_checkpoint_contexts
 from .staged_checkpoint_evidence_payloads import claims, source_refs, string_list
 from .staged_checkpoint_tabular_shape import (
@@ -101,18 +102,45 @@ def staged_json_evidence_findings(
     if not evidence_contract:
         return []
     path = artifact_path(ref, task_workspace)
-    if not path.exists() or path.suffix.lower() != ".json":
+    value = _staged_json_dict(path)
+    if not isinstance(value, dict):
         return []
+    source_records = source_refs(value.get("source_refs"))
+    claim_records = claims(value.get("claims"))
+    findings = _evidence_finding_dicts(
+        _evaluate_staged_evidence(evidence_contract, source_records, claim_records),
+        ref,
+        path,
+    )
+    findings.extend(
+        _metric_finding_dicts(
+            delivery_quality_metric_findings(evidence_contract.get("metric_contracts"), source_records, claim_records),
+            ref,
+            path,
+        )
+    )
+    return findings
+
+
+def _staged_json_dict(path: Path) -> dict[str, object] | None:
+    if not path.exists() or path.suffix.lower() != ".json":
+        return None
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
-    if not isinstance(value, dict):
-        return []
-    report = evaluate_evidence_contract(
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _evaluate_staged_evidence(
+    evidence_contract: dict[str, object],
+    source_records: list[dict[str, object]],
+    claim_records: list[dict[str, object]],
+) -> object:
+    return evaluate_evidence_contract(
         EvidenceContractRequest(
-            source_refs=source_refs(value.get("source_refs")),
-            claims=claims(value.get("claims")),
+            source_refs=source_records,
+            claims=claim_records,
             required_fields=string_list(evidence_contract.get("required_fields")),
             allowed_value_types=string_list(evidence_contract.get("allowed_value_types")) or ["exact"],
             min_confidence=_float_value(evidence_contract.get("min_confidence")),
@@ -120,6 +148,9 @@ def staged_json_evidence_findings(
             require_verified=bool(evidence_contract.get("require_verified", True)),
         )
     )
+
+
+def _evidence_finding_dicts(report: object, ref: str, path: Path) -> list[dict[str, object]]:
     return [
         {
             "code": str(item.get("code") or "EVIDENCE_CONTRACT_FAILED"),
@@ -130,6 +161,20 @@ def staged_json_evidence_findings(
             **{key: val for key, val in item.items() if key not in {"code", "severity", "message"}},
         }
         for item in report.findings
+    ]
+
+
+def _metric_finding_dicts(findings: object, ref: str, path: Path) -> list[dict[str, object]]:
+    return [
+        {
+            "code": item.code,
+            "severity": item.severity,
+            "stage_ref": ref,
+            "location": str(path),
+            "message": item.message or "Metric quality contract failed.",
+            **({"evidence": item.evidence} if item.evidence else {}),
+        }
+        for item in findings
     ]
 
 

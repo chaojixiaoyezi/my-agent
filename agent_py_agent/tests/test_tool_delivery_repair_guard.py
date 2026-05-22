@@ -124,6 +124,7 @@ def test_delivery_repair_guard_rejects_empty_source_checkpoint_write(tmp_path: P
 
     assert is_delivery_repair_productive_call(agent, [_empty_source_checkpoint_write_call()]) is False
     assert is_delivery_repair_productive_call(agent, [_non_empty_source_checkpoint_write_call()]) is True
+    assert is_delivery_repair_productive_call(agent, [_generated_rows_list_checkpoint_write_call()]) is True
 
 
 # LLM: api_json_collection repair skeletons must use collection params, not invalid checkpoint data payloads.
@@ -229,6 +230,15 @@ def _non_empty_source_checkpoint_write_call() -> dict[str, object]:
         "tool": "write_structured_json",
         "path": "outputs/research_documents/source_index.json",
         "data": {"completion_evidence": {"scope": "fixture"}, "rows": [{"title": "Paper"}]},
+    }
+
+
+def _generated_rows_list_checkpoint_write_call() -> dict[str, object]:
+    return {
+        "tool": "write_structured_json",
+        "path": "outputs/research_documents/source_index.json",
+        "generated_rows": [{"title": "Paper", "translated": True}],
+        "completion_evidence": {"scope": "fixture"},
     }
 
 

@@ -389,6 +389,32 @@ def test_structured_json_tool_accepts_generated_rule_aliases(tmp_path: Path) -> 
     ]
 
 
+# LLM: Some providers put literal row lists in generated_rows; normalize that at the tool boundary.
+# 函数用途: 验证 generated_rows 误放对象数组时按 rows 处理，避免模型参数别名导致 checkpoint 不落盘。
+def test_structured_json_tool_treats_generated_rows_list_as_rows(tmp_path: Path) -> None:
+    tool = StructuredJsonTool(tmp_path)
+
+    result = tool.execute(
+        {
+            "path": "outputs/research_documents/source_index.json",
+            "generated_rows": [
+                {
+                    "title": "DeepSeek-R1",
+                    "url": "https://arxiv.org/abs/2501.12948",
+                    "date": "2025-01-22",
+                    "translated": True,
+                }
+            ],
+            "completion_evidence": {"scope": "fixture"},
+        }
+    )
+
+    assert result.ok, result.output
+    data = json.loads((tmp_path / "outputs/research_documents/source_index.json").read_text(encoding="utf-8"))
+    assert data["completion_evidence"] == {"scope": "fixture"}
+    assert data["rows"][0]["translated"] is True
+
+
 # LLM: Tool registry visibility lets staged repair actions point to the writer tool.
 # 函数用途: 验证主代理默认可以检索到 write_structured_json。
 def test_tool_registry_registers_structured_json_tool(tmp_path: Path) -> None:

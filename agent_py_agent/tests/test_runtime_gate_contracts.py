@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from agent_py_agent.agent.contracts.gates import (
     GateContext,
     GateDecision,
+    GateFinding,
     GateRegistry,
     evaluate_acceptance_closeout_gate,
     evaluate_artifact_provenance_gate,
@@ -29,6 +32,38 @@ def test_gate_registry_blocks_when_any_required_gate_denies():
     assert decision.allowed is False
     assert decision.status == "DENY"
     assert decision.finding_codes == ("BROKEN_FACT",)
+
+
+# LLM: Failed gate decisions must carry a structured recovery envelope, not only a blocking status.
+# 函数用途: 验证合同门失败会给出机器可读返工动作；中文说明只是展示字段，不参与判断。
+def test_gate_decision_serializes_recovery_envelope_with_chinese_message():
+    decision = GateDecision.repair(
+        "delivery_quality",
+        [GateFinding("METRIC_WINDOW_MISSING", message="请补充时间窗口", evidence={"field": "stars_delta"})],
+    )
+    payload = decision.to_dict()
+
+    recovery = payload["recovery"]
+    action = recovery["actions"][0]
+    assert recovery["status"] == "repair_required"
+    assert recovery["can_auto_repair"] is True
+    assert recovery["next_status"] == "REPAIRING"
+    assert recovery["finding_codes"] == ["METRIC_WINDOW_MISSING"]
+    assert action["recommended_action"] == "repair_structured_checkpoint_json"
+    assert action["evidence"]["field"] == "stars_delta"
+    assert "请" in recovery["message_zh"]
+
+
+# LLM: Approval gates should ask the user instead of being mislabeled as automatic repair.
+# 函数用途: 验证需要审批的合同门返回 needs_user_input，让运行时等待审批而不是粗暴失败或自动绕过。
+def test_gate_decision_recovery_envelope_marks_approval_as_user_input():
+    decision = GateDecision.need_approval("tool_effect", evidence={"tool_name": "block_ip"})
+    recovery = decision.to_dict()["recovery"]
+
+    assert recovery["status"] == "needs_user_input"
+    assert recovery["requires_user"] is True
+    assert recovery["next_status"] == "WAITING_APPROVAL"
+    assert recovery["actions"][0]["recommended_action"] == "request_user_input_or_approval"
 
 
 def test_tool_call_gate_accepts_legacy_payload_only_after_structured_normalization():
@@ -142,6 +177,24 @@ def test_artifact_provenance_gate_requires_current_run_tool_evidence():
     assert old_run.allowed is False
     assert old_run.finding_codes == ("ARTIFACT_PROVENANCE_RUN_MISMATCH",)
     assert passed.allowed is True
+
+
+# LLM: Artifact provenance should survive post-write validation failures when the file was actually written.
+# 函数用途: 验证写工具产生文件但结果因后置完整性门 ok=false 时，产物来源仍绑定当前 run。
+def test_artifact_provenance_accepts_materialized_write_record_with_failed_post_validation(tmp_path: Path):
+    artifact_dir = tmp_path / "site"
+    artifact_dir.mkdir()
+    (artifact_dir / "index.html").write_text("<!doctype html><html></html>", encoding="utf-8")
+    decision = evaluate_artifact_provenance_gate(
+        {
+            "path": str(artifact_dir),
+            "ok": True,
+            "provenance": _artifact_provenance_from_archive_row(tmp_path, artifact_dir / "index.html"),
+        },
+        run_id="run-1",
+    )
+
+    assert decision.allowed is True
 
 
 def test_final_closeout_gate_requires_run_artifact_state_and_acceptance_gates():
@@ -333,3 +386,30 @@ def _artifact_provenance(path: str, *, run_id: str = "run-1") -> dict[str, objec
         "idempotency_key": "idem-write-1",
         "created_by_current_run": True,
     }
+
+
+def _artifact_provenance_from_archive_row(root: Path, written_path: Path) -> dict[str, object]:
+    from agent_py_agent.agent.contracts.gates import artifact_provenance_from_archive
+
+    return artifact_provenance_from_archive(
+        {"path": str(written_path.parent), "ok": True},
+        [
+            {
+                "tool": "write_file",
+                "ok": False,
+                "run_id": "run-1",
+                "parameters": {"path": str(written_path.relative_to(root))},
+                "runtime_gate": {
+                    "allowed": True,
+                    "status": "ALLOW",
+                    "evidence": {
+                        "tool_name": "write_file",
+                        "operation_id": "op-write",
+                        "idempotency_key": "idem-write",
+                    },
+                },
+            }
+        ],
+        run_id="run-1",
+        workspace_root=root,
+    )

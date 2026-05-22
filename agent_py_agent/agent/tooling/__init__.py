@@ -35,6 +35,7 @@ from .registry import ToolRegistry, ToolRegistryParams
 from .registry_list_tools import ListToolsTool
 from .spreadsheet_builder import DataWorkbookTool
 from .web import FetchUrlTool, HttpRequestTool
+from .web_search import WebSearchTool
 from .write_boundary import WRITE_TOOL_NAMES, validate_write_boundary
 
 __all__ = [
@@ -60,6 +61,7 @@ __all__ = [
     "ToolSearchHit",
     "ToolSpec",
     "VectorToolSearchProvider",
+    "WebSearchTool",
     "WRITE_TOOL_NAMES",
     "WriteFileTool",
     "validate_write_boundary",

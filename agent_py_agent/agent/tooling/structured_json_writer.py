@@ -157,6 +157,8 @@ def _data_value(value: object) -> object:
 def _shape_value_from_params(params: dict[str, Any]) -> object:
     if has_generated_rows(params):
         return generated_rows_checkpoint(params.get("generated_rows"))
+    if isinstance(params.get("generated_rows"), list):
+        return {"rows": params["generated_rows"]}
     if isinstance(params.get("sheets"), list):
         return {"sheets": params["sheets"]}
     if isinstance(params.get("rows"), list):
@@ -218,7 +220,12 @@ def _merge_inline_shape(data: dict[str, object], shape: dict[str, object]) -> di
 # LLM: _has_shape_payload keeps this runtime helper grounded in structured fields.
 # 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _has_shape_payload(params: dict[str, Any]) -> bool:
-    return has_generated_rows(params) or isinstance(params.get("sheets"), list) or isinstance(params.get("rows"), list)
+    return (
+        has_generated_rows(params)
+        or isinstance(params.get("generated_rows"), list)
+        or isinstance(params.get("sheets"), list)
+        or isinstance(params.get("rows"), list)
+    )
 
 
 # LLM: _should_use_data_value keeps this runtime helper grounded in structured fields.

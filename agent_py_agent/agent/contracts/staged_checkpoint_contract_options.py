@@ -48,7 +48,11 @@ def _evidence_contract(contract: dict[str, object], ref: str, source_ref: str) -
     if source_ref and ref != source_ref:
         return {}
     evidence = contract.get("evidence_contract")
-    return dict(evidence) if isinstance(evidence, dict) else {}
+    result = dict(evidence) if isinstance(evidence, dict) else {}
+    metrics = contract.get("metric_contracts")
+    if isinstance(metrics, list):
+        result["metric_contracts"] = [dict(item) for item in metrics if isinstance(item, dict)]
+    return result
 
 
 # LLM: _string_list keeps this runtime helper grounded in structured fields.

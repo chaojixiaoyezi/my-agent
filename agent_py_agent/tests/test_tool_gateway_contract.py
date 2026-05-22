@@ -145,7 +145,13 @@ def test_tool_gateway_reports_single_error_for_closed_raw_block_missing_attrs(tm
 # 函数用途: 验证完整单文件 raw content block 会直接转成 write_file，不再要求模型手工管理 chunk。
 def test_tool_gateway_parses_write_file_raw_content_block(tmp_path: Path):
     registry = _registry(tmp_path)
-    html = "<!doctype html>\n<html><body><h1>ARCA</h1></body></html>"
+    html = (
+        "<!doctype html>\n"
+        "<html>\n"
+        "<head><meta charset=\"utf-8\"><title>ARCA</title></head>\n"
+        "<body><h1>ARCA</h1></body>\n"
+        "</html>"
+    )
 
     calls = registry.parse_tool_calls(
         '[WRITE_FILE_RAW path="out/index.html"]\n'

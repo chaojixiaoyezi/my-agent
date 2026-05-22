@@ -70,6 +70,9 @@ def test_corrupt_state_file_blocks_with_recovery_diagnostic() -> None:
     assert result.ok is False
     assert result.error_codes == ("STATE_CORRUPT",)
     assert result.actions[0]["next_status"] == "BLOCKED"
+    assert result.recovery is not None
+    assert result.recovery["status"] == "recovering"
+    assert "checkpoint" in result.recovery["message_zh"]
 
 
 # LLM: If artifact write succeeded before finalizer crash, recovery should revalidate before rerun.
@@ -91,3 +94,5 @@ def test_artifact_written_before_finalizer_crash_revalidates_without_reexecuting
     assert result.ok is False
     assert result.error_codes == ("REVALIDATE_ARTIFACT_BEFORE_RERUN",)
     assert result.actions[0]["forbid_reexecute_operation_ids"] == "op-send-message"
+    assert result.recovery is not None
+    assert result.recovery["next_status"] == "RECOVERING"

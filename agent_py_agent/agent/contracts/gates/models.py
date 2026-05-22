@@ -7,6 +7,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..recovery_envelope import RecoveryEnvelopeRequest, recovery_envelope_from_gate_payload
+
 GateValidator = Callable[["GateContext"], "GateDecision"]
 
 
@@ -157,9 +159,9 @@ class GateDecision:
         return cls(gate, "RECOVERING", False, tuple(findings), "recover_from_checkpoint", evidence or {})
 
     # LLM: GateDecision.to_dict is the stable serialized gate result.
-    # 函数用途: 输出 gate/status/allowed/findings/recommended_action/evidence 供日志和 replay 读取。
+    # 函数用途: 输出 gate/status/allowed/findings/recommended_action/evidence；失败时附 recovery 返工包供日志、replay 和模型反馈读取。
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "gate": self.gate,
             "status": self.status,
             "allowed": self.allowed,
@@ -167,6 +169,19 @@ class GateDecision:
             "recommended_action": self.recommended_action,
             "evidence": dict(self.evidence),
         }
+        recovery = recovery_envelope_from_gate_payload(
+            RecoveryEnvelopeRequest(
+                gate=self.gate,
+                status=self.status,
+                allowed=self.allowed,
+                findings=payload["findings"],
+                recommended_action=self.recommended_action,
+                evidence=payload["evidence"],
+            )
+        )
+        if recovery is not None:
+            payload["recovery"] = recovery.to_dict()
+        return payload
 
 
 __all__ = ["GateContext", "GateDecision", "GateFinding", "GateValidator"]

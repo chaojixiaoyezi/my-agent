@@ -26,6 +26,10 @@ from .main_agent_delivery_closeout_artifacts import (
     _validate_contract_artifacts,
     _write_report,
 )
+from .main_agent_delivery_closeout_gate_recovery import (
+    attach_contract_recovery,
+    failed_gate_payloads,
+)
 from .main_agent_delivery_closeout_progress import (
     _enrich_delivery_progress,
     _should_block_on_no_progress,
@@ -114,7 +118,9 @@ def _attach_closeout_gates(request: CloseoutGateRequest) -> list[Any]:
     request.report["acceptance_gate"] = acceptance_decision.to_dict()
     final_decision = evaluate_final_closeout_gate(request.report)
     request.report["final_closeout_gate"] = final_decision.to_dict()
-    return [run_contract_decision, gate_decision, state_decision, quality_decision, acceptance_decision, final_decision]
+    decisions = [run_contract_decision, gate_decision, state_decision, quality_decision, acceptance_decision, final_decision]
+    attach_contract_recovery(request.report, decisions, contract=request.contract)
+    return decisions
 
 
 # LLM: _all_gates_allowed keeps final closeout branching tied to gate decisions.
@@ -177,6 +183,8 @@ def _append_failed_contract_context(params: ToolLoopExecuteParams, report: dict[
                 "ok": False,
                 "report_ref": report.get("report_ref", ""),
                 "failed_artifacts": [item for item in report["artifacts"] if not item["ok"]],
+                "failed_gates": failed_gate_payloads(report),
+                "contract_recovery": report.get("contract_recovery", {}),
                 "delivery_progress": report.get("delivery_progress", {}),
             },
             ensure_ascii=False,
@@ -238,6 +246,7 @@ def _blocked_closeout_text(report: dict[str, Any]) -> str:
         "case_id": report.get("case_id", ""),
         "report_ref": report.get("report_ref", ""),
         "delivery_progress": report.get("delivery_progress", {}),
+        "contract_recovery": report.get("contract_recovery", {}),
         "failed_artifacts": [_failed_artifact_payload(item) for item in report.get("artifacts", []) if not item.get("ok")],
     }
     return (

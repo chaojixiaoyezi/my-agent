@@ -23,6 +23,7 @@ from .shell import ShellTool
 from .spreadsheet_builder import DataWorkbookTool
 from .structured_json_writer import StructuredJsonTool
 from .web import FetchUrlTool, HttpRequestTool
+from .web_search import WebSearchTool
 
 
 # LLM: build_tool_retriever centralizes catalog retrieval setup.
@@ -84,6 +85,7 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
 # LLM: _register_network_tools isolates non-filesystem tool setup from constructor policy.
 # 函数用途: 注册网页、HTTP、shell 和受控执行工具，保持工具初始化顺序稳定。
 def _register_network_tools(registry: Any, params: Any) -> None:
+    registry.register(WebSearchTool(max_results=params.max_matches, timeout=params.http_timeout))
     registry.register(FetchUrlTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
     registry.register(HttpRequestTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
     registry.register(

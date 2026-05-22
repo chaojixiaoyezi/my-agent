@@ -15,10 +15,15 @@ def test_tool_call_policy_rejects_unknown_not_allowed_and_denied_tools() -> None
         denied_tools=("block_ip",),
     )
 
-    assert validate_tool_call_policy({"tool": "missing_tool", "args": {}}, policy).error_code == "TOOL_NOT_FOUND"
+    missing_tool = validate_tool_call_policy({"tool": "missing_tool", "args": {}}, policy)
+    assert missing_tool.error_code == "TOOL_NOT_FOUND"
+    assert missing_tool.to_dict()["recovery"]["status"] == "repair_required"
     assert validate_tool_call_policy({"tool": "block_ip", "args": {"ip": "1.1.1.1"}}, policy).error_code == "TOOL_DENIED"
     assert validate_tool_call_policy({"tool": "write_file", "args": {"path": "out.md"}}, policy).ok is True
-    assert validate_tool_call_policy({"tool": "read_artifact", "args": {}}, policy).error_code == "TOOL_NOT_ALLOWED"
+    assert "recovery" not in validate_tool_call_policy({"tool": "write_file", "args": {"path": "out.md"}}, policy).to_dict()
+    not_allowed = validate_tool_call_policy({"tool": "read_artifact", "args": {}}, policy)
+    assert not_allowed.error_code == "TOOL_NOT_ALLOWED"
+    assert not_allowed.to_dict()["recovery"]["actions"][0]["message_zh"]
 
 
 # LLM: Tool parameter validation should be schema driven, not inferred from model narration.

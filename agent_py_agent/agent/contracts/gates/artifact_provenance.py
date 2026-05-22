@@ -67,9 +67,11 @@ def artifact_provenance_from_archive(
         return {"ok": False, "code": "ARTIFACT_PATH_INVALID"}
     old_run_match: dict[str, Any] | None = None
     for record in archive_tool_calls:
-        if not isinstance(record, dict) or record.get("ok") is not True:
+        if not isinstance(record, dict):
             continue
         if not _record_targets_artifact(record, artifact_path, workspace_root):
+            continue
+        if record.get("ok") is not True and not _record_materialized_artifact(record, artifact_path, workspace_root):
             continue
         provenance = _provenance_from_record(record, artifact_path=artifact_path, current_run_id=run_id)
         if provenance.get("ok") is not True:
@@ -113,6 +115,12 @@ def _provenance_from_record(
 # 函数用途: 从 parameters/tool_result_refs 中找写入路径，支持文件产物和目录产物的子路径匹配。
 def _record_targets_artifact(record: dict[str, Any], artifact_path: Path, workspace_root: Path) -> bool:
     return any(_path_matches_artifact(path, artifact_path) for path in _record_paths(record, workspace_root))
+
+
+# LLM: _record_materialized_artifact treats post-write validation failures as valid provenance if the file exists.
+# 函数用途: 写工具可能已产生文件但随后因完整性门返回 ok=false；产物来源仍应记录为本 run 的写入事实。
+def _record_materialized_artifact(record: dict[str, Any], artifact_path: Path, workspace_root: Path) -> bool:
+    return any(path.exists() and _path_matches_artifact(path, artifact_path) for path in _record_paths(record, workspace_root))
 
 
 # LLM: _record_paths extracts path-like refs from archive rows without parsing prose.

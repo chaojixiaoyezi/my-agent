@@ -19,6 +19,9 @@ def test_approval_gate_requires_approval_for_dangerous_action():
     assert decision.allowed is False
     assert decision.status == "WAITING_HUMAN"
     assert decision.error_code == "APPROVAL_REQUIRED"
+    payload = decision.to_dict()
+    assert payload["recovery"]["status"] == "needs_user_input"
+    assert payload["recovery"]["actions"][0]["message_zh"]
 
 
 def test_approval_gate_allows_exact_approved_action_binding():
@@ -75,6 +78,9 @@ def test_approval_gate_rejects_action_if_bound_args_change():
     assert decision.allowed is False
     assert decision.status == "BLOCKED"
     assert decision.error_code == "APPROVAL_BINDING_MISMATCH"
+    payload = decision.to_dict()
+    assert payload["recovery"]["status"] == "needs_user_input"
+    assert payload["recovery"]["actions"][0]["recommended_action"] == "request_user_input_or_approval"
 
 
 def test_approval_gate_rejects_denied_expired_unauthorized_and_replayed_records():

@@ -191,7 +191,7 @@ def _research_document_translation_case() -> MainAgentTaskCase:
         case_id="research_documents_translation_pdf",
         title="研究文档中文翻译 PDF",
         user_prompt=(
-            "找到 DeepSeek 在 2025 年之后公开发布的所有论文或研究文档，逐篇翻译成中文，"
+            "找到指定开源大模型项目在 2025 年之后公开发布的所有论文或研究文档，逐篇翻译成中文，"
             "正文翻译准确，专业术语可以保留英文。最终成品需要是 PDF，排版要正确、清楚、好看，并附来源清单。"
         ),
         artifacts=(artifact,),

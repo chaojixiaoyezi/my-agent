@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .recovery_envelope import RecoveryEnvelopeRequest, recovery_envelope_from_gate_payload
+
 CORRUPT_STATE_ERROR_CODES = {"JSON_DECODE_ERROR", "STATE_SCHEMA_INVALID", "STATE_CHECKSUM_MISMATCH"}
 NON_RETRYABLE_ERROR_CODES = {"PATH_PERMISSION_DENIED", "WRITE_FORBIDDEN", "APPROVAL_REJECTED"}
 
@@ -18,6 +20,7 @@ class OfflineRecoveryValidation:
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, str], ...]
     actions: tuple[dict[str, str], ...]
+    recovery: dict[str, Any] | None = None
 
 
 # LLM: validate_recovery_events inspects structured runtime events for safe recovery decisions.
@@ -32,7 +35,34 @@ def validate_recovery_events(events: tuple[dict[str, Any], ...]) -> OfflineRecov
         error_codes=tuple(dict.fromkeys(item["code"] for item in findings)),
         findings=tuple(findings),
         actions=tuple(actions),
+        recovery=_offline_recovery_payload(findings, actions),
     )
+
+
+# LLM: _offline_recovery_payload gives offline validators the same repair envelope shape as runtime gates.
+# 函数用途: 离线恢复合同失败时也输出可读中文和机器 next_status，避免调用方只看到 ok=false 后粗暴中断。
+def _offline_recovery_payload(
+    findings: list[dict[str, str]],
+    actions: list[dict[str, str]],
+) -> dict[str, Any] | None:
+    if not findings:
+        return None
+    next_statuses = {str(item.get("next_status") or "") for item in actions}
+    status = "RECOVERING" if "VERIFYING" in next_statuses or "RECOVERING" in next_statuses else "BLOCKED"
+    envelope = recovery_envelope_from_gate_payload(
+        RecoveryEnvelopeRequest(
+            gate="offline_recovery",
+            status=status,
+            allowed=False,
+            findings=[
+                {"code": item.get("code", ""), "severity": "P1", "message": "", "evidence": dict(item)}
+                for item in findings
+            ],
+            recommended_action=str(actions[0].get("code") if actions else "stop_and_report_blocker"),
+            evidence={"actions": [dict(item) for item in actions]},
+        )
+    )
+    return envelope.to_dict() if envelope is not None else None
 
 
 # LLM: _apply_recovery_event dispatches one structured event to the right recovery rule.

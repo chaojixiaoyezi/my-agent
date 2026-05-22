@@ -274,6 +274,15 @@ def test_delivery_closeout_blocks_metric_quality_contract_mismatch(tmp_path):
     assert report["runtime_gate"]["status"] == "ALLOW"
     assert report["delivery_quality_gate"]["status"] == "NEED_REPAIR"
     assert report["delivery_quality_gate"]["findings"][0]["code"] == "METRIC_KIND_MISMATCH"
+    assert report["delivery_quality_gate"]["recovery"]["status"] == "repair_required"
+    recovery = report["contract_recovery"]
+    assert recovery["status"] == "repair_required"
+    action = recovery["actions"][0]
+    assert action["code"] == "METRIC_KIND_MISMATCH"
+    assert action["checkpoint_ref"] == "source_data.json"
+    assert action["writer_tool"] == "write_structured_json"
+    assert action["recommended_action"] == "repair_structured_checkpoint_json"
+    assert any(item["gate"] == "delivery_quality" for item in json.loads(params.tool_context[-1].split("\n", 1)[1])["failed_gates"])
     assert report["final_closeout_gate"]["allowed"] is False
 
 
