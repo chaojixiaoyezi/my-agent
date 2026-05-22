@@ -33,6 +33,43 @@ def test_collection_checkpoint_quality_prefers_api_collection_writer() -> None:
     assert action["collection_contract"]["source_json_ref"] == "outputs/github_star_growth/source_data.json"
 
 
+# LLM: Synthetic generated-row checkpoints should prefer deterministic structured writer repair.
+# 函数用途: 有 generated_rows 形状提示时，恢复动作优先走 write_structured_json，不误导成 API 采集。
+def test_collection_checkpoint_quality_prefers_structured_writer_for_generated_rows() -> None:
+    contract = xlsx_delivery_contract()
+    validation = contract["artifacts"][0]["validation_contract"]
+    validation["collection_contract"] = {
+        "source_json_ref": "outputs/github_star_growth/source_data.json",
+        "items_path": "rows",
+        "required_item_fields": ["项目名", "地址", "上升 star 数"],
+        "require_completion_evidence": True,
+    }
+    validation["staging_contract"]["checkpoint_shape_hints"] = {
+        "outputs/github_star_growth/source_data.json": json.dumps(
+            {
+                "data": {"completion_evidence": {"scope": "synthetic_dataset", "row_count": 1000}},
+                "generated_rows": {
+                    "count": 1000,
+                    "columns": ["项目名", "地址", "上升 star 数"],
+                    "fields": {
+                        "项目名": {"format": "repo-{index:04d}", "start": 1},
+                        "地址": {"format": "https://example.com/repo-{index:04d}", "start": 1},
+                        "上升 star 数": {"number": {"start": 100, "step": 7}},
+                    },
+                    "sheets": {"count": 3, "prefix": "数据"},
+                },
+            },
+            ensure_ascii=False,
+        )
+    }
+
+    actions = _actions_for_source(_bad_collection_source(), contract)
+
+    action = actions["STAGED_JSON_REQUIRED_COLUMNS_MISSING"]
+    assert action["writer_tool"] == "write_structured_json"
+    assert action["write_tools"] == ["write_structured_json", "api_json_collection"]
+
+
 def _actions_for_source(source_content: str, contract: dict[str, object]) -> dict[str, dict[str, object]]:
     from agent_py_agent.agent.agent_core.main_agent_delivery_closeout import (
         DeliveryContractValidationRequest,

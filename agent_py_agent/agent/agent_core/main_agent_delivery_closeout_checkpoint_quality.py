@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ..contracts.error_taxonomy import error_contract
@@ -85,6 +86,16 @@ def _checkpoint_optional_fields(
 # LLM: Collection source checkpoints must route to source collection first, not manual JSON patching.
 # 函数用途: 当坏掉的 checkpoint 是 collection_contract 声明的 source_json_ref 时，优先暴露 api_json_collection 采集门。
 def _checkpoint_writer_fields(request: CheckpointQualityActionRequest) -> dict[str, object]:
+    if _shape_hint_has_generated_rows(request.checkpoint_shape_hint):
+        return {
+            "collection_contract": _compact_collection_contract(
+                request.validation_contract.get("collection_contract", {})
+                if isinstance(request.validation_contract, dict)
+                else {}
+            ),
+            "writer_tool": "write_structured_json",
+            "write_tools": ["write_structured_json", "api_json_collection"],
+        }
     validation_contract = request.validation_contract if isinstance(request.validation_contract, dict) else {}
     collection = validation_contract.get("collection_contract")
     if isinstance(collection, dict) and _same_path_ref(request.checkpoint_ref, str(collection.get("source_json_ref") or "")):
@@ -118,6 +129,14 @@ def _same_path_ref(path: str, ref: str) -> bool:
         or normalized_path.endswith(f"/{normalized_ref}")
         or normalized_ref.endswith(f"/{normalized_path}")
     )
+
+
+def _shape_hint_has_generated_rows(value: str) -> bool:
+    try:
+        parsed = json.loads(str(value or ""))
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict) and isinstance(parsed.get("generated_rows"), dict)
 
 
 __all__ = ["append_checkpoint_quality_action", "checkpoint_writer_fields", "required_sheets_min"]

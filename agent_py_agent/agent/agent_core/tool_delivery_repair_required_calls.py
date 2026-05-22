@@ -53,9 +53,10 @@ def _writer_call(action: dict[str, object]) -> dict[str, object]:
         if groups_path := str(action.get("groups_path") or "").strip():
             call["groups_path"] = groups_path
     if hint := _json_hint(action):
-        call["data"] = hint
+        _apply_json_hint(call, hint)
     if tool == "write_structured_json" or str(action.get("recommended_action") or "") == "repair_evidence_refs":
-        call["merge_existing"] = True
+        if not _is_full_checkpoint_hint(hint):
+            call["merge_existing"] = True
     return call
 
 
@@ -233,6 +234,33 @@ def _json_hint(action: dict[str, object]) -> object:
         if value := _parse_json_text(str(action.get(key) or "").strip()):
             return value
     return {}
+
+
+# LLM: _apply_json_hint maps checkpoint shape hints to real tool parameters.
+# 函数用途: 把 generated_rows、rows、sheets、completion_evidence 等机器字段拆到工具顶层，不塞成自然语言或嵌套 data。
+def _apply_json_hint(call: dict[str, object], hint: object) -> None:
+    if not isinstance(hint, dict):
+        call["data"] = hint
+        return
+    for key in (
+        "data",
+        "rows",
+        "sheets",
+        "generated_rows",
+        "completion_evidence",
+        "source_refs",
+        "claims",
+        "columns",
+        "name",
+    ):
+        if key in hint:
+            call[key] = hint[key]
+
+
+# LLM: full checkpoint hints should replace bad staged JSON rather than merge with stale rows.
+# 函数用途: generated_rows/rows/sheets 代表整份 checkpoint 形状，返工时不自动 merge_existing。
+def _is_full_checkpoint_hint(value: object) -> bool:
+    return isinstance(value, dict) and any(key in value for key in ("rows", "sheets", "generated_rows"))
 
 
 # LLM: _parse_json_text keeps this runtime helper grounded in structured fields.
