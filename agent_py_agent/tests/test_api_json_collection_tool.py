@@ -309,6 +309,22 @@ def test_api_json_collection_private_resolution_env_opt_in(tmp_path: Path, monke
     assert len(checkpoint["sheets"]) == 2
 
 
+def test_api_json_collection_allows_public_hostname_with_benchmark_proxy_dns(tmp_path: Path, monkeypatch) -> None:
+    from agent_py_agent.agent.tooling.api_json_collection import ApiJsonCollectionTool
+
+    _install_fake_urlopen(monkeypatch)
+
+    result = ApiJsonCollectionTool(
+        tmp_path,
+        timeout=3,
+        resolver=lambda _host: ("198.18.0.18", "::ffff:0:c612:12"),
+    ).execute(_collection_params())
+
+    assert result.ok is True
+    checkpoint = json.loads((tmp_path / "outputs/source_data.json").read_text(encoding="utf-8"))
+    assert len(checkpoint["sheets"]) == 2
+
+
 def test_api_json_collection_stage_contract_accepts_existing_checkpoint(tmp_path: Path) -> None:
     contract = _validation_contract()
     collection = contract["collection_contract"]

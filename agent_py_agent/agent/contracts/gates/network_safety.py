@@ -21,6 +21,7 @@ _ALWAYS_BLOCKED_NETWORKS = (
     ipaddress.ip_network("::ffff:169.254.0.0/112"),
 )
 _CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+_RFC2544_BENCHMARK_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 
 
 # LLM: NetworkSafetyFacts keeps this contract helper structure-first and stable.
@@ -32,6 +33,7 @@ class NetworkSafetyFacts:
     allowed_private_hosts: Iterable[str] = ()
     previous_resolved_ips: Iterable[str] = ()
     allow_private_resolution: bool = False
+    allow_benchmark_resolution: bool = True
 
 
 # LLM: evaluate_network_safety_gate blocks private DNS/IP targets before and after adapter requests.
@@ -66,7 +68,12 @@ def evaluate_network_safety_gate(facts: NetworkSafetyFacts) -> GateDecision:
     always_blocked_ip = _first_always_blocked_ip(resolved)
     if always_blocked_ip:
         return _deny("NETWORK_ALWAYS_BLOCKED_IP", _resolved_evidence(host, resolved, previous, always_blocked_ip))
-    blocked_ip = _first_blocked_ip(resolved, private_host_allowed, facts.allow_private_resolution)
+    blocked_ip = _first_blocked_ip(
+        resolved,
+        private_host_allowed,
+        facts.allow_private_resolution,
+        facts.allow_benchmark_resolution,
+    )
     if blocked_ip:
         code = "NETWORK_DNS_REBINDING_BLOCKED" if previous else "NETWORK_PRIVATE_IP_BLOCKED"
         return _deny(code, _resolved_evidence(host, resolved, previous, blocked_ip))
@@ -80,6 +87,8 @@ def evaluate_network_safety_gate(facts: NetworkSafetyFacts) -> GateDecision:
             "dns_rechecked": bool(previous),
             "private_host_allowed": private_host_allowed,
             "allow_private_resolution": bool(facts.allow_private_resolution),
+            "allow_benchmark_resolution": bool(facts.allow_benchmark_resolution),
+            "benchmark_resolution_allowed_ips": _benchmark_ips(resolved, facts.allow_benchmark_resolution),
         },
     )
 
@@ -129,10 +138,15 @@ def _first_always_blocked_ip(resolved: Iterable[str]) -> str:
 
 # LLM: _first_blocked_ip keeps this contract helper structure-first and stable.
 # 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
-def _first_blocked_ip(resolved: Iterable[str], private_host_allowed: bool, allow_private_resolution: bool) -> str:
+def _first_blocked_ip(
+    resolved: Iterable[str],
+    private_host_allowed: bool,
+    allow_private_resolution: bool,
+    allow_benchmark_resolution: bool,
+) -> str:
     if private_host_allowed or allow_private_resolution:
         return ""
-    return next((ip for ip in resolved if _is_private_ip(ip)), "")
+    return next((ip for ip in resolved if _is_private_ip(ip) and not _benchmark_allowed(ip, allow_benchmark_resolution)), "")
 
 
 # LLM: _resolved_evidence keeps this contract helper structure-first and stable.
@@ -163,6 +177,16 @@ def _dedupe_ips(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _benchmark_ips(resolved: Iterable[str], allow_benchmark_resolution: bool) -> list[str]:
+    if not allow_benchmark_resolution:
+        return []
+    return [ip for ip in resolved if _is_benchmark_proxy_ip(ip)]
+
+
+def _benchmark_allowed(ip: str, allow_benchmark_resolution: bool) -> bool:
+    return bool(allow_benchmark_resolution and _is_benchmark_proxy_ip(ip))
+
+
 # LLM: _canonical_ip keeps this contract helper structure-first and stable.
 # 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _canonical_ip(host: object) -> str:
@@ -184,6 +208,38 @@ def _canonical_ip(host: object) -> str:
     return str(address)
 
 
+def _is_benchmark_proxy_ip(value: str) -> bool:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped:
+            address = address.ipv4_mapped
+        else:
+            embedded = _embedded_ipv4_from_ipv6(address)
+            if embedded is None:
+                return False
+            address = embedded
+    return isinstance(address, ipaddress.IPv4Address) and address in _RFC2544_BENCHMARK_NETWORK
+
+
+def _embedded_ipv4_from_ipv6(address: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
+    parts = tuple(int(part, 16) for part in address.exploded.split(":"))
+    sentinels = (
+        (parts[:6] == (0, 0, 0, 0, 0, 0), parts[6], parts[7]),
+        (parts[:6] == (0, 0, 0, 0, 0xFFFF, 0), parts[6], parts[7]),
+        (parts[:3] == (0x0064, 0xFF9B, 0x0001) and parts[3:6] == (0, 0, 0), parts[6], parts[7]),
+        (parts[0] == 0x2002, parts[1], parts[2]),
+        (parts[0] == 0x2001 and parts[1] == 0, parts[6] ^ 0xFFFF, parts[7] ^ 0xFFFF),
+        ((parts[4] & 0xFCFF) == 0 and parts[5] == 0x5EFE, parts[6], parts[7]),
+    )
+    for matches, high, low in sentinels:
+        if matches:
+            return ipaddress.IPv4Address(((high & 0xFFFF) << 16) | (low & 0xFFFF))
+    return None
+
+
 # LLM: _is_private_ip keeps this contract helper structure-first and stable.
 # 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _is_private_ip(value: str) -> bool:
@@ -193,6 +249,10 @@ def _is_private_ip(value: str) -> bool:
         return True
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
         address = address.ipv4_mapped
+    elif isinstance(address, ipaddress.IPv6Address):
+        embedded = _embedded_ipv4_from_ipv6(address)
+        if embedded is not None:
+            address = embedded
     return (
         address.is_private
         or address.is_loopback
@@ -213,6 +273,10 @@ def _is_always_blocked_ip(value: str) -> bool:
         return True
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
         address = address.ipv4_mapped
+    elif isinstance(address, ipaddress.IPv6Address):
+        embedded = _embedded_ipv4_from_ipv6(address)
+        if embedded is not None:
+            address = embedded
     return any(address in network for network in _ALWAYS_BLOCKED_NETWORKS)
 
 
