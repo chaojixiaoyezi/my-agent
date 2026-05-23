@@ -22,9 +22,12 @@ def repairable_code(code: str) -> bool:
         (
             "ACCEPTANCE_",
             "ARTIFACT_",
+            "BUILDER_",
             "COLLECTION_",
             "CSV_",
             "DELIVERY_",
+            "DOCUMENT_",
+            "DOCX_",
             "EVIDENCE_",
             "FINAL_CLOSEOUT_",
             "HTML_",
@@ -73,7 +76,7 @@ def hard_stop_code(code: str) -> bool:
 
 
 def recovery_category(code: str) -> str:
-    if code.startswith(("ARTIFACT_", "HTML_", "XLSX_", "CSV_", "JSON_", "PDF_", "MARKDOWN_", "SPREADSHEET_", "STATIC_SITE_")):
+    if code.startswith(("ARTIFACT_", "BUILDER_", "DOCUMENT_", "DOCX_", "HTML_", "XLSX_", "CSV_", "JSON_", "PDF_", "MARKDOWN_", "SPREADSHEET_", "STATIC_SITE_")):
         return "artifact"
     if code.startswith(("EVIDENCE_", "METRIC_", "LANGUAGE_", "COLLECTION_")):
         return "evidence"
@@ -101,7 +104,7 @@ def recommended_action(code: str, status: str) -> str:
         return "repair_structured_checkpoint_json"
     if code.startswith("EVIDENCE_"):
         return "repair_evidence_refs"
-    if code.startswith(("ARTIFACT_", "HTML_", "XLSX_", "CSV_", "JSON_", "PDF_", "MARKDOWN_", "STATIC_SITE_")):
+    if code.startswith(("ARTIFACT_", "BUILDER_", "DOCUMENT_", "DOCX_", "HTML_", "XLSX_", "CSV_", "JSON_", "PDF_", "MARKDOWN_", "STATIC_SITE_")):
         return "repair_artifact_against_findings"
     if code.startswith(("STAGED_", "SPREADSHEET_")):
         return "repair_structured_checkpoint_json"

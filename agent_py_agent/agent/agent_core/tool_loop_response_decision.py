@@ -147,12 +147,12 @@ def _tool_calls_decision(
     if delivery_repair_active:
         clean_response = sanitize_reserved_tool_record_response(request.response)
         return ToolLoopResponseDecision("run_tools", clean_response, calls, request.counters)
-    bootstrap_decision = _bootstrap_materialization_tool_call_decision(request, calls)
-    if bootstrap_decision is not None:
-        return bootstrap_decision
     local_progress_tools = _local_progress_tool_call_decision(request, calls)
     if local_progress_tools is not None:
         return local_progress_tools
+    bootstrap_decision = _bootstrap_materialization_tool_call_decision(request, calls)
+    if bootstrap_decision is not None:
+        return bootstrap_decision
     exploration_fuse = exploration_fuse_tool_call_decision(_exploration_request(request, calls))
     if exploration_fuse is not None:
         return _exploration_decision(exploration_fuse)

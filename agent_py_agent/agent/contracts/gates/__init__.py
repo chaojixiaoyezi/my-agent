@@ -22,6 +22,13 @@ from .delivery_quality import (
     append_delivery_quality_gate_trace,
     evaluate_delivery_quality_gate,
 )
+from .document_content_quality import (
+    DocumentContentFacts,
+    DocumentSection,
+    document_content_quality_findings,
+    evaluate_document_content_quality_gate,
+    extract_document_content_facts,
+)
 from .gate_pipeline import (
     DEFAULT_GATE_PIPELINE_SPECS,
     DEFAULT_HIGH_RISK_PHASES,
@@ -79,6 +86,8 @@ __all__ = [
     "GateContext",
     "GateDecision",
     "DeliveryQualityTraceScope",
+    "DocumentContentFacts",
+    "DocumentSection",
     "GateFinding",
     "GatePipeline",
     "GatePipelineSpec",
@@ -109,6 +118,9 @@ __all__ = [
     "evaluate_artifact_provenance_gate",
     "evaluate_delivery_closeout_gate",
     "evaluate_delivery_quality_gate",
+    "document_content_quality_findings",
+    "evaluate_document_content_quality_gate",
+    "extract_document_content_facts",
     "evaluate_final_closeout_gate",
     "evaluate_idempotency_ledger_gate",
     "evaluate_command_policy",

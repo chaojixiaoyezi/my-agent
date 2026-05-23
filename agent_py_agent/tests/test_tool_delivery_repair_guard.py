@@ -41,9 +41,9 @@ def _builder_ready_action() -> dict[str, object]:
     }
 
 
-# LLM: missing-checkpoint repair may still read artifact evidence before materializing a file.
-# 函数用途: 验证 materialize_checkpoint 阶段不会把 read_artifact 误判为空转。
-def test_delivery_repair_guard_allows_read_artifact_before_checkpoint_exists(tmp_path: Path) -> None:
+# LLM: missing-checkpoint repair may read declared artifact evidence before materializing a file.
+# 函数用途: 验证 materialize_checkpoint 只放行 recovery action 明确声明的 artifact 来源。
+def test_delivery_repair_guard_allows_declared_read_artifact_before_checkpoint_exists(tmp_path: Path) -> None:
     from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
         is_delivery_repair_productive_call,
     )
@@ -80,6 +80,7 @@ def _missing_checkpoint_action() -> dict[str, object]:
         "code": "STAGING_CHECKPOINT_MISSING",
         "recommended_action": "materialize_checkpoint",
         "checkpoint_ref": "outputs/deepseek_papers/source_index.json",
+        "source_artifact_refs": ["demo.json"],
     }
 
 

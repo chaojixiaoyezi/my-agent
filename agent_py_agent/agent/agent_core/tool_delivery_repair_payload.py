@@ -24,10 +24,15 @@ _WRITE_FIRST_ACTIONS = {
 _LIST_FIELDS = {
     "finding_codes",
     "finding_values",
+    "artifact_refs",
     "collection_item_updates",
+    "input_artifacts",
     "repair_targets",
     "required_columns",
     "required_fields",
+    "source_artifact_refs",
+    "source_artifacts",
+    "source_refs",
     "write_tools",
 }
 _DICT_FIELDS = {
@@ -304,17 +309,29 @@ def _source_artifact_fields(call: dict[str, object], action: dict[str, object], 
     columns = _string_list(call.get("columns"))
     values = _required_item_values(action)
     existing_values = _existing_checkpoint_constant_values(action, agent_root)
-    mapped: dict[str, object] = {}
-    for column in columns:
-        if column in values:
-            mapped[column] = {"value": values[column]}
-        elif inferred := _common_source_field(column):
-            mapped[column] = inferred
-        elif column in existing_values:
-            mapped[column] = {"value": existing_values[column]}
-        elif isinstance(fields, dict) and column in fields:
-            mapped[column] = fields[column]
-    return mapped
+    field_values = fields if isinstance(fields, dict) else {}
+    return {
+        column: value
+        for column in columns
+        for value in [_source_artifact_field_value(column, values, existing_values, field_values)]
+        if value is not None
+    }
+
+
+def _source_artifact_field_value(
+    column: str,
+    values: dict[str, object],
+    existing_values: dict[str, object],
+    fields: dict[str, object],
+) -> object | None:
+    if column in values:
+        return {"value": values[column]}
+    inferred = _common_source_field(column)
+    if inferred:
+        return inferred
+    if column in existing_values:
+        return {"value": existing_values[column]}
+    return fields.get(column)
 
 
 def _source_artifact_evidence_fields(call: dict[str, object], action: dict[str, object]) -> list[str]:

@@ -26,6 +26,7 @@ from .tool_delivery_repair_productivity import (
     productive_tools,
 )
 from .tool_delivery_repair_rejection_context import render_delivery_repair_rejection_context
+from .tool_delivery_repair_sources import read_artifact_matches_declared_source
 from .tool_shell_command_classifier import command_has_local_mutation
 
 _MAX_REPAIRS = 2
@@ -224,20 +225,21 @@ def _is_source_checkpoint_materialization_gathering(
 ) -> bool:
     tool = str(call.get("tool") or "").strip()
     return any(
-        _action_allows_source_gathering_for_checkpoint(tool, action)
+        _action_allows_source_gathering_for_checkpoint(call, action)
         or _action_allows_source_gathering_for_collection_repair(tool, action, context.required_tool_calls)
         or _action_allows_source_gathering_for_data_checkpoint(tool, action, context.strict_write_required)
         for action in context.required_actions
     )
 
 
-def _action_allows_source_gathering_for_checkpoint(tool: str, action: dict[str, object]) -> bool:
+def _action_allows_source_gathering_for_checkpoint(call: dict[str, object], action: dict[str, object]) -> bool:
+    tool = str(call.get("tool") or "").strip()
     if str(action.get("recommended_action") or "") != "materialize_checkpoint":
         return False
     if not str(action.get("checkpoint_ref") or "").strip():
         return False
     if tool == "read_artifact":
-        return True
+        return read_artifact_matches_declared_source(call, action)
     writer_tool = str(action.get("writer_tool") or "").strip()
     raw_write_tools = action.get("write_tools")
     write_tools = {str(item).strip() for item in raw_write_tools if str(item).strip()} if isinstance(raw_write_tools, list) else set()
@@ -246,7 +248,6 @@ def _action_allows_source_gathering_for_checkpoint(tool: str, action: dict[str, 
         or writer_tool == "api_json_collection"
         or "api_json_collection" in write_tools
     )
-
 
 def _action_allows_source_gathering_for_collection_repair(
     tool: str,

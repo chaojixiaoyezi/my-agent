@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
+from ..contracts.artifact_format_lint import lint_artifact_format
 from ..contracts.gates import artifact_provenance_from_archive
 from ..contracts.staged_checkpoint_acceptance import staged_checkpoint_findings
 from ._runtime_params import ToolLoopExecuteParams
@@ -86,12 +86,10 @@ def _validate_artifact_item(
     path = _artifact_path(raw_path, workspace_root)
     if path is None:
         return _path_failure(item, raw_path, "ARTIFACT_PATH_INVALID")
-    report = validate_artifact(
-        ArtifactAcceptanceRequest(
-            path=path,
-            workspace_root=workspace_root,
-            validation_contract=_validation_contract(item),
-        )
+    report = lint_artifact_format(
+        path=path,
+        workspace_root=workspace_root,
+        validation_contract=_validation_contract(item),
     ).to_dict()
     report = _with_staged_checkpoint_findings(report, item, workspace_root)
     artifact = {

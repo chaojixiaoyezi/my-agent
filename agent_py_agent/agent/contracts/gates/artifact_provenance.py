@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -34,12 +35,13 @@ def evaluate_artifact_provenance_gate(item: dict[str, Any], *, run_id: str = "")
             ("ARTIFACT_PROVENANCE_TOOL_MISSING", provenance.get("tool_name")),
             ("ARTIFACT_PROVENANCE_OPERATION_MISSING", provenance.get("operation_id")),
             ("ARTIFACT_PROVENANCE_IDEMPOTENCY_MISSING", provenance.get("idempotency_key")),
-            ("ARTIFACT_PROVENANCE_REF_MISSING", provenance.get("artifact_ref") or provenance.get("path")),
+            ("ARTIFACT_PROVENANCE_REF_MISSING", provenance.get("artifact_ref") or provenance.get("path") or item.get("path")),
         )
         if not str(value or "").strip()
     ]
     if provenance.get("created_by_current_run") is not True:
         findings.append(GateFinding("ARTIFACT_PROVENANCE_NOT_CURRENT_RUN"))
+    findings.extend(_hash_chain_findings(item, provenance))
     if findings:
         return GateDecision.repair("artifact_provenance", findings)
     return GateDecision.allow(
@@ -49,6 +51,7 @@ def evaluate_artifact_provenance_gate(item: dict[str, Any], *, run_id: str = "")
             "tool_name": str(provenance.get("tool_name") or ""),
             "operation_id": str(provenance.get("operation_id") or ""),
             "run_id": provenance_run_id,
+            "build_output_hash": str(provenance.get("build_output_hash") or ""),
         },
     )
 
@@ -82,6 +85,100 @@ def artifact_provenance_from_archive(
     if old_run_match:
         return {**old_run_match, "created_by_current_run": False, "code": "ARTIFACT_PROVENANCE_RUN_MISMATCH"}
     return {"ok": False, "code": "ARTIFACT_PROVENANCE_MISSING"}
+
+
+# LLM: _hash_chain_findings verifies declared build/source hashes against current files.
+# 函数用途: 本 run 写过只能证明来源存在，hash 链才能证明最终产物来自最新 source/checkpoint。
+def _hash_chain_findings(item: dict[str, Any], provenance: dict[str, Any]) -> list[GateFinding]:
+    findings: list[GateFinding] = []
+    source_hashes = provenance.get("source_artifact_hashes")
+    if isinstance(source_hashes, dict):
+        findings.extend(_source_hash_findings(source_hashes))
+    artifact_ref = str(provenance.get("artifact_ref") or provenance.get("path") or item.get("path") or "").strip()
+    if output_finding := _output_hash_finding(artifact_ref, str(provenance.get("build_output_hash") or "")):
+        findings.append(output_finding)
+    if input_finding := _build_input_hash_finding(source_hashes, str(provenance.get("build_input_hash") or "")):
+        findings.append(input_finding)
+    return findings
+
+
+def _source_hash_findings(source_hashes: dict[Any, Any]) -> list[GateFinding]:
+    findings: list[GateFinding] = []
+    for raw_ref, raw_expected in source_hashes.items():
+        ref = str(raw_ref or "").strip()
+        expected = _normalize_hash(raw_expected)
+        if not ref or not expected:
+            findings.append(
+                GateFinding(
+                    "ARTIFACT_PROVENANCE_SOURCE_HASH_MISSING",
+                    evidence={"current_state": {"source_ref": ref, "hash": str(raw_expected or "")}, "required_state": {"source_hash": "sha256"}},
+                )
+            )
+            continue
+        path = Path(ref).expanduser().resolve(strict=False)
+        actual = _file_hash(path)
+        if actual and actual != expected:
+            findings.append(
+                GateFinding(
+                    "BUILDER_PROVENANCE_STALE",
+                    evidence={
+                        "source_ref": ref,
+                        "current_state": {"source_hash": actual},
+                        "required_state": {"recorded_source_hash": expected},
+                        "repair_action": "rebuild_from_latest_source",
+                        "required_tool_calls": ["read_artifact", "rebuild_artifact"],
+                        "retryable": True,
+                    },
+                )
+            )
+    return findings
+
+
+def _build_input_hash_finding(source_hashes: object, build_input_hash: str) -> GateFinding | None:
+    if not isinstance(source_hashes, dict) or len(source_hashes) != 1 or not build_input_hash:
+        return None
+    expected = _normalize_hash(next(iter(source_hashes.values())))
+    current = _normalize_hash(build_input_hash)
+    if expected and current and expected != current:
+        return GateFinding(
+            "BUILDER_PROVENANCE_INPUT_HASH_MISMATCH",
+            evidence={
+                "current_state": {"build_input_hash": current},
+                "required_state": {"source_hash": expected},
+                "repair_action": "rebuild_from_latest_source",
+            },
+        )
+    return None
+
+
+def _output_hash_finding(artifact_ref: str, build_output_hash: str) -> GateFinding | None:
+    if not artifact_ref or not build_output_hash:
+        return None
+    actual = _file_hash(Path(artifact_ref).expanduser().resolve(strict=False))
+    expected = _normalize_hash(build_output_hash)
+    if actual and expected and actual != expected:
+        return GateFinding(
+            "BUILDER_PROVENANCE_OUTPUT_HASH_MISMATCH",
+            evidence={
+                "artifact_ref": artifact_ref,
+                "current_state": {"output_hash": actual},
+                "required_state": {"build_output_hash": expected},
+                "repair_action": "rebuild_or_revalidate_artifact",
+            },
+        )
+    return None
+
+
+def _file_hash(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _normalize_hash(value: object) -> str:
+    text = str(value or "").strip()
+    return text.split(":", 1)[1] if text.startswith("sha256:") else text
 
 
 # LLM: _provenance_from_record copies operation facts from a tool archive row.

@@ -172,6 +172,25 @@ def test_delivery_repair_replaces_directory_setup_with_source_artifact_required_
     assert normalized[0]["source_artifacts"][0]["artifact_ref"] == str(artifact_path)
 
 
+# LLM: materialize_checkpoint cannot treat arbitrary artifact reads as progress.
+# 函数用途: checkpoint 修复只能读取合同声明的来源 artifact；随便读旧工具产物仍要被拉回写入/构建主线。
+def test_delivery_repair_guard_rejects_unbound_read_artifact_for_checkpoint_materialization(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _closeout_with_actions(tmp_path, [_source_checkpoint_action()])
+    agent = SimpleNamespace(root=tmp_path)
+
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "read_artifact", "artifact_ref": "memory_archive/artifacts/tool_outputs/unrelated.json"}],
+        )
+        is False
+    )
+
+
 def _write_tool_output_artifact(root: Path) -> Path:
     artifact_dir = root / "memory_archive/artifacts/tool_outputs"
     artifact_dir.mkdir(parents=True, exist_ok=True)

@@ -602,6 +602,7 @@ my-agent real-e2e --workspace .\.real-e2e --report .\reports\real-e2e.json
 | `--run-real-tasks` | `false` | 显式执行真实任务套件；默认关闭，避免普通验证意外调用模型或长期占用进程。 |
 | `--real-task-case <case_id>` | 可重复 | 只计划/执行指定 case，例如 `furniture_homepage_html`。不传则覆盖全部默认 case。 |
 | `--real-task-base-config <path>` | 空 | 执行真实任务使用的基础配置文件；为空时使用离线 echo 配置，传真实配置才会调用真实模型。 |
+| `--real-task-prompt-override <case_id=prompt_file>` | 可重复 | 用外部 prompt 文件覆盖指定真实任务 case 的初始提示词；只接受结构化 `case_id=路径`，不从自然语言猜 case。 |
 | `--revalidate-real-task-report <path>` | 空 | 只读复验已有真实任务执行报告；不启动模型进程，只重新跑产物验收。 |
 | `--resume-real-task-recovery-packet <path>` | 空 | 按已有 `recovery_packet.json` 续跑同一个真实任务 case，复用原 task workspace 和验收合同。 |
 | `--real-task-max-workers <n>` | `4` | 真实任务计划/执行的最大并发工位。 |

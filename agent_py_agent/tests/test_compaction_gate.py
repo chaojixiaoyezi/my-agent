@@ -50,13 +50,12 @@ class TestPreCompactChecks:
         assert decision.allowed is False
         assert any("MISSING_APPROVAL_REFS" in f.code for f in decision.findings)
 
-    def test_warns_empty_artifact_refs(self):
+    def test_allows_empty_artifact_refs_before_artifacts_exist(self):
         state = _full_pre_state()
         state["artifact_refs"] = {}
         facts = CompactionGateFacts(pre_compact_state=state, phase="pre_compact")
         decision = evaluate_compaction_gate(facts)
-        assert decision.allowed is False
-        assert any("EMPTY_ARTIFACT_REFS" in f.code for f in decision.findings)
+        assert decision.allowed is True
 
     def test_none_field_is_missing(self):
         state = _full_pre_state()

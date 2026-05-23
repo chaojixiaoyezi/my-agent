@@ -17,6 +17,11 @@ from .artifact_acceptance_models import (
 from .artifact_binary_signature import binary_signature_finding
 from .artifact_collection_contract import collection_contract_findings
 from .artifact_csv_acceptance import validate_csv_artifact
+from .artifact_document_acceptance import (
+    document_quality_artifact_findings,
+    validate_docx_artifact,
+    validate_text_artifact,
+)
 from .artifact_html_contract import html_contract_findings, record_resource_ref
 from .artifact_html_refs import image_ref_findings, scan_html_refs
 from .artifact_staged_evidence import staged_source_evidence_findings
@@ -100,9 +105,11 @@ def _kind_validators() -> dict[str, ArtifactValidator]:
         "json": _validate_json_request,
         "md": _validate_markdown_request,
         "markdown": _validate_markdown_request,
+        "txt": _validate_text_request,
         "csv": _validate_csv_request,
         "xlsx": _validate_xlsx_request,
         "pdf": _validate_pdf_request,
+        "docx": _validate_docx_request,
     }
 
 
@@ -156,6 +163,12 @@ def _validate_markdown_request(request: ArtifactAcceptanceRequest) -> ArtifactAc
     return _validate_markdown(Path(request.path), request.validation_contract)
 
 
+# LLM: _validate_text_request adapts text documents to the shared document quality contract.
+# 函数用途: 对 txt 产物执行通用文档内容质量检查。
+def _validate_text_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
+    return validate_text_artifact(Path(request.path), request.validation_contract, workspace_root=request.workspace_root)
+
+
 # LLM: _validate_csv_request adapts the path-based validator to the shared request shape.
 # 函数用途: 保持注册表只处理 ArtifactAcceptanceRequest，不暴露内部 path-only helper。
 def _validate_csv_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
@@ -176,6 +189,12 @@ def _validate_pdf_request(request: ArtifactAcceptanceRequest) -> ArtifactAccepta
         request.validation_contract,
         workspace_root=request.workspace_root,
     )
+
+
+# LLM: _validate_docx_request adapts Word documents to the shared document quality contract.
+# 函数用途: 对 docx 产物执行基本包完整性和通用文档内容质量检查。
+def _validate_docx_request(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
+    return validate_docx_artifact(Path(request.path), request.validation_contract, workspace_root=request.workspace_root)
 
 
 # LLM: _validate_generic_request keeps unknown artifact kinds on the generic fallback path.
@@ -222,6 +241,7 @@ def _validate_markdown(
     text = path.read_text(encoding="utf-8", errors="replace")
     findings = text_size_findings(path, text, validation_contract or {})
     findings.extend(markdown_section_findings(path, text, validation_contract or {}))
+    findings.extend(document_quality_artifact_findings(path, validation_contract, workspace_root=path.parent))
     return ArtifactAcceptanceReport(
         ok=not any(item.severity == "hard" for item in findings),
         artifact_ref=str(path),
@@ -280,7 +300,10 @@ def _validate_pdf(
             message="PDF is missing %PDF header or EOF marker.",
         )
         return _report_with_finding(path, "pdf", finding)
-    findings = collection_contract_findings(validation_contract or {}, workspace_root or path.parent)
+    findings = [
+        *collection_contract_findings(validation_contract or {}, workspace_root or path.parent),
+        *document_quality_artifact_findings(path, validation_contract, workspace_root=workspace_root or path.parent),
+    ]
     return ArtifactAcceptanceReport(
         ok=not any(item.severity == "hard" for item in findings),
         artifact_ref=str(path),

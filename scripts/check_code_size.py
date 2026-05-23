@@ -49,6 +49,8 @@ from code_size_thresholds import (
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT_PATH = ROOT / "CODE_SIZE_REPORT.md"
+DEFAULT_BASELINE_PATH = ROOT / "CODE_SIZE_BASELINE.json"
+_SEVERITY_RANK = {"soft": 1, "high-risk": 2, "hard": 3}
 
 
 # LLM: _is_excluded 是扫描入口的路径闸门；目录白名单变化会影响所有规模检查。
@@ -298,6 +300,23 @@ def compute_strict_blockers(findings: list[Finding], baseline: dict[str, str] | 
     return blockers
 
 
+# LLM: report_findings filters historical baseline debt so CODE_SIZE_REPORT represents current net risk.
+# 函数用途: 生成报告时只展示新增、恶化或强制阻断的规模问题，避免下游矩阵把历史 baseline 当作新失败。
+def report_findings(findings: list[Finding], baseline: dict[str, str] | None) -> list[Finding]:
+    if baseline is None:
+        return findings
+    return [item for item in findings if _finding_exceeds_baseline(item, baseline)]
+
+
+def _finding_exceeds_baseline(item: Finding, baseline: dict[str, str]) -> bool:
+    if item.kind == "high_risk_growth":
+        return True
+    previous = baseline.get(item.identity())
+    if previous is None:
+        return True
+    return _SEVERITY_RANK.get(item.severity, 0) > _SEVERITY_RANK.get(previous, 0)
+
+
 # LLM: _parse_args 定义脚本参数面；改参数会影响 CI 调用方式。
 # 函数用途: 注册 warn/strict、baseline 和写 baseline 等命令行参数。
 def _parse_args() -> argparse.Namespace:
@@ -318,6 +337,16 @@ def _load_optional_baseline(path: str | None) -> tuple[dict[str, str] | None, bo
         return load_baseline(baseline_path), True
     print(f"WARNING: baseline file not found: {path}", file=sys.stderr)
     return None, False
+
+
+# LLM: _effective_baseline_arg gives local checks the repo baseline unless a caller explicitly overrides it.
+# 函数用途: 让 warn/strict 生成同一净报告口径；没有默认 baseline 时保持旧的无 baseline 行为。
+def _effective_baseline_arg(path: str | None) -> str | None:
+    if path:
+        return path
+    if DEFAULT_BASELINE_PATH.exists():
+        return DEFAULT_BASELINE_PATH.relative_to(ROOT).as_posix()
+    return None
 
 
 # LLM: _write_requested_baseline 只在显式请求时写文件；默认检查不落盘。
@@ -348,12 +377,14 @@ def main() -> int:
     args = _parse_args()
     findings = collect_findings()
     _write_requested_baseline(findings, args.write_baseline)
-    baseline, baseline_loaded = _load_optional_baseline(args.baseline)
+    baseline_arg = _effective_baseline_arg(args.baseline)
+    baseline, baseline_loaded = _load_optional_baseline(baseline_arg)
     blockers = compute_strict_blockers(findings, baseline)
     blocked = args.mode == "strict" and bool(blockers)
-    context = ReportRenderContext(args.mode, blocked, args.baseline, baseline_loaded)
-    write_report(REPORT_PATH, findings, context)
-    _print_summary(findings, blocked)
+    visible_findings = report_findings(findings, baseline)
+    context = ReportRenderContext(args.mode, blocked, baseline_arg, baseline_loaded)
+    write_report(REPORT_PATH, visible_findings, context)
+    _print_summary(visible_findings, blocked)
     if blocked:
         for item in blockers:
             print(f"BLOCKED: {item.severity}: {item.kind}: {item.path}:{item.name} {item.message}")

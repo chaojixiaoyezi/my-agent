@@ -65,7 +65,7 @@ def _pre_compact_check(facts: CompactionGateFacts) -> GateDecision:
                 {"field": field},
             ))
             continue
-        if field in ("pending_actions", "artifact_refs") and isinstance(state[field], (list, tuple, dict)) and len(state[field]) == 0:
+        if field == "pending_actions" and isinstance(state[field], (list, tuple, dict)) and len(state[field]) == 0:
             findings.append(GateFinding(
                 f"COMPACT_EMPTY_{field.upper()}", "P1",
                 f"Required field '{field}' is empty before compaction",
