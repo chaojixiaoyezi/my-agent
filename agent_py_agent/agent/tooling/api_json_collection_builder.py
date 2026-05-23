@@ -112,8 +112,9 @@ def _load_json(
     allowed_private_hosts: Iterable[str] = (),
     allow_private_resolution: bool | None = None,
 ) -> dict[str, object]:
-    if str(spec.get("artifact_path") or "").strip():
-        return _load_artifact_json(str(spec["artifact_path"]))
+    artifact_ref = str(spec.get("artifact_path") or spec.get("artifact_ref") or "").strip()
+    if artifact_ref:
+        return _load_artifact_json(artifact_ref)
     return fetch_json(
         spec["url"],
         timeout=timeout,
@@ -169,7 +170,7 @@ def _rows_from_response(response: object, context: dict[str, Any]) -> list[dict[
     for item_index, item in enumerate(items[: int(spec.get("limit") or request["limit_per_request"])]):
         if not isinstance(item, dict):
             continue
-        row = _row_from_item(item, request["fields"], request["evidence_fields"], str(spec["source_id"]))
+        row = _row_from_item(item, context)
         if not _row_within_date_bounds(row, request.get("item_date_bounds")):
             continue
         if request.get("drop_incomplete_items") is True and not _row_has_evidence_fields(row, request["evidence_fields"]):
@@ -179,14 +180,15 @@ def _rows_from_response(response: object, context: dict[str, Any]) -> list[dict[
     return rows
 
 
-def _row_from_item(
-    item: dict[str, object],
-    fields: dict[str, object],
-    evidence_fields: list[str],
-    source_id: str,
-) -> dict[str, object]:
-    row = {field: _field_value(rule, item) for field, rule in fields.items()}
-    row["field_source_ids"] = {field: [source_id] for field in evidence_fields if _has_value(row.get(field))}
+# LLM: _row_from_item maps one API item into a row while reserving LLM fields.
+# 函数用途: 使用结构化 fields 填工具字段，llm_generated_fields 留空等待模型分析补写。
+def _row_from_item(item: dict[str, object], context: dict[str, Any]) -> dict[str, object]:
+    request = context["request"]
+    source_id = str(context["spec"]["source_id"])
+    row = {field: _field_value(rule, item) for field, rule in request["fields"].items()}
+    for field in _string_list(request.get("llm_generated_fields", [])):
+        row.setdefault(field, "")
+    row["field_source_ids"] = {field: [source_id] for field in request["evidence_fields"] if _has_value(row.get(field))}
     return row
 
 
@@ -403,6 +405,10 @@ def _string_value(value: object) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
     return "" if value is None else str(value)
+
+
+def _string_list(value: object) -> list[str]:
+    return [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []
 
 
 def _now() -> str:

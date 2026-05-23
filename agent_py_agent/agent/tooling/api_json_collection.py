@@ -109,6 +109,7 @@ def _tool_spec() -> ToolSpec:
             "limit_per_request": "每个请求最多取多少条，默认 10",
             "columns": "输出表头数组",
             "fields": "输出字段映射；值可为 JSON path，或 {path/paths/value/template/default/default_template/date_from_url}",
+            "llm_generated_fields": "需要模型后续分析撰写的列；采集工具会保留列但不从 API 字段硬填",
             "evidence_fields": "需要绑定 field_source_ids 和 claims 的字段",
             "drop_incomplete_items": "为 true 时跳过缺少 evidence_fields 的单条来源条目；默认严格失败",
             "completion_evidence": "完成范围、方法、抓取时间等机器字段",
@@ -119,6 +120,7 @@ def _tool_spec() -> ToolSpec:
             "source_artifacts": "artifact_ref 必须位于工作区允许根内；支持直接 JSON 或 fetch_url tool_output_artifact.content 中的 JSON 正文。",
             "request_delay_seconds": "可显式设为 0..60 秒；未设置且请求数大于 10 时默认 6.5 秒。",
             "fields": "字符串表示 item 内路径；paths 可声明多个候选路径；date_from_url 可从 URL 里的结构化日期片段提取日期；default_template 不能使用占位值。",
+            "llm_generated_fields": "例如中文说明、推荐理由、风险判断这类分析型列；不能映射到 description 之类来源字段冒充模型分析。",
             "evidence_fields": "缺省为 fields 的全部字段；每行会写 field_source_ids[field]=[source_id]。",
             "drop_incomplete_items": "只影响单条来源 item；如果全部被跳过，checkpoint 仍按 API_JSON_NO_ROWS 失败。",
         },
@@ -132,13 +134,10 @@ def _range_example() -> str:
         '"request_ranges":[{"start_date":"2026-01-01","end_date":"2026-02-28","step_days":7,'
         '"name_template":"2026-W{index:02d}","source_id_template":"src-w{index:02d}",'
         '"url_template":"https://api.example/items?from={start}&to={end}"}],'
-        '"fields":{"项目名":"full_name","地址":"html_url","上升 star 数":"stargazers_count",'
-        '"中文解释":{"path":"description","default_template":"{full_name} repository; language={language}"},'
-        '"推荐理由":{"template":"stars={stargazers_count}; topics={topics}"},'
-        '"技术栈":{"path":"language","default":"unknown"},'
-        '"生态":{"template":"topics={topics}"},'
-        '"应用方向":{"template":"topics={topics}"}},'
-        '"evidence_fields":["项目名","地址","上升 star 数","中文解释","推荐理由"]}'
+        '"fields":{"名称":"name","地址":"url","周期增量":"delta",'
+        '"技术字段":{"path":"primary_technology","default":"unknown"}},'
+        '"llm_generated_fields":["中文说明","推荐理由","应用方向"],'
+        '"evidence_fields":["名称","地址","周期增量","技术字段"]}'
     )
 
 

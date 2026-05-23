@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from .main_agent_delivery_closeout_recovery_models import RecoveryActionLedger
 
-_REPAIR_TARGET_SUFFIXES = {".css", ".html", ".htm", ".js", ".json", ".md", ".txt", ".yaml", ".yml"}
 _MAX_FINDING_VALUES_PER_ACTION = 64
+_SAFE_REPAIR_SUFFIX_RE = re.compile(r"^\.[a-z0-9][a-z0-9._+-]{0,63}$")
 
 
 # LLM: append_artifact_finding_repair_actions 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
@@ -429,14 +430,28 @@ def _repair_targets(item: dict[str, Any], findings: list[dict[str, Any]]) -> lis
 # 函数用途: 处理 finding file targets 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _finding_file_targets(artifact_path: Path, findings: list[dict[str, Any]]) -> list[Path]:
     targets: list[Path] = []
-    for value in [*_finding_values(findings, "location"), *_finding_values(findings, "value")]:
-        head = _file_ref_head(value)
-        if not head or Path(head).suffix.lower() not in _REPAIR_TARGET_SUFFIXES:
-            continue
-        target = _safe_artifact_related_path(artifact_path, head)
+    for finding in findings:
+        targets.extend(_finding_targets_for_one_finding(artifact_path, finding))
+    return targets
+
+
+# LLM: _finding_targets_for_one_finding isolates per-finding file-ref repair extraction.
+# 函数用途: 从一个结构化 finding 的 location/value 里提取可修复文件目标，控制主循环复杂度。
+def _finding_targets_for_one_finding(artifact_path: Path, finding: dict[str, Any]) -> list[Path]:
+    targets: list[Path] = []
+    for value in (str(finding.get("location") or ""), str(finding.get("value") or "")):
+        target = _repair_target_for_ref(artifact_path, _file_ref_head(value), finding)
         if target is not None:
             targets.append(target)
     return targets
+
+
+# LLM: _repair_target_for_ref validates one structured file reference before path resolution.
+# 函数用途: 把 finding 中的单个文件引用转成安全路径；非文件引用返回 None。
+def _repair_target_for_ref(artifact_path: Path, head: str, finding: dict[str, Any]) -> Path | None:
+    if not _is_repair_file_ref(artifact_path, head, finding):
+        return None
+    return _safe_artifact_related_path(artifact_path, head)
 
 
 # LLM: _file_ref_head 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
@@ -453,11 +468,37 @@ def _existing_text_targets(artifact_path: Path) -> list[Path]:
         files = [
             path
             for path in artifact_path.rglob("*")
-            if path.is_file() and path.suffix.lower() in _REPAIR_TARGET_SUFFIXES
+            if path.is_file() and _has_safe_repair_suffix(path)
         ]
     except OSError:
         return []
     return sorted(files, key=lambda path: (len(path.parts), str(path)))[:8]
+
+
+# LLM: _is_repair_file_ref keeps repair target discovery open-world while avoiding dotted API names.
+# 函数用途: 只接受安全文件引用；新格式靠真实文件或带路径 ref 进入，不靠固定后缀表。
+def _is_repair_file_ref(artifact_path: Path, value: str, finding: dict[str, Any]) -> bool:
+    if not value or not _has_safe_repair_suffix(Path(value)):
+        return False
+    if "/" in value or "\\" in value:
+        return True
+    target = _safe_artifact_related_path(artifact_path, value)
+    if target and target.exists() and target.is_file():
+        return True
+    return _finding_declares_file_ref(finding)
+
+
+# LLM: _finding_declares_file_ref trusts structured finding codes, not file-type suffix enums.
+# 函数用途: 缺失文件尚不存在时，只有文件类机器 finding 才能把短文件名加入 repair_targets。
+def _finding_declares_file_ref(finding: dict[str, Any]) -> bool:
+    code = str(finding.get("code") or "").upper()
+    return "FILE" in code
+
+
+# LLM: _has_safe_repair_suffix validates suffix shape instead of closed file-type enums.
+# 函数用途: 判断路径是否像安全文件名，避免开放格式因未登记在表里被丢弃。
+def _has_safe_repair_suffix(path: Path) -> bool:
+    return bool(path.name and _SAFE_REPAIR_SUFFIX_RE.fullmatch(path.suffix.lower()))
 
 
 # LLM: _safe_artifact_child 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
@@ -493,6 +534,8 @@ def _safe_artifact_related_path(artifact_path: Path, rel: str) -> Path | None:
     return _safe_artifact_child(artifact_path, rel)
 
 
+# LLM: _workspace_relative_candidate resolves outputs/... style refs against ancestor roots.
+# 函数用途: 当 finding 给出工作区相对路径时，先按已有顶层目录定位，避免重复拼接 artifact 子目录。
 def _workspace_relative_candidate(artifact_path: Path, rel: str) -> Path | None:
     first_part = Path(rel).parts[0] if Path(rel).parts else ""
     if not first_part:

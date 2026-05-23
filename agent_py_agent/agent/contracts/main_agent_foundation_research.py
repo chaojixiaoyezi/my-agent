@@ -32,27 +32,27 @@ def research_evidence_contract_case(workspace: Path) -> dict[str, object]:
 
 
 # LLM: _valid_research_evidence_contract builds the positive sourced-claim fixture.
-# 函数用途: 构造带 source_ref 的 GitHub 统计 claim，证明有来源资料可以通过证据合同。
+# 函数用途: 构造带 source_ref 的通用指标 claim，证明有来源资料可以通过证据合同。
 def _valid_research_evidence_contract():
     return evaluate_evidence_contract(
         EvidenceContractRequest(
             source_refs=[
                 EvidenceSourceRef(
-                    source_id="github-api-openclaw",
+                    source_id="source-api-example",
                     source_type="api",
-                    uri="https://api.github.com/repos/openclaw/openclaw",
+                    uri="https://example.com/data/project.json",
                     retrieved_at="2026-05-18T10:00:00Z",
                 )
             ],
             claims=[
                 EvidenceClaim(
-                    claim_id="openclaw-stars",
-                    field="stargazers_count",
+                    claim_id="sourced-metric-value",
+                    field="metric_value",
                     value=372838,
-                    source_ids=["github-api-openclaw"],
+                    source_ids=["source-api-example"],
                 )
             ],
-            required_fields=["stargazers_count"],
+            required_fields=["metric_value"],
         )
     )
 
@@ -62,15 +62,8 @@ def _valid_research_evidence_contract():
 def _invalid_research_evidence_contract():
     return evaluate_evidence_contract(
         EvidenceContractRequest(
-            claims=[
-                EvidenceClaim(
-                    claim_id="repo-weekly-growth",
-                    field="weekly_star_growth",
-                    value=581200,
-                    source_ids=[],
-                )
-            ],
-            required_fields=["weekly_star_growth"],
+            claims=[EvidenceClaim(claim_id="unsourced-metric-value", field="metric_delta", value=581200, source_ids=[])],
+            required_fields=["metric_delta"],
         )
     )
 
@@ -101,4 +94,3 @@ def _research_evidence_issues(valid_ok: bool, invalid_ok: bool) -> list[str]:
     if invalid_ok:
         issues.append("unsourced claim passed")
     return issues
-

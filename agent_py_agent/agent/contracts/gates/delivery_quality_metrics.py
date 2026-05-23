@@ -46,6 +46,8 @@ def _one_metric_contract_findings(
         if bool(metric_contract.get("required_window")) and not _has_time_window(claim, sources_by_id):
             findings.append(_claim_metric_finding("METRIC_WINDOW_MISSING", claim, expected_kind=expected_kind))
         findings.extend(_metric_estimate_findings(claim, metric_contract))
+    if bool(metric_contract.get("require_consistent_window")):
+        findings.extend(_consistent_window_findings(matched, sources_by_id))
     return findings
 
 
@@ -103,13 +105,57 @@ def _has_time_window(claim: EvidenceClaim, sources_by_id: dict[str, EvidenceSour
     return any(_has_time_window_fields(sources_by_id[source_id].reserved) for source_id in claim.source_ids if source_id in sources_by_id)
 
 
+# LLM: _consistent_window_findings compares structured time windows for one metric field.
+# 函数用途: 防止同一指标混用不同周期口径；只读 window_start/window_end/time_window 机器字段。
+# LLM: _consistent_window_findings rejects mixed metric time windows.
+# 函数用途: 对同一指标的所有 claim/source 时间窗口做一致性检查，防止口径混用。
+def _consistent_window_findings(
+    claims: list[EvidenceClaim],
+    sources_by_id: dict[str, EvidenceSourceRef],
+) -> list[GateFinding]:
+    windows = {window for claim in claims if (window := _time_window(claim, sources_by_id))}
+    if len(windows) <= 1:
+        return []
+    claim = claims[0]
+    return [
+        _claim_metric_finding(
+            "METRIC_WINDOW_INCONSISTENT",
+            claim,
+            actual_kind=",".join(sorted(f"{start}..{end}" for start, end in windows)[:6]),
+        )
+    ]
+
+
+# LLM: _time_window resolves a claim's structured metric window.
+# 函数用途: 优先读 claim reserved，再读 source reserved，确保口径检查不靠自然语言。
+def _time_window(
+    claim: EvidenceClaim,
+    sources_by_id: dict[str, EvidenceSourceRef],
+) -> tuple[str, str] | None:
+    if window := _time_window_fields(claim.reserved):
+        return window
+    for source_id in claim.source_ids:
+        source = sources_by_id.get(source_id)
+        if source and (window := _time_window_fields(source.reserved)):
+            return window
+    return None
+
+
 # LLM: _has_time_window_fields accepts the two supported structured window shapes.
 # 函数用途: 支持 window_start/window_end 和 time_window.start/end，不读说明文字。
 def _has_time_window_fields(value: dict[str, Any]) -> bool:
+    return _time_window_fields(value) is not None
+
+
+# LLM: _time_window_fields accepts canonical structured window fields.
+# 函数用途: 读取 window_start/window_end 或 time_window.start/end 并返回稳定二元组。
+def _time_window_fields(value: dict[str, Any]) -> tuple[str, str] | None:
     if _text(value.get("window_start")) and _text(value.get("window_end")):
-        return True
+        return (_text(value.get("window_start")), _text(value.get("window_end")))
     window = value.get("time_window")
-    return isinstance(window, dict) and _text(window.get("start")) and _text(window.get("end"))
+    if isinstance(window, dict) and _text(window.get("start")) and _text(window.get("end")):
+        return (_text(window.get("start")), _text(window.get("end")))
+    return None
 
 
 # LLM: _has_estimate_limitations checks explicit uncertainty/limitations metadata.

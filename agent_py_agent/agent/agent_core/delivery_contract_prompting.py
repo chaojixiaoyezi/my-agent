@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 
+from .artifact_locator import artifact_can_be_located
 from .delivery_contract_prompting_recovery import render_recovery_guidance_lines
 
 DELIVERY_PREFLIGHT_FINDINGS_KEY = "_preflight_findings"
@@ -60,13 +61,13 @@ def _one_artifact_preflight_findings(index: int, item: object) -> list[dict[str,
                 "delivery_contract artifact entries must be objects.",
             )
         ]
-    if _artifact_target_path(item):
+    if artifact_can_be_located(item):
         return []
     return [
         _preflight_finding(
             "DELIVERY_CONTRACT_ARTIFACT_TARGET_MISSING",
             location,
-            "delivery_contract artifact entries must declare path or preferred_path.",
+            "delivery_contract artifact entries must declare path/preferred_path or kind with allowed_output_roots.",
         )
     ]
 
@@ -167,9 +168,14 @@ def _materialize_checkpoint_lines(action: dict[str, object]) -> list[str]:
     checkpoint_ref = str(action.get("checkpoint_ref") or "").strip()
     if not checkpoint_ref:
         return []
-    if action.get("requires_auditable_source_evidence") is True:
+    if action.get("research_first") is True or action.get("requires_auditable_source_evidence") is True:
         fields = ", ".join(str(item) for item in action.get("required_structured_fields", []) if str(item).strip())
         suffix = f"，必须包含 {fields}" if fields else ""
+        if action.get("research_first") is True:
+            return [
+                f"- 先完成来源采集/读取，再写 checkpoint: {checkpoint_ref}",
+                f"- 这是来源型 checkpoint，优先用采集/转换工具物化{suffix}。",
+            ]
         return [
             f"- 先真实写出 checkpoint: {checkpoint_ref}",
             f"- 这是来源型 checkpoint，优先用采集/转换工具物化{suffix}。",
@@ -198,7 +204,13 @@ def _builder_startup_lines(action: dict[str, object]) -> list[str]:
 def _one_artifact_lines(artifact: dict[str, object]) -> list[str]:
     contract = artifact.get("validation_contract") if isinstance(artifact.get("validation_contract"), dict) else {}
     requirements = contract.get("quality_requirements") if isinstance(contract.get("quality_requirements"), dict) else {}
-    lines = [f"- 写入产物路径: {artifact.get('preferred_path') or artifact.get('path') or '<missing>'}"]
+    target = artifact.get("preferred_path") or artifact.get("path")
+    if target:
+        lines = [f"- 写入产物路径: {target}"]
+    else:
+        roots = artifact.get("allowed_output_roots") or artifact.get("search_roots") or artifact.get("artifact_roots")
+        roots_text = ", ".join(str(item) for item in roots if str(item).strip()) if isinstance(roots, list) else "outputs, artifacts"
+        lines = [f"- 写入产物目标: kind={artifact.get('kind') or '<missing>'}, allowed_output_roots={roots_text}"]
     if artifact.get("kind"):
         lines.append(f"- 产物类型: {artifact.get('kind')}")
     if requirements.get("complete_html_document"):

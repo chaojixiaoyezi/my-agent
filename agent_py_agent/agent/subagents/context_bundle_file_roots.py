@@ -3,25 +3,12 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from .models import SubAgentTask
 
-_CONTRACT_FILE_SUFFIXES = {
-    ".py",
-    ".md",
-    ".json",
-    ".yaml",
-    ".yml",
-    ".txt",
-    ".ts",
-    ".tsx",
-    ".js",
-    ".jsx",
-    ".css",
-    ".html",
-    ".htm",
-}
+_SAFE_FILE_SUFFIX_RE = re.compile(r"^\.[a-z0-9][a-z0-9._+-]{0,63}$")
 
 
 # LLM: file_level_write_root_terms turns explicit product file grants into required file contracts.
@@ -39,10 +26,10 @@ def file_level_write_root_terms(task: SubAgentTask) -> list[str]:
     return terms
 
 
-# LLM: is_contract_file_path keeps directory roots out of required_files.
-# 函数用途: 只把带受支持后缀的具体文件路径加入文件合同。
+# LLM: is_contract_file_path keeps directory roots out without a closed file-type enum.
+# 函数用途: 只要结构化写入根是安全具体文件路径，就进入文件合同；不靠固定后缀表。
 def is_contract_file_path(path: Path) -> bool:
-    return bool(path.name and path.suffix.lower() in _CONTRACT_FILE_SUFFIXES)
+    return bool(path.name and _SAFE_FILE_SUFFIX_RE.fullmatch(path.suffix.lower()))
 
 
 # LLM: is_internal_task_file filters run-private output/checkpoint files from product contracts.

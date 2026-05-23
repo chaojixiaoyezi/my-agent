@@ -181,21 +181,42 @@ def _normalize_payload_mapping(payload: dict[Any, Any]) -> tuple[dict[str, Any],
 
 
 # LLM: _unwrap_param_name_bundle repairs a common model mistake without hiding collisions.
-# 函数用途: 当模型把真实参数误包进 param_name 字段时，将其展开成工具可执行的扁平参数。
+# 函数用途: 当模型把真实参数误包进 param_name/arguments 字段时，将其展开成工具可执行的扁平参数。
 def _unwrap_param_name_bundle(payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
     wrapper_keys = [key for key in payload if key != "tool"]
-    if (
-        len(wrapper_keys) != 1
-        or wrapper_keys[0] not in MODEL_WRAPPER_PARAM_KEYS
-        or not isinstance(payload.get(wrapper_keys[0]), dict)
-    ):
+    if len(wrapper_keys) != 1 or wrapper_keys[0] not in MODEL_WRAPPER_PARAM_KEYS:
         return payload, ""
-    bundled, error = _normalize_payload_mapping(payload[wrapper_keys[0]])
+    wrapper_key = wrapper_keys[0]
+    wrapper_value = payload.get(wrapper_key)
+    if isinstance(wrapper_value, str):
+        wrapper_value, error = _parse_wrapper_param_json(wrapper_key, wrapper_value)
+        if error:
+            return {}, error
+    if not isinstance(wrapper_value, dict):
+        return payload, ""
+    bundled, error = _normalize_payload_mapping(wrapper_value)
     if error:
         return {}, error
     if "tool" in bundled:
-        return {}, f"{wrapper_keys[0]} 参数包不能包含 tool 字段"
+        return {}, f"{wrapper_key} 参数包不能包含 tool 字段"
     return {"tool": payload["tool"], **bundled}, ""
+
+
+# LLM: _parse_wrapper_param_json accepts structured JSON-string wrappers without guessing semantics.
+# 函数用途: 把 arguments/params 中的 JSON 字符串解成对象；只做格式修复，不读取自然语言描述。
+def _parse_wrapper_param_json(wrapper_key: str, raw_value: str) -> tuple[object, str]:
+    text = raw_value.strip()
+    if not text:
+        return raw_value, ""
+    if not text.startswith("{"):
+        return raw_value, ""
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return None, f"{wrapper_key} 参数包 JSON 解析失败: {exc}"
+    if not isinstance(parsed, dict):
+        return None, f"{wrapper_key} 参数包必须是 JSON 对象"
+    return parsed, ""
 
 
 # LLM: _canonicalize_tool_payload repairs stable aliases before auth and execution.

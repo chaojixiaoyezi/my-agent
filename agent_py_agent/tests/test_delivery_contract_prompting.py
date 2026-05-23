@@ -126,6 +126,32 @@ def test_render_delivery_contract_section_includes_bootstrap_targets():
     assert "data_to_workbook" in text
 
 
+def test_render_delivery_contract_section_keeps_research_first_before_skeletons():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    text = render_delivery_contract_section(
+        {
+            "bootstrap_contract": {
+                "startup_actions": [
+                    {
+                        "action": "materialize_checkpoint",
+                        "priority": 1,
+                        "checkpoint_ref": "outputs/source_data.json",
+                        "research_first": True,
+                        "required_structured_fields": ["source_refs", "claims"],
+                    }
+                ],
+            }
+        }
+    )
+
+    assert "先完成来源采集/读取，再写 checkpoint: outputs/source_data.json" in text
+    assert "source_refs, claims" in text
+    assert "最小有效骨架" not in text
+
+
 # LLM: source-evidence checkpoints should not be rendered as skeleton-first recovery work.
 # 函数用途: 验证需要来源证据的 checkpoint 会提示先采集/绑定 source refs，而不是写空骨架。
 def test_render_delivery_contract_section_avoids_skeleton_hint_for_source_evidence_checkpoint():

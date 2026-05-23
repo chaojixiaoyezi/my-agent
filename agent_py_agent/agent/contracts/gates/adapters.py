@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from ..state_machine_transitions import transition_contract
+from ..tool_name_resolution import suggested_tool_name
 from ..tool_protocol_v2 import normalize_tool_call, validate_tool_call
 from .models import GateDecision, GateFinding
 from .tool_effects import ToolGatePolicy, tool_effect_decision
@@ -27,7 +28,10 @@ def evaluate_tool_call_gate(
     available = _string_set(available_tools)
     allowed = _string_set(allowed_tools)
     if available is not None and call.tool_name not in available:
-        return GateDecision.deny("tool_call", "TOOL_NOT_REGISTERED", evidence={"tool_name": call.tool_name})
+        evidence = {"tool_name": call.tool_name}
+        if suggestion := suggested_tool_name(call.tool_name, available):
+            evidence["suggested_tool_name"] = suggestion
+        return GateDecision.deny("tool_call", "TOOL_NOT_REGISTERED", evidence=evidence)
     if allowed is not None and call.tool_name not in allowed:
         return GateDecision.deny("tool_call", "TOOL_NOT_ALLOWED", evidence={"tool_name": call.tool_name})
     effect_decision = tool_effect_decision(payload, call, policy)

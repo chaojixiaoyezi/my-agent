@@ -36,17 +36,20 @@ def collection_request(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"TOOL_INVALID_ARGUMENTS: requests max is {_MAX_REQUESTS}")
     if not isinstance(fields, dict) or not fields:
         raise ValueError("TOOL_INVALID_ARGUMENTS: fields must be a non-empty object")
-    columns = _columns(params.get("columns"), fields)
-    _validate_column_mappings(columns, fields)
+    llm_generated_fields = _field_names(params.get("llm_generated_fields"))
+    fields = _fields_without_llm_generated(fields, llm_generated_fields)
+    columns = _columns(params.get("columns"), fields, llm_generated_fields)
+    _validate_column_mappings(columns, fields, llm_generated_fields)
     return {
         "columns": columns,
         "completion_evidence": _completion_evidence(params.get("completion_evidence")),
         "drop_incomplete_items": _bool_param(params.get("drop_incomplete_items")),
-        "evidence_fields": _evidence_fields(params.get("evidence_fields"), fields),
+        "evidence_fields": _evidence_fields(params.get("evidence_fields"), fields, llm_generated_fields),
         "fields": {str(key): value for key, value in fields.items() if str(key).strip()},
         "item_date_bounds": _item_date_bounds(params.get("item_date_bounds")),
         "item_path": _text_param(params.get("item_path", "items"), name="item_path", max_chars=160, strip=True),
         "limit_per_request": _bounded_limit(params.get("limit_per_request")),
+        "llm_generated_fields": llm_generated_fields,
         "request_delay_seconds": _request_delay_seconds(params.get("request_delay_seconds"), len(requests)),
         "requests": [_request_spec(item, index) for index, item in enumerate(requests, start=1)],
     }
@@ -234,27 +237,38 @@ def _request_reserved(value: object) -> dict[str, object]:
     return {str(key): item for key, item in value.items() if str(key).strip()}
 
 
-def _columns(value: object, fields: dict[str, object]) -> list[str]:
+def _columns(value: object, fields: dict[str, object], llm_generated_fields: list[str]) -> list[str]:
     if isinstance(value, list):
         columns = [str(item).strip() for item in value if str(item).strip()]
         if columns:
             return columns
-    return [str(key) for key in fields]
+    return [str(key) for key in fields] + [field for field in llm_generated_fields if field not in fields]
 
 
-def _evidence_fields(value: object, fields: dict[str, object]) -> list[str]:
+def _evidence_fields(value: object, fields: dict[str, object], llm_generated_fields: list[str]) -> list[str]:
+    llm_fields = set(llm_generated_fields)
     if isinstance(value, list):
-        parsed = [str(item).strip() for item in value if str(item).strip()]
+        parsed = [str(item).strip() for item in value if str(item).strip() and str(item).strip() not in llm_fields]
         if parsed:
             return parsed
-    return [str(key) for key in fields]
+    return [str(key) for key in fields if str(key) not in llm_fields]
 
 
-def _validate_column_mappings(columns: list[str], fields: dict[str, object]) -> None:
-    missing = [column for column in columns if column not in fields]
+def _validate_column_mappings(columns: list[str], fields: dict[str, object], llm_generated_fields: list[str]) -> None:
+    llm_fields = set(llm_generated_fields)
+    missing = [column for column in columns if column not in fields and column not in llm_fields]
     if missing:
         joined = ", ".join(missing[:5])
         raise ValueError(f"TOOL_INVALID_ARGUMENTS: fields missing mappings for columns: {joined}")
+
+
+def _fields_without_llm_generated(fields: dict[str, object], llm_generated_fields: list[str]) -> dict[str, object]:
+    llm_fields = set(llm_generated_fields)
+    return {str(key): value for key, value in fields.items() if str(key).strip() and str(key) not in llm_fields}
+
+
+def _field_names(value: object) -> list[str]:
+    return [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []
 
 
 def _completion_evidence(value: object) -> dict[str, object]:

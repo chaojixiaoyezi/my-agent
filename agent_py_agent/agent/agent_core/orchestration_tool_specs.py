@@ -69,7 +69,7 @@ _CREATE_PARAMETER_DETAILS = {
         "这不是 root 要立刻读取的清单，而是交给对应小傻妞读取和分析的清单。"
     ),
     "output_files": (
-        "只要用户给了明确保存路径，就把路径放进这里，例如 [\"lab_outputs/furniture-home/index.html\"]。"
+        "只要用户给了明确保存路径，就把路径放进这里，例如 [\"outputs/page/index.html\"]。"
         "不要只把保存路径写在 goal 里；goal 是给人看的任务描述，output_files 才是系统后续调度、验收、"
         "恢复和去重会读取的机器事实。"
     ),
@@ -85,29 +85,29 @@ _CREATE_PARAMETER_DETAILS = {
 }
 _CREATE_EXAMPLES = [
     (
-        '{"tool":"create_subagents","items":[{"goal":"用单文件 HTML 做一个高端现代家具品牌首页",'
-        '"role":"worker","agent_name":"小傻妞-家具网页",'
-        '"output_files":["lab_outputs/furniture-home/index.html"]}]}'
+        '{"tool":"create_subagents","items":[{"goal":"用单文件 HTML 完成用户指定页面",'
+        '"role":"worker","agent_name":"小傻妞-页面",'
+        '"output_files":["outputs/page/index.html"]}]}'
     ),
     (
         '{"tool":"create_subagents","items":['
-        '{"goal":"研究市场环境并输出证据摘要","role":"worker","agent_name":"小傻妞-市场"},'
-        '{"goal":"研究竞争格局并输出证据摘要","role":"worker","agent_name":"小傻妞-竞争"},'
-        '{"goal":"制定进入策略并整合风险","role":"coordinator","agent_name":"小傻妞-策略"}],'
+        '{"goal":"读取资料 A 并输出证据摘要","role":"worker","agent_name":"小傻妞-资料A"},'
+        '{"goal":"读取资料 B 并输出证据摘要","role":"worker","agent_name":"小傻妞-资料B"},'
+        '{"goal":"整合多个资料摘要并输出风险","role":"coordinator","agent_name":"小傻妞-整合"}],'
         '"acceptance_checks":["必须有证据","必须标注未确认信息"]}'
     ),
     (
         '{"tool":"create_subagents","items":['
-        '{"goal":"读取并分析 data/market.md，输出市场证据摘要","role":"worker",'
-        '"agent_name":"小傻妞-市场","required_read_paths":["data/market.md","rubric.md"]},'
-        '{"goal":"读取并分析 data/competition.md，输出竞争证据摘要","role":"worker",'
-        '"agent_name":"小傻妞-竞争","required_read_paths":["data/competition.md","rubric.md"]}]}'
+        '{"goal":"读取并分析 data/a.md，输出证据摘要","role":"worker",'
+        '"agent_name":"小傻妞-资料A","required_read_paths":["data/a.md","rubric.md"]},'
+        '{"goal":"读取并分析 data/b.md，输出证据摘要","role":"worker",'
+        '"agent_name":"小傻妞-资料B","required_read_paths":["data/b.md","rubric.md"]}]}'
     ),
     '{"tool":"create_subagents","goal":"在隔离 fixture 项目里实现三个小功能并写报告","count":3,"role":"worker","workflow_mode":"off","acceptance_checks":["必须有文件证据","必须说明测试结果"]}',
-    '{"tool":"create_subagents","goal":"在 /workspace/deliverables/flow/build 实现静态交易流程站点 HTML 骨架和 data.json","count":1,"role":"worker","agent_name":"小傻妞-基础结构","extra_write_roots":["/workspace/deliverables/flow/build"]}',
-    '{"tool":"create_subagents","goal":"在 /workspace/deliverables/flow/build 实现静态交易流程站点 styles.css 和 app.js 交互","count":1,"role":"worker","agent_name":"小傻妞-样式交互","extra_write_roots":["/workspace/deliverables/flow/build"]}',
-    '{"tool":"create_subagents","goal":"检查多个 worker 的静态交易流程站点实现","count":1,"role":"bug_finder"}',
-    '{"tool":"create_subagents","goal":"验收静态交易流程站点从账号入口到最终确认前的完整流程","count":1,"role":"acceptor"}',
+    '{"tool":"create_subagents","goal":"在 /workspace/deliverables/app/build 实现用户指定项目的 HTML 骨架和 data.json","count":1,"role":"worker","agent_name":"小傻妞-基础结构","extra_write_roots":["/workspace/deliverables/app/build"]}',
+    '{"tool":"create_subagents","goal":"在 /workspace/deliverables/app/build 实现用户指定项目的 styles.css 和 app.js 交互","count":1,"role":"worker","agent_name":"小傻妞-样式交互","extra_write_roots":["/workspace/deliverables/app/build"]}',
+    '{"tool":"create_subagents","goal":"检查多个 worker 的项目实现","count":1,"role":"bug_finder"}',
+    '{"tool":"create_subagents","goal":"验收用户指定项目的完整流程","count":1,"role":"acceptor"}',
 ]
 
 _BOARD_PARAMETERS = {

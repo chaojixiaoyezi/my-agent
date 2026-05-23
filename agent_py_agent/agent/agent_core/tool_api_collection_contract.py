@@ -155,13 +155,23 @@ def _merge_api_request_fields(payload: dict[str, object], request: dict[str, obj
     request_fields = request.get("fields")
     if not isinstance(request_fields, dict) or not request_fields:
         return
+    llm_generated = _string_list(request.get("llm_generated_fields"))
     payload_fields = payload.get("fields")
-    payload["fields"] = {
+    merged_fields = {
         **(payload_fields if isinstance(payload_fields, dict) else {}),
         **request_fields,
     }
+    for field in llm_generated:
+        merged_fields.pop(field, None)
+    payload["fields"] = {
+        key: value
+        for key, value in merged_fields.items()
+        if str(key).strip()
+    }
+    if llm_generated:
+        payload["llm_generated_fields"] = llm_generated
     if payload.get("columns") in (None, "", []):
-        payload["columns"] = list(payload["fields"])
+        payload["columns"] = [*list(payload["fields"]), *[field for field in llm_generated if field not in payload["fields"]]]
 
 
 def _deep_merge_dicts(base: dict[str, object], authoritative: dict[str, object]) -> dict[str, object]:
@@ -196,9 +206,10 @@ def _source_checkpoint_refs(validation: dict[str, object]) -> list[str]:
 
 def _missing_field_mappings(payload: dict[str, object], contract: dict[str, object]) -> list[str]:
     required = _required_columns(contract)
+    llm_generated = set(_llm_generated_fields(contract))
     fields = payload.get("fields")
     field_names = set(fields) if isinstance(fields, dict) else set()
-    missing = [field for field in required if field not in field_names]
+    missing = [field for field in required if field not in field_names and field not in llm_generated]
     return [
         "missing field mappings for columns: "
         f"{', '.join(missing[:8])}; use path/template/default/default_template, including template/default_template for derived columns"
@@ -210,6 +221,17 @@ def _required_columns(contract: dict[str, object]) -> list[str]:
     collection = contract.get("collection_contract")
     if isinstance(collection, dict):
         values.extend(_string_list(collection.get("required_item_fields")))
+    return sorted(set(values))
+
+
+def _llm_generated_fields(contract: dict[str, object]) -> list[str]:
+    collection = contract.get("collection_contract")
+    values = _string_list(contract.get("llm_generated_fields"))
+    if isinstance(collection, dict):
+        values.extend(_string_list(collection.get("llm_generated_fields")))
+        request = collection.get("api_request")
+        if isinstance(request, dict):
+            values.extend(_string_list(request.get("llm_generated_fields")))
     return sorted(set(values))
 
 

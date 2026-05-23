@@ -292,6 +292,29 @@ def test_context_bundle_required_files_include_file_level_write_roots(tmp_path) 
     assert report.ok is True
 
 
+# LLM: file-level write roots are open-world deliverables, not a fixed web/text suffix list.
+# 函数用途: 验证 xlsx/parquet 等新格式文件级写入授权也会进入 required_files。
+def test_context_bundle_required_files_include_open_world_file_level_write_roots(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    target = tmp_path / "deliverables" / "analysis" / "metrics.parquet"
+    task = manager.create_run(
+        goal="生成分析结果文件。",
+        thought="目标文件来自父级结构化写入根。",
+        plan=["生成文件", "验收文件"],
+        role="child",
+        acceptance_checks=["文件路径正确存在"],
+    )
+    task.allowed_write_roots = [str(task.task_dir), str(target)]
+    manager.save(task)
+
+    bundle = build_context_bundle(manager.load(task.id))
+    report = validate_context_bundle(bundle)
+
+    assert "metrics.parquet" in bundle.output_contract["required_files"]
+    assert "metrics.parquet" in bundle.task_packet["file_contract"]["required_files"]
+    assert report.ok is True
+
+
 # LLM: Context Gate should not block when a task reads a Markdown data pack as input.
 # 函数用途: 复现 Task17 里 `读取 .../vietnam.md` 被误判成必需输出文件，导致市场子代理无法开工。
 def test_context_bundle_ignores_source_markdown_inputs_for_required_files(tmp_path) -> None:

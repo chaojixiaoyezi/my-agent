@@ -201,7 +201,7 @@ class WebSearchTool(BaseTool):
             },
             examples=[
                 '{"tool": "web_search", "query": "open model reasoning paper arxiv", "limit": 5}',
-                '{"tool": "web_search", "query": "github weekly rank 20260105", "allowed_domains": ["github.com"]}',
+                '{"tool": "web_search", "query": "project weekly ranking 20260105", "allowed_domains": ["example.com"]}',
             ],
         )
 

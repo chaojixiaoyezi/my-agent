@@ -18,6 +18,7 @@ from ..action_protocol import (
     RunScope,
     ToolCallEnvelope,
 )
+from ..contracts.tool_name_resolution import resolve_dispatch_tool_name
 from .models import BaseTool, ToolExecutionResult
 from .parse_error_hint import parse_error_message
 from .parser import parse_xmlish_tool_calls
@@ -142,6 +143,7 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
     normalized_payload = _normalized_payload_or_error(call, envelope)
     if isinstance(normalized_payload, ToolExecutionResult):
         return normalized_payload
+    normalized_payload = _with_resolved_dispatch_tool_name(normalized_payload, call)
     gate_decision = tool_call_gate_decision(normalized_payload, call)
     if not gate_decision.allowed:
         return runtime_gate_block_result(normalized_payload, gate_decision, envelope)
@@ -184,6 +186,18 @@ def _normalized_payload_or_error(
             envelope,
         )
     return prepared
+
+
+# LLM: _with_resolved_dispatch_tool_name rewrites only deterministic tool-name drift.
+# 函数用途: 在工具网关执行前修正大小写/命名空间后缀，不执行 fuzzy suggestion。
+def _with_resolved_dispatch_tool_name(
+    payload: dict[str, Any],
+    call: ExecuteRegistryCallParams,
+) -> dict[str, Any]:
+    resolved = resolve_dispatch_tool_name(payload.get("tool"), call.tools.keys())
+    if not resolved or resolved == payload.get("tool"):
+        return payload
+    return {**payload, "tool": resolved}
 
 
 # LLM: _invoke_registry_with_envelope invokes the selected tool and preserves call envelope refs.

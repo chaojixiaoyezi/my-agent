@@ -12,6 +12,7 @@ from ..contracts.artifact_format_lint import lint_artifact_format
 from ..contracts.gates import artifact_provenance_from_archive
 from ..contracts.staged_checkpoint_acceptance import staged_checkpoint_findings
 from ._runtime_params import ToolLoopExecuteParams
+from .artifact_locator import locate_artifact
 
 CLOSEOUT_DIR = ".agent_delivery"
 CLOSEOUT_REPORT = "closeout.json"
@@ -83,9 +84,15 @@ def _validate_artifact_item(
     run_id: str = "",
 ) -> dict[str, Any]:
     raw_path = str(item.get("preferred_path") or item.get("path") or "")
-    path = _artifact_path(raw_path, workspace_root)
+    located = locate_artifact(item, workspace_root)
+    path = located.path
     if path is None:
-        return _path_failure(item, raw_path, "ARTIFACT_PATH_INVALID")
+        return _path_failure(
+            item,
+            raw_path,
+            str(located.findings[0]["code"]) if located.findings else "ARTIFACT_PATH_INVALID",
+            locator_findings=located.findings,
+        )
     report = lint_artifact_format(
         path=path,
         workspace_root=workspace_root,
@@ -124,7 +131,13 @@ def _artifact_path(raw_path: str, workspace_root: Path) -> Path | None:
 
 # LLM: _path_failure gives missing or escaped artifact refs the same report shape as validator failures.
 # 函数用途: 生成路径无效时的结构化产物验收结果，方便后续修复流程统一消费。
-def _path_failure(item: dict[str, Any], raw_path: str, code: str) -> dict[str, Any]:
+def _path_failure(
+    item: dict[str, Any],
+    raw_path: str,
+    code: str,
+    *,
+    locator_findings: list[dict[str, object]] | None = None,
+) -> dict[str, Any]:
     finding = {
         "code": code,
         "severity": "hard",
@@ -132,6 +145,8 @@ def _path_failure(item: dict[str, Any], raw_path: str, code: str) -> dict[str, A
         "location": raw_path,
         "value": raw_path,
     }
+    if locator_findings:
+        finding["locator_findings"] = locator_findings
     return {
         "artifact_id": str(item.get("artifact_id") or ""),
         "kind": str(item.get("kind") or ""),

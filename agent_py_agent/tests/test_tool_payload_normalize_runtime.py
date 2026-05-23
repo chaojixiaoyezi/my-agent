@@ -50,6 +50,38 @@ def test_normalize_tool_payload_unwraps_args_bundle() -> None:
     }
 
 
+# LLM: provider wrappers sometimes serialize arguments as a JSON string; this repairs only the structure.
+# 函数用途: 验证 arguments 字符串是 JSON 对象时会被展开，并继续走参数别名归一。
+def test_normalize_tool_payload_unwraps_arguments_json_string() -> None:
+    payload, error = normalize_tool_payload(
+        {
+            "tool": "write_file",
+            "arguments": '{"file_path":"outputs/report.txt","content":"ok"}',
+        }
+    )
+
+    assert not error
+    assert payload == {
+        "tool": "write_file",
+        "path": "outputs/report.txt",
+        "content": "ok",
+    }
+
+
+# LLM: malformed structured wrapper JSON should become a stable parse error instead of leaking to tools.
+# 函数用途: 验证 arguments JSON 字符串损坏时，解析层返回结构化错误而不是执行未知参数。
+def test_normalize_tool_payload_rejects_bad_arguments_json_string() -> None:
+    payload, error = normalize_tool_payload(
+        {
+            "tool": "write_file",
+            "arguments": '{"path":"outputs/report.txt"',
+        }
+    )
+
+    assert payload is None
+    assert "arguments 参数包 JSON 解析失败" in error
+
+
 # LLM: uppercase or legacy raw write aliases should collapse to the canonical write_file tool.
 # 函数用途: 验证 WRITE_FILE_RAW / write_file_raw 这类漂移工具名会被统一成 write_file。
 def test_normalize_tool_payload_maps_write_file_raw_aliases() -> None:
