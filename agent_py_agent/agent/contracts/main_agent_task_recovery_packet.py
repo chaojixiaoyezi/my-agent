@@ -39,7 +39,17 @@ class TaskRunRecoveryPacketRequest:
 # LLM: write_task_recovery_packet emits a machine-readable continuation packet.
 # 函数用途: 写 recovery_packet.json；包里只放结构化原因、路径引用和验收 findings 摘要。
 def write_task_recovery_packet(request: TaskRunRecoveryPacketRequest) -> str:
-    payload = _packet_payload(request)
+    return write_recovery_packet(request, schema_version=SCHEMA_VERSION)
+
+
+# LLM: write_recovery_packet is the shared packet writer behind task and real_task facades.
+# 函数用途: 按调用方 schema 写同一恢复包结构，避免两套 packet 逻辑漂移。
+def write_recovery_packet(
+    request: TaskRunRecoveryPacketRequest,
+    *,
+    schema_version: str,
+) -> str:
+    payload = _packet_payload(request, schema_version=schema_version)
     request.packet_path.parent.mkdir(parents=True, exist_ok=True)
     request.packet_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
@@ -51,6 +61,15 @@ def write_task_recovery_packet(request: TaskRunRecoveryPacketRequest) -> str:
 # LLM: task_recovery_refs collects durable per-case refs for continuation.
 # 函数用途: 输出 prompt、合同、日志、事件和工作区引用；调用方不需要内联 stdout 或任务正文。
 def task_recovery_refs(
+    paths: dict[str, Path],
+    case: MainAgentTaskCasePlan,
+) -> dict[str, Path | str]:
+    return recovery_refs(paths, case)
+
+
+# LLM: recovery_refs collects durable per-case refs for both task tracks.
+# 函数用途: 输出 prompt、合同、日志、事件和工作区引用；调用方不需要内联 stdout 或任务正文。
+def recovery_refs(
     paths: dict[str, Path],
     case: MainAgentTaskCasePlan,
 ) -> dict[str, Path | str]:
@@ -71,9 +90,13 @@ def task_recovery_refs(
 
 # LLM: _packet_payload keeps recovery semantics stable across CLI and future task cards.
 # 函数用途: 生成恢复包字段；recommended_action 是机器动作码，不承载任务事实。
-def _packet_payload(request: TaskRunRecoveryPacketRequest) -> dict[str, object]:
+def _packet_payload(
+    request: TaskRunRecoveryPacketRequest,
+    *,
+    schema_version: str,
+) -> dict[str, object]:
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema_version,
         "case_id": request.case_id,
         "title": request.title,
         "status": request.status,
@@ -180,6 +203,8 @@ def _rel(path: Path | str, base: Path) -> str:
 __all__ = [
     "TaskRunRecoveryPacketRequest",
     "SCHEMA_VERSION",
+    "recovery_refs",
     "task_recovery_refs",
+    "write_recovery_packet",
     "write_task_recovery_packet",
 ]

@@ -124,13 +124,21 @@ class MainAgentTaskSuiteReport:
 # 函数用途: 生成真实任务套件的 prompt、验收合同、期望产物清单和总报告；默认不启动模型。
 def plan_main_agent_task_suite(
     request: MainAgentTaskSuiteRequest,
+    *,
+    schema_version: str = SCHEMA_VERSION,
+    acceptance_schema_version: str = ACCEPTANCE_SCHEMA_VERSION,
+    artifact_schema_version: str = ARTIFACT_SCHEMA_VERSION,
+    root_name: str = "main_agent_task_suite",
+    cases: list[MainAgentTaskCase] | None = None,
 ) -> MainAgentTaskSuiteReport:
-    from .main_agent_task_suite_cases import default_main_agent_task_cases
+    if cases is None:
+        from .main_agent_task_suite_cases import default_main_agent_task_cases
+
+        cases = default_main_agent_task_cases()
 
     _validate_request(request)
     workspace = Path(request.workspace)
-    root = workspace / "main_agent_task_suite"
-    cases = default_main_agent_task_cases()
+    root = workspace / root_name
     planned_cases = [
         _write_case_plan(
             MainAgentTaskCasePlanRequest(
@@ -139,14 +147,16 @@ def plan_main_agent_task_suite(
                 worker_slot=index % request.max_workers,
                 timeout_seconds=request.task_timeout_seconds,
                 execute=request.execute,
-            )
+            ),
+            acceptance_schema_version=acceptance_schema_version,
+            artifact_schema_version=artifact_schema_version,
         )
         for index, case in enumerate(cases)
     ]
     summary = _summary(planned_cases)
     report = MainAgentTaskSuiteReport(
         ok=not any(item.status == "FAILED" for item in planned_cases),
-        schema_version=SCHEMA_VERSION,
+        schema_version=schema_version,
         execution_mode="execute_requested" if request.execute else "plan_only",
         summary=summary,
         cases=planned_cases,
@@ -167,7 +177,12 @@ def _validate_request(request: MainAgentTaskSuiteRequest) -> None:
 
 # LLM: _write_case_plan writes prompt and machine contracts for one planned real task.
 # 函数用途: 给单个任务落 prompt.md、acceptance.json、expected_artifacts.json，并返回引用。
-def _write_case_plan(request: MainAgentTaskCasePlanRequest) -> MainAgentTaskCasePlan:
+def _write_case_plan(
+    request: MainAgentTaskCasePlanRequest,
+    *,
+    acceptance_schema_version: str,
+    artifact_schema_version: str,
+) -> MainAgentTaskCasePlan:
     case = request.case
     case_root = request.root / "tasks" / case.case_id
     prompt_path = case_root / "prompt.md"
@@ -175,8 +190,8 @@ def _write_case_plan(request: MainAgentTaskCasePlanRequest) -> MainAgentTaskCase
     artifacts_path = case_root / "expected_artifacts.json"
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text(case.user_prompt, encoding="utf-8")
-    _write_json(acceptance_path, _acceptance_payload(case))
-    _write_json(artifacts_path, _artifact_payload(case))
+    _write_json(acceptance_path, _acceptance_payload(case, acceptance_schema_version))
+    _write_json(artifacts_path, _artifact_payload(case, artifact_schema_version))
     return MainAgentTaskCasePlan(
         case_id=case.case_id,
         title=case.title,
@@ -191,9 +206,9 @@ def _write_case_plan(request: MainAgentTaskCasePlanRequest) -> MainAgentTaskCase
 
 # LLM: _acceptance_payload stores completion checks as structured contracts.
 # 函数用途: 生成验收合同 JSON，后续验收器按 check_id/kind/artifact_id 判断，不解析 prompt 文本。
-def _acceptance_payload(case: MainAgentTaskCase) -> dict[str, object]:
+def _acceptance_payload(case: MainAgentTaskCase, schema_version: str) -> dict[str, object]:
     return {
-        "schema_version": ACCEPTANCE_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "case_id": case.case_id,
         "required_artifact_ids": [
             artifact.artifact_id for artifact in case.artifacts if artifact.required
@@ -204,9 +219,9 @@ def _acceptance_payload(case: MainAgentTaskCase) -> dict[str, object]:
 
 # LLM: _artifact_payload stores expected outputs with validation contracts and paths.
 # 函数用途: 生成期望产物 JSON，真实 runner/验收器据此找文件和选择通用检查器。
-def _artifact_payload(case: MainAgentTaskCase) -> dict[str, object]:
+def _artifact_payload(case: MainAgentTaskCase, schema_version: str) -> dict[str, object]:
     return {
-        "schema_version": ARTIFACT_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "case_id": case.case_id,
         "artifacts": [artifact.to_dict() for artifact in case.artifacts],
     }

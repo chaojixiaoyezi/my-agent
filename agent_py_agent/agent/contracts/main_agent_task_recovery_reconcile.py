@@ -8,7 +8,8 @@ import time
 from pathlib import Path
 
 from ..tooling.file_write_session_inspection import open_file_write_sessions
-from .main_agent_task_recovery_resume import recovery_packet_payload
+from .main_agent_task_recovery_packet import SCHEMA_VERSION as TASK_RECOVERY_SCHEMA_VERSION
+from .main_agent_task_recovery_resume import recovery_packet_payload_for_schema
 
 
 # LLM: reconcile_recovery_open_write_sessions aborts duplicate open write sessions for the same target.
@@ -18,9 +19,29 @@ def reconcile_recovery_open_write_sessions(
     *,
     workspace: Path,
 ) -> dict[str, object]:
-    payload = recovery_packet_payload(packet_path)
+    return reconcile_recovery_open_write_sessions_for_schema(
+        packet_path,
+        workspace=workspace,
+        packet_schema_version=TASK_RECOVERY_SCHEMA_VERSION,
+        reconcile_schema_version="task-recovery-reconcile.v1",
+    )
+
+
+# LLM: reconcile_recovery_open_write_sessions_for_schema powers both task tracks.
+# 函数用途: 根据不同恢复包 schema 复用同一 open write-session reconciliation 逻辑。
+def reconcile_recovery_open_write_sessions_for_schema(
+    packet_path: Path | None,
+    *,
+    workspace: Path,
+    packet_schema_version: str,
+    reconcile_schema_version: str,
+) -> dict[str, object]:
+    payload = recovery_packet_payload_for_schema(
+        packet_path,
+        expected_schema_version=packet_schema_version,
+    )
     if _is_invalid_packet(payload):
-        return _invalid_packet_summary(payload, "task-recovery-reconcile.v1")
+        return _invalid_packet_summary(payload, reconcile_schema_version)
     task_workspace = _task_workspace(payload, workspace)
     findings = _dedupe_findings([*_workspace_findings(task_workspace), *_runtime_findings(payload)])
     groups = _duplicate_groups(findings)
@@ -32,7 +53,7 @@ def reconcile_recovery_open_write_sessions(
     summaries = [item for item in summaries if item.get("retired_session_ids")]
     if not summaries:
         return {}
-    return {"schema_version": "task-recovery-reconcile.v1", "groups": summaries}
+    return {"schema_version": reconcile_schema_version, "groups": summaries}
 
 
 # LLM: _runtime_findings extracts only structured acceptance findings from the recovery packet.
@@ -229,4 +250,7 @@ def _target_path(finding: dict[str, object]) -> str:
     return str(target.get("display") or target.get("raw") or target.get("resolved") or "")
 
 
-__all__ = ["reconcile_recovery_open_write_sessions"]
+__all__ = [
+    "reconcile_recovery_open_write_sessions",
+    "reconcile_recovery_open_write_sessions_for_schema",
+]

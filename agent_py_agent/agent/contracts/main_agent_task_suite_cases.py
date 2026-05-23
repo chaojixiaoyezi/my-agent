@@ -134,6 +134,14 @@ def _github_star_workbook_validation_contract() -> dict[str, object]:
             "required_fields": ["项目名", "地址", "上升 star 数"],
             "require_verified": True,
         },
+        "metric_contracts": [
+            {
+                "field": "上升 star 数",
+                "expected_kind": "time_window_delta",
+                "required_window": True,
+                "allow_estimated": False,
+            }
+        ],
         "collection_contract": _github_star_collection_contract(),
         "staging_contract": _github_star_workbook_staging_contract(),
     }
@@ -155,7 +163,8 @@ def _github_star_workbook_staging_contract() -> dict[str, object]:
                 '"field_source_ids":{"项目名":["src-id"],"地址":["src-id"],"上升 star 数":["src-id"]}}]}],'
                 '"source_refs":[{"source_id":"src-id","uri":"https://...","retrieved_at":"...",'
                 '"reserved":{"metric_kind":"time_window_delta","window_start":"YYYY-MM-DD","window_end":"YYYY-MM-DD"}}],'
-                '"claims":[{"field":"上升 star 数","source_ids":["src-id"],"verification_status":"VERIFIED"}]}'
+                '"claims":[{"field":"上升 star 数","source_ids":["src-id"],"verification_status":"VERIFIED",'
+                '"reserved":{"metric_kind":"time_window_delta","window_start":"YYYY-MM-DD","window_end":"YYYY-MM-DD"}}]}'
             )
         },
         "checkpoint_refs": [

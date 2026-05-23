@@ -22,6 +22,7 @@ from .main_agent_task_runtime_results import (
     case_result_kwargs,
     timeout_issues,
 )
+from .state_machine import normalize_status
 
 
 # LLM: case_result converts per-case files into the execution report shape.
@@ -76,12 +77,29 @@ def case_issues(
 # LLM: write_recovery_packet_ref materializes continuation facts for failed real tasks.
 # 函数用途: 失败/超时时写 recovery_packet.json；完成任务不写恢复包，避免制造噪音。
 def write_recovery_packet_ref(bundle: CaseResultBundle) -> str:
+    return write_recovery_packet_ref_with_writer(
+        bundle,
+        packet_request_type=TaskRunRecoveryPacketRequest,
+        refs_func=task_recovery_refs,
+        writer=write_task_recovery_packet,
+    )
+
+
+# LLM: write_recovery_packet_ref_with_writer shares recovery packet materialization.
+# 函数用途: task/real_task 使用同一失败转恢复包流程，只替换 schema-aware packet writer。
+def write_recovery_packet_ref_with_writer(
+    bundle: CaseResultBundle,
+    *,
+    packet_request_type,
+    refs_func,
+    writer,
+) -> str:
     runtime = bundle.runtime
     acceptance = bundle.acceptance
-    if bundle.status == "DONE" or acceptance is None:
+    if normalize_status(bundle.status) == "DONE" or acceptance is None:
         return ""
-    return write_task_recovery_packet(
-        TaskRunRecoveryPacketRequest(
+    return writer(
+        packet_request_type(
             case_id=runtime.case.case_id,
             title=runtime.case.title,
             status=bundle.status,
@@ -90,7 +108,7 @@ def write_recovery_packet_ref(bundle: CaseResultBundle) -> str:
             reason_codes=bundle.issues,
             workspace_root=runtime.workspace,
             packet_path=runtime.paths["recovery_packet"],
-            refs=task_recovery_refs(runtime.paths, runtime.case),
+            refs=refs_func(runtime.paths, runtime.case),
             acceptance=acceptance,
         )
     )
@@ -104,4 +122,5 @@ __all__ = [
     "timeout_issues",
     "validate_case_artifacts",
     "write_recovery_packet_ref",
+    "write_recovery_packet_ref_with_writer",
 ]

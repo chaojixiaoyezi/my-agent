@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from .main_agent_execution_contract_artifacts import (
@@ -18,6 +19,10 @@ from .main_agent_execution_contract_artifacts import (
 from .main_agent_task_execution_models import MainAgentTaskExecutionRequest
 from .main_agent_task_recovery_reconcile import reconcile_recovery_open_write_sessions
 from .main_agent_task_recovery_resume import recovery_delivery_contract_payload
+from .main_agent_task_runtime_execution_recovery import (
+    recovery_attempt_baseline,
+    recovery_attempt_inspection_budget,
+)
 from .main_agent_task_suite import MainAgentTaskCasePlan
 
 _RUNTIME_ISOLATION_KEYS = (
@@ -31,14 +36,6 @@ _RUNTIME_ISOLATION_KEYS = (
     "gateway_workspace",
     "adapter_workspace",
 )
-_DIRECT_REPAIR_ACTIONS = {
-    "invoke_builder_tool",
-    "repair_evidence_refs",
-    "repair_structured_checkpoint_json",
-    "write_non_empty_structured_rows",
-}
-
-
 # LLM: command_for_case builds an argv list and never shells through natural language.
 # 函数用途: 根据 prompt ref、交付合同和隔离配置生成 `python -m agent_py_agent ... run` 命令。
 def command_for_case(
@@ -49,18 +46,45 @@ def command_for_case(
     workspace: Path,
     delivery_contract_path: Path | None = None,
 ) -> list[str]:
+    return command_for_case_with_options(
+        case,
+        request,
+        config_path=config_path,
+        workspace=workspace,
+        delivery_contract_path=delivery_contract_path,
+        root_name="main_agent_task_execution",
+        recovery_reconciler=reconcile_recovery_open_write_sessions,
+        recovery_payload_reader=recovery_delivery_contract_payload,
+    )
+
+
+# LLM: command_for_case_with_options powers task and real_task command generation.
+# 函数用途: 复用命令/交付合同/恢复 marker 写入逻辑，只替换 root 和恢复包 schema 入口。
+def command_for_case_with_options(
+    case: MainAgentTaskCasePlan,
+    request: MainAgentTaskExecutionRequest,
+    *,
+    config_path: Path,
+    workspace: Path,
+    delivery_contract_path: Path | None = None,
+    root_name: str,
+    recovery_reconciler,
+    recovery_payload_reader,
+) -> list[str]:
     prompt = prompt_for_case(case, workspace=workspace)
-    delivery_contract_path = delivery_contract_path or case_paths(workspace, case.case_id)["delivery_contract"]
-    task_workspace = case_paths(workspace, case.case_id)["workspace"]
+    paths = case_paths_for_root(workspace, case.case_id, root_name=root_name)
+    delivery_contract_path = delivery_contract_path or paths["delivery_contract"]
+    task_workspace = paths["workspace"]
     artifact_manifest_path = task_workspace / ".my_agent_artifact_paths.json"
-    recovery_reconciliation = reconcile_recovery_open_write_sessions(
+    recovery_reconciliation = recovery_reconciler(
         request.recovery_packet_path,
         workspace=workspace,
     )
-    delivery_contract = delivery_contract_for_case(
+    delivery_contract = delivery_contract_for_case_with_options(
         case,
         workspace=workspace,
         recovery_packet_path=request.recovery_packet_path,
+        track=(root_name, recovery_payload_reader),
     )
     if recovery_reconciliation:
         delivery_contract["recovery_reconciliation"] = recovery_reconciliation
@@ -76,16 +100,8 @@ def command_for_case(
     )
     prepare_artifact_workspace(delivery_contract_path, artifact_manifest_path)
     return [
-        sys.executable,
-        "-m",
-        "agent_py_agent",
-        "--config",
-        str(config_path),
-        "run",
-        prompt,
-        "--delivery-contract-file",
-        str(delivery_contract_path),
-        "--save",
+        sys.executable, "-m", "agent_py_agent", "--config", str(config_path), "run", prompt,
+        "--delivery-contract-file", str(delivery_contract_path), "--save",
     ]
 
 
@@ -103,7 +119,25 @@ def delivery_contract_for_case(
     workspace: Path,
     recovery_packet_path: Path | None = None,
 ) -> dict[str, object]:
-    task_workspace = case_paths(workspace, case.case_id)["workspace"]
+    return delivery_contract_for_case_with_options(
+        case,
+        workspace=workspace,
+        recovery_packet_path=recovery_packet_path,
+        track=("main_agent_task_execution", recovery_delivery_contract_payload),
+    )
+
+
+# LLM: delivery_contract_for_case_with_options builds the shared machine contract shape.
+# 函数用途: task/real_task 使用同一合同结构，只替换执行目录和恢复包 reader。
+def delivery_contract_for_case_with_options(
+    case: MainAgentTaskCasePlan,
+    *,
+    workspace: Path,
+    recovery_packet_path: Path | None = None,
+    track: tuple[str, Callable[..., dict[str, object]]],
+) -> dict[str, object]:
+    root_name, recovery_payload_reader = track
+    task_workspace = case_paths_for_root(workspace, case.case_id, root_name=root_name)["workspace"]
     artifacts = load_json_payload(workspace / case.expected_artifacts_ref)
     acceptance = load_json_payload(workspace / case.acceptance_ref)
     payload = {
@@ -115,7 +149,7 @@ def delivery_contract_for_case(
         "acceptance": acceptance,
     }
     payload["bootstrap_contract"] = build_bootstrap_contract(payload["artifacts"])
-    recovery = recovery_delivery_contract_payload(recovery_packet_path, workspace=workspace)
+    recovery = recovery_payload_reader(recovery_packet_path, workspace=workspace)
     if recovery:
         payload["recovery"] = recovery
     return payload
@@ -151,91 +185,11 @@ def _write_recovery_attempt_marker(
             "schema_version": "delivery-recovery-attempt.v1",
             "packet_ref": rel(Path(packet_path).expanduser().resolve(), workspace),
             "delivery_contract_ref": rel(delivery_contract_path, workspace),
-            **_recovery_attempt_baseline(task_workspace),
+            **recovery_attempt_baseline(task_workspace),
             "inspection_round_budget": recovery_attempt_inspection_budget(task_workspace),
             "started_at_unix": round(time.time(), 3),
         },
     )
-
-
-# LLM: recovery_attempt_inspection_budget is derived from structured closeout actions, not task wording.
-# 函数用途: 直接写入/构建类恢复不给额外读取窗口；仍需定位缺失产物时才保留小检查预算。
-def recovery_attempt_inspection_budget(task_workspace: Path) -> int:
-    progress = _closeout_progress(task_workspace)
-    actions = progress.get("recovery_actions") if isinstance(progress, dict) else None
-    action_rows = [item for item in actions if isinstance(item, dict)] if isinstance(actions, list) else []
-    if any(_requires_direct_repair(item, task_workspace) for item in action_rows):
-        return 0
-    return 2 if action_rows else 4
-
-
-# LLM: _recovery_attempt_baseline keeps this runtime helper grounded in structured fields.
-# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
-def _recovery_attempt_baseline(task_workspace: Path) -> dict[str, object]:
-    progress_payload = _closeout_progress(task_workspace)
-    return {
-        "baseline_failure_fingerprint": str(progress_payload.get("failure_fingerprint") or ""),
-        "baseline_unchanged_failure_count": _safe_int(progress_payload.get("unchanged_failure_count")),
-    }
-
-
-# LLM: _closeout_progress reads only the machine delivery_progress envelope.
-# 函数用途: 从 closeout.json 提取结构化恢复状态；坏文件按空状态处理。
-def _closeout_progress(task_workspace: Path) -> dict[str, object]:
-    closeout = task_workspace / ".agent_delivery" / "closeout.json"
-    try:
-        payload = json.loads(closeout.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    progress = payload.get("delivery_progress") if isinstance(payload, dict) else {}
-    return progress if isinstance(progress, dict) else {}
-
-
-# LLM: _requires_direct_repair identifies recovery actions that should mutate before inspecting again.
-# 函数用途: 根据 recommended_action、artifact_path 和 finding_codes 的结构化字段计算恢复窗口。
-def _requires_direct_repair(action: dict[str, object], task_workspace: Path) -> bool:
-    recommended = str(action.get("recommended_action") or "").strip()
-    if recommended in _DIRECT_REPAIR_ACTIONS:
-        return True
-    if recommended != "repair_artifact_against_findings":
-        return False
-    if _artifact_missing_only(action):
-        return False
-    return _action_target_exists(action, task_workspace)
-
-
-# LLM: _artifact_missing_only keeps missing-artifact lookup separate from invalid-artifact repair.
-# 函数用途: 只有纯 ARTIFACT_MISSING 才允许续跑先查找；结构错误、DOM 缺失等都要求写入修复。
-def _artifact_missing_only(action: dict[str, object]) -> bool:
-    codes = action.get("finding_codes")
-    values = {str(code) for code in codes if str(code)} if isinstance(codes, list) else set()
-    return bool(values) and values.issubset({"ARTIFACT_MISSING"})
-
-
-# LLM: _action_target_exists resolves structured refs inside the task workspace.
-# 函数用途: 判断当前恢复对象是否已经有本地目标，避免把已存在但坏的产物继续当成“先找找看”。
-def _action_target_exists(action: dict[str, object], task_workspace: Path) -> bool:
-    for key in ("artifact_path", "checkpoint_ref", "output_ref", "source_ref"):
-        ref = str(action.get(key) or "").strip()
-        if ref and _resolve_action_ref(ref, task_workspace).exists():
-            return True
-    return False
-
-
-# LLM: _resolve_action_ref normalizes absolute and workspace-relative refs.
-# 函数用途: 将 closeout 里的结构化路径解析成 Path，不解析自然语言描述。
-def _resolve_action_ref(ref: str, task_workspace: Path) -> Path:
-    path = Path(ref).expanduser()
-    return path if path.is_absolute() else task_workspace / path
-
-
-# LLM: _safe_int keeps this runtime helper grounded in structured fields.
-# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
-def _safe_int(value: object) -> int:
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return 0
 
 
 # LLM: default_config_text reuses the repo default agent config so controlled runs match real runtime defaults.
@@ -295,7 +249,13 @@ def _posix(path: Path) -> str:
 # LLM: case_paths returns all per-case runtime paths in the workspace.
 # 函数用途: 集中定义每个真实任务的 workspace/config/log/command 文件位置。
 def case_paths(workspace: Path, case_id: str) -> dict[str, Path]:
-    root = execution_root(workspace) / "tasks" / case_id
+    return case_paths_for_root(workspace, case_id, root_name="main_agent_task_execution")
+
+
+# LLM: case_paths_for_root parameterizes only the execution artifact root.
+# 函数用途: task 和 real_task 共享同一 per-case 文件布局，目录名由兼容层选择。
+def case_paths_for_root(workspace: Path, case_id: str, *, root_name: str) -> dict[str, Path]:
+    root = execution_root_for_name(workspace, root_name=root_name) / "tasks" / case_id
     return {
         "root": root,
         "workspace": root / "workspace",
@@ -313,7 +273,13 @@ def case_paths(workspace: Path, case_id: str) -> dict[str, Path]:
 # LLM: execution_root keeps execution artifacts separate from suite prompt/contracts.
 # 函数用途: 返回真实任务执行记录根目录，避免污染计划目录和用户产物目录。
 def execution_root(workspace: Path) -> Path:
-    return workspace / "main_agent_task_execution"
+    return execution_root_for_name(workspace, root_name="main_agent_task_execution")
+
+
+# LLM: execution_root_for_name keeps root naming as a compatibility option.
+# 函数用途: 避免 task/real_task 因目录名不同复制整份执行文件 helper。
+def execution_root_for_name(workspace: Path, *, root_name: str) -> Path:
+    return workspace / root_name
 
 
 # LLM: package_root resolves where `python -m agent_py_agent` should be launched.
@@ -344,19 +310,3 @@ def rel(path: Path, base: Path) -> str:
         return str(path.relative_to(base))
     except ValueError:
         return str(path)
-
-
-__all__ = [
-    "case_paths",
-    "command_for_case",
-    "delivery_contract_for_case",
-    "execution_root",
-    "append_event",
-    "package_root",
-    "prompt_for_case",
-    "rel",
-    "write_case_config",
-    "write_json",
-    "isolated_runtime_config",
-    "without_config_keys",
-]
