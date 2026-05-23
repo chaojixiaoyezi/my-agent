@@ -385,7 +385,7 @@ def delivery_contract_prompt() -> str:
 # 函数用途: 生成主代理交付收口需要的结构化合同；测试不从普通自然语言里推断产物要求。
 def delivery_contract() -> dict[str, object]:
     return {
-        "case_id": "furniture_homepage_html",
+        "case_id": "html_delivery_case",
         "artifacts": [
             {
                 "artifact_id": "homepage_html",
@@ -408,7 +408,7 @@ def delivery_contract() -> dict[str, object]:
 # 函数用途: 生成目录型 Web 产物合同，要求 index.html 和 app.js 都真实存在。
 def web_project_delivery_contract() -> dict[str, object]:
     return {
-        "case_id": "shopping_site_flow",
+        "case_id": "web_project_case",
         "bootstrap_contract": {
             "materialization_targets": _shopping_site_targets(),
             "startup_actions": [{"action": "materialize_target", "priority": 1}],
@@ -432,7 +432,7 @@ def web_project_delivery_contract() -> dict[str, object]:
 # 函数用途: 给 closeout 恢复动作测试提供通用表格阶段合同：先有 source_data，再调 builder 生成 workbook。
 def xlsx_delivery_contract() -> dict[str, object]:
     return {
-        "case_id": "github_weekly_star_growth_xlsx",
+        "case_id": "workbook_recovery_case",
         "artifacts": [
             {
                 "artifact_id": "github_star_growth_workbook",

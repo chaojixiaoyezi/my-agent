@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from agent_py_agent.agent.contracts.artifact_acceptance import validate_artifact
@@ -12,25 +11,25 @@ from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryPara
 # LLM: MarkdownPdfTool is the generic document builder; tests assert machine refs, not task prose.
 # 函数用途: 验证 Markdown 文档可以通过通用工具生成可验收 PDF。
 def test_markdown_pdf_tool_builds_pdf_from_markdown(tmp_path: Path) -> None:
-    source = tmp_path / "outputs" / "research" / "report.md"
+    source = tmp_path / "outputs" / "documents" / "report.md"
     source.parent.mkdir(parents=True)
-    source.write_text("# 标题\n\n这是中文正文。\n\n- 来源: https://example.com/paper\n", encoding="utf-8")
+    source.write_text("# 标题\n\n这是中文正文。\n\n- 来源: https://example.com/doc\n", encoding="utf-8")
     tool = MarkdownPdfTool(tmp_path)
 
     result = tool.execute(
         {
-            "source_markdown_path": "outputs/research/report.md",
-            "path": "outputs/research/report.pdf",
-            "title": "研究报告",
+            "source_markdown_path": "outputs/documents/report.md",
+            "path": "outputs/documents/report.pdf",
+            "title": "文档报告",
         }
     )
 
     assert result.ok, result.output
-    pdf = tmp_path / "outputs" / "research" / "report.pdf"
+    pdf = tmp_path / "outputs" / "documents" / "report.pdf"
     assert pdf.exists()
     assert validate_artifact(ArtifactAcceptanceRequest(path=pdf, workspace_root=tmp_path)).ok
-    assert result.result_envelope["source_ref"] == "outputs/research/report.md"
-    assert result.result_envelope["artifact_ref"] == "outputs/research/report.pdf"
+    assert result.result_envelope["source_ref"] == "outputs/documents/report.md"
+    assert result.result_envelope["artifact_ref"] == "outputs/documents/report.pdf"
 
 
 # LLM: Builder tools must fail structurally when the staged markdown source is absent.
@@ -64,101 +63,3 @@ def test_tool_registry_registers_markdown_pdf_tool(tmp_path: Path) -> None:
     assert "markdown_to_pdf" in registry.tools
     hits = registry.find_relevant_specs("把 markdown 文档生成 pdf")
     assert any(spec.name == "markdown_to_pdf" for spec in hits)
-
-
-# LLM: Document startup contracts must carry markdown source/output refs for the builder tool.
-# 函数用途: 验证 PDF 阶段构建动作不会再只支持 workbook 字段，避免 source_ref/output_ref 为空。
-def test_research_pdf_startup_action_uses_markdown_source_and_pdf_output(tmp_path: Path) -> None:
-    from agent_py_agent.agent.contracts.main_agent_real_task_suite import (
-        MainAgentRealTaskSuiteRequest,
-        plan_main_agent_real_task_suite,
-    )
-    from agent_py_agent.agent.contracts.main_agent_task_execution_files import (
-        case_paths,
-        command_for_case,
-    )
-    from agent_py_agent.agent.contracts.main_agent_task_execution_models import (
-        MainAgentTaskExecutionRequest,
-    )
-    suite = plan_main_agent_real_task_suite(MainAgentRealTaskSuiteRequest(workspace=tmp_path, max_workers=1))
-    case = next(item for item in suite.cases if item.case_id == "research_documents_translation_pdf")
-    paths = case_paths(tmp_path, case.case_id)
-    command_for_case(
-        case,
-        MainAgentTaskExecutionRequest(workspace=tmp_path),
-        config_path=tmp_path / "config.yaml",
-        workspace=tmp_path,
-        delivery_contract_path=paths["delivery_contract"],
-    )
-    payload = json.loads(paths["delivery_contract"].read_text(encoding="utf-8"))
-    builder_actions = [
-        item for item in payload["bootstrap_contract"]["startup_actions"] if item.get("action") == "invoke_builder_tool"
-    ]
-
-    assert builder_actions == [
-        {
-            "action": "invoke_builder_tool",
-            "priority": 2,
-            "builder_tool": "markdown_to_pdf",
-            "source_ref": "outputs/research_documents/research_documents_zh.md",
-            "output_ref": "outputs/research_documents/research_documents_zh.pdf",
-        }
-    ]
-
-
-# LLM: research translation tasks need collection completeness and mapping contracts.
-# 函数用途: 验证 PDF 任务不再只要求一个 PDF，而要求 source index、完整性证据和正文映射。
-def test_research_pdf_case_has_collection_completeness_contract(tmp_path: Path) -> None:
-    from agent_py_agent.agent.contracts.main_agent_real_task_suite import (
-        MainAgentRealTaskSuiteRequest,
-        plan_main_agent_real_task_suite,
-    )
-
-    suite = plan_main_agent_real_task_suite(MainAgentRealTaskSuiteRequest(workspace=tmp_path, max_workers=1))
-    case = next(item for item in suite.cases if item.case_id == "research_documents_translation_pdf")
-    artifacts = json.loads((tmp_path / case.expected_artifacts_ref).read_text(encoding="utf-8"))
-    contract = artifacts["artifacts"][0]["validation_contract"]["collection_contract"]
-
-    assert contract["source_json_ref"] == "outputs/research_documents/source_index.json"
-    assert contract["items_path"] == "rows"
-    assert contract["min_items_total"] >= 3
-    assert contract["required_item_values"] == {"translated": True}
-    assert contract["item_date_bounds"] == {"field": "date", "min": "2025-01-01"}
-    assert contract["require_completion_evidence"] is True
-    assert contract["require_item_evidence"] is True
-    assert contract["required_item_evidence_fields"] == ["title", "url", "date"]
-    assert contract["mapping"]["artifact_ref"] == "outputs/research_documents/research_documents_zh.md"
-    assert contract["mapping"]["key_fields"] == ["title"]
-
-
-# LLM: Built-in task fixtures stay generic; concrete subjects enter through structured prompt overrides.
-# 函数用途: 验证生产默认任务不写专项项目名，真实测试题目通过 request 字段覆盖 prompt 文件。
-def test_research_pdf_case_prompt_can_be_structurally_overridden(tmp_path: Path) -> None:
-    from agent_py_agent.agent.contracts.main_agent_real_task_suite import (
-        MainAgentRealTaskSuiteRequest,
-        plan_main_agent_real_task_suite,
-    )
-
-    suite = plan_main_agent_real_task_suite(MainAgentRealTaskSuiteRequest(workspace=tmp_path, max_workers=1))
-    case = next(item for item in suite.cases if item.case_id == "research_documents_translation_pdf")
-    prompt = (tmp_path / case.prompt_ref).read_text(encoding="utf-8")
-
-    assert "DeepSeek" not in prompt
-    assert "指定开源大模型项目" in prompt
-
-    concrete_prompt = (
-        "找到 DeepSeek 在 2025 年之后公开发布的所有论文或研究文档，逐篇翻译成中文，"
-        "最终生成排版清楚的 PDF，并附来源清单。"
-    )
-    overridden = plan_main_agent_real_task_suite(
-        MainAgentRealTaskSuiteRequest(
-            workspace=tmp_path / "override",
-            max_workers=1,
-            prompt_overrides={"research_documents_translation_pdf": concrete_prompt},
-        )
-    )
-    overridden_case = next(
-        item for item in overridden.cases if item.case_id == "research_documents_translation_pdf"
-    )
-
-    assert (tmp_path / "override" / overridden_case.prompt_ref).read_text(encoding="utf-8") == concrete_prompt

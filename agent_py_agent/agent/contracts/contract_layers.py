@@ -22,6 +22,8 @@ _FORMAT_VALIDATOR_NAMES = {
     "artifact_collection_evidence",
     "artifact_collection_mapping",
     "artifact_validator_registry",
+    "main_agent_real_task_acceptance",
+    "main_agent_task_acceptance",
 }
 _OFFLINE_PREFIXES = (
     "offline_",
@@ -35,8 +37,6 @@ _OFFLINE_PREFIXES = (
 _LIVE_SCENARIO_PREFIXES = (
     "e2e_matrix",
     "main_agent_foundation",
-    "main_agent_real_task",
-    "main_agent_task",
     "medium_real_acceptance",
     "pre_real_task",
     "real_run_review",

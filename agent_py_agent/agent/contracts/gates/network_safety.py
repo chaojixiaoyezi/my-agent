@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .models import GateDecision, GateFinding
+from .network_address_projection import ip_address_or_none, ipv4_projected
 
 NetworkResolver = Callable[[str], Iterable[object]]
 
@@ -37,8 +38,7 @@ class NetworkSafetyFacts:
 
 
 # LLM: evaluate_network_safety_gate blocks private DNS/IP targets before and after adapter requests.
-# LLM: evaluate_network_safety_gate keeps this contract helper structure-first and stable.
-# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
+# 函数用途: 基于 URL、解析结果和 allowlist 机器字段做网络边界判定，不执行真实网络请求。
 def evaluate_network_safety_gate(facts: NetworkSafetyFacts) -> GateDecision:
     parsed = urlparse(_text(facts.url))
     scheme = _text(parsed.scheme).lower()
@@ -59,25 +59,52 @@ def evaluate_network_safety_gate(facts: NetworkSafetyFacts) -> GateDecision:
 
     if _is_private_hostname(host) and not private_host_allowed and not facts.allow_private_resolution:
         return _deny("NETWORK_PRIVATE_HOST_BLOCKED", {"host": host})
+    return _resolved_host_decision(host, facts, private_host_allowed)
 
+
+# LLM: _resolved_host_decision applies DNS facts after literal/private hostname checks.
+# 函数用途: 统一处理解析失败、metadata IP、私网 IP、DNS rebinding 和 allow evidence。
+def _resolved_host_decision(host: str, facts: NetworkSafetyFacts, private_host_allowed: bool) -> GateDecision:
     resolved = _resolve_host(facts.resolver, host)
     if isinstance(resolved, GateDecision):
         return resolved
 
     previous = _canonical_ip_list(facts.previous_resolved_ips)
+    code, blocked_ip = _resolved_block(resolved, previous, private_host_allowed, facts)
+    if blocked_ip:
+        return _deny(code, _resolved_evidence(host, resolved, previous, blocked_ip))
+    return _allow_resolved_host(host, resolved, previous, facts)
+
+
+# LLM: _resolved_block chooses the strongest structured denial reason for resolved IPs.
+# 函数用途: 把 metadata/link-local 优先级放在私网和 rebinding 之前，返回错误码和命中 IP。
+def _resolved_block(
+    resolved: tuple[str, ...],
+    previous: tuple[str, ...],
+    private_host_allowed: bool,
+    facts: NetworkSafetyFacts,
+) -> tuple[str, str]:
     always_blocked_ip = _first_always_blocked_ip(resolved)
     if always_blocked_ip:
-        return _deny("NETWORK_ALWAYS_BLOCKED_IP", _resolved_evidence(host, resolved, previous, always_blocked_ip))
+        return "NETWORK_ALWAYS_BLOCKED_IP", always_blocked_ip
     blocked_ip = _first_blocked_ip(
         resolved,
         private_host_allowed,
         facts.allow_private_resolution,
         facts.allow_benchmark_resolution,
     )
-    if blocked_ip:
-        code = "NETWORK_DNS_REBINDING_BLOCKED" if previous else "NETWORK_PRIVATE_IP_BLOCKED"
-        return _deny(code, _resolved_evidence(host, resolved, previous, blocked_ip))
+    code = "NETWORK_DNS_REBINDING_BLOCKED" if previous else "NETWORK_PRIVATE_IP_BLOCKED"
+    return (code, blocked_ip) if blocked_ip else ("", "")
 
+
+# LLM: _allow_resolved_host records the exact DNS facts that passed the gate.
+# 函数用途: 输出 allow decision 的 evidence，供审计和回放确认没有隐藏解析事实。
+def _allow_resolved_host(
+    host: str,
+    resolved: tuple[str, ...],
+    previous: tuple[str, ...],
+    facts: NetworkSafetyFacts,
+) -> GateDecision:
     return GateDecision.allow(
         _GATE,
         evidence={
@@ -85,7 +112,7 @@ def evaluate_network_safety_gate(facts: NetworkSafetyFacts) -> GateDecision:
             "resolved_ips": list(resolved),
             "previous_resolved_ips": list(previous),
             "dns_rechecked": bool(previous),
-            "private_host_allowed": private_host_allowed,
+            "private_host_allowed": _host_is_allowlisted(host, _normalized_allowlist(facts.allowed_private_hosts)),
             "allow_private_resolution": bool(facts.allow_private_resolution),
             "allow_benchmark_resolution": bool(facts.allow_benchmark_resolution),
             "benchmark_resolution_allowed_ips": _benchmark_ips(resolved, facts.allow_benchmark_resolution),
@@ -177,12 +204,14 @@ def _dedupe_ips(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(result)
 
 
+# LLM: _benchmark_ips reports allowed benchmark-space IPs for audit evidence.
+# 函数用途: 当调用方允许 RFC2544 benchmark 网段时，记录哪些解析值命中该特例。
 def _benchmark_ips(resolved: Iterable[str], allow_benchmark_resolution: bool) -> list[str]:
-    if not allow_benchmark_resolution:
-        return []
-    return [ip for ip in resolved if _is_benchmark_proxy_ip(ip)]
+    return [ip for ip in resolved if allow_benchmark_resolution and _is_benchmark_proxy_ip(ip)]
 
 
+# LLM: _benchmark_allowed isolates the RFC2544 benchmark exception from private-IP logic.
+# 函数用途: 判断单个 IP 是否因为显式 benchmark 许可而不被私网 IP 门拦截。
 def _benchmark_allowed(ip: str, allow_benchmark_resolution: bool) -> bool:
     return bool(allow_benchmark_resolution and _is_benchmark_proxy_ip(ip))
 
@@ -208,51 +237,21 @@ def _canonical_ip(host: object) -> str:
     return str(address)
 
 
+# LLM: _is_benchmark_proxy_ip detects IPv4-compatible benchmark proxy addresses.
+# 函数用途: 支持 IPv4、IPv4-mapped IPv6 和常见嵌入 IPv4 的 IPv6 表示。
 def _is_benchmark_proxy_ip(value: str) -> bool:
-    try:
-        address = ipaddress.ip_address(value)
-    except ValueError:
-        return False
-    if isinstance(address, ipaddress.IPv6Address):
-        if address.ipv4_mapped:
-            address = address.ipv4_mapped
-        else:
-            embedded = _embedded_ipv4_from_ipv6(address)
-            if embedded is None:
-                return False
-            address = embedded
-    return isinstance(address, ipaddress.IPv4Address) and address in _RFC2544_BENCHMARK_NETWORK
-
-
-def _embedded_ipv4_from_ipv6(address: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
-    parts = tuple(int(part, 16) for part in address.exploded.split(":"))
-    sentinels = (
-        (parts[:6] == (0, 0, 0, 0, 0, 0), parts[6], parts[7]),
-        (parts[:6] == (0, 0, 0, 0, 0xFFFF, 0), parts[6], parts[7]),
-        (parts[:3] == (0x0064, 0xFF9B, 0x0001) and parts[3:6] == (0, 0, 0), parts[6], parts[7]),
-        (parts[0] == 0x2002, parts[1], parts[2]),
-        (parts[0] == 0x2001 and parts[1] == 0, parts[6] ^ 0xFFFF, parts[7] ^ 0xFFFF),
-        ((parts[4] & 0xFCFF) == 0 and parts[5] == 0x5EFE, parts[6], parts[7]),
-    )
-    for matches, high, low in sentinels:
-        if matches:
-            return ipaddress.IPv4Address(((high & 0xFFFF) << 16) | (low & 0xFFFF))
-    return None
+    address = ip_address_or_none(value)
+    projected = ipv4_projected(address) if address is not None else None
+    return isinstance(projected, ipaddress.IPv4Address) and projected in _RFC2544_BENCHMARK_NETWORK
 
 
 # LLM: _is_private_ip keeps this contract helper structure-first and stable.
 # 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _is_private_ip(value: str) -> bool:
-    try:
-        address = ipaddress.ip_address(value)
-    except ValueError:
+    address = ip_address_or_none(value)
+    if address is None:
         return True
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-        address = address.ipv4_mapped
-    elif isinstance(address, ipaddress.IPv6Address):
-        embedded = _embedded_ipv4_from_ipv6(address)
-        if embedded is not None:
-            address = embedded
+    address = ipv4_projected(address) or address
     return (
         address.is_private
         or address.is_loopback
@@ -260,23 +259,17 @@ def _is_private_ip(value: str) -> bool:
         or address.is_reserved
         or address.is_multicast
         or address.is_unspecified
-        or address in _CGNAT_NETWORK
+        or (isinstance(address, ipaddress.IPv4Address) and address in _CGNAT_NETWORK)
     )
 
 
 # LLM: _is_always_blocked_ip keeps cloud metadata floors non-negotiable.
 # 函数用途: 即使开启私网解析授权，也禁止 metadata/link-local 这类凭证端点。
 def _is_always_blocked_ip(value: str) -> bool:
-    try:
-        address = ipaddress.ip_address(value)
-    except ValueError:
+    address = ip_address_or_none(value)
+    if address is None:
         return True
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-        address = address.ipv4_mapped
-    elif isinstance(address, ipaddress.IPv6Address):
-        embedded = _embedded_ipv4_from_ipv6(address)
-        if embedded is not None:
-            address = embedded
+    address = ipv4_projected(address) or address
     return any(address in network for network in _ALWAYS_BLOCKED_NETWORKS)
 
 

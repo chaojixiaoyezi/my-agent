@@ -321,11 +321,11 @@ def test_recovery_attempt_uses_repair_contract_before_stale_local_progress_guard
         contract = xlsx_delivery_contract()
         contract["recovery"] = {
             "schema_version": "main-agent-real-task-recovery.v1",
-            "case_id": "github_weekly_star_growth_xlsx",
+            "case_id": "workbook_recovery_case",
             "status": "FAILED",
             "recommended_action": "repair_then_resume_same_case",
             "reason_codes": ["exit_code=2", "artifact_acceptance_failed=2"],
-            "packet_ref": "main_agent_task_execution/tasks/github_weekly_star_growth_xlsx/recovery_packet.json",
+            "packet_ref": "main_agent_task_execution/tasks/workbook_recovery_case/recovery_packet.json",
         }
 
         result = _agent(workspace, backend, max_tool_rounds=6).run(

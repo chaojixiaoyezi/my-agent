@@ -113,7 +113,7 @@ def test_delivery_repair_guard_allows_search_during_source_evidence_recovery_bud
 # LLM: direct repair actions should not get a fresh read window from the attempt marker.
 # 函数用途: 验证 recovery attempt 的检查预算由结构化恢复动作决定，不靠提示词劝模型少读。
 def test_recovery_attempt_budget_is_zero_for_direct_artifact_repair(tmp_path: Path):
-    from agent_py_agent.agent.contracts.main_agent_task_execution_files import (
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_attempt import (
         recovery_attempt_inspection_budget,
     )
 
@@ -126,7 +126,7 @@ def test_recovery_attempt_budget_is_zero_for_direct_artifact_repair(tmp_path: Pa
 
 
 def test_recovery_attempt_budget_allows_small_lookup_for_missing_artifact(tmp_path: Path):
-    from agent_py_agent.agent.contracts.main_agent_task_execution_files import (
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_attempt import (
         recovery_attempt_inspection_budget,
     )
 
@@ -153,7 +153,7 @@ def test_recovery_attempt_budget_allows_small_lookup_for_missing_artifact(tmp_pa
 # LLM: source-evidence checkpoints need a bounded lookup window before the first structured write.
 # 函数用途: 验证来源型 checkpoint 续跑不会被误判成“必须立刻写入”，否则 web_search/fetch_url 无法补真实证据。
 def test_recovery_attempt_budget_allows_lookup_for_source_evidence_checkpoint(tmp_path: Path):
-    from agent_py_agent.agent.contracts.main_agent_task_execution_files import (
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_attempt import (
         recovery_attempt_inspection_budget,
     )
 
