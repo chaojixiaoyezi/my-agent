@@ -123,8 +123,42 @@ def test_research_pdf_case_has_collection_completeness_contract(tmp_path: Path) 
     assert contract["items_path"] == "rows"
     assert contract["min_items_total"] >= 3
     assert contract["required_item_values"] == {"translated": True}
+    assert contract["item_date_bounds"] == {"field": "date", "min": "2025-01-01"}
     assert contract["require_completion_evidence"] is True
     assert contract["require_item_evidence"] is True
     assert contract["required_item_evidence_fields"] == ["title", "url", "date"]
     assert contract["mapping"]["artifact_ref"] == "outputs/research_documents/research_documents_zh.md"
     assert contract["mapping"]["key_fields"] == ["title"]
+
+
+# LLM: Built-in task fixtures stay generic; concrete subjects enter through structured prompt overrides.
+# 函数用途: 验证生产默认任务不写专项项目名，真实测试题目通过 request 字段覆盖 prompt 文件。
+def test_research_pdf_case_prompt_can_be_structurally_overridden(tmp_path: Path) -> None:
+    from agent_py_agent.agent.contracts.main_agent_real_task_suite import (
+        MainAgentRealTaskSuiteRequest,
+        plan_main_agent_real_task_suite,
+    )
+
+    suite = plan_main_agent_real_task_suite(MainAgentRealTaskSuiteRequest(workspace=tmp_path, max_workers=1))
+    case = next(item for item in suite.cases if item.case_id == "research_documents_translation_pdf")
+    prompt = (tmp_path / case.prompt_ref).read_text(encoding="utf-8")
+
+    assert "DeepSeek" not in prompt
+    assert "指定开源大模型项目" in prompt
+
+    concrete_prompt = (
+        "找到 DeepSeek 在 2025 年之后公开发布的所有论文或研究文档，逐篇翻译成中文，"
+        "最终生成排版清楚的 PDF，并附来源清单。"
+    )
+    overridden = plan_main_agent_real_task_suite(
+        MainAgentRealTaskSuiteRequest(
+            workspace=tmp_path / "override",
+            max_workers=1,
+            prompt_overrides={"research_documents_translation_pdf": concrete_prompt},
+        )
+    )
+    overridden_case = next(
+        item for item in overridden.cases if item.case_id == "research_documents_translation_pdf"
+    )
+
+    assert (tmp_path / "override" / overridden_case.prompt_ref).read_text(encoding="utf-8") == concrete_prompt

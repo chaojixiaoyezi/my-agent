@@ -18,6 +18,7 @@ class MainAgentTaskExecutionRequest:
     task_timeout_seconds: int = 480
     execute: bool = False
     case_ids: tuple[str, ...] = ()
+    prompt_overrides: dict[str, str] = field(default_factory=dict)
     base_config_path: Path | None = None
     package_root: Path | None = None
     recovery_packet_path: Path | None = None

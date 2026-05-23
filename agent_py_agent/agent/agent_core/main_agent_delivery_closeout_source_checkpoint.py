@@ -25,9 +25,13 @@ def checkpoint_materialization_fields(ref_text: str, validation_contract: dict[s
     fields = checkpoint_writer_fields(ref_text)
     if not source_evidence_checkpoint_ref(ref_text, validation_contract):
         return fields
+    collection = validation_contract.get("collection_contract")
+    collection_contract = dict(collection) if isinstance(collection, dict) else {}
     return {
         **fields,
+        "collection_contract": collection_contract,
         "checkpoint_materialization_mode": "source_evidence_first",
+        "required_columns": _required_source_columns(collection_contract),
         "required_structured_fields": ["source_refs", "claims", "completion_evidence", "field_source_ids"],
         "requires_auditable_source_evidence": True,
         "write_tools": ["api_json_collection", "write_structured_json"],
@@ -51,6 +55,12 @@ def source_evidence_checkpoint_ref(ref_text: str, validation_contract: dict[str,
         or collection.get("required_item_evidence_fields")
         or collection.get("require_completion_evidence")
     )
+
+
+def _required_source_columns(collection_contract: dict[str, object]) -> list[str]:
+    fields = collection_contract.get("required_item_fields")
+    columns = [str(item).strip() for item in fields if str(item).strip()] if isinstance(fields, list) else []
+    return list(dict.fromkeys(columns))
 
 
 __all__ = [

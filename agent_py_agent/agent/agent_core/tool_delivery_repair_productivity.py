@@ -26,6 +26,7 @@ EVIDENCE_GATHERING_TOOL_NAMES = {
     "http_request",
     "read_artifact",
     "search",
+    "search_text",
     "web_search",
 }
 STRICT_REPAIR_PRODUCTIVE_TOOLS = {
@@ -49,6 +50,7 @@ class DeliveryRepairProductivityContext:
     inspection_only_tools: set[str]
     strict_write_required: bool
     required_actions: list[dict[str, object]]
+    required_tool_calls: list[dict[str, object]]
 
 
 # LLM: productive_tools decides which tools count as progress for the current staged-repair phase.

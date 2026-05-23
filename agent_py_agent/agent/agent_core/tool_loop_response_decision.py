@@ -255,7 +255,7 @@ def _bootstrap_materialization_tool_call_decision(
 ) -> ToolLoopResponseDecision | None:
     if not has_required_bootstrap_materialization(request.agent, request.params, calls):
         return None
-    if is_bootstrap_materialization_productive_call(calls):
+    if is_bootstrap_materialization_productive_call(calls, _bootstrap_materialization_payload(request)):
         return None
     if is_bootstrap_materialization_evidence_call(calls):
         block = bootstrap_materialization_block_response(request.agent, request.params)
@@ -272,6 +272,12 @@ def _bootstrap_materialization_tool_call_decision(
         return ToolLoopResponseDecision("continue", None, [], _inc_bootstrap_materialization(request.counters))
     block = bootstrap_materialization_block_response(request.agent, request.params)
     return ToolLoopResponseDecision("break", block or request.response, [], request.counters)
+
+
+def _bootstrap_materialization_payload(request: ToolLoopResponseDecisionRequest) -> dict[str, object]:
+    from .tool_bootstrap_materialization_guard import _bootstrap_payload
+
+    return _bootstrap_payload(request.agent, request.params)
 
 
 # LLM: _local_progress_tool_call_decision redirects repeated remote/read-only exploration when closeout facts show the local workspace has stopped changing.

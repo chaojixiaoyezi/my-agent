@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
-from .tool_delivery_repair_paths import call_path, same_path_ref
+import json
+import shlex
+
+from .tool_delivery_repair_paths import call_command, call_path, same_path_ref
 from .tool_delivery_repair_payload import delivery_repair_payload
 from .tool_delivery_repair_productivity import (
     EVIDENCE_GATHERING_TOOL_NAMES,
@@ -27,6 +30,8 @@ def normalize_delivery_repair_calls(
     if not required_actions:
         return calls
     normalized = [_normalize_call(call, required_actions) for call in calls]
+    if writer_call := _deterministic_source_writer_call_for_inspection(normalized, payload, required_actions):
+        return [writer_call]
     if builder_call := _deterministic_builder_call_for_inspection(normalized, payload, required_actions):
         return [builder_call]
     return normalized
@@ -57,13 +62,80 @@ def _current_delivery_contract(params: object) -> dict[str, object] | None:
 
 
 # LLM: _normalize_call keeps non-matching tool calls unchanged.
-# 函数用途: 只对匹配 repair_evidence_refs 的 write_structured_json 调用设置 merge_existing。
+# 函数用途: 只按 required_actions 机器字段修正工具调用，不读取普通自然语言作为事实。
 def _normalize_call(call: dict[str, object], required_actions: list[dict[str, object]]) -> dict[str, object]:
+    if normalized := _normalize_write_file_json_checkpoint(call, required_actions):
+        return normalized
     if not _matches_evidence_metadata_merge(call, required_actions):
         return call
     normalized = dict(call)
     normalized["merge_existing"] = True
     return normalized
+
+
+# LLM: write_file JSON checkpoint repair is upgraded to the structured writer declared by the contract.
+# 函数用途: 当模型把结构化 checkpoint 作为 JSON 字符串写入时，在执行前转为 write_structured_json。
+def _normalize_write_file_json_checkpoint(
+    call: dict[str, object],
+    required_actions: list[dict[str, object]],
+) -> dict[str, object]:
+    if str(call.get("tool") or "").strip() != "write_file":
+        return {}
+    path = call_path(call)
+    if not path or not _allows_structured_checkpoint_write(path, required_actions):
+        return {}
+    data = _json_content(call)
+    if data is _JSON_UNSET:
+        return {}
+    normalized: dict[str, object] = {
+        "tool": "write_structured_json",
+        "path": path,
+        "data": data,
+    }
+    if isinstance(call.get("merge_existing"), bool):
+        normalized["merge_existing"] = bool(call["merge_existing"])
+    return normalized
+
+
+# LLM: _allows_structured_checkpoint_write reads only writer_tool/write_tools/checkpoint_ref fields.
+# 函数用途: 确认当前路径是合同声明 checkpoint，且 write_structured_json 是允许 writer。
+def _allows_structured_checkpoint_write(path: str, required_actions: list[dict[str, object]]) -> bool:
+    return any(
+        _declared_writer_allows_structured_json(action)
+        and same_path_ref(path, str(action.get("checkpoint_ref") or ""))
+        for action in required_actions
+    )
+
+
+def _declared_writer_allows_structured_json(action: dict[str, object]) -> bool:
+    tools = {str(action.get("writer_tool") or "").strip()}
+    raw_tools = action.get("write_tools")
+    if isinstance(raw_tools, list):
+        tools.update(str(tool).strip() for tool in raw_tools if str(tool).strip())
+    return "write_structured_json" in tools
+
+
+_JSON_UNSET = object()
+
+
+# LLM: _json_content parses only explicit write_file content fields.
+# 函数用途: 只有 content/text/body 是有效 JSON 对象或数组时才做结构化写入转换。
+def _json_content(call: dict[str, object]) -> object:
+    raw = _raw_file_content(call)
+    if not isinstance(raw, str):
+        return _JSON_UNSET
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return _JSON_UNSET
+    return data if isinstance(data, (dict, list)) else _JSON_UNSET
+
+
+def _raw_file_content(call: dict[str, object]) -> object:
+    for key in ("content", "text", "body"):
+        if key in call:
+            return call.get(key)
+    return None
 
 
 # LLM: _deterministic_builder_call_for_inspection turns inspection loops into the required builder call.
@@ -73,7 +145,7 @@ def _deterministic_builder_call_for_inspection(
     payload: dict[str, object],
     required_actions: list[dict[str, object]],
 ) -> dict[str, object]:
-    if not calls or not _all_calls_are_inspection(calls):
+    if not calls or not _all_calls_are_inspection_or_setup(calls):
         return {}
     builder_tools = _ready_builder_tools(required_actions)
     if not builder_tools:
@@ -84,11 +156,51 @@ def _deterministic_builder_call_for_inspection(
     return {}
 
 
+# LLM: source-backed required writers replace inspection loops once source artifacts already exist.
+# 函数用途: 资料来源已经外置为 artifact 时，继续 read/list 不算推进；直接执行 required_tool_calls 里的 writer。
+def _deterministic_source_writer_call_for_inspection(
+    calls: list[dict[str, object]],
+    payload: dict[str, object],
+    required_actions: list[dict[str, object]],
+) -> dict[str, object]:
+    if not calls or not _all_calls_are_inspection_or_setup(calls):
+        return {}
+    writer_tools = _ready_writer_tools(required_actions)
+    if not writer_tools:
+        return {}
+    for call in payload.get("required_tool_calls", []):
+        if not isinstance(call, dict):
+            continue
+        tool = str(call.get("tool") or "").strip()
+        if tool in writer_tools and _has_source_backing(call):
+            return dict(call)
+    return {}
+
+
 # LLM: _all_calls_are_inspection classifies calls by tool name, not by assistant prose.
 # 函数用途: 只有模型本轮完全没有写入/构建动作时，才允许系统替换成 deterministic builder 调用。
-def _all_calls_are_inspection(calls: list[dict[str, object]]) -> bool:
+def _all_calls_are_inspection_or_setup(calls: list[dict[str, object]]) -> bool:
     inspection_tools = INSPECTION_ONLY_TOOL_NAMES | EVIDENCE_GATHERING_TOOL_NAMES
-    return all(str(call.get("tool") or "").strip() in inspection_tools for call in calls)
+    return all(
+        str(call.get("tool") or "").strip() in inspection_tools
+        or _is_directory_setup_command(call)
+        for call in calls
+    )
+
+
+def _is_directory_setup_command(call: dict[str, object]) -> bool:
+    if str(call.get("tool") or "").strip() != "run_command":
+        return False
+    command = call_command(call)
+    if not command:
+        return False
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+    if not parts or parts[0] != "mkdir":
+        return False
+    return bool(parts[1:]) and all(part == "-p" or not part.startswith("-") for part in parts[1:])
 
 
 # LLM: _ready_builder_tools reads builder tools from invoke_builder_tool recovery actions.
@@ -101,6 +213,29 @@ def _ready_builder_tools(required_actions: list[dict[str, object]]) -> set[str]:
         for tool in [str(action.get("builder_tool") or "").strip()]
         if tool
     }
+
+
+def _ready_writer_tools(required_actions: list[dict[str, object]]) -> set[str]:
+    return {
+        tool
+        for action in required_actions
+        for tool in _declared_writer_tool_values(action)
+    }
+
+
+def _declared_writer_tool_values(action: dict[str, object]) -> set[str]:
+    values = {str(action.get("writer_tool") or "").strip()}
+    raw = action.get("write_tools")
+    if isinstance(raw, list):
+        values.update(str(item).strip() for item in raw if str(item).strip())
+    return {value for value in values if value}
+
+
+def _has_source_backing(call: dict[str, object]) -> bool:
+    artifacts = call.get("source_artifacts")
+    if isinstance(artifacts, list) and any(isinstance(item, dict) for item in artifacts):
+        return True
+    return bool(str(call.get("source_ref") or "").strip() and str(call.get("content") or "").strip())
 
 
 # LLM: _matches_evidence_metadata_merge checks structured tool/path/action fields only.

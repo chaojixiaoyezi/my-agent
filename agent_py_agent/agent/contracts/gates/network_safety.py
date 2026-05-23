@@ -15,6 +15,12 @@ NetworkResolver = Callable[[str], Iterable[object]]
 
 _GATE = "network_safety"
 _PRIVATE_HOSTS = {"localhost"}
+_ALWAYS_BLOCKED_HOSTS = {"metadata.google.internal", "metadata.goog"}
+_ALWAYS_BLOCKED_NETWORKS = (
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("::ffff:169.254.0.0/112"),
+)
+_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 
 
 # LLM: NetworkSafetyFacts keeps this contract helper structure-first and stable.
@@ -25,6 +31,7 @@ class NetworkSafetyFacts:
     resolver: NetworkResolver
     allowed_private_hosts: Iterable[str] = ()
     previous_resolved_ips: Iterable[str] = ()
+    allow_private_resolution: bool = False
 
 
 # LLM: evaluate_network_safety_gate blocks private DNS/IP targets before and after adapter requests.
@@ -39,14 +46,16 @@ def evaluate_network_safety_gate(facts: NetworkSafetyFacts) -> GateDecision:
     host = _normalize_host(parsed.hostname)
     if not host:
         return _deny("NETWORK_HOST_REQUIRED", {"scheme": scheme})
+    if host in _ALWAYS_BLOCKED_HOSTS:
+        return _deny("NETWORK_ALWAYS_BLOCKED_HOST", {"host": host})
 
     allowed_private_hosts = _normalized_allowlist(facts.allowed_private_hosts)
     private_host_allowed = _host_is_allowlisted(host, allowed_private_hosts)
     literal_ip = _canonical_ip(host)
     if literal_ip:
-        return _literal_host_decision(host, literal_ip, private_host_allowed)
+        return _literal_host_decision(host, literal_ip, private_host_allowed, facts.allow_private_resolution)
 
-    if _is_private_hostname(host) and not private_host_allowed:
+    if _is_private_hostname(host) and not private_host_allowed and not facts.allow_private_resolution:
         return _deny("NETWORK_PRIVATE_HOST_BLOCKED", {"host": host})
 
     resolved = _resolve_host(facts.resolver, host)
@@ -54,7 +63,10 @@ def evaluate_network_safety_gate(facts: NetworkSafetyFacts) -> GateDecision:
         return resolved
 
     previous = _canonical_ip_list(facts.previous_resolved_ips)
-    blocked_ip = _first_blocked_ip(resolved, private_host_allowed)
+    always_blocked_ip = _first_always_blocked_ip(resolved)
+    if always_blocked_ip:
+        return _deny("NETWORK_ALWAYS_BLOCKED_IP", _resolved_evidence(host, resolved, previous, always_blocked_ip))
+    blocked_ip = _first_blocked_ip(resolved, private_host_allowed, facts.allow_private_resolution)
     if blocked_ip:
         code = "NETWORK_DNS_REBINDING_BLOCKED" if previous else "NETWORK_PRIVATE_IP_BLOCKED"
         return _deny(code, _resolved_evidence(host, resolved, previous, blocked_ip))
@@ -67,14 +79,17 @@ def evaluate_network_safety_gate(facts: NetworkSafetyFacts) -> GateDecision:
             "previous_resolved_ips": list(previous),
             "dns_rechecked": bool(previous),
             "private_host_allowed": private_host_allowed,
+            "allow_private_resolution": bool(facts.allow_private_resolution),
         },
     )
 
 
 # LLM: _literal_host_decision keeps this contract helper structure-first and stable.
 # 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
-def _literal_host_decision(host: str, ip: str, private_host_allowed: bool) -> GateDecision:
-    if _is_private_ip(ip) and not private_host_allowed:
+def _literal_host_decision(host: str, ip: str, private_host_allowed: bool, allow_private_resolution: bool) -> GateDecision:
+    if _is_always_blocked_ip(ip):
+        return _deny("NETWORK_ALWAYS_BLOCKED_IP", {"host": host, "ip": ip})
+    if _is_private_ip(ip) and not private_host_allowed and not allow_private_resolution:
         return _deny("NETWORK_PRIVATE_HOST_BLOCKED", {"host": host, "ip": ip})
     return GateDecision.allow(
         _GATE,
@@ -84,6 +99,7 @@ def _literal_host_decision(host: str, ip: str, private_host_allowed: bool) -> Ga
             "previous_resolved_ips": [],
             "dns_rechecked": False,
             "private_host_allowed": private_host_allowed,
+            "allow_private_resolution": bool(allow_private_resolution),
         },
     )
 
@@ -107,8 +123,14 @@ def _resolve_host(resolver: NetworkResolver, host: str) -> tuple[str, ...] | Gat
 
 # LLM: _first_blocked_ip keeps this contract helper structure-first and stable.
 # 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
-def _first_blocked_ip(resolved: Iterable[str], private_host_allowed: bool) -> str:
-    if private_host_allowed:
+def _first_always_blocked_ip(resolved: Iterable[str]) -> str:
+    return next((ip for ip in resolved if _is_always_blocked_ip(ip)), "")
+
+
+# LLM: _first_blocked_ip keeps this contract helper structure-first and stable.
+# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
+def _first_blocked_ip(resolved: Iterable[str], private_host_allowed: bool, allow_private_resolution: bool) -> str:
+    if private_host_allowed or allow_private_resolution:
         return ""
     return next((ip for ip in resolved if _is_private_ip(ip)), "")
 
@@ -171,7 +193,27 @@ def _is_private_ip(value: str) -> bool:
         return True
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
         address = address.ipv4_mapped
-    return address.is_private or address.is_loopback or address.is_link_local or address.is_unspecified
+    return (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+        or address in _CGNAT_NETWORK
+    )
+
+
+# LLM: _is_always_blocked_ip keeps cloud metadata floors non-negotiable.
+# 函数用途: 即使开启私网解析授权，也禁止 metadata/link-local 这类凭证端点。
+def _is_always_blocked_ip(value: str) -> bool:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return True
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return any(address in network for network in _ALWAYS_BLOCKED_NETWORKS)
 
 
 # LLM: _is_private_hostname keeps this contract helper structure-first and stable.

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 SCHEMA_VERSION = "main-agent-task-suite.v1"
@@ -53,6 +53,7 @@ class MainAgentTaskSuiteRequest:
     max_workers: int = 4
     task_timeout_seconds: int = 480
     execute: bool = False
+    prompt_overrides: dict[str, str] = field(default_factory=dict)
 
 
 # LLM: MainAgentTaskCasePlan is one planned test task with refs to prompt and contracts.
@@ -137,6 +138,7 @@ def plan_main_agent_task_suite(
         cases = default_main_agent_task_cases()
 
     _validate_request(request)
+    cases = _with_prompt_overrides(cases, request.prompt_overrides)
     workspace = Path(request.workspace)
     root = workspace / root_name
     planned_cases = [
@@ -173,6 +175,34 @@ def _validate_request(request: MainAgentTaskSuiteRequest) -> None:
         raise ValueError("max_workers must be >= 1")
     if request.task_timeout_seconds < 1:
         raise ValueError("task_timeout_seconds must be >= 1")
+
+
+# LLM: Prompt overrides are structured test inputs; default case code remains task-generic.
+# 函数用途: 按 case_id 替换 prompt 文件内容，并拒绝未知 case 或空 prompt，避免专项词写入生产案例。
+def _with_prompt_overrides(
+    cases: list[MainAgentTaskCase], overrides: dict[str, str]
+) -> list[MainAgentTaskCase]:
+    if not overrides:
+        return cases
+    case_ids = {case.case_id for case in cases}
+    unknown = sorted(set(overrides) - case_ids)
+    if unknown:
+        raise ValueError(f"unknown prompt_overrides case_id: {', '.join(unknown)}")
+    return [
+        replace(case, user_prompt=_override_prompt(case.case_id, overrides))
+        if case.case_id in overrides
+        else case
+        for case in cases
+    ]
+
+
+# LLM: Empty prompt overrides are configuration errors, not model-time clarification problems.
+# 函数用途: 读取某个 case 的 override prompt 并做最小结构校验。
+def _override_prompt(case_id: str, overrides: dict[str, str]) -> str:
+    prompt = str(overrides.get(case_id) or "").strip()
+    if not prompt:
+        raise ValueError(f"prompt_overrides for {case_id} must be non-empty")
+    return prompt
 
 
 # LLM: _write_case_plan writes prompt and machine contracts for one planned real task.

@@ -29,6 +29,25 @@ def test_delivery_closeout_uses_finding_location_as_repair_target_for_mapping_fa
         assert str(draft) in actions["ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED"]["repair_targets"]
 
 
+# LLM: Missing mapping targets should resolve against the workspace root, not the final artifact directory twice.
+# 函数用途: 验证 outputs/... 这类合同 ref 即使文件尚不存在，也不会被拼成 outputs/.../outputs/... 的假路径。
+def test_delivery_closeout_resolves_missing_mapping_target_without_nested_output_prefix() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td).resolve()
+        contract = _research_pdf_contract()
+        validation_contract = contract["artifacts"][0]["validation_contract"]
+        validation_contract["collection_contract"] = _mapping_collection_contract()
+        _write_valid_pdf(workspace / "outputs/research_documents/research_documents_zh.pdf")
+        _write_json_file(workspace / "outputs/research_documents/source_index.json", _mapped_rows_payload())
+
+        _, actions = _enriched_report(workspace, contract)
+
+        targets = actions["ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED"]["repair_targets"]
+        expected = str(workspace / "outputs/research_documents/research_documents_zh.md")
+        assert expected in targets
+        assert not any("outputs/research_documents/outputs/research_documents" in item for item in targets)
+
+
 def _mapping_collection_contract() -> dict[str, object]:
     return {
         "source_json_ref": "outputs/research_documents/source_index.json",
@@ -98,6 +117,28 @@ def test_delivery_closeout_emits_collection_item_value_repair_action() -> None:
         ]
 
 
+# LLM: Placeholder source fields should route back through the collection writer, not PDF artifact patching.
+# 函数用途: 验证来源索引中残留 __FILL_* 时，closeout 生成 source checkpoint 返工动作，优先重新采集/重写结构化来源。
+def test_delivery_closeout_emits_collection_placeholder_repair_action() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td).resolve()
+        contract = _research_pdf_contract()
+        validation_contract = contract["artifacts"][0]["validation_contract"]
+        validation_contract["collection_contract"] = _translated_collection_contract()
+        source = workspace / "outputs/research_documents/source_index.json"
+        _write_valid_pdf(workspace / "outputs/research_documents/research_documents_zh.pdf")
+        _write_json_file(source, _placeholder_rows_payload())
+
+        _, actions = _enriched_report(workspace, contract)
+
+        action = actions["COLLECTION_ITEM_PLACEHOLDER_VALUE"]
+        assert action["recommended_action"] == "repair_structured_checkpoint_json"
+        assert action["checkpoint_ref"] == "outputs/research_documents/source_index.json"
+        assert action["writer_tool"] == "api_json_collection"
+        assert action["write_tools"] == ["api_json_collection", "write_structured_json"]
+        assert action["required_columns"] == ["title", "url", "date", "translated"]
+
+
 def _translated_collection_contract() -> dict[str, object]:
     return {
         "source_json_ref": "outputs/research_documents/source_index.json",
@@ -113,6 +154,15 @@ def _translated_rows_payload() -> dict[str, object]:
         "rows": [
             {"title": "Paper A", "url": "https://example.com/a", "date": "2026-01-01", "translated": True},
             {"title": "Paper B", "url": "https://example.com/b", "date": "2026-01-02", "translated": False},
+        ],
+    }
+
+
+def _placeholder_rows_payload() -> dict[str, object]:
+    return {
+        "rows": [
+            {"title": "Paper A", "url": "https://example.com/a", "date": "__FILL_3_date__", "translated": True},
+            {"title": "Paper B", "url": "https://example.com/b", "date": "2026-01-02", "translated": True},
         ],
     }
 

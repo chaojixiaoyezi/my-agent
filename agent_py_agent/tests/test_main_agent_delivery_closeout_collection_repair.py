@@ -33,6 +33,30 @@ def test_collection_checkpoint_quality_prefers_api_collection_writer() -> None:
     assert action["collection_contract"]["source_json_ref"] == "outputs/github_star_growth/source_data.json"
 
 
+# LLM: Too-few collection findings should repair the source checkpoint, not only the final artifact.
+# 函数用途: 验证集合条目不足时会生成 api_json_collection 返工动作，避免真实任务被泛化 artifact repair 卡断。
+def test_collection_too_few_items_routes_to_api_collection_writer() -> None:
+    contract = xlsx_delivery_contract()
+    validation = contract["artifacts"][0]["validation_contract"]
+    validation["collection_contract"] = {
+        "source_json_ref": "outputs/github_star_growth/source_data.json",
+        "groups_path": "sheets",
+        "items_path": "rows",
+        "min_items_total": 3,
+        "required_item_fields": ["项目名", "地址", "上升 star 数"],
+        "require_completion_evidence": True,
+    }
+
+    actions = _actions_for_source(_small_valid_collection_source(), contract)
+
+    action = actions["COLLECTION_TOO_FEW_ITEMS"]
+    assert action["recommended_action"] == "repair_structured_checkpoint_json"
+    assert action["checkpoint_ref"] == "outputs/github_star_growth/source_data.json"
+    assert action["writer_tool"] == "api_json_collection"
+    assert action["write_tools"] == ["api_json_collection", "write_structured_json"]
+    assert action["collection_contract"]["min_items_total"] == 3
+
+
 # LLM: Synthetic generated-row checkpoints should prefer deterministic structured writer repair.
 # 函数用途: 有 generated_rows 形状提示时，恢复动作优先走 write_structured_json，不误导成 API 采集。
 def test_collection_checkpoint_quality_prefers_structured_writer_for_generated_rows() -> None:
@@ -104,6 +128,25 @@ def _bad_collection_source() -> str:
                     "rows": [{"项目名": "demo", "地址": "https://example.com", "上升 star 数": 10}],
                 }
             ]
+        },
+        ensure_ascii=False,
+    )
+
+
+def _small_valid_collection_source() -> str:
+    return json.dumps(
+        {
+            "sheets": [
+                {
+                    "name": "week-1",
+                    "columns": ["项目名", "地址", "上升 star 数"],
+                    "rows": [
+                        {"项目名": "demo", "地址": "https://example.com", "上升 star 数": 10},
+                        {"项目名": "demo2", "地址": "https://example.com/2", "上升 star 数": 8},
+                    ],
+                }
+            ],
+            "completion_evidence": {"method": "fixture", "scope": "unit"},
         },
         ensure_ascii=False,
     )

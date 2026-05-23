@@ -66,7 +66,9 @@ def _declared_read_signature(payload: dict[str, object]) -> str:
 
 
 def _state_path(agent: object) -> Path:
-    return Path(getattr(agent, "root", ".")).resolve() / ".agent_delivery" / _STATE_FILE
+    tools = getattr(agent, "tools", None)
+    workspace = getattr(tools, "workspace_root", None)
+    return Path(workspace or getattr(agent, "root", ".")).resolve() / ".agent_delivery" / _STATE_FILE
 
 
 def _load_state(agent: object) -> dict[str, object]:

@@ -84,6 +84,32 @@ def test_delivery_repair_guard_reapplies_strict_after_recovery_attempt_budget(tm
     assert is_delivery_repair_productive_call(agent, [{"tool": "list_files", "path": "outputs/site"}]) is False
 
 
+# LLM: source-evidence repairs may gather sources during their bounded recovery window.
+# 函数用途: 验证恢复预算未耗尽时，web_search/search_text 能作为来源证据推进，而不是被阶段修复门提前阻断。
+def test_delivery_repair_guard_allows_search_during_source_evidence_recovery_budget(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_source_evidence_closeout(tmp_path, unchanged_failure_count=6)
+    marker = tmp_path / ".agent_delivery" / "recovery_attempt.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "schema_version": "delivery-recovery-attempt.v1",
+                "packet_ref": "recovery_packet.json",
+                "baseline_unchanged_failure_count": 6,
+                "inspection_round_budget": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    agent = SimpleNamespace(root=tmp_path)
+
+    assert is_delivery_repair_productive_call(agent, [{"tool": "web_search", "query": "paper", "limit": 5}]) is True
+    assert is_delivery_repair_productive_call(agent, [{"tool": "search_text", "query": "paper", "path": "outputs"}]) is True
+
+
 # LLM: direct repair actions should not get a fresh read window from the attempt marker.
 # 函数用途: 验证 recovery attempt 的检查预算由结构化恢复动作决定，不靠提示词劝模型少读。
 def test_recovery_attempt_budget_is_zero_for_direct_artifact_repair(tmp_path: Path):
@@ -116,6 +142,45 @@ def test_recovery_attempt_budget_allows_small_lookup_for_missing_artifact(tmp_pa
                         "artifact_path": "outputs/report.xlsx",
                         "finding_codes": ["ARTIFACT_MISSING"],
                     }
+                ],
+            },
+        },
+    )
+
+    assert recovery_attempt_inspection_budget(tmp_path) == 2
+
+
+# LLM: source-evidence checkpoints need a bounded lookup window before the first structured write.
+# 函数用途: 验证来源型 checkpoint 续跑不会被误判成“必须立刻写入”，否则 web_search/fetch_url 无法补真实证据。
+def test_recovery_attempt_budget_allows_lookup_for_source_evidence_checkpoint(tmp_path: Path):
+    from agent_py_agent.agent.contracts.main_agent_task_execution_files import (
+        recovery_attempt_inspection_budget,
+    )
+
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "recovery_actions": [
+                    {
+                        "code": "STAGING_CHECKPOINT_MISSING",
+                        "recommended_action": "materialize_checkpoint",
+                        "checkpoint_ref": "outputs/research/source_index.json",
+                        "checkpoint_materialization_mode": "source_evidence_first",
+                        "required_structured_fields": ["source_refs", "claims", "completion_evidence"],
+                        "requires_auditable_source_evidence": True,
+                        "writer_tool": "api_json_collection",
+                    },
+                    {
+                        "category": "evidence",
+                        "code": "COLLECTION_SOURCE_MISSING",
+                        "recommended_action": "repair_structured_checkpoint_json",
+                    },
+                    {
+                        "code": "STAGED_ARTIFACT_MISSING",
+                        "recommended_action": "materialize_checkpoint",
+                    },
                 ],
             },
         },
@@ -172,6 +237,30 @@ def _write_strict_artifact_closeout(root: Path, *, unchanged_failure_count: int 
                         "artifact_path": "outputs/site",
                         "finding_values": ["index.html:href=styles.css"],
                         "write_tools": ["write_file", "replace_in_file"],
+                    }
+                ],
+            },
+        },
+    )
+
+
+def _write_source_evidence_closeout(root: Path, *, unchanged_failure_count: int = 4) -> None:
+    _write_closeout(
+        root,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "unchanged_failure_count": unchanged_failure_count,
+                "no_progress_block_threshold": 4,
+                "recovery_actions": [
+                    {
+                        "code": "STAGING_CHECKPOINT_MISSING",
+                        "recommended_action": "materialize_checkpoint",
+                        "checkpoint_ref": "outputs/research/source_index.json",
+                        "checkpoint_materialization_mode": "source_evidence_first",
+                        "requires_auditable_source_evidence": True,
+                        "writer_tool": "api_json_collection",
+                        "write_tools": ["api_json_collection", "write_structured_json"],
                     }
                 ],
             },

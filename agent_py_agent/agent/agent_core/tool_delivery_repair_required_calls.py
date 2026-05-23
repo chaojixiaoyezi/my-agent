@@ -13,6 +13,7 @@ _CREATE_OR_REPLACE_FINDING_CODES = frozenset(
 )
 _FULL_REWRITE_FINDING_CODES = frozenset(
     {
+        "ARTIFACT_MAPPING_MISSING",
         "STATIC_SITE_FORM_BINDING_HITS",
         "STATIC_SITE_HTML_STRUCTURE_HITS",
         "STATIC_SITE_INERT_CONTROL_HITS",
@@ -102,7 +103,7 @@ def _api_collection_evidence_fields(action: dict[str, object], columns: list[str
 def _api_collection_request_fields(action: dict[str, object]) -> dict[str, object]:
     request = _api_collection_request(action)
     if not isinstance(request, dict):
-        return {}
+        request = {}
     keys = (
         "request_ranges",
         "requests",
@@ -112,7 +113,11 @@ def _api_collection_request_fields(action: dict[str, object]) -> dict[str, objec
         "limit_per_request",
         "request_delay_seconds",
     )
-    return {key: request[key] for key in keys if key in request}
+    fields = {key: request[key] for key in keys if key in request}
+    collection = action.get("collection_contract")
+    if isinstance(collection, dict) and isinstance(collection.get("item_date_bounds"), dict):
+        fields["item_date_bounds"] = collection["item_date_bounds"]
+    return fields
 
 
 def _api_collection_request(action: dict[str, object]) -> dict[str, object]:
@@ -138,8 +143,8 @@ def _api_collection_columns(action: dict[str, object]) -> list[str]:
 
 def _api_collection_field_skeleton(columns: list[str]) -> dict[str, object]:
     return {
-        column: {"path": "__FILL_JSON_PATH__", "default_template": f"__FILL_{index}_{column}__"}
-        for index, column in enumerate(columns, start=1)
+        column: {"path": "__FILL_JSON_PATH__"}
+        for column in columns
     }
 
 
@@ -205,15 +210,25 @@ def _artifact_repair_calls(action: dict[str, object]) -> list[dict[str, object]]
         target_values = [artifact_path] if artifact_path else []
     findings = action.get("finding_values")
     finding_values = [str(item) for item in findings if str(item)] if isinstance(findings, list) else []
+    mapping_requirement = _mapping_requirement(action, finding_values)
     return [
-        {
-            "tool": tool,
-            "path": target,
-            "finding_values": finding_values[:_MAX_REPAIR_FINDING_VALUES],
-            "mutation_intent": intent,
-        }
+        _with_mapping_requirement(
+            {
+                "tool": tool,
+                "path": target,
+                "finding_values": finding_values[:_MAX_REPAIR_FINDING_VALUES],
+                "mutation_intent": intent,
+                **_source_ref_payload(action),
+            },
+            mapping_requirement,
+        )
         for target in target_values[:4]
     ]
+
+
+def _source_ref_payload(action: dict[str, object]) -> dict[str, object]:
+    source_ref = str(action.get("source_ref") or "").strip()
+    return {"source_ref": source_ref} if source_ref else {}
 
 
 # LLM: _artifact_repair_tool picks a deterministic patch-capable tool from the action manifest.
@@ -261,6 +276,71 @@ def _artifact_repair_intent(action: dict[str, object]) -> str:
     if codes & _FULL_REWRITE_FINDING_CODES:
         return "rewrite"
     return "patch"
+
+
+def _with_mapping_requirement(call: dict[str, object], requirement: dict[str, object]) -> dict[str, object]:
+    if requirement:
+        call.update(requirement)
+    return call
+
+
+# LLM: mapping repair requirements come from structured finding JSON emitted by artifact_collection_mapping.
+# 函数用途: 从 ARTIFACT_MAPPING_MISSING 的 value JSON 提取缺失 key 和最低映射数量，供 required calls/guard 使用。
+def _mapping_requirement(action: dict[str, object], finding_values: list[str]) -> dict[str, object]:
+    if not _has_finding_code(action, "ARTIFACT_MAPPING_MISSING"):
+        return {}
+    keys: list[dict[str, str]] = []
+    required = 0
+    for raw in finding_values:
+        value = _parse_json_text(raw)
+        if not isinstance(value, dict):
+            continue
+        required = max(required, _positive_int(value.get("required")))
+        missing = value.get("missing_keys")
+        if isinstance(missing, list):
+            for item in missing:
+                key_values = _mapping_key_values(item)
+                if key_values:
+                    keys.append(key_values)
+    unique_keys = _unique_mapping_keys(keys)
+    if not unique_keys:
+        return {}
+    count = required or len(unique_keys)
+    return {
+        "mapping_required_count": max(1, min(count, len(unique_keys))),
+        "mapping_required_keys": unique_keys[:10],
+    }
+
+
+def _has_finding_code(action: dict[str, object], code: str) -> bool:
+    raw_codes = action.get("finding_codes")
+    return isinstance(raw_codes, list) and code in {str(item) for item in raw_codes}
+
+
+def _mapping_key_values(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): str(item).strip() for key, item in value.items() if str(key).strip() and str(item).strip()}
+
+
+def _unique_mapping_keys(values: list[dict[str, str]]) -> list[dict[str, str]]:
+    unique: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for value in values:
+        marker = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if marker in seen:
+            continue
+        seen.add(marker)
+        unique.append(value)
+    return unique
+
+
+def _positive_int(value: object) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return number if number > 0 else 0
 
 
 # LLM: _source_param_name keeps this runtime helper grounded in structured fields.

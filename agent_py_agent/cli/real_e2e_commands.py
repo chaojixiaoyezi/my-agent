@@ -83,6 +83,12 @@ def add_real_e2e_subcommand(
         "--real-task-base-config", default="", help="真实任务执行使用的基础配置文件"
     )
     parser.add_argument(
+        "--real-task-prompt-override",
+        action="append",
+        default=[],
+        help="可重复：case_id=prompt_file，用外部文件覆盖指定真实任务 prompt",
+    )
+    parser.add_argument(
         "--revalidate-real-task-report",
         default="",
         help="只读复验已有真实任务执行报告，不重新启动模型进程",
@@ -168,6 +174,7 @@ def _real_task_suite(args, *, workspace: Path) -> dict[str, object] | None:
             max_workers=int(getattr(args, "real_task_max_workers", 4)),
             task_timeout_seconds=int(getattr(args, "real_task_timeout", 480)),
             execute=False,
+            prompt_overrides=_prompt_overrides(args),
         )
     )
     return report.to_dict()
@@ -195,6 +202,7 @@ def _real_task_execution(args, *, workspace: Path) -> dict[str, object] | None:
             task_timeout_seconds=int(getattr(args, "real_task_timeout", 480)),
             execute=True,
             case_ids=tuple(getattr(args, "real_task_case", []) or ()),
+            prompt_overrides=_prompt_overrides(args),
             base_config_path=base_config,
             recovery_packet_path=recovery_packet,
         )
@@ -210,6 +218,30 @@ def _real_task_revalidation(args, *, workspace: Path) -> dict[str, object] | Non
         return None
     report = revalidate_main_agent_real_task_execution(Path(value).expanduser(), workspace=workspace)
     return report.to_dict()
+
+
+# LLM: Prompt overrides are external structured inputs, so production case code stays generic.
+# 函数用途: 解析 `case_id=文件` 列表并读取 prompt 内容，供 suite/execution request 注入。
+def _prompt_overrides(args) -> dict[str, str]:
+    values = getattr(args, "real_task_prompt_override", []) or []
+    overrides: dict[str, str] = {}
+    for raw in values:
+        case_id, prompt_path = _split_prompt_override(str(raw))
+        overrides[case_id] = Path(prompt_path).expanduser().read_text(encoding="utf-8")
+    return overrides
+
+
+# LLM: Override specs fail early when the user gives an ambiguous CLI shape.
+# 函数用途: 将 `case_id=path` 拆成结构化二元组，不从自然语言中猜 case。
+def _split_prompt_override(value: str) -> tuple[str, str]:
+    if "=" not in value:
+        raise ValueError("--real-task-prompt-override must be case_id=prompt_file")
+    case_id, path = value.split("=", 1)
+    case_id = case_id.strip()
+    path = path.strip()
+    if not case_id or not path:
+        raise ValueError("--real-task-prompt-override must include non-empty case_id and prompt_file")
+    return case_id, path
 
 
 # LLM: _payload gives CLI, docs, and frontend one stable report shape.

@@ -44,6 +44,28 @@ def api_collection_contract_result(
     )
 
 
+# LLM: API collection calls may be incomplete when the active delivery contract already owns request facts.
+# 函数用途: 从 collection_contract.api_request 合并缺失的工具参数；合同字段是机器事实，模型字段只是补充。
+def normalize_api_collection_payload(
+    params: ToolLoopExecuteParams,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    if str(payload.get("tool") or "").strip() != "api_json_collection":
+        return payload
+    path = str(payload.get("path") or "").strip()
+    if not path:
+        return payload
+    contract = _matching_validation_contract(_delivery_contract(params), path)
+    request = _declared_api_request(contract)
+    if not request:
+        return payload
+    normalized = dict(payload)
+    _merge_api_request_collections(normalized, request)
+    _merge_api_request_metadata(normalized, request)
+    _merge_api_request_fields(normalized, request)
+    return normalized
+
+
 def _structured_source_checkpoint_result(
     params: ToolLoopExecuteParams,
     payload: dict[str, object],
@@ -71,6 +93,85 @@ def _matching_validation_contract(contract: dict[str, Any], path: str) -> dict[s
         if isinstance(validation, dict) and _matches_source_checkpoint(path, validation):
             return validation
     return {}
+
+
+def _declared_api_request(contract: dict[str, object]) -> dict[str, object]:
+    collection = contract.get("collection_contract")
+    api_request = collection.get("api_request") if isinstance(collection, dict) else None
+    return dict(api_request) if isinstance(api_request, dict) else {}
+
+
+def _merge_api_request_collections(payload: dict[str, object], request: dict[str, object]) -> None:
+    for key in ("request_ranges", "requests", "source_artifacts"):
+        declared_items = request.get(key)
+        payload_items = payload.get(key)
+        if isinstance(payload_items, list) and payload_items:
+            payload[key] = _merge_request_items(payload_items, declared_items)
+        elif isinstance(declared_items, list) and declared_items:
+            payload[key] = [dict(item) for item in declared_items if isinstance(item, dict)]
+
+
+def _merge_request_items(payload_items: list[object], declared_items: object) -> list[object]:
+    declared = [item for item in declared_items if isinstance(item, dict)] if isinstance(declared_items, list) else []
+    if not declared:
+        return list(payload_items)
+    result: list[object] = []
+    for index, item in enumerate(payload_items):
+        if not isinstance(item, dict):
+            result.append(item)
+            continue
+        template = declared[index] if index < len(declared) else declared[-1]
+        result.append(_merge_request_item(item, template))
+    return result
+
+
+def _merge_request_item(item: dict[str, object], declared: dict[str, object]) -> dict[str, object]:
+    merged = {key: value for key, value in declared.items() if key != "reserved"}
+    merged.update(item)
+    declared_reserved = declared.get("reserved")
+    item_reserved = item.get("reserved")
+    if isinstance(declared_reserved, dict) or isinstance(item_reserved, dict):
+        merged["reserved"] = _deep_merge_dicts(
+            item_reserved if isinstance(item_reserved, dict) else {},
+            declared_reserved if isinstance(declared_reserved, dict) else {},
+        )
+    return merged
+
+
+def _merge_api_request_metadata(payload: dict[str, object], request: dict[str, object]) -> None:
+    for key in ("item_path", "limit_per_request", "request_delay_seconds", "url_template"):
+        if key in request and payload.get(key) in (None, "", []):
+            payload[key] = request[key]
+    if isinstance(request.get("completion_evidence"), dict):
+        payload["completion_evidence"] = _deep_merge_dicts(
+            payload.get("completion_evidence") if isinstance(payload.get("completion_evidence"), dict) else {},
+            request["completion_evidence"],
+        )
+    if isinstance(request.get("evidence_fields"), list) and request["evidence_fields"]:
+        payload["evidence_fields"] = list(request["evidence_fields"])
+
+
+def _merge_api_request_fields(payload: dict[str, object], request: dict[str, object]) -> None:
+    request_fields = request.get("fields")
+    if not isinstance(request_fields, dict) or not request_fields:
+        return
+    payload_fields = payload.get("fields")
+    payload["fields"] = {
+        **(payload_fields if isinstance(payload_fields, dict) else {}),
+        **request_fields,
+    }
+    if payload.get("columns") in (None, "", []):
+        payload["columns"] = list(payload["fields"])
+
+
+def _deep_merge_dicts(base: dict[str, object], authoritative: dict[str, object]) -> dict[str, object]:
+    merged = dict(base)
+    for key, value in authoritative.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 
 
 # LLM: Source checkpoints may be declared by collection contracts or as JSON staging refs.
@@ -315,4 +416,4 @@ def _same_path_ref(path: str, ref: str) -> bool:
     )
 
 
-__all__ = ["api_collection_contract_result"]
+__all__ = ["api_collection_contract_result", "normalize_api_collection_payload"]

@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 from ..backend import ModelResponse
 from ._runtime_params import ToolLoopExecuteParams
-from .tool_shell_command_classifier import command_has_local_mutation
+from .tool_shell_command_classifier import command_has_local_mutation, shell_segments
 
 _STATE_DIR = ".agent_delivery"
 _STATE_FILE = "bootstrap_materialization_guard.json"
@@ -25,7 +26,7 @@ _BOOTSTRAP_PRODUCTIVE_TOOLS = {
     "write_structured_json",
     "write_file",
 }
-_BOOTSTRAP_EVIDENCE_TOOLS = {"fetch_url", "http_request", "read_artifact", "search"}
+_BOOTSTRAP_EVIDENCE_TOOLS = {"fetch_url", "http_request", "read_artifact", "search", "search_text", "web_search"}
 _RUN_COMMAND_INSPECTION_PREFIXES = ("find ", "ls", "pwd")
 
 
@@ -50,8 +51,8 @@ def bootstrap_materialization_context(agent: object, params: ToolLoopExecutePara
                 ensure_ascii=False,
                 sort_keys=True,
             ),
-            "你还处在开工阶段，bootstrap_contract 里的目标一个都没真实出现。下一轮必须先让至少一个 target 文件或目录出现，"
-            "例如创建目录、写最小骨架文件，之后再继续抓取、分析或整理。",
+            "你还处在开工阶段，bootstrap_contract 里的目标一个都没真实出现。下一轮必须先让至少一个 target 文件"
+            "或声明的 target 目录出现，例如写最小骨架文件；仅创建父目录不算完成物化。",
         ]
     )
 
@@ -81,7 +82,7 @@ def has_required_bootstrap_materialization(
         _clear_state(agent)
         return False
     state = _load_state(agent)
-    if is_bootstrap_materialization_productive_call(calls or []):
+    if is_bootstrap_materialization_productive_call(calls or [], payload):
         _write_state(
             agent,
             {
@@ -114,8 +115,11 @@ def has_required_bootstrap_materialization(
 
 # LLM: is_bootstrap_materialization_productive_call checks whether a tool call can materially create the first staged target.
 # 函数用途: 只有明显会创建目录/文件的动作才算推进 bootstrap；纯检查和抓取不算。
-def is_bootstrap_materialization_productive_call(calls: list[dict[str, object]]) -> bool:
-    return any(_call_is_bootstrap_productive(call) for call in calls)
+def is_bootstrap_materialization_productive_call(
+    calls: list[dict[str, object]],
+    payload: dict[str, object] | None = None,
+) -> bool:
+    return any(_call_is_bootstrap_productive(call, payload) for call in calls)
 
 
 # LLM: evidence-gathering calls may be needed before non-empty checkpoint materialization.
@@ -274,22 +278,69 @@ def _artifact_items(contract: dict[str, object]) -> list[dict[str, object]]:
 
 # LLM: _call_is_bootstrap_productive distinguishes "create the first target" actions from pure inspection or remote fetch steps.
 # 函数用途: bootstrap 阶段只把明确创建目录/文件的工具调用视为推进动作。
-def _call_is_bootstrap_productive(call: dict[str, object]) -> bool:
+def _call_is_bootstrap_productive(call: dict[str, object], payload: dict[str, object] | None = None) -> bool:
     tool = str(call.get("tool") or "").strip()
     if tool in _BOOTSTRAP_PRODUCTIVE_TOOLS - {"run_command"}:
         return True
     if tool != "run_command":
         return False
-    command = str(call.get("command") or "").strip().lower()
-    if not command:
-        shell = call.get("shell")
-        if isinstance(shell, dict):
-            command = str(shell.get("command") or "").strip().lower()
+    command = _raw_call_command(call)
     if not command:
         return False
-    if command_has_local_mutation(command):
+    if payload and _is_parent_directory_setup_only(command, payload):
+        return False
+    lowered = command.lower()
+    if command_has_local_mutation(lowered):
         return True
-    return not any(command.startswith(prefix) for prefix in _RUN_COMMAND_INSPECTION_PREFIXES)
+    return not any(lowered.startswith(prefix) for prefix in _RUN_COMMAND_INSPECTION_PREFIXES)
+
+
+# LLM: Parent-directory setup is not a materialized file/checkpoint target.
+# 函数用途: 对 JSON/MD/PDF 等文件目标，mkdir 父目录只能算准备工作，不能解除 bootstrap 入口门。
+def _is_parent_directory_setup_only(command: str, payload: dict[str, object]) -> bool:
+    segments = shell_segments(command)
+    return bool(segments) and all(_segment_is_parent_directory_setup_only(segment, payload) for segment in segments)
+
+
+def _segment_is_parent_directory_setup_only(segment: str, payload: dict[str, object]) -> bool:
+    try:
+        parts = shlex.split(segment)
+    except ValueError:
+        return False
+    if not parts or parts[0] != "mkdir":
+        return False
+    paths = [part for part in parts[1:] if part != "-p" and not part.startswith("-")]
+    if not paths:
+        return False
+    parent_dirs = _pending_file_target_parent_dirs(payload)
+    return bool(parent_dirs) and all(_path_matches_any_parent_dir(path, parent_dirs) for path in paths)
+
+
+def _pending_file_target_parent_dirs(payload: dict[str, object]) -> set[str]:
+    raw = payload.get("pending_materialization_targets")
+    dirs: set[str] = set()
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("target_type") or "").strip().lower() in {"dir", "directory"}:
+            continue
+        resolved = str(item.get("resolved_path") or "").strip()
+        if resolved:
+            dirs.add(str(Path(resolved).expanduser().resolve(strict=False).parent))
+        relative = str(item.get("workspace_relative_path") or "").strip()
+        if relative:
+            parent = str(Path(relative).parent)
+            if parent and parent != ".":
+                dirs.add(parent)
+    return dirs
+
+
+def _path_matches_any_parent_dir(path: str, parent_dirs: set[str]) -> bool:
+    raw = path.strip()
+    if raw in parent_dirs:
+        return True
+    resolved = str(Path(raw).expanduser().resolve(strict=False))
+    return resolved in parent_dirs
 
 
 # LLM: _is_bootstrap_exploration_only_call checks whether the whole call batch stayed in inspection/fetch mode.
@@ -302,7 +353,17 @@ def _is_bootstrap_exploration_only_call(calls: list[dict[str, object]]) -> bool:
 # 函数用途: 把单个工具调用识别成 bootstrap 探索动作，供空转计数和重复指纹使用。
 def _call_is_bootstrap_exploration_only(call: dict[str, object]) -> bool:
     tool = str(call.get("tool") or "").strip()
-    if tool in {"fetch_url", "http_request", "list_files", "list_tools", "read_artifact", "read_file", "search"}:
+    if tool in {
+        "fetch_url",
+        "http_request",
+        "list_files",
+        "list_tools",
+        "read_artifact",
+        "read_file",
+        "search",
+        "search_text",
+        "web_search",
+    }:
         return True
     if tool != "run_command":
         return False
@@ -349,10 +410,15 @@ def _call_fingerprint(call: dict[str, object]) -> str:
 # LLM: _call_command extracts a normalized shell command string from either direct or nested payload fields.
 # 函数用途: 统一读取工具调用中的 command 文本，兼容 shell 嵌套参数结构。
 def _call_command(call: dict[str, object]) -> str:
-    command = str(call.get("command") or "").strip().lower()
+    command = _raw_call_command(call).lower()
+    return command
+
+
+def _raw_call_command(call: dict[str, object]) -> str:
+    command = str(call.get("command") or "").strip()
     if command:
         return command
     shell = call.get("shell")
     if isinstance(shell, dict):
-        return str(shell.get("command") or "").strip().lower()
+        return str(shell.get("command") or "").strip()
     return ""

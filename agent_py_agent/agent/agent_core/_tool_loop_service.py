@@ -15,6 +15,7 @@ from .runner_stage_trace import (
 )
 from .subagent_attempt_guard import stale_subagent_attempt_message
 from .subagent_dispatch_closeout import subagent_dispatch_final_response_guard
+from .tool_api_collection_contract import normalize_api_collection_payload
 from .tool_call_archive_record import archive_tool_call_record
 from .tool_call_context_reducer import render_tool_payload_for_live_prompt
 from .tool_call_guardrail import record_tool_guard_observation
@@ -241,6 +242,8 @@ class ToolLoopService:
     # 函数用途: 推进one工具call的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _execute_one_tool_call(self, request: ToolCallExecuteParams):
         payload = payload_with_runtime_scope(self._agent, request.params, request.payload)
+        if isinstance(payload, dict):
+            payload = normalize_api_collection_payload(request.params, payload)
         trace_request = RunnerToolStageTraceRequest(
             agent=self._agent,
             params=request.params,

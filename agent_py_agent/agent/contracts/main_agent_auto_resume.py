@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -61,6 +62,8 @@ def auto_resume_decision(bundle: _BundleLike) -> AutoResumeDecision:
         return AutoResumeDecision(False, attempts, max_attempts, "missing_recovery_packet")
     if attempts >= max_attempts:
         return AutoResumeDecision(False, attempts, max_attempts, "attempts_exhausted")
+    if auto_resume_remaining_timeout_seconds(bundle) <= 0:
+        return AutoResumeDecision(False, attempts, max_attempts, "timeout_budget_exhausted")
     return AutoResumeDecision(True, attempts, max_attempts, "allowed")
 
 
@@ -93,6 +96,20 @@ def auto_resume_limit(request: object) -> int:
         return DEFAULT_AUTO_RECOVERY_ATTEMPTS
 
 
+# LLM: auto_resume_remaining_timeout_seconds makes the case timeout a shared budget.
+# 函数用途: 自动恢复只继承上一轮剩余秒数，避免一次 case 因多次恢复获得多份完整生命周期。
+def auto_resume_remaining_timeout_seconds(bundle: _BundleLike) -> int:
+    try:
+        current_budget = max(0, int(getattr(bundle.runtime.request, "task_timeout_seconds", 0)))
+    except (TypeError, ValueError):
+        return 0
+    try:
+        spent = max(0, math.ceil(float(getattr(bundle, "duration_seconds", 0.0))))
+    except (TypeError, ValueError):
+        spent = current_budget
+    return max(0, current_budget - spent)
+
+
 # LLM: _ledger_path keeps this contract helper structure-first and stable.
 # 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _ledger_path(paths: dict[str, Path]) -> Path:
@@ -121,5 +138,6 @@ __all__ = [
     "SCHEMA_VERSION",
     "auto_resume_decision",
     "auto_resume_limit",
+    "auto_resume_remaining_timeout_seconds",
     "record_auto_resume_attempt",
 ]

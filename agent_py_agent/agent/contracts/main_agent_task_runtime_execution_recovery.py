@@ -46,14 +46,57 @@ def _closeout_progress(task_workspace: Path) -> dict[str, object]:
 
 
 def _requires_direct_repair(action: dict[str, object], task_workspace: Path) -> bool:
+    if _requires_source_evidence_lookup(action):
+        return False
     recommended = str(action.get("recommended_action") or "").strip()
+    if recommended == "repair_artifact_against_findings":
+        if _artifact_missing_only(action):
+            return False
+        return _action_target_exists(action, task_workspace)
     if recommended in _DIRECT_REPAIR_ACTIONS:
-        return True
+        return _has_direct_repair_target(action)
     if recommended != "repair_artifact_against_findings":
         return False
-    if _artifact_missing_only(action):
-        return False
-    return _action_target_exists(action, task_workspace)
+    return False
+
+
+def _requires_source_evidence_lookup(action: dict[str, object]) -> bool:
+    if str(action.get("checkpoint_materialization_mode") or "").strip() == "source_evidence_first":
+        return True
+    if bool(action.get("requires_auditable_source_evidence")):
+        return True
+    fields = action.get("required_structured_fields")
+    if isinstance(fields, list) and {"source_refs", "claims"}.issubset({str(item) for item in fields}):
+        return True
+    codes = {str(code) for code in action.get("finding_codes", []) if str(code)} if isinstance(action.get("finding_codes"), list) else set()
+    code = str(action.get("code") or "").strip()
+    category = str(action.get("category") or "").strip()
+    return category == "evidence" or code == "COLLECTION_SOURCE_MISSING" or "COLLECTION_SOURCE_MISSING" in codes
+
+
+def _has_direct_repair_target(action: dict[str, object]) -> bool:
+    recommended = str(action.get("recommended_action") or "").strip()
+    if recommended == "invoke_builder_tool":
+        return bool(str(action.get("builder_tool") or "").strip() and str(action.get("output_ref") or "").strip())
+    if recommended in {
+        "materialize_checkpoint",
+        "repair_collection_item_values",
+        "repair_evidence_refs",
+        "repair_structured_checkpoint_json",
+        "write_non_empty_structured_rows",
+    }:
+        return bool(str(action.get("checkpoint_ref") or "").strip() and _declares_writer_or_update(action))
+    return False
+
+
+def _declares_writer_or_update(action: dict[str, object]) -> bool:
+    if str(action.get("writer_tool") or "").strip():
+        return True
+    write_tools = action.get("write_tools")
+    if isinstance(write_tools, list) and any(str(item).strip() for item in write_tools):
+        return True
+    updates = action.get("collection_item_updates")
+    return isinstance(updates, list) and bool(updates)
 
 
 def _artifact_missing_only(action: dict[str, object]) -> bool:

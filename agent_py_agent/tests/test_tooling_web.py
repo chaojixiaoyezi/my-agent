@@ -8,6 +8,18 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def _private_resolver(_host: str) -> tuple[str, ...]:
+    return ("127.0.0.1",)
+
+
+def _proxy_private_resolver(_host: str) -> tuple[str, ...]:
+    return ("198.18.0.18",)
+
+
+def _public_resolver(_host: str) -> tuple[str, ...]:
+    return ("8.8.8.8",)
+
+
 class TestWebSearchTool:
     """测试 WebSearchTool 做通用公开来源发现。"""
 
@@ -130,7 +142,7 @@ class TestFetchUrlTool:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
 
-        tool = FetchUrlTool(max_chars=10000, timeout=10)
+        tool = FetchUrlTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "https://example.com"})
 
         assert result.ok is True
@@ -149,7 +161,7 @@ class TestFetchUrlTool:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
 
-        tool = FetchUrlTool(max_chars=10000, timeout=10)
+        tool = FetchUrlTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "https://example.com", "max_chars": 300})
 
         assert result.ok is True
@@ -172,7 +184,7 @@ class TestFetchUrlTool:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
 
-        tool = FetchUrlTool(max_chars=400, timeout=10)
+        tool = FetchUrlTool(max_chars=400, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "https://example.com/trending"})
 
         assert result.ok is True
@@ -197,7 +209,7 @@ class TestFetchUrlTool:
         mock_error.read.return_value = b"Not Found"
         mock_urlopen.side_effect = mock_error
 
-        tool = FetchUrlTool(max_chars=10000, timeout=10)
+        tool = FetchUrlTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "https://example.com"})
 
         assert result.ok is False
@@ -212,7 +224,7 @@ class TestFetchUrlTool:
 
         mock_urlopen.side_effect = urllib.error.URLError("Timeout")
 
-        tool = FetchUrlTool(max_chars=10000, timeout=10)
+        tool = FetchUrlTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "https://example.com"})
 
         assert result.ok is False
@@ -222,7 +234,7 @@ class TestFetchUrlTool:
         """非 HTTP/HTTPS URL 被拒绝。"""
         from agent_py_agent.agent.tooling.web import FetchUrlTool
 
-        tool = FetchUrlTool(max_chars=10000, timeout=10)
+        tool = FetchUrlTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "ftp://example.com/file"})
 
         assert result.ok is False
@@ -232,7 +244,7 @@ class TestFetchUrlTool:
         """缺少 URL 参数。"""
         from agent_py_agent.agent.tooling.web import FetchUrlTool
 
-        tool = FetchUrlTool(max_chars=10000, timeout=10)
+        tool = FetchUrlTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({})
 
         assert result.ok is False
@@ -241,7 +253,7 @@ class TestFetchUrlTool:
         """空 URL 被拒绝。"""
         from agent_py_agent.agent.tooling.web import FetchUrlTool
 
-        tool = FetchUrlTool(max_chars=10000, timeout=10)
+        tool = FetchUrlTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": ""})
 
         assert result.ok is False
@@ -250,7 +262,7 @@ class TestFetchUrlTool:
         """包含控制字符的 URL 被拒绝。"""
         from agent_py_agent.agent.tooling.web import FetchUrlTool
 
-        tool = FetchUrlTool(max_chars=10000, timeout=10)
+        tool = FetchUrlTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "https://example.com\n/foo"})
 
         assert result.ok is False
@@ -260,7 +272,7 @@ class TestFetchUrlTool:
         """带用户信息的 URL 被拒绝。"""
         from agent_py_agent.agent.tooling.web import FetchUrlTool
 
-        tool = FetchUrlTool(max_chars=10000, timeout=10)
+        tool = FetchUrlTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "https://user:pass@example.com"})
 
         assert result.ok is False
@@ -270,12 +282,50 @@ class TestFetchUrlTool:
         """超长 URL 被拒绝。"""
         from agent_py_agent.agent.tooling.web import FetchUrlTool
 
-        tool = FetchUrlTool(max_chars=10000, timeout=10)
+        tool = FetchUrlTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         long_url = "https://example.com/" + "a" * 5000
         result = tool.execute({"url": long_url})
 
         assert result.ok is False
         assert "过长" in result.output
+
+    @patch("urllib.request.urlopen")
+    def test_fetch_url_blocks_private_dns_before_request(self, mock_urlopen, tmp_path: Path):
+        """DNS 解析到私网地址时，网络入口门必须先拦截，不能发起请求。"""
+        from agent_py_agent.agent.tooling.web import FetchUrlTool
+
+        tool = FetchUrlTool(max_chars=10000, timeout=10, resolver=_private_resolver)
+        result = tool.execute({"url": "https://public.example.test/report"})
+
+        assert result.ok is False
+        assert result.error_code == "NETWORK_PRIVATE_IP_BLOCKED"
+        assert result.result_envelope["network_safety_gate"]["gate"] == "network_safety"
+        mock_urlopen.assert_not_called()
+
+    @patch("urllib.request.urlopen")
+    def test_fetch_url_structured_private_resolution_opt_in(self, mock_urlopen, tmp_path: Path):
+        """代理/VPN 环境只能通过结构化开关放行私网解析，不读 prompt 文案。"""
+        from agent_py_agent.agent.tooling.web import FetchUrlTool
+
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.headers = {"Content-Type": "text/plain"}
+        mock_response.read.return_value = b"ok"
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
+
+        tool = FetchUrlTool(
+            max_chars=10000,
+            timeout=10,
+            resolver=_proxy_private_resolver,
+            allow_private_resolution=True,
+        )
+        result = tool.execute({"url": "https://public.example.test/report"})
+
+        assert result.ok is True
+        assert "ok" in result.output
+        mock_urlopen.assert_called_once()
 
 
 class TestHttpRequestTool:
@@ -294,7 +344,7 @@ class TestHttpRequestTool:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
 
-        tool = HttpRequestTool(max_chars=10000, timeout=10)
+        tool = HttpRequestTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "https://api.example.com/health"})
 
         assert result.ok is True
@@ -313,7 +363,7 @@ class TestHttpRequestTool:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
 
-        tool = HttpRequestTool(max_chars=10000, timeout=10)
+        tool = HttpRequestTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "https://api.example.com/large", "max_chars": 300})
 
         assert result.ok is True
@@ -334,7 +384,7 @@ class TestHttpRequestTool:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
 
-        tool = HttpRequestTool(max_chars=10000, timeout=10)
+        tool = HttpRequestTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({
             "url": "https://api.example.com/items",
             "method": "POST",
@@ -348,7 +398,7 @@ class TestHttpRequestTool:
         """无效 HTTP 方法被拒绝。"""
         from agent_py_agent.agent.tooling.web import HttpRequestTool
 
-        tool = HttpRequestTool(max_chars=10000, timeout=10)
+        tool = HttpRequestTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({
             "url": "https://api.example.com",
             "method": "INVALID_METHOD",
@@ -361,7 +411,7 @@ class TestHttpRequestTool:
         """字典格式请求头。"""
         from agent_py_agent.agent.tooling.web import HttpRequestTool
 
-        tool = HttpRequestTool(max_chars=10000, timeout=10)
+        tool = HttpRequestTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         # 不需要真正发送请求，只需验证参数解析不报错
         # headers 参数会在内部标准化
 
@@ -378,7 +428,7 @@ class TestHttpRequestTool:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
 
-        tool = HttpRequestTool(max_chars=10000, timeout=10)
+        tool = HttpRequestTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({
             "url": "https://api.example.com",
             "headers": '{"Authorization": "Bearer token123"}',
@@ -390,7 +440,7 @@ class TestHttpRequestTool:
         """无效 JSON 请求头被拒绝。"""
         from agent_py_agent.agent.tooling.web import HttpRequestTool
 
-        tool = HttpRequestTool(max_chars=10000, timeout=10)
+        tool = HttpRequestTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({
             "url": "https://api.example.com",
             "headers": "not valid json",
@@ -404,7 +454,7 @@ class TestHttpRequestTool:
         """请求体过大被拒绝。"""
         from agent_py_agent.agent.tooling.web import HttpRequestTool
 
-        tool = HttpRequestTool(max_chars=10000, timeout=10)
+        tool = HttpRequestTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({
             "url": "https://api.example.com",
             "body": "A" * 2_000_000,
@@ -417,7 +467,7 @@ class TestHttpRequestTool:
         """请求头过多被拒绝。"""
         from agent_py_agent.agent.tooling.web import HttpRequestTool
 
-        tool = HttpRequestTool(max_chars=10000, timeout=10)
+        tool = HttpRequestTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         many_headers = {f"Header{i}": f"Value{i}" for i in range(200)}
         result = tool.execute({
             "url": "https://api.example.com",
@@ -427,11 +477,41 @@ class TestHttpRequestTool:
         assert result.ok is False
         assert "字段过多" in result.output
 
+    @patch("urllib.request.urlopen")
+    def test_http_request_blocks_private_dns_before_request(self, mock_urlopen, tmp_path: Path):
+        """通用 HTTP 请求也必须经过 DNS 网络安全门。"""
+        from agent_py_agent.agent.tooling.web import HttpRequestTool
+
+        tool = HttpRequestTool(max_chars=10000, timeout=10, resolver=_private_resolver)
+        result = tool.execute({"url": "https://api.public.example.test/items", "method": "GET"})
+
+        assert result.ok is False
+        assert result.error_code == "NETWORK_PRIVATE_IP_BLOCKED"
+        assert result.result_envelope["network_safety_gate"]["gate"] == "network_safety"
+        mock_urlopen.assert_not_called()
+
+    @patch("urllib.request.urlopen")
+    def test_http_request_blocks_metadata_even_with_private_resolution_opt_in(self, mock_urlopen, tmp_path: Path):
+        """metadata/link-local 是安全底线，结构化私网解析授权也不能放行。"""
+        from agent_py_agent.agent.tooling.web import HttpRequestTool
+
+        tool = HttpRequestTool(
+            max_chars=10000,
+            timeout=10,
+            resolver=lambda _host: ("169.254.169.254",),
+            allow_private_resolution=True,
+        )
+        result = tool.execute({"url": "https://public.example.test/items", "method": "GET"})
+
+        assert result.ok is False
+        assert result.error_code == "NETWORK_ALWAYS_BLOCKED_IP"
+        mock_urlopen.assert_not_called()
+
     def test_http_request_header_name_invalid(self, tmp_path: Path):
         """无效请求头名称被拒绝。"""
         from agent_py_agent.agent.tooling.web import HttpRequestTool
 
-        tool = HttpRequestTool(max_chars=10000, timeout=10)
+        tool = HttpRequestTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({
             "url": "https://api.example.com",
             "headers": {"Invalid Name": "value"},
@@ -456,7 +536,7 @@ class TestHttpRequestTool:
         mock_error.read.return_value = b"Server Error"
         mock_urlopen.side_effect = mock_error
 
-        tool = HttpRequestTool(max_chars=10000, timeout=10)
+        tool = HttpRequestTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "https://api.example.com"})
 
         assert result.ok is False
@@ -470,7 +550,7 @@ class TestUrlValidation:
         """无主机名的 URL 被拒绝。"""
         from agent_py_agent.agent.tooling.web import FetchUrlTool
 
-        tool = FetchUrlTool(max_chars=10000, timeout=10)
+        tool = FetchUrlTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "https://"})
 
         assert result.ok is False
@@ -480,7 +560,7 @@ class TestUrlValidation:
         """localhost 应该是有效的。"""
         from agent_py_agent.agent.tooling.web import FetchUrlTool
 
-        tool = FetchUrlTool(max_chars=10000, timeout=10)
+        tool = FetchUrlTool(max_chars=10000, timeout=10, resolver=_public_resolver)
         result = tool.execute({"url": "http://localhost:8080/"})
 
         # localhost 应该有有效主机名
@@ -490,7 +570,7 @@ class TestUrlValidation:
         """响应内容过长时被截断。"""
         from agent_py_agent.agent.tooling.web import FetchUrlTool
 
-        tool = FetchUrlTool(max_chars=100, timeout=10)
+        tool = FetchUrlTool(max_chars=100, timeout=10, resolver=_public_resolver)
 
         # 通过 mock 验证截断行为
         # 由于这个测试需要真实的网络调用，我们跳过

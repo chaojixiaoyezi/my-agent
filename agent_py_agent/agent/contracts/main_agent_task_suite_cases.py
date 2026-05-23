@@ -320,6 +320,7 @@ def _research_document_collection_contract() -> dict[str, object]:
         "min_items_total": 3,
         "required_item_fields": ["title", "url", "date", "translated"],
         "required_item_values": {"translated": True},
+        "item_date_bounds": {"field": "date", "min": "2025-01-01"},
         "require_completion_evidence": True,
         "completion_evidence_path": "completion_evidence",
         "require_item_evidence": True,

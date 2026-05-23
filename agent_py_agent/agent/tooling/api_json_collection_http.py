@@ -5,14 +5,32 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import socket
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterable
+
+from ..contracts.gates import NetworkResolver, NetworkSafetyFacts, evaluate_network_safety_gate
 
 
 # LLM: fetch_json performs one bounded GET with one structured rate-limit retry.
 # 函数用途: 对 403/429 的 Retry-After/X-RateLimit-Reset 做一次有限等待，避免模型退化成手写数据。
-def fetch_json(url: str, *, timeout: int) -> dict[str, object]:
+def fetch_json(
+    url: str,
+    *,
+    timeout: int,
+    resolver: NetworkResolver | None = None,
+    allowed_private_hosts: Iterable[str] = (),
+    allow_private_resolution: bool | None = None,
+) -> dict[str, object]:
+    _ensure_network_safe(
+        url,
+        resolver or _default_network_resolver,
+        allowed_private_hosts,
+        allow_private_resolution=allow_private_resolution,
+    )
     req = urllib.request.Request(url, method="GET", headers={"User-Agent": "SimplePythonAgent/1.0"})
     try:
         return _fetch_json_once(req, timeout=timeout)
@@ -25,6 +43,39 @@ def fetch_json(url: str, *, timeout: int) -> dict[str, object]:
         raise ValueError(f"API_REQUEST_FAILED: {exc.__class__.__name__}") from exc
     except json.JSONDecodeError as exc:
         raise ValueError(f"API_JSON_INVALID: {exc.msg}") from exc
+
+
+def _default_network_resolver(host: str) -> tuple[str, ...]:
+    answers = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    return tuple(str(sockaddr[0]) for *_prefix, sockaddr in answers)
+
+
+def _ensure_network_safe(
+    url: str,
+    resolver: NetworkResolver,
+    allowed_private_hosts: Iterable[str],
+    *,
+    allow_private_resolution: bool | None = None,
+) -> None:
+    decision = evaluate_network_safety_gate(
+        NetworkSafetyFacts(
+            url=url,
+            resolver=resolver,
+            allowed_private_hosts=allowed_private_hosts,
+            allow_private_resolution=_effective_allow_private_resolution(allow_private_resolution),
+        )
+    )
+    if decision.allowed:
+        return
+    code = decision.finding_codes[0] if decision.finding_codes else "NETWORK_SAFETY_DENIED"
+    raise ValueError(f"{code}: network safety gate denied API JSON request")
+
+
+def _effective_allow_private_resolution(value: bool | None) -> bool:
+    if value is not None:
+        return bool(value)
+    raw = os.environ.get("MY_AGENT_ALLOW_PRIVATE_URLS", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _fetch_json_once(req: urllib.request.Request, *, timeout: int) -> dict[str, object]:

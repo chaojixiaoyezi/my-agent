@@ -84,6 +84,44 @@ def test_allowlisted_private_host_is_allowed() -> None:
     assert resolver.calls == ["localhost"]
 
 
+def test_structured_private_resolution_opt_in_allows_proxy_dns() -> None:
+    resolver = FakeResolver(("198.18.0.18",))
+
+    decision = evaluate_network_safety_gate(
+        NetworkSafetyFacts(
+            "https://api.github.com/repos/example/project",
+            resolver,
+            allow_private_resolution=True,
+        )
+    )
+
+    assert decision.allowed is True
+    assert decision.evidence["allow_private_resolution"] is True
+    assert decision.evidence["resolved_ips"] == ["198.18.0.18"]
+
+
+def test_private_resolution_opt_in_still_blocks_metadata_targets() -> None:
+    resolver = FakeResolver(("169.254.169.254",))
+
+    hostname = evaluate_network_safety_gate(
+        NetworkSafetyFacts(
+            "http://metadata.google.internal/computeMetadata/v1",
+            resolver,
+            allow_private_resolution=True,
+        )
+    )
+    address = evaluate_network_safety_gate(
+        NetworkSafetyFacts(
+            "http://example.test/redirected",
+            resolver,
+            allow_private_resolution=True,
+        )
+    )
+
+    assert hostname.finding_codes == ("NETWORK_ALWAYS_BLOCKED_HOST",)
+    assert address.finding_codes == ("NETWORK_ALWAYS_BLOCKED_IP",)
+
+
 def test_file_url_is_blocked_without_dns_resolution() -> None:
     resolver = FakeResolver(("93.184.216.34",))
 

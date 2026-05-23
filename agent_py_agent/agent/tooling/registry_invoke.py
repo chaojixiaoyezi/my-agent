@@ -58,10 +58,12 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
     if boundary_error:
         return ToolExecutionResult(request.tool_name, False, boundary_error)
 
-    return _execute_with_workspace_roots(
+    return _execute_with_temporary_tool_context(
         tool,
-        workspace_roots,
-        lambda: execute_authorized_tool(
+        workspace_roots=workspace_roots,
+        allowed_private_hosts=_boundary_string_tuple(request.write_boundary, "allowed_private_hosts"),
+        allow_private_resolution=_boundary_bool(request.write_boundary, "allow_private_resolution"),
+        callback=lambda: execute_authorized_tool(
             AuthorizedToolDispatchRequest(
                 tool_name=request.tool_name,
                 tool=tool,
@@ -69,7 +71,7 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
                 workspace_root=request.workspace_root,
                 write_boundary=request.write_boundary,
             )
-        )
+        ),
     )
 
 
@@ -86,19 +88,32 @@ def _workspace_roots_for_invocation(request: RegistryToolInvokeRequest) -> list[
 
 # LLM: _execute_with_workspace_roots scopes temporary filesystem root expansion to one tool call.
 # 函数用途: 只在当前工具执行期间替换 tool.workspace_roots，执行后恢复，避免授权根污染后续无关调用。
-def _execute_with_workspace_roots(
+def _execute_with_temporary_tool_context(
     tool: BaseTool,
+    *,
     workspace_roots: list[Path] | None,
+    allowed_private_hosts: tuple[str, ...],
+    allow_private_resolution: bool | None,
     callback: Callable[[], ToolExecutionResult],
 ) -> ToolExecutionResult:
-    if not workspace_roots or not hasattr(tool, "workspace_roots"):
-        return callback()
-    old_roots = tool.workspace_roots
-    tool.workspace_roots = workspace_roots
+    old_roots = getattr(tool, "workspace_roots", None)
+    old_allowed_private_hosts = getattr(tool, "allowed_private_hosts", None)
+    old_allow_private_resolution = getattr(tool, "allow_private_resolution", None)
+    if workspace_roots and hasattr(tool, "workspace_roots"):
+        tool.workspace_roots = workspace_roots
+    if allowed_private_hosts and hasattr(tool, "allowed_private_hosts"):
+        tool.allowed_private_hosts = allowed_private_hosts
+    if allow_private_resolution is not None and hasattr(tool, "allow_private_resolution"):
+        tool.allow_private_resolution = allow_private_resolution
     try:
         return callback()
     finally:
-        tool.workspace_roots = old_roots
+        if workspace_roots and hasattr(tool, "workspace_roots"):
+            tool.workspace_roots = old_roots
+        if allowed_private_hosts and hasattr(tool, "allowed_private_hosts"):
+            tool.allowed_private_hosts = old_allowed_private_hosts
+        if allow_private_resolution is not None and hasattr(tool, "allow_private_resolution"):
+            tool.allow_private_resolution = old_allow_private_resolution
 
 
 # LLM: _append_boundary_roots normalizes absolute and relative write-boundary roots without validating business policy.
@@ -114,6 +129,27 @@ def _append_boundary_roots(roots: list[Path], value: object, workspace_root: Pat
         resolved = path.resolve(strict=False)
         if resolved not in roots:
             roots.append(resolved)
+
+
+# LLM: _boundary_string_tuple reads per-call network allowlist entries from write_boundary.
+# 函数用途: 把结构化 allowed_private_hosts 临时传给网络工具，和 registry 前置 gate 保持一致。
+def _boundary_string_tuple(boundary: dict[str, object] | None, key: str) -> tuple[str, ...]:
+    if not isinstance(boundary, dict):
+        return ()
+    value = boundary.get(key)
+    items = value if isinstance(value, list) else []
+    return tuple(str(item).strip() for item in items if str(item).strip())
+
+
+# LLM: _boundary_bool reads per-call network policy from write_boundary.
+# 函数用途: 让结构化 runtime policy 能临时开启私网解析授权，不读取 prompt 文本。
+def _boundary_bool(boundary: dict[str, object] | None, key: str) -> bool | None:
+    if not isinstance(boundary, dict) or key not in boundary:
+        return None
+    value = boundary.get(key)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 # LLM: _normalized_roots mirrors filesystem root normalization for registry-level tool execution.

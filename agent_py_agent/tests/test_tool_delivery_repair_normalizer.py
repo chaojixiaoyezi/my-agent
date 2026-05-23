@@ -67,6 +67,163 @@ def test_delivery_repair_normalizes_evidence_write_to_merge_existing(tmp_path: P
     assert calls[0]["merge_existing"] is False
 
 
+# LLM: JSON text writes to structured checkpoints should enter the structured writer gate.
+# 函数用途: 模型把 JSON checkpoint 误用 write_file 提交时，底层只按机器合同转换为 write_structured_json。
+def test_delivery_repair_normalizes_json_write_file_to_structured_checkpoint_writer(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_call_normalizer import (
+        normalize_delivery_repair_calls,
+    )
+
+    _closeout_with_actions(tmp_path, [_source_checkpoint_action()])
+    content = json.dumps({"items": [{"title": "DeepSeek-R1", "url": "https://example.com/paper.pdf"}]})
+
+    normalized = normalize_delivery_repair_calls(
+        SimpleNamespace(root=tmp_path),
+        [
+            {
+                "tool": "write_file",
+                "path": "outputs/research_documents/source_index.json",
+                "content": content,
+            }
+        ],
+    )
+
+    assert normalized == [
+        {
+            "tool": "write_structured_json",
+            "path": "outputs/research_documents/source_index.json",
+            "data": {"items": [{"title": "DeepSeek-R1", "url": "https://example.com/paper.pdf"}]},
+        }
+    ]
+
+
+# LLM: non-JSON file writes are not rewritten as structured checkpoint writes.
+# 函数用途: 归一化只接受可解析 JSON，普通文本写入仍交给后续合同门判断。
+def test_delivery_repair_keeps_non_json_write_file_unchanged(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_call_normalizer import (
+        normalize_delivery_repair_calls,
+    )
+
+    _closeout_with_actions(tmp_path, [_source_checkpoint_action()])
+    call = {
+        "tool": "write_file",
+        "path": "outputs/research_documents/source_index.json",
+        "content": "not json",
+    }
+
+    assert normalize_delivery_repair_calls(SimpleNamespace(root=tmp_path), [call]) == [call]
+
+
+# LLM: structured writer normalization is scoped to declared checkpoint refs.
+# 函数用途: 即使 content 是 JSON，只要路径不匹配 recovery action，也不能被系统改写。
+def test_delivery_repair_keeps_json_write_file_for_unrelated_path(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_call_normalizer import (
+        normalize_delivery_repair_calls,
+    )
+
+    _closeout_with_actions(tmp_path, [_source_checkpoint_action()])
+    call = {
+        "tool": "write_file",
+        "path": "outputs/other/source_index.json",
+        "content": json.dumps({"items": []}),
+    }
+
+    assert normalize_delivery_repair_calls(SimpleNamespace(root=tmp_path), [call]) == [call]
+
+
+# LLM: source-backed required writers should replace another inspection round.
+# 函数用途: 已有 source_artifacts 时，read_artifact/list_files 不能继续空转，应执行合同声明的结构化 writer。
+def test_delivery_repair_replaces_inspection_with_source_artifact_required_writer(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_call_normalizer import (
+        normalize_delivery_repair_calls,
+    )
+
+    artifact_path = _write_tool_output_artifact(tmp_path)
+    _closeout_with_actions(tmp_path, [_source_checkpoint_action()])
+
+    normalized = normalize_delivery_repair_calls(
+        SimpleNamespace(root=tmp_path),
+        [{"tool": "read_artifact", "artifact_ref": str(artifact_path), "max_chars": 8000}],
+    )
+
+    assert normalized[0]["tool"] == "api_json_collection"
+    assert normalized[0]["path"] == "outputs/research_documents/source_index.json"
+    assert normalized[0]["source_artifacts"][0]["artifact_ref"] == str(artifact_path)
+    assert normalized[0]["item_path"] == "results"
+
+
+# LLM: Directory setup commands should not stall source-backed checkpoint repair.
+# 函数用途: 当来源 artifact 已存在且合同已有可执行 writer 时，mkdir 这类准备动作会被归一成真正的 checkpoint 写入。
+def test_delivery_repair_replaces_directory_setup_with_source_artifact_required_writer(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_call_normalizer import (
+        normalize_delivery_repair_calls,
+    )
+
+    artifact_path = _write_tool_output_artifact(tmp_path)
+    _closeout_with_actions(tmp_path, [_source_checkpoint_action()])
+
+    normalized = normalize_delivery_repair_calls(
+        SimpleNamespace(root=tmp_path),
+        [{"tool": "run_command", "command": "mkdir -p outputs/research_documents"}],
+    )
+
+    assert normalized[0]["tool"] == "api_json_collection"
+    assert normalized[0]["path"] == "outputs/research_documents/source_index.json"
+    assert normalized[0]["source_artifacts"][0]["artifact_ref"] == str(artifact_path)
+
+
+def _write_tool_output_artifact(root: Path) -> Path:
+    artifact_dir = root / "memory_archive/artifacts/tool_outputs"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = artifact_dir / "web_search-1.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "content": json.dumps(
+                    {"results": [{"snippet": "摘要", "title": "Paper", "url": "https://example.com/paper"}]},
+                    ensure_ascii=False,
+                ),
+                "ok": True,
+                "tool": "web_search",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (artifact_dir / "index.jsonl").write_text(
+        json.dumps(
+            {
+                "call_id": "1-1",
+                "path": str(artifact_path),
+                "scoped_call_id": "run-1:1-1",
+                "sha256": "abc",
+                "tool": "web_search",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return artifact_path
+
+
+def _source_checkpoint_action() -> dict[str, object]:
+    return {
+        "code": "STAGING_CHECKPOINT_MISSING",
+        "recommended_action": "materialize_checkpoint",
+        "checkpoint_materialization_mode": "source_evidence_first",
+        "checkpoint_ref": "outputs/research_documents/source_index.json",
+        "collection_contract": {
+            "required_item_evidence_fields": ["title", "url"],
+            "required_item_fields": ["title", "url", "translated"],
+            "required_item_values": {"translated": True},
+        },
+        "required_columns": ["title", "url", "translated"],
+        "writer_tool": "api_json_collection",
+        "write_tools": ["api_json_collection", "write_structured_json"],
+    }
+
+
 def _structured_repair_action(checkpoint_ref: str) -> dict[str, object]:
     return {
         "code": "STAGED_JSON_TOO_FEW_SHEETS",
@@ -323,3 +480,77 @@ def test_delivery_repair_response_decision_replaces_inspection_with_required_bui
 
     assert decision.action == "run_tools"
     assert decision.calls == [_builder_call()]
+
+
+# LLM: mapping repairs must materialize the source-backed markdown before running builders.
+# 函数用途: 当集合映射和 builder 同时待修时，检查类调用先被归一成 write_file，而不是过早生成 PDF。
+def test_delivery_repair_normalizer_prioritizes_mapping_writer_before_builder(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_call_normalizer import (
+        normalize_delivery_repair_calls,
+    )
+
+    _write_mapping_source_index(tmp_path)
+    _closeout_with_actions(tmp_path, [_mapping_writer_action(), _pdf_builder_action()])
+
+    normalized = normalize_delivery_repair_calls(
+        SimpleNamespace(root=tmp_path),
+        [{"tool": "web_search", "query": "more sources"}],
+    )
+
+    assert normalized[0]["tool"] == "write_file"
+    assert normalized[0]["path"] == "outputs/research/research.md"
+    assert "Paper A" in normalized[0]["content"]
+    assert "https://example.com/a" in normalized[0]["content"]
+
+
+def _write_mapping_source_index(root: Path) -> None:
+    path = root / "outputs/research/source_index.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {"title": "Paper A", "url": "https://example.com/a", "date": "2025-01-01", "translated": True},
+                    {"title": "Paper B", "url": "https://example.com/b", "date": "2025-02-01", "translated": True},
+                    {"title": "Paper C", "url": "https://example.com/c", "date": "2025-03-01", "translated": True},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _mapping_writer_action() -> dict[str, object]:
+    return {
+        "artifact_path": "outputs/research/research.md",
+        "checkpoint_ref": "outputs/research/source_index.json",
+        "code": "ARTIFACT_MAPPING_MISSING",
+        "finding_codes": ["ARTIFACT_MAPPING_MISSING"],
+        "finding_values": [
+            json.dumps(
+                {
+                    "mapped": 0,
+                    "missing_keys": [{"title": "Paper A"}, {"title": "Paper B"}, {"title": "Paper C"}],
+                    "required": 3,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        ],
+        "recommended_action": "repair_artifact_against_findings",
+        "repair_targets": ["outputs/research/research.md"],
+        "source_ref": "outputs/research/source_index.json",
+        "write_tools": ["write_file", "replace_in_file"],
+    }
+
+
+def _pdf_builder_action() -> dict[str, object]:
+    return {
+        "builder_tool": "markdown_to_pdf",
+        "code": "STAGING_BUILDER_READY",
+        "output_ref": "outputs/research/research.pdf",
+        "recommended_action": "invoke_builder_tool",
+        "source_ref": "outputs/research/research.md",
+    }

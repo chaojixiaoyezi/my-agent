@@ -99,6 +99,37 @@ def test_bootstrap_materialization_allows_evidence_tool_calls_to_run(tmp_path: P
     assert params.tool_context == []
 
 
+# LLM: provider and local search are evidence-gathering tools before source checkpoints exist.
+# 函数用途: 验证资料任务开工时可以先调用 web_search/search_text 取证，后续仍由 checkpoint verifier 要求写结构化来源。
+def test_bootstrap_materialization_allows_search_evidence_tool_calls_to_run(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_loop_repair_counters import ToolLoopRepairCounters
+    from agent_py_agent.agent.agent_core.tool_loop_response_decision import (
+        ToolLoopResponseDecisionRequest,
+        tool_loop_response_decision,
+    )
+    from agent_py_agent.agent.backend import ModelResponse
+
+    calls = [
+        {"tool": "web_search", "query": "open source llm papers 2025", "limit": 5},
+        {"tool": "search_text", "query": "paper", "path": "outputs"},
+    ]
+    agent = _agent(tmp_path, {"CALL_SEARCH": calls})
+    params = _params(delivery_contract=_delivery_contract_with_shape_hint())
+
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="CALL_SEARCH", backend="fake"),
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+
+    assert decision.action == "run_tools"
+    assert decision.calls == calls
+    assert params.tool_context == []
+
+
 # LLM: Pure inspection still should not consume tool turns before the first bootstrap target exists.
 # 函数用途: 验证允许证据采集后，list_files/read_file 这类纯检查仍会收到结构化开工纠偏。
 def test_bootstrap_materialization_still_redirects_inspection_tool_calls(tmp_path: Path):
@@ -117,6 +148,44 @@ def test_bootstrap_materialization_still_redirects_inspection_tool_calls(tmp_pat
             agent=agent,
             params=params,
             response=ModelResponse(text="CALL_LIST", backend="fake"),
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+
+    assert decision.action == "continue"
+    assert decision.calls == []
+    assert decision.counters.bootstrap_materialization_redirects == 1
+    assert any("bootstrap-materialization" in item for item in params.tool_context)
+
+
+# LLM: Creating only a parent directory must not satisfy file/checkpoint materialization.
+# 函数用途: 防止模型在入口合同阶段反复 mkdir 父目录，却从未写出声明的 JSON/MD/PDF 目标文件。
+def test_bootstrap_materialization_redirects_parent_directory_setup_for_file_targets(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_loop_repair_counters import ToolLoopRepairCounters
+    from agent_py_agent.agent.agent_core.tool_loop_response_decision import (
+        ToolLoopResponseDecisionRequest,
+        tool_loop_response_decision,
+    )
+    from agent_py_agent.agent.backend import ModelResponse
+
+    agent = _agent(
+        tmp_path,
+        {
+            "CALL_MKDIR": [
+                {
+                    "tool": "run_command",
+                    "command": f"mkdir -p {tmp_path / 'outputs/report'}",
+                }
+            ]
+        },
+    )
+    params = _params(delivery_contract=_delivery_contract_with_shape_hint())
+
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="CALL_MKDIR", backend="fake"),
             counters=ToolLoopRepairCounters(),
         )
     )

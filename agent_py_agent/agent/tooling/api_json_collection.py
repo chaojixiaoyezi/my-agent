@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from ..contracts.gates import NetworkResolver
 from ._filesystem_helpers import _required_path
 from ._filesystem_read import FileSystemTool
 from .api_json_collection_builder import build_checkpoint, validate_checkpoint
@@ -22,9 +24,21 @@ _DEFAULT_TIMEOUT = 15
 class ApiJsonCollectionTool(FileSystemTool):
     # LLM: __init__ declares the stable API collection schema for tool discovery.
     # 函数用途: 初始化 api_json_collection 工具规格和网络超时。
-    def __init__(self, workspace_root: Path, workspace_roots: list[Path] | None = None, *, timeout: int = _DEFAULT_TIMEOUT):
+    def __init__(
+        self,
+        workspace_root: Path,
+        workspace_roots: list[Path] | None = None,
+        *,
+        timeout: int = _DEFAULT_TIMEOUT,
+        resolver: NetworkResolver | None = None,
+        allowed_private_hosts: Iterable[str] = (),
+        allow_private_resolution: bool | None = None,
+    ):
         super().__init__(workspace_root, workspace_roots)
         self.timeout = max(1, int(timeout or _DEFAULT_TIMEOUT))
+        self.resolver = resolver
+        self.allowed_private_hosts = tuple(allowed_private_hosts)
+        self.allow_private_resolution = allow_private_resolution
         self.spec = _tool_spec()
 
     # LLM: execute fetches declared URLs and writes one structured checkpoint under workspace roots.
@@ -34,7 +48,13 @@ class ApiJsonCollectionTool(FileSystemTool):
             target = self.resolve_path(_required_path(params.get("path")))
             request = collection_request(params)
             request = self._bind_artifact_requests(request)
-            checkpoint = build_checkpoint(request, timeout=self.timeout)
+            checkpoint = build_checkpoint(
+                request,
+                timeout=self.timeout,
+                resolver=self.resolver,
+                allowed_private_hosts=self.allowed_private_hosts,
+                allow_private_resolution=self.allow_private_resolution,
+            )
             validate_checkpoint(checkpoint, request=request)
         except ValueError as exc:
             return ToolExecutionResult("api_json_collection", False, str(exc), error_code=_error_code(exc))
@@ -88,8 +108,9 @@ def _tool_spec() -> ToolSpec:
             "item_path": "响应 JSON 中数组位置，默认 items",
             "limit_per_request": "每个请求最多取多少条，默认 10",
             "columns": "输出表头数组",
-            "fields": "输出字段映射；值可为 JSON path，或 {path/value/template/default/default_template}",
+            "fields": "输出字段映射；值可为 JSON path，或 {path/paths/value/template/default/default_template/date_from_url}",
             "evidence_fields": "需要绑定 field_source_ids 和 claims 的字段",
+            "drop_incomplete_items": "为 true 时跳过缺少 evidence_fields 的单条来源条目；默认严格失败",
             "completion_evidence": "完成范围、方法、抓取时间等机器字段",
         },
         parameter_details={
@@ -97,8 +118,9 @@ def _tool_spec() -> ToolSpec:
             "request_ranges": "url_template 可用 {start}/{end}/{index}，适合周/月分组等大量同形请求。",
             "source_artifacts": "artifact_ref 必须位于工作区允许根内；支持直接 JSON 或 fetch_url tool_output_artifact.content 中的 JSON 正文。",
             "request_delay_seconds": "可显式设为 0..60 秒；未设置且请求数大于 10 时默认 6.5 秒。",
-            "fields": "字符串表示 item 内路径；default_template 可在 path 为空时用 item 字段补非空值。",
+            "fields": "字符串表示 item 内路径；paths 可声明多个候选路径；date_from_url 可从 URL 里的结构化日期片段提取日期；default_template 不能使用占位值。",
             "evidence_fields": "缺省为 fields 的全部字段；每行会写 field_source_ids[field]=[source_id]。",
+            "drop_incomplete_items": "只影响单条来源 item；如果全部被跳过，checkpoint 仍按 API_JSON_NO_ROWS 失败。",
         },
         examples=[_range_example()],
     )
@@ -138,7 +160,7 @@ def _atomic_write_json(path: Path, value: object) -> None:
 
 def _error_code(exc: ValueError) -> str:
     prefix = str(exc).split(":", 1)[0].strip().upper()
-    if prefix.startswith(("API_", "TOOL_INVALID_ARGUMENTS", "PATH_")):
+    if prefix.startswith(("API_", "TOOL_INVALID_ARGUMENTS", "PATH_", "NETWORK_")):
         return prefix
     return "TOOL_INVALID_ARGUMENTS"
 

@@ -247,6 +247,46 @@ def test_main_agent_task_execution_honors_request_auto_resume_limit(tmp_path, mo
     assert ledger["attempts"] == 1
 
 
+# LLM: Auto resume should share the original case timeout budget across attempts.
+# 函数用途: 防止一次真实任务因为自动恢复拿到多份完整 timeout，导致外层 case 生命周期失控。
+def test_auto_resume_spends_remaining_timeout_budget(tmp_path, monkeypatch):
+    from agent_py_agent.agent.contracts import main_agent_task_execution as execution
+    from agent_py_agent.agent.contracts.main_agent_task_execution import (
+        MainAgentTaskExecutionRequest,
+        run_main_agent_task_execution,
+    )
+    from agent_py_agent.agent.contracts.main_agent_task_subprocess import (
+        TaskRunSubprocessResult,
+    )
+
+    requested_timeouts: list[int] = []
+
+    def _run(request):
+        requested_timeouts.append(request.timeout_seconds)
+        if len(requested_timeouts) == 1:
+            return TaskRunSubprocessResult(exit_code=0, duration_seconds=26.0)
+        return TaskRunSubprocessResult(exit_code=0, duration_seconds=4.0)
+
+    monkeypatch.setattr(execution, "run_task_subprocess", _run)
+
+    report = run_main_agent_task_execution(
+        MainAgentTaskExecutionRequest(
+            workspace=tmp_path,
+            max_workers=1,
+            task_timeout_seconds=30,
+            execute=True,
+            case_ids=("furniture_homepage_html",),
+            max_auto_recovery_attempts=3,
+        )
+    )
+
+    case = report.cases[0]
+    assert requested_timeouts == [30, 4]
+    assert report.ok is False
+    assert case.status == "FAILED"
+    assert case.timeout_seconds == 4
+
+
 def _assert_resume_contract(command: list[str]) -> None:
     contract_path = Path(command[command.index("--delivery-contract-file") + 1])
     contract = json.loads(contract_path.read_text(encoding="utf-8"))

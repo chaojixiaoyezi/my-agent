@@ -31,6 +31,16 @@ from .tool_shell_command_classifier import command_has_local_mutation
 _MAX_REPAIRS = 2
 _RUN_COMMAND_INSPECTION_PREFIXES = ("cat ", "curl ", "find ", "ls", "pwd", "rg ", "wget ")
 _PARAMS_UNSET = object()
+_WRITE_TARGET_TOOLS = {
+    "append_file",
+    "api_json_collection",
+    "data_to_workbook",
+    "file_write_session",
+    "markdown_to_pdf",
+    "replace_in_file",
+    "write_structured_json",
+    "write_file",
+}
 
 
 # LLM: delivery_repair_context exposes required staged-repair actions from closeout.json as one structured prompt hint.
@@ -117,6 +127,7 @@ def is_delivery_repair_productive_call(
         inspection_only_tools=inspection_only_tools(required_actions, strict_write_required),
         strict_write_required=strict_write_required,
         required_actions=required_actions,
+        required_tool_calls=[item for item in payload.get("required_tool_calls", []) if isinstance(item, dict)],
     )
     if any(_call_resets_declared_read_allowance(call, context) for call in calls):
         reset_declared_read_allowance(agent)
@@ -162,7 +173,14 @@ def _call_is_productive(
         return True
     if _is_evidence_repair_gathering(call, context.required_actions):
         return True
+    if tool in EVIDENCE_GATHERING_TOOL_NAMES:
+        return _is_source_checkpoint_materialization_gathering(
+            call,
+            context,
+        )
     if _violates_declared_writer_tool(call, context.required_actions):
+        return False
+    if _violates_declared_write_target(call, context.required_actions):
         return False
     if violates_evidence_repair_shape(
         call,
@@ -170,6 +188,8 @@ def _call_is_productive(
         path_matches=same_path_ref,
         call_path=call_path,
     ):
+        return False
+    if _violates_mapping_repair_content(call, context.required_actions):
         return False
     if _violates_non_empty_rows_repair(call, context.required_actions):
         return False
@@ -196,6 +216,111 @@ def _violates_declared_writer_tool(call: dict[str, object], required_actions: li
         if allowed_tools and checkpoint_ref and tool not in allowed_tools and same_path_ref(path, checkpoint_ref):
             return True
     return False
+
+
+def _is_source_checkpoint_materialization_gathering(
+    call: dict[str, object],
+    context: DeliveryRepairProductivityContext,
+) -> bool:
+    tool = str(call.get("tool") or "").strip()
+    return any(
+        _action_allows_source_gathering_for_checkpoint(tool, action)
+        or _action_allows_source_gathering_for_collection_repair(tool, action, context.required_tool_calls)
+        or _action_allows_source_gathering_for_data_checkpoint(tool, action, context.strict_write_required)
+        for action in context.required_actions
+    )
+
+
+def _action_allows_source_gathering_for_checkpoint(tool: str, action: dict[str, object]) -> bool:
+    if str(action.get("recommended_action") or "") != "materialize_checkpoint":
+        return False
+    if not str(action.get("checkpoint_ref") or "").strip():
+        return False
+    if tool == "read_artifact":
+        return True
+    writer_tool = str(action.get("writer_tool") or "").strip()
+    raw_write_tools = action.get("write_tools")
+    write_tools = {str(item).strip() for item in raw_write_tools if str(item).strip()} if isinstance(raw_write_tools, list) else set()
+    return (
+        str(action.get("checkpoint_materialization_mode") or "") == "source_evidence_first"
+        or writer_tool == "api_json_collection"
+        or "api_json_collection" in write_tools
+    )
+
+
+def _action_allows_source_gathering_for_collection_repair(
+    tool: str,
+    action: dict[str, object],
+    required_tool_calls: list[dict[str, object]],
+) -> bool:
+    if tool == "read_artifact":
+        return False
+    if str(action.get("recommended_action") or "") != "repair_structured_checkpoint_json":
+        return False
+    collection = action.get("collection_contract")
+    if not isinstance(collection, dict) or not str(collection.get("source_json_ref") or "").strip():
+        return False
+    if _has_ready_api_collection_call(action, required_tool_calls):
+        return False
+    writer_tool = str(action.get("writer_tool") or "").strip()
+    raw_write_tools = action.get("write_tools")
+    write_tools = {str(item).strip() for item in raw_write_tools if str(item).strip()} if isinstance(raw_write_tools, list) else set()
+    return writer_tool == "api_json_collection" or "api_json_collection" in write_tools
+
+
+def _has_ready_api_collection_call(
+    action: dict[str, object],
+    required_tool_calls: list[dict[str, object]],
+) -> bool:
+    checkpoint_ref = str(action.get("checkpoint_ref") or "").strip()
+    if not checkpoint_ref:
+        return False
+    return any(
+        str(call.get("tool") or "") == "api_json_collection"
+        and same_path_ref(str(call.get("path") or ""), checkpoint_ref)
+        and _api_collection_call_has_sources(call)
+        for call in required_tool_calls
+    )
+
+
+def _api_collection_call_has_sources(call: dict[str, object]) -> bool:
+    return any(call.get(key) for key in ("requests", "request_ranges", "source_artifacts"))
+
+
+def _action_allows_source_gathering_for_data_checkpoint(
+    tool: str,
+    action: dict[str, object],
+    strict_write_required: bool,
+) -> bool:
+    return (
+        not strict_write_required
+        and str(action.get("recommended_action") or "") == "write_non_empty_structured_rows"
+        and str(action.get("checkpoint_ref") or "").strip().lower().endswith(".json")
+        and tool != "read_artifact"
+    )
+
+
+def _violates_declared_write_target(call: dict[str, object], required_actions: list[dict[str, object]]) -> bool:
+    tool = str(call.get("tool") or "").strip()
+    if tool not in _WRITE_TARGET_TOOLS:
+        return False
+    path = call_path(call)
+    if not path:
+        return False
+    targets = repair_target_values(required_actions)
+    return bool(targets) and not any(_matches_declared_write_target(path, target) for target in targets)
+
+
+def _matches_declared_write_target(path: str, target: str) -> bool:
+    if same_path_ref(path, target):
+        return True
+    normalized_path = _normalized_ref_path(path)
+    normalized_target = _normalized_ref_path(target)
+    return bool(normalized_path and normalized_target and normalized_path.startswith(f"{normalized_target}/"))
+
+
+def _normalized_ref_path(value: str) -> str:
+    return str(value or "").strip().replace("\\", "/").rstrip("/")
 
 
 # LLM: _declared_writer_tools lets one checkpoint have multiple structured writer tools.
@@ -256,6 +381,128 @@ def _has_non_empty_structured_rows(value: object) -> bool:
     if isinstance(data, (dict, list)):
         return _has_non_empty_structured_rows(data)
     return False
+
+
+def _violates_mapping_repair_content(call: dict[str, object], required_actions: list[dict[str, object]]) -> bool:
+    path = call_path(call)
+    if not path:
+        return False
+    for action in required_actions:
+        requirement = _mapping_requirement(action)
+        if not requirement:
+            continue
+        if not any(same_path_ref(path, target) for target in _mapping_repair_targets(action)):
+            continue
+        content = _call_write_text(call)
+        return not content or not _text_maps_required_keys(content, requirement)
+    return False
+
+
+# LLM: mapping requirements are parsed from ARTIFACT_MAPPING_MISSING finding values.
+# 函数用途: 将映射缺项 finding 的 missing_keys/required 转成机器可检查的写入门。
+def _mapping_requirement(action: dict[str, object]) -> dict[str, object]:
+    explicit_keys = _mapping_key_list(action.get("mapping_required_keys"))
+    explicit_count = _positive_int(action.get("mapping_required_count"))
+    if explicit_keys:
+        return {"required": max(1, min(explicit_count or len(explicit_keys), len(explicit_keys))), "keys": explicit_keys}
+    if not _has_mapping_finding(action):
+        return {}
+    keys: list[dict[str, str]] = []
+    required = 0
+    values = action.get("finding_values")
+    raw_values = values if isinstance(values, list) else []
+    for raw in raw_values:
+        value = _parse_json_text(str(raw))
+        if not isinstance(value, dict):
+            continue
+        required = max(required, _positive_int(value.get("required")))
+        keys.extend(_mapping_key_list(value.get("missing_keys")))
+    unique = _unique_mapping_keys(keys)
+    if not unique:
+        return {}
+    return {"required": max(1, min(required or len(unique), len(unique))), "keys": unique}
+
+
+def _has_mapping_finding(action: dict[str, object]) -> bool:
+    codes = action.get("finding_codes")
+    return isinstance(codes, list) and "ARTIFACT_MAPPING_MISSING" in {str(code) for code in codes}
+
+
+def _mapping_key_list(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    keys: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        key_values = {str(key): str(raw).strip() for key, raw in item.items() if str(key).strip() and str(raw).strip()}
+        if key_values:
+            keys.append(key_values)
+    return keys
+
+
+def _unique_mapping_keys(values: list[dict[str, str]]) -> list[dict[str, str]]:
+    unique: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for value in values:
+        marker = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if marker in seen:
+            continue
+        seen.add(marker)
+        unique.append(value)
+    return unique
+
+
+def _mapping_repair_targets(action: dict[str, object]) -> list[str]:
+    targets = action.get("repair_targets")
+    values = [str(item).strip() for item in targets if str(item).strip()] if isinstance(targets, list) else []
+    artifact_path = str(action.get("artifact_path") or "").strip()
+    if artifact_path:
+        values.append(artifact_path)
+    return list(dict.fromkeys(values))
+
+
+def _call_write_text(call: dict[str, object]) -> str:
+    for key in ("content", "text", "replacement", "new_content"):
+        value = call.get(key)
+        if isinstance(value, str):
+            return value
+    data = call.get("data")
+    if isinstance(data, (dict, list)):
+        return json.dumps(data, ensure_ascii=False, sort_keys=True)
+    return ""
+
+
+def _text_maps_required_keys(text: str, requirement: dict[str, object]) -> bool:
+    required = _positive_int(requirement.get("required"))
+    keys = requirement.get("keys")
+    if not isinstance(keys, list) or required <= 0:
+        return False
+    mapped = 0
+    for item in keys:
+        if not isinstance(item, dict):
+            continue
+        values = [str(value).strip() for value in item.values() if str(value).strip()]
+        if values and all(value in text for value in values):
+            mapped += 1
+    return mapped >= required
+
+
+def _parse_json_text(text: str) -> object:
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+
+
+def _positive_int(value: object) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return number if number > 0 else 0
 
 
 def _positive_generated_row_count(value: dict[str, object]) -> bool:

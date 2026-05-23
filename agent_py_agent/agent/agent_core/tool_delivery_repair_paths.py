@@ -9,7 +9,7 @@ from pathlib import Path
 # LLM: call_path reads only structured path fields from a tool call.
 # 函数用途: 从工具调用里的 path/file_path/target_path 提取目标路径，不解析普通自然语言。
 def call_path(call: dict[str, object]) -> str:
-    for key in ("path", "file_path", "target_path"):
+    for key in ("path", "file_path", "target_path", "output_path", "artifact_ref"):
         if value := str(call.get(key) or "").strip():
             return value
     return ""
@@ -67,7 +67,7 @@ def _action_repair_targets(action: dict[str, object]) -> list[str]:
         *values,
         *[
             value
-            for key in ("checkpoint_ref", "artifact_path")
+            for key in ("checkpoint_ref", "artifact_path", "output_ref", "pdf_ref", "workbook_ref")
             for value in [str(action.get(key) or "").strip()]
             if value
         ],
@@ -101,7 +101,7 @@ def repair_target_snapshot(target: str, agent_root: Path, *, max_chars: int) -> 
     if path.is_dir():
         return {"path": target, "exists": True, "kind": "directory"}
     snapshot = _file_snapshot_base(path, target)
-    if not snapshot.get("readable", True) or int(snapshot.get("size_bytes") or 0) > 12000:
+    if not snapshot.get("readable", True) or int(snapshot.get("size_bytes") or 0) > 48000:
         return snapshot
     return _attach_text_preview(snapshot, path, max_chars=max_chars)
 

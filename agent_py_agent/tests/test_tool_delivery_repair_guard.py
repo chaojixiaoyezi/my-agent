@@ -11,6 +11,10 @@ def _agent(root: Path) -> SimpleNamespace:
     return SimpleNamespace(root=root)
 
 
+def _agent_with_workspace(root: Path, workspace_root: Path) -> SimpleNamespace:
+    return SimpleNamespace(root=root, tools=SimpleNamespace(workspace_root=workspace_root))
+
+
 def _write_actions(root: Path, actions: list[dict[str, object]], **progress: object) -> None:
     _write_closeout(root, {"ok": False, "delivery_progress": {"recovery_actions": actions, **progress}})
 
@@ -110,6 +114,88 @@ def test_delivery_repair_guard_requires_write_action_after_repeated_no_progress(
     assert is_delivery_repair_productive_call(agent, [{"tool": "fetch_url", "url": "https://example.com"}]) is False
     assert is_delivery_repair_productive_call(agent, [_write_file_call()]) is True
     assert is_delivery_repair_productive_call(agent, [_structured_rows_call()]) is True
+
+
+# LLM: staged repair writes must hit declared machine targets, not any sibling file in the output directory.
+# 函数用途: 验证恢复阶段不能把非当前 repair target 的写入算作有效推进。
+def test_delivery_repair_guard_rejects_write_to_undeclared_repair_target(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_actions(tmp_path, [_missing_markdown_action()])
+    agent = _agent(tmp_path)
+
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "write_file", "path": "outputs/research_documents/source_index.json", "content": "{}"}],
+        )
+        is False
+    )
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "write_file", "path": "outputs/research_documents/research_documents_zh.md", "content": "# 译文"}],
+        )
+        is True
+    )
+
+
+# LLM: evidence gathering is useful for source checkpoints, but not for already-declared artifact writes.
+# 函数用途: 验证恢复动作已经进入写 md/pdf 等产物阶段后，继续 web_search 不算修复进展。
+def test_delivery_repair_guard_rejects_evidence_gathering_when_write_target_is_ready(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_actions(tmp_path, [_missing_markdown_action()])
+    agent = _agent(tmp_path)
+
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "web_search", "query": "open source llm papers 2025", "limit": 5}],
+        )
+        is False
+    )
+    assert is_delivery_repair_productive_call(agent, [_source_checkpoint_api_collection_call()]) is False
+
+
+def test_delivery_repair_guard_allows_evidence_gathering_for_source_checkpoint_materialization(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_actions(tmp_path, [_source_checkpoint_missing_action()])
+    agent = _agent(tmp_path)
+
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "web_search", "query": "open source llm papers 2025", "limit": 5}],
+        )
+        is True
+    )
+
+
+def _missing_markdown_action() -> dict[str, object]:
+    return {
+        "code": "STAGED_ARTIFACT_MISSING",
+        "recommended_action": "materialize_checkpoint",
+        "checkpoint_ref": "outputs/research_documents/research_documents_zh.md",
+        "write_tools": ["write_file", "replace_in_file", "file_write_session"],
+    }
+
+
+def _source_checkpoint_api_collection_call() -> dict[str, object]:
+    return {
+        "tool": "api_json_collection",
+        "path": "outputs/research_documents/source_index.json",
+        "source_artifacts": [{"artifact_ref": "/tmp/web_search.json", "item_path": "results", "source_id": "search-1"}],
+        "fields": {"title": "title", "url": "url", "date": {"path": "date", "date_from_url": True}},
+        "evidence_fields": ["title", "url", "date"],
+    }
 
 
 # LLM: source checkpoint materialization must write real rows, not an empty skeleton.
@@ -352,6 +438,243 @@ def test_delivery_repair_guard_requires_merge_existing_for_evidence_repair(tmp_p
 
     assert is_delivery_repair_productive_call(agent, [_evidence_write_call(merge_existing=False)]) is False
     assert is_delivery_repair_productive_call(agent, [_evidence_write_call(merge_existing=True)]) is True
+
+
+# LLM: mapping repair must reject artifact rewrites that do not contain required source keys.
+# 函数用途: 验证 ARTIFACT_MAPPING_MISSING 后，写一个空壳 Markdown 不再算有效推进，必须包含结构化 missing_keys。
+def test_delivery_repair_guard_rejects_mapping_repair_without_required_keys(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_actions(tmp_path, [_mapping_repair_action()])
+    agent = _agent(tmp_path)
+
+    assert is_delivery_repair_productive_call(agent, [_mapping_write_call("# 汇总\n\n待补充")]) is False
+    assert is_delivery_repair_productive_call(
+        agent,
+        [_mapping_write_call("# 汇总\n\n- Paper A\n- Paper B\n- Paper C\n")],
+    ) is True
+
+
+# LLM: collection source repairs may gather evidence before rewriting the source checkpoint.
+# 函数用途: 验证 source_index 占位符/缺字段返工时，web_search 这类证据采集不是空转，会进入后续 api_json_collection 写入桥接。
+def test_delivery_repair_guard_allows_evidence_gathering_for_collection_source_repair(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_actions(tmp_path, [_collection_placeholder_repair_action()], strict_write_required=True)
+
+    assert (
+        is_delivery_repair_productive_call(
+            _agent(tmp_path),
+            [{"tool": "web_search", "query": "open source LLM papers after 2025", "limit": 10}],
+        )
+        is True
+    )
+
+
+# LLM: Once source artifacts are available, collection repair must use api_json_collection instead of more search.
+# 函数用途: 验证来源证据已归档时，repair guard 会把模型拉回结构化采集工具，避免真实任务一直 web_search/read_file。
+def test_delivery_repair_guard_rejects_more_search_when_api_collection_is_ready(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_web_search_tool_output_artifact(tmp_path)
+    _write_actions(tmp_path, [_collection_placeholder_repair_action()], strict_write_required=True)
+    agent = _agent(tmp_path)
+
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "web_search", "query": "open source LLM papers after 2025", "limit": 10}],
+        )
+        is False
+    )
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "api_json_collection", "path": "outputs/research_documents/source_index.json"}],
+        )
+        is True
+    )
+
+
+# LLM: real task execution stores closeout under tools.workspace_root, not always agent.root.
+# 函数用途: 验证工具循环根目录和代理根目录不一致时，delivery repair guard 仍读取真实工作区的 closeout。
+def test_delivery_repair_guard_uses_tool_workspace_root_for_closeout(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    agent_root = tmp_path / "agent-root"
+    workspace_root = tmp_path / "task-workspace"
+    agent_root.mkdir()
+    workspace_root.mkdir()
+    _write_web_search_tool_output_artifact(workspace_root)
+    _write_actions(workspace_root, [_collection_placeholder_repair_action()], strict_write_required=True)
+    agent = _agent_with_workspace(agent_root, workspace_root)
+
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "web_search", "query": "open source LLM papers after 2025", "limit": 10}],
+        )
+        is False
+    )
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "api_json_collection", "path": "outputs/research_documents/source_index.json"}],
+        )
+        is True
+    )
+
+
+# LLM: moderately sized JSON repair targets should still include a bounded preview.
+# 函数用途: 验证 12KB 以上但仍可控的 source checkpoint 会给模型预览，减少重复 read_file 空转。
+def test_delivery_repair_context_previews_moderate_source_checkpoint(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        delivery_repair_context,
+    )
+
+    source = tmp_path / "outputs/research_documents/source_index.json"
+    source.parent.mkdir(parents=True)
+    source.write_text(json.dumps({"rows": [{"title": f"Paper {index}", "date": "__FILL_3_date__"} for index in range(700)]}), encoding="utf-8")
+    assert source.stat().st_size > 12_000
+    _write_actions(tmp_path, [_collection_placeholder_repair_action()])
+
+    payload = json.loads(delivery_repair_context(_agent(tmp_path), repairs=0).splitlines()[1])
+    snapshots = payload["repair_target_snapshots"]
+
+    assert snapshots[0]["path"] == "outputs/research_documents/source_index.json"
+    assert "preview" in snapshots[0]
+    assert len(snapshots[0]["preview"]) <= 2400
+
+
+def test_delivery_repair_context_maps_common_source_date_without_placeholder(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        delivery_repair_context,
+    )
+
+    _write_source_checkpoint_with_constant_field(tmp_path)
+    _write_web_search_tool_output_artifact(tmp_path)
+    _write_actions(tmp_path, [_collection_placeholder_repair_action()])
+
+    payload = delivery_repair_context(_agent(tmp_path), repairs=0).splitlines()[1]
+    required_call = json.loads(payload)["required_tool_calls"][0]
+
+    assert required_call["tool"] == "api_json_collection"
+    assert "__FILL" not in json.dumps(required_call, ensure_ascii=False)
+    assert required_call["fields"]["date"] == {
+        "date_from_url": True,
+        "paths": ["date", "published", "published_at", "updated"],
+    }
+    assert required_call["fields"]["translated"] == {"value": True}
+
+
+def _collection_placeholder_repair_action() -> dict[str, object]:
+    return {
+        "checkpoint_ref": "outputs/research_documents/source_index.json",
+        "code": "COLLECTION_ITEM_PLACEHOLDER_VALUE",
+        "collection_contract": {
+            "required_item_fields": ["title", "url", "date", "translated"],
+            "source_json_ref": "outputs/research_documents/source_index.json",
+        },
+        "recommended_action": "repair_structured_checkpoint_json",
+        "required_columns": ["title", "url", "date", "translated"],
+        "write_tools": ["api_json_collection", "write_structured_json"],
+        "writer_tool": "api_json_collection",
+    }
+
+
+def _mapping_repair_action() -> dict[str, object]:
+    return {
+        "recommended_action": "repair_artifact_against_findings",
+        "artifact_path": "outputs/research_documents/research_documents_zh.md",
+        "finding_codes": ["ARTIFACT_MAPPING_MISSING"],
+        "finding_values": [
+            json.dumps(
+                {
+                    "mapped": 0,
+                    "required": 3,
+                    "missing_keys": [{"title": "Paper A"}, {"title": "Paper B"}, {"title": "Paper C"}],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        ],
+        "write_tools": ["write_file", "replace_in_file"],
+    }
+
+
+def _mapping_write_call(content: str) -> dict[str, object]:
+    return {
+        "tool": "write_file",
+        "path": "outputs/research_documents/research_documents_zh.md",
+        "content": content,
+    }
+
+
+def _write_source_checkpoint_with_constant_field(root: Path) -> None:
+    path = root / "outputs/research_documents/source_index.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {"title": "Paper", "url": "https://arxiv.org/abs/2501.12948", "date": "__FILL_date__", "translated": True}
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_web_search_tool_output_artifact(root: Path) -> None:
+    artifact_dir = root / "memory_archive/artifacts/tool_outputs"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = artifact_dir / "web_search-1.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "content": json.dumps(
+                    {
+                        "results": [
+                            {
+                                "snippet": "arXiv paper page",
+                                "title": "Paper",
+                                "url": "https://arxiv.org/abs/2501.12948",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                "ok": True,
+                "tool": "web_search",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (artifact_dir / "index.jsonl").write_text(
+        json.dumps(
+            {
+                "call_id": "1-1",
+                "path": str(artifact_path),
+                "scoped_call_id": "run-1:1-1",
+                "sha256": "abc",
+                "tool": "web_search",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _evidence_writer_action() -> dict[str, object]:

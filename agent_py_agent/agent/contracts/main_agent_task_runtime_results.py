@@ -43,7 +43,7 @@ def case_result_kwargs(
         "title": runtime.case.title,
         "status": bundle.status,
         "worker_slot": runtime.case.worker_slot,
-        "timeout_seconds": runtime.case.timeout_seconds,
+        "timeout_seconds": runtime.request.task_timeout_seconds,
         "prompt_ref": runtime.case.prompt_ref,
         "config_ref": rel(runtime.paths["config"], runtime.workspace),
         "command_ref": rel(runtime.paths["command"], runtime.workspace),

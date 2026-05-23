@@ -95,6 +95,39 @@ def test_cmd_real_e2e_includes_main_agent_real_task_suite_plan(tmp_path, capsys)
     assert saved["main_agent_real_task_suite"]["ok"] is True
 
 
+# LLM: Concrete live-task wording should come from CLI prompt override files, not production case code.
+# 函数用途: 验证 real-e2e 能按 case_id 读取外部 prompt override 并只写入该 case 的 prompt 文件。
+def test_cmd_real_e2e_applies_prompt_override_file_to_real_task_suite(tmp_path, capsys):
+    from agent_py_agent.cli.real_e2e_commands import cmd_real_e2e
+
+    prompt_file = tmp_path / "research_prompt.md"
+    prompt_file.write_text("找到 DeepSeek 2025 年之后公开发布的研究文档并生成中文 PDF。", encoding="utf-8")
+    args = argparse.Namespace(
+        workspace=str(tmp_path / "workspace"),
+        report="",
+        json=True,
+        include_real_model=False,
+        artifact=[],
+        real_task_suite=True,
+        run_real_tasks=False,
+        real_task_case=[],
+        real_task_max_workers=1,
+        real_task_timeout=333,
+        real_task_prompt_override=[f"research_documents_translation_pdf={prompt_file}"],
+    )
+
+    exit_code = cmd_real_e2e(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    case = next(
+        item
+        for item in payload["main_agent_real_task_suite"]["cases"]
+        if item["case_id"] == "research_documents_translation_pdf"
+    )
+    assert exit_code == 0
+    assert (tmp_path / "workspace" / case["prompt_ref"]).read_text(encoding="utf-8") == prompt_file.read_text(encoding="utf-8")
+
+
 # LLM: real-e2e should expose controlled execution and artifact acceptance separately.
 # 函数用途: 验证 CLI 显式执行 echo 任务时，会返回日志 refs，并因缺少产物给出失败退出码。
 def test_cmd_real_e2e_runs_controlled_echo_real_task(tmp_path, capsys):

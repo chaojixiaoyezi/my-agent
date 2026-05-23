@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 
 # LLM: Staged writer contracts are machine facts, not prompt hints.
@@ -152,6 +153,108 @@ def test_api_collection_contract_blocks_missing_declared_request_reserved_metada
     assert result is not None
     assert result.ok is False
     assert "missing request reserved metadata" in result.output
+
+
+# LLM: API collection payloads should inherit machine request facts from the delivery contract.
+# 函数用途: 验证模型漏填 reserved/fields/completion_evidence 时，运行时从 collection_contract.api_request 合并结构化事实。
+def test_api_collection_payload_normalization_fills_declared_request_contract():
+    from agent_py_agent.agent.agent_core.tool_api_collection_contract import (
+        api_collection_contract_result,
+        normalize_api_collection_payload,
+    )
+
+    contract = _xlsx_delivery_contract()
+    validation = contract["artifacts"][0]["validation_contract"]
+    validation["collection_contract"]["api_request"] = {
+        "request_ranges": [
+            {
+                "reserved": {
+                    "metric_kind": "time_window_delta",
+                    "time_window": {"end": "{end_date}", "start": "{start_date}"},
+                    "window_end": "{end_date}",
+                    "window_start": "{start_date}",
+                }
+            }
+        ],
+        "fields": {
+            "项目名": "full_name",
+            "地址": "html_url",
+            "上升 star 数": "stargazers_count",
+        },
+        "evidence_fields": ["项目名", "地址", "上升 star 数"],
+        "completion_evidence": {"method": "api_json_collection", "scope": "declared-test"},
+    }
+    params = _params(contract)
+
+    normalized = normalize_api_collection_payload(
+        params,
+        {
+            "path": "outputs/report/source_data.json",
+            "request_ranges": [{"end_date": "2026-05-22", "start_date": "2026-01-01", "step_days": 7}],
+            "tool": "api_json_collection",
+        },
+    )
+
+    assert normalized["request_ranges"][0]["reserved"]["metric_kind"] == "time_window_delta"
+    assert normalized["request_ranges"][0]["reserved"]["time_window"]["start"] == "{start_date}"
+    assert normalized["fields"]["上升 star 数"] == "stargazers_count"
+    assert normalized["completion_evidence"]["scope"] == "declared-test"
+    assert api_collection_contract_result(params, normalized) is None
+
+
+# LLM: Tool execution uses the normalized API collection payload, not the model's partial payload.
+# 函数用途: 验证工具入口在执行前合并 collection_contract.api_request，避免模型少填机器字段导致反复返工。
+def test_tool_loop_executes_api_collection_with_contract_normalized_payload(tmp_path: Path):
+    from agent_py_agent.agent.agent_core._tool_loop_service import ToolLoopService
+    from agent_py_agent.agent.agent_core.tool_round_execution import ToolCallExecuteParams
+    from agent_py_agent.agent.tools import ToolExecutionResult
+
+    contract = _xlsx_delivery_contract()
+    validation = contract["artifacts"][0]["validation_contract"]
+    validation["collection_contract"]["api_request"] = {
+        "request_ranges": [
+            {
+                "reserved": {
+                    "metric_kind": "time_window_delta",
+                    "time_window": {"end": "{end_date}", "start": "{start_date}"},
+                    "window_end": "{end_date}",
+                    "window_start": "{start_date}",
+                }
+            }
+        ],
+        "fields": {
+            "项目名": "full_name",
+            "地址": "html_url",
+            "上升 star 数": "stargazers_count",
+        },
+        "evidence_fields": ["项目名", "地址", "上升 star 数"],
+    }
+    params = _params(contract)
+    executed_payloads: list[dict[str, object]] = []
+
+    class _Tools:
+        workspace_root = tmp_path
+
+        def execute_call(self, payload, **_kwargs):
+            executed_payloads.append(payload)
+            return ToolExecutionResult("api_json_collection", True, "{}")
+
+    agent = SimpleNamespace(root=tmp_path, tools=_Tools(), local_store=None)
+    result = ToolLoopService(agent)._execute_one_tool_call(
+        ToolCallExecuteParams(
+            params=params,
+            tool_rounds=1,
+            idx=1,
+            payload={
+                "path": "outputs/report/source_data.json",
+                "request_ranges": [{"end_date": "2026-05-22", "start_date": "2026-01-01", "step_days": 7}],
+                "tool": "api_json_collection",
+            },
+        )
+    )
+
+    assert result.ok is True
+    assert executed_payloads[0]["request_ranges"][0]["reserved"]["metric_kind"] == "time_window_delta"
 
 
 def test_structured_json_source_checkpoint_blocks_missing_row_evidence():

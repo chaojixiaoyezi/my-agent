@@ -434,8 +434,8 @@ def test_fetch_url_and_http_request_tools(monkeypatch):
     server = start_test_server()
     try:
         base = f"http://127.0.0.1:{server.server_port}"
-        fetch_tool = FetchUrlTool(max_chars=2000, timeout=5)
-        http_tool = HttpRequestTool(max_chars=2000, timeout=5)
+        fetch_tool = FetchUrlTool(max_chars=2000, timeout=5, allowed_private_hosts=("127.0.0.1",))
+        http_tool = HttpRequestTool(max_chars=2000, timeout=5, allowed_private_hosts=("127.0.0.1",))
 
         fetch_result = fetch_tool.execute({"url": base + "/page"})
         http_result = http_tool.execute(

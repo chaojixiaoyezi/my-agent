@@ -171,6 +171,8 @@ def _flat_item_contexts(value: object, contract: dict[str, object]) -> list[dict
 # 函数用途: 处理 groups 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _groups(value: object, contract: dict[str, object]) -> list[object]:
     groups_path = str(contract.get("groups_path") or "").strip()
+    if not groups_path and _items_path_is_missing(value, contract):
+        groups_path = "sheets"
     if not groups_path:
         return []
     groups = _lookup_path(value, groups_path)
@@ -185,6 +187,11 @@ def _items_from_group(group: object, contract: dict[str, object]) -> list[object
     if isinstance(items, list):
         return list(items)
     return list(group) if isinstance(group, list) else []
+
+
+def _items_path_is_missing(value: object, contract: dict[str, object]) -> bool:
+    items_path = str(contract.get("items_path") or "rows")
+    return not isinstance(_lookup_path(value, items_path), list)
 
 
 # LLM: _claim_records 是 agent_py_agent/agent/contracts/artifact_collection_evidence.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。

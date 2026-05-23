@@ -8,7 +8,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from .main_agent_auto_resume import auto_resume_decision, record_auto_resume_attempt
+from .main_agent_auto_resume import (
+    auto_resume_decision,
+    auto_resume_remaining_timeout_seconds,
+    record_auto_resume_attempt,
+)
 from .main_agent_task_runtime_adapter import MainAgentTaskRuntimeAdapter
 from .state_machine import normalize_status
 
@@ -162,15 +166,26 @@ def _finalize_case_bundle(bundle: Any, runtime_adapter: MainAgentTaskRuntimeAdap
 def _auto_resume_case(bundle: Any, runtime_adapter: MainAgentTaskRuntimeAdapter) -> Any:
     runtime = bundle.runtime
     packet_path = (runtime.workspace / bundle.recovery_packet_ref).resolve()
+    next_timeout_seconds = auto_resume_remaining_timeout_seconds(bundle)
     ledger = record_auto_resume_attempt(bundle)
     runtime_adapter.append_event(
         runtime.paths["events"],
         "case_auto_resume_started",
-        {"case_id": runtime.case.case_id, "recovery_packet_ref": bundle.recovery_packet_ref, "attempts": ledger.get("attempts")},
+        {
+            "case_id": runtime.case.case_id,
+            "recovery_packet_ref": bundle.recovery_packet_ref,
+            "attempts": ledger.get("attempts"),
+            "timeout_seconds": next_timeout_seconds,
+        },
     )
     return prepare_or_execute_case(
         runtime.case,
-        replace(runtime.request, recovery_packet_path=packet_path, auto_recovery_active=True),
+        replace(
+            runtime.request,
+            recovery_packet_path=packet_path,
+            auto_recovery_active=True,
+            task_timeout_seconds=next_timeout_seconds,
+        ),
         workspace=runtime.workspace,
         runtime_adapter=runtime_adapter,
     )
@@ -213,6 +228,7 @@ def _plan_suite(request: Any, workspace: Path, runtime_adapter: MainAgentTaskRun
             max_workers=request.max_workers,
             task_timeout_seconds=request.task_timeout_seconds,
             execute=request.execute,
+            prompt_overrides=dict(getattr(request, "prompt_overrides", {}) or {}),
         )
     )
 

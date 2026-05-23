@@ -60,6 +60,14 @@ def _collection_value_repair_actions_for_item(item: object, contract: dict[str, 
         return
     for checkpoint_ref, updates in _collection_updates_by_ref(artifact_findings(item), collection_contract).items():
         yield _collection_value_repair_action(checkpoint_ref, updates, collection_contract)
+    for checkpoint_ref in _collection_placeholder_refs(artifact_findings(item), collection_contract):
+        yield _collection_placeholder_repair_action(checkpoint_ref, collection_contract)
+    for code, checkpoint_ref in _collection_count_refs(artifact_findings(item), collection_contract):
+        yield _collection_count_repair_action(code, checkpoint_ref, collection_contract)
+    for code, checkpoint_ref in _collection_date_refs(artifact_findings(item), collection_contract):
+        yield _collection_date_repair_action(code, checkpoint_ref, collection_contract)
+    if action := _collection_mapping_repair_action(artifact_findings(item), collection_contract):
+        yield action
 
 
 def _collection_contract_for_item(item: dict[str, Any], contract: dict[str, Any]) -> dict[str, object]:
@@ -120,6 +128,77 @@ def _collection_updates_by_ref(
         seen.add(key)
         updates_by_ref.setdefault(checkpoint_ref, []).append(update)
     return updates_by_ref
+
+
+def _collection_placeholder_refs(
+    findings: Any,
+    collection_contract: dict[str, object],
+) -> list[str]:
+    refs: list[str] = []
+    declared_ref = str(collection_contract.get("source_json_ref") or "").strip()
+    for finding in findings:
+        if str(finding.get("code") or "") != "COLLECTION_ITEM_PLACEHOLDER_VALUE":
+            continue
+        location = _parse_collection_location(str(finding.get("location") or ""))
+        if not location:
+            continue
+        checkpoint_ref = str(location["checkpoint_ref"])
+        if declared_ref and _normalized_ref(checkpoint_ref) != _normalized_ref(declared_ref):
+            continue
+        if checkpoint_ref not in refs:
+            refs.append(checkpoint_ref)
+    return refs
+
+
+def _collection_count_refs(
+    findings: Any,
+    collection_contract: dict[str, object],
+) -> list[tuple[str, str]]:
+    refs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    declared_ref = str(collection_contract.get("source_json_ref") or "").strip()
+    for finding in findings:
+        code = str(finding.get("code") or "")
+        if code not in {"COLLECTION_TOO_FEW_ITEMS", "COLLECTION_TOO_FEW_GROUPS", "COLLECTION_GROUP_TOO_FEW_ITEMS"}:
+            continue
+        checkpoint_ref = _collection_finding_checkpoint_ref(finding, declared_ref)
+        if not checkpoint_ref:
+            continue
+        key = (code, checkpoint_ref)
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append(key)
+    return refs
+
+
+def _collection_date_refs(
+    findings: Any,
+    collection_contract: dict[str, object],
+) -> list[tuple[str, str]]:
+    refs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    declared_ref = str(collection_contract.get("source_json_ref") or "").strip()
+    for finding in findings:
+        code = str(finding.get("code") or "")
+        if code not in {"COLLECTION_ITEM_DATE_INVALID", "COLLECTION_ITEM_DATE_BEFORE_MIN", "COLLECTION_ITEM_DATE_AFTER_MAX"}:
+            continue
+        checkpoint_ref = _collection_finding_checkpoint_ref(finding, declared_ref)
+        if not checkpoint_ref:
+            continue
+        key = (code, checkpoint_ref)
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append(key)
+    return refs
+
+
+def _collection_finding_checkpoint_ref(finding: dict[str, Any], declared_ref: str) -> str:
+    location = _file_ref_head(str(finding.get("location") or ""))
+    if declared_ref and location and _normalized_ref(location) != _normalized_ref(declared_ref):
+        return ""
+    return location or declared_ref
 
 
 # LLM: _collection_update_from_finding reads only structured code/location/value fields.
@@ -206,6 +285,99 @@ def _collection_value_repair_action(
     if groups_path:
         action["groups_path"] = groups_path
     return action
+
+
+def _collection_placeholder_repair_action(
+    checkpoint_ref: str,
+    collection_contract: dict[str, object],
+) -> dict[str, object]:
+    action: dict[str, object] = {
+        "code": "COLLECTION_ITEM_PLACEHOLDER_VALUE",
+        "category": "artifact",
+        "retryable": True,
+        "recommended_action": "repair_structured_checkpoint_json",
+        "checkpoint_ref": checkpoint_ref,
+        "writer_tool": "api_json_collection",
+        "write_tools": ["api_json_collection", "write_structured_json"],
+        "items_path": str(collection_contract.get("items_path") or "rows"),
+        "collection_contract": dict(collection_contract),
+        "required_columns": _collection_required_columns(collection_contract),
+        "recovery_hint": "集合 JSON 的必填字段仍含模板占位值；重新采集或重写来源 checkpoint，不能保留 __FILL__/TODO 这类占位符。",
+    }
+    groups_path = str(collection_contract.get("groups_path") or "").strip()
+    if groups_path:
+        action["groups_path"] = groups_path
+    return action
+
+
+def _collection_count_repair_action(
+    code: str,
+    checkpoint_ref: str,
+    collection_contract: dict[str, object],
+) -> dict[str, object]:
+    action: dict[str, object] = {
+        "code": code,
+        "category": "artifact",
+        "retryable": True,
+        "recommended_action": "repair_structured_checkpoint_json",
+        "checkpoint_ref": checkpoint_ref,
+        "writer_tool": "api_json_collection",
+        "write_tools": ["api_json_collection", "write_structured_json"],
+        "items_path": str(collection_contract.get("items_path") or "rows"),
+        "collection_contract": dict(collection_contract),
+        "required_columns": _collection_required_columns(collection_contract),
+        "recovery_hint": "集合 JSON 的数量没有达到合同要求；继续采集或补齐来源 checkpoint，保持 source_refs/claims/completion_evidence 可审计。",
+    }
+    groups_path = str(collection_contract.get("groups_path") or "").strip()
+    if groups_path:
+        action["groups_path"] = groups_path
+    return action
+
+
+def _collection_date_repair_action(
+    code: str,
+    checkpoint_ref: str,
+    collection_contract: dict[str, object],
+) -> dict[str, object]:
+    action = _collection_count_repair_action(code, checkpoint_ref, collection_contract)
+    action["recovery_hint"] = "集合 JSON 的日期字段不满足时间窗口合同；重新采集或过滤来源 checkpoint，保留满足 item_date_bounds 的可审计条目。"
+    return action
+
+
+def _collection_required_columns(collection_contract: dict[str, object]) -> list[str]:
+    fields = collection_contract.get("required_item_fields")
+    return [str(item).strip() for item in fields if str(item).strip()] if isinstance(fields, list) else []
+
+
+def _collection_mapping_repair_action(
+    findings: Any,
+    collection_contract: dict[str, object],
+) -> dict[str, object]:
+    finding_values = [
+        str(finding.get("value") or "").strip()
+        for finding in findings
+        if isinstance(finding, dict) and str(finding.get("code") or "") == "ARTIFACT_MAPPING_MISSING"
+    ]
+    finding_values = [value for value in finding_values if value]
+    mapping = collection_contract.get("mapping")
+    artifact_ref = str(mapping.get("artifact_ref") or "").strip() if isinstance(mapping, dict) else ""
+    source_ref = str(collection_contract.get("source_json_ref") or "").strip()
+    if not finding_values or not artifact_ref or not source_ref:
+        return {}
+    return {
+        "category": "artifact",
+        "code": "ARTIFACT_MAPPING_MISSING",
+        "recommended_action": "repair_artifact_against_findings",
+        "artifact_path": artifact_ref,
+        "checkpoint_ref": source_ref,
+        "finding_codes": ["ARTIFACT_MAPPING_MISSING"],
+        "finding_values": finding_values[:_MAX_FINDING_VALUES_PER_ACTION],
+        "repair_targets": [artifact_ref],
+        "retryable": True,
+        "source_ref": source_ref,
+        "write_tools": ["write_file", "replace_in_file", "file_write_session"],
+        "recovery_hint": "集合映射产物缺少 source_json_ref 中的条目；按结构化来源生成或修复目标文档后重新验收。",
+    }
 
 
 # LLM: _artifact_finding_repair_action 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
@@ -307,6 +479,9 @@ def _safe_artifact_child(artifact_path: Path, rel: str) -> Path | None:
 def _safe_artifact_related_path(artifact_path: Path, rel: str) -> Path | None:
     if Path(rel).is_absolute() or _has_parent_ref(rel):
         return None
+    workspace_ref = _workspace_relative_candidate(artifact_path, rel)
+    if workspace_ref is not None:
+        return workspace_ref
     for root in _candidate_repair_roots(artifact_path):
         try:
             candidate = (root / rel).resolve()
@@ -316,6 +491,23 @@ def _safe_artifact_related_path(artifact_path: Path, rel: str) -> Path | None:
         if candidate.exists():
             return candidate
     return _safe_artifact_child(artifact_path, rel)
+
+
+def _workspace_relative_candidate(artifact_path: Path, rel: str) -> Path | None:
+    first_part = Path(rel).parts[0] if Path(rel).parts else ""
+    if not first_part:
+        return None
+    for root in _candidate_repair_roots(artifact_path):
+        try:
+            existing_anchor = (root / first_part).resolve(strict=False)
+            if not existing_anchor.exists() or not existing_anchor.is_dir():
+                continue
+            candidate = (root / rel).resolve(strict=False)
+            candidate.relative_to(root.resolve(strict=False))
+        except (OSError, ValueError):
+            continue
+        return candidate
+    return None
 
 
 # LLM: _candidate_repair_roots 是 agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。

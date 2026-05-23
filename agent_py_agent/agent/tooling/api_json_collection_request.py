@@ -41,8 +41,10 @@ def collection_request(params: dict[str, Any]) -> dict[str, Any]:
     return {
         "columns": columns,
         "completion_evidence": _completion_evidence(params.get("completion_evidence")),
+        "drop_incomplete_items": _bool_param(params.get("drop_incomplete_items")),
         "evidence_fields": _evidence_fields(params.get("evidence_fields"), fields),
         "fields": {str(key): value for key, value in fields.items() if str(key).strip()},
+        "item_date_bounds": _item_date_bounds(params.get("item_date_bounds")),
         "item_path": _text_param(params.get("item_path", "items"), name="item_path", max_chars=160, strip=True),
         "limit_per_request": _bounded_limit(params.get("limit_per_request")),
         "request_delay_seconds": _request_delay_seconds(params.get("request_delay_seconds"), len(requests)),
@@ -171,6 +173,22 @@ def _parse_date(value: object, name: str) -> date:
         raise ValueError(f"TOOL_INVALID_ARGUMENTS: {name} must be YYYY-MM-DD") from exc
 
 
+def _item_date_bounds(value: object) -> dict[str, str]:
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("TOOL_INVALID_ARGUMENTS: item_date_bounds must be an object")
+    field = _text_param(value.get("field") or "date", name="item_date_bounds.field", max_chars=80, strip=True)
+    bounds: dict[str, str] = {"field": field}
+    if value.get("min") not in (None, ""):
+        bounds["min"] = _parse_date(value.get("min"), "item_date_bounds.min").isoformat()
+    if value.get("max") not in (None, ""):
+        bounds["max"] = _parse_date(value.get("max"), "item_date_bounds.max").isoformat()
+    if "min" not in bounds and "max" not in bounds:
+        raise ValueError("TOOL_INVALID_ARGUMENTS: item_date_bounds requires min or max")
+    return bounds
+
+
 def _render_range_template(value: object, default: str, values: dict[str, object]) -> str:
     template = _normalize_template_placeholders(str(value or default))
     try:
@@ -251,6 +269,10 @@ def _bounded_limit(value: object) -> int:
     except (TypeError, ValueError):
         limit = 10
     return max(1, min(_MAX_ITEMS_PER_REQUEST, limit))
+
+
+def _bool_param(value: object) -> bool:
+    return bool(value) if isinstance(value, bool) else str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _request_delay_seconds(value: object, request_count: int) -> float:

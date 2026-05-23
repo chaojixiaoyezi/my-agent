@@ -12,13 +12,17 @@ from __future__ import annotations
 """
 
 import json
+import os
 import re
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
+from ..contracts.gates import NetworkResolver, NetworkSafetyFacts, evaluate_network_safety_gate
 from .models import BaseTool, ToolExecutionResult, ToolSpec
 from .web_html_preview import format_html_response, is_html_response
 
@@ -81,6 +85,51 @@ def _normalize_url(value: Any) -> str:
     return url
 
 
+# LLM: _default_network_resolver supplies DNS facts for the network_safety gate.
+# 函数用途: 只解析 host 到 IP，不发起 HTTP 请求；失败由 network_safety gate 转成结构化错误。
+def _default_network_resolver(host: str) -> tuple[str, ...]:
+    answers = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    return tuple(str(sockaddr[0]) for *_prefix, sockaddr in answers)
+
+
+# LLM: _network_safety_error converts SSRF/DNS gate denials into normal tool failures.
+# 函数用途: 所有出站 HTTP 工具在请求前统一过 network_safety 门，避免只靠 URL 字面校验。
+def _network_safety_error(
+    tool: str,
+    url: str,
+    resolver: NetworkResolver,
+    allowed_private_hosts: Iterable[str] = (),
+    allow_private_resolution: bool | None = None,
+) -> ToolExecutionResult | None:
+    decision = evaluate_network_safety_gate(
+        NetworkSafetyFacts(
+            url=url,
+            resolver=resolver,
+            allowed_private_hosts=allowed_private_hosts,
+            allow_private_resolution=_effective_allow_private_resolution(allow_private_resolution),
+        )
+    )
+    if decision.allowed:
+        return None
+    code = decision.finding_codes[0] if decision.finding_codes else "NETWORK_SAFETY_DENIED"
+    return ToolExecutionResult(
+        tool,
+        False,
+        f"网络安全检查失败: {code}",
+        result_envelope={"network_safety_gate": decision.to_dict()},
+        error_code=code,
+    )
+
+
+# LLM: _effective_allow_private_resolution keeps proxy/VPN private DNS opt-in structured.
+# 函数用途: 从显式参数或环境配置读取是否允许私网解析，但 metadata/link-local 仍由 gate 永久拦截。
+def _effective_allow_private_resolution(value: bool | None) -> bool:
+    if value is not None:
+        return bool(value)
+    raw = os.environ.get("MY_AGENT_ALLOW_PRIVATE_URLS", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 # LLM: _normalize_method 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
 # 函数用途: 把输入值归一成 工具系统 内部使用的稳定格式。
 def _normalize_method(value: Any) -> str:
@@ -139,9 +188,20 @@ class FetchUrlTool(BaseTool):
 
     # LLM: FetchUrlTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 初始化 FetchUrlTool 的依赖、配置和运行期字段。
-    def __init__(self, *, max_chars: int, timeout: int):
+    def __init__(
+        self,
+        *,
+        max_chars: int,
+        timeout: int,
+        resolver: NetworkResolver | None = None,
+        allowed_private_hosts: Iterable[str] = (),
+        allow_private_resolution: bool | None = None,
+    ):
         self.max_chars = max_chars
         self.timeout = timeout
+        self.resolver = resolver or _default_network_resolver
+        self.allowed_private_hosts = tuple(allowed_private_hosts)
+        self.allow_private_resolution = allow_private_resolution
         self.spec = ToolSpec(
             name="fetch_url",
             category="web",
@@ -176,6 +236,15 @@ class FetchUrlTool(BaseTool):
             max_chars = _response_preview_chars(params, self.max_chars)
         except ValueError as exc:
             return ToolExecutionResult("fetch_url", False, str(exc))
+        network_error = _network_safety_error(
+            "fetch_url",
+            url,
+            self.resolver,
+            self.allowed_private_hosts,
+            self.allow_private_resolution,
+        )
+        if network_error is not None:
+            return network_error
 
         req = urllib.request.Request(
             url,
@@ -198,9 +267,20 @@ class HttpRequestTool(BaseTool):
 
     # LLM: HttpRequestTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 初始化 HttpRequestTool 的依赖、配置和运行期字段。
-    def __init__(self, *, max_chars: int, timeout: int):
+    def __init__(
+        self,
+        *,
+        max_chars: int,
+        timeout: int,
+        resolver: NetworkResolver | None = None,
+        allowed_private_hosts: Iterable[str] = (),
+        allow_private_resolution: bool | None = None,
+    ):
         self.max_chars = max_chars
         self.timeout = timeout
+        self.resolver = resolver or _default_network_resolver
+        self.allowed_private_hosts = tuple(allowed_private_hosts)
+        self.allow_private_resolution = allow_private_resolution
         self.spec = ToolSpec(
             name="http_request",
             category="api",
@@ -252,6 +332,15 @@ class HttpRequestTool(BaseTool):
             )
         except ValueError as exc:
             return ToolExecutionResult("http_request", False, str(exc))
+        network_error = _network_safety_error(
+            "http_request",
+            url,
+            self.resolver,
+            self.allowed_private_hosts,
+            self.allow_private_resolution,
+        )
+        if network_error is not None:
+            return network_error
         data = None if body_text is None else body_text.encode("utf-8")
 
         req = urllib.request.Request(url, data=data, method=method, headers=headers)

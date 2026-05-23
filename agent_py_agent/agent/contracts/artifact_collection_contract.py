@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -189,6 +190,7 @@ def _single_item_findings(
         return [_finding("COLLECTION_ITEM_SHAPE_INVALID", "collection item must be an object.", context.source_ref, str(index))]
     findings = _required_item_field_findings(item, context.source_ref, index, context.required_fields)
     findings.extend(_required_item_value_findings(item, context.contract, context.source_ref, index))
+    findings.extend(_item_date_bound_findings(item, context.contract, context.source_ref, index))
     return findings
 
 
@@ -201,16 +203,40 @@ def _required_item_field_findings(
     required_fields: list[str],
 ) -> list[ArtifactFinding]:
     missing = [field for field in required_fields if not _has_value(item.get(field))]
-    if not missing:
-        return []
-    return [
-        _finding(
-            "COLLECTION_ITEM_REQUIRED_FIELD_MISSING",
-            "collection item is missing required fields.",
-            f"{source_ref}#{index}",
-            ",".join(missing),
+    findings: list[ArtifactFinding] = []
+    if missing:
+        findings.append(
+            _finding(
+                "COLLECTION_ITEM_REQUIRED_FIELD_MISSING",
+                "collection item is missing required fields.",
+                f"{source_ref}#{index}",
+                ",".join(missing),
+            )
         )
-    ]
+    findings.extend(_placeholder_item_field_findings(item, source_ref, index, required_fields))
+    return findings
+
+
+def _placeholder_item_field_findings(
+    item: dict[str, object],
+    source_ref: str,
+    index: int,
+    required_fields: list[str],
+) -> list[ArtifactFinding]:
+    findings: list[ArtifactFinding] = []
+    for field in required_fields:
+        value = item.get(field)
+        if not _is_placeholder_value(value):
+            continue
+        findings.append(
+            _finding(
+                "COLLECTION_ITEM_PLACEHOLDER_VALUE",
+                "collection item required field still contains a placeholder value.",
+                f"{source_ref}#{index}:{field}",
+                _compact_json({"field": field, "value": value}),
+            )
+        )
+    return findings
 
 
 # LLM: item value rules are structured predicates for row-level completion flags.
@@ -240,6 +266,67 @@ def _required_item_value_findings(
                 )
             )
     return findings
+
+
+# LLM: date bounds are structured collection predicates for time-scoped research/report tasks.
+# 函数用途: 校验集合条目的日期上下界，例如今年以来、某日期之后等，不解析 prompt 文本。
+def _item_date_bound_findings(
+    item: dict[str, object],
+    contract: dict[str, object],
+    source_ref: str,
+    index: int,
+) -> list[ArtifactFinding]:
+    bounds = contract.get("item_date_bounds")
+    if not isinstance(bounds, dict):
+        return []
+    field = str(bounds.get("field") or "date").strip()
+    if not field:
+        return []
+    raw_value = _lookup_path(item, field)
+    actual = _parse_iso_date(raw_value)
+    if actual is None:
+        return [
+            _finding(
+                "COLLECTION_ITEM_DATE_INVALID",
+                "collection item date cannot be parsed as ISO date.",
+                f"{source_ref}#{index}:{field}",
+                _compact_json({"actual": raw_value}),
+            )
+        ]
+    findings: list[ArtifactFinding] = []
+    min_date = _parse_iso_date(bounds.get("min"))
+    max_date = _parse_iso_date(bounds.get("max"))
+    if min_date is not None and actual < min_date:
+        findings.append(
+            _finding(
+                "COLLECTION_ITEM_DATE_BEFORE_MIN",
+                "collection item date is before the declared minimum date.",
+                f"{source_ref}#{index}:{field}",
+                _compact_json({"min": min_date.isoformat(), "actual": actual.isoformat()}),
+            )
+        )
+    if max_date is not None and actual > max_date:
+        findings.append(
+            _finding(
+                "COLLECTION_ITEM_DATE_AFTER_MAX",
+                "collection item date is after the declared maximum date.",
+                f"{source_ref}#{index}:{field}",
+                _compact_json({"max": max_date.isoformat(), "actual": actual.isoformat()}),
+            )
+        )
+    return findings
+
+
+def _parse_iso_date(value: object) -> date | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if len(text) >= 10:
+        text = text[:10]
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
 
 
 # LLM: _completion_evidence_findings 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
@@ -279,6 +366,8 @@ def _source_claim_count_findings(value: object, contract: dict[str, object], sou
 # 函数用途: 处理 groups 相关的结构化数据、路径或 finding，供当前合同链路调用。
 def _groups(value: object, contract: dict[str, object]) -> list[object]:
     groups_path = str(contract.get("groups_path") or "").strip()
+    if not groups_path and _items_path_is_missing(value, contract):
+        groups_path = "sheets"
     if not groups_path:
         return []
     groups = _lookup_path(value, groups_path)
@@ -306,6 +395,11 @@ def _items_from_group(group: object, contract: dict[str, object]) -> list[object
     if isinstance(items, list):
         return list(items)
     return list(group) if isinstance(group, list) else []
+
+
+def _items_path_is_missing(value: object, contract: dict[str, object]) -> bool:
+    items_path = str(contract.get("items_path") or "rows")
+    return not isinstance(_lookup_path(value, items_path), list)
 
 
 # LLM: _lookup_path 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。
@@ -343,8 +437,24 @@ def _has_value(value: object) -> bool:
     if value is None:
         return False
     if isinstance(value, str):
-        return bool(value.strip())
+        return bool(value.strip()) and not _is_placeholder_value(value)
     return True
+
+
+def _is_placeholder_value(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text:
+        return False
+    upper = text.upper()
+    if upper.startswith("__FILL_") and upper.endswith("__"):
+        return True
+    if upper in {"__FILL__", "__TODO__", "PLACEHOLDER", "TODO", "TBD", "TO_BE_FILLED"}:
+        return True
+    if text in {"待补充", "待定", "未知", "暂无", "无", "..."}:
+        return True
+    return upper.startswith("{") and upper.endswith("}") and len(upper) <= 80
 
 
 # LLM: _has_structured_data 是 agent_py_agent/agent/contracts/artifact_collection_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。

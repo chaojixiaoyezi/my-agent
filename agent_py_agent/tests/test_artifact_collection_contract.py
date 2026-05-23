@@ -5,6 +5,7 @@ from pathlib import Path
 
 from agent_py_agent.agent.contracts.artifact_acceptance import validate_artifact
 from agent_py_agent.agent.contracts.artifact_acceptance_models import ArtifactAcceptanceRequest
+from agent_py_agent.agent.contracts.artifact_collection_contract import collection_contract_findings
 from agent_py_agent.agent.tooling.spreadsheet_builder import DataWorkbookTool
 
 
@@ -191,6 +192,158 @@ def test_collection_contract_rejects_required_item_value_mismatch(tmp_path: Path
 
     assert not report.ok
     assert "COLLECTION_ITEM_VALUE_MISMATCH" in {finding.code for finding in report.findings}
+
+
+# LLM: collection date ranges are machine bounds, not prose hidden in the user prompt.
+# 函数用途: 验证集合型来源清单能声明日期下界，防止过期条目混入“今年/某日期之后”的任务。
+def test_collection_contract_rejects_item_date_before_declared_min(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs/docs"
+    outputs.mkdir(parents=True)
+    (outputs / "report.pdf").write_bytes(b"%PDF-1.4\n1 0 obj<<>>endobj\n%%EOF\n")
+    (outputs / "report.md").write_text("# 翻译稿\n\nPaper 2024\nPaper 2025\n", encoding="utf-8")
+    (outputs / "source_index.json").write_text(
+        json.dumps(
+            {
+                "completion_evidence": {"source": "fixture"},
+                "rows": [
+                    {"title": "Paper 2024", "url": "https://example.com/2024", "date": "2024-12-01", "translated": True},
+                    {"title": "Paper 2025", "url": "https://example.com/2025", "date": "2025-01-01", "translated": True},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=outputs / "report.pdf",
+            workspace_root=tmp_path,
+            validation_contract={
+                "validator": "document_acceptance",
+                "collection_contract": {
+                    "source_json_ref": "outputs/docs/source_index.json",
+                    "items_path": "rows",
+                    "min_items_total": 2,
+                    "required_item_fields": ["title", "url", "date", "translated"],
+                    "required_item_values": {"translated": True},
+                    "item_date_bounds": {"field": "date", "min": "2025-01-01"},
+                    "require_completion_evidence": True,
+                    "mapping": {
+                        "artifact_ref": "outputs/docs/report.md",
+                        "key_fields": ["title"],
+                        "min_mapped_items": 2,
+                    },
+                },
+            },
+        )
+    )
+
+    assert not report.ok
+    assert "COLLECTION_ITEM_DATE_BEFORE_MIN" in {finding.code for finding in report.findings}
+
+
+# LLM: source collections must not treat generator placeholders as real required field values.
+# 函数用途: 验证 __FILL_* / TODO 这类模板值不能通过 required_item_fields，避免假来源数据进入最终产物映射。
+def test_collection_contract_rejects_required_item_placeholder_values(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs/docs"
+    outputs.mkdir(parents=True)
+    (outputs / "report.pdf").write_bytes(b"%PDF-1.4\n1 0 obj<<>>endobj\n%%EOF\n")
+    (outputs / "report.md").write_text("# 翻译稿\n\nPaper 1\n", encoding="utf-8")
+    (outputs / "source_index.json").write_text(
+        json.dumps(
+            {
+                "completion_evidence": {"source": "fixture"},
+                "rows": [
+                    {"title": "Paper 1", "url": "https://example.com/1", "date": "__FILL_3_date__", "translated": True},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=outputs / "report.pdf",
+            workspace_root=tmp_path,
+            validation_contract={
+                "validator": "document_acceptance",
+                "collection_contract": {
+                    "source_json_ref": "outputs/docs/source_index.json",
+                    "items_path": "rows",
+                    "min_items_total": 1,
+                    "required_item_fields": ["title", "url", "date", "translated"],
+                    "required_item_values": {"translated": True},
+                    "require_completion_evidence": True,
+                    "mapping": {
+                        "artifact_ref": "outputs/docs/report.md",
+                        "key_fields": ["title"],
+                        "min_mapped_items": 1,
+                    },
+                },
+            },
+        )
+    )
+
+    assert not report.ok
+    placeholder = next(finding for finding in report.findings if finding.code == "COLLECTION_ITEM_PLACEHOLDER_VALUE")
+    assert placeholder.location == "outputs/docs/source_index.json#0:date"
+    assert "__FILL_3_date__" in placeholder.value
+
+
+# LLM: api_json_collection emits sheets while document source indexes may declare flat rows.
+# 函数用途: 验证集合验收能把标准 sheets[].rows 输出作为 rows 集合读取，不误判为 0 items。
+def test_collection_contract_accepts_sheets_rows_when_flat_items_path_is_missing(tmp_path: Path) -> None:
+    source_id = "src-web"
+    (tmp_path / "source_index.json").write_text(
+        json.dumps(
+            {
+                "completion_evidence": {"method": "api_json_collection"},
+                "sheets": [
+                    {
+                        "name": "web_search",
+                        "rows": [
+                            {
+                                "date": "2026-01-01",
+                                "field_source_ids": {"date": [source_id], "title": [source_id], "url": [source_id]},
+                                "title": "Paper 1",
+                                "translated": True,
+                                "url": "https://example.com/1",
+                            },
+                            {
+                                "date": "2026-02-01",
+                                "field_source_ids": {"date": [source_id], "title": [source_id], "url": [source_id]},
+                                "title": "Paper 2",
+                                "translated": True,
+                                "url": "https://example.com/2",
+                            },
+                        ],
+                    }
+                ],
+                "source_refs": [_source_ref(source_id)],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    findings = collection_contract_findings(
+        {
+            "collection_contract": {
+                "source_json_ref": "source_index.json",
+                "items_path": "rows",
+                "min_items_total": 2,
+                "required_item_fields": ["title", "url", "date", "translated"],
+                "required_item_values": {"translated": True},
+                "require_completion_evidence": True,
+                "required_item_evidence_fields": ["title", "url", "date"],
+            }
+        },
+        tmp_path,
+    )
+
+    assert findings == []
 
 
 def test_collection_contract_rejects_global_claims_without_row_field_sources(tmp_path: Path) -> None:
