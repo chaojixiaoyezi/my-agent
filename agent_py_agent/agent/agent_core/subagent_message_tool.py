@@ -135,7 +135,7 @@ def build_subagent_message_spec() -> ToolSpec:
             ),
             (
                 '{"tool":"subagent_message","mode":"broadcast","scope":"descendants","topic":"requirement_change",'
-                '"body":"所有下级在继续前先读取 shared blackboard，注册/登录/购物车按钮都不能失效。",'
+                '"body":"所有下级在继续前先读取 shared blackboard，确保核心交互流程的按钮和功能都正常。",'
                 '"requires_ack":true}'
             ),
             (

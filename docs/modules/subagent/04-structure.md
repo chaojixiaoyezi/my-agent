@@ -6,7 +6,7 @@
 
 ## 2026-05-20 parent oracle contract boundary
 
-- `agent_py_agent/agent/subagents/shop_web_parent_oracle.py` 仍是父级验收 oracle 生成器，但生产说明口径改为通用“静态交易流程站点”，不把某个真实任务样本写成生产合同。
+- `agent_py_agent/agent/subagents/static_flow_parent_oracle.py` 是父级静态流程验收 oracle 生成器。必需区块、按钮 action、本地资源和响应式布局都来自结构化请求，不在生产代码里内置某个真实任务样本。
 - 该 oracle 的事实源是生成的 pytest：必需区块、按钮 action、本地资源和响应式布局。验收结论来自文件、DOM 和 asset 事实，不来自任务 prompt 里的业务名称。
 - 真实任务样本可以继续出现在 `agent_py_agent/tests/**`、Live Lab fixture、replay trace 和最终验收报告；生产 runtime、contract、tool guard 只允许使用通用字段和机器合同。
 

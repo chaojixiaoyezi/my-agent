@@ -37,7 +37,6 @@ DOMAIN_STOPWORDS = {
     "run",
     "runner",
     "qa",
-    "shop",
     "static",
     "subagent",
     "task",
@@ -49,7 +48,6 @@ DOMAIN_STOPWORDS = {
     "users",
     "worker",
     "workspace",
-    "xiaoyezi",
 }
 
 COORDINATION_ROLE_TOKENS = {

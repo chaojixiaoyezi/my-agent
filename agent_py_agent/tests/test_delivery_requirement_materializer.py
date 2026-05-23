@@ -61,6 +61,22 @@ def test_materialized_delivery_contract_rejects_unbounded_absolute_artifact_path
     assert contract["artifacts"] == []
 
 
+def test_materialized_delivery_contract_attaches_doctor_findings_for_bad_contract_shape():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    contract = materialized_delivery_contract({"artifacts": "output.md"})
+
+    doctor = contract["_contract_doctor"]
+    assert doctor["ok"] is False
+    assert doctor["repair_actions"][0]["recommended_action"] == "rematerialize_delivery_contract"
+    assert "DELIVERY_CONTRACT_ARTIFACTS_NOT_LIST" in {
+        finding["code"] for finding in doctor["findings"]
+    }
+    assert "normalized_contract" not in doctor
+
+
 def test_materializer_prompt_asks_for_structured_contract_not_task_template():
     from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
         build_delivery_requirement_materializer_prompt,
@@ -72,4 +88,3 @@ def test_materializer_prompt_asks_for_structured_contract_not_task_template():
     assert "不要写具体执行步骤模板" in prompt
     assert "GitHub" not in prompt
     assert "论文" not in prompt
-

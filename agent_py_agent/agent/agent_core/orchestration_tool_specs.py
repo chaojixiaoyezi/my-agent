@@ -141,7 +141,7 @@ _DISPATCH_PARAMETER_DETAILS = {
     "planner": "true 会额外调用父代理 LLM planner；适合长任务统筹，但会多消耗一次模型调用。",
     "workflow_mode": "plan 只把 workflow 计划写回父任务；auto 会在计划 OK 时落成 worker 子工单；未知值保守按 off 处理。",
     "max_runners": "用来限制本轮推进数量；顶层默认 1，runner 内部默认 6，避免父节点只推进一个孩子就超时。",
-    "run_ids": "适合父 runner 用 schedule_child_subagents 返回的 created_run_ids 指定本轮孩子，例如先跑 auth/catalog，再跑 cart/quality。",
+    "run_ids": "适合父 runner 用 schedule_child_subagents 返回的 created_run_ids 指定本轮孩子，例如先跑 phase-a/phase-b，再跑 phase-c/review。",
     "runner_instruction": "只适合单个 run_id 的补充说明。多个不同子任务一起跑时不要写子任务专属内容；需要专属说明就拆成多次单 run_id dispatch。",
     "take_over_by": (
         "只在恢复动作需要新 leader 时填写。先用 subagent_board 或 due-check 找到可接管的已有 coordinator/leader run_id，"
@@ -183,14 +183,14 @@ _SCHEDULE_CHILD_PARAMETER_DETAILS = {
 _SCHEDULE_CHILD_EXAMPLES = [
     (
         '{"tool":"schedule_child_subagents","apply":true,'
-        '"children":[{"role":"child_coordinator","agent_name":"catalog-lead",'
-        '"goal":"继续拆分商品目录实现任务",'
+        '"children":[{"role":"child_coordinator","agent_name":"module-lead",'
+        '"goal":"继续拆分目标子模块实现任务",'
         '"allowed_tools":["schedule_child_subagents","dispatch_subagents","subagent_board","read_file"]}]}'
     ),
     (
         '{"tool":"schedule_child_subagents","apply":true,'
         '"children":[{"role":"bug_finder","agent_name":"qa-finder","goal":"检查多个 worker 的实现和证据"},'
-        '{"role":"tester","agent_name":"qa-tester","goal":"测试注册、登录、购物车和下单流程"},'
+        '{"role":"tester","agent_name":"qa-tester","goal":"测试关键交互流程和验收路径"},'
         '{"role":"acceptor","agent_name":"qa-acceptor","goal":"按验收标准判断是否可以交付"}]}'
     ),
 ]
@@ -254,8 +254,8 @@ def build_dispatch_subagents_spec() -> ToolSpec:
         examples=[
             '{"tool":"dispatch_subagents","apply":false,"workflow_mode":"plan","max_runners":1}',
             '{"tool":"dispatch_subagents","apply":true,"execute_runners":true,"run_ids":["coordinator-id"],"runner_instruction":"只创建下一层 refs，不要执行 leaf worker"}',
-            '{"tool":"dispatch_subagents","apply":true,"execute_runners":true,"run_ids":["child-auth","child-catalog"],"max_runners":2}',
-            '{"tool":"dispatch_subagents","apply":true,"execute_runners":true,"run_ids":["child-auth"],"max_runners":1,"runner_instruction":"只补充 auth 子任务自己的执行重点"}',
+            '{"tool":"dispatch_subagents","apply":true,"execute_runners":true,"run_ids":["child-phase-a","child-phase-b"],"max_runners":2}',
+            '{"tool":"dispatch_subagents","apply":true,"execute_runners":true,"run_ids":["child-phase-a"],"max_runners":1,"runner_instruction":"只补充 phase-a 子任务自己的执行重点"}',
             '{"tool":"dispatch_subagents","apply":true,"execute_runners":false,"take_over_by":"subagent-new-leader","max_runners":0}',
         ],
     )

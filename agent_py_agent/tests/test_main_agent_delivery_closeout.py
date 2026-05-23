@@ -100,6 +100,26 @@ def test_tool_loop_closes_out_from_structured_run_params_delivery_contract():
         assert (workspace / ".agent_delivery/closeout.json").exists()
 
 
+def test_tool_loop_reports_malformed_delivery_contract_before_artifact_closeout():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        backend = MalformedDeliveryContractBackend()
+        result = _agent(workspace, backend, max_tool_rounds=2).run(
+            "生成一个交付文件。",
+            params=RunParams(delivery_contract={"schema_version": "delivery_contract.v1", "artifacts": "output.md"}, save=False),
+        )
+
+        doctor_report = json.loads((workspace / ".agent_delivery/contract_doctor.json").read_text(encoding="utf-8"))
+        assert backend.calls == 2
+        assert backend.saw_contract_doctor is True
+        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
+        assert doctor_report["ok"] is False
+        assert doctor_report["repair_actions"][0]["recommended_action"] == "rematerialize_delivery_contract"
+        assert "DELIVERY_CONTRACT_ARTIFACTS_NOT_LIST" in {
+            finding["code"] for finding in doctor_report["findings"]
+        }
+
+
 # LLM: Failed delivery contracts must not pretend the task is complete.
 # 函数用途: 验证产物验收失败时不会输出完成标记，而是把结构化 finding 传给下一轮模型修复。
 def test_tool_loop_does_not_close_out_when_delivery_contract_fails():
@@ -430,6 +450,29 @@ class UncontractedFollowupBackend:
                 backend=self.name,
             )
         return ModelResponse(text="当前任务已完成。", backend=self.name)
+
+
+# LLM: MalformedDeliveryContractBackend proves contract Doctor findings reach the next turn.
+# 类用途: 模拟外部结构化合同本身写坏；第二轮必须看到 Doctor 的机器 finding。
+class MalformedDeliveryContractBackend:
+    name = "fake_malformed_delivery_contract_backend"
+
+    def __init__(self):
+        self.calls = 0
+        self.saw_contract_doctor = False
+
+    def generate(self, prompt: str, on_chunk=None):
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"write_file","path":"outputs/draft.md","content":"draft"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        assert "delivery-contract-doctor" in prompt
+        assert "DELIVERY_CONTRACT_ARTIFACTS_NOT_LIST" in prompt
+        assert "rematerialize_delivery_contract" in prompt
+        self.saw_contract_doctor = True
+        return ModelResponse(text="已收到合同结构返工要求。", backend=self.name)
 
 
 # LLM: _closeout_finding_codes returns validator finding codes from the first artifact.

@@ -219,6 +219,22 @@
 - `tool_manifest_payload` 和 registry 使用同一批 ToolSpec 字段，避免模型可见工具清单和真实执行策略分裂。
 - 不写任务专项逻辑；路径、URL、命令、审批、幂等都是通用运行合同。
 
+### 入口合同与韧性阶段 1-6
+
+2026-05-24 开始把真实 LLM 测试前的“入口级合同门”补齐。目标是让普通用户提示词先被物化成结构化合同，再由通用门守住执行边界，而不是靠专项模板或长提示词约束模型。
+
+阶段 1：Contract Schema。新增 `delivery_contract_doctor.py`，对 `delivery_contract.v1` 做轻量 schema 自检；坏字段输出结构化 finding 和 `rematerialize_delivery_contract` 返工动作，schema version 不匹配只 warning，保持向后兼容。
+
+阶段 2：Contract Doctor。`delivery_requirement_materializer.py` 保留原始物化结果的 Doctor findings；`main_agent_delivery_closeout.py` 在验收 artifact 前先跑 Doctor，合同本身坏了就写 `.agent_delivery/contract_doctor.json` 并把 `[delivery-contract-doctor]` 注入下一轮返工上下文。
+
+阶段 3：标准合同测试套件。新增 `tests/support/delivery_contract_suite.py`，复用同一组合同用例测试 artifacts 类型错误、未知格式显式扩展、路径越界和版本漂移，避免每个入口散写一套。
+
+阶段 4：韧性层。新增 `registry_resilience.py`，只读工具失败可有限重试；大输出会归档到 `.agent_tool_outputs/` 并给模型短摘要和 artifact ref；mutating/dangerous 工具仍必须先通过幂等、审批、路径等入口门。
+
+阶段 5：入口合同门接主运行链路。`registry_execution.py` 的真实工具入口已接入韧性层；delivery closeout 已接入 Doctor，合同结构失败走返工循环，不再静默跳过或假完成。
+
+阶段 6：非真实环境补测。新增 focused tests 覆盖 Doctor、工具韧性、物化器接线、closeout 接线，并回归 bootstrap、repair、collection、staged writer 等现有入口门。当前仍坚持：真实任务只做最终验收，日常开发以离线合同、fake tool、fake model 和 replay 为主。
+
 ### Delivery Quality Gate 阶段 0-6
 
 2026-05-22 增加了 `delivery_quality` 门，目的是解决“文件存在但交付质量不可靠”的问题。这个门不是 GitHub、论文、购物站等专项合同，而是对所有资料整理、表格、报告、PDF、网页等交付都能复用的数据质量门。

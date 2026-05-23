@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..backends import ModelResponse
+from ..contracts.delivery_contract_doctor import ContractDoctorReport, validate_delivery_contract
 from ..contracts.gates import (
     evaluate_acceptance_closeout_gate,
     evaluate_delivery_closeout_gate,
@@ -62,10 +63,18 @@ class CloseoutGateRequest:
 # 函数用途: 根据结构化 delivery_contract 验收必交产物；通过则停止工具循环，失败则写结构化反馈让模型修复。
 def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequest) -> ModelResponse | None:
     contract = _delivery_contract(request.params)
+    if not contract:
+        return None
+    workspace_root = _workspace_root(request.agent)
+    doctor = validate_delivery_contract(contract, workspace_root=workspace_root)
+    _write_contract_doctor_report(workspace_root, doctor)
+    if not doctor.ok:
+        _append_contract_doctor_context(request.params, doctor)
+        return None
+    contract = dict(doctor.normalized_contract or contract)
     artifacts = _required_artifacts(contract)
     if not artifacts:
         return None
-    workspace_root = _workspace_root(request.agent)
     if open_sessions := open_file_write_sessions(
         workspace_root,
         scope=_runtime_scope(request.params),
@@ -184,6 +193,21 @@ def _delivery_contract(params: ToolLoopExecuteParams) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+# LLM: _append_contract_doctor_context feeds malformed contract facts into the next model turn.
+# 函数用途: 合同本身坏掉时写入结构化 Doctor 报告，要求入口物化层返工，而不是静默跳过验收。
+def _append_contract_doctor_context(params: ToolLoopExecuteParams, report: ContractDoctorReport) -> None:
+    payload = report.to_dict()
+    payload.pop("normalized_contract", None)
+    params.tool_context.append(
+        "[delivery-contract-doctor]\n"
+        + json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+
+
 # LLM: _append_failed_contract_context feeds structured repair facts into the next model turn.
 # 函数用途: 验收失败时追加 JSON 反馈，不把自然语言说明当机器事实。
 def _append_failed_contract_context(params: ToolLoopExecuteParams, report: dict[str, Any]) -> None:
@@ -283,6 +307,15 @@ def _failed_artifact_payload(item: dict[str, Any]) -> dict[str, object]:
 def _workspace_root(agent: object) -> Path:
     root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", ".")
     return Path(root).expanduser().resolve()
+
+
+# LLM: _write_contract_doctor_report persists entry-gate findings next to closeout reports.
+# 函数用途: 记录最新合同结构自检结果，方便离线回放和用户审计。
+def _write_contract_doctor_report(workspace_root: Path, report: ContractDoctorReport) -> Path:
+    path = workspace_root / ".agent_delivery" / "contract_doctor.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report.to_dict(), ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    return path
 
 
 # LLM: _runtime_scope bundles closeout identity fields for file-write session inspection.

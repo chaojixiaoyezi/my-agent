@@ -271,5 +271,5 @@ def _default_forbidden_write_roots() -> list[str]:
         str(home),
         str(home / "Desktop"),
         str(home / "Downloads"),
-        str(home / ".openclaw"),
+        str(home / ".ssh"),
     ]

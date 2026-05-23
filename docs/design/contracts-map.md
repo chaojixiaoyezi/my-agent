@@ -23,6 +23,7 @@
 - `agent_py_agent/agent/contracts/recovery_actions.py`：恢复动作枚举。
 - `agent_py_agent/agent/contracts/tool_protocol_v2.py`：工具调用归一化。
 - `agent_py_agent/agent/contracts/gates/`：工具、路径、审批、幂等、交付质量等运行门。
+- `agent_py_agent/agent/contracts/delivery_contract_doctor.py`：入口级 delivery_contract 自检，负责 schema、路径边界、开放世界扩展声明和返工动作。
 - `agent_py_agent/agent/contracts/effective_contract_snapshot.py`：最终生效合同快照。
 - `agent_py_agent/agent/contracts/run_trace_contract.py`：运行 trace 结构。
 - `agent_py_agent/agent/contracts/contract_status.py`：合同失败状态汇总。
@@ -39,6 +40,13 @@
 - `agent_py_agent/agent/contracts/staged_checkpoint_acceptance.py`：阶段 checkpoint。
 - `agent_py_agent/agent/contracts/evidence_contract.py`：证据来源、claim、verified 状态。
 - `agent_py_agent/agent/contracts/artifact_collection_*`：集合类产物字段、分组、证据。
+
+### 工具韧性合同
+
+这些模块负责让工具失败、大输出和副作用行为在进入模型上下文前变成结构化事实：
+
+- `agent_py_agent/agent/tooling/registry_execution.py`：统一工具入口，先过 runtime gate，再执行工具。
+- `agent_py_agent/agent/tooling/registry_resilience.py`：只读工具可有限重试，大输出落 artifact ref，mutating/dangerous 仍由幂等和审批门约束。
 
 ### 离线测试合同
 

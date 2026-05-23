@@ -41,7 +41,12 @@ class ListToolsTool(BaseTool):
         specs = self.registry.specs(include_orchestration=True)
         payload = tool_manifest_payload(specs, owner_type="main_agent")
         payload["tool_failure_taxonomy"] = payload["failure_taxonomy"]
-        return ToolExecutionResult("list_tools", True, json.dumps(payload, ensure_ascii=False))
+        return ToolExecutionResult(
+            "list_tools",
+            True,
+            json.dumps(payload, ensure_ascii=False),
+            result_envelope={"tool_output_policy": {"preserve_prompt_output": True}},
+        )
 
 
 __all__ = ["ListToolsTool"]

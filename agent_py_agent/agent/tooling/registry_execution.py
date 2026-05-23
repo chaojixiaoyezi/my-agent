@@ -51,6 +51,7 @@ from .registry_payload_normalize import (
 from .registry_payload_normalize import (
     tool_name as normalize_tool_name,
 )
+from .registry_resilience import resilient_tool_invoke
 from .registry_runtime_gate_pipeline import tool_call_gate_decision
 from .registry_runtime_gate_results import attach_runtime_gate, runtime_gate_block_result
 
@@ -208,17 +209,21 @@ def _invoke_registry_with_envelope(
     tool_name: str,
     payload: dict[str, Any],
 ) -> ToolExecutionResult:
+    request = RegistryToolInvokeRequest(
+        tool_name=tool_name,
+        payload=payload,
+        tools=call.tools,
+        workspace_root=call.workspace_root,
+        workspace_roots=call.workspace_roots,
+        allowed_tools=call.allowed_tools,
+        write_boundary=call.write_boundary,
+    )
     return attach_result_envelope(
-        invoke_registry_tool(
-            RegistryToolInvokeRequest(
-                tool_name=tool_name,
-                payload=payload,
-                tools=call.tools,
-                workspace_root=call.workspace_root,
-                workspace_roots=call.workspace_roots,
-                allowed_tools=call.allowed_tools,
-                write_boundary=call.write_boundary,
-            )
+        resilient_tool_invoke(
+            invoke=lambda: invoke_registry_tool(request),
+            spec=call.tools[tool_name].spec,
+            payload=payload,
+            workspace_root=call.workspace_root,
         ),
         envelope,
     )

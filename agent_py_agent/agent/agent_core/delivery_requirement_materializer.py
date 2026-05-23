@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..contracts.delivery_contract_doctor import validate_delivery_contract
+
 SCHEMA_VERSION = "delivery_contract.v1"
 MATERIALIZER_SCHEMA_VERSION = "delivery_requirement_materializer.v1"
 
@@ -33,6 +35,7 @@ def materialized_delivery_contract(
     workspace_root: Path | None = None,
 ) -> dict[str, Any]:
     value = _payload_object(payload)
+    source_doctor = validate_delivery_contract(value, workspace_root=workspace_root)
     artifacts, findings = _artifact_contracts(value.get("artifacts"), workspace_root)
     contract: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -43,6 +46,20 @@ def materialized_delivery_contract(
             contract[key] = dict(value[key])
     if findings:
         contract["_preflight_findings"] = findings
+    doctor = validate_delivery_contract(contract, workspace_root=workspace_root)
+    if doctor.normalized_contract:
+        contract = dict(doctor.normalized_contract)
+    doctor_findings = [*source_doctor.findings, *doctor.findings]
+    if doctor_findings:
+        contract["_contract_doctor"] = _doctor_payload(
+            {
+                **doctor.to_dict(),
+                "ok": not any(finding.severity == "hard" for finding in doctor_findings),
+                "findings": [finding.to_dict() for finding in doctor_findings],
+                "repair_actions": source_doctor.repair_actions or doctor.repair_actions,
+                "should_rematerialize": source_doctor.should_rematerialize or doctor.should_rematerialize,
+            }
+        )
     return contract
 
 
@@ -135,6 +152,18 @@ def _finding(code: str, location: str, *, value: str = "") -> dict[str, object]:
         "location": location,
         "message": code.lower(),
         "value": value,
+    }
+
+
+# LLM: _doctor_payload keeps materialized contracts from recursively embedding themselves.
+# 函数用途: 只保留 Doctor 结论和返工动作，不把 normalized_contract 再塞回合同自身。
+def _doctor_payload(report: dict[str, object]) -> dict[str, object]:
+    return {
+        "schema_version": report.get("schema_version", ""),
+        "ok": report.get("ok", False),
+        "findings": report.get("findings", []),
+        "repair_actions": report.get("repair_actions", []),
+        "should_rematerialize": report.get("should_rematerialize", False),
     }
 
 

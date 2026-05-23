@@ -6,7 +6,7 @@
 
 ## 2026-05-20 parent oracle wording cleanup
 
-- 本轮只清理父级静态流程站点 oracle 的生产侧说明文字：`shop_web_parent_oracle.py` 不再把具体真实验收样本写成生产合同描述，改为“静态交易流程站点”这一类通用网页流程验收。
+- 本轮把旧的任务样本 oracle 收口为 `static_flow_parent_oracle.py`：生产代码只接受结构化的 required sections/actions 和资源检查开关，不再内置某个真实任务样本。
 - 机器合同保持不变：父级 oracle 仍检查 section/action/local asset/responsive layout 等结构化事实，专项真实任务语义只允许留在测试 fixture 和最终真实验收样本。
 - 相关门禁：`check_contract_test_pyramid` 会扫描生产 `agent_py_agent/agent`，阻止 DeepSeek、论文翻译、购物网站、最热文章等专项任务词进入生产合同层。
 
