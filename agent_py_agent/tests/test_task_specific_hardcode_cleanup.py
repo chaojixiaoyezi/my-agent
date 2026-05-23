@@ -4,12 +4,45 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agent_py_agent.agent.contracts.sample_neutrality import (
+    SampleNeutralityRule,
+    find_sample_neutrality_violations,
+)
 from agent_py_agent.agent.subagents.policies import _default_forbidden_write_roots as policy_roots
 from agent_py_agent.agent.subagents.policy_checks import (
     _default_forbidden_write_roots as check_roots,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+# LLM: Sample neutrality checker should be driven by structured rules, not task-specific code.
+# 函数用途: 验证样板污染扫描器只读调用方传入的文件和 marker，不在实现里内置业务词。
+def test_sample_neutrality_checker_uses_caller_supplied_rules(tmp_path) -> None:
+    clean = tmp_path / "tool_spec.py"
+    clean.write_text('example = {"columns": ["记录ID"]}\n', encoding="utf-8")
+    dirty = tmp_path / "runtime_prompt.py"
+    dirty.write_text('example = {"columns": ["订单ID"]}\n', encoding="utf-8")
+
+    findings = find_sample_neutrality_violations(
+        tmp_path,
+        [
+            SampleNeutralityRule(
+                path="tool_spec.py",
+                disallowed_markers=("订单ID",),
+                surface="tool_prompt_example",
+            ),
+            SampleNeutralityRule(
+                path="runtime_prompt.py",
+                disallowed_markers=("订单ID",),
+                surface="runtime_prompt_example",
+            ),
+        ],
+    )
+
+    assert [finding.path for finding in findings] == ["runtime_prompt.py"]
+    assert findings[0].marker == "订单ID"
+    assert findings[0].surface == "runtime_prompt_example"
 
 
 # LLM: Production defaults should not retain the old shop-specific parent oracle module.
@@ -21,11 +54,6 @@ def test_shop_parent_oracle_module_removed_from_production_defaults() -> None:
 # LLM: Built-in routing and orchestration examples should stay domain-neutral.
 # 函数用途: 只检查审计指出的默认提示/示例文件，避免购物类示例再次污染通用能力路由。
 def test_default_tool_examples_do_not_contain_shop_specific_terms() -> None:
-    checked_files = [
-        "agent_py_agent/agent/capability/router.py",
-        "agent_py_agent/agent/agent_core/orchestration_tool_specs.py",
-        "agent_py_agent/agent/agent_core/subagent_message_tool.py",
-    ]
     forbidden_terms = {
         "购物",
         "购物车",
@@ -38,10 +66,50 @@ def test_default_tool_examples_do_not_contain_shop_specific_terms() -> None:
         "place-order",
         "测试注册、登录",
     }
+    findings = find_sample_neutrality_violations(
+        REPO_ROOT,
+        [
+            SampleNeutralityRule(
+                path=relative_path,
+                disallowed_markers=tuple(sorted(forbidden_terms)),
+                surface="runtime_prompt_example",
+            )
+            for relative_path in (
+                "agent_py_agent/agent/capability/router.py",
+                "agent_py_agent/agent/agent_core/orchestration_tool_specs.py",
+                "agent_py_agent/agent/agent_core/subagent_message_tool.py",
+            )
+        ],
+    )
 
-    for relative_path in checked_files:
-        text = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-        assert not (forbidden_terms & {term for term in forbidden_terms if term in text}), relative_path
+    assert findings == []
+
+
+# LLM: Tool prompt examples and contract fixtures should use neutral labels.
+# 函数用途: 防止工具示例或 contracts 夹具继续把订单/商品/购物流程写成默认样板。
+def test_structured_tool_and_contract_fixtures_use_neutral_sample_terms() -> None:
+    findings = find_sample_neutrality_violations(
+        REPO_ROOT,
+        [
+            SampleNeutralityRule(
+                path="agent_py_agent/agent/tooling/structured_json_writer.py",
+                disallowed_markers=("订单ID", "ORD-"),
+                surface="tool_prompt_example",
+            ),
+            SampleNeutralityRule(
+                path="agent_py_agent/agent/contracts/medium_real_acceptance_runner.py",
+                disallowed_markers=("cart.html", "checkout.html", ">Pay<", "Pay</button>"),
+                surface="contract_fixture",
+            ),
+            SampleNeutralityRule(
+                path="agent_py_agent/agent/contracts/main_agent_foundation_runner.py",
+                disallowed_markers=("productGrid", "商品"),
+                surface="contract_fixture",
+            ),
+        ],
+    )
+
+    assert findings == []
 
 
 # LLM: Default hierarchy stopwords should not include user-specific or one-task domain names.

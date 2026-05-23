@@ -79,7 +79,7 @@ def _structured_json_tool_spec() -> ToolSpec:
         examples=[
             '{"tool": "write_structured_json", "path": "outputs/report/source_data.json", "sheets": [{"name": "榜单", "rows": [{"项目名": "demo"}]}]}',
             '{"tool": "write_structured_json", "path": "outputs/docs/source_index.json", "data": [{"title": "paper", "url": "https://example.com"}]}',
-            '{"tool": "write_structured_json", "path": "outputs/report/source_data.json", "generated_rows": {"count": 1000, "columns": ["订单ID"], "fields": {"订单ID": {"format": "ORD-{index:04d}", "start": 1}}, "sheets": {"count": 3, "prefix": "数据"}}}',
+            '{"tool": "write_structured_json", "path": "outputs/report/source_data.json", "generated_rows": {"count": 1000, "columns": ["记录ID"], "fields": {"记录ID": {"format": "REC-{index:04d}", "start": 1}}, "sheets": {"count": 3, "prefix": "数据"}}}',
         ],
     )
 

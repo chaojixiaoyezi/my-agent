@@ -117,15 +117,15 @@ def _medium_static_site_project(workspace: Path) -> SmallRealCaseResult:
     case_dir = _case_dir(workspace, "medium_static_site_project")
     site = case_dir / "site"
     site.mkdir(parents=True, exist_ok=True)
-    (site / "index.html").write_text('<a href="cart.html">Cart</a><div id="cart"></div>', encoding="utf-8")
-    (site / "cart.html").write_text('<a href="checkout.html">Checkout</a><form id="checkout"></form>', encoding="utf-8")
-    (site / "checkout.html").write_text("<button onclick=\"document.body.dataset.done='1'\">Pay</button>", encoding="utf-8")
+    (site / "index.html").write_text('<a href="step-two.html">Step Two</a><div id="summary"></div>', encoding="utf-8")
+    (site / "step-two.html").write_text('<a href="step-three.html">Step Three</a><form id="review"></form>', encoding="utf-8")
+    (site / "step-three.html").write_text("<button onclick=\"document.body.dataset.done='1'\">Complete</button>", encoding="utf-8")
     record = run_static_site_check(
         {
             "name": "medium static site",
             "validation_method": "static_site_check",
             "site_root": "site",
-            "required_files": ["index.html", "cart.html", "checkout.html"],
+            "required_files": ["index.html", "step-two.html", "step-three.html"],
             "check_inert_controls": False,
         },
         case_dir,

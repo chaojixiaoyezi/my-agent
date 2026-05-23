@@ -114,10 +114,10 @@ def _case_web_artifact_validator(workspace: Path) -> MainAgentFoundationCaseResu
     site = workspace / "web_artifact_validator" / "site"
     site.mkdir(parents=True, exist_ok=True)
     (site / "index.html").write_text(
-        '<div id="homeProducts"></div><script src="app.js"></script>', encoding="utf-8"
+        '<div id="homePanel"></div><script src="app.js"></script>', encoding="utf-8"
     )
     (site / "app.js").write_text(
-        "document.getElementById('productGrid').innerHTML = '<p>商品</p>';", encoding="utf-8"
+        "document.getElementById('resultGrid').innerHTML = '<p>记录</p>';", encoding="utf-8"
     )
     record = run_static_site_check(
         {
@@ -133,7 +133,7 @@ def _case_web_artifact_validator(workspace: Path) -> MainAgentFoundationCaseResu
         json.dumps(record.to_dict(), ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
     )
     expected_hit = record.validation_result.get("missing_dom_id_hits") == [
-        "getElementById:productGrid"
+        "getElementById:resultGrid"
     ]
     issues = (
         []
