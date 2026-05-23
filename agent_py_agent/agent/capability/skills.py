@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..contracts.gates.skill_guard import evaluate_skill_guard_gate
+
 
 # LLM: SkillCard is a 能力路由 boundary object; coordinate field or method changes with callers, docs, and focused tests.
 # 类用途: 一个 skill 的轻量索引卡。 Card 只放路由需要的短信息，不直接装进完整 `SKILL.md`。 这样即使未来有一万个 skill，也可以先检索 card，再按需加载正文。
@@ -62,9 +64,20 @@ class SkillRegistry:
 
     # LLM: SkillRegistry.__init__ belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 初始化实例依赖和字段，不应在构造阶段做难以回滚的重副作用；它是 SkillRegistry 的方法，通常依赖实例字段。
-    def __init__(self, skill_dirs: list[str | Path] | None = None):
+    def __init__(
+        self,
+        skill_dirs: list[str | Path] | None = None,
+        *,
+        guard_source: str = "manual",
+        enforce_guard: bool = True,
+        guard_force: bool = False,
+    ):
         self.skill_dirs = [Path(item).expanduser() for item in (skill_dirs or [])]
+        self.guard_source = guard_source
+        self.enforce_guard = enforce_guard
+        self.guard_force = guard_force
         self._cards: dict[str, SkillCard] = {}
+        self._gate_decisions: dict[str, dict[str, Any]] = {}
 
     # LLM: SkillRegistry.scan belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 扫描所有 skill 目录，并按后出现覆盖先出现的规则合并同名 skill。。
@@ -73,13 +86,28 @@ class SkillRegistry:
 
         cards: dict[str, SkillCard] = {}
         for skill_dir in self.skill_dirs:
-            if not skill_dir.exists():
-                continue
-            for skill_file in sorted(skill_dir.glob("*/SKILL.md")):
-                card = parse_skill_file(skill_file, source=str(skill_dir))
-                cards[card.name] = card
+            self._scan_skill_dir(skill_dir, cards)
         self._cards = cards
         return self.cards()
+
+    # LLM: _scan_skill_dir keeps the scan loop shallow while preserving gate-first registration.
+    # 函数用途: 扫描单个 skill 根目录；每个 SKILL.md 先过 skill_guard，再转成 SkillCard。
+    def _scan_skill_dir(self, skill_dir: Path, cards: dict[str, SkillCard]) -> None:
+        if not skill_dir.exists():
+            return
+        for skill_file in sorted(skill_dir.glob("*/SKILL.md")):
+            self._register_skill_file(skill_dir, skill_file, cards)
+
+    # LLM: _register_skill_file registers one skill only after the shared skill_guard allows it.
+    # 函数用途: 将 gate 裁决写入审计缓存；被拦 skill 不进入能力路由。
+    def _register_skill_file(self, skill_dir: Path, skill_file: Path, cards: dict[str, SkillCard]) -> None:
+        decision = self._evaluate_skill_gate(skill_file)
+        self._gate_decisions[skill_file.parent.name] = decision.to_dict()
+        if self.enforce_guard and not decision.allowed:
+            return
+        card = parse_skill_file(skill_file, source=str(skill_dir))
+        cards[card.name] = card
+        self._gate_decisions[card.name] = decision.to_dict()
 
     # LLM: SkillRegistry.cards belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 返回当前已扫描到的 skill card。。
@@ -95,6 +123,11 @@ class SkillRegistry:
 
         return self._cards.get(name)
 
+    # LLM: SkillRegistry.gate_decisions exposes skill scan decisions as machine records.
+    # 函数用途: 返回最近 scan/load_body 产生的 skill_guard 裁决，供 CLI、测试和审计读取。
+    def gate_decisions(self) -> dict[str, dict[str, Any]]:
+        return {name: dict(decision) for name, decision in self._gate_decisions.items()}
+
     # LLM: SkillRegistry.load_body belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
     # 函数用途: 读取某个 skill 的正文。 `max_chars=0` 表示不限制长度。这里先用字符数兜底，后续接 tokenizer 时可以替换成真正的 token 截断。。
     def load_body(self, name: str, *, max_chars: int = 0) -> str:
@@ -106,10 +139,24 @@ class SkillRegistry:
         card = self.get(name)
         if card is None:
             raise KeyError(f"未知 skill: {name}")
+        decision = self._evaluate_skill_gate(card.path)
+        self._gate_decisions[card.name] = decision.to_dict()
+        if self.enforce_guard and not decision.allowed:
+            raise PermissionError(_skill_guard_error(card.name, decision.to_dict()))
         body = card.path.read_text(encoding="utf-8")
         if max_chars and len(body) > max_chars:
             return body[:max_chars] + "\n... 已截断"
         return body
+
+    # LLM: _evaluate_skill_gate keeps skill enablement behind the shared runtime gate.
+    # 函数用途: 对一个 SKILL.md 所在目录执行 skill_guard；关闭 enforce 时仍记录裁决供审计。
+    def _evaluate_skill_gate(self, skill_file: Path) -> Any:
+        return evaluate_skill_guard_gate(
+            skill_file.parent,
+            source=self.guard_source,
+            skill_name=skill_file.parent.name,
+            force=self.guard_force,
+        )
 
 
 # LLM: parse_skill_file belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
@@ -231,3 +278,14 @@ def _first_paragraph(body: str) -> str:
         if text and not text.startswith("#"):
             return " ".join(text.split())
     return ""
+
+
+# LLM: _skill_guard_error formats a compact exception without making prose a machine fact.
+# 函数用途: 将 skill_guard 结构化 finding code 放入异常，方便调用方和用户定位被拦原因。
+def _skill_guard_error(name: str, decision: dict[str, Any]) -> str:
+    codes = [
+        str(item.get("code"))
+        for item in decision.get("findings", [])
+        if isinstance(item, dict) and item.get("code")
+    ]
+    return f"skill_guard_denied skill={name} codes={','.join(codes)}"

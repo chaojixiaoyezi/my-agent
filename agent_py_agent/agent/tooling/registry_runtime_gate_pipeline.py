@@ -12,10 +12,13 @@ from ..contracts.gates import (
     GateDecision,
     GatePipeline,
     PathUrlCommandFacts,
+    ToolGuardrailFacts,
     ToolRateLimitFacts,
     ToolRateLimitPolicy,
+    command_name,
     evaluate_path_url_command_gate,
     evaluate_tool_call_gate,
+    evaluate_tool_guardrail_gate,
     evaluate_tool_rate_limit_gate,
 )
 from ..contracts.gates.tool_effects import args_hash_for_call
@@ -80,6 +83,7 @@ def _tool_execution_pipeline(payload: dict[str, Any], call: object, tool_name: s
     )
     pipeline.register("tool_manifest", lambda _context: tool_manifest_decision(tool_name, tools))
     pipeline.register("path_url_command", lambda _context: _path_url_command_decision(payload, call))
+    pipeline.register("tool_guardrail", lambda _context: _tool_guardrail_decision(payload, call))
     pipeline.register("tool_rate_limit", lambda _context: _tool_rate_limit_decision(payload, call, tool_name))
     pipeline.register(
         "tool_effect",
@@ -104,7 +108,60 @@ def _path_url_command_decision(payload: dict[str, Any], call: object) -> GateDec
             workspace_roots=_path_gate_roots(call),
             allowed_private_hosts=boundary_strings(boundary, "allowed_private_hosts"),
             allow_shell_operators=boundary_bool(boundary, "allow_shell_operators"),
+            allowed_commands=_controlled_exec_allowed_commands(boundary),
         )
+    )
+
+
+# LLM: _controlled_exec_allowed_commands collects command_allowlist entries from every parent grant.
+# 函数用途: 提取所有 controlled_exec_grants 的 command_allowlist，归一化为 basename 小写供 policy 匹配。
+def _controlled_exec_allowed_commands(boundary: dict[str, object] | None) -> list[str]:
+    grants = boundary_list(boundary, "controlled_exec_grants")
+    allowed: list[str] = []
+    for grant in grants:
+        if not isinstance(grant, dict):
+            continue
+        _collect_grant_allowlist(grant, allowed)
+        _collect_delete_allowlist(grant, allowed)
+    return allowed
+
+
+# LLM: _collect_grant_allowlist extracts command_allowlist entries from a single grant dict.
+# 函数用途: 遍历单个 grant 的 command_allowlist 字段，归一化为 command_name 和原始字符串两种形式。
+def _collect_grant_allowlist(grant: dict[str, object], allowed: list[str]) -> None:
+    for item in grant.get("command_allowlist") or []:
+        text = str(item).strip()
+        if not text:
+            continue
+        allowed.append(command_name(text))
+        allowed.append(text)
+
+
+# LLM: _collect_delete_allowlist adds rm/rmdir/unlink to allowed commands when grant has delete_policy.
+# 函数用途: 带 delete_policy 的 grant 会由 controlled_exec 工具拦截删除命令并走 task_trash，所以 gate 层不应阻断。
+def _collect_delete_allowlist(grant: dict[str, object], allowed: list[str]) -> None:
+    constraints = grant.get("constraints")
+    if not isinstance(constraints, dict) or not constraints.get("delete_policy"):
+        return
+    for cmd in ("rm", "rmdir", "unlink"):
+        if cmd not in allowed:
+            allowed.append(cmd)
+
+
+# LLM: _tool_guardrail_decision checks tool loop patterns (exact failure, same-tool failure, no-progress).
+# 函数用途: 从 boundary 读取 tool_guardrail_records，在工具执行前阻断重复失败/无进展的调用。
+def _tool_guardrail_decision(payload: dict[str, Any], call: object) -> GateDecision:
+    tool_name = _tool_name_for_gate(payload)
+    normalized = normalize_tool_call(_payload_for_rate_limit(payload))
+    boundary = getattr(call, "write_boundary", None)
+    is_readonly = _tool_effect_for_action(call, tool_name) == "read_only"
+    return evaluate_tool_guardrail_gate(
+        ToolGuardrailFacts(
+            tool_name=tool_name or normalized.tool_name,
+            args_hash=args_hash_for_call(normalized.input),
+            is_readonly=is_readonly,
+        ),
+        records=tuple(boundary_list(boundary, "tool_guardrail_records")),
     )
 
 

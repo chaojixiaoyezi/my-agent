@@ -11,6 +11,12 @@ from .command_policy import (
     command_name,
     evaluate_command_policy,
 )
+from .compaction_gate import (
+    REQUIRED_COMPACT_FIELDS,
+    CompactionGateFacts,
+    compaction_gate_snapshot,
+    evaluate_compaction_gate,
+)
 from .delivery_quality import (
     DeliveryQualityTraceScope,
     append_delivery_quality_gate_trace,
@@ -40,8 +46,23 @@ from .runtime_reports import (
     evaluate_recovery_replay_gate,
     evaluate_runtime_audit_gate,
 )
+from .skill_guard import (
+    SkillGuardFinding,
+    SkillScanResult,
+    evaluate_skill_guard_gate,
+    install_decision,
+    scan_skill,
+)
 from .state_event_ledger import StateEventLedgerSnapshot, evaluate_state_event_ledger_gate
 from .tool_effects import ToolEffectFacts, ToolGatePolicy, evaluate_tool_effect_gate
+from .tool_guardrail import (
+    ToolGuardrailConfig,
+    ToolGuardrailFacts,
+    args_hash_for_guardrail,
+    evaluate_tool_guardrail_gate,
+    record_tool_guardrail_result,
+    result_hash_for_guardrail,
+)
 from .tool_manifest import ToolManifestFacts, evaluate_tool_manifest_gate, tool_manifest_from_spec
 from .tool_rate_limit import (
     ToolRateLimitFacts,
@@ -102,6 +123,21 @@ __all__ = [
     "evaluate_tool_call_gate",
     "evaluate_tool_effect_gate",
     "evaluate_tool_manifest_gate",
+    "CompactionGateFacts",
+    "SkillGuardFinding",
+    "SkillScanResult",
+    "ToolGuardrailConfig",
+    "ToolGuardrailFacts",
+    "REQUIRED_COMPACT_FIELDS",
+    "args_hash_for_guardrail",
+    "compaction_gate_snapshot",
+    "evaluate_compaction_gate",
+    "evaluate_skill_guard_gate",
+    "evaluate_tool_guardrail_gate",
     "evaluate_tool_rate_limit_gate",
+    "install_decision",
+    "record_tool_guardrail_result",
+    "result_hash_for_guardrail",
+    "scan_skill",
     "tool_manifest_from_spec",
 ]

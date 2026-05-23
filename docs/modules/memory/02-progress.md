@@ -13,6 +13,7 @@
 - 2026-05-17 compact/resume 体积边界同步整理：compact apply 的 Markdown 渲染拆到 `compact_apply_rendering.py`，compact resume 的 handoff/continue packet 派生输出拆到 `compact_resume_payloads.py`，新增 context bundle 专项测试拆到独立测试文件，避免主编排文件和大测试文件继续接近 code-size high-risk。
 - 2026-05-17 Tool Output Artifact Refs 第一片已落地：`memory-compact --apply` 会只读扫描 `memory_archive/artifacts/tool_outputs/index.jsonl`，按 request/run/task scope 登记同任务的大工具输出 artifact refs；`work_state_snapshot.artifact_refs` 和 `memory-resume --from-compact recommended_read_paths` 都会带上这些路径。它只登记路径、hash、size 和 call id，不读取 artifact 正文。
 - 2026-05-17 Artifact Read Hints 第一片已落地：`memory-resume --from-compact` 会从 `work_state_snapshot.artifact_refs` 生成 `artifact_read_hints`，在 handoff、context block 和 continue packet 中给出 `read_artifact` 的 `artifact_ref/offset/max_chars`；优先使用 scoped call id，避免恢复模型复制长路径出错。
+- 2026-05-23 Compact Gate 真实入口已落地：`memory-compact --apply` 会把 apply 时的 contract、artifact refs、restore refs、pending/failed actions 写入 `compaction_gate.state_snapshot`，`memory-resume --from-compact` 会用同一快照做 post-compact 对比；如果恢复包丢失关键状态，consistency report 会给出 `compaction_gate_ok=false` 并阻断自动继续。
 - `memory_store/` 已承接长期记忆 JSONL 存储，根层 `memory.py` 保留兼容入口。
 - `memory_routing/` 已有 route index 加载、匹配、校验、上下文读取和 receipt 结构。
 - `memory_archive/` 已有压缩前 snapshot、raw event、每日 hook/raw JSONL、留存和 token 估算骨架。

@@ -1019,11 +1019,20 @@ docs/
 - `agent_py_agent/agent/contracts/e2e_matrix_runner.py`: 不调用模型的确定性 E2E runner；当前验证中文路径写读、大输出 artifact metadata 和工具失败分类。
 - `agent_py_agent/agent/contracts/main_agent_foundation_runner.py`: 主代理基础测试 1-6 类总入口；默认真实模型用例标记 `SKIPPED`，避免 focused tests 冒充真实模型验收。
 - `agent_py_agent/agent/contracts/artifact_acceptance.py`: 通用产物验收合同；HTML/JSON/CSV/XLSX/PDF/未知格式都输出结构化 findings，模型自检不再作为唯一证据。
-- `agent_py_agent/agent/contracts/main_agent_real_task_acceptance.py`: 主代理真实任务执行后的 expected artifact 验收入口；只读取结构化产物合同，不相信模型自述。
-- `agent_py_agent/agent/contracts/main_agent_real_task_execution.py`: 主代理真实任务受控执行入口；显式 `--run-real-tasks` 时并发启动隔离主代理任务，默认不烧真实 API。
-- `agent_py_agent/agent/contracts/main_agent_real_task_execution_files.py`: 主代理真实任务执行的命令、配置、日志和 refs helper，保证每个 case 有独立 workspace。
-- `agent_py_agent/agent/contracts/main_agent_real_task_execution_models.py`: 主代理真实任务执行请求、单项结果和总报告 bundle；报告只写 stdout/stderr refs。
-- `agent_py_agent/agent/contracts/main_agent_real_task_revalidation.py`: 主代理真实任务报告复验入口；只重跑 artifact acceptance，不重新启动模型进程。
+- `agent_py_agent/agent/contracts/main_agent_task_runtime.py`: 主代理受控任务执行的统一运行时核心；所有 task/real_task 入口最终都走这里的 run_main_agent_task_runtime，不再存在两套执行状态机。
+- `agent_py_agent/agent/contracts/main_agent_task_runtime_adapters.py`: 统一运行时的 task/real_task 适配器；real_task_runtime_adapter 和 task_runtime_adapter 各自注入 track 名字、subprocess runner 和 schema，业务逻辑不重复。
+- `agent_py_agent/agent/contracts/main_agent_task_runtime_revalidation.py`: 统一运行时复验逻辑；revalidate_main_agent_task_execution_report 处理 task 和 real_task 的复验，只重跑 artifact acceptance 不启动模型。
+- `agent_py_agent/agent/contracts/main_agent_task_runtime_subprocess.py`: 统一运行时子进程 runner；task 和 real_task 公用同一套隔离子进程启动逻辑，不再维护两份 subprocess 代码。
+- `agent_py_agent/agent/contracts/main_agent_task_runtime_results.py`: 统一运行时结果 builder；completed_case_result 和 timeout_case_result 由 adapter 注入差异类型，核心组装逻辑只维护一份。
+- `agent_py_agent/agent/contracts/main_agent_task_runtime_summary.py`: 统一运行时报告汇总；task 和 real_task 的执行报告摘要共用同一套汇总逻辑。
+- `agent_py_agent/agent/contracts/main_agent_task_runtime_issues.py`: 统一运行时问题记录；task 和 real_task 的 runtime_issues 只维护一套。
+- `agent_py_agent/agent/contracts/main_agent_task_runtime_issue_codes.py`: 统一运行时问题码定义；task/real_task 共用同一套稳定问题码。
+- `agent_py_agent/agent/contracts/main_agent_task_common.py`: 双轨复验共用的报告读取、路径解析、expected_artifacts ref 和状态摘要逻辑；task 和 real_task 不再各自维护一份。
+- `agent_py_agent/agent/contracts/main_agent_real_task_acceptance.py`: 兼容 facade；把 task acceptance 的类重导出为 RealTask* 别名，验收逻辑全部委托到 main_agent_task_acceptance。
+- `agent_py_agent/agent/contracts/main_agent_real_task_execution.py`: 兼容 facade；注入 real_task_runtime_adapter 后委托到 main_agent_task_runtime，不再维护独立执行逻辑。
+- `agent_py_agent/agent/contracts/main_agent_real_task_execution_files.py`: 兼容 facade；注入 real_task 的 root/name/recovery adapter 后委托到 main_agent_task_execution_files。
+- `agent_py_agent/agent/contracts/main_agent_real_task_execution_models.py`: 兼容 facade；把 task execution 的数据类重导出为 MainAgentRealTask* 别名。
+- `agent_py_agent/agent/contracts/main_agent_real_task_revalidation.py`: 兼容 facade；委托到 main_agent_task_runtime_revalidation，只保留 real_task 入口名。
 - `agent_py_agent/agent/contracts/main_agent_core_entrypoints.py`: 主代理核心入口冻结合同；要求状态机、工具执行、验收、日志、审批和 effective contract 都以结构化入口存在。
 - `agent_py_agent/agent/contracts/dry_run_mainline_contract.py`: 通用 dry-run 主线合同；校验输入、工具结果、产物 refs、证据 refs 和副作用隔离，不写具体任务专项规则。
 - `agent_py_agent/agent/contracts/live_llm_fake_tool_contract.py`: 真实 LLM + fake tools 试跑记录合同；要求保存 prompt/response/tool-trace/contract refs 和工具边界违规指标。

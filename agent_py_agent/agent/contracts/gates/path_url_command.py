@@ -26,6 +26,7 @@ class PathUrlCommandFacts:
     workspace_roots: list[Path] | None = None
     allowed_private_hosts: Iterable[str] = ()
     allow_shell_operators: bool = False
+    allowed_commands: Iterable[str] = ()
 
 
 # LLM: evaluate_path_url_command_gate checks structured path, URL, and command fields without reading prose.
@@ -36,7 +37,7 @@ def evaluate_path_url_command_gate(facts: PathUrlCommandFacts) -> GateDecision:
     findings: list[GateFinding] = []
     _collect_path_findings(data, roots, findings)
     _collect_url_findings(data, {_normalize_host(item) for item in facts.allowed_private_hosts}, findings)
-    _collect_command_findings(data, facts.allow_shell_operators, findings)
+    _collect_command_findings(data, facts.allow_shell_operators, facts.allowed_commands, findings)
     if findings:
         return GateDecision("path_url_command", "DENY", False, tuple(findings), "repair_tool_call", {})
     return GateDecision.allow("path_url_command", evidence={"checked_fields": _checked_field_names(data)})
@@ -70,10 +71,11 @@ def _collect_url_findings(
 def _collect_command_findings(
     data: Mapping[object, object],
     allow_shell_operators: bool,
+    allowed_commands: Iterable[str],
     findings: list[GateFinding],
 ) -> None:
     for key, value in _matching_fields(data, _COMMAND_KEYS):
-        findings.extend(_command_findings(str(key), value, allow_shell_operators))
+        findings.extend(_command_findings(str(key), value, allow_shell_operators, allowed_commands))
 
 
 # LLM: _path_finding checks one path-like field value.
@@ -115,8 +117,8 @@ def _url_finding(field: str, raw_url: object, allowed_private_hosts: set[str]) -
 
 # LLM: _command_findings adapts shared command policy findings into GateFinding records.
 # 函数用途: 给 path/url/command gate 输出统一 GateFinding，同时保留字段名和 policy evidence。
-def _command_findings(field: str, value: object, allow_shell_operators: bool) -> list[GateFinding]:
-    decision = evaluate_command_policy(value, allow_shell_operators=allow_shell_operators)
+def _command_findings(field: str, value: object, allow_shell_operators: bool, allowed_commands: Iterable[str] = ()) -> list[GateFinding]:
+    decision = evaluate_command_policy(value, allow_shell_operators=allow_shell_operators, allowed_commands=allowed_commands)
     return [
         GateFinding(finding.code, evidence={"field": field, **finding.evidence})
         for finding in decision.findings

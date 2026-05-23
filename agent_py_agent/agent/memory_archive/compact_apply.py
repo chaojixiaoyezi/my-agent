@@ -64,6 +64,7 @@ from .compact_context_bundle_refs import (
     compact_context_bundle_summary,
     load_main_context_bundle_ref,
 )
+from .compact_gate_bridge import evaluate_pre_compaction_state
 from .schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_reserved_fields,
@@ -98,6 +99,15 @@ class _ApplyMetadataBuildRequest:
     lineage: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _SelfCheckRequest:
+    payload: dict[str, Any]
+    plan: dict[str, Any]
+    paths: dict[str, Path]
+    now: str
+    work_state: dict[str, Any]
+
+
 # LLM: apply_memory_compact 是 memory compact 的显式 apply 边界；保持非破坏性和可审计输出。
 # 函数用途: 根据 dry-run plan 写 compact context、metadata、ledger 和 self-check；不会删除或覆盖归档事实源。
 def apply_memory_compact(root: str | Path, options: MemoryCompactApplyOptions) -> dict[str, Any]:
@@ -129,20 +139,42 @@ def apply_memory_compact(root: str | Path, options: MemoryCompactApplyOptions) -
     _write_json(paths["work_state_snapshot_json"], work_state)
     apply_bundle = _apply_bundle_payload(payload, restore_refs, work_state, paths)
     _write_json(paths["apply_bundle_json"], apply_bundle)
-    self_check = _self_check_payload(plan, paths, now, work_state)
+    _attach_compaction_gate(payload, restore_refs, work_state)
+    self_check = _attach_self_check(_SelfCheckRequest(payload, plan, paths, now, work_state))
     payload["post_compact_self_check"] = self_check
     payload["restore_refs"] = restore_refs
     payload["work_state_snapshot"] = work_state
     payload["apply_bundle"] = apply_bundle
-    if not self_check["ok"]:
-        payload["ok"] = False
-        payload["compact_status"] = "blocked_self_check_failed"
-        payload["self_check_failure"] = _self_check_failure_payload(payload, self_check, _refs(paths), now)
-        _write_json(paths["failed_self_check_json"], payload["self_check_failure"])
     _write_json(paths["self_check_json"], self_check)
     _write_json(paths["metadata_json"], payload)
     _append_jsonl(paths["ledger_jsonl"], _ledger_record(payload))
     return payload
+
+
+# LLM: _attach_compaction_gate stores the shared compaction gate decision on apply metadata.
+# 函数用途: 把 compact 前状态快照写成机器字段，供 memory-resume 做 post_compact 对比。
+def _attach_compaction_gate(
+    payload: dict[str, Any], restore_refs: dict[str, Any], work_state: dict[str, Any]
+) -> None:
+    compaction_gate = evaluate_pre_compaction_state(payload, restore_refs, work_state)
+    payload["compaction_gate"] = compaction_gate
+    if not compaction_gate["pre"]["allowed"]:
+        payload["ok"] = False
+        payload["compact_status"] = "blocked_compaction_gate_failed"
+
+
+# LLM: _attach_self_check finalizes compact apply validation without expanding the entrypoint.
+# 函数用途: 执行原有 self-check，失败时写结构化 failure payload 并更新 compact_status。
+def _attach_self_check(request: _SelfCheckRequest) -> dict[str, Any]:
+    self_check = _self_check_payload(request.plan, request.paths, request.now, request.work_state)
+    if not self_check["ok"]:
+        request.payload["ok"] = False
+        request.payload["compact_status"] = "blocked_self_check_failed"
+        request.payload["self_check_failure"] = _self_check_failure_payload(
+            request.payload, self_check, _refs(request.paths), request.now
+        )
+        _write_json(request.paths["failed_self_check_json"], request.payload["self_check_failure"])
+    return self_check
 
 
 # LLM: _apply_paths 统一 compact apply 产物路径；避免 CLI、测试和后续 resume 各自拼路径。

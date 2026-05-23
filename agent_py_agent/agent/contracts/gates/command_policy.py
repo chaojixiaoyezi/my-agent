@@ -65,14 +65,19 @@ class CommandPolicyDecision:
 
 # LLM: evaluate_command_policy applies fail-closed shell command checks to string or argv inputs.
 # 函数用途: 结构化解析 command/argv，按危险模式、危险 executable、shell 操作符顺序输出机器码。
-def evaluate_command_policy(command: object, *, allow_shell_operators: bool = False) -> CommandPolicyDecision:
+def evaluate_command_policy(
+    command: object,
+    *,
+    allow_shell_operators: bool = False,
+    allowed_commands: Iterable[str] = (),
+) -> CommandPolicyDecision:
     parsed = _parse_command_value(command)
     if parsed.findings:
         return parsed
     findings, covered_positions = _dangerous_pattern_findings(parsed.argv)
     if not allow_shell_operators:
         findings.extend(_shell_operator_findings(parsed.argv, _raw_command_text(command)))
-    findings.extend(_dangerous_executable_findings(parsed.argv, covered_positions))
+    findings.extend(_dangerous_executable_findings(parsed.argv, covered_positions, frozenset(allowed_commands)))
     return CommandPolicyDecision(parsed.argv, _unique_findings(findings))
 
 
@@ -171,12 +176,15 @@ def _shell_operator_findings(argv: tuple[str, ...], raw: str) -> list[CommandPol
 def _dangerous_executable_findings(
     argv: tuple[str, ...],
     covered_positions: set[int],
+    allowed_commands: frozenset[str] = frozenset(),
 ) -> list[CommandPolicyFinding]:
     findings: list[CommandPolicyFinding] = []
     for position in _command_positions(argv):
         if position in covered_positions:
             continue
         executable = command_name(argv[position])
+        if executable in allowed_commands:
+            continue
         if _is_dangerous_executable(executable):
             findings.append(
                 CommandPolicyFinding("COMMAND_DANGEROUS_EXECUTABLE_BLOCKED", {"executable": executable})

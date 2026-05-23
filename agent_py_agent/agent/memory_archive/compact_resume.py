@@ -15,6 +15,7 @@ from .compact_action_guard import (
     build_compact_action_guard,
 )
 from .compact_context_bundle_refs import compact_context_bundle_summary
+from .compact_gate_bridge import evaluate_post_compaction_state
 from .compact_resume_blocked import BlockedCompactResumeRequest, build_blocked_compact_resume
 from .compact_resume_failsafe import collect_fail_safe_checkpoints
 from .compact_resume_io import (
@@ -39,6 +40,8 @@ from .schema import (
 
 COMPACT_RESUME_SCHEMA = RuntimeMemorySchemaOptions("compact_resume")
 COMPACT_RESUME_CONSISTENCY_SCHEMA = RuntimeMemorySchemaOptions("compact_resume_consistency_report")
+
+# LLM: compact resume re-runs the shared compaction gate against the apply-time snapshot before allowing resume.
 
 
 # LLM: MemoryCompactResumeOptions is the bundle for manual compact resume and future subagent compact owners.
@@ -104,7 +107,8 @@ def build_memory_compact_resume(root: str | Path, options: MemoryCompactResumeOp
 def _consistency_report(
     metadata: dict[str, Any], artifacts: dict[str, Any], options: MemoryCompactResumeOptions
 ) -> dict[str, Any]:
-    checks = _consistency_checks(metadata, artifacts)
+    compaction_gate = evaluate_post_compaction_state(metadata, artifacts)
+    checks = _consistency_checks(metadata, artifacts, compaction_gate)
     hard_ok = all(item["ok"] for item in checks if item["severity"] == "hard")
     return {
         "version": COMPACT_RESUME_CONSISTENCY_SCHEMA.version,
@@ -116,14 +120,19 @@ def _consistency_report(
         "plan_id": metadata.get("plan_id", ""),
         "checks": checks,
         "missing_fields": _work_state_missing_fields(artifacts),
+        "compaction_gate": compaction_gate,
         "reserved": runtime_memory_reserved_fields(COMPACT_RESUME_CONSISTENCY_SCHEMA),
     }
 
 
 # LLM: _consistency_checks keeps hard failures deterministic and soft gaps visible.
 # 函数用途: 生成 compact resume 的一致性检查列表；hard 失败阻断，soft 缺口留给人工判断。
-def _consistency_checks(metadata: dict[str, Any], artifacts: dict[str, Any]) -> list[dict[str, Any]]:
+def _consistency_checks(
+    metadata: dict[str, Any], artifacts: dict[str, Any], compaction_gate: dict[str, Any]
+) -> list[dict[str, Any]]:
     work_state = artifacts["work_state"]
+    gate_present = bool(compaction_gate.get("present"))
+    gate_allowed = bool(compaction_gate.get("post", {}).get("allowed", True))
     return [
         {"name": "metadata_loaded", "ok": bool(metadata), "severity": "hard"},
         {"name": "apply_bundle_loaded", "ok": bool(artifacts["apply_bundle"]), "severity": "hard"},
@@ -134,6 +143,8 @@ def _consistency_checks(metadata: dict[str, Any], artifacts: dict[str, Any]) -> 
         {"name": "apply_ids_consistent", "ok": _artifact_ids_match(metadata, artifacts), "severity": "hard"},
         {"name": "restore_refs_exist", "ok": _restore_refs_exist(artifacts), "severity": "hard"},
         {"name": "compact_context_loaded", "ok": bool(artifacts["compact_context"]), "severity": "hard"},
+        {"name": "compaction_gate_present", "ok": gate_present, "severity": "soft"},
+        {"name": "compaction_gate_ok", "ok": gate_allowed, "severity": "hard" if gate_present else "soft"},
         {"name": "goal_present", "ok": bool(work_state.get("goal")), "severity": "soft"},
         {"name": "next_step_present", "ok": bool(work_state.get("next_step")), "severity": "soft"},
         {"name": "missing_fields_recorded", "ok": isinstance(work_state.get("missing_fields"), list), "severity": "soft"},
@@ -162,6 +173,7 @@ def _resume_payload(request: _ResumePayloadBuildRequest) -> dict[str, Any]:
         "work_state": artifacts["work_state"],
         "consistency_report": consistency,
         "action_guard": action_guard,
+        "compaction_gate": consistency.get("compaction_gate", {}),
         "main_context_bundle": parts["main_context_bundle"],
         "handoff": parts["handoff"],
         "continue_packet": parts["continue_packet"],
