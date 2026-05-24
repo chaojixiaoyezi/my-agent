@@ -39,7 +39,7 @@ def test_static_flow_parent_oracle_passes_on_complete_fixture(tmp_path):
 
 
 # LLM: The generic parent oracle should catch broken assets and action handlers.
-# 函数用途: 验证通用静态流程验收仍能抓资源丢失和按钮无处理器，不依赖购物领域词。
+# 函数用途: 验证通用静态流程验收仍能抓资源丢失和按钮无处理器，不依赖示例流程领域词。
 def test_static_flow_parent_oracle_catches_broken_asset_and_action_handler(tmp_path):
     webapp = tmp_path / "static-flow-app"
     _write_flow_fixture(webapp, broken_image=True, missing_handler=True)

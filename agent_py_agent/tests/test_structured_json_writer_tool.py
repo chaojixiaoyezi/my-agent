@@ -18,8 +18,8 @@ def test_structured_json_tool_writes_valid_json_from_sheets(tmp_path: Path) -> N
             "sheets": [
                 {
                     "name": "week-1",
-                    "columns": ["项目名", "地址"],
-                    "rows": [{"项目名": "demo", "地址": "https://example.com"}],
+                    "columns": ["记录名", "地址"],
+                    "rows": [{"记录名": "demo", "地址": "https://example.com"}],
                 }
             ],
         }
@@ -27,7 +27,7 @@ def test_structured_json_tool_writes_valid_json_from_sheets(tmp_path: Path) -> N
 
     assert result.ok, result.output
     data = json.loads((tmp_path / "outputs/report/source_data.json").read_text(encoding="utf-8"))
-    assert data["sheets"][0]["rows"][0]["项目名"] == "demo"
+    assert data["sheets"][0]["rows"][0]["记录名"] == "demo"
     assert result.result_envelope["artifact_ref"] == "outputs/report/source_data.json"
 
 
@@ -51,7 +51,7 @@ def test_structured_json_tool_merges_existing_checkpoint_metadata(tmp_path: Path
     target.parent.mkdir(parents=True)
     target.write_text(
         json.dumps(
-            {"sheets": [{"name": "榜单", "rows": [{"项目名": "demo"}]}]},
+            {"sheets": [{"name": "榜单", "rows": [{"记录名": "demo"}]}]},
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -63,16 +63,16 @@ def test_structured_json_tool_merges_existing_checkpoint_metadata(tmp_path: Path
             "merge_existing": True,
             "data": {
                 "source_refs": [{"source_id": "src-1", "uri": "https://example.com"}],
-                "claims": [{"field": "项目名", "source_ids": ["src-1"], "value": "demo"}],
+                "claims": [{"field": "记录名", "source_ids": ["src-1"], "value": "demo"}],
             },
         }
     )
 
     assert result.ok, result.output
     data = json.loads(target.read_text(encoding="utf-8"))
-    assert data["sheets"][0]["rows"][0]["项目名"] == "demo"
+    assert data["sheets"][0]["rows"][0]["记录名"] == "demo"
     assert data["source_refs"][0]["source_id"] == "src-1"
-    assert data["claims"][0]["field"] == "项目名"
+    assert data["claims"][0]["field"] == "记录名"
 
 
 # LLM: Evidence repair should add missing evidence without discarding earlier claims.
@@ -84,9 +84,9 @@ def test_structured_json_tool_appends_evidence_metadata_when_merging(tmp_path: P
     target.write_text(
         json.dumps(
             {
-                "sheets": [{"name": "榜单", "rows": [{"项目名": "demo"}]}],
+                "sheets": [{"name": "榜单", "rows": [{"记录名": "demo"}]}],
                 "source_refs": [{"source_id": "src-1", "uri": "https://example.com/old"}],
-                "claims": [{"field": "项目名", "source_ids": ["src-1"], "value": "demo"}],
+                "claims": [{"field": "记录名", "source_ids": ["src-1"], "value": "demo"}],
             },
             ensure_ascii=False,
         ),
@@ -104,7 +104,7 @@ def test_structured_json_tool_appends_evidence_metadata_when_merging(tmp_path: P
                 ],
                 "claims": [
                     {"field": "地址", "source_ids": ["src-2"], "value": "https://example.com/new"},
-                    {"field": "项目名", "source_ids": ["src-1"], "value": "demo"},
+                    {"field": "记录名", "source_ids": ["src-1"], "value": "demo"},
                 ],
             },
         }
@@ -113,8 +113,8 @@ def test_structured_json_tool_appends_evidence_metadata_when_merging(tmp_path: P
     assert result.ok, result.output
     data = json.loads(target.read_text(encoding="utf-8"))
     assert [item["source_id"] for item in data["source_refs"]] == ["src-1", "src-2"]
-    assert [item["field"] for item in data["claims"]] == ["项目名", "地址"]
-    assert data["sheets"][0]["rows"][0]["项目名"] == "demo"
+    assert [item["field"] for item in data["claims"]] == ["记录名", "地址"]
+    assert data["sheets"][0]["rows"][0]["记录名"] == "demo"
 
 
 # LLM: large spreadsheet-style checkpoints should be extendable one sheet at a time.
@@ -125,7 +125,7 @@ def test_structured_json_tool_appends_sheets_when_merging_existing_checkpoint(tm
     target.parent.mkdir(parents=True)
     target.write_text(
         json.dumps(
-            {"sheets": [{"name": "2026-W01", "rows": [{"项目名": "demo-1"}]}]},
+            {"sheets": [{"name": "2026-W01", "rows": [{"记录名": "demo-1"}]}]},
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -135,14 +135,14 @@ def test_structured_json_tool_appends_sheets_when_merging_existing_checkpoint(tm
         {
             "path": "outputs/report/source_data.json",
             "merge_existing": True,
-            "sheets": [{"name": "2026-W02", "rows": [{"项目名": "demo-2"}]}],
+            "sheets": [{"name": "2026-W02", "rows": [{"记录名": "demo-2"}]}],
         }
     )
 
     assert result.ok, result.output
     data = json.loads(target.read_text(encoding="utf-8"))
     assert [sheet["name"] for sheet in data["sheets"]] == ["2026-W01", "2026-W02"]
-    assert data["sheets"][1]["rows"][0]["项目名"] == "demo-2"
+    assert data["sheets"][1]["rows"][0]["记录名"] == "demo-2"
 
 
 # LLM: retries for the same sheet should append rows without discarding previous rows.
@@ -153,7 +153,7 @@ def test_structured_json_tool_appends_rows_for_same_sheet_name(tmp_path: Path) -
     target.parent.mkdir(parents=True)
     target.write_text(
         json.dumps(
-            {"sheets": [{"name": "2026-W01", "rows": [{"项目名": "demo-1"}]}]},
+            {"sheets": [{"name": "2026-W01", "rows": [{"记录名": "demo-1"}]}]},
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -163,13 +163,13 @@ def test_structured_json_tool_appends_rows_for_same_sheet_name(tmp_path: Path) -
         {
             "path": "outputs/report/source_data.json",
             "merge_existing": True,
-            "sheets": [{"name": "2026-W01", "rows": [{"项目名": "demo-2"}]}],
+            "sheets": [{"name": "2026-W01", "rows": [{"记录名": "demo-2"}]}],
         }
     )
 
     assert result.ok, result.output
     data = json.loads(target.read_text(encoding="utf-8"))
-    assert data["sheets"][0]["rows"] == [{"项目名": "demo-1"}, {"项目名": "demo-2"}]
+    assert data["sheets"][0]["rows"] == [{"记录名": "demo-1"}, {"记录名": "demo-2"}]
 
 
 # LLM: merge_existing should behave as an upsert so the first chunk can create the checkpoint.
@@ -181,13 +181,13 @@ def test_structured_json_tool_merge_existing_creates_missing_checkpoint(tmp_path
         {
             "path": "outputs/report/source_data.json",
             "merge_existing": True,
-            "sheets": [{"name": "2026-W01", "rows": [{"项目名": "demo"}]}],
+            "sheets": [{"name": "2026-W01", "rows": [{"记录名": "demo"}]}],
         }
     )
 
     assert result.ok, result.output
     data = json.loads((tmp_path / "outputs/report/source_data.json").read_text(encoding="utf-8"))
-    assert data["sheets"][0]["rows"][0]["项目名"] == "demo"
+    assert data["sheets"][0]["rows"][0]["记录名"] == "demo"
 
 
 # LLM: Empty data should not mask non-empty rows/sheets supplied in the same tool call.
@@ -199,13 +199,13 @@ def test_structured_json_tool_uses_sheets_when_data_is_empty(tmp_path: Path) -> 
         {
             "path": "outputs/report/source_data.json",
             "data": {},
-            "sheets": [{"name": "榜单", "rows": [{"项目名": "demo"}]}],
+            "sheets": [{"name": "榜单", "rows": [{"记录名": "demo"}]}],
         }
     )
 
     assert result.ok, result.output
     data = json.loads((tmp_path / "outputs/report/source_data.json").read_text(encoding="utf-8"))
-    assert data["sheets"][0]["rows"][0]["项目名"] == "demo"
+    assert data["sheets"][0]["rows"][0]["记录名"] == "demo"
 
 
 # LLM: Non-empty metadata in data must not silently discard sibling sheets/rows.
@@ -217,14 +217,14 @@ def test_structured_json_tool_merges_nonempty_data_with_sheets(tmp_path: Path) -
         {
             "path": "outputs/report/source_data.json",
             "data": {"completion_evidence": {"scope": "fixture"}},
-            "sheets": [{"name": "榜单", "rows": [{"项目名": "demo"}]}],
+            "sheets": [{"name": "榜单", "rows": [{"记录名": "demo"}]}],
         }
     )
 
     assert result.ok, result.output
     data = json.loads((tmp_path / "outputs/report/source_data.json").read_text(encoding="utf-8"))
     assert data["completion_evidence"]["scope"] == "fixture"
-    assert data["sheets"][0]["rows"][0]["项目名"] == "demo"
+    assert data["sheets"][0]["rows"][0]["记录名"] == "demo"
 
 
 # LLM: Top-level metadata fields are structured tool facts and must not be dropped in rows mode.
@@ -338,9 +338,9 @@ def test_structured_json_tool_generates_rows_from_structured_series(tmp_path: Pa
             "data": {"completion_evidence": {"scope": "fixture", "row_count": 1000}},
             "generated_rows": {
                 "count": 1000,
-                "columns": ["订单ID", "月份", "地区", "销售额", "利润"],
+                "columns": ["记录ID", "月份", "地区", "销售额", "利润"],
                 "fields": {
-                    "订单ID": {"format": "ORD-{index:04d}", "start": 1},
+                    "记录ID": {"format": "REC-{index:04d}", "start": 1},
                     "月份": {"cycle": ["2026-01", "2026-02"]},
                     "地区": {"cycle": ["华东", "华南", "华北"]},
                     "销售额": {"number": {"start": 1000, "step": 37, "modulo": 9000}},
@@ -354,7 +354,7 @@ def test_structured_json_tool_generates_rows_from_structured_series(tmp_path: Pa
     assert result.ok, result.output
     data = json.loads((tmp_path / "outputs/report/source_data.json").read_text(encoding="utf-8"))
     assert len(data["rows"]) == 1000
-    assert data["rows"][0]["订单ID"] == "ORD-0001"
+    assert data["rows"][0]["记录ID"] == "REC-0001"
     assert data["rows"][1]["月份"] == "2026-02"
     assert data["rows"][0]["利润"] == 200
     assert [sheet["name"] for sheet in data["sheets"]] == ["数据1", "数据2", "数据3"]
@@ -396,7 +396,7 @@ def test_structured_json_tool_treats_generated_rows_list_as_rows(tmp_path: Path)
 
     result = tool.execute(
         {
-            "path": "outputs/research_documents/source_index.json",
+            "path": "outputs/document_delivery/source_index.json",
             "generated_rows": [
                 {
                     "title": "DeepSeek-R1",
@@ -410,7 +410,7 @@ def test_structured_json_tool_treats_generated_rows_list_as_rows(tmp_path: Path)
     )
 
     assert result.ok, result.output
-    data = json.loads((tmp_path / "outputs/research_documents/source_index.json").read_text(encoding="utf-8"))
+    data = json.loads((tmp_path / "outputs/document_delivery/source_index.json").read_text(encoding="utf-8"))
     assert data["completion_evidence"] == {"scope": "fixture"}
     assert data["rows"][0]["translated"] is True
 

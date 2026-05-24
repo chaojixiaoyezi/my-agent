@@ -204,8 +204,8 @@ def _json_bool(value: object, *, default: bool) -> str:
     return "true" if bool(default if value is None else value) else "false"
 
 
-# LLM: _staged_json_no_rows_lines renders the structured data handoff after an empty source checkpoint.
-# 函数用途: 当 source_data.json 无行时，提示模型先写非空 rows/sheets，再调用合同里的 builder_tool 生成 workbook。
+# LLM: _staged_json_no_rows_lines renders the structured data handoff after an empty JSON checkpoint.
+# 函数用途: 当阶段 JSON 无行时，提示模型补非空 rows/sheets，再调用合同里的 builder_tool 生成产物。
 def _staged_json_no_rows_lines(
     finding: dict[str, object], artifact_items: list[dict[str, object]]
 ) -> list[str]:
@@ -216,17 +216,17 @@ def _staged_json_no_rows_lines(
     columns = validation.get("required_columns") if isinstance(validation.get("required_columns"), list) else []
     lines = [
         "- staged_json_no_rows:",
-        f"  - source_json_ref={staging.get('source_json_ref') or stage_ref}",
+        f"  - source_ref={_staging_source_ref(staging) or stage_ref}",
         f"  - write_shape={_checkpoint_shape_hint(stage_ref, staging)}",
         f"  - required_columns={', '.join(str(item) for item in columns)}",
         f"  - writer_tool={finding.get('writer_tool') or 'write_structured_json'}",
         f"  - builder_tool={staging.get('builder_tool') or ''}",
-        f"  - workbook_ref={staging.get('workbook_ref') or ''}",
+        f"  - output_ref={_staging_output_ref(staging)}",
         "  - 优先用 writer_tool 写 path/rows/sheets/data，避免手写大型 JSON 字符串。",
         "  - 如果 min_items_total 很大，优先用 writer_tool 的 generated_rows 结构化参数生成 rows 和多 sheet。",
-        "  - 如果数据来自多个 JSON API，可用 api_json_collection 一次生成带 source_refs/claims 的 source_json_ref；"
+        "  - 如果数据来自多个 JSON API，可用 api_json_collection 一次生成带 source_refs/claims 的结构化 JSON；"
         "大量同形日期/分页请求优先用 request_ranges，避免手写长 JSON。",
-        "  - source_json_ref 有非空 rows/sheets 后，再调用 builder_tool；不要把空 JSON 当完成。",
+        "  - source_ref 有非空 rows/sheets 或声明形状后，再调用 builder_tool；不要把空 checkpoint 当完成。",
     ]
     lines.extend(_collection_contract_lines(validation))
     return lines
@@ -244,14 +244,14 @@ def _staged_json_invalid_lines(
     parse_error = str(finding.get("parse_error") or "")
     return [
         "- staged_json_invalid:",
-        f"  - source_json_ref={staging.get('source_json_ref') or stage_ref}",
+        f"  - source_ref={_staging_source_ref(staging) or stage_ref}",
         f"  - required_shape={_checkpoint_shape_hint(stage_ref, staging)}",
         f"  - parse_error={json.dumps(parse_error, ensure_ascii=False)}",
         f"  - writer_tool={finding.get('writer_tool') or 'write_structured_json'}",
         f"  - builder_tool={staging.get('builder_tool') or ''}",
-        f"  - workbook_ref={staging.get('workbook_ref') or ''}",
+        f"  - output_ref={_staging_output_ref(staging)}",
         "  - 优先用 writer_tool 重写 path/rows/sheets/data，避免手动修补截断 JSON。",
-        "  - 先把 source_json_ref 修成可解析的完整 JSON，再继续 builder_tool 或下一阶段产物。",
+        "  - 先把 source_ref 修成可解析的完整 checkpoint，再继续 builder_tool 或下一阶段产物。",
     ]
 
 
@@ -274,9 +274,50 @@ def _artifact_for_stage_ref(
 def _staging_refs(staging: dict[str, object]) -> set[str]:
     return {
         str(staging.get(key) or "").strip()
-        for key in ("source_json_ref", "source_markdown_ref", "source_ref", "workbook_ref", "pdf_ref", "output_ref")
+        for key in _staging_ref_keys(staging)
         if str(staging.get(key) or "").strip()
     }
+
+
+def _staging_source_ref(staging: dict[str, object]) -> str:
+    for key in _staging_source_keys(staging):
+        if value := str(staging.get(key) or "").strip():
+            return value
+    return ""
+
+
+def _staging_output_ref(staging: dict[str, object]) -> str:
+    for key in _staging_output_keys(staging):
+        if value := str(staging.get(key) or "").strip():
+            return value
+    return ""
+
+
+def _staging_ref_keys(staging: dict[str, object]) -> tuple[str, ...]:
+    return (*_staging_source_keys(staging), *_staging_output_keys(staging))
+
+
+def _staging_source_keys(staging: dict[str, object]) -> tuple[str, ...]:
+    keys = [
+        str(staging.get("source_ref_key") or "").strip(),
+        str(staging.get("input_ref_key") or "").strip(),
+        "source_json_ref",
+        "source_markdown_ref",
+        "source_ref",
+        "input_ref",
+    ]
+    return tuple(dict.fromkeys(key for key in keys if key))
+
+
+def _staging_output_keys(staging: dict[str, object]) -> tuple[str, ...]:
+    keys = [
+        str(staging.get("output_ref_key") or "").strip(),
+        "workbook_ref",
+        "pdf_ref",
+        "output_ref",
+        "artifact_ref",
+    ]
+    return tuple(dict.fromkeys(key for key in keys if key))
 
 
 # LLM: _collection_contract_lines exposes generic coverage and evidence facts from the machine contract.

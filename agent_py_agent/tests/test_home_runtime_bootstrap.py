@@ -33,9 +33,9 @@ def test_saved_run_creates_home_task_workspace(tmp_path: Path):
     cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
     agent = SimpleAgent(cfg, repo)
 
-    agent.run("做一个购物网站", request_id="req-1", run_id="run-1", task_id="购物网站 E2E")
+    agent.run("做一个示例网站", request_id="req-1", run_id="run-1", task_id="示例网站 E2E")
 
-    task_root = home / "workspace" / "tasks" / date.today().isoformat() / "购物网站-e2e"
+    task_root = home / "workspace" / "tasks" / date.today().isoformat() / "示例网站-e2e"
     assert (task_root / "outputs").is_dir()
     assert (task_root / "runtime").is_dir()
     assert (task_root / "agents").is_dir()
@@ -43,7 +43,7 @@ def test_saved_run_creates_home_task_workspace(tmp_path: Path):
     state = json.loads((task_root / "state.json").read_text(encoding="utf-8"))
     assert state["request_id"] == "req-1"
     assert state["run_id"] == "run-1"
-    assert state["task_id"] == "购物网站 E2E"
+    assert state["task_id"] == "示例网站 E2E"
     assert (task_root / "timeline.jsonl").read_text(encoding="utf-8").strip()
 
 
@@ -55,7 +55,7 @@ def test_saved_run_writes_main_context_bundle_v1(tmp_path: Path):
     cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
     agent = SimpleAgent(cfg, repo)
 
-    result = agent.run("做一个购物网站", request_id="req-ctx", run_id="run-ctx", task_id="主代理任务")
+    result = agent.run("做一个示例网站", request_id="req-ctx", run_id="run-ctx", task_id="主代理任务")
 
     assert "# Main Agent Context Bundle v1" in result.prompt
     assert result.main_context_bundle_path
@@ -69,7 +69,7 @@ def test_saved_run_writes_main_context_bundle_v1(tmp_path: Path):
     assert payload["scope"]["task_id"] == "主代理任务"
     assert payload["workspace_refs"]["primary_workspace_root"] == str(repo.resolve())
     assert payload["workspace_refs"]["my_agent_home"] == str(home.resolve())
-    assert payload["task"]["user_prompt_preview"] == "做一个购物网站"
+    assert payload["task"]["user_prompt_preview"] == "做一个示例网站"
     assert result.main_context_bundle_markdown_path
     assert Path(result.main_context_bundle_markdown_path).exists()
 

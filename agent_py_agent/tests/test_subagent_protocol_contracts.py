@@ -64,7 +64,7 @@ def test_task_envelope_write_contract_includes_granted_filesystem_roots(tmp_path
 
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
-        goal="写页面到 lab_outputs/furniture-home/index.html",
+        goal="写页面到 lab_outputs/site-output/index.html",
         thought="等待父级授权产物目录",
         plan=["写 HTML"],
         role="worker",

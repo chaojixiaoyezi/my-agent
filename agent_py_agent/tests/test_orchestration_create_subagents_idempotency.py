@@ -128,7 +128,7 @@ def test_generic_single_worker_reuses_explicit_idempotency_contract(tmp_path):
         "goal": "在 artifacts/index.html 写一个现代家具品牌首页。",
         "role": "worker",
         "extra_write_roots": [str(tmp_path / "artifacts")],
-        "context_packs": [_idempotency_pack("furniture-home", "artifacts/index.html")],
+        "context_packs": [_idempotency_pack("site-output", "artifacts/index.html")],
     }
     first = json.loads(CreateSubagentsTool(agent).execute(params).output)
     second = json.loads(CreateSubagentsTool(agent).execute(params).output)
@@ -229,13 +229,13 @@ def _pipeline_items(output_name: str) -> list[dict[str, object]]:
     return [
         {
             "agent_name": "小傻妞-数据收集",
-            "goal": f"收集 GitHub star 数据，写到 data/subagents/subagent_data_collection/{output_name}",
+            "goal": f"收集 代码平台 star 数据，写到 data/subagents/subagent_data_collection/{output_name}",
             "role": "worker",
             "context_packs": [_idempotency_pack("task18-data-collection", "data_collection")],
         },
         {
             "agent_name": "小傻妞-内容编写",
-            "goal": "基于数据收集结果写中文解释，输出 project_explanations.md",
+            "goal": "基于数据收集结果写中文说明，输出 project_explanations.md",
             "role": "worker",
             "context_packs": [_idempotency_pack("task18-explanations", "project_explanations")],
         },

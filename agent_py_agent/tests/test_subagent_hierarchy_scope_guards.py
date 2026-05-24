@@ -127,14 +127,14 @@ def test_hierarchy_schedule_blocks_qa_before_implementation_ready(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
     root = manager.create_run(
-        goal=f"交付购物网站到 {build}，需要 tester / bug_finder / acceptor。",
+        goal=f"交付示例网站到 {build}，需要 tester / bug_finder / acceptor。",
         thought="root",
         plan=["root"],
         extra_write_roots=[str(build)],
         role="coordinator",
     )
     parent = manager.create_run(
-        goal=f"继续创建 depth=3 leaf 写购物网站到 {build}，之后再做 QA。",
+        goal=f"继续创建 depth=3 leaf 写示例网站到 {build}，之后再做 QA。",
         thought="coord",
         plan=["plan"],
         parent_id=root.id,
@@ -149,7 +149,7 @@ def test_hierarchy_schedule_blocks_qa_before_implementation_ready(tmp_path):
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
-                HierarchyChildSpec(goal="检查购物流程", role="tester", agent_name="小小小傻妞-tester"),
+                HierarchyChildSpec(goal="检查示例流程", role="tester", agent_name="小小小傻妞-tester"),
                 HierarchyChildSpec(goal="找坏链接和坏按钮", role="bug_finder", agent_name="小小小傻妞-bug_finder"),
             ],
             apply=True,
@@ -169,7 +169,7 @@ def test_hierarchy_schedule_allows_qa_after_implementation_ready(tmp_path):
     build = tmp_path / "deliverables" / "shop" / "build"
     root = manager.create_run(goal="root", thought="root", plan=["root"], extra_write_roots=[str(build)])
     parent = manager.create_run(
-        goal=f"交付购物网站到 {build}，之后做 QA。",
+        goal=f"交付示例网站到 {build}，之后做 QA。",
         thought="coord",
         plan=["plan"],
         parent_id=root.id,
@@ -180,7 +180,7 @@ def test_hierarchy_schedule_allows_qa_after_implementation_ready(tmp_path):
         allowed_tools=["schedule_child_subagents"],
     )
     manager.create_run(
-        goal=f"写购物网站文件到 {build}",
+        goal=f"写示例网站文件到 {build}",
         thought="leaf",
         plan=["write"],
         parent_id=parent.id,
@@ -198,7 +198,7 @@ def test_hierarchy_schedule_allows_qa_after_implementation_ready(tmp_path):
     result = manager.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
-            child_specs=[HierarchyChildSpec(goal="检查购物流程", role="tester", agent_name="小小小傻妞-tester")],
+            child_specs=[HierarchyChildSpec(goal="检查示例流程", role="tester", agent_name="小小小傻妞-tester")],
             apply=True,
             max_depth=3,
         )
@@ -214,14 +214,14 @@ def test_hierarchy_schedule_allows_qa_after_implementation_descendant_ready(tmp_
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
     root = manager.create_run(
-        goal=f"交付购物网站到 {build}，需要 tester / bug_finder / acceptor。",
+        goal=f"交付示例网站到 {build}，需要 tester / bug_finder / acceptor。",
         thought="root",
         plan=["root"],
         extra_write_roots=[str(build)],
         role="coordinator",
     )
     coordinator = manager.create_run(
-        goal=f"协调 leaf 写购物网站到 {build}",
+        goal=f"协调 leaf 写示例网站到 {build}",
         thought="coord",
         plan=["delegate"],
         parent_id=root.id,
@@ -231,7 +231,7 @@ def test_hierarchy_schedule_allows_qa_after_implementation_descendant_ready(tmp_
         extra_write_roots=[str(build)],
     )
     leaf = manager.create_run(
-        goal=f"写购物网站文件到 {build}",
+        goal=f"写示例网站文件到 {build}",
         thought="leaf",
         plan=["write"],
         parent_id=coordinator.id,
@@ -248,7 +248,7 @@ def test_hierarchy_schedule_allows_qa_after_implementation_descendant_ready(tmp_
     result = manager.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
-            child_specs=[HierarchyChildSpec(goal="检查完整购物流程", role="tester", agent_name="小傻妞-tester")],
+            child_specs=[HierarchyChildSpec(goal="检查完整示例流程", role="tester", agent_name="小傻妞-tester")],
             apply=True,
             max_depth=3,
         )

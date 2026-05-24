@@ -14,7 +14,7 @@ def test_task_acceptance_ignores_open_session_for_accepted_target(tmp_path):
     _write_open_session_target_manifest(
         workspace,
         session_id="session-workbook",
-        relative_target="outputs/github_star_growth/github_star_growth.xlsx",
+        relative_target="outputs/table_report/table_report.xlsx",
         resolved_target=workbook,
     )
     expected = _write_expected_artifacts(tmp_path)
@@ -39,14 +39,14 @@ def _write_valid_workbook(workspace: Path) -> Path:
 
     DataWorkbookTool(workspace).execute(
         {
-            "path": "outputs/github_star_growth/github_star_growth.xlsx",
+            "path": "outputs/table_report/table_report.xlsx",
             "sheets": [
-                {"name": "summary", "rows": [{"项目名": "demo", "地址": "https://example.com"}]},
-                {"name": "details", "rows": [{"项目名": "demo", "地址": "https://example.com"}]},
+                {"name": "summary", "rows": [{"记录名": "demo", "地址": "https://example.com"}]},
+                {"name": "details", "rows": [{"记录名": "demo", "地址": "https://example.com"}]},
             ],
         }
     )
-    return workspace / "outputs/github_star_growth/github_star_growth.xlsx"
+    return workspace / "outputs/table_report/table_report.xlsx"
 
 
 # LLM: _write_expected_artifacts writes the structured artifact contract used by the acceptance service.
@@ -61,13 +61,13 @@ def _write_expected_artifacts(tmp_path: Path) -> Path:
 # 函数用途: 返回 xlsx 产物验收合同，包含必需列和最小 sheet 数。
 def _workbook_artifact_contract() -> dict[str, object]:
     return {
-        "artifact_id": "github_star_growth_workbook",
+        "artifact_id": "table_report_workbook",
         "kind": "xlsx",
-        "preferred_path": "outputs/github_star_growth/github_star_growth.xlsx",
+        "preferred_path": "outputs/table_report/table_report.xlsx",
         "required": True,
         "validation_contract": {
             "validator": "spreadsheet_acceptance",
-            "required_columns": ["项目名", "地址"],
+            "required_columns": ["记录名", "地址"],
             "required_sheets_min": 2,
         },
     }

@@ -49,3 +49,20 @@ def test_model_adapter_rejects_streaming_and_retry_and_schema_failures() -> None
         "MODEL_RETRY_LIMIT_EXCEEDED",
         "MODEL_SWITCH_SCHEMA_MISMATCH",
     )
+
+
+# LLM: zero retry limits should disable the adapter retry cap instead of acting as one retry.
+# 函数用途: 验证 retry_limit=0 表示模型适配器重试预算不设上限。
+def test_model_adapter_zero_retry_limit_is_unlimited() -> None:
+    from agent_py_agent.agent.contracts.offline_model_adapter_contract import (
+        validate_model_adapter_facts,
+    )
+
+    result = validate_model_adapter_facts(
+        {
+            "model_errors": [{"retryable": True}, {"retryable": True}, {"retryable": True}],
+            "retry_limit": 0,
+        }
+    )
+
+    assert "MODEL_RETRY_LIMIT_EXCEEDED" not in result.error_codes

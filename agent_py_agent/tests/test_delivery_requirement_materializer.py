@@ -38,6 +38,241 @@ def test_materialized_delivery_contract_accepts_generic_artifacts_without_paths(
     assert contract["delivery_quality_contract"]["metric_contracts"][0]["field"] == "star_delta"
 
 
+def test_materialized_delivery_contract_derives_fact_evidence_gate_from_quality_contract():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    contract = materialized_delivery_contract(
+        {
+            "artifacts": [{"artifact_id": "final_workbook", "kind": "xlsx", "allowed_output_roots": ["outputs"]}],
+            "delivery_quality_contract": {
+                "evidence_contract": {
+                    "required_fields": ["measured_value"],
+                    "allowed_value_types": ["exact"],
+                    "require_verified": True,
+                },
+                "metric_contracts": [{"field": "measured_value", "required_window": True}],
+            },
+        }
+    )
+
+    fact_contract = contract["fact_evidence_contract"]
+    assert fact_contract["require_tool_backed_sources"] is True
+    assert fact_contract["evidence_contract"]["required_fields"] == ["measured_value"]
+    assert fact_contract["evidence_contract"]["allowed_value_types"] == ["exact"]
+    assert fact_contract["evidence_contract"]["require_verified"] is True
+
+
+def test_materialized_delivery_contract_accepts_json_fenced_model_output():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    contract = materialized_delivery_contract(
+        """```json
+{"artifacts":[{"artifact_id":"report","kind":"md","preferred_path":"outputs/report.md"}]}
+```"""
+    )
+
+    assert contract["artifacts"][0]["artifact_id"] == "report"
+    assert contract["artifacts"][0]["preferred_path"] == "outputs/report.md"
+
+
+def test_materialized_delivery_contract_accepts_single_root_artifact_object():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    contract = materialized_delivery_contract(
+        {
+            "artifact_id": "weekly_workbook",
+            "kind": "xlsx",
+            "required": True,
+            "allowed_output_roots": ["outputs/reports"],
+        }
+    )
+
+    artifact = contract["artifacts"][0]
+    assert artifact["artifact_id"] == "weekly_workbook"
+    assert artifact["kind"] == "xlsx"
+    assert artifact["allowed_output_roots"] == ["outputs/reports"]
+
+
+def test_materialized_delivery_contract_promotes_file_root_to_preferred_path():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    contract = materialized_delivery_contract(
+        {
+            "artifacts": [
+                {
+                    "artifact_id": "weekly_workbook",
+                    "kind": "xlsx",
+                    "allowed_output_roots": ["outputs/result.xlsx"],
+                }
+            ]
+        }
+    )
+
+    artifact = contract["artifacts"][0]
+    assert artifact["preferred_path"] == "outputs/result.xlsx"
+    assert artifact["allowed_output_roots"] == ["outputs"]
+
+
+def test_materialized_delivery_contract_does_not_auto_bootstrap_plain_artifact(tmp_path):
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    contract = materialized_delivery_contract(
+        {
+            "artifacts": [
+                {
+                    "artifact_id": "weekly_workbook",
+                    "kind": "xlsx",
+                    "preferred_path": str(tmp_path / "outputs/result.xlsx"),
+                }
+            ]
+        },
+        workspace_root=tmp_path,
+    )
+
+    assert "bootstrap_contract" not in contract
+    assert contract["artifacts"][0]["preferred_path"] == str(tmp_path / "outputs/result.xlsx")
+
+
+def test_materialized_delivery_contract_preserves_explicit_soft_bootstrap():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    contract = materialized_delivery_contract(
+        {
+            "artifacts": [{"artifact_id": "report", "kind": "md", "preferred_path": "outputs/report.md"}],
+            "bootstrap_contract": {
+                "materialization_targets": [
+                    {
+                        "artifact_id": "report",
+                        "target_type": "artifact",
+                        "workspace_relative_path": "outputs/report.md",
+                    }
+                ],
+            },
+        }
+    )
+
+    assert contract["bootstrap_contract"]["enforcement"] == "soft"
+    assert contract["bootstrap_contract"]["materialization_targets"][0]["workspace_relative_path"] == "outputs/report.md"
+
+
+def test_materialized_delivery_contract_preserves_columns_without_auto_staging():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    contract = materialized_delivery_contract(
+        {
+            "artifacts": [
+                {
+                    "artifact_id": "weekly_workbook",
+                    "kind": "xlsx",
+                    "preferred_path": "outputs/result.xlsx",
+                    "validation_contract": {
+                        "required_columns": ["project", "metric"],
+                    },
+                }
+            ]
+        }
+    )
+
+    artifact = contract["artifacts"][0]
+    validation = artifact["validation_contract"]
+    assert validation["required_columns"] == ["project", "metric"]
+    assert "staging_contract" not in validation
+    assert "collection_contract" not in validation
+    assert "bootstrap_contract" not in contract
+
+
+def test_materialized_workbook_contract_preserves_llm_generated_fields_without_auto_collection():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    contract = materialized_delivery_contract(
+        {
+            "artifacts": [
+                {
+                    "artifact_id": "weekly_workbook",
+                    "kind": "xlsx",
+                    "preferred_path": "outputs/result.xlsx",
+                    "llm_generated_fields": ["中文说明", "说明依据"],
+                    "validation_contract": {
+                        "required_columns": ["记录名", "来源地址", "本周新增 star 数", "中文说明", "说明依据"],
+                    },
+                }
+            ],
+            "delivery_quality_contract": {
+                "metric_contracts": [{"field": "本周新增 star 数", "expected_kind": "period_delta"}],
+            },
+        }
+    )
+
+    validation = contract["artifacts"][0]["validation_contract"]
+    artifact = contract["artifacts"][0]
+    assert artifact["llm_generated_fields"] == ["中文说明", "说明依据"]
+    assert validation["required_columns"] == ["记录名", "来源地址", "本周新增 star 数", "中文说明", "说明依据"]
+    assert "collection_contract" not in validation
+    assert "staging_contract" not in validation
+    assert contract["fact_evidence_contract"]["evidence_contract"]["required_fields"] == ["本周新增 star 数"]
+
+
+def test_materialized_workbook_staging_infers_kind_from_output_path_and_metric_name():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    contract = materialized_delivery_contract(
+        {
+            "artifacts": [
+                {
+                    "artifact_id": "result.xlsx",
+                    "preferred_path": "outputs/result.xlsx",
+                    "llm_generated_fields": ["中文说明", "说明依据"],
+                    "validation_contract": {
+                        "required_columns": [
+                            "记录名",
+                            "来源地址",
+                            "指标值",
+                            "当前总star数",
+                            "中文说明",
+                            "说明依据",
+                            "技术栈",
+                        ],
+                    },
+                }
+            ],
+            "delivery_quality_contract": {
+                "metric_contracts": [
+                    {
+                        "name": "指标值",
+                        "type": "number",
+                    }
+                ]
+            },
+        }
+    )
+
+    artifact = contract["artifacts"][0]
+    assert artifact["kind"] == "xlsx"
+    validation = artifact["validation_contract"]
+    assert "staging_contract" not in validation
+    assert "collection_contract" not in validation
+    assert artifact["llm_generated_fields"] == ["中文说明", "说明依据"]
+    assert contract["fact_evidence_contract"]["evidence_contract"]["required_fields"] == ["指标值"]
+
+
 def test_materialized_delivery_contract_rejects_unbounded_absolute_artifact_path(tmp_path):
     from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
         materialized_delivery_contract,
@@ -86,5 +321,7 @@ def test_materializer_prompt_asks_for_structured_contract_not_task_template():
 
     assert "delivery_contract.v1" in prompt
     assert "不要写具体执行步骤模板" in prompt
-    assert "GitHub" not in prompt
+    assert "required_columns" in prompt
+    assert "metric_contracts" in prompt
+    assert "代码平台" not in prompt
     assert "论文" not in prompt

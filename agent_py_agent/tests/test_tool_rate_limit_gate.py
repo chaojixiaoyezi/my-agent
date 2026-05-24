@@ -21,6 +21,22 @@ def test_same_tool_args_rate_limit_blocks_after_budget() -> None:
     assert decision.findings[0].evidence["retry_after_seconds"] == 8.0
 
 
+# LLM: zero max_calls disables the rate cap instead of creating a one-call fuse.
+# 函数用途: 验证 max_calls=0 表示不限制同一工具身份在窗口内的调用次数。
+def test_zero_max_calls_is_unlimited() -> None:
+    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
+        ToolRateLimitFacts,
+        ToolRateLimitLedger,
+        ToolRateLimitPolicy,
+    )
+
+    ledger = ToolRateLimitLedger(policy=ToolRateLimitPolicy(max_calls=0, window_seconds=60))
+    for offset in range(8):
+        facts = ToolRateLimitFacts(tool_name="fetch_url", args_hash="sha256:a", now=100.0 + offset)
+        assert ledger.check(facts).allowed is True
+        ledger.record_attempt(facts)
+
+
 # LLM: Tool rate limits must isolate different argument identities.
 # 函数用途: 验证同一工具换 args_hash 时不会被另一个参数桶的速率预算阻断。
 def test_rate_limit_uses_args_hash_as_part_of_key() -> None:
@@ -61,6 +77,27 @@ def test_consecutive_failures_open_circuit_for_same_key() -> None:
     assert decision.finding_codes == ("TOOL_CIRCUIT_OPEN",)
     assert decision.findings[0].evidence["retry_after_seconds"] == 1.5
     assert decision.findings[0].evidence["circuit_state"] == "open"
+
+
+# LLM: zero failure_threshold disables the failure circuit rather than opening it immediately.
+# 函数用途: 验证 failure_threshold=0 表示不限制连续失败次数，不产生 circuit open 阻断。
+def test_zero_failure_threshold_disables_circuit() -> None:
+    from agent_py_agent.agent.contracts.gates.tool_rate_limit import (
+        ToolRateLimitFacts,
+        ToolRateLimitLedger,
+        ToolRateLimitPolicy,
+    )
+
+    ledger = ToolRateLimitLedger(
+        policy=ToolRateLimitPolicy(failure_threshold=0, backoff_schedule_seconds=(1, 2, 4)),
+    )
+    for offset in range(5):
+        ledger.record_failure(ToolRateLimitFacts(tool_name="fetch_url", args_hash="sha256:a", now=10.0 + offset))
+
+    decision = ledger.check(ToolRateLimitFacts(tool_name="fetch_url", args_hash="sha256:a", now=20.0))
+
+    assert decision.allowed is True
+    assert decision.evidence["consecutive_failures"] == 5
 
 
 # LLM: Backoff should increase by structured failure count, not by parsing error text.

@@ -267,10 +267,10 @@ def test_dispatch_payload_tells_runner_to_summarize_ready_children():
 def test_dispatch_payload_suggests_quality_wave_before_closeout():
     parent = SimpleNamespace(
         id="root",
-        goal="购物网站必须有 tester / bug_finder / acceptor 三类 QA 子代理。",
+        goal="示例网站必须有 tester / bug_finder / acceptor 三类 QA 子代理。",
         acceptance_checks=[],
         child_ids=["child-a"],
-        allowed_write_roots=["/tmp/shop/build"],
+        allowed_write_roots=["/tmp/site/build"],
         task_dir="",
         role="coordinator",
         agent_name="root",
@@ -303,8 +303,8 @@ def test_dispatch_payload_surfaces_qa_repair_advice_from_direct_child(tmp_path: 
     tester_dir.mkdir()
     (tester_dir / "output.json").write_text(
         json.dumps({
-            "structured_output": {"summary": "checkout.html 缺少到 order-success.html 的链接，流程断裂。"},
-            "acceptance": ["checkout.html 到 order-success.html 链接缺失"],
+            "structured_output": {"summary": "flow-b.html 缺少到 flow-done.html 的链接，流程断裂。"},
+            "acceptance": ["flow-b.html 到 flow-done.html 链接缺失"],
         }, ensure_ascii=False),
         encoding="utf-8",
     )
@@ -333,7 +333,7 @@ def test_dispatch_payload_surfaces_qa_repair_advice_from_direct_child(tmp_path: 
 # 函数用途: 直接 child 的 HTML 结构检查失败时，父 runner 应拿到 refs-first 修复建议，不应先读正文或泛化接管。
 def test_dispatch_payload_surfaces_artifact_integrity_repair_from_direct_child(tmp_path: Path):
     run_dir = tmp_path / "worker"
-    product_root = tmp_path / "deliverables" / "furniture-home"
+    product_root = tmp_path / "deliverables" / "site-output"
     product_root.mkdir(parents=True)
     artifact = product_root / "index.html"
     run_dir.mkdir()

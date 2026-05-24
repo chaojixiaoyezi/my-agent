@@ -251,7 +251,7 @@ def _run_single_watch_cycle(
         agent.subagents.append_dispatch_watch_log(record)
     _update_dispatch_rounds(agent, had_progress)
 
-    if agent._consecutive_dispatch_rounds >= params.max_consecutive:
+    if params.max_consecutive > 0 and agent._consecutive_dispatch_rounds >= params.max_consecutive:
         return limit_idle_result(LimitIdleResultRequest(agent, params, message, record, store_record))
 
     more_cycles, message = watch_sleep_state(params, message)

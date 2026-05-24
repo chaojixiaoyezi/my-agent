@@ -113,6 +113,37 @@ def test_registry_execution_blocks_when_runtime_rate_limit_is_exhausted(tmp_path
     assert result.result_envelope["runtime_gate"]["findings"][0]["code"] == "TOOL_RATE_LIMIT_EXCEEDED"
 
 
+# LLM: runtime write-boundary policies can explicitly disable tool rate limits with zero budgets.
+# 函数用途: 验证 max_calls=0 和 failure_threshold=0 在 registry gate 里也表示不启用对应次数门。
+def test_registry_execution_zero_rate_limit_policy_is_unlimited(tmp_path):
+    payload = {"tool": "echo", "value": 1}
+    result = execute_registry_call(
+        ExecuteRegistryCallParams(
+            payload=payload,
+            tools={"echo": EchoTool()},
+            workspace_root=tmp_path,
+            workspace_roots=[tmp_path],
+            expose_security_tools=False,
+            security_tool_names=set(),
+            write_boundary={
+                "now": 10.0,
+                "tool_rate_limit_policy": {"max_calls": 0, "window_seconds": 60, "failure_threshold": 0},
+                "tool_rate_limit_records": [
+                    {
+                        "tool_name": "echo",
+                        "args_hash": _args_hash_for_legacy_payload(payload),
+                        "attempt_timestamps": [1.0, 2.0, 3.0],
+                        "consecutive_failures": 9,
+                        "last_failure_at": 9.0,
+                    }
+                ],
+            },
+        )
+    )
+
+    assert result.ok is True
+
+
 def test_registry_execution_blocks_tool_with_incomplete_manifest(tmp_path):
     result = execute_registry_call(
         ExecuteRegistryCallParams(

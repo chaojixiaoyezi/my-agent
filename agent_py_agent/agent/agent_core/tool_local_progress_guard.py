@@ -67,14 +67,15 @@ def has_required_local_progress_guard(agent: object, params: ToolLoopExecutePara
     count = int(state.get("exploration_rounds_without_local_progress") or 0) + 1
     state["exploration_rounds_without_local_progress"] = count
     _write_state(agent, state)
-    return count >= _exploration_round_threshold(payload)
+    threshold = _exploration_round_threshold(payload)
+    return threshold > 0 and count >= threshold
 
 
 # LLM: local_progress_guard_context exposes structured no-progress facts so the next model turn knows it must switch from exploration to local work.
 # 函数用途: 当 guard 触发时，把连续探索轮次、待处理恢复动作和缺失目标作为结构化提示喂给下一轮模型。
 def local_progress_guard_context(agent: object, redirects: int) -> str:
     payload = _guard_payload(agent)
-    if not payload or redirects >= _MAX_REDIRECTS:
+    if not payload or (_MAX_REDIRECTS > 0 and redirects >= _MAX_REDIRECTS):
         return ""
     state = _load_state(agent)
     envelope = {
@@ -90,8 +91,8 @@ def local_progress_guard_context(agent: object, redirects: int) -> str:
             "[tool-system local-progress-guard]",
             json.dumps(envelope, ensure_ascii=False, sort_keys=True),
             "结构化交付状态显示你已经连续多轮只做远程/只读探索，而 outputs/scripts/data 没有新的本地推进。"
-            "下一轮必须优先执行本地推进动作，例如补 checkpoint、写 draft、调用 builder tool，"
-            "不要继续只读 artifact、抓网页或重复只读检查。",
+            "请优先执行能留下本地进展的动作，例如补 checkpoint、写 draft、调用 builder tool；"
+            "如果还需要继续检索，也要同步写入来源索引、草稿或阶段数据。",
         ]
     )
 
@@ -148,7 +149,7 @@ def _guard_payload(agent: object) -> dict[str, object]:
         return {}
     return {
         "failure_fingerprint": failure_fingerprint,
-        "no_progress_block_threshold": progress.get("no_progress_block_threshold") or 0,
+        "no_progress_block_threshold": progress.get("no_progress_block_threshold", _EXPLORATION_ROUND_THRESHOLD),
         "pending_materialization_targets": pending_targets,
         "recovery_actions": [item for item in recovery_actions if isinstance(item, dict)],
         "work_progress_fingerprint": fingerprint,
@@ -231,9 +232,11 @@ def _is_local_progressive_call(payload: dict[str, object], calls: list[dict[str,
 # 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _exploration_round_threshold(payload: dict[str, object]) -> int:
     try:
-        value = int(payload.get("no_progress_block_threshold") or 0)
+        value = int(payload.get("no_progress_block_threshold"))
     except (TypeError, ValueError):
-        value = 0
+        return _EXPLORATION_ROUND_THRESHOLD
+    if value == 0:
+        return 0
     return max(_EXPLORATION_ROUND_THRESHOLD, value)
 
 

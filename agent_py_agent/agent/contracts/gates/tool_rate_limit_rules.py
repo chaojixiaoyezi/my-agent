@@ -24,7 +24,10 @@ def circuit_decision(
     facts: ToolRateLimitFacts,
     policy: ToolRateLimitPolicy,
 ) -> GateDecision | None:
-    if record.circuit_state != _OPEN and record.consecutive_failures < failure_threshold(policy):
+    threshold = failure_threshold(policy)
+    if threshold <= 0:
+        return None
+    if record.circuit_state != _OPEN and record.consecutive_failures < threshold:
         return None
     retry_after_until = record.retry_after_until
     if retry_after_until <= 0 and record.last_failure_at > 0:
@@ -38,7 +41,7 @@ def circuit_decision(
         evidence=blocking_evidence(record, facts, "open", retry_after)
         | {
             "consecutive_failures": record.consecutive_failures,
-            "failure_threshold": failure_threshold(policy),
+            "failure_threshold": threshold,
         },
         recommended_action="retry_after_backoff",
     )
@@ -201,7 +204,7 @@ def text(value: object) -> str:
 
 
 # LLM: max_calls clamps negative max call budgets to zero.
-# 函数用途: 为 check 提供稳定预算口径，0 表示只要窗口有记录就阻断。
+# 函数用途: 为 check 提供稳定预算口径；0 表示不限制同一窗口内调用次数。
 def max_calls(policy: ToolRateLimitPolicy) -> int:
     return max(0, int(policy.max_calls))
 
@@ -212,10 +215,10 @@ def window_seconds(policy: ToolRateLimitPolicy) -> float:
     return max(0.0, float(policy.window_seconds))
 
 
-# LLM: failure_threshold clamps circuit thresholds to at least one.
-# 函数用途: 避免配置为 0 或负数时熔断判断失去意义。
+# LLM: failure_threshold clamps negative circuit thresholds to zero.
+# 函数用途: 为连续失败熔断提供稳定预算；0 表示不启用失败次数熔断。
 def failure_threshold(policy: ToolRateLimitPolicy) -> int:
-    return max(1, int(policy.failure_threshold))
+    return max(0, int(policy.failure_threshold))
 
 
 __all__ = [

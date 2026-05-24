@@ -16,8 +16,8 @@ def test_xlsx_acceptance_checks_required_columns_and_sheet_count(tmp_path: Path)
         {
             "path": "report.xlsx",
             "sheets": [
-                {"name": "summary", "rows": [{"项目名": "demo", "地址": "https://example.com"}]},
-                {"name": "detail", "rows": [{"项目名": "demo", "上升 star 数": 42}]},
+                {"name": "summary", "rows": [{"记录名": "demo", "地址": "https://example.com"}]},
+                {"name": "detail", "rows": [{"记录名": "demo", "指标值": 42}]},
             ],
         }
     )
@@ -29,7 +29,7 @@ def test_xlsx_acceptance_checks_required_columns_and_sheet_count(tmp_path: Path)
             workspace_root=tmp_path,
             validation_contract={
                 "required_sheets_min": 2,
-                "required_columns": ["项目名", "地址", "上升 star 数"],
+                "required_columns": ["记录名", "地址", "指标值"],
             },
         )
     )
@@ -44,7 +44,7 @@ def test_xlsx_acceptance_rejects_missing_required_columns(tmp_path: Path) -> Non
     result = tool.execute(
         {
             "path": "report.xlsx",
-            "sheets": [{"name": "summary", "rows": [{"项目名": "demo"}]}],
+            "sheets": [{"name": "summary", "rows": [{"记录名": "demo"}]}],
         }
     )
     assert result.ok
@@ -55,7 +55,7 @@ def test_xlsx_acceptance_rejects_missing_required_columns(tmp_path: Path) -> Non
             workspace_root=tmp_path,
             validation_contract={
                 "required_sheets_min": 2,
-                "required_columns": ["项目名", "地址"],
+                "required_columns": ["记录名", "地址"],
             },
         )
     )
@@ -76,8 +76,8 @@ def test_xlsx_acceptance_rejects_blank_required_column_values(tmp_path: Path) ->
             "sheets": [
                 {
                     "name": "weekly",
-                    "columns": ["项目名", "地址", "上升 star 数"],
-                    "rows": [{"项目名": "", "地址": "https://example.com/demo", "上升 star 数": "42"}],
+                    "columns": ["记录名", "地址", "指标值"],
+                    "rows": [{"记录名": "", "地址": "https://example.com/demo", "指标值": "42"}],
                 }
             ],
         }
@@ -89,7 +89,7 @@ def test_xlsx_acceptance_rejects_blank_required_column_values(tmp_path: Path) ->
             path=tmp_path / "report.xlsx",
             workspace_root=tmp_path,
             validation_contract={
-                "required_columns": ["项目名", "地址", "上升 star 数"],
+                "required_columns": ["记录名", "地址", "指标值"],
             },
         )
     )
@@ -109,8 +109,8 @@ def test_xlsx_acceptance_rejects_unsourced_staged_source_json(tmp_path: Path) ->
   "sheets": [
     {
       "name": "weekly",
-      "columns": ["项目名", "地址", "上升 star 数"],
-      "rows": [{"项目名": "demo", "地址": "https://example.com/demo", "上升 star 数": 42}]
+      "columns": ["记录名", "地址", "指标值"],
+      "rows": [{"记录名": "demo", "地址": "https://example.com/demo", "指标值": 42}]
     }
   ]
 }
@@ -126,12 +126,12 @@ def test_xlsx_acceptance_rejects_unsourced_staged_source_json(tmp_path: Path) ->
             path=tmp_path / "report.xlsx",
             workspace_root=tmp_path,
             validation_contract={
-                "required_columns": ["项目名", "地址", "上升 star 数"],
+                "required_columns": ["记录名", "地址", "指标值"],
                 "staging_contract": {
                     "source_json_ref": "source_data.json",
                 },
                 "evidence_contract": {
-                    "required_fields": ["上升 star 数"],
+                    "required_fields": ["指标值"],
                     "require_verified": True,
                 },
             },
@@ -146,7 +146,7 @@ def test_xlsx_acceptance_rejects_unsourced_staged_source_json(tmp_path: Path) ->
 # LLM: Staged source JSON should reject blank required cell values before the workbook builder runs.
 # 函数用途: 验证 source_data.json 的必填列空值会在阶段验收中失败，避免生成空单元格 xlsx。
 def test_staged_checkpoint_rejects_blank_required_column_values(tmp_path: Path) -> None:
-    source = tmp_path / "outputs/github_star_growth/source_data.json"
+    source = tmp_path / "outputs/table_report/source_data.json"
     source.parent.mkdir(parents=True)
     source.write_text(
         """
@@ -154,8 +154,8 @@ def test_staged_checkpoint_rejects_blank_required_column_values(tmp_path: Path) 
   "sheets": [
     {
       "name": "汇总",
-      "columns": ["项目名", "地址", "上升 star 数"],
-      "rows": [{"项目名": "", "地址": "https://example.com", "上升 star 数": "估算"}]
+      "columns": ["记录名", "地址", "指标值"],
+      "rows": [{"记录名": "", "地址": "https://example.com", "指标值": "估算"}]
     }
   ]
 }
@@ -166,10 +166,10 @@ def test_staged_checkpoint_rejects_blank_required_column_values(tmp_path: Path) 
     findings = staged_checkpoint_findings(
         [
             {
-                "preferred_path": "outputs/github_star_growth/github_star_growth.xlsx",
+                "preferred_path": "outputs/table_report/table_report.xlsx",
                 "validation_contract": {
-                    "required_columns": ["项目名", "地址", "上升 star 数"],
-                    "staging_contract": {"checkpoint_refs": ["outputs/github_star_growth/source_data.json"]},
+                    "required_columns": ["记录名", "地址", "指标值"],
+                    "staging_contract": {"checkpoint_refs": ["outputs/table_report/source_data.json"]},
                 },
             }
         ],
@@ -182,17 +182,17 @@ def test_staged_checkpoint_rejects_blank_required_column_values(tmp_path: Path) 
 # LLM: Non-JSON staged checkpoints should enter the same generic artifact validator as final artifacts.
 # 函数用途: 验证 CSV checkpoint 不能只凭存在/非空通过；结构问题必须返回统一产物验收 finding。
 def test_staged_checkpoint_routes_non_json_csv_through_artifact_validator(tmp_path: Path) -> None:
-    checkpoint = tmp_path / "outputs/github_star_growth/source_data.csv"
+    checkpoint = tmp_path / "outputs/table_report/source_data.csv"
     checkpoint.parent.mkdir(parents=True)
     checkpoint.write_text("project,stars\n", encoding="utf-8")
 
     findings = staged_checkpoint_findings(
         [
             {
-                "preferred_path": "outputs/github_star_growth/github_star_growth.xlsx",
+                "preferred_path": "outputs/table_report/table_report.xlsx",
                 "validation_contract": {
                     "staging_contract": {
-                        "checkpoint_refs": ["outputs/github_star_growth/source_data.csv"],
+                        "checkpoint_refs": ["outputs/table_report/source_data.csv"],
                     },
                     "min_data_rows": 1,
                     "required_columns": ["project", "stars"],
@@ -208,27 +208,27 @@ def test_staged_checkpoint_routes_non_json_csv_through_artifact_validator(tmp_pa
 # LLM: staged checkpoint acceptance must use the same sheet/evidence contract as final artifact checks.
 # 函数用途: 验证真实任务 acceptance 的 runtime_findings 不会丢掉 staged source 的结构和证据问题。
 def test_staged_checkpoint_findings_use_validation_contract_shape_and_evidence(tmp_path: Path) -> None:
-    source = tmp_path / "outputs/github_star_growth/source_data.json"
+    source = tmp_path / "outputs/table_report/source_data.json"
     source.parent.mkdir(parents=True)
     source.write_text(
-        '{"sheets":[{"name":"汇总","rows":[{"项目名":"demo","地址":"https://example.com","上升 star 数":"估算"}]}]}',
+        '{"sheets":[{"name":"汇总","rows":[{"记录名":"demo","地址":"https://example.com","指标值":"估算"}]}]}',
         encoding="utf-8",
     )
 
     findings = staged_checkpoint_findings(
         [
             {
-                "preferred_path": "outputs/github_star_growth/github_star_growth.xlsx",
+                "preferred_path": "outputs/table_report/table_report.xlsx",
                 "validation_contract": {
                     "required_sheets_min": 2,
-                    "required_columns": ["项目名", "地址", "上升 star 数"],
+                    "required_columns": ["记录名", "地址", "指标值"],
                     "staging_contract": {
                         "checkpoint_refs": [
-                            "outputs/github_star_growth/source_data.json",
-                            "outputs/github_star_growth/github_star_growth.xlsx",
+                            "outputs/table_report/source_data.json",
+                            "outputs/table_report/table_report.xlsx",
                         ]
                     },
-                    "evidence_contract": {"required_fields": ["项目名", "地址", "上升 star 数"], "require_verified": True},
+                    "evidence_contract": {"required_fields": ["记录名", "地址", "指标值"], "require_verified": True},
                 },
             }
         ],
@@ -276,7 +276,7 @@ def test_staged_checkpoint_evidence_allows_pending_claims_until_final_gate(tmp_p
         "validation_contract": {
             **base_item["validation_contract"],
             "evidence_contract": {
-                "required_fields": ["上升 star 数"],
+                "required_fields": ["指标值"],
                 "require_verified": True,
                 "staging_require_verified": True,
             },
@@ -288,19 +288,19 @@ def test_staged_checkpoint_evidence_allows_pending_claims_until_final_gate(tmp_p
 
 def _pending_evidence_contract_item() -> dict[str, object]:
     return {
-        "preferred_path": "outputs/github_star_growth/github_star_growth.xlsx",
+        "preferred_path": "outputs/table_report/table_report.xlsx",
         "validation_contract": {
             "staging_contract": {
-                "checkpoint_refs": ["outputs/github_star_growth/source_data.json"],
-                "source_json_ref": "outputs/github_star_growth/source_data.json",
+                "checkpoint_refs": ["outputs/table_report/source_data.json"],
+                "source_json_ref": "outputs/table_report/source_data.json",
             },
-            "evidence_contract": {"required_fields": ["上升 star 数"], "require_verified": True},
+            "evidence_contract": {"required_fields": ["指标值"], "require_verified": True},
         },
     }
 
 
 def _write_pending_source(root: Path) -> None:
-    source = root / "outputs/github_star_growth/source_data.json"
+    source = root / "outputs/table_report/source_data.json"
     source.parent.mkdir(parents=True)
     source.write_text(
         """
@@ -309,14 +309,14 @@ def _write_pending_source(root: Path) -> None:
   "claims": [
     {
       "claim_id": "growth-1",
-      "field": "上升 star 数",
+      "field": "指标值",
       "value": "120",
       "source_ids": ["src-1"],
       "verification_status": "PENDING",
       "value_type": "exact"
     }
   ],
-  "rows": [{"项目名": "demo", "地址": "https://example.com", "上升 star 数": "120"}]
+  "rows": [{"记录名": "demo", "地址": "https://example.com", "指标值": "120"}]
 }
 """.strip(),
         encoding="utf-8",
@@ -344,7 +344,7 @@ def test_staged_checkpoint_evidence_accepts_declared_estimates(tmp_path: Path) -
 
 
 def _write_estimated_source(root: Path) -> None:
-    source = root / "outputs/github_star_growth/source_data.json"
+    source = root / "outputs/table_report/source_data.json"
     source.parent.mkdir(parents=True)
     source.write_text(
         """
@@ -352,15 +352,15 @@ def _write_estimated_source(root: Path) -> None:
   "sheets": [
     {
       "name": "汇总",
-      "columns": ["项目名", "地址", "上升 star 数"],
-      "rows": [{"项目名": "demo", "地址": "https://example.com", "上升 star 数": "~100-120"}]
+      "columns": ["记录名", "地址", "指标值"],
+      "rows": [{"记录名": "demo", "地址": "https://example.com", "指标值": "~100-120"}]
     }
   ],
   "source_refs": [{"source_id": "src-1", "uri": "https://example.com/ranking"}],
   "claims": [
     {
       "claim_id": "growth-1",
-      "field": "上升 star 数",
+      "field": "指标值",
       "value": "~100-120",
       "source_ids": ["src-1"],
       "confidence": 0.7,
@@ -376,7 +376,7 @@ def _write_estimated_source(root: Path) -> None:
 
 
 def _write_metric_mismatch_source(root: Path) -> None:
-    source = root / "outputs/github_star_growth/source_data.json"
+    source = root / "outputs/table_report/source_data.json"
     source.parent.mkdir(parents=True)
     source.write_text(
         """
@@ -384,7 +384,7 @@ def _write_metric_mismatch_source(root: Path) -> None:
   "sheets": [
     {
       "name": "汇总",
-      "rows": [{"项目名": "demo", "地址": "https://example.com", "上升 star 数": 4991}]
+      "rows": [{"记录名": "demo", "地址": "https://example.com", "指标值": 4991}]
     }
   ],
   "source_refs": [
@@ -397,7 +397,7 @@ def _write_metric_mismatch_source(root: Path) -> None:
   "claims": [
     {
       "claim_id": "claim-growth",
-      "field": "上升 star 数",
+      "field": "指标值",
       "value": 4991,
       "source_ids": ["src-current"],
       "verification_status": "VERIFIED",
@@ -413,14 +413,14 @@ def _write_metric_mismatch_source(root: Path) -> None:
 
 def _metric_mismatch_contract_item() -> dict[str, object]:
     return {
-        "preferred_path": "outputs/github_star_growth/github_star_growth.xlsx",
+        "preferred_path": "outputs/table_report/table_report.xlsx",
         "validation_contract": {
-            "required_columns": ["项目名", "地址", "上升 star 数"],
-            "staging_contract": {"checkpoint_refs": ["outputs/github_star_growth/source_data.json"]},
-            "evidence_contract": {"required_fields": ["上升 star 数"], "require_verified": True},
+            "required_columns": ["记录名", "地址", "指标值"],
+            "staging_contract": {"checkpoint_refs": ["outputs/table_report/source_data.json"]},
+            "evidence_contract": {"required_fields": ["指标值"], "require_verified": True},
             "metric_contracts": [
                 {
-                    "field": "上升 star 数",
+                    "field": "指标值",
                     "expected_kind": "time_window_delta",
                     "required_window": True,
                 }
@@ -431,17 +431,17 @@ def _metric_mismatch_contract_item() -> dict[str, object]:
 
 def _estimated_evidence_contract_item() -> dict[str, object]:
     return {
-        "preferred_path": "outputs/github_star_growth/github_star_growth.xlsx",
+        "preferred_path": "outputs/table_report/table_report.xlsx",
         "validation_contract": {
             "required_sheets_min": 1,
-            "required_columns": ["项目名", "地址", "上升 star 数"],
-            "staging_contract": {"checkpoint_refs": ["outputs/github_star_growth/source_data.json"]},
+            "required_columns": ["记录名", "地址", "指标值"],
+            "staging_contract": {"checkpoint_refs": ["outputs/table_report/source_data.json"]},
             "evidence_contract": {
                 "allowed_value_types": ["exact", "estimated"],
                 "min_confidence": 0.5,
                 "require_methodology_for_estimates": True,
                 "require_verified": True,
-                "required_fields": ["上升 star 数"],
+                "required_fields": ["指标值"],
             },
         },
     }

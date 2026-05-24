@@ -26,6 +26,30 @@ def test_retryable_tool_failure_allows_bounded_retry() -> None:
     assert result.actions[0]["operation_id"] == "op-fetch"
 
 
+# LLM: zero retry limits should keep retryable recovery alive until another gate stops it.
+# 函数用途: 验证 retry_limit=0 表示恢复重试预算不设上限，不会按默认 1 次误阻断。
+def test_retryable_tool_failure_zero_retry_limit_is_unlimited() -> None:
+    from agent_py_agent.agent.contracts.offline_recovery_contract import validate_recovery_events
+
+    result = validate_recovery_events(
+        (
+            {
+                "type": "tool_result",
+                "operation_id": "op-fetch",
+                "tool": "fetch_url",
+                "ok": False,
+                "error_code": "TOOL_TIMEOUT",
+                "retryable": True,
+                "attempt": 12,
+                "retry_limit": 0,
+            },
+        )
+    )
+
+    assert result.ok is True
+    assert result.actions[0]["code"] == "RETRY_ALLOWED"
+
+
 # LLM: Non-retryable tool failures must stop automatic retry instead of looping.
 # 函数用途: 验证 permission/path 类不可重试失败返回 NON_RETRYABLE_FAILURE。
 def test_non_retryable_permission_failure_stops_retry() -> None:

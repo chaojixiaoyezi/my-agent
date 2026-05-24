@@ -191,8 +191,10 @@ def dispatch_loop(
     report = DispatchLoopReport()
     max_rounds = params.max_consecutive_rounds
     no_progress_tracker = DispatchNoProgressTracker()
+    round_num = 0
 
-    for round_num in range(1, max_rounds + 1):
+    while max_rounds == 0 or round_num < max_rounds:
+        round_num += 1
         dispatch_report = _run_single_dispatch(
             SingleDispatchRequest(agent, router, capability_config, params)
         )
@@ -203,7 +205,7 @@ def dispatch_loop(
             report.stopped_by_no_progress = True
             _clear_pending_work(agent)
             break
-        if round_num >= max_rounds:
+        if max_rounds > 0 and round_num >= max_rounds:
             report.stopped_by_limit = True
             break
 

@@ -12,11 +12,11 @@ def test_static_site_check_passes_valid_site(tmp_path):
     _write_site(
         tmp_path,
         {
-            "index.html": '<a href="products.html">Products</a><img src="https://example.com/p.png">',
-            "products.html": '<a href="cart.html">Cart</a><button onclick="location.href=\'cart.html\'">Buy</button>',
-            "cart.html": '<form action="checkout.html"><button type="submit">Checkout</button></form>',
-            "checkout.html": '<a href="order-success.html">Submit</a>',
-            "order-success.html": '<a href="products.html">Continue</a>',
+            "index.html": '<a href="items.html">Products</a><img src="https://example.com/p.png">',
+            "items.html": '<a href="flow-a.html">Cart</a><button onclick="location.href=\'flow-a.html\'">Buy</button>',
+            "flow-a.html": '<form action="flow-b.html"><button type="submit">Checkout</button></form>',
+            "flow-b.html": '<a href="flow-done.html">Submit</a>',
+            "flow-done.html": '<a href="items.html">Continue</a>',
         },
     )
     executor = TestExecutor(tmp_path)
@@ -28,10 +28,10 @@ def test_static_site_check_passes_valid_site(tmp_path):
             "site_root": "site",
             "required_files": [
                 "index.html",
-                "products.html",
-                "cart.html",
-                "checkout.html",
-                "order-success.html",
+                "items.html",
+                "flow-a.html",
+                "flow-b.html",
+                "flow-done.html",
             ],
         }
     )
@@ -49,7 +49,7 @@ def test_static_site_check_blocks_common_generated_site_failures(tmp_path):
         tmp_path,
         {
             "login.html": '<button>孤立按钮</button><script>location.href = "product_list.html";</script>',
-            "order-success.html": '<a href="index.html">继续购物</a><main>${name}</main>',
+            "flow-done.html": '<a href="index.html">继续示例流程</a><main>${name}</main>',
         },
     )
     executor = TestExecutor(tmp_path)
@@ -59,7 +59,7 @@ def test_static_site_check_blocks_common_generated_site_failures(tmp_path):
             "name": "broken shop site",
             "validation_method": "static_site_check",
             "site_root": "site",
-            "required_files": ["products.html", "order-success.html"],
+            "required_files": ["items.html", "flow-done.html"],
         }
     )
 
@@ -69,8 +69,8 @@ def test_static_site_check_blocks_common_generated_site_failures(tmp_path):
     assert "placeholder_hits=1" in record.error
     assert "broken_local_refs=1" in record.error
     assert "inert_control_hits=1" in record.error
-    assert record.validation_result["missing_required_files"] == ["products.html"]
-    assert record.validation_result["placeholder_hits"] == ["order-success.html"]
+    assert record.validation_result["missing_required_files"] == ["items.html"]
+    assert record.validation_result["placeholder_hits"] == ["flow-done.html"]
 
 
 # LLM: Placeholder hash links from real E2E must fail when pages claim buttons/links work.
@@ -362,13 +362,13 @@ def test_static_site_check_blocks_missing_dom_id_targets(tmp_path):
 
 
 # LLM: DOM binding checks should be on by default for generated apps, not a hidden expert option.
-# 函数用途: 固定购物站真实测试暴露的问题；HTML/JS 的 id 不一致时默认验收失败。
+# 函数用途: 固定示例站真实测试暴露的问题；HTML/JS 的 id 不一致时默认验收失败。
 def test_static_site_check_blocks_missing_dom_id_targets_by_default(tmp_path):
     _write_site(
         tmp_path,
         {
             "index.html": '<div id="homeProducts"></div><script src="app.js"></script>',
-            "app.js": "document.getElementById('productGrid').innerHTML = '<p>商品</p>';",
+            "app.js": "document.getElementById('productGrid').innerHTML = '<p>条目</p>';",
         },
     )
     executor = TestExecutor(tmp_path)
@@ -485,7 +485,7 @@ def test_static_site_check_allows_javascript_template_literals(tmp_path):
     _write_site(
         tmp_path,
         {
-            "cart.html": """
+            "flow-a.html": """
             <html>
               <body>
                 <div id="cart"></div>
@@ -505,7 +505,7 @@ def test_static_site_check_allows_javascript_template_literals(tmp_path):
             "name": "shop site",
             "validation_method": "static_site_check",
             "site_root": "site",
-            "required_files": ["cart.html"],
+            "required_files": ["flow-a.html"],
         }
     )
 
@@ -574,8 +574,8 @@ def test_static_site_check_allows_workspace_symlink_alias(tmp_path):
     _write_site(
         real_workspace,
         {
-            "index.html": '<a href="products.html">Products</a>',
-            "products.html": '<a href="index.html">Home</a>',
+            "index.html": '<a href="items.html">Products</a>',
+            "items.html": '<a href="index.html">Home</a>',
         },
     )
     record = run_static_site_check(

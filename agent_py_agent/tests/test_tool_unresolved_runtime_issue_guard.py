@@ -40,6 +40,26 @@ def test_no_tool_final_redirects_unresolved_artifact_integrity_issue(tmp_path: P
     assert any("unresolved-runtime-issues" in item for item in params.tool_context)
 
 
+# LLM: zero unresolved-runtime redirect max means unlimited repair contexts.
+# 函数用途: 验证未解决运行问题 guard 的 0 次数预算不会让修复上下文提前消失。
+def test_unresolved_runtime_issue_zero_redirect_limit_is_unlimited(tmp_path: Path, monkeypatch):
+    from agent_py_agent.agent.agent_core import tool_unresolved_runtime_issue_guard as guard
+
+    monkeypatch.setattr(guard, "_MAX_REDIRECTS", 0)
+    params = _params(
+        archive_tool_calls=[
+            _artifact_integrity_archive_record(
+                ok=False,
+                artifact_ok=False,
+                path="app.js",
+                codes=["STATIC_SITE_MISSING_DOM_ID_HITS"],
+            )
+        ]
+    )
+
+    assert guard.unresolved_runtime_issue_context(params, redirects=99)
+
+
 # LLM: A later successful integrity envelope for the same target clears the earlier failure.
 # 函数用途: 验证 final gate 按结构化目标和后续成功记录消解问题，不靠最终自然语言自证。
 def test_no_tool_final_allows_after_artifact_integrity_issue_is_cleared(tmp_path: Path):

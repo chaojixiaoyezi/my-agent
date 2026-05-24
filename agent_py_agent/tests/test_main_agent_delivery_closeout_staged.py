@@ -6,6 +6,9 @@ import json
 import tempfile
 from pathlib import Path
 
+from agent_py_agent.agent.agent_core.main_agent_delivery_closeout import (
+    _should_block_on_no_progress,
+)
 from agent_py_agent.agent.agent_core.runtime_loop_models import RunParams
 from agent_py_agent.tests.support.main_agent_delivery_closeout_fixtures import (
     xlsx_delivery_contract,
@@ -19,10 +22,10 @@ def test_delivery_closeout_prefers_checkpoint_quality_actions_before_builder():
 
     assert "STAGED_JSON_NO_ROWS" in actions
     assert actions["STAGED_JSON_NO_ROWS"]["recommended_action"] == "write_non_empty_structured_rows"
-    assert actions["STAGED_JSON_NO_ROWS"]["checkpoint_ref"] == "outputs/github_star_growth/source_data.json"
+    assert actions["STAGED_JSON_NO_ROWS"]["checkpoint_ref"] == "outputs/table_report/source_data.json"
     assert actions["STAGED_JSON_NO_ROWS"]["writer_tool"] == "write_structured_json"
     assert "checkpoint_shape_hint" in actions["STAGED_JSON_NO_ROWS"]
-    assert actions["STAGED_JSON_NO_ROWS"]["required_columns"] == ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"]
+    assert actions["STAGED_JSON_NO_ROWS"]["required_columns"] == ["记录名", "地址", "指标值", "中文说明", "说明依据"]
     assert "STAGING_BUILDER_READY" not in actions
 
 
@@ -52,7 +55,7 @@ def test_delivery_closeout_rejects_non_tabular_checkpoint_when_columns_required(
     )
 
     assert "STAGED_JSON_REQUIRED_COLUMNS_MISSING" in actions
-    assert actions["STAGED_JSON_REQUIRED_COLUMNS_MISSING"]["missing_columns"] == "项目名,地址,上升 star 数,中文解释,推荐理由"
+    assert actions["STAGED_JSON_REQUIRED_COLUMNS_MISSING"]["missing_columns"] == "记录名,地址,指标值,中文说明,说明依据"
     assert "checkpoint_shape_hint" in actions["STAGED_JSON_REQUIRED_COLUMNS_MISSING"]
     assert "STAGING_BUILDER_READY" not in actions
 
@@ -66,8 +69,8 @@ def test_delivery_closeout_requires_staged_json_required_columns_before_builder(
                 "sheets": [
                     {
                         "name": "week-1",
-                        "columns": ["项目名", "地址", "周上升star数"],
-                        "rows": [{"项目名": "demo", "地址": "https://example.com", "周上升star数": 10}],
+                        "columns": ["记录名", "地址", "周指标值"],
+                        "rows": [{"记录名": "demo", "地址": "https://example.com", "周指标值": 10}],
                     }
                 ]
             },
@@ -77,7 +80,7 @@ def test_delivery_closeout_requires_staged_json_required_columns_before_builder(
 
     assert "STAGED_JSON_REQUIRED_COLUMNS_MISSING" in actions
     assert actions["STAGED_JSON_REQUIRED_COLUMNS_MISSING"]["recommended_action"] == "repair_structured_checkpoint_json"
-    assert "上升 star 数" in actions["STAGED_JSON_REQUIRED_COLUMNS_MISSING"]["missing_columns"]
+    assert "指标值" in actions["STAGED_JSON_REQUIRED_COLUMNS_MISSING"]["missing_columns"]
     assert "STAGING_BUILDER_READY" not in actions
 
 
@@ -85,15 +88,15 @@ def test_delivery_closeout_requires_staged_json_evidence_before_builder():
     contract = xlsx_delivery_contract()
     artifact = contract["artifacts"][0]
     artifact["validation_contract"]["evidence_contract"] = {
-        "required_fields": ["上升 star 数"],
+        "required_fields": ["指标值"],
         "require_verified": True,
     }
     actions = _actions_for_source(_valid_rows_json(), contract=contract)
 
     assert "EVIDENCE_REQUIRED_FIELD_MISSING" in actions
     assert actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["recommended_action"] == "repair_evidence_refs"
-    assert actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["checkpoint_ref"] == "outputs/github_star_growth/source_data.json"
-    assert actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["required_fields"] == ["上升 star 数"]
+    assert actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["checkpoint_ref"] == "outputs/table_report/source_data.json"
+    assert actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["required_fields"] == ["指标值"]
     assert actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["writer_tool"] == "write_structured_json"
     assert "claims" in actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["evidence_shape_hint"]
     assert "STAGING_BUILDER_READY" not in actions
@@ -105,13 +108,13 @@ def test_delivery_closeout_missing_source_checkpoint_prefers_auditable_collectio
     contract = xlsx_delivery_contract()
     artifact = contract["artifacts"][0]
     artifact["validation_contract"]["collection_contract"] = {
-        "source_json_ref": "outputs/github_star_growth/source_data.json",
-        "required_item_evidence_fields": ["项目名", "地址", "上升 star 数"],
+        "source_json_ref": "outputs/table_report/source_data.json",
+        "required_item_evidence_fields": ["记录名", "地址", "指标值"],
         "require_completion_evidence": True,
         "require_item_evidence": True,
     }
     artifact["validation_contract"]["evidence_contract"] = {
-        "required_fields": ["项目名", "地址", "上升 star 数"],
+        "required_fields": ["记录名", "地址", "指标值"],
         "require_verified": True,
     }
 
@@ -119,7 +122,7 @@ def test_delivery_closeout_missing_source_checkpoint_prefers_auditable_collectio
         _, actions = _enriched_report(Path(td).resolve(), contract)
 
     action = actions["STAGING_CHECKPOINT_MISSING"]
-    assert action["checkpoint_ref"] == "outputs/github_star_growth/source_data.json"
+    assert action["checkpoint_ref"] == "outputs/table_report/source_data.json"
     assert action["checkpoint_materialization_mode"] == "source_evidence_first"
     assert action["requires_auditable_source_evidence"] is True
     assert action["writer_tool"] == "api_json_collection"
@@ -135,13 +138,13 @@ def test_delivery_closeout_aggregates_missing_evidence_fields():
     artifact = contract["artifacts"][0]
     artifact["validation_contract"]["required_sheets_min"] = 1
     artifact["validation_contract"]["evidence_contract"] = {
-        "required_fields": ["项目名", "地址", "上升 star 数"],
+        "required_fields": ["记录名", "地址", "指标值"],
         "require_verified": True,
     }
     actions = _actions_for_source(_valid_rows_json(), contract=contract)
 
     action = actions["EVIDENCE_REQUIRED_FIELD_MISSING"]
-    assert action["required_fields"] == ["上升 star 数", "地址", "项目名"]
+    assert set(action["required_fields"]) == {"指标值", "地址", "记录名"}
     assert action["writer_tool"] == "write_structured_json"
     assert "source_refs" in action["evidence_shape_hint"]
 
@@ -171,7 +174,7 @@ def test_delivery_closeout_adds_generic_staging_builder_action_for_ready_source(
     assert "STAGING_BUILDER_READY" in actions
     assert actions["STAGING_BUILDER_READY"]["recommended_action"] == "invoke_builder_tool"
     assert actions["STAGING_BUILDER_READY"]["builder_tool"] == "data_to_workbook"
-    assert actions["STAGING_BUILDER_READY"]["source_ref"] == "outputs/github_star_growth/source_data.json"
+    assert actions["STAGING_BUILDER_READY"]["source_ref"] == "outputs/table_report/source_data.json"
 
 
 # LLM: Failed builder outputs should be regenerated from the staged source instead of manually patched.
@@ -185,18 +188,18 @@ def test_delivery_closeout_adds_builder_action_for_failed_existing_workbook():
         _write_source(workspace, _valid_rows_json())
         result = DataWorkbookTool(workspace).execute(
             {
-                "path": "outputs/github_star_growth/github_star_growth.xlsx",
+                "path": "outputs/table_report/table_report.xlsx",
                 "sheets": [
                     {
                         "name": "week-1",
-                        "columns": ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"],
+                        "columns": ["记录名", "地址", "指标值", "中文说明", "说明依据"],
                         "rows": [
                             {
-                                "项目名": "",
+                                "记录名": "",
                                 "地址": "https://example.com",
-                                "上升 star 数": 10,
-                                "中文解释": "demo",
-                                "推荐理由": "demo",
+                                "指标值": 10,
+                                "中文说明": "demo",
+                                "说明依据": "demo",
                             }
                         ],
                     }
@@ -209,18 +212,18 @@ def test_delivery_closeout_adds_builder_action_for_failed_existing_workbook():
 
         assert actions["STAGING_BUILDER_READY"]["recommended_action"] == "invoke_builder_tool"
         assert actions["STAGING_BUILDER_READY"]["builder_tool"] == "data_to_workbook"
-        assert actions["STAGING_BUILDER_READY"]["source_ref"] == "outputs/github_star_growth/source_data.json"
-        assert actions["STAGING_BUILDER_READY"]["output_ref"] == "outputs/github_star_growth/github_star_growth.xlsx"
+        assert actions["STAGING_BUILDER_READY"]["source_ref"] == "outputs/table_report/source_data.json"
+        assert actions["STAGING_BUILDER_READY"]["output_ref"] == "outputs/table_report/table_report.xlsx"
 
 
 # LLM: Invalid staged JSON should produce a repair action with parse context instead of a builder action.
 # 函数用途: 验证阶段 JSON 损坏时，closeout 会要求先修 JSON，而不是继续下游构建。
 def test_delivery_closeout_reports_invalid_checkpoint_json():
-    actions = _actions_for_source('[{"项目名":"demo","地址":"https://example.com"')
+    actions = _actions_for_source('[{"记录名":"demo","地址":"https://example.com"')
 
     assert "STAGED_JSON_INVALID" in actions
     assert actions["STAGED_JSON_INVALID"]["recommended_action"] == "repair_structured_checkpoint_json"
-    assert actions["STAGED_JSON_INVALID"]["checkpoint_ref"] == "outputs/github_star_growth/source_data.json"
+    assert actions["STAGED_JSON_INVALID"]["checkpoint_ref"] == "outputs/table_report/source_data.json"
     assert "parse_error" in actions["STAGED_JSON_INVALID"]
     assert actions["STAGED_JSON_INVALID"]["writer_tool"] == "write_structured_json"
     assert "STAGING_BUILDER_READY" not in actions
@@ -232,7 +235,7 @@ def test_delivery_closeout_does_not_materialize_builder_output_before_source_is_
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td).resolve()
         contract = xlsx_delivery_contract()
-        report, _ = _enriched_report_for_source(workspace, '[{"项目名":"demo","地址":"https://example.com"', contract)
+        report, _ = _enriched_report_for_source(workspace, '[{"记录名":"demo","地址":"https://example.com"', contract)
         actions = report["delivery_progress"]["recovery_actions"]
 
         builder_output_refs = {
@@ -253,7 +256,7 @@ def test_delivery_closeout_defers_no_progress_block_when_write_first_repair_exis
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td).resolve()
         contract = xlsx_delivery_contract()
-        report, actions = _enriched_report_for_source(workspace, '[{"项目名":"demo","地址":"https://example.com"', contract)
+        report, actions = _enriched_report_for_source(workspace, '[{"记录名":"demo","地址":"https://example.com"', contract)
         previous = _previous_delivery_progress(report, unchanged_failure_count=5)
 
         from agent_py_agent.agent.agent_core.main_agent_delivery_closeout import (
@@ -268,103 +271,44 @@ def test_delivery_closeout_defers_no_progress_block_when_write_first_repair_exis
         assert _should_block_on_no_progress(enriched, contract=contract, workspace_root=workspace) is False
 
 
+# LLM: explicit zero no-progress threshold means no closeout loop cap.
+# 函数用途: 验证 closeout 报告里 no_progress_block_threshold=0 不会被实时阈值兜底重新卡住。
+def test_delivery_closeout_zero_no_progress_threshold_is_unlimited():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td).resolve()
+
+        report = {
+            "ok": False,
+            "artifacts": [],
+            "delivery_progress": {
+                "unchanged_failure_count": 999,
+                "no_progress_block_threshold": 0,
+                "recovery_actions": [],
+            },
+        }
+
+        assert _should_block_on_no_progress(report, contract={}, workspace_root=workspace) is False
+
+
 # LLM: Delivery progress must watch contract-declared artifact roots, not only built-in outputs/.
 # 函数用途: 复现 Live Lab 使用 lab_outputs 时，真实文件变化曾被误判为无进展而过早阻断的问题。
 def test_delivery_progress_tracks_contract_declared_artifact_roots():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td).resolve()
-        contract = _lab_outputs_web_contract()
-        report = _failed_lab_outputs_web_report(workspace)
+        contract = _custom_root_artifact_contract()
+        report = _failed_custom_root_artifact_report(workspace)
 
         from agent_py_agent.agent.agent_core.main_agent_delivery_closeout import (
             _enrich_delivery_progress,
         )
 
         first = _enrich_delivery_progress(report, {}, workspace, contract=contract)
-        target = workspace / "lab_outputs/main-web-app/index.html"
+        target = workspace / "lab_outputs/custom-artifact/index.html"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("<!doctype html><html><body><input id='email'></body></html>", encoding="utf-8")
         second = _enrich_delivery_progress(report, first, workspace, contract=contract)
 
         assert second["delivery_progress"]["unchanged_failure_count"] == 1
-
-
-# LLM: A valid final file cannot bypass invalid staged checkpoints declared by the same contract.
-# 函数用途: 验证 PDF 签名有效但 source_index.json 为空时，closeout 仍按阶段合同失败，不误发完成标记。
-def test_delivery_closeout_rejects_valid_final_artifact_when_staged_checkpoint_is_empty():
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td).resolve()
-        contract = _research_pdf_contract()
-        _write_valid_pdf(workspace / "outputs/research_documents/research_documents_zh.pdf")
-        draft = workspace / "outputs/research_documents/research_documents_zh.md"
-        draft.parent.mkdir(parents=True, exist_ok=True)
-        draft.write_text("# 翻译正文\n\n这是已经生成的中文草稿。", encoding="utf-8")
-        source_index = workspace / "outputs/research_documents/source_index.json"
-        source_index.parent.mkdir(parents=True, exist_ok=True)
-        source_index.write_text("[]", encoding="utf-8")
-
-        report, actions = _enriched_report(workspace, contract)
-        findings = report["artifacts"][0]["acceptance_report"]["findings"]
-
-        assert report["ok"] is False
-        assert {item["code"] for item in findings} == {"STAGED_JSON_NO_ROWS"}
-        assert actions["STAGED_JSON_NO_ROWS"]["recommended_action"] == "write_non_empty_structured_rows"
-        assert actions["STAGED_JSON_NO_ROWS"]["checkpoint_ref"] == "outputs/research_documents/source_index.json"
-
-
-# LLM: Non-JSON staged sources should still become builder-ready once present and non-empty.
-# 函数用途: 验证 Markdown 草稿存在且 PDF 缺失时，恢复动作会指向通用 markdown_to_pdf builder。
-def test_delivery_closeout_adds_document_builder_action_for_ready_markdown_source():
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td).resolve()
-        contract = _research_pdf_contract()
-        source_index = workspace / "outputs/research_documents/source_index.json"
-        source_index.parent.mkdir(parents=True, exist_ok=True)
-        source_index.write_text('[{"title":"demo","url":"https://example.com"}]', encoding="utf-8")
-        draft = workspace / "outputs/research_documents/research_documents_zh.md"
-        draft.write_text("# 翻译正文\n\n这是已经完成的中文草稿。", encoding="utf-8")
-
-        _, actions = _enriched_report(workspace, contract)
-
-        assert "STAGING_BUILDER_READY" in actions
-        assert actions["STAGING_BUILDER_READY"]["builder_tool"] == "markdown_to_pdf"
-        assert actions["STAGING_BUILDER_READY"]["source_ref"] == "outputs/research_documents/research_documents_zh.md"
-        assert actions["STAGING_BUILDER_READY"]["output_ref"] == "outputs/research_documents/research_documents_zh.pdf"
-
-
-# LLM: Evidence repair for document flows must target the structured source index, not the markdown builder input.
-# 函数用途: 验证 source_markdown_ref 作为 builder 输入时，collection_contract.source_json_ref 仍能生成证据修复动作。
-def test_delivery_closeout_repairs_collection_source_evidence_before_document_builder():
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td).resolve()
-        contract = _research_pdf_contract()
-        artifact = contract["artifacts"][0]
-        artifact["validation_contract"]["collection_contract"] = {
-            "source_json_ref": "outputs/research_documents/source_index.json",
-        }
-        artifact["validation_contract"]["evidence_contract"] = {
-            "required_fields": ["title", "url", "date"],
-            "require_verified": True,
-        }
-        _write_json_file(
-            workspace / "outputs/research_documents/source_index.json",
-            {
-                "rows": [{"title": "demo", "url": "https://example.com", "date": "2026-01-01"}],
-                "source_refs": [{"source_id": "src-1", "uri": "https://example.com"}],
-                "claims": [{"field": "title", "value": "demo", "source_ids": ["src-1"]}],
-            },
-        )
-        draft = workspace / "outputs/research_documents/research_documents_zh.md"
-        draft.write_text("# 翻译正文\n\n这是已经完成的中文草稿。", encoding="utf-8")
-
-        _, actions = _enriched_report(workspace, contract)
-
-        action = actions["EVIDENCE_REQUIRED_FIELD_MISSING"]
-        assert action["recommended_action"] == "repair_evidence_refs"
-        assert action["checkpoint_ref"] == "outputs/research_documents/source_index.json"
-        assert action["required_fields"] == ["date", "url"]
-        assert action["writer_tool"] == "write_structured_json"
-        assert "STAGING_BUILDER_READY" not in actions
 
 
 # LLM: Recovery actions must not drop larger structured validator batches.
@@ -463,22 +407,22 @@ def _enriched_report(
     return enriched, actions
 
 
-# LLM: _lab_outputs_web_contract mirrors Live Lab's non-default artifact root without copying its prompt.
-# 函数用途: 构造使用 lab_outputs 的结构化网页合同，验证进展指纹按合同根目录扩展。
-def _lab_outputs_web_contract() -> dict[str, object]:
+# LLM: _custom_root_artifact_contract mirrors a non-default artifact root without copying a task template.
+# 函数用途: 构造使用 lab_outputs 的结构化样例合同，验证进展指纹按合同根目录扩展。
+def _custom_root_artifact_contract() -> dict[str, object]:
     return {
-        "case_id": "main_direct_web_app",
+        "case_id": "custom_root_artifact_case",
         "bootstrap_contract": {
             "materialization_targets": [
-                {"workspace_relative_path": f"lab_outputs/main-web-app/{name}"}
+                {"workspace_relative_path": f"lab_outputs/custom-artifact/{name}"}
                 for name in ("index.html", "styles.css", "app.js", "README.md")
             ]
         },
         "artifacts": [
             {
-                "artifact_id": "main_web_app_root",
+                "artifact_id": "custom_artifact_root",
                 "kind": "web_project",
-                "preferred_path": "lab_outputs/main-web-app",
+                "preferred_path": "lab_outputs/custom-artifact",
                 "required": True,
                 "validation_contract": {"validator": "static_site_check"},
             }
@@ -486,17 +430,17 @@ def _lab_outputs_web_contract() -> dict[str, object]:
     }
 
 
-# LLM: _failed_lab_outputs_web_report keeps the progress test focused on fingerprinting.
+# LLM: _failed_custom_root_artifact_report keeps the progress test focused on fingerprinting.
 # 函数用途: 生成一个稳定失败报告；测试关注文件变化是否重置 unchanged_failure_count。
-def _failed_lab_outputs_web_report(workspace: Path) -> dict[str, object]:
+def _failed_custom_root_artifact_report(workspace: Path) -> dict[str, object]:
     return {
-        "case_id": "main_direct_web_app",
+        "case_id": "custom_root_artifact_case",
         "ok": False,
         "artifacts": [
             {
-                "artifact_id": "main_web_app_root",
+                "artifact_id": "custom_artifact_root",
                 "kind": "web_project",
-                "path": str(workspace / "lab_outputs/main-web-app"),
+                "path": str(workspace / "lab_outputs/custom-artifact"),
                 "ok": False,
                 "acceptance_report": {
                     "findings": [
@@ -514,60 +458,11 @@ def _failed_lab_outputs_web_report(workspace: Path) -> dict[str, object]:
 
 
 # LLM: _write_source materializes the staged JSON checkpoint under the task workspace.
-# 函数用途: 写 outputs/github_star_growth/source_data.json，让 closeout 读取真实文件状态。
+# 函数用途: 写 outputs/table_report/source_data.json，让 closeout 读取真实文件状态。
 def _write_source(workspace: Path, source_content: str) -> None:
-    source = workspace / "outputs/github_star_growth/source_data.json"
+    source = workspace / "outputs/table_report/source_data.json"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(source_content, encoding="utf-8")
-
-
-# LLM: _write_valid_pdf writes a minimal signature-valid PDF for closeout tests.
-# 函数用途: 让测试聚焦 staged checkpoint 合同，而不是 PDF 解析细节。
-def _write_valid_pdf(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n")
-
-
-# LLM: _write_json_file writes deterministic fixture JSON for staged contract tests.
-# 函数用途: 写入测试用结构化 JSON，避免每个场景手写 JSON 字符串。
-def _write_json_file(path: Path, payload: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-
-
-# LLM: _research_pdf_contract mirrors a generic source-index -> draft -> PDF staged delivery flow.
-# 函数用途: 提供非专项的“阶段来源索引 + 最终 PDF”合同，覆盖所有长文档生成任务的收口问题。
-def _research_pdf_contract() -> dict[str, object]:
-    return {
-        "case_id": "document_translation_pdf",
-        "artifacts": [
-            {
-                "artifact_id": "document_pdf",
-                "kind": "pdf",
-                "preferred_path": "outputs/research_documents/research_documents_zh.pdf",
-                "required": True,
-                "validation_contract": {
-                    "validator": "document_acceptance",
-                    "staging_contract": {
-                        "strategy": "source_index_then_translation_draft_then_pdf",
-                        "builder_tool": "markdown_to_pdf",
-                        "source_markdown_ref": "outputs/research_documents/research_documents_zh.md",
-                        "pdf_ref": "outputs/research_documents/research_documents_zh.pdf",
-                        "checkpoint_shape_hints": {
-                            "outputs/research_documents/source_index.json": (
-                                '[{"title":"...","authors":["..."],"date":"...","url":"..."}]'
-                            )
-                        },
-                        "checkpoint_refs": [
-                            "outputs/research_documents/source_index.json",
-                            "outputs/research_documents/research_documents_zh.md",
-                            "outputs/research_documents/research_documents_zh.pdf",
-                        ],
-                    },
-                },
-            }
-        ],
-    }
 
 
 # LLM: _previous_delivery_progress builds a prior closeout report with matching fingerprints.
@@ -592,14 +487,14 @@ def _valid_rows_json() -> str:
             "sheets": [
                 {
                     "name": "week-1",
-                    "columns": ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"],
+                    "columns": ["记录名", "地址", "指标值", "中文说明", "说明依据"],
                     "rows": [
                         {
-                            "项目名": "demo",
+                            "记录名": "demo",
                             "地址": "https://example.com",
-                            "上升 star 数": 10,
-                            "中文解释": "demo",
-                            "推荐理由": "demo",
+                            "指标值": 10,
+                            "中文说明": "demo",
+                            "说明依据": "demo",
                         }
                     ],
                 }

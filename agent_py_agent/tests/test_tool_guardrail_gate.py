@@ -57,6 +57,31 @@ class TestExactFailureDetection:
         assert decision.allowed is False
         assert any("EXACT_FAILURE_BLOCKED" in f.code for f in decision.findings)
 
+    # LLM: zero warn/block thresholds disable the count gate instead of blocking immediately.
+    # 函数用途: 验证运行时工具 guardrail 的 0 阈值不会被 count>=0 误判为立即告警或阻断。
+    def test_zero_thresholds_are_unlimited(self):
+        config = ToolGuardrailConfig(
+            exact_failure_warn_after=0,
+            exact_failure_block_after=0,
+            same_tool_failure_warn_after=0,
+            same_tool_failure_block_after=0,
+            no_progress_warn_after=0,
+            no_progress_block_after=0,
+        )
+        records = tuple(
+            _make_record("read_file", "abc123", failed=True, result_hash="same")
+            for _ in range(20)
+        )
+
+        decision = evaluate_tool_guardrail_gate(
+            ToolGuardrailFacts("read_file", "abc123", result_hash="same"),
+            config=config,
+            records=records,
+        )
+
+        assert decision.allowed is True
+        assert decision.findings == ()
+
     def test_resets_exact_count_on_success(self):
         config = ToolGuardrailConfig(exact_failure_warn_after=2)
         records = (

@@ -17,20 +17,20 @@ def test_file_contract_extracts_structured_required_files():
     text = """
     required_files: index.html、style.css/app.js, docs/README.md
     required_files:
-    - checkout.html
+    - flow-b.html
     - reports/final_report.md
     """
 
     required = required_file_terms_from_text(text, extensions=r"html?|css|js|md")
 
-    assert required == ["index.html", "style.css", "app.js", "docs/README.md", "checkout.html", "reports/final_report.md"]
+    assert required == ["index.html", "style.css", "app.js", "docs/README.md", "flow-b.html", "reports/final_report.md"]
 
 
 # LLM: structured forbidden_files fields stay separate from deliverables.
 # 函数用途: forbidden_files 机器字段只进入禁止文件合同，不会污染 required_files。
 def test_file_contract_extracts_structured_forbidden_files():
     text = """
-    required_files: index.html, product-detail.html
+    required_files: index.html, item-detail.html
     forbidden_files: product.html/legacy.html, output.json
     forbidden_files:
     - RUNNER_RESULT.md
@@ -40,7 +40,7 @@ def test_file_contract_extracts_structured_forbidden_files():
     required = required_file_terms_from_text(text, extensions=r"html?|json|md")
     forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|json|md")
 
-    assert required == ["index.html", "product-detail.html"]
+    assert required == ["index.html", "item-detail.html"]
     assert forbidden == ["product.html", "legacy.html", "output.json", "RUNNER_RESULT.md", "execution_context.json"]
 
 

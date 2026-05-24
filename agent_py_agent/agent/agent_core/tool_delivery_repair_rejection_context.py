@@ -14,7 +14,7 @@ def render_delivery_repair_rejection_context(
     repairs: int,
     max_repairs: int,
 ) -> str:
-    if not payload or repairs >= max_repairs:
+    if not payload or (max_repairs > 0 and repairs >= max_repairs):
         return ""
     rejection_payload = {
         **payload,
@@ -26,7 +26,8 @@ def render_delivery_repair_rejection_context(
             "[tool-system delivery-required-repair-rejected]",
             json.dumps(rejection_payload, ensure_ascii=False, sort_keys=True),
             "上一轮工具调用没有推进 required_actions，系统未执行这些检查/空转调用。"
-            "下一轮必须调用 required_tool_calls 中匹配的真实写入或构建工具。",
+            "请优先调用 required_tool_calls 中匹配的真实写入或构建工具；"
+            "如果还需要读取或搜索，请同步留下可验收的本地进展。",
         ]
     )
 

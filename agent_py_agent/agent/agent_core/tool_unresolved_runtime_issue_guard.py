@@ -24,7 +24,7 @@ def unresolved_runtime_issues(params: object) -> list[dict[str, object]]:
 # 函数用途: 将未解决问题以 JSON 形式给下一轮模型，机器判断仍由 archive fields 决定。
 def unresolved_runtime_issue_context(params: object, redirects: int) -> str:
     issues = unresolved_runtime_issues(params)
-    if not issues or redirects >= _MAX_REDIRECTS:
+    if not issues or (_MAX_REDIRECTS > 0 and redirects >= _MAX_REDIRECTS):
         return ""
     envelope = {
         "unresolved_runtime_issues": issues[:8],

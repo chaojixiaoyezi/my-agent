@@ -44,10 +44,10 @@ def test_task_workspace_path_template_sanitizes_task_name(tmp_path: Path):
         tmp_path,
         "workspace/tasks/{date}/{task_slug}",
         date="2026-05-13",
-        task_name="购物网站 E2E / main",
+        task_name="示例网站 E2E / main",
     )
 
-    assert path == tmp_path / "workspace" / "tasks" / "2026-05-13" / "购物网站-e2e-main"
+    assert path == tmp_path / "workspace" / "tasks" / "2026-05-13" / "示例网站-e2e-main"
 
 
 # LLM: home paths are a stable map for docs, setup, doctor, and later migration commands.

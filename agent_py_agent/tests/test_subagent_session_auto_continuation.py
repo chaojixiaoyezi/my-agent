@@ -61,7 +61,7 @@ def test_subagent_runner_auto_continues_through_multiple_local_compacts(tmp_path
     backend = MultiCompactSubagentBackend()
     agent.backend = backend
     task = agent.subagents.create_run(
-        goal="长任务：分多轮写完购物站恢复说明",
+        goal="长任务：分多轮写完示例站恢复说明",
         thought="测试子代理本地 compact 自动续跑。",
         plan=["写第一段", "本地 compact", "继续直到 SUBAGENT_RESULT"],
         role="worker",
@@ -152,7 +152,7 @@ def test_task_local_write_progress_updates_continue_packet(tmp_path: Path) -> No
 # 函数用途: 复现真实 E2E 里 HTML 已闭合但子代理继续读写不收口；进度包应提示写 output.json 交父级验收。
 def test_task_local_write_progress_completed_html_prompts_output_json_closeout(tmp_path: Path) -> None:
     task = _progress_task(tmp_path)
-    artifact = tmp_path / "deliverables" / "furniture-home" / "index.html"
+    artifact = tmp_path / "deliverables" / "site-output" / "index.html"
     artifact.parent.mkdir(parents=True)
     artifact.write_text("<html><body><main id='hero'>done</main></body></html>", encoding="utf-8")
 
@@ -178,7 +178,7 @@ def test_task_local_write_progress_completed_html_prompts_output_json_closeout(t
 # 函数用途: 复现家具页真实产物残留 href="#"；进度包应提示先修复明显失效链接，再写 output.json。
 def test_task_local_write_progress_placeholder_hash_link_prompts_repair(tmp_path: Path) -> None:
     task = _progress_task(tmp_path)
-    artifact = tmp_path / "deliverables" / "furniture-home" / "index.html"
+    artifact = tmp_path / "deliverables" / "site-output" / "index.html"
     artifact.parent.mkdir(parents=True)
     artifact.write_text(
         "<html><body><main id='hero'>done</main><a href='#'>品牌故事</a><a href='#missing'>空间系列</a></body></html>",
@@ -210,7 +210,7 @@ def test_task_local_write_progress_placeholder_hash_link_prompts_repair(tmp_path
 # 函数用途: 复现真实 E2E 中 17 个 href="#" 被一轮只替换一个，进度包应提示批量修复策略。
 def test_task_local_write_progress_many_placeholder_links_prompts_batch_repair(tmp_path: Path) -> None:
     task = _progress_task(tmp_path)
-    artifact = tmp_path / "deliverables" / "furniture-home" / "index.html"
+    artifact = tmp_path / "deliverables" / "site-output" / "index.html"
     artifact.parent.mkdir(parents=True)
     artifact.write_text(
         (
@@ -247,7 +247,7 @@ def test_task_local_output_json_closeout_preserves_product_integrity_progress(tm
     output_json = tmp_path / "legacy" / "run-progress" / "output.json"
     output_json.parent.mkdir(parents=True)
     task.output_json = str(output_json)
-    artifact = tmp_path / "deliverables" / "furniture-home" / "index.html"
+    artifact = tmp_path / "deliverables" / "site-output" / "index.html"
     artifact.parent.mkdir(parents=True)
     artifact.write_text(
         "<html><body><main id='hero'>done</main><a href='#'>联系客服</a></body></html>",

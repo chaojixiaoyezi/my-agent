@@ -32,21 +32,21 @@ def evaluate_acceptance_closeout_gate(report: dict[str, Any]) -> GateDecision:
 # 函数用途: 最终完成只能由 run/runtime/state/quality/acceptance 五个结构化 gate 共同放行，不能跳过任何一门。
 def evaluate_final_closeout_gate(report: dict[str, Any]) -> GateDecision:
     findings: list[GateFinding] = []
-    for key in ("run_contract_gate", "runtime_gate", "state_gate", "delivery_quality_gate", "acceptance_gate"):
+    child_gates = [
+        "run_contract_gate",
+        "runtime_gate",
+        "state_gate",
+        "delivery_quality_gate",
+        *([] if "fact_evidence_gate" not in report else ["fact_evidence_gate"]),
+        "acceptance_gate",
+    ]
+    for key in child_gates:
         _require_allowed_child_gate(report, key, findings)
     if findings:
         return GateDecision.repair("final_closeout", findings, evidence={"missing_count": len(findings)})
     return GateDecision.allow(
         "final_closeout",
-        evidence={
-            "child_gates": [
-                "run_contract_gate",
-                "runtime_gate",
-                "state_gate",
-                "delivery_quality_gate",
-                "acceptance_gate",
-            ],
-        },
+        evidence={"child_gates": child_gates},
     )
 
 

@@ -13,19 +13,19 @@ from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
 
 
 # LLM: test_hierarchy_schedule_preserves_shopping_file_contract covers real E2E page-name drift.
-# 函数用途: 购物站这类父级明确列文件名时，下层不能把 product-detail/style.css/app.js 改成其它名字。
+# 函数用途: 示例站这类父级明确列文件名时，下层不能把 product-detail/style.css/app.js 改成其它名字。
 def test_hierarchy_schedule_preserves_shopping_file_contract_when_child_goal_only_has_build_dir(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
     root = manager.create_run(
-        goal="购物站需要完整页面结构和 4 层链路。",
+        goal="示例站需要完整页面结构和 4 层链路。",
         thought="root only dispatches.",
         plan=["plan"],
         extra_write_roots=[str(build)],
         attributes={
             "required_files": [
-                "index.html", "register.html", "login.html", "products.html", "product-detail.html",
-                "cart.html", "checkout.html", "order-success.html", "style.css", "app.js",
+                "index.html", "register.html", "login.html", "items.html", "item-detail.html",
+                "flow-a.html", "flow-b.html", "flow-done.html", "style.css", "app.js",
             ],
             "hierarchy_contracts": ["4 层链路", "depth=1 小傻妞-*", "depth=2 小小傻妞-*", "depth=3 小小小傻妞-*"],
         },
@@ -47,8 +47,8 @@ def test_hierarchy_schedule_preserves_shopping_file_contract_when_child_goal_onl
     )
     child = manager.load(result.created_run_ids[0])
 
-    assert "product-detail.html" in child.goal
-    assert "order-success.html" in child.goal
+    assert "item-detail.html" in child.goal
+    assert "flow-done.html" in child.goal
     assert "style.css" in child.goal
     assert "app.js" in child.goal
     assert "4 层链路" in child.goal
@@ -71,14 +71,14 @@ def test_hierarchy_schedule_preserves_forbidden_file_contract_when_child_goal_su
 
 def _forbidden_file_contract_root(manager: SubAgentManager, build):
     return manager.create_run(
-        goal="购物站需要完整页面结构，并禁止旧文件名。",
+        goal="示例站需要完整页面结构，并禁止旧文件名。",
         thought="root only dispatches.",
         plan=["plan"],
         extra_write_roots=[str(build)],
         attributes={
             "required_files": [
-                "index.html", "register.html", "login.html", "products.html", "product-detail.html",
-                "cart.html", "checkout.html", "order-success.html", "style.css", "app.js",
+                "index.html", "register.html", "login.html", "items.html", "item-detail.html",
+                "flow-a.html", "flow-b.html", "flow-done.html", "style.css", "app.js",
             ],
             "forbidden_files": [
                 "product.html", "old-product.html", "legacy.html", "obsolete.html",
@@ -93,9 +93,9 @@ def _schedule_forbidden_contract_child(manager: SubAgentManager, root_id: str, b
         parent_run_id=root_id,
         child_specs=[HierarchyChildSpec(
             goal=(
-                f"交付静态购物网站页面到 {build}。核心产物必须同名：index.html、register.html、"
-                "login.html、products.html、product-detail.html、cart.html、checkout.html、"
-                "order-success.html、style.css、app.js。约束：禁止文件名改、禁止 output.json。"
+                f"交付静态示例网站页面到 {build}。核心产物必须同名：index.html、register.html、"
+                "login.html、items.html、item-detail.html、flow-a.html、flow-b.html、"
+                "flow-done.html、style.css、app.js。约束：禁止文件名改、禁止 output.json。"
             ),
             role="child_coordinator",
             agent_name="小傻妞-页面协调",
@@ -134,12 +134,12 @@ def test_hierarchy_schedule_preserves_no_space_four_layer_contract_without_forci
 # 函数用途: 创建带“4层”中文无空格约束的 root 和第一层 coordinator。
 def _create_no_space_four_layer_child(manager: SubAgentManager, build):
     root = manager.create_run(
-        goal="购物站需要指定文件和 4 层链路。",
+        goal="示例站需要指定文件和 4 层链路。",
         thought="root only dispatches.",
         plan=["plan"],
         extra_write_roots=[str(build)],
         attributes={
-            "required_files": ["index.html", "products.html", "product-detail.html", "style.css", "app.js"],
+            "required_files": ["index.html", "items.html", "item-detail.html", "style.css", "app.js"],
             "hierarchy_contracts": [
                 "4层链路要求", "depth=1 小傻妞-*", "depth=2 小小傻妞-*", "depth=3 小小小傻妞-*", "max_depth=3",
             ],
@@ -151,8 +151,8 @@ def _create_no_space_four_layer_child(manager: SubAgentManager, build):
             child_specs=[
                 HierarchyChildSpec(
                     goal=(
-                        f"创建页面架构 coordinator，产物目录 {build}，核心产物 index.html、products.html、"
-                        "product-detail.html、style.css、app.js。"
+                        f"创建页面架构 coordinator，产物目录 {build}，核心产物 index.html、items.html、"
+                        "item-detail.html、style.css、app.js。"
                     ),
                     role="child_coordinator",
                     agent_name="小傻妞-页面协调",
@@ -166,17 +166,17 @@ def _create_no_space_four_layer_child(manager: SubAgentManager, build):
 
 
 # LLM: test_hierarchy_file_contract_skips_forbidden_rename_targets guards R22 prompt corruption.
-# 函数用途: 父级写“禁止改成 product.html”时，只继承 product-detail.html，不能把反例当必需产物。
+# 函数用途: 父级写“禁止改成 product.html”时，只继承 item-detail.html，不能把反例当必需产物。
 def test_hierarchy_file_contract_skips_forbidden_rename_targets(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
     root = manager.create_run(
-        goal="购物站需要指定文件，并禁止旧文件名。",
+        goal="示例站需要指定文件，并禁止旧文件名。",
         thought="root",
         plan=["plan"],
         extra_write_roots=[str(build)],
         attributes={
-            "required_files": ["index.html", "products.html", "product-detail.html", "style.css", "app.js"],
+            "required_files": ["index.html", "items.html", "item-detail.html", "style.css", "app.js"],
             "forbidden_files": ["product.html", "old-product.html", "legacy.html"],
         },
     )
@@ -191,7 +191,7 @@ def test_hierarchy_file_contract_skips_forbidden_rename_targets(tmp_path):
     child = manager.load(result.created_run_ids[0])
     required_section = child.goal.split("forbidden_files:", 1)[0]
 
-    assert "\n- product-detail.html\n" in required_section
+    assert "\n- item-detail.html\n" in required_section
     assert "\n- product.html\n" not in required_section
     assert "\n- old-product.html\n" not in required_section
     assert "\n- legacy.html\n" not in required_section

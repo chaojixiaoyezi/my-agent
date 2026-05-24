@@ -92,15 +92,15 @@ def _collection_params() -> dict[str, object]:
         ],
         "item_path": "items",
         "limit_per_request": 2,
-        "columns": ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"],
+        "columns": ["记录名", "地址", "指标值", "中文说明", "说明依据"],
         "fields": {
-            "项目名": "full_name",
+            "记录名": "full_name",
             "地址": "html_url",
-            "上升 star 数": "stargazers_count",
-            "中文解释": "description",
-            "推荐理由": {"template": "stars={stargazers_count}; language={language}"},
+            "指标值": "stargazers_count",
+            "中文说明": "description",
+            "说明依据": {"template": "stars={stargazers_count}; language={language}"},
         },
-        "evidence_fields": ["项目名", "地址", "上升 star 数"],
+        "evidence_fields": ["记录名", "地址", "指标值"],
         "completion_evidence": {"scope": "fixture", "method": "api_json_collection"},
     }
 
@@ -108,9 +108,9 @@ def _collection_params() -> dict[str, object]:
 def _validation_contract() -> dict[str, object]:
     return {
         "required_sheets_min": 2,
-        "required_columns": ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"],
+        "required_columns": ["记录名", "地址", "指标值", "中文说明", "说明依据"],
         "evidence_contract": {
-            "required_fields": ["项目名", "地址", "上升 star 数"],
+            "required_fields": ["记录名", "地址", "指标值"],
             "require_verified": True,
         },
         "collection_contract": {
@@ -119,7 +119,7 @@ def _validation_contract() -> dict[str, object]:
             "items_path": "rows",
             "min_groups": 2,
             "min_items_per_group": 2,
-            "required_item_fields": ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"],
+            "required_item_fields": ["记录名", "地址", "指标值", "中文说明", "说明依据"],
             "require_completion_evidence": True,
             "completion_evidence_path": "completion_evidence",
         },
@@ -190,7 +190,7 @@ def _range_collection_params() -> dict[str, object]:
             "url_template": "https://api.example.test/range?from={start_date}&to={end_date}&week={index}",
         }
     ]
-    params["fields"]["中文解释"] = {"path": "description", "default_template": "Repository {full_name} uses {language}"}
+    params["fields"]["中文说明"] = {"path": "description", "default_template": "Repository {full_name} uses {language}"}
     return params
 
 
@@ -206,7 +206,7 @@ def test_api_json_collection_writes_sourced_grouped_checkpoint(
     assert result.ok is True
     checkpoint = json.loads((tmp_path / "outputs/source_data.json").read_text(encoding="utf-8"))
     assert len(checkpoint["sheets"]) == 2
-    assert checkpoint["sheets"][0]["rows"][0]["field_source_ids"]["项目名"] == ["src-w01"]
+    assert checkpoint["sheets"][0]["rows"][0]["field_source_ids"]["记录名"] == ["src-w01"]
     assert len(checkpoint["claims"]) == 12
 
     findings = staged_checkpoint_findings(
@@ -229,7 +229,7 @@ def test_api_json_collection_builds_checkpoint_from_source_artifacts(tmp_path: P
     assert result.ok is True
     checkpoint = json.loads((tmp_path / "outputs/source_data.json").read_text(encoding="utf-8"))
     assert checkpoint["sheets"][0]["name"] == "2026-W01"
-    assert checkpoint["sheets"][0]["rows"][0]["field_source_ids"]["项目名"] == ["artifact-w01"]
+    assert checkpoint["sheets"][0]["rows"][0]["field_source_ids"]["记录名"] == ["artifact-w01"]
     assert checkpoint["source_refs"][0]["artifact_ref"] == ref
     assert checkpoint["source_refs"][0]["source_type"] == "artifact_json"
     assert len(checkpoint["claims"]) == 6
@@ -349,7 +349,7 @@ def test_api_json_collection_expands_date_range_and_defaults(
     assert result.ok is True
     checkpoint = json.loads((tmp_path / "outputs/source_data.json").read_text(encoding="utf-8"))
     assert [sheet["name"] for sheet in checkpoint["sheets"]] == ["2026-W01", "2026-W02", "2026-W03"]
-    assert checkpoint["sheets"][0]["rows"][0]["中文解释"] == "Repository org/project-1-a uses Python"
+    assert checkpoint["sheets"][0]["rows"][0]["中文说明"] == "Repository org/project-1-a uses Python"
 
 
 # LLM: Request-scope metadata must travel with expanded range sources so metric gates see machine facts.
@@ -381,7 +381,7 @@ def test_api_json_collection_preserves_range_reserved_metadata_for_metric_gate(
     contract = _validation_contract()
     contract["staging_contract"]["checkpoint_refs"] = ["outputs/source_data.json"]
     contract["metric_contracts"] = [
-        {"expected_kind": "time_window_delta", "field": "上升 star 数", "required_window": True}
+        {"expected_kind": "time_window_delta", "field": "指标值", "required_window": True}
     ]
     findings = staged_checkpoint_findings(
         [{"preferred_path": "unused.xlsx", "validation_contract": contract}],
@@ -475,7 +475,7 @@ def test_api_json_collection_rejects_columns_without_field_mapping(tmp_path: Pat
     from agent_py_agent.agent.tooling.api_json_collection import ApiJsonCollectionTool
 
     params = _collection_params()
-    params["columns"] = ["项目名", "地址", "缺少映射列"]
+    params["columns"] = ["记录名", "地址", "缺少映射列"]
 
     result = ApiJsonCollectionTool(tmp_path, timeout=3, resolver=_public_resolver).execute(params)
 
@@ -492,8 +492,8 @@ def test_api_json_collection_rejects_empty_evidence_field_without_fallback(
 
     _install_range_urlopen(monkeypatch)
     params = _range_collection_params()
-    params["fields"]["中文解释"] = {"path": "description"}
-    params["evidence_fields"] = ["项目名", "地址", "上升 star 数", "中文解释"]
+    params["fields"]["中文说明"] = {"path": "description"}
+    params["evidence_fields"] = ["记录名", "地址", "指标值", "中文说明"]
 
     result = ApiJsonCollectionTool(tmp_path, timeout=3, resolver=_public_resolver).execute(params)
 
@@ -512,12 +512,12 @@ def test_api_json_collection_rejects_placeholder_default_template(
     _install_fake_urlopen(monkeypatch)
     params = _collection_params()
     params["fields"] = {
-        "项目名": "full_name",
+        "记录名": "full_name",
         "地址": "html_url",
         "date": {"path": "published_at", "default_template": "__FILL_date__"},
     }
-    params["columns"] = ["项目名", "地址", "date"]
-    params["evidence_fields"] = ["项目名", "地址", "date"]
+    params["columns"] = ["记录名", "地址", "date"]
+    params["evidence_fields"] = ["记录名", "地址", "date"]
 
     result = ApiJsonCollectionTool(tmp_path, timeout=3, resolver=_public_resolver).execute(params)
 

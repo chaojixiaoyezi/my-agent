@@ -31,7 +31,7 @@ def validate_tool_events(
 ) -> OfflineToolValidation:
     findings: list[dict[str, object]] = []
     _validate_tool_result_shapes(events, findings)
-    _validate_repeated_no_progress(events, max(2, repeated_threshold), findings)
+    _validate_repeated_no_progress(events, max(0, repeated_threshold), findings)
     return OfflineToolValidation(
         ok=not findings,
         error_codes=tuple(dict.fromkeys(_text(item.get("code")) for item in findings)),
@@ -117,6 +117,8 @@ def _validate_repeated_no_progress(
     threshold: int,
     findings: list[dict[str, object]],
 ) -> None:
+    if threshold <= 0:
+        return
     last_key: tuple[str, str, str] | None = None
     streak = 0
     reported_keys: set[tuple[str, str, str]] = set()

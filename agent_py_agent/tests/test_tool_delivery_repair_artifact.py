@@ -96,7 +96,7 @@ def test_delivery_repair_context_includes_evidence_repair_shape(tmp_path: Path):
                         "code": "EVIDENCE_REQUIRED_FIELD_MISSING",
                         "recommended_action": "repair_evidence_refs",
                         "checkpoint_ref": "outputs/report/source_data.json",
-                        "required_fields": ["项目名", "地址"],
+                        "required_fields": ["记录名", "地址"],
                         "writer_tool": "write_structured_json",
                         "evidence_shape_hint": '{"source_refs":[],"claims":[]}',
                     }

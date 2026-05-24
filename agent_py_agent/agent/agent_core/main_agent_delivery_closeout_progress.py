@@ -65,9 +65,12 @@ def _should_block_on_no_progress(
     if _has_write_first_recovery_action(progress):
         return False
     unchanged = _safe_int(progress.get("unchanged_failure_count"))
-    threshold = _progress_threshold_from_report(progress)
-    if threshold <= 0:
+    if "no_progress_block_threshold" in progress:
+        threshold = _progress_threshold_from_report(progress)
+    else:
         threshold = _live_no_progress_threshold(report, contract, workspace_root)
+    if threshold <= 0:
+        return False
     if unchanged >= threshold and _has_write_first_recovery_action(progress):
         return False
     return unchanged >= threshold

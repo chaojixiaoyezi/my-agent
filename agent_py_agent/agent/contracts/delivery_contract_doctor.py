@@ -86,6 +86,7 @@ def validate_delivery_contract(payload: object, *, workspace_root: Path | None =
     normalized["schema_version"] = SCHEMA_VERSION
     normalized["artifacts"] = normalized_artifacts
     findings.extend(_validate_optional_dict(payload, "delivery_quality_contract"))
+    findings.extend(_validate_optional_dict(payload, "fact_evidence_contract"))
     findings.extend(_validate_optional_dict(payload, "bootstrap_contract"))
     return _report(normalized, findings)
 

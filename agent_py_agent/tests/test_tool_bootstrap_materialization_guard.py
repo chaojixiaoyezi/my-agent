@@ -24,6 +24,22 @@ def test_bootstrap_materialization_context_includes_startup_actions_and_shape_hi
     assert payload["checkpoint_shape_hints"]["outputs/report/source_data.json"]
 
 
+# LLM: zero bootstrap thresholds disable count-based startup hard stops.
+# 函数用途: 验证开工物化 guard 的显式 0 阈值不会让计数门立即阻断。
+def test_bootstrap_materialization_zero_thresholds_are_unlimited(monkeypatch):
+    from agent_py_agent.agent.agent_core import tool_bootstrap_materialization_guard as guard
+
+    monkeypatch.setattr(guard, "_EXPLORATION_BLOCK_THRESHOLD", 0)
+    monkeypatch.setattr(guard, "_REPEATED_EXPLORATION_BLOCK_THRESHOLD", 0)
+
+    assert guard._should_block(
+        {
+            "exploration_rounds_without_materialization": 999,
+            "repeated_exploration_count": 999,
+        }
+    ) is False
+
+
 # LLM: Generic artifact writer and builder tools should count as bootstrap materialization attempts.
 # 函数用途: 验证主代理调用通用 writer/builder 时不会被开工 guard 误判成“没有执行创建/写入动作”。
 def test_bootstrap_materialization_allows_generic_artifact_tools(tmp_path: Path):
@@ -38,7 +54,7 @@ def test_bootstrap_materialization_allows_generic_artifact_tools(tmp_path: Path)
         {
             "tool": "write_structured_json",
             "path": "outputs/report/source_data.json",
-            "sheets": [{"name": "榜单", "rows": [{"项目名": "demo"}]}],
+            "sheets": [{"name": "榜单", "rows": [{"记录名": "demo"}]}],
         },
         {
             "tool": "data_to_workbook",
@@ -121,6 +137,141 @@ def test_bootstrap_materialization_allows_search_evidence_tool_calls_to_run(tmp_
             agent=agent,
             params=params,
             response=ModelResponse(text="CALL_SEARCH", backend="fake"),
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+
+    assert decision.action == "run_tools"
+    assert decision.calls == calls
+    assert params.tool_context == []
+
+
+def test_soft_bootstrap_materialization_does_not_redirect_regular_task_calls(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_loop_repair_counters import ToolLoopRepairCounters
+    from agent_py_agent.agent.agent_core.tool_loop_response_decision import (
+        ToolLoopResponseDecisionRequest,
+        tool_loop_response_decision,
+    )
+    from agent_py_agent.agent.backend import ModelResponse
+
+    contract = _delivery_contract_with_shape_hint()
+    contract["bootstrap_contract"]["enforcement"] = "soft"
+    agent = _agent(tmp_path, {"CALL_LIST": [{"tool": "list_files", "path": "."}]})
+    params = _params(delivery_contract=contract)
+
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="CALL_LIST", backend="fake"),
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+
+    assert decision.action == "run_tools"
+    assert decision.calls == [{"tool": "list_files", "path": "."}]
+    assert params.tool_context == []
+
+
+# LLM: Soft bootstrap evidence gathering should not be converted into a hard preflight loop.
+# 函数用途: 验证普通任务可以连续取证；最终质量由 closeout/recovery 返工，而不是入口阶段直接卡断。
+def test_soft_bootstrap_materialization_allows_repeated_evidence_without_target(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_loop_repair_counters import ToolLoopRepairCounters
+    from agent_py_agent.agent.agent_core.tool_loop_response_decision import (
+        ToolLoopResponseDecisionRequest,
+        tool_loop_response_decision,
+    )
+    from agent_py_agent.agent.backend import ModelResponse
+
+    agent = _agent(tmp_path, {"CALL_FETCH": [{"tool": "fetch_url", "url": "https://example.test/data.json"}]})
+    contract = _delivery_contract_with_shape_hint()
+    contract["bootstrap_contract"]["enforcement"] = "soft"
+    params = _params(delivery_contract=contract)
+
+    for _ in range(2):
+        decision = tool_loop_response_decision(
+            ToolLoopResponseDecisionRequest(
+                agent=agent,
+                params=params,
+                response=ModelResponse(text="CALL_FETCH", backend="fake"),
+                counters=ToolLoopRepairCounters(),
+            )
+        )
+        assert decision.action == "run_tools"
+
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="CALL_FETCH", backend="fake"),
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+
+    assert decision.action == "run_tools"
+    assert decision.calls == [{"tool": "fetch_url", "url": "https://example.test/data.json"}]
+    assert params.tool_context == []
+
+
+def test_bootstrap_materialization_executes_source_collection_after_repeated_evidence(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_loop_repair_counters import ToolLoopRepairCounters
+    from agent_py_agent.agent.agent_core.tool_loop_response_decision import (
+        ToolLoopResponseDecisionRequest,
+        tool_loop_response_decision,
+    )
+    from agent_py_agent.agent.backend import ModelResponse
+
+    _write_web_search_tool_output_artifact(tmp_path)
+    calls = [{"tool": "web_search", "query": "weekly project growth", "limit": 5}]
+    agent = _agent(tmp_path, {"CALL_SEARCH": calls})
+    params = _params(delivery_contract=_delivery_contract_with_collection_checkpoint())
+
+    for _ in range(2):
+        decision = tool_loop_response_decision(
+            ToolLoopResponseDecisionRequest(
+                agent=agent,
+                params=params,
+                response=ModelResponse(text="CALL_SEARCH", backend="fake"),
+                counters=ToolLoopRepairCounters(),
+            )
+        )
+        assert decision.action == "run_tools"
+        assert decision.calls == calls
+
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="CALL_SEARCH", backend="fake"),
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+
+    assert decision.action == "continue"
+    assert decision.calls == []
+    assert any("bootstrap-materialization" in item for item in params.tool_context)
+
+
+def test_bootstrap_materialization_allows_setup_plus_evidence_before_threshold(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_loop_repair_counters import ToolLoopRepairCounters
+    from agent_py_agent.agent.agent_core.tool_loop_response_decision import (
+        ToolLoopResponseDecisionRequest,
+        tool_loop_response_decision,
+    )
+    from agent_py_agent.agent.backend import ModelResponse
+
+    calls = [
+        {"tool": "run_command", "command": f"mkdir -p {tmp_path / 'outputs/report'}"},
+        {"tool": "web_search", "query": "weekly project growth", "limit": 5},
+    ]
+    agent = _agent(tmp_path, {"CALL_SETUP_SEARCH": calls})
+    params = _params(delivery_contract=_delivery_contract_with_shape_hint())
+
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="CALL_SETUP_SEARCH", backend="fake"),
             counters=ToolLoopRepairCounters(),
         )
     )
@@ -217,7 +368,7 @@ def test_delivery_repair_has_priority_over_bootstrap_materialization(tmp_path: P
                         "code": "STAGING_CHECKPOINT_MISSING",
                         "recommended_action": "materialize_checkpoint",
                         "checkpoint_ref": "outputs/report/source_data.json",
-                        "checkpoint_shape_hint": '{"sheets":[{"rows":[{"项目名":"..."}]}]}',
+                        "checkpoint_shape_hint": '{"sheets":[{"rows":[{"记录名":"..."}]}]}',
                         "writer_tool": "write_structured_json",
                     }
                 ]
@@ -264,7 +415,7 @@ def test_delivery_repair_no_tool_context_has_priority_over_bootstrap(tmp_path: P
                         "code": "STAGING_CHECKPOINT_MISSING",
                         "recommended_action": "materialize_checkpoint",
                         "checkpoint_ref": "outputs/report/source_data.json",
-                        "checkpoint_shape_hint": '{"sheets":[{"rows":[{"项目名":"..."}]}]}',
+                        "checkpoint_shape_hint": '{"sheets":[{"rows":[{"记录名":"..."}]}]}',
                         "writer_tool": "write_structured_json",
                     }
                 ]
@@ -295,6 +446,7 @@ def test_delivery_repair_no_tool_context_has_priority_over_bootstrap(tmp_path: P
 def _delivery_contract_with_shape_hint() -> dict[str, object]:
     return {
         "bootstrap_contract": {
+            "enforcement": "hard",
             "materialization_targets": [_checkpoint_target()],
             "startup_actions": [
                 {
@@ -306,6 +458,21 @@ def _delivery_contract_with_shape_hint() -> dict[str, object]:
         },
         "artifacts": [_artifact_with_shape_hint()],
     }
+
+
+def _delivery_contract_with_collection_checkpoint() -> dict[str, object]:
+    contract = _delivery_contract_with_shape_hint()
+    artifact = contract["artifacts"][0]
+    artifact["validation_contract"]["required_columns"] = ["记录名", "来源地址", "中文说明"]
+    artifact["validation_contract"]["collection_contract"] = {
+        "source_json_ref": "outputs/report/source_data.json",
+        "required_item_fields": ["记录名", "来源地址", "中文说明"],
+        "required_item_evidence_fields": ["记录名", "来源地址"],
+        "llm_generated_fields": ["中文说明"],
+        "require_completion_evidence": True,
+        "require_item_evidence": True,
+    }
+    return contract
 
 
 # LLM: _checkpoint_target returns the bootstrap materialization target fixture.
@@ -328,7 +495,7 @@ def _artifact_with_shape_hint() -> dict[str, object]:
         "validation_contract": {
             "staging_contract": {
                 "checkpoint_shape_hints": {
-                    "outputs/report/source_data.json": '{"sheets":[{"name":"榜单","rows":[{"项目名":"..."}]}]}'
+                    "outputs/report/source_data.json": '{"sheets":[{"name":"榜单","rows":[{"记录名":"..."}]}]}'
                 }
             }
         },
@@ -374,3 +541,46 @@ def _agent(root: Path, calls_by_text: dict[str, list[dict[str, object]]]):
         root=root,
         tools=_Tools(),
     )
+
+
+def _write_web_search_tool_output_artifact(root: Path) -> Path:
+    artifact_dir = root / "memory_archive/artifacts/tool_outputs"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = artifact_dir / "web_search-1.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "content": json.dumps(
+                    {
+                        "results": [
+                            {
+                                "snippet": "项目介绍",
+                                "title": "demo/project",
+                                "url": "https://github.com/demo/project",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                "ok": True,
+                "tool": "web_search",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (artifact_dir / "index.jsonl").write_text(
+        json.dumps(
+            {
+                "call_id": "1-1",
+                "path": str(artifact_path),
+                "scoped_call_id": "run-1:1-1",
+                "sha256": "abc",
+                "tool": "web_search",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return artifact_path

@@ -53,7 +53,7 @@ def test_items_worker_with_dispatch_tools_stays_worker():
                 "role": "worker",
             },
             {
-                "goal": "基于小傻妞-数据收集提供的结果，写中文解释到 content_writeup.md",
+                "goal": "基于小傻妞-数据收集提供的结果，写中文说明到 content_writeup.md",
                 "agent_name": "小傻妞-内容编写",
                 "role": "worker",
             },
@@ -89,7 +89,7 @@ def test_items_path_refs_create_workflow_dependency_edges():
             },
         ),
         CreateSubagentItem(
-            goal="读取 data/subagents/data_collection.md，写推荐理由到 data/subagents/content_writeup.md",
+            goal="读取 data/subagents/data_collection.md，写说明依据到 data/subagents/content_writeup.md",
             params={
                 "agent_name": "小傻妞-内容编写",
                 "dependencies": ["data_collection"],
@@ -130,7 +130,7 @@ def test_items_path_refs_persist_workflow_depends_on():
                 "output_refs": ["data/subagents/data_collection.md"],
             },
             {
-                "goal": "读取 data/subagents/data_collection.md，写推荐理由到 data/subagents/content_writeup.md",
+                "goal": "读取 data/subagents/data_collection.md，写说明依据到 data/subagents/content_writeup.md",
                 "agent_name": "小傻妞-内容编写",
                 "role": "worker",
                 "input_refs": ["data/subagents/data_collection.md"],

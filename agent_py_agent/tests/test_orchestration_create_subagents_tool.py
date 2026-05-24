@@ -329,21 +329,21 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         result = CreateSubagentsTool(mock_agent).execute({
             "items": [
                 {
-                    "goal": "整理三周 GitHub star 数据。",
-                    "output_files": ["data/github_star_data.md"],
+                    "goal": "整理三周 代码平台 star 数据。",
+                    "output_files": ["data/source_data.md"],
                     "agent_name": "小傻妞-数据搜集",
                     "role": "worker",
                 },
                 {
                     "goal": "核验并翻译。",
                     "dependencies": ["小傻妞-数据搜集"],
-                    "output_files": ["data/github_star_analysis.md"],
+                    "output_files": ["data/source_analysis.md"],
                     "agent_name": "小傻妞-核验翻译",
                     "role": "worker",
                 },
                 {
                     "goal": "生成报告。",
-                    "required_read_paths": ["data/github_star_analysis.md"],
+                    "required_read_paths": ["data/source_analysis.md"],
                     "output_files": ["xlsx/final_report.md"],
                     "agent_name": "小傻妞-生成报告",
                     "role": "worker",
@@ -354,10 +354,10 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         calls = mock_agent.subagents.create_run.call_args_list
         assert result.ok is True
         assert calls[1].kwargs["params"].context_manifest["required_read_paths"] == [
-            "data/github_star_data.md"
+            "data/source_data.md"
         ]
         assert calls[2].kwargs["params"].context_manifest["required_read_paths"] == [
-            "data/github_star_analysis.md"
+            "data/source_analysis.md"
         ]
 
     def test_items_mode_infers_bare_filename_dependencies(self):
@@ -370,7 +370,7 @@ class TestCreateSubagentsToolWorkspaceDefaults:
             "items": [
                 {"goal": "收集项目数据。", "output_files": ["data_collection.md"], "agent_name": "小傻妞-数据收集"},
                 {
-                    "goal": "写中文解释。",
+                    "goal": "写中文说明。",
                     "required_read_paths": ["data_collection.md"],
                     "output_files": ["content_writeup.md"],
                     "agent_name": "小傻妞-内容编写",
@@ -437,9 +437,9 @@ class TestCreateSubagentsToolWorkspaceDefaults:
 
         result = CreateSubagentsTool(mock_agent).execute({
             "items": [
-                {"goal": "收集三周 GitHub star 数据。", "agent_name": "小傻妞-数据收集"},
+                {"goal": "收集三周 代码平台 star 数据。", "agent_name": "小傻妞-数据收集"},
                 {
-                    "goal": "写中文解释。",
+                    "goal": "写中文说明。",
                     "dependencies": ["小傻妞-数据收集"],
                     "agent_name": "小傻妞-内容编写",
                 },

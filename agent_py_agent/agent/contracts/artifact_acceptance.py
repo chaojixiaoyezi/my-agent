@@ -15,6 +15,7 @@ from .artifact_acceptance_models import (
     kind_for_path,
 )
 from .artifact_binary_signature import binary_signature_finding
+from .artifact_capabilities import artifact_capability
 from .artifact_collection_contract import collection_contract_findings
 from .artifact_csv_acceptance import validate_csv_artifact
 from .artifact_document_acceptance import (
@@ -75,7 +76,7 @@ def validate_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceR
     if _outside_workspace(path, request.workspace_root):
         return _outside_workspace_report(path)
     if not path.exists():
-        return _missing_report(path, kind=kind_for_path(path))
+        return _missing_report(path, kind=_request_capability(request).kind)
     validator = resolve_artifact_validator(
         request,
         named_validators=_named_validators(),
@@ -116,8 +117,15 @@ def _kind_validators() -> dict[str, ArtifactValidator]:
 # LLM: validate_by_artifact_kind routes through registered kind validators when the contract stays generic.
 # 函数用途: 在 validator=artifact_acceptance 时仍按产物类型选默认验收器，不让上层关心具体格式。
 def validate_by_artifact_kind(request: ArtifactAcceptanceRequest) -> ArtifactAcceptanceReport:
-    path = Path(request.path)
-    return _kind_validators().get(kind_for_path(path), _validate_generic_request)(request)
+    capability = _request_capability(request)
+    return _kind_validators().get(capability.validator_key or capability.kind, _validate_generic_request)(request)
+
+
+def _request_capability(request: ArtifactAcceptanceRequest):
+    validation = request.validation_contract or {}
+    declared_kind = str(validation.get("artifact_kind") or validation.get("kind") or "").strip()
+    declared_mime = str(validation.get("mime_type") or validation.get("mime") or "").strip()
+    return artifact_capability(request.path, declared_kind=declared_kind, declared_mime=declared_mime)
 
 
 # LLM: _missing_report preserves one missing-file shape for every validator.

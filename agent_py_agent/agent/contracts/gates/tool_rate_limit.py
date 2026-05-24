@@ -62,8 +62,6 @@ class ToolRateLimitLedger:
             return circuit
         attempts = window_attempts(record, facts.now, window_seconds(self.policy))
         call_budget = max_calls(self.policy)
-        if call_budget <= 0 and attempts:
-            return rate_limit_block(record, facts, attempts, window_seconds(self.policy))
         if call_budget > 0 and len(attempts) >= call_budget:
             return rate_limit_block(record, facts, attempts, window_seconds(self.policy))
         return GateDecision.allow(
@@ -97,7 +95,7 @@ class ToolRateLimitLedger:
         now = float(facts.now)
         failures = max(0, int(record.consecutive_failures)) + 1
         threshold = failure_threshold(self.policy)
-        opened = failures >= threshold
+        opened = threshold > 0 and failures >= threshold
         updated = replace(
             record,
             attempt_timestamps=window_attempts(record, now, window_seconds(self.policy)),

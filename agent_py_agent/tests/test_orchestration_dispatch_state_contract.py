@@ -119,7 +119,7 @@ def test_schedule_child_payload_includes_current_turn_run_state(tmp_path):
 
     payload = json.loads(ScheduleChildSubagentsTool(agent).execute({
         "apply": True,
-        "children": [{"goal": "写商品卡片组件", "role": "worker"}],
+        "children": [{"goal": "写条目卡片组件", "role": "worker"}],
     }).output)
 
     state = payload["current_turn_run_state"]

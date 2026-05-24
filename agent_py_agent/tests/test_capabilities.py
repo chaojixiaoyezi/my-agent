@@ -203,7 +203,7 @@ def test_zero_limit_means_unlimited():
 def test_playwright_default_ability_routes_to_controlled_exec():
     router = CapabilityRouter(config=CapabilityConfig(capability_candidate_limit=5))
 
-    hits = router.search("用 Playwright 打开浏览器做购物网站 E2E 截图")
+    hits = router.search("用 Playwright 打开浏览器做示例网站 E2E 截图")
     cards = [hit.card for hit in hits]
 
     assert any(card.source == "builtin_capability_card" for card in cards)

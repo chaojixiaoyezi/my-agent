@@ -68,7 +68,7 @@ def _row_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 # LLM: _sheet_rows extracts rows from structured sheet payloads.
-# 函数用途: 支持 source_data.json 的 sheets[].rows 形状，保持 _row_records 低嵌套。
+# 函数用途: 支持任意结构化 JSON 的 sheets[].rows 形状，保持 _row_records 低嵌套。
 def _sheet_rows(value: object) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     if not isinstance(value, list):

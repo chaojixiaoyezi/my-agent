@@ -93,9 +93,9 @@ def _check_threshold(
         block_code, warn_code = "TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED", "TOOL_GUARDRAIL_NO_PROGRESS_WARNING"
         msg = f"{facts.tool_name} returned same result {count} times"
     evidence = {"tool_name": facts.tool_name, "count": count}
-    if count >= block_after:
+    if block_after > 0 and count >= block_after:
         return GateDecision("tool_guardrail", "DENY", False, (GateFinding(block_code, "P0", msg, evidence),), "repair_tool_call")
-    if count >= warn_after:
+    if warn_after > 0 and count >= warn_after:
         return GateDecision("tool_guardrail", "ALLOW", True, (GateFinding(warn_code, "P1", msg, evidence),))
     return None
 

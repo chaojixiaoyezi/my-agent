@@ -48,8 +48,6 @@ def auto_resume_decision(bundle: _BundleLike) -> AutoResumeDecision:
     request = bundle.runtime.request
     max_attempts = auto_resume_limit(request)
     attempts = _ledger_attempts(_ledger_path(bundle.runtime.paths))
-    if max_attempts <= 0:
-        return AutoResumeDecision(False, attempts, max_attempts, "auto_resume_disabled")
     if not bool(getattr(request, "execute", False)):
         return AutoResumeDecision(False, attempts, max_attempts, "not_execute_mode")
     if getattr(request, "recovery_packet_path", None) is not None and not bool(
@@ -60,7 +58,7 @@ def auto_resume_decision(bundle: _BundleLike) -> AutoResumeDecision:
         return AutoResumeDecision(False, attempts, max_attempts, "status_not_failed")
     if not str(bundle.recovery_packet_ref or "").strip():
         return AutoResumeDecision(False, attempts, max_attempts, "missing_recovery_packet")
-    if attempts >= max_attempts:
+    if max_attempts > 0 and attempts >= max_attempts:
         return AutoResumeDecision(False, attempts, max_attempts, "attempts_exhausted")
     if auto_resume_remaining_timeout_seconds(bundle) <= 0:
         return AutoResumeDecision(False, attempts, max_attempts, "timeout_budget_exhausted")

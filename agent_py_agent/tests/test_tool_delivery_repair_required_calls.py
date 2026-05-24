@@ -16,9 +16,9 @@ def test_required_tool_calls_expand_generated_rows_shape_hint() -> None:
         "data": {"completion_evidence": {"scope": "synthetic_analysis_dataset", "row_count": 1000}},
         "generated_rows": {
             "count": 1000,
-            "columns": ["订单ID", "月份", "地区", "品类", "销售额", "利润"],
+            "columns": ["记录ID", "月份", "地区", "品类", "销售额", "利润"],
             "fields": {
-                "订单ID": {"format": "ORD-{index:04d}", "start": 1},
+                "记录ID": {"format": "REC-{index:04d}", "start": 1},
                 "月份": {"cycle": ["2026-01", "2026-02"]},
                 "地区": {"cycle": ["华东", "华南"]},
                 "品类": {"cycle": ["电子产品", "服装"]},
@@ -91,6 +91,43 @@ def test_delivery_repair_payload_enriches_api_collection_with_source_artifacts(t
     assert call["fields"]["abstract"]["path"] == "snippet"
     assert call["fields"]["translated"] == {"value": True}
     assert call["evidence_fields"] == ["title", "url"]
+
+
+def test_delivery_repair_payload_keeps_analysis_columns_for_llm(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_payload import delivery_repair_payload
+
+    artifact_path = _write_tool_output_artifact(tmp_path)
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "delivery_progress": {
+                "recovery_actions": [
+                    {
+                        "checkpoint_materialization_mode": "source_evidence_first",
+                        "checkpoint_ref": "outputs/report/collected.json",
+                        "collection_contract": {
+                            "required_item_evidence_fields": ["title", "url"],
+                            "required_item_fields": ["title", "url", "中文说明", "说明依据", "summary"],
+                        },
+                        "recommended_action": "materialize_checkpoint",
+                        "requires_auditable_source_evidence": True,
+                        "writer_tool": "api_json_collection",
+                    }
+                ]
+            },
+        },
+    )
+
+    payload = delivery_repair_payload(SimpleNamespace(root=tmp_path))
+    call = payload["required_tool_calls"][0]
+
+    assert call["source_artifacts"][0]["artifact_ref"] == str(artifact_path)
+    assert call["fields"]["title"] == "title"
+    assert call["fields"]["url"] == "url"
+    assert "中文说明" not in call["fields"]
+    assert "说明依据" not in call["fields"]
+    assert "summary" not in call["fields"]
 
 
 # LLM: Refreshed closeout repairs should turn collection count failures into source collection calls.
@@ -237,7 +274,7 @@ def test_required_tool_calls_include_mapping_required_keys() -> None:
     assert calls == [
         {
             "tool": "write_file",
-            "path": "outputs/research_documents/research_documents_zh.md",
+            "path": "outputs/document_delivery/document_delivery_zh.md",
             "finding_values": [_mapping_finding_value()],
             "mapping_required_count": 3,
             "mapping_required_keys": [
@@ -296,7 +333,7 @@ def test_delivery_repair_payload_generates_markdown_from_collection_mapping(tmp_
 def _mapping_repair_action() -> dict[str, object]:
     return {
         "recommended_action": "repair_artifact_against_findings",
-        "artifact_path": "outputs/research_documents/research_documents_zh.md",
+        "artifact_path": "outputs/document_delivery/document_delivery_zh.md",
         "finding_codes": ["ARTIFACT_MAPPING_MISSING"],
         "finding_values": [_mapping_finding_value()],
         "write_tools": ["write_file", "replace_in_file"],

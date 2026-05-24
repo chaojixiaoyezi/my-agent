@@ -94,7 +94,7 @@ def _main_artifact_readback_prompt() -> str:
         请你找出 ALPHA-ANCHOR、OMEGA-ANCHOR、TRACE-ARTIFACT-991 三处附近分别在说什么。
         如果系统一次只给你一部分内容，或者提示内容已经放到外置文件里，请继续按线索读完整，不要猜。
 
-        最终把三处证据、你的中文解释、风险判断和下一步建议写到 lab_outputs/artifact-readback/report.md。
+        最终把三处证据、你的中文说明、风险判断和下一步建议写到 lab_outputs/artifact-readback/report.md。
         报告要让普通人能看懂，不能只列三个词。
         """
     ).strip()

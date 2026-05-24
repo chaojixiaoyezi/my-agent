@@ -150,7 +150,7 @@ def test_runner_context_dispatch_batches_multiple_recovery_strategies_without_sh
             apply=True,
             child_specs=[
                 HierarchyChildSpec(goal="写登录", role="worker", agent_name="小傻妞-auth"),
-                HierarchyChildSpec(goal="写购物车", role="worker", agent_name="小傻妞-cart"),
+                HierarchyChildSpec(goal="写流程状态", role="worker", agent_name="小傻妞-cart"),
             ],
         )
     ).created_run_ids
@@ -193,7 +193,7 @@ def test_runner_context_dispatch_splits_mixed_recovery_batches(tmp_path: Path) -
             apply=True,
             child_specs=[
                 HierarchyChildSpec(goal="继续登录", role="worker", agent_name="小傻妞-auth"),
-                HierarchyChildSpec(goal="继续购物车", role="worker", agent_name="小傻妞-cart"),
+                HierarchyChildSpec(goal="继续流程状态", role="worker", agent_name="小傻妞-cart"),
             ],
         )
     ).created_run_ids

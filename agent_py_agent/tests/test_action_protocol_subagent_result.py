@@ -72,7 +72,7 @@ def test_subagent_result_accepts_deliverables_alias_for_artifacts():
         "{"
         '"status":"AWAITING_ACCEPTANCE",'
         '"summary":"homepage written",'
-        '"deliverables":[{"path":"deliverables/furniture-home/index.html","kind":"html"}],'
+        '"deliverables":[{"path":"deliverables/site-output/index.html","kind":"html"}],'
         '"files":[{"summary":"not a path"}],'
         '"tests":[]'
         "}\n"
@@ -82,7 +82,7 @@ def test_subagent_result_accepts_deliverables_alias_for_artifacts():
     parsed = parse_subagent_runner_output(text)
 
     assert parsed.ok
-    assert parsed.artifacts == [{"path": "deliverables/furniture-home/index.html", "kind": "html"}]
+    assert parsed.artifacts == [{"path": "deliverables/site-output/index.html", "kind": "html"}]
 
 
 # LLM: Envelope conversion consumes parser artifacts, so aliases must survive into typed refs.
@@ -93,7 +93,7 @@ def test_subagent_result_envelope_accepts_deliverables_alias_for_artifacts():
         "{"
         '"status":"AWAITING_ACCEPTANCE",'
         '"summary":"homepage written",'
-        '"deliverables":[{"path":"deliverables/furniture-home/index.html","kind":"html"}]'
+        '"deliverables":[{"path":"deliverables/site-output/index.html","kind":"html"}]'
         "}\n"
         "[/SUBAGENT_RESULT]"
     )
@@ -108,7 +108,7 @@ def test_subagent_result_envelope_accepts_deliverables_alias_for_artifacts():
     )
 
     assert envelope is not None
-    assert envelope.artifact_refs[0].path == "deliverables/furniture-home/index.html"
+    assert envelope.artifact_refs[0].path == "deliverables/site-output/index.html"
 
 
 # LLM: Structured repair may move the file path into evidence while leaving artifacts empty.
@@ -159,7 +159,7 @@ def test_subagent_result_recovers_artifact_from_files_modified():
         "{"
         '"status":"COMPLETED",'
         '"summary":"homepage fixed",'
-        '"files_modified":["deliverables/furniture-home/index.html"]'
+        '"files_modified":["deliverables/site-output/index.html"]'
         "}\n"
         "[/SUBAGENT_RESULT]"
     )
@@ -169,7 +169,7 @@ def test_subagent_result_recovers_artifact_from_files_modified():
     assert parsed.ok
     assert parsed.artifacts == [
         {
-            "path": "deliverables/furniture-home/index.html",
+            "path": "deliverables/site-output/index.html",
             "kind": "file",
             "summary": "reported modified artifact",
         }

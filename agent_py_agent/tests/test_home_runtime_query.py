@@ -109,17 +109,17 @@ def test_memory_resume_reads_home_task_workspace_by_task_id(tmp_path: Path, caps
         EnsureRunWorkspaceRequest(
             home=agent.home_paths.root,
             template=agent.config.workspace_task_path_template,
-            task_name="购物网站 E2E",
-            user_prompt="继续购物网站",
+            task_name="示例网站 E2E",
+            user_prompt="继续示例网站",
             request_id="req-shop",
             run_id="run-shop",
-            task_id="购物网站 E2E",
+            task_id="示例网站 E2E",
             source="run",
             created_at="2026-05-13T01:00:00+00:00",
         )
     )
 
-    code, payload = _run_cli_json(capsys, config_path, "memory-resume", "--task-id", "购物网站 E2E")
+    code, payload = _run_cli_json(capsys, config_path, "memory-resume", "--task-id", "示例网站 E2E")
 
     assert code == 0
     assert payload["task_fact_sources"][0]["exists"] is True

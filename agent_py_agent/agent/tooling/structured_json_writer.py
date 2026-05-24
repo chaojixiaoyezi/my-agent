@@ -69,17 +69,17 @@ def _structured_json_tool_spec() -> ToolSpec:
         requires_idempotency=True,
         description="把结构化 data/rows/sheets 写成工作区内 JSON checkpoint。",
         use_cases=[
-            "需要写 source_data.json、source_index.json、claims.json 等机器可读阶段文件",
+            "需要写机器可读的阶段数据、来源索引或事实记录 JSON",
             "避免把大型 JSON 当字符串手写导致引号、逗号或截断错误",
         ],
         avoid_when=["只写普通 Markdown/HTML 文本时用 write_file 或 file_write_session"],
-        keywords=["json", "source_data", "source_index", "rows", "sheets", "checkpoint", "结构化数据", "写 JSON"],
+        keywords=["json", "rows", "sheets", "checkpoint", "结构化数据", "来源索引", "事实记录", "写 JSON"],
         parameters=_structured_json_parameters(),
         parameter_details=_structured_json_parameter_details(),
         examples=[
-            '{"tool": "write_structured_json", "path": "outputs/report/source_data.json", "sheets": [{"name": "榜单", "rows": [{"项目名": "demo"}]}]}',
-            '{"tool": "write_structured_json", "path": "outputs/docs/source_index.json", "data": [{"title": "paper", "url": "https://example.com"}]}',
-            '{"tool": "write_structured_json", "path": "outputs/report/source_data.json", "generated_rows": {"count": 1000, "columns": ["记录ID"], "fields": {"记录ID": {"format": "REC-{index:04d}", "start": 1}}, "sheets": {"count": 3, "prefix": "数据"}}}',
+            '{"tool": "write_structured_json", "path": "outputs/report/data.json", "sheets": [{"name": "数据表", "rows": [{"字段A": "demo"}]}]}',
+            '{"tool": "write_structured_json", "path": "outputs/docs/source_index.json", "data": [{"title": "document", "url": "https://example.com"}]}',
+            '{"tool": "write_structured_json", "path": "outputs/report/data.json", "generated_rows": {"count": 1000, "columns": ["记录ID"], "fields": {"记录ID": {"format": "REC-{index:04d}", "start": 1}}, "sheets": {"count": 3, "prefix": "数据"}}}',
         ],
     )
 
@@ -105,7 +105,7 @@ def _structured_json_parameter_details() -> dict[str, str]:
     return {
         "path": "相对工作区的 .json 输出路径；父目录会自动创建。",
         "data": "dict/list；适合 source_index 这类数组或对象；dict 可和 rows/sheets 同次提交写元数据。",
-        "rows": "非空数组；适合单表 source_data。",
+        "rows": "非空数组；适合单表阶段数据。",
         "sheets": "非空数组，每个 sheet 需要非空 rows。",
         "generated_rows": "对象；count 为行数，columns 为列名，fields 支持 value/cycle/number/format/multiply，sheets.count 可把生成行拆成多个同形 sheet。",
         "collection_item_updates": "对象数组；每项用 item_index、field_path、value 更新 rows/list/groups 中的已有条目。",

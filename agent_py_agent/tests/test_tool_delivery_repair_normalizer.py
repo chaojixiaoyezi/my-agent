@@ -82,7 +82,7 @@ def test_delivery_repair_normalizes_json_write_file_to_structured_checkpoint_wri
         [
             {
                 "tool": "write_file",
-                "path": "outputs/research_documents/source_index.json",
+                "path": "outputs/document_delivery/source_index.json",
                 "content": content,
             }
         ],
@@ -91,7 +91,7 @@ def test_delivery_repair_normalizes_json_write_file_to_structured_checkpoint_wri
     assert normalized == [
         {
             "tool": "write_structured_json",
-            "path": "outputs/research_documents/source_index.json",
+            "path": "outputs/document_delivery/source_index.json",
             "data": {"items": [{"title": "DeepSeek-R1", "url": "https://example.com/paper.pdf"}]},
         }
     ]
@@ -107,7 +107,7 @@ def test_delivery_repair_keeps_non_json_write_file_unchanged(tmp_path: Path) -> 
     _closeout_with_actions(tmp_path, [_source_checkpoint_action()])
     call = {
         "tool": "write_file",
-        "path": "outputs/research_documents/source_index.json",
+        "path": "outputs/document_delivery/source_index.json",
         "content": "not json",
     }
 
@@ -147,7 +147,7 @@ def test_delivery_repair_replaces_inspection_with_source_artifact_required_write
     )
 
     assert normalized[0]["tool"] == "api_json_collection"
-    assert normalized[0]["path"] == "outputs/research_documents/source_index.json"
+    assert normalized[0]["path"] == "outputs/document_delivery/source_index.json"
     assert normalized[0]["source_artifacts"][0]["artifact_ref"] == str(artifact_path)
     assert normalized[0]["item_path"] == "results"
 
@@ -164,11 +164,11 @@ def test_delivery_repair_replaces_directory_setup_with_source_artifact_required_
 
     normalized = normalize_delivery_repair_calls(
         SimpleNamespace(root=tmp_path),
-        [{"tool": "run_command", "command": "mkdir -p outputs/research_documents"}],
+        [{"tool": "run_command", "command": "mkdir -p outputs/document_delivery"}],
     )
 
     assert normalized[0]["tool"] == "api_json_collection"
-    assert normalized[0]["path"] == "outputs/research_documents/source_index.json"
+    assert normalized[0]["path"] == "outputs/document_delivery/source_index.json"
     assert normalized[0]["source_artifacts"][0]["artifact_ref"] == str(artifact_path)
 
 
@@ -231,7 +231,7 @@ def _source_checkpoint_action() -> dict[str, object]:
         "code": "STAGING_CHECKPOINT_MISSING",
         "recommended_action": "materialize_checkpoint",
         "checkpoint_materialization_mode": "source_evidence_first",
-        "checkpoint_ref": "outputs/research_documents/source_index.json",
+        "checkpoint_ref": "outputs/document_delivery/source_index.json",
         "collection_contract": {
             "required_item_evidence_fields": ["title", "url"],
             "required_item_fields": ["title", "url", "translated"],
@@ -257,7 +257,7 @@ def _sheet_write_call(path: str) -> dict[str, object]:
         "tool": "write_structured_json",
         "path": path,
         "merge_existing": False,
-        "data": {"sheets": [{"name": "Sheet1", "rows": [{"项目名": "demo"}]}]},
+        "data": {"sheets": [{"name": "Sheet1", "rows": [{"记录名": "demo"}]}]},
     }
 
 
@@ -293,7 +293,7 @@ def _non_empty_sheet_call() -> dict[str, object]:
         "tool": "write_structured_json",
         "path": "outputs/report/source_data.json",
         "merge_existing": True,
-        "sheets": [{"name": "W01", "rows": [{"项目名": "demo"}]}],
+        "sheets": [{"name": "W01", "rows": [{"记录名": "demo"}]}],
     }
 
 
@@ -360,9 +360,9 @@ def _columns_action() -> dict[str, object]:
         "code": "STAGED_JSON_REQUIRED_COLUMNS_MISSING",
         "recommended_action": "write_non_empty_structured_rows",
         "checkpoint_ref": "outputs/report/source_data.json",
-        "checkpoint_shape_hint": '{"sheets":[{"name":"榜单","rows":[{"项目名":"..."}]}]}',
-        "required_columns": ["项目名", "地址"],
-        "missing_columns": "项目名,地址",
+        "checkpoint_shape_hint": '{"sheets":[{"name":"榜单","rows":[{"记录名":"..."}]}]}',
+        "required_columns": ["记录名", "地址"],
+        "missing_columns": "记录名,地址",
         "writer_tool": "write_structured_json",
     }
 
@@ -391,7 +391,7 @@ def _missing_checkpoint_action() -> dict[str, object]:
         "code": "STAGING_CHECKPOINT_MISSING",
         "recommended_action": "materialize_checkpoint",
         "checkpoint_ref": "outputs/report/source_data.json",
-        "checkpoint_shape_hint": '{"sheets":[{"name":"榜单","rows":[{"项目名":"..."}]}]}',
+        "checkpoint_shape_hint": '{"sheets":[{"name":"榜单","rows":[{"记录名":"..."}]}]}',
         "writer_tool": "write_structured_json",
     }
 

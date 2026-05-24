@@ -29,6 +29,7 @@ from .document_content_quality import (
     evaluate_document_content_quality_gate,
     extract_document_content_facts,
 )
+from .fact_evidence import evaluate_fact_evidence_gate
 from .gate_pipeline import (
     DEFAULT_GATE_PIPELINE_SPECS,
     DEFAULT_HIGH_RISK_PHASES,
@@ -120,6 +121,7 @@ __all__ = [
     "evaluate_delivery_quality_gate",
     "document_content_quality_findings",
     "evaluate_document_content_quality_gate",
+    "evaluate_fact_evidence_gate",
     "extract_document_content_facts",
     "evaluate_final_closeout_gate",
     "evaluate_idempotency_ledger_gate",

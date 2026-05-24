@@ -44,6 +44,8 @@ class TestRunnerMaxAttempts:
         assert _runner_max_attempts("3") == 3
         assert _runner_max_attempts(3) == 3
         assert _runner_max_attempts(1) == 1
+        assert _runner_max_attempts("0") == 0
+        assert _runner_max_attempts(0) == 0
 
     def test_invalid_policy_returns_2(self):
         """无效策略默认返回 2。"""
@@ -51,6 +53,23 @@ class TestRunnerMaxAttempts:
 
         assert _runner_max_attempts("invalid") == 2
         assert _runner_max_attempts("abc") == 2
+
+    # LLM: zero runner attempts means no retry ceiling, not retry disabled.
+    # 函数用途: 验证 runner_failure_policy=0 时可重试失败不会因 attempt 计数被提前卡死。
+    def test_zero_policy_keeps_retry_candidate_unlimited(self):
+        from agent_py_agent.agent.agent_core.runner_dispatch import _is_dispatch_runner_candidate
+
+        task = SimpleNamespace(
+            status="FAILED",
+            verification_status="UNVERIFIED",
+            channel_status="OK",
+            capability_requests=[],
+            capability_gaps=[],
+            failure_type="runner_error",
+            runner_attempts=99,
+        )
+
+        assert _is_dispatch_runner_candidate(task, runner_max_attempts=0) is True
 
 
 class TestRunnerFailureType:
@@ -246,7 +265,7 @@ class TestRunnerTaskTimeout:
 
         task = MagicMock()
         task.attributes = {}
-        task.goal = "实现购物网站 demo，包含注册、登录、购物车和下单。"
+        task.goal = "实现示例网站 demo，包含注册、登录、流程状态和下单。"
         task.plan = ["write files", "verify behavior"]
         task.role = "worker"
         task.allowed_tools = ["read_file", "write_file"]
@@ -304,7 +323,7 @@ class TestRunnerTaskTimeout:
         worker_task.parent_id = "root-run"
         worker_task.role = "worker"
         worker_task.attributes = {}
-        worker_task.goal = "写一个购物网站页面。"
+        worker_task.goal = "写一个示例网站页面。"
         worker_task.plan = []
 
         assert get_task_timeout(root_task, 8.0, config) == 0.0

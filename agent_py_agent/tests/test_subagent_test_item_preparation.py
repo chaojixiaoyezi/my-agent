@@ -217,7 +217,7 @@ def test_prepare_test_items_drops_malformed_runner_checklist_when_static_check_i
     site_dir = tmp_path / "deliverables" / "shop" / "build"
     site_dir.mkdir(parents=True)
     (site_dir / "index.html").write_text("<link rel='stylesheet' href='style.css'>", encoding="utf-8")
-    (site_dir / "cart.html").write_text("<script src='app.js'></script>", encoding="utf-8")
+    (site_dir / "flow-a.html").write_text("<script src='app.js'></script>", encoding="utf-8")
     (site_dir / "style.css").write_text("body { color: #111; }\n", encoding="utf-8")
     (site_dir / "app.js").write_text("console.log('ok');\n", encoding="utf-8")
 
@@ -233,7 +233,7 @@ def test_prepare_test_items_drops_malformed_runner_checklist_when_static_check_i
             }],
             output={"artifacts": [
                 {"path": str(site_dir / "index.html")},
-                {"path": str(site_dir / "cart.html")},
+                {"path": str(site_dir / "flow-a.html")},
                 {"path": str(site_dir / "style.css")},
                 {"path": str(site_dir / "app.js")},
             ]},
@@ -245,7 +245,7 @@ def test_prepare_test_items_drops_malformed_runner_checklist_when_static_check_i
         "name": "inferred static site check",
         "validation_method": "static_site_check",
         "site_root": "deliverables/shop/build",
-        "required_files": ["cart.html", "index.html"],
+        "required_files": ["flow-a.html", "index.html"],
         "require_complete_html": True,
     }]
 
@@ -270,7 +270,7 @@ def test_prepare_test_items_infers_static_site_check_for_single_html_artifact(tm
                 "name": "index.html 导航链接验证",
                 "validation_method": "content_check",
                 "ok": True,
-                "summary": "包含 login.html、register.html、products.html、cart.html 链接",
+                "summary": "包含 login.html、register.html、items.html、flow-a.html 链接",
             }],
             output={"artifacts": [
                 {"path": str(site_dir / "index.html")},
@@ -349,25 +349,25 @@ def test_required_static_dom_ids_from_structured_acceptance_text():
 
 
 # LLM: test_prepare_test_items_merges_task_required_static_files covers root whole-site required files.
-# 函数用途: 分支目录已有 HTML 时，也要把任务明确要求的顶层购物站文件放进 static_site_check。
+# 函数用途: 分支目录已有 HTML 时，也要把任务明确要求的顶层示例站文件放进 static_site_check。
 def test_prepare_test_items_merges_task_required_static_files(tmp_path):
     site_dir = tmp_path / "deliverables" / "shop" / "build"
     auth = site_dir / "auth"
     catalog = site_dir / "catalog"
     auth.mkdir(parents=True)
     catalog.mkdir(parents=True)
-    (auth / "login.html").write_text("<a href='../catalog/products.html'>products</a>", encoding="utf-8")
-    (catalog / "products.html").write_text("<a href='../auth/login.html'>login</a>", encoding="utf-8")
+    (auth / "login.html").write_text("<a href='../catalog/items.html'>products</a>", encoding="utf-8")
+    (catalog / "items.html").write_text("<a href='../auth/login.html'>login</a>", encoding="utf-8")
 
     prepared = prepare_test_items(
         TestItemPreparationRequest(
             tests=[],
             output={"artifacts": [
                 {"path": str(auth / "login.html")},
-                {"path": str(catalog / "products.html")},
+                {"path": str(catalog / "items.html")},
             ]},
             workspace_root=tmp_path,
-            required_files=["index.html", "login.html", "products.html", "cart.html", "style.css", "app.js"],
+            required_files=["index.html", "login.html", "items.html", "flow-a.html", "style.css", "app.js"],
         )
     )
 
@@ -378,11 +378,11 @@ def test_prepare_test_items_merges_task_required_static_files(tmp_path):
         "required_files": [
             "app.js",
             "auth/login.html",
-            "cart.html",
-            "catalog/products.html",
+            "flow-a.html",
+            "catalog/items.html",
             "index.html",
             "login.html",
-            "products.html",
+            "items.html",
             "style.css",
         ],
         "require_complete_html": True,
@@ -393,17 +393,17 @@ def test_prepare_test_items_merges_task_required_static_files(tmp_path):
 # 函数用途: 静态站必需文件只从 required_files 机器字段读取，不从自然语言句子里猜。
 def test_static_required_files_from_texts_reads_structured_file_contract():
     files = static_required_files_from_texts([
-        "required_files: index.html, products.html, product-detail.html, cart.html, checkout.html",
+        "required_files: index.html, items.html, item-detail.html, flow-a.html, flow-b.html",
         "required_files: style.css, app.js",
         "forbidden_files: product.html, old-product.html, legacy.html",
     ])
 
     assert files == [
         "index.html",
-        "products.html",
-        "product-detail.html",
-        "cart.html",
-        "checkout.html",
+        "items.html",
+        "item-detail.html",
+        "flow-a.html",
+        "flow-b.html",
         "style.css",
         "app.js",
     ]
@@ -413,7 +413,7 @@ def test_static_required_files_from_texts_reads_structured_file_contract():
 # 函数用途: 普通“必须生成/不要创建”自然语言不能让 Python 生成 required_files。
 def test_static_required_files_from_texts_ignores_natural_language():
     files = static_required_files_from_texts([
-        "必须生成 index.html, products.html，还要有 style.css 和 app.js。",
+        "必须生成 index.html, items.html，还要有 style.css 和 app.js。",
         "不要创建 legacy.html。",
     ])
 
@@ -439,8 +439,8 @@ def test_prepare_test_items_keeps_malformed_check_without_machine_fallback(tmp_p
 def test_prepare_test_items_does_not_duplicate_static_site_check(tmp_path):
     site_dir = tmp_path / "site"
     site_dir.mkdir()
-    (site_dir / "index.html").write_text("<a href='cart.html'>cart</a>", encoding="utf-8")
-    (site_dir / "cart.html").write_text("<a href='index.html'>home</a>", encoding="utf-8")
+    (site_dir / "index.html").write_text("<a href='flow-a.html'>cart</a>", encoding="utf-8")
+    (site_dir / "flow-a.html").write_text("<a href='index.html'>home</a>", encoding="utf-8")
 
     prepared = prepare_test_items(
         TestItemPreparationRequest(
@@ -448,11 +448,11 @@ def test_prepare_test_items_does_not_duplicate_static_site_check(tmp_path):
                 "name": "declared static check",
                 "validation_method": "static_site_check",
                 "site_root": "site",
-                "required_files": ["index.html", "cart.html"],
+                "required_files": ["index.html", "flow-a.html"],
             }],
             output={"artifacts": [
                 {"path": str(site_dir / "index.html")},
-                {"path": str(site_dir / "cart.html")},
+                {"path": str(site_dir / "flow-a.html")},
             ]},
             workspace_root=tmp_path,
         )

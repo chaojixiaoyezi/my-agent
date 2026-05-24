@@ -19,7 +19,7 @@ from .models import ToolExecutionResult, ToolSpec
 _DEFAULT_TIMEOUT = 15
 
 
-# LLM: ApiJsonCollectionTool turns remote JSON pages into auditable local source_data checkpoints.
+# LLM: ApiJsonCollectionTool turns remote JSON pages into auditable local JSON checkpoints.
 # 类用途: 为来源型表格任务提供批量 API->sheets 工具，避免模型手写超长 JSON 或伪造行级证据。
 class ApiJsonCollectionTool(FileSystemTool):
     # LLM: __init__ declares the stable API collection schema for tool discovery.
@@ -92,9 +92,9 @@ def _tool_spec() -> ToolSpec:
         category="api",
         effect="mutating",
         requires_idempotency=True,
-        description="按 requests 列表抓取 JSON API，并生成带来源证据的 sheets/source_data.json。",
+        description="按 requests 列表抓取 JSON API，并生成带来源证据的机器可读 JSON。",
         use_cases=[
-            "需要从多个 API 分组生成 xlsx/source_data.json",
+            "需要从多个 API 或已归档 JSON 分组生成结构化数据",
             "每个表格行都需要 source_refs、claims 或 field_source_ids 证据",
         ],
         avoid_when=["只是写少量人工整理 JSON 时，用 write_structured_json 更直接"],
@@ -130,7 +130,7 @@ def _tool_spec() -> ToolSpec:
 
 def _range_example() -> str:
     return (
-        '{"tool":"api_json_collection","path":"outputs/source_data.json",'
+        '{"tool":"api_json_collection","path":"outputs/collected_data.json",'
         '"request_ranges":[{"start_date":"2026-01-01","end_date":"2026-02-28","step_days":7,'
         '"name_template":"2026-W{index:02d}","source_id_template":"src-w{index:02d}",'
         '"url_template":"https://api.example/items?from={start}&to={end}"}],'

@@ -149,7 +149,7 @@ def test_subagent_output_json_response_does_not_hide_bad_packet(tmp_path):
 # LLM: ready task-local progress should close the runner without one more free-form model turn.
 # 函数用途: 复现真实 E2E 中 HTML 已写完并通过结构检查，但模型还没写 output.json 导致父级一直等待。
 def test_subagent_progress_closeout_response_uses_latest_tool_progress(tmp_path):
-    artifact = tmp_path / "lab_outputs" / "furniture-home" / "index.html"
+    artifact = tmp_path / "lab_outputs" / "site-output" / "index.html"
     artifact.parent.mkdir(parents=True)
     artifact.write_text("<html><body><main id='home'>done</main></body></html>", encoding="utf-8")
     workspace = tmp_path / "tasks" / "worker" / "agents" / "worker"

@@ -36,6 +36,8 @@ from .main_agent_delivery_closeout_progress import (
     _should_block_on_no_progress,
 )
 from .main_agent_delivery_closeout_quality import delivery_quality_decision
+from .main_agent_delivery_fact_evidence import fact_evidence_decision
+from .main_agent_delivery_progress_ledger import append_delivery_progress_event
 from .main_agent_delivery_tool_failure_recovery import attach_tool_failure_recovery_actions
 from .tool_local_progress_guard import reset_local_progress_guard
 
@@ -86,7 +88,9 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     report["report_ref"] = _relative_report_ref(report_ref, workspace_root)
     decisions = _attach_closeout_gates(CloseoutGateRequest(request, report, contract, workspace_root))
     _write_report(workspace_root, report)
-    if not _all_gates_allowed(decisions):
+    gates_allowed = _all_gates_allowed(decisions)
+    append_delivery_progress_event(workspace_root, report, blocked=not gates_allowed)
+    if not gates_allowed:
         return _failed_delivery_response(request, report, contract, workspace_root)
     reset_local_progress_guard(request.agent, request.params)
     return ModelResponse(text=_closeout_text(report), backend=request.backend)
@@ -118,6 +122,12 @@ def _attach_closeout_gates(request: CloseoutGateRequest) -> list[Any]:
         contract_hash=contract_hash,
     )
     request.report["delivery_quality_gate"] = quality_decision.to_dict()
+    fact_decision = fact_evidence_decision(
+        contract=request.contract,
+        workspace_root=request.workspace_root,
+        archive_tool_calls=[item for item in getattr(closeout.params, "archive_tool_calls", []) or [] if isinstance(item, dict)],
+    )
+    request.report["fact_evidence_gate"] = fact_decision.to_dict()
     acceptance_decision = evaluate_acceptance_closeout_gate(
         {
             "final_status": "DONE",
@@ -128,7 +138,15 @@ def _attach_closeout_gates(request: CloseoutGateRequest) -> list[Any]:
     request.report["acceptance_gate"] = acceptance_decision.to_dict()
     final_decision = evaluate_final_closeout_gate(request.report)
     request.report["final_closeout_gate"] = final_decision.to_dict()
-    decisions = [run_contract_decision, gate_decision, state_decision, quality_decision, acceptance_decision, final_decision]
+    decisions = [
+        run_contract_decision,
+        gate_decision,
+        state_decision,
+        quality_decision,
+        fact_decision,
+        acceptance_decision,
+        final_decision,
+    ]
     attach_contract_recovery(request.report, decisions, contract=request.contract)
     return decisions
 
@@ -221,6 +239,7 @@ def _append_failed_contract_context(params: ToolLoopExecuteParams, report: dict[
                 "failed_gates": failed_gate_payloads(report),
                 "contract_recovery": report.get("contract_recovery", {}),
                 "delivery_progress": report.get("delivery_progress", {}),
+                "rework_message_zh": "这是交付返工，不是任务终止。请按 contract_recovery.actions 修复后重新验收；只有 status=blocked 或需要用户输入时才停止自动返工。",
             },
             ensure_ascii=False,
             sort_keys=True,

@@ -22,7 +22,7 @@ def test_collection_contract_rejects_too_few_structured_groups(tmp_path: Path) -
                     _sheet("week-3", 10),
                 ],
                 "source_refs": [_source_ref("src-1")],
-                "claims": [_claim("项目名", "src-1")],
+                "claims": [_claim("记录名", "src-1")],
             },
             ensure_ascii=False,
         ),
@@ -36,7 +36,7 @@ def test_collection_contract_rejects_too_few_structured_groups(tmp_path: Path) -
             path=tmp_path / "report.xlsx",
             workspace_root=tmp_path,
             validation_contract={
-                "required_columns": ["项目名", "地址", "上升 star 数"],
+                "required_columns": ["记录名", "地址", "指标值"],
                 "staging_contract": {"source_json_ref": "source_data.json"},
                 "collection_contract": {
                     "source_json_ref": "source_data.json",
@@ -44,7 +44,7 @@ def test_collection_contract_rejects_too_few_structured_groups(tmp_path: Path) -
                     "items_path": "rows",
                     "min_groups": 20,
                     "min_items_per_group": 10,
-                    "required_item_fields": ["项目名", "地址", "上升 star 数"],
+                    "required_item_fields": ["记录名", "地址", "指标值"],
                 },
             },
         )
@@ -63,7 +63,7 @@ def test_collection_contract_rejects_group_with_too_few_items(tmp_path: Path) ->
             {
                 "sheets": [_sheet("week-1", 10), _sheet("week-2", 2)],
                 "source_refs": [_source_ref("src-1")],
-                "claims": [_claim("项目名", "src-1")],
+                "claims": [_claim("记录名", "src-1")],
             },
             ensure_ascii=False,
         ),
@@ -77,7 +77,7 @@ def test_collection_contract_rejects_group_with_too_few_items(tmp_path: Path) ->
             path=tmp_path / "report.xlsx",
             workspace_root=tmp_path,
             validation_contract={
-                "required_columns": ["项目名", "地址", "上升 star 数"],
+                "required_columns": ["记录名", "地址", "指标值"],
                 "staging_contract": {"source_json_ref": "source_data.json"},
                 "collection_contract": {
                     "source_json_ref": "source_data.json",
@@ -85,7 +85,7 @@ def test_collection_contract_rejects_group_with_too_few_items(tmp_path: Path) ->
                     "items_path": "rows",
                     "min_groups": 2,
                     "min_items_per_group": 10,
-                    "required_item_fields": ["项目名", "地址", "上升 star 数"],
+                    "required_item_fields": ["记录名", "地址", "指标值"],
                 },
             },
         )
@@ -347,7 +347,7 @@ def test_collection_contract_accepts_sheets_rows_when_flat_items_path_is_missing
 
 
 def test_collection_contract_rejects_global_claims_without_row_field_sources(tmp_path: Path) -> None:
-    _write_source_workbook(tmp_path, {"sheets": [_sheet("week-1", 2)], "source_refs": [_source_ref("src-1")], "claims": [_claim("上升 star 数", "src-1")]})
+    _write_source_workbook(tmp_path, {"sheets": [_sheet("week-1", 2)], "source_refs": [_source_ref("src-1")], "claims": [_claim("指标值", "src-1")]})
     report = _validate_row_evidence_workbook(tmp_path, min_items=2)
 
     assert not report.ok
@@ -357,7 +357,7 @@ def test_collection_contract_rejects_global_claims_without_row_field_sources(tmp
 def test_collection_contract_accepts_row_field_sources(tmp_path: Path) -> None:
     _write_source_workbook(
         tmp_path,
-        {"sheets": [_sheet("week-1", 2, source_id="src-1")], "source_refs": [_source_ref("src-1")], "claims": [_claim("上升 star 数", "src-1")]},
+        {"sheets": [_sheet("week-1", 2, source_id="src-1")], "source_refs": [_source_ref("src-1")], "claims": [_claim("指标值", "src-1")]},
     )
     report = _validate_row_evidence_workbook(tmp_path, min_items=2)
 
@@ -368,7 +368,7 @@ def test_collection_contract_rejects_unaudited_row_field_source(tmp_path: Path) 
     _write_source_workbook(
         tmp_path,
         {
-            "claims": [_claim("上升 star 数", "src-1")],
+            "claims": [_claim("指标值", "src-1")],
             "sheets": [_sheet("week-1", 1, source_id="src-1")],
             "source_refs": [{"source_id": "src-1", "status": "AVAILABLE", "uri": "https://example.com"}],
         },
@@ -383,7 +383,7 @@ def test_collection_contract_rejects_content_hash_without_source_binding(tmp_pat
     _write_source_workbook(
         tmp_path,
         {
-            "claims": [_claim("上升 star 数", "src-1")],
+            "claims": [_claim("指标值", "src-1")],
             "sheets": [_sheet("week-1", 1, source_id="src-1")],
             "source_refs": [
                 {
@@ -404,7 +404,7 @@ def test_collection_contract_rejects_content_hash_without_source_binding(tmp_pat
 def test_collection_contract_accepts_row_scoped_claims(tmp_path: Path) -> None:
     _write_source_workbook(
         tmp_path,
-        {"sheets": [_sheet("week-1", 1)], "source_refs": [_source_ref("src-1")], "claims": [_row_claim("上升 star 数", 0, "src-1")]},
+        {"sheets": [_sheet("week-1", 1)], "source_refs": [_source_ref("src-1")], "claims": [_row_claim("指标值", 0, "src-1")]},
     )
     report = _validate_row_evidence_workbook(tmp_path, min_items=1)
 
@@ -422,9 +422,9 @@ def _validate_row_evidence_workbook(tmp_path: Path, *, min_items: int):
             path=tmp_path / "report.xlsx",
             workspace_root=tmp_path,
             validation_contract={
-                "required_columns": ["项目名", "地址", "上升 star 数"],
+                "required_columns": ["记录名", "地址", "指标值"],
                 "staging_contract": {"source_json_ref": "source_data.json"},
-                "evidence_contract": {"required_fields": ["上升 star 数"], "require_verified": True},
+                "evidence_contract": {"required_fields": ["指标值"], "require_verified": True},
                 "collection_contract": _row_evidence_collection_contract(min_items),
             },
         )
@@ -438,22 +438,22 @@ def _row_evidence_collection_contract(min_items: int) -> dict[str, object]:
         "items_path": "rows",
         "min_groups": 1,
         "min_items_per_group": min_items,
-        "required_item_fields": ["项目名", "地址", "上升 star 数"],
+        "required_item_fields": ["记录名", "地址", "指标值"],
         "require_item_evidence": True,
-        "required_item_evidence_fields": ["上升 star 数"],
+        "required_item_evidence_fields": ["指标值"],
     }
 
 
 def _sheet(name: str, count: int, *, source_id: str = "") -> dict[str, object]:
     return {
         "name": name,
-        "columns": ["项目名", "地址", "上升 star 数"],
+        "columns": ["记录名", "地址", "指标值"],
         "rows": [
             {
-                "项目名": f"repo-{index}",
+                "记录名": f"repo-{index}",
                 "地址": f"https://example.com/repo-{index}",
-                "上升 star 数": index,
-                **({"field_source_ids": {"上升 star 数": [source_id]}} if source_id else {}),
+                "指标值": index,
+                **({"field_source_ids": {"指标值": [source_id]}} if source_id else {}),
             }
             for index in range(count)
         ],

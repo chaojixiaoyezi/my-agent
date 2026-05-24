@@ -73,8 +73,8 @@ def _write_ready_source(root: Path) -> None:
                 "sheets": [
                     {
                         "name": "week",
-                        "columns": ["项目名", "地址"],
-                        "rows": [{"项目名": "demo", "地址": "https://example.com"}],
+                        "columns": ["记录名", "地址"],
+                        "rows": [{"记录名": "demo", "地址": "https://example.com"}],
                     }
                 ]
             },
@@ -97,7 +97,7 @@ def _failed_builder_closeout(root: Path) -> None:
                     "ok": False,
                     "acceptance_report": {
                         "ok": False,
-                        "findings": [{"code": "XLSX_REQUIRED_COLUMN_EMPTY_VALUES", "value": "项目名"}],
+                        "findings": [{"code": "XLSX_REQUIRED_COLUMN_EMPTY_VALUES", "value": "记录名"}],
                     },
                 }
             ],
@@ -122,7 +122,7 @@ def _workbook_delivery_contract() -> dict[str, object]:
                 "kind": "xlsx",
                 "preferred_path": "outputs/report/report.xlsx",
                 "validation_contract": {
-                    "required_columns": ["项目名", "地址"],
+                    "required_columns": ["记录名", "地址"],
                     "required_sheets_min": 1,
                     "staging_contract": {
                         "builder_tool": "data_to_workbook",
@@ -156,7 +156,7 @@ def _evidence_repair_closeout() -> dict[str, object]:
                     "code": "EVIDENCE_REQUIRED_FIELD_MISSING",
                     "recommended_action": "repair_evidence_refs",
                     "checkpoint_ref": "outputs/report/source_data.json",
-                    "required_fields": ["项目名", "地址"],
+                    "required_fields": ["记录名", "地址"],
                     "writer_tool": "write_structured_json",
                 }
             ]
@@ -173,7 +173,7 @@ def _structure_and_evidence_repair_closeout() -> dict[str, object]:
             "code": "STAGED_JSON_TOO_FEW_SHEETS",
             "recommended_action": "repair_structured_checkpoint_json",
             "checkpoint_ref": "outputs/report/source_data.json",
-            "required_columns": ["项目名", "地址"],
+            "required_columns": ["记录名", "地址"],
             "writer_tool": "write_structured_json",
         },
     )
@@ -184,7 +184,7 @@ def _sheet_only_write_call() -> dict[str, object]:
     return {
         "tool": "write_structured_json",
         "path": "outputs/report/source_data.json",
-        "sheets": [{"name": "榜单", "rows": [{"项目名": "demo", "地址": "https://example.com"}]}],
+        "sheets": [{"name": "榜单", "rows": [{"记录名": "demo", "地址": "https://example.com"}]}],
     }
 
 
@@ -194,10 +194,10 @@ def _structured_evidence_write_call() -> dict[str, object]:
         "path": "outputs/report/source_data.json",
         "merge_existing": True,
         "data": {
-            "sheets": [{"name": "榜单", "rows": [{"项目名": "demo", "地址": "https://example.com"}]}],
+            "sheets": [{"name": "榜单", "rows": [{"记录名": "demo", "地址": "https://example.com"}]}],
             "source_refs": [{"source_id": "src-1", "uri": "https://example.com"}],
             "claims": [
-                {"field": "项目名", "value": "demo", "source_ids": ["src-1"], "verification_status": "VERIFIED"},
+                {"field": "记录名", "value": "demo", "source_ids": ["src-1"], "verification_status": "VERIFIED"},
                 {"field": "地址", "value": "https://example.com", "source_ids": ["src-1"], "verification_status": "VERIFIED"},
             ],
         },

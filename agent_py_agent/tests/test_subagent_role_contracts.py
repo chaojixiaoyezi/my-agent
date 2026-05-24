@@ -43,7 +43,7 @@ def test_create_run_uses_template_defaults_after_natural_role_resolution(tmp_pat
     manager = SubAgentManager(tmp_path)
 
     task = manager.create_run(
-        goal="继续拆分购物网站商品目录任务",
+        goal="继续拆分示例网站条目目录任务",
         thought="coordinate",
         plan=["split", "dispatch"],
         role="child_coordinator",
@@ -61,7 +61,7 @@ def test_unknown_llm_role_falls_back_to_worker_template(tmp_path):
     manager = SubAgentManager(tmp_path)
 
     task = manager.create_run(
-        goal="实现购物网站页脚",
+        goal="实现示例网站页脚",
         thought="build",
         plan=["implement", "report"],
         role="frontend_footer_builder",

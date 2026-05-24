@@ -214,7 +214,7 @@ def test_model_generate_enforces_request_timeout_when_backend_blocks():
 
 
 # LLM: large write_file streams should become recoverable session writes instead of parse errors.
-# 函数用途: 复现购物站点类失败：模型把大 HTML 塞进未闭合 write_file，系统应保留已生成前缀并转入分块写入。
+# 函数用途: 复现示例站点类失败：模型把大 HTML 塞进未闭合 write_file，系统应保留已生成前缀并转入分块写入。
 def test_model_generate_aborts_streaming_write_file_content_over_inline_limit():
     backend = _StreamingLongWriteBackend()
     agent = SimpleNamespace(

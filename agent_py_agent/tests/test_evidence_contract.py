@@ -89,7 +89,7 @@ def test_evidence_contract_default_allows_sourced_pending_claims():
 
 
 # LLM: Generated tables must not pass when key numeric fields have no source ref.
-# 函数用途: 固定 GitHub star XLSX 真实测试暴露的问题；没有证据的增长数字不能当真。
+# 函数用途: 固定 代码平台 star XLSX 真实测试暴露的问题；没有证据的增长数字不能当真。
 def test_evidence_contract_rejects_unsourced_required_claims():
     from agent_py_agent.agent.contracts.evidence_contract import (
         EvidenceClaim,
@@ -178,7 +178,7 @@ def test_evidence_contract_accepts_declared_estimates_with_methodology():
                     confidence=0.78,
                     verification_status="VERIFIED",
                     value_type="estimated",
-                    methodology="weekly ranking overlap plus current GitHub snapshot",
+                    methodology="weekly ranking overlap plus current 代码平台 snapshot",
                 )
             ],
             required_fields=["weekly_star_growth"],

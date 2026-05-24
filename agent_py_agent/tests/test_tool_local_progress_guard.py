@@ -57,6 +57,35 @@ def test_local_progress_guard_uses_closeout_no_progress_threshold(tmp_path: Path
     assert has_required_local_progress_guard(agent, params, exploratory_calls) is True
 
 
+# LLM: zero no-progress thresholds should mean no local-progress cap, not immediate or default blocking.
+# 函数用途: 验证结构化 no_progress_block_threshold=0 时不会因为连续只读轮次触发阻断。
+def test_local_progress_guard_zero_threshold_is_unlimited(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_local_progress_guard import (
+        has_required_local_progress_guard,
+    )
+
+    payload = _closeout_payload(work_progress_fingerprint="same-progress")
+    payload["delivery_progress"]["no_progress_block_threshold"] = 0
+    _write_closeout(tmp_path, payload)
+    params = _params()
+    agent = SimpleNamespace(root=tmp_path)
+    exploratory_calls = [{"tool": "fetch_url", "url": "https://example.test/data.json"}]
+
+    for _ in range(8):
+        assert has_required_local_progress_guard(agent, params, exploratory_calls) is False
+
+
+# LLM: zero local-progress redirect max means unlimited repair contexts.
+# 函数用途: 验证 local-progress guard 的上下文返工次数设置为 0 时不会提前消失。
+def test_local_progress_guard_zero_redirects_are_unlimited(tmp_path: Path, monkeypatch):
+    from agent_py_agent.agent.agent_core import tool_local_progress_guard as guard
+
+    _write_closeout(tmp_path, _closeout_payload(work_progress_fingerprint="same-progress"))
+    monkeypatch.setattr(guard, "_MAX_REDIRECTS", 0)
+
+    assert guard.local_progress_guard_context(SimpleNamespace(root=tmp_path), redirects=99)
+
+
 # LLM: a changed work-progress fingerprint should reset the guard budget instead of carrying old exploration debt forever.
 # 函数用途: 验证只要 closeout 报告里的本地进展指纹变化了，local-progress guard 会重置计数，避免误伤后续合理探索。
 def test_local_progress_guard_resets_when_work_progress_fingerprint_changes(tmp_path: Path):

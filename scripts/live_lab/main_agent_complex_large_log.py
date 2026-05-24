@@ -27,7 +27,7 @@ def main_large_log_prompt() -> str:
         这次你自己完成，不要派小傻妞。
 
         logs/huge_app.log 是一个很大的日志文件。请不要把日志全文复制到回复里。
-        你要帮我找里面最重要的异常线索，重点关注付款、购物车、超时、trace id。
+        你要帮我找里面最重要的异常线索，重点关注付款、流程状态、超时、trace id。
         最终把审计结果写到 lab_outputs/large-log-audit/report.md。
 
         报告里要包含：发现了哪些问题、关键证据、可能影响、建议怎么排查。
@@ -52,7 +52,7 @@ def seed_large_log(path: Path) -> None:
 
 
 # LLM: assert_large_log_report validates that the audit found seeded high-signal failures.
-# 函数用途: 检查日志审计报告是否抓到付款、购物车和 trace 证据。
+# 函数用途: 检查日志审计报告是否抓到付款、流程状态和 trace 证据。
 def assert_large_log_report(output: Path) -> None:
     if not output.exists():
         raise RuntimeError(f"大日志审计报告不存在: {output}")

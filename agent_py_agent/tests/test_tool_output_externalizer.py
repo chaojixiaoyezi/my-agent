@@ -142,7 +142,7 @@ def test_read_artifact_output_is_not_re_externalized(tmp_path: Path) -> None:
 def test_tool_loop_summarizes_large_tool_call_payload_for_live_prompt() -> None:
     huge_html = "<html>" + ("x" * 9000) + "</html>"
     response = (
-        "我要写商品页面。\n"
+        "我要写条目页面。\n"
         "[TOOL_CALL]\n"
         + json.dumps({"tool": "write_file", "path": "shop/list.html", "content": huge_html})
         + "\n[/TOOL_CALL]"
@@ -172,14 +172,14 @@ def test_tool_call_record_summarizes_large_payload_for_live_prompt(tmp_path: Pat
             params=params,
             tool_rounds=1,
             idx=1,
-            payload={"tool": "write_file", "path": "shop/cart.html", "content": huge_html},
+            payload={"tool": "write_file", "path": "shop/flow-a.html", "content": huge_html},
             result=ToolExecutionResult("write_file", False, "路径不在 allowed_write_roots 内"),
         )
     )
 
     live_context = params.tool_context[-1]
     assert "tool_call_1: tool=write_file" in live_context
-    assert "path: shop/cart.html" in live_context
+    assert "path: shop/flow-a.html" in live_context
     assert "large text omitted" in live_context
     assert huge_html not in live_context
 

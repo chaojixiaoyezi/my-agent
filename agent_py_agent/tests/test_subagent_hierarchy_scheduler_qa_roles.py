@@ -41,7 +41,7 @@ def test_hierarchy_schedule_advises_required_qa_roles_without_auto_creation(tmp_
             parent_run_id=parent.id,
             child_specs=[
                 HierarchyChildSpec(
-                        goal=f"实现购物车模块到 {build}，写回证据 refs。",
+                        goal=f"实现流程状态模块到 {build}，写回证据 refs。",
                     role="worker",
                     agent_name="小傻妞-cart-worker",
                 )
@@ -108,7 +108,7 @@ def test_hierarchy_schedule_defers_auto_qa_until_implementation_ready(tmp_path):
             parent_run_id=parent.id,
             child_specs=[
                 HierarchyChildSpec(
-                    goal=f"实现购物站页面，写到 {build}。",
+                    goal=f"实现示例站页面，写到 {build}。",
                     role="worker",
                     agent_name="小傻妞-shop-worker",
                 )
@@ -131,7 +131,7 @@ def test_hierarchy_schedule_quality_advice_after_implementation_ready(tmp_path):
     build = tmp_path / "deliverables" / "shop" / "build"
     parent = _qa_parent(manager, extra_write_roots=[str(build)])
     worker = manager.create_run(
-        goal=f"实现购物站页面，写到 {build}。",
+        goal=f"实现示例站页面，写到 {build}。",
         thought="work",
         plan=["write"],
         parent_id=parent.id,
@@ -167,7 +167,7 @@ def test_hierarchy_schedule_quality_advice_after_implementation_descendant_ready
     build = tmp_path / "deliverables" / "shop" / "build"
     parent = _qa_parent(manager, extra_write_roots=[str(build)])
     coordinator = manager.create_run(
-        goal=f"协调 leaf 写购物站页面到 {build}。",
+        goal=f"协调 leaf 写示例站页面到 {build}。",
         thought="coord",
         plan=["delegate"],
         parent_id=parent.id,
@@ -177,7 +177,7 @@ def test_hierarchy_schedule_quality_advice_after_implementation_descendant_ready
         extra_write_roots=[str(build)],
     )
     leaf = manager.create_run(
-        goal=f"实现购物站页面，写到 {build}。",
+        goal=f"实现示例站页面，写到 {build}。",
         thought="work",
         plan=["write"],
         parent_id=coordinator.id,
@@ -211,7 +211,7 @@ def test_hierarchy_schedule_quality_advice_after_implementation_descendant_ready
 def test_qa_role_tasks_do_not_inherit_their_own_required_role_contract(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     task = manager.create_run(
-        goal="你是小小傻妞-acceptor（第三层验收子代理），验收购物网站。",
+        goal="你是小小傻妞-acceptor（第三层验收子代理），验收示例网站。",
         thought="qa",
         plan=["inspect refs"],
         role="acceptor",
@@ -226,7 +226,7 @@ def test_qa_role_tasks_do_not_inherit_their_own_required_role_contract(tmp_path)
 def test_qa_role_contract_ignores_natural_language_role_requests(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     task = manager.create_run(
-        goal="这个购物网站做好后记得测试、找问题、最后验收。",
+        goal="这个示例网站做好后记得测试、找问题、最后验收。",
         thought="qa",
         plan=["inspect refs"],
         role="coordinator",

@@ -46,7 +46,9 @@ def _validate_stream(facts: dict[str, Any], findings: list[dict[str, object]]) -
 # LLM: _validate_retry_budget bounds retryable upstream model failures.
 # 函数用途: retryable 错误数超过 retry_limit 时返回 MODEL_RETRY_LIMIT_EXCEEDED。
 def _validate_retry_budget(facts: dict[str, Any], findings: list[dict[str, object]]) -> None:
-    retry_limit = positive_int(facts.get("retry_limit")) or 1
+    retry_limit = positive_int(facts.get("retry_limit")) if "retry_limit" in facts else 1
+    if retry_limit <= 0:
+        return
     retryable_count = sum(1 for item in dict_items(facts.get("model_errors")) if item.get("retryable") is True)
     if retryable_count > retry_limit:
         findings.append(finding("MODEL_RETRY_LIMIT_EXCEEDED", {"attempts": retryable_count}))

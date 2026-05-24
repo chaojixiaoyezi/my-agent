@@ -114,11 +114,11 @@ def test_repair_task_uses_required_read_target_as_product_root(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _mock_workspace_agent(tmp_path)
-    target = tmp_path / "lab_outputs" / "shop-demo" / "index.html"
+    target = tmp_path / "lab_outputs" / "site-demo" / "index.html"
     report = tmp_path / ".my-agent" / "subagents" / "child-a" / "reports" / "test_execution.json"
 
     result = CreateSubagentsTool(agent).execute({
-        "goal": "修复购物站 index.html 的结构验证问题，并满足 required_dom_ids。",
+        "goal": "修复示例站 index.html 的结构验证问题，并满足 required_dom_ids。",
         "agent_name": "小傻妞-验收修复",
         "role": "repair_worker",
         "required_read_paths": [str(report), str(target)],
@@ -139,11 +139,11 @@ def test_goal_absolute_target_file_normalizes_write_root_to_parent(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _mock_workspace_agent(tmp_path)
-    target = tmp_path / "lab_outputs" / "shop-demo" / "index.html"
+    target = tmp_path / "lab_outputs" / "site-demo" / "index.html"
 
     result = CreateSubagentsTool(agent).execute({
-        "goal": "修复购物站验收失败问题。",
-        "agent_name": "小傻妞-修复购物站",
+        "goal": "修复示例站验收失败问题。",
+        "agent_name": "小傻妞-修复示例站",
         "role": "worker",
         "extra_write_roots": [str(target)],
     })

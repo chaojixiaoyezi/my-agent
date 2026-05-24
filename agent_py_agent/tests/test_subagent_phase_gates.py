@@ -187,23 +187,23 @@ def test_explicit_run_ids_wait_for_missing_input_refs(tmp_path):
 # LLM: natural sibling-output wording must still block downstream runners until the file exists.
 # 函数用途: 覆盖 Task18 真实 E2E：“读取某代理的输出 data/x”应视为输入依赖，不是当前任务输出目标。
 def test_explicit_run_ids_wait_for_named_upstream_output_refs(tmp_path):
-    collect = _runner_task("collect", "worker", "小傻妞-数据搜集", "输出到 data/github_star_data.md")
+    collect = _runner_task("collect", "worker", "小傻妞-数据搜集", "输出到 data/source_data.md")
     analysis = _runner_task(
         "analysis",
         "worker",
         "小傻妞-核验翻译",
-        "接收小傻妞-数据搜集的输出 data/github_star_data.md，输出到 data/github_star_analysis.md",
+        "接收小傻妞-数据搜集的输出 data/source_data.md，输出到 data/source_analysis.md",
     )
     report = _runner_task(
         "report",
         "worker",
         "小傻妞-生成报告",
-        "读取小傻妞-核验翻译的输出 data/github_star_analysis.md，并生成 xlsx/final_report.md",
+        "读取小傻妞-核验翻译的输出 data/source_analysis.md，并生成 xlsx/final_report.md",
     )
-    collect.attributes = {"output_refs": ["data/github_star_data.md"]}
-    analysis.attributes = {"output_refs": ["data/github_star_analysis.md"]}
-    analysis.context_manifest = SimpleNamespace(required_read_paths=["data/github_star_data.md"])
-    report.context_manifest = SimpleNamespace(required_read_paths=["data/github_star_analysis.md"])
+    collect.attributes = {"output_refs": ["data/source_data.md"]}
+    analysis.attributes = {"output_refs": ["data/source_analysis.md"]}
+    analysis.context_manifest = SimpleNamespace(required_read_paths=["data/source_data.md"])
+    report.context_manifest = SimpleNamespace(required_read_paths=["data/source_analysis.md"])
     _attach_tmp_workspace(tmp_path, [collect, analysis, report])
     ctx = _dispatch_ctx(["report", "analysis", "collect"])
 
@@ -212,7 +212,7 @@ def test_explicit_run_ids_wait_for_named_upstream_output_refs(tmp_path):
     assert [task.id for task in selected] == ["collect"]
 
     (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "github_star_data.md").write_text("data", encoding="utf-8")
+    (tmp_path / "data" / "source_data.md").write_text("data", encoding="utf-8")
     collect.status = "DONE"
     collect.verification_status = "VERIFIED"
     selected = _runner_candidates_for_context([report, analysis, collect], ctx, runner_max_attempts=1)

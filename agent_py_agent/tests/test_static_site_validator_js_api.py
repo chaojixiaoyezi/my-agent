@@ -11,7 +11,7 @@ def test_static_site_check_blocks_missing_window_app_methods(tmp_path):
         tmp_path,
         {
             "index.html": (
-                '<button onclick="app.showCart()">购物车</button>'
+                '<button onclick="app.showCart()">流程状态</button>'
                 '<script src="app.js"></script>'
             ),
             "app.js": "function showProducts(){} window.app = { showProducts };",
@@ -40,7 +40,7 @@ def test_static_site_check_accepts_top_level_app_object_methods(tmp_path):
         tmp_path,
         {
             "index.html": (
-                '<button onclick="app.showCart()">购物车</button>'
+                '<button onclick="app.showCart()">流程状态</button>'
                 '<script src="app.js"></script>'
             ),
             "app.js": "function showCart(){} const app = { showCart };",

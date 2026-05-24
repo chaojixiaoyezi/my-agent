@@ -86,7 +86,7 @@ def test_model_dispatch_run_ids_respects_task_workflow_off(tmp_path):
         thought="直接完成父级交付，不自动套 workflow。",
         plan=["写页面", "交验收"],
         role="worker",
-        acceptance_checks=[f"文件必须保存到 {tmp_path}/deliverables/furniture-home/index.html"],
+        acceptance_checks=[f"文件必须保存到 {tmp_path}/deliverables/site-output/index.html"],
         workflow_mode="off",
     )
 

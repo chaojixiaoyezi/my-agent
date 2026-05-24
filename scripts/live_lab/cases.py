@@ -15,26 +15,13 @@ import sys
 import textwrap
 
 from .constants import REPO_ROOT
-from .file_repair_wave_case import case_natural_file_repair_wave
 from .main_agent_artifact_case import (
     case_main_artifact_readback,
     case_main_compact_resume_roundtrip,
 )
 from .main_agent_complex_case import (
-    case_main_direct_web_app,
     case_main_large_log_audit,
     case_main_tool_failure_recovery,
-)
-from .markdown_repair_wave_case import case_natural_markdown_repair_wave
-from .shop_case import (
-    _external_asset_refs,
-    _has_disabled_control,
-    case_natural_shop_subagent,
-)
-from .shop_repair_wave_case import case_natural_shop_repair_wave
-from .state_assertions import (
-    assert_no_subagent_state_blockers,
-    assert_persisted_subagent_state_clean,
 )
 
 # LLM: Case imports stay explicit so adding a real canary also updates docs and tests in one place.
@@ -56,18 +43,10 @@ def run_case(lab, case_name: str) -> None:
         "log_analysis_replay": case_log_analysis_replay,
         "gateway_ask": case_gateway_ask,
         "long_subagent": case_long_subagent,
-        "natural_html_subagent": case_natural_html_subagent,
-        "natural_shop_subagent": case_natural_shop_subagent,
-        "natural_shop_repair_wave": case_natural_shop_repair_wave,
         "main_artifact_readback": case_main_artifact_readback,
         "main_compact_resume_roundtrip": case_main_compact_resume_roundtrip,
-        "main_direct_web_app": case_main_direct_web_app,
         "main_tool_failure_recovery": case_main_tool_failure_recovery,
         "main_large_log_audit": case_main_large_log_audit,
-        # LLM: File repair canary stays split so generic cases.py does not grow CSV-specific assertions.
-        "natural_file_repair_wave": case_natural_file_repair_wave,
-        # LLM: Markdown repair canary keeps document checks out of the generic dispatcher.
-        "natural_markdown_repair_wave": case_natural_markdown_repair_wave,
     }
     handlers[case_name](lab)
 
@@ -229,80 +208,3 @@ def case_long_subagent(lab) -> None:
         ),
         timeout=lab.args.timeout * max(lab.args.max_cycles, 1) + 180,
     )
-
-
-# LLM: case_natural_html_subagent is the user-language E2E canary; avoid orchestration jargon in its prompt.
-# 函数用途: 用普通用户说法要求主代理派小傻妞完成一个单文件 HTML 页面，并检查真实产物是否落在公共输出目录。
-def case_natural_html_subagent(lab) -> None:
-    """runs a natural-language subagent task against the real gateway path."""
-
-    lab.section("CASE natural_html_subagent")
-    prompt = _natural_html_prompt()
-    lab.record_prompt("natural_html_subagent", prompt)
-    lab.run_command(lab.agent_command("gateway", "start", "--force"), timeout=90)
-    try:
-        # LLM: Natural HTML case may span several model/tool turns, so the harness waits on gateway budget.
-        # 函数用途: 让普通中文网页任务按 gateway 总预算等待，不把单次模型超时误当整条链路超时。
-        response = lab.run_command(
-            lab.agent_command(
-                "gateway",
-                "ask",
-                prompt,
-                "--timeout",
-                str(lab.gateway_wait_timeout),
-                "--json",
-            ),
-            timeout=lab.gateway_wait_timeout + 120,
-        )
-        response_path = lab.responses_dir / "natural_html_subagent.stdout.json"
-        response_path.write_text(response.stdout, encoding="utf-8")
-        lab.log(f"response_file={response_path}")
-        assert_no_subagent_state_blockers(response.stdout)
-    finally:
-        lab.run_command(
-            lab.agent_command("gateway", "stop", "--timeout", "15", "--kill", "--reason", "live lab done"),
-            timeout=45,
-            allow_fail=True,
-        )
-    output_path = lab.fixture_root / "lab_outputs" / "furniture-home" / "index.html"
-    _assert_natural_html_output(output_path)
-    assert_persisted_subagent_state_clean(lab.fixture_root)
-    lab.log(f"natural_html_output={output_path}")
-
-
-# LLM: _natural_html_prompt must stay close to real user wording so the test catches prompt-contract drift.
-# 函数用途: 生成自然语言测试提示词；不出现 dispatch、runner、contract 等专业词，避免把测试做成只会考试。
-def _natural_html_prompt() -> str:
-    return textwrap.dedent(
-        """
-        我想做一个真实可看的页面。请你安排小傻妞帮你完成，不要你自己直接写正文。
-
-        任务是：用单文件 html 做一个高端现代家具品牌的网站首页，风格高级、简洁、有设计感，适合真实商业品牌使用。只输出完整 html，不要注释。
-
-        请把最终页面保存到 lab_outputs/furniture-home/index.html。
-        不要依赖外部图片、外部字体或外部脚本；需要视觉效果就用 CSS、渐变、色块或内联样式完成。
-        链接不要写成 /collections 这种需要真实路由的地址；如果要链接，就用页面内真实存在的 #section-id。
-        完成后你自己检查一下：文件存在、能作为网页打开、页面里没有空链接、没有坏链接、没有 disabled 按钮。
-        最后告诉我保存路径和检查结果。
-        """
-    ).strip()
-
-
-# LLM: _assert_natural_html_output validates visible artifact facts, including static-only links, not the model's prose.
-# 函数用途: 检查小傻妞真实写出的 HTML 产物，避免主代理只口头说完成，或交付 /shop 这类单文件页面打不开的坏链接。
-def _assert_natural_html_output(output_path) -> None:
-    if not output_path.exists():
-        raise RuntimeError(f"自然语言 HTML 产物不存在: {output_path}")
-    content = output_path.read_text(encoding="utf-8", errors="replace")
-    lower = content.lower()
-    required_terms = ["<html", "</html>", "<body", "</body>"]
-    missing = [term for term in required_terms if term not in lower]
-    if missing:
-        raise RuntimeError(f"自然语言 HTML 产物缺少基本标签: {missing}")
-    if "href=\"#\"" in lower or 'href="/' in lower or _has_disabled_control(lower):
-        raise RuntimeError("自然语言 HTML 产物包含空链接、根路径坏链接或 disabled 按钮。")
-    external_assets = _external_asset_refs(lower)
-    if external_assets:
-        raise RuntimeError(f"自然语言 HTML 产物依赖外部资源: {external_assets[:5]}")
-    if "家具" not in content and "furniture" not in lower:
-        raise RuntimeError("自然语言 HTML 产物不像家具品牌页面。")

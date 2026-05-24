@@ -72,9 +72,9 @@ class TestWebSearchTool:
         html = """
         <html><body>
           <a class="result__a" href="/l/?uddg=https%3A%2F%2Fgithub.com%2FOpenGithubs%2Fgithub-weekly-rank">
-            GitHub weekly rank
+            代码平台 weekly rank
           </a>
-          <a class="result__snippet">Weekly GitHub ranking source.</a>
+          <a class="result__snippet">Weekly 代码平台 ranking source.</a>
           <a class="result__a" href="/l/?uddg=https%3A%2F%2Fexample.com%2Fblog">
             Example blog
           </a>

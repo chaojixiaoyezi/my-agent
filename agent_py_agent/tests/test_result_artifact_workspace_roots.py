@@ -16,13 +16,13 @@ from agent_py_agent.agent.subagents.result_artifact_integrity import missing_loc
 # LLM: Product workspace relative refs should resolve from the workspace root, not only the run dir.
 # 函数用途: 子代理声明 `data/subagents/<alias>/file` 时，只要任务工作区里真实存在，就不能误报 missing_artifact_refs。
 def test_workspace_product_artifact_ref_is_not_missing_from_run_local_task(tmp_path) -> None:
-    workspace = tmp_path / "task_18_short_github_star_growth_xlsx"
+    workspace = tmp_path / "task_18_short_table_report_xlsx"
     run_dir = workspace / "data" / "subagents" / "subagent-actual-run"
     run_dir.mkdir(parents=True)
     artifact_ref = "data/subagents/subagent_data_collection/star_data.md"
     artifact = workspace / artifact_ref
     artifact.parent.mkdir(parents=True)
-    artifact.write_text("github star data", encoding="utf-8")
+    artifact.write_text("source data", encoding="utf-8")
     task = SimpleNamespace(
         task_dir=str(run_dir),
         output_dir=str(run_dir / "output"),

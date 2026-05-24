@@ -46,7 +46,7 @@ def test_runner_context_schedule_without_children_returns_quality_advice(tmp_pat
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     build = tmp_path / "deliverables" / "shop" / "build"
     root = agent.subagents.create_run(
-        goal="购物网站需要 tester / bug_finder / acceptor，但由 LLM 决定 QA scope。",
+        goal="示例网站需要 tester / bug_finder / acceptor，但由 LLM 决定 QA scope。",
         thought="root",
         plan=["root"],
         role="coordinator",
@@ -54,7 +54,7 @@ def test_runner_context_schedule_without_children_returns_quality_advice(tmp_pat
         attributes={"required_qa_roles": ["tester", "bug_finder", "acceptor"]},
     )
     worker = agent.subagents.create_run(
-        goal=f"实现购物网站到 {build}",
+        goal=f"实现示例网站到 {build}",
         thought="work",
         plan=["write"],
         parent_id=root.id,

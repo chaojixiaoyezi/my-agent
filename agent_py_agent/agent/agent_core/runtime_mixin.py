@@ -19,6 +19,10 @@ from .compact_auto_continuation import (
     compact_auto_continuation_decision,
     mark_compact_auto_continued,
 )
+from .delivery_requirement_materializer import (
+    build_delivery_requirement_materializer_prompt,
+    materialized_delivery_contract,
+)
 from .runtime_loop_models import RuntimeContextRequest
 from .runtime_loop_support import (
     FinalizeParams,
@@ -30,6 +34,8 @@ from .runtime_loop_support import (
     run_params_from_values,
 )
 from .runtime_services import CompressionService, FinalizationService, ToolLoopService
+
+_AUTO_MATERIALIZE_SOURCES = {"chat", "cli_run", "gateway"}
 
 
 # LLM: _RuntimeServices 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -277,6 +283,7 @@ def _run_params_from_compat(params: RunParams, fields: _RunCompatibilityFields) 
 # 函数用途: 执行已归一化的 RunParams，串接准备上下文、工具循环和 finalization。
 def _run_with_params(agent, user_prompt: str, params: RunParams):
     current_params = _run_params_with_request_id(params)
+    current_params = _run_params_with_materialized_delivery_contract(agent, user_prompt, current_params)
     result = _run_once_with_params(agent, user_prompt, current_params)
     while True:
         decision = compact_auto_continuation_decision(
@@ -301,6 +308,32 @@ def _run_params_with_request_id(params: RunParams) -> RunParams:
     if params.request_id == request_id and params.run_id == run_id and params.task_id == task_id:
         return params
     return replace(params, request_id=request_id, run_id=run_id, task_id=task_id)
+
+
+def _run_params_with_materialized_delivery_contract(agent, user_prompt: str, params: RunParams) -> RunParams:
+    if params.delivery_contract is not None or not _should_materialize_delivery_contract(params):
+        return params
+    prompt = build_delivery_requirement_materializer_prompt(user_prompt)
+    response = agent.backend.generate(prompt)
+    contract = materialized_delivery_contract(response.text, workspace_root=agent.root)
+    if not _has_materialized_runtime_contract(contract):
+        return params
+    return replace(params, delivery_contract=contract)
+
+
+def _should_materialize_delivery_contract(params: RunParams) -> bool:
+    return str(params.source or "").strip() in _AUTO_MATERIALIZE_SOURCES
+
+
+def _has_materialized_runtime_contract(contract: dict) -> bool:
+    return any(
+        (
+            bool(contract.get("artifacts")),
+            isinstance(contract.get("delivery_quality_contract"), dict),
+            isinstance(contract.get("fact_evidence_contract"), dict),
+            isinstance(contract.get("bootstrap_contract"), dict),
+        )
+    )
 
 
 # LLM: _run_once_with_params contains one normal model/tool/finalize pass for reuse by auto continuation.

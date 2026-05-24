@@ -436,7 +436,7 @@ def test_top_level_natural_report_only_prompt_blocks_product_body_before_accepto
 
 
 # LLM: Real user wording may include "你自己直接写页面正文" instead of refs-only jargon.
-# 函数用途: 购物站真实 E2E 暴露 root 读正文保护漏识别这类普通话术；这里固定为验收前阻断。
+# 函数用途: 示例站真实 E2E 暴露 root 读正文保护漏识别这类普通话术；这里固定为验收前阻断。
 def test_top_level_delegate_only_prompt_with_you_directly_write_text_blocks_product_body():
     tasks = {
         "worker": _task("worker", identity="worker", done=True),

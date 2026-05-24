@@ -111,14 +111,14 @@ def test_hierarchy_schedule_duplicate_domain_ignores_shared_filesystem_paths(tmp
                 HierarchyChildSpec(
                     goal=(
                         "在 /Users/example/my-claude-code/deliverables/stage7_shop_complete/build "
-                        "交付静态购物网站 HTML/CSS/JS。"
+                        "交付静态示例网站 HTML/CSS/JS。"
                     ),
                     role="coordinator",
                     agent_name="小小傻妞-前端Worker",
                 ),
                 HierarchyChildSpec(
                     goal=(
-                        "协调测试子代理，为购物网站 demo 创建验收测试。测试文件写到 "
+                        "协调测试子代理，为示例网站 demo 创建验收测试。测试文件写到 "
                         "/Users/example/my-claude-code/deliverables/stage7_shop_complete/build/tests/。"
                     ),
                     role="coordinator",
@@ -157,7 +157,7 @@ def test_hierarchy_schedule_duplicate_domain_ignores_depth_markers(tmp_path):
                     agent_name="小小傻妞-前端协调A",
                 ),
                 HierarchyChildSpec(
-                    goal="创建 depth=3 孙孙节点完成 login.html/cart.html/checkout.html。",
+                    goal="创建 depth=3 孙孙节点完成 login.html/flow-a.html/flow-b.html。",
                     role="child_coordinator",
                     agent_name="小小傻妞-前端协调B",
                 ),
@@ -290,13 +290,13 @@ def test_hierarchy_schedule_allows_leaf_referencing_shared_assets(tmp_path):
             child_specs=[
                 HierarchyChildSpec(
                     goal=(
-                        "写 cart.html 和 checkout.html\n"
+                        "写 flow-a.html 和 flow-b.html\n"
                         "## 目标\n"
-                        "- /tmp/shop/build/cart.html\n"
-                        "- /tmp/shop/build/checkout.html\n"
+                        "- /tmp/site/build/flow-a.html\n"
+                        "- /tmp/site/build/flow-b.html\n"
                         "## 内容\n"
-                        "- cart.html 引入 style.css 和 app.js\n"
-                        "- checkout.html 链接到 order-success.html"
+                        "- flow-a.html 引入 style.css 和 app.js\n"
+                        "- flow-b.html 链接到 flow-done.html"
                     ),
                     role="leaf_worker",
                     agent_name="小小小傻妞-cart-writer",

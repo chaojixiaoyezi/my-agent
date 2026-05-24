@@ -65,6 +65,7 @@ def _writer_call(action: dict[str, object]) -> dict[str, object]:
 # 函数用途: 从 collection_contract 和 required_columns 生成可填写的 API 采集工具骨架，避免把 shape hint 塞进无效 data 字段。
 def _api_json_collection_call(action: dict[str, object], path: str) -> dict[str, object]:
     columns = _api_collection_columns(action)
+    llm_generated_fields = _api_collection_llm_generated_fields(action)
     call: dict[str, object] = {
         "tool": "api_json_collection",
         "path": path,
@@ -76,6 +77,8 @@ def _api_json_collection_call(action: dict[str, object], path: str) -> dict[str,
             "scope": _completion_scope(action),
         },
     }
+    if llm_generated_fields:
+        call["llm_generated_fields"] = llm_generated_fields
     call.update(_api_collection_request_fields(action))
     collection = action.get("collection_contract")
     if isinstance(collection, dict):
@@ -97,7 +100,23 @@ def _api_collection_evidence_fields(action: dict[str, object], columns: list[str
         values = _string_list(request.get("evidence_fields"))
         if values:
             return values
+    collection = action.get("collection_contract")
+    if isinstance(collection, dict):
+        values = _string_list(collection.get("required_item_evidence_fields"))
+        if values:
+            return values
     return columns
+
+
+def _api_collection_llm_generated_fields(action: dict[str, object]) -> list[str]:
+    fields: list[str] = []
+    collection = action.get("collection_contract")
+    if isinstance(collection, dict):
+        fields.extend(_string_list(collection.get("llm_generated_fields")))
+        request = collection.get("api_request")
+        if isinstance(request, dict):
+            fields.extend(_string_list(request.get("llm_generated_fields")))
+    return list(dict.fromkeys(fields))
 
 
 def _api_collection_request_fields(action: dict[str, object]) -> dict[str, object]:
@@ -190,7 +209,7 @@ def _builder_call(action: dict[str, object]) -> dict[str, object]:
         return {}
     call: dict[str, object] = {"tool": tool, "path": output_ref}
     if source_ref:
-        call[_source_param_name(tool)] = source_ref
+        call[_source_param_name(action, tool)] = source_ref
     return call
 
 
@@ -343,9 +362,13 @@ def _positive_int(value: object) -> int:
     return number if number > 0 else 0
 
 
-# LLM: _source_param_name keeps this runtime helper grounded in structured fields.
-# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
-def _source_param_name(tool: str) -> str:
+# LLM: _source_param_name prefers explicit builder schema fields and only uses known-tool defaults as a fast path.
+# 函数用途: 优先读取结构化 source_param/source_param_name/input_param；未知 builder 走 source_path 兜底，不因映射缺失拒绝。
+def _source_param_name(action: dict[str, object], tool: str) -> str:
+    for key in ("source_param", "source_param_name", "input_param"):
+        value = str(action.get(key) or "").strip()
+        if value:
+            return value
     return {
         "data_to_workbook": "source_json_path",
         "markdown_to_pdf": "source_markdown_path",

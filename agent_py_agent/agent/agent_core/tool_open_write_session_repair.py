@@ -16,7 +16,7 @@ _MAX_REPAIRS = 2
 # 函数用途: 如果存在未 finish 的分块写入 session，则返回下一轮模型必须处理的结构化提示。
 def open_write_session_repair_context(agent: object, repairs: int, params: object | None = None) -> str:
     sessions = _open_sessions(agent, params)
-    if not sessions or repairs >= _MAX_REPAIRS:
+    if not sessions or (_MAX_REPAIRS > 0 and repairs >= _MAX_REPAIRS):
         return ""
     payload = {"open_file_write_sessions": sessions}
     return "\n".join(

@@ -54,6 +54,26 @@ def test_gate_decision_serializes_recovery_envelope_with_chinese_message():
     assert "请" in recovery["message_zh"]
 
 
+def test_contract_recovery_exposes_rework_loop_for_repairable_gate_failure():
+    from agent_py_agent.agent.agent_core.main_agent_delivery_closeout_gate_recovery import (
+        attach_contract_recovery,
+    )
+
+    report: dict[str, object] = {}
+    decision = GateDecision.repair(
+        "delivery_quality",
+        [GateFinding("METRIC_WINDOW_MISSING", message="缺少时间窗口", evidence={"field": "stars_delta"})],
+    )
+
+    attach_contract_recovery(report, [decision], contract={})
+
+    recovery = report["contract_recovery"]
+    assert recovery["status"] == "repair_required"
+    assert recovery["rework_loop"]["mode"] == "repair_then_revalidate"
+    assert recovery["rework_loop"]["terminal"] is False
+    assert "重新跑同一套合同验收" in recovery["rework_loop"]["message_zh"]
+
+
 # LLM: Approval gates should ask the user instead of being mislabeled as automatic repair.
 # 函数用途: 验证需要审批的合同门返回 needs_user_input，让运行时等待审批而不是粗暴失败或自动绕过。
 def test_gate_decision_recovery_envelope_marks_approval_as_user_input():

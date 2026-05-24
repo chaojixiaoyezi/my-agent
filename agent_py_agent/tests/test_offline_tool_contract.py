@@ -78,6 +78,23 @@ def test_repeated_identical_tool_calls_block_after_threshold() -> None:
     assert result.error_codes == ("TOOL_REPEATED_NO_PROGRESS",)
 
 
+# LLM: zero repeated_threshold disables the offline no-progress cap.
+# 函数用途: 验证工具结果合同中 repeated_threshold=0 不会把重复只读结果直接判死。
+def test_repeated_threshold_zero_is_unlimited() -> None:
+    from agent_py_agent.agent.contracts.offline_tool_contract import validate_tool_events
+
+    call = {"tool": "query_logs", "args_hash": "args-1", "result_hash": "result-1", "read_only": True}
+    result = validate_tool_events(
+        tuple(
+            {"type": "tool_result", "operation_id": f"op-{idx}", "result": {"ok": True}, **call}
+            for idx in range(10)
+        ),
+        repeated_threshold=0,
+    )
+
+    assert result.ok is True
+
+
 # LLM: Repeated tool names with different arguments are exploration, not a no-progress loop.
 # 函数用途: 验证同一工具不同 args_hash 不会被重复调用合同误杀。
 def test_same_tool_with_different_args_is_allowed() -> None:

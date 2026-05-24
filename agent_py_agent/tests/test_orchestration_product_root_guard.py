@@ -18,7 +18,7 @@ def test_explicit_coordinator_product_delivery_requires_write_root():
 
     tool = CreateSubagentsTool(mock_agent)
     result = tool.execute({
-        "goal": "交付购物网站。",
+        "goal": "交付示例网站。",
         "output_files": ["build/index.html", "build/style.css", "build/app.js"],
         "role": "coordinator",
     })

@@ -307,6 +307,7 @@ def _artifact_item_path(tool: str) -> str:
 def _source_artifact_fields(call: dict[str, object], action: dict[str, object], agent_root: Path) -> dict[str, object]:
     fields = call.get("fields")
     columns = _string_list(call.get("columns"))
+    llm_fields = set(_llm_generated_fields(call, action))
     values = _required_item_values(action)
     existing_values = _existing_checkpoint_constant_values(action, agent_root)
     field_values = fields if isinstance(fields, dict) else {}
@@ -314,7 +315,7 @@ def _source_artifact_fields(call: dict[str, object], action: dict[str, object], 
         column: value
         for column in columns
         for value in [_source_artifact_field_value(column, values, existing_values, field_values)]
-        if value is not None
+        if value is not None and column not in llm_fields and not _column_requires_llm_generation(column)
     }
 
 
@@ -326,11 +327,11 @@ def _source_artifact_field_value(
 ) -> object | None:
     if column in values:
         return {"value": values[column]}
+    if column in existing_values:
+        return {"value": existing_values[column]}
     inferred = _common_source_field(column)
     if inferred:
         return inferred
-    if column in existing_values:
-        return {"value": existing_values[column]}
     return fields.get(column)
 
 
@@ -341,6 +342,17 @@ def _source_artifact_evidence_fields(call: dict[str, object], action: dict[str, 
         if fields:
             return fields
     return _string_list(call.get("evidence_fields"))
+
+
+def _llm_generated_fields(call: dict[str, object], action: dict[str, object]) -> list[str]:
+    fields = _string_list(call.get("llm_generated_fields"))
+    collection = action.get("collection_contract")
+    if isinstance(collection, dict):
+        fields.extend(_string_list(collection.get("llm_generated_fields")))
+        request = collection.get("api_request")
+        if isinstance(request, dict):
+            fields.extend(_string_list(request.get("llm_generated_fields")))
+    return list(dict.fromkeys(fields))
 
 
 def _enrich_collection_markdown_write_call(call: dict[str, object], agent_root: Path) -> dict[str, object]:
@@ -411,7 +423,7 @@ def _same_row(left: dict[str, object], right: dict[str, object]) -> bool:
 def _markdown_from_collection_rows(rows: list[dict[str, object]], *, source_ref: str) -> str:
     lines = ["# 交付文档", "", f"> source_ref: `{source_ref}`", ""]
     for index, row in enumerate(rows, start=1):
-        title = str(row.get("title") or row.get("name") or row.get("项目名") or f"Item {index}").strip()
+        title = _row_title(row, index)
         lines.extend([f"## {index}. {title}", ""])
         for key, value in row.items():
             if key == "field_source_ids" or isinstance(value, (dict, list)):
@@ -419,6 +431,20 @@ def _markdown_from_collection_rows(rows: list[dict[str, object]], *, source_ref:
             lines.append(f"- {key}: {value}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _row_title(row: dict[str, object], index: int) -> str:
+    for key in ("title", "name"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    for value in row.values():
+        if isinstance(value, (dict, list)):
+            continue
+        text = str(value or "").strip()
+        if text:
+            return text[:80]
+    return f"Item {index}"
 
 
 def _required_item_values(action: dict[str, object]) -> dict[str, object]:
@@ -429,19 +455,100 @@ def _required_item_values(action: dict[str, object]) -> dict[str, object]:
 
 def _common_source_field(column: str) -> object:
     normalized = column.strip().lower()
+    compact = _compact_field_name(normalized)
     mapping: dict[str, Any] = {
         "abstract": {"path": "snippet", "default_template": "{snippet}"},
         "date": {"paths": ["date", "published", "published_at", "updated"], "date_from_url": True},
+        "description": {"paths": ["description", "snippet", "summary"]},
+        "name": {"paths": ["name", "title", "full_name"]},
         "published": {"paths": ["published", "published_at", "date", "updated"], "date_from_url": True},
         "published_at": {"paths": ["published_at", "published", "date", "updated"], "date_from_url": True},
         "snippet": "snippet",
+        "summary": {"paths": ["summary", "snippet", "description"]},
         "title": "title",
         "url": "url",
         "uri": "url",
     }
     if normalized in {"authors", "author"}:
         return {"path": "authors", "default": []}
-    return mapping.get(normalized)
+    if normalized in mapping:
+        return mapping[normalized]
+    if compact in {"name", "title", "名称", "标题"}:
+        return {"paths": ["name", "title"]}
+    if compact in {"url", "uri", "link", "address", "地址", "链接"}:
+        return {"paths": ["url", "link", "uri"]}
+    if compact in {"description", "summary", "abstract", "snippet", "说明", "摘要", "简介"}:
+        return {"paths": ["description", "summary", "snippet"]}
+    if compact in {"language", "languages", "techstack", "technology", "技术栈", "技术", "语言"}:
+        return {"paths": ["language", "primary_language", "languages", "topics"], "default": ""}
+    if compact in {"delta", "growth", "change", "metricdelta", "指标变化", "指标增量", "新增值", "变化值"}:
+        return {"paths": ["metric_delta", "value_delta", "growth", "delta", "change"], "default": ""}
+    return _derived_source_field(column)
+
+
+def _derived_source_field(column: str) -> object | None:
+    names = _source_field_candidates(column)
+    if not names:
+        return None
+    return names[0] if len(names) == 1 else {"paths": names, "default": ""}
+
+
+def _source_field_candidates(column: str) -> list[str]:
+    raw = column.strip()
+    if not raw:
+        return []
+    compact = _compact_field_name(raw.lower())
+    snake = _ascii_snake_name(raw)
+    candidates = [raw, compact, snake]
+    return [item for item in dict.fromkeys(candidates) if item]
+
+
+def _ascii_snake_name(value: str) -> str:
+    chars: list[str] = []
+    previous_was_sep = False
+    for char in value.strip().lower():
+        if char.isascii() and char.isalnum():
+            chars.append(char)
+            previous_was_sep = False
+        elif chars and not previous_was_sep:
+            chars.append("_")
+            previous_was_sep = True
+    return "".join(chars).strip("_")
+
+
+
+
+def _column_requires_llm_generation(column: str) -> bool:
+    compact = _compact_field_name(column.strip().lower())
+    if not compact:
+        return False
+    markers = (
+        "analysis",
+        "commentary",
+        "decision",
+        "explanation",
+        "insight",
+        "judgement",
+        "judgment",
+        "opinion",
+        "reason",
+        "recommendation",
+        "summary",
+        "建议",
+        "判断",
+        "分析",
+        "推荐",
+        "摘要",
+        "理由",
+        "结论",
+        "解释",
+        "评价",
+    )
+    return any(marker in compact for marker in markers)
+
+
+def _compact_field_name(value: str) -> str:
+    return "".join(ch for ch in value if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
 
 
 def _existing_checkpoint_constant_values(action: dict[str, object], agent_root: Path) -> dict[str, object]:

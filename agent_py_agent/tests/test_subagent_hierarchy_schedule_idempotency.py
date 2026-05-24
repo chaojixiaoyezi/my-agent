@@ -33,8 +33,8 @@ def test_schedule_child_reuses_explicit_idempotency_contract_without_growing_tre
     root = manager.create_run(goal="root", thought="root", plan=["root"])
     parent = manager.create_run(goal="parent", thought="parent", plan=["parent"], parent_id=root.id, root_id=root.id)
 
-    first = _schedule_one(manager, parent.id, "写商品列表页面", key="product-list")
-    second = _schedule_one(manager, parent.id, "继续商品列表页面", key="product-list")
+    first = _schedule_one(manager, parent.id, "写条目列表页面", key="product-list")
+    second = _schedule_one(manager, parent.id, "继续条目列表页面", key="product-list")
 
     assert len(first.created_run_ids) == 1
     assert second.created_run_ids == []
@@ -51,8 +51,8 @@ def test_schedule_child_does_not_reuse_different_goal_with_same_default_name(tmp
     root = manager.create_run(goal="root", thought="root", plan=["root"])
     parent = manager.create_run(goal="parent", thought="parent", plan=["parent"], parent_id=root.id, root_id=root.id)
 
-    first = _schedule_one(manager, parent.id, "写商品列表页面", key="product-list")
-    second = _schedule_one(manager, parent.id, "写购物车页面")
+    first = _schedule_one(manager, parent.id, "写条目列表页面", key="product-list")
+    second = _schedule_one(manager, parent.id, "写流程状态页面")
 
     assert len(first.created_run_ids) == 1
     assert len(second.created_run_ids) == 1
@@ -66,13 +66,13 @@ def test_schedule_child_reuses_verified_child_without_dispatching(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(goal="root", thought="root", plan=["root"])
     parent = manager.create_run(goal="parent", thought="parent", plan=["parent"], parent_id=root.id, root_id=root.id)
-    first = _schedule_one(manager, parent.id, "写商品列表页面", key="product-list")
+    first = _schedule_one(manager, parent.id, "写条目列表页面", key="product-list")
     child = manager.load(first.created_run_ids[0])
     child.status = "DONE"
     child.verification_status = "VERIFIED"
     manager.save(child)
 
-    second = _schedule_one(manager, parent.id, "继续商品列表页面", key="product-list")
+    second = _schedule_one(manager, parent.id, "继续条目列表页面", key="product-list")
 
     assert second.created_run_ids == []
     assert second.reused_run_ids == first.created_run_ids
@@ -97,7 +97,7 @@ def test_schedule_child_tool_payload_exposes_reused_and_dispatch_ids(tmp_path):
     tool = ScheduleChildSubagentsTool(agent)
     params = {
         "apply": True,
-        "children": [{"goal": "写商品列表页面", "role": "worker", "context_packs": _packs("product-list")}],
+        "children": [{"goal": "写条目列表页面", "role": "worker", "context_packs": _packs("product-list")}],
     }
 
     first = json.loads(tool.execute(params).output)

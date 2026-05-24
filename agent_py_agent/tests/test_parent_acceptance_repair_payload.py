@@ -82,8 +82,8 @@ def test_top_level_rejected_parent_tests_include_repair_child_tool_call(tmp_path
 # 函数用途: 顶层验收修复建议要继承失败 child 的完整验收条件，避免只补最近一个静态错误就误通过。
 def test_top_level_repair_child_inherits_original_acceptance_contract(tmp_path: Path):
     fixture = _top_level_reject_fixture(tmp_path)
-    original_check = "购物站必须有完整注册、登录、购物车、结算和下单成功流程"
-    _write_original_task_contract(fixture.run_dir, goal="做一个完整购物网站", checks=[original_check])
+    original_check = "示例站必须有完整注册、登录、流程状态、结算和下单成功流程"
+    _write_original_task_contract(fixture.run_dir, goal="做一个完整示例网站", checks=[original_check])
 
     payload = dispatch_record_payload(fixture.item)
 
@@ -103,7 +103,7 @@ def test_direct_repair_child_inherits_original_acceptance_contract(tmp_path: Pat
     reports_dir = _reports_dir(tmp_path, message="父级真实验收测试失败：total=2 failed=1")
     _write_failed_test_refs(reports_dir)
     original_check = "最终页面必须包含 register、login、cart、checkout 和 order-confirmation 区域"
-    _write_original_task_contract(reports_dir.parent, goal="做完整购物站首页", checks=[original_check])
+    _write_original_task_contract(reports_dir.parent, goal="做完整示例站首页", checks=[original_check])
 
     direct = _dispatch_direct_children(_child(reports_dir))
 
@@ -119,7 +119,7 @@ def _top_level_reject_fixture(tmp_path: Path) -> SimpleNamespace:
     run_dir = tmp_path / "child-a"
     reports_dir = run_dir / "reports"
     reports_dir.mkdir(parents=True)
-    refs = _top_level_reject_refs(run_dir, tmp_path / "deliverables" / "furniture-home")
+    refs = _top_level_reject_refs(run_dir, tmp_path / "deliverables" / "site-output")
     return SimpleNamespace(
         run_dir=run_dir,
         item=_top_level_reject_item(refs.test_ref, refs.followup_ref),
@@ -134,7 +134,7 @@ def _top_level_reject_refs(run_dir: Path, product_root: Path) -> SimpleNamespace
     output_ref = run_dir / "output.json"
     missing_xlsx = product_root / "github_weekly_star_growth_short.xlsx"
     _write_parent_reject_run_ref(run_dir, product_root)
-    output_ref.write_text(json.dumps({"artifacts": [{"path": "deliverables/furniture-home/index.html"}]}), encoding="utf-8")
+    output_ref.write_text(json.dumps({"artifacts": [{"path": "deliverables/site-output/index.html"}]}), encoding="utf-8")
     test_ref.write_text(json.dumps({"records": [{"validation_result": {"ok": False, "path": str(missing_xlsx)}}]}), encoding="utf-8")
     return SimpleNamespace(
         test_ref=test_ref,
@@ -214,7 +214,7 @@ def test_top_level_artifact_integrity_blocker_includes_repair_child_tool_call(tm
 def _artifact_integrity_blocker_fixture(tmp_path: Path) -> SimpleNamespace:
     run_dir = tmp_path / "child-a"
     run_dir.mkdir()
-    product_root = tmp_path / "deliverables" / "furniture-home"
+    product_root = tmp_path / "deliverables" / "site-output"
     product_root.mkdir(parents=True)
     artifact = product_root / "index.html"
     artifact.write_text("<html><body>", encoding="utf-8")

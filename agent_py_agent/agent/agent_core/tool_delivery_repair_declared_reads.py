@@ -36,6 +36,39 @@ def declared_repair_reads_exhausted(
     return False
 
 
+def declared_repair_reads_exhausted_for_all_calls(
+    agent: object,
+    payload: dict[str, object],
+    calls: list[dict[str, object]],
+    required_actions: list[dict[str, object]],
+) -> bool:
+    read_keys = [_declared_repair_read_key(call, required_actions) for call in calls]
+    if not read_keys or not all(read_keys):
+        return False
+    return declared_repair_reads_exhausted(agent, payload, calls, required_actions)
+
+
+def exhausted_declared_repair_read_keys(
+    agent: object,
+    payload: dict[str, object],
+    calls: list[dict[str, object]],
+    required_actions: list[dict[str, object]],
+) -> set[str]:
+    read_keys = [declared_repair_read_key(call, required_actions) for call in calls]
+    read_keys = [key for key in read_keys if key]
+    if not read_keys:
+        return set()
+    signature = _declared_read_signature(payload)
+    state = _load_state(agent)
+    if str(state.get("signature") or "") != signature:
+        state = {"seen": [], "signature": signature}
+    seen = {str(item) for item in state.get("seen", []) if str(item)} if isinstance(state.get("seen"), list) else set()
+    exhausted = {key for key in read_keys if key in seen}
+    seen.update(read_keys)
+    _write_state(agent, {"seen": sorted(seen), "signature": signature})
+    return exhausted
+
+
 def reset_declared_read_allowance(agent: object) -> None:
     path = _state_path(agent)
     try:
@@ -54,6 +87,10 @@ def _declared_repair_read_key(call: dict[str, object], required_actions: list[di
         if same_path_ref(path, target):
             return target.replace("\\", "/").strip("/")
     return ""
+
+
+def declared_repair_read_key(call: dict[str, object], required_actions: list[dict[str, object]]) -> str:
+    return _declared_repair_read_key(call, required_actions)
 
 
 def _declared_read_signature(payload: dict[str, object]) -> str:
@@ -88,4 +125,10 @@ def _write_state(agent: object, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
 
 
-__all__ = ["declared_repair_reads_exhausted", "reset_declared_read_allowance"]
+__all__ = [
+    "declared_repair_reads_exhausted",
+    "declared_repair_reads_exhausted_for_all_calls",
+    "declared_repair_read_key",
+    "exhausted_declared_repair_read_keys",
+    "reset_declared_read_allowance",
+]

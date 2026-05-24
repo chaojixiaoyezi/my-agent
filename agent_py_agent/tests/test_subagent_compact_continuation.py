@@ -19,16 +19,16 @@ from agent_py_agent.agent.subagents.models import SubAgentParsedOutput
 def test_subagent_save_writes_task_local_continue_packet(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
-        goal="继续实现 checkout.html",
-        thought="购物站 leaf 被 compact 后要能接着写。",
+        goal="继续实现 flow-b.html",
+        thought="示例站 leaf 被 compact 后要能接着写。",
         plan=["恢复 checkpoint", "继续补测试"],
         role="leaf_worker",
     )
     task.status = "BLOCKED"
     task.current_step = "等待父级授权后继续 checkout tests"
-    task.latest_summary = "已经写完商品页，checkout tests 还没补齐。"
+    task.latest_summary = "已经写完条目页，checkout tests 还没补齐。"
     task.blockers = ["缺少父级重新 dispatch"]
-    task.artifact_refs = ["build/products.html"]
+    task.artifact_refs = ["build/items.html"]
     task.evidence_refs = ["reports/runner_result.json"]
 
     manager.save(task)
@@ -46,7 +46,7 @@ def test_subagent_save_writes_task_local_continue_packet(tmp_path: Path) -> None
     assert packet["ready_to_continue"] is True
     assert packet["owner"] == {"owner_type": "subagent_run", "owner_id": task.id}
     assert packet["next_action"] == "等待父级授权后继续 checkout tests"
-    assert packet["latest_summary"] == "已经写完商品页，checkout tests 还没补齐。"
+    assert packet["latest_summary"] == "已经写完条目页，checkout tests 还没补齐。"
     assert packet["restore_refs"]["agent_run_checkpoint"].endswith("checkpoint.json")
     assert loaded.agent_run_checkpoint_json in packet["recommended_read_paths"]
     assert ledger_lines
@@ -58,7 +58,7 @@ def test_subagent_save_writes_task_local_continue_packet(tmp_path: Path) -> None
 def test_runner_prompt_uses_generated_task_local_continue_packet(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
-        goal="继续购物网站 leaf 任务",
+        goal="继续示例网站 leaf 任务",
         thought="需要从 task-local packet 接续。",
         plan=["读 checkpoint", "继续写验收证据"],
         role="leaf_worker",

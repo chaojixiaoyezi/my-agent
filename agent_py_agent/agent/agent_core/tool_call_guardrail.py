@@ -60,7 +60,8 @@ def maybe_block_repeated_tool_failure(agent: object, params: object, payload: di
     if not signature.tool_name:
         return None
     failures = _failure_state(agent).get(signature.key(), 0)
-    if failures < _block_after(params):
+    block_after = _block_after(params)
+    if block_after <= 0 or failures < block_after:
         return None
     return ToolExecutionResult(
         signature.tool_name,
@@ -89,7 +90,8 @@ def maybe_block_repeated_tool_no_progress(agent: object, params: object, payload
     if not signature.tool_name or not _is_read_only_tool(signature.tool_name):
         return None
     record = _no_progress_state(agent).get(signature.key())
-    if not isinstance(record, dict) or int(record.get("count") or 0) < _no_progress_block_after(params):
+    block_after = _no_progress_block_after(params)
+    if block_after <= 0 or not isinstance(record, dict) or int(record.get("count") or 0) < block_after:
         return None
     return ToolExecutionResult(
         signature.tool_name,
@@ -219,8 +221,8 @@ def _block_after(params: object) -> int:
         try:
             parsed = int(value)
         except (TypeError, ValueError):
-            parsed = 0
-        if parsed > 0:
+            parsed = -1
+        if parsed >= 0:
             return parsed
     return _DEFAULT_EXACT_FAILURE_BLOCK_AFTER
 
@@ -232,8 +234,8 @@ def _no_progress_block_after(params: object) -> int:
         try:
             parsed = int(value)
         except (TypeError, ValueError):
-            parsed = 0
-        if parsed > 0:
+            parsed = -1
+        if parsed >= 0:
             return parsed
     return _DEFAULT_NO_PROGRESS_BLOCK_AFTER
 

@@ -59,7 +59,7 @@ def test_tool_loop_closes_out_after_delivery_contract_passes():
         assert backend.calls == 1
         assert result.tool_rounds == 1
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
-        assert (workspace / "outputs/furniture_homepage/index.html").exists()
+        assert (workspace / "outputs/html_report/index.html").exists()
         assert (workspace / ".agent_delivery/closeout.json").exists()
 
 
@@ -72,13 +72,13 @@ def test_tool_loop_redirects_repeated_remote_exploration_back_to_local_progress(
         backend = LocalProgressRedirectBackend()
 
         result = _agent(workspace, backend, max_tool_rounds=8).run(
-            "整理 GitHub 项目并生成表格。",
+            "整理 代码平台 项目并生成表格。",
             params=RunParams(delivery_contract=xlsx_delivery_contract(), save=False),
         )
 
         assert backend.calls == 5
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
-        assert (workspace / "outputs/github_star_growth/github_star_growth.xlsx").exists()
+        assert (workspace / "outputs/table_report/table_report.xlsx").exists()
 
 
 # LLM: Delivery closeout must use RunParams contracts without requiring prompt markers.
@@ -93,7 +93,7 @@ def test_tool_loop_closes_out_from_structured_run_params_delivery_contract():
         )
 
         assert backend.calls == 1
-        assert "outputs/furniture_homepage/index.html" in backend.prompts[0]
+        assert "outputs/html_report/index.html" in backend.prompts[0]
         assert "[tool-system delivery-contract]" in backend.prompts[0]
         assert "不得引用 http/https 外部" in backend.prompts[0]
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
@@ -141,7 +141,7 @@ def test_tool_loop_does_not_close_out_when_delivery_contract_fails():
         assert repair["recommended_action"] == "repair_artifact_against_findings"
         assert "write_file" in repair["write_tools"]
         assert "HTML_INCOMPLETE_DOCUMENT" in repair["finding_codes"]
-        assert any(str(path).endswith("outputs/furniture_homepage/index.html") for path in repair["repair_targets"])
+        assert any(str(path).endswith("outputs/html_report/index.html") for path in repair["repair_targets"])
 
 
 # LLM: Failed artifact findings should repair in the next model turn and then close out.
@@ -173,7 +173,7 @@ def test_tool_loop_repairs_missing_artifact_to_contract_path_before_closeout():
 
         assert backend.calls == 2
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
-        assert (workspace / "outputs/furniture_homepage/index.html").exists()
+        assert (workspace / "outputs/html_report/index.html").exists()
         assert _closeout_report(workspace)["ok"] is True
 
 
@@ -203,7 +203,7 @@ def test_tool_loop_delivery_closeout_blocks_open_file_write_sessions():
         _write_site_index(workspace)
         backend = OpenWriteSessionDeliveryBackend()
         result = _agent(workspace, backend, max_tool_rounds=3).run(
-            "做一个购物网站。",
+            "做一个示例网站。",
             params=RunParams(delivery_contract=web_project_delivery_contract(), save=False),
             allowed_tools=["file_write_session"],
         )
@@ -211,7 +211,7 @@ def test_tool_loop_delivery_closeout_blocks_open_file_write_sessions():
         assert backend.calls == 3
         assert backend.saw_open_session_context is True
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
-        assert (workspace / "outputs/shopping_site/app.js").read_text(encoding="utf-8") == 'console.log("shop ready");'
+        assert (workspace / "outputs/static_site/app.js").read_text(encoding="utf-8") == 'console.log("shop ready");'
 
 
 # LLM: Repeated identical delivery failures must terminate as blocked instead of consuming endless tool rounds.
@@ -261,7 +261,7 @@ def test_tool_loop_keeps_running_while_bootstrap_targets_are_still_missing():
         workspace = Path(td)
         backend = PendingTargetsDeliveryBackend()
         result = _agent(workspace, backend, max_tool_rounds=6).run(
-            "做一个购物网站。",
+            "做一个示例网站。",
             params=RunParams(delivery_contract=web_project_delivery_contract(), save=False),
         )
         report = _closeout_report(workspace)
@@ -270,8 +270,8 @@ def test_tool_loop_keeps_running_while_bootstrap_targets_are_still_missing():
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert "[MAIN_AGENT_DELIVERY_BLOCKED]" not in result.response
         assert report["ok"] is True
-        assert (workspace / "outputs/shopping_site/index.html").exists()
-        assert (workspace / "outputs/shopping_site/app.js").read_text(encoding="utf-8") == 'console.log("shop ready");'
+        assert (workspace / "outputs/static_site/index.html").exists()
+        assert (workspace / "outputs/static_site/app.js").read_text(encoding="utf-8") == 'console.log("shop ready");'
 
 
 # LLM: Startup bootstrap contracts should redirect inspection-only first turns until one target is materialized.
@@ -280,9 +280,11 @@ def test_tool_loop_redirects_inspection_only_calls_before_any_bootstrap_target_e
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         backend = BootstrapMaterializationRedirectBackend()
+        contract = web_project_delivery_contract()
+        contract["bootstrap_contract"]["enforcement"] = "hard"
         result = _agent(workspace, backend).run(
-            "做一个购物网站。",
-            params=RunParams(delivery_contract=web_project_delivery_contract(), save=False),
+            "做一个示例网站。",
+            params=RunParams(delivery_contract=contract, save=False),
             allowed_tools=["list_files", "write_file"],
         )
         report = _closeout_report(workspace)
@@ -290,8 +292,8 @@ def test_tool_loop_redirects_inspection_only_calls_before_any_bootstrap_target_e
         assert backend.calls == 3
         assert report["ok"] is True
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
-        assert (workspace / "outputs/shopping_site/index.html").exists()
-        assert (workspace / "outputs/shopping_site/app.js").read_text(encoding="utf-8") == 'console.log("bootstrapped");'
+        assert (workspace / "outputs/static_site/index.html").exists()
+        assert (workspace / "outputs/static_site/app.js").read_text(encoding="utf-8") == 'console.log("bootstrapped");'
 
 
 # LLM: bootstrap startup should allow multiple redirects before escalating to a final block.
@@ -300,16 +302,18 @@ def test_tool_loop_allows_multiple_bootstrap_redirects_before_blocking():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         backend = BootstrapMaterializationProgressiveBackend()
+        contract = web_project_delivery_contract()
+        contract["bootstrap_contract"]["enforcement"] = "hard"
         result = _agent(workspace, backend, max_tool_rounds=7).run(
-            "做一个购物网站。",
-            params=RunParams(delivery_contract=web_project_delivery_contract(), save=False),
+            "做一个示例网站。",
+            params=RunParams(delivery_contract=contract, save=False),
             allowed_tools=["list_files", "write_file"],
         )
 
         assert backend.calls == 5
         assert _closeout_report(workspace)["ok"] is True
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
-        assert (workspace / "outputs/shopping_site/app.js").read_text(encoding="utf-8") == 'console.log("bootstrapped later");'
+        assert (workspace / "outputs/static_site/app.js").read_text(encoding="utf-8") == 'console.log("bootstrapped later");'
 
 
 # LLM: write-first staged recovery must redirect inspection-only calls before letting the task drift further.
@@ -319,7 +323,7 @@ def test_tool_loop_redirects_inspection_only_calls_during_required_delivery_repa
         workspace = Path(td)
         backend = DeliveryRepairRedirectBackend()
         result = _agent(workspace, backend, max_tool_rounds=6).run(
-            "整理 GitHub 周升星项目并生成表格。",
+            "整理 代码平台 周升星项目并生成表格。",
             params=RunParams(delivery_contract=xlsx_delivery_contract(), save=False),
             allowed_tools=["write_file", "read_file", "write_structured_json", "data_to_workbook"],
         )
@@ -327,7 +331,7 @@ def test_tool_loop_redirects_inspection_only_calls_during_required_delivery_repa
         assert backend.calls == 4
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert _closeout_report(workspace)["ok"] is True
-        assert (workspace / "outputs/github_star_growth/github_star_growth.xlsx").exists()
+        assert (workspace / "outputs/table_report/table_report.xlsx").exists()
 
 
 # LLM: Recovery attempt identity should reset stale no-progress counters before staged repair runs.
@@ -360,7 +364,7 @@ def test_recovery_attempt_uses_repair_contract_before_stale_local_progress_guard
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert state["exploration_rounds_without_local_progress"] == 0
         assert state["recovery_signature"]
-        assert (workspace / "outputs/github_star_growth/github_star_growth.xlsx").exists()
+        assert (workspace / "outputs/table_report/table_report.xlsx").exists()
 
 
 # LLM: New write tools must not run while a file_write_session is still open for the same task.
@@ -371,23 +375,23 @@ def test_tool_loop_blocks_unrelated_write_tools_while_open_file_write_session_ex
         _write_site_index(workspace)
         backend = WrongToolDuringOpenSessionBackend()
         result = _agent(workspace, backend, max_tool_rounds=6).run(
-            "做一个购物网站。",
+            "做一个示例网站。",
             params=RunParams(delivery_contract=web_project_delivery_contract(), save=False),
             allowed_tools=["file_write_session", "write_file"],
         )
 
         assert backend.calls == 4
         assert not (workspace / "outputs/rogue.txt").exists()
-        assert (workspace / "outputs/shopping_site/app.js").read_text(encoding="utf-8") == 'console.log("ok");'
+        assert (workspace / "outputs/static_site/app.js").read_text(encoding="utf-8") == 'console.log("ok");'
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
 
 
 # LLM: _write_site_index creates the already-materialized part of a static site contract.
 # 函数用途: 给 open-session 测试准备 index.html 和站点目录。
 def _write_site_index(workspace: Path) -> None:
-    (workspace / "outputs/shopping_site").mkdir(parents=True)
-    (workspace / "outputs/shopping_site/index.html").write_text(
-        "<!doctype html><html><body><main>Shop</main></body></html>",
+    (workspace / "outputs/static_site").mkdir(parents=True)
+    (workspace / "outputs/static_site/index.html").write_text(
+        "<!doctype html><html><body><main>Sample</main></body></html>",
         encoding="utf-8",
     )
 
@@ -406,14 +410,14 @@ def _write_stale_delivery_closeout(workspace: Path) -> None:
     path.write_text(
         json.dumps(
             {
-                "case_id": "main_direct_web_app",
+                "case_id": "sample_stale_delivery_case",
                 "ok": False,
                 "delivery_progress": {
                     "recovery_actions": [
                         {
                             "code": "ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED",
                             "recommended_action": "repair_artifact_against_findings",
-                            "artifact_path": "lab_outputs/main-web-app",
+                            "artifact_path": "lab_outputs/sample-artifact",
                             "finding_values": ["getElementById:email"],
                             "write_tools": ["write_file", "replace_in_file"],
                         }
@@ -491,15 +495,15 @@ def _write_stale_xlsx_closeout(workspace: Path) -> None:
             "failure_fingerprint": "failed-xlsx",
             "work_progress_fingerprint": "empty-source",
             "pending_materialization_targets": [
-                {"workspace_relative_path": "outputs/github_star_growth/github_star_growth.xlsx", "exists": False}
+                {"workspace_relative_path": "outputs/table_report/table_report.xlsx", "exists": False}
             ],
             "recovery_actions": [
                 {
                     "category": "artifact",
-                    "checkpoint_ref": "outputs/github_star_growth/source_data.json",
+                    "checkpoint_ref": "outputs/table_report/source_data.json",
                     "code": "STAGED_JSON_NO_ROWS",
                     "recommended_action": "write_non_empty_structured_rows",
-                    "required_columns": ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"],
+                    "required_columns": ["记录名", "地址", "指标值", "中文说明", "说明依据"],
                     "retryable": True,
                 }
             ],

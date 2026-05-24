@@ -51,6 +51,7 @@ class DeliveryRepairProductivityContext:
     strict_write_required: bool
     required_actions: list[dict[str, object]]
     required_tool_calls: list[dict[str, object]]
+    exhausted_declared_read_keys: set[str] | None = None
 
 
 # LLM: productive_tools decides which tools count as progress for the current staged-repair phase.

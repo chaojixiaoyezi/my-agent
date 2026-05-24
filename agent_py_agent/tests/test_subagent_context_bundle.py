@@ -17,7 +17,7 @@ from agent_py_agent.agent.subagents.models import CapabilityGrant
 def test_context_bundle_v1_captures_task_handoff_fields(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
-        goal="实现购物车结算页",
+        goal="实现流程状态结算页",
         thought="需要让 worker 写页面、测试和验收说明。",
         plan=["读取现有项目", "实现结算页", "写测试"],
         role="worker",
@@ -26,11 +26,11 @@ def test_context_bundle_v1_captures_task_handoff_fields(tmp_path) -> None:
     task.parent_id = "parent-1"
     task.root_id = "root-1"
     task.depth = 2
-    task.acceptance_checks = ["能从购物车进入结算", "测试覆盖订单总价"]
+    task.acceptance_checks = ["能从流程状态进入结算", "测试覆盖流程总计"]
     task.allowed_tools = ["read_file", "write_file"]
     task.allowed_write_roots = [str(tmp_path / task.id / "artifacts")]
     task.forbidden_write_roots = ["/System"]
-    task.context_packs = [{"id": "pack-1", "summary": "购物流程背景"}]
+    task.context_packs = [{"id": "pack-1", "summary": "示例流程背景"}]
     manager.save(task)
 
     bundle = build_context_bundle(manager.load(task.id))
@@ -76,9 +76,9 @@ def _assert_core_context_bundle(bundle, task) -> None:
     assert bundle.root_id == "root-1"
     assert bundle.parent_id == "parent-1"
     assert bundle.role == "worker"
-    assert bundle.goal == "实现购物车结算页"
+    assert bundle.goal == "实现流程状态结算页"
     assert bundle.plan == ["读取现有项目", "实现结算页", "写测试"]
-    assert bundle.acceptance_checks == ["能从购物车进入结算", "测试覆盖订单总价"]
+    assert bundle.acceptance_checks == ["能从流程状态进入结算", "测试覆盖流程总计"]
     assert bundle.constraints["forbidden_write_roots"] == ["/System"]
     assert bundle.permissions["allowed_tools"] == ["read_file", "write_file"]
 
@@ -206,14 +206,14 @@ def test_context_bundle_output_contract_separates_required_and_forbidden_files(t
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
         goal=(
-            "写购物站页面。required_files: should-not-count.html"
+            "写示例站页面。required_files: should-not-count.html"
         ),
         thought="forbidden_files: should-not-count.html",
         plan=["拆页面", "验收文件名"],
         role="worker",
         acceptance_checks=["forbidden_files: should-not-count.html"],
         attributes={
-            "required_files": ["index.html", "product-detail.html", "style.css", "app.js"],
+            "required_files": ["index.html", "item-detail.html", "style.css", "app.js"],
             "forbidden_files": ["product.html", "old-product.html", "legacy.html", "obsolete.html"],
         },
     )
@@ -223,7 +223,7 @@ def test_context_bundle_output_contract_separates_required_and_forbidden_files(t
 
     assert bundle.output_contract["required_files"] == [
         "index.html",
-        "product-detail.html",
+        "item-detail.html",
         "style.css",
         "app.js",
     ]
@@ -235,7 +235,7 @@ def test_context_bundle_output_contract_separates_required_and_forbidden_files(t
     ]
     assert bundle.task_packet["file_contract"]["required_files"] == [
         "index.html",
-        "product-detail.html",
+        "item-detail.html",
         "style.css",
         "app.js",
     ]
@@ -273,7 +273,7 @@ def test_context_bundle_file_contract_does_not_parse_task_text_fields(tmp_path) 
 # 函数用途: 产物写入根指向具体 HTML 文件时，required_files 必须包含该文件名，避免 Context Gate 误挡子代理。
 def test_context_bundle_required_files_include_file_level_write_roots(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
-    target = tmp_path / "deliverables" / "furniture-home" / "index.html"
+    target = tmp_path / "deliverables" / "site-output" / "index.html"
     task = manager.create_run(
         goal=f"在 {target} 创建高端现代家具首页。",
         thought="目标文件来自父级自然语言任务。",

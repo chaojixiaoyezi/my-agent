@@ -16,12 +16,12 @@ def test_collection_checkpoint_quality_prefers_api_collection_writer() -> None:
     contract = xlsx_delivery_contract()
     validation = contract["artifacts"][0]["validation_contract"]
     validation["collection_contract"] = {
-        "source_json_ref": "outputs/github_star_growth/source_data.json",
+        "source_json_ref": "outputs/table_report/source_data.json",
         "groups_path": "sheets",
         "items_path": "rows",
         "min_groups": 2,
         "min_items_per_group": 10,
-        "required_item_fields": ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"],
+        "required_item_fields": ["记录名", "地址", "指标值", "中文说明", "说明依据"],
         "require_completion_evidence": True,
     }
 
@@ -30,7 +30,7 @@ def test_collection_checkpoint_quality_prefers_api_collection_writer() -> None:
     action = actions["STAGED_JSON_REQUIRED_COLUMNS_MISSING"]
     assert action["writer_tool"] == "api_json_collection"
     assert action["write_tools"] == ["api_json_collection", "write_structured_json"]
-    assert action["collection_contract"]["source_json_ref"] == "outputs/github_star_growth/source_data.json"
+    assert action["collection_contract"]["source_json_ref"] == "outputs/table_report/source_data.json"
 
 
 # LLM: Too-few collection findings should repair the source checkpoint, not only the final artifact.
@@ -39,11 +39,11 @@ def test_collection_too_few_items_routes_to_api_collection_writer() -> None:
     contract = xlsx_delivery_contract()
     validation = contract["artifacts"][0]["validation_contract"]
     validation["collection_contract"] = {
-        "source_json_ref": "outputs/github_star_growth/source_data.json",
+        "source_json_ref": "outputs/table_report/source_data.json",
         "groups_path": "sheets",
         "items_path": "rows",
         "min_items_total": 3,
-        "required_item_fields": ["项目名", "地址", "上升 star 数"],
+        "required_item_fields": ["记录名", "地址", "指标值"],
         "require_completion_evidence": True,
     }
 
@@ -51,7 +51,7 @@ def test_collection_too_few_items_routes_to_api_collection_writer() -> None:
 
     action = actions["COLLECTION_TOO_FEW_ITEMS"]
     assert action["recommended_action"] == "repair_structured_checkpoint_json"
-    assert action["checkpoint_ref"] == "outputs/github_star_growth/source_data.json"
+    assert action["checkpoint_ref"] == "outputs/table_report/source_data.json"
     assert action["writer_tool"] == "api_json_collection"
     assert action["write_tools"] == ["api_json_collection", "write_structured_json"]
     assert action["collection_contract"]["min_items_total"] == 3
@@ -63,22 +63,22 @@ def test_collection_checkpoint_quality_prefers_structured_writer_for_generated_r
     contract = xlsx_delivery_contract()
     validation = contract["artifacts"][0]["validation_contract"]
     validation["collection_contract"] = {
-        "source_json_ref": "outputs/github_star_growth/source_data.json",
+        "source_json_ref": "outputs/table_report/source_data.json",
         "items_path": "rows",
-        "required_item_fields": ["项目名", "地址", "上升 star 数"],
+        "required_item_fields": ["记录名", "地址", "指标值"],
         "require_completion_evidence": True,
     }
     validation["staging_contract"]["checkpoint_shape_hints"] = {
-        "outputs/github_star_growth/source_data.json": json.dumps(
+        "outputs/table_report/source_data.json": json.dumps(
             {
                 "data": {"completion_evidence": {"scope": "synthetic_dataset", "row_count": 1000}},
                 "generated_rows": {
                     "count": 1000,
-                    "columns": ["项目名", "地址", "上升 star 数"],
+                    "columns": ["记录名", "地址", "指标值"],
                     "fields": {
-                        "项目名": {"format": "repo-{index:04d}", "start": 1},
+                        "记录名": {"format": "repo-{index:04d}", "start": 1},
                         "地址": {"format": "https://example.com/repo-{index:04d}", "start": 1},
-                        "上升 star 数": {"number": {"start": 100, "step": 7}},
+                        "指标值": {"number": {"start": 100, "step": 7}},
                     },
                     "sheets": {"count": 3, "prefix": "数据"},
                 },
@@ -103,7 +103,7 @@ def _actions_for_source(source_content: str, contract: dict[str, object]) -> dic
 
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td).resolve()
-        source = workspace / "outputs/github_star_growth/source_data.json"
+        source = workspace / "outputs/table_report/source_data.json"
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text(source_content, encoding="utf-8")
         report = _validate_contract_artifacts(
@@ -124,8 +124,8 @@ def _bad_collection_source() -> str:
             "sheets": [
                 {
                     "name": "week-1",
-                    "columns": ["项目名", "地址", "上升 star 数"],
-                    "rows": [{"项目名": "demo", "地址": "https://example.com", "上升 star 数": 10}],
+                    "columns": ["记录名", "地址", "指标值"],
+                    "rows": [{"记录名": "demo", "地址": "https://example.com", "指标值": 10}],
                 }
             ]
         },
@@ -139,10 +139,10 @@ def _small_valid_collection_source() -> str:
             "sheets": [
                 {
                     "name": "week-1",
-                    "columns": ["项目名", "地址", "上升 star 数"],
+                    "columns": ["记录名", "地址", "指标值"],
                     "rows": [
-                        {"项目名": "demo", "地址": "https://example.com", "上升 star 数": 10},
-                        {"项目名": "demo2", "地址": "https://example.com/2", "上升 star 数": 8},
+                        {"记录名": "demo", "地址": "https://example.com", "指标值": 10},
+                        {"记录名": "demo2", "地址": "https://example.com/2", "指标值": 8},
                     ],
                 }
             ],

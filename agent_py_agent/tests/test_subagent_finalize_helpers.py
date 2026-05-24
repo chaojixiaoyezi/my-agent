@@ -229,7 +229,7 @@ def test_leaf_success_closeout_blocks_invalid_html_links(tmp_path: Path):
 # LLM: latest tool progress should restore artifact refs omitted from output.json closeout.
 # 函数用途: 复现真实 E2E 中 output.json.artifacts=[]；finalize 应从 latest_tool_progress 补产物并继续 integrity gate。
 def test_leaf_success_closeout_recovers_missing_artifact_from_latest_progress(tmp_path: Path):
-    artifact = tmp_path / "deliverables" / "furniture-home" / "index.html"
+    artifact = tmp_path / "deliverables" / "site-output" / "index.html"
     artifact.parent.mkdir(parents=True)
     artifact.write_text("<html><body><main id='home'>done</main><a href='#'>咨询</a></body></html>", encoding="utf-8")
     workspace = tmp_path / "tasks" / "worker" / "agents" / "worker"
@@ -300,7 +300,7 @@ def test_leaf_relative_artifact_uses_product_write_root(tmp_path: Path):
 # LLM: product-root relative refs may include the root suffix already, as real models often report.
 # 函数用途: 覆盖 deliverables/site/index.html 这类相对路径，避免 integrity gate 误拼成 site/deliverables/site/index.html。
 def test_leaf_relative_artifact_with_product_root_suffix(tmp_path: Path):
-    product_root = tmp_path / "deliverables" / "furniture-home"
+    product_root = tmp_path / "deliverables" / "site-output"
     artifact = product_root / "index.html"
     product_root.mkdir(parents=True)
     artifact.write_text("<html><body><main>done</main></body></html>", encoding="utf-8")
@@ -310,7 +310,7 @@ def test_leaf_relative_artifact_with_product_root_suffix(tmp_path: Path):
         ok=True,
         status="AWAITING_ACCEPTANCE",
         summary="页面已完成。",
-        artifacts=[{"path": "deliverables/furniture-home/index.html", "kind": "file", "summary": "homepage"}],
+        artifacts=[{"path": "deliverables/site-output/index.html", "kind": "file", "summary": "homepage"}],
     )
     context = _context(
         role="leaf_worker",
@@ -331,7 +331,7 @@ def test_leaf_relative_artifact_with_product_root_suffix(tmp_path: Path):
 # 函数用途: 复现 Live Lab 中 product_write_roots=lab_outputs/...；finalize 应检查项目根下的产物，不能误拼到 .my_agent/subagents。
 def test_leaf_relative_product_root_uses_derived_workspace_root(tmp_path: Path):
     workspace_root = tmp_path / "fixture_project"
-    product_root = workspace_root / "lab_outputs" / "furniture-home"
+    product_root = workspace_root / "lab_outputs" / "site-output"
     artifact = product_root / "index.html"
     product_root.mkdir(parents=True)
     artifact.write_text("<html><body><main>done</main></body></html>", encoding="utf-8")
@@ -342,13 +342,13 @@ def test_leaf_relative_product_root_uses_derived_workspace_root(tmp_path: Path):
         ok=True,
         status="AWAITING_ACCEPTANCE",
         summary="页面已完成。",
-        artifacts=[{"path": "lab_outputs/furniture-home/index.html", "kind": "file", "summary": "homepage"}],
+        artifacts=[{"path": "lab_outputs/site-output/index.html", "kind": "file", "summary": "homepage"}],
     )
     context = _context(
         role="leaf_worker",
         agent_name="小傻妞-page",
         task_dir=str(task_dir),
-        write_boundary={"product_write_roots": ["lab_outputs/furniture-home"]},
+        write_boundary={"product_write_roots": ["lab_outputs/site-output"]},
     )
 
     result = record_finalized_runner_result(

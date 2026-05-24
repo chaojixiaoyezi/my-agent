@@ -70,7 +70,7 @@ def test_xlsx_output_requires_sheets_columns_and_rows() -> None:
                     "sheet_names": ["Summary"],
                     "required_sheets": ["Summary", "Weekly"],
                     "columns": ["项目", "地址"],
-                    "required_columns": ["项目", "地址", "推荐理由"],
+                    "required_columns": ["项目", "地址", "说明依据"],
                     "row_count": 0,
                     "required_rows_min": 1,
                 }

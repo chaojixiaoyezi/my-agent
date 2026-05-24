@@ -78,6 +78,43 @@ def test_staged_writer_contract_allows_declared_builder_output_tool():
     assert result is None
 
 
+def test_staged_writer_contract_supports_explicit_open_world_builder_refs():
+    from agent_py_agent.agent.agent_core.tool_staged_writer_contract import (
+        staged_writer_contract_result,
+    )
+
+    contract = {
+        "artifacts": [
+            {
+                "artifact_id": "deck",
+                "preferred_path": "outputs/deck/result.deckbin",
+                "validation_contract": {
+                    "staging_contract": {
+                        "builder_tool": "render_custom_deck",
+                        "source_ref_key": "slides_ref",
+                        "output_ref_key": "deck_ref",
+                        "slides_ref": "outputs/deck/slides.xml",
+                        "deck_ref": "outputs/deck/result.deckbin",
+                    }
+                },
+            }
+        ]
+    }
+
+    blocked = staged_writer_contract_result(
+        _params(contract),
+        {"tool": "write_file", "path": "outputs/deck/result.deckbin", "content": "not-deck"},
+    )
+    allowed = staged_writer_contract_result(
+        _params(contract),
+        {"tool": "render_custom_deck", "path": "outputs/deck/result.deckbin", "source_path": "outputs/deck/slides.xml"},
+    )
+
+    assert blocked is not None
+    assert "required_tool=render_custom_deck" in blocked.output
+    assert allowed is None
+
+
 def test_api_collection_contract_blocks_missing_required_field_mappings():
     from agent_py_agent.agent.agent_core.tool_api_collection_contract import (
         api_collection_contract_result,
@@ -86,7 +123,7 @@ def test_api_collection_contract_blocks_missing_required_field_mappings():
     result = api_collection_contract_result(
         _params(_xlsx_delivery_contract()),
         {
-            "fields": {"项目名": "full_name", "地址": "html_url"},
+            "fields": {"记录名": "full_name", "地址": "html_url"},
             "path": "outputs/report/source_data.json",
             "request_ranges": [{"end_date": "2026-05-22", "start_date": "2026-01-01", "step_days": 7}],
             "tool": "api_json_collection",
@@ -107,7 +144,7 @@ def test_api_collection_contract_blocks_too_few_planned_groups():
     result = api_collection_contract_result(
         _params(_xlsx_delivery_contract()),
         {
-            "fields": {"项目名": "full_name", "地址": "html_url", "上升 star 数": "stargazers_count"},
+            "fields": {"记录名": "full_name", "地址": "html_url", "指标值": "stargazers_count"},
             "path": "outputs/report/source_data.json",
             "request_ranges": [{"end_date": "2026-01-14", "start_date": "2026-01-01", "step_days": 7}],
             "tool": "api_json_collection",
@@ -143,7 +180,7 @@ def test_api_collection_contract_blocks_missing_declared_request_reserved_metada
     result = api_collection_contract_result(
         _params(contract),
         {
-            "fields": {"项目名": "full_name", "地址": "html_url", "上升 star 数": "stargazers_count"},
+            "fields": {"记录名": "full_name", "地址": "html_url", "指标值": "stargazers_count"},
             "path": "outputs/report/source_data.json",
             "request_ranges": [{"end_date": "2026-05-22", "start_date": "2026-01-01", "step_days": 7}],
             "tool": "api_json_collection",
@@ -177,11 +214,11 @@ def test_api_collection_payload_normalization_fills_declared_request_contract():
             }
         ],
         "fields": {
-            "项目名": "full_name",
+            "记录名": "full_name",
             "地址": "html_url",
-            "上升 star 数": "stargazers_count",
+            "指标值": "stargazers_count",
         },
-        "evidence_fields": ["项目名", "地址", "上升 star 数"],
+        "evidence_fields": ["记录名", "地址", "指标值"],
         "completion_evidence": {"method": "api_json_collection", "scope": "declared-test"},
     }
     params = _params(contract)
@@ -197,7 +234,7 @@ def test_api_collection_payload_normalization_fills_declared_request_contract():
 
     assert normalized["request_ranges"][0]["reserved"]["metric_kind"] == "time_window_delta"
     assert normalized["request_ranges"][0]["reserved"]["time_window"]["start"] == "{start_date}"
-    assert normalized["fields"]["上升 star 数"] == "stargazers_count"
+    assert normalized["fields"]["指标值"] == "stargazers_count"
     assert normalized["completion_evidence"]["scope"] == "declared-test"
     assert api_collection_contract_result(params, normalized) is None
 
@@ -223,11 +260,11 @@ def test_tool_loop_executes_api_collection_with_contract_normalized_payload(tmp_
             }
         ],
         "fields": {
-            "项目名": "full_name",
+            "记录名": "full_name",
             "地址": "html_url",
-            "上升 star 数": "stargazers_count",
+            "指标值": "stargazers_count",
         },
-        "evidence_fields": ["项目名", "地址", "上升 star 数"],
+        "evidence_fields": ["记录名", "地址", "指标值"],
     }
     params = _params(contract)
     executed_payloads: list[dict[str, object]] = []
@@ -266,7 +303,7 @@ def test_structured_json_source_checkpoint_blocks_missing_row_evidence():
         _params(_sourced_xlsx_delivery_contract()),
         {
             "path": "outputs/report/source_data.json",
-            "rows": [{"项目名": "org/demo", "地址": "https://github.com/org/demo"}],
+            "rows": [{"记录名": "org/demo", "地址": "https://github.com/org/demo"}],
             "tool": "write_structured_json",
         },
     )
@@ -284,7 +321,7 @@ def test_structured_json_source_checkpoint_blocks_unbound_source_refs():
     result = api_collection_contract_result(
         _params(_sourced_xlsx_delivery_contract()),
         {
-            "claims": [{"field": "项目名", "source_ids": ["src-1"], "value": "org/demo"}],
+            "claims": [{"field": "记录名", "source_ids": ["src-1"], "value": "org/demo"}],
             "completion_evidence": {"scope": "fixture"},
             "path": "outputs/report/source_data.json",
             "source_refs": [{"content_sha256": "abc", "source_id": "src-1", "uri": "https://example.test/data.json"}],
@@ -305,7 +342,7 @@ def test_structured_json_source_checkpoint_blocks_unrecorded_tool_call_binding()
     result = api_collection_contract_result(
         _params(_sourced_xlsx_delivery_contract()),
         {
-            "claims": [{"field": "项目名", "source_ids": ["src-1"], "value": "org/demo"}],
+            "claims": [{"field": "记录名", "source_ids": ["src-1"], "value": "org/demo"}],
             "completion_evidence": {"scope": "fixture"},
             "path": "outputs/report/source_data.json",
             "source_refs": [
@@ -332,7 +369,7 @@ def test_structured_json_source_checkpoint_blocks_missing_required_claim_fields(
     result = api_collection_contract_result(
         _params(_sourced_xlsx_delivery_contract()),
         {
-            "claims": [{"field": "项目名", "source_ids": ["src-1"], "value": "org/demo"}],
+            "claims": [{"field": "记录名", "source_ids": ["src-1"], "value": "org/demo"}],
             "completion_evidence": {"scope": "fixture"},
             "path": "outputs/report/source_data.json",
             "source_refs": [{"artifact_ref": "artifacts/raw.json", "source_id": "src-1"}],
@@ -343,7 +380,7 @@ def test_structured_json_source_checkpoint_blocks_missing_required_claim_fields(
     assert result is not None
     assert result.ok is False
     assert "missing required claim fields" in result.output
-    assert "上升 star 数" in result.output
+    assert "指标值" in result.output
     assert "地址" in result.output
 
 
@@ -356,9 +393,9 @@ def test_structured_json_source_checkpoint_blocks_unverified_claims_when_require
         _params(_sourced_xlsx_delivery_contract()),
         {
             "claims": [
-                {"field": "项目名", "source_ids": ["src-1"], "value": "org/demo", "verification_status": "PENDING"},
+                {"field": "记录名", "source_ids": ["src-1"], "value": "org/demo", "verification_status": "PENDING"},
                 {"field": "地址", "source_ids": ["src-1"], "value": "https://github.com/org/demo"},
-                {"field": "上升 star 数", "source_ids": ["src-1"], "value": 100},
+                {"field": "指标值", "source_ids": ["src-1"], "value": 100},
             ],
             "completion_evidence": {"scope": "fixture"},
             "path": "outputs/report/source_data.json",
@@ -436,7 +473,7 @@ def test_structured_json_source_checkpoint_blocks_missing_completion_evidence():
     result = api_collection_contract_result(
         _params(_sourced_xlsx_delivery_contract()),
         {
-            "claims": [{"field": "项目名", "source_ids": ["src-1"], "value": "org/demo"}],
+            "claims": [{"field": "记录名", "source_ids": ["src-1"], "value": "org/demo"}],
             "path": "outputs/report/source_data.json",
             "source_refs": [{"artifact_ref": "artifacts/raw.json", "source_id": "src-1"}],
             "tool": "write_structured_json",
@@ -516,9 +553,9 @@ def _xlsx_delivery_contract() -> dict[str, object]:
                         "groups_path": "sheets",
                         "items_path": "rows",
                         "min_groups": 20,
-                        "required_item_fields": ["项目名", "地址", "上升 star 数"],
+                        "required_item_fields": ["记录名", "地址", "指标值"],
                     },
-                    "required_columns": ["项目名", "地址", "上升 star 数"],
+                    "required_columns": ["记录名", "地址", "指标值"],
                     "staging_contract": {
                         "builder_tool": "data_to_workbook",
                         "source_json_ref": "outputs/report/source_data.json",
@@ -556,22 +593,22 @@ def _sourced_xlsx_delivery_contract() -> dict[str, object]:
     validation = contract["artifacts"][0]["validation_contract"]
     validation["evidence_contract"] = {
         "require_verified": True,
-        "required_fields": ["项目名", "地址", "上升 star 数"],
+        "required_fields": ["记录名", "地址", "指标值"],
     }
     validation["collection_contract"] = {
         **validation["collection_contract"],
         "require_completion_evidence": True,
         "require_item_evidence": True,
-        "required_item_evidence_fields": ["项目名", "地址"],
+        "required_item_evidence_fields": ["记录名", "地址"],
     }
     return contract
 
 
 def _project_claims(source_id: str) -> list[dict[str, object]]:
     return [
-        {"field": "项目名", "source_ids": [source_id], "value": "org/demo"},
+        {"field": "记录名", "source_ids": [source_id], "value": "org/demo"},
         {"field": "地址", "source_ids": [source_id], "value": "https://github.com/org/demo"},
-        {"field": "上升 star 数", "source_ids": [source_id], "value": 100},
+        {"field": "指标值", "source_ids": [source_id], "value": 100},
     ]
 
 

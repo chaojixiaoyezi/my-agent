@@ -19,8 +19,8 @@ def test_data_workbook_tool_builds_xlsx_from_json_rows(tmp_path: Path) -> None:
         json.dumps(
             {
                 "top_projects": [
-                    {"项目名": "demo-a", "地址": "https://example.com/a", "上升 star 数": 120},
-                    {"项目名": "demo-b", "地址": "https://example.com/b", "上升 star 数": 90},
+                    {"记录名": "demo-a", "地址": "https://example.com/a", "指标值": 120},
+                    {"记录名": "demo-b", "地址": "https://example.com/b", "指标值": 90},
                 ],
                 "summary": {"ignored_scalar": True},
             },
@@ -48,7 +48,7 @@ def test_data_workbook_tool_builds_xlsx_from_json_rows(tmp_path: Path) -> None:
         assert "xl/worksheets/sheet1.xml" in archive.namelist()
         sheet_xml = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
     assert "demo-a" in sheet_xml
-    assert "上升 star 数" in sheet_xml
+    assert "指标值" in sheet_xml
 
 
 # LLM: test_data_workbook_tool_rejects_empty_structured_data keeps empty checkpoints from passing.

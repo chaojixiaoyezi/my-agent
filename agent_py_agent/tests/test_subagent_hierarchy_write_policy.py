@@ -164,7 +164,7 @@ def test_hierarchy_schedule_grants_worker_path_written_by_child_spec(tmp_path):
             parent_run_id=coordinator.id,
             child_specs=[
                 HierarchyChildSpec(
-                    goal="创建购物车页面，写 cart.html。",
+                    goal="创建流程状态页面，写 flow-a.html。",
                     agent_name="cart-checkout-worker",
                     role="worker",
                     extra_write_roots=[str(deliverables / "build")],
@@ -186,7 +186,7 @@ def test_hierarchy_schedule_blocks_sibling_path_drift(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables" / "case"
     parent = manager.create_run(
-        goal="创建购物车页面。",
+        goal="创建流程状态页面。",
         thought="delegate",
         plan=["plan"],
         agent_name="cart-coordinator",
@@ -200,7 +200,7 @@ def test_hierarchy_schedule_blocks_sibling_path_drift(tmp_path):
             parent_run_id=parent.id,
             child_specs=[
                 HierarchyChildSpec(
-                    goal="创建 cart.html。",
+                    goal="创建 flow-a.html。",
                     agent_name="cart-worker",
                     role="worker",
                     extra_write_roots=[str(deliverables / "stage7_r8_build")],
@@ -223,7 +223,7 @@ def test_hierarchy_schedule_allows_child_path_under_parent_root(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables" / "case"
     parent = manager.create_run(
-        goal="创建购物网站。",
+        goal="创建示例网站。",
         thought="delegate",
         plan=["plan"],
         agent_name="cart-coordinator",
@@ -237,7 +237,7 @@ def test_hierarchy_schedule_allows_child_path_under_parent_root(tmp_path):
             parent_run_id=parent.id,
             child_specs=[
                 HierarchyChildSpec(
-                    goal="写购物车页面。",
+                    goal="写流程状态页面。",
                     agent_name="cart-worker",
                     role="worker",
                     extra_write_roots=[str(deliverables / "build")],
@@ -272,7 +272,7 @@ def test_hierarchy_schedule_ignores_url_image_sources_in_write_roots(tmp_path):
             child_specs=[
                 HierarchyChildSpec(
                     goal=(
-                        "写商品列表，"
+                        "写条目列表，"
                         "图片可使用 https://picsum.photos/300/200 和 "
                         "https://images.unsplash.com/photo-1.jpg。"
                     ),

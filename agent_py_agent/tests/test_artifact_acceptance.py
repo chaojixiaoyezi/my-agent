@@ -229,7 +229,7 @@ def test_validate_artifact_static_site_contract_rejects_missing_required_files(t
         validate_artifact,
     )
 
-    site = tmp_path / "outputs" / "shopping_site"
+    site = tmp_path / "outputs" / "static_site"
     site.mkdir(parents=True)
     (site / "index.html").write_text(
         "<!doctype html><html><body><main id='home'>Shop</main></body></html>",

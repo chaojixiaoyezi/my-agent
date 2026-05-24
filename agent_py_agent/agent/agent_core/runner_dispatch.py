@@ -89,13 +89,13 @@ def _runner_text_phase_priority(text: str, *, default: int = 10) -> int:
 # 函数用途: 推进执行器maxattempts的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _runner_max_attempts(policy: str) -> int:
 
-    value = str(policy or "auto").strip().lower()
+    value = str("auto" if policy is None else policy).strip().lower()
     if value in {"", "auto"}:
         return 2
     if value in {"off", "none", "disabled", "false", "no"}:
         return 1
     try:
-        return max(1, int(value))
+        return max(0, int(value))
     except ValueError:
         return 2
 
@@ -111,7 +111,7 @@ def _runner_failure_type(task: SubAgentTask) -> str:
 # 函数用途: 推进执行器retryreason的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _runner_retry_reason(task: SubAgentTask, runner_max_attempts: int) -> str:
 
-    if runner_max_attempts <= 1:
+    if runner_max_attempts == 1:
         return ""
     if task.status not in {"BLOCKED", "FAILED", "TIMEOUT"}:
         return ""
@@ -119,9 +119,10 @@ def _runner_retry_reason(task: SubAgentTask, runner_max_attempts: int) -> str:
     if failure_type not in RETRYABLE_RUNNER_FAILURE_TYPES:
         return ""
     attempts = max(0, int(task.runner_attempts or 0))
-    if attempts >= runner_max_attempts:
+    if runner_max_attempts > 0 and attempts >= runner_max_attempts:
         return ""
-    return f"failure_type={failure_type}; attempt={attempts + 1}/{runner_max_attempts}"
+    max_attempts_label = "unlimited" if runner_max_attempts <= 0 else str(runner_max_attempts)
+    return f"failure_type={failure_type}; attempt={attempts + 1}/{max_attempts_label}"
 
 
 # LLM: _resolve_runner_concurrency 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

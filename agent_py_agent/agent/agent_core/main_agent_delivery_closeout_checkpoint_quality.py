@@ -115,7 +115,10 @@ def _compact_collection_contract(collection: dict[str, object]) -> dict[str, obj
         "min_groups",
         "min_items_per_group",
         "required_item_fields",
+        "required_item_evidence_fields",
+        "llm_generated_fields",
         "require_completion_evidence",
+        "require_item_evidence",
         "completion_evidence_path",
         "api_request",
     )

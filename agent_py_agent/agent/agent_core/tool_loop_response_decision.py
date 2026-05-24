@@ -13,6 +13,7 @@ from .tool_bootstrap_materialization_guard import (
     has_required_bootstrap_materialization,
     is_bootstrap_materialization_evidence_call,
     is_bootstrap_materialization_productive_call,
+    should_redirect_bootstrap_evidence,
 )
 from .tool_delivery_repair_call_normalizer import normalize_delivery_repair_calls
 from .tool_delivery_repair_guard import (
@@ -261,6 +262,15 @@ def _bootstrap_materialization_tool_call_decision(
         block = bootstrap_materialization_block_response(request.agent, request.params)
         if block is not None:
             return ToolLoopResponseDecision("break", block, [], request.counters)
+        if should_redirect_bootstrap_evidence(request.agent):
+            repair_context = bootstrap_materialization_context(
+                request.agent,
+                request.params,
+                request.counters.bootstrap_materialization_redirects,
+            )
+            if repair_context:
+                request.params.tool_context.append(repair_context)
+                return ToolLoopResponseDecision("continue", None, [], _inc_bootstrap_materialization(request.counters))
         return None
     repair_context = bootstrap_materialization_context(
         request.agent,

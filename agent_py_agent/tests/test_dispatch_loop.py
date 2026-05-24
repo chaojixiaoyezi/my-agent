@@ -140,6 +140,30 @@ class TestDispatchLoop:
         # dispatch_subagents 被调用 5 次
         assert agent.dispatch_subagents.call_count == 5
 
+    # LLM: zero max_consecutive_rounds means no hard round ceiling.
+    # 函数用途: 验证调度循环里 max_consecutive_rounds=0 不会变成“0 轮不跑”。
+    def test_dispatch_loop_zero_max_rounds_is_unlimited_until_done(self, tmp_path: Path):
+        from agent_py_agent.agent.agent_core.dispatch_loop import dispatch_loop
+
+        agent = MagicMock()
+        agent.config.runner_failure_policy = "auto"
+        agent.subagents.list_runs.return_value = []
+        mock_report = MagicMock()
+        mock_report.records = [MagicMock()]
+        call_count = [0]
+
+        def dispatch_side_effect(*args, **kwargs):
+            call_count[0] += 1
+            agent.has_pending_work = call_count[0] < 3
+            return mock_report
+
+        agent.dispatch_subagents.side_effect = dispatch_side_effect
+
+        result = dispatch_loop(agent, router=None, max_consecutive_rounds=0)
+
+        assert result.rounds_count == 3
+        assert result.stopped_by_limit is False
+
     def test_dispatch_loop_stops_when_audit_only_actions_repeat(self, tmp_path: Path):
         """重复的记录类动作不应该把调度循环拖到最大轮数。"""
         from agent_py_agent.agent.agent_core.dispatch_loop import dispatch_loop

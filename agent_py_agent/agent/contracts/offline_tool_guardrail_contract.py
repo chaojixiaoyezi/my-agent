@@ -29,8 +29,8 @@ def validate_tool_guardrail_events(
 ) -> OfflineToolGuardrailValidation:
     findings: list[dict[str, object]] = []
     _validate_result_shapes(events, findings)
-    _validate_repeated_exact_results(events, max(2, repeated_threshold), findings)
-    _validate_retry_budget(events, max(1, retry_limit), findings)
+    _validate_repeated_exact_results(events, max(0, repeated_threshold), findings)
+    _validate_retry_budget(events, max(0, retry_limit), findings)
     return OfflineToolGuardrailValidation(
         ok=not findings,
         error_codes=tuple(dict.fromkeys(_text(item.get("code")) for item in findings)),
@@ -60,6 +60,8 @@ def _validate_repeated_exact_results(
     threshold: int,
     findings: list[dict[str, object]],
 ) -> None:
+    if threshold <= 0:
+        return
     last_key: tuple[str, str, str] | None = None
     streak = 0
     reported: set[tuple[str, str, str]] = set()
@@ -90,8 +92,8 @@ def _validate_retry_budget(
         if key is None:
             continue
         failures[key] = failures.get(key, 0) + 1
-        limit = _positive_int(event.get("retry_limit")) or retry_limit
-        if failures[key] > limit and key not in reported:
+        limit = _event_retry_limit(event, retry_limit)
+        if limit > 0 and failures[key] > limit and key not in reported:
             reported.add(key)
             findings.append(_finding("TOOL_RETRY_LIMIT_EXCEEDED", index, event, {"attempts": failures[key]}))
 
@@ -155,6 +157,12 @@ def _positive_int(value: object) -> int:
     except (TypeError, ValueError):
         return 0
     return max(0, parsed)
+
+
+def _event_retry_limit(event: dict[str, Any], default: int) -> int:
+    if "retry_limit" not in event:
+        return default
+    return _positive_int(event.get("retry_limit"))
 
 
 # LLM: _text normalizes optional scalar values for exact comparisons.

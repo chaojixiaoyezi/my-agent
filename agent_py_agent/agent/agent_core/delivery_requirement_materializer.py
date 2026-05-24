@@ -20,8 +20,12 @@ def build_delivery_requirement_materializer_prompt(user_prompt: str) -> str:
         "请把下面的用户需求转换成一个最小 delivery_contract.v1 JSON 对象。\n"
         "只输出 JSON，不要解释，不要写具体执行步骤模板，不要替用户编造来源。\n"
         "产物可以只声明 artifact_id、kind、required、allowed_output_roots；不知道固定路径时不要硬写路径。\n"
-        "分析型字段请放入 llm_generated_fields，不要把它们映射到来源 API 的普通 description 字段。\n"
-        "可选字段包括 artifacts、delivery_quality_contract、bootstrap_contract。\n"
+        "如果用户给了明确文件路径，必须写入 artifacts[].preferred_path；如果只给目录，才写 allowed_output_roots。\n"
+        "如果用户要求表格列，请写入 artifacts[].validation_contract.required_columns；事实型数字、排名、时间窗"
+        "请写入 delivery_quality_contract.metric_contracts。\n"
+        "分析型字段请放入 artifacts[].llm_generated_fields，例如解释、理由、建议、结论、判断、摘要这类需要模型撰写的列；"
+        "不要把它们映射到来源 API 的普通 description 字段。\n"
+        "可选字段包括 artifacts、delivery_quality_contract、fact_evidence_contract；只有外部系统显式给出时才保留 bootstrap_contract。\n"
         "用户需求：\n"
         f"{user_prompt}"
     )
@@ -36,14 +40,17 @@ def materialized_delivery_contract(
 ) -> dict[str, Any]:
     value = _payload_object(payload)
     source_doctor = validate_delivery_contract(value, workspace_root=workspace_root)
-    artifacts, findings = _artifact_contracts(value.get("artifacts"), workspace_root)
+    artifacts, findings = _artifact_contracts(_artifact_payload(value), workspace_root)
     contract: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "artifacts": artifacts,
     }
-    for key in ("delivery_quality_contract", "bootstrap_contract"):
+    for key in ("delivery_quality_contract", "fact_evidence_contract", "bootstrap_contract"):
         if isinstance(value.get(key), dict):
             contract[key] = dict(value[key])
+    _normalize_delivery_quality_contract(contract)
+    _derive_fact_evidence_contract(contract)
+    _preserve_explicit_bootstrap_contract(contract)
     if findings:
         contract["_preflight_findings"] = findings
     doctor = validate_delivery_contract(contract, workspace_root=workspace_root)
@@ -63,18 +70,46 @@ def materialized_delivery_contract(
     return contract
 
 
+def _artifact_payload(value: dict[str, Any]) -> object:
+    if "artifacts" in value:
+        return value.get("artifacts")
+    if any(key in value for key in ("artifact_id", "kind", "path", "preferred_path", "allowed_output_roots")):
+        return [value]
+    return None
+
+
 # LLM: _payload_object normalizes materializer output without trusting prose.
 # 函数用途: 接受 dict 或 JSON 字符串，解析失败时返回空结构供预检继续报告。
 def _payload_object(payload: object) -> dict[str, Any]:
     if isinstance(payload, dict):
         return payload
     if isinstance(payload, str):
-        try:
-            parsed = json.loads(payload)
-        except json.JSONDecodeError:
-            return {}
+        parsed = _loads_payload_object(payload)
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _loads_payload_object(text: str) -> object:
+    for candidate in _json_candidates(text):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    return {}
+
+
+def _json_candidates(text: str) -> list[str]:
+    stripped = text.strip()
+    candidates = [stripped]
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if len(lines) >= 3 and lines[-1].strip() == "```":
+            candidates.append("\n".join(lines[1:-1]).strip())
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(stripped[start : end + 1])
+    return candidates
 
 
 # LLM: _artifact_contracts extracts artifact contracts from structured JSON only.
@@ -109,15 +144,110 @@ def _artifact_contract(item: dict[str, Any]) -> dict[str, Any]:
         "required",
         "search_roots",
         "validation_contract",
+        "llm_generated_fields",
     }
     result = {key: item[key] for key in allowed_keys if key in item}
     if "required" not in result:
         result["required"] = True
     if "kind" in result:
         result["kind"] = str(result["kind"]).strip().lower()
+    else:
+        kind = _kind_from_artifact_path(result)
+        if kind:
+            result["kind"] = kind
     if isinstance(result.get("allowed_output_roots"), list):
         result["allowed_output_roots"] = [str(value).strip() for value in result["allowed_output_roots"] if str(value).strip()]
+        _promote_file_root_to_preferred_path(result)
     return result
+
+
+def _kind_from_artifact_path(artifact: dict[str, Any]) -> str:
+    raw = str(artifact.get("preferred_path") or artifact.get("path") or "").strip()
+    if not raw:
+        roots = artifact.get("allowed_output_roots")
+        raw = str(roots[0]).strip() if isinstance(roots, list) and len(roots) == 1 else ""
+    suffix = Path(raw).suffix.lower().lstrip(".")
+    if not suffix:
+        return ""
+    return suffix
+
+
+def _promote_file_root_to_preferred_path(artifact: dict[str, Any]) -> None:
+    if artifact.get("preferred_path") or artifact.get("path"):
+        return
+    roots = artifact.get("allowed_output_roots")
+    if not isinstance(roots, list) or len(roots) != 1:
+        return
+    root = str(roots[0]).strip()
+    if not Path(root).suffix:
+        return
+    artifact["preferred_path"] = root
+    artifact["allowed_output_roots"] = [str(Path(root).parent)]
+
+
+# LLM: _derive_fact_evidence_contract turns quality facts into mandatory source/tool evidence checks.
+# 函数用途: 从结构化质量合同派生事实证据门，不要求用户或专项模板手写 fact_evidence_contract。
+def _derive_fact_evidence_contract(contract: dict[str, Any]) -> None:
+    if isinstance(contract.get("fact_evidence_contract"), dict):
+        return
+    quality = contract.get("delivery_quality_contract")
+    if not isinstance(quality, dict):
+        return
+    evidence_contract = _derived_evidence_contract(quality)
+    if not evidence_contract:
+        return
+    contract["fact_evidence_contract"] = {
+        "evidence_contract": evidence_contract,
+        "require_tool_backed_sources": True,
+    }
+
+
+def _normalize_delivery_quality_contract(contract: dict[str, Any]) -> None:
+    quality = contract.get("delivery_quality_contract")
+    if not isinstance(quality, dict):
+        return
+    metrics = quality.get("metric_contracts")
+    if not isinstance(metrics, list):
+        return
+    normalized: list[dict[str, Any]] = []
+    for item in metrics:
+        if not isinstance(item, dict):
+            continue
+        metric = dict(item)
+        field = str(metric.get("field") or metric.get("name") or metric.get("column") or "").strip()
+        if field:
+            metric["field"] = field
+        normalized.append(metric)
+    quality["metric_contracts"] = normalized
+    contract["delivery_quality_contract"] = quality
+
+
+def _preserve_explicit_bootstrap_contract(contract: dict[str, Any]) -> None:
+    bootstrap = contract.get("bootstrap_contract")
+    if not isinstance(bootstrap, dict):
+        return
+    if "enforcement" not in bootstrap:
+        bootstrap["enforcement"] = "soft"
+    contract["bootstrap_contract"] = bootstrap
+
+
+def _derived_evidence_contract(quality: dict[str, Any]) -> dict[str, Any]:
+    evidence = dict(quality.get("evidence_contract")) if isinstance(quality.get("evidence_contract"), dict) else {}
+    required_fields = _merged_required_fields(evidence.get("required_fields"), quality.get("metric_contracts"))
+    if not required_fields:
+        return {}
+    evidence["required_fields"] = required_fields
+    evidence.setdefault("require_verified", True)
+    if "allowed_value_types" not in evidence:
+        evidence["allowed_value_types"] = ["exact"]
+    return evidence
+
+
+def _merged_required_fields(raw_fields: object, metric_contracts: object) -> list[str]:
+    fields = [str(item).strip() for item in raw_fields if str(item).strip()] if isinstance(raw_fields, list) else []
+    if isinstance(metric_contracts, list):
+        fields.extend(str(item.get("field") or "").strip() for item in metric_contracts if isinstance(item, dict))
+    return sorted({item for item in fields if item})
 
 
 # LLM: _path_finding validates materialized paths against the task workspace.

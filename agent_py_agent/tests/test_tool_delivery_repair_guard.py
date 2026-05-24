@@ -31,6 +31,17 @@ def test_delivery_repair_guard_treats_read_artifact_as_nonproductive_when_builde
     assert is_delivery_repair_productive_call(_agent(tmp_path), [{"tool": "read_artifact", "artifact_ref": "demo.json"}]) is False
 
 
+# LLM: zero delivery repair max means unlimited structured repair hints.
+# 函数用途: 验证阶段产物返工提示的 0 次数预算不会在高 repairs 计数时消失。
+def test_delivery_repair_context_zero_max_repairs_is_unlimited(tmp_path: Path, monkeypatch) -> None:
+    from agent_py_agent.agent.agent_core import tool_delivery_repair_guard as guard
+
+    _write_actions(tmp_path, [_builder_ready_action()])
+    monkeypatch.setattr(guard, "_MAX_REPAIRS", 0)
+
+    assert guard.delivery_repair_context(_agent(tmp_path), repairs=99)
+
+
 def _builder_ready_action() -> dict[str, object]:
     return {
         "code": "STAGING_BUILDER_READY",
@@ -60,12 +71,12 @@ def test_delivery_repair_guard_bounds_repeated_declared_target_reads(tmp_path: P
         is_delivery_repair_productive_call,
     )
 
-    target = tmp_path / "outputs" / "research_documents" / "source_index.json"
+    target = tmp_path / "outputs" / "document_delivery" / "source_index.json"
     target.parent.mkdir(parents=True)
     target.write_text('{"rows":[{"translated":false}]}', encoding="utf-8")
     _write_actions(tmp_path, [_source_index_repair_action()])
     agent = _agent(tmp_path)
-    read_call = {"tool": "read_file", "path": "outputs/research_documents/source_index.json"}
+    read_call = {"tool": "read_file", "path": "outputs/document_delivery/source_index.json"}
 
     assert is_delivery_repair_productive_call(agent, [read_call]) is True
     assert is_delivery_repair_productive_call(agent, [read_call]) is False
@@ -75,11 +86,31 @@ def test_delivery_repair_guard_bounds_repeated_declared_target_reads(tmp_path: P
     assert is_delivery_repair_productive_call(agent, [read_call]) is True
 
 
+def test_delivery_repair_guard_does_not_drop_new_gathering_when_repeated_read_is_present(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    target = tmp_path / "outputs" / "document_delivery" / "source_index.json"
+    target.parent.mkdir(parents=True)
+    target.write_text('{"rows":[{"title":""}]}', encoding="utf-8")
+    _write_actions(tmp_path, [_source_checkpoint_missing_action()])
+    agent = _agent(tmp_path)
+    read_call = {"tool": "read_file", "path": "outputs/document_delivery/source_index.json"}
+    search_call = {"tool": "web_search", "query": "source records", "limit": 5}
+    inspection_call = {"tool": "list_files", "path": "outputs/document_delivery"}
+
+    assert is_delivery_repair_productive_call(agent, [read_call]) is True
+    assert is_delivery_repair_productive_call(agent, [read_call]) is False
+    assert is_delivery_repair_productive_call(agent, [read_call, search_call]) is True
+    assert is_delivery_repair_productive_call(agent, [read_call, inspection_call]) is False
+
+
 def _missing_checkpoint_action() -> dict[str, object]:
     return {
         "code": "STAGING_CHECKPOINT_MISSING",
         "recommended_action": "materialize_checkpoint",
-        "checkpoint_ref": "outputs/deepseek_papers/source_index.json",
+        "checkpoint_ref": "outputs/document_bundle/source_index.json",
         "source_artifact_refs": ["demo.json"],
     }
 
@@ -88,7 +119,7 @@ def _source_index_repair_action() -> dict[str, object]:
     return {
         "code": "COLLECTION_ITEM_VALUE_MISMATCH",
         "recommended_action": "repair_structured_checkpoint_json",
-        "checkpoint_ref": "outputs/research_documents/source_index.json",
+        "checkpoint_ref": "outputs/document_delivery/source_index.json",
         "writer_tool": "write_structured_json",
     }
 
@@ -96,7 +127,7 @@ def _source_index_repair_action() -> dict[str, object]:
 def _source_index_write_call() -> dict[str, object]:
     return {
         "tool": "write_structured_json",
-        "path": "outputs/research_documents/source_index.json",
+        "path": "outputs/document_delivery/source_index.json",
         "data": {"rows": [{"translated": True}]},
     }
 
@@ -130,14 +161,14 @@ def test_delivery_repair_guard_rejects_write_to_undeclared_repair_target(tmp_pat
     assert (
         is_delivery_repair_productive_call(
             agent,
-            [{"tool": "write_file", "path": "outputs/research_documents/source_index.json", "content": "{}"}],
+            [{"tool": "write_file", "path": "outputs/document_delivery/source_index.json", "content": "{}"}],
         )
         is False
     )
     assert (
         is_delivery_repair_productive_call(
             agent,
-            [{"tool": "write_file", "path": "outputs/research_documents/research_documents_zh.md", "content": "# 译文"}],
+            [{"tool": "write_file", "path": "outputs/document_delivery/document_delivery_zh.md", "content": "# 译文"}],
         )
         is True
     )
@@ -180,11 +211,229 @@ def test_delivery_repair_guard_allows_evidence_gathering_for_source_checkpoint_m
     )
 
 
+# LLM: Materialized workbook contracts should repair through a source checkpoint before final xlsx writes.
+# 函数用途: 验证入口自动派生的表格阶段合同会让缺失 workbook 先进入来源采集/JSON checkpoint 修复，而不是硬写最终 xlsx。
+def test_delivery_repair_guard_does_not_invent_workbook_staging_for_missing_artifact(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        delivery_repair_context,
+        is_delivery_repair_productive_call,
+    )
+
+    contract = materialized_delivery_contract(
+        {
+            "artifacts": [
+                {
+                    "artifact_id": "weekly_workbook",
+                    "kind": "xlsx",
+                    "preferred_path": "outputs/result.xlsx",
+                    "validation_contract": {
+                        "required_columns": ["project", "metric"],
+                    },
+                }
+            ]
+        },
+        workspace_root=tmp_path,
+    )
+    _write_closeout(
+        tmp_path,
+        {
+            "ok": False,
+            "artifacts": [
+                {
+                    "artifact_id": "weekly_workbook",
+                    "kind": "xlsx",
+                    "path": str(tmp_path / "outputs/result.xlsx"),
+                    "ok": False,
+                    "acceptance_report": {
+                        "findings": [
+                            {
+                                "code": "ARTIFACT_MISSING",
+                                "location": str(tmp_path / "outputs/result.xlsx"),
+                                "severity": "hard",
+                            }
+                        ]
+                    },
+                }
+            ],
+            "delivery_progress": {},
+        },
+    )
+    agent = _agent(tmp_path)
+    runtime_params = SimpleNamespace(delivery_contract=contract, task_attributes={})
+
+    context = delivery_repair_context(agent, repairs=0, runtime_params=runtime_params)
+    payload = json.loads(context.splitlines()[1])
+    assert payload["required_actions"][0]["recommended_action"] == "repair_artifact_against_findings"
+    assert payload["required_actions"][0]["artifact_path"] == str(tmp_path / "outputs/result.xlsx")
+    assert payload["required_tool_calls"][0]["tool"] in {"write_file", "run_command"}
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "web_search", "query": "fresh sources", "limit": 5}],
+            runtime_params=runtime_params,
+        )
+        is False
+    )
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "write_file", "path": "outputs/result.xlsx", "content": "placeholder"}],
+            runtime_params=runtime_params,
+        )
+        is True
+    )
+
+
+def test_delivery_repair_payload_maps_source_artifact_fields_and_preserves_llm_fields(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_payload import (
+        delivery_repair_payload,
+    )
+
+    tool_outputs = tmp_path / "memory_archive/artifacts/tool_outputs"
+    tool_outputs.mkdir(parents=True)
+    source_artifact = tool_outputs / "web_search-1.json"
+    source_artifact.write_text(
+        json.dumps(
+            {
+                "content": json.dumps(
+                    {
+                        "results": [
+                            {
+                                "title": "example/project",
+                                "url": "https://example.test/project",
+                                "snippet": "A source-backed project summary.",
+                            }
+                        ]
+                    }
+                )
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tool_outputs / "index.jsonl").write_text(
+        json.dumps(
+            {
+                "tool": "web_search",
+                "path": str(source_artifact),
+                "call_id": "1-1",
+                "scoped_call_id": "run-1:1-1",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _write_actions(
+        tmp_path,
+        [
+            {
+                "recommended_action": "materialize_checkpoint",
+                "checkpoint_ref": "outputs/source_data.json",
+                "checkpoint_materialization_mode": "source_evidence_first",
+                "writer_tool": "api_json_collection",
+                "write_tools": ["api_json_collection", "write_structured_json"],
+                "required_columns": ["记录名", "来源地址", "中文说明", "说明依据"],
+                "collection_contract": {
+                    "source_json_ref": "outputs/source_data.json",
+                    "required_item_fields": ["记录名", "来源地址", "中文说明", "说明依据"],
+                    "required_item_evidence_fields": ["记录名", "来源地址"],
+                    "llm_generated_fields": ["中文说明", "说明依据"],
+                },
+            }
+        ],
+    )
+
+    payload = delivery_repair_payload(_agent(tmp_path))
+    call = payload["required_tool_calls"][0]
+
+    assert call["tool"] == "api_json_collection"
+    assert call["fields"]["记录名"] == {"paths": ["full_name", "name", "title"]}
+    assert call["fields"]["来源地址"] == {"paths": ["html_url", "url", "link", "uri"]}
+    assert "中文说明" not in call["fields"]
+    assert "说明依据" not in call["fields"]
+    assert call["llm_generated_fields"] == ["中文说明", "说明依据"]
+    assert call["evidence_fields"] == ["记录名", "来源地址"]
+    assert call["source_artifacts"][0]["artifact_ref"] == str(source_artifact)
+
+
+def test_delivery_repair_payload_api_collection_call_materializes_source_checkpoint(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_payload import (
+        delivery_repair_payload,
+    )
+    from agent_py_agent.agent.tooling.api_json_collection import ApiJsonCollectionTool
+
+    tool_outputs = tmp_path / "memory_archive/artifacts/tool_outputs"
+    tool_outputs.mkdir(parents=True)
+    source_artifact = tool_outputs / "web_search-1.json"
+    source_artifact.write_text(
+        json.dumps(
+            {
+                "content": json.dumps(
+                    {
+                        "results": [
+                            {
+                                "title": "example/project",
+                                "url": "https://example.test/project",
+                                "snippet": "A source-backed project summary.",
+                            }
+                        ]
+                    }
+                )
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tool_outputs / "index.jsonl").write_text(
+        json.dumps(
+            {
+                "tool": "web_search",
+                "path": str(source_artifact),
+                "call_id": "1-1",
+                "scoped_call_id": "run-1:1-1",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _write_actions(
+        tmp_path,
+        [
+            {
+                "recommended_action": "materialize_checkpoint",
+                "checkpoint_ref": "outputs/source_data.json",
+                "checkpoint_materialization_mode": "source_evidence_first",
+                "writer_tool": "api_json_collection",
+                "write_tools": ["api_json_collection", "write_structured_json"],
+                "required_columns": ["记录名", "来源地址", "中文说明"],
+                "collection_contract": {
+                    "source_json_ref": "outputs/source_data.json",
+                    "required_item_fields": ["记录名", "来源地址", "中文说明"],
+                    "required_item_evidence_fields": ["记录名", "来源地址"],
+                    "llm_generated_fields": ["中文说明"],
+                },
+            }
+        ],
+    )
+
+    call = delivery_repair_payload(_agent(tmp_path))["required_tool_calls"][0]
+    result = ApiJsonCollectionTool(tmp_path).execute(call)
+    checkpoint = json.loads((tmp_path / "outputs/source_data.json").read_text(encoding="utf-8"))
+    row = checkpoint["sheets"][0]["rows"][0]
+
+    assert result.ok is True
+    assert row["记录名"] == "example/project"
+    assert row["来源地址"] == "https://example.test/project"
+    assert row["中文说明"] == ""
+    assert set(row["field_source_ids"]) == {"记录名", "来源地址"}
+
+
 def _missing_markdown_action() -> dict[str, object]:
     return {
         "code": "STAGED_ARTIFACT_MISSING",
         "recommended_action": "materialize_checkpoint",
-        "checkpoint_ref": "outputs/research_documents/research_documents_zh.md",
+        "checkpoint_ref": "outputs/document_delivery/document_delivery_zh.md",
         "write_tools": ["write_file", "replace_in_file", "file_write_session"],
     }
 
@@ -192,7 +441,7 @@ def _missing_markdown_action() -> dict[str, object]:
 def _source_checkpoint_api_collection_call() -> dict[str, object]:
     return {
         "tool": "api_json_collection",
-        "path": "outputs/research_documents/source_index.json",
+        "path": "outputs/document_delivery/source_index.json",
         "source_artifacts": [{"artifact_ref": "/tmp/web_search.json", "item_path": "results", "source_id": "search-1"}],
         "fields": {"title": "title", "url": "url", "date": {"path": "date", "date_from_url": True}},
         "evidence_fields": ["title", "url", "date"],
@@ -226,8 +475,8 @@ def test_delivery_repair_context_renders_api_collection_required_call(tmp_path: 
     required_call = json.loads(payload)["required_tool_calls"][0]
 
     assert required_call["tool"] == "api_json_collection"
-    assert required_call["path"] == "outputs/github_star_growth/source_data.json"
-    assert required_call["columns"] == ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"]
+    assert required_call["path"] == "outputs/table_report/source_data.json"
+    assert required_call["columns"] == ["记录名", "地址", "指标值", "中文说明", "说明依据"]
     assert "data" not in required_call
     assert "fields" in required_call
     assert "collection_contract" in required_call
@@ -246,7 +495,7 @@ def test_delivery_repair_context_renders_collection_item_update_call(tmp_path: P
 
     assert required_call == {
         "tool": "write_structured_json",
-        "path": "outputs/research_documents/source_index.json",
+        "path": "outputs/document_delivery/source_index.json",
         "collection_item_updates": [{"item_index": 1, "field_path": "translated", "value": True}],
         "items_path": "rows",
         "merge_existing": True,
@@ -272,9 +521,9 @@ def test_delivery_repair_context_renders_api_collection_request_hints(tmp_path: 
     assert required_call["request_ranges"][0]["reserved"]["window_start"] == "{start_date}"
     assert required_call["item_path"] == "items"
     assert required_call["limit_per_request"] == 10
-    assert required_call["fields"]["项目名"] == "full_name"
-    assert required_call["fields"]["中文解释"]["default_template"] == "{full_name}：{language}"
-    assert required_call["evidence_fields"] == ["项目名", "地址", "上升 star 数"]
+    assert required_call["fields"]["记录名"] == "full_name"
+    assert required_call["fields"]["中文说明"]["default_template"] == "{full_name}：{language}"
+    assert required_call["evidence_fields"] == ["记录名", "地址", "指标值"]
 
 
 def _api_collection_request_hints() -> dict[str, object]:
@@ -283,13 +532,13 @@ def _api_collection_request_hints() -> dict[str, object]:
         "item_path": "items",
         "limit_per_request": 10,
         "fields": {
-            "项目名": "full_name",
+            "记录名": "full_name",
             "地址": "html_url",
-            "上升 star 数": "stargazers_count",
-            "中文解释": {"path": "description", "default_template": "{full_name}：{language}"},
-            "推荐理由": {"template": "stars={stargazers_count}; topics={topics}"},
+            "指标值": "stargazers_count",
+            "中文说明": {"path": "description", "default_template": "{full_name}：{language}"},
+            "说明依据": {"template": "stars={stargazers_count}; topics={topics}"},
         },
-        "evidence_fields": ["项目名", "地址", "上升 star 数"],
+        "evidence_fields": ["记录名", "地址", "指标值"],
     }
 
 
@@ -309,8 +558,8 @@ def _no_rows_action() -> dict[str, object]:
     return {
         "code": "STAGED_JSON_NO_ROWS",
         "recommended_action": "write_non_empty_structured_rows",
-        "checkpoint_ref": "outputs/github_star_growth/source_data.json",
-        "required_columns": ["项目名", "地址"],
+        "checkpoint_ref": "outputs/table_report/source_data.json",
+        "required_columns": ["记录名", "地址"],
     }
 
 
@@ -318,7 +567,7 @@ def _evidence_action() -> dict[str, object]:
     return {
         "code": "EVIDENCE_REQUIRED_FIELD_MISSING",
         "recommended_action": "repair_evidence_refs",
-        "checkpoint_ref": "outputs/github_star_growth/source_data.json",
+        "checkpoint_ref": "outputs/table_report/source_data.json",
     }
 
 
@@ -326,21 +575,21 @@ def _api_collection_action() -> dict[str, object]:
     return {
         "code": "STAGED_JSON_REQUIRED_COLUMNS_MISSING",
         "recommended_action": "repair_structured_checkpoint_json",
-        "checkpoint_ref": "outputs/github_star_growth/source_data.json",
+        "checkpoint_ref": "outputs/table_report/source_data.json",
         "writer_tool": "api_json_collection",
         "write_tools": ["api_json_collection", "write_structured_json"],
-        "required_columns": ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"],
+        "required_columns": ["记录名", "地址", "指标值", "中文说明", "说明依据"],
         "collection_contract": {
-            "source_json_ref": "outputs/github_star_growth/source_data.json",
+            "source_json_ref": "outputs/table_report/source_data.json",
             "groups_path": "sheets",
             "items_path": "rows",
             "min_groups": 21,
             "min_items_per_group": 10,
-            "required_item_fields": ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"],
+            "required_item_fields": ["记录名", "地址", "指标值", "中文说明", "说明依据"],
         },
         "checkpoint_shape_hint": (
             '{"completion_evidence":{"scope":"year_to_date"},'
-            '"sheets":[{"columns":["项目名","地址","上升 star 数","中文解释","推荐理由"],"rows":[]}]}'
+            '"sheets":[{"columns":["记录名","地址","指标值","中文说明","说明依据"],"rows":[]}]}'
         ),
     }
 
@@ -349,7 +598,7 @@ def _source_checkpoint_missing_action() -> dict[str, object]:
     return {
         "code": "STAGING_CHECKPOINT_MISSING",
         "recommended_action": "materialize_checkpoint",
-        "checkpoint_ref": "outputs/research_documents/source_index.json",
+        "checkpoint_ref": "outputs/document_delivery/source_index.json",
         "checkpoint_materialization_mode": "source_evidence_first",
         "writer_tool": "api_json_collection",
         "write_tools": ["api_json_collection", "write_structured_json"],
@@ -359,7 +608,7 @@ def _source_checkpoint_missing_action() -> dict[str, object]:
 def _empty_source_checkpoint_write_call() -> dict[str, object]:
     return {
         "tool": "write_structured_json",
-        "path": "outputs/research_documents/source_index.json",
+        "path": "outputs/document_delivery/source_index.json",
         "data": {"completion_evidence": {"scope": "fixture"}, "rows": []},
     }
 
@@ -367,7 +616,7 @@ def _empty_source_checkpoint_write_call() -> dict[str, object]:
 def _non_empty_source_checkpoint_write_call() -> dict[str, object]:
     return {
         "tool": "write_structured_json",
-        "path": "outputs/research_documents/source_index.json",
+        "path": "outputs/document_delivery/source_index.json",
         "data": {"completion_evidence": {"scope": "fixture"}, "rows": [{"title": "Paper"}]},
     }
 
@@ -375,7 +624,7 @@ def _non_empty_source_checkpoint_write_call() -> dict[str, object]:
 def _generated_rows_list_checkpoint_write_call() -> dict[str, object]:
     return {
         "tool": "write_structured_json",
-        "path": "outputs/research_documents/source_index.json",
+        "path": "outputs/document_delivery/source_index.json",
         "generated_rows": [{"title": "Paper", "translated": True}],
         "completion_evidence": {"scope": "fixture"},
     }
@@ -385,7 +634,7 @@ def _collection_item_update_action() -> dict[str, object]:
     return {
         "code": "COLLECTION_ITEM_VALUE_MISMATCH",
         "recommended_action": "repair_collection_item_values",
-        "checkpoint_ref": "outputs/research_documents/source_index.json",
+        "checkpoint_ref": "outputs/document_delivery/source_index.json",
         "writer_tool": "write_structured_json",
         "items_path": "rows",
         "collection_item_updates": [{"item_index": 1, "field_path": "translated", "value": True}],
@@ -393,14 +642,14 @@ def _collection_item_update_action() -> dict[str, object]:
 
 
 def _write_file_call() -> dict[str, object]:
-    return {"tool": "write_file", "path": "outputs/github_star_growth/source_data.json", "content": "{}"}
+    return {"tool": "write_file", "path": "outputs/table_report/source_data.json", "content": "{}"}
 
 
 def _structured_rows_call() -> dict[str, object]:
     return {
         "tool": "write_structured_json",
-        "path": "outputs/github_star_growth/source_data.json",
-        "rows": [{"项目名": "demo"}],
+        "path": "outputs/table_report/source_data.json",
+        "rows": [{"记录名": "demo"}],
     }
 
 
@@ -422,7 +671,7 @@ def _structured_repair_action() -> dict[str, object]:
     return {
         "code": "STAGED_JSON_TOO_FEW_SHEETS",
         "recommended_action": "repair_structured_checkpoint_json",
-        "checkpoint_ref": "outputs/github_star_growth/source_data.json",
+        "checkpoint_ref": "outputs/table_report/source_data.json",
         "writer_tool": "write_structured_json",
     }
 
@@ -497,7 +746,56 @@ def test_delivery_repair_guard_rejects_more_search_when_api_collection_is_ready(
     assert (
         is_delivery_repair_productive_call(
             agent,
-            [{"tool": "api_json_collection", "path": "outputs/research_documents/source_index.json"}],
+            [{"tool": "api_json_collection", "path": "outputs/document_delivery/source_index.json"}],
+        )
+        is True
+    )
+
+
+def test_delivery_repair_guard_rejects_more_search_when_api_collection_ready_with_evidence_repair(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    _write_web_search_tool_output_artifact(tmp_path)
+    _write_actions(
+        tmp_path,
+        [_collection_placeholder_repair_action(), _evidence_writer_action()],
+        strict_write_required=True,
+    )
+    agent = _agent(tmp_path)
+
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "web_search", "query": "open source LLM papers after 2025", "limit": 10}],
+        )
+        is False
+    )
+    assert (
+        is_delivery_repair_productive_call(
+            agent,
+            [{"tool": "api_json_collection", "path": "outputs/document_delivery/source_index.json"}],
+        )
+        is True
+    )
+
+
+def test_delivery_repair_guard_allows_api_collection_when_same_checkpoint_has_evidence_repair(tmp_path: Path) -> None:
+    from agent_py_agent.agent.agent_core.tool_delivery_repair_guard import (
+        is_delivery_repair_productive_call,
+    )
+
+    collection_action = _collection_placeholder_repair_action()
+    evidence_action = _evidence_writer_action()
+    evidence_action["checkpoint_ref"] = collection_action["checkpoint_ref"]
+    _write_web_search_tool_output_artifact(tmp_path)
+    _write_actions(tmp_path, [collection_action, evidence_action], strict_write_required=True)
+
+    assert (
+        is_delivery_repair_productive_call(
+            _agent(tmp_path),
+            [{"tool": "api_json_collection", "path": "outputs/document_delivery/source_index.json"}],
         )
         is True
     )
@@ -528,7 +826,7 @@ def test_delivery_repair_guard_uses_tool_workspace_root_for_closeout(tmp_path: P
     assert (
         is_delivery_repair_productive_call(
             agent,
-            [{"tool": "api_json_collection", "path": "outputs/research_documents/source_index.json"}],
+            [{"tool": "api_json_collection", "path": "outputs/document_delivery/source_index.json"}],
         )
         is True
     )
@@ -541,7 +839,7 @@ def test_delivery_repair_context_previews_moderate_source_checkpoint(tmp_path: P
         delivery_repair_context,
     )
 
-    source = tmp_path / "outputs/research_documents/source_index.json"
+    source = tmp_path / "outputs/document_delivery/source_index.json"
     source.parent.mkdir(parents=True)
     source.write_text(json.dumps({"rows": [{"title": f"Paper {index}", "date": "__FILL_3_date__"} for index in range(700)]}), encoding="utf-8")
     assert source.stat().st_size > 12_000
@@ -550,7 +848,7 @@ def test_delivery_repair_context_previews_moderate_source_checkpoint(tmp_path: P
     payload = json.loads(delivery_repair_context(_agent(tmp_path), repairs=0).splitlines()[1])
     snapshots = payload["repair_target_snapshots"]
 
-    assert snapshots[0]["path"] == "outputs/research_documents/source_index.json"
+    assert snapshots[0]["path"] == "outputs/document_delivery/source_index.json"
     assert "preview" in snapshots[0]
     assert len(snapshots[0]["preview"]) <= 2400
 
@@ -578,11 +876,11 @@ def test_delivery_repair_context_maps_common_source_date_without_placeholder(tmp
 
 def _collection_placeholder_repair_action() -> dict[str, object]:
     return {
-        "checkpoint_ref": "outputs/research_documents/source_index.json",
+        "checkpoint_ref": "outputs/document_delivery/source_index.json",
         "code": "COLLECTION_ITEM_PLACEHOLDER_VALUE",
         "collection_contract": {
             "required_item_fields": ["title", "url", "date", "translated"],
-            "source_json_ref": "outputs/research_documents/source_index.json",
+            "source_json_ref": "outputs/document_delivery/source_index.json",
         },
         "recommended_action": "repair_structured_checkpoint_json",
         "required_columns": ["title", "url", "date", "translated"],
@@ -594,7 +892,7 @@ def _collection_placeholder_repair_action() -> dict[str, object]:
 def _mapping_repair_action() -> dict[str, object]:
     return {
         "recommended_action": "repair_artifact_against_findings",
-        "artifact_path": "outputs/research_documents/research_documents_zh.md",
+        "artifact_path": "outputs/document_delivery/document_delivery_zh.md",
         "finding_codes": ["ARTIFACT_MAPPING_MISSING"],
         "finding_values": [
             json.dumps(
@@ -615,13 +913,13 @@ def _mapping_repair_action() -> dict[str, object]:
 def _mapping_write_call(content: str) -> dict[str, object]:
     return {
         "tool": "write_file",
-        "path": "outputs/research_documents/research_documents_zh.md",
+        "path": "outputs/document_delivery/document_delivery_zh.md",
         "content": content,
     }
 
 
 def _write_source_checkpoint_with_constant_field(root: Path) -> None:
-    path = root / "outputs/research_documents/source_index.json"
+    path = root / "outputs/document_delivery/source_index.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
@@ -682,7 +980,7 @@ def _evidence_writer_action() -> dict[str, object]:
     return {
         "code": "EVIDENCE_REQUIRED_FIELD_MISSING",
         "recommended_action": "repair_evidence_refs",
-        "checkpoint_ref": "outputs/github_star_growth/source_data.json",
+        "checkpoint_ref": "outputs/table_report/source_data.json",
         "writer_tool": "write_structured_json",
         "required_fields": ["地址"],
     }
@@ -691,7 +989,7 @@ def _evidence_writer_action() -> dict[str, object]:
 def _evidence_write_call(*, merge_existing: bool) -> dict[str, object]:
     return {
         "tool": "write_structured_json",
-        "path": "outputs/github_star_growth/source_data.json",
+        "path": "outputs/table_report/source_data.json",
         "merge_existing": merge_existing,
         "data": {
             "source_refs": [{"source_id": "src-1", "uri": "https://example.com"}],

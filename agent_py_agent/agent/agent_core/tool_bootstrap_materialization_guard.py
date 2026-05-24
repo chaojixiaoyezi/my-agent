@@ -15,6 +15,7 @@ _STATE_DIR = ".agent_delivery"
 _STATE_FILE = "bootstrap_materialization_guard.json"
 _EXPLORATION_BLOCK_THRESHOLD = 6
 _REPEATED_EXPLORATION_BLOCK_THRESHOLD = 4
+_EVIDENCE_REDIRECT_THRESHOLD = 3
 _BOOTSTRAP_PRODUCTIVE_TOOLS = {
     "append_file",
     "api_json_collection",
@@ -51,7 +52,7 @@ def bootstrap_materialization_context(agent: object, params: ToolLoopExecutePara
                 ensure_ascii=False,
                 sort_keys=True,
             ),
-            "你还处在开工阶段，bootstrap_contract 里的目标一个都没真实出现。下一轮必须先让至少一个 target 文件"
+            "你还处在开工阶段，bootstrap_contract 里的目标一个都没真实出现。请优先让至少一个 target 文件"
             "或声明的 target 目录出现，例如写最小骨架文件；仅创建父目录不算完成物化。",
         ]
     )
@@ -60,13 +61,24 @@ def bootstrap_materialization_context(agent: object, params: ToolLoopExecutePara
 # LLM: bootstrap_materialization_block_response deterministically stops startup loops that ignored repeated materialization redirects.
 # 函数用途: 模型多次忽略“先物化一个目标”的结构化要求时，返回明确阻断，避免在开工阶段空转。
 def bootstrap_materialization_block_response(agent: object, params: ToolLoopExecuteParams) -> ModelResponse | None:
-    if not _bootstrap_payload(agent, params) or not _should_block(_load_state(agent)):
+    if not _bootstrap_is_hard_enforced(params) or not _bootstrap_payload(agent, params) or not _should_block(_load_state(agent)):
         return None
     return ModelResponse(
         text="[BOOTSTRAP_MATERIALIZATION_BLOCKED] bootstrap 目标一个都还没物化，且模型连续没有执行创建/写入动作，已停止本轮以避免继续空转。",
         backend=str(getattr(getattr(agent, "backend", None), "name", "") or ""),
         runtime_status="blocked",
         runtime_reason="BOOTSTRAP_MATERIALIZATION",
+    )
+
+
+# LLM: should_redirect_bootstrap_evidence asks evidence-only startup loops to materialize after a short grace window.
+# 函数用途: 允许前几轮抓取真实资料，但达到阈值后必须先写出结构化目标，避免取证工具无限接力。
+def should_redirect_bootstrap_evidence(agent: object) -> bool:
+    state = _load_state(agent)
+    return (
+        _EVIDENCE_REDIRECT_THRESHOLD > 0
+        and int(state.get("exploration_rounds_without_materialization") or 0) >= _EVIDENCE_REDIRECT_THRESHOLD
+        and not _should_block(state)
     )
 
 
@@ -78,6 +90,9 @@ def has_required_bootstrap_materialization(
     calls: list[dict[str, object]] | None = None,
 ) -> bool:
     payload = _bootstrap_payload(agent, params)
+    if not _bootstrap_is_hard_enforced(params):
+        _clear_state(agent)
+        return False
     if not payload:
         _clear_state(agent)
         return False
@@ -125,7 +140,10 @@ def is_bootstrap_materialization_productive_call(
 # LLM: evidence-gathering calls may be needed before non-empty checkpoint materialization.
 # 函数用途: 允许 bootstrap 阶段先获取真实资料，再用 writer 写非空 checkpoint；重复无进展仍由计数熔断。
 def is_bootstrap_materialization_evidence_call(calls: list[dict[str, object]]) -> bool:
-    return bool(calls) and all(_call_is_bootstrap_evidence(call) for call in calls)
+    return bool(calls) and any(_call_is_bootstrap_evidence(call) for call in calls) and all(
+        _call_is_bootstrap_evidence(call) or _call_is_bootstrap_setup_only(call)
+        for call in calls
+    )
 
 
 # LLM: _bootstrap_payload extracts missing startup targets from the machine delivery contract.
@@ -145,10 +163,26 @@ def _bootstrap_payload(agent: object, params: ToolLoopExecuteParams) -> dict[str
         return {}
     return {
         "checkpoint_shape_hints": shape_hints,
+        "enforcement": _bootstrap_enforcement(params),
         "pending_materialization_targets": normalized,
         "productive_tool_names": sorted(_BOOTSTRAP_PRODUCTIVE_TOOLS),
         "startup_actions": _startup_actions(bootstrap),
     }
+
+
+def _bootstrap_is_hard_enforced(params: ToolLoopExecuteParams) -> bool:
+    return _bootstrap_enforcement(params) == "hard"
+
+
+def _bootstrap_enforcement(params: ToolLoopExecuteParams) -> str:
+    contract = params.delivery_contract if isinstance(params.delivery_contract, dict) else {}
+    bootstrap = contract.get("bootstrap_contract")
+    if not isinstance(bootstrap, dict):
+        return "soft"
+    if bool(bootstrap.get("hard_block")):
+        return "hard"
+    value = str(bootstrap.get("enforcement") or bootstrap.get("mode") or "soft").strip().lower()
+    return "hard" if value == "hard" else "soft"
 
 
 # LLM: _workspace_root resolves the write boundary root used to evaluate bootstrap target existence.
@@ -201,8 +235,11 @@ def _clear_state(agent: object) -> None:
 # 函数用途: 根据连续探索轮次和重复探索次数判断是否该阻断开工阶段空转。
 def _should_block(state: dict[str, object]) -> bool:
     return (
-        int(state.get("exploration_rounds_without_materialization") or 0) >= _EXPLORATION_BLOCK_THRESHOLD
-        or int(state.get("repeated_exploration_count") or 0) >= _REPEATED_EXPLORATION_BLOCK_THRESHOLD
+        _EXPLORATION_BLOCK_THRESHOLD > 0
+        and int(state.get("exploration_rounds_without_materialization") or 0) >= _EXPLORATION_BLOCK_THRESHOLD
+    ) or (
+        _REPEATED_EXPLORATION_BLOCK_THRESHOLD > 0
+        and int(state.get("repeated_exploration_count") or 0) >= _REPEATED_EXPLORATION_BLOCK_THRESHOLD
     )
 
 
@@ -280,6 +317,10 @@ def _artifact_items(contract: dict[str, object]) -> list[dict[str, object]]:
 # 函数用途: bootstrap 阶段只把明确创建目录/文件的工具调用视为推进动作。
 def _call_is_bootstrap_productive(call: dict[str, object], payload: dict[str, object] | None = None) -> bool:
     tool = str(call.get("tool") or "").strip()
+    if payload and _call_materializes_pending_target(call, payload):
+        return True
+    if _call_has_materialization_payload(call) and any(fragment in tool for fragment in ("write", "create", "build", "export", "save")):
+        return True
     if tool in _BOOTSTRAP_PRODUCTIVE_TOOLS - {"run_command"}:
         return True
     if tool != "run_command":
@@ -293,6 +334,52 @@ def _call_is_bootstrap_productive(call: dict[str, object], payload: dict[str, ob
     if command_has_local_mutation(lowered):
         return True
     return not any(lowered.startswith(prefix) for prefix in _RUN_COMMAND_INSPECTION_PREFIXES)
+
+
+def _call_materializes_pending_target(call: dict[str, object], payload: dict[str, object]) -> bool:
+    if not _call_has_materialization_payload(call):
+        return False
+    targets = _pending_target_refs(payload)
+    if not targets:
+        return False
+    return any(_same_path_ref(path, target) for path in _call_path_values(call) for target in targets)
+
+
+def _call_has_materialization_payload(call: dict[str, object]) -> bool:
+    if any(key in call for key in ("content", "data", "rows", "sheets", "generated_rows", "bytes")):
+        return True
+    args = call.get("args")
+    return isinstance(args, dict) and any(
+        key in args for key in ("content", "data", "rows", "sheets", "generated_rows", "bytes")
+    )
+
+
+def _pending_target_refs(payload: dict[str, object]) -> list[str]:
+    refs: list[str] = []
+    raw = payload.get("pending_materialization_targets")
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("workspace_relative_path", "resolved_path"):
+            ref = str(item.get(key) or "").strip()
+            if ref:
+                refs.append(ref)
+    return refs
+
+
+def _call_path_values(call: dict[str, object]) -> list[str]:
+    keys = ("path", "file_path", "target_path", "output_path", "artifact_path", "workspace_relative_path")
+    values = [str(call.get(key) or "").strip() for key in keys if str(call.get(key) or "").strip()]
+    args = call.get("args")
+    if isinstance(args, dict):
+        values.extend(str(args.get(key) or "").strip() for key in keys if str(args.get(key) or "").strip())
+    return values
+
+
+def _same_path_ref(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    return Path(left).expanduser().resolve(strict=False) == Path(right).expanduser().resolve(strict=False)
 
 
 # LLM: Parent-directory setup is not a materialized file/checkpoint target.
@@ -385,6 +472,24 @@ def _call_is_bootstrap_evidence(call: dict[str, object]) -> bool:
         return False
     command = _call_command(call)
     return command.startswith(("curl ", "wget "))
+
+
+def _call_is_bootstrap_setup_only(call: dict[str, object]) -> bool:
+    if str(call.get("tool") or "").strip() != "run_command":
+        return False
+    command = _raw_call_command(call)
+    if not command:
+        return False
+    segments = shell_segments(command)
+    return bool(segments) and all(_segment_is_setup_only(segment) for segment in segments)
+
+
+def _segment_is_setup_only(segment: str) -> bool:
+    try:
+        parts = shlex.split(segment)
+    except ValueError:
+        return False
+    return bool(parts) and parts[0] == "mkdir" and all(part == "-p" or not part.startswith("-") for part in parts[1:])
 
 
 # LLM: _calls_fingerprint gives repeated startup exploration a stable machine signature across turns.

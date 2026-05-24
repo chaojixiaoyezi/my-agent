@@ -94,7 +94,8 @@ def _handle_tool_result(
         findings.append(_finding("NON_RETRYABLE_FAILURE", event, "tool failure is not retryable"))
         actions.append(_action("STOP_RETRY", event, next_status="BLOCKED"))
         return
-    if _attempt(event) >= _retry_limit(event):
+    retry_limit = _retry_limit(event)
+    if retry_limit > 0 and _attempt(event) >= retry_limit:
         findings.append(_finding("RETRY_LIMIT_EXCEEDED", event, "retry limit reached"))
         actions.append(_action("STOP_RETRY", event, next_status="BLOCKED"))
         return
@@ -158,9 +159,11 @@ def _attempt(event: dict[str, Any]) -> int:
 
 
 # LLM: _retry_limit reads the retry budget from event fields with a conservative default.
-# 函数用途: 把 retry_limit 字段规整为至少 1 的整数。
+# 函数用途: 把 retry_limit 字段规整为非负整数；显式 0 表示不启用重试次数上限。
 def _retry_limit(event: dict[str, Any]) -> int:
-    return max(1, _int_field(event.get("retry_limit")) or 1)
+    if "retry_limit" not in event:
+        return 1
+    return max(0, _int_field(event.get("retry_limit")))
 
 
 # LLM: _action creates compact machine actions for recovery runners and tests.

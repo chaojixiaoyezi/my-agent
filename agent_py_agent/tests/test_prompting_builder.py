@@ -170,10 +170,10 @@ class TestBuildBasic:
             ),
         ]
 
-        result = builder.build("请派小傻妞整理 GitHub 热门项目流水线。", memories)
+        result = builder.build("请派小傻妞整理 代码平台 热门项目流水线。", memories)
 
         assert "之前的任务是继续完成东南亚市场进入策略" in result
-        assert "请派小傻妞整理 GitHub 热门项目流水线" in result
+        assert "请派小傻妞整理 代码平台 热门项目流水线" in result
         assert result.index("Related Memory 是历史参考") < result.index("[daily] assistant")
         assert result.index("# Related Memory") < result.index("# User Task")
         assert "如果它和 # User Task、当前工作区文件或最新工具结果冲突，必须以后者为准" in result

@@ -42,8 +42,8 @@ run_task_workspace_enabled: true
 
 # 任务工作区路径模板：
 # - {date} 是任务创建日期，例如 2026-05-13。
-# - {task_slug} 是从任务名生成的安全目录名，例如 “购物网站 E2E / main” -> “购物网站-e2e-main”。
-# - 默认结果形如 ~/.my-agent/workspace/tasks/2026-05-13/购物网站-e2e-main/。
+# - {task_slug} 是从任务名生成的安全目录名，例如 “示例任务 / main” -> “示例任务-main”。
+# - 默认结果形如 ~/.my-agent/workspace/tasks/2026-05-13/示例任务-main/。
 workspace_task_path_template: "workspace/tasks/{date}/{task_slug}"
 
 # 默认模型后端：

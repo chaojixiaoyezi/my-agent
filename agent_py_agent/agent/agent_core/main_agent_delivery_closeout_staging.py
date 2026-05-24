@@ -35,7 +35,17 @@ def staging_checkpoint_refs(staging: dict[str, Any]) -> list[str]:
 # LLM: staging_source_ref reads source refs by structured key aliases.
 # 函数用途: 支持 JSON、Markdown 和未来通用 source_ref，不从任务描述里猜产物路径。
 def staging_source_ref(staging: dict[str, Any]) -> str:
-    for key in ("source_json_ref", "source_markdown_ref", "source_ref"):
+    keys = [
+        str(staging.get("source_ref_key") or "").strip(),
+        str(staging.get("input_ref_key") or "").strip(),
+        "source_json_ref",
+        "source_markdown_ref",
+        "source_ref",
+        "input_ref",
+    ]
+    for key in keys:
+        if not key:
+            continue
         if value := str(staging.get(key) or "").strip():
             return value
     return ""
@@ -44,7 +54,16 @@ def staging_source_ref(staging: dict[str, Any]) -> str:
 # LLM: staging_output_ref reads builder output refs by structured key aliases.
 # 函数用途: 支持 workbook/pdf/output_ref，缺省时回退到 artifact preferred_path。
 def staging_output_ref(staging: dict[str, Any], artifact: dict[str, Any]) -> str:
-    for key in ("workbook_ref", "pdf_ref", "output_ref"):
+    keys = [
+        str(staging.get("output_ref_key") or "").strip(),
+        "workbook_ref",
+        "pdf_ref",
+        "output_ref",
+        "artifact_ref",
+    ]
+    for key in keys:
+        if not key:
+            continue
         if value := str(staging.get(key) or "").strip():
             return value
     return str(artifact.get("preferred_path") or artifact.get("path") or "").strip()

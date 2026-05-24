@@ -62,6 +62,49 @@ def test_failed_tool_retry_budget_stops_after_limit() -> None:
     assert result.error_codes == ("TOOL_RETRY_LIMIT_EXCEEDED",)
 
 
+# LLM: zero retry_limit disables the offline retry cap for replay contracts.
+# 函数用途: 验证离线工具回放里 retry_limit=0 表示不限制重试次数。
+def test_failed_tool_retry_budget_zero_is_unlimited() -> None:
+    from agent_py_agent.agent.contracts.offline_tool_guardrail_contract import (
+        validate_tool_guardrail_events,
+    )
+
+    failure = {
+        "type": "tool_result",
+        "tool": "fetch_url",
+        "args_hash": "same",
+        "retryable": True,
+        "retry_limit": 0,
+    }
+    result = validate_tool_guardrail_events(
+        (
+            {**failure, "operation_id": "op-1", "result": {"ok": False}},
+            {**failure, "operation_id": "op-2", "result": {"ok": False}},
+            {**failure, "operation_id": "op-3", "result": {"ok": False}},
+            {**failure, "operation_id": "op-4", "result": {"ok": False}},
+        ),
+        retry_limit=0,
+    )
+
+    assert result.ok is True
+
+
+# LLM: zero repeated_threshold disables exact-result loop caps for replay fixtures.
+# 函数用途: 验证离线回放里 repeated_threshold=0 不会把任意重复工具结果立即判死。
+def test_repeated_threshold_zero_is_unlimited() -> None:
+    from agent_py_agent.agent.contracts.offline_tool_guardrail_contract import (
+        validate_tool_guardrail_events,
+    )
+
+    event = {"type": "tool_result", "tool": "query_logs", "args_hash": "a", "result_hash": "r"}
+    result = validate_tool_guardrail_events(
+        tuple({**event, "operation_id": f"op-{idx}", "result": {"ok": True}} for idx in range(10)),
+        repeated_threshold=0,
+    )
+
+    assert result.ok is True
+
+
 # LLM: Fake tools should expose message/firewall/browser/ticket families as structured results.
 # 函数用途: 验证新增 fake tool 家族都返回 ok/error_code 结构，供离线合同复用。
 def test_fake_message_firewall_browser_and_ticket_tools_return_structured_results(tmp_path: Path) -> None:

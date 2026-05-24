@@ -175,7 +175,7 @@ def test_quality_role_contracts_use_template_defaults(tmp_path):
     manager = SubAgentManager(tmp_path)
 
     bug_finder = manager.create_run(
-        goal="检查多个 worker 的购物网站实现",
+        goal="检查多个 worker 的示例网站实现",
         thought="find issues",
         plan=["scan outputs", "report findings"],
         role="bug_finder",
@@ -187,7 +187,7 @@ def test_quality_role_contracts_use_template_defaults(tmp_path):
         role="tester",
     )
     acceptor = manager.create_run(
-        goal="验收购物网站交付物",
+        goal="验收示例网站交付物",
         thought="accept",
         plan=["read criteria", "judge"],
         role="acceptor",
@@ -225,7 +225,7 @@ def test_worker_template_supplies_default_write_tools(tmp_path):
     manager = SubAgentManager(tmp_path)
 
     task = manager.create_run(
-        goal="实现购物网站页面",
+        goal="实现示例网站页面",
         thought="build",
         plan=["implement", "verify"],
         role="worker",

@@ -15,19 +15,19 @@ def test_render_delivery_contract_section_includes_staging_refs():
             "artifacts": [
                 {
                     "kind": "xlsx",
-                    "preferred_path": "outputs/github_star_growth/github_star_growth.xlsx",
+                    "preferred_path": "outputs/table_report/table_report.xlsx",
                     "validation_contract": {
                     "staging_contract": {
                         "strategy": "data_then_tool_builder_then_workbook",
                         "builder_tool": "data_to_workbook",
-                        "source_json_ref": "outputs/github_star_growth/source_data.json",
-                        "workbook_ref": "outputs/github_star_growth/github_star_growth.xlsx",
+                        "source_json_ref": "outputs/table_report/source_data.json",
+                        "workbook_ref": "outputs/table_report/table_report.xlsx",
                         "checkpoint_shape_hints": {
-                            "outputs/github_star_growth/source_data.json": '{"sheets":[{"name":"本周榜单","rows":[{"项目名":"..."}]}]}'
+                            "outputs/table_report/source_data.json": '{"sheets":[{"name":"数据清单","rows":[{"记录名":"..."}]}]}'
                         },
                         "checkpoint_refs": [
-                            "outputs/github_star_growth/source_data.json",
-                            "outputs/github_star_growth/github_star_growth.xlsx",
+                            "outputs/table_report/source_data.json",
+                            "outputs/table_report/table_report.xlsx",
                         ],
                     }
                     },
@@ -37,11 +37,11 @@ def test_render_delivery_contract_section_includes_staging_refs():
     )
 
     assert "阶段产物" in text
-    assert "outputs/github_star_growth/source_data.json" in text
+    assert "outputs/table_report/source_data.json" in text
     assert "阶段构建工具: data_to_workbook" in text
-    assert "source_json_path=outputs/github_star_growth/source_data.json" in text
-    assert "本周榜单" in text
-    assert "项目名" in text
+    assert "source_json_path=outputs/table_report/source_data.json" in text
+    assert "数据清单" in text
+    assert "记录名" in text
     assert "generated_rows" in text
 
 
@@ -89,11 +89,11 @@ def test_render_delivery_contract_section_includes_bootstrap_targets():
                 "materialization_targets": [
                     {
                         "target_type": "checkpoint",
-                        "workspace_relative_path": "outputs/github_star_growth/source_data.json",
+                        "workspace_relative_path": "outputs/table_report/source_data.json",
                     },
                     {
                         "target_type": "required_file",
-                        "workspace_relative_path": "outputs/shopping_site/index.html",
+                        "workspace_relative_path": "outputs/static_site/index.html",
                     },
                 ],
                 "startup_actions": [
@@ -101,14 +101,14 @@ def test_render_delivery_contract_section_includes_bootstrap_targets():
                     {
                         "action": "materialize_checkpoint",
                         "priority": 1,
-                        "checkpoint_ref": "outputs/github_star_growth/source_data.json",
+                        "checkpoint_ref": "outputs/table_report/source_data.json",
                     },
                     {
                         "action": "invoke_builder_tool",
                         "priority": 2,
                         "builder_tool": "data_to_workbook",
-                        "source_ref": "outputs/github_star_growth/source_data.json",
-                        "output_ref": "outputs/github_star_growth/github_star_growth.xlsx",
+                        "source_ref": "outputs/table_report/source_data.json",
+                        "output_ref": "outputs/table_report/table_report.xlsx",
                     },
                 ],
             }
@@ -116,11 +116,11 @@ def test_render_delivery_contract_section_includes_bootstrap_targets():
     )
 
     assert "开工顺序" in text
-    assert "checkpoint: outputs/github_star_growth/source_data.json" in text
-    assert "required_file: outputs/shopping_site/index.html" in text
+    assert "checkpoint: outputs/table_report/source_data.json" in text
+    assert "required_file: outputs/static_site/index.html" in text
     assert "不要连续两轮只做目录查看" in text
-    assert "先真实写出 checkpoint: outputs/github_star_growth/source_data.json" in text
-    assert "先给 outputs/github_star_growth/source_data.json 写可验收的非空结构骨架" in text
+    assert "先真实写出 checkpoint: outputs/table_report/source_data.json" in text
+    assert "先给 outputs/table_report/source_data.json 写可验收的非空结构骨架" in text
     assert "最小有效骨架" in text
     assert "空 JSON 数组" not in text
     assert "data_to_workbook" in text
@@ -166,7 +166,7 @@ def test_render_delivery_contract_section_avoids_skeleton_hint_for_source_eviden
                     {
                         "action": "materialize_checkpoint",
                         "checkpoint_materialization_mode": "source_evidence_first",
-                        "checkpoint_ref": "outputs/github_star_growth/source_data.json",
+                        "checkpoint_ref": "outputs/table_report/source_data.json",
                         "requires_auditable_source_evidence": True,
                         "required_structured_fields": ["source_refs", "claims", "completion_evidence"],
                     }
@@ -175,7 +175,7 @@ def test_render_delivery_contract_section_avoids_skeleton_hint_for_source_eviden
         }
     )
 
-    assert "先真实写出 checkpoint: outputs/github_star_growth/source_data.json" in text
+    assert "先真实写出 checkpoint: outputs/table_report/source_data.json" in text
     assert "source_refs" in text
     assert "claims" in text
     assert "最小有效骨架" not in text
@@ -234,16 +234,16 @@ def test_render_delivery_contract_section_uses_checkpoint_shape_hint_for_non_wor
             "artifacts": [
                 {
                     "kind": "pdf",
-                    "preferred_path": "outputs/deepseek_papers/deepseek_papers_zh.pdf",
+                    "preferred_path": "outputs/document_bundle/document_bundle_zh.pdf",
                     "validation_contract": {
                         "staging_contract": {
                             "checkpoint_refs": [
-                                "outputs/deepseek_papers/source_index.json",
-                                "outputs/deepseek_papers/deepseek_papers_zh.md",
-                                "outputs/deepseek_papers/deepseek_papers_zh.pdf",
+                                "outputs/document_bundle/source_index.json",
+                                "outputs/document_bundle/document_bundle_zh.md",
+                                "outputs/document_bundle/document_bundle_zh.pdf",
                             ],
                             "checkpoint_shape_hints": {
-                                "outputs/deepseek_papers/source_index.json": '[{"title":"...","authors":["..."],"date":"...","url":"...","abstract":"...","translated":true}]'
+                                "outputs/document_bundle/source_index.json": '[{"title":"...","authors":["..."],"date":"...","url":"...","abstract":"...","translated":true}]'
                             },
                         }
                     },
@@ -254,7 +254,7 @@ def test_render_delivery_contract_section_uses_checkpoint_shape_hint_for_non_wor
                     "runtime_findings": [
                         {
                             "code": "STAGED_JSON_NO_ROWS",
-                            "stage_ref": "outputs/deepseek_papers/source_index.json",
+                            "stage_ref": "outputs/document_bundle/source_index.json",
                         }
                     ]
                 }
@@ -278,7 +278,7 @@ def test_render_delivery_contract_section_includes_generic_html_rules_only():
             "artifacts": [
                 {
                     "kind": "html",
-                    "preferred_path": "outputs/furniture_homepage/index.html",
+                    "preferred_path": "outputs/html_report/index.html",
                     "validation_contract": {
                         "quality_requirements": {
                             "complete_html_document": True,
@@ -354,11 +354,11 @@ def test_render_delivery_contract_section_recommends_one_duplicate_open_write_se
     assert "staged_json_invalid" in text
     assert "Unterminated string starting at" in text
     assert "staged_json_no_rows" in text
-    assert "required_columns=项目名, 地址" in text
+    assert "required_columns=记录名, 地址" in text
     assert "min_groups=21" in text
     assert "min_items_per_group=10" in text
-    assert "required_item_fields=项目名, 地址, 上升 star 数" in text
-    assert "item_evidence_required_fields=项目名, 地址, 上升 star 数" in text
+    assert "required_item_fields=记录名, 地址, 指标值" in text
+    assert "item_evidence_required_fields=记录名, 地址, 指标值" in text
     assert "require_verified_evidence=true" in text
     assert "data_to_workbook" in text
 
@@ -417,12 +417,12 @@ def _duplicate_open_session_contract() -> dict[str, object]:
                     _open_write_session("fetch-v3", 2, [0, 1]),
                     {
                         "code": "STAGED_JSON_INVALID",
-                        "stage_ref": "outputs/github_star_growth/source_data.json",
+                        "stage_ref": "outputs/table_report/source_data.json",
                         "parse_error": "Unterminated string starting at: line 12 column 9",
                     },
                     {
                         "code": "STAGED_JSON_NO_ROWS",
-                        "stage_ref": "outputs/github_star_growth/source_data.json",
+                        "stage_ref": "outputs/table_report/source_data.json",
                     },
                 ]
             }
@@ -435,30 +435,30 @@ def _duplicate_open_session_contract() -> dict[str, object]:
 def _xlsx_artifact_contract() -> dict[str, object]:
     return {
         "kind": "xlsx",
-        "preferred_path": "outputs/github_star_growth/github_star_growth.xlsx",
+        "preferred_path": "outputs/table_report/table_report.xlsx",
         "validation_contract": {
             "collection_contract": {
                 "groups_path": "sheets",
                 "items_path": "rows",
                 "min_groups": 21,
                 "min_items_per_group": 10,
-                "required_item_fields": ["项目名", "地址", "上升 star 数"],
+                "required_item_fields": ["记录名", "地址", "指标值"],
             },
             "evidence_contract": {
                 "require_verified": True,
-                "required_fields": ["项目名", "地址", "上升 star 数"],
+                "required_fields": ["记录名", "地址", "指标值"],
             },
-            "required_columns": ["项目名", "地址"],
+            "required_columns": ["记录名", "地址"],
             "staging_contract": {
                 "builder_tool": "data_to_workbook",
                 "checkpoint_shape_hints": {
-                    "outputs/github_star_growth/source_data.json": '{"sheets":[{"name":"本周榜单","rows":[{"项目名":"..."}]}]}'
+                    "outputs/table_report/source_data.json": '{"sheets":[{"name":"数据清单","rows":[{"记录名":"..."}]}]}'
                 },
-                "source_json_ref": "outputs/github_star_growth/source_data.json",
-                "workbook_ref": "outputs/github_star_growth/github_star_growth.xlsx",
+                "source_json_ref": "outputs/table_report/source_data.json",
+                "workbook_ref": "outputs/table_report/table_report.xlsx",
                 "checkpoint_refs": [
-                    "outputs/github_star_growth/source_data.json",
-                    "outputs/github_star_growth/github_star_growth.xlsx",
+                    "outputs/table_report/source_data.json",
+                    "outputs/table_report/table_report.xlsx",
                 ],
             },
         },
@@ -475,5 +475,5 @@ def _open_write_session(session_id: str, next_chunk: int, chunks: list[int]) -> 
         "received_chunks": chunks,
         "preview_path": f"workspace/.agent_file_write_sessions/{session_id}/write.tmp",
         "preview_materialized": bool(chunks),
-        "target_path": {"display": "outputs/github_star_growth/fetch.py"},
+        "target_path": {"display": "outputs/table_report/fetch.py"},
     }

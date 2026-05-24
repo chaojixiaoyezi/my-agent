@@ -13,7 +13,9 @@ _DIRECT_FILE_WRITE_TOOLS = {"append_file", "file_write_session", "replace_in_fil
 _STRUCTURED_JSON_WRITER = "write_structured_json"
 _STRUCTURED_JSON_SOURCE_WRITERS = frozenset({_STRUCTURED_JSON_WRITER, "api_json_collection"})
 _JSON_SOURCE_KEYS = ("source_json_ref",)
-_BUILDER_OUTPUT_KEYS = ("workbook_ref", "pdf_ref", "output_ref")
+_KNOWN_BUILDER_OUTPUT_KEYS = ("workbook_ref", "pdf_ref", "output_ref", "artifact_ref")
+_READ_ONLY_TOOL_PREFIXES = ("read", "list", "search", "fetch", "http", "web_search")
+_WRITE_INTENT_FRAGMENTS = ("write", "create", "build", "export", "save", "convert", "render")
 
 
 # LLM: WriterContractIndex keeps path-to-tool facts separate from error rendering.
@@ -102,7 +104,7 @@ def _index_artifact_staging_contracts(index: WriterContractIndex, artifacts: obj
 # LLM: JSON source refs are machine checkpoints and must use the structured JSON writer.
 # 函数用途: 将 source_json_ref 和 JSON checkpoint_refs 绑定到 write_structured_json。
 def _index_json_sources(index: WriterContractIndex, staging: dict[str, object]) -> None:
-    for key in _JSON_SOURCE_KEYS:
+    for key in _source_ref_keys(staging):
         _add_json_source_writers(index, staging.get(key))
     checkpoint_refs = staging.get("checkpoint_refs")
     if not isinstance(checkpoint_refs, list):
@@ -136,7 +138,7 @@ def _index_builder_outputs(index: WriterContractIndex, staging: dict[str, object
     builder_tool = _tool_text(staging.get("builder_tool"))
     if not builder_tool:
         return
-    for key in _BUILDER_OUTPUT_KEYS:
+    for key in _builder_output_keys(staging):
         index.add(staging.get(key), builder_tool)
 
 
@@ -179,11 +181,38 @@ def _index_declared_actions(index: WriterContractIndex, value: object) -> None:
 # LLM: _target_path_for_tool extracts only machine path parameters that represent writes.
 # 函数用途: 识别本次工具会写哪个目标路径；source_json_path 这类读取参数不会被当成写入目标。
 def _target_path_for_tool(tool: str, payload: dict[str, object]) -> str:
+    if _looks_read_only_tool(tool):
+        return ""
     if tool in _DIRECT_FILE_WRITE_TOOLS:
         return _first_path(payload, ("path", "file_path", "target_path"))
     if tool in {*_STRUCTURED_JSON_SOURCE_WRITERS, "data_to_workbook", "markdown_to_pdf"}:
-        return _first_path(payload, ("path", "output_path"))
+        return _first_path(payload, ("path", "output_path", "target_path", "artifact_path"))
+    if any(fragment in tool for fragment in _WRITE_INTENT_FRAGMENTS):
+        return _first_path(payload, ("path", "output_path", "target_path", "artifact_path", "file_path"))
     return ""
+
+
+def _source_ref_keys(staging: dict[str, object]) -> tuple[str, ...]:
+    keys = [
+        str(staging.get("source_ref_key") or "").strip(),
+        str(staging.get("input_ref_key") or "").strip(),
+        *_JSON_SOURCE_KEYS,
+        "source_ref",
+        "input_ref",
+    ]
+    return tuple(dict.fromkeys(key for key in keys if key))
+
+
+def _builder_output_keys(staging: dict[str, object]) -> tuple[str, ...]:
+    keys = [
+        str(staging.get("output_ref_key") or "").strip(),
+        *_KNOWN_BUILDER_OUTPUT_KEYS,
+    ]
+    return tuple(dict.fromkeys(key for key in keys if key))
+
+
+def _looks_read_only_tool(tool: str) -> bool:
+    return bool(tool) and tool.startswith(_READ_ONLY_TOOL_PREFIXES)
 
 
 # LLM: _first_path 是 agent_py_agent/agent/agent_core/tool_staged_writer_contract.py 的结构化 helper；修改时保持不读取普通自然语言作为机器事实。

@@ -11,6 +11,7 @@ from .artifact_acceptance_models import (
     ArtifactAcceptanceRequest,
     kind_for_path,
 )
+from .artifact_capabilities import artifact_capability
 
 ArtifactValidator = Callable[[ArtifactAcceptanceRequest], ArtifactAcceptanceReport]
 
@@ -34,7 +35,13 @@ def resolve_artifact_validator(
     validator_name = validator_name_from_contract(request.validation_contract)
     if validator_name and validator_name in named_validators:
         return named_validators[validator_name]
-    artifact_kind = kind_for_path(Path(request.path))
+    validation = request.validation_contract or {}
+    capability = artifact_capability(
+        Path(request.path),
+        declared_kind=str(validation.get("artifact_kind") or validation.get("kind") or ""),
+        declared_mime=str(validation.get("mime_type") or validation.get("mime") or ""),
+    )
+    artifact_kind = capability.validator_key or capability.kind or kind_for_path(Path(request.path))
     return kind_validators.get(artifact_kind, fallback)
 
 

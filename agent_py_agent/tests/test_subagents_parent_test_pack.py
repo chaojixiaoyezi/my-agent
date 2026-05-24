@@ -44,7 +44,7 @@ def test_parent_test_pack_round_trips_parent_owned_tests(tmp_path):
                 "name": "parent checkout contract",
                 "validation_method": "command",
                 "command": "python3 -m pytest tests/parent/test_checkout_contract.py -q",
-                "working_dir": "shop-webapp",
+                "working_dir": "sample-webapp",
             }],
             source="parent_oracle",
         )
@@ -56,16 +56,16 @@ def test_parent_test_pack_round_trips_parent_owned_tests(tmp_path):
         "name": "parent checkout contract",
         "validation_method": "command",
         "command": "python3 -m pytest tests/parent/test_checkout_contract.py -q",
-        "working_dir": "shop-webapp",
+        "working_dir": "sample-webapp",
         "source": "parent_oracle",
     }]
 
 
 def test_subagents_tests_rerun_executes_parent_owned_web_pack(tmp_path, capsys):
-    """LLM: subagents-tests should run parent-owned shop-webapp checks even when output tests are empty."""
+    """LLM: subagents-tests should run parent-owned sample-webapp checks even when output tests are empty."""
 
     task = _task(tmp_path)
-    _write_parent_contract(tmp_path / "shop-webapp")
+    _write_parent_contract(tmp_path / "sample-webapp")
     write_parent_test_pack(
         ParentTestPackWriteRequest(
             reports_dir=task.reports_dir,
@@ -73,7 +73,7 @@ def test_subagents_tests_rerun_executes_parent_owned_web_pack(tmp_path, capsys):
                 "name": "parent shop contract",
                 "validation_method": "command",
                 "command": "python3 -m pytest tests/parent/test_shop_contract.py -q",
-                "working_dir": "shop-webapp",
+                "working_dir": "sample-webapp",
             }],
             source="shop_parent_oracle",
         )
@@ -94,7 +94,7 @@ def test_subagents_tests_rerun_replaces_empty_acceptance_report_with_parent_pack
     """LLM: Empty acceptance side effects must not mask parent-owned test packs."""
 
     task = _task(tmp_path)
-    _write_parent_contract(tmp_path / "shop-webapp")
+    _write_parent_contract(tmp_path / "sample-webapp")
     write_parent_test_pack(
         ParentTestPackWriteRequest(
             reports_dir=task.reports_dir,
@@ -102,7 +102,7 @@ def test_subagents_tests_rerun_replaces_empty_acceptance_report_with_parent_pack
                 "name": "parent shop contract",
                 "validation_method": "command",
                 "command": "python3 -m pytest tests/parent/test_shop_contract.py -q",
-                "working_dir": "shop-webapp",
+                "working_dir": "sample-webapp",
             }],
             source="shop_parent_oracle",
         )
@@ -149,7 +149,7 @@ def _args(tmp_path, *, re_run=False):
 
 
 def _write_parent_contract(webapp: Path) -> None:
-    """LLM: Create a tiny shop-webapp fixture and parent-owned pytest contract."""
+    """LLM: Create a tiny sample-webapp fixture and parent-owned pytest contract."""
 
     test_dir = webapp / "tests" / "parent"
     test_dir.mkdir(parents=True)

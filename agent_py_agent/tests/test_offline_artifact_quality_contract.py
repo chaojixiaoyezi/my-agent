@@ -51,38 +51,38 @@ def test_json_artifact_requires_declared_fields(tmp_path: Path) -> None:
 # 函数用途: 验证 CSV 表头缺少 validation_contract.required_columns 时会失败。
 def test_csv_artifact_requires_declared_columns(tmp_path: Path) -> None:
     csv_path = tmp_path / "report.csv"
-    csv_path.write_text("项目名,地址\nA,https://example.test\n", encoding="utf-8")
+    csv_path.write_text("记录名,地址\nA,https://example.test\n", encoding="utf-8")
 
     result = validate_artifact(
         ArtifactAcceptanceRequest(
             path=csv_path,
             workspace_root=tmp_path,
-            validation_contract={"required_columns": ["项目名", "地址", "推荐理由"]},
+            validation_contract={"required_columns": ["记录名", "地址", "说明依据"]},
         )
     )
 
     assert result.ok is False
     assert [item.code for item in result.findings] == ["CSV_REQUIRED_COLUMNS_MISSING"]
-    assert result.findings[0].value == "推荐理由"
+    assert result.findings[0].value == "说明依据"
 
 
 # LLM: XLSX contracts use the same required_columns shape as CSV and staged tabular JSON.
 # 函数用途: 验证 xlsx 缺少声明列时沿用已有 workbook XML 验收器。
 def test_xlsx_artifact_requires_declared_columns(tmp_path: Path) -> None:
     xlsx_path = tmp_path / "report.xlsx"
-    _write_minimal_xlsx(xlsx_path, worksheet_text=["项目名", "地址"])
+    _write_minimal_xlsx(xlsx_path, worksheet_text=["记录名", "地址"])
 
     result = validate_artifact(
         ArtifactAcceptanceRequest(
             path=xlsx_path,
             workspace_root=tmp_path,
-            validation_contract={"required_columns": ["项目名", "地址", "推荐理由"]},
+            validation_contract={"required_columns": ["记录名", "地址", "说明依据"]},
         )
     )
 
     assert result.ok is False
     assert [item.code for item in result.findings] == ["XLSX_MISSING_REQUIRED_COLUMNS"]
-    assert result.findings[0].value == "推荐理由"
+    assert result.findings[0].value == "说明依据"
 
 
 # LLM: _write_minimal_xlsx creates the smallest workbook package needed by the contract validator.

@@ -136,12 +136,12 @@ class TestCreateSubagentsToolRawPromptRepair:
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({
             "goal": (
-                "完成购物站，交付 index.html、products.html、product-detail.html、style.css、app.js，"
+                "完成示例站，交付 index.html、items.html、item-detail.html、style.css、app.js，"
                 "文件名不要改，建立 4层链路。"
             ),
             "role": "coordinator",
-            "extra_write_roots": ["/tmp/shop/build"],
-            "required_files": ["index.html", "products.html", "product-detail.html", "style.css", "app.js"],
+            "extra_write_roots": ["/tmp/site/build"],
+            "required_files": ["index.html", "items.html", "item-detail.html", "style.css", "app.js"],
             "forbidden_files": [
                 "product.html", "old-product.html", "legacy.html", "obsolete.html",
                 "output.json", "RUNNER_RESULT.md", "execution_context.json",

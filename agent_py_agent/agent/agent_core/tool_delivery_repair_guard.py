@@ -7,7 +7,8 @@ import json
 
 from ..backend import ModelResponse
 from .tool_delivery_repair_declared_reads import (
-    declared_repair_reads_exhausted,
+    declared_repair_read_key,
+    exhausted_declared_repair_read_keys,
     reset_declared_read_allowance,
 )
 from .tool_delivery_repair_evidence_shape import violates_evidence_repair_shape
@@ -48,15 +49,15 @@ _WRITE_TARGET_TOOLS = {
 # 函数用途: 读取 .agent_delivery/closeout.json 中的结构化恢复动作；若当前必须先修阶段产物，则返回下一轮模型可见的纠偏合同。
 def delivery_repair_context(agent: object, repairs: int, runtime_params: object = _PARAMS_UNSET) -> str:
     payload = _delivery_repair_payload(agent, runtime_params)
-    if not payload or repairs >= _MAX_REPAIRS:
+    if not payload or (_MAX_REPAIRS > 0 and repairs >= _MAX_REPAIRS):
         return ""
     return "\n".join(
         [
             "[tool-system delivery-required-repair]",
             json.dumps(payload, ensure_ascii=False, sort_keys=True),
-            "当前仍处于阶段产物修复模式。下一轮必须优先执行能推进 required_actions 的真实工具调用，"
+            "当前仍处于阶段产物修复模式。请优先执行能推进 required_actions 的真实工具调用，"
             "例如写出/修复 checkpoint、补齐非空结构化数据，或调用 builder tool。"
-            "不要只重复 read_file、list_files、search、list_tools 这类检查动作。",
+            "如果还需要读取或搜索，请把结果同步转成可验收的本地进展。",
         ]
     )
 
@@ -123,17 +124,24 @@ def is_delivery_repair_productive_call(
         if isinstance(item.get("write_tools"), list)
     )
     strict_write_required = bool(payload.get("strict_write_required"))
-    context = DeliveryRepairProductivityContext(
+    base_context = DeliveryRepairProductivityContext(
         productive_tools=productive_tools(payload, action_tools),
         inspection_only_tools=inspection_only_tools(required_actions, strict_write_required),
         strict_write_required=strict_write_required,
         required_actions=required_actions,
         required_tool_calls=[item for item in payload.get("required_tool_calls", []) if isinstance(item, dict)],
     )
-    if any(_call_resets_declared_read_allowance(call, context) for call in calls):
+    if any(_call_resets_declared_read_allowance(call, base_context) for call in calls):
         reset_declared_read_allowance(agent)
-    if declared_repair_reads_exhausted(agent, payload, calls, required_actions):
-        return False
+    exhausted_reads = exhausted_declared_repair_read_keys(agent, payload, calls, required_actions)
+    context = DeliveryRepairProductivityContext(
+        productive_tools=base_context.productive_tools,
+        inspection_only_tools=base_context.inspection_only_tools,
+        strict_write_required=strict_write_required,
+        required_actions=required_actions,
+        required_tool_calls=base_context.required_tool_calls,
+        exhausted_declared_read_keys=exhausted_reads,
+    )
     return any(_call_is_productive(call, context) for call in calls)
 
 
@@ -168,11 +176,13 @@ def _call_is_productive(
     context: DeliveryRepairProductivityContext,
 ) -> bool:
     tool = str(call.get("tool") or "").strip()
+    if _is_exhausted_declared_read(call, context):
+        return False
     if _is_declared_repair_target_read(call, context.required_actions):
         return True
     if _is_checkpoint_repair_read(call, context.required_actions):
         return True
-    if _is_evidence_repair_gathering(call, context.required_actions):
+    if _is_evidence_repair_gathering(call, context):
         return True
     if tool in EVIDENCE_GATHERING_TOOL_NAMES:
         return _is_source_checkpoint_materialization_gathering(
@@ -203,6 +213,17 @@ def _call_is_productive(
     return tool not in context.inspection_only_tools
 
 
+def _is_exhausted_declared_read(
+    call: dict[str, object],
+    context: DeliveryRepairProductivityContext,
+) -> bool:
+    exhausted = context.exhausted_declared_read_keys or set()
+    if not exhausted:
+        return False
+    key = declared_repair_read_key(call, context.required_actions)
+    return bool(key and key in exhausted)
+
+
 # LLM: _violates_declared_writer_tool keeps this runtime helper grounded in structured fields.
 # 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
 def _violates_declared_writer_tool(call: dict[str, object], required_actions: list[dict[str, object]]) -> bool:
@@ -210,13 +231,17 @@ def _violates_declared_writer_tool(call: dict[str, object], required_actions: li
     path = call_path(call)
     if not tool or not path:
         return False
+    allowed_for_path: set[str] = set()
+    matched_path = False
     for action in required_actions:
         writer_tool = str(action.get("writer_tool") or "").strip()
         allowed_tools = _declared_writer_tools(action, writer_tool)
         checkpoint_ref = str(action.get("checkpoint_ref") or "").strip()
-        if allowed_tools and checkpoint_ref and tool not in allowed_tools and same_path_ref(path, checkpoint_ref):
-            return True
-    return False
+        if not allowed_tools or not checkpoint_ref or not same_path_ref(path, checkpoint_ref):
+            continue
+        matched_path = True
+        allowed_for_path.update(allowed_tools)
+    return bool(matched_path and allowed_for_path and tool not in allowed_for_path)
 
 
 def _is_source_checkpoint_materialization_gathering(
@@ -286,6 +311,10 @@ def _has_ready_api_collection_call(
 
 def _api_collection_call_has_sources(call: dict[str, object]) -> bool:
     return any(call.get(key) for key in ("requests", "request_ranges", "source_artifacts"))
+
+
+def _has_any_ready_api_collection_call(context: DeliveryRepairProductivityContext) -> bool:
+    return any(_has_ready_api_collection_call(action, context.required_tool_calls) for action in context.required_actions)
 
 
 def _action_allows_source_gathering_for_data_checkpoint(
@@ -547,14 +576,19 @@ def _is_declared_repair_target_read(call: dict[str, object], required_actions: l
 
 # LLM: _is_evidence_repair_gathering allows source collection when claims/source_refs are the failed contract.
 # 函数用途: 证据修复可以先调用抓取/检索工具补 source_refs，但仍由后续 verifier 要求写入结构化 claims。
-def _is_evidence_repair_gathering(call: dict[str, object], required_actions: list[dict[str, object]]) -> bool:
+def _is_evidence_repair_gathering(
+    call: dict[str, object],
+    context: DeliveryRepairProductivityContext,
+) -> bool:
     tool = str(call.get("tool") or "").strip()
     if tool not in EVIDENCE_GATHERING_TOOL_NAMES:
+        return False
+    if _has_any_ready_api_collection_call(context):
         return False
     return any(
         str(action.get("recommended_action") or "") == "repair_evidence_refs"
         and bool(action.get("required_fields"))
-        for action in required_actions
+        for action in context.required_actions
     )
 
 

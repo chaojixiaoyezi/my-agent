@@ -24,7 +24,7 @@ class DeliveryContractBackend:
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
-                    '{"tool":"write_file","path":"outputs/furniture_homepage/index.html",'
+                    '{"tool":"write_file","path":"outputs/html_report/index.html",'
                     '"content":"<!doctype html><html><head><title>Maison</title></head><body>'
                     '<a href=\\"#story\\">Story</a>'
                     '<section id=\\"story\\">Done</section></body></html>"}\n'
@@ -49,7 +49,7 @@ class FailedDeliveryContractBackend:
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
-                    '{"tool":"write_file","path":"outputs/furniture_homepage/index.html",'
+                    '{"tool":"write_file","path":"outputs/html_report/index.html",'
                     '"content":"<!doctype html><html><head><link rel=\\"stylesheet\\" href=\\"https://fonts.example/font.css\\"></head><body><main>Bad</main>"}\n'
                     "[/TOOL_CALL]"
                 ),
@@ -75,7 +75,7 @@ class IncompleteDeliveryContractBackend:
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
-                    '{"tool":"write_file","path":"outputs/furniture_homepage/index.html",'
+                    '{"tool":"write_file","path":"outputs/html_report/index.html",'
                     '"content":"<!doctype html><html><head><link rel=\\"stylesheet\\" '
                     'href=\\"https://fonts.example/font.css\\"><style>body{color:#111}"}\n'
                     "[/TOOL_CALL]"
@@ -101,7 +101,7 @@ class ArtifactFindingRepairBackend:
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
-                    '{"tool":"write_file","path":"outputs/furniture_homepage/index.html",'
+                    '{"tool":"write_file","path":"outputs/html_report/index.html",'
                     '"content":"<!doctype html><html><head><link rel=\\"stylesheet\\" '
                     'href=\\"https://fonts.example/font.css\\"></head><body><main>Bad</main>"}\n'
                     "[/TOOL_CALL]"
@@ -114,7 +114,7 @@ class ArtifactFindingRepairBackend:
             assert "HTML_EXTERNAL_RESOURCE_REF" in prompt
             assert "repair_required" in prompt
             return _write_file_response(
-                "outputs/furniture_homepage/index.html",
+                "outputs/html_report/index.html",
                 '<!doctype html><html><head><title>Maison</title><style>body{color:#111}</style></head><body><main>Ready</main></body></html>',
                 self.name,
             )
@@ -142,7 +142,7 @@ class MissingArtifactRepairBackend:
             assert "ARTIFACT_MISSING" in prompt
             assert "repair_required" in prompt
             return _write_file_response(
-                "outputs/furniture_homepage/index.html",
+                "outputs/html_report/index.html",
                 '<!doctype html><html><head><title>Maison</title></head><body><main>Correct path</main></body></html>',
                 self.name,
             )
@@ -164,7 +164,7 @@ class OpenWriteSessionDeliveryBackend:
         session_id = session_id_from_prompt(prompt)
         if self.calls == 1:
             return ModelResponse(
-                text='[TOOL_CALL]\n{"tool":"file_write_session","action":"begin","target_path":"outputs/shopping_site/app.js"}\n[/TOOL_CALL]',
+                text='[TOOL_CALL]\n{"tool":"file_write_session","action":"begin","target_path":"outputs/static_site/app.js"}\n[/TOOL_CALL]',
                 backend=self.name,
             )
         if self.calls == 2:
@@ -193,7 +193,7 @@ class NoProgressDeliveryBackend:
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
-                    '{"tool":"write_file","path":"outputs/furniture_homepage/index.html",'
+                    '{"tool":"write_file","path":"outputs/html_report/index.html",'
                     '"content":"<!doctype html><html><head><link rel=\\"stylesheet\\" href=\\"https://fonts.example/font.css\\"></head><body><main>Bad</main>"}\n'
                     "[/TOOL_CALL]"
                 ),
@@ -213,14 +213,14 @@ class PendingTargetsDeliveryBackend:
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
-            return _write_file_response("outputs/shopping_site/index.html", '<!doctype html><html><body><script src="app.js"></script></body></html>', self.name)
+            return _write_file_response("outputs/static_site/index.html", '<!doctype html><html><body><script src="app.js"></script></body></html>', self.name)
         if self.calls == 2:
             assert "pending_materialization_targets" in prompt
-            assert "outputs/shopping_site/app.js" in prompt
-            return ModelResponse(text='[TOOL_CALL]\n{"tool":"read_file","path":"outputs/shopping_site/index.html"}\n[/TOOL_CALL]', backend=self.name)
+            assert "outputs/static_site/app.js" in prompt
+            return ModelResponse(text='[TOOL_CALL]\n{"tool":"read_file","path":"outputs/static_site/index.html"}\n[/TOOL_CALL]', backend=self.name)
         if self.calls == 3:
             assert "no_progress_block_threshold" in prompt
-            return _write_file_response("outputs/shopping_site/app.js", 'console.log("shop ready");', self.name)
+            return _write_file_response("outputs/static_site/app.js", 'console.log("shop ready");', self.name)
         raise AssertionError("pending targets should complete before any blocked closeout")
 
 
@@ -236,17 +236,17 @@ class DeliveryRepairRedirectBackend:
         self.calls += 1
         if self.calls == 1:
             return _write_structured_json_response(
-                "outputs/github_star_growth/source_data.json",
-                '{"generated_at":"2026-05-20","sheets":[{"name":"本周榜单","rows":[]}]}',
+                "outputs/table_report/source_data.json",
+                '{"generated_at":"2026-05-20","sheets":[{"name":"数据清单","rows":[]}]}',
                 self.name,
             )
         if self.calls == 2:
             assert "STAGED_JSON_NO_ROWS" in prompt
-            return ModelResponse(text='[TOOL_CALL]\n{"tool":"read_file","path":"outputs/github_star_growth/source_data.json"}\n[/TOOL_CALL]', backend=self.name)
+            return ModelResponse(text='[TOOL_CALL]\n{"tool":"read_file","path":"outputs/table_report/source_data.json"}\n[/TOOL_CALL]', backend=self.name)
         if self.calls == 3:
             assert "STAGED_JSON_NO_ROWS" in prompt
             return _write_structured_json_response(
-                "outputs/github_star_growth/source_data.json",
+                "outputs/table_report/source_data.json",
                 _valid_workbook_source_json(),
                 self.name,
             )
@@ -267,12 +267,12 @@ class BootstrapMaterializationRedirectBackend:
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
-            return ModelResponse(text='[TOOL_CALL]\n{"tool":"list_files","path":"outputs/shopping_site"}\n[/TOOL_CALL]', backend=self.name)
+            return ModelResponse(text='[TOOL_CALL]\n{"tool":"list_files","path":"outputs/static_site"}\n[/TOOL_CALL]', backend=self.name)
         if self.calls == 2:
             assert "bootstrap-materialization" in prompt
-            return _write_file_response("outputs/shopping_site/index.html", '<!doctype html><html><body><script src="app.js"></script></body></html>', self.name)
+            return _write_file_response("outputs/static_site/index.html", '<!doctype html><html><body><script src="app.js"></script></body></html>', self.name)
         if self.calls == 3:
-            return _write_file_response("outputs/shopping_site/app.js", 'console.log("bootstrapped");', self.name)
+            return _write_file_response("outputs/static_site/app.js", 'console.log("bootstrapped");', self.name)
         raise AssertionError("bootstrap guard should redirect inspection-only startup and then complete")
 
 
@@ -289,12 +289,12 @@ class BootstrapMaterializationProgressiveBackend:
         if self.calls in {1, 2, 3}:
             if self.calls > 1:
                 assert "bootstrap-materialization" in prompt
-            return ModelResponse(text='[TOOL_CALL]\n{"tool":"list_files","path":"outputs/shopping_site"}\n[/TOOL_CALL]', backend=self.name)
+            return ModelResponse(text='[TOOL_CALL]\n{"tool":"list_files","path":"outputs/static_site"}\n[/TOOL_CALL]', backend=self.name)
         if self.calls == 4:
             assert "exploration_rounds_without_materialization" in prompt
-            return _write_file_response("outputs/shopping_site/index.html", '<!doctype html><html><body><script src="app.js"></script></body></html>', self.name)
+            return _write_file_response("outputs/static_site/index.html", '<!doctype html><html><body><script src="app.js"></script></body></html>', self.name)
         if self.calls == 5:
-            return _write_file_response("outputs/shopping_site/app.js", 'console.log("bootstrapped later");', self.name)
+            return _write_file_response("outputs/static_site/app.js", 'console.log("bootstrapped later");', self.name)
         raise AssertionError("bootstrap guard should allow several redirects before any final block")
 
 
@@ -310,13 +310,13 @@ class LocalProgressRedirectBackend:
         self.calls += 1
         artifact_ref = str(Path("memory_archive/artifacts/tool_outputs/demo.json").resolve())
         if self.calls == 1:
-            return _write_file_response("outputs/github_star_growth/source_data.json", _empty_workbook_source_json(), self.name)
+            return _write_file_response("outputs/table_report/source_data.json", _empty_workbook_source_json(), self.name)
         if self.calls in {2, 3}:
             return ModelResponse(text=f'[TOOL_CALL]\n{{"tool":"read_artifact","artifact_ref":"{artifact_ref}","offset":0,"max_chars":2000}}\n[/TOOL_CALL]', backend=self.name)
         if self.calls == 4:
             assert "local-progress-guard" in prompt or "delivery-required-repair" in prompt
             return _write_structured_json_response(
-                "outputs/github_star_growth/source_data.json",
+                "outputs/table_report/source_data.json",
                 _valid_workbook_source_json(),
                 self.name,
             )
@@ -341,7 +341,7 @@ class RecoveryAttemptRepairBackend:
             assert "delivery-required-repair" in prompt
             assert "LOCAL_PROGRESS_GUARD_BLOCKED" not in prompt
             return _write_structured_json_response(
-                "outputs/github_star_growth/source_data.json",
+                "outputs/table_report/source_data.json",
                 _valid_workbook_source_json(),
                 self.name,
             )
@@ -363,7 +363,7 @@ class WrongToolDuringOpenSessionBackend:
         self.calls += 1
         session_id = session_id_from_prompt(prompt)
         if self.calls == 1:
-            return ModelResponse(text='[TOOL_CALL]\n{"tool":"file_write_session","action":"begin","target_path":"outputs/shopping_site/app.js"}\n[/TOOL_CALL]', backend=self.name)
+            return ModelResponse(text='[TOOL_CALL]\n{"tool":"file_write_session","action":"begin","target_path":"outputs/static_site/app.js"}\n[/TOOL_CALL]', backend=self.name)
         if self.calls == 2:
             self.session_id = session_id
             return _write_file_response("outputs/rogue.txt", "should not run", self.name)
@@ -390,7 +390,7 @@ def delivery_contract() -> dict[str, object]:
             {
                 "artifact_id": "homepage_html",
                 "kind": "html",
-                "preferred_path": "outputs/furniture_homepage/index.html",
+                "preferred_path": "outputs/html_report/index.html",
                 "required": True,
                 "validation_contract": {
                     "validator": "artifact_acceptance",
@@ -410,14 +410,14 @@ def web_project_delivery_contract() -> dict[str, object]:
     return {
         "case_id": "web_project_case",
         "bootstrap_contract": {
-            "materialization_targets": _shopping_site_targets(),
+            "materialization_targets": _static_site_targets(),
             "startup_actions": [{"action": "materialize_target", "priority": 1}],
         },
         "artifacts": [
             {
-                "artifact_id": "shopping_site_root",
+                "artifact_id": "static_site_root",
                 "kind": "web_project",
-                "preferred_path": "outputs/shopping_site",
+                "preferred_path": "outputs/static_site",
                 "required": True,
                 "validation_contract": {
                     "validator": "static_site_check",
@@ -435,9 +435,9 @@ def xlsx_delivery_contract() -> dict[str, object]:
         "case_id": "workbook_recovery_case",
         "artifacts": [
             {
-                "artifact_id": "github_star_growth_workbook",
+                "artifact_id": "table_report_workbook",
                 "kind": "xlsx",
-                "preferred_path": "outputs/github_star_growth/github_star_growth.xlsx",
+                "preferred_path": "outputs/table_report/table_report.xlsx",
                 "required": True,
                 "validation_contract": _xlsx_validation_contract(),
             }
@@ -452,13 +452,13 @@ def session_id_from_prompt(prompt: str) -> str:
     return match.group(1) if match else ""
 
 
-# LLM: _shopping_site_targets returns structured bootstrap materialization targets for a static site.
+# LLM: _static_site_targets returns structured bootstrap materialization targets for a static site.
 # 函数用途: 声明目录、index 和 app.js 三个目标，不用 prompt 文字推断。
-def _shopping_site_targets() -> list[dict[str, object]]:
+def _static_site_targets() -> list[dict[str, object]]:
     return [
-        {"artifact_id": "shopping_site_root", "kind": "web_project", "target_type": "artifact", "workspace_relative_path": "outputs/shopping_site"},
-        {"artifact_id": "shopping_site_root", "kind": "web_project", "target_type": "required_file", "workspace_relative_path": "outputs/shopping_site/index.html"},
-        {"artifact_id": "shopping_site_root", "kind": "web_project", "target_type": "required_file", "workspace_relative_path": "outputs/shopping_site/app.js"},
+        {"artifact_id": "static_site_root", "kind": "web_project", "target_type": "artifact", "workspace_relative_path": "outputs/static_site"},
+        {"artifact_id": "static_site_root", "kind": "web_project", "target_type": "required_file", "workspace_relative_path": "outputs/static_site/index.html"},
+        {"artifact_id": "static_site_root", "kind": "web_project", "target_type": "required_file", "workspace_relative_path": "outputs/static_site/app.js"},
     ]
 
 
@@ -467,17 +467,17 @@ def _shopping_site_targets() -> list[dict[str, object]]:
 def _xlsx_validation_contract() -> dict[str, object]:
     return {
         "validator": "spreadsheet_acceptance",
-        "required_columns": ["项目名", "地址", "上升 star 数", "中文解释", "推荐理由"],
+        "required_columns": ["记录名", "地址", "指标值", "中文说明", "说明依据"],
         "staging_contract": {
             "builder_tool": "data_to_workbook",
-            "source_json_ref": "outputs/github_star_growth/source_data.json",
-            "workbook_ref": "outputs/github_star_growth/github_star_growth.xlsx",
+            "source_json_ref": "outputs/table_report/source_data.json",
+            "workbook_ref": "outputs/table_report/table_report.xlsx",
             "checkpoint_shape_hints": {
-                "outputs/github_star_growth/source_data.json": '{"sheets":[{"name":"本周榜单","columns":["项目名","地址","上升 star 数","中文解释","推荐理由"],"rows":[{"项目名":"..."}]}]}'
+                "outputs/table_report/source_data.json": '{"sheets":[{"name":"数据清单","columns":["记录名","地址","指标值","中文说明","说明依据"],"rows":[{"记录名":"..."}]}]}'
             },
             "checkpoint_refs": [
-                "outputs/github_star_growth/source_data.json",
-                "outputs/github_star_growth/github_star_growth.xlsx",
+                "outputs/table_report/source_data.json",
+                "outputs/table_report/table_report.xlsx",
             ],
         },
     }
@@ -513,10 +513,10 @@ def _session_finish_response(session_id: str, backend: str) -> ModelResponse:
 
 
 # LLM: _workbook_builder_response builds the data_to_workbook call for staged xlsx tests.
-# 函数用途: 将 source_data.json 物化成 github_star_growth.xlsx。
+# 函数用途: 将 source_data.json 物化成 table_report.xlsx。
 def _workbook_builder_response(backend: str) -> ModelResponse:
     return ModelResponse(
-        text='[TOOL_CALL]\n{"tool":"data_to_workbook","source_json_path":"outputs/github_star_growth/source_data.json","path":"outputs/github_star_growth/github_star_growth.xlsx"}\n[/TOOL_CALL]',
+        text='[TOOL_CALL]\n{"tool":"data_to_workbook","source_json_path":"outputs/table_report/source_data.json","path":"outputs/table_report/table_report.xlsx"}\n[/TOOL_CALL]',
         backend=backend,
     )
 
@@ -524,15 +524,15 @@ def _workbook_builder_response(backend: str) -> ModelResponse:
 # LLM: _empty_workbook_source_json returns a structured-but-empty staged data payload.
 # 函数用途: 触发 STAGED_JSON_NO_ROWS/local-progress 修复路径。
 def _empty_workbook_source_json() -> str:
-    return '{"sheets":[{"name":"周榜单","columns":["项目名","地址","上升 star 数","中文解释","推荐理由"]}],"generated_at":"2026-05-20"}'
+    return '{"sheets":[{"name":"数据清单","columns":["记录名","地址","指标值","中文说明","说明依据"]}],"generated_at":"2026-05-20"}'
 
 
 # LLM: _valid_workbook_source_json returns minimal builder-compatible staged data.
 # 函数用途: 提供两张 sheet 和必要列，供 data_to_workbook 生成可验收 xlsx。
 def _valid_workbook_source_json() -> str:
     return (
-        '{"sheets":[{"name":"周榜单","columns":["项目名","地址","上升 star 数","中文解释","推荐理由"],'
-        '"rows":[{"项目名":"demo-1","地址":"https://example.com/1","上升 star 数":120,"中文解释":"说明1","推荐理由":"理由1"}]},'
-        '{"name":"汇总","columns":["项目名","地址","上升 star 数","中文解释","推荐理由"],'
-        '"rows":[{"项目名":"demo-2","地址":"https://example.com/2","上升 star 数":110,"中文解释":"说明2","推荐理由":"理由2"}]}]}'
+        '{"sheets":[{"name":"数据清单","columns":["记录名","地址","指标值","中文说明","说明依据"],'
+        '"rows":[{"记录名":"demo-1","地址":"https://example.com/1","指标值":120,"中文说明":"说明1","说明依据":"理由1"}]},'
+        '{"name":"汇总","columns":["记录名","地址","指标值","中文说明","说明依据"],'
+        '"rows":[{"记录名":"demo-2","地址":"https://example.com/2","指标值":110,"中文说明":"说明2","说明依据":"理由2"}]}]}'
     )

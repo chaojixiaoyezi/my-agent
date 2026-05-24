@@ -348,7 +348,7 @@ def _hierarchical_schedule_tool_call_response(backend: str) -> ModelResponse:
             '"children":[{'
             '"role":"child_coordinator",'
             '"agent_name":"child-catalog",'
-            '"goal":"作为主节点的下一层，继续拆分目录和商品列表实现任务",'
+            '"goal":"作为主节点的下一层，继续拆分目录和条目列表实现任务",'
             '"allowed_tools":["schedule_child_subagents","dispatch_subagents","subagent_board","read_file","write_file"],'
             '"acceptance_checks":["必须只通过父节点汇报 refs 和状态"]'
             "}]"

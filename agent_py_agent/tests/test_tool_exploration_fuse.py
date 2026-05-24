@@ -28,6 +28,20 @@ def test_exploration_fuse_redirects_after_repeated_read_only_calls(tmp_path: Pat
     assert "write_file" in context
 
 
+# LLM: zero exploration fuse threshold disables the count cap while still recording exploration facts.
+# 函数用途: 验证探索熔断阈值为 0 时表示不限制轮数，不会把普通长研究任务卡死。
+def test_exploration_fuse_zero_threshold_is_unlimited(tmp_path: Path, monkeypatch):
+    from agent_py_agent.agent.agent_core import tool_exploration_fuse
+
+    monkeypatch.setattr(tool_exploration_fuse, "_EXPLORATION_ROUND_THRESHOLD", 0)
+    agent = SimpleNamespace(root=tmp_path)
+    calls = [{"tool": "fetch_url", "url": "https://example.test/data.json"}]
+
+    for _ in range(12):
+        assert tool_exploration_fuse.has_required_exploration_fuse(agent, calls) is False
+    assert tool_exploration_fuse.has_pending_exploration_fuse(agent) is False
+
+
 # LLM: durable local progress clears exploration debt so a long task can continue normally.
 # 函数用途: 验证写文件、分块写入或构建类工具调用会重置只读探索计数。
 def test_exploration_fuse_resets_when_local_progress_happens(tmp_path: Path):

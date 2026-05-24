@@ -251,8 +251,16 @@ def _strategy_request(agent, task, all_tasks: list | None = None) -> SubagentRec
         task=task,
         all_tasks=list(all_tasks or []),
         packet_max_age_seconds=float(getattr(config, "subagent_recovery_packet_max_age_seconds", 0.0) or 0.0),
-        no_progress_attempt_limit=int(getattr(config, "subagent_no_progress_attempt_limit", 4) or 4),
+        no_progress_attempt_limit=_no_progress_attempt_limit(config),
     )
+
+
+def _no_progress_attempt_limit(config: object) -> int:
+    value = getattr(config, "subagent_no_progress_attempt_limit", 4)
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 4
 
 
 # LLM: _action_counts summarizes batch recovery decisions without long per-run prose.

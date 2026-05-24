@@ -90,11 +90,11 @@ def test_output_path_ref_is_parameter_fact_not_goal_fact(tmp_path):
         task_dir=str(run_dir),
         allowed_write_roots=[str(workspace)],
         context_manifest={},
-        attributes={"output_files": ["lab_outputs/furniture-home/index.html"]},
+        attributes={"output_files": ["lab_outputs/site-output/index.html"]},
     )
 
     assert params_input_refs({"goal": "required_read_paths: should-not-count.md"}) == []
-    assert params_output_refs({"output_files": ["lab_outputs/furniture-home/index.html"]}) == [
-        "lab_outputs/furniture-home/index.html"
+    assert params_output_refs({"output_files": ["lab_outputs/site-output/index.html"]}) == [
+        "lab_outputs/site-output/index.html"
     ]
     assert missing_input_dependencies(task) == []

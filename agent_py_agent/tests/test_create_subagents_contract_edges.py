@@ -45,7 +45,7 @@ def test_items_mode_preserves_absolute_path_dependencies():
                 "output_refs": [f"{root}/data/subagents/data_collection.md"],
             },
             {
-                "goal": f"读取 {root}/data/subagents/data_collection.md，写中文解释。",
+                "goal": f"读取 {root}/data/subagents/data_collection.md，写中文说明。",
                 "agent_name": "小傻妞-内容编写",
                 "input_refs": [f"{root}/data/subagents/data_collection.md"],
             },
@@ -69,7 +69,7 @@ def test_researcher_preset_gets_web_tools_by_default():
     result = CreateSubagentsTool(mock_agent).execute({
         "items": [
             {
-                "goal": "查 GitHub 项目并用 fetch_url 验证页面可访问。",
+                "goal": "查 代码平台 项目并用 fetch_url 验证页面可访问。",
                 "agent_name": "小傻妞-数据收集",
                 "role": "researcher",
                 "tool_preset": "researcher",

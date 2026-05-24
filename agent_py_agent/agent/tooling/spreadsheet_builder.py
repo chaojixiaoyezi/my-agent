@@ -30,11 +30,11 @@ class DataWorkbookTool(FileSystemTool):
             requires_idempotency=True,
             description="把结构化 JSON 数据或 sheets 参数生成 xlsx 工作簿。",
             use_cases=[
-                "已经有 rows/source_data.json，需要稳定生成 Excel/xlsx",
-                "资料整理、榜单、统计结果要交付 workbook，避免临时写大脚本",
+                "已经有 rows/sheets 结构化数据，需要稳定生成 Excel/xlsx",
+                "资料整理、列表、统计结果要交付 workbook，避免临时写大脚本",
             ],
             avoid_when=[
-                "还没有结构化行数据时，先收集数据并写 source_data.json",
+                "还没有结构化行数据时，先收集数据并写入机器可读 JSON",
             ],
             keywords=[
                 "xlsx",
@@ -44,7 +44,7 @@ class DataWorkbookTool(FileSystemTool):
                 "表格",
                 "数据整理",
                 "生成工作簿",
-                "source_data",
+                "结构化数据",
             ],
             parameters={
                 "path": "要写出的 xlsx 路径",
@@ -59,8 +59,8 @@ class DataWorkbookTool(FileSystemTool):
                 "default_sheet_name": "没有 sheet 名时使用，默认 Sheet1。",
             },
             examples=[
-                '{"tool": "data_to_workbook", "source_json_path": "outputs/report/source_data.json", "path": "outputs/report/report.xlsx"}',
-                '{"tool": "data_to_workbook", "path": "out.xlsx", "sheets": [{"name": "Summary", "rows": [{"项目": "demo"}]}]}',
+                '{"tool": "data_to_workbook", "source_json_path": "outputs/report/data.json", "path": "outputs/report/report.xlsx"}',
+                '{"tool": "data_to_workbook", "path": "out.xlsx", "sheets": [{"name": "Summary", "rows": [{"字段A": "demo"}]}]}',
             ],
         )
 

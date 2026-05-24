@@ -319,7 +319,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         category="artifact",
         retryable=True,
         recommended_action="write_or_fix_structured_source_data",
-        recovery_hint="表格源数据缺失；先写 source_data.json 或直接传 sheets，再重新生成 workbook。",
+        recovery_hint="表格源数据缺失；写出任意声明的机器可读 JSON，或直接传 sheets，再重新生成 workbook。",
     ),
     "SPREADSHEET_SOURCE_INVALID": ErrorContract(
         code="SPREADSHEET_SOURCE_INVALID",

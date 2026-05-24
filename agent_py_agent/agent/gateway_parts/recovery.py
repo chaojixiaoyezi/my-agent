@@ -80,7 +80,7 @@ def recover_gateway_processing_requests(
     _ensure_recovery_dirs(paths)
     summary = {"requeued": 0, "failed": 0, "checked": 0, "archived": 0}
     now = time.time()
-    max_attempts = max(1, int(max_attempts or 1))
+    max_attempts = _non_negative_int(max_attempts, default=1)
     timeout_seconds = max(1, int(timeout_seconds or 1))
     context = params or _RecoveryContext(now, max_attempts, timeout_seconds, startup, agent, lease_stale_seconds)
     for request_path in sorted(paths.processing.glob("*.json")):
@@ -112,7 +112,7 @@ def _recover_one_processing_request(
     if not _processing_request_stale(payload, request_path, context):
         return ""
     attempts = _gateway_request_attempts(payload)
-    if attempts >= context.max_attempts:
+    if context.max_attempts > 0 and attempts >= context.max_attempts:
         return _fail_stale_processing(
             {
                 "paths": paths,
@@ -124,6 +124,13 @@ def _recover_one_processing_request(
             }
         )
     return _requeue_stale_processing(paths, request_path, payload, context)
+
+
+def _non_negative_int(value: object, *, default: int) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
 
 
 # LLM: _archive_completed_processing 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。

@@ -139,7 +139,7 @@ def test_runner_prompt_tells_root_not_to_request_capability():
     context = SubAgentExecutionContext(
         run_id="root-1",
         generated_at=1.0,
-        goal="协调购物网站开发",
+        goal="协调示例网站开发",
         thought="",
         plan=[],
         role="coordinator",
@@ -209,7 +209,7 @@ def test_runner_prompt_includes_task_local_compact_continuation_refs(tmp_path: P
     assert "latest_continue_packet.json" in prompt
     assert "continue checkout tests" in prompt
     assert "继续补齐 checkout tests" in prompt
-    assert "已完成商品列表" in prompt
+    assert "已完成条目列表" in prompt
     assert "SOUL.md" not in prompt
     assert "USER.md" not in prompt
 
@@ -221,7 +221,7 @@ def _compact_continuation_context(tmp_path: Path) -> SubAgentExecutionContext:
     context = SubAgentExecutionContext(
         run_id="leaf-compact",
         generated_at=1.0,
-        goal="继续购物网站子任务",
+        goal="继续示例网站子任务",
         thought="",
         plan=["从 checkpoint 接续"],
         role="leaf_worker",
@@ -250,12 +250,12 @@ def _prepare_compact_continuation_workspace(tmp_path: Path) -> tuple[Path, Path]
     compactions = run_workspace / "compactions"
     session_compactions = compactions / "session"
     session_compactions.mkdir(parents=True)
-    (run_workspace / "task.md").write_text("实现购物车结算按钮\n", encoding="utf-8")
+    (run_workspace / "task.md").write_text("实现流程状态结算按钮\n", encoding="utf-8")
     (run_workspace / "checkpoint.json").write_text(
         json.dumps({"current_step": "继续补齐 checkout tests", "next_action": "write tests"}),
         encoding="utf-8",
     )
-    (run_workspace / "summary.md").write_text("已完成商品列表，剩余购物车验收。\n", encoding="utf-8")
+    (run_workspace / "summary.md").write_text("已完成条目列表，剩余流程状态验收。\n", encoding="utf-8")
     (run_workspace / "final_report.md").write_text("还没有最终验收。\n", encoding="utf-8")
     (run_workspace / "findings.jsonl").write_text('{"claim":"cart missing tests"}\n', encoding="utf-8")
     (run_workspace / "timeline.jsonl").write_text('{"event":"checkpoint_written"}\n', encoding="utf-8")

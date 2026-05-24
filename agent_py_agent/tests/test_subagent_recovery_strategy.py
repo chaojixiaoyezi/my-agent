@@ -20,14 +20,14 @@ from agent_py_agent.agent.subagents.services.recovery_strategy import (
 def _saved_task(tmp_path: Path, *, status: str = "BLOCKED"):
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(
-        goal="继续购物网站 checkout 任务",
+        goal="继续示例网站 checkout 任务",
         thought="需要从本地恢复包接着做。",
         plan=["读恢复包", "继续实现"],
         role="leaf_worker",
     )
     task.status = status
     task.current_step = "继续补 checkout QA 证据"
-    task.latest_summary = "商品页已完成，checkout QA 还没结束。"
+    task.latest_summary = "条目页已完成，checkout QA 还没结束。"
     manager.save(task)
     return manager, manager.load(task.id)
 
@@ -114,7 +114,7 @@ def test_recovery_strategy_suggests_takeover_for_dead_worker(tmp_path: Path) -> 
 def test_recovery_strategy_suggests_leadership_recovery_for_failed_coordinator(tmp_path: Path) -> None:
     manager = SubAgentManager(tmp_path)
     coordinator = manager.create_run(
-        goal="协调购物网站实现",
+        goal="协调示例网站实现",
         thought="拆给 leaf。",
         plan=["派工"],
         role="coordinator",
@@ -123,7 +123,7 @@ def test_recovery_strategy_suggests_leadership_recovery_for_failed_coordinator(t
         params=HierarchyScheduleRequest(
             parent_run_id=coordinator.id,
             apply=True,
-            child_specs=[HierarchyChildSpec(goal="写商品列表", role="worker", agent_name="小小傻妞-catalog")],
+            child_specs=[HierarchyChildSpec(goal="写条目列表", role="worker", agent_name="小小傻妞-catalog")],
         )
     )
     coordinator = manager.load(coordinator.id)

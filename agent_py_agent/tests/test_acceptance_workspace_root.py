@@ -32,7 +32,7 @@ def _write_static_page(path: Path) -> None:
 def test_acceptance_tests_use_workspace_root_containing_artifact(tmp_path: Path):
     primary = tmp_path / "repo-root"
     secondary = tmp_path / "user-workspace"
-    artifact = secondary / "deliverables" / "furniture-home" / "index.html"
+    artifact = secondary / "deliverables" / "site-output" / "index.html"
     _write_static_page(artifact)
     agent = _agent_with_workspace_roots(primary, secondary)
     task = _acceptance_task_with_artifact(agent, artifact)

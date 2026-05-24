@@ -271,7 +271,7 @@ def test_subagent_runner_can_schedule_children_from_current_node_context():
         backend = HierarchicalScheduleSubagentBackend()
         agent.backend = backend
         task = agent.subagents.create_run(
-            goal="主节点统筹购物站点真实 E2E 测试",
+            goal="主节点统筹示例站点真实 E2E 测试",
             thought="只创建下一层，不直接碰叶子节点。",
             plan=["创建下一层 coordinator", "等待父级观察日志", "汇报 refs"],
             agent_name="main-node",

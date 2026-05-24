@@ -48,20 +48,20 @@ def has_required_exploration_fuse(agent: object, calls: list[dict[str, object]] 
         return False
     count = int(state.get("exploration_rounds_without_local_progress") or 0) + 1
     _write_state(agent, {"exploration_rounds_without_local_progress": count})
-    return count >= _EXPLORATION_ROUND_THRESHOLD
+    return _EXPLORATION_ROUND_THRESHOLD > 0 and count >= _EXPLORATION_ROUND_THRESHOLD
 
 
 # LLM: has_pending_exploration_fuse keeps final prose from bypassing a materialization redirect.
 # 函数用途: 读取结构化探索轮次；达到阈值后，无工具回复也必须先落地本地进展。
 def has_pending_exploration_fuse(agent: object) -> bool:
     state = _load_state(agent)
-    return int(state.get("exploration_rounds_without_local_progress") or 0) >= _EXPLORATION_ROUND_THRESHOLD
+    return _EXPLORATION_ROUND_THRESHOLD > 0 and int(state.get("exploration_rounds_without_local_progress") or 0) >= _EXPLORATION_ROUND_THRESHOLD
 
 
 # LLM: exploration_fuse_context tells the model to materialize local progress before further exploration.
 # 函数用途: 输出结构化空转事实和下一步机器动作建议，不读取用户自然语言作为事实。
 def exploration_fuse_context(agent: object, redirects: int) -> str:
-    if redirects >= _MAX_REDIRECTS:
+    if _MAX_REDIRECTS > 0 and redirects >= _MAX_REDIRECTS:
         return ""
     state = _load_state(agent)
     envelope = {
@@ -73,8 +73,8 @@ def exploration_fuse_context(agent: object, redirects: int) -> str:
         [
             "[tool-system exploration-fuse]",
             json.dumps(envelope, ensure_ascii=False, sort_keys=True),
-            "你已经连续多轮只做抓取/读取/搜索，没有新的本地交付推进。下一轮必须先写出本地 checkpoint、"
-            "草稿、脚本、数据文件或阶段产物，再继续远程抓取；不要继续只 fetch/read/search。",
+            "你已经连续多轮只做抓取/读取/搜索，没有新的本地交付推进。请先写出本地 checkpoint、"
+            "草稿、脚本、数据文件或阶段产物；如果还要继续远程抓取，也要同步留下本地进展。",
         ]
     )
 

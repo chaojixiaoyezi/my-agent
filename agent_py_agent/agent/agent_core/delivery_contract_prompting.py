@@ -95,7 +95,7 @@ def _bootstrap_guidance_lines(contract: dict[str, object]) -> list[str]:
         return []
     lines = ["开工顺序："]
     if targets:
-        lines.append("- 前两轮至少让下面这些结构化目标中的一个真实出现，不要连续两轮只做目录查看。")
+        lines.append("- 建议尽早让下面这些结构化目标中的一个真实出现，避免长期只做目录查看。")
         lines.extend(f"  - {target}" for target in targets[:6])
         lines.append("- 阶段目标允许先写最小有效骨架，但 JSON checkpoint 必须是可验收的非空结构，不能只写空数组或空对象。")
     if actions:
@@ -110,8 +110,8 @@ def _artifact_guidance_lines(contract: dict[str, object]) -> list[str]:
     lines = ["执行要求："]
     for artifact in _artifact_items(contract):
         lines.extend(_one_artifact_lines(artifact))
-    lines.append("- 如果 required artifact 还不存在，前两轮优先对该 artifact 的目标路径动手：创建目录、开始写入或补齐阶段产物。")
-    lines.append("- 不要把前两轮都花在只读检查上；先让 required artifact 或阶段产物出现，再继续精修。")
+    lines.append("- 如果 required artifact 还不存在，优先对该 artifact 的目标路径动手：创建目录、开始写入或补齐阶段产物。")
+    lines.append("- 可以继续必要的检索，但应同步留下本地草稿、数据或阶段产物，避免只读检查长期空转。")
     lines.append("如果内容较长，使用 file_write_session 分块写入，并在最终答复前 finish。")
     return lines
 
@@ -246,7 +246,7 @@ def _staging_lines(contract: dict[str, object]) -> list[str]:
     source_ref = _staging_source_ref(staging)
     output_ref = _staging_output_ref(staging)
     if source_ref and output_ref and builder_tool:
-        source_param = _builder_source_param(builder_tool)
+        source_param = _builder_source_param(staging, builder_tool)
         lines.append(f"- 阶段输入就绪后优先调用 {builder_tool}: {source_param}={source_ref}, path={output_ref}")
         if source_ref.lower().endswith(".json"):
             lines.append("- JSON checkpoint 优先用 write_structured_json 写入 rows/sheets/data；不要手写大型 JSON 字符串。")
@@ -260,7 +260,11 @@ def _staging_lines(contract: dict[str, object]) -> list[str]:
 
 # LLM: _builder_source_param maps builder tools to their structured source parameter names.
 # 函数用途: 渲染工具调用提示时使用工具 schema 参数名，而不是固定 source_json_path。
-def _builder_source_param(builder_tool: str) -> str:
+def _builder_source_param(staging: dict[str, object], builder_tool: str) -> str:
+    for key in ("source_param", "source_param_name", "input_param"):
+        value = str(staging.get(key) or "").strip()
+        if value:
+            return value
     if builder_tool == "markdown_to_pdf":
         return "source_markdown_path"
     if builder_tool == "data_to_workbook":
@@ -271,7 +275,17 @@ def _builder_source_param(builder_tool: str) -> str:
 # LLM: _staging_source_ref reads all supported staged source aliases.
 # 函数用途: 同时支持 JSON、Markdown 和未来通用 source_ref。
 def _staging_source_ref(staging: dict[str, object]) -> str:
-    for key in ("source_json_ref", "source_markdown_ref", "source_ref"):
+    keys = [
+        str(staging.get("source_ref_key") or "").strip(),
+        str(staging.get("input_ref_key") or "").strip(),
+        "source_json_ref",
+        "source_markdown_ref",
+        "source_ref",
+        "input_ref",
+    ]
+    for key in keys:
+        if not key:
+            continue
         if value := str(staging.get(key) or "").strip():
             return value
     return ""
@@ -280,7 +294,16 @@ def _staging_source_ref(staging: dict[str, object]) -> str:
 # LLM: _staging_output_ref reads all supported staged output aliases.
 # 函数用途: 同时支持 workbook、PDF 和未来通用 output_ref。
 def _staging_output_ref(staging: dict[str, object]) -> str:
-    for key in ("workbook_ref", "pdf_ref", "output_ref"):
+    keys = [
+        str(staging.get("output_ref_key") or "").strip(),
+        "workbook_ref",
+        "pdf_ref",
+        "output_ref",
+        "artifact_ref",
+    ]
+    for key in keys:
+        if not key:
+            continue
         if value := str(staging.get(key) or "").strip():
             return value
     return ""

@@ -185,7 +185,7 @@ def _deep_merge_dicts(base: dict[str, object], authoritative: dict[str, object])
 
 
 # LLM: Source checkpoints may be declared by collection contracts or as JSON staging refs.
-# 函数用途: 让 source_index.json 这类前置证据文件和 source_data.json 用同一个来源绑定门。
+# 函数用途: 让前置证据 JSON 和阶段数据 JSON 用同一个来源绑定门。
 def _matches_source_checkpoint(path: str, validation: dict[str, object]) -> bool:
     return any(_same_path_ref(path, ref) for ref in _source_checkpoint_refs(validation))
 

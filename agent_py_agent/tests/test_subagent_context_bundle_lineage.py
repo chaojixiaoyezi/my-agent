@@ -43,7 +43,7 @@ def test_context_bundle_records_multilevel_lineage_refs(tmp_path) -> None:
 
 def _create_context_bundle_hierarchy(manager: SubAgentManager):
     root = manager.create_run(
-        goal="根代理拆购物网站任务",
+        goal="根代理拆示例网站任务",
         thought="负责拆分和汇总。",
         plan=["拆任务", "看状态"],
         acceptance_checks=["所有子树有交接包"],

@@ -53,7 +53,7 @@ def test_external_write_guard_suggests_workspace_typo_retry():
 
 
 # LLM: URL image sources are content references, not write targets.
-# 函数用途: 验证商品图片 URL 不会被派工写入预检误切成 `s://...` 并阻断 child 创建。
+# 函数用途: 验证条目图片 URL 不会被派工写入预检误切成 `s://...` 并阻断 child 创建。
 def test_external_write_guard_ignores_url_image_sources(tmp_path):
     workspace_root = tmp_path / "my-claude-code"
     mock_agent = MagicMock()

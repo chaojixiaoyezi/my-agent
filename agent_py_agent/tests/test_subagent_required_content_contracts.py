@@ -79,7 +79,7 @@ def test_prepare_test_items_infers_content_checks_for_mapped_file_artifacts(tmp_
     report_dir.mkdir(parents=True)
     report = report_dir / "report.md"
     data = report_dir / "orders.csv"
-    report.write_text("# 订单报告\n", encoding="utf-8")
+    report.write_text("# 记录报告\n", encoding="utf-8")
     data.write_text("order_id,total\nA-1001,299.00\n", encoding="utf-8")
 
     prepared = prepare_test_items(
@@ -88,7 +88,7 @@ def test_prepare_test_items_infers_content_checks_for_mapped_file_artifacts(tmp_
             output={"artifacts": [{"path": str(report)}, {"path": str(data)}]},
             workspace_root=tmp_path,
             required_content_files={
-                "report.md": ["# 订单报告"],
+                "report.md": ["# 记录报告"],
                 "orders.csv": ["order_id,total", "A-1001,299.00"],
             },
         )
@@ -99,7 +99,7 @@ def test_prepare_test_items_infers_content_checks_for_mapped_file_artifacts(tmp_
             "name": "inferred content check report.md 1",
             "validation_method": "content_check",
             "file_path": "deliverables/order-pack/report.md",
-            "content_pattern": "# 订单报告",
+            "content_pattern": "# 记录报告",
         },
         {
             "name": "inferred content check orders.csv 1",
@@ -170,12 +170,12 @@ def test_required_content_lines_ignores_natural_fenced_expected_block():
 def test_required_content_lines_by_file_from_structured_text():
     mapping = required_content_lines_by_file_from_texts([
         "required_content_lines[orders.csv]: order_id,total | A-1001,299.00",
-        "required_content_lines[report.md]: # 订单报告 | - 已核对",
+        "required_content_lines[report.md]: # 记录报告 | - 已核对",
     ])
 
     assert mapping == {
         "orders.csv": ["order_id,total", "A-1001,299.00"],
-        "report.md": ["# 订单报告", "- 已核对"],
+        "report.md": ["# 记录报告", "- 已核对"],
     }
 
 
@@ -188,12 +188,12 @@ def test_required_content_for_task_ignores_text_fields_and_reads_attributes():
         acceptance_checks=["required_content_lines: should-not-count"],
         attributes={
             "required_content_lines": ["order_id,total", "A-1001,299.00"],
-            "required_content_files": {"report.md": ["# 订单报告"]},
+            "required_content_files": {"report.md": ["# 记录报告"]},
         },
     )
 
     assert required_content_lines_for_task(task) == ["order_id,total", "A-1001,299.00"]
-    assert required_content_lines_by_file_for_task(task) == {"report.md": ["# 订单报告"]}
+    assert required_content_lines_by_file_for_task(task) == {"report.md": ["# 记录报告"]}
 
 
 # LLM: text-only task fields are no longer machine facts for content acceptance.
@@ -217,7 +217,7 @@ def test_create_run_persists_required_content_attributes(tmp_path):
 
     manager = SubAgentManager(tmp_path / "subs")
     task = manager.create_run(
-        goal="写订单报表",
+        goal="写记录报表",
         thought="普通说明不承载机器验收事实。",
         plan=["write"],
         attributes={

@@ -63,10 +63,27 @@ def _staging_progress_paths(workspace_root: Path, staging: object) -> list[Path]
     paths = _resolved_contract_paths(
         workspace_root,
         staging,
-        ("source_json_ref", "workbook_ref", "pdf_ref", "output_ref"),
+        _staging_ref_keys(staging),
     )
     paths.extend(_checkpoint_progress_paths(workspace_root, staging.get("checkpoint_refs")))
     return paths
+
+
+def _staging_ref_keys(staging: dict[str, Any]) -> tuple[str, ...]:
+    keys = [
+        str(staging.get("source_ref_key") or "").strip(),
+        str(staging.get("input_ref_key") or "").strip(),
+        str(staging.get("output_ref_key") or "").strip(),
+        "source_json_ref",
+        "source_markdown_ref",
+        "source_ref",
+        "input_ref",
+        "workbook_ref",
+        "pdf_ref",
+        "output_ref",
+        "artifact_ref",
+    ]
+    return tuple(dict.fromkeys(key for key in keys if key))
 
 
 # LLM: _checkpoint_progress_paths normalizes checkpoint refs without adding nested control flow.
