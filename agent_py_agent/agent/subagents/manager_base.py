@@ -261,7 +261,7 @@ def _normalize_debug_trace_level(value: object) -> int:
     return max(0, min(5, level))
 
 
-from .services.persistence import (
+from .services.persistence_model_normalizers import (
     _field_names,
     _list_value,
     _normalize_context_manifest,

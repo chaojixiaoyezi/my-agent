@@ -217,10 +217,11 @@ def test_subagent_save_projects_status_into_control_plane(tmp_path) -> None:
 
     manager.save(child)
 
-    projected = store.get_agent_run(child.id)
-    tree = store.list_agent_tree(parent.root_id)
-    rollup = store.get_task_rollup(parent.root_id)
+    _assert_child_control_projection(store.get_agent_run(child.id), parent, child)
+    _assert_child_rollup_projection(store, parent.root_id, child.id)
 
+
+def _assert_child_control_projection(projected, parent, child) -> None:
     assert projected is not None
     assert projected.run_id == child.id
     assert projected.parent_run_id == parent.id
@@ -231,13 +232,17 @@ def test_subagent_save_projects_status_into_control_plane(tmp_path) -> None:
     assert projected.latest_summary == "子代理已阻塞，等待证据。"
     assert projected.metadata["system_tree"]["updated_by"] == "system"
     assert projected.metadata["system_tree"]["parent_id"] == parent.id
-    workspace_path = projected.workspace_path.replace("\\", "/")
-    assert workspace_path.endswith(f"tasks/{parent.root_id}/agents/{child.id}")
+    assert projected.workspace_path.replace("\\", "/").endswith(f"tasks/{parent.root_id}/agents/{child.id}")
     assert projected.checkpoint_ref.endswith("checkpoint.json")
+
+
+def _assert_child_rollup_projection(store: LocalStore, root_id: str, child_id: str) -> None:
+    tree = store.list_agent_tree(root_id)
+    rollup = store.get_task_rollup(root_id)
     assert rollup is not None
     assert rollup.blocked_agents == 1
     assert rollup.running_agents == 0
-    assert child.id in [item.run_id for item in tree.runs]
+    assert child_id in [item.run_id for item in tree.runs]
 
 
 # LLM: Regression for multi-level agent trees where stale parent snapshots are saved after child creation.

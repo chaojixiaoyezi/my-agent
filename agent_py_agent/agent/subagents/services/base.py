@@ -206,7 +206,7 @@ class SubAgentBaseService:
         from ..models import SubAgentTask
         from ..services.inheritance_manifest import build_inheritance_manifest
         from ..services.output_ref_rebinding import rebind_task_output_refs_to_run
-        from ..services.persistence import (
+        from ..services.persistence_model_normalizers import (
             _normalize_context_manifest,
             _normalize_context_packs,
             _normalize_quality_contract,

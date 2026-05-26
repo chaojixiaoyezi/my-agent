@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, fields
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -21,11 +21,6 @@ from ..models import (
     CapabilityGrant,
     CapabilityRequest,
     ChannelProbeCheck,
-    ContextManifest,
-    EvidencePacket,
-    Finding,
-    QualityContract,
-    StatusReport,
     SubAgentTask,
     TakeoverRecord,
     VerificationEvidence,
@@ -37,154 +32,21 @@ from .failure_handoff import refresh_failure_handoff
 from .persistence_failure_handoff import normalize_failure_handoff, write_failure_handoff
 from .persistence_identity import normalize_runtime_identity
 from .persistence_inheritance import normalize_inheritance_manifest, write_inheritance_manifest
+from .persistence_model_normalizers import (
+    _field_names,
+    _normalize_context_manifest,
+    _normalize_context_packs,
+    _normalize_evidence_packet,
+    _normalize_finding,
+    _normalize_nested_model,
+    _normalize_quality_contract,
+    _normalize_status_report,
+)
 from .persistence_recovery_outputs import write_recovery_output_files
 from .persistence_rendering import render_thought_markdown
 from .persistence_security import normalize_security_signal
 from .persistence_status_report import build_status_report
 from .task_workspace_adapter import sync_task_workspace_fields
-
-
-# LLM: _field_names 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 处理字段names相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
-def _field_names(model: type) -> set[str]:
-    return {item.name for item in fields(model)}
-
-
-# LLM: _normalize_nested_model keeps persisted child records tolerant of reserved/future keys.
-# 函数用途: 读取嵌套 dataclass 记录时只保留当前模型认识的字段，避免旧/新记录互相卡死。
-def _normalize_nested_model(model: type, item: dict[str, object]):
-    payload = {key: item[key] for key in _field_names(model) if key in item}
-    return model(**payload)
-
-
-# LLM: _list_value 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 读取或查询value需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
-def _list_value(value: object) -> list[object]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return value
-    if isinstance(value, tuple):
-        return list(value)
-    return [value]
-
-
-# LLM: _string_list_value 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 处理stringlistvalue相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
-def _string_list_value(value: object) -> list[str]:
-    return [str(item) for item in _list_value(value) if item not in (None, "")]
-
-
-# LLM: _normalize_quality_contract 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 解析并归一化qualitycontract的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
-def _normalize_quality_contract(value: object) -> QualityContract:
-    if isinstance(value, QualityContract):
-        return value
-    if not isinstance(value, dict):
-        return QualityContract()
-    payload = {key: value[key] for key in _field_names(QualityContract) if key in value}
-    for key in [
-        "failure_conditions",
-        "forbidden_delivery",
-        "must_check",
-        "sampling_plan",
-        "evidence_required",
-        "allowed_degradation",
-    ]:
-        payload[key] = _string_list_value(payload.get(key))
-    return QualityContract(**payload)
-
-
-# LLM: _normalize_context_manifest 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 解析并归一化上下文manifest的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
-def _normalize_context_manifest(value: object) -> ContextManifest:
-    if isinstance(value, ContextManifest):
-        return value
-    if not isinstance(value, dict):
-        return ContextManifest()
-    payload = {key: value[key] for key in _field_names(ContextManifest) if key in value}
-    # LLM: hint_read_paths is stored as a soft prompt hint and must not revive old input-dependency gates.
-    # 函数用途: 保存/读取 ContextManifest 时保留提示路径，但不参与候选过滤或启动阻断。
-    for key in ["task_pack_refs", "required_read_paths", "hint_read_paths", "omitted_context"]:
-        payload[key] = _string_list_value(payload.get(key))
-    try:
-        payload["token_budget"] = int(payload.get("token_budget") or 0)
-    except (TypeError, ValueError):
-        payload["token_budget"] = 0
-    return ContextManifest(**payload)
-
-
-# LLM: _normalize_context_packs 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 解析并归一化上下文packs的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
-def _normalize_context_packs(value: object) -> list[dict[str, object]]:
-    if isinstance(value, dict):
-        return [value]
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
-
-
-# LLM: _float_value 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 处理floatvalue相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
-def _float_value(value: object, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-# LLM: _dict_value 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 处理dictvalue相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
-def _dict_value(value: object) -> dict[str, object]:
-    return value if isinstance(value, dict) else {}
-
-
-# LLM: _normalize_evidence_packet 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 解析并归一化证据packet的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
-def _normalize_evidence_packet(value: object) -> EvidencePacket:
-    if isinstance(value, EvidencePacket):
-        return value
-    if not isinstance(value, dict):
-        return EvidencePacket()
-    payload = {key: value[key] for key in _field_names(EvidencePacket) if key in value}
-    for key in ["evidence_refs", "artifact_refs", "counter_evidence_refs", "unresolved_risks"]:
-        payload[key] = _string_list_value(payload.get(key))
-    payload["confidence"] = _float_value(payload.get("confidence"))
-    payload["created_at"] = _float_value(payload.get("created_at"))
-    return EvidencePacket(**payload)
-
-
-# LLM: _normalize_finding 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 解析并归一化finding的输入形态，让下游只处理稳定结构；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
-def _normalize_finding(value: object) -> Finding:
-    if isinstance(value, Finding):
-        return value
-    if not isinstance(value, dict):
-        return Finding()
-    payload = {key: value[key] for key in _field_names(Finding) if key in value}
-    for key in ["evidence_packet_ids", "evidence_refs", "counter_evidence_refs"]:
-        payload[key] = _string_list_value(payload.get(key))
-    payload["confidence"] = _float_value(payload.get("confidence"))
-    payload["created_at"] = _float_value(payload.get("created_at"))
-    return Finding(**payload)
-
-
-# LLM: _normalize_status_report 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 解析并归一化状态报告的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
-def _normalize_status_report(value: object) -> StatusReport:
-    if isinstance(value, StatusReport):
-        return value
-    if not isinstance(value, dict):
-        return StatusReport()
-    payload = {key: value[key] for key in _field_names(StatusReport) if key in value}
-    payload["version"] = int(_float_value(payload.get("version"), 0.0))
-    payload["progress"] = _float_value(payload.get("progress"))
-    payload["summary_delta"] = _dict_value(payload.get("summary_delta"))
-    payload["budget_used"] = _dict_value(payload.get("budget_used"))
-    for key in ["artifact_refs", "evidence_refs", "blockers"]:
-        payload[key] = _string_list_value(payload.get(key))
-    payload["updated_at"] = _float_value(payload.get("updated_at"))
-    return StatusReport(**payload)
 
 
 # LLM: SubAgentPersistenceService 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。

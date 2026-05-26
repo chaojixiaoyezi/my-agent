@@ -90,7 +90,7 @@ def _inherited_goal_context(
 ) -> str:
     lines = [
         "inherited_parent_context=true",
-        "继承父级收口，不代表当前子任务要执行父级全部目标）：",
+        "继承父级目标/边界（只作为背景，不代表当前子任务要执行父级全部目标）：",
         "当前子任务只执行上方 goal，不要展开父级其它 sibling 目标。",
     ]
     roots = _write_root_lines(parent, write_roots=write_roots)
