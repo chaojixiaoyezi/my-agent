@@ -163,7 +163,7 @@ def _subagent_result(summary: str) -> str:
         "[SUBAGENT_RESULT]\n"
         + json.dumps(
             {
-                "status": "AWAITING_ACCEPTANCE",
+                "status": "DONE",
                 "summary": summary,
                 "used_tools": ["schedule_child_subagents", "dispatch_subagents", "write_file"],
                 "used_skills": [],

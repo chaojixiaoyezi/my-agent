@@ -17,7 +17,7 @@ from .qa_role_contract import qa_role_identity_roles
 from .repair_contract_identity import repair_contract_identity_from_context_packs
 
 _IMPLEMENTATION_SCAN_MAX_NODES = 64
-_ACTIVE_DUPLICATE_STATUSES = {"PLANNING", "RUNNING", "BLOCKED", "AWAITING_ACCEPTANCE"}
+_ACTIVE_DUPLICATE_STATUSES = {"PLANNING", "RUNNING", "BLOCKED", "DONE"}
 
 
 # LLM: schedule_block_reason keeps only red-line dispatch guards; workflow shape is left to LLM/templates.
@@ -45,7 +45,7 @@ def qa_phase_block_reason(manager: Any, parent: SubAgentTask, request: Any) -> s
 
 
 # LLM: active_duplicate_child_reason prevents recovery loops from spawning endless same-purpose QA repairs.
-# 函数用途: 同父级已有活跃 QA/修复/验收类同名 child 时，阻断再次创建并提示复用或 takeover 现有 run。
+# 函数用途: 同父级收口类同名 child 时，阻断再次创建并提示复用或 takeover 现有 run。
 def active_duplicate_child_reason(manager: Any, parent: SubAgentTask, request: Any) -> str:
     for spec in request.child_specs:
         if not _is_recovery_quality_like(spec):
@@ -95,7 +95,7 @@ def _parent_has_product_root(parent: SubAgentTask) -> bool:
 
 
 # LLM: _is_qa_like checks explicit role/name identity, not broad inherited goal prose.
-# 函数用途: 判断 child spec 是否是 tester、bug_finder 或 acceptor 这类 QA 角色。
+# 函数用途: 判断 child spec 是否是 tester 或 bug_finder 这类 QA 角色。
 def _is_qa_like(item: Any) -> bool:
     return bool(qa_role_identity_roles(role=str(getattr(item, "role", "")), agent_name=str(getattr(item, "agent_name", ""))))
 
@@ -140,7 +140,7 @@ def _is_active_child(item: Any) -> bool:
 def _is_recovery_quality_like(item: Any) -> bool:
     role = _template_role_identity(item)
     return bool(
-        role in {"tester", "bug_finder", "acceptor"}
+        role in {"tester", "bug_finder"}
         or repair_contract_identity_from_context_packs(getattr(item, "context_packs", []))
         or _identity_is_repair_worker(item)
     )
@@ -190,11 +190,11 @@ def _ready_implementation_children(manager: Any, parent: SubAgentTask) -> list[A
 
 
 # LLM: _implementation_child_ready keeps QA creation behind an actual implementation checkpoint.
-# 函数用途: worker/leaf 至少等待验收或已完成时，QA 子任务才有真实产物/证据可检查。
+# 函数用途: worker/leaf 至少等待收口或已完成时，QA 子任务才有真实产物/证据可检查。
 def _implementation_child_ready(child: Any) -> bool:
     status = str(getattr(child, "status", "") or "").upper()
     verification = str(getattr(child, "verification_status", "") or "").upper()
-    return status in {"AWAITING_ACCEPTANCE", "DONE"} or verification in {"NEEDS_ACCEPTANCE", "VERIFIED"}
+    return status in {"DONE"} or verification in {"VERIFIED"}
 
 
 # LLM: _is_leaf_like detects implementation leaves from structured role/name ids.

@@ -6,7 +6,6 @@ from __future__ import annotations
 # LLM: structural run/ref/qa words are stopwords so generated checker children do not collide by parent refs.
 DOMAIN_STOPWORDS = {
     "agent",
-    "acceptor",
     "build",
     "child",
     "checker",
@@ -51,7 +50,6 @@ DOMAIN_STOPWORDS = {
 }
 
 COORDINATION_ROLE_TOKENS = {
-    "acceptor",
     "checker",
     "coordinator",
     "lead",

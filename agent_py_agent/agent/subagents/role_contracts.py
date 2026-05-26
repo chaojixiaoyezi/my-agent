@@ -30,8 +30,6 @@ ROLE_ALIASES = {
     "bug_finder": "bug_finder",
     "tester": "tester",
     "test": "tester",
-    "acceptor": "acceptor",
-    "acceptance": "acceptor",
     "coordinator": "coordinator",
     "worker": "worker",
     "researcher": "researcher",
@@ -39,7 +37,7 @@ ROLE_ALIASES = {
 }
 
 REPORTER_ACCEPTANCE_CHECK = "Reporter output must cite evidence_refs or artifact_refs for each user-visible claim."
-CHECKER_ACCEPTANCE_CHECK = "Checker must verify reporter evidence refs and cannot self-accept final work."
+CHECKER_ACCEPTANCE_CHECK = "Checker must verify reporter evidence refs and write concrete findings."
 
 
 # LLM: normalize_subagent_role is the single public role-name normalization helper.
@@ -52,7 +50,7 @@ def normalize_subagent_role(role: str) -> str:
 
 
 # LLM: apply_role_contract_to_create_params rewrites create-run bundles without changing call shape.
-# 函数用途: 在任务落盘前补齐角色名、角色模板默认工具、验收要求和父级验收质量门。
+# 函数用途: 在任务落盘前补齐角色名、角色模板默认工具、验收要求和最终收口质量门。
 def apply_role_contract_to_create_params(params: Any, role_template_dirs: object = None):
     original_role = str(getattr(params, "role", "") or "general")
     contract_role = normalize_subagent_role(original_role)
@@ -121,24 +119,15 @@ def _allowed_tools_for_role(
     return list(ROLE_BASE_TOOLS) if role else tools
 
 
-# LLM: _quality_contract_for_role hardens parent-final-gate fields for quality roles.
-# 函数用途: 让 reporter/checker/找茬/测试/验收等角色默认不能自验收，最终由父级门判断。
+# LLM: _quality_contract_for_role attaches broad quality defaults without creating a closeout.
+# 函数用途: 让 reporter/checker/找茬/测试等角色拿到通用质量字段，不再生成额外收口门。
 def _quality_contract_for_role(role: str, value: object, template: RoleTemplate | None) -> object:
     if role not in {REPORTER_ROLE, CHECKER_ROLE} and template is None:
         return value
     if isinstance(value, QualityContract):
-        value.cannot_self_accept = True
-        value.parent_final_gate = True
-        if role in {CHECKER_ROLE, "acceptor"}:
-            value.final_judge = "parent_final_gate"
         return value
     if isinstance(value, dict):
-        payload = dict(value)
-        payload["cannot_self_accept"] = True
-        payload["parent_final_gate"] = True
-        if role in {CHECKER_ROLE, "acceptor"}:
-            payload["final_judge"] = "parent_final_gate"
-        return payload
+        return dict(value)
     return QualityContract()
 
 

@@ -272,13 +272,12 @@ def _is_dispatch_runner_candidate(
     if task.status == "RUNNING":
         return False
     if task.status in {
-        "AWAITING_ACCEPTANCE",
         "DONE",
         "CHANNEL_ERROR",
         "TAKEN_OVER",
     }:
         return False
-    if task.verification_status in {"NEEDS_ACCEPTANCE", "VERIFIED"}:
+    if task.verification_status == "VERIFIED":
         return False
     if task.channel_status == "BROKEN":
         return False

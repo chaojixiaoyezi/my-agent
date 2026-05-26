@@ -19,7 +19,7 @@ def _accepted_result(summary: str) -> ModelResponse:
         text=(
             "[SUBAGENT_RESULT]\n"
             "{\n"
-            '  "status": "AWAITING_ACCEPTANCE",\n'
+            '  "status": "DONE",\n'
             f'  "summary": "{summary}",\n'
             '  "used_tools": [],\n'
             '  "used_skills": [],\n'
@@ -133,7 +133,7 @@ def test_dispatch_parallel_runner_pool_does_not_broadcast_specific_instruction(m
                 ok=True,
                 message="done",
                 status="DONE",
-                verification_status="NEEDS_ACCEPTANCE",
+                verification_status="VERIFIED",
             )
         )
 
@@ -179,7 +179,7 @@ def test_dispatch_single_runner_keeps_specific_instruction(monkeypatch, tmp_path
                 ok=True,
                 message="done",
                 status="DONE",
-                verification_status="NEEDS_ACCEPTANCE",
+                verification_status="VERIFIED",
             )
         )
 
@@ -228,7 +228,7 @@ def _capture_runner_ids(monkeypatch, agent, captured: list[str]) -> None:
                 ok=True,
                 message="should not run",
                 status="DONE",
-                verification_status="NEEDS_ACCEPTANCE",
+                verification_status="VERIFIED",
             )
         )
 
@@ -260,7 +260,7 @@ def test_dispatch_blocks_invalid_scoped_run_id_with_valid_child_hint(monkeypatch
             include_run_ids=[wrong_id],
             max_runners=1,
             probe=False,
-            finalize_acceptance=False,
+            finish_dispatch=False,
         ),
     )
 

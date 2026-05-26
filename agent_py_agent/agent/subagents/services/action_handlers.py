@@ -62,26 +62,13 @@ def apply_reopen_for_evidence(service, action, task, ctx: ActionHandlerContext):
     task.updated_at = ctx.now
     task.result = task.result or "缺少验收证据，等待补充 evidence 后再完成。"
     service.manager.save(task)
-    service._append_task_work_log(task, "action_apply reopen_for_evidence: 已重开任务并等待验收证据。")
+    service._append_task_work_log(task, "action_apply reopen_for_evidence: 已重开任务并等待收口证据。")
     return service._record_after_task_action(
         RecordAfterTaskActionParams(
             action, task, ctx.before_status, ctx.before_channel_status, "已把缺证据的 DONE 任务改为 BLOCKED。"
         )
     )
 
-
-# LLM: apply_run_acceptance 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 更新验收对应的任务或运行状态，并保留既有字段语义；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
-def apply_run_acceptance(service, action, task, ctx: ActionHandlerContext):
-    task.verification_status = "NEEDS_ACCEPTANCE"
-    task.updated_at = ctx.now
-    service.manager.save(task)
-    service._append_task_work_log(task, "action_apply run_acceptance: 已标记为需要验收。")
-    return service._record_after_task_action(
-        RecordAfterTaskActionParams(
-            action, task, ctx.before_status, ctx.before_channel_status, "已标记为需要验收，未自动执行未知命令。"
-        )
-    )
 
 
 # LLM: apply_stop_no_progress_and_escalate records a terminal retry fuse without changing ownership or spawning work.

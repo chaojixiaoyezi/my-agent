@@ -61,7 +61,7 @@ class ScenarioRealModelRecoveryBackend:
             )
         summary_preview = _scenario_summary_preview(self.real_response_text)
         payload = {
-            "status": "AWAITING_ACCEPTANCE",
+            "status": "DONE",
             "summary": f"Real model smoke test: {summary_preview}",
             "used_tools": ["read_file"],
             "used_skills": [],
@@ -133,11 +133,11 @@ def _real_model_recovery_setup(args):
 
     print_scenario_step(1, "Create a parent-owned subagent task")
     task = agent.subagents.create_run(
-        goal="real model recovery smoke test: read README and wait for parent acceptance",
+        goal="real model recovery smoke test: read README and wait for closeout",
         thought="verify real model API round-trip survives cross-day recovery.",
         plan=["runner reads README.md via real model", "write structured result", "simulate cross-day", "memory-resume recovers task fact sources"],
         allowed_tools=["read_file"],
-        acceptance_checks=["must have read_file evidence", "recovery must recommend task fact sources", "parent decides acceptance after recovery"],
+        acceptance_checks=["must have read_file evidence", "recovery must recommend task fact sources", "caller decides closeout after recovery"],
     )
     print(f"run_id={task.id}")
 
@@ -147,7 +147,7 @@ def _real_model_recovery_setup(args):
         dry_run=False,
         probe=False,
         instruction=(
-            "Real model recovery smoke test. Read README.md first, then output an AWAITING_ACCEPTANCE "
+            "Real model recovery smoke test. Read README.md first, then output an DONE "
             "[SUBAGENT_RESULT]. Do not mark DONE yourself."
         ),
     )
@@ -231,8 +231,8 @@ def _real_model_recovery_verify(ctx: _RealModelRecoveryVerifyContext) -> int:
     echo_signature = "这是 echo 后端的本地响应"
     final_ok = (
         ctx.runner.ok
-        and ctx.loaded.status == "AWAITING_ACCEPTANCE"
-        and ctx.loaded.verification_status == "NEEDS_ACCEPTANCE"
+        and ctx.loaded.status == "DONE"
+        and ctx.loaded.verification_status == "VERIFIED"
         and "read_file" in ctx.loaded.used_tools
         and ctx.backend.calls >= 2
         and bool(ctx.backend.real_response_text)
@@ -240,10 +240,10 @@ def _real_model_recovery_verify(ctx: _RealModelRecoveryVerifyContext) -> int:
         and ctx.resume_payload.get("ok") is True
         and ctx.archive_count >= 2
         and ctx.matching_task.get("exists") is True
-        and ctx.matching_task.get("status") == "AWAITING_ACCEPTANCE"
+        and ctx.matching_task.get("status") == "DONE"
         and all(path in ctx.recommended_reads for path in expected_reads)
         and ctx.task.id in ctx.context_block
-        and "AWAITING_ACCEPTANCE" in ctx.context_block
+        and "DONE" in ctx.context_block
     )
     write_scenario_summary(
         ctx.paths,

@@ -31,7 +31,11 @@ def delivery_quality_decision(
         return GateDecision.allow("delivery_quality", evidence={"declared": False})
     payload = load_delivery_quality_payload(contract, workspace_root)
     if payload is None:
-        return GateDecision.repair("delivery_quality", [GateFinding("DELIVERY_QUALITY_PAYLOAD_MISSING")])
+        return GateDecision.allow(
+            "delivery_quality",
+            recommended_action="record_quality_payload_when_available",
+            evidence={"declared": True, "warning_codes": ["DELIVERY_QUALITY_PAYLOAD_MISSING"]},
+        )
     payload.setdefault("artifacts", quality_artifact_records(report, contract_hash=contract_hash))
     decision = evaluate_delivery_quality_gate(payload, quality_contract, contract_hash=contract_hash)
     append_delivery_quality_gate_trace(
@@ -43,6 +47,16 @@ def delivery_quality_decision(
             contract_hash=contract_hash,
         ),
     )
+    if not decision.allowed and not _quality_enforcement_required(quality_contract):
+        return GateDecision.allow(
+            "delivery_quality",
+            recommended_action="review_quality_findings",
+            evidence={
+                "declared": True,
+                "warning_codes": list(decision.finding_codes),
+                "advisory_status": decision.status,
+            },
+        )
     return decision
 
 
@@ -91,6 +105,11 @@ def _merge_quality_contract(base: dict[str, Any], incoming: dict[str, Any]) -> d
     if metrics:
         merged["metric_contracts"] = metrics
     return merged
+
+
+def _quality_enforcement_required(contract: dict[str, Any]) -> bool:
+    value = str(contract.get("enforcement") or contract.get("mode") or "").strip().lower()
+    return value in {"required", "hard", "block", "blocking"}
 
 
 def _merge_evidence_contract(base: object, incoming: object) -> dict[str, Any]:

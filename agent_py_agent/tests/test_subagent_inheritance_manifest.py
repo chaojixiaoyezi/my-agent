@@ -15,7 +15,7 @@ def test_subagent_create_run_records_inheritance_manifest(tmp_path) -> None:
         role="coordinator",
         allowed_skills=["review", "debug"],
         allowed_tools=["read_file", "shell"],
-        acceptance_checks=["必须经过上级验收"],
+        acceptance_checks=["必须经过上级检查"],
         context_packs=[{"id": "parent-pack", "summary": "父级上下文包"}],
     )
 
@@ -46,7 +46,7 @@ def test_subagent_create_run_records_inheritance_manifest(tmp_path) -> None:
     assert manifest.dropped["allowed_tools"] == ["shell"]
     assert manifest.dropped["context_packs"][0]["id"] == "parent-pack"
     assert manifest.overridden["allowed_skills"]["added"] == ["child-only"]
-    assert manifest.overridden["acceptance_checks"]["parent"][0] == "必须经过上级验收"
+    assert manifest.overridden["acceptance_checks"]["parent"][0] == "必须经过上级检查"
     assert any("协调子代理" in item for item in manifest.overridden["acceptance_checks"]["parent"])
     assert manifest.overridden["acceptance_checks"]["child"][0] == "子任务需要附 evidence"
     assert any("执行子代理" in item for item in manifest.overridden["acceptance_checks"]["child"])

@@ -43,7 +43,7 @@ from .registry_list_tools import ListToolsTool
 from .registry_prompt import render_tool_catalog_section
 
 _allowed_tool_set = allowed_tool_set
-_DEFAULT_HIDDEN_TOOL_NAMES = frozenset({"controlled_exec"})
+_DEFAULT_HIDDEN_TOOL_NAMES = frozenset({"controlled_exec", "fetch_url"})
 
 
 # LLM: ToolRegistryParams 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。

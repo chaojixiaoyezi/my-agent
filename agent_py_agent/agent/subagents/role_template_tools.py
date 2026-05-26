@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-WEB_TOOLS = ["fetch_url", "http_request"]
+# LLM: Web roles use the four network tools; fetch_url remains a hidden compatibility alias only.
+WEB_TOOLS = ["web_search", "web_fetch", "web_extract", "http_request"]
 READ_ONLY_TOOLS = ["list_files", "read_file", "search_text", "read_artifact", *WEB_TOOLS]
 WORKER_READ_TOOLS = ["list_files", "read_file", "search_text", "read_artifact", *WEB_TOOLS]
 ARTIFACT_BUILDER_TOOLS: list[str] = []

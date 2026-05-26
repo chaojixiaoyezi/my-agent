@@ -15,7 +15,6 @@ from pathlib import Path
 from .models import SubAgentParsedOutput, SubAgentRunnerResult, SubAgentTask
 from .parsing import _dict_list
 from .policies import _status_from_structured_output, _verification_from_runner_status
-from .reports import AcceptanceReviewFinding
 from .result_contexts import OutputPayloadContext, RunnerResultContext
 from .result_debrief import _append_runner_debrief_content
 from .result_payloads import _build_output_payload
@@ -102,7 +101,6 @@ def _write_runner_result_files(
 
 
 __all__ = [
-    "AcceptanceReviewFinding",
     "OutputPayloadContext",
     "RunnerResultContext",
     "SubAgentParsedOutput",

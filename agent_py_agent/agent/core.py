@@ -217,6 +217,7 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
         enable_self_learning=agent.config.enable_self_learning,
         debug_trace_level=agent.config.subagent_debug_trace_level,
         takeover_chain_max_depth=agent.config.subagent_takeover_chain_max_depth,
+        closeout_for_all_task_nodes=agent.config.closeout_for_all_task_nodes,
     )
 
 

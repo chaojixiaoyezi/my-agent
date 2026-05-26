@@ -172,7 +172,7 @@ def test_test_executor_content_check_does_not_infer_negative_from_name(tmp_path)
 
 
 # LLM: Model-produced negative aliases should not invert no-bad-pattern checks.
-# 函数用途: 子代理常写 `match_mode=not_exists` 表示坏内容不应存在；父级验收必须按 not_contains 处理。
+# 函数用途: 子代理常写 `match_mode=not_exists` 表示坏内容不应存在；最终收口必须按 not_contains 处理。
 def test_test_executor_content_check_supports_not_exists_match_mode(tmp_path):
     (tmp_path / "page.html").write_text("<a href='index1.html'>首页</a>\n", encoding="utf-8")
     executor = TestExecutor(tmp_path)
@@ -192,7 +192,7 @@ def test_test_executor_content_check_supports_not_exists_match_mode(tmp_path):
 
 
 def test_test_executor_content_check_supports_exact_match(tmp_path):
-    """LLM: Exact content checks keep parent acceptance from accepting extra text."""
+    """LLM: Exact content checks keep closeout from accepting extra text."""
     (tmp_path / "proof.txt").write_text("context-lineage-ok\n", encoding="utf-8")
     executor = TestExecutor(tmp_path)
 
@@ -210,8 +210,8 @@ def test_test_executor_content_check_supports_exact_match(tmp_path):
     assert record.error == "内容不相等"
 
 
-# LLM: artifact_integrity is a native parent-acceptance method, not an unknown model checklist item.
-# 函数用途: 确认父级验收能执行通用产物完整性检查，避免真实产物已写出却卡在未知验证方式。
+# LLM: artifact_integrity is a native closeout method, not an unknown model checklist item.
+# 函数用途: 确认最终收口能执行通用产物完整性检查，避免真实产物已写出却卡在未知验证方式。
 def test_test_executor_runs_artifact_integrity_check(tmp_path):
     (tmp_path / "index.html").write_text(
         "<!doctype html><html><body><a href='#hero'>首页</a><main id='hero'></main></body></html>",

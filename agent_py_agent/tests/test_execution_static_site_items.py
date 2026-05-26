@@ -13,7 +13,7 @@ from agent_py_agent.agent.subagents.static_required_files import (
 
 
 # LLM: Missing artifact lists from real runners must still produce static web checks.
-# 函数用途: 子代理漏写 artifacts 列表但任务目标明确 HTML 文件时，父级验收仍应检查 artifacts 目录。
+# 函数用途: 子代理漏写 artifacts 列表但任务目标明确 HTML 文件时，最终收口仍应检查 artifacts 目录。
 def test_prepare_items_infers_static_check_from_required_files_without_artifacts(tmp_path):
     site = tmp_path / "artifacts"
     site.mkdir()
@@ -69,7 +69,7 @@ def test_prepare_items_scopes_static_check_to_observed_leaf_artifacts(tmp_path):
 
 
 # LLM: Static-site inference should use task write-root hints when runners omit artifact refs.
-# 函数用途: worker 已写到任务专属 deliverables 目录但 output.json 没列 artifacts 时，父级验收不能退回全局 deliverables 误报缺文件。
+# 函数用途: worker 已写到任务专属 deliverables 目录但 output.json 没列 artifacts 时，最终收口不能退回全局 deliverables 误报缺文件。
 def test_prepare_items_uses_site_root_hints_when_no_artifacts(tmp_path):
     deliverables = tmp_path / "nested" / "deliverables"
     deliverables.mkdir(parents=True)
@@ -90,7 +90,7 @@ def test_prepare_items_uses_site_root_hints_when_no_artifacts(tmp_path):
 
 
 # LLM: Concrete write roots should narrow inherited parent required_files for leaf runners.
-# 函数用途: 子任务 goal 里被迫带着父级 index1/index2 清单时，验收仍只检查自己被授权写的那个文件。
+# 函数用途: 子任务 goal 里被迫带着父级收口仍只检查自己被授权写的那个文件。
 def test_required_static_files_scope_to_concrete_allowed_write_file(tmp_path):
     site = tmp_path / "artifacts"
     site.mkdir()
@@ -109,7 +109,7 @@ def test_required_static_files_scope_to_concrete_allowed_write_file(tmp_path):
     assert required_static_dom_ids_for_task(task) == ["hero"]
 
 
-# LLM: task-level static contracts must ignore goal and acceptance text.
+# LLM: task-level static contracts must ignore goal and closeout text.
 # 函数用途: required_files/required_dom_ids 写在普通文本字段里时，不再成为运行时机器验收事实。
 def test_required_static_contracts_for_task_do_not_parse_text_fields(tmp_path):
     task = SimpleNamespace(

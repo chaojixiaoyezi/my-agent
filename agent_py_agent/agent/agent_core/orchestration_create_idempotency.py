@@ -28,7 +28,6 @@ _GENERIC_AGENT_NAMES = {
     "小傻妞-researcher",
     "小傻妞-writer",
     "小傻妞-tester",
-    "小傻妞-acceptor",
 }
 _GENERIC_LINEAGE_ROLES = {
     "worker",
@@ -36,7 +35,6 @@ _GENERIC_LINEAGE_ROLES = {
     "researcher",
     "writer",
     "tester",
-    "acceptor",
     "bug-finder",
     "coordinator",
     "leaf-worker",

@@ -105,7 +105,7 @@ compact 后的模型上下文应该由这些层组成：
 - self check 失败仍继续运行。
 - 把 hypothesis 写成 confirmed fact。
 - 自动写正式 skill。
-- 自动执行 parent acceptance 的 `run_tests`、`apply_acceptance` 或 rescue。
+- 自动执行 closeout 的 `run_tests`、`apply_result` 或 rescue。
 
 ## 无人值守工作状态锁
 
@@ -129,7 +129,7 @@ compact 后的模型上下文应该由这些层组成：
 4. 只有 `ok=true` 时才允许继续执行工具或改代码。
 5. 如果缺字段、refs 不存在、任务目标冲突或 diff 范围异常，进入 `blocked_needs_human_review`，不得无人值守继续。
 
-Action Guard 之后还必须生成 Continue Packet。Continue Packet 固定继续工作所需的目标、下一步、验收、约束、最近测试、refs、owner 和 `automatic_tool_execution=none`。它是“compact 恢复可继续”的证明，不是“业务验收已通过”的证明；子代理是否通过验收仍由 parent acceptance controller 和 auto-policy 负责。
+Action Guard 之后还必须生成 Continue Packet。Continue Packet 固定继续工作所需的目标、下一步、验收、约束、最近测试、refs、owner 和 `automatic_tool_execution=none`。它是“compact 恢复可继续”的证明，不是“业务验收已通过”的证明；子代理是否通过验收仍由 closeout controller 和 auto-policy 负责。
 
 这条规则适用于半自动和自动模式：自动 compact 不是“压完就继续”，而是“压完、恢复、对照、确认一致，再继续”。
 

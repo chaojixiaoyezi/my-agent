@@ -61,16 +61,16 @@ def test_status_all_keeps_board_items():
 
 
 # LLM: Board reads must tell the parent not to summarize incomplete child work as done.
-# 函数用途: AWAITING_ACCEPTANCE/NEEDS_ACCEPTANCE 看板条目要在顶层暴露阻塞 id 和建议 dispatch，不让模型看见文件就报完成。
-def test_board_payload_marks_awaiting_acceptance_as_not_complete():
+# 函数用途: DONE/VERIFIED 看板条目要在顶层暴露阻塞 id 和建议 dispatch，不让模型看见文件就报完成。
+def test_board_payload_marks_pending_closeout_as_not_complete():
     from agent_py_agent.agent.agent_core.orchestration_tools import SubagentBoardTool
 
     mock_agent = MagicMock()
     mock_agent.subagents.workspace = Path("/tmp/workspace")
     mock_board = MagicMock()
-    mock_board.summary = {"total": 1, "AWAITING_ACCEPTANCE": 1, "NEEDS_ACCEPTANCE": 1}
-    item = _board_item("run_1", "AWAITING_ACCEPTANCE")
-    item.verification_status = "NEEDS_ACCEPTANCE"
+    mock_board.summary = {"total": 1, "DONE": 1, "VERIFIED": 1}
+    item = _board_item("run_1", "DONE")
+    item.verification_status = "VERIFIED"
     mock_board.items = [item]
     mock_agent.subagents.write_board.return_value = mock_board
 

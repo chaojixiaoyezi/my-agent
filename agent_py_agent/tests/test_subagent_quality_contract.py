@@ -17,10 +17,9 @@ def test_create_run_persists_quality_contract(tmp_path):
         plan=["draft", "check evidence"],
         quality_contract=QualityContract(
             user_visible_goal="Readable final report",
-            quality_bar="Evidence-backed and ready for parent review",
+            quality_bar="Evidence-backed and ready for review",
             must_check=["real artifact"],
             evidence_required=["test output"],
-            final_judge="parent_final_gate",
         ),
         context_manifest=ContextManifest(
             task_pack_refs=["task.md"],
@@ -33,9 +32,7 @@ def test_create_run_persists_quality_contract(tmp_path):
 
     payload = json.loads((Path(task.task_dir) / "task.json").read_text(encoding="utf-8"))
 
-    assert payload["quality_contract"]["quality_bar"] == "Evidence-backed and ready for parent review"
-    assert payload["quality_contract"]["cannot_self_accept"] is True
-    assert payload["quality_contract"]["parent_final_gate"] is True
+    assert payload["quality_contract"]["quality_bar"] == "Evidence-backed and ready for review"
     assert payload["context_manifest"]["required_read_paths"] == ["README.md"]
     assert payload["context_packs"][0]["name"] == "core"
 
@@ -92,7 +89,7 @@ def test_load_legacy_task_json_is_compatible(tmp_path):
     assert task.context_manifest.token_budget == 42
     assert task.context_packs == [{"name": "legacy-pack"}]
     assert task.capability_requests == []
-    assert bare_task.quality_contract.final_judge == "parent_final_gate"
+    assert bare_task.quality_contract.quality_bar == ""
     assert bare_task.context_manifest.core_pack_version == "subagent-quality-contract-v1"
     assert bare_task.context_packs == []
 
@@ -118,7 +115,7 @@ def test_execution_context_contains_quality_contract_and_manifest(tmp_path):
     assert payload["context_manifest"]["role_pack"] == "producer"
 
 
-def test_execution_context_markdown_states_parent_final_gate_rule(tmp_path):
+def test_execution_context_markdown_states_result_handoff_rule(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     task = manager.create_run(
         goal="Review output",
@@ -129,8 +126,7 @@ def test_execution_context_markdown_states_parent_final_gate_rule(tmp_path):
     context = manager.write_execution_context(task.id)
     text = Path(context.execution_context_file).read_text(encoding="utf-8")
 
-    assert "Subagents cannot self-accept" in text
-    assert "final_judge/parent_final_gate" in text
+    assert "hand results back to the caller" in text
     assert "Quality Contract" in text
     assert "Context Manifest" in text
 
@@ -153,4 +149,4 @@ def test_create_run_workflow_plan_persists_without_raw_json(tmp_path):
     assert payload["workflow_mode"] == "plan"
     assert payload["workflow_plan"]["selected_template_id"] == "code_feature_split"
     assert "Implementation satisfies the shared contract" in task.acceptance_checks
-    assert "Focused verification passes" in task.acceptance_checks
+    assert "Tests cover the closeout criteria" in task.acceptance_checks

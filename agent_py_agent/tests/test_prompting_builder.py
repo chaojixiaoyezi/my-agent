@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -140,6 +140,32 @@ class TestBuildBasic:
 
         assert f"current_local_date: {date.today().isoformat()}" in result
         assert "写报告日期时优先使用 current_local_date" in result
+
+    def test_build_includes_relative_time_ranges(self, tmp_path):
+        """主代理做搜索前应把“最近一周”等相对时间换成明确日期范围。"""
+        config = AgentConfig()
+        builder = PromptBuilder(config, tmp_path)
+        today = date.today()
+        week_start = today - timedelta(days=today.weekday())
+        last_7_days_start = today - timedelta(days=6)
+
+        result = builder.build("找最近一周值得关注的 GitHub 项目", [])
+
+        assert f"current_week_range: {week_start.isoformat()}.." in result
+        assert f"last_7_days_range: {last_7_days_start.isoformat()}..{today.isoformat()}" in result
+        assert "相对时间" in result
+        assert "搜索和报告都使用这个明确范围" in result
+
+    def test_build_tells_model_not_to_guess_urls(self, tmp_path):
+        """最终产物里的链接应来自工具结果或先验证，不能靠名称拼 URL。"""
+        config = AgentConfig()
+        builder = PromptBuilder(config, tmp_path)
+
+        result = builder.build("找项目地址，做成表格", [])
+
+        assert "最终产物里写 URL" in result
+        assert "先用网页/HTTP 工具验证可访问" in result
+        assert "不能靠项目名猜仓库地址" in result
 
     def test_build_includes_refs_first_delegation_hint(self, tmp_path):
         """主代理派工时应优先传资料 refs，不要先把所有正文塞进 root 上下文。"""

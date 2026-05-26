@@ -78,15 +78,15 @@ def dispatch_missing_quality_roles_notice(tasks: list[object], missing_roles: li
         "Latest child summaries and refs:",
         *_task_summary_rows(tasks)[:12],
         "",
-        "建议下一步：父级根据缺失角色决定是否调用 create_subagents 继续派工、调整验收范围，或把无法继续的原因上报给用户。",
+        "建议下一步：父级收口范围，或把无法继续的原因上报给用户。",
     ]
     return "\n".join(lines)
 
 
 def _quality_role_alias_lines(missing_roles: list[str]) -> list[str]:
     normalized = {str(role or "").strip().lower() for role in missing_roles}
-    if {"tester", "acceptor"}.issubset(normalized):
-        return ["缺少质量角色组合：tester/acceptor"]
+    if {"tester", "bug_finder"}.issubset(normalized):
+        return ["缺少质量角色组合：tester/bug_finder"]
     return []
 
 
@@ -106,7 +106,7 @@ def _required_next_action_lines() -> list[str]:
         "",
         "## Required Next Action",
         "",
-        "- 先读取 blocking_run_ids 的 runner_result、failure_handoff、acceptance_review，再由父级接管、重试或重派。",
+        "- 先读取 blocking_run_ids 的 runner_result、failure_handoff，再由父级接管、重试或重派。",
         "- 不要把本轮说成完成；页面产物存在不等于子代理层级、角色覆盖和验收链路已经通过。",
     ]
 

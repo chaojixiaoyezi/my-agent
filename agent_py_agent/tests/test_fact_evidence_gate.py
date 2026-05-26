@@ -80,7 +80,7 @@ def test_fact_evidence_gate_accepts_verified_claims_with_archive_backing() -> No
     assert decision.evidence["claim_count"] == 1
 
 
-def test_delivery_closeout_blocks_artifact_when_fact_evidence_gate_fails(tmp_path: Path) -> None:
+def test_delivery_closeout_reports_fact_evidence_gate_findings_as_warnings(tmp_path: Path) -> None:
     params = _fact_evidence_closeout_params(tmp_path)
     agent = SimpleNamespace(root=tmp_path, tools=SimpleNamespace(workspace_root=tmp_path))
 
@@ -88,23 +88,14 @@ def test_delivery_closeout_blocks_artifact_when_fact_evidence_gate_fails(tmp_pat
         MainAgentDeliveryCloseoutRequest(agent=agent, params=params, backend="test")
     )
     report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
-    context_payload = json.loads(params.tool_context[-1].split("\n", 1)[1])
     progress_events = _progress_events(tmp_path)
 
-    assert response is None
-    assert report["fact_evidence_gate"]["status"] == "NEED_REPAIR"
-    assert report["final_closeout_gate"]["allowed"] is False
-    recovery_action = report["contract_recovery"]["actions"][0]
-    assert recovery_action["source_gate"] == "fact_evidence"
-    assert recovery_action["checkpoint_ref"] == "source_data.json"
-    assert recovery_action["writer_tool"] == "write_file"
-    assert recovery_action["required_structured_fields"] == ["source_refs", "claims"]
-    assert recovery_action["required_fields"] == ["measured_value"]
-    assert any(item["gate"] == "fact_evidence" for item in context_payload["failed_gates"])
+    assert response is not None
+    assert report["fact_evidence_gate"]["status"] == "ALLOW"
+    assert report["fact_evidence_gate"]["evidence"]["warning_codes"]
+    assert report["final_closeout_gate"]["allowed"] is True
     assert progress_events[-1]["event_type"] == "delivery_closeout_progress"
-    assert progress_events[-1]["ok"] is False
-    assert progress_events[-1]["failed_gates"][0]["gate"] == "fact_evidence"
-    assert progress_events[-1]["recovery_actions"][0]["checkpoint_ref"] == "source_data.json"
+    assert progress_events[-1]["ok"] is True
 
 
 def _fact_evidence_closeout_params(tmp_path: Path):
@@ -145,7 +136,7 @@ def _progress_events(tmp_path: Path) -> list[dict[str, object]]:
     ]
 
 
-def test_delivery_closeout_turns_bad_fact_payload_json_into_repair_context(tmp_path: Path) -> None:
+def test_delivery_closeout_turns_bad_fact_payload_json_into_warning(tmp_path: Path) -> None:
     (tmp_path / "out.txt").write_text("finished artifact", encoding="utf-8")
     (tmp_path / "source_data.json").write_text('{"source_refs": [', encoding="utf-8")
     params = _delivery_closeout_params(archive_tool_calls=[_write_file_archive_record()])
@@ -160,12 +151,10 @@ def test_delivery_closeout_turns_bad_fact_payload_json_into_repair_context(tmp_p
         MainAgentDeliveryCloseoutRequest(agent=agent, params=params, backend="test")
     )
     report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
-    context_payload = json.loads(params.tool_context[-1].split("\n", 1)[1])
 
-    assert response is None
-    assert report["fact_evidence_gate"]["findings"][0]["code"] == "FACT_EVIDENCE_PAYLOAD_MISSING"
-    assert report["contract_recovery"]["actions"][0]["checkpoint_ref"] == "source_data.json"
-    assert context_payload["failed_gates"][0]["gate"] == "fact_evidence"
+    assert response is not None
+    assert report["fact_evidence_gate"]["status"] == "ALLOW"
+    assert report["fact_evidence_gate"]["evidence"]["warning_codes"] == ["FACT_EVIDENCE_PAYLOAD_MISSING"]
 
 
 def test_fact_evidence_gate_rejects_estimated_claims_without_methodology() -> None:

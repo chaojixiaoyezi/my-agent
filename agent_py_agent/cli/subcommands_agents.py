@@ -19,8 +19,6 @@ from .subagents import (
     cmd_subagent_detail,
     cmd_subagent_run,
     cmd_subagents,
-    cmd_subagents_acceptance,
-    cmd_subagents_acceptance_plan,
     cmd_subagents_apply_actions,
     cmd_subagents_budget,
     cmd_subagents_dispatch,
@@ -140,56 +138,8 @@ def _add_agents_action_subcommands(sub):
     route.add_argument("--limit", type=int, default=None, help="最多处理多少条 request；默认读配置")
     route.set_defaults(func=cmd_subagents_route_capabilities, apply=False)
 
-    _add_agents_acceptance_subcommand(sub)
     _add_agents_tests_subcommand(sub)
     _add_agents_patch_subcommand(sub)
-
-
-# LLM: _add_agents_acceptance_subcommand keeps acceptance-specific argparse wiring isolated.
-# 函数用途: 注册父级验收命令和真实测试执行覆盖参数。
-def _add_agents_acceptance_subcommand(sub):
-    acceptance = sub.add_parser("subagents-acceptance", help="验收等待验收的 subagent")
-    acceptance.add_argument("--dry-run", action="store_false", dest="apply", help="只生成验收报告，不修改记录")
-    acceptance.add_argument("--apply", action="store_true", help="验收通过时标记 DONE/VERIFIED，失败时标记 BLOCKED/FAILED")
-    acceptance.add_argument("--run-id", nargs="*", help="只验收指定子代理运行 ID")
-    acceptance.add_argument("--limit", type=int, default=None, help="最多处理多少条记录；默认读配置")
-    acceptance.add_argument("--reviewer", default="parent", help="验收者标识")
-    acceptance.add_argument("--note", help="写入验收记录的备注")
-    acceptance_tests = acceptance.add_mutually_exclusive_group()
-    acceptance_tests.add_argument(
-        "--execute-tests",
-        action="store_true",
-        dest="execute_tests",
-        default=None,
-        help="本次验收显式执行 output.json 里的 tests",
-    )
-    acceptance_tests.add_argument(
-        "--no-execute-tests",
-        action="store_false",
-        dest="execute_tests",
-        help="本次验收显式不执行 tests，覆盖配置默认值",
-    )
-    acceptance.add_argument("--test-timeout", type=float, default=None, help="真实执行 tests 时单条测试超时秒数")
-    acceptance.set_defaults(func=cmd_subagents_acceptance, apply=False)
-
-    # LLM: acceptance-plan exposes the parent controller decision and an explicit inspect_only apply bridge.
-    # 函数用途: 注册父级验收计划查看命令；默认只展示决策，--apply 仅放行低风险 inspect_only。
-    acceptance_plan = sub.add_parser("subagents-acceptance-plan", help="查看单个 subagent 的父级验收 dry-run 决策")
-    acceptance_plan.add_argument("run_id", help="子代理运行 ID")
-    acceptance_plan.add_argument("--json", action="store_true", help="输出机器可读 JSON")
-    acceptance_plan.add_argument("--write", action="store_true", help="写入 refs-only 父级验收决策审计文件")
-    acceptance_plan.add_argument("--apply", action="store_true", help="显式应用 inspect_only 低风险父级验收决策")
-    acceptance_plan.add_argument("--next-action", action="store_true", help="查看父级下一步显式动作建议，不执行动作")
-    acceptance_plan.add_argument("--auto-policy", action="store_true", help="查看父级自动策略 dry-run，不执行动作")
-    acceptance_plan.add_argument("--auto-execution", action="store_true", help="查看父级自动执行 dry-run facade，不执行动作")
-    acceptance_plan.add_argument("--execute-auto-tests", action="store_true", help="与 --auto-execution 一起显式执行 run_tests，不 apply")
-    acceptance_plan.add_argument("--followup", action="store_true", help="查看测试后的 follow-up 下一步建议，不执行动作")
-    acceptance_plan.add_argument("--apply-followup", action="store_true", help="显式处理 follow-up：apply 或受控接管")
-    acceptance_plan.add_argument("--take-over-by", default="", help="follow-up rescue 接管者，apply-followup rescue 时必填")
-    acceptance_plan.add_argument("--locked-file", action="append", help="follow-up rescue 接管时锁定的文件，可多次传入")
-    acceptance_plan.add_argument("--reviewer", default="parent", help="apply 时写入验收记录的 reviewer")
-    acceptance_plan.add_argument("--note", default="", help="apply 时写入验收记录的备注")
-    acceptance_plan.set_defaults(func=cmd_subagents_acceptance_plan)
 
 
 # LLM: _add_agents_tests_subcommand registers the explicit test-report inspection command.
@@ -251,7 +201,6 @@ def _add_agents_dispatch_subcommands(sub):
     dispatch.add_argument("--dry-run", action="store_false", dest="apply", help="只生成调度报告，不修改记录")
     dispatch.add_argument("--apply", action="store_true", help="执行低风险调度动作并写审计日志")
     dispatch.add_argument("--execute-runners", action="store_true", help="配合 --apply 调用真实模型执行 runner")
-    dispatch.add_argument("--execute-acceptance-tests", action="store_true", help="显式执行父级验收 run_tests，但不自动 apply")
     dispatch.add_argument("--planner", action="store_true", help="有待处理事项时调用父代理 LLM planner，禁止空心 HEARTBEAT_OK")
     dispatch.add_argument("--workflow-mode", choices=["off", "plan", "auto"], default="off", help="dispatch 前对父任务执行 workflow 规划；plan 只写计划，auto 还会自动派工")
     dispatch.add_argument("--max-runners", type=int, default=None, help="本轮最多推进多少个 runner，0 表示不执行 runner；默认读配置")

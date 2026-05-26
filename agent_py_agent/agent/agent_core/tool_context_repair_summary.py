@@ -11,19 +11,19 @@ _MAX_TOOL_CALL_JSON = 2400
 
 
 # LLM: repair_advice_action_lines keeps top-level repair calls copyable after output externalization.
-# 函数用途: 顶层 parent_acceptance_repair_advice 聚合在 records 外；这里渲染失败 refs 和建议工具调用，避免被普通摘要截断。
+# 函数用途: 顶层 repair_advice 聚合在 records 外；这里渲染失败 refs 和建议工具调用，避免被普通摘要截断。
 def repair_advice_action_lines(value: object) -> list[str]:
     if not isinstance(value, dict):
         return []
-    lines = ["- parent_acceptance_repair_advice: available"]
+    lines = ["- repair_advice: available"]
     if value.get("failed_run_ids"):
-        lines.append(f"- parent_acceptance_repair_failed_run_ids: {_json_inline(value.get('failed_run_ids'))}")
+        lines.append(f"- repair_failed_run_ids: {_json_inline(value.get('failed_run_ids'))}")
     if value.get("failure_refs"):
-        lines.append(f"- parent_acceptance_repair_failure_refs: {_json_inline(value.get('failure_refs'))}")
+        lines.append(f"- repair_failure_refs: {_json_inline(value.get('failure_refs'))}")
     suggested = value.get("suggested_tool_call")
     if isinstance(suggested, dict):
-        lines.append(f"- parent_acceptance_repair_next_tool: {suggested.get('tool', '')}")
-        lines.append(f"- parent_acceptance_repair_suggested_tool_call: {_json_inline(suggested, limit=_MAX_TOOL_CALL_JSON)}")
+        lines.append(f"- repair_next_tool: {suggested.get('tool', '')}")
+        lines.append(f"- repair_suggested_tool_call: {_json_inline(suggested, limit=_MAX_TOOL_CALL_JSON)}")
     return lines
 
 

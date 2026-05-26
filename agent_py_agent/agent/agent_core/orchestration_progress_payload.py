@@ -12,10 +12,6 @@ from .orchestration_artifact_integrity_repair import (
     artifact_integrity_blocked,
     artifact_integrity_repair_advice_payload,
 )
-from .orchestration_parent_acceptance_repair import (
-    parent_acceptance_rejected,
-    parent_acceptance_repair_advice_payload,
-)
 from .orchestration_quality_advice_payload import quality_advice_payload
 from .orchestration_quality_payload import quality_repair_advice_payload
 from .orchestration_recovery_batches import recovery_batches_from_strategies
@@ -33,7 +29,6 @@ def direct_children_progress_payload(agent) -> dict[str, object]:
         return {}
     payload = _progress_payload(parent_run_id, direct_children)
     payload["direct_children"].update(artifact_integrity_repair_advice_payload(direct_children))
-    payload["direct_children"].update(parent_acceptance_repair_advice_payload(direct_children))
     payload["direct_children"].update(quality_repair_advice_payload(agent, parent_run_id))
     _attach_quality_advice(agent, parent_run_id, payload["direct_children"])
     _attach_recovery_strategies(agent, payload["direct_children"])
@@ -60,31 +55,25 @@ def _attach_direct_child_next_action(children: dict[str, object]) -> None:
         children.update(_recovery_dispatch_payload(children["recovery_run_ids"], children.get("recovery_strategies")))
         if children.get("needs_repair_wave"):
             children["repair_wave_deferred_by_recovery"] = True
-        if children.get("needs_parent_acceptance_repair_wave"):
-            children["parent_acceptance_repair_deferred_by_recovery"] = True
         if children.get("needs_artifact_integrity_repair_wave"):
             children["artifact_integrity_repair_deferred_by_recovery"] = True
         return
     if children.get("needs_artifact_integrity_repair_wave"):
-        children["ready_for_parent_acceptance"] = False
+        children["ready_for_closeout"] = False
         children["next_action"] = "create_repair_child_from_artifact_integrity_refs"
         return
-    if children.get("needs_parent_acceptance_repair_wave"):
-        children["ready_for_parent_acceptance"] = False
-        children["next_action"] = "create_repair_child_from_parent_acceptance_refs"
-        return
     if children.get("needs_repair_wave"):
-        children["ready_for_parent_acceptance"] = False
+        children["ready_for_closeout"] = False
         children["next_action"] = "create_repair_child_from_qa_refs"
         return
     if children["needs_more_dispatch"]:
         children.update(_continue_dispatch_payload(children["unfinished_run_ids"]))
         return
     if children.get("quality_advice"):
-        children["ready_for_parent_acceptance"] = False
+        children["ready_for_closeout"] = False
         children.update(_quality_wave_payload(children["quality_advice"]))
         return
-    if children["ready_for_parent_acceptance"]:
+    if children["ready_for_closeout"]:
         children.update(_closeout_payload())
 
 
@@ -128,14 +117,14 @@ def _closeout_payload() -> dict[str, object]:
     return {
         "next_action": "summarize_direct_children_refs",
         "closeout_hint": (
-            "所有直接 child 已等待验收或完成；不要反复 read_file/read_artifact 读取子产物正文。"
-            "请只汇总 child run_id、状态、产物 refs 和阻塞项，写入自己的 output.json 或最终结果块后等待父级验收。"
+            "所有直接 child 已完成或没有阻塞；不要反复 read_file/read_artifact 读取子产物正文。"
+            "请只汇总 child run_id、状态、产物 refs 和阻塞项，写入自己的 output.json 或最终结果块。"
         ),
     }
 
 
 # LLM: _quality_wave_payload points coordinators to QA child creation before they reread artifacts.
-# 函数用途: 已有可验收实现但缺 tester/bug_finder/acceptor 时，返回 refs-first QA 波次建议。
+# 函数用途: 已有可检查实现但缺 tester/bug_finder 时，返回 refs-first QA 波次建议。
 def _quality_wave_payload(advice: dict[str, object]) -> dict[str, object]:
     return {
         "next_action": "create_quality_children_from_ready_refs",
@@ -145,7 +134,7 @@ def _quality_wave_payload(advice: dict[str, object]) -> dict[str, object]:
             "children": list(advice.get("suggested_children") or []),
         },
         "quality_hint": (
-            "父任务还缺真实 QA 角色；先按 suggested_tool_call 创建 tester/bug_finder/acceptor，"
+            "父任务还缺真实 QA 角色；先按 suggested_tool_call 创建 tester/bug_finder，"
             "不要反复 read_file/read_artifact 读取产物正文来替代 QA 子代理。"
         ),
     }
@@ -193,7 +182,6 @@ def _attach_quality_advice(agent, parent_run_id: str, children: dict[str, object
     if (
         children.get("needs_more_dispatch")
         or children.get("needs_recovery")
-        or children.get("needs_parent_acceptance_repair_wave")
         or children.get("needs_repair_wave")
     ):
         return
@@ -280,7 +268,6 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
     planning_ids: list[str] = []
     running_ids: list[str] = []
     recovery_ids: list[str] = []
-    rejected_ids: list[str] = []
     for item in direct_children:
         status = str(getattr(item, "status", "") or "UNKNOWN").upper()
         item_id = str(getattr(item, "id", "") or "")
@@ -289,8 +276,6 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
             planning_ids.append(item_id)
         if status == "RUNNING":
             running_ids.append(item_id)
-        if parent_acceptance_rejected(item):
-            rejected_ids.append(item_id)
         if status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"} and not artifact_integrity_blocked(item):
             recovery_ids.append(item_id)
     unfinished_ids = [item for item in [*planning_ids, *running_ids] if item]
@@ -303,14 +288,10 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
             "planning_run_ids": [item for item in planning_ids if item],
             "running_run_ids": [item for item in running_ids if item],
             "recovery_run_ids": recovery_ids,
-            "rejected_acceptance_run_ids": [item for item in rejected_ids if item],
-            "parent_acceptance_repair_run_ids": [item for item in rejected_ids if item],
             "unfinished_run_ids": unfinished_ids,
             "needs_more_dispatch": bool(unfinished_ids),
             "needs_recovery": bool(recovery_ids),
-            "ready_for_parent_acceptance": (
-                bool(direct_children) and not unfinished_ids and not recovery_ids and not rejected_ids
-            ),
+            "ready_for_closeout": bool(direct_children) and not unfinished_ids and not recovery_ids,
         }
     }
 

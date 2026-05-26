@@ -87,7 +87,7 @@ def _render_write_boundary_section(context):
 
 
 # LLM: Declared output refs are user-visible deliverable targets, not runner-private reports.
-# 函数用途: 把父级声明的 output_files/output_refs 显示给 runner，避免验收要求了目标路径但子代理只看到 output.json。
+# 函数用途: 把父级收口要求了目标路径但子代理只看到 output.json。
 def _render_declared_outputs_section(context):
     output_contract = (
         context.context_bundle.get("output_contract")
@@ -131,9 +131,6 @@ def _render_quality_contract_section(contract):
     lines.append(f"- user_visible_goal: {contract.user_visible_goal or 'none'}")
     lines.append(f"- benchmark_sample: {contract.benchmark_sample or 'none'}")
     lines.append(f"- quality_bar: {contract.quality_bar or 'none'}")
-    lines.append(f"- final_judge: {contract.final_judge or 'parent_final_gate'}")
-    lines.append(f"- cannot_self_accept: {contract.cannot_self_accept}")
-    lines.append(f"- parent_final_gate: {contract.parent_final_gate}")
     lines.append("- failure_conditions:")
     lines.extend(f"  - {item}" for item in contract.failure_conditions or ["none"])
     lines.append("- forbidden_delivery:")
@@ -219,10 +216,7 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
     lines.extend(_render_pending_requests_section(context))
     lines.extend(_render_open_gaps_section(context))
     lines.extend(["", "## Execution Rules", ""])
-    lines.append(
-        "- Subagents cannot self-accept or declare final completion; only the parent "
-        "session final_judge/parent_final_gate can make the final acceptance decision."
-    )
+    lines.append("- Finish the assigned task, write concrete refs, and hand results back to the caller.")
     lines.extend(f"- {item}" for item in context.instructions)
     return "\n".join(lines) + "\n"
 

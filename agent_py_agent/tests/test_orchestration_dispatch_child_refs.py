@@ -70,7 +70,7 @@ def test_dispatch_payload_exposes_runner_created_children():
         applied=True,
         message="runner 已完成模型调用，等待独立验收。",
         before_status="PLANNING",
-        after_status="AWAITING_ACCEPTANCE",
+        after_status="DONE",
         runner_summary="root 创建了 2 个直接孩子。",
         runner_created_child_count=2,
         runner_created_child_ids=["child-a", "child-b"],
@@ -88,66 +88,6 @@ def test_dispatch_payload_exposes_runner_created_children():
     assert payload["records"][0]["runner_unfinished_child_ids"] == ["child-b"]
     assert payload["records"][0]["runner_partial_success"] is True
     assert "root 创建了 2 个直接孩子" in payload["records"][0]["runner_summary"]
-
-
-# LLM: test_dispatch_payload_includes_acceptance_followup keeps rescue hints visible to runner context.
-# 函数用途: runner 内部要能看到 child 测试失败和 follow-up 动作，才可能继续救援。
-def test_dispatch_payload_includes_acceptance_followup():
-    record = SimpleNamespace(
-        step="acceptance",
-        action="reject",
-        run_id="leaf-1",
-        ok=False,
-        dry_run=True,
-        applied=False,
-        message="验收失败。",
-        before_status="AWAITING_ACCEPTANCE",
-        after_status="AWAITING_ACCEPTANCE",
-        parent_acceptance_auto_execution_test_failed=5,
-        parent_acceptance_test_failure_summary="inferred static site check: inert_control_hits=15",
-        parent_acceptance_test_failure_details=[
-            "inert_control_hits: index2.html:a:Collection href=#; index2.html:a:Contact href=#missing",
-        ],
-        parent_acceptance_followup_action="plan_rescue",
-        parent_acceptance_followup_command="subagents-acceptance-plan leaf-1 --take-over-by <agent>",
-    )
-    payload = _dispatch_payload_for_record(record)
-
-    assert payload["records"][0]["test_failed"] == 5
-    assert payload["records"][0]["test_failure_summary"] == "inferred static site check: inert_control_hits=15"
-    assert payload["records"][0]["test_failure_details"] == [
-        "inert_control_hits: index2.html:a:Collection href=#; index2.html:a:Contact href=#missing",
-    ]
-    assert payload["records"][0]["followup_action"] == "plan_rescue"
-    assert payload["records"][0]["followup_command"].endswith("--take-over-by <agent>")
-
-
-def test_dispatch_payload_lifts_parent_acceptance_advice_before_records():
-    """父级验收返工建议必须出现在长 records 前，避免真实模型只读前段时错过。"""
-    record = SimpleNamespace(
-        step="acceptance",
-        action="reject",
-        run_id="leaf-1",
-        ok=False,
-        dry_run=False,
-        applied=True,
-        message="产物缺少目标文件，需要按 failure refs 修复。",
-        before_status="AWAITING_ACCEPTANCE",
-        after_status="BLOCKED",
-        parent_acceptance_auto_execution_test_failed=0,
-        parent_acceptance_test_failure_summary="missing target artifact",
-        parent_acceptance_test_failure_details=[],
-        parent_acceptance_followup_action="",
-        parent_acceptance_followup_command="",
-    )
-
-    payload = _dispatch_payload_for_record(record)
-
-    keys = list(payload)
-    assert payload["next_action"] == "create_repair_child_from_parent_acceptance_refs"
-    assert payload["parent_acceptance_repair_advice"]["next_action"] == "create_repair_child_from_parent_acceptance_refs"
-    assert keys.index("parent_acceptance_repair_advice") < keys.index("records")
-    assert "suggested_tool_call" not in payload
 
 
 # LLM: dispatch payload should tell models when only audit/classify actions remain.
@@ -274,54 +214,6 @@ def test_dispatch_payload_tells_runner_to_continue_unfinished_children():
     assert direct["suggested_tool_call"]["execute_runners"] is True
     assert direct["suggested_tool_call"]["run_ids"] == ["child-a", "child-b"]
     assert direct["suggested_tool_call"]["workflow_mode"] == "off"
-
-
-# LLM: test_dispatch_payload_tells_runner_to_summarize_ready_children covers R5 over-read prevention.
-# 函数用途: 直接孩子都等待验收或完成时，父 runner 应收口汇总 refs，不该反复读取子产物正文。
-def test_dispatch_payload_tells_runner_to_summarize_ready_children():
-    payload = _dispatch_payload_with_direct_children([
-        SimpleNamespace(id="child-a", parent_id="root", status="AWAITING_ACCEPTANCE"),
-        SimpleNamespace(id="child-b", parent_id="root", status="DONE"),
-    ])
-
-    direct = payload["direct_children"]
-    assert direct["ready_for_parent_acceptance"] is True
-    assert direct["next_action"] == "summarize_direct_children_refs"
-    assert "不要反复 read_file/read_artifact" in direct["closeout_hint"]
-
-
-# LLM: Required QA roles should steer parent to create QA children instead of rereading artifacts.
-# 函数用途: 父级目标点名 tester/bug_finder/acceptor 且实现已 ready 时，dispatch payload 要提示补 QA 波次。
-def test_dispatch_payload_suggests_quality_wave_before_closeout():
-    parent = SimpleNamespace(
-        id="root",
-        goal="示例网站必须有 tester / bug_finder / acceptor 三类 QA 子代理。",
-        acceptance_checks=[],
-        child_ids=["child-a"],
-        allowed_write_roots=["/tmp/site/build"],
-        task_dir="",
-        role="coordinator",
-        agent_name="root",
-        attributes={"required_qa_roles": ["tester", "bug_finder", "acceptor"]},
-    )
-    child = SimpleNamespace(
-        id="child-a",
-        parent_id="root",
-        status="AWAITING_ACCEPTANCE",
-        verification_status="NEEDS_ACCEPTANCE",
-        role="leaf_worker",
-        agent_name="小傻妞-worker",
-        child_ids=[],
-    )
-    payload = _dispatch_payload_with_direct_children([child], parent=parent)
-
-    direct = payload["direct_children"]
-    assert direct["ready_for_parent_acceptance"] is False
-    assert direct["next_action"] == "create_quality_children_from_ready_refs"
-    assert direct["quality_advice"]["phase"] == "quality_wave_ready"
-    assert set(direct["quality_advice"]["suggested_roles"]) == {"tester", "bug_finder", "acceptor"}
-    assert direct["quality_advice"]["ready_work_refs"][0]["run_id"] == "child-a"
-    assert direct["quality_advice"]["suggested_children"][0]["source_run_ids"] == ["child-a"]
 
 
 # LLM: QA self-reported failures should guide repair without forcing an automatic workflow.

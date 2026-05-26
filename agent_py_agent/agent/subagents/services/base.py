@@ -144,7 +144,7 @@ class SubAgentBaseService:
         workflow_mode controls workflow planning:
           - "off" : default, no workflow (backward compatible)
           - "plan" : run workflow planning, write result to task.workflow_plan
-          - "auto" : run workflow planning, auto-merge worker spec and parent gate into acceptance checklist
+          - "auto" : run workflow planning, auto-merge worker spec and closeout into acceptance checklist
         """
         # LLM: role contracts normalize reporter/checker semantics before workflow planning and persistence.
         from ..role_contracts import apply_role_contract_to_create_params

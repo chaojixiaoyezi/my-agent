@@ -1,5 +1,5 @@
 # LLM: Partial runner-result recovery is isolated so the main parser stays small and auditable.
-# 模块用途: 从尾部截断的 SUBAGENT_RESULT JSON 中恢复最小可验收结果；只接受带可追溯 refs 的证据包。
+# 模块用途: 从尾部截断的 SUBAGENT_RESULT JSON 中恢复最小可收口结果；只接受带可追溯 refs 的证据包。
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def extract_partial_subagent_result_text(text: str) -> str:
     if not _partial_result_is_safe(status, evidence_packets, blocked_reason, failure_type):
         return ""
     payload = {
-        "status": str(status or "AWAITING_ACCEPTANCE"),
+        "status": str(status or "DONE"),
         "summary": str(summary or "结构化结果尾部被截断，已从完整证据包恢复最小结果。"),
         "used_tools": _string_list(_json_field_value(leading, "used_tools")),
         "used_skills": _string_list(_json_field_value(leading, "used_skills")),
@@ -123,7 +123,7 @@ def _partial_result_is_safe(
     status_text = str(status or "").strip().upper()
     if status_text in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
         return bool(str(blocked_reason or failure_type or "").strip())
-    if status_text not in {"AWAITING_ACCEPTANCE", "COMPLETED", "DONE", "SUCCESS", "OK"}:
+    if status_text not in {"COMPLETED", "DONE", "SUCCESS", "OK"}:
         return False
     return any(_packet_has_traceable_ref(item) for item in evidence_packets)
 

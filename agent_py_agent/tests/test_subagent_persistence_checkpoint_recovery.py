@@ -32,14 +32,14 @@ def _create_checkpoint_recovery_task(manager: SubAgentManager, tmp_path: Path):
             {"name": "lint", "ok": True},
         ],
         "next_actions": ["补证据链"],
-        "next_action": "请求父级验收",
+        "next_action": "请求最终收口",
     }
     (tmp_path / task.id / "output.json").write_text(json.dumps(output_payload), encoding="utf-8")
     task.status = "BLOCKED"
     task.progress = 0.4
     task.current_step = "等待证据"
     task.latest_summary = "runner 已产出材料但证据不足。"
-    task.blockers = ["父级未验收"]
+    task.blockers = ["父级未收口"]
     task.artifact_refs = ["output.json"]
     task.evidence_refs = ["logs/focused.txt"]
     return task
@@ -57,7 +57,7 @@ def _assert_checkpoint_recovery_artifacts(tmp_path: Path, task) -> None:
     assert checkpoint["status"] == "BLOCKED"
     assert _path_text(checkpoint["checkpoint_ref"]).endswith("reports/checkpoint.json")
     assert _path_text(checkpoint["status_report_ref"]).endswith("reports/status_report.json")
-    assert checkpoint["blockers"] == ["父级未验收", "缺少验证证据"]
+    assert checkpoint["blockers"] == ["父级未收口", "缺少验证证据"]
     assert failing_tests["failing_tests"] == [
         {
             "name": "focused",
@@ -66,7 +66,7 @@ def _assert_checkpoint_recovery_artifacts(tmp_path: Path, task) -> None:
             "message": "assertion failed",
         }
     ]
-    assert next_actions["next_actions"][:2] == ["补证据链", "请求父级验收"]
+    assert next_actions["next_actions"][:2] == ["补证据链", "请求最终收口"]
     assert "runner 已产出材料但证据不足。" in progress_md
 
 

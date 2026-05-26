@@ -39,7 +39,7 @@ class PromptCaptureAcceptedBackend(BaseBackend):
             text=(
                 "[SUBAGENT_RESULT]\n"
                 "{\n"
-                '  "status": "AWAITING_ACCEPTANCE",\n'
+                '  "status": "DONE",\n'
                 '  "summary": "done",\n'
                 '  "used_tools": [],\n'
                 '  "used_skills": [],\n'
@@ -67,7 +67,7 @@ def test_subagent_runner_dry_run_and_execute():
         task = agent.subagents.create_run(
             goal="读取配置并总结",
             thought="只允许读取文件，不允许写文件。",
-            plan=["读取", "总结", "等待验收"],
+            plan=["读取", "总结", "等待收口"],
             allowed_tools=["read_file"],
             acceptance_checks=["输出里说明已读取的文件"],
         )
@@ -91,8 +91,8 @@ def test_subagent_runner_dry_run_and_execute():
 
         assert not executed.dry_run
         assert executed.ok
-        assert loaded.status == "AWAITING_ACCEPTANCE"
-        assert loaded.verification_status == "NEEDS_ACCEPTANCE"
+        assert loaded.status == "DONE"
+        assert loaded.verification_status == "VERIFIED"
         assert output["dry_run"] is False
         assert output["next_action"] == "run_acceptance"
         assert "read_file [filesystem]" in prompt
@@ -116,7 +116,7 @@ def test_subagent_runner_uses_child_system_prompt_not_parent_root_identity():
         task = agent.subagents.create_run(
             goal="写一个短报告",
             thought="只需要返回结构化结果。",
-            plan=["执行", "等待验收"],
+            plan=["执行", "等待收口"],
             agent_name="小傻妞-report",
             role="worker",
         )
@@ -305,7 +305,7 @@ def test_subagent_runner_repairs_missing_structured_output():
         task = agent.subagents.create_run(
             goal="检查 runner 结构化输出恢复",
             thought="模型可能完成了工作，但忘记结果块。",
-            plan=["执行", "修复格式", "等待验收"],
+            plan=["执行", "修复格式", "等待收口"],
             allowed_tools=[],
             acceptance_checks=["必须有可验收证据"],
         )
@@ -321,8 +321,8 @@ def test_subagent_runner_repairs_missing_structured_output():
         assert result.structured_repair_ok
         assert result.evidence_count == 1
         assert result.test_count == 1
-        assert loaded.status == "AWAITING_ACCEPTANCE"
-        assert loaded.verification_status == "NEEDS_ACCEPTANCE"
+        assert loaded.status == "DONE"
+        assert loaded.verification_status == "VERIFIED"
         assert "Structured Output Repair Response" in response
         runner_json = json.loads(Path(loaded.runner_result_json).read_text(encoding="utf-8"))
         output_json = json.loads(Path(loaded.output_json).read_text(encoding="utf-8"))
@@ -333,7 +333,7 @@ def test_subagent_runner_repairs_missing_structured_output():
 
 
 # LLM: coordinator finalization no longer rewrites status from child-status heuristics.
-# 函数用途: 子代理收尾只记录模型/工具事实，不再因为 child 已完成而把 tool-limit BLOCKED 改成待验收。
+# 函数用途: 子代理收尾只记录模型/工具事实，不再因为 child 已完成而把 tool-limit BLOCKED 改成待收口。
 def test_subagent_runner_does_not_override_coordinator_tool_limit_status():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -347,7 +347,7 @@ def test_subagent_runner_does_not_override_coordinator_tool_limit_status():
         agent.backend = CoordinatorToolLimitBlockedBackend()
         parent = agent.subagents.create_run(
             goal="root coordinator 只负责创建和验收直接 child",
-            thought="直接 child 完成后，root 应等待父级验收。",
+            thought="直接 child 完成后，root 应等待最终收口。",
             plan=["观察 child", "汇总 refs"],
             agent_name="root-coordinator",
             role="coordinator",
@@ -388,7 +388,7 @@ def test_subagent_runner_parser_uses_last_parseable_fenced_block():
         "# [SUBAGENT_RESULT]\n"
         "```json\n"
         "{\n"
-        '  "status": "AWAITING_ACCEPTANCE",\n'
+        '  "status": "DONE",\n'
         '  "summary": "真实 runner 输出里 JSON 被 Markdown fence 包住。",\n'
         '  "used_tools": ["read_file"],\n'
         '  "used_skills": [],\n'
@@ -410,7 +410,7 @@ def test_subagent_runner_parser_uses_last_parseable_fenced_block():
 
     assert parsed.found
     assert parsed.ok
-    assert parsed.status == "AWAITING_ACCEPTANCE"
+    assert parsed.status == "DONE"
     assert parsed.summary == "真实 runner 输出里 JSON 被 Markdown fence 包住。"
     assert parsed.used_tools == ["read_file"]
     assert parsed.evidence[0]["summary"] == "读取 SPEC.md"
@@ -423,7 +423,7 @@ def test_subagent_runner_parser_accepts_prefixed_json_block():
         "[SUBAGENT_RESULT]\n"
         "json\n"
         "{\n"
-        '  "status": "AWAITING_ACCEPTANCE",\n'
+        '  "status": "DONE",\n'
         '  "summary": "模型在 JSON 前多写了语言标签。",\n'
         '  "used_tools": [],\n'
         '  "used_skills": [],\n'

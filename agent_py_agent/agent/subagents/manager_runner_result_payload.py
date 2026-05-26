@@ -55,7 +55,7 @@ class BuildAndPersistContext:
     structured_evidence_count: int
     structured_request_count: int
     artifacts: list
-    # LLM: 输出载荷组装时保留可追溯证据包，供父级验收继续读取。
+    # LLM: 输出载荷组装时保留可追溯证据包，供最终收口继续读取。
     evidence_packets: list
     findings: list
     tests: list

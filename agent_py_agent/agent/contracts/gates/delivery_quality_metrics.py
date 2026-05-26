@@ -184,7 +184,7 @@ def _claim_metric_finding(
         evidence["expected_kind"] = expected_kind
     if actual_kind:
         evidence["actual_kind"] = actual_kind
-    return GateFinding(code, evidence=evidence)
+    return GateFinding(code, severity="advisory", evidence=evidence)
 
 
 # LLM: _text normalizes scalar values for exact comparisons only.

@@ -61,7 +61,7 @@ class TestExecutionContextRendering:
     def test_render_execution_context_explains_delegate_report_writes(self):
         """测试委托写入边界会说明报告类文件仍可写。
 
-        验证 tester/acceptor 不会因为 delegate 策略误以为自己不能写验收报告。
+        验证 tester/bug_finder 不会因为 delegate 策略误以为自己不能写验收报告。
         """
         context = SubAgentExecutionContext(
             run_id="run-report-boundary",
@@ -69,7 +69,7 @@ class TestExecutionContextRendering:
             goal="写测试报告",
             thought="思考",
             plan=["检查产物", "写报告"],
-            role="acceptor",
+            role="bug_finder",
             write_boundary={
                 "task_dir": "/tmp/task",
                 "allowed_write_roots": ["/tmp/task", "/tmp/deliverables"],
@@ -141,7 +141,7 @@ class TestExecutionContextRendering:
             quality_contract=QualityContract(
                 user_visible_goal="交付高质量代码",
                 quality_bar="代码可运行",
-                final_judge="parent_final_gate",
+                quality_note="normal_closeout",
             ),
         )
 
@@ -149,7 +149,7 @@ class TestExecutionContextRendering:
 
         assert "## Quality Contract" in result
         assert "交付高质量代码" in result
-        assert "parent_final_gate" in result
+        assert "normal_closeout" in result
 
     def test_render_execution_context_markdown_with_repair_contract_pack(self):
         """测试 repair context pack 会展示关键合同字段。"""
@@ -164,7 +164,7 @@ class TestExecutionContextRendering:
                 "summary": "同一个 run 内修复、执行、验证",
                 "contract": {
                     "schema": "subagent_repair_contract.v1",
-                    "kind": "parent_acceptance",
+                    "kind": "final_closeout",
                     "same_run_required_actions": ["repair_named_scope", "verify_target_artifacts"],
                     "target_artifact_refs": ["/tmp/out/report.xlsx"],
                 },

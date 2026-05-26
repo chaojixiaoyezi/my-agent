@@ -19,7 +19,7 @@ def _template(template_id: str) -> WorkflowTemplate:
         solves=["test"],
         fit_for=["test"],
         phases=[],
-        parent_acceptance=["test"],
+        final_checks=["test"],
     )
 
 

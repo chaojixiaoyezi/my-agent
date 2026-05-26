@@ -18,7 +18,6 @@ from ..subagents.models import (
 from ..subagents.services.action_options import ActionApplyOptions
 from ..subagents.services.dispatch_params import DispatchRecordParams, DispatchWatchRecordParams
 from .dispatch_record_params import (
-    AcceptanceRecordParams,
     ActionApplyRecordParams,
     CapabilityRouteRecordParams,
     PatchReviewRecordParams,

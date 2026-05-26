@@ -204,7 +204,7 @@
 我们借鉴的方向：
 
 - 后续只把通用 runtime card 和 message route 变成机器合同
-- 专项真实任务只留在测试 fixture 和最终验收，不进入生产合同
+- 专项真实任务只留在测试 fixture 和最终收口，不进入生产合同
 
 ---
 
@@ -246,7 +246,7 @@
 - 子代理状态摘要在未完成时附带 child 摘要和 refs，作为返工提示，而不是只列 run_id/status。
 - 同批创建的子代理会拿到 `sibling_roster` context pack，里面只有 peer 的 `run_id/name/role/goal` 等控制面身份事实，不包含未来产物路径。这样 coordinator 不必靠父级自然语言记住 10 个兄弟是谁，也不会把 peer 的未来 `output_refs/output_files` 当成当前可读资料。
 
-这不是新验收硬门，只是把已有机器事实放到模型最容易看到的位置。父级仍然要由 LLM 自己判断如何继续调度、接管、修正汇总或向用户报告阻塞。
+这不是新收口交给父级仍然要由 LLM 自己判断如何继续调度、接管、修正汇总或向用户报告阻塞。
 
 随后真实复验 `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-144053` 暴露了另一条更底层的协作合同缺口：模型创建 11 个子代理以后，尚未 `dispatch_subagents`，却尝试提交验收或让用户确认“等子代理完成”。修复方向是通用合同语义，而不是给这个场景写专项流程：
 
@@ -309,7 +309,7 @@
 
 阶段 5：入口合同门接主运行链路。`registry_execution.py` 的真实工具入口已接入韧性层；delivery closeout 已接入 Doctor，合同结构失败走返工循环，不再静默跳过或假完成。
 
-阶段 6：非真实环境补测。新增 focused tests 覆盖 Doctor、工具韧性、物化器接线、closeout 接线，并回归 bootstrap、repair、collection、staged writer 等现有入口门。当前仍坚持：真实任务只做最终验收，日常开发以离线合同、fake tool、fake model 和 replay 为主。
+阶段 6：非真实环境补测。新增 focused tests 覆盖 Doctor、工具韧性、物化器接线、closeout 接线，并回归 bootstrap、repair、collection、staged writer 等现有入口门。当前仍坚持：真实任务只做最终收口，日常开发以离线合同、fake tool、fake model 和 replay 为主。
 
 ### Delivery Quality Gate 阶段 0-6
 
@@ -916,7 +916,7 @@ TaskTree 是多 Agent 前置能力，不是真正启动子 Agent。第一版只�
 核心原则：
 
 - 不频繁提交代码；只有完成一个稳定批次、验证通过后再提交。
-- 真实任务不是主要调试方式；真实任务只做最终验收和失败样本来源。
+- 真实任务不是主要调试方式；真实任务只做最终收口和失败样本来源。
 - 发现问题先看 `/Users/example/study-agent/all-agent/` 下的参考项目，再做本仓库通用修复。
 - 禁止专项合同；产品代码不能为了某个网页、表格、论文、站点或 prompt 样例写专门分支。
 - 禁止代码依赖普通自然语言文本作为机器事实来源；机器判断必须来自结构化字段、状态、refs、schema、工具记录、文件系统事实或显式配置。

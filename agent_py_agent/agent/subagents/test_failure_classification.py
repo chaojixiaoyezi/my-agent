@@ -1,4 +1,4 @@
-# LLM: Classify parent test execution outcomes into compact rescue-routing categories.
+# LLM: Classify result check execution outcomes into compact rescue-routing categories.
 # 模块用途: 根据 test_execution.json 的摘要判断失败类型，写 refs-only 分类报告，不展开大输出正文。
 
 from __future__ import annotations
@@ -185,7 +185,7 @@ def _primary_category(counts: dict[str, int]) -> str:
 # 函数用途: 给后续 repair/rescue 流程提供稳定动作词，而不是直接解析文本。
 def _recommended_action(category: str) -> str:
     if category == "passed":
-        return "apply_acceptance"
+        return "summarize_or_deliver"
     if category in {"assertion_failure", "syntax_or_import_error", "runtime_failure"}:
         return "repair_code"
     if category in {"command_rejected", "not_executed", "runner_output_missing_tests"}:

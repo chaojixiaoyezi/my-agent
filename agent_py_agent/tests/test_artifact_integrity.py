@@ -9,7 +9,7 @@ from agent_py_agent.agent.tooling.artifact_integrity import (
 )
 
 
-# LLM: artifact integrity should catch files that are incomplete before parent acceptance.
+# LLM: artifact integrity should catch files that are incomplete before closeout.
 # 函数用途: 验证 HTML 产物少了结束标签时会被机器检查识别为不可验收。
 def test_artifact_integrity_detects_incomplete_html(tmp_path: Path) -> None:
     artifact = tmp_path / "artifacts" / "index.html"
@@ -39,7 +39,7 @@ def test_artifact_integrity_detects_content_after_html_close(tmp_path: Path) -> 
     assert "content_after_html_close" in result.blocker_codes
 
 
-# LLM: post-write feedback should point models at fake hash links before parent acceptance.
+# LLM: post-write feedback should point models at fake hash links before closeout.
 # 函数用途: 写 HTML 后即时提示 href="#"，减少 runner 写完后继续空转或把假链接报成完成。
 def test_html_post_write_note_warns_placeholder_hash_links(tmp_path: Path) -> None:
     artifact = tmp_path / "artifacts" / "index.html"

@@ -10,7 +10,7 @@ def test_subagent_result_text_converts_to_typed_envelope():
     text = (
         "[SUBAGENT_RESULT]\n"
         "{"
-        '"status":"AWAITING_ACCEPTANCE",'
+        '"status":"DONE",'
         '"summary":"display only",'
         '"used_tools":["fake_from_model"],'
         '"artifacts":[{"path":"out.txt","kind":"file","summary":"output"}],'
@@ -36,7 +36,7 @@ def test_subagent_result_text_converts_to_typed_envelope():
     assert envelope.kind == "subagent_result"
     assert envelope.result_id == "result-1"
     assert envelope.run_id == "run-1"
-    assert envelope.status == "AWAITING_ACCEPTANCE"
+    assert envelope.status == "DONE"
     assert envelope.summary == "display only"
     assert envelope.actual_tools == ["read_file"]
     assert envelope.artifact_refs[0].path == "out.txt"
@@ -48,7 +48,7 @@ def test_subagent_result_text_converts_to_typed_envelope():
 def test_subagent_result_envelope_does_not_infer_tools_from_summary():
     text = (
         "[SUBAGENT_RESULT]\n"
-        '{"status":"AWAITING_ACCEPTANCE","summary":"I used read_file and write_file"}\n'
+        '{"status":"DONE","summary":"I used read_file and write_file"}\n'
         "[/SUBAGENT_RESULT]"
     )
 
@@ -64,13 +64,13 @@ def test_subagent_result_envelope_does_not_infer_tools_from_summary():
     assert envelope.actual_tools == []
 
 
-# LLM: Real runners sometimes say deliverables; parser must normalize that before parent acceptance.
+# LLM: Real runners sometimes say deliverables; parser must normalize that before closeout.
 # 函数用途: 复现真实 E2E 中模型把 artifacts 写成 deliverables 后父级漏测产物的问题。
 def test_subagent_result_accepts_deliverables_alias_for_artifacts():
     text = (
         "[SUBAGENT_RESULT]\n"
         "{"
-        '"status":"AWAITING_ACCEPTANCE",'
+        '"status":"DONE",'
         '"summary":"homepage written",'
         '"deliverables":[{"path":"deliverables/site-output/index.html","kind":"html"}],'
         '"files":[{"summary":"not a path"}],'
@@ -91,7 +91,7 @@ def test_subagent_result_envelope_accepts_deliverables_alias_for_artifacts():
     text = (
         "[SUBAGENT_RESULT]\n"
         "{"
-        '"status":"AWAITING_ACCEPTANCE",'
+        '"status":"DONE",'
         '"summary":"homepage written",'
         '"deliverables":[{"path":"deliverables/site-output/index.html","kind":"html"}]'
         "}\n"
@@ -117,7 +117,7 @@ def test_subagent_result_recovers_artifact_from_evidence_path():
     text = (
         "[SUBAGENT_RESULT]\n"
         "{"
-        '"status":"AWAITING_ACCEPTANCE",'
+        '"status":"DONE",'
         '"summary":"homepage written",'
         '"evidence":[{"kind":"artifact","path":"/tmp/site/index.html","summary":"HTML"}],'
         '"artifacts":[]'
@@ -137,7 +137,7 @@ def test_subagent_result_recovers_artifact_from_evidence_packet_refs():
     text = (
         "[SUBAGENT_RESULT]\n"
         "{"
-        '"status":"AWAITING_ACCEPTANCE",'
+        '"status":"DONE",'
         '"summary":"homepage written",'
         '"evidence_packets":[{"claim":"HTML exists","artifact_refs":["/tmp/site/index.html"]}],'
         '"artifacts":[]'
@@ -152,7 +152,7 @@ def test_subagent_result_recovers_artifact_from_evidence_packet_refs():
 
 
 # LLM: Repair workers often report changed files instead of repeating the canonical artifact list.
-# 函数用途: 确认 files_modified 字符串列表会补成 artifacts，避免父级验收漏跑修复后的产物。
+# 函数用途: 确认 files_modified 字符串列表会补成 artifacts，避免最终收口漏跑修复后的产物。
 def test_subagent_result_recovers_artifact_from_files_modified():
     text = (
         "[SUBAGENT_RESULT]\n"

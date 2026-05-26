@@ -117,7 +117,7 @@ def test_runner_candidates_keep_creation_order_without_hidden_role_phase():
 # 函数用途: tester/bug_finder/coordinator 都是普通候选，不再由 runtime 偷偷按阶段卡住。
 def test_runner_selection_does_not_hide_requested_quality_roles():
     inherited_contract = (
-        "父级要求至少创建 tester / bug_finder / acceptor；"
+        "父级要求至少创建 tester / bug_finder；"
         "当前 coordinator 先创建下一层 worker，不要自己做 QA。"
     )
     tasks = [

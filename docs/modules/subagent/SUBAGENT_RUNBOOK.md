@@ -36,13 +36,13 @@
 - 默认 dry-run。
 - 能力授权可审计。
 - DONE 需要证据。
-- runner 不直接标记 DONE，只进入待验收。
+- runner 不直接标记 DONE，只进入待收口。
 
 ## 质量契约与受控施工队模式
 
 这轮讨论确认了一个重要边界：子代理不是“平行主代理”，而是受控施工队。
 
-子代理可以更像主代理，拿到足够的上下文、记忆和质量标准；但它不能成为项目经理，不能自己定义完成标准，也不能直接决定最终交付。父会话负责定义标准、裁决边界、验收产物和决定是否交付。
+子代理可以更像主代理，拿到足够的上下文、记忆和质量标准；但它不能成为项目经理，不能自己定义完成标准，也不能直接决定最终交付。父会话负责定义标准、裁决边界、检查产物和决定是否交付。
 
 完整模块设计见 `docs/design/subagent-quality-contract.md`；本 runbook 保留操作层规则和落地检查。
 
@@ -50,7 +50,7 @@
 - 子代理只收到“动作目标”，例如下载、翻译、生成、检查，却没有收到“成品质量目标”。
 - 子代理容易把文件存在、命令成功、页数匹配、检查脚本通过当成任务成功。
 - 模糊边界处最容易出错，例如主论文/附录/系统卡判定，正文/参考文献/补充材料判定，原文排版问题/翻译破坏判定。
-- 父会话派工和验收如果只写工程化指标，会把低质量结果放大成“已完成”。
+- 父会话派工和检查如果只写工程化指标，会把低质量结果放大成“已完成”。
 - 子代理总结不是结论，只是待审核材料；不能因为它说 PASS 就信。
 - 全量塞入长 prompt 不等于继承责任感，反而可能稀释重点、增加成本和让多个子代理都误以为自己是总负责人。
 
@@ -94,7 +94,7 @@ Core Context Pack 应包含：
 - 不能只说完成，必须落盘证据。
 - 不确定必须列风险。
 - 不准擅自降级目标。
-- 只能提交待验收材料，最终裁决属于父会话/用户。
+- 只能提交待收口材料，最终裁决属于父会话/用户。
 - 子代理输出必须足够让父代理复核，不能把关键事实只留在自己的推理里。
 
 Task Context Pack 应包含：
@@ -166,7 +166,7 @@ critic 的提示词要和 producer 不同。它的目标不是证明完成，而
 - 是否像正式交付。
 - 用户打开后是否舒服。
 
-所以最终验收必须保留父会话/用户审美权。对于 PDF/文档交付，最终抽查至少覆盖：
+所以最终交付必须保留父会话/用户审美权。对于 PDF/文档交付，最终抽查至少覆盖：
 - 第一页。
 - 中间正文。
 - 后半段。
@@ -211,7 +211,7 @@ agent_py_agent/quality_profiles/
 
 短期：
 - 在 `SubAgentTask` / `execution_context` 增加质量契约字段。
-- runner prompt 明确“不能定义完成标准，只能提交待验收材料”。
+- runner prompt 明确“不能定义完成标准，只能提交待收口材料”。
 - acceptance 报告显示质量契约是否存在、证据是否覆盖抽查计划。
 - dispatch 支持 `producer` / `critic` / `reviewer` 角色。
 
@@ -264,7 +264,7 @@ Task Context Pack、Role Context Pack，并按 sampling_plan 抽查后半段和 
 - execution context 默认包含 core context pack。
 - dispatch 默认写 context manifest。
 - acceptance 默认检查质量契约覆盖情况。
-- 子代理输出和父代理验收全部落盘，便于恢复和复查。
+- 子代理输出和普通收口全部落盘，便于恢复和复查。
 
 #### 哪些应该做成开关
 
@@ -275,7 +275,7 @@ Task Context Pack、Role Context Pack，并按 sampling_plan 抽查后半段和 
 - `subagent_workspace`: 子代理运行记录目录。
 - `subagent_role_template_dirs`: 额外角色模板目录；空列表表示内置模板 + 工作区模板。
 - `subagent_debug_trace_level`: 0-5 调试追踪等级，默认关闭。
-- `acceptance_execute_tests` / `acceptance_test_timeout_seconds`: 父级验收是否真实执行测试，以及单条测试超时。
+- `result_check_execute_tests` / `result_check_timeout_seconds`: 最终收口是否真实执行测试，以及单条测试超时。
 
 其他更细的质量模式、上下文预算、QA 拓扑、修复轮数和调度细节先由系统内部策略/LLM 判断，不再作为普通用户默认配置项。需要面向企业/外部用户暴露时，再通过 workflow 或高阶 profile 统一打开，而不是继续堆几十个微参数。
 
@@ -307,7 +307,7 @@ Task Context Pack、Role Context Pack，并按 sampling_plan 抽查后半段和 
 
 验收：
 - 创建工单后能看到质量契约字段。
-- runner prompt 能显示“不能定义完成标准，只能提交待验收材料”。
+- runner prompt 能显示“不能定义完成标准，只能提交待收口材料”。
 - 旧工单缺字段时兼容读取。
 
 #### Phase 2: 质量 profile 和自动任务分类
@@ -465,7 +465,7 @@ grant 会合并进子代理的 `allowed_skills` / `allowed_tools`。
 - allowed skills / tools。
 - granted cards。
 - 写入边界。
-- 验收要求。
+- 交付要求。
 - 已有证据。
 - open request / gap。
 - 执行硬规则。
@@ -481,7 +481,7 @@ runner 执行后会写：
 - `logs/runner_response.md`
 - `output.json`
 
-这些文件是后续验收器、集成器和父代理接管的事实源。
+这些文件是后续检查器、集成器和父代理接管的事实源。
 
 ## 标准工单目录
 
@@ -583,7 +583,7 @@ python3 -m agent_py_agent subagents-due-check
 会检查：
 - 工单文件是否缺失。
 - DONE 是否缺证据。
-- DONE 是否未验收。
+- DONE 是否未收口。
 - 是否长时间无心跳。
 - 是否运行超时。
 - 是否有 open capability request。
@@ -772,7 +772,7 @@ python3 -m agent_py_agent subagent-run <run_id> --execute
 ```text
 [SUBAGENT_RESULT]
 {
-  "status": "AWAITING_ACCEPTANCE",
+  "status": "DONE",
   "summary": "本轮完成或卡住的摘要",
   "used_tools": [],
   "used_skills": [],
@@ -837,7 +837,7 @@ python3 -m agent_py_agent subagent-run <run_id> --execute
 runner 不应该直接让任务变成 DONE。
 
 推荐：
-- `AWAITING_ACCEPTANCE`：任务执行完，等待验收。
+- `DONE`：任务执行完，等待收口。
 - `BLOCKED`：缺能力、缺上下文、缺权限或遇到明确阻塞。
 - `FAILED`：执行失败。
 
@@ -970,7 +970,7 @@ python3 -m agent_py_agent subagents-patches --apply --run-id <run_id>
 注意：
 - patch 审核器只审核 runner 已声明的 patch 状态。
 - 当前不会自动应用未知 diff 或改动文件。
-- applied patch 如果没有 `review_status=APPROVED`，父代理验收会继续阻断。
+- applied patch 如果没有 `review_status=APPROVED`，普通收口会继续阻断。
 
 ## 父代理调度
 
@@ -1009,7 +1009,7 @@ python3 -m agent_py_agent daemon
 `daemon` 读取 `agent_config.yaml` 里的 `daemon_*` 配置，适合把常驻参数收进配置文件，日常启动时少打长命令。
 
 配置分两层：
-- 子代理用户层配置：默认只暴露 `enable_subagents`、`subagent_mode`、`max_subagents`、`subagent_workspace`、`subagent_role_template_dirs`、`subagent_debug_trace_level` 和父级验收两项。普通用户不需要判断每个角色用什么工具、上下文给多少、一次派几个叶子。
+- 子代理用户层配置：默认只暴露 `enable_subagents`、`subagent_mode`、`max_subagents`、`subagent_workspace`、`subagent_role_template_dirs`、`subagent_debug_trace_level` 和最终收口两项。普通用户不需要判断每个角色用什么工具、上下文给多少、一次派几个叶子。
 - 能力路由配置：`capability_config.yaml` 默认只保留开关、上抛层数和授权过期。具体给哪个子代理什么工具，默认由任务包、角色模板和 LLM 判断，不要求用户逐个填写。
 - 当前前台 daemon 高级参数：`daemon_max_runners: "auto"` 会先映射成保守值 1；`daemon_max_cycles=0` 表示持续运行；`daemon_limit=0` 表示不限制记录条数；`daemon_max_cards=0` 表示不限制能力卡数量；`daemon_interval=0` 通常只用于测试或单轮验证。
 
@@ -1056,29 +1056,29 @@ python3 -m agent_py_agent subagents-dispatch --watch --max-cycles 1 --interval 0
 - 如果确认旧 lock 是异常退出残留，可以用 `--force-lock` 覆盖。
 - 独立 daemon 可以在这条稳定的 watch 命令之上再实现。
 
-## 父代理验收
+## 普通收口
 
 默认 dry-run：
 
 ```bash
-python3 -m agent_py_agent subagents-acceptance
+python3 -m agent_py_agent subagents-tests
 ```
 
 指定 run：
 
 ```bash
-python3 -m agent_py_agent subagents-acceptance --run-id <run_id>
+python3 -m agent_py_agent subagents-tests --run-id <run_id>
 ```
 
 真正写回：
 
 ```bash
-python3 -m agent_py_agent subagents-acceptance --apply --run-id <run_id>
+python3 -m agent_py_agent subagents-tests --apply --run-id <run_id>
 ```
 
 验收器会检查：
 - 工单现场是否完整。
-- run 是否处于 `AWAITING_ACCEPTANCE` / `NEEDS_ACCEPTANCE`。
+- run 是否处于 `DONE` / `VERIFIED`。
 - channel 是否不是 `BROKEN`。
 - runner 结构化输出是否可解析。
 - 是否至少有一条 ok evidence。
@@ -1093,9 +1093,9 @@ python3 -m agent_py_agent subagents-acceptance --apply --run-id <run_id>
 输出：
 - 全局 `subagent_acceptance_report.json`
 - 全局 `SUBAGENT_ACCEPTANCE.md`
-- 单任务 `reports/acceptance_review.json`
-- 单任务 `ACCEPTANCE_REVIEW.md`
-- apply 时追加 `subagent_acceptance_log.jsonl` 和 `ACCEPTANCE_REVIEW_LOG.md`
+- 单任务 `reports/runner_result.json`
+- 单任务 `RUNNER_RESULT.md`
+- apply 时追加 `subagent_result_log.jsonl` 和 `RUNNER_RESULT_LOG.md`
 
 写回规则：
 - 通过并 apply：`DONE + VERIFIED`
@@ -1110,7 +1110,7 @@ python3 -m agent_py_agent subagents-acceptance --apply --run-id <run_id>
 PLANNING
 RUNNING
 BLOCKED
-AWAITING_ACCEPTANCE
+DONE
 DONE
 FAILED
 TIMEOUT
@@ -1121,7 +1121,7 @@ TAKEN_OVER
 当前 runner 真执行成功后：
 
 ```text
-AWAITING_ACCEPTANCE + NEEDS_ACCEPTANCE
+DONE + VERIFIED
 ```
 
 如果结构化输出有 `capability_requests` 或 `blocked_reason`：
@@ -1192,7 +1192,7 @@ failure_type = structured_output_parse_error
 优先级高：
 - worker / session pool 升级：当前已有保守 runner 并发线程池，但还缺真正的进程级 worker pool、session pool、启动速率控制和长期心跳治理。
 - subagent 独立服务化：当前 `daemon` 是前台常驻 dispatch；还缺 subagent 自身的系统服务封装、外部停止控制和更正式的 scheduler。
-- 验收层增强：从 `output.json.tests` / `artifacts` 自动生成验收任务，并把证据事实、worker 自述和父级结论分层展示。
+- 收口交给父级结论分层展示。
 - patch 集成器深化：当前已有 patch review/apply service，后续还要按权限、owner、审核结果和集成测试做更完整的受控集成验收。
 - learning draft 提升链路：当前 `enable_self_learning=true` 会生成候选草稿；还缺从 accepted draft 到正式 skill / rule / profile 的人工确认提升流程。
 - 跨层能力上抛：父代理找不到时继续向爷代理或更高层抛。

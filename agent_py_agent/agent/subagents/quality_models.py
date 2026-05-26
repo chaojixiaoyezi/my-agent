@@ -6,7 +6,7 @@ from __future__ import annotations
 """quality contract dataclasses shared by subagent task and workflow state.
 
 给人看的解释：
-这里只放父会话传给子代理的质量标准和上下文清单，避免核心 models.py 继续膨胀。
+这里只放任务质量标准和上下文清单，避免核心 models.py 继续膨胀。
 """
 
 from dataclasses import dataclass, field
@@ -28,9 +28,6 @@ class QualityContract:
     evidence_required: list[str] = field(default_factory=list)
     risk_report_required: str = ""
     allowed_degradation: list[str] = field(default_factory=list)
-    final_judge: str = "parent_final_gate"
-    cannot_self_accept: bool = True
-    parent_final_gate: bool = True
 
 
 # LLM: ContextManifest 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

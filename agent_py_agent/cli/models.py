@@ -144,7 +144,6 @@ class SubagentsDispatchOptions:
 
     apply: bool
     execute_runners: bool
-    execute_acceptance_tests: bool
     planner: bool
     workflow_mode: str
     max_runners: int

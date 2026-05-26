@@ -43,6 +43,7 @@ class SubAgentManagerInitParams:
     enable_self_learning: bool = False
     debug_trace_level: int = 0
     takeover_chain_max_depth: int = 0
+    closeout_for_all_task_nodes: bool = False
 
 
 # LLM: SubAgentBaseMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
@@ -63,6 +64,7 @@ class SubAgentBaseMixin:
         workspace_roots: list[str | Path] | None = None,
         role_template_dirs: list[str | Path] | None = None,
         enable_self_learning: bool = False,
+        closeout_for_all_task_nodes: bool = False,
     ):
         params = params or SubAgentManagerInitParams(
             local_store=local_store,
@@ -71,6 +73,7 @@ class SubAgentBaseMixin:
             workspace_roots=workspace_roots,
             role_template_dirs=role_template_dirs,
             enable_self_learning=enable_self_learning,
+            closeout_for_all_task_nodes=closeout_for_all_task_nodes,
         )
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -83,6 +86,7 @@ class SubAgentBaseMixin:
         self.enable_self_learning = bool(params.enable_self_learning)
         self.debug_trace_level = _normalize_debug_trace_level(params.debug_trace_level)
         self.takeover_chain_max_depth = max(0, int(params.takeover_chain_max_depth or 0))
+        self.closeout_for_all_task_nodes = bool(params.closeout_for_all_task_nodes)
 
         from .services.base import SubAgentBaseService
         from .services.lifecycle import SubAgentLifecycleService

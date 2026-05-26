@@ -10,7 +10,7 @@ from .orchestration_run_scope import remembered_orchestration_run_ids
 # LLM: board_actionable_run_ids puts status buckets before verbose board rows for LLM recovery.
 # 函数用途: 把看板条目按状态整理成可继续 dispatch、验收或排障的 run id 列表，方便模型先看到关键 id。
 def board_actionable_run_ids(items) -> dict[str, list[str]]:
-    buckets = {"planning": [], "running": [], "awaiting_acceptance": [], "blocked": [], "done": []}
+    buckets = {"planning": [], "running": [], "blocked": [], "done": []}
     for item in items:
         status = str(item.status or "").lower()
         key = status if status in buckets else ""
@@ -39,7 +39,7 @@ def scoped_board_items(agent: object, items) -> list:
 
 
 # LLM: board_completion_status puts the “do not report done yet” fact at the top of board payloads.
-# 函数用途: 根据看板条目生成模型可读的完成状态和下一步建议，避免父级把 AWAITING_ACCEPTANCE 误当完成。
+# 函数用途: 根据看板条目生成模型可读的完成状态和下一步建议，避免父级把未完成子任务误当完成。
 def board_completion_status(items) -> dict[str, object]:
     verified_targets = _verified_target_tokens(items)
     blockers = [
@@ -110,43 +110,22 @@ def _item_blocks_completion(item, verified_targets: set[str]) -> bool:
     return status not in {"DONE"} or verification != "VERIFIED"
 
 
-# LLM: Board advice separates acceptance-only continuation from real runner dispatch.
-# 函数用途: 全部阻塞项都在等待父级验收时，只建议跑验收 tests；不要再误触发 runner。
+# LLM: Board advice suggests continuing unfinished direct children.
+# 函数用途: 看板只给继续推进建议；不再生成最终收口-only 路径。
 def _suggested_dispatch_tool_call(items, blockers: list[str]) -> dict[str, object]:
-    blocking_items = [_item_by_id(items, run_id) for run_id in blockers[:20]]
-    acceptance_only = bool(blocking_items) and all(
-        item is not None and _item_waiting_for_acceptance(item)
-        for item in blocking_items
-    )
     payload: dict[str, object] = {
         "tool": "dispatch_subagents",
         "apply": True,
-        "execute_runners": not acceptance_only,
-        "execute_acceptance_tests": True,
-        "auto_apply_acceptance_followup": True,
-        "workflow_mode": "off" if acceptance_only else "execute",
+        "execute_runners": True,
+        "workflow_mode": "execute",
         "run_ids": blockers[:20],
     }
-    if not acceptance_only:
-        payload["max_runners"] = min(len(blockers), 8) or 1
+    payload["max_runners"] = min(len(blockers), 8) or 1
     return payload
 
 
-def _item_by_id(items, run_id: str):
-    for item in items:
-        if str(getattr(item, "id", "") or "") == run_id:
-            return item
-    return None
-
-
-def _item_waiting_for_acceptance(item) -> bool:
-    status = str(getattr(item, "status", "") or "").upper()
-    verification = str(getattr(item, "verification_status", "") or "").upper()
-    return status == "AWAITING_ACCEPTANCE" or verification == "NEEDS_ACCEPTANCE"
-
-
 # LLM: _verified_target_tokens lets board completion mirror final closeout's repair coverage semantics.
-# 函数用途: 汇总 DONE/VERIFIED 行的产物 token，让旧失败/待验收 run 被后续已验收修复覆盖时不再误报阻塞。
+# 函数用途: 汇总 DONE/VERIFIED 行的产物 token，让旧失败/待收口 run 被后续已验收修复覆盖时不再误报阻塞。
 def _verified_target_tokens(items) -> set[str]:
     tokens: set[str] = set()
     for item in items:

@@ -33,7 +33,7 @@ def _parsed_output_with_lessons(lesson_text: str) -> SubAgentParsedOutput:
     return parse_subagent_runner_output(
         "[SUBAGENT_RESULT]\n"
         "{\n"
-        f'  "status": "AWAITING_ACCEPTANCE",\n'
+        f'  "status": "DONE",\n'
         f'  "summary": "整理出 lesson",\n'
         f'  "lessons": [{json.dumps(lesson_text)}],\n'
         f'  "evidence": [{{"kind": "note", "summary": "有 lesson", "ok": true}}],\n'
@@ -49,7 +49,7 @@ def _sample_parsed_output_with_lesson() -> SubAgentParsedOutput:
     return parse_subagent_runner_output(
         "[SUBAGENT_RESULT]\n"
         "{\n"
-        '  "status": "AWAITING_ACCEPTANCE",\n'
+        '  "status": "DONE",\n'
         '  "summary": "生成 lesson",\n'
         '  "lessons": ["先读现有测试，再补最小回归，再改实现"],\n'
         '  "evidence": [{"kind": "note", "summary": "有 lesson", "ok": true}],\n'

@@ -183,7 +183,13 @@ class TestNormalizeSubagentAgentConfig:
             key
             for key in visible
             if key.startswith("subagent_")
-            or key in {"enable_subagents", "max_subagents", "acceptance_execute_tests", "acceptance_test_timeout_seconds"}
+            or key in {
+                "enable_subagents",
+                "max_subagents",
+                "result_check_execute_tests",
+                "result_check_timeout_seconds",
+                "closeout_for_all_task_nodes",
+            }
         }
         assert exposed == {
             "enable_subagents",
@@ -192,8 +198,9 @@ class TestNormalizeSubagentAgentConfig:
             "max_subagents",
             "subagent_workspace",
             "subagent_role_template_dirs",
-            "acceptance_execute_tests",
-            "acceptance_test_timeout_seconds",
+            "result_check_execute_tests",
+            "result_check_timeout_seconds",
+            "closeout_for_all_task_nodes",
         }
 
     def test_hidden_subagent_compat_limits_default_to_unrestricted(self):

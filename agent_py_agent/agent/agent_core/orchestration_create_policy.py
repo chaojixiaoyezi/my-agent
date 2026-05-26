@@ -79,14 +79,14 @@ def _has_child_dispatch_tool(raw_params: dict[str, object]) -> bool:
 
 
 # LLM: _role_identity_is_quality protects QA templates from being rewritten just because they can inspect boards.
-# 函数用途: tester/bug_finder/acceptor 这类质量角色可拥有调度/看板工具，但角色身份不能被改成 coordinator。
+# 函数用途: tester/bug_finder 这类质量角色可拥有调度/看板工具，但角色身份不能被改成 coordinator。
 def _role_identity_is_quality(raw_params: dict[str, object]) -> bool:
     identity = f"{raw_params.get('role') or ''} {raw_params.get('agent_name') or ''}"
-    return role_template_id_for_role(identity, fallback="") in {"tester", "bug_finder", "acceptor"}
+    return role_template_id_for_role(identity, fallback="") in {"tester", "bug_finder"}
 
 
 # LLM: _should_disable_generic_workflow_for_concrete_worker prevents simple deliverable workers from growing workflow children.
-# 函数用途: 明确文件交付 worker 直接干活，QA/验收由父级按实际完成状态再派。
+# 函数用途: 明确文件交付 worker 直接干活，QA/收口交给上级按实际完成状态再派。
 def _should_disable_generic_workflow_for_concrete_worker(
     raw_params: dict[str, object],
     goal: str,
@@ -257,9 +257,9 @@ def _create_plan(raw_params: dict[str, object]) -> list[str]:
             "理解父级目标和可用资料",
             *task_hints,
             "汇总下级结果、证据 refs 和阻塞项",
-            "等待父代理验收",
+            "交回真实结果和证据",
         ]
-    return ["理解目标", "执行任务", "产出证据", "等待父代理验收"]
+    return ["理解目标", "执行任务", "产出证据", "交回真实结果和证据"]
 
 
 # LLM: _child_task_hint_plan turns 长期助手 nested tasks into readable coordinator steps.

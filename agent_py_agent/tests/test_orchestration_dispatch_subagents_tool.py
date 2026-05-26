@@ -68,8 +68,8 @@ class TestDispatchSubagentsToolExecute:
 
         assert result.ok is True
 
-    def test_top_level_execute_runners_defaults_acceptance_test_closure(self):
-        """顶层真实跑 runner 时，默认进入受控验收测试和通过后自动闭环。"""
+    def test_top_level_execute_runners_dispatches_plain_runner(self):
+        """顶层真实跑 runner 时，只推进 runner，并返回普通调度结果。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
         mock_report = MagicMock()
@@ -89,36 +89,7 @@ class TestDispatchSubagentsToolExecute:
 
         assert result.ok is True
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
-        assert call_kwargs["params"].execute_acceptance_tests is True
-        assert call_kwargs["params"].auto_apply_acceptance_followup is True
-
-    def test_model_cannot_skip_acceptance_tests_for_live_runner_dispatch(self):
-        """模型工具调用误写 false 时，真实 runner 仍必须进入父级验收。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
-
-        mock_report = MagicMock()
-        mock_report.dry_run = False
-        mock_report.summary = "真实执行"
-        mock_report.records = []
-
-        mock_agent = MagicMock()
-        mock_agent._current_subagent_run_id = ""
-        mock_agent.config.subagent_workflow_mode = "off"
-        mock_agent.tools.specs.return_value = []
-        mock_agent.dispatch_subagents.return_value = mock_report
-        mock_agent.subagents.workspace = Path("/tmp/workspace")
-        mock_agent.subagents.list_runs.return_value = []
-
-        result = DispatchSubagentsTool(mock_agent).execute({
-            "apply": True,
-            "execute_runners": True,
-            "execute_acceptance_tests": False,
-        })
-
-        assert result.ok is True
-        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
-        assert call_kwargs["params"].execute_acceptance_tests is True
-        assert call_kwargs["params"].auto_apply_acceptance_followup is True
+        assert call_kwargs["params"].execute_runners is True
 
     def test_dispatch_exact_run_ids_are_passed_to_params(self):
         """run_ids 让父 runner 精确指定本轮孩子执行顺序。"""
@@ -363,8 +334,6 @@ class TestDispatchSubagentsToolRunnerContext:
         assert call_kwargs["params"].workflow_mode == "off"
         assert call_kwargs["params"].parent_run_id == "subagent-root"
         assert call_kwargs["params"].exclude_run_ids == ["subagent-root"]
-        assert call_kwargs["params"].execute_acceptance_tests is True
-        assert call_kwargs["params"].finalize_acceptance is True
 
     def test_runner_context_dispatch_defaults_to_execute_direct_children(self):
         """runner 内部省略 apply/execute 时，默认推进当前节点的直接孩子。"""
@@ -390,11 +359,9 @@ class TestDispatchSubagentsToolRunnerContext:
         call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
         assert call_kwargs["params"].apply is True
         assert call_kwargs["params"].execute_runners is True
-        assert call_kwargs["params"].execute_acceptance_tests is True
         assert call_kwargs["params"].max_runners == 6
         assert call_kwargs["params"].parent_run_id == "subagent-root"
         assert call_kwargs["params"].exclude_run_ids == ["subagent-root"]
-        assert call_kwargs["params"].finalize_acceptance is True
 
     def test_execute_limit_aliases_runner_count_when_max_runners_missing(self):
         """真实执行时，模型只写 limit 也应按 runner 数量推进，避免误退回单线程。"""

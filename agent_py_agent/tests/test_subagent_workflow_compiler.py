@@ -15,7 +15,7 @@ def _template(phases: list[WorkflowPhase]) -> WorkflowTemplate:
         solves=["testable work"],
         fit_for=["unit tests"],
         phases=phases,
-        parent_acceptance=["parent checks evidence"],
+        final_checks=["caller checks evidence"],
     )
 
 
@@ -36,7 +36,7 @@ def test_compile_single_worker_template_creates_worker_spec():
     assert isinstance(plan, WorkflowDispatchPlan)
     assert plan.template_id == "example"
     assert plan.goal == "Add compiler coverage"
-    assert plan.parent_acceptance == ["parent checks evidence"]
+    assert plan.final_checks == ["caller checks evidence"]
     assert len(plan.worker_specs) == 1
     spec = plan.worker_specs[0]
     assert isinstance(spec, WorkflowWorkerSpec)

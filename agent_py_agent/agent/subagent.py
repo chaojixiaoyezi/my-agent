@@ -10,8 +10,6 @@ Human version:
 `agent.subagents.*`，这里保留旧入口，避免一次重构打断所有调用方。
 """
 
-# LLM: keep acceptance options exported through this legacy facade; CI lint may reorder imports, but callers keep the old path.
-from .subagents.acceptance_review_service import AcceptanceReviewOptions
 from .subagents.manager import SubAgentManager
 from .subagents.manager_runner_results import RecordRunnerResultParams
 from .subagents.models import (
@@ -37,17 +35,9 @@ from .subagents.models import (
     VerificationEvidence,
     WorkOrderValidation,
 )
-
-# LLM: expose parent acceptance plan/apply/next-action/auto-policy records through the legacy facade for upper-agent callers.
-from .subagents.parent_acceptance_apply import ParentAcceptanceApplyResult
-from .subagents.parent_acceptance_auto_policy import ParentAcceptanceAutoPolicy
-from .subagents.parent_acceptance_controller import ParentAcceptanceDecision, ParentAcceptanceRef
-from .subagents.parent_acceptance_next_action import ParentAcceptanceNextAction
 from .subagents.parsing import parse_parent_planner_output, parse_subagent_runner_output
 from .subagents.policies import filter_board_items
 from .subagents.rendering import (
-    render_acceptance_record_markdown,
-    render_acceptance_review_markdown,
     render_action_apply_markdown,
     render_action_plan_markdown,
     render_board_markdown,
@@ -60,9 +50,6 @@ from .subagents.rendering import (
     render_patch_review_record_markdown,
 )
 from .subagents.reports import (
-    AcceptanceReviewFinding,
-    AcceptanceReviewRecord,
-    AcceptanceReviewReport,
     ActionApplyRecord,
     ActionApplyReport,
     ActionPlanItem,

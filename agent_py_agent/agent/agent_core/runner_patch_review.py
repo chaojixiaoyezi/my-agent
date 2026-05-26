@@ -16,7 +16,7 @@ from ..subagent import SubAgentTask
 def _dispatch_patch_review_run_ids(tasks: list[SubAgentTask]) -> list[str]:
     run_ids: list[str] = []
     for task in tasks:
-        if task.status != "AWAITING_ACCEPTANCE" and task.verification_status != "NEEDS_ACCEPTANCE":
+        if task.status != "DONE":
             continue
         if _task_has_runner_patches(task):
             run_ids.append(task.id)

@@ -6,7 +6,6 @@ from __future__ import annotations
 from ..backends import ModelResponse
 from ..subagents.role_templates import role_template_id_for_role
 from ..subagents.services.qa_role_contract import qa_roles_required_by_task
-from .orchestration_parent_acceptance_repair import parent_acceptance_rejected
 from .orchestration_run_scope import (
     remembered_dispatched_orchestration_run_ids,
     remembered_orchestration_run_ids,
@@ -94,12 +93,12 @@ def _inside_subagent_runner(agent) -> bool:
 
 
 # LLM: _repair_required_task_ids distinguishes terminal repair facts from normal awaiting-acceptance work.
-# 函数用途: 只有失败验收或阻塞类状态才触发本地未完成收口；普通待验收仍交给后续 dispatch/模型继续推进。
+# 函数用途: 只有失败验收或阻塞类状态才触发本地未完成收口；普通待收口仍交给后续 dispatch/模型继续推进。
 def _repair_required_task_ids(tasks: list[object]) -> list[str]:
     ids: list[str] = []
     for task in tasks:
         task_id = str(getattr(task, "id", "") or "")
-        if task_id and (_task_status_requires_repair(task) or parent_acceptance_rejected(task)):
+        if task_id and _task_status_requires_repair(task):
             ids.append(task_id)
     return ids
 
@@ -161,7 +160,7 @@ def _task_in_scope(task: object, seen: set[str], root_ids: set[str]) -> bool:
 
 
 # LLM: _missing_required_quality_roles compares persisted task contracts to concrete role tokens.
-# 函数用途: 找出父任务结构化要求但尚未真实创建的 tester/acceptor 角色，防止 root 只靠口头总结跳过验收链路。
+# 函数用途: 找出父任务结构化要求但尚未真实创建的 tester/bug_finder 角色，防止 root 只靠口头总结跳过检查链路。
 def _missing_required_quality_roles(tasks: list[object]) -> list[str]:
     required = _required_quality_roles(tasks)
     if not required:
@@ -180,7 +179,7 @@ def _required_quality_roles(tasks: list[object]) -> set[str]:
 
 
 # LLM: _present_role_tokens normalizes role/name fields through template ids for deterministic closeout gating.
-# 函数用途: 汇总已有子代理的 role 和名字模板 id，判断 tester/acceptor 是否已经真正创建过。
+# 函数用途: 汇总已有子代理的 role 和名字模板 id，判断 tester/bug_finder 是否已经真正创建过。
 def _present_role_tokens(tasks: list[object]) -> set[str]:
     present: set[str] = set()
     for task in tasks:
@@ -189,11 +188,11 @@ def _present_role_tokens(tasks: list[object]) -> set[str]:
 
 
 # LLM: _quality_role_tokens_for_task keeps closeout role scanning shallow and template-id based.
-# 函数用途: 从单个 task 的 role/agent_name 提取 tester/acceptor 模板角色，不读取目标自然语言。
+# 函数用途: 从单个 task 的 role/agent_name 提取 tester/bug_finder 模板角色，不读取目标自然语言。
 def _quality_role_tokens_for_task(task: object) -> set[str]:
     values = (getattr(task, "role", ""), getattr(task, "agent_name", ""))
     return {
         role
         for value in values
-        if (role := role_template_id_for_role(str(value or ""), fallback="")) in {"tester", "bug_finder", "acceptor"}
+        if (role := role_template_id_for_role(str(value or ""), fallback="")) in {"tester", "bug_finder"}
     }

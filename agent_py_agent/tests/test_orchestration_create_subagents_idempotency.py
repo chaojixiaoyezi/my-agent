@@ -255,8 +255,8 @@ def _fixture_worker_item(agent_name: str) -> dict[str, object]:
         "agent_name": agent_name,
         "goal": "在隔离 fixture 项目中读取 README.md，并在子代理 task_dir/scenario_outputs/ 写入自己的证据报告",
         "role": "worker",
-        "acceptance_checks": ["必须有 read_file 证据", "必须有 write_file 证据", "必须等待父代理验收"],
-        "plan": "读取 README.md；写入 task_dir/scenario_outputs/<run_id>.md；等待验收",
+        "acceptance_checks": ["必须有 read_file 证据", "必须有 write_file 证据", "必须等待普通收口"],
+        "plan": "读取 README.md；写入 task_dir/scenario_outputs/<run_id>.md；等待收口",
     }
 
 

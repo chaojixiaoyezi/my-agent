@@ -132,8 +132,9 @@ class AgentConfig(HomeProviderConfigFields, ToolConfig):
     subagent_context_summary_inline_text_chars: int = 500
     subagent_automation_level: int = 2
     subagent_debug_trace_level: int = 0
-    acceptance_execute_tests: bool = False
-    acceptance_test_timeout_seconds: int = 120
+    result_check_execute_tests: bool = False
+    result_check_timeout_seconds: int = 120
+    closeout_for_all_task_nodes: bool = False
     dynamic_timeout_safety_margin: float = 2.0
     dynamic_timeout_min: int = 30
     dynamic_timeout_max: int = 600

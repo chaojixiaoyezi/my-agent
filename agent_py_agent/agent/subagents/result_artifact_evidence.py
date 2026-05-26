@@ -1,4 +1,4 @@
-# LLM: Artifact-only runner output needs a refs-only evidence bridge for parent acceptance.
+# LLM: Artifact-only runner output needs a refs-only evidence bridge for closeout.
 # 模块用途: 从 runner artifacts 生成和合并证据引用；不读取 artifact 正文，只维护可追踪 refs。
 
 from __future__ import annotations

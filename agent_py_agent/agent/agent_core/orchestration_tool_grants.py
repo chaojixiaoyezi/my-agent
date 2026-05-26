@@ -10,7 +10,9 @@ CODING_SUBAGENT_TOOLS = [
     "read_file",
     "search_text",
     "read_artifact",
-    "fetch_url",
+    "web_search",
+    "web_fetch",
+    "web_extract",
     "http_request",
     "write_file",
     "apply_patch",
@@ -45,7 +47,6 @@ _CODING_TOOL_PRESETS = {
     "researcher",
     "writer",
     "tester",
-    "acceptor",
     "worker",
 }
 

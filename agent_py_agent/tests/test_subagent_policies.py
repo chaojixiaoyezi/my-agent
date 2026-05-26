@@ -492,7 +492,7 @@ def test_execution_context_instructions_not_empty():
 
 def test_is_active_terminal_status():
     """测试终态状态不是 active。"""
-    terminal_statuses = ["DONE", "FAILED", "BLOCKED", "AWAITING_ACCEPTANCE", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"]
+    terminal_statuses = ["DONE", "FAILED", "BLOCKED", "DONE", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"]
     for status in terminal_statuses:
         assert _is_active(status) is False
 

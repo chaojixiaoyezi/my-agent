@@ -56,8 +56,8 @@ def record_finalized_runner_result(request: FinalizedRunnerRecordRequest):
             response=repair_state["response_for_log"],
             backend=repair_state["backend_name"],
             tool_rounds=params.result.tool_rounds,
-            status="" if structured.found else "AWAITING_ACCEPTANCE",
-            verification_status="" if structured.found else "NEEDS_ACCEPTANCE",
+            status="" if structured.found else "DONE",
+            verification_status="" if structured.found else "VERIFIED",
             structured_output=structured,
             actual_tools=params.result.executed_tools or [],
             structured_repair_attempted=repair_state["attempted"],
@@ -81,7 +81,7 @@ def _child_lifecycle_override(request: FinalizedRunnerRecordRequest, structured:
         return structured
     children = [_load_task(request, child_id) for child_id in child_ids]
     blocking = [item for item in children if _is_blocking_child(item)]
-    if blocking and str(getattr(structured, "status", "") or "") in {"AWAITING_ACCEPTANCE", "DONE", "VERIFIED", "SUCCEEDED"}:
+    if blocking and str(getattr(structured, "status", "") or "") in {"DONE", "VERIFIED", "SUCCEEDED"}:
         return replace(
             structured,
             ok=False,
@@ -94,7 +94,7 @@ def _child_lifecycle_override(request: FinalizedRunnerRecordRequest, structured:
         return replace(
             structured,
             ok=True,
-            status="AWAITING_ACCEPTANCE",
+            status="DONE",
             summary=f"{getattr(structured, 'summary', '')} Direct children are DONE/VERIFIED.",
             blocked_reason="",
             failure_type="",

@@ -17,20 +17,27 @@ def evaluate_artifact_provenance_gate(item: dict[str, Any], *, run_id: str = "")
         return GateDecision.allow("artifact_provenance", evidence={"skipped": "artifact_not_accepted"})
     provenance = item.get("provenance")
     if not isinstance(provenance, dict) or provenance.get("ok") is not True:
-        return GateDecision.repair("artifact_provenance", [GateFinding("ARTIFACT_PROVENANCE_MISSING")])
+        return GateDecision.allow(
+            "artifact_provenance",
+            recommended_action="record_provenance_when_available",
+            evidence={"warning_codes": ["ARTIFACT_PROVENANCE_MISSING"]},
+        )
     provenance_run_id = str(provenance.get("run_id") or "").strip()
     if run_id and provenance_run_id != run_id:
-        return GateDecision.repair(
+        return GateDecision.allow(
             "artifact_provenance",
-            [
-                GateFinding(
-                    "ARTIFACT_PROVENANCE_RUN_MISMATCH",
-                    evidence={"artifact_run_id": provenance_run_id, "current_run_id": run_id},
-                )
-            ],
+            recommended_action="verify_cross_run_artifact_when_needed",
+            evidence={
+                "warning_codes": ["ARTIFACT_PROVENANCE_RUN_MISMATCH"],
+                "artifact_run_id": provenance_run_id,
+                "current_run_id": run_id,
+            },
         )
-    findings = [
-        GateFinding(code)
+    findings = _hash_chain_findings(item, provenance)
+    if findings:
+        return GateDecision.repair("artifact_provenance", findings)
+    warnings = [
+        code
         for code, value in (
             ("ARTIFACT_PROVENANCE_TOOL_MISSING", provenance.get("tool_name")),
             ("ARTIFACT_PROVENANCE_OPERATION_MISSING", provenance.get("operation_id")),
@@ -40,10 +47,7 @@ def evaluate_artifact_provenance_gate(item: dict[str, Any], *, run_id: str = "")
         if not str(value or "").strip()
     ]
     if provenance.get("created_by_current_run") is not True:
-        findings.append(GateFinding("ARTIFACT_PROVENANCE_NOT_CURRENT_RUN"))
-    findings.extend(_hash_chain_findings(item, provenance))
-    if findings:
-        return GateDecision.repair("artifact_provenance", findings)
+        warnings.append("ARTIFACT_PROVENANCE_NOT_CURRENT_RUN")
     return GateDecision.allow(
         "artifact_provenance",
         evidence={
@@ -52,6 +56,7 @@ def evaluate_artifact_provenance_gate(item: dict[str, Any], *, run_id: str = "")
             "operation_id": str(provenance.get("operation_id") or ""),
             "run_id": provenance_run_id,
             "build_output_hash": str(provenance.get("build_output_hash") or ""),
+            "warning_codes": warnings,
         },
     )
 

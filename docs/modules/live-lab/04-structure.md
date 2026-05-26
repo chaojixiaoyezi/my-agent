@@ -83,7 +83,7 @@ scripts/
 - Workspace boundary: `agent_py_agent/agent/subagents/workspace_roots.py` is the shared helper for deriving project roots from `.my_agent/subagents/<run>`, `.my-agent/subagents/<run>`, and `data/subagents/<run>` layouts. Live Lab real cases use this through runner input dependency checks and artifact integrity checks.
 
 ## 2026-05-17 natural-suite structure
-- 中文说明：`natural` suite 是真实用户语言 canary，不替代固定 `scenario-test`。它的价值是看主代理在没有内部术语提示时，是否仍能用小傻妞完成真实产物、返回 refs，并通过父级验收。
+- 中文说明：`natural` suite 是真实用户语言 canary，不替代固定 `scenario-test`。它的价值是看主代理在没有内部术语提示时，是否仍能用小傻妞完成真实产物、返回 refs，并通过最终收口。
 - `scripts/live_lab/constants.py`：`natural` suite 显式包含 `health` 和 `natural_html_subagent`；`natural_html_subagent` 属于 `REAL_CASES`，必须传 `--real-llm`。
 - `scripts/live_lab/cases.py`：`case_natural_html_subagent()` 负责发自然语言 prompt、保存 response、停止 gateway，并调用 `_assert_natural_html_output()` 验证真实 HTML artifact；`_external_asset_refs()` 只拦截页面渲染依赖的外部资源，不禁止普通外链。
 - `scripts/live_lab/cases.py`：`_assert_natural_html_output()` 把 `href="/..."` 视为单文件静态交付里的坏链接；需要页面跳转时应使用真实存在的 `#section-id`，避免离线打开后按钮或导航失效。
@@ -104,7 +104,7 @@ scripts/
 - `scripts/live_lab/shop_case.py`：`_assert_shop_html_output()` 检查完整 HTML、关键业务区域、关键按钮动作、空链接、disabled 和外部渲染资源；`_assert_static_site_check_clean()` 复用产品侧 `static_site_check` 检查坏链接、可见占位符、失效控件、表单绑定和缺失 DOM id。
 - `agent_py_agent/tests/test_live_lab_natural_case.py`：同一个测试文件覆盖家具和购物站两个自然语言 canary，确保 suite 注册、提示词口径和产物门同步。
 - 产品侧依赖：`static_site_html_parser.py` / `static_site_dom_checks.py` 负责通用网页控件检查；真实 disabled 控件会被拦截，但 CSS/JS 里的 disabled 字样不会被当成坏按钮。
-- 调度侧依赖：父级验收失败时，`dispatch_subagents` 的外置摘要必须保留 `parent_acceptance_repair_advice` 机器字段；Live Lab shop case 不直接创建 repair child，但真实 E2E 会验证 root 是否能看见这类修复建议。
+- 调度侧依赖：最终收口失败时，`dispatch_subagents` 的外置摘要必须保留 `final_closeout_repair_advice` 机器字段；Live Lab shop case 不直接创建 repair child，但真实 E2E 会验证 root 是否能看见这类修复建议。
 - 当前真实验收：`20260517-shop-flow-08-repair-wave` 已通过，证明 shop suite 能跑真实 MiniMax-M2.7、隔离 gateway、子代理产物和最终状态门。后续还需要加“故意失败再修复”case，专门压测 repair wave。
 
 ## 2026-05-17 shop-repair structure
@@ -114,17 +114,17 @@ scripts/
 - `scripts/live_lab/cases.py`：只登记 `natural_shop_repair_wave`；具体失败种子、prompt 和验收逻辑放在拆分模块，避免 `cases.py` 继续膨胀。
 - `scripts/live_lab/shop_repair_wave_case.py`：负责 `seed_failed_shop_child()`、`_natural_shop_repair_wave_prompt()`、`assert_shop_repair_wave_created()` 和真实 case。seed 使用产品侧 `SubAgentManager` 创建完整 task，而不是手写不完整状态。
 - `assert_shop_repair_wave_created()` 会读取 `.my_agent/subagents/subagent-*/task.json`，要求出现 DONE/VERIFIED 的修复 run，并用产品侧 closeout resolver 判断旧失败 run 是否被同目标修复 sibling 覆盖。
-- 这个 suite 的目标是压测通用 repair wave：以后 Excel、PDF、代码仓库等任务失败时，也应沿用同一套 parent acceptance refs -> repair child -> dispatch -> verified closeout 的合同。
+- 这个 suite 的目标是压测通用 repair wave：以后 Excel、PDF、代码仓库等任务失败时，也应沿用同一套 closeout refs -> repair child -> dispatch -> verified closeout 的合同。
 - 当前真实验收：`20260517-shop-repair-wave-03` 已通过。前两轮失败分别固化成通用合同：repair 建议必须继承原始成功条件，create/schedule 必须从目标 refs 推导产品写入根，静态站点验收可读取结构化 `required_dom_ids`，不能只修最新报错点。
 
 ## 2026-05-17 file-repair structure
 
-- 中文说明：`file-repair` suite 是非网页文件的失败恢复 canary。它证明 repair wave 不是只会修 HTML：CSV、Markdown、TXT、代码文件这类普通文件也可以用结构化内容合同做父级机器验收。
+- 中文说明：`file-repair` suite 是非网页文件的失败恢复 canary。它证明 repair wave 不是只会修 HTML：CSV、Markdown、TXT、代码文件这类普通文件也可以用结构化内容合同做父级检查。
 - `scripts/live_lab/constants.py`：`file-repair` suite 显式包含 `health` 和 `natural_file_repair_wave`；`natural_file_repair_wave` 属于 `REAL_CASES`，必须传 `--real-llm`。
 - `scripts/live_lab/cases.py`：只负责把 `natural_file_repair_wave` 分发到拆分模块，避免主 case 文件继续膨胀。
 - `scripts/live_lab/file_repair_wave_case.py`：负责 `seed_failed_file_child()`、`_natural_file_repair_wave_prompt()`、`assert_file_repair_wave_created()` 和最终 CSV 内容 gate。seed 使用真实 `SubAgentManager` 创建 task，并在 acceptance checks 里写结构化 `required_content_lines`。
 - 产品侧依赖：`required_content_lines.py` 从任务验收文本抽取必须出现的字面行，`execution_test_items.py` 在单个普通文件 artifact 上生成 `content_check`。这条路只读 workspace 内真实文件，不相信模型自述。
-- 当前真实验收：`20260517-file-repair-wave-02` 已通过。最终 `orders.csv` 四行一字不差，旧失败 run 的 4 条父级 `content_check` 全部通过；后续可把同一合同扩展到 Excel 导出清单、Markdown 报告和代码生成任务。
+- 当前真实收口交给父级 `content_check` 全部通过；后续可把同一合同扩展到 Excel 导出清单、Markdown 报告和代码生成任务。
 
 ## 2026-05-17 markdown-repair structure
 
@@ -150,7 +150,7 @@ scripts/
 - `main_compact_resume_roundtrip`：读取上一个真实 run 的 `runtime_facts` request id，写入用户确认的验收/约束/测试事实，执行 `memory-compact --apply` 和 `memory-resume --compact-resume-mode auto`，要求 auto guard 只放行续接、不自动执行工具。
 - `main_large_log_audit`：生成 100MB 日志，只要求报告关键证据和建议。它的目的不是测日志内容本身，而是测大输出/大文件场景下是否保持 refs-first（只拿引用和证据，不把全文塞进上下文）。
 - `main_agent_complex_large_log.py`：承载 `main_large_log_audit` 的日志生成、提示词和报告 gate；这是结构拆分，不改变真实 case 的输出目录或验收口径。
-- 底层合同依赖：`main-complex` 的产物验收现在和父级验收共享 `contracts/artifact_acceptance.py` / `contracts/acceptance_contract.py` / `contracts/state_machine.py` / 结构化工具 envelope。Web case 复用 `static_site_check`；强制业务区块应使用结构化 `required_dom_ids`，而 `getElementById` 已经做空值保护的可选 hook 不算硬失败。
+- 底层合同依赖：`main-complex` 的产物验收现在和最终收口共享 `contracts/artifact_acceptance.py` / `contracts/acceptance_contract.py` / `contracts/state_machine.py` / 结构化工具 envelope。Web case 复用 `static_site_check`；强制业务区块应使用结构化 `required_dom_ids`，而 `getElementById` 已经做空值保护的可选 hook 不算硬失败。
 - 当前真实验收：`main-complex-isolated-20260518-135442` 已用 MiniMax-M2.7 跑通。它验证了主代理多文件 Web app、工具失败恢复、100MB 大日志审计和 Live Lab 家目录隔离。
 - 当前真实验收：`main-artifact-20260518-early-request-id` 已用 MiniMax-M2.7 跑通。它验证了主代理在长资料读回时能先接收外置 tool-output artifact，再用 `read_artifact` 续读并写出证据报告；同一 run 的 `request_id` 会提前进入 context bundle、tool-output index、runtime facts，随后 compact/resume roundtrip 能带回 `artifact_refs` 并放行 `allow_automated_continue`。
 - 后续扩展：compact/resume 多次续接、验收失败后自动修复、真实资料整理 xlsx/论文翻译等可以继续拆成同目录的新 case，不要塞回 `cases.py`。

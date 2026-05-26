@@ -36,7 +36,7 @@ _TOP_LEVEL_ACTION_KEYS = (
     "completion_status",
     "must_not_report_done",
     "blocking_run_ids",
-    "parent_acceptance_repair_advice",
+    "repair_advice",
     "created_run_ids",
     "planned_count",
     "scheduling_warnings",

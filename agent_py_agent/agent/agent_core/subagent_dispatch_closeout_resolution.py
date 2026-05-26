@@ -42,13 +42,13 @@ def task_resolved_for_closeout(task: object, tasks: list[object]) -> bool:
 
 
 # LLM: done_verified_count counts terminal or covered rows using the same closeout predicate.
-# 函数用途: 给最终报告提供严格完成数，不把口头完成或待验收算成完成。
+# 函数用途: 给最终报告提供严格完成数，不把口头完成或待收口算成完成。
 def done_verified_count(tasks: list[object]) -> int:
     return sum(1 for task in tasks if task_resolved_for_closeout(task, tasks))
 
 
 # LLM: _task_targets_resolved_by_verified_siblings lets verified repair leaves cover stale terminal work.
-# 函数用途: 如果旧失败或待验收任务的具体产物已被其它 DONE/VERIFIED 任务覆盖，就不继续阻塞整棵树。
+# 函数用途: 如果旧失败或待收口任务的具体产物已被其它 DONE/VERIFIED 任务覆盖，就不继续阻塞整棵树。
 def _task_targets_resolved_by_verified_siblings(task: object, tasks: list[object]) -> bool:
     if not _status_allows_sibling_target_coverage(task):
         return False
@@ -64,12 +64,11 @@ def _task_targets_resolved_by_verified_siblings(task: object, tasks: list[object
 
 
 # LLM: _status_allows_sibling_target_coverage prevents unstarted/running work from vanishing at closeout.
-# 函数用途: 已失败/阻塞/待验收/接管的旧 run 可被同目标 verified sibling 覆盖；PLANNING/RUNNING 仍必须调度或显式取消。
+# 函数用途: 已失败/阻塞/待收口/接管的旧 run 可被同目标 verified sibling 覆盖；PLANNING/RUNNING 仍必须调度或显式取消。
 def _status_allows_sibling_target_coverage(task: object) -> bool:
     status = str(getattr(task, "status", "") or "").upper()
     return status in {
         "ABANDONED",
-        "AWAITING_ACCEPTANCE",
         "BLOCKED",
         "CANCELED",
         "CANCELLED",
@@ -104,7 +103,7 @@ def _task_by_id(tasks: list[object], run_id: str) -> object | None:
 
 
 # LLM: _task_done_verified is the strict terminal success predicate reused by closeout helpers.
-# 函数用途: 精确判断任务是否 DONE/VERIFIED；不给 AWAITING_ACCEPTANCE 或口头完成放行。
+# 函数用途: 精确判断任务是否 DONE/VERIFIED；不给口头完成放行。
 def _task_done_verified(task: object) -> bool:
     return (
         str(getattr(task, "status", "") or "").upper() == "DONE"

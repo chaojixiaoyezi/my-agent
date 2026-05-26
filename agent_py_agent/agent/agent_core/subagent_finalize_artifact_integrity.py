@@ -1,5 +1,5 @@
-# LLM: Artifact integrity override blocks broken product files before parent acceptance.
-# 模块用途: 在 runner 结果落盘前检查结构化 artifact refs，避免半截 HTML 被误标成待验收。
+# LLM: Artifact integrity override blocks broken product files before closeout.
+# 模块用途: 在 runner 结果落盘前检查结构化 artifact refs，避免半截 HTML 被误标成待收口。
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ def progress_artifacts_override(request: object, structured: object) -> object:
     return structured
 
 
-# LLM: artifact_integrity_override makes obvious broken product files block before parent acceptance.
+# LLM: artifact_integrity_override makes obvious broken product files block before closeout.
 # 函数用途: runner 自称完成但 HTML 产物半截或闭合后被追加时，改成 BLOCKED 并给父级明确修复动作。
 def artifact_integrity_override(request: object, structured: object) -> object:
     if not looks_like_success_closeout(structured):
@@ -87,7 +87,7 @@ def _closeout_blocker_codes(decision: object) -> str:
 
 
 # LLM: _blocked_artifact_output preserves useful runner metadata while changing lifecycle state.
-# 函数用途: 把产物结构检查失败写入标准 SubAgentParsedOutput，供父级恢复和验收链路读取。
+# 函数用途: 把产物结构检查失败写入标准 SubAgentParsedOutput，供父级恢复和收口链路读取。
 def _blocked_artifact_output(structured: object, blocker_text: str) -> SubAgentParsedOutput:
     existing_tests = list(getattr(structured, "tests", []) or [])
     return SubAgentParsedOutput(
@@ -95,7 +95,7 @@ def _blocked_artifact_output(structured: object, blocker_text: str) -> SubAgentP
         ok=True,
         status="BLOCKED",
         summary=(
-            "artifact integrity check failed; repair the listed product files before parent acceptance. "
+            "artifact integrity check failed; repair the listed product files before closeout. "
             f"issues={blocker_text}"
         ),
         blocked_reason=f"artifact_integrity_failed:{blocker_text}",
@@ -238,11 +238,11 @@ def _append_unique_root(roots: list[Path], root: Path) -> None:
 
 
 # LLM: looks_like_success_closeout recognizes model self-reports that would otherwise move a parent forward.
-# 函数用途: 只拦截“我完成了/待验收”类汇报，不影响真实 capability 或业务阻塞。
+# 函数用途: 只拦截“我完成了/待收口”类汇报，不影响真实 capability 或业务阻塞。
 def looks_like_success_closeout(structured: object) -> bool:
     if not bool(getattr(structured, "found", False)) or not bool(getattr(structured, "ok", False)):
         return False
     if getattr(structured, "capability_requests", []) or getattr(structured, "blocked_reason", ""):
         return False
     status = str(getattr(structured, "status", "") or "").strip().upper()
-    return status in {"", "AWAITING_ACCEPTANCE", "DONE", "COMPLETED", "SUCCESS", "OK"}
+    return status in {"", "DONE", "COMPLETED", "SUCCESS", "OK"}

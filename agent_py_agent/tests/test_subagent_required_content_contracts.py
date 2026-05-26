@@ -72,7 +72,7 @@ def test_prepare_test_items_does_not_guess_required_content_file_for_multiple_ar
     assert prepared == []
 
 
-# LLM: Explicit per-file content contracts let parent acceptance validate multi-file outputs safely.
+# LLM: Explicit per-file content contracts let closeout validate multi-file outputs safely.
 # 函数用途: 多个普通文件产物时，只按文件名映射生成对应 content_check，不靠顺序猜测。
 def test_prepare_test_items_infers_content_checks_for_mapped_file_artifacts(tmp_path):
     report_dir = tmp_path / "deliverables" / "order-pack"
@@ -156,7 +156,7 @@ def test_required_content_lines_ignores_natural_fenced_expected_block():
         ```text
         # 周报
         - 完成数据清洗
-        - 风险：等待验收
+        - 风险：等待收口
         ```
         其它解释不要加入内容检查。
         """
@@ -211,7 +211,7 @@ def test_required_content_for_task_does_not_parse_goal_or_acceptance_checks():
 
 
 # LLM: create_run should persist structured content contracts without text-field parsing.
-# 函数用途: 验证子代理创建入口能直接接收 attributes，后续父级验收从这里读内容合同。
+# 函数用途: 验证子代理创建入口能直接接收 attributes，后续最终收口从这里读内容合同。
 def test_create_run_persists_required_content_attributes(tmp_path):
     from agent_py_agent.agent.subagents.manager import SubAgentManager
 

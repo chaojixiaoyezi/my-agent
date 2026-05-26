@@ -57,8 +57,6 @@ def _normalize_quality_contract(value: object) -> QualityContract:
         "allowed_degradation",
     ]:
         payload[key] = _string_list_value(payload.get(key))
-    payload["cannot_self_accept"] = bool(payload.get("cannot_self_accept", True))
-    payload["parent_final_gate"] = bool(payload.get("parent_final_gate", True))
     return QualityContract(**payload)
 
 

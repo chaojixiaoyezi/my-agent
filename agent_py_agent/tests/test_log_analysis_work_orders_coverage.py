@@ -13,7 +13,6 @@ import pytest
 
 from agent_py_agent.agent.log_analysis.dispatch.work_orders import (
     NO_EVIDENCE_ISSUE,
-    PARENT_FINAL_GATE,
     PLAN_NOT_READY_ISSUE,
     LogAnalysisWorkOrderPlan,
     SubagentWorkOrder,
@@ -178,8 +177,6 @@ class TestSubagentWorkOrderDataclass:
         assert order.evidence_refs == []
         assert order.context == {}
         assert order.acceptance_checks == []
-        assert order.cannot_self_accept is True
-        assert order.parent_final_gate == PARENT_FINAL_GATE
         assert order.issues == []
         assert order.risks == []
 
@@ -343,11 +340,6 @@ class TestConstants:
         """Test NO_EVIDENCE_ISSUE is defined."""
         assert NO_EVIDENCE_ISSUE is not None
         assert "evidence" in NO_EVIDENCE_ISSUE.lower()
-
-    def test_parent_final_gate_constant(self):
-        """Test PARENT_FINAL_GATE is defined."""
-        assert PARENT_FINAL_GATE is not None
-        assert PARENT_FINAL_GATE == "parent_session_final_approval_required"
 
     def test_plan_not_ready_issue_constant(self):
         """Test PLAN_NOT_READY_ISSUE is defined."""

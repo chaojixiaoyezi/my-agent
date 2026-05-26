@@ -1,6 +1,6 @@
 """LLM: Dispatch should expose concrete static-site acceptance failures.
 
-模块用途: 用小型集成测试验证父级验收失败细节能回到 dispatch record，避免膨胀主 dispatch 测试文件。
+模块用途: 用小型集成测试验证最终收口失败细节能回到 dispatch record，避免膨胀主 dispatch 测试文件。
 """
 
 from __future__ import annotations
@@ -32,28 +32,28 @@ def test_static_site_failure_details_reach_dispatch_record(tmp_path):
     report = agent.dispatch_subagents(
         CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs()),
         CapabilityConfig(),
-        params=DispatchParams(apply=True, max_runners=0, execute_acceptance_tests=True),
+        params=DispatchParams(apply=True, max_runners=0, execute_runners=True),
     )
 
     record = next(item for item in report.records if item.step == "acceptance" and item.run_id == task.id)
     assert record.action == "reject"
-    assert "inert_control_hits=1" in record.parent_acceptance_test_failure_summary
-    assert record.parent_acceptance_test_failure_details == [
+    assert "inert_control_hits=1" in record.final_closeout_test_failure_summary
+    assert record.final_closeout_test_failure_details == [
         "inert_control_hits: index.html:a:Shop href=#",
         "repair_hints: inert_controls: add real href targets, onclick handlers, or matching anchor sections for listed controls",
     ]
 
 
 # LLM: _acceptance_task creates the minimum awaiting-acceptance task with evidence.
-# 函数用途: 构造一个可进入父级验收的子代理任务，避免复用大型 dispatch 测试模块。
+# 函数用途: 构造一个可进入最终收口的子代理任务，避免复用大型 dispatch 测试模块。
 def _acceptance_task(agent: SimpleAgent):
     task = agent.subagents.create_run(
         goal="静态页面验收失败要给出具体修复线索",
         thought="等待 tests。",
         plan=["tests"],
     )
-    task.status = "AWAITING_ACCEPTANCE"
-    task.verification_status = "NEEDS_ACCEPTANCE"
+    task.status = "DONE"
+    task.verification_status = "VERIFIED"
     task.channel_status = "OK"
     task.evidence.append(VerificationEvidence(kind="note", summary="有验收证据", ok=True, created_at=time.time()))
     task.evidence_packets.append(EvidencePacket(

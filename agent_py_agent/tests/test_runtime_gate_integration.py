@@ -301,7 +301,7 @@ def test_delivery_closeout_report_contains_runtime_gate_decision(tmp_path):
     assert report["runtime_gate"]["evidence"]["artifact_count"] == 1
 
 
-def test_delivery_closeout_blocks_preexisting_artifact_without_tool_provenance(tmp_path):
+def test_delivery_closeout_allows_preexisting_artifact_with_provenance_warning(tmp_path):
     output = tmp_path / "out.txt"
     output.write_text("finished artifact", encoding="utf-8")
     params = _delivery_closeout_params(archive_tool_calls=[])
@@ -312,14 +312,14 @@ def test_delivery_closeout_blocks_preexisting_artifact_without_tool_provenance(t
     )
     report = json.loads((Path(tmp_path) / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
 
-    assert response is None
-    assert report["runtime_gate"]["status"] == "NEED_REPAIR"
-    assert report["runtime_gate"]["findings"][0]["code"] == "ARTIFACT_PROVENANCE_MISSING"
+    assert response is not None
+    assert report["runtime_gate"]["status"] == "ALLOW"
+    assert report["final_closeout_gate"]["status"] == "ALLOW"
 
 
-# LLM: Delivery closeout must run data quality gates when a structured quality contract is present.
-# 函数用途: 验证文件和 provenance 都通过时，错误数据口径仍会阻止最终收口。
-def test_delivery_closeout_blocks_metric_quality_contract_mismatch(tmp_path):
+# LLM: Auto-derived delivery quality findings are advisory unless a contract explicitly requests hard enforcement.
+# 函数用途: 验证数据口径问题会进入 closeout 报告，但默认不把普通交付卡死。
+def test_delivery_closeout_reports_metric_quality_contract_mismatch_as_warning(tmp_path):
     output = tmp_path / "out.txt"
     output.write_text("finished artifact", encoding="utf-8")
     _write_point_in_time_quality_source(tmp_path)
@@ -332,24 +332,35 @@ def test_delivery_closeout_blocks_metric_quality_contract_mismatch(tmp_path):
     )
     report = json.loads((Path(tmp_path) / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
 
-    assert response is None
+    assert response is not None
     assert report["runtime_gate"]["status"] == "ALLOW"
+    assert report["delivery_quality_gate"]["status"] == "ALLOW"
+    assert "METRIC_KIND_MISMATCH" in report["delivery_quality_gate"]["evidence"]["warning_codes"]
+    assert report["final_closeout_gate"]["allowed"] is True
+
+
+def test_delivery_closeout_blocks_metric_quality_contract_mismatch_when_enforcement_required(tmp_path):
+    output = tmp_path / "out.txt"
+    output.write_text("finished artifact", encoding="utf-8")
+    _write_point_in_time_quality_source(tmp_path)
+    params = _delivery_closeout_params(archive_tool_calls=[_write_file_archive_record()])
+    _add_metric_quality_contract(params)
+    params.delivery_contract["delivery_quality_contract"]["enforcement"] = "required"
+    agent = SimpleNamespace(root=tmp_path, tools=SimpleNamespace(workspace_root=tmp_path))
+
+    response = main_agent_delivery_closeout_response(
+        MainAgentDeliveryCloseoutRequest(agent=agent, params=params, backend="test")
+    )
+    report = json.loads((Path(tmp_path) / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+
+    assert response is None
     assert report["delivery_quality_gate"]["status"] == "NEED_REPAIR"
     assert report["delivery_quality_gate"]["findings"][0]["code"] == "METRIC_KIND_MISMATCH"
-    assert report["delivery_quality_gate"]["recovery"]["status"] == "repair_required"
-    recovery = report["contract_recovery"]
-    assert recovery["status"] == "repair_required"
-    action = recovery["actions"][0]
-    assert action["code"] == "METRIC_KIND_MISMATCH"
-    assert action["checkpoint_ref"] == "source_data.json"
-    assert action["writer_tool"] == "write_file"
-    assert action["recommended_action"] == "repair_structured_checkpoint_json"
-    assert any(item["gate"] == "delivery_quality" for item in json.loads(params.tool_context[-1].split("\n", 1)[1])["failed_gates"])
     assert report["final_closeout_gate"]["allowed"] is False
 
 
-# LLM: Artifact validation contracts are quality gates, not optional prompt hints.
-# 函数用途: 验证 artifact.validation_contract 里的 staged metric 合同会自动进入 closeout quality gate。
+# LLM: Artifact validation contracts feed advisory quality findings unless explicitly hardened.
+# 函数用途: 验证 artifact.validation_contract 里的 staged metric 合同会进入 closeout 质量报告，但默认不阻断普通交付。
 def test_delivery_closeout_derives_quality_gate_from_artifact_validation_contract(tmp_path):
     output = tmp_path / "out.txt"
     output.write_text("finished artifact", encoding="utf-8")
@@ -363,10 +374,10 @@ def test_delivery_closeout_derives_quality_gate_from_artifact_validation_contrac
     )
     report = json.loads((Path(tmp_path) / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
 
-    assert response is None
-    assert report["delivery_quality_gate"]["status"] == "NEED_REPAIR"
-    assert report["delivery_quality_gate"]["findings"][0]["code"] == "METRIC_KIND_MISMATCH"
-    assert report["delivery_quality_gate"]["evidence"]["source_count"] == 1
+    assert response is not None
+    assert report["delivery_quality_gate"]["status"] == "ALLOW"
+    assert "METRIC_KIND_MISMATCH" in report["delivery_quality_gate"]["evidence"]["warning_codes"]
+    assert report["final_closeout_gate"]["allowed"] is True
 
 
 # LLM: Multi-artifact closeout must not stop at the first quality contract.
@@ -400,8 +411,8 @@ def test_delivery_closeout_merges_quality_contracts_from_all_artifacts(tmp_path)
     )
     report = json.loads((Path(tmp_path) / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
 
-    assert response is None
-    codes = {item["code"] for item in report["delivery_quality_gate"]["findings"]}
+    assert response is not None
+    codes = set(report["delivery_quality_gate"]["evidence"]["warning_codes"])
     assert "METRIC_KIND_MISMATCH" in codes
 
 

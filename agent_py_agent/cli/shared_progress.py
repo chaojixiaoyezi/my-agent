@@ -10,14 +10,6 @@ from pathlib import Path
 from typing import Any
 
 from ..agent.local_storage import AgentRuntimeQueryContext
-from .acceptance_progress import (
-    acceptance_next_action_entries,
-    acceptance_next_action_planner,
-    acceptance_plan_entries,
-    acceptance_planner,
-    format_acceptance_next_action_lines,
-    format_acceptance_plan_lines,
-)
 
 
 # LLM: shared_progress_for_board collects root task panels for visible board items only.
@@ -94,7 +86,7 @@ def _query_panels(agent: Any, root_ids: list[str], purpose: str) -> list[dict[st
         panel = local_store.query_shared_progress_panel(
             AgentRuntimeQueryContext(root_task_id=root_id, scope="root_tree", purpose=purpose, requester_role="cli")
         )
-        panels.append(_panel_payload(panel, acceptance_planner(agent), acceptance_next_action_planner(agent)))
+        panels.append(_panel_payload(panel))
     return panels
 
 
@@ -111,7 +103,7 @@ def _root_ids_from_board(board: Any) -> list[str]:
 
 # LLM: _panel_payload serializes a SharedProgressPanel without reading linked files.
 # 函数用途:把共享进度面板转成 status/subagents 输出需要的短 JSON。
-def _panel_payload(panel: Any, plan_hook: Any = None, next_action_hook: Any = None) -> dict[str, Any]:
+def _panel_payload(panel: Any) -> dict[str, Any]:
     runs = _list_attr(panel, "runs")
     blocked_runs = _list_attr(panel, "blocked_runs")
     rollup = getattr(panel, "rollup", None)
@@ -127,8 +119,6 @@ def _panel_payload(panel: Any, plan_hook: Any = None, next_action_hook: Any = No
         "failure_handoff_refs": failure_refs,
         "takeover_readiness_refs": takeover_refs,
         "takeover_entries": _takeover_entries(runs),
-        "acceptance_plan_entries": acceptance_plan_entries(runs, plan_hook),
-        "acceptance_next_action_entries": acceptance_next_action_entries(runs, next_action_hook),
         "warnings": list(getattr(panel, "warnings", []) or []),
     }
 

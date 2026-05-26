@@ -183,7 +183,7 @@ def _path_exists_or_is_future_ref(path_text: str, task: SubAgentTask) -> bool:
 
 
 # LLM: _ready_to_continue is a parent-dispatch signal, not permission to run tools automatically.
-# 函数用途: 判断任务是否仍可由父级继续推进；已完成验收或被放弃/接管则不再建议继续。
+# 函数用途: 判断任务是否仍可由父级收口或被放弃/接管则不再建议继续。
 def _ready_to_continue(task: SubAgentTask) -> bool:
     status = str(task.status or "").upper()
     verification = str(task.verification_status or "").upper()

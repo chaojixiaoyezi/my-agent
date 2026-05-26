@@ -31,7 +31,7 @@ class ScenarioStructuredRepairBackend:
                     "我已经完成任务，但这次故意输出一个损坏的结构化结果块。\n"
                     "[SUBAGENT_RESULT]\n"
                     "{\n"
-                    '  "status": "AWAITING_ACCEPTANCE",\n'
+                    '  "status": "DONE",\n'
                     '  "summary": "这个 JSON 少了结尾，用来模拟模型输出损坏",\n'
                     '  "evidence": [\n'
                     '    {"kind": "note", "summary": "原始回复声称已有证据", "ok": true}\n'
@@ -82,7 +82,7 @@ def _structured_repair_success_text() -> str:
     text = (
         "[SUBAGENT_RESULT]\n"
         "{\n"
-        '  "status": "AWAITING_ACCEPTANCE",\n'
+        '  "status": "DONE",\n'
         '  "summary": "结构化输出损坏后已通过修复回合补齐。",\n'
         '  "used_tools": [],\n'
         '  "used_skills": [],\n'
@@ -106,13 +106,13 @@ def _structured_repair_success_text() -> str:
     return text.replace("_STRUCTURED_TEST_", _file_check_test("structured repair", "坏 JSON 已修复"))
 
 
-# LLM: _runner_retry_success_text keeps retry scenario output aligned with strict parent acceptance.
+# LLM: _runner_retry_success_text keeps retry scenario output aligned with strict closeout.
 # 函数用途: 生成 runner retry 成功 SUBAGENT_RESULT，显式提供 evidence packet refs 和 file_check 测试事实。
 def _runner_retry_success_text() -> str:
     text = (
         "[SUBAGENT_RESULT]\n"
         "{\n"
-        '  "status": "AWAITING_ACCEPTANCE",\n'
+        '  "status": "DONE",\n'
         '  "summary": "runner 在第二次尝试中完成，已生成可验收证据。",\n'
         '  "used_tools": [],\n'
         '  "used_skills": [],\n'

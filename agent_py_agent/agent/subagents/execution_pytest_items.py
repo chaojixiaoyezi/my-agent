@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 
-# LLM: artifact_pytest_items gives parent acceptance a bounded fallback when runners omit tests.
+# LLM: artifact_pytest_items gives closeout a bounded fallback when runners omit tests.
 # 函数用途: 从 workspace 内 test_*.py artifact 生成 pytest 命令；普通源码和非 Python 文件不会被推断。
 def artifact_pytest_items(
     artifact_paths: list[tuple[str, Path]],

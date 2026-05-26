@@ -94,8 +94,8 @@ def test_coordinator_success_closeout_blocks_when_direct_child_timed_out():
     structured = SubAgentParsedOutput(
         found=True,
         ok=True,
-        status="AWAITING_ACCEPTANCE",
-        summary="文件已经生成，等待验收。",
+        status="DONE",
+        summary="文件已经生成，等待收口。",
     )
 
     result = record_finalized_runner_result(
@@ -112,7 +112,7 @@ def test_coordinator_success_closeout_blocks_when_direct_child_timed_out():
 
 
 # LLM: verified children still allow the existing coordinator completion override.
-# 函数用途: 确认新增 child blocker 门不破坏“孩子全绿后 coordinator 可待验收”的旧行为。
+# 函数用途: 确认新增 child blocker 门不破坏“孩子全绿后 coordinator 可待收口”的旧行为。
 def test_coordinator_tool_limit_cleanup_still_passes_when_children_verified():
     agent, captured = _agent({
         "parent": _task("parent", status="RUNNING", verification="UNVERIFIED", children=["child-a"]),
@@ -131,8 +131,8 @@ def test_coordinator_tool_limit_cleanup_still_passes_when_children_verified():
         FinalizedRunnerRecordRequest(agent, _params(), structured, _repair_state())
     )
 
-    assert result.status == "AWAITING_ACCEPTANCE"
-    assert captured.params.structured_output.status == "AWAITING_ACCEPTANCE"
+    assert result.status == "DONE"
+    assert captured.params.structured_output.status == "DONE"
     assert "DONE/VERIFIED" in captured.params.structured_output.summary
 
 
@@ -141,20 +141,20 @@ def test_coordinator_tool_limit_cleanup_still_passes_when_children_verified():
 def test_coordinator_success_closeout_keeps_non_blocking_children():
     agent, captured = _agent({
         "parent": _task("parent", status="RUNNING", verification="UNVERIFIED", children=["child-a"]),
-        "child-a": _task("child-a", status="AWAITING_ACCEPTANCE", verification="NEEDS_ACCEPTANCE"),
+        "child-a": _task("child-a", status="DONE", verification="VERIFIED"),
     })
     structured = SubAgentParsedOutput(
         found=True,
         ok=True,
-        status="AWAITING_ACCEPTANCE",
-        summary="等待父级验收。",
+        status="DONE",
+        summary="等待最终收口。",
     )
 
     result = record_finalized_runner_result(
         FinalizedRunnerRecordRequest(agent, _params(), structured, _repair_state())
     )
 
-    assert result.status == "AWAITING_ACCEPTANCE"
+    assert result.status == "DONE"
     assert captured.params.structured_output.failure_type == ""
 
 
@@ -168,7 +168,7 @@ def test_leaf_success_closeout_blocks_incomplete_html_artifact(tmp_path: Path):
     structured = SubAgentParsedOutput(
         found=True,
         ok=True,
-        status="AWAITING_ACCEPTANCE",
+        status="DONE",
         summary="页面已完成。",
         artifacts=[{"path": str(artifact), "kind": "file", "summary": "homepage"}],
     )
@@ -203,7 +203,7 @@ def test_leaf_success_closeout_blocks_invalid_html_links(tmp_path: Path):
     structured = SubAgentParsedOutput(
         found=True,
         ok=True,
-        status="AWAITING_ACCEPTANCE",
+        status="DONE",
         summary="页面已完成。",
         artifacts=[{"path": str(artifact), "kind": "file", "summary": "homepage"}],
     )
@@ -248,7 +248,7 @@ def test_leaf_success_closeout_recovers_missing_artifact_from_latest_progress(tm
     structured = SubAgentParsedOutput(
         found=True,
         ok=True,
-        status="AWAITING_ACCEPTANCE",
+        status="DONE",
         summary="页面已完成。",
         artifacts=[],
     )
@@ -278,7 +278,7 @@ def test_leaf_relative_artifact_uses_product_write_root(tmp_path: Path):
     structured = SubAgentParsedOutput(
         found=True,
         ok=True,
-        status="AWAITING_ACCEPTANCE",
+        status="DONE",
         summary="页面已修复。",
         artifacts=[{"path": "artifacts/index.html", "kind": "file", "summary": "homepage"}],
     )
@@ -293,7 +293,7 @@ def test_leaf_relative_artifact_uses_product_write_root(tmp_path: Path):
         FinalizedRunnerRecordRequest(agent, _params("worker", context=context), structured, _repair_state())
     )
 
-    assert result.status == "AWAITING_ACCEPTANCE"
+    assert result.status == "DONE"
     assert captured.params.structured_output.failure_type == ""
 
 
@@ -308,7 +308,7 @@ def test_leaf_relative_artifact_with_product_root_suffix(tmp_path: Path):
     structured = SubAgentParsedOutput(
         found=True,
         ok=True,
-        status="AWAITING_ACCEPTANCE",
+        status="DONE",
         summary="页面已完成。",
         artifacts=[{"path": "deliverables/site-output/index.html", "kind": "file", "summary": "homepage"}],
     )
@@ -323,7 +323,7 @@ def test_leaf_relative_artifact_with_product_root_suffix(tmp_path: Path):
         FinalizedRunnerRecordRequest(agent, _params("worker", context=context), structured, _repair_state())
     )
 
-    assert result.status == "AWAITING_ACCEPTANCE"
+    assert result.status == "DONE"
     assert captured.params.structured_output.failure_type == ""
 
 
@@ -340,7 +340,7 @@ def test_leaf_relative_product_root_uses_derived_workspace_root(tmp_path: Path):
     structured = SubAgentParsedOutput(
         found=True,
         ok=True,
-        status="AWAITING_ACCEPTANCE",
+        status="DONE",
         summary="页面已完成。",
         artifacts=[{"path": "lab_outputs/site-output/index.html", "kind": "file", "summary": "homepage"}],
     )
@@ -355,7 +355,7 @@ def test_leaf_relative_product_root_uses_derived_workspace_root(tmp_path: Path):
         FinalizedRunnerRecordRequest(agent, _params("worker", context=context), structured, _repair_state())
     )
 
-    assert result.status == "AWAITING_ACCEPTANCE"
+    assert result.status == "DONE"
     assert captured.params.structured_output.failure_type == ""
 
 

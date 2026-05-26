@@ -46,7 +46,7 @@ def test_process_structured_output_handles_raw_json(mock_task):
 
 
 def test_process_structured_output_records_evidence_packets_and_findings(mock_task):
-    """LLM: evidence packets become task facts for parent acceptance."""
+    """LLM: evidence packets become task facts for closeout."""
     parsed = SubAgentParsedOutput(
         found=True,
         ok=True,
@@ -108,7 +108,7 @@ def test_process_structured_output_records_coverage_records(mock_task):
 
 
 # LLM: negative content-check evidence must use explicit schema rather than summary prose.
-# 函数用途: 子代理用 match_mode=not_contains 表示坏模式不存在时，父级验收按负向检查通过。
+# 函数用途: 子代理用 match_mode=not_contains 表示坏模式不存在时，最终收口按负向检查通过。
 def test_process_structured_output_normalizes_explicit_absent_pattern_evidence(mock_task):
     parsed = SubAgentParsedOutput(
         found=True,
@@ -155,7 +155,7 @@ def test_process_structured_output_does_not_invert_natural_absent_summary(mock_t
 
 
 def test_process_structured_output_synthesizes_artifact_evidence_packet(mock_task):
-    """LLM: artifact-only runner outputs still become traceable parent-acceptance evidence."""
+    """LLM: artifact-only runner outputs still become traceable closeout evidence."""
     parsed = SubAgentParsedOutput(
         found=True,
         ok=True,
@@ -266,7 +266,7 @@ def test_process_structured_output_resolves_refs_from_agent_run_workspace(mock_t
         found=True,
         ok=True,
         parse_error="",
-        status="AWAITING_ACCEPTANCE",
+        status="DONE",
         artifacts=[{"path": str(artifact), "kind": "report"}],
         evidence_packets=[{
             "claim": "泰国分析报告已完成",
@@ -278,7 +278,7 @@ def test_process_structured_output_resolves_refs_from_agent_run_workspace(mock_t
 
     result = _process_structured_output(mock_task, parsed, 123456.0, None)
 
-    assert parsed.status == "AWAITING_ACCEPTANCE"
+    assert parsed.status == "DONE"
     assert parsed.failure_type == ""
     assert result["evidence_packets"][0]["artifact_refs"] == [str(artifact)]
     assert mock_task.artifact_refs == [str(artifact)]
@@ -316,7 +316,7 @@ def test_process_structured_output_resolves_guessed_child_artifact_refs(mock_tas
         found=True,
         ok=True,
         parse_error="",
-        status="AWAITING_ACCEPTANCE",
+        status="DONE",
         evidence_packets=[{
             "claim": "直接竞争对手研究已完成",
             "checked_scope": "child artifact refs",
@@ -327,7 +327,7 @@ def test_process_structured_output_resolves_guessed_child_artifact_refs(mock_tas
 
     result = _process_structured_output(mock_task, parsed, 123456.0, None)
 
-    assert parsed.status == "AWAITING_ACCEPTANCE"
+    assert parsed.status == "DONE"
     assert parsed.failure_type == ""
     assert result["evidence_packets"][0]["artifact_refs"] == [str(actual)]
     assert mock_task.artifact_refs == [str(actual)]

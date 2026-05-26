@@ -134,7 +134,7 @@ def subagent_output_json_response(agent, fallback: ModelResponse) -> ModelRespon
         "[SUBAGENT_RESULT]\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
         "[/SUBAGENT_RESULT]\n\n"
-        "系统检测到当前子代理已写出 output.json，已结束工具循环并等待父级验收。"
+        "系统检测到当前子代理已写出 output.json，已结束工具循环并交回父级汇总。"
     )
     return ModelResponse(text=text, backend=fallback.backend)
 
@@ -235,9 +235,6 @@ def _task_report_refs(task) -> list[str]:
         "coordinator_report.md",
         "runner_result.json",
         "test_execution.json",
-        "acceptance_review.json",
-        "parent_acceptance_auto_execution.json",
-        "parent_acceptance_decision.json",
         "failure_handoff.json",
         "takeover_readiness.json",
     )
@@ -282,7 +279,7 @@ def _evidence_packet_claim(payload: dict[str, object]) -> str:
     summary = str(payload.get("summary") or "").strip()
     if summary:
         return summary[:200]
-    status = str(payload.get("status") or "AWAITING_ACCEPTANCE").strip()
+    status = str(payload.get("status") or "DONE").strip()
     return f"runner wrote output.json closeout with status={status}"
 
 

@@ -129,7 +129,7 @@ class PathRef:
 
 
 # LLM: EvidenceRef points to machine-checkable evidence instead of trusting summaries.
-# 类用途: 保存验收声明和对应 evidence/artifact 引用，避免父级从自然语言 summary 猜事实。
+# 类用途: 保存收口交给父级从自然语言 summary 猜事实。
 @dataclass(frozen=True)
 class EvidenceRef:
     evidence_id: str

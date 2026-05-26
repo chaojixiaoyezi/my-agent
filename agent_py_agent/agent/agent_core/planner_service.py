@@ -29,7 +29,6 @@ class PlannerInputContext:
     action_plan: Any
     runner_candidates: list
     patch_run_ids: list
-    acceptance_report: Any
     open_requests: list
     open_gaps: list
 
@@ -95,12 +94,6 @@ def _collect_parent_planner_context(agent: SimpleAgent, params: PlannerStatePara
     action_plan = agent.subagents.plan_actions(params.cfg)
     runner_candidates = _dispatch_runner_candidates(tasks, params.max_runners)
     patch_run_ids = _limit_items(_dispatch_patch_review_run_ids(tasks), params.limit)
-    acceptance_report = agent.subagents.review_acceptances(
-        apply=False,
-        reviewer=params.reviewer,
-        note=params.note,
-        limit=params.limit,
-    )
     active_tasks = _active_planner_tasks(tasks)
     open_requests, open_gaps = _collect_open_capability_items(tasks)
     return (
@@ -112,7 +105,6 @@ def _collect_parent_planner_context(agent: SimpleAgent, params: PlannerStatePara
             action_plan=action_plan,
             runner_candidates=runner_candidates,
             patch_run_ids=patch_run_ids,
-            acceptance_report=acceptance_report,
             open_requests=open_requests,
             open_gaps=open_gaps,
         ),
@@ -123,11 +115,7 @@ def _collect_parent_planner_context(agent: SimpleAgent, params: PlannerStatePara
 # 函数用途: 处理active规划器tasks相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _active_planner_tasks(tasks: list) -> list:
     terminal_statuses = {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
-    return [
-        task
-        for task in tasks
-        if task.status not in terminal_statuses or task.verification_status == "NEEDS_ACCEPTANCE"
-    ]
+    return [task for task in tasks if task.status not in terminal_statuses]
 
 
 # LLM: _collect_open_capability_items 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -198,7 +186,6 @@ def _build_gate_summary(ctx: PlannerInputContext) -> dict[str, Any]:
         "action_items": ctx.action_plan.summary.get("total", 0),
         "runner_candidates": len(ctx.runner_candidates),
         "patch_reviews": len(ctx.patch_run_ids),
-        "acceptance_records": len(ctx.acceptance_report.records),
         "open_capability_requests": len(ctx.open_requests),
         "open_capability_gaps": len(ctx.open_gaps),
     }
@@ -211,7 +198,6 @@ def _build_gate_summary(ctx: PlannerInputContext) -> dict[str, Any]:
                 "action_items",
                 "runner_candidates",
                 "patch_reviews",
-                "acceptance_records",
                 "open_capability_requests",
                 "open_capability_gaps",
             )
@@ -255,17 +241,6 @@ def _build_planner_state_dict(gate_summary: dict[str, Any], board: Any, ctx: Pla
         ],
         "runner_candidates": [_task_state_for_planner(task) for task in ctx.runner_candidates],
         "patch_review_run_ids": ctx.patch_run_ids,
-        "acceptance_records": [
-            {
-                "run_id": record.run_id,
-                "decision": record.decision,
-                "ok": record.ok,
-                "message": record.message,
-                "evidence_count": record.evidence_count,
-                "test_count": record.test_count,
-            }
-            for record in _limit_items(ctx.acceptance_report.records, limit)
-        ],
         "open_capability_requests": _limit_items(ctx.open_requests, limit),
         "open_capability_gaps": _limit_items(ctx.open_gaps, limit),
     }

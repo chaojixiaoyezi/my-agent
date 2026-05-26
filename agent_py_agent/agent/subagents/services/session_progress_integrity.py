@@ -46,8 +46,8 @@ def artifact_next_action(integrity: dict[str, Any]) -> str:
         detail_text = f"；具体位置：{details}" if details else ""
         strategy = _integrity_repair_strategy(integrity)
         strategy_text = f"；{strategy}" if strategy else ""
-        return f"产物已写出但自检发现 codes={joined}{detail_text}{strategy_text}；先修复这些问题，再写 execution_context.output_json 交父级验收。"
-    return "产物已形成完整 HTML；停止继续写正文，按验收条件自检后写 execution_context.output_json（output.json）或 SUBAGENT_RESULT，交父级验收。"
+        return f"产物已写出但自检发现 codes={joined}{detail_text}{strategy_text}；先修复这些问题，再写 execution_context.output_json 交最终收口。"
+    return "产物已形成完整 HTML；停止继续写正文，按验收条件自检后写 execution_context.output_json（output.json）或 SUBAGENT_RESULT，交最终收口。"
 
 
 # LLM: artifact_integrity_summary keeps progress summaries readable while preserving issue codes.

@@ -1,4 +1,4 @@
-# LLM: QA ready refs give tester/acceptor agents concrete worker outputs without reading bodies.
+# LLM: QA ready refs give tester agents concrete worker outputs without reading bodies.
 # 模块用途: 扫描父任务子树里的可验收实现节点，输出 refs-only 的 QA 输入清单。
 
 from __future__ import annotations
@@ -71,14 +71,14 @@ def _ready_ref_payload(child: object) -> dict[str, object]:
 
 
 # LLM: _is_ready_implementation_child classifies implementation roles and completion states.
-# 函数用途: worker/writer/coder/leaf 至少等待验收或已验证完成，才暴露给 QA。
+# 函数用途: worker/writer/coder/leaf 至少等待收口或已验证完成，才暴露给 QA。
 def _is_ready_implementation_child(child: object) -> bool:
     identity = f"{_text_attr(child, 'role')} {_text_attr(child, 'agent_name')}".lower().replace("-", "_")
     if not any(token in identity for token in {"worker", "writer", "coder", "leaf"}):
         return False
     status = _text_attr(child, "status").upper()
     verification = _text_attr(child, "verification_status").upper()
-    return status in {"AWAITING_ACCEPTANCE", "DONE"} or verification in {"NEEDS_ACCEPTANCE", "VERIFIED"}
+    return status in {"DONE"} or verification in {"VERIFIED"}
 
 
 # LLM: _load_child isolates manager compatibility differences and stale refs.

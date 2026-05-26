@@ -191,7 +191,7 @@ def _raise_main_event_call(run_id: str) -> dict[str, object]:
 
 def _raise_main_event_result() -> dict[str, object]:
     return {
-        "status": "AWAITING_ACCEPTANCE",
+        "status": "DONE",
         "summary": "已通过 raise_main_event 上报主代理。",
         "used_tools": ["raise_main_event"],
         "evidence_packets": [_raise_main_event_packet()],
@@ -243,7 +243,7 @@ def _request_collaboration_call(case_id: str, run_id: str) -> dict[str, object]:
 
 def _open_case_result(case_id: str, request_id: str) -> dict[str, object]:
     return {
-        "status": "AWAITING_ACCEPTANCE",
+        "status": "DONE",
         "summary": "已打开协作 case 并发起补证据请求。",
         "used_tools": ["open_case", "request_collaboration"],
         "evidence_packets": [_case_request_packet(case_id, request_id)],
@@ -289,7 +289,7 @@ def _update_request_call(case_id: str, request_id: str, run_id: str) -> dict[str
 
 def _evidence_result() -> dict[str, object]:
     return {
-        "status": "AWAITING_ACCEPTANCE",
+        "status": "DONE",
         "summary": "已提交协作证据并更新请求状态。",
         "used_tools": ["submit_evidence", "update_collaboration_request"],
         "evidence_packets": [_local_source_b_packet()],

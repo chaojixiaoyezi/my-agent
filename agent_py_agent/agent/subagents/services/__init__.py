@@ -1,5 +1,5 @@
 # LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
-# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+# 模块用途: 支撑主代理派发、跟踪和汇总子代理任务。
 
 """service objects behind the public SubAgentManager facade.
 
@@ -8,7 +8,6 @@
 service 只在内部收口实现细节。
 """
 
-from .acceptance_findings import SubAgentAcceptanceFindingService
 from .actions import SubAgentActionService
 from .base import SubAgentBaseService
 from .board import SubAgentBoardService
@@ -26,6 +25,5 @@ __all__ = [
     "SubAgentActionService",
     "SubAgentDispatchService",
     "SubAgentIndexingService",
-    "SubAgentAcceptanceFindingService",
     "SubAgentWorkflowService",
 ]

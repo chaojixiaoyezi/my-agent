@@ -133,7 +133,7 @@ class TestInspectAgentTreeTool:
         child.current_tool = "write_file"
         child.last_progress_summary = "写出阶段报告"
         child.artifact_refs = ["artifact:report.md"]
-        child.blockers = ["等待验收"]
+        child.blockers = ["等待收口"]
         manager.save(child)
         root.child_ids = [child.id]
         manager.save(root)
@@ -154,7 +154,7 @@ class TestInspectAgentTreeTool:
         assert payload["nodes"][1]["current_tool"] == "write_file"
         assert payload["nodes"][1]["last_progress_summary"] == "写出阶段报告"
         assert payload["nodes"][1]["artifact_refs"] == ["artifact:report.md"]
-        assert payload["nodes"][1]["blockers"] == ["等待验收"]
+        assert payload["nodes"][1]["blockers"] == ["等待收口"]
         assert mock_agent.dispatch_subagents.call_count == 0
         assert mock_agent._has_pending_work is True
 

@@ -81,7 +81,7 @@ def test_hierarchy_recovery_packet_collects_multilevel_candidates_refs_only(tmp_
     assert all(item.takeover_readiness_ref for item in result.recovery_candidates)
     assert all(item.context_bundle_ref.endswith("context_bundle.json") for item in result.recovery_candidates)
     assert all(item.parent_context_bundle_ref.endswith("context_bundle.json") for item in result.recovery_candidates)
-    assert all(item.recommended_command.startswith("my-agent subagents-acceptance-plan") for item in result.recovery_candidates)
+    assert all(item.recommended_command.startswith("my-agent subagents-tests-plan") for item in result.recovery_candidates)
     assert "DO_NOT_READ_THIS_RECOVERY_ARTIFACT_BODY" not in payload
 
 

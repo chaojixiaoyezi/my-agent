@@ -51,7 +51,7 @@ class TestParseSubagentRunnerOutput:
         """结果尾部截断但 evidence_packets 已完整时，恢复最小可验收结果。"""
         text = """[SUBAGENT_RESULT]
 {
-  "status": "AWAITING_ACCEPTANCE",
+  "status": "DONE",
   "summary": "10个文件已创建",
   "used_tools": ["write_file", "list_files"],
   "evidence_packets": [
@@ -63,7 +63,7 @@ class TestParseSubagentRunnerOutput:
         result = parse_subagent_runner_output(text)
         assert result.found is True
         assert result.ok is True
-        assert result.status == "AWAITING_ACCEPTANCE"
+        assert result.status == "DONE"
         assert result.summary == "10个文件已创建"
         assert result.used_tools == ["write_file", "list_files"]
         assert result.evidence_packets[0]["artifact_refs"] == ["/tmp/build/index.html"]
@@ -72,7 +72,7 @@ class TestParseSubagentRunnerOutput:
         """没有可追溯 refs 的截断成功态不能被恢复成完成。"""
         text = """[SUBAGENT_RESULT]
 {
-  "status": "AWAITING_ACCEPTANCE",
+  "status": "DONE",
   "summary": "我完成了",
   "evidence_packets": [
     {"id": "evpkt-no-refs", "claim": "完成", "checked_scope": "prose", "confidence": 1.0}
@@ -148,12 +148,12 @@ class TestParseSubagentRunnerOutput:
         assert result.lessons == ["l1"]
         assert result.next_actions == ["a1"]
 
-    # LLM: top-level artifact_refs are common in reviewer/acceptor outputs and must feed machine checks.
-    # 函数用途: 复现验收代理把真实产物写在 artifact_refs 而不是 artifacts 时，父级测试漏掉产物的问题。
+    # LLM: top-level artifact_refs are common in reviewer/bug_finder outputs and must feed machine checks.
+    # 函数用途: 复现验收代理把真实产物写在 artifact_refs 而不是 artifacts 时，结果检查漏掉产物的问题。
     def test_parse_top_level_artifact_refs_as_artifacts(self):
         text = """[SUBAGENT_RESULT]
 {
-  "status": "AWAITING_ACCEPTANCE",
+  "status": "DONE",
   "summary": "验收完成",
   "artifact_refs": ["/tmp/shop/index.html", "/tmp/report.md"]
 }

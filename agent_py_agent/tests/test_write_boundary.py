@@ -246,7 +246,7 @@ class TestValidateWriteBoundaryAllowedRoots:
                 {"path": str(product / filename)},
                 workspace_root=tmp_path,
                 write_boundary={
-                    "role": "acceptor",
+                    "role": "bug_finder",
                     "allowed_write_roots": [str(task_dir), str(product)],
                     "product_write_roots": [str(product)],
                     "product_write_policy": "delegate",

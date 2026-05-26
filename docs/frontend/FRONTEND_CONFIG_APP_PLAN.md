@@ -247,7 +247,7 @@ type ConfigSchema = {
 | `gateway` | Gateway | `gateway_workspace`, `gateway_port`, `gateway_heartbeat_interval`, `gateway_request_workers` |
 | `daemon` | 前台 Daemon | `daemon_planner`, `daemon_apply`, `daemon_execute_runners`, `daemon_interval` |
 | `scheduler` | 调度策略（高级兼容） | `scheduler_mode`, `runner_failure_policy` |
-| `acceptance` | 验收策略 | `acceptance_execute_tests`, `acceptance_test_timeout_seconds` |
+| `result_check` | 结果检查 | `result_check_execute_tests`, `result_check_timeout_seconds` |
 | `notification` | 通知系统 | `notification_enabled`, `notification_store_path` |
 | `audit` | 审计日志 | `audit_enabled`, `audit_log_path` |
 | `concurrency` | 并发控制 | `concurrency_lock_enabled`, `task_lock_timeout_seconds` |
@@ -750,7 +750,7 @@ const toolWriteInlineMaxChars: ConfigField = {
         "run_id": "run_child_001",
         "agent_name": "worker-001",
         "role": "worker",
-        "status": "AWAITING_ACCEPTANCE",
+        "status": "DONE",
         "children": [
           {
             "run_id": "run_grandchild_001",
@@ -886,7 +886,7 @@ const toolWriteInlineMaxChars: ConfigField = {
   "subagents": {
     "total_active": 5,
     "total_pending": 3,
-    "total_awaiting_acceptance": 2
+    "total_pending_closeout": 2
   },
   "memory": {
     "record_count": 12450,
@@ -979,7 +979,7 @@ const toolWriteInlineMaxChars: ConfigField = {
 - 每个节点显示：agent name、role、status、current step
 - Blockers 列表（红色高亮）
 - Output refs、artifact refs、debug trace refs（只显示路径和摘要，不加载正文）
-- QA / tester / acceptor / bug_finder 角色标识（不同颜色标签）
+- QA / tester / checker / bug_finder 角色标识（不同颜色标签）
 - Rescue / takeover 状态（闪烁或特殊背景）
 - 点击节点展开详情面板：生命周期时间线、验收状态、工具调用统计
 - 支持按 status、role、depth 过滤
@@ -1037,7 +1037,7 @@ const toolWriteInlineMaxChars: ConfigField = {
 ### 8.7 Templates（模板页）
 
 **功能**：
-- Role templates 列表：coordinator、worker、tester、acceptor、bug_finder 等
+- Role templates 列表：coordinator、worker、tester、checker、bug_finder 等
 - 显示每个 role 的 description、allowed tools、默认参数
 - Workflow templates 列表（当前预留）
 - Skill templates 列表（未来预留）
@@ -1055,7 +1055,7 @@ const toolWriteInlineMaxChars: ConfigField = {
 [root] coordinator-001          RUNNING  [coordinator]
   ├── [child] worker-001        RUNNING  [worker]
   │     ├── [grandchild] tester-001  DONE  [tester]
-  │     └── [grandchild] writer-001  AWAITING_ACCEPTANCE  [writer]
+  │     └── [grandchild] writer-001  DONE  [writer]
   ├── [child] worker-002        BLOCKED  [worker]  ⚠️ 工具调用超时
   └── [child] researcher-001    RUNNING  [researcher]
         └── [grandchild] bug_finder-001  PENDING  [bug_finder]
@@ -1096,14 +1096,14 @@ const toolWriteInlineMaxChars: ConfigField = {
 +----------------------------------+
 |  验收状态                          |
 |  QA: PENDING | Tester: DONE       |
-|  Acceptor: -- | Bug Finder: --    |
+|  Checker: -- | Bug Finder: --    |
 +----------------------------------+
 ```
 
-### 9.3 QA / Tester / Acceptor / Bug Finder 角色展示
+### 9.3 QA / Tester / Checker / Bug Finder 角色展示
 
 - 在详情面板的"验收状态"区域集中展示
-- 每个角色的状态用颜色区分：DONE（绿）、PENDING（灰）、NEEDS_ACCEPTANCE（橙）、FAILED（红）
+- 每个角色的状态用颜色区分：DONE（绿）、PENDING（灰）、VERIFIED（橙）、FAILED（红）
 - 点击角色标签可展开该角色的详细报告（异步加载）
 
 ### 9.4 Rescue / Takeover 状态
@@ -2166,14 +2166,14 @@ const configSchemaExample: ConfigSchema = {
     {
       key: "acceptance",
       label: "验收策略",
-      description: "父级验收的测试执行和超时配置",
+      description: "最终收口的测试执行和超时配置",
       icon: "CheckCircle",
       order: 9,
       fields: [
         {
-          key: "acceptance_execute_tests",
+          key: "result_check_execute_tests",
           label: "执行验收测试",
-          description: "父级验收是否默认真实执行 runner 输出里的 tests",
+          description: "最终收口是否默认真实执行 runner 输出里的 tests",
           type: "boolean",
           defaultValue: false,
           category: "acceptance",
@@ -2186,9 +2186,9 @@ const configSchemaExample: ConfigSchema = {
           order: 1,
         },
         {
-          key: "acceptance_test_timeout_seconds",
+          key: "result_check_timeout_seconds",
           label: "测试超时（秒）",
-          description: "父级验收真实执行 tests 时的单条测试超时",
+          description: "最终收口真实执行 tests 时的单条测试超时",
           type: "number",
           defaultValue: 120,
           min: 1,

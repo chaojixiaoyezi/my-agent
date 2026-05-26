@@ -1,9 +1,9 @@
 # LLM: Minimal real acceptance validation executor; returns records and leaves acceptance decisions to callers.
-# 模块用途: 执行父级验收需要的 command/file/content 检查，产出执行记录，但不写任务状态。
+# 模块用途: 执行最终收口需要的 command/file/content 检查，产出执行记录，但不写任务状态。
 
 from __future__ import annotations
 
-"""Bounded executor for real parent-acceptance validation items."""
+"""Bounded executor for real closeout validation items."""
 
 import importlib
 import subprocess
@@ -32,9 +32,9 @@ from .static_site_validator import run_static_site_check
 
 
 # LLM: TestExecutor performs bounded local validation and returns records; callers decide whether records affect acceptance.
-# 类用途: 执行父级验收用的最小真实检查；会在 workspace 内执行 allowlist 命令或读取指定文件，但不写任务状态。
+# 类用途: 执行最终收口用的最小真实检查；会在 workspace 内执行 allowlist 命令或读取指定文件，但不写任务状态。
 class TestExecutor:
-    """Execute one real validation item for parent acceptance."""
+    """Execute one real validation item for closeout."""
 
     __test__: ClassVar[bool] = False
     ALLOWED_PREFIXES: ClassVar[frozenset[str]] = frozenset({
@@ -177,7 +177,7 @@ class TestExecutor:
             )
         )
 
-    # LLM: _check_artifact_integrity runs the shared bounded artifact gate as a parent-acceptance test item.
+    # LLM: _check_artifact_integrity runs the shared bounded artifact gate as a closeout test item.
     # 函数用途: 执行 artifact_integrity 验收项，检查 workspace 内产物结构，不读取或信任模型总结文案。
     def _check_artifact_integrity(self, test: dict[str, Any]) -> TestExecutionRecord:
         path, error = self._resolve_test_path(test.get("file_path") or test.get("path"))
@@ -211,7 +211,7 @@ class TestExecutor:
             return path, "file_path 超出 workspace 边界"
         return path, ""
 
-    # LLM: _resolve_command_working_dir lets parent tests run inside artifact dirs while preserving workspace bounds.
+    # LLM: _resolve_command_working_dir lets result checks run inside artifact dirs while preserving workspace bounds.
     # 函数用途: 解析 command 测试的 working_dir/cwd；未指定时使用 workspace 根目录，越界或非目录会阻断执行。
     def _resolve_command_working_dir(self, test: dict[str, Any]) -> tuple[Path, str]:
         raw = str(test.get("working_dir") or test.get("cwd") or "").strip()

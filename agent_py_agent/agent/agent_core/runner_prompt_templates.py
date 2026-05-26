@@ -6,7 +6,7 @@ from __future__ import annotations
 SUBAGENT_RESULT_TEMPLATE = (
     "[SUBAGENT_RESULT]\n"
     "{\n"
-    '  "status": "AWAITING_ACCEPTANCE",\n'
+    '  "status": "DONE",\n'
     '  "summary": "本轮完成或卡住的摘要",\n'
     '  "used_tools": [],\n'
     '  "used_skills": [],\n'
@@ -42,7 +42,7 @@ SUBAGENT_RESULT_TEMPLATE = (
 SUBAGENT_REPAIR_RESULT_TEMPLATE = (
     "[SUBAGENT_RESULT]\n"
     "{\n"
-    '  "status": "AWAITING_ACCEPTANCE",\n'
+    '  "status": "DONE",\n'
     '  "summary": "本轮完成或卡住的摘要",\n'
     '  "used_tools": [],\n'
     '  "used_skills": [],\n'

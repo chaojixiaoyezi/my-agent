@@ -25,7 +25,6 @@ from agent_py_agent.agent.log_analysis.dispatch.work_orders.creation import (
     create_subagent_tasks_from_work_order_plan,
 )
 from agent_py_agent.agent.log_analysis.dispatch.work_orders.planning import (
-    PARENT_FINAL_GATE,
     PLAN_NOT_READY_ISSUE,
     LogAnalysisWorkOrderPlan,
     SubagentWorkOrder,

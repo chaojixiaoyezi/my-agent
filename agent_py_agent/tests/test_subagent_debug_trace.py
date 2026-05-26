@@ -39,7 +39,7 @@ class _TraceToolBackend(BaseBackend):
             text=(
                 "[SUBAGENT_RESULT]\n"
                 "{\n"
-                '  "status": "AWAITING_ACCEPTANCE",\n'
+                '  "status": "DONE",\n'
                 '  "summary": "trace runner finished.",\n'
                 '  "used_tools": ["list_files"],\n'
                 '  "used_skills": [],\n'
@@ -129,8 +129,8 @@ def test_subagent_debug_trace_records_runner_result_when_enabled(tmp_path):
             dry_run=False,
             ok=True,
             message="done",
-            status="AWAITING_ACCEPTANCE",
-            verification_status="NEEDS_ACCEPTANCE",
+            status="DONE",
+            verification_status="VERIFIED",
             backend="echo",
             tool_rounds=1,
         )
@@ -141,8 +141,8 @@ def test_subagent_debug_trace_records_runner_result_when_enabled(tmp_path):
     runner_record = records[-1]
     assert runner_record["level"] == 2
     assert runner_record["run_id"] == task.id
-    assert runner_record["status"] == "AWAITING_ACCEPTANCE"
-    assert runner_record["verification_status"] == "NEEDS_ACCEPTANCE"
+    assert runner_record["status"] == "DONE"
+    assert runner_record["verification_status"] == "VERIFIED"
     assert runner_record["ok"] is True
     assert runner_record["dry_run"] is False
     assert runner_record["backend"] == "echo"
@@ -184,26 +184,26 @@ def test_subagent_debug_trace_records_hierarchy_schedule_when_enabled(tmp_path):
     assert schedule_record["requested_by"] == "root"
 
 
-def test_subagent_debug_trace_records_parent_acceptance_decision_and_next_action(tmp_path):
-    """等级 2 记录父级验收判断和下一动作，便于排查卡在人审还是测试。"""
+def test_subagent_debug_trace_records_final_closeout_decision_and_next_action(tmp_path):
+    """等级 2 记录最终收口判断和下一动作，便于排查卡在人审还是测试。"""
     manager = SubAgentManager(tmp_path, debug_trace_level=2)
     task = manager.create_run(goal="acceptance", thought="check", plan=["plan"])
 
-    manager.plan_parent_acceptance(task.id)
-    manager.plan_parent_acceptance_next_action(task.id)
+    manager.plan_final_closeout(task.id)
+    manager.plan_final_closeout_next_action(task.id)
 
     records = _trace_records(tmp_path)
     assert [record["event_type"] for record in records] == [
         "task_created",
-        "parent_acceptance_decision",
-        "parent_acceptance_next_action",
+        "final_closeout_decision",
+        "final_closeout_next_action",
     ]
     decision_record = records[-2]
     action_record = records[-1]
     assert decision_record["decision"] == "inspect_only"
     assert decision_record["risk_level"] == "low"
     assert decision_record["requires_human_confirmation"] is False
-    assert action_record["action"] == "apply_acceptance"
+    assert action_record["action"] == "apply_result"
     assert action_record["mutates_task_state"] is True
 
 

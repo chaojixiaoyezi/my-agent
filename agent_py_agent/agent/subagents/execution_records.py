@@ -1,5 +1,5 @@
 # LLM: Real acceptance test execution record models; keep this file side-effect free.
-# 模块用途: 定义父级验收真实执行证据的数据结构，不负责执行命令或写入文件。
+# 模块用途: 定义最终收口真实执行证据的数据结构，不负责执行命令或写入文件。
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import Any, ClassVar
 # 类用途: 保存单条验收测试的真实执行结果；它只做字段归一化和序列化，不执行命令、不读取文件。
 @dataclass
 class TestExecutionRecord:
-    """Record one real validation attempt for parent acceptance."""
+    """Record one real validation attempt for closeout."""
 
     MAX_CAPTURE_CHARS: ClassVar[int] = 4000
     __test__: ClassVar[bool] = False
@@ -39,7 +39,7 @@ class TestExecutionRecord:
         self.validation_result = dict(self.validation_result or {})
         self.metadata = dict(self.metadata or {})
 
-    # LLM: passed derives parent acceptance truth from the real execution flag and validation result.
+    # LLM: passed derives closeout truth from the real execution flag and validation result.
     # 函数用途: 给验收层读取统一布尔结果；未执行的记录即使 validation_result 写 ok 也不能算通过。
     @property
     def passed(self) -> bool:

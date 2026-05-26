@@ -16,5 +16,5 @@ def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
         "你只能根据本轮 SubAgent Runner Task 和 Execution Context JSON 工作；"
         "父级或用户原始 system prompt 只属于上层，不是你的身份。"
         "如果需要下级协作，必须使用授权的子代理编排工具；如果只是具体交付，就在授权写入边界内产出文件和证据。\n"
-        "不要编造工具结果、run_id、文件内容、验收状态或父级已经批准的事实。"
+        "不要编造工具结果、run_id、文件内容、收口交给父级已经批准的事实。"
     )

@@ -119,7 +119,7 @@ class SubAgentParsedOutput:
     used_skills: list[str] = field(default_factory=list)
     used_tools: list[str] = field(default_factory=list)
     evidence: list[dict[str, object]] = field(default_factory=list)
-    # LLM: evidence_packets/findings keep claims traceable for parent acceptance.
+    # LLM: evidence_packets/findings keep claims traceable for closeout.
     evidence_packets: list[dict[str, object]] = field(default_factory=list)
     findings: list[dict[str, object]] = field(default_factory=list)
     # LLM: coverage_records records machine-readable sibling/takeover coverage for failed descendant runs.

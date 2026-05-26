@@ -4,7 +4,7 @@
 
 我们要做的 subagent 不是“多开几个聊天分身”，而是一个可管理的任务树系统。
 
-每个 subagent 都应该是一个可查询、可恢复、可验收、可上抛、可被父级观察的任务节点。主 agent 不靠聊天上下文记全局状态，而是从任务注册表、事件流、证据包和验收报告里实时读取事实。
+每个 subagent 都应该是一个可查询、可恢复、可收口交给父级检查报告里实时读取事实。
 
 这份路线只描述开发顺序和交付边界，不改动既有需求、痛点和设计动机。
 
@@ -108,7 +108,7 @@
 退出标准：
 
 - 子代理不能只用“已完成”通过验收。
-- 父级验收能列出每条关键结论对应的 evidence refs。
+- 最终收口能列出每条关键结论对应的 evidence refs。
 - 缺 evidence chain 的 DONE / PASS 会被阻断。
 
 ### 3. Acceptance 强化 + Verifier
@@ -122,7 +122,7 @@
 - 从 `output.json.tests`、`artifacts`、`evidence_packets` 自动生成验收检查项。
 - acceptance report 分层展示：worker 自述、证据事实、父级结论。
 - 新增 verifier 角色约定：只读证据、找反例、检查 claim 是否过度推断。
-- 高风险 workflow 默认 producer -> verifier / critic -> parent acceptance。
+- 高风险 workflow 默认 producer -> verifier / critic -> closeout。
 
 退出标准：
 

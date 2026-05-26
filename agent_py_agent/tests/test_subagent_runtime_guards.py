@@ -205,7 +205,7 @@ def test_dispatch_closeout_treats_verified_repair_target_as_resolved(tmp_path):
 
 
 # LLM: Broad repair output files_modified refs should resolve stale originals once all touched files are verified.
-# 函数用途: 一个修复代理改了多个页面后，即使自身仍停在待验收，若页面已有 VERIFIED 覆盖，也不能拖住最终账本。
+# 函数用途: 一个修复代理改了多个页面后，即使自身仍停在待收口，若页面已有 VERIFIED 覆盖，也不能拖住最终账本。
 def test_dispatch_closeout_treats_multi_file_repair_as_resolved_by_verified_outputs(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     repair = manager.create_run(
@@ -216,7 +216,7 @@ def test_dispatch_closeout_treats_multi_file_repair_as_resolved_by_verified_outp
     page1 = manager.create_run(goal="verify index1.html", thought="done", plan=["verify"])
     page2 = manager.create_run(goal="verify index2.html", thought="done", plan=["verify"])
     repair.result = _subagent_result_json({
-        "status": "AWAITING_ACCEPTANCE",
+        "status": "DONE",
         "files_modified": [
             {"file": "/Users/example/project/deliverables/index1.html"},
             {"file": "/Users/example/project/deliverables/index2.html"},
@@ -224,8 +224,8 @@ def test_dispatch_closeout_treats_multi_file_repair_as_resolved_by_verified_outp
     })
     _write_output_json(page1.output_json, {"artifacts": [{"path": "deliverables/index1.html"}]})
     _write_output_json(page2.output_json, {"artifacts": [{"path": "deliverables/index2.html"}]})
-    repair.status = "AWAITING_ACCEPTANCE"
-    repair.verification_status = "NEEDS_ACCEPTANCE"
+    repair.status = "DONE"
+    repair.verification_status = "VERIFIED"
     page1.status = page2.status = "DONE"
     page1.verification_status = page2.verification_status = "VERIFIED"
     manager.save(repair)
@@ -250,8 +250,8 @@ def test_dispatch_closeout_reads_users_path_from_result_json(tmp_path):
         "artifact_path": "/Users/example/my-claude-code/work/deliverables/index3.html",
     })
     _write_output_json(verified.output_json, {"artifacts": [{"path": "deliverables/index3.html"}]})
-    stale.status = "AWAITING_ACCEPTANCE"
-    stale.verification_status = "NEEDS_ACCEPTANCE"
+    stale.status = "DONE"
+    stale.verification_status = "VERIFIED"
     verified.status = "DONE"
     verified.verification_status = "VERIFIED"
     manager.save(stale)
@@ -349,23 +349,23 @@ def test_final_response_guard_ignores_dry_run_dispatch_scope(tmp_path):
 
 
 # LLM: Awaiting-acceptance work is incomplete but still reportable as factual status.
-# 函数用途: 子代理已真实运行并产出 output.json、只是等待验收时，最终守卫不能把状态汇报替换成泛化阻断。
-def test_final_response_guard_keeps_awaiting_acceptance_status_answer(tmp_path):
+# 函数用途: 子代理已真实运行并产出 output.json、只是等待收口时，最终守卫不能把状态汇报替换成泛化阻断。
+def test_final_response_guard_keeps_pending_closeout_status_answer(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     task = manager.create_run(goal="summarize source", thought="runner touched", plan=["read"])
     _write_output_json(task.output_json, {
-        "status": "AWAITING_ACCEPTANCE",
+        "status": "DONE",
         "summary": "已读取文件并写入摘要。",
     })
-    task.status = "AWAITING_ACCEPTANCE"
-    task.verification_status = "NEEDS_ACCEPTANCE"
+    task.status = "DONE"
+    task.verification_status = "VERIFIED"
     task.latest_summary = "已读取文件并写入摘要。"
     manager.save(task)
     agent = SimpleNamespace(subagents=manager, _current_subagent_run_id="")
     remember_orchestration_run_ids(agent, [task.id])
     remember_dispatched_orchestration_run_ids(agent, [task.id])
     original = ModelResponse(
-        text=f"子代理已经真实跑过，当前等待验收。结果在 {task.output_json}",
+        text=f"子代理已经真实跑过，当前等待收口。结果在 {task.output_json}",
         backend="test",
     )
 
@@ -380,15 +380,15 @@ def test_final_response_guard_keeps_awaiting_acceptance_status_answer(tmp_path):
     assert str(task.output_json) in response.text
 
 
-# LLM: Parent acceptance repair no longer hijacks the post-dispatch tool round.
-# 函数用途: dispatch_subagents 后只把索引/状态交回模型；父级验收失败不能在工具轮后本地抢答或塞修复提示。
-def test_dispatch_round_returns_to_parent_when_acceptance_needs_repair(tmp_path):
+# LLM: Closeout repair no longer hijacks the post-dispatch tool round.
+# 函数用途: dispatch_subagents 后只把索引/状态交回模型；最终收口失败不能在工具轮后本地抢答或塞修复提示。
+def test_dispatch_round_returns_to_parent_when_closeout_needs_repair(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     task = manager.create_run(goal="deliver web artifact", thought="await repair", plan=["repair"])
-    task.status = "AWAITING_ACCEPTANCE"
-    task.verification_status = "NEEDS_ACCEPTANCE"
+    task.status = "DONE"
+    task.verification_status = "VERIFIED"
     manager.save(task)
-    _write_json(task.reports_dir, "acceptance_review.json", {"decision": "REJECT", "ok": False})
+    _write_json(task.reports_dir, "runner_result.json", {"decision": "REJECT", "ok": False})
     agent = SimpleNamespace(subagents=manager, _current_subagent_run_id="")
     params = _tool_loop_params("请安排小傻妞完成并验收。")
 
@@ -416,16 +416,16 @@ def test_dispatch_round_returns_to_parent_when_acceptance_needs_repair(tmp_path)
     assert params.tool_context == []
 
 
-# LLM: Final model text must not claim completion when a requested acceptor role never ran.
+# LLM: Final model text must not claim completion when a requested bug_finder role never ran.
 # 函数用途: root 已经调度 worker/tester 但缺少用户明确要求的验收子代理时，最终回复守卫必须拦住口头完成。
-def test_final_response_guard_blocks_missing_explicit_acceptor_role(tmp_path):
+def test_final_response_guard_blocks_missing_explicit_bug_finder_role(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     coordinator = manager.create_run(
         goal="coordinate page",
         thought="coordinator",
         plan=["coordinate"],
         role="coordinator",
-        attributes={"required_qa_roles": ["acceptor"]},
+        attributes={"required_qa_roles": ["bug_finder"]},
     )
     worker = manager.create_run(goal="write page", thought="worker", plan=["write"], role="worker")
     tester = manager.create_run(goal="test page", thought="tester", plan=["test"], role="tester")
@@ -449,7 +449,7 @@ def test_final_response_guard_blocks_missing_explicit_acceptor_role(tmp_path):
 
     assert response is not None
     assert "缺少" in response.text
-    assert "acceptor" in response.text
+    assert "bug_finder" in response.text
     assert "create_subagents" in response.text
     assert "页面已经全部完成" not in response.text
 

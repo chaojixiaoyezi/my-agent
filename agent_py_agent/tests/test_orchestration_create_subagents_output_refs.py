@@ -379,12 +379,12 @@ def test_schedule_child_without_idempotency_contract_does_not_reuse_by_goal_text
     assert second["reused_run_ids"] == []
 
 
-# LLM: _repair_create_params mirrors the repair suggested_tool_call shape used by parent acceptance.
+# LLM: _repair_create_params mirrors the repair suggested_tool_call shape used by closeout.
 # 函数用途: 生成带同 run 修复合同的 create/schedule 参数，供顶层和 runner-context 测试复用。
-def _repair_create_params(run_id: str, artifact: str, *, goal: str = "修复父级验收失败") -> dict[str, object]:
+def _repair_create_params(run_id: str, artifact: str, *, goal: str = "修复最终收口失败") -> dict[str, object]:
     contract = {
         "schema": "subagent_repair_contract.v1",
-        "kind": "parent_acceptance",
+        "kind": "final_closeout",
         "failed_run_ids": [run_id],
         "required_read_paths": [f"reports/{run_id}/test_execution.json"],
         "target_artifact_refs": [artifact],

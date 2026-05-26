@@ -127,7 +127,7 @@ def test_hierarchy_schedule_warns_qa_before_implementation_ready(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
     root = manager.create_run(
-        goal=f"交付示例网站到 {build}，需要 tester / bug_finder / acceptor。",
+        goal=f"交付示例网站到 {build}，需要 tester / bug_finder。",
         thought="root",
         plan=["root"],
         extra_write_roots=[str(build)],
@@ -163,7 +163,7 @@ def test_hierarchy_schedule_warns_qa_before_implementation_ready(tmp_path):
 
 
 # LLM: test_hierarchy_schedule_allows_qa_after_implementation_child keeps normal QA follow-up possible.
-# 函数用途: 父节点已有实现 child 后，可以继续创建 tester/bug_finder/acceptor 检查产物。
+# 函数用途: 父节点已有实现 child 后，可以继续创建 tester/bug_finder 检查产物。
 def test_hierarchy_schedule_allows_qa_after_implementation_ready(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
@@ -191,8 +191,8 @@ def test_hierarchy_schedule_allows_qa_after_implementation_ready(tmp_path):
         extra_write_roots=[str(build)],
     )
     child = manager.load(manager.load(parent.id).child_ids[0])
-    child.status = "AWAITING_ACCEPTANCE"
-    child.verification_status = "NEEDS_ACCEPTANCE"
+    child.status = "DONE"
+    child.verification_status = "VERIFIED"
     manager.save(child)
 
     result = manager.schedule_child_runs(
@@ -209,12 +209,12 @@ def test_hierarchy_schedule_allows_qa_after_implementation_ready(tmp_path):
 
 
 # LLM: delegated production branches should also unlock QA at the parent that owns the contract.
-# 函数用途: root 通过 coordinator 链路完成 leaf 后，root 仍能创建 tester/bug_finder/acceptor，不被“直接 child 不是 worker”误挡。
+# 函数用途: root 通过 coordinator 链路完成 leaf 后，root 仍能创建 tester/bug_finder，不被“直接 child 不是 worker”误挡。
 def test_hierarchy_schedule_allows_qa_after_implementation_descendant_ready(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
     root = manager.create_run(
-        goal=f"交付示例网站到 {build}，需要 tester / bug_finder / acceptor。",
+        goal=f"交付示例网站到 {build}，需要 tester / bug_finder。",
         thought="root",
         plan=["root"],
         extra_write_roots=[str(build)],
@@ -241,8 +241,8 @@ def test_hierarchy_schedule_allows_qa_after_implementation_descendant_ready(tmp_
         agent_name="小小傻妞-leaf",
         extra_write_roots=[str(build)],
     )
-    leaf.status = "AWAITING_ACCEPTANCE"
-    leaf.verification_status = "NEEDS_ACCEPTANCE"
+    leaf.status = "DONE"
+    leaf.verification_status = "VERIFIED"
     manager.save(leaf)
 
     result = manager.schedule_child_runs(

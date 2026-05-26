@@ -35,7 +35,7 @@ def _template(template_id: str) -> WorkflowTemplate:
                 acceptance=["focused tests pass"],
             )
         ],
-        parent_acceptance=["parent checks evidence"],
+        final_closeout=["parent checks evidence"],
     )
 
 
@@ -78,13 +78,13 @@ def test_plan_workflow_for_goal_composes_router_compiler_and_parent_gate():
     assert result.selected_template_id == "code_feature_split"
     assert result.template is not None
     assert result.dispatch_plan is not None
-    assert result.parent_acceptance_plan is not None
+    assert result.final_closeout_plan is not None
     assert result.dispatch_plan.worker_specs[0].quality_contract is contract
     assert result.dispatch_plan.worker_specs[0].allowed_write_roots == [
         "agent_py_agent/agent/example.py"
     ]
-    assert "real artifact" in result.parent_acceptance_plan.checklist
-    assert any("worker self-accepted PASS" in item for item in result.parent_acceptance_plan.checklist)
+    assert "real artifact" in result.final_closeout_plan.checklist
+    assert any("worker self-accepted PASS" in item for item in result.final_closeout_plan.checklist)
 
 
 def test_plan_workflow_for_goal_respects_off_mode():
@@ -101,7 +101,7 @@ def test_plan_workflow_for_goal_respects_off_mode():
     assert result.selected_template_id == ""
     assert result.template is None
     assert result.dispatch_plan is None
-    assert result.parent_acceptance_plan is None
+    assert result.final_closeout_plan is None
 
 
 def test_plan_workflow_for_goal_manual_mode_marks_confirmation():
@@ -146,7 +146,7 @@ def test_workflow_planning_result_serializes_audit_preview():
             "depends_on": [],
         }
     ]
-    assert payload["parent_acceptance_checklist"][0] == "parent checks evidence"
+    assert payload["final_closeout_checklist"][0] == "parent checks evidence"
     assert payload["issues"] == []
 
 
@@ -177,7 +177,7 @@ def test_subagents_workflow_plan_cli_json_previews_without_dispatch(tmp_path, ca
     assert payload["needs_confirmation"] is False
     assert payload["worker_count"] >= 1
     assert payload["workers"][0]["role"]
-    assert payload["parent_acceptance_check_count"] >= 1
+    assert payload["final_closeout_check_count"] >= 1
     assert payload["issues"] == []
 
 
@@ -214,7 +214,7 @@ def test_subagents_workflow_plan_cli_writes_preview_files(tmp_path, capsys):
     assert payload["selected_template_id"] == "code_feature_split"
     assert payload["worker_count"] >= 1
     assert "# Subagent Workflow Plan Preview" in markdown
-    assert "## Parent Acceptance Checklist" in markdown
+    assert "## Final Closeout Checklist" in markdown
 
 
 def test_subagents_workflow_plan_cli_json_reports_written_preview_paths(tmp_path, capsys):

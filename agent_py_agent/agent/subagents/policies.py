@@ -149,7 +149,7 @@ def _action_for_issue(issue: DueCheckIssue) -> tuple[str, int, str]:
     if kind == "fake_done_risk":
         return "reopen_for_evidence", 940, "BLOCKED"
     if kind == "unverified_done":
-        return "run_acceptance", 760, ""
+        return "reopen_for_evidence", 760, "BLOCKED"
     if kind in {"run_timeout", "heartbeat_stale", "status_timeout"}:
         return "takeover_or_reassign", 900, "TIMEOUT"
     if kind == "no_progress_fuse":
@@ -282,16 +282,16 @@ def _status_from_structured_output(parsed: SubAgentParsedOutput) -> str:
         return "BLOCKED"
     if status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
         return status
-    if status in {"DONE", "COMPLETED", "COMPLETE", "SUCCESS", "AWAITING_ACCEPTANCE"}:
-        return "AWAITING_ACCEPTANCE"
-    return "AWAITING_ACCEPTANCE"
+    if status in {"DONE", "COMPLETED", "COMPLETE", "SUCCESS"}:
+        return "DONE"
+    return "DONE"
 
 
 # LLM: _verification_from_runner_status 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 函数用途: 处理来自verification执行器状态相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _verification_from_runner_status(status: str) -> str:
-    if status.upper() == "AWAITING_ACCEPTANCE":
-        return "NEEDS_ACCEPTANCE"
+    if status.upper() in {"DONE", "COMPLETED", "COMPLETE", "SUCCESS"}:
+        return "VERIFIED"
     return "UNVERIFIED"
 # LLM: _runner_next_action 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 函数用途: 推进执行器next动作的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
@@ -302,8 +302,6 @@ def _runner_next_action(*, params: RunnerNextActionParams) -> str:
         return "route_capability_request"
     if params.next_actions:
         return params.next_actions[0]
-    if params.ok and params.status == "AWAITING_ACCEPTANCE":
-        return "run_acceptance"
     if not params.ok:
         return "inspect_runner_failure"
     return ""
@@ -350,7 +348,6 @@ def _is_active(status: str) -> bool:
         "DONE",
         "FAILED",
         "BLOCKED",
-        "AWAITING_ACCEPTANCE",
         "TIMEOUT",
         "CHANNEL_ERROR",
         "TAKEN_OVER",

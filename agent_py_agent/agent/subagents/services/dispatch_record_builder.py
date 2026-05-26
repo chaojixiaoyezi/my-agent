@@ -43,7 +43,6 @@ class DispatchRecordBuilder:
             runner_child_status_counts=params.runner_child_status_counts or {},
             runner_unfinished_child_ids=params.runner_unfinished_child_ids or [],
             runner_partial_success=params.runner_partial_success,
-            **_parent_acceptance_fields(params),
             created_at=time.time(),
         )
 
@@ -66,41 +65,3 @@ class DispatchRecordBuilder:
                 "runner_created_children", 0,
             ) + int(record.runner_created_child_count or 0)
         return summary
-
-
-# LLM: _parent_acceptance_fields keeps dispatch record creation below the size guard.
-# 函数用途: 提取父级验收 policy、execution、follow-up 摘要字段，供 DispatchRecord 构造器展开。
-def _parent_acceptance_fields(params) -> dict[str, object]:
-    return {
-        "parent_acceptance_policy_ref": params.parent_acceptance_policy_ref,
-        "parent_acceptance_policy_decision": params.parent_acceptance_policy_decision,
-        "parent_acceptance_policy_action": params.parent_acceptance_policy_action,
-        "parent_acceptance_policy_would_execute": params.parent_acceptance_policy_would_execute,
-        "parent_acceptance_policy_executed": params.parent_acceptance_policy_executed,
-        "parent_acceptance_policy_execution_mode": params.parent_acceptance_policy_execution_mode,
-        "parent_acceptance_policy_automatic_execution_allowed": (
-            params.parent_acceptance_policy_automatic_execution_allowed
-        ),
-        "parent_acceptance_policy_recommended_command": params.parent_acceptance_policy_recommended_command,
-        "parent_acceptance_policy_preflight_status": params.parent_acceptance_policy_preflight_status,
-        "parent_acceptance_policy_ready_for_automatic_execution": (
-            params.parent_acceptance_policy_ready_for_automatic_execution
-        ),
-        "parent_acceptance_policy_preflight_blockers": params.parent_acceptance_policy_preflight_blockers or [],
-        "parent_acceptance_auto_execution_ref": params.parent_acceptance_auto_execution_ref,
-        "parent_acceptance_auto_execution_status": params.parent_acceptance_auto_execution_status,
-        "parent_acceptance_auto_execution_allowed": params.parent_acceptance_auto_execution_allowed,
-        "parent_acceptance_auto_execution_executed": params.parent_acceptance_auto_execution_executed,
-        "parent_acceptance_auto_execution_guard_status": params.parent_acceptance_auto_execution_guard_status,
-        "parent_acceptance_auto_execution_blocked_by": params.parent_acceptance_auto_execution_blocked_by or [],
-        "parent_acceptance_auto_execution_test_ref": params.parent_acceptance_auto_execution_test_ref,
-        "parent_acceptance_auto_execution_test_total": params.parent_acceptance_auto_execution_test_total,
-        "parent_acceptance_auto_execution_test_failed": params.parent_acceptance_auto_execution_test_failed,
-        "parent_acceptance_test_failure_summary": params.parent_acceptance_test_failure_summary,
-        "parent_acceptance_test_failure_details": params.parent_acceptance_test_failure_details or [],
-        "parent_acceptance_followup_ref": params.parent_acceptance_followup_ref,
-        "parent_acceptance_followup_status": params.parent_acceptance_followup_status,
-        "parent_acceptance_followup_action": params.parent_acceptance_followup_action,
-        "parent_acceptance_followup_command": params.parent_acceptance_followup_command,
-        "parent_acceptance_followup_reason": params.parent_acceptance_followup_reason,
-    }

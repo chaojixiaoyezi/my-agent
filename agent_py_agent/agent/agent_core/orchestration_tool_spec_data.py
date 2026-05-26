@@ -110,7 +110,6 @@ _CREATE_EXAMPLES = [
     '{"tool":"create_subagents","goal":"在 /workspace/deliverables/app/build 实现用户指定项目的 HTML 骨架和 data.json","count":1,"role":"worker","agent_name":"小傻妞-基础结构","extra_write_roots":["/workspace/deliverables/app/build"]}',
     '{"tool":"create_subagents","goal":"在 /workspace/deliverables/app/build 实现用户指定项目的 styles.css 和 app.js 交互","count":1,"role":"worker","agent_name":"小傻妞-样式交互","extra_write_roots":["/workspace/deliverables/app/build"]}',
     '{"tool":"create_subagents","goal":"检查多个 worker 的项目实现","count":1,"role":"bug_finder"}',
-    '{"tool":"create_subagents","goal":"验收用户指定项目的完整流程","count":1,"role":"acceptor"}',
 ]
 
 _BOARD_PARAMETERS = {
@@ -143,8 +142,6 @@ _DISPATCH_PARAMETERS = {
     "dry_run": "统一预览开关；true 只预览不执行，false 真实推进 runner。显式传 dry_run 时系统会自动换算 apply/execute_runners。",
     "apply": "是否写回低风险动作，默认 false",
     "execute_runners": "是否真实调用模型执行 runner，必须配合 apply=true",
-    "execute_acceptance_tests": "是否执行子代理输出的父级验收 tests；真实执行 runner 时默认 true",
-    "auto_apply_acceptance_followup": "tests 通过后是否自动应用验收 follow-up；真实执行 runner 时默认 true",
     "planner": "是否启用父代理 planner，默认 false",
     "workflow_mode": "off/plan/auto；是否在 dispatch 前补做 workflow 规划或自动派工",
     "max_runners": "本轮最多推进多少个 runner，默认 1；0 表示不执行 runner",
@@ -166,8 +163,6 @@ _DISPATCH_PARAMETER_DETAILS = {
         "如果目标是让某个 coordinator 亲自创建下一层 refs，必须对这个 coordinator 设置 execute_runners=true；"
         "不要把“下下层 worker 暂不执行”误写成当前 coordinator 的 execute_runners=false。"
     ),
-    "execute_acceptance_tests": "apply=true 且 execute_runners=true 时固定为 true，用受控 TestExecutor 执行直接 child 声明的 tests 并写 follow-up refs；模型工具调用不能跳过父级验收，CLI 手动 --no-execute-tests 另走直达参数。",
-    "auto_apply_acceptance_followup": "apply=true、execute_runners=true、tests 通过且 follow-up 指向 apply_acceptance 时默认 true，只落本轮直接 child 的验收状态；失败不会自动通过。",
     "planner": "true 会额外调用父代理 LLM planner；适合长任务统筹，但会多消耗一次模型调用。",
     "workflow_mode": "plan 只把 workflow 计划写回父任务；auto 会在计划 OK 时落成 worker 子工单；未知值保守按 off 处理。",
     "max_runners": "用来限制本轮推进数量；顶层默认 1，runner 内部默认 6，避免父节点只推进一个孩子就超时。",
@@ -220,13 +215,12 @@ _SCHEDULE_CHILD_EXAMPLES = [
     (
         '{"tool":"schedule_child_subagents","apply":true,'
         '"children":[{"role":"bug_finder","agent_name":"qa-finder","goal":"检查多个 worker 的实现和证据"},'
-        '{"role":"tester","agent_name":"qa-tester","goal":"测试关键交互流程和验收路径"},'
-        '{"role":"acceptor","agent_name":"qa-acceptor","goal":"按验收标准判断是否可以交付"}]}'
+        '{"role":"tester","agent_name":"qa-tester","goal":"测试关键交互流程和质量要求"}]}'
     ),
 ]
 _SCHEDULE_CHILD_COORDINATOR_RULES = (
     "coordinator/lead 的权限应覆盖下级，便于检查、接管和救援；小任务、用户明确要求或下级卡住时也可以亲自完成。"
-    "请用本工具创建 worker/writer/leaf_worker，并把父级给定的路径、文件名和验收条件原样传下去。"
+    "请用本工具创建 worker/writer/leaf_worker，并把父级收口条件原样传下去。"
     "如果父级要求 4 层链路，深度未到孙孙层前先创建下一层 coordinator。"
     "需要通知下级时用 subagent_message：少量不同消息用 direct+descendants，大量统一消息用 broadcast+descendants；"
     "平级讨论用 direct+peers，不能越权通知别的分支。"

@@ -40,7 +40,7 @@
       ]
     }
   ],
-  "parent_acceptance": [
+  "final_checks": [
     "Critic findings are considered",
     "Repair pass reports what changed",
     "Final verification is recorded"

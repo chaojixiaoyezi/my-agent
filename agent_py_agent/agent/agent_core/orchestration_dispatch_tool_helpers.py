@@ -172,8 +172,6 @@ def _dispatch_top_level_guidance(agent: object, report: object, records: list[di
     }
     if blockers:
         payload["blocking_run_ids"] = blockers
-        payload.update(_aggregate_parent_acceptance_repair_advice(records))
-        _lift_parent_acceptance_repair_action(payload)
     if unfinished:
         payload["unfinished_run_ids"] = unfinished
     if blockers or unfinished:
@@ -233,7 +231,7 @@ def _dispatch_completion_status(
 
 
 # LLM: _unfinished_remembered_run_ids keeps explicit dispatch scopes honest after partial execution.
-# 函数用途: 当前轮已创建/调度的 run 只要还有未完成未验收，就在顶层阻止 root 汇报完成。
+# 函数用途: 当前轮已创建/调度的 run 只要还有未完成未收口，就在顶层阻止 root 汇报完成。
 def _unfinished_remembered_run_ids(agent: object) -> list[str]:
     load = getattr(getattr(agent, "subagents", None), "load", None)
     if not callable(load):
@@ -264,71 +262,6 @@ def _blocking_run_ids(
         if run_id and run_id not in ids:
             ids.append(run_id)
     return ids[:20]
-
-
-# LLM: _aggregate_parent_acceptance_repair_advice keeps repair hints visible outside bulky records.
-# 函数用途: records 被外置时，仍在顶层保留父级验收失败的 refs-first 修复建议。
-def _aggregate_parent_acceptance_repair_advice(records: list[dict[str, object]]) -> dict[str, object]:
-    advices = [
-        item.get("parent_acceptance_repair_advice")
-        for item in records
-        if isinstance(item.get("parent_acceptance_repair_advice"), dict)
-    ]
-    if not advices:
-        return {}
-    failed_ids = _unique_strings([
-        str(run_id)
-        for advice in advices
-        for run_id in list(advice.get("failed_run_ids") or [])
-    ])
-    failure_refs = [
-        ref
-        for advice in advices
-        for ref in list(advice.get("failure_refs") or [])
-        if isinstance(ref, dict)
-    ][:12]
-    suggested_calls = [
-        call
-        for advice in advices
-        if isinstance(call := advice.get("suggested_tool_call"), dict)
-    ][:5]
-    preferred_call = _preferred_parent_acceptance_repair_call(suggested_calls)
-    next_action = _parent_acceptance_repair_next_action(preferred_call)
-    advice: dict[str, object] = {
-        "phase": "parent_acceptance_repair_recommended",
-        "failed_run_ids": failed_ids,
-        "failure_refs": failure_refs,
-        "next_action": next_action,
-        "llm_next_step": _parent_acceptance_repair_next_step(preferred_call),
-    }
-    if preferred_call:
-        advice["suggested_tool_call"] = preferred_call
-        advice["suggested_tool_calls"] = suggested_calls
-    return {"parent_acceptance_repair_advice": advice}
-
-
-def _preferred_parent_acceptance_repair_call(calls: list[dict[str, object]]) -> dict[str, object]:
-    return calls[0] if calls else {}
-
-
-def _parent_acceptance_repair_next_action(call: dict[str, object]) -> str:
-    return "create_repair_child_from_parent_acceptance_refs"
-
-
-def _parent_acceptance_repair_next_step(call: dict[str, object]) -> str:
-    return (
-        "还有子代理未通过父级验收；先按 failure_refs 创建修复/接管小傻妞，"
-        "重新 dispatch 并通过验收后再向用户报完成。"
-    )
-
-
-def _lift_parent_acceptance_repair_action(payload: dict[str, object]) -> None:
-    advice = payload.get("parent_acceptance_repair_advice")
-    if not isinstance(advice, dict):
-        return
-    next_action = str(advice.get("next_action") or "").strip()
-    if next_action:
-        payload.setdefault("next_action", next_action)
 
 
 # LLM: _unique_strings preserves first occurrence order for small model-facing lists.

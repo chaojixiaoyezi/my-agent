@@ -24,7 +24,6 @@ _NO_PROGRESS_STATE_ATTR = "_tool_call_guardrail_no_progress"
 _BLOCK_CODE = "TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED"
 _NO_PROGRESS_BLOCK_CODE = "TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED"
 _READ_ONLY_TOOL_NAMES = {
-    "fetch_url",
     "http_request",
     "list_files",
     "list_tools",
@@ -33,6 +32,8 @@ _READ_ONLY_TOOL_NAMES = {
     "search",
     "search_text",
     "web_search",
+    "web_fetch",
+    "web_extract",
 }
 _LOCAL_PROGRESS_TOOL_NAMES = {
     "apply_patch",

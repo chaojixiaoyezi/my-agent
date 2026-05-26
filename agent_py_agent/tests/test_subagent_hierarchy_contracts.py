@@ -106,7 +106,7 @@ def _schedule_forbidden_contract_child(manager: SubAgentManager, root_id: str, b
 
 
 # LLM: R70 showed schedule-time chain forcing over-constrained otherwise valid implementation children.
-# 函数用途: 父级写 4层/depth=3/小傻妞命名规则时，下级必须继续携带；调度阶段不再硬挡 worker/leaf，最终链路交给验收判断。
+# 函数用途: 父级收口判断。
 def test_hierarchy_schedule_preserves_no_space_four_layer_contract_without_forcing_coord_chain(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"

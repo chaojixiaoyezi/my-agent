@@ -118,7 +118,7 @@ def test_scenario_gateway_cross_day_resume_uses_real_gateway_process(tmp_path, c
     assert "SCENARIO_PASS" in output
 
 
-def test_scenario_runner_retry_reaches_parent_acceptance(tmp_path, capsys):
+def test_scenario_runner_retry_reaches_final_closeout(tmp_path, capsys):
     """The runner retry scenario should satisfy the current evidence-packet acceptance contract."""
 
     output = _run_offline_scenario_case(tmp_path, capsys, "runner-retry")
@@ -127,7 +127,7 @@ def test_scenario_runner_retry_reaches_parent_acceptance(tmp_path, capsys):
     assert "final status=DONE verify=VERIFIED" in output
 
 
-def test_scenario_structured_repair_reaches_parent_acceptance(tmp_path, capsys):
+def test_scenario_structured_repair_reaches_final_closeout(tmp_path, capsys):
     """The structured repair scenario should satisfy the current evidence-packet acceptance contract."""
 
     output = _run_offline_scenario_case(tmp_path, capsys, "structured-repair")

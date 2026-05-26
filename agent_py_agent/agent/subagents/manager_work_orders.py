@@ -267,7 +267,7 @@ _PROGRESS_MD_TMPL = "# PROGRESS\n\n- run_id: {task_id}\n- status: {status}\n- pr
 
 
 # LLM: _output_json_template must return a dict, not pre-serialized JSON, because _write_json_if_missing serializes once.
-# 函数用途: 生成子代理初始 output.json 的最小对象；避免写成 JSON 字符串导致父级验收无法读取字段。
+# 函数用途: 生成子代理初始 output.json 的最小对象；避免写成 JSON 字符串导致最终收口无法读取字段。
 def _output_json_template(task_id: str, status: str) -> dict[str, object]:
     return {
         "run_id": task_id,

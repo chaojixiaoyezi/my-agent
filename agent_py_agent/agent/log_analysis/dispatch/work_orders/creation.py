@@ -1,7 +1,7 @@
 # LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
 # 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
 
-"""本模块负责把已审核的工单计划落成 SubAgentTask，并保证 apply/dry-run 边界和父级最终验收。
+"""本模块负责把已审核的工单计划落成 SubAgentTask，并保证 apply/dry-run 边界和最终收口。
 
 新手说明:
 这里包含 SubAgentTaskCreator（创建任务的协议接口）、SubagentWorkOrderCreationResult（创建结果）
@@ -119,19 +119,18 @@ class WorkOrderCreationOptions:
 # LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 _work_order_quality_contract 时同步检查返回值、异常处理和读写副作用。
 # 函数用途: 完成 work order quality contract 在当前模块中的核心转换或协调步骤，衔接 dispatch 流程按预算、队列和工单状态分派日志分析任务。
 def _work_order_quality_contract(order: SubagentWorkOrder) -> dict[str, Any]:
-    """它继承上游 quality_contract，并强制补上 evidence_required、cannot_self_accept 和 parent_final_gate。
+    """它继承上游 quality_contract，并补上 evidence_required 和 must_check。
 
     新手说明:
-    子代理需要知道"必须看哪些证据、按哪些标准检查、谁有最终决定权"。
-    这里把工单自身的证据和验收项并入契约，同时固定最终验收属于父级，避免 analyst/reviewer 自己给自己盖章。
+    子代理需要知道必须看哪些证据、按哪些标准检查。
+    这里把工单自身的证据和验收项并入契约，最终是否继续由普通任务收口流程处理。
 
     参数说明:
     order: 单张 SubagentWorkOrder。函数会读取 order.context["quality_contract"]、order.evidence_refs、
     order.acceptance_checks 和 order.goal。
 
     返回说明:
-    返回 quality_contract 字典，后续会写进 SubAgentTask.quality_contract 和 context_pack。
-    返回值会强制包含 cannot_self_accept=True、parent_final_gate=True、final_judge="parent_final_gate"。"""
+    返回 quality_contract 字典，后续会写进 SubAgentTask.quality_contract 和 context_pack。"""
     source = order.context.get("quality_contract")
     inherited = dict(source) if isinstance(source, Mapping) else {}
     evidence_required = _merge_unique(inherited.get("evidence_required"), order.evidence_refs)
@@ -146,9 +145,6 @@ def _work_order_quality_contract(order: SubagentWorkOrder) -> dict[str, Any]:
         "quality_bar": inherited.get("quality_bar") or "Evidence-backed log analysis for parent final review.",
         "evidence_required": evidence_required,
         "must_check": must_check,
-        "final_judge": "parent_final_gate",
-        "cannot_self_accept": True,
-        "parent_final_gate": True,
     }
 
 
@@ -174,8 +170,6 @@ def _work_order_context_pack(order: SubagentWorkOrder) -> dict[str, Any]:
         "evidence_refs": list(order.evidence_refs),
         "route_summary": dict(order.context.get("route_summary") or {}),
         "quality_contract": _work_order_quality_contract(order),
-        "cannot_self_accept": order.cannot_self_accept,
-        "parent_final_gate": order.parent_final_gate,
         "case_summary": order.context.get("case_summary", ""),
         "handoff_contract": order.context.get("handoff_contract", ""),
         "expected_input": order.context.get("expected_input", ""),
@@ -200,7 +194,7 @@ def _work_order_plan_steps(order: SubagentWorkOrder) -> list[str]:
     steps = [
         f"Read the focused context pack for case {order.case_id}.",
         "Use only allowed tools and retained evidence_refs.",
-        "Produce the role-specific contract output without claiming final acceptance.",
+        "Produce the role-specific contract output without claiming final closeout.",
         "Leave final approval to the parent session gate.",
     ]
     if order.role == "reviewer":
@@ -286,7 +280,7 @@ def _create_run_payload(order: SubagentWorkOrder, *, options: WorkOrderCreationO
     parent_id = options.parent_id
     return {
         "goal": order.goal,
-        "thought": f"Manual LOG {order.role} work order for {order.case_id}; stay evidence-bound and leave final acceptance to the parent.",
+        "thought": f"Manual LOG {order.role} work order for {order.case_id}; stay evidence-bound and leave final closeout to the caller.",
         "plan": _work_order_plan_steps(order),
         "agent_name": f"log-{order.role}",
         "role": order.role,
@@ -300,7 +294,7 @@ def _create_run_payload(order: SubagentWorkOrder, *, options: WorkOrderCreationO
         "quality_contract": _work_order_quality_contract(order),
         "context_manifest": _context_manifest(order),
         "context_packs": [_work_order_context_pack(order)],
-        # LLM: LOG keeps analyst/reviewer as domain-visible roles while still inheriting parent gate contracts.
+        # LLM: LOG keeps analyst/reviewer as domain-visible roles while still inheriting closeout contracts.
         "normalize_role": False,
     }
 

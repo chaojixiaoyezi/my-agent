@@ -30,8 +30,8 @@ class TestAcceptanceFindingsAliases:
 
         task = MagicMock()
         task.id = "test-task-001"
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
+        task.status = "DONE"
+        task.verification_status = "VERIFIED"
         task.output_json = str(tmp_path / "output.json")
         task.runner_result_json = str(tmp_path / "runner.json")
         task.evidence = [MagicMock(ok=True)]
@@ -71,8 +71,8 @@ class TestAcceptanceFindingsAliases:
 
         task = MagicMock()
         task.id = "test-task-001"
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
+        task.status = "DONE"
+        task.verification_status = "VERIFIED"
         task.output_json = str(tmp_path / "output.json")
         task.runner_result_json = str(tmp_path / "runner.json")
         task.evidence = [MagicMock(ok=True)]
@@ -111,8 +111,8 @@ class TestAcceptanceFindingsAliases:
 
         task = MagicMock()
         task.id = "test-task-001"
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
+        task.status = "DONE"
+        task.verification_status = "VERIFIED"
         task.output_json = str(tmp_path / "output.json")
         task.runner_result_json = str(tmp_path / "runner.json")
         task.evidence = [MagicMock(ok=True)]

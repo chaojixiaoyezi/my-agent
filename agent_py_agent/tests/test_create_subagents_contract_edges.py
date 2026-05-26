@@ -60,7 +60,7 @@ def test_items_mode_preserves_absolute_path_dependencies():
 
 
 # LLM: Research-style children should have web evidence tools by default, like the main agent baseline.
-# 函数用途: 验证 researcher/web 任务默认能 fetch_url/http_request，不再先卡成 capability_request 往返。
+# 函数用途: 验证 researcher/web 任务默认能拿到新网络四件套，不再先卡成 capability_request 往返。
 def test_researcher_preset_gets_web_tools_by_default():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -79,5 +79,7 @@ def test_researcher_preset_gets_web_tools_by_default():
 
     params = mock_agent.subagents.create_run.call_args.kwargs["params"]
     assert result.ok is True
-    assert "fetch_url" in params.allowed_tools
+    assert "web_search" in params.allowed_tools
+    assert "web_fetch" in params.allowed_tools
+    assert "web_extract" in params.allowed_tools
     assert "http_request" in params.allowed_tools

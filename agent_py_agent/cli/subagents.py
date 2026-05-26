@@ -8,7 +8,7 @@ from __future__ import annotations
 给人看的解释：
 这个文件只管用户在命令行里怎么操作子代理。
 实际状态机和文件写入仍然交给 SimpleAgent/SubAgentManager，这里主要做参数转发和结果打印。
-父级验收计划入口也只导出只读 dry-run 命令，避免 CLI 聚合层隐式触发 tests 或状态写回。
+最终收口计划入口也只导出只读 dry-run 命令，避免 CLI 聚合层隐式触发 tests 或状态写回。
 """
 
 from agent_py_agent.cli._actions import (
@@ -39,11 +39,8 @@ from agent_py_agent.cli._leadership import (
 )
 from agent_py_agent.cli._memory_gate import cmd_subagents_memory_gate
 
-# 函数用途: 汇总 review 类子命令入口；包含只读的父级验收计划 dry-run 查看命令。
 # 函数用途: 汇总 review 类子命令入口，供 argparse 注册层统一导入。
 from agent_py_agent.cli._review import (
-    cmd_subagents_acceptance,
-    cmd_subagents_acceptance_plan,
     cmd_subagents_patches,
     cmd_subagents_tests,
 )

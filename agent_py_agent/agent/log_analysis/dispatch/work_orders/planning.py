@@ -19,7 +19,6 @@ from ...agents.contracts import (
 )
 from ...agents.summaries import render_case_summary, summarize_case
 from .models import (
-    PARENT_FINAL_GATE,
     CreateWorkOrdersParams,
     LogAnalysisWorkOrderPlan,
     PlanInputs,
@@ -283,7 +282,6 @@ build_log_analysis_work_orders = plan_case_subagent_work_orders
 __all__ = [
     "DEFAULT_REVIEWER_TOOLS",
     "NO_EVIDENCE_ISSUE",
-    "PARENT_FINAL_GATE",
     "PLAN_NOT_READY_ISSUE",
     "LogAnalysisWorkOrderPlan",
     "PlanWorkOrdersOptions",

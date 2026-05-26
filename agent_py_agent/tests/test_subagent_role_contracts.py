@@ -82,12 +82,10 @@ def test_create_run_applies_reporter_contract(tmp_path):
 
     assert task.role == REPORTER_ROLE
     assert any("evidence_refs" in check for check in task.acceptance_checks)
-    assert task.quality_contract.cannot_self_accept is True
-    assert task.quality_contract.parent_final_gate is True
 
 
-# LLM: test_create_run_applies_checker_contract keeps checker capable and parent-gated by default.
-# 函数用途: 创建 checker 任务时保留基础读写/报告能力，但最终验收仍由父级门决定。
+# LLM: test_create_run_applies_checker_contract keeps checker capable by default.
+# 函数用途: 创建 checker 任务时保留基础读写/报告能力。
 def test_create_run_applies_checker_contract(tmp_path):
     manager = SubAgentManager(tmp_path)
 
@@ -97,10 +95,7 @@ def test_create_run_applies_checker_contract(tmp_path):
     assert "read_file" in task.allowed_tools
     assert "write_file" in task.allowed_tools
     assert "apply_patch" in task.allowed_tools
-    assert task.quality_contract.final_judge == "parent_final_gate"
-    assert task.quality_contract.cannot_self_accept is True
-    assert task.quality_contract.parent_final_gate is True
-    assert any("cannot self-accept" in check for check in task.acceptance_checks)
+    assert any("concrete findings" in check for check in task.acceptance_checks)
 
 
 # LLM: test_hierarchy_scheduler_applies_role_contracts_to_children covers nested creation.

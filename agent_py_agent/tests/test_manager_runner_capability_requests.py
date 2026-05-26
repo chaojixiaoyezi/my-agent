@@ -127,7 +127,7 @@ def _sample_task_path_fields(tmp_path) -> dict:
 
 
 def test_record_runner_result_pending_capability_stays_blocked(capability_manager, capability_task):
-    """测试 pending capability 状态不会被写成等待验收。"""
+    """测试 pending capability 状态不会被写成等待收口。"""
     capability_manager._tasks[capability_task.id] = capability_task
     parsed = SubAgentParsedOutput(
         found=True,
@@ -190,7 +190,7 @@ def test_record_runner_result_recovers_pending_capability_request(capability_man
 
 
 def test_record_runner_result_keeps_tool_created_open_request_blocked(capability_manager, capability_task):
-    """capability_request 工具写入的 OPEN request 不能被 AWAITING_ACCEPTANCE 收口误清理。"""
+    """capability_request 工具写入的 OPEN request 不能被 DONE 收口误清理。"""
     capability_task.capability_requests.append(
         CapabilityRequest(
             id="capreq-tool",
@@ -205,7 +205,7 @@ def test_record_runner_result_keeps_tool_created_open_request_blocked(capability
     parsed = SubAgentParsedOutput(
         found=True,
         ok=True,
-        status="AWAITING_ACCEPTANCE",
+        status="DONE",
         summary="写了 capability_request.json，但没有真正授权。",
         capability_requests=[],
         blocked_reason="",

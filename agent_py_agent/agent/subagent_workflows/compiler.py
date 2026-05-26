@@ -27,7 +27,6 @@ class WorkflowWorkerSpec:
     forbidden_write_roots: list[str] = field(default_factory=list)
     quality_contract: Any = None
     context_manifest: Any = None
-    cannot_self_accept: bool = True
     depends_on: list[str] = field(default_factory=list)
 
 
@@ -41,7 +40,7 @@ class WorkflowDispatchPlan:
     template_name: str
     goal: str
     worker_specs: list[WorkflowWorkerSpec]
-    parent_acceptance: list[str] = field(default_factory=list)
+    final_checks: list[str] = field(default_factory=list)
     quality_contract: Any = None
     context_manifest: Any = None
 
@@ -98,7 +97,7 @@ def compile_workflow(
         template_name=template.name,
         goal=values.goal,
         worker_specs=worker_specs,
-        parent_acceptance=list(template.parent_acceptance),
+        final_checks=list(template.final_checks),
         quality_contract=values.quality_contract,
         context_manifest=values.context_manifest,
     )
@@ -127,7 +126,6 @@ def _worker_spec(request: _WorkerSpecRequest) -> WorkflowWorkerSpec:
         forbidden_write_roots=list(request.forbidden_roots),
         quality_contract=values.quality_contract,
         context_manifest=values.context_manifest,
-        cannot_self_accept=True,
         depends_on=list(phase.depends_on),
     )
 
@@ -148,7 +146,7 @@ def _build_worker_instructions(
             f"Phase task: {phase_task}",
             "You are not the only worker; other workers may modify adjacent router, gate, or workflow code in parallel.",
             "Do not roll back or overwrite changes made by other workers.",
-            "You cannot self-accept final completion; parent acceptance must make the final call.",
+            "Hand back concrete results and evidence; do not claim facts you did not verify.",
             "Leave concrete evidence for every claimed result, including commands run, files changed, and verification output.",
             "Report residual risks and any deferred or unverified items before handing off.",
         ]

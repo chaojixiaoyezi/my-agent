@@ -8,7 +8,6 @@ from typing import Any
 
 from .orchestration_summary_action_lines import top_level_action_lines
 from .tool_context_recovery_summary import strategy_preview
-from .tool_context_repair_summary import repair_advice_action_lines
 
 _ORCHESTRATION_TOOLS = {
     "case_status",
@@ -79,7 +78,6 @@ def _render_orchestration_summary(
         "- policy: refs-first orchestration output; do not read artifact/file bodies unless a specific evidence ref requires it.",
     ]
     lines.extend(_direct_children_lines(payload.get("direct_children")))
-    lines.extend(repair_advice_action_lines(payload.get("parent_acceptance_repair_advice")))
     lines.extend(top_level_action_lines(payload))
     lines.extend(_result_refs_by_run_lines(payload.get("result_refs_by_run")))
     lines.extend(_ref_lines(payload))
@@ -130,7 +128,7 @@ def _direct_children_recovery_lines(value: dict[str, Any]) -> list[str]:
 
 
 # LLM: _direct_children_repair_lines renders deferred repair advice separately from recovery actions.
-# 函数用途: 渲染 QA/artifact/parent-acceptance repair 建议和恢复优先级延期标记。
+# 函数用途: 渲染 QA/artifact 修复建议和恢复优先级延期标记。
 def _direct_children_repair_lines(value: dict[str, Any]) -> list[str]:
     lines: list[str] = []
     if value.get("qa_repair_advice"):
@@ -139,16 +137,10 @@ def _direct_children_repair_lines(value: dict[str, Any]) -> list[str]:
         lines.append(
             f"- artifact_integrity_repair_advice: {_json_inline(value.get('artifact_integrity_repair_advice'))}"
         )
-    if value.get("parent_acceptance_repair_advice"):
-        lines.append(
-            f"- parent_acceptance_repair_advice: {_json_inline(value.get('parent_acceptance_repair_advice'))}"
-        )
     if value.get("repair_wave_deferred_by_recovery"):
         lines.append("- repair_wave_deferred_by_recovery: true")
     if value.get("artifact_integrity_repair_deferred_by_recovery"):
         lines.append("- artifact_integrity_repair_deferred_by_recovery: true")
-    if value.get("parent_acceptance_repair_deferred_by_recovery"):
-        lines.append("- parent_acceptance_repair_deferred_by_recovery: true")
     return lines
 
 

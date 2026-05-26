@@ -225,7 +225,7 @@ def _check_done_verification_issues(ctx: DueInspectionContext):
                 "P1",
                 "unverified_done",
                 "任务已标记 DONE，但 verification_status 还不是 VERIFIED。",
-                "run_acceptance_or_assign_reviewer",
+                "reopen_for_evidence_or_assign_reviewer",
             ),
         )
     ]

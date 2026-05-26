@@ -118,7 +118,7 @@ def can_repair(facts: RunStateFacts) -> bool:
 
 
 # LLM: waiting_reason exposes why execution is paused without asking callers to parse status prose.
-# 函数用途: 把等待用户、等待工具、等待验收和等待本地进展整理成稳定原因字段，供控制面和 UI 统一使用。
+# 函数用途: 把等待用户、等待工具和等待本地进展整理成稳定原因字段，供控制面和 UI 统一使用。
 def waiting_reason(facts: RunStateFacts) -> str:
     status = normalize_status(facts.status)
     verification = normalize_verification(facts.verification_status)
@@ -131,12 +131,10 @@ def waiting_reason(facts: RunStateFacts) -> str:
         return "tool"
     if status == "WAITING_FOR_CHILD":
         return "child"
-    if status in {"AWAITING_ACCEPTANCE", "VERIFYING"}:
-        return "acceptance"
-    if verification == "NEEDS_ACCEPTANCE":
-        return "acceptance"
+    if status == "VERIFYING":
+        return "verification"
     if status == "DONE" and verification not in VERIFIED_STATES:
-        return "acceptance"
+        return "verification"
     if status == "RUNNING" and not facts.has_progress:
         return "local_progress"
     return "none"

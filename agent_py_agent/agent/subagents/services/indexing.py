@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ..models import ChannelProbeResult, SubAgentExecutionContext, SubAgentTask
     from ..reports import (
-        AcceptanceReviewRecord,
         ActionApplyRecord,
         CapabilityRouteRecord,
         DispatchRecord,
@@ -36,7 +35,6 @@ from .indexing_dispatch import (
 )
 from .indexing_params import DataclassRecordIndexParams, IndexReportParams, LocalRecordParams
 from .indexing_records import (
-    index_acceptance_review_via,
     index_action_apply_via,
     index_capability_route_via,
     index_channel_probe_via,
@@ -146,11 +144,6 @@ class SubAgentIndexingService:
     # 函数用途: 处理index能力route相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def index_capability_route(self, record: CapabilityRouteRecord) -> None:
         index_capability_route_via(self, record)
-
-    # LLM: index_acceptance_review 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-    # 函数用途: 处理index验收审查相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
-    def index_acceptance_review(self, record: AcceptanceReviewRecord) -> None:
-        index_acceptance_review_via(self, record)
 
     # LLM: index_patch_review 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
     # 函数用途: 处理index补丁审查相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。

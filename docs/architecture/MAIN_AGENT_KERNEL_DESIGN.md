@@ -221,7 +221,7 @@ agent_py_agent/agent/contracts/
 - Error Taxonomy（错误分类体系）：把路径错误、写入禁止、工具不可用、模型上游失败、产物缺失、验收失败、compact 引用缺失等失败分成稳定代码，并给出恢复建议。它不自动替模型决定重试，只告诉上层“这类失败是什么”。
 - State Machine（状态机）：把 `PLANNING`、`RUNNING`、`WAITING_FOR_TOOL`、`BLOCKED`、`FAILED`、`DONE`、`VERIFIED` 等状态变成统一事实判断。它不规定每个任务必须走固定流程，只回答“现在能不能 dispatch、能不能 closeout、该等、修、接管还是人工看”。
 - Idempotency Contract（幂等合同）：给 create/schedule/dispatch/compact/resume/artifact write 这类动作提供稳定 key。模型多调用一次工具时，系统可以复用已有 run 或跳过已完成项，而不是无限创建重复任务。
-- Artifact Acceptance（产物验收）：把 HTML/PDF/XLSX/代码等产物的质量问题变成结构化 findings。模型可以自检，但不能把“我检查过了”当作通过；验收器输出才是 repair（修复）和最终验收的输入。
+- Artifact Acceptance（产物验收）：把 HTML/PDF/XLSX/代码等产物的质量问题变成结构化 findings。模型可以自检，但不能把“我检查过了”当作通过；验收器输出才是 repair（修复）和最终收口的输入。
 - Real E2E Matrix（真实端到端测试矩阵）：把必须长期跑的真实链路做成数据合同，例如中文路径写文件、大工具输出 artifact、compact 后 resume、工具失败分类、验收失败后修复、长任务中断恢复、单代理完整任务、子代理复用主代理 kernel。
 
 大白话说：这四个合同不是给代理套枷锁，而是让系统在出问题时有统一语言。它们回答“坏在哪、现在是什么状态、这个操作是不是重复、真实链路有没有测过”。
@@ -240,7 +240,7 @@ agent_py_agent/agent/contracts/
 - `artifact_acceptance.py` 提供通用产物验收入口：HTML 能发现 `href="#"`、空链接、`javascript:void(0)`、外部图片和缺失本地图片；JSON/CSV/XLSX/PDF 会做轻量可打开/可解析检查；未知格式至少检查存在和非空。真实测试发现模型产物自称“无坏链”，但机器验收抓到 21 个占位链接；把 findings 交回主代理后，主代理修复到 0 个 findings。
 - `my-agent real-e2e` 已接入 CLI：默认跑确定性主代理基础矩阵，写 `real_e2e_report.json`；传 `--artifact` 时会把真实模型产物接入 Artifact Acceptance。它当前不自动调用模型，避免 CI 或普通提交意外烧 API。
 - `main_agent_real_task_suite` 已接入 `my-agent real-e2e --real-task-suite`：它会为家具 HTML、购物网站、GitHub 升星 XLSX、DeepSeek 论文翻译 PDF 这类真实复杂任务生成受控批量测试计划。计划会写 `prompt.md`、`acceptance.json`、`expected_artifacts.json` 和 `suite_report.json`，报告只带 refs、worker slot、timeout 和结构化验收合同，不直接启动模型进程。
-- `main_agent_real_task_execution` 已接入 `my-agent real-e2e --run-real-tasks`：它只在用户显式开启时启动任务；每个 case 都有独立 `config.yaml`、`command.json`、`stdout.txt`、`stderr.txt`、`acceptance_report.json` 和 workspace，并按 `real_task_max_workers` 并发运行，报告会记录 `concurrency`。执行后会按 `expected_artifacts.json` 验收产物，进程退出码为 0 但缺产物也算失败。未传真实 `--real-task-base-config` 时默认走离线 echo 配置，保证 CI 和普通提交不会偷偷烧 API。
+- `main_agent_real_task_execution` 已接入 `my-agent real-e2e --run-real-tasks`：它只在用户显式开启时启动任务；每个 case 都有独立 `config.yaml`、`command.json`、`stdout.txt`、`stderr.txt`、`acceptance_report.json` 和 workspace，并按 `real_task_max_workers` 并发运行，报告会记录 `concurrency`。执行后会按 `expected_artifacts.json` 检查产物，进程退出码为 0 但缺产物也算失败。未传真实 `--real-task-base-config` 时默认走离线 echo 配置，保证 CI 和普通提交不会偷偷烧 API。
 - `main_agent_real_task_revalidation` 已接入 `my-agent real-e2e --revalidate-real-task-report`：它读取已有 `execution_report.json`，只复验 expected artifact 合同和产物文件，不重新启动主代理。真实 API 跑完后可以反复复验产物，而不会重新花模型调用。
 
 大白话说：以后要开 4 个主代理并行测真实任务，不应该手动乱开终端和进程。先用这套命令生成任务清单、工位、超时和验收合同，再由受控 runner 去执行。这样就算测试很大，也能知道“哪个任务该产出什么、谁在跑、怎么验收、报告在哪里”。

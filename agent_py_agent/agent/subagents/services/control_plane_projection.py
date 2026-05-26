@@ -70,6 +70,7 @@ def _agent_run_metadata(task: SubAgentTask) -> dict[str, object]:
         "failure_type": task.failure_type,
         "blockers": list(task.blockers),
         "status_report_ref": task.status_report_json,
+        "system_tree": dict((task.attributes or {}).get("system_tree") or {}),
     }
     security_signal_types = [item.signal_type for item in task.security_signals if item.signal_type]
     if task.security_review_required or security_signal_types:

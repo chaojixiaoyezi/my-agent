@@ -1,12 +1,11 @@
 # LLM: CLI implementation for subagents-tests; keep real test execution refs-first.
-# 模块用途: 查看或显式重跑 subagent 测试报告，和 acceptance/patch review CLI 拆开维护。
+# 模块用途: 查看或显式重跑 subagent 测试报告，和 patch review CLI 拆开维护。
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from ..agent.subagents.acceptance_review_service import AcceptanceReviewOptions
 from ..agent.subagents.execution_executor import TestExecutor
 from ..agent.subagents.execution_report import (
     TestExecutionReportOptions,
@@ -14,7 +13,6 @@ from ..agent.subagents.execution_report import (
     write_test_execution_report,
 )
 from ..agent.subagents.execution_test_items import TestItemPreparationRequest, prepare_test_items
-from ..agent.subagents.parent_test_pack import load_parent_test_items
 from ..agent.subagents.test_failure_classification import (
     TestFailureClassificationRequest,
     classify_test_execution_report,
@@ -33,9 +31,7 @@ def cmd_subagents_tests(args, make_agent_fn=make_agent) -> int:
     report_path = Path(task.reports_dir) / "test_execution.json"
 
     if options.re_run:
-        _request_acceptance_test_execution(agent, options)
-        if _needs_direct_subagents_tests_report(report_path, task):
-            _write_subagents_tests_report(agent, task, options)
+        _write_subagents_tests_report(agent, task, options)
 
     if not report_path.exists():
         print("SUBAGENT TESTS")
@@ -59,19 +55,7 @@ def _subagents_tests_options(args) -> SubagentsTestsOptions:
     )
 
 
-# LLM: _request_acceptance_test_execution keeps this command aligned with acceptance opt-in semantics.
-# 函数用途: 调用验收服务的显式真实测试开关；真实服务会写报告，测试替身则可只记录调用。
-def _request_acceptance_test_execution(agent, options: SubagentsTestsOptions) -> None:
-    agent.subagents.write_acceptance_review_report(
-        run_ids=[options.run_id],
-        options=AcceptanceReviewOptions(
-            execute_tests=True,
-            test_timeout_seconds=options.timeout,
-        ),
-    )
-
-
-# LLM: _write_subagents_tests_report is a fallback for direct CLI re-run when acceptance did not write a report.
+# LLM: _write_subagents_tests_report re-runs declared subagent tests directly.
 # 函数用途: 从 output.json 读取 tests 并执行，写入 test_execution.json/md。
 def _write_subagents_tests_report(agent, task, options: SubagentsTestsOptions):
     workspace_root = _subagents_tests_workspace(agent, task)
@@ -92,11 +76,10 @@ def _write_subagents_tests_report(agent, task, options: SubagentsTestsOptions):
     )
 
 
-# LLM: _subagents_tests_items combines worker-declared tests with parent-owned oracle packs.
-# 函数用途: 构造真实执行测试项；父级测试包不依赖 worker output，可用于共享 Web 仓库 contract tests。
+# LLM: _subagents_tests_items returns worker-declared tests only.
+# 函数用途: 构造真实执行测试项；不再合并结果检查包。
 def _subagents_tests_items(task, output: dict[str, object]) -> list[dict]:
-    worker_tests = [item for item in output.get("tests", []) if isinstance(item, dict)]
-    return [*worker_tests, *load_parent_test_items(task)]
+    return [item for item in output.get("tests", []) if isinstance(item, dict)]
 
 
 # LLM: _write_subagents_test_classification keeps test reports paired with compact repair-routing facts.
@@ -108,25 +91,10 @@ def _write_subagents_test_classification(task, report):
     return classification
 
 
-# LLM: _needs_direct_subagents_tests_report prevents empty acceptance side effects from masking declared tests.
-# 函数用途: 判断是否需要直接按 output.json 执行 tests；空报告不能覆盖真实声明的测试项。
-def _needs_direct_subagents_tests_report(report_path: Path, task) -> bool:
-    if not report_path.exists():
-        return True
-    report = load_test_execution_report(report_path)
-    return report.total_tests == 0 and _task_has_executable_tests(task)
-
-
 # LLM: _output_declares_tests reads only structured output metadata to decide whether a zero-test report is suspicious.
 # 函数用途: 判断 output.json 是否声明了 tests；用于避免“报告存在但没执行任何测试”被当成成功。
 def _output_declares_tests(task) -> bool:
     return bool([item for item in _read_task_output(task).get("tests", []) if isinstance(item, dict)])
-
-
-# LLM: _task_has_executable_tests includes parent-owned packs so empty acceptance side effects cannot mask oracles.
-# 函数用途: 判断是否存在需要真实执行的测试；worker tests 和父级 test pack 任一存在都要重跑。
-def _task_has_executable_tests(task) -> bool:
-    return _output_declares_tests(task) or bool(load_parent_test_items(task))
 
 
 # LLM: _subagents_tests_exit_code makes the CLI fail when no tests ran or any test failed.

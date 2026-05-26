@@ -36,7 +36,6 @@ class WorkOrderToTaskConfig:
                 "must_check": ["查询结果数", "时间窗覆盖", "证据完整性"],
                 "evidence_required": ["查询记录", "结果样本", "时间戳"],
                 "risk_report_required": "缺少的关键证据或数据源",
-                "final_judge": "parent_final_gate",
             }
         if not self.context_manifest:
             self.context_manifest = {
@@ -224,7 +223,6 @@ def _quality_contract_from_dict(d: dict[str, Any]) -> Any:
         evidence_required=d.get("evidence_required", []),
         risk_report_required=d.get("risk_report_required", ""),
         allowed_degradation=d.get("allowed_degradation", []),
-        final_judge=d.get("final_judge", "parent_final_gate"),
     )
 
 

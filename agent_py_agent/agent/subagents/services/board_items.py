@@ -22,10 +22,6 @@ def build_risk_flags(
     flags: list[str] = []
     if task.status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
         flags.append(task.status.lower())
-    if task.status == "AWAITING_ACCEPTANCE":
-        flags.append("awaiting_acceptance")
-    if task.verification_status == "NEEDS_ACCEPTANCE":
-        flags.append("needs_acceptance")
     if task.status == "DONE" and not task.evidence:
         flags.append("done_without_evidence")
     if task.status == "DONE" and task.verification_status != "VERIFIED":

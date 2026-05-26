@@ -13,7 +13,7 @@ from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
 
 
 # LLM: test_hierarchy_schedule_keeps_report_roles_with_parent_write_coverage covers takeover authority.
-# 函数用途: researcher/tester/acceptor 等报告型角色也继承父级产物根，方便检查、接管、救援；是否亲自写由角色职责约束。
+# 函数用途: researcher/tester/bug_finder 等报告型角色也继承父级产物根，方便检查、接管、救援；是否亲自写由角色职责约束。
 def test_hierarchy_schedule_keeps_report_roles_with_parent_write_coverage(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"

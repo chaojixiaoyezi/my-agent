@@ -285,7 +285,7 @@ def _recommended_command(task: SubAgentTask, reason: str) -> str:
             "my-agent subagents-apply-actions --apply --action takeover_or_reassign "
             f"--run-id {task.id} --take-over-by <agent>"
         )
-    return f"my-agent subagents-acceptance-plan {task.id} --followup"
+    return f"my-agent subagents-tests-plan {task.id} --followup"
 
 
 # LLM: _active_stale_reasons mirrors due-check timeout signals for recovery-tree visibility.

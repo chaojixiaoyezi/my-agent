@@ -14,7 +14,7 @@ from typing import Any
 from .models import WorkflowLoadIssue, WorkflowPhase, WorkflowTemplate
 
 BUILTIN_PACKAGE = "agent_py_agent.agent.subagent_workflows.builtin"
-REQUIRED_TEMPLATE_FIELDS = ("id", "name", "solves", "fit_for", "phases", "parent_acceptance")
+REQUIRED_TEMPLATE_FIELDS = ("id", "name", "solves", "fit_for", "phases")
 REQUIRED_PHASE_FIELDS = ("id", "kind", "task")
 
 
@@ -259,7 +259,7 @@ def _template_from_mapping(
         solves=_as_list(data.get("solves")),
         fit_for=_as_list(data.get("fit_for")),
         phases=[_phase_from_mapping(item) for item in data.get("phases", [])],
-        parent_acceptance=_as_list(data.get("parent_acceptance")),
+        final_checks=_as_list(data.get("final_checks") or data.get("checks")),
         source=source,
         source_path=source_path,
     )

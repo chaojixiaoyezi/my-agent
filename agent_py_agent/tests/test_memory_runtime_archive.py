@@ -55,7 +55,7 @@ def _write_cross_day_handoff_archive(root: Path, run_id: str) -> None:
                     "request_id": "request-runtime-cross-day",
                     "run_id": run_id,
                     "task_id": run_id,
-                    "status": "awaiting_acceptance",
+                    "status": "pending_closeout",
                 }
             ],
             task_refs=[run_id],
@@ -194,7 +194,7 @@ def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
         plan=["读 archive", "读 HANDOFF", "继续验收"],
     )
     Path(task.status_file).write_text(
-        "# STATUS\n\n- status: AWAITING_ACCEPTANCE\n- next: 继续验收\n",
+        "# STATUS\n\n- status: DONE\n- next: 继续验收\n",
         encoding="utf-8",
     )
     Path(task.handoff_file).write_text(

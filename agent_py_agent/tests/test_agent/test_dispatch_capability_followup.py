@@ -47,7 +47,7 @@ def test_dispatch_routes_new_capability_request_then_reruns_worker(monkeypatch):
         task = agent.subagents.create_run(
             goal="需要受控 shell 能力，授权后再继续执行并报告 refs。",
             thought="先申请授权，再执行。",
-            plan=["申请能力", "授权后执行", "等待验收"],
+            plan=["申请能力", "授权后执行", "等待收口"],
             allowed_tools=["write_file"],
         )
         router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
@@ -86,7 +86,7 @@ def test_dispatch_reruns_incomplete_output_after_write_grant(monkeypatch):
         task = agent.subagents.create_run(
             goal="写一个完整的单文件 HTML。",
             thought="先写文件，必要时继续补齐。",
-            plan=["写文件", "补齐", "等待验收"],
+            plan=["写文件", "补齐", "等待收口"],
             allowed_tools=["write_file"],
             acceptance_checks=["HTML 文件完整闭合"],
         )

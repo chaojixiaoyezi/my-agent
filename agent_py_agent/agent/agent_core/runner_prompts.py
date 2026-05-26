@@ -52,7 +52,7 @@ def _build_subagent_runner_prompt(
     return (
         "# SubAgent Runner Task\n\n"
         "你是一个被父代理授权的子代理，只能依据下面的执行上下文工作。\n"
-        "不要使用上下文之外的 skill/tool，不要假完成；没有验收证据时只能标记等待验收或上抛能力请求。\n\n"
+        "不要使用上下文之外的 skill/tool，不要假完成；没有验收证据时只能标记等待收口或上抛能力请求。\n\n"
         "## Extra Instruction\n\n"
         f"{extra}\n\n"
         "## Runner Contract\n\n"
@@ -70,7 +70,7 @@ def _build_subagent_runner_prompt(
         "- 列出使用过的授权工具或 skill。\n"
         "- 给出可验收证据；成功时 evidence_packets 必须有 artifact_refs 或 evidence_refs，不能只写普通 evidence。\n"
         "- 如果你认为某个失败、损坏或超时的 child run 已由另一个已完成 run 覆盖，必须写 coverage_records；"
-        "只在 summary 里说“已覆盖”不会被父级验收或最终收口认可。\n"
+        "只在 summary 里说“已覆盖”不会被最终收口认可。\n"
         "- 结果块要短：evidence/artifacts/tests/lessons 每类只保留最关键的 1-5 条，长报告写文件后引用路径。\n"
         "- 最后必须输出一个机器可解析结果块，格式如下：\n\n"
         "注意：结果块里面只能放裸 JSON object，不要使用 ```json 或任何 Markdown 代码围栏。\n"
@@ -80,14 +80,13 @@ def _build_subagent_runner_prompt(
 
 
 # LLM: _runner_execution_contract_lines keeps model-facing runner rules precise without bloating the prompt builder.
-# 函数用途: 根据 runner 上下文生成执行边界说明，尤其说明叶子节点测试命令应交给父级验收器执行。
+# 函数用途: 根据 runner 上下文生成执行边界说明。
 def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[str]:
     lines = [
         "- 只把真正阻止你产出文件、报告或证据的缺口写成 capability_request。",
         "- 如果你没有 shell/command/terminal 工具，不要因为不能自己运行 pytest 就提交 capability_request。",
-        "- 没有命令执行工具时，应写出可验收产物和测试文件，并在 tests/next_actions 中给父级验收器推荐命令。",
-        "- 推荐给父级验收器的命令必须是安全、具体、可复制的；不要假装你已经执行过它。",
-        "- tests 里的命令必须能被父级 TestExecutor 安全执行：不要写 cd ... &&，把目录写在 \"working_dir\" 字段里。",
+        "- 没有命令执行工具时，应写出产物和测试建议；不要假装你已经执行过命令。",
+        "- tests 里的命令必须安全、具体、可复制：不要写 cd ... &&，把目录写在 \"working_dir\" 字段里。",
         "- 验证文件内容时优先写 validation_method=\"content_check\"、file_path、content_pattern 或 content_equals、match_mode=\"exact\"，不要写 cat 文件命令。",
         "- 写代码和测试后，必须逐条对照验收条件做静态自检，确保实现、测试、README 三者互相一致。",
         "- 写 Python 测试时必须保证从 working_dir 运行能导入被测模块；优先把测试文件和模块放同一目录，或显式处理 import path。",
@@ -114,7 +113,7 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
     lines.extend(_controlled_exec_contract_lines(context))
     lines.extend(_current_role_template_lines(context))
     if "leaf" in str(context.role or "").lower():
-        lines.append("- 叶子节点重点是交付产物和测试文件；父级验收器负责运行命令、判定通过和触发 rescue。")
+        lines.append("- 叶子节点重点是交付产物、证据和测试建议；父级只负责读取结果并继续调度或汇总。")
     lines.extend(_root_execution_contract_lines(context))
     if _is_coordinator_context(context):
         lines.extend(_coordinator_execution_contract_lines())

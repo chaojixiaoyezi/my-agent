@@ -36,7 +36,7 @@ def test_user_template_overrides_builtin_template_id(tmp_path):
                 "task": "Use the local custom workflow.",
             }
         ],
-        "parent_acceptance": ["custom acceptance"],
+        "final_closeout": ["custom acceptance"],
     }
     (user_dir / "single_worker_verified.json").write_text(
         json.dumps(user_template),
@@ -70,7 +70,7 @@ def test_bad_template_reports_validation_issues(tmp_path):
                         "task": "Missing phase id.",
                     },
                 ],
-                "parent_acceptance": ["reported"],
+                "final_closeout": ["reported"],
             }
         ),
         encoding="utf-8",
@@ -96,7 +96,7 @@ def test_validate_template_data_reports_required_fields():
             "solves": ["some problem"],
             "fit_for": ["tests"],
             "phases": [{"kind": "worker", "task": "Missing phase id."}],
-            "parent_acceptance": ["reported"],
+            "final_closeout": ["reported"],
         },
         source_path="broken.json",
     )

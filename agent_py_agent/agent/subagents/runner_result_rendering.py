@@ -82,9 +82,9 @@ def _runner_parent_next_action_lines(result: SubAgentRunnerResult) -> list[str]:
         "",
         "## Parent Next Action",
         "",
-        "- artifact_integrity_failed 表示产物还没过结构检查，不能进入父级验收。",
+        "- artifact_integrity_failed 表示产物还没过结构检查，不能进入最终收口。",
         "- 父级/root 不要直接改业务产物；请派 repair worker/修复小傻妞读取 output_json 和产物路径继续修。",
-        "- 修复后重新 dispatch，并再次检查 artifact integrity 与父级验收。",
+        "- 修复后重新 dispatch，并再次检查 artifact integrity 与最终收口。",
     ]
 
 

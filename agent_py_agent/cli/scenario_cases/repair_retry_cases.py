@@ -93,8 +93,8 @@ def _structured_repair_setup(args):
     task = agent.subagents.create_run(
         goal="极端场景：runner 输出损坏的 SUBAGENT_RESULT，父代理应触发修复回合",
         thought="验证结构化输出坏掉时不会直接把任务丢成无法验收。",
-        plan=["输出损坏结果块", "修复结构化结果", "父代理验收"],
-        acceptance_checks=["必须触发 structured repair", "修复后必须有证据", "父代理必须验收通过"],
+        plan=["输出损坏结果块", "修复结构化结果", "交回真实结果"],
+        acceptance_checks=["必须触发 structured repair", "修复后必须有证据", "父代理必须完成普通收口"],
     )
     print(f"run_id={task.id}")
     return paths, agent, backend, capability_config, router, task
@@ -178,8 +178,8 @@ def _runner_retry_setup(args):
     task = agent.subagents.create_run(
         goal="极端场景：runner 第一次调用模型失败，下一轮 dispatch 应自动重试",
         thought="验证临时模型/接口错误不会让任务永久卡死。",
-        plan=["第一次 runner 失败", "下一轮自动重试", "成功后父代理验收"],
-        acceptance_checks=["第二次 runner 必须生成证据", "父代理必须验收通过"],
+        plan=["第一次 runner 失败", "下一轮自动重试", "成功后交回真实结果"],
+        acceptance_checks=["第二次 runner 必须生成证据", "父代理必须完成普通收口"],
     )
     print(f"run_id={task.id}")
     return paths, agent, backend, capability_config, router, task

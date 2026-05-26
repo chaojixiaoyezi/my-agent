@@ -149,7 +149,7 @@ def _should_resolve_stale_capability_requests(task) -> bool:
 
 
 # LLM: _has_open_capability_requests protects tool-created requests from accidental success cleanup.
-# 函数用途: 判断任务是否已有 OPEN 能力申请；这种情况下 runner 不能进入等待验收或完成态。
+# 函数用途: 判断任务是否已有 OPEN 能力申请；这种情况下 runner 不能进入等待收口或完成态。
 def _has_open_capability_requests(task) -> bool:
     return any(getattr(request, "status", "") == "OPEN" for request in getattr(task, "capability_requests", []) or [])
 

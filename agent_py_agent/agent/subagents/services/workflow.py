@@ -97,7 +97,7 @@ def _add_worker_checks(merged: list[str], worker: dict[str, object]) -> None:
 
 
 # LLM: _merge_workflow_acceptance_checks 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 更新工作流验收检查对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、报告记录和持久化副作用，需避免破坏既有状态机约定。
+# 函数用途: 合并 workflow 的 worker 检查项；不再注入单独最终收口清单。
 def _merge_workflow_acceptance_checks(
     acceptance_checks: list[str],
     workflow_plan_dict: dict[str, object] | None,
@@ -109,9 +109,6 @@ def _merge_workflow_acceptance_checks(
     workers = workflow_plan_dict.get("workers") or []
     for worker in _iter_workflow_workers(workers):
         _add_worker_checks(merged, worker)
-    for check in workflow_plan_dict.get("parent_acceptance_checklist") or []:
-        if isinstance(check, str) and check not in merged:
-            merged.append(check)
     return merged
 
 
@@ -263,7 +260,7 @@ class SubAgentWorkflowService:
         child_plan = [
             phase_task,
             "保留命令、文件和测试证据。",
-            "不要自判最终完成，等待父代理验收。",
+            "完成后写清楚真实产物、证据和阻塞项，交回调用方继续推进。",
         ]
 
         agent_name = _workflow_child_agent_name(parent, phase_id, role)
@@ -272,7 +269,7 @@ class SubAgentWorkflowService:
                 goal=f"{parent.goal}\n\nWorkflow phase {phase_id}: {phase_task}",
                 thought=(
                     f"执行 workflow phase {phase_id}（{kind}）。"
-                    " 先遵守质量契约和写入边界，再提交待父代理验收的材料。"
+                    " 先遵守质量契约和写入边界，再交回真实材料和证据。"
                 ),
                 plan=child_plan,
                 agent_name=agent_name,

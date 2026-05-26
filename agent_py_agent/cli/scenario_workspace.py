@@ -42,7 +42,7 @@ def write_scenario_fixture(fixture_root: Path) -> None:
                 "",
                 "- 子代理必须读取本 README。",
                 "- 子代理必须在自己的 task_dir/scenario_outputs/ 里写入报告。",
-                "- 父代理必须完成 runner 调度和验收闭环。",
+                "- 父代理必须完成 runner 调度和收口闭环。",
                 "",
             ]
         ),

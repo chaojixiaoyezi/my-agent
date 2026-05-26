@@ -10,7 +10,6 @@ from ..debug_trace import trace_hierarchy_schedule
 from ..models import SubAgentTask
 from . import hierarchy_context as hctx
 from .base import CreateRunParams
-from .hierarchy_acceptance import scheduled_child_acceptance_checks
 from .hierarchy_agent_names import scheduled_child_agent_name
 from .hierarchy_child_context import child_context_manifest, child_context_packs
 from .hierarchy_qa_scheduler import qa_orchestration_advice
@@ -260,7 +259,7 @@ def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParam
     return CreateRunParams(
         goal=request.goal,
         thought=spec.thought or hctx.inherited_hierarchy_thought(parent, child_goal=request.goal),
-        plan=spec.plan or ["读取父级 refs", "执行小切片", "写回状态和证据 refs", "等待父级验收"],
+        plan=spec.plan or ["读取父级 refs", "执行小切片", "写回状态和证据 refs", "等待最终收口"],
         agent_name=agent_name,
         role=request.role,
         parent_id=parent.id,
@@ -278,7 +277,7 @@ def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParam
         owner=agent_name,
         supervisor=parent.id,
         final_owner=parent.final_owner or parent.owner,
-        acceptance_checks=scheduled_child_acceptance_checks(
+        acceptance_checks=_scheduled_child_checks(
             spec,
             role=request.role,
             goal=request.goal,
@@ -297,6 +296,23 @@ def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParam
         workflow_mode="off",
         attributes=hctx.inherited_hierarchy_attributes(parent, spec),
     )
+
+
+def _scheduled_child_checks(
+    spec: HierarchyChildSpec,
+    *,
+    role: str,
+    goal: str,
+    leaf_write_intent: bool,
+) -> list[str]:
+    checks = [str(item) for item in spec.acceptance_checks if str(item).strip()]
+    if checks:
+        return checks
+    if leaf_write_intent:
+        return ["按任务说明交回真实产物、证据 refs 和阻塞项。"]
+    if role or goal:
+        return ["按任务说明交回真实结果、证据 refs 和阻塞项。"]
+    return []
 
 
 # LLM: _planned_items mirrors created item shape while keeping run_id empty in dry-runs.

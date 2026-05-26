@@ -93,6 +93,7 @@ def _sample_task_fields(tmp_path) -> dict:
         "evidence_refs": [],
         "artifact_refs": [],
         "blockers": [],
+        "attributes": {},
         "progress": 0.0,
         "current_step": "",
         "latest_summary": "",
@@ -190,7 +191,31 @@ def test_record_runner_result_with_parsed_output(mock_manager, sample_task):
     assert result.structured_output_found is True
 
 
-# LLM: A runner that claims a missing artifact must not enter the parent-readable acceptance lane.
+# LLM: closeout_for_all_task_nodes writes feedback only; it must not revive parent acceptance states.
+# 函数用途: 验证子代理完成后只在任务属性里留下同一套 closeout 提示事实，不改变成功状态。
+def test_record_runner_result_writes_task_node_closeout_feedback_when_enabled(mock_manager, sample_task):
+    mock_manager.closeout_for_all_task_nodes = True
+    mock_manager._tasks[sample_task.id] = sample_task
+
+    result = mock_manager.record_runner_result(_rrr(
+        run_id="run-123",
+        dry_run=False,
+        ok=True,
+        message="完成",
+        status="DONE",
+        verification_status="VERIFIED",
+    ))
+
+    feedback = sample_task.attributes["task_node_closeout"]
+    assert result.ok is True
+    assert feedback["mode"] == "feedback_only"
+    assert feedback["enabled_by"] == "closeout_for_all_task_nodes"
+    assert feedback["ok"] is True
+    assert feedback["status"] == "DONE"
+    assert "acceptance" not in feedback
+
+
+# LLM: A runner that claims a missing artifact must not enter the parent-readable result lane.
 # 函数用途: 防止子代理只在 JSON 里声称写了报告、实际没写文件时被父级当作已完成产物读取。
 def test_record_runner_result_blocks_missing_local_artifact_ref(mock_manager, sample_task, tmp_path):
     mock_manager._tasks[sample_task.id] = sample_task
@@ -207,7 +232,7 @@ def test_record_runner_result_blocks_missing_local_artifact_ref(mock_manager, sa
         found=True,
         ok=True,
         parse_error="",
-        status="AWAITING_ACCEPTANCE",
+        status="DONE",
         summary="报告已完成",
         artifacts=[{"path": "missing_report.md", "kind": "report"}],
         evidence_packets=[{
@@ -558,8 +583,8 @@ def test_record_runner_result_success_clears_stale_failure_state(mock_manager, s
         found=True,
         ok=True,
         parse_error="",
-        status="AWAITING_ACCEPTANCE",
-        summary="文件已经写出，等待验收。",
+        status="DONE",
+        summary="文件已经写出，等待收口。",
         blocked_reason="",
         failure_type="",
         used_skills=[],
@@ -581,7 +606,7 @@ def test_record_runner_result_success_clears_stale_failure_state(mock_manager, s
         structured_output=parsed,
     ))
 
-    assert sample_task.status == "AWAITING_ACCEPTANCE"
+    assert sample_task.status == "DONE"
     assert sample_task.failure_type == ""
     assert sample_task.blockers == []
     assert sample_task.capability_requests[0].status == "RESOLVED"

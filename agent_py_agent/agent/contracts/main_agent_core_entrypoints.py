@@ -10,7 +10,7 @@ from .offline_contract_report import OfflineContractValidation, finding, text, v
 REQUIRED_ENTRYPOINTS = (
     "state_machine",
     "tool_executor",
-    "acceptance_gate",
+    "closeout_gate",
     "runlog",
     "tooltrace",
     "approval_gate",

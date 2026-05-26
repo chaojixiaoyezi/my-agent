@@ -115,9 +115,9 @@ def build_scenario_prompt(count: int) -> str:
         f"- count: {count}\n"
         "- tool_preset: coding\n"
         "- goal: 在隔离 fixture 项目中读取 README.md，并在子代理 task_dir/scenario_outputs/ 写入自己的证据报告\n"
-        "- acceptance_checks: 必须有 read_file 证据；必须有 write_file 证据；必须等待父代理验收\n"
+        "- acceptance_checks: 必须有 read_file 证据；必须有 write_file 证据；必须交回真实产物和证据\n"
         "- plan: 读取 README.md；从执行上下文读取 task_dir；写入 task_dir/scenario_outputs/<run_id>.md；"
-        "输出 SUBAGENT_RESULT；等待验收\n\n"
+        "输出 SUBAGENT_RESULT；等待收口\n\n"
         "创建后可以调用 subagent_board 看一眼状态，然后用一句话汇报创建了几个子代理。"
     )
 
@@ -139,7 +139,7 @@ def build_scenario_runner_instruction() -> str:
         "说明已读取 README.md，并注明这是隔离测试和 task_dir 内产物。\n"
         "4. 只有在你已经看到 write_file 成功结果后，才允许输出最终 [SUBAGENT_RESULT]。\n"
         "5. 最终回复只能包含一个 [SUBAGENT_RESULT] JSON 结果块，不要输出 Markdown 代码围栏。\n"
-        "JSON 必须包含：status=AWAITING_ACCEPTANCE；summary；used_tools 至少包含 read_file 和 write_file；"
+        "JSON 必须包含：status=DONE；summary；used_tools 至少包含 read_file 和 write_file；"
         "evidence 至少两条，分别证明 README.md 已读取、task_dir/scenario_outputs/<run_id>.md 已写入；"
         "tests 至少一条 ok=true；artifacts 包含写入的报告路径；patches 为空数组。"
     )

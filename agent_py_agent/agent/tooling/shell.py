@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import os
-import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -13,11 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from agent_py_agent.agent.contracts.gates.command_policy import (
-    command_name,
     evaluate_command_policy,
 )
 
 from .models import BaseTool, ToolExecutionResult, ToolSpec
+from .shell_delete_policy import delete_target_access_error
 
 _MAX_COMMAND_CHARS = 2000
 _DEFAULT_MAX_OUTPUT_CHARS = 12_000
@@ -145,53 +144,6 @@ def _working_dir_from_params(
         ),
         error_code="PATH_OUTSIDE_WORKSPACE",
     )
-
-
-# LLM: _delete_target_access_error makes workspace-write protect delete targets, not only cwd.
-# 函数用途: 在执行 rm/rmdir/unlink 前校验显式目标路径；工作区模式不允许删到 roots 外。
-def _delete_target_access_error(command: str, cwd: Path, roots: list[Path], access_mode: str) -> str:
-    if _normalize_access_mode(access_mode) == "full-access":
-        return ""
-    argv = _shell_tokens(command)
-    if not argv:
-        return ""
-    for position, token in enumerate(argv):
-        executable = command_name(token)
-        if executable not in {"rm", "rmdir", "unlink"}:
-            continue
-        for raw_target in _delete_targets(argv[position + 1 :]):
-            target = Path(raw_target).expanduser()
-            resolved = target.resolve(strict=False) if target.is_absolute() else (cwd / target).resolve(strict=False)
-            if not _path_inside_any_root(resolved, roots):
-                return f"COMMAND_ACCESS_DENIED: delete target outside workspace roots: {raw_target}"
-    return ""
-
-
-# LLM: _shell_tokens mirrors command_policy tokenization for lightweight delete-target checks.
-# 函数用途: 用 shlex 拆命令字符串；解析失败时不额外拦截，交给 subprocess 或共享 command policy 返回错误。
-def _shell_tokens(command: str) -> list[str]:
-    try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        lexer.commenters = ""
-        return list(lexer)
-    except ValueError:
-        return []
-
-
-# LLM: _delete_targets filters command options and stops at shell operators.
-# 函数用途: 从 rm/rmdir/unlink 参数中提取路径目标，不把 -rf/--force 当路径。
-def _delete_targets(args: list[str]) -> list[str]:
-    targets: list[str] = []
-    for arg in args:
-        if arg and set(arg).issubset({"&", "|", ";", ">", "<"}):
-            break
-        if arg == "--":
-            continue
-        if arg.startswith("-") and arg != "-":
-            continue
-        targets.append(arg)
-    return targets
 
 
 # LLM: _bounded_output preserves enough command output for diagnosis without flooding the live prompt.
@@ -325,7 +277,7 @@ class ShellTool(BaseTool):
         )
         if isinstance(target, ToolExecutionResult):
             return target
-        delete_error = _delete_target_access_error(command, target, self.workspace_roots, self.access_mode)
+        delete_error = delete_target_access_error(command, target, self.workspace_roots, self.access_mode)
         if delete_error:
             return ToolExecutionResult(self.spec.name, False, delete_error, error_code="PATH_OUTSIDE_WORKSPACE")
         try:

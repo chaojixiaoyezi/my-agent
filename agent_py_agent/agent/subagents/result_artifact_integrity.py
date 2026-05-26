@@ -1,4 +1,4 @@
-# LLM: Runner-declared artifacts must be checked as refs before parent acceptance.
+# LLM: Runner-declared artifacts must be checked as refs before closeout.
 # 模块用途: 校验子代理结构化结果里声明的本地产物是否真实存在；只看路径，不读取产物正文。
 
 from __future__ import annotations

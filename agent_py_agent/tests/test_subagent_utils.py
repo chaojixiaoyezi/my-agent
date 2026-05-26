@@ -115,7 +115,7 @@ class TestReadJsonObject:
         assert result == {}
 
     # LLM: Older work-order defaults accidentally wrote JSON objects as JSON strings; readers should tolerate that.
-    # 函数用途: 保证历史 output.json/status JSON 即使是双层编码，也能被父级验收和恢复读取。
+    # 函数用途: 保证历史 output.json/status JSON 即使是双层编码，也能被最终收口和恢复读取。
     def test_read_nested_json_string_object(self, tmp_path: Path):
         file = tmp_path / "nested.json"
         file.write_text(json.dumps('{"run_id": "run-1", "status": "PLANNING"}'), encoding="utf-8")

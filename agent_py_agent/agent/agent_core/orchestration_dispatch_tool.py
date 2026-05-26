@@ -20,11 +20,8 @@ from .orchestration_dispatch_payload import (
 from .orchestration_dispatch_refs import related_task_result_refs
 from .orchestration_dispatch_scope import (
     dispatch_apply_default,
-    dispatch_auto_apply_acceptance_followup_default,
     dispatch_exclude_run_ids,
-    dispatch_execute_acceptance_tests_default,
     dispatch_execute_runners_default,
-    dispatch_finalize_acceptance,
     dispatch_include_run_ids_param,
     dispatch_max_runners_default,
     dispatch_parent_run_id,
@@ -91,19 +88,13 @@ class DispatchSubagentsTool(BaseTool):
         return cfg, CapabilityRouter(config=cfg, tool_specs=tool_specs)
 
     # LLM: _dispatch_params is the bundle boundary from model params into dispatch service params.
-    # 函数用途: 把模型传入的散字段收敛成 DispatchParams，集中处理父级作用域、执行开关、验收跟进和 run id 过滤。
+# 函数用途: 把模型传入的散字段收敛成 DispatchParams，集中处理父级作用域、执行开关和 run id 过滤。
     def _dispatch_params(
         self,
         params: dict[str, object],
         apply: bool,
         execute_runners: bool,
     ) -> DispatchParams:
-        execute_acceptance_tests = dispatch_execute_acceptance_tests_default(
-            self.agent,
-            params,
-            apply=apply,
-            execute_runners=execute_runners,
-        )
         return DispatchParams(
             apply=apply,
             execute_runners=execute_runners,
@@ -121,19 +112,10 @@ class DispatchSubagentsTool(BaseTool):
             probe=not _bool_param(params.get("no_probe"), default=False),
             take_over_by=dispatch_take_over_by_default(self.agent, params),
             locked_files=_string_list(params.get("locked_files")),
-            execute_acceptance_tests=execute_acceptance_tests,
-            auto_apply_acceptance_followup=dispatch_auto_apply_acceptance_followup_default(
-                self.agent,
-                params,
-                apply=apply,
-                execute_runners=execute_runners,
-                execute_acceptance_tests=execute_acceptance_tests,
-            ),
             parent_run_id=dispatch_parent_run_id(self.agent, params),
             root_id=str(params.get("root_id") or "").strip(),
             include_run_ids=dispatch_include_run_ids_param(params, agent=self.agent),
             exclude_run_ids=dispatch_exclude_run_ids(self.agent, params),
-            finalize_acceptance=dispatch_finalize_acceptance(self.agent, params),
         )
 
     # LLM: _report_payload keeps dispatch output compact and recovery-friendly for the parent model.

@@ -69,7 +69,7 @@ class ScenarioRealModelMultiRoundBackend:
     def _final_structured_result(self) -> str:
         summary_preview = _scenario_summary_preview(self.real_response_text)
         return _subagent_result_text({
-            "status": "AWAITING_ACCEPTANCE",
+            "status": "DONE",
             "summary": f"Real model multi-round smoke test: {summary_preview}",
             "used_tools": self.tool_sequence,
             "used_skills": [],
@@ -118,11 +118,11 @@ def _multi_round_setup(args):
 
     print_scenario_step(1, "Create a parent-owned subagent task for multi-round test")
     task = agent.subagents.create_run(
-        goal="real model multi-round recovery smoke test: read README, search gateway, wait for parent acceptance",
+        goal="real model multi-round recovery smoke test: read README, search gateway, wait for closeout",
         thought="verify real model API multi-round round-trip survives cross-day recovery.",
         plan=["runner reads README.md via real model", "runner searches gateway via real model", "write structured result", "simulate cross-day", "memory-resume recovers multi-round evidence"],
         allowed_tools=["read_file", "search_text"],
-        acceptance_checks=["must have read_file and search_text evidence", "recovery must recommend task fact sources", "parent decides acceptance after recovery"],
+        acceptance_checks=["must have read_file and search_text evidence", "recovery must recommend task fact sources", "caller decides closeout after recovery"],
     )
     print(f"run_id={task.id}")
 
@@ -133,7 +133,7 @@ def _multi_round_setup(args):
         probe=False,
         instruction=(
             "Real model multi-round recovery smoke test. Read README.md first, then search_text for 'gateway', "
-            "then output an AWAITING_ACCEPTANCE [SUBAGENT_RESULT]. Do not mark DONE yourself."
+            "then output an DONE [SUBAGENT_RESULT]. Do not mark DONE yourself."
         ),
     )
     loaded = agent.subagents.load(task.id)
@@ -222,8 +222,8 @@ def _multi_round_final_ok(ctx: _MultiRoundVerifyContext, expected_reads: list, o
     echo_signature = "这是 echo 后端的本地响应"
     return (
         ctx.runner.ok
-        and ctx.loaded.status == "AWAITING_ACCEPTANCE"
-        and ctx.loaded.verification_status == "NEEDS_ACCEPTANCE"
+        and ctx.loaded.status == "DONE"
+        and ctx.loaded.verification_status == "VERIFIED"
         and "read_file" in ctx.loaded.used_tools
         and "search_text" in ctx.loaded.used_tools
         and ctx.backend.calls >= 3
@@ -235,10 +235,10 @@ def _multi_round_final_ok(ctx: _MultiRoundVerifyContext, expected_reads: list, o
         and ctx.resume_payload.get("ok") is True
         and ctx.archive_count >= 2
         and ctx.matching_task.get("exists") is True
-        and ctx.matching_task.get("status") == "AWAITING_ACCEPTANCE"
+        and ctx.matching_task.get("status") == "DONE"
         and all(path in ctx.recommended_reads for path in expected_reads)
         and ctx.task.id in ctx.context_block
-        and "AWAITING_ACCEPTANCE" in ctx.context_block
+        and "DONE" in ctx.context_block
         and output_json_valid
     )
 

@@ -15,8 +15,10 @@ _DEFAULT_MAX_DIRECTIVE_CHARS = 1600
 _SHARED_CONTEXT_SOURCE_TOOLS = frozenset({
     "read_file",
     "read_artifact",
-    "fetch_url",
+    "web_fetch",
+    "web_extract",
     "http_request",
+    "web_search",
     "search_text",
     "list_files",
 })

@@ -55,8 +55,8 @@ def test_subagent_save_removes_failure_handoff_after_successful_retry(tmp_path) 
     assert handoff_path.exists()
 
     task = manager.load(task.id)
-    task.status = "AWAITING_ACCEPTANCE"
-    task.verification_status = "NEEDS_ACCEPTANCE"
+    task.status = "DONE"
+    task.verification_status = "VERIFIED"
     task.failure_type = ""
     task.blockers = []
     manager.save(task)

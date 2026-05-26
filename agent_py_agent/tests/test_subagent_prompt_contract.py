@@ -8,7 +8,7 @@ from agent_py_agent.agent.subagents.models import SubAgentExecutionContext
 
 
 def test_runner_prompt_tells_leaf_to_defer_command_execution_to_parent():
-    """叶子没有命令工具时，应写测试文件并交给父级验收器执行。"""
+    """叶子没有命令工具时，应写测试文件并交给最终收口器执行。"""
     context = SubAgentExecutionContext(
         run_id="leaf-1",
         generated_at=1.0,
@@ -24,7 +24,7 @@ def test_runner_prompt_tells_leaf_to_defer_command_execution_to_parent():
 
     assert "没有 shell/command/terminal 工具" in prompt
     assert "不要因为不能自己运行 pytest 就提交 capability_request" in prompt
-    assert "父级验收器" in prompt
+    assert "最终收口器" in prompt
     assert "不要写 cd ... &&" in prompt
     assert '"working_dir"' in prompt
     assert "逐条对照验收条件" in prompt

@@ -7,11 +7,16 @@ import re
 import shlex
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
+from .command_positions import (
+    command_name,
+    effective_command_positions,
+    is_shell_operator_token,
+    looks_like_assignment,
+)
+
 _CATASTROPHIC_EXECUTABLES = frozenset({"shutdown", "reboot", "halt", "poweroff", "telinit"})
-_COMMAND_WRAPPERS = frozenset({"sudo", "command", "exec", "builtin", "nohup", "time"})
 _PROTECTED_DELETE_PREFIXES = (
     "/",
     "/bin",
@@ -86,12 +91,6 @@ def evaluate_command_policy(
     return CommandPolicyDecision(parsed.argv, _unique_findings(findings))
 
 
-# LLM: command_name normalizes executable names for policy and gateway allowlists.
-# 函数用途: 提取 basename 并小写，覆盖 /bin/rm 和 mkfs.ext4 这类可执行路径。
-def command_name(value: object) -> str:
-    return Path(str(value or "")).name.lower()
-
-
 # LLM: _parse_command_value keeps this contract helper structure-first and stable.
 # 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _parse_command_value(command: object) -> CommandPolicyDecision:
@@ -134,7 +133,7 @@ def _dangerous_pattern_findings(argv: tuple[str, ...]) -> tuple[list[CommandPoli
     raw = " ".join(argv)
     if _FORK_BOMB_RE.search(raw):
         findings.append(CommandPolicyFinding("COMMAND_DANGEROUS_PATTERN_BLOCKED", {"pattern": "FORK_BOMB"}))
-    command_positions = _effective_command_positions(argv)
+    command_positions = effective_command_positions(argv)
     for position in command_positions:
         executable = command_name(argv[position])
         args = _command_args(argv, position)
@@ -172,7 +171,7 @@ def _dangerous_pattern_findings(argv: tuple[str, ...]) -> tuple[list[CommandPoli
 # LLM: _shell_operator_findings keeps this contract helper structure-first and stable.
 # 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _shell_operator_findings(argv: tuple[str, ...], raw: str) -> list[CommandPolicyFinding]:
-    operators = {token for token in argv if _is_shell_operator_token(token)}
+    operators = {token for token in argv if is_shell_operator_token(token)}
     if "`" in raw:
         operators.add("`")
     if "$(" in raw:
@@ -192,7 +191,7 @@ def _dangerous_executable_findings(
     allowed_commands: frozenset[str] = frozenset(),
 ) -> list[CommandPolicyFinding]:
     findings: list[CommandPolicyFinding] = []
-    for position in _effective_command_positions(argv):
+    for position in effective_command_positions(argv):
         if position in covered_positions:
             continue
         executable = command_name(argv[position])
@@ -203,75 +202,12 @@ def _dangerous_executable_findings(
     return findings
 
 
-# LLM: _command_positions keeps this contract helper structure-first and stable.
-# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
-def _command_positions(argv: tuple[str, ...]) -> list[int]:
-    positions: list[int] = []
-    expect_command = True
-    for index, token in enumerate(argv):
-        if _is_shell_operator_token(token):
-            expect_command = True
-            continue
-        if expect_command and _looks_like_assignment(token):
-            continue
-        if expect_command:
-            positions.append(index)
-            expect_command = False
-    return positions
-
-
-# LLM: _effective_command_positions unwraps sudo/env/time-style launchers before checking the real command.
-# 函数用途: 防止 sudo rm、env VAR=x rm、timeout 5 rm 这类包装绕过灾难命令判断。
-def _effective_command_positions(argv: tuple[str, ...]) -> list[int]:
-    positions: list[int] = []
-    for position in _command_positions(argv):
-        effective = _unwrap_command_position(argv, position)
-        if effective not in positions:
-            positions.append(effective)
-    return positions
-
-
-# LLM: _unwrap_command_position keeps policy target-aware while allowing harmless wrappers.
-# 函数用途: 跳过 sudo/env/time/timeout/nice/nohup 等启动包装，返回实际可执行文件位置。
-def _unwrap_command_position(argv: tuple[str, ...], position: int) -> int:
-    current = position
-    while current < len(argv):
-        executable = command_name(argv[current])
-        if executable in _COMMAND_WRAPPERS:
-            current += 1
-            if executable == "sudo":
-                while current < len(argv) and argv[current].startswith("-"):
-                    current += 1
-            continue
-        if executable == "env":
-            current += 1
-            while current < len(argv) and (argv[current].startswith("-") or _looks_like_assignment(argv[current])):
-                current += 1
-            continue
-        if executable == "timeout":
-            current += 1
-            while current < len(argv) and argv[current].startswith("-"):
-                current += 1
-            if current < len(argv):
-                current += 1
-            continue
-        if executable == "nice":
-            current += 1
-            if current < len(argv) and argv[current] == "-n":
-                current += 2
-            elif current < len(argv) and argv[current].startswith("-"):
-                current += 1
-            continue
-        return current
-    return position
-
-
 # LLM: _command_args keeps this contract helper structure-first and stable.
 # 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _command_args(argv: tuple[str, ...], position: int) -> list[str]:
     args: list[str] = []
     for token in argv[position + 1 :]:
-        if _is_shell_operator_token(token):
+        if is_shell_operator_token(token):
             break
         args.append(token)
     return args
@@ -354,23 +290,10 @@ def _download_piped_to_shell(argv: tuple[str, ...], command_positions: list[int]
     return False
 
 
-# LLM: _is_shell_operator_token keeps this contract helper structure-first and stable.
-# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
-def _is_shell_operator_token(token: str) -> bool:
-    return bool(token) and set(token).issubset({"&", "|", ";", ">", "<"})
-
-
 # LLM: _is_dangerous_executable keeps this contract helper structure-first and stable.
 # 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
 def _is_dangerous_executable(executable: str) -> bool:
     return executable in _CATASTROPHIC_EXECUTABLES or executable == "mkfs" or executable.startswith("mkfs.")
-
-
-# LLM: _looks_like_assignment keeps this contract helper structure-first and stable.
-# 函数用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
-def _looks_like_assignment(token: str) -> bool:
-    name, separator, _value = token.partition("=")
-    return bool(separator and name.replace("_", "").isalnum() and not name[0].isdigit())
 
 
 # LLM: _raw_command_text keeps this contract helper structure-first and stable.

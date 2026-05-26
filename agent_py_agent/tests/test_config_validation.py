@@ -172,26 +172,29 @@ def test_acceptance_real_execution_config_defaults_are_conservative():
     """验证真实验收执行配置默认关闭，避免老验收路径自动跑命令。"""
     defaults_normalized, warnings = normalize_agent_config({})
     assert warnings == []
-    assert defaults_normalized["acceptance_execute_tests"] is False
-    assert defaults_normalized["acceptance_test_timeout_seconds"] == 120
+    assert defaults_normalized["result_check_execute_tests"] is False
+    assert defaults_normalized["result_check_timeout_seconds"] == 120
+    assert defaults_normalized["closeout_for_all_task_nodes"] is False
 
 
 def test_acceptance_real_execution_config_coercion_and_range():
     """验证真实验收执行配置支持显式开启和超时校验。"""
     normalized, warnings = normalize_agent_config({
-        "acceptance_execute_tests": "true",
-        "acceptance_test_timeout_seconds": "30",
+        "result_check_execute_tests": "true",
+        "result_check_timeout_seconds": "30",
+        "closeout_for_all_task_nodes": "true",
     })
     assert warnings == []
-    assert normalized["acceptance_execute_tests"] is True
-    assert normalized["acceptance_test_timeout_seconds"] == 30
+    assert normalized["result_check_execute_tests"] is True
+    assert normalized["result_check_timeout_seconds"] == 30
+    assert normalized["closeout_for_all_task_nodes"] is True
 
     fallback, warnings = normalize_agent_config({
-        "acceptance_test_timeout_seconds": "9999",
+        "result_check_timeout_seconds": "9999",
     })
     defaults_normalized, _ = normalize_agent_config({})
-    assert any("acceptance_test_timeout_seconds" in warning for warning in warnings)
-    assert fallback["acceptance_test_timeout_seconds"] == defaults_normalized["acceptance_test_timeout_seconds"]
+    assert any("result_check_timeout_seconds" in warning for warning in warnings)
+    assert fallback["result_check_timeout_seconds"] == defaults_normalized["result_check_timeout_seconds"]
 
 
 def test_subagent_debug_trace_level_defaults_to_off():

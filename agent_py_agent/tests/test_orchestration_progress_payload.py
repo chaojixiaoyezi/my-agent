@@ -51,7 +51,7 @@ def test_runner_context_dispatch_reports_direct_child_progress() -> None:
     mock_agent.subagents.workspace = Path("/tmp/workspace")
     mock_agent.subagents.list_runs.return_value = [
         SimpleNamespace(id="parent-run", parent_id="", status="RUNNING"),
-        SimpleNamespace(id="child-a", parent_id="parent-run", status="AWAITING_ACCEPTANCE"),
+        SimpleNamespace(id="child-a", parent_id="parent-run", status="DONE"),
         SimpleNamespace(id="child-b", parent_id="parent-run", status="PLANNING"),
     ]
 

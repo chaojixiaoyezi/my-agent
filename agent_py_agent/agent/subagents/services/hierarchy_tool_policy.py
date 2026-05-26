@@ -11,13 +11,16 @@ from typing import Any, ClassVar
 from ..role_templates import COORDINATOR_TOOLS
 
 # LLM: Leaf defaults mirror main-agent basics: read/write/search/web plus orchestration, with no role-specific handcuffs.
+# LLM: Network defaults use web_search/web_fetch/web_extract/http_request; fetch_url is normalized to web_fetch.
 # 函数用途: 给调度出来的小傻妞默认补齐读写、网页证据和继续派工能力，减少因模板或自然语言误差导致的“有任务但没工具”。
 _DEFAULT_LEAF_CODING_TOOLS = [
     "list_files",
     "read_file",
     "search_text",
     "read_artifact",
-    "fetch_url",
+    "web_search",
+    "web_fetch",
+    "web_extract",
     "http_request",
     "write_file",
     "apply_patch",
@@ -48,6 +51,8 @@ _TOOL_NAME_ALIASES = {
     "patch": "apply_patch",
     "replace": "apply_patch",
     "search": "search_text",
+    "fetch": "web_fetch",
+    "fetch_url": "web_fetch",
     "write": "write_file",
 }
 # LLM: LeafWriteIntentRequest bundles the signals used to infer concrete file-writing intent.

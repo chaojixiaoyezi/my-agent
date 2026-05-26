@@ -21,7 +21,7 @@
 - LOG case 不再停留在“有一份派工计划”：父会话确认后可以生成真实、可追踪、可复核的子代理任务记录。
 - 默认仍是 dry-run，避免用户没确认时就创建任务。
 - 无 evidence refs 的 case 会拒绝创建 analyst/reviewer 任务，减少无证据分析。
-- 创建出的任务带有 allowed tools、evidence refs、quality contract、context pack、父级最终验收门，解决 worker 自己宣布完成的问题。
+- 创建出的任务带有 allowed tools、evidence refs、quality contract、context pack、最终收口门，解决 worker 自己宣布完成的问题。
 - 任务保持 `PLANNING` / `UNVERIFIED`，解决“创建任务”和“真正执行/验收”混在一起的风险。
 - LOG 的工具边界、体检边界和配置边界现在更适合小白学习，也更方便后续 LLM 在不重新扫全代码的情况下理解参数含义。
 - 注释明确了 security tools 只返回摘要和 evidence refs、doctor 不加载重依赖、配置坏值会 warning 后回退安全默认值。
@@ -31,7 +31,7 @@
 
 - 用受控 evidence-ref reader 替换 placeholder `evidence_read`。
 - 给 LOG work-order apply path 增加 CLI 或父会话确认入口。
-- 在真实 analyst/reviewer 执行前，把 reviewer decision 和 parent acceptance report 的持久化格式定下来。
+- 在真实 analyst/reviewer 执行前，把 reviewer decision 和 closeout report 的持久化格式定下来。
 - 增加更丰富的安全 fixture 和回归场景。
 - 继续明确 JSONL dev/local 后端与未来 DuckDB / Parquet / SQLite 后端的边界。
 - 继续给 `models.py`、`storage/query.py`、`ingest/`、`analytics/` 等核心文件补同等级中文注释。
@@ -41,7 +41,7 @@
 - 历史记录显示 LOG 专项、CLI、tools、detector、model、dispatch、Live Lab replay 都已有多轮测试记录。
 - 相关旧记录见 [docs/design/log-analysis.md](../../design/log-analysis.md)、[ACCEPTANCE.md](../../../ACCEPTANCE.md) 和 [EVIDENCE.md](../../../EVIDENCE.md)。
 - 本轮 focused 验收已覆盖 LOG dispatch：`python -m pytest agent_py_agent\tests\test_log_analysis_dispatch.py` -> `18 passed`。
-- 父会话 focused 组合验收：`python -m pytest agent_py_agent\tests\test_log_analysis_dispatch.py agent_py_agent\tests\test_subagent_workflow_planner.py` -> `26 passed`。
+- 父会话检查：`python -m pytest agent_py_agent\tests\test_log_analysis_dispatch.py agent_py_agent\tests\test_subagent_workflow_planner.py` -> `26 passed`。
 - 父会话全量回归：`python -m pytest` -> `236 passed`。
 - 空白检查：`git diff --check` -> passed。
 - 本轮注释同步 focused 验收：`python -m pytest agent_py_agent\tests\test_log_analysis_models.py agent_py_agent\tests\test_log_analysis_query.py agent_py_agent\tests\test_log_analysis_cli.py agent_py_agent\tests\test_tools.py agent_py_agent\tests\test_doc_sync.py` -> `45 passed`。
@@ -57,7 +57,7 @@
 ## 风险
 
 - 第一版四件套还没有搬入旧文档全文，查细节仍要跳转到旧 design/backlog/evidence。
-- 当前 apply path 只创建任务记录，不代表 analyst 已经工作，也不代表父级验收通过。
+- 当前 apply path 只创建任务记录，不代表 analyst 已经工作，也不代表最终收口通过。
 - `evidence_read` 仍是待落地的受控读取能力，真实 analyst 执行前必须补齐。
 - JSONL 本地后端适合开发和小样本，不应被误解为生产 SIEM 存储。
 ## 2026-05-06 code-size cleanup
@@ -78,7 +78,7 @@
 - Security prompt, query evidence, dispatch queue, ingest pipeline, dedup, dead-letter, entity graph, and trace-case helpers now expose explicit bundle params instead of function-level var-keyword compatibility bags.
 - Focused verification covered dispatch, queue, entity graph, dead-letter, ingest, evidence, architecture guardrails, and strict code-size checks.
 - 2026-05-07 high-risk cleanup continued in detector rule helpers and query evidence references; finding construction and evidence metadata now keep multi-field payloads inside explicit params objects.
-- 2026-05-09 LOG work-order apply compatibility updated: LOG-created tasks keep domain-visible `analyst` / `reviewer` roles even though the generic subagent layer now has `reporter` / `checker` aliases; parent final gate and cannot-self-accept contracts remain enforced through the work-order quality contract.
+- 2026-05-09 LOG work-order apply compatibility updated: LOG-created tasks keep domain-visible `analyst` / `reviewer` roles even though the generic subagent layer now has `reporter` / `checker` aliases; closeout and cannot-self-accept contracts remain enforced through the work-order quality contract.
 - 2026-05-22 LOG tools joined the runtime manifest gate contract: `security_query`, `security_hunt_ip`, and `security_trace_case` declare `effect=read_only` in both tool class entrypoints, so side-effect policy no longer relies on prompt wording.
 ## 2026-05-07 LLM annotation coverage update
 - 中文说明：这一轮只补 LOG 模块产品代码的双层注释，不改行为、文件格式、工作流语义或公开接口。后续改模块/类/函数行为、bundle 或副作用时要同步维护。

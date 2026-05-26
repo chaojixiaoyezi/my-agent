@@ -162,9 +162,9 @@ def test_recovery_strategy_exports_address_and_envelope_refs(tmp_path: Path) -> 
     assert strategy["recommended_action"] == "create_takeover_run_from_continue_packet"
 
 
-def test_parent_acceptance_decision_carries_task_envelope_acceptance(tmp_path: Path) -> None:
-    from agent_py_agent.agent.subagents.parent_acceptance_controller import (
-        build_parent_acceptance_decision,
+def test_final_closeout_decision_carries_task_envelope_acceptance(tmp_path: Path) -> None:
+    from agent_py_agent.agent.subagents.final_closeout_controller import (
+        build_final_closeout_decision,
     )
 
     manager = SubAgentManager(tmp_path)
@@ -173,7 +173,7 @@ def test_parent_acceptance_decision_carries_task_envelope_acceptance(tmp_path: P
     Path(task.output_json).write_text(json.dumps({"artifacts": ["index.html"], "tests": []}), encoding="utf-8")
     manager.save(task)
 
-    decision = build_parent_acceptance_decision(manager.load(task.id), workspace_root=tmp_path)
+    decision = build_final_closeout_decision(manager.load(task.id), workspace_root=tmp_path)
 
     assert decision.reserved["task_envelope"]["address"]["run_id"] == task.id
     assert decision.reserved["task_envelope"]["acceptance"]["checks"] == ["index.html 存在"]

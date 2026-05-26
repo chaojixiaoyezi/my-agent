@@ -1,5 +1,5 @@
 # LLM: QA scheduler augmentation keeps role auto-fill out of the core hierarchy scheduler.
-# 模块用途: 父任务明确要求 tester/bug_finder/acceptor 时，计算需要补派的 QA child 规格。
+# 模块用途: 父任务明确要求 tester/bug_finder 时，计算需要补派的 QA child 规格。
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def qa_orchestration_advice(
             phase="implementation_first",
             llm_next_step=(
                 "先创建或继续 dispatch worker/writer/leaf_worker，等至少一个实现节点有可测试产物后，"
-                "再由 LLM 选择局部 QA、整体验证或 repair/acceptance 组合。"
+                "再由 LLM 选择局部 QA、整体检查或 repair 组合。"
             ),
             guardrails=_quality_guardrails(),
             suggested_roles=missing,
@@ -69,7 +69,7 @@ def qa_orchestration_advice(
     return QaOrchestrationAdvice(
         phase="quality_wave_ready",
         llm_next_step=(
-            "根据 ready work refs、依赖组和风险，选择 tester/bug_finder/acceptor 的数量、scope 和顺序；"
+            "根据 ready work refs、依赖组和风险，选择 tester/bug_finder 的数量、scope 和顺序；"
             "系统只校验红线，不固定工作流。"
         ),
         guardrails=_quality_guardrails(),
@@ -80,7 +80,7 @@ def qa_orchestration_advice(
 
 
 # LLM: _qa_autofill_deferred_until_implementation_ready prevents empty-build QA children.
-# 函数用途: 有产物根的父任务先等 worker/leaf 有可验收状态，再建议 tester/bug_finder/acceptor。
+# 函数用途: 有产物根的父任务先等 worker/leaf 有可检查状态，再建议 tester/bug_finder。
 def _qa_autofill_deferred_until_implementation_ready(manager: Any, parent: SubAgentTask) -> bool:
     if not inherited_extra_write_roots(parent):
         return False
@@ -98,7 +98,7 @@ def _missing_required_qa_roles(manager: Any, parent: SubAgentTask, specs: list[A
 
 
 # LLM: _qa_roles_from_specs trusts explicit role identity fields instead of broad goal prose.
-# 函数用途: 判断本轮请求里是否已经包含 tester、bug_finder 或 acceptor。
+# 函数用途: 判断本轮请求里是否已经包含 tester 或 bug_finder。
 def _qa_roles_from_specs(specs: list[Any]) -> set[str]:
     roles: set[str] = set()
     for spec in specs:
@@ -137,7 +137,7 @@ def _load_child_for_qa_scan(manager: Any, run_id: str) -> SubAgentTask | None:
 
 
 # LLM: _qa_role_child_spec builds a self-contained checker task while leaving product writes to workers.
-# 函数用途: 生成自动补齐的 tester/bug_finder/acceptor 子任务，默认只检查证据和写自己的报告 refs。
+# 函数用途: 生成自动补齐的 tester/bug_finder 子任务，默认只检查证据和写自己的报告 refs。
 def _qa_role_child_spec(parent: SubAgentTask, role: str, ready_refs: list[dict[str, object]]) -> RequiredQaChildSpec:
     label = _qa_role_zh(role)
     source_run_ids = [str(item.get("run_id") or "") for item in ready_refs if str(item.get("run_id") or "")]
@@ -148,7 +148,7 @@ def _qa_role_child_spec(parent: SubAgentTask, role: str, ready_refs: list[dict[s
             f"补齐父任务要求的 {role}（{label}）QA 角色。"
             f"父任务 run_id={parent.id}；优先检查 ready source_run_ids={source_run_ids}，"
             "按这些实现节点的产物 refs、output refs 和证据 refs 做局部/整体 QA；"
-            "只写自己的报告/发现/验收 refs，不替 worker 修改业务产物。"
+            "只写自己的报告/发现 refs，不替 worker 修改业务产物。"
         ),
         agent_name=role,
         role=role,
@@ -167,7 +167,6 @@ def _qa_role_zh(role: str) -> str:
     return {
         "tester": "测试子代理",
         "bug_finder": "找茬子代理",
-        "acceptor": "验收子代理",
     }.get(role, role)
 
 
@@ -177,6 +176,6 @@ def _quality_guardrails() -> list[str]:
     return [
         "没有可测试产物或 ready work refs 时，不要创建/执行 QA。",
         "QA 失败、QA 工具失败、产品失败必须分开记录。",
-        "QA 通过只表示对应 scope 可进入验收，不代表整个父任务自动完成。",
+        "QA 通过只表示对应 scope 已被检查，不代表整个任务自动完成。",
         "repair 必须基于失败 refs，不能覆盖无关产物。",
     ]

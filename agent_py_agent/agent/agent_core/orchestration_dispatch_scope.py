@@ -31,43 +31,6 @@ def dispatch_execute_runners_default(agent, params: dict[str, object], *, apply:
     return bool(apply and current_subagent_run_id(agent))
 
 
-# LLM: dispatch_execute_acceptance_tests_default keeps model dispatch from skipping parent checks.
-# 函数用途: 真实执行 runner 时始终跑父级验收 tests；CLI 手动跳过测试走 DispatchParams 直达，不走模型工具入口。
-def dispatch_execute_acceptance_tests_default(
-    agent,
-    params: dict[str, object],
-    *,
-    apply: bool,
-    execute_runners: bool,
-) -> bool:
-    if apply and execute_runners:
-        return True
-    if _targets_waiting_for_acceptance(agent, params, apply=apply):
-        return True
-    if "execute_acceptance_tests" in params:
-        return _bool_param(params.get("execute_acceptance_tests"), default=False)
-    return False
-
-
-# LLM: dispatch_auto_apply_acceptance_followup_default only applies machine-proven acceptance follow-ups.
-# 函数用途: 真实 runner 的验收 tests 全通过后默认落状态；失败、dry-run 或显式 false 都不会自动闭环。
-def dispatch_auto_apply_acceptance_followup_default(
-    agent,
-    params: dict[str, object],
-    *,
-    apply: bool,
-    execute_runners: bool,
-    execute_acceptance_tests: bool,
-) -> bool:
-    if "auto_apply_acceptance_followup" in params:
-        return _bool_param(params.get("auto_apply_acceptance_followup"), default=False)
-    return bool(
-        apply
-        and execute_acceptance_tests
-        and (execute_runners or _targets_waiting_for_acceptance(agent, params, apply=apply))
-    )
-
-
 # LLM: dispatch_max_runners_default prevents explicit run_ids from being silently under-executed.
 # 函数用途: 顶层未指定 run_ids 时默认每轮 1 个；显式给多个 run_ids 时默认全跑，runner 内部默认最多 6 个直接 child。
 def dispatch_max_runners_default(agent, params: dict[str, object], *, execute_runners: bool | None = None) -> int:
@@ -122,68 +85,6 @@ def _target_workflow_mode(agent, run_id: str) -> str:
     return str(getattr(task, "workflow_mode", "") or "").strip().lower()
 
 
-# LLM: Acceptance-only dispatch should still run machine checks when the target is already waiting.
-# 函数用途: 模型只传 apply+run_ids 推进待验收 run 时，默认执行父级验收，不再要求额外猜 execute_acceptance_tests。
-def _targets_waiting_for_acceptance(agent, params: dict[str, object], *, apply: bool) -> bool:
-    if not apply:
-        return False
-    for task in _target_tasks(agent, params):
-        if _task_waiting_for_acceptance(task):
-            return True
-    return False
-
-
-def _target_tasks(agent, params: dict[str, object]) -> list[object]:
-    manager = getattr(agent, "subagents", None)
-    if manager is None:
-        return []
-    run_ids = dispatch_include_run_ids_param(params, agent=agent)
-    if run_ids:
-        return _load_run_ids(manager, run_ids)
-    return _scoped_waiting_tasks(manager, params)
-
-
-def _load_run_ids(manager: object, run_ids: list[str]) -> list[object]:
-    loaded: list[object] = []
-    load = getattr(manager, "load", None)
-    if not callable(load):
-        return loaded
-    for run_id in run_ids:
-        try:
-            loaded.append(load(run_id))
-        except Exception:
-            continue
-    return loaded
-
-
-def _scoped_waiting_tasks(manager: object, params: dict[str, object]) -> list[object]:
-    if not (params.get("parent_run_id") or params.get("root_id")):
-        return []
-    list_runs = getattr(manager, "list_runs", None)
-    if not callable(list_runs):
-        return []
-    parent_run_id = str(params.get("parent_run_id") or "").strip()
-    root_id = str(params.get("root_id") or "").strip()
-    tasks: list[object] = []
-    try:
-        candidates = list_runs()
-    except Exception:
-        return []
-    for task in candidates:
-        if parent_run_id and str(getattr(task, "parent_id", "") or "") != parent_run_id:
-            continue
-        if root_id and str(getattr(task, "root_id", "") or "") != root_id:
-            continue
-        tasks.append(task)
-    return tasks
-
-
-def _task_waiting_for_acceptance(task: object) -> bool:
-    status = str(getattr(task, "status", "") or "").upper()
-    verification = str(getattr(task, "verification_status", "") or "").upper()
-    return status == "AWAITING_ACCEPTANCE" or verification == "NEEDS_ACCEPTANCE"
-
-
 # LLM: _top_level_root_role_dispatch protects coordinator-owned hierarchy from generic workflow auto-splitting.
 # 函数用途: 顶层正在执行 root/coordinator 时关闭 workflow 自动拆分，避免绕过该 coordinator 自己创建孩子。
 def _top_level_root_role_dispatch(agent, params: dict[str, object]) -> bool:
@@ -218,7 +119,6 @@ def dispatch_parent_run_id(agent, params: dict[str, object]) -> str:
     if explicit:
         return explicit
     return current_subagent_run_id(agent)
-
 
 # LLM: dispatch_exclude_run_ids ensures nested dispatch never selects the active runner itself.
 # 函数用途: 合并显式排除列表和当前 runner id，传给 runner 候选过滤。
@@ -288,11 +188,3 @@ def dispatch_take_over_by_default(agent, params: dict[str, object]) -> str:
     if explicit:
         return explicit
     return current_subagent_run_id(agent)
-
-
-# LLM: dispatch_finalize_acceptance lets runner parents write acceptance/test refs for direct children.
-# 函数用途: runner 内部 dispatch 默认进入验收阶段以捕获 child 测试结果；显式 false 仍可只推进执行。
-def dispatch_finalize_acceptance(agent, params: dict[str, object]) -> bool:
-    if "finalize_acceptance" in params:
-        return _bool_param(params.get("finalize_acceptance"), default=True)
-    return True

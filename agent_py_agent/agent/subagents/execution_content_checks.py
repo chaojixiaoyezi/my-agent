@@ -1,4 +1,4 @@
-# LLM: Normalize model-written content assertions into bounded parent-acceptance content checks.
+# LLM: Normalize model-written content assertions into bounded closeout content checks.
 # 模块用途: 处理 runner 常写的 `cat file` 验收形式；只有结构化期望字段存在时才改成 content_check。
 
 from __future__ import annotations

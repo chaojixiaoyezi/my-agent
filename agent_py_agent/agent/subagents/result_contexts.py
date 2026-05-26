@@ -35,7 +35,7 @@ class OutputPayloadContext:
     ignored_tools: list[str]
     ignored_skills: list[str]
     artifacts: list[dict[str, Any]]
-    # LLM: 父级验收把证据包和发现项当作一等事实消费，不再只读文本摘要。
+    # LLM: 最终收口把证据包和发现项当作一等事实消费，不再只读文本摘要。
     evidence_packets: list[dict[str, Any]]
     findings: list[dict[str, Any]]
     tests: list[dict[str, Any]]

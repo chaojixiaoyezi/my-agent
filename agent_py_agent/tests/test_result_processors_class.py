@@ -110,7 +110,7 @@ def _sample_runner_result_ok() -> SubAgentRunnerResult:
         dry_run=False,
         ok=True,
         status="DONE",
-        verification_status="NEEDS_ACCEPTANCE",
+        verification_status="VERIFIED",
         message="成功",
         backend="test",
         tool_rounds=1,

@@ -1,9 +1,9 @@
 # LLM: Helper functions for TestExecutor records and command normalization.
-# 模块用途: 承接父级验收执行器的命令解析、记录构造和时间戳 helper，保持主 executor 文件短小。
+# 模块用途: 承接最终收口执行器的命令解析、记录构造和时间戳 helper，保持主 executor 文件短小。
 
 from __future__ import annotations
 
-"""Small helpers used by the parent-acceptance test executor."""
+"""Small helpers used by the closeout test executor."""
 
 import os
 import shlex
@@ -242,7 +242,7 @@ def _command_completed_record(
 
 
 # LLM: _with_working_dir records command cwd evidence without changing the pass/fail calculation.
-# 函数用途: 给命令执行记录补充真实工作目录，方便排查父验收和子代理本地测试目录差异。
+# 函数用途: 给命令执行记录补充真实工作目录，方便排查收口和子代理本地测试目录差异。
 def _with_working_dir(record: TestExecutionRecord, working_dir: Path) -> TestExecutionRecord:
     record.metadata["working_dir"] = str(working_dir)
     record.validation_result.setdefault("working_dir", str(working_dir))

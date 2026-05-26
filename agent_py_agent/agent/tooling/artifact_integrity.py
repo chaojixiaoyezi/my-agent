@@ -1,5 +1,5 @@
 # LLM: artifact integrity checks are small machine gates around model-written files, not business acceptance.
-# 模块用途: 对模型产出的本地文件做低成本结构检查，防止明显损坏的产物进入父级验收。
+# 模块用途: 对模型产出的本地文件做低成本结构检查，防止明显损坏的产物进入最终收口。
 
 from __future__ import annotations
 

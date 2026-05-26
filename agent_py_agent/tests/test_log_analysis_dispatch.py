@@ -232,7 +232,7 @@ def test_dispatch_engine_builds_security_tool_names_for_analyst_input():
 def test_work_order_plan_builds_manual_dry_run_analyst_and_reviewer_orders():
     plan = plan_case_subagent_work_orders(
         _case_fixture(),
-        quality_contract={"acceptance_checks": ["Reviewer must enforce parent final gate."]},
+        quality_contract={"acceptance_checks": ["Reviewer must enforce closeout."]},
     )
     payload = plan.to_dict()
 
@@ -252,11 +252,7 @@ def test_work_order_plan_builds_manual_dry_run_analyst_and_reviewer_orders():
         "evidence_read",
     ]
     assert reviewer["allowed_tools"] == ["evidence_read"]
-    assert analyst["cannot_self_accept"]
-    assert reviewer["cannot_self_accept"]
-    assert analyst["parent_final_gate"] == "parent_session_final_approval_required"
     assert reviewer["context"]["expected_input"] == "AnalystReport from analyst work order"
-    assert "Reviewer must enforce parent final gate." in reviewer["acceptance_checks"]
     assert not plan.issues
 
 
@@ -283,7 +279,7 @@ def test_work_order_plan_apply_creates_analyst_and_reviewer_subagent_tasks(tmp_p
     subagents = SubAgentManager(tmp_path / "subagents")
     plan = plan_case_subagent_work_orders(
         _case_fixture(),
-        quality_contract={"acceptance_checks": ["Reviewer must enforce parent final gate."]},
+        quality_contract={"acceptance_checks": ["Reviewer must check evidence."]},
     )
 
     result = create_subagent_tasks_from_work_order_plan(
@@ -316,13 +312,9 @@ def test_work_order_plan_apply_creates_analyst_and_reviewer_subagent_tasks(tmp_p
         assert task.parent_id == "parent-run"
         assert task.root_id == "root-run"
         assert task.final_owner == "parent"
-        assert task.quality_contract.cannot_self_accept is True
-        assert task.quality_contract.parent_final_gate is True
         assert "ev-waf-1" in task.quality_contract.evidence_required
         assert task.context_packs[0]["case_id"] == "case-001"
         assert task.context_packs[0]["evidence_refs"] == ["ev-waf-1", "ev-edr-1"]
-        assert task.context_packs[0]["cannot_self_accept"] is True
-        assert task.context_packs[0]["parent_final_gate"] == "parent_session_final_approval_required"
 
 
 def test_work_order_plan_dry_run_does_not_create_subagent_tasks(tmp_path):

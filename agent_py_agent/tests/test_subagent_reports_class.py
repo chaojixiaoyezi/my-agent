@@ -11,9 +11,6 @@ from dataclasses import asdict
 import pytest
 
 from agent_py_agent.agent.subagents.reports import (
-    AcceptanceReviewFinding,
-    AcceptanceReviewRecord,
-    AcceptanceReviewReport,
     ActionApplyRecord,
     ActionApplyReport,
     ActionPlanItem,

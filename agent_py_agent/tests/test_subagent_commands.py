@@ -262,7 +262,7 @@ class TestCmdSubagentsAcceptance:
     """测试 cmd_subagents_acceptance 命令。"""
 
     def test_cmd_subagents_acceptance_no_records(self, tmp_path: Path):
-        """没有等待验收的子代理时显示提示。"""
+        """没有等待收口的子代理时显示提示。"""
         from agent_py_agent.cli.subagents import cmd_subagents_acceptance
 
         args = MagicMock()
@@ -277,12 +277,12 @@ class TestCmdSubagentsAcceptance:
         mock_report = MagicMock()
         mock_report.summary = {"total": 0}
         mock_report.records = []
-        mock_agent.subagents.write_acceptance_review_report.return_value = mock_report
+        mock_agent.subagents.write_runner_result_report.return_value = mock_report
 
         with patch("agent_py_agent.cli._review.make_agent", return_value=mock_agent):
             result = cmd_subagents_acceptance(args)
             assert result == 0
-        call_kwargs = mock_agent.subagents.write_acceptance_review_report.call_args.kwargs
+        call_kwargs = mock_agent.subagents.write_runner_result_report.call_args.kwargs
         assert call_kwargs["run_ids"] is None
         assert call_kwargs["options"].apply is False
         assert call_kwargs["options"].reviewer == "parent"
@@ -556,8 +556,8 @@ class TestCmdSubagentsWorkflowPlan:
             "reason": "测试",
             "worker_count": 2,
             "workers": [],
-            "parent_acceptance_check_count": 0,
-            "parent_acceptance_checklist": [],
+            "final_closeout_check_count": 0,
+            "final_closeout_checklist": [],
             "issues": []
         }
 

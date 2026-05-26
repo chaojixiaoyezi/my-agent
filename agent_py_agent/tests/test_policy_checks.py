@@ -59,16 +59,16 @@ def test_status_from_structured_output_preserves_fail_states():
 
 
 def test_status_from_structured_output_done_becomes_awaiting():
-    """测试 DONE 类状态变成 AWAITING_ACCEPTANCE。"""
+    """测试 DONE 类状态变成 DONE。"""
     for status in ["DONE", "COMPLETED", "COMPLETE", "SUCCESS"]:
         parsed = SubAgentParsedOutput(status=status, capability_requests=[], blocked_reason="")
-        assert _status_from_structured_output(parsed) == "AWAITING_ACCEPTANCE"
+        assert _status_from_structured_output(parsed) == "DONE"
 
 
 def test_status_from_structured_output_unknown_becomes_awaiting():
-    """测试未知状态变成 AWAITING_ACCEPTANCE。"""
+    """测试未知状态变成 DONE。"""
     parsed = SubAgentParsedOutput(status="UNKNOWN_STATUS", capability_requests=[], blocked_reason="")
-    assert _status_from_structured_output(parsed) == "AWAITING_ACCEPTANCE"
+    assert _status_from_structured_output(parsed) == "DONE"
 
 
 def test_status_from_structured_output_pending_capability_blocks():
@@ -84,15 +84,15 @@ def test_status_from_structured_output_pending_capability_blocks():
 def test_status_from_structured_output_strips_whitespace():
     """测试状态值去除空白。"""
     parsed = SubAgentParsedOutput(status="  done  ", capability_requests=[], blocked_reason="")
-    assert _status_from_structured_output(parsed) == "AWAITING_ACCEPTANCE"
+    assert _status_from_structured_output(parsed) == "DONE"
 
 
 # ── _verification_from_runner_status 测试 ─────────────────────────────────
 
-def test_verification_awaiting_acceptance():
-    """测试待验收状态返回 NEEDS_ACCEPTANCE。"""
-    result = _verification_from_runner_status("AWAITING_ACCEPTANCE")
-    assert result == "NEEDS_ACCEPTANCE"
+def test_verification_pending_closeout():
+    """测试待收口状态返回 VERIFIED。"""
+    result = _verification_from_runner_status("DONE")
+    assert result == "VERIFIED"
 
 
 def test_verification_other_statuses():
@@ -144,13 +144,13 @@ def test_runner_next_action_next_actions():
     assert result == "custom_action"
 
 
-def test_runner_next_action_awaiting_acceptance():
-    """AWAITING_ACCEPTANCE 时跑验收。"""
+def test_runner_next_action_pending_closeout():
+    """DONE 时跑验收。"""
     result = _runner_next_action(
         params=RunnerNextActionParams(
             dry_run=False,
             ok=True,
-            status="AWAITING_ACCEPTANCE",
+            status="DONE",
             capability_request_count=0,
         ),
     )
@@ -482,7 +482,7 @@ def test_commands_for_action_no_progress_fuse():
 
 def test_is_active_terminal():
     """终态返回 False。"""
-    for status in ["DONE", "FAILED", "BLOCKED", "TIMEOUT", "CHANNEL_ERROR", "AWAITING_ACCEPTANCE", "TAKEN_OVER"]:
+    for status in ["DONE", "FAILED", "BLOCKED", "TIMEOUT", "CHANNEL_ERROR", "DONE", "TAKEN_OVER"]:
         assert _is_active(status) is False
 
 

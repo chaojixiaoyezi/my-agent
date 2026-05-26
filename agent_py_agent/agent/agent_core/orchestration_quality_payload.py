@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-_QA_ROLES = {"tester", "bug_finder", "acceptor"}
+_QA_ROLES = {"tester", "bug_finder"}
 _QUALITY_SCAN_MAX_NODES = 96
 
 
@@ -27,7 +27,7 @@ def quality_repair_advice_payload(agent: Any, parent_run_id: str) -> dict[str, o
             "qa_signal_refs": list(failing),
             "llm_next_step": (
                 "先读取失败 QA 的 output/report refs，再由 LLM 创建 scoped repair worker；"
-                "修复后重新 dispatch tester/acceptor，不要让单个 acceptor 的通过覆盖 tester 失败证据。"
+                "修复后重新 dispatch tester，不要让单个检查结果覆盖失败证据。"
             ),
             "suggested_tool_call": _repair_child_tool_call(failed_ids),
         },
@@ -169,7 +169,7 @@ def _repair_child_tool_call(failed_ids: list[str]) -> dict[str, object]:
                 "goal": (
                     "根据失败或冲突 QA refs 修复最小业务范围："
                     f"{joined}。先读取这些 QA run 的 output/report refs，"
-                    "只改被证据点名的文件；修复后让 tester/acceptor 复测。"
+                    "只改被证据点名的文件；修复后让 tester 复测。"
                 ),
                 "allowed_tools": [
                     "subagent_board",

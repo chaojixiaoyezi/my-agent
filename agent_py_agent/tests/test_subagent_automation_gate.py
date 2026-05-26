@@ -37,7 +37,7 @@ def test_auto_gate_blocks_mutating_action_without_manual_confirmation():
         SubAgentAutomationGateRequest(
             mode="auto",
             action="apply_followup",
-            refs=["reports/parent_acceptance_auto_followup.json"],
+            refs=["reports/final_closeout_note.json"],
             mutates_task_state=True,
             executes_tools=False,
         )
@@ -57,7 +57,7 @@ def test_manual_confirmed_tool_action_is_semi_auto_not_automatic():
         SubAgentAutomationGateRequest(
             mode="semi_auto",
             action="execute_parent_tests",
-            refs=["reports/parent_acceptance_auto_execution.json"],
+            refs=["reports/final_closeout_note.json"],
             mutates_task_state=False,
             executes_tools=True,
             manual_confirmed=True,

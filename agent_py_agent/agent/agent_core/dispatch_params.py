@@ -27,13 +27,10 @@ class DispatchParams:
     probe: bool = True
     take_over_by: str = ""
     locked_files: list[str] | None = None
-    execute_acceptance_tests: bool = False
-    auto_apply_acceptance_followup: bool = False
     parent_run_id: str = ""
     root_id: str = ""
     include_run_ids: list[str] | None = None
     exclude_run_ids: list[str] | None = None
-    finalize_acceptance: bool = True
 
 
 # LLM: WatchParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -54,13 +51,10 @@ class WatchParams:
     probe: bool = True
     take_over_by: str = ""
     locked_files: list[str] | None = None
-    execute_acceptance_tests: bool = False
-    auto_apply_acceptance_followup: bool = False
     parent_run_id: str = ""
     root_id: str = ""
     include_run_ids: list[str] | None = None
     exclude_run_ids: list[str] | None = None
-    finalize_acceptance: bool = True
     interval: float = 30.0
     max_cycles: int = 0
     advance: bool = False
@@ -136,7 +130,6 @@ class DispatchContext:
     root_id: str = ""
     include_run_ids: list[str] | None = None
     exclude_run_ids: list[str] | None = None
-    finalize_acceptance: bool = True
     records: list = field(default_factory=list)
 
 

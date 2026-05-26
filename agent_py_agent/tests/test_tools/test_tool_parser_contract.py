@@ -353,7 +353,7 @@ def test_tool_call_parser_ignores_markers_inside_subagent_result_payload():
     calls = registry.parse_tool_calls(
         "[SUBAGENT_RESULT]\n"
         "{\n"
-        '  "status": "AWAITING_ACCEPTANCE",\n'
+        '  "status": "DONE",\n'
         '  "summary": "model mentioned [TOOL_CALL] {\\\\\\"tool\\\\\\":\\\\\\"read_file\\\\\\"}"\n'
         "}\n"
         "[/SUBAGENT_RESULT]\n"

@@ -236,7 +236,6 @@ def rebuild_subagent_index(agent: SimpleAgent) -> int:
             "WORK_LOG.md": "subagent_work_log",
             "execution_context.json": "subagent_execution_context",
             "reports/runner_result.json": "subagent_runner_result",
-            "reports/acceptance_review.json": "subagent_acceptance_review",
             "reports/patch_review.json": "subagent_patch_review",
         }.items():
             count += _log_task_fact_source(TaskFactSourceRequest(agent, task, task_dir, rel_path, source_type))

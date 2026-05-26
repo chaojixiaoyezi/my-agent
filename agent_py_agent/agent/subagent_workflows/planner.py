@@ -1,16 +1,15 @@
-# LLM: Subagent workflow planner module; keep route, compile, and acceptance bundle shapes stable.
-# 模块用途: 拆分子代理工作流的规划、编译、验收或存储逻辑。
+# LLM: Subagent workflow planner module; keep route and compile bundles stable.
+# 模块用途: 拆分子代理工作流的规划、编译和存储逻辑。
 
 from __future__ import annotations
 
-"""workflow planning composes route, compile, and parent acceptance through bundles."""
+"""workflow planning composes route and dispatch bundles."""
 
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .acceptance import ParentAcceptancePlan, plan_parent_acceptance
 from .compiler import WorkflowDispatchPlan, compile_workflow
 from .models import WorkflowTemplate
 from .router import WorkflowRouteDecision, WorkflowRouteRequest, route_workflow
@@ -38,14 +37,13 @@ class WorkflowPlanConstraints:
 # 类用途: 集中保存工作流planning结果字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class WorkflowPlanningResult:
-    """A parent-reviewable workflow plan for a user goal."""
+    """A reviewable workflow plan for a user goal."""
 
     goal: str
     decision: WorkflowRouteDecision
     enabled: bool
     template: WorkflowTemplate | None = None
     dispatch_plan: WorkflowDispatchPlan | None = None
-    parent_acceptance_plan: ParentAcceptancePlan | None = None
     issues: list[str] = field(default_factory=list)
 
     # LLM: ok 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
@@ -111,14 +109,6 @@ def _template_phase_tasks(template: WorkflowTemplate | None) -> dict[str, str]:
     return {phase.id: phase.task for phase in template.phases}
 
 
-# LLM: _parent_checklist 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
-# 函数用途: 处理父级checklist相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
-def _parent_checklist(parent_acceptance_plan: ParentAcceptancePlan | None) -> list[str]:
-    if parent_acceptance_plan is None:
-        return []
-    return parent_acceptance_plan.checklist
-
-
 # LLM: _planning_payload_base 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
 # 函数用途: 处理planning载荷基础相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _planning_payload_base(result: WorkflowPlanningResult, workers: list[dict[str, object]]) -> dict[str, object]:
@@ -141,12 +131,9 @@ def _planning_payload_base(result: WorkflowPlanningResult, workers: list[dict[st
 # 函数用途: 处理planning载荷相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _planning_payload(result: WorkflowPlanningResult) -> dict[str, object]:
     workers = _workflow_workers(result.dispatch_plan, _template_phase_tasks(result.template))
-    parent_checklist = _parent_checklist(result.parent_acceptance_plan)
     payload = _planning_payload_base(result, workers)
     payload.update(
         {
-            "parent_acceptance_check_count": len(parent_checklist),
-            "parent_acceptance_checklist": list(parent_checklist),
             "issues": list(result.issues),
         }
     )
@@ -183,7 +170,7 @@ def plan_workflow_for_goal(
         issues.append(f"selected workflow template not found: {decision.selected_template_id}")
         return _make_disabled_result(goal, decision, issues)
 
-    dispatch_plan, parent_acceptance_plan = _compile_plans(
+    dispatch_plan = _compile_plans(
         _CompilePlansRequest(
             template=template,
             goal=goal,
@@ -200,7 +187,6 @@ def plan_workflow_for_goal(
         enabled=True,
         template=template,
         dispatch_plan=dispatch_plan,
-        parent_acceptance_plan=parent_acceptance_plan,
         issues=issues,
     )
 
@@ -223,9 +209,9 @@ def _make_disabled_result(
 
 # LLM: _compile_plans 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
 # 函数用途: 处理compileplans相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
-def _compile_plans(request: _CompilePlansRequest) -> tuple[WorkflowDispatchPlan, ParentAcceptancePlan]:
-    """Compile both dispatch and parent-acceptance plans from a resolved template."""
-    dispatch_plan = compile_workflow(
+def _compile_plans(request: _CompilePlansRequest) -> WorkflowDispatchPlan:
+    """Compile a dispatch plan from a resolved template."""
+    return compile_workflow(
         request.template,
         goal=request.goal,
         quality_contract=request.quality_contract,
@@ -233,12 +219,6 @@ def _compile_plans(request: _CompilePlansRequest) -> tuple[WorkflowDispatchPlan,
         allowed_write_roots=request.allowed_write_roots,
         forbidden_write_roots=request.forbidden_write_roots,
     )
-    parent_acceptance_plan = plan_parent_acceptance(
-        request.template,
-        goal=request.goal,
-        quality_contract=request.quality_contract,
-    )
-    return dispatch_plan, parent_acceptance_plan
 
 
 # LLM: write_workflow_plan_preview 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
@@ -268,8 +248,6 @@ def write_workflow_plan_preview(
 def _render_workflow_plan_preview_markdown(payload: dict[str, object]) -> str:
     lines = _workflow_plan_header_lines(payload)
     lines.extend(_workflow_plan_worker_lines(payload.get("workers")))
-    lines.extend(["", "## Parent Acceptance Checklist"])
-    lines.extend(_workflow_plan_list_lines(payload.get("parent_acceptance_checklist")))
     lines.extend(["", "## Issues"])
     lines.extend(_workflow_plan_list_lines(payload.get("issues")))
     lines.append("")

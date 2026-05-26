@@ -92,8 +92,6 @@ def _normalize_quality_contract(value: object) -> QualityContract:
         "allowed_degradation",
     ]:
         payload[key] = _string_list_value(payload.get(key))
-    payload["cannot_self_accept"] = bool(payload.get("cannot_self_accept", True))
-    payload["parent_final_gate"] = bool(payload.get("parent_final_gate", True))
     return QualityContract(**payload)
 
 
@@ -285,6 +283,7 @@ class SubAgentPersistenceService:
         task.updated_at = task.updated_at or time.time()
         if task.checkpoint_json:
             task.checkpoint_ref = task.checkpoint_json
+        _refresh_system_tree_snapshot(task)
         task.latest_status_report = build_status_report(task)
         refresh_failure_handoff(task)
         output_payload = _read_json_object(Path(task.output_json)) if task.output_json else {}
@@ -343,6 +342,47 @@ def _merge_existing_takeover_state(service: SubAgentPersistenceService, task: Su
     task.takeover_records = list(existing.takeover_records)
     task.final_owner = existing.final_owner
     task.locked_files = _unique_strings([*existing.locked_files, *task.locked_files])
+
+
+# LLM: system_tree is a system-owned read snapshot, never model-provided task content.
+# 函数用途: 每次保存都从 SubAgentTask 字段重建树节点摘要，覆盖子代理输出里可能夹带的伪造 system_tree。
+def _refresh_system_tree_snapshot(task: SubAgentTask) -> None:
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    attrs["system_tree"] = {
+        "schema_version": "subagent_system_tree.v1",
+        "updated_by": "system",
+        "source": "persistence.save",
+        "run_id": task.id,
+        "root_id": task.root_id or task.id,
+        "parent_id": task.parent_id,
+        "depth": _safe_int(task.depth),
+        "status": task.status,
+        "verification_status": task.verification_status,
+        "failure_type": task.failure_type,
+        "progress": _safe_float(task.progress),
+        "current_step": task.current_step,
+        "latest_summary": task.latest_summary,
+        "child_ids": _unique_strings(list(task.child_ids)),
+        "artifact_refs": _unique_strings(list(task.artifact_refs)),
+        "evidence_refs": _unique_strings(list(task.evidence_refs)),
+        "blockers": _unique_strings(list(task.blockers)),
+        "updated_at": _safe_float(task.updated_at or task.heartbeat_at or task.created_at),
+    }
+    task.attributes = attrs
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return default
 
 
 # LLM: _unique_strings keeps append-only refs stable while removing duplicates.

@@ -184,7 +184,7 @@ def test_prepare_test_items_infers_pytest_when_runner_only_reports_test_artifact
 
 
 # LLM: test_prepare_test_items_infers_static_site_check covers auto validation for generated HTML sites.
-# 函数用途: runner 只报告多个 HTML 产物时，父级验收会自动补 static_site_check。
+# 函数用途: runner 只报告多个 HTML 产物时，最终收口会自动补 static_site_check。
 def test_prepare_test_items_infers_static_site_check_for_html_artifacts(tmp_path):
     site_dir = tmp_path / "deliverables" / "shop" / "build"
     site_dir.mkdir(parents=True)
@@ -337,8 +337,8 @@ def test_prepare_test_items_infers_static_site_check_with_required_dom_ids(tmp_p
     }]
 
 
-# LLM: Structured required DOM ids in acceptance text should become parent-test inputs.
-# 函数用途: 从 acceptance_checks 中提取 required_dom_ids: ...，供父级 static_site_check 机器验收业务区域。
+# LLM: Structured required DOM ids in closeout text should become result-check inputs.
+# 函数用途: 从 acceptance_checks 中提取 required_dom_ids: ...，供父级收口业务区域。
 def test_required_static_dom_ids_from_structured_acceptance_text():
     ids = required_static_dom_ids_from_texts([
         "required_dom_ids: register, login, cart, checkout, order-confirmation",
@@ -421,7 +421,7 @@ def test_static_required_files_from_texts_ignores_natural_language():
 
 
 # LLM: test_prepare_test_items_keeps_malformed_check_without_machine_fallback preserves conservative failure signals.
-# 函数用途: 没有自动机器验收兜底时，格式不完整的测试项仍保留，让父级看到 runner 输出不合格。
+# 函数用途: 没有自动机器收口交给父级看到 runner 输出不合格。
 def test_prepare_test_items_keeps_malformed_check_without_machine_fallback(tmp_path):
     prepared = prepare_test_items(
         TestItemPreparationRequest(

@@ -166,12 +166,12 @@ before changing code.
 - Follow the 长期助手/通道运行时 split: execution/tool/path/self-termination
   safety belongs in the hard guard layer; planning order, QA wave timing, repair
   strategy, and role selection belong to LLM role templates, workflow templates,
-  refs-only advice, and final acceptance checks.
+  refs-only advice, and final closeout checks.
 - Parent/root agents that delegated work should stay refs-only by default, but
   may read orchestration artifacts such as dispatch summaries, subagent boards,
   due-check reports, status refs, and acceptance/test refs.  Product bodies and
-  large child artifact bodies stay blocked until a real acceptor finishes or the
-  current user prompt explicitly asks the parent to inspect or accept the work.
+  large child artifact bodies stay blocked until a real checker finishes or the
+  current user prompt explicitly asks the parent to inspect the work.
 - Self-authorized root/coordinator/lead runs do not write `capability_request`.
   They have no parent to ask, so ordinary task-local capability gaps must be
   handled by creating/routing lower agents, using existing tools, or reporting
@@ -313,8 +313,8 @@ do_write()
   `subagent-run --execute`, `subagents-dispatch --execute-runners`, and
   planner paths that are clearly named as planner/model execution.
 - Explicit command execution must stay opt-in, such as
-  `subagents-tests --re-run`, `subagents-acceptance --execute-tests`, or
-  `subagents-dispatch --execute-acceptance-tests`.
+  `subagents-tests --re-run`, `subagents-tests --execute-tests`, or
+  `subagents-dispatch --execute-runners`.
 - Default lookup surfaces must be refs-only: show ids, status, summaries,
   counts, hashes, sizes, and file refs. Do not read or inline
   `logs/runner_prompt.md`, `logs/runner_response.md`, externalized tool
@@ -332,12 +332,12 @@ do_write()
   evidence refs, but they should not auto-read cold bodies or promote facts
   into main memory without an explicit gate.
 - When a parent/root agent has delegated work to child agents, it must stay
-  refs-only until a real acceptor finishes or the current user prompt explicitly
-  authorizes parent inspection, for example "you inspect/accept it yourself".
+  refs-only until a real checker finishes or the current user prompt explicitly
+  authorizes parent inspection, for example "you inspect it yourself".
   Parent agents may read hot runtime metadata (`task.json`, status reports,
   acceptance/test refs, handoff/takeover packets), but must not read product
   bodies or externalized artifact bodies as a substitute for tester,
-  bug_finder, acceptor, repair, and retest children.
+  bug_finder, checker, repair, and retest children.
 - Do not turn workflow preferences into hardcoded product behavior. The durable
   hard red line is self-system destruction risk: when the user asks agents to
   uninstall or break the agent system itself, delete system directories, remove
@@ -347,7 +347,7 @@ do_write()
   directories inside the authorized workspace when that matches the task. For
   normal user work, prefer user intent, LLM planning, role templates, scoped
   permissions, audit logs, and acceptance facts over rigid scheduler rules. If
-  users explicitly authorize a parent/root agent to inspect or accept work
+  users explicitly authorize a parent/root agent to inspect work
   itself, that current-run instruction should override the default delegation
   preference while still staying inside filesystem/tool boundaries.
 - For remote CI pushes, use the strict remote-submit profile before pushing:
@@ -440,15 +440,15 @@ do_write()
   coordinator/lead prompts should keep a short index of when to use each broad
   role, then load details only when dispatching. Worker/writer produce real
   artifacts; researcher gathers facts; tester verifies behavior; bug_finder
-  searches for defects and counterexamples; acceptor prepares final acceptance
+  searches for defects and counterexamples; checker prepares final closeout
   recommendations; coordinator/lead splits, broadcasts, corrects, rescues, and
   summarizes refs without defaulting to writing final product artifacts.
 - Explicit QA role requirements are machine contracts, not prose suggestions.
-  If a parent goal or acceptance check names `tester`, `bug_finder`, or
-  `acceptor` (including the Chinese role names), detection must flow through
+  If a parent goal or closeout check names `tester`, `bug_finder`, or
+  `checker` (including the Chinese role names), detection must flow through
   `qa_role_contract.py`. QA roles themselves are terminal reviewer roles and
   must not be forced to spawn another same-role child just because their own
-  goal contains `tester`, `bug_finder`, or `acceptor`. Scheduling should expose
+  goal contains `tester`, `bug_finder`, or `checker`. Scheduling should expose
   quality advice for the LLM to choose scope/order, while acceptance verifies
   real persisted descendant roles instead of trusting summaries.
 - Runner-context dispatch suggestions must not accidentally re-enable generic
@@ -474,7 +474,7 @@ do_write()
   bodies into trace records.
 - Level guidance:
   - `1`: lifecycle checkpoints such as task creation.
-  - `2`: runner close-out, hierarchy scheduling, parent acceptance
+  - `2`: runner close-out, hierarchy scheduling, closeout
     decision/next-action, and other critical state transitions.
   - `3`: report and loop summaries such as due-check, action-plan,
     recovery-tree, dispatch, dispatch-watch, bounded status snapshots,
@@ -483,8 +483,8 @@ do_write()
   - `5`: maximum local diagnostics for short controlled test windows.
 - Current approved event families are lifecycle (`task_created`), runner
   close-out (`runner_result_recorded`), hierarchy fan-out
-  (`hierarchy_schedule_result`), parent acceptance control-plane events
-  (`parent_acceptance_decision`, `parent_acceptance_next_action`), and bounded
+  (`hierarchy_schedule_result`), closeout control-plane events
+  (`final_closeout_decision`, `final_closeout_next_action`), and bounded
   report summaries (`due_check_report`, `action_plan_report`,
   `hierarchy_recovery_packet`, `dispatch_report`, `dispatch_watch_report`).
 - Any new trace event must have focused tests proving `0` writes nothing and

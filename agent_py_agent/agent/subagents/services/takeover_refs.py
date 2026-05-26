@@ -27,7 +27,7 @@ def default_takeover_plan() -> list[str]:
         "读取 takeover_source_refs.latest_continue_packet；不可用则读 checkpoint/summary",
         "继续原 run 未完成的 current_step/next_action",
         "复用原任务目录和 artifacts refs 写入结果与证据",
-        "完成后写 final_report/output 并等待父级验收",
+        "完成后写 final_report/output 并等待最终收口",
     ]
 
 

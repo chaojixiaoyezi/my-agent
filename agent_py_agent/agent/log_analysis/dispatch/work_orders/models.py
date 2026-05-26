@@ -8,8 +8,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-PARENT_FINAL_GATE = "parent_session_final_approval_required"
-
 
 # LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 SubagentWorkOrder 前先核对字段语义、序列化形态和调用方假设。
 # 类用途: 承载 SubagentWorkOrder 的字段集合，在模块边界间传递结构化状态和结果。
@@ -27,8 +25,6 @@ class SubagentWorkOrder:
     evidence_refs: list[str] = field(default_factory=list)
     context: dict[str, Any] = field(default_factory=dict)
     acceptance_checks: list[str] = field(default_factory=list)
-    cannot_self_accept: bool = True
-    parent_final_gate: str = PARENT_FINAL_GATE
     issues: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
 
@@ -98,7 +94,6 @@ class PlanInputs:
 __all__ = [
     "CreateWorkOrdersParams",
     "LogAnalysisWorkOrderPlan",
-    "PARENT_FINAL_GATE",
     "PlanInputs",
     "SubagentWorkOrder",
 ]

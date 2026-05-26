@@ -233,7 +233,7 @@ class TestEnsureWorkOrderFiles:
         assert Path(task.work_log_file).exists()
         assert Path(task.output_json).exists()
 
-    # LLM: default work-order JSON must be a JSON object so parent acceptance can read fields immediately.
+    # LLM: default work-order JSON must be a JSON object so closeout can read fields immediately.
     # 函数用途: 防止初始 output/status/dependencies 文件被写成“JSON 字符串包 JSON”，导致父级聚合丢字段。
     def test_creates_machine_readable_default_json_files(self, tmp_path: Path):
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin

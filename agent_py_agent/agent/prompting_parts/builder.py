@@ -17,7 +17,7 @@ from __future__ import annotations
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -203,11 +203,21 @@ def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, is
 def _workspace_context_text(builder: PromptBuilder) -> str:
     root = Path(builder.root).resolve()
     now = datetime.now().astimezone()
+    today = now.date()
+    current_week_start = today - timedelta(days=today.weekday())
+    current_week_end = current_week_start + timedelta(days=6)
+    last_7_days_start = today - timedelta(days=6)
     return "\n".join([
         f"- primary_workspace_root: {root}",
-        f"- current_local_date: {now.date().isoformat()}",
+        f"- current_local_date: {today.isoformat()}",
         f"- current_local_time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}",
+        f"- current_week_range: {current_week_start.isoformat()}..{current_week_end.isoformat()}",
+        f"- last_7_days_range: {last_7_days_start.isoformat()}..{today.isoformat()}",
         "- 写报告日期时优先使用 current_local_date，不要从旧文件、旧记忆或训练知识里猜日期。",
+        "- 任务里出现“今天、最近、近一周、本周、今年”等相对时间时，先按 current_local_date 换成明确日期范围；"
+        "搜索和报告都使用这个明确范围，不能把旧网页年份或训练知识年份当成本轮日期。",
+        "- 最终产物里写 URL、项目地址、论文地址、下载地址或接口地址时，优先使用工具结果里真实出现的链接；"
+        "如果链接是你从名称推断出来的，先用网页/HTTP 工具验证可访问，不能靠项目名猜仓库地址。",
         "- 相对路径默认相对 primary_workspace_root。",
         "- 写文件、读文件、创建 artifacts/deliverables 时优先使用这个真实路径。",
         "- 不要把 /workspace 当作真实路径，除非用户明确给了这个绝对目录。",

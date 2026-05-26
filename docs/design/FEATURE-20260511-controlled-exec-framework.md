@@ -102,7 +102,7 @@ Dry-run 不新增运行时写入。`apply=true` 的 shell 执行由 `shell_gatew
 - [x] `controlled_exec` 工具不能通过模型参数自授权。
 - [x] 显式 apply 会写 bounded refs/audit，不回传大输出正文。
 - [x] 删除类动作只移动到 task trash。
-- [x] 缺能力时有正式 `capability_request` 工具入口，OPEN request 不会被 `AWAITING_ACCEPTANCE` 收口误清理。
+- [x] 缺能力时有正式 `capability_request` 工具入口，OPEN request 不会被 `DONE` 收口误清理。
 
 ## Risks / 风险
 

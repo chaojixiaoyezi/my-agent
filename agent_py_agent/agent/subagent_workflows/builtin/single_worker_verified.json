@@ -31,7 +31,7 @@
       ]
     }
   ],
-  "parent_acceptance": [
+  "final_checks": [
     "Worker reports changed files",
     "Worker reports verification result",
     "Worker reports residual risk"

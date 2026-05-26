@@ -74,7 +74,7 @@ def _advice(signals: list[dict[str, object]], *, top_level: bool) -> dict[str, o
         "llm_next_step": (
             "child 产物结构检查失败；不要由父级直接改文件。"
             "请创建修复小傻妞读取 failure_refs，只修复列出的产物文件，"
-            "修复后重新 dispatch 并执行父级验收。"
+            "修复后重新 dispatch 并执行最终收口。"
         ),
         "suggested_tool_call": _top_level_tool_call(signals) if top_level else _runner_context_tool_call(signals),
     }

@@ -74,11 +74,6 @@ class SubAgentIndexingMixin:
     def _index_capability_route(self, record):
         return self._indexing_service.index_capability_route(record)
 
-    # LLM: _index_acceptance_review 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 处理index验收审查相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
-    def _index_acceptance_review(self, record):
-        return self._indexing_service.index_acceptance_review(record)
-
     # LLM: _index_patch_review 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
     # 函数用途: 处理index补丁审查相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def _index_patch_review(self, record):
@@ -95,7 +90,7 @@ class SubAgentIndexingMixin:
         return self._indexing_service.index_dispatch_watch_record(record)
 
     # LLM: _index_parent_planner_record 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 处理index父级规划器记录相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
+    # 函数用途: 处理index父级收口和报告展示，调用方依赖写入顺序和文件格式。
     def _index_parent_planner_record(self, record):
         return self._indexing_service.index_parent_planner_record(record)
 
@@ -145,7 +140,7 @@ class SubAgentIndexingMixin:
         return self._indexing_service.index_dispatch_watch_record(record)
 
     # LLM: index_parent_planner_record 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 处理index父级规划器记录相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
+    # 函数用途: 处理index父级收口和报告展示，调用方依赖写入顺序和文件格式。
     def index_parent_planner_record(self, record):
         return self._indexing_service.index_parent_planner_record(record)
 

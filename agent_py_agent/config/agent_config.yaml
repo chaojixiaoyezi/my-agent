@@ -182,16 +182,22 @@ user_data_root: "data/users"
 auth_enabled: true
 admin_user_id: "admin"
 
-# 父级验收是否默认真实执行 runner 输出里的 tests：
+# 结果检查是否默认真实执行 runner 输出里的 tests：
 # - false: 保守默认，只检查 runner 填写的 tests 字段和证据，不自动跑命令。
-# - true: `subagents-acceptance` 默认执行 allowlist 内的 command/file/content 验证。
+# - true: 普通收口默认执行 allowlist 内的 command/file/content 验证。
 # - 单次命令可用 `--execute-tests` / `--no-execute-tests` 覆盖这里。
-acceptance_execute_tests: false
+result_check_execute_tests: false
 
-# 父级验收真实执行 tests 时的单条测试超时秒数：
+# 结果检查真实执行 tests 时的单条测试超时秒数：
 # - 1 到 300 秒；超过范围会回退默认值。
-# - `subagents-acceptance --test-timeout` 和 `subagents-tests --timeout` 可覆盖单次调用。
-acceptance_test_timeout_seconds: 120
+# - `subagents-tests --timeout` 可覆盖单次调用。
+result_check_timeout_seconds: 120
+
+# 是否把同一套 closeout 反馈扩展到每一个任务节点：
+# - false: 默认只对主/root 交付做 closeout；子代理结果只更新 refs、状态和任务树。
+# - true: 子代理、孙代理等每个任务节点完成时也写 task-node closeout 反馈。
+# 这个开关不引入父代理验收、acceptance 状态或阻断门；失败只作为返工提示/状态事实交给当前代理判断。
+closeout_for_all_task_nodes: false
 
 # runner_failure_policy 控制 runner 临时失败后的总尝试次数：
 # - "auto": 当前等价于最多 2 次，也就是首次失败后下一轮 dispatch 再试一次
@@ -423,10 +429,11 @@ tool_list_max_entries: 200
 # search_text 工具最多返回多少条匹配
 tool_search_max_matches: 50
 
-# 网页抓取和接口响应最多保留多少字符
+# web_fetch / web_extract / http_request 返回给模型的默认预览字符上限。
+# 全文或二进制内容应保存为 artifact 引用，不要直接塞进上下文。
 tool_web_max_chars: 100000
 
-# fetch_url / http_request 工具默认超时秒数
+# web_search / web_fetch / web_extract / http_request 工具默认超时秒数
 tool_http_timeout: 30
 
 # 命令运行权限档位。这里只暴露一个总开关，其他命令安全策略由运行时派生：

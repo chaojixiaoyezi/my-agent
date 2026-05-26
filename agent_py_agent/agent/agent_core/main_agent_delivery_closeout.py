@@ -51,12 +51,7 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     _write_contract_doctor_report(workspace_root, doctor)
     if not doctor.ok:
         if _has_contract_doctor_context(request.params):
-            return ModelResponse(
-                text=_contract_doctor_blocked_text(doctor),
-                backend=request.backend,
-                runtime_status="blocked",
-                runtime_reason="DELIVERY_CONTRACT_DOCTOR",
-            )
+            return None
         _append_contract_doctor_context(request.params, doctor)
         return None
     contract = dict(doctor.normalized_contract or contract)
@@ -166,12 +161,6 @@ def _append_contract_doctor_context(params: ToolLoopExecuteParams, report: Contr
 
 def _has_contract_doctor_context(params: ToolLoopExecuteParams) -> bool:
     return any(str(item).startswith("[delivery-contract-doctor]") for item in params.tool_context)
-
-
-def _contract_doctor_blocked_text(report: ContractDoctorReport) -> str:
-    payload = report.to_dict()
-    payload.pop("normalized_contract", None)
-    return "[DELIVERY_CONTRACT_DOCTOR_BLOCKED]\n" + json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
 # LLM: _append_failed_contract_context feeds structured repair facts into the next model turn.

@@ -25,7 +25,7 @@ PARENT_PLANNER_RESULT_TEMPLATE = (
     '  "runner_instruction": "给本轮 runner 的额外指令，可为空",\n'
     '  "suggested_max_runners": 1,\n'
     '  "actions": [\n'
-    '    {"action": "execute_runner|review_acceptance|route_capability|takeover|report_blocker", "run_id": "", "priority": 1, "reason": ""}\n'
+    '    {"action": "execute_runner|route_capability|takeover|report_blocker", "run_id": "", "priority": 1, "reason": ""}\n'
     "  ],\n"
     '  "blockers": [],\n'
     '  "risks": [],\n'

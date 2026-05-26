@@ -14,7 +14,7 @@ _SAME_RUN_ACTIONS = [
     "preserve_original_success_contract",
     "execute_generated_scripts_or_commands_if_needed",
     "verify_target_artifacts",
-    "emit_executable_tests_for_parent_acceptance",
+    "emit_executable_tests_for_final_check",
     "report_artifact_and_test_refs",
 ]
 _RECOMMENDED_TEST_METHODS = ["file_check", "content_check", "static_site_check", "command"]
@@ -68,7 +68,7 @@ def repair_contract_acceptance_checks(failure_refs: list[dict[str, object]] | No
         "同一个 repair run 内完成读取 failure refs、修复、必要执行和产物验证",
         "修复后必须重新满足原始完整验收要求，不能只修最近一个症状",
         "如果生成或修改了脚本/命令，必须在本 run 内执行或明确给出不能执行的机器证据",
-        "output.json.tests 必须包含可执行父级验收项：优先 file_check/content_check/static_site_check，必要时才用 command",
+        "output.json.tests 必须包含可执行最终收口项：优先 file_check/content_check/static_site_check，必要时才用 command",
         "完成前必须报告目标 artifact/test refs，不要只说已经修好",
     ]
     checks.extend(f"原始验收: {item}" for item in repair_contract_full_success_checks(failure_refs or [])[:8])
@@ -76,7 +76,7 @@ def repair_contract_acceptance_checks(failure_refs: list[dict[str, object]] | No
 
 
 # LLM: repair_contract_allowed_tools grants repair workers the same generic handoff tools across repair lanes.
-# 函数用途: 给父级验收修复 worker 统一授权读写和协作账本工具；不按具体业务类型区分。
+# 函数用途: 给最终收口修复 worker 统一授权读写和协作账本工具；不按具体业务类型区分。
 def repair_contract_allowed_tools() -> list[str]:
     return list(_REPAIR_ALLOWED_TOOLS)
 

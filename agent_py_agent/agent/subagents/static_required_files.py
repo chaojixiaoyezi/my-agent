@@ -48,7 +48,7 @@ def required_static_files_for_task(task: Any) -> list[str]:
 
 
 # LLM: required_static_dom_ids_for_task reads explicit DOM contracts from task attributes only.
-# 函数用途: 从 task.attributes.required_dom_ids 读取业务区域 id，交给父级 static_site_check 做机器验收。
+# 函数用途: 从 task.attributes.required_dom_ids 读取业务区域 id，交给父级收口。
 def required_static_dom_ids_for_task(task: Any) -> list[str]:
     return _dedupe(_string_list(_task_attributes(task).get("required_dom_ids")))[:50]
 
@@ -60,7 +60,7 @@ def _task_attributes(task: Any) -> dict[str, Any]:
     return attributes if isinstance(attributes, dict) else {}
 
 
-# LLM: static_site_root_hints_for_task exposes write-root refs to parent static-site acceptance.
+# LLM: static_site_root_hints_for_task exposes write-root refs to static-site result validation.
 # 函数用途: 子代理漏写 artifacts 时，父级可用 allowed_write_roots 找到正确任务产物目录，而不是猜全局 deliverables。
 def static_site_root_hints_for_task(task: Any) -> list[str]:
     hints: list[str] = []
@@ -72,7 +72,7 @@ def static_site_root_hints_for_task(task: Any) -> list[str]:
 
 
 # LLM: _scope_to_allowed_write_files prevents child acceptance from inheriting sibling deliverables.
-# 函数用途: 如果当前子任务的 allowed_write_roots 明确是具体静态文件，只验收这些文件，不扫父级其它 sibling 文件。
+# 函数用途: 如果当前子任务的 allowed_write_roots 明确是具体静态文件，只收口交给父级其它 sibling 文件。
 def _scope_to_allowed_write_files(files: list[str], allowed_write_roots: list[object]) -> list[str]:
     allowed = _allowed_static_file_names(allowed_write_roots)
     if not allowed:

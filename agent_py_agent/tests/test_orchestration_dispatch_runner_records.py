@@ -22,8 +22,8 @@ def _runner_result() -> SubAgentRunnerResult:
         run_id="root",
         dry_run=False,
         ok=True,
-        status="AWAITING_ACCEPTANCE",
-        verification_status="NEEDS_ACCEPTANCE",
+        status="DONE",
+        verification_status="VERIFIED",
         message="runner done",
         structured_summary="创建两个直接孩子。",
         execution_context_json="/tmp/execution_context.json",
@@ -37,8 +37,8 @@ def _runner_result() -> SubAgentRunnerResult:
 def test_runner_dispatch_record_carries_created_child_summary():
     before = SimpleNamespace(status="PLANNING", verification_status="UNVERIFIED")
     after = SimpleNamespace(
-        status="AWAITING_ACCEPTANCE",
-        verification_status="NEEDS_ACCEPTANCE",
+        status="DONE",
+        verification_status="VERIFIED",
         child_ids=["child-a", "child-b"],
     )
     agent = MagicMock()

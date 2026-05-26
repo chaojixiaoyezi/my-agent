@@ -25,7 +25,6 @@ from agent_py_agent.agent.log_analysis.dispatch.work_orders.creation import (
     create_subagent_tasks_from_work_order_plan,
 )
 from agent_py_agent.agent.log_analysis.dispatch.work_orders.planning import (
-    PARENT_FINAL_GATE,
     PLAN_NOT_READY_ISSUE,
     LogAnalysisWorkOrderPlan,
     SubagentWorkOrder,
@@ -117,29 +116,6 @@ class TestWorkOrderQualityContract:
         assert "ev-001" in contract["evidence_required"]
         assert "ev-002" in contract["evidence_required"]
 
-    def test_sets_cannot_self_accept(self):
-        """测试设置不能自验收"""
-        order = SubagentWorkOrder(
-            role="analyst",
-            case_id="q-self-001",
-            goal="Test goal",
-            evidence_refs=["ev-001"],
-        )
-        contract = _work_order_quality_contract(order)
-        assert contract["cannot_self_accept"] is True
-
-    def test_sets_parent_final_gate(self):
-        """测试设置父级最终门"""
-        order = SubagentWorkOrder(
-            role="analyst",
-            case_id="q-gate-001",
-            goal="Test goal",
-            evidence_refs=["ev-001"],
-        )
-        contract = _work_order_quality_contract(order)
-        assert contract["parent_final_gate"] is True
-        assert contract["final_judge"] == "parent_final_gate"
-
     def test_uses_order_goal_as_fallback(self):
         """测试使用 order goal 作为降级"""
         order = SubagentWorkOrder(
@@ -193,16 +169,12 @@ class TestWorkOrderContextPack:
             case_id="pack-001",
             goal="Test goal",
             evidence_refs=["ev-001", "ev-002"],
-            cannot_self_accept=True,
-            parent_final_gate=PARENT_FINAL_GATE,
         )
         pack = _work_order_context_pack(order)
         assert pack["name"] == "log-analysis-work-order"
         assert pack["case_id"] == "pack-001"
         assert pack["role"] == "analyst"
         assert pack["evidence_refs"] == ["ev-001", "ev-002"]
-        assert pack["cannot_self_accept"] is True
-        assert pack["parent_final_gate"] == PARENT_FINAL_GATE
 
     def test_includes_route_summary(self):
         """测试包含路由摘要"""

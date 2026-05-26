@@ -16,7 +16,6 @@ from .creation import (
 from .planning import (
     DEFAULT_REVIEWER_TOOLS,
     NO_EVIDENCE_ISSUE,
-    PARENT_FINAL_GATE,
     PLAN_NOT_READY_ISSUE,
     LogAnalysisWorkOrderPlan,
     SubagentWorkOrder,
@@ -28,7 +27,6 @@ __all__ = [
     "DEFAULT_REVIEWER_TOOLS",
     "LogAnalysisWorkOrderPlan",
     "NO_EVIDENCE_ISSUE",
-    "PARENT_FINAL_GATE",
     "PLAN_NOT_READY_ISSUE",
     "SubAgentTaskCreator",
     "SubagentWorkOrder",

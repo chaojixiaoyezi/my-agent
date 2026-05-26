@@ -46,7 +46,7 @@ def test_sample_neutrality_checker_uses_caller_supplied_rules(tmp_path) -> None:
 
 
 # LLM: Production defaults should not retain the old shop-specific parent oracle module.
-# 函数用途: 防止电商专用父级验收模块重新进入 agent 生产代码路径。
+# 函数用途: 防止电商专用最终收口模块重新进入 agent 生产代码路径。
 def test_shop_parent_oracle_module_removed_from_production_defaults() -> None:
     assert not (REPO_ROOT / "agent_py_agent/agent/subagents/shop_web_parent_oracle.py").exists()
 

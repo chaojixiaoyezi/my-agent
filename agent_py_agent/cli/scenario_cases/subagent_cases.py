@@ -78,8 +78,8 @@ class ScenarioParentSubagentRecoveryBackend:
             text=(
                 "[SUBAGENT_RESULT]\n"
                 "{\n"
-                '  "status": "AWAITING_ACCEPTANCE",\n'
-                '  "summary": "parent/subagent 跨天恢复演练：runner 已读取 README，等待父级验收。",\n'
+                '  "status": "DONE",\n'
+                '  "summary": "parent/subagent 跨天恢复演练：runner 已读取 README，等待最终收口。",\n'
                 '  "used_tools": ["read_file"],\n'
                 '  "used_skills": [],\n'
                 '  "evidence": [\n'
@@ -92,7 +92,7 @@ class ScenarioParentSubagentRecoveryBackend:
                 "  ],\n"
                 '  "patches": [],\n'
                 '  "lessons": ["跨天恢复必须回到 task fact sources，而不是只相信 archive 摘要"],\n'
-                '  "next_actions": ["父级恢复后读取 STATUS/WORK_LOG/HANDOFF/output.json，再决定是否验收"],\n'
+                '  "next_actions": ["父级恢复后读取 STATUS/WORK_LOG/HANDOFF/output.json，再决定是否收口"],\n'
                 '  "blocked_reason": "",\n'
                 '  "failure_type": ""\n'
                 "}\n"
@@ -111,7 +111,7 @@ def _write_parent_subagent_recovery_fact_files(task) -> None:
         f"- id: {task.id}\n"
         f"- status: {task.status}\n"
         f"- verification_status: {task.verification_status}\n"
-        "- next: 父级恢复后读取 output.json / RUNNER_RESULT.md，再决定是否验收。\n",
+        "- next: 父级恢复后读取 output.json / RUNNER_RESULT.md，再决定是否收口。\n",
         encoding="utf-8",
     )
     Path(task.handoff_file).write_text(
@@ -124,7 +124,7 @@ def _write_parent_subagent_recovery_fact_files(task) -> None:
         "- README.md 已通过 read_file 读取。\n"
         "- output.json 和 reports/runner_result.json 已落盘。\n\n"
         "## Not Done\n\n"
-        "- 父级验收尚未执行。\n\n"
+        "- 最终收口尚未执行。\n\n"
         "## Next Step\n\n"
         "- 恢复后先读 STATUS、WORK_LOG、HANDOFF、TEST_CHECKLIST 和 output.json，再决定是否运行 acceptance。\n",
         encoding="utf-8",
@@ -132,8 +132,8 @@ def _write_parent_subagent_recovery_fact_files(task) -> None:
     Path(task.test_checklist_file).write_text(
         "# TEST_CHECKLIST\n\n"
         "- [x] runner 调用 read_file README.md\n"
-        "- [x] runner 输出 AWAITING_ACCEPTANCE 结构化结果\n"
-        "- [ ] 父级恢复后执行验收\n",
+        "- [x] runner 输出 DONE 结构化结果\n"
+        "- [ ] 父级恢复后检查结果\n",
         encoding="utf-8",
     )
 
@@ -154,7 +154,7 @@ def _append_parent_subagent_cross_day_resume_clues(root: Path, task) -> None:
             target="parent",
             action="subagent_runner_result",
             status=str(task.status).lower(),
-            content_preview="parent subagent cross-day resume: runner finished and waits for parent acceptance",
+            content_preview="parent subagent cross-day resume: runner finished and waits for closeout",
             source="subagent_run",
             created_at="2026-04-29T23:55:00+00:00",
         ),
@@ -195,7 +195,7 @@ def _append_subagent_snapshot(root: Path, task) -> None:
                 task.test_checklist_file, task.runner_result_file,
                 task.runner_result_json, task.output_json,
             ],
-            next_actions=["Read task fact sources, then run parent acceptance only after evidence is checked."],
+            next_actions=["Read task fact sources, then run closeout only after evidence is checked."],
             created_at="2026-04-30T00:07:00+00:00",
         ),
     )
@@ -217,11 +217,11 @@ def _parent_subagent_setup(args):
 
     print_scenario_step(1, "Create a parent-owned subagent task")
     task = agent.subagents.create_run(
-        goal="parent/subagent 跨天恢复演练：读取 README 后等待父级恢复验收",
+        goal="parent/subagent 跨天恢复演练：读取 README 后等待父级恢复收口",
         thought="验证真实 runner 写回后，隔天恢复必须回到子代理任务事实源。",
         plan=["runner 读取 README.md", "写回结构化结果", "模拟跨天恢复", "memory-resume 找回任务事实源"],
         allowed_tools=["read_file"],
-        acceptance_checks=["必须有 read_file 证据", "恢复时必须推荐任务事实源", "父级恢复后再决定是否验收"],
+        acceptance_checks=["必须有 read_file 证据", "恢复时必须推荐任务事实源", "父级恢复后再决定是否收口"],
     )
     print(f"run_id={task.id}")
 
@@ -231,7 +231,7 @@ def _parent_subagent_setup(args):
         dry_run=False,
         probe=False,
         instruction=(
-            "这是 parent/subagent 跨天恢复演练。先读 README.md，再输出 AWAITING_ACCEPTANCE 的 "
+            "这是 parent/subagent 跨天恢复演练。先读 README.md，再输出 DONE 的 "
             "[SUBAGENT_RESULT]，不要自行标记 DONE。"
         ),
     )
@@ -276,18 +276,18 @@ def _verify_subagent_resume(run: SubagentRunResults, resume: ResumeCommandResult
     )
     return (
         run.runner.ok
-        and run.loaded.status == "AWAITING_ACCEPTANCE"
-        and run.loaded.verification_status == "NEEDS_ACCEPTANCE"
+        and run.loaded.status == "DONE"
+        and run.loaded.verification_status == "VERIFIED"
         and "read_file" in run.loaded.used_tools
         and run.runner.tool_rounds == 1
         and run.backend.calls == 2
         and resume.returncode == 0
         and archive_count >= 2
         and matching_task.get("exists") is True
-        and matching_task.get("status") == "AWAITING_ACCEPTANCE"
+        and matching_task.get("status") == "DONE"
         and all(path in recommended_reads for path in expected_reads)
         and task.id in context_block
-        and "AWAITING_ACCEPTANCE" in context_block
+        and "DONE" in context_block
     )
 
 

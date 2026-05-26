@@ -35,7 +35,7 @@
 - `validation/security_fixtures/`：最小安全日志 fixture。
 - `agent_py_agent/tests/test_log_analysis_*.py`：LOG 专项、CLI 和工具注册测试。
 
-## 父验收结果
+## 收口结果
 
 第一版已提交：
 - `97b8bc4 Add log analysis foundation`
@@ -194,7 +194,7 @@
 - 中文说明：这一片解决“坏 JSONL 行被悄悄跳过”的问题。现在读取日志时会写 audit，记录跳过了哪些坏行、坏对象，并把 skipped/corrupt 计数放进 query 摘要，方便 reviewer 知道证据是否完整。
 - Status: landed in code and focused tests.
 - Solves: bad JSONL lines are no longer silently skipped with no trail. Reads now produce a `JsonlReadAudit`, persist corrupt/non-object samples to `corrupt_lines.jsonl`, and include skipped/corrupt counts in query summaries and query records.
-- Parent acceptance: this proves the local JSONL backend is still tolerant of bad rows, while giving reviewers evidence about what was skipped.
+- Closeout: this proves the local JSONL backend is still tolerant of bad rows, while giving reviewers evidence about what was skipped.
 - Remaining after this slice: runtime capability auto-wiring, storage limit config alignment, Live Lab scenario replay, and user-facing quickstart docs.
 
 ## 2026-04-30 Implementation Note: Runtime Capability, Limits, and Replay
@@ -218,9 +218,9 @@
 
 ## 2026-04-30 Implementation Note: LOG Analyst Work Orders
 
-- 中文说明：这一片先做 dry-run 工单规划，不直接派真实子代理。detector 找到 case 后，可以生成 analyst/reviewer 的受控任务规格，里面有证据引用、工具边界、验收要求和不能自验收规则；缺证据的 case 会明确返回 issue，而不是硬派人干活。
+- 中文说明：这一片先做 dry-run 工单规划，不直接派真实子代理。detector 找到 case 后，可以生成 analyst/reviewer 的受控任务规格，里面有证据引用、工具边界、交付要求和不能自验收规则；缺证据的 case 会明确返回 issue，而不是硬派人干活。
 - Status: dry-run work-order planning landed.
 - Solves: detected cases can be translated into controlled analyst/reviewer specs before any real subagent is created.
-- Safety: work orders include evidence refs, bounded tool lists, acceptance checks, `cannot_self_accept`, and parent final gate rules.
+- Safety: work orders include evidence refs, bounded tool lists, acceptance checks, `cannot_self_accept`, and closeout rules.
 - Failure behavior: cases without evidence refs are not ready for analyst dispatch and return explicit issue/risk fields.
 - Remaining after this slice: add manual apply to real `SubAgentTask` records and replace placeholder `evidence_read` with a bounded evidence-ref reader.

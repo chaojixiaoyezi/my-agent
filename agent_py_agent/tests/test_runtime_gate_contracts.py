@@ -181,7 +181,7 @@ def test_run_contract_gate_rejects_contract_doctor_findings():
     assert decision.finding_codes == ("CONTRACT_SCHEMA_INVALID", "UNKNOWN_VERIFIER")
 
 
-def test_artifact_provenance_gate_requires_current_run_tool_evidence():
+def test_artifact_provenance_gate_warns_on_missing_or_cross_run_tool_evidence():
     missing = evaluate_artifact_provenance_gate({"path": "out.txt", "ok": True}, run_id="run-1")
     old_run = evaluate_artifact_provenance_gate(
         {"path": "out.txt", "ok": True, "provenance": _artifact_provenance("out.txt", run_id="run-old")},
@@ -192,10 +192,10 @@ def test_artifact_provenance_gate_requires_current_run_tool_evidence():
         run_id="run-1",
     )
 
-    assert missing.allowed is False
-    assert missing.finding_codes == ("ARTIFACT_PROVENANCE_MISSING",)
-    assert old_run.allowed is False
-    assert old_run.finding_codes == ("ARTIFACT_PROVENANCE_RUN_MISMATCH",)
+    assert missing.allowed is True
+    assert missing.evidence["warning_codes"] == ["ARTIFACT_PROVENANCE_MISSING"]
+    assert old_run.allowed is True
+    assert old_run.evidence["warning_codes"] == ["ARTIFACT_PROVENANCE_RUN_MISMATCH"]
     assert passed.allowed is True
 
 

@@ -359,7 +359,7 @@ def test_tool_loop_cuts_streaming_response_after_first_complete_tool_call():
         assert "fake-child-run" not in "".join(visible_chunks)
 
 
-# LLM: spoof-only tool records should trigger one correction turn instead of final acceptance.
+# LLM: spoof-only tool records should trigger one correction turn instead of final closeout.
 # 函数用途: 模型没有真实 TOOL_CALL 却自称工具成功时，系统给一次纠偏机会，不直接假绿。
 def test_tool_loop_repairs_spoof_only_reserved_tool_record_once():
     with tempfile.TemporaryDirectory() as td:

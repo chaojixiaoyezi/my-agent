@@ -37,19 +37,19 @@
 
 ## 2026-05-17 Markdown repair-wave canary
 
-- 中文说明：新增 `markdown-repair` suite，用普通用户话术测试“普通文档做坏了以后，root 是否会安排小傻妞修同一个真实文件，并让父级机器验收内容”。这个 case 不依赖购物站、HTML 或 CSV 特判。
-- 已实现：`natural_markdown_repair_wave` 会预置一个坏的 Markdown 周报 child，写入 `output.json`、`acceptance_review.json`、`test_execution.json` 和 follow-up refs，然后启动真实 gateway 让 root 继续处理。
-- 已实现：seed 的验收条件包含 `required_content_lines[weekly.md]`，产品侧父级验收会把它转成逐行 `content_check`；验收读真实 `lab_outputs/report/weekly.md`，不相信最终口头回复。
+- 中文说明：新增 `markdown-repair` suite，用普通用户话术测试“普通文档做坏了以后，root 是否会安排小傻妞修同一个真实文件，并让父级检查内容”。这个 case 不依赖购物站、HTML 或 CSV 特判。
+- 已实现：`natural_markdown_repair_wave` 会预置一个坏的 Markdown 周报 child，写入 `output.json`、`runner_result.json`、`test_execution.json` 和 follow-up refs，然后启动真实 gateway 让 root 继续处理。
+- 已实现：seed 的验收条件包含 `required_content_lines[weekly.md]`，产品侧最终收口会把它转成逐行 `content_check`；验收读真实 `lab_outputs/report/weekly.md`，不相信最终口头回复。
 - 已测试：`python3 -m pytest agent_py_agent/tests/test_live_lab_natural_case.py -q --tb=short` -> `28 passed`。
 - 真实复测：`python3 scripts/live_agent_lab.py --suite markdown-repair --real-llm --runs-dir /Users/example/my-终端应用/real_e2e_next --run-id 20260517-markdown-repair-wave-01 --timeout 600 --count 1 --max-runners 3 --max-cycles 6 --keep-going` -> `LIVE_LAB_PASS`。MiniMax-M2.7 创建 `小傻妞-周报修复`，最终 `lab_outputs/report/weekly.md` 五行一字不差，并覆盖旧失败 run。
 
 ## 2026-05-17 File repair-wave canary
 
-- 中文说明：新增 `file-repair` suite，用普通用户话术测试“非网页文件做坏了以后，root 是否会安排小傻妞修同一个真实文件，并让父级机器验收内容”。这个 case 不依赖购物站或 HTML 特判。
-- 已实现：`natural_file_repair_wave` 会预置一个坏的订单 CSV child，写入 `output.json`、`acceptance_review.json`、`test_execution.json` 和 follow-up refs，然后启动真实 gateway 让 root 继续处理。
-- 已实现：seed 的验收条件包含 `required_content_lines`，产品侧父级验收会把它转成 4 条 `content_check`；验收读真实 `lab_outputs/order-report/orders.csv`，不相信最终口头回复。
+- 中文说明：新增 `file-repair` suite，用普通用户话术测试“非网页文件做坏了以后，root 是否会安排小傻妞修同一个真实文件，并让父级检查内容”。这个 case 不依赖购物站或 HTML 特判。
+- 已实现：`natural_file_repair_wave` 会预置一个坏的订单 CSV child，写入 `output.json`、`runner_result.json`、`test_execution.json` 和 follow-up refs，然后启动真实 gateway 让 root 继续处理。
+- 已实现：seed 的验收条件包含 `required_content_lines`，产品侧最终收口会把它转成 4 条 `content_check`；验收读真实 `lab_outputs/order-report/orders.csv`，不相信最终口头回复。
 - 真实复测：`python3 scripts/live_agent_lab.py --suite file-repair --real-llm --runs-dir /Users/example/my-终端应用/real_e2e_next --run-id 20260517-file-repair-wave-02 --timeout 600 --count 1 --max-runners 3 --max-cycles 6 --keep-going` -> `LIVE_LAB_PASS`。MiniMax-M2.7 创建修复小傻妞，最终 CSV 包含表头、两条订单和 SUMMARY 行。
-- 已知后续增强：这轮修复小傻妞自己的 `tests` 仍可能为空；目前通过旧失败 run 的内容合同完成父级验收。后续普通新文件任务也应更容易生成内容验收合同，而不是只靠 seed/follow-up 继承。
+- 已知后续增强：这轮修复小傻妞自己的 `tests` 仍可能为空；目前通过旧失败 run 的内容合同完成最终收口。后续普通新文件任务也应更容易生成内容验收合同，而不是只靠 seed/follow-up 继承。
 
 ## 已跑测试
 
@@ -99,7 +99,7 @@
 - 已实现：`natural_html_subagent` case 会启动真实 gateway、发送家具品牌单文件 HTML 任务、保存 response，并检查 `lab_outputs/furniture-home/index.html` 真实存在、HTML 基础标签完整、没有 `href="#"`、没有 disabled 按钮、没有外部图片/字体/脚本/CSS 背景资源依赖。
 - 已实现：`natural` suite 是 opt-in；只有显式 `--suite natural --real-llm` 才会跑，普通 smoke 不会消耗真实模型 API。
 - 已测试：`python3 -m pytest -q agent_py_agent/tests/test_live_lab_natural_case.py agent_py_agent/tests/test_live_lab_runner_interface.py` -> `5 passed`。
-- 真实复测：`python3 scripts/live_agent_lab.py --suite natural --real-llm --runs-dir /Users/example/my-终端应用/real_e2e_next --run-id 20260517-natural-html-01 --timeout 360 --count 2 --max-runners 2 --max-cycles 3 --keep-going` -> `LIVE_LAB_PASS`。MiniMax-M2.7 通过主代理创建 1 个小傻妞，写出约 50KB HTML，并完成父级验收。
+- 真实复测：`python3 scripts/live_agent_lab.py --suite natural --real-llm --runs-dir /Users/example/my-终端应用/real_e2e_next --run-id 20260517-natural-html-01 --timeout 360 --count 2 --max-runners 2 --max-cycles 3 --keep-going` -> `LIVE_LAB_PASS`。MiniMax-M2.7 通过主代理创建 1 个小傻妞，写出约 50KB HTML，并完成最终收口。
 - 后续风险：第一次真实跑出来的 HTML 使用了 Google Fonts 和 Unsplash 图片，说明模型会自然引入外部资源；现在 canary 已收紧为离线单文件资源策略，下一轮真实复测要验证模型是否能按这个策略生成页面。
 
 ## 2026-05-17 Natural suite 工具轮数上限修正
@@ -127,14 +127,14 @@
 - 中文说明：真实购物站 E2E 已经跑通一轮，并且中间暴露的问题都按通用合同修复，而不是按购物网站特判。现在这个 suite 能检查“主代理派小傻妞写业务网页”这一类任务是否真的能交付。
 - 已实现：`natural_shop_subagent` 会用普通中文提示词要求注册、登录、商品、购物车、结算、下单成功流程，不暴露 dispatch/runner/contract 术语。
 - 已实现：`static_site_check` 现在会通用拒绝真实 disabled HTML 控件；Live Lab 自己只把 CSS/JS 里的 disabled 字样当普通文本，不误判。
-- 已实现：父级验收失败时，调度控制面会给 root 一次基于 `parent_acceptance_repair_advice.suggested_tool_call` 创建修复小傻妞的机会；同一阻塞重复出现才事实收口，避免卡死。
+- 已实现：最终收口失败时，调度控制面会给 root 一次基于 `final_closeout_repair_advice.suggested_tool_call` 创建修复小傻妞的机会；同一阻塞重复出现才事实收口，避免卡死。
 - 真实复测：`python3 scripts/live_agent_lab.py --suite shop --real-llm --runs-dir /Users/example/my-终端应用/real_e2e_next --run-id 20260517-shop-flow-08-repair-wave --timeout 540 --count 1 --max-runners 3 --max-cycles 5 --keep-going` -> `LIVE_LAB_PASS`。MiniMax-M2.7 创建 1 个小傻妞，写出 `lab_outputs/shop-demo/index.html`，最终 `DONE/VERIFIED`。
 - 下一步：新增“故意失败再修复”的 shop/web case，验证 root 会真的创建 repair child，而不只是第一轮幸运通过。
 
 ## 2026-05-17 Shop repair-wave canary
 
 - 中文说明：新增 `shop-repair` suite，专门测试“已经有一个小傻妞做坏了，root 会不会根据状态和验收失败 refs 派修复小傻妞继续干”。这不是购物站特判，而是失败后修复闭环的真实模型 canary。
-- 已实现：`natural_shop_repair_wave` 会先在隔离 workspace 用真实 `SubAgentManager` 预置一个 `AWAITING_ACCEPTANCE` 的失败 child；它有坏 HTML、`output.json`、`acceptance_review.json`、`test_execution.json` 和 `parent_acceptance_auto_followup.json`。
+- 已实现：`natural_shop_repair_wave` 会先在隔离 workspace 用真实 `SubAgentManager` 预置一个 `DONE` 的失败 child；它有坏 HTML、`output.json`、`runner_result.json`、`test_execution.json` 和 `closeout_auto_followup.json`。
 - 已实现：提示词仍然用普通中文，只说“刚刚那个购物网站没通过检查，请安排小傻妞修好”，不出现 `dispatch`、`runner`、`contract` 等内部词。
 - 已实现：验收不信最终口头回复；它会检查最终 `lab_outputs/shop-demo/index.html`、产品侧 `static_site_check`、是否出现 DONE/VERIFIED 的修复小傻妞，以及旧失败 run 是否被同目标 verified sibling 覆盖。
 - 真实复测：`20260517-shop-repair-wave-01` 暴露 repair child 只修最新失败症状、没有继承原始成功合同；已把 `task_ref`、`original_goal`、`original_acceptance_checks` 和 `full_success_checks` 写入修复建议。
@@ -183,7 +183,7 @@
 - 中文说明：新增 `main-artifact` suite，专门测“主代理自己读一个比较长的资料文件，发现一次读不完或只拿到片段时，能不能继续按证据找完整”。它不测小傻妞，只测主代理的大输出读回和续接能力。
 - 已实现：`main_artifact_readback` 会生成约 96KB 的 `data/artifact-readback/source.txt`，把 `ALPHA-ANCHOR`、`OMEGA-ANCHOR`、`TRACE-ARTIFACT-991` 三处证据放在相隔很远的位置。
 - 已实现：提示词仍然是普通中文，只说“资料比较长，如果系统一次只给你一部分内容，请继续按线索读完整，不要猜”，不使用 `dispatch`、`runner`、`contract` 等内部术语。
-- 已实现：最终验收只读真实 `lab_outputs/artifact-readback/report.md`，要求三处远距离证据都出现，并且报告必须包含解释、风险和下一步建议；不相信主代理最终口头说“我已经完成”。
+- 已实现：最终收口只读真实 `lab_outputs/artifact-readback/report.md`，要求三处远距离证据都出现，并且报告必须包含解释、风险和下一步建议；不相信主代理最终口头说“我已经完成”。
 - 已实现：`main-complex` 也纳入 `main_artifact_readback`，但单独提供 `main-artifact` 小 suite，方便快速真实复测这一类大输出/外置产物读回问题。
 - 已实现：新增 `main_compact_resume_roundtrip`，紧跟长输出读回 case 执行。它先用 `memory-fact-write` 写结构化验收/约束/测试事实，再按同一 request id 执行 `memory-compact --apply` 和 `memory-resume --compact-resume-mode auto`，验证交接包可以继续。
 - 已实现：compact/resume gate 只读 JSON 结构化字段：`work_state_snapshot.missing_fields` 必须为空，`acceptance/constraints/latest_tests` 必须来自 `runtime_facts/*/task.json`，action guard 必须返回 `allow_automated_continue`，并且不自动执行工具。

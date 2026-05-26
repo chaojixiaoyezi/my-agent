@@ -40,8 +40,8 @@ def test_dispatch_payload_surfaces_qa_repair_advice_from_direct_child(tmp_path: 
             parent_id="root",
             role="tester",
             agent_name="小傻妞-tester",
-            status="AWAITING_ACCEPTANCE",
-            verification_status="NEEDS_ACCEPTANCE",
+            status="DONE",
+            verification_status="VERIFIED",
             task_dir=str(tester_dir),
         )
     ])
@@ -49,7 +49,7 @@ def test_dispatch_payload_surfaces_qa_repair_advice_from_direct_child(tmp_path: 
     direct = payload["direct_children"]
     assert direct["needs_repair_wave"] is True
     assert direct["next_action"] == "create_repair_child_from_qa_refs"
-    assert direct["ready_for_parent_acceptance"] is False
+    assert direct["ready_for_final_closeout"] is False
     assert direct["qa_repair_advice"]["failed_or_conflicting_qa_run_ids"] == ["tester-1"]
     assert direct["qa_repair_advice"]["suggested_tool_call"]["children"][0]["role"] == "worker"
 
@@ -152,14 +152,14 @@ def test_dispatch_payload_surfaces_qa_repair_advice_from_descendant(tmp_path: Pa
     )
 
     payload = _dispatch_payload_with_direct_children([
-        SimpleNamespace(id="coord-1", parent_id="root", role="coordinator", agent_name="小傻妞-coord", status="AWAITING_ACCEPTANCE"),
+        SimpleNamespace(id="coord-1", parent_id="root", role="coordinator", agent_name="小傻妞-coord", status="DONE"),
         SimpleNamespace(
             id="tester-2",
             parent_id="coord-1",
             role="tester",
             agent_name="小小傻妞-tester",
-            status="AWAITING_ACCEPTANCE",
-            verification_status="NEEDS_ACCEPTANCE",
+            status="DONE",
+            verification_status="VERIFIED",
             task_dir=str(tester_dir),
         ),
     ])

@@ -308,7 +308,7 @@ def test_hierarchy_schedule_normalizes_model_write_alias_for_leaf_tasks(tmp_path
 def test_hierarchy_schedule_carries_parent_context_to_child_thought(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(
-        goal="父级要求 leaf 写 48 个验收文件，且 coordinator 不能代写。",
+        goal="父级收口文件，且 coordinator 不能代写。",
         thought="父级补充：只能通过当前节点继续派下一层。",
         plan=["plan"],
     )
@@ -318,7 +318,7 @@ def test_hierarchy_schedule_carries_parent_context_to_child_thought(tmp_path):
     )
     child = manager.load(result.created_run_ids[0])
 
-    assert "父级要求 leaf 写 48 个验收文件" in child.thought
+    assert "父级收口文件" in child.thought
     assert "父级补充：只能通过当前节点继续派下一层" in child.thought
     assert "必须把下一层 goal 写成自包含任务" in child.thought
 

@@ -22,7 +22,7 @@
 | `researcher` | 信息不足，需要查资料、对比方案、整理事实源时 | 已有明确方案，只差执行时 | 研究摘要、来源 refs、可执行建议 |
 | `tester` | 需要设计或执行可验证测试、复现流程、浏览器/CLI 验证时 | 只是在主观评价“好不好看”时 | 测试计划、测试记录、失败复现 |
 | `bug_finder` | 需要找风险、找反例、挑毛病、审查边界时 | 需要直接修复或写最终产物时 | findings、风险等级、复现线索 |
-| `acceptor` | 产物和测试事实基本齐全，需要最终验收建议时 | worker 还没产出、测试还没跑、证据缺失时 | 验收结论、通过/阻断原因、下一步建议 |
+| `checker` | 产物和测试事实基本齐全，需要最终收口建议时 | worker 还没产出、测试还没跑、证据缺失时 | 验收结论、通过/阻断原因、下一步建议 |
 
 ## 派工顺序
 
@@ -30,11 +30,11 @@
 
 1. 先判断任务是不是单点小任务；如果是，root 可以直接派 `worker` / `writer`。
 2. 如果任务需要多人、多文件、多阶段或用户明确要求多层，就先派 `coordinator` / `lead`。
-3. 产出型工作先派 `worker` / `writer` / `leaf_worker`，不要先创建或执行 `tester`、`bug_finder`、`acceptor` 空转。
+3. 产出型工作先派 `worker` / `writer` / `leaf_worker`，不要先创建或执行 `tester`、`bug_finder`、`checker` 空转。
 4. 事实不足时先派 `researcher`，再把研究结论交给 worker/writer。
 5. 产物出来后，可以让一个 `tester` 检查多个 worker 的结果。
 6. 风险较高或用户要求严格时，加一个或多个 `bug_finder` 找问题；它们可以横向检查多个产物。
-7. 测试和找错都收口后，再派 `acceptor` 做最终验收建议；最终状态仍由父级 gate 决定。
+7. 测试和找错都收口后，再派 `checker` 做最终收口建议；最终状态仍由closeout 决定。
 
 ## QA 阶段门
 
@@ -42,20 +42,20 @@
 
 这里的“阶段门”只是一条红线，不是固定剧本。系统只判断“现在有没有可测对象、QA 有没有越权、父级有没有跳过失败 child”；至于派一个 QA 还是多个 QA、按局部 work group 测还是整体验证、失败后回原 worker 还是新建 repair worker，优先交给 LLM 根据上下文和 workflow 判断。
 
-- 全部 work 都结束：创建或激活一组 tester / bug_finder；它们通过后再创建或激活 acceptor。
+- 全部 work 都结束：创建或激活一组 tester / bug_finder；它们通过后再创建或激活 checker。
 - 部分关联 work 结束：只给这组关联 work 建 QA，QA 结果绑定 `work_group_id`、产物 refs 和测试 refs；通过表示这组可集成，不代表整个父任务完成。
 - 单个 work 结束：默认进入 `ready_for_batch_qa`；只有它是独立交付单元或阻塞后续工作时，才立即派 QA。
-- QA 通过：work 不删除、不污染长期 memory，进入 `QA_PASSED` 或 `AWAITING_ACCEPTANCE`，保留 workspace、artifact refs、test refs，等待 acceptor 或父级 gate。
+- QA 通过：work 不删除、不污染长期 memory，进入 `QA_PASSED` 或 `DONE`，保留 workspace、artifact refs、test refs，等待 checker 或closeout。
 - QA 不通过：work 进入 `NEEDS_REPAIR`，优先让原 worker 修或派 repair worker；QA report 必须带失败 refs，不能只写自然语言。
 - QA 自己失败：不等于产品失败。要区分 `QA_TOOL_FAILED` / `QA_BLOCKED` 和 `PRODUCT_FAILED`；前者重跑或替换 QA，后者才返修 work。
-- worker runner 可以结束，但 task workspace 不能删；后续 QA、repair、acceptor 都必须能从 refs 接上。
+- worker runner 可以结束，但 task workspace 不能删；后续 QA、repair、checker 都必须能从 refs 接上。
 - 大型并行任务要引入 `work_group_id` / `dependency_group` / `qa_scope`，让一个 QA 检查一组相关 work，而不是扫全局或和 worker 一一对应。
 
 ## 派工角色必须知道的边界
 
 - 上层权限可以覆盖下层，但上层不应该默认替下层写最终业务产物。
 - coordinator 可以写自己的报告、看板和纠偏消息；真实产物默认转派 worker/writer。
-- 后代专属工具能力，例如 `controlled_exec`、shell、network、skill，应由真正要执行的 child/leaf 自己申请；父级负责授权、继续推进和验收。
+- 后代专属工具能力，例如 `controlled_exec`、shell、network、skill，应由真正要执行的 child/leaf 自己申请；父级检查。
 - 一个检查类角色可以检查多个产出角色，不需要和 worker 一一绑定。
 - root 不固定必须创建 coordinator；是否创建 coordinator 由任务复杂度和当前 prompt 约束决定。
 - 显式要求 4 层链路时，root 只能启动第一层，后续必须由上层逐级创建下层。
@@ -66,8 +66,8 @@
 2. 增加 `role_selection` 小型决策包：输入任务目标、阶段、已有 child 状态和证据 refs，输出推荐角色、理由、是否需要 QA wave。
 3. 在 `create_subagents` / `schedule_child_subagents` 工具说明里引用短规则，但不展开完整模板。
 4. coordinator/lead 派工时，如果要创建多个下级，先生成 refs-only role plan，再分批创建。
-5. 真实 E2E 覆盖每个内置角色：至少验证能正确选择、正确创建、正确使用工具、正确写报告、正确被父级验收。
-6. 后续接入 workflow 模板时，workflow 只能建议角色组合，不能绕过角色权限和父级验收 gate。
+5. 真实 E2E 覆盖每个内置角色：至少验证能正确选择、正确创建、正确使用工具、正确写报告、正确被最终收口。
+6. 后续接入 workflow 模板时，workflow 只能建议角色组合，不能绕过角色权限和最终收口 gate。
 
 ## 用户可扩展口子
 

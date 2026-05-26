@@ -33,7 +33,7 @@ def inherited_hierarchy_thought(parent: SubAgentTask, *, child_goal: str = "") -
     parts = [
         f"执行由 {parent.id} 派生的层级子任务。",
         "必须把下一层 goal 写成自包含任务，包含目标、产物路径、工具边界和验收条件。",
-        "当前节点只执行自己的 goal；父级摘要只作边界/验收背景，不要展开父级其它 sibling 任务。",
+        "当前节点只执行自己的 goal；父级收口背景，不要展开父级其它 sibling 任务。",
     ]
     parent_context = relevant_parent_context(parent.goal, child_goal) or clip_parent_context(parent.goal)
     if parent_context:
@@ -44,7 +44,7 @@ def inherited_hierarchy_thought(parent: SubAgentTask, *, child_goal: str = "") -
 
 
 # LLM: scheduled_child_goal makes child goals self-contained while reflecting actual write roots.
-# 函数用途: 生成 child goal；补入父级相关边界，但允许路径作为委派/验收上下文继续传给下一层。
+# 函数用途: 生成 child goal；补入父级收口上下文继续传给下一层。
 def scheduled_child_goal(
     parent: SubAgentTask,
     spec: HierarchyChildSpec,
@@ -90,7 +90,7 @@ def _inherited_goal_context(
 ) -> str:
     lines = [
         "inherited_parent_context=true",
-        "继承父级目标/边界（仅用于目录/权限/验收，不代表当前子任务要执行父级全部目标）：",
+        "继承父级收口，不代表当前子任务要执行父级全部目标）：",
         "当前子任务只执行上方 goal，不要展开父级其它 sibling 目标。",
     ]
     roots = _write_root_lines(parent, write_roots=write_roots)

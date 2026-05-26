@@ -18,9 +18,6 @@ from .rendering_patch import (
 )
 from .rendering_rescue import render_action_rescue_packet_lines
 from .reports import (
-    AcceptanceReviewFinding,
-    AcceptanceReviewRecord,
-    AcceptanceReviewReport,
     ActionApplyReport,
     ActionPlanReport,
     CapabilityRouteReport,
@@ -209,117 +206,6 @@ def render_capability_route_markdown(report: CapabilityRouteReport) -> str:
         if record.reasons:
             lines.append(f"  - reasons: {'; '.join(record.reasons[:5])}")
     return "\n".join(lines) + "\n"
-
-
-# LLM: render_acceptance_review_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 渲染或汇总验收审查markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
-def render_acceptance_review_markdown(report: AcceptanceReviewReport) -> str:
-    mode = "dry-run" if report.dry_run else "apply"
-    # LLM: acceptance reports separate worker claims from evidence and parent decisions.
-    lines = [
-        "# SUBAGENT ACCEPTANCE",
-        "",
-        f"- generated_at: {report.generated_at}",
-        f"- mode: {mode}",
-        f"- total_records: {report.summary.get('total', 0)}",
-        "",
-        "## Summary",
-        "",
-        *_summary_lines(report.summary),
-        "",
-        "## Records",
-        "",
-    ]
-    if not report.records:
-        lines.append("- 暂无等待验收的子代理运行")
-    for record in report.records[:100]:
-        status = "OK" if record.ok else "FAIL"
-        lines.append(
-            f"- [{status}] `{record.run_id}` decision={record.decision} "
-            f"applied={record.applied} {record.before_status}/{record.before_verification_status}"
-            f" -> {record.after_status}/{record.after_verification_status}"
-        )
-        lines.append(f"  - {record.message}")
-        if record.worker_claims:
-            lines.append(f"  - worker: {record.worker_claims[0]}")
-        if record.evidence_facts:
-            lines.append(f"  - evidence: {'; '.join(record.evidence_facts[:3])}")
-        _extend_failed_acceptance_items(lines, record)
-    return "\n".join(lines) + "\n"
-
-
-# LLM: _extend_failed_acceptance_items 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 处理extendfailed验收条目相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
-def _extend_failed_acceptance_items(
-    lines: list[str],
-    record: AcceptanceReviewRecord,
-) -> None:
-    # LLM: 审查摘要只展示阻塞性失败，完整细节仍留在记录分区。
-    failed = [item for item in record.findings if not item.ok and item.severity != "P2"]
-    failed.extend(item for item in record.verifier_checks if not item.ok and item.severity != "P2")
-    for item in failed[:5]:
-        lines.append(f"  - [{item.severity}] {item.name}: {item.message}")
-
-
-# LLM: render_acceptance_record_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 渲染或汇总验收记录markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
-def render_acceptance_record_markdown(record: AcceptanceReviewRecord) -> str:
-    lines = [
-        "# ACCEPTANCE REVIEW",
-        "",
-        f"- id: {record.id}",
-        f"- run_id: {record.run_id}",
-        f"- mode: {'dry-run' if record.dry_run else 'apply'}",
-        f"- decision: {record.decision}",
-        f"- ok: {record.ok}",
-        f"- applied: {record.applied}",
-        f"- reviewer: {record.reviewer or 'none'}",
-        f"- note: {record.note or 'none'}",
-        f"- status: {record.before_status}/{record.before_verification_status} -> {record.after_status}/{record.after_verification_status}",
-        f"- message: {record.message}",
-        "",
-        "## Counts",
-        "",
-        f"- evidence: {record.evidence_count}",
-        f"- tests: {record.test_count}",
-        f"- artifacts: {record.artifact_count}",
-        "",
-        "## Worker Claims",
-        "",
-        *_list_or_none(record.worker_claims),
-        "",
-        "## Evidence Facts",
-        "",
-        *_list_or_none(record.evidence_facts),
-        "",
-        "## Parent Conclusions",
-        "",
-        *_list_or_none(record.parent_conclusions),
-        "",
-        "## Verifier Checks",
-        "",
-    ]
-    _extend_acceptance_review_items(lines, record.verifier_checks)
-    lines.extend(["## Findings", ""])
-    _extend_acceptance_review_items(lines, record.findings)
-    return "\n".join(lines) + "\n"
-
-
-# LLM: _extend_acceptance_review_items 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 处理extend验收审查条目相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
-def _extend_acceptance_review_items(
-    lines: list[str],
-    items: list[AcceptanceReviewFinding],
-) -> None:
-    # LLM: 验收记录分区共用渲染逻辑，但判定规则仍保留在调用方。
-    if not items:
-        lines.append("- none")
-        return
-    for item in items:
-        status = "OK" if item.ok else "FAIL"
-        lines.append(f"- [{status}] {item.severity} {item.name}: {item.message}")
-        if item.evidence_path:
-            lines.append(f"  - evidence: {item.evidence_path}")
 
 
 # LLM: _list_or_none 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

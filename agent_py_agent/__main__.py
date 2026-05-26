@@ -121,7 +121,6 @@ from .cli.scenario_cases import (
     run_scenario_real_model_recovery_case,
     run_scenario_runner_retry_case,
     run_scenario_structured_repair_case,
-    run_scenario_verification_case,
 )
 from .cli.scenario_utils import (
     ScenarioPaths,
@@ -144,7 +143,6 @@ from .cli.subagents import (
     cmd_subagent_detail,
     cmd_subagent_run,
     cmd_subagents,
-    cmd_subagents_acceptance,
     cmd_subagents_apply_actions,
     cmd_subagents_dispatch,
     cmd_subagents_due_check,

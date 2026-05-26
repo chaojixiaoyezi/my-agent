@@ -32,7 +32,7 @@ from .models import (
 )
 from .registry import ToolRegistry, ToolRegistryParams
 from .registry_list_tools import ListToolsTool
-from .web import FetchUrlTool, HttpRequestTool
+from .web import FetchUrlTool, HttpRequestTool, WebExtractTool, WebFetchTool
 from .web_search import WebSearchTool
 from .write_boundary import WRITE_TOOL_NAMES, validate_write_boundary
 
@@ -57,6 +57,8 @@ __all__ = [
     "ToolSearchHit",
     "ToolSpec",
     "VectorToolSearchProvider",
+    "WebExtractTool",
+    "WebFetchTool",
     "WebSearchTool",
     "WRITE_TOOL_NAMES",
     "WriteFileTool",

@@ -30,7 +30,6 @@ def _subagents_dispatch_options(args, agent=None) -> SubagentsDispatchOptions:
     return SubagentsDispatchOptions(
         apply=bool(args.apply),
         execute_runners=bool(args.execute_runners),
-        execute_acceptance_tests=bool(getattr(args, "execute_acceptance_tests", False)),
         planner=bool(args.planner),
         workflow_mode=args.workflow_mode or "off",
         max_runners=_configured_int(args.max_runners, config, "dispatch_default_max_runners"),
@@ -72,7 +71,6 @@ def _dispatch_params(options: SubagentsDispatchOptions) -> DispatchParams:
     return DispatchParams(
         apply=options.apply,
         execute_runners=options.execute_runners,
-        execute_acceptance_tests=options.execute_acceptance_tests,
         planner=options.planner,
         workflow_mode=options.workflow_mode,
         max_runners=options.max_runners,
@@ -106,7 +104,7 @@ def _print_watch_report(agent, report, options: SubagentsDispatchOptions) -> Non
     print("SUBAGENT DISPATCH WATCH")
     print(
         f"mode={mode} planner={options.planner} execute_runners={options.execute_runners} "
-        f"execute_acceptance_tests={options.execute_acceptance_tests} advance={options.advance} "
+        f"advance={options.advance} "
         f"cycles={report.summary.get('total', 0)}"
     )
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
@@ -134,7 +132,7 @@ def _print_dispatch_report(agent, report, options: SubagentsDispatchOptions) -> 
     print("SUBAGENT DISPATCH")
     print(
         f"mode={mode} planner={options.planner} execute_runners={options.execute_runners} "
-        f"execute_acceptance_tests={options.execute_acceptance_tests} total_records={report.summary.get('total', 0)}"
+        f"total_records={report.summary.get('total', 0)}"
     )
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
     if not report.records:
@@ -171,10 +169,8 @@ def cmd_subagents_dispatch(args) -> int:
     agent.capability_config_path = args.capability_config
     router = make_capability_router(agent, capability_config, args.skill_dir)
     if options.watch:
-        if not options.advance and (
-            options.execute_runners or options.planner or options.execute_acceptance_tests
-        ):
-            print("--watch 下 planner/runner/acceptance 推进需要显式加 --advance。", file=sys.stderr)
+        if not options.advance and (options.execute_runners or options.planner):
+            print("--watch 下 planner/runner 推进需要显式加 --advance。", file=sys.stderr)
             return 2
         try:
             report = agent.watch_subagents(router, capability_config, params=_watch_params(options))
@@ -229,9 +225,6 @@ def cmd_subagents_workflow_plan(args) -> int:
             f"- {worker['phase_id']} role={worker['role']} kind={worker['kind']} "
             f"depends_on={depends_on} checks={worker['acceptance_check_count']} :: {worker['task']}"
         )
-    print(f"parent_acceptance_checks={payload['parent_acceptance_check_count']}")
-    for check in payload["parent_acceptance_checklist"]:
-        print(f"- {check}")
     if payload["issues"]:
         print("issues=" + json.dumps(payload["issues"], ensure_ascii=False))
     if written_paths is not None:

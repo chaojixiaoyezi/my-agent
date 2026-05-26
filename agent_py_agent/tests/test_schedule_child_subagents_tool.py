@@ -41,17 +41,17 @@ def test_runner_context_schedule_bare_lineage_name_returns_payload_not_index_err
 
 
 # LLM: schedule_child_subagents without children can return LLM advice instead of forcing a fixed flow.
-# 函数用途: worker 已可测试但模型还没决定 QA 波次时，工具返回 quality_advice，让 LLM 选择 tester/bug_finder/acceptor。
+# 函数用途: worker 已可测试但模型还没决定 QA 波次时，工具返回 quality_advice，让 LLM 选择 tester/bug_finder。
 def test_runner_context_schedule_without_children_returns_quality_advice(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     build = tmp_path / "deliverables" / "shop" / "build"
     root = agent.subagents.create_run(
-        goal="示例网站需要 tester / bug_finder / acceptor，但由 LLM 决定 QA scope。",
+        goal="示例网站需要 tester / bug_finder，但由 LLM 决定 QA scope。",
         thought="root",
         plan=["root"],
         role="coordinator",
         extra_write_roots=[str(build)],
-        attributes={"required_qa_roles": ["tester", "bug_finder", "acceptor"]},
+        attributes={"required_qa_roles": ["tester", "bug_finder", "bug_finder"]},
     )
     worker = agent.subagents.create_run(
         goal=f"实现示例网站到 {build}",
@@ -62,8 +62,8 @@ def test_runner_context_schedule_without_children_returns_quality_advice(tmp_pat
         role="worker",
         extra_write_roots=[str(build)],
     )
-    worker.status = "AWAITING_ACCEPTANCE"
-    worker.verification_status = "NEEDS_ACCEPTANCE"
+    worker.status = "DONE"
+    worker.verification_status = "VERIFIED"
     agent.subagents.save(worker)
     agent._current_subagent_run_id = root.id
 
@@ -74,7 +74,7 @@ def test_runner_context_schedule_without_children_returns_quality_advice(tmp_pat
     assert payload["blocked"] is True
     assert payload["reason"] == "no_child_specs"
     assert payload["quality_advice"]["phase"] == "quality_wave_ready"
-    assert set(payload["quality_advice"]["suggested_roles"]) == {"tester", "bug_finder", "acceptor"}
+    assert set(payload["quality_advice"]["suggested_roles"]) == {"tester", "bug_finder"}
     assert payload["quality_advice"]["ready_work_refs"][0]["run_id"] == worker.id
     assert payload["quality_advice"]["suggested_children"][0]["source_run_ids"] == [worker.id]
     assert payload["created_run_ids"] == []

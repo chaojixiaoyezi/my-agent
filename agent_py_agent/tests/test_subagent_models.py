@@ -3,6 +3,30 @@ from __future__ import annotations
 
 import time
 
+from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings.config import AgentConfig
+
+
+# LLM: closeout_for_all_task_nodes is a config switch, not a new parent-acceptance subsystem.
+# 函数用途: 验证 SimpleAgent 只把统一 closeout 开关传入子代理管理器，后续由 runner 保存链路写反馈。
+def test_simple_agent_passes_closeout_task_node_config(tmp_path):
+    config = AgentConfig(
+        model_backend="echo",
+        closeout_for_all_task_nodes=True,
+        local_store_path=str(tmp_path / "local.db"),
+        local_store_files_dir=str(tmp_path / "files"),
+        local_store_events_path=str(tmp_path / "events.jsonl"),
+        memory_path=str(tmp_path / "memory.jsonl"),
+        subagent_workspace=str(tmp_path / "subagents"),
+        conversation_workspace=str(tmp_path / "conversation"),
+        collaboration_workspace=str(tmp_path / "collaboration"),
+    )
+
+    agent = SimpleAgent(config, tmp_path)
+
+    assert agent.subagents.closeout_for_all_task_nodes is True
+
+
 from agent_py_agent.agent.subagents.models import (
     DISPATCH_INELIGIBLE_STATUSES,
     CapabilityGap,
@@ -97,9 +121,6 @@ class TestQualityContract:
         assert qc.evidence_required == []
         assert qc.risk_report_required == ""
         assert qc.allowed_degradation == []
-        assert qc.final_judge == "parent_final_gate"
-        assert qc.cannot_self_accept is True
-        assert qc.parent_final_gate is True
 
     def test_quality_contract_with_values(self):
         """验证自定义值。"""
@@ -107,12 +128,10 @@ class TestQualityContract:
             user_visible_goal="完成登录功能",
             quality_bar="所有测试通过",
             failure_conditions=["编译错误", "运行崩溃"],
-            cannot_self_accept=False,
         )
         assert qc.user_visible_goal == "完成登录功能"
         assert qc.quality_bar == "所有测试通过"
         assert qc.failure_conditions == ["编译错误", "运行崩溃"]
-        assert qc.cannot_self_accept is False
 
 
 class TestContextManifest:

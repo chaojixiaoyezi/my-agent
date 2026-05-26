@@ -30,7 +30,6 @@ from .scenario_cases import (
     run_scenario_real_model_recovery_multi_round_case,
     run_scenario_runner_retry_case,
     run_scenario_structured_repair_case,
-    run_scenario_verification_case,
 )
 from .scenario_utils import (
     build_scenario_prompt,
@@ -134,7 +133,7 @@ class ScenarioDispatchRequest:
 def _cmd_scenario_dispatch(request: ScenarioDispatchRequest):
     agent = request.agent
     args = request.args
-    print_scenario_step(3, "父代理调度 runner 和验收")
+    print_scenario_step(3, "父代理调度 runner 和收口")
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(agent, capability_config, args.skill_dir)
     dispatch_summaries: list[dict[str, object]] = []
@@ -226,7 +225,6 @@ def cmd_scenario_test(args) -> int:
 # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _scenario_case_runners():
     return {
-        "verification": run_scenario_verification_case,
         "gateway-restart": run_scenario_gateway_restart_case,
         "gateway-cross-day-resume": run_scenario_gateway_cross_day_resume_case,
         "gateway-delayed-response": run_scenario_gateway_delayed_response_case,

@@ -78,7 +78,7 @@ def test_tool_call_result_and_subagent_result_envelopes_are_decodeable():
     subagent = SubagentResultEnvelope(
         result_id="result-1",
         run_id="run-1",
-        status="AWAITING_ACCEPTANCE",
+        status="DONE",
         summary="human display only",
         actual_tools=["read_file"],
         artifact_refs=[ArtifactRef(artifact_id="art-1", path="out.txt")],
@@ -122,7 +122,7 @@ def test_subagent_result_path_refs_are_structured_not_summary_inferred():
     subagent = SubagentResultEnvelope(
         result_id="result-1",
         run_id="run-1",
-        status="AWAITING_ACCEPTANCE",
+        status="DONE",
         summary="display text mentions ignored.txt but that is not a ref",
         path_refs=refs,
     )

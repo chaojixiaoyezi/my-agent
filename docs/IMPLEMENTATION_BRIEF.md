@@ -22,7 +22,7 @@
 
 4. **Workflow Compiler**：匹配到的模板 → 生成 worker spec（包含 QualityContract、acceptance_checks、context_packs）。
 
-5. **Parent Gate**：派工前生成可执行计划，合并到父级验收 checklist。
+5. **Closeout**：派工前生成可执行计划，合并到最终收口 checklist。
 
 ### 约束
 
@@ -45,7 +45,7 @@
 - [ ] `task.raw_json` bug 修复，`create_run()` 在 `workflow_mode != "off"` 时不崩溃
 - [ ] `my-agent subagents-dispatch --workflow-mode plan` 能生成 workflow plan 并写入任务
 - [ ] `my-agent subagents-dispatch --workflow-mode auto` 能自动派工
-- [ ] 至少一个内置模板能被 Router 匹配、Compiler 编译、Parent Gate 验收
+- [ ] 至少一个内置模板能被 Router 匹配、Compiler 编译、Closeout 验收
 - [ ] `python3 -m pytest -q` 全量通过
 - [ ] 更新 `docs/ROADMAP.md` 和 `docs/COMPLETED.md`
 
@@ -55,7 +55,7 @@
 
 ### 解决问题
 
-runner 输出的 patches 目前只是计划/状态记录，必须由父代理或集成器验收后手动处理，无法自动应用和集成验证。
+runner 输出的 patches 目前只是计划/状态记录，必须由上级或集成器检查后手动处理，无法自动应用和集成验证。
 
 ### 范围
 

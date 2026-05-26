@@ -69,19 +69,6 @@ def index_capability_route_via(service: Any, record: object) -> None:
     )
 
 
-# LLM: index_acceptance_review_via 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 处理index验收审查via相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
-def index_acceptance_review_via(service: Any, record: object) -> None:
-    index_dataclass_record_via(
-        service,
-        DataclassRecordIndexParams(
-            "subagent_acceptance_review", record.id,
-            f"Acceptance {record.decision} {record.run_id}",
-            record, "subagent_acceptance_review_logged",
-        ),
-    )
-
-
 # LLM: index_patch_review_via 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 函数用途: 处理index补丁审查via相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def index_patch_review_via(service: Any, record: object) -> None:

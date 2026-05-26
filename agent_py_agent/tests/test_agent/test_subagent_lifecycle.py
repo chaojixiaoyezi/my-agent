@@ -162,7 +162,7 @@ def test_subagent_takeover_records_locked_files():
         record = agent.subagents.record_takeover(
             task.id,
             take_over_by="parent-supervisor",
-            reason="子代理长时间无验收证据，父代理接管收口。",
+            reason="子代理长时间无交付证据，父代理接管收口。",
             locked_files=["src/login.py", "tests/test_login.py"],
         )
         loaded = agent.subagents.load(task.id)

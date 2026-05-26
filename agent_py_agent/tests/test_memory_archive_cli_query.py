@@ -87,7 +87,7 @@ def _cross_day_snapshot(run_id: str) -> CompressionSnapshot:
             "request_id": "request-cross-day",
             "run_id": run_id,
             "task_id": run_id,
-            "status": "awaiting_acceptance",
+            "status": "pending_closeout",
         }],
         next_actions=["读取 STATUS.md、WORK_LOG.md、HANDOFF.md 后继续。"],
         task_refs=[run_id],
@@ -119,12 +119,12 @@ def _make_echo_agent(root: Path) -> SimpleAgent:
 
 def _write_task_handoff_files(task) -> None:
     Path(task.status_file).write_text(
-        "# STATUS\n\n- status: AWAITING_ACCEPTANCE\n- next: 读取 HANDOFF.md 后继续验收\n",
+        "# STATUS\n\n- status: DONE\n- next: 读取 HANDOFF.md 后继续验收\n",
         encoding="utf-8",
     )
     Path(task.handoff_file).write_text(
         "# HANDOFF\n\n## Current State\n\n- 跨天 handoff 已准备好。\n\n"
-        "## Next Step\n\n- 父会话读取 STATUS/WORK_LOG/HANDOFF 后继续验收。\n",
+        "## Next Step\n\n- 父会话收口。\n",
         encoding="utf-8",
     )
 

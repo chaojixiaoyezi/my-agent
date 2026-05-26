@@ -1,4 +1,4 @@
-"""LLM: focused tests for static-site parent acceptance validation."""
+"""LLM: focused tests for static-site closeout validation."""
 
 from pathlib import Path
 
@@ -192,7 +192,7 @@ def test_static_site_check_can_scope_to_declared_html_files(tmp_path):
 
 
 # LLM: R59 shopping E2E generated loginForm/registerForm but JS bound login-form/register-form.
-# 函数用途: 父级静态验收要能发现表单 id 和本地 app.js 绑定目标不一致，避免按钮假可用。
+# 函数用途: 静态产物检查要能发现表单 id 和本地 app.js 绑定目标不一致，避免按钮假可用。
 def test_static_site_check_blocks_missing_validate_form_targets(tmp_path):
     _write_site(
         tmp_path,
@@ -330,7 +330,7 @@ def test_static_site_check_allows_group_guarded_missing_dom_binding(tmp_path):
 
 
 # LLM: DOM id binding mismatches catch generated buttons that look clickable but break at runtime.
-# 函数用途: app.js 读取不存在的按钮 id 时，父级静态验收要失败并给出具体缺失 id。
+# 函数用途: app.js 读取不存在的按钮 id 时，静态产物检查要失败并给出具体缺失 id。
 def test_static_site_check_blocks_missing_dom_id_targets(tmp_path):
     _write_site(
         tmp_path,
@@ -387,7 +387,7 @@ def test_static_site_check_blocks_missing_dom_id_targets_by_default(tmp_path):
     assert record.validation_result["missing_dom_id_hits"] == ["getElementById:productGrid"]
 
 
-# LLM: Explicit required DOM ids let parent acceptance preserve business flow contracts.
+# LLM: Explicit required DOM ids let closeout preserve business flow contracts.
 # 函数用途: 当任务声明必须存在某些页面区域时，static_site_check 要检查这些 id，而不是只看 HTML 结构。
 def test_static_site_check_blocks_missing_required_dom_ids(tmp_path):
     _write_site(
@@ -417,7 +417,7 @@ def test_static_site_check_blocks_missing_required_dom_ids(tmp_path):
 
 
 # LLM: inferred full-page checks must catch malformed HTML that browsers would render incorrectly.
-# 函数用途: 完整 HTML 产物正文落进 style/head 时，父级验收应提示先修骨架，而不是只追 DOM id。
+# 函数用途: 完整 HTML 产物正文落进 style/head 时，最终收口应提示先修骨架，而不是只追 DOM id。
 def test_static_site_check_blocks_malformed_complete_html(tmp_path):
     _write_site(
         tmp_path,

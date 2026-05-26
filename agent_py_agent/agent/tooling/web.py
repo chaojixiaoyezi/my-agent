@@ -7,7 +7,7 @@ from __future__ import annotations
 
 给人看的解释：
 这个文件只负责访问网络。
-`fetch_url` 偏向'简单打开一个网页'，`http_request` 偏向'调接口、带 header、带 body'。
+`web_fetch` 偏向'简单打开一个网页'，`web_extract` 偏向'批量抽取来源'，`http_request` 偏向'调接口、带 header、带 body'。
 这里统一限制超时时间和返回长度，避免一次请求把主流程卡死或把 prompt 撑爆。
 """
 
@@ -24,7 +24,10 @@ from typing import Any
 
 from ..contracts.gates import NetworkResolver, NetworkSafetyFacts, evaluate_network_safety_gate
 from .models import BaseTool, ToolExecutionResult, ToolSpec
-from .web_html_preview import format_html_response, is_html_response
+from .web_fetch_tools import WebExtractTool as _WebExtractTool
+from .web_fetch_tools import WebFetchTool as _WebFetchTool
+from .web_fetch_tools import WebRuntimeDeps
+from .web_html_preview import format_html_response, is_html_response, visible_html_text
 
 _MAX_URL_CHARS = 4096
 _MAX_BODY_CHARS = 1_000_000
@@ -36,6 +39,14 @@ _MAX_METHOD_CHARS = 16
 _MIN_RESPONSE_PREVIEW_CHARS = 256
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _HTTP_METHOD_RE = re.compile(r"^[A-Z][A-Z0-9_-]*$")
+_TEXTUAL_CONTENT_MARKERS = (
+    "text/",
+    "json",
+    "xml",
+    "javascript",
+    "x-www-form-urlencoded",
+)
+_MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 # LLM: _ResponseParts 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
@@ -46,6 +57,15 @@ class _ResponseParts:
     status: int
     headers: Any
     body: str
+
+
+@dataclass(frozen=True)
+class _HttpRequestParts:
+    url: str
+    method: str
+    headers: dict[str, str]
+    body_text: str | None
+    max_chars: int
 
 
 # LLM: _has_control_chars 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -261,6 +281,38 @@ class FetchUrlTool(BaseTool):
             return ToolExecutionResult("fetch_url", False, f"请求失败: {exc.__class__.__name__}")
 
 
+# LLM: WebFetchTool keeps the old import path while implementation lives in web_fetch_tools.py.
+# 类用途: 给旧调用方保留 agent.tooling.web.WebFetchTool，同时注入共享 URL、安全和错误格式 helper。
+class WebFetchTool(_WebFetchTool):
+    def __init__(self, *, max_chars: int, timeout: int, **kwargs: Any):
+        super().__init__(WebRuntimeDeps(
+            max_chars=max_chars,
+            timeout=timeout,
+            resolver=kwargs.pop("resolver", None) or _default_network_resolver,
+            normalize_url=_normalize_url,
+            response_preview_chars=_response_preview_chars,
+            network_safety_error=_network_safety_error,
+            format_http_error=_format_http_error,
+            **kwargs,
+        ))
+
+
+# LLM: WebExtractTool keeps the old import path while implementation lives in web_fetch_tools.py.
+# 类用途: 给旧调用方保留 agent.tooling.web.WebExtractTool，同时注入共享 URL、安全和错误格式 helper。
+class WebExtractTool(_WebExtractTool):
+    def __init__(self, *, max_chars: int, timeout: int, **kwargs: Any):
+        super().__init__(WebRuntimeDeps(
+            max_chars=max_chars,
+            timeout=timeout,
+            resolver=kwargs.pop("resolver", None) or _default_network_resolver,
+            normalize_url=_normalize_url,
+            response_preview_chars=_response_preview_chars,
+            network_safety_error=_network_safety_error,
+            format_http_error=_format_http_error,
+            **kwargs,
+        ))
+
+
 # LLM: HttpRequestTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
 # 类用途: HttpRequestTool 数据模型，集中保存 工具系统 的结构化状态。
 class HttpRequestTool(BaseTool):
@@ -292,7 +344,7 @@ class HttpRequestTool(BaseTool):
                 "带请求头、请求体去联调 API",
             ],
             avoid_when=[
-                "只是想看一个普通网页正文时，fetch_url 更简单",
+                "只是想看一个普通网页正文时，web_fetch 更简单",
             ],
             keywords=["API", "接口", "HTTP", "POST", "GET", "Webhook", "请求头", "请求体"],
             parameters={
@@ -319,40 +371,50 @@ class HttpRequestTool(BaseTool):
     # 函数用途: 执行 HttpRequestTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
-            url = _normalize_url(params.get("url"))
-            method = _normalize_method(params.get("method", "GET"))
-            headers = self._normalize_headers(params.get("headers"))
-            max_chars = _response_preview_chars(params, self.max_chars)
-            body = params.get("body")
-            body_text = None if body is None else _scalar_text(
-                body,
-                name="body",
-                max_chars=_MAX_BODY_CHARS,
-                allow_empty=True,
-            )
+            request = self._request_parts(params)
         except ValueError as exc:
             return ToolExecutionResult("http_request", False, str(exc))
         network_error = _network_safety_error(
             "http_request",
-            url,
+            request.url,
             self.resolver,
             self.allowed_private_hosts,
             self.allow_private_resolution,
         )
         if network_error is not None:
             return network_error
-        data = None if body_text is None else body_text.encode("utf-8")
+        return self._execute_request(request)
 
-        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    def _request_parts(self, params: dict[str, Any]) -> _HttpRequestParts:
+        body = params.get("body")
+        body_text = None if body is None else _scalar_text(
+            body,
+            name="body",
+            max_chars=_MAX_BODY_CHARS,
+            allow_empty=True,
+        )
+        return _HttpRequestParts(
+            url=_normalize_url(params.get("url")),
+            method=_normalize_method(params.get("method", "GET")),
+            headers=self._normalize_headers(params.get("headers")),
+            body_text=body_text,
+            max_chars=_response_preview_chars(params, self.max_chars),
+        )
+
+    def _execute_request(self, request: _HttpRequestParts) -> ToolExecutionResult:
+        data = None if request.body_text is None else request.body_text.encode("utf-8")
+        req = urllib.request.Request(request.url, data=data, method=request.method, headers=request.headers)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 response_body = resp.read().decode("utf-8", "replace")
-                return _format_response(
+                result = _format_response(
                     _ResponseParts("http_request", resp.status, resp.headers, response_body),
-                    max_chars,
+                    request.max_chars,
                 )
+                _attach_http_advisory(result, request)
+                return result
         except urllib.error.HTTPError as exc:
-            return _format_http_error("http_request", exc, max_chars)
+            return _format_http_error("http_request", exc, request.max_chars)
         except (urllib.error.URLError, TimeoutError) as exc:
             return ToolExecutionResult("http_request", False, f"请求失败: {exc.__class__.__name__}")
 
@@ -381,6 +443,19 @@ class HttpRequestTool(BaseTool):
         raise ValueError("headers 必须为空、对象或 JSON 字符串")
 
 
+def _attach_http_advisory(result: ToolExecutionResult, request: _HttpRequestParts) -> None:
+    effect = "mutating" if request.method in _MUTATING_METHODS else "read_only"
+    advisories = ["idempotency_key"] if effect == "mutating" and not _has_idempotency_key(request.headers) else []
+    result.result_envelope.update({
+        "http_effect": effect,
+        "method": request.method,
+        "advisories": advisories,
+        "advisory_details": {
+            "idempotency_key": "变更类请求建议提供幂等键，便于网络重试时避免重复副作用。"
+        } if advisories else {},
+    })
+
+
 # LLM: _normalize_header_dict 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
 # 函数用途: 把输入值归一成 工具系统 内部使用的稳定格式。
 def _normalize_header_dict(headers: dict[Any, Any]) -> dict[str, str]:
@@ -406,3 +481,7 @@ def _normalize_header_dict(headers: dict[Any, Any]) -> dict[str, str]:
             raise ValueError("headers 值不能包含换行")
         normalized[name] = header_value
     return normalized
+
+
+def _has_idempotency_key(headers: dict[str, str]) -> bool:
+    return any(key.lower() in {"idempotency-key", "x-idempotency-key"} for key in headers)

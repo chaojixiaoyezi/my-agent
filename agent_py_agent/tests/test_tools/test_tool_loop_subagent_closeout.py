@@ -40,7 +40,7 @@ class _DispatchThenQualityBackend:
                 backend=self.name,
             )
         return ModelResponse(
-            text="继续创建 tester 和 acceptor 子代理，不能只因 worker 验收通过就收口。",
+            text="继续创建 tester 和 bug_finder 子代理，不能只因 worker 验收通过就收口。",
             backend=self.name,
         )
 
@@ -68,7 +68,7 @@ class _DispatchThenOverclaimBackend:
 
 
 # LLM: verifies runner completion artifacts short-circuit extra model turns.
-# 函数用途: 子代理成功写出自己的 output.json 后，应直接进入等待验收，避免继续请求模型导致卡住或烧 token。
+# 函数用途: 子代理成功写出自己的 output.json 后，应直接进入等待收口，避免继续请求模型导致卡住或烧 token。
 def test_subagent_runner_stops_after_output_json_write():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
@@ -81,7 +81,7 @@ def test_subagent_runner_stops_after_output_json_write():
         agent = SimpleAgent(cfg, workspace)
         task = agent.subagents.create_run(
             goal="写出 output.json 后收口",
-            thought="模拟真实 runner 完成产物后等待父级验收。",
+            thought="模拟真实 runner 完成产物后等待最终收口。",
             plan=["写结果", "停止工具循环"],
             allowed_tools=["write_file"],
         )
@@ -90,8 +90,8 @@ def test_subagent_runner_stops_after_output_json_write():
         result = agent.run_subagent(task.id, dry_run=False, probe=False)
 
         assert agent.backend.calls == 1
-        assert result.status == "AWAITING_ACCEPTANCE"
-        assert result.verification_status == "NEEDS_ACCEPTANCE"
+        assert result.status == "DONE"
+        assert result.verification_status == "VERIFIED"
         assert result.structured_output_found is True
         assert result.structured_output_ok is True
         assert result.tool_rounds == 1
@@ -121,7 +121,7 @@ def test_completed_dispatch_returns_to_parent_synthesis_turn():
         assert "deliverables/report.md" in result.response
 
 
-# LLM: explicit QA/acceptor instructions must override deterministic one-worker closeout.
+# LLM: explicit QA/bug_finder instructions must override deterministic one-worker closeout.
 # 函数用途: 用户要求 worker 完成后继续创建测试/验收角色时，主循环不能因为已有 worker DONE/VERIFIED 就本地收口。
 def test_completed_dispatch_does_not_close_when_prompt_requires_quality_roles():
     with tempfile.TemporaryDirectory() as td:
@@ -133,20 +133,20 @@ def test_completed_dispatch_does_not_close_when_prompt_requires_quality_roles():
             max_tool_rounds=4,
         )
         agent = SimpleAgent(cfg, workspace)
-        _done_verified_task(agent, required_qa_roles=["tester", "acceptor"])
+        _done_verified_task(agent, required_qa_roles=["tester", "bug_finder"])
         agent.backend = _DispatchThenQualityBackend()
 
-        result = agent.run("worker 完成后必须继续创建 tester 和 acceptor 做测试验收", save=False)
+        result = agent.run("worker 完成后必须继续创建 tester 和 bug_finder 做测试验收", save=False)
 
         assert agent.backend.calls == 2
-        assert "tester/acceptor" in result.response
+        assert "tester/bug_finder" in result.response
         assert "不能按完成汇报" in result.response
         assert "未再发起额外模型请求" not in result.response
 
 
-# LLM: generic human wording like "验收结果" should not force a separate acceptor role.
-# 函数用途: 复现真实 E2E 里用户只要求主代理安排和验收，却被误判缺 acceptor 导致完成态自相矛盾。
-def test_generic_acceptance_result_wording_does_not_require_acceptor_role():
+# LLM: generic human wording like "验收结果" should not force a separate bug_finder role.
+# 函数用途: 复现真实 E2E 里用户只要求主代理安排和验收，却被误判缺 bug_finder 导致完成态自相矛盾。
+def test_generic_acceptance_result_wording_does_not_require_bug_finder_role():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         cfg = AgentConfig(
@@ -267,7 +267,7 @@ def _done_verified_task(agent, *, required_qa_roles: list[str] | None = None):
     ))
     Path(task.output_json).write_text(
         json.dumps({
-            "status": "AWAITING_ACCEPTANCE",
+            "status": "DONE",
             "summary": "fixture done",
             "evidence_packets": [{
                 "id": "evpkt-dispatch-closeout",

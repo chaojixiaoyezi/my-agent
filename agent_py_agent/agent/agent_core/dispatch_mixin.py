@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..subagent import DispatchReport
-from .dispatch_acceptance_records import make_acceptance_records
 from .dispatch_capability_followup import (
     PostRunnerCapabilityFollowupParams,
     run_post_runner_capability_followup,
@@ -33,10 +32,7 @@ from .dispatch_params import (
     RunnerBatchContext,
     merge_dispatch_params,
 )
-from .dispatch_record_params import (
-    AcceptanceRecordParams,
-    PatchReviewRecordParams,
-)
+from .dispatch_record_params import PatchReviewRecordParams
 from .dispatch_runner_batches import execute_runner_jobs
 from .dispatch_runner_selection import scoped_runner_tasks
 
@@ -68,9 +64,6 @@ class DispatchFinalizeParams:
     reviewer: str
     note: str
     limit: int
-    execute_acceptance_tests: bool
-    auto_apply_acceptance_followup: bool
-    finalize_acceptance: bool
     existing_records: list
     parent_run_id: str = ""
     root_id: str = ""
@@ -117,24 +110,6 @@ class _DispatchCollectionBase:
             )
         )
         records.extend(patch_records)
-        if not params.finalize_acceptance:
-            return records
-        acceptance_records = make_acceptance_records(
-            AcceptanceRecordParams(
-                self,
-                params.apply,
-                params.reviewer,
-                params.note,
-                params.limit,
-                params.execute_acceptance_tests,
-                params.auto_apply_acceptance_followup,
-                root_id=params.root_id,
-                parent_run_id=params.parent_run_id,
-                include_run_ids=params.include_run_ids,
-                exclude_run_ids=params.exclude_run_ids,
-            )
-        )
-        records.extend(acceptance_records)
         return records
 
 
@@ -278,7 +253,6 @@ def _dispatch_context_from_params(
         root_id=params.root_id,
         include_run_ids=params.include_run_ids,
         exclude_run_ids=params.exclude_run_ids,
-        finalize_acceptance=params.finalize_acceptance,
         router=router,
     )
 
@@ -291,9 +265,6 @@ def _dispatch_finalize_params(params: DispatchParams, records: list) -> Dispatch
         reviewer=params.reviewer,
         note=params.note,
         limit=params.limit,
-        execute_acceptance_tests=params.execute_acceptance_tests,
-        auto_apply_acceptance_followup=params.auto_apply_acceptance_followup,
-        finalize_acceptance=params.finalize_acceptance,
         existing_records=records,
         parent_run_id=params.parent_run_id,
         root_id=params.root_id,
@@ -319,7 +290,6 @@ def _finalize_scoped_tasks(agent, params: DispatchFinalizeParams) -> list:
         root_id=params.root_id,
         include_run_ids=params.include_run_ids,
         exclude_run_ids=params.exclude_run_ids,
-        finalize_acceptance=params.finalize_acceptance,
         router=CapabilityRouter(),
     )
     return scoped_runner_tasks(agent.subagents.list_runs(), ctx)

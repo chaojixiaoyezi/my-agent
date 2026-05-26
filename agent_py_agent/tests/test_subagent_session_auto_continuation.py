@@ -74,8 +74,8 @@ def test_subagent_runner_auto_continues_through_multiple_local_compacts(tmp_path
     packet = json.loads((Path(loaded.agent_run_latest_session_continue_packet_json)).read_text(encoding="utf-8"))
 
     assert backend.calls == 5
-    assert result.status == "AWAITING_ACCEPTANCE"
-    assert result.verification_status == "NEEDS_ACCEPTANCE"
+    assert result.status == "DONE"
+    assert result.verification_status == "VERIFIED"
     assert len(package_dirs) >= 4
     assert loaded.latest_summary == "长任务已经完成。"
     assert packet["session_compact"]["metadata_ref"].endswith("latest_metadata.json")
@@ -104,7 +104,7 @@ def test_subagent_session_continuation_preserves_executed_tools(tmp_path: Path) 
     output = json.loads(Path(loaded.output_json).read_text(encoding="utf-8"))
 
     assert backend.calls == 3
-    assert result.status == "AWAITING_ACCEPTANCE"
+    assert result.status == "DONE"
     assert loaded.used_tools == ["read_file"]
     assert output["structured_output"]["actual_tools"] == ["read_file"]
 
@@ -149,7 +149,7 @@ def test_task_local_write_progress_updates_continue_packet(tmp_path: Path) -> No
 
 
 # LLM: complete HTML progress should steer runners toward structured closeout instead of endless writing.
-# 函数用途: 复现真实 E2E 里 HTML 已闭合但子代理继续读写不收口；进度包应提示写 output.json 交父级验收。
+# 函数用途: 复现真实 E2E 里 HTML 已闭合但子代理继续读写不收口；进度包应提示写 output.json 交最终收口。
 def test_task_local_write_progress_completed_html_prompts_output_json_closeout(tmp_path: Path) -> None:
     task = _progress_task(tmp_path)
     artifact = tmp_path / "deliverables" / "site-output" / "index.html"
@@ -269,7 +269,7 @@ def test_task_local_output_json_closeout_preserves_product_integrity_progress(tm
         SubagentToolProgressRequest(
             task=task,
             tool="write_file",
-            payload={"path": str(output_json), "content": '{"status":"AWAITING_ACCEPTANCE"}'},
+            payload={"path": str(output_json), "content": '{"status":"DONE"}'},
             output="已写入文件: output.json",
             ok=True,
             tool_round=9,
@@ -362,13 +362,13 @@ def _long_partial_response(index: int) -> str:
 
 
 # LLM: _final_subagent_result returns a valid structured runner result after compact continuation.
-# 函数用途: 生成最终 SUBAGENT_RESULT，让 manager 走正常 AWAITING_ACCEPTANCE 收口。
+# 函数用途: 生成最终 SUBAGENT_RESULT，让 manager 走正常 DONE 收口。
 def _final_subagent_result(*, used_tools: list[str] | None = None) -> str:
     tools_json = json.dumps(used_tools or [], ensure_ascii=False)
     return (
         "[SUBAGENT_RESULT]\n"
         "{\n"
-        '  "status": "AWAITING_ACCEPTANCE",\n'
+        '  "status": "DONE",\n'
         '  "summary": "长任务已经完成。",\n'
         f'  "used_tools": {tools_json},\n'
         '  "used_skills": [],\n'

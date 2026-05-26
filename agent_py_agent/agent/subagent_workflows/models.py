@@ -32,7 +32,7 @@ class WorkflowTemplate:
     solves: list[str]
     fit_for: list[str]
     phases: list[WorkflowPhase]
-    parent_acceptance: list[str]
+    final_checks: list[str] = field(default_factory=list)
     source: str = ""
     source_path: str = ""
 

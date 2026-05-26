@@ -120,8 +120,8 @@ def _runner_timeout_role_aliases(role: str) -> list[str]:
         aliases.append("worker")
     if normalized in {"review", "reviewer", "critic", "qa", "tester"}:
         aliases.append("tester")
-    if normalized in {"acceptor", "acceptance", "verifier"}:
-        aliases.append("acceptor")
+    if normalized in {"verifier"}:
+        aliases.append("tester")
     if (
         ("coordinator" in normalized and normalized != "coordinator")
         or normalized in {"leader", "manager", "planner", "dispatcher"}

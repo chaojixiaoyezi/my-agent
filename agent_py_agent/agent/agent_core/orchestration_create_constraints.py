@@ -40,7 +40,6 @@ _RELAXATION_ALIAS_MAP = {
     "comments_allowed": "no_comments",
 }
 _NON_WORKER_ROLES = {
-    "acceptor",
     "bug_finder",
     "coordinator",
     "critic",

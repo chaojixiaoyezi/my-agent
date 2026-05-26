@@ -1,10 +1,10 @@
-# LLM: Static site validator gives parent acceptance a deterministic check for generated web artifacts.
+# LLM: Static site validator gives closeout a deterministic check for generated web artifacts.
 # 模块用途: 检查静态站点目录的必需文件、本地链接/资源和模板占位符，不执行 JS、不访问网络。
 # 2026-05-18: strict_dom_bindings checks unguarded JS id lookups; required_dom_ids declares mandatory DOM.
 
 from __future__ import annotations
 
-"""Bounded static-site validation for parent acceptance tests."""
+"""Bounded static-site validation for closeout tests."""
 
 import re
 from dataclasses import dataclass, field
@@ -51,7 +51,7 @@ class StaticSiteCheckResult:
     repair_hints: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
-    # LLM: ok is the single pass/fail boolean consumed by parent acceptance.
+    # LLM: ok is the single pass/fail boolean consumed by closeout.
     # 函数用途: 判断静态站点检查是否通过；任何缺文件、坏链接、占位符或失效控件都会失败。
     @property
     def ok(self) -> bool:
@@ -120,7 +120,7 @@ class StaticSiteHtmlScanRequest:
 
 
 # LLM: run_static_site_check is the public validation entrypoint used by TestExecutor.
-# 函数用途: 检查 workspace 内静态站点目录，并返回父级验收能直接读取的执行记录。
+# 函数用途: 检查 workspace 内静态站点目录，并返回最终收口能直接读取的执行记录。
 def run_static_site_check(test: dict[str, Any], workspace_root: Path) -> TestExecutionRecord:
     site_root, error = _resolve_site_root(test, workspace_root)
     if error:

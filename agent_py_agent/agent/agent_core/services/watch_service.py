@@ -230,14 +230,6 @@ def _execute_watch_dispatch(agent, params):
 # 避免触发“模型顶层 dispatch 不得猜历史任务”的保护。
 def _watch_scoped_dispatch_params(agent: SimpleAgent, dispatch_params: DispatchParams) -> DispatchParams:
     updates: dict[str, object] = {}
-    if (
-        not dispatch_params.apply
-        and dispatch_params.finalize_acceptance
-        and not dispatch_params.execute_acceptance_tests
-        and not dispatch_params.auto_apply_acceptance_followup
-        and int(getattr(dispatch_params, "max_runners", 0) or 0) > 0
-    ):
-        updates["finalize_acceptance"] = False
     if dispatch_params.include_run_ids or dispatch_params.parent_run_id or dispatch_params.root_id:
         return replace(dispatch_params, **updates) if updates else dispatch_params
     run_ids = [

@@ -3,7 +3,7 @@
   "name": "Code Feature Split",
   "solves": [
     "Feature work that can be split across implementation and test/documentation lanes",
-    "Parallelizable changes with a shared parent acceptance contract"
+    "Parallelizable changes with a shared closeout contract"
   ],
   "fit_for": [
     "medium sized code changes",
@@ -35,11 +35,11 @@
       "task": "Add focused tests or fixtures for the shared feature contract.",
       "depends_on": ["design_contract"],
       "acceptance": [
-        "Tests cover the parent acceptance criteria"
+        "Tests cover the closeout criteria"
       ]
     }
   ],
-  "parent_acceptance": [
+  "final_checks": [
     "Implementation and tests agree on the same contract",
     "Focused verification passes",
     "Any cross-worker conflicts are resolved by the parent"

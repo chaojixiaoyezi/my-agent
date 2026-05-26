@@ -1,5 +1,5 @@
 # LLM: Subagent kernel read model; keep it refs-first and free of orchestration side effects.
-# 模块用途: 汇总子代理 run/session/task 的核心状态，给父级、接管和验收链路提供统一读取入口。
+# 模块用途: 汇总子代理 run/session/task 的核心状态，给父级、接管和收口链路提供统一读取入口。
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from .models import SubAgentTask
 from .protocol import build_task_address, build_task_envelope
 
 _RUNNING_STATUSES = {"RUNNING"}
-_COMPLETED_STATUSES = {"DONE", "COMPLETED", "ACCEPTED", "AWAITING_ACCEPTANCE", "VERIFIED"}
+_COMPLETED_STATUSES = {"DONE", "COMPLETED", "ACCEPTED", "VERIFIED"}
 _FAILED_STATUSES = {"FAILED", "ERROR", "TIMEOUT"}
 _BLOCKED_STATUSES = {"BLOCKED"}
 _TAKEOVER_CANDIDATE_STATUSES = _FAILED_STATUSES | _BLOCKED_STATUSES

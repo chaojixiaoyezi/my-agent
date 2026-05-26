@@ -63,7 +63,7 @@ class AcceptedSubagentBackend(BaseBackend):
             text=(
                 "[SUBAGENT_RESULT]\n"
                 "{\n"
-                '  "status": "AWAITING_ACCEPTANCE",\n'
+                '  "status": "DONE",\n'
                 '  "summary": "调度器 runner 已完成。",\n'
                 '  "used_tools": [],\n'
                 '  "used_skills": [],\n'
@@ -91,7 +91,7 @@ class AcceptedSubagentBackend(BaseBackend):
 
 
 # LLM: CapabilityThenAcceptedBackend simulates a worker that needs one parent grant before finishing.
-# 类用途: 第一轮返回 controlled_exec 能力申请，第二轮看到父级 grant 后返回可验收结果，用于测试 dispatch 内部闭环。
+# 类用途: 第一轮返回 controlled_exec 能力申请，第二轮看到父级收口结果，用于测试 dispatch 内部闭环。
 class CapabilityThenAcceptedBackend(BaseBackend):
     """测试用后端：先申请 controlled_exec，授权后完成。"""
 
@@ -190,8 +190,8 @@ def _incomplete_write_done_result() -> str:
     return (
         "[SUBAGENT_RESULT]\n"
         "{\n"
-        '  "status": "AWAITING_ACCEPTANCE",\n'
-        '  "summary": "HTML已补齐并等待父级验收。",\n'
+        '  "status": "DONE",\n'
+        '  "summary": "HTML已补齐并等待最终收口。",\n'
         '  "used_tools": ["apply_patch"],\n'
         '  "used_skills": [],\n'
         '  "evidence": [{"kind": "command", "summary": "HTML完整闭合", "ok": true}],\n'
@@ -215,7 +215,7 @@ def _controlled_exec_done_result() -> str:
     return (
         "[SUBAGENT_RESULT]\n"
         "{\n"
-        '  "status": "AWAITING_ACCEPTANCE",\n'
+        '  "status": "DONE",\n'
         '  "summary": "controlled_exec 已通过父级 grant 执行。stdout_ref=stdout.log audit_ref=audit.jsonl trash_manifest_ref=trash_manifest.jsonl",\n'
         '  "used_tools": ["controlled_exec"],\n'
         '  "used_skills": [],\n'
@@ -260,7 +260,7 @@ class BoundaryWriteSubagentBackend(BaseBackend):
             text=(
                 "[SUBAGENT_RESULT]\n"
                 "{\n"
-                '  "status": "AWAITING_ACCEPTANCE",\n'
+                '  "status": "DONE",\n'
                 '  "summary": "越界写入已被工具层阻止。",\n'
                 '  "used_tools": [],\n'
                 '  "used_skills": [],\n'
@@ -314,7 +314,7 @@ class CoordinatorAnalysisOnlyBackend(BaseBackend):
             text=(
                 "[SUBAGENT_RESULT]\n"
                 "{\n"
-                '  "status": "AWAITING_ACCEPTANCE",\n'
+                '  "status": "DONE",\n'
                 '  "summary": "我已经分析完，下一步应该调用 schedule_child_subagents 创建 worker。",\n'
                 '  "used_tools": [],\n'
                 '  "used_skills": [],\n'
@@ -366,7 +366,7 @@ def _hierarchical_schedule_result_response(backend: str) -> ModelResponse:
         text=(
             "[SUBAGENT_RESULT]\n"
             "{\n"
-            '  "status": "AWAITING_ACCEPTANCE",\n'
+            '  "status": "DONE",\n'
             '  "summary": "主节点已创建下一层 child coordinator，等待父级继续调度。",\n'
             '  "used_tools": ["schedule_child_subagents"],\n'
             '  "used_skills": [],\n'
@@ -408,7 +408,7 @@ class FlakyThenAcceptedSubagentBackend(BaseBackend):
             text=(
                 "[SUBAGENT_RESULT]\n"
                 "{\n"
-                '  "status": "AWAITING_ACCEPTANCE",\n'
+                '  "status": "DONE",\n'
                 '  "summary": "重试后 runner 已完成。",\n'
                 '  "used_tools": [],\n'
                 '  "used_skills": [],\n'
@@ -455,7 +455,7 @@ class RepairingSubagentBackend(BaseBackend):
             text=(
                 "[SUBAGENT_RESULT]\n"
                 "{\n"
-                '  "status": "AWAITING_ACCEPTANCE",\n'
+                '  "status": "DONE",\n'
                 '  "summary": "已通过修复回合补齐结构化结果。",\n'
                 '  "used_tools": [],\n'
                 '  "used_skills": [],\n'
@@ -508,7 +508,7 @@ class CoordinatorToolLimitBlockedBackend(BaseBackend):
             text=(
                 "[SUBAGENT_RESULT]\n"
                 "{\n"
-                '  "status": "AWAITING_ACCEPTANCE",\n'
+                '  "status": "DONE",\n'
                 '  "summary": "直接 child 已完成，但工具轮数上限导致无法重复验证。",\n'
                 '  "used_tools": [],\n'
                 '  "used_skills": [],\n'
@@ -520,7 +520,7 @@ class CoordinatorToolLimitBlockedBackend(BaseBackend):
                 '  "tests": [],\n'
                 '  "patches": [],\n'
                 '  "lessons": [],\n'
-                '  "next_actions": ["parent_acceptance"],\n'
+                '  "next_actions": ["final_closeout"],\n'
                 '  "blocked_reason": "",\n'
                 '  "failure_type": ""\n'
                 "}\n"

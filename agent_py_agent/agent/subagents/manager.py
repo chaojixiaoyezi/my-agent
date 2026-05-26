@@ -1,5 +1,5 @@
 # LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
-# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+# 模块用途: 支撑主代理派发、跟踪和汇总子代理任务。
 
 from __future__ import annotations
 
@@ -10,10 +10,7 @@ SubAgentManager 仍然是外部代码使用的入口，但具体能力已经分�
 它本身不写业务逻辑，只组合那些已经按职责拆开的能力。
 """
 
-# LLM: kernel mixin adds the read-only subagent kernel snapshot facade without changing lifecycle behavior.
 from .kernel import SubagentKernelMixin
-from .manager_acceptance import SubAgentAcceptanceMixin
-from .manager_acceptance_findings import SubAgentAcceptanceFindingMixin
 from .manager_actions import SubAgentActionMixin
 from .manager_base import SubAgentBaseMixin, SubAgentManagerInitParams
 from .manager_board import SubAgentBoardMixin
@@ -36,8 +33,8 @@ from .manager_workflow import SubAgentWorkflowMixin
 # LLM: memory gate review is separate from learning drafts and never promotes by itself.
 
 
-# LLM: SubAgentManager 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 协调subagent管理器的下游服务和持久化入口，对外维持稳定管理接口；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
+# LLM: SubAgentManager 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果和报告展示仍按原契约工作。
+# 类用途: 协调subagent管理器的下游服务和持久化入口，对外维持稳定管理接口；关键副作用: 方法可能触发任务状态、执行器结果和报告展示相关副作用，需保持公开契约稳定。
 class SubAgentManager(
     SubAgentBaseMixin,
     SubAgentLifecycleMixin,
@@ -45,10 +42,8 @@ class SubAgentManager(
     SubAgentBudgetMixin,
     SubAgentActionMixin,
     SubAgentCapabilityMixin,
-    SubAgentAcceptanceMixin,
     SubAgentPatchMixin,
     SubAgentDispatchMixin,
-    SubAgentAcceptanceFindingMixin,
     SubAgentRunnerContextMixin,
     SubAgentRunnerResultMixin,
     SubAgentChannelProbeMixin,
@@ -66,8 +61,8 @@ class SubAgentManager(
     它本身不写业务逻辑，只组合那些已经按职责拆开的能力。
     """
 
-    # LLM: __init__ 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
+    # LLM: __init__ 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果和报告展示仍按原契约工作。
+    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持任务状态、执行器结果和报告展示上的返回值和副作用边界稳定。
     def __init__(
         self,
         workspace,
@@ -81,6 +76,7 @@ class SubAgentManager(
         enable_self_learning=False,
         debug_trace_level=0,
         takeover_chain_max_depth=0,
+        closeout_for_all_task_nodes=False,
     ):
         # LLM: role_template_dirs lets runtime load user JSON role templates while keeping built-ins external.
         # 函数用途: 当调用方不传目录时，底层会自动使用工作区 .agent/subagents/roles。
@@ -95,6 +91,7 @@ class SubAgentManager(
             enable_self_learning=enable_self_learning,
             debug_trace_level=debug_trace_level,
             takeover_chain_max_depth=takeover_chain_max_depth,
+            closeout_for_all_task_nodes=closeout_for_all_task_nodes,
         )
         super().__init__(
             workspace,

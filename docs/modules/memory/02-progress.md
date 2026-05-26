@@ -79,7 +79,7 @@
 - 2026-05-08 Auto Compact/Resume 持久化边界修正：即使配置开启 `memory_compact_auto_allow_apply`，`run(..., save=False)` / `--no-save` 仍会阻止自动 apply 写入 `memory_archive/compact_applies/*`，继续只返回人工确认建议。
 - 2026-05-08 Runtime Fact Source 解析边界修正：显式验收/约束/测试段落遇到未知标题会停止当前桶，避免“实施步骤”等后续段落被误收为 acceptance/constraints/latest_tests。
 - 2026-05-08 Compact work-state scope 安全修正：request/session/task/run id 现在按字面路径解析，`*`、`[]` 等 glob 字符不会扩大扫描 `tasks/*/agents/*`；半自动 completion 命令也会保留原 `--session-id/--request-id/--task-id/--run-id` scope。
-- 2026-05-08 compact + parent acceptance 联调第一片已落地：新增 focused 测试串起 subagent task、compact apply/resume、continue packet、parent acceptance apply 阻断和 auto-policy dry-run；断言 auto-policy 仍 `executed=false`、`mutates_task_state=false`，且 task 状态不被 compact 自动链路改动。
+- 2026-05-08 compact + closeout 联调第一片已落地：新增 focused 测试串起 subagent task、compact apply/resume、continue packet、closeout apply 阻断和 auto-policy dry-run；断言 auto-policy 仍 `executed=false`、`mutates_task_state=false`，且 task 状态不被 compact 自动链路改动。
 - 2026-05-13 Code-size high-risk 清零第一片已落地：`memory_archive/query/resume_guidance.py` 承接 `ResumeGuidanceRequest` bundle，CLI/runtime 恢复建议不再用散装参数；相关 focused tests、ruff、strict code-size 已验证 `hard=0 high-risk=0 soft=0`。
 - 2026-05-13 Home Runtime 读取侧迁移第一片已落地：`memory_store/jsonl.py` 的搜索/recall 会把 `~/.my-agent/memory/daily/YYYY-MM-DD.jsonl` 作为旧 `memory_path` 的补充事实源并去重，`all()` / `index_all()` 仍保持旧 memory_path 语义；新增 `home_runtime_query.py`，统一读取 daily memory、`workspace/tasks/{date}/{task_slug}` 和 home status。
 - 2026-05-13 Home Runtime CLI/Doctor 第一片已落地：新增 `home-status`、`memory-daily-list`、`task-workspace-list`；`memory-doctor --json` 会报告 home 入口文件、关键目录和计数；`memory-resume --task-id/--run-id` 在旧 subagent 工单不存在时可回退到主代理 task workspace 的 `state.json` / `timeline.jsonl`。
@@ -142,7 +142,7 @@
 - Resume 交接包增强第一片解决了“恢复结果只给路径和简单状态，不够接手”的问题；现在 handoff/context block 直接把接手者最需要看的目标、约束、验收、测试和 guard 状态摆出来。
 - 自动 Guard 放行第一片解决了“guard 只能阻断，不能表达安全可继续”的问题；现在字段完整时能给自动流程一个明确 go 信号，但工具执行仍必须由后续更高层策略显式触发。
 - Continue Packet 解决了“resume 输出能看但缺统一继续契约”的问题；现在手动、半自动和自动 compact 都能读同一份 packet 判断目标、约束、验收、测试、refs 和 guard 状态。
-- compact + parent acceptance 联调解决了“恢复上下文可继续”和“子代理业务验收通过”容易混淆的问题；现在测试明确这两条链路相邻但不互相越权。
+- compact + closeout 联调解决了“恢复上下文可继续”和“子代理业务验收通过”容易混淆的问题；现在测试明确这两条链路相邻但不互相越权。
 - P0 安全切片解决了三类恢复风险：compact 快照不会丢 routed/resume 恢复线索；artifact manifest 不会越界读本机任意绝对路径；shared workspace 不再由最后一次保存覆盖 sibling 已登记的 finding/evidence。
 
 ## 下一步
@@ -150,7 +150,7 @@
 - 扩展 `scripts/check_doc_sync.py` 后续规则时，继续保持 memory 的 `02-progress.md` 和 `04-structure.md` 同步更新。
 - 继续补损坏 snapshot、task 权威文件缺失、默认注入过多等异常场景联合测试。
 - 继续补 subagent checkpoint artifact 缺失、损坏和旧任务未保存新字段时的恢复降级测试。
-- 继续把 Phase 6 显式收口链接入更高层 verifier / acceptance 报告：当前已经有确定性 CLI 和 focused E2E，后续可把 `verifier_report.json` 纳入父级验收摘要。
+- 继续把 Phase 6 显式收口链接入更高层 verifier / acceptance 报告：当前已经有确定性 CLI 和 focused E2E，后续可把 `verifier_report.json` 纳入最终收口摘要。
 - 记忆推模式接入更多决策点：planner 决策前自动注入 context 类型记忆（已实现：subagent_mixin.py run_parent_planner 前调用 push_planning_memories）
 - 验证推模式记忆注入后 agent 行为是否正确改善
 
@@ -346,5 +346,5 @@
 - 对标吸收：会话运行时 的结构化工具输出和输出截断测试、通道运行时 的 E2E/live/docker/package acceptance、长期助手 的“live path 前必须 E2E”和动态 toolset 可用性过滤。my-agent 采用“模型自检只是说明，机器验收才是证据”的原则。
 - 2026-05-18 继续收口：新增 `my-agent real-e2e` 正式 CLI，默认跑主代理基础确定性矩阵并写 refs-first 报告；`--artifact` 可把真实模型产物接入统一验收。`artifact_acceptance.py` 扩展为通用入口，当前覆盖 HTML、JSON、CSV、XLSX、PDF 和未知格式非空检查，后续浏览器/Excel/PDF 渲染验收可继续挂在同一合同下。
 - 2026-05-18 主代理真实任务批量测试计划第一片已落地：新增 `main_agent_real_task_suite.py` 和 `main_agent_real_task_suite_cases.py`，`my-agent real-e2e --real-task-suite` 会生成家具 HTML、购物站点、GitHub 升星 XLSX、DeepSeek 论文翻译 PDF 的 prompt refs、acceptance refs、expected artifact refs、worker slot 和 timeout；默认只规划不调用模型，避免继续手动乱开多个长期进程。
-- 2026-05-18 主代理真实任务受控执行第一片已落地：新增 `main_agent_real_task_execution.py` 三件套和 `main_agent_real_task_acceptance.py`，`my-agent real-e2e --run-real-tasks` 会给每个 case 写独立配置、命令、stdout/stderr、acceptance report 和 workspace，并按 `--real-task-max-workers` 并发执行。执行完成后按 expected artifact 合同验收产物，避免“进程 0 退出但没交付文件”被误判成功；未传 `--real-task-base-config` 时使用离线 echo 配置，传真实配置才会调用真实模型。
+- 2026-05-18 主代理真实任务受控执行第一片已落地：新增 `main_agent_real_task_execution.py` 三件套和 `main_agent_real_task_acceptance.py`，`my-agent real-e2e --run-real-tasks` 会给每个 case 写独立配置、命令、stdout/stderr、acceptance report 和 workspace，并按 `--real-task-max-workers` 并发执行。执行完成后按 expected artifact 合同检查产物，避免“进程 0 退出但没交付文件”被误判成功；未传 `--real-task-base-config` 时使用离线 echo 配置，传真实配置才会调用真实模型。
 - 2026-05-18 主代理真实任务复验第一片已落地：新增 `main_agent_real_task_revalidation.py` 和 `my-agent real-e2e --revalidate-real-task-report`，可以读取已有 execution report 并只读复验产物，不重新启动模型进程。真实 API 跑完后可反复检查文件质量和验收报告。

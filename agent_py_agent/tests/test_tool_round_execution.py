@@ -104,7 +104,7 @@ def test_subagent_output_json_response_derives_packet_from_report(tmp_path):
     output_json.write_text(
         json.dumps(
             {
-                "status": "AWAITING_ACCEPTANCE",
+                "status": "DONE",
                 "summary": "root 已完成协调并写出报告。",
                 "evidence_packets": [],
             },
@@ -132,7 +132,7 @@ def test_subagent_output_json_response_does_not_hide_bad_packet(tmp_path):
     reports_dir.mkdir()
     (reports_dir / "coordinator_report.md").write_text("report", encoding="utf-8")
     original = {
-        "status": "AWAITING_ACCEPTANCE",
+        "status": "DONE",
         "summary": "bad packet",
         "evidence_packets": [{"id": "bad", "claim": "done"}],
     }
@@ -187,6 +187,6 @@ def test_subagent_progress_closeout_response_uses_latest_tool_progress(tmp_path)
 
     assert response is not None
     assert "[SUBAGENT_RESULT]" in response.text
-    assert '"status": "AWAITING_ACCEPTANCE"' in response.text
+    assert '"status": "DONE"' in response.text
     assert str(artifact) in response.text
     assert str(progress_ref) in response.text

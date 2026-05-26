@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 
 # LLM: ParentPlannerParsedOutput 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存父级规划器parsedoutput字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
+# 类用途: 集中保存父级收口和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class ParentPlannerParsedOutput:
     """父代理 planner 的结构化模型输出。"""

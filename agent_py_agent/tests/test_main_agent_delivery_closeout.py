@@ -98,7 +98,9 @@ def test_tool_loop_closes_out_from_structured_run_params_delivery_contract():
         assert (workspace / ".agent_delivery/closeout.json").exists()
 
 
-def test_tool_loop_reports_malformed_delivery_contract_before_artifact_closeout():
+# LLM: Malformed delivery contracts should become model-visible hints, not terminal blocks.
+# 函数用途: 验证合同 Doctor 只提示坏合同字段，不再用 BLOCKED 终止普通任务。
+def test_tool_loop_reports_malformed_delivery_contract_without_blocking():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         backend = MalformedDeliveryContractBackend()
@@ -110,11 +112,44 @@ def test_tool_loop_reports_malformed_delivery_contract_before_artifact_closeout(
         doctor_report = json.loads((workspace / ".agent_delivery/contract_doctor.json").read_text(encoding="utf-8"))
         assert backend.calls == 3
         assert backend.saw_contract_doctor is True
-        assert "[DELIVERY_CONTRACT_DOCTOR_BLOCKED]" in result.response
+        assert "[DELIVERY_CONTRACT_DOCTOR_BLOCKED]" not in result.response
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
         assert doctor_report["ok"] is False
         assert doctor_report["repair_actions"][0]["recommended_action"] == "rematerialize_delivery_contract"
         assert "DELIVERY_CONTRACT_ARTIFACTS_NOT_LIST" in {
+            finding["code"] for finding in doctor_report["findings"]
+        }
+
+
+# LLM: Malformed validation details should not terminally block a task that still has an artifact target.
+# 函数用途: 验证内部 validation_contract 字段写坏时只返还 doctor 上下文，不直接用 BLOCKED 否定已有产物目标。
+def test_tool_loop_does_not_block_immediately_on_malformed_validation_contract_with_artifact_target():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        backend = ValidationContractStringListBackend()
+        result = _agent(workspace, backend, max_tool_rounds=3).run(
+            "生成一个表格。",
+            params=RunParams(
+                delivery_contract={
+                    "schema_version": "delivery_contract.v1",
+                    "artifacts": [
+                        {
+                            "artifact_id": "report",
+                            "kind": "xlsx",
+                            "preferred_path": "outputs/report.xlsx",
+                            "validation_contract": {"required_columns": ""},
+                        }
+                    ],
+                },
+                save=False,
+            ),
+        )
+
+        assert backend.calls == 3
+        assert backend.saw_contract_doctor is True
+        assert "[DELIVERY_CONTRACT_DOCTOR_BLOCKED]" not in result.response
+        doctor_report = json.loads((workspace / ".agent_delivery/contract_doctor.json").read_text(encoding="utf-8"))
+        assert "VALIDATION_CONTRACT_STRING_LIST_INVALID" in {
             finding["code"] for finding in doctor_report["findings"]
         }
 
@@ -369,6 +404,30 @@ class MalformedDeliveryContractBackend:
         assert "rematerialize_delivery_contract" in prompt
         self.saw_contract_doctor = True
         return ModelResponse(text="已收到合同结构返工要求。", backend=self.name)
+
+
+# LLM: ValidationContractStringListBackend proves malformed validation fields re-enter the model loop.
+# 类用途: 模拟产物目标存在但 validation_contract 字段类型写坏，确认不再直接终止任务。
+class ValidationContractStringListBackend:
+    name = "fake_validation_contract_string_list_backend"
+
+    def __init__(self):
+        self.calls = 0
+        self.saw_contract_doctor = False
+
+    def generate(self, prompt: str, on_chunk=None):
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"write_file","path":"outputs/report.xlsx","content":"placeholder"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        if self.calls == 2:
+            return ModelResponse(text="表格已生成，请系统验收。", backend=self.name)
+        assert "delivery-contract-doctor" in prompt
+        assert "VALIDATION_CONTRACT_STRING_LIST_INVALID" in prompt
+        self.saw_contract_doctor = True
+        return ModelResponse(text="收到内部合同字段问题，我会继续按用户目标修正。", backend=self.name)
 
 
 # LLM: _closeout_finding_codes returns validator finding codes from the first artifact.

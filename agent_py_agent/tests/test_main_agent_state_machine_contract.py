@@ -27,7 +27,7 @@ def test_run_state_snapshot_projects_done_without_acceptance_to_verifying():
     task = SimpleNamespace(
         id="run-2",
         status="DONE",
-        verification_status="NEEDS_ACCEPTANCE",
+        verification_status="VERIFIED",
         channel_status="OK",
         has_progress=True,
     )

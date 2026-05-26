@@ -299,7 +299,7 @@ class TestRecordAfterTaskAction:
             action_id="action_after",
             run_id="run_after",
             action="run_acceptance",
-            would_change_status_to="NEEDS_ACCEPTANCE",
+            would_change_status_to="VERIFIED",
         )
 
         record = mixin._record_after_task_action(

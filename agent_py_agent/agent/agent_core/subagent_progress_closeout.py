@@ -1,5 +1,5 @@
 # LLM: Subagent progress closeout converts task-local product progress into a structured runner result.
-# 模块用途: 当子代理已经写出声明产物但还没写 output.json 时，用机器进度包生成 SUBAGENT_RESULT。
+# 模块用途: 当子代理已经写出声明产物但还没写 output.json 时，用机器进度包生成 DONE 结果。
 
 from __future__ import annotations
 
@@ -64,14 +64,14 @@ def _progress_ready_for_closeout(progress: dict[str, object], task) -> bool:
 
 
 # LLM: _progress_closeout_payload is the synthetic SUBAGENT_RESULT contract for ready artifacts.
-# 函数用途: 把 latest_tool_progress 的 refs 转成 artifacts/evidence_packets/tests，交后续验收链路继续判断业务质量。
+# 函数用途: 把 latest_tool_progress 的 refs 转成 artifacts/evidence_packets/tests，交父级汇总或最终 closeout 继续判断业务质量。
 def _progress_closeout_payload(progress: dict[str, object], task) -> dict[str, object]:
     artifact_ref = str(progress.get("latest_written_path") or "").strip()
     progress_ref = str(progress.get("latest_tool_progress_ref") or "").strip()
     evidence_refs = [ref for ref in [progress_ref] if ref]
     return {
-        "status": "AWAITING_ACCEPTANCE",
-        "summary": "task-local progress shows a declared product artifact awaiting parent acceptance.",
+        "status": "DONE",
+        "summary": "task-local progress shows a declared product artifact ready for parent summarization.",
         "used_tools": [],
         "used_skills": [],
         "evidence": _progress_evidence(progress_ref, artifact_ref),
@@ -82,7 +82,7 @@ def _progress_closeout_payload(progress: dict[str, object], task) -> dict[str, o
         "tests": _progress_tests(progress),
         "patches": [],
         "lessons": [],
-        "next_actions": ["parent_acceptance"],
+        "next_actions": ["summarize_or_deliver"],
         "blocked_reason": "",
         "failure_type": "",
     }
@@ -103,8 +103,8 @@ def _progress_evidence(progress_ref: str, artifact_ref: str) -> list[dict[str, o
     ]
 
 
-# LLM: _progress_evidence_packets links the product artifact and progress packet for parent acceptance.
-# 函数用途: 生成最小 evidence packet，后续验收器可追踪到产物和结构检查记录。
+# LLM: _progress_evidence_packets links the product artifact and progress packet for closeout.
+# 函数用途: 生成最小 evidence packet，后续 closeout 可追踪到产物和结构检查记录。
 def _progress_evidence_packets(
     artifact_ref: str, evidence_refs: list[str], task: object
 ) -> list[dict[str, object]]:
@@ -121,7 +121,7 @@ def _progress_evidence_packets(
 
 
 # LLM: _progress_artifacts exposes the product artifact as a ref-only payload.
-# 函数用途: 把 latest_written_path 转成父级验收能读取的 artifact 引用。
+# 函数用途: 把 latest_written_path 转成父级汇总能读取的 artifact 引用。
 def _progress_artifacts(artifact_ref: str) -> list[dict[str, object]]:
     return [
         {
@@ -150,7 +150,7 @@ def _progress_tests(progress: dict[str, object]) -> list[dict[str, object]]:
             "name": "declared product artifact exists",
             "validation_method": "file_exists",
             "ok": True,
-            "summary": "declared output path exists and is non-empty enough for parent acceptance",
+            "summary": "declared output path exists and is non-empty enough for closeout",
         }
     ]
 
@@ -162,7 +162,7 @@ def _closeout_response(payload: dict[str, object], fallback: ModelResponse) -> M
         "[SUBAGENT_RESULT]\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
         "[/SUBAGENT_RESULT]\n\n"
-        "系统检测到 task-local progress 已形成可验收产物引用，已结束工具循环并等待父级验收。"
+        "系统检测到 task-local progress 已形成产物引用，已结束工具循环并交回父级汇总。"
     )
     return ModelResponse(text=text, backend=fallback.backend)
 
@@ -181,7 +181,7 @@ def _same_path(first: object, second: object) -> bool:
 
 
 # LLM: _matches_declared_product_output prevents generic progress closeout from promoting scratch files.
-# 函数用途: 非 HTML/未知格式只在命中机器声明的 output_refs/output_files/artifact_refs 时自动交父级验收。
+# 函数用途: 非 HTML/未知格式只在命中机器声明的 output_refs/output_files/artifact_refs 时自动收口。
 def _matches_declared_product_output(path: str, task: object) -> bool:
     return any(_same_path(path, ref) for ref in _declared_product_refs(task))
 

@@ -43,7 +43,7 @@ def _direct_children_recovery_payload() -> dict:
     return {
         "parent_run_id": "root-1",
         "total": 1,
-        "by_status": {"AWAITING_ACCEPTANCE": 1},
+        "by_status": {"DONE": 1},
         "needs_recovery": True,
         "next_action": "inspect_or_rescue_direct_children",
         "recovery_run_ids": ["child-1"],
@@ -168,7 +168,7 @@ def test_dispatch_externalized_result_keeps_top_level_completion_gate():
             "must_not_report_done": True,
             "blocking_run_ids": ["child-bad"],
             "next_action": "repair_or_continue_blocking_run_ids",
-            "parent_acceptance_repair_advice": {
+            "final_closeout_repair_advice": {
                 "failed_run_ids": ["child-bad"],
                 "suggested_tool_call": {"tool": "create_subagents", "goal": "修复 child-bad"},
             },
@@ -218,18 +218,18 @@ def test_orchestration_externalized_result_keeps_current_turn_run_state():
     assert "records" not in rendered
 
 
-# LLM: Parent acceptance repair advice must survive dispatch output externalization.
+# LLM: Closeout repair advice must survive dispatch output externalization.
 # 函数用途: dispatch_subagents 输出过大时，live prompt 摘要仍要保留修复子代理建议，而不是丢掉测试失败线索。
-def test_dispatch_externalized_result_keeps_parent_acceptance_repair_advice():
+def test_dispatch_externalized_result_keeps_final_closeout_repair_advice():
     output = json.dumps(
         {
             "direct_children": {
                 "parent_run_id": "root-1",
                 "total": 1,
-                "by_status": {"AWAITING_ACCEPTANCE": 1},
-                "next_action": "create_repair_child_from_parent_acceptance_refs",
+                "by_status": {"DONE": 1},
+                "next_action": "create_repair_child_from_final_closeout_refs",
                 "rejected_acceptance_run_ids": ["child-1"],
-                "parent_acceptance_repair_advice": {
+                "final_closeout_repair_advice": {
                     "failed_run_ids": ["child-1"],
                     "failure_refs": [{"run_id": "child-1", "test_ref": "/tmp/test_execution.json"}],
                     "suggested_tool_call": {
@@ -247,21 +247,21 @@ def test_dispatch_externalized_result_keeps_parent_acceptance_repair_advice():
         _dispatch_externalized_archive_record(output),
     )
 
-    assert "parent_acceptance_repair_advice" in rendered
-    assert "create_repair_child_from_parent_acceptance_refs" in rendered
+    assert "final_closeout_repair_advice" in rendered
+    assert "create_repair_child_from_final_closeout_refs" in rendered
     assert "schedule_child_subagents" in rendered
     assert "HTML语法静态检查" in rendered
     assert "records" not in rendered
 
 
-# LLM: Top-level parent-acceptance repair advice needs a copyable tool call, not only a clipped blob.
+# LLM: Top-level closeout repair advice needs a copyable tool call, not only a clipped blob.
 # 函数用途: 顶层 dispatch 输出外置时，修复建议要保留独立 tool/refs/call 行，方便 root 下一轮直接派修复小傻妞。
 def test_dispatch_externalized_result_keeps_top_level_parent_repair_tool_call():
     output = json.dumps(
         {
             "completion_status": {"status": "not_complete"},
             "blocking_run_ids": ["child-1"],
-            "parent_acceptance_repair_advice": {
+            "final_closeout_repair_advice": {
                 "failed_run_ids": ["child-1"],
                 "failure_refs": [{"run_id": "child-1", "test_ref": "/tmp/test_execution.json"}],
                 "suggested_tool_call": {
@@ -269,7 +269,7 @@ def test_dispatch_externalized_result_keeps_top_level_parent_repair_tool_call():
                     "count": 1,
                     "role": "worker",
                     "agent_name": "小傻妞-验收修复",
-                    "goal": "修复父级验收失败的 child-1，读取 test_execution.json 后只修复被点名的问题。",
+                    "goal": "修复最终收口失败的 child-1，读取 test_execution.json 后只修复被点名的问题。",
                 },
             },
             "records": [{"message": "z" * 2000}],
@@ -281,8 +281,8 @@ def test_dispatch_externalized_result_keeps_top_level_parent_repair_tool_call():
         _dispatch_externalized_archive_record(output),
     )
 
-    assert "parent_acceptance_repair_next_tool: create_subagents" in rendered
-    assert "parent_acceptance_repair_suggested_tool_call" in rendered
+    assert "final_closeout_repair_next_tool: create_subagents" in rendered
+    assert "final_closeout_repair_suggested_tool_call" in rendered
     assert "小傻妞-验收修复" in rendered
     assert "/tmp/test_execution.json" in rendered
     assert "records" not in rendered

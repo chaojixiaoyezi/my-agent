@@ -104,11 +104,11 @@
 
 ### Workflow Router/Compiler 集成
 
-解决问题：用户必须手写 goal 和 acceptance，workflow 集成后需要能从模板自动生成 worker spec 和父级验收条件，减少人工配置，缓解派错工、漏验收和 fake done。
+解决问题：用户必须手写 goal 和 acceptance，workflow 集成后需要能从模板自动生成 worker spec 和最终收口条件，减少人工配置，缓解派错工、漏验收和 fake done。
 
 落地内容：
 - 修复 `SubAgentManager.create_run()` 的 `task.raw_json` 崩溃路径，改为把计划持久化到 `SubAgentTask.workflow_plan` / `workflow_mode` / `workflow_template_id`
-- `create_run()` 和 `dispatch` 现在都会把 workflow worker 验收项与 parent gate checklist 合并进父任务 `acceptance_checks`
+- `create_run()` 和 `dispatch` 现在都会把 workflow worker 验收项与 closeout checklist 合并进父任务 `acceptance_checks`
 - `dispatch_subagents` CLI 和编排工具新增 `workflow_mode=off|plan|auto`，`plan` 只写计划，`auto` 会把内置模板落成 worker 子工单
 - `spawn_subagents` / `create_subagents` 已接通配置型 workflow 模式，`subagent_workflow_mode=manual` 会映射到建单时的 `plan`
 - 自动派工会把 phase、依赖关系和 worker 子工单写回任务目录，避免重复创建
@@ -310,7 +310,7 @@
 
 落地内容：
 - `AcceptanceReviewFinding`/`AcceptanceReviewRecord`/`AcceptanceReviewReport`
-- `subagents-acceptance` 命令，默认 dry-run
+- `subagents-tests` 命令，默认 dry-run
 - 验收检查：工单完整、通道非 BROKEN、有 ok evidence、无失败 evidence、无 open capability request/gap、tests 不失败、patches 已审核
 
 验证：`test_agent.py` 覆盖验收链路。

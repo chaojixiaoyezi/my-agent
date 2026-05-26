@@ -29,7 +29,7 @@
 | --- | --- | --- | --- |
 | [log-analysis.md](log-analysis.md) | 日志分析模块 | 部分落地 | 第一版验收状态、剩余缺口和下一批 worker 切片 |
 | [subagent-quality-contract.md](subagent-quality-contract.md) | subagent 派工与验收 | 设计中 | 质量契约、受控施工队、context pack、producer/critic/reviewer、用户少说模式 |
-| [main-agent-contract-testing.md](main-agent-contract-testing.md) | 主代理合同驱动测试 | 进行中 | 真实环境降级为最终验收，主开发切到合同单测、fake tool、fake LLM 和 replay |
+| [main-agent-contract-testing.md](main-agent-contract-testing.md) | 主代理合同驱动测试 | 进行中 | 真实环境降级为最终收口，主开发切到合同单测、fake tool、fake LLM 和 replay |
 
 ## 后续待拆模块
 

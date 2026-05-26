@@ -56,13 +56,13 @@ class TestMakeDispatchRecord:
                 before_status="PLANNING",
                 after_status="RUNNING",
                 before_verification_status="UNVERIFIED",
-                after_verification_status="NEEDS_ACCEPTANCE",
+                after_verification_status="VERIFIED",
             )
 
             assert record.before_status == "PLANNING"
             assert record.after_status == "RUNNING"
             assert record.before_verification_status == "UNVERIFIED"
-            assert record.after_verification_status == "NEEDS_ACCEPTANCE"
+            assert record.after_verification_status == "VERIFIED"
 
     def test_make_dispatch_record_with_evidence_paths(self):
         """验证带证据路径的 dispatch 记录。"""
@@ -73,7 +73,7 @@ class TestMakeDispatchRecord:
 
             evidence = ["/path/to/evidence1.md", "/path/to/evidence2.json"]
             record = agent.subagents.make_dispatch_record(
-                step="acceptance_review",
+                step="runner_result",
                 action="accept",
                 run_id="test-run-003",
                 evidence_paths=evidence,
@@ -134,7 +134,7 @@ class TestBuildDispatchReport:
                     ok=False,
                 ),
                 agent.subagents.make_dispatch_record(
-                    step="acceptance_review",
+                    step="runner_result",
                     action="accept",
                     run_id="run-001",
                     ok=True,
@@ -146,7 +146,7 @@ class TestBuildDispatchReport:
             assert report.dry_run is False
             assert report.summary["total"] == 3
             assert report.summary["runner_execute"] == 2
-            assert report.summary["acceptance_review"] == 1
+            assert report.summary["runner_result"] == 1
             assert report.summary["ok"] == 2
             assert report.summary["failed"] == 1
 

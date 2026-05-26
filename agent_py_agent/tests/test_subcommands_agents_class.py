@@ -38,8 +38,6 @@ class TestSubagentsSubcommandRegistration:
             "subagents-plan-actions",
             "subagents-apply-actions",
             "subagents-route-capabilities",
-            "subagents-acceptance",
-            "subagents-acceptance-plan",
             "subagents-tests",
             "subagents-patches",
             "subagents-dispatch",
@@ -157,17 +155,6 @@ class TestSubagentsSubcommandRegistration:
         args = parser.parse_args(["subagents-dispatch", "--apply"])
         assert args.apply is True
 
-    def test_subagents_dispatch_has_execute_acceptance_tests_argument(self):
-        """测试 subagents-dispatch 可显式触发父级验收 tests，但不自动 apply。"""
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
-
-        parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers(dest="subcommand")
-        add_subagents_subcommands(sub)
-
-        args = parser.parse_args(["subagents-dispatch", "--execute-acceptance-tests"])
-        assert args.execute_acceptance_tests is True
-
     def test_subagent_run_has_run_id_argument(self):
         """测试 subagent-run 命令有 run_id 参数。
 
@@ -247,47 +234,6 @@ class TestSubagentsReviewCommandRegistration:
         args = parser.parse_args([])
         assert args.capability_config == str(DEFAULT_CAPABILITY_CONFIG)
 
-    def test_subagents_acceptance_has_review_args(self):
-        """测试 subagents-acceptance 命令有审核相关参数。
-
-        验证 reviewer 和 note 参数正确工作。
-        """
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
-
-        parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers(dest="subcommand")
-        add_subagents_subcommands(sub)
-
-        args = parser.parse_args([
-            "subagents-acceptance",
-            "--reviewer", "test-reviewer",
-            "--note", "测试备注"
-        ])
-        assert args.reviewer == "test-reviewer"
-        assert args.note == "测试备注"
-
-    def test_subagents_acceptance_has_real_test_override_args(self):
-        """测试 subagents-acceptance 命令可以显式覆盖真实测试执行配置。"""
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
-
-        parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers(dest="subcommand")
-        add_subagents_subcommands(sub)
-
-        args = parser.parse_args([
-            "subagents-acceptance",
-            "--execute-tests",
-            "--test-timeout", "9",
-        ])
-        assert args.execute_tests is True
-        assert args.test_timeout == 9
-
-        args = parser.parse_args([
-            "subagents-acceptance",
-            "--no-execute-tests",
-        ])
-        assert args.execute_tests is False
-
     def test_subagents_tests_has_view_and_rerun_args(self):
         """测试 subagents-tests 命令有查看和显式重跑参数。"""
         from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
@@ -305,109 +251,6 @@ class TestSubagentsReviewCommandRegistration:
         assert args.run_id == "run-123"
         assert args.re_run is True
         assert args.timeout == 9
-
-    def test_subagents_acceptance_plan_has_run_id_argument(self):
-        """测试 subagents-acceptance-plan 命令必须指定 run_id。"""
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
-
-        parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers(dest="subcommand")
-        add_subagents_subcommands(sub)
-
-        args = parser.parse_args(["subagents-acceptance-plan", "run-123"])
-        assert args.run_id == "run-123"
-
-    def test_subagents_acceptance_plan_has_write_argument(self):
-        """测试 subagents-acceptance-plan 可显式写入 dry-run 决策文件。"""
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
-
-        parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers(dest="subcommand")
-        add_subagents_subcommands(sub)
-
-        args = parser.parse_args(["subagents-acceptance-plan", "run-123", "--write"])
-        assert args.write is True
-
-    def test_subagents_acceptance_plan_has_apply_argument(self):
-        """测试 subagents-acceptance-plan 可显式 apply 低风险决策。"""
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
-
-        parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers(dest="subcommand")
-        add_subagents_subcommands(sub)
-
-        args = parser.parse_args(["subagents-acceptance-plan", "run-123", "--apply"])
-        assert args.apply is True
-
-    def test_subagents_acceptance_plan_has_next_action_argument(self):
-        """测试 subagents-acceptance-plan 可查看父级下一动作建议。"""
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
-
-        parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers(dest="subcommand")
-        add_subagents_subcommands(sub)
-
-        args = parser.parse_args(["subagents-acceptance-plan", "run-123", "--next-action"])
-        assert args.next_action is True
-
-    def test_subagents_acceptance_plan_has_auto_policy_argument(self):
-        """测试 subagents-acceptance-plan 可查看自动策略 dry-run。"""
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
-
-        parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers(dest="subcommand")
-        add_subagents_subcommands(sub)
-
-        args = parser.parse_args(["subagents-acceptance-plan", "run-123", "--auto-policy"])
-        assert args.auto_policy is True
-
-    def test_subagents_acceptance_plan_has_auto_execution_argument(self):
-        """测试 subagents-acceptance-plan 可查看自动执行 dry-run facade。"""
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
-
-        parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers(dest="subcommand")
-        add_subagents_subcommands(sub)
-
-        args = parser.parse_args(["subagents-acceptance-plan", "run-123", "--auto-execution"])
-        assert args.auto_execution is True
-
-    def test_subagents_acceptance_plan_has_execute_auto_tests_argument(self):
-        """测试 subagents-acceptance-plan 自动执行 facade 需要显式测试执行确认。"""
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
-
-        parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers(dest="subcommand")
-        add_subagents_subcommands(sub)
-
-        args = parser.parse_args([
-            "subagents-acceptance-plan",
-            "run-123",
-            "--auto-execution",
-            "--execute-auto-tests",
-        ])
-        assert args.execute_auto_tests is True
-
-    def test_subagents_acceptance_plan_has_followup_arguments(self):
-        """测试 subagents-acceptance-plan 可查看并显式处理 follow-up。"""
-        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
-
-        parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers(dest="subcommand")
-        add_subagents_subcommands(sub)
-
-        args = parser.parse_args([
-            "subagents-acceptance-plan",
-            "run-123",
-            "--apply-followup",
-            "--take-over-by",
-            "parent",
-            "--locked-file",
-            "README.md",
-        ])
-        assert args.apply_followup is True
-        assert args.take_over_by == "parent"
-        assert args.locked_file == ["README.md"]
 
     def test_subagents_patches_has_patch_action_group(self):
         """测试 subagents-patches 命令有 patch 操作组。

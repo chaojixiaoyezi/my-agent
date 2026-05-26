@@ -90,28 +90,6 @@ class TestScenarioUtils:
 class TestScenarioCaseRouting:
     """测试场景测试用例路由。"""
 
-    def test_route_to_verification_case(self, tmp_path: Path):
-        """路由到 verification case。"""
-        from agent_py_agent.cli.scenario import cmd_scenario_test
-
-        args = MagicMock()
-        args.case = "verification"
-        args.count = 1
-        args.max_runners = 1
-        args.max_cycles = 1
-        args.dry_run = True
-        args.direct = False
-        args.timeout = 60
-        args.planner = False
-        args.skill_dir = None
-        args.workspace = str(tmp_path)
-        args.capability_config = str(tmp_path / "capability.yaml")
-
-        with patch("agent_py_agent.cli.scenario.run_scenario_verification_case", return_value=0):
-            result = cmd_scenario_test(args)
-            # 取决于 mock 返回值
-            assert result in (0, 2)
-
     def test_route_to_gateway_restart_case(self, tmp_path: Path):
         """路由到 gateway-restart case。"""
         from agent_py_agent.cli.scenario import cmd_scenario_test

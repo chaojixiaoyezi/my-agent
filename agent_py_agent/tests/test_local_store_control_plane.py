@@ -229,6 +229,8 @@ def test_subagent_save_projects_status_into_control_plane(tmp_path) -> None:
     assert projected.progress == 0.4
     assert projected.current_step == "等待 evidence packet"
     assert projected.latest_summary == "子代理已阻塞，等待证据。"
+    assert projected.metadata["system_tree"]["updated_by"] == "system"
+    assert projected.metadata["system_tree"]["parent_id"] == parent.id
     workspace_path = projected.workspace_path.replace("\\", "/")
     assert workspace_path.endswith(f"tasks/{parent.root_id}/agents/{child.id}")
     assert projected.checkpoint_ref.endswith("checkpoint.json")
@@ -277,3 +279,54 @@ def test_subagent_save_preserves_child_links_from_stale_snapshots(tmp_path) -> N
 
     assert child.id in reloaded_parent.child_ids
     assert leaf.id in reloaded_child.child_ids
+
+
+# LLM: System-owned tree metadata must override model-provided hints.
+# 函数用途: 防止子代理把 attributes.system_tree 当成事实源；树关系、状态和 refs 只能由保存链路从任务字段派生。
+def test_subagent_save_overwrites_model_written_system_tree_snapshot(tmp_path) -> None:
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+
+    manager = SubAgentManager(tmp_path)
+    parent = manager.create_run(
+        goal="父任务",
+        thought="系统维护任务树。",
+        plan=["创建子任务"],
+        role="coordinator",
+    )
+    child = manager.create_run(
+        goal="子任务",
+        thought="子代理只能写结果，不能改树。",
+        plan=["写产物"],
+        parent_id=parent.id,
+        root_id=parent.root_id,
+        depth=1,
+    )
+    child.status = "DONE"
+    child.verification_status = "VERIFIED"
+    child.artifact_refs = [str(tmp_path / "artifact.md")]
+    child.evidence_refs = [str(tmp_path / "evidence.json")]
+    child.attributes["system_tree"] = {
+        "updated_by": "model",
+        "parent_id": "fake-parent",
+        "root_id": "fake-root",
+        "child_ids": ["fake-child"],
+        "status": "FAKE",
+    }
+
+    manager.save(child)
+
+    reloaded = manager.load(child.id)
+    tree = reloaded.attributes["system_tree"]
+    snapshot = manager.kernel_snapshot()
+    child_node = next(row for row in snapshot.runs if row.run_id == child.id)
+
+    assert tree["updated_by"] == "system"
+    assert tree["parent_id"] == parent.id
+    assert tree["root_id"] == parent.root_id
+    assert tree["child_ids"] == []
+    assert tree["status"] == "DONE"
+    assert tree["verification_status"] == "VERIFIED"
+    assert tree["artifact_refs"] == [str(tmp_path / "artifact.md")]
+    assert tree["evidence_refs"] == [str(tmp_path / "evidence.json")]
+    assert child_node.parent_run_id == parent.id
+    assert child_node.status == "DONE"

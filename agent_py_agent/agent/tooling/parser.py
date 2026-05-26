@@ -48,8 +48,10 @@ _XMLISH_PARAMETER_NAME_RE = re.compile(
 
 _XMLISH_TOOL_ALIASES = {
     "cat": "read_file",
-    "fetch": "fetch_url",
-    "fetch_url": "fetch_url",
+    "fetch": "web_fetch",
+    "fetch_url": "web_fetch",
+    "web_fetch": "web_fetch",
+    "web_extract": "web_extract",
     "grep": "search_text",
     "http": "http_request",
     "http_request": "http_request",

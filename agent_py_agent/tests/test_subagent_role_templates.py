@@ -16,7 +16,7 @@ from agent_py_agent.agent.subagents.role_templates import (
     role_template_index_text,
 )
 
-BUILTIN_ROLE_IDS = ["acceptor", "bug_finder", "coordinator", "researcher", "tester", "worker", "writer"]
+BUILTIN_ROLE_IDS = ["bug_finder", "coordinator", "researcher", "tester", "worker", "writer"]
 
 
 # LLM: _write_ppt_polisher_template creates a reusable user role fixture.
@@ -49,11 +49,11 @@ def _write_ppt_polisher_template(template_dir) -> None:
 
 
 # LLM: test_builtin_role_templates_are_bilingual_and_broad protects the user-facing role catalog.
-# 函数用途: 确保内置找茬、测试、验收模板都有中文说明，并声明能处理多个目标而不是小动作。
+# 函数用途: 确保内置找茬、测试模板都有中文说明，并声明能处理多个目标而不是小动作。
 def test_builtin_role_templates_are_bilingual_and_broad():
     store = load_role_template_store()
 
-    for template_id in ["bug_finder", "tester", "acceptor"]:
+    for template_id in ["bug_finder", "tester"]:
         template = store.get(template_id)
         assert template is not None
         assert template.scope == "role"
@@ -186,19 +186,14 @@ def test_quality_role_contracts_use_template_defaults(tmp_path):
         plan=["plan tests", "report evidence"],
         role="tester",
     )
-    acceptor = manager.create_run(
-        goal="验收示例网站交付物",
-        thought="accept",
-        plan=["read criteria", "judge"],
-        role="acceptor",
-    )
-
     expected_bug_finder_tools = [
         "list_files",
         "read_file",
         "search_text",
         "read_artifact",
-        "fetch_url",
+        "web_search",
+        "web_fetch",
+        "web_extract",
         "http_request",
         "write_file",
         "apply_patch",
@@ -206,13 +201,8 @@ def test_quality_role_contracts_use_template_defaults(tmp_path):
     ]
     assert bug_finder.allowed_tools[:len(expected_bug_finder_tools)] == expected_bug_finder_tools
     assert "write_file" in tester.allowed_tools
-    assert "write_file" in acceptor.allowed_tools
-    assert bug_finder.quality_contract.cannot_self_accept is True
-    assert tester.quality_contract.parent_final_gate is True
-    assert acceptor.quality_contract.parent_final_gate is True
     assert any("找茬" in check for check in bug_finder.acceptance_checks)
     assert any("测试" in check for check in tester.acceptance_checks)
-    assert any("验收" in check for check in acceptor.acceptance_checks)
 
 
 # LLM: test_worker_template_supplies_default_write_tools proves automatic policy is useful.
@@ -316,7 +306,7 @@ def test_all_builtin_role_template_details_are_scoped():
 
 
 # LLM: test_all_builtin_role_contracts_are_applied_on_create_run covers effective execution boundaries.
-# 函数用途: 每个模板创建 run 后都应拿到对应默认工具、输出合同和父级验收边界。
+# 函数用途: 每个模板创建 run 后都应拿到对应默认工具和输出合同。
 def test_all_builtin_role_contracts_are_applied_on_create_run(tmp_path):
     store = load_role_template_store()
     manager = SubAgentManager(tmp_path)
@@ -334,8 +324,6 @@ def test_all_builtin_role_contracts_are_applied_on_create_run(tmp_path):
         assert task.role == template_id
         assert task.allowed_tools[:len(template.default_tools)] == list(template.default_tools)
         assert any(template.output_contract_zh in check for check in task.acceptance_checks)
-        assert task.quality_contract.cannot_self_accept is True
-        assert task.quality_contract.parent_final_gate is True
         for tool_name in ["write_file", "apply_patch", "apply_patch"]:
             assert tool_name in task.allowed_tools
         assert ("schedule_child_subagents" in task.allowed_tools) is template.can_spawn_children

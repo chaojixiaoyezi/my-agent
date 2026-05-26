@@ -64,7 +64,7 @@ def _missing_tool_issues(allowed: list[str], available: set[str]) -> list[Protoc
 
 
 # LLM: _write_contract_issues ensures implementation-style tasks know where they may write.
-# 函数用途: 有验收输出但没有 allowed_write_roots 时，开工前明确提示父级补路径。
+# 函数用途: 有收口交给父级补路径。
 def _write_contract_issues(envelope: TaskEnvelope) -> list[ProtocolIssue]:
     checks = list(envelope.acceptance.get("checks") or [])
     roots = list(envelope.write_contract.get("product_write_roots") or [])

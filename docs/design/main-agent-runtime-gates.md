@@ -8,7 +8,7 @@
 
 - 真实任务 prompt 保持普通人语言：说清做什么、要求什么、放哪里、要什么产物格式。
 - 不允许因为某次真实任务失败，就新增“必须先做 X 才能做 Y”的前置硬门，除非 X 是安全、权限、路径、工具 schema、审批、幂等等真实运行边界。
-- 交付质量问题优先走 closeout 验收、结构化返工单、草稿验证和最终验收，不要前置成开工阶段硬阻断。
+- 交付质量问题优先走 closeout 验收、结构化返工单、草稿验证和最终收口，不要前置成开工阶段硬阻断。
 - 文件格式、产物类型、协议、MIME type 属于开放世界。映射表只能做优化路径，不能因为“不在表里”就拒绝。
 - 每次开发必须同步更新文档；文档没有同步的代码改动视为未收尾。
 
@@ -55,6 +55,36 @@
 这些门的数字统一从配置读取，`0` 表示不按次数阻断。
 
 ## 本轮已落地调整
+
+### -2. 相对时间上下文从“日期提示”升级成“日期范围提示”
+
+文件：
+
+- `agent_py_agent/agent/prompting_parts/builder.py`
+- `agent_py_agent/tests/test_prompting_builder.py`
+
+真实 GitHub 周榜 smoke 暴露了一个非工具链问题：主 prompt 里已经有 `current_local_date/current_local_time`，但模型仍把“最近一周”搜索成旧年份资料，最后生成了结构正确但时间口径错误的 XLSX。
+
+这不是新增硬门，也不是 GitHub 专项模板。修正方式是把每轮通用 Workspace Context 补成更明确的日历上下文：
+
+```text
+current_local_date
+current_local_time
+current_week_range
+last_7_days_range
+```
+
+并提示模型：遇到“今天、最近、近一周、本周、今年”等相对时间时，先按 `current_local_date` 换成明确日期范围，再用于搜索和报告。这样仍由模型自己搜索、判断和写产物，只是减少它从旧网页年份或训练知识年份里猜日期。
+
+第二轮复测又暴露了同类事实链问题：模型不再用旧年份，但会根据项目名猜 GitHub 仓库地址，导致最终 XLSX 里出现 404 链接。修正仍然放在通用 prompt 上，而不是写 GitHub 专项规则：
+
+```text
+最终产物里写 URL、项目地址、论文地址、下载地址或接口地址时，
+优先使用工具结果里真实出现的链接；
+如果链接是你从名称推断出来的，先用网页/HTTP 工具验证可访问。
+```
+
+这不是硬门，也不要求固定工具顺序。它只是告诉模型：链接是事实，不是可以靠名字拼出来的装饰字段。
 
 ### -1. 撤销错误的路径自动产物推断
 
@@ -228,13 +258,13 @@ same_run_redispatch_limit: 1
 - `dispatch_subagents apply=false`、dry-run、状态检查不算 runner 执行。
 - 旧的“输入依赖检查 + materialize_subagent_inputs”启动修补路径已经删除。`required_read_paths` 是给 runner 的上下文/读授权提示，不再作为启动前硬依赖。
 - 一旦某个 run 真正进入 runner 执行或重试，后续即使主代理又读文件、查状态、搜索，最终回答仍要按真实 `task.json` 防假完成。
-- `AWAITING_ACCEPTANCE/NEEDS_ACCEPTANCE` 表示 runner 已写出结果但还没通过父级验收。它仍然不算严格完成，但不再自动触发最终回答状态摘要抢答；主代理可以如实汇报“已运行、结果路径、等待验收”。只有 `FAILED/BLOCKED/TIMEOUT/CHANNEL_ERROR` 或父级验收明确 `REJECT` 这类需要修复的事实，才返回子代理状态摘要，避免口头完成掩盖落盘失败。
-- 父级在 `create_subagents` / `schedule_child_subagents` 中声明的 `output_files` / `output_refs` 会进入机器交接包，但要区分两类语义：像 `/tmp/out.xlsx`、`outputs/report.md` 这类 path-like 值是文件型交付目标，验收会检查路径存在；像 `source_file`、`subagent_summary` 这类非路径值只是逻辑结果键或上层字段名，不能被当成缺失文件硬拒。runner Markdown 的 `Declared Output Targets` 会展示两类 refs，但只有 `required_file_refs` 才是必须落地的文件路径。内部 `output.json` 只作为运行报告，不能单独冒充已声明的文件型用户产物。
-- `dispatch_subagents` 跑完一批子代理后，不再因为所有子代理 `DONE/VERIFIED` 就立刻替主代理收口。原因是多代理任务经常需要主代理继续读取子代理产物、发现新线索、发起下一轮协作或写最终交付物。系统仍会在工具轮数耗尽、模型空响应、明确 `FAILED/BLOCKED/TIMEOUT/CHANNEL_ERROR`、父级验收 `REJECT` 等场景用真实 task 状态兜底；正常完成的一批子代理结果要先交回主代理继续判断。
-- 协作意图不再作为父级验收硬门。子代理写了“需要协作 / 需要别人确认 / 跨来源验证”等内容时，系统只通过协作账本、工具调用记录和调试日志观察流程是否跑通；不能因为它没有留下 case/request/evidence ref 就直接判验收失败。
-- 协作修复不再由父级验收自动补洞。协作应该在运行时由发现者发起：发现问题、请求同级/上级/匹配能力代理响应、到 deadline 汇总命中/未命中/未回复，再上报父级。验收层只负责产物和安全边界，不替模型判断“此刻必须协作”。
+- `DONE/VERIFIED` 表示 runner 已写出结果但还没通过最终收口。它仍然不算严格完成，但不再自动触发最终回答状态摘要抢答；主代理可以如实汇报“已运行、结果路径、等待收口”。只有 `FAILED/BLOCKED/TIMEOUT/CHANNEL_ERROR` 或最终收口明确 `REJECT` 这类需要修复的事实，才返回子代理状态摘要，避免口头完成掩盖落盘失败。
+- 父级检查会检查路径存在；像 `source_file`、`subagent_summary` 这类非路径值只是逻辑结果键或上层字段名，不能被当成缺失文件硬拒。runner Markdown 的 `Declared Output Targets` 会展示两类 refs，但只有 `required_file_refs` 才是必须落地的文件路径。内部 `output.json` 只作为运行报告，不能单独冒充已声明的文件型用户产物。
+- `dispatch_subagents` 跑完一批子代理后，不再因为所有子代理 `DONE/VERIFIED` 就立刻替主代理收口。原因是多代理任务经常需要主代理继续读取子代理产物、发现新线索、发起下一轮协作或写最终交付物。系统仍会在工具轮数耗尽、模型空响应、明确 `FAILED/BLOCKED/TIMEOUT/CHANNEL_ERROR`、最终收口 `REJECT` 等场景用真实 task 状态兜底；正常完成的一批子代理结果要先交回主代理继续判断。
+- 协作意图不再作为最终收口硬门。子代理写了“需要协作 / 需要别人确认 / 跨来源验证”等内容时，系统只通过协作账本、工具调用记录和调试日志观察流程是否跑通；不能因为它没有留下 case/request/evidence ref 就直接判验收失败。
+- 协作修复不再由最终收口自动补洞。协作应该在运行时由发现者发起：发现问题、请求同级/上级/匹配能力代理响应、到 deadline 汇总命中/未命中/未回复，再上报父级检查层只负责产物和安全边界，不替模型判断“此刻必须协作”。
 - `list_collaboration_requests` 是只读控制面能力，默认进入子/孙代理基础工具包。响应者即使不知道 case_id/request_id，也可以按自身 `run_id/agent_name/role` 查到待响应请求；这不是业务专项工具，也不会替模型判断某个线索该怎么查。
-- `collaboration://case/...`、`collaboration://request/...` 和 `collaboration://evidence/...` 是逻辑控制面引用，不是本地文件路径。父级验收会把它们当作协作证据入口，不会用文件存在性检查把它们误判成“产物路径不存在”。
+- `collaboration://case/...`、`collaboration://request/...` 和 `collaboration://evidence/...` 是逻辑控制面引用，不是本地文件路径。最终收口会把它们当作协作证据入口，不会用文件存在性检查把它们误判成“产物路径不存在”。
 - 如果 runner 已经真实调用 `raise_collaboration_event`、`request_collaboration` 或 `submit_evidence` 这类协作账本工具，父级和主代理会在 dispatch 输出、case 状态、日志和最终产物里看到这些事实；它们不再变成最终 closeout 的硬阻断。
 - 已废弃方向：`collaboration_closeout`、`collaboration_intent_resolved` 和“只开 case 不算完成所以打回验收”曾经把协作当成交付验收门，导致流程里出现多层卡点。现在协作账本只记录谁发现、问了谁、谁回、谁没回、证据在哪、汇总是什么；到点带部分结果继续推进。
 
@@ -365,10 +395,10 @@ context_refs
 
 补充修复链路：
 
-- 父级验收不再因为 child 写了“待协作”但没有 case/request/evidence ref 而创建协作补洞 repair。协作是运行时动作，不是验收失败类型。
+- 最终收口不再因为 child 写了“待协作”但没有 case/request/evidence ref 而创建协作补洞 repair。协作是运行时动作，不是验收失败类型。
 - repair worker 只处理普通产物损坏、脚本没跑、文件缺失、输入缺失等真实验收问题；不要用 repair worker 去补“协作应该发生但没发生”。
 - repair contract 的通用要求是：读取 failure refs、保留原始完整验收目标、必要时修复产物。它不再要求在 repair run 内补 collaboration refs。
-- `current_turn_run_state` 会把父级验收 REJECT 的 run 单独放进 `parent_acceptance_rejected_run_ids`，并把 `next_action` 改成 `resolve_parent_acceptance_rejected_refs`，真实动作以 `parent_acceptance_repair_advice.suggested_tool_call` 为准。这样不会同时提示“再跑一次 acceptance”，也不会把所有 REJECT 都强行导向 repair worker。
+- `current_turn_run_state` 会把最终收口 REJECT 的 run 单独放进 `final_closeout_rejected_run_ids`，并把 `next_action` 改成 `resolve_final_closeout_rejected_refs`，真实动作以 `final_closeout_repair_advice.suggested_tool_call` 为准。这样不会同时提示“再跑一次 acceptance”，也不会把所有 REJECT 都强行导向 repair worker。
 - 协作意图识别不再作为硬验收逻辑存在。运行时可以保留日志或观察指标，帮助复盘“模型是否该发起协作却没有发起”，但这些指标不能卡住子代理验收或主代理 closeout。
 - `dispatch_subagents` 接受 `dispatch_run_ids`/`subagent_run_ids`/`dispatch_subagent_ids`/`dispatch_subagent_run_ids` 作为 `run_ids` 的兼容别名。真实模型经常直接照抄 `create_subagents` 返回的 `dispatch_run_ids` 字段，或把目标放进 `orchestration.subagent_run_ids`；这属于工具协议自描述一致性问题，不是专项任务逻辑。
 - `create_subagents` 的 `output_files/output_refs/artifact_refs` 可以是字符串列表，也可以是对象列表，例如 `{"output_path": "...", "description": "..."}`。系统只把对象里的路径字段持久化为文件合同，不会把整个对象字符串当成“必须存在的文件名”。这也是开放世界协议容错：对象可以带描述、来源、用途等扩展字段，验收层只硬查明确的本地路径。
@@ -376,7 +406,7 @@ context_refs
 - 顶层 dispatch 不再把“协作未落账”提升成 `raise_collaboration_event` suggested tool。发现者需要协作时，应该在自己的运行中直接发起；如果没发起，测试和日志应指出 runtime/prompt/工具暴露问题，而不是通过验收补开 case。
 - `requires_collab=true`、`collaboration_request={...}`、`coordination_request={...}` 这类字段只能作为运行时观察信号，不能变成“没有 case/request/evidence ref 就不能完成”的硬门。
 - 瘦身 runner prompt 会展示短版 `context_packs`，包括 `parent_task_directive` 和 sibling roster。完整包仍保存在 `context_bundle.json`，prompt 里只放摘要，避免上下文膨胀。
-- 父级共享 brief 只来自读取类工具结果，例如 `read_file/read_artifact/fetch_url/http_request/search_text/list_files`。`write_file` 这类写入回声不会再传给新 child，避免主代理误写的草稿最终报告污染子代理判断。
+- 父级共享 brief 只来自读取类工具结果，例如 `read_file/read_artifact/web_search/web_fetch/web_extract/http_request/search_text/list_files`。`write_file` 这类写入回声不会再传给新 child，避免主代理误写的草稿最终报告污染子代理判断。
 - `open_case` 只是开协作房间，`request_collaboration` 才是发请求，`submit_evidence` 才是回证据；这只是账本语义，不再作为验收卡点。空 case 可以被日志标注为“可能没推进”，但不能挡住任务流程。
 - `open_case` 工具结果可以给下一步建议，帮助模型少走弯路；建议是软提示，不是必须按这一路走的硬约束。
 - 当前轮次内仍为 open 的空 case 不再触发 closeout 打回。case 状态用于复盘和继续调度：谁没回、谁超时、是否要部分收口，由模型和上级根据任务上下文判断。
@@ -389,8 +419,8 @@ context_refs
 - 当 deadline 已到但仍有 responder 未回，`case_status` 读取时就能看到 timed out/missing responder；后台 `CollaborationCoordinator.tick()` 会把 case 状态推进为 `close` 并写 observation/wake。模型可以按部分证据推进，不能无限等待，也不能因为有人未回就让流程死卡。
 - `dispatch_subagents` 对模型公开的首选执行开关是 `dry_run`：`dry_run=true` 只预览，`dry_run=false` 才真实推进 runner。旧的 `apply/execute_runners` 继续兼容，但新 prompt、工具建议和协作唤醒都不再让模型同时猜三套开关。
 - `dispatch_subagents` 的顶层响应不再优先展示 `collaboration_closeout` 或把 `next_action` 改成 `continue_collaboration_or_dispatch_pending_requests`。协作信息如果需要展示，应作为只读状态/日志/账本摘要，不覆盖普通 dispatch 结果。
-- 父级验收不再把“需要协作但没调用协作工具”提升为顶层 `suggested_tool_call`。如果测试发现模型漏协作，应修 runtime 工具暴露、prompt 简化或自动协作触发，而不是在验收阶段补开 case。
-- `dispatch_subagents` 会把 `parent_acceptance_repair_advice`、`suggested_tool_call`、`next_action` 放在长 `records` 前面。真实模型或 live prompt 只读工具结果前段时，也能先看到普通修复或继续调度建议，不会因为建议埋在几万字记录后面而误走慢路。协作 case 不再由 closeout 兜底补开；发现者需要协作时，应在自己的运行中直接记录 case/request。
+- 最终收口不再把“需要协作但没调用协作工具”提升为顶层 `suggested_tool_call`。如果测试发现模型漏协作，应修 runtime 工具暴露、prompt 简化或自动协作触发，而不是在验收阶段补开 case。
+- `dispatch_subagents` 会把 `final_closeout_repair_advice`、`suggested_tool_call`、`next_action` 放在长 `records` 前面。真实模型或 live prompt 只读工具结果前段时，也能先看到普通修复或继续调度建议，不会因为建议埋在几万字记录后面而误走慢路。协作 case 不再由 closeout 兜底补开；发现者需要协作时，应在自己的运行中直接记录 case/request。
 - 协作意图文本检测曾经用于硬验收，这是走偏的设计。后续如果保留文本检测，只能作为调试日志或指标，不得因为自然语言里出现或没出现某个词而判定任务失败。
 - 产物路径合同会去掉 product root 已经包含的相对前缀。例如 product root 是 `.../outputs/discoveries`，模型声明 `outputs/discoveries/a.json` 时，最终检查路径应是 `.../outputs/discoveries/a.json`，不能拼成双层 `outputs/discoveries/outputs/discoveries/a.json`。
 - 已废弃：`create_subagents items[]` 不再因为多个子代理声明同一个输出 ref 而拒绝创建，也不再要求用 `dependencies/required_read_paths` 建流水线等待。共享写入风险应由普通写入工具、append-only case/event log 和最终 closeout 暴露，不在创建阶段阻塞协作流。
@@ -503,16 +533,28 @@ main_agent_auto_resume_attempt_limit: 3
 
 旧的 2、4、5、6 细分阈值已被压缩掉，避免概念重叠。
 
-### 9. 合同 Doctor 不再无限循环
+### 9. 合同 Doctor 只提示不阻断
 
 文件：
 
 - `agent_py_agent/agent/agent_core/main_agent_delivery_closeout.py`
 - `agent_py_agent/agent/contracts/delivery_contract_doctor.py`
 
-如果 delivery contract 自身结构坏掉，第一次验收会把 `[delivery-contract-doctor]` 放回模型上下文，告诉模型入口合同需要重新物化或修复。若下一次仍是同一份坏合同，系统会返回 `DELIVERY_CONTRACT_DOCTOR_BLOCKED`，避免模型反复普通回复却无法改变 `RunParams.delivery_contract`，导致真实任务卡住。
+如果 delivery contract 自身结构坏掉，第一次验收会把 `[delivery-contract-doctor]` 放回模型上下文，告诉模型入口合同需要重新物化或修复。若下一次仍是同一份坏合同，系统不再返回 `DELIVERY_CONTRACT_DOCTOR_BLOCKED`，而是让模型按普通最终回复继续收口；doctor 报告只保留在 `.agent_delivery/contract_doctor.json` 和上下文提示里。
 
-这不是产物质量硬门，也不是要求用户写技术 prompt；它只处理机器合同本身不可运行的情况。
+这不是产物质量硬门，也不是要求用户写技术 prompt；它只处理机器合同本身不可运行的诊断，不能挡住普通任务。
+
+### 9.1 元数据质量默认不阻断
+
+文件：
+
+- `agent_py_agent/agent/contracts/gates/artifact_provenance.py`
+- `agent_py_agent/agent/agent_core/main_agent_delivery_closeout_quality.py`
+- `agent_py_agent/agent/agent_core/main_agent_delivery_fact_evidence.py`
+
+产物 provenance 缺失、跨 run 来源、delivery quality payload 缺失、fact evidence payload 缺失、自动派生的事实口径 warning，默认都写进 closeout 报告的 `warning_codes`，不阻断最终交付。只有外部显式结构化合同声明 `enforcement: required`、`hard`、`block` 或 `blocking` 时，delivery quality / fact evidence gate 才会变成硬返工。
+
+这样保留了诊断和复盘能力，但不会因为“账本没写齐”把一个已经生成的 xlsx/pdf/word/html 普通任务卡死。
 
 ### 10. 删除 delivery repair 独立运行门
 
@@ -558,9 +600,9 @@ main_agent_auto_resume_attempt_limit: 3
 
 原因：
 
-bootstrap 开工物化门不是安全门，也不是最终验收门。它会把普通任务变成“必须先写某个中间 JSON / checkpoint 才能继续”，这会把 LLM 从会做事的人降成跑模板的人。
+bootstrap 开工物化门不是安全门，也不是最终收口门。它会把普通任务变成“必须先写某个中间 JSON / checkpoint 才能继续”，这会把 LLM 从会做事的人降成跑模板的人。
 
-现在保留的只有 delivery contract prompt 里的软参考，例如建议尽早留下草稿或阶段产物；它不会拦截 `web_search`、`fetch_url`、`read_file`、`list_files`，也不会因为还没写中间文件就停任务。
+现在保留的只有 delivery contract prompt 里的软参考，例如建议尽早留下草稿或阶段产物；它不会拦截 `web_search`、`web_fetch`、`web_extract`、`read_file`、`list_files`，也不会因为还没写中间文件就停任务。
 
 ### 12. 废弃 open write session，统一到通用写入工具
 
@@ -615,7 +657,7 @@ artifact_refs
 blockers
 ```
 
-这里的 `current_tool` 是最近观测到的工具，不表示它一定仍在执行；真实执行权仍由 runner/lease 控制。`last_progress_*` 是最近成功工具或写入进展的摘要，用来让父级知道“它最近推进到哪儿了”，不是交付验收结论。
+这里的 `current_tool` 是最近观测到的工具，不表示它一定仍在执行；真实执行权仍由 runner/lease 控制。`last_progress_*` 是最近成功工具或写入进展的摘要，用来让父级检查结论。
 
 语义边界：
 
@@ -650,7 +692,7 @@ subagents-dispatch --watch --advance
 
 watch 才会进入旧的推进路径，调用 `dispatch_subagents`。
 
-这条边界是为了防止“看一眼子代理状态”误变成“推进/重派/验收子代理”。`planner`、`execute_runners`、`execute_acceptance_tests` 都属于推进语义；在 `--watch` 下使用这些开关时必须同时显式给 `--advance`。
+这条边界是为了防止“看一眼子代理状态”误变成“推进/重派/验收子代理”。`planner`、`execute_runners`、`execute_runners` 都属于推进语义；在 `--watch` 下使用这些开关时必须同时显式给 `--advance`。
 
 例外边界：`gateway run` 和 `daemon` 是明确的常驻运行器入口，不是“看一眼状态”的入口。它们会显式传 `advance=True`，保持后台任务队列可以继续推进。换句话说，默认只读的是 watch 能力本身；真正名字和职责就是“运行器”的入口必须显式声明推进。
 
@@ -727,14 +769,14 @@ my-agent background-main-agent service --interval 5 --max-cycles 3
 文件：
 
 - `agent_py_agent/agent/subagents/parsing.py`
-- `agent_py_agent/agent/subagents/parent_acceptance_empty_report.py`
+- `agent_py_agent/agent/subagents/final_closeout_empty_report.py`
 
 这一层解决的是调查、查询、监控、状态核验这类任务：子代理可能只需要返回“查到了什么 / 没查到什么 / 证据在哪里”，不一定会生成新的 PDF、XLSX、HTML 或其它用户产物。
 
 关键语义：
 
 - `test_execution.json` 里 `total=0 failed=0` 不等于测试失败。它只表示“没有可执行测试项”。
-- 如果子代理已有可追踪 `evidence_refs` 或 `artifact_refs`，父级验收应进入 `inspect_only`，由普通 acceptance findings 继续判断证据链，而不是直接 rescue。
+- 如果子代理已有可追踪 `evidence_refs` 或 `artifact_refs`，最终收口应进入 `inspect_only`，由普通 acceptance findings 继续判断证据链，而不是直接 rescue。
 - 如果模型把 `evidence_refs/artifact_refs` 放在 `[SUBAGENT_RESULT]` 顶层，没有包进 `evidence_packets`，解析层会补一个 refs-only evidence packet，避免证据在落盘时丢失。
 - 内部 run 文件不能冒充证据：`output.json`、`reports/`、agent-run workspace、runner result、debrief 等仍会被 run-private 过滤排除。
 
@@ -742,7 +784,7 @@ my-agent background-main-agent service --interval 5 --max-cycles 3
 
 ```text
 查资料的子代理不一定要新写一个文件。
-只要它给了可追踪证据 ref，父级就应该继续验收这个证据，
+只要它给了可追踪证据 ref，父级检查这个证据，
 而不是因为没有 pytest / command test 就说任务失败。
 ```
 
@@ -1017,7 +1059,7 @@ my-agent collaboration update-status --case-id <case-id> --status closed --summa
 
 - 入口物化后，`runtime_mixin` 会把 `orchestration_contract` 注入 `task_attributes`，并设置 `subagent_delegation=True` 和 `refs_only=True`。
 - 这样已有的派工前正文读取保护会生效：root 可以读 README、目标、rubric、目录等 brief，但不能先把 `data/source/docs/materials` 正文吞完再创建子代理。
-- 派工之后，`orchestration_contract.requires_orchestration=true` 也会继续启用 root 控制面边界：root 有当前轮 child runs 且 acceptor 未完成时，不能改成自己直接读取已委派 source/product 正文。它应该读取 `subagent_board`、`dispatch_subagents` artifact、task/output/status 等控制面元数据，然后继续调度、创建 repair worker，或说明哪个子代理阻塞。
+- 派工之后，`orchestration_contract.requires_orchestration=true` 也会继续启用 root 控制面边界：root 有当前轮 child runs 且 checker 未完成时，不能改成自己直接读取已委派 source/product 正文。它应该读取 `subagent_board`、`dispatch_subagents` artifact、task/output/status 等控制面元数据，然后继续调度、创建 repair worker，或说明哪个子代理阻塞。
 - 当模型准备无工具最终回答时，`tool_loop_orchestration_contract_decision.py` 会检查真实工具事实：`required_tools` 是否执行、`minimum_subagent_count` 是否满足。
 - 如果没满足，系统返回 `[tool-system orchestration-contract-rework]`，明确缺哪个工具/数量，要求模型按 Tool Catalog 重试；这不是任务终止。
 - 连续忽略返工超过 `rework_budget` 后，才返回 `ORCHESTRATION_CONTRACT_BLOCKED`，并带上机器可读 missing 列表。
@@ -1026,7 +1068,7 @@ my-agent collaboration update-status --case-id <case-id> --status closed --summa
 
 历史上这里曾经按 worker/coordinator 自动拆成两波执行，后来证明这是隐藏流水线，会让父级以为“我一次指定了这些 run”，但运行时偷偷改了顺序。当前规则已经删除这层隐性拆波：`dispatch_subagents` 按父级显式 `run_ids` 顺序和并发配置推进候选。若任务确实需要“先收集再汇总”，由父级 prompt/计划明确先 dispatch 收集者，查看 tree/board/产物后再 dispatch 汇总者。
 
-父级验收执行器支持通用存在性别名：`file_exists/path_exists/artifact_exists` 会归一成 `file_check`。如果测试项没有写 `file_path`，系统只会从同一 `output.artifacts[].path` 的机器字段展开目标；不会从测试名、summary 或任务正文猜路径。
+最终收口执行器支持通用存在性别名：`file_exists/path_exists/artifact_exists` 会归一成 `file_check`。如果测试项没有写 `file_path`，系统只会从同一 `output.artifacts[].path` 的机器字段展开目标；不会从测试名、summary 或任务正文猜路径。
 
 这刀参考的是 通道运行时 / OpenHuman 的显式协调工具思路：协作不是自然语言承诺，而是能被控制面、工具记录和状态回路看见的事实。
 
@@ -1120,7 +1162,7 @@ create_subagents 写清楚 goal / refs
 
 - `workflow_depends_on` 不再是 `SubAgentTask` 运行时字段。
 - `subagents/dependency_artifact_refs.py` 已删除，不再自动把上游 sibling 产物塞进下游 read refs。
-- `dispatch_subagents` 不再因为角色是 tester/reviewer/acceptor 或所谓 phase 顺序，只放行一部分 runner。
+- `dispatch_subagents` 不再因为角色是 tester/reviewer/checker 或所谓 phase 顺序，只放行一部分 runner。
 
 真要流水线时，父代理显式控制即可：先创建/dispatch A，看到 A 结果后，再创建/dispatch B。这样普通并行协作、临时响应和广播自查不会被隐藏的“生产线顺序”卡住。
 
@@ -1132,30 +1174,30 @@ create_subagents 写清楚 goal / refs
 
 同一轮还废弃了 workflow 自动套娃：全局 `subagent_workflow_mode=auto` 不再静默作用到普通 `create_subagents` / `dispatch_subagents`。只有本次工具参数明确写 `workflow_mode=plan` 或 `workflow_mode=auto` 才会启用 workflow；未知值如 `parallel` 一律当 `off`，避免普通 worker 被拆成 implement/verify 孙代理。
 
-同一状态合同也把 `AWAITING_ACCEPTANCE` / `NEEDS_ACCEPTANCE` 归为 `VERIFYING`。如果当前轮 run 已经写出结果、等待父级验收，`current_turn_run_state.awaiting_acceptance_run_ids` 会建议：
+同一状态合同也把 `DONE` / `VERIFIED` 归为 `VERIFYING`。如果当前轮 run 已经写出结果、等待最终收口，`current_turn_run_state.pending_closeout_run_ids` 会建议：
 
 ```json
 {
   "tool": "dispatch_subagents",
   "apply": true,
   "execute_runners": false,
-  "execute_acceptance_tests": true,
-  "auto_apply_acceptance_followup": true,
+  "execute_runners": true,
+  "auto_apply_result_followup": true,
   "run_ids": ["subagent-..."]
 }
 ```
 
 也就是继续走验收/返工循环，而不是重复创建代理或直接汇报完成。
 
-如果模型只传 `apply=true + run_ids=[...]`，而目标 run 已经处于 `AWAITING_ACCEPTANCE` 或 `verification_status=NEEDS_ACCEPTANCE`，`dispatch_subagents` 会自动按验收-only 续推：
+如果模型只传 `apply=true + run_ids=[...]`，而目标 run 已经处于 `DONE` 或 `verification_status=VERIFIED`，`dispatch_subagents` 会自动按验收-only 续推：
 
 ```text
 execute_runners = false
-execute_acceptance_tests = true
-auto_apply_acceptance_followup = true
+execute_runners = true
+auto_apply_result_followup = true
 ```
 
-这不是新的硬门，也不会把业务任务写死成固定模板。它只是让“runner 已经产出，下一步应该验收”成为控制面默认动作，避免模型为了推进待验收任务又重复跑 runner，或者只看见状态摘要后停在人工猜测。
+这不是新的硬门，也不会把业务任务写死成固定模板。它只是让“runner 已经产出，下一步应该验收”成为控制面默认动作，避免模型为了推进待收口任务又重复跑 runner，或者只看见状态摘要后停在人工猜测。
 
 ## 显式产物写入根授权
 

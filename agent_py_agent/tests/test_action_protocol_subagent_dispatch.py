@@ -26,7 +26,7 @@ def test_dispatch_subagents_output_contains_typed_envelope():
             applied=True,
             message="done",
             before_status="PLANNING",
-            after_status="AWAITING_ACCEPTANCE",
+            after_status="DONE",
         )],
     )
     agent = MagicMock()

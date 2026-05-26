@@ -355,12 +355,6 @@ my-agent subagent-run <run_id>
 my-agent subagent-run <run_id> --execute
 # 真正调用模型执行这个子代理；会消耗 API。
 
-my-agent subagents-acceptance --dry-run
-# 预览父代理验收结果；不写回。
-
-my-agent subagents-acceptance --apply
-# 真正写回验收结果，把可验收任务标为 DONE/VERIFIED。
-
 my-agent subagents-dispatch --dry-run
 # 预览一轮父代理调度；不写回，不执行 runner。
 
@@ -479,7 +473,7 @@ agent_py_agent/config/capability_config.yaml
 2. 根据任务注入工具目录和推荐工具。
 3. 模型输出 `[TOOL_CALL]` 或 Qwen/通道运行时 常见 XML-ish 工具调用时，工具系统会解析、执行并回填结果。
 4. 工具调用半截损坏时，会变成可恢复的 `__parse_error__`，避免整轮崩掉。
-5. 子代理可以创建工单，记录父子关系、能力边界、验收要求和证据。
+5. 子代理可以创建工单，记录父子关系、能力边界、交付要求和证据。
 6. 父代理可用 Capability Router 把 request 路由成 grant 或 gap。
 7. `subagent-run` 默认 dry-run，显式 `--execute` 才调用真实模型。
 8. runner 输出 `[SUBAGENT_RESULT]` JSON 后，系统会把 evidence、artifacts、tests、patches、lessons、next_actions 写回工单。
@@ -502,7 +496,7 @@ agent_py_agent/config/capability_config.yaml
 - runner 执行前默认做 channel probe，BROKEN 时不会继续模型调用。
 - 子代理只能看到 `execution_context.json` 里的 allowed tools / skills。
 - 模型尝试调用未授权工具时，工具层会拒绝。
-- runner 不会直接把任务标成 DONE，只会进入 `AWAITING_ACCEPTANCE` / `NEEDS_ACCEPTANCE`，等待独立验收。
+- runner 写出结构化结果后直接进入 `DONE/VERIFIED` 或明确失败态；父级只读取代理树和产物 refs 继续调度或汇总，不再有单独最终收口阶段。
 - `patches` 当前只记录补丁意图和状态，不会自动 apply。
 - `lessons` 会写入 `output.json` / `DEBRIEF.md`；打开 `enable_self_learning=true` 后还会生成 learning draft 候选，但不会自动写正式 skill。
 

@@ -29,7 +29,7 @@
 8. 冲突参数显式报错，不静默猜测，例如 `path` 和 `file_path` 不一致时拒绝。
 9. 把 create/schedule/dispatch 的工具输出继续 typed envelope 化，父级只读 run ids 和 refs。
 10. 将 parent planner、coordinator planner 和 runner 继续隔离，planner 不读产品正文。
-11. 将 QA/tester/acceptor 的创建策略改成“work 完成后按依赖触发”为主。
+11. 将 QA/tester/checker 的创建策略改成“work 完成后按依赖触发”为主。
 12. 允许 LLM 决定 QA 覆盖范围：一个 QA 可以检查多个 worker，不强制一一对应。
 13. 强化 direct child 进度摘要，父级先看状态和 refs，不直接读正文。
 14. 优化 takeover packet，确保原 run 挂死后新 run 接管同一任务目录和 artifacts。
@@ -80,8 +80,8 @@
 
 ## Steps 10-12 Planner And QA Verification
 
-- 中文说明：第 10-12 步的重点是“父级别变重、QA 别空转”。parent planner 使用 control-plane 提示和空工具列表，只消费状态快照；父级委托下级后，在 acceptor 完成前只读 refs、报告和运行元数据。
-- QA/tester/acceptor 不再一开始固定创建。系统先返回 `quality_advice`，等 worker/writer/leaf 有可验收产物后，再让 LLM 决定 QA 范围、数量和顺序。
+- 中文说明：第 10-12 步的重点是“父级别变重、QA 别空转”。parent planner 使用 control-plane 提示和空工具列表，只消费状态快照；父级委托下级后，在 checker 完成前只读 refs、报告和运行元数据。
+- QA/tester/checker 不再一开始固定创建。系统先返回 `quality_advice`，等 worker/writer/leaf 有可检查产物后，再让 LLM 决定 QA 范围、数量和顺序。
 - 一个 QA 可以检查多个 worker，也可以只检查高风险 refs；系统只挡明显错误，例如没有产物时创建空 QA、QA 失败却直接收口、repair 覆盖无关文件。
 - 复验命令覆盖 planner 隔离、body-read guard、QA 后置、dispatch child refs 和 planner/watch；当前 focused tests 通过。
 
@@ -96,7 +96,7 @@
 
 - 中文说明：第 19-24 步改成真实小白提示词验证，不在普通任务里塞 `dispatch/run_id` 这类术语。外部测试者只给主代理一句自然任务，后续必须由主代理创建和调度小傻妞。
 - 已加固：明确文件交付 worker 即使命中全局 workflow auto，create/dispatch 也会关闭通用 producer/critic/repair 扩展；质量波次等 worker 完成后再由 LLM 按 refs 决定。
-- 已加固：`dispatch_subagents` 验收记录以父级真实 tests/follow-up 为准。测试失败、测试为空但需要 rescue、或 follow-up 指向 `plan_rescue` 时，dispatch record、aggregate report 和单 run `acceptance_review.json` 都写 `REJECT`，不再混入“验收通过”。
+- 已加固：`dispatch_subagents` 收口交给上级真实 tests/follow-up 为准。测试失败、测试为空但需要 rescue、或 follow-up 指向 `plan_rescue` 时，dispatch record、aggregate report 和单 run `runner_result.json` 都写 `REJECT`，不再混入“验收通过”。
 - 已加固：refs-only 委托期不只挡 `read_file/read_artifact`，也挡 `run_command` 里的 `cat/tail/head/sed/rg` 等产物正文读取；控制面元数据仍可读，避免恢复和调度卡死。
 - 真实复验：`subagent_hardening_e2e_20260515_step24d` 通过，root 自然语言派工，1 个小傻妞 worker 写出家具网站首页，最终 `done_verified=1`。
 
@@ -135,7 +135,7 @@
 - 已调整：看板 payload 顶层给 `completion_status`，包括 `must_not_report_done`、`blocking_run_ids` 和建议继续 dispatch 的结构化调用。
 - 已调整：`target_tokens` 成为 board row 的 refs-only 字段；父级可以知道 run 关联的具体产物名，但不读取产物正文。
 - 已调整：`task_actual_target_tokens()` 统一目标识别，优先结构化 `output.json` 和 `[SUBAGENT_RESULT]`，再回退自然语言 goal；英文引用词 `use/include/import/load/link to` 需要词边界，避免 `/Users/...` 被误切。
-- 已调整：最终 closeout 和 board completion 都接受“旧失败/待验收 run 的目标文件已被后续 DONE/VERIFIED sibling 覆盖”这一事实，避免重复修和假阻塞。
+- 已调整：最终 closeout 和 board completion 都接受“旧失败/待收口 run 的目标文件已被后续 DONE/VERIFIED sibling 覆盖”这一事实，避免重复修和假阻塞。
 - 迁移原则：把事实从 prompt 里抽出来，放到 typed refs 和目标 token；prompt 可以自然，状态机必须稳定。
 
 ## 2026-05-15 Code-Size Zero Refactor
@@ -149,7 +149,7 @@
 ## Stage 2 Kernel Boundary Slice
 
 - 中文说明：继续最初 1-7 阶段里的第 2 阶段，新增 `SubagentKernel` 只读内核视图。它不是新的调度器，也不是新的事实源；旧 `task.json`、agent run workspace 和控制面投影仍是事实来源。
-- `SubagentKernelQuery` / `SubagentKernelSnapshot` 固定 root tree、own subtree、状态桶、workspace refs、recovery refs、artifact/evidence refs 和 takeover candidates 的读取形状。父级、接管、QA、验收后续优先读这个快照，不再各模块自己拼状态。
+- `SubagentKernelQuery` / `SubagentKernelSnapshot` 固定 root tree、own subtree、状态桶、workspace refs、recovery refs、artifact/evidence refs 和 takeover candidates 的读取形状。父级检查后续优先读这个快照，不再各模块自己拼状态。
 - `SubAgentManager.kernel_snapshot()` 是当前公开入口；它只读 `manager.list_runs()` 和 run 记录，不调度、不恢复、不执行测试、不读取 artifact 正文。
 - 迁移原则：这是“把发动机仪表盘统一起来”，不是继续加 guard。后续第 3 阶段协议层、第 4 阶段工具网关、第 5 阶段恢复接管都要尽量消费 kernel snapshot 或它的后续扩展。
 
@@ -168,13 +168,13 @@
 
 ## Stages 1-6 Protocol Contract Slice
 
-- 中文说明：这一步把“少限制、强协议”的 1-6 步收成第一版可执行合同。目标不是把流程写死，而是让父级、子级、恢复和验收都读同一份机器字段。
+- 中文说明：这一步把“少限制、强协议”的 1-6 步收成第一版可执行合同。目标不是把流程写死，而是让父级检查都读同一份机器字段。
 - `TaskAddress` 是子代理地址：包含 run、root、parent、depth、lineage、attempt 和 workspace ref。它解决“谁是谁的孩子、接管哪个目录、恢复哪个 run”这些不该靠自然语言猜的问题。
-- `TaskEnvelope` 是子代理任务包：包含 goal、role、plan、tool contract、write contract、acceptance、context refs 和 audit。它会出现在 kernel snapshot、recovery strategy 和 parent acceptance decision 里。
+- `TaskEnvelope` 是子代理任务包：包含 goal、role、plan、tool contract、write contract、acceptance、context refs 和 audit。它会出现在 kernel snapshot、recovery strategy 和 closeout decision 里。
 - `write_contract` 区分 `internal_task_root` 和 `product_write_roots`。子代理始终可以写自己的任务日志/报告；但要写用户产物目录，必须有明确 product root，避免“能写自己屋子”误判成“能交付项目文件”。
 - `run_tool_preflight()` 是工具预检：缺工具、缺产物写入根、缺 controlled exec 授权时返回结构化 `ToolContractError`。它不把基础读写工具关掉，也不新增用户可见微参数。
 - 恢复链路仍然 packet-first：如果 `latest_continue_packet.json` 已准备好，推荐从 packet 接；否则再降级 checkpoint/summary。区别是现在推荐动作同时带 address 和 envelope，后续接管者不需要重新读自然语言摘要猜任务。
-- 验收链路拿同一份 envelope：parent acceptance decision 会带 `task_envelope.acceptance`，QA/tester/acceptor 能看到父级要求的验收条件，而不是从输出摘要里反推。
+- 收口交给父级检查条件，而不是从输出摘要里反推。
 - 后续迁移要求：dispatcher 和 runner 下一步要优先消费 `TaskEnvelope`，tool gateway 要优先消费 preflight issue；真实 E2E 要继续使用普通用户自然语言，不在 prompt 里塞内部字段名。
 
 ## Stages 1-6 Runner Consumption Slice
@@ -187,18 +187,18 @@
 
 ## Real Runner E2E Hardening Slice
 
-- 中文说明：真实 MiniMax E2E 证明协议进入 prompt 后还需要控制两类成本：启动上下文不能太胖，父级验收不能被模型参数关掉。
+- 中文说明：真实 MiniMax E2E 证明协议进入 prompt 后还需要控制两类成本：启动上下文不能太胖，最终收口不能被模型参数关掉。
 - runner prompt 现在只带 slim execution context summary。完整 context bundle、TaskEnvelope、tool preflight、output refs 仍落盘，prompt 只放短摘要和 refs，避免真实模型因 30K+ 开场提示词超时。
 - `required_file_contract()` 会从文件级 product write root 推导 required files。这样 `/.../deliverables/furniture-home/index.html` 既是写权限事实，也是验收合同事实。
-- 质量角色判断收窄：普通“主代理验收 / 汇报验收结果”不再强制 acceptor；只有显式 `acceptor`、`验收子代理`、`验收代理`、`派验收` 才要求独立验收角色。
-- 模型面对的 `dispatch_subagents` 在 `apply=true && execute_runners=true` 时固定执行父级 acceptance tests。手动 CLI `--no-execute-tests` 仍可用于人工轻量调度，但 LLM 不能无意跳过网页/static/content 验收。
+- 质量角色判断收窄：普通“主代理验收 / 汇报验收结果”不再强制 checker；只有显式 `checker`、`验收子代理`、`验收代理`、`派验收` 才要求独立验收角色。
+- 模型面对的 `dispatch_subagents` 在 `apply=true && execute_runners=true` 时固定执行父级检查。
 - 迁移原则：不是加新 guard，而是把“启动轻、事实硬、验收必须机器可证”收进协议边界。下一步做允许 repair 的真实 E2E，让 root 基于失败报告重新派修复 worker。
 
 ## Repair Loop / Tool Gateway Hardening Slice
 
 - 中文说明：这片继续把真实 E2E 中暴露的“系统边界不硬”问题归到协议、记忆和工具网关，而不是继续往 prompt 里补口号。
-- Parent acceptance repair：`orchestration_parent_acceptance_repair.py` 把 `acceptance_review.json=REJECT`、`test_execution.json` 和 parent follow-up refs 转成机器字段 `parent_acceptance_repair_advice`。runner-context dispatch 的下一步会明确说“按父级验收 refs 派修复 child”，不是让 root 读正文猜。
-- Top-level repair handoff：顶层 `dispatch_subagents` 的 acceptance reject record 也会附带 `parent_acceptance_repair_advice` 和 `create_subagents` 建议工具调用；失败 refs 包含 test/follow-up/output/run，小傻妞修复任务会继承原 child 的 product write roots。
+- Closeout repair：`orchestration_final_closeout_repair.py` 把 `runner_result.json=REJECT`、`test_execution.json` 和 parent follow-up refs 转成机器字段 `final_closeout_repair_advice`。runner-context dispatch 的下一步会明确说“按最终收口 refs 派修复 child”，不是让 root 读正文猜。
+- Top-level repair handoff：顶层 `dispatch_subagents` 的 acceptance reject record 也会附带 `final_closeout_repair_advice` 和 `create_subagents` 建议工具调用；失败 refs 包含 test/follow-up/output/run，小傻妞修复任务会继承原 child 的 product write roots。
 - Stale runner stop：`subagent_attempt_guard.py` 现在同时服务工具前拦截和模型前停止。runner attempt 被 timeout/abandon 后，旧线程下一轮不会再调用模型。
 - Memory isolation：LocalStore memory hit 带 `memory_path`，搜索只接受当前 `JsonlMemory.path` 的命中，避免干净 E2E 或未来多用户 workspace 被旧任务记忆污染。
 - Tool gateway：registry 在单次文件工具调用内把父级授权的 product roots 并入 `workspace_roots`。读、列、搜、写都能访问用户指定产物目录；调用结束后恢复，避免授权根外泄到别的工具调用。
@@ -206,5 +206,5 @@
 - Task-local progress：写 HTML 后的 `latest_tool_progress.json` 不再永远说“继续写”。它会带 `artifact_integrity` 小字段；未闭合就继续分块，已闭合就提示写 `output.json` / `SUBAGENT_RESULT` 收口，发现 `href="#"` 这类假链接就先修复再验收。这样把 runner 收口方向放进机器字段，而不是靠 prompt 猜。
 - Parser schema tolerance：runner 可以把产物 refs 写成 `deliverables` / `output_files` / `files`，也可能把产物路径放进 `evidence.kind=artifact.path` 或 `evidence_packets.artifact_refs`。解析层会把这些带 path/id 的条目统一转成 canonical `artifacts`。后续所有验收、typed envelope 和恢复逻辑继续只读 `artifacts`，不把同义词扩散到业务层。
 - Artifact repair lane：`artifact_integrity_failed` 现在有独立信号层和 repair 建议层。父级只读 output/run/artifact refs，顶层用 `create_subagents`、runner-context 用 `schedule_child_subagents` 派修复小傻妞；不再把缺闭合标签、半截 HTML 这类确定性产物错误泛化成 `classify_blocker` 让 root 自己修。
-- Real E2E baseline：`real-e2e-20260515-180300-repair-loop4` 通过自然语言 root -> worker -> parent acceptance；产物在 `/Users/example/my-终端应用/.../deliverables/furniture-home/index.html`，状态 `DONE/VERIFIED`。
+- Real E2E baseline：`real-e2e-20260515-180300-repair-loop4` 通过自然语言 root -> worker -> closeout；产物在 `/Users/example/my-终端应用/.../deliverables/furniture-home/index.html`，状态 `DONE/VERIFIED`。
 - 迁移原则：子代理是有任务边界的小主代理。父级给了产物目录，就必须能读写；runner 超时，就必须停止；记忆隔离，就不能串旧索引。

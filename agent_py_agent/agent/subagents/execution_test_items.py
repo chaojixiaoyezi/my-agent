@@ -1,9 +1,9 @@
-# LLM: Prepare runner-declared tests before bounded parent acceptance execution.
+# LLM: Prepare runner-declared tests before bounded closeout execution.
 # 模块用途: 根据 output.json 里的 artifacts 给测试项补充安全工作目录，不执行命令、不读取 artifact 正文。
 
 from __future__ import annotations
 
-"""Prepare test execution items for parent acceptance."""
+"""Prepare test execution items for closeout."""
 
 import shlex
 from dataclasses import dataclass, field
@@ -34,9 +34,9 @@ class TestItemPreparationRequest:
     output: dict[str, object]
     workspace_root: str | Path
     required_files: list[str] = field(default_factory=list)
-    # LLM: required_dom_ids lets parent acceptance pass machine-readable business sections into static_site_check.
+    # LLM: required_dom_ids lets closeout pass machine-readable business sections into static_site_check.
     required_dom_ids: list[str] = field(default_factory=list)
-    # LLM: required_content_lines lets parent acceptance validate plain artifacts without trusting model self-reports.
+    # LLM: required_content_lines lets closeout validate plain artifacts without trusting model self-reports.
     required_content_lines: list[str] = field(default_factory=list)
     # LLM: required_content_files maps exact file refs to required lines for multi-artifact outputs.
     required_content_files: dict[str, list[str]] = field(default_factory=dict)
@@ -76,7 +76,7 @@ def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, An
         _prepared_test_item(test, context) for test in request.tests
     ]
     # LLM: Artifact integrity checks are inferred from artifact refs, not runner prose.
-    # 函数用途: 在父级验收前补齐通用产物完整性检查，避免空测试清单直接假绿。
+    # 函数用途: 在最终收口前补齐通用产物完整性检查，避免空测试清单直接假绿。
     prepared = expand_artifact_integrity_items(
         prepared,
         artifact_paths=context.artifact_paths,
@@ -298,7 +298,7 @@ def _workspace_path(value: object, workspace_root: Path) -> Path | None:
     return path
 
 
-# LLM: _artifact_pytest_items gives parent acceptance a bounded fallback when runners omit tests.
+# LLM: _artifact_pytest_items gives closeout a bounded fallback when runners omit tests.
 # 函数用途: 从 workspace 内 test_*.py artifact 生成 pytest 命令；只用路径元数据，不执行或读取文件正文。
 def _artifact_pytest_items(context: TestItemPreparationContext) -> list[dict[str, Any]]:
     return artifact_pytest_items(context.artifact_paths, workspace_root=context.workspace_root)

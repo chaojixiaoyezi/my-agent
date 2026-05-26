@@ -14,11 +14,10 @@ from html.parser import HTMLParser
 from typing import Any
 
 from .models import BaseTool, ToolExecutionResult, ToolSpec
-from .web import _format_http_error, _has_control_chars, _normalize_url, _scalar_text
+from .web import _has_control_chars, _normalize_url, _scalar_text
 
 _MAX_QUERY_CHARS = 512
 _MAX_SEARCH_RESULTS = 10
-_MIN_RESPONSE_PREVIEW_CHARS = 256
 
 
 @dataclass(frozen=True)
@@ -27,6 +26,66 @@ class _SearchResult:
     url: str
     snippet: str
     source: str = "duckduckgo_html"
+
+
+@dataclass(frozen=True)
+class _SearchRequest:
+    query: str
+    limit: int
+    allowed_domains: list[str]
+    blocked_domains: list[str]
+
+
+@dataclass(frozen=True)
+class _ProviderSearchResult:
+    provider_name: str
+    rows: list[dict[str, str]]
+    failures: list[dict[str, str]]
+
+
+class WebSearchProvider:
+    """Small provider interface for web_search backends.
+
+    给人看的解释：
+    这只是搜索来源的“插槽”。DuckDuckGo、Exa、Parallel、Tavily 这类来源都应该长得像
+    `search(query, limit) -> list[dict]`，这样以后加来源不用改主工具流程。
+    """
+
+    name = "base"
+
+    def search(self, query: str, limit: int) -> list[dict[str, str]]:
+        raise NotImplementedError
+
+
+class DuckDuckGoHtmlProvider(WebSearchProvider):
+    """DuckDuckGo HTML fallback provider that needs no external API key."""
+
+    name = "duckduckgo_html"
+
+    def __init__(self, *, timeout: int):
+        self.timeout = timeout
+
+    def search(self, query: str, limit: int) -> list[dict[str, str]]:
+        url = "https://duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
+        req = urllib.request.Request(
+            url,
+            method="GET",
+            headers={"User-Agent": "MyAgent-WebSearch/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            body = resp.read().decode("utf-8", "replace")
+
+        parser = _DuckDuckGoHtmlResultParser()
+        parser.feed(body)
+        return [
+            {
+                "source": item.source,
+                "title": item.title,
+                "url": item.url,
+                "snippet": item.snippet,
+            }
+            for item in _dedupe_search_results(parser.results, limit)
+        ]
 
 
 # LLM: _DuckDuckGoHtmlResultParser extracts structured search hits from the public HTML endpoint.
@@ -171,84 +230,101 @@ def _dedupe_search_results(results: list[_SearchResult], limit: int) -> list[_Se
 # 类用途: 通用网页搜索工具，返回结构化候选来源，避免模型靠猜测 URL 做研究。
 class WebSearchTool(BaseTool):
 
-    def __init__(self, *, max_results: int = 5, timeout: int):
+    def __init__(self, *, max_results: int = 5, timeout: int, providers: list[WebSearchProvider] | None = None):
         self.max_results = max(1, min(_MAX_SEARCH_RESULTS, max_results))
         self.timeout = timeout
+        self.providers = providers or [DuckDuckGoHtmlProvider(timeout=timeout)]
         self.spec = ToolSpec(
             name="web_search",
             category="web",
             effect="read_only",
             description="按关键词搜索公开网页，返回结构化候选来源 URL、标题和摘要。",
             use_cases=[
-                "不知道具体 URL 时，先搜索公开来源候选，再用 fetch_url/http_request 读取",
+                "不知道具体 URL 时，先搜索公开来源候选，再用 web_fetch/web_extract 读取",
                 "研究论文、项目资料、文档和新闻入口时获取可核验链接",
             ],
             avoid_when=[
-                "已经有确定 URL 时，直接用 fetch_url 或 http_request",
+                "已经有确定 URL 时，直接用 web_fetch；需要调 API 时用 http_request",
             ],
             keywords=["搜索", "网页搜索", "查找来源", "search", "web_search", "公开来源", "候选链接"],
-            parameters={
-                "query": "搜索关键词",
-                "limit": "可选，最多返回多少条候选结果",
-                "allowed_domains": "可选，只保留这些域名及其子域名的结果",
-                "blocked_domains": "可选，排除这些域名及其子域名的结果",
-            },
+            parameters={"query": "搜索关键词", "limit": "可选，最多返回多少条候选结果", "allowed_domains": "可选，只保留这些域名及其子域名的结果", "blocked_domains": "可选，排除这些域名及其子域名的结果"},
             parameter_details={
                 "query": "必填，普通搜索关键词；工具只把它作为搜索引擎查询，不从自然语言推断任务事实。",
                 "limit": f"可选，1 到 {self.max_results}；超过配置会自动收敛。",
                 "allowed_domains": "可选字符串数组，例如 [\"github.com\"]；和 blocked_domains 不能同时使用。",
                 "blocked_domains": "可选字符串数组，例如 [\"example.com\"]；和 allowed_domains 不能同时使用。",
             },
-            examples=[
-                '{"tool": "web_search", "query": "open model reasoning paper arxiv", "limit": 5}',
-                '{"tool": "web_search", "query": "project weekly ranking 20260105", "allowed_domains": ["example.com"]}',
-            ],
+            examples=['{"tool": "web_search", "query": "open model reasoning paper arxiv", "limit": 5}', '{"tool": "web_search", "query": "project weekly ranking 20260105", "allowed_domains": ["example.com"]}'],
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
-            query = _normalize_query(params.get("query"))
-            limit = _search_limit(params.get("limit"), self.max_results)
-            allowed_domains = _normalize_domain_filter(params.get("allowed_domains"), name="allowed_domains")
-            blocked_domains = _normalize_domain_filter(params.get("blocked_domains"), name="blocked_domains")
-            if allowed_domains and blocked_domains:
-                raise ValueError("allowed_domains 和 blocked_domains 不能同时使用")
+            request = _search_request_from_params(params, self.max_results)
         except ValueError as exc:
             return ToolExecutionResult("web_search", False, str(exc))
 
-        url = "https://duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
-        req = urllib.request.Request(
-            url,
-            method="GET",
-            headers={"User-Agent": "SimplePythonAgent/1.0"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                body = resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            return _format_http_error("web_search", exc, _MIN_RESPONSE_PREVIEW_CHARS)
-        except (urllib.error.URLError, TimeoutError) as exc:
-            return ToolExecutionResult("web_search", False, f"搜索失败: {exc.__class__.__name__}")
-
-        parser = _DuckDuckGoHtmlResultParser()
-        parser.feed(body)
-        results = _filter_search_results(
-            parser.results,
-            allowed_domains=allowed_domains,
-            blocked_domains=blocked_domains,
-        )
-        results = _dedupe_search_results(results, limit)
-        payload = {
-            "engine": "duckduckgo_html",
-            "query": query,
-            "results": [
-                {
-                    "source": item.source,
-                    "title": item.title,
-                    "url": item.url,
-                    "snippet": item.snippet,
-                }
-                for item in results
-            ],
-        }
+        provider_result = _search_with_providers(self.providers, request.query, request.limit)
+        if not provider_result.rows:
+            payload = {"query": request.query, "provider_failures": provider_result.failures}
+            return ToolExecutionResult("web_search", False, json.dumps(payload, ensure_ascii=False), error_code="TOOL_UNAVAILABLE")
+        results = _normalized_provider_results(provider_result)
+        results = _filter_search_results(results, allowed_domains=request.allowed_domains, blocked_domains=request.blocked_domains)
+        payload = _search_payload(provider_result, request, _dedupe_search_results(results, request.limit))
         return ToolExecutionResult("web_search", True, json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+
+def _search_request_from_params(params: dict[str, Any], max_results: int) -> _SearchRequest:
+    allowed_domains = _normalize_domain_filter(params.get("allowed_domains"), name="allowed_domains")
+    blocked_domains = _normalize_domain_filter(params.get("blocked_domains"), name="blocked_domains")
+    if allowed_domains and blocked_domains:
+        raise ValueError("allowed_domains 和 blocked_domains 不能同时使用")
+    return _SearchRequest(
+        query=_normalize_query(params.get("query")),
+        limit=_search_limit(params.get("limit"), max_results),
+        allowed_domains=allowed_domains,
+        blocked_domains=blocked_domains,
+    )
+
+
+def _search_with_providers(providers: list[WebSearchProvider], query: str, limit: int) -> _ProviderSearchResult:
+    failures: list[dict[str, str]] = []
+    for provider in providers:
+        try:
+            rows = provider.search(query, limit)
+        except urllib.error.HTTPError as exc:
+            failures.append({"provider": provider.name, "error": f"HTTP {exc.code}"})
+            continue
+        except (urllib.error.URLError, TimeoutError, Exception) as exc:
+            failures.append({"provider": provider.name, "error": exc.__class__.__name__})
+            continue
+        if rows:
+            return _ProviderSearchResult(provider.name, rows, failures)
+    return _ProviderSearchResult("", [], failures)
+
+
+def _normalized_provider_results(provider_result: _ProviderSearchResult) -> list[_SearchResult]:
+    return [
+        _SearchResult(
+            title=str(item.get("title", "")),
+            url=str(item.get("url", "")),
+            snippet=str(item.get("snippet") or item.get("description") or ""),
+            source=str(item.get("source") or provider_result.provider_name),
+        )
+        for item in provider_result.rows
+    ]
+
+
+def _search_payload(
+    provider_result: _ProviderSearchResult,
+    request: _SearchRequest,
+    results: list[_SearchResult],
+) -> dict[str, Any]:
+    return {
+        "engine": provider_result.provider_name,
+        "query": request.query,
+        "provider_failures": provider_result.failures,
+        "results": [
+            {"source": item.source, "title": item.title, "url": item.url, "snippet": item.snippet}
+            for item in results
+        ],
+    }

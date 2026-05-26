@@ -25,8 +25,8 @@ def _record_real_runner_result(manager: SubAgentManager, run_id: str) -> None:
             response="r" * 200,
             backend="minimax",
             tool_rounds=3,
-            status="AWAITING_ACCEPTANCE",
-            verification_status="NEEDS_ACCEPTANCE",
+            status="DONE",
+            verification_status="VERIFIED",
         )
     )
 

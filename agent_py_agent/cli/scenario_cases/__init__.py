@@ -27,7 +27,6 @@ from .repair_retry_cases import (
     run_scenario_structured_repair_case,
 )
 from .subagent_cases import run_scenario_parent_subagent_cross_day_resume_case
-from .verification_case import run_scenario_verification_case
 
 __all__ = [
     "ScenarioRetryBackend",
@@ -43,5 +42,4 @@ __all__ = [
     "run_scenario_real_model_recovery_multi_round_case",
     "run_scenario_runner_retry_case",
     "run_scenario_structured_repair_case",
-    "run_scenario_verification_case",
 ]

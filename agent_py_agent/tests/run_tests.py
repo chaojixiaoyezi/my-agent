@@ -96,10 +96,10 @@ def create_real_api_subagent_run() -> str:
         "agent = SimpleAgent(cfg, Path('agent_py_agent').resolve())\n"
         "task = agent.subagents.create_run(\n"
         "    goal='真实 API 子代理 E2E：读取 README.md 并生成验收证据',\n"
-        "    thought='验证真实模型、工具调用、结构化输出和父代理验收闭环。',\n"
-        "    plan=['读取 README.md', '输出 SUBAGENT_RESULT', '等待验收'],\n"
+        "    thought='验证真实模型、工具调用、结构化输出和普通收口闭环。',\n"
+        "    plan=['读取 README.md', '输出 SUBAGENT_RESULT', '等待收口'],\n"
         "    allowed_tools=['read_file'],\n"
-        "    acceptance_checks=['真实 API runner 执行成功', '结构化输出可解析', '父代理验收通过'],\n"
+        "    acceptance_checks=['真实 API runner 执行成功', '结构化输出可解析', '普通收口通过'],\n"
         ")\n"
         "print(task.id)\n"
     )
@@ -114,7 +114,7 @@ def create_real_api_subagent_run() -> str:
 
 
 def assert_real_api_subagent_e2e(run_id: str) -> None:
-    """确认真实 API runner 和验收状态都已闭环。"""
+    """确认真实 API runner 和收口状态都已闭环。"""
 
     run_dir = TEST_SUBAGENTS / run_id
     runner = json.loads((run_dir / "reports" / "runner_result.json").read_text(encoding="utf-8"))
@@ -128,8 +128,7 @@ def assert_real_api_subagent_e2e(run_id: str) -> None:
     task = json.loads((run_dir / "task.json").read_text(encoding="utf-8"))
     assert task["status"] == "DONE"
     assert task["verification_status"] == "VERIFIED"
-    assert (run_dir / "ACCEPTANCE_REVIEW.md").exists()
-    assert (run_dir / "reports" / "acceptance_review.json").exists()
+    assert (run_dir / "reports" / "runner_result.json").exists()
 
 
 print(f"FULL_SMOKE_TEST_WORKSPACE={TEST_TMP}")
@@ -161,7 +160,7 @@ run(agent_cmd("subagents-leadership-recovery-plan", "--help"))
 run(agent_cmd("subagents-leadership-recovery-apply", "--help"))
 run(agent_cmd("subagents-apply-actions", "--dry-run", "--limit", "2"))
 run(agent_cmd("subagents-route-capabilities", "--dry-run", "--limit", "2"))
-run(agent_cmd("subagents-acceptance", "--help"))
+run(agent_cmd("subagents-tests", "--help"))
 run(agent_cmd("subagents-patches", "--help"))
 run(agent_cmd("subagents-dispatch", "--help"))
 run(agent_cmd("subagents-dispatch", "--watch", "--max-cycles", "1", "--interval", "0", "--max-runners", "0"))
@@ -242,7 +241,7 @@ run(
             "最终回复必须只包含一个结构化结果块，格式精确为："
             "[SUBAGENT_RESULT]\\n{JSON}\\n[/SUBAGENT_RESULT]。"
             "JSON 必须可被 json.loads 解析，必须包含："
-            "\"status\":\"AWAITING_ACCEPTANCE\"，"
+            "\"status\":\"DONE\"，"
             "\"message\":\"已读取 README.md 并生成证据\"，"
             "\"evidence\":[{\"kind\":\"file_read\",\"summary\":\"README.md 已通过 read_file 读取\",\"path\":\"README.md\",\"ok\":true}]，"
             "\"tests\":[{\"name\":\"read_file README.md\",\"command\":\"read_file README.md\",\"ok\":true,\"summary\":\"工具调用成功\"}]，"
@@ -251,7 +250,7 @@ run(
         ),
     )
 )
-run(agent_cmd("subagents-acceptance", "--apply", "--run-id", e2e_run_id, "--reviewer", "full-smoke"))
+run(agent_cmd("subagents-tests", "--apply", "--run-id", e2e_run_id, "--reviewer", "full-smoke"))
 assert_real_api_subagent_e2e(e2e_run_id)
 
 discovered_tests = run_capture([sys.executable, "-m", "pytest", "agent_py_agent/tests", "-q"])

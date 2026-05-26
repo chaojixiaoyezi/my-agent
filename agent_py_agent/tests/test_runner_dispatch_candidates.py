@@ -201,7 +201,7 @@ class TestDispatchRunnerCandidates:
         from agent_py_agent.agent.agent_core.runner_dispatch import _dispatch_runner_candidates
 
         tasks = [
-            self._runner_task("accept", "acceptor", created_at=1.0),
+            self._runner_task("accept", "bug_finder", created_at=1.0),
             self._runner_task("bug", "bug_finder", created_at=2.0),
             self._runner_task("test", "tester", created_at=3.0),
             self._runner_task("work", "worker", created_at=4.0),

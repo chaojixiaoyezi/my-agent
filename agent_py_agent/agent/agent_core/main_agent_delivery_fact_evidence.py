@@ -27,8 +27,24 @@ def fact_evidence_decision(
         return GateDecision.allow("fact_evidence", evidence={"declared": False})
     payload = load_fact_evidence_payload(contract, workspace_root)
     if payload is None:
-        return GateDecision.repair("fact_evidence", [GateFinding("FACT_EVIDENCE_PAYLOAD_MISSING")])
-    return evaluate_fact_evidence_gate(payload, fact_contract, archive_tool_calls=archive_tool_calls)
+        return GateDecision.allow(
+            "fact_evidence",
+            recommended_action="record_fact_evidence_payload_when_available",
+            evidence={"declared": True, "warning_codes": ["FACT_EVIDENCE_PAYLOAD_MISSING"]},
+        )
+    decision = evaluate_fact_evidence_gate(payload, fact_contract, archive_tool_calls=archive_tool_calls)
+    if not decision.allowed and not _fact_evidence_enforcement_required(fact_contract):
+        return GateDecision.allow(
+            "fact_evidence",
+            recommended_action="review_fact_evidence_findings",
+            evidence={
+                "declared": True,
+                "warning_codes": list(decision.finding_codes),
+                "advisory_status": decision.status,
+                **decision.evidence,
+            },
+        )
+    return decision
 
 
 def fact_evidence_contract(contract: dict[str, Any]) -> dict[str, Any]:
@@ -60,6 +76,11 @@ def fact_evidence_payload_ref(contract: dict[str, Any]) -> str:
         if ref := str(contract.get(key) or "").strip():
             return ref
     return delivery_quality_payload_ref(contract)
+
+
+def _fact_evidence_enforcement_required(contract: dict[str, Any]) -> bool:
+    value = str(contract.get("enforcement") or contract.get("mode") or "").strip().lower()
+    return value in {"required", "hard", "block", "blocking"}
 
 
 __all__ = [

@@ -148,7 +148,7 @@ def validate_task_envelope(envelope: TaskEnvelope) -> ProtocolValidationReport:
             _protocol_issue(
                 "missing_acceptance_checks",
                 "acceptance.checks",
-                "TaskEnvelope.acceptance.checks must include at least one parent-visible check.",
+                "TaskEnvelope.acceptance.checks must include at least one caller-visible check.",
             )
         )
     return ProtocolValidationReport(ok=not issues, issues=issues)
@@ -242,13 +242,11 @@ def _tool_contract(task: SubAgentTask) -> dict[str, object]:
     }
 
 
-# LLM: _acceptance_contract makes parent acceptance checks a protocol field, not only prompt text.
-# 函数用途: 暴露验收条件、不能自验收和 required outputs，为 QA/验收链路提供机器事实。
+# LLM: _acceptance_contract makes closeout checks a protocol field, not only prompt text.
+# 函数用途: 暴露检查条件和 required outputs，为结果检查链路提供机器事实。
 def _acceptance_contract(task: SubAgentTask) -> dict[str, object]:
-    quality_contract = getattr(task, "quality_contract", None)
     return {
         "checks": _task_list(task, "acceptance_checks"),
-        "must_not_self_accept": bool(getattr(quality_contract, "cannot_self_accept", True)),
         "required_outputs": _task_list(task, "artifact_refs"),
     }
 

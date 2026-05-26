@@ -1,5 +1,5 @@
 # LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
-# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+# 模块用途: 支撑主代理派发、跟踪和汇总子代理任务。
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ from .action_handlers import (
     apply_record_only_action,
     apply_reopen_for_evidence,
     apply_repair_work_order,
-    apply_run_acceptance,
     apply_stop_no_progress_and_escalate,
 )
 from .action_leadership import apply_recover_coordinator_leadership
@@ -37,7 +36,6 @@ ACTION_DISPATCH = {
     "inspect_channel_probe": apply_probe_or_repair_channel,
     "repair_work_order": apply_repair_work_order,
     "reopen_for_evidence": apply_reopen_for_evidence,
-    "run_acceptance": apply_run_acceptance,
     "takeover_or_reassign": apply_takeover_or_reassign,
     "recover_coordinator_leadership": apply_recover_coordinator_leadership,
     # LLM: parent-timeout child recovery is audit-only until an explicit handoff apply exists.

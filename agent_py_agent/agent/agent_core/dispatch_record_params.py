@@ -66,20 +66,3 @@ class PatchReviewRecordParams:
     reviewer: str
     note: str
     limit: int
-
-
-# LLM: AcceptanceRecordParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存验收记录参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
-@dataclass(frozen=True)
-class AcceptanceRecordParams:
-    agent: Any
-    apply: bool
-    reviewer: str
-    note: str
-    limit: int
-    execute_acceptance_tests: bool = False
-    auto_apply_acceptance_followup: bool = False
-    root_id: str = ""
-    parent_run_id: str = ""
-    include_run_ids: list[str] | None = None
-    exclude_run_ids: list[str] | None = None

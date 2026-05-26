@@ -105,10 +105,6 @@ def _dispatch_record_made_progress(record) -> bool:
         return True
     if _safe_list(record, "runner_created_child_ids"):
         return True
-    if _safe_bool(record, "parent_acceptance_policy_executed"):
-        return True
-    if _safe_bool(record, "parent_acceptance_auto_execution_executed"):
-        return True
 
     before_status = _safe_str(record, "before_status")
     after_status = _safe_str(record, "after_status")

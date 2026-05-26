@@ -34,33 +34,6 @@ class DispatchRecordParams:
     runner_child_status_counts: dict[str, int] | None = None
     runner_unfinished_child_ids: list[str] | None = None
     runner_partial_success: bool = False
-    parent_acceptance_policy_ref: str = ""
-    parent_acceptance_policy_decision: str = ""
-    parent_acceptance_policy_action: str = ""
-    parent_acceptance_policy_would_execute: bool = False
-    parent_acceptance_policy_executed: bool = False
-    parent_acceptance_policy_execution_mode: str = ""
-    parent_acceptance_policy_automatic_execution_allowed: bool = False
-    parent_acceptance_policy_recommended_command: str = ""
-    parent_acceptance_policy_preflight_status: str = ""
-    parent_acceptance_policy_ready_for_automatic_execution: bool = False
-    parent_acceptance_policy_preflight_blockers: list[str] | None = None
-    parent_acceptance_auto_execution_ref: str = ""
-    parent_acceptance_auto_execution_status: str = ""
-    parent_acceptance_auto_execution_allowed: bool = False
-    parent_acceptance_auto_execution_executed: bool = False
-    parent_acceptance_auto_execution_guard_status: str = ""
-    parent_acceptance_auto_execution_blocked_by: list[str] | None = None
-    parent_acceptance_auto_execution_test_ref: str = ""
-    parent_acceptance_auto_execution_test_total: int = 0
-    parent_acceptance_auto_execution_test_failed: int = 0
-    parent_acceptance_test_failure_summary: str = ""
-    parent_acceptance_test_failure_details: list[str] | None = None
-    parent_acceptance_followup_ref: str = ""
-    parent_acceptance_followup_status: str = ""
-    parent_acceptance_followup_action: str = ""
-    parent_acceptance_followup_command: str = ""
-    parent_acceptance_followup_reason: str = ""
 
 
 # LLM: DispatchWatchRecordParams 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
