@@ -352,8 +352,7 @@ def test_runner_prompt_describes_scoped_capability_request_loop(tmp_path) -> Non
     prompt = _build_subagent_runner_prompt(context)
 
     assert '"capability_type": "shell|tool|skill|mcp|network|generic"' in prompt
-    assert '"requested_commands": ["python3"]' in prompt
     assert '"requested_mcp_tools": []' in prompt
-    assert '"path_scope": ["任务内需要访问的目录"]' in prompt
-    assert '"output_budget": {"stdout_bytes": 65536, "stderr_bytes": 32768}' in prompt
+    assert "expected_output" in prompt
+    assert "不要把父级授权细节、grant、path_scope、output_budget 当成普通任务步骤" in prompt
     assert "controlled_exec 只能使用 controlled_exec_grants 里的父级 grant" in prompt

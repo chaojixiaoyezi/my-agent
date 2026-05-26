@@ -1,35 +1,31 @@
 # LLM: read_file execution is isolated so filesystem tool declarations stay small.
-# 模块用途: 执行工作区内文本文件读取、行号分页、结构化摘要和 artifact 读取提示。
+# 模块用途: 执行工作区内文本文件读取、tool-output 正文读取、行号分页和结构化摘要。
 
 from __future__ import annotations
 
 from typing import Any
 
 from ._filesystem_helpers import _bundled_filesystem_param, _int_param, _required_path
-from .filesystem_artifact_guard import allowed_tools_hint_param, tool_output_artifact_read_hint
+from .filesystem_artifact_guard import tool_output_artifact_content
 from .filesystem_structured_read import structured_read_summary
 from .models import ToolExecutionResult
 
 
 # LLM: execute_read_file carries the full read_file behavior for FileSystemTool subclasses.
-# 函数用途: 解析 read_file 参数、校验 artifact 读取边界、读取文本并按行号/字符预算返回结果。
+# 函数用途: 解析 read_file 参数、读取普通文本或 tool-output artifact 正文，并按行号/字符预算返回结果。
 def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolExecutionResult:
     try:
         raw_path = _required_path(_bundled_filesystem_param(params, "path"))
         target = tool.resolve_path(raw_path)
     except ValueError as exc:
         return ToolExecutionResult("read_file", False, str(exc))
-    artifact_hint = tool_output_artifact_read_hint(
-        target,
-        tool.workspace_roots,
-        allowed_tools=allowed_tools_hint_param(params),
-    )
-    if artifact_hint:
-        return ToolExecutionResult("read_file", False, artifact_hint)
     if not target.exists():
         return ToolExecutionResult("read_file", False, f"文件不存在: {tool.display_path(target)}")
     if not target.is_file():
         return ToolExecutionResult("read_file", False, f"目标不是文件: {tool.display_path(target)}")
+    artifact_content = tool_output_artifact_content(target, tool.workspace_roots)
+    if artifact_content:
+        return _numbered_text_result(artifact_content, params, max_chars)
     try:
         content = target.read_text(encoding="utf-8")
     except UnicodeDecodeError:

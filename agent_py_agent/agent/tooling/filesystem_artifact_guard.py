@@ -1,9 +1,11 @@
 # LLM: Keep file-read artifact guard out of filesystem tools so the read module stays small.
-# 模块用途: 判断普通 read_file 是否误读外置 tool-output artifact 包装文件，并返回改用 read_artifact 的提示。
+# 模块用途: 识别外置 tool-output artifact 包装文件，让普通 read_file 可读取其中正文。
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 _TOOL_OUTPUT_ARTIFACT_PARTS = ("memory_archive", "artifacts", "tool_outputs")
 
@@ -14,8 +16,8 @@ def is_tool_output_artifact_path(target: Path) -> bool:
     return target.suffix.lower() == ".json" and _path_has_parts(target, _TOOL_OUTPUT_ARTIFACT_PARTS)
 
 
-# LLM: tool_output_artifact_typo_hint routes typo-repaired wrapper paths to the artifact reader.
-# 函数用途: 当模型把 tool-output artifact 路径前缀抄错时，返回 read_artifact 恢复提示而不是 read_file 重试提示。
+# LLM: tool_output_artifact_typo_hint keeps typo recovery on the normal read_file path.
+# 函数用途: 当模型把 tool-output artifact 路径前缀抄错时，提示用 suggested_target 继续 read_file。
 def tool_output_artifact_typo_hint(
     raw_path: str,
     workspace_root: Path,
@@ -30,28 +32,22 @@ def tool_output_artifact_typo_hint(
         f" suspected_path_typo=true target={raw_path} workspace_root={workspace_root}"
         f" suggested_target={suggested}。"
         " 这是路径拼写错误，不是权限缺口；但目标是已外置的 tool-output artifact JSON 包装文件。"
-        f" 不要用 read_file 或 suggested_target 重试，请改用 read_artifact，artifact_ref={suggested_path.name}，"
-        "offset=0，max_chars=4000；需要更多内容再分页读取。"
-        + _read_artifact_permission_hint(allowed_tools)
+        " 请继续用 read_file 读取 suggested_target；read_file 会读取 artifact 正文并按行分页。"
     )
 
 
-# LLM: tool_output_artifact_read_hint blocks accidental prompt-flood reads of externalized output wrappers.
-# 函数用途: 判断 read_file 目标是否是 tool_outputs 下的 artifact JSON；若是则要求使用 read_artifact 切片读取。
-def tool_output_artifact_read_hint(target: Path, roots: list[Path], allowed_tools: list[str] | None = None) -> str:
+# LLM: tool_output_artifact_content returns the body of a trusted wrapper without requiring index lookup.
+# 函数用途: 如果 read_file 目标是 tool-output artifact 包装文件，读取其中 content 字段；普通文件返回空字符串。
+def tool_output_artifact_content(target: Path, roots: list[Path]) -> str:
     if not is_tool_output_artifact_path(target):
         return ""
     for root in roots:
         artifact_root = root / Path(*_TOOL_OUTPUT_ARTIFACT_PARTS)
         try:
             target.relative_to(artifact_root.resolve(strict=False))
-            return (
-                "这是已外置的工具输出 artifact JSON 包装文件，不能用 read_file 直接读取。"
-                "请改用 read_artifact，并传 artifact_ref 为该路径或 call_id，再设置 max_chars 分片读取。"
-                + _read_artifact_permission_hint(allowed_tools)
-            )
         except ValueError:
             continue
+        return _tool_output_content_from_json(target)
     return ""
 
 
@@ -63,15 +59,19 @@ def _path_has_parts(path: Path, parts: tuple[str, ...]) -> bool:
     return any(tuple(values[index:index + size]) == parts for index in range(0, len(values) - size + 1))
 
 
-# LLM: _read_artifact_permission_hint adapts wrapper recovery advice to the current tool catalog.
-# 函数用途: 如果当前上下文没有授权 read_artifact，提示上报 capability_request，而不是让子代理继续空转。
-def _read_artifact_permission_hint(allowed_tools: list[str] | None) -> str:
-    if allowed_tools is None:
+# LLM: _tool_output_content_from_json is tolerant; invalid wrappers fall back to normal file reads.
+# 函数用途: 解析 tool-output artifact 包装 JSON，只有 kind/content 形状正确时才返回正文。
+def _tool_output_content_from_json(target: Path) -> str:
+    try:
+        payload: Any = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return ""
-    allowed = {str(item) for item in allowed_tools if str(item).strip()}
-    if "read_artifact" in allowed:
-        return " 当前上下文已授权 read_artifact。"
-    return " 当前执行上下文未授权 read_artifact；请向父级上报 capability_request，请求 artifact 读取能力。"
+    if not isinstance(payload, dict):
+        return ""
+    if payload.get("kind") != "tool_output":
+        return ""
+    content = payload.get("content")
+    return content if isinstance(content, str) else ""
 
 
 # LLM: allowed_tools_hint_param extracts registry-injected authorization context for recovery hints only.

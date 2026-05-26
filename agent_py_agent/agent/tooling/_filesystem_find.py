@@ -20,9 +20,12 @@ from ._filesystem_read import _COMMON_FILE_DISCOVERY_IGNORES, FileSystemTool
 from .models import ToolExecutionResult, ToolSpec
 
 
+# LLM: FindFilesTool is the dedicated glob-based file discovery tool.
+# 类用途: 按 glob 查找文件路径，和 list_files/search_text 分工明确。
 class FindFilesTool(FileSystemTool):
-    # LLM: FindFilesTool offers one generic glob-based file discovery surface.
-    # 类用途: 按 glob 查找文件路径，和 list_files/search_text 分工明确。
+
+    # LLM: FindFilesTool.__init__ builds the model-facing tool metadata.
+    # 函数用途: 初始化 find_files 的工作区范围、最大结果数和 ToolSpec。
     def __init__(self, workspace_root: Path, max_matches: int, workspace_roots: list[Path] | None = None):
         super().__init__(workspace_root, workspace_roots)
         self.max_matches = max_matches
@@ -60,6 +63,8 @@ class FindFilesTool(FileSystemTool):
             ],
         )
 
+    # LLM: FindFilesTool.execute validates params then dispatches file or directory search.
+    # 函数用途: 执行 find_files 主流程并返回稳定 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
             request = _find_files_request_from_params(params, self.max_matches)
@@ -72,11 +77,15 @@ class FindFilesTool(FileSystemTool):
             return self._find_in_single_file(target, request)
         return self._find_in_directory(target, request)
 
+    # LLM: FindFilesTool._find_in_single_file handles the path-is-file case.
+    # 函数用途: 当搜索范围本身是文件时，只判断该文件是否匹配 pattern。
     def _find_in_single_file(self, target: Path, request: _FindFilesRequest) -> ToolExecutionResult:
         if _matches_find_pattern(self.display_path(target), target.name, request.pattern):
             return ToolExecutionResult("find_files", True, self.display_path(target))
         return ToolExecutionResult("find_files", True, "没有找到匹配文件")
 
+    # LLM: FindFilesTool._find_in_directory walks candidates with pagination.
+    # 函数用途: 在目录内查找匹配文件，按 offset/limit 输出可继续翻页的结果。
     def _find_in_directory(self, target: Path, request: _FindFilesRequest) -> ToolExecutionResult:
         results: list[str] = []
         seen = 0
@@ -102,6 +111,8 @@ class FindFilesTool(FileSystemTool):
         return ToolExecutionResult("find_files", True, "\n".join(results))
 
 
+# LLM: _FindFilesRequest bundles validated find_files params.
+# 类用途: 保存 find_files 的 glob、路径、分页和忽略目录开关。
 @dataclass(frozen=True)
 class _FindFilesRequest:
     pattern: str
@@ -111,6 +122,8 @@ class _FindFilesRequest:
     include_ignored: bool
 
 
+# LLM: _find_files_request_from_params parses model JSON into a request object.
+# 函数用途: 校验 pattern/path/limit/offset/include_ignored 参数。
 def _find_files_request_from_params(params: dict[str, Any], max_matches: int) -> _FindFilesRequest:
     return _FindFilesRequest(
         pattern=_text_param(
@@ -129,6 +142,8 @@ def _find_files_request_from_params(params: dict[str, Any], max_matches: int) ->
     )
 
 
+# LLM: _iter_find_candidates walks files in stable sorted order.
+# 函数用途: 生成候选文件列表，默认跳过常见缓存和依赖目录。
 def _iter_find_candidates(target: Path, *, include_ignored: bool) -> list[Path]:
     candidates: list[Path] = []
     for root, dirnames, filenames in os.walk(target):
@@ -139,5 +154,7 @@ def _iter_find_candidates(target: Path, *, include_ignored: bool) -> list[Path]:
     return sorted(candidates, key=lambda path: (path.as_posix().lower(), path.as_posix()))
 
 
+# LLM: _matches_find_pattern checks both relative path and basename.
+# 函数用途: 让 glob 可匹配完整展示路径，也可只匹配文件名。
 def _matches_find_pattern(display_path: str, basename: str, pattern: str) -> bool:
     return fnmatch.fnmatch(display_path, pattern) or fnmatch.fnmatch(basename, pattern)

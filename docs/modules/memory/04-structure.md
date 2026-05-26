@@ -293,7 +293,7 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 ## 2026-05-08 artifact explicit read structure update
 - `memory_archive/artifact_reader.py` owns indexed tool-output artifact body reads. It treats `index.jsonl` as the authority, validates the registered path boundary, verifies sha256, and returns explicit slices.
 - `cli/memory_artifact_commands.py` exposes `memory-artifact-read`, keeping failed reads metadata-only and successful reads clearly marked with `reads_artifact_body=true`.
-- `tooling/artifact.py` exposes `read_artifact` to the model as the controlled runtime tool; ordinary workspace files still go through `read_file`.
+- `tooling/artifact.py` keeps `read_artifact` as the strict recovery/audit reader for indexed tool-output refs; ordinary files, explicit large-output paths, and safe tool-output wrapper paths go through `read_file`.
 
 ## 2026-05-11 artifact copied-prefix recovery structure update
 - `memory_archive/artifact_reader.py` 现在在精确 path/hash/call_id 匹配失败、且 ref 看起来像路径时，会尝试用唯一 artifact 文件名回到已登记 index 记录；这是为了修复模型复制路径前缀时把 workspace 根写错的真实 E2E 问题。
@@ -317,12 +317,12 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 - 这条结构规则用于修复真实 E2E 的 prompt/路径误传问题：模型看到的引用不能只是人类可读短号，必须能绑定到当前任务、当前 run、当前 workspace。
 
 ## 2026-05-13 artifact read mode and budget structure update
-- `memory_archive/artifact_reader.py` 继续是唯一 tool-output artifact 正文读取入口；现在 `ReadToolOutputArtifactRequest` 增加 `mode` 和 `query` 字段，支持 `slice/head/tail/search` 四种窄读方式。所有模式仍先查 `tool_outputs/index.jsonl`、校验目录边界和 sha256。
+- `memory_archive/artifact_reader.py` 继续是严格 artifact ref 读取入口；现在 `ReadToolOutputArtifactRequest` 增加 `mode` 和 `query` 字段，支持 `slice/head/tail/search` 四种窄读方式。所有模式仍先查 `tool_outputs/index.jsonl`、校验目录边界和 sha256。模型已经拿到明确安全路径时，不必绕到这里；普通读取统一用 `read_file`。
 - `memory_archive/artifact_read_modes.py` 承接正文 shaping：slice/head/tail/search 的 offset、截断、匹配行和附加元数据都在这里处理，避免 artifact index 读取层继续增长。
 - `memory_archive/artifact_reader.py` 还提供 `estimate_tool_output_artifact_size()`，只读 index 的 `size_bytes`，不打开正文，用于 `max_chars=0` 这类无界读取的预算预判。
 - `tooling/artifact_read_budget.py` 是 read_artifact 的单 run 正文读取预算器；它记录 `run_id -> [(timestamp, chars)]`，只限制带 run scope 的子代理读取，不限制普通主代理聊天。
 - `tooling/artifact.py` 把工具参数转成 `ReadToolOutputArtifactRequest` bundle，再先做预算 preflight，成功读取后按实际 `content_chars` 计费。这样预算逻辑不散落到 reader 或 tool loop 里。
-- `tooling/filesystem_artifact_guard.py` 负责普通 `read_file` 误读 artifact 包装文件的恢复提示；提示会根据 registry 注入的 `allowed_tools` 判断当前上下文是否有 `read_artifact`，没有时要求上报 `capability_request`。
+- `tooling/filesystem_artifact_guard.py` 负责识别 `memory_archive/artifacts/tool_outputs/*.json` 包装文件；`read_file` 会读取其中 `content` 正文并按普通文件分页。只有短 call id、hash、compact/resume 这类需要防串 run 的场景继续走 `read_artifact`。
 
 ## 2026-05-14 compact multi-hop and subagent owner structure update
 - `agent/action_protocol.py` 现在作为 typed protocol facade 导出 `CompactContinuePacketEnvelope` 和 `PathRef`，具体 compact envelope 在 `action_protocol_compact.py`，共享 refs 在 `action_protocol_core.py`；`memory_archive/compact_continue_packet.py` 会把旧 continue packet 同步包装成 `typed_envelope`，推荐读取路径进入结构化 `path_refs`，避免后续自动恢复解析自然语言说明。

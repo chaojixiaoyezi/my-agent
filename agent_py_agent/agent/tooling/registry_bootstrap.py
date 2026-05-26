@@ -17,7 +17,7 @@ from .filesystem import (
     WriteFileTool,
 )
 from .models import HybridToolRetriever, KeywordToolSearchProvider, VectorToolSearchProvider
-from .shell import ShellTool
+from .shell import ShellTool, ShellToolOptions
 from .web import FetchUrlTool, HttpRequestTool
 from .web_search import WebSearchTool
 
@@ -69,7 +69,7 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
 
 
 # LLM: _register_network_tools isolates non-filesystem tool setup from constructor policy.
-# 函数用途: 注册网页、HTTP、shell 和受控执行工具，保持工具初始化顺序稳定。
+# 函数用途: 注册网页、HTTP 和 shell 工具，保持工具初始化顺序稳定。
 def _register_network_tools(registry: Any, params: Any) -> None:
     registry.register(WebSearchTool(max_results=params.max_matches, timeout=params.http_timeout))
     registry.register(FetchUrlTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
@@ -77,10 +77,16 @@ def _register_network_tools(registry: Any, params: Any) -> None:
     registry.register(
         ShellTool(
             registry.workspace_root,
-            default_timeout=params.shell_tool_timeout,
-            max_output_chars=params.shell_tool_output_max_chars,
+            options=ShellToolOptions(
+                workspace_roots=registry.workspace_roots,
+                access_mode=params.access_mode,
+                default_timeout=params.shell_tool_timeout,
+                max_output_chars=params.shell_tool_output_max_chars,
+            ),
         )
     )
+    # controlled_exec is kept as a legacy/internal tool for existing capability
+    # flows, but ToolRegistry hides it from the default model-facing catalog.
     registry.register(ControlledExecTool())
 
 

@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,8 @@ from .models import BaseTool, ToolExecutionResult, ToolSpec
 
 _MAX_COMMAND_CHARS = 2000
 _DEFAULT_MAX_OUTPUT_CHARS = 12_000
+_DEFAULT_ACCESS_MODE = "workspace-write"
+_ACCESS_MODES = frozenset({"restricted", "workspace-write", "full-access"})
 _TOOL_DEADLINE_UNIX_ENV = "MY_AGENT_TOOL_DEADLINE_UNIX"
 _TOOL_DEADLINE_MARGIN_SECONDS_ENV = "MY_AGENT_TOOL_DEADLINE_MARGIN_SECONDS"
 
@@ -34,6 +37,16 @@ _DANGEROUS_COMMANDS = [
 ]
 
 _DANGEROUS_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _DANGEROUS_COMMANDS]
+
+
+# LLM: ShellToolOptions keeps run_command constructor stable while avoiding parameter sprawl.
+# 类用途: 保存 run_command 的工作区、权限、超时和输出预算配置。
+@dataclass(frozen=True)
+class ShellToolOptions:
+    workspace_roots: list[Path] | None = None
+    access_mode: str = _DEFAULT_ACCESS_MODE
+    default_timeout: int = 30
+    max_output_chars: int = _DEFAULT_MAX_OUTPUT_CHARS
 
 
 # LLM: _is_dangerous_command 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -97,12 +110,54 @@ def _float_env(name: str) -> float:
         return 0.0
 
 
-# LLM: _working_dir_from_params 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 完成 工具系统 中的 working_dir_from_params 步骤，并保持调用方依赖的数据形状。
-def _working_dir_from_params(params: dict[str, Any], workspace_root: Path) -> Path:
+# LLM: _normalize_access_mode keeps command permissions a small runtime enum.
+# 函数用途: 归一化 access_mode；坏配置回退 workspace-write，避免把异常值变成隐式 full access。
+def _normalize_access_mode(access_mode: str) -> str:
+    mode = str(access_mode or "").strip().lower().replace("_", "-")
+    return mode if mode in _ACCESS_MODES else _DEFAULT_ACCESS_MODE
+
+
+# LLM: _path_inside_any_root is the shell cwd boundary for workspace modes.
+# 函数用途: 判断工作目录是否落在允许 roots 内；用 resolve 后路径避免简单前缀绕过。
+def _path_inside_any_root(path: Path, roots: list[Path]) -> bool:
+    resolved = path.expanduser().resolve()
+    for root in roots:
+        try:
+            resolved.relative_to(root.expanduser().resolve())
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+# LLM: _working_dir_from_params applies access_mode before launching shell work.
+# 函数用途: 解析 working_dir，并按权限档位决定是否允许工作区外执行。
+def _working_dir_from_params(
+    params: dict[str, Any],
+    workspace_root: Path,
+    *,
+    workspace_roots: list[Path] | None = None,
+    access_mode: str = _DEFAULT_ACCESS_MODE,
+) -> Path | ToolExecutionResult:
     working_dir = str(params.get("working_dir", "")).strip()
     target = Path(working_dir).expanduser() if working_dir else workspace_root
-    return target if target.is_dir() else workspace_root
+    if not target.is_dir():
+        return workspace_root
+    mode = _normalize_access_mode(access_mode)
+    if mode == "full-access":
+        return target
+    roots = workspace_roots or [workspace_root]
+    if _path_inside_any_root(target, roots):
+        return target.resolve()
+    return ToolExecutionResult(
+        "run_command",
+        False,
+        (
+            f"COMMAND_ACCESS_DENIED: access_mode={mode} 只允许在配置的工作区内执行命令。"
+            " 如确实需要访问系统其他目录，请把 access_mode 显式改为 full-access。"
+        ),
+        error_code="PATH_OUTSIDE_WORKSPACE",
+    )
 
 
 # LLM: _bounded_output preserves enough command output for diagnosis without flooding the live prompt.
@@ -141,6 +196,46 @@ def _subprocess_text_env() -> dict[str, str]:
     return env
 
 
+# LLM: _build_shell_tool_spec keeps run_command metadata out of the constructor.
+# 函数用途: 构建模型可见的 run_command 工具说明。
+def _build_shell_tool_spec(access_mode: str, default_timeout: int, max_output_chars: int) -> ToolSpec:
+    return ToolSpec(
+        name="run_command",
+        category="shell",
+        effect="mutating",
+        requires_idempotency=True,
+        description="Execute one shell command in the workspace.",
+        use_cases=[
+            "Run a project build script such as make or npm run.",
+            "Inspect processes, ports, network state, or other system information.",
+            "Execute a one-off script or command-line tool.",
+        ],
+        avoid_when=[
+            "Use read_file / write_file when only file IO is needed.",
+            "Avoid for interactive terminal workflows.",
+            "Prefer write_file for file changes instead of shell redirection.",
+        ],
+        keywords=["shell", "command", "terminal", "bash", "cmd", "script"],
+        parameters={
+            "command": "Shell command string to execute.",
+            "timeout": f"Timeout in seconds; default {default_timeout}.",
+            "working_dir": "Execution directory; defaults to the workspace root.",
+        },
+        parameter_details={
+            "command": "Required. Full command string, for example 'ls -la' or 'python build.py'.",
+            "timeout": f"Optional. Defaults to {default_timeout} seconds.",
+            "working_dir": "Optional. In restricted/workspace-write mode it must stay inside workspace roots.",
+            "access_mode": f"Runtime policy is configured outside the tool as access_mode={access_mode}.",
+            "output": f"Stdout/stderr are bounded previews; each stream preview defaults to {max_output_chars} chars.",
+        },
+        examples=[
+            '{"tool": "run_command", "command": "ls -la"}',
+            '{"tool": "run_command", "command": "python --version", "working_dir": "."}',
+            '{"tool": "run_command", "command": "make build", "timeout": 60}',
+        ],
+    )
+
+
 # LLM: ShellTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
 # 类用途: ShellTool 数据模型，集中保存 工具系统 的结构化状态。
 class ShellTool(BaseTool):
@@ -150,49 +245,16 @@ class ShellTool(BaseTool):
     def __init__(
         self,
         workspace_root: Path,
-        default_timeout: int = 30,
-        max_output_chars: int = _DEFAULT_MAX_OUTPUT_CHARS,
+        *,
+        options: ShellToolOptions | None = None,
     ):
+        options = options or ShellToolOptions()
         self.workspace_root = workspace_root.resolve()
-        self.default_timeout = default_timeout
-        self.max_output_chars = max(0, int(max_output_chars))
-        self.spec = ToolSpec(
-            name="run_command",
-            category="shell",
-            effect="mutating",
-            requires_idempotency=True,
-            description="Execute one shell command in the workspace.",
-            use_cases=[
-                "Run a project build script such as make or npm run.",
-                "Inspect processes, ports, network state, or other system information.",
-                "Execute a one-off script or command-line tool.",
-            ],
-            avoid_when=[
-                "Use read_file / write_file when only file IO is needed.",
-                "Avoid for interactive terminal workflows.",
-                "Prefer write_file for file changes instead of shell redirection.",
-            ],
-            keywords=["shell", "command", "terminal", "bash", "cmd", "script"],
-            parameters={
-                "command": "Shell command string to execute.",
-                "timeout": f"Timeout in seconds; default {default_timeout}.",
-                "working_dir": "Execution directory; defaults to the workspace root.",
-            },
-            parameter_details={
-                "command": "Required. Full command string, for example 'ls -la' or 'python build.py'.",
-                "timeout": f"Optional. Defaults to {default_timeout} seconds.",
-                "working_dir": "Optional. Directory where the command runs.",
-                "output": (
-                    "Stdout/stderr are returned as bounded previews with *_chars and *_truncated flags; "
-                    f"each stream preview defaults to {self.max_output_chars} chars."
-                ),
-            },
-            examples=[
-                '{"tool": "run_command", "command": "ls -la"}',
-                '{"tool": "run_command", "command": "python --version", "working_dir": "."}',
-                '{"tool": "run_command", "command": "make build", "timeout": 60}',
-            ],
-        )
+        self.workspace_roots = [root.resolve() for root in (options.workspace_roots or [self.workspace_root])]
+        self.access_mode = _normalize_access_mode(options.access_mode)
+        self.default_timeout = options.default_timeout
+        self.max_output_chars = max(0, int(options.max_output_chars))
+        self.spec = _build_shell_tool_spec(self.access_mode, self.default_timeout, self.max_output_chars)
 
     # LLM: ShellTool.execute 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 执行 ShellTool 的主流程并返回 ToolExecutionResult。
@@ -212,7 +274,14 @@ class ShellTool(BaseTool):
                 "TOOL_DEADLINE_EXCEEDED: 外层任务剩余时间不足，系统没有启动新的 shell 命令。",
                 error_code="TOOL_TIMEOUT",
             )
-        target = _working_dir_from_params(params, self.workspace_root)
+        target = _working_dir_from_params(
+            params,
+            self.workspace_root,
+            workspace_roots=self.workspace_roots,
+            access_mode=self.access_mode,
+        )
+        if isinstance(target, ToolExecutionResult):
+            return target
         try:
             result = self._run_command(command, target, timeout)
             return ToolExecutionResult(self.spec.name, True, _format_process_result(result, self.max_output_chars))

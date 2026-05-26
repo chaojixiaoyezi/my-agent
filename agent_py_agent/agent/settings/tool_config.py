@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 __all__ = ["DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS", "ToolConfig"]
 
 DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS = 12_000
+DEFAULT_COMMAND_ACCESS_MODE = "workspace-write"
 
 
 # LLM: ToolConfig 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
@@ -30,6 +31,7 @@ class ToolConfig:
     tool_search_max_matches: int = 50
     tool_web_max_chars: int = 100_000
     tool_http_timeout: int = 30
+    access_mode: str = DEFAULT_COMMAND_ACCESS_MODE
     tool_shell_timeout: int = 240
     tool_shell_output_max_chars: int = 12_000
     stream_enabled: bool = True

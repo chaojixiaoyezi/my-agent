@@ -19,6 +19,7 @@ import pytest
 from agent_py_agent.agent.tooling.models import ToolExecutionResult
 from agent_py_agent.agent.tooling.shell import (
     ShellTool,
+    ShellToolOptions,
     _is_dangerous_command,
     _validate_command,
 )
@@ -27,7 +28,7 @@ from agent_py_agent.agent.tooling.shell import (
 @pytest.fixture
 def shell_tool(tmp_path: Path) -> ShellTool:
     """Create a ShellTool instance for testing."""
-    return ShellTool(tmp_path, default_timeout=5)
+    return ShellTool(tmp_path, options=ShellToolOptions(default_timeout=5))
 
 
 def test_shell_tool_echo_hello(shell_tool: ShellTool) -> None:

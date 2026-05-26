@@ -305,10 +305,11 @@ class ReadFileTool(FileSystemTool):
             name="read_file",
             category="filesystem",
             effect="read_only",
-            description="读取文本文件内容，适合看代码、配置和文档。",
+            description="读取文本文件内容；普通文件、大工具输出路径和历史产物路径都优先用这个入口。",
             use_cases=[
                 "查看某个 Python 文件、配置文件或 Markdown 文档",
                 "定位报错后，按行阅读相关代码",
+                "读取工具返回的大输出保存路径或 tool-output artifact 包装路径",
             ],
             avoid_when=[
                 "只想知道关键字在哪些文件出现过时，先用 search_text 更省",
@@ -320,7 +321,7 @@ class ReadFileTool(FileSystemTool):
                 "end_line": "结束行号，可选",
             },
             parameter_details={
-                "path": "相对工作区的文本文件路径，必须是文件而不是目录。",
+                "path": "相对工作区的文本文件路径，或系统返回的安全大输出路径；必须是文件而不是目录。",
                 "start_line": "从第几行开始读，默认从第 1 行开始。",
                 "end_line": "读到第几行结束，包含该行；不传时默认读到文件结尾。",
             },

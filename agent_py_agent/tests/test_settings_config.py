@@ -215,6 +215,20 @@ class TestNormalizeAgentConfig:
         assert normalized["tool_detail_max_chars"] == 3000
         assert warnings == []
 
+    # LLM: access_mode is intentionally the only user-facing command permission knob.
+    # 函数用途: 验证命令运行权限档位接受连字符和下划线写法，并归一到稳定值。
+    def test_normalize_agent_config_access_mode(self):
+        normalized, warnings = normalize_agent_config({"access_mode": "full_access"})
+        assert normalized["access_mode"] == "full-access"
+        assert warnings == []
+
+    # LLM: invalid access_mode must not accidentally widen shell permissions.
+    # 函数用途: 验证坏权限档位会回退默认 workspace-write 并产生配置告警。
+    def test_normalize_agent_config_invalid_access_mode(self):
+        normalized, warnings = normalize_agent_config({"access_mode": "god-mode"})
+        assert normalized["access_mode"] == AgentConfig().access_mode
+        assert warnings
+
     # LLM: Invalid inline write limits should fall back before reaching ToolRegistry.
     # 函数用途: 验证过小的写入正文上限会回退默认值，并产生配置告警。
     def test_normalize_agent_config_invalid_tool_write_inline_max_chars(self):
@@ -330,6 +344,20 @@ class TestLoadConfig:
         finally:
             path.unlink()
 
+    # LLM: load_config should expose the single command access-mode knob.
+    # 函数用途: 验证配置文件里的 access_mode 能进入 AgentConfig。
+    def test_load_config_with_access_mode(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write("model_backend: echo\naccess_mode: full-access\n")
+            f.flush()
+            path = Path(f.name)
+
+        try:
+            config = load_config(path)
+            assert config.access_mode == "full-access"
+        finally:
+            path.unlink()
+
     def test_load_config_applies_log_level(self):
         """验证 log_level 配置加载后会影响包内 logger。"""
         logger = logging.getLogger("agent_py_agent")
@@ -388,6 +416,7 @@ class TestAgentConfigDefaults:
         assert config.max_tool_rounds == 0
         assert config.memory_top_k == 5
         assert config.max_subagents == 1000
+        assert config.access_mode == "workspace-write"
 
     def test_agent_config_dispatch_defaults(self):
         """验证 dispatch 相关默认值。"""

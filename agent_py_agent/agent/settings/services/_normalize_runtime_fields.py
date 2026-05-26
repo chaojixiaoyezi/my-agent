@@ -67,6 +67,7 @@ class ToolFieldsService:
         warnings = _normalize_tool_int_fields(out, defaults)
         warnings.extend(_normalize_tool_bool_fields(out, defaults))
         warnings.extend(_normalize_tool_catalog_fields(out, defaults))
+        warnings.extend(_normalize_command_access_mode(out, defaults))
         warnings.extend(_normalize_dispatch_watch_interval(out, defaults))
         return out, warnings
 
@@ -102,6 +103,23 @@ def _normalize_tool_catalog_fields(out: dict[str, object], defaults: object) -> 
     out["tool_catalog_categories"] = _normalize_string_list(
         out.get("tool_catalog_categories", defaults.tool_catalog_categories)
     )
+    return warnings
+
+
+# LLM: access_mode is the single user-facing command permission knob.
+# 函数用途: 归一化命令运行权限档位；只暴露一个配置项，其他安全策略由运行时派生。
+def _normalize_command_access_mode(out: dict[str, object], defaults: object) -> list[str]:
+    warnings: list[str] = []
+    raw = out.get("access_mode", defaults.access_mode)
+    normalized_raw = str(raw).strip().lower().replace("_", "-") if raw is not None else ""
+    mode, warn = CoercionService.coerce_choice(
+        "access_mode",
+        normalized_raw,
+        defaults.access_mode,
+        choices=("restricted", "workspace-write", "full-access"),
+    )
+    out["access_mode"] = mode
+    _append_warning(warnings, warn)
     return warnings
 
 

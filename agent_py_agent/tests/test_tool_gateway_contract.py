@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -45,6 +46,39 @@ def test_tool_gateway_canonicalizes_shell_aliases(tmp_path: Path):
     assert "123" in result.output
 
 
+# LLM: controlled_exec stays internal and must not appear in the normal model-facing tool list.
+# 函数用途: 验证默认工具目录只给模型 run_command，不再展示 controlled_exec 授权迷宫。
+def test_tool_gateway_hides_controlled_exec_from_default_catalog(tmp_path: Path):
+    registry = _registry(tmp_path)
+
+    names = {spec.name for spec in registry.specs(include_orchestration=True)}
+    manifest = json.loads(registry.execute_call({"tool": "list_tools"}).output)
+    manifest_names = {item["name"] for item in manifest["tools"]}
+    retired_names = {
+        "append_file",
+        "replace_in_file",
+        "write_structured_json",
+        "data_to_workbook",
+        "markdown_to_pdf",
+        "file_write_session",
+    }
+
+    assert "run_command" in names
+    assert "controlled_exec" not in names
+    assert retired_names.isdisjoint(names)
+    assert "run_command" in manifest_names
+    assert "controlled_exec" not in manifest_names
+    assert retired_names.isdisjoint(manifest_names)
+
+
+# LLM: legacy internal tests can still request controlled_exec explicitly while we migrate old flows.
+# 函数用途: 验证显式 allowed_tools 查询仍能拿到 controlled_exec，避免一次性删除打断旧内部链路。
+def test_tool_gateway_can_still_expose_controlled_exec_when_explicitly_allowed(tmp_path: Path):
+    names = {spec.name for spec in _registry(tmp_path).specs(allowed_tools=["controlled_exec"])}
+
+    assert names == {"controlled_exec"}
+
+
 # LLM: Large shell output must return a bounded preview while preserving total-size facts.
 # 函数用途: 命令 stdout 很大时，工具返回截断预览、总字符数和截断标记，避免 live prompt 被大日志淹没。
 def test_run_command_output_is_bounded_by_gateway_budget(tmp_path: Path):
@@ -70,39 +104,6 @@ def test_tool_gateway_canonicalizes_read_artifact_aliases(tmp_path: Path):
 
     assert payload["artifact_ref"] == "run-1:2-1"
     assert payload["max_chars"] == 123
-
-
-# LLM: write_file raw blocks avoid forcing large HTML through escaped JSON strings.
-# 函数用途: 验证结构化 raw content block 会变成 write_file.append，不依赖自然语言续写。
-def test_tool_gateway_parses_write_file_raw_content_block(tmp_path: Path):
-    registry = _registry(tmp_path)
-    html = "<!doctype html>\n<html><body><h1>ARCA</h1></body></html>"
-
-    calls = registry.parse_tool_calls(
-        '[FILE_WRITE_SESSION_APPEND session_id="homepage-1" target_path="out/index.html" chunk_index=0]\n'
-        f"{html}\n"
-        "[/FILE_WRITE_SESSION_APPEND]"
-    )
-
-    assert calls == [
-        {
-            "tool": "write_file",
-            "action": "append",
-            "session_id": "homepage-1",
-            "target_path": "out/index.html",
-            "chunk_index": 0,
-            "content": html,
-        }
-    ]
-    append = registry.execute_call(calls[0])
-    finish = registry.execute_call({
-        "tool": "write_file",
-        "action": "finish",
-        "session_id": "homepage-1",
-    })
-    assert append.ok is True
-    assert finish.ok is True
-    assert (tmp_path / "out" / "index.html").read_text(encoding="utf-8") == html
 
 
 # LLM: Retired raw write markers should not resurrect the old session writer.

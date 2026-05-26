@@ -102,8 +102,9 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "系统会自动把它包成 SUBAGENT_RESULT 收口，避免对话里的长结果块被截断。",
         "- output.json 是内部收口文件名；只能写 execution_context.output_json，"
         "不要在 product_write_roots、deliverables 或用户产物目录里创建 output.json。",
-        "- 需要新工具、skill、MCP、网络或 shell 命令时，写 capability_request；"
-        "必须说明 requested_tools/requested_skills/requested_mcp_tools/requested_commands 和 path_scope/output_budget。",
+        "- 需要当前工具目录之外的新工具、skill、MCP、网络或运行权限时，写 capability_request；"
+        "说清楚 problem、needed_capability、capability_type、requested_tools/requested_skills/requested_mcp_tools 和 expected_output 即可，"
+        "不要把父级授权细节、grant、path_scope、output_budget 当成普通任务步骤。",
         "- 如果 Tool Catalog 里有 capability_request 工具，缺能力时必须先调用该工具记录正式申请；"
         "不要在产物目录写 capability_request.json，也不要改 execution_context.json 伪造 pending_requests。",
         "- capability_request 工具返回 OPEN 后，最终结果块写 status=PENDING_CAPABILITY_REQUEST 或 BLOCKED，"
@@ -135,6 +136,8 @@ def _collaboration_control_plane_lines(context: SubAgentExecutionContext) -> lis
     ]
 
 
+# LLM: _collaboration_intro_lines explains the control-plane tools only when granted.
+# 函数用途: 渲染协作工具开场说明，不给未授权任务注入协作流程。
 def _collaboration_intro_lines() -> list[str]:
     return [
         "- 协作控制面：你已获得部分多代理协作工具。"
@@ -143,6 +146,8 @@ def _collaboration_intro_lines() -> list[str]:
     ]
 
 
+# LLM: _targeted_request_lines renders already-addressed collaboration requests.
+# 函数用途: 把当前 runner 被点名的协作请求压成少量可执行提示。
 def _targeted_request_lines(context: SubAgentExecutionContext) -> list[str]:
     requests = _targeted_collaboration_requests(context)
     if not requests:
@@ -157,6 +162,8 @@ def _targeted_request_lines(context: SubAgentExecutionContext) -> list[str]:
     return lines
 
 
+# LLM: _single_targeted_request_lines renders one collaboration request.
+# 函数用途: 展示线索事实、查询提示和响应形状，保持开放世界字段不写死。
 def _single_targeted_request_lines(request: dict[str, object]) -> list[str]:
     lines = [_request_ref_line(request)]
     if request.get("observed_facts"):
@@ -168,6 +175,8 @@ def _single_targeted_request_lines(request: dict[str, object]) -> list[str]:
     return lines
 
 
+# LLM: _request_ref_line keeps collaboration request ids copyable.
+# 函数用途: 将 case/request 引用渲染成一行，方便模型提交 evidence 或更新状态。
 def _request_ref_line(request: dict[str, object]) -> str:
     return (
         "- 点名请求详情："
@@ -179,6 +188,8 @@ def _request_ref_line(request: dict[str, object]) -> str:
     )
 
 
+# LLM: _collaboration_tool_lines renders hints only for actually granted tools.
+# 函数用途: 根据 allowed_tools 选择协作工具提示，避免普通任务 prompt 膨胀。
 def _collaboration_tool_lines(tools: set[str]) -> list[str]:
     lines: list[str] = []
     for name, message in COLLABORATION_TOOL_HINTS:
@@ -189,6 +200,8 @@ def _collaboration_tool_lines(tools: set[str]) -> list[str]:
     return lines
 
 
+# LLM: _collaboration_closeout_lines asks runners to leave refs without hard-gating success.
+# 函数用途: 提醒协作结果应留引用，方便上级从 tree/case 继续查看。
 def _collaboration_closeout_lines() -> list[str]:
     return ["- 协作结果要落到账本或产物：最终 evidence_packets/next_actions 中引用 collaboration://case/<id>、collaboration://request/<id> 或真实 artifact/evidence refs，方便上级从 tree/case 状态继续看和调度。"]
 

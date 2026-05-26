@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import time
 
-from agent_py_agent.agent.tooling.shell import ShellTool, _timeout_from_params
+from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions, _timeout_from_params
 
 
 # LLM: deadline caps should shorten oversized model-requested shell timeouts.
@@ -24,7 +24,7 @@ def test_shell_timeout_caps_to_runtime_deadline(monkeypatch):
 def test_shell_tool_refuses_expired_runtime_deadline(tmp_path, monkeypatch):
     monkeypatch.setenv("MY_AGENT_TOOL_DEADLINE_UNIX", str(time.time() - 1))
     monkeypatch.setenv("MY_AGENT_TOOL_DEADLINE_MARGIN_SECONDS", "0")
-    tool = ShellTool(tmp_path, default_timeout=30)
+    tool = ShellTool(tmp_path, options=ShellToolOptions(default_timeout=30))
 
     result = tool.execute({"command": "echo should-not-run", "timeout": 100})
 

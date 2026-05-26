@@ -43,6 +43,7 @@ from .registry_list_tools import ListToolsTool
 from .registry_prompt import render_tool_catalog_section
 
 _allowed_tool_set = allowed_tool_set
+_DEFAULT_HIDDEN_TOOL_NAMES = frozenset({"controlled_exec"})
 
 
 # LLM: ToolRegistryParams 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
@@ -59,6 +60,7 @@ class ToolRegistryParams:
     retrieval_limit: int
     vector_search_enabled: bool
     workspace_roots: list[Path] | None = None
+    access_mode: str = "workspace-write"
     shell_tool_timeout: int = 30
     shell_tool_output_max_chars: int = 12_000
     catalog_mode: str = "compact"
@@ -87,6 +89,7 @@ class ToolRegistry:
         self.workspace_root = params.workspace_root.resolve()
         self.workspace_roots = params.workspace_roots or [self.workspace_root]
         self.tools: dict[str, BaseTool] = {}
+        self.default_hidden_tool_names = set(_DEFAULT_HIDDEN_TOOL_NAMES)
         self.expose_security_tools = params.expose_security_tools
         self.security_tool_names = set(SECURITY_TOOL_NAMES)
         self.catalog_limit = params.catalog_limit
@@ -120,6 +123,8 @@ class ToolRegistry:
 
         allowed = allowed_tool_set(allowed_tools)
         specs = [tool.spec for tool in self.tools.values()]
+        if allowed is None:
+            specs = [spec for spec in specs if spec.name not in self.default_hidden_tool_names]
         if not security_tools_visible(
             self.expose_security_tools,
             allowed=allowed,

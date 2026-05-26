@@ -65,24 +65,24 @@ def build_capability_request_spec() -> ToolSpec:
         category="orchestration",
         effect="mutating",
         requires_idempotency=True,
-        description="为当前 subagent run 记录一条待父级路由的能力申请；不授权也不执行工具。",
+        description="为当前 subagent run 记录一条待父级处理的能力申请；不授权也不执行工具。",
         use_cases=[
-            "runner 需要 controlled_exec、shell 命令、网络、MCP、skill 或新工具才能继续",
+            "runner 需要当前工具目录之外的网络、MCP、skill 或新工具才能继续",
+            "runner 需要父级扩大运行权限或代为处理当前权限下做不了的动作",
             "当前工具集无法产出真实证据，需要父级授权后重跑",
         ],
         avoid_when=[
-            "只是推荐父级验收器运行测试命令，可以写 tests/next_actions，不需要申请能力",
-            "已经有父级 grant 时应使用被授权的工具，不要重复申请",
+            "只是推荐父级运行测试命令，可以写 tests/next_actions，不需要申请能力",
+            "当前已有 run_command、write_file、apply_patch 等普通工具能完成任务",
         ],
         keywords=["capability", "request", "grant", "tool", "skill", "shell", "MCP", "能力申请", "授权"],
         parameters=_capability_request_parameters(),
         parameter_details=_capability_request_parameter_details(),
         examples=[
             (
-                '{"tool":"capability_request","problem":"需要读取当前目录和运行一个小脚本确认环境",'
-                '"needed_capability":"controlled_exec","capability_type":"shell",'
-                '"requested_tools":["controlled_exec"],"requested_commands":["pwd","python3"],'
-                '"path_scope":["/workspace/task"],"output_budget":{"stdout_bytes":65536,"stderr_bytes":32768},'
+                '{"tool":"capability_request","problem":"当前工具无法访问必要的内部系统查询结果",'
+                '"needed_capability":"internal_api_access","capability_type":"network",'
+                '"requested_tools":["internal_api_query"],"expected_output":"拿到查询结果或明确失败原因",'
                 '"risk_level":"low"}'
             )
         ],
@@ -215,12 +215,12 @@ def _object_dict(value: object) -> dict[str, object]:
 def _capability_request_parameters() -> dict[str, str]:
     return {
         "problem": "必填；当前被什么能力缺口阻塞",
-        "needed_capability": "能力名，例如 controlled_exec、network_api、playwright、skill:xxx",
+        "needed_capability": "能力名，例如 network_api、browser_login、skill:xxx、internal_tool",
         "capability_type": "shell/tool/skill/mcp/network/generic",
         "requested_tools": "希望父级授权的工具名列表",
-        "requested_commands": "希望受控执行的命令名列表，例如 pwd、python3、pytest",
-        "path_scope": "需要访问的目录或文件范围",
-        "output_budget": "stdout/stderr/文件输出预算",
+        "requested_skills": "希望父级授权或加载的 skill 名列表",
+        "requested_mcp_tools": "希望父级授权的 MCP 工具名列表",
+        "expected_output": "拿到能力后预计能产出的结果或证据",
         "risk_level": "low/medium/high；高风险必须说明原因和替代方案",
     }
 
@@ -232,10 +232,10 @@ def _capability_request_parameter_details() -> dict[str, str]:
         "problem": "写清楚为什么现有工具不能继续；不要只写“需要工具”。",
         "needed_capability": "父级用它做路由检索；能具体就具体。",
         "capability_type": "shell 表示命令执行；tool 表示内置工具；skill 表示知识/流程；mcp/network 分别表示 MCP 或网络能力。",
-        "requested_tools": "只列真正需要的工具；申请 shell 命令优先写 controlled_exec，不要申请裸 rm。",
-        "requested_commands": "只列命令名，不写完整危险 shell；具体参数留给后续受控 exec grant。",
-        "path_scope": "限定在任务目录、产物目录或父级允许的目录；不要写系统根目录。",
-        "output_budget": "例如 {\"stdout_bytes\":65536,\"stderr_bytes\":32768}；避免巨大日志撑爆上下文。",
+        "requested_tools": "只列真正需要的工具；能用已有 run_command/write_file/apply_patch 完成时不要申请。",
+        "requested_skills": "只列任务确实需要的 skill；不要把普通任务包装成能力申请。",
+        "requested_mcp_tools": "只列需要父级接入的外部工具；不知道名称时在 problem 里说明需要什么能力即可。",
+        "expected_output": "说明父级处理后应该返回什么，例如文件路径、查询结果、审批结果或失败原因。",
         "risk_level": "涉及删除、网络写入、大量输出或跨目录访问时至少 medium。",
     }
 

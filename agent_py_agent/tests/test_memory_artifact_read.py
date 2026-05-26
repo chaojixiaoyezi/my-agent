@@ -283,9 +283,9 @@ def test_read_artifact_short_call_id_without_scope_prefers_latest(tmp_path: Path
     assert payload["run_id"] == "latest-run"
 
 
-# LLM: test_read_file_rejects_tool_output_artifact_wrapper captures the R16 prompt-bloat regression.
-# 函数用途: 防止模型用 read_file 直接读取外置工具输出 JSON 包装，必须改走 read_artifact 分片。
-def test_read_file_rejects_tool_output_artifact_wrapper(tmp_path: Path) -> None:
+# LLM: read_file is the normal path for explicit tool-output artifact paths.
+# 函数用途: 验证模型拿到外置工具输出路径后，可以直接用 read_file 读取正文切片。
+def test_read_file_reads_tool_output_artifact_content(tmp_path: Path) -> None:
     artifact_path = _write_externalized_tool_output(tmp_path, content="large-output" * 500)
     registry = ToolRegistry(
         ToolRegistryParams(
@@ -303,31 +303,31 @@ def test_read_file_rejects_tool_output_artifact_wrapper(tmp_path: Path) -> None:
 
     result = registry.execute_call({"tool": "read_file", "path": str(artifact_path)})
 
-    assert result.ok is False
-    assert "read_artifact" in result.output
-    assert "max_chars" in result.output
+    assert result.ok is True
+    assert "1: large-output" in result.output
+    assert "... 已截断" in result.output
+    assert '"kind": "tool_output"' not in result.output
 
 
-# LLM: wrapper hints should tell a restricted agent how to request artifact-read capability.
-# 函数用途: 当当前 allowed_tools 只有 read_file 时，误读外置 artifact 的提示要说明缺 read_artifact 权限并建议上报能力申请。
-def test_read_file_artifact_wrapper_hint_mentions_missing_read_artifact_permission(tmp_path: Path) -> None:
-    artifact_path = _write_externalized_tool_output(tmp_path, content="large-output" * 500)
+# LLM: read_file should not require read_artifact permission for explicit artifact wrapper paths.
+# 函数用途: 即使当前上下文只授权 read_file，也能读取安全路径下 tool-output artifact 的正文。
+def test_read_file_artifact_wrapper_does_not_require_read_artifact_permission(tmp_path: Path) -> None:
+    artifact_path = _write_externalized_tool_output(tmp_path, content="alpha\nbeta\n" * 20)
     registry = _registry(tmp_path)
 
     result = registry.execute_call(
-        {"tool": "read_file", "path": str(artifact_path)},
+        {"tool": "read_file", "path": str(artifact_path), "start_line": 2, "end_line": 3},
         allowed_tools=["read_file"],
     )
 
-    assert result.ok is False
-    assert "read_artifact" in result.output
-    assert "未授权" in result.output
-    assert "capability_request" in result.output
+    assert result.ok is True
+    assert "2: beta" in result.output
+    assert "3: alpha" in result.output
 
 
-# LLM: test_read_file_typo_to_tool_output_artifact_routes_to_read_artifact catches copied-prefix drift.
-# 函数用途: 模型把 artifact 绝对路径前缀抄错时，read_file 也要提示改用 read_artifact，而不是按 suggested_target 继续读文件。
-def test_read_file_typo_to_tool_output_artifact_routes_to_read_artifact(tmp_path: Path) -> None:
+# LLM: typo recovery should stay on read_file instead of switching tools.
+# 函数用途: 模型把 artifact 绝对路径前缀抄错时，提示继续 read_file suggested_target。
+def test_read_file_typo_to_tool_output_artifact_keeps_read_file_recovery(tmp_path: Path) -> None:
     artifact_path = _write_externalized_tool_output(tmp_path, content="large-output" * 500)
     registry = ToolRegistry(
         ToolRegistryParams(
@@ -348,9 +348,9 @@ def test_read_file_typo_to_tool_output_artifact_routes_to_read_artifact(tmp_path
 
     assert result.ok is False
     assert "suspected_path_typo=true" in result.output
-    assert "read_artifact" in result.output
+    assert "read_file" in result.output
     assert artifact_path.name in result.output
-    assert "不要用 read_file" in result.output
+    assert "suggested_target" in result.output
 
 
 def _write_config(tmp_path: Path) -> Path:

@@ -83,8 +83,8 @@ def tool_content_transport_protocol(max_inline_chars: int = MAX_INLINE_WRITE_CON
         "- PDF、XLSX、图片、压缩包等二进制产物用脚本生成后，通过 write_file.data_base64 写入最终文件。\n"
         f"- 如果上一轮工具调用解析失败、超时或被截断，下一轮每块降到 {RECOVERY_WRITE_CHUNK_CHARS} 字符以内，"
         "闭合工具调用后等待结果。\n"
-        "- 修改已有文件时优先用 apply_patch；已有 controlled_exec 授权时，"
-        "可在授权目录内运行脚本生成大文件，只返回 stdout_ref/audit_ref。"
+        "- 修改已有文件时优先用 apply_patch；需要脚本生成大文件时，直接用 run_command，"
+        "由运行时 access_mode 决定命令是否能在目标目录执行。"
     )
 
 
@@ -157,7 +157,6 @@ def long_content_transport_hint(request: LongContentTransportHintRequest) -> str
         f"请改用 WRITE_FILE_RAW 或 write_file.data_base64 提交完整产物；普通文本 content 建议 "
         f"{RECOMMENDED_WRITE_CHUNK_CHARS} 字符，工具解析失败后降到不超过 "
         f"{RECOVERY_WRITE_CHUNK_CHARS} 字符。\n"
-        "修改已有文件时优先用 apply_patch；"
-        "如果已有父级 controlled_exec grant，可用 controlled_exec 在授权目录内运行脚本生成文件，"
-        "并只返回 stdout_ref/audit_ref，不要回传完整正文。"
+        "修改已有文件时优先用 apply_patch；需要脚本生成大文件时，直接用 run_command，"
+        "由运行时 access_mode 决定命令是否能在目标目录执行，不要引入额外 grant 流程。"
     )

@@ -429,6 +429,13 @@ tool_web_max_chars: 100000
 # fetch_url / http_request 工具默认超时秒数
 tool_http_timeout: 30
 
+# 命令运行权限档位。这里只暴露一个总开关，其他命令安全策略由运行时派生：
+# - restricted：保守模式，命令只能在配置工作区内执行，适合不信任任务。
+# - workspace-write：默认开发模式，命令可以在当前工作区内跑测试、构建和脚本。
+# - full-access：完全访问模式，允许显式切到系统其他目录；rm -rf /、格式化磁盘、关机等最后保护仍会拒绝。
+# 模型不需要知道 grant/path_scope/apply 之类内部字段；它只调用 run_command。
+access_mode: workspace-write
+
 # run_command 工具默认超时秒数
 tool_shell_timeout: 240
 

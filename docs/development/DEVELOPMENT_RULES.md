@@ -141,10 +141,11 @@ before changing code.
   `open(..., "w")` directly.
 - The write boundary enforces: workspace root containment, no path traversal, no
   system path writes.  See `FILE_WRITING_RULES.md` for the full policy.
-- Subagent shell/exec access must go through `controlled_exec`, and `controlled_exec`
-  must read authority from `write_boundary.controlled_exec_grants`.  Do not add
-  product interfaces where a child agent can self-authorize `command_allowlist`,
-  `path_scope`, `network_scope`, or output budget from its own tool params.
+- Agent shell access should use the single model-facing `run_command` tool.
+  Command permissions come from the runtime `access_mode` config, not from
+  model-authored `grant_id`, `command_allowlist`, `path_scope`, `apply`, or output
+  budget fields.  Legacy `controlled_exec` code may exist during migration, but
+  it must not be introduced into ordinary task prompts or default tool catalogs.
 - Delete-like child-agent operations must route to task-local trash.  Do not expose
   `rm`/`rmdir`/`unlink` as direct shell execution for subagents.
 
@@ -368,27 +369,22 @@ do_write()
 - Do not add task-wide or conversation-wide tool budgets unless a future spec
   explicitly reopens that decision. Long-lived root/main-agent behavior should
   be handled by gateway/daemon/supervisor lifecycle, not by this per-run budget.
-- Future shell/exec access for subagents must go through a controlled gateway:
-  workspace-bound paths, no raw destructive commands for lower agents, `trash`
-  instead of direct `rm`, bounded output capture, and audit records. Directory
-  permission can make read/write commands low-friction, but it must not bypass
-  path containment, output-size guards, or tool/skill request escalation.
-- Subagent exec requests must be grant-backed. The model may request a command,
-  cwd, or output intent, but parent `CapabilityGrant` must supply the actual
-  command allowlist, path scope, network scope, and output budget before the
-  request reaches shell execution. Do not let tool parameters become self-issued
-  authorization.
+- Model-facing shell access should go through `run_command`. Runtime config
+  decides the boundary with `access_mode`: `restricted`, `workspace-write`, or
+  `full-access`. The model should not have to understand grant ids, command
+  allowlists, path scopes, or apply flags just to run an ordinary command.
+  Legacy controlled-exec internals may exist during migration, but they must not
+  be introduced into ordinary prompts or default tool catalogs.
 - Large generated file bodies must not travel as one giant tool-call JSON
-  argument. `write_file` / `append_file` content goes through
-  `content_transport_policy.py`; the default recommended inline size is 12,000
-  characters and can be tuned with `tool_write_inline_max_chars`. If a valid
-  parsed tool call exceeds that configured recommendation, the tool should
-  preserve the content and return a warning; future calls should use a short
-  skeleton plus bounded `append_file` chunks, a small
-  `replace_in_file`/patch edit, or a grant-backed `controlled_exec` path that
-  writes inside the allowed workspace and returns only refs/audit metadata.
-  Streaming stdout/stderr can improve observability, but it is not a fix for an
-  oversized or malformed tool-call JSON block.
+  argument. `write_file.content` goes through `content_transport_policy.py`; the
+  default recommended inline size is 12,000 characters and can be tuned with
+  `tool_write_inline_max_chars`. If a valid parsed tool call exceeds that
+  configured recommendation, the tool should preserve the content and return a
+  warning; future calls should use smaller `write_file` writes, `apply_patch`
+  for local diffs, or `run_command` under the current `access_mode` to generate
+  the file and return only paths/summaries. Streaming stdout/stderr can improve
+  observability, but it is not a fix for an oversized or malformed tool-call
+  JSON block.
 - Tool prompt budgets must be long-term config-backed. If a tool/catalog/search
   threshold affects runtime behavior, put it in `agent_config.yaml`,
   `AgentConfig`, the normalizer, and the frontend runtime config together; do
