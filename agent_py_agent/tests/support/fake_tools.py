@@ -6,7 +6,7 @@ from agent_py_agent.agent.contracts.tool_call_policy import (
     ToolCallPolicy,
     validate_tool_call_policy,
 )
-from agent_py_agent.agent.tooling.spreadsheet_builder import DataWorkbookTool
+from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
 
 
 class FakeToolRunner:
@@ -78,13 +78,12 @@ class FakeToolRunner:
             return {"tool": "fetch_url", **value}
         return {"tool": "fetch_url", "ok": False, "error_code": "NETWORK_UNAVAILABLE"}
 
-    def _tool_data_to_workbook(self, params: dict[str, object]) -> dict[str, object]:
-        result = DataWorkbookTool(self.run_dir).execute(params)
+    def _tool_write_workbook_fixture(self, params: dict[str, object]) -> dict[str, object]:
+        target = write_xlsx_fixture(self.run_dir, dict(params))
         return {
-            "tool": "data_to_workbook",
-            "ok": result.ok,
-            "output": result.output,
-            "error_code": result.error_code,
+            "tool": "write_workbook_fixture",
+            "ok": True,
+            "path": str(target),
         }
 
     def _tool_dangerous_command(self, params: dict[str, object]) -> dict[str, object]:

@@ -159,7 +159,7 @@ def _append_refs(refs: list[dict[str, object]], payload: dict[str, object]) -> N
 
 
 # LLM: _ref_values normalizes scalar and nested target_path refs.
-# 函数用途: 兼容 file_write_session target_path 的 raw/resolved 对象形态，降低 refs 提取嵌套复杂度。
+# 函数用途: 兼容 legacy session target_path 的 raw/resolved 对象形态，降低 refs 提取嵌套复杂度。
 def _ref_values(value: object) -> list[object]:
     if not isinstance(value, dict):
         return [value]

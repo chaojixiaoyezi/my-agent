@@ -286,12 +286,12 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action="repair_evidence_refs",
         recovery_hint="必需字段缺少结构化 claim；为 required_fields 补齐 claims/source_ids 后再继续。",
     ),
-    "TARGET_PENDING_FILE_WRITE_SESSION": ErrorContract(
-        code="TARGET_PENDING_FILE_WRITE_SESSION",
+    "TARGET_PENDING_WRITE": ErrorContract(
+        code="TARGET_PENDING_WRITE",
         category="artifact",
         retryable=True,
-        recommended_action="continue_pending_file_write_session",
-        recovery_hint="目标文件尚未 materialize；继续推荐的 file_write_session 并 finish 后再读取最终文件。",
+        recommended_action="write_target_artifact",
+        recovery_hint="目标文件尚未写出；用 write_file 或 apply_patch 写出目标文件后再读取或验收。",
     ),
     "ACCEPTANCE_FAILED": ErrorContract(
         code="ACCEPTANCE_FAILED",
@@ -333,21 +333,21 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         category="artifact",
         retryable=True,
         recommended_action="collect_non_empty_rows_before_workbook",
-        recovery_hint="表格源数据没有非空行；先补齐 rows/sheets 数据，再调用 data_to_workbook。",
+        recovery_hint="表格源数据没有非空行；先补齐 rows/sheets 数据，再用通用代码生成 workbook。",
     ),
     "MARKDOWN_SOURCE_MISSING": ErrorContract(
         code="MARKDOWN_SOURCE_MISSING",
         category="artifact",
         retryable=True,
         recommended_action="write_or_fix_markdown_source",
-        recovery_hint="Markdown 源文档缺失；先写出 source_markdown_path，再调用 markdown_to_pdf。",
+        recovery_hint="Markdown 源文档缺失；先写出源文档，再用通用代码生成目标文档。",
     ),
     "MARKDOWN_SOURCE_EMPTY": ErrorContract(
         code="MARKDOWN_SOURCE_EMPTY",
         category="artifact",
         retryable=True,
         recommended_action="write_non_empty_markdown_source",
-        recovery_hint="Markdown 源文档为空；补齐正文后再调用 markdown_to_pdf。",
+        recovery_hint="Markdown 源文档为空；补齐正文后再用通用代码生成目标文档。",
     ),
     "UNKNOWN_ERROR": ErrorContract(
         code="UNKNOWN_ERROR",

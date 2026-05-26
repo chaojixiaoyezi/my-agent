@@ -186,7 +186,7 @@ class TestNormalizeAgentConfig:
         assert len(warnings) > 0
 
     # LLM: Tool write inline limits must be user-configurable through the standard config normalizer.
-    # 函数用途: 验证用户能通过配置调整 write_file/append_file 单次正文上限。
+    # 函数用途: 验证用户能通过配置调整 write_file/apply_patch 单次正文上限。
     def test_normalize_agent_config_tool_write_inline_max_chars(self):
         data = {"tool_write_inline_max_chars": 16384}
         normalized, warnings = normalize_agent_config(data)

@@ -57,13 +57,13 @@ def test_runtime_repeated_read_guard_resets_after_local_progress() -> None:
     agent = SimpleNamespace()
     params = _params(task_attributes={"repeat_fail_threshold": 1})
     read_payload = {"tool": "read_file", "path": "outputs/source_index.json"}
-    write_payload = {"tool": "write_structured_json", "path": "outputs/source_index.json", "rows": [{"a": 1}]}
+    write_payload = {"tool": "write_file", "path": "outputs/source_index.json", "rows": [{"a": 1}]}
 
     for _ in range(3):
         record_tool_guard_observation(agent, params, read_payload, ToolExecutionResult("read_file", True, "same"))
     assert maybe_block_repeated_tool_no_progress(agent, params, read_payload) is not None
 
-    record_tool_guard_observation(agent, params, write_payload, ToolExecutionResult("write_structured_json", True, "{}"))
+    record_tool_guard_observation(agent, params, write_payload, ToolExecutionResult("write_file", True, "{}"))
 
     assert maybe_block_repeated_tool_no_progress(agent, params, read_payload) is None
 

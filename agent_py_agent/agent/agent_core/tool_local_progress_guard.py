@@ -1,36 +1,27 @@
-# LLM: local-progress guard stops endless remote exploration when closeout machine facts show no new local work progress.
-# 模块用途: 基于 closeout.json 的结构化失败/进展指纹，限制“连续多轮只抓资料、不回本地写 checkpoint/draft/builder”的空转。
+# LLM: local-progress guard gives soft rework hints when closeout machine facts show no new local work progress.
+# 模块用途: 基于 closeout.json 的结构化失败/进展指纹，提醒模型从只读探索切回本地 checkpoint/draft/builder，不阻断任务。
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from ..backend import ModelResponse
 from ._runtime_params import ToolLoopExecuteParams
 from .exploration_fuse_config import exploration_fuse_config
 from .tool_local_progress_hints import (
     HintDeliveryInput,
     due_hint_round,
-    exploration_round_threshold,
     hint_message,
     mark_hint_delivered,
     recovery_signature,
-    should_prompt_or_block,
-    used_percent,
+    should_prompt,
 )
 
 _STATE_DIR = ".agent_delivery"
 _STATE_FILE = "local_progress_guard.json"
-_MAX_REDIRECTS = 2
 _LOCAL_PROGRESS_TOOL_NAMES = {
-    "append_file",
-    "api_json_collection",
-    "data_to_workbook",
-    "file_write_session",
-    "markdown_to_pdf",
-    "replace_in_file",
-    "write_structured_json",
+    "apply_patch",
+    "run_command",
     "write_file",
 }
 _EXPLORATION_TOOL_NAMES = {
@@ -46,8 +37,8 @@ _RUN_COMMAND_LOCAL_MUTATION_PREFIXES = ("mkdir ", "mkdir -p", "touch ", "cp ", "
 _RUN_COMMAND_EXPLORATION_PREFIXES = ("curl ", "find ", "ls", "pwd", "rg ", "cat ", "wget ")
 
 
-# LLM: has_required_local_progress_guard increments a task-local exploration counter and activates only after repeated non-local turns with unchanged progress.
-# 函数用途: 若 closeout 一直显示同一失败和同一本地进展指纹，而模型连续多轮只做远程/只读探索，则触发回到本地推进的通用守门。
+# LLM: has_required_local_progress_guard increments a task-local exploration counter and activates only on soft hint rounds.
+# 函数用途: 若 closeout 一直显示同一失败和同一本地进展指纹，而模型连续多轮只做远程/只读探索，则在提示节点提醒回到本地推进。
 def has_required_local_progress_guard(agent: object, params: ToolLoopExecuteParams, calls: list[dict[str, object]] | None) -> bool:
     payload = _guard_payload(agent)
     if not payload:
@@ -78,56 +69,39 @@ def has_required_local_progress_guard(agent: object, params: ToolLoopExecutePara
     state["exploration_rounds_without_local_progress"] = count
     _write_state(agent, state)
     config = exploration_fuse_config(agent)
-    return should_prompt_or_block(payload, config, state, count)
+    return should_prompt(config, state, count)
 
 
-# LLM: local_progress_guard_context exposes structured no-progress facts so the next model turn knows it must switch from exploration to local work.
+# LLM: local_progress_guard_context exposes structured no-progress facts so the next model turn can switch from exploration to local work.
 # 函数用途: 当 guard 触发时，把连续探索轮次、待处理恢复动作和缺失目标作为结构化提示喂给下一轮模型。
 def local_progress_guard_context(agent: object, redirects: int) -> str:
+    del redirects
     payload = _guard_payload(agent)
     config = exploration_fuse_config(agent)
-    threshold = exploration_round_threshold(payload, config) if payload else 0
-    if not payload or (threshold > 0 and _MAX_REDIRECTS > 0 and redirects >= _MAX_REDIRECTS):
+    if not payload:
         return ""
     state = _load_state(agent)
     count = int(state.get("exploration_rounds_without_local_progress") or 0)
-    hint_round = due_hint_round(payload, config, state, count)
+    hint_round = due_hint_round(config, state, count)
     if hint_round is None:
         return ""
-    percent = used_percent(threshold, hint_round)
     envelope = {
         "exploration_rounds_without_local_progress": count,
         "failure_fingerprint": payload.get("failure_fingerprint", ""),
-        "local_progress_budget_used_percent": percent,
         "local_progress_hint_round": hint_round,
-        "no_progress_block_threshold": threshold,
+        "local_progress_hint_interval": config.local_progress_unlimited_hint_interval,
         "pending_materialization_targets": payload.get("pending_materialization_targets", []),
         "recovery_actions": payload.get("recovery_actions", []),
         "work_progress_fingerprint": payload.get("work_progress_fingerprint", ""),
     }
-    mark_hint_delivered(HintDeliveryInput(agent, state, payload, config, hint_round, _write_state))
+    mark_hint_delivered(HintDeliveryInput(agent, state, config, hint_round, _write_state))
     return "\n".join(
         [
             "[tool-system local-progress-guard]",
             json.dumps(envelope, ensure_ascii=False, sort_keys=True),
-            hint_message(threshold, count, hint_round, percent),
+            hint_message(count, hint_round),
         ]
     )
-
-
-# LLM: local_progress_guard_block_response ends the loop only after the model ignored repeated local-progress redirects.
-# 函数用途: 连续收到 local-progress guard 仍不切回本地推进时，给出确定性阻断，避免真实任务一直空转到超时。
-def local_progress_guard_block_response(agent: object) -> ModelResponse | None:
-    payload = _guard_payload(agent)
-    if not payload:
-        return None
-    return ModelResponse(
-        text="[LOCAL_PROGRESS_GUARD_BLOCKED] 结构化交付状态显示本地工作区连续没有新的推进，且模型仍持续停留在远程/只读探索，已停止本轮以避免继续空转。",
-        backend=str(getattr(getattr(agent, "backend", None), "name", "") or ""),
-        runtime_status="blocked",
-        runtime_reason="LOCAL_PROGRESS_GUARD",
-    )
-
 
 # LLM: reset_local_progress_guard clears stale no-progress debt after a successful machine closeout.
 # 函数用途: 任务已通过结构化收口时重置本地进展计数，避免旧失败状态污染后续恢复 attempt。
@@ -167,7 +141,6 @@ def _guard_payload(agent: object) -> dict[str, object]:
         return {}
     return {
         "failure_fingerprint": failure_fingerprint,
-        "no_progress_block_threshold": progress.get("no_progress_block_threshold"),
         "pending_materialization_targets": pending_targets,
         "recovery_actions": [item for item in recovery_actions if isinstance(item, dict)],
         "work_progress_fingerprint": fingerprint,

@@ -78,7 +78,7 @@ def _capability_followup_instruction(params: PostRunnerCapabilityFollowupParams)
     lines = [
         "父级已处理上一轮 capability_request；本轮是同一个 run 的授权后续跑。",
         "不要从头重做任务；先看当前 task 的 blockers、next_actions、artifact_refs 和已有文件，再继续完成缺失部分。",
-        "如果获批了 write_file/append_file/replace_in_file，优先补齐或修复目标产物；完成后写标准 SUBAGENT_RESULT 或 execution_context.output_json。",
+        "如果获批了 write_file/apply_patch，优先补齐或修复目标产物；完成后写标准 SUBAGENT_RESULT 或 execution_context.output_json。",
     ]
     if snippets:
         lines.extend(["", "授权后续跑上下文：", *snippets])

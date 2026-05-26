@@ -159,9 +159,9 @@ class MissingArtifactRepairBackend:
 
 
 # LLM: OpenWriteSessionDeliveryBackend creates a valid-looking artifact while leaving staged writes open.
-# 类用途: 复现真实 E2E 中目录验收提前收口的问题；系统必须先处理 open file_write_session。
+# 类用途: 复现真实 E2E 中目录验收提前收口的问题；系统必须先处理 open write_file。
 class OpenWriteSessionDeliveryBackend:
-    name = "fake_open_write_session_delivery_backend"
+    name = "fake_legacy_write_session_delivery_backend"
 
     def __init__(self):
         self.calls = 0
@@ -173,7 +173,7 @@ class OpenWriteSessionDeliveryBackend:
         session_id = session_id_from_prompt(prompt)
         if self.calls == 1:
             return ModelResponse(
-                text='[TOOL_CALL]\n{"tool":"file_write_session","action":"begin","target_path":"outputs/static_site/app.js"}\n[/TOOL_CALL]',
+                text='[TOOL_CALL]\n{"tool":"write_file","action":"begin","target_path":"outputs/static_site/app.js"}\n[/TOOL_CALL]',
                 backend=self.name,
             )
         if self.calls == 2:
@@ -181,7 +181,7 @@ class OpenWriteSessionDeliveryBackend:
         if self.calls == 3:
             self.saw_open_session_context = True
             assert "open-file-write-session" in prompt
-            assert "open_file_write_sessions" in prompt
+            assert "open_write_files" in prompt
             self.session_id = session_id
             return _session_append_finish_response(session_id, 'console.log("shop ready");', self.name)
         if self.calls == 4:
@@ -353,12 +353,12 @@ class WrongToolDuringOpenSessionBackend:
         self.calls += 1
         session_id = session_id_from_prompt(prompt)
         if self.calls == 1:
-            return ModelResponse(text='[TOOL_CALL]\n{"tool":"file_write_session","action":"begin","target_path":"outputs/static_site/app.js"}\n[/TOOL_CALL]', backend=self.name)
+            return ModelResponse(text='[TOOL_CALL]\n{"tool":"write_file","action":"begin","target_path":"outputs/static_site/app.js"}\n[/TOOL_CALL]', backend=self.name)
         if self.calls == 2:
             self.session_id = session_id
             return _write_file_response("outputs/static_site/app.js", "should not run", self.name)
         if self.calls == 3:
-            assert "open_file_write_sessions" in prompt
+            assert "open_write_files" in prompt
             return _session_append_response(session_id or self.session_id, 'console.log("ok");', self.name)
         if self.calls == 4:
             return _session_finish_response(session_id or self.session_id, self.name)
@@ -438,7 +438,7 @@ def xlsx_delivery_contract() -> dict[str, object]:
 
 
 # LLM: session_id_from_prompt reads structured tool result JSON from the previous model/tool turn.
-# 函数用途: 测试后端从 file_write_session begin 回执里取 session_id，不靠自然语言描述。
+# 函数用途: 测试后端从 write_file begin 回执里取 session_id，不靠自然语言描述。
 def session_id_from_prompt(prompt: str) -> str:
     match = re.search(r'"session_id":\s*"([^"]+)"', prompt)
     return match.group(1) if match else ""
@@ -461,7 +461,7 @@ def _xlsx_validation_contract() -> dict[str, object]:
         "validator": "spreadsheet_acceptance",
         "required_columns": ["记录名", "地址", "指标值", "中文说明", "说明依据"],
         "staging_contract": {
-            "builder_tool": "data_to_workbook",
+            "builder_tool": "write_file",
             "source_json_ref": "outputs/table_report/source_data.json",
             "workbook_ref": "outputs/table_report/table_report.xlsx",
             "checkpoint_shape_hints": {
@@ -486,16 +486,16 @@ def _write_file_response(path: str, content: str, backend: str) -> ModelResponse
 # 函数用途: 在测试中按机器 writer_tool 合同写阶段 JSON，不绕回普通文本写入。
 def _write_structured_json_response(path: str, json_payload: str, backend: str) -> ModelResponse:
     return ModelResponse(
-        text=f'[TOOL_CALL]\n{{"tool":"write_structured_json","path":"{path}","data":{json_payload}}}\n[/TOOL_CALL]',
+        text=f'[TOOL_CALL]\n{{"tool":"write_file","path":"{path}","data":{json_payload}}}\n[/TOOL_CALL]',
         backend=backend,
     )
 
 
-# LLM: _session_append_response builds one file_write_session append call response.
+# LLM: _session_append_response builds one write_file append call response.
 # 函数用途: 用真实 session_id 写入 chunk，覆盖 open-session 修复路径。
 def _session_append_response(session_id: str, content: str, backend: str) -> ModelResponse:
     escaped = content.replace("\\", "\\\\").replace('"', '\\"')
-    return ModelResponse(text=f'[TOOL_CALL]\n{{"tool":"file_write_session","action":"append","session_id":"{session_id}","chunk_index":0,"content":"{escaped}"}}\n[/TOOL_CALL]', backend=backend)
+    return ModelResponse(text=f'[TOOL_CALL]\n{{"tool":"write_file","action":"append","session_id":"{session_id}","chunk_index":0,"content":"{escaped}"}}\n[/TOOL_CALL]', backend=backend)
 
 
 # LLM: _session_append_finish_response appends and finishes in one model turn.
@@ -505,27 +505,27 @@ def _session_append_finish_response(session_id: str, content: str, backend: str)
     return ModelResponse(
         text=(
             "[TOOL_CALL]\n"
-            f'{{"tool":"file_write_session","action":"append","session_id":"{session_id}","chunk_index":0,"content":"{escaped}"}}\n'
+            f'{{"tool":"write_file","action":"append","session_id":"{session_id}","chunk_index":0,"content":"{escaped}"}}\n'
             "[/TOOL_CALL]\n"
             "[TOOL_CALL]\n"
-            f'{{"tool":"file_write_session","action":"finish","session_id":"{session_id}"}}\n'
+            f'{{"tool":"write_file","action":"finish","session_id":"{session_id}"}}\n'
             "[/TOOL_CALL]"
         ),
         backend=backend,
     )
 
 
-# LLM: _session_finish_response builds one file_write_session finish call response.
+# LLM: _session_finish_response builds one write_file finish call response.
 # 函数用途: 完成 open write session，允许后续 closeout 验收通过。
 def _session_finish_response(session_id: str, backend: str) -> ModelResponse:
-    return ModelResponse(text=f'[TOOL_CALL]\n{{"tool":"file_write_session","action":"finish","session_id":"{session_id}"}}\n[/TOOL_CALL]', backend=backend)
+    return ModelResponse(text=f'[TOOL_CALL]\n{{"tool":"write_file","action":"finish","session_id":"{session_id}"}}\n[/TOOL_CALL]', backend=backend)
 
 
 # LLM: _workbook_builder_response builds the data_to_workbook call for staged xlsx tests.
 # 函数用途: 将 source_data.json 物化成 table_report.xlsx。
 def _workbook_builder_response(backend: str) -> ModelResponse:
     return ModelResponse(
-        text='[TOOL_CALL]\n{"tool":"data_to_workbook","source_json_path":"outputs/table_report/source_data.json","path":"outputs/table_report/table_report.xlsx"}\n[/TOOL_CALL]',
+        text='[TOOL_CALL]\n{"tool":"write_file","source_json_path":"outputs/table_report/source_data.json","path":"outputs/table_report/table_report.xlsx"}\n[/TOOL_CALL]',
         backend=backend,
     )
 

@@ -137,7 +137,7 @@ def _artifact_guidance_lines(contract: dict[str, object]) -> list[str]:
         lines.extend(_one_artifact_lines(artifact))
     lines.append("- 如果 required artifact 还不存在，优先对该 artifact 的目标路径动手：创建目录、开始写入或补齐阶段产物。")
     lines.append("- 可以继续必要的检索，但应同步留下本地草稿、数据或阶段产物，避免只读检查长期空转。")
-    lines.append("如果内容较长，使用 file_write_session 分块写入，并在最终答复前 finish。")
+    lines.append("- 长文本用 WRITE_FILE_RAW 或 write_file 完整写入；二进制产物用脚本生成后通过 write_file.data_base64 写入。")
     return lines
 
 
@@ -220,8 +220,8 @@ def _builder_startup_lines(action: dict[str, object]) -> list[str]:
     source_ref = str(action.get("source_ref") or "").strip()
     output_ref = str(action.get("output_ref") or "").strip()
     if source_ref and output_ref:
-        return [f"- 阶段数据就绪后，优先调用 {builder}: {_builder_source_param(action, builder)}={source_ref}, path={output_ref}"]
-    return [f"- 阶段数据就绪后，优先调用 {builder} 生成后续产物。"]
+        return [f"- 阶段数据就绪后，用通用工具生成 {output_ref}；来源参考 {source_ref}，不要依赖固定 builder 工具。"]
+    return ["- 阶段数据就绪后，用通用写入/命令工具生成后续产物，不要依赖固定 builder 工具。"]
 
 
 # LLM: _one_artifact_lines summarizes one artifact contract without changing validation behavior.
@@ -267,19 +267,13 @@ def _staging_lines(contract: dict[str, object]) -> list[str]:
     lines.extend(f"  - {ref}" for ref in refs if str(ref).strip())
     builder_tool = str(staging.get("builder_tool") or "").strip()
     if builder_tool:
-        lines.append(f"- 阶段构建工具: {builder_tool}")
+        lines.append(f"- 阶段构建建议: 原合同提到 {builder_tool}，当前请用通用写入/命令工具完成。")
     source_ref = _staging_source_ref(staging)
     output_ref = _staging_output_ref(staging)
     if source_ref and output_ref and builder_tool:
-        source_param = _builder_source_param(staging, builder_tool)
-        lines.append(f"- 阶段输入就绪后优先调用 {builder_tool}: {source_param}={source_ref}, path={output_ref}")
+        lines.append(f"- 阶段输入就绪后生成 {output_ref}，来源参考 {source_ref}。")
         if source_ref.lower().endswith(".json"):
-            lines.append("- JSON checkpoint 优先用 write_structured_json 写入 rows/sheets/data；不要手写大型 JSON 字符串。")
-            lines.append("- 大批量表格可用 write_structured_json.generated_rows 声明 count/columns/fields/sheets，由工具生成 rows。")
-            lines.append(
-                "- 多个 JSON API 来源要汇成表格时，可用 api_json_collection 直接生成带 source_refs/claims 的 checkpoint；"
-                "大量同形日期/分页请求优先用 request_ranges，避免手写长 JSON。"
-            )
+            lines.append("- JSON checkpoint 用 write_file 写完整 JSON；大批量数据可用授权命令/脚本生成后写入。")
     return lines
 
 
@@ -290,10 +284,6 @@ def _builder_source_param(staging: dict[str, object], builder_tool: str) -> str:
         value = str(staging.get(key) or "").strip()
         if value:
             return value
-    if builder_tool == "markdown_to_pdf":
-        return "source_markdown_path"
-    if builder_tool == "data_to_workbook":
-        return "source_json_path"
     return "source_ref"
 
 

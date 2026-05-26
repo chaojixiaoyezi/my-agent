@@ -386,7 +386,7 @@ class TestCmdRun:
         args.resume_context = None
 
         result_payload = SimpleNamespace(
-            response="[OPEN_FILE_WRITE_SESSION_BLOCKED] blocked",
+            response="[RUNTIME_BLOCKED] blocked",
             prompt="最终的 prompt",
             backend="test",
             used_memories=0,
@@ -401,7 +401,7 @@ class TestCmdRun:
             memory_resume_context_token_estimate=0,
             memory_compact_suggested=False,
             runtime_status="blocked",
-            runtime_reason="OPEN_FILE_WRITE_SESSION",
+            runtime_reason="RUNTIME_BLOCKED",
         )
 
         mock_agent = MagicMock()

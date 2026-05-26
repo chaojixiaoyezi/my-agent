@@ -1,5 +1,5 @@
 # LLM: Long content recovery mode converts repeated large-payload failures into a compact next-turn policy.
-# 模块用途: 当 write_file/append_file 的大正文导致解析失败或被拒绝时，给下一轮模型追加统一降级策略。
+# 模块用途: 当 write_file 的大正文导致解析失败或被拒绝时，给下一轮模型追加统一降级策略。
 
 from __future__ import annotations
 
@@ -23,88 +23,44 @@ class LongContentRecoveryRequest:
 # LLM: long_content_recovery_context returns a tiny tool-system instruction for the next model turn.
 # 函数用途: 识别长正文截断/拒绝场景；需要恢复时生成稳定规则，不需要时返回空字符串。
 def long_content_recovery_context(request: LongContentRecoveryRequest) -> str:
-    structured_context = _structured_json_recovery_context(request)
-    if structured_context:
-        return structured_context
     if not _needs_long_content_recovery(request):
         return ""
     target_path = _target_path(request.payload)
     lines = [
         "[tool-system]",
         "long_content_recovery_mode: active",
-        "reason: previous write_file/append_file content was too long, truncated, or rejected.",
+        "reason: previous write_file content was too long, truncated, or rejected.",
     ]
     if target_path:
         lines.append(f"target_path: {target_path}")
     lines.extend([
         "rules:",
-        "- 只输出 1 个 write_file 或 append_file 工具调用；闭合 [/TOOL_CALL] 后等待下一轮继续。",
-        f"- 先用 write_file 写短骨架，再用 append_file 分块追加；每块 content 不超过 {RECOVERY_WRITE_CHUNK_CHARS} 字符。",
-        "- 修改已有文件优先用 replace_in_file/patch 风格小 diff。",
+        "- 文本完整文件优先用 WRITE_FILE_RAW；二进制产物用 write_file.data_base64。",
+        f"- 如果继续用 write_file.content，每次 content 不超过 {RECOVERY_WRITE_CHUNK_CHARS} 字符。",
+        "- 修改已有文件优先用 apply_patch。",
         "- 不要在普通回复或 JSON 参数里回传完整大文件正文。",
     ])
     return "\n".join(lines)
 
 
-# LLM: structured JSON recovery is a separate mode because rows/sheets are not a content string.
-# 函数用途: write_structured_json 的长参数截断后，提示下一轮按小批次 merge_existing 写结构化数据。
-def _structured_json_recovery_context(request: LongContentRecoveryRequest) -> str:
-    if not _needs_structured_json_recovery(request):
-        return ""
-    target_path = _target_path(request.payload)
-    lines = [
-        "[tool-system]",
-        "structured_json_recovery_mode: active",
-        "reason: previous write_structured_json rows/sheets/data payload was too long, truncated, or malformed.",
-    ]
-    if target_path:
-        lines.append(f"target_path: {target_path}")
-    lines.extend(
-        [
-            "rules:",
-            "- 只输出 1 个 write_structured_json 工具调用；闭合 [/TOOL_CALL] 后等待下一轮继续。",
-            "- 每次只写一个小批次，例如一个 sheet 或少量 rows。",
-            "- 对已有 checkpoint 继续补数据时必须设置 merge_existing=true。",
-            "- 不要在单次工具调用里塞完整大表；非空 rows/sheets 写完后再调用 builder tool。",
-        ]
-    )
-    return "\n".join(lines)
-
-
 # LLM: _needs_long_content_recovery keeps detection conservative so normal tool failures are unaffected.
-# 函数用途: 只把 write/append 的长正文截断、解析失败或 inline 上限拒绝切入恢复模式。
+# 函数用途: 只把 write_file 的长正文截断、解析失败或 inline 上限拒绝切入恢复模式。
 def _needs_long_content_recovery(request: LongContentRecoveryRequest) -> bool:
     output = request.output
     if request.result_ok:
         return False
     if request.result_tool == "__parse_error__":
         return _parse_error_mentions_long_write(request.payload, output)
-    if request.result_tool in {"write_file", "append_file"}:
-        return "inline content 过长" in output or "inline content 超过推荐值" in output or "分块追加" in output
-    return False
-
-
-# LLM: _needs_structured_json_recovery detects malformed rows/sheets/data writes.
-# 函数用途: 只在 write_structured_json 的解析/截断/过长失败时启用分批结构化恢复，不影响普通工具错误。
-def _needs_structured_json_recovery(request: LongContentRecoveryRequest) -> bool:
-    output = request.output
-    if request.result_ok:
-        return False
-    if request.result_tool == "__parse_error__":
-        text = f"{_payload_text(request.payload)}\n{output}"
-        if "write_structured_json" not in text:
-            return False
-        return any(marker in text for marker in ("缺少结束标记", "太长", "截断", "malformed", "rows", "sheets", "data"))
-    if request.result_tool == "write_structured_json":
-        return any(marker in output for marker in ("inline", "过长", "截断", "SPREADSHEET_SOURCE_NO_ROWS"))
+    if request.result_tool == "write_file":
+        return "inline content 过长" in output or "inline content 超过推荐值" in output
     return False
 
 
 # LLM: _parse_error_mentions_long_write recognizes truncated write payloads without retaining raw bodies.
-# 函数用途: 判断解析错误是否来自 write_file/append_file 的 content 被截断或过长。
+# 函数用途: 判断解析错误是否来自 write_file 的 content 被截断或过长。
 def _parse_error_mentions_long_write(payload: object, output: str) -> bool:
     text = f"{_payload_text(payload)}\n{output}"
-    if not any(tool in text for tool in ("write_file", "append_file")):
+    if "write_file" not in text:
         return False
     return "content" in text and any(
         marker in text

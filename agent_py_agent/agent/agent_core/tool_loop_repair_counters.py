@@ -14,7 +14,6 @@ class ToolLoopRepairCounters:
     __test__: ClassVar[bool] = False
 
     reserved_record_repairs: int = 0
-    open_write_session_repairs: int = 0
     local_progress_redirects: int = 0
     exploration_fuse_redirects: int = 0
     unresolved_runtime_issue_redirects: int = 0
@@ -26,33 +25,6 @@ class ToolLoopRepairCounters:
 def _inc_reserved(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
     return ToolLoopRepairCounters(
         reserved_record_repairs=counters.reserved_record_repairs + 1,
-        open_write_session_repairs=counters.open_write_session_repairs,
-        local_progress_redirects=counters.local_progress_redirects,
-        exploration_fuse_redirects=counters.exploration_fuse_redirects,
-        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
-        orchestration_contract_redirects=counters.orchestration_contract_redirects,
-    )
-
-
-# LLM: _inc_open_session returns a new counters bundle after one unhandled open-session model turn.
-# 函数用途: 累加“模型本轮没有处理 open file_write_session”的次数，保持 dataclass 不可变。
-def _inc_open_session(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return ToolLoopRepairCounters(
-        reserved_record_repairs=counters.reserved_record_repairs,
-        open_write_session_repairs=counters.open_write_session_repairs + 1,
-        local_progress_redirects=counters.local_progress_redirects,
-        exploration_fuse_redirects=counters.exploration_fuse_redirects,
-        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
-        orchestration_contract_redirects=counters.orchestration_contract_redirects,
-    )
-
-
-# LLM: _reset_open_session clears the unhandled-turn counter when the model works on the open session.
-# 函数用途: 模型 append/finish/reset/abort 当前 open session 后清零计数，避免后续提醒继承旧回合。
-def _reset_open_session(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return ToolLoopRepairCounters(
-        reserved_record_repairs=counters.reserved_record_repairs,
-        open_write_session_repairs=0,
         local_progress_redirects=counters.local_progress_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
@@ -65,7 +37,6 @@ def _reset_open_session(counters: ToolLoopRepairCounters) -> ToolLoopRepairCount
 def _inc_local_progress(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
     return ToolLoopRepairCounters(
         reserved_record_repairs=counters.reserved_record_repairs,
-        open_write_session_repairs=counters.open_write_session_repairs,
         local_progress_redirects=counters.local_progress_redirects + 1,
         exploration_fuse_redirects=counters.exploration_fuse_redirects,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
@@ -78,7 +49,6 @@ def _inc_local_progress(counters: ToolLoopRepairCounters) -> ToolLoopRepairCount
 def _inc_exploration_fuse(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
     return ToolLoopRepairCounters(
         reserved_record_repairs=counters.reserved_record_repairs,
-        open_write_session_repairs=counters.open_write_session_repairs,
         local_progress_redirects=counters.local_progress_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects + 1,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
@@ -89,7 +59,6 @@ def _inc_exploration_fuse(counters: ToolLoopRepairCounters) -> ToolLoopRepairCou
 def _inc_unresolved_runtime_issue(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
     return ToolLoopRepairCounters(
         reserved_record_repairs=counters.reserved_record_repairs,
-        open_write_session_repairs=counters.open_write_session_repairs,
         local_progress_redirects=counters.local_progress_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects + 1,
@@ -100,7 +69,6 @@ def _inc_unresolved_runtime_issue(counters: ToolLoopRepairCounters) -> ToolLoopR
 def _inc_orchestration_contract(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
     return ToolLoopRepairCounters(
         reserved_record_repairs=counters.reserved_record_repairs,
-        open_write_session_repairs=counters.open_write_session_repairs,
         local_progress_redirects=counters.local_progress_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
@@ -112,9 +80,7 @@ __all__ = [
     "ToolLoopRepairCounters",
     "_inc_exploration_fuse",
     "_inc_local_progress",
-    "_inc_open_session",
     "_inc_orchestration_contract",
     "_inc_reserved",
     "_inc_unresolved_runtime_issue",
-    "_reset_open_session",
 ]

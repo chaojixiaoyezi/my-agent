@@ -29,12 +29,8 @@ _CODING_SUBAGENT_TOOLS = [
     "read_file",
     "search_text",
     "write_file",
-    "append_file",
-    "replace_in_file",
-    "file_write_session",
-    "write_structured_json",
-    "data_to_workbook",
-    "markdown_to_pdf",
+    "apply_patch",
+    # LLM: Workflow children inherit generic write tools, not retired session/builder tools.
     # LLM: workflow children can report durable observations without being forced into dispatch.
     "raise_observation",
     "raise_main_event",

@@ -88,6 +88,7 @@ def test_dispatch_reruns_incomplete_output_after_write_grant(monkeypatch):
             thought="先写文件，必要时继续补齐。",
             plan=["写文件", "补齐", "等待验收"],
             allowed_tools=["write_file"],
+            acceptance_checks=["HTML 文件完整闭合"],
         )
         router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
 
@@ -108,5 +109,5 @@ def test_dispatch_reruns_incomplete_output_after_write_grant(monkeypatch):
         assert "授权后续跑" in backend.prompts[1]
         assert "不要从头重做任务" in backend.prompts[1]
         assert loaded.capability_requests[0].status == "GRANTED"
-        assert "append_file" in loaded.allowed_tools
+        assert "apply_patch" in loaded.allowed_tools
         assert "HTML已补齐" in loaded.result

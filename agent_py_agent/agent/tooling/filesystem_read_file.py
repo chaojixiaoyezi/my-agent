@@ -3,11 +3,9 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from ._filesystem_helpers import _bundled_filesystem_param, _int_param, _required_path
-from .file_write_session_inspection import open_file_write_sessions
 from .filesystem_artifact_guard import allowed_tools_hint_param, tool_output_artifact_read_hint
 from .filesystem_structured_read import structured_read_summary
 from .models import ToolExecutionResult
@@ -29,9 +27,6 @@ def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolExecu
     if artifact_hint:
         return ToolExecutionResult("read_file", False, artifact_hint)
     if not target.exists():
-        pending_session = _pending_write_session_result(tool, target)
-        if pending_session:
-            return pending_session
         return ToolExecutionResult("read_file", False, f"文件不存在: {tool.display_path(target)}")
     if not target.is_file():
         return ToolExecutionResult("read_file", False, f"目标不是文件: {tool.display_path(target)}")
@@ -43,38 +38,6 @@ def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolExecu
     if summary:
         return ToolExecutionResult("read_file", True, summary)
     return _numbered_text_result(content, params, max_chars)
-
-
-# LLM: _pending_write_session_result exposes staged write state when the final target is not materialized.
-# 函数用途: read_file 读最终文件但文件还没 finish 时，返回结构化 file_write_session 续写合同。
-def _pending_write_session_result(tool, target) -> ToolExecutionResult | None:
-    for session in open_file_write_sessions(tool.workspace_root, limit=100):
-        target_path = session.get("target_path") if isinstance(session.get("target_path"), dict) else {}
-        resolved = str(target_path.get("resolved") or "")
-        if resolved != str(target):
-            continue
-        envelope = {
-            "code": "TARGET_PENDING_FILE_WRITE_SESSION",
-            "target_path": target_path,
-            "recommended_session_id": str(session.get("session_id") or ""),
-            "manifest_path": str(session.get("manifest_path") or ""),
-            "preview_path": str(session.get("preview_path") or ""),
-            "preview_materialized": bool(session.get("preview_materialized")),
-            "received_chunks": list(session.get("received_chunks") or []),
-            "next_chunk_index": int(session.get("next_chunk_index") or 0),
-            "recommended_tool_call": session.get("continue_tool_call") or {},
-            "finish_tool_call": session.get("finish_tool_call") or {},
-        }
-        return ToolExecutionResult(
-            "read_file",
-            False,
-            json.dumps(envelope, ensure_ascii=False, sort_keys=True),
-            result_envelope=envelope,
-            error_code="TARGET_PENDING_FILE_WRITE_SESSION",
-            recommended_action="continue_pending_file_write_session",
-            recovery_hint="continue file_write_session by recommended_session_id and finish before reading final target",
-        )
-    return None
 
 
 # LLM: _numbered_text_result turns raw text into bounded line-aware output.

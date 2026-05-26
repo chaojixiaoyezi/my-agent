@@ -34,6 +34,7 @@ def artifact_integrity_progress(path: str) -> dict[str, Any]:
 # LLM: artifact_next_action turns machine artifact state into one runner instruction.
 # 函数用途: HTML 未闭合时继续写；HTML 有假链接/结构问题时先修；HTML 完整时要求写 output.json 收口。
 def artifact_next_action(integrity: dict[str, Any]) -> str:
+    # LLM: Repair advice names generic write/patch behavior indirectly through runner contract.
     if not integrity:
         return "继续从 latest_tool_progress.json 接续；写作前先对照 headings，避免重复已记录章节。"
     codes = _integrity_codes(integrity)
@@ -103,7 +104,7 @@ def _integrity_repair_strategy(integrity: dict[str, Any]) -> str:
         return ""
     return (
         "建议一次性批量修复：先搜索全部 href=\"#\"，"
-        "能用同一个 old/new 处理时用 replace_in_file 并传 count=0 替换全部匹配，"
+        "能用同一个 old/new 处理时用 apply_patch 批量修改相关片段，"
         "否则重写相关导航、页脚、CTA 或整文件；不要一轮只替换一个链接"
     )
 

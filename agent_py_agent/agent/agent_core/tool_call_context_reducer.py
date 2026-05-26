@@ -1,5 +1,5 @@
 # LLM: Tool-call context reducer keeps huge tool payloads out of the next live prompt.
-# 模块用途: 当模型一次性生成很大的 write_file/append_file 参数时，只把摘要放回下一轮上下文，避免 prompt 爆炸。
+# 模块用途: 当模型一次性生成很大的 write_file 参数时，只把摘要放回下一轮上下文，避免 prompt 爆炸。
 
 from __future__ import annotations
 

@@ -453,15 +453,12 @@ main_agent_auto_resume_attempt_limit: 3
 - `agent_py_agent/config/runtime_guard_config.yaml`
 - `agent_py_agent/agent/agent_core/tool_local_progress_guard.py`
 
-现在默认 `local_progress_round_threshold=50`。只有 closeout 已经失败、失败指纹没变、工作区进展指纹也没变，并且模型连续 50 轮只读/只搜/只抓，才会阻断。
+现在只保留一个参数：`local_progress_unlimited_hint_interval`。
 
-提示节点是 1/3 和 2/3。比如 50 会在第 16、33 轮附近提示。
-
-如果用户填 `local_progress_round_threshold: 0`：
-
-- 不按次数阻断。
-- 按 `local_progress_unlimited_hint_interval` 固定间隔提示。
 - 默认每 10 轮提示一次。
+- 它只提醒，不阻断。
+
+这条门的定位是“提醒模型别只读不修”，不是“替 closeout 判死刑”。真正的交付结果仍由 closeout 在模型提交验收或最终回复时判断。
 
 ### 6. 显式提交验收工具
 
@@ -502,7 +499,7 @@ main_agent_auto_resume_attempt_limit: 3
 - `invalid_artifacts_retry_limit`：产物齐全但内容、格式、字段、证据、质量门不合格。
 - `missing_artifacts_retry_limit`：必交产物缺失、路径无效、无法定位或路径越界。
 
-默认都是 3。填 0 表示不按次数阻断，只持续返回结构化返工单。
+默认都是 0，表示不按次数阻断，只持续返回结构化返工单。
 
 旧的 2、4、5、6 细分阈值已被压缩掉，避免概念重叠。
 
@@ -565,37 +562,23 @@ bootstrap 开工物化门不是安全门，也不是最终验收门。它会把�
 
 现在保留的只有 delivery contract prompt 里的软参考，例如建议尽早留下草稿或阶段产物；它不会拦截 `web_search`、`fetch_url`、`read_file`、`list_files`，也不会因为还没写中间文件就停任务。
 
-### 12. open write session 改成事务保护 + 周期提醒
+### 12. 废弃 open write session，统一到通用写入工具
 
-文件：
+本节是历史纠偏记录：`file_write_session`、`append_file`、`replace_in_file`、`write_structured_json`、`data_to_workbook`、`markdown_to_pdf` 已从模型可见工具面删除。
 
-- `agent_py_agent/agent/agent_core/open_write_session_config.py`
-- `agent_py_agent/config/runtime_guard_config.yaml`
-- `agent_py_agent/agent/agent_core/tool_loop_open_session_decision.py`
-- `agent_py_agent/agent/agent_core/tool_open_write_session_repair.py`
+当前写入面只保留：
 
-`file_write_session` 是分块写大文件的事务工具：
+- `write_file`：原子写入完整文件；文本用 `content`，PDF/XLSX/图片/压缩包等二进制产物用 `data_base64`。
+- `apply_patch`：局部修改、新增、删除或移动文本文件。
+- `run_command`：在获得权限时用脚本或系统工具生成复杂格式，再由通用文件工具落盘或验收。
 
-```text
-begin  -> 创建 session 和目标路径记录
-append -> 把内容写入临时区
-finish -> 把临时区内容正式提交到目标文件
-reset  -> 清空当前 session 后重写
-abort  -> 放弃当前 session
-```
+这次纠偏的原因：
 
-如果 session 没有 `finish/abort/reset`，系统不能证明用户指定的目标文件已经是最新完整产物。因此最终收口前必须处理 open session。
+- 分块 session 让模型必须记住 begin/append/finish/reset/abort，普通任务容易因为没 finish 被卡住。
+- 固定 builder 工具会把主代理从“会做事的人”推成“跑模板的人”，并且很难覆盖 Word、PPT、视频、XML、未知格式等开放世界产物。
+- 其他参考项目更常见的路线是通用写文件、补丁和命令工具，产物格式由模型/脚本/外部工具生成，系统只管路径、安全、原子写入和 closeout 验收。
 
-这轮调整后的规则：
-
-- 关键动作立即返工：最终回答、`submit_for_acceptance`、读取未提交目标文件、覆盖写未提交目标文件，会收到结构化返工提示。
-- 非冲突工具继续执行：继续搜索、读取其他文件、写其他目标文件、列目录等动作不会因为 open session 被强行挡住。
-- 统计单位是模型回合：一轮模型回复里没有处理当前 open session，才累计 1 次；不是单个工具调用。
-- 处理 session 会清零：本轮只要调用当前 session 的 `append/finish/reset/abort`，open session 未处理计数清零。
-- 周期提醒只提醒不阻断：默认每 3 个未处理模型回合提醒一次；不会因为次数把任务置为 `blocked`。
-- 真正的最终兜底仍是全局 `max_tool_rounds` 或用户停止，不是 open session 自己的“2 次熔断”。
-
-这样保留了“不能半截提交”的硬边界，同时不会把模型正常查资料、看目录、写其他文件的工作流卡死。
+现在不再存在 open-session 专属阻断、专属返工预算或专属周期提醒。大文件或复杂格式失败时，系统只返回普通工具错误、解析错误或 closeout 返工单；模型继续用 `write_file`、`apply_patch`、`run_command` 换路修复。
 
 ### 13. 只读代理树状态与 dispatch 推进分离
 

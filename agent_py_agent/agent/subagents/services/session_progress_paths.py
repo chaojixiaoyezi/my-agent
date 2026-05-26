@@ -6,7 +6,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-WRITE_TOOLS = {"write_file", "append_file", "replace_in_file"}
+# LLM: Progress extraction recognizes only the generic mutating file tools.
+WRITE_TOOLS = {"write_file", "apply_patch"}
 
 
 def progress_path(request: object) -> str:
@@ -28,8 +29,6 @@ def _payload_progress_path(request: object) -> str:
     payload = payload if isinstance(payload, dict) else {}
     if tool in WRITE_TOOLS:
         return path_text(payload.get("path"))
-    if tool == "file_write_session" and str(payload.get("action") or "") == "finish":
-        return path_text(payload.get("target_path"))
     return ""
 
 

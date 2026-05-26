@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from .context_bundle_file_roots import (
-    append_file_root_term,
+    add_file_root_term,
     file_level_write_root_terms,
     is_contract_file_path,
 )
@@ -73,6 +73,7 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
             "source": components.source,
         },
         "write_contract": {
+            # LLM: Write contracts expose generic roots only; concrete writes use write_file/apply_patch.
             "product_write_roots": components.product_roots,
             "required_file_refs": components.required_file_refs,
             "declared_output_refs": declared_output_refs(task),
@@ -148,7 +149,7 @@ def required_product_file_refs(
     refs: list[str] = []
     for filename in files:
         for ref in _required_product_ref_candidates(str(filename or "").strip(), product_roots):
-            append_file_root_term(refs, ref)
+            add_file_root_term(refs, ref)
     return refs
 
 

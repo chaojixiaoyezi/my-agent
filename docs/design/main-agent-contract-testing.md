@@ -218,7 +218,7 @@
 
 - 保留真正硬门：工具 schema、路径/URL/command 边界、审批绑定、幂等、最终 delivery closeout。
 - open write session 是写入事务保护：关键收口、读未提交目标、覆盖未提交目标会被拉回；非冲突工具继续执行，并按模型回合周期提醒，不再由它自己按次数 blocked。
-- 探索熔断和本地进展门改成配置化，默认大幅放宽；`0` 表示不按次数阻断。
+- 探索熔断改成配置化；本地进展门改成只提醒不阻断，默认 `0` 表示只按固定间隔给软提示。
 - closeout 返工预算只分“产物齐全但不合格”和“必交产物缺失/无法定位”两类，默认各 3 次，`0` 表示持续返工不按次数停。
 - delivery repair 独立运行门已删除；closeout 失败后统一通过 `[delivery-contract-check]` 的 `repair_guidance`、failed artifacts、failed gates 和 recovery actions 指导模型返工，读/搜空转由探索熔断和本地进展门统一处理。
 - 新增显式 `submit_for_acceptance`，并保留“无工具最终回复触发隐式验收”。
@@ -1035,12 +1035,12 @@ git diff --check
 - 结果：5 个 case 通过，`main_direct_web_app` 失败。
 - 通过 case：`health`、`main_tool_failure_recovery`、`main_artifact_readback`、`main_compact_resume_roundtrip`、`main_large_log_audit`。
 - 失败证据根：`/Users/example/my_agent/live-lab-runs/20260522-main-complex-01/fixture_project/lab_outputs/main-web-app`。
-- 根因：长 HTML 写入被恢复到 `file_write_session` 后，提交边界只校验 JSON，没有在 `finish` 前复用 HTML artifact integrity；因此结构损坏、`href="#"` 和缺失锚点能落成最终文件。
-- 通用修复：`file_write_session finish` 现在对 `.html/.htm` 做 artifact integrity 预提交校验；结构 blocker 和可操作本地链接 warning 会变成 `ARTIFACT_INTEGRITY_FAILED`，session 保持 open 供继续修复或显式 abort。
+- 历史根因：长 HTML 曾被恢复到 `file_write_session`，随后又引入 open-session 阻断和专门返工路径，导致普通写作任务被事务流程卡住。
+- 当前纠偏：`file_write_session` 及其提交边界已废弃；复杂产物统一回到 `write_file`、`apply_patch` 和授权命令生成，最终质量由 closeout / artifact acceptance 验收。
 - 参考项目借鉴：长期助手 的隔离 `长期助手_HOME`、一次性工具轨迹和原子写入思路；通道运行时 的运行态/工具边界可见性；会话运行时 的工具提交边界先验收再落事实。
 - 命令：`python3 scripts/live_agent_lab.py --suite main-complex --real-llm --runs-dir /Users/example/my_agent/live-lab-runs --run-id 20260522-main-complex-03 --timeout 900 --keep-going`
 - 结果：5 个 case 通过，`main_direct_web_app` 仍失败，但坏页面不再提交。
-- 新根因：默认 `write_file` 长内容在约 4K 时被流式边界过早切到 `file_write_session`，模型随后混用直接写入和 session 写入，触发 `[OPEN_FILE_WRITE_SESSION_BLOCKED]`。这不是 HTML 专项问题，而是默认大块工具输入的流式边界过窄。
+- 新根因：默认 `write_file` 长内容在约 4K 时被流式边界过早切到专用 session writer，模型随后混用直接写入和 session 写入。这不是 HTML 专项问题，而是专用写入流程把普通任务复杂化。
 - 通用修复：默认流式 inline 写入边界放宽到 32K，同时保留显式小阈值测试入口；常见完整 HTML/CSS/JS 可以自然收尾，真正失控的长流仍会进入 staged writer 恢复。
 - 复验命令：web-only 真 LLM 复验，run id `20260522-main-web-only-04`，只跑 `health` 和 `main_direct_web_app`。
 - 复验结果：`LIVE_LAB_PASS`，`main_direct_web_app` 245.40 秒完成，产物目录 `lab_outputs/main-web-app` 下生成 `index.html`、`styles.css`、`app.js`、`README.md`，本仓库静态验收通过。

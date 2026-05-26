@@ -271,7 +271,7 @@ def _generate_backend_response(request: ModelGenerateParams, on_chunk, timeout: 
         backend.request_timeout = original
 
 
-# LLM: _tool_write_inline_max_chars keeps streaming guard aligned with write_file/append_file config.
+# LLM: _tool_write_inline_max_chars keeps streaming guard aligned with write_file config.
 # 函数用途: 从 config 读取单次 inline 写入上限；无效值由工具内容策略回退默认值。
 def _tool_write_inline_max_chars(agent: object) -> int | None:
     return getattr(getattr(agent, "config", None), "tool_write_inline_max_chars", None)

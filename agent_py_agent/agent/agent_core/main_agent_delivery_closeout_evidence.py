@@ -83,8 +83,8 @@ def _evidence_writer_fields(checkpoint_ref: str) -> dict[str, object]:
     if not checkpoint_ref.lower().endswith(".json"):
         return {}
     return {
-        "writer_tool": "write_structured_json",
-        "write_tools": ["write_structured_json", "api_json_collection"],
+        "writer_tool": "write_file",
+        "write_tools": ["write_file"],
         "evidence_shape_hint": (
             '{"source_refs":[{"source_id":"src-1","uri":"https://...","retrieved_at":"..."}],'
             '"claims":[{"field":"...","value":"...","source_ids":["src-1"],'

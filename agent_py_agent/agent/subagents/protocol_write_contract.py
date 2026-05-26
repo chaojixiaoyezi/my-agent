@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from .models import SubAgentTask
 
-_FILESYSTEM_WRITE_GRANT_TOOLS = {"write_file", "append_file", "replace_in_file"}
+_FILESYSTEM_WRITE_GRANT_TOOLS = {"write_file", "apply_patch"}
 
 
 # LLM: build_write_contract keeps path boundaries in one protocol field.
@@ -67,7 +67,7 @@ def _effective_allowed_write_roots(task: SubAgentTask) -> list[str]:
 
 
 # LLM: _grant_allows_filesystem_write reads only structured grant tool names.
-# 函数用途: 只有 write_file/append_file/replace_in_file 授权才会扩展普通文件写入边界；shell grant 仍走 controlled_exec。
+# 函数用途: 只有通用文件写入授权才会扩展普通文件写入边界；shell grant 仍走 controlled_exec。
 def _grant_allows_filesystem_write(grant: object) -> bool:
     tools = {str(item or "").strip() for item in getattr(grant, "tools", []) or []}
     return bool(tools & _FILESYSTEM_WRITE_GRANT_TOOLS)
@@ -102,4 +102,3 @@ def _task_text(task: object, name: str) -> str:
 def _task_list(task: object, name: str) -> list:
     value = getattr(task, name, [])
     return list(value) if isinstance(value, (list, tuple, set)) else []
-

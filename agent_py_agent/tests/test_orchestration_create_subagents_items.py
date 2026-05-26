@@ -246,5 +246,5 @@ class TestCreateSubagentsToolGrantProtocol:
         assert result.ok is True
         assert "read_file" in params.allowed_tools
         assert "write_file" in params.allowed_tools
-        assert "append_file" in params.allowed_tools
-        assert "replace_in_file" in params.allowed_tools
+        assert "apply_patch" in params.allowed_tools
+        assert "apply_patch" in params.allowed_tools

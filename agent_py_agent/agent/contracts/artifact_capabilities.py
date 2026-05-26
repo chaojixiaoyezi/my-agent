@@ -37,10 +37,7 @@ _KNOWN_VALIDATORS = {
     "xlsx": "xlsx",
 }
 
-_KNOWN_BUILDERS = {
-    "xlsx": "data_to_workbook",
-    "pdf": "markdown_to_pdf",
-}
+_KNOWN_BUILDERS: dict[str, str] = {}
 
 
 # LLM: artifact_capability derives a best-effort capability without treating unknown suffixes as invalid.

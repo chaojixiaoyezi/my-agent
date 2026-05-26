@@ -22,9 +22,8 @@ _REPAIR_TOOLS = [
     "list_files",
     "read_file",
     "search_text",
-    "replace_in_file",
+    "apply_patch",
     "write_file",
-    "append_file",
 ]
 
 

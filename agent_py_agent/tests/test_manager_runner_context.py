@@ -431,7 +431,7 @@ def test_build_execution_context_adds_filesystem_grant_path_scope_to_write_roots
         request_id="req-write-1",
         grant_to_run_id="run-456",
         grant_type="tool",
-        tools=["write_file", "append_file"],
+        tools=["write_file", "apply_patch"],
         path_scope=[str(build_dir)],
         reason="允许接管 run 继续写产物目录",
         constraints={},

@@ -104,8 +104,8 @@ def _builder_startup_lines(action: dict[str, object]) -> list[str]:
     source_ref = str(action.get("source_ref") or "").strip()
     output_ref = str(action.get("output_ref") or "").strip()
     if source_ref and output_ref:
-        return [f"- 阶段数据就绪后，优先调用 {builder}: {_builder_source_param(action, builder)}={source_ref}, path={output_ref}"]
-    return [f"- 阶段数据就绪后，优先调用 {builder} 生成后续产物。"]
+        return [f"- 阶段数据就绪后，用通用写入/命令工具生成 {output_ref}；来源参考 {source_ref}。"]
+    return ["- 阶段数据就绪后，用通用写入/命令工具生成后续产物。"]
 
 
 # LLM: _builder_source_param maps builder tools to their structured source parameter names.
@@ -115,8 +115,4 @@ def _builder_source_param(staging: dict[str, object], builder_tool: str) -> str:
         value = str(staging.get(key) or "").strip()
         if value:
             return value
-    if builder_tool == "markdown_to_pdf":
-        return "source_markdown_path"
-    if builder_tool == "data_to_workbook":
-        return "source_json_path"
     return "source_ref"

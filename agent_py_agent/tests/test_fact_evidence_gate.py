@@ -97,7 +97,7 @@ def test_delivery_closeout_blocks_artifact_when_fact_evidence_gate_fails(tmp_pat
     recovery_action = report["contract_recovery"]["actions"][0]
     assert recovery_action["source_gate"] == "fact_evidence"
     assert recovery_action["checkpoint_ref"] == "source_data.json"
-    assert recovery_action["writer_tool"] == "write_structured_json"
+    assert recovery_action["writer_tool"] == "write_file"
     assert recovery_action["required_structured_fields"] == ["source_refs", "claims"]
     assert recovery_action["required_fields"] == ["measured_value"]
     assert any(item["gate"] == "fact_evidence" for item in context_payload["failed_gates"])

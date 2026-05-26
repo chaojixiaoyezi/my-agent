@@ -39,14 +39,6 @@ def payload_with_runtime_scope(agent, params: ToolLoopExecuteParams, payload: ob
         scoped.setdefault("task_id", params.task_id)
         scoped.setdefault("request_id", params.request_id)
         return scoped
-    if tool == "file_write_session":
-        scoped = dict(payload)
-        scoped["_runtime_scope"] = {
-            "request_id": params.request_id,
-            "run_id": runtime_run_id(agent, params),
-            "task_id": params.task_id,
-        }
-        return scoped
     return payload
 
 

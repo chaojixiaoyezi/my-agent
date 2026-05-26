@@ -223,9 +223,9 @@ def test_tool_loop_enters_long_content_recovery_after_truncated_write_parse_erro
         "raw": '{"tool":"write_file","path":"site/app.js","content":"const data = ',
     }
     output = (
-        "工具调用缺少结束标记 [/TOOL_CALL]。如果上一轮是 write_file/append_file 且 "
+        "工具调用缺少结束标记 [/TOOL_CALL]。如果上一轮是 write_file/apply_patch 且 "
         "content 太长，不要重复输出完整 content；必须先用 write_file 写短骨架，再用 "
-        f"append_file 分块追加内容；content 降到不超过 {RECOVERY_WRITE_CHUNK_CHARS} 字符。"
+        f"apply_patch 分块追加内容；content 降到不超过 {RECOVERY_WRITE_CHUNK_CHARS} 字符。"
     )
 
     service._record_tool_call(
@@ -241,13 +241,13 @@ def test_tool_loop_enters_long_content_recovery_after_truncated_write_parse_erro
     live_context = "\n".join(params.tool_context)
     assert "long_content_recovery_mode" in live_context
     assert "write_file 写短骨架" in live_context
-    assert "append_file 分块追加" in live_context
+    assert "apply_patch 分块追加" in live_context
     assert f"不超过 {RECOVERY_WRITE_CHUNK_CHARS} 字符" in live_context
     assert "site/app.js" in live_context
 
 
 # LLM: structured JSON parse failures should recover through batched machine writes.
-# 函数用途: 验证超长 write_structured_json 截断后，下一轮提示转为小批量 merge_existing 写入，而不是继续塞整份 JSON。
+# 函数用途: 验证旧结构化 JSON 写入截断后只记录普通解析错误，不再进入专项写入器恢复模式。
 def test_tool_loop_enters_structured_json_recovery_after_truncated_parse_error(
     tmp_path: Path,
 ) -> None:
@@ -256,7 +256,7 @@ def test_tool_loop_enters_structured_json_recovery_after_truncated_parse_error(
     payload = {
         "tool": "__parse_error__",
         "error": "工具调用缺少结束标记 [/TOOL_CALL]",
-        "raw": '{"tool":"write_structured_json","path":"outputs/report/source_data.json","sheets":[{"rows":[',
+        "raw": '{"tool":"write_file","path":"outputs/report/source_data.json","sheets":[{"rows":[',
     }
     output = "工具调用缺少结束标记 [/TOOL_CALL]。write_structured_json 参数太长。"
 
@@ -271,10 +271,9 @@ def test_tool_loop_enters_structured_json_recovery_after_truncated_parse_error(
     )
 
     live_context = "\n".join(params.tool_context)
-    assert "structured_json_recovery_mode" in live_context
-    assert "write_structured_json" in live_context
-    assert "merge_existing=true" in live_context
-    assert "每次只写一个小批次" in live_context
+    assert "structured_json_recovery_mode" not in live_context
+    assert "write_file" in live_context
+    assert "write_structured_json 参数太长" in live_context
     assert "outputs/report/source_data.json" in live_context
 
 
@@ -289,7 +288,7 @@ def test_tool_loop_enters_long_content_recovery_after_inline_write_rejection(
     output = (
         f"write_file.content inline content 超过推荐值：{rejected_chars} 字符，"
         f"推荐最多 {MAX_INLINE_WRITE_CONTENT_CHARS} 字符。 path=site/app.css\n"
-        "请先用 write_file 写短骨架，再用 append_file 分块追加。"
+        "请先用 write_file 写短骨架，再用 apply_patch 分块追加。"
     )
 
     service._record_tool_call(
@@ -304,7 +303,8 @@ def test_tool_loop_enters_long_content_recovery_after_inline_write_rejection(
 
     live_context = "\n".join(params.tool_context)
     assert "long_content_recovery_mode" in live_context
-    assert "只输出 1 个 write_file 或 append_file 工具调用" in live_context
+    assert "WRITE_FILE_RAW" in live_context
+    assert "apply_patch" in live_context
     assert "site/app.css" in live_context
 
 

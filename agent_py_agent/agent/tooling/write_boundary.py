@@ -14,7 +14,7 @@ prompt 里说'只能写这个目录'只是提醒，真正防止越界写文件�
 from pathlib import Path
 from typing import Any
 
-WRITE_TOOL_NAMES = {"write_file", "append_file", "replace_in_file"}
+WRITE_TOOL_NAMES = {"write_file", "apply_patch"}
 _MAX_BOUNDARY_PATH_CHARS = 4096
 _PRODUCT_WRITE_DELEGATE_POLICY = "delegate"
 _INTERNAL_OUTPUT_JSON_NAME = "output.json"
@@ -73,38 +73,74 @@ def validate_write_boundary(
     if not isinstance(params, dict):
         return "写入被阻止: 工具参数必须是 JSON 对象。"
 
-    raw_path = params.get("path")
-    if raw_path is None:
+    raw_paths = _tool_write_paths(tool_name, params)
+    if not raw_paths:
         return ""
 
     roots = _normalized_workspace_roots(workspace_root, workspace_roots)
-    try:
-        target = _resolve_boundary_path(raw_path, workspace_root, roots)
-    except ValueError as exc:
-        return f"写入被阻止: {exc}"
-
     allowed_roots = _boundary_paths(write_boundary.get("allowed_write_roots"), workspace_root, roots)
     if not allowed_roots:
         return "写入被阻止: 当前 subagent 没有配置 allowed_write_roots，不能执行写文件工具。"
-    if not any(_is_relative_to(target, root) for root in allowed_roots):
-        roots = ", ".join(_display_path(root, workspace_root) for root in allowed_roots)
-        return (
-            "写入被阻止: 目标路径不在 allowed_write_roots 内。"
-            f" target={_display_path(target, workspace_root)} allowed={roots}"
-        )
+    for raw_path in raw_paths:
+        try:
+            target = _resolve_boundary_path(raw_path, workspace_root, roots)
+        except ValueError as exc:
+            return f"写入被阻止: {exc}"
+        if not any(_is_relative_to(target, root) for root in allowed_roots):
+            allowed = ", ".join(_display_path(root, workspace_root) for root in allowed_roots)
+            return (
+                "写入被阻止: 目标路径不在 allowed_write_roots 内。"
+                f" target={_display_path(target, workspace_root)} allowed={allowed}"
+            )
+        internal_output_error = _internal_output_json_error(target, write_boundary, workspace_root, roots)
+        if internal_output_error:
+            return internal_output_error
+        product_policy_error = _product_write_policy_error(target, write_boundary, workspace_root, roots)
+        if product_policy_error:
+            return product_policy_error
+        forbidden_error = _forbidden_boundary_error(target, allowed_roots, write_boundary, workspace_root)
+        if forbidden_error:
+            return forbidden_error
+        locked_error = _locked_boundary_error(target, write_boundary, workspace_root)
+        if locked_error:
+            return locked_error
+    return ""
 
-    internal_output_error = _internal_output_json_error(target, write_boundary, workspace_root, roots)
-    if internal_output_error:
-        return internal_output_error
 
-    product_policy_error = _product_write_policy_error(target, write_boundary, workspace_root, roots)
-    if product_policy_error:
-        return product_policy_error
+def _tool_write_paths(tool_name: str, params: dict[str, Any]) -> list[str]:
+    if tool_name == "write_file":
+        raw_path = params.get("path")
+        return [str(raw_path)] if raw_path is not None else []
+    if tool_name == "apply_patch":
+        patch = params.get("patch")
+        if not isinstance(patch, str):
+            return []
+        return _patch_declared_paths(patch)
+    return []
 
-    forbidden_error = _forbidden_boundary_error(target, allowed_roots, write_boundary, workspace_root)
-    if forbidden_error:
-        return forbidden_error
-    return _locked_boundary_error(target, write_boundary, workspace_root)
+
+def _patch_declared_paths(patch: str) -> list[str]:
+    paths: list[str] = []
+    for raw in patch.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        path = _patch_declared_path(raw)
+        if path:
+            paths.append(path)
+    return [path for path in paths if path]
+
+
+# LLM: _patch_declared_path extracts one filesystem path from a patch control line.
+# 函数用途: 让 write boundary 能在 apply_patch 真执行前检查全部声明路径。
+def _patch_declared_path(raw: str) -> str:
+    prefixes = (
+        "*** Add File: ",
+        "*** Update File: ",
+        "*** Delete File: ",
+        "*** Move to: ",
+    )
+    for prefix in prefixes:
+        if raw.startswith(prefix):
+            return raw.removeprefix(prefix).strip()
+    return ""
 
 
 # LLM: _internal_output_json_error keeps runner bookkeeping out of user deliverable roots.

@@ -10,7 +10,6 @@ from typing import Any
 
 from ..backends import ModelResponse
 from ..contracts.delivery_contract_doctor import ContractDoctorReport, validate_delivery_contract
-from ..tooling.file_write_session_inspection import open_file_write_sessions
 from ._runtime_params import ToolLoopExecuteParams
 from .main_agent_delivery_closeout_artifacts import (
     DeliveryContractValidationRequest,
@@ -63,12 +62,6 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     contract = dict(doctor.normalized_contract or contract)
     artifacts = _required_artifacts(contract)
     if not artifacts:
-        return None
-    if open_sessions := open_file_write_sessions(
-        workspace_root,
-        scope=_runtime_scope(request.params),
-    ):
-        _append_open_session_context(request.params, open_sessions)
         return None
     report = _delivery_report(request, contract, artifacts, workspace_root)
     report_ref = _write_report(workspace_root, report)
@@ -218,24 +211,6 @@ def _repair_guidance(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "submit_when_ready": "submit_for_acceptance 或无工具最终回复",
     }
-
-
-# LLM: _append_open_session_context blocks delivery completion from open file-write manifests.
-# 函数用途: 有未 finish/abort 的分块写入时，只追加结构化 session 事实，让下一轮先处理这些会话。
-def _append_open_session_context(params: ToolLoopExecuteParams, sessions: list[dict[str, Any]]) -> None:
-    params.tool_context.append(
-        "[delivery-contract-open-file-write-sessions]\n"
-        + json.dumps(
-            {
-                "ok": False,
-                "reason": "open_file_write_sessions",
-                "open_file_write_sessions": sessions,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-    )
-
 
 # LLM: _closeout_text makes the final message copyable while keeping the machine payload explicit.
 # 函数用途: 生成主代理完成响应，告知上层工具循环不用再请求下一轮模型。

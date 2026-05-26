@@ -2,30 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_py_agent.agent.tooling._filesystem_write import AppendFileTool
 from agent_py_agent.agent.tooling.artifact_integrity import (
     ArtifactIntegrityCheckRequest,
     check_artifact_integrity,
     html_post_write_note,
 )
-
-
-# LLM: HTML artifacts should not accept append chunks after the document is closed.
-# 函数用途: 防止子代理把内容追加到 </html> 后面，导致页面文件看似完成但实际结构脏掉。
-def test_append_file_blocks_html_content_after_closing_tag(tmp_path: Path) -> None:
-    artifact = tmp_path / "artifacts" / "index.html"
-    artifact.parent.mkdir()
-    artifact.write_text("<html><body><main>done</main></body></html>", encoding="utf-8")
-    tool = AppendFileTool(tmp_path)
-
-    result = tool.execute({
-        "path": "artifacts/index.html",
-        "content": "\n<section>late content</section>",
-    })
-
-    assert not result.ok
-    assert "HTML 文件已经闭合" in result.output
-    assert artifact.read_text(encoding="utf-8") == "<html><body><main>done</main></body></html>"
 
 
 # LLM: artifact integrity should catch files that are incomplete before parent acceptance.

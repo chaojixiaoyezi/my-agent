@@ -25,7 +25,7 @@ class ListToolsTool(BaseTool):
             description="列出当前执行上下文可见的工具清单。",
             use_cases=[
                 "不确定当前有哪些工具时，先查询机器可读工具清单",
-                "需要确认 run_command、data_to_workbook 等工具是否可用",
+                "需要确认 run_command、write_file、apply_patch 等工具是否可用",
             ],
             avoid_when=[
                 "已经知道要用哪个工具时，直接调用目标工具",

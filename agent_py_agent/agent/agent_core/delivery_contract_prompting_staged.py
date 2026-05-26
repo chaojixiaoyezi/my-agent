@@ -23,13 +23,10 @@ def _staged_json_no_rows_lines(
         f"  - source_ref={_staging_source_ref(staging) or stage_ref}",
         f"  - write_shape={_checkpoint_shape_hint(stage_ref, staging)}",
         f"  - required_columns={', '.join(str(item) for item in columns)}",
-        f"  - writer_tool={finding.get('writer_tool') or 'write_structured_json'}",
+        f"  - writer_tool={finding.get('writer_tool') or 'write_file'}",
         f"  - builder_tool={staging.get('builder_tool') or ''}",
         f"  - output_ref={_staging_output_ref(staging)}",
-        "  - 优先用 writer_tool 写 path/rows/sheets/data，避免手写大型 JSON 字符串。",
-        "  - 如果 min_items_total 很大，优先用 writer_tool 的 generated_rows 结构化参数生成 rows 和多 sheet。",
-        "  - 如果数据来自多个 JSON API，可用 api_json_collection 一次生成带 source_refs/claims 的结构化 JSON；"
-        "大量同形日期/分页请求优先用 request_ranges，避免手写长 JSON。",
+        "  - 优先用 write_file 写完整 JSON checkpoint；数据很大时可用授权命令/脚本生成文件。",
         "  - source_ref 有非空 rows/sheets 或声明形状后，再调用 builder_tool；不要把空 checkpoint 当完成。",
     ]
     lines.extend(_collection_contract_lines(validation))
@@ -51,10 +48,10 @@ def _staged_json_invalid_lines(
         f"  - source_ref={_staging_source_ref(staging) or stage_ref}",
         f"  - required_shape={_checkpoint_shape_hint(stage_ref, staging)}",
         f"  - parse_error={json.dumps(parse_error, ensure_ascii=False)}",
-        f"  - writer_tool={finding.get('writer_tool') or 'write_structured_json'}",
+        f"  - writer_tool={finding.get('writer_tool') or 'write_file'}",
         f"  - builder_tool={staging.get('builder_tool') or ''}",
         f"  - output_ref={_staging_output_ref(staging)}",
-        "  - 优先用 writer_tool 重写 path/rows/sheets/data，避免手动修补截断 JSON。",
+        "  - 优先用 write_file 重写完整 checkpoint，避免手动修补截断 JSON。",
         "  - 先把 source_ref 修成可解析的完整 checkpoint，再继续 builder_tool 或下一阶段产物。",
     ]
 

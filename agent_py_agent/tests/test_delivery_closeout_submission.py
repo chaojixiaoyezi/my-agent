@@ -181,7 +181,7 @@ def _write_builder_ready_closeout(root: Path) -> None:
                         {
                             "code": "STAGING_BUILDER_READY",
                             "recommended_action": "invoke_builder_tool",
-                            "builder_tool": "data_to_workbook",
+                            "builder_tool": "write_file",
                             "source_ref": "outputs/report/source.json",
                             "output_ref": "outputs/report/report.xlsx",
                         }

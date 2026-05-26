@@ -33,9 +33,6 @@ TAG_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("approval_anomaly", ("APPROVAL_",)),
     ("invalid_state_transition", ("STATE_TRANSITION_INVALID",)),
     ("context_contract_lost", ("CONTEXT_BUNDLE", "COMPACT_REF_MISSING", "CONTRACT_HASH_MISMATCH")),
-    # Legacy marker kept only so old run logs remain classifiable; new open-write-session handling
-    # returns structured repair hints and relies on global tool-round limits rather than its own block.
-    ("open_write_session_blocked_legacy", ("OPEN_FILE_WRITE_SESSION_BLOCKED",)),
     ("local_progress_blocked", ("LOCAL_PROGRESS_GUARD_BLOCKED",)),
 )
 
@@ -55,7 +52,6 @@ STAGE_BY_TAG = {
     "approval_anomaly": "approval",
     "invalid_state_transition": "state",
     "context_contract_lost": "context",
-    "open_write_session_blocked_legacy": "artifact",
     "local_progress_blocked": "loop",
 }
 
@@ -74,7 +70,6 @@ P1_TAGS = {
     "repeated_tool_blocked",
     "approval_anomaly",
     "context_contract_lost",
-    "open_write_session_blocked_legacy",
     "local_progress_blocked",
 }
 

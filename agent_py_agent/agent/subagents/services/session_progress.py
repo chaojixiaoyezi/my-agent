@@ -242,7 +242,7 @@ def _refresh_continue_packet(task: SubAgentTask, snapshot: dict[str, Any]) -> No
 
 
 # LLM: _headings_from_payload extracts markdown headings from model-written content without reading files.
-# 函数用途: 从 write_file/append_file content 参数里提取标题，形成续跑时可对照的已完成章节清单。
+# 函数用途: 从 write_file content 参数里提取标题，形成续跑时可对照的已完成章节清单。
 def _headings_from_payload(payload: dict[str, object]) -> list[str]:
     content = str(payload.get("content") or "")
     headings: list[str] = []

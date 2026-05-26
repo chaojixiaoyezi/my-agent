@@ -126,7 +126,7 @@ class IncompleteOutputThenAcceptedBackend(BaseBackend):
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(text=_incomplete_write_request_result(), backend=self.name)
-        assert "append_file" in prompt
+        assert "apply_patch" in prompt
         return ModelResponse(text=_incomplete_write_done_result(), backend=self.name)
 
 
@@ -170,7 +170,7 @@ def _incomplete_write_request_result() -> str:
         '  "evidence": [{"kind": "command", "summary": "index.html 只写入 2386 字节", "ok": false}],\n'
         '  "evidence_packets": [],\n'
         '  "capability_requests": [\n'
-        '    {"problem": "HTML文件写入不完整，需要追加剩余内容", "needed_capability": "write_file或append_file继续写入", "capability_type": "tool", "expected_output": "完整HTML", "requested_tools": ["write_file", "append_file"], "path_scope": ["."]}\n'
+        '    {"problem": "HTML文件写入不完整，需要继续补齐", "needed_capability": "write_file或apply_patch继续写入", "capability_type": "tool", "expected_output": "完整HTML", "requested_tools": ["write_file", "apply_patch"], "path_scope": ["."]}\n'
         "  ],\n"
         '  "artifacts": [{"path": "index.html", "kind": "file", "summary": "半截HTML"}],\n'
         '  "tests": [],\n'
@@ -192,7 +192,7 @@ def _incomplete_write_done_result() -> str:
         "{\n"
         '  "status": "AWAITING_ACCEPTANCE",\n'
         '  "summary": "HTML已补齐并等待父级验收。",\n'
-        '  "used_tools": ["append_file"],\n'
+        '  "used_tools": ["apply_patch"],\n'
         '  "used_skills": [],\n'
         '  "evidence": [{"kind": "command", "summary": "HTML完整闭合", "ok": true}],\n'
         '  "evidence_packets": [{"id": "evpkt-html-complete", "claim": "HTML已完整", "checked_scope": "index.html", "evidence_refs": ["runner_result.json"], "artifact_refs": [], "confidence": 0.9}],\n'

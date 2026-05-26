@@ -7,7 +7,7 @@ from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryPara
 
 
 # LLM: list_tools gives the model a machine-readable ToolManifest at runtime.
-# 函数用途: 验证模型主动查询工具时能看到 run_command 和 data_to_workbook，不再靠猜。
+# 函数用途: 验证模型主动查询工具时能看到通用执行和写入工具，不再靠固定构建器。
 def test_list_tools_returns_runtime_tool_manifest(tmp_path: Path) -> None:
     registry = ToolRegistry(
         ToolRegistryParams(
@@ -30,7 +30,8 @@ def test_list_tools_returns_runtime_tool_manifest(tmp_path: Path) -> None:
     names = {item["name"] for item in payload["tools"]}
     assert "TOOL_UNAVAILABLE" in payload["tool_failure_taxonomy"]
     assert "run_command" in names
-    assert "data_to_workbook" in names
+    assert "write_file" in names
+    assert "apply_patch" in names
     assert "list_tools" in names
     list_tools = next(item for item in payload["tools"] if item["name"] == "list_tools")
     assert list_tools["visible_in_context"] is True

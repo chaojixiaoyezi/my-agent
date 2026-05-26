@@ -257,5 +257,5 @@ class TestCodingSubagentTools:
         from agent_py_agent.agent.subagents.manager_base import _CODING_SUBAGENT_TOOLS
 
         assert "write_file" in _CODING_SUBAGENT_TOOLS
-        assert "replace_in_file" in _CODING_SUBAGENT_TOOLS
-        assert "append_file" in _CODING_SUBAGENT_TOOLS
+        assert "apply_patch" in _CODING_SUBAGENT_TOOLS
+        assert "apply_patch" in _CODING_SUBAGENT_TOOLS

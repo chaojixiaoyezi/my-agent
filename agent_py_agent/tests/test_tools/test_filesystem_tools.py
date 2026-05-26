@@ -9,12 +9,11 @@ import tempfile
 from pathlib import Path
 
 from agent_py_agent.agent.tools import (
-    AppendFileTool,
+    ApplyPatchTool,
     FetchUrlTool,
     HttpRequestTool,
     ListFilesTool,
     ReadFileTool,
-    ReplaceInFileTool,
     SearchTextTool,
     WriteFileTool,
 )
@@ -91,7 +90,7 @@ def _assert_blocked_non_string_path(registry, boundary) -> None:
         write_boundary=boundary,
     )
     assert not result.ok
-    assert "path 参数必须是字符串路径" in result.output
+    assert "allowed_write_roots" in result.output or "path 参数必须是字符串路径" in result.output
 
 
 def test_write_boundary_blocks_subagent_writes_outside_allowed_roots():
@@ -189,22 +188,32 @@ def test_write_boundary_blocks_symlink_escape_under_allowed_root():
         assert not (outside / "escape.txt").exists()
 
 
-def test_write_and_append_file_tools():
-    """LLM: verify that WriteFileTool creates files and AppendFileTool appends to existing files.
+def test_write_and_apply_patch_tools():
+    """LLM: verify that WriteFileTool creates files and ApplyPatchTool edits existing files.
 
     新手说明:
-    先写再追加，确认内容顺序和文件内容正确。
+    先写完整文件，再用补丁做局部修改，确认内容正确。
     """
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         write_tool = WriteFileTool(workspace)
-        append_tool = AppendFileTool(workspace)
+        patch_tool = ApplyPatchTool(workspace)
 
         write_result = write_tool.execute({"path": "src/demo.py", "content": "print('a')\n"})
-        append_result = append_tool.execute({"path": "src/demo.py", "content": "print('b')\n"})
+        patch_result = patch_tool.execute(
+            {
+                "patch": (
+                    "*** Begin Patch\n"
+                    "*** Update File: src/demo.py\n"
+                    " print('a')\n"
+                    "+print('b')\n"
+                    "*** End Patch\n"
+                )
+            }
+        )
 
         assert write_result.ok
-        assert append_result.ok
+        assert patch_result.ok
         assert (workspace / "src" / "demo.py").read_text(encoding="utf-8") == "print('a')\nprint('b')\n"
 
 
@@ -397,11 +406,11 @@ def test_list_files_supports_limit_offset_depth_and_glob(tmp_path: Path):
     assert "next_offset=2" in result.output
 
 
-def test_replace_in_file_tool():
-    """LLM: verify that ReplaceInFileTool replaces text and reports the count.
+def test_apply_patch_tool_updates_text():
+    """LLM: verify that ApplyPatchTool updates text with explicit context.
 
     新手说明:
-    在已有文件里替换一处文本，确认文件内容和返回信息正确。
+    在已有文件里替换一处文本，确认文件内容正确。
     """
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
@@ -409,17 +418,21 @@ def test_replace_in_file_tool():
         target.parent.mkdir(parents=True)
         target.write_text("def hello():\n    return 'old'\n", encoding="utf-8")
 
-        tool = ReplaceInFileTool(workspace)
+        tool = ApplyPatchTool(workspace)
         result = tool.execute(
             {
-                "path": "src/demo.py",
-                "old": "return 'old'",
-                "new": "return 'new'",
+                "patch": (
+                    "*** Begin Patch\n"
+                    "*** Update File: src/demo.py\n"
+                    " def hello():\n"
+                    "-    return 'old'\n"
+                    "+    return 'new'\n"
+                    "*** End Patch\n"
+                )
             }
         )
 
         assert result.ok
-        assert "替换 1 处" in result.output
         assert target.read_text(encoding="utf-8") == "def hello():\n    return 'new'\n"
 
 

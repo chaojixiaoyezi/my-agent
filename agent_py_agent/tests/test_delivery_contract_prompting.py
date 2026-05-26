@@ -19,7 +19,7 @@ def test_render_delivery_contract_section_includes_staging_refs():
                     "validation_contract": {
                     "staging_contract": {
                         "strategy": "data_then_tool_builder_then_workbook",
-                        "builder_tool": "data_to_workbook",
+                        "builder_tool": "write_file",
                         "source_json_ref": "outputs/table_report/source_data.json",
                         "workbook_ref": "outputs/table_report/table_report.xlsx",
                         "checkpoint_shape_hints": {
@@ -38,11 +38,11 @@ def test_render_delivery_contract_section_includes_staging_refs():
 
     assert "阶段产物" in text
     assert "outputs/table_report/source_data.json" in text
-    assert "阶段构建工具: data_to_workbook" in text
-    assert "source_json_path=outputs/table_report/source_data.json" in text
+    assert "outputs/table_report/table_report.xlsx" in text
+    assert "data_to_workbook" not in text
     assert "数据清单" in text
     assert "记录名" in text
-    assert "generated_rows" in text
+    assert "阶段构建工具:" not in text
 
 
 # LLM: One malformed artifact entry must not erase valid contract guidance.
@@ -73,7 +73,7 @@ def test_render_delivery_contract_section_skips_bad_artifact_items():
     )
 
     assert "- 阶段产物:" in text
-    assert "- 阶段构建工具: data_to_workbook" in text
+    assert "阶段构建工具:" not in text
 
 
 # LLM: bootstrap contract guidance should push the model to materialize targets before repeated inspection.
@@ -106,7 +106,7 @@ def test_render_delivery_contract_section_includes_bootstrap_targets():
                     {
                         "action": "invoke_builder_tool",
                         "priority": 2,
-                        "builder_tool": "data_to_workbook",
+                        "builder_tool": "write_file",
                         "source_ref": "outputs/table_report/source_data.json",
                         "output_ref": "outputs/table_report/table_report.xlsx",
                     },
@@ -123,7 +123,7 @@ def test_render_delivery_contract_section_includes_bootstrap_targets():
     assert "给 outputs/table_report/source_data.json 写阶段草稿" in text
     assert "最小有效骨架" in text
     assert "空 JSON 数组" not in text
-    assert "data_to_workbook" in text
+    assert "write_file" in text
 
 
 def test_render_delivery_contract_section_keeps_research_first_before_skeletons():
@@ -181,9 +181,9 @@ def test_render_delivery_contract_section_avoids_skeleton_hint_for_source_eviden
     assert "最小有效骨架" not in text
 
 
-# LLM: document builder prompts must use the source parameter declared by the tool schema.
-# 函数用途: 验证 markdown_to_pdf 渲染 source_markdown_path，而不是 workbook 专用 source_json_path。
-def test_render_delivery_contract_section_uses_document_builder_source_param():
+# LLM: document outputs should use generic write guidance instead of fixed builder prompts.
+# 函数用途: 验证 PDF 产物不会渲染旧的专项 markdown_to_pdf 工具参数。
+def test_render_delivery_contract_section_uses_generic_document_write_guidance():
     from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
         render_delivery_contract_section,
     )
@@ -195,7 +195,7 @@ def test_render_delivery_contract_section_uses_document_builder_source_param():
                     {
                         "action": "invoke_builder_tool",
                         "priority": 2,
-                        "builder_tool": "markdown_to_pdf",
+                        "builder_tool": "write_file",
                         "source_ref": "outputs/docs/draft.md",
                         "output_ref": "outputs/docs/final.pdf",
                     }
@@ -207,7 +207,7 @@ def test_render_delivery_contract_section_uses_document_builder_source_param():
                     "preferred_path": "outputs/docs/final.pdf",
                     "validation_contract": {
                         "staging_contract": {
-                            "builder_tool": "markdown_to_pdf",
+                            "builder_tool": "write_file",
                             "source_markdown_ref": "outputs/docs/draft.md",
                             "pdf_ref": "outputs/docs/final.pdf",
                             "checkpoint_refs": ["outputs/docs/source_index.json", "outputs/docs/draft.md"],
@@ -218,7 +218,8 @@ def test_render_delivery_contract_section_uses_document_builder_source_param():
         }
     )
 
-    assert "markdown_to_pdf: source_markdown_path=outputs/docs/draft.md, path=outputs/docs/final.pdf" in text
+    assert "markdown_to_pdf" not in text
+    assert "write_file.data_base64" in text
     assert "source_json_path=outputs/docs/draft.md" not in text
 
 
@@ -295,9 +296,9 @@ def test_render_delivery_contract_section_includes_generic_html_rules_only():
     assert "HTML 链接不得使用这些 href 占位值" not in text
 
 
-# LLM: recovery runtime findings should reach the model as structured continuation hints.
-# 函数用途: 验证 open file_write_session 从 recovery packet 渲染为明确续写/finish 提示，不读取旧 stdout。
-def test_render_delivery_contract_section_includes_open_write_session_recovery():
+# LLM: unknown retired runtime findings should render only as raw machine facts.
+# 函数用途: 旧分块写入 finding 不再拥有专项恢复提示，只按普通 runtime finding 展示。
+def test_render_delivery_contract_section_renders_retired_finding_generically():
     from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
         render_delivery_contract_section,
     )
@@ -311,8 +312,8 @@ def test_render_delivery_contract_section_includes_open_write_session_recovery()
                             "code": "OPEN_FILE_WRITE_SESSION",
                             "session_id": "session-123",
                             "next_chunk_index": 2,
-                            "manifest_path": "workspace/.agent_file_write_sessions/session-123/manifest.json",
-                            "preview_path": "workspace/.agent_file_write_sessions/session-123/write.tmp",
+                            "manifest_path": "workspace/.agent_write_files/session-123/manifest.json",
+                            "preview_path": "workspace/.agent_write_files/session-123/write.tmp",
                             "preview_materialized": True,
                             "target_path": {"display": "outputs/report.py"},
                             "resume_action": "append_from_next_chunk_then_finish",
@@ -326,31 +327,24 @@ def test_render_delivery_contract_section_includes_open_write_session_recovery()
     )
 
     assert "恢复要求" in text
-    assert "open_file_write_session" in text
-    assert "session_id=session-123" in text
-    assert "next_chunk_index=2" in text
-    assert "preview_path=workspace/.agent_file_write_sessions/session-123/write.tmp" in text
-    assert "preview_materialized=true" in text
-    assert "staged_fact_source=preview_and_chunks" in text
-    assert "preview_materialized_after_append=true" in text
-    assert "resume_action=append_from_next_chunk_then_finish" in text
-    assert "chunk_content_read_required=false" in text
-    assert "existing_chunks_authoritative=true" in text
-    assert "不要重复 begin 新 session" in text
+    assert "runtime_finding=OPEN_FILE_WRITE_SESSION" in text
+    assert "旧分块写入 session" not in text
+    assert "write_file" in text
+    assert "session_id=session-123" not in text
 
 
-# LLM: duplicate open write sessions for one target must render one recovery choice instead of asking the model to guess.
-# 函数用途: 验证同一目标文件存在多个 open session 时，提示会推荐已有 chunk 最多的 session，并要求关闭空/重复 session。
-def test_render_delivery_contract_section_recommends_one_duplicate_open_write_session():
+# LLM: duplicate retired write sessions should not revive the old session workflow.
+# 函数用途: 验证旧重复 session finding 不再生成推荐 session，其他 staged finding 仍正常展示。
+def test_render_delivery_contract_section_ignores_duplicate_retired_write_sessions():
     from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
         render_delivery_contract_section,
     )
 
     text = render_delivery_contract_section(_duplicate_open_session_contract())
 
-    assert "duplicate_open_file_write_sessions" in text
-    assert "recommended_session_id=fetch-v3" in text
-    assert "abort_duplicate_session_ids=empty-session" in text
+    assert "duplicate_open_write_files" not in text
+    assert "recommended_session_id=fetch-v3" not in text
+    assert "旧分块写入 session" not in text
     assert "staged_json_invalid" in text
     assert "Unterminated string starting at" in text
     assert "staged_json_no_rows" in text
@@ -360,12 +354,12 @@ def test_render_delivery_contract_section_recommends_one_duplicate_open_write_se
     assert "required_item_fields=记录名, 地址, 指标值" in text
     assert "item_evidence_required_fields=记录名, 地址, 指标值" in text
     assert "require_verified_evidence=true" in text
-    assert "data_to_workbook" in text
+    assert "data_to_workbook" not in text
 
 
-# LLM: Reconciled sessions should override stale recovery findings in model-visible hints.
-# 函数用途: 验证系统已 abort 的旧 session 不再被渲染为续写目标，只展示保留 session。
-def test_render_delivery_contract_section_skips_reconciled_aborted_sessions():
+# LLM: recovery reconciliation for retired sessions should not render old session controls.
+# 函数用途: 验证旧 reconciliation 字段不会重新暴露 session 工作流。
+def test_render_delivery_contract_section_does_not_render_retired_session_reconciliation():
     from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
         render_delivery_contract_section,
     )
@@ -398,23 +392,23 @@ def test_render_delivery_contract_section_skips_reconciled_aborted_sessions():
         }
     )
 
-    assert "reconciled_open_file_write_session" in text
-    assert "kept_session_id=kept-session" in text
-    assert "kept_next_chunk_index=3" in text
-    assert "kept_received_chunks=0, 1, 2" in text
+    assert "reconciled_open_write_file" not in text
+    assert "kept_session_id=kept-session" not in text
+    assert "旧分块写入 session" not in text
+    assert "runtime_finding=OPEN_FILE_WRITE_SESSION" in text
     assert "session_id=stale-session" not in text
 
 
 # LLM: _duplicate_open_session_contract keeps the duplicate-session fixture reusable and under code-size limits.
-# 函数用途: 构造包含重复 open file_write_session 和空 staged JSON 的交付合同测试数据。
+# 函数用途: 构造包含重复 open write_file 和空 staged JSON 的交付合同测试数据。
 def _duplicate_open_session_contract() -> dict[str, object]:
     return {
         "artifacts": [_xlsx_artifact_contract()],
         "recovery": {
             "acceptance": {
                 "runtime_findings": [
-                    _open_write_session("empty-session", 0, []),
-                    _open_write_session("fetch-v3", 2, [0, 1]),
+                    _legacy_write_session("empty-session", 0, []),
+                    _legacy_write_session("fetch-v3", 2, [0, 1]),
                     {
                         "code": "STAGED_JSON_INVALID",
                         "stage_ref": "outputs/table_report/source_data.json",
@@ -450,7 +444,7 @@ def _xlsx_artifact_contract() -> dict[str, object]:
             },
             "required_columns": ["记录名", "地址"],
             "staging_contract": {
-                "builder_tool": "data_to_workbook",
+                "builder_tool": "write_file",
                 "checkpoint_shape_hints": {
                     "outputs/table_report/source_data.json": '{"sheets":[{"name":"数据清单","rows":[{"记录名":"..."}]}]}'
                 },
@@ -465,15 +459,15 @@ def _xlsx_artifact_contract() -> dict[str, object]:
     }
 
 
-# LLM: _open_write_session builds one structured runtime finding without embedding prose facts.
-# 函数用途: 构造 open file_write_session finding，用于测试重复 session 的恢复选择。
-def _open_write_session(session_id: str, next_chunk: int, chunks: list[int]) -> dict[str, object]:
+# LLM: _legacy_write_session builds one structured runtime finding without embedding prose facts.
+# 函数用途: 构造 open write_file finding，用于测试重复 session 的恢复选择。
+def _legacy_write_session(session_id: str, next_chunk: int, chunks: list[int]) -> dict[str, object]:
     return {
         "code": "OPEN_FILE_WRITE_SESSION",
         "session_id": session_id,
         "next_chunk_index": next_chunk,
         "received_chunks": chunks,
-        "preview_path": f"workspace/.agent_file_write_sessions/{session_id}/write.tmp",
+        "preview_path": f"workspace/.agent_write_files/{session_id}/write.tmp",
         "preview_materialized": bool(chunks),
         "target_path": {"display": "outputs/table_report/fetch.py"},
     }

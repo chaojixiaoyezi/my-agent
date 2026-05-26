@@ -11,14 +11,12 @@ from .parameters import _one_shot_tool_call_key
 from .runner_stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_call_finished
 from .subagent_attempt_guard import stale_subagent_attempt_result
 from .tool_agent_budget_stage import ToolAgentBudgetStageRequest, maybe_block_tool_agent_budget
-from .tool_api_collection_contract import api_collection_contract_result
 from .tool_call_guardrail import (
     maybe_block_repeated_tool_failure,
     maybe_block_repeated_tool_no_progress,
 )
 from .tool_round_execution import ToolCallExecuteParams
 from .tool_runtime_ledger import write_boundary_with_runtime_ledger
-from .tool_staged_writer_contract import staged_writer_contract_result
 
 
 # LLM: ToolCallRuntimeRequest bundles one parsed tool call with its trace metadata.
@@ -58,12 +56,6 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
     stale_result = stale_subagent_attempt_result(runtime_request.agent, payload)
     if stale_result is not None:
         return _trace_finished_result(trace_request, stale_result)
-    staged_writer_result = staged_writer_contract_result(request.params, payload)
-    if staged_writer_result is not None:
-        return _trace_finished_result(trace_request, staged_writer_result)
-    api_collection_result = api_collection_contract_result(request.params, payload)
-    if api_collection_result is not None:
-        return _trace_finished_result(trace_request, api_collection_result)
     return maybe_block_tool_agent_budget(ToolAgentBudgetStageRequest(runtime_request.agent, request, payload))
 
 

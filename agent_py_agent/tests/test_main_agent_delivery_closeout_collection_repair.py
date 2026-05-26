@@ -28,8 +28,8 @@ def test_collection_checkpoint_quality_prefers_api_collection_writer() -> None:
     actions = _actions_for_source(_bad_collection_source(), contract)
 
     action = actions["STAGED_JSON_REQUIRED_COLUMNS_MISSING"]
-    assert action["writer_tool"] == "api_json_collection"
-    assert action["write_tools"] == ["api_json_collection", "write_structured_json"]
+    assert action["writer_tool"] == "write_file"
+    assert action["write_tools"] == ["write_file"]
     assert action["collection_contract"]["source_json_ref"] == "outputs/table_report/source_data.json"
 
 
@@ -52,8 +52,8 @@ def test_collection_too_few_items_routes_to_api_collection_writer() -> None:
     action = actions["COLLECTION_TOO_FEW_ITEMS"]
     assert action["recommended_action"] == "repair_structured_checkpoint_json"
     assert action["checkpoint_ref"] == "outputs/table_report/source_data.json"
-    assert action["writer_tool"] == "api_json_collection"
-    assert action["write_tools"] == ["api_json_collection", "write_structured_json"]
+    assert action["writer_tool"] == "write_file"
+    assert action["write_tools"] == ["write_file"]
     assert action["collection_contract"]["min_items_total"] == 3
 
 
@@ -90,8 +90,8 @@ def test_collection_checkpoint_quality_prefers_structured_writer_for_generated_r
     actions = _actions_for_source(_bad_collection_source(), contract)
 
     action = actions["STAGED_JSON_REQUIRED_COLUMNS_MISSING"]
-    assert action["writer_tool"] == "write_structured_json"
-    assert action["write_tools"] == ["write_structured_json", "api_json_collection"]
+    assert action["writer_tool"] == "write_file"
+    assert action["write_tools"] == ["write_file"]
 
 
 def _actions_for_source(source_content: str, contract: dict[str, object]) -> dict[str, dict[str, object]]:

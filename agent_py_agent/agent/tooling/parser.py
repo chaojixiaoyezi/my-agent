@@ -47,8 +47,6 @@ _XMLISH_PARAMETER_NAME_RE = re.compile(
 )
 
 _XMLISH_TOOL_ALIASES = {
-    "append": "append_file",
-    "append_file": "append_file",
     "cat": "read_file",
     "fetch": "fetch_url",
     "fetch_url": "fetch_url",
@@ -61,8 +59,7 @@ _XMLISH_TOOL_ALIASES = {
     "open": "read_file",
     "read": "read_file",
     "read_file": "read_file",
-    "replace": "replace_in_file",
-    "replace_in_file": "replace_in_file",
+    "patch": "apply_patch",
     "request": "http_request",
     "search": "search_text",
     "search_text": "search_text",

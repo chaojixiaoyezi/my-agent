@@ -51,23 +51,6 @@ class ArtifactIntegrityDecision:
         return [issue.code for issue in self.issues if issue.severity == "warning"]
 
 
-# LLM: HtmlAppendGuardRequest separates append safety from final artifact acceptance.
-# 类用途: 描述一次 HTML append 是否允许；用于阻止把内容追加到已经闭合的 HTML 后面。
-@dataclass(frozen=True)
-class HtmlAppendGuardRequest:
-    path: Path
-    existing_text: str
-    append_text: str
-
-
-# LLM: HtmlAppendGuardDecision is intentionally tiny so filesystem tools can fail fast.
-# 类用途: 返回 append 是否允许，以及给模型的下一步修复提示。
-@dataclass(frozen=True)
-class HtmlAppendGuardDecision:
-    allowed: bool
-    message: str = ""
-
-
 _HTML_ID_RE = re.compile(r"\bid\s*=\s*['\"]([^'\"]+)['\"]", re.IGNORECASE)
 _HTML_ANCHOR_TAG_RE = re.compile(r"<a\b(?P<attrs>[^>]*)>(?P<label>.*?)</a>", re.IGNORECASE | re.DOTALL)
 _HTML_HREF_ATTR_RE = re.compile(r"\bhref\s*=\s*(['\"])(?P<href>.*?)\1", re.IGNORECASE | re.DOTALL)
@@ -132,26 +115,6 @@ def web_project_post_write_note(decision: ArtifactIntegrityDecision) -> str:
     return (
         "Web 项目完整性失败: web_project_integrity_failed=true "
         f"codes={codes}。请修复这些结构化问题后再声明完成。"
-    )
-
-
-# LLM: check_html_append_allowed blocks the exact failure mode where chunks continue after </html>.
-# 函数用途: append_file 写 HTML 时，如果文件已经闭合且新内容不是空白，就拒绝追加并提示正确修复路径。
-def check_html_append_allowed(request: HtmlAppendGuardRequest) -> HtmlAppendGuardDecision:
-    path = Path(request.path)
-    if not _looks_like_html_path(path):
-        return HtmlAppendGuardDecision(allowed=True)
-    if "</html>" not in request.existing_text.lower():
-        return HtmlAppendGuardDecision(allowed=True)
-    if not request.append_text.strip():
-        return HtmlAppendGuardDecision(allowed=True)
-    return HtmlAppendGuardDecision(
-        allowed=False,
-        message=(
-            "HTML 文件已经闭合，不能继续把正文 append 到 </html> 后面。"
-            "请用 replace_in_file 插入到 </body> 前，或重写完整文件；"
-            "如果在分块写长 HTML，请只在最后一块写 </body></html>。"
-        ),
     )
 
 

@@ -72,9 +72,9 @@ def test_tool_gateway_canonicalizes_read_artifact_aliases(tmp_path: Path):
     assert payload["max_chars"] == 123
 
 
-# LLM: file_write_session raw blocks avoid forcing large HTML through escaped JSON strings.
-# 函数用途: 验证结构化 raw content block 会变成 file_write_session.append，不依赖自然语言续写。
-def test_tool_gateway_parses_file_write_session_raw_content_block(tmp_path: Path):
+# LLM: write_file raw blocks avoid forcing large HTML through escaped JSON strings.
+# 函数用途: 验证结构化 raw content block 会变成 write_file.append，不依赖自然语言续写。
+def test_tool_gateway_parses_write_file_raw_content_block(tmp_path: Path):
     registry = _registry(tmp_path)
     html = "<!doctype html>\n<html><body><h1>ARCA</h1></body></html>"
 
@@ -86,7 +86,7 @@ def test_tool_gateway_parses_file_write_session_raw_content_block(tmp_path: Path
 
     assert calls == [
         {
-            "tool": "file_write_session",
+            "tool": "write_file",
             "action": "append",
             "session_id": "homepage-1",
             "target_path": "out/index.html",
@@ -96,7 +96,7 @@ def test_tool_gateway_parses_file_write_session_raw_content_block(tmp_path: Path
     ]
     append = registry.execute_call(calls[0])
     finish = registry.execute_call({
-        "tool": "file_write_session",
+        "tool": "write_file",
         "action": "finish",
         "session_id": "homepage-1",
     })
@@ -105,24 +105,19 @@ def test_tool_gateway_parses_file_write_session_raw_content_block(tmp_path: Path
     assert (tmp_path / "out" / "index.html").read_text(encoding="utf-8") == html
 
 
-# LLM: Malformed raw write markers must feed the repair loop instead of becoming final prose.
-# 函数用途: 模型把 FILE_WRITE_SESSION_APPEND 写坏时，网关返回 parse-error，让主循环继续修复。
-def test_tool_gateway_reports_malformed_file_write_session_raw_marker(tmp_path: Path):
+# LLM: Retired raw write markers should not resurrect the old session writer.
+# 函数用途: 旧 FILE_WRITE_SESSION_APPEND 标记不再触发隐藏写入或专门拦截。
+def test_tool_gateway_reports_malformed_write_file_raw_marker(tmp_path: Path):
     registry = _registry(tmp_path)
 
     calls = registry.parse_tool_calls(
         "准备写文件\n"
         "[FILE_WRITE_SESSION_APPEND]\n"
-        '{"tool":"file_write_session","action":"begin","target_path":"out/index.html"}\n'
+        '{"tool":"write_file","action":"begin","target_path":"out/index.html"}\n'
         "[/TOOL_CALL]"
     )
 
-    assert len(calls) == 1
-    assert calls[0]["tool"] == "__parse_error__"
-    assert "FILE_WRITE_SESSION_APPEND" in calls[0]["error"]
-    result = registry.execute_call(calls[0])
-    assert result.ok is False
-    assert "请重新输出标准工具调用格式" in result.output
+    assert calls == []
 
 
 # LLM: Valid raw blocks with missing attrs already have a single structured parse error.

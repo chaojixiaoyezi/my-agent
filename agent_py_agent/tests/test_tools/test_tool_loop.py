@@ -129,8 +129,8 @@ class _EmptyThenFinalAfterToolBackend:
         return ModelResponse(text="已根据工具结果继续完成。", backend=self.name)
 
 
-# LLM: _LongAppendPromptWindowBackend reproduces a productive runner whose live tool transcript grows every round.
-# 类用途: 测试专用后端；连续 append 同一个产物，确认系统会压缩旧工具上下文而不是让 prompt 无限变大。
+# LLM: _LongWritePromptWindowBackend reproduces a productive runner whose live tool transcript grows every round.
+# 类用途: 测试专用后端；连续重写同一个产物，确认系统会压缩旧工具上下文而不是让 prompt 无限变大。
 class _LongAppendPromptWindowBackend:
     name = "fake_long_append_prompt_window_backend"
 
@@ -138,16 +138,18 @@ class _LongAppendPromptWindowBackend:
         self.calls = 0
         self.rounds = rounds
         self.max_prompt_chars = 0
+        self.rows: list[str] = []
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         self.max_prompt_chars = max(self.max_prompt_chars, len(prompt))
         if self.calls <= self.rounds:
-            content = f"row-{self.calls}: " + ("x" * 900)
+            self.rows.append(f"row-{self.calls}: " + ("x" * 900))
+            content = "\\n".join(self.rows) + "\\n"
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
-                    f'{{"tool":"append_file","path":"data/weekly_data.json","content":"{content}\\n"}}\n'
+                    f'{{"tool":"write_file","path":"data/weekly_data.json","content":"{content}"}}\n'
                     "[/TOOL_CALL]"
                 ),
                 backend=self.name,
@@ -300,12 +302,11 @@ def test_tool_loop_windows_long_runner_tool_context():
         backend = _LongAppendPromptWindowBackend()
         agent.backend = backend
 
-        result = agent.run("持续写入 data/weekly_data.json 后收口", save=False, allowed_tools=["append_file"])
+        result = agent.run("持续写入 data/weekly_data.json 后收口", save=False, allowed_tools=["write_file"])
 
         assert result.response == "连续写入后已正常收口。"
         assert result.tool_rounds == 45
         assert backend.max_prompt_chars < 70_000
-        assert "row-1:" not in result.prompt
         assert "tool-context-window" in result.prompt
         assert (workspace / "data" / "weekly_data.json").read_text(encoding="utf-8").count("row-") == 45
 

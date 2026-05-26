@@ -294,7 +294,7 @@ def classify_tool_risk(spec: ToolSpec) -> tuple[list[str], str]:
     后续可以在 tool card 里继续扩展更细的权限和确认机制。"""
 
     name = spec.name
-    if name in {"write_file", "append_file", "replace_in_file"}:
+    if name in {"write_file", "apply_patch"}:
         return ["filesystem_write"], "high"
     if name == "http_request":
         return ["network_request"], "medium"

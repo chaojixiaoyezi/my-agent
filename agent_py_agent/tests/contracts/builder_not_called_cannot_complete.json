@@ -1,6 +1,6 @@
 {
-  "name": "builder_not_called_cannot_complete",
-  "task_type": "builder_backed_artifact",
+  "name": "required_external_step_not_called_cannot_complete",
+  "task_type": "required_external_step_artifact",
   "artifacts": {
     "required": [
       {
@@ -19,10 +19,10 @@
   },
   "tools": {
     "required_calls": [
-      "write_file"
+      "run_command"
     ],
     "required_successful_calls": [
-      "data_to_workbook"
+      "run_command"
     ]
   },
   "final_status": {

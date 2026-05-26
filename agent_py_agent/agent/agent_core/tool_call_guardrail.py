@@ -35,14 +35,9 @@ _READ_ONLY_TOOL_NAMES = {
     "web_search",
 }
 _LOCAL_PROGRESS_TOOL_NAMES = {
-    "append_file",
-    "api_json_collection",
-    "data_to_workbook",
-    "file_write_session",
-    "markdown_to_pdf",
-    "replace_in_file",
+    "apply_patch",
+    "run_command",
     "write_file",
-    "write_structured_json",
 }
 
 _repeat_fail_threshold = repeat_fail_threshold

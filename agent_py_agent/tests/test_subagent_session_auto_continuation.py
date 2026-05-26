@@ -126,7 +126,7 @@ def test_task_local_write_progress_updates_continue_packet(tmp_path: Path) -> No
     snapshot = record_subagent_tool_progress(
         SubagentToolProgressRequest(
             task=task,
-            tool="append_file",
+            tool="apply_patch",
             payload={
                 "path": str(tmp_path / "legacy" / "run-progress" / "算法测试方案.md"),
                 "content": "## 第1章：排序\n正文\n## 第2章：搜索\n正文",
@@ -139,7 +139,7 @@ def test_task_local_write_progress_updates_continue_packet(tmp_path: Path) -> No
     )
     packet = json.loads(Path(task.agent_run_latest_session_continue_packet_json).read_text(encoding="utf-8"))
 
-    assert snapshot["summary"] == "最近 append_file 算法测试方案.md；已记录标题：第1章：排序；第2章：搜索"
+    assert snapshot["summary"] == "最近 apply_patch 算法测试方案.md；已记录标题：第1章：排序；第2章：搜索"
     assert packet["latest_summary"] == snapshot["summary"]
     assert packet["work_progress"]["latest_written_path"].endswith("算法测试方案.md")
     assert packet["work_progress"]["headings"] == ["第1章：排序", "第2章：搜索"]
@@ -159,7 +159,7 @@ def test_task_local_write_progress_completed_html_prompts_output_json_closeout(t
     snapshot = record_subagent_tool_progress(
         SubagentToolProgressRequest(
             task=task,
-            tool="append_file",
+            tool="apply_patch",
             payload={"path": str(artifact), "content": "</body></html>"},
             output="已追加文件: index.html\nHTML 完整性提示: 当前结构没有发现明显问题。",
             ok=True,
@@ -188,7 +188,7 @@ def test_task_local_write_progress_placeholder_hash_link_prompts_repair(tmp_path
     snapshot = record_subagent_tool_progress(
         SubagentToolProgressRequest(
             task=task,
-            tool="replace_in_file",
+            tool="apply_patch",
             payload={"path": str(artifact), "content": ""},
             output="已修改文件: index.html",
             ok=True,
@@ -225,7 +225,7 @@ def test_task_local_write_progress_many_placeholder_links_prompts_batch_repair(t
     snapshot = record_subagent_tool_progress(
         SubagentToolProgressRequest(
             task=task,
-            tool="append_file",
+            tool="apply_patch",
             payload={"path": str(artifact), "content": "</body></html>"},
             output="已追加文件: index.html",
             ok=True,
@@ -236,7 +236,7 @@ def test_task_local_write_progress_many_placeholder_links_prompts_batch_repair(t
 
     assert "placeholder_hash_linkx5" in snapshot["next_action"]
     assert "一次性批量修复" in snapshot["next_action"]
-    assert "count=0" in snapshot["next_action"]
+    assert "apply_patch" in snapshot["next_action"]
     assert "不要一轮只替换一个链接" in snapshot["next_action"]
 
 
@@ -257,7 +257,7 @@ def test_task_local_output_json_closeout_preserves_product_integrity_progress(tm
     product_snapshot = record_subagent_tool_progress(
         SubagentToolProgressRequest(
             task=task,
-            tool="replace_in_file",
+            tool="apply_patch",
             payload={"path": str(artifact), "content": ""},
             output="已修改文件: index.html",
             ok=True,
@@ -305,7 +305,7 @@ def test_continue_packet_prefers_work_progress_summary(tmp_path: Path) -> None:
     record_subagent_tool_progress(
         SubagentToolProgressRequest(
             task=task,
-            tool="append_file",
+            tool="apply_patch",
             payload={
                 "path": str(tmp_path / "legacy" / "run-progress" / "算法测试方案.md"),
                 "content": "## 第1章：排序\n正文\n## 第2章：搜索\n正文",
@@ -318,7 +318,7 @@ def test_continue_packet_prefers_work_progress_summary(tmp_path: Path) -> None:
     )
     packet = json.loads(Path(task.agent_run_latest_session_continue_packet_json).read_text(encoding="utf-8"))
 
-    assert packet["latest_summary"] == "最近 append_file 算法测试方案.md；已记录标题：第1章：排序；第2章：搜索"
+    assert packet["latest_summary"] == "最近 apply_patch 算法测试方案.md；已记录标题：第1章：排序；第2章：搜索"
 
 
 # LLM: _progress_task keeps progress snapshot tests focused on state transitions, not task boilerplate.

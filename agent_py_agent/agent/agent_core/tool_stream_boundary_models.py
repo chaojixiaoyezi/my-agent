@@ -21,7 +21,7 @@ class LongToolContentAbortPayload:
 
 
 # LLM: LongToolContentStreamAbort is a structured early-stop signal for oversized write tool streams.
-# 类用途: 表示模型正在输出过长的 write_file/append_file content；上层会把它转成可恢复的分块提示。
+# 类用途: 表示模型正在输出过长的 write_file content；上层会把它转成可恢复的分块提示。
 class LongToolContentStreamAbort(RuntimeError):
     # LLM: __init__ stores one payload object so the constructor stays below parameter limits.
     # 函数用途: 记录被中断的工具名、路径、已流式输出字符数和上限，方便后续提示模型分块恢复。

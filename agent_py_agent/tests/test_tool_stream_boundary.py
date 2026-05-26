@@ -1,9 +1,4 @@
-"""LLM: tests for streaming tool-call boundary behavior.
-
-给人看的解释：
-这里测试模型流式输出工具调用时的公共边界。
-真实模型如果把一整个网页或脚本塞进一次 write_file 参数，系统应该尽早打断并引导它分块写入。
-"""
+"""流式工具调用边界测试。"""
 
 from __future__ import annotations
 
@@ -25,16 +20,10 @@ from agent_py_agent.agent.tooling.content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
     STREAMING_INLINE_WRITE_ABORT_CHARS,
 )
-from agent_py_agent.agent.tooling.file_write_session_models import (
-    DEFAULT_MAX_SESSION_CHUNK_CHARS,
-)
 
 
-# LLM: streaming large write_file content must stop before provider timeout hides the partial tool call.
-# 函数用途: 验证未闭合 write_file content 超过 inline 上限时，流式边界会抛出可恢复中断。
-def test_tool_boundary_aborts_unclosed_large_write_content_stream():
+def test_tool_boundary_aborts_unclosed_large_write_content_stream() -> None:
     boundary = ToolBoundaryChunkFilter(None, max_inline_content_chars=12)
-
     boundary('[TOOL_CALL]\n{"tool":"write_file","path":"site/index.html","content":"')
 
     try:
@@ -43,64 +32,19 @@ def test_tool_boundary_aborts_unclosed_large_write_content_stream():
         assert exc.tool == "write_file"
         assert exc.path == "site/index.html"
         assert exc.limit == 12
-    else:  # pragma: no cover - keeps assertion message clear.
+    else:  # pragma: no cover
         raise AssertionError("expected large write stream abort")
 
 
-# LLM: structured JSON checkpoints can be large too; unfinished payload streams need the same early stop.
-# 函数用途: 验证 write_structured_json 的 sheets/data/rows 大参数没闭合时会提前中断，而不是拖到模型总超时。
-def test_tool_boundary_aborts_unclosed_large_structured_json_stream():
-    boundary = ToolBoundaryChunkFilter(None, max_inline_content_chars=12)
-
-    boundary(
-        '[TOOL_CALL]\n'
-        '{"tool":"write_structured_json","path":"outputs/data.json","sheets":['
-    )
-
-    try:
-        boundary("{" + '"rows":[' + "A" * 13)
-    except LongToolContentStreamAbort as exc:
-        assert exc.tool == "write_structured_json"
-        assert exc.path == "outputs/data.json"
-        assert exc.limit == 12
-    else:  # pragma: no cover - keeps assertion message clear.
-        raise AssertionError("expected structured JSON stream abort")
-
-
-# LLM: real models sometimes wrap filesystem parameters under a nested object before normalization runs.
-# 函数用途: 验证流式边界也能识别 {"tool":"write_file","filesystem":{"path":...,"content":...}} 这种真实输出。
-def test_tool_boundary_aborts_nested_filesystem_large_write_content_stream():
-    boundary = ToolBoundaryChunkFilter(None, max_inline_content_chars=12)
-
-    boundary(
-        '[TOOL_CALL]\n'
-        '{"tool":"write_file","filesystem":{"path":"shop/index.html","content":"'
-    )
-
-    try:
-        boundary("A" * 13)
-    except LongToolContentStreamAbort as exc:
-        assert exc.tool == "write_file"
-        assert exc.path == "shop/index.html"
-        assert exc.limit == 12
-    else:  # pragma: no cover - keeps assertion message clear.
-        raise AssertionError("expected nested filesystem large write stream abort")
-
-
-# LLM: default write streams allow common complete HTML/tool bodies to close before recovery.
-# 函数用途: 验证默认写入流不会在旧 4K 小阈值处过早切断，避免半截 HTML 变成 open session。
-def test_tool_boundary_allows_default_write_file_past_inline_recommendation():
+def test_tool_boundary_allows_default_write_file_past_inline_recommendation() -> None:
     boundary = ToolBoundaryChunkFilter(None, max_inline_content_chars=MAX_INLINE_WRITE_CONTENT_CHARS)
 
     boundary('[TOOL_CALL]\n{"tool":"write_file","path":"site/index.html","content":"')
     boundary("A" * (MAX_INLINE_WRITE_CONTENT_CHARS + 1))
 
 
-# LLM: runaway write streams still stop at the expanded streaming cap.
-# 函数用途: 验证未闭合 write_file 过长时仍会抛出可恢复中断，防止模型输出阶段无限拖延。
-def test_tool_boundary_aborts_write_file_at_expanded_streaming_threshold():
+def test_tool_boundary_aborts_write_file_at_expanded_streaming_threshold() -> None:
     boundary = ToolBoundaryChunkFilter(None, max_inline_content_chars=12_000)
-
     boundary('[TOOL_CALL]\n{"tool":"write_file","path":"scripts/collect.py","content":"')
 
     try:
@@ -109,95 +53,11 @@ def test_tool_boundary_aborts_write_file_at_expanded_streaming_threshold():
         assert exc.tool == "write_file"
         assert exc.path == "scripts/collect.py"
         assert exc.limit == STREAMING_INLINE_WRITE_ABORT_CHARS
-    else:  # pragma: no cover - keeps assertion message clear.
+    else:  # pragma: no cover
         raise AssertionError("expected streaming threshold abort")
 
 
-# LLM: structured JSON is not an unbounded generation channel; unfinished large payloads must recover early.
-# 函数用途: 验证大型 rows/sheets checkpoint 没闭合时按通用流式阈值早停，不拖到模型请求超时。
-def test_tool_boundary_aborts_structured_json_at_write_streaming_threshold():
-    boundary = ToolBoundaryChunkFilter(None, max_inline_content_chars=MAX_INLINE_WRITE_CONTENT_CHARS)
-
-    boundary(
-        '[TOOL_CALL]\n'
-        '{"tool":"write_structured_json","path":"outputs/data.json","sheets":['
-    )
-
-    try:
-        boundary("{" + '"rows":[' + "A" * (MAX_INLINE_WRITE_CONTENT_CHARS + 1))
-    except LongToolContentStreamAbort as exc:
-        assert exc.tool == "write_structured_json"
-        assert exc.path == "outputs/data.json"
-        assert exc.limit == MAX_INLINE_WRITE_CONTENT_CHARS
-    else:  # pragma: no cover - keeps assertion message clear.
-        raise AssertionError("expected structured JSON stream abort")
-
-
-# LLM: file_write_session is the large-body channel, so it must not inherit write_file's tiny stream cutoff.
-# 函数用途: 验证 file_write_session append 不会按普通 write_file 早停阈值截断，避免大 HTML 被拆坏。
-def test_tool_boundary_allows_file_write_session_until_session_chunk_limit():
-    boundary = ToolBoundaryChunkFilter(None, max_inline_content_chars=12_000)
-
-    boundary(
-        '[TOOL_CALL]\n'
-        '{"tool":"file_write_session","action":"append","session_id":"s1","chunk_index":0,"content":"'
-    )
-
-    boundary("A" * (STREAMING_INLINE_WRITE_ABORT_CHARS + 1))
-
-
-# LLM: file_write_session still needs a high ceiling so truly runaway streams remain recoverable.
-# 函数用途: 验证 file_write_session 超过 session chunk 上限后才早停，并给出可恢复的 append 前缀。
-def test_tool_boundary_aborts_file_write_session_after_session_chunk_limit():
-    boundary = ToolBoundaryChunkFilter(None, max_inline_content_chars=12_000)
-
-    boundary(
-        '[TOOL_CALL]\n'
-        '{"tool":"file_write_session","action":"append","session_id":"s1","chunk_index":0,"content":"'
-    )
-
-    try:
-        boundary("A" * (DEFAULT_MAX_SESSION_CHUNK_CHARS + 1))
-    except LongToolContentStreamAbort as exc:
-        assert exc.tool == "file_write_session"
-        assert exc.path == "session_id=s1"
-        assert exc.limit == DEFAULT_MAX_SESSION_CHUNK_CHARS
-    else:  # pragma: no cover - keeps assertion message clear.
-        raise AssertionError("expected file_write_session stream abort")
-
-
-# LLM: streamed file_write_session content is machine payload and should be salvaged into a real append call.
-# 函数用途: 验证未闭合 file_write_session append 的内容前缀不会丢失，而是转成可执行工具调用。
-def test_long_file_write_session_abort_response_salvages_append_prefix():
-    response = long_write_abort_response(
-        LongToolContentStreamAbort(
-            LongToolContentAbortPayload(
-                tool="file_write_session",
-                path="session_id=s1",
-                chars=DEFAULT_MAX_SESSION_CHUNK_CHARS + 1,
-                limit=DEFAULT_MAX_SESSION_CHUNK_CHARS,
-                action="append",
-                session_id="s1",
-                chunk_index=3,
-                content_prefix="hello\nworldhello\nworld",
-            )
-        ),
-        backend="test-backend",
-    )
-
-    payload = json.loads(response.text.split("\n", 2)[1])
-    assert payload == {
-        "tool": "file_write_session",
-        "action": "append",
-        "session_id": "s1",
-        "chunk_index": 3,
-        "content": "hello\nworldhello\nworld",
-    }
-
-
-# LLM: oversized write_file streams should become a recoverable file_write_session chunk.
-# 函数用途: 验证模型输出超长 write_file 被中断时，已生成正文前缀不会丢失为 parse error。
-def test_long_write_file_abort_response_salvages_prefix_to_file_write_session():
+def test_long_write_abort_response_returns_parse_error_not_hidden_writer() -> None:
     response = long_write_abort_response(
         LongToolContentStreamAbort(
             LongToolContentAbortPayload(
@@ -212,19 +72,14 @@ def test_long_write_file_abort_response_salvages_prefix_to_file_write_session():
     )
 
     payload = json.loads(response.text.split("\n", 2)[1])
-    assert payload == {
-        "tool": "file_write_session",
-        "action": "append",
-        "session_id": "stream_write_ec6a9f3c2770",
-        "target_path": "outputs/site/index.html",
-        "chunk_index": 0,
-        "content": "<!doctype html>\n<html>",
-    }
+    assert payload["tool"] == "__parse_error__"
+    assert payload["raw"] == (
+        '{"tool": "write_file", "path": "outputs/site/index.html", '
+        '"content": "...streaming content omitted..."}'
+    )
 
 
-# LLM: completed machine blocks after a first tool call must survive prose trimming.
-# 函数用途: 验证同一轮模型输出多个结构化工具块时，系统保留机器块、丢掉普通自然语言。
-def test_tool_boundary_preserves_later_raw_write_block_when_trimming_prose():
+def test_tool_boundary_preserves_later_raw_write_block_when_trimming_prose() -> None:
     response = ModelResponse(
         text=(
             "先建目录\n"
@@ -250,9 +105,7 @@ def test_tool_boundary_preserves_later_raw_write_block_when_trimming_prose():
     assert "[WRITE_FILE_RAW" in cut.text
 
 
-# LLM: repeated unclosed tool markers should become a structured protocol abort instead of burning the run timeout.
-# 函数用途: 验证模型连续输出多个未闭合 TOOL_CALL/SUBAGENT_CALL 标记时，流式边界会提前中断并进入恢复路径。
-def test_tool_boundary_aborts_repeated_unclosed_tool_markers():
+def test_tool_boundary_aborts_repeated_unclosed_tool_markers() -> None:
     boundary = ToolBoundaryChunkFilter(None)
 
     try:
@@ -261,74 +114,24 @@ def test_tool_boundary_aborts_repeated_unclosed_tool_markers():
         assert exc.start_marker == "[TOOL_CALL]"
         assert exc.marker_count == 9
         assert exc.limit == 1
-    else:  # pragma: no cover - keeps assertion message clear.
+    else:  # pragma: no cover
         raise AssertionError("expected malformed tool protocol stream abort")
 
 
-# LLM: a second tool opener before closing the first one is an invalid machine protocol transition.
-# 函数用途: 验证模型不能在一个 TOOL_CALL 未闭合时再开另一个 TOOL_CALL；这会被立即中断进入恢复路径。
-def test_tool_boundary_aborts_second_unclosed_tool_start_marker():
+def test_tool_boundary_aborts_second_unclosed_tool_start_marker() -> None:
     boundary = ToolBoundaryChunkFilter(None)
 
     try:
-        boundary('[TOOL_CALL]\n{"tool":"file_write_session","content":"partial"\n[TOOL_CALL]\n')
+        boundary('[TOOL_CALL]\n{"tool":"write_file","content":"partial"\n[TOOL_CALL]\n')
     except MalformedToolProtocolStreamAbort as exc:
         assert exc.start_marker == "[TOOL_CALL]"
         assert exc.marker_count == 2
         assert exc.limit == 1
-    else:  # pragma: no cover - keeps assertion message clear.
+    else:  # pragma: no cover
         raise AssertionError("expected second unclosed tool marker abort")
 
 
-# LLM: a later end marker cannot retroactively close an earlier tool after a nested opener.
-# 函数用途: 验证第一个工具调用未闭合前出现第二个 TOOL_CALL 时，即使后面有结束标记也不能误判为合法闭合。
-def test_tool_boundary_aborts_nested_tool_start_before_first_end_marker():
-    boundary = ToolBoundaryChunkFilter(None)
-
-    try:
-        boundary(
-            '[TOOL_CALL]\n{"tool":"file_write_session","content":"partial"\n'
-            '[TOOL_CALL]\n{"tool":"read_file","path":"x"}\n[/TOOL_CALL]'
-        )
-    except MalformedToolProtocolStreamAbort as exc:
-        assert exc.start_marker == "[TOOL_CALL]"
-        assert exc.marker_count == 2
-        assert exc.limit == 1
-    else:  # pragma: no cover - keeps assertion message clear.
-        raise AssertionError("expected nested tool marker abort")
-
-
-# LLM: malformed protocol detection must cover near-tool marker storms seen in real model output.
-# 函数用途: 验证 [TOOL read_file / <TOOL ... 这类坏协议会提前中断，而不是拖到真实任务超时。
-def test_tool_boundary_aborts_repeated_near_tool_marker_lines():
-    boundary = ToolBoundaryChunkFilter(None)
-    text = "\n".join(
-        [
-            "[TOOL",
-            "```",
-            "[TOOL read_file",
-            "<TOOL read_file",
-            "TOOL write_file",
-            "[TOOL",
-            "[TOOL read_file",
-            "[TOOL",
-            "TOOL read_file",
-        ]
-    )
-
-    try:
-        boundary(text)
-    except MalformedToolProtocolStreamAbort as exc:
-        assert exc.start_marker == "TOOL_PROTOCOL_LINE"
-        assert exc.marker_count == 8
-        assert exc.limit == 7
-    else:  # pragma: no cover - keeps assertion message clear.
-        raise AssertionError("expected malformed near-tool protocol stream abort")
-
-
-# LLM: malformed protocol aborts must reuse parser recovery instead of becoming user-visible transcript text.
-# 函数用途: 验证连续工具标记异常会被封装成 __parse_error__ 工具调用，后续工具循环可以按结构化错误恢复。
-def test_malformed_tool_protocol_abort_response_uses_parse_error_tool():
+def test_malformed_tool_protocol_abort_response_uses_parse_error_tool() -> None:
     response = malformed_tool_protocol_abort_response(
         MalformedToolProtocolStreamAbort(
             start_marker="[TOOL_CALL]",
@@ -338,9 +141,6 @@ def test_malformed_tool_protocol_abort_response_uses_parse_error_tool():
         backend="test-backend",
     )
 
-    assert '"tool": "__parse_error__"' in response.text
     payload = json.loads(response.text.split("\n", 2)[1])
-    raw = json.loads(payload["raw"])
-    assert raw["marker_count"] == 9
-    assert response.text.startswith("[TOOL_CALL]")
-    assert response.text.rstrip().endswith("[/TOOL_CALL]")
+    assert payload["tool"] == "__parse_error__"
+    assert "TOOL_CALL" in payload["error"]

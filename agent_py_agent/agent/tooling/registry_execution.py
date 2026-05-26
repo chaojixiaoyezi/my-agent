@@ -37,7 +37,6 @@ from .registry_envelopes import (
 )
 from .registry_file_write_blocks import (
     malformed_file_write_raw_block_calls,
-    parse_file_write_session_raw_blocks,
     parse_write_file_raw_blocks,
 )
 from .registry_invoke import RegistryToolInvokeRequest, invoke_registry_tool
@@ -112,7 +111,6 @@ def parse_registry_tool_calls(text: str) -> list[dict[str, Any]]:
 
     calls.extend(malformed_tool_marker_calls(scan_text))
     calls.extend(parse_write_file_raw_blocks(scan_text))
-    calls.extend(parse_file_write_session_raw_blocks(scan_text))
     calls.extend(malformed_file_write_raw_block_calls(scan_text))
     calls.extend(parse_xmlish_tool_calls(scan_text))
     calls.sort(key=lambda item: item[0])

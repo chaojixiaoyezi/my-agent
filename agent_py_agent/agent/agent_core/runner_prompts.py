@@ -93,13 +93,9 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "- 写 Python 测试时必须保证从 working_dir 运行能导入被测模块；优先把测试文件和模块放同一目录，或显式处理 import path。",
         "- 如果用户要求按钮、链接或图片不能失效，不要用 href=\"#\"、空锚点或不存在的 #id 假装可点击；"
         "页面内跳转必须指向真实存在的元素 id，按钮必须有真实交互或真实本地目标。",
-        "- 生成长 CSS/JS/HTML 或大段代码时，不要一次性把完整 content 塞进 write_file；"
-        "先用 write_file 写短骨架，再用 append_file 分块追加；正常分块时单次 content 建议 1500-2000 字符。"
-        "写 HTML 时，最后一块才写 </body></html>；一旦文件已经闭合，不要再 append 正文，"
-        "需要补中间内容就用 replace_in_file 插到 </body> 前。"
-        "如果出现工具调用解析失败，再降到不超过 800 字符，并且每轮只输出 1 个写入工具调用，"
-        "闭合 [/TOOL_CALL] 后再继续下一块。",
-        "- write_file 和 append_file 会在授权 allowed_write_roots 内自动创建父目录；不要因为目标目录尚未创建就标记 BLOCKED。",
+        "- 生成长 CSS/JS/HTML、大段代码或长报告时，优先用 WRITE_FILE_RAW 一次提交完整文本文件；"
+        "局部修改已有文件用 apply_patch。PDF、XLSX、图片等二进制产物可用授权命令/脚本生成，再用 write_file.data_base64 写入。",
+        "- write_file 会在授权 allowed_write_roots 内自动创建父目录；不要因为目标目录尚未创建就标记 BLOCKED。",
         *read_ref_context_lines(context),
         *required_product_contract_lines(context),
         "- 如果最终结果需要列很多 artifacts 或证据，优先用 write_file 写 execution_context.output_json 的短 JSON；"

@@ -23,7 +23,7 @@ def test_delivery_closeout_prefers_checkpoint_quality_actions_before_builder():
     assert "STAGED_JSON_NO_ROWS" in actions
     assert actions["STAGED_JSON_NO_ROWS"]["recommended_action"] == "write_non_empty_structured_rows"
     assert actions["STAGED_JSON_NO_ROWS"]["checkpoint_ref"] == "outputs/table_report/source_data.json"
-    assert actions["STAGED_JSON_NO_ROWS"]["writer_tool"] == "write_structured_json"
+    assert actions["STAGED_JSON_NO_ROWS"]["writer_tool"] == "write_file"
     assert "checkpoint_shape_hint" in actions["STAGED_JSON_NO_ROWS"]
     assert actions["STAGED_JSON_NO_ROWS"]["required_columns"] == ["记录名", "地址", "指标值", "中文说明", "说明依据"]
     assert "STAGING_BUILDER_READY" not in actions
@@ -97,7 +97,7 @@ def test_delivery_closeout_requires_staged_json_evidence_before_builder():
     assert actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["recommended_action"] == "repair_evidence_refs"
     assert actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["checkpoint_ref"] == "outputs/table_report/source_data.json"
     assert actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["required_fields"] == ["指标值"]
-    assert actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["writer_tool"] == "write_structured_json"
+    assert actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["writer_tool"] == "write_file"
     assert "claims" in actions["EVIDENCE_REQUIRED_FIELD_MISSING"]["evidence_shape_hint"]
     assert "STAGING_BUILDER_READY" not in actions
 
@@ -125,8 +125,8 @@ def test_delivery_closeout_missing_source_checkpoint_prefers_auditable_collectio
     assert action["checkpoint_ref"] == "outputs/table_report/source_data.json"
     assert action["checkpoint_materialization_mode"] == "source_evidence_first"
     assert action["requires_auditable_source_evidence"] is True
-    assert action["writer_tool"] == "api_json_collection"
-    assert action["write_tools"] == ["api_json_collection", "write_structured_json"]
+    assert action["writer_tool"] == "write_file"
+    assert action["write_tools"] == ["write_file"]
     assert "source_refs" in action["required_structured_fields"]
     assert "claims" in action["required_structured_fields"]
 
@@ -145,7 +145,7 @@ def test_delivery_closeout_aggregates_missing_evidence_fields():
 
     action = actions["EVIDENCE_REQUIRED_FIELD_MISSING"]
     assert set(action["required_fields"]) == {"指标值", "地址", "记录名"}
-    assert action["writer_tool"] == "write_structured_json"
+    assert action["writer_tool"] == "write_file"
     assert "source_refs" in action["evidence_shape_hint"]
 
 
@@ -160,7 +160,7 @@ def test_delivery_closeout_requires_staged_json_min_sheet_count_before_builder()
     assert "STAGED_JSON_TOO_FEW_SHEETS" in actions
     assert actions["STAGED_JSON_TOO_FEW_SHEETS"]["recommended_action"] == "repair_structured_checkpoint_json"
     assert actions["STAGED_JSON_TOO_FEW_SHEETS"]["required_sheets_min"] == 2
-    assert actions["STAGED_JSON_TOO_FEW_SHEETS"]["writer_tool"] == "write_structured_json"
+    assert actions["STAGED_JSON_TOO_FEW_SHEETS"]["writer_tool"] == "write_file"
     assert "STAGING_BUILDER_READY" not in actions
 
 
@@ -173,20 +173,21 @@ def test_delivery_closeout_adds_generic_staging_builder_action_for_ready_source(
 
     assert "STAGING_BUILDER_READY" in actions
     assert actions["STAGING_BUILDER_READY"]["recommended_action"] == "invoke_builder_tool"
-    assert actions["STAGING_BUILDER_READY"]["builder_tool"] == "data_to_workbook"
+    assert actions["STAGING_BUILDER_READY"]["builder_tool"] == "write_file"
     assert actions["STAGING_BUILDER_READY"]["source_ref"] == "outputs/table_report/source_data.json"
 
 
 # LLM: Failed builder outputs should be regenerated from the staged source instead of manually patched.
 # 函数用途: 验证 workbook 已存在但验收失败时，恢复动作仍会给出 data_to_workbook 的 builder 调用合同。
 def test_delivery_closeout_adds_builder_action_for_failed_existing_workbook():
-    from agent_py_agent.agent.tooling.spreadsheet_builder import DataWorkbookTool
+    from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
 
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td).resolve()
         contract = xlsx_delivery_contract()
         _write_source(workspace, _valid_rows_json())
-        result = DataWorkbookTool(workspace).execute(
+        write_xlsx_fixture(
+            workspace,
             {
                 "path": "outputs/table_report/table_report.xlsx",
                 "sheets": [
@@ -206,12 +207,10 @@ def test_delivery_closeout_adds_builder_action_for_failed_existing_workbook():
                 ],
             }
         )
-        assert result.ok
-
         _, actions = _enriched_report(workspace, contract)
 
         assert actions["STAGING_BUILDER_READY"]["recommended_action"] == "invoke_builder_tool"
-        assert actions["STAGING_BUILDER_READY"]["builder_tool"] == "data_to_workbook"
+        assert actions["STAGING_BUILDER_READY"]["builder_tool"] == "write_file"
         assert actions["STAGING_BUILDER_READY"]["source_ref"] == "outputs/table_report/source_data.json"
         assert actions["STAGING_BUILDER_READY"]["output_ref"] == "outputs/table_report/table_report.xlsx"
 
@@ -225,7 +224,7 @@ def test_delivery_closeout_reports_invalid_checkpoint_json():
     assert actions["STAGED_JSON_INVALID"]["recommended_action"] == "repair_structured_checkpoint_json"
     assert actions["STAGED_JSON_INVALID"]["checkpoint_ref"] == "outputs/table_report/source_data.json"
     assert "parse_error" in actions["STAGED_JSON_INVALID"]
-    assert actions["STAGED_JSON_INVALID"]["writer_tool"] == "write_structured_json"
+    assert actions["STAGED_JSON_INVALID"]["writer_tool"] == "write_file"
     assert "STAGING_BUILDER_READY" not in actions
 
 
@@ -250,9 +249,9 @@ def test_delivery_closeout_does_not_materialize_builder_output_before_source_is_
         ]
 
 
-# LLM: repeated staged JSON failures use the unified closeout retry budget.
-# 函数用途: 验证 JSON 阶段文件损坏重复失败时，不再交给独立 delivery repair 门豁免，而是由 closeout 预算收口。
-def test_delivery_closeout_blocks_by_budget_even_when_write_first_repair_exists():
+# LLM: repeated staged JSON failures should keep returning repair facts when no closeout cap is configured.
+# 函数用途: 验证默认不再因为重复失败硬停，仍把机器 finding 交给模型返工。
+def test_delivery_closeout_repeated_staged_failure_remains_repairable_by_default():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td).resolve()
         contract = xlsx_delivery_contract()
@@ -269,7 +268,7 @@ def test_delivery_closeout_blocks_by_budget_even_when_write_first_repair_exists(
 
         assert "STAGED_JSON_INVALID" in actions
         assert enriched["delivery_progress"]["unchanged_failure_count"] >= 6
-        assert _should_block_on_no_progress(enriched, contract=contract, workspace_root=workspace) is True
+        assert _should_block_on_no_progress(enriched, contract=contract, workspace_root=workspace) is False
 
 
 # LLM: explicit zero no-progress threshold means no closeout loop cap.

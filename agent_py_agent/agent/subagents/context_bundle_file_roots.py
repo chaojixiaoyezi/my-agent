@@ -20,9 +20,9 @@ def file_level_write_root_terms(task: SubAgentTask) -> list[str]:
         path = Path(str(raw or "").strip().replace("\\", "/"))
         if not is_contract_file_path(path) or is_internal_task_file(path, task_dir):
             continue
-        append_file_root_term(terms, path.name)
+        add_file_root_term(terms, path.name)
         if len(path.parts) >= 2:
-            append_file_root_term(terms, "/".join(path.parts[-2:]))
+            add_file_root_term(terms, "/".join(path.parts[-2:]))
     return terms
 
 
@@ -43,9 +43,9 @@ def is_internal_task_file(path: Path, task_dir: Path) -> bool:
         return False
 
 
-# LLM: append_file_root_term preserves basename and scoped relative forms without duplicates.
+# LLM: add_file_root_term preserves basename and scoped relative forms without duplicates.
 # 函数用途: 让 `index.html` 和 `dir/index.html` 都能匹配不同自然语言写法。
-def append_file_root_term(terms: list[str], value: str) -> None:
+def add_file_root_term(terms: list[str], value: str) -> None:
     text = str(value or "").strip()
     if text and text not in terms:
         terms.append(text)

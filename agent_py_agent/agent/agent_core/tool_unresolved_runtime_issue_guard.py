@@ -166,8 +166,6 @@ def _is_successful_artifact_write(record: dict[str, object], envelope: dict[str,
     tool = str(record.get("tool") or "")
     status = str(envelope.get("status") or "")
     action = str(envelope.get("action") or "")
-    if tool == "file_write_session":
-        return action == "finish" and status == "finished"
     return bool(_target_refs(envelope))
 
 

@@ -148,7 +148,7 @@ class TestCreateSubagentsToolTemplatePolicy:
         call_kwargs = mock_agent.subagents.create_run.call_args[1]
         assert "read_file" in call_kwargs["params"].allowed_tools
         assert "write_file" in call_kwargs["params"].allowed_tools
-        assert "replace_in_file" in call_kwargs["params"].allowed_tools
+        assert "apply_patch" in call_kwargs["params"].allowed_tools
 
     def test_tool_preset_none_does_not_create_toolless_subagent(self):
         """模型传 tool_preset=none 时回退自动策略，不创建空工具子代理。"""
@@ -225,8 +225,8 @@ class TestCreateSubagentsToolTemplatePolicy:
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
-        assert "append_file" in params.allowed_tools
-        assert "replace_in_file" in params.allowed_tools
+        assert "apply_patch" in params.allowed_tools
+        assert "apply_patch" in params.allowed_tools
         assert "read_artifact" in params.allowed_tools
 
     def test_vague_deliverable_worker_requires_extra_write_root_without_workspace(self):

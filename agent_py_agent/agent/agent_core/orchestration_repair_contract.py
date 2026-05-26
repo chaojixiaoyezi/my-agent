@@ -30,9 +30,8 @@ _REPAIR_ALLOWED_TOOLS = [
     "read_file",
     "read_artifact",
     "search_text",
-    "replace_in_file",
+    "apply_patch",
     "write_file",
-    "append_file",
 ]
 
 

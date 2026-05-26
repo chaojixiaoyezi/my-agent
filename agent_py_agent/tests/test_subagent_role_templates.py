@@ -91,7 +91,7 @@ def test_user_role_template_can_extend_catalog(tmp_path):
     )
     assert "read_file" in task.allowed_tools
     assert "write_file" in task.allowed_tools
-    assert "replace_in_file" not in task.allowed_tools
+    assert "apply_patch" not in task.allowed_tools
     assert any("PPT润色子代理" in check for check in task.acceptance_checks)
 
 
@@ -134,7 +134,7 @@ def test_user_template_role_can_be_selected_from_natural_name(tmp_path):
     assert "list_files" in task.allowed_tools
     assert "read_file" in task.allowed_tools
     assert "write_file" in task.allowed_tools
-    assert "replace_in_file" in task.allowed_tools
+    assert "apply_patch" in task.allowed_tools
     assert any("PPT润色子代理" in check for check in task.acceptance_checks)
 
 
@@ -201,12 +201,7 @@ def test_quality_role_contracts_use_template_defaults(tmp_path):
         "fetch_url",
         "http_request",
         "write_file",
-        "append_file",
-        "replace_in_file",
-        "file_write_session",
-        "write_structured_json",
-        "data_to_workbook",
-        "markdown_to_pdf",
+        "apply_patch",
         "capability_request",
     ]
     assert bug_finder.allowed_tools[:len(expected_bug_finder_tools)] == expected_bug_finder_tools
@@ -234,7 +229,7 @@ def test_worker_template_supplies_default_write_tools(tmp_path):
 
     assert "read_file" in task.allowed_tools
     assert "write_file" in task.allowed_tools
-    assert "replace_in_file" in task.allowed_tools
+    assert "apply_patch" in task.allowed_tools
 
 
 # LLM: test_role_template_index_is_compact_catalog_metadata locks the lazy prompt boundary.
@@ -341,7 +336,7 @@ def test_all_builtin_role_contracts_are_applied_on_create_run(tmp_path):
         assert any(template.output_contract_zh in check for check in task.acceptance_checks)
         assert task.quality_contract.cannot_self_accept is True
         assert task.quality_contract.parent_final_gate is True
-        for tool_name in ["write_file", "append_file", "replace_in_file"]:
+        for tool_name in ["write_file", "apply_patch", "apply_patch"]:
             assert tool_name in task.allowed_tools
         assert ("schedule_child_subagents" in task.allowed_tools) is template.can_spawn_children
 

@@ -20,12 +20,8 @@ _DEFAULT_LEAF_CODING_TOOLS = [
     "fetch_url",
     "http_request",
     "write_file",
-    "append_file",
-    "replace_in_file",
-    "file_write_session",
-    "write_structured_json",
-    "data_to_workbook",
-    "markdown_to_pdf",
+    "apply_patch",
+    # LLM: Special writer/builder tools are intentionally absent; children use generic write tools.
     "schedule_child_subagents",
     "dispatch_subagents",
     # LLM: Nested agents inherit the read-only tree inspector so status checks do not become dispatch loops.
@@ -47,10 +43,10 @@ _DEFAULT_LEAF_CODING_TOOLS = [
 ]
 # LLM: Leaf defaults intentionally include coordination tools; role changes prompt style, not basic capability.
 _TOOL_NAME_ALIASES = {
-    "append": "append_file",
     "list": "list_files",
     "read": "read_file",
-    "replace": "replace_in_file",
+    "patch": "apply_patch",
+    "replace": "apply_patch",
     "search": "search_text",
     "write": "write_file",
 }

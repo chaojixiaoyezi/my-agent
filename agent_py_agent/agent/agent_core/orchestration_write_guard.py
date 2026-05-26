@@ -15,7 +15,7 @@ from .orchestration_create_target_roots import (
 from .parameters import _string_list
 from .runner_ref_fields import params_output_refs
 
-WRITE_SUBAGENT_TOOLS = {"write_file", "append_file", "replace_in_file"}
+WRITE_SUBAGENT_TOOLS = {"write_file", "apply_patch"}
 
 
 # LLM: ExternalWriteTargetRequest is the structured preflight contract for delegation write targets.

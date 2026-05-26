@@ -284,11 +284,11 @@ def _task_text_field(task: object, name: str) -> str:
     return value if isinstance(value, str) else ""
 
 
-_FILESYSTEM_WRITE_GRANT_TOOLS = {"write_file", "append_file", "replace_in_file"}
+_FILESYSTEM_WRITE_GRANT_TOOLS = {"write_file", "apply_patch"}
 
 
 # LLM: grant path_scope becomes an actual filesystem write boundary only for explicit file-write grants.
-# 函数用途: 把父级已批准的 write_file/append_file/replace_in_file 路径范围加入 runner 写边界；shell grant 仍走 controlled_exec，不混进普通文件写权限。
+# 函数用途: 把父级已批准的通用文件写入路径范围加入 runner 写边界；shell grant 仍走 controlled_exec，不混进普通文件写权限。
 def _granted_filesystem_write_roots(task: object) -> list[str]:
     roots: list[str] = []
     for grant in getattr(task, "capability_grants", []) or []:

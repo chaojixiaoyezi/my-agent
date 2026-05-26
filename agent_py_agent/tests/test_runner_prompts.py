@@ -86,7 +86,7 @@ class TestBuildSubagentRunnerPrompt:
             "run_write_parent",
             role="leaf_worker",
             task_dir="/tmp",
-            allowed_tools=["write_file", "append_file"],
+            allowed_tools=["write_file", "apply_patch"],
         )
         prompt = _build_subagent_runner_prompt(context)
 

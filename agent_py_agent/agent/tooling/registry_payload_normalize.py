@@ -30,7 +30,7 @@ MODEL_WRAPPER_PARAM_KEYS = {
 }
 TOOL_NAME_ALIASES = {
     "WRITE_FILE_RAW": "write_file",
-    "append": "append_file",
+    "apply_patch": "apply_patch",
     "bash": "run_command",
     "cat": "read_file",
     "command": "run_command",
@@ -41,8 +41,8 @@ TOOL_NAME_ALIASES = {
     "list": "list_files",
     "ls": "list_files",
     "open": "read_file",
+    "patch": "apply_patch",
     "read": "read_file",
-    "replace": "replace_in_file",
     "request": "http_request",
     "search": "search_text",
     "sh": "run_command",
@@ -61,16 +61,10 @@ FILESYSTEM_PATH_PARAM_ALIASES = {
     "target_path": "path",
 }
 PARAM_ALIASES_BY_TOOL = {
-    "append_file": FILESYSTEM_PATH_PARAM_ALIASES,
+    "apply_patch": {},
     "list_files": FILESYSTEM_PATH_PARAM_ALIASES,
     "read_file": FILESYSTEM_PATH_PARAM_ALIASES,
     "write_file": FILESYSTEM_PATH_PARAM_ALIASES,
-    "replace_in_file": {
-        **FILESYSTEM_PATH_PARAM_ALIASES,
-        "old_text": "old",
-        "new_text": "new",
-        "replacement": "new",
-    },
     "search_text": {
         **FILESYSTEM_PATH_PARAM_ALIASES,
         "keyword": "query",

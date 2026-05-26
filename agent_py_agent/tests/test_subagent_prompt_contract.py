@@ -41,18 +41,16 @@ def test_runner_prompt_tells_leaf_to_chunk_long_file_writes():
         thought="",
         plan=[],
         role="leaf_worker",
-        allowed_tools=["write_file", "append_file"],
+        allowed_tools=["write_file", "apply_patch"],
         acceptance_checks=["CSS/JS 必须存在"],
     )
 
     prompt = _build_subagent_runner_prompt(context)
 
     assert "长 CSS/JS/HTML" in prompt
-    assert "write_file 写短骨架" in prompt
-    assert "append_file 分块追加" in prompt
-    assert "1500-2000 字符" in prompt
-    assert "不超过 800 字符" in prompt
-    assert "每轮只输出 1 个写入工具调用" in prompt
+    assert "WRITE_FILE_RAW" in prompt
+    assert "apply_patch" in prompt
+    assert "data_base64" in prompt
 
 
 def test_runner_prompt_tells_controlled_exec_leaf_to_apply_and_report_refs():

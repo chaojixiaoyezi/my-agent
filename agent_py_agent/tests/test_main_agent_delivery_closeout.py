@@ -10,6 +10,8 @@ import json
 import tempfile
 from pathlib import Path
 
+from agent_py_agent.agent.agent_core.delivery_closeout_config import DeliveryCloseoutConfig
+from agent_py_agent.agent.agent_core.exploration_fuse_config import ExplorationFuseConfig
 from agent_py_agent.agent.agent_core.runtime_loop_models import RunParams
 from agent_py_agent.agent.backend import ModelResponse
 from agent_py_agent.agent.config import AgentConfig
@@ -36,10 +38,18 @@ from agent_py_agent.tests.support.main_agent_delivery_closeout_fixtures import (
 
 # LLM: _agent builds a SimpleAgent test harness with one fake backend.
 # 函数用途: 统一创建临时工作区、工具开启配置和测试后端，减少每个测试的样板代码。
-def _agent(workspace: Path, backend, *, max_tool_rounds: int = 5) -> SimpleAgent:
+def _agent(
+    workspace: Path,
+    backend,
+    *,
+    max_tool_rounds: int = 5,
+    delivery_closeout_config: DeliveryCloseoutConfig | None = None,
+) -> SimpleAgent:
     cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=max_tool_rounds)
     agent = SimpleAgent(cfg, workspace)
     agent.backend = backend
+    if delivery_closeout_config is not None:
+        agent._delivery_closeout_config = delivery_closeout_config
     return agent
 
 
@@ -49,7 +59,11 @@ def test_tool_loop_closes_out_after_delivery_contract_passes():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         backend = DeliveryContractBackend()
-        result = _agent(workspace, backend).run(
+        result = _agent(
+            workspace,
+            backend,
+            delivery_closeout_config=DeliveryCloseoutConfig(invalid_artifacts_retry_limit=2),
+        ).run(
             delivery_contract_prompt(),
             params=RunParams(delivery_contract=delivery_contract(), save=False),
         )
@@ -61,31 +75,17 @@ def test_tool_loop_closes_out_after_delivery_contract_passes():
         assert (workspace / ".agent_delivery/closeout.json").exists()
 
 
-def test_tool_loop_redirects_repeated_remote_exploration_back_to_local_progress():
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td)
-        artifact_path = workspace / "memory_archive" / "artifacts" / "tool_outputs" / "demo.json"
-        artifact_path.parent.mkdir(parents=True, exist_ok=True)
-        artifact_path.write_text(json.dumps({"items": [{"name": "demo"}]}, ensure_ascii=False), encoding="utf-8")
-        backend = LocalProgressRedirectBackend()
-
-        result = _agent(workspace, backend, max_tool_rounds=8).run(
-            "整理 代码平台 项目并生成表格。",
-            params=RunParams(delivery_contract=xlsx_delivery_contract(), save=False),
-        )
-
-        assert backend.calls == 6
-        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
-        assert (workspace / "outputs/table_report/table_report.xlsx").exists()
-
-
 # LLM: Delivery closeout must use RunParams contracts without requiring prompt markers.
 # 函数用途: 验证系统交付合同可以通过结构化运行参数传入，不依赖 user_prompt 中的机器 JSON 标记。
 def test_tool_loop_closes_out_from_structured_run_params_delivery_contract():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         backend = DeliveryContractBackend()
-        result = _agent(workspace, backend).run(
+        result = _agent(
+            workspace,
+            backend,
+            delivery_closeout_config=DeliveryCloseoutConfig(invalid_artifacts_retry_limit=2),
+        ).run(
             "用单文件 html 做一个高端家具品牌首页。",
             params=RunParams(delivery_contract=delivery_contract(), save=False),
         )
@@ -125,7 +125,11 @@ def test_tool_loop_does_not_close_out_when_delivery_contract_fails():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         backend = FailedDeliveryContractBackend()
-        result = _agent(workspace, backend).run(
+        result = _agent(
+            workspace,
+            backend,
+            delivery_closeout_config=DeliveryCloseoutConfig(invalid_artifacts_retry_limit=3),
+        ).run(
             delivery_contract_prompt(),
             params=RunParams(delivery_contract=delivery_contract(), save=False),
         )
@@ -184,7 +188,11 @@ def test_tool_loop_rejects_incomplete_delivery_contract_artifact():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         backend = IncompleteDeliveryContractBackend()
-        result = _agent(workspace, backend).run(
+        result = _agent(
+            workspace,
+            backend,
+            delivery_closeout_config=DeliveryCloseoutConfig(invalid_artifacts_retry_limit=3),
+        ).run(
             delivery_contract_prompt(),
             params=RunParams(delivery_contract=delivery_contract(), save=False),
         )
@@ -200,30 +208,17 @@ def test_tool_loop_rejects_incomplete_delivery_contract_artifact():
 
 # LLM: Delivery closeout must not pass while any chunked write session remains open.
 # 函数用途: 有 open file_write_session manifest 时，即使目录已存在也不能输出完成标记。
-def test_tool_loop_delivery_closeout_blocks_open_file_write_sessions():
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td)
-        _write_site_index(workspace)
-        backend = OpenWriteSessionDeliveryBackend()
-        result = _agent(workspace, backend, max_tool_rounds=3).run(
-            "做一个示例网站。",
-            params=RunParams(delivery_contract=web_project_delivery_contract(), save=False),
-            allowed_tools=["file_write_session"],
-        )
-
-        assert backend.calls == 4
-        assert backend.saw_open_session_context is True
-        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
-        assert (workspace / "outputs/static_site/app.js").read_text(encoding="utf-8") == 'console.log("shop ready");'
-
-
 # LLM: Repeated identical delivery failures must terminate as blocked instead of consuming endless tool rounds.
 # 函数用途: 验证 closeout 会识别“同一失败 + 无工作进展”的通用卡死模式，并输出结构化阻塞结果。
 def test_tool_loop_blocks_after_repeated_unchanged_delivery_failure():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         backend = NoProgressDeliveryBackend()
-        result = _agent(workspace, backend).run(
+        result = _agent(
+            workspace,
+            backend,
+            delivery_closeout_config=DeliveryCloseoutConfig(invalid_artifacts_retry_limit=3),
+        ).run(
             delivery_contract_prompt(),
             params=RunParams(delivery_contract=delivery_contract(), save=False),
         )
@@ -279,75 +274,8 @@ def test_tool_loop_keeps_running_while_bootstrap_targets_are_still_missing():
 
 # LLM: failed closeout should guide repair without blocking useful inspection reads.
 # 函数用途: 验证 closeout 返工单能推动主代理修产物，同时不再用 delivery repair 独立门拦截只读动作。
-def test_tool_loop_repairs_after_closeout_failure_without_delivery_repair_gate():
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td)
-        backend = CloseoutReworkBackend()
-        result = _agent(workspace, backend, max_tool_rounds=7).run(
-            "整理 代码平台 周升星项目并生成表格。",
-            params=RunParams(delivery_contract=xlsx_delivery_contract(), save=False),
-            allowed_tools=["write_file", "read_file", "write_structured_json", "data_to_workbook", "submit_for_acceptance"],
-        )
-
-        assert backend.calls == 6
-        assert not any("delivery-required-repair" in prompt for prompt in backend.prompts)
-        assert any("repair_guidance" in prompt for prompt in backend.prompts)
-        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
-        assert _closeout_report(workspace)["ok"] is True
-        assert (workspace / "outputs/table_report/table_report.xlsx").exists()
-
-
 # LLM: Recovery attempt identity should reset stale no-progress counters before staged repair runs.
 # 函数用途: 覆盖真实续跑中旧 local-progress 计数继承到新 attempt，导致阶段修复还没开始就被阻断的问题。
-def test_recovery_attempt_uses_repair_contract_before_stale_local_progress_guard():
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td)
-        _write_stale_xlsx_closeout(workspace)
-        _write_stale_local_progress_state(workspace)
-        backend = RecoveryAttemptRepairBackend()
-        contract = xlsx_delivery_contract()
-        contract["recovery"] = {
-            "schema_version": "main-agent-real-task-recovery.v1",
-            "case_id": "workbook_recovery_case",
-            "status": "FAILED",
-            "recommended_action": "repair_then_resume_same_case",
-            "reason_codes": ["exit_code=2", "artifact_acceptance_failed=2"],
-            "packet_ref": "main_agent_task_execution/tasks/workbook_recovery_case/recovery_packet.json",
-        }
-
-        result = _agent(workspace, backend, max_tool_rounds=6).run(
-            "继续恢复上一轮失败的表格任务。",
-            params=RunParams(delivery_contract=contract, save=False),
-            allowed_tools=["read_file", "write_structured_json", "data_to_workbook"],
-        )
-
-        state = json.loads((workspace / ".agent_delivery/local_progress_guard.json").read_text(encoding="utf-8"))
-        assert backend.calls == 4
-        assert "[LOCAL_PROGRESS_GUARD_BLOCKED]" not in result.response
-        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
-        assert state["exploration_rounds_without_local_progress"] == 0
-        assert state["recovery_signature"]
-        assert (workspace / "outputs/table_report/table_report.xlsx").exists()
-
-
-# LLM: New write tools must not overwrite a target with an open file_write_session.
-# 函数用途: 验证 open session 存在时，系统会拒绝覆盖同目标的 write_file，迫使模型先 append/finish 当前 session。
-def test_tool_loop_blocks_same_target_write_tools_while_open_file_write_session_exists():
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td)
-        _write_site_index(workspace)
-        backend = WrongToolDuringOpenSessionBackend()
-        result = _agent(workspace, backend, max_tool_rounds=6).run(
-            "做一个示例网站。",
-            params=RunParams(delivery_contract=web_project_delivery_contract(), save=False),
-            allowed_tools=["file_write_session", "write_file"],
-        )
-
-        assert backend.calls == 5
-        assert (workspace / "outputs/static_site/app.js").read_text(encoding="utf-8") == 'console.log("ok");'
-        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
-
-
 # LLM: _write_site_index creates the already-materialized part of a static site contract.
 # 函数用途: 给 open-session 测试准备 index.html 和站点目录。
 def _write_site_index(workspace: Path) -> None:

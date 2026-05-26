@@ -1,11 +1,10 @@
 # LLM: Main-agent foundation contract cases cover hard runtime contracts used by real E2E.
-# 模块用途: 提供模型调用账本、工具协议 v2 和大文件分块写入的确定性验收用例。
+# 模块用途: 提供模型调用账本、工具协议 v2 和通用文件写入的确定性验收用例。
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
 from pathlib import Path
 
 from ..agent_core.model_call_monitor import (
@@ -18,7 +17,7 @@ from ..contracts.model_call_ledger import (
     ModelCallStartedParams,
     ModelCallTimeoutParams,
 )
-from ..tooling.file_write_session import FileWriteSessionTool
+from ..tooling import ApplyPatchTool, WriteFileTool
 from .main_agent_foundation_models import MainAgentFoundationCaseResult
 from .tool_protocol_v2 import (
     normalize_tool_call,
@@ -26,18 +25,6 @@ from .tool_protocol_v2 import (
     validate_tool_call,
     validate_tool_result,
 )
-
-
-# LLM: FileWriteSessionCaseArtifacts bundles tool results from one chunked write scenario.
-# 类用途: 保存大文件分块写入用例的 begin/append/finish 结果和目标路径。
-@dataclass(frozen=True)
-class FileWriteSessionCaseArtifacts:
-    begin: object
-    append_0: object
-    duplicate: object
-    append_1: object
-    finish: object
-    target: Path
 
 
 # LLM: case_model_call_ledger_timeout proves provider timing facts are structured.
@@ -117,32 +104,32 @@ def case_tool_protocol_v2_envelope(workspace: Path) -> MainAgentFoundationCaseRe
     )
 
 
-# LLM: case_file_write_session_contract checks chunked writes without large inline tool bodies.
-# 函数用途: 通过 begin/append/finish 写文件，验证重复 chunk 幂等和最终原子提交。
-def case_file_write_session_contract(workspace: Path) -> MainAgentFoundationCaseResult:
-    case_dir = workspace / "file_write_session_contract"
-    tool = FileWriteSessionTool(case_dir, max_chunk_chars=16)
-    begin = tool.execute({"action": "begin", "target_path": "out/report.txt"})
-    session_id = str(begin.result_envelope.get("session_id", ""))
-    append_0 = tool.execute(
-        {"action": "append", "session_id": session_id, "chunk_index": 0, "content": "hello "}
+# LLM: case_general_write_contract checks the two open-world write surfaces.
+# 函数用途: 验证 write_file 支持文本/二进制原子写入，apply_patch 支持局部文本编辑。
+def case_general_write_contract(workspace: Path) -> MainAgentFoundationCaseResult:
+    case_dir = workspace / "general_write_contract"
+    write_tool = WriteFileTool(case_dir)
+    patch_tool = ApplyPatchTool(case_dir)
+    text_result = write_tool.execute({"path": "out/report.txt", "content": "hello world\n"})
+    binary_result = write_tool.execute({"path": "out/blob.bin", "data_base64": "AAEC"})
+    patch_result = patch_tool.execute(
+        {
+            "patch": (
+                "*** Begin Patch\n"
+                "*** Update File: out/report.txt\n"
+                "-hello world\n"
+                "+hello patched world\n"
+                "*** End Patch\n"
+            )
+        }
     )
-    duplicate = tool.execute(
-        {"action": "append", "session_id": session_id, "chunk_index": 0, "content": "hello "}
-    )
-    append_1 = tool.execute(
-        {"action": "append", "session_id": session_id, "chunk_index": 1, "content": "world"}
-    )
-    finish = tool.execute({"action": "finish", "session_id": session_id})
-    target = case_dir / "out" / "report.txt"
-    artifacts = FileWriteSessionCaseArtifacts(begin, append_0, duplicate, append_1, finish, target)
-    evidence = _write_file_session_evidence(case_dir, artifacts)
-    issues = _file_session_issues(artifacts)
+    evidence = _write_general_write_evidence(case_dir, text_result, binary_result, patch_result)
+    issues = _general_write_issues(case_dir, text_result, binary_result, patch_result)
     return MainAgentFoundationCaseResult(
-        case_id="file_write_session_contract",
-        title="大文件分块写入合同测试",
+        case_id="general_write_contract",
+        title="通用文件写入合同测试",
         status="FAILED" if issues else "PASSED",
-        summary="file_write_session 能分块写入、重复 chunk 幂等，并在 finish 时原子提交目标文件。",
+        summary="write_file 可写文本/二进制完整文件，apply_patch 可做局部文本修改。",
         evidence_refs=[str(evidence)],
         issues=issues,
     )
@@ -181,21 +168,20 @@ def _ledger_issues(ledger: ModelCallLedger) -> list[str]:
     return ["model call ledger did not record timeout"]
 
 
-# LLM: _write_file_session_evidence persists only envelopes and refs, not hidden prompt text.
-# 函数用途: 写入 file_write_session 确定性用例的证据 JSON。
-def _write_file_session_evidence(case_dir: Path, artifacts: FileWriteSessionCaseArtifacts) -> Path:
+# LLM: _write_general_write_evidence persists deterministic refs for generic write tools.
+# 函数用途: 写入通用写入确定性用例的证据 JSON。
+def _write_general_write_evidence(case_dir: Path, text_result: object, binary_result: object, patch_result: object) -> Path:
     evidence = case_dir / "evidence.json"
+    text_target = case_dir / "out" / "report.txt"
+    binary_target = case_dir / "out" / "blob.bin"
     payload = {
-        "begin": artifacts.begin.result_envelope,
-        "append_0": artifacts.append_0.result_envelope,
-        "duplicate": artifacts.duplicate.result_envelope,
-        "append_1": artifacts.append_1.result_envelope,
-        "finish": artifacts.finish.result_envelope,
-        "target_ref": str(artifacts.target),
-        "target_size": artifacts.target.stat().st_size if artifacts.target.exists() else 0,
-        "target_sha256": hashlib.sha256(artifacts.target.read_bytes()).hexdigest()
-        if artifacts.target.exists()
-        else "",
+        "write_text_ok": bool(getattr(text_result, "ok", False)),
+        "write_binary_ok": bool(getattr(binary_result, "ok", False)),
+        "patch_ok": bool(getattr(patch_result, "ok", False)),
+        "text_target_ref": str(text_target),
+        "binary_target_ref": str(binary_target),
+        "text_sha256": hashlib.sha256(text_target.read_bytes()).hexdigest() if text_target.exists() else "",
+        "binary_sha256": hashlib.sha256(binary_target.read_bytes()).hexdigest() if binary_target.exists() else "",
     }
     evidence.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
@@ -203,31 +189,23 @@ def _write_file_session_evidence(case_dir: Path, artifacts: FileWriteSessionCase
     return evidence
 
 
-# LLM: _file_session_issues checks chunk session behavior through tool result envelopes.
-# 函数用途: 判断 begin/append/finish、重复 chunk 幂等和最终文件内容是否符合合同。
-def _file_session_issues(artifacts: FileWriteSessionCaseArtifacts) -> list[str]:
+# LLM: _general_write_issues checks generic write tool behavior through files and result flags.
+# 函数用途: 判断文本写入、二进制写入和 patch 修改是否符合合同。
+def _general_write_issues(case_dir: Path, text_result: object, binary_result: object, patch_result: object) -> list[str]:
     issues: list[str] = []
-    results = (
-        artifacts.begin,
-        artifacts.append_0,
-        artifacts.duplicate,
-        artifacts.append_1,
-        artifacts.finish,
-    )
-    if not all(item.ok for item in results):
-        issues.append("file_write_session action failed")
-    if not artifacts.duplicate.result_envelope.get("duplicate"):
-        issues.append("duplicate chunk was not idempotent")
-    if (
-        not artifacts.target.exists()
-        or artifacts.target.read_text(encoding="utf-8") != "hello world"
-    ):
-        issues.append("final target content mismatch")
+    if not all(bool(getattr(item, "ok", False)) for item in (text_result, binary_result, patch_result)):
+        issues.append("generic write action failed")
+    text_target = case_dir / "out" / "report.txt"
+    binary_target = case_dir / "out" / "blob.bin"
+    if not text_target.exists() or text_target.read_text(encoding="utf-8") != "hello patched world\n":
+        issues.append("text target content mismatch")
+    if not binary_target.exists() or binary_target.read_bytes() != b"\x00\x01\x02":
+        issues.append("binary target content mismatch")
     return issues
 
 
 __all__ = [
-    "case_file_write_session_contract",
+    "case_general_write_contract",
     "case_model_call_ledger_timeout",
     "case_tool_protocol_v2_envelope",
 ]

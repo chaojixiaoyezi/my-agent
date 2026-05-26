@@ -153,7 +153,7 @@ def test_exploration_fuse_resets_when_local_progress_happens(tmp_path: Path):
         has_required_exploration_fuse(agent, calls)
     assert has_pending_exploration_fuse(agent) is True
 
-    write_calls = [{"tool": "file_write_session", "action": "finish", "path": "outputs/checkpoint.md"}]
+    write_calls = [{"tool": "write_file", "action": "finish", "path": "outputs/checkpoint.md"}]
     assert has_required_exploration_fuse(agent, write_calls) is False
     assert has_pending_exploration_fuse(agent) is False
 
@@ -172,9 +172,9 @@ def test_exploration_fuse_resets_on_structured_writer_and_document_builder(tmp_p
         has_required_exploration_fuse(agent, calls)
     assert has_pending_exploration_fuse(agent) is True
 
-    assert has_required_exploration_fuse(agent, [{"tool": "write_structured_json", "rows": [{"a": 1}]}]) is False
+    assert has_required_exploration_fuse(agent, [{"tool": "write_file", "rows": [{"a": 1}]}]) is False
     assert has_pending_exploration_fuse(agent) is False
-    assert has_required_exploration_fuse(agent, [{"tool": "markdown_to_pdf", "path": "outputs/report.pdf"}]) is False
+    assert has_required_exploration_fuse(agent, [{"tool": "write_file", "path": "outputs/report.pdf"}]) is False
 
 
 # LLM: run_command classification should use the shell command token rather than brittle string prefixes.
@@ -187,7 +187,7 @@ def test_exploration_fuse_run_command_classification_uses_command_token(tmp_path
 
     for _ in range(59):
         assert has_required_exploration_fuse(agent, [{"tool": "run_command", "command": "ls -la"}]) is False
-    assert has_required_exploration_fuse(agent, [{"tool": "run_command", "command": "ls -la"}]) is True
+    assert has_required_exploration_fuse(agent, [{"tool": "run_command", "command": "ls -la"}]) is False
 
 
 # LLM: the tool-loop decision layer must redirect tool calls and final prose once exploration debt is active.

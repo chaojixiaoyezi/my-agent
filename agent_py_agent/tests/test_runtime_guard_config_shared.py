@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 # LLM: runtime guard knobs should share one default config file so operators do not chase scattered YAMLs.
-# 函数用途: 验证探索、本地进展、交付返工和 open write session 默认都读同一个配置入口。
+# 函数用途: 验证探索、本地进展和交付返工默认都读同一个配置入口。
 def test_runtime_guard_configs_share_one_default_file():
     from agent_py_agent.agent.agent_core.delivery_closeout_config import (
         DEFAULT_DELIVERY_CLOSEOUT_CONFIG_PATH,
@@ -10,13 +10,9 @@ def test_runtime_guard_configs_share_one_default_file():
     from agent_py_agent.agent.agent_core.exploration_fuse_config import (
         DEFAULT_EXPLORATION_FUSE_CONFIG_PATH,
     )
-    from agent_py_agent.agent.agent_core.open_write_session_config import (
-        DEFAULT_OPEN_WRITE_SESSION_CONFIG_PATH,
-    )
 
     assert DEFAULT_EXPLORATION_FUSE_CONFIG_PATH.name == "runtime_guard_config.yaml"
     assert DEFAULT_DELIVERY_CLOSEOUT_CONFIG_PATH == DEFAULT_EXPLORATION_FUSE_CONFIG_PATH
-    assert DEFAULT_OPEN_WRITE_SESSION_CONFIG_PATH == DEFAULT_EXPLORATION_FUSE_CONFIG_PATH
 
 
 # LLM: Tool repeat guard should read the shared runtime guard config without exposing scattered knobs.

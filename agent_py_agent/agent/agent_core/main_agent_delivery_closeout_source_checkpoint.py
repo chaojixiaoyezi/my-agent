@@ -20,7 +20,7 @@ def missing_checkpoint_recovery_hint(ref_text: str, validation_contract: dict[st
 
 
 # LLM: checkpoint_materialization_fields selects the writer contract for one missing checkpoint ref.
-# 函数用途: 对来源证据 checkpoint 推荐 api_json_collection，并保留 write_structured_json 的审计字段门。
+# 函数用途: 对来源证据 checkpoint 推荐 通用采集/写入，并保留 write_file 的审计字段门。
 def checkpoint_materialization_fields(ref_text: str, validation_contract: dict[str, object]) -> dict[str, object]:
     fields = checkpoint_writer_fields(ref_text)
     if not source_evidence_checkpoint_ref(ref_text, validation_contract):
@@ -34,8 +34,8 @@ def checkpoint_materialization_fields(ref_text: str, validation_contract: dict[s
         "required_columns": _required_source_columns(collection_contract),
         "required_structured_fields": ["source_refs", "claims", "completion_evidence", "field_source_ids"],
         "requires_auditable_source_evidence": True,
-        "write_tools": ["api_json_collection", "write_structured_json"],
-        "writer_tool": "api_json_collection",
+        "write_tools": ["write_file"],
+        "writer_tool": "write_file",
     }
 
 

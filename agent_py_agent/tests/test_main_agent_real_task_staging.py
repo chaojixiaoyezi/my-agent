@@ -63,10 +63,10 @@ def test_real_task_acceptance_rejects_invalid_candidate_artifact(tmp_path):
         RealTaskAcceptanceRequest,
         validate_real_task_artifacts,
     )
-    from agent_py_agent.agent.tooling.spreadsheet_builder import DataWorkbookTool
+    from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
 
     workspace = tmp_path / "task"
-    DataWorkbookTool(workspace).execute(
+    write_xlsx_fixture(workspace, 
         {
             "path": "data/outputs/table_report/table_report.xlsx",
             "sheets": [{"name": "summary", "rows": [{"记录名": "demo"}]}],
@@ -90,16 +90,16 @@ def test_real_task_acceptance_rejects_invalid_candidate_artifact(tmp_path):
 
 
 # LLM: Accepted artifacts should not be re-blocked by stale open sessions that point to the same finished target.
-# 函数用途: 验证目标产物已经通过验收时，同目标旧 open file_write_session 不会再把真实任务卡成 runtime finding。
+# 函数用途: 验证目标产物已经通过验收时，同目标旧 open write_file 不会再把真实任务卡成 runtime finding。
 def test_real_task_acceptance_ignores_open_session_for_accepted_target(tmp_path):
     from agent_py_agent.agent.contracts.main_agent_real_task_acceptance import (
         RealTaskAcceptanceRequest,
         validate_real_task_artifacts,
     )
-    from agent_py_agent.agent.tooling.spreadsheet_builder import DataWorkbookTool
+    from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
 
     workspace = tmp_path / "task"
-    DataWorkbookTool(workspace).execute(
+    write_xlsx_fixture(workspace, 
         {
             "path": "outputs/table_report/table_report.xlsx",
             "sheets": [
@@ -265,7 +265,7 @@ def _staged_workbook_artifact():
             "validator": "spreadsheet_acceptance",
             "staging_contract": {
                 "strategy": "data_then_tool_builder_then_workbook",
-                "builder_tool": "data_to_workbook",
+                "builder_tool": "write_file",
                 "source_json_ref": "outputs/table_report/source_data.json",
                 "workbook_ref": "outputs/table_report/table_report.xlsx",
                 "checkpoint_refs": [
@@ -283,7 +283,7 @@ def _write_open_session_target_manifest(
     relative_target: str,
     resolved_target: Path,
 ) -> Path:
-    path = task_workspace / ".agent_file_write_sessions" / session_id / "manifest.json"
+    path = task_workspace / ".agent_write_files" / session_id / "manifest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(

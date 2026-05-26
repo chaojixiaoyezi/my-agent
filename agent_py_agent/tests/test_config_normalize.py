@@ -154,9 +154,9 @@ class TestNormalizeSubagentAgentConfig:
 
     def test_normalize_subagent_allowed_tools_scalar(self):
         """验证逗号分隔的子代理工具白名单也可用。"""
-        data = {"subagent_allowed_tools": "read_file, write_file, append_file"}
+        data = {"subagent_allowed_tools": "read_file, write_file, apply_patch"}
         normalized, warnings = normalize_agent_config(data)
-        assert normalized["subagent_allowed_tools"] == ["read_file", "write_file", "append_file"]
+        assert normalized["subagent_allowed_tools"] == ["read_file", "write_file", "apply_patch"]
         assert len(warnings) == 0
 
     def test_subagent_defaults_leave_decisions_automatic(self):

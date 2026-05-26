@@ -1850,3 +1850,9 @@
 - 中文说明：`output_contract()` 和 `task_packet()` 之前各自重新计算 required/product/forbidden 文件合同，容易以后一个入口改了另一个漏。现在改为共用 `task_contract_components()`，让文件合同只在一个结构化 helper 里计算。
 - 已实现：`subagents/context_bundle_contracts.py` 新增 `_TaskContractComponents` 和 `task_contract_components()`；`output_contract()` 与 `task_packet()` 共享同一组 required files、product write roots、required refs、forbidden files 和 source。
 - 边界说明：这只是去重合同计算，不新增自然语言路径解析；机器事实仍来自 `required_files`、`output_refs`、`artifact_refs`、product roots 等结构化字段。
+
+## 2026-05-26 子代理通用写入面同步
+
+- 中文说明：本轮跟随主代理工具面纠偏，子代理默认工具、角色模板、context bundle、workflow 和协作登记里的写入能力统一收敛为 `write_file` + `apply_patch`。以前的 append/replace/session/builder 工具不再作为模型可见工具。
+- 边界说明：这不是新增流程，也不是新的启动门；子代理仍按 prompt 和结构化 refs 干活，只是写文件时不再被引导进入多套专项写入路径。复杂 XLSX/PDF/未知格式由模型选择脚本/命令/库生成，系统保留路径、权限、原子写入和 closeout 验收。
+- 已测试：全量 `python3 -m pytest -q agent_py_agent/tests --tb=short --maxfail=20`、`ruff check agent_py_agent`、`python3 scripts/check_code_size.py --mode warn` 通过。

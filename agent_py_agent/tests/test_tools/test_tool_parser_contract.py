@@ -126,10 +126,9 @@ def test_tool_catalog_includes_global_large_content_protocol():
 
     assert "# Tool Content Transport Protocol" in catalog
     assert "不要把完整大文件正文塞进一个 JSON 工具参数" in catalog
-    assert "write_file 写短骨架" in catalog
-    assert "append_file 分块追加" in catalog
+    assert "write_file" in catalog
+    assert "apply_patch" in catalog
     assert "[WRITE_FILE_RAW" in catalog
-    assert "[FILE_WRITE_SESSION_APPEND" in catalog
 
 
 def test_tool_catalog_uses_configured_categories_offset_and_notice():
@@ -407,8 +406,8 @@ def test_tool_call_parser_reports_malformed_opening_marker():
     assert "[TOOL_CALL]" in result.output
 
 
-# LLM: test_parse_error_hint_recommends_append_for_truncated_write covers long generated CSS/HTML writes.
-# 函数用途: 写文件内容太长被截断时，错误提示要引导模型用 append_file 分块写，避免重复失败。
+# LLM: test_parse_error_hint_recommends_raw_or_patch_for_truncated_write covers long generated CSS/HTML writes.
+# 函数用途: 写文件内容太长被截断时，错误提示要引导模型用 raw write 或 apply_patch，避免重复失败。
 def test_parse_error_hint_recommends_append_for_truncated_write():
     registry = make_tool_registry(Path.cwd())
     calls = registry.parse_tool_calls(
@@ -419,10 +418,10 @@ def test_parse_error_hint_recommends_append_for_truncated_write():
 
     assert calls[0]["tool"] == "__parse_error__"
     assert result.ok is False
-    assert "append_file 分块追加内容" in result.output
+    assert "WRITE_FILE_RAW" in result.output
     assert "1500-2000 字符" in result.output
     assert "不超过 800 字符" in result.output
-    assert "只能输出 1 个 write_file/append_file" in result.output
+    assert "只能输出 1 个 write_file" in result.output
 
 
 def test_tool_spec_catalog_entry_includes_first_example():

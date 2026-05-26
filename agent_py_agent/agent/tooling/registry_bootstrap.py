@@ -5,24 +5,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from .api_json_collection import ApiJsonCollectionTool
 from .artifact import ReadArtifactTool
 from .controlled_exec import ControlledExecTool
 from .delivery_acceptance import SubmitForAcceptanceTool
-from .document_pdf_builder import MarkdownPdfTool
-from .file_write_session import FileWriteSessionTool
 from .filesystem import (
-    AppendFileTool,
+    ApplyPatchTool,
     ListFilesTool,
     ReadFileTool,
-    ReplaceInFileTool,
     SearchTextTool,
     WriteFileTool,
 )
 from .models import HybridToolRetriever, KeywordToolSearchProvider, VectorToolSearchProvider
 from .shell import ShellTool
-from .spreadsheet_builder import DataWorkbookTool
-from .structured_json_writer import StructuredJsonTool
 from .web import FetchUrlTool, HttpRequestTool
 from .web_search import WebSearchTool
 
@@ -69,19 +63,7 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
             max_inline_content_chars=params.tool_write_inline_max_chars,
         )
     )
-    registry.register(
-        AppendFileTool(
-            registry.workspace_root,
-            workspace_roots,
-            max_inline_content_chars=params.tool_write_inline_max_chars,
-        )
-    )
-    registry.register(FileWriteSessionTool(registry.workspace_root, workspace_roots))
-    registry.register(ReplaceInFileTool(registry.workspace_root, workspace_roots))
-    registry.register(StructuredJsonTool(registry.workspace_root, workspace_roots))
-    registry.register(ApiJsonCollectionTool(registry.workspace_root, workspace_roots, timeout=params.http_timeout))
-    registry.register(DataWorkbookTool(registry.workspace_root, workspace_roots))
-    registry.register(MarkdownPdfTool(registry.workspace_root, workspace_roots))
+    registry.register(ApplyPatchTool(registry.workspace_root, workspace_roots))
 
 
 # LLM: _register_network_tools isolates non-filesystem tool setup from constructor policy.

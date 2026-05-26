@@ -14,7 +14,6 @@ def test_load_exploration_fuse_config_from_shared_runtime_guard_file(tmp_path: P
             [
                 "round_threshold: 0",
                 "unlimited_hint_rounds: [25, 75, 125]",
-                "local_progress_round_threshold: 0",
                 "local_progress_unlimited_hint_interval: 12",
             ]
         ),
@@ -25,7 +24,6 @@ def test_load_exploration_fuse_config_from_shared_runtime_guard_file(tmp_path: P
 
     assert config.round_threshold == 0
     assert config.unlimited_hint_rounds == (25, 75, 125)
-    assert config.local_progress_round_threshold == 0
     assert config.local_progress_unlimited_hint_interval == 12
 
 
@@ -51,11 +49,10 @@ def test_load_exploration_fuse_config_invalid_values_fall_back(tmp_path: Path):
 
 
 # LLM: local-progress guard defaults share the same runtime guard config file.
-# 函数用途: 验证本地进展门默认 50 轮、无限模式每 10 轮提醒一次。
+# 函数用途: 验证本地进展门只保留固定提醒间隔，默认每 10 轮提醒一次。
 def test_load_exploration_fuse_config_local_progress_defaults():
     from agent_py_agent.agent.agent_core.exploration_fuse_config import load_exploration_fuse_config
 
     config = load_exploration_fuse_config(Path("/missing/runtime_guard_config.yaml"))
 
-    assert config.local_progress_round_threshold == 50
     assert config.local_progress_unlimited_hint_interval == 10

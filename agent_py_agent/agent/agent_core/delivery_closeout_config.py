@@ -10,7 +10,7 @@ from pathlib import Path
 from ..settings.config_io import load_simple_yaml
 from .runtime_guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
 
-DEFAULT_DELIVERY_CLOSEOUT_RETRY_LIMIT = 3
+DEFAULT_DELIVERY_CLOSEOUT_RETRY_LIMIT = 0
 DEFAULT_DELIVERY_CLOSEOUT_CONFIG_PATH = DEFAULT_RUNTIME_GUARD_CONFIG_PATH
 DELIVERY_CLOSEOUT_CONFIG_ENV = "MY_AGENT_DELIVERY_CLOSEOUT_CONFIG"
 
@@ -23,11 +23,11 @@ class DeliveryCloseoutConfig:
 
     invalid_artifacts_retry_limit:
         必交产物都已经能定位到，但内容、格式、字段、证据或质量门不合格时，
-        同一失败且工作区无新进展最多允许几次验收返工。默认 3。
+        同一失败且工作区无新进展最多允许几次验收返工。默认 0。
         0 表示不按次数阻断，只持续返回结构化返工单。
     missing_artifacts_retry_limit:
         必交产物缺失、路径无效或无法唯一定位时，同一失败且工作区无新进展
-        最多允许几次验收返工。默认 3。
+        最多允许几次验收返工。默认 0。
         0 表示不按次数阻断。
     """
 

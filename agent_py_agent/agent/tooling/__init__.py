@@ -10,14 +10,12 @@ from __future__ import annotations
 外部如果想直接用工具系统，可以从这里导入公开类；老的 `agent.tools` 入口也会继续兼容。
 """
 
-from .api_json_collection import ApiJsonCollectionTool
 from .artifact import ReadArtifactTool
 from .filesystem import (
-    AppendFileTool,
+    ApplyPatchTool,
     FileSystemTool,
     ListFilesTool,
     ReadFileTool,
-    ReplaceInFileTool,
     SearchTextTool,
     WriteFileTool,
 )
@@ -33,19 +31,16 @@ from .models import (
 )
 from .registry import ToolRegistry, ToolRegistryParams
 from .registry_list_tools import ListToolsTool
-from .spreadsheet_builder import DataWorkbookTool
 from .web import FetchUrlTool, HttpRequestTool
 from .web_search import WebSearchTool
 from .write_boundary import WRITE_TOOL_NAMES, validate_write_boundary
 
 __all__ = [
-    "AppendFileTool",
-    "ApiJsonCollectionTool",
+    "ApplyPatchTool",
     "BaseTool",
     "BaseToolSearchProvider",
     "FetchUrlTool",
     "FileSystemTool",
-    "DataWorkbookTool",
     "HttpRequestTool",
     "HybridToolRetriever",
     "KeywordToolSearchProvider",
@@ -53,7 +48,6 @@ __all__ = [
     "ListToolsTool",
     "ReadFileTool",
     "ReadArtifactTool",
-    "ReplaceInFileTool",
     "SearchTextTool",
     "ToolExecutionResult",
     "ToolRegistry",

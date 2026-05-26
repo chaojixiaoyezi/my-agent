@@ -5,14 +5,13 @@ from pathlib import Path
 from agent_py_agent.agent.contracts.artifact_acceptance import validate_artifact
 from agent_py_agent.agent.contracts.artifact_acceptance_models import ArtifactAcceptanceRequest
 from agent_py_agent.agent.contracts.staged_checkpoint_acceptance import staged_checkpoint_findings
-from agent_py_agent.agent.tooling.spreadsheet_builder import DataWorkbookTool
+from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
 
 
 # LLM: xlsx acceptance must validate structured workbook schema, not only zip integrity.
 # 函数用途: 验证 required_columns 和 required_sheets_min 会真实参与 xlsx 机器验收。
 def test_xlsx_acceptance_checks_required_columns_and_sheet_count(tmp_path: Path) -> None:
-    tool = DataWorkbookTool(tmp_path)
-    result = tool.execute(
+    write_xlsx_fixture(tmp_path, 
         {
             "path": "report.xlsx",
             "sheets": [
@@ -21,8 +20,6 @@ def test_xlsx_acceptance_checks_required_columns_and_sheet_count(tmp_path: Path)
             ],
         }
     )
-    assert result.ok
-
     report = validate_artifact(
         ArtifactAcceptanceRequest(
             path=tmp_path / "report.xlsx",
@@ -40,15 +37,12 @@ def test_xlsx_acceptance_checks_required_columns_and_sheet_count(tmp_path: Path)
 # LLM: xlsx acceptance should reject workbook packages that lack declared schema fields.
 # 函数用途: 验证缺少必需列时返回稳定 finding，避免错表通过真实 E2E。
 def test_xlsx_acceptance_rejects_missing_required_columns(tmp_path: Path) -> None:
-    tool = DataWorkbookTool(tmp_path)
-    result = tool.execute(
+    write_xlsx_fixture(tmp_path, 
         {
             "path": "report.xlsx",
             "sheets": [{"name": "summary", "rows": [{"记录名": "demo"}]}],
         }
     )
-    assert result.ok
-
     report = validate_artifact(
         ArtifactAcceptanceRequest(
             path=tmp_path / "report.xlsx",
@@ -69,8 +63,7 @@ def test_xlsx_acceptance_rejects_missing_required_columns(tmp_path: Path) -> Non
 # LLM: Required spreadsheet columns are value contracts, not only header labels.
 # 函数用途: 验证 xlsx 里必填列存在但数据行为空时不能通过机器验收。
 def test_xlsx_acceptance_rejects_blank_required_column_values(tmp_path: Path) -> None:
-    tool = DataWorkbookTool(tmp_path)
-    result = tool.execute(
+    write_xlsx_fixture(tmp_path, 
         {
             "path": "report.xlsx",
             "sheets": [
@@ -82,8 +75,6 @@ def test_xlsx_acceptance_rejects_blank_required_column_values(tmp_path: Path) ->
             ],
         }
     )
-    assert result.ok
-
     report = validate_artifact(
         ArtifactAcceptanceRequest(
             path=tmp_path / "report.xlsx",
@@ -117,10 +108,7 @@ def test_xlsx_acceptance_rejects_unsourced_staged_source_json(tmp_path: Path) ->
 """.strip(),
         encoding="utf-8",
     )
-    tool = DataWorkbookTool(tmp_path)
-    result = tool.execute({"path": "report.xlsx", "source_json_path": "source_data.json"})
-    assert result.ok
-
+    write_xlsx_fixture(tmp_path, {"path": "report.xlsx", "source_json_path": "source_data.json"})
     report = validate_artifact(
         ArtifactAcceptanceRequest(
             path=tmp_path / "report.xlsx",

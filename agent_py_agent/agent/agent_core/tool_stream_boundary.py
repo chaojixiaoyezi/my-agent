@@ -28,10 +28,6 @@ _MACHINE_BLOCK_PATTERNS = (
     re.compile(r"\[TOOL_CALL\].*?\[/TOOL_CALL\]", re.DOTALL),
     re.compile(r"\[SUBAGENT_CALL\].*?\[/SUBAGENT_CALL\]", re.DOTALL),
     re.compile(r"\[WRITE_FILE_RAW[^\]]*\].*?\[/WRITE_FILE_RAW\]", re.DOTALL),
-    re.compile(
-        r"\[FILE_WRITE_SESSION_APPEND[^\]]*\].*?\[/FILE_WRITE_SESSION_APPEND\]",
-        re.DOTALL,
-    ),
 )
 _MAX_UNCLOSED_TOOL_START_MARKERS = 1
 _MAX_NEAR_TOOL_PROTOCOL_LINES = 7

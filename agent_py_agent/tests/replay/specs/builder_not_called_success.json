@@ -13,6 +13,7 @@
     "block_reason": "",
     "replay_error_codes": [],
     "contract_error_codes": [
+      "REQUIRED_TOOL_CALL_MISSING",
       "REQUIRED_SUCCESSFUL_TOOL_CALL_MISSING",
       "FINAL_STATUS_REJECTED"
     ]

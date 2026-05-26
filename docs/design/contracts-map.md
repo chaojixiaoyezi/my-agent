@@ -63,6 +63,9 @@
 
 - `agent_py_agent/agent/tooling/registry_execution.py`：统一工具入口，先过 runtime gate，再执行工具。
 - `agent_py_agent/agent/tooling/registry_resilience.py`：只读工具可有限重试，大输出落 artifact ref，mutating/dangerous 仍由幂等和审批门约束。
+- `agent_py_agent/agent/tooling/_filesystem_write.py`：通用 `write_file` 原子写入，支持文本 `content` 和二进制 `data_base64`。
+- `agent_py_agent/agent/tooling/_filesystem_patch.py`：通用 `apply_patch` 文本补丁，替代 append/replace/session 等多套专项写入工具。
+- 已删除旧专项写入/构建工具：`append_file`、`replace_in_file`、`file_write_session`、`write_structured_json`、`data_to_workbook`、`markdown_to_pdf`。复杂格式由模型选择脚本/命令/库生成，系统只保留通用写入、路径边界和最终验收。
 
 ### 离线测试合同
 
@@ -148,5 +151,5 @@
 - bootstrap 开工物化硬门已删除。它不是安全门，也不是最终验收门，不能再拦截普通 `web_search`、`fetch_url`、`read_file`、`list_files`。
 - 交付验收现在支持显式 `submit_for_acceptance` 和无工具最终回复触发的隐式验收。
 - delivery contract Doctor 首次返回结构化返工上下文，若同一坏机器合同继续不可运行，则确定性 `DELIVERY_CONTRACT_DOCTOR_BLOCKED`，避免入口合同损坏时无限循环。
-- 探索熔断、本地进展门、closeout 返工预算都改成配置化；delivery repair 独立运行门已删除，返工提示统一由 closeout 的 `[delivery-contract-check]` 和 `repair_guidance` 承担；数字字段统一遵守 `0` 表示不按次数阻断。
+- 探索熔断和 closeout 返工预算改成配置化；本地进展门只做配置化软提醒，不再阻断任务；delivery repair 独立运行门已删除，返工提示统一由 closeout 的 `[delivery-contract-check]` 和 `repair_guidance` 承担；数字字段统一遵守 `0` 表示不按次数阻断。
 - 质量问题继续走 closeout / repair / replay 闭环，不新增“必须先写某个专项中间文件”的前置硬门。

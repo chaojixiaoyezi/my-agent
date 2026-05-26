@@ -96,7 +96,7 @@ def test_create_run_applies_checker_contract(tmp_path):
     assert task.role == CHECKER_ROLE
     assert "read_file" in task.allowed_tools
     assert "write_file" in task.allowed_tools
-    assert "replace_in_file" in task.allowed_tools
+    assert "apply_patch" in task.allowed_tools
     assert task.quality_contract.final_judge == "parent_final_gate"
     assert task.quality_contract.cannot_self_accept is True
     assert task.quality_contract.parent_final_gate is True
@@ -126,4 +126,4 @@ def test_hierarchy_scheduler_applies_role_contracts_to_children(tmp_path):
     assert checker.role == CHECKER_ROLE
     assert "read_file" in checker.allowed_tools
     assert "write_file" in checker.allowed_tools
-    assert "replace_in_file" in checker.allowed_tools
+    assert "apply_patch" in checker.allowed_tools

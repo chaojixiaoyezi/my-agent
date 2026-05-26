@@ -5,13 +5,13 @@ from pathlib import Path
 from agent_py_agent.agent.agent_core.delivery_closeout_config import load_delivery_closeout_config
 
 
-# LLM: closeout retry budgets should be configurable in the shared runtime guard file and default to three attempts.
-# 函数用途: 验证交付验收失败预算不再散落在进展计算代码里，缺产物和坏产物默认都给三次。
-def test_delivery_closeout_retry_config_defaults_to_three_attempts():
+# LLM: closeout retry budgets should be configurable and default to unlimited rework attempts.
+# 函数用途: 验证交付验收失败预算不再散落在进展计算代码里，缺产物和坏产物默认都不按次数阻断。
+def test_delivery_closeout_retry_config_defaults_to_unlimited_rework():
     config = load_delivery_closeout_config(Path("/missing/runtime_guard_config.yaml"))
 
-    assert config.invalid_artifacts_retry_limit == 3
-    assert config.missing_artifacts_retry_limit == 3
+    assert config.invalid_artifacts_retry_limit == 0
+    assert config.missing_artifacts_retry_limit == 0
 
 
 # LLM: zero retry budgets mean unlimited rework attempts instead of immediate blocking.
@@ -34,8 +34,8 @@ def test_delivery_closeout_retry_config_accepts_zero_as_unlimited(tmp_path: Path
     assert config.missing_artifacts_retry_limit == 0
 
 
-# LLM: invalid config values should fall back to safe defaults instead of disabling retries accidentally.
-# 函数用途: 验证配置写错时回退默认 3 次，而不是解释成无限或立即阻断。
+# LLM: invalid config values should fall back to the default unlimited rework behavior.
+# 函数用途: 验证配置写错时回退默认 0 次数限制，而不是解释成立即阻断。
 def test_delivery_closeout_retry_config_invalid_values_fall_back(tmp_path: Path):
     path = tmp_path / "runtime_guard_config.yaml"
     path.write_text(
@@ -45,5 +45,5 @@ def test_delivery_closeout_retry_config_invalid_values_fall_back(tmp_path: Path)
 
     config = load_delivery_closeout_config(path)
 
-    assert config.invalid_artifacts_retry_limit == 3
-    assert config.missing_artifacts_retry_limit == 3
+    assert config.invalid_artifacts_retry_limit == 0
+    assert config.missing_artifacts_retry_limit == 0

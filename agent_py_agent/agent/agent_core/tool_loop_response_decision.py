@@ -13,7 +13,6 @@ from .main_agent_delivery_closeout import (
 )
 from .tool_local_progress_guard import (
     has_required_local_progress_guard,
-    local_progress_guard_block_response,
     local_progress_guard_context,
 )
 from .tool_loop_exploration_decision import (
@@ -21,12 +20,6 @@ from .tool_loop_exploration_decision import (
     ExplorationFuseDecisionRequest,
     exploration_fuse_no_tool_call_decision,
     exploration_fuse_tool_call_decision,
-)
-from .tool_loop_open_session_decision import (
-    OpenSessionDecision,
-    OpenSessionDecisionRequest,
-    open_session_tool_call_decision,
-    open_write_session_decision,
 )
 from .tool_loop_orchestration_contract_decision import (
     OrchestrationContractDecision,
@@ -128,9 +121,6 @@ def _tool_calls_decision(
     request: ToolLoopResponseDecisionRequest,
     calls: list[dict[str, object]],
 ) -> ToolLoopResponseDecision:
-    open_session_tools = open_session_tool_call_decision(_open_session_request(request, calls))
-    if open_session_tools is not None:
-        return _open_session_decision(open_session_tools)
     local_progress_tools = _local_progress_tool_call_decision(request, calls)
     if local_progress_tools is not None:
         return local_progress_tools
@@ -144,9 +134,6 @@ def _tool_calls_decision(
 # LLM: _no_tool_calls_decision prevents spoof-only reserved records from becoming final answers.
 # 函数用途: 无真实工具调用时，普通回复直接收口；伪造工具回执先纠偏一次，再重复就阻断。
 def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision:
-    open_session_decision = open_write_session_decision(_open_session_request(request, []))
-    if open_session_decision is not None:
-        return _open_session_decision(open_session_decision)
     orchestration_contract_decision = orchestration_contract_no_tool_call_decision(
         _orchestration_contract_request(request)
     )
@@ -194,8 +181,8 @@ def _implicit_delivery_closeout_decision(
     return None
 
 
-# LLM: _local_progress_no_tool_call_decision blocks empty chatter turns once the machine closeout report shows repeated exploration without new local work.
-# 函数用途: 连续多轮没有任何本地推进时，普通文本回复也要先被拉回 checkpoint/draft/builder 主链，而不是继续聊天。
+# LLM: _local_progress_no_tool_call_decision gives a soft rework hint after repeated exploration without new local work.
+# 函数用途: 连续多轮没有任何本地推进时，给模型补充 checkpoint/draft/builder 返工提示；没有新提示时不阻断。
 def _local_progress_no_tool_call_decision(
     request: _NoToolCallsRequest,
 ) -> ToolLoopResponseDecision | None:
@@ -208,12 +195,11 @@ def _local_progress_no_tool_call_decision(
     if repair_context:
         request.params.tool_context.append(repair_context)
         return ToolLoopResponseDecision("continue", None, [], _inc_local_progress(request.counters))
-    block = local_progress_guard_block_response(request.agent)
-    return ToolLoopResponseDecision("break", block or request.response, [], request.counters)
+    return None
 
 
-# LLM: _local_progress_tool_call_decision redirects repeated remote/read-only exploration when closeout facts show the local workspace has stopped changing.
-# 函数用途: 利用结构化 closeout 进展指纹判断“只抓不落地”的空转；先纠偏，连续忽略后再阻断。
+# LLM: _local_progress_tool_call_decision redirects repeated remote/read-only exploration only on soft hint rounds.
+# 函数用途: 利用结构化 closeout 进展指纹判断“只抓不落地”的空转；只给返工提示，不把任务终止。
 def _local_progress_tool_call_decision(
     request: ToolLoopResponseDecisionRequest,
     calls: list[dict[str, object]],
@@ -227,8 +213,7 @@ def _local_progress_tool_call_decision(
     if repair_context:
         request.params.tool_context.append(repair_context)
         return ToolLoopResponseDecision("continue", None, [], _inc_local_progress(request.counters))
-    block = local_progress_guard_block_response(request.agent)
-    return ToolLoopResponseDecision("break", block or request.response, [], request.counters)
+    return None
 
 
 # LLM: _exploration_decision adapts the split exploration module into this module's public decision type.
@@ -265,17 +250,3 @@ def _exploration_request(
 ) -> ExplorationFuseDecisionRequest:
     return ExplorationFuseDecisionRequest(request.agent, request.params, request.response, request.counters, calls)
 
-
-# LLM: _open_session_request adapts either tool-call or no-tool requests into the split module shape.
-# 函数用途: 复用 open-session 分支的 request dataclass，避免主决策函数继续扩展参数。
-def _open_session_request(
-    request: ToolLoopResponseDecisionRequest | _NoToolCallsRequest,
-    calls: list[dict[str, object]],
-) -> OpenSessionDecisionRequest:
-    return OpenSessionDecisionRequest(request.agent, request.params, request.response, request.counters, calls)
-
-
-# LLM: _open_session_decision adapts the split open-session module into this module's public decision type.
-# 函数用途: 保持 tool_loop_response_decision 对外返回类型不变。
-def _open_session_decision(decision: OpenSessionDecision) -> ToolLoopResponseDecision:
-    return ToolLoopResponseDecision(decision.action, decision.response, decision.calls, decision.counters)

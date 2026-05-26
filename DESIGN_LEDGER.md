@@ -2645,6 +2645,16 @@ def example(...):
 - 同一批显式目标不再按 worker/coordinator 自动拆两波执行。显式 `run_ids` 是父级的操作请求，系统按给定顺序和并发参数推进；如果需要先收集再汇总，父级应分两次 dispatch。
 - 验证链路：`ruff check` 目标文件通过；一次性脚本确认 child refs 只包含 alert directive 和自己的 source 文件，acceptance scope 只返回本轮 run；`test_orchestration_tools.py` 与 `test_delivery_contract_prompting.py` 通过。旧 `test_orchestration_body_read_guard.py` 仍包含“顶层必须禁止读正文”的历史期望，和前面放松普通任务卡死规则冲突，未修改测试文件。
 
+## 2026-05-26 Local-progress guard no longer blocks
+
+状态：已落地，focused 验证通过
+
+摘要：
+- 本地进展门从“closeout 失败后连续只读到一定次数就停止”改成“只按固定间隔给返工建议”。它仍然记录 failure/work-progress 指纹和连续只读轮次，但不会把任务置为 blocked。
+- 本地进展门只保留 `local_progress_unlimited_hint_interval` 一个参数，默认每 10 轮给软提示。
+- 这样 closeout 失败后的真实返工路径统一回到 closeout 结构化返工单和模型继续执行，不再因为“只读几轮”提前结束任务。
+- 验证链路：`test_tool_local_progress_guard.py`、`test_exploration_fuse_config.py`、`test_runtime_guard_config_shared.py` 通过。
+
 ## 2026-05-25 Subagent input materialization recovery
 
 状态：已落地，focused 验证通过；待真实 MiniMax 复验
@@ -2680,3 +2690,14 @@ def example(...):
 - 如果旧代码已经创建过缺交接字段的 takeover run，后续复用它时会自动补齐源 run 缺失的结构化交接单，但不会覆盖已有 takeover 自己新增的字段。
 - 这不是 IP 协作专项修复。它只解决通用接管语义：恢复/接管不能把“该读什么、该写哪儿、有哪些兄弟/上下文包”丢掉。
 - 验证链路：一次性脚本先确认旧行为会丢 `required_read_paths/hint_read_paths/task_pack_refs/context_packs/output_files/output_refs`；修复后同脚本全部继承通过，并额外确认复用旧 takeover 时会补齐缺失字段。
+
+## 2026-05-26 Generic write surface replaces special builders
+
+状态：已落地，pytest 全量通过
+
+摘要：
+- 本轮按“不要把主代理变成模板执行器”的纠偏原则，删除模型可见的专项写入/构建工具：`append_file`、`replace_in_file`、`file_write_session`、`write_structured_json`、`data_to_workbook`、`markdown_to_pdf`。
+- 当前模型可见写入面收敛为 `write_file` 和 `apply_patch`：`write_file` 原子写入完整文本或 `data_base64` 二进制；`apply_patch` 做局部文本修改、新增、删除、移动。
+- PDF、XLSX、Word、PPT、视频、XML、未知格式等开放世界产物不再走固定 builder。模型可以用授权命令、脚本或库生成，再通过通用写入和 closeout/artifact acceptance 验收。
+- 这次也标记了之前走偏的方向：open write session、固定 workbook/pdf/json builder、builder-ready 自动推进，都容易把普通任务塞进单一路径。以后遇到产物质量问题，优先修 closeout 验收、工具错误回执、路径安全和通用返工，不再新增任务专项工具或前置硬门。
+- 验证链路：`python3 -m compileall -q agent_py_agent/agent agent_py_agent/tests` 通过；`python3 -m pytest -q agent_py_agent/tests --tb=short --maxfail=20` 全量通过；`python3 scripts/check_code_size.py --mode warn` 输出 `hard=0 high-risk=0 soft=0`。

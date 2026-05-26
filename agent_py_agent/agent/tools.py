@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from .tooling import (
     WRITE_TOOL_NAMES,
-    AppendFileTool,
+    ApplyPatchTool,
     BaseTool,
     BaseToolSearchProvider,
     FetchUrlTool,
@@ -24,7 +24,6 @@ from .tooling import (
     ListFilesTool,
     ReadArtifactTool,
     ReadFileTool,
-    ReplaceInFileTool,
     SearchTextTool,
     ToolExecutionResult,
     ToolRegistry,
@@ -57,7 +56,7 @@ from .tooling.write_boundary import (
 )
 
 __all__ = [
-    "AppendFileTool",
+    "ApplyPatchTool",
     "BaseTool",
     "BaseToolSearchProvider",
     "FetchUrlTool",
@@ -68,7 +67,6 @@ __all__ = [
     "ListFilesTool",
     "ReadArtifactTool",
     "ReadFileTool",
-    "ReplaceInFileTool",
     "SearchTextTool",
     "ToolExecutionResult",
     "ToolRegistry",

@@ -7,7 +7,6 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..tooling.file_write_session_inspection import open_file_write_sessions
 from .artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
 from .artifact_candidate_paths import report_with_candidate_paths
 from .contract_validation_recovery import recovery_for_findings
@@ -199,53 +198,7 @@ def _runtime_findings(
     task_workspace: Path,
     artifacts: list[TaskRunArtifactAcceptance],
 ) -> list[dict[str, object]]:
-    accepted_targets = _accepted_artifact_targets(artifacts)
-    return [
-        _open_session_finding(session)
-        for session in open_file_write_sessions(task_workspace, limit=20)
-        if _session_target(session) not in accepted_targets
-    ]
-
-
-# LLM: _accepted_artifact_targets tracks which final artifact paths are already accepted and should not be blocked by stale sessions.
-# 函数用途: 收集通过验收的产物绝对路径，用来放行同目标的旧 file_write_session。
-def _accepted_artifact_targets(artifacts: list[TaskRunArtifactAcceptance]) -> set[str]:
-    return {str(Path(item.path).resolve()) for item in artifacts if item.ok}
-
-
-# LLM: _session_target resolves one open file-write session to its target path for runtime finding de-duplication.
-# 函数用途: 从 file_write_session 摘出最终写入目标路径，便于和已验收产物做同目标比较。
-def _session_target(session: dict[str, object]) -> str:
-    target = session.get("target_path")
-    if not isinstance(target, dict):
-        return ""
-    value = target.get("resolved") or target.get("raw")
-    if not value:
-        return ""
-    return str(Path(str(value)).resolve())
-
-
-# LLM: _open_session_finding turns a write-session manifest summary into a stable acceptance finding.
-# 函数用途: 将 open file_write_session 作为机器验收失败项记录，避免超时后误判产物已完成。
-def _open_session_finding(session: dict[str, object]) -> dict[str, object]:
-    return {
-        "code": "OPEN_FILE_WRITE_SESSION",
-        "severity": "hard",
-        "session_id": str(session.get("session_id") or ""),
-        "target_path": session.get("target_path") or {},
-        "manifest_path": str(session.get("manifest_path") or ""),
-        "preview_path": str(session.get("preview_path") or ""),
-        "preview_materialized": bool(session.get("preview_materialized")),
-        "received_chunks": list(session.get("received_chunks") or []),
-        "next_chunk_index": int(session.get("next_chunk_index") or 0),
-        "continue_tool_call": session.get("continue_tool_call") or {},
-        "finish_tool_call": session.get("finish_tool_call") or {},
-        "abort_tool_call": session.get("abort_tool_call") or {},
-        "abort_requires_discard_chunks": bool(session.get("abort_requires_discard_chunks")),
-        "resume_action": "append_from_next_chunk_then_finish",
-        "chunk_content_read_required": False,
-        "existing_chunks_authoritative": True,
-    }
+    return []
 
 
 # LLM: _summary counts artifact and runtime contract outcomes for case-level status.

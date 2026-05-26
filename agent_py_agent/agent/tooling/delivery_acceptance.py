@@ -21,8 +21,7 @@ class SubmitForAcceptanceTool(BaseTool):
             "已按返工单修复产物，需要重新提交验收",
         ],
         avoid_when=[
-            "还在搜索、读取、分析、写草稿或分块写入没有 finish 时不要调用",
-            "有 file_write_session 仍未 finish/abort 时不要调用",
+            "还在搜索、读取、分析、写草稿或没有写出目标产物时不要调用",
         ],
         keywords=["submit", "acceptance", "final", "done", "验收", "提交", "交付", "完成"],
         parameters={"note": "可选。简短说明你认为可以验收的内容；系统不会把 note 当作通过依据。"},

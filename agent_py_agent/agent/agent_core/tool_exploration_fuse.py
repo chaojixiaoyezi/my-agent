@@ -28,12 +28,8 @@ _EXPLORATION_TOOL_NAMES = {
     "web_search",
 }
 _LOCAL_PROGRESS_TOOL_NAMES = {
-    "append_file",
-    "data_to_workbook",
-    "file_write_session",
-    "markdown_to_pdf",
-    "replace_in_file",
-    "write_structured_json",
+    "apply_patch",
+    "run_command",
     "write_file",
 }
 _RUN_COMMAND_LOCAL_TOOLS = {"cp", "mkdir", "mv", "python", "python3", "touch"}

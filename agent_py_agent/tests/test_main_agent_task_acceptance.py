@@ -35,9 +35,8 @@ def test_task_acceptance_ignores_open_session_for_accepted_target(tmp_path):
 # LLM: _write_valid_workbook creates the accepted target that an open session must not invalidate.
 # 函数用途: 生成满足表格验收的 workbook，并返回最终产物路径。
 def _write_valid_workbook(workspace: Path) -> Path:
-    from agent_py_agent.agent.tooling.spreadsheet_builder import DataWorkbookTool
-
-    DataWorkbookTool(workspace).execute(
+    from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
+    write_xlsx_fixture(workspace, 
         {
             "path": "outputs/table_report/table_report.xlsx",
             "sheets": [

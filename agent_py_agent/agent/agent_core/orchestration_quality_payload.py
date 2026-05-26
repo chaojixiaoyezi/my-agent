@@ -176,9 +176,8 @@ def _repair_child_tool_call(failed_ids: list[str]) -> dict[str, object]:
                     "list_files",
                     "read_file",
                     "search_text",
-                    "replace_in_file",
+                    "apply_patch",
                     "write_file",
-                    "append_file",
                 ],
             }
         ],

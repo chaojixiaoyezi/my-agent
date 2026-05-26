@@ -28,10 +28,10 @@ def append_checkpoint_quality_action(request: CheckpointQualityActionRequest) ->
 
 
 # LLM: checkpoint_writer_fields exposes a generic writer tool for machine JSON checkpoints.
-# 函数用途: 让 staged recovery 推荐 write_structured_json，而不是诱导模型手写大 JSON 字符串。
+# 函数用途: 让 staged recovery 推荐 write_file，而不是诱导模型手写大 JSON 字符串。
 def checkpoint_writer_fields(ref_text: str) -> dict[str, object]:
     if ref_text.lower().endswith(".json"):
-        return {"writer_tool": "write_structured_json", "write_tools": ["write_structured_json", "api_json_collection"]}
+        return {"writer_tool": "write_file", "write_tools": ["write_file"]}
     return {}
 
 
@@ -84,7 +84,7 @@ def _checkpoint_optional_fields(
 
 
 # LLM: Collection source checkpoints must route to source collection first, not manual JSON patching.
-# 函数用途: 当坏掉的 checkpoint 是 collection_contract 声明的 source_json_ref 时，优先暴露 api_json_collection 采集门。
+# 函数用途: 当坏掉的 checkpoint 是 collection_contract 声明的 source_json_ref 时，优先暴露 通用采集/写入 采集门。
 def _checkpoint_writer_fields(request: CheckpointQualityActionRequest) -> dict[str, object]:
     if _shape_hint_has_generated_rows(request.checkpoint_shape_hint):
         return {
@@ -93,16 +93,16 @@ def _checkpoint_writer_fields(request: CheckpointQualityActionRequest) -> dict[s
                 if isinstance(request.validation_contract, dict)
                 else {}
             ),
-            "writer_tool": "write_structured_json",
-            "write_tools": ["write_structured_json", "api_json_collection"],
+            "writer_tool": "write_file",
+            "write_tools": ["write_file"],
         }
     validation_contract = request.validation_contract if isinstance(request.validation_contract, dict) else {}
     collection = validation_contract.get("collection_contract")
     if isinstance(collection, dict) and _same_path_ref(request.checkpoint_ref, str(collection.get("source_json_ref") or "")):
         return {
             "collection_contract": _compact_collection_contract(collection),
-            "writer_tool": "api_json_collection",
-            "write_tools": ["api_json_collection", "write_structured_json"],
+            "writer_tool": "write_file",
+            "write_tools": ["write_file"],
         }
     return checkpoint_writer_fields(request.checkpoint_ref)
 

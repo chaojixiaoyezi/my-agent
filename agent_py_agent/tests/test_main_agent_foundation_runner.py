@@ -23,7 +23,7 @@ def test_main_agent_foundation_runner_reports_core_categories(tmp_path):
     assert by_id["activity_timeout_recovery"].status == "PASSED"
     assert by_id["model_call_ledger_timeout"].status == "PASSED"
     assert by_id["tool_protocol_v2_envelope"].status == "PASSED"
-    assert by_id["file_write_session_contract"].status == "PASSED"
+    assert by_id["general_write_contract"].status == "PASSED"
     assert by_id["large_output_artifact_refs"].status == "PASSED"
     assert by_id["deterministic_e2e_matrix"].status == "PASSED"
     assert by_id["single_agent_real_tasks"].status == "SKIPPED"

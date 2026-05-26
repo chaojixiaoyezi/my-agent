@@ -22,6 +22,9 @@ from ._filesystem_helpers import (
     _text_param,
 )
 
+# Re-export write tools
+from ._filesystem_patch import ApplyPatchTool
+
 # Re-export base class and read tools
 from ._filesystem_read import (
     FileSystemTool,
@@ -29,13 +32,7 @@ from ._filesystem_read import (
     ReadFileTool,
 )
 from ._filesystem_search import SearchTextTool
-
-# Re-export write tools
-from ._filesystem_write import (
-    AppendFileTool,
-    ReplaceInFileTool,
-    WriteFileTool,
-)
+from ._filesystem_write import WriteFileTool
 from .models import BaseTool, ToolExecutionResult, ToolSpec
 
 __all__ = [
@@ -62,7 +59,6 @@ __all__ = [
     "ReadFileTool",
     "SearchTextTool",
     # Write tools
-    "AppendFileTool",
-    "ReplaceInFileTool",
+    "ApplyPatchTool",
     "WriteFileTool",
 ]

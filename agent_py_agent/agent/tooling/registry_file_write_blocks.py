@@ -1,5 +1,5 @@
 # LLM: File-write raw blocks provide structured large-content transport outside JSON strings.
-# 模块用途: 解析写文件 raw block，转成 write_file 或 file_write_session.append 工具调用。
+# 模块用途: 解析写文件 raw block，转成 write_file 工具调用。
 
 from __future__ import annotations
 
@@ -9,33 +9,15 @@ from typing import Any
 
 from .registry_payload_normalize import parse_error_payload
 
-_APPEND_BLOCK_RE = re.compile(
-    r"\[FILE_WRITE_SESSION_APPEND(?P<attrs>[^\]]*)\](?P<content>.*?)\[/FILE_WRITE_SESSION_APPEND\]",
-    re.DOTALL,
-)
 _WRITE_FILE_BLOCK_RE = re.compile(
     r"\[WRITE_FILE_RAW(?P<attrs>[^\]]*)\](?P<content>.*?)\[/WRITE_FILE_RAW\]",
     re.DOTALL,
 )
-_RAW_BLOCK_MARKERS = ("FILE_WRITE_SESSION_APPEND", "WRITE_FILE_RAW")
+_RAW_BLOCK_MARKERS = ("WRITE_FILE_RAW",)
 _ATTR_RE = re.compile(
     r"(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*=\s*"
     r"(?:\"(?P<double>(?:\\.|[^\"\\])*)\"|'(?P<single>(?:\\.|[^'\\])*)'|(?P<bare>[^\s\]]+))"
 )
-
-
-# LLM: parse_file_write_session_raw_blocks reads only explicit machine markers and header attributes.
-# 函数用途: 把大文件 raw block 解析成 file_write_session append 参数；正文不经过自然语言判断。
-def parse_file_write_session_raw_blocks(text: str) -> list[tuple[int, dict[str, Any]]]:
-    calls: list[tuple[int, dict[str, Any]]] = []
-    for match in _APPEND_BLOCK_RE.finditer(text):
-        attrs = _parse_attrs(match.group("attrs"))
-        error = _attrs_error(attrs)
-        if error:
-            calls.append((match.start(), parse_error_payload(error, match.group(0))))
-            continue
-        calls.append((match.start(), _append_payload(attrs, match.group("content"))))
-    return calls
 
 
 # LLM: parse_write_file_raw_blocks is the one-shot structured commit path for complete files.
@@ -85,39 +67,12 @@ def _decode_attr_value(value: str) -> str:
         return value
 
 
-# LLM: _attrs_error validates required machine fields before the tool layer mutates disk.
-# 函数用途: 检查 raw block 是否具备 append 所需字段，缺失时返回结构化 parse error 文案。
-def _attrs_error(attrs: dict[str, str]) -> str:
-    required = ("session_id", "target_path", "chunk_index")
-    missing = [key for key in required if not str(attrs.get(key) or "").strip()]
-    if missing:
-        return "FILE_WRITE_SESSION_APPEND 缺少结构化属性: " + ", ".join(missing)
-    try:
-        int(str(attrs["chunk_index"]))
-    except ValueError:
-        return "FILE_WRITE_SESSION_APPEND chunk_index 必须是整数"
-    return ""
-
-
 # LLM: _write_attrs_error validates WRITE_FILE_RAW headers before write_file mutates disk.
 # 函数用途: 检查一次性写文件 raw block 的 path 字段是否存在。
 def _write_attrs_error(attrs: dict[str, str]) -> str:
     if not str(attrs.get("path") or "").strip():
         return "WRITE_FILE_RAW 缺少结构化属性: path"
     return ""
-
-
-# LLM: _append_payload emits the same dict shape as JSON file_write_session.append.
-# 函数用途: 构造工具调用 payload，并只去掉 raw block 外围换行，保留正文内容本身。
-def _append_payload(attrs: dict[str, str], content: str) -> dict[str, Any]:
-    return {
-        "tool": "file_write_session",
-        "action": "append",
-        "session_id": attrs["session_id"],
-        "target_path": attrs["target_path"],
-        "chunk_index": int(attrs["chunk_index"]),
-        "content": _block_content(content),
-    }
 
 
 # LLM: _write_file_payload emits the same dict shape as JSON write_file.
@@ -143,9 +98,7 @@ def _block_content(content: str) -> str:
 # LLM: _valid_raw_block_ranges lets malformed detection ignore blocks handled by the normal parsers.
 # 函数用途: 标记已经完整闭合的 raw block 区间，避免一个坏属性块被重复报两次错误。
 def _valid_raw_block_ranges(text: str) -> list[tuple[int, int]]:
-    ranges = [(match.start(), match.end()) for match in _APPEND_BLOCK_RE.finditer(text)]
-    ranges.extend((match.start(), match.end()) for match in _WRITE_FILE_BLOCK_RE.finditer(text))
-    return ranges
+    return [(match.start(), match.end()) for match in _WRITE_FILE_BLOCK_RE.finditer(text)]
 
 
 # LLM: _position_in_ranges keeps scanner logic independent from regex match internals.
@@ -203,7 +156,7 @@ def _malformed_raw_block_error(marker: str) -> str:
 def _raw_block_sample(text: str, pos: int) -> str:
     candidates = [
         idx + len(marker)
-        for marker in ("[/FILE_WRITE_SESSION_APPEND]", "[/WRITE_FILE_RAW]", "[/TOOL_CALL]", "[/SUBAGENT_CALL]")
+        for marker in ("[/WRITE_FILE_RAW]", "[/TOOL_CALL]", "[/SUBAGENT_CALL]")
         if (idx := text.find(marker, pos)) != -1
     ]
     end = min(candidates) if candidates else len(text)
@@ -212,6 +165,5 @@ def _raw_block_sample(text: str, pos: int) -> str:
 
 __all__ = [
     "malformed_file_write_raw_block_calls",
-    "parse_file_write_session_raw_blocks",
     "parse_write_file_raw_blocks",
 ]

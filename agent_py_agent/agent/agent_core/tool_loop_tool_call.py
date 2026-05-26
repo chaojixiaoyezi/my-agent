@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from .runner_stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_call_started
-from .tool_api_collection_contract import normalize_api_collection_payload
 from .tool_call_runtime import (
     ToolCallRuntimeRequest,
     execute_traced_tool_call,
@@ -28,8 +27,6 @@ def execute_one_tool_call(agent, request: ToolCallExecuteParams):
 
 def _execute_scoped_tool_call(agent, request: ToolCallExecuteParams):
     payload = payload_with_runtime_scope(agent, request.params, request.payload)
-    if isinstance(payload, dict):
-        payload = normalize_api_collection_payload(request.params, payload)
     trace_request = RunnerToolStageTraceRequest(
         agent=agent,
         params=request.params,

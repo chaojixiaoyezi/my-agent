@@ -225,7 +225,7 @@ def _record_materialized_artifact(record: dict[str, Any], artifact_path: Path, w
 
 
 # LLM: _record_paths extracts path-like refs from archive rows without parsing prose.
-# 函数用途: 支持 write_file、builder、file_write_session 和工具 result refs 的结构化路径字段。
+# 函数用途: 支持 write_file and tool 和工具 result refs 的结构化路径字段。
 def _record_paths(record: dict[str, Any], workspace_root: Path) -> list[Path]:
     paths: list[Path] = []
     for source in (record, _mapping(record.get("parameters")), _mapping(record.get("tool_result_envelope"))):
@@ -239,7 +239,7 @@ def _record_paths(record: dict[str, Any], workspace_root: Path) -> list[Path]:
 
 
 # LLM: _paths_from_value normalizes scalar and nested target_path refs.
-# 函数用途: 兼容 file_write_session target_path 的 raw/resolved 对象形态。
+# 函数用途: 兼容 legacy session target_path 的 raw/resolved 对象形态。
 def _paths_from_value(value: object, workspace_root: Path) -> list[Path]:
     if isinstance(value, dict):
         candidates = [value.get("resolved"), value.get("raw"), value.get("path"), value.get("artifact_ref")]

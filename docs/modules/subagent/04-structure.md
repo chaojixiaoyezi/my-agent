@@ -693,3 +693,4 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - 相关测试已经迁移到 `attributes`、`context_manifest.required_read_paths` 和 input/output refs；旧 workflow dependency helper 已删除，不能重新长出独立的自然语言验收或启动依赖逻辑。
 - `subagents/execution_executor.py` 的 artifact integrity helper 只负责把执行后的结构化 artifact facts 汇总成验收结果；注释同步后，后续维护仍应保持“执行记录、artifact refs、文件系统事实”为唯一机器依据，不要把 runner summary 或普通回复当完成事实。
 - `subagents/static_site_js_api_checks.py` 负责静态比较页面脚本里的 `app.method()` 调用和 `window.app` / local `app` 导出的函数名。它只处理 JS 代码结构和方法集合，不从普通自然语言页面内容、goal 或 summary 推断业务事实；2026-05-22 已补齐函数级 LLM/人类用途注释，后续改动需继续保持这个边界。
+- 子代理写入工具面在 2026-05-26 收敛为 `write_file` 和 `apply_patch`。`role_template_tools.py`、hierarchy policy、workflow defaults、context bundle 和 session progress 只识别这两个通用写入工具；append/replace/session/builder 工具不再作为模型可见能力。这个变化用于减少流程卡点，不改变 task tree、parent acceptance 或 closeout 的统一验收边界。

@@ -31,7 +31,7 @@ def append_artifact_finding_repair_actions(report: dict[str, Any], ledger: Recov
 
 
 # LLM: append_collection_value_repair_actions converts row-value findings into checkpoint updates.
-# 函数用途: 将 COLLECTION_ITEM_VALUE_MISMATCH 这类机器 finding 转成 write_structured_json 可执行更新，不让模型猜 JSON 文本。
+# 函数用途: 将 COLLECTION_ITEM_VALUE_MISMATCH 这类机器 finding 转成 write_file 可执行更新，不让模型猜 JSON 文本。
 def append_collection_value_repair_actions(
     report: dict[str, Any],
     contract: dict[str, Any],
@@ -276,8 +276,8 @@ def _collection_value_repair_action(
         "retryable": True,
         "recommended_action": "repair_collection_item_values",
         "checkpoint_ref": checkpoint_ref,
-        "writer_tool": "write_structured_json",
-        "write_tools": ["write_structured_json"],
+        "writer_tool": "write_file",
+        "write_tools": ["write_file"],
         "items_path": str(collection_contract.get("items_path") or "rows"),
         "collection_item_updates": updates,
         "recovery_hint": "集合 JSON 的行级机器字段不符合合同；按 collection_item_updates 更新 checkpoint 后重新验收。",
@@ -298,8 +298,8 @@ def _collection_placeholder_repair_action(
         "retryable": True,
         "recommended_action": "repair_structured_checkpoint_json",
         "checkpoint_ref": checkpoint_ref,
-        "writer_tool": "api_json_collection",
-        "write_tools": ["api_json_collection", "write_structured_json"],
+        "writer_tool": "write_file",
+        "write_tools": ["write_file"],
         "items_path": str(collection_contract.get("items_path") or "rows"),
         "collection_contract": dict(collection_contract),
         "required_columns": _collection_required_columns(collection_contract),
@@ -322,8 +322,8 @@ def _collection_count_repair_action(
         "retryable": True,
         "recommended_action": "repair_structured_checkpoint_json",
         "checkpoint_ref": checkpoint_ref,
-        "writer_tool": "api_json_collection",
-        "write_tools": ["api_json_collection", "write_structured_json"],
+        "writer_tool": "write_file",
+        "write_tools": ["write_file"],
         "items_path": str(collection_contract.get("items_path") or "rows"),
         "collection_contract": dict(collection_contract),
         "required_columns": _collection_required_columns(collection_contract),
@@ -376,7 +376,7 @@ def _collection_mapping_repair_action(
         "repair_targets": [artifact_ref],
         "retryable": True,
         "source_ref": source_ref,
-        "write_tools": ["write_file", "replace_in_file", "file_write_session"],
+        "write_tools": ["write_file", "apply_patch", "write_file"],
         "recovery_hint": "集合映射产物缺少 source_json_ref 中的条目；按结构化来源生成或修复目标文档后重新验收。",
     }
 
@@ -398,7 +398,7 @@ def _artifact_finding_repair_action(
         "finding_codes": _finding_values(findings, "code"),
         "finding_values": _finding_values(findings, "value"),
         "repair_targets": _repair_targets(item, findings),
-        "write_tools": ["write_file", "replace_in_file", "file_write_session"],
+        "write_tools": ["write_file", "apply_patch", "write_file"],
         "recovery_hint": "产物验收已给出结构化 findings；优先修改对应产物文件，然后重新验收。",
     }
 

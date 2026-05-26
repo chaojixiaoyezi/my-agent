@@ -229,14 +229,14 @@ class TestReadFileTool:
         assert result.ok is False
         assert "不存在" in result.output
 
-    def test_read_file_missing_target_reports_pending_write_session(self, tmp_path: Path):
-        """目标文件未 finish 时，read_file 应返回结构化续写状态，而不是普通不存在。"""
+    def test_read_file_missing_target_ignores_retired_write_session_state(self, tmp_path: Path):
+        """旧 file_write_sessions 状态不再影响普通 read_file 缺失错误。"""
         import json
 
         from agent_py_agent.agent.tooling.filesystem import ReadFileTool
 
         workspace = tmp_path / "workspace"
-        session_dir = workspace / ".agent_file_write_sessions" / "session-open"
+        session_dir = workspace / ".agent_write_files" / "session-open"
         session_dir.mkdir(parents=True)
         (session_dir / "manifest.json").write_text(
             json.dumps(
@@ -258,10 +258,8 @@ class TestReadFileTool:
         result = tool.execute({"path": "outputs/report.html"})
 
         assert result.ok is False
-        assert result.result_envelope["code"] == "TARGET_PENDING_FILE_WRITE_SESSION"
-        assert result.result_envelope["recommended_session_id"] == "session-open"
-        assert result.result_envelope["next_chunk_index"] == 2
-        assert "TARGET_PENDING_FILE_WRITE_SESSION" in result.output
+        assert result.result_envelope == {}
+        assert "文件不存在" in result.output
 
     def test_read_file_with_line_range(self, tmp_path: Path):
         """按行范围读取文件。"""

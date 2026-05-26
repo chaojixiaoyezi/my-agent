@@ -6,7 +6,7 @@ from pathlib import Path
 from agent_py_agent.agent.contracts.artifact_acceptance import validate_artifact
 from agent_py_agent.agent.contracts.artifact_acceptance_models import ArtifactAcceptanceRequest
 from agent_py_agent.agent.contracts.artifact_collection_contract import collection_contract_findings
-from agent_py_agent.agent.tooling.spreadsheet_builder import DataWorkbookTool
+from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
 
 
 # LLM: complex table tasks need coverage contracts, not just workbook existence.
@@ -28,8 +28,7 @@ def test_collection_contract_rejects_too_few_structured_groups(tmp_path: Path) -
         ),
         encoding="utf-8",
     )
-    tool = DataWorkbookTool(tmp_path)
-    assert tool.execute({"path": "report.xlsx", "source_json_path": "source_data.json"}).ok
+    write_xlsx_fixture(tmp_path, {"path": "report.xlsx", "source_json_path": "source_data.json"})
 
     report = validate_artifact(
         ArtifactAcceptanceRequest(
@@ -69,8 +68,7 @@ def test_collection_contract_rejects_group_with_too_few_items(tmp_path: Path) ->
         ),
         encoding="utf-8",
     )
-    tool = DataWorkbookTool(tmp_path)
-    assert tool.execute({"path": "report.xlsx", "source_json_path": "source_data.json"}).ok
+    write_xlsx_fixture(tmp_path, {"path": "report.xlsx", "source_json_path": "source_data.json"})
 
     report = validate_artifact(
         ArtifactAcceptanceRequest(
@@ -413,7 +411,7 @@ def test_collection_contract_accepts_row_scoped_claims(tmp_path: Path) -> None:
 
 def _write_source_workbook(tmp_path: Path, payload: dict[str, object]) -> None:
     (tmp_path / "source_data.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    assert DataWorkbookTool(tmp_path).execute({"path": "report.xlsx", "source_json_path": "source_data.json"}).ok
+    write_xlsx_fixture(tmp_path, {"path": "report.xlsx", "source_json_path": "source_data.json"})
 
 
 def _validate_row_evidence_workbook(tmp_path: Path, *, min_items: int):

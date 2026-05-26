@@ -85,7 +85,7 @@ class _StreamingRepeatedToolBackend:
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         parts = [
             '[TOOL_CALL]\n{"tool":"read_file","path":"final.html"}\n[/TOOL_CALL]',
-            "\n[TOOL_CALL]\n{\"tool\":\"file_write_session\",\"action\":\"append\"",
+            "\n[TOOL_CALL]\n{\"tool\":\"write_file\",\"action\":\"append\"",
             ',"session_id":"same","chunk_index":3,"content":"duplicate"}\n[/TOOL_CALL]',
         ]
         text = ""
@@ -97,8 +97,8 @@ class _StreamingRepeatedToolBackend:
         return ModelResponse(text=text, backend=self.name)
 
 
-# LLM: _StreamingLongFileWriteSessionBackend simulates a runaway file_write_session append above one session chunk.
-# 类用途: 测试 file_write_session.append 只有超过大文件 session 上限后才 salvage，普通 HTML 不会被 4K 截断。
+# LLM: _StreamingLongFileWriteSessionBackend simulates a runaway write_file append above one session chunk.
+# 类用途: 测试 write_file.append 只有超过大文件 session 上限后才 salvage，普通 HTML 不会被 4K 截断。
 class _StreamingLongFileWriteSessionBackend:
     name = "streaming-long-file-write-session-test-backend"
 
@@ -112,7 +112,7 @@ class _StreamingLongFileWriteSessionBackend:
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         parts = [
             '[TOOL_CALL]\n'
-            '{"tool":"file_write_session","action":"append",'
+            '{"tool":"write_file","action":"append",'
             '"session_id":"homepage-v1","chunk_index":2,"content":"',
             "hello\\n",
             "world" * 30_000,
@@ -213,8 +213,8 @@ def test_model_generate_enforces_request_timeout_when_backend_blocks():
     assert time.monotonic() - started < 0.06
 
 
-# LLM: large write_file streams should become recoverable session writes instead of parse errors.
-# 函数用途: 复现示例站点类失败：模型把大 HTML 塞进未闭合 write_file，系统应保留已生成前缀并转入分块写入。
+# LLM: large write_file streams should become recoverable parse errors, not hidden session writes.
+# 函数用途: 复现示例站点类失败：模型把大 HTML 塞进未闭合 write_file 时，系统给出可返工的解析错误。
 def test_model_generate_aborts_streaming_write_file_content_over_inline_limit():
     backend = _StreamingLongWriteBackend()
     agent = SimpleNamespace(
@@ -234,15 +234,14 @@ def test_model_generate_aborts_streaming_write_file_content_over_inline_limit():
 
     assert 1 < backend.chunks_emitted < 5
     assert response.backend == backend.name
-    assert '"tool": "file_write_session"' in response.text
-    assert '"action": "append"' in response.text
-    assert '"chunk_index": 0' in response.text
+    assert '"tool": "__parse_error__"' in response.text
+    assert "inline content streaming exceeded" in response.text
     assert "site/index.html" in response.text
 
 
-# LLM: file_write_session stream aborts should salvage machine payload instead of forcing another prose retry.
-# 函数用途: 验证未闭合 append 的已流出 content 会变成真实 file_write_session append 工具调用。
-def test_model_generate_salvages_streaming_file_write_session_append_prefix():
+# LLM: retired session-style stream aborts should become parse errors with repair hints.
+# 函数用途: 验证未闭合旧 session 写入不会被隐藏续写，而是交给通用返工提示处理。
+def test_model_generate_salvages_streaming_write_file_append_prefix():
     backend = _StreamingLongFileWriteSessionBackend()
     agent = SimpleNamespace(
         backend=backend,
@@ -260,12 +259,9 @@ def test_model_generate_salvages_streaming_file_write_session_append_prefix():
     )
 
     assert 1 < backend.chunks_emitted < 4
-    assert '"tool": "file_write_session"' in response.text
-    assert '"action": "append"' in response.text
-    assert '"session_id": "homepage-v1"' in response.text
-    assert '"chunk_index": 2' in response.text
-    assert "hello\\nworld" in response.text
-    assert "__parse_error__" not in response.text
+    assert '"tool": "__parse_error__"' in response.text
+    assert "homepage-v1" in response.text
+    assert "inline content streaming exceeded" in response.text
 
 
 # LLM: complete tool calls are execution boundaries, not just display boundaries.

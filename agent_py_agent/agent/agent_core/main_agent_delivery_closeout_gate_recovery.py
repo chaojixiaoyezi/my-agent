@@ -67,8 +67,8 @@ def _attach_quality_repair_refs(payload: dict[str, Any], contract: dict[str, Any
     ref = delivery_quality_payload_ref(contract)
     if ref:
         payload.setdefault("checkpoint_ref", ref)
-        payload.setdefault("writer_tool", "write_structured_json")
-        payload.setdefault("write_tools", ["write_structured_json"])
+        payload.setdefault("writer_tool", "write_file")
+        payload.setdefault("write_tools", ["write_file"])
     required = _quality_required_fields(contract)
     if required:
         payload.setdefault("required_fields", required)
@@ -94,8 +94,8 @@ def _attach_fact_evidence_repair_refs(payload: dict[str, Any], contract: dict[st
     ref = fact_evidence_payload_ref(contract)
     if ref:
         payload.setdefault("checkpoint_ref", ref)
-        payload.setdefault("writer_tool", "write_structured_json")
-        payload.setdefault("write_tools", ["write_structured_json"])
+        payload.setdefault("writer_tool", "write_file")
+        payload.setdefault("write_tools", ["write_file"])
     payload.setdefault("required_structured_fields", ["source_refs", "claims"])
     if required := _fact_required_fields(contract):
         payload.setdefault("required_fields", required)

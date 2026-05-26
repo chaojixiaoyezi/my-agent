@@ -18,7 +18,7 @@ _PATH_KEYS = (
     "source_ref",
 )
 
-_JSON_WRITER_TOOLS = {"write_structured_json", "api_json_collection"}
+_JSON_WRITER_TOOLS = {"write_file"}
 
 
 # LLM: tool_failure_recovery_actions reads tool archive machine fields only.
@@ -91,8 +91,8 @@ def _action_from_failed_record(
         action["artifact_ref"] = target_ref
     if _is_json_checkpoint_action(record, target_ref):
         action["checkpoint_ref"] = target_ref
-        action["writer_tool"] = "write_structured_json"
-        action["write_tools"] = ["write_structured_json", "api_json_collection"]
+        action["writer_tool"] = "write_file"
+        action["write_tools"] = ["write_file"]
     return action
 
 
