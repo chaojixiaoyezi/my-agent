@@ -5,12 +5,17 @@
 from __future__ import annotations
 
 import os
-import re
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from agent_py_agent.agent.contracts.gates.command_policy import (
+    command_name,
+    evaluate_command_policy,
+)
 
 from .models import BaseTool, ToolExecutionResult, ToolSpec
 
@@ -20,24 +25,6 @@ _DEFAULT_ACCESS_MODE = "workspace-write"
 _ACCESS_MODES = frozenset({"restricted", "workspace-write", "full-access"})
 _TOOL_DEADLINE_UNIX_ENV = "MY_AGENT_TOOL_DEADLINE_UNIX"
 _TOOL_DEADLINE_MARGIN_SECONDS_ENV = "MY_AGENT_TOOL_DEADLINE_MARGIN_SECONDS"
-
-_DANGEROUS_COMMANDS = [
-    r"^rm\s+-rf\s+/",
-    r"^mkfs",
-    r"^dd\s+.*of=",
-    r"^shutdown",
-    r"^reboot",
-    r"^init\s+6",
-    r"^init\s+0",
-    r"^halt",
-    r"^poweroff",
-    r"^telinit",
-    r":\(\;\)\s*;",
-    r"rm\s+-rf\s+\$\{",
-]
-
-_DANGEROUS_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _DANGEROUS_COMMANDS]
-
 
 # LLM: ShellToolOptions keeps run_command constructor stable while avoiding parameter sprawl.
 # 类用途: 保存 run_command 的工作区、权限、超时和输出预算配置。
@@ -49,10 +36,10 @@ class ShellToolOptions:
     max_output_chars: int = _DEFAULT_MAX_OUTPUT_CHARS
 
 
-# LLM: _is_dangerous_command 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-# 函数用途: 判断 is_dangerous_command 是否满足安全或状态条件。
+# LLM: _is_dangerous_command is a compatibility wrapper over the shared structured command policy.
+# 函数用途: 判断命令是否命中灾难级保护；普通 rm/chmod 不在这里被硬拒。
 def _is_dangerous_command(command: str) -> bool:
-    return any(pattern.search(command) for pattern in _DANGEROUS_PATTERNS)
+    return not evaluate_command_policy(command, allow_shell_operators=True).allowed
 
 
 # LLM: _validate_command 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -160,6 +147,53 @@ def _working_dir_from_params(
     )
 
 
+# LLM: _delete_target_access_error makes workspace-write protect delete targets, not only cwd.
+# 函数用途: 在执行 rm/rmdir/unlink 前校验显式目标路径；工作区模式不允许删到 roots 外。
+def _delete_target_access_error(command: str, cwd: Path, roots: list[Path], access_mode: str) -> str:
+    if _normalize_access_mode(access_mode) == "full-access":
+        return ""
+    argv = _shell_tokens(command)
+    if not argv:
+        return ""
+    for position, token in enumerate(argv):
+        executable = command_name(token)
+        if executable not in {"rm", "rmdir", "unlink"}:
+            continue
+        for raw_target in _delete_targets(argv[position + 1 :]):
+            target = Path(raw_target).expanduser()
+            resolved = target.resolve(strict=False) if target.is_absolute() else (cwd / target).resolve(strict=False)
+            if not _path_inside_any_root(resolved, roots):
+                return f"COMMAND_ACCESS_DENIED: delete target outside workspace roots: {raw_target}"
+    return ""
+
+
+# LLM: _shell_tokens mirrors command_policy tokenization for lightweight delete-target checks.
+# 函数用途: 用 shlex 拆命令字符串；解析失败时不额外拦截，交给 subprocess 或共享 command policy 返回错误。
+def _shell_tokens(command: str) -> list[str]:
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        return list(lexer)
+    except ValueError:
+        return []
+
+
+# LLM: _delete_targets filters command options and stops at shell operators.
+# 函数用途: 从 rm/rmdir/unlink 参数中提取路径目标，不把 -rf/--force 当路径。
+def _delete_targets(args: list[str]) -> list[str]:
+    targets: list[str] = []
+    for arg in args:
+        if arg and set(arg).issubset({"&", "|", ";", ">", "<"}):
+            break
+        if arg == "--":
+            continue
+        if arg.startswith("-") and arg != "-":
+            continue
+        targets.append(arg)
+    return targets
+
+
 # LLM: _bounded_output preserves enough command output for diagnosis without flooding the live prompt.
 # 函数用途: 按配置截断单个 stdout/stderr 字段，并返回是否截断，避免大日志撑爆上下文。
 def _bounded_output(text: str, max_chars: int) -> tuple[str, bool]:
@@ -263,8 +297,17 @@ class ShellTool(BaseTool):
         if isinstance(command_result, ToolExecutionResult):
             return command_result
         command = command_result
-        if _is_dangerous_command(command):
-            return ToolExecutionResult(self.spec.name, False, f"危险命令被系统拒绝: {command[:50]}...")
+        command_policy = evaluate_command_policy(command, allow_shell_operators=True)
+        if not command_policy.allowed:
+            return ToolExecutionResult(
+                self.spec.name,
+                False,
+                (
+                    "危险命令被系统拒绝: "
+                    f"codes={','.join(command_policy.finding_codes)} command={command[:80]}..."
+                ),
+                error_code="COMMAND_POLICY_BLOCKED",
+            )
 
         timeout = _timeout_from_params(params, self.default_timeout)
         if timeout <= 0:
@@ -282,6 +325,9 @@ class ShellTool(BaseTool):
         )
         if isinstance(target, ToolExecutionResult):
             return target
+        delete_error = _delete_target_access_error(command, target, self.workspace_roots, self.access_mode)
+        if delete_error:
+            return ToolExecutionResult(self.spec.name, False, delete_error, error_code="PATH_OUTSIDE_WORKSPACE")
         try:
             result = self._run_command(command, target, timeout)
             return ToolExecutionResult(self.spec.name, True, _format_process_result(result, self.max_output_chars))

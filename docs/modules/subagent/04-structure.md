@@ -565,21 +565,21 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `services/persistence.py` 读取嵌套 capability 记录时会过滤未知字段，给 reserved/schema v2 留升级空间；过滤只发生在读取边界，不会吞掉当前模型已声明字段。
 - `services/lifecycle_capability_records.py` 承接 capability request/grant/gap 构造逻辑，让 `SubAgentLifecycleService` 保持读写编排职责，不随字段扩展继续变大。
 - 第一阶段只补“表达和持久化能力需求”的结构层，尚未放开 shell 执行；真实执行必须继续走后续 shell gateway、trash、输出预算和审计层。
-- `capability_scope.py` 是父级路由的 scope 投影层：从 request 提取 request snapshot、legacy constraints、command allowlist、gap attempted tools 和 escalation chain。`rm/rmdir/unlink` 这类删除请求不得进入 shell command allowlist，只能作为 request scope 审计事实交给 task trash 替代层处理。
+- `capability_scope.py` 是父级路由的 scope 投影层：从 request 提取 request snapshot、legacy constraints、command allowlist、gap attempted tools 和 escalation chain。删除请求不再因为 `rm/rmdir/unlink` 名字本身被判死刑；普通 workspace 清理可以进入受控 shell 策略，根目录、系统目录、家目录和裸盘破坏仍由最后保护硬拒。
 - `capability_request_identity.py` 是能力申请去重层：用 capability/tool/skill/MCP/命令/path/network/output budget 生成 scope 签名，避免 `capability_request` 工具调用和结构化结果重复写入同一个 request；命令签名会抽取 base command，和 shell gateway 的检查口径保持一致。
 - `manager_capabilities.py` 只负责把路由命中转成 `RecordCapabilityGrantParams`，不直接解释 shell 命令；`capability_route_service.py` 只负责 gap/dry-run/apply report 的 refs-only 记录。
 - `CapabilityRouteRecord.request_scope` / `grant_scope` 只用于审计和展示，不触发执行；后续 shell gateway 必须重新检查 grant、cwd、路径、网络和输出预算。
-- `shell_gateway.py` 是受控 shell 的策略入口。它提供 `ShellGatewayRequest`、`ShellGatewayDecision` 和 `plan_shell_command()`，执行层也必须复用这个策略层，不得绕过危险命令、cwd、网络和输出预算检查。`dry_run` 字段会跟随请求：计划阶段为 true，真实执行阶段为 false，避免模型把已执行命令误读成 dry-run。shell 操作符检查使用 `shlex` punctuation token，只阻断字符串命令里未引用的 `;|&<>` 等 shell 分隔符；argv list 命令不会按 shell 字符串扫描，因此 `["python3","-c","print(1); print('x' * 2000)"]` 这类 Python 语句分隔符不会被误挡，因为执行层使用 argv / `shell=False`。
+- `shell_gateway.py` 是受控 shell 的策略入口。它提供 `ShellGatewayRequest`、`ShellGatewayDecision` 和 `plan_shell_command()`，执行层也必须复用这个策略层，不得绕过灾难命令、cwd、网络和输出预算检查。普通 `rm file`、`rm -rf build`、`chmod 777 scratch` 不再因为命令名本身被硬拒；`rm -rf /`、`sudo rm -rf /etc`、`rm -rf $HOME`、裸盘 `dd`、`mkfs`、关机重启等仍硬拒。`dry_run` 字段会跟随请求：计划阶段为 true，真实执行阶段为 false，避免模型把已执行命令误读成 dry-run。shell 操作符检查使用 `shlex` punctuation token，只阻断字符串命令里未引用的 `;|&<>` 等 shell 分隔符；argv list 命令不会按 shell 字符串扫描，因此 `["python3","-c","print(1); print('x' * 2000)"]` 这类 Python 语句分隔符不会被误挡，因为执行层使用 argv / `shell=False`。
 - shell gateway 的 dry-run `allowed=True` 只代表“如果进入执行层，可以尝试执行”；它不表示已执行，也不允许子代理获得裸 shell。
 - 旧 `controlled_exec_gateway.py` / `tooling/controlled_exec.py` 链路只作为迁移期内部兼容层存在：普通模型目录默认不展示它，普通任务不应再被提示写 grant、`command_allowlist`、`path_scope`、`apply` 或 refs。新命令入口统一是 `run_command`，由运行时 `access_mode` 做权限边界。
-- 删除类命令当前仍由安全层兜底保护；后续如果需要真正删除/隔离文件，应补专门的 `delete_file` / quarantine 工具，而不是把删除伪装成通用 shell 能力。
+- 删除类命令现在走受控策略：工作区内普通清理允许，系统级破坏拒绝；未来如果要做可恢复隔离/回收站语义，再补专门的 `delete_file` / quarantine 工具，而不是把所有删除都塞进硬拦或 task trash。
 - `hierarchy_scope_guards.py` 的四层合同 guard 只在父级明确写出 `4 层` / `4层` / `四层` / `孙孙` / `depth=3` / `great-grandchild` / `root ->` 等词时启用；启用后 depth<2 的节点不能直接创建 leaf/worker，必须继续创建 coordinator。写根漂移 guard 会忽略父级内部 task/run workspace 引用，避免把 `task_dir` 这类上下文路径误判成用户产物根漂移。
 - `tooling/registry_tool_dispatch.py` 是 registry 已完成解析、授权和写边界后的最终执行分发层；普通工具走 `tool.execute()`，少数内部迁移工具才在这里接入额外运行时上下文。
 - `hierarchy_context.py` 只继承真正通用的机器事实：required/forbidden 文件、层级/depth/命名要求、工具缺口和能力申请事实。旧 controlled-exec 专项字段不再作为普通任务的默认继承合同。
 - `agent_core/runner_prompts.py` 的 capability request 模板只要求说明缺什么能力、为什么缺、期望父级返回什么结果；不要把父级授权细节变成模型必须填写的任务步骤。
 - `shell_gateway_execution.py` 提供第一版执行入口 `execute_shell_command()`；它先调用 `plan_shell_command()`，再用 `subprocess.Popen(..., shell=False)` 执行 argv，并用 `_read_limited()` 持续 drain stdout/stderr。
 - `ShellGatewayExecutionResult` 只保存预览、字节数、截断标记和文件 refs；完整输出不会自动塞进模型上下文，调用方要显式读 refs。
-- `task_trash.py` 是删除类动作的受控替代层：`ensure_task_trash()` 管目录，`move_to_task_trash()` 只做 workspace/task-local move 和 manifest 记录；shell gateway 仍阻断 `rm`。
+- `task_trash.py` 是删除类动作的可恢复替代层：`ensure_task_trash()` 管目录，`move_to_task_trash()` 只做 workspace/task-local move 和 manifest 记录。旧 `controlled_exec` 路径仍可选择 task trash；默认 `run_command`/shell gateway 则允许普通工作区清理并拒绝系统级破坏。
 - `fallback_report.py` 是父级保存兜底结果的最小写入层；它只写 task-local reports，不替代 runner 正常 artifact 写入，也不把报告内容提升进长期 memory。
 - `tool_call_context_reducer.py` 同时保护两条 live prompt 入口：assistant 回复里的大工具调用会摘要，`_record_tool_call` 里的工具 payload 也会摘要；小 dict payload 也渲染为摘要行，避免模型把历史 dict 复制成新工具调用。完整正文只能留在目标 artifact、debug detail 或显式读取的外部文件里。
 - `hierarchy_write_policy.py` 的 `requested_child_write_roots()` 会合并父级继承根、显式 `extra_write_roots` 和 child spec goal 中的产物路径；上层/协调/检查类节点也继承覆盖下级的写入根，便于验收、接管和救援。是否应该亲自写最终产物由角色职责、提示词和父级验收约束，不再用“没有写权限”来表达。

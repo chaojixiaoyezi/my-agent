@@ -107,18 +107,18 @@ def test_path_url_command_gate_blocks_escape_private_url_and_shell_operators(tmp
     assert passed.allowed is True
 
 
-def test_path_url_command_gate_blocks_argv_dangerous_executable(tmp_path: Path):
-    decision = _path_gate({"tool": "run_command", "argv": ["sudo", "ls"]}, tmp_path)
+def test_path_url_command_gate_blocks_argv_catastrophic_executable(tmp_path: Path):
+    decision = _path_gate({"tool": "run_command", "argv": ["mkfs.ext4", "/dev/sda1"]}, tmp_path)
 
     assert decision.finding_codes == ("COMMAND_DANGEROUS_EXECUTABLE_BLOCKED",)
-    assert decision.findings[0].evidence["executable"] == "sudo"
+    assert decision.findings[0].evidence["executable"] == "mkfs.ext4"
 
 
 def test_path_url_command_gate_blocks_string_dangerous_pattern(tmp_path: Path):
-    decision = _path_gate({"tool": "run_command", "command": "chmod 777 app.py"}, tmp_path)
+    decision = _path_gate({"tool": "run_command", "command": "sudo rm -rf /etc"}, tmp_path)
 
     assert decision.finding_codes == ("COMMAND_DANGEROUS_PATTERN_BLOCKED",)
-    assert decision.findings[0].evidence["pattern"] == "CHMOD_WORLD_WRITABLE"
+    assert decision.findings[0].evidence["pattern"] == "RM_PROTECTED_TARGET"
 
 
 def test_path_url_command_gate_allows_read_only_command(tmp_path: Path):

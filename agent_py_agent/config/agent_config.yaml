@@ -431,8 +431,9 @@ tool_http_timeout: 30
 
 # 命令运行权限档位。这里只暴露一个总开关，其他命令安全策略由运行时派生：
 # - restricted：保守模式，命令只能在配置工作区内执行，适合不信任任务。
-# - workspace-write：默认开发模式，命令可以在当前工作区内跑测试、构建和脚本。
-# - full-access：完全访问模式，允许显式切到系统其他目录；rm -rf /、格式化磁盘、关机等最后保护仍会拒绝。
+# - workspace-write：默认开发模式，命令可以在当前工作区内跑测试、构建、脚本和普通清理。
+# - full-access：完全访问模式，允许显式切到系统其他目录；rm -rf /、删除系统/家目录、格式化磁盘、关机等最后保护仍会拒绝。
+# 普通 rm/rmdir/chmod/sudo 不因名字本身被拒绝；真正的边界来自 access_mode、工作区范围和灾难命令保护。
 # 模型不需要知道 grant/path_scope/apply 之类内部字段；它只调用 run_command。
 access_mode: workspace-write
 

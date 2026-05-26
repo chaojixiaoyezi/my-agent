@@ -1856,3 +1856,10 @@
 - 中文说明：本轮跟随主代理工具面纠偏，子代理默认工具、角色模板、context bundle、workflow 和协作登记里的写入能力统一收敛为 `write_file` + `apply_patch`。以前的 append/replace/session/builder 工具不再作为模型可见工具。
 - 边界说明：这不是新增流程，也不是新的启动门；子代理仍按 prompt 和结构化 refs 干活，只是写文件时不再被引导进入多套专项写入路径。复杂 XLSX/PDF/未知格式由模型选择脚本/命令/库生成，系统保留路径、权限、原子写入和 closeout 验收。
 - 已测试：全量 `python3 -m pytest -q agent_py_agent/tests --tb=short --maxfail=20`、`ruff check agent_py_agent`、`python3 scripts/check_code_size.py --mode warn` 通过。
+
+## 2026-05-27 受控 shell 删除策略同步
+
+- 中文说明：`run_command` 和子代理 shell gateway 不再把 `rm/rmdir/chmod/sudo` 这类命令名本身当成硬失败。普通工作区清理可以执行；根目录、系统目录、家目录、裸盘写入、格式化和关机重启仍然硬拒。
+- 已实现：`command_policy.py` 改成灾难动作识别，能穿透 `sudo/env/time/timeout` 等包装判断真实命令；`shell.py` 复用同一策略，并在 `workspace-write` 下额外检查删除目标不能越出 workspace roots；`shell_gateway.py` 同步检查删除目标 scope。
+- 边界说明：这是安全运行边界，不是任务流程门。模型可以用普通 shell 清理临时文件，但不能借 shell 删除系统路径或越权删除别的工作区。
+- 已测试：command policy、run_command、runtime gateway、regression matrix 和 subagent shell gateway focused tests 通过；ruff 通过。

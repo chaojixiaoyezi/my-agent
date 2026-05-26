@@ -63,6 +63,7 @@
 
 - `agent_py_agent/agent/tooling/registry_execution.py`：统一工具入口，先过 runtime gate，再执行工具。
 - `agent_py_agent/agent/tooling/registry_resilience.py`：只读工具可有限重试，大输出落 artifact ref，mutating/dangerous 仍由幂等和审批门约束。
+- `agent_py_agent/agent/contracts/gates/command_policy.py`：共享命令策略；普通工作区清理不靠命令名硬拒，灾难级删除、裸盘写入、格式化和关机重启仍硬拒。`run_command` 和 shell gateway 复用同一套判断，避免两边策略漂移。
 - `agent_py_agent/agent/tooling/_filesystem_write.py`：通用 `write_file` 原子写入，支持文本 `content` 和二进制 `data_base64`。
 - `agent_py_agent/agent/tooling/_filesystem_patch.py`：通用 `apply_patch` 文本补丁，替代 append/replace/session 等多套专项写入工具。
 - 已删除旧专项写入/构建工具：`append_file`、`replace_in_file`、`file_write_session`、`write_structured_json`、`data_to_workbook`、`markdown_to_pdf`。复杂格式由模型选择脚本/命令/库生成，系统只保留通用写入、路径边界和最终验收。

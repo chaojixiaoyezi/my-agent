@@ -70,6 +70,54 @@ class TestShellToolBasics:
 class TestShellToolDangerousCommands:
     """测试危险命令拦截。"""
 
+    def test_allow_workspace_file_delete(self, tmp_path: Path):
+        """允许工作区内普通删除。"""
+        from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        target = workspace / "old.txt"
+        target.write_text("old", encoding="utf-8")
+
+        tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
+        result = tool.execute({"command": "rm old.txt"})
+
+        assert result.ok is True
+        assert "return_code=0" in result.output
+        assert not target.exists()
+
+    def test_allow_workspace_recursive_cleanup(self, tmp_path: Path):
+        """允许工作区内目录清理。"""
+        from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
+
+        workspace = tmp_path / "workspace"
+        build = workspace / "build"
+        build.mkdir(parents=True)
+        (build / "cache.txt").write_text("cache", encoding="utf-8")
+
+        tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
+        result = tool.execute({"command": "rm -rf build"})
+
+        assert result.ok is True
+        assert "return_code=0" in result.output
+        assert not build.exists()
+
+    def test_workspace_write_blocks_external_delete_target(self, tmp_path: Path):
+        """workspace-write 下删除目标也不能越出工作区。"""
+        from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        external = tmp_path / "external.txt"
+        external.write_text("keep", encoding="utf-8")
+
+        tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
+        result = tool.execute({"command": "rm ../external.txt"})
+
+        assert result.ok is False
+        assert "delete target outside workspace roots" in result.output
+        assert external.exists()
+
     def test_block_rm_rf_root(self, tmp_path: Path):
         """拦截 rm -rf / 危险命令。"""
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
@@ -123,15 +171,14 @@ class TestShellToolDangerousCommands:
         assert "危险命令" in result.output
 
     def test_block_command_injection(self, tmp_path: Path):
-        """拦截命令注入。"""
+        """拦截包装后的根目录删除。"""
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
         tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
-        # 危险命令在开头，应该被拦截
-        result = tool.execute({"command": "rm -rf /"})
+        result = tool.execute({"command": "sudo rm -rf /"})
 
         assert result.ok is False
         assert "危险命令" in result.output

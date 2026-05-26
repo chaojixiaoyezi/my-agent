@@ -285,33 +285,22 @@ class TestScenario9EquivalentActionBypass:
         assert _is_dangerous_executable("mkfs.fat")
         assert _is_dangerous_executable("mkfs")
 
-    def test_rm_recursive_force_pattern_detected(self):
+    def test_workspace_recursive_cleanup_allowed(self):
         decision = evaluate_command_policy("rm -rf /tmp/x")
-        assert not decision.allowed
-        assert any(
-            f.evidence.get("pattern") == "RM_RECURSIVE_FORCE"
-            for f in decision.findings
-        )
+        assert decision.allowed
 
-    def test_rm_dash_r_dash_f_detected(self):
-        decision = evaluate_command_policy("rm -r -f /tmp/x")
+    def test_root_recursive_delete_detected(self):
+        decision = evaluate_command_policy("rm -r -f /")
         assert not decision.allowed
+        assert any(f.evidence.get("pattern") == "RM_PROTECTED_TARGET" for f in decision.findings)
 
-    def test_chmod_world_writable_detected(self):
+    def test_chmod_world_writable_allowed_by_command_policy(self):
         decision = evaluate_command_policy("chmod 777 file.txt")
-        assert not decision.allowed
-        assert any(
-            f.evidence.get("pattern") == "CHMOD_WORLD_WRITABLE"
-            for f in decision.findings
-        )
+        assert decision.allowed
 
-    def test_chmod_0777_detected(self):
+    def test_chmod_0777_allowed_by_command_policy(self):
         decision = evaluate_command_policy("chmod 0777 file.txt")
-        assert not decision.allowed
-        assert any(
-            f.evidence.get("pattern") == "CHMOD_WORLD_WRITABLE"
-            for f in decision.findings
-        )
+        assert decision.allowed
 
 
 # ============================================================

@@ -42,7 +42,7 @@ def test_shell_gateway_dry_run_allows_scoped_command(tmp_path) -> None:
     assert decision_to_dict(decision)["audit"]["run_id"] == "run-1"
 
 
-def test_shell_gateway_dry_run_blocks_dangerous_rm_even_if_granted(tmp_path) -> None:
+def test_shell_gateway_dry_run_allows_scoped_rm_when_granted(tmp_path) -> None:
     decision = plan_shell_command(
         ShellGatewayRequest(
             command="rm file.txt",
@@ -51,9 +51,22 @@ def test_shell_gateway_dry_run_blocks_dangerous_rm_even_if_granted(tmp_path) -> 
         )
     )
 
+    assert decision.allowed is True
+    assert decision.blockers == []
+    assert decision.audit["command_policy_findings"] == []
+
+
+def test_shell_gateway_dry_run_blocks_rm_target_outside_scope(tmp_path) -> None:
+    decision = plan_shell_command(
+        ShellGatewayRequest(
+            command="rm ../outside.txt",
+            workspace_root=tmp_path,
+            command_allowlist=["rm"],
+        )
+    )
+
     assert decision.allowed is False
-    assert decision.blockers == ["COMMAND_DANGEROUS_EXECUTABLE_BLOCKED"]
-    assert decision.audit["command_policy_findings"][0]["evidence"]["executable"] == "rm"
+    assert decision.blockers == ["delete_target_outside_allowed_roots:../outside.txt"]
 
 
 def test_shell_gateway_dry_run_blocks_shell_metacharacters(tmp_path) -> None:
@@ -69,18 +82,18 @@ def test_shell_gateway_dry_run_blocks_shell_metacharacters(tmp_path) -> None:
     assert "COMMAND_SHELL_OPERATOR_BLOCKED" in decision.blockers
 
 
-def test_shell_gateway_reuses_command_policy_for_dangerous_patterns(tmp_path) -> None:
+def test_shell_gateway_reuses_command_policy_for_protected_delete_targets(tmp_path) -> None:
     decision = plan_shell_command(
         ShellGatewayRequest(
-            command="chmod 777 file.txt",
+            command="sudo rm -rf /etc",
             workspace_root=tmp_path,
-            command_allowlist=["chmod"],
+            command_allowlist=["rm"],
         )
     )
 
     assert decision.allowed is False
     assert decision.blockers == ["COMMAND_DANGEROUS_PATTERN_BLOCKED"]
-    assert decision.audit["command_policy_findings"][0]["evidence"]["pattern"] == "CHMOD_WORLD_WRITABLE"
+    assert decision.audit["command_policy_findings"][0]["evidence"]["pattern"] == "RM_PROTECTED_TARGET"
 
 
 def test_shell_gateway_allows_quoted_python_statement_separators(tmp_path) -> None:
@@ -220,11 +233,28 @@ def test_shell_gateway_execute_truncates_large_output(tmp_path) -> None:
 def test_shell_gateway_execute_does_not_run_blocked_command(tmp_path) -> None:
     result = execute_shell_command(
         ShellGatewayRequest(
-            command="rm file.txt",
+            command="rm -rf /",
             workspace_root=tmp_path,
             command_allowlist=["rm"],
         )
     )
 
     assert result.executed is False
-    assert result.decision.blockers == ["COMMAND_DANGEROUS_EXECUTABLE_BLOCKED"]
+    assert result.decision.blockers == ["COMMAND_DANGEROUS_PATTERN_BLOCKED"]
+
+
+def test_shell_gateway_execute_can_remove_workspace_file_when_granted(tmp_path) -> None:
+    target = tmp_path / "old.txt"
+    target.write_text("old", encoding="utf-8")
+
+    result = execute_shell_command(
+        ShellGatewayRequest(
+            command="rm old.txt",
+            workspace_root=tmp_path,
+            command_allowlist=["rm"],
+        )
+    )
+
+    assert result.executed is True
+    assert result.exit_code == 0
+    assert not target.exists()

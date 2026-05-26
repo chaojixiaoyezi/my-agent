@@ -146,8 +146,12 @@ before changing code.
   model-authored `grant_id`, `command_allowlist`, `path_scope`, `apply`, or output
   budget fields.  Legacy `controlled_exec` code may exist during migration, but
   it must not be introduced into ordinary task prompts or default tool catalogs.
-- Delete-like child-agent operations must route to task-local trash.  Do not expose
-  `rm`/`rmdir`/`unlink` as direct shell execution for subagents.
+- Shell policy must be controlled rather than name-banned: ordinary cleanup such
+  as `rm file`, `rm -rf build`, `rmdir tmp`, or `chmod 777 scratch` may run when it
+  stays inside the configured access boundary.  Catastrophic actions such as
+  deleting `/`, deleting system/home roots, writing raw disks with `dd`,
+  formatting disks, or shutting down/rebooting remain hard-blocked even when
+  `access_mode=full-access`.
 
 ## 7.1 Guard Boundary / 守卫边界
 
