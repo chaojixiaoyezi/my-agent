@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,21 @@ from ._filesystem_helpers import (
 from .filesystem_artifact_guard import tool_output_artifact_typo_hint
 from .filesystem_read_file import execute_read_file
 from .models import BaseTool, ToolExecutionResult, ToolSpec
+
+_COMMON_FILE_DISCOVERY_IGNORES = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        "node_modules",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".venv",
+        "venv",
+    }
+)
 
 
 # LLM: FileSystemTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
@@ -124,6 +140,7 @@ class ListFilesTool(FileSystemTool):
                 "file_glob": "按 glob 过滤文件/目录名，例如 *.py",
                 "include_dirs": "是否包含目录，默认 true",
                 "include_files": "是否包含文件，默认 true",
+                "include_ignored": "是否包含常见噪声目录，如 .git/node_modules，默认 false",
             },
             parameter_details={
                 "path": "相对工作区的目录路径；不传时默认从项目根目录开始列。",
@@ -134,6 +151,7 @@ class ListFilesTool(FileSystemTool):
                 "file_glob": "按工作区相对路径或文件名匹配；例如 *.py、src/*.ts。",
                 "include_dirs": "false 时只返回文件。",
                 "include_files": "false 时只返回目录。",
+                "include_ignored": "默认跳过 .git、node_modules 和常见缓存目录；确实要看时传 true。",
             },
             examples=[
                 '{"tool": "list_files", "path": "."}',
@@ -158,7 +176,7 @@ class ListFilesTool(FileSystemTool):
     # LLM: ListFilesTool._list_target keeps execute focused on validation and path safety.
     # 函数用途: 遍历目标目录，按分页和过滤参数生成 list_files 输出。
     def _list_target(self, target: Path, request: _ListFilesRequest) -> ToolExecutionResult:
-        iterator = target.rglob("*") if request.recursive else target.iterdir()
+        iterator = _iter_list_candidates(target, recursive=request.recursive, include_ignored=request.include_ignored)
         entries: list[str] = []
         seen = 0
         paged_notice_added = False
@@ -221,6 +239,7 @@ class _ListFilesRequest:
     file_glob: str
     include_dirs: bool
     include_files: bool
+    include_ignored: bool
 
 
 # LLM: _list_files_request_from_params validates model JSON before any directory traversal.
@@ -244,7 +263,33 @@ def _list_files_request_from_params(params: dict[str, Any], max_entries: int) ->
         ),
         include_dirs=_bool_param(_bundled_filesystem_param(params, "include_dirs", True), default=True),
         include_files=_bool_param(_bundled_filesystem_param(params, "include_files", True), default=True),
+        include_ignored=_bool_param(_bundled_filesystem_param(params, "include_ignored", False), default=False),
     )
+
+
+# LLM: _iter_list_candidates keeps list_files deterministic and skips common project-noise dirs by default.
+# 函数用途: 生成稳定排序的目录候选项；递归时避免扫描 .git/node_modules 等常见噪声目录。
+def _iter_list_candidates(target: Path, *, recursive: bool, include_ignored: bool) -> list[Path]:
+    if not recursive:
+        return sorted(
+            [item for item in target.iterdir() if include_ignored or item.name not in _COMMON_FILE_DISCOVERY_IGNORES],
+            key=_path_sort_key,
+        )
+    candidates: list[Path] = []
+    for root, dirnames, filenames in os.walk(target):
+        if not include_ignored:
+            dirnames[:] = [dirname for dirname in dirnames if dirname not in _COMMON_FILE_DISCOVERY_IGNORES]
+        root_path = Path(root)
+        candidates.extend(root_path / dirname for dirname in dirnames)
+        candidates.extend(root_path / filename for filename in filenames)
+    return sorted(candidates, key=_path_sort_key)
+
+
+# LLM: _path_sort_key provides deterministic file navigation output across filesystems.
+# 函数用途: 给文件导航结果提供大小写无关的稳定排序键。
+def _path_sort_key(path: Path) -> tuple[str, str]:
+    text = path.as_posix()
+    return (text.lower(), text)
 
 
 # LLM: ReadFileTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。

@@ -14,6 +14,7 @@ from .artifact import ReadArtifactTool
 from .filesystem import (
     ApplyPatchTool,
     FileSystemTool,
+    FindFilesTool,
     ListFilesTool,
     ReadFileTool,
     SearchTextTool,
@@ -41,6 +42,7 @@ __all__ = [
     "BaseToolSearchProvider",
     "FetchUrlTool",
     "FileSystemTool",
+    "FindFilesTool",
     "HttpRequestTool",
     "HybridToolRetriever",
     "KeywordToolSearchProvider",

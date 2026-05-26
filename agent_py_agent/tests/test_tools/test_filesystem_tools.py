@@ -6,11 +6,14 @@
 """
 
 import tempfile
+import types
 from pathlib import Path
 
+from agent_py_agent.agent.tooling import _filesystem_search as search_mod
 from agent_py_agent.agent.tools import (
     ApplyPatchTool,
     FetchUrlTool,
+    FindFilesTool,
     HttpRequestTool,
     ListFilesTool,
     ReadFileTool,
@@ -376,6 +379,110 @@ def test_search_text_supports_limit_offset_and_glob(tmp_path: Path):
     assert "next_offset" not in result.output
 
 
+def test_search_text_supports_files_and_count_output_modes(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "a.py").write_text("Needle one\nNeedle two\n", encoding="utf-8")
+    (workspace / "b.py").write_text("Needle three\n", encoding="utf-8")
+    tool = SearchTextTool(workspace, max_matches=10)
+
+    files = tool.execute({"query": "Needle", "output_mode": "files_with_matches"})
+    counts = tool.execute({"query": "Needle", "output_mode": "count"})
+
+    assert files.ok
+    assert "a.py" in files.output
+    assert "b.py" in files.output
+    assert "Needle one" not in files.output
+    assert counts.ok
+    assert "a.py: 2" in counts.output
+    assert "b.py: 1" in counts.output
+
+
+def test_search_text_supports_regex_and_ignore_case(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "alerts.txt").write_text("ALERT-123\nalert-abc\n", encoding="utf-8")
+    tool = SearchTextTool(workspace, max_matches=10)
+
+    regex = tool.execute({"query": r"alert-\d+", "literal": False, "ignore_case": True})
+    literal = tool.execute({"query": r"alert-\d+", "literal": True, "ignore_case": True})
+
+    assert regex.ok
+    assert "ALERT-123" in regex.output
+    assert "alert-abc" not in regex.output
+    assert literal.ok
+    assert "没有找到匹配项" in literal.output
+
+
+def test_search_text_skips_common_noise_dirs_by_default(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "src.py").write_text("needle visible\n", encoding="utf-8")
+    node_modules = workspace / "node_modules"
+    node_modules.mkdir()
+    (node_modules / "pkg.py").write_text("needle hidden\n", encoding="utf-8")
+    tool = SearchTextTool(workspace, max_matches=10)
+
+    default = tool.execute({"query": "needle"})
+    included = tool.execute({"query": "needle", "include_ignored": True})
+
+    assert default.ok
+    assert "src.py" in default.output
+    assert "node_modules" not in default.output
+    assert included.ok
+    assert "node_modules/pkg.py" in included.output
+
+
+def test_search_text_uses_rg_backend_when_available(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "a.py").write_text("Needle one\n", encoding="utf-8")
+    tool = SearchTextTool(workspace, max_matches=10)
+    calls: list[list[str]] = []
+
+    def fake_run(args, **_kwargs):
+        calls.append(args)
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=(
+                '{"type":"match","data":{"path":{"text":"'
+                + str(workspace / "a.py")
+                + '"},"lines":{"text":"Needle one\\n"},"line_number":1}}\n'
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(search_mod, "shutil", types.SimpleNamespace(which=lambda _name: "/usr/bin/rg"), raising=False)
+    monkeypatch.setattr(search_mod, "subprocess", types.SimpleNamespace(run=fake_run), raising=False)
+
+    result = tool.execute({"query": "Needle", "file_glob": "*.py", "literal": True})
+
+    assert result.ok
+    assert "a.py:1: Needle one" in result.output
+    assert calls
+    assert calls[0][0] == "/usr/bin/rg"
+    assert "--fixed-strings" in calls[0]
+    assert "--glob" in calls[0]
+
+
+def test_search_text_treats_rg_no_matches_as_empty_result(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "a.py").write_text("Needle one\n", encoding="utf-8")
+    tool = SearchTextTool(workspace, max_matches=10)
+
+    def fake_run(_args, **_kwargs):
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(search_mod, "shutil", types.SimpleNamespace(which=lambda _name: "/usr/bin/rg"), raising=False)
+    monkeypatch.setattr(search_mod, "subprocess", types.SimpleNamespace(run=fake_run), raising=False)
+
+    result = tool.execute({"query": "Missing"})
+
+    assert result.ok
+    assert "没有找到匹配项" in result.output
+
+
 def test_list_files_supports_limit_offset_depth_and_glob(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -404,6 +511,60 @@ def test_list_files_supports_limit_offset_depth_and_glob(tmp_path: Path):
     assert "c.md" not in result.output
     assert "nested/deep.py" not in result.output
     assert "next_offset=2" in result.output
+
+
+def test_list_files_sorts_entries_and_skips_common_noise_dirs(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "zeta.txt").write_text("z", encoding="utf-8")
+    (workspace / "alpha.txt").write_text("a", encoding="utf-8")
+    git_dir = workspace / ".git"
+    git_dir.mkdir()
+    (git_dir / "HEAD").write_text("ref", encoding="utf-8")
+    node_modules = workspace / "node_modules"
+    node_modules.mkdir()
+    (node_modules / "pkg.js").write_text("pkg", encoding="utf-8")
+    tool = ListFilesTool(workspace, max_entries=20)
+
+    result = tool.execute({"path": ".", "recursive": True})
+
+    assert result.ok
+    lines = result.output.splitlines()
+    assert lines.index("alpha.txt") < lines.index("zeta.txt")
+    assert ".git" not in result.output
+    assert "node_modules" not in result.output
+
+
+def test_find_files_finds_glob_matches_and_skips_common_noise_dirs(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    src = workspace / "src"
+    src.mkdir()
+    (src / "a.py").write_text("a", encoding="utf-8")
+    (src / "b.md").write_text("b", encoding="utf-8")
+    node_modules = workspace / "node_modules"
+    node_modules.mkdir()
+    (node_modules / "hidden.py").write_text("hidden", encoding="utf-8")
+    tool = FindFilesTool(workspace, max_matches=20)
+
+    result = tool.execute({"pattern": "**/*.py", "path": "."})
+
+    assert result.ok
+    assert "src/a.py" in result.output
+    assert "src/b.md" not in result.output
+    assert "node_modules" not in result.output
+
+
+def test_find_files_is_registered_in_base_registry(tmp_path: Path):
+    registry = make_tool_registry(tmp_path)
+
+    result = registry.execute_call(
+        {"tool": "find_files", "pattern": "*.py", "path": "."},
+        allowed_tools=["find_files"],
+    )
+
+    assert result.ok
+    assert "没有找到匹配文件" in result.output
 
 
 def test_apply_patch_tool_updates_text():

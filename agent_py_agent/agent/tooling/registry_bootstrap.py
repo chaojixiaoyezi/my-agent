@@ -10,6 +10,7 @@ from .controlled_exec import ControlledExecTool
 from .delivery_acceptance import SubmitForAcceptanceTool
 from .filesystem import (
     ApplyPatchTool,
+    FindFilesTool,
     ListFilesTool,
     ReadFileTool,
     SearchTextTool,
@@ -46,6 +47,7 @@ def register_base_tools(registry: Any, params: Any) -> None:
 def _register_filesystem_tools(registry: Any, params: Any) -> None:
     workspace_roots = registry.workspace_roots
     registry.register(ListFilesTool(registry.workspace_root, params.max_entries, workspace_roots))
+    registry.register(FindFilesTool(registry.workspace_root, params.max_matches, workspace_roots))
     registry.register(ReadFileTool(registry.workspace_root, params.max_chars, workspace_roots))
     registry.register(SearchTextTool(registry.workspace_root, params.max_matches, workspace_roots))
     registry.register(

@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._filesystem_find import FindFilesTool
+
 # Re-export helpers for backwards compatibility
 from ._filesystem_helpers import (
     _MAX_PATH_CHARS,
@@ -41,6 +43,7 @@ __all__ = [
     "ToolExecutionResult",
     "ToolSpec",
     "FileSystemTool",
+    "FindFilesTool",
     # Helpers
     "_bool_param",
     "_has_control_chars",
