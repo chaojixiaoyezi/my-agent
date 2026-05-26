@@ -1,5 +1,5 @@
-# LLM: Subagent progress closeout converts task-local write progress into a structured runner result.
-# 模块用途: 当子代理已经写出可验收产物但还没写 output.json 时，用机器进度包生成 SUBAGENT_RESULT。
+# LLM: Subagent progress closeout converts task-local product progress into a structured runner result.
+# 模块用途: 当子代理已经写出声明产物但还没写 output.json 时，用机器进度包生成 SUBAGENT_RESULT。
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from ..backends import ModelResponse
 from ..subagents.utils import _read_json_object
 
 
-# LLM: subagent_progress_closeout_response turns ready task-local write progress into a final runner envelope.
-# 函数用途: 真实 runner 已写出完整产物但未再写 output.json 时，用 latest_tool_progress 的机器字段收口，避免最后一步靠模型自觉。
+# LLM: subagent_progress_closeout_response turns ready task-local product progress into a final runner envelope.
+# 函数用途: 真实 runner 已写出声明业务产物但未再写 output.json 时，用 latest_tool_progress 的机器字段收口，避免最后一步靠模型自觉。
 def subagent_progress_closeout_response(agent, fallback: ModelResponse) -> ModelResponse | None:
     task = _current_subagent_task(agent)
     if task is None:
@@ -45,7 +45,7 @@ def _latest_progress_payload(task) -> dict[str, object]:
 
 
 # LLM: _progress_ready_for_closeout checks machine facts, not natural-language summaries.
-# 函数用途: 只有存在真实产物路径、HTML 结构检查无 blocker/warning、且不是内部 output.json 时才自动收口。
+# 函数用途: HTML 走完整结构检查；其它开放格式必须命中声明 output_refs/output_files 才自动收口。
 def _progress_ready_for_closeout(progress: dict[str, object], task) -> bool:
     path = str(progress.get("latest_written_path") or "").strip()
     if not path or path == str(progress.get("closeout_written_path") or "").strip():
@@ -56,11 +56,11 @@ def _progress_ready_for_closeout(progress: dict[str, object], task) -> bool:
     if not artifact.is_file():
         return False
     integrity = progress.get("artifact_integrity")
-    if not isinstance(integrity, dict) or integrity.get("kind") != "html":
-        return False
-    if integrity.get("ok") is not True:
-        return False
-    return not (integrity.get("blocker_codes") or integrity.get("warning_codes"))
+    if isinstance(integrity, dict) and integrity.get("kind") == "html":
+        if integrity.get("ok") is not True:
+            return False
+        return not (integrity.get("blocker_codes") or integrity.get("warning_codes"))
+    return _matches_declared_product_output(path, task)
 
 
 # LLM: _progress_closeout_payload is the synthetic SUBAGENT_RESULT contract for ready artifacts.
@@ -71,15 +71,15 @@ def _progress_closeout_payload(progress: dict[str, object], task) -> dict[str, o
     evidence_refs = [ref for ref in [progress_ref] if ref]
     return {
         "status": "AWAITING_ACCEPTANCE",
-        "summary": "task-local progress shows a structurally complete product artifact awaiting parent acceptance.",
+        "summary": "task-local progress shows a declared product artifact awaiting parent acceptance.",
         "used_tools": [],
         "used_skills": [],
-        "evidence": _progress_evidence(progress_ref),
+        "evidence": _progress_evidence(progress_ref, artifact_ref),
         "evidence_packets": _progress_evidence_packets(artifact_ref, evidence_refs, task),
         "coverage_records": [],
         "capability_requests": [],
         "artifacts": _progress_artifacts(artifact_ref),
-        "tests": _progress_tests(),
+        "tests": _progress_tests(progress),
         "patches": [],
         "lessons": [],
         "next_actions": ["parent_acceptance"],
@@ -90,14 +90,15 @@ def _progress_closeout_payload(progress: dict[str, object], task) -> dict[str, o
 
 # LLM: _progress_evidence keeps the closeout evidence shape compact and stable.
 # 函数用途: 生成指向 progress 控制包的结构化证据，不读取产物正文。
-def _progress_evidence(progress_ref: str) -> list[dict[str, object]]:
+def _progress_evidence(progress_ref: str, artifact_ref: str) -> list[dict[str, object]]:
     return [
         {
-            "kind": "artifact_integrity",
-            "summary": "latest product artifact has no blocker or warning codes",
+            "kind": "product_artifact_progress",
+            "summary": "latest product artifact path is recorded by task-local progress",
             "path": progress_ref,
             "url": "",
             "ok": True,
+            "artifact_ref": artifact_ref,
         }
     ]
 
@@ -133,13 +134,23 @@ def _progress_artifacts(artifact_ref: str) -> list[dict[str, object]]:
 
 # LLM: _progress_tests reports the deterministic artifact-integrity check.
 # 函数用途: 写出机器可读测试记录，说明当前只证明结构完整，不替代业务验收。
-def _progress_tests() -> list[dict[str, object]]:
+def _progress_tests(progress: dict[str, object]) -> list[dict[str, object]]:
+    integrity = progress.get("artifact_integrity")
+    if isinstance(integrity, dict) and integrity.get("kind") == "html":
+        return [
+            {
+                "name": "artifact integrity",
+                "validation_method": "artifact_integrity",
+                "ok": True,
+                "summary": "no blocker_codes or warning_codes",
+            }
+        ]
     return [
         {
-            "name": "artifact integrity",
-            "validation_method": "artifact_integrity",
+            "name": "declared product artifact exists",
+            "validation_method": "file_exists",
             "ok": True,
-            "summary": "no blocker_codes or warning_codes",
+            "summary": "declared output path exists and is non-empty enough for parent acceptance",
         }
     ]
 
@@ -168,3 +179,45 @@ def _same_path(first: object, second: object) -> bool:
     except OSError:
         return left == right
 
+
+# LLM: _matches_declared_product_output prevents generic progress closeout from promoting scratch files.
+# 函数用途: 非 HTML/未知格式只在命中机器声明的 output_refs/output_files/artifact_refs 时自动交父级验收。
+def _matches_declared_product_output(path: str, task: object) -> bool:
+    return any(_same_path(path, ref) for ref in _declared_product_refs(task))
+
+
+# LLM: _declared_product_refs reads only machine fields that were set by create/schedule contracts.
+# 函数用途: 从 task.attributes 和 output-scope context packs 中读取交付目标，不解析 goal 自然语言。
+def _declared_product_refs(task: object) -> list[str]:
+    refs: list[str] = []
+    attrs = getattr(task, "attributes", {}) or {}
+    if isinstance(attrs, dict):
+        for key in ("output_refs", "output_files", "artifact_refs"):
+            refs.extend(_string_list(attrs.get(key)))
+    for pack in getattr(task, "context_packs", []) or []:
+        if not isinstance(pack, dict):
+            continue
+        contract = pack.get("contract")
+        if not isinstance(contract, dict):
+            continue
+        kind = str(contract.get("kind") or "").strip()
+        idem_key = str(contract.get("idempotency_key") or contract.get("key") or "").strip()
+        if kind != "system_derived_output_scope" and not idem_key.endswith(".output_refs"):
+            continue
+        refs.extend(_string_list(contract.get("scope_refs")))
+        refs.extend(_string_list(contract.get("target_artifact_refs")))
+    return _unique_strings(refs)
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list | tuple | set):
+        return []
+    return [str(item).strip() for item in value if str(item or "").strip()]
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    unique: list[str] = []
+    for value in values:
+        if value and value not in unique:
+            unique.append(value)
+    return unique

@@ -4,7 +4,7 @@
   "expected": {
     "contract_ok": false,
     "blocked": true,
-    "block_reason": "TOOL_REPEATED_EXACT_FAILURE",
+    "block_reason": "TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED",
     "replay_error_codes": [],
     "contract_error_codes": [
       "ARTIFACT_MISSING",

@@ -12,6 +12,7 @@ from typing import Any, ClassVar
 
 from .execution_artifact_integrity_items import expand_artifact_integrity_items
 from .execution_content_checks import CatContentCheckRequest, normalize_cat_content_check
+from .execution_file_exists_items import expand_file_exists_items
 from .execution_inferred_content_items import (
     ContentCheckInferenceRequest,
     inferred_content_check_items,
@@ -77,6 +78,13 @@ def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, An
     # LLM: Artifact integrity checks are inferred from artifact refs, not runner prose.
     # 函数用途: 在父级验收前补齐通用产物完整性检查，避免空测试清单直接假绿。
     prepared = expand_artifact_integrity_items(
+        prepared,
+        artifact_paths=context.artifact_paths,
+        workspace_root=workspace_root,
+    )
+    # LLM: file_exists is a generic existence alias; bind missing targets from machine artifact refs.
+    # 函数用途: 把模型/系统常写的 file_exists 转成可执行 file_check，不从自然语言 summary 猜路径。
+    prepared = expand_file_exists_items(
         prepared,
         artifact_paths=context.artifact_paths,
         workspace_root=workspace_root,

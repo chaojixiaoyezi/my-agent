@@ -79,3 +79,7 @@ class AcceptanceRecordParams:
     limit: int
     execute_acceptance_tests: bool = False
     auto_apply_acceptance_followup: bool = False
+    root_id: str = ""
+    parent_run_id: str = ""
+    include_run_ids: list[str] | None = None
+    exclude_run_ids: list[str] | None = None

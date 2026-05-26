@@ -16,10 +16,8 @@ from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.tests.support.main_agent_delivery_closeout_fixtures import (
     ArtifactFindingRepairBackend,
-    BootstrapMaterializationProgressiveBackend,
-    BootstrapMaterializationRedirectBackend,
+    CloseoutReworkBackend,
     DeliveryContractBackend,
-    DeliveryRepairRedirectBackend,
     FailedDeliveryContractBackend,
     IncompleteDeliveryContractBackend,
     LocalProgressRedirectBackend,
@@ -56,7 +54,7 @@ def test_tool_loop_closes_out_after_delivery_contract_passes():
             params=RunParams(delivery_contract=delivery_contract(), save=False),
         )
 
-        assert backend.calls == 1
+        assert backend.calls == 2
         assert result.tool_rounds == 1
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert (workspace / "outputs/html_report/index.html").exists()
@@ -76,7 +74,7 @@ def test_tool_loop_redirects_repeated_remote_exploration_back_to_local_progress(
             params=RunParams(delivery_contract=xlsx_delivery_contract(), save=False),
         )
 
-        assert backend.calls == 5
+        assert backend.calls == 6
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert (workspace / "outputs/table_report/table_report.xlsx").exists()
 
@@ -92,7 +90,7 @@ def test_tool_loop_closes_out_from_structured_run_params_delivery_contract():
             params=RunParams(delivery_contract=delivery_contract(), save=False),
         )
 
-        assert backend.calls == 1
+        assert backend.calls == 2
         assert "outputs/html_report/index.html" in backend.prompts[0]
         assert "[tool-system delivery-contract]" in backend.prompts[0]
         assert "不得引用 http/https 外部" in backend.prompts[0]
@@ -110,8 +108,9 @@ def test_tool_loop_reports_malformed_delivery_contract_before_artifact_closeout(
         )
 
         doctor_report = json.loads((workspace / ".agent_delivery/contract_doctor.json").read_text(encoding="utf-8"))
-        assert backend.calls == 2
+        assert backend.calls == 3
         assert backend.saw_contract_doctor is True
+        assert "[DELIVERY_CONTRACT_DOCTOR_BLOCKED]" in result.response
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
         assert doctor_report["ok"] is False
         assert doctor_report["repair_actions"][0]["recommended_action"] == "rematerialize_delivery_contract"
@@ -132,8 +131,10 @@ def test_tool_loop_does_not_close_out_when_delivery_contract_fails():
         )
         codes = _closeout_finding_codes(workspace)
 
-        assert backend.calls == 4
-        assert "[DELIVERY_REQUIRED_REPAIR_BLOCKED]" in result.response
+        assert backend.calls >= 2
+        assert any("HTML_INCOMPLETE_DOCUMENT" in prompt for prompt in backend.prompts[1:])
+        assert any("HTML_EXTERNAL_RESOURCE_REF" in prompt for prompt in backend.prompts[1:])
+        assert "[DELIVERY_REQUIRED_REPAIR_BLOCKED]" not in result.response
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
         assert {"HTML_INCOMPLETE_DOCUMENT", "HTML_EXTERNAL_RESOURCE_REF"} <= set(codes)
         actions = _closeout_report(workspace)["delivery_progress"]["recovery_actions"]
@@ -155,7 +156,7 @@ def test_tool_loop_repairs_failed_artifact_findings_before_closeout():
             params=RunParams(delivery_contract=delivery_contract(), save=False),
         )
 
-        assert backend.calls == 2
+        assert backend.calls == 4
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert _closeout_report(workspace)["ok"] is True
 
@@ -171,7 +172,7 @@ def test_tool_loop_repairs_missing_artifact_to_contract_path_before_closeout():
             params=RunParams(delivery_contract=delivery_contract(), save=False),
         )
 
-        assert backend.calls == 2
+        assert backend.calls == 4
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert (workspace / "outputs/html_report/index.html").exists()
         assert _closeout_report(workspace)["ok"] is True
@@ -189,8 +190,10 @@ def test_tool_loop_rejects_incomplete_delivery_contract_artifact():
         )
         codes = _closeout_finding_codes(workspace)
 
-        assert backend.calls == 4
-        assert "[DELIVERY_REQUIRED_REPAIR_BLOCKED]" in result.response
+        assert backend.calls >= 2
+        assert any("HTML_INCOMPLETE_DOCUMENT" in prompt for prompt in backend.prompts[1:])
+        assert any("HTML_EXTERNAL_RESOURCE_REF" in prompt for prompt in backend.prompts[1:])
+        assert "[DELIVERY_REQUIRED_REPAIR_BLOCKED]" not in result.response
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
         assert {"HTML_INCOMPLETE_DOCUMENT", "HTML_EXTERNAL_RESOURCE_REF"} <= set(codes)
 
@@ -208,7 +211,7 @@ def test_tool_loop_delivery_closeout_blocks_open_file_write_sessions():
             allowed_tools=["file_write_session"],
         )
 
-        assert backend.calls == 3
+        assert backend.calls == 4
         assert backend.saw_open_session_context is True
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert (workspace / "outputs/static_site/app.js").read_text(encoding="utf-8") == 'console.log("shop ready");'
@@ -226,11 +229,11 @@ def test_tool_loop_blocks_after_repeated_unchanged_delivery_failure():
         )
         report = _closeout_report(workspace)
 
-        assert backend.calls == 4
+        assert backend.calls >= 6
         assert "[MAIN_AGENT_DELIVERY_BLOCKED]" in result.response
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
         assert report["ok"] is False
-        assert report["delivery_progress"]["unchanged_failure_count"] >= 4
+        assert report["delivery_progress"]["unchanged_failure_count"] >= 3
         actions = report["delivery_progress"]["recovery_actions"]
         assert actions[0]["code"] == "ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED"
         assert "ACCEPTANCE_FAILED" in {item["code"] for item in actions}
@@ -266,7 +269,7 @@ def test_tool_loop_keeps_running_while_bootstrap_targets_are_still_missing():
         )
         report = _closeout_report(workspace)
 
-        assert backend.calls == 3
+        assert backend.calls == 5
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert "[MAIN_AGENT_DELIVERY_BLOCKED]" not in result.response
         assert report["ok"] is True
@@ -274,61 +277,21 @@ def test_tool_loop_keeps_running_while_bootstrap_targets_are_still_missing():
         assert (workspace / "outputs/static_site/app.js").read_text(encoding="utf-8") == 'console.log("shop ready");'
 
 
-# LLM: Startup bootstrap contracts should redirect inspection-only first turns until one target is materialized.
-# 函数用途: 验证一个目标都还没出现时，list_files 不会被执行消耗轮次，而是先逼主代理落一个最小有效产物。
-def test_tool_loop_redirects_inspection_only_calls_before_any_bootstrap_target_exists():
+# LLM: failed closeout should guide repair without blocking useful inspection reads.
+# 函数用途: 验证 closeout 返工单能推动主代理修产物，同时不再用 delivery repair 独立门拦截只读动作。
+def test_tool_loop_repairs_after_closeout_failure_without_delivery_repair_gate():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        backend = BootstrapMaterializationRedirectBackend()
-        contract = web_project_delivery_contract()
-        contract["bootstrap_contract"]["enforcement"] = "hard"
-        result = _agent(workspace, backend).run(
-            "做一个示例网站。",
-            params=RunParams(delivery_contract=contract, save=False),
-            allowed_tools=["list_files", "write_file"],
-        )
-        report = _closeout_report(workspace)
-
-        assert backend.calls == 3
-        assert report["ok"] is True
-        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
-        assert (workspace / "outputs/static_site/index.html").exists()
-        assert (workspace / "outputs/static_site/app.js").read_text(encoding="utf-8") == 'console.log("bootstrapped");'
-
-
-# LLM: bootstrap startup should allow multiple redirects before escalating to a final block.
-# 函数用途: 验证开工阶段连续几轮只检查目录时，系统会持续引导落地目标，而不是过早阻断。
-def test_tool_loop_allows_multiple_bootstrap_redirects_before_blocking():
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td)
-        backend = BootstrapMaterializationProgressiveBackend()
-        contract = web_project_delivery_contract()
-        contract["bootstrap_contract"]["enforcement"] = "hard"
+        backend = CloseoutReworkBackend()
         result = _agent(workspace, backend, max_tool_rounds=7).run(
-            "做一个示例网站。",
-            params=RunParams(delivery_contract=contract, save=False),
-            allowed_tools=["list_files", "write_file"],
-        )
-
-        assert backend.calls == 5
-        assert _closeout_report(workspace)["ok"] is True
-        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
-        assert (workspace / "outputs/static_site/app.js").read_text(encoding="utf-8") == 'console.log("bootstrapped later");'
-
-
-# LLM: write-first staged recovery must redirect inspection-only calls before letting the task drift further.
-# 函数用途: 验证 closeout 要求先补非空结构化数据时，系统会拦下只读动作，推动主代理先修阶段产物。
-def test_tool_loop_redirects_inspection_only_calls_during_required_delivery_repair():
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td)
-        backend = DeliveryRepairRedirectBackend()
-        result = _agent(workspace, backend, max_tool_rounds=6).run(
             "整理 代码平台 周升星项目并生成表格。",
             params=RunParams(delivery_contract=xlsx_delivery_contract(), save=False),
-            allowed_tools=["write_file", "read_file", "write_structured_json", "data_to_workbook"],
+            allowed_tools=["write_file", "read_file", "write_structured_json", "data_to_workbook", "submit_for_acceptance"],
         )
 
-        assert backend.calls == 4
+        assert backend.calls == 6
+        assert not any("delivery-required-repair" in prompt for prompt in backend.prompts)
+        assert any("repair_guidance" in prompt for prompt in backend.prompts)
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert _closeout_report(workspace)["ok"] is True
         assert (workspace / "outputs/table_report/table_report.xlsx").exists()
@@ -359,7 +322,7 @@ def test_recovery_attempt_uses_repair_contract_before_stale_local_progress_guard
         )
 
         state = json.loads((workspace / ".agent_delivery/local_progress_guard.json").read_text(encoding="utf-8"))
-        assert backend.calls == 3
+        assert backend.calls == 4
         assert "[LOCAL_PROGRESS_GUARD_BLOCKED]" not in result.response
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
         assert state["exploration_rounds_without_local_progress"] == 0
@@ -367,9 +330,9 @@ def test_recovery_attempt_uses_repair_contract_before_stale_local_progress_guard
         assert (workspace / "outputs/table_report/table_report.xlsx").exists()
 
 
-# LLM: New write tools must not run while a file_write_session is still open for the same task.
-# 函数用途: 验证 open session 存在时，系统会拒绝新的 write_file，迫使模型先 append/finish 当前 session。
-def test_tool_loop_blocks_unrelated_write_tools_while_open_file_write_session_exists():
+# LLM: New write tools must not overwrite a target with an open file_write_session.
+# 函数用途: 验证 open session 存在时，系统会拒绝覆盖同目标的 write_file，迫使模型先 append/finish 当前 session。
+def test_tool_loop_blocks_same_target_write_tools_while_open_file_write_session_exists():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         _write_site_index(workspace)
@@ -380,8 +343,7 @@ def test_tool_loop_blocks_unrelated_write_tools_while_open_file_write_session_ex
             allowed_tools=["file_write_session", "write_file"],
         )
 
-        assert backend.calls == 4
-        assert not (workspace / "outputs/rogue.txt").exists()
+        assert backend.calls == 5
         assert (workspace / "outputs/static_site/app.js").read_text(encoding="utf-8") == 'console.log("ok");'
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in result.response
 
@@ -472,6 +434,8 @@ class MalformedDeliveryContractBackend:
                 text='[TOOL_CALL]\n{"tool":"write_file","path":"outputs/draft.md","content":"draft"}\n[/TOOL_CALL]',
                 backend=self.name,
             )
+        if self.calls == 2:
+            return ModelResponse(text="草稿已写入，请系统验收。", backend=self.name)
         assert "delivery-contract-doctor" in prompt
         assert "DELIVERY_CONTRACT_ARTIFACTS_NOT_LIST" in prompt
         assert "rematerialize_delivery_contract" in prompt

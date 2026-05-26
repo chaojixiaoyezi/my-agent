@@ -108,6 +108,154 @@ class TestSubagentBoardToolExecute:
 
         assert result.ok is True
 
+
+class TestInspectAgentTreeTool:
+    """测试只读代理树查看工具。"""
+
+    def test_returns_main_and_descendant_tree_without_dispatching(self, tmp_path):
+        """查看状态不能触发 dispatch，也不能清掉 pending_work。"""
+        import json
+
+        from agent_py_agent.agent.agent_core.orchestration_tools import InspectAgentTreeTool
+        from agent_py_agent.agent.subagents.manager import SubAgentManager
+
+        manager = SubAgentManager(tmp_path)
+        root = manager.create_run(goal="root", thought="", plan=["split"], role="coordinator")
+        child = manager.create_run(
+            goal="child",
+            thought="",
+            plan=["write"],
+            parent_id=root.id,
+            root_id=root.id,
+            depth=1,
+            role="worker",
+        )
+        child.current_tool = "write_file"
+        child.last_progress_summary = "写出阶段报告"
+        child.artifact_refs = ["artifact:report.md"]
+        child.blockers = ["等待验收"]
+        manager.save(child)
+        root.child_ids = [child.id]
+        manager.save(root)
+
+        mock_agent = MagicMock()
+        mock_agent.subagents = manager
+        mock_agent._has_pending_work = True
+        mock_agent.dispatch_subagents = MagicMock()
+
+        result = InspectAgentTreeTool(mock_agent).execute({"root_id": root.id})
+        payload = json.loads(result.output)
+
+        assert result.ok is True
+        assert payload["effect"] == "read_only"
+        assert payload["main"]["agent_kind"] == "main_agent"
+        assert payload["nodes"][1]["task_id"] == child.id
+        assert payload["nodes"][1]["parent_run_id"] == root.id
+        assert payload["nodes"][1]["current_tool"] == "write_file"
+        assert payload["nodes"][1]["last_progress_summary"] == "写出阶段报告"
+        assert payload["nodes"][1]["artifact_refs"] == ["artifact:report.md"]
+        assert payload["nodes"][1]["blockers"] == ["等待验收"]
+        assert mock_agent.dispatch_subagents.call_count == 0
+        assert mock_agent._has_pending_work is True
+
+
+class TestRaiseMainEventTool:
+    """测试子孙代理事件冒泡。"""
+
+    # LLM: Descendant event tools should infer tree lineage from task_id, not require the model to copy ids.
+    # 函数用途: 孙代理只传自己的 task_id 时，事件账本仍能记录 source/parent/root，供主代理快速定位子树。
+    def test_infers_descendant_lineage_from_task_id(self, tmp_path):
+        from agent_py_agent.agent.agent_core.orchestration_tools import RaiseMainEventTool
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+        thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1"})
+        root = agent.subagents.create_run(goal="root", thought="", plan=["root"])
+        child = agent.subagents.create_run(
+            goal="child",
+            thought="",
+            plan=["child"],
+            parent_id=root.id,
+            root_id=root.id,
+            depth=1,
+        )
+        grandchild = agent.subagents.create_run(
+            goal="grandchild",
+            thought="",
+            plan=["grandchild"],
+            parent_id=child.id,
+            root_id=root.id,
+            depth=2,
+            attributes={"conversation_thread_id": thread.thread_id},
+        )
+
+        result = RaiseMainEventTool(agent).execute(
+            {
+                "task_id": grandchild.id,
+                "event_type": "coordination_needed",
+                "summary": "需要上级协调其它代理补充证据。",
+            }
+        )
+        observation = agent.conversation_store.recent_observations(thread.thread_id)[-1]
+
+        assert result.ok is True
+        assert observation.source_agent_id == grandchild.id
+        assert observation.parent_agent_id == child.id
+        assert observation.root_task_id == root.id
+
+
+class TestDispatchSubagentsTool:
+    """测试 dispatch_subagents 的模型参数容错。"""
+
+    def test_top_level_subagent_ids_alias_runs_and_executes(self, tmp_path):
+        """真实模型常写 subagent_ids；顶层显式目标应按 run_ids 推进真实 runner。"""
+        from agent_py_agent.agent.agent_core.orchestration_dispatch_tool import (
+            DispatchSubagentsTool,
+        )
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+        task = agent.subagents.create_run(goal="child", thought="", plan=["do"], role="worker")
+        report = SimpleNamespace(dry_run=False, summary={"ok": True}, records=[])
+        agent.dispatch_subagents = MagicMock(return_value=report)
+
+        result = DispatchSubagentsTool(agent).execute({"subagent_ids": [task.id]})
+        params = agent.dispatch_subagents.call_args.kwargs["params"]
+
+        assert result.ok is True
+        assert params.include_run_ids == [task.id]
+        assert params.apply is True
+        assert params.execute_runners is True
+        assert params.max_runners == 1
+
+    def test_top_level_items_run_id_alias_runs_and_executes(self, tmp_path):
+        """真实模型也会写 items:[{run_id:...}]；工具入口应归一成 include_run_ids。"""
+        from agent_py_agent.agent.agent_core.orchestration_dispatch_tool import (
+            DispatchSubagentsTool,
+        )
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+        first = agent.subagents.create_run(goal="child-a", thought="", plan=["do"], role="worker")
+        second = agent.subagents.create_run(goal="child-b", thought="", plan=["do"], role="worker")
+        report = SimpleNamespace(dry_run=False, summary={"ok": True}, records=[])
+        agent.dispatch_subagents = MagicMock(return_value=report)
+
+        result = DispatchSubagentsTool(agent).execute(
+            {"items": [{"run_id": first.id}, {"run_id": second.id}]}
+        )
+        params = agent.dispatch_subagents.call_args.kwargs["params"]
+
+        assert result.ok is True
+        assert params.include_run_ids == [first.id, second.id]
+        assert params.apply is True
+        assert params.execute_runners is True
+        assert params.max_runners == 2
+
+
 class TestScheduleChildSubagentsTool:
     """测试当前 runner 创建下一层子节点的安全边界。"""
 

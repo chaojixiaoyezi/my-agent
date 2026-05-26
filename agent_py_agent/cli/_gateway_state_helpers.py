@@ -280,6 +280,7 @@ def _gateway_watch_params(context: GatewayRunContext) -> WatchParams:
         locked_files=context.locked_files,
         interval=options.interval,
         max_cycles=options.max_cycles,
+        advance=True,
         force_lock=context.force_lock,
         stop_file=context.paths.stop_request,
     )

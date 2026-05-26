@@ -201,11 +201,12 @@ class TestCreateSubagentsItemsMode:
         assert "不要同时传 items 和 tasks" in result.output
         mock_agent.subagents.create_run.assert_not_called()
 
-    def test_create_subagents_rejects_direct_grandchild_items(self):
-        """root 入口只能创建直接小傻妞；小小傻妞应由上级用 schedule_child_subagents 创建。"""
+    def test_create_subagents_keeps_grandchild_like_names_as_display_text(self):
+        """名字里的小小傻妞/grandchild 只是展示文本，不应变成 create 阶段硬拒。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _agent()
+        mock_agent.subagents.create_run.side_effect = _create_run_sequence()
         result = CreateSubagentsTool(mock_agent).execute({
             "items": [{
                 "goal": "分析印尼市场",
@@ -214,10 +215,9 @@ class TestCreateSubagentsItemsMode:
             }],
         })
 
-        assert result.ok is False
-        assert "create_subagents 只能创建直接小傻妞" in result.output
-        assert "schedule_child_subagents" in result.output
-        mock_agent.subagents.create_run.assert_not_called()
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert result.ok is True
+        assert params.agent_name == "小小傻妞-印尼市场"
 
 
 class TestCreateSubagentsToolGrantProtocol:

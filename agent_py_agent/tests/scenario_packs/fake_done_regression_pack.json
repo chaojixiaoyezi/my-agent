@@ -43,18 +43,6 @@
       ]
     },
     {
-      "case_id": "fake_llm_bootstrap_issue",
-      "kind": "fake_llm",
-      "fixture_ref": "../fake_llm/bootstrap_materialization_then_success.json",
-      "expect_error_codes": [
-        "RUNTIME_ISSUE_SUCCESS_CONFLICT",
-        "FINAL_STATUS_REJECTED"
-      ],
-      "expect_runtime_issue_codes": [
-        "BOOTSTRAP_MATERIALIZATION_REQUIRED"
-      ]
-    },
-    {
       "case_id": "fake_llm_done_without_evidence",
       "kind": "fake_llm",
       "fixture_ref": "../fake_llm/done_without_evidence.json",
@@ -76,7 +64,7 @@
       "case_id": "replay_repeated_tool",
       "kind": "replay",
       "trace_ref": "../replay/repeated_tool_should_block.jsonl",
-      "expect_block_reason": "TOOL_REPEATED_EXACT_FAILURE"
+      "expect_block_reason": "TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED"
     },
     {
       "case_id": "replay_runtime_issue_conflict",
@@ -87,7 +75,7 @@
         "FINAL_STATUS_REJECTED"
       ],
       "expect_runtime_issue_codes": [
-        "BOOTSTRAP_MATERIALIZATION_REQUIRED"
+        "NO_PROGRESS"
       ],
       "expect_replay_error_codes": [
         "RUNTIME_ISSUE_FINAL_CONFLICT"

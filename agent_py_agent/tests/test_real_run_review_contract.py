@@ -17,23 +17,18 @@ def test_real_run_review_clusters_failed_acceptance_reports(tmp_path: Path) -> N
             ],
         },
     )
-    _write_text(
-        tmp_path / "main-agent-stage3-github-retry15-20260521" / "main_agent_task_execution" / "tasks" / "github" / "stdout.txt",
-        "[DELIVERY_REQUIRED_REPAIR_BLOCKED] repair blocked",
-    )
-
     review = review_real_run_tree(tmp_path, run_glob="*20260521*")
 
     assert review.summary == {"failed": 1, "passed": 0, "total": 1, "unknown": 0}
     assert review.records[0].root_cause_tags == (
         "structured_columns_missing",
         "evidence_claims_missing",
-        "delivery_repair_blocked",
     )
     assert review.records[0].priority == "P1"
-    assert review.clusters[0].tag == "delivery_repair_blocked"
-    assert review.clusters[0].count == 1
-    assert review.clusters[0].run_ids == ("main-agent-stage3-github-retry15-20260521",)
+    assert {cluster.tag for cluster in review.clusters} == {
+        "evidence_claims_missing",
+        "structured_columns_missing",
+    }
 
 
 def test_real_run_review_preserves_success_and_static_site_failures(tmp_path: Path) -> None:

@@ -128,9 +128,9 @@ class TestBuildSubagentRunnerPrompt:
         assert huge_blob[:100] not in prompt
         assert len(prompt) < 12000
 
-    # LLM: Downstream runners must see resolved upstream artifacts before stale natural-language paths.
-    # 函数用途: 防止下游先读不存在的人名路径后直接 BLOCKED，而忽略 context_manifest 中已解析的真实上游产物。
-    def test_prompt_highlights_resolved_dependency_read_paths(self, tmp_path):
+    # LLM: Read refs are visible to runners without becoming startup dependencies.
+    # 函数用途: 路径线索进入 prompt，但语义是可读线索，不再要求 runner 先满足输入依赖门。
+    def test_prompt_shows_read_refs_without_dependency_gate_language(self, tmp_path):
         from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
         from agent_py_agent.agent.subagents.models import ContextManifest
 
@@ -158,7 +158,53 @@ class TestBuildSubagentRunnerPrompt:
         assert "resolved_read_paths" in prompt
         assert str(artifact) in prompt
         assert missing_alias in prompt
-        assert "某个自然语言路径不存在" in prompt
+        assert "不是启动前置条件" in prompt
+        assert "input_contract" not in prompt
+
+    # LLM: Addressed collaboration requests must expose generic clue content, not just request ids.
+    # 函数用途: 防止响应子代理只看到 case/request 引用却看不到开放世界线索、查询意图和响应形状。
+    def test_prompt_exposes_targeted_collaboration_clue_packet(self):
+        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
+
+        context = self._make_context(
+            "run_responder",
+            "根据收到的协作请求查找相关证据",
+            task_dir="/tmp/task",
+            allowed_tools=["case_status", "submit_evidence", "update_collaboration_request"],
+            context_bundle=_targeted_collaboration_bundle(),
+        )
+
+        prompt = _build_subagent_runner_prompt(context)
+
+        assert "clue-A42" in prompt
+        assert "corroborate_or_refute" in prompt
+        assert "artifact://source-a/context" in prompt
+        assert "expected_fields" in prompt
+
+
+def _targeted_collaboration_bundle() -> dict[str, object]:
+    return {
+        "collaboration": {
+            "targeted_request_count": 1,
+            "targeted_requests": [_targeted_collaboration_request()],
+        }
+    }
+
+
+def _targeted_collaboration_request() -> dict[str, object]:
+    return {
+        "case_id": "case-001",
+        "request_id": "creq-001",
+        "case_ref": "collaboration://case/case-001",
+        "request_ref": "collaboration://request/creq-001",
+        "question": "请按你的数据源查找是否存在同一线索。",
+        "problem_statement": "上游代理发现一个需要多源佐证的开放线索。",
+        "observed_facts": [{"label": "关键线索", "value": "clue-A42", "source_ref": "artifact://source-a"}],
+        "query_intent": {"goal": "corroborate_or_refute"},
+        "query_hints": [{"kind": "candidate_lookup", "value": "clue-A42"}],
+        "response_contract": {"expected_fields": ["matched", "evidence_refs", "limitations"]},
+        "context_refs": ["artifact://source-a/context"],
+    }
 
 
 class TestBuildSubagentRunnerRepairPrompt:

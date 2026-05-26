@@ -37,7 +37,7 @@ def replay_contract_trace(trace_path: Path, run_dir: Path) -> TraceReplayResult:
     tool_trace = [event for event in events if event.get("type") == "tool_result"]
     replay_facts = _replay_facts(events)
     final_status = _final_status(events)
-    block_reason = _repeated_failure_block_reason(tool_trace)
+    block_reason = _repeated_failure_block_reason(tool_trace, _repeat_fail_threshold(events))
     replay_errors = _replay_error_codes(final_status, replay_facts)
     contract_result = verify_contract_fixture(
         run_dir,
@@ -102,16 +102,30 @@ def _tool_trace_item(event: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _repeated_failure_block_reason(tool_trace: list[dict[str, object]]) -> str:
+def _repeated_failure_block_reason(tool_trace: list[dict[str, object]], repeat_fail_threshold: int = 10) -> str:
+    threshold = max(0, repeat_fail_threshold)
+    if threshold == 0:
+        return ""
     counts: dict[str, int] = {}
     for event in tool_trace:
         if bool(event.get("ok")):
             continue
         key = _tool_failure_key(event)
         counts[key] = counts.get(key, 0) + 1
-        if counts[key] >= 3:
-            return "TOOL_REPEATED_EXACT_FAILURE"
+        if counts[key] >= threshold * 3:
+            return "TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED"
     return ""
+
+
+def _repeat_fail_threshold(events: list[dict[str, object]]) -> int:
+    for event in events:
+        if event.get("type") != "runtime_config":
+            continue
+        try:
+            return max(0, int(event.get("repeat_fail_threshold", 10)))
+        except (TypeError, ValueError):
+            return 10
+    return 10
 
 
 def _replay_error_codes(

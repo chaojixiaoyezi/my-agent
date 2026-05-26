@@ -9,6 +9,7 @@ from .dispatch_record_params import (
     CapabilityRouteRecordParams,
     WorkflowRecordParams,
 )
+from .dispatch_runner_selection import scoped_runner_tasks
 from .dispatch_service import (
     DueCheckRecordParams,
     build_workflow_records,
@@ -41,7 +42,7 @@ def _planner_and_workflow_records(agent, ctx) -> list:
             build_workflow_records(
                 WorkflowRecordParams(
                     agent,
-                    agent.subagents.list_runs(),
+                    scoped_runner_tasks(agent.subagents.list_runs(), ctx),
                     ctx.normalized_workflow_mode,
                     ctx.limit,
                     ctx.apply,
@@ -67,10 +68,14 @@ def _due_and_leadership_records(agent, ctx) -> list:
             )
         )
     ]
-    leadership_record = make_leadership_recovery_plan_record(agent, ctx.cfg)
+    leadership_record = None if _has_explicit_dispatch_scope(ctx) else make_leadership_recovery_plan_record(agent, ctx.cfg)
     if leadership_record is not None:
         records.append(leadership_record)
     return records
+
+
+def _has_explicit_dispatch_scope(ctx) -> bool:
+    return bool(ctx.parent_run_id or ctx.root_id or ctx.include_run_ids or ctx.exclude_run_ids)
 
 
 # LLM: _action_apply_records maps dispatch context into scoped action apply records.

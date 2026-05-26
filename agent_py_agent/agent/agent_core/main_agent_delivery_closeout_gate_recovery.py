@@ -160,18 +160,7 @@ def contract_recovery_status(actions: list[dict[str, Any]]) -> str:
 
 def _rework_loop_payload(actions: list[dict[str, Any]]) -> dict[str, Any]:
     status = contract_recovery_status(actions)
-    if status == "blocked":
-        mode = "stop_and_report"
-        message = "存在不可自动修复的硬阻断，请停止自动继续并报告阻断原因。"
-    elif status == "needs_user_input":
-        mode = "ask_user_then_continue"
-        message = "需要用户确认或审批；拿到明确回复后再继续，不要假装已经完成。"
-    elif status == "recovering":
-        mode = "recover_then_revalidate"
-        message = "先按恢复动作恢复运行状态，再重新验收交付物。"
-    else:
-        mode = "repair_then_revalidate"
-        message = "按 actions 修复产物或证据，然后重新跑同一套合同验收；不要因为一次失败就结束任务。"
+    mode, message = _rework_loop_mode(status)
     return {
         "mode": mode,
         "message_zh": message,
@@ -179,6 +168,18 @@ def _rework_loop_payload(actions: list[dict[str, Any]]) -> dict[str, Any]:
         "requires_user": any(action.get("requires_user") is True for action in actions),
         "terminal": any(action.get("terminal") is True for action in actions),
     }
+
+
+def _rework_loop_mode(status: str) -> tuple[str, str]:
+    modes = {
+        "blocked": ("stop_and_report", "存在不可自动修复的硬阻断，请停止自动继续并报告阻断原因。"),
+        "needs_user_input": ("ask_user_then_continue", "需要用户确认或审批；拿到明确回复后再继续，不要假装已经完成。"),
+        "recovering": ("recover_then_revalidate", "先按恢复动作恢复运行状态，再重新验收交付物。"),
+    }
+    return modes.get(
+        status,
+        ("repair_then_revalidate", "按 actions 修复产物或证据，然后重新跑同一套合同验收；不要因为一次失败就结束任务。"),
+    )
 
 
 __all__ = ["attach_contract_recovery", "contract_recovery_status", "failed_gate_payloads", "merge_recovery_actions"]

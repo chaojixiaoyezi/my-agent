@@ -131,6 +131,10 @@ def waiting_reason(facts: RunStateFacts) -> str:
         return "tool"
     if status == "WAITING_FOR_CHILD":
         return "child"
+    if status in {"AWAITING_ACCEPTANCE", "VERIFYING"}:
+        return "acceptance"
+    if verification == "NEEDS_ACCEPTANCE":
+        return "acceptance"
     if status == "DONE" and verification not in VERIFIED_STATES:
         return "acceptance"
     if status == "RUNNING" and not facts.has_progress:
@@ -192,7 +196,9 @@ def recovery_decision(facts: RunStateFacts) -> RecoveryDecision:
         return RecoveryDecision(ACTION_CLOSEOUT, False, "done_verified")
     if channel == "BROKEN":
         return RecoveryDecision(ACTION_REPAIR_OR_PROBE_CHANNEL, False, "channel_broken")
-    if status == "DONE" and normalize_verification(facts.verification_status) not in VERIFIED_STATES:
+    if status in {"TIMEOUT", "CHANNEL_ERROR"} and can_repair(facts):
+        return RecoveryDecision(ACTION_REPAIR, False, "repairable_failure")
+    if waiting_reason(facts) == "acceptance":
         return RecoveryDecision(ACTION_WAIT_FOR_ACCEPTANCE, False, "done_unverified")
     if failure == "NO_PROGRESS":
         return RecoveryDecision(ACTION_CHANGE_STRATEGY_OR_STOP, False, "no_progress")

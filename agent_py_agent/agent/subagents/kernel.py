@@ -42,12 +42,17 @@ class SubagentKernelQuery:
 @dataclass(frozen=True)
 class SubagentKernelRun:
 
-    run_id: str
+    run_id: str = ""
+    task_id: str = ""
     session_id: str = ""
     thread_id: str = ""
     root_id: str = ""
+    root_run_id: str = ""
+    parent_task_id: str = ""
     parent_id: str = ""
+    parent_run_id: str = ""
     depth: int = 0
+    agent_kind: str = ""
     role: str = ""
     agent_name: str = ""
     status: str = ""
@@ -55,6 +60,11 @@ class SubagentKernelRun:
     failure_type: str = ""
     progress: float = 0.0
     current_step: str = ""
+    current_tool: str = ""
+    heartbeat_at: float = 0.0
+    updated_at: float = 0.0
+    last_progress_at: float = 0.0
+    last_progress_summary: str = ""
     latest_summary: str = ""
     child_ids: list[str] = field(default_factory=list)
     address: dict[str, object] = field(default_factory=dict)
@@ -189,12 +199,17 @@ def _task_to_kernel_run(
     all_tasks: list[SubAgentTask],
 ) -> SubagentKernelRun:
     return SubagentKernelRun(
+        task_id=task.id,
         run_id=task.id,
         session_id=task.subagent_session_id,
         thread_id=task.agent_thread_id,
         root_id=_root_for_run(task),
+        root_run_id=_root_for_run(task),
+        parent_task_id=task.parent_id,
         parent_id=task.parent_id,
+        parent_run_id=task.parent_id,
         depth=int(task.depth or 0),
+        agent_kind=_agent_kind(task),
         role=task.role,
         agent_name=task.agent_name,
         status=task.status,
@@ -202,6 +217,11 @@ def _task_to_kernel_run(
         failure_type=task.failure_type,
         progress=float(task.progress or 0.0),
         current_step=task.current_step,
+        current_tool=str(getattr(task, "current_tool", "") or ""),
+        heartbeat_at=float(task.heartbeat_at or 0.0),
+        updated_at=float(task.updated_at or 0.0),
+        last_progress_at=float(getattr(task, "last_progress_at", 0.0) or 0.0),
+        last_progress_summary=str(getattr(task, "last_progress_summary", "") or ""),
         latest_summary=task.latest_summary,
         child_ids=list(task.child_ids),
         address=build_task_address(task, all_tasks=all_tasks).to_dict() if include_refs else {},
@@ -282,6 +302,16 @@ def _continue_packet_ref(task: SubAgentTask) -> str:
 # 函数用途: 按 depth、created_at 和 run id 排序，让测试、日志和父级读取结果稳定。
 def _stable_tasks(tasks: list[SubAgentTask]) -> list[SubAgentTask]:
     return sorted(tasks, key=lambda item: (int(item.depth or 0), float(item.created_at or 0.0), item.id))
+
+
+# LLM: _agent_kind is a structural projection, not a role/prompt classifier.
+# 函数用途: 根据 parent/depth 给状态树一个稳定层级标签，让父级查看时不用猜 child/grandchild。
+def _agent_kind(task: SubAgentTask) -> str:
+    if int(task.depth or 0) <= 0 and not task.parent_id:
+        return "root_agent"
+    if int(task.depth or 0) <= 1:
+        return "child_agent"
+    return "grandchild_agent"
 
 
 # LLM: _root_for_run normalizes legacy empty root_id to the run itself.

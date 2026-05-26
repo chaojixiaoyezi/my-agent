@@ -59,16 +59,7 @@ def board_completion_status(items) -> dict[str, object]:
         "blocking_run_ids": blockers[:20],
         "must_not_report_done": True,
         "recommended_next_action": "continue_dispatch_or_repair_blocking_run_ids",
-        "suggested_tool_call": {
-            "tool": "dispatch_subagents",
-            "apply": True,
-            "execute_runners": True,
-            "execute_acceptance_tests": True,
-            "auto_apply_acceptance_followup": True,
-            "workflow_mode": "execute",
-            "run_ids": blockers[:20],
-            "max_runners": min(len(blockers), 8) or 1,
-        },
+        "suggested_tool_call": _suggested_dispatch_tool_call(items, blockers),
     }
 
 
@@ -119,6 +110,41 @@ def _item_blocks_completion(item, verified_targets: set[str]) -> bool:
     return status not in {"DONE"} or verification != "VERIFIED"
 
 
+# LLM: Board advice separates acceptance-only continuation from real runner dispatch.
+# 函数用途: 全部阻塞项都在等待父级验收时，只建议跑验收 tests；不要再误触发 runner。
+def _suggested_dispatch_tool_call(items, blockers: list[str]) -> dict[str, object]:
+    blocking_items = [_item_by_id(items, run_id) for run_id in blockers[:20]]
+    acceptance_only = bool(blocking_items) and all(
+        item is not None and _item_waiting_for_acceptance(item)
+        for item in blocking_items
+    )
+    payload: dict[str, object] = {
+        "tool": "dispatch_subagents",
+        "apply": True,
+        "execute_runners": not acceptance_only,
+        "execute_acceptance_tests": True,
+        "auto_apply_acceptance_followup": True,
+        "workflow_mode": "off" if acceptance_only else "execute",
+        "run_ids": blockers[:20],
+    }
+    if not acceptance_only:
+        payload["max_runners"] = min(len(blockers), 8) or 1
+    return payload
+
+
+def _item_by_id(items, run_id: str):
+    for item in items:
+        if str(getattr(item, "id", "") or "") == run_id:
+            return item
+    return None
+
+
+def _item_waiting_for_acceptance(item) -> bool:
+    status = str(getattr(item, "status", "") or "").upper()
+    verification = str(getattr(item, "verification_status", "") or "").upper()
+    return status == "AWAITING_ACCEPTANCE" or verification == "NEEDS_ACCEPTANCE"
+
+
 # LLM: _verified_target_tokens lets board completion mirror final closeout's repair coverage semantics.
 # 函数用途: 汇总 DONE/VERIFIED 行的产物 token，让旧失败/待验收 run 被后续已验收修复覆盖时不再误报阻塞。
 def _verified_target_tokens(items) -> set[str]:
@@ -152,14 +178,22 @@ def _single_board_root_id(items) -> str:
 # 函数用途: 将 kernel run 行转成 JSON 友好字段，不展开 goal、artifact 正文或长日志。
 def _kernel_row_payload(row: object) -> dict[str, object]:
     return {
+        "task_id": row.task_id,
         "run_id": row.run_id,
         "parent_id": row.parent_id,
+        "parent_run_id": row.parent_run_id,
+        "root_run_id": row.root_run_id,
         "depth": row.depth,
+        "agent_kind": row.agent_kind,
         "role": row.role,
         "agent_name": row.agent_name,
         "status": row.status,
         "verification_status": row.verification_status,
         "progress": row.progress,
+        "current_tool": row.current_tool,
+        "heartbeat_at": row.heartbeat_at,
+        "last_progress_at": row.last_progress_at,
+        "last_progress_summary": row.last_progress_summary,
         "child_ids": list(row.child_ids),
         "address": dict(row.address),
         "task_envelope": dict(row.task_envelope),

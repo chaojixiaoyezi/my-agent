@@ -97,6 +97,7 @@ def test_collection_checkpoint_quality_prefers_structured_writer_for_generated_r
 def _actions_for_source(source_content: str, contract: dict[str, object]) -> dict[str, dict[str, object]]:
     from agent_py_agent.agent.agent_core.main_agent_delivery_closeout import (
         DeliveryContractValidationRequest,
+        DeliveryProgressContext,
         _enrich_delivery_progress,
         _validate_contract_artifacts,
     )
@@ -114,7 +115,7 @@ def _actions_for_source(source_content: str, contract: dict[str, object]) -> dic
                 params=RunParams(delivery_contract=contract, save=False),
             )
         )
-        enriched = _enrich_delivery_progress(report, {}, workspace, contract=contract)
+        enriched = _enrich_delivery_progress(report, {}, DeliveryProgressContext(workspace, contract))
     return {item["code"]: item for item in enriched["delivery_progress"]["recovery_actions"]}
 
 

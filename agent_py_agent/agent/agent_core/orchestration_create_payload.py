@@ -22,9 +22,9 @@ def create_subagents_payload(agent, resolutions: list, allowed_tools, request_pa
         "created_run_ids": [task.id for task in created],
         "reused_run_ids": [task.id for task in reused],
         "dispatch_run_ids": [task.id for task in dispatch],
+        "next_action": _dispatch_next_action(dispatch),
         "allowed_tools": allowed_tools or "automatic",
         "operation_contract": _operation_contract(request_params, created, reused, dispatch),
-        "next_action": _dispatch_next_action(dispatch),
         "subagent_workspace": str(agent.subagents.workspace),
         "tasks": [_task_payload(task) for task in tasks],
     }
@@ -49,15 +49,15 @@ def _operation_contract(request_params: dict[str, object], created: list, reused
 
 
 # LLM: _dispatch_next_action makes create-vs-run explicit for the parent model.
-# 函数用途: 告诉模型 create_subagents 只创建任务记录；下一步默认先推进 1 个，流水线依赖由 dispatch 再判断。
+# 函数用途: 告诉模型 create_subagents 只创建任务记录；是否启动、启动几个，由父代理根据 tree/board 判断。
 def _dispatch_next_action(tasks) -> dict[str, object]:
     run_ids = [task.id for task in tasks]
     if not run_ids:
         return {"tool": "subagent_board", "reason": "create_subagents 没有可调度的新 run；请读取看板/状态后决定是否汇报或进入验收。", "params": {"limit": 20}}
     return {
         "tool": "dispatch_subagents",
-        "reason": "create_subagents 只创建任务记录；要让子代理真正开始工作，请调度这些 run_id。默认 max_runners=1，确认任务彼此独立时再提高并发。",
-        "params": {"apply": True, "execute_runners": True, "run_ids": run_ids, "max_runners": 1},
+        "reason": "create_subagents 只创建任务记录；要让子代理真正开始工作，请按任务需要调度这些 run_id。",
+        "params": {"apply": True, "execute_runners": True, "run_ids": run_ids, "max_runners": len(run_ids)},
     }
 
 

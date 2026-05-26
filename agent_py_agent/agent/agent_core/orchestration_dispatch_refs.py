@@ -20,10 +20,10 @@ def related_task_refs(agent: object, report: object, attr: str, *, limit: int = 
 
 
 # LLM: related_task_result_refs gives parent agents a compact per-run result index instead of a long flat path list.
-# 函数用途: 按直接 run 汇总状态、摘要和主产物 refs；父级汇总时优先读这里，避免猜子代理文件名。
+# 函数用途: 按本轮触碰的 run 和 runner 新建 child 汇总状态、摘要和 refs，父级优先读这里，避免猜子代理文件名。
 def related_task_result_refs(agent: object, report: object, *, per_run_artifact_limit: int = 3) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
-    for run_id in _direct_record_run_ids(report):
+    for run_id in _related_run_ids(report) or _visible_run_ids(agent):
         task = _safe_load_task(agent, run_id)
         if not _has_task_identity(task, run_id):
             continue
@@ -33,8 +33,8 @@ def related_task_result_refs(agent: object, report: object, *, per_run_artifact_
     return rows
 
 
-# LLM: _related_run_ids includes explicit runner targets and nested child ids created during dispatch.
-# 函数用途: 顶层 refs 汇总要看到 runner 内创建的孙代理，不能只看父 run。
+# LLM: _related_run_ids includes explicit runner targets without flattening entire descendant trees.
+# 函数用途: 调度索引只列本轮直接相关 run；孙代理通过对应父代理 output/tree 追踪，避免大型代理树撑爆上下文。
 def _related_run_ids(report: object) -> list[str]:
     ids: list[str] = []
     for record in getattr(report, "records", []) or []:
@@ -42,25 +42,40 @@ def _related_run_ids(report: object) -> list[str]:
     return ids
 
 
-# LLM: _direct_record_run_ids keeps final handoff centered on direct children before descendant evidence.
-# 函数用途: 只取 dispatch 记录里的直接 run_id；多个 acceptance/runner 记录指向同一 run 时去重。
-def _direct_record_run_ids(report: object) -> list[str]:
+# LLM: _visible_run_ids is the status-query fallback when dispatch did not touch a concrete run.
+# 函数用途: 顶层模型把 dispatch_subagents 当“查一下子代理状态”使用时，返回当前子代理索引而不是空摘要。
+def _visible_run_ids(agent: object, *, limit: int = 20) -> list[str]:
+    try:
+        tasks = list(agent.subagents.list_runs())
+    except Exception:
+        return []
     ids: list[str] = []
-    seen: set[str] = set()
-    for record in getattr(report, "records", []) or []:
-        run_id = str(getattr(record, "run_id", "") or "").strip()
-        if run_id and run_id not in seen:
-            seen.add(run_id)
+    for task in sorted(tasks, key=_task_sort_key):
+        run_id = str(getattr(task, "id", "") or "").strip()
+        if run_id and run_id not in ids:
             ids.append(run_id)
+        if len(ids) >= limit:
+            break
     return ids
 
 
-# LLM: _record_related_run_ids flattens one dispatch record into candidate run refs.
-# 函数用途: 从一条 dispatch record 中取当前 run 和 runner 新建 child id，供顶层 refs 汇总去重。
+def _task_sort_key(task: object) -> tuple[int, float, str]:
+    try:
+        depth = int(getattr(task, "depth", 0) or 0)
+    except (TypeError, ValueError):
+        depth = 0
+    try:
+        created = float(getattr(task, "created_at", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        created = 0.0
+    return depth, created, str(getattr(task, "id", "") or "")
+
+
+# LLM: _record_related_run_ids extracts the run touched by one dispatch record.
+# 函数用途: 只返回当前 record 的 run_id；不自动展开 runner_created_child_ids，避免跨层级抢占父级汇总入口。
 def _record_related_run_ids(record: object) -> list[str]:
-    ids = [str(getattr(record, "run_id", "") or "").strip()]
-    ids.extend(str(item or "").strip() for item in getattr(record, "runner_created_child_ids", []) or [])
-    return [item for item in ids if item]
+    run_id = str(getattr(record, "run_id", "") or "").strip()
+    return [run_id] if run_id else []
 
 
 # LLM: _extend_unique_refs is the shared bounded append helper for run ids and artifact refs.

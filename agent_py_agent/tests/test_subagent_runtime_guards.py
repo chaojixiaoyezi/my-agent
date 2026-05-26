@@ -11,13 +11,15 @@ from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import ToolLoopService
+from agent_py_agent.agent.agent_core.orchestration_run_scope import (
+    remember_dispatched_orchestration_run_ids,
+    remember_orchestration_run_ids,
+)
 from agent_py_agent.agent.agent_core.subagent_attempt_guard import (
     stale_subagent_attempt_message,
     stale_subagent_attempt_result,
 )
 from agent_py_agent.agent.agent_core.subagent_dispatch_closeout import (
-    DispatchCompletionRequest,
-    subagent_dispatch_completion_response,
     subagent_dispatch_final_response_guard,
     subagent_dispatch_limit_response,
 )
@@ -278,6 +280,7 @@ def test_dispatch_closeout_ignores_unseen_historical_runs(tmp_path):
         subagents=manager,
         _current_subagent_run_id="",
         _orchestration_run_ids_seen={current.id},
+        _orchestration_dispatched_run_ids_seen={current.id},
     )
 
     response = subagent_dispatch_limit_response(agent, backend="test")
@@ -288,34 +291,98 @@ def test_dispatch_closeout_ignores_unseen_historical_runs(tmp_path):
     assert old.id not in response.text
 
 
-# LLM: Explicit quality-role requirements should prevent worker-only deterministic closeout.
-# 函数用途: 用户明确要求测试子代理和验收子代理时，只有 worker DONE 不能直接完成。
-def test_dispatch_completion_waits_for_explicit_quality_roles(tmp_path):
+# LLM: Dry-run dispatch/status inspection must not be treated like runner execution.
+# 函数用途: 本轮只做 dispatch dry-run、补输入或看状态时，工具上限收口不能把 PLANNING run 说成失败链路。
+def test_dispatch_limit_response_ignores_seen_but_not_dispatched_scope(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
-    worker = manager.create_run(goal="write three pages", thought="worker", plan=["write"])
-    worker.attributes = {"required_qa_roles": ["tester", "acceptor"]}
-    worker.status = "DONE"
-    worker.verification_status = "VERIFIED"
-    manager.save(worker)
+    task = manager.create_run(goal="inspect pending dependency", thought="status only", plan=["check"])
+    task.status = "PLANNING"
+    task.verification_status = "UNVERIFIED"
+    manager.save(task)
     agent = SimpleNamespace(subagents=manager, _current_subagent_run_id="")
+    remember_orchestration_run_ids(agent, [task.id])
 
-    response = subagent_dispatch_completion_response(
-        DispatchCompletionRequest(
-            agent=agent,
-            params=_tool_loop_params(
-                "请派小傻妞做页面，完成后必须继续创建测试子代理和验收子代理收口。"
-            ),
-            before_executed_count=0,
-            backend="test",
-        )
-    )
+    response = subagent_dispatch_limit_response(agent, backend="test")
 
     assert response is None
 
 
-# LLM: Parent acceptance repair gets one model turn before deterministic closeout.
-# 函数用途: 父级验收失败时先给 root 一次创建修复小傻妞的机会；同一阻塞重复出现才事实收口，避免无限等。
-def test_dispatch_round_grants_one_parent_acceptance_repair_turn(tmp_path):
+# LLM: Actual runner dispatch still protects final answers from overclaiming incomplete subagents.
+# 函数用途: 同一个 run 一旦真实进入 dispatch，工具上限仍应按 task.json 事实生成未完成报告。
+def test_dispatch_limit_response_keeps_actual_dispatched_scope(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    task = manager.create_run(goal="executed pending worker", thought="runner touched", plan=["write"])
+    task.status = "BLOCKED"
+    task.verification_status = "FAILED"
+    manager.save(task)
+    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id="")
+    remember_orchestration_run_ids(agent, [task.id])
+    remember_dispatched_orchestration_run_ids(agent, [task.id])
+
+    response = subagent_dispatch_limit_response(agent, backend="test")
+
+    assert response is not None
+    assert "尚未完整通过" in response.text
+    assert task.id in response.text
+
+
+# LLM: Final response guard must not clobber status-check answers after dry-run dispatch.
+# 函数用途: 主代理只是检查/物化输入后汇报状态时，即使 executed_tools 含 dispatch_subagents，也保留模型自然回答。
+def test_final_response_guard_ignores_dry_run_dispatch_scope(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    task = manager.create_run(goal="status-only run", thought="missing input check", plan=["check"])
+    task.status = "PLANNING"
+    task.verification_status = "UNVERIFIED"
+    manager.save(task)
+    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id="")
+    remember_orchestration_run_ids(agent, [task.id])
+    original = ModelResponse(text="缺输入已经解除，下一步可以真实调度。", backend="test")
+
+    response = subagent_dispatch_final_response_guard(
+        agent,
+        original,
+        executed_tools=["dispatch_subagents"],
+    )
+
+    assert response is original
+    assert "缺输入已经解除" in response.text
+
+
+# LLM: Awaiting-acceptance work is incomplete but still reportable as factual status.
+# 函数用途: 子代理已真实运行并产出 output.json、只是等待验收时，最终守卫不能把状态汇报替换成泛化阻断。
+def test_final_response_guard_keeps_awaiting_acceptance_status_answer(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    task = manager.create_run(goal="summarize source", thought="runner touched", plan=["read"])
+    _write_output_json(task.output_json, {
+        "status": "AWAITING_ACCEPTANCE",
+        "summary": "已读取文件并写入摘要。",
+    })
+    task.status = "AWAITING_ACCEPTANCE"
+    task.verification_status = "NEEDS_ACCEPTANCE"
+    task.latest_summary = "已读取文件并写入摘要。"
+    manager.save(task)
+    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id="")
+    remember_orchestration_run_ids(agent, [task.id])
+    remember_dispatched_orchestration_run_ids(agent, [task.id])
+    original = ModelResponse(
+        text=f"子代理已经真实跑过，当前等待验收。结果在 {task.output_json}",
+        backend="test",
+    )
+
+    response = subagent_dispatch_final_response_guard(
+        agent,
+        original,
+        executed_tools=["dispatch_subagents", "read_artifact"],
+    )
+
+    assert response is original
+    assert "Subagent State Notice" not in response.text
+    assert str(task.output_json) in response.text
+
+
+# LLM: Parent acceptance repair no longer hijacks the post-dispatch tool round.
+# 函数用途: dispatch_subagents 后只把索引/状态交回模型；父级验收失败不能在工具轮后本地抢答或塞修复提示。
+def test_dispatch_round_returns_to_parent_when_acceptance_needs_repair(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     task = manager.create_run(goal="deliver web artifact", thought="await repair", plan=["repair"])
     task.status = "AWAITING_ACCEPTANCE"
@@ -345,12 +412,8 @@ def test_dispatch_round_grants_one_parent_acceptance_repair_turn(tmp_path):
     )
 
     assert first is None
-    assert params.tool_context
-    assert "parent_acceptance_repair_advice.suggested_tool_call" in params.tool_context[-1]
-    assert second is not None
-    assert "尚未完整通过" in second.text
-    assert "不能按完成汇报" in second.text
-    assert task.id in second.text
+    assert second is None
+    assert params.tool_context == []
 
 
 # LLM: Final model text must not claim completion when a requested acceptor role never ran.
@@ -375,6 +438,7 @@ def test_final_response_guard_blocks_missing_explicit_acceptor_role(tmp_path):
         _current_subagent_run_id="",
         _current_user_prompt="请安排小傻妞做页面，最后必须派验收子代理收口。",
         _orchestration_run_ids_seen={coordinator.id, worker.id, tester.id},
+        _orchestration_dispatched_run_ids_seen={coordinator.id, worker.id, tester.id},
     )
 
     response = subagent_dispatch_final_response_guard(

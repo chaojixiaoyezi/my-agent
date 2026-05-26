@@ -12,14 +12,13 @@ dispatch 阶段不应该把"谁能跑、能不能重试、并发 worker 怎么�
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..settings.config_io import load_simple_yaml
 from ..subagent import SubAgentRunnerResult, SubAgentTask
-from ..subagents.role_templates import role_template_id_for_role
 from ..subagents.services.dispatch_params import DispatchRecordParams
 from .runner_child_summary import runner_child_summary_fields
-from .runner_input_dependencies import input_dependency_ready_candidates
 from .runner_patch_review import _dispatch_patch_review_run_ids, _task_has_runner_patches
 from .runner_worker import RunSubagentWorkerParams, _run_subagent_worker
-from .runner_workflow_dependencies import workflow_dependency_ready_candidates
+from .runtime_guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -46,58 +45,45 @@ CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES = {
 DEFAULT_AUTO_RUNNER_CONCURRENCY = 8
 
 
-# LLM: role phase ordering trusts structured role/name identity only.
-# 函数用途: 给 runner 角色分配执行阶段；coordinator 先拆任务，worker 产出，tester/bug_finder 随后检查，acceptor 最后验收。
-def _runner_role_phase_priority(task: SubAgentTask) -> int:
-
-    role = str(getattr(task, "role", "") or "").strip().lower().replace("-", "_")
-    identity_text = f"{role} {getattr(task, 'agent_name', '')}".lower().replace("-", "_")
-    template_role = role_template_id_for_role(identity_text, fallback="")
-    if _identity_requests_quality_phase(identity_text):
-        return 20
-    if template_role == "coordinator" or role in {"lead", "planner", "dispatcher"}:
-        return 0
-    if template_role == "acceptor" or role in {"acceptor", "verifier", "verification"}:
-        return 30
-    if template_role in {"tester", "bug_finder"} or role in {"tester", "bug_finder", "qa", "checker", "auditor"}:
-        return 20
-    if template_role in {"worker", "writer", "researcher"} or role in {"worker", "writer", "researcher", "general", "coder", "reporter"}:
-        return 10
-    return 10
-
-
-# LLM: _identity_requests_quality_phase lets structured QA names wait for producer phases.
-# 函数用途: 当角色名/代理名明确是 quality/test/check 时，即使 role=coordinator，也归入质量阶段。
-def _identity_requests_quality_phase(identity_text: str) -> bool:
-    markers = ("quality", "qa", "tester", "test", "bug_finder", "checker", "acceptance")
-    return any(marker in identity_text for marker in markers)
-
-
-# LLM: _runner_text_phase_priority is retained for compatibility and delegates to template ids.
-# 函数用途: 兼容旧测试入口；不从 goal 自然语言猜阶段，只按模板 id/结构化角色词判断。
-def _runner_text_phase_priority(text: str, *, default: int = 10) -> int:
-    normalized = str(text or "").lower().replace("-", "_")
-    template_role = role_template_id_for_role(normalized, fallback="")
-    if template_role == "acceptor" or normalized in {"verifier", "verification"}:
-        return 30
-    if template_role in {"tester", "bug_finder"} or normalized in {"qa", "checker", "auditor"}:
-        return 20
-    return default
-
-
-# LLM: _runner_max_attempts 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 推进执行器maxattempts的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
+# LLM: _runner_max_attempts returns the configured retry budget after the first failed attempt.
+# 函数用途: 解析 runner 失败后的补跑次数；0 表示不限制，旧 off/auto 字符串只做兼容入口。
 def _runner_max_attempts(policy: str) -> int:
 
-    value = str("auto" if policy is None else policy).strip().lower()
+    if policy is None or str(policy).strip().lower() in {"", "auto"}:
+        return _runtime_guard_int("runner_failure_retry_limit", 2)
+    value = str(policy).strip().lower()
     if value in {"", "auto"}:
-        return 2
+        return _runtime_guard_int("runner_failure_retry_limit", 2)
     if value in {"off", "none", "disabled", "false", "no"}:
-        return 1
+        return 0
     try:
         return max(0, int(value))
     except ValueError:
-        return 2
+        return _runtime_guard_int("runner_failure_retry_limit", 2)
+
+
+# LLM: _same_run_redispatch_limit reads the same-run retry cap from shared runtime guard config.
+# 函数用途: 限制同一个 run_id 失败后被反复派发的次数；0 表示不限制。
+def _same_run_redispatch_limit(value: object = None) -> int:
+    if value is None:
+        value = _runtime_guard_int("same_run_redispatch_limit", 1)
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return _runtime_guard_int("same_run_redispatch_limit", 1)
+
+
+# LLM: _runtime_guard_int keeps runner defaults in runtime_guard_config.yaml without importing AgentConfig.
+# 函数用途: 读取共享运行门整数配置；坏配置回退默认值。
+def _runtime_guard_int(key: str, default: int) -> int:
+    try:
+        data = load_simple_yaml(DEFAULT_RUNTIME_GUARD_CONFIG_PATH)
+    except OSError:
+        return default
+    try:
+        return max(0, int(data.get(key, default) or 0))
+    except (TypeError, ValueError, AttributeError):
+        return default
 
 
 # LLM: _runner_failure_type 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -119,10 +105,16 @@ def _runner_retry_reason(task: SubAgentTask, runner_max_attempts: int) -> str:
     if failure_type not in RETRYABLE_RUNNER_FAILURE_TYPES:
         return ""
     attempts = max(0, int(task.runner_attempts or 0))
-    if runner_max_attempts > 0 and attempts >= runner_max_attempts:
+    if runner_max_attempts > 0 and _retry_count_after_initial_attempt(attempts) >= runner_max_attempts:
         return ""
-    max_attempts_label = "unlimited" if runner_max_attempts <= 0 else str(runner_max_attempts)
-    return f"failure_type={failure_type}; attempt={attempts + 1}/{max_attempts_label}"
+    max_attempts_label = "unlimited" if runner_max_attempts <= 0 else f"+{runner_max_attempts}"
+    return f"failure_type={failure_type}; retry={_retry_count_after_initial_attempt(attempts) + 1}/{max_attempts_label}"
+
+
+# LLM: _retry_count_after_initial_attempt makes retry limits count re-runs, not total runner attempts.
+# 函数用途: runner_attempts 包含首次执行；补跑预算只统计首次失败后的重新派发次数。
+def _retry_count_after_initial_attempt(attempts: int) -> int:
+    return max(0, int(attempts) - 1)
 
 
 # LLM: _resolve_runner_concurrency 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -242,29 +234,21 @@ def _dispatch_runner_candidates(
     max_runners: int,
     *,
     runner_max_attempts: int = 1,
+    same_run_redispatch_limit: int | None = None,
 ) -> list[SubAgentTask]:
 
     if max_runners <= 0:
         return []
     candidates: list[SubAgentTask] = []
     for task in tasks:
-        if not _is_dispatch_runner_candidate(task, runner_max_attempts=runner_max_attempts):
+        if not _is_dispatch_runner_candidate(
+            task,
+            runner_max_attempts=runner_max_attempts,
+            same_run_redispatch_limit=same_run_redispatch_limit,
+        ):
             continue
         candidates.append(task)
-    candidates = input_dependency_ready_candidates(candidates)
-    candidates = workflow_dependency_ready_candidates(candidates, tasks)
-    candidates = _ready_phase_candidates(candidates)
-    ordered = sorted(enumerate(candidates), key=lambda item: (_runner_role_phase_priority(item[1]), item[0]))
-    return [task for _, task in ordered[:max_runners]]
-
-
-# LLM: _ready_phase_candidates prevents QA/test runners from racing ahead of implementation runners.
-# 函数用途: 同一 dispatch 范围内只放行当前最低阶段的候选；生产线未完成前，quality/test/acceptance 先等待下一轮。
-def _ready_phase_candidates(candidates: list[SubAgentTask]) -> list[SubAgentTask]:
-    if not candidates:
-        return []
-    current_phase = min(_runner_role_phase_priority(task) for task in candidates)
-    return [task for task in candidates if _runner_role_phase_priority(task) == current_phase]
+    return candidates[:max_runners]
 
 
 # LLM: _limit_items 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -282,6 +266,7 @@ def _is_dispatch_runner_candidate(
     task: SubAgentTask,
     *,
     runner_max_attempts: int = 1,
+    same_run_redispatch_limit: int | None = None,
 ) -> bool:
 
     if task.status == "RUNNING":
@@ -304,10 +289,27 @@ def _is_dispatch_runner_candidate(
     if task.status == "BLOCKED":
         if _blocked_after_capability_grant(task):
             return True
-        return bool(_runner_retry_reason(task, runner_max_attempts))
+        return _can_retry_same_run(task, runner_max_attempts, same_run_redispatch_limit)
     if task.status in {"FAILED", "TIMEOUT"}:
-        return bool(_runner_retry_reason(task, runner_max_attempts))
+        return _can_retry_same_run(task, runner_max_attempts, same_run_redispatch_limit)
     return task.status == "PLANNING"
+
+
+# LLM: _can_retry_same_run applies global retry and same-run redispatch budgets as soft parent-facing caps.
+# 函数用途: 达到同 run 重派限制时不再自动选择该 run，交给父代理换策略或显式恢复。
+def _can_retry_same_run(
+    task: SubAgentTask,
+    runner_max_attempts: int,
+    same_run_redispatch_limit: int | None,
+) -> bool:
+    reason = _runner_retry_reason(task, runner_max_attempts)
+    if not reason:
+        return False
+    limit = _same_run_redispatch_limit(same_run_redispatch_limit)
+    if limit <= 0:
+        return True
+    attempts = max(0, int(getattr(task, "runner_attempts", 0) or 0))
+    return _retry_count_after_initial_attempt(attempts) < limit
 
 
 # LLM: granted capability blockers should rerun once the parent has routed the request.

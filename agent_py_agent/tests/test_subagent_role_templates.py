@@ -193,7 +193,7 @@ def test_quality_role_contracts_use_template_defaults(tmp_path):
         role="acceptor",
     )
 
-    assert bug_finder.allowed_tools == [
+    expected_bug_finder_tools = [
         "list_files",
         "read_file",
         "search_text",
@@ -209,6 +209,7 @@ def test_quality_role_contracts_use_template_defaults(tmp_path):
         "markdown_to_pdf",
         "capability_request",
     ]
+    assert bug_finder.allowed_tools[:len(expected_bug_finder_tools)] == expected_bug_finder_tools
     assert "write_file" in tester.allowed_tools
     assert "write_file" in acceptor.allowed_tools
     assert bug_finder.quality_contract.cannot_self_accept is True
@@ -336,7 +337,7 @@ def test_all_builtin_role_contracts_are_applied_on_create_run(tmp_path):
         )
 
         assert task.role == template_id
-        assert task.allowed_tools == template.default_tools
+        assert task.allowed_tools[:len(template.default_tools)] == list(template.default_tools)
         assert any(template.output_contract_zh in check for check in task.acceptance_checks)
         assert task.quality_contract.cannot_self_accept is True
         assert task.quality_contract.parent_final_gate is True

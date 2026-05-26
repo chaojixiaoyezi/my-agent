@@ -158,6 +158,7 @@ class SubagentsDispatchOptions:
     locked_files: list[str]
     interval: float
     max_cycles: int
+    advance: bool
     force_lock: bool
     watch: bool
 

@@ -27,9 +27,12 @@ def runner_context_summary_payload(context: SubAgentExecutionContext) -> dict[st
             "controlled_exec_grant_count": len(context.controlled_exec_grants or []),
         },
         "write_boundary": dict(context.write_boundary or {}),
+        "conversation": _conversation_prompt_payload(bundle),
+        "collaboration": _collaboration_prompt_payload(bundle.get("collaboration")),
+        "context_packs": _context_packs_prompt_payload(context.context_packs),
         "task_envelope": _task_envelope_prompt_payload(bundle.get("task_envelope")),
         "tool_preflight": _tool_preflight_prompt_payload(bundle.get("tool_preflight")),
-        "input_contract": _input_contract_prompt_payload(context),
+        "read_refs": _read_refs_prompt_payload(context),
         "output_contract": _dict_prompt_subset(
             bundle.get("output_contract"),
             [
@@ -49,21 +52,22 @@ def runner_context_summary_payload(context: SubAgentExecutionContext) -> dict[st
     }
 
 
-# LLM: _input_contract_prompt_payload lifts concrete dependency artifacts above natural-language task text.
-# 函数用途: 把已存在的上游输入路径单独放进瘦身 prompt，避免 runner 先读不存在的口语路径就误判 BLOCKED。
-def _input_contract_prompt_payload(context: SubAgentExecutionContext) -> dict[str, object]:
+# LLM: _read_refs_prompt_payload exposes read refs as hints, not hidden prerequisites.
+# 函数用途: 把父级显式给出的可读路径压进 prompt；缺失路径只作为限制事实，不再触发输入依赖启动门。
+def _read_refs_prompt_payload(context: SubAgentExecutionContext) -> dict[str, object]:
     refs = _string_list(getattr(context.context_manifest, "required_read_paths", []))
-    if not refs:
+    hints = _string_list(getattr(context.context_manifest, "hint_read_paths", []))
+    if not refs and not hints:
         return {}
     resolved, unresolved = _resolve_read_paths(refs, _read_roots(context))
+    hint_resolved, _ = _resolve_read_paths(hints, _read_roots(context))
     return {
         "required_read_paths": refs[:12],
         "resolved_read_paths": resolved[:12],
         "unresolved_read_paths": unresolved[:12],
-        "read_policy": (
-            "先读取 resolved_read_paths；某个自然语言路径不存在时，继续尝试同名或已解析候选，"
-            "只有所有相关候选都失败才 BLOCKED。"
-        ),
+        "hint_read_paths": hints[:12],
+        "resolved_hint_read_paths": hint_resolved[:12],
+        "read_policy": "这些路径是可读线索/授权范围，不是启动前置条件；缺失时记录限制并继续按任务判断。",
     }
 
 
@@ -84,6 +88,77 @@ def _runner_identity_payload(context: SubAgentExecutionContext) -> dict[str, obj
         "subagent_session_id": context.subagent_session_id,
         "agent_thread_id": context.agent_thread_id,
     }
+
+
+# LLM: _conversation_prompt_payload exposes the inherited thread/task refs to local child agents.
+# 函数用途: 子/孙代理需要上报主代理时，可直接使用 run_id 或这里的 root_task_id/thread_id。
+def _conversation_prompt_payload(bundle: dict[str, object]) -> dict[str, object]:
+    reserved = bundle.get("reserved") if isinstance(bundle, dict) else {}
+    if not isinstance(reserved, dict):
+        return {}
+    conversation = reserved.get("conversation")
+    return dict(conversation) if isinstance(conversation, dict) else {}
+
+
+# LLM: _collaboration_prompt_payload keeps addressed request refs visible in the slim runner prompt.
+# 函数用途: 只展开点名给当前 runner 的协作请求摘要，避免模型再开重复 case。
+def _collaboration_prompt_payload(collaboration: object) -> dict[str, object]:
+    if not isinstance(collaboration, dict):
+        return {}
+    requests = collaboration.get("targeted_requests")
+    if not isinstance(requests, list):
+        requests = []
+    return {
+        "targeted_request_count": int(collaboration.get("targeted_request_count") or len(requests)),
+        "targeted_requests": [_collaboration_request_prompt_payload(item) for item in requests[:5] if isinstance(item, dict)],
+        "responder_policy": collaboration.get("responder_policy") or "",
+    }
+
+
+# LLM: _collaboration_request_prompt_payload exposes bounded open-world clue packets to responders.
+# 函数用途: 点名协作请求不仅给 case/request id，也给问题、线索、查询意图、软提示和响应形状。
+def _collaboration_request_prompt_payload(request: dict[str, object]) -> dict[str, object]:
+    payload = _dict_prompt_subset(
+        request,
+        [
+            "case_id",
+            "request_id",
+            "case_ref",
+            "request_ref",
+            "case_title",
+            "question",
+            "problem_statement",
+            "priority",
+            "deadline_at",
+            "target_agent_ids",
+            "required_capabilities",
+            "recommended_tools",
+            "context_refs",
+        ],
+    )
+    payload["observed_facts"] = _bounded_object_list(request.get("observed_facts"), limit=4)
+    payload["query_hints"] = _bounded_object_list(request.get("query_hints"), limit=4)
+    payload["query_intent"] = _bounded_object(request.get("query_intent"))
+    payload["routing_requirements"] = _bounded_object(request.get("routing_requirements"))
+    payload["response_contract"] = _bounded_object(request.get("response_contract"))
+    return {key: value for key, value in payload.items() if value not in ({}, [], "", None)}
+
+
+# LLM: _context_packs_prompt_payload shows short inherited directives without dumping bundle files.
+# 函数用途: 将父级任务摘要、兄弟 roster 和小型上下文包压进 runner prompt，避免模型只看到被缩短的局部 goal。
+def _context_packs_prompt_payload(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list | tuple):
+        return []
+    packs: list[dict[str, object]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        pack = _bounded_object(item)
+        if pack:
+            packs.append(pack)
+        if len(packs) >= 5:
+            break
+    return packs
 
 
 # LLM: _runner_ref_payload gives the model exact files to read when summary fields are insufficient.
@@ -154,6 +229,50 @@ def _dict_prompt_subset(value: object, keys: list[str]) -> dict[str, object]:
     if not isinstance(value, dict):
         return {}
     return {key: value[key] for key in keys if key in value}
+
+
+# LLM: _bounded_object_list keeps prompt-facing collaboration facts useful without inlining big payloads.
+# 函数用途: 对开放世界 fact/hint 列表做浅层截断；坏条目跳过，单个脏项不能丢掉整包。
+def _bounded_object_list(value: object, *, limit: int) -> list[dict[str, object]]:
+    if not isinstance(value, list | tuple):
+        return []
+    return [
+        _bounded_object(item)
+        for item in value[:limit]
+        if isinstance(item, dict)
+    ]
+
+
+# LLM: _bounded_object keeps generic keys and short scalar/list values only.
+# 函数用途: 截断 prompt 摘要里的任意结构化对象，避免协作请求携带大正文撑爆 runner prompt。
+def _bounded_object(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, object] = {}
+    for key, item in list(value.items())[:12]:
+        bounded = _bounded_value(item)
+        if bounded is not None:
+            result[str(key)] = bounded
+    return result
+
+
+def _bounded_value(item: object) -> object:
+    if isinstance(item, str):
+        return item[:300]
+    if isinstance(item, bool | int | float):
+        return item
+    if isinstance(item, list | tuple):
+        return [str(entry)[:160] for entry in item[:8]]
+    if isinstance(item, dict):
+        return _bounded_child_dict(item)
+    return str(item)[:160] if item is not None else None
+
+
+def _bounded_child_dict(item: dict[object, object]) -> dict[str, str]:
+    return {
+        str(child_key): str(child_value)[:160]
+        for child_key, child_value in list(item.items())[:8]
+    }
 
 
 # LLM: _read_roots returns likely workspace roots for resolving relative required_read_paths.

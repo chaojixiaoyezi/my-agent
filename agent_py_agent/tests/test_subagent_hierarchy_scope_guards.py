@@ -121,9 +121,9 @@ def test_hierarchy_schedule_forbidden_scope_ignores_parent_thought(tmp_path):
     assert len(result.created_run_ids) == 1
 
 
-# LLM: test_hierarchy_schedule_blocks_qa_only_before_implementation covers Stage7 R64.
-# 函数用途: 有产物根的父任务不能在没有 worker/leaf child 时只创建 QA 子任务。
-def test_hierarchy_schedule_blocks_qa_before_implementation_ready(tmp_path):
+# LLM: test_hierarchy_schedule_warns_qa_only_before_implementation covers the soft QA-order warning.
+# 函数用途: 有产物根但没有 ready worker/leaf child 时，QA 只产生 warning，不再阻断父级显式派工。
+def test_hierarchy_schedule_warns_qa_before_implementation_ready(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
     root = manager.create_run(
@@ -157,9 +157,9 @@ def test_hierarchy_schedule_blocks_qa_before_implementation_ready(tmp_path):
         )
     )
 
-    assert result.blocked is True
-    assert result.reason.startswith("qa_before_implementation_ready")
-    assert manager.load(parent.id).child_ids == []
+    assert result.blocked is False
+    assert any(item.startswith("qa_before_implementation_ready") for item in result.scheduling_warnings)
+    assert len(manager.load(parent.id).child_ids) == 2
 
 
 # LLM: test_hierarchy_schedule_allows_qa_after_implementation_child keeps normal QA follow-up possible.

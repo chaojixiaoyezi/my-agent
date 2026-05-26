@@ -50,6 +50,29 @@ def test_acceptance_tests_use_workspace_root_containing_artifact(tmp_path: Path)
     assert record["validation_result"]["checked_root"] == str(artifact.parent.resolve())
 
 
+# LLM: output_refs may be logical result keys rather than path refs.
+# 函数用途: 防止 source_file/subagent_summary 这类结构化结果键被验收器误当成缺失文件。
+def test_acceptance_ignores_logical_output_refs_when_checking_files(tmp_path: Path):
+    primary = tmp_path / "repo-root"
+    secondary = tmp_path / "user-workspace"
+    artifact = secondary / "deliverables" / "summary.txt"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("summary", encoding="utf-8")
+    agent = _agent_with_workspace_roots(primary, secondary)
+    task = _acceptance_task_with_artifact(agent, artifact)
+    task.attributes = {"output_refs": ["source_file", "subagent_summary"]}
+    agent.subagents.save(task)
+
+    record = agent.subagents.review_acceptance(
+        task.id,
+        options=AcceptanceReviewOptions(apply=False, execute_tests=False),
+    )
+
+    findings = {item.name: item for item in record.findings}
+    assert findings["declared_output_refs_exist"].ok is True
+    assert "未声明 output_files/output_refs" in findings["declared_output_refs_exist"].message
+
+
 # LLM: _agent_with_workspace_roots creates the minimal echo agent for multi-root acceptance tests.
 # 函数用途: 把 agent 初始化从测试主体中拆出，保留 primary/secondary workspace 语义。
 def _agent_with_workspace_roots(primary: Path, secondary: Path) -> SimpleAgent:

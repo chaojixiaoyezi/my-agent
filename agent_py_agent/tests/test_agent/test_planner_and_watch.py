@@ -174,8 +174,35 @@ def test_subagent_dispatch_parent_planner_zero_limit_means_unlimited_context():
         assert any(item.step == "parent_planner" and item.ok for item in report.records)
 
 
-def test_subagent_dispatch_watch_runs_one_cycle_and_releases_lock():
-    """LLM: Verifies watch runs one dispatch cycle and releases the lock file."""
+def test_subagent_watch_default_observes_without_dispatching():
+    """LLM: Verifies watch defaults to read-only tree inspection, not dispatch."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        agent.subagents.create_run(
+            goal="watch 只读观察",
+            thought="等待 watch 观察一轮。",
+            plan=["inspect"],
+        )
+        agent.dispatch_subagents = MagicMock(side_effect=AssertionError("read-only watch must not dispatch"))
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+
+        report = agent.watch_subagents(
+            router,
+            CapabilityConfig(),
+            params=WatchParams(max_cycles=1, interval=0, max_runners=1),
+        )
+
+        agent.dispatch_subagents.assert_not_called()
+        assert report.summary["total"] == 1
+        assert report.records[0].ok
+        assert report.records[0].dispatch_record_count == 0
+        assert report.records[0].dispatch_summary["inspect_agent_tree"] == 1
+
+
+def test_subagent_dispatch_watch_advance_runs_one_cycle_and_releases_lock():
+    """LLM: Verifies explicit advance watch runs one dispatch cycle and releases the lock file."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
@@ -190,10 +217,7 @@ def test_subagent_dispatch_watch_runs_one_cycle_and_releases_lock():
         report = agent.watch_subagents(
             router,
             CapabilityConfig(),
-            apply=False,
-            max_cycles=1,
-            interval=0,
-            max_runners=1,
+            params=WatchParams(max_cycles=1, interval=0, max_runners=1, advance=True),
         )
         workspace = root / "subs"
 
@@ -270,7 +294,7 @@ def test_subagent_dispatch_watch_limit_returns_to_idle_sleep(monkeypatch):
         report = agent.watch_subagents(
             router,
             CapabilityConfig(),
-            params=WatchParams(max_cycles=4, interval=0, max_runners=0),
+            params=WatchParams(max_cycles=4, interval=0, max_runners=0, advance=True),
         )
 
         assert sleeps == [7, 7, 7]
@@ -357,6 +381,7 @@ def test_subagent_dispatch_watch_surfaces_parent_acceptance_auto_policy_refs():
             max_cycles=1,
             interval=0,
             max_runners=0,
+            advance=True,
         )
 
         watch_record = report.records[0]
@@ -391,7 +416,7 @@ def test_subagent_dispatch_watch_executes_acceptance_tests_when_confirmed():
         agent.watch_subagents(
             router,
             CapabilityConfig(),
-            params=WatchParams(max_cycles=1, interval=0, max_runners=0, execute_acceptance_tests=True),
+            params=WatchParams(max_cycles=1, interval=0, max_runners=0, execute_acceptance_tests=True, advance=True),
         )
 
         record = _watch_acceptance_dispatch_record(root)

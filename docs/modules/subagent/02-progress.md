@@ -1,4 +1,12 @@
-﻿## 2026-05-21 artifact integrity test item split
+﻿## 2026-05-25 agent tree inspection and runtime progress fields
+
+- 子代理任务现在把运行观测字段落到 `SubAgentTask`：`current_tool`、`last_progress_at`、`last_progress_summary`。这些字段只用于父级查看和恢复提示，不参与权限、调度或验收判定。
+- runner 每次 task-local 工具调用都会刷新 `heartbeat_at` 和 `current_tool`；成功工具调用会刷新 `last_progress_*`。写文件类工具仍继续写 `latest_tool_progress.json`，并把摘要同步到任务状态。
+- 新增只读工具 `inspect_agent_tree`，返回主代理、子代理、孙代理的状态树。它不调用 `dispatch_subagents`，不清理 `has_pending_work`，用于“看一眼当前谁在干什么”。
+- `dispatch_loop` 仍只负责推进任务；`DispatchNoProgressTracker` 只判断真正 dispatch 的重复空转，不判断普通状态查看。
+- 参考项目对齐：代理运行时/模型助手 Code 给子代理独立 agent id / parent agent id，Picoclaw 的 active turn state 支持 `/subagents` 观测命令；本仓库吸收的是“身份链 + 只读观测入口”，不引入专项任务模板。
+
+## 2026-05-21 artifact integrity test item split
 
 - 父级验收测试项预处理现在会从结构化 artifact refs 推断通用 artifact integrity 检查，并把 pytest artifact 推断拆到 `execution_pytest_items.py`、产物完整性推断拆到 `execution_artifact_integrity_items.py`。
 - 这不是某个网页、Excel 或 PDF 的专项合同：tests 为空时仍按机器产物 refs 补充可执行检查，模型口头说“我测过了”不算机器事实。
@@ -1234,7 +1242,7 @@
 
 ## 2026-05-14 recovery 专项 12 第二片：task-local 进度、结构化读取和 ledger 去重
 - 中文说明：这轮把“子代理有接班包”推进到“接班包里有具体工作进度，模型读取时不会套娃，也不会因为低阈值写一堆重复 ledger”。
-- 已实现：新增 `subagents/services/session_progress.py`。子代理 runner 成功调用 `write_file` / `append_file` / `replace_in_file` 后，会在当前 `tasks/<root>/agents/<run>/progress/` 下写 `latest_tool_progress.json` 和 `tool_progress.jsonl`，记录最近写入路径、累计标题、摘要和下一步。
+- 已实现：新增 `subagents/services/session_progress.py`。子代理 runner 成功调用文件写入类工具，或任何返回 `artifact_ref` / `path` / `target_path` 等机器产物引用的工具后，会在当前 `tasks/<root>/agents/<run>/progress/` 下写 `latest_tool_progress.json` 和 `tool_progress.jsonl`，记录最近写入路径、累计标题、摘要和下一步。HTML 继续保留结构完整性提示；JSON、XLSX、PDF 和未来格式不走闭合枚举，只要工具返回明确产物引用即可被进度层看见。
 - 已实现：`latest_continue_packet.json` 移到 `compactions/session/latest_continue_packet.json`，并嵌入 `work_progress`；`recommended_read_paths` 优先推荐 `latest_tool_progress.json`，避免 compact/retry 后重复写已完成章节。
 - 已实现：新增 `tooling/filesystem_structured_read.py`。默认 `read_file` 读取 `latest_continue_packet.json` 时返回结构化摘要；显式传 `start_line/end_line` 才读原始 JSON，降低 token 和 artifact 套娃风险。
 - 已实现：`read_artifact` 的有界读取结果不再被二次外置；外置摘要会指回 `source_artifact_ref`，防止模型追着 wrapper artifact 读。

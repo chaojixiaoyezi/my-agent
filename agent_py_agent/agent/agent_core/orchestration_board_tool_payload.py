@@ -46,6 +46,25 @@ def board_payload_item(item: object) -> dict[str, object]:
     }
 
 
+# LLM: board_child_result_index gives parents the compact facts before verbose board rows.
+# 函数用途: 把子代理状态、摘要和 refs 汇总成顶层索引，供父级先核对，不读取产物正文。
+def board_child_result_index(items: list[object], *, limit: int = 20) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for item in items[:limit]:
+        rows.append({
+            "run_id": str(getattr(item, "id", "") or ""),
+            "agent_name": str(getattr(item, "agent_name", "") or ""),
+            "role": str(getattr(item, "role", "") or ""),
+            "status": str(getattr(item, "status", "") or ""),
+            "verification_status": str(getattr(item, "verification_status", "") or ""),
+            "summary": clip_board_text(str(getattr(item, "latest_summary", "") or ""), limit=220),
+            "artifact_refs": item_ref_preview(item, "artifact_refs", limit=3),
+            "evidence_refs": item_ref_preview(item, "evidence_refs", limit=3),
+            "output_json": str(getattr(item, "output_json", "") or ""),
+        })
+    return rows
+
+
 # LLM: board_ref_preview gives root agents direct deliverable refs before they try task_dir guesses.
 # 函数用途: 汇总看板条目的 artifact/evidence refs，限制数量后放到 subagent_board 顶层。
 def board_ref_preview(items: list[object], attr: str, *, limit: int = 20) -> list[str]:

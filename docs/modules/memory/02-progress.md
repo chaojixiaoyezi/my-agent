@@ -2,6 +2,7 @@
 
 ## 已完成
 
+- 2026-05-26 Resume trigger public helper 已落地：`memory_archive.has_resume_trigger()` 现在可被 prompt/context 选择逻辑复用，只判断用户是否明确要求继续/恢复旧任务，不读取 archive 正文，也不会自动恢复。
 - 2026-05-14 Compact Continue Packet typed envelope 第一片已落地：`memory-resume --from-compact` 返回的 continue packet 仍保留旧字段，同时新增 `typed_envelope.kind=compact_continue_packet`，把 apply/plan、work_state、guard、next_actions 和 recommended_read_paths 转成机器可读恢复包；它仍不执行工具、不改任务状态。
 - 2026-05-17 Main Agent Context Bundle 与手动 compact/resume 对齐已落地：主代理保存型 run 会写 `Main Agent Context Bundle v1`；`memory-compact --apply` 会登记最近一次主代理任务卡，API 可显式传 `main_context_bundle_ref`；`memory-resume --from-compact` 会把这张任务卡放进 `main_context_bundle`、推荐读取路径、handoff/context block 和 continue packet。旧 apply 包没有该字段也可继续恢复。
 - 2026-05-17 Main Agent Context Bundle 合同完整性已落地：context bundle 现在包含 RunScope、ToolManifest、Acceptance Contract、ArtifactRef、自检、schema migration policy、prompt budget 和 subagent-compatible owner model；`memory-compact --apply` 自动绑定最近任务卡前会做 scope match，避免 compact 老任务时误用最新任务卡；新增 `context-bundle latest --json` 只读观测入口。

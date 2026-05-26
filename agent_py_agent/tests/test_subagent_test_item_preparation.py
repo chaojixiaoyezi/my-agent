@@ -378,11 +378,11 @@ def test_prepare_test_items_merges_task_required_static_files(tmp_path):
         "required_files": [
             "app.js",
             "auth/login.html",
-            "flow-a.html",
             "catalog/items.html",
+            "flow-a.html",
             "index.html",
-            "login.html",
             "items.html",
+            "login.html",
             "style.css",
         ],
         "require_complete_html": True,

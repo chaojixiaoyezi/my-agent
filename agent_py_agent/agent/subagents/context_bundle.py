@@ -22,7 +22,6 @@ from .protocol_preflight import run_tool_preflight
 
 REQUIRED_CONTEXT_BUNDLE_FIELDS = (
     "goal",
-    "plan",
     "acceptance_checks",
     "output_contract",
     "permissions",
@@ -55,6 +54,7 @@ class ContextBundleV1:
     task_packet: dict[str, object] = field(default_factory=dict)
     task_envelope: dict[str, object] = field(default_factory=dict)
     tool_preflight: dict[str, object] = field(default_factory=dict)
+    collaboration: dict[str, object] = field(default_factory=dict)
     source_refs: dict[str, list[str]] = field(default_factory=dict)
     reserved: dict[str, object] = field(default_factory=dict)
 
@@ -153,6 +153,8 @@ def render_context_bundle_markdown(bundle: ContextBundleV1, gate: ContextGateRep
     lines.extend(render_task_envelope_lines(bundle.task_envelope))
     lines.extend(["", "## Tool Preflight", ""])
     lines.extend(render_tool_preflight_lines(bundle.tool_preflight))
+    lines.extend(["", "## Collaboration", ""])
+    lines.extend(render_collaboration_lines(bundle.collaboration))
     lines.extend(["", "## Task Packet", ""])
     lines.extend(render_task_packet_lines(bundle.task_packet))
     lines.extend(["", "## Context Gate", ""])
@@ -210,6 +212,27 @@ def render_tool_preflight_lines(preflight: dict[str, object]) -> list[str]:
         f"- issue_codes: {_compact_prompt_list(issue_codes)}",
         f"- effective_tools: {_compact_prompt_list(preflight.get('effective_tools'))}",
     ]
+
+
+# LLM: render_collaboration_lines shows targeted request refs without expanding case history.
+# 函数用途: 在 CONTEXT_BUNDLE.md 中展示点名协作请求，方便接管者复用已有 case/request。
+def render_collaboration_lines(collaboration: dict[str, object]) -> list[str]:
+    if not collaboration:
+        return ["- targeted_request_count: 0"]
+    requests = collaboration.get("targeted_requests")
+    if not isinstance(requests, list):
+        requests = []
+    lines = [f"- targeted_request_count: {len(requests)}"]
+    for request in requests[:5]:
+        if not isinstance(request, dict):
+            continue
+        lines.append(
+            "- targeted_request: "
+            f"case_id={request.get('case_id') or 'none'}; "
+            f"request_id={request.get('request_id') or 'none'}; "
+            f"request_ref={request.get('request_ref') or 'none'}"
+        )
+    return lines
 
 
 # LLM: _protocol_prompt_lines makes envelope/preflight the first runner-facing protocol hints.
@@ -282,9 +305,25 @@ def _reserved(task: SubAgentTask) -> dict[str, object]:
     attributes = attributes if isinstance(attributes, dict) else {}
     preflight = attributes.get("runner_recovery_preflight")
     reserved: dict[str, object] = _file_contract_reserved(attributes)
+    conversation = _conversation_reserved(attributes)
+    if conversation:
+        reserved["conversation"] = conversation
     if isinstance(preflight, dict):
         reserved["runner_recovery_preflight"] = dict(preflight)
     return reserved
+
+
+# LLM: _conversation_reserved carries durable channel/thread identity for descendant event tools.
+# 函数用途: 把长期会话绑定作为机器字段传给 runner；不要求模型从自然语言里猜 thread。
+def _conversation_reserved(attributes: dict[str, object]) -> dict[str, str]:
+    thread_id = str(attributes.get("conversation_thread_id") or "").strip()
+    task_id = str(attributes.get("conversation_task_id") or "").strip()
+    payload = {}
+    if thread_id:
+        payload["thread_id"] = thread_id
+    if task_id:
+        payload["root_task_id"] = task_id
+    return payload
 
 
 # LLM: _file_contract_reserved gives the semantic gate an attribute-side expectation snapshot.

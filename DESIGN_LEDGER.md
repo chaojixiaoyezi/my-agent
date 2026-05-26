@@ -1,5 +1,242 @@
 # 设计思路台账
 
+## 2026-05-26 / 删除协作流程里的走钢丝硬门
+
+状态：本地已落地，focused tests 已跑一轮；不提交
+
+摘要：
+- 本轮按“先跑通协作流程，不在流程里塞卡点”的规则，删除了旧的 1-5 类硬门：派工前正文读取门、委托期正文读取门、直接写入门、输入依赖启动门、输入物化工具、sibling workflow 自动依赖、共享输出/count 复制具体文件目标硬拒绝、coordinator/child 状态收尾改写，以及 delivery repair / bootstrap materialization 这类和 closeout 重叠的返工门。
+- 删除的生产模块包括：`orchestration_predelegation_read_guard.py`、`orchestration_body_read_guard.py`、`orchestration_direct_write_guard.py`、`tool_body_read_guard_stage.py`、`tool_direct_write_guard_stage.py`、`subagent_input_materialization.py`、`runner_input_dependencies.py`、`runner_workflow_dependencies.py`、`orchestration_item_dependencies.py`、`tool_bootstrap_materialization_guard.py`、`tool_delivery_repair_*.py`。
+- `runner_input_dependencies.py` 被替换为 `runner_ref_fields.py`：只保留结构化输入/输出 ref 解析能力，不再判断“输入依赖是否就绪”、不再过滤 runner 候选、不再生成缺输入阻断。`required_read_paths` 继续是读提示/读授权信息，不是 runner 启动前必须满足的验收项。
+- `create_subagents(items=...)` 不再根据 sibling `input_refs/output_refs/dependencies` 自动生成 `workflow_depends_on`。如果用户真要流水线，父代理自己按“先派 A、看 A 完成、再派 B”的方式显式调度；普通并行协作不被隐藏依赖拖住。
+- `create_subagents(count=...)` 不再因为目标里有具体 `output_files/output_refs/artifact_refs` 就拒绝。共享输出风险交给 prompt 分工、tree/board 状态和最终 closeout 暴露；不在创建阶段提前卡住普通任务。
+- `subagent_finalize_helpers.py` 不再用 coordinator/child 状态启发式把 runner 改成 `needs_child_creation`、等待父级验收或其他状态。子代理写产物、上报 tree/board/case，父代理看事实决定下一步；统一质量验收仍回到 closeout。
+- 旧协作 closeout/acceptance 的专项卡点也被降级或删除。测试里如果只是为了证明旧硬门会阻断，删除；如果日志有意义，保留为普通测试断言或文档记录，而不是继续让运行时照着旧门卡住。
+- 继续清理后，又删除了 `workflow_depends_on` 运行时依赖和 runner 角色阶段候选门：dispatch 不再因为 tester/reviewer/acceptor 角色或 sibling phase 关系只放行一部分 runner。真要流水线，由父代理显式“先派 A，等 A 结果，再派 B”；普通协作/临时响应不被隐藏阶段卡住。
+- runner prompt 里的旧 `input_contract.resolved_read_paths` 改成 `read_refs`：它只是可读线索和授权范围，不是启动前置条件。子代理读不到某条路径时，应该记录限制、换线索、上报父级，而不是在 runner 启动前被系统判死。
+- `create_subagents(items=...)` 不再静默删除 item 自己显式传入的 sibling output read refs。既然 `required_read_paths` 只是读线索，不是启动硬门，就应把父级/模型给出的线索原样交给子代理；路径暂时不存在时由子代理运行后记录限制或上报，而不是 create 阶段偷偷改参数。
+- `create_subagents(items=...)` 不再因为 `agent_name/role` 里出现 `grandchild`、`小小傻妞` 这类展示名就硬拒。真实层级只看 parent/root/depth 机器字段；名字写错最多是命名可读性问题，不应成为普通协作任务的启动卡点。
+- `sibling_roster` 继续保留同批 peers 的 `run_id/name/role/goal`，但不再发布 peer 的未来 `output_refs/output_files`。这样子代理知道“可以找谁”，不会被未来同伴产物路径误导。
+- `pending_requests_for_agent()` 只列 open case 里的待办。case 到 deadline 关闭后，未回复对象会进入“未回复事实”，不会在下次 tick 又把旧请求塞回 responder inbox。
+- `open_case` 相关提示从“必须继续 request”改成“需要别人回应时建议 request；只记录事件可以停在 open case”。协作工具提示只做软引导，不再把账本步骤写成验收卡点。
+- 参考项目复查结论：长期助手 的 `delegate_task`、终端交互 的 `AgentTool`、通道运行时 的 consult runtime 都以 prompt/task + 工具权限 + workspace/session/timeout 为主，没看到“启动前输入物化门”“sibling 输入输出依赖自动推断门”这类硬卡点；会话运行时 SDK 的 `Thread.run/runStreamed/resumeThread` 更强调 thread 续跑、结构化事件、sandbox/approval 配置，也没有把普通任务拆成隐藏的 worker/coordinator 阶段门。
+- 顶层 dispatch 完成态恢复确定性 closeout：所有当前 scope 子代理已经 `DONE/VERIFIED` 时，工具轮后直接返回 refs-first 状态，不再额外请求一次模型。失败/阻塞时仍只返回中文子代理状态摘要，旧 `Subagent State Notice` 文案不再出现在生产代码。
+- QA/tester/acceptor 早于实现产物的调度不再硬阻断。`qa_before_implementation_ready` 现在只是 `scheduling_warnings`，提醒父级“可能在空产物上测试”，但不替父级决定流程；最终是否合格仍交给统一 closeout/acceptance。
+
+设计结论：
+- 协作 case 的基本语义保持简单：打开、收集、到 deadline 关闭/汇总。没有回复的对象写成未回复事实，不让整个任务无限等。
+- 子代理发现问题后，可以按 prompt 调用协作工具、直接问同级、上报父级或写产物；系统记录事实和状态，但不因为“没按某个内部模板动作”直接判任务失败。
+- 真正需要硬的地方仍然是安全/权限/路径/工具执行边界和最终 closeout 验收；普通协作调度不再用中间模板门代替 LLM 判断。
+
+验证：
+- `python3 -m compileall -q agent_py_agent/agent agent_py_agent/tests`
+- `python3 -m pytest -q agent_py_agent/tests/test_runner_ref_fields.py agent_py_agent/tests/test_tools/test_tool_loop.py::test_tool_loop_and_prompt_transcript agent_py_agent/tests/test_subagent_runtime_guards.py::test_final_response_guard_ignores_dry_run_dispatch_scope agent_py_agent/tests/test_agent/test_subagent_runner.py::test_subagent_runner_repairs_missing_structured_output --tb=short`
+- `python3 -m pytest -q agent_py_agent/tests/test_orchestration_tools.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_runner_dispatch.py agent_py_agent/tests/test_orchestration_dispatch_child_refs.py --tb=short`
+- `python3 -m pytest -q agent_py_agent/tests/test_agent/test_subagent_runner.py agent_py_agent/tests/test_subagent_runtime_guards.py --tb=short`
+- `python3 -m pytest -q agent_py_agent/tests/test_subagent_phase_gates.py agent_py_agent/tests/test_runner_dispatch.py --tb=short`
+- `python3 -m pytest -q agent_py_agent/tests/test_subagent_phase_gates.py agent_py_agent/tests/test_runner_dispatch.py agent_py_agent/tests/test_runner_prompts.py agent_py_agent/tests/test_manager_runner_context.py agent_py_agent/tests/test_dispatch_workflow_modes.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_orchestration_create_subagents_items_policy.py agent_py_agent/tests/test_subagent_runtime_guards.py agent_py_agent/tests/test_tools/test_tool_loop_subagent_closeout.py --tb=short`
+- `python3 -m pytest -q agent_py_agent/tests/test_collaboration_control_plane.py agent_py_agent/tests/test_local_collaboration_subagent_integration.py agent_py_agent/tests/test_background_main_agent_runtime.py agent_py_agent/tests/test_conversation_store.py agent_py_agent/tests/test_conversation_wake_events.py agent_py_agent/tests/test_orchestration_create_subagents_items.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_orchestration_create_subagents_items_policy.py agent_py_agent/tests/test_runner_prompts.py agent_py_agent/tests/test_manager_runner_context.py agent_py_agent/tests/test_dispatch_workflow_modes.py --tb=short`
+- `python3 -m pytest -q agent_py_agent/tests/test_collaboration_control_plane.py::test_pending_requests_for_agent_ignores_closed_cases agent_py_agent/tests/test_orchestration_create_subagents_tool.py::TestCreateSubagentsToolWorkspaceDefaults::test_items_mode_sibling_roster_does_not_publish_future_outputs --tb=short`
+- `ruff check` 目标文件通过；`git diff --check` 目标文件通过。
+
+## 2026-05-26 / 无固定协调员协作控制面阶段 0-8
+
+状态：历史记录，已被“删除协作流程里的走钢丝硬门”部分覆盖；其中提到的协作验收硬卡点、输入物化启动门和旧测试期望不再作为当前路线
+
+摘要：
+- 真实 5 子代理无固定协调员 smoke 暴露的根因不是 IP 任务专项，而是控制面有三处通用缺口：发现者可能只把“需要协作”写进产物却没有 case/request；批量子代理可能继承父级最终输出路径互相抢写；`dispatch_subagents` 全部 DONE 后曾经过早替主代理收口，切断第二轮协作判断。
+- 阶段 0：`create_subagents` 批量模式不再把顶层 `output_files/output_refs/artifact_refs` 当作每个 child 默认输出。item 自己显式写的输出仍保留；若多个 child 仍共享同一文件型输出，返回 `coordination_warnings` 结构化提醒，不直接硬杀任务。
+- 阶段 1：新增 `raise_collaboration_event` 通用工具，一步打开 case 并创建 request。它接收开放世界的 `observed_facts/query_hints/response_contract/context_refs`，不写 IP、日志、API、数据库等业务分支。
+- 阶段 2-4：已有 `request_collaboration/list_collaboration_requests/reroute_collaboration_request/submit_evidence/update_collaboration_request` 继续承接显式目标、能力路由、响应发现、换路和证据提交。
+- 阶段 5：临时查询 worker 不新增专项协议；上级或响应者用现有 `schedule_child_subagents` 派短生命周期 worker，并把 `case_id/request_id/context_refs` 作为结构化上下文传下去。
+- 阶段 6：后台主代理和长期会话只通过 `case_status/inspect_agent_tree/wake signals/thread messages` 判断升级或汇报，不把 watch 只读巡逻变成默认 dispatch。
+- 阶段 7：后续真实规模测试按 5 -> 10 -> 20 子代理逐级放大，小规模没稳定前不跑大规模。
+- 阶段 8：文档明确记录几条走偏反例：固定协调员、事后猜产物、共享最终输出路径、all-green 自动收口、为测试样例写专项路径。它们保留为教训，不再作为默认路线。
+- 真实 5 子代理 smoke 的第二轮暴露了后续通用缺口：父级验收能拒绝“产物声明待协作但没有 case/request/evidence ref”，但自动建议的 repair worker 只有读写文件工具，不能补开协作账本。已把父级验收 repair worker 的工具授权统一到 `repair_contract_allowed_tools()`，同时包含读写、`read_artifact` 和协作账本工具；repair contract 也明确要求协作未交接时必须留下结构化 ref，不能只写自然语言说明。
+- 复验又暴露一个状态建议冲突：`parent_acceptance_repair_advice` 已经要求处理父级验收 REJECT，但 `current_turn_run_state` 仍把同一个 run 归为普通 awaiting acceptance，建议再次跑验收。已新增 `parent_acceptance_rejected_run_ids`，父级验收 REJECT 统一提示 `resolve_parent_acceptance_rejected_refs`，具体是 `raise_collaboration_event` 还是 repair worker 以 `parent_acceptance_repair_advice.suggested_tool_call` 为准，避免模型陷入重复验收或慢修复。
+- 第三轮真实 smoke 暴露协作意图识别过窄：子代理写 `collaboration_events=[{status: pending, collaboration_requirement: ...}]` 时，旧验收器没有识别为待协作。已扩展为通用开放世界列表识别：字段名带 collaboration/coordination，列表项有 pending/open/needed 状态或需求/请求/问题/下一步字段且没有 case/request/evidence ref，就不能验收通过。
+- 第四轮真实 smoke 暴露工具协议别名不一致：`create_subagents` 返回 `dispatch_run_ids`，模型照抄给 `dispatch_subagents`，但 dispatch 只识别 `run_ids/subagent_ids/...`，导致反复停在 PLANNING 或只推进局部 run。已把 `dispatch_run_ids/dispatch_subagent_ids` 归一为 `run_ids`，这是通用协议兼容修复，不是任务专项分支。
+- 第五轮真实 smoke 暴露 repair 路径太重：父级验收已经明确说“请调用 raise_collaboration_event”，但顶层建议仍让主代理创建修复子代理，导致 5 子代理样例在修复 worker 上拖到 180 秒。已改成：协作未落账这类失败优先给 `raise_collaboration_event` 直接建议，context_refs 指向发现者产物和验收报告；普通产物/脚本/文件失败才走 repair worker。
+- 第六轮真实 smoke 暴露短写协作意图漏检：子代理产物写 `requires_collab=true` 和 `collaboration_request={...}`，父级验收仍放行，主代理开始汇总而不是落协作 case。已扩展开放世界识别：`collab/coord` 相关字段、非空 request/question/query/observed_facts 等意图字段且没有 case/request/evidence ref 时，必须返工落账。
+- 第七轮真实 smoke 暴露两个通用协议兼容点：模型把 dispatch 目标写成 `orchestration.subagent_run_ids`，旧 dispatch 别名没识别；模型把 `output_refs` 写成对象 `{"output_path": "...", "description": "..."}`，旧持久化把整个对象字符串当成文件路径，导致明明写了产物也被父级验收误判缺失。已修成：dispatch 识别 `subagent_run_ids/dispatch_subagent_run_ids`；创建和验收层只从结构化 ref 对象中提取路径字段，保留扩展字段但不把它们变成硬文件名。
+- 第八轮真实 smoke 产物存在但判定不通过：主代理最终自己读取 5 个源文件写了结果，说明控制面没有守住“只指挥子代理”。直接根因是模型把 `context_manifest` 写成中文说明“请仔细阅读 source_01.txt...”，输入依赖门把这句说明里的 `阅读source_01.txt` 抽成硬输入路径，导致 5 个子代理没启动。已修成：字符串 `context_manifest` 只有整段是纯路径列表时才作为输入 refs；普通说明文本不再生成缺失输入依赖。结构化 `required_read_paths/input_refs`、dict 输入字段和 list refs 仍然照常生效。
+
+后续方向：
+- 先跑 focused 语法和协作工具注册/closeout 相关测试；再用普通中文 prompt 重跑 5 子代理无固定协调员 smoke。只有 5 子代理稳定通过后，才进入 10/20 响应时间和偶然性验证。
+
+## 2026-05-25 / 父级验收存在性别名对齐
+
+状态：本地已落地，focused tests 通过，待真实 11 子代理 smoke 复验
+
+摘要：
+- 真实 11 子代理协作 smoke 暴露：worker 已经写出 `check_result_*.json` 产物，但父级验收执行器不认识 `validation_method=file_exists`，导致 `test_execution.json` 记录 `unknown_validation_method`，子代理停在 `AWAITING_ACCEPTANCE/NEEDS_ACCEPTANCE`。
+- 修复方向是通用协议对齐，不是 IP 或协作任务专项：`file_exists/path_exists/artifact_exists` 作为存在性别名归一到 `file_check`。
+- 如果存在性测试项没有 `file_path`，只从同一 `output.artifacts[].path` 的机器字段展开目标；不从测试名、summary 或任务正文猜路径，继续遵守“自然语言不是机器事实来源”。
+
+验证：
+- 一次性最小复现确认旧代码会把 `file_exists` 报成 `unknown_validation_method`，补丁后会展开成 `file_check + file_path` 并通过真实文件元数据验收。
+- `ruff check agent_py_agent/agent/subagents/execution_test_items.py agent_py_agent/agent/subagents/execution_executor.py`
+- `pytest -q agent_py_agent/tests/test_subagent_test_executor.py agent_py_agent/tests/test_subagents_tests_command.py agent_py_agent/tests/test_runner_input_dependencies.py agent_py_agent/tests/test_orchestration_input_materialization_tool.py --tb=short`
+
+后续方向：
+- 用普通中文 prompt 重跑 11 子代理协作真实 smoke，确认 worker 验收不再卡在 `file_exists`。注意：后续复盘已废弃“同一次 dispatch 第二波 coordinator”做法，汇总顺序应由父级显式控制。
+
+## 2026-05-25 / 协作会话 P0 稳定性修补
+
+状态：本地已落地，focused tests 通过，未提交
+
+摘要：
+- 新增 `list_collaboration_requests` 只读工具：响应者不知道 `case_id/request_id` 时，可以按当前 runner 身份或显式 `agent_id/agent_name/agent_role` 发现点名给自己的待响应协作请求。它只读结构化 case/request 账本，不按 IP、日志、API 等业务内容做专项判断。
+- 后台主代理上下文新增预算裁剪层 `conversation/context_budget.py`：消息、observation、wake signal、agent tree 等只在 prompt 副本里截断长字符串和超大列表，原始账本/产物不改写。这样长期会话不会因为 recent messages、agent tree 或 wake signals 过大而把一次后台唤醒撑爆。
+- JSON 文件写入新增 `update_json_file_atomic()`：把 read-modify-write 放在同一个 per-file 锁内，并给 `write_json_file_atomic/read_json_file` 增加跨进程文件锁。JSONL append 继续走现有 append 锁；wake 去重按 `thread_id + dedupe_key` 建小索引，避免全量 pending wake 扫描造成大锁。
+- `BackgroundMainAgentScheduler` 新增 per-thread background claim：同一 thread 已有未过期后台运行时，下一轮 tick 不重复唤醒；claim TTL 是“不续约就认为死了”的租约窗口，不是后台任务最长运行时间。运行中会启动后台 heartbeat 线程按 TTL 的安全间隔续约；结束时先停 heartbeat、限时 join，再按 `claim_id` finish，进程崩溃则自然停止续约并让 claim 过期。
+- `CollaborationCoordinator` 在 case 升级前会把已过 deadline 且未响应的 request 标为 `timeout`，并写入 `metadata.timeout`。这让主代理能看到“哪条协作请求超时、deadline 是多少”，再决定换路、补派或汇报阻塞，而不是只收到抽象升级事件。
+- 真实 smoke 发现：主代理只是 dry-run `dispatch_subagents` 检查输入依赖、调用 `materialize_subagent_inputs` 补齐父级文件、再 dry-run 复核时，工具轮数到顶会被子代理事实收口抢答成“未完成链路”。已调整为只有 runner 真实执行/重试过的 run 才触发工具上限和最终回答事实收口；纯 dry-run、状态检查、输入物化复核不覆盖主代理自然回复。
+- 同一 smoke 还发现 dispatch 缺输入时会同时暴露“输入物化建议”和“父级验收 repair child 建议”。后者是时序噪声，因为 runner 没启动，`PLANNING/UNVERIFIED` 不能被当成验收修复任务。现在缺输入 payload 顶层 `next_action` 固定为 `materialize_or_provide_missing_inputs`，并去掉该场景下的 repair advice。
+- 真实模型会把 child 缺的短 ref `source.weird` 写成父级相对路径 `parent_inputs/source.weird`。物化服务现在 exact ref 优先，exact 不匹配但 basename 唯一时也会把 child 原短 ref 回绑到受控物化路径，避免复制成功但旧短 ref 仍卡住下一轮 dispatch。
+- 可物化缺输入时不再输出 `dispatch_terminal=stop_dispatch_and_report_blockers`。真实模型会被 terminal 带停，甚至口头声称调用了未执行工具；现在有 `input_materialization_recovery` 就以物化/补路径为唯一顶层路线。
+
+验证：
+- `python3 -m pytest agent_py_agent/tests/test_collaboration_control_plane.py::test_collaboration_tools_are_registered_and_write_case_flow agent_py_agent/tests/test_collaboration_control_plane.py::test_list_collaboration_requests_finds_targeted_request_without_case_id agent_py_agent/tests/test_collaboration_control_plane.py::test_targeted_collaboration_request_carries_clue_packet_to_responder_context agent_py_agent/tests/test_collaboration_control_plane.py::test_coordinator_marks_expired_request_timeout_before_escalation agent_py_agent/tests/test_background_main_agent_runtime.py::test_background_context_budget_truncates_large_messages agent_py_agent/tests/test_background_main_agent_runtime.py::test_scheduler_skips_thread_with_active_background_claim agent_py_agent/tests/test_background_main_agent_runtime.py::test_scheduler_processes_collaboration_cases_before_waking_agent agent_py_agent/tests/test_conversation_wake_events.py::test_observation_and_wake_signal_are_durable_and_idempotent agent_py_agent/tests/test_conversation_store.py::test_update_json_file_atomic_updates_under_single_file_transaction -q`
+- `python3 -m pytest agent_py_agent/tests/test_background_main_agent_runtime.py::test_scheduler_renews_background_claim_while_runtime_is_still_running agent_py_agent/tests/test_background_main_agent_runtime.py::test_scheduler_default_heartbeat_interval_stays_below_small_ttl agent_py_agent/tests/test_background_main_agent_runtime.py::test_scheduler_skips_thread_with_active_background_claim -q`
+- `python3 -m pytest agent_py_agent/tests/test_subagent_runtime_guards.py::test_dispatch_limit_response_ignores_seen_but_not_dispatched_scope agent_py_agent/tests/test_subagent_runtime_guards.py::test_dispatch_limit_response_keeps_actual_dispatched_scope agent_py_agent/tests/test_subagent_runtime_guards.py::test_final_response_guard_ignores_dry_run_dispatch_scope -q`
+- `python3 -m pytest agent_py_agent/tests/test_orchestration_input_materialization_tool.py::test_dispatch_materialize_dispatch_tool_loop_clears_missing_input -q`
+- `python3 -m pytest agent_py_agent/tests/test_subagent_input_materialization.py::test_materialize_subagent_inputs_rebinds_parent_relative_missing_ref_by_unique_basename -q`
+
+后续方向：
+- P0 真实复验时继续使用普通中文任务 prompt，不写内部 case/schema 字段。若协调仍慢，优先看 responder 是否调用 `list_collaboration_requests`、是否收到 `targeted_requests`、是否提交 `submit_evidence` 和 `update_collaboration_request`，不要添加业务专项模板或固定 180 秒规则。
+- P1 再考虑 archive/purge、active task 清理、按唤醒原因分层工具集、accept/decline wrapper、FakeChannel 故障模拟。
+
+## 2026-05-25 / 长期协作控制面阶段 0-8
+
+状态：本地已落地，离线 focused tests 和小型 live E2E 通过，未提交
+
+摘要：
+- 阶段 0 修正 `context_manifest` 输入/输出/线索混判：输入依赖只读取 input-like 结构化字段，`output_path/output_files/output_refs` 不再被当成启动前必须存在的输入文件；类似 IP、版本号这类 dotted numeric clue 不再被误判为文件 ref。
+- 阶段 1-2 复用已有 `collaboration` 和 `conversation` 控制面，把长期 thread、wake signal、observation、case/request/evidence 作为结构化账本；它们不绑定飞书/微信，也不绑定日志/IP/API 业务。
+- 阶段 3 给 runner prompt 补齐 targeted collaboration clue packet：`problem_statement/observed_facts/query_intent/query_hints/routing_requirements/response_contract/context_refs` 会进入响应代理上下文。字段保持开放世界，`query_hints` 只是软提示，响应代理可以拆分、改写或换来源。
+- 阶段 4 跑通同级协作路由：子代理可以打开 case、发请求、提交 refs-first evidence、更新 request 状态，主代理通过 `case_status` 和代理树继续判断。
+- 阶段 5 补父子孙冒泡：`raise_main_event` 和 `raise_observation` 在子/孙代理只传 `task_id` 时，会从真实任务树推导 `source_agent_id/parent_agent_id/root_task_id`，避免模型猜错 lineage 字段。
+- 阶段 6 增加短协调等待与 watch 边界：`request_collaboration` 支持 `deadline_seconds`；`watch` 默认只观察代理树，只有显式 `advance` 才推进 dispatch；显式 advance 会按当前 workspace run scope 调度，不再因为没有当前聊天轮 scope 被拦。
+- 阶段 7 live E2E 先暴露了一个通用 bug：一个 request 发给多个目标时，任一目标提交 evidence 后，旧逻辑会让其他目标丢失 pending inbox。已改为按 responder 身份逐个闭环；多目标 request 只有所有目标都有 evidence 后才算 completed。
+- 阶段 8 同步文档并跑整体验收。所有新增行为都在控制面层，不新增 IP、GitHub、PDF、API 等专项模板或专项验收器。
+
+验证：
+- `python3 -m pytest agent_py_agent/tests/test_runner_input_dependencies.py -q`
+- `python3 -m pytest agent_py_agent/tests/test_runner_prompts.py agent_py_agent/tests/test_subagent_context_bundle.py agent_py_agent/tests/test_subagent_prompt_contract.py -q`
+- `python3 -m pytest agent_py_agent/tests/test_orchestration_tools.py agent_py_agent/tests/test_subagent_hierarchy_limits_cli.py agent_py_agent/tests/test_subagent_context_bundle.py agent_py_agent/tests/test_local_collaboration_subagent_integration.py -q`
+- `python3 -m pytest agent_py_agent/tests/test_collaboration_control_plane.py agent_py_agent/tests/test_agent/test_planner_and_watch.py agent_py_agent/tests/test_background_main_agent_runtime.py -q`
+- live E2E：`/Users/example/my_agent/live-agent-runs/collaboration-control-plane-e2e-20260525-stage7-rerun/stage7_e2e_summary.json`。本轮创建 10 个 source 子代理和 1 个触发子代理；10 个 source 都响应同一个多目标 request，3 个命中，7 个未命中但给出检查范围；最终 `pending_request_count=0`、`completed_request_count=1`、`ready_for_main_agent=true`，后台主代理被唤醒并发送汇报。
+
+后续方向：
+- 继续做真实 LLM 长期任务验收时，只用普通用户 prompt。若失败，先看结构化账本里是哪一层断：输入 refs、targeted request、evidence、request lifecycle、wake signal、watch advance、background main-agent。
+- 长期驻守类任务后续要进入 watch/schedule runtime，不用普通子代理 dispatch loop 硬跑无限循环；watch 负责观察和必要时唤醒/推进，主代理 LLM 负责二次判断、调度和用户风格汇报。
+
+## 2026-05-25 / 父级共享 brief 与开放 Context Pack 渲染
+
+状态：本地已落地；真实协作 run 已能防假完成，正在补齐父级结果索引收口
+
+摘要：
+- 真实 11 子代理协作 run 暴露：主代理先读到告警线索后，资料源子代理仍只知道“与告警相关的关键线索”，但不知道具体线索值；模型自己传的 `context_packs.files` 也没有被 runner prompt 渲染，子代理只看到包名。
+- 新增 `orchestration_shared_context.py`：工具归档后从最近小型成功读取结果生成 refs-first `parent_recent_read` brief，包含 `summary/path/ref/source_tool`，不会复制大正文，也不是验收硬门。
+- `_tool_loop_service.py` 在工具记录阶段先从本次成功的小型读取结果直接刷新父级共享 brief，再从 `archive_tool_calls` 做补充刷新；这样即使小结果还没被 archive/window 链路扫到，紧接着的 `create_subagents` 也能继承父级已知线索。
+- `create_subagents` 创建子代理时把该 brief 追加到每个 child 的 `context_packs`，让协作代理共享父级已读到的小型线索。
+- `runner_rendering.py` 的 Context Pack 渲染改成开放字段小型展示：除 `kind/summary/path/ref/role` 外，`files/refs/source_tool/name` 等新增字段也会显示，避免新字段静默进入 task.json 却不进 runner prompt。
+- 补丁后真实 run `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-142000` 正常退出，但暴露第二个通用收口问题：source child 的 `latest_summary/output.json` 已包含关键发现，协调产物漏汇总其中一个 child；系统最终没有假报完成，而是用状态摘要拦住了最终回复。当前版本已把旧 `Subagent State Notice` 文案改成中文子代理状态摘要，避免包装词误导排查。
+- `dispatch_subagents` 和 `subagent_board` 现在在顶层提前暴露 `child_result_index`，把每个 child 的 `run_id/status/verification_status/summary/output_json/artifact_refs` 放在巨大 `records/items` 前面。父级先按这个索引核对 child 摘要与协调汇总，避免因为 artifact 读取截断、只看输出目录或只信单个协调产物而漏掉已产出的发现。
+- 同一轮真实复验继续暴露：协调子代理会因为不知道同批资料源子代理的 `run_id/agent_name` 而 BLOCKED。新增 `orchestration_sibling_roster.py`，批量创建完成后给每个 child 附加 `sibling_roster` context pack，只列出同批 peers 的 `run_id/name/role/goal`。它不再发布 peer 的未来 `output_refs/output_files`，避免把“未来同伴产物”注入上下文。
+- 这不是 IP 专项修复；IP 只是真实协作验收的样例。规则只处理“父级已读取的小型上下文如何安全传给子代理”和“开放 context pack 字段如何展示”。
+
+验证：
+- 一次性脚本确认 `refresh_parent_shared_context_from_tool_record()` 支持 `{"filesystem": {"path": ...}}` 形态的 `read_file` 参数，能直接生成 `parent_recent_read` 并被 `append_parent_shared_context()` 注入。
+- 一次性脚本确认 `refresh_parent_shared_context_cache()` 后 `append_parent_shared_context()` 会追加 `parent_recent_read`，且 `context_packs.files` 会在 runner 渲染里出现。
+- 一次性脚本确认 `attach_sibling_roster()` 会给同批 child 持久化 peer roster，runner prompt 能展示 peer run id。
+- `ruff check agent_py_agent/agent/agent_core/orchestration_shared_context.py agent_py_agent/agent/agent_core/orchestration_tools.py agent_py_agent/agent/agent_core/_tool_loop_service.py agent_py_agent/agent/subagents/runner_rendering.py`
+- `pytest agent_py_agent/tests/test_orchestration_tools.py agent_py_agent/tests/test_orchestration_dispatch_completion_gate.py -q`
+- 真实 run `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-135034` 已生成 `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-135034/outputs/investigation_result.json`，机器核验命中 `source_02/source_05/source_08`，未确认数为 0。
+- 真实 run `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-142000` 验证了系统不会在子代理链路未通过时假完成；本轮记录到的缺口是父级需要更靠前、更紧凑的 child 结果索引。
+
+后续方向：
+- 用 `child_result_index + sibling_roster` 补丁后的代码重跑普通中文 prompt 的协作调查真实用例，确认协调子代理能看到同批资料源 run id，并由它自己完成协作汇总。
+- 如果长任务仍因 compact 停住，下一轮真实测试应使用可保存 session，并显式开启或测试 auto-compact resume；不要用 `--no-save` 测“完全无人值守长跑”。
+
+## 2026-05-25 / 子代理输入引用归一化
+
+状态：本地已落地，待重新跑真实协作验收
+
+摘要：
+- 真实多代理协作 run 暴露：主代理把 `context_manifest` 写成 `read_file:/abs/path/file.txt` 这类工具动作引用时，输入依赖门把整个字符串当成文件路径，导致真实文件存在仍被报 `missing_input_refs`，所有子代理卡在 `PLANNING`。
+- `runner_input_dependencies.py` 新增通用文件引用归一化：`read_file:/path`、`write_file:~/path` 等工具动作前缀会在文件依赖判断前剥离，`http://`、`https://` 等真实 URL 不受影响。
+- `orchestration_create_context.py` 在创建 context manifest 时也复用同一归一化，避免把带工具名前缀的脏 ref 持久化为硬输入依赖。
+- 这不是 IP/日志/GitHub/PDF 专项修复；机器层仍然只看结构化 ref，不根据自然语言任务内容推断业务规则。
+
+后续方向：
+- 重跑普通自然语言的多代理协作真实用例，确认子代理能从 `PLANNING` 推进到执行、验收和最终汇总。
+
+## 2026-05-25 / 显式协作请求入口合同
+
+状态：已落地入口物化、运行属性注入和最终回答返工门，focused tests 通过
+
+摘要：
+- 真实 MiniMax 场景暴露：用户普通语言明确要求“创建 11 个子代理/联合其他代理调查”时，主代理仍可直接读完资料并写最终报告，因为旧逻辑只在已有 `task_attributes.subagent_delegation` 或已经创建过子代理时保护派工边界。
+- 新增通用 `orchestration_contract`，由入口物化器从普通用户需求抽取结构化字段：`requires_orchestration`、`required_tools`、`minimum_subagent_count`、`rework_budget`。它不包含 IP、日志、GitHub、PDF、XLSX 等任务专项字段。
+- `runtime_mixin` 会把物化出的 `orchestration_contract` 注入 `task_attributes`，并设置 `subagent_delegation=True`，让已有派工前正文读取保护生效；root 仍可读 README、目标、rubric 和目录，但不能先吞 data/source 正文再假装完成协作任务。
+- `tool_loop_orchestration_contract_decision.py` 在模型准备无工具最终回答时检查真实工具事实：必须看到合同要求的 orchestration 工具执行记录，并满足最小创建数量。未满足时返回结构化中文返工提示，让模型按 Tool Catalog 重试 `create_subagents` 等工具；连续忽略后才返回 blocked。
+- 对照参考：通道运行时 的 subagents 工具把 list/steer/yield 做成显式控制面，OpenHuman 文档强调 subagent/delegate 是可见工具决策；本仓库吸收的是“显式协作必须有工具事实和状态回路”，不是业务模板。
+
+验证：
+- `pytest agent_py_agent/tests/test_delivery_requirement_materializer.py::test_materialized_delivery_contract_preserves_orchestration_contract agent_py_agent/tests/test_runtime_delivery_materialization_entry.py::test_cli_run_reworks_final_answer_until_explicit_orchestration_runs -q`
+- `pytest agent_py_agent/tests/test_delivery_requirement_materializer.py agent_py_agent/tests/test_runtime_delivery_materialization_entry.py -q`
+- `pytest agent_py_agent/tests/test_tools/test_tool_loop.py::test_tool_loop_blocks_predelegation_source_body_read agent_py_agent/tests/test_tools/test_tool_loop.py::test_agent_can_delegate_to_subagents_from_tool_call agent_py_agent/tests/test_orchestration_direct_write_guard.py -q`
+
+## 2026-05-25 / 通用多代理协作控制面
+
+状态：已落地 request 生命周期与结构化换路版，离线 focused tests 通过
+
+摘要：
+- 新增 `agent_py_agent/agent/collaboration/`，把多代理联动拆成通用 `AgentCapability / CollaborationCase / CollaborationRequest / EvidencePacket / CaseDecision` 账本，不绑定日志、API、数据库、GitHub、论文、PDF、XLSX 等任务专项。
+- 新增 `open_case / request_collaboration / submit_evidence / update_collaboration_request / reroute_collaboration_request / case_status` 编排工具。子代理和协调代理默认能参与协作 case，但只能提交结构化请求、证据 refs、请求状态、换路动作和摘要，不直接绕过主代理对用户收口。
+- `CollaborationRequest` 采用 append-only 快照更新；`case_status` 折叠为最新状态，同时暴露 pending/blocked/completed/declined 计数、缺证据 request_id、`ready_for_main_agent` 和历史快照计数。
+- `reroute_collaboration_request` 和 `update_collaboration_request(target_agent_ids=...)` 会把换路真正落到 `CollaborationRequest.target_agent_ids`，并记录 `original_target_agent_ids`、`rerouted_from`、`rerouted_to` 与审计 decision，避免模型只在自然语言或 metadata 里说“已换路”。
+- `CollaborationCoordinator.tick()` 会把证据达标、deadline 到期、请求阻塞或请求可收口的 case 转成 `ObservationEvent / WakeSignal`，接入现有后台主代理唤醒链路；调度器只负责叫醒，LLM 主代理负责二次分析、调度和汇报。
+- 协作层坚持 refs-first：大日志、大文件、API 返回、数据库快照、截图和文档正文不进入协作账本，只进入 artifact/tool result 等外部 refs。
+- 新增 `update_case_status` 与 `collaboration update-status`，允许主代理/coordinator/人工推进 case 生命周期；状态字段保持开放世界，但关闭/解决/完成类状态必须有 summary、decision_type 或已有 decision，避免 case 无审计关闭。
+- `case_status` / `update_collaboration_request` / `reroute_collaboration_request` 的外置工具结果会保留 request/evidence/ready 等 live-prompt 摘要，避免状态工具结果被压缩后模型看不到关键机器字段。
+- `case_status` 新增 `rework/rework_targets`，把阻塞请求和缺证据请求转成通用返工目标；它只读结构化 request/evidence 状态，不按任务文本写专项分支。若 metadata 里有 `alternate_sources_available`、`candidate_target_agent_ids` 或 `alternate_target_agent_ids`，会暴露候选目标和 `primary_tool=reroute_collaboration_request`，给主代理一个明确可执行的换路动作。
+- 新增 `CollaborationStore.overview()` 和 `my-agent collaboration overview`，给真实复杂任务前做只读控制面体检：ready case、阻塞、缺证据、证据和决策数量一眼可见。
+- 子代理创建完成后会登记一份开放世界的 `AgentCapability` 快照：显式 `attributes.capabilities`、角色、展示名、工具名原值都会保留；read/search/fetch 等已知工具只额外补 `query` 这类通用别名，`submit_evidence` 补 `evidence_submission`，不把能力词汇封成枚举。这样 `request_collaboration(required_capabilities=...)` 即使没有显式 target，也能按结构化能力找到现有子代理。
+- `open_case` 现在优先使用已存在 thread；如果模型给了猜测的 thread_id/task_id，系统会先按显式 `task_id/run_id` 解析，解析失败但当前处在子代理 runner 内时，再使用当前 runner 的真实 run_id 物化一个 `internal` conversation thread 并绑定该任务。这样本地真实测试、后台 runner 和无飞书/微信通道的子代理也能进入协作账本，不要求用户或模型先手工准备外部会话 id，也不要求模型猜内部 run_id。
+- `request_collaboration` 升级为通用线索协作请求：新增 `problem_statement / observed_facts / query_intent / query_hints / routing_requirements / response_contract / context_refs`。这些字段不包含 IP、hostname、订单号等业务枚举；`kind`、`label`、`value`、`terms` 等由 LLM 或上游工具按当前任务生成，系统只保证结构化透传、refs-first 和响应闭环。
+- `submit_evidence` 升级为通用协作响应包：新增 `queried_scopes / used_query_hints / miss_reason / response_facts / followup_suggestions / query_actions`。响应代理可以命中、未命中、阻塞或建议继续找其他来源；查不到不是失败，但必须能说明查了什么、限制是什么、证据 refs 在哪里。
+- 子代理 runner prompt 只把 `query_hints` 当软提示：响应代理可以完整查、拆分查、改写查、扩大/缩小范围或换来源。机器层不根据 `kind` 写专项逻辑，也不要求用户在普通 prompt 里手写这些字段。
+- `BackgroundMainAgentScheduler.tick()` 合并同 thread 的多条 wake signal，同一轮只叫醒一次后台主代理，避免多证据/多阻塞事件造成重复 LLM 唤醒。
+- `tool_protocol_v2` 修正旧 flat tool call 的开放世界兼容：业务参数 `status` 不再被协议状态枚举吞掉，`update_case_status(status=needs_replan)` 这类工具调用能保留业务状态。
+- 本地 `create_subagents -> dispatch_subagents -> run_subagent` 已接入长期会话继承。主代理在绑定 `RunParams.task_id` 的 thread 内创建子代理时，子/孙代理会继承 `conversation_thread_id/conversation_task_id`，并能用自己的 `run_id` 调用 `raise_main_event/open_case` 回到原 thread。
+- 新增 `background-main-agent status` 只读控制面看板，汇总长期会话、绑定任务、wake queue、未处理 observation、progress policy、协作 case 和代理树；它不调用 LLM、不 dispatch、不改状态。
+- 新增本地真实协作验收：两个真实子代理分别打开 case/发请求、提交 refs-first 证据/更新请求状态；后台主代理重启后被协作 case 唤醒，并通过 `case_status + inspect_agent_tree` 完成下一步判断。
+- 对照来源：通道运行时 的事件账本/replay、长期助手 的后台 wake gate、终端交互 的控制请求/响应模式。吸收的是控制面模式，不复制业务任务模板。
+
+后续方向：
+- 继续给真实长期任务增加观测指标，让用户能看到活跃 case、待响应/阻塞/完成请求和已提交证据。
+- 后续接入飞书/微信/真实后台服务时，只把通道适配到 Conversation/Wake，不把通道逻辑写进 collaboration 核心。
+
+## 2026-05-24 / 主代理运行门收口与文档同步铁律
+
+状态：部分落地，最新代码本地未提交
+
+摘要：
+- 新增开发铁律：每次开发必须同步更新文档。运行语义、合同门、配置、工具行为、验收流程、真实测试方法、架构边界或长期规则变了，同一轮必须更新 `AGENTS.md`、`DESIGN_LEDGER.md`、`docs/design/`、`CODEBASE_TREE.md` 或对应说明；如果不需要文档变更，最终汇报必须说明原因。
+- 新增 `docs/design/main-agent-runtime-gates.md`，记录最近几轮主代理运行门调整：探索熔断配置化、本地进展门配置化、显式 `submit_for_acceptance`、无工具最终回复隐式验收、closeout 返工预算配置化、删除 delivery repair 独立运行门、删除 bootstrap 开工物化硬门。
+- delivery contract Doctor 现在第一次给结构化返工上下文，第二次仍不可运行时返回 `DELIVERY_CONTRACT_DOCTOR_BLOCKED`，避免机器合同自身坏掉后无限循环；普通产物质量失败仍由 closeout 返工单处理。
+- 删除 bootstrap 开工物化硬门的方向已经确定：它不是安全门，也不是最终验收门，不能再拦截普通 `web_search`、`fetch_url`、`read_file`、`list_files`，也不能把普通任务变成必须先写某个系统指定中间文件。
+- 当前真实任务测试原则继续保持：prompt 用普通人语言；失败先沉淀离线样本和通用底座修复；禁止新增专项模板或新的非安全前置硬门。
+- open write session 门已经从“连续 2 次忽略就阻断”改成“写入事务保护 + 周期提醒”：最终回答、提交验收、读/写未提交目标文件会被立即拉回；非冲突工具继续执行；提醒按未处理 open session 的模型回合计数，默认每 3 回合提醒一次，不再由这个门自己 blocked。
+
+后续方向：
+- 迁移旧 closeout 集成测试到显式/隐式提交验收语义。
+- 用普通用户 prompt 重跑单周 GitHub 任务，观察自由检索、产物生成、提交验收和返工闭环。
+- 产物内容质量问题继续走事实声明、来源引用、事实核对、closeout 返工单，不回退到开工前置模板。
+
 ## 2026-05-22 / 主代理阶段 0-6 运行硬门补齐
 
 状态：已落地第一版，focused gate/closeout 测试通过，code-size hard/high-risk/soft 清零
@@ -2191,3 +2428,255 @@ def example(...):
 - 新增回归覆盖“只有几百行却声称至少一千行”：即使 workbook 已存在，只要 `source_data.json.rows` 少于 1000，artifact acceptance 必须返回 `COLLECTION_TOO_FEW_ITEMS`。
 - 参考项目取舍：学习 长期助手/通道运行时/会话运行时 的 mandatory gate 思路，把约束挂在 runner、tool gateway、artifact validator、delivery closeout，而不是解析 prompt 或最终回复里的普通自然语言。
 - 下一步：跑离线门控链路后，先单个复杂任务真实复验，再用 4 个主代理并行跑 GitHub、论文、购物站、数据分析包。
+
+## 2026-05-25 Long-running background MainAgent thread runtime
+
+状态：已落地，已做离线验收
+
+摘要：
+- 新增 `agent_py_agent/agent/conversation/`，把长期主代理线程拆成 `ConversationThread`、`MessageLogEntry`、`ChannelBinding`、`ThreadTaskLink`、`ProgressPolicy` 五类机器事实；它们只描述会话、渠道、任务和定时策略，不承载任何专项任务模板。
+- `ConversationStore` 用本地 JSON/JSONL 账本保存 thread、消息、任务绑定、渠道绑定和 progress policy。换进程重新创建 store 后，可以恢复同一用户在 fake Feishu / fake WeChat / internal 之间的上下文；新渠道默认不复用最近 thread，只有消息入口明确继续上下文时才复用，避免同用户新任务串线。
+- `BackgroundMainAgentRuntime` 会装载会话消息、任务绑定和 `inspect_agent_tree` 快照，再调用同一个 `SimpleAgent.run()`。scheduler/watch 只负责叫醒，不替 LLM 判断工作内容。
+- `BackgroundMainAgentScheduler.tick()` 只查到期 `ProgressPolicy` 并唤醒 runtime；发送路径先用 `FakeChannelHub` 验证 internal/fake Feishu/fake WeChat，后续真实飞书/微信 adapter 只需要接入同一 route 语义。CLI 已提供 `background-main-agent message/bind-task/tick/service`，用于本地模拟渠道消息、绑定任务、单次 tick 和前台循环 tick。
+- 参考项目取舍：长期助手 的 SessionSource/cron due-job、通道运行时 的 watch 控制面、OpenAI Agents 的 resume tracker 共同点是“恢复和投递靠结构化会话事实，不靠模型记忆普通文本”。本轮实现吸收这条，不复制它们的业务模板。
+- 验证链路：`test_conversation_store.py` 覆盖跨渠道和重启恢复，`test_background_main_agent_runtime.py` 覆盖定时唤醒和重启后继续汇报，`test_fake_channel_resume.py` 覆盖 fake Feishu/fake WeChat 同用户恢复同一 thread，`test_background_main_agent_cli.py` 覆盖本地 CLI 入口；目标 `ruff` 已通过。
+
+## 2026-05-25 Descendant event wake queue for background MainAgent
+
+状态：已落地，已做离线验收
+
+摘要：
+- `ConversationStore` 新增 `ObservationEvent` 和 `WakeSignal` 账本。子代理、孙代理或外部通道可以写入结构化观察事实；紧急事件进入 durable wake queue，普通待复核事件等下一次 tick 交给主代理。
+- 新增 `raise_observation` / `raise_main_event` 编排工具，并把它们加入默认子代理/层级/工作流工具授权。它们只写结构化事件和 wake signal，不执行调度、不替模型做业务判断。
+- `BackgroundMainAgentScheduler.tick()` 现在按顺序处理 urgent wake、未处理 observation、到期 progress policy。`BackgroundMainAgentRuntime` 会把 `Recent Observations` 和 `Pending Wake Signals` 注入上下文，由同一个主代理 LLM 判断是否二次分析、调度或汇报。
+- `background-main-agent observe` 提供本地模拟入口；`service` 的 sleep 改成短轮询 wake queue，紧急事件不必等完整 interval。
+- 参考项目取舍：学习 长期助手 cron wake gate 的“先判定是否叫醒，再让 agent 处理”结构；没有增加 API/告警/安全专项模板，也没有把普通观察变成硬阻断。
+- 验证链路：`test_conversation_wake_events.py` 覆盖 observation 持久化、wake 幂等、urgent 立即唤醒、普通待复核 tick 处理和工具反查 task thread；`test_background_main_agent_cli.py` 覆盖 observe CLI 和 service wake interrupt。
+
+## 2026-05-25 Subagent collaboration control-plane affordance
+
+状态：已落地，已做 focused 验收
+
+摘要：
+- 真实 MiniMax 小场景显示：协作工具虽然已经授权给子代理，但 runner prompt 没有把 `open_case/request_collaboration/submit_evidence/update_collaboration_request/reroute_collaboration_request/case_status` 作为通用动作入口讲清楚，模型会退回读写报告而不是进入协作账本。
+- `runner_prompts.py` 现在只在当前 `allowed_tools` 包含协作工具时追加“协作控制面”段落。段落按实际授权工具解释何时开 case、何时请求补证据、如何提交 refs-first 证据、如何更新请求、何时结构化改派。
+- 后续已调整措辞：如果 runner 同时有 `open_case` 和 `request_collaboration`，提示只说明“需要其他代理回应/补证据时，再创建 request”。这属于软动作建议，不是 closeout/acceptance 卡点；空 case 可以作为日志事实存在。
+- 新增点名协作请求注入：`CollaborationStore.pending_requests_for_agent()` 会按结构化 `agent_id/agent_name/agent_role/target_agent_ids` 找出尚未提交证据、未完成/未拒绝的 request；它兼容系统给展示名追加的数字后缀，例如 `Agent-B-2` 可响应发给 `Agent-B` 的请求，也支持发给结构化 role 的请求，例如 `target_agent_ids=["agent-b"]`。`SubAgentManager` 把这些 refs 写入 `context_bundle.collaboration.targeted_requests`，runner prompt 明确要求响应者复用已有 case/request，按 `case_status -> submit_evidence -> update_collaboration_request` 收口，避免 B 代理再开第二个 case。
+- `dispatch_subagents` 的 runner candidate 现在会优先包含“被新协作请求点名”的空闲/已完成代理，并且在显式 `include_run_ids` 时仍只在当前 scoped 范围内处理。这样 A 后创建 request、B 先前已 DONE/VERIFIED 的时序也能自然进入下一轮 B responder，而不是直接派 repair 代理或让 B 永远不知道 request。
+- `dispatch_subagents(router=None, execute_runners=True)` 会跳过 runner 后置 capability route+rerun 闭环，但保留 runner 本身执行结果；显式传入 CapabilityRouter 时才尝试把新 `capability_request` 自动授权并重跑一轮。
+- 这不是专项模板：不解析用户 prompt，不绑定 GitHub/日志/API/论文等业务类型，也不要求用户写 case 字段。它只把已有结构化工具权限变成真实模型可理解、可执行的控制面入口。
+- 验证链路：`test_subagent_prompt_contract.py` 增加 prompt contract 回归，`test_collaboration_control_plane.py` 覆盖 targeted request 查询和 execution context 注入，`test_local_collaboration_subagent_integration.py` 继续覆盖 fake 子代理协作闭环。
+
+## 2026-05-25 Explicit orchestration root control-plane boundary
+
+状态：已落地，focused 验收通过；真实 MiniMax 场景已复现旧问题并保留现场
+
+摘要：
+- 真实协作调查场景暴露了一个通用边界缺口：入口已经物化 `orchestration_contract.v1`，root 也创建并调度了子代理，但当第一批子代理验收不顺时，root 会改成自己直接读取已委派的源文件补洞。
+- 这不是 IP 专项问题，而是“显式协作任务里 root 是否仍保持控制面角色”的问题。修复后，`orchestration_contract.requires_orchestration=true` 会被视为 refs-only 委托意图，入口运行参数同时设置 `subagent_delegation=True` 和 `refs_only=True`。
+- root 已经有当前轮 child runs 且 acceptor 未完成时，`orchestration_body_read_guard.py` 会继续阻断 root 读取普通 source/product 正文；root 仍可读 `subagent_board`、`dispatch_subagents` artifact、task/output/status 这类控制面元数据，然后继续调度、创建 repair worker，或明确报告子代理阻塞原因。
+- 这条规则只读结构化 `task_attributes.orchestration_contract`，不扫描 prompt 里的 IP、hostname、日志、论文等业务内容，也不限制 leaf worker 读取自己负责的资料。
+- 同一真实场景还暴露模型把 `dispatch_subagents` 的 `run_ids` 写成 `subagent_ids`、`target_subagent_ids` 或 `items:[{"run_id":...}]`，导致工具只 dry-run、子代理一直停在 PLANNING。修复后 `dispatch_subagents` 接受 `run_ids/include_run_ids/subagent_ids/target_subagent_ids/target_run_ids/agent_ids/items[].run_id` 作为同一类显式目标；顶层显式给目标 ID 时默认 `apply=true`、`execute_runners=true`，显式 `apply=false` 仍保留 dry-run。
+- 验证链路：新增 `test_top_level_orchestration_contract_blocks_source_body_after_children_exist`、`test_top_level_subagent_ids_alias_runs_and_executes` 和 `test_top_level_items_run_id_alias_runs_and_executes`，并复跑显式协作入口物化测试；目标 `ruff` 已通过。真实现场保存在 `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-093000`、`/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-093500` 和 `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-094000`。
+
+## 2026-05-25 Evidence-only subagent acceptance for investigation work
+
+状态：已落地，focused 验收通过；待真实 MiniMax 复验
+
+摘要：
+- 真实协作调查场景 `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-094500` 里，部分 leaf worker 已经读取资料源、给出命中/未命中事实和 evidence ref，但父级验收把 `test_execution.json` 的 `total=0 failed=0` 当成失败，导致任务停在 `AWAITING_ACCEPTANCE` 并诱导 root 创建修复子代理。
+- 这不是 IP 专项问题，而是通用“调查/查询/监控类子代理可能只产出证据事实，不一定产出新文件 artifact”的问题。修复后，空可执行测试报告只有在缺少可追踪证据时才会转 rescue；如果 task/output/evidence packet 指向非内部的 `evidence_refs` 或 `artifact_refs`，父级会进入 `inspect_only -> apply_acceptance` 轨道。
+- runner 解析层现在兼容顶层 `evidence_refs/artifact_refs`：模型没有把 refs 包进 `evidence_packets` 时，系统会补一个 refs-only evidence packet，避免证据在 parser 到 acceptance 之间丢失。
+- 这条规则只读结构化 refs 和 run-private 路径边界，不扫描 prompt 里的 IP、hostname、日志、GitHub、论文等业务自然语言；内部 `output.json`、reports、agent-run 目录仍不能冒充外部证据。
+- 验证链路：一次性复现脚本先确认旧逻辑会丢顶层 refs；修复后复跑 `test_parent_acceptance_controller.py`、`test_subagent_parsing.py`、`test_result_processors_edges.py`、`test_orchestration_tools.py` 和 `test_orchestration_dispatch_completion_gate.py`。
+
+## 2026-05-25 Explicit read refs become read-only subagent roots
+
+状态：已落地，focused 验收通过；待真实 MiniMax 复验
+
+摘要：
+- 真实协作调查场景 `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-101000` 暴露的卡点不是业务判断，而是路径授权链断开：root 创建了 11 个子代理，source 子代理都拿到了明确文件路径，但 runner 的 path gate 只看到主工作区和写入根，导致读取 `/Users/example/my_agent/live-agent-runs/.../inputs/sources/*.txt` 时统一 `PATH_WORKSPACE_ESCAPE_BLOCKED`。
+- `create_subagents` 现在会把 item `goal` 里的显式文件路径 token 补进 `context_manifest.hint_read_paths`。这是路径形态提取，不解析用户任务语义；模型如果已经传了 `required_read_paths/source_refs/input_files`，仍优先保留这些结构化字段作为硬输入依赖。
+- runner context 会把 `context_manifest.required_read_paths` 和 `hint_read_paths` 写成 `write_boundary.allowed_read_roots`，供工具 path gate 使用。这个 root 只扩大读取边界，不进入 `allowed_write_roots/product_write_roots`，不会让子代理写入用户输入目录。
+- 这条规则适用于任意显式资料文件，不绑定 IP、日志、论文、GitHub 或某种文件格式；协议、产物类型和业务实体仍保持开放世界。
+- 验证链路：`ruff check` 目标文件通过；一次性构造验证确认 goal 显式文件路径进入 `hint_read_paths` 且变成 `allowed_read_roots`；复跑 `test_parent_acceptance_controller.py`、`test_subagent_parsing.py`、`test_result_processors_edges.py`、`test_orchestration_tools.py` 和 `test_orchestration_dispatch_completion_gate.py`。
+
+## 2026-05-25 Structured write roots align create preflight with runner boundary
+
+状态：已落地，focused 验收通过；待真实 MiniMax 复验
+
+## 2026-05-25 Awaiting-acceptance final response scope
+
+状态：已落地，focused 验证通过；待真实 MiniMax 复验
+
+摘要：
+- 阶段 2 主代理自然语言 smoke 暴露：子代理已经真实 dispatch、读取物化输入并写出 `output.json`，状态停在 `AWAITING_ACCEPTANCE/NEEDS_ACCEPTANCE`，但最终回答守卫把它当作硬 blocker，整段替换成 `Subagent State Notice`。
+- 修复后区分两种口径：`blocking_task_ids()` 仍用于“严格完成”判断，待验收不算完成；最终回答覆盖只看需要修复的事实，例如 `FAILED/BLOCKED/TIMEOUT/CHANNEL_ERROR` 或父级验收 `REJECT`。因此主代理可以如实回答“子代理已跑、结果在哪、当前等待验收”，不会被泛化阻断抢答。
+- 这不是放松防假完成：工具上限收口、缺质量角色、父级验收拒绝和终态失败仍会覆盖模型草稿；只是避免把正常待验收状态当成故障。
+- 验证链路：新增 `test_final_response_guard_keeps_awaiting_acceptance_status_answer`，并复跑 `test_subagent_runtime_guards.py` 与 `ruff check` 目标文件通过。
+
+## 2026-05-25 Declared output refs reach runner prompts
+
+状态：已落地，focused 验证通过；待真实 MiniMax 复验
+
+摘要：
+- 同一阶段 2 复验继续暴露：父级 `create_subagents` 声明了 `output_files=[".../summary_result.txt"]`，验收正确把它当成交付目标；但 runner prompt 没把这个路径显式渲染给子代理，导致子代理只写内部 `output.json`，父级验收因声明产物缺失而 REJECT。
+- 修复后，`output_files/output_refs` 会进入 `context_bundle.output_contract.declared_output_refs`、`task_packet.file_contract.required_file_refs/declared_output_refs` 和 `write_contract.declared_output_refs`。`render_execution_context_markdown()` 新增 `Declared Output Targets` 小节，明确内部 `output.json` 只是运行报告，不能单独冒充用户产物。
+- 这不是任务专项，也不从自然语言目标里抽文件名；只传递父级工具参数里的结构化机器字段，让验收合同和 runner 可见合同同源。
+- 验证链路：新增 `test_context_bundle_maps_declared_output_files_to_required_refs` 和 `test_render_execution_context_highlights_declared_output_refs`，并复跑 `test_subagent_context_bundle.py`、`test_runner_rendering_class.py`、`test_runner_prompts.py` 与 `ruff check` 目标文件通过。
+
+## 2026-05-25 Logical output refs are not file paths
+
+状态：已落地，focused 验证通过；待真实 MiniMax 复验
+
+摘要：
+- 阶段 2 第二次复验显示 MiniMax 会把 `output_refs` 写成 `["source_file", "subagent_summary"]`，这在开放世界协议里是合理的逻辑字段名；旧验收把它们当文件路径查存在，导致正常子代理结果被误判为缺产物。
+- 修复后只有 path-like 输出 ref 才进入文件存在合同：绝对路径、带目录分隔符的相对路径、或带安全文件后缀的具体文件名。`source_file/subagent_summary` 这类非路径值仍保留在 `declared_output_refs` 里供模型理解结果键，但不会进入 `required_file_refs`，也不会触发 `declared_output_refs_exist` 缺文件。
+- 这遵守开放世界铁律：`output_refs` 可表示文件、artifact URI、逻辑字段、外部系统 ref 或未来协议对象；系统只能对确定是本地文件路径的值做文件存在硬验收。
+- 验证链路：新增 `test_context_bundle_keeps_logical_output_refs_out_of_required_files` 和 `test_acceptance_ignores_logical_output_refs_when_checking_files`，并复跑 `test_subagent_context_bundle.py`、`test_runner_rendering_class.py`、`test_acceptance_workspace_root.py` 与 `ruff check` 目标文件通过。
+
+摘要：
+- 同一真实协作调查场景继续暴露第二个通用不一致：模型按工具提示为 `output_files` 指向 `/Users/example/my_agent/live-agent-runs/.../outputs/*.json`，随后又补了 `extra_write_roots=/Users/example/my_agent/live-agent-runs/.../outputs`，但 `create_subagents` 预检仍只用主仓库 workspace 判断，导致结构化写入授权没有生效。
+- `orchestration_write_guard.py` 现在把 `extra_write_roots/write_roots/target_roots` 纳入 create/schedule 预检允许根；`output_files/artifact_refs` 仍只是目标文件，不会自动变成宽授权根。
+- 安全边界保持不变：普通 `goal/thought` 不产生写权限；`/` 和用户 home 这类过宽根会被忽略；目标文件必须落在主 workspace 或显式结构化写入根下，否则继续拒绝。
+- 这条规则让创建前预检和 runner 的 `allowed_write_roots` 语义对齐，避免“系统要求模型补 extra_write_roots，但补完仍被同一预检拒绝”的死路。
+- 验证链路：`ruff check` 目标文件通过；一次性构造验证确认授权 outputs 目录可通过、Desktop 非授权目标仍拒绝；复跑 `test_orchestration_tools.py` 和 `test_orchestration_dispatch_completion_gate.py`。
+
+## 2026-05-25 Refs-only context manifest shorthand and input dependency blocker
+
+状态：已落地，focused 验收通过；待真实 MiniMax 复验
+
+摘要：
+- 真实协作调查场景 `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-103000` 暴露第三个通用链路问题：模型把 `context_manifest` 写成 refs-only 列表，例如 `context_manifest=["/path/source_01.txt"]`，旧逻辑只接受对象，导致完整路径被丢弃。随后系统只能从 goal 中得到 `source_01.txt` 这类短文件名。
+- `orchestration_create_context.py` 现在把 `context_manifest` 的字符串或列表短写归一成 `required_read_paths`。对象条目不会被转成字符串，避免把上下文对象误当文件路径。
+- `dispatch_runner_batches.py` 现在在显式 `run_ids` 被输入依赖过滤到没有 runner 候选时，返回 `runner_selection/input_dependencies_missing` 记录，逐个列出 run_id 和缺失的 `missing_input_refs`。这样主代理知道要补路径、重建任务或换策略，而不是继续重复空 dispatch。
+- 这条规则只读取结构化 refs，不解析 IP、域名、日志、论文、GitHub 等业务语义；它修的是控制面引用传递和调度可观测性。
+- 验证链路：一次性复现脚本确认旧形态会丢 refs；修复后确认列表型 `context_manifest` 能写入 `required_read_paths`，输入依赖缺失会生成 `input_dependencies_missing` 记录；`ruff check` 目标文件通过。
+
+## 2026-05-25 Pending dispatch redirect and awaiting-acceptance state
+
+状态：已落地，focused 验收通过；待真实 MiniMax 复验
+
+摘要：
+- 真实协作调查场景 `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-112500` 已经能让第一批资料源子代理读取自己的文件，但 root 在第一批 run 尚未 dispatch 前又继续 `create_subagents`，导致同一批工作被重复创建。
+- `create_subagents` 现在会检查当前 root 轮次是否已有可调度但尚未 dispatch 的 run。如果有，工具不会继续扩容，而是返回 `pending_dispatch_redirect.v1`：`created=0`、保留 `dispatch_run_ids`、给出可复制的 `next_action.dispatch_subagents`。这不是任务失败，也不解析业务语义；如果确实要追加全新的独立任务，也要等已有 run dispatch 之后再创建。
+- `state_machine.py` 现在把 `AWAITING_ACCEPTANCE`、`VERIFYING` 和 `verification_status=NEEDS_ACCEPTANCE` 统一投影为 `waiting_reason=acceptance` / `lifecycle_phase=VERIFYING` / `recovery_decision=wait_for_acceptance`，不再落入 `manual_review` 未处理状态。
+- `current_turn_run_state` 新增 `awaiting_acceptance_run_ids`。当当前轮没有 blocked、但有待验收 run 时，状态合同会建议 `dispatch_subagents(apply=true, execute_runners=false, run_ids=[...])` 跑验收路径，而不是诱导 root 汇报完成或重复创建新代理。
+- 验证链路：一次性复现脚本先确认旧状态机会把 `AWAITING_ACCEPTANCE` 打成 `manual_review`；修复后确认待验收 run 进入 `VERIFYING` 并输出 acceptance 建议。复跑 `ruff check` 目标文件和 `test_main_agent_state_machine_contract.py`、`test_orchestration_tools.py`、`test_orchestration_dispatch_completion_gate.py`。
+
+## 2026-05-25 Structured task refs grant external task output roots
+
+状态：已落地，一次性复现脚本通过；待 focused/真实复验
+
+摘要：
+- 真实协作调查场景继续暴露一个通用路径断点：用户给了独立任务目录 `/Users/.../live-agent-runs/...`，模型在 `create_subagents.items[].context_manifest` 里给了输入文件路径，在 `output_files` 里给了同一任务目录下的输出文件路径，但系统只认主仓库 workspace 和显式 `extra_write_roots`，第一轮就把用户要求的输出目录拒掉。
+- 修复后，`context_manifest` 被视作开放的 refs carrier：任意结构化字段值里出现的文件 ref 都会归入输入依赖。它不维护 `source_file/alert_file` 这类封闭字段名，也不解析业务语义。
+- `create_subagents` 预检和 `CreateRunParams.extra_write_roots` 现在会从同一个结构化参数包中推导窄写根：只有当 `output_files/output_refs/artifact_refs` 的输出路径与至少一个真实存在的输入 ref 共享一个足够窄的任务目录时，才把输出文件父目录加入写入根。这样用户临时任务目录可以跑通，但 `/`、用户 home、`/etc` 这类宽根不会因为模型填了 output path 就被授权。
+- `registry_invoke.py` 修正读根接线：`write_boundary.allowed_read_roots` 现在会像写根一样临时并入 `read_file/list_files/search_text` 的底层 filesystem workspace_roots，避免上层 path gate 已放行、底层文件工具仍报 `PATH_WORKSPACE_ESCAPE_BLOCKED` 的不一致。
+- 文件 ref 识别改成开放世界扩展名规则：已知格式仍是快路径，未知后缀如 `.xml`、`.pptx`、`.customext` 也能作为结构化文件 ref 参与调度和写根判断，不再因为“不在内置表”就丢失。
+- 输入 ref 去重现在会保留覆盖范围更明确的完整路径，丢弃同一字段里的短写重复项。例如 `/tmp/task/source_01.txt` 和 `source_01.txt` 同时出现时，完整路径作为事实源，短写不再触发 `missing_input_refs`。
+- 子代理自己的 `output_files/output_refs/artifact_refs` 不会进入 `required_read_paths`。即使模型在 goal 中同时写了“读取输入文件”和“写到输出文件”，系统也不会要求未来产物在 runner 启动前已经存在。
+- `goal` 中抽到的文件路径降级为 `context_manifest.hint_read_paths`：它只给 runner 一个可读授权和提示，不参与 `missing_input_refs` 启动依赖判断。硬依赖仍只来自 `required_read_paths/input_refs/input_files` 等结构化字段。
+- 这条修复不新增专项 case，不读取 prompt 自然语言来决定授权，只使用工具参数中的结构化输入/输出 refs 和文件系统存在性事实。
+
+## 2026-05-25 Orchestration contract requires execution by default
+
+状态：已落地，一次性复现脚本通过；待真实 MiniMax 复验
+
+摘要：
+- 真实协作调查场景 `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-144053` 暴露一个通用合同缺口：入口物化出来的 `orchestration_contract.v1` 只要求 `create_subagents`，所以主代理创建 11 个子代理后可以误以为协作合同已满足，甚至在子代理仍是 `PLANNING/UNVERIFIED` 时尝试 `submit_for_acceptance` 或等待用户确认。
+- 修复后，普通协作合同默认包含 `execution_required=true`。入口提示会要求新合同写入 `create_subagents` 与 `dispatch_subagents`；运行时和提示层也会把旧合同里的 `create_subagents` + `execution_required=true` 解释为还必须真实 `dispatch_subagents`。这表达的是通用事实：创建任务记录不等于执行任务；只有真实 dispatch 之后，子代理才会开始工作、写结果、进入验收。
+- 为开放场景保留逃生口：如果外部结构化 case 明确声明 `execution_required=false`，系统允许只创建/规划子代理，不强制要求 `dispatch_subagents`。这避免把“只想设计代理分工”的任务误伤成必须执行。
+- 运行时兼容旧合同：即使旧 `orchestration_contract` 为兼容外部结构化输入而保留 `required_tools=["create_subagents"]` 原样，只要没有明确 `execution_required=false`，最终回答前的编排合同也会把缺少 `dispatch_subagents` 识别为待返工，而不是让任务口头完成。
+- 这条规则不绑定 IP、日志、文件数量、agent 数量或某个测试目录；它只看机器字段 `orchestration_contract` 和真实工具调用记录。
+- 验证链路：`ruff check` 目标文件通过；一次性脚本确认入口合同会自动补 `dispatch_subagents`，旧合同缺 dispatch 会被 `missing_orchestration_requirements` 打回，`execution_required=false` 时不会强制 dispatch。
+
+## 2026-05-25 Dispatch orchestration wrapper normalization
+
+状态：已落地，一次性复现脚本通过；待真实 MiniMax 复验
+
+摘要：
+- 真实协作调查复验 `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-150500` 显示上一刀有效：模型创建子代理后主动调用了 `dispatch_subagents`，不再直接 submit/等待用户确认。
+- 新卡点是工具协议兼容：模型把 `run_ids/concurrency/mode` 包在 `orchestration:{...}` 里，并使用 `mode=parallel/async`。旧 `dispatch_subagents` 只读取顶层参数，导致真实 run ids 没被识别，连续返回模式错误。
+- 修复后，`dispatch_subagents` 在入口先展开 `orchestration` wrapper；`concurrency/parallelism/runner_concurrency` 归一到 `max_runners`；`mode=parallel/async/execute/run/real` 归一成 `apply=true + execute_runners=true + workflow_mode=off`，`mode=dry_run/preview/plan` 归一成 dry-run 预览。
+- 这不是放松安全边界：仍然只接受机器字段，不从自然语言里猜 run_id；真正执行还要经过已有 path、scope、lease、acceptance 和 runner gate。
+- 验证链路：`ruff check` 目标文件通过；一次性脚本确认 wrapped dispatch 参数会被解包并得到正确执行开关。
+
+## 2026-05-25 Same-batch coordinator defer
+
+状态：已废弃，2026-05-26 已从运行时删除
+
+摘要：
+- 真实协作调查 `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-152000` 已能创建并真实 dispatch 11 个子代理，但 coordinator 和 worker 同批并行启动，worker 结果尚未稳定时 coordinator 已开始汇总，最终漏掉了 source_05/source_08 的命中事实。
+- 当时的修复是：同一批显式 `run_ids` 同时包含 worker 与 coordinator/reviewer/acceptor 时，如果 worker 仍在 `PLANNING/PENDING/RUNNING`，调度层先只启动 worker，暂缓 coordinator。等 worker 至少离开预结果状态后，下一轮 dispatch 再启动 coordinator 做汇总、复核或验收。
+- 这条规则不解析 IP、日志、字段名或业务实体，只读结构化角色、agent_name 和状态机状态。它解决的是“汇总者不能和被汇总对象并发抢跑”的控制面时序问题。
+- 验证链路：`ruff check` 目标文件通过；一次性脚本确认 worker+coordinator 同批时先返回 worker，worker 到 `AWAITING_ACCEPTANCE` 后 coordinator 可进入候选。
+- 复盘结论：这仍然是隐藏流水线，和“不要让运行时替父代理偷偷卡流程”的规则冲突。当前版本已删除 `split_deferred_coordinator_candidates` 和第二波 coordinator 续跑逻辑；父代理要先收集再汇总时，应该显式先 dispatch 收集者，确认结果后再 dispatch 汇总者。
+
+## 2026-05-25 CLI run dialogue memory isolation
+
+状态：已落地，待真实 MiniMax 复验
+
+摘要：
+- 真实协作调查复验 `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-160000` 暴露上下文污染：`my-agent run` 的一次性任务从长期记忆召回了旧 GitHub 任务 prompt，模型把 Related Memory 里的旧对话误当成当前任务，读完告警后转向去做 GitHub XLSX。
+- 修复后，`source=cli_run` 的普通一次性执行默认过滤 `kind=dialogue` 的历史记忆，只保留规则、经验、事实等非对话记忆。用户明确说“继续/恢复/刚刚/run_id”等恢复意图，或调用方显式开启 `resume_context=True` 时，旧对话才会重新参与 prompt。
+- `chat/gateway` 长会话不走这个过滤，仍保留对话连续性；子代理/控制面 `task_local/control_plane` 原本就不注入主代理记忆，语义不变。
+- 这不是专项修复，也不是靠 prompt 软约束让模型“别看旧任务”；它把当前任务和旧对话记忆在入口结构上分开，避免旧用户任务被当成新的可执行指令。
+
+## 2026-05-25 Top-level orchestration scope must be current-turn scoped
+
+状态：已落地，待真实 MiniMax 复验
+
+摘要：
+- 同一复验继续暴露旧账本污染：本轮还没创建任何子代理时，顶层 `refs_only` body-read guard 和隐式 `dispatch_subagents` 会扫描全局 `data/subagents`，把历史子代理当作当前任务的孩子或可调度对象。
+- 修复后，顶层 root 只有在本轮已经记录了 `create_subagents/schedule_child_subagents/dispatch_subagents` 触碰过的 run_id 时，才把这些 run 作为当前委托范围。没有本轮 run_id 时，body-read guard 不会用历史子代理阻断普通输入读取；顶层隐式 dispatch 会返回 `no_current_turn_scope` 返工提示，要求先创建本轮子代理或显式传入 run_ids。
+- 这条规则不删除历史任务，也不改变显式恢复/接管能力；它只禁止“未指定范围时扫描旧 workspace 猜当前任务”，避免真实任务被旧测试数据污染。
+
+## 2026-05-25 Item batch context and explicit dispatch scope
+
+状态：已落地，focused 验证通过；待真实 MiniMax 复验
+
+摘要：
+- 真实协作调查 `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-163000` 暴露两个通用控制面问题：`create_subagents.items[]` 会把顶层 `context_manifest` 的开放字段整体继承给每个子任务，导致 `source_files` 清单里的所有文件都变成每个 worker 的硬依赖；显式传 `agent_ids/run_ids` 的 `dispatch_subagents` 在 workflow、patch review、acceptance finalize 阶段仍会扫描历史 workspace。
+- 修复后，批量创建子代理时不再把全局 `context_manifest` 整段复制给每个 child。每个 child 的硬 `required_read_paths` 只来自显式 required refs、共享 directive/brief context pack，以及该 child 自己 goal 中明确存在的文件路径；全局 `source_files`、`sources_base`、`output_dir` 这类开放字段只保留为上下文，不再卡 runner。
+- 共享 directive/brief 不是业务专项：它只看 context pack 的机器角色是否是 `primary_directive/directive/instruction/brief`，不解析 IP、域名、论文、GitHub 等任务实体。
+- 显式 dispatch 的后处理现在继承同一 scope：workflow 记录、leadership recovery inspect、patch review 和 acceptance finalize 都不会在传入 `run_ids/agent_ids/root_id/parent_run_id` 时扫旧任务。这样同一个全局 `data/subagents` 可以继续长期保存历史任务，但本轮调度报告只描述本轮目标。
+- `dispatch_subagents` 的 run id 入口补充了常见模型别名 `child_run_ids/children`，并把 `direct_children=true` 解释成当前作用域的直接孩子，而不是字符串 run_id `"True"`。这些入口只映射到同一个机器字段 `include_run_ids` 或当前轮已知作用域，不会从自然语言里猜 run，也不会绕过已有 scope、lease、runner 和 acceptance gate。
+- 同一批显式目标不再按 worker/coordinator 自动拆两波执行。显式 `run_ids` 是父级的操作请求，系统按给定顺序和并发参数推进；如果需要先收集再汇总，父级应分两次 dispatch。
+- 验证链路：`ruff check` 目标文件通过；一次性脚本确认 child refs 只包含 alert directive 和自己的 source 文件，acceptance scope 只返回本轮 run；`test_orchestration_tools.py` 与 `test_delivery_contract_prompting.py` 通过。旧 `test_orchestration_body_read_guard.py` 仍包含“顶层必须禁止读正文”的历史期望，和前面放松普通任务卡死规则冲突，未修改测试文件。
+
+## 2026-05-25 Subagent input materialization recovery
+
+状态：已落地，focused 验证通过；待真实 MiniMax 复验
+
+摘要：
+- 审查发现输入依赖诊断还有一个控制面漏点：显式 `run_ids` 只有“全部候选都被过滤”时才报告缺输入；如果部分可跑、部分缺输入，缺输入项会静默消失。自动候选路径也直接用 `input_dependency_ready_candidates` 过滤，主代理看不到哪个 runner 被跳过。
+- 修复后，`runner_input_dependencies.py` 新增 ready/skipped 分流结果，`dispatch_subagents` 会对显式和自动候选统一写 `runner_selection/input_dependencies_skipped` 记录。记录里包含机器字段 `input_dependency_skipped_run_ids`、`input_dependency_missing_refs_by_run`、`input_dependency_checked_roots_by_run` 和 `input_dependency_recoverable`，不要求模型从中文 message 里猜。
+- `dispatch_subagents` 顶层 payload 新增 `input_materialization_recovery`，里面给出可复制的 `materialize_subagent_inputs` 工具调用建议。
+- 新增 `subagent_input_materialization.py` 和模型工具 `materialize_subagent_inputs`。它把父级可读的本地普通文件复制到 `subagents/_shared_inputs/<run_id>/`，写 `materialized_inputs.json` 记录 source、hash、size 和目标路径，再用受控路径替换 child `context_manifest.required_read_paths`。原始 refs 保存在 `task.attributes.original_required_read_paths`，供审计使用。
+- 安全边界保持硬规则：不跟随 symlink，不复制目录/设备文件，不把整个文件系统授权给 child；未知后缀不会被拒绝，因为输入交接层只处理文件 refs，不做封闭格式枚举。
+- 同轮顺手恢复 `_run_ids_from_dispatch` 旧 helper 名作为 `_run_ids_for_scope` 的 thin wrapper，并让当前轮 scope 不再被旧 acceptance 记录扩展，避免历史验收污染本轮收口。
+- 验证链路：新增 `test_runner_input_dependency_diagnostics.py`、`test_subagent_input_materialization.py`、`test_orchestration_input_materialization_tool.py`；复跑 `test_runner_input_dependencies.py`、`test_runner_dispatch.py`、`test_orchestration_dispatch_subagents_tool.py`、`test_orchestration_tool_specs.py` 和上述新增测试通过。
+
+## 2026-05-25 Acceptance-only dispatch default for waiting subagents
+
+状态：已落地，focused 验证通过；待真实 MiniMax 复验
+
+摘要：
+- 真实 11 子代理协作 smoke 暴露：10 个 worker 已经写出结果并进入 `AWAITING_ACCEPTANCE/NEEDS_ACCEPTANCE`，但模型如果只按看板建议继续 `dispatch_subagents(apply=true, run_ids=[...])`，旧默认不会自动跑父级验收，也不会自动应用验收 follow-up，任务容易卡在“已产出但未验收”。
+- 修复后，`dispatch_subagents` 的默认策略会检查显式目标 run 是否已等待验收。若是，`apply=true` 会默认进入验收-only 续推：`execute_runners=false`、`execute_acceptance_tests=true`、`auto_apply_acceptance_followup=true`。显式参数仍优先，模型明确传 `execute_acceptance_tests=false` 时不会被覆盖。
+- `subagent_board` 的完成状态建议也同步改为验收-only。只有 blockers 不是纯待验收时，才建议继续 runner dispatch。这样不会为了验收已产物任务重复跑子代理。
+- `current_turn_run_state.awaiting_acceptance_run_ids` 的建议工具调用也显式带上 `execute_acceptance_tests=true` 和 `auto_apply_acceptance_followup=true`，避免模型只看到 `execute_runners=false` 后不知道下一步要跑验收。
+- 这不是业务专项规则，也不是新的前置硬门。它只看结构化状态 `AWAITING_ACCEPTANCE` / `NEEDS_ACCEPTANCE`，把“runner 已产出，下一步验收”变成通用控制面默认。
+- 验证链路：一次性脚本先复现旧默认 `execute_acceptance_tests=false/auto_apply_acceptance_followup=false`；修复后确认待验收目标会默认打开验收和 follow-up，`subagent_board` 给出验收-only 建议。复跑 `ruff check` 目标文件和 `test_orchestration_dispatch_subagents_tool.py`、`test_orchestration_board_payload.py`、`test_agent/test_planner_and_watch.py` 通过。
+
+## 2026-05-25 Takeover run structured handoff inheritance
+
+状态：已落地，一次性复现脚本通过；待真实 MiniMax 复验
+
+摘要：
+- 真实 11 子代理协作 smoke 继续暴露恢复链问题：旧 coordinator 被 180 秒外层 wrapper 杀掉后进入 `RUNNING` stale，due-check 创建 takeover run，但新 takeover 没有继承原 coordinator 的 `context_manifest`、`context_packs` 和 `output_files/output_refs`。结果就是新接管者不知道要读告警文件、兄弟清单和最终输出目标。
+- 修复后，`takeover_run.py` 创建接管 run 时会继承原 run 的 `quality_contract`、`context_manifest`、`context_packs`、机器产物 refs、artifact/evidence refs 和写入根；只重写 `takeover_source_run_id`、`takeover_source_refs`、`takeover_chain_depth` 等接管审计字段。
+- 如果旧代码已经创建过缺交接字段的 takeover run，后续复用它时会自动补齐源 run 缺失的结构化交接单，但不会覆盖已有 takeover 自己新增的字段。
+- 这不是 IP 协作专项修复。它只解决通用接管语义：恢复/接管不能把“该读什么、该写哪儿、有哪些兄弟/上下文包”丢掉。
+- 验证链路：一次性脚本先确认旧行为会丢 `required_read_paths/hint_read_paths/task_pack_refs/context_packs/output_files/output_refs`；修复后同脚本全部继承通过，并额外确认复用旧 takeover 时会补齐缺失字段。

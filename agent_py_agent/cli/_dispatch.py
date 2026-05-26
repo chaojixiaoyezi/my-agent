@@ -44,6 +44,7 @@ def _subagents_dispatch_options(args, agent=None) -> SubagentsDispatchOptions:
         locked_files=args.locked_file or [],
         interval=_configured_float(args.interval, config, "dispatch_default_watch_interval"),
         max_cycles=int(args.max_cycles or 0),
+        advance=getattr(args, "advance", False) is True,
         force_lock=bool(args.force_lock),
         watch=bool(args.watch),
     )
@@ -93,6 +94,7 @@ def _watch_params(options: SubagentsDispatchOptions) -> WatchParams:
         **_dispatch_params(options).__dict__,
         interval=options.interval,
         max_cycles=options.max_cycles,
+        advance=options.advance,
         force_lock=options.force_lock,
     )
 
@@ -104,7 +106,8 @@ def _print_watch_report(agent, report, options: SubagentsDispatchOptions) -> Non
     print("SUBAGENT DISPATCH WATCH")
     print(
         f"mode={mode} planner={options.planner} execute_runners={options.execute_runners} "
-        f"execute_acceptance_tests={options.execute_acceptance_tests} cycles={report.summary.get('total', 0)}"
+        f"execute_acceptance_tests={options.execute_acceptance_tests} advance={options.advance} "
+        f"cycles={report.summary.get('total', 0)}"
     )
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
     for record in report.records:
@@ -168,6 +171,11 @@ def cmd_subagents_dispatch(args) -> int:
     agent.capability_config_path = args.capability_config
     router = make_capability_router(agent, capability_config, args.skill_dir)
     if options.watch:
+        if not options.advance and (
+            options.execute_runners or options.planner or options.execute_acceptance_tests
+        ):
+            print("--watch 下 planner/runner/acceptance 推进需要显式加 --advance。", file=sys.stderr)
+            return 2
         try:
             report = agent.watch_subagents(router, capability_config, params=_watch_params(options))
         except RuntimeError as exc:

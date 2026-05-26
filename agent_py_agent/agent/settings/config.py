@@ -177,6 +177,20 @@ class AgentConfig(HomeProviderConfigFields, ToolConfig):
     qq_app_id: str = ""
     qq_app_secret: str = ""
     session_workspace: str = "data/sessions"
+    # 长期主代理会话账本目录。它保存 thread/message/task/policy 机器事实，
+    # 不保存真实通道凭证，也不把用户任务变成内置 case。
+    conversation_workspace: str = "data/conversations"
+    # 多代理协作控制面目录。这里保存 case/request/evidence/decision 的轻量账本，
+    # 大日志、大文件、API 返回和截图只通过 evidence_refs 引用，避免把协作层变成业务模板。
+    collaboration_workspace: str = "data/collaboration"
+    # 协作请求自动唤醒 responder 的最大并发数。普通 dispatch 仍保持默认宽度；
+    # 只有已有 collaboration request 等待多个代理响应时，才用这个上限减少串行等待。
+    # 0 表示关闭自动放宽，完全按 dispatch/max_runners 原值执行。
+    collaboration_auto_dispatch_max_runners: int = 8
+    # 协作请求默认截止时间。模型没有显式传 deadline_at/deadline_seconds 时，
+    # 系统会给 request 自动补一个相对 deadline，避免大规模协作无限等全员。
+    # 0 表示不自动补截止时间，只使用模型或用户显式给出的 deadline。
+    collaboration_default_deadline_seconds: int = 120
     notification_enabled: bool = True
     notification_store_path: str = "data/notifications"
     notification_channel_timeout_seconds: int = 300

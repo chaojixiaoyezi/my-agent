@@ -137,7 +137,7 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
         "_workflow_goal_fields",
         "_STRUCTURED_ROUTE_FIELD_RE",
     ],
-    "agent_py_agent/agent/agent_core/runner_input_dependencies.py": [
+    "agent_py_agent/agent/agent_core/runner_ref_fields.py": [
         "_fallback_file_ref_roles",
         "_READ_REF_MARKERS",
         "_WRITE_REF_MARKERS",
@@ -216,12 +216,6 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
         "prompt: str",
         "str(prompt",
         "user_prompt",
-    ],
-    "agent_py_agent/agent/agent_core/orchestration_direct_write_guard.py": [
-        "_user_requested_delegate_only",
-        "_user_authorized_parent_product_write",
-        "delegate_only=true",
-        "parent_product_write=allow",
     ],
     "agent_py_agent/agent/agent_core/orchestration_quality_intent.py": [
         "_natural_quality_roles",

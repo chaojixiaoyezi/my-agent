@@ -30,7 +30,11 @@ def normalize_tool_call(payload: Any) -> ToolCallEnvelope:
     tool_name = str(data.get("tool_name") or data.get("tool") or "")
     raw_input = data.get("input")
     if raw_input is None:
-        raw_input = data.get("args") or data.get("arguments") or {}
+        raw_input = data.get("args") or data.get("arguments")
+    raw_status = str(data.get("status") or "").lower()
+    status = raw_status if raw_status in STATUSES else "pending"
+    if raw_input is None:
+        raw_input = _legacy_flat_call_input(data, include_status=bool(raw_status and raw_status not in STATUSES))
     input_payload = json_stable(raw_input if isinstance(raw_input, dict) else {"value": raw_input})
     call_id = str(data.get("call_id") or "")
     operation_id = str(data.get("operation_id") or "")
@@ -41,7 +45,6 @@ def normalize_tool_call(payload: Any) -> ToolCallEnvelope:
     idempotency_key = str(data.get("idempotency_key") or "")
     if not idempotency_key:
         idempotency_key = build_idempotency_key(tool_name or "unknown_tool", input_payload)
-    status = str(data.get("status") or "pending").lower()
     refs = _normalize_artifact_refs(data.get("artifact_refs") or data.get("artifacts") or [])
     metadata = data.get("metadata") or data.get("reserved") or {}
     return ToolCallEnvelope(
@@ -143,6 +146,30 @@ def deserialize_tool_call(payload: str | bytes | dict[str, Any]) -> ToolCallEnve
 # 函数用途: 作为工具协议 v2 的读取边界，兼容旧字段并返回规范对象。
 def deserialize_tool_result(payload: str | bytes | dict[str, Any]) -> ToolResultEnvelope:
     return normalize_tool_result(payload)
+
+
+# LLM: _legacy_flat_call_input keeps flat tool args open-world without treating arg status as protocol status.
+# 函数用途: 把旧式 {"tool": "...", "path": "..."} 调用里的参数提取到 input。
+def _legacy_flat_call_input(data: dict[str, Any], *, include_status: bool) -> dict[str, Any]:
+    protocol_keys = {
+        "args",
+        "arguments",
+        "artifact_refs",
+        "artifacts",
+        "call_id",
+        "idempotency_key",
+        "input",
+        "kind",
+        "metadata",
+        "operation_id",
+        "reserved",
+        "schema_version",
+        "tool",
+        "tool_name",
+    }
+    if not include_status:
+        protocol_keys.add("status")
+    return {key: value for key, value in data.items() if key not in protocol_keys}
 
 
 # LLM: _loads_if_json accepts protocol payloads as JSON strings or dict-like data.

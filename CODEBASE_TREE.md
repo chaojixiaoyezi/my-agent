@@ -18,24 +18,28 @@
 agent_py_agent/
 |-- cli/                                      # 命令行入口层，只做参数解析、展示和调用服务
 |   |-- chat_parts/                           # 交互 chat 的 UI、历史、gateway client、fallback worker、TUI activity/scrollback helpers
-|   |-- commands/                             # 命令行分组入口和小型 command helpers
+|   |-- commands/                             # 命令行分组入口和小型 command helpers；含 background-main-agent 注册入口
 |   |-- memory_commands/                      # memory route/query/doctor/compact/archive 子命令
 |   |-- scenario_cases/                       # gateway、subagent、runner、repair 等确定性 scenario
 |   |-- daemon.py                             # 前台常驻 subagent/watch 调度入口
+|   |-- background_main_agent.py              # 长期主代理本地 message/bind-task/observe/tick/service 命令实现
+|   |-- collaboration.py                      # 通用协作 case/request 的 overview/list/status/update 可视化和状态推进命令实现
 |   |-- local_doctor.py                       # 本地状态体检、修复建议和重建入口
 |   |-- local_status_payload.py               # status payload 组装
 |   |-- local_status_view.py                  # status 用户可读展示
 |   `-- parser.py                             # argparse 命令树和 main()
 |-- agent/
 |   |-- adapter/                              # 外部聊天/消息通道适配，例如 QQ、飞书和协议管理
-|   |-- agent_core/                           # SimpleAgent 主循环、tool loop、dispatch、planner、runner、watch
+|   |-- agent_core/                           # SimpleAgent 主循环、tool loop、dispatch、planner、runner、watch；含入口 delivery/orchestration 合同物化、显式资料/产物路径边界、输入物化交接和最终回答返工门
 |   |   `-- services/                         # 主循环可复用服务，例如 notification/watch
 |   |-- audit/                                # 审计日志、任务访问记录和查询
 |   |-- auth/                                 # 认证、权限中间件和用户身份模型
 |   |-- backends/                             # 模型后端适配、流式解析和 ProviderTimeoutError 等错误边界
 |   |-- capability/                           # skill/tool/capability 配置、路由和 card 解析
+|   |-- collaboration/                        # 通用多代理协作控制面：case/request 生命周期、开放世界线索包、多目标 responder 逐个闭环、list_collaboration_requests 待办发现、internal thread 兜底、结构化换路、request timeout、evidence、decision、overview 和 rework 账本工具
 |   |-- concurrency/                          # 乐观锁、任务锁和透明重试
 |   |-- contracts/                            # 主代理合同、离线矩阵、产物验收、runtime gate 和恢复 replay 合同
+|   |-- conversation/                         # 长期主代理 thread、消息、渠道绑定、observation/wake queue、上下文预算裁剪、后台运行 claim/heartbeat、定时汇报和后台唤醒 runtime
 |   |-- extensions/                           # 插件/扩展声明和加载边界
 |   |-- gateway_parts/                        # 文件协议 gateway：路径、队列、HTTP、worker、恢复、supervisor
 |   |-- io/                                   # 底层 JSONL/文件 IO 原语
@@ -73,7 +77,7 @@ agent_py_agent/
 |   |-- subagents/role_templates.py           # 子代理广义角色模板加载、校验和查询
 |   |-- subagents/role_template_catalog/      # 内置外置 JSON role templates
 |   |-- subagents/workflow_template_catalog/  # workflow 模板外置化预留目录
-|   |-- subagents/                            # 子代理 manager facade、服务、验收、patch、runner、persistence
+|   |-- subagents/                            # 子代理 manager facade、服务、验收、patch、runner、persistence；runner context 负责读/写边界分离
 |   |   |-- capability_request_identity.py      # 能力申请 scope 签名和去重
 |   |   |-- root_task_policy.py                 # 区分 self-authorized root seed 和主代理直接创建的一层 worker
 |   |   |-- acceptance_helpers/                # 父级验收 evidence/artifact/readiness helpers
@@ -144,6 +148,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   `-- design/                                # 模块设计文档
 |       |-- log-analysis.md                    # 日志分析模块设计
 |       |-- main-agent-contract-testing.md     # 主代理合同驱动测试与第一到第五阶段计划
+|       |-- main-agent-runtime-gates.md        # 主代理运行门、验收触发、次数门配置和 bootstrap 硬门删除记录
 |       `-- subagent-quality-contract.md       # subagent 质量契约
 |-- scripts/                                   # 开发辅助脚本和治理检查工具
 |   |-- code_size_report.py                    # 代码规模检查 Markdown 报告渲染辅助模块
@@ -845,7 +850,7 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 
 这是模块级设计文档目录。
 
-它负责承载会长期扩展的设计细节，例如模块背景、痛点、schema、配置开关、分阶段开发计划和验收策略。当前已有 subagent 质量契约设计和 log analysis 模块设计，后续 memory、gateway 等模块如果设计内容继续膨胀，也应按同样方式拆出独立文档。
+它负责承载会长期扩展的设计细节，例如模块背景、痛点、schema、配置开关、分阶段开发计划和验收策略。当前已有 subagent 质量契约设计、log analysis 模块设计和主代理运行门文档，后续 memory、gateway 等模块如果设计内容继续膨胀，也应按同样方式拆出独立文档。
 
 ## 跨平台兼容性
 
@@ -971,7 +976,7 @@ docs/
 - `agent_py_agent/agent/subagents/models.py`: SubAgentTask 新增 `attributes: dict[str, object]` 字段
   - 用于存储动态超时、拆分信息等运行时属性
 
-- `agent_py_agent/agent/agent_core/runner_dispatch.py`: runner 候选选择、重试和角色阶段排序；coordinator/worker/tester/bug_finder/acceptor 会按“先拆/先做/再测/再验收”的阶段顺序进入 `max_runners`，并且同一轮只放行当前最低阶段，避免 QA/test/review/acceptance 抢在 producer/coordinator 前面运行；阶段判断优先信任 `role` / `agent_name`，只有身份不明确时才读 goal，避免继承的父级 QA 合同污染 coordinator；dispatch record 会保留 runner 创建的 child 状态摘要、未完成 child ids 和 partial-success 标记。
+- `agent_py_agent/agent/agent_core/runner_dispatch.py`: runner 候选选择和重试策略；候选只按真实可执行状态、通道、能力请求和重试预算过滤，不再按角色阶段或 workflow 依赖隐藏挡住 runner。需要“先 A 后 B”时，由父代理显式先派 A、看 tree/board/closeout 结果，再派 B；dispatch record 仍会保留 runner 创建的 child 状态摘要、未完成 child ids 和 partial-success 标记。
 - `agent_py_agent/agent/agent_core/runner_gate.py`: 集中计算 runner timeout；`off/none/disabled/0` 表示不限制，`auto` 表示按动态 timeout 配置计算，固定数字表示秒数。
   - 支持从任务 attributes 读取动态超时。
 
@@ -1016,6 +1021,7 @@ docs/
 - `agent_py_agent/agent/action_protocol_subagents.py`: SubagentResultEnvelope、SubagentScheduleEnvelope 和 artifact/evidence -> path refs 的结构化转换；schedule envelope 保留 reused/dispatch/status refs，父级不靠自然语言猜。
 - `agent_py_agent/agent/action_protocol_compact.py`: CompactContinuePacketEnvelope，承接 compact/resume 的结构化继续工作包。
 - `agent_py_agent/agent/contracts/error_taxonomy.py`: 主代理和子代理共用的错误分类合同；把路径、权限、工具不可用、模型上游失败、产物缺失和 compact 引用缺失转成稳定错误码和恢复建议。
+- `agent_py_agent/agent/contracts/tool_protocol_v2.py`: 工具调用/结果协议 v2 归一化层；兼容旧 flat tool call，并保持工具 input 字段开放世界，避免把业务参数 `status` 等字段误吞成协议状态枚举。
 - `agent_py_agent/agent/contracts/e2e_matrix_runner.py`: 不调用模型的确定性 E2E runner；当前验证中文路径写读、大输出 artifact metadata 和工具失败分类。
 - `agent_py_agent/agent/contracts/main_agent_foundation_runner.py`: 主代理基础测试 1-6 类总入口；默认真实模型用例标记 `SKIPPED`，避免 focused tests 冒充真实模型验收。
 - `agent_py_agent/agent/contracts/artifact_acceptance.py`: 通用产物验收合同；HTML/JSON/CSV/XLSX/PDF/未知格式都输出结构化 findings，模型自检不再作为唯一证据。
@@ -1067,12 +1073,12 @@ docs/
 - `agent_py_agent/agent/agent_core/tool_call_archive_record.py`: 工具调用归档记录生成层；外置大输出，同时保留 runtime_gate、tool_result_refs 和 compact result envelope，供 closeout/replay 做机器验收。
 - `agent_py_agent/agent/agent_core/tool_context_reducer.py`: 大工具输出进入下一轮 live prompt 前只注入 artifact 摘要和 checkpoint refs，小输出仍保留原工具结果；调度类输出会交给 orchestration summary 只保留 next_action/run refs。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_refs.py`: 汇总 dispatch 触达 run 的 artifact/evidence refs，并生成 `result_refs_by_run`；它会从 child `output.json.artifacts[]` 提取主产物路径和短摘要，父级先读 summary/refs 再按需读正文。
-- `agent_py_agent/agent/agent_core/orchestration_dispatch_state_contract.py`: 当前轮状态合同层；create/schedule/dispatch 共用，仅读取 remembered run ids，输出 `current_turn_run_state` 的 status buckets、dispatchable/running/blocked/verified ids 和下一步建议，避免 root 读大 records 或重复调度。
-- `agent_py_agent/agent/agent_core/tool_context_orchestration_summary.py`: externalized dispatch/schedule/read_artifact 调度输出的 live-prompt 摘要层，保留状态、建议工具调用、`result_refs_by_run`、artifact summaries 和 refs，不默认诱导父级读 artifact 正文。
+- `agent_py_agent/agent/agent_core/orchestration_dispatch_state_contract.py`: 当前轮状态合同层；create/schedule/dispatch 共用，仅读取 remembered run ids，输出 `current_turn_run_state` 的 status buckets、dispatchable/awaiting_acceptance/running/blocked/verified ids 和下一步建议；待验收 run 的建议会显式开启 `execute_acceptance_tests` 和 `auto_apply_acceptance_followup`，避免 root 读大 records、重复调度或把待验收 run 当未知状态。
+- `agent_py_agent/agent/agent_core/tool_context_orchestration_summary.py`: externalized dispatch/schedule/read_artifact/case_status 等控制面输出的 live-prompt 摘要层，保留状态、协作 request/evidence/ready/rework 计数、建议工具调用、`result_refs_by_run`、artifact summaries 和 refs，不默认诱导父级读 artifact 正文。
 - `agent_py_agent/agent/agent_core/tool_context_repair_summary.py`: 渲染 parent-acceptance repair advice 的 copyable failed-run refs 和 suggested tool call，避免调度 records 外置后 root 看不见修复入口。
 - `agent_py_agent/agent/agent_core/tool_context_recovery_summary.py`: 渲染 recovery strategy 的 bounded preview，让 packet/checkpoint/takeover 批次进入 live prompt 时不展开完整恢复正文。
 - `agent_py_agent/agent/agent_core/hierarchy_tools.py`: runner 内 `schedule_child_subagents` 仍负责当前节点创建下一层 child，现在响应会附带 `typed_envelope.kind=subagent_schedule`，并暴露 `created_run_ids` / `reused_run_ids` / `dispatch_run_ids` / `current_turn_run_state`，父级恢复和继续调度不必从自然语言里抄 child id；child 参数里的 `required_read_paths/context_packs` 会写入真实 task，repair contract 不会在 runner-context 调度边界丢失。
-- `agent_py_agent/agent/agent_core/orchestration_tools.py`: 顶层 `create_subagents` 响应会附带同一 `subagent_schedule` typed envelope；顶层和多层派工走同一 refs 形状。顶层批量派工支持 长期助手 风格 `items/tasks`，不同子任务拥有独立 goal；系统默认名会补成 `小傻妞-角色-编号`，并在响应里给出下一步 `dispatch_subagents` 的真实 run_id 和 `current_turn_run_state`；typed envelope 会在状态合同生成后写入，避免恢复层丢掉 dispatchable refs；没有可调度 run 时会建议 `subagent_board`，避免空 dispatch。
+- `agent_py_agent/agent/agent_core/orchestration_tools.py`: 顶层 `create_subagents` 响应会附带同一 `subagent_schedule` typed envelope；顶层和多层派工走同一 refs 形状。顶层批量派工支持 长期助手 风格 `items/tasks`，不同子任务拥有独立 goal；系统默认名会补成 `小傻妞-角色-编号`，并在响应里给出下一步 `dispatch_subagents` 的真实 run_id 和 `current_turn_run_state`；typed envelope 会在状态合同生成后写入，避免恢复层丢掉 dispatchable refs；没有可调度 run 时会建议 `subagent_board`，避免空 dispatch。`raise_observation` / `raise_main_event` 让子/孙代理写入持久 observation 和 wake signal，主代理后台 tick 再判断是否分析、调度或汇报。
 - `agent_py_agent/agent/agent_core/orchestration_create_items.py`: 解析 `create_subagents` 的 `items/tasks` 批量入口；继承顶层默认字段，让每个 child item 独立覆盖 goal/role/name/验收/写入边界；顶层全局 plan 不自动复制到每个 child。
 - `agent_py_agent/agent/agent_core/orchestration_create_policy.py`: create_subagents role 纠偏层；只把本地 goal/name/thought/plan 的明确派工语义用于 worker->coordinator 纠偏，`allowed_tools` 只当能力授权，不再把普通 items worker 误升成 coordinator。
 - `agent_py_agent/agent/agent_core/orchestration_lineage_names.py`: 顶层 create_subagents 的小傻妞默认命名 helper；把系统名补成 `小傻妞-角色-编号`，并防止重复回放时无限追加编号。
@@ -1084,7 +1090,7 @@ docs/
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`: 承接 runner-context `dispatch_subagents` 工具返回 payload 的单条 record 构造，输出 test/follow-up refs 和摘要，不展开正文；错 run_id 时顶层 recovery 会给 `valid_run_ids`。
 - `agent_py_agent/agent/agent_core/orchestration_artifact_integrity_signals.py`: 从 task/dispatch record/output.json/run.json 提取 artifact_integrity_failed 信号、artifact refs 和 product write roots，不读取产物正文。
 - `agent_py_agent/agent/agent_core/orchestration_artifact_integrity_repair.py`: 把 artifact integrity 信号转换成 refs-first 修复建议；顶层给 `create_subagents`，runner-context 给 `schedule_child_subagents`。
-- `agent_py_agent/agent/agent_core/orchestration_board_payload.py`: 承接 `subagent_board` 的状态桶、完成状态、当前轮作用域和 kernel snapshot payload；看板只附加 refs-first 内核快照，不读取业务产物正文。
+- `agent_py_agent/agent/agent_core/orchestration_board_payload.py`: 承接 `subagent_board` 的状态桶、完成状态、当前轮作用域和 kernel snapshot payload；看板只附加 refs-first 内核快照，不读取业务产物正文；当阻塞项全是待验收 run 时，建议验收-only `dispatch_subagents`，不建议重复 runner。
 - `agent_py_agent/agent/agent_core/runner_stage_trace.py`: 把子代理 runner 的模型请求/响应/失败和工具调用开始/结束写入 debug trace；level 3 只记录长度、backend、工具名、payload keys 和 ok，level 4/5 才追加短预览或完整 detail 文件 ref。
 - `agent_py_agent/agent/subagents/services/control_plane_projection.py`: 在 subagent 保存时把 task 当前状态投影到 LocalStore 控制面；它只做查询索引，不替代旧工单目录或 runtime workspace 事实源。
 - `agent_py_agent/agent/subagents/kernel.py`: 子代理内核只读快照入口；`SubAgentManager.kernel_snapshot()` 统一返回 root tree / own subtree 的状态桶、workspace refs、recovery refs、tool_contract、TaskAddress/TaskEnvelope、artifact/evidence refs 和 takeover candidates，不调度、不恢复、不读取产物正文。
@@ -1101,7 +1107,7 @@ docs/
 - `agent_py_agent/agent/subagents/parsing_values.py`: 子代理结果解析共用的 list/dict/int 归一化 helper，让 `parsing.py` 保持薄层并保留旧 private import 兼容。
 - `agent_py_agent/agent/subagents/parsing_artifacts.py`: runner 产物字段别名归一化，把 `deliverables` / `output_files` / `files`、`evidence.kind=artifact.path` 和 `evidence_packets.artifact_refs` 收敛成标准 `artifacts`。
 - `agent_py_agent/agent/subagents/acceptance_workspace.py`: 父级验收 workspace 选择 helper，优先使用包含 artifact refs 或 product write roots 的 configured workspace root，忽略 task-local runtime 根。
-- `agent_py_agent/agent/subagents/parsing.py`: 旧 `[SUBAGENT_RESULT]` / planner 兼容解析入口；`parse_subagent_result_envelope()` 只保留旧导入路径，实际 typed 转换委托给 `parsing_envelope.py`。
+- `agent_py_agent/agent/subagents/parsing.py`: 旧 `[SUBAGENT_RESULT]` / planner 兼容解析入口；`parse_subagent_result_envelope()` 只保留旧导入路径，实际 typed 转换委托给 `parsing_envelope.py`；顶层 `evidence_refs/artifact_refs` 会补成 refs-only evidence packet，避免调查类 worker 的证据在 parser 到验收之间丢失。
 - `agent_py_agent/agent/subagents/parsing_envelope.py`: 把旧 `[SUBAGENT_RESULT]` 转成 `SubagentResultEnvelope`，真实工具列表由执行层传入，不信模型 summary。
 - `agent_py_agent/agent/subagents/capability_status.py`: 统一判断 runner 结构化状态是否仍在等待 tool/skill/shell/MCP/capability，供 parser、policy 和 acceptance 共用。
 - `agent_py_agent/agent/subagents/parsing_capability_requests.py`: 当模型写出 pending capability 状态但漏填 `capability_requests` 时，从结构化 pending steps 恢复父级可路由申请；推不出具体工具或命令时不生成空泛 generic request，避免产生无用 grant。
@@ -1119,7 +1125,7 @@ docs/
 - `agent_py_agent/agent/subagents/services/session_progress_integrity.py`: HTML artifact integrity 进度提示层；把缺闭合标签、假链接、缺失 hash target 等检查结果压成 bounded issue/count/examples 和 next_action，并在大量重复 `href="#"` 时提示 `replace_in_file count=0` 批量修复。
 - `agent_py_agent/agent/subagents/services/subagent_session_compact.py`: 子代理本地 session compact package 写入层；runner compact 信号只写当前 run `compactions/session/latest_metadata.json` / `latest_summary.md` / package refs，不写主代理 `memory_archive/compact_applies`。
 - `agent_py_agent/agent/subagents/services/recovery_strategy.py`: 子代理恢复策略入口；优先验证 task-local `latest_continue_packet.json`，坏包/缺包/过期包降级到 checkpoint/summary，并给出续跑原 run、创建 takeover run、leader recovery 或 no-progress fuse 的 refs-only 决策。
-- `agent_py_agent/agent/subagents/services/takeover_run.py`: 原 runner 挂死后的幂等接管 run 创建服务；新 run 保留旧 task_dir/artifacts/checkpoint/packet refs，同一个 source run 重复恢复不会无限创建接管者。
+- `agent_py_agent/agent/subagents/services/takeover_run.py`: 原 runner 挂死后的幂等接管 run 创建服务；新 run 保留旧 task_dir/artifacts/checkpoint/packet refs，并继承 `quality_contract`、`context_manifest`、`context_packs`、output refs、artifact/evidence refs 和写入根；复用旧 takeover 时会补齐缺失交接字段，同一个 source run 重复恢复不会无限创建接管者。
 - `agent_py_agent/agent/memory_archive/compact_resume_failsafe.py`: 从 compact restore refs 指向的 hook JSONL 中提取工具输出外置前 fail-safe checkpoint，保持 memory-resume refs-only。
 - `agent_py_agent/agent/memory_archive/compact_continue_packet.py`: 把 compact resume 后的 work_state、action guard、推荐读取路径和 subagent owner refs 固定成继续工作包；它只表达恢复上下文可继续，不执行工具或业务验收。
 - `agent_py_agent/agent/memory_archive/compact_continue_packet.py`: continue packet 同时写 `typed_envelope.kind=compact_continue_packet`，把推荐读取路径转成 `PathRef`，后续自动恢复可按字段读，不解析说明文字。
@@ -1137,7 +1143,7 @@ docs/
 - `agent_py_agent/agent/tooling/registry_auth.py`: registry 鉴权 helper；统一 allowed_tools、安全工具可见性和 capability grants，不和工具执行/解析耦合。
 - `agent_py_agent/agent/tooling/registry_gate_policy.py`: registry runtime gate policy helper；从 ToolSpec 和 write_boundary 生成 tool manifest、path roots、approval/idempotency policy。
 - `agent_py_agent/agent/tooling/registry_runtime_gate_results.py`: registry gate 结果写回层；gate 拒绝时返回普通 ToolExecutionResult，同时在 result_envelope.runtime_gate 保留机器事实。
-- `agent_py_agent/agent/tooling/registry_invoke.py`: 工具执行前的参数准备、写边界校验和临时工作根注入层；当父级明确授权外部 product/artifact 目录时，同一工具调用内会把这些目录加入文件工具 read/list/search/write 根，调用结束后恢复原工具状态。
+- `agent_py_agent/agent/tooling/registry_invoke.py`: 工具执行前的参数准备、写边界校验和临时工作根注入层；当父级明确授权外部 product/artifact 或 read roots 时，同一工具调用内会把这些目录加入文件工具 read/list/search/write 根，调用结束后恢复原工具状态。
 - `agent_py_agent/agent/tooling/registry_payload_normalize.py`: 对标准 JSON 工具块做 payload 校验、工具名别名归一和参数别名归一；支持 shell/cmd/cwd 与 read_artifact ref/limit 等常见模型漂移，冲突参数明确报错，不静默猜测。
 - `agent_py_agent/agent/tooling/artifact.py`: 注册 `read_artifact` 工具，给模型提供受控 artifact slice/head/tail/search 读取入口。
 - `agent_py_agent/agent/tooling/artifact_read_budget.py`: `read_artifact` 的单 run 正文读取预算器，按 `run_id` 统计滚动窗口字符数，避免子代理反复展开大 artifact。
@@ -1150,9 +1156,9 @@ docs/
 - `agent_py_agent/agent/subagents/services/persistence_identity.py`: 负责 `RuntimeIdentity` 预留字段的读取归一化，保证员工/会话/配置 scope 只作为审计元数据进入 task 记录。
 - `agent_py_agent/agent/subagents/model_task.py`: 新增 `SecuritySignal` 和 `security_review_required` 安全预留字段，用于记录安全劫持、安全欺骗、prompt injection、工具权限异常等可疑信号；当前只审计不拦截。
 - `agent_py_agent/agent/subagents/execution_records.py`: 新增 `TestExecutionRecord`，定义真实验收执行证据、输出截断和通过结果派生。
-- `agent_py_agent/agent/subagents/execution_executor.py`: 新增最小 `TestExecutor`，执行 command/file/content/static_site 四类检查并产出 `TestExecutionRecord`；当前不接 acceptance 自动写回。
+- `agent_py_agent/agent/subagents/execution_executor.py`: 新增最小 `TestExecutor`，执行 command/file/content/static_site 四类检查并产出 `TestExecutionRecord`；`file_exists/path_exists/artifact_exists` 作为存在性别名归一到 `file_check`，当前不接 acceptance 自动写回。
 - `agent_py_agent/agent/subagents/static_site_validator.py`: 父级验收的静态站点检查器门面，扫描 workspace 内 HTML 必需文件、结构化 required DOM ids、本地 href/src/action、`${...}` 占位符和明显无动作控件，不执行 JS、不访问网络；DOM/id/control 检查和路径/ref 检查已拆到 `static_site_dom_checks.py` / `static_site_path_checks.py`。
-- `agent_py_agent/agent/subagents/execution_test_items.py`: 新增测试项预处理 helper，根据 runner artifacts 安全推断 command 测试工作目录，避免父验收在 workspace 根目录误跑相对测试命令；也会把 workspace 内安全的 `cd <dir> && pytest` 拆成 `working_dir + 纯命令`，不放开 shell；当 artifacts 显示静态 HTML 且缺少同类测试时，会追加 `static_site_check`，并能把调用方传入的 task-level required files / required DOM ids 合进测试项；普通文件任务可从全局或 per-file required content contract 生成 `content_check`。
+- `agent_py_agent/agent/subagents/execution_test_items.py`: 新增测试项预处理 helper，根据 runner artifacts 安全推断 command 测试工作目录，避免父验收在 workspace 根目录误跑相对测试命令；也会把 workspace 内安全的 `cd <dir> && pytest` 拆成 `working_dir + 纯命令`，不放开 shell；当 artifacts 显示静态 HTML 且缺少同类测试时，会追加 `static_site_check`；`file_exists/path_exists/artifact_exists` 缺少 `file_path` 时只从 `output.artifacts[].path` 展开；普通文件任务可从全局或 per-file required content contract 生成 `content_check`。
 - `agent_py_agent/agent/subagents/execution_inferred_content_items.py`: 根据普通文件 artifact 和显式 required content lines 推断逐行 `content_check`；单文件吃全局内容合同，多文件只吃 per-file 映射，保持 `execution_test_items.py` 只做测试项编排。
 - `agent_py_agent/agent/subagents/execution_test_checklists.py`: 过滤不可执行的模型空壳测试清单，只有已有机器验收兜底时才使用，避免 malformed checklist 盖过真实检查。
 - `agent_py_agent/agent/subagents/static_required_files.py`: 从 task goal/thought/description/acceptance_checks 里的结构化 `required_files` 和内部必需文件标签提取 `index.html`、`style.css`、`app.js` 等静态 Web 必需文件名；只从结构化 `required_dom_ids` 提取必需 DOM ids，不从普通正文猜测业务区块，不读取产物正文。
@@ -1166,7 +1172,7 @@ docs/
 - `agent_py_agent/agent/subagents/execution_report.py`: 新增 `test_execution.json` / `test_execution.md` 报告写读入口；JSON 是机器事实源，Markdown 只做展示。
 - `agent_py_agent/agent/subagents/services/acceptance_machine_evidence.py`: 新增父级真实测试报告读取 helper；通过的 `test_execution.json` 可在无 worker evidence packet 时作为机器证据链。
 - `agent_py_agent/agent/subagents/parent_acceptance_controller.py`: 新增父级验收 dry-run 决策器和 refs-only 决策落盘 helper，读取 `output.json`、`test_execution.json` 和 handoff refs，返回 execute_tests / review_patches / inspect_only / request_human / rescue；显式写入生成 `parent_acceptance_decision.json`，不读取 artifact 正文；预检前复用 `prepare_test_items()` 归一化安全 cwd 包装，空测试报告配合 traceable artifact/evidence refs 会走 inspect_only，不误判为 rescue。
-- `agent_py_agent/agent/subagents/parent_acceptance_empty_report.py`: 拆出可执行 test 筛选和空 `test_execution.json` 的 inspect-only 判定，只检查 evidence/artifact refs 元数据，不展开正文。
+- `agent_py_agent/agent/subagents/parent_acceptance_empty_report.py`: 拆出可执行 test 筛选和空 `test_execution.json` 的 inspect-only 判定，只检查 evidence/artifact refs 元数据，不展开正文；非内部 evidence ref 可让无可执行测试的调查/查询任务进入 inspect-only，不再误报 `total=0 failed=0` 为失败。
 - `agent_py_agent/agent/subagents/parent_acceptance_apply.py`: 新增显式 apply 结果模型、拦截/应用结果构造和 `parent_acceptance_apply.json` 落盘 helper；非 inspect_only 决策只留下拦截审计，不改任务状态。
 - `agent_py_agent/agent/subagents/parent_acceptance_next_action.py`: 新增父级下一动作建议模型，把当前决策/apply 审计映射成 run_tests / review_patches / request_human_confirmation / plan_rescue / apply_acceptance；只返回 refs 和建议命令，不执行。
 - `agent_py_agent/agent/subagents/parent_acceptance_auto_policy.py`: 新增父级自动策略 dry-run 模型和 `parent_acceptance_auto_policy.json` 审计落盘；第一版只判断 allow/blocked、would_execute、manual-only 半自动计划和 preflight 检查，不执行命令、不改状态。
@@ -1180,18 +1186,21 @@ docs/
 - `agent_py_agent/agent/subagents/services/hierarchy_schedule_idempotency.py`: runner 内 schedule_child_subagents 幂等合同层；按 parent/root/role/goal/extra_write_roots/status 匹配当前 direct children，返回新建、复用和可 dispatch 的 run ids，避免重复派工无限扩容。
 - `agent_py_agent/agent/subagents/services/hierarchy_agent_names.py`: 层级展示名统一生成器，负责 `小傻妞-*` / `小小傻妞-*` / `小小小傻妞-*` 前缀；真实模型只写 `小小傻妞` 这种无后缀名字或把 `*` 占位符原样传入时，会回退到 role 后缀并补 sibling 编号，例如 `小小傻妞-tester-2`；已有语义后缀如 `小小傻妞-product-worker` 会保留，避免把辨识信息吞掉。
 - `agent_py_agent/agent/subagents/services/hierarchy_child_context.py`: runner 内层级 child context 选择 helper；child spec 携带 repair/context refs 时优先写入 child task，否则沿用父级 context。
-- `agent_py_agent/agent/subagents/services/base.py`: 子代理基础创建服务；不再从目标自然语言里提取本地写入根。额外写入根必须来自 `extra_write_roots`、workspace/product root 或结构化 refs，避免图片/API 地址被误当成可写目录。
+- `agent_py_agent/agent/subagents/services/base.py`: 子代理基础创建服务；不再从目标自然语言里提取本地写入根。额外写入根必须来自 `extra_write_roots`、workspace/product root 或结构化 refs，避免图片/API 地址被误当成可写目录；创建完成后会登记开放世界 `AgentCapability` 快照，让协作请求可以按结构化能力路由到已有子代理。
 - `agent_py_agent/agent/subagents/services/hierarchy_acceptance.py`: 从 scheduler 拆出的验收兜底策略，只在模型没有显式 `acceptance_checks` 时派生最小验收项。
-- `agent_py_agent/agent/subagents/services/hierarchy_tool_policy.py`: 从 scheduler 拆出的工具策略，统一处理 coordinator/leaf 的工具继承、写文件工具补齐和 `write`/`read` 等模型工具名别名修正；coordinator 显式 allowed_tools 会补回内置编排工具，避免模型漏传后失去派工能力。
+- `agent_py_agent/agent/subagents/services/hierarchy_tool_policy.py`: 从 scheduler 拆出的工具策略，统一处理 coordinator/leaf 的工具继承、写文件工具补齐和 `write`/`read` 等模型工具名别名修正；coordinator 显式 allowed_tools 会补回内置编排工具和 `raise_observation` / `raise_main_event`，避免模型漏传后失去派工或上报主代理能力。
 - `agent_py_agent/agent/subagents/execution_test_items.py`: 预处理父级验收 tests，推断 workspace 内 `working_dir`，拆安全 `cd <dir> && pytest`，并把带明确期望内容的 `cat <workspace文件>` 改成受控 `content_check`，避免为真实模型输出放开 `cat` 命令；多页 HTML artifacts 会自动补 `static_site_check`，普通文件可从 `required_content_lines` 自动补逐行 `content_check`。
 - `agent_py_agent/agent/subagents/execution_executor.py`: `content_check` 支持 `content_pattern` 包含匹配，也支持 `content_equals` / `expected_content` + `match_mode=exact`，用于严格验证文件内容没有额外字符；`static_site_check` 用于机器验收购物站这类静态产物的页面存在性、坏链接、占位符和明显失效控件。
-- `agent_py_agent/agent/agent_core/_tool_loop_service.py`: 主代理和 subagent 共用的工具循环；到达 `max_tool_rounds` 后给模型一次收口机会，如果模型仍吐工具调用，返回确定性停止说明而不是把新 `[TOOL_CALL]` 当最终回答；执行真实工具前会检查 per-run 工具预算和委托期读正文守卫，预算触发时只拦截当前 run 的工具并给模型自检/上报提示。
-- `agent_py_agent/agent/agent_core/orchestration_body_read_guard.py`: 委托期 refs-only 工具守卫；父级已有 child 且 acceptor 未完成时阻断 product `read_file` 和大正文 `read_artifact`，运行元数据和调度类小 artifact 可读，用户显式要求父级亲自验收时临时放行；它也接入派工前 source-body 提示门，避免 root 在第一次创建小傻妞前吞掉 `data/docs/materials` 正文。
-- `agent_py_agent/agent/agent_core/orchestration_predelegation_read_guard.py`: 派工前正文读取提示门；root 尚未创建本轮 subagent run 且用户明确要派小傻妞/子代理时，README/rubric/目标等 brief 放行，`data/docs/materials` 正文和普通大 artifact 会被提示改用 `create_subagents + required_read_paths/context_manifest/context_packs` 下发。
-- `agent_py_agent/agent/agent_core/orchestration_tools.py`: 顶层 `create_subagents` / `subagent_board` 工具入口；显式 root/coordinator seed 只继承结构化 required/forbidden 文件合同、refs、context packs 和写入根，不再从当前原始用户 prompt 的普通句子里补机器事实。`create_subagents` 同时支持 `goal + count` 单任务兼容模式和 `items/tasks` 多任务结构化模式；系统默认名会补成 `小傻妞-角色-编号`，例如 `小傻妞-worker-1` / `小傻妞-tester-2`；创建后 payload 会给出 `next_action.dispatch_subagents`，避免模型把“已建工单”误当“已执行”；若本次没有可调度 run，下一步转为 `subagent_board`。
+- `agent_py_agent/agent/agent_core/_tool_loop_service.py`: 主代理和 subagent 共用的工具循环；到达 `max_tool_rounds` 后给模型一次收口机会，如果模型仍吐工具调用，返回确定性停止说明而不是把新 `[TOOL_CALL]` 当最终回答；执行真实工具前会检查 per-run 工具预算，预算触发时只拦截当前 run 的工具并给模型自检/上报提示；工具归档后会刷新父级小型读取 brief 缓存，供后续 `create_subagents` 共享给子代理。
+- 已删除旧读正文硬门：`orchestration_body_read_guard.py`、`orchestration_predelegation_read_guard.py`、`orchestration_direct_write_guard.py`、`tool_body_read_guard_stage.py`、`tool_direct_write_guard_stage.py` 不再存在。父代理、子代理是否读取正文或写产物由 prompt、工具权限、路径边界和统一 closeout 验收控制，不再用“委托期/派工前/直接写”额外卡点阻断普通协作流程。
+- `agent_py_agent/agent/agent_core/orchestration_tools.py`: 顶层 `create_subagents` / `subagent_board` / `inspect_agent_tree` / `raise_observation` / `raise_main_event` 工具入口；显式 root/coordinator seed 只继承结构化 required/forbidden 文件合同、refs、context packs 和写入根，不再从当前原始用户 prompt 的普通句子里补机器事实。`create_subagents` 同时支持 `goal + count` 单任务兼容模式和 `items/tasks` 多任务结构化模式；创建子代理前会追加父级最近小型读取 brief 到 `context_packs`，让协作子代理共享父级已经读到的短线索；系统默认名会补成 `小傻妞-角色-编号`，例如 `小傻妞-worker-1` / `小傻妞-tester-2`；创建后 payload 只给出 `next_action.dispatch_subagents` 建议，不再因为当前轮已有未 dispatch run 而用 `pending_dispatch_redirect` 拦截新增子代理；协作入口合同默认 `execution_required=true`，最终回答前必须同时满足 create 与 dispatch 工具事实，避免只建记录就口头完成；`raise_*` 只上报事件和叫醒主代理，不直接调度或验收。
+- `agent_py_agent/agent/agent_core/orchestration_shared_context.py`: 父级共享 brief helper；从本次成功工具记录、`archive_tool_calls` 或缓存里提取最近小型成功读取结果，生成 bounded `parent_recent_read` context pack，只传摘要、来源路径和工具 ref，不复制大正文，也不作为验收门。
+- `agent_py_agent/agent/agent_core/orchestration_dispatch_refs.py`: dispatch/subagent board 的 child 结果索引 helper；把 child `summary/output_json/artifact_refs` 放到父级最前面，避免长 `records` 截断后父级漏掉已产出的发现。
+- `agent_py_agent/agent/agent_core/orchestration_sibling_roster.py`: 同批子代理 roster helper；批量创建后给每个 child 附加同批 peers 的 run_id/name/role/目标摘要，供 coordinator 点名协作和结果核对。
 - `agent_py_agent/agent/agent_core/orchestration_root_contract.py`: root/coordinator seed 合同修复 helper；从原始用户 prompt 提取 required/forbidden 文件和精确层级命名合同，避免自然语言摘要把机器合同改写或漏传。
-- `agent_py_agent/agent/agent_core/subagent_finalize_helpers.py`: 子代理 runner 收尾持久化 helper；coordinator 已真实创建并验收 child 时可合成等待父级验收的收口，同时会阻断“没工具调用、没 child refs，只说下一步要 schedule_child_subagents”的假完成，转成 `BLOCKED / needs_child_creation` 让 LLM 继续派工。
-- `agent_py_agent/agent/agent_core/runner_input_dependencies.py`: runner 输入依赖识别层；只读取 `required_read_paths` / `input_refs` 和 `output_files` / `output_refs` / `artifact_refs` 等结构化字段。普通自然语言里的“输出路径/保存文件/目标文件”不再产生机器输入或输出事实。
+- `agent_py_agent/agent/agent_core/subagent_finalize_helpers.py`: 子代理 runner 收尾持久化 helper；现在只做进展产物和 artifact 完整性兜底，不再根据 coordinator/child 状态启发式改写 runner 状态。父级看 tree/board/产物 refs，自行决定下一步调度或 closeout。
+- `agent_py_agent/agent/agent_core/runner_ref_fields.py`: runner 输入/输出 ref 字段解析层；只读取 `required_read_paths` / `input_refs` / `input_files` 这类结构化字段，普通自然语言不变成启动依赖。它提供 ref 提取和路径归一，不再判断 runner 是否“输入依赖就绪”，也不再过滤候选或生成缺输入阻断。
+- `agent_py_agent/agent/subagents/runner_rendering.py`: 子代理执行上下文 Markdown 渲染层；Context Pack 不再只显示固定几个字段，`files/refs/name/source_tool` 等开放小字段会按大小上限渲染，避免模型或系统新增的 context pack 字段落盘后不进 runner prompt。
 - `agent_py_agent/agent/agent_core/subagent_dispatch_closeout_resolution.py`: 顶层 dispatch 收口状态归并层；只允许 `BLOCKED/FAILED/TIMEOUT/AWAITING_ACCEPTANCE/TAKEN_OVER` 等旧问题 run 被已验证 sibling 目标覆盖，`PLANNING/RUNNING` 不再被同目标 sibling 静默算作完成。
 - `agent_py_agent/agent/agent_core/subagent_finalize_artifact_integrity.py`: runner 收尾前的产物完整性检查层；相对 artifact ref 会从 run-local `task_dir` 推导真实项目 workspace，再对齐相对/绝对 product write roots，避免 `lab_outputs/site/index.html` 这类共享产物被误查到私有 `.my_agent/subagents/...` 目录后标成 `artifact_missing`。
 - `agent_py_agent/agent/backends/base.py`: Anthropic-compatible 非流式响应解析会在 thinking-only/no-text 内容块时重试一次；流式响应连续空文本时会在后端边界做一次非流式 `/v1/messages` 兜底，避免真实 E2E 被可恢复的厂商响应形状直接打成 runner 失败；普通空响应仍报错。
@@ -1204,7 +1213,7 @@ docs/
 - `agent_py_agent/agent/subagents/services/qa_role_contract.py`: tester / bug_finder / acceptor 角色合同识别 helper；调度器和验收发现共用它来判断父任务是否要求真实 QA 后代、某个 persisted child 是否真正覆盖 QA 角色。
 - `agent_py_agent/agent/subagents/services/hierarchy_qa_scheduler.py`: 调度阶段 QA advice helper；根据父任务合同、本轮 specs、已存在后代和实现进度生成 `quality_advice`，提示缺失 tester/bug_finder/acceptor、候选 child spec 和红线；不替 LLM 固定创建 QA，避免核心 scheduler 继续变胖。
 - `agent_py_agent/agent/subagents/services/hierarchy_context.py`: 层级派工的父级上下文继承层；保留产物路径、文件合同、层级合同，以及 `controlled_exec` / capability request / path_scope / output_budget / task_trash / refs 等不能丢的能力安全合同。
-- `agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py`: 从 scheduler 中拆出的层级 scope guard，集中处理空计划、深度/数量限制、结构化 forbidden/domain scopes、同批混建 coordinator/leaf、QA 早于实现完成、child 写入根漂移和 domain mismatch；重复 coordinator 领域和已验证 leaf 具体目标文件现在只进入 `scheduling_warnings`，不再硬阻断 QA/修复/协作写入；领域和禁止范围只从 `forbidden_child_scopes` / `domain_scopes` / role identity 等机器字段读取，不从 goal 自然语言里兜底提取。
+- `agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py`: 从 scheduler 中拆出的层级 scope guard，集中处理空计划、深度/数量限制、结构化 forbidden/domain scopes、child 写入根漂移和 domain mismatch；同批混建 coordinator/leaf、QA 早于实现完成、重复 coordinator 领域和已验证 leaf 具体目标文件现在只进入 `scheduling_warnings`，不再硬阻断 QA/修复/协作写入；领域和禁止范围只从 `forbidden_child_scopes` / `domain_scopes` / role identity 等机器字段读取，不从 goal 自然语言里兜底提取。
 - `agent_py_agent/agent/subagents/services/hierarchy_leaf_targets.py`: 从 scope guard 拆出的已验证 leaf 目标文件去重 helper；只读 direct child 元数据和 `output.json.artifacts` 路径引用，不读取 artifact 正文。
 - `agent_py_agent/agent/subagents/services/hierarchy_context.py`: 层级目标继承 helper；把父级 required/forbidden 文件合同、4层/depth/命名合同和能力安全合同补进下级 goal，防止模型总结时把关键边界缩水。
 - `agent_py_agent/agent/subagents/services/hierarchy_write_policy.py`: 层级写入根策略，区分 task-local 报告写入和最终产品写入；coordinator/researcher/tester/bug_finder/acceptor 可保留产品路径上下文但不继承产品写入根。
@@ -1224,7 +1233,6 @@ docs/
 - `agent_py_agent/agent/subagents/role_templates.py`: 加载内置和用户 JSON role templates，要求广义角色、中文说明和多目标适用，坏模板记录 issue；提供轻量 `role_template_index_text()` 给主代理和派工类角色常驻使用，索引包含适用/不适用场景、能力标签和模板位置但不展开默认工具；按需 `role_template_detail_text()` 给派工 coordinator 展开完整角色提示。
 - `agent_py_agent/agent/subagents/root_task_policy.py`: 判断 subagent run 是否是 self-authorized root/coordinator/lead seed；普通一层 worker/researcher/writer 即使没有 subagent parent_id，也按有主代理上级处理，保留 capability request 通道。
 - `agent_py_agent/agent/subagents/role_template_catalog/builtin/*.json`: 内置 `coordinator/worker/bug_finder/tester/acceptor/researcher/writer` 角色模板。
-- `agent_py_agent/agent/subagents/dependency_artifact_refs.py`: workflow sibling 依赖的 artifact ref 解析层；下游 required_read_paths 写短文件名时，可接上已完成上游 run 的真实同名 artifact 路径。
 - `agent_py_agent/agent/agent_core/tool_call_context_reducer.py`: 大段 assistant tool-call 参数摘要层，避免 `write_file(content=<large html>)` 原文反复进入下一轮 prompt；保留工具名、路径、字段大小、hash 和短预览。小 dict payload 也渲染为摘要行，避免模型把历史 dict 复制成新工具调用。
 - `agent_py_agent/agent/tooling/content_transport_policy.py`: 长内容工具参数硬门；`write_file` / `append_file` 在写入前统一检查 inline content 长度，过长时返回分块、patch 或 grant-backed `controlled_exec` 的恢复提示，不写磁盘。
 - `agent_py_agent/agent/tooling/content_recovery_mode.py`: 长内容工具失败后的自动降级策略；工具循环检测到截断 parse error 或 inline 上限拒绝后，只把短恢复模式放回下一轮 prompt，不回灌正文。
@@ -1233,25 +1241,25 @@ docs/
 - `agent_py_agent/agent/agent_core/spawn_role_seed.py`: CLI 显式 role seed 入口；root/coordinator seed 不再从 goal 自然语言抽产品路径，自身 allowed write roots 只保留 task-local 协调目录和调用方显式传入的结构化根。
 - `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context dispatch 的直接 child 进度摘要；含状态计数、unfinished ids、recovery ids、rejected acceptance ids、`parent_acceptance_repair_advice`、`needs_more_dispatch` / `needs_recovery` 和带 `run_ids` 的建议继续调度、修复或恢复工具调用。
 - `agent_py_agent/agent/agent_core/orchestration_board_payload.py`: subagent board 输出整形 helper；把可继续处理的 run id 按状态放到顶层，归一 `status=ALL/*/ANY` 为不过滤，并截断长 goal，避免看板响应挤占模型上下文。
-- `agent_py_agent/agent/agent_core/orchestration_dispatch_tool.py`: `dispatch_subagents` 模型工具类；把模型参数收敛成 `DispatchParams`，返回 refs-first 调度报告、typed dispatch envelope、当前轮状态合同和错误 run id 恢复提示。
-- `agent_py_agent/agent/agent_core/orchestration_dispatch_scope.py`: 集中维护 dispatch_subagents 的 apply/execute 默认、parent scope、self-exclude、workflow-off 和验收收口策略；真实执行 runner 的模型工具调用固定开启父级验收测试，顶层 active root/coordinator 在 `apply=true` 时强制 workflow off，避免全局 auto workflow 先生成 producer/critic/repair 子工单并绕过 root 自己派工。
-- `agent_py_agent/agent/agent_core/orchestration_dispatch_scope.py`: 显式 `run_ids` 的真实 dispatch 若漏写 `max_runners`，默认按 run_ids 数量推进，避免模型点名多个孩子却只跑第一个。
-- `agent_py_agent/agent/agent_core/runner_prompts.py`: 子代理 runner / repair prompt 构建器；只把 slim execution context summary、TaskEnvelope/tool preflight 提示和 refs 放进启动提示词，避免真实模型因完整 context bundle 内联而超时。
-- `agent_py_agent/agent/agent_core/runner_prompt_context_summary.py`: runner prompt 的瘦身执行摘要生成层；集中提取身份、refs、任务、权限、写入边界、TaskEnvelope、preflight 短字段和 input_contract resolved/unresolved read paths。
-- `agent_py_agent/agent/agent_core/runner_prompt_contract_lines.py`: runner 输入/输出合同提示渲染层；把 resolved upstream read paths 和 required product refs 显式写进 prompt，避免模型从自然语言别名猜路径。
+- `agent_py_agent/agent/agent_core/orchestration_dispatch_tool.py`: `dispatch_subagents` 模型工具类；把模型参数收敛成 `DispatchParams`，返回 refs-first 调度报告、typed dispatch envelope、当前轮状态合同和错误 run id 恢复提示。真实模型常见的 `orchestration:{run_ids, concurrency, mode}` wrapper 会在入口归一成顶层 `run_ids/max_runners/apply/execute_runners/workflow_mode`，避免已创建子代理因参数包形态不同而一直停在 PLANNING。
+- `agent_py_agent/agent/agent_core/orchestration_dispatch_scope.py`: 集中维护 dispatch_subagents 的 apply/execute 默认、parent scope、self-exclude、workflow-off 和验收收口策略；真实执行 runner 的模型工具调用固定开启父级验收测试；目标 run 已等待验收时，`apply=true` 会默认走验收-only 续推并自动应用验收 follow-up；顶层 active root/coordinator 在 `apply=true` 时强制 workflow off，避免全局 auto workflow 先生成 producer/critic/repair 子工单并绕过 root 自己派工。
+- `agent_py_agent/agent/agent_core/orchestration_dispatch_scope.py`: 显式 `run_ids/include_run_ids/subagent_ids/target_subagent_ids/target_run_ids/agent_ids/child_run_ids/children/items[].run_id` 会归一为同一批目标；`direct_children=true` 是作用域意图，不会被当成 `"True"` run_id；顶层给出显式目标 ID 时省略 `apply/execute_runners` 会默认真实推进 runner，显式 `apply=false` 才 dry-run；真实 dispatch 若漏写 `max_runners`，默认按目标 ID 数量推进，避免模型点名多个孩子却只跑第一个。
+- `agent_py_agent/agent/agent_core/runner_prompts.py`: 子代理 runner / repair prompt 构建器；只把 slim execution context summary、TaskEnvelope/tool preflight 提示和 refs 放进启动提示词，并在协作工具已授权时注入通用协作控制面动作入口；当 context bundle 里有点名请求时，提示响应者复用已有 case/request。
+- `agent_py_agent/agent/agent_core/runner_prompt_context_summary.py`: runner prompt 的瘦身执行摘要生成层；集中提取身份、refs、任务、权限、写入边界、协作点名请求、TaskEnvelope、preflight 短字段和 read_refs 摘要。read_refs 是可读线索/授权范围，不是启动前置依赖。
+- `agent_py_agent/agent/agent_core/runner_prompt_contract_lines.py`: runner 输入/输出提示渲染层；把 read_refs 和 required product refs 显式写进 prompt。read_refs 缺失时记录限制或换线索，不会因为某条路径不存在就让 runner 启动前被卡死。
 - `agent_py_agent/agent/agent_core/subagent_dispatch_closeout.py` / `tool_loop_completion.py`: 顶层子代理调度收口守卫；用持久 task 状态替换过度乐观最终回答。顶层 dispatch 后若 scoped tasks 全部 `DONE/VERIFIED` 且没有缺结构化 `required_qa_roles` / `qa_roles`，会直接生成 refs-first 确定性收口，不再额外发起自由模型轮。
 - `agent_py_agent/agent/subagents/context_bundle_contracts.py`: context bundle 合同生成层；从任务文本和文件级 product write roots 推导 required/forbidden files，保证写权限事实和验收文件合同一致，并区分用户产物 refs 与 agent-run 内部交接 refs。
 - `agent_py_agent/agent/agent_core/capability_request_tool.py`: `capability_request` 模型工具类；runner 缺工具、skill、MCP、网络或 shell 时写正式 OPEN `CapabilityRequest`，只允许当前 run 自己申请，父级后续 route/grant/rerun。
 - `agent_py_agent/agent/agent_core/capability_config_patch_tool.py`: `capability_config_patch` 模型工具类；把配置修复请求收敛成 `CapabilityConfigPatchRequest`，只自动应用安全字段，危险字段返回建议，并写审计/通知。
 - `agent_py_agent/agent/agent_core/orchestration_workflow_mode.py`: create/dispatch 共用 workflow mode 归一化 helper，维持 `off` / `plan` / `auto` 兼容语义。
 - `agent_py_agent/agent/agent_core/orchestration_repair_contract.py`: repair/execute/verify 共享合同层；把失败 refs、目标产物 refs、原始任务 goal/acceptance 和完整成功检查打成机器字段，避免 repair worker 只修最新错误提示。
-- `agent_py_agent/agent/agent_core/orchestration_create_constraints.py`: create/schedule 写入根和任务约束推导层；保留高层约束判断，例如重复文件目标、委托约束冲突和缺写入根提示。
-- `agent_py_agent/agent/agent_core/orchestration_create_target_roots.py`: create/schedule 的目标写入根解析层；会从 context/read/repair target refs 推导产品写入根，并把目标文件路径归一为父目录，防止修复同一个产物时写到 sibling 目录。
+- `agent_py_agent/agent/agent_core/orchestration_create_constraints.py`: create/schedule 写入根和任务约束推导层；保留安全/边界类约束，例如委托约束冲突和缺写入根提示；不再因为多个子代理共享输出路径或 count 复制具体文件目标而在 create 阶段硬拒绝。
+- `agent_py_agent/agent/agent_core/orchestration_create_target_roots.py`: create/schedule 的目标写入根解析层；会从 context/read/repair target refs 推导产品写入根，并把目标文件路径归一为父目录。若同一个结构化任务包里的输出 ref 与真实输入 ref 共享窄任务目录，会把输出父目录授权给 child，防止临时任务目录被误判为仓库外非法写入。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`: dispatch 工具返回 payload 压缩层；单条 record 只保留 refs 和关键字段，错 run_id 时把 `runner_selection_recovery.valid_run_ids` 放到顶层；顶层父级验收 REJECT 也会返回 `parent_acceptance_repair_advice` 和 `create_subagents` 修复建议，并把原始 task refs / goal / acceptance checks 传给 repair child，避免修复目标缩水。
 - `agent_py_agent/agent/agent_core/dispatch_runner_selection.py`: runner 候选范围和显式 `include_run_ids` 预检；错 id 会返回 `runner_selection/invalid_run_ids`、可用 direct child ids 和保守纠正提示。
-- `agent_py_agent/agent/agent_core/dispatch_runner_candidates.py`: runner 候选策略层；显式 run_ids、输入文件依赖、workflow sibling 依赖和 packet/checkpoint 恢复候选都在这里统一判断。
-- `agent_py_agent/agent/agent_core/dispatch_runner_batches.py`: runner 候选收集和执行批处理；调用 selection、输入依赖和 workflow 依赖 helper 精确推进父节点给定的直接孩子。
-- `agent_py_agent/agent/agent_core/orchestration_item_dependencies.py`: `create_subagents(items=...)` 批量派工的 sibling dependency helper；把“基于某小傻妞结果”的自然引用固化为 required refs 或 `workflow_depends_on`。
+- `agent_py_agent/agent/agent_core/dispatch_runner_candidates.py`: runner 候选策略层；显式 run_ids、状态、scope、packet/checkpoint 恢复候选都在这里统一判断。它不再用输入文件依赖或 workflow sibling 依赖静默过滤候选。
+- `agent_py_agent/agent/agent_core/dispatch_runner_batches.py`: runner 候选收集和执行批处理；调用 selection 精确推进父节点给定的直接孩子。缺文件、缺资料、缺权限现在交给真实 runner 工具调用和父级 tree/board 反馈处理，不在启动前提前卡死。
+- 已删除旧 sibling workflow 推断层：`orchestration_item_dependencies.py` 和 `runner_workflow_dependencies.py` 不再存在。真要流水线，由父代理按“派 A、看 A 完成、再派 B”的方式显式控制；批量 items 不再自动把 `dependencies` / `input_refs` 转成等待关系。
 - `agent_py_agent/agent/agent_core/services/watch_config_reload.py`: dispatch watch 的 capability_config 热加载层；每轮开始前检测配置 hash，变化只影响后续 dispatch，不改已经运行中的 runner。
 - `agent_py_agent/agent/tooling/json_repair.py`: 工具调用 JSON 的窄口修复 helper；目前只修有效对象后多余右花括号，避免模型因 parse error 把完整任务 goal 越改越短。
 - `agent_py_agent/agent/subagents/role_contracts.py`: 新增 reporter/checker 角色契约和 analyst/reviewer 兼容映射；同时把模板角色接入默认工具、输出契约和 parent final gate。

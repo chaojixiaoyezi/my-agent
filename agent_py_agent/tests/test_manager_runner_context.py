@@ -137,8 +137,8 @@ def test_build_execution_context_basic(mock_manager, tmp_path):
     assert context.generated_at > 0
 
 
-def test_build_execution_context_adds_completed_dependency_artifact_refs(mock_manager, tmp_path):
-    """测试下游执行上下文会看到已完成上游的真实 artifact ref。"""
+def test_build_execution_context_keeps_read_refs_without_hidden_dependency_rebinding(mock_manager, tmp_path):
+    """执行上下文不再根据 sibling workflow 自动补写上游 artifact ref。"""
     upstream = make_task(tmp_path, "collect")
     upstream.status = "DONE"
     upstream.verification_status = "VERIFIED"
@@ -152,14 +152,13 @@ def test_build_execution_context_adds_completed_dependency_artifact_refs(mock_ma
     downstream = make_task(tmp_path, "content")
     downstream.workflow_parent_run_id = "batch-1"
     downstream.workflow_phase_id = "content"
-    downstream.workflow_depends_on = ["collect"]
     downstream.context_manifest = ContextManifest(required_read_paths=["data_collection.md"])
     mock_manager._tasks[upstream.id] = upstream
     mock_manager._tasks[downstream.id] = downstream
 
     context = mock_manager.build_execution_context(downstream.id)
 
-    assert str(artifact) in context.context_manifest.required_read_paths
+    assert context.context_manifest.required_read_paths == ["data_collection.md"]
 
 
 def test_build_execution_context_includes_granted_skills_and_tools(mock_manager, tmp_path):

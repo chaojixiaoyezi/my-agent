@@ -15,11 +15,10 @@ class ToolLoopRepairCounters:
 
     reserved_record_repairs: int = 0
     open_write_session_repairs: int = 0
-    bootstrap_materialization_redirects: int = 0
     local_progress_redirects: int = 0
-    delivery_repair_redirects: int = 0
     exploration_fuse_redirects: int = 0
     unresolved_runtime_issue_redirects: int = 0
+    orchestration_contract_redirects: int = 0
 
 
 # LLM: _inc_reserved returns a new counters bundle after fake-record repair.
@@ -28,25 +27,36 @@ def _inc_reserved(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
     return ToolLoopRepairCounters(
         reserved_record_repairs=counters.reserved_record_repairs + 1,
         open_write_session_repairs=counters.open_write_session_repairs,
-        bootstrap_materialization_redirects=counters.bootstrap_materialization_redirects,
         local_progress_redirects=counters.local_progress_redirects,
-        delivery_repair_redirects=counters.delivery_repair_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
+        orchestration_contract_redirects=counters.orchestration_contract_redirects,
     )
 
 
-# LLM: _inc_open_session returns a new counters bundle after open-session repair.
-# 函数用途: 增加分块写入 session 纠偏计数，保持 dataclass 不可变。
+# LLM: _inc_open_session returns a new counters bundle after one unhandled open-session model turn.
+# 函数用途: 累加“模型本轮没有处理 open file_write_session”的次数，保持 dataclass 不可变。
 def _inc_open_session(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
     return ToolLoopRepairCounters(
         reserved_record_repairs=counters.reserved_record_repairs,
         open_write_session_repairs=counters.open_write_session_repairs + 1,
-        bootstrap_materialization_redirects=counters.bootstrap_materialization_redirects,
         local_progress_redirects=counters.local_progress_redirects,
-        delivery_repair_redirects=counters.delivery_repair_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
+        orchestration_contract_redirects=counters.orchestration_contract_redirects,
+    )
+
+
+# LLM: _reset_open_session clears the unhandled-turn counter when the model works on the open session.
+# 函数用途: 模型 append/finish/reset/abort 当前 open session 后清零计数，避免后续提醒继承旧回合。
+def _reset_open_session(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
+    return ToolLoopRepairCounters(
+        reserved_record_repairs=counters.reserved_record_repairs,
+        open_write_session_repairs=0,
+        local_progress_redirects=counters.local_progress_redirects,
+        exploration_fuse_redirects=counters.exploration_fuse_redirects,
+        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
+        orchestration_contract_redirects=counters.orchestration_contract_redirects,
     )
 
 
@@ -56,39 +66,10 @@ def _inc_local_progress(counters: ToolLoopRepairCounters) -> ToolLoopRepairCount
     return ToolLoopRepairCounters(
         reserved_record_repairs=counters.reserved_record_repairs,
         open_write_session_repairs=counters.open_write_session_repairs,
-        bootstrap_materialization_redirects=counters.bootstrap_materialization_redirects,
         local_progress_redirects=counters.local_progress_redirects + 1,
-        delivery_repair_redirects=counters.delivery_repair_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
-    )
-
-
-# LLM: _inc_bootstrap_materialization returns a new immutable counters bundle after one startup-materialization redirect.
-# 函数用途: 累加 bootstrap 开工纠偏计数，避免“先物化一个目标”的提醒无限重复。
-def _inc_bootstrap_materialization(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return ToolLoopRepairCounters(
-        reserved_record_repairs=counters.reserved_record_repairs,
-        open_write_session_repairs=counters.open_write_session_repairs,
-        bootstrap_materialization_redirects=counters.bootstrap_materialization_redirects + 1,
-        local_progress_redirects=counters.local_progress_redirects,
-        delivery_repair_redirects=counters.delivery_repair_redirects,
-        exploration_fuse_redirects=counters.exploration_fuse_redirects,
-        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
-    )
-
-
-# LLM: _inc_delivery_repair returns a new immutable counters bundle after one staged-delivery redirect.
-# 函数用途: 增加 delivery repair 纠偏计数，避免该类状态无限提醒不收口。
-def _inc_delivery_repair(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return ToolLoopRepairCounters(
-        reserved_record_repairs=counters.reserved_record_repairs,
-        open_write_session_repairs=counters.open_write_session_repairs,
-        bootstrap_materialization_redirects=counters.bootstrap_materialization_redirects,
-        local_progress_redirects=counters.local_progress_redirects,
-        delivery_repair_redirects=counters.delivery_repair_redirects + 1,
-        exploration_fuse_redirects=counters.exploration_fuse_redirects,
-        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
+        orchestration_contract_redirects=counters.orchestration_contract_redirects,
     )
 
 
@@ -98,11 +79,10 @@ def _inc_exploration_fuse(counters: ToolLoopRepairCounters) -> ToolLoopRepairCou
     return ToolLoopRepairCounters(
         reserved_record_repairs=counters.reserved_record_repairs,
         open_write_session_repairs=counters.open_write_session_repairs,
-        bootstrap_materialization_redirects=counters.bootstrap_materialization_redirects,
         local_progress_redirects=counters.local_progress_redirects,
-        delivery_repair_redirects=counters.delivery_repair_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects + 1,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
+        orchestration_contract_redirects=counters.orchestration_contract_redirects,
     )
 
 
@@ -110,21 +90,31 @@ def _inc_unresolved_runtime_issue(counters: ToolLoopRepairCounters) -> ToolLoopR
     return ToolLoopRepairCounters(
         reserved_record_repairs=counters.reserved_record_repairs,
         open_write_session_repairs=counters.open_write_session_repairs,
-        bootstrap_materialization_redirects=counters.bootstrap_materialization_redirects,
         local_progress_redirects=counters.local_progress_redirects,
-        delivery_repair_redirects=counters.delivery_repair_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects + 1,
+        orchestration_contract_redirects=counters.orchestration_contract_redirects,
+    )
+
+
+def _inc_orchestration_contract(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
+    return ToolLoopRepairCounters(
+        reserved_record_repairs=counters.reserved_record_repairs,
+        open_write_session_repairs=counters.open_write_session_repairs,
+        local_progress_redirects=counters.local_progress_redirects,
+        exploration_fuse_redirects=counters.exploration_fuse_redirects,
+        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
+        orchestration_contract_redirects=counters.orchestration_contract_redirects + 1,
     )
 
 
 __all__ = [
     "ToolLoopRepairCounters",
-    "_inc_bootstrap_materialization",
-    "_inc_delivery_repair",
     "_inc_exploration_fuse",
     "_inc_local_progress",
     "_inc_open_session",
+    "_inc_orchestration_contract",
     "_inc_reserved",
     "_inc_unresolved_runtime_issue",
+    "_reset_open_session",
 ]

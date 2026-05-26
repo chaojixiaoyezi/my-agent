@@ -10,13 +10,6 @@ from typing import Any
 
 from ..backends import ModelResponse
 from ..contracts.delivery_contract_doctor import ContractDoctorReport, validate_delivery_contract
-from ..contracts.gates import (
-    evaluate_acceptance_closeout_gate,
-    evaluate_delivery_closeout_gate,
-    evaluate_final_closeout_gate,
-    evaluate_run_contract_gate,
-    evaluate_state_transition_gate,
-)
 from ..tooling.file_write_session_inspection import open_file_write_sessions
 from ._runtime_params import ToolLoopExecuteParams
 from .main_agent_delivery_closeout_artifacts import (
@@ -27,16 +20,13 @@ from .main_agent_delivery_closeout_artifacts import (
     _validate_contract_artifacts,
     _write_report,
 )
-from .main_agent_delivery_closeout_gate_recovery import (
-    attach_contract_recovery,
-    failed_gate_payloads,
-)
+from .main_agent_delivery_closeout_gate_recovery import failed_gate_payloads
+from .main_agent_delivery_closeout_gates import CloseoutGateRequest, attach_closeout_gates
 from .main_agent_delivery_closeout_progress import (
+    DeliveryProgressContext,
     _enrich_delivery_progress,
     _should_block_on_no_progress,
 )
-from .main_agent_delivery_closeout_quality import delivery_quality_decision
-from .main_agent_delivery_fact_evidence import fact_evidence_decision
 from .main_agent_delivery_progress_ledger import append_delivery_progress_event
 from .main_agent_delivery_tool_failure_recovery import attach_tool_failure_recovery_actions
 from .tool_local_progress_guard import reset_local_progress_guard
@@ -51,16 +41,6 @@ class MainAgentDeliveryCloseoutRequest:
     backend: str
 
 
-# LLM: CloseoutGateRequest bundles gate attachment inputs.
-# 类用途: 避免 closeout gate helper 参数膨胀，把 report/contract/workspace 放进一个结构化请求。
-@dataclass(frozen=True)
-class CloseoutGateRequest:
-    closeout: MainAgentDeliveryCloseoutRequest
-    report: dict[str, Any]
-    contract: dict[str, Any]
-    workspace_root: Path
-
-
 # LLM: main_agent_delivery_closeout_response returns a deterministic final response only after all required refs pass.
 # 函数用途: 根据结构化 delivery_contract 验收必交产物；通过则停止工具循环，失败则写结构化反馈让模型修复。
 def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequest) -> ModelResponse | None:
@@ -71,6 +51,13 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     doctor = validate_delivery_contract(contract, workspace_root=workspace_root)
     _write_contract_doctor_report(workspace_root, doctor)
     if not doctor.ok:
+        if _has_contract_doctor_context(request.params):
+            return ModelResponse(
+                text=_contract_doctor_blocked_text(doctor),
+                backend=request.backend,
+                runtime_status="blocked",
+                runtime_reason="DELIVERY_CONTRACT_DOCTOR",
+            )
         _append_contract_doctor_context(request.params, doctor)
         return None
     contract = dict(doctor.normalized_contract or contract)
@@ -86,7 +73,7 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     report = _delivery_report(request, contract, artifacts, workspace_root)
     report_ref = _write_report(workspace_root, report)
     report["report_ref"] = _relative_report_ref(report_ref, workspace_root)
-    decisions = _attach_closeout_gates(CloseoutGateRequest(request, report, contract, workspace_root))
+    decisions = attach_closeout_gates(CloseoutGateRequest(request, report, contract, workspace_root))
     _write_report(workspace_root, report)
     gates_allowed = _all_gates_allowed(decisions)
     append_delivery_progress_event(workspace_root, report, blocked=not gates_allowed)
@@ -96,59 +83,18 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     return ModelResponse(text=_closeout_text(report), backend=request.backend)
 
 
-# LLM: _attach_closeout_gates writes every mandatory gate payload into the closeout report.
-# 函数用途: 统一添加 run/runtime/state/acceptance/final gate，主流程只看 gate 决策，不读自然语言。
-def _attach_closeout_gates(request: CloseoutGateRequest) -> list[Any]:
-    closeout = request.closeout
-    run_contract_decision = evaluate_run_contract_gate(
-        request.contract,
-        scope={
-            "request_id": closeout.params.request_id,
-            "run_id": closeout.params.run_id,
-            "task_id": closeout.params.task_id,
-            "workspace_root": str(request.workspace_root),
-        },
-    )
-    request.report["run_contract_gate"] = run_contract_decision.to_dict()
-    gate_decision = evaluate_delivery_closeout_gate(request.report)
-    request.report["runtime_gate"] = gate_decision.to_dict()
-    state_decision = evaluate_state_transition_gate("RUNNING", "VERIFYING")
-    request.report["state_gate"] = state_decision.to_dict()
-    contract_hash = str(run_contract_decision.evidence.get("effective_contract_hash") or "")
-    quality_decision = delivery_quality_decision(
-        contract=request.contract,
-        report=request.report,
-        workspace_root=request.workspace_root,
-        contract_hash=contract_hash,
-    )
-    request.report["delivery_quality_gate"] = quality_decision.to_dict()
-    fact_decision = fact_evidence_decision(
-        contract=request.contract,
-        workspace_root=request.workspace_root,
-        archive_tool_calls=[item for item in getattr(closeout.params, "archive_tool_calls", []) or [] if isinstance(item, dict)],
-    )
-    request.report["fact_evidence_gate"] = fact_decision.to_dict()
-    acceptance_decision = evaluate_acceptance_closeout_gate(
-        {
-            "final_status": "DONE",
-            "verification_status": "PASSED" if gate_decision.allowed else "FAILED",
-            "runtime_gate": gate_decision.to_dict(),
-        }
-    )
-    request.report["acceptance_gate"] = acceptance_decision.to_dict()
-    final_decision = evaluate_final_closeout_gate(request.report)
-    request.report["final_closeout_gate"] = final_decision.to_dict()
-    decisions = [
-        run_contract_decision,
-        gate_decision,
-        state_decision,
-        quality_decision,
-        fact_decision,
-        acceptance_decision,
-        final_decision,
-    ]
-    attach_contract_recovery(request.report, decisions, contract=request.contract)
-    return decisions
+# LLM: append_existing_failed_closeout_context reuses closeout rework feedback on resumed runs.
+# 函数用途: 续跑时若已有失败 closeout，就用同一套 delivery-contract-check 返工上下文提示模型，而不是启用独立 repair gate。
+def append_existing_failed_closeout_context(agent: object, params: ToolLoopExecuteParams) -> None:
+    if not _delivery_contract(params):
+        return
+    workspace_root = _workspace_root(agent)
+    report = _existing_report(workspace_root)
+    if report.get("ok") is not False:
+        return
+    if any(str(item).startswith("[delivery-contract-check]") for item in params.tool_context):
+        return
+    _append_failed_contract_context(params, report)
 
 
 # LLM: _all_gates_allowed keeps final closeout branching tied to gate decisions.
@@ -176,8 +122,7 @@ def _delivery_report(
     enriched = _enrich_delivery_progress(
         report,
         _existing_report(workspace_root),
-        workspace_root,
-        contract=contract,
+        DeliveryProgressContext(workspace_root=workspace_root, contract=contract, agent=closeout.agent),
     )
     return attach_tool_failure_recovery_actions(
         enriched,
@@ -226,6 +171,16 @@ def _append_contract_doctor_context(params: ToolLoopExecuteParams, report: Contr
     )
 
 
+def _has_contract_doctor_context(params: ToolLoopExecuteParams) -> bool:
+    return any(str(item).startswith("[delivery-contract-doctor]") for item in params.tool_context)
+
+
+def _contract_doctor_blocked_text(report: ContractDoctorReport) -> str:
+    payload = report.to_dict()
+    payload.pop("normalized_contract", None)
+    return "[DELIVERY_CONTRACT_DOCTOR_BLOCKED]\n" + json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
 # LLM: _append_failed_contract_context feeds structured repair facts into the next model turn.
 # 函数用途: 验收失败时追加 JSON 反馈，不把自然语言说明当机器事实。
 def _append_failed_contract_context(params: ToolLoopExecuteParams, report: dict[str, Any]) -> None:
@@ -235,16 +190,34 @@ def _append_failed_contract_context(params: ToolLoopExecuteParams, report: dict[
             {
                 "ok": False,
                 "report_ref": report.get("report_ref", ""),
-                "failed_artifacts": [item for item in report["artifacts"] if not item["ok"]],
+                "failed_artifacts": [item for item in report.get("artifacts", []) if isinstance(item, dict) and not item.get("ok")],
                 "failed_gates": failed_gate_payloads(report),
                 "contract_recovery": report.get("contract_recovery", {}),
                 "delivery_progress": report.get("delivery_progress", {}),
-                "rework_message_zh": "这是交付返工，不是任务终止。请按 contract_recovery.actions 修复后重新验收；只有 status=blocked 或需要用户输入时才停止自动返工。",
+                "repair_guidance": _repair_guidance(report),
+                "rework_message_zh": "这是交付返工，不是任务终止。请按 repair_guidance.required_actions 和 failed_artifacts 修复后重新验收；只有 status=blocked 或需要用户输入时才停止自动返工。",
             },
             ensure_ascii=False,
             sort_keys=True,
         )
     )
+
+
+# LLM: _repair_guidance keeps delivery rework advice inside closeout feedback.
+# 函数用途: 把验收 finding、recovery_actions 和下一步建议统一放到 closeout 上下文，避免独立 delivery repair 门干预工具选择。
+def _repair_guidance(report: dict[str, Any]) -> dict[str, Any]:
+    progress = report.get("delivery_progress")
+    actions = progress.get("recovery_actions") if isinstance(progress, dict) else []
+    return {
+        "mode": "closeout_rework",
+        "required_actions": actions if isinstance(actions, list) else [],
+        "message_zh": (
+            "请根据 failed_artifacts、failed_gates 和 required_actions 自主选择下一步修复方式。"
+            "如果还需要读取或搜索来确认上下文，可以继续做；但要尽快把结果落成可验收的本地产物，"
+            "然后调用 submit_for_acceptance 或用最终回复触发隐式验收。"
+        ),
+        "submit_when_ready": "submit_for_acceptance 或无工具最终回复",
+    }
 
 
 # LLM: _append_open_session_context blocks delivery completion from open file-write manifests.
@@ -276,7 +249,7 @@ def _closeout_text(report: dict[str, Any]) -> str:
     return (
         "[MAIN_AGENT_DELIVERY_COMPLETE]\n"
         + json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
-        + "\n[/MAIN_AGENT_DELIVERY_COMPLETE]\n结构化交付合同已通过，主代理停止继续工具循环。"
+        + "\n[/MAIN_AGENT_DELIVERY_COMPLETE]\n交付验收通过。结构化交付合同已通过，主代理停止继续工具循环。"
     )
 
 

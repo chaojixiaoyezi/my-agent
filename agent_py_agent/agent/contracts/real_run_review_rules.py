@@ -33,10 +33,10 @@ TAG_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("approval_anomaly", ("APPROVAL_",)),
     ("invalid_state_transition", ("STATE_TRANSITION_INVALID",)),
     ("context_contract_lost", ("CONTEXT_BUNDLE", "COMPACT_REF_MISSING", "CONTRACT_HASH_MISMATCH")),
-    ("open_write_session_blocked", ("OPEN_FILE_WRITE_SESSION_BLOCKED",)),
-    ("delivery_repair_blocked", ("DELIVERY_REQUIRED_REPAIR_BLOCKED",)),
+    # Legacy marker kept only so old run logs remain classifiable; new open-write-session handling
+    # returns structured repair hints and relies on global tool-round limits rather than its own block.
+    ("open_write_session_blocked_legacy", ("OPEN_FILE_WRITE_SESSION_BLOCKED",)),
     ("local_progress_blocked", ("LOCAL_PROGRESS_GUARD_BLOCKED",)),
-    ("bootstrap_materialization_blocked", ("BOOTSTRAP_MATERIALIZATION_BLOCKED",)),
 )
 
 STAGE_BY_TAG = {
@@ -55,10 +55,8 @@ STAGE_BY_TAG = {
     "approval_anomaly": "approval",
     "invalid_state_transition": "state",
     "context_contract_lost": "context",
-    "open_write_session_blocked": "artifact",
-    "delivery_repair_blocked": "recovery",
+    "open_write_session_blocked_legacy": "artifact",
     "local_progress_blocked": "loop",
-    "bootstrap_materialization_blocked": "recovery",
 }
 
 P0_TAGS = {"dry_run_real_conflict", "invalid_state_transition"}
@@ -76,10 +74,8 @@ P1_TAGS = {
     "repeated_tool_blocked",
     "approval_anomaly",
     "context_contract_lost",
-    "open_write_session_blocked",
-    "delivery_repair_blocked",
+    "open_write_session_blocked_legacy",
     "local_progress_blocked",
-    "bootstrap_materialization_blocked",
 }
 
 __all__ = ["P0_TAGS", "P1_TAGS", "STAGE_BY_TAG", "TAG_RULES"]

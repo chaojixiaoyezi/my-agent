@@ -35,6 +35,19 @@ _CODING_SUBAGENT_TOOLS = [
     "write_structured_json",
     "data_to_workbook",
     "markdown_to_pdf",
+    # LLM: workflow children can report durable observations without being forced into dispatch.
+    "raise_observation",
+    "raise_main_event",
+    # LLM: workflow children can join generic collaboration cases without task-specific templates.
+    "raise_collaboration_event",
+    "open_case",
+    "request_collaboration",
+    "list_collaboration_requests",
+    "submit_evidence",
+    "update_collaboration_request",
+    "reroute_collaboration_request",
+    "update_case_status",
+    "case_status",
 ]
 _READ_ONLY_SUBAGENT_TOOLS = list(_CODING_SUBAGENT_TOOLS)
 
@@ -250,15 +263,12 @@ class SubAgentWorkflowService:
         role = str(worker.get("role") or worker.get("kind") or "worker").strip() or "worker"
         kind = str(worker.get("kind") or role or "worker").strip() or "worker"
         phase_task = str(worker.get("task") or parent.goal).strip() or parent.goal
-        depends_on = [str(item).strip() for item in worker.get("depends_on") or [] if str(item).strip()]
 
         child_plan = [
             phase_task,
             "保留命令、文件和测试证据。",
             "不要自判最终完成，等待父代理验收。",
         ]
-        if depends_on:
-            child_plan.append("先确认依赖 phase 已提交结果：" + ", ".join(depends_on))
 
         agent_name = _workflow_child_agent_name(parent, phase_id, role)
         child = self.manager.create_run(
@@ -289,7 +299,6 @@ class SubAgentWorkflowService:
         )
         child.workflow_parent_run_id = parent.id
         child.workflow_phase_id = phase_id
-        child.workflow_depends_on = depends_on
         self.manager.save(child)
         return child
 
@@ -299,14 +308,14 @@ class SubAgentWorkflowService:
         self, created: list[SubAgentTask], phase_to_child_id: dict[str, str]
     ) -> None:
         """Write dependencies JSON for each created child task."""
+        _ = phase_to_child_id
         for child in created:
-            dep_run_ids = [phase_to_child_id[item] for item in child.workflow_depends_on if item in phase_to_child_id]
             Path(child.dependencies_json).write_text(
                 json.dumps(
                     {
                         "run_id": child.id,
-                        "dependencies": dep_run_ids,
-                        "workflow_depends_on": child.workflow_depends_on,
+                        "dependencies": [],
+                        "note": "workflow dependencies are no longer enforced here; parent agents should dispatch dependent work explicitly.",
                     },
                     ensure_ascii=False,
                     indent=2,

@@ -138,10 +138,10 @@ class TestScenario4BadCheckpointJSON:
 # ============================================================
 class TestScenario5ToolFailureModelClaimsSuccess:
     def test_guardrail_tracks_failures(self):
-        config = ToolGuardrailConfig(exact_failure_warn_after=2)
+        config = ToolGuardrailConfig(repeat_fail_threshold=2)
         records = (
-            {"tool_name": "terminal", "args_hash": "h1", "failed": True},
-            {"tool_name": "terminal", "args_hash": "h1", "failed": True},
+            {"tool_name": "terminal", "args_hash": "h1", "failed": True, "failure_class": "code:failed"},
+            {"tool_name": "terminal", "args_hash": "h1", "failed": True, "failure_class": "code:failed"},
         )
         decision = evaluate_tool_guardrail_gate(
             ToolGuardrailFacts("terminal", "h1"),
@@ -149,12 +149,12 @@ class TestScenario5ToolFailureModelClaimsSuccess:
             records=records,
         )
         assert decision.allowed
-        assert any("EXACT_FAILURE_WARNING" in f.code for f in decision.findings)
+        assert any("REPEAT_FAILURE_HINT" in f.code for f in decision.findings)
 
-    def test_guardrail_blocks_despite_optimism(self):
-        config = ToolGuardrailConfig(exact_failure_block_after=3)
+    def test_guardrail_blocks_same_action_despite_optimism(self):
+        config = ToolGuardrailConfig(repeat_fail_threshold=1)
         records = tuple(
-            {"tool_name": "terminal", "args_hash": "h1", "failed": True}
+            {"tool_name": "terminal", "args_hash": "h1", "failed": True, "failure_class": "code:failed"}
             for _ in range(3)
         )
         decision = evaluate_tool_guardrail_gate(
@@ -163,7 +163,8 @@ class TestScenario5ToolFailureModelClaimsSuccess:
             records=records,
         )
         assert not decision.allowed
-        assert any("EXACT_FAILURE_BLOCKED" in f.code for f in decision.findings)
+        assert decision.recommended_action == "change_strategy"
+        assert any("REPEAT_FAILURE_BLOCKED" in f.code for f in decision.findings)
 
 
 # ============================================================

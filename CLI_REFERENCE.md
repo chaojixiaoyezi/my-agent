@@ -188,6 +188,8 @@ Ctrl+C
 | `subagents-patches` | 审核或 apply runner 输出的 patch 记录 | 默认 review dry-run；`--review-apply` 只写审核状态；`--apply` 真正落文件 | 否 |
 | `subagents-memory-gate` | 查看或写回子代理 memory/skill 候选 review decision | 传 `--candidate-id` 时写 `memory_gate/decisions.jsonl` 和 gate 状态 | 否 |
 | `subagents-dispatch` | 执行父代理调度 | dry-run 写报告；`--apply` 写回；`--execute-acceptance-tests` 只跑父级验收 tests | 只有 `--apply --execute-runners` 会调用模型；`--execute-acceptance-tests` 会执行本地验收 tests |
+| `background-main-agent` | 本地长期主代理线程、定时汇报和后台唤醒命令 | message/bind-task/observe 会写长期会话账本；tick/service 会唤醒后台主代理 | tick/service 可能调用模型 |
+| `collaboration` | 查看和推进通用多代理协作 case/request/evidence 状态 | update-status/update-request 会写协作账本 | 否 |
 | `daemon` | 按 `agent_config.yaml` 的 `daemon_*` 配置启动前台常驻调度 | 取决于配置 | 取决于配置 |
 | `scenario-test` | 跑一轮隔离的 gateway/chat/subagent/runner/验收全流程 | 写临时 fixture 和报告 | 默认调用真实 API，可用 `--dry-run` 跳过 runner |
 | `real-e2e` | 跑主代理基础确定性矩阵，并把指定产物交给 Artifact Acceptance 验收 | 写 refs-first 报告 | 否；真实模型产物由外部真实 run 生成后用 `--artifact` 接入 |
@@ -1183,6 +1185,7 @@ my-agent subagents-dispatch --watch --planner --interval 30
 | `--max-runners <n>` | `1` | 本轮最多推进多少个 runner；`0` 表示不执行 runner。 |
 | `--limit <n>` | `20` | 每个阶段最多处理多少条记录；`0` 表示不限制。 |
 | `--watch` | `false` | 持续循环执行 dispatch。 |
+| `--advance` | `false` | watch 模式显式推进 dispatch；不传时只读观察代理树，避免后台观察误触发调度。 |
 | `--interval <seconds>` | `30.0` | watch 模式每轮间隔秒数；`0` 表示不等待，通常只用于测试或单轮验证。 |
 | `--max-cycles <n>` | `0` | watch 模式最多循环次数，`0` 表示持续运行。 |
 | `--force-lock` | `false` | 强制覆盖已有 watch lock；只应在确认旧进程已退出后使用。 |

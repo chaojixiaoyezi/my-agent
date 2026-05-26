@@ -8,11 +8,15 @@ import shlex
 from pathlib import Path
 
 from ..backend import ModelResponse
+from .exploration_fuse_config import (
+    ExplorationFuseConfig,
+    exploration_fuse_config,
+    exploration_fuse_hint_rounds,
+    exploration_fuse_used_percent,
+)
 
 _STATE_DIR = ".agent_delivery"
 _STATE_FILE = "exploration_fuse.json"
-_EXPLORATION_ROUND_THRESHOLD = 10
-_MAX_REDIRECTS = 2
 _EXPLORATION_TOOL_NAMES = {
     "fetch_url",
     "http_request",
@@ -47,34 +51,46 @@ def has_required_exploration_fuse(agent: object, calls: list[dict[str, object]] 
         _write_state(agent, state)
         return False
     count = int(state.get("exploration_rounds_without_local_progress") or 0) + 1
-    _write_state(agent, {"exploration_rounds_without_local_progress": count})
-    return _EXPLORATION_ROUND_THRESHOLD > 0 and count >= _EXPLORATION_ROUND_THRESHOLD
+    state = _state_with_count(state, count)
+    _write_state(agent, state)
+    return _should_prompt_or_block(exploration_fuse_config(agent), state, count)
 
 
 # LLM: has_pending_exploration_fuse keeps final prose from bypassing a materialization redirect.
 # 函数用途: 读取结构化探索轮次；达到阈值后，无工具回复也必须先落地本地进展。
 def has_pending_exploration_fuse(agent: object) -> bool:
     state = _load_state(agent)
-    return _EXPLORATION_ROUND_THRESHOLD > 0 and int(state.get("exploration_rounds_without_local_progress") or 0) >= _EXPLORATION_ROUND_THRESHOLD
+    config = exploration_fuse_config(agent)
+    count = int(state.get("exploration_rounds_without_local_progress") or 0)
+    return config.round_threshold > 0 and count >= config.round_threshold
 
 
 # LLM: exploration_fuse_context tells the model to materialize local progress before further exploration.
 # 函数用途: 输出结构化空转事实和下一步机器动作建议，不读取用户自然语言作为事实。
 def exploration_fuse_context(agent: object, redirects: int) -> str:
-    if _MAX_REDIRECTS > 0 and redirects >= _MAX_REDIRECTS:
-        return ""
+    del redirects
+    config = exploration_fuse_config(agent)
     state = _load_state(agent)
+    count = int(state.get("exploration_rounds_without_local_progress") or 0)
+    hint_round = _due_hint_round(config, state, count)
+    if hint_round is None:
+        return ""
+    percent = exploration_fuse_used_percent(config, hint_round)
     envelope = {
-        "exploration_rounds_without_local_progress": int(state.get("exploration_rounds_without_local_progress") or 0),
+        "exploration_fuse_budget_used_percent": percent,
+        "exploration_fuse_hint_round": hint_round,
+        "exploration_fuse_round_threshold": config.round_threshold,
+        "exploration_rounds_without_local_progress": count,
         "required_next_action": "materialize_local_progress",
         "productive_tool_names": sorted(_LOCAL_PROGRESS_TOOL_NAMES),
     }
+    message = _hint_message(config, count, hint_round, percent)
+    _mark_hint_delivered(agent, state, config, hint_round)
     return "\n".join(
         [
             "[tool-system exploration-fuse]",
             json.dumps(envelope, ensure_ascii=False, sort_keys=True),
-            "你已经连续多轮只做抓取/读取/搜索，没有新的本地交付推进。请先写出本地 checkpoint、"
-            "草稿、脚本、数据文件或阶段产物；如果还要继续远程抓取，也要同步留下本地进展。",
+            message,
         ]
     )
 
@@ -82,14 +98,60 @@ def exploration_fuse_context(agent: object, redirects: int) -> str:
 # LLM: exploration_fuse_block_response stops loops that ignored local-materialization redirects.
 # 函数用途: 连续忽略探索空转纠偏后确定性停止本轮，避免真实任务一直烧模型时间。
 def exploration_fuse_block_response(agent: object) -> ModelResponse:
+    config = exploration_fuse_config(agent)
     return ModelResponse(
         text=(
-            "[EXPLORATION_FUSE_BLOCKED] 模型连续只做抓取/读取/搜索，没有物化新的本地进展；"
-            "本轮已停止，保留已抓取 artifacts，后续应从 checkpoint/script/report 草稿继续。"
+            f"[EXPLORATION_FUSE_BLOCKED] 模型连续只做抓取/读取/搜索已达到探索额度 {config.round_threshold} 轮，"
+            "仍没有物化新的本地进展；本轮已停止，保留已抓取 artifacts，"
+            "后续应从 checkpoint/source_index/research_notes/script/report 草稿继续。"
         ),
         backend=str(getattr(getattr(agent, "backend", None), "name", "") or ""),
         runtime_status="blocked",
         runtime_reason="EXPLORATION_FUSE",
+    )
+
+
+# LLM: _should_prompt_or_block separates soft budget hints from the final hard stop.
+# 函数用途: 有限额度在 1/5、2/5、4/5 给提示并在上限阻断；0 额度只在固定轮次提示。
+def _should_prompt_or_block(config: ExplorationFuseConfig, state: dict[str, object], count: int) -> bool:
+    if config.round_threshold <= 0:
+        return _due_hint_round(config, state, count) is not None
+    return _due_hint_round(config, state, count) is not None or count >= config.round_threshold
+
+
+def _due_hint_round(config: ExplorationFuseConfig, state: dict[str, object], count: int) -> int | None:
+    if config.round_threshold > 0 and count >= config.round_threshold:
+        return None
+    delivered = _delivered_hint_rounds(state)
+    crossed = [
+        hint_round
+        for hint_round in exploration_fuse_hint_rounds(config)
+        if hint_round <= count and hint_round not in delivered
+    ]
+    return max(crossed) if crossed else None
+
+
+def _hint_message(config: ExplorationFuseConfig, count: int, hint_round: int, percent: int) -> str:
+    action_hint = (
+        "下一轮优先做一次本地落地动作，例如保存来源索引、阶段笔记、检查点、草稿、结构化数据或目标产物；"
+    )
+    if config.round_threshold <= 0:
+        return (
+            f"连续探索额度配置为 0，不会因次数阻断；这是第 {hint_round} 轮固定提醒"
+            f"（当前已连续探索 {count} 轮）。"
+            f"{action_hint}"
+            "如果还要继续远程抓取，也要同步留下本地进展。"
+        )
+    if percent >= 80:
+        return (
+            f"你已经消耗了 {percent}% 的连续探索额度（{count}/{config.round_threshold} 轮）。"
+            f"请尽快执行本地落地动作；下一轮必须优先物化本地进展。{action_hint}"
+            "如果还要继续远程抓取，也要同步留下本地进展。"
+        )
+    return (
+        f"你已经消耗 {percent}% 的连续探索额度（{count}/{config.round_threshold} 轮）。"
+        f"建议先写出本地阶段产物；下一轮请执行本地落地动作。{action_hint}"
+        "如果还要继续远程抓取，也要同步留下本地进展。"
     )
 
 
@@ -178,6 +240,43 @@ def _write_state(agent: object, payload: dict[str, object]) -> None:
     path = _state_path(agent)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _state_with_count(state: dict[str, object], count: int) -> dict[str, object]:
+    payload = dict(state)
+    payload["exploration_rounds_without_local_progress"] = count
+    delivered = _delivered_hint_rounds(state)
+    if delivered:
+        payload["delivered_hint_rounds"] = sorted(delivered)
+    return payload
+
+
+def _mark_hint_delivered(
+    agent: object,
+    state: dict[str, object],
+    config: ExplorationFuseConfig,
+    hint_round: int,
+) -> None:
+    delivered = _delivered_hint_rounds(state)
+    delivered.update(item for item in exploration_fuse_hint_rounds(config) if item <= hint_round)
+    payload = _state_with_count(state, int(state.get("exploration_rounds_without_local_progress") or 0))
+    payload["delivered_hint_rounds"] = sorted(delivered)
+    _write_state(agent, payload)
+
+
+def _delivered_hint_rounds(state: dict[str, object]) -> set[int]:
+    raw = state.get("delivered_hint_rounds")
+    if not isinstance(raw, list | tuple):
+        return set()
+    delivered: set[int] = set()
+    for item in raw:
+        try:
+            number = int(item)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            delivered.add(number)
+    return delivered
 
 
 __all__ = [

@@ -24,6 +24,16 @@ _MUST_NOT = [
     "repair unrelated healthy branches",
     "shrink the original success contract to only the latest failure symptom",
 ]
+_REPAIR_ALLOWED_TOOLS = [
+    "subagent_board",
+    "list_files",
+    "read_file",
+    "read_artifact",
+    "search_text",
+    "replace_in_file",
+    "write_file",
+    "append_file",
+]
 
 
 # LLM: RepairContractRequest keeps repair contract assembly bundle-shaped.
@@ -64,6 +74,12 @@ def repair_contract_acceptance_checks(failure_refs: list[dict[str, object]] | No
     ]
     checks.extend(f"原始验收: {item}" for item in repair_contract_full_success_checks(failure_refs or [])[:8])
     return checks
+
+
+# LLM: repair_contract_allowed_tools grants repair workers the same generic handoff tools across repair lanes.
+# 函数用途: 给父级验收修复 worker 统一授权读写和协作账本工具；不按具体业务类型区分。
+def repair_contract_allowed_tools() -> list[str]:
+    return list(_REPAIR_ALLOWED_TOOLS)
 
 
 # LLM: repair_contract_goal_suffix is short text for model-visible goals.
@@ -153,6 +169,7 @@ def _unique_text(values: list[str]) -> list[str]:
 __all__ = [
     "RepairContractRequest",
     "repair_contract_acceptance_checks",
+    "repair_contract_allowed_tools",
     "repair_contract_full_success_checks",
     "repair_contract_goal_suffix",
     "repair_contract_tool_fields",

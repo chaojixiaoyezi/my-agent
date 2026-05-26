@@ -51,7 +51,7 @@ def _build_readiness_findings(
     created_at: float,
 ) -> list[AcceptanceReviewFinding]:
 
-    ready = task.status == "AWAITING_ACCEPTANCE" or task.verification_status == "NEEDS_ACCEPTANCE"
+    ready = _task_ready_or_already_accepted(task)
     runner_structured_found = bool(runner.get("structured_output_found", False))
     runner_structured_ok = bool(runner.get("structured_output_ok", False))
     return [
@@ -75,6 +75,18 @@ def _ready_finding(task, ready, created_at):
         ),
         evidence_path=task.runner_result_json,
         created_at=created_at,
+    )
+
+
+# LLM: _task_ready_or_already_accepted treats verified DONE runs as already past acceptance readiness.
+# 函数用途: 父级验收复查时不要把已验证完成的子任务误判成未进入验收。
+def _task_ready_or_already_accepted(task) -> bool:
+    status = str(getattr(task, "status", "") or "").upper()
+    verification = str(getattr(task, "verification_status", "") or "").upper()
+    return (
+        status == "AWAITING_ACCEPTANCE"
+        or verification == "NEEDS_ACCEPTANCE"
+        or (status == "DONE" and verification == "VERIFIED")
     )
 
 

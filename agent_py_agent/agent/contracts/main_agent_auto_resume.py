@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from ..agent_core.runtime_guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
+from ..settings.config_io import load_simple_yaml
 from .state_machine import normalize_status
 
 SCHEMA_VERSION = "main-agent-auto-resume-ledger.v1"
@@ -84,14 +86,17 @@ def record_auto_resume_attempt(bundle: _BundleLike) -> dict[str, object]:
     return payload
 
 
-# LLM: auto_resume_limit keeps the default small while allowing tests/CLI to narrow it.
-# 函数用途: 从 request.max_auto_recovery_attempts 读取结构化预算，非法值回退默认值。
+# LLM: auto_resume_limit keeps the default configurable while preserving explicit request overrides.
+# 函数用途: 从 request.max_auto_recovery_attempts 或运行门配置读取恢复预算；0 表示不按次数限制。
 def auto_resume_limit(request: object) -> int:
-    value = getattr(request, "max_auto_recovery_attempts", DEFAULT_AUTO_RECOVERY_ATTEMPTS)
+    configured_default = _configured_auto_resume_limit()
+    value = getattr(request, "max_auto_recovery_attempts", None)
+    if value is None:
+        value = configured_default
     try:
         return max(0, int(value))
     except (TypeError, ValueError):
-        return DEFAULT_AUTO_RECOVERY_ATTEMPTS
+        return configured_default
 
 
 # LLM: auto_resume_remaining_timeout_seconds makes the case timeout a shared budget.
@@ -128,6 +133,21 @@ def _read_ledger(path: Path) -> dict[str, object]:
     except (OSError, json.JSONDecodeError):
         return {"schema_version": SCHEMA_VERSION, "attempts": 0, "packet_refs": []}
     return payload if isinstance(payload, dict) else {"schema_version": SCHEMA_VERSION, "attempts": 0, "packet_refs": []}
+
+
+# LLM: _configured_auto_resume_limit reads the shared runtime guard file without making recovery depend on prompts.
+# 函数用途: 从 runtime_guard_config.yaml 读取主任务自动恢复次数；缺失、非法或负数时回退默认 3。
+def _configured_auto_resume_limit() -> int:
+    try:
+        data = load_simple_yaml(DEFAULT_RUNTIME_GUARD_CONFIG_PATH)
+    except OSError:
+        return DEFAULT_AUTO_RECOVERY_ATTEMPTS
+    if not isinstance(data, dict):
+        return DEFAULT_AUTO_RECOVERY_ATTEMPTS
+    try:
+        return max(0, int(data.get("main_agent_auto_resume_attempt_limit", DEFAULT_AUTO_RECOVERY_ATTEMPTS)))
+    except (TypeError, ValueError):
+        return DEFAULT_AUTO_RECOVERY_ATTEMPTS
 
 
 __all__ = [

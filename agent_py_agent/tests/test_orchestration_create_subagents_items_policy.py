@@ -72,51 +72,10 @@ def test_items_worker_with_dispatch_tools_stays_worker():
     assert all("用户原始层级" not in call.kwargs["params"].goal for call in calls)
 
 
-# LLM: This regression keeps path-based sibling pipelines machine ordered.
-# 函数用途: 验证下游读取上游输出文件时，即使没有提上游代理全名，也会写入 workflow_depends_on。
-def test_items_path_refs_create_workflow_dependency_edges():
-    from agent_py_agent.agent.agent_core.orchestration_create_items import CreateSubagentItem
-    from agent_py_agent.agent.agent_core.orchestration_item_dependencies import (
-        item_dependency_edges,
-    )
-
-    items = [
-        CreateSubagentItem(
-            goal="收集项目基础信息，结果写入 data/subagents/data_collection.md",
-            params={
-                "agent_name": "小傻妞-数据收集",
-                "output_refs": ["data/subagents/data_collection.md"],
-            },
-        ),
-        CreateSubagentItem(
-            goal="读取 data/subagents/data_collection.md，写说明依据到 data/subagents/content_writeup.md",
-            params={
-                "agent_name": "小傻妞-内容编写",
-                "dependencies": ["data_collection"],
-                "output_refs": ["data/subagents/content_writeup.md"],
-            },
-        ),
-        CreateSubagentItem(
-            goal=(
-                "读取 data/subagents/data_collection.md 和 data/subagents/content_writeup.md，"
-                "生成 final_report.md"
-            ),
-            params={
-                "agent_name": "小傻妞-生成报告",
-                "input_refs": [
-                    "data/subagents/data_collection.md",
-                    "data/subagents/content_writeup.md",
-                ],
-            },
-        ),
-    ]
-
-    assert item_dependency_edges(items) == [[], [0], [0, 1]]
-
-
-# LLM: This regression proves create_subagents persists item dependency edges onto tasks.
-# 函数用途: 确保真实 create 工具会把路径推断出的依赖写成 workflow_depends_on，而不是只停留在临时推断结果。
-def test_items_path_refs_persist_workflow_depends_on():
+# LLM: Batch items must not grow hidden sibling workflow edges.
+# 函数用途: 验证 create_subagents 不再把 dependencies/input_refs 自动转成 workflow_depends_on；
+# 真要流水线由父代理显式按顺序派工。
+def test_items_path_refs_do_not_persist_hidden_workflow_depends_on():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     mock_agent = _mock_items_agent()
@@ -148,8 +107,14 @@ def test_items_path_refs_persist_workflow_depends_on():
         ],
     })
 
-    tasks = mock_agent._created_tasks
+    calls = mock_agent.subagents.create_run.call_args_list
     assert result.ok is True
-    assert tasks[0].workflow_depends_on == []
-    assert tasks[1].workflow_depends_on == ["run_0"]
-    assert tasks[2].workflow_depends_on == ["run_0", "run_1"]
+    assert [hasattr(call.kwargs["params"], "workflow_depends_on") for call in calls] == [
+        False,
+        False,
+        False,
+    ]
+    assert all(
+        "workflow_depends_on" not in (call.kwargs["params"].attributes or {})
+        for call in calls
+    )

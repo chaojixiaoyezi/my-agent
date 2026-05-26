@@ -1,5 +1,6 @@
 {
   "contract_ref": "../contracts/missing_artifact_should_fail.json",
+  "repeat_fail_threshold": 1,
   "model_steps": [
     {
       "type": "tool_call",

@@ -75,13 +75,14 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
     )
 
 
-# LLM: _workspace_roots_for_invocation lets parent-granted product roots reach filesystem tools.
-# 函数用途: 写工具执行时把 write_boundary 明确授权的产物目录临时并入工作区根，避免外部产物目录被工具层误拒。
+# LLM: _workspace_roots_for_invocation lets parent-granted path roots reach filesystem tools.
+# 函数用途: 文件工具执行时把 write_boundary 明确授权的读/写目录临时并入工作区根，
+# 避免上层 path gate 放行后底层文件工具仍按旧 workspace 拒绝。
 def _workspace_roots_for_invocation(request: RegistryToolInvokeRequest) -> list[Path] | None:
     roots = _normalized_roots(request.workspace_root, request.workspace_roots)
     if request.tool_name not in _BOUNDARY_FILESYSTEM_TOOL_NAMES or not isinstance(request.write_boundary, dict):
         return roots
-    for key in ("allowed_write_roots", "product_write_roots", "task_dir"):
+    for key in ("allowed_read_roots", "allowed_write_roots", "product_write_roots", "task_dir"):
         _append_boundary_roots(roots, request.write_boundary.get(key), request.workspace_root)
     return roots
 

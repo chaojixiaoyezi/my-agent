@@ -277,6 +277,28 @@ provider_space_destructive_actions_use_trash: true
 # - session.json 包含会话元数据：session_id、user_id、created_at、updated_at、last_active_channel、metadata
 session_workspace: "data/sessions"
 
+# 长期主代理线程工作区：
+# - 保存 ConversationThread、MessageLog、ChannelBinding、ThreadTaskLink 和 ProgressPolicy。
+# - 这是后台主代理恢复/定时汇报/跨渠道继续上下文的机器账本。
+# - 不保存真实飞书/微信凭证，也不要求用户按工程字段写任务 prompt。
+conversation_workspace: "data/conversations"
+
+# 多代理协作控制面工作区：
+# - 保存通用 case/request/evidence/decision 账本。
+# - 只保存轻量机器事实；大文件、日志、API 返回和截图必须用 evidence_refs 指向外部产物。
+# - 不把日志分析、GitHub 研究、文档生成等任务写成内置专项模板。
+collaboration_workspace: "data/collaboration"
+# 协作请求自动唤醒 responder 的最大并发数。
+# 普通 dispatch 仍按 dispatch_default_max_runners；只有已有 collaboration request
+# 等待多个代理响应时，才按这个上限一次推进多个 responder，避免协作证据串行排队。
+# 0 表示关闭自动放宽，完全按本轮 max_runners 执行。
+collaboration_auto_dispatch_max_runners: 8
+# 协作请求默认截止时间（秒）。
+# request_collaboration / raise_collaboration_event 如果没有显式传 deadline_at 或 deadline_seconds，
+# 系统会自动补这个相对 deadline，避免大规模协作因为少数 responder 慢/断网而无限等待。
+# 0 表示不自动补截止时间，只使用用户或模型显式给出的 deadline。
+collaboration_default_deadline_seconds: 120
+
 # 通知系统配置：
 # - notification_enabled: 是否启用通知推送
 # - notification_store_path: 通知存储目录，每个通知一个 JSON 文件

@@ -9,6 +9,7 @@ from .models import (
     SubAgentExecutionContext,
 )
 from .runner_rendering_context import render_context_bundle_section
+from .runner_rendering_context_packs import render_context_packs_section
 from .runner_rendering_sections import render_evidence_item_lines, render_granted_card_lines
 from .runner_result_rendering import render_runner_result_markdown
 
@@ -83,6 +84,46 @@ def _render_write_boundary_section(context):
     )
     lines.append(f"- locked_files: {', '.join(locked_files) if locked_files else 'none'}")
     return lines
+
+
+# LLM: Declared output refs are user-visible deliverable targets, not runner-private reports.
+# 函数用途: 把父级声明的 output_files/output_refs 显示给 runner，避免验收要求了目标路径但子代理只看到 output.json。
+def _render_declared_outputs_section(context):
+    output_contract = (
+        context.context_bundle.get("output_contract")
+        if isinstance(context.context_bundle, dict)
+        else {}
+    )
+    if not isinstance(output_contract, dict):
+        output_contract = {}
+    required_refs = _string_list(output_contract.get("required_file_refs"))
+    declared_refs = _string_list(output_contract.get("declared_output_refs"))
+    if not required_refs and not declared_refs:
+        return []
+    lines = ["", "## Declared Output Targets", ""]
+    if required_refs:
+        lines.append("- required_file_refs:")
+        lines.extend(f"  - {item}" for item in required_refs)
+    if declared_refs:
+        lines.append("- declared_output_refs (may include logical result keys):")
+        lines.extend(f"  - {item}" for item in declared_refs)
+    if required_refs:
+        lines.append(
+            "- 如果上面有 required_file_refs，必须把交付产物写到这些路径；"
+            "内部 output.json 只能作为运行报告，不能单独冒充用户产物。"
+        )
+    return lines
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result
 # LLM: _render_quality_contract_section 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 函数用途: 渲染或汇总qualitycontractsection的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _render_quality_contract_section(contract):
@@ -121,55 +162,6 @@ def _render_context_manifest_section(manifest):
     lines.extend(f"  - {item}" for item in manifest.required_read_paths or ["none"])
     lines.append("- omitted_context:")
     lines.extend(f"  - {item}" for item in manifest.omitted_context or ["none"])
-    return lines
-# LLM: _render_context_pack_item_lines 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 渲染或汇总上下文pack条目lines的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
-def _render_context_pack_item_lines(item: dict[str, object]) -> list[str]:
-    lines = []
-    for key in ["kind", "summary", "path", "ref", "role"]:
-        if item.get(key):
-            lines.append(f"  - {key}: {item[key]}")
-    lines.extend(_render_context_pack_contract_lines(item.get("contract")))
-    return lines
-
-
-# LLM: _render_context_pack_contract_lines exposes small repair-contract facts in the runner prompt.
-# 函数用途: 渲染 repair_contract 的动作词和目标 refs；保持上限，避免把大合同或产物正文塞进 prompt。
-def _render_context_pack_contract_lines(value: object) -> list[str]:
-    if not isinstance(value, dict):
-        return []
-    lines = []
-    for key in ["schema", "kind"]:
-        if value.get(key):
-            lines.append(f"  - contract.{key}: {value[key]}")
-    actions = _bounded_contract_list(value.get("same_run_required_actions"), limit=6)
-    if actions:
-        lines.append(f"  - contract.same_run_required_actions: {', '.join(actions)}")
-    targets = _bounded_contract_list(value.get("target_artifact_refs"), limit=6)
-    if targets:
-        lines.append("- contract.target_artifact_refs:")
-        lines.extend(f"    - {item}" for item in targets)
-    return lines
-
-
-# LLM: _bounded_contract_list keeps prompt-visible contract lists small and string-only.
-# 函数用途: 将合同字段压成短列表；非列表字段不渲染，避免异常对象进入 Markdown。
-def _bounded_contract_list(value: object, *, limit: int) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    items = [" ".join(str(item or "").split()) for item in value[:limit]]
-    return [item for item in items if item]
-# LLM: _render_context_packs_section 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 渲染或汇总上下文packssection的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
-def _render_context_packs_section(context):
-    lines = ["", "## Context Packs", ""]
-    if context.context_packs:
-        for item in context.context_packs:
-            name = item.get("name") or item.get("id") or item.get("kind") or "pack"
-            lines.append(f"- {name}")
-            lines.extend(_render_context_pack_item_lines(item))
-    else:
-        lines.append("- none")
     return lines
 # LLM: _render_evidence_section 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 函数用途: 渲染或汇总证据section的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
@@ -217,11 +209,12 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
     lines.extend(render_context_bundle_section(context))
     lines.extend(_render_capabilities_section(context))
     lines.extend(_render_write_boundary_section(context))
+    lines.extend(_render_declared_outputs_section(context))
     lines.extend(["", "## Acceptance Checks", ""])
     lines.extend(f"- [ ] {item}" for item in context.acceptance_checks or ["未设置"])
     lines.extend(_render_quality_contract_section(context.quality_contract))
     lines.extend(_render_context_manifest_section(context.context_manifest))
-    lines.extend(_render_context_packs_section(context))
+    lines.extend(render_context_packs_section(context))
     lines.extend(_render_evidence_section(context))
     lines.extend(_render_pending_requests_section(context))
     lines.extend(_render_open_gaps_section(context))

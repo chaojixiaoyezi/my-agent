@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..contracts.delivery_contract_doctor import validate_delivery_contract
+from .delivery_requirement_orchestration import _derived_evidence_contract
 
 SCHEMA_VERSION = "delivery_contract.v1"
 MATERIALIZER_SCHEMA_VERSION = "delivery_requirement_materializer.v1"
@@ -19,12 +20,20 @@ def build_delivery_requirement_materializer_prompt(user_prompt: str) -> str:
     return (
         "请把下面的用户需求转换成一个最小 delivery_contract.v1 JSON 对象。\n"
         "只输出 JSON，不要解释，不要写具体执行步骤模板，不要替用户编造来源。\n"
-        "产物可以只声明 artifact_id、kind、required、allowed_output_roots；不知道固定路径时不要硬写路径。\n"
-        "如果用户给了明确文件路径，必须写入 artifacts[].preferred_path；如果只给目录，才写 allowed_output_roots。\n"
+        "artifacts 只表示用户要求创建、修改或最终交付的产物；用户要求读取、参考、搜索、对比的文件路径"
+        "不是产物，不要写入 artifacts。\n"
+        "产物可以只声明 artifact_id、kind、required、allowed_output_roots；只有用户明确说把结果保存到某个文件时，"
+        "才写 artifacts[].preferred_path；如果只给输出目录，才写 allowed_output_roots。\n"
         "如果用户要求表格列，请写入 artifacts[].validation_contract.required_columns；事实型数字、排名、时间窗"
         "请写入 delivery_quality_contract.metric_contracts。\n"
         "分析型字段请放入 artifacts[].llm_generated_fields，例如解释、理由、建议、结论、判断、摘要这类需要模型撰写的列；"
         "不要把它们映射到来源 API 的普通 description 字段。\n"
+        "如果用户明确要求创建子代理、派工、多代理协作、联合其他代理/人员调查，请写入 orchestration_contract："
+        '{"schema_version":"orchestration_contract.v1","requires_orchestration":true,'
+        '"execution_required":true,"required_tools":["create_subagents","dispatch_subagents"],'
+        '"minimum_subagent_count":用户明确数量或1,"rework_budget":2}。'
+        "只有用户明确说只要规划、只要创建记录、暂不执行时，execution_required 才可以是 false。\n"
+        "没有明确协作要求时不要写 orchestration_contract。\n"
         "可选字段包括 artifacts、delivery_quality_contract、fact_evidence_contract；只有外部系统显式给出时才保留 bootstrap_contract。\n"
         "用户需求：\n"
         f"{user_prompt}"
@@ -48,6 +57,7 @@ def materialized_delivery_contract(
     for key in ("delivery_quality_contract", "fact_evidence_contract", "bootstrap_contract"):
         if isinstance(value.get(key), dict):
             contract[key] = dict(value[key])
+    _preserve_orchestration_contract(contract, value)
     _normalize_delivery_quality_contract(contract)
     _derive_fact_evidence_contract(contract)
     _preserve_explicit_bootstrap_contract(contract)
@@ -123,6 +133,9 @@ def _artifact_contracts(value: object, workspace_root: Path | None) -> tuple[lis
         if not isinstance(item, dict):
             findings.append(_finding("DELIVERY_MATERIALIZER_ARTIFACT_INVALID", f"artifacts[{index}]"))
             continue
+        if _artifact_declares_input_role(item):
+            findings.append(_finding("DELIVERY_MATERIALIZER_INPUT_NOT_ARTIFACT", f"artifacts[{index}]"))
+            continue
         normalized = _artifact_contract(item)
         path_finding = _path_finding(normalized, workspace_root, index)
         if path_finding:
@@ -141,7 +154,9 @@ def _artifact_contract(item: dict[str, Any]) -> dict[str, Any]:
         "kind",
         "path",
         "preferred_path",
+        "purpose",
         "required",
+        "role",
         "search_roots",
         "validation_contract",
         "llm_generated_fields",
@@ -159,6 +174,26 @@ def _artifact_contract(item: dict[str, Any]) -> dict[str, Any]:
         result["allowed_output_roots"] = [str(value).strip() for value in result["allowed_output_roots"] if str(value).strip()]
         _promote_file_root_to_preferred_path(result)
     return result
+
+
+def _artifact_declares_input_role(item: dict[str, Any]) -> bool:
+    role = " ".join(
+        str(item.get(key) or "").strip().lower()
+        for key in ("artifact_role", "role", "purpose", "usage")
+    )
+    if not role:
+        return False
+    input_markers = (
+        "input",
+        "source",
+        "reference",
+        "read_only",
+        "readonly",
+        "evidence",
+        "lookup",
+        "search",
+    )
+    return any(marker in role for marker in input_markers)
 
 
 def _kind_from_artifact_path(artifact: dict[str, Any]) -> str:
@@ -231,23 +266,7 @@ def _preserve_explicit_bootstrap_contract(contract: dict[str, Any]) -> None:
     contract["bootstrap_contract"] = bootstrap
 
 
-def _derived_evidence_contract(quality: dict[str, Any]) -> dict[str, Any]:
-    evidence = dict(quality.get("evidence_contract")) if isinstance(quality.get("evidence_contract"), dict) else {}
-    required_fields = _merged_required_fields(evidence.get("required_fields"), quality.get("metric_contracts"))
-    if not required_fields:
-        return {}
-    evidence["required_fields"] = required_fields
-    evidence.setdefault("require_verified", True)
-    if "allowed_value_types" not in evidence:
-        evidence["allowed_value_types"] = ["exact"]
-    return evidence
-
-
-def _merged_required_fields(raw_fields: object, metric_contracts: object) -> list[str]:
-    fields = [str(item).strip() for item in raw_fields if str(item).strip()] if isinstance(raw_fields, list) else []
-    if isinstance(metric_contracts, list):
-        fields.extend(str(item.get("field") or "").strip() for item in metric_contracts if isinstance(item, dict))
-    return sorted({item for item in fields if item})
+from .delivery_requirement_orchestration import _preserve_orchestration_contract
 
 
 # LLM: _path_finding validates materialized paths against the task workspace.

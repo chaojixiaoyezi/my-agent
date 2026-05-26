@@ -7,13 +7,32 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
+from agent_py_agent.agent.agent_core.dispatch_capability_followup import (
+    PostRunnerCapabilityFollowupParams,
+    run_post_runner_capability_followup,
+)
 from agent_py_agent.agent.capabilities import CapabilityRouter
 from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 
 from .backends import CapabilityThenAcceptedBackend, IncompleteOutputThenAcceptedBackend
+
+
+def test_dispatch_capability_followup_skips_when_router_missing():
+    records = [SimpleNamespace(step="runner", action="ok")]
+    result = run_post_runner_capability_followup(
+        PostRunnerCapabilityFollowupParams(
+            agent=SimpleNamespace(),
+            ctx=SimpleNamespace(router=None, cfg=CapabilityConfig(), limit=20),
+            params=SimpleNamespace(apply=True, execute_runners=True),
+            records=records,
+        )
+    )
+
+    assert result == records
 
 
 # LLM: test_dispatch_routes_new_capability_request_then_reruns_worker covers the real R3 stalled flow.

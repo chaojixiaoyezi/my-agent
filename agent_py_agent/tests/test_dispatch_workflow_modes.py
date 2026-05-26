@@ -72,7 +72,7 @@ def test_workflow_auto_mode_spawns_worker_children(tmp_path):
     assert {child.workflow_phase_id for child in children} == {"design_contract", "implementation", "tests"}
     assert all(child.parent_id == loaded.id for child in children)
     assert all(child.agent_name.startswith("小小傻妞-") for child in children)
-    assert any(child.workflow_depends_on == ["design_contract"] for child in children)
+    assert all(not hasattr(child, "workflow_depends_on") for child in children)
 
 
 # LLM: test_model_dispatch_run_ids_respects_task_workflow_off covers real root-created worker E2E.

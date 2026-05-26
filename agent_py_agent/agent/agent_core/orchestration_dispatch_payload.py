@@ -11,6 +11,7 @@ from .orchestration_artifact_integrity_repair import artifact_integrity_repair_r
 from .orchestration_repair_contract import (
     RepairContractRequest,
     repair_contract_acceptance_checks,
+    repair_contract_allowed_tools,
     repair_contract_goal_suffix,
     repair_contract_tool_fields,
 )
@@ -121,18 +122,21 @@ def _dispatch_record_acceptance_repair_payload(item) -> dict[str, object]:
         return {}
     refs = _repair_refs(item)
     return {
-        "next_action": "create_repair_child_from_parent_acceptance_refs",
+        "next_action": _record_next_action(item),
         "parent_acceptance_repair_advice": {
             "phase": "parent_acceptance_repair_recommended",
             "failed_run_ids": [item.run_id] if item.run_id else [],
             "failure_refs": _compact_failure_refs(item, refs),
-            "llm_next_step": (
-                "父级真实验收已失败；请创建一名修复小傻妞读取 failure_refs，"
-                "只修复验收报告点名的问题，然后重新 dispatch 并跑父级验收。"
-            ),
+            "llm_next_step": _repair_next_step(item),
             "suggested_tool_call": _top_level_repair_tool_call(item, refs),
         },
     }
+
+
+# LLM: _record_next_action keeps the action name aligned with the actual suggested tool.
+# 函数用途: 父级验收失败只给普通修复建议；协作流程不再由验收失败自动开 case。
+def _record_next_action(item) -> str:
+    return "create_repair_child_from_parent_acceptance_refs"
 
 
 # LLM: _repair_refs collects canonical report refs once for the top-level advice helpers.
@@ -177,16 +181,18 @@ def _top_level_repair_tool_call(
             "不要改写无关产物或健康分支",
             *repair_contract_acceptance_checks(failure_refs),
         ],
-        "allowed_tools": [
-            "list_files",
-            "read_file",
-            "search_text",
-            "replace_in_file",
-            "write_file",
-            "append_file",
-        ],
+        "allowed_tools": repair_contract_allowed_tools(),
         **contract_fields,
     }
+
+
+# LLM: _repair_next_step keeps parent acceptance recovery as generic artifact repair.
+# 函数用途: 父级验收失败只提示按报告修复；协作账本是运行时流程，不是验收补洞动作。
+def _repair_next_step(item) -> str:
+    return (
+        "父级真实验收已失败；请创建一名修复小傻妞读取 failure_refs，"
+        "只修复验收报告点名的问题，然后重新 dispatch 并跑父级验收。"
+    )
 
 
 # LLM: _repair_goal keeps top-level repair work grounded in machine refs instead of natural summaries.

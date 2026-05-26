@@ -23,7 +23,7 @@ def test_trace_replay_blocks_repeated_identical_tool_calls(tmp_path: Path):
     result = replay_contract_trace(trace, tmp_path)
 
     assert result.blocked is True
-    assert result.block_reason == "TOOL_REPEATED_EXACT_FAILURE"
+    assert result.block_reason == "TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED"
 
 
 def test_trace_replay_rejects_missing_builder_call(tmp_path: Path):
@@ -65,7 +65,7 @@ def test_trace_replay_rejects_success_conflicting_with_runtime_issue(tmp_path: P
     assert result.contract_result.ok is False
     assert "RUNTIME_ISSUE_SUCCESS_CONFLICT" in result.contract_result.error_codes
     assert "RUNTIME_ISSUE_FINAL_CONFLICT" in result.replay_error_codes
-    assert {item["code"] for item in result.runtime_issues} == {"BOOTSTRAP_MATERIALIZATION_REQUIRED"}
+    assert {item["code"] for item in result.runtime_issues} == {"NO_PROGRESS"}
 
 
 def test_trace_replay_rejects_success_conflicting_with_closeout_snapshot(tmp_path: Path):

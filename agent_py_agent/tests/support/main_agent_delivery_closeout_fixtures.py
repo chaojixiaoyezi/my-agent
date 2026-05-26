@@ -8,8 +8,8 @@ from pathlib import Path
 from agent_py_agent.agent.backend import ModelResponse
 
 
-# LLM: DeliveryContractBackend proves valid artifact delivery stops the loop without another model turn.
-# 类用途: 第一轮写出合同要求的 HTML；如果系统没自动收口，第二轮会让测试失败。
+# LLM: DeliveryContractBackend proves valid artifacts close out after the model submits final text.
+# 类用途: 第一轮写出合同要求的 HTML，第二轮用普通最终回复触发隐式验收。
 class DeliveryContractBackend:
     name = "fake_delivery_contract_backend"
 
@@ -32,7 +32,9 @@ class DeliveryContractBackend:
                 ),
                 backend=self.name,
             )
-        raise AssertionError("delivery contract should close out before a second model call")
+        if self.calls == 2:
+            return ModelResponse(text="产物已经写好，请系统验收。", backend=self.name)
+        raise AssertionError("delivery contract should close out after implicit acceptance")
 
 
 # LLM: FailedDeliveryContractBackend proves failed machine acceptance feeds repair instead of false closeout.
@@ -42,8 +44,10 @@ class FailedDeliveryContractBackend:
 
     def __init__(self):
         self.calls = 0
+        self.prompts = []
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.prompts.append(prompt)
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
@@ -55,9 +59,6 @@ class FailedDeliveryContractBackend:
                 ),
                 backend=self.name,
             )
-        assert "delivery-contract-check" in prompt
-        assert "HTML_INCOMPLETE_DOCUMENT" in prompt
-        assert "HTML_EXTERNAL_RESOURCE_REF" in prompt
         return ModelResponse(text="已收到结构化修复反馈。", backend=self.name)
 
 
@@ -68,8 +69,10 @@ class IncompleteDeliveryContractBackend:
 
     def __init__(self):
         self.calls = 0
+        self.prompts = []
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.prompts.append(prompt)
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
@@ -82,13 +85,11 @@ class IncompleteDeliveryContractBackend:
                 ),
                 backend=self.name,
             )
-        assert "HTML_INCOMPLETE_DOCUMENT" in prompt
-        assert "HTML_EXTERNAL_RESOURCE_REF" in prompt
         return ModelResponse(text="已收到不完整 HTML 的结构化反馈。", backend=self.name)
 
 
 # LLM: ArtifactFindingRepairBackend proves failed artifact findings can be repaired and revalidated.
-# 类用途: 第一轮写出不合格 HTML；第二轮必须收到结构化 repair_required 后写合格文件并自动收口。
+# 类用途: 第一轮写出不合格 HTML，第二轮提交验收，第三轮按结构化返工单修复，第四轮隐式验收。
 class ArtifactFindingRepairBackend:
     name = "fake_artifact_finding_repair_backend"
 
@@ -109,6 +110,8 @@ class ArtifactFindingRepairBackend:
                 backend=self.name,
             )
         if self.calls == 2:
+            return ModelResponse(text="初版已写好，请系统验收。", backend=self.name)
+        if self.calls == 3:
             assert "delivery-contract-check" in prompt
             assert "HTML_INCOMPLETE_DOCUMENT" in prompt
             assert "HTML_EXTERNAL_RESOURCE_REF" in prompt
@@ -118,11 +121,13 @@ class ArtifactFindingRepairBackend:
                 '<!doctype html><html><head><title>Maison</title><style>body{color:#111}</style></head><body><main>Ready</main></body></html>',
                 self.name,
             )
-        raise AssertionError("artifact finding repair should close out after the repaired write")
+        if self.calls == 4:
+            return ModelResponse(text="修复后的产物已经写好，请系统验收。", backend=self.name)
+        raise AssertionError("artifact finding repair should close out after implicit acceptance")
 
 
 # LLM: MissingArtifactRepairBackend proves wrong-path output is repaired through artifact refs.
-# 类用途: 第一轮写到错误路径；第二轮必须收到 ARTIFACT_MISSING recovery 后写到合同路径并通过验收。
+# 类用途: 第一轮写到错误路径，第二轮提交验收，第三轮按 ARTIFACT_MISSING 写到合同路径。
 class MissingArtifactRepairBackend:
     name = "fake_missing_artifact_repair_backend"
 
@@ -138,6 +143,8 @@ class MissingArtifactRepairBackend:
                 self.name,
             )
         if self.calls == 2:
+            return ModelResponse(text="初版已写好，请系统验收。", backend=self.name)
+        if self.calls == 3:
             assert "delivery-contract-check" in prompt
             assert "ARTIFACT_MISSING" in prompt
             assert "repair_required" in prompt
@@ -146,7 +153,9 @@ class MissingArtifactRepairBackend:
                 '<!doctype html><html><head><title>Maison</title></head><body><main>Correct path</main></body></html>',
                 self.name,
             )
-        raise AssertionError("missing artifact repair should close out after writing the contracted path")
+        if self.calls == 4:
+            return ModelResponse(text="修复后的产物已经写好，请系统验收。", backend=self.name)
+        raise AssertionError("missing artifact repair should close out after implicit acceptance")
 
 
 # LLM: OpenWriteSessionDeliveryBackend creates a valid-looking artifact while leaving staged writes open.
@@ -168,14 +177,15 @@ class OpenWriteSessionDeliveryBackend:
                 backend=self.name,
             )
         if self.calls == 2:
+            return ModelResponse(text="当前站点文件已准备验收。", backend=self.name)
+        if self.calls == 3:
             self.saw_open_session_context = True
-            assert "delivery-contract-open-file-write-sessions" in prompt
+            assert "open-file-write-session" in prompt
             assert "open_file_write_sessions" in prompt
             self.session_id = session_id
-            return _session_append_response(session_id, 'console.log("shop ready");', self.name)
-        if self.calls == 3:
-            assert "delivery-contract-open-file-write-sessions" in prompt
-            return _session_finish_response(session_id or self.session_id, self.name)
+            return _session_append_finish_response(session_id, 'console.log("shop ready");', self.name)
+        if self.calls == 4:
+            return ModelResponse(text="open session 已关闭，请系统验收。", backend=self.name)
         raise AssertionError("delivery should close out after open session is finished")
 
 
@@ -189,7 +199,7 @@ class NoProgressDeliveryBackend:
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
-        if self.calls <= 4:
+        if self.calls in {1, 3, 5, 7}:
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
@@ -199,6 +209,8 @@ class NoProgressDeliveryBackend:
                 ),
                 backend=self.name,
             )
+        if self.calls in {2, 4, 6, 8}:
+            return ModelResponse(text="坏版本已写入，请系统验收。", backend=self.name)
         raise AssertionError("delivery should block after repeated unchanged failure")
 
 
@@ -215,24 +227,30 @@ class PendingTargetsDeliveryBackend:
         if self.calls == 1:
             return _write_file_response("outputs/static_site/index.html", '<!doctype html><html><body><script src="app.js"></script></body></html>', self.name)
         if self.calls == 2:
+            return ModelResponse(text="站点初版已写入，请系统验收。", backend=self.name)
+        if self.calls == 3:
             assert "pending_materialization_targets" in prompt
             assert "outputs/static_site/app.js" in prompt
             return ModelResponse(text='[TOOL_CALL]\n{"tool":"read_file","path":"outputs/static_site/index.html"}\n[/TOOL_CALL]', backend=self.name)
-        if self.calls == 3:
+        if self.calls == 4:
             assert "no_progress_block_threshold" in prompt
             return _write_file_response("outputs/static_site/app.js", 'console.log("shop ready");', self.name)
+        if self.calls == 5:
+            return ModelResponse(text="缺失文件已补齐，请系统验收。", backend=self.name)
         raise AssertionError("pending targets should complete before any blocked closeout")
 
 
-# LLM: DeliveryRepairRedirectBackend proves write-first staged recovery redirects inspection-only calls.
-# 类用途: 第一轮写空骨架，第二轮只读检查；系统应拉回“先补非空结构化数据，再调 builder”。
-class DeliveryRepairRedirectBackend:
-    name = "fake_delivery_repair_redirect_backend"
+# LLM: CloseoutReworkBackend proves failed closeout guidance can recover without a separate repair gate.
+# 类用途: 第一轮写空骨架，第二轮允许只读确认；closeout 返工单随后推动补数据并调 builder。
+class CloseoutReworkBackend:
+    name = "fake_closeout_rework_backend"
 
     def __init__(self):
         self.calls = 0
+        self.prompts: list[str] = []
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.prompts.append(prompt)
         self.calls += 1
         if self.calls == 1:
             return _write_structured_json_response(
@@ -241,61 +259,26 @@ class DeliveryRepairRedirectBackend:
                 self.name,
             )
         if self.calls == 2:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"submit_for_acceptance","note":"初版结构化数据已写入，请验收。"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        if self.calls == 3:
+            assert "repair_guidance" in prompt
             assert "STAGED_JSON_NO_ROWS" in prompt
             return ModelResponse(text='[TOOL_CALL]\n{"tool":"read_file","path":"outputs/table_report/source_data.json"}\n[/TOOL_CALL]', backend=self.name)
-        if self.calls == 3:
+        if self.calls == 4:
             assert "STAGED_JSON_NO_ROWS" in prompt
             return _write_structured_json_response(
                 "outputs/table_report/source_data.json",
                 _valid_workbook_source_json(),
                 self.name,
             )
-        if self.calls == 4:
-            assert "STAGING_BUILDER_READY" in prompt
-            return _workbook_builder_response(self.name)
-        raise AssertionError("delivery repair should redirect inspection-only turns and then complete")
-
-
-# LLM: BootstrapMaterializationRedirectBackend proves startup guard redirects pure inspection loops.
-# 类用途: 第一轮只 list_files；系统应要求先物化一个 target，随后再允许继续正常交付。
-class BootstrapMaterializationRedirectBackend:
-    name = "fake_bootstrap_materialization_redirect_backend"
-
-    def __init__(self):
-        self.calls = 0
-
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
-        self.calls += 1
-        if self.calls == 1:
-            return ModelResponse(text='[TOOL_CALL]\n{"tool":"list_files","path":"outputs/static_site"}\n[/TOOL_CALL]', backend=self.name)
-        if self.calls == 2:
-            assert "bootstrap-materialization" in prompt
-            return _write_file_response("outputs/static_site/index.html", '<!doctype html><html><body><script src="app.js"></script></body></html>', self.name)
-        if self.calls == 3:
-            return _write_file_response("outputs/static_site/app.js", 'console.log("bootstrapped");', self.name)
-        raise AssertionError("bootstrap guard should redirect inspection-only startup and then complete")
-
-
-# LLM: BootstrapMaterializationProgressiveBackend proves startup inspection gets several redirects before blocking.
-# 类用途: 前三轮都只做目录检查；第四轮落文件后，流程应能正常完成。
-class BootstrapMaterializationProgressiveBackend:
-    name = "fake_bootstrap_materialization_progressive_backend"
-
-    def __init__(self):
-        self.calls = 0
-
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
-        self.calls += 1
-        if self.calls in {1, 2, 3}:
-            if self.calls > 1:
-                assert "bootstrap-materialization" in prompt
-            return ModelResponse(text='[TOOL_CALL]\n{"tool":"list_files","path":"outputs/static_site"}\n[/TOOL_CALL]', backend=self.name)
-        if self.calls == 4:
-            assert "exploration_rounds_without_materialization" in prompt
-            return _write_file_response("outputs/static_site/index.html", '<!doctype html><html><body><script src="app.js"></script></body></html>', self.name)
         if self.calls == 5:
-            return _write_file_response("outputs/static_site/app.js", 'console.log("bootstrapped later");', self.name)
-        raise AssertionError("bootstrap guard should allow several redirects before any final block")
+            return _workbook_builder_response(self.name)
+        if self.calls == 6:
+            return ModelResponse(text="产物已经修复并生成完毕，请系统验收。", backend=self.name)
+        raise AssertionError("closeout rework should let the agent repair and then complete")
 
 
 # LLM: LocalProgressRedirectBackend proves repeated remote exploration gets redirected back to staged local work.
@@ -311,10 +294,12 @@ class LocalProgressRedirectBackend:
         artifact_ref = str(Path("memory_archive/artifacts/tool_outputs/demo.json").resolve())
         if self.calls == 1:
             return _write_file_response("outputs/table_report/source_data.json", _empty_workbook_source_json(), self.name)
-        if self.calls in {2, 3}:
+        if self.calls == 2:
+            return ModelResponse(text="阶段数据已写入，请系统验收。", backend=self.name)
+        if self.calls == 3:
             return ModelResponse(text=f'[TOOL_CALL]\n{{"tool":"read_artifact","artifact_ref":"{artifact_ref}","offset":0,"max_chars":2000}}\n[/TOOL_CALL]', backend=self.name)
         if self.calls == 4:
-            assert "local-progress-guard" in prompt or "delivery-required-repair" in prompt
+            assert "local-progress-guard" in prompt
             return _write_structured_json_response(
                 "outputs/table_report/source_data.json",
                 _valid_workbook_source_json(),
@@ -322,6 +307,8 @@ class LocalProgressRedirectBackend:
             )
         if self.calls == 5:
             return _workbook_builder_response(self.name)
+        if self.calls == 6:
+            return ModelResponse(text="表格产物已生成，请系统验收。", backend=self.name)
         raise AssertionError("local-progress guard should redirect remote exploration back to local staged work")
 
 
@@ -338,7 +325,8 @@ class RecoveryAttemptRepairBackend:
         if self.calls == 1:
             return ModelResponse(text='[TOOL_CALL]\n{"tool":"read_file","path":"recovery_packet.json"}\n[/TOOL_CALL]', backend=self.name)
         if self.calls == 2:
-            assert "delivery-required-repair" in prompt
+            assert "delivery-contract-check" in prompt
+            assert "repair_guidance" in prompt
             assert "LOCAL_PROGRESS_GUARD_BLOCKED" not in prompt
             return _write_structured_json_response(
                 "outputs/table_report/source_data.json",
@@ -347,11 +335,13 @@ class RecoveryAttemptRepairBackend:
             )
         if self.calls == 3:
             return _workbook_builder_response(self.name)
+        if self.calls == 4:
+            return ModelResponse(text="恢复产物已经生成完毕，请系统验收。", backend=self.name)
         raise AssertionError("fresh recovery attempt should repair before local-progress block")
 
 
-# LLM: WrongToolDuringOpenSessionBackend proves open sessions block unrelated new write tools.
-# 类用途: begin 之后故意发新的 write_file；系统必须要求继续同一个 session，而不是执行新写入。
+# LLM: WrongToolDuringOpenSessionBackend proves open sessions block writes to the same unfinished target.
+# 类用途: begin 之后故意覆盖同一个目标；系统必须要求继续同一个 session，而不是执行冲突写入。
 class WrongToolDuringOpenSessionBackend:
     name = "fake_wrong_tool_during_open_session_backend"
 
@@ -366,12 +356,14 @@ class WrongToolDuringOpenSessionBackend:
             return ModelResponse(text='[TOOL_CALL]\n{"tool":"file_write_session","action":"begin","target_path":"outputs/static_site/app.js"}\n[/TOOL_CALL]', backend=self.name)
         if self.calls == 2:
             self.session_id = session_id
-            return _write_file_response("outputs/rogue.txt", "should not run", self.name)
+            return _write_file_response("outputs/static_site/app.js", "should not run", self.name)
         if self.calls == 3:
             assert "open_file_write_sessions" in prompt
             return _session_append_response(session_id or self.session_id, 'console.log("ok");', self.name)
         if self.calls == 4:
             return _session_finish_response(session_id or self.session_id, self.name)
+        if self.calls == 5:
+            return ModelResponse(text="open session 已关闭，请系统验收。", backend=self.name)
         raise AssertionError("open session should finish before any unrelated write executes")
 
 
@@ -504,6 +496,23 @@ def _write_structured_json_response(path: str, json_payload: str, backend: str) 
 def _session_append_response(session_id: str, content: str, backend: str) -> ModelResponse:
     escaped = content.replace("\\", "\\\\").replace('"', '\\"')
     return ModelResponse(text=f'[TOOL_CALL]\n{{"tool":"file_write_session","action":"append","session_id":"{session_id}","chunk_index":0,"content":"{escaped}"}}\n[/TOOL_CALL]', backend=backend)
+
+
+# LLM: _session_append_finish_response appends and finishes in one model turn.
+# 函数用途: 让隐式验收测试先关闭 open session，再由下一轮最终回复触发 closeout。
+def _session_append_finish_response(session_id: str, content: str, backend: str) -> ModelResponse:
+    escaped = content.replace("\\", "\\\\").replace('"', '\\"')
+    return ModelResponse(
+        text=(
+            "[TOOL_CALL]\n"
+            f'{{"tool":"file_write_session","action":"append","session_id":"{session_id}","chunk_index":0,"content":"{escaped}"}}\n'
+            "[/TOOL_CALL]\n"
+            "[TOOL_CALL]\n"
+            f'{{"tool":"file_write_session","action":"finish","session_id":"{session_id}"}}\n'
+            "[/TOOL_CALL]"
+        ),
+        backend=backend,
+    )
 
 
 # LLM: _session_finish_response builds one file_write_session finish call response.

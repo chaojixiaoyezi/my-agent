@@ -6,19 +6,27 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ..backend import ModelResponse
 from ..tooling.file_write_session_inspection import open_file_write_sessions
-
-_MAX_REPAIRS = 2
 
 
 # LLM: open_write_session_repair_context is based on manifest facts, not model prose.
 # 函数用途: 如果存在未 finish 的分块写入 session，则返回下一轮模型必须处理的结构化提示。
-def open_write_session_repair_context(agent: object, repairs: int, params: object | None = None) -> str:
+def open_write_session_repair_context(
+    agent: object,
+    repairs: int = 0,
+    params: object | None = None,
+    *,
+    reason: str = "",
+) -> str:
     sessions = _open_sessions(agent, params)
-    if not sessions or (_MAX_REPAIRS > 0 and repairs >= _MAX_REPAIRS):
+    if not sessions:
         return ""
-    payload = {"open_file_write_sessions": sessions}
+    payload = {
+        "open_file_write_sessions": sessions,
+        "unhandled_model_turns": max(0, int(repairs or 0)),
+    }
+    if reason:
+        payload["reason"] = reason
     return "\n".join(
         [
             "[tool-system open-file-write-session]",
@@ -28,20 +36,6 @@ def open_write_session_repair_context(agent: object, repairs: int, params: objec
             "如果只是未提交，调用 payload.finish_tool_call；如果放弃该产物，使用 payload.abort_tool_call。"
             "处理完之前不要给最终答复。",
         ]
-    )
-
-
-# LLM: open_write_session_block_response gives a deterministic stop after repeated ignored repair prompts.
-# 函数用途: 模型多次忽略 open session 合同时，返回明确失败，避免无限空转。
-def open_write_session_block_response(agent: object, params: object | None = None) -> ModelResponse | None:
-    sessions = _open_sessions(agent, params)
-    if not sessions:
-        return None
-    return ModelResponse(
-        text="[OPEN_FILE_WRITE_SESSION_BLOCKED] 分块写入会话仍未 finish/abort，已停止最终收口。",
-        backend=str(getattr(getattr(agent, "backend", None), "name", "") or ""),
-        runtime_status="blocked",
-        runtime_reason="OPEN_FILE_WRITE_SESSION",
     )
 
 

@@ -17,71 +17,20 @@ from ..subagents.role_templates import role_template_detail_text, role_template_
 from . import subagent_compact_continuation
 from .runner_prompt_context_summary import runner_context_summary_payload
 from .runner_prompt_contract_lines import (
-    input_dependency_contract_lines,
+    read_ref_context_lines,
     required_product_contract_lines,
 )
 from .runner_prompt_coordinator_policy import coordinator_execution_policy_lines
-
-_SUBAGENT_RESULT_TEMPLATE = (
-    "[SUBAGENT_RESULT]\n"
-    "{\n"
-    '  "status": "AWAITING_ACCEPTANCE",\n'
-    '  "summary": "本轮完成或卡住的摘要",\n'
-    '  "used_tools": [],\n'
-    '  "used_skills": [],\n'
-    '  "evidence": [\n'
-    '    {"kind": "command", "summary": "验证摘要", "command": "", "path": "", "url": "", "ok": true}\n'
-    "  ],\n"
-    '  "evidence_packets": [\n'
-    '    {"id": "evpkt-run-id-short", "claim": "可验收声明", "checked_scope": "检查范围", "evidence_refs": ["runner_result.json"], "artifact_refs": ["产物路径或output.json"], "confidence": 0.9}\n'
-    "  ],\n"
-    '  "coverage_records": [\n'
-    '    {"covered_run_id": "失败或损坏的run_id", "covered_by_run_id": "已DONE/VERIFIED的覆盖run_id", "reason": "为什么覆盖同一范围", "artifact_refs": ["覆盖者产物路径"], "evidence_refs": ["覆盖者证据路径"]}\n'
-    "  ],\n"
-    '  "capability_requests": [\n'
-    '    {"problem": "缺少什么", "needed_capability": "能力名", "capability_type": "shell|tool|skill|mcp|network|generic", "expected_output": "希望得到什么", "requested_tools": [], "requested_skills": [], "requested_mcp_tools": [], "requested_commands": ["python3"], "cwd_scope": [], "path_scope": ["任务内需要访问的目录"], "network_scope": [], "output_budget": {"stdout_bytes": 65536, "stderr_bytes": 32768}, "risk_level": "low|medium|high", "tried": [], "evidence": [], "constraints": {}, "fallback_attempted": [], "escalation_target": "parent", "reserved": {}}\n'
-    "  ],\n"
-    '  "artifacts": [\n'
-    '    {"path": "产物路径", "kind": "file|report|log", "summary": "产物说明"}\n'
-    "  ],\n"
-    '  "tests": [\n'
-    '    {"name": "测试名称", "validation_method": "command", "command": "python3 -m pytest -q", "working_dir": "运行目录", "ok": true, "summary": "测试结果摘要"}\n'
-    "  ],\n"
-    '  "patches": [\n'
-    '    {"path": "改动文件", "status": "applied|planned|blocked", "summary": "改了什么或准备改什么"}\n'
-    "  ],\n"
-    '  "lessons": ["可沉淀经验，适合未来变成 skill 或规则"],\n'
-    '  "next_actions": ["建议父代理下一步动作"],\n'
-    '  "blocked_reason": "",\n'
-    '  "failure_type": ""\n'
-    "}\n"
-    "[/SUBAGENT_RESULT]\n"
+from .runner_prompt_templates import (
+    COLLABORATION_CONTROL_PLANE_TOOLS,
+    COLLABORATION_TOOL_HINTS,
+    SUBAGENT_REPAIR_RESULT_TEMPLATE,
+    SUBAGENT_RESULT_TEMPLATE,
 )
-
-_SUBAGENT_REPAIR_RESULT_TEMPLATE = (
-    "[SUBAGENT_RESULT]\n"
-    "{\n"
-    '  "status": "AWAITING_ACCEPTANCE",\n'
-    '  "summary": "本轮完成或卡住的摘要",\n'
-    '  "used_tools": [],\n'
-    '  "used_skills": [],\n'
-    '  "evidence": [\n'
-    '    {"kind": "artifact", "summary": "已检查的产物或报告", "path": "产物路径或报告路径", "ok": true}\n'
-    "  ],\n"
-    '  "evidence_packets": [\n'
-    '    {"id": "evpkt-repair-run-id-short", "claim": "可验收声明", "checked_scope": "修复整理范围", "evidence_refs": ["报告或output.json路径"], "artifact_refs": ["产物路径"], "confidence": 0.8}\n'
-    "  ],\n"
-    '  "coverage_records": [],\n'
-    '  "capability_requests": [],\n'
-    '  "artifacts": [],\n'
-    '  "tests": [],\n'
-    '  "patches": [],\n'
-    '  "lessons": [],\n'
-    '  "next_actions": [],\n'
-    '  "blocked_reason": "",\n'
-    '  "failure_type": ""\n'
-    "}\n"
-    "[/SUBAGENT_RESULT]"
+from .runner_repair_log import (
+    _append_runner_repair_failure,
+    _append_runner_repair_prompt,
+    _append_runner_repair_response,
 )
 
 
@@ -126,7 +75,7 @@ def _build_subagent_runner_prompt(
         "- 最后必须输出一个机器可解析结果块，格式如下：\n\n"
         "注意：结果块里面只能放裸 JSON object，不要使用 ```json 或任何 Markdown 代码围栏。\n"
         "在最终结果块之前，不要把 [SUBAGENT_RESULT] 或 [/SUBAGENT_RESULT] 当作普通说明文字重复引用。\n\n"
-        f"{_SUBAGENT_RESULT_TEMPLATE}"
+        f"{SUBAGENT_RESULT_TEMPLATE}"
     )
 
 
@@ -151,7 +100,7 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "如果出现工具调用解析失败，再降到不超过 800 字符，并且每轮只输出 1 个写入工具调用，"
         "闭合 [/TOOL_CALL] 后再继续下一块。",
         "- write_file 和 append_file 会在授权 allowed_write_roots 内自动创建父目录；不要因为目标目录尚未创建就标记 BLOCKED。",
-        *input_dependency_contract_lines(context),
+        *read_ref_context_lines(context),
         *required_product_contract_lines(context),
         "- 如果最终结果需要列很多 artifacts 或证据，优先用 write_file 写 execution_context.output_json 的短 JSON；"
         "系统会自动把它包成 SUBAGENT_RESULT 收口，避免对话里的长结果块被截断。",
@@ -164,6 +113,7 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "- capability_request 工具返回 OPEN 后，最终结果块写 status=PENDING_CAPABILITY_REQUEST 或 BLOCKED，"
         "不要继续假装能力已经授权或命令已经执行。",
     ]
+    lines.extend(_collaboration_control_plane_lines(context))
     lines.extend(_controlled_exec_contract_lines(context))
     lines.extend(_current_role_template_lines(context))
     if "leaf" in str(context.role or "").lower():
@@ -172,6 +122,92 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
     if _is_coordinator_context(context):
         lines.extend(_coordinator_execution_contract_lines())
     return lines
+
+
+# LLM: Collaboration guidance is rendered only from granted tools, not from task-specific templates.
+# 函数用途: 子代理已获得协作工具时，给出通用 case/request/evidence 控制面入口；未授权时不污染普通任务 prompt。
+def _collaboration_control_plane_lines(context: SubAgentExecutionContext) -> list[str]:
+    tools = set(context.allowed_tools or [])
+    granted = [tool for tool in COLLABORATION_CONTROL_PLANE_TOOLS if tool in tools]
+    if not granted:
+        return []
+    return [
+        *_collaboration_intro_lines(),
+        *_targeted_request_lines(context),
+        *_collaboration_tool_lines(tools),
+        *_collaboration_closeout_lines(),
+    ]
+
+
+def _collaboration_intro_lines() -> list[str]:
+    return [
+        "- 协作控制面：你已获得部分多代理协作工具。"
+        "当任务需要兄弟代理、上级代理或其他数据源共同补证据/换来源时，"
+        "不要只在自然语言报告里描述协作，应该用已授权工具留下结构化 case、request 或 evidence 引用。"
+    ]
+
+
+def _targeted_request_lines(context: SubAgentExecutionContext) -> list[str]:
+    requests = _targeted_collaboration_requests(context)
+    if not requests:
+        return []
+    lines = [
+        "- 点名给你的协作请求：优先复用已有 case/request；"
+        "处理顺序是 case_status -> submit_evidence -> update_collaboration_request。"
+        "除非发现全新问题，不要另开 open_case。"
+    ]
+    for request in requests[:3]:
+        lines.extend(_single_targeted_request_lines(request))
+    return lines
+
+
+def _single_targeted_request_lines(request: dict[str, object]) -> list[str]:
+    lines = [_request_ref_line(request)]
+    if request.get("observed_facts"):
+        lines.append("- 线索事实：observed_facts 是开放世界线索包；kind/label/value 由请求方定义，你要按自己的数据源判断如何查询，不要把 kind 当封闭枚举。")
+    if request.get("query_hints"):
+        lines.append("- 查询提示：query_hints 是软提示；可以完整查、拆分查、改写查、扩大/缩小范围或换来源，提交 evidence 时尽量说明 queried_scopes、used_query_hints、limitations。")
+    if request.get("response_contract"):
+        lines.append("- 响应形状：优先按 response_contract 返回 matched、evidence_refs、queried_scopes、limitations；查不到也要提交 matched=false 的证据包和 miss_reason。")
+    return lines
+
+
+def _request_ref_line(request: dict[str, object]) -> str:
+    return (
+        "- 点名请求详情："
+        f"case_id={request.get('case_id') or ''}; "
+        f"request_id={request.get('request_id') or ''}; "
+        f"case_ref={request.get('case_ref') or ''}; "
+        f"request_ref={request.get('request_ref') or ''}; "
+        f"question={request.get('question') or ''}"
+    )
+
+
+def _collaboration_tool_lines(tools: set[str]) -> list[str]:
+    lines: list[str] = []
+    for name, message in COLLABORATION_TOOL_HINTS:
+        if name in tools:
+            lines.append(message)
+    if {"open_case", "request_collaboration"}.issubset(tools) and "raise_collaboration_event" not in tools:
+        lines.append("- 如果 open_case 后还需要其他代理回应、补证据或确认同一实体，建议继续调用 request_collaboration 留下明确 request；只记录事件时可以停在 open_case。")
+    return lines
+
+
+def _collaboration_closeout_lines() -> list[str]:
+    return ["- 协作结果要落到账本或产物：最终 evidence_packets/next_actions 中引用 collaboration://case/<id>、collaboration://request/<id> 或真实 artifact/evidence refs，方便上级从 tree/case 状态继续看和调度。"]
+
+
+# LLM: _targeted_collaboration_requests reads machine-provided request refs without inferring from the goal.
+# 函数用途: 从 context_bundle.collaboration 中取出点名当前 runner 的协作请求，限制 prompt 展开量。
+def _targeted_collaboration_requests(context: SubAgentExecutionContext) -> list[dict[str, object]]:
+    bundle = context.context_bundle if isinstance(context.context_bundle, dict) else {}
+    collaboration = bundle.get("collaboration")
+    if not isinstance(collaboration, dict):
+        return []
+    requests = collaboration.get("targeted_requests")
+    if not isinstance(requests, list):
+        return []
+    return [dict(item) for item in requests if isinstance(item, dict)]
 
 
 # LLM: _controlled_exec_contract_lines isolates grant-specific runner guidance from the base prompt builder.
@@ -273,7 +309,7 @@ def _build_subagent_runner_repair_prompt(
         "不要复述长报告、表格或源码。成功时必须给 evidence_packets，且每个 packet 至少包含 "
         "artifact_refs 或 evidence_refs 之一。\n\n"
         "必须只输出下面这种结果块，不要输出解释文字、Markdown 代码围栏或额外前后缀：\n\n"
-        f"{_SUBAGENT_REPAIR_RESULT_TEMPLATE}\n\n"
+        f"{SUBAGENT_REPAIR_RESULT_TEMPLATE}\n\n"
         "## Parse Problem\n\n"
         f"{problem}\n\n"
         "## Execution Context JSON\n\n"
@@ -291,39 +327,3 @@ def _clip_repair_text(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return f"[... clipped {len(text) - limit} chars ...]\n{text[-limit:]}"
-
-
-# LLM: _append_runner_repair_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 写入执行器repair提示词的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
-def _append_runner_repair_prompt(original_prompt: str, repair_prompt: str) -> str:
-
-    return (
-        f"{original_prompt}\n\n"
-        "---\n\n"
-        "# Structured Output Repair Prompt\n\n"
-        f"{repair_prompt}"
-    )
-
-
-# LLM: _append_runner_repair_response 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 写入执行器repair响应的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
-def _append_runner_repair_response(original_response: str, repair_response: str) -> str:
-
-    return (
-        f"{original_response}\n\n"
-        "---\n\n"
-        "# Structured Output Repair Response\n\n"
-        f"{repair_response}"
-    )
-
-
-# LLM: _append_runner_repair_failure 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 写入执行器repair失败的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
-def _append_runner_repair_failure(original_response: str, exc: Exception) -> str:
-
-    return (
-        f"{original_response}\n\n"
-        "---\n\n"
-        "# Structured Output Repair Failure\n\n"
-        f"{type(exc).__name__}: {exc}"
-    )

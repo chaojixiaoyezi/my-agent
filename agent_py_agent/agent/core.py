@@ -18,6 +18,9 @@ from .agent_core import (
     CapabilityRequestTool,
     CreateSubagentsTool,
     DispatchSubagentsTool,
+    InspectAgentTreeTool,
+    RaiseMainEventTool,
+    RaiseObservationTool,
     ScheduleChildSubagentsTool,
     SimpleAgentDispatchMixin,
     SimpleAgentRuntimeMixin,
@@ -66,7 +69,20 @@ from .agent_core.runner_prompts import (
 )
 from .backend import get_backend
 from .capability.runtime_config import default_capability_config_path
+from .collaboration import (
+    CaseStatusTool,
+    CollaborationStore,
+    ListCollaborationRequestsTool,
+    OpenCaseTool,
+    RaiseCollaborationEventTool,
+    RequestCollaborationTool,
+    RerouteCollaborationRequestTool,
+    SubmitEvidenceTool,
+    UpdateCaseStatusTool,
+    UpdateCollaborationRequestTool,
+)
 from .config import AgentConfig
+from .conversation import ConversationStore
 from .local_store import LocalStore
 from .memory import JsonlMemory
 from .prompting import PromptBuilder
@@ -93,6 +109,8 @@ def _resolve_paths(config, root: Path):
             "memory_path": user_paths.memory_path,
             "subagent_workspace": user_paths.subagent_workspace,
             "gateway_workspace": root / config.gateway_workspace,
+            "conversation_workspace": root / config.conversation_workspace,
+            "collaboration_workspace": root / config.collaboration_workspace,
         }
 
     return {
@@ -102,6 +120,8 @@ def _resolve_paths(config, root: Path):
         "memory_path": root / config.memory_path,
         "subagent_workspace": root / config.subagent_workspace,
         "gateway_workspace": root / config.gateway_workspace,
+        "conversation_workspace": root / config.conversation_workspace,
+        "collaboration_workspace": root / config.collaboration_workspace,
     }
 
 
@@ -161,6 +181,8 @@ class SimpleAgent(
         )
         self.prompts = PromptBuilder(config, self.root, home_paths=self.home_paths)
         self.backend = get_backend(config.model_backend, config)
+        self.conversation_store = ConversationStore(paths["conversation_workspace"])
+        self.collaboration_store = CollaborationStore(paths["collaboration_workspace"])
         self.subagents = _build_subagent_manager(self, paths)
         self.tools = _build_tool_registry(self, config)
         _register_orchestration_tools(self)
@@ -188,6 +210,7 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
     return SubAgentManager(
         paths["subagent_workspace"],
         local_store=agent.local_store,
+        collaboration_store=agent.collaboration_store,
         workspace_root=agent.root,
         workspace_roots=agent.workspace_roots,
         role_template_dirs=agent.config.subagent_role_template_dirs,
@@ -238,6 +261,18 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CapabilityRequestTool(agent))
     agent.tools.register(CapabilityConfigPatchTool(agent))
     agent.tools.register(SubagentBoardTool(agent))
+    agent.tools.register(InspectAgentTreeTool(agent))
+    agent.tools.register(RaiseObservationTool(agent))
+    agent.tools.register(RaiseMainEventTool(agent))
+    agent.tools.register(RaiseCollaborationEventTool(agent))
+    agent.tools.register(OpenCaseTool(agent))
+    agent.tools.register(RequestCollaborationTool(agent))
+    agent.tools.register(SubmitEvidenceTool(agent))
+    agent.tools.register(UpdateCollaborationRequestTool(agent))
+    agent.tools.register(RerouteCollaborationRequestTool(agent))
+    agent.tools.register(UpdateCaseStatusTool(agent))
+    agent.tools.register(CaseStatusTool(agent))
+    agent.tools.register(ListCollaborationRequestsTool(agent))
     agent.tools.register(SubagentMessageTool(agent))
     agent.tools.register(DispatchSubagentsTool(agent))
     agent.tools.register(ScheduleChildSubagentsTool(agent))
@@ -247,14 +282,25 @@ __all__ = [
     "AgentRunResult",
     "CapabilityRequestTool",
     "CapabilityConfigPatchTool",
+    "CaseStatusTool",
     "CODING_SUBAGENT_TOOLS",
     "CreateSubagentsTool",
     "DispatchSubagentsTool",
+    "InspectAgentTreeTool",
+    "ListCollaborationRequestsTool",
+    "OpenCaseTool",
+    "RaiseCollaborationEventTool",
+    "RaiseMainEventTool",
+    "RaiseObservationTool",
+    "RequestCollaborationTool",
     "ONE_SHOT_TOOL_NAMES",
     "PARENT_PLANNER_READ_TOOLS",
     "READ_ONLY_SUBAGENT_TOOLS",
     "ScheduleChildSubagentsTool",
     "SimpleAgent",
+    "SubmitEvidenceTool",
+    "UpdateCaseStatusTool",
+    "UpdateCollaborationRequestTool",
     "SubagentMessageTool",
     "SubagentBoardTool",
 ]

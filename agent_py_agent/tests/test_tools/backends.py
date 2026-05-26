@@ -398,6 +398,8 @@ class DispatchCompletionBackend(BaseBackend):
         self.calls += 1
         if self.calls > 1:
             assert "dispatch_subagents" in prompt
+            assert "result_refs_by_run" in prompt
+            assert "deliverables/report.md" in prompt
             return ModelResponse(
                 text="我已经综合子代理结果，最终产物见 deliverables/report.md。",
                 backend=self.name,

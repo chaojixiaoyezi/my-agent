@@ -5,11 +5,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
-# LLM: repeated remote-style exploration with unchanged closeout fingerprints should activate the local-progress guard.
-# 函数用途: 验证连续两轮只读 artifact 且本地进展指纹没变时，会触发“回到本地写入/构建”的通用守门。
-def test_local_progress_guard_redirects_after_repeated_exploration_without_local_progress(tmp_path: Path):
+# LLM: repeated remote-style exploration should warn at configured local-progress budget ratios.
+# 函数用途: 验证 closeout 失败后默认 50 轮本地进展预算会在 1/3、2/3 处提示并在上限阻断。
+def test_local_progress_guard_warns_at_default_budget_ratios_then_blocks(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_local_progress_guard import (
         has_required_local_progress_guard,
+        local_progress_guard_block_response,
+        local_progress_guard_context,
     )
 
     _write_closeout(
@@ -34,8 +36,27 @@ def test_local_progress_guard_redirects_after_repeated_exploration_without_local
     agent = SimpleNamespace(root=tmp_path)
     exploratory_calls = [{"tool": "read_artifact", "artifact_ref": "memory_archive/artifacts/tool_outputs/demo.json"}]
 
-    assert has_required_local_progress_guard(agent, params, exploratory_calls) is False
+    _assert_guard_false_for_rounds(has_required_local_progress_guard, (agent, params, exploratory_calls), 15)
     assert has_required_local_progress_guard(agent, params, exploratory_calls) is True
+    context = local_progress_guard_context(agent, redirects=0)
+    assert "33%" in context
+    assert "16/50" in context
+
+    _assert_guard_false_for_rounds(has_required_local_progress_guard, (agent, params, exploratory_calls), 16)
+    assert has_required_local_progress_guard(agent, params, exploratory_calls) is True
+    context = local_progress_guard_context(agent, redirects=0)
+    assert "66%" in context
+    assert "33/50" in context
+
+    _assert_guard_false_for_rounds(has_required_local_progress_guard, (agent, params, exploratory_calls), 16)
+    assert has_required_local_progress_guard(agent, params, exploratory_calls) is True
+    assert local_progress_guard_context(agent, redirects=0) == ""
+    assert "[LOCAL_PROGRESS_GUARD_BLOCKED]" in local_progress_guard_block_response(agent).text
+
+
+def _assert_guard_false_for_rounds(func, args: tuple[object, object, object], rounds: int) -> None:
+    for _ in range(rounds):
+        assert func(*args) is False
 
 
 # LLM: closeout no-progress threshold is the machine contract for how many exploration turns are allowed.
@@ -43,16 +64,21 @@ def test_local_progress_guard_redirects_after_repeated_exploration_without_local
 def test_local_progress_guard_uses_closeout_no_progress_threshold(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_local_progress_guard import (
         has_required_local_progress_guard,
+        local_progress_guard_context,
     )
 
     payload = _closeout_payload(work_progress_fingerprint="same-progress")
-    payload["delivery_progress"]["no_progress_block_threshold"] = 5
+    payload["delivery_progress"]["no_progress_block_threshold"] = 6
     _write_closeout(tmp_path, payload)
     params = _params()
     agent = SimpleNamespace(root=tmp_path)
     exploratory_calls = [{"tool": "fetch_url", "url": "https://example.test/data.json"}]
 
-    for _ in range(4):
+    assert has_required_local_progress_guard(agent, params, exploratory_calls) is False
+    assert has_required_local_progress_guard(agent, params, exploratory_calls) is True
+    assert "33%" in local_progress_guard_context(agent, redirects=0)
+
+    for _ in range(1):
         assert has_required_local_progress_guard(agent, params, exploratory_calls) is False
     assert has_required_local_progress_guard(agent, params, exploratory_calls) is True
 
@@ -62,6 +88,7 @@ def test_local_progress_guard_uses_closeout_no_progress_threshold(tmp_path: Path
 def test_local_progress_guard_zero_threshold_is_unlimited(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_local_progress_guard import (
         has_required_local_progress_guard,
+        local_progress_guard_context,
     )
 
     payload = _closeout_payload(work_progress_fingerprint="same-progress")
@@ -71,19 +98,45 @@ def test_local_progress_guard_zero_threshold_is_unlimited(tmp_path: Path):
     agent = SimpleNamespace(root=tmp_path)
     exploratory_calls = [{"tool": "fetch_url", "url": "https://example.test/data.json"}]
 
-    for _ in range(8):
+    for _ in range(9):
         assert has_required_local_progress_guard(agent, params, exploratory_calls) is False
+    assert has_required_local_progress_guard(agent, params, exploratory_calls) is True
+    context = local_progress_guard_context(agent, redirects=0)
+    assert "不会因次数阻断" in context
+    assert "第 10 轮固定提醒" in context
+
+    for _ in range(9):
+        assert has_required_local_progress_guard(agent, params, exploratory_calls) is False
+    assert has_required_local_progress_guard(agent, params, exploratory_calls) is True
+    assert "第 20 轮固定提醒" in local_progress_guard_context(agent, redirects=0)
 
 
-# LLM: zero local-progress redirect max means unlimited repair contexts.
-# 函数用途: 验证 local-progress guard 的上下文返工次数设置为 0 时不会提前消失。
-def test_local_progress_guard_zero_redirects_are_unlimited(tmp_path: Path, monkeypatch):
-    from agent_py_agent.agent.agent_core import tool_local_progress_guard as guard
+# LLM: local-progress guard can tune unlimited reminder intervals from the shared config object.
+# 函数用途: 验证本地进展门无限模式的固定提醒间隔由同一个探索/进展配置控制。
+def test_local_progress_guard_unlimited_hint_interval_is_configurable(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.exploration_fuse_config import ExplorationFuseConfig
+    from agent_py_agent.agent.agent_core.tool_local_progress_guard import (
+        has_required_local_progress_guard,
+        local_progress_guard_context,
+    )
 
-    _write_closeout(tmp_path, _closeout_payload(work_progress_fingerprint="same-progress"))
-    monkeypatch.setattr(guard, "_MAX_REDIRECTS", 0)
+    payload = _closeout_payload(work_progress_fingerprint="same-progress")
+    payload["delivery_progress"]["no_progress_block_threshold"] = 0
+    _write_closeout(tmp_path, payload)
+    params = _params()
+    agent = SimpleNamespace(
+        root=tmp_path,
+        _exploration_fuse_config=ExplorationFuseConfig(
+            local_progress_round_threshold=0,
+            local_progress_unlimited_hint_interval=7,
+        ),
+    )
+    exploratory_calls = [{"tool": "fetch_url", "url": "https://example.test/data.json"}]
 
-    assert guard.local_progress_guard_context(SimpleNamespace(root=tmp_path), redirects=99)
+    for _ in range(6):
+        assert has_required_local_progress_guard(agent, params, exploratory_calls) is False
+    assert has_required_local_progress_guard(agent, params, exploratory_calls) is True
+    assert "第 7 轮固定提醒" in local_progress_guard_context(agent, redirects=99)
 
 
 # LLM: a changed work-progress fingerprint should reset the guard budget instead of carrying old exploration debt forever.

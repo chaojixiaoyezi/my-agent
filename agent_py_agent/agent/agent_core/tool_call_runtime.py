@@ -12,17 +12,9 @@ from .runner_stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_c
 from .subagent_attempt_guard import stale_subagent_attempt_result
 from .tool_agent_budget_stage import ToolAgentBudgetStageRequest, maybe_block_tool_agent_budget
 from .tool_api_collection_contract import api_collection_contract_result
-from .tool_body_read_guard_stage import (
-    ToolBodyReadGuardStageRequest,
-    maybe_block_delegating_body_read_stage,
-)
 from .tool_call_guardrail import (
     maybe_block_repeated_tool_failure,
     maybe_block_repeated_tool_no_progress,
-)
-from .tool_direct_write_guard_stage import (
-    ToolDirectWriteGuardStageRequest,
-    maybe_block_delegate_only_direct_write_stage,
 )
 from .tool_round_execution import ToolCallExecuteParams
 from .tool_runtime_ledger import write_boundary_with_runtime_ledger
@@ -72,16 +64,6 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
     api_collection_result = api_collection_contract_result(request.params, payload)
     if api_collection_result is not None:
         return _trace_finished_result(trace_request, api_collection_result)
-    body_read_result = maybe_block_delegating_body_read_stage(
-        ToolBodyReadGuardStageRequest(runtime_request.agent, request, payload)
-    )
-    if body_read_result is not None:
-        return body_read_result
-    direct_write_result = maybe_block_delegate_only_direct_write_stage(
-        ToolDirectWriteGuardStageRequest(runtime_request.agent, request, payload)
-    )
-    if direct_write_result is not None:
-        return direct_write_result
     return maybe_block_tool_agent_budget(ToolAgentBudgetStageRequest(runtime_request.agent, request, payload))
 
 

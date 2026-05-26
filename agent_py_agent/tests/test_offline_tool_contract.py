@@ -59,8 +59,8 @@ def test_tool_result_rejects_unredacted_secret_fields() -> None:
     assert result.findings[0]["field_path"] == "result.data.token"
 
 
-# LLM: Repeated identical read-only calls with unchanged result hash should be blocked as no-progress.
-# 函数用途: 验证同工具同参数同结果连续 3 次会返回 TOOL_REPEATED_NO_PROGRESS。
+# LLM: Repeated identical read-only calls with unchanged result hash should use the unified no-progress guard code.
+# 函数用途: 验证同工具同参数同结果达到显式阈值时会返回统一工具无进展 finding。
 def test_repeated_identical_tool_calls_block_after_threshold() -> None:
     from agent_py_agent.agent.contracts.offline_tool_contract import validate_tool_events
 
@@ -75,7 +75,7 @@ def test_repeated_identical_tool_calls_block_after_threshold() -> None:
     )
 
     assert result.ok is False
-    assert result.error_codes == ("TOOL_REPEATED_NO_PROGRESS",)
+    assert result.error_codes == ("TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED",)
 
 
 # LLM: zero repeated_threshold disables the offline no-progress cap.

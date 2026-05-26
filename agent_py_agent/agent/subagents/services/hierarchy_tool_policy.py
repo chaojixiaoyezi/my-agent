@@ -28,8 +28,21 @@ _DEFAULT_LEAF_CODING_TOOLS = [
     "markdown_to_pdf",
     "schedule_child_subagents",
     "dispatch_subagents",
+    # LLM: Nested agents inherit the read-only tree inspector so status checks do not become dispatch loops.
+    "inspect_agent_tree",
     "subagent_board",
     "subagent_message",
+    "raise_observation",
+    "raise_main_event",
+    "raise_collaboration_event",
+    "open_case",
+    "request_collaboration",
+    "list_collaboration_requests",
+    "submit_evidence",
+    "update_collaboration_request",
+    "reroute_collaboration_request",
+    "update_case_status",
+    "case_status",
     "capability_request",
 ]
 # LLM: Leaf defaults intentionally include coordination tools; role changes prompt style, not basic capability.

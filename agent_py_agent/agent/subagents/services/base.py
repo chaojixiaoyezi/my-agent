@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from .collaboration_registry import register_collaboration_agent_capability
+
 if TYPE_CHECKING:
     from ..models import ContextManifest, QualityContract, SubAgentCard, SubAgentTask
 
@@ -256,6 +258,7 @@ class SubAgentBaseService:
         from ..debug_trace import trace_task_created
 
         self.manager.save(task)
+        register_collaboration_agent_capability(self.manager, task)
         # LLM: trace_task_created is gated by subagent_debug_trace_level and writes only internal refs.
         trace_task_created(self.manager, task)
         if self.manager.local_store:

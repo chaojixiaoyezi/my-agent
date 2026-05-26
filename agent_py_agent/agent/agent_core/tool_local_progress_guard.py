@@ -8,11 +8,21 @@ from pathlib import Path
 
 from ..backend import ModelResponse
 from ._runtime_params import ToolLoopExecuteParams
+from .exploration_fuse_config import exploration_fuse_config
+from .tool_local_progress_hints import (
+    HintDeliveryInput,
+    due_hint_round,
+    exploration_round_threshold,
+    hint_message,
+    mark_hint_delivered,
+    recovery_signature,
+    should_prompt_or_block,
+    used_percent,
+)
 
 _STATE_DIR = ".agent_delivery"
 _STATE_FILE = "local_progress_guard.json"
 _MAX_REDIRECTS = 2
-_EXPLORATION_ROUND_THRESHOLD = 2
 _LOCAL_PROGRESS_TOOL_NAMES = {
     "append_file",
     "api_json_collection",
@@ -43,18 +53,18 @@ def has_required_local_progress_guard(agent: object, params: ToolLoopExecutePara
     if not payload:
         return False
     state = _load_state(agent)
-    recovery_signature = _recovery_signature(params)
+    recovery_sig = recovery_signature(params)
     fingerprint = str(payload.get("work_progress_fingerprint") or "")
     failure_fingerprint = str(payload.get("failure_fingerprint") or "")
     if (
         str(state.get("work_progress_fingerprint") or "") != fingerprint
         or str(state.get("failure_fingerprint") or "") != failure_fingerprint
-        or str(state.get("recovery_signature") or "") != recovery_signature
+        or str(state.get("recovery_signature") or "") != recovery_sig
     ):
         state = {
             "failure_fingerprint": failure_fingerprint,
             "exploration_rounds_without_local_progress": 0,
-            "recovery_signature": recovery_signature,
+            "recovery_signature": recovery_sig,
             "work_progress_fingerprint": fingerprint,
         }
     if _is_local_progressive_call(payload, calls):
@@ -67,32 +77,40 @@ def has_required_local_progress_guard(agent: object, params: ToolLoopExecutePara
     count = int(state.get("exploration_rounds_without_local_progress") or 0) + 1
     state["exploration_rounds_without_local_progress"] = count
     _write_state(agent, state)
-    threshold = _exploration_round_threshold(payload)
-    return threshold > 0 and count >= threshold
+    config = exploration_fuse_config(agent)
+    return should_prompt_or_block(payload, config, state, count)
 
 
 # LLM: local_progress_guard_context exposes structured no-progress facts so the next model turn knows it must switch from exploration to local work.
 # 函数用途: 当 guard 触发时，把连续探索轮次、待处理恢复动作和缺失目标作为结构化提示喂给下一轮模型。
 def local_progress_guard_context(agent: object, redirects: int) -> str:
     payload = _guard_payload(agent)
-    if not payload or (_MAX_REDIRECTS > 0 and redirects >= _MAX_REDIRECTS):
+    config = exploration_fuse_config(agent)
+    threshold = exploration_round_threshold(payload, config) if payload else 0
+    if not payload or (threshold > 0 and _MAX_REDIRECTS > 0 and redirects >= _MAX_REDIRECTS):
         return ""
     state = _load_state(agent)
+    count = int(state.get("exploration_rounds_without_local_progress") or 0)
+    hint_round = due_hint_round(payload, config, state, count)
+    if hint_round is None:
+        return ""
+    percent = used_percent(threshold, hint_round)
     envelope = {
-        "exploration_rounds_without_local_progress": int(state.get("exploration_rounds_without_local_progress") or 0),
+        "exploration_rounds_without_local_progress": count,
         "failure_fingerprint": payload.get("failure_fingerprint", ""),
-        "no_progress_block_threshold": _exploration_round_threshold(payload),
+        "local_progress_budget_used_percent": percent,
+        "local_progress_hint_round": hint_round,
+        "no_progress_block_threshold": threshold,
         "pending_materialization_targets": payload.get("pending_materialization_targets", []),
         "recovery_actions": payload.get("recovery_actions", []),
         "work_progress_fingerprint": payload.get("work_progress_fingerprint", ""),
     }
+    mark_hint_delivered(HintDeliveryInput(agent, state, payload, config, hint_round, _write_state))
     return "\n".join(
         [
             "[tool-system local-progress-guard]",
             json.dumps(envelope, ensure_ascii=False, sort_keys=True),
-            "结构化交付状态显示你已经连续多轮只做远程/只读探索，而 outputs/scripts/data 没有新的本地推进。"
-            "请优先执行能留下本地进展的动作，例如补 checkpoint、写 draft、调用 builder tool；"
-            "如果还需要继续检索，也要同步写入来源索引、草稿或阶段数据。",
+            hint_message(threshold, count, hint_round, percent),
         ]
     )
 
@@ -114,13 +132,13 @@ def local_progress_guard_block_response(agent: object) -> ModelResponse | None:
 # LLM: reset_local_progress_guard clears stale no-progress debt after a successful machine closeout.
 # 函数用途: 任务已通过结构化收口时重置本地进展计数，避免旧失败状态污染后续恢复 attempt。
 def reset_local_progress_guard(agent: object, params: ToolLoopExecuteParams | None = None) -> None:
-    recovery_signature = _recovery_signature(params) if params is not None else ""
+    recovery_sig = recovery_signature(params) if params is not None else ""
     _write_state(
         agent,
         {
             "failure_fingerprint": "",
             "exploration_rounds_without_local_progress": 0,
-            "recovery_signature": recovery_signature,
+            "recovery_signature": recovery_sig,
             "work_progress_fingerprint": "",
         },
     )
@@ -149,7 +167,7 @@ def _guard_payload(agent: object) -> dict[str, object]:
         return {}
     return {
         "failure_fingerprint": failure_fingerprint,
-        "no_progress_block_threshold": progress.get("no_progress_block_threshold", _EXPLORATION_ROUND_THRESHOLD),
+        "no_progress_block_threshold": progress.get("no_progress_block_threshold"),
         "pending_materialization_targets": pending_targets,
         "recovery_actions": [item for item in recovery_actions if isinstance(item, dict)],
         "work_progress_fingerprint": fingerprint,
@@ -196,23 +214,6 @@ def _write_state(agent: object, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
-# LLM: _recovery_signature scopes no-progress debt to the current structured recovery attempt.
-# 函数用途: 续跑 attempt 不能继承上一轮已经累计到临界值的探索计数；签名只来自机器合同字段。
-def _recovery_signature(params: ToolLoopExecuteParams) -> str:
-    contract = params.delivery_contract if isinstance(params.delivery_contract, dict) else {}
-    recovery = contract.get("recovery") if isinstance(contract.get("recovery"), dict) else {}
-    if not recovery:
-        return ""
-    payload = {
-        "case_id": recovery.get("case_id") or "",
-        "packet_ref": recovery.get("packet_ref") or "",
-        "recommended_action": recovery.get("recommended_action") or "",
-        "reason_codes": recovery.get("reason_codes") if isinstance(recovery.get("reason_codes"), list) else [],
-        "schema_version": recovery.get("schema_version") or "",
-    }
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
-
-
 # LLM: _is_local_progressive_call checks whether any tool call advances checkpoint/draft/builder work locally.
 # 函数用途: 判断一轮工具调用里是否包含 builder 或本地写入动作，从而重置 no-progress 计数。
 def _is_local_progressive_call(payload: dict[str, object], calls: list[dict[str, object]] | None) -> bool:
@@ -226,18 +227,6 @@ def _is_local_progressive_call(payload: dict[str, object], calls: list[dict[str,
     }
     productive_tools = {tool for tool in action_tools if tool} | _LOCAL_PROGRESS_TOOL_NAMES
     return any(_call_is_local_progressive(call, productive_tools) for call in calls)
-
-
-# LLM: _exploration_round_threshold keeps this runtime helper grounded in structured fields.
-# 函数用途: 处理当前模块的结构化数据流，不把普通自然语言文本当作系统事实来源。
-def _exploration_round_threshold(payload: dict[str, object]) -> int:
-    try:
-        value = int(payload.get("no_progress_block_threshold"))
-    except (TypeError, ValueError):
-        return _EXPLORATION_ROUND_THRESHOLD
-    if value == 0:
-        return 0
-    return max(_EXPLORATION_ROUND_THRESHOLD, value)
 
 
 # LLM: _call_is_local_progressive classifies one call as genuine local progress rather than exploration.

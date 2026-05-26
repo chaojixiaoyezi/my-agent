@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from .orchestration_dispatch_run_ids import dispatch_include_run_ids_param
 from .parameters import _bool_param, _non_negative_int, _string_list
 from .runner_context import current_subagent_run_id
 from .spawn_role_seed import is_explicit_root_role
@@ -15,6 +16,8 @@ _DISPATCH_FINAL_STATUSES = {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN
 def dispatch_apply_default(agent, params: dict[str, object]) -> bool:
     if "apply" in params:
         return _bool_param(params.get("apply"), default=False)
+    if dispatch_include_run_ids_param(params, agent=agent):
+        return True
     return bool(current_subagent_run_id(agent))
 
 
@@ -23,6 +26,8 @@ def dispatch_apply_default(agent, params: dict[str, object]) -> bool:
 def dispatch_execute_runners_default(agent, params: dict[str, object], *, apply: bool) -> bool:
     if "execute_runners" in params:
         return _bool_param(params.get("execute_runners"), default=False)
+    if apply and dispatch_include_run_ids_param(params, agent=agent):
+        return True
     return bool(apply and current_subagent_run_id(agent))
 
 
@@ -36,6 +41,8 @@ def dispatch_execute_acceptance_tests_default(
     execute_runners: bool,
 ) -> bool:
     if apply and execute_runners:
+        return True
+    if _targets_waiting_for_acceptance(agent, params, apply=apply):
         return True
     if "execute_acceptance_tests" in params:
         return _bool_param(params.get("execute_acceptance_tests"), default=False)
@@ -54,7 +61,11 @@ def dispatch_auto_apply_acceptance_followup_default(
 ) -> bool:
     if "auto_apply_acceptance_followup" in params:
         return _bool_param(params.get("auto_apply_acceptance_followup"), default=False)
-    return bool(apply and execute_runners and execute_acceptance_tests)
+    return bool(
+        apply
+        and execute_acceptance_tests
+        and (execute_runners or _targets_waiting_for_acceptance(agent, params, apply=apply))
+    )
 
 
 # LLM: dispatch_max_runners_default prevents explicit run_ids from being silently under-executed.
@@ -66,7 +77,7 @@ def dispatch_max_runners_default(agent, params: dict[str, object], *, execute_ru
         return _non_negative_int(params.get("runner_limit"), default=1)
     if execute_runners and "limit" in params:
         return _non_negative_int(params.get("limit"), default=1)
-    explicit_run_ids = _string_list(params.get("run_ids") or params.get("include_run_ids"))
+    explicit_run_ids = dispatch_include_run_ids_param(params, agent=agent)
     if execute_runners and explicit_run_ids:
         return len(explicit_run_ids)
     if current_subagent_run_id(agent):
@@ -95,7 +106,7 @@ def _explicit_workflow_off_target_dispatch(agent, params: dict[str, object]) -> 
         return False
     if not _bool_param(params.get("apply"), default=False):
         return False
-    run_ids = _string_list(params.get("run_ids") or params.get("include_run_ids"))
+    run_ids = dispatch_include_run_ids_param(params, agent=agent)
     if not run_ids:
         return False
     return all(_target_workflow_mode(agent, run_id) == "off" for run_id in run_ids)
@@ -109,6 +120,68 @@ def _target_workflow_mode(agent, run_id: str) -> str:
     except Exception:
         return ""
     return str(getattr(task, "workflow_mode", "") or "").strip().lower()
+
+
+# LLM: Acceptance-only dispatch should still run machine checks when the target is already waiting.
+# 函数用途: 模型只传 apply+run_ids 推进待验收 run 时，默认执行父级验收，不再要求额外猜 execute_acceptance_tests。
+def _targets_waiting_for_acceptance(agent, params: dict[str, object], *, apply: bool) -> bool:
+    if not apply:
+        return False
+    for task in _target_tasks(agent, params):
+        if _task_waiting_for_acceptance(task):
+            return True
+    return False
+
+
+def _target_tasks(agent, params: dict[str, object]) -> list[object]:
+    manager = getattr(agent, "subagents", None)
+    if manager is None:
+        return []
+    run_ids = dispatch_include_run_ids_param(params, agent=agent)
+    if run_ids:
+        return _load_run_ids(manager, run_ids)
+    return _scoped_waiting_tasks(manager, params)
+
+
+def _load_run_ids(manager: object, run_ids: list[str]) -> list[object]:
+    loaded: list[object] = []
+    load = getattr(manager, "load", None)
+    if not callable(load):
+        return loaded
+    for run_id in run_ids:
+        try:
+            loaded.append(load(run_id))
+        except Exception:
+            continue
+    return loaded
+
+
+def _scoped_waiting_tasks(manager: object, params: dict[str, object]) -> list[object]:
+    if not (params.get("parent_run_id") or params.get("root_id")):
+        return []
+    list_runs = getattr(manager, "list_runs", None)
+    if not callable(list_runs):
+        return []
+    parent_run_id = str(params.get("parent_run_id") or "").strip()
+    root_id = str(params.get("root_id") or "").strip()
+    tasks: list[object] = []
+    try:
+        candidates = list_runs()
+    except Exception:
+        return []
+    for task in candidates:
+        if parent_run_id and str(getattr(task, "parent_id", "") or "") != parent_run_id:
+            continue
+        if root_id and str(getattr(task, "root_id", "") or "") != root_id:
+            continue
+        tasks.append(task)
+    return tasks
+
+
+def _task_waiting_for_acceptance(task: object) -> bool:
+    status = str(getattr(task, "status", "") or "").upper()
+    verification = str(getattr(task, "verification_status", "") or "").upper()
+    return status == "AWAITING_ACCEPTANCE" or verification == "NEEDS_ACCEPTANCE"
 
 
 # LLM: _top_level_root_role_dispatch protects coordinator-owned hierarchy from generic workflow auto-splitting.

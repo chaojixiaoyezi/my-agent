@@ -217,13 +217,19 @@ def dispatch_loop(
 # 函数用途: 处理finalpending执行器数量相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _final_pending_runner_count(agent) -> int:
     try:
-        from .runner_dispatch import _dispatch_runner_candidates, _runner_max_attempts
+        from .runner_dispatch import (
+            _dispatch_runner_candidates,
+            _runner_max_attempts,
+            _same_run_redispatch_limit,
+        )
 
         runner_max_attempts = _runner_max_attempts(agent.config.runner_failure_policy)
+        same_run_limit = _same_run_redispatch_limit(getattr(agent.config, "same_run_redispatch_limit", None))
         candidates = _dispatch_runner_candidates(
             agent.subagents.list_runs(),
             max_runners=999,
             runner_max_attempts=runner_max_attempts,
+            same_run_redispatch_limit=same_run_limit,
         )
         return len(candidates)
     except Exception:

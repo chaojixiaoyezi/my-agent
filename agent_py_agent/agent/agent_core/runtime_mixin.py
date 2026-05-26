@@ -11,17 +11,12 @@ from __future__ import annotations
 Facade pattern: delegates to service classes in runtime_services.py.
 """
 
-import time as time_module
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 
 from .compact_auto_continuation import (
     compact_auto_continuation_decision,
     mark_compact_auto_continued,
-)
-from .delivery_requirement_materializer import (
-    build_delivery_requirement_materializer_prompt,
-    materialized_delivery_contract,
 )
 from .runtime_loop_models import RuntimeContextRequest
 from .runtime_loop_support import (
@@ -31,11 +26,14 @@ from .runtime_loop_support import (
     _finalize_params,
     _prepare_runtime_context,
     _runtime_loop_params,
-    run_params_from_values,
+)
+from .runtime_run_params import (
+    RunCompatibilityFields,
+    run_params_from_compat,
+    run_params_with_materialized_delivery_contract,
+    run_params_with_request_id,
 )
 from .runtime_services import CompressionService, FinalizationService, ToolLoopService
-
-_AUTO_MATERIALIZE_SOURCES = {"chat", "cli_run", "gateway"}
 
 
 # LLM: _RuntimeServices 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -60,53 +58,48 @@ class _CompressionSnapshotRequest:
     resume_context_section: object
 
 
-# LLM: _RunCompatibilityFields 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存runcompatibility字段字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
-class _RunCompatibilityFields:
-    # LLM: 旧运行关键字字段先集中收集，再构造统一运行参数。
-    inject: list[str] | None = None
-    prompt_files: list[str] | None = None
-    save: bool | None = None
-    allowed_tools: list[str] | None = None
-    granted_capabilities: list[str] | None = None
-    write_boundary: dict[str, object] | None = None
-    request_id: str | None = None
-    run_id: str | None = None
-    task_id: str | None = None
-    task_attributes: dict | None = None
-    delivery_contract: dict | None = None
-    system_prompt_override: str | None = None
-    source: str | None = None
-    recovery_snapshot: bool | None = None
-    resume_context: bool | None = None
-    recovery_task_refs: list[str] | None = None
-    recovery_content_paths: list[str] | None = None
-    recovery_next_actions: list[str] | None = None
-    on_chunk: object = None
-    context_scope: str | None = None
+class _PromptScopeSnapshot:
+    had_prompt: bool
+    previous_prompt: str
+    had_params: bool
+    previous_params: object
 
 
-# LLM: _current_prompt_scope keeps run() flat while preserving the legacy _current_user_prompt behavior.
-# 函数用途: 在一次 run 内设置当前用户 prompt，退出时恢复旧值或删除临时字段。
+# LLM: _current_prompt_scope keeps run() flat while exposing current run identity to tools.
+# 函数用途: 在一次 run 内设置当前用户 prompt 和 RunParams，退出时恢复旧值或删除临时字段。
 @contextmanager
-def _current_prompt_scope(agent, user_prompt: str):
+def _current_prompt_scope(agent, user_prompt: str, params: RunParams | None = None):
     had_current_prompt = hasattr(agent, "_current_user_prompt")
     previous_current_prompt = getattr(agent, "_current_user_prompt", "")
+    had_current_run_params = hasattr(agent, "_current_run_params")
+    previous_current_run_params = getattr(agent, "_current_run_params", None)
     agent._current_user_prompt = user_prompt
+    if params is not None:
+        agent._current_run_params = params
+    snapshot = _PromptScopeSnapshot(
+        had_current_prompt,
+        previous_current_prompt,
+        had_current_run_params,
+        previous_current_run_params,
+    )
     try:
         yield
     finally:
-        _restore_current_prompt(agent, had_current_prompt, previous_current_prompt)
+        _restore_current_prompt(agent, snapshot)
 
 
 # LLM: _restore_current_prompt keeps the context manager below nesting limits.
-# 函数用途: 退出 run 作用域时恢复旧 prompt；旧字段不存在时删除临时字段。
-def _restore_current_prompt(agent, had_current_prompt: bool, previous_current_prompt: str) -> None:
-    if had_current_prompt:
-        agent._current_user_prompt = previous_current_prompt
+# 函数用途: 退出 run 作用域时恢复旧 prompt/RunParams；旧字段不存在时删除临时字段。
+def _restore_current_prompt(agent, snapshot: _PromptScopeSnapshot) -> None:
+    if snapshot.had_prompt:
+        agent._current_user_prompt = snapshot.previous_prompt
     elif hasattr(agent, "_current_user_prompt"):
         delattr(agent, "_current_user_prompt")
+    if snapshot.had_params:
+        agent._current_run_params = snapshot.previous_params
+    elif hasattr(agent, "_current_run_params"):
+        delattr(agent, "_current_run_params")
 
 
 # LLM: SimpleAgentRuntimeMixin 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -178,9 +171,9 @@ class SimpleAgentRuntimeMixin:
         context_scope: str | None = None,
     ):
         provided_params = params
-        params = _run_params_from_compat(
+        params = run_params_from_compat(
             params,
-            _RunCompatibilityFields(
+            RunCompatibilityFields(
                 inject=inject,
                 prompt_files=prompt_files,
                 save=save,
@@ -251,39 +244,11 @@ class SimpleAgentRuntimeMixin:
         return self.memory.search(query, top_k or self.config.memory_top_k)
 
 
-# LLM: _run_params_from_compat 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 推进来自参数compat的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
-def _run_params_from_compat(params: RunParams, fields: _RunCompatibilityFields) -> RunParams:
-    return run_params_from_values(
-        params,
-        inject=fields.inject,
-        prompt_files=fields.prompt_files,
-        save=fields.save,
-        allowed_tools=fields.allowed_tools,
-        granted_capabilities=fields.granted_capabilities,
-        write_boundary=fields.write_boundary,
-        request_id=fields.request_id,
-        run_id=fields.run_id,
-        task_id=fields.task_id,
-        task_attributes=fields.task_attributes,
-        delivery_contract=fields.delivery_contract,
-        system_prompt_override=fields.system_prompt_override,
-        source=fields.source,
-        recovery_snapshot=fields.recovery_snapshot,
-        resume_context=fields.resume_context,
-        recovery_task_refs=fields.recovery_task_refs,
-        recovery_content_paths=fields.recovery_content_paths,
-        recovery_next_actions=fields.recovery_next_actions,
-        on_chunk=fields.on_chunk,
-        context_scope=fields.context_scope,
-    )
-
-
 # LLM: _run_with_params keeps the public run() compatibility shim under code-size limits.
 # 函数用途: 执行已归一化的 RunParams，串接准备上下文、工具循环和 finalization。
 def _run_with_params(agent, user_prompt: str, params: RunParams):
-    current_params = _run_params_with_request_id(params)
-    current_params = _run_params_with_materialized_delivery_contract(agent, user_prompt, current_params)
+    current_params = run_params_with_request_id(params)
+    current_params = run_params_with_materialized_delivery_contract(agent, user_prompt, current_params)
     result = _run_once_with_params(agent, user_prompt, current_params)
     while True:
         decision = compact_auto_continuation_decision(
@@ -299,47 +264,10 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
         current_params = next_params
 
 
-# LLM: request/run/task ids must exist before context-bundle and tool-output artifact writes.
-# 函数用途: 普通 run 没有显式 scope 时提前生成稳定运行标识，保证工具输出、runtime facts 和 compact scope 可对齐。
-def _run_params_with_request_id(params: RunParams) -> RunParams:
-    request_id = params.request_id or f"run-{time_module.time_ns()}"
-    run_id = params.run_id or request_id
-    task_id = params.task_id or run_id
-    if params.request_id == request_id and params.run_id == run_id and params.task_id == task_id:
-        return params
-    return replace(params, request_id=request_id, run_id=run_id, task_id=task_id)
-
-
-def _run_params_with_materialized_delivery_contract(agent, user_prompt: str, params: RunParams) -> RunParams:
-    if params.delivery_contract is not None or not _should_materialize_delivery_contract(params):
-        return params
-    prompt = build_delivery_requirement_materializer_prompt(user_prompt)
-    response = agent.backend.generate(prompt)
-    contract = materialized_delivery_contract(response.text, workspace_root=agent.root)
-    if not _has_materialized_runtime_contract(contract):
-        return params
-    return replace(params, delivery_contract=contract)
-
-
-def _should_materialize_delivery_contract(params: RunParams) -> bool:
-    return str(params.source or "").strip() in _AUTO_MATERIALIZE_SOURCES
-
-
-def _has_materialized_runtime_contract(contract: dict) -> bool:
-    return any(
-        (
-            bool(contract.get("artifacts")),
-            isinstance(contract.get("delivery_quality_contract"), dict),
-            isinstance(contract.get("fact_evidence_contract"), dict),
-            isinstance(contract.get("bootstrap_contract"), dict),
-        )
-    )
-
-
 # LLM: _run_once_with_params contains one normal model/tool/finalize pass for reuse by auto continuation.
 # 函数用途: 执行单轮 run，不处理自动 compact 后续跑，避免递归和重复上下文作用域。
 def _run_once_with_params(agent, user_prompt: str, params: RunParams):
-    with _current_prompt_scope(agent, user_prompt):
+    with _current_prompt_scope(agent, user_prompt, params):
         prepared = _prepare_runtime_context(
             agent,
             RuntimeContextRequest(

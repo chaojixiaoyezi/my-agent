@@ -8945,3 +8945,28 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Status:
   - Fixed for explicit content-line contracts on single ordinary-file artifacts.
   - Remaining improvement: new plain-file tasks should learn to create content-line contracts more often, so they do not depend on a seeded failed run to carry exact checks.
+
+### Finding 186: dispatch_subagents must not replace the parent synthesis turn
+
+- Trigger:
+  - The 5-subagent coordination smoke finished child work and wrote collaboration state, but final output was missing.
+  - The root did not get a normal next model turn after `dispatch_subagents`; an older deterministic closeout path could locally answer from task state.
+- Problem:
+  - `dispatch_subagents` had drifted from "advance and report child state" into "sometimes decide the final answer locally".
+  - That breaks collaboration-style tasks: the parent model should inspect child summaries/refs, decide whether to close the case, and write the final report in its own words.
+  - The old behavior also conflicted with reference projects: child/delegate results are handed back to the requester/coordinator, not used as a local replacement for that agent's final reasoning.
+- 中文解释:
+  - `dispatch_subagents` 应该像“推进一下并把子代理状态递回来”。
+  - 它不应该说“我看子代理都完成了，那我替主代理直接结案”。
+  - 主代理必须看到子代理索引和 refs，然后自己决定下一步。
+- Fix:
+  - Removed the post-dispatch deterministic completion/rework response from `tool_loop_completion.py`.
+  - Deleted the unused deterministic completion helper path from `subagent_dispatch_closeout.py` / rendering helpers.
+  - `dispatch_subagents` now returns compact child result refs/status even when the dispatch report did not touch a concrete run id, so it can work as a status-index action.
+  - The live prompt summary now exposes `result_refs_by_run` and artifact refs for the next model turn.
+- Verification:
+  - Focused regression proves completed dispatch now makes a second backend/model call and the parent turn sees `result_refs_by_run`.
+  - Runtime guard tests still prove final overclaiming is corrected when persisted child state has blockers.
+  - Real MiniMax-M2.7 smoke `real-5-subagents-post-dispatch-index-20260526-102608` passed in 170.82 seconds. After `dispatch_subagents`, the parent read the dispatch artifact, wrote `outputs/final_report.md`, verified it, and `submit_for_acceptance` returned `MAIN_AGENT_DELIVERY_COMPLETE`.
+- Status:
+  - Fixed for the dispatch/parent-synthesis loop and verified by the 5-subagent coordination smoke.

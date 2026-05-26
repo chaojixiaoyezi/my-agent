@@ -250,9 +250,9 @@ def test_delivery_closeout_does_not_materialize_builder_output_before_source_is_
         ]
 
 
-# LLM: Repeated staged JSON failures should route into repair guard before no-progress closeout blocks.
-# 函数用途: 验证 JSON 阶段文件损坏时，即使失败重复，也先给结构化修复链路接管机会。
-def test_delivery_closeout_defers_no_progress_block_when_write_first_repair_exists():
+# LLM: repeated staged JSON failures use the unified closeout retry budget.
+# 函数用途: 验证 JSON 阶段文件损坏重复失败时，不再交给独立 delivery repair 门豁免，而是由 closeout 预算收口。
+def test_delivery_closeout_blocks_by_budget_even_when_write_first_repair_exists():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td).resolve()
         contract = xlsx_delivery_contract()
@@ -260,15 +260,16 @@ def test_delivery_closeout_defers_no_progress_block_when_write_first_repair_exis
         previous = _previous_delivery_progress(report, unchanged_failure_count=5)
 
         from agent_py_agent.agent.agent_core.main_agent_delivery_closeout import (
+            DeliveryProgressContext,
             _enrich_delivery_progress,
             _should_block_on_no_progress,
         )
 
-        enriched = _enrich_delivery_progress(report, previous, workspace, contract=contract)
+        enriched = _enrich_delivery_progress(report, previous, DeliveryProgressContext(workspace, contract))
 
         assert "STAGED_JSON_INVALID" in actions
         assert enriched["delivery_progress"]["unchanged_failure_count"] >= 6
-        assert _should_block_on_no_progress(enriched, contract=contract, workspace_root=workspace) is False
+        assert _should_block_on_no_progress(enriched, contract=contract, workspace_root=workspace) is True
 
 
 # LLM: explicit zero no-progress threshold means no closeout loop cap.
@@ -299,14 +300,15 @@ def test_delivery_progress_tracks_contract_declared_artifact_roots():
         report = _failed_custom_root_artifact_report(workspace)
 
         from agent_py_agent.agent.agent_core.main_agent_delivery_closeout import (
+            DeliveryProgressContext,
             _enrich_delivery_progress,
         )
 
-        first = _enrich_delivery_progress(report, {}, workspace, contract=contract)
+        first = _enrich_delivery_progress(report, {}, DeliveryProgressContext(workspace, contract))
         target = workspace / "lab_outputs/custom-artifact/index.html"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("<!doctype html><html><body><input id='email'></body></html>", encoding="utf-8")
-        second = _enrich_delivery_progress(report, first, workspace, contract=contract)
+        second = _enrich_delivery_progress(report, first, DeliveryProgressContext(workspace, contract))
 
         assert second["delivery_progress"]["unchanged_failure_count"] == 1
 
@@ -364,6 +366,7 @@ def _enriched_report_for_source(
 ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
     from agent_py_agent.agent.agent_core.main_agent_delivery_closeout import (
         DeliveryContractValidationRequest,
+        DeliveryProgressContext,
         _enrich_delivery_progress,
         _validate_contract_artifacts,
     )
@@ -377,7 +380,7 @@ def _enriched_report_for_source(
             params=RunParams(delivery_contract=contract, save=False),
         )
     )
-    enriched = _enrich_delivery_progress(report, {}, workspace, contract=contract)
+    enriched = _enrich_delivery_progress(report, {}, DeliveryProgressContext(workspace, contract))
     actions = {item["code"]: item for item in enriched["delivery_progress"]["recovery_actions"]}
     return enriched, actions
 
@@ -390,6 +393,7 @@ def _enriched_report(
 ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
     from agent_py_agent.agent.agent_core.main_agent_delivery_closeout import (
         DeliveryContractValidationRequest,
+        DeliveryProgressContext,
         _enrich_delivery_progress,
         _validate_contract_artifacts,
     )
@@ -402,7 +406,7 @@ def _enriched_report(
             params=RunParams(delivery_contract=contract, save=False),
         )
     )
-    enriched = _enrich_delivery_progress(report, {}, workspace, contract=contract)
+    enriched = _enrich_delivery_progress(report, {}, DeliveryProgressContext(workspace, contract))
     actions = {item["code"]: item for item in enriched["delivery_progress"]["recovery_actions"]}
     return enriched, actions
 

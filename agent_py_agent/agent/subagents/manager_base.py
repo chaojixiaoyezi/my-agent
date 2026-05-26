@@ -34,6 +34,9 @@ if TYPE_CHECKING:
 class SubAgentManagerInitParams:
 
     local_store: LocalStore | None = None
+    # LLM: collaboration_store lets runner context reuse existing case/request refs without parsing goals.
+    # 参数说明: 协作账本依赖；为空时子代理仍按普通无协作上下文运行。
+    collaboration_store: Any | None = None
     workspace_root: str | Path | None = None
     workspace_roots: list[str | Path] | None = None
     role_template_dirs: list[str | Path] | None = None
@@ -55,6 +58,7 @@ class SubAgentBaseMixin:
         *,
         params: SubAgentManagerInitParams | None = None,
         local_store: LocalStore | None = None,
+        collaboration_store: Any | None = None,
         workspace_root: str | Path | None = None,
         workspace_roots: list[str | Path] | None = None,
         role_template_dirs: list[str | Path] | None = None,
@@ -62,6 +66,7 @@ class SubAgentBaseMixin:
     ):
         params = params or SubAgentManagerInitParams(
             local_store=local_store,
+            collaboration_store=collaboration_store,
             workspace_root=workspace_root,
             workspace_roots=workspace_roots,
             role_template_dirs=role_template_dirs,
@@ -71,6 +76,7 @@ class SubAgentBaseMixin:
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.cards: dict[str, SubAgentCard] = {}
         self.local_store = params.local_store
+        self.collaboration_store = params.collaboration_store
         self.workspace_root = Path(params.workspace_root).resolve() if params.workspace_root else self.workspace.resolve().parent
         self.workspace_roots = _normalized_workspace_roots(self.workspace_root, params.workspace_roots)
         self.role_template_dirs = _normalized_template_dirs(self.workspace_root, params.role_template_dirs)

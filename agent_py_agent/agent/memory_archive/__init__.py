@@ -54,7 +54,7 @@ from .daily_ledger import (
     daily_events_path_for,
 )
 from .models import CompressionSnapshot, RawMemoryEvent
-from .resume_context import ResumeContextResult, build_auto_resume_context
+from .resume_context import ResumeContextResult, build_auto_resume_context, has_resume_trigger
 from .runtime import ArchiveRunTurnResult, archive_run_turn
 from .schema import (
     RESERVED_FIELD_KEYS,
@@ -147,6 +147,8 @@ __all__ = [
     "apply_memory_compact",
     "append_subagent_task_event",
     "build_auto_resume_context",
+    # LLM: re-export prompt-only resume intent detection without loading archive history.
+    "has_resume_trigger",
     "build_compact_continue_packet",
     "build_memory_compact_resume",
     "build_compact_action_guard",

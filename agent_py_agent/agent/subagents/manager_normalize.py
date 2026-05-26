@@ -72,7 +72,9 @@ def _normalize_context_manifest(value: object) -> ContextManifest:
     if not isinstance(value, dict):
         return ContextManifest()
     payload = {key: value[key] for key in _field_names(ContextManifest) if key in value}
-    for key in ["task_pack_refs", "required_read_paths", "omitted_context"]:
+    # LLM: hint_read_paths survives persistence as soft read guidance, not a startup dependency gate.
+    # 函数用途: 归一化 refs-first 读线索，避免恢复后丢失父级给子代理的参考路径。
+    for key in ["task_pack_refs", "required_read_paths", "hint_read_paths", "omitted_context"]:
         payload[key] = _string_list_value(payload.get(key))
     try:
         payload["token_budget"] = int(payload.get("token_budget") or 0)

@@ -69,8 +69,10 @@ class TestExecutor:
         method = _validation_method(test)
         if method == "command":
             return self._execute_command(test)
-        if method == "file_check":
-            return self._check_file(test)
+        # LLM: file existence aliases share the same workspace-bound metadata check.
+        # 函数用途: 兼容不同合同命名，不要求上层为同一类文件存在性检查写多套执行器。
+        if method in {"file_check", "file_exists", "path_exists", "artifact_exists"}:
+            return self._check_file(test, method="file_check" if method != "file_check" else method)
         if method == "content_check":
             return self._check_content(test)
         if method == "static_site_check":
@@ -136,10 +138,10 @@ class TestExecutor:
 
     # LLM: _check_file validates existence inside workspace and records metadata only.
     # 函数用途: 检查 workspace 内文件是否存在；只读取元数据，不读取正文。
-    def _check_file(self, test: dict[str, Any]) -> TestExecutionRecord:
-        path, error = self._resolve_test_path(test.get("file_path"))
+    def _check_file(self, test: dict[str, Any], *, method: str = "file_check") -> TestExecutionRecord:
+        path, error = self._resolve_test_path(test.get("file_path") or test.get("path"))
         if error:
-            return _file_record(test, "file_check", error=error)
+            return _file_record(test, method, error=error)
         exists = path.exists() and path.is_file()
         result = _file_result(path, exists)
         return TestExecutionRecord(
@@ -147,7 +149,7 @@ class TestExecutor:
             executed=True,
             exit_code=0 if exists else 1,
             executed_at=_utc_now_iso(),
-            validation_method="file_check",
+            validation_method=method,
             validation_result=result,
             error="" if exists else "文件不存在",
         )

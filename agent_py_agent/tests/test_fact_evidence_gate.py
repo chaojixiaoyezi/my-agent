@@ -81,36 +81,7 @@ def test_fact_evidence_gate_accepts_verified_claims_with_archive_backing() -> No
 
 
 def test_delivery_closeout_blocks_artifact_when_fact_evidence_gate_fails(tmp_path: Path) -> None:
-    (tmp_path / "out.txt").write_text("finished artifact", encoding="utf-8")
-    (tmp_path / "source_data.json").write_text(
-        json.dumps(
-            {
-                "source_refs": [{"source_id": "src-1", "uri": "https://example.invalid/data"}],
-                "claims": [
-                    {
-                        "claim_id": "claim-1",
-                        "field": "measured_value",
-                        "value": 42,
-                        "source_ids": ["src-1"],
-                        "verification_status": "VERIFIED",
-                        "value_type": "exact",
-                    }
-                ],
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    params = _delivery_closeout_params(archive_tool_calls=[_write_file_archive_record()])
-    params.delivery_contract["fact_evidence_payload_ref"] = "source_data.json"
-    params.delivery_contract["fact_evidence_contract"] = {
-        "evidence_contract": {
-            "required_fields": ["measured_value"],
-            "allowed_value_types": ["exact"],
-            "require_verified": True,
-        },
-        "require_tool_backed_sources": True,
-    }
+    params = _fact_evidence_closeout_params(tmp_path)
     agent = SimpleNamespace(root=tmp_path, tools=SimpleNamespace(workspace_root=tmp_path))
 
     response = main_agent_delivery_closeout_response(
@@ -118,11 +89,7 @@ def test_delivery_closeout_blocks_artifact_when_fact_evidence_gate_fails(tmp_pat
     )
     report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
     context_payload = json.loads(params.tool_context[-1].split("\n", 1)[1])
-    progress_events = [
-        json.loads(line)
-        for line in (tmp_path / ".agent_delivery" / "progress_ledger.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    progress_events = _progress_events(tmp_path)
 
     assert response is None
     assert report["fact_evidence_gate"]["status"] == "NEED_REPAIR"
@@ -138,6 +105,44 @@ def test_delivery_closeout_blocks_artifact_when_fact_evidence_gate_fails(tmp_pat
     assert progress_events[-1]["ok"] is False
     assert progress_events[-1]["failed_gates"][0]["gate"] == "fact_evidence"
     assert progress_events[-1]["recovery_actions"][0]["checkpoint_ref"] == "source_data.json"
+
+
+def _fact_evidence_closeout_params(tmp_path: Path):
+    (tmp_path / "out.txt").write_text("finished artifact", encoding="utf-8")
+    (tmp_path / "source_data.json").write_text(json.dumps(_unbacked_fact_payload(), ensure_ascii=False), encoding="utf-8")
+    params = _delivery_closeout_params(archive_tool_calls=[_write_file_archive_record()])
+    params.delivery_contract["fact_evidence_payload_ref"] = "source_data.json"
+    params.delivery_contract["fact_evidence_contract"] = {
+        "evidence_contract": {
+            "required_fields": ["measured_value"],
+            "allowed_value_types": ["exact"],
+            "require_verified": True,
+        },
+        "require_tool_backed_sources": True,
+    }
+    return params
+
+
+def _unbacked_fact_payload() -> dict[str, object]:
+    return {
+        "source_refs": [{"source_id": "src-1", "uri": "https://example.invalid/data"}],
+        "claims": [{
+            "claim_id": "claim-1",
+            "field": "measured_value",
+            "value": 42,
+            "source_ids": ["src-1"],
+            "verification_status": "VERIFIED",
+            "value_type": "exact",
+        }],
+    }
+
+
+def _progress_events(tmp_path: Path) -> list[dict[str, object]]:
+    return [
+        json.loads(line)
+        for line in (tmp_path / ".agent_delivery" / "progress_ledger.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
 
 def test_delivery_closeout_turns_bad_fact_payload_json_into_repair_context(tmp_path: Path) -> None:

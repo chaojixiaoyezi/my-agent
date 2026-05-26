@@ -164,6 +164,7 @@ class SubAgentCapabilityMixin:
         selected_hits: list[CapabilitySearchHit],
         apply: bool,
     ) -> CapabilityRouteRecord:
+        selected_hits = _hits_matching_requested_scope(request, selected_hits)
         selected_cards, granted_skills, granted_tools, reasons = extract_selected_hits_data(selected_hits)
         if existing_grant := existing_delete_trash_grant(task, request):
             return route_existing_capability_grant(
@@ -194,6 +195,25 @@ class SubAgentCapabilityMixin:
                 reasons=reasons,
             )
         )
+
+
+# LLM: _hits_matching_requested_scope prevents generic keyword matches from granting unrelated requested tools.
+# 函数用途: 当请求点名具体 tool/skill/mcp/command 时，只接受同名命中；未知开放能力保持 GAP。
+def _hits_matching_requested_scope(
+    request: CapabilityRequest,
+    hits: list[CapabilitySearchHit],
+) -> list[CapabilitySearchHit]:
+    requested_tools = set(request.requested_tools or [])
+    requested_skills = set(request.requested_skills or [])
+    requested_mcp = set(request.requested_mcp_tools or [])
+    if requested_mcp:
+        return [hit for hit in hits if hit.card.kind == "mcp" and hit.card.name in requested_mcp]
+    if requested_tools:
+        return [hit for hit in hits if hit.card.kind == "tool" and hit.card.name in requested_tools]
+    if requested_skills:
+        return [hit for hit in hits if hit.card.kind == "skill" and hit.card.name in requested_skills]
+    return hits
+
 
 # LLM: _capability_route_options 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 函数用途: 处理能力route选项相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。

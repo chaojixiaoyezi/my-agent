@@ -6,21 +6,6 @@ from __future__ import annotations
 from .subagent_dispatch_closeout_resolution import blocking_task_ids, done_verified_count
 
 
-# LLM: dispatch_completion_text keeps final top-level output refs-first and compact.
-# 函数用途: 从已验收任务生成用户可读收尾说明，列出 root、任务数和 output.json 引用。
-def dispatch_completion_text(tasks: list[object]) -> str:
-    refs = _output_refs(tasks)
-    artifact_refs = _artifact_refs(tasks)
-    lines = _dispatch_completion_header(tasks)
-    if artifact_refs:
-        lines.append("- artifact_refs:")
-        lines.extend(f"  - {ref}" for ref in artifact_refs[:12])
-    if refs:
-        lines.append("- output_json_refs:")
-        lines.extend(f"  - {ref}" for ref in refs[:12])
-    return "\n".join(lines)
-
-
 # LLM: dispatch_limit_text is a factual report for incomplete or failed subagent trees.
 # 函数用途: 工具轮数到顶时输出真实状态、阻塞 run_id 和引用路径。
 def dispatch_limit_text(tasks: list[object], *, reason: str = "tool_limit") -> str:
@@ -45,15 +30,15 @@ def dispatch_limit_text(tasks: list[object], *, reason: str = "tool_limit") -> s
     return "\n".join(lines)
 
 
-# LLM: dispatch_incomplete_notice replaces over-optimistic final model text.
-# 函数用途: 用真实 task 状态替换最终汇报，确保有阻塞时用户先看到未完成事实。
+# LLM: dispatch_incomplete_notice renders persisted blockers as a status summary.
+# 函数用途: 有真实失败/阻塞任务时展示 task 状态摘要，避免口头完成掩盖已落盘问题。
 def dispatch_incomplete_notice(tasks: list[object], blockers: list[str]) -> str:
     lines = [
         "---",
         "",
-        "## Subagent State Notice",
+        "## 子代理状态摘要",
         "",
-        "结论修正：子代理链路尚未完整通过，不能按完成汇报。",
+        "结论修正：子代理链路尚未完整通过，本轮不能按完成汇报。",
         "",
         f"- total_runs: {len(tasks)}",
         f"- done_verified: {done_verified_count(tasks)}",
@@ -62,20 +47,26 @@ def dispatch_incomplete_notice(tasks: list[object], blockers: list[str]) -> str:
         "Persisted task state:",
         *_task_status_rows(tasks)[:12],
         "",
-        "建议下一步：继续让父级基于 blocking_run_ids 做 retry、takeover、repair 或验收复核；不要只因为产物文件存在就认为整条子代理恢复链路已通过。",
+        "Latest child summaries and refs:",
+        *_task_summary_rows(tasks)[:12],
+        "",
+        "建议下一步：父级读取 blocking_run_ids 对应的 refs，决定重试、接管、重派或把阻塞原因上报给用户。",
     ]
     return "\n".join(lines)
 
 
-# LLM: dispatch_missing_quality_roles_notice blocks false completion when requested roles never ran.
-# 函数用途: 当前任务都绿但缺用户要求的测试/验收角色时，告诉 root 继续派质量子代理。
+# LLM: dispatch_missing_quality_roles_notice reports missing explicitly requested quality roles.
+# 函数用途: 用户明确要求质量角色但没有运行时，展示缺口，让父级决定继续派工或说明限制。
 def dispatch_missing_quality_roles_notice(tasks: list[object], missing_roles: list[str]) -> str:
     lines = [
         "---",
         "",
-        "## Subagent State Notice",
+        "## 子代理状态摘要",
         "",
-        "结论修正：用户要求的质量链路还没跑完，不能按完成汇报。",
+        "结论修正：用户要求的质量链路还没跑完，本轮不能按完成汇报。",
+        f"缺少质量角色：{', '.join(missing_roles)}",
+        f"缺少质量角色组合：{'/'.join(sorted(missing_roles))}",
+        *_quality_role_alias_lines(missing_roles),
         "",
         f"- total_runs: {len(tasks)}",
         f"- done_verified: {done_verified_count(tasks)}",
@@ -84,9 +75,19 @@ def dispatch_missing_quality_roles_notice(tasks: list[object], missing_roles: li
         "Persisted task state:",
         *_task_status_rows(tasks)[:12],
         "",
-        "建议下一步：顶层 root 请继续调用 create_subagents 创建缺少的 tester/acceptor，然后再调用 dispatch_subagents 调度这些质量子代理；不要使用 schedule_child_subagents，因为它只给已经处在子代理 runner 内的父级使用。",
+        "Latest child summaries and refs:",
+        *_task_summary_rows(tasks)[:12],
+        "",
+        "建议下一步：父级根据缺失角色决定是否调用 create_subagents 继续派工、调整验收范围，或把无法继续的原因上报给用户。",
     ]
     return "\n".join(lines)
+
+
+def _quality_role_alias_lines(missing_roles: list[str]) -> list[str]:
+    normalized = {str(role or "").strip().lower() for role in missing_roles}
+    if {"tester", "acceptor"}.issubset(normalized):
+        return ["缺少质量角色组合：tester/acceptor"]
+    return []
 
 
 # LLM: _append_output_refs keeps summaries traceable without reading big outputs.
@@ -118,19 +119,6 @@ def _dispatch_fallback_reason_text(reason: str) -> str:
     return "已达到最大工具轮数限制，系统根据本地 subagent task.json 直接生成状态报告，未让模型继续自由总结。"
 
 
-# LLM: _dispatch_completion_header renders stable counters without touching output bodies.
-# 函数用途: 生成本地收尾回答固定头部，帮助用户快速定位总数和 root 节点。
-def _dispatch_completion_header(tasks: list[object]) -> list[str]:
-    roots = _root_task_ids(tasks)
-    return [
-        "子代理调度已完成，系统根据本地任务状态直接收口，未再发起额外模型请求。",
-        "",
-        f"- total_runs: {len(tasks)}",
-        f"- done_verified: {len(tasks)}",
-        f"- root_run_ids: {', '.join(roots) if roots else '(none)'}",
-    ]
-
-
 # LLM: _task_status_rows renders short task facts from persisted fields only.
 # 函数用途: 汇总每个子代理真实 id、role、name、depth、status 和 task_dir。
 def _task_status_rows(tasks: list[object]) -> list[str]:
@@ -152,6 +140,43 @@ def _task_status_rows(tasks: list[object]) -> list[str]:
     return lines
 
 
+# LLM: _task_summary_rows makes rework actionable without reading artifact bodies.
+# 函数用途: 未完成收口时暴露每个子代理的最新摘要和 refs，避免父级只看到 run_id/status 后漏掉已产出的关键发现。
+def _task_summary_rows(tasks: list[object]) -> list[str]:
+    rows: list[str] = []
+    for task in sorted(tasks, key=_task_sort_key):
+        task_id = str(getattr(task, "id", "") or "")
+        name = str(getattr(task, "agent_name", "") or "")
+        summary = _bounded_inline(str(getattr(task, "latest_summary", "") or ""))
+        refs = _short_refs([
+            str(getattr(task, "output_json", "") or ""),
+            *(getattr(task, "artifact_refs", []) or []),
+            *(getattr(task, "evidence_refs", []) or []),
+        ])
+        rows.append(
+            f"- `{task_id}` name={name or 'unnamed'} summary={summary or '(empty)'} refs={refs or '(none)'}"
+        )
+    return rows
+
+
+def _bounded_inline(value: str, *, limit: int = 220) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
+
+
+def _short_refs(values: list[object], *, limit: int = 3) -> str:
+    refs: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in refs:
+            refs.append(text)
+        if len(refs) >= limit:
+            break
+    return ", ".join(refs)
+
+
 # LLM: _task_sort_key keeps factual reports stable across filesystem ordering.
 # 函数用途: 按 depth、创建时间和 id 排序，便于对比 E2E 日志。
 def _task_sort_key(task: object) -> tuple[int, float, str]:
@@ -166,18 +191,6 @@ def _task_sort_key(task: object) -> tuple[int, float, str]:
     return depth, created, str(getattr(task, "id", "") or "")
 
 
-# LLM: _root_task_ids extracts top-level subagent ids for deterministic final summaries.
-# 函数用途: 找出 parent_id 为空或等于自身的 root 节点 id。
-def _root_task_ids(tasks: list[object]) -> list[str]:
-    roots: list[str] = []
-    for task in tasks:
-        task_id = str(getattr(task, "id", "") or "")
-        parent_id = str(getattr(task, "parent_id", "") or "")
-        if task_id and (not parent_id or parent_id == task_id):
-            roots.append(task_id)
-    return roots
-
-
 # LLM: _output_refs keeps deterministic summaries traceable without reading big outputs.
 # 函数用途: 收集每个任务 output.json 路径作为验收追踪入口；只列路径，不读取正文。
 def _output_refs(tasks: list[object]) -> list[str]:
@@ -187,41 +200,3 @@ def _output_refs(tasks: list[object]) -> list[str]:
         if ref and ref not in refs:
             refs.append(ref)
     return refs
-
-
-# LLM: _artifact_refs exposes deliverable refs in deterministic closeout without reading bodies.
-# 函数用途: 收集已完成子代理登记的业务产物路径，让 root 本地收口也能交付可读报告 refs。
-def _artifact_refs(tasks: list[object]) -> list[str]:
-    refs: list[str] = []
-    for task in sorted(tasks, key=_task_sort_key):
-        _append_user_artifact_refs(refs, getattr(task, "artifact_refs", []) or [])
-    return refs
-
-
-# LLM: _append_user_artifact_refs keeps filtering separate from sorted task traversal.
-# 函数用途: 只追加可交付产物 ref，过滤 output/checkpoint/report 等内部状态文件。
-def _append_user_artifact_refs(target: list[str], refs: list[object]) -> None:
-    for ref in refs:
-        text = str(ref or "").strip()
-        if text and _looks_like_user_artifact(text) and text not in target:
-            target.append(text)
-
-
-# LLM: _looks_like_user_artifact filters internal state refs from closeout deliverable refs.
-# 函数用途: 避免把 output.json、checkpoint、运行审计报告当作用户最终产物展示。
-def _looks_like_user_artifact(ref: str) -> bool:
-    text = str(ref or "").strip().replace("\\", "/")
-    if not text:
-        return False
-    lower = text.lower()
-    if lower.endswith("/output.json") or lower == "output.json":
-        return False
-    blocked_parts = (
-        "/reports/",
-        "/memory_archive/",
-        "/agent_run/",
-        "/compactions/",
-        "/checkpoint",
-        "/takeover_readiness",
-    )
-    return not any(part in lower for part in blocked_parts)

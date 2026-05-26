@@ -1,5 +1,5 @@
-# LLM: Tool guardrail gate tests verify loop detection (exact failure, same-tool failure, no-progress).
-# 模块用途: 用结构化 records 模拟重复失败和无进展场景，确保 gate 在正确阈值触发 warn/block。
+# LLM: Tool guardrail gate tests verify repeat-failure hints and action-level blocks.
+# 模块用途: 用结构化 records 模拟重复失败和无进展场景，确保合同层 gate 与主代理运行时使用同一套 N/2N/3N 语义。
 
 from __future__ import annotations
 
@@ -15,15 +15,24 @@ from agent_py_agent.agent.contracts.gates.tool_guardrail import (
 )
 
 
-def _make_record(tool_name: str, args_hash: str, failed: bool = False, result_hash: str = "") -> dict:
+def _make_record(
+    tool_name: str,
+    args_hash: str,
+    **kwargs,
+) -> dict:
+    failed = bool(kwargs.get("failed", False))
+    result_hash = str(kwargs.get("result_hash") or "")
+    failure_class = str(kwargs.get("failure_class") or "code:failed")
     r: dict[str, object] = {"tool_name": tool_name, "args_hash": args_hash, "failed": failed}
     if result_hash:
         r["result_hash"] = result_hash
+    if failed and failure_class:
+        r["failure_class"] = failure_class
     r["ts"] = time.time()
     return r
 
 
-class TestExactFailureDetection:
+class TestRepeatFailureDetection:
     def test_allows_first_call(self):
         decision = evaluate_tool_guardrail_gate(
             ToolGuardrailFacts("read_file", "abc123"),
@@ -31,10 +40,11 @@ class TestExactFailureDetection:
         )
         assert decision.allowed is True
 
-    def test_warns_after_exact_failures_reach_threshold(self):
-        config = ToolGuardrailConfig(exact_failure_warn_after=2)
+    def test_warns_after_repeat_failures_reach_threshold(self):
+        config = ToolGuardrailConfig(repeat_fail_threshold=2)
         records = tuple(
-            _make_record("read_file", "abc123", failed=True) for _ in range(2)
+            _make_record("read_file", "abc123", failed=True, failure_class="code:not_found")
+            for _ in range(2)
         )
         decision = evaluate_tool_guardrail_gate(
             ToolGuardrailFacts("read_file", "abc123"),
@@ -42,12 +52,13 @@ class TestExactFailureDetection:
             records=records,
         )
         assert decision.allowed is True
-        assert any("EXACT_FAILURE_WARNING" in f.code for f in decision.findings)
+        assert any("REPEAT_FAILURE_HINT" in f.code for f in decision.findings)
 
-    def test_blocks_after_exact_failures_exceed_block_threshold(self):
-        config = ToolGuardrailConfig(exact_failure_block_after=5)
+    def test_blocks_only_the_next_same_call_at_three_times_threshold(self):
+        config = ToolGuardrailConfig(repeat_fail_threshold=2)
         records = tuple(
-            _make_record("read_file", "abc123", failed=True) for _ in range(5)
+            _make_record("read_file", "abc123", failed=True, failure_class="code:not_found")
+            for _ in range(6)
         )
         decision = evaluate_tool_guardrail_gate(
             ToolGuardrailFacts("read_file", "abc123"),
@@ -55,22 +66,16 @@ class TestExactFailureDetection:
             records=records,
         )
         assert decision.allowed is False
-        assert any("EXACT_FAILURE_BLOCKED" in f.code for f in decision.findings)
+        assert decision.recommended_action == "change_strategy"
+        assert any("REPEAT_FAILURE_BLOCKED" in f.code for f in decision.findings)
 
-    # LLM: zero warn/block thresholds disable the count gate instead of blocking immediately.
-    # 函数用途: 验证运行时工具 guardrail 的 0 阈值不会被 count>=0 误判为立即告警或阻断。
-    def test_zero_thresholds_are_unlimited(self):
-        config = ToolGuardrailConfig(
-            exact_failure_warn_after=0,
-            exact_failure_block_after=0,
-            same_tool_failure_warn_after=0,
-            same_tool_failure_block_after=0,
-            no_progress_warn_after=0,
-            no_progress_block_after=0,
-        )
+    # LLM: zero repeat thresholds disable action blocks and keep only fixed soft hints.
+    # 函数用途: 验证 repeat_fail_threshold=0 时不会按次数阻断，但 50/100 次仍给模型换路提示。
+    def test_zero_threshold_is_unlimited_with_fixed_hints(self):
+        config = ToolGuardrailConfig(repeat_fail_threshold=0)
         records = tuple(
             _make_record("read_file", "abc123", failed=True, result_hash="same")
-            for _ in range(20)
+            for _ in range(50)
         )
 
         decision = evaluate_tool_guardrail_gate(
@@ -80,10 +85,10 @@ class TestExactFailureDetection:
         )
 
         assert decision.allowed is True
-        assert decision.findings == ()
+        assert any("REPEAT_FAILURE_HINT" in f.code for f in decision.findings)
 
     def test_resets_exact_count_on_success(self):
-        config = ToolGuardrailConfig(exact_failure_warn_after=2)
+        config = ToolGuardrailConfig(repeat_fail_threshold=2)
         records = (
             _make_record("read_file", "abc123", failed=True),
             _make_record("read_file", "abc123", failed=True),
@@ -98,10 +103,8 @@ class TestExactFailureDetection:
         assert decision.allowed is True
         assert not decision.findings
 
-
-class TestSameToolFailureDetection:
-    def test_warns_after_same_tool_failures(self):
-        config = ToolGuardrailConfig(same_tool_failure_warn_after=3)
+    def test_different_args_do_not_compound(self):
+        config = ToolGuardrailConfig(repeat_fail_threshold=2)
         records = (
             _make_record("terminal", "hash1", failed=True),
             _make_record("terminal", "hash2", failed=True),
@@ -113,25 +116,27 @@ class TestSameToolFailureDetection:
             records=records,
         )
         assert decision.allowed is True
-        assert any("SAME_TOOL_FAILURE_WARNING" in f.code for f in decision.findings)
+        assert not decision.findings
 
-    def test_blocks_after_same_tool_failures_exceed(self):
-        config = ToolGuardrailConfig(same_tool_failure_block_after=5)
-        records = tuple(
-            _make_record("terminal", f"hash{i}", failed=True) for i in range(5)
+    def test_different_failure_class_does_not_compound(self):
+        config = ToolGuardrailConfig(repeat_fail_threshold=2)
+        records = (
+            _make_record("terminal", "h1", failed=True, failure_class="code:not_found"),
+            _make_record("terminal", "h1", failed=True, failure_class="code:not_found"),
+            _make_record("terminal", "h1", failed=True, failure_class="code:timeout"),
         )
         decision = evaluate_tool_guardrail_gate(
-            ToolGuardrailFacts("terminal", "hash_x"),
+            ToolGuardrailFacts("terminal", "h1"),
             config=config,
             records=records,
         )
-        assert decision.allowed is False
-        assert any("SAME_TOOL_FAILURE_BLOCKED" in f.code for f in decision.findings)
+        assert decision.allowed is True
+        assert not decision.findings
 
 
 class TestNoProgressDetection:
     def test_skips_mutating_tools(self):
-        config = ToolGuardrailConfig(no_progress_warn_after=1)
+        config = ToolGuardrailConfig(repeat_fail_threshold=1)
         records = tuple(
             _make_record("write_file", "abc", failed=False, result_hash="same")
             for _ in range(3)
@@ -145,7 +150,7 @@ class TestNoProgressDetection:
         assert not decision.findings
 
     def test_warns_on_readonly_no_progress(self):
-        config = ToolGuardrailConfig(no_progress_warn_after=2)
+        config = ToolGuardrailConfig(repeat_fail_threshold=2)
         records = tuple(
             _make_record("read_file", "abc", failed=False, result_hash="same")
             for _ in range(2)
@@ -158,11 +163,11 @@ class TestNoProgressDetection:
         assert decision.allowed is True
         assert any("NO_PROGRESS_WARNING" in f.code for f in decision.findings)
 
-    def test_blocks_on_readonly_no_progress(self):
-        config = ToolGuardrailConfig(no_progress_block_after=3)
+    def test_blocks_next_readonly_call_at_three_times_threshold(self):
+        config = ToolGuardrailConfig(repeat_fail_threshold=2)
         records = tuple(
             _make_record("read_file", "abc", failed=False, result_hash="same")
-            for _ in range(3)
+            for _ in range(6)
         )
         decision = evaluate_tool_guardrail_gate(
             ToolGuardrailFacts("read_file", "abc", result_hash="same", is_readonly=True),
@@ -172,15 +177,31 @@ class TestNoProgressDetection:
         assert decision.allowed is False
         assert any("NO_PROGRESS_BLOCKED" in f.code for f in decision.findings)
 
+    def test_changing_readonly_results_count_as_progress(self):
+        config = ToolGuardrailConfig(repeat_fail_threshold=2)
+        records = (
+            _make_record("read_file", "abc", failed=False, result_hash="page-1"),
+            _make_record("read_file", "abc", failed=False, result_hash="page-2"),
+            _make_record("read_file", "abc", failed=False, result_hash="page-3"),
+        )
+        decision = evaluate_tool_guardrail_gate(
+            ToolGuardrailFacts("read_file", "abc", result_hash="page-3", is_readonly=True),
+            config=config,
+            records=records,
+        )
+        assert decision.allowed is True
+        assert not decision.findings
+
 
 class TestRecordToolGuardrailResult:
     def test_appends_record(self):
         records: tuple[dict[str, object], ...] = ()
-        facts = ToolGuardrailFacts("pwd", "hash1", failed=False, result_hash="res1", now=100.0)
+        facts = ToolGuardrailFacts("pwd", "hash1", failed=True, result_hash="res1", failure_class="code:x", now=100.0)
         new_records = record_tool_guardrail_result(records, facts)
         assert len(new_records) == 1
         assert new_records[0]["tool_name"] == "pwd"
-        assert new_records[0]["failed"] is False
+        assert new_records[0]["failed"] is True
+        assert new_records[0]["failure_class"] == "code:x"
 
     def test_enforces_max_records(self):
         records = tuple({"tool_name": "pwd", "args_hash": f"h{i}", "failed": False} for i in range(300))

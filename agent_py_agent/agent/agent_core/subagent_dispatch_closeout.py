@@ -1,70 +1,21 @@
-# LLM: Top-level subagent dispatch closeout helpers avoid extra final model calls after all work is verified.
-# 模块用途: 当顶层主代理调度的子代理全部 DONE/VERIFIED 时，生成本地收尾回答，避免完成后再请求模型卡住。
+# LLM: Top-level subagent dispatch guards keep final answers aligned with persisted task state.
+# 模块用途: 子代理调度工具本身只返回索引/状态；这里仅保留工具上限和最终回答的事实兜底。
 
 from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import ClassVar
 
 from ..backends import ModelResponse
 from ..subagents.role_templates import role_template_id_for_role
 from ..subagents.services.qa_role_contract import qa_roles_required_by_task
-from ._runtime_params import ToolLoopExecuteParams
 from .orchestration_parent_acceptance_repair import parent_acceptance_rejected
 from .orchestration_run_scope import (
     remembered_dispatched_orchestration_run_ids,
     remembered_orchestration_run_ids,
 )
 from .subagent_dispatch_closeout_rendering import (
-    dispatch_completion_text,
     dispatch_incomplete_notice,
     dispatch_limit_text,
     dispatch_missing_quality_roles_notice,
 )
-from .subagent_dispatch_closeout_resolution import (
-    all_tasks_done_verified,
-    blocking_task_ids,
-)
-
-
-# LLM: DispatchCompletionRequest bundles the deterministic closeout inputs for bundle-interface rules.
-# 类用途: 集中保存顶层 dispatch 收口判断所需上下文；调用方只传一个参数包，避免扩散散参。
-@dataclass(frozen=True)
-class DispatchCompletionRequest:
-    __test__: ClassVar[bool] = False
-
-    agent: object
-    params: ToolLoopExecuteParams
-    before_executed_count: int
-    backend: str
-
-
-# LLM: subagent_dispatch_completion_response closes top-level dispatch without another model call.
-# 函数用途: 顶层主代理刚完成 dispatch_subagents 且全部子代理 DONE/VERIFIED 时，直接生成确定性收尾说明。
-def subagent_dispatch_completion_response(request: DispatchCompletionRequest) -> ModelResponse | None:
-    if _inside_subagent_runner(request.agent) or not _round_executed_dispatch(request):
-        return None
-    tasks = _subagent_tasks(request.agent)
-    if not tasks or not all_tasks_done_verified(tasks):
-        return None
-    if _task_scope_requires_uncreated_quality_roles(tasks):
-        return None
-    return ModelResponse(text=dispatch_completion_text(tasks), backend=request.backend)
-
-
-# LLM: subagent_dispatch_repair_required_response closes terminal failed dispatch rounds from task facts.
-# 函数用途: 本轮 dispatch 已经产生明确失败验收/阻塞事实时，直接返回未完成报告，避免再等模型自由总结到超时。
-def subagent_dispatch_repair_required_response(request: DispatchCompletionRequest) -> ModelResponse | None:
-    if _inside_subagent_runner(request.agent) or not _round_executed_dispatch(request):
-        return None
-    tasks = _subagent_tasks(request.agent)
-    repair_blockers = _repair_required_task_ids(tasks)
-    if not repair_blockers:
-        return None
-    if _grant_parent_acceptance_repair_turn(request, tasks, repair_blockers):
-        return None
-    blockers = blocking_task_ids(tasks) or repair_blockers
-    return ModelResponse(text=dispatch_incomplete_notice(tasks, blockers), backend=request.backend)
 
 
 # LLM: subagent_dispatch_limit_response prevents final user reports from inventing subagent status.
@@ -72,14 +23,16 @@ def subagent_dispatch_repair_required_response(request: DispatchCompletionReques
 def subagent_dispatch_limit_response(agent, *, backend: str, reason: str = "tool_limit") -> ModelResponse | None:
     if _inside_subagent_runner(agent):
         return None
+    if not _has_actual_dispatch_scope(agent):
+        return None
     tasks = _subagent_tasks(agent)
     if not tasks:
         return None
     return ModelResponse(text=dispatch_limit_text(tasks, reason=reason), backend=backend)
 
 
-# LLM: subagent_dispatch_final_response_guard makes the final user answer reflect persisted task state.
-# 函数用途: 顶层主代理用过子代理编排工具后，如果 task.json 仍有阻塞，就用事实报告替换模型草稿，防止先报喜再纠正。
+# LLM: subagent_dispatch_final_response_guard keeps final answers aligned with persisted task state.
+# 函数用途: 顶层主代理用过子代理编排工具后，如果 task.json 仍有真实失败/阻塞，就返回状态摘要，避免口头完成掩盖事实。
 def subagent_dispatch_final_response_guard(
     agent,
     response: ModelResponse | None,
@@ -97,7 +50,7 @@ def subagent_dispatch_final_response_guard(
             text=dispatch_missing_quality_roles_notice(tasks, missing_quality_roles),
             backend=response.backend,
         )
-    blockers = blocking_task_ids(tasks)
+    blockers = _repair_required_task_ids(tasks)
     if not blockers:
         return response
     notice = dispatch_incomplete_notice(tasks, blockers)
@@ -108,9 +61,24 @@ def subagent_dispatch_final_response_guard(
 
 
 # LLM: _has_closeout_scope keeps final answers tied to the persisted root-turn subagent scope.
-# 函数用途: 判断最终回答是否需要按本轮子代理事实兜底；即使后面又读文件/search，也不能丢掉前面派工的阻塞状态。
+# 函数用途: 判断最终回答是否需要按本轮真实调度过的子代理事实兜底；dry-run/状态检查不能抢答。
 def _has_closeout_scope(agent, executed_tools: list[object]) -> bool:
-    return _executed_orchestration(executed_tools) or bool(remembered_dispatched_orchestration_run_ids(agent))
+    dispatched = remembered_dispatched_orchestration_run_ids(agent)
+    if dispatched:
+        return True
+    if remembered_orchestration_run_ids(agent):
+        return _executed_orchestration(executed_tools)
+    return _executed_orchestration(executed_tools)
+
+
+# LLM: _has_actual_dispatch_scope separates real runner execution from dry-run/status dispatches.
+# 函数用途: 工具上限和空响应兜底只有在 runner 真实跨过 dispatch 后才接管；无现代 scope 时保留旧 helper 兼容。
+def _has_actual_dispatch_scope(agent) -> bool:
+    if remembered_dispatched_orchestration_run_ids(agent):
+        return True
+    if remembered_orchestration_run_ids(agent):
+        return False
+    return True
 
 
 # LLM: _executed_orchestration mirrors the top-level tool-loop check without importing the service.
@@ -136,54 +104,6 @@ def _repair_required_task_ids(tasks: list[object]) -> list[str]:
     return ids
 
 
-# LLM: _grant_parent_acceptance_repair_turn lets root consume structured repair advice once before closeout.
-# 函数用途: 父级验收失败且已有 repair advice 时，给模型一次创建修复小傻妞的机会；若下一轮仍未推进，再事实收口。
-def _grant_parent_acceptance_repair_turn(
-    request: DispatchCompletionRequest,
-    tasks: list[object],
-    repair_blockers: list[str],
-) -> bool:
-    if not _has_parent_acceptance_repair(tasks, repair_blockers):
-        return False
-    key = tuple(sorted(repair_blockers))
-    granted = set(getattr(request.agent, "_subagent_parent_acceptance_repair_turns", set()) or set())
-    if key in granted:
-        return False
-    granted.add(key)
-    try:
-        request.agent._subagent_parent_acceptance_repair_turns = granted
-    except Exception:
-        return False
-    request.params.tool_context.append(_parent_acceptance_repair_turn_context(repair_blockers))
-    return True
-
-
-# LLM: _has_parent_acceptance_repair keeps the extra model turn scoped to test/acceptance rejects.
-# 函数用途: 只有父级验收 REJECT 才进入修复派工机会；TIMEOUT/BLOCKED 等终态仍直接收口或走恢复链路。
-def _has_parent_acceptance_repair(tasks: list[object], repair_blockers: list[str]) -> bool:
-    blocker_set = set(repair_blockers)
-    for task in tasks:
-        task_id = str(getattr(task, "id", "") or "")
-        if task_id in blocker_set and parent_acceptance_rejected(task):
-            return True
-    return False
-
-
-# LLM: _parent_acceptance_repair_turn_context is a small control-plane nudge, not a task-specific prompt.
-# 函数用途: 告诉 root 下一轮应按 dispatch_subagents 的结构化 advice 创建修复 child，不读正文、不直接报完成。
-def _parent_acceptance_repair_turn_context(repair_blockers: list[str]) -> str:
-    ids = ", ".join(repair_blockers)
-    return "\n".join([
-        "[subagent-parent-acceptance-repair-required]",
-        f"blocking_run_ids: {ids}",
-        "policy: parent acceptance rejected these runs; do not report final completion yet.",
-        "next_action: use the latest dispatch_subagents parent_acceptance_repair_advice.suggested_tool_call "
-        "to create a scoped repair child, then dispatch_subagents again.",
-        "refs_policy: repair child should read failure_refs/test_ref/output_ref/run_ref; root should not edit product bodies directly.",
-        "fallback: if you cannot create the repair child, answer with the blocking_run_ids and the exact reason.",
-    ])
-
-
 # LLM: _task_status_requires_repair captures generic lifecycle states that need recovery before success.
 # 函数用途: BLOCKED/FAILED/TIMEOUT/CHANNEL_ERROR 这类终态不能继续等模型口头收尾，必须先修复或接管。
 def _task_status_requires_repair(task: object) -> bool:
@@ -193,14 +113,6 @@ def _task_status_requires_repair(task: object) -> bool:
         "TIMEOUT",
         "CHANNEL_ERROR",
     }
-
-
-# LLM: _round_executed_dispatch looks only at tools executed in the just-finished round.
-# 函数用途: 判断刚结束的工具轮是否真实执行过 dispatch_subagents，避免普通看板查询被误当成收尾信号。
-def _round_executed_dispatch(request: DispatchCompletionRequest) -> bool:
-    return "dispatch_subagents" in [
-        str(item or "") for item in request.params.executed_tools[request.before_executed_count:]
-    ]
 
 
 # LLM: _subagent_tasks reads the manager list defensively for top-level closeout.
@@ -246,12 +158,6 @@ def _task_in_scope(task: object, seen: set[str], root_ids: set[str]) -> bool:
         return True
     root_id = str(getattr(task, "root_id", "") or "")
     return bool(root_id and root_id in root_ids)
-
-
-# LLM: _task_scope_requires_uncreated_quality_roles preserves explicit tester/acceptor workflow contracts.
-# 函数用途: 父任务 attributes.required_qa_roles 要求后续测试/验收时，顶层不能因现有任务全绿而提前本地收口。
-def _task_scope_requires_uncreated_quality_roles(tasks: list[object]) -> bool:
-    return bool(_missing_required_quality_roles(tasks))
 
 
 # LLM: _missing_required_quality_roles compares persisted task contracts to concrete role tokens.

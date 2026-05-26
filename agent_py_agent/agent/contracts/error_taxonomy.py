@@ -153,18 +153,18 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action="choose_valid_public_url",
         recovery_hint="DNS 返回值不是有效 IP；换可信公开 URL，不要继续请求。",
     ),
-    "TOOL_REPEATED_EXACT_FAILURE": ErrorContract(
-        code="TOOL_REPEATED_EXACT_FAILURE",
+    "TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED": ErrorContract(
+        code="TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED",
         category="tool",
         retryable=True,
-        recommended_action="change_tool_arguments_or_strategy",
-        recovery_hint="同一工具同一参数连续失败；不要原样重试，先改参数、换工具或记录明确阻塞原因。",
+        recommended_action="change_strategy",
+        recovery_hint="同一工具同一参数同类失败已经重复过多次；不要原样重试，先改参数、换工具、换来源或记录明确阻塞原因。",
     ),
-    "TOOL_REPEATED_NO_PROGRESS": ErrorContract(
-        code="TOOL_REPEATED_NO_PROGRESS",
+    "TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED": ErrorContract(
+        code="TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED",
         category="tool",
         retryable=True,
-        recommended_action="change_tool_arguments_or_materialize_progress",
+        recommended_action="change_strategy_or_materialize_progress",
         recovery_hint="同一只读工具同一参数连续返回相同结果；不要继续原样读取，先写 checkpoint、换参数或记录阻塞原因。",
     ),
     "MODEL_UPSTREAM_FAILED": ErrorContract(

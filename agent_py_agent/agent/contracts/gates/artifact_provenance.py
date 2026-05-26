@@ -191,7 +191,11 @@ def _provenance_from_record(
 ) -> dict[str, Any]:
     runtime_gate = record.get("runtime_gate")
     evidence = runtime_gate.get("evidence") if isinstance(runtime_gate, dict) else {}
-    if not isinstance(evidence, dict) or runtime_gate.get("allowed") is not True:
+    if (
+        not isinstance(runtime_gate, dict)
+        or not isinstance(evidence, dict)
+        or runtime_gate.get("allowed") is not True
+    ):
         return {"ok": False, "code": "ARTIFACT_TOOL_GATE_MISSING"}
     run_id = str(record.get("run_id") or "").strip()
     tool_name = str(evidence.get("tool_name") or record.get("tool") or "").strip()

@@ -137,13 +137,13 @@ def test_contract_fixture_rejects_failed_required_tool(tmp_path: Path):
     assert "FINAL_STATUS_REJECTED" in result.error_codes
 
 
-def test_contract_fixture_rejects_success_when_runtime_issue_blocks_completion(tmp_path: Path):
+def test_contract_fixture_rejects_success_when_no_progress_issue_blocks_completion(tmp_path: Path):
     from agent_py_agent.tests.support.contract_fixture_runner import (
         FixtureRunFacts,
         verify_contract_fixture,
     )
 
-    contract = _fixture("bootstrap_materialization_required.json")
+    contract = _fixture("repeated_exploration_should_redirect_or_block.json")
 
     result = verify_contract_fixture(
         tmp_path,
@@ -151,7 +151,7 @@ def test_contract_fixture_rejects_success_when_runtime_issue_blocks_completion(t
         FixtureRunFacts(
             tool_trace=(),
             final_status="SUCCEEDED",
-            runtime_issues=({"code": "BOOTSTRAP_MATERIALIZATION_REQUIRED", "severity": "hard"},),
+            runtime_issues=({"code": "NO_PROGRESS", "severity": "hard"},),
         ),
     )
 

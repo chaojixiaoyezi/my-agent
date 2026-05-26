@@ -158,6 +158,35 @@
 
 - 记忆要分层、可索引、可压缩、可落盘为可读文件
 
+---
+
+## 2026-05-25 多代理协作上下文穿透验收
+
+这轮真实用例不是测 IP 业务，而是测一个通用协作问题：
+
+- 父代理先读到一条小型线索
+- 父代理创建多个子代理
+- 子代理需要共享这条父级已知线索，同时保留各自的资料 refs
+- 最终由协作链路产出结构化结果
+
+本轮修复原则：
+
+- 不新增专项任务模板
+- 不按 `IP/hostname/日志` 这类业务词写死规则
+- 只做父级已读小型上下文到 `context_packs` 的 refs-first 透传
+- 只展示开放 context pack 小字段，不维护封闭字段表
+
+已验证：
+
+- 一次性脚本验证 `read_file` 的嵌套 `filesystem.path` 参数可以生成 `parent_recent_read`
+- focused orchestration tests 通过
+- 真实 run `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-135034` 已生成正确 `investigation_result.json`
+
+待继续：
+
+- 用补丁后的代码重跑一次同类普通中文 prompt，确认新子代理实际拿到 `parent_recent_read`
+- 继续压缩最终 closeout/dispatch 收口耗时，避免产物已经正确但主进程仍长时间不退出
+
 ### 终端交互-main / openclaude-main / langchain-master
 
 这些作为补充参考：
@@ -182,6 +211,53 @@
 ## 3. 测试金字塔
 
 后续测试按五层执行。
+
+### 2026-05-24 运行门与验收触发收口
+
+最新运行门说明见 `docs/design/main-agent-runtime-gates.md`。这一轮的核心变化是把“阻止模型走歪”和“限制模型怎么开工”分开：
+
+- 保留真正硬门：工具 schema、路径/URL/command 边界、审批绑定、幂等、最终 delivery closeout。
+- open write session 是写入事务保护：关键收口、读未提交目标、覆盖未提交目标会被拉回；非冲突工具继续执行，并按模型回合周期提醒，不再由它自己按次数 blocked。
+- 探索熔断和本地进展门改成配置化，默认大幅放宽；`0` 表示不按次数阻断。
+- closeout 返工预算只分“产物齐全但不合格”和“必交产物缺失/无法定位”两类，默认各 3 次，`0` 表示持续返工不按次数停。
+- delivery repair 独立运行门已删除；closeout 失败后统一通过 `[delivery-contract-check]` 的 `repair_guidance`、failed artifacts、failed gates 和 recovery actions 指导模型返工，读/搜空转由探索熔断和本地进展门统一处理。
+- 新增显式 `submit_for_acceptance`，并保留“无工具最终回复触发隐式验收”。
+- delivery contract Doctor 第一次返回结构化返工，第二次仍不可运行则 `DELIVERY_CONTRACT_DOCTOR_BLOCKED`，避免坏机器合同导致无限循环；普通产物失败仍走 closeout 返工循环。
+- 删除 bootstrap 开工物化硬门，避免普通任务被迫先写系统指定中间文件。
+
+后续真实任务测试必须按普通用户 prompt 开始：说清任务、要求、输出目录和目标产物格式即可。测试失败时先沉淀离线失败样本，再修通用底座；禁止把失败修成专项模板或新的开工前置硬门。
+
+### 2026-05-25 多代理协作上下文穿透
+
+普通中文协作调查真实 run 暴露两个通用问题：父级先读到的小型线索没有稳定下发给资料源子代理；模型传入 `context_packs.files` 后，runner prompt 只显示包名，不显示文件 refs。
+
+修复方向不是新增 IP 专项合同，而是把协作控制面的信息流补硬：
+
+- 工具归档后生成父级 `parent_recent_read` brief 缓存。
+- `create_subagents` 给每个 child 追加 bounded context pack，让子代理看到父级已经读到的短线索。
+- Context Pack 渲染改成开放字段小型展示，支持 `files/refs/name/source_tool` 等后续扩展字段。
+
+这层只负责上下文穿透，不负责替模型判断业务结论；最终质量仍由子代理执行、证据 refs 和 closeout 验收负责。
+
+同日下午复验继续暴露一个收口层问题：父级调度返回里已经有每个 child 的摘要和 `output_json`，但这些信息排在庞大的 `records` 后面，模型读取外置 artifact 时可能先被 records 截断，导致协调汇总漏掉某个 child 的发现。修复方向仍是通用的 refs-first 控制面：
+
+- `dispatch_subagents` 顶层先返回 `child_result_index`，再返回详细 `records`。
+- `subagent_board` 顶层也返回 `child_result_index`，让父级“只看状态”时同样能先看到 child 摘要和 refs。
+- 子代理状态摘要在未完成时附带 child 摘要和 refs，作为返工提示，而不是只列 run_id/status。
+- 同批创建的子代理会拿到 `sibling_roster` context pack，里面只有 peer 的 `run_id/name/role/goal` 等控制面身份事实，不包含未来产物路径。这样 coordinator 不必靠父级自然语言记住 10 个兄弟是谁，也不会把 peer 的未来 `output_refs/output_files` 当成当前可读资料。
+
+这不是新验收硬门，只是把已有机器事实放到模型最容易看到的位置。父级仍然要由 LLM 自己判断如何继续调度、接管、修正汇总或向用户报告阻塞。
+
+随后真实复验 `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-144053` 暴露了另一条更底层的协作合同缺口：模型创建 11 个子代理以后，尚未 `dispatch_subagents`，却尝试提交验收或让用户确认“等子代理完成”。修复方向是通用合同语义，而不是给这个场景写专项流程：
+
+- `orchestration_contract.v1` 默认 `execution_required=true`。
+- 协作执行任务默认必须同时满足 `create_subagents` 和 `dispatch_subagents` 两个真实工具事实；旧合同可以保留 `required_tools` 原样，但提示层和最终回答门会按 `execution_required=true` 推导出 dispatch 缺口。
+- 旧合同如果没有显式 `execution_required=false`，运行时也会把缺少 `dispatch_subagents` 识别为返工缺口。
+- 如果用户或外部结构化 case 明确只想规划/只建记录，才允许 `execution_required=false`，此时不强制执行调度。
+
+这条规则表达的是“创建任务记录不等于执行任务”，不绑定 IP、文件数量、子代理数量或具体业务。
+
+同轮复验还显示模型会把 dispatch 参数写成 `{"orchestration": {"run_ids": [...], "concurrency": 5, "mode": "parallel"}}`。这是通用工具协议漂移，不是业务专项问题。`dispatch_subagents` 现在会展开 `orchestration` wrapper，并把 `concurrency` 映射到 `max_runners`、把 `mode=parallel/async/execute/run/real` 映射到真实执行开关；dry-run/plan/preview 仍保留为预览语义。
 
 ### 运行硬门阶段 0-6
 

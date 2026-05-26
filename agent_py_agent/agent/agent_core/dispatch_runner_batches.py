@@ -7,12 +7,24 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..subagents.services.dispatch_params import DispatchRecordParams
+from .dispatch_collaboration_candidates import (
+    CollaborationCandidateLimitInput,
+    collaboration_candidate_limit,
+    collaboration_request_runner_candidates,
+)
 from .dispatch_limiter import RunnerJobLimitRequest, limit_runner_jobs
 from .dispatch_params import DispatchContext, RunnerBatchContext
-from .dispatch_runner_candidates import _runner_candidates_for_context
+from .dispatch_runner_candidates import (
+    _runner_candidates_for_context,
+)
+from .dispatch_runner_records import (
+    RunnerDryRecordParams,
+    dry_runner_record,
+    multi_runner_instruction_record,
+)
 from .dispatch_runner_selection import (
     invalid_include_run_ids_record,
+    requested_include_ids,
     scoped_current_turn_runner_tasks,
     scoped_runner_tasks,
 )
@@ -22,6 +34,7 @@ from .runner_dispatch import (
     _runner_dispatch_record,
     _runner_max_attempts,
     _runner_retry_reason,
+    _same_run_redispatch_limit,
 )
 from .runner_gate import (
     ConcurrentRunnerParams,
@@ -46,15 +59,13 @@ class RunnerRecordInput:
     retry_reason: str
 
 
-# LLM: RunnerDryRecordParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存执行器dry记录参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
-class RunnerDryRecordParams:
+class RunnerJobsRunInput:
     agent: object
     ctx: DispatchContext
-    task: object
-    before: object
-    retry_reason: str
+    batch: RunnerBatchContext
+    records: list
+    pending_runner_jobs: list
 
 
 # LLM: execute_runner_jobs 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -62,11 +73,13 @@ class RunnerDryRecordParams:
 def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) -> list:
     records = list(batch.records)
     runner_max_attempts = _runner_max_attempts(agent.config.runner_failure_policy)
+    same_run_limit = _same_run_redispatch_limit(getattr(agent.config, "same_run_redispatch_limit", None))
     all_tasks = agent.subagents.list_runs()
+    active_run_ids = remembered_orchestration_run_ids(agent)
     scoped_tasks = scoped_current_turn_runner_tasks(
         scoped_runner_tasks(all_tasks, ctx),
         ctx,
-        active_run_ids=remembered_orchestration_run_ids(agent),
+        active_run_ids=active_run_ids,
     )
     selection_record = invalid_include_run_ids_record(agent, ctx, all_tasks, scoped_tasks)
     if selection_record is not None:
@@ -76,7 +89,22 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
         scoped_tasks,
         ctx,
         runner_max_attempts,
-        dependency_tasks=all_tasks,
+        same_run_redispatch_limit=same_run_limit,
+    )
+    collaboration_candidates = collaboration_request_runner_candidates(agent, scoped_tasks)
+    candidate_limit = collaboration_candidate_limit(
+        CollaborationCandidateLimitInput(
+            config=getattr(agent, "config", None),
+            requested_limit=ctx.max_runners,
+            candidates=collaboration_candidates,
+            execute_runners=batch.execute_runners,
+            has_explicit_run_ids=bool(requested_include_ids(ctx)),
+        )
+    )
+    runner_candidates = _merge_runner_candidates(
+        collaboration_candidates,
+        runner_candidates,
+        limit=candidate_limit,
     )
     dry_records, pending_runner_jobs = collect_runner_candidates(
         agent, ctx, runner_max_attempts, runner_candidates
@@ -84,10 +112,23 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
     records.extend(dry_records)
     if not pending_runner_jobs:
         return records
-    batch.pending_runner_jobs = _limited_runner_jobs(agent, pending_runner_jobs)
-    batch.records = records
-    _guard_multi_runner_instruction(agent, ctx, batch)
-    return run_runner_batch(agent, batch)
+    return _run_runner_jobs_with_limit(RunnerJobsRunInput(agent, ctx, batch, records, pending_runner_jobs))
+
+
+# LLM: _merge_runner_candidates gives collaboration wakeups priority while preserving normal candidate order.
+# 函数用途: 合并协作唤醒候选和普通候选，按 run_id 去重并遵守 max_runners。
+def _merge_runner_candidates(primary: list, secondary: list, *, limit: int) -> list:
+    merged = []
+    seen: set[str] = set()
+    for task in [*primary, *secondary]:
+        run_id = str(getattr(task, "id", "") or "")
+        if not run_id or run_id in seen:
+            continue
+        seen.add(run_id)
+        merged.append(task)
+    if limit <= 0:
+        return []
+    return merged[:limit]
 
 
 # LLM: collect_runner_candidates 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -101,38 +142,18 @@ def collect_runner_candidates(agent, ctx: DispatchContext, runner_max_attempts: 
             pending_runner_jobs.append((task.id, before, retry_reason))
             continue
         dry_records.append(
-            _dry_runner_record(RunnerDryRecordParams(agent, ctx, task, before, retry_reason))
+            dry_runner_record(RunnerDryRecordParams(agent, ctx, task, before, retry_reason))
         )
     return dry_records, pending_runner_jobs
 
 
-# LLM: _dry_runner_record 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理dry执行器记录相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
-def _dry_runner_record(params: RunnerDryRecordParams):
-    return params.agent.subagents.make_dispatch_record(
-        params=DispatchRecordParams(
-            step="runner",
-            action="retry_runner" if params.retry_reason else "execute_runner",
-            run_id=params.task.id,
-            dry_run=True,
-            applied=False,
-            ok=True,
-            message=_dry_runner_message(params.retry_reason),
-            before_status=params.before.status,
-            after_status=params.before.status,
-            before_verification_status=params.before.verification_status,
-            after_verification_status=params.before.verification_status,
-            evidence_paths=[params.before.task_dir],
-        ),
-    )
-
-
-# LLM: _dry_runner_message 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理dry执行器消息相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
-def _dry_runner_message(retry_reason: str) -> str:
-    if retry_reason:
-        return f"dry-run: 将重试 runner（{retry_reason}）。"
-    return "dry-run: apply 时会生成执行上下文；带 --execute-runners 时会调用模型。"
+# LLM: _run_runner_jobs_with_limit centralizes rate limiting and instruction guards for selected runners.
+# 函数用途: 统一执行父级选中的 runner，保持父级 run_ids 顺序，不再按角色拆隐藏波次。
+def _run_runner_jobs_with_limit(request: RunnerJobsRunInput) -> list:
+    request.batch.pending_runner_jobs = _limited_runner_jobs(request.agent, request.pending_runner_jobs)
+    request.batch.records = request.records
+    _guard_multi_runner_instruction(request.agent, request.ctx, request.batch)
+    return run_runner_batch(request.agent, request.batch)
 
 
 # LLM: _limited_runner_jobs 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -155,28 +176,8 @@ def _guard_multi_runner_instruction(agent, ctx: DispatchContext, batch: RunnerBa
     if len(batch.pending_runner_jobs) <= 1 or not str(batch.effective_runner_instruction or "").strip():
         return
     task_dirs = [str(before.task_dir) for _, before, _ in batch.pending_runner_jobs if before.task_dir]
-    batch.records.append(_multi_runner_instruction_record(agent, ctx, task_dirs))
+    batch.records.append(multi_runner_instruction_record(agent, ctx, task_dirs))
     batch.effective_runner_instruction = ""
-
-
-# LLM: _multi_runner_instruction_record keeps the safety downgrade visible without leaking full prompt text.
-# 函数用途: 构建“多 runner 指令被忽略”的报告记录；只写原因和任务目录引用，不写完整指令正文。
-def _multi_runner_instruction_record(agent, ctx: DispatchContext, evidence_paths: list[str]):
-    return agent.subagents.make_dispatch_record(
-        params=DispatchRecordParams(
-            step="runner_instruction",
-            action="ignore_multi_runner_instruction",
-            dry_run=not ctx.apply,
-            applied=False,
-            ok=True,
-            message=(
-                "已忽略本轮共享 runner_instruction：同一次 dispatch 选中了多个 runner，"
-                "为避免某个子任务专属提示污染其他分支，请改为分别 dispatch 单个 run_id，"
-                "或把通用要求写入每个 child goal/context bundle。"
-            ),
-            evidence_paths=evidence_paths[:20],
-        ),
-    )
 
 
 # LLM: _runner_role_limits reads an optional future config hook without requiring schema changes today.

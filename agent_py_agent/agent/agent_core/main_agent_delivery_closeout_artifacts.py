@@ -34,7 +34,35 @@ def _required_artifacts(contract: dict[str, Any]) -> list[dict[str, Any]]:
     raw = contract.get("artifacts")
     if not isinstance(raw, list):
         return []
-    return [item for item in raw if isinstance(item, dict) and item.get("required") is not False]
+    return [
+        item
+        for item in raw
+        if isinstance(item, dict)
+        and item.get("required") is not False
+        and not _artifact_declares_input_role(item)
+    ]
+
+
+def _artifact_declares_input_role(item: dict[str, Any]) -> bool:
+    role = " ".join(
+        str(item.get(key) or "").strip().lower()
+        for key in ("artifact_role", "role", "purpose", "usage")
+    )
+    if not role:
+        return False
+    return any(
+        marker in role
+        for marker in (
+            "input",
+            "source",
+            "reference",
+            "read_only",
+            "readonly",
+            "evidence",
+            "lookup",
+            "search",
+        )
+    )
 
 
 # LLM: _validate_contract_artifacts converts artifact refs into a single machine-readable delivery report.

@@ -7,6 +7,7 @@
 
 ## 已完成
 
+- 2026-05-26 Gateway JSON 文件锁已落地：`gateway_parts/io.py` 的 JSON read/write 和 read-modify-write 更新现在共用进程内锁 + 平台文件锁，新增 `update_json_file_atomic()`，用于协作/会话等并发 tick 避免 last-write-wins 覆盖。
 - `agent/gateway.py` 已作为兼容入口，真实协议实现拆到 `gateway_parts/`。
 - gateway 控制面已有 pid、state、heartbeat、stop request、log 等文件。
 - request 队列已有 pending、processing、done、failed、responses 目录语义。

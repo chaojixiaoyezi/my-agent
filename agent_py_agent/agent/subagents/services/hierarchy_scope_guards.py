@@ -38,10 +38,10 @@ def schedule_block_reason(parent: SubAgentTask, request: Any) -> str:
     return domain_mismatch_reason(parent, request)
 
 
-# LLM: qa_phase_block_reason keeps empty QA fanout from burning model calls with nothing to inspect.
-# 函数用途: 只阻断“没有实现产物却创建 QA”的红线；重复 coordinator 这类协作风险降级为 warning。
+# LLM: qa_phase_block_reason no longer enforces workflow order.
+# 函数用途: QA 先后顺序交给父级/LLM 和 closeout；这里只保留兼容入口，不再阻断调度。
 def qa_phase_block_reason(manager: Any, parent: SubAgentTask, request: Any) -> str:
-    return _qa_before_implementation_reason(manager, parent, request)
+    return ""
 
 
 # LLM: active_duplicate_child_reason prevents recovery loops from spawning endless same-purpose QA repairs.
@@ -60,6 +60,8 @@ def active_duplicate_child_reason(manager: Any, parent: SubAgentTask, request: A
 # 函数用途: 返回重复文件目标等可审计风险；不在底层阻断调度，避免修复/协作写同一文件时卡死。
 def schedule_warnings(manager: Any, parent: SubAgentTask, request: Any) -> list[str]:
     warnings: list[str] = []
+    if qa_reason := _qa_before_implementation_reason(manager, parent, request):
+        warnings.append(qa_reason)
     if mixed_reason := _mixed_coordinator_leaf_reason(request.child_specs):
         warnings.append(mixed_reason)
     warnings.extend(duplicate_verified_leaf_target_warnings(
@@ -74,8 +76,8 @@ def schedule_warnings(manager: Any, parent: SubAgentTask, request: Any) -> list[
     return warnings
 
 
-# LLM: _qa_before_implementation_reason keeps QA creation from becoming the only next layer.
-# 函数用途: 交付型父任务还没有 worker/leaf child 时，阻断纯 tester/bug_finder/acceptor 批次，要求先创建实现节点。
+# LLM: _qa_before_implementation_reason reports empty-QA risk without blocking creation.
+# 函数用途: 交付型父任务还没有 ready worker/leaf child 时给 warning，父级决定是否仍要先派 QA。
 def _qa_before_implementation_reason(manager: Any, parent: SubAgentTask, request: Any) -> str:
     if not _parent_has_product_root(parent):
         return ""

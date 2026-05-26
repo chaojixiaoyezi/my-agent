@@ -9,6 +9,7 @@ import re
 import tempfile
 from pathlib import Path
 
+from agent_py_agent.agent.agent_core.open_write_session_config import OpenWriteSessionConfig
 from agent_py_agent.agent.backend import ModelResponse
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
@@ -83,7 +84,6 @@ class _WrongRootOpenSessionBackend:
                 backend=self.name,
             )
         if self.calls == 3:
-            assert "open_file_write_sessions" in prompt
             assert session_id
             return ModelResponse(text=_append_call(session_id), backend=self.name)
         if self.calls == 4:
@@ -91,10 +91,10 @@ class _WrongRootOpenSessionBackend:
         return ModelResponse(text="分块文件已提交。", backend=self.name)
 
 
-# LLM: _NeverFinishesWriteSessionBackend keeps an open session until the deterministic block path fires.
-# 类用途: 复现真实任务里模型连续忽略 finish/abort 后，run 结果必须带机器阻断状态。
-class _NeverFinishesWriteSessionBackend:
-    name = "fake_never_finishes_write_session_backend"
+# LLM: _DelayedFinishWriteSessionBackend ignores open-session repair for several model turns before finishing.
+# 类用途: 验证 open session 只做周期提醒，不再因为固定 2 次忽略直接阻断任务。
+class _DelayedFinishWriteSessionBackend:
+    name = "fake_delayed_finish_write_session_backend"
 
     def __init__(self):
         self.calls = 0
@@ -109,7 +109,73 @@ class _NeverFinishesWriteSessionBackend:
             )
         if self.calls == 2:
             return ModelResponse(text=_append_call(session_id), backend=self.name)
+        if self.calls == 3:
+            return ModelResponse(text="文件已经写好了。", backend=self.name)
+        if self.calls in {4, 5}:
+            assert "open_file_write_sessions" in prompt
+            return ModelResponse(text="文件已经写好了。", backend=self.name)
+        if self.calls == 6:
+            assert "open_file_write_sessions" in prompt
+            return ModelResponse(text=_finish_call(session_id), backend=self.name)
+        return ModelResponse(text="延迟提交后完成。", backend=self.name)
+
+
+# LLM: _UnrelatedToolDuringOpenSessionBackend proves open sessions do not freeze unrelated research.
+# 类用途: 分块写入未提交时，非冲突工具调用应继续执行，只在关键收口点保护事务。
+class _UnrelatedToolDuringOpenSessionBackend:
+    name = "fake_unrelated_tool_during_open_session_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        session_id = _session_id_from_prompt(prompt)
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"file_write_session","action":"begin","target_path":"big.html"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        if self.calls == 2:
+            return ModelResponse(text=_append_call(session_id), backend=self.name)
+        if self.calls == 3:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"list_files","path":"."}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        if self.calls == 4:
+            return ModelResponse(text=_finish_call(session_id), backend=self.name)
         return ModelResponse(text="文件已经写好了。", backend=self.name)
+
+
+# LLM: _PeriodicOpenSessionReminderBackend checks non-conflicting tool turns still accumulate reminders.
+# 类用途: open session 期间连续做非冲突工具时，系统按配置周期提醒，但不阻断工具执行。
+class _PeriodicOpenSessionReminderBackend:
+    name = "fake_periodic_open_session_reminder_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        session_id = _session_id_from_prompt(prompt)
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"file_write_session","action":"begin","target_path":"big.html"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        if self.calls == 2:
+            return ModelResponse(text=_append_call(session_id), backend=self.name)
+        if self.calls in {3, 4}:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"list_files","path":"."}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        if self.calls == 5:
+            assert "periodic_open_session_reminder" in prompt
+            assert "open_file_write_sessions" in prompt
+            return ModelResponse(text=_finish_call(session_id), backend=self.name)
+        return ModelResponse(text="周期提醒后已提交。", backend=self.name)
 
 
 # LLM: _BeginOnlyWriteSessionBackend opens a session so tests can inspect manifest scope.
@@ -201,7 +267,7 @@ def test_tool_loop_requires_finish_for_open_file_write_session():
         result = agent.run("写一个较大的 HTML 文件", save=False, allowed_tools=["file_write_session"])
 
         assert result.response == "分块文件已提交。"
-        assert result.tool_rounds == 3
+        assert result.tool_rounds == 4
         assert agent.backend.calls == 5
         assert (workspace / "big.html").read_text(encoding="utf-8") == "<html><body>ok</body></html>"
 
@@ -229,20 +295,73 @@ def test_tool_loop_open_session_guard_uses_tool_workspace_root():
         assert (workspace / "big.html").read_text(encoding="utf-8") == "<html><body>ok</body></html>"
 
 
-# LLM: deterministic open-session blocks must flow through AgentRunResult machine status.
-# 函数用途: 防止真实 CLI 把 open session 阻断当 exit 0 成功。
-def test_tool_loop_open_session_block_sets_runtime_status():
+# LLM: open-session reminders must not hard-block a later valid finish.
+# 函数用途: 连续几轮未处理 open session 后，如果模型最终 finish，任务仍应正常完成。
+def test_tool_loop_open_session_reminders_do_not_block_late_finish():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=8)
         agent = SimpleAgent(cfg, workspace)
-        agent.backend = _NeverFinishesWriteSessionBackend()
+        agent.backend = _DelayedFinishWriteSessionBackend()
 
         result = agent.run("写一个较大的 HTML 文件", save=False, allowed_tools=["file_write_session"])
 
-        assert "[OPEN_FILE_WRITE_SESSION_BLOCKED]" in result.response
-        assert result.runtime_status == "blocked"
-        assert result.runtime_reason == "OPEN_FILE_WRITE_SESSION"
+        assert result.response == "延迟提交后完成。"
+        assert result.runtime_status == "ok"
+        assert result.runtime_reason == ""
+        assert (workspace / "big.html").read_text(encoding="utf-8") == "<html><body>ok</body></html>"
+
+
+# LLM: open sessions protect the staged target without freezing unrelated tools.
+# 函数用途: open file_write_session 期间允许 list_files 这类非冲突工具继续执行，最终仍必须 finish。
+def test_tool_loop_allows_unrelated_tools_while_file_write_session_open():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=8)
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = _UnrelatedToolDuringOpenSessionBackend()
+
+        result = agent.run(
+            "写一个较大的 HTML 文件，中途可以继续检查目录",
+            save=False,
+            allowed_tools=["file_write_session", "list_files"],
+        )
+
+        assert result.response == "文件已经写好了。"
+        assert result.executed_tools == [
+            "file_write_session",
+            "file_write_session",
+            "list_files",
+            "file_write_session",
+        ]
+        assert (workspace / "big.html").read_text(encoding="utf-8") == "<html><body>ok</body></html>"
+
+
+# LLM: non-conflicting turns should still receive periodic open-session reminders.
+# 函数用途: 验证周期提醒按模型回合累计，不因放行 list_files 而丢计数。
+def test_tool_loop_periodically_reminds_during_unrelated_open_session_work():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=8)
+        agent = SimpleAgent(cfg, workspace)
+        agent._open_write_session_config = OpenWriteSessionConfig(reminder_interval=2)
+        agent.backend = _PeriodicOpenSessionReminderBackend()
+
+        result = agent.run(
+            "写一个较大的 HTML 文件，中途可以继续检查目录",
+            save=False,
+            allowed_tools=["file_write_session", "list_files"],
+        )
+
+        assert result.response == "周期提醒后已提交。"
+        assert result.executed_tools == [
+            "file_write_session",
+            "file_write_session",
+            "list_files",
+            "list_files",
+            "file_write_session",
+        ]
+        assert (workspace / "big.html").read_text(encoding="utf-8") == "<html><body>ok</body></html>"
 
 
 # LLM: new file_write_session manifests must carry the active run scope.

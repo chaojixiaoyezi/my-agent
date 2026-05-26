@@ -65,11 +65,33 @@ def _acceptance_report(params: AcceptanceRecordParams):
         limit=params.limit,
         execute_tests=params.execute_acceptance_tests,
     )
+    run_ids = _acceptance_run_ids(params)
     if params.apply and not params.execute_acceptance_tests:
-        return params.agent.subagents.write_acceptance_review_report(options=options)
+        return params.agent.subagents.write_acceptance_review_report(run_ids, options=options)
     if params.execute_acceptance_tests:
-        return params.agent.subagents.write_acceptance_review_report(options=options)
-    return params.agent.subagents.review_acceptances(options=options)
+        return params.agent.subagents.write_acceptance_review_report(run_ids, options=options)
+    return params.agent.subagents.review_acceptances(run_ids, options=options)
+
+
+# LLM: _acceptance_run_ids scopes finalize reviews to the dispatch target when provided.
+# 函数用途: 显式 run_ids/root/parent 调度只验收本轮范围内等待验收的任务，避免旧工作区任务污染报告。
+def _acceptance_run_ids(params: AcceptanceRecordParams) -> list[str] | None:
+    if params.include_run_ids:
+        return [str(item) for item in params.include_run_ids if str(item or "").strip()]
+    if not (params.root_id or params.parent_run_id or params.exclude_run_ids):
+        return None
+    excluded = {str(item) for item in (params.exclude_run_ids or []) if str(item or "").strip()}
+    selected: list[str] = []
+    for task in params.agent.subagents.list_runs():
+        if task.id in excluded:
+            continue
+        if params.parent_run_id and task.parent_id != params.parent_run_id:
+            continue
+        if params.root_id and task.root_id != params.root_id:
+            continue
+        if task.status == "AWAITING_ACCEPTANCE" or task.verification_status == "NEEDS_ACCEPTANCE":
+            selected.append(task.id)
+    return selected
 
 
 # LLM: _write_refreshed_report_if_needed keeps aggregate acceptance files aligned after explicit tests.

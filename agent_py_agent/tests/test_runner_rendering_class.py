@@ -83,6 +83,30 @@ class TestExecutionContextRendering:
         assert "- product_write_policy: delegate" in result
         assert "- allowed_write_roots: /tmp/task, /tmp/deliverables" in result
 
+    # LLM: Declared output refs should be visible before a runner writes only output.json.
+    # 函数用途: 父级声明 output_files 时，执行上下文必须明确告诉 runner 这些是用户产物路径。
+    def test_render_execution_context_highlights_declared_output_refs(self):
+        context = SubAgentExecutionContext(
+            run_id="run-output-target",
+            generated_at=time.time(),
+            goal="读取资料并写摘要",
+            thought="思考",
+            plan=["读资料", "写摘要"],
+            role="worker",
+            context_bundle={
+                "output_contract": {
+                    "required_file_refs": ["/tmp/work/summary_result.txt"],
+                    "declared_output_refs": ["/tmp/work/summary_result.txt"],
+                }
+            },
+        )
+
+        result = render_execution_context_markdown(context)
+
+        assert "## Declared Output Targets" in result
+        assert "/tmp/work/summary_result.txt" in result
+        assert "内部 output.json 只能作为运行报告" in result
+
     def test_render_execution_context_markdown_empty_fields(self):
         """测试空字段执行上下文渲染。
 

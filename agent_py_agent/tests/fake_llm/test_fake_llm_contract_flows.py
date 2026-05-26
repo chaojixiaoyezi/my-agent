@@ -61,7 +61,7 @@ def test_fake_llm_repeated_missing_tool_call_is_blocked(tmp_path: Path):
     result = runner.run(tmp_path)
 
     assert result.blocked is True
-    assert result.block_reason == "TOOL_REPEATED_EXACT_FAILURE"
+    assert result.block_reason == "TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED"
 
 
 def test_fake_llm_unknown_tool_and_dangerous_action_are_rejected(tmp_path: Path):
@@ -110,18 +110,6 @@ def test_fake_llm_done_without_evidence_is_rejected(tmp_path: Path):
 
     assert result.contract_result.ok is False
     assert "REQUIRED_JSON_COLLECTION_EMPTY" in result.contract_result.error_codes
-    assert "FINAL_STATUS_REJECTED" in result.contract_result.error_codes
-
-
-def test_fake_llm_bootstrap_runtime_issue_is_recorded_and_blocks_success(tmp_path: Path):
-    from agent_py_agent.tests.support.fake_llm_runner import FakeLLMRunner
-
-    runner = FakeLLMRunner.from_fixture(_fixture("bootstrap_materialization_then_success.json"))
-
-    result = runner.run(tmp_path)
-
-    assert {item["code"] for item in result.runtime_issues} == {"BOOTSTRAP_MATERIALIZATION_REQUIRED"}
-    assert "RUNTIME_ISSUE_SUCCESS_CONFLICT" in result.contract_result.error_codes
     assert "FINAL_STATUS_REJECTED" in result.contract_result.error_codes
 
 

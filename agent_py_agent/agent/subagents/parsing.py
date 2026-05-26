@@ -18,6 +18,7 @@ from .coverage_records import coverage_records_from_payload
 from .models import SubAgentParsedOutput
 from .parsing_artifacts import artifact_items_from_payload
 from .parsing_capability_requests import capability_requests_from_payload
+from .parsing_evidence_refs import evidence_packets_with_top_level_refs
 from .parsing_partial import extract_partial_subagent_result_text
 from .parsing_values import (
     _dict_list as _dict_list,
@@ -267,6 +268,7 @@ def _parsed_parent_planner_from_payload(payload: dict[str, object]) -> ParentPla
 def _parsed_output_from_payload(payload: dict[str, object]) -> SubAgentParsedOutput:
     """把已解析 JSON payload 转成标准结果对象。"""
 
+    evidence_packets = evidence_packets_with_top_level_refs(payload)
     return SubAgentParsedOutput(
         found=True,
         ok=True,
@@ -278,7 +280,7 @@ def _parsed_output_from_payload(payload: dict[str, object]) -> SubAgentParsedOut
         used_tools=_string_list(payload.get("used_tools", [])),
         evidence=_dict_list(payload.get("evidence", [])),
         # LLM: 可追溯声明包与旧证据备注分开解析，避免语义互相污染。
-        evidence_packets=_dict_list(payload.get("evidence_packets", [])),
+        evidence_packets=evidence_packets,
         findings=_dict_list(payload.get("findings", [])),
         coverage_records=coverage_records_from_payload(payload),
         capability_requests=capability_requests_from_payload(payload),

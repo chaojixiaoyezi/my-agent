@@ -23,6 +23,7 @@ def repairable_code(code: str) -> bool:
             "ACCEPTANCE_",
             "ARTIFACT_",
             "BUILDER_",
+            "COLLABORATION_",
             "COLLECTION_",
             "CSV_",
             "DELIVERY_",
@@ -79,7 +80,7 @@ def hard_stop_code(code: str) -> bool:
 def recovery_category(code: str) -> str:
     if code.startswith(("ARTIFACT_", "BUILDER_", "DOCUMENT_", "DOCX_", "HTML_", "XLSX_", "CSV_", "JSON_", "PDF_", "MARKDOWN_", "SPREADSHEET_", "STATIC_SITE_")):
         return "artifact"
-    if code.startswith(("EVIDENCE_", "FACT_", "METRIC_", "LANGUAGE_", "COLLECTION_")):
+    if code.startswith(("EVIDENCE_", "FACT_", "METRIC_", "LANGUAGE_", "COLLABORATION_", "COLLECTION_")):
         return "evidence"
     if code.startswith(("TOOL_", "TOOL_PROTOCOL_")):
         return "tool"
@@ -101,6 +102,8 @@ def recommended_action(code: str, status: str) -> str:
         return "recover_from_checkpoint"
     if status == "blocked":
         return "stop_and_report_blocker"
+    if code.startswith("COLLABORATION_"):
+        return "continue_collaboration_or_mark_true_blocker"
     if code.startswith(("METRIC_", "LANGUAGE_", "COLLECTION_")):
         return "repair_structured_checkpoint_json"
     if code.startswith(("EVIDENCE_", "FACT_")):

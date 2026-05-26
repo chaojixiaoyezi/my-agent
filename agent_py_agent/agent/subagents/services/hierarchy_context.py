@@ -12,6 +12,9 @@ if TYPE_CHECKING:
 
 _INHERITED_ATTRIBUTE_FIELDS = (
     "capability_contracts",
+    # LLM: conversation refs are inherited as machine fields so descendants can raise events without guessing chat context.
+    "conversation_task_id",
+    "conversation_thread_id",
     "acceptance_required_tools",
     "controlled_exec_contract_required",
     "domain_scopes",

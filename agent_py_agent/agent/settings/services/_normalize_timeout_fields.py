@@ -56,6 +56,8 @@ _TIMEOUT_INT_FIELDS = (
     ("memory_resume_recommended_read_paths_limit", 0, None),
     ("memory_doctor_recent_archive_file_limit", 0, None),
     ("dispatch_default_max_runners", 0, None),
+    ("collaboration_auto_dispatch_max_runners", 0, None),
+    ("collaboration_default_deadline_seconds", 0, None),
     ("dispatch_default_limit", 0, None),
     ("dispatch_pending_runner_scan_limit", 1, None),
     ("watchdog_interval", 1, None),

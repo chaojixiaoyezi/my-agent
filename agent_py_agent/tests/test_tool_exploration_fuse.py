@@ -4,10 +4,60 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
-# LLM: exploration-only loops should be detected from structured tool calls, not prompt wording.
-# 函数用途: 验证连续只读/抓取工具达到阈值后，会要求先物化本地 checkpoint、草稿或产物。
-def test_exploration_fuse_redirects_after_repeated_read_only_calls(tmp_path: Path):
+# LLM: skipped hint rounds must still produce one correction instead of silently disappearing.
+# 函数用途: 验证恢复状态越过提示节点时会补发最近的通用提示，并且同一节点不会重复刷屏。
+def test_exploration_fuse_emits_crossed_hint_once(tmp_path: Path):
+    import json
+
+    from agent_py_agent.agent.agent_core.tool_exploration_fuse import exploration_fuse_context
+
+    state_dir = tmp_path / ".agent_delivery"
+    state_dir.mkdir()
+    state_file = state_dir / "exploration_fuse.json"
+    state_file.write_text(
+        json.dumps({"exploration_rounds_without_local_progress": 61}),
+        encoding="utf-8",
+    )
+    agent = SimpleNamespace(root=tmp_path)
+
+    context = exploration_fuse_context(agent, redirects=0)
+
+    assert "20%" in context
+    assert "下一轮请执行本地落地动作" in context
+    assert exploration_fuse_context(agent, redirects=0) == ""
+
+
+# LLM: unlimited exploration mode still sends crossed reminders without ever becoming a block.
+# 函数用途: 验证 threshold=0 时如果恢复状态跨过固定提醒节点，也会补发最近提醒且不进入阻断。
+def test_exploration_fuse_unlimited_mode_emits_crossed_fixed_hint_once(tmp_path: Path):
+    import json
+
+    from agent_py_agent.agent.agent_core.exploration_fuse_config import ExplorationFuseConfig
     from agent_py_agent.agent.agent_core.tool_exploration_fuse import (
+        exploration_fuse_context,
+        has_pending_exploration_fuse,
+    )
+
+    state_dir = tmp_path / ".agent_delivery"
+    state_dir.mkdir()
+    (state_dir / "exploration_fuse.json").write_text(
+        json.dumps({"exploration_rounds_without_local_progress": 151}),
+        encoding="utf-8",
+    )
+    agent = SimpleNamespace(root=tmp_path, _exploration_fuse_config=ExplorationFuseConfig(round_threshold=0))
+
+    context = exploration_fuse_context(agent, redirects=0)
+
+    assert "第 150 轮固定提醒" in context
+    assert has_pending_exploration_fuse(agent) is False
+    assert exploration_fuse_context(agent, redirects=0) == ""
+
+
+# LLM: exploration-only loops should warn at configured budget ratios before blocking.
+# 函数用途: 验证默认 300 轮探索额度会在 1/5、2/5、4/5 处提示，最终到额度上限才阻断。
+def test_exploration_fuse_uses_configured_budget_ratio_hints(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_exploration_fuse import (
+        exploration_fuse_block_response,
         exploration_fuse_context,
         has_pending_exploration_fuse,
         has_required_exploration_fuse,
@@ -16,30 +66,76 @@ def test_exploration_fuse_redirects_after_repeated_read_only_calls(tmp_path: Pat
     agent = SimpleNamespace(root=tmp_path)
     calls = [{"tool": "fetch_url", "url": "https://example.test/data.json"}]
 
-    for _ in range(9):
+    for _ in range(59):
         assert has_required_exploration_fuse(agent, calls) is False
 
     assert has_required_exploration_fuse(agent, calls) is True
-    assert has_pending_exploration_fuse(agent) is True
-
     context = exploration_fuse_context(agent, redirects=0)
     assert "[tool-system exploration-fuse]" in context
+    assert has_pending_exploration_fuse(agent) is False
+    assert "20%" in context
+    assert "连续探索额度" in context
+    assert "建议先写出" in context
+    assert "下一轮优先做一次本地落地动作" in context
+    assert "保存来源索引、阶段笔记、检查点、草稿、结构化数据或目标产物" in context
     assert "materialize_local_progress" in context
     assert "write_file" in context
 
+    for _ in range(59):
+        assert has_required_exploration_fuse(agent, calls) is False
+    assert has_required_exploration_fuse(agent, calls) is True
+    assert "40%" in exploration_fuse_context(agent, redirects=0)
+
+    for _ in range(119):
+        assert has_required_exploration_fuse(agent, calls) is False
+    assert has_required_exploration_fuse(agent, calls) is True
+    urgent_context = exploration_fuse_context(agent, redirects=0)
+    assert "80%" in urgent_context
+    assert "请尽快" in urgent_context
+    assert "下一轮必须优先物化本地进展" in urgent_context
+
+    for _ in range(59):
+        assert has_required_exploration_fuse(agent, calls) is False
+    assert has_required_exploration_fuse(agent, calls) is True
+    assert has_pending_exploration_fuse(agent) is True
+    assert exploration_fuse_context(agent, redirects=0) == ""
+    assert "[EXPLORATION_FUSE_BLOCKED]" in exploration_fuse_block_response(agent).text
+
 
 # LLM: zero exploration fuse threshold disables the count cap while still recording exploration facts.
-# 函数用途: 验证探索熔断阈值为 0 时表示不限制轮数，不会把普通长研究任务卡死。
-def test_exploration_fuse_zero_threshold_is_unlimited(tmp_path: Path, monkeypatch):
-    from agent_py_agent.agent.agent_core import tool_exploration_fuse
+# 函数用途: 验证探索熔断阈值为 0 时不阻断，只在 50、150、250 轮给固定提醒。
+def test_exploration_fuse_zero_threshold_uses_fixed_hints_without_blocking(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.exploration_fuse_config import ExplorationFuseConfig
+    from agent_py_agent.agent.agent_core.tool_exploration_fuse import (
+        exploration_fuse_context,
+        has_pending_exploration_fuse,
+        has_required_exploration_fuse,
+    )
 
-    monkeypatch.setattr(tool_exploration_fuse, "_EXPLORATION_ROUND_THRESHOLD", 0)
-    agent = SimpleNamespace(root=tmp_path)
+    agent = SimpleNamespace(root=tmp_path, _exploration_fuse_config=ExplorationFuseConfig(round_threshold=0))
     calls = [{"tool": "fetch_url", "url": "https://example.test/data.json"}]
 
-    for _ in range(12):
-        assert tool_exploration_fuse.has_required_exploration_fuse(agent, calls) is False
-    assert tool_exploration_fuse.has_pending_exploration_fuse(agent) is False
+    for _ in range(49):
+        assert has_required_exploration_fuse(agent, calls) is False
+    assert has_required_exploration_fuse(agent, calls) is True
+    context = exploration_fuse_context(agent, redirects=0)
+    assert "第 50 轮固定提醒" in context
+    assert "不会因次数阻断" in context
+    assert "下一轮优先做一次本地落地动作" in context
+
+    for _ in range(99):
+        assert has_required_exploration_fuse(agent, calls) is False
+    assert has_required_exploration_fuse(agent, calls) is True
+    assert "第 150 轮固定提醒" in exploration_fuse_context(agent, redirects=0)
+
+    for _ in range(99):
+        assert has_required_exploration_fuse(agent, calls) is False
+    assert has_required_exploration_fuse(agent, calls) is True
+    assert "第 250 轮固定提醒" in exploration_fuse_context(agent, redirects=0)
+
+    for _ in range(50):
+        assert has_required_exploration_fuse(agent, calls) is False
+    assert has_pending_exploration_fuse(agent) is False
 
 
 # LLM: durable local progress clears exploration debt so a long task can continue normally.
@@ -53,7 +149,7 @@ def test_exploration_fuse_resets_when_local_progress_happens(tmp_path: Path):
     agent = SimpleNamespace(root=tmp_path)
     calls = [{"tool": "read_artifact", "artifact_ref": "memory_archive/artifacts/tool_outputs/data.json"}]
 
-    for _ in range(10):
+    for _ in range(300):
         has_required_exploration_fuse(agent, calls)
     assert has_pending_exploration_fuse(agent) is True
 
@@ -72,7 +168,7 @@ def test_exploration_fuse_resets_on_structured_writer_and_document_builder(tmp_p
 
     agent = SimpleNamespace(root=tmp_path)
     calls = [{"tool": "fetch_url", "url": "https://example.test/data.json"}]
-    for _ in range(10):
+    for _ in range(300):
         has_required_exploration_fuse(agent, calls)
     assert has_pending_exploration_fuse(agent) is True
 
@@ -89,7 +185,7 @@ def test_exploration_fuse_run_command_classification_uses_command_token(tmp_path
     agent = SimpleNamespace(root=tmp_path)
     assert has_required_exploration_fuse(agent, [{"tool": "run_command", "command": "lsof -i :3000"}]) is False
 
-    for _ in range(9):
+    for _ in range(59):
         assert has_required_exploration_fuse(agent, [{"tool": "run_command", "command": "ls -la"}]) is False
     assert has_required_exploration_fuse(agent, [{"tool": "run_command", "command": "ls -la"}]) is True
 
@@ -107,7 +203,7 @@ def test_tool_loop_decision_redirects_and_blocks_exploration_fuse(tmp_path: Path
 
     agent = _agent(tmp_path)
     calls = [{"tool": "fetch_url", "url": "https://example.test/data.json"}]
-    for _ in range(9):
+    for _ in range(59):
         assert has_required_exploration_fuse(agent, calls) is False
 
     params = _params()
@@ -122,6 +218,9 @@ def test_tool_loop_decision_redirects_and_blocks_exploration_fuse(tmp_path: Path
     assert decision.action == "continue"
     assert decision.counters.exploration_fuse_redirects == 1
     assert any("exploration-fuse" in item for item in params.tool_context)
+
+    for _ in range(240):
+        has_required_exploration_fuse(agent, calls)
 
     final_decision = tool_loop_response_decision(
         ToolLoopResponseDecisionRequest(

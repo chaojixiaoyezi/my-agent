@@ -6,10 +6,22 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .orchestration_summary_action_lines import top_level_action_lines
 from .tool_context_recovery_summary import strategy_preview
 from .tool_context_repair_summary import repair_advice_action_lines
 
-_ORCHESTRATION_TOOLS = {"create_subagents", "dispatch_subagents", "schedule_child_subagents", "subagent_board"}
+_ORCHESTRATION_TOOLS = {
+    "case_status",
+    "create_subagents",
+    "dispatch_subagents",
+    "inspect_agent_tree",
+    "list_collaboration_requests",
+    "raise_collaboration_event",
+    "reroute_collaboration_request",
+    "schedule_child_subagents",
+    "subagent_board",
+    "update_collaboration_request",
+}
 _MAX_INLINE_JSON = 900
 _MAX_INLINE_TEXT = 500
 
@@ -68,7 +80,7 @@ def _render_orchestration_summary(
     ]
     lines.extend(_direct_children_lines(payload.get("direct_children")))
     lines.extend(repair_advice_action_lines(payload.get("parent_acceptance_repair_advice")))
-    lines.extend(_top_level_action_lines(payload))
+    lines.extend(top_level_action_lines(payload))
     lines.extend(_result_refs_by_run_lines(payload.get("result_refs_by_run")))
     lines.extend(_ref_lines(payload))
     lines.extend(_summary_lines(payload))
@@ -151,35 +163,6 @@ def _direct_children_suggested_tool_lines(value: dict[str, Any]) -> list[str]:
             f"- suggested_recovery_child_tool_call: {_json_inline(value.get('suggested_recovery_child_tool_call'))}"
         )
     return lines
-
-
-# LLM: _top_level_action_lines keeps schedule outputs useful even when they have no direct_children block.
-# 函数用途: 提取 schedule_child_subagents 等顶层字段中的新建 run、警告和 QA 建议。
-def _top_level_action_lines(payload: dict[str, Any]) -> list[str]:
-    keys = (
-        "blocked",
-        "reason",
-        "created",
-        "ids",
-        "allowed_tools",
-        "subagent_workspace",
-        "completion_status",
-        "must_not_report_done",
-        "blocking_run_ids",
-        "parent_acceptance_repair_advice",
-        "created_run_ids",
-        "planned_count",
-        "scheduling_warnings",
-        "coordination_advice",
-        "runner_selection_recovery",
-        "quality_advice",
-        "artifact_integrity_repair_advice",
-        # LLM: keep root's status table after create/schedule/dispatch outputs are externalized.
-        # 函数用途: 大调度 JSON 外置后仍保留 current_turn_run_state，避免下一轮重复 create 或空 dispatch。
-        "current_turn_run_state",
-        "next_action",
-    )
-    return [f"- {key}: {_json_inline(payload.get(key))}" for key in keys if payload.get(key)]
 
 
 # LLM: _result_refs_by_run_lines makes final handoff refs visible even when the flat ref list is clipped.

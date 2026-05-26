@@ -17,6 +17,9 @@ from .models import AgentRunResult
 from .orchestration_tools import (
     CreateSubagentsTool,
     DispatchSubagentsTool,
+    InspectAgentTreeTool,
+    RaiseMainEventTool,
+    RaiseObservationTool,
     SubagentBoardTool,
 )
 from .runtime_mixin import SimpleAgentRuntimeMixin
@@ -29,6 +32,9 @@ __all__ = [
     "CapabilityConfigPatchTool",
     "CreateSubagentsTool",
     "DispatchSubagentsTool",
+    "InspectAgentTreeTool",
+    "RaiseMainEventTool",
+    "RaiseObservationTool",
     "ScheduleChildSubagentsTool",
     "SimpleAgentDispatchMixin",
     "SimpleAgentRuntimeMixin",

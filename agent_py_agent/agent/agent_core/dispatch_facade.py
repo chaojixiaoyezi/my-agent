@@ -41,7 +41,7 @@ class _DispatchFacadeMixin:
         self._consecutive_dispatch_rounds = 0
 
     # LLM: watch_subagents 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 推进子代理的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
+    # 函数用途: watch 默认巡检子代理状态；显式 advance=True 时才串接调度、runner 和验收。
     def watch_subagents(
         self,
         router: CapabilityRouter,
@@ -63,6 +63,7 @@ class _DispatchFacadeMixin:
         locked_files: list[str] | None = None,
         interval: float = 30.0,
         max_cycles: int = 0,
+        advance: bool = False,
         force_lock: bool = False,
         stop_file=None,
     ) -> DispatchWatchReport:
@@ -82,6 +83,7 @@ class _DispatchFacadeMixin:
             locked_files=locked_files,
             interval=interval,
             max_cycles=max_cycles,
+            advance=advance,
             force_lock=force_lock,
             stop_file=stop_file,
         )

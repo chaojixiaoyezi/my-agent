@@ -4,21 +4,22 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from .delivery_closeout_config import delivery_closeout_config
 from .main_agent_delivery_closeout_artifacts import _artifact_path
 from .main_agent_delivery_closeout_recovery import _recovery_actions
 from .main_agent_delivery_progress_roots import work_progress_roots
 
-_WRITE_FIRST_RECOVERY_ACTIONS = {
-    "invoke_builder_tool",
-    "materialize_checkpoint",
-    "repair_evidence_refs",
-    "repair_structured_checkpoint_json",
-    "write_non_empty_structured_rows",
-}
+
+@dataclass(frozen=True)
+class DeliveryProgressContext:
+    workspace_root: Path
+    contract: dict[str, Any]
+    agent: object | None = None
 
 
 # LLM: _enrich_delivery_progress records generic failure fingerprints and suggested recovery actions.
@@ -26,10 +27,10 @@ _WRITE_FIRST_RECOVERY_ACTIONS = {
 def _enrich_delivery_progress(
     report: dict[str, Any],
     previous_report: dict[str, Any],
-    workspace_root: Path,
-    *,
-    contract: dict[str, Any],
+    context: DeliveryProgressContext,
 ) -> dict[str, Any]:
+    workspace_root = context.workspace_root
+    contract = context.contract
     progress = _initial_progress(workspace_root, contract)
     if report["ok"]:
         report["delivery_progress"] = progress
@@ -45,24 +46,18 @@ def _enrich_delivery_progress(
     )
     pending_targets = _pending_materialization_targets(contract, workspace_root)
     progress["pending_materialization_targets"] = pending_targets
-    progress["no_progress_block_threshold"] = _no_progress_block_threshold(
-        pending_targets,
-        total_target_count=_materialization_target_count(contract),
-        has_existing_failed_artifact=_has_existing_failed_artifact(report),
-    )
+    progress["no_progress_block_threshold"] = _no_progress_block_threshold(report, agent=context.agent)
     report["delivery_progress"] = progress
     return report
 
 
 # LLM: _should_block_on_no_progress uses only structured delivery facts, never prompt prose, to stop a loop.
-# 函数用途: 成品都已落地时保持严格阻塞；仍缺结构化目标时适度放宽，让多文件/分阶段任务有机会补齐产物。
+# 函数用途: 统一按 closeout retry budget 收口重复验收失败；返工建议由 closeout 上下文提供，不再交给独立 repair guard 豁免。
 def _should_block_on_no_progress(
     report: dict[str, Any], *, contract: dict[str, Any], workspace_root: Path
 ) -> bool:
     progress = report.get("delivery_progress")
     if not isinstance(progress, dict):
-        return False
-    if _has_write_first_recovery_action(progress):
         return False
     unchanged = _safe_int(progress.get("unchanged_failure_count"))
     if "no_progress_block_threshold" in progress:
@@ -70,8 +65,6 @@ def _should_block_on_no_progress(
     else:
         threshold = _live_no_progress_threshold(report, contract, workspace_root)
     if threshold <= 0:
-        return False
-    if unchanged >= threshold and _has_write_first_recovery_action(progress):
         return False
     return unchanged >= threshold
 
@@ -123,11 +116,7 @@ def _live_no_progress_threshold(
     contract: dict[str, Any],
     workspace_root: Path,
 ) -> int:
-    return _no_progress_block_threshold(
-        _pending_materialization_targets(contract, workspace_root),
-        total_target_count=_materialization_target_count(contract),
-        has_existing_failed_artifact=_has_existing_failed_artifact(report),
-    )
+    return _no_progress_block_threshold(report)
 
 
 # LLM: _has_existing_failed_artifact distinguishes broken existing outputs from not-yet-materialized outputs.
@@ -137,24 +126,6 @@ def _has_existing_failed_artifact(report: dict[str, Any]) -> bool:
         not item.get("ok") and Path(str(item.get("path") or "")).exists()
         for item in report.get("artifacts", [])
     )
-
-
-# LLM: write-first recovery actions are handled by tool_delivery_repair_guard before terminal no-progress blocking.
-# 函数用途: 判断 closeout 是否已经给出必须先写入/修复/构建的结构化动作；这类动作要先进入修复 guard。
-def _has_write_first_recovery_action(progress: dict[str, Any]) -> bool:
-    actions = progress.get("recovery_actions")
-    if not isinstance(actions, list):
-        return False
-    return any(_is_write_first_action(item) for item in actions)
-
-
-# LLM: _is_write_first_action checks one structured recovery action for write-first behavior.
-# 函数用途: 用 recommended_action 字段判断修复链路，不解析自然语言 hint。
-def _is_write_first_action(item: object) -> bool:
-    if not isinstance(item, dict):
-        return False
-    action = str(item.get("recommended_action") or "").strip()
-    return bool(item.get("retryable", True)) and action in _WRITE_FIRST_RECOVERY_ACTIONS
 
 
 # LLM: _progress_threshold_from_report keeps no-progress blocking data-driven once the report already carries the threshold.
@@ -204,16 +175,60 @@ def _materialization_target_record(item: dict[str, Any], workspace_root: Path) -
     }
 
 
-# LLM: _no_progress_block_threshold raises the retry budget only while bootstrap targets are still missing.
-# 函数用途: 统一 no-progress 阈值：成品都已落地时保持严格；目标仍缺失时给继续物化的机会。
+# LLM: _no_progress_block_threshold returns one of two generic closeout retry budgets.
+# 函数用途: 统一验收返工阈值：缺产物和产物齐全但不合格两类；0 表示不按次数阻断。
 def _no_progress_block_threshold(
-    pending_targets: list[dict[str, object]], *, total_target_count: int, has_existing_failed_artifact: bool
+    report_or_pending_targets: dict[str, Any] | list[dict[str, object]],
+    *,
+    total_target_count: int = 0,
+    has_existing_failed_artifact: bool = False,
+    agent: object | None = None,
 ) -> int:
-    if not pending_targets:
-        return 4 if has_existing_failed_artifact else 2
-    if total_target_count > 0 and len(pending_targets) >= total_target_count:
-        return 6
-    return 5
+    config = delivery_closeout_config(agent)
+    if isinstance(report_or_pending_targets, dict):
+        if not _failed_artifacts(report_or_pending_targets):
+            return 0
+        if _has_missing_artifact_failure(report_or_pending_targets):
+            return config.missing_artifacts_retry_limit
+        return config.invalid_artifacts_retry_limit
+    if report_or_pending_targets:
+        return config.missing_artifacts_retry_limit
+    if has_existing_failed_artifact:
+        return config.invalid_artifacts_retry_limit
+    return 0
+
+
+def _failed_artifacts(report: dict[str, Any]) -> list[dict[str, Any]]:
+    artifacts = report.get("artifacts")
+    if not isinstance(artifacts, list):
+        return []
+    return [item for item in artifacts if isinstance(item, dict) and item.get("ok") is not True]
+
+
+def _has_missing_artifact_failure(report: dict[str, Any]) -> bool:
+    return any(_artifact_failure_is_missing(item) for item in _failed_artifacts(report))
+
+
+def _artifact_failure_is_missing(item: dict[str, Any]) -> bool:
+    path = str(item.get("path") or "").strip()
+    if path and not Path(path).exists():
+        return True
+    return any(_finding_code_is_missing(finding.get("code")) for finding in _artifact_findings(item))
+
+
+def _artifact_findings(item: dict[str, Any]) -> list[dict[str, Any]]:
+    report = item.get("acceptance_report")
+    findings = report.get("findings") if isinstance(report, dict) else None
+    return [finding for finding in findings or [] if isinstance(finding, dict)]
+
+
+def _finding_code_is_missing(value: object) -> bool:
+    code = str(value or "").strip().upper()
+    return (
+        code == "ARTIFACT_MISSING"
+        or code == "ARTIFACT_PATH_INVALID"
+        or code.startswith("ARTIFACT_LOCATOR_")
+    )
 
 
 # LLM: _materialization_target_count keeps the closeout retry budget based on structured bootstrap facts only.

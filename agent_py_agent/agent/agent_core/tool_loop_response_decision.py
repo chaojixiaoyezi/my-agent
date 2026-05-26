@@ -7,21 +7,9 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from ._runtime_params import ToolLoopExecuteParams
-from .tool_bootstrap_materialization_guard import (
-    bootstrap_materialization_block_response,
-    bootstrap_materialization_context,
-    has_required_bootstrap_materialization,
-    is_bootstrap_materialization_evidence_call,
-    is_bootstrap_materialization_productive_call,
-    should_redirect_bootstrap_evidence,
-)
-from .tool_delivery_repair_call_normalizer import normalize_delivery_repair_calls
-from .tool_delivery_repair_guard import (
-    delivery_repair_block_response,
-    delivery_repair_context,
-    delivery_repair_rejection_context,
-    has_required_delivery_repair,
-    is_delivery_repair_productive_call,
+from .main_agent_delivery_closeout import (
+    MainAgentDeliveryCloseoutRequest,
+    main_agent_delivery_closeout_response,
 )
 from .tool_local_progress_guard import (
     has_required_local_progress_guard,
@@ -40,10 +28,13 @@ from .tool_loop_open_session_decision import (
     open_session_tool_call_decision,
     open_write_session_decision,
 )
+from .tool_loop_orchestration_contract_decision import (
+    OrchestrationContractDecision,
+    OrchestrationContractDecisionRequest,
+    orchestration_contract_no_tool_call_decision,
+)
 from .tool_loop_repair_counters import (
     ToolLoopRepairCounters,
-    _inc_bootstrap_materialization,
-    _inc_delivery_repair,
     _inc_local_progress,
     _inc_reserved,
 )
@@ -140,20 +131,9 @@ def _tool_calls_decision(
     open_session_tools = open_session_tool_call_decision(_open_session_request(request, calls))
     if open_session_tools is not None:
         return _open_session_decision(open_session_tools)
-    calls = normalize_delivery_repair_calls(request.agent, calls, request.params)
-    delivery_repair_active = has_required_delivery_repair(request.agent, request.params)
-    delivery_repair_tools = _delivery_repair_tool_call_decision(request, calls)
-    if delivery_repair_tools is not None:
-        return delivery_repair_tools
-    if delivery_repair_active:
-        clean_response = sanitize_reserved_tool_record_response(request.response)
-        return ToolLoopResponseDecision("run_tools", clean_response, calls, request.counters)
     local_progress_tools = _local_progress_tool_call_decision(request, calls)
     if local_progress_tools is not None:
         return local_progress_tools
-    bootstrap_decision = _bootstrap_materialization_tool_call_decision(request, calls)
-    if bootstrap_decision is not None:
-        return bootstrap_decision
     exploration_fuse = exploration_fuse_tool_call_decision(_exploration_request(request, calls))
     if exploration_fuse is not None:
         return _exploration_decision(exploration_fuse)
@@ -167,12 +147,14 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
     open_session_decision = open_write_session_decision(_open_session_request(request, []))
     if open_session_decision is not None:
         return _open_session_decision(open_session_decision)
-    delivery_repair_decision = _delivery_repair_no_tool_call_decision(request)
-    if delivery_repair_decision is not None:
-        return delivery_repair_decision
-    bootstrap_decision = _bootstrap_materialization_no_tool_call_decision(request)
-    if bootstrap_decision is not None:
-        return bootstrap_decision
+    orchestration_contract_decision = orchestration_contract_no_tool_call_decision(
+        _orchestration_contract_request(request)
+    )
+    if orchestration_contract_decision is not None:
+        return _orchestration_contract_decision(orchestration_contract_decision)
+    delivery_closeout_decision = _implicit_delivery_closeout_decision(request)
+    if delivery_closeout_decision is not None:
+        return delivery_closeout_decision
     local_progress_decision = _local_progress_no_tool_call_decision(request)
     if local_progress_decision is not None:
         return local_progress_decision
@@ -192,42 +174,24 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
     return ToolLoopResponseDecision("break", final, [], request.counters)
 
 
-# LLM: _delivery_repair_no_tool_call_decision prevents staged-repair tasks from ending or chatting while write-first recovery actions remain.
-# 函数用途: closeout 已要求先修阶段产物时，若模型没有给任何工具调用，就先纠偏；连续忽略则阻断。
-def _delivery_repair_no_tool_call_decision(
+# LLM: no-tool final text is an implicit delivery submission when a delivery contract exists.
+# 函数用途: 模型准备最终回答时先跑机器验收；通过才完成，失败则把返工单放回下一轮。
+def _implicit_delivery_closeout_decision(
     request: _NoToolCallsRequest,
 ) -> ToolLoopResponseDecision | None:
-    if not has_required_delivery_repair(request.agent, request.params):
-        return None
-    repair_context = delivery_repair_context(
-        request.agent,
-        request.counters.delivery_repair_redirects,
-        request.params,
+    before_context_count = len(request.params.tool_context)
+    response = main_agent_delivery_closeout_response(
+        MainAgentDeliveryCloseoutRequest(
+            agent=request.agent,
+            params=request.params,
+            backend=request.response.backend,
+        )
     )
-    if repair_context:
-        request.params.tool_context.append(repair_context)
-        return ToolLoopResponseDecision("continue", None, [], _inc_delivery_repair(request.counters))
-    block = delivery_repair_block_response(request.agent, request.params)
-    return ToolLoopResponseDecision("break", block or request.response, [], request.counters)
-
-
-# LLM: _bootstrap_materialization_no_tool_call_decision stops the assistant from chatting before the first structured target exists.
-# 函数用途: 开工阶段所有目标都还缺失时，如果模型没给工具调用，就先纠偏；重复忽略后阻断。
-def _bootstrap_materialization_no_tool_call_decision(
-    request: _NoToolCallsRequest,
-) -> ToolLoopResponseDecision | None:
-    if not has_required_bootstrap_materialization(request.agent, request.params, []):
-        return None
-    repair_context = bootstrap_materialization_context(
-        request.agent,
-        request.params,
-        request.counters.bootstrap_materialization_redirects,
-    )
-    if repair_context:
-        request.params.tool_context.append(repair_context)
-        return ToolLoopResponseDecision("continue", None, [], _inc_bootstrap_materialization(request.counters))
-    block = bootstrap_materialization_block_response(request.agent, request.params)
-    return ToolLoopResponseDecision("break", block or request.response, [], request.counters)
+    if response is not None:
+        return ToolLoopResponseDecision("break", response, [], request.counters)
+    if len(request.params.tool_context) > before_context_count:
+        return ToolLoopResponseDecision("continue", None, [], request.counters)
+    return None
 
 
 # LLM: _local_progress_no_tool_call_decision blocks empty chatter turns once the machine closeout report shows repeated exploration without new local work.
@@ -246,48 +210,6 @@ def _local_progress_no_tool_call_decision(
         return ToolLoopResponseDecision("continue", None, [], _inc_local_progress(request.counters))
     block = local_progress_guard_block_response(request.agent)
     return ToolLoopResponseDecision("break", block or request.response, [], request.counters)
-
-
-# LLM: _bootstrap_materialization_tool_call_decision permits evidence gathering while redirecting pure inspection startup turns.
-# 函数用途: bootstrap 目标缺失时允许先抓取真实证据，但纯检查仍先纠偏；重复无进展达到阈值后阻断。
-def _bootstrap_materialization_tool_call_decision(
-    request: ToolLoopResponseDecisionRequest,
-    calls: list[dict[str, object]],
-) -> ToolLoopResponseDecision | None:
-    if not has_required_bootstrap_materialization(request.agent, request.params, calls):
-        return None
-    if is_bootstrap_materialization_productive_call(calls, _bootstrap_materialization_payload(request)):
-        return None
-    if is_bootstrap_materialization_evidence_call(calls):
-        block = bootstrap_materialization_block_response(request.agent, request.params)
-        if block is not None:
-            return ToolLoopResponseDecision("break", block, [], request.counters)
-        if should_redirect_bootstrap_evidence(request.agent):
-            repair_context = bootstrap_materialization_context(
-                request.agent,
-                request.params,
-                request.counters.bootstrap_materialization_redirects,
-            )
-            if repair_context:
-                request.params.tool_context.append(repair_context)
-                return ToolLoopResponseDecision("continue", None, [], _inc_bootstrap_materialization(request.counters))
-        return None
-    repair_context = bootstrap_materialization_context(
-        request.agent,
-        request.params,
-        request.counters.bootstrap_materialization_redirects,
-    )
-    if repair_context:
-        request.params.tool_context.append(repair_context)
-        return ToolLoopResponseDecision("continue", None, [], _inc_bootstrap_materialization(request.counters))
-    block = bootstrap_materialization_block_response(request.agent, request.params)
-    return ToolLoopResponseDecision("break", block or request.response, [], request.counters)
-
-
-def _bootstrap_materialization_payload(request: ToolLoopResponseDecisionRequest) -> dict[str, object]:
-    from .tool_bootstrap_materialization_guard import _bootstrap_payload
-
-    return _bootstrap_payload(request.agent, request.params)
 
 
 # LLM: _local_progress_tool_call_decision redirects repeated remote/read-only exploration when closeout facts show the local workspace has stopped changing.
@@ -309,27 +231,6 @@ def _local_progress_tool_call_decision(
     return ToolLoopResponseDecision("break", block or request.response, [], request.counters)
 
 
-# LLM: _delivery_repair_tool_call_decision redirects inspection-only tool calls while staged-delivery recovery still requires writes or builder actions.
-# 函数用途: 当模型在必须先写/修/构建的阶段仍只发检查类工具调用时，先追加结构化纠偏合同，再重复忽略就阻断。
-def _delivery_repair_tool_call_decision(
-    request: ToolLoopResponseDecisionRequest,
-    calls: list[dict[str, object]],
-) -> ToolLoopResponseDecision | None:
-    if is_delivery_repair_productive_call(request.agent, calls, request.params):
-        return None
-    repair_context = delivery_repair_rejection_context(
-        request.agent,
-        calls,
-        request.counters.delivery_repair_redirects,
-        request.params,
-    )
-    if repair_context:
-        request.params.tool_context.append(repair_context)
-        return ToolLoopResponseDecision("continue", None, [], _inc_delivery_repair(request.counters))
-    block = delivery_repair_block_response(request.agent, request.params)
-    return ToolLoopResponseDecision("break", block or request.response, [], request.counters)
-
-
 # LLM: _exploration_decision adapts the split exploration module into this module's public decision type.
 # 函数用途: 保持 tool_loop_response_decision 的返回类型稳定，同时让 exploration 分支独立演进。
 def _exploration_decision(decision: ExplorationFuseDecision) -> ToolLoopResponseDecision:
@@ -340,10 +241,20 @@ def _unresolved_runtime_issue_decision(decision: UnresolvedRuntimeIssueDecision)
     return ToolLoopResponseDecision(decision.action, decision.response, decision.calls, decision.counters)
 
 
+def _orchestration_contract_decision(decision: OrchestrationContractDecision) -> ToolLoopResponseDecision:
+    return ToolLoopResponseDecision(decision.action, decision.response, decision.calls, decision.counters)
+
+
 def _unresolved_runtime_issue_request(
     request: _NoToolCallsRequest,
 ) -> UnresolvedRuntimeIssueDecisionRequest:
     return UnresolvedRuntimeIssueDecisionRequest(request.agent, request.params, request.response, request.counters)
+
+
+def _orchestration_contract_request(
+    request: _NoToolCallsRequest,
+) -> OrchestrationContractDecisionRequest:
+    return OrchestrationContractDecisionRequest(request.agent, request.params, request.response, request.counters)
 
 
 # LLM: _exploration_request adapts either request shape into the exploration module contract.

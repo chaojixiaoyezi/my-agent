@@ -270,13 +270,19 @@ def make_patch_review_records(params: PatchReviewRecordParams):
 # LLM: update_pending_work_state 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 更新pendingwork状态对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新运行循环、工具调用、调度记录和最终响应，需避免破坏既有状态机约定。
 def update_pending_work_state(agent) -> bool:
-    from .runner_dispatch import _dispatch_runner_candidates, _runner_max_attempts
+    from .runner_dispatch import (
+        _dispatch_runner_candidates,
+        _runner_max_attempts,
+        _same_run_redispatch_limit,
+    )
 
     runner_max_attempts = _runner_max_attempts(agent.config.runner_failure_policy)
+    same_run_limit = _same_run_redispatch_limit(getattr(agent.config, "same_run_redispatch_limit", None))
     candidates = _dispatch_runner_candidates(
         agent.subagents.list_runs(),
         max_runners=999,
         runner_max_attempts=runner_max_attempts,
+        same_run_redispatch_limit=same_run_limit,
     )
     return len(candidates) > 0
 

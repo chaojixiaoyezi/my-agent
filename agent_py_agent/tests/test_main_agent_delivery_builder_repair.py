@@ -5,6 +5,7 @@ from pathlib import Path
 
 from agent_py_agent.agent.agent_core.main_agent_delivery_closeout import (
     DeliveryContractValidationRequest,
+    DeliveryProgressContext,
     _enrich_delivery_progress,
     _validate_contract_artifacts,
 )
@@ -34,7 +35,7 @@ def _actions(workspace: Path, contract: dict[str, object]) -> dict[str, dict[str
             workspace_root=workspace,
         )
     )
-    enriched = _enrich_delivery_progress(report, {}, workspace, contract=contract)
+    enriched = _enrich_delivery_progress(report, {}, DeliveryProgressContext(workspace, contract))
     return {item["code"]: item for item in enriched["delivery_progress"]["recovery_actions"]}
 
 

@@ -14,13 +14,13 @@ import json
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..file_io import append_jsonl
 from .controlled_exec_gateway import controlled_exec_grant_refs
-from .dependency_artifact_refs import dependency_artifact_refs_for_required_paths
+from .manager_collaboration_context import collaboration_context_payload
 from .models import SubAgentExecutionContext
 from .parsing import (
     _dict_list,
@@ -126,6 +126,7 @@ class SubAgentRunnerContextMixin:
         product_roots = task_product_write_roots(task, report_roots)
         controlled_exec_grants = controlled_exec_grant_refs(list(task.capability_grants or []))
         grant_write_roots = _granted_filesystem_write_roots(task)
+        read_roots = _task_required_read_roots(task)
         return {
             "task_dir": task.task_dir,
             "role": task.role,
@@ -133,6 +134,7 @@ class SubAgentRunnerContextMixin:
                 _merge_list(task.allowed_write_roots, grant_write_roots),
                 report_roots,
             ),
+            "allowed_read_roots": read_roots,
             "product_write_roots": product_roots,
             "product_write_policy": task_product_write_policy(task, product_roots),
             "forbidden_write_roots": task.forbidden_write_roots,
@@ -165,7 +167,6 @@ class SubAgentRunnerContextMixin:
 
         task = self.load(run_id)
         _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
-        _append_dependency_artifact_refs(task, self.list_runs())
         granted_skills, granted_tools, grants = self._extract_granted_caps(task)
         allowed_skills = _merge_list(task.allowed_skills, granted_skills)
         allowed_tools = _runner_allowed_tools(task, _merge_list(task.allowed_tools, granted_tools))
@@ -184,6 +185,10 @@ class SubAgentRunnerContextMixin:
     def _make_execution_context(self, request: ExecutionContextBuildRequest) -> SubAgentExecutionContext:
         task = request.task
         controlled_exec_grants = controlled_exec_grant_refs(list(task.capability_grants or []))
+        context_bundle = execution_context_bundle(task)
+        collaboration = collaboration_context_payload(self, task)
+        if collaboration:
+            context_bundle["collaboration"] = collaboration
         return SubAgentExecutionContext(
             **_execution_context_task_fields(task),
             allowed_skills=request.allowed_skills,
@@ -196,7 +201,7 @@ class SubAgentRunnerContextMixin:
             quality_contract=task.quality_contract,
             context_manifest=task.context_manifest,
             context_packs=task.context_packs,
-            context_bundle=execution_context_bundle(task),
+            context_bundle=context_bundle,
             context_bundle_file=str(Path(task.task_dir) / "CONTEXT_BUNDLE.md"),
             context_bundle_json=str(Path(task.task_dir) / "context_bundle.json"),
             write_boundary=self._build_write_boundary(task),
@@ -279,21 +284,6 @@ def _task_text_field(task: object, name: str) -> str:
     return value if isinstance(value, str) else ""
 
 
-# LLM: _append_dependency_artifact_refs exposes completed upstream outputs as concrete read refs.
-# 函数用途: 下游只写了短文件名时，把已完成上游 artifact 路径补进 Context Manifest，避免 runner 猜路径。
-def _append_dependency_artifact_refs(task: object, dependency_tasks: list) -> None:
-    manifest = getattr(task, "context_manifest", None)
-    if manifest is None:
-        return
-    refs = dependency_artifact_refs_for_required_paths(task, dependency_tasks)
-    if not refs:
-        return
-    current = getattr(manifest, "required_read_paths", None)
-    if not isinstance(current, list):
-        return
-    manifest.required_read_paths = _merge_list(current, refs)
-
-
 _FILESYSTEM_WRITE_GRANT_TOOLS = {"write_file", "append_file", "replace_in_file"}
 
 
@@ -307,6 +297,27 @@ def _granted_filesystem_write_roots(task: object) -> list[str]:
             continue
         roots = _merge_list(roots, _string_list(getattr(grant, "path_scope", []) or []))
     return roots
+
+
+# LLM: required_read_paths are read grants only; they must not become product write roots.
+# 函数用途: 将父级显式传下来的资料路径变成工具层 allowed_read_roots，
+# 让子代理能读自己的输入文件，同时不扩大写入权限。
+def _task_required_read_roots(task: object) -> list[str]:
+    manifest = getattr(task, "context_manifest", None)
+    if isinstance(manifest, dict):
+        raw = manifest.get("required_read_paths")
+        hint_raw = manifest.get("hint_read_paths")
+    else:
+        raw = getattr(manifest, "required_read_paths", None)
+        hint_raw = getattr(manifest, "hint_read_paths", None)
+    roots: list[str] = []
+    for item in [*_string_list(raw), *_string_list(hint_raw)]:
+        text = str(item or "").strip()
+        if not text or "://" in text:
+            continue
+        path = Path(text).expanduser()
+        roots.append(str(path if path.is_absolute() else path))
+    return _merge_list([], roots)
 
 
 # LLM: _runner_allowed_tools removes parent-only request lanes only from self-authorized roots.

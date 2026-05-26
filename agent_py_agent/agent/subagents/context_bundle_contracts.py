@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from typing import NamedTuple
 
@@ -11,6 +12,7 @@ from .context_bundle_file_roots import (
     file_level_write_root_terms,
     is_contract_file_path,
 )
+from .context_bundle_internal_roots import internal_root_texts, path_is_internal
 from .context_bundle_refs import safe_string_ref, workspace_refs
 from .models import SubAgentTask
 from .required_file_terms import (
@@ -37,6 +39,7 @@ def output_contract(task: SubAgentTask) -> dict[str, object]:
         "agent_run_final_report_ref": safe_string_ref(task, "agent_run_final_report_md") or safe_string_ref(task, "debrief_file"),
         "runner_result_ref": safe_string_ref(task, "runner_result_json"),
         "output_json_ref": safe_string_ref(task, "output_json"),
+        "declared_output_refs": declared_output_refs(task),
         "required_files": components.required_files,
         "forbidden_files": components.forbidden_files,
         "file_contract_source": components.source,
@@ -65,12 +68,14 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
         "file_contract": {
             "required_files": components.required_files,
             "required_file_refs": components.required_file_refs,
+            "declared_output_refs": declared_output_refs(task),
             "forbidden_files": components.forbidden_files,
             "source": components.source,
         },
         "write_contract": {
             "product_write_roots": components.product_roots,
             "required_file_refs": components.required_file_refs,
+            "declared_output_refs": declared_output_refs(task),
             "allowed_write_roots": list(task.allowed_write_roots or []),
             "forbidden_write_roots": list(task.forbidden_write_roots or []),
             "locked_files": list(task.locked_files or []),
@@ -120,11 +125,11 @@ def required_file_contract(task: SubAgentTask) -> list[str]:
 # LLM: product_write_roots separates user deliverable roots from run-private report roots for handoff contracts.
 # 函数用途: 从 allowed_write_roots 里筛出真实用户产物根，避免内部 agent-run final_report 被当成业务交付物。
 def product_write_roots(task: SubAgentTask) -> list[str]:
-    internal_roots = _internal_root_texts(task)
+    internal_roots = internal_root_texts(task)
     roots: list[str] = []
     for raw in getattr(task, "allowed_write_roots", []) or []:
         text = str(raw or "").strip()
-        if not text or _path_is_internal(text, internal_roots):
+        if not text or path_is_internal(text, internal_roots):
             continue
         if text not in roots:
             roots.append(text)
@@ -167,7 +172,34 @@ def _structured_required_file_contract(task: SubAgentTask) -> list[str]:
     return _dedupe_file_terms([
         *_file_contract_list(attrs.get("required_files")),
         *_file_contract_list(attrs.get("required_file_refs")),
+        *_path_like_output_contract_list(attrs.get("output_files")),
+        *_path_like_output_contract_list(attrs.get("output_refs")),
     ])
+
+
+# LLM: declared_output_refs exposes parent-declared deliverables without parsing prose.
+# 函数用途: 把 create/schedule 里的 output_files/output_refs/artifact_refs 传给 runner；不从 goal 自然语言推导。
+def declared_output_refs(task: SubAgentTask) -> list[str]:
+    attrs = _task_attributes(task)
+    return _dedupe_file_terms([
+        *_file_contract_list(attrs.get("output_files")),
+        *_file_contract_list(attrs.get("output_refs")),
+        *_file_contract_list(attrs.get("artifact_refs")),
+    ])
+
+
+# LLM: output_refs may be logical field names, so only path-like values become file requirements.
+# 函数用途: 允许模型/外部系统用 output_refs 表示结果键；只有绝对路径、带目录或具体文件名才进入硬文件合同。
+def _path_like_output_contract_list(value: object) -> list[str]:
+    return [item for item in _file_contract_list(value) if _looks_like_output_path(item)]
+
+
+def _looks_like_output_path(value: object) -> bool:
+    text = str(value or "").strip().replace("\\", "/")
+    if not text or "://" in text:
+        return False
+    path = Path(text)
+    return path.is_absolute() or "/" in text or is_contract_file_path(path)
 
 
 # LLM: _structured_forbidden_file_contract reads forbidden files from task attributes only.
@@ -201,6 +233,7 @@ def render_task_packet_lines(packet: dict[str, object]) -> list[str]:
         f"- role: {packet.get('role') or 'none'}",
         f"- required_files: {_compact_list(file_contract.get('required_files'))}",
         f"- required_file_refs: {_compact_list(file_contract.get('required_file_refs'))}",
+        f"- declared_output_refs: {_compact_list(file_contract.get('declared_output_refs'))}",
         f"- forbidden_files: {_compact_list(file_contract.get('forbidden_files'))}",
         f"- product_write_roots: {_compact_list(write_contract.get('product_write_roots'))}",
         f"- allowed_write_roots: {_compact_list(write_contract.get('allowed_write_roots'))}",
@@ -227,10 +260,33 @@ def _task_attributes(task: SubAgentTask) -> dict[str, object]:
 def _file_contract_list(value: object) -> list[str]:
     if value is None:
         return []
+    structured = _structured_file_ref_value(value)
+    if structured is not value:
+        return _file_contract_list(structured)
+    if isinstance(value, dict):
+        refs: list[str] = []
+        for field in ("path", "file", "file_path", "output_path", "artifact_path", "ref", "href"):
+            refs.extend(_file_contract_list(value.get(field)))
+        return _dedupe_file_terms(refs)
     if isinstance(value, list | tuple):
-        return [term for item in value if (term := clean_file_contract_term(item))]
+        return _dedupe_file_terms([term for item in value for term in _file_contract_list(item)])
     term = clean_file_contract_term(value)
     return [term] if term else []
+
+
+# LLM: _structured_file_ref_value accepts serialized ref carriers without making prose a contract.
+# 函数用途: 兼容旧任务把 {"output_path": "..."} 误存成字符串的情况，只按结构化对象读取路径字段。
+def _structured_file_ref_value(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text or text[0] not in "[{":
+        return value
+    try:
+        parsed = ast.literal_eval(text)
+    except (SyntaxError, ValueError):
+        return value
+    return parsed if isinstance(parsed, dict | list | tuple) else value
 
 
 # LLM: _dedupe_file_terms preserves user-mentioned order for required/forbidden contract lists.
@@ -269,8 +325,12 @@ def _resolve_required_file_ref(root: str, file_path: Path) -> str:
 # LLM: _file_path_with_product_root_stripped avoids duplicating the product root basename.
 # 函数用途: 当模型/任务文本写出 `site/index.html` 且 product root 已经是 `.../site` 时，生成 `.../site/index.html` 而不是 `.../site/site/index.html`。
 def _file_path_with_product_root_stripped(root_path: Path, file_path: Path) -> Path:
-    if len(file_path.parts) > 1 and file_path.parts[0] == root_path.name:
-        return Path(*file_path.parts[1:])
+    file_parts = file_path.parts
+    root_parts = root_path.parts
+    max_size = min(len(file_parts) - 1, len(root_parts))
+    for size in range(max_size, 0, -1):
+        if file_parts[:size] == root_parts[-size:]:
+            return Path(*file_parts[size:])
     return file_path
 
 
@@ -287,46 +347,6 @@ def _required_product_ref_candidates(file_text: str, product_roots: list[str]) -
         for root in product_roots
         if (resolved := _resolve_required_file_ref(root, file_path))
     ]
-
-
-# LLM: _internal_root_texts enumerates run-private directories that must not satisfy product contracts.
-# 函数用途: 收集 task_dir、agent_run_workspace 等内部目录，用于过滤 allowed_write_roots。
-def _internal_root_texts(task: SubAgentTask) -> set[str]:
-    fields = (
-        "task_dir",
-        "data_dir",
-        "output_dir",
-        "tests_dir",
-        "reports_dir",
-        "logs_dir",
-        "scratch_dir",
-        "task_workspace_dir",
-        "agent_run_workspace_dir",
-        "agent_run_artifacts_dir",
-    )
-    return {_resolved_path_text(getattr(task, field, "")) for field in fields if _path_text(getattr(task, field, ""))}
-
-
-# LLM: _path_is_internal compares path boundaries without touching the filesystem.
-# 函数用途: 判断一个授权 root 是否是内部运行目录或内部运行目录的子路径。
-def _path_is_internal(path: str, internal_roots: set[str]) -> bool:
-    resolved = _resolved_path_text(path)
-    return any(resolved == root or resolved.startswith(f"{root}/") for root in internal_roots if root)
-
-
-# LLM: _path_text protects contract helpers from MagicMock values in tests and migrations.
-# 函数用途: 只把真实字符串/Path 当成路径字段，其它类型视为空。
-def _path_text(value: object) -> str:
-    if isinstance(value, Path):
-        return str(value)
-    return value if isinstance(value, str) else ""
-
-
-# LLM: _resolved_path_text normalizes path text for comparisons only.
-# 函数用途: 用 pathlib 做稳定比较；路径不存在时也不触发异常。
-def _resolved_path_text(value: object) -> str:
-    text = _path_text(value)
-    return str(Path(text).expanduser().resolve(strict=False)) if text else ""
 
 
 # LLM: _compact_list renders short packet arrays for handoff markdown.

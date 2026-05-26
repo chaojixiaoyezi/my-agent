@@ -38,6 +38,32 @@ def test_materialized_delivery_contract_accepts_generic_artifacts_without_paths(
     assert contract["delivery_quality_contract"]["metric_contracts"][0]["field"] == "star_delta"
 
 
+def test_materialized_delivery_contract_preserves_orchestration_contract():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    contract = materialized_delivery_contract(
+        {
+            "schema_version": "delivery_requirement_materializer.v1",
+            "orchestration_contract": {
+                "schema_version": "orchestration_contract.v1",
+                "requires_orchestration": True,
+                "required_tools": ["create_subagents"],
+                "minimum_subagent_count": "11",
+                "rework_budget": "2",
+            },
+        }
+    )
+
+    orchestration = contract["orchestration_contract"]
+    assert orchestration["schema_version"] == "orchestration_contract.v1"
+    assert orchestration["requires_orchestration"] is True
+    assert orchestration["required_tools"] == ["create_subagents"]
+    assert orchestration["minimum_subagent_count"] == 11
+    assert orchestration["rework_budget"] == 2
+
+
 def test_materialized_delivery_contract_derives_fact_evidence_gate_from_quality_contract():
     from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
         materialized_delivery_contract,

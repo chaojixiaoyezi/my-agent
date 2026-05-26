@@ -11,9 +11,11 @@ from .orchestration_create_target_roots import (
     context_target_write_roots,
     is_relative_to,
     normalized_write_root,
+    structured_output_write_roots,
+    structured_task_output_write_roots,
 )
 from .parameters import _string_list
-from .runner_input_dependencies import params_output_refs
+from .runner_ref_fields import params_output_refs
 
 _PARENT_CONSTRAINT_FIELDS = {"delegation_constraints", "required_constraints", "hard_constraints"}
 _CHILD_RELAXATION_FIELDS = {"constraint_overrides", "constraint_relaxations", "allowed_relaxations"}
@@ -79,9 +81,14 @@ def resolved_extra_write_roots(agent: object, params: dict[str, object], goal: s
     explicit = merged_extra_write_roots(params, goal)
     if explicit:
         return explicit
-    target_roots = context_target_write_roots(agent, params) if _has_structured_write_intent(params, goal) else []
+    target_roots = []
+    if _has_structured_write_intent(params, goal):
+        target_roots.extend(structured_output_write_roots(agent, params))
+        if _has_repair_write_intent(params):
+            target_roots.extend(context_target_write_roots(agent, params))
+        target_roots.extend(structured_task_output_write_roots(agent, params))
     if target_roots:
-        return target_roots
+        return _unique_roots(target_roots)
     default_root = _default_workspace_product_root(agent, params, goal)
     return [default_root] if default_root else []
 
@@ -106,23 +113,6 @@ def explicit_root_missing_write_root_error(agent: object, params: dict[str, obje
         "请重新调用 create_subagents，并在顶层传入 extra_write_roots，"
         "例如 extra_write_roots=[\"/Users/.../deliverables/.../build\"]；"
         "不要只在 goal 里写“目标目录”“同一目录”或“build 目录”。"
-    )
-
-
-# LLM: ambiguous_repeated_product_goal_error rejects cloned workers for one concrete deliverable target.
-# 函数用途: 防止 count>1 复制同一组明确文件目标，导致多个 worker 抢同一批产物。
-def ambiguous_repeated_product_goal_error(params: dict[str, object], count: int, role: str) -> str:
-    if count <= 1 or not role_allows_direct_product_work(role):
-        return ""
-    file_targets = sorted(set(_structured_output_refs(params)))
-    if not file_targets:
-        return ""
-    files_text = ", ".join(file_targets[:6])
-    return (
-        "ambiguous_repeated_product_goal: 不要用 count 复制同一个带具体文件名的交付任务。"
-        f"本次 goal 提到了 {files_text}，count={count} 会让多个 worker 抢同一批文件。"
-        "请改成二选一：1) 创建 count=1 的 coordinator，让它按文件继续拆给下一层；"
-        "2) 多次调用 create_subagents，每次只给一个 worker 一个明确文件目标。"
     )
 
 
@@ -165,6 +155,20 @@ def _has_structured_write_intent(params: dict[str, object], goal: str) -> bool:
     )
 
 
+# LLM: _has_repair_write_intent gates required_read_paths-derived write roots to repair flows.
+# 函数用途: 普通输出任务只按 output_files 授权写根；修复任务才可把目标读路径作为待修产物根。
+def _has_repair_write_intent(params: dict[str, object]) -> bool:
+    if isinstance(params.get("repair_contract"), dict):
+        return True
+    role = str(params.get("role") or "").casefold().replace("-", "_")
+    if "repair" in role:
+        return True
+    packs = params.get("context_packs")
+    if not isinstance(packs, list):
+        return False
+    return any(isinstance(pack, dict) and pack.get("kind") == "repair_contract" for pack in packs)
+
+
 # LLM: _default_workspace_product_root refuses mocks/internal subagent dirs and only returns a real workspace path.
 # 函数用途: 从 agent.subagents.workspace_root 取当前任务工作区；如果只是测试 MagicMock 或内部 subagents 目录则不自动授权。
 def _default_workspace_product_root(agent: object, params: dict[str, object], goal: str) -> str:
@@ -186,6 +190,15 @@ def _default_workspace_product_root(agent: object, params: dict[str, object], go
 def _manager_has_real_workspace(agent: object) -> bool:
     raw = getattr(getattr(agent, "subagents", None), "workspace_root", None)
     return isinstance(raw, str | Path)
+
+
+def _unique_roots(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result
 
 
 # LLM: _structured_parent_constraints reads only create_subagents protocol params.

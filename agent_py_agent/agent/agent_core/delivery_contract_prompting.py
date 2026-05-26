@@ -18,6 +18,7 @@ def render_delivery_contract_section(contract: dict[str, object]) -> str:
         [
             "[tool-system delivery-contract]",
             json.dumps(contract, ensure_ascii=False, sort_keys=True),
+            *_orchestration_guidance_lines(contract),
             *_bootstrap_guidance_lines(contract),
             *_artifact_guidance_lines(contract),
             *render_recovery_guidance_lines(contract, _artifact_items(contract)),
@@ -83,32 +84,56 @@ def _preflight_finding(code: str, location: str, message: str) -> dict[str, obje
     }
 
 
-# LLM: _bootstrap_guidance_lines turns structured startup targets into concise first-round execution hints.
-# 函数用途: 根据 bootstrap_contract 渲染通用开工顺序，避免模型前几轮一直只读检查目录。
-def _bootstrap_guidance_lines(contract: dict[str, object]) -> list[str]:
-    bootstrap = contract.get("bootstrap_contract")
-    if not isinstance(bootstrap, dict):
+from .delivery_contract_prompting_bootstrap import _bootstrap_guidance_lines
+
+
+def _orchestration_guidance_lines(contract: dict[str, object]) -> list[str]:
+    orchestration = contract.get("orchestration_contract")
+    if not isinstance(orchestration, dict) or orchestration.get("requires_orchestration") is not True:
         return []
-    targets = _bootstrap_targets(bootstrap.get("materialization_targets"))
-    actions = _bootstrap_actions(bootstrap.get("startup_actions"))
-    if not targets and not actions:
-        return []
-    lines = ["开工顺序："]
-    if targets:
-        lines.append("- 建议尽早让下面这些结构化目标中的一个真实出现，避免长期只做目录查看。")
-        lines.extend(f"  - {target}" for target in targets[:6])
-        lines.append("- 阶段目标允许先写最小有效骨架，但 JSON checkpoint 必须是可验收的非空结构，不能只写空数组或空对象。")
-    if actions:
-        lines.extend(_startup_action_lines(actions))
-    lines.append("- 如果暂时不确定具体工具，可以先 list_tools 一次，但紧接着就开始物化目标路径。")
-    return lines
+    tools_text = ", ".join(_orchestration_required_tools(orchestration))
+    count = orchestration.get("minimum_subagent_count")
+    count_text = f"，最少数量 {count}" if count not in (None, "", 0) else ""
+    return [
+        "协作要求：",
+        f"- 用户明确要求子代理/协作；最终答复前必须先真实调用这些 orchestration 工具: {tools_text}{count_text}。",
+        "- 不要由 root 自己直接读完、写完后口头说已完成；工具参数错了就按 Tool Catalog 重试。",
+    ]
+
+
+# LLM: _orchestration_required_tools mirrors runtime execution semantics for prompt guidance only.
+# 函数用途: 合同字段可保留外部原样；提示层根据 execution_required 展示实际需要满足的协作工具事实。
+def _orchestration_required_tools(orchestration: dict[str, object]) -> list[str]:
+    tools = [
+        str(item).strip()
+        for item in orchestration.get("required_tools", [])
+        if str(item).strip()
+    ] if isinstance(orchestration.get("required_tools"), list) else ["create_subagents"]
+    if "create_subagents" not in tools:
+        tools.insert(0, "create_subagents")
+    if _execution_required(orchestration) and "dispatch_subagents" not in tools:
+        tools.append("dispatch_subagents")
+    return tools
+
+
+def _execution_required(orchestration: dict[str, object]) -> bool:
+    value = orchestration.get("execution_required")
+    if isinstance(value, bool):
+        return value is not False
+    if isinstance(value, int | float):
+        return value != 0
+    text = str(value or "").strip().casefold()
+    return text not in {"0", "false", "no", "n", "off", "disabled"}
 
 
 # LLM: _artifact_guidance_lines turns artifact machine fields into concise model guidance.
 # 函数用途: 根据 artifacts.validation_contract 生成执行提示，避免模型忽略单文件和完整文档要求。
 def _artifact_guidance_lines(contract: dict[str, object]) -> list[str]:
+    artifacts = _artifact_items(contract)
+    if not artifacts:
+        return []
     lines = ["执行要求："]
-    for artifact in _artifact_items(contract):
+    for artifact in artifacts:
         lines.extend(_one_artifact_lines(artifact))
     lines.append("- 如果 required artifact 还不存在，优先对该 artifact 的目标路径动手：创建目录、开始写入或补齐阶段产物。")
     lines.append("- 可以继续必要的检索，但应同步留下本地草稿、数据或阶段产物，避免只读检查长期空转。")
@@ -182,7 +207,7 @@ def _materialize_checkpoint_lines(action: dict[str, object]) -> list[str]:
         ]
     return [
         f"- 先真实写出 checkpoint: {checkpoint_ref}",
-        f"- 如果资料还没收全，先给 {checkpoint_ref} 写可验收的非空结构骨架，再继续抓取/整理。",
+        f"- 如果资料还没收全，可以给 {checkpoint_ref} 写阶段草稿，再继续抓取/整理。",
     ]
 
 
@@ -195,7 +220,7 @@ def _builder_startup_lines(action: dict[str, object]) -> list[str]:
     source_ref = str(action.get("source_ref") or "").strip()
     output_ref = str(action.get("output_ref") or "").strip()
     if source_ref and output_ref:
-        return [f"- 阶段数据就绪后，优先调用 {builder}: {_builder_source_param(builder)}={source_ref}, path={output_ref}"]
+        return [f"- 阶段数据就绪后，优先调用 {builder}: {_builder_source_param(action, builder)}={source_ref}, path={output_ref}"]
     return [f"- 阶段数据就绪后，优先调用 {builder} 生成后续产物。"]
 
 

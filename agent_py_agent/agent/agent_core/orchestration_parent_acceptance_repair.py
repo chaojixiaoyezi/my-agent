@@ -11,6 +11,7 @@ from .dispatch_test_failure_summary import acceptance_test_failure_payload
 from .orchestration_repair_contract import (
     RepairContractRequest,
     repair_contract_acceptance_checks,
+    repair_contract_allowed_tools,
     repair_contract_goal_suffix,
     repair_contract_tool_fields,
 )
@@ -104,15 +105,7 @@ def _repair_child_tool_call(signals: list[dict[str, object]]) -> dict[str, objec
                     "不要改写健康分支或无关产物",
                     *repair_contract_acceptance_checks(signals),
                 ],
-                "allowed_tools": [
-                    "subagent_board",
-                    "list_files",
-                    "read_file",
-                    "search_text",
-                    "replace_in_file",
-                    "write_file",
-                    "append_file",
-                ],
+                "allowed_tools": repair_contract_allowed_tools(),
                 **contract_fields,
             }
         ],

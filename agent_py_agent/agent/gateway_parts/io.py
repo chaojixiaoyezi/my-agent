@@ -14,10 +14,17 @@ import json
 import threading
 import time
 import uuid
+from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 
 from ..file_io import append_jsonl
 from .paths import GatewayPaths
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback.
+    fcntl = None
 
 _JSON_FILE_LOCKS: dict[str, threading.Lock] = {}
 _JSON_FILE_LOCKS_GUARD = threading.Lock()
@@ -49,7 +56,7 @@ def write_json_file_atomic(path: Path, payload: dict) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
-    with _path_lock(path):
+    with _locked_json_path(path):
         try:
             tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
             _replace_with_retry(tmp, path)
@@ -86,11 +93,76 @@ def _replace_with_retry(tmp: Path, path: Path) -> None:
 def read_json_file(path: Path) -> dict:
 
     try:
-        with _path_lock(path):
+        with _locked_json_path(path):
             payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+# LLM: update_json_file_atomic keeps read-modify-write under one file-level lock.
+# 函数用途: 在同一个 JSON 文件锁内读取、更新、原子替换，避免并发 tick 丢更新。
+def update_json_file_atomic(path: Path, updater: Callable[[dict], dict]) -> dict:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    with _locked_json_path(path):
+        try:
+            current = _read_json_dict_unlocked(path)
+            updated = _updated_json_dict(updater, current)
+            tmp.write_text(json.dumps(updated, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+            _replace_with_retry(tmp, path)
+            return updated
+        finally:
+            _unlink_tmp_file(tmp)
+
+
+def _read_json_dict_unlocked(path: Path) -> dict:
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return current if isinstance(current, dict) else {}
+
+
+def _updated_json_dict(updater: Callable[[dict], dict], current: dict) -> dict:
+    updated = updater(dict(current))
+    if not isinstance(updated, dict):
+        raise TypeError("update_json_file_atomic updater must return dict")
+    return updated
+
+
+@contextmanager
+def _locked_json_path(path: Path):
+    lock = _path_lock(path)
+    with lock:
+        with _locked_file_path(path):
+            yield
+
+
+@contextmanager
+def _locked_file_path(path: Path):
+    with _open_lock_handle(path) as handle:
+        _flock_exclusive(handle)
+        try:
+            yield
+        finally:
+            _flock_unlock(handle)
+
+
+def _open_lock_handle(path: Path):
+    lock_path = path.with_name(path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    return lock_path.open("a+", encoding="utf-8")
+
+
+def _flock_exclusive(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _flock_unlock(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 # LLM: read_pid 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。

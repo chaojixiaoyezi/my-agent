@@ -308,6 +308,7 @@ class TestGatewayRunStateHelpers:
         assert params.note == "note"
         assert params.take_over_by == "owner"
         assert params.locked_files == ["a.py"]
+        assert params.advance is True
         assert params.force_lock is True
         assert params.stop_file == paths.stop_request
 

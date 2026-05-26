@@ -277,8 +277,8 @@ def test_natural_language_root_drives_child_and_grandchild_e2e(tmp_path: Path) -
         tmp_path,
     )
 
-    assert "子代理调度已完成" in result.response
-    assert "done_verified: 2" in result.response
+    assert "家具品牌首页" in result.response
+    assert "已交付" in result.response
     assert "blocking_run_ids" not in result.response
     assert [item.agent_name for item in records] == ["小傻妞-家具总控", "小小傻妞-家具叶子"]
     assert {item.depth for item in records} == {0, 1}

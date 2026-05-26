@@ -14,11 +14,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ...contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
+from ..acceptance_helpers.readiness import _task_ready_or_already_accepted
 from ..capability_status import is_pending_capability_status
 from ..execution_report import TestExecutionReport, load_test_execution_report
 from ..reports import AcceptanceReviewFinding
 from .acceptance_artifacts import artifact_exists, resolve_artifact_path
 from .acceptance_controlled_exec_findings import controlled_exec_contract_finding
+from .acceptance_declared_outputs import _looks_like_local_output_path, declared_output_refs_finding
 from .acceptance_descendant_health import descendant_health_finding
 from .acceptance_evidence_findings import build_evidence_findings
 from .acceptance_patch_findings import patch_findings
@@ -71,7 +73,7 @@ class SubAgentAcceptanceFindingService:
             message="工单现场完整。" if validation.ok else f"工单缺少 {len(validation.missing)} 个关键路径。",
             evidence_path=task.task_dir, created_at=created_at,
         ))
-        ready = task.status == "AWAITING_ACCEPTANCE" or task.verification_status == "NEEDS_ACCEPTANCE"
+        ready = _task_ready_or_already_accepted(task)
         findings.append(AcceptanceReviewFinding(
             name="ready_for_acceptance", ok=ready, severity="P1",
             message="任务处于等待验收状态。" if ready else f"任务未处于等待验收状态: status={task.status} verify={task.verification_status}",
@@ -165,11 +167,13 @@ class SubAgentAcceptanceFindingService:
     def _findings_artifacts_patches(self, task: SubAgentTask, output: dict, created_at: float) -> list[AcceptanceReviewFinding]:
         findings: list[AcceptanceReviewFinding] = []
         findings.append(required_product_files_finding(task, created_at))
+        findings.append(declared_output_refs_finding(self.manager, task, output, created_at))
         artifacts = _dict_list(output.get("artifacts", []))
         missing_artifacts = [
             str(item.get("path", "") or "")
             for item in artifacts
             if str(item.get("path", "") or "").strip()
+            and _looks_like_local_output_path(str(item.get("path", "") or ""))
             and not self._artifact_exists(task, str(item.get("path", "") or ""))
         ]
         findings.append(AcceptanceReviewFinding(
@@ -199,7 +203,8 @@ class SubAgentAcceptanceFindingService:
         reports = [
             validate_artifact(ArtifactAcceptanceRequest(path=path, workspace_root=self._workspace_root()))
             for item in artifacts
-            if (path := self._artifact_path(task, str(item.get("path", "") or ""))) is not None
+            if _looks_like_local_output_path(str(item.get("path", "") or ""))
+            and (path := self._artifact_path(task, str(item.get("path", "") or ""))) is not None
         ]
         failed = [report.artifact_ref for report in reports if not report.ok]
         return AcceptanceReviewFinding(

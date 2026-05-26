@@ -8,6 +8,7 @@ from typing import Any
 from .api_json_collection import ApiJsonCollectionTool
 from .artifact import ReadArtifactTool
 from .controlled_exec import ControlledExecTool
+from .delivery_acceptance import SubmitForAcceptanceTool
 from .document_pdf_builder import MarkdownPdfTool
 from .file_write_session import FileWriteSessionTool
 from .filesystem import (
@@ -42,6 +43,7 @@ def build_tool_retriever(params: Any) -> HybridToolRetriever:
 def register_base_tools(registry: Any, params: Any) -> None:
     _register_filesystem_tools(registry, params)
     _register_network_tools(registry, params)
+    registry.register(SubmitForAcceptanceTool())
     _register_security_tools(registry)
 
 

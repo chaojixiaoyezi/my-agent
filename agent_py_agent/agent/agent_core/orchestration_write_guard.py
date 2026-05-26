@@ -6,9 +6,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .orchestration_create_target_roots import agent_workspace_roots, is_relative_to
+from .orchestration_create_target_roots import (
+    agent_workspace_roots,
+    is_relative_to,
+    normalized_write_root,
+    structured_task_output_write_roots,
+)
 from .parameters import _string_list
-from .runner_input_dependencies import params_output_refs
+from .runner_ref_fields import params_output_refs
 
 WRITE_SUBAGENT_TOOLS = {"write_file", "append_file", "replace_in_file"}
 
@@ -22,6 +27,14 @@ class ExternalWriteTargetRequest:
     params: dict[str, object]
 
 
+@dataclass(frozen=True)
+class _AllowedWriteRootRequest:
+    agent: object
+    params: dict[str, object]
+    workspace_root: Path
+    workspace_roots: list[Path]
+
+
 # LLM: external_write_target_error checks only structured output roots and refs.
 # 函数用途: 在 create/schedule 前拦截机器字段声明的工作区外写入目标；普通 goal 文本不作为事实来源。
 def external_write_target_error(request: ExternalWriteTargetRequest) -> str:
@@ -33,13 +46,21 @@ def external_write_target_error(request: ExternalWriteTargetRequest) -> str:
     roots = _workspace_roots(request.agent)
     if not roots:
         return ""
+    allowed_roots = _merge_roots(
+        roots,
+        _structured_allowed_write_roots(_AllowedWriteRootRequest(request.agent, request.params, roots[0], roots)),
+    )
     for target in targets:
         path = _target_path(target, roots[0])
-        if path is None or any(is_relative_to(path, root) for root in roots):
+        if path is None or any(is_relative_to(path, root) for root in allowed_roots):
             continue
         if suggestion := _workspace_typo_message(path, roots):
             return suggestion
-        return f"子代理写入目标在当前工作区外: target={path}; workspace_roots={[str(item) for item in roots]}"
+        return (
+            f"子代理写入目标在当前工作区外: target={path}; "
+            f"workspace_roots={[str(item) for item in roots]}; "
+            f"structured_write_roots={[str(item) for item in allowed_roots if item not in roots]}"
+        )
     return ""
 
 
@@ -79,6 +100,69 @@ def _workspace_roots(agent) -> list[Path]:
         return []
     root = Path(raw).expanduser().resolve(strict=False)
     return agent_workspace_roots(agent, root)
+
+
+# LLM: _structured_allowed_write_roots trusts explicit roots only inside configured workspaces.
+# 函数用途: create/schedule 可用 extra_write_roots 收窄到某个产物目录，
+# 但不能靠工具参数把工作区外路径临时变成授权根；外部工作区必须先进入 workspace_roots。
+def _structured_allowed_write_roots(request: _AllowedWriteRootRequest) -> list[Path]:
+    result: list[Path] = []
+    for raw in _candidate_write_root_values(request.agent, request.params):
+        root = _safe_structured_root(raw, request.workspace_root, request.workspace_roots)
+        if root and root not in result:
+            result.append(root)
+    return result
+
+
+def _candidate_write_root_values(agent: object, params: dict[str, object]) -> list[str]:
+    values: list[str] = []
+    for source in [*_structured_write_root_sources(params), structured_task_output_write_roots(agent, params)]:
+        values.extend(_string_list(source))
+    return values
+
+
+# LLM: _structured_write_root_sources keeps root grants separate from output filenames.
+# 函数用途: 只读取明确的写入根字段；output_files 仍是目标，不自动变成任意根。
+def _structured_write_root_sources(params: dict[str, object]) -> list[object]:
+    return [
+        params.get("extra_write_roots"),
+        params.get("write_roots"),
+        params.get("target_roots"),
+    ]
+
+
+# LLM: _safe_structured_root rejects broad filesystem roots while allowing task-scoped dirs.
+# 函数用途: 将显式写入根归一成绝对路径；拒绝 `/`、用户 home 这类过宽根，具体任务目录可用。
+def _safe_structured_root(value: object, workspace_root: Path, workspace_roots: list[Path]) -> Path | None:
+    text = normalized_write_root(value)
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        path = workspace_root / path
+    resolved = path.resolve(strict=False)
+    if _too_broad_write_root(resolved):
+        return None
+    if not any(is_relative_to(resolved, root) for root in workspace_roots):
+        return None
+    return resolved
+
+
+# LLM: _too_broad_write_root is a filesystem safety check, not a product-type enum.
+# 函数用途: 防止模型把系统根或用户 home 当成写入授权范围。
+def _too_broad_write_root(path: Path) -> bool:
+    home = Path.home().resolve(strict=False)
+    return path == path.parent or path == home
+
+
+# LLM: _merge_roots keeps root lists stable for diagnostics.
+# 函数用途: 合并 workspace roots 与显式写入根，保持顺序并去重。
+def _merge_roots(left: list[Path], right: list[Path]) -> list[Path]:
+    merged: list[Path] = []
+    for root in [*left, *right]:
+        if root not in merged:
+            merged.append(root)
+    return merged
 
 
 # LLM: _target_path resolves relative structured targets below the primary workspace root.

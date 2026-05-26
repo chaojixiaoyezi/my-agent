@@ -74,6 +74,7 @@ class SubAgentManager(
         *,
         params: SubAgentManagerInitParams | None = None,
         local_store=None,
+        collaboration_store=None,
         workspace_root=None,
         workspace_roots=None,
         role_template_dirs=None,
@@ -84,8 +85,10 @@ class SubAgentManager(
         # LLM: role_template_dirs lets runtime load user JSON role templates while keeping built-ins external.
         # 函数用途: 当调用方不传目录时，底层会自动使用工作区 .agent/subagents/roles。
         # LLM: debug_trace_level is an internal observability switch; level 0 must keep persistence silent.
+        # 参数说明: collaboration_store 只用于给 runner 注入点名 request refs；为空时保持普通子代理行为。
         params = params or SubAgentManagerInitParams(
             local_store=local_store,
+            collaboration_store=collaboration_store,
             workspace_root=workspace_root,
             workspace_roots=workspace_roots,
             role_template_dirs=role_template_dirs,

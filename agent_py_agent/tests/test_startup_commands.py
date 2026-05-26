@@ -128,6 +128,7 @@ class TestCmdDaemon:
         call_kwargs = mock_agent.watch_subagents.call_args.kwargs
         assert isinstance(call_kwargs["params"], WatchParams)
         assert call_kwargs["params"].execute_runners is True
+        assert call_kwargs["params"].advance is True
         assert call_kwargs["params"].max_runners == 2
         assert "apply" not in call_kwargs
 

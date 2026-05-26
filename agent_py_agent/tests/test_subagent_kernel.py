@@ -21,6 +21,16 @@ def test_kernel_snapshot_returns_root_tree_with_status_buckets(tmp_path) -> None
     assert snapshot.runs[1].recovery_refs["checkpoint"].endswith("checkpoint.json")
     assert snapshot.runs[1].tool_contract["allowed_tools"] == ["read_file", "write_file", "controlled_exec"]
     assert snapshot.runs[1].tool_contract["used_tools"] == ["write_file"]
+    assert snapshot.runs[1].task_id == worker.id
+    assert snapshot.runs[1].run_id == worker.id
+    assert snapshot.runs[1].parent_task_id == root.id
+    assert snapshot.runs[1].parent_run_id == root.id
+    assert snapshot.runs[1].root_run_id == root.id
+    assert snapshot.runs[1].agent_kind == "child_agent"
+    assert snapshot.runs[1].heartbeat_at == worker.heartbeat_at
+    assert snapshot.runs[1].current_tool == "write_file"
+    assert snapshot.runs[1].last_progress_at == 1234.0
+    assert snapshot.runs[1].last_progress_summary == "写出 HTML 产物"
     assert snapshot.runs[1].tool_contract["open_request_count"] == 1
     assert snapshot.runs[1].tool_contract["grant_count"] == 1
     assert snapshot.runs[1].tool_contract["gap_count"] == 1
@@ -61,6 +71,9 @@ def _create_kernel_root_worker(manager: SubAgentManager, tmp_path):
 def _populate_worker_kernel_fields(worker, tmp_path, root_id: str) -> None:
     worker.status = "DONE"
     worker.progress = 1.0
+    worker.current_tool = "write_file"
+    worker.last_progress_at = 1234.0
+    worker.last_progress_summary = "写出 HTML 产物"
     worker.latest_summary = "index.html 已完成"
     worker.allowed_tools = ["read_file", "write_file", "controlled_exec"]
     worker.used_tools = ["write_file"]
@@ -145,3 +158,34 @@ def test_kernel_snapshot_marks_takeover_candidates_without_new_guards(tmp_path) 
     assert snapshot.takeover_candidate_run_ids == [failed.id]
     assert snapshot.runs[1].failure_type == "model_timeout"
     assert "failure_warning" in snapshot.runs[1].recovery_refs
+
+
+def test_runtime_tool_progress_updates_agent_status_fields(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.subagents.services.session_progress import (
+        record_runtime_subagent_tool_progress,
+    )
+
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(goal="write", thought="", plan=["write"])
+    task.agent_run_workspace_dir = str(tmp_path / "agents" / task.id)
+    manager.save(task)
+    agent = SimpleNamespace(subagents=manager)
+    params = SimpleNamespace(context_scope="task_local", run_id=task.id)
+    result = SimpleNamespace(tool="write_file", output="ok", ok=True)
+    record = SimpleNamespace(
+        params=params,
+        result=result,
+        payload={"path": str(tmp_path / "out.md"), "content": "# Summary\ndone"},
+        tool_rounds=7,
+        idx=2,
+    )
+
+    record_runtime_subagent_tool_progress(agent, record)
+
+    loaded = manager.load(task.id)
+    assert loaded.current_tool == "write_file"
+    assert loaded.last_progress_at > 0
+    assert loaded.last_progress_summary
+    assert loaded.heartbeat_at == loaded.last_progress_at

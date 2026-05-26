@@ -194,6 +194,11 @@ class SubAgentTask:
     ended_at: float = 0.0
     progress: float = 0.0
     current_step: str = ""
+    # LLM: current_tool and last_progress_* are read-only observability facts for parent/status tools.
+    # 字段用途: 记录最近观测到的工具和最近真实推进摘要；它们不授予权限，也不触发调度。
+    current_tool: str = ""
+    last_progress_at: float = 0.0
+    last_progress_summary: str = ""
     latest_summary: str = ""
     blockers: list[str] = field(default_factory=list)
     budget_used: dict[str, object] = field(default_factory=dict)
@@ -306,7 +311,6 @@ class SubAgentTask:
     workflow_plan: dict[str, object] = field(default_factory=dict)
     workflow_parent_run_id: str = ""
     workflow_phase_id: str = ""
-    workflow_depends_on: list[str] = field(default_factory=list)
     workflow_child_run_ids: list[str] = field(default_factory=list)
     takeover_by: str = ""
     takeover_reason: str = ""

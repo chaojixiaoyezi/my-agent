@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import time as time_module
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -50,6 +50,7 @@ class RunSingleWatchCycleParams:
     idle_record_already_written: bool = False
     no_progress_tracker: DispatchNoProgressTracker | None = None
     max_cycles: int = 0
+    advance: bool = False
 
 
 WatchSubagentsParams = WatchParams
@@ -83,7 +84,7 @@ class WatchCycleBuildParams:
 
 
 # LLM: watch_subagents 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 推进子代理的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
+# 函数用途: 巡检子代理状态；只有 params.advance=True 时才推进调度、runner 或验收流程。
 def watch_subagents(
     agent: SimpleAgent,
     router: CapabilityRouter,
@@ -132,7 +133,7 @@ def watch_subagents(
 
 
 # LLM: _run_watch_cycles 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 推进cycles的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
+# 函数用途: 执行 watch 周期；默认只观察状态，显式 advance 才调 dispatch。
 def _run_watch_cycles(
     agent,
     records: list,
@@ -181,7 +182,7 @@ def _next_idle_record_state(state: WatchLoopState, result: WatchCycleResult) -> 
 
 
 # LLM: _watch_cycle_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 推进cycle参数的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
+# 函数用途: 把 watch 配置转换为单轮参数，保留 observe/advance 边界。
 def _watch_cycle_params(request: WatchCycleBuildParams) -> RunSingleWatchCycleParams:
     loop = request.loop
     params = request.loop.params
@@ -193,6 +194,7 @@ def _watch_cycle_params(request: WatchCycleBuildParams) -> RunSingleWatchCyclePa
         idle_record_already_written=request.idle_record_already_written,
         no_progress_tracker=request.no_progress_tracker,
         max_cycles=params.max_cycles,
+        advance=params.advance,
     )
 
 
@@ -203,7 +205,7 @@ def _execute_watch_dispatch(agent, params):
         dispatch_report = agent.dispatch_subagents(
             router=params.router,
             capability_config=params.cfg,
-            params=params.dispatch_params,
+            params=_watch_scoped_dispatch_params(agent, params.dispatch_params),
         )
         ok = all(item.ok for item in dispatch_report.records)
         message = f"完成一轮 dispatch，records={len(dispatch_report.records)}。"
@@ -223,8 +225,36 @@ def _execute_watch_dispatch(agent, params):
     return ok, message, record_count, dispatch_summary, evidence_paths, dispatch_report
 
 
+# LLM: _watch_scoped_dispatch_params separates durable watch advancement from model-turn dispatch.
+# 函数用途: watch --advance 是显式后台推进器；未给 run_ids 时，用当前 workspace 的 run_id 作为明确范围，
+# 避免触发“模型顶层 dispatch 不得猜历史任务”的保护。
+def _watch_scoped_dispatch_params(agent: SimpleAgent, dispatch_params: DispatchParams) -> DispatchParams:
+    updates: dict[str, object] = {}
+    if (
+        not dispatch_params.apply
+        and dispatch_params.finalize_acceptance
+        and not dispatch_params.execute_acceptance_tests
+        and not dispatch_params.auto_apply_acceptance_followup
+        and int(getattr(dispatch_params, "max_runners", 0) or 0) > 0
+    ):
+        updates["finalize_acceptance"] = False
+    if dispatch_params.include_run_ids or dispatch_params.parent_run_id or dispatch_params.root_id:
+        return replace(dispatch_params, **updates) if updates else dispatch_params
+    run_ids = [
+        str(getattr(task, "id", "") or "")
+        for task in agent.subagents.list_runs()
+        if str(getattr(task, "id", "") or "").strip()
+    ]
+    if not run_ids:
+        return replace(dispatch_params, **updates) if updates else dispatch_params
+    limit = int(getattr(dispatch_params, "limit", 0) or 0)
+    scoped = run_ids[:limit] if limit > 0 else run_ids
+    updates["include_run_ids"] = scoped
+    return replace(dispatch_params, **updates)
+
+
 # LLM: _run_single_watch_cycle 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 推进单个监控cycle的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
+# 函数用途: 执行单个 watch 周期；无任务时 idle，有任务时默认 inspect，advance 才 dispatch。
 def _run_single_watch_cycle(
     agent: SimpleAgent,
     params: RunSingleWatchCycleParams,
@@ -236,6 +266,8 @@ def _run_single_watch_cycle(
 
     if not _watch_has_dispatch_inputs(agent):
         return _run_idle_watch_cycle(agent, params, started_at=started_at)
+    if not params.advance:
+        return _run_readonly_watch_cycle(agent, params, started_at=started_at)
 
     ok, message, record_count, dispatch_summary, evidence_paths, dispatch_report = _execute_watch_dispatch(
         agent, params
@@ -268,46 +300,11 @@ def _run_single_watch_cycle(
     return WatchCycleResult(record, store_record, had_progress=had_progress)
 
 
-# LLM: _run_idle_watch_cycle keeps persistent gateways alive without creating due-check audit noise.
-# 函数用途: 没有任何子代理任务时只写心跳和一条可选 idle 记录，不调用 dispatch_subagents。
-def _run_idle_watch_cycle(agent, params: RunSingleWatchCycleParams, *, started_at: float) -> WatchCycleResult:
-    from ..parameters import _sleep_with_stop
-
-    message = "暂无子代理任务，watch idle。"
-    record = append_watch_record(
-        agent,
-        params,
-        started_at=started_at,
-        ok=True,
-        message=message,
-        record_count=0,
-        dispatch_summary={"idle": 1},
-        evidence_paths=[],
-    )
-    store_record = not params.idle_record_already_written
-    if store_record:
-        agent.subagents.append_dispatch_watch_log(record)
-    more_cycles, message = watch_sleep_state(params, message)
-    write_watch_heartbeat(
-        agent,
-        params,
-        status="idle" if more_cycles else "stopping",
-        message=message,
-    )
-    if not more_cycles:
-        return WatchCycleResult(record, store_record, had_progress=False)
-    if _sleep_with_stop(params.idle_interval, params.stop_path):
-        return WatchCycleResult(record, store_record, had_progress=False, stop_watch=True)
-    return WatchCycleResult(record, store_record, had_progress=False)
-
-
-# LLM: _watch_has_dispatch_inputs is the cheap preflight before writing dispatch reports.
-# 函数用途: 没有任何子代理 run 时跳过 dispatch，避免 gateway 空闲时重复写 due-check/report/index。
-def _watch_has_dispatch_inputs(agent) -> bool:
-    try:
-        return bool(agent.subagents.list_runs())
-    except Exception:
-        return True
+from .watch_cycle_observe import (
+    _run_idle_watch_cycle,
+    _run_readonly_watch_cycle,
+    _watch_has_dispatch_inputs,
+)
 
 
 # LLM: _watch_dispatch_had_progress shares dispatch_loop's progress contract with gateway watch.

@@ -31,6 +31,7 @@ class _FakeLLMPlayback:
     state_snapshots: list[dict[str, object]] | None = None
     closeout_snapshots: list[dict[str, object]] | None = None
     acceptance_reports: list[dict[str, object]] | None = None
+    repeat_fail_threshold: int = 10
 
 
 class FakeLLMRunner:
@@ -45,7 +46,7 @@ class FakeLLMRunner:
 
     def run(self, run_dir: Path) -> FakeLLMRunResult:
         tools = FakeToolRunner(run_dir, fixtures=_dict(self.fixture.get("tool_fixtures")))
-        playback = _playback()
+        playback = _playback(_repeat_fail_threshold(self.fixture))
         for step in self._steps():
             _apply_step(step, tools, playback)
         contract = self._contract()
@@ -100,13 +101,14 @@ def _result_error_code(trace_item: dict[str, object]) -> str:
     return str(result.get("error_code") or "")
 
 
-def _playback() -> _FakeLLMPlayback:
+def _playback(repeat_fail_threshold: int = 10) -> _FakeLLMPlayback:
     return _FakeLLMPlayback(
         failure_counts={},
         runtime_issues=[],
         state_snapshots=[],
         closeout_snapshots=[],
         acceptance_reports=[],
+        repeat_fail_threshold=repeat_fail_threshold,
     )
 
 
@@ -133,8 +135,16 @@ def _apply_tool_call(step: dict[str, object], tools: FakeToolRunner, playback: _
         counts = {}
         playback.failure_counts = counts
     counts[key] = counts.get(key, 0) + 1
-    if counts[key] >= 3 and not playback.block_reason:
-        playback.block_reason = "TOOL_REPEATED_EXACT_FAILURE"
+    threshold = max(0, int(playback.repeat_fail_threshold))
+    if threshold > 0 and counts[key] >= threshold * 3 and not playback.block_reason:
+        playback.block_reason = "TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED"
+
+
+def _repeat_fail_threshold(fixture: dict[str, object]) -> int:
+    try:
+        return max(0, int(fixture.get("repeat_fail_threshold", 10)))
+    except (TypeError, ValueError):
+        return 10
 
 
 def _step_bucket(playback: _FakeLLMPlayback, step_type: str) -> list[dict[str, object]] | None:

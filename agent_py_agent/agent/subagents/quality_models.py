@@ -43,6 +43,8 @@ class ContextManifest:
     task_pack_refs: list[str] = field(default_factory=list)
     role_pack: str = ""
     required_read_paths: list[str] = field(default_factory=list)
+    # LLM: hint_read_paths are advisory refs for the runner prompt, not required inputs.
+    hint_read_paths: list[str] = field(default_factory=list)
     quality_contract_ref: str = ""
     omitted_context: list[str] = field(default_factory=list)
     token_budget: int = 0

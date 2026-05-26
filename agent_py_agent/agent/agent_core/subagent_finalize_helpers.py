@@ -5,13 +5,12 @@ from __future__ import annotations
 
 """finalized subagent runner persistence helpers kept outside the lifecycle mixin."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from ..subagent import RecordRunnerResultParams, SubAgentParsedOutput
+from ..subagent import RecordRunnerResultParams
 from ._subagent_repair_mixin import RecoverySnapshotParams
 from .subagent_finalize_artifact_integrity import (
     artifact_integrity_override,
-    looks_like_success_closeout,
     progress_artifacts_override,
 )
 from .subagent_params import SubagentFinalizeParams
@@ -42,11 +41,9 @@ class FinalizedRecoverySnapshotRequest:
 # 函数用途: 写入finalized执行器结果的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def record_finalized_runner_result(request: FinalizedRunnerRecordRequest):
     params = request.params
-    structured = _coordinator_child_blockers_override(request, request.structured)
-    structured = progress_artifacts_override(request, structured)
+    structured = progress_artifacts_override(request, request.structured)
     structured = artifact_integrity_override(request, structured)
-    structured = _coordinator_child_completion_override(request, structured)
-    structured = _coordinator_analysis_only_override(request, structured)
+    structured = _child_lifecycle_override(request, structured)
     repair_state = request.repair_state
     return request.agent.subagents.record_runner_result(
         RecordRunnerResultParams(
@@ -71,234 +68,72 @@ def record_finalized_runner_result(request: FinalizedRunnerRecordRequest):
     )
 
 
-# LLM: _coordinator_child_blockers_override makes child status authoritative before coordinator self-report.
-# 函数用途: coordinator 不能在直属 child 仍失败或超时时把自己标成待验收；父级必须先恢复这些 child。
-def _coordinator_child_blockers_override(
-    request: FinalizedRunnerRecordRequest,
-    structured: object,
-) -> object:
-    if not _is_coordinator_context(request.params.context):
-        return structured
-    if not looks_like_success_closeout(structured):
-        return structured
-    blockers = _blocking_direct_child_refs(request.agent, request.params.run_id)
-    if not blockers:
-        return structured
-    blocker_text = ", ".join(blockers)
-    return SubAgentParsedOutput(
-        found=True,
-        ok=True,
-        status="BLOCKED",
-        summary=(
-            "coordinator has blocking child runs; recover or retry them before parent acceptance. "
-            f"blocking_children={blocker_text}"
-        ),
-        blocked_reason=f"coordinator_child_blocked:{blocker_text}",
-        failure_type="child_blocked",
-        tests=[
-            {
-                "name": "direct child status gate",
-                "validation_method": "child_status",
-                "ok": False,
-                "summary": f"blocking child runs: {blocker_text}",
-            }
-        ],
-        next_actions=["dispatch_subagents", "recover_blocking_children"],
-    )
-
-
 # LLM: _subagent_session_compact_payload converts save=False compact signals into task-local package facts.
 # 函数用途: 从 AgentRunResult 提取自动 compact 建议；子代理不会写主 memory，只把这些字段交给 task-local writer。
 def _subagent_session_compact_payload(result: object) -> dict[str, object]:
     return subagent_session_compact_payload_from_result(result)
 
 
-# LLM: _coordinator_analysis_only_override blocks fake completion when no child creation happened.
-# 函数用途: coordinator 只写“下一步要 schedule child”但没有工具调用或 child refs 时，转为可恢复阻塞。
-def _coordinator_analysis_only_override(
-    request: FinalizedRunnerRecordRequest,
-    structured: object,
-) -> object:
-    if not _is_coordinator_context(request.params.context):
-        return structured
-    if not _looks_like_analysis_only_child_plan(request, structured):
-        return structured
-    return SubAgentParsedOutput(
-        found=True,
-        ok=True,
-        status="BLOCKED",
-        summary="coordinator described child scheduling but did not create child refs; continue orchestration.",
-        blocked_reason="coordinator_needs_child_creation: call schedule_child_subagents before acceptance",
-        failure_type="needs_child_creation",
-        next_actions=["schedule_child_subagents"],
-    )
-
-
-# LLM: _coordinator_child_completion_override prevents a coordinator from being marked failed after its children finished.
-# 函数用途: 当 coordinator 已经把直接 child 都推进到 DONE/VERIFIED，但收尾因工具轮数上限误报 BLOCKED 时，改成等待父级验收。
-def _coordinator_child_completion_override(
-    request: FinalizedRunnerRecordRequest,
-    structured: object,
-) -> object:
-    if not _is_coordinator_context(request.params.context):
-        return structured
-    if not _looks_like_tool_limit_cleanup(structured):
-        return structured
-    child_refs = _verified_direct_child_refs(request.agent, request.params.run_id)
-    if not child_refs:
-        return structured
-    return SubAgentParsedOutput(
-        found=True,
-        ok=True,
-        status="AWAITING_ACCEPTANCE",
-        summary=(
-            "coordinator direct children already reached DONE/VERIFIED; "
-            f"waiting for parent acceptance. children={', '.join(child_refs)}"
-        ),
-        evidence=[
-            {
-                "kind": "child_acceptance",
-                "summary": "all direct children are DONE/VERIFIED",
-                "path": "",
-                "url": "",
-                "ok": True,
-            }
-        ],
-        capability_requests=[],
-        artifacts=[],
-        tests=[{
-            "name": "direct children acceptance",
-            "validation_method": "child_acceptance",
-            "ok": True,
-            "summary": "all direct children are DONE/VERIFIED",
-        }],
-        patches=[],
-        lessons=[],
-        next_actions=["parent_acceptance"],
-    )
-
-
-# LLM: _is_coordinator_context keeps the override limited to subagent leaders that can create children.
-# 函数用途: 判断当前 runner 是否是带派工能力的协调类节点，避免普通 worker 被误套用 child 完成规则。
-def _is_coordinator_context(context: object) -> bool:
-    role_text = f"{getattr(context, 'role', '')} {getattr(context, 'agent_name', '')}".lower()
-    tools = set(getattr(context, "allowed_tools", []) or [])
-    return ("coordinator" in role_text or "lead" in role_text) and "schedule_child_subagents" in tools
-
-
-# LLM: _looks_like_analysis_only_child_plan keeps the guard to explicit orchestration promises.
-# 函数用途: 只拦“未用工具、无 child、却说要 schedule”的 coordinator，避免影响普通总结或已派工节点。
-def _looks_like_analysis_only_child_plan(request: FinalizedRunnerRecordRequest, structured: object) -> bool:
-    if not bool(getattr(structured, "found", False)) or not bool(getattr(structured, "ok", False)):
-        return False
-    if request.params.result.executed_tools:
-        return False
-    if _direct_child_refs(request.agent, request.params.run_id):
-        return False
-    status = str(getattr(structured, "status", "") or "").strip().upper()
-    if status not in {"", "AWAITING_ACCEPTANCE", "DONE", "COMPLETED", "SUCCESS"}:
-        return False
-    return "schedule_child_subagents" in _structured_next_action_codes(structured)
-
-
-# LLM: _structured_next_action_codes reads exact next action machine codes.
-# 函数用途: 只从 next_actions 结构化字段读取动作代码；summary 普通文本不参与系统判断。
-def _structured_next_action_codes(structured: object) -> set[str]:
-    return {str(item or "").strip() for item in (getattr(structured, "next_actions", []) or []) if str(item or "").strip()}
-
-
-# LLM: _looks_like_tool_limit_cleanup avoids overriding real capability or business blockers.
-# 函数用途: 只对“缺结果块/工具轮数上限/收尾多查一次”这类清理失败放行，保留真实 BLOCKED。
-def _looks_like_tool_limit_cleanup(structured: object) -> bool:
-    if not bool(getattr(structured, "found", False)):
-        return True
-    if not bool(getattr(structured, "ok", False)):
-        return False
-    status = str(getattr(structured, "status", "") or "").strip().upper()
-    has_capability_requests = bool(getattr(structured, "capability_requests", []) or [])
-    if status not in {"BLOCKED", "FAILED", "TIMEOUT"} and not has_capability_requests:
-        return False
-    failure_type = str(getattr(structured, "failure_type", "") or "").strip().lower()
-    return failure_type in {"max_tool_rounds", "tool_round_limit", "max_tool_round_limit"} or (
-        has_capability_requests and _capability_requests_are_tool_limit_cleanup(structured)
-    )
-
-
-# LLM: _capability_requests_are_tool_limit_cleanup keeps coordinator completion from being blocked by a late cleanup read.
-# 函数用途: 只把“增加工具轮数/重复验证”这类清理型能力申请视为可忽略；真实业务缺能力仍保持 BLOCKED。
-def _capability_requests_are_tool_limit_cleanup(structured: object) -> bool:
-    requests = getattr(structured, "capability_requests", []) or []
-    if not requests:
-        return False
-    for request in requests:
-        if not _capability_request_is_tool_limit_cleanup(request):
-            return False
-    return True
-
-
-# LLM: _capability_request_is_tool_limit_cleanup reads exact capability failure codes.
-# 函数用途: 只接受 failure_type / needed_capability 的机器码，不从 problem/expected_output 文本猜原因。
-def _capability_request_is_tool_limit_cleanup(request: object) -> bool:
-    if isinstance(request, dict):
-        values = [request.get("failure_type"), request.get("needed_capability")]
-    else:
-        values = [getattr(request, "failure_type", ""), getattr(request, "needed_capability", "")]
-    codes = {str(value or "").strip().lower() for value in values if str(value or "").strip()}
-    return bool(codes & {"max_tool_rounds", "tool_round_limit", "max_tool_round_limit"})
-
-
-# LLM: _verified_direct_child_refs checks refs-only child status before synthesizing coordinator completion.
-# 函数用途: 读取当前 coordinator 的直接 child 列表，只有全部 DONE/VERIFIED 时才返回 child ids。
-def _verified_direct_child_refs(agent: object, run_id: str) -> list[str]:
-    try:
-        task = agent.subagents.load(run_id)
-    except Exception:
-        return []
-    child_ids = [str(item) for item in (getattr(task, "child_ids", []) or []) if str(item).strip()]
+def _child_lifecycle_override(request: FinalizedRunnerRecordRequest, structured: object):
+    task = _load_task(request, request.params.run_id)
+    child_ids = list(getattr(task, "child_ids", []) or [])
     if not child_ids:
-        return []
-    verified: list[str] = []
-    for child_id in child_ids:
-        try:
-            child = agent.subagents.load(child_id)
-        except Exception:
-            return []
-        if str(getattr(child, "status", "")).upper() != "DONE":
-            return []
-        if str(getattr(child, "verification_status", "")).upper() != "VERIFIED":
-            return []
-        verified.append(child_id)
-    return verified
+        return structured
+    children = [_load_task(request, child_id) for child_id in child_ids]
+    blocking = [item for item in children if _is_blocking_child(item)]
+    if blocking and str(getattr(structured, "status", "") or "") in {"AWAITING_ACCEPTANCE", "DONE", "VERIFIED", "SUCCEEDED"}:
+        return replace(
+            structured,
+            ok=False,
+            status="BLOCKED",
+            failure_type="child_blocked",
+            blocked_reason=_blocking_child_reason(blocking),
+            next_actions=["dispatch_subagents", "recover_blocking_children"],
+        )
+    if _is_tool_limit_block(structured) and children and all(_child_verified(item) for item in children):
+        return replace(
+            structured,
+            ok=True,
+            status="AWAITING_ACCEPTANCE",
+            summary=f"{getattr(structured, 'summary', '')} Direct children are DONE/VERIFIED.",
+            blocked_reason="",
+            failure_type="",
+        )
+    return structured
 
 
-# LLM: _blocking_direct_child_refs treats persisted child failures as stronger than coordinator prose.
-# 函数用途: 读取直属 child 的小 task 状态；失败、超时或未验收 DONE 都返回 run_id，供父级恢复。
-def _blocking_direct_child_refs(agent: object, run_id: str) -> list[str]:
-    child_ids = _direct_child_refs(agent, run_id)
-    blockers: list[str] = []
-    for child_id in child_ids:
-        try:
-            child = agent.subagents.load(child_id)
-        except Exception:
-            blockers.append(child_id)
-            continue
-        status = str(getattr(child, "status", "") or "").upper()
-        verification = str(getattr(child, "verification_status", "") or "").upper()
-        if status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"} or (
-            status == "DONE" and verification != "VERIFIED"
-        ):
-            blockers.append(child_id)
-    return blockers
-
-
-# LLM: _direct_child_refs reads only child ids for fake-completion detection.
-# 函数用途: 判断当前 coordinator 是否已经真实创建过 child；有 child 时不触发 analysis-only 阻断。
-def _direct_child_refs(agent: object, run_id: str) -> list[str]:
+def _load_task(request: FinalizedRunnerRecordRequest, run_id: str):
     try:
-        task = agent.subagents.load(run_id)
+        return request.agent.subagents.load(run_id)
     except Exception:
-        return []
-    return [str(item) for item in (getattr(task, "child_ids", []) or []) if str(item).strip()]
+        return None
+
+
+def _is_blocking_child(task: object) -> bool:
+    status = str(getattr(task, "status", "") or "").upper()
+    verification = str(getattr(task, "verification_status", "") or "").upper()
+    return status in {"FAILED", "TIMEOUT", "CANCELLED", "BLOCKED"} or verification in {"FAILED", "REJECTED"}
+
+
+def _blocking_child_reason(children: list[object]) -> str:
+    parts = [
+        f"{getattr(item, 'id', '')}:{getattr(item, 'status', '')}/{getattr(item, 'verification_status', '')}"
+        for item in children
+    ]
+    return "direct child blocked: " + ", ".join(parts)
+
+
+def _is_tool_limit_block(structured: object) -> bool:
+    status = str(getattr(structured, "status", "") or "").upper()
+    failure = str(getattr(structured, "failure_type", "") or "").lower()
+    reason = str(getattr(structured, "blocked_reason", "") or "").lower()
+    return status == "BLOCKED" and ("tool_round" in failure or "tool_round" in reason or "max_tool_round" in reason)
+
+
+def _child_verified(task: object) -> bool:
+    status = str(getattr(task, "status", "") or "").upper()
+    verification = str(getattr(task, "verification_status", "") or "").upper()
+    return status in {"DONE", "VERIFIED", "SUCCEEDED"} and verification == "VERIFIED"
 
 
 # LLM: write_finalized_recovery_snapshot 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

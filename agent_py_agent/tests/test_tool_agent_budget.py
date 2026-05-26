@@ -34,6 +34,19 @@ def test_tool_agent_budget_ignores_calls_without_run_id():
     assert second is None
 
 
+# LLM: Shared runtime config should provide the default per-agent budget when legacy config is absent.
+# 函数用途: 验证单代理工具预算默认值集中在 runtime_guard_config.yaml，而不是必须依赖 AgentConfig 字段。
+def test_tool_agent_budget_uses_shared_runtime_config_defaults():
+    agent = SimpleNamespace(config=SimpleNamespace())
+
+    for index in range(50):
+        assert check_tool_agent_budget(ToolAgentBudgetRequest(agent, "run-1", "read_file", now=float(index))) is None
+    blocked = check_tool_agent_budget(ToolAgentBudgetRequest(agent, "run-1", "read_file", now=51.0))
+
+    assert blocked is not None
+    assert "最近 600 秒最多 50 次工具调用" in blocked.output
+
+
 # LLM: a single subagent run is blocked after its rolling budget is exhausted.
 # 函数用途: 同一个 run_id 在窗口内超过预算后，返回自检提示而不是继续执行工具。
 def test_tool_agent_budget_blocks_after_per_agent_window_limit():

@@ -257,6 +257,7 @@ def _add_agents_dispatch_subcommands(sub):
     dispatch.add_argument("--max-runners", type=int, default=None, help="本轮最多推进多少个 runner，0 表示不执行 runner；默认读配置")
     dispatch.add_argument("--limit", type=int, default=None, help="每个阶段最多处理多少条记录，0 表示不限制；默认读配置")
     dispatch.add_argument("--watch", action="store_true", help="持续循环执行 dispatch")
+    dispatch.add_argument("--advance", action="store_true", help="watch 模式显式推进 dispatch；不传则只读观察代理树")
     dispatch.add_argument("--interval", type=float, default=None, help="watch 模式每轮间隔秒数，0 表示不等待；默认读配置")
     dispatch.add_argument("--max-cycles", type=int, default=0, help="watch 模式最多循环次数，0 表示持续运行")
     dispatch.add_argument("--force-lock", action="store_true", help="强制覆盖已有 watch lock")

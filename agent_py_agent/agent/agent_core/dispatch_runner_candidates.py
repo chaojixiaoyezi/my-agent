@@ -1,5 +1,5 @@
-# LLM: Runner candidate policy module; keep explicit run-id, input, workflow, and recovery gates together.
-# 模块用途: 统一计算 dispatch_subagents 要启动哪些 runner，避免批处理执行模块继续变胖。
+# LLM: Runner candidate policy module; keep explicit run-id and recovery selection together.
+# 模块用途: 统一计算 dispatch_subagents 要启动哪些 runner；不再用输入依赖或 workflow 依赖隐藏过滤候选。
 
 from __future__ import annotations
 
@@ -10,8 +10,6 @@ from .runner_dispatch import (
     _is_dispatch_runner_candidate,
     _runner_retry_reason,
 )
-from .runner_input_dependencies import input_dependency_ready_candidates
-from .runner_workflow_dependencies import workflow_dependency_ready_candidates
 
 
 # LLM: _runner_candidates_for_context lets explicit packet recovery rerun the original blocked child.
@@ -21,10 +19,15 @@ def _runner_candidates_for_context(
     ctx: DispatchContext,
     runner_max_attempts: int,
     *,
-    dependency_tasks: list | None = None,
+    same_run_redispatch_limit: int | None = None,
 ) -> list:
     if requested_include_ids(ctx):
-        candidates = _included_normal_runner_tasks(tasks, ctx, runner_max_attempts, dependency_tasks or tasks)
+        candidates = _included_normal_runner_tasks(
+            tasks,
+            ctx,
+            runner_max_attempts,
+            same_run_redispatch_limit,
+        )
         if candidates or not _is_explicit_recovery_dispatch(ctx):
             return candidates
         return _included_recovery_runner_tasks(tasks, ctx)
@@ -32,6 +35,7 @@ def _runner_candidates_for_context(
         tasks,
         ctx.max_runners,
         runner_max_attempts=runner_max_attempts,
+        same_run_redispatch_limit=same_run_redispatch_limit,
     )
 
 
@@ -41,17 +45,20 @@ def _included_normal_runner_tasks(
     tasks: list,
     ctx: DispatchContext,
     runner_max_attempts: int,
-    dependency_tasks: list,
+    same_run_redispatch_limit: int | None,
 ) -> list:
-    selected = _requested_candidate_tasks(tasks, ctx, runner_max_attempts)
-    selected = input_dependency_ready_candidates(selected, dependency_tasks=dependency_tasks)
-    selected = workflow_dependency_ready_candidates(selected, dependency_tasks)
+    selected = _requested_candidate_tasks(tasks, ctx, runner_max_attempts, same_run_redispatch_limit)
     return selected[: max(0, int(ctx.max_runners or 0))]
 
 
 # LLM: _requested_candidate_tasks keeps explicit include_run_ids exact and ordered.
 # 函数用途: 按父级指定的 run_id 顺序挑选可启动任务，避免无关候选混入同一轮 dispatch。
-def _requested_candidate_tasks(tasks: list, ctx: DispatchContext, runner_max_attempts: int) -> list:
+def _requested_candidate_tasks(
+    tasks: list,
+    ctx: DispatchContext,
+    runner_max_attempts: int,
+    same_run_redispatch_limit: int | None,
+) -> list:
     requested = requested_include_ids(ctx)
     by_id = {str(getattr(task, "id", "") or ""): task for task in tasks}
     return [
@@ -59,7 +66,11 @@ def _requested_candidate_tasks(tasks: list, ctx: DispatchContext, runner_max_att
         for run_id in requested
         if (
             (task := by_id.get(run_id)) is not None
-            and _is_dispatch_runner_candidate(task, runner_max_attempts=runner_max_attempts)
+            and _is_dispatch_runner_candidate(
+                task,
+                runner_max_attempts=runner_max_attempts,
+                same_run_redispatch_limit=same_run_redispatch_limit,
+            )
         )
     ]
 

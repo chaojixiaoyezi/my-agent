@@ -12,22 +12,10 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from ..subagents.models import SubAgentBoardOptions
 from ..subagents.services.base import CreateRunParams
 from ..tools import BaseTool, ToolExecutionResult
-from .hierarchy_tools import ScheduleChildSubagentsTool
-from .orchestration_board_payload import (
-    board_actionable_run_ids,
-    board_completion_status,
-    board_kernel_snapshot_payload,
-)
-from .orchestration_board_tool_payload import (
-    board_items_for_payload,
-    board_payload_item,
-    board_ref_preview,
-)
+from .hierarchy_tools import ScheduleChildSubagentsTool as ScheduleChildSubagentsTool
 from .orchestration_create_constraints import (
-    ambiguous_repeated_product_goal_error,
     delegation_constraint_conflict_error,
     explicit_root_missing_write_root_error,
 )
@@ -35,24 +23,31 @@ from .orchestration_create_idempotency import (
     CreateTaskResolution,
     resolve_create_run,
 )
-from .orchestration_create_items import CreateSubagentItem, create_items_from_params
+from .orchestration_create_items import (
+    CreateSubagentItem,
+    create_items_from_params,
+)
 from .orchestration_create_payload import create_subagents_payload
 from .orchestration_create_policy import (
     create_run_params,
 )
 from .orchestration_dispatch_tool import DispatchSubagentsTool
-from .orchestration_item_dependencies import enrich_item_dependencies, item_dependency_edges
+from .orchestration_event_tools import RaiseMainEventTool as RaiseMainEventTool
+from .orchestration_event_tools import RaiseObservationTool as RaiseObservationTool
 from .orchestration_lineage_names import indexed_count_params, indexed_item_params
-from .orchestration_run_scope import remember_orchestration_run_ids
+from .orchestration_run_scope import (
+    remember_orchestration_run_ids,
+)
+from .orchestration_shared_context import append_parent_shared_context
+from .orchestration_sibling_roster import attach_sibling_roster
+from .orchestration_status_tools import InspectAgentTreeTool as InspectAgentTreeTool
+from .orchestration_status_tools import SubagentBoardTool as SubagentBoardTool
 from .orchestration_tool_grants import (
     CODING_SUBAGENT_TOOLS,
     READ_ONLY_SUBAGENT_TOOLS,
     subagent_allowed_tools,
 )
-from .orchestration_tool_specs import (
-    build_create_subagents_spec,
-    build_subagent_board_spec,
-)
+from .orchestration_tool_specs import build_create_subagents_spec
 from .orchestration_workflow_mode import tool_workflow_mode as _tool_workflow_mode
 from .orchestration_write_guard import ExternalWriteTargetRequest, external_write_target_error
 from .parameters import _positive_int
@@ -85,8 +80,11 @@ class CreateSubagentsTool(BaseTool):
         if isinstance(prepared, ToolExecutionResult):
             return prepared
         goal, count, allowed_tools, run_params = prepared
-        resolutions = self._create_tasks(goal, count, run_params)
+        task_params = self._count_run_params(count, run_params)
+        resolutions = self._resolve_task_params(task_params)
         tasks = [item.task for item in resolutions]
+        attach_sibling_roster(self.agent.subagents, tasks)
+        _bind_created_tasks_to_conversation(self.agent, tasks)
         remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
         payload = create_subagents_payload(self.agent, resolutions, allowed_tools, params)
         return ToolExecutionResult(
@@ -110,6 +108,7 @@ class CreateSubagentsTool(BaseTool):
     def _prepare_count_mode(
         self, params: dict[str, object]
     ) -> tuple[str, int, list[str] | None, CreateRunParams] | ToolExecutionResult:
+        params = append_parent_shared_context(self.agent, params)
         goal = str(params.get("goal") or "").strip()
         if not goal:
             return ToolExecutionResult("create_subagents", False, "缺少必填参数 goal。")
@@ -121,23 +120,25 @@ class CreateSubagentsTool(BaseTool):
         if validation:
             return ToolExecutionResult("create_subagents", False, validation)
         run_params = create_run_params(self.agent, params, goal, allowed_tools)
-        ambiguous = ambiguous_repeated_product_goal_error(params, count, run_params.role)
-        if ambiguous:
-            return ToolExecutionResult("create_subagents", False, ambiguous)
         return goal, count, allowed_tools, run_params
 
     # LLM: _execute_items is the structured batch path, equivalent to 长期助手 delegate_task tasks[].
     # 函数用途: 按 items[] 中每个独立 goal 创建子代理，避免 count 复制同一个任务目标。
     def _execute_items(self, items: list[CreateSubagentItem]) -> ToolExecutionResult:
         capped_raw = self._cap_items(items)
-        dependency_edges = item_dependency_edges(capped_raw)
-        capped = enrich_item_dependencies(capped_raw)
+        capped = [
+            CreateSubagentItem(
+                goal=item.goal,
+                params=append_parent_shared_context(self.agent, item.params),
+            )
+            for item in capped_raw
+        ]
         allowed_tool_values = [subagent_allowed_tools(item.params) for item in capped]
         for item, allowed_tools in zip(capped, allowed_tool_values, strict=True):
             validation = self._validate_single_goal(item.params, item.goal, allowed_tools)
             if validation:
                 return ToolExecutionResult("create_subagents", False, validation)
-        resolutions: list[CreateTaskResolution] = []
+        run_params_by_item: list[CreateRunParams] = []
         for index, item in enumerate(capped, start=1):
             run_params = create_run_params(
                 self.agent,
@@ -145,13 +146,13 @@ class CreateSubagentsTool(BaseTool):
                 item.goal,
                 subagent_allowed_tools(item.params),
             )
-            resolution = resolve_create_run(
-                self.agent.subagents,
-                indexed_item_params(run_params, index=index, total=len(capped)),
-            )
-            resolutions.append(resolution)
+            run_params_by_item.append(indexed_item_params(run_params, index=index, total=len(capped)))
+        resolutions = self._resolve_task_params(run_params_by_item)
         tasks = [item.task for item in resolutions]
-        _apply_item_dependency_edges(self.agent.subagents, tasks, dependency_edges)
+        attach_sibling_roster(self.agent.subagents, tasks, save=False)
+        for task in tasks:
+            self.agent.subagents.save(task)
+        _bind_created_tasks_to_conversation(self.agent, tasks)
         remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
         payload = create_subagents_payload(
             self.agent,
@@ -208,24 +209,19 @@ class CreateSubagentsTool(BaseTool):
 
     # LLM: _create_tasks 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 构建tasks所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
-    def _create_tasks(self, goal: str, count: int, run_params: CreateRunParams) -> list[CreateTaskResolution]:
-        resolutions: list[CreateTaskResolution] = []
-        for index in range(1, count + 1):
-            task_params = indexed_count_params(run_params, index=index, count=count)
-            resolutions.append(resolve_create_run(self.agent.subagents, task_params))
-        return resolutions
+    def _count_run_params(self, count: int, run_params: CreateRunParams) -> list[CreateRunParams]:
+        return [
+            indexed_count_params(run_params, index=index, count=count)
+            for index in range(1, count + 1)
+        ]
 
-# LLM: _apply_item_dependency_edges persists batch sibling ordering as workflow-style phase refs.
-# 函数用途: items[] 下游自然引用上游代理时，写入 run 级依赖，dispatch 显式 run_ids 也不能抢跑。
-def _apply_item_dependency_edges(manager, tasks: list, dependency_edges: list[list[int]]) -> None:
-    if not tasks:
-        return
-    batch_id = f"items:{tasks[0].id}"
-    for task, deps in zip(tasks, dependency_edges, strict=False):
-        task.workflow_parent_run_id = batch_id
-        task.workflow_phase_id = task.id
-        task.workflow_depends_on = [tasks[index].id for index in deps if 0 <= index < len(tasks)]
-        manager.save(task)
+    # LLM: _resolve_task_params is the only place count/items params become persisted runs.
+    # 函数用途: 将 create_subagents 参数创建或复用成真实 run；不在创建阶段插入额外等待门。
+    def _resolve_task_params(self, task_params: list[CreateRunParams]) -> list[CreateTaskResolution]:
+        resolutions: list[CreateTaskResolution] = []
+        for item in task_params:
+            resolutions.append(resolve_create_run(self.agent.subagents, item))
+        return resolutions
 
 
 # LLM: _payload_allowed_tools summarizes items-mode tool policy without hiding per-task params.
@@ -239,35 +235,18 @@ def _payload_allowed_tools(values: list[list[str] | None]) -> list[str] | str | 
     return "per_item"
 
 
-# LLM: SubagentBoardTool 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 提供子代理看板工具模型工具入口，把结构化参数转为子代理操作；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
-class SubagentBoardTool(BaseTool):
-
-    # LLM: __init__ 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
-    def __init__(self, agent: SimpleAgent):
-        self.agent = agent
-        self.spec = build_subagent_board_spec()
-
-    # LLM: execute 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 推进execute的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
-        limit = _positive_int(params.get("limit"), default=10)
-        board = self.agent.subagents.write_board(
-            options=SubAgentBoardOptions(recent_limit=max(1, limit)),
-        )
-        items = board_items_for_payload(self.agent, board.items, params, limit)
-        payload = {
-            "summary": board.summary,
-            "completion_status": board_completion_status(items),
-            "kernel_snapshot": board_kernel_snapshot_payload(self.agent, items),
-            "returned": len(items),
-            "actionable_run_ids": board_actionable_run_ids(items),
-            "deliverable_artifact_refs": board_ref_preview(items, "artifact_refs"),
-            "deliverable_evidence_refs": board_ref_preview(items, "evidence_refs"),
-            "subagent_workspace": str(self.agent.subagents.workspace),
-            "items": [board_payload_item(item) for item in items],
-            "board_json": str(self.agent.subagents.workspace / "subagent_board.json"),
-            "board_md": str(self.agent.subagents.workspace / "SUBAGENT_BOARD.md"),
-        }
-        return ToolExecutionResult("subagent_board", True, json.dumps(payload, ensure_ascii=False, indent=2))
+# LLM: _bind_created_tasks_to_conversation makes local subagents addressable by task_id in event tools.
+# 函数用途: 如果 create_run_params 已继承 conversation_thread_id，则把每个 run_id 也绑定到同一 thread；
+# 这样子代理上报事件只需传自己的 run_id，不必知道外部会话 ID。
+def _bind_created_tasks_to_conversation(agent, tasks: list) -> None:
+    for task in tasks:
+        attrs = getattr(task, "attributes", {}) or {}
+        if not isinstance(attrs, dict):
+            continue
+        thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+        if not thread_id:
+            continue
+        try:
+            agent.conversation_store.bind_task({'thread_id': thread_id, 'task_id': str(getattr(task, "id", "") or ""), 'goal': str(getattr(task, "goal", "") or "")})
+        except Exception:
+            continue

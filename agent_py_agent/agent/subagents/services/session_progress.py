@@ -6,7 +6,8 @@ from __future__ import annotations
 """Task-local progress snapshots for subagent runner tool calls."""
 
 import json
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -17,9 +18,9 @@ from .session_progress_integrity import (
     artifact_integrity_summary,
     artifact_next_action,
 )
+from .session_progress_paths import progress_path
 
 _SCHEMA_VERSION = "subagent_tool_progress.v1"
-_WRITE_TOOLS = {"write_file", "append_file", "replace_in_file"}
 _MAX_HEADINGS = 16
 
 
@@ -34,6 +35,7 @@ class SubagentToolProgressRequest:
     ok: bool
     tool_round: int
     tool_index: int
+    result_envelope: dict[str, Any] = field(default_factory=dict)
 
 
 # LLM: _ProgressRefs bundles the two progress files written for one agent run.
@@ -71,17 +73,24 @@ def record_runtime_subagent_tool_progress(agent: object, record: object) -> dict
         return {}
     result = getattr(record, "result", None)
     payload = getattr(record, "payload", {})
-    return record_subagent_tool_progress(
+    progress = record_subagent_tool_progress(
         SubagentToolProgressRequest(
             task=task,
             tool=str(getattr(result, "tool", "") or ""),
             payload=payload if isinstance(payload, dict) else {},
             output=str(getattr(result, "output", "") or ""),
+            result_envelope=(
+                dict(getattr(result, "result_envelope", {}) or {})
+                if isinstance(getattr(result, "result_envelope", {}), dict)
+                else {}
+            ),
             ok=bool(getattr(result, "ok", False)),
             tool_round=int(getattr(record, "tool_rounds", 0) or 0),
             tool_index=int(getattr(record, "idx", 0) or 0),
         )
     )
+    _persist_runtime_status(agent, task, result, progress)
+    return progress
 
 
 # LLM: record_subagent_tool_progress writes a compact, cumulative progress snapshot for write-like tools.
@@ -104,9 +113,39 @@ def record_subagent_tool_progress(request: SubagentToolProgressRequest) -> dict[
 
 
 # LLM: _should_record limits progress writes to successful filesystem mutations.
-# 函数用途: 过滤非写入工具、失败工具和坏 payload，避免读取/搜索类工具污染进度。
+# 函数用途: 只记录成功且能解析出产物路径的工具；支持未来工具通过 artifact_ref/path 自说明。
 def _should_record(request: SubagentToolProgressRequest) -> bool:
-    return bool(request.ok and request.tool in _WRITE_TOOLS and isinstance(request.payload, dict))
+    return bool(request.ok and isinstance(request.payload, dict) and progress_path(request))
+
+
+# LLM: _persist_runtime_status updates the lightweight agent tree view after each runner tool call.
+# 函数用途: 只回写观测字段和最近进展，不调度、不验收、不改变任务完成状态。
+def _persist_runtime_status(agent: object, task: SubAgentTask, result: object, progress: dict[str, Any]) -> None:
+    now = time.time()
+    tool = str(getattr(result, "tool", "") or "")
+    ok = bool(getattr(result, "ok", False))
+    task.current_tool = tool
+    task.heartbeat_at = now
+    task.updated_at = now
+    if ok and tool:
+        task.last_progress_at = now
+        task.last_progress_summary = _progress_summary(tool, progress)
+        if progress:
+            task.latest_summary = str(progress.get("summary") or task.latest_summary or "")
+            task.current_step = str(progress.get("next_action") or task.current_step or "")
+    try:
+        agent.subagents.save(task)
+    except Exception:
+        return
+
+
+# LLM: _progress_summary keeps status rows concise and avoids copying full tool output.
+# 函数用途: 为只读状态树生成一句最近进展；写入类工具优先用已生成的 progress 摘要。
+def _progress_summary(tool: str, progress: dict[str, Any]) -> str:
+    summary = str(progress.get("summary") or "").strip() if isinstance(progress, dict) else ""
+    if summary:
+        return summary
+    return f"最近成功调用工具: {tool}"
 
 
 # LLM: _progress_dir derives the stable progress directory inside the agent run workspace.
@@ -123,7 +162,7 @@ def _snapshot_payload(
     previous: dict[str, Any],
     refs: _ProgressRefs,
 ) -> dict[str, Any]:
-    path = str(request.payload.get("path") or "")
+    path = progress_path(request)
     headings = _merge_unique(_string_list(previous.get("headings")) + _headings_from_payload(request.payload))
     written_paths = _merge_unique(_string_list(previous.get("written_paths")) + ([path] if path else []))
     if _is_internal_output_path(request.task, path) and previous:

@@ -27,6 +27,8 @@ def scoped_current_turn_runner_tasks(
     *,
     active_run_ids: set[str],
 ) -> list:
+    if ctx.planner:
+        return list(tasks)
     if requested_include_ids(ctx):
         return list(tasks)
     if str(getattr(ctx, "parent_run_id", "") or "").strip():

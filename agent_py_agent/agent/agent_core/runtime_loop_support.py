@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import fields, replace
 
-from ..memory_archive import build_auto_resume_context
+from ..memory_archive import build_auto_resume_context, has_resume_trigger
 from ..memory_routing import RouteContextOptions, build_routed_memory_context
 from .runtime_capabilities import resolve_runtime_capabilities
 from .runtime_context_bundle import build_runtime_main_context_bundle
@@ -140,7 +140,8 @@ def _resolve_tool_sections(agent, allowed_tools, granted_capabilities):
 # 函数用途: 根据 RuntimeContextRequest 准备 memory、路由和恢复上下文；隔离上下文时不注入主代理长期记忆。
 def _prepare_runtime_context(agent, request: RuntimeContextRequest):
     task_local = _is_task_local_context(request.context_scope)
-    memories = [] if task_local else agent.memory.search(request.user_prompt, agent.config.memory_top_k)
+    raw_memories = [] if task_local else agent.memory.search(request.user_prompt, agent.config.memory_top_k)
+    memories = _memories_for_request(raw_memories, request, task_local=task_local)
     routed_context = _routed_memory_context_for_request(agent, request, task_local=task_local)
     resume_context_result, resume_context_section = _resume_context_for_request(
         agent, request, task_local=task_local,
@@ -276,6 +277,31 @@ def _execute_runtime_compression(agent, params: RuntimeLoopParams) -> Compressio
 # 函数用途: 识别只允许隔离 refs 的运行模式，供 memory/routing/resume 注入共同使用。
 def _is_task_local_context(value: object) -> bool:
     return str(value or "").strip().lower() in {"task_local", "control_plane"}
+
+
+# LLM: _memories_for_request prevents one-shot execution from inheriting old task prompts.
+# 函数用途: 对本轮可注入记忆做作用域过滤；CLI 一次性任务默认只保留规则/经验类事实，不把旧对话当当前任务。
+def _memories_for_request(memories: list, request: RuntimeContextRequest, *, task_local: bool) -> list:
+    if task_local:
+        return []
+    if _dialogue_memory_allowed(request):
+        return memories
+    return [memory for memory in memories if not _is_dialogue_memory(memory)]
+
+
+# LLM: _dialogue_memory_allowed keeps explicit continuation stronger than standalone run isolation.
+# 函数用途: 只有用户明确恢复/继续时，CLI run 才注入旧对话；chat/gateway 仍按会话长期上下文工作。
+def _dialogue_memory_allowed(request: RuntimeContextRequest) -> bool:
+    source = str(request.source or "").strip()
+    if source != "cli_run":
+        return True
+    if request.resume_context is True:
+        return True
+    return has_resume_trigger(request.user_prompt)
+
+
+def _is_dialogue_memory(memory: object) -> bool:
+    return str(getattr(memory, "kind", "") or "").strip().lower() == "dialogue"
 
 
 # LLM: _tool_loop_execute_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import argparse
 
+from .commands.background_main_agent import add_background_main_agent_subcommands
 from .commands.bench import add_bench_model_command
+from .commands.collaboration import add_collaboration_subcommands
 from .commands.contracts import add_contracts_subcommand
 from .commands.core import (
     add_basic_subcommands,
@@ -76,6 +78,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_task_subcommands(subparsers)
     add_operations_subcommands(subparsers)
     add_real_e2e_subcommand(subparsers)
+    add_background_main_agent_subcommands(subparsers)
+    add_collaboration_subcommands(subparsers)
 
     return parser
 

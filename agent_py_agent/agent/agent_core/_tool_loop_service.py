@@ -7,25 +7,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..backends import ModelResponse
+from ..settings.config_io import load_simple_yaml
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
 from ._runtime_params import ToolLoopExecuteParams
-from .runner_stage_trace import (
-    RunnerToolStageTraceRequest,
-    trace_runner_tool_call_started,
+from .main_agent_delivery_closeout import append_existing_failed_closeout_context
+from .orchestration_shared_context import (
+    refresh_parent_shared_context_cache,
+    refresh_parent_shared_context_from_tool_record,
 )
+from .runtime_guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
 from .subagent_attempt_guard import stale_subagent_attempt_message
 from .subagent_dispatch_closeout import subagent_dispatch_final_response_guard
-from .tool_api_collection_contract import normalize_api_collection_payload
 from .tool_call_archive_record import archive_tool_call_record
 from .tool_call_context_reducer import render_tool_payload_for_live_prompt
 from .tool_call_guardrail import record_tool_guard_observation
-from .tool_call_runtime import (
-    ToolCallRuntimeRequest,
-    execute_traced_tool_call,
-    guarded_tool_call_result,
-)
 from .tool_context_reducer import render_tool_result_for_live_prompt
-from .tool_delivery_repair_guard import delivery_repair_context
 from .tool_limit_closeout import final_response_after_tool_limit
 from .tool_loop_completion import ToolRoundCompletionRequest, completion_response_after_tool_round
 from .tool_loop_empty_response import (
@@ -35,15 +31,13 @@ from .tool_loop_empty_response import (
 )
 from .tool_loop_orchestration_scope import executed_subagent_orchestration
 from .tool_loop_prompting import build_tool_loop_prompt, next_tool_loop_model_response
-from .tool_loop_recovery import (
-    append_long_content_recovery_context,
-    payload_with_runtime_scope,
-)
+from .tool_loop_recovery import append_long_content_recovery_context
 from .tool_loop_response_decision import (
     ToolLoopRepairCounters,
     ToolLoopResponseDecisionRequest,
     tool_loop_response_decision,
 )
+from .tool_loop_tool_call import execute_one_tool_call
 from .tool_round_execution import (
     ToolCallExecuteParams,
     ToolCallRecordParams,
@@ -66,7 +60,9 @@ class _ToolStepRequest:
 # LLM: _effective_max_tool_rounds 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 处理effectivemax工具轮数相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
-    effective = agent.config.max_tool_rounds
+    effective = getattr(getattr(agent, "config", None), "max_tool_rounds", None)
+    if effective is None:
+        effective = _runtime_guard_int("max_tool_rounds", 0)
     attrs_to_check = params.task_attributes or getattr(agent, "_current_task_attributes", None)
     if attrs_to_check and "max_tool_rounds" in attrs_to_check:
         effective = attrs_to_check["max_tool_rounds"]
@@ -74,6 +70,19 @@ def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
         return max(0, int(effective))
     except (TypeError, ValueError):
         return 0
+
+
+# LLM: _runtime_guard_int keeps tool-loop defaults in the shared runtime guard file.
+# 函数用途: 读取 runtime_guard_config.yaml 的整数配置；文件缺失或坏值时回落默认值。
+def _runtime_guard_int(key: str, default: int) -> int:
+    try:
+        data = load_simple_yaml(DEFAULT_RUNTIME_GUARD_CONFIG_PATH)
+    except OSError:
+        return default
+    try:
+        return max(0, int(data.get(key, default) or 0))
+    except (TypeError, ValueError, AttributeError):
+        return default
 
 
 # LLM: ToolLoopService 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -93,7 +102,7 @@ class ToolLoopService:
         tool_rounds = params.tool_rounds
         repair_counters = ToolLoopRepairCounters()
         empty_response_repairs = 0
-        _append_initial_delivery_repair_context(self._agent, params)
+        append_existing_failed_closeout_context(self._agent, params)
 
         while True:
             (
@@ -216,6 +225,8 @@ class ToolLoopService:
     def _run_tool_round(self, request: ToolRoundExecutionRequest):
         before_executed_count = len(request.params.executed_tools)
         subagent_output_written = execute_tool_round(request)
+        if terminal_response := _terminal_tool_guard_response(request):
+            return request.tool_rounds, terminal_response
         final_response = completion_response_after_tool_round(
             ToolRoundCompletionRequest(
                 self._agent,
@@ -241,38 +252,27 @@ class ToolLoopService:
     # LLM: _execute_one_tool_call 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 推进one工具call的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _execute_one_tool_call(self, request: ToolCallExecuteParams):
-        payload = payload_with_runtime_scope(self._agent, request.params, request.payload)
-        if isinstance(payload, dict):
-            payload = normalize_api_collection_payload(request.params, payload)
-        trace_request = RunnerToolStageTraceRequest(
-            agent=self._agent,
-            params=request.params,
-            tool_rounds=request.tool_rounds,
-            idx=request.idx,
-            payload=payload,
-        )
-        trace_runner_tool_call_started(trace_request)
-        runtime_request = ToolCallRuntimeRequest(self._agent, request, payload, trace_request)
-        guard_result = guarded_tool_call_result(runtime_request)
-        if guard_result is not None:
-            return guard_result
-        return execute_traced_tool_call(runtime_request)
+        return execute_one_tool_call(self._agent, request)
 
     # LLM: _record_tool_call 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 写入工具call的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
     def _record_tool_call(self, record: ToolCallRecordParams) -> None:
-        record_tool_guard_observation(self._agent, record.params, record.payload, record.result)
+        guardrail_hint = record_tool_guard_observation(self._agent, record.params, record.payload, record.result)
         if record.result.ok and record.result.tool not in {"__parse_error__", "unknown"}:
             record.params.executed_tools.append(record.result.tool)
         archive_record = self._archive_tool_call_record(record)
         persist_tool_runtime_ledger(self._agent, archive_record)
         record.params.archive_tool_calls.append(archive_record)
+        refresh_parent_shared_context_cache(self._agent, record.params.archive_tool_calls)
+        refresh_parent_shared_context_from_tool_record(self._agent, record)
         record.params.tool_context.append(
             f"[tool-record round={record.tool_rounds} index={record.idx}]\n"
             f"{render_tool_payload_for_live_prompt(record.payload)}\n"
             f"[tool-output-record round={record.tool_rounds} index={record.idx}]\n"
             f"{render_tool_result_for_live_prompt(record.result, archive_record)}"
         )
+        if guardrail_hint:
+            record.params.tool_context.append(f"[tool-loop-guardrail-hint]\n{guardrail_hint}")
         append_long_content_recovery_context(record)
         progress = record_runtime_subagent_tool_progress(self._agent, record)
         if progress:
@@ -301,12 +301,24 @@ def _task_local_progress_context(progress: dict[str, object]) -> str:
     )
 
 
-# LLM: _append_initial_delivery_repair_context makes active recovery contracts visible before the first retry turn.
-# 函数用途: 续跑一开始就注入 closeout 的 required_actions/required_tool_calls，而不是等模型先犯一次空转。
-def _append_initial_delivery_repair_context(agent: object, params: ToolLoopExecuteParams) -> None:
-    context = delivery_repair_context(agent, repairs=0, runtime_params=params)
-    if not context:
-        return
-    if any(str(item).startswith("[tool-system delivery-required-repair]") for item in params.tool_context):
-        return
-    params.tool_context.append(context)
+def _terminal_tool_guard_response(request: ToolRoundExecutionRequest) -> ModelResponse | None:
+    current_round_prefix = f"{request.tool_rounds}-"
+    for record in reversed(list(getattr(request.params, "archive_tool_calls", []) or [])):
+        if not isinstance(record, dict):
+            continue
+        if not str(record.get("call_id") or "").startswith(current_round_prefix):
+            continue
+        gate = record.get("runtime_gate")
+        if not isinstance(gate, dict) or gate.get("action") != "terminal_block":
+            continue
+        text = (
+            "[TOOL_GUARD_TERMINAL_BLOCKED] 同一工具路径持续无效，且 terminal_block_enabled 已开启，"
+            "本任务已停止继续自动尝试。请调整参数、换工具/来源，或重新发起任务。"
+        )
+        return ModelResponse(
+            text=text,
+            backend=request.response.backend,
+            runtime_status="blocked",
+            runtime_reason=str(gate.get("code") or "TOOL_GUARD_TERMINAL_BLOCKED"),
+        )
+    return None

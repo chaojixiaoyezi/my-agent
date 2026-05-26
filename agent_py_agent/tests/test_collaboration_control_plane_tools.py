@@ -1,0 +1,303 @@
+from __future__ import annotations
+
+import json
+
+from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.conversation import ConversationStore
+from agent_py_agent.agent.core import SimpleAgent
+
+
+def test_collaboration_tools_are_registered_and_write_case_flow(tmp_path) -> None:
+    agent = _agent_with_task(tmp_path)
+
+    registered = {spec.name for spec in agent.tools.specs(include_orchestration=True)}
+
+    assert {
+        "open_case",
+        "request_collaboration",
+        "list_collaboration_requests",
+        "submit_evidence",
+        "update_collaboration_request",
+        "reroute_collaboration_request",
+        "update_case_status",
+        "case_status",
+    }.issubset(registered)
+
+    open_result = agent.tools.tools["open_case"].execute(_open_case_params())
+    case_id = json.loads(open_result.output)["case_id"]
+    request_result = agent.tools.tools["request_collaboration"].execute(_request_params(case_id))
+    request_id = json.loads(request_result.output)["request_id"]
+    evidence_result = agent.tools.tools["submit_evidence"].execute(_evidence_params(case_id, request_id))
+    request_update_result = agent.tools.tools["update_collaboration_request"].execute(
+        _request_update_params(case_id, request_id)
+    )
+    status_result = agent.tools.tools["case_status"].execute({"case_id": case_id})
+
+    assert open_result.ok is True
+    assert request_result.ok is True
+    assert evidence_result.ok is True
+    assert request_update_result.ok is True
+    assert json.loads(status_result.output)["evidence_count"] == 1
+    assert json.loads(status_result.output)["completed_request_count"] == 1
+
+
+def _agent_with_task(tmp_path) -> SimpleAgent:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "协作任务", 'now': 2.0})
+    return agent
+
+
+def _open_case_params() -> dict[str, object]:
+    return {
+        "task_id": "task-1",
+        "title": "通用协作 case",
+        "summary": "需要其他代理协作。",
+        "priority": "urgent",
+        "created_by": "agent-a",
+        "required_capabilities": ["query"],
+    }
+
+
+def _request_params(case_id: str) -> dict[str, object]:
+    return {
+        "case_id": case_id,
+        "requester_agent_id": "agent-a",
+        "target_agent_ids": ["agent-b"],
+        "required_capabilities": ["query"],
+        "question": "请补充证据。",
+    }
+
+
+def _evidence_params(case_id: str, request_id: str) -> dict[str, object]:
+    return {
+        "case_id": case_id,
+        "request_id": request_id,
+        "source_agent_id": "agent-b",
+        "matched": True,
+        "summary": "找到证据。",
+        "evidence_refs": ["artifact://agent-b/e1"],
+    }
+
+
+def _request_update_params(case_id: str, request_id: str) -> dict[str, object]:
+    return {
+        "case_id": case_id,
+        "request_id": request_id,
+        "status": "completed",
+        "actor_agent_id": "agent-b",
+        "summary": "已响应协作请求。",
+    }
+
+
+def test_list_collaboration_requests_finds_targeted_request_without_case_id(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "协作任务", 'now': 2.0})
+    case_id = json.loads(
+        agent.tools.tools["open_case"].execute(
+            {
+                "task_id": "task-1",
+                "title": "待发现协作请求",
+                "summary": "响应者不知道 case_id，也要能发现自己被点名。",
+                "created_by": "source-a",
+            }
+        ).output
+    )["case_id"]
+    request_id = json.loads(
+        agent.tools.tools["request_collaboration"].execute(
+            {
+                "case_id": case_id,
+                "requester_agent_id": "source-a",
+                "target_agent_ids": ["source-b"],
+                "question": "请补充你负责来源里的证据。",
+                "observed_facts": [{"fact_id": "fact-1", "value": "opaque-clue"}],
+            }
+        ).output
+    )["request_id"]
+
+    result = agent.tools.tools["list_collaboration_requests"].execute({"agent_id": "source-b"})
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["request_count"] == 1
+    assert payload["requests"][0]["case_id"] == case_id
+    assert payload["requests"][0]["request_id"] == request_id
+    assert payload["requests"][0]["observed_facts"][0]["value"] == "opaque-clue"
+
+
+def test_open_case_materializes_internal_thread_for_known_local_task(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    child = agent.subagents.create_run(
+        goal="本地协作子代理需要打开一个 case。",
+        allowed_tools=["open_case", "request_collaboration"],
+        agent_name="local-source-a",
+    )
+
+    open_result = agent.tools.tools["open_case"].execute(
+        {
+            "thread_id": "guessed-thread-id",
+            "task_id": child.id,
+            "title": "本地任务协作 case",
+            "summary": "没有外部会话绑定时也要能落到内部 thread。",
+            "created_by": child.id,
+        }
+    )
+    payload = json.loads(open_result.output)
+    linked = agent.conversation_store.thread_for_task(child.id)
+
+    assert open_result.ok is True
+    assert payload["thread_id"]
+    assert linked is not None
+    assert linked.thread_id == payload["thread_id"]
+    assert linked.channel_bindings[0].channel == "internal"
+
+
+def test_targeted_collaboration_request_carries_clue_packet_to_responder_context(tmp_path) -> None:
+    agent, responder, request = _targeted_clue_request(tmp_path)
+
+    context = agent.subagents.build_execution_context(responder.id)
+    targeted = context.context_bundle["collaboration"]["targeted_requests"][0]
+
+    assert targeted["request_id"] == request.request_id
+    assert targeted["observed_facts"][0]["kind"] == "caller-defined-kind"
+    assert targeted["query_hints"][0]["hint_id"] == "hint-1"
+    assert targeted["response_contract"]["allow_not_matched"] is True
+
+
+def _targeted_clue_request(tmp_path):
+    from agent_py_agent.agent.collaboration import AgentCapability
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    responder = agent.subagents.create_run(
+        goal="响应开放世界线索协作请求。",
+        allowed_tools=["case_status", "submit_evidence", "update_collaboration_request"],
+        agent_name="source-b",
+        role="responder",
+    )
+    agent.collaboration_store.register_agent(
+        AgentCapability(agent_id=responder.id, capabilities=("query", "evidence_submission"))
+    )
+    case = agent.collaboration_store.open_case({'thread_id': "thread-1", 'task_id': "task-1", 'title': "响应者上下文线索", 'summary': "需要把线索包交给响应者。", 'created_by': "source-a", 'now': 1.0})
+    request = agent.collaboration_store.request_collaboration({'case_id': case.case_id, 'requester_agent_id': "source-a", 'target_agent_ids': (responder.id,), 'question': "请围绕开放世界线索查证。", 'observed_facts': (
+            {
+                "fact_id": "fact-1",
+                "label": "任意关键线索",
+                "kind": "caller-defined-kind",
+                "value": "opaque-value-3",
+            },
+        ), 'query_hints': (
+            {
+                "hint_id": "hint-1",
+                "purpose": "响应代理自行决定完整查、拆分查或换来源。",
+                "terms": ["opaque-value-3"],
+            },
+        ), 'response_contract': {"allow_not_matched": True}, 'now': 2.0})
+    return agent, responder, request
+
+
+def test_reroute_collaboration_request_tool_updates_targets_and_audit(tmp_path) -> None:
+    agent, case_id, request_id = _reroute_tool_fixture(tmp_path)
+
+    reroute_result = agent.tools.tools["reroute_collaboration_request"].execute(
+        {
+            "case_id": case_id,
+            "request_id": request_id,
+            "actor_agent_id": "main",
+            "target_agent_ids": ["source-b"],
+            "summary": "source-a 失败，改由 source-b 继续。",
+            "metadata": {"reason_code": "source_unavailable"},
+        }
+    )
+    payload = json.loads(reroute_result.output)
+    status = json.loads(agent.tools.tools["case_status"].execute({"case_id": case_id}).output)
+
+    assert reroute_result.ok is True
+    assert payload["request"]["target_agent_ids"] == ["source-b"]
+    assert payload["request"]["status"] == "pending"
+    assert status["requests"][0]["target_agent_ids"] == ["source-b"]
+    assert status["requests"][0]["metadata"]["rerouted_from"] == ["source-a"]
+    assert status["requests"][0]["metadata"]["rerouted_to"] == ["source-b"]
+
+
+def _reroute_tool_fixture(tmp_path) -> tuple[SimpleAgent, str, str]:
+    agent = _agent_with_task(tmp_path)
+    case_id = json.loads(agent.tools.tools["open_case"].execute(_reroute_case_params()).output)["case_id"]
+    request_id = json.loads(
+        agent.tools.tools["request_collaboration"].execute({
+            "case_id": case_id,
+            "requester_agent_id": "source-a",
+            "target_agent_ids": ["source-a"],
+            "question": "请查询线索。",
+        }).output
+    )["request_id"]
+    return agent, case_id, request_id
+
+
+def _reroute_case_params() -> dict[str, object]:
+    return {
+        "task_id": "task-1",
+        "title": "换路工具 case",
+        "summary": "原目标失败，需要替代目标。",
+        "created_by": "source-a",
+    }
+
+
+def test_case_lifecycle_requires_summary_or_decision_when_closing(tmp_path) -> None:
+    from agent_py_agent.agent.collaboration import CollaborationStore
+
+    store = CollaborationStore(tmp_path / "collaboration")
+    case = store.open_case({'thread_id': "thread-1", 'task_id': "task-1", 'title': "生命周期 case", 'summary': "需要后续关闭。", 'created_by': "agent-a", 'now': 10.0})
+
+    _assert_empty_close_rejected(store, case.case_id)
+
+    updated = store.record_case_status({'case_id': case.case_id, 'status': "triaged", 'actor_agent_id': "agent-a", 'summary': "已完成初步研判，等待更多证据。", 'now': 12.0})
+    closed = store.record_case_status({'case_id': case.case_id, 'status': "closed", 'actor_agent_id': "agent-a", 'summary': "证据已收口，结论已同步。", 'decision_type': "closed_by_main_agent", 'now': 13.0})
+    decisions = store.case_decisions(case.case_id)
+
+    assert updated.status == "triaged"
+    assert closed.status == "closed"
+    assert [item.summary for item in decisions] == [
+        "已完成初步研判，等待更多证据。",
+        "证据已收口，结论已同步。",
+    ]
+
+
+def _assert_empty_close_rejected(store, case_id: str) -> None:
+    try:
+        store.record_case_status({'case_id': case_id, 'status': "closed", 'actor_agent_id': "agent-a", 'summary': "", 'now': 11.0})
+    except ValueError as exc:
+        assert "summary_or_decision_required" in str(exc)
+    else:
+        raise AssertionError("closing a case without summary or decision should fail")
+
+
+def test_update_case_status_tool_records_decision_and_case_status(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "协作任务", 'now': 2.0})
+    open_result = agent.tools.tools["open_case"].execute(
+        {
+            "task_id": "task-1",
+            "title": "状态工具 case",
+            "summary": "需要状态推进。",
+            "created_by": "agent-a",
+        }
+    )
+    case_id = json.loads(open_result.output)["case_id"]
+
+    update_result = agent.tools.tools["update_case_status"].execute(
+        {
+            "case_id": case_id,
+            "status": "resolved",
+            "actor_agent_id": "agent-a",
+            "summary": "已经完成研判并给出处理结论。",
+            "decision_type": "resolved_by_main_agent",
+        }
+    )
+    status = json.loads(agent.tools.tools["case_status"].execute({"case_id": case_id}).output)
+
+    assert update_result.ok is True
+    assert json.loads(update_result.output)["case"]["status"] == "resolved"
+    assert status["case"]["status"] == "resolved"
+    assert status["decision_count"] == 1

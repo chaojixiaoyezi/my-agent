@@ -141,6 +141,20 @@ def test_legacy_fields_convert_to_v2_envelopes():
     assert result.idempotency_key.startswith("idem:read_file:")
 
 
+def test_legacy_flat_tool_status_argument_does_not_become_protocol_status():
+    call = normalize_tool_call(
+        {
+            "tool": "update_case_status",
+            "case_id": "case-1",
+            "status": "needs_replan",
+        }
+    )
+
+    assert call.status == "pending"
+    assert call.input["status"] == "needs_replan"
+    assert validate_tool_call(call) == []
+
+
 def test_unknown_error_downgrades_to_unknown_error():
     error = ToolError.from_payload({"error_type": "ALIEN_SIGNAL", "message": "strange failure"})
 

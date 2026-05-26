@@ -7,19 +7,24 @@ from ..subagent import SubAgentExecutionContext
 from .runner_prompt_context_summary import runner_context_summary_payload
 
 
-# LLM: input_dependency_contract_lines tells runners to use resolved upstream files before prose aliases.
-# 函数用途: 防止下游读取一个不存在的自然语言路径后立刻 BLOCKED，而忽略已完成上游 artifact 的真实路径。
-def input_dependency_contract_lines(context: SubAgentExecutionContext) -> list[str]:
+# LLM: read_ref_context_lines renders read refs as context, not as startup dependencies.
+# 函数用途: 把父级显式给出的可读路径展示给 runner；路径缺失时只能记录限制或换线索，不能当成启动门。
+def read_ref_context_lines(context: SubAgentExecutionContext) -> list[str]:
     payload = runner_context_summary_payload(context)
-    contract = payload.get("input_contract") if isinstance(payload.get("input_contract"), dict) else {}
-    resolved = [str(item) for item in contract.get("resolved_read_paths") or [] if str(item).strip()]
-    if not resolved:
+    refs = payload.get("read_refs") if isinstance(payload.get("read_refs"), dict) else {}
+    declared = [str(item) for item in refs.get("required_read_paths") or [] if str(item).strip()]
+    resolved = [str(item) for item in refs.get("resolved_read_paths") or [] if str(item).strip()]
+    if not declared and not resolved:
         return []
-    return [
-        "- 读取上游/依赖输入时，先使用 input_contract.resolved_read_paths 里的真实存在路径；"
-        "某个自然语言路径不存在时，必须继续尝试同名或已解析候选，不要立刻 BLOCKED。",
-        f"- resolved_read_paths: {', '.join(resolved[:8])}",
+    lines = [
+        "- read_refs 是父级给你的可读线索和授权范围，不是启动前置门。"
+        "能读就读；某条路径不存在时，记录限制、尝试其他线索或向父级说明，不要因为单条线索缺失直接卡死。",
     ]
+    if declared:
+        lines.append(f"- declared_read_paths: {', '.join(declared[:8])}")
+    if resolved:
+        lines.append(f"- resolved_read_paths: {', '.join(resolved[:8])}")
+    return lines
 
 
 # LLM: required_product_contract_lines makes exact deliverable paths explicit before the model writes files.

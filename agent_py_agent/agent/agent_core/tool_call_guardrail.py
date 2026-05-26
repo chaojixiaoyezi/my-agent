@@ -9,13 +9,20 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..tooling import ToolExecutionResult
+from .tool_call_guardrail_config import (
+    no_progress_action_block_after,
+    no_progress_hint,
+    repeat_fail_threshold,
+    repeat_failure_hint,
+)
+from .tool_call_guardrail_config import (
+    terminal_block_enabled as configured_terminal_block_enabled,
+)
 
 _STATE_ATTR = "_tool_call_guardrail_failures"
 _NO_PROGRESS_STATE_ATTR = "_tool_call_guardrail_no_progress"
-_DEFAULT_EXACT_FAILURE_BLOCK_AFTER = 3
-_DEFAULT_NO_PROGRESS_BLOCK_AFTER = 2
-_BLOCK_CODE = "TOOL_REPEATED_EXACT_FAILURE"
-_NO_PROGRESS_BLOCK_CODE = "TOOL_REPEATED_NO_PROGRESS"
+_BLOCK_CODE = "TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED"
+_NO_PROGRESS_BLOCK_CODE = "TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED"
 _READ_ONLY_TOOL_NAMES = {
     "fetch_url",
     "http_request",
@@ -38,6 +45,9 @@ _LOCAL_PROGRESS_TOOL_NAMES = {
     "write_structured_json",
 }
 
+_repeat_fail_threshold = repeat_fail_threshold
+_terminal_block_enabled = configured_terminal_block_enabled
+
 
 # LLM: ToolCallSignature is the normalized identity for one tool call within a scoped failure ledger.
 # 类用途: 封装工具名、参数指纹和作用域，作为重复失败 guard 的稳定键。
@@ -46,41 +56,57 @@ class ToolCallSignature:
     tool_name: str
     args_hash: str
     scope: str
+    failure_class: str = ""
 
     # LLM: key returns the tuple form used by the persisted failure counter map.
     # 函数用途: 把签名对象转成可哈希键，供重复失败计数表读写。
-    def key(self) -> tuple[str, str, str]:
-        return (self.scope, self.tool_name, self.args_hash)
+    def key(self) -> tuple[str, str, str, str]:
+        return (self.scope, self.tool_name, self.args_hash, self.failure_class)
 
 
-# LLM: maybe_block_repeated_tool_failure blocks exact same failing calls after the configured threshold.
-# 函数用途: 在同一作用域里相同工具+参数连续失败达到阈值时，返回结构化阻断结果。
+# LLM: maybe_block_repeated_tool_failure intercepts the next unchanged failing action at 3N.
+# 函数用途: 在同一作用域里相同工具+参数+同类失败达到 3 倍阈值时，只拦截本次重复动作。
 def maybe_block_repeated_tool_failure(agent: object, params: object, payload: dict[str, object]):
-    signature = _signature(params, payload)
+    signature = _failure_signature_from_payload(agent, params, payload)
     if not signature.tool_name:
         return None
     failures = _failure_state(agent).get(signature.key(), 0)
-    block_after = _block_after(params)
-    if block_after <= 0 or failures < block_after:
+    threshold = repeat_fail_threshold(params)
+    if threshold <= 0 or failures < threshold * 3:
         return None
+    terminal_block_enabled = configured_terminal_block_enabled(params)
     return ToolExecutionResult(
         signature.tool_name,
         False,
         json.dumps(
             {
-                "error": "repeated identical tool call failure blocked",
+                "error": "同一工具、同一参数、同类失败已经重复过多次；本次相同调用未执行。请换关键词、换参数、换工具或换数据来源；如果外部条件确实阻塞，请说明已尝试来源和真实阻塞点。",
                 "guardrail": {
                     "code": _BLOCK_CODE,
                     "action": "block",
                     "tool_name": signature.tool_name,
                     "count": failures,
                     "args_hash": signature.args_hash,
+                    "failure_class": signature.failure_class,
                     "scope": signature.scope,
+                    "terminal_block_enabled": terminal_block_enabled,
                 },
             },
             ensure_ascii=False,
             sort_keys=True,
         ),
+        result_envelope={
+            "runtime_gate": {
+                "code": _BLOCK_CODE,
+                "action": "terminal_block" if terminal_block_enabled else "block_tool_call",
+                "terminal_block_enabled": terminal_block_enabled,
+                "tool_name": signature.tool_name,
+                "count": failures,
+                "args_hash": signature.args_hash,
+                "failure_class": signature.failure_class,
+                "scope": signature.scope,
+            }
+        },
         error_code=_BLOCK_CODE,
     )
 
@@ -90,15 +116,16 @@ def maybe_block_repeated_tool_no_progress(agent: object, params: object, payload
     if not signature.tool_name or not _is_read_only_tool(signature.tool_name):
         return None
     record = _no_progress_state(agent).get(signature.key())
-    block_after = _no_progress_block_after(params)
+    block_after = no_progress_action_block_after(params)
     if block_after <= 0 or not isinstance(record, dict) or int(record.get("count") or 0) < block_after:
         return None
+    terminal_block_enabled = configured_terminal_block_enabled(params)
     return ToolExecutionResult(
         signature.tool_name,
         False,
         json.dumps(
             {
-                "error": "repeated identical read-only tool call returned unchanged results",
+                "error": "同一只读工具、同一参数已经多次返回相同结果；本次相同调用未执行。请使用已有结果、换查询条件、换工具或换数据来源。",
                 "guardrail": {
                     "code": _NO_PROGRESS_BLOCK_CODE,
                     "action": "block",
@@ -107,30 +134,47 @@ def maybe_block_repeated_tool_no_progress(agent: object, params: object, payload
                     "args_hash": signature.args_hash,
                     "result_hash": str(record.get("result_hash") or ""),
                     "scope": signature.scope,
+                    "terminal_block_enabled": terminal_block_enabled,
                 },
             },
             ensure_ascii=False,
             sort_keys=True,
         ),
+        result_envelope={
+            "runtime_gate": {
+                "code": _NO_PROGRESS_BLOCK_CODE,
+                "action": "terminal_block" if terminal_block_enabled else "block_tool_call",
+                "terminal_block_enabled": terminal_block_enabled,
+                "tool_name": signature.tool_name,
+                "count": int(record.get("count") or 0),
+                "args_hash": signature.args_hash,
+                "result_hash": str(record.get("result_hash") or ""),
+                "scope": signature.scope,
+            }
+        },
         error_code=_NO_PROGRESS_BLOCK_CODE,
     )
 
 
 # LLM: record_tool_guard_observation updates the exact-failure ledger after each tool result.
 # 函数用途: 记录工具调用成功或失败；失败递增，同结果只读成功递增，本地推进成功会清理无进展计数。
-def record_tool_guard_observation(agent: object, runtime_params: object, payload: object, result: ToolExecutionResult) -> None:
+def record_tool_guard_observation(agent: object, runtime_params: object, payload: object, result: ToolExecutionResult) -> str:
     if not isinstance(payload, dict):
-        return
-    _record_no_progress_observation(agent, runtime_params, payload, result)
-    signature = _signature(runtime_params, payload)
+        return ""
+    no_progress_hint = _record_no_progress_observation(agent, runtime_params, payload, result)
+    signature = _signature(runtime_params, payload, _failure_class(result))
     if not signature.tool_name or result.error_code == _BLOCK_CODE:
-        return
+        return no_progress_hint
     failures = _failure_state(agent)
     key = signature.key()
     if result.ok:
-        failures.pop(key, None)
-        return
-    failures[key] = failures.get(key, 0) + 1
+        _clear_failure_counts_for_call(failures, signature)
+        _set_last_failure_class(agent, signature, "")
+        return no_progress_hint
+    count = failures.get(key, 0) + 1
+    failures[key] = count
+    _set_last_failure_class(agent, signature, signature.failure_class)
+    return repeat_failure_hint(runtime_params, signature, count) or no_progress_hint
 
 
 def _record_no_progress_observation(
@@ -138,28 +182,30 @@ def _record_no_progress_observation(
     runtime_params: object,
     payload: dict[str, object],
     result: ToolExecutionResult,
-) -> None:
+) -> str:
     signature = _signature(runtime_params, payload)
     if not signature.tool_name or result.error_code == _NO_PROGRESS_BLOCK_CODE:
-        return
+        return ""
     state = _no_progress_state(agent)
     if result.ok and _is_local_progress_tool(signature.tool_name):
         state.clear()
-        return
+        return ""
     if not (result.ok and _is_read_only_tool(signature.tool_name)):
-        return
+        return ""
     result_hash = _result_hash(result.output)
     key = signature.key()
     record = state.get(key)
     if isinstance(record, dict) and record.get("result_hash") == result_hash:
-        record["count"] = int(record.get("count") or 0) + 1
-        return
+        count = int(record.get("count") or 0) + 1
+        record["count"] = count
+        return no_progress_hint(runtime_params, signature, count)
     state[key] = {"count": 1, "result_hash": result_hash}
+    return ""
 
 
 # LLM: _failure_state provides the task-local mutable ledger used by the exact-failure guard.
 # 函数用途: 获取或初始化 agent 上的失败计数字典，避免重复失败状态散落在别处。
-def _failure_state(agent: object) -> dict[tuple[str, str, str], int]:
+def _failure_state(agent: object) -> dict[tuple[str, str, str, str], int]:
     state = getattr(agent, _STATE_ATTR, None)
     if not isinstance(state, dict):
         state = {}
@@ -167,7 +213,7 @@ def _failure_state(agent: object) -> dict[tuple[str, str, str], int]:
     return state
 
 
-def _no_progress_state(agent: object) -> dict[tuple[str, str, str], dict[str, object]]:
+def _no_progress_state(agent: object) -> dict[tuple[str, str, str, str], dict[str, object]]:
     state = getattr(agent, _NO_PROGRESS_STATE_ATTR, None)
     if not isinstance(state, dict):
         state = {}
@@ -177,9 +223,25 @@ def _no_progress_state(agent: object) -> dict[tuple[str, str, str], dict[str, ob
 
 # LLM: _signature builds the guardrail identity from structured params and tool payload.
 # 函数用途: 根据 payload 和运行参数构造 ToolCallSignature，统一重复失败的比较口径。
-def _signature(params: object, payload: dict[str, object]) -> ToolCallSignature:
+def _signature(params: object, payload: dict[str, object], failure_class: str = "") -> ToolCallSignature:
     tool_name = str(payload.get("tool") or "").strip()
-    return ToolCallSignature(tool_name=tool_name, args_hash=_args_hash(payload), scope=_scope(params))
+    return ToolCallSignature(
+        tool_name=tool_name,
+        args_hash=_args_hash(payload),
+        scope=_scope(params),
+        failure_class=failure_class,
+    )
+
+
+def _failure_signature_from_payload(agent: object, params: object, payload: dict[str, object]) -> ToolCallSignature:
+    signature = _signature(params, payload)
+    failure_class = _last_failure_class(agent, signature.scope, signature.tool_name, signature.args_hash)
+    return ToolCallSignature(
+        tool_name=signature.tool_name,
+        args_hash=signature.args_hash,
+        scope=signature.scope,
+        failure_class=failure_class,
+    )
 
 
 # LLM: _args_hash gives tool payloads a stable digest so repeated exact failures are detected even across dict ordering changes.
@@ -212,32 +274,42 @@ def _is_local_progress_tool(tool_name: str) -> bool:
     return tool_name in _LOCAL_PROGRESS_TOOL_NAMES
 
 
-# LLM: _block_after reads the configurable exact-failure threshold while keeping a safe default.
-# 函数用途: 从任务属性里读取重复失败阻断阈值；缺失或非法时回退默认值。
-def _block_after(params: object) -> int:
-    attrs = getattr(params, "task_attributes", None)
-    if isinstance(attrs, dict):
-        value: Any = attrs.get("tool_guard_exact_failure_block_after")
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            parsed = -1
-        if parsed >= 0:
-            return parsed
-    return _DEFAULT_EXACT_FAILURE_BLOCK_AFTER
+def _failure_class(result: ToolExecutionResult) -> str:
+    code = str(getattr(result, "error_code", "") or "").strip()
+    if code:
+        return f"code:{code}"
+    category = str(getattr(result, "error_category", "") or "").strip()
+    if category:
+        return f"category:{category}"
+    return f"output:{_result_hash(result.output)}"
 
 
-def _no_progress_block_after(params: object) -> int:
-    attrs = getattr(params, "task_attributes", None)
-    if isinstance(attrs, dict):
-        value: Any = attrs.get("tool_guard_no_progress_block_after")
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            parsed = -1
-        if parsed >= 0:
-            return parsed
-    return _DEFAULT_NO_PROGRESS_BLOCK_AFTER
+def _last_failure_class(agent: object, scope: str, tool_name: str, args_hash: str) -> str:
+    state = getattr(agent, "_tool_call_guardrail_last_failure_class", None)
+    if not isinstance(state, dict):
+        return ""
+    return str(state.get((scope, tool_name, args_hash)) or "")
+
+
+def _set_last_failure_class(agent: object, signature: ToolCallSignature, failure_class: str) -> None:
+    state = getattr(agent, "_tool_call_guardrail_last_failure_class", None)
+    if not isinstance(state, dict):
+        state = {}
+        agent._tool_call_guardrail_last_failure_class = state
+    key = (signature.scope, signature.tool_name, signature.args_hash)
+    if failure_class:
+        state[key] = failure_class
+    else:
+        state.pop(key, None)
+
+
+def _clear_failure_counts_for_call(
+    failures: dict[tuple[str, str, str, str], int],
+    signature: ToolCallSignature,
+) -> None:
+    for key in list(failures):
+        if key[:3] == (signature.scope, signature.tool_name, signature.args_hash):
+            failures.pop(key, None)
 
 
 __all__ = [

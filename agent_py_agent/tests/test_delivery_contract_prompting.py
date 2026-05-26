@@ -115,12 +115,12 @@ def test_render_delivery_contract_section_includes_bootstrap_targets():
         }
     )
 
-    assert "开工顺序" in text
+    assert "开工参考" in text
     assert "checkpoint: outputs/table_report/source_data.json" in text
     assert "required_file: outputs/static_site/index.html" in text
-    assert "不要连续两轮只做目录查看" in text
+    assert "避免长期只做目录查看" in text
     assert "先真实写出 checkpoint: outputs/table_report/source_data.json" in text
-    assert "先给 outputs/table_report/source_data.json 写可验收的非空结构骨架" in text
+    assert "给 outputs/table_report/source_data.json 写阶段草稿" in text
     assert "最小有效骨架" in text
     assert "空 JSON 数组" not in text
     assert "data_to_workbook" in text

@@ -9,7 +9,12 @@ from ..subagents.services.idempotency_contract_identity import (
     idempotency_contract_identity_from_context_packs,
 )
 from .parameters import _string_list
-from .runner_input_dependencies import params_output_refs
+from .runner_ref_fields import (
+    _file_refs_from_value,
+    _manifest_input_refs,
+    _normalize_file_ref,
+    params_output_refs,
+)
 
 
 # LLM: create_context_manifest preserves refs-first source paths as machine-readable child context.
@@ -17,6 +22,7 @@ from .runner_input_dependencies import params_output_refs
 def create_context_manifest(raw_params: dict[str, object]) -> dict[str, object]:
     manifest = _dict_param(raw_params.get("context_manifest"))
     _set_list_if_present(manifest, "required_read_paths", _required_read_paths(raw_params, manifest))
+    _set_list_if_present(manifest, "hint_read_paths", _hint_read_paths(raw_params, manifest))
     _set_list_if_present(manifest, "task_pack_refs", _task_pack_refs(raw_params, manifest))
     _set_list_if_present(manifest, "omitted_context", _omitted_context(raw_params, manifest))
     _copy_optional_manifest_scalars(manifest, raw_params)
@@ -53,16 +59,31 @@ def _append_system_idempotency_pack(packs: list[dict[str, object]], raw_params: 
     })
 
 
-# LLM: _required_read_paths merges the accepted source-path aliases for child reads.
-# 函数用途: 收集 required/source/reference/material 路径字段，作为子代理必须自己读取的资料索引。
+# LLM: _required_read_paths preserves accepted source-path aliases as child read hints.
+# 函数用途: 收集 required/source/reference/material 路径字段，作为子代理可读线索；不作为启动前置门。
 def _required_read_paths(raw_params: dict[str, object], manifest: dict[str, object]) -> list[str]:
-    return _merged_string_list([
+    refs = _merged_string_list([
         manifest.get("required_read_paths"),
+        _manifest_file_refs(manifest),
         raw_params.get("required_read_paths"),
+        raw_params.get("input_refs"),
+        raw_params.get("input_files"),
         raw_params.get("source_paths"),
         raw_params.get("source_refs"),
         raw_params.get("reference_paths"),
         raw_params.get("material_refs"),
+    ])
+    return _without_current_outputs(refs, params_output_refs(raw_params))
+
+
+# LLM: _hint_read_paths grants literal goal refs as optional read roots, not dependency blockers.
+# 函数用途: 模型常把资料路径只写进 goal；这些路径可以帮助子代理读文件，但不能作为
+# runner 启动门或候选过滤条件，避免“未来输出文件”被误判为缺失输入。
+def _hint_read_paths(raw_params: dict[str, object], manifest: dict[str, object]) -> list[str]:
+    return _merged_string_list([
+        manifest.get("hint_read_paths"),
+        raw_params.get("hint_read_paths"),
+        _explicit_goal_file_refs(raw_params.get("goal")),
     ])
 
 
@@ -93,6 +114,13 @@ def _copy_optional_manifest_scalars(manifest: dict[str, object], raw_params: dic
             manifest[key] = raw_params[key]
 
 
+# LLM: _manifest_file_refs preserves generic ref-valued manifest fields.
+# 函数用途: 模型常写 source_file/alert_file/source_analyses 等开放字段名；这里只看值是否像文件 ref，
+# 不从字段名或业务语义推断规则。
+def _manifest_file_refs(manifest: dict[str, object]) -> list[str]:
+    return _manifest_input_refs({key: value for key, value in manifest.items() if key != "required_read_paths"})
+
+
 # LLM: _set_list_if_present avoids writing empty manifest lists.
 # 函数用途: 只有列表有内容时才写入 manifest，保持旧记录的空字段语义。
 def _set_list_if_present(manifest: dict[str, object], key: str, values: list[str]) -> None:
@@ -100,10 +128,53 @@ def _set_list_if_present(manifest: dict[str, object], key: str, values: list[str
         manifest[key] = values
 
 
-# LLM: _dict_param accepts only explicit mapping payloads.
-# 函数用途: 读取可选 dict 参数；非对象输入按空对象处理，避免字符串被误当字段。
+# LLM: _dict_param accepts explicit mappings and refs-only manifest shorthand.
+# 函数用途: 读取可选 dict 参数；列表/字符串短写只作为 read refs，避免显式资料路径静默丢失。
 def _dict_param(value: object) -> dict[str, object]:
-    return dict(value) if isinstance(value, dict) else {}
+    if isinstance(value, dict):
+        return dict(value)
+    refs = _context_manifest_shorthand_refs(value)
+    return {"required_read_paths": refs} if refs else {}
+
+
+# LLM: _context_manifest_shorthand_refs preserves model-written refs-only manifests.
+# 函数用途: 兼容 context_manifest=["/path/a.txt"] 或 context_manifest="/path/a.txt"；
+# 对象条目不转成字符串，避免把上下文对象误当文件路径。
+def _context_manifest_shorthand_refs(value: object) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        return _refs_from_shorthand_sequence(value)
+    if isinstance(value, str):
+        return _refs_only_shorthand_items(value)
+    return []
+
+
+def _refs_from_shorthand_sequence(value: object) -> list[str]:
+    refs: list[str] = []
+    for item in value if isinstance(value, (list, tuple, set)) else []:
+        if isinstance(item, dict):
+            continue
+        refs.extend(_refs_only_shorthand_items(item))
+    return _merged_string_list([refs])
+
+
+# LLM: _refs_only_shorthand_items keeps prose context from becoming hard input dependencies.
+# 函数用途: context_manifest 字符串短写只接受纯路径项；普通说明文字可留给 goal/context，不进入启动前必读门。
+def _refs_only_shorthand_items(value: object) -> list[str]:
+    refs: list[str] = []
+    for item in _string_list(value):
+        if not _is_file_ref_token(item):
+            continue
+        refs.append(_normalize_file_ref(str(item).strip().strip("- ").strip()))
+    return refs
+
+
+def _is_file_ref_token(value: object) -> bool:
+    text = str(value or "").strip().strip("- ").strip()
+    if not text:
+        return False
+    normalized = _normalize_file_ref(text)
+    file_refs = _file_refs_from_value(text)
+    return len(file_refs) == 1 and file_refs[0] == normalized
 
 
 # LLM: _dict_list_param keeps context pack lists tolerant but explicit.
@@ -128,10 +199,11 @@ def _merged_string_list(values: Iterable[object]) -> list[str]:
     merged: list[str] = []
     seen: set[str] = set()
     for item in _iter_string_list_items(values):
-        if item in seen:
+        ref = _normalize_file_ref(item)
+        if not ref or ref in seen:
             continue
-        seen.add(item)
-        merged.append(item)
+        seen.add(ref)
+        merged.append(ref)
     return merged
 
 
@@ -140,3 +212,37 @@ def _merged_string_list(values: Iterable[object]) -> list[str]:
 def _iter_string_list_items(values: Iterable[object]) -> Iterator[str]:
     for value in values:
         yield from _string_list(value)
+
+
+# LLM: _explicit_goal_file_refs extracts literal file refs only, not task semantics.
+# 函数用途: 当模型把明确文件路径放在 create_subagents.goal 而漏填 required_read_paths 时，
+# 只把路径形态的 token 补成只读资料 refs；不根据普通描述推断任务规则。
+def _explicit_goal_file_refs(value: object) -> list[str]:
+    from .runner_ref_fields import _file_refs_from_value
+
+    return _file_refs_from_value(value)
+
+
+# LLM: _without_current_outputs prevents a child from waiting for its own future artifact.
+# 函数用途: goal 里可能同时出现输入路径和 output_files 路径；结构化 output refs 是写入目标，
+# 不应作为启动前必须存在的 required_read_paths，否则新产物会把 runner 自己卡住。
+def _without_current_outputs(refs: list[str], output_refs: list[str]) -> list[str]:
+    if not output_refs:
+        return refs
+    return [ref for ref in refs if not _matches_any_output_ref(ref, output_refs)]
+
+
+def _matches_any_output_ref(ref: str, output_refs: list[str]) -> bool:
+    return any(_path_ref_matches(ref, output_ref) for output_ref in output_refs)
+
+
+def _path_ref_matches(ref: str, output_ref: str) -> bool:
+    left = str(ref or "").strip()
+    right = str(output_ref or "").strip()
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    left_path = left.replace("\\", "/")
+    right_path = right.replace("\\", "/")
+    return left_path.endswith("/" + right_path) or right_path.endswith("/" + left_path)

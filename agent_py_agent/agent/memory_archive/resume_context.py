@@ -210,6 +210,12 @@ def _has_resume_trigger(user_prompt: str) -> bool:
     return any(keyword.lower() in lowered for keyword in _TRIGGER_KEYWORDS)
 
 
+# LLM: has_resume_trigger is the public intent check shared by prompt-memory scoping.
+# 函数用途: 判断用户是否明确在恢复或继续旧任务；只返回布尔值，不读取任何历史上下文。
+def has_resume_trigger(user_prompt: str) -> bool:
+    return _has_resume_trigger(user_prompt)
+
+
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _resume_args 时同步检查返回值、异常处理和读写副作用。
 # 函数用途: 收集或查询 resume args 的候选结果，并按参数完成筛选、排序或数量限制。
 def _resume_args(query: str) -> SimpleNamespace:

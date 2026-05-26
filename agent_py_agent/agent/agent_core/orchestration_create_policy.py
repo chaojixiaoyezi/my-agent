@@ -15,7 +15,7 @@ from .orchestration_create_constraints import (
 from .orchestration_create_context import create_context_manifest, create_context_packs
 from .orchestration_workflow_mode import tool_workflow_mode as _tool_workflow_mode
 from .parameters import _positive_int, _string_list
-from .runner_input_dependencies import params_output_refs
+from .runner_ref_fields import params_input_refs, params_output_refs
 from .spawn_role_seed import is_explicit_root_role
 
 
@@ -50,7 +50,7 @@ def create_run_params(
         context_manifest=create_context_manifest(raw_params),
         context_packs=create_context_packs(raw_params),
         workflow_mode=workflow_mode,
-        attributes=_create_attributes(raw_params),
+        attributes=_create_attributes(raw_params, agent),
     )
 
 
@@ -104,10 +104,10 @@ def _should_disable_generic_workflow_for_concrete_worker(
 
 # LLM: _create_attributes persists create-time machine facts beside the human-facing goal.
 # 函数用途: 把 output/input/QA/static/content 等结构化工具参数写入 task.attributes，运行期不再解析 goal。
-def _create_attributes(raw_params: dict[str, object]) -> dict[str, object]:
+def _create_attributes(raw_params: dict[str, object], agent=None) -> dict[str, object]:
     attrs = dict(raw_params.get("attributes") or {}) if isinstance(raw_params.get("attributes"), dict) else {}
     for key in _LIST_ATTRIBUTE_FIELDS:
-        values = _string_list(raw_params.get(key))
+        values = _list_attribute_values(key, raw_params)
         if values and key not in attrs:
             attrs[key] = values
     for key in _SCALAR_ATTRIBUTE_FIELDS:
@@ -118,7 +118,61 @@ def _create_attributes(raw_params: dict[str, object]) -> dict[str, object]:
         value = raw_params.get(key)
         if isinstance(value, dict) and key not in attrs:
             attrs[key] = dict(value)
+    _add_derived_output_refs(attrs, raw_params)
+    _add_current_conversation_attrs(attrs, agent)
     return attrs
+
+
+# LLM: _add_derived_output_refs persists output_path-like manifest refs as machine output facts.
+# 函数用途: 模型把产物路径写进 context_manifest.output_path 时，仍进入写根、幂等和验收链路。
+def _add_derived_output_refs(attrs: dict[str, object], raw_params: dict[str, object]) -> None:
+    refs = params_output_refs(raw_params)
+    if not refs:
+        return
+    existing = _list_attribute_values("output_refs", {"output_refs": attrs.get("output_refs")})
+    merged = [*existing]
+    for ref in refs:
+        if ref not in merged:
+            merged.append(ref)
+    if merged:
+        attrs["output_refs"] = merged
+
+
+# LLM: _list_attribute_values keeps structured ref fields from becoming dict-string file contracts.
+# 函数用途: output/input 路径字段允许对象形态如 {"output_path": "..."}；这里只提取路径引用，不把整个对象转成文件名。
+def _list_attribute_values(key: str, raw_params: dict[str, object]) -> list[str]:
+    value = raw_params.get(key)
+    if key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
+        return params_output_refs({key: value})
+    if key in _INPUT_REF_ATTRIBUTE_FIELDS:
+        return params_input_refs({key: value})
+    return _string_list(value)
+
+
+# LLM: _add_current_conversation_attrs propagates durable thread binding to spawned agents.
+# 函数用途: create_subagents 在长期会话 run 内调用时，把 thread/task 绑定写入 task.attributes；
+# 后续子/孙代理可用自己的 run_id 反查会话，不要求模型手填 thread_id。
+def _add_current_conversation_attrs(attrs: dict[str, object], agent) -> None:
+    if agent is None:
+        return
+    current = getattr(agent, "_current_run_params", None)
+    raw_task_id = getattr(current, "task_id", "") if current is not None else ""
+    if not isinstance(raw_task_id, str):
+        return
+    task_id = raw_task_id.strip()
+    if not task_id:
+        return
+    try:
+        thread = agent.conversation_store.thread_for_task(task_id)
+    except Exception:
+        thread = None
+    if thread is None:
+        return
+    thread_id = getattr(thread, "thread_id", "")
+    if not isinstance(thread_id, str) or not thread_id.strip():
+        return
+    attrs.setdefault("conversation_thread_id", thread_id.strip())
+    attrs.setdefault("conversation_task_id", task_id)
 
 
 _LIST_ATTRIBUTE_FIELDS = (
@@ -140,6 +194,8 @@ _LIST_ATTRIBUTE_FIELDS = (
     "required_read_paths",
     "workflow_risk_tags",
 )
+_OUTPUT_REF_ATTRIBUTE_FIELDS = frozenset({"artifact_refs", "output_files", "output_refs"})
+_INPUT_REF_ATTRIBUTE_FIELDS = frozenset({"input_files", "input_refs", "required_read_paths"})
 _MAPPING_ATTRIBUTE_FIELDS = ("required_content_files",)
 _SCALAR_ATTRIBUTE_FIELDS = (
     "preferred_workflow_template",

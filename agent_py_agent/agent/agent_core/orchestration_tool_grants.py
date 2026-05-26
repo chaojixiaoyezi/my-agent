@@ -23,6 +23,17 @@ CODING_SUBAGENT_TOOLS = [
     "dispatch_subagents",
     "subagent_board",
     "subagent_message",
+    "raise_observation",
+    "raise_main_event",
+    "raise_collaboration_event",
+    "open_case",
+    "request_collaboration",
+    "list_collaboration_requests",
+    "submit_evidence",
+    "update_collaboration_request",
+    "reroute_collaboration_request",
+    "update_case_status",
+    "case_status",
     "capability_request",
 ]
 READ_ONLY_SUBAGENT_TOOLS = list(CODING_SUBAGENT_TOOLS)

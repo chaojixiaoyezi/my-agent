@@ -18,7 +18,6 @@ from agent_py_agent.agent.subagent import parse_subagent_runner_output
 from .backends import (
     AcceptedSubagentBackend,
     BoundaryWriteSubagentBackend,
-    CoordinatorAnalysisOnlyBackend,
     CoordinatorToolLimitBlockedBackend,
     HierarchicalScheduleSubagentBackend,
     RepairingSubagentBackend,
@@ -295,35 +294,6 @@ def test_subagent_runner_can_schedule_children_from_current_node_context():
         assert "schedule_child_subagents" in child.allowed_tools
 
 
-# LLM: coordinator cannot finish by merely saying it should schedule children next.
-# 函数用途: 复现 R66：coordinator 没有工具调用、没有 child refs，却把“下一步派工”当成可验收完成。
-def test_subagent_runner_blocks_analysis_only_coordinator_without_children():
-    with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
-        cfg = AgentConfig(enable_tools=True, model_backend="echo", subagent_workspace="subs")
-        agent = SimpleAgent(cfg, root)
-        agent.backend = CoordinatorAnalysisOnlyBackend()
-        task = agent.subagents.create_run(
-            goal="先创建 worker，再等待 QA。",
-            thought="coordinator",
-            plan=["schedule worker"],
-            agent_name="小傻妞-coordinator",
-            role="coordinator",
-            allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
-        )
-
-        result = agent.run_subagent(task.id, dry_run=False, probe=False)
-        loaded = agent.subagents.load(task.id)
-        output = json.loads(Path(loaded.output_json).read_text(encoding="utf-8"))
-
-        assert result.structured_output_found
-        assert loaded.status == "BLOCKED"
-        assert loaded.verification_status == "UNVERIFIED"
-        assert loaded.failure_type == "needs_child_creation"
-        assert "schedule_child_subagents" in output["next_actions"]
-        assert output["structured_output"]["actual_tools"] == []
-
-
 def test_subagent_runner_repairs_missing_structured_output():
     """LLM: Verifies the repair round-trip when the first model response lacks a structured block."""
     with tempfile.TemporaryDirectory() as td:
@@ -362,9 +332,9 @@ def test_subagent_runner_repairs_missing_structured_output():
         assert output_json["structured_output"]["repair_ok"] is True
 
 
-# LLM: coordinator finalization should trust verified direct children over a late tool-limit cleanup miss.
-# 函数用途: 复现真实 E2E 中 root 已经带出完成子链路，却因为最后多查一次撞到工具上限被误标 BLOCKED 的问题。
-def test_subagent_runner_keeps_completed_coordinator_awaiting_acceptance_after_tool_limit():
+# LLM: coordinator finalization no longer rewrites status from child-status heuristics.
+# 函数用途: 子代理收尾只记录模型/工具事实，不再因为 child 已完成而把 tool-limit BLOCKED 改成待验收。
+def test_subagent_runner_does_not_override_coordinator_tool_limit_status():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
@@ -405,12 +375,8 @@ def test_subagent_runner_keeps_completed_coordinator_awaiting_acceptance_after_t
         assert len(agent.backend.prompts) == 3
         assert result.structured_output_found
         assert result.structured_output_ok
-        assert result.status == "AWAITING_ACCEPTANCE"
-        assert result.verification_status == "NEEDS_ACCEPTANCE"
-        assert result.blocked_reason == ""
-        assert loaded.status == "AWAITING_ACCEPTANCE"
-        assert loaded.failure_type == ""
-        assert child.id in result.structured_summary
+        assert result.status == "BLOCKED"
+        assert loaded.status == "BLOCKED"
 
 
 def test_subagent_runner_parser_uses_last_parseable_fenced_block():

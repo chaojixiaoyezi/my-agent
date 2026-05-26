@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from .parameters import _string_list
+from .runner_ref_fields import params_input_refs, params_output_refs
 
 _PRODUCT_TARGET_SUFFIXES = {
     ".html",
@@ -30,6 +33,14 @@ _PRODUCT_TARGET_SUFFIXES = {
 }
 
 
+@dataclass(frozen=True)
+class _TaskOutputRootInput:
+    output_ref: str
+    workspace_root: Path
+    workspace_roots: list[Path]
+    input_paths: list[Path]
+
+
 # LLM: normalized_write_root turns file targets into their parent directory.
 # 函数用途: create_subagents 从自然语言或 extra_write_roots 收到 `/.../index.html` 时，持久化目录写入根而不是文件根。
 def normalized_write_root(value: object) -> str:
@@ -37,7 +48,7 @@ def normalized_write_root(value: object) -> str:
     if not text:
         return ""
     path = Path(text).expanduser()
-    if path.suffix.lower() in _PRODUCT_TARGET_SUFFIXES:
+    if _path_has_file_suffix(path):
         path = path.parent
     return str(path)
 
@@ -59,6 +70,55 @@ def context_target_write_roots(agent: object, params: dict[str, object]) -> list
         if root not in result:
             result.append(root)
     return result
+
+
+# LLM: structured_output_write_roots binds declared deliverable refs to concrete product roots.
+# 函数用途: create_subagents 带 output_files/output_refs 时，授权声明产物所在目录；
+# 不要求输入文件已存在，也不依赖文件类型枚举，避免模型只能写进子代理私有目录。
+def structured_output_write_roots(agent: object, params: dict[str, object]) -> list[str]:
+    raw_root = getattr(getattr(agent, "subagents", None), "workspace_root", None)
+    if not isinstance(raw_root, str | Path):
+        return []
+    workspace_root = Path(raw_root).expanduser().resolve(strict=False)
+    roots = agent_workspace_roots(agent, workspace_root)
+    result: list[str] = []
+    for value in params_output_refs(params):
+        path = _workspace_product_file_path(value, workspace_root, roots)
+        if path is None:
+            continue
+        root = str(path.parent)
+        if root not in result:
+            result.append(root)
+    return result
+
+
+# LLM: structured_task_output_write_roots grants only sibling output roots backed by existing input refs.
+# 函数用途: 当同一个 create_subagents 参数包里同时有真实输入路径和输出路径时，
+# 允许子代理写到同一任务目录的输出根；不从 goal/prompt 自然语言猜授权。
+def structured_task_output_write_roots(agent: object, params: dict[str, object]) -> list[str]:
+    raw_root = getattr(getattr(agent, "subagents", None), "workspace_root", None)
+    if not isinstance(raw_root, str | Path):
+        return []
+    workspace_root = Path(raw_root).expanduser().resolve(strict=False)
+    workspace_roots = agent_workspace_roots(agent, workspace_root)
+    input_paths = _existing_absolute_paths(params_input_refs(params), workspace_root)
+    if not input_paths:
+        return []
+    roots: list[str] = []
+    for output_ref in params_output_refs(params):
+        _append_task_output_root(roots, _TaskOutputRootInput(output_ref, workspace_root, workspace_roots, input_paths))
+    return roots
+
+
+def _append_task_output_root(roots: list[str], request: _TaskOutputRootInput) -> None:
+    output_path = _absolute_ref_path(request.output_ref, request.workspace_root)
+    if output_path is None or any(is_relative_to(output_path, root) for root in request.workspace_roots):
+        return
+    if not _output_matches_existing_task_input(output_path, request.input_paths):
+        return
+    root = str(output_path.parent)
+    if root not in roots:
+        roots.append(root)
 
 
 # LLM: agent_workspace_roots mirrors write-guard root normalization without importing that preflight module.
@@ -110,7 +170,7 @@ def _workspace_product_file_path(value: str, workspace_root: Path, workspace_roo
     candidate = Path(raw).expanduser()
     path = candidate if candidate.is_absolute() else workspace_root / candidate
     resolved = path.resolve(strict=False)
-    if resolved.suffix.lower() not in _PRODUCT_TARGET_SUFFIXES or _is_agent_internal_path(resolved):
+    if not _path_has_file_suffix(resolved) or _is_agent_internal_path(resolved):
         return None
     return resolved if any(is_relative_to(resolved, root) for root in workspace_roots) else None
 
@@ -119,3 +179,60 @@ def _workspace_product_file_path(value: str, workspace_root: Path, workspace_roo
 # 函数用途: required_read_paths 里常有 .my_agent 报告；这些只能读，不能当成产物目录授权。
 def _is_agent_internal_path(path: Path) -> bool:
     return any(part in {".my_agent", ".my-agent"} for part in path.parts)
+
+
+# LLM: _path_has_file_suffix keeps format detection open-world.
+# 函数用途: 已知产物后缀仍可作为快路径，但未知扩展名也按文件目标处理。
+def _path_has_file_suffix(path: Path) -> bool:
+    suffix = path.suffix.lower()
+    if not suffix:
+        return False
+    if suffix in _PRODUCT_TARGET_SUFFIXES:
+        return True
+    return len(suffix) > 1 and suffix[1:].replace(".", "").replace("_", "").replace("+", "").replace("-", "").isalnum()
+
+
+def _existing_absolute_paths(refs: list[str], workspace_root: Path) -> list[Path]:
+    paths: list[Path] = []
+    for ref in refs:
+        path = _absolute_ref_path(ref, workspace_root)
+        if path is not None and path.exists() and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _absolute_ref_path(ref: str, workspace_root: Path) -> Path | None:
+    text = str(ref or "").strip()
+    if not text or "://" in text:
+        return None
+    candidate = Path(text).expanduser()
+    path = candidate if candidate.is_absolute() else workspace_root / candidate
+    try:
+        return path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _output_matches_existing_task_input(output_path: Path, input_paths: list[Path]) -> bool:
+    for input_path in input_paths:
+        common = _common_parent(input_path, output_path)
+        if common is not None and _safe_external_task_root(common):
+            return True
+    return False
+
+
+def _common_parent(left: Path, right: Path) -> Path | None:
+    try:
+        return Path(os.path.commonpath([str(left), str(right)])).resolve(strict=False)
+    except (OSError, ValueError):
+        return None
+
+
+# LLM: _safe_external_task_root prevents sibling-task grants from widening to /, home, or tiny system dirs.
+# 函数用途: 只有足够窄的共同任务目录才能把 input refs 和 output refs 绑定成写入授权。
+def _safe_external_task_root(path: Path) -> bool:
+    root = path.resolve(strict=False)
+    home = Path.home().resolve(strict=False)
+    if root == root.parent or root == home:
+        return False
+    return len(root.parts) >= 3

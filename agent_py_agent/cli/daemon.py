@@ -94,6 +94,7 @@ def _daemon_watch_params(options: DaemonOptions) -> WatchParams:
         locked_files=options.locked_files,
         interval=options.interval,
         max_cycles=options.max_cycles,
+        advance=True,
         force_lock=options.force_lock,
     )
 

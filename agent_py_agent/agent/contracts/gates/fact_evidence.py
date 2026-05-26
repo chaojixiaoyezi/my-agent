@@ -134,38 +134,47 @@ def _collect_archive_ids(record: dict[str, Any], ids: set[str]) -> None:
     runtime_gate = record.get("runtime_gate")
     evidence = runtime_gate.get("evidence") if isinstance(runtime_gate, dict) else {}
     for source in (record, evidence if isinstance(evidence, dict) else {}):
-        for key in ("scoped_call_id", "tool_call_id", "call_id", "id", "operation_id", "idempotency_key"):
-            if value := _text(source.get(key)):
-                ids.add(value)
+        _collect_id_keys(source, ids)
+
+
+def _collect_id_keys(source: dict[str, Any], ids: set[str]) -> None:
+    for key in ("scoped_call_id", "tool_call_id", "call_id", "id", "operation_id", "idempotency_key"):
+        if value := _text(source.get(key)):
+            ids.add(value)
 
 
 def _collect_archive_refs(record: dict[str, Any], refs: set[str]) -> None:
     for source in (record, _mapping(record.get("parameters")), _mapping(record.get("tool_result_envelope"))):
-        for key in ("artifact_ref", "path", "output_path", "source_json_path", "source_ref", "uri", "url"):
-            if value := _text(source.get(key)):
-                refs.add(value)
+        _collect_ref_keys(source, refs, ("artifact_ref", "path", "output_path", "source_json_path", "source_ref", "uri", "url"))
     tool_refs = record.get("tool_result_refs")
     if isinstance(tool_refs, list):
         for item in tool_refs:
-            ref = _mapping(item)
-            for key in ("artifact_ref", "path", "uri", "url"):
-                if value := _text(ref.get(key)):
-                    refs.add(value)
+            _collect_ref_keys(_mapping(item), refs, ("artifact_ref", "path", "uri", "url"))
+
+
+def _collect_ref_keys(source: dict[str, Any], refs: set[str], keys: tuple[str, ...]) -> None:
+    for key in keys:
+        if value := _text(source.get(key)):
+            refs.add(value)
 
 
 def _source_has_tool_backing(source: dict[str, Any], archive_index: dict[str, set[str]]) -> bool:
     backing_ids = archive_index["ids"]
     backing_refs = archive_index["refs"]
-    for key in ("tool_call_ref", "tool_call_id", "call_id", "operation_id"):
-        if (value := _text(source.get(key))) and value in backing_ids:
-            return True
+    if _mapping_has_backing_id(source, backing_ids):
+        return True
     reserved = source.get("reserved")
-    if isinstance(reserved, dict):
-        for key in ("tool_call_ref", "tool_call_id", "call_id", "operation_id"):
-            if (value := _text(reserved.get(key))) and value in backing_ids:
-                return True
+    if isinstance(reserved, dict) and _mapping_has_backing_id(reserved, backing_ids):
+        return True
     for key in ("artifact_ref", "uri"):
         if (value := _text(source.get(key))) and value in backing_refs:
+            return True
+    return False
+
+
+def _mapping_has_backing_id(source: dict[str, Any], backing_ids: set[str]) -> bool:
+    for key in ("tool_call_ref", "tool_call_id", "call_id", "operation_id"):
+        if (value := _text(source.get(key))) and value in backing_ids:
             return True
     return False
 

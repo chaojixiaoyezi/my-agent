@@ -30,7 +30,7 @@ agent_py_agent/cli/
 ## 核心文件
 
 - `gateway_parts/paths.py`：集中描述所有 gateway 文件路径，避免路径散落各处。
-- `gateway_parts/io.py`：负责请求 JSON 的读写和目录迁移。
+- `gateway_parts/io.py`：负责请求 JSON 的读写和目录迁移；`update_json_file_atomic()` 在同一文件锁内完成读-改-写，避免并发后台 tick 丢更新。
 - `gateway_parts/process_control.py`：负责后台进程生命周期。
 - `gateway_parts/recovery.py`：处理卡在 processing 的请求。
 - `gateway_parts/runtime.py`：真正执行 request worker，从 pending 取请求、调用 agent、写 response。

@@ -63,6 +63,7 @@ class WatchParams:
     finalize_acceptance: bool = True
     interval: float = 30.0
     max_cycles: int = 0
+    advance: bool = False
     force_lock: bool = False
     stop_file: str | Path | None = None
 

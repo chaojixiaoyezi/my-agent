@@ -196,6 +196,89 @@ def test_runner_prompt_loads_current_role_template_for_worker():
     assert "你是找茬子代理" not in prompt
 
 
+def test_runner_prompt_exposes_generic_collaboration_control_plane_when_tools_are_allowed():
+    """协作工具已授权时，真实子代理要看到通用控制面动作，而不是只靠自然语言猜。"""
+    context = SubAgentExecutionContext(
+        run_id="worker-collab",
+        generated_at=1.0,
+        goal="观察本地线索，需要其他代理补充证据时发起协作。",
+        thought="",
+        plan=[],
+        role="worker",
+        allowed_tools=[
+            "open_case",
+            "request_collaboration",
+            "submit_evidence",
+            "update_collaboration_request",
+            "reroute_collaboration_request",
+            "case_status",
+        ],
+        acceptance_checks=["有协作需要时留下 case/request/evidence 引用"],
+    )
+
+    prompt = _build_subagent_runner_prompt(context)
+
+    assert "协作控制面" in prompt
+    assert "open_case" in prompt
+    assert "request_collaboration" in prompt
+    assert "submit_evidence" in prompt
+    assert "update_collaboration_request" in prompt
+    assert "reroute_collaboration_request" in prompt
+    assert "case_status" in prompt
+    assert "open_case 后" in prompt
+    assert "建议继续调用 request_collaboration" in prompt
+    assert "只记录事件时可以停在 open_case" in prompt
+    assert "collaboration://case/" in prompt
+    assert "collaboration://request/" in prompt
+    assert "不要只在 summary 里说已经协作" in prompt
+
+
+def test_runner_prompt_tells_targeted_responder_to_reuse_existing_collaboration_request():
+    """已有请求点名当前 runner 时，优先响应 request，不应再开新 case。"""
+    context = SubAgentExecutionContext(
+        run_id="agent-b",
+        generated_at=1.0,
+        goal="补充协作证据。",
+        thought="",
+        plan=[],
+        role="worker",
+        allowed_tools=[
+            "open_case",
+            "case_status",
+            "submit_evidence",
+            "update_collaboration_request",
+        ],
+        context_bundle={
+            "collaboration": {
+                "targeted_requests": [
+                    {
+                        "case_id": "case-123",
+                        "request_id": "creq-456",
+                        "case_ref": "collaboration://case/case-123",
+                        "request_ref": "collaboration://request/creq-456",
+                        "question": "请补一条证据引用。",
+                        "recommended_tools": [
+                            "case_status",
+                            "submit_evidence",
+                            "update_collaboration_request",
+                        ],
+                    }
+                ]
+            }
+        },
+        acceptance_checks=["提交证据并更新请求状态"],
+    )
+
+    prompt = _build_subagent_runner_prompt(context)
+
+    assert "点名给你的协作请求" in prompt
+    assert "case-123" in prompt
+    assert "creq-456" in prompt
+    assert "优先复用已有 case/request" in prompt
+    assert "不要另开 open_case" in prompt
+    assert "case_status -> submit_evidence -> update_collaboration_request" in prompt
+
+
 # LLM: compacted subagents must resume from their task-local run workspace, not parent long-term memory.
 # 函数用途: 验证子代理 runner prompt 会引用本地 checkpoint、summary 和 latest continue packet，避免压缩后丢失任务状态。
 def test_runner_prompt_includes_task_local_compact_continuation_refs(tmp_path: Path):

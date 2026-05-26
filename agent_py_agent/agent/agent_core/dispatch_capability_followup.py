@@ -48,7 +48,8 @@ def run_post_runner_capability_followup(params: PostRunnerCapabilityFollowupPara
 # LLM: _should_follow_up limits the feature to real apply+execute dispatch runs.
 # 函数用途: dry-run、纯 route、纯 acceptance 或没有 runner 执行的场景不做后置重跑。
 def _should_follow_up(params: PostRunnerCapabilityFollowupParams) -> bool:
-    return bool(params.params.apply and params.params.execute_runners)
+    router = getattr(params.ctx, "router", None)
+    return bool(params.params.apply and params.params.execute_runners and hasattr(router, "search"))
 
 
 # LLM: _created_grant keeps rerun tied to actual GRANTED records only.

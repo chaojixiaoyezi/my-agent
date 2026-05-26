@@ -47,7 +47,11 @@ def empty_report_is_inspectable(
 def has_traceable_acceptance_evidence(task: SubAgentTask, output: dict[str, Any]) -> bool:
     if _product_artifact_refs(task, _task_artifact_refs(task)):
         return True
-    if any(_product_artifact_refs(task, item.artifact_refs) for item in task.evidence_packets):
+    if _product_artifact_refs(task, _task_evidence_refs(task)):
+        return True
+    if any(_packet_has_traceable_refs(task, item) for item in task.evidence_packets):
+        return True
+    if any(_output_packet_has_traceable_refs(task, item) for item in _dict_list(output.get("evidence_packets", []))):
         return True
     return any(
         _product_artifact_refs(task, [str(item.get("path") or item.get("uri") or item.get("artifact_id") or "")])
@@ -59,6 +63,43 @@ def has_traceable_acceptance_evidence(task: SubAgentTask, output: dict[str, Any]
 # 函数用途: 读取 task.artifact_refs 时只接受非空字符串，避免把审计报告路径当作业务产物。
 def _task_artifact_refs(task: SubAgentTask) -> list[str]:
     value = getattr(task, "artifact_refs", [])
+    if not isinstance(value, list | tuple | set):
+        return []
+    return [str(item).strip() for item in value if str(item or "").strip()]
+
+
+# LLM: Evidence refs can be the deliverable fact source for investigation/checking tasks.
+# 函数用途: 读取 task.evidence_refs 中的外部证据路径；内部报告会在后续 product-ref 过滤中排除。
+def _task_evidence_refs(task: SubAgentTask) -> list[str]:
+    value = getattr(task, "evidence_refs", [])
+    if not isinstance(value, list | tuple | set):
+        return []
+    return [str(item).strip() for item in value if str(item or "").strip()]
+
+
+# LLM: Empty executable-test reports may still be inspectable through packet evidence refs.
+# 函数用途: EvidencePacket 的 evidence_refs/artifact_refs 任一指向非内部事实源，就允许父级继续 inspect_only。
+def _packet_has_traceable_refs(task: SubAgentTask, packet: object) -> bool:
+    evidence_refs = getattr(packet, "evidence_refs", [])
+    artifact_refs = getattr(packet, "artifact_refs", [])
+    return bool(
+        _product_artifact_refs(task, _string_refs(evidence_refs))
+        or _product_artifact_refs(task, _string_refs(artifact_refs))
+    )
+
+
+# LLM: output.json packet dicts use the same traceable-ref rule as persisted EvidencePacket objects.
+# 函数用途: 兼容尚未完全回写到 task 的 evidence_packets 字典。
+def _output_packet_has_traceable_refs(task: SubAgentTask, packet: dict[str, Any]) -> bool:
+    return bool(
+        _product_artifact_refs(task, _string_refs(packet.get("evidence_refs", [])))
+        or _product_artifact_refs(task, _string_refs(packet.get("artifact_refs", [])))
+    )
+
+
+# LLM: Small ref normalization helper avoids depending on a concrete dataclass/list type.
+# 函数用途: 把证据引用列表转成非空字符串列表，供父级空测试报告判断使用。
+def _string_refs(value: object) -> list[str]:
     if not isinstance(value, list | tuple | set):
         return []
     return [str(item).strip() for item in value if str(item or "").strip()]

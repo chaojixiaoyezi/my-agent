@@ -97,9 +97,9 @@ def test_subagent_runner_stops_after_output_json_write():
         assert result.tool_rounds == 1
 
 
-# LLM: verifies top-level dispatch completion closes from persisted state without another model turn.
-# 函数用途: 子代理任务全都 DONE/VERIFIED 后，顶层主代理应直接给结构化 refs，避免完成后继续自由读写跑偏。
-def test_completed_dispatch_closes_deterministically_without_extra_model_turn():
+# LLM: verifies top-level dispatch returns child refs to the parent synthesis turn.
+# 函数用途: 子代理任务全都 DONE/VERIFIED 后，dispatch 只返回索引和状态；主代理必须获得下一轮模型机会完成汇总。
+def test_completed_dispatch_returns_to_parent_synthesis_turn():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         cfg = AgentConfig(
@@ -114,11 +114,11 @@ def test_completed_dispatch_closes_deterministically_without_extra_model_turn():
 
         result = agent.run("推进并汇报已完成的子代理", save=False)
 
-        assert agent.backend.calls == 1
+        assert agent.backend.calls == 2
         assert result.tool_rounds == 1
-        assert "未再发起额外模型请求" in result.response
+        assert "未再发起额外模型请求" not in result.response
+        assert "我已经综合子代理结果" in result.response
         assert "deliverables/report.md" in result.response
-        assert task.id in result.response
 
 
 # LLM: explicit QA/acceptor instructions must override deterministic one-worker closeout.
@@ -161,11 +161,12 @@ def test_generic_acceptance_result_wording_does_not_require_acceptor_role():
 
         result = agent.run("请你作为主代理来安排和验收，完成后只汇报产物路径和验收结果。", save=False)
 
-        assert agent.backend.calls == 1
-        assert "未再发起额外模型请求" in result.response
+        assert agent.backend.calls == 2
+        assert "未再发起额外模型请求" not in result.response
+        assert "我已经综合子代理结果" in result.response
         assert "missing_quality_roles" not in result.response
         assert "结论修正" not in result.response
-        assert task.id in result.response
+        assert "deliverables/report.md" in result.response
 
 
 # LLM: final root answers must not overclaim success when persisted subagent tasks are blocked.

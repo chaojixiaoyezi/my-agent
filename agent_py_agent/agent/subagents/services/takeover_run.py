@@ -6,10 +6,22 @@ from __future__ import annotations
 """Create idempotent takeover runs for dead subagent tasks."""
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from ..models import SubAgentTask
+from .takeover_refs import (
+    default_takeover_plan,
+    source_refs,
+    structured_payload,
+    takeover_agent_name,
+    takeover_attributes,
+    takeover_chain_depth,
+    takeover_chain_limit,
+    takeover_lineage_root,
+    takeover_write_roots,
+    unique_strings,
+    unique_structured,
+)
 
 
 # LLM: TakeoverRunRequest bundles source run and creation overrides for future tool/CLI use.
@@ -63,9 +75,10 @@ class SubAgentTakeoverRunService:
         source = self.manager.load(request.source_run_id)
         existing = _existing_takeover(self.manager, source)
         if existing:
+            _ensure_existing_takeover_handoff(self.manager, source, existing)
             return _existing_result(source, existing)
-        chain_limit = _takeover_chain_limit(self.manager)
-        if chain_limit > 0 and _takeover_chain_depth(source) >= chain_limit:
+        chain_limit = takeover_chain_limit(self.manager)
+        if chain_limit > 0 and takeover_chain_depth(source) >= chain_limit:
             return _chain_exhausted_result(self.manager, source, chain_limit)
         takeover = _create_takeover_task(self.manager, source, request)
         self.manager.record_takeover(source.id, take_over_by=takeover.id, reason=request.reason, locked_files=[])
@@ -75,7 +88,7 @@ class SubAgentTakeoverRunService:
             created=True,
             applied=True,
             message=f"created takeover run {takeover.id} for {source.id}",
-            takeover_refs=_source_refs(source),
+            takeover_refs=source_refs(source),
         )
 
 
@@ -120,8 +133,79 @@ def _existing_result(source: SubAgentTask, existing: SubAgentTask) -> TakeoverRu
         created=False,
         applied=False,
         message=f"source {source.id} already taken over by {existing.id}",
-        takeover_refs=_source_refs(source),
+        takeover_refs=source_refs(source),
     )
+
+
+# LLM: _ensure_existing_takeover_handoff repairs old replacement runs created before refs inheritance existed.
+# 函数用途: 复用已有 takeover run 时补齐源任务的机器交接字段；只补缺失项，不覆盖接管者已有进展。
+def _ensure_existing_takeover_handoff(manager: Any, source: SubAgentTask, existing: SubAgentTask) -> None:
+    changed = False
+    changed |= _merge_context_manifest(existing, source)
+    changed |= _merge_context_packs(existing, source)
+    changed |= _merge_attribute_handoff(existing, source)
+    merged_artifacts = unique_strings([*source.artifact_refs, *existing.artifact_refs, source.agent_run_artifacts_dir])
+    if merged_artifacts != existing.artifact_refs:
+        existing.artifact_refs = merged_artifacts
+        changed = True
+    merged_evidence = unique_strings([*source.evidence_refs, *existing.evidence_refs])
+    if merged_evidence != existing.evidence_refs:
+        existing.evidence_refs = merged_evidence
+        changed = True
+    merged_roots = unique_strings([*existing.allowed_write_roots, *takeover_write_roots(source)])
+    if merged_roots != existing.allowed_write_roots:
+        existing.allowed_write_roots = merged_roots
+        changed = True
+    if changed:
+        manager.save(existing)
+
+
+# LLM: _merge_context_manifest keeps source refs first and preserves any takeover-local additions.
+# 函数用途: 旧接管 run 缺 required_read_paths/hint_read_paths/task_pack_refs 时从源 run 补齐。
+def _merge_context_manifest(target: SubAgentTask, source: SubAgentTask) -> bool:
+    changed = False
+    for field_name in ("task_pack_refs", "required_read_paths", "hint_read_paths", "omitted_context"):
+        source_values = list(getattr(source.context_manifest, field_name, []) or [])
+        target_values = list(getattr(target.context_manifest, field_name, []) or [])
+        merged = unique_strings([*source_values, *target_values])
+        if merged != target_values:
+            setattr(target.context_manifest, field_name, merged)
+            changed = True
+    for field_name in ("role_pack", "quality_contract_ref"):
+        target_value = str(getattr(target.context_manifest, field_name, "") or "").strip()
+        source_value = str(getattr(source.context_manifest, field_name, "") or "").strip()
+        if not target_value and source_value:
+            setattr(target.context_manifest, field_name, source_value)
+            changed = True
+    if not int(getattr(target.context_manifest, "token_budget", 0) or 0):
+        source_budget = int(getattr(source.context_manifest, "token_budget", 0) or 0)
+        if source_budget:
+            target.context_manifest.token_budget = source_budget
+            changed = True
+    return changed
+
+
+# LLM: _merge_context_packs restores refs-only packs such as sibling rosters without duplicating them.
+# 函数用途: 接管 run 可以继续看到兄弟清单、依赖包和系统派生合同。
+def _merge_context_packs(target: SubAgentTask, source: SubAgentTask) -> bool:
+    merged = unique_structured([*source.context_packs, *target.context_packs])
+    if merged == target.context_packs:
+        return False
+    target.context_packs = merged
+    return True
+
+
+# LLM: _merge_attribute_handoff fills source-declared output refs while preserving takeover audit keys.
+# 函数用途: output_files/output_refs 等机器产物目标不能在接管时丢失；已有同名字段不被覆盖。
+def _merge_attribute_handoff(target: SubAgentTask, source: SubAgentTask) -> bool:
+    source_attrs = takeover_attributes(source)
+    target_attrs = takeover_attributes(target)
+    merged = dict(source_attrs)
+    merged.update(target_attrs)
+    if merged == target.attributes:
+        return False
+    target.attributes = merged
+    return True
 
 
 # LLM: _chain_exhausted_result turns repeated takeover timeouts into a visible blocker instead of more children.
@@ -129,7 +213,7 @@ def _existing_result(source: SubAgentTask, existing: SubAgentTask) -> TakeoverRu
 def _chain_exhausted_result(manager: Any, source: SubAgentTask, chain_limit: int) -> TakeoverRunResult:
     source.status = "BLOCKED"
     source.failure_type = "takeover_chain_exhausted"
-    source.blockers = _unique_strings(
+    source.blockers = unique_strings(
         [
             *source.blockers,
             f"takeover chain reached max depth {chain_limit}; escalate or adjust timeout/scope before retry",
@@ -144,7 +228,7 @@ def _chain_exhausted_result(manager: Any, source: SubAgentTask, chain_limit: int
         created=False,
         applied=False,
         message=f"takeover chain exhausted for {source.id}; max_depth={chain_limit}",
-        takeover_refs=_source_refs(source),
+        takeover_refs=source_refs(source),
     )
 
 
@@ -154,8 +238,8 @@ def _create_takeover_task(manager: Any, source: SubAgentTask, request: TakeoverR
     takeover = manager.create_run(
         goal=f"接管 run {source.id}: {source.goal}",
         thought="旧 runner 已超时或断通道；从 task-local refs 接续，不重新理解任务。",
-        plan=request.plan or _default_takeover_plan(),
-        agent_name=request.agent_name or _takeover_agent_name(source),
+        plan=request.plan or default_takeover_plan(),
+        agent_name=request.agent_name or takeover_agent_name(source),
         role=request.role or source.role or "worker",
         parent_id=source.parent_id,
         root_id=source.root_id or source.id,
@@ -163,133 +247,23 @@ def _create_takeover_task(manager: Any, source: SubAgentTask, request: TakeoverR
         allowed_skills=list(source.allowed_skills),
         allowed_tools=list(source.allowed_tools),
         acceptance_checks=list(source.acceptance_checks),
-        extra_write_roots=_takeover_write_roots(source),
+        quality_contract=structured_payload(source.quality_contract),
+        context_manifest=structured_payload(source.context_manifest),
+        context_packs=structured_payload(source.context_packs),
+        extra_write_roots=takeover_write_roots(source),
         workflow_mode="off",
+        attributes=takeover_attributes(source),
     )
     takeover.attributes["takeover_source_run_id"] = source.id
-    takeover.attributes["takeover_source_refs"] = _source_refs(source)
-    takeover.attributes["takeover_lineage_root_run_id"] = _takeover_lineage_root(source)
-    takeover.attributes["takeover_chain_depth"] = _takeover_chain_depth(source) + 1
+    takeover.attributes["takeover_source_refs"] = source_refs(source)
+    takeover.attributes["takeover_lineage_root_run_id"] = takeover_lineage_root(source)
+    takeover.attributes["takeover_chain_depth"] = takeover_chain_depth(source) + 1
     takeover.current_step = "读取 takeover_source_refs.latest_continue_packet 或 checkpoint 后接续原任务。"
     takeover.latest_summary = source.latest_summary
-    takeover.artifact_refs = _unique_strings([*source.artifact_refs, source.agent_run_artifacts_dir])
+    takeover.artifact_refs = unique_strings([*source.artifact_refs, source.agent_run_artifacts_dir])
     takeover.evidence_refs = list(source.evidence_refs)
     manager.save(takeover)
     return takeover
-
-
-# LLM: _default_takeover_plan keeps takeover behavior concrete but role-agnostic.
-# 函数用途: 新接管 run 默认先读 refs，再继续实现/验证，最后写结果和证据。
-def _default_takeover_plan() -> list[str]:
-    return [
-        "读取 takeover_source_refs.latest_continue_packet；不可用则读 checkpoint/summary",
-        "继续原 run 未完成的 current_step/next_action",
-        "复用原任务目录和 artifacts refs 写入结果与证据",
-        "完成后写 final_report/output 并等待父级验收",
-    ]
-
-
-# LLM: _takeover_agent_name makes replacement identity visible without depending on user naming.
-# 函数用途: 生成可读的接管 agent_name，方便看板和日志区分旧 run 与新 run。
-def _takeover_agent_name(source: SubAgentTask) -> str:
-    base = str(source.agent_name or source.id or "worker").strip()
-    return f"{base}-takeover"
-
-
-# LLM: _source_refs records the exact task-local recovery files and shared artifact roots.
-# 函数用途: 给新 run 和测试提供同一任务目录、artifacts、checkpoint、packet 的固定引用。
-def _source_refs(source: SubAgentTask) -> dict[str, str]:
-    refs = {
-        "task_dir": source.task_dir,
-        "agent_run_workspace_dir": source.agent_run_workspace_dir,
-        "agent_run_artifacts_dir": source.agent_run_artifacts_dir,
-        "task_workspace_artifacts_dir": source.task_workspace_artifacts_dir,
-        "latest_continue_packet": _latest_continue_packet_ref(source),
-        "checkpoint": source.agent_run_checkpoint_json,
-        "summary": source.agent_run_summary_md,
-        "output_json": source.output_json,
-        "runner_result": source.runner_result_json,
-        "takeover_readiness": source.takeover_readiness_json,
-    }
-    return {key: str(value) for key, value in refs.items() if str(value or "").strip()}
-
-
-# LLM: _latest_continue_packet_ref keeps the packet path derivation identical to recovery strategy.
-# 函数用途: 从 source.agent_run_compactions_dir 推导 latest_continue_packet.json。
-def _latest_continue_packet_ref(source: SubAgentTask) -> str:
-    if source.agent_run_latest_session_continue_packet_json:
-        return source.agent_run_latest_session_continue_packet_json
-    if not source.agent_run_compactions_dir:
-        return ""
-    return str(Path(source.agent_run_compactions_dir) / "session" / "latest_continue_packet.json")
-
-
-# LLM: _takeover_write_roots grants the replacement access to source-owned task/artifact directories.
-# 函数用途: 新 run 可在同一任务产物区继续写，但不扩大到主代理或其他分支目录。
-def _takeover_write_roots(source: SubAgentTask) -> list[str]:
-    return _unique_strings(
-        [
-            *_explicit_source_write_roots(source),
-            *_existing_dirs(
-                [
-                    source.task_dir,
-                    source.agent_run_artifacts_dir,
-                    source.task_workspace_artifacts_dir,
-                    source.task_workspace_shared_dir,
-                ]
-            ),
-        ]
-    )
-
-
-# LLM: explicit source write roots may be future product directories that write_file will create.
-# 函数用途: 保留父级派工时明确给原 run 的写入目录，即使目录还不存在；避免 takeover 再次申请同一写权限。
-def _explicit_source_write_roots(source: SubAgentTask) -> list[str]:
-    return _unique_strings([str(item) for item in source.allowed_write_roots if str(item or "").strip()])
-
-
-# LLM: _takeover_chain_limit keeps the safety fuse explicit; zero means unrestricted.
-# 函数用途: 读取 manager 上的接管链深度上限；0 表示不限制，显式正数才触发接管链熔断。
-def _takeover_chain_limit(manager: Any) -> int:
-    try:
-        return max(0, int(getattr(manager, "takeover_chain_max_depth", 0) or 0))
-    except (TypeError, ValueError):
-        return 0
-
-
-# LLM: _takeover_chain_depth is stored on replacement runs and defaults to 0 for original runs.
-# 函数用途: 获取当前 run 已经位于第几层 takeover 链，用于防止无限接管。
-def _takeover_chain_depth(source: SubAgentTask) -> int:
-    try:
-        return max(0, int((source.attributes or {}).get("takeover_chain_depth", 0) or 0))
-    except (TypeError, ValueError):
-        return 0
-
-
-# LLM: _takeover_lineage_root keeps later takeover runs tied to the original failed run.
-# 函数用途: 返回接管链最初的 run_id，便于日志和后续 no-progress 诊断。
-def _takeover_lineage_root(source: SubAgentTask) -> str:
-    attrs = source.attributes or {}
-    root = str(attrs.get("takeover_lineage_root_run_id") or "").strip()
-    return root or source.id
-
-
-# LLM: _existing_dirs filters write roots down to real directories.
-# 函数用途: 避免把空字符串或文件路径当成接管写入根。
-def _existing_dirs(values: list[str]) -> list[str]:
-    dirs: list[str] = []
-    for value in values:
-        text = str(value or "").strip()
-        if text and Path(text).is_dir() and text not in dirs:
-            dirs.append(text)
-    return dirs
-
-
-# LLM: _unique_strings deduplicates refs while preserving source order.
-# 函数用途: 清理 artifact/evidence refs，避免重复路径增加上下文噪音。
-def _unique_strings(values: list[str]) -> list[str]:
-    return list(dict.fromkeys(str(item) for item in values if str(item or "").strip()))
-
 
 __all__ = [
     "SubAgentTakeoverRunService",

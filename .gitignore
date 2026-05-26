@@ -32,6 +32,17 @@ htmlcov/
 agent_py_agent/data/
 agent_py_agent/memory/
 agent_py_agent/memory_archive/
+/.agent_delivery/
+/.agent_tool_outputs/
+/data/collaboration/
+/data/conversations/
+/data/local_store/
+/data/memory.jsonl
+/data/memory.jsonl.lock
+/data/subagents/
+/memory/
+/memory_archive/
+/workspace/
 data/notifications/
 data/sessions/
 logs/

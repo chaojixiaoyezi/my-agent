@@ -38,6 +38,7 @@ from .dispatch_record_params import (
     PatchReviewRecordParams,
 )
 from .dispatch_runner_batches import execute_runner_jobs
+from .dispatch_runner_selection import scoped_runner_tasks
 
 if TYPE_CHECKING:
     pass
@@ -71,6 +72,10 @@ class DispatchFinalizeParams:
     auto_apply_acceptance_followup: bool
     finalize_acceptance: bool
     existing_records: list
+    parent_run_id: str = ""
+    root_id: str = ""
+    include_run_ids: list[str] | None = None
+    exclude_run_ids: list[str] | None = None
 
 
 # LLM: _DispatchCollectionBase 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -105,7 +110,7 @@ class _DispatchCollectionBase:
     # 函数用途: 处理finalize调度相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _finalize_dispatch(self, params: DispatchFinalizeParams):
         records = list(params.existing_records)
-        patch_run_ids = _dispatch_patch_review_run_ids(self.subagents.list_runs())
+        patch_run_ids = _dispatch_patch_review_run_ids(_finalize_scoped_tasks(self, params))
         patch_records = make_patch_review_records(
             PatchReviewRecordParams(
                 self, patch_run_ids, params.apply, params.reviewer, params.note, params.limit
@@ -123,6 +128,10 @@ class _DispatchCollectionBase:
                 params.limit,
                 params.execute_acceptance_tests,
                 params.auto_apply_acceptance_followup,
+                root_id=params.root_id,
+                parent_run_id=params.parent_run_id,
+                include_run_ids=params.include_run_ids,
+                exclude_run_ids=params.exclude_run_ids,
             )
         )
         records.extend(acceptance_records)
@@ -286,7 +295,34 @@ def _dispatch_finalize_params(params: DispatchParams, records: list) -> Dispatch
         auto_apply_acceptance_followup=params.auto_apply_acceptance_followup,
         finalize_acceptance=params.finalize_acceptance,
         existing_records=records,
+        parent_run_id=params.parent_run_id,
+        root_id=params.root_id,
+        include_run_ids=params.include_run_ids,
+        exclude_run_ids=params.exclude_run_ids,
     )
+
+
+def _finalize_scoped_tasks(agent, params: DispatchFinalizeParams) -> list:
+    ctx = DispatchContext(
+        cfg=CapabilityConfig(),
+        normalized_workflow_mode="off",
+        apply=params.apply,
+        planner=False,
+        runner_instruction="",
+        max_runners=1,
+        limit=params.limit,
+        reviewer=params.reviewer,
+        note=params.note,
+        take_over_by="",
+        locked_files=None,
+        parent_run_id=params.parent_run_id,
+        root_id=params.root_id,
+        include_run_ids=params.include_run_ids,
+        exclude_run_ids=params.exclude_run_ids,
+        finalize_acceptance=params.finalize_acceptance,
+        router=CapabilityRouter(),
+    )
+    return scoped_runner_tasks(agent.subagents.list_runs(), ctx)
 
 
 # LLM: _planner_dispatch_overrides 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

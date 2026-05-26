@@ -27,6 +27,7 @@ _DEPENDENT_ORCHESTRATION_TOOLS = {
     "capability_config_patch",
     "create_subagents",
     "dispatch_subagents",
+    "inspect_agent_tree",
     "schedule_child_subagents",
     "subagent_board",
     "subagent_message",

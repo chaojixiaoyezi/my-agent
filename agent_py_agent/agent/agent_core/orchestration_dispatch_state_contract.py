@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from ..contracts.error_taxonomy import error_contract
 from ..contracts.state_machine import run_state_snapshot_from_task
+from .orchestration_parent_acceptance_repair import parent_acceptance_rejected
 from .orchestration_run_scope import remembered_orchestration_run_ids
 
 _RUNNING_STATUSES = {"RUNNING"}
@@ -51,6 +52,8 @@ def _state_payload(tasks: list[object], missing_run_ids: list[str]) -> dict[str,
         "total": len(tasks),
         "by_status": buckets["by_status"],
         "dispatchable_run_ids": _clean_ids(buckets["dispatchable"]),
+        "awaiting_acceptance_run_ids": _clean_ids(buckets["acceptance"]),
+        "parent_acceptance_rejected_run_ids": _clean_ids(buckets["acceptance_rejected"]),
         "running_run_ids": _clean_ids(buckets["running"]),
         "blocked_run_ids": _clean_ids(buckets["blocked"]),
         "verified_run_ids": _clean_ids(buckets["verified"]),
@@ -67,6 +70,8 @@ def _empty_state_buckets() -> dict[str, object]:
         "by_status": {},
         "dispatchable": [],
         "running": [],
+        "acceptance": [],
+        "acceptance_rejected": [],
         "blocked": [],
         "verified": [],
         "unfinished": [],
@@ -82,7 +87,10 @@ def _append_task_state(buckets: dict[str, object], task: object) -> None:
     status = str(snapshot["status"])
     by_status = buckets["by_status"]
     by_status[status] = by_status.get(status, 0) + 1
+    rejected = parent_acceptance_rejected(task)
     _append_if(buckets["dispatchable"], run_id, bool(snapshot["can_dispatch"]))
+    _append_if(buckets["acceptance"], run_id, str(snapshot["waiting_reason"]) == "acceptance" and not rejected)
+    _append_if(buckets["acceptance_rejected"], run_id, rejected)
     _append_if(buckets["running"], run_id, status in _RUNNING_STATUSES)
     _append_if(buckets["blocked"], run_id, status in _BLOCKED_STATUSES)
     verified = bool(snapshot["can_closeout"])
@@ -120,15 +128,21 @@ def _append_recovery_recommendation(buckets: dict[str, object], snapshot: dict[s
 
 
 # LLM: _attach_state_next_action gives root a clear next move without hard-coding workflow order.
-# 函数用途: 根据状态桶设置 next_action 和建议工具调用，阻塞优先，其次继续可调度 run，再等待 running。
+# 函数用途: 根据状态桶设置 next_action 和建议工具调用；真实阻塞先暴露，可调度 run 优先于验收波次。
 def _attach_state_next_action(state: dict[str, object]) -> None:
     blocked = list(state.get("blocked_run_ids") or [])
+    rejected = list(state.get("parent_acceptance_rejected_run_ids") or [])
+    acceptance = list(state.get("awaiting_acceptance_run_ids") or [])
     dispatchable = list(state.get("dispatchable_run_ids") or [])
     running = list(state.get("running_run_ids") or [])
     missing = list(state.get("missing_run_ids") or [])
     if blocked:
         state["next_action"] = "inspect_or_rescue_blocked_run_ids"
         state["suggested_tool_call"] = _dispatch_tool_call(blocked, execute_runners=False)
+        return
+    if rejected:
+        state["next_action"] = "resolve_parent_acceptance_rejected_refs"
+        state["repair_advice_ref"] = "parent_acceptance_repair_advice.suggested_tool_call"
         return
     if dispatchable:
         state["next_action"] = "continue_dispatch_unfinished_run_ids"
@@ -137,6 +151,10 @@ def _attach_state_next_action(state: dict[str, object]) -> None:
     if running:
         state["next_action"] = "wait_or_check_subagent_board"
         state["suggested_tool_call"] = {"tool": "subagent_board", "limit": 20}
+        return
+    if acceptance:
+        state["next_action"] = "run_acceptance_for_awaiting_run_ids"
+        state["suggested_tool_call"] = _acceptance_tool_call(acceptance)
         return
     if missing:
         state["next_action"] = "refresh_subagent_board_for_missing_run_ids"
@@ -155,6 +173,13 @@ def _dispatch_tool_call(run_ids: list[str], *, execute_runners: bool) -> dict[st
         "run_ids": _clean_ids(run_ids),
         "workflow_mode": "off",
     }
+
+
+def _acceptance_tool_call(run_ids: list[str]) -> dict[str, object]:
+    payload = _dispatch_tool_call(run_ids, execute_runners=False)
+    payload["execute_acceptance_tests"] = True
+    payload["auto_apply_acceptance_followup"] = True
+    return payload
 
 
 # LLM: _clean_ids drops empty ids while preserving order.

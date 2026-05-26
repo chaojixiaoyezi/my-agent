@@ -5,6 +5,42 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
+
+from .parameters import _string_list
+from .runner_ref_fields import (
+    _file_refs_from_value,
+    _normalize_file_ref,
+    params_output_refs,
+)
+
+_BASE_FIELDS_EXCLUDED_FROM_ITEM = {
+    "count",
+    "items",
+    "tasks",
+    "goal",
+    "plan",
+    "context_manifest",
+    # Top-level delivery targets belong to the parent/root output. In batch mode
+    # each child keeps its own explicit output refs; shared files are coordinated
+    # by the parent prompt/tree/closeout instead of a hidden create-time gate.
+    "output_files",
+    "output_refs",
+    "artifact_refs",
+    "required_output_files",
+    "required_output_refs",
+    "deliverables",
+    "final_output",
+    "final_output_path",
+}
+_SHARED_DIRECTIVE_ROLES = frozenset(
+    {
+        "primary_directive",
+        "directive",
+        "instruction",
+        "brief",
+    }
+)
 
 
 # LLM: CreateSubagentItem keeps one requested child task as a structured bundle.
@@ -40,11 +76,7 @@ def create_items_from_params(params: dict[str, object]) -> list[CreateSubagentIt
 # 函数用途: 让模型在 create_subagents 入口先修正 items/tasks/count 混用和越层派工，避免创建错误任务树。
 def _batch_protocol_error(params: dict[str, object]) -> str:
     if "items" in params and "tasks" in params:
-        return (
-            "不要同时传 items 和 tasks；二选一即可。"
-            "create_subagents 只创建直接小傻妞；小小傻妞/孙代理请由对应小傻妞在 runner 内"
-            "调用 schedule_child_subagents 创建。"
-        )
+        return "不要同时传 items 和 tasks；二选一即可。"
     raw_items = params.get("items") if "items" in params else params.get("tasks")
     if raw_items is None:
         return ""
@@ -64,9 +96,6 @@ def _create_item(
     goal = str(raw.get("goal") or "").strip()
     if not goal:
         return f"items[{index}] 缺少必填 goal。"
-    direct_grandchild = _direct_grandchild_error(raw)
-    if direct_grandchild:
-        return direct_grandchild
     merged = _create_item_params(base_params, raw, goal)
     return CreateSubagentItem(goal=goal, params=merged)
 
@@ -78,27 +107,119 @@ def _create_item_params(
     raw: dict[str, object],
     goal: str,
 ) -> dict[str, object]:
-    merged = {
-        key: value
-        for key, value in base_params.items()
-        if key not in {"count", "items", "tasks", "goal", "plan"}
-    }
+    merged = _base_item_defaults(base_params)
     merged["_item_allowed_tools_explicit"] = "allowed_tools" in raw
     merged.update(raw)
     merged["goal"] = goal
     merged["count"] = 1
+    _merge_item_required_read_paths(merged, base_params, goal)
     return merged
 
 
-# LLM: _direct_grandchild_error keeps root batch mode at the direct-child boundary.
-# 函数用途: create_subagents 只能创建直接小傻妞；小小傻妞/孙代理要由对应父节点在 runner 内创建。
-def _direct_grandchild_error(raw: dict[str, object]) -> str:
-    identity = f"{raw.get('role') or ''} {raw.get('agent_name') or ''}".lower()
-    if "grandchild" not in identity and "小小傻妞" not in identity:
-        return ""
+# LLM: _base_item_defaults keeps batch-global manifests from becoming per-child blockers.
+# 函数用途: items[] 子任务只继承真正通用的顶层字段；全局 context_manifest 的开放字段
+# 不自动变成每个子代理的硬输入依赖，避免一个来源清单卡住所有 worker。
+def _base_item_defaults(base_params: dict[str, object]) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in base_params.items()
+        if key not in _BASE_FIELDS_EXCLUDED_FROM_ITEM
+    }
+
+
+# LLM: _merge_item_required_read_paths preserves explicit child read refs as hints.
+# 函数用途: 只合并当前 item 的显式 read refs、共享指令 pack 和 goal 中已存在文件；
+# 顶层 required_read_paths 不自动复制到每个 worker，避免把一组输入清单误变成所有子代理的读提示。
+def _merge_item_required_read_paths(
+    merged: dict[str, object],
+    base_params: dict[str, object],
+    goal: str,
+) -> None:
+    refs = _merge_refs(
+        [
+            _shared_directive_pack_paths(base_params.get("context_packs")),
+            _string_list(merged.get("required_read_paths")),
+            _item_manifest_required_read_paths(merged.get("context_manifest")),
+            _existing_goal_file_refs(goal, output_refs=params_output_refs(merged)),
+        ]
+    )
+    if refs:
+        merged["required_read_paths"] = refs
+
+
+def _item_manifest_required_read_paths(value: object) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    return _string_list(value.get("required_read_paths"))
+
+
+def _shared_directive_pack_paths(value: object) -> list[str]:
+    packs = _context_pack_list(value)
+    paths: list[str] = []
+    for pack in packs:
+        role = str(pack.get("role") or pack.get("kind") or "").strip().lower()
+        if role not in _SHARED_DIRECTIVE_ROLES:
+            continue
+        paths.extend(_string_list(pack.get("path") or pack.get("ref")))
+    return paths
+
+
+def _existing_goal_file_refs(goal: str, *, output_refs: list[str]) -> list[str]:
+    refs = []
+    for ref in _file_refs_from_value(goal):
+        normalized = _normalize_file_ref(ref)
+        if not normalized or _ref_matches_any_output(normalized, output_refs):
+            continue
+        if _ref_exists_now(normalized):
+            refs.append(normalized)
+    return refs
+
+
+def _context_pack_list(value: object) -> list[dict[str, object]]:
+    if isinstance(value, dict):
+        return [dict(value)]
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _merge_refs(groups: list[list[str]]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group:
+            _append_merged_ref(merged, seen, item)
+    return merged
+
+
+def _append_merged_ref(merged: list[str], seen: set[str], item: object) -> None:
+    normalized = _normalize_file_ref(item)
+    if not normalized or normalized in seen:
+        return
+    seen.add(normalized)
+    merged.append(normalized)
+
+
+def _ref_exists_now(ref: str) -> bool:
+    path = Path(ref).expanduser()
+    if path.is_absolute():
+        return path.exists()
+    return Path(ref).exists()
+
+
+def _ref_matches_any_output(ref: str, output_refs: list[str]) -> bool:
+    return any(_path_ref_matches(ref, output_ref) for output_ref in output_refs)
+
+
+def _path_ref_matches(left: str, right: str) -> bool:
+    left_text = str(left or "").strip().replace("\\", "/")
+    right_text = str(right or "").strip().replace("\\", "/")
+    if not left_text or not right_text:
+        return False
     return (
-        "create_subagents 只能创建直接小傻妞。"
-        "请先创建上一层小傻妞/coordinator，再由它调用 schedule_child_subagents 创建小小傻妞/孙代理。"
+        left_text == right_text
+        or left_text.endswith("/" + right_text)
+        or right_text.endswith("/" + left_text)
     )
 
 

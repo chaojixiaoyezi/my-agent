@@ -27,7 +27,7 @@ class OfflineToolValidation:
 def validate_tool_events(
     events: tuple[dict[str, Any], ...],
     *,
-    repeated_threshold: int = 3,
+    repeated_threshold: int = 10,
 ) -> OfflineToolValidation:
     findings: list[dict[str, object]] = []
     _validate_tool_result_shapes(events, findings)
@@ -110,8 +110,8 @@ def _validate_secret_fields(
         findings.append(_finding("TOOL_RESULT_SECRET_LEAK", {"index": index, "field_path": field_path}))
 
 
-# LLM: _validate_repeated_no_progress blocks identical read-only tool/result loops.
-# 函数用途: 连续同 tool、args_hash、result_hash 且 read_only=true 达阈值时返回重复无进展 finding。
+# LLM: _validate_repeated_no_progress flags identical read-only tool/result loops.
+# 函数用途: 连续同 tool、args_hash、result_hash 且 read_only=true 达阈值时返回统一 tool guardrail finding。
 def _validate_repeated_no_progress(
     events: tuple[dict[str, Any], ...],
     threshold: int,
@@ -134,7 +134,7 @@ def _validate_repeated_no_progress(
             reported_keys.add(key)
             findings.append(
                 _finding(
-                    "TOOL_REPEATED_NO_PROGRESS",
+                    "TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED",
                     {
                         "index": index,
                         "tool": key[0],
