@@ -163,7 +163,7 @@ class TestNormalizeSubagentAgentConfig:
         """验证默认子代理配置不让用户预判工具和工作流，只保留宽松数量上限。"""
         normalized, warnings = normalize_agent_config({})
         assert warnings == []
-        assert normalized["max_subagents"] == 1000
+        assert normalized["max_subagents"] == 50
         assert normalized["subagent_allowed_tools"] == []
         assert normalized["subagent_role_template_dirs"] == []
         assert normalized["subagent_mode"] == "trusted_local_hardening"
@@ -175,8 +175,8 @@ class TestNormalizeSubagentAgentConfig:
         assert normalized["subagent_mode"] == "trusted_local_hardening"
         assert any("subagent_mode" in warning for warning in warnings)
 
-    def test_default_config_exposes_fewer_than_ten_subagent_user_knobs(self):
-        """验证默认配置不再暴露大量子代理微调参数，避免用户被奇葩参数拖住。"""
+    def test_default_config_exposes_only_user_facing_subagent_knobs(self):
+        """验证默认配置只暴露用户能理解的子代理开关和记忆策略。"""
         config_path = Path(__file__).parents[1] / "config" / "agent_config.yaml"
         visible = load_simple_yaml(config_path)
         exposed = {
@@ -195,6 +195,9 @@ class TestNormalizeSubagentAgentConfig:
             "enable_subagents",
             "subagent_mode",
             "subagent_debug_trace_level",
+            "subagent_memory_retention_policy",
+            "subagent_memory_delete_after_days",
+            "subagent_destroy_summary_required",
             "max_subagents",
             "subagent_workspace",
             "subagent_role_template_dirs",

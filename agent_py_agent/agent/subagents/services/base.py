@@ -14,10 +14,19 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from ..effective_permissions import effective_permission_snapshot
+from ..models import SubAgentTask
 from .collaboration_registry import register_collaboration_agent_capability
+from .inheritance_manifest import build_inheritance_manifest
+from .output_ref_rebinding import rebind_task_output_refs_to_run
+from .persistence_model_normalizers import (
+    _normalize_context_manifest,
+    _normalize_context_packs,
+    _normalize_quality_contract,
+)
 
 if TYPE_CHECKING:
-    from ..models import ContextManifest, QualityContract, SubAgentCard, SubAgentTask
+    from ..models import ContextManifest, QualityContract, SubAgentCard
 
 
 # LLM: CreateRunParams 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -47,6 +56,10 @@ class CreateRunParams:
     workflow_mode: str = "off"
     normalize_role: bool = True
     attributes: dict[str, object] | None = None
+    parent_access_mode: str = ""
+    memory_retention_policy: str = "parent_review_or_cleanup"
+    memory_delete_after_days: int = 0
+    destroy_summary_required: bool = True
 
 
 # LLM: _load_parent_task keeps inheritance manifest creation best-effort and non-blocking.
@@ -82,6 +95,50 @@ def _create_run_route_attrs(params: CreateRunParams) -> dict[str, object]:
         "explicit_template_id": str(attrs.get("workflow_template_id") or "").strip(),
         "workflow_task_type": str(attrs.get("workflow_task_type") or "").strip(),
         "workflow_risk_tags": attrs.get("workflow_risk_tags"),
+    }
+
+
+# LLM: _memory_retention_policy keeps retention policy open-world and non-blocking.
+# 函数用途: 读取配置/创建参数里的策略名，空值回退默认策略。
+def _memory_retention_policy(value: object) -> str:
+    text = str(value or "").strip()
+    return text or "parent_review_or_cleanup"
+
+
+# LLM: _nonnegative_int normalizes optional retention day counts.
+# 函数用途: 将配置/参数转成非负整数，无法解析时返回 0。
+def _nonnegative_int(value: object) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
+
+
+# LLM: _apply_runtime_identity_and_memory_scope writes system-derived run identity facts.
+# 函数用途: 给子代理设置 root/conversation/memory namespace，并写入 memory_scope 账本。
+def _apply_runtime_identity_and_memory_scope(task: Any, params: CreateRunParams) -> None:
+    task.runtime_identity.root_run_id = task.root_id or task.id
+    task.runtime_identity.conversation_id = task.root_subagent_session_id or task.subagent_session_id
+    task.runtime_identity.memory_namespace = f"subagent:{task.root_id or task.id}:{task.id}"
+    task.runtime_identity.conversation_memory_policy = "task_scoped"
+    task.runtime_identity.promotion_policy = "explicit_parent_review"
+    task.attributes = {
+        **dict(task.attributes or {}),
+        "memory_scope": _memory_scope(task, params),
+    }
+
+
+# LLM: _memory_scope is the task-local memory retention record for one subagent.
+# 函数用途: 生成子代理任务级记忆策略，不授予长期记忆写入权限。
+def _memory_scope(task: Any, params: CreateRunParams) -> dict[str, object]:
+    return {
+        "schema_version": "subagent_memory_scope.v1",
+        "namespace": task.runtime_identity.memory_namespace,
+        "retention_policy": _memory_retention_policy(params.memory_retention_policy),
+        "delete_after_days": _nonnegative_int(params.memory_delete_after_days),
+        "destroy_summary_required": bool(params.destroy_summary_required),
+        "auto_promote_to_parent_memory": False,
     }
 
 
@@ -203,15 +260,6 @@ class SubAgentBaseService:
     # 函数用途: 构建任务所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def _build_task(self, params: CreateRunParams, prepared: dict[str, object]) -> SubAgentTask:
         """Build SubAgentTask from params and prepared context."""
-        from ..models import SubAgentTask
-        from ..services.inheritance_manifest import build_inheritance_manifest
-        from ..services.output_ref_rebinding import rebind_task_output_refs_to_run
-        from ..services.persistence_model_normalizers import (
-            _normalize_context_manifest,
-            _normalize_context_packs,
-            _normalize_quality_contract,
-        )
-
         run_id = prepared["run_id"]
         now = prepared["now"]
         workflow_plan_dict = prepared["workflow_plan_dict"]
@@ -237,6 +285,10 @@ class SubAgentBaseService:
             quality_contract=_normalize_quality_contract(params.quality_contract),
             context_manifest=_normalize_context_manifest(params.context_manifest),
             context_packs=_normalize_context_packs(params.context_packs),
+            effective_permissions=effective_permission_snapshot(
+                parent_task=parent_task,
+                parent_access_mode=params.parent_access_mode,
+            ),
             created_at=now,
             updated_at=now,
             heartbeat_at=now,
@@ -246,6 +298,7 @@ class SubAgentBaseService:
             attributes=dict(params.attributes or {}),
             **prepared["paths"],
         )
+        _apply_runtime_identity_and_memory_scope(task, params)
         task.inheritance_manifest = build_inheritance_manifest(parent_task, task)
         # LLM: Bind self-output refs after run_id exists so models cannot persist guessed sibling ids.
         rebind_task_output_refs_to_run(task)

@@ -2,6 +2,20 @@
 
 > 2026-05-27 当前路线备注：早期条目里提到的 `orchestration_contract`、`materialize_subagent_inputs`、`subagent_dispatch_closeout`、`parent_acceptance` 专项收口、`scheduling_warnings`、领域/重复目标调度提示等，都是历史试错记录。当前生产路线是：调度工具只返回 refs/tree/status，普通协作不靠中间验收门卡住；最终质量统一回到 closeout 和任务树事实。
 
+## 2026-05-27 / 子代理权限、基础工具和任务级记忆
+
+状态：本地已落地，focused tests 已跑；未提交
+
+摘要：
+- 子代理有效权限现在由系统从父级权限派生，落到 `effective_permissions` 和执行上下文 `write_boundary.shell_access_mode`。父级 `full-access` 不会直接下放给子代理，子代理最多 `workspace-write`；父级 `restricted` 时子代理也保持 `restricted`。
+- `run_command` 会读取系统注入的 `__access_mode`，模型自己在参数里写更大权限不会放大执行权限。
+- 默认基础工具不再因为缺少 `tool_preset` 或写了 `tool_preset=none` 变空；子代理默认有读、列、搜、读 artifact、联网检索、写文件、打补丁、受控命令、协作和能力申请工具。
+- 子代理任务记忆命名空间固定为 `subagent:{root_run_id}:{run_id}`，并写入 `attributes.memory_scope`。保留策略来自配置：`subagent_memory_retention_policy`、`subagent_memory_delete_after_days`、`subagent_destroy_summary_required`；这些是账本/清理边界，不是新硬门。
+
+验证：
+- `python3 -m pytest agent_py_agent/tests/test_config_validation.py::test_subagent_memory_policy_config_is_normalized_without_closed_enum agent_py_agent/tests/test_orchestration_create_subagents_tool.py::TestCreateSubagentsToolTemplatePolicy::test_default_tools_use_role_template_policy agent_py_agent/tests/test_subagent_persistence_service.py::test_subagent_memory_scope_uses_create_params_policy -q`
+- `python3 -m pytest agent_py_agent/tests/test_subagent_persistence_service.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_orchestration_tool_constants.py agent_py_agent/tests/test_tooling_shell.py agent_py_agent/tests/test_tool_gateway_contract.py agent_py_agent/tests/test_subagent_mixin.py agent_py_agent/tests/test_subagent_spawn_role_seed.py -q`
+
 ## 2026-05-27 / create_subagents 后台启动与三层状态树
 
 状态：本地已落地，focused tests 已跑；未提交

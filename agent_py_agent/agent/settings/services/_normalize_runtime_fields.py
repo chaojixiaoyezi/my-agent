@@ -316,9 +316,22 @@ class SubagentAdvancedFieldsService:
                 ("dynamic_timeout_max", 60, None),
                 ("max_auto_split_depth", 0, None),
                 ("max_auto_retry_attempts", 1, 10),
+                ("subagent_memory_delete_after_days", 0, None),
             ),
         )
-        warnings.extend(_apply_bool_fields(out, defaults, ("result_check_execute_tests", "closeout_for_all_task_nodes")))
+        warnings.extend(_apply_bool_fields(
+            out,
+            defaults,
+            (
+                "result_check_execute_tests",
+                "closeout_for_all_task_nodes",
+                "subagent_destroy_summary_required",
+            ),
+        ))
+        retention_policy = _string_config_value(
+            out.get("subagent_memory_retention_policy", defaults.subagent_memory_retention_policy)
+        ).strip()
+        out["subagent_memory_retention_policy"] = retention_policy or defaults.subagent_memory_retention_policy
         value, warn = CoercionService.coerce_float(
             "dynamic_timeout_safety_margin", out.get("dynamic_timeout_safety_margin"),
             defaults.dynamic_timeout_safety_margin, min_val=1.0, max_val=10.0,

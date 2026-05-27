@@ -389,6 +389,29 @@ class TestDispatchSubagentsToolRunnerContext:
         assert call_kwargs["params"].parent_run_id == "subagent-root"
         assert call_kwargs["params"].exclude_run_ids == ["subagent-root"]
 
+    def test_runner_context_dispatch_ignores_explicit_sibling_parent_scope(self):
+        """runner 内 dispatch 不能用显式 parent_run_id 跳到平行子树。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        mock_report = MagicMock()
+        mock_report.dry_run = False
+        mock_report.summary = {"runner": 1}
+        mock_report.records = []
+
+        mock_agent = MagicMock()
+        mock_agent._current_subagent_run_id = "current-child"
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent.tools.specs.return_value = []
+        mock_agent.dispatch_subagents.return_value = mock_report
+        mock_agent.subagents.workspace = Path("/tmp/workspace")
+
+        result = DispatchSubagentsTool(mock_agent).execute({"parent_run_id": "sibling-parent"})
+
+        assert result.ok is True
+        params = mock_agent.dispatch_subagents.call_args.kwargs["params"]
+        assert params.parent_run_id == "current-child"
+        assert params.exclude_run_ids == ["current-child"]
+
     def test_execute_limit_aliases_runner_count_when_max_runners_missing(self):
         """真实执行时，模型只写 limit 也应按 runner 数量推进，避免误退回单线程。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool

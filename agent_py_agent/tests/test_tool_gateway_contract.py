@@ -14,7 +14,7 @@ from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryPara
 
 # LLM: _registry keeps gateway contract tests independent from the larger parser suite.
 # 函数用途: 创建可配置 shell 输出上限的工具注册表，方便验证网关行为。
-def _registry(root: Path, *, shell_output_max_chars: int = 80) -> ToolRegistry:
+def _registry(root: Path, *, shell_output_max_chars: int = 80, access_mode: str = "workspace-write") -> ToolRegistry:
     return ToolRegistry(
         ToolRegistryParams(
             workspace_root=root,
@@ -28,6 +28,7 @@ def _registry(root: Path, *, shell_output_max_chars: int = 80) -> ToolRegistry:
             vector_search_enabled=False,
             shell_tool_timeout=30,
             shell_tool_output_max_chars=shell_output_max_chars,
+            access_mode=access_mode,
         )
     )
 
@@ -91,6 +92,28 @@ def test_run_command_output_is_bounded_by_gateway_budget(tmp_path: Path):
     assert "stdout_truncated=True" in result.output
     assert "stdout_chars=201" in result.output
     assert "A" * 80 not in result.output
+
+
+# LLM: Subagent shell boundary should keep run_command inside runtime workspace checks.
+# 函数用途: 验证子代理 write_boundary 下的 run_command 不会绕过工具网关的工作区边界。
+def test_run_command_honors_shell_access_mode_from_write_boundary(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    external = tmp_path / "external"
+    workspace.mkdir()
+    external.mkdir()
+    registry = _registry(workspace, access_mode="full-access")
+
+    result = registry.execute_call(
+        {
+            "tool": "run_command",
+            "command": "pwd",
+            "working_dir": str(external),
+        },
+        write_boundary={"shell_access_mode": "workspace-write"},
+    )
+
+    assert result.ok is False
+    assert "PATH_WORKSPACE_ESCAPE_BLOCKED" in result.output
 
 
 # LLM: read_artifact aliases keep artifact refs machine-shaped when models say ref/path/call_id.

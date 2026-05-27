@@ -1,6 +1,4 @@
 [
-  "agent_py_agent/agent/agent_core/agent_tree_status.py:141:_first_remembered_run_id",
-  "agent_py_agent/agent/agent_core/agent_tree_status.py:149:_empty_snapshot",
   "agent_py_agent/agent/agent_core/delivery_closeout_config.py:63:_non_negative_int",
   "agent_py_agent/agent/agent_core/delivery_closeout_config.py:71:_resolve_config_path",
   "agent_py_agent/agent/agent_core/delivery_closeout_config.py:80:_read_config_data",
@@ -791,7 +789,6 @@
   "agent_py_agent/agent/subagents/parsing_evidence_refs.py:39:_packet_ref_keys",
   "agent_py_agent/agent/subagents/parsing_evidence_refs.py:49:_top_level_refs_packet_id",
   "agent_py_agent/agent/subagents/parsing_evidence_refs.py:9:evidence_packets_with_top_level_refs",
-  "agent_py_agent/agent/subagents/runner_rendering.py:118:_string_list",
   "agent_py_agent/agent/subagents/runner_rendering_context_packs.py:19:_render_context_pack_item_lines",
   "agent_py_agent/agent/subagents/runner_rendering_context_packs.py:33:_render_context_pack_extra_lines",
   "agent_py_agent/agent/subagents/runner_rendering_context_packs.py:48:_render_context_pack_list",

@@ -29,6 +29,7 @@ def build_inheritance_manifest(parent: SubAgentTask | None, child: SubAgentTask)
     buckets = (inherited, overridden, dropped)
     _compare_object_field(parent, child, "quality_contract", buckets)
     _compare_object_field(parent, child, "context_manifest", buckets)
+    _compare_object_field(parent, child, "effective_permissions", buckets)
     return InheritanceManifest(
         source_run_id=parent.id,
         target_run_id=child.id,

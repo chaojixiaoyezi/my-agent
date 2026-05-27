@@ -275,6 +275,9 @@ Task Context Pack、Role Context Pack，并按 sampling_plan 抽查后半段和 
 - `subagent_workspace`: 子代理运行记录目录。
 - `subagent_role_template_dirs`: 额外角色模板目录；空列表表示内置模板 + 工作区模板。
 - `subagent_debug_trace_level`: 0-5 调试追踪等级，默认关闭。
+- `subagent_memory_retention_policy`: 子代理任务记忆保留策略名，默认 `parent_review_or_cleanup`；允许自定义策略名，避免把后续清理方式写死成封闭枚举。
+- `subagent_memory_delete_after_days`: 子代理任务记忆按天清理的预留参数，`0` 表示不按天自动删除。
+- `subagent_destroy_summary_required`: 子代理归档/销毁前是否要求留下最终总结事实，默认开启。
 - `result_check_execute_tests` / `result_check_timeout_seconds`: 最终收口是否真实执行测试，以及单条测试超时。
 
 其他更细的质量模式、上下文预算、QA 拓扑、修复轮数和调度细节先由系统内部策略/LLM 判断，不再作为普通用户默认配置项。需要面向企业/外部用户暴露时，再通过 workflow 或高阶 profile 统一打开，而不是继续堆几十个微参数。

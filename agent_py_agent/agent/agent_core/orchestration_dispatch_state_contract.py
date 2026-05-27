@@ -174,6 +174,8 @@ def _run_id(task: object) -> str:
     return str(getattr(task, "id", "") or "").strip()
 
 
+# LLM: _background_start_running treats just-launched children as active for current-turn state.
+# 函数用途: 根据 task.attributes.background_start 判断 PLANNING/PENDING run 是否正在后台启动。
 def _background_start_running(task: object, status: str) -> bool:
     attrs = getattr(task, "attributes", {}) or {}
     if not isinstance(attrs, dict) or status not in {"PLANNING", "PENDING"}:

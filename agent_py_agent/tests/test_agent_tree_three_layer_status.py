@@ -50,3 +50,31 @@ def test_agent_tree_node_exposes_liveness_progress_and_evidence_layers():
     assert node["evidence_layer"]["artifact_refs"] == ["/tmp/out.xlsx"]
     assert node["needs_capability"] == ["capability_request", "capability_gap"]
     assert node["recent_tool_trace"] == [{"tool": "web_search", "ok": True, "summary": "查到候选资料"}]
+
+
+def test_subagent_runner_can_only_inspect_own_subtree_even_with_root_params():
+    """子代理只读查树时，即使传 root_id，也应被限制到自己的子树。"""
+
+    class _Manager:
+        seen_query = None
+
+        def kernel_snapshot(self, query):
+            self.seen_query = query
+            return SubagentKernelSnapshot(
+                schema_version="subagent_kernel_snapshot.v1",
+                root_id="root-1",
+                scope=query.scope,
+                runs=[SubagentKernelRun(run_id="child-1", parent_run_id="root-1")],
+            )
+
+    class _Agent:
+        _current_subagent_run_id = "child-1"
+        subagents = _Manager()
+
+    payload = agent_tree_status_payload(_Agent(), {"root_id": "root-1", "scope": "root_tree"})
+
+    query = _Agent.subagents.seen_query
+    assert query.run_id == "child-1"
+    assert query.root_id == ""
+    assert query.scope == "own_subtree"
+    assert payload["scope"] == "own_subtree"

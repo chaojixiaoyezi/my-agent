@@ -36,8 +36,9 @@ def completion_response_after_tool_round(
 ) -> ModelResponse | None:
     if request.subagent_output_written:
         return subagent_output_json_response(request.agent, request.response)
-    if progress_response := subagent_progress_closeout_response(request.agent, request.response):
-        return progress_response
+    if _is_task_local_round(request):
+        if progress_response := subagent_progress_closeout_response(request.agent, request.response):
+            return progress_response
     if _round_submitted_for_acceptance(request):
         if delivery_response := main_agent_delivery_closeout_response(
             MainAgentDeliveryCloseoutRequest(
@@ -56,3 +57,9 @@ def _round_submitted_for_acceptance(request: ToolRoundCompletionRequest) -> bool
     executed = list(getattr(request.params, "executed_tools", []) or [])
     current_round = executed[request.before_executed_count :]
     return "submit_for_acceptance" in current_round
+
+
+# LLM: _is_task_local_round prevents child-run closeout from leaking into the parent response.
+# 函数用途: 只有子代理 runner 的 task_local 工具轮能使用 task-local progress 自动收口。
+def _is_task_local_round(request: ToolRoundCompletionRequest) -> bool:
+    return str(getattr(request.params, "context_scope", "") or "").strip().lower() == "task_local"

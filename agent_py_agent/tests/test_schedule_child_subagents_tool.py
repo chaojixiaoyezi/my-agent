@@ -40,6 +40,50 @@ def test_runner_context_schedule_bare_lineage_name_returns_payload_not_index_err
     assert agent.subagents.load(payload["created_run_ids"][0]).agent_name == "小小傻妞-coordinator-1"
 
 
+def test_runner_context_schedule_auto_starts_created_children(tmp_path, monkeypatch):
+    """runner 内创建下一层后应像 create_subagents 一样后台启动，并返回状态。"""
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
+    agent._current_subagent_run_id = root.id
+    launched: list[str] = []
+
+    def fake_start(_agent, run_ids):
+        launched.extend(run_ids)
+        return {"status": "started", "dispatch_mode": "background", "run_ids": list(run_ids)}
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.orchestration_background_dispatch._start_background_dispatch",
+        fake_start,
+    )
+
+    result = ScheduleChildSubagentsTool(agent).execute({
+        "children": [{"goal": "查一份文件并写结果", "role": "worker", "agent_name": "reader"}]
+    })
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["created_run_ids"]
+    assert launched == payload["created_run_ids"]
+    assert payload["auto_start"]["status"] == "started"
+    assert payload["auto_start"]["run_ids"] == payload["created_run_ids"]
+
+
+def test_auto_start_dispatch_keeps_current_runner_parent_scope(tmp_path):
+    """后台启动参数要保留当前 runner 作用域，避免越过父子边界。"""
+    from agent_py_agent.agent.agent_core.orchestration_background_dispatch import (
+        _auto_start_dispatch_args,
+    )
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
+    agent._current_subagent_run_id = root.id
+
+    _, _, params = _auto_start_dispatch_args(agent, ["child-run"])
+
+    assert params.parent_run_id == root.id
+    assert params.include_run_ids == ["child-run"]
+
+
 # LLM: schedule_child_subagents without children can return LLM advice instead of forcing a fixed flow.
 # 函数用途: worker 已可测试但模型还没决定 QA 波次时，工具返回 quality_advice，让 LLM 选择 tester/bug_finder。
 def test_runner_context_schedule_without_children_returns_quality_advice(tmp_path):

@@ -51,6 +51,14 @@ def create_run_params(
         context_packs=create_context_packs(raw_params),
         workflow_mode=workflow_mode,
         attributes=_create_attributes(raw_params, agent),
+        parent_access_mode=_config_access_mode(agent),
+        memory_retention_policy=_config_string(
+            agent,
+            "subagent_memory_retention_policy",
+            "parent_review_or_cleanup",
+        ),
+        memory_delete_after_days=_config_int(agent, "subagent_memory_delete_after_days", 0),
+        destroy_summary_required=_config_bool(agent, "subagent_destroy_summary_required", True),
     )
 
 
@@ -67,6 +75,47 @@ def _role_from_create_intent(raw_params: dict[str, object], goal: str, agent) ->
     if role == "worker" and _has_child_dispatch_tool(raw_params) and not _role_identity_is_quality(raw_params):
         return "coordinator"
     return role
+
+
+# LLM: MagicMock or missing config values must not become persisted access modes.
+# 函数用途: 只从真实字符串配置读取 access_mode，其他情况交给子代理权限派生默认值。
+def _config_access_mode(agent) -> str:
+    value = getattr(getattr(agent, "config", None), "access_mode", "")
+    return str(value).strip() if isinstance(value, str) else ""
+
+
+# LLM: _config_string reads optional config strings without persisting test doubles.
+# 函数用途: 只接受真实字符串，缺失或空值回退默认值。
+def _config_string(agent, key: str, default: str) -> str:
+    value = getattr(getattr(agent, "config", None), key, default)
+    text = str(value).strip() if isinstance(value, str) else ""
+    return text or default
+
+
+# LLM: _config_int reads optional non-negative config integers.
+# 函数用途: 将配置值转成非负整数，无法解析时回退默认值。
+def _config_int(agent, key: str, default: int) -> int:
+    value = getattr(getattr(agent, "config", None), key, default)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0, parsed)
+
+
+# LLM: _config_bool reads optional config booleans from bool or common strings.
+# 函数用途: 支持 true/false 字符串，其他类型回退默认值。
+def _config_bool(agent, key: str, default: bool) -> bool:
+    value = getattr(getattr(agent, "config", None), key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return default
 
 
 # LLM: _has_child_dispatch_tool treats explicit tool grants as role intent, not prose.

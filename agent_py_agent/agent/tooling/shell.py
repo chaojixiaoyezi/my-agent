@@ -22,6 +22,7 @@ _MAX_COMMAND_CHARS = 2000
 _DEFAULT_MAX_OUTPUT_CHARS = 12_000
 _DEFAULT_ACCESS_MODE = "workspace-write"
 _ACCESS_MODES = frozenset({"restricted", "workspace-write", "full-access"})
+_ACCESS_MODE_RANK = {"restricted": 0, "workspace-write": 1, "full-access": 2}
 _TOOL_DEADLINE_UNIX_ENV = "MY_AGENT_TOOL_DEADLINE_UNIX"
 _TOOL_DEADLINE_MARGIN_SECONDS_ENV = "MY_AGENT_TOOL_DEADLINE_MARGIN_SECONDS"
 
@@ -101,6 +102,19 @@ def _float_env(name: str) -> float:
 def _normalize_access_mode(access_mode: str) -> str:
     mode = str(access_mode or "").strip().lower().replace("_", "-")
     return mode if mode in _ACCESS_MODES else _DEFAULT_ACCESS_MODE
+
+
+# LLM: Shell access overrides can only narrow the tool's configured mode.
+# 函数用途: 子代理执行上下文可把父级 full-access 降为 workspace-write，但不能反向提权。
+def _effective_access_mode(configured: str, override: object = "") -> str:
+    configured_mode = _normalize_access_mode(configured)
+    override_text = str(override or "").strip()
+    if not override_text:
+        return configured_mode
+    override_mode = _normalize_access_mode(override_text)
+    if _ACCESS_MODE_RANK[override_mode] < _ACCESS_MODE_RANK[configured_mode]:
+        return override_mode
+    return configured_mode
 
 
 # LLM: _path_inside_any_root is the shell cwd boundary for workspace modes.
@@ -269,15 +283,16 @@ class ShellTool(BaseTool):
                 "TOOL_DEADLINE_EXCEEDED: 外层任务剩余时间不足，系统没有启动新的 shell 命令。",
                 error_code="TOOL_TIMEOUT",
             )
+        effective_access_mode = _effective_access_mode(self.access_mode, params.get("__access_mode"))
         target = _working_dir_from_params(
             params,
             self.workspace_root,
             workspace_roots=self.workspace_roots,
-            access_mode=self.access_mode,
+            access_mode=effective_access_mode,
         )
         if isinstance(target, ToolExecutionResult):
             return target
-        delete_error = delete_target_access_error(command, target, self.workspace_roots, self.access_mode)
+        delete_error = delete_target_access_error(command, target, self.workspace_roots, effective_access_mode)
         if delete_error:
             return ToolExecutionResult(self.spec.name, False, delete_error, error_code="PATH_OUTSIDE_WORKSPACE")
         try:

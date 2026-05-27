@@ -10,23 +10,18 @@ from __future__ import annotations
 """
 
 import json
-import threading
-import time
 from typing import TYPE_CHECKING
 
-from ..capabilities import CapabilityRouter
 from ..subagents.services.base import CreateRunParams
 from ..tools import BaseTool, ToolExecutionResult
-from .agent_tree_status import agent_tree_status_payload
-from .dispatch_params import DispatchParams
 from .hierarchy_tools import ScheduleChildSubagentsTool as ScheduleChildSubagentsTool
+from .orchestration_background_dispatch import auto_start_tasks
 from .orchestration_create_constraints import (
     delegation_constraint_conflict_error,
     explicit_root_missing_write_root_error,
 )
 from .orchestration_create_idempotency import (
     CreateTaskResolution,
-    dispatchable_tasks,
     resolve_create_run,
 )
 from .orchestration_create_items import (
@@ -38,7 +33,6 @@ from .orchestration_create_policy import (
     create_run_params,
 )
 from .orchestration_dispatch_tool import DispatchSubagentsTool
-from .orchestration_dispatch_tool_helpers import _dispatch_capability_config
 from .orchestration_event_tools import RaiseMainEventTool as RaiseMainEventTool
 from .orchestration_event_tools import RaiseObservationTool as RaiseObservationTool
 from .orchestration_lineage_names import indexed_count_params, indexed_item_params
@@ -57,7 +51,7 @@ from .orchestration_tool_grants import (
 from .orchestration_tool_specs import build_create_subagents_spec
 from .orchestration_workflow_mode import tool_workflow_mode as _tool_workflow_mode
 from .orchestration_write_guard import ExternalWriteTargetRequest, external_write_target_error
-from .parameters import _bool_param, _positive_int
+from .parameters import _positive_int
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -93,7 +87,7 @@ class CreateSubagentsTool(BaseTool):
         attach_sibling_roster(self.agent.subagents, tasks)
         _bind_created_tasks_to_conversation(self.agent, tasks)
         remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
-        auto_start = _auto_start_tasks(self.agent, tasks, params)
+        auto_start = auto_start_tasks(self.agent, tasks, params)
         payload = create_subagents_payload(
             CreateSubagentsPayloadInput(
                 agent=self.agent,
@@ -159,7 +153,7 @@ class CreateSubagentsTool(BaseTool):
         _bind_created_tasks_to_conversation(self.agent, tasks)
         remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
         payload_request = self._items_payload_request(request_params, capped)
-        auto_start = _auto_start_tasks(self.agent, tasks, payload_request)
+        auto_start = auto_start_tasks(self.agent, tasks, payload_request)
         payload = create_subagents_payload(
             CreateSubagentsPayloadInput(
                 agent=self.agent,
@@ -283,159 +277,6 @@ def _payload_allowed_tools(values: list[list[str] | None]) -> list[str] | str | 
     if all(value == first for value in values):
         return first
     return "per_item"
-
-
-# LLM: _auto_start_tasks makes create_subagents mean "create and start" unless defer_start is explicit.
-# 函数用途: 创建子代理后立即启动可运行 run；defer_start=true 时才只建记录，避免父代理忘记再调度。
-def _auto_start_tasks(agent, tasks: list, request_params: dict[str, object]) -> dict[str, object]:
-    skipped_run_ids = [_safe_task_id(task) for task in tasks if _safe_task_id(task)]
-    dispatchable = dispatchable_tasks(tasks)
-    run_ids = [_safe_task_id(task) for task in dispatchable if _safe_task_id(task)]
-    if not run_ids:
-        return {"status": "not_needed", "run_ids": [], "skipped_run_ids": skipped_run_ids}
-    if _bool_param(request_params.get("defer_start"), default=False):
-        return {"status": "deferred", "run_ids": run_ids, "reason": "defer_start=true"}
-    dispatcher = getattr(agent, "dispatch_subagents", None)
-    if not callable(dispatcher):
-        return {"status": "unavailable", "run_ids": run_ids, "reason": "agent has no dispatch_subagents"}
-    try:
-        return _start_background_dispatch(agent, run_ids)
-    except Exception as exc:
-        return {"status": "failed", "run_ids": run_ids, "error": f"{type(exc).__name__}: {exc}"}
-
-
-# LLM: _start_background_dispatch launches children without making the parent wait for completion.
-# 函数用途: create_subagents 默认创建并后台启动 run，立即返回 run_id/tree/status；真实执行结果后续从 inspect_agent_tree 读取。
-def _start_background_dispatch(agent, run_ids: list[str]) -> dict[str, object]:
-    launch_id = f"subagent-start-{time.time_ns()}"
-    _mark_background_start(agent, run_ids, launch_id, status="launching")
-    router, cfg, dispatch_params = _auto_start_dispatch_args(agent, run_ids)
-    thread = threading.Thread(
-        target=_background_dispatch_worker,
-        name=f"my-agent-{launch_id}",
-        args=(agent, run_ids, launch_id, router, cfg, dispatch_params),
-        daemon=True,
-    )
-    _remember_background_dispatch(agent, launch_id, run_ids, thread.name)
-    thread.start()
-    return {
-        "status": "started",
-        "dispatch_mode": "background",
-        "run_ids": run_ids,
-        "launch_id": launch_id,
-        "thread_name": thread.name,
-        "summary": "subagent dispatch launched in background; parent should inspect agent tree for progress",
-        "agent_tree": _safe_agent_tree(agent),
-    }
-
-
-# LLM: _background_dispatch_worker contains the only async side effect for create-time autostart.
-# 函数用途: 后台调用原 dispatch_subagents；失败时只记录状态，不能把父代理工具调用卡死。
-def _background_dispatch_worker(agent, run_ids: list[str], launch_id: str, router, cfg, dispatch_params: DispatchParams) -> None:
-    try:
-        _mark_background_start(agent, run_ids, launch_id, status="running")
-        report = agent.dispatch_subagents(router, cfg, params=dispatch_params)
-    except Exception as exc:
-        _mark_background_start(agent, run_ids, launch_id, status="failed", error=f"{type(exc).__name__}: {exc}")
-        _remember_background_result(agent, launch_id, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
-        return
-    _mark_background_start(agent, run_ids, launch_id, status="finished")
-    _remember_background_result(agent, launch_id, _auto_start_report(run_ids, report))
-
-
-def _mark_background_start(agent, run_ids: list[str], launch_id: str, *, status: str, error: str = "") -> None:
-    now = time.time()
-    manager = getattr(agent, "subagents", None)
-    for run_id in run_ids:
-        try:
-            task = manager.load(run_id)
-        except Exception:
-            continue
-        if getattr(task, "id", "") != run_id:
-            continue
-        attrs = dict(getattr(task, "attributes", {}) or {})
-        attrs["background_start"] = {
-            "launch_id": launch_id,
-            "status": status,
-            "updated_at": now,
-            "error": error,
-        }
-        task.attributes = attrs
-        try:
-            manager.save(task)
-        except Exception:
-            continue
-
-
-def _remember_background_dispatch(agent, launch_id: str, run_ids: list[str], thread_name: str) -> None:
-    registry = getattr(agent, "_background_subagent_dispatches", None)
-    if not isinstance(registry, dict):
-        registry = {}
-        agent._background_subagent_dispatches = registry
-    registry[launch_id] = {
-        "run_ids": list(run_ids),
-        "thread_name": thread_name,
-        "status": "running",
-        "started_at": time.time(),
-    }
-
-
-def _remember_background_result(agent, launch_id: str, result: dict[str, object]) -> None:
-    registry = getattr(agent, "_background_subagent_dispatches", None)
-    if not isinstance(registry, dict):
-        return
-    item = dict(registry.get(launch_id) or {})
-    item.update({"status": "finished" if result.get("ok", True) else "failed", "result": result, "finished_at": time.time()})
-    registry[launch_id] = item
-
-
-def _safe_agent_tree(agent) -> dict[str, object]:
-    try:
-        return agent_tree_status_payload(agent, {"scope": "root_tree"})
-    except Exception as exc:
-        return {"schema_version": "agent_tree_status.v1", "warnings": [f"agent_tree_unavailable:{type(exc).__name__}"]}
-
-
-# LLM: _auto_start_dispatch_args builds the dispatch call for create-time auto-start.
-# 函数用途: 生成 router、capability config 和 DispatchParams，避免 _auto_start_tasks 膨胀。
-def _auto_start_dispatch_args(agent, run_ids: list[str]) -> tuple[object, object, DispatchParams]:
-    cfg = _dispatch_capability_config(agent)
-    tool_specs = [spec for spec in agent.tools.specs() if getattr(spec, "category", "") != "orchestration"]
-    router = CapabilityRouter(config=cfg, tool_specs=tool_specs)
-    params = DispatchParams(
-        apply=True,
-        execute_runners=True,
-        workflow_mode="off",
-        max_runners=len(run_ids),
-        limit=max(20, len(run_ids)),
-        reviewer="create-subagents-auto-start",
-        note="auto-start after create_subagents",
-        include_run_ids=run_ids,
-    )
-    return router, cfg, params
-
-
-# LLM: _auto_start_report normalizes dispatch reports from real agents and MagicMock tests.
-# 函数用途: 将自动启动的 dispatch 结果压成小型 JSON 字段，供 create_subagents payload 返回。
-def _auto_start_report(run_ids: list[str], report: object) -> dict[str, object]:
-    summary = getattr(report, "summary", "")
-    records = getattr(report, "records", [])
-    if not isinstance(summary, str) or not isinstance(records, list):
-        return {"status": "started", "run_ids": run_ids, "summary": "dispatch started"}
-    return {
-        "status": "started",
-        "run_ids": run_ids,
-        "summary": summary,
-        "record_count": len(records),
-        "dry_run": bool(getattr(report, "dry_run", False)),
-    }
-
-
-# LLM: _safe_task_id extracts persisted run ids without leaking MagicMock or adapter objects.
-# 函数用途: 从任务对象读取字符串 id，非法或空 id 返回空字符串供调用方过滤。
-def _safe_task_id(task: object) -> str:
-    value = getattr(task, "id", "")
-    return value.strip() if isinstance(value, str) else ""
 
 
 # LLM: _bind_created_tasks_to_conversation makes local subagents addressable by task_id in event tools.

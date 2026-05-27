@@ -101,7 +101,7 @@ class TestCreateSubagentsToolExecute:
 
     def test_create_subagents_auto_starts_created_runs_without_waiting_for_completion(self, monkeypatch):
         """create_subagents 默认创建并后台启动，父代理不等子代理全部结束。"""
-        from agent_py_agent.agent.agent_core import orchestration_tools
+        from agent_py_agent.agent.agent_core import orchestration_background_dispatch
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _mock_create_items_agent(task_count=2)
@@ -118,7 +118,7 @@ class TestCreateSubagentsToolExecute:
                 "agent_tree": {"schema_version": "agent_tree_status.v1"},
             }
 
-        monkeypatch.setattr(orchestration_tools, "_start_background_dispatch", fake_background_start)
+        monkeypatch.setattr(orchestration_background_dispatch, "_start_background_dispatch", fake_background_start)
 
         result = CreateSubagentsTool(mock_agent).execute({"goal": "分别整理两份资料", "count": 2})
         payload = json.loads(result.output)
@@ -154,12 +154,16 @@ class TestCreateSubagentsToolTemplatePolicy:
     """测试 create_subagents 的角色模板和工具推断策略。"""
 
     def test_default_tools_use_role_template_policy(self):
-        """默认不再要求用户选工具，而是交给角色模板/任务上下文推断。"""
+        """默认给子代理基础内置工具，避免少填 allowed_tools 变成残废代理。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
+        mock_agent.config.access_mode = "full-access"
+        mock_agent.config.subagent_memory_retention_policy = "delete_after_days"
+        mock_agent.config.subagent_memory_delete_after_days = 7
+        mock_agent.config.subagent_destroy_summary_required = False
 
         mock_task = MagicMock()
         mock_task.id = "run_default"
@@ -173,7 +177,14 @@ class TestCreateSubagentsToolTemplatePolicy:
         result = tool.execute({"goal": "测试"})
 
         call_kwargs = mock_agent.subagents.create_run.call_args[1]
-        assert call_kwargs["params"].allowed_tools is None
+        assert "read_file" in call_kwargs["params"].allowed_tools
+        assert "write_file" in call_kwargs["params"].allowed_tools
+        assert "apply_patch" in call_kwargs["params"].allowed_tools
+        assert "run_command" in call_kwargs["params"].allowed_tools
+        assert call_kwargs["params"].parent_access_mode == "full-access"
+        assert call_kwargs["params"].memory_retention_policy == "delete_after_days"
+        assert call_kwargs["params"].memory_delete_after_days == 7
+        assert call_kwargs["params"].destroy_summary_required is False
         assert call_kwargs["params"].role == "worker"
         assert result.ok is True
 
@@ -221,7 +232,8 @@ class TestCreateSubagentsToolTemplatePolicy:
         tool.execute({"goal": "测试", "tool_preset": "none"})
 
         call_kwargs = mock_agent.subagents.create_run.call_args[1]
-        assert call_kwargs["params"].allowed_tools is None
+        assert "read_file" in call_kwargs["params"].allowed_tools
+        assert "run_command" in call_kwargs["params"].allowed_tools
 
     def test_unknown_tool_preset_does_not_override_role_template(self):
         """模型误把 role 写到 tool_preset 时，应回退给 role template 自动决定工具。"""
@@ -248,7 +260,9 @@ class TestCreateSubagentsToolTemplatePolicy:
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
-        assert params.allowed_tools is None
+        assert "read_file" in params.allowed_tools
+        assert "run_command" in params.allowed_tools
+        assert params.role == "coordinator"
 
     def test_frontend_preset_completes_partial_explicit_tool_list(self):
         """frontend-dev 这类写页面预设会补齐 append/replace，避免模型少填工具后卡住。"""

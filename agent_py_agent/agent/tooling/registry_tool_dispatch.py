@@ -38,9 +38,22 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolExecu
             )
         )
     try:
-        return request.tool.execute(request.tool_params)
+        return request.tool.execute(_tool_params_with_runtime_boundary(request))
     except Exception as exc:
         return ToolExecutionResult(request.tool_name, False, _format_tool_exception(exc))
+
+
+# LLM: Runtime boundary params are system-injected and override model payload fields.
+# 函数用途: 把子代理有效 shell 权限传给 run_command；模型不能通过 payload 给自己提权。
+def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -> dict[str, Any]:
+    if request.tool_name != "run_command" or not isinstance(request.write_boundary, dict):
+        return request.tool_params
+    shell_mode = str(request.write_boundary.get("shell_access_mode") or "").strip()
+    if not shell_mode:
+        return request.tool_params
+    params = dict(request.tool_params)
+    params["__access_mode"] = shell_mode
+    return params
 
 
 # LLM: _format_tool_exception returns stable, bounded messages without leaking stack traces.

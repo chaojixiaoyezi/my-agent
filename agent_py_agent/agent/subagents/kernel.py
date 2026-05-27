@@ -11,10 +11,10 @@ control-plane 已有字段整理成一个稳定快照，后续恢复、QA、验�
 减少“每个模块自己猜状态”的问题。
 """
 
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .kernel_models import SubagentKernelQuery, SubagentKernelRun, SubagentKernelSnapshot
 from .models import SubAgentTask
 from .protocol import build_task_address, build_task_envelope
 
@@ -23,78 +23,6 @@ _COMPLETED_STATUSES = {"DONE", "COMPLETED", "ACCEPTED", "VERIFIED"}
 _FAILED_STATUSES = {"FAILED", "ERROR", "TIMEOUT"}
 _BLOCKED_STATUSES = {"BLOCKED"}
 _TAKEOVER_CANDIDATE_STATUSES = _FAILED_STATUSES | _BLOCKED_STATUSES
-
-
-# LLM: SubagentKernelQuery is the bundle-shaped read contract for kernel snapshots.
-# 类用途: 描述调用方要读取 root tree、某个子树，还是全部可见 run；默认只读，不产生副作用。
-@dataclass(frozen=True)
-class SubagentKernelQuery:
-
-    root_id: str = ""
-    run_id: str = ""
-    scope: str = "root_tree"
-    include_refs: bool = True
-    reserved: dict[str, object] = field(default_factory=dict)
-
-
-# LLM: SubagentKernelRun is a compact refs-first status row for one subagent run.
-# 类用途: 保存单个子代理 run 的身份、状态、父子关系、工作区引用和恢复引用，供父级稳定读取。
-@dataclass(frozen=True)
-class SubagentKernelRun:
-
-    run_id: str = ""
-    task_id: str = ""
-    session_id: str = ""
-    thread_id: str = ""
-    root_id: str = ""
-    root_run_id: str = ""
-    parent_task_id: str = ""
-    parent_id: str = ""
-    parent_run_id: str = ""
-    depth: int = 0
-    agent_kind: str = ""
-    role: str = ""
-    agent_name: str = ""
-    status: str = ""
-    verification_status: str = ""
-    failure_type: str = ""
-    progress: float = 0.0
-    current_step: str = ""
-    current_tool: str = ""
-    heartbeat_at: float = 0.0
-    updated_at: float = 0.0
-    last_progress_at: float = 0.0
-    last_progress_summary: str = ""
-    latest_summary: str = ""
-    child_ids: list[str] = field(default_factory=list)
-    address: dict[str, object] = field(default_factory=dict)
-    task_envelope: dict[str, object] = field(default_factory=dict)
-    workspace_refs: dict[str, str] = field(default_factory=dict)
-    recovery_refs: dict[str, str] = field(default_factory=dict)
-    tool_contract: dict[str, object] = field(default_factory=dict)
-    artifact_refs: list[str] = field(default_factory=list)
-    evidence_refs: list[str] = field(default_factory=list)
-    blockers: list[str] = field(default_factory=list)
-    reserved: dict[str, object] = field(default_factory=dict)
-
-
-# LLM: SubagentKernelSnapshot is the stable boundary between orchestration and status consumers.
-# 类用途: 汇总一棵任务树或子树的状态桶和 run 列表，后续恢复、QA 和验收链路先读它。
-@dataclass(frozen=True)
-class SubagentKernelSnapshot:
-
-    schema_version: str
-    root_id: str = ""
-    scope: str = ""
-    runs: list[SubagentKernelRun] = field(default_factory=list)
-    running_run_ids: list[str] = field(default_factory=list)
-    blocked_run_ids: list[str] = field(default_factory=list)
-    completed_run_ids: list[str] = field(default_factory=list)
-    failed_run_ids: list[str] = field(default_factory=list)
-    takeover_candidate_run_ids: list[str] = field(default_factory=list)
-    source_refs: dict[str, str] = field(default_factory=dict)
-    warnings: list[str] = field(default_factory=list)
-    reserved: dict[str, object] = field(default_factory=dict)
 
 
 # LLM: SubagentKernel builds read-only snapshots from SubAgentManager's current file facts.

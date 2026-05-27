@@ -171,6 +171,16 @@ subagent_role_template_dirs: []
 # - 3-5: 逐步增加 prompt/tool/response 预览或完整细节，建议只在真实 E2E 排障时开启
 subagent_debug_trace_level: 0
 
+# 子代理记忆保留策略：
+# - subagent_memory_retention_policy 只是机器记录里的策略名，不做封闭枚举硬卡。
+#   默认 parent_review_or_cleanup 表示：子代理结束前写总结，是否提升到父级/长期记忆由父级或用户复核。
+#   也可以写 delete_after_days、keep_forever 或你自己的策略名，运行时会原样记录，方便后续清理器识别。
+# - subagent_memory_delete_after_days 只有清理器/后续维护任务会用；0 表示不按天数自动删除。
+# - subagent_destroy_summary_required 控制子代理销毁/归档前是否要求留下最终总结事实。
+subagent_memory_retention_policy: "parent_review_or_cleanup"
+subagent_memory_delete_after_days: 0
+subagent_destroy_summary_required: true
+
 # 用户数据隔离配置
 # - user_id: 当前用户标识，默认为 admin
 # - user_data_root: 用户数据根目录，所有用户数据都放在这里

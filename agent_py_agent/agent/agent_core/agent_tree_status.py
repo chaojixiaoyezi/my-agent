@@ -8,6 +8,7 @@ from typing import Any
 
 from ..subagents.kernel import SubagentKernelQuery
 from .orchestration_run_scope import remembered_orchestration_run_ids
+from .runner_context import current_subagent_run_id
 
 _SCHEMA_VERSION = "agent_tree_status.v1"
 
@@ -51,6 +52,9 @@ def _kernel_snapshot(agent: object, params: dict[str, object]):
     manager = getattr(agent, "subagents", None)
     if manager is None or not callable(getattr(type(manager), "kernel_snapshot", None)):
         return _empty_snapshot()
+    current_run_id = current_subagent_run_id(agent)
+    if current_run_id:
+        return manager.kernel_snapshot(SubagentKernelQuery(run_id=current_run_id, scope="own_subtree"))
     root_id = str(params.get("root_id") or "").strip()
     run_id = str(params.get("run_id") or "").strip()
     scope = str(params.get("scope") or "").strip() or ("own_subtree" if run_id else "root_tree")
@@ -113,13 +117,32 @@ def _main_agent_node(agent: object, nodes: list[dict[str, object]]) -> dict[str,
 # 函数用途: 将 kernel run 行转成模型可读状态节点，不读取产物正文。
 def _node_from_kernel_run(row: object) -> dict[str, object]:
     payload = asdict(row)
+    refs = _node_ref_values(payload)
+    node = _node_identity(payload)
+    node.update(_node_status(payload, refs))
+    node["liveness"] = _liveness_layer(payload)
+    node["progress_layer"] = _progress_layer(payload)
+    node["evidence_layer"] = _evidence_layer(refs)
+    return node
+
+
+# LLM: _node_ref_values groups refs and capability signals before node rendering.
+# 函数用途: 从 kernel payload 提取 artifact/evidence/blocker 和最近工具轨迹。
+def _node_ref_values(payload: dict[str, object]) -> dict[str, list[object]]:
     tool_contract = _dict(payload.get("tool_contract"))
     reserved = _dict(payload.get("reserved"))
-    artifact_refs = _list(payload.get("artifact_refs"))
-    evidence_refs = _list(payload.get("evidence_refs"))
-    blockers = _list(payload.get("blockers"))
-    needs_capability = _needs_capability(tool_contract, reserved)
-    recent_tool_trace = _recent_tool_trace(reserved)
+    return {
+        "artifact_refs": _list(payload.get("artifact_refs")),
+        "evidence_refs": _list(payload.get("evidence_refs")),
+        "blockers": _list(payload.get("blockers")),
+        "needs_capability": _needs_capability(tool_contract, reserved),
+        "recent_tool_trace": _recent_tool_trace(reserved),
+    }
+
+
+# LLM: _node_identity keeps identity and lifecycle fields together.
+# 函数用途: 生成任务树节点的身份、状态、进度和层级基础字段。
+def _node_identity(payload: dict[str, object]) -> dict[str, object]:
     return {
         "task_id": payload.get("task_id") or payload.get("run_id", ""),
         "run_id": payload.get("run_id", ""),
@@ -144,35 +167,58 @@ def _node_from_kernel_run(row: object) -> dict[str, object]:
         "last_progress_summary": payload.get("last_progress_summary", ""),
         "latest_summary": payload.get("latest_summary", ""),
         "child_ids": payload.get("child_ids", []),
-        "artifact_refs": artifact_refs,
-        "evidence_refs": evidence_refs,
-        "blockers": blockers,
+    }
+
+
+# LLM: _node_status attaches refs and tool contract facts without reading artifact bodies.
+# 函数用途: 给任务树节点补充 workspace、recovery、capability 和最近工具状态。
+def _node_status(payload: dict[str, object], refs: dict[str, list[object]]) -> dict[str, object]:
+    return {
+        "artifact_refs": refs["artifact_refs"],
+        "evidence_refs": refs["evidence_refs"],
+        "blockers": refs["blockers"],
         "workspace_refs": payload.get("workspace_refs", {}),
         "recovery_refs": payload.get("recovery_refs", {}),
-        "tool_contract": tool_contract,
-        "needs_capability": needs_capability,
-        "recent_tool_trace": recent_tool_trace,
-        "liveness": {
-            "status": payload.get("status", ""),
-            "heartbeat_at": payload.get("heartbeat_at", 0.0),
-            "updated_at": payload.get("updated_at", 0.0),
-            "has_heartbeat": bool(payload.get("heartbeat_at", 0.0)),
-        },
-        "progress_layer": {
-            "progress": payload.get("progress", 0.0),
-            "current_step": payload.get("current_step", ""),
-            "current_tool": payload.get("current_tool", ""),
-            "last_progress_at": payload.get("last_progress_at", 0.0),
-            "last_progress_summary": payload.get("last_progress_summary", ""),
-            "latest_summary": payload.get("latest_summary", ""),
-        },
-        "evidence_layer": {
-            "artifact_refs": artifact_refs,
-            "evidence_refs": evidence_refs,
-            "blockers": blockers,
-            "needs_capability": needs_capability,
-            "recent_tool_trace": recent_tool_trace,
-        },
+        "tool_contract": _dict(payload.get("tool_contract")),
+        "needs_capability": refs["needs_capability"],
+        "recent_tool_trace": refs["recent_tool_trace"],
+    }
+
+
+# LLM: _liveness_layer is the read-only heartbeat projection for one node.
+# 函数用途: 把 status、heartbeat 和 updated_at 投影成 liveness 层。
+def _liveness_layer(payload: dict[str, object]) -> dict[str, object]:
+    heartbeat_at = payload.get("heartbeat_at", 0.0)
+    return {
+        "status": payload.get("status", ""),
+        "heartbeat_at": heartbeat_at,
+        "updated_at": payload.get("updated_at", 0.0),
+        "has_heartbeat": bool(heartbeat_at),
+    }
+
+
+# LLM: _progress_layer is the read-only work-progress projection for one node.
+# 函数用途: 把进度、当前步骤、当前工具和摘要投影成 progress 层。
+def _progress_layer(payload: dict[str, object]) -> dict[str, object]:
+    return {
+        "progress": payload.get("progress", 0.0),
+        "current_step": payload.get("current_step", ""),
+        "current_tool": payload.get("current_tool", ""),
+        "last_progress_at": payload.get("last_progress_at", 0.0),
+        "last_progress_summary": payload.get("last_progress_summary", ""),
+        "latest_summary": payload.get("latest_summary", ""),
+    }
+
+
+# LLM: _evidence_layer is the read-only refs projection for one node.
+# 函数用途: 汇总产物、证据、阻塞、能力缺口和最近工具轨迹。
+def _evidence_layer(values: dict[str, list[object]]) -> dict[str, object]:
+    return {
+        "artifact_refs": values["artifact_refs"],
+        "evidence_refs": values["evidence_refs"],
+        "blockers": values["blockers"],
+        "needs_capability": values["needs_capability"],
+        "recent_tool_trace": values["recent_tool_trace"],
     }
 
 
@@ -189,6 +235,8 @@ def _tree_edges(nodes: list[dict[str, object]]) -> list[dict[str, str]]:
     return edges
 
 
+# LLM: _first_remembered_run_id keeps implicit tree scope tied to current orchestration facts.
+# 函数用途: 从当前轮已记住的 run_id 中取第一个有效值。
 def _first_remembered_run_id(agent: object) -> str:
     for run_id in remembered_orchestration_run_ids(agent):
         text = str(run_id or "").strip()
@@ -197,6 +245,8 @@ def _first_remembered_run_id(agent: object) -> str:
     return ""
 
 
+# LLM: _empty_snapshot returns a safe read-only kernel response when no manager exists.
+# 函数用途: 生成空任务树快照，避免状态查看因为缺 subagent manager 崩溃。
 def _empty_snapshot():
     from ..subagents.kernel import SubagentKernelSnapshot
 
@@ -210,14 +260,20 @@ def _empty_snapshot():
 __all__ = ["agent_tree_status_payload"]
 
 
+# LLM: _dict normalizes optional mapping payloads.
+# 函数用途: 非 dict 值统一视为空映射。
 def _dict(value: object) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+# LLM: _list normalizes optional list payloads.
+# 函数用途: 非 list 值统一视为空列表。
 def _list(value: object) -> list:
     return list(value) if isinstance(value, list) else []
 
 
+# LLM: _needs_capability derives capability hints from structured kernel facts.
+# 函数用途: 合并显式能力缺口和工具合同里的 request/gap 计数。
 def _needs_capability(tool_contract: dict[str, object], reserved: dict[str, object]) -> list[str]:
     explicit = reserved.get("needs_capability")
     if isinstance(explicit, list):
@@ -230,6 +286,8 @@ def _needs_capability(tool_contract: dict[str, object], reserved: dict[str, obje
     return needs
 
 
+# LLM: _recent_tool_trace bounds observability facts for prompt-safe tree output.
+# 函数用途: 只返回最近少量工具轨迹摘要，不读取大正文。
 def _recent_tool_trace(reserved: dict[str, object]) -> list[dict[str, object]]:
     value = reserved.get("recent_tool_trace")
     if not isinstance(value, list):
@@ -241,6 +299,8 @@ def _recent_tool_trace(reserved: dict[str, object]) -> list[dict[str, object]]:
     return result
 
 
+# LLM: _safe_int keeps malformed kernel counters from breaking tree rendering.
+# 函数用途: 把可选计数字段安全转成 int，失败时返回 0。
 def _safe_int(value: object) -> int:
     try:
         return int(value or 0)

@@ -415,7 +415,7 @@ class TestAgentConfigDefaults:
         assert config.model_backend == "echo"
         assert config.max_tool_rounds is None
         assert config.memory_top_k == 5
-        assert config.max_subagents == 1000
+        assert config.max_subagents == 50
         assert config.access_mode == "workspace-write"
 
     def test_agent_config_dispatch_defaults(self):

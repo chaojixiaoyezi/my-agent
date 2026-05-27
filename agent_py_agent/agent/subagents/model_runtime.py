@@ -44,6 +44,7 @@ class SubAgentExecutionContext:
     execution_context_json: str = ""
     allowed_skills: list[str] = field(default_factory=list)
     allowed_tools: list[str] = field(default_factory=list)
+    effective_permissions: dict[str, object] = field(default_factory=dict)
     granted_cards: list[dict[str, str]] = field(default_factory=list)
     grants: list[dict[str, object]] = field(default_factory=list)
     # LLM: controlled_exec_grants are parent-supplied scope refs; runners cannot mint these locally.

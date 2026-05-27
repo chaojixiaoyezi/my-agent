@@ -16,8 +16,10 @@ CODING_SUBAGENT_TOOLS = [
     "http_request",
     "write_file",
     "apply_patch",
+    "run_command",
     "schedule_child_subagents",
     "dispatch_subagents",
+    "inspect_agent_tree",
     "subagent_board",
     "subagent_message",
     "raise_observation",
@@ -60,8 +62,8 @@ def subagent_allowed_tools(params: dict[str, object]) -> list[str] | None:
     if allowed_tools:
         return _merge_tool_grants(allowed_tools, preset_tools or CODING_SUBAGENT_TOOLS)
     if "tool_preset" not in params:
-        return None
-    return _preset_allowed_tools(preset or "read_only")
+        return list(CODING_SUBAGENT_TOOLS)
+    return _preset_allowed_tools(preset or "read_only") or list(CODING_SUBAGENT_TOOLS)
 
 
 # LLM: _preset_allowed_tools maps semantic task presets to baseline-capable tool grants.

@@ -60,6 +60,11 @@ def _render_capabilities_section(context):
     lines = ["## Allowed Capabilities", ""]
     lines.append(f"- skills: {', '.join(context.allowed_skills) or 'none'}")
     lines.append(f"- tools: {', '.join(context.allowed_tools) or 'none'}")
+    shell_mode = ""
+    if isinstance(context.effective_permissions, dict):
+        shell_mode = str(context.effective_permissions.get("shell_access_mode") or "").strip()
+    if shell_mode:
+        lines.append(f"- shell_access_mode: {shell_mode}")
     lines.extend(["", "## Granted Cards", ""])
     if context.granted_cards:
         for card in context.granted_cards:
@@ -79,6 +84,8 @@ def _render_write_boundary_section(context):
     lines.append(f"- allowed_write_roots: {', '.join(allowed_roots) if allowed_roots else 'none'}")
     lines.append(f"- product_write_roots: {', '.join(product_roots) if product_roots else 'none'}")
     lines.append(f"- product_write_policy: {context.write_boundary.get('product_write_policy') or 'direct'}")
+    if context.write_boundary.get("shell_access_mode"):
+        lines.append(f"- shell_access_mode: {context.write_boundary.get('shell_access_mode')}")
     lines.append(
         f"- forbidden_write_roots: {', '.join(forbidden_roots) if forbidden_roots else 'none'}"
     )
@@ -115,6 +122,8 @@ def _render_declared_outputs_section(context):
     return lines
 
 
+# LLM: _string_list keeps runner rendering tolerant of malformed list fields.
+# 函数用途: 将 list/tuple/set 里的非空项转成字符串列表，其他类型返回空列表。
 def _string_list(value: object) -> list[str]:
     if not isinstance(value, (list, tuple, set)):
         return []

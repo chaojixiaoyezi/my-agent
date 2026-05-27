@@ -147,6 +147,11 @@ class SubAgentRunnerContextMixin:
             "bugs_file": task.bugs_file,
             "skill_usage_file": task.skill_usage_file,
             "controlled_exec_grants": controlled_exec_grants,
+            "effective_permissions": dict(getattr(task, "effective_permissions", {}) or {}),
+            "shell_access_mode": str(
+                (getattr(task, "effective_permissions", {}) or {}).get("shell_access_mode")
+                or "workspace-write"
+            ),
             # LLM: runners may write task-local skill candidates, not global memory.
             "skill_sparks_file": task.skill_sparks_file,
             "handoff_file": task.handoff_file,
@@ -193,6 +198,7 @@ class SubAgentRunnerContextMixin:
             **_execution_context_task_fields(task),
             allowed_skills=request.allowed_skills,
             allowed_tools=request.allowed_tools,
+            effective_permissions=dict(getattr(task, "effective_permissions", {}) or {}),
             granted_cards=_dedupe_granted_cards(task.capability_grants, max_cards=request.max_cards),
             grants=request.grants,
             controlled_exec_grants=controlled_exec_grants,

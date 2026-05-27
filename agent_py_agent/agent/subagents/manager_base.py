@@ -132,7 +132,10 @@ class SubAgentBaseMixin:
         acceptance_checks: list[str] | None = None, quality_contract: Any = None,
         context_manifest: Any = None, context_packs: Any = None,
         extra_write_roots: list[str] | None = None, workflow_mode: str = "off",
-        attributes: dict[str, object] | None = None,
+        attributes: dict[str, object] | None = None, parent_access_mode: str = "",
+        memory_retention_policy: str = "parent_review_or_cleanup",
+        memory_delete_after_days: int = 0,
+        destroy_summary_required: bool = True,
     ) -> SubAgentTask:
         params = params or CreateRunParams(
             goal=goal, thought=thought, plan=plan or [], agent_name=agent_name, role=role,
@@ -142,6 +145,10 @@ class SubAgentBaseMixin:
             acceptance_checks=acceptance_checks, quality_contract=quality_contract,
             context_manifest=context_manifest, context_packs=context_packs,
             extra_write_roots=extra_write_roots, workflow_mode=workflow_mode, attributes=attributes,
+            parent_access_mode=parent_access_mode,
+            memory_retention_policy=memory_retention_policy,
+            memory_delete_after_days=memory_delete_after_days,
+            destroy_summary_required=destroy_summary_required,
         )
         return self.base_service.create_run(params=params)
 

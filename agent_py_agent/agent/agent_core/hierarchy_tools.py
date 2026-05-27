@@ -14,6 +14,7 @@ from ..subagents.services.hierarchy_scheduler import (
     HierarchyScheduleResult,
 )
 from ..tools import BaseTool, ToolExecutionResult
+from . import orchestration_background_dispatch
 from .orchestration_create_context import create_context_manifest, create_context_packs
 from .orchestration_dispatch_state_contract import dispatch_state_contract_payload
 from .orchestration_quality_advice_payload import quality_advice_payload
@@ -73,13 +74,20 @@ class ScheduleChildSubagentsTool(BaseTool):
             )
         except (IndexError, TypeError, ValueError) as exc:
             return _schedule_error(_schedule_validation_error_message(exc))
+        auto_start = _schedule_auto_start(self.agent, result, params)
         # LLM: remember child ids from schedule so the nested parent sees a machine state table immediately.
         # 函数用途: schedule_child_subagents 返回后直接给模型 dispatchable/running/blocked 状态，不靠 prose 抄 id。
         remember_orchestration_run_ids(self.agent, [*result.created_run_ids, *result.reused_run_ids])
         return ToolExecutionResult(
             "schedule_child_subagents",
             True,
-            _schedule_payload_json(result, dispatch_state_contract_payload(self.agent)),
+            _schedule_payload_json(
+                result,
+                {
+                    "auto_start": auto_start,
+                    **dispatch_state_contract_payload(self.agent),
+                },
+            ),
         )
 
 
@@ -156,6 +164,30 @@ def _schedule_payload_json(result: HierarchyScheduleResult, state_payload: dict[
         tool="schedule_child_subagents",
     ).to_dict()
     return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+# LLM: _schedule_auto_start mirrors create_subagents startup while preserving current runner scope.
+# 函数用途: schedule_child_subagents 创建下一层后后台启动可运行 child，并把状态放进同一个 payload。
+def _schedule_auto_start(agent: object, result: HierarchyScheduleResult, params: dict[str, object]) -> dict[str, object]:
+    if result.dry_run or result.blocked:
+        return {"status": "not_needed", "run_ids": []}
+    tasks = _load_schedule_dispatch_tasks(agent, result.dispatch_run_ids)
+    return orchestration_background_dispatch.auto_start_tasks(agent, tasks, params)
+
+
+# LLM: _load_schedule_dispatch_tasks loads only scheduler-selected child ids for auto-start.
+# 函数用途: 按 dispatch_run_ids 读取刚创建或可复用的直接孩子；读取失败时跳过单项而不中断调度响应。
+def _load_schedule_dispatch_tasks(agent: object, run_ids: list[str]) -> list[object]:
+    manager = getattr(agent, "subagents", None)
+    tasks: list[object] = []
+    for run_id in run_ids:
+        try:
+            task = manager.load(run_id)
+        except Exception:
+            continue
+        if getattr(task, "id", "") == run_id:
+            tasks.append(task)
+    return tasks
 
 
 # LLM: _schedule_item_payload keeps the tool response refs-only and safe for model context.

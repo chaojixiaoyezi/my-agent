@@ -216,6 +216,27 @@ def test_subagent_debug_trace_level_accepts_zero_to_five():
     assert fallback["subagent_debug_trace_level"] == defaults_normalized["subagent_debug_trace_level"]
 
 
+def test_subagent_memory_policy_config_is_normalized_without_closed_enum():
+    """验证子代理记忆保留策略可配置，策略名不做封闭枚举硬卡。"""
+    normalized, warnings = normalize_agent_config({
+        "subagent_memory_retention_policy": "custom-cleanup-after-parent-review",
+        "subagent_memory_delete_after_days": "14",
+        "subagent_destroy_summary_required": "false",
+    })
+
+    assert warnings == []
+    assert normalized["subagent_memory_retention_policy"] == "custom-cleanup-after-parent-review"
+    assert normalized["subagent_memory_delete_after_days"] == 14
+    assert normalized["subagent_destroy_summary_required"] is False
+
+    fallback, warnings = normalize_agent_config({
+        "subagent_memory_delete_after_days": "-1",
+    })
+    defaults_normalized, _ = normalize_agent_config({})
+    assert any("subagent_memory_delete_after_days" in warning for warning in warnings)
+    assert fallback["subagent_memory_delete_after_days"] == defaults_normalized["subagent_memory_delete_after_days"]
+
+
 def test_lease_config_defaults():
     """验证 lease 心跳续期配置项的默认值和 coerce 规则。"""
     defaults_normalized, _ = normalize_agent_config({})

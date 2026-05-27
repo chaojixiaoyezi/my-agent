@@ -406,3 +406,23 @@ class TestShellToolEdgeCases:
 
         assert result.ok is False
         assert "危险命令" in result.output
+
+    def test_child_shell_access_override_can_narrow_full_access(self, tmp_path: Path):
+        """父级 full-access 的 shell 工具被子代理边界降级后，不能跑到工作区外。"""
+        from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
+
+        workspace = tmp_path / "workspace"
+        external = tmp_path / "external"
+        workspace.mkdir()
+        external.mkdir()
+
+        tool = ShellTool(workspace, options=ShellToolOptions(access_mode="full-access", default_timeout=30))
+        result = tool.execute({
+            "command": "pwd",
+            "working_dir": str(external),
+            "__access_mode": "workspace-write",
+        })
+
+        assert result.ok is False
+        assert result.error_code == "PATH_OUTSIDE_WORKSPACE"
+        assert "access_mode=workspace-write" in result.output

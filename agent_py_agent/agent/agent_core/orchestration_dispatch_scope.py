@@ -113,12 +113,15 @@ def _is_active_root_role_task(task) -> bool:
 
 
 # LLM: dispatch_parent_run_id scopes runner-context dispatch to the current node's direct children.
-# 函数用途: runner 内部未显式传 parent_run_id 时默认使用当前 run，避免调度器重跑自己。
+# 函数用途: runner 内部总是使用当前 run 作为 parent，避免显式 parent_run_id 越权调度平行节点。
 def dispatch_parent_run_id(agent, params: dict[str, object]) -> str:
+    current = current_subagent_run_id(agent)
+    if current:
+        return current
     explicit = str(params.get("parent_run_id") or "").strip()
     if explicit:
         return explicit
-    return current_subagent_run_id(agent)
+    return ""
 
 # LLM: dispatch_exclude_run_ids ensures nested dispatch never selects the active runner itself.
 # 函数用途: 合并显式排除列表和当前 runner id，传给 runner 候选过滤。

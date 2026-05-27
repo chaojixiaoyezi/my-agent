@@ -230,6 +230,7 @@ class SubagentDelegationBackend(BaseBackend):
                     '"tool":"create_subagents",'
                     '"goal":"隔离场景测试：实现 fixture 功能并产出证据",'
                     '"count":2,'
+                    '"defer_start":true,'
                     '"tool_preset":"coding",'
                     '"acceptance_checks":["必须有文件证据","必须说明测试结果"]'
                     "}\n"
@@ -237,7 +238,8 @@ class SubagentDelegationBackend(BaseBackend):
                 ),
                 backend=self.name,
             )
-        assert "subagent_workspace" in prompt
+        assert "create_subagents" in prompt
+        assert "defer_start" in prompt
         assert "write_file" in prompt
         return ModelResponse(text="已创建子代理任务并等待调度。", backend=self.name)
 

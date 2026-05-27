@@ -22,6 +22,9 @@ class SubagentConfig:
     subagent_workspace: str = "data/subagents"
     subagent_role_template_dirs: list[str] = field(default_factory=list)
     subagent_debug_trace_level: int = 0
+    subagent_memory_retention_policy: str = "parent_review_or_cleanup"
+    subagent_memory_delete_after_days: int = 0
+    subagent_destroy_summary_required: bool = True
     result_check_execute_tests: bool = False
     result_check_timeout_seconds: int = 120
     closeout_for_all_task_nodes: bool = False

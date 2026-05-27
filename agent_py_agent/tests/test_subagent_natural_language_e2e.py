@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 
 from agent_py_agent.agent.backend import BaseBackend, ModelResponse
@@ -266,7 +267,7 @@ def test_natural_language_root_drives_child_and_grandchild_e2e(tmp_path: Path) -
         "用单文件html做一个高端现代家具品牌的网站首页，风格高级、简洁、有设计感，适合真实商业品牌使用。只输出完整html，不要注释。",
         save=False,
     )
-    records = list(agent.subagents.list_runs())
+    records = _wait_for_subagent_records(agent, expected=2, artifact_path=site_dir / "index.html")
     site_check = run_static_site_check(
         {
             "name": "natural-furniture-site",
@@ -280,8 +281,20 @@ def test_natural_language_root_drives_child_and_grandchild_e2e(tmp_path: Path) -
     assert "家具品牌首页" in result.response
     assert "已交付" in result.response
     assert "blocking_run_ids" not in result.response
-    assert [item.agent_name for item in records] == ["小傻妞-家具总控", "小小傻妞-家具叶子"]
+    records_by_depth = sorted(records, key=lambda item: (item.depth, item.agent_name))
+    assert [item.agent_name for item in records_by_depth] == ["小傻妞-家具总控", "小小傻妞-家具叶子"]
     assert {item.depth for item in records} == {0, 1}
     assert len(backend.runner.prompts) >= 4
     assert (site_dir / "index.html").exists()
     assert site_check.validation_result["ok"] is True
+
+
+# LLM: _wait_for_subagent_records accounts for create_subagents background auto-start.
+# 函数用途: 等待后台子代理线程短暂完成，避免测试重新假设 create_subagents 同步阻塞。
+def _wait_for_subagent_records(agent: SimpleAgent, *, expected: int, artifact_path: Path) -> list:
+    deadline = time.monotonic() + 2.0
+    records = list(agent.subagents.list_runs())
+    while (len(records) < expected or not artifact_path.exists()) and time.monotonic() < deadline:
+        time.sleep(0.05)
+        records = list(agent.subagents.list_runs())
+    return records

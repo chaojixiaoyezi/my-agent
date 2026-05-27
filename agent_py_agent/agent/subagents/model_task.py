@@ -175,6 +175,9 @@ class SubAgentTask:
     quality_contract: QualityContract = field(default_factory=QualityContract)
     context_manifest: ContextManifest = field(default_factory=ContextManifest)
     context_packs: list[dict[str, object]] = field(default_factory=list)
+    # LLM: effective_permissions is a system-derived snapshot, not a model-editable grant.
+    # 字段用途: 记录子代理最终 shell/工具边界；父级 full-access 默认降级为 workspace-write。
+    effective_permissions: dict[str, object] = field(default_factory=dict)
     child_ids: list[str] = field(default_factory=list)
     status: str = "PLANNING"
     description: str = ""

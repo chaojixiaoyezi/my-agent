@@ -11,6 +11,7 @@ ARTIFACT_BUILDER_TOOLS: list[str] = []
 # LLM: Built-in roles now share the generic write surface instead of append/replace/builder tools.
 WORKER_WRITE_TOOLS = ["write_file", "apply_patch"]
 REPORT_WRITE_TOOLS = ["write_file", "apply_patch"]
+SHELL_TOOL = "run_command"
 CAPABILITY_REQUEST_TOOL = "capability_request"
 MAIN_EVENT_TOOLS = ["raise_observation", "raise_main_event"]
 COLLABORATION_TOOLS = [
@@ -27,6 +28,8 @@ COLLABORATION_TOOLS = [
 ROLE_BASE_TOOLS = [
     *READ_ONLY_TOOLS,
     *REPORT_WRITE_TOOLS,
+    SHELL_TOOL,
+    "inspect_agent_tree",
     *MAIN_EVENT_TOOLS,
     *COLLABORATION_TOOLS,
     CAPABILITY_REQUEST_TOOL,
@@ -50,6 +53,7 @@ __all__ = [
     "READ_ONLY_TOOLS",
     "REPORT_WRITE_TOOLS",
     "ROLE_BASE_TOOLS",
+    "SHELL_TOOL",
     "WEB_TOOLS",
     "WORKER_READ_TOOLS",
     "WORKER_WRITE_TOOLS",
