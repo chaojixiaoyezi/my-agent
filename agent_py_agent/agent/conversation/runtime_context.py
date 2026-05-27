@@ -6,7 +6,10 @@ from __future__ import annotations
 from typing import Any
 
 from ..agent_core.agent_tree_status import agent_tree_status_payload
-from .context_budget import bounded_background_context_payload
+from .context_budget import (
+    background_context_budget_from_config,
+    bounded_background_context_payload,
+)
 from .models import ConversationThread
 from .runtime_utils import json_block, pending_wake_payload
 from .store import ConversationStore
@@ -44,11 +47,32 @@ def context_markdown(*, agent: object, store: ConversationStore, thread: Convers
 
 
 def _bounded_context(agent: object, store: ConversationStore, thread_id: str) -> dict[str, Any]:
+    config = getattr(agent, "config", None)
     return bounded_background_context_payload(
-        bundle=store.context_bundle(thread_id),
-        pending_wake_signals=pending_wake_payload(store, thread_id),
+        bundle=store.context_bundle(thread_id, recent_limit=_config_int(config, "conversation_context_recent_limit")),
+        pending_wake_signals=pending_wake_payload(
+            store,
+            thread_id,
+            limit=_config_int(config, "background_pending_wake_prompt_limit"),
+        ),
         agent_tree=agent_tree_status_payload(agent, {}),
+        budget=background_context_budget_from_config(config),
     )
+
+
+# LLM: _config_int resolves background-context limits from AgentConfig for prompt rendering.
+# 函数用途: 读取长期会话 prompt 预算；非法值只回退到配置 schema 默认。
+def _config_int(config: object | None, key: str) -> int:
+    if config is None:
+        from ..settings.config import AgentConfig
+
+        config = AgentConfig()
+    try:
+        return max(0, int(getattr(config, key)))
+    except (TypeError, ValueError):
+        from ..settings.config import AgentConfig
+
+        return max(0, int(getattr(AgentConfig(), key)))
 
 
 def _context_header(request, thread: ConversationThread) -> list[str]:

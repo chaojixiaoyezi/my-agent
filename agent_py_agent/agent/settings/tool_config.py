@@ -25,6 +25,12 @@ class ToolConfig:
     tool_agent_budget_max_calls: int | None = None
     tool_artifact_read_budget_window_seconds: int = 600
     tool_artifact_read_budget_max_chars: int = 240_000
+    tool_output_externalize_min_chars: int = 1200
+    tool_output_preview_chars: int = 500
+    tool_payload_max_fields: int = 64
+    tool_payload_max_field_name_chars: int = 128
+    tool_payload_max_name_chars: int = 128
+    tool_payload_parse_error_raw_chars: int = 1000
     tool_read_max_chars: int = 50_000
     tool_write_inline_max_chars: int = DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
     tool_list_max_entries: int = 200

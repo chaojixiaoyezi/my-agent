@@ -4,14 +4,58 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from .json_repair import load_tool_block_json
 
-MAX_TOOL_PAYLOAD_FIELDS = 64
-MAX_TOOL_FIELD_NAME_CHARS = 128
-MAX_TOOL_NAME_CHARS = 128
-MAX_PARSE_ERROR_RAW_CHARS = 1000
+
+# LLM: ToolPayloadNormalizeLimits carries parser budgets from AgentConfig.
+# 类用途: 保存单次工具调用 JSON 的字段数、字段名长度、工具名长度和错误预览长度。
+@dataclass(frozen=True)
+class ToolPayloadNormalizeLimits:
+    max_fields: int
+    max_field_name_chars: int
+    max_tool_name_chars: int
+    max_parse_error_raw_chars: int
+
+
+# LLM: tool_payload_limits_from_config resolves parser limits for one agent runtime.
+# 函数用途: 从配置对象读取工具调用 payload 解析预算；缺失时使用 AgentConfig schema 默认。
+def tool_payload_limits_from_config(config: object | None) -> ToolPayloadNormalizeLimits:
+    if config is None:
+        from ..settings.config import AgentConfig
+
+        config = AgentConfig()
+    defaults = _default_tool_payload_limits()
+    return ToolPayloadNormalizeLimits(
+        max_fields=_config_int(config, "tool_payload_max_fields", defaults.max_fields),
+        max_field_name_chars=_config_int(
+            config,
+            "tool_payload_max_field_name_chars",
+            defaults.max_field_name_chars,
+        ),
+        max_tool_name_chars=_config_int(config, "tool_payload_max_name_chars", defaults.max_tool_name_chars),
+        max_parse_error_raw_chars=_config_int(
+            config,
+            "tool_payload_parse_error_raw_chars",
+            defaults.max_parse_error_raw_chars,
+        ),
+    )
+
+
+# LLM: _default_tool_payload_limits reads schema defaults for payload parsing.
+# 函数用途: 构造默认工具调用 payload 预算，不在解析器里写第二套数字。
+def _default_tool_payload_limits() -> ToolPayloadNormalizeLimits:
+    from ..settings.config import AgentConfig
+
+    defaults = AgentConfig()
+    return ToolPayloadNormalizeLimits(
+        max_fields=defaults.tool_payload_max_fields,
+        max_field_name_chars=defaults.tool_payload_max_field_name_chars,
+        max_tool_name_chars=defaults.tool_payload_max_name_chars,
+        max_parse_error_raw_chars=defaults.tool_payload_parse_error_raw_chars,
+    )
 MODEL_WRAPPER_PARAM_KEYS = {
     "args",
     "actual_parameter_name",
@@ -99,51 +143,68 @@ PARAM_ALIASES_BY_TOOL = {
 
 # LLM: parse_tool_block_payload is the tolerant bridge from text protocol to dict payload.
 # 函数用途: 解析单个工具调用 JSON 块；失败时返回 __parse_error__ 载荷供上层统一处理。
-def parse_tool_block_payload(raw: str) -> dict[str, Any]:
+def parse_tool_block_payload(
+    raw: str,
+    *,
+    limits: ToolPayloadNormalizeLimits | None = None,
+) -> dict[str, Any]:
+    active_limits = limits or _default_tool_payload_limits()
     try:
         payload = load_tool_block_json(raw)
     except json.JSONDecodeError as exc:
-        return parse_error_payload(f"工具调用 JSON 解析失败: {exc}", raw)
+        return parse_error_payload(f"工具调用 JSON 解析失败: {exc}", raw, limits=active_limits)
     if not isinstance(payload, dict):
-        return parse_error_payload("工具调用必须是 JSON 对象", raw)
-    normalized, error = normalize_tool_payload(payload)
+        return parse_error_payload("工具调用必须是 JSON 对象", raw, limits=active_limits)
+    normalized, error = normalize_tool_payload(payload, limits=active_limits)
     if error or normalized is None:
-        return parse_error_payload(error or "工具调用解析失败", raw)
+        return parse_error_payload(error or "工具调用解析失败", raw, limits=active_limits)
     return normalized
 
 
 # LLM: normalize_tool_payload validates and canonicalizes payload shape before execution.
 # 函数用途: 把输入值归一成工具系统内部使用的稳定格式，兼容常见工具名和参数别名。
-def normalize_tool_payload(payload: object) -> tuple[dict[str, Any] | None, str]:
+def normalize_tool_payload(
+    payload: object,
+    *,
+    limits: ToolPayloadNormalizeLimits | None = None,
+) -> tuple[dict[str, Any] | None, str]:
+    active_limits = limits or _default_tool_payload_limits()
     if not isinstance(payload, dict):
         return None, "工具调用必须是 JSON 对象"
-    normalized, error = _normalize_payload_mapping(payload)
+    normalized, error = _normalize_payload_mapping(payload, active_limits)
     if error:
         return None, error
-    expanded, error = _unwrap_param_name_bundle(normalized)
+    expanded, error = _unwrap_param_name_bundle(normalized, active_limits)
     if error:
         return None, error
     canonical, error = _canonicalize_tool_payload(expanded)
     if error:
         return None, error
-    if len(canonical) > MAX_TOOL_PAYLOAD_FIELDS:
-        return None, f"工具调用字段过多，最多 {MAX_TOOL_PAYLOAD_FIELDS} 个字段"
+    if len(canonical) > active_limits.max_fields:
+        return None, f"工具调用字段过多，最多 {active_limits.max_fields} 个字段"
     return canonical, ""
 
 
 # LLM: parse_error_payload preserves enough raw text for debugging without flooding context.
 # 函数用途: 生成工具解析错误载荷，并截断原始内容。
-def parse_error_payload(error: str, raw: str) -> dict[str, str]:
+def parse_error_payload(
+    error: str,
+    raw: str,
+    *,
+    limits: ToolPayloadNormalizeLimits | None = None,
+) -> dict[str, str]:
+    active_limits = limits or _default_tool_payload_limits()
     return {
         "tool": "__parse_error__",
         "error": error,
-        "raw": _truncate(raw, MAX_PARSE_ERROR_RAW_CHARS),
+        "raw": _truncate(raw, active_limits.max_parse_error_raw_chars),
     }
 
 
 # LLM: tool_name extracts and validates the canonical tool identifier.
 # 函数用途: 把工具名字段转成安全字符串；缺失、空值、控制字符会抛出 ValueError。
-def tool_name(value: object) -> str:
+def tool_name(value: object, *, limits: ToolPayloadNormalizeLimits | None = None) -> str:
+    active_limits = limits or _default_tool_payload_limits()
     if value is None:
         raise ValueError("工具调用缺少 tool 字段")
     if not isinstance(value, (str, int, float, bool)):
@@ -151,8 +212,8 @@ def tool_name(value: object) -> str:
     name = str(value).strip()
     if not name:
         raise ValueError("工具调用缺少 tool 字段")
-    if len(name) > MAX_TOOL_NAME_CHARS:
-        raise ValueError(f"tool 字段过长，最多 {MAX_TOOL_NAME_CHARS} 个字符")
+    if len(name) > active_limits.max_tool_name_chars:
+        raise ValueError(f"tool 字段过长，最多 {active_limits.max_tool_name_chars} 个字符")
     if any(ord(char) < 32 for char in name):
         raise ValueError("tool 字段包含不支持的控制字符")
     return name
@@ -160,17 +221,20 @@ def tool_name(value: object) -> str:
 
 # LLM: _normalize_payload_mapping validates a tool payload map before dispatch.
 # 函数用途: 检查工具参数名是否安全，并把参数键统一转成字符串，避免坏键污染执行层。
-def _normalize_payload_mapping(payload: dict[Any, Any]) -> tuple[dict[str, Any], str]:
-    if len(payload) > MAX_TOOL_PAYLOAD_FIELDS:
-        return {}, f"工具调用字段过多，最多 {MAX_TOOL_PAYLOAD_FIELDS} 个字段"
+def _normalize_payload_mapping(
+    payload: dict[Any, Any],
+    limits: ToolPayloadNormalizeLimits,
+) -> tuple[dict[str, Any], str]:
+    if len(payload) > limits.max_fields:
+        return {}, f"工具调用字段过多，最多 {limits.max_fields} 个字段"
 
     normalized: dict[str, Any] = {}
     for key, value in payload.items():
         key_text = str(key)
         if not key_text:
             return {}, "工具调用包含空参数名"
-        if len(key_text) > MAX_TOOL_FIELD_NAME_CHARS:
-            return {}, f"工具调用参数名过长，最多 {MAX_TOOL_FIELD_NAME_CHARS} 个字符"
+        if len(key_text) > limits.max_field_name_chars:
+            return {}, f"工具调用参数名过长，最多 {limits.max_field_name_chars} 个字符"
         if any(ord(char) < 32 for char in key_text):
             return {}, "工具调用参数名包含不支持的控制字符"
         normalized[key_text] = value
@@ -179,7 +243,10 @@ def _normalize_payload_mapping(payload: dict[Any, Any]) -> tuple[dict[str, Any],
 
 # LLM: _unwrap_param_name_bundle repairs a common model mistake without hiding collisions.
 # 函数用途: 当模型把真实参数误包进 param_name/arguments 字段时，将其展开成工具可执行的扁平参数。
-def _unwrap_param_name_bundle(payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
+def _unwrap_param_name_bundle(
+    payload: dict[str, Any],
+    limits: ToolPayloadNormalizeLimits,
+) -> tuple[dict[str, Any], str]:
     wrapper_keys = [key for key in payload if key != "tool"]
     if len(wrapper_keys) != 1 or wrapper_keys[0] not in MODEL_WRAPPER_PARAM_KEYS:
         return payload, ""
@@ -191,7 +258,7 @@ def _unwrap_param_name_bundle(payload: dict[str, Any]) -> tuple[dict[str, Any], 
             return {}, error
     if not isinstance(wrapper_value, dict):
         return payload, ""
-    bundled, error = _normalize_payload_mapping(wrapper_value)
+    bundled, error = _normalize_payload_mapping(wrapper_value, limits)
     if error:
         return {}, error
     if "tool" in bundled:
@@ -250,3 +317,12 @@ def _truncate(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + "\n... 已截断"
+
+
+# LLM: _config_int normalizes one tool payload parser budget field.
+# 函数用途: 读取单个配置字段并归一为非负整数，非法值回退到调用方默认值。
+def _config_int(config: object, key: str, fallback: int) -> int:
+    try:
+        return max(0, int(getattr(config, key)))
+    except (TypeError, ValueError):
+        return max(0, int(fallback))

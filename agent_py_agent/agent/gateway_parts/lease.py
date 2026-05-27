@@ -43,17 +43,25 @@ class _LeaseHeartbeatContext:
 # LLM: _gateway_processing_lease_interval 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
 # 函数用途: 处理网关processing租约interval相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _gateway_processing_lease_interval(agent: SimpleAgent) -> float:
-    try:
-        gateway_interval = float(agent.config.gateway_heartbeat_interval or 5)
-    except (TypeError, ValueError):
-        gateway_interval = 5.0
-    try:
-        processing_timeout = float(agent.config.gateway_processing_timeout_seconds or 900)
-    except (TypeError, ValueError):
-        processing_timeout = 900.0
+    gateway_interval = _config_float(agent, "gateway_heartbeat_interval")
+    processing_timeout = _config_float(agent, "gateway_processing_timeout_seconds")
     if processing_timeout > 0:
         gateway_interval = min(gateway_interval, max(0.2, processing_timeout / 3.0))
     return max(0.2, gateway_interval)
+
+
+# LLM: _config_float keeps gateway lease defaults tied to AgentConfig instead of local constants.
+# 函数用途: 从运行配置读取 gateway 租约时间参数，非法值只回退到配置 schema 默认。
+def _config_float(agent: SimpleAgent, key: str) -> float:
+    try:
+        value = float(getattr(agent.config, key))
+        if value > 0:
+            return value
+    except (TypeError, ValueError):
+        pass
+    from ..settings.config import AgentConfig
+
+    return float(getattr(AgentConfig(), key))
 
 
 # LLM: _touch_gateway_processing_lease 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。

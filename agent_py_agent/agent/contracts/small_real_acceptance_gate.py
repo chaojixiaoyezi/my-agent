@@ -19,7 +19,6 @@ from .offline_contract_report import (
 ALLOWED_COMPLEXITY = {"small", "medium"}
 ALLOWED_EFFECTS = {"read_only", "dry_run"}
 ALLOWED_TOOL_MODES = {"read_only", "dry_run"}
-MAX_SMALL_REAL_RUNTIME_SECONDS = 900
 
 
 # LLM: _AllowedValuesCheck bundles one whitelist validation request.
@@ -33,20 +32,30 @@ class _AllowedValuesCheck:
 
 # LLM: validate_small_real_acceptance_gate is the pre-large-real-task gate.
 # 函数用途: 校验小型真实验收 case 是否隔离、限时、只读或 dry-run、可验收且可 replay。
-def validate_small_real_acceptance_gate(gate: dict[str, Any]) -> OfflineContractValidation:
+def validate_small_real_acceptance_gate(
+    gate: dict[str, Any],
+    *,
+    config: object | None = None,
+) -> OfflineContractValidation:
     findings: list[dict[str, object]] = []
     cases = dict_items(gate.get("cases"))
     if not cases:
         findings.append(finding("SMALL_REAL_CASES_MISSING"))
         return validation_report(findings)
+    max_runtime_seconds = _max_runtime_seconds(config)
     for case in cases:
-        _validate_case(case, findings)
+        _validate_case(case, findings, max_runtime_seconds=max_runtime_seconds)
     return validation_report(findings)
 
 
 # LLM: _validate_case checks one bounded live-validation case.
 # 函数用途: 对单个小型真实验收 case 执行结构化边界校验。
-def _validate_case(case: dict[str, Any], findings: list[dict[str, object]]) -> None:
+def _validate_case(
+    case: dict[str, Any],
+    findings: list[dict[str, object]],
+    *,
+    max_runtime_seconds: int,
+) -> None:
     if text(case.get("complexity")) not in ALLOWED_COMPLEXITY:
         findings.append(finding("SMALL_REAL_CASE_NOT_BOUNDED", _case_extra(case)))
     if case.get("isolation_ok") is not True or not text(case.get("workspace_ref")):
@@ -61,8 +70,21 @@ def _validate_case(case: dict[str, Any], findings: list[dict[str, object]]) -> N
         findings.append(finding("SMALL_REAL_VERIFICATION_REF_MISSING", _case_extra(case)))
     if case.get("replay_capture_enabled") is not True:
         findings.append(finding("SMALL_REAL_REPLAY_CAPTURE_MISSING", _case_extra(case)))
-    if positive_int(case.get("max_runtime_seconds")) > MAX_SMALL_REAL_RUNTIME_SECONDS:
+    if max_runtime_seconds > 0 and positive_int(case.get("max_runtime_seconds")) > max_runtime_seconds:
         findings.append(finding("SMALL_REAL_RUNTIME_TOO_LARGE", _case_extra(case)))
+
+
+# LLM: _max_runtime_seconds resolves the small-real runtime cap from AgentConfig.
+# 函数用途: 读取小型真实验收声明运行时长上限；0 表示关闭这个上限 finding。
+def _max_runtime_seconds(config: object | None) -> int:
+    if config is None:
+        from ..settings.config import AgentConfig
+
+        config = AgentConfig()
+    try:
+        return max(0, int(config.small_real_acceptance_max_runtime_seconds))
+    except (TypeError, ValueError):
+        return 0
 
 
 # LLM: _validate_allowed_values rejects effects or modes outside the bounded live gate.

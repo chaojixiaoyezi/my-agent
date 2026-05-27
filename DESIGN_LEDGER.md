@@ -2,6 +2,22 @@
 
 > 2026-05-27 当前路线备注：早期条目里提到的 `orchestration_contract`、`materialize_subagent_inputs`、`subagent_dispatch_closeout`、`parent_acceptance` 专项收口、`scheduling_warnings`、领域/重复目标调度提示等，都是历史试错记录。当前生产路线是：调度工具只返回 refs/tree/status，普通协作不靠中间验收门卡住；最终质量统一回到 closeout 和任务树事实。
 
+## 2026-05-27 / 运行参数继续收敛到主配置
+
+状态：本地已落地，focused tests 已跑；未提交
+
+摘要：
+- 本轮继续清理“代码里藏第二份默认值”的问题。`runner_concurrency=auto` 的上限、后台主代理上下文裁剪、conversation 读取条数、后台 claim TTL/心跳、工具输出外置阈值/预览长度、工具调用 payload 解析预算、`contracts status` 扫描预算、skill guard 扫描预算、小型真实验收 runtime 上限、真实运行复盘 report/log 大小预算，都进入 `agent_py_agent/config/agent_config.yaml` 和 `AgentConfig`。
+- 运行调用点只读取配置对象：SimpleAgent 构造 `ToolRegistryParams` 时传入工具 payload limits 和 artifact 读取预算；后台 scheduler/context 从 `agent.config` 读取会话/上下文/claim 参数；工具输出归档从 `agent.config` 读取外置和预览预算；合同状态、skill guard、小型真实验收和真实运行复盘都支持显式 `config` 参数，没有传时只回到 `AgentConfig` schema 默认。
+- 这批参数不是新硬门，也不是专项合同。它们只控制“读多少、展示多少、扫描多少、并发 auto 上限是多少”这类运行预算；改 YAML 后无需再同步改 Python 常量。
+
+验证：
+- `python3 -m pytest -q agent_py_agent/tests/test_runtime_parameter_config.py agent_py_agent/tests/test_runner_dispatch.py::TestResolveRunnerConcurrency agent_py_agent/tests/test_contract_observability.py::test_summarize_contract_status_counts_nested_findings --tb=short`
+- `python3 -m pytest -q agent_py_agent/tests/test_tool_payload_normalize_runtime.py agent_py_agent/tests/test_tool_output_externalizer.py agent_py_agent/tests/test_memory_artifact_read.py --tb=short`
+- `python3 -m pytest -q agent_py_agent/tests/test_skill_guard_gate.py agent_py_agent/tests/test_small_real_acceptance_gate.py agent_py_agent/tests/test_background_main_agent_runtime.py --tb=short`
+- `python3 -m pytest -q agent_py_agent/tests/test_settings_config.py agent_py_agent/tests/test_config_normalize.py --tb=short`
+- `python3 -m pytest -q agent_py_agent/tests/test_memory_compact_repeat_resume.py agent_py_agent/tests/test_memory_control_plane.py agent_py_agent/tests/test_memory_compact_tool_output_refs.py agent_py_agent/tests/test_main_context_bundle_contract.py --tb=short`
+
 ## 2026-05-27 / 配置单一来源与 create 默认开跑
 
 状态：本地已落地，focused tests 已跑；未提交

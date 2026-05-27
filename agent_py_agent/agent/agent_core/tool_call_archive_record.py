@@ -22,12 +22,25 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
         request_id=record.params.request_id,
         run_id=runtime_run_id(agent, record.params),
         task_id=record.params.task_id,
+        min_chars=_config_int(agent, "tool_output_externalize_min_chars"),
+        preview_chars=_config_int(agent, "tool_output_preview_chars"),
     )
     output_record = externalize_tool_output_record(request)
     output_record.update(write_tool_output_fail_safe_checkpoint(request))
     output_record["parameters"] = record.payload
     _attach_gate_and_refs(output_record, record.result)
     return output_record
+
+
+# LLM: _config_int reads archive-related tool budgets from AgentConfig.
+# 函数用途: 读取工具输出外置和 preview 预算，非法值只回退到配置 schema 默认。
+def _config_int(agent: object, key: str) -> int:
+    try:
+        return int(getattr(agent.config, key))
+    except (AttributeError, TypeError, ValueError):
+        from ..settings.config import AgentConfig
+
+        return int(getattr(AgentConfig(), key))
 
 
 # LLM: _attach_gate_and_refs copies small structured result facts into the archive row.
@@ -131,6 +144,8 @@ def _compact_result_envelope(result: object) -> dict[str, object]:
     return compact
 
 
+# LLM: _compact_artifact_integrity keeps only small artifact integrity facts in tool archive rows.
+# 函数用途: 裁剪 artifact integrity payload，避免归档里复制长 issue 或产物正文。
 def _compact_artifact_integrity(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         return {}

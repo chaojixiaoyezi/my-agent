@@ -14,8 +14,6 @@ from ..memory_archive.artifact_reader import (
     read_tool_output_artifact,
 )
 from .artifact_read_budget import (
-    DEFAULT_ARTIFACT_READ_BUDGET_MAX_CHARS,
-    DEFAULT_ARTIFACT_READ_BUDGET_WINDOW_SECONDS,
     ArtifactReadBudget,
     ArtifactReadBudgetRequest,
 )
@@ -60,15 +58,18 @@ class ReadArtifactTool(BaseTool):
         self,
         root: Path,
         *,
-        artifact_read_budget_window_seconds: int = DEFAULT_ARTIFACT_READ_BUDGET_WINDOW_SECONDS,
-        artifact_read_budget_max_chars: int = DEFAULT_ARTIFACT_READ_BUDGET_MAX_CHARS,
-        default_read_chars: int = 4000,
+        artifact_read_budget_window_seconds: int | None = None,
+        artifact_read_budget_max_chars: int | None = None,
+        default_read_chars: int | None = None,
     ):
         self.root = Path(root)
-        self.default_read_chars = max(0, int(default_read_chars))
+        self.default_read_chars = _config_int("memory_artifact_default_read_chars", default_read_chars)
         self.read_budget = ArtifactReadBudget(
-            window_seconds=artifact_read_budget_window_seconds,
-            max_chars=artifact_read_budget_max_chars,
+            window_seconds=_config_int(
+                "tool_artifact_read_budget_window_seconds",
+                artifact_read_budget_window_seconds,
+            ),
+            max_chars=_config_int("tool_artifact_read_budget_max_chars", artifact_read_budget_max_chars),
         )
 
     # LLM: execute delegates to read_tool_output_artifact and returns JSON so callers can inspect metadata.
@@ -95,7 +96,7 @@ def _read_request_from_params(
     root: Path,
     params: dict[str, Any],
     *,
-    default_read_chars: int = 4000,
+    default_read_chars: int,
 ) -> ReadToolOutputArtifactRequest:
     return ReadToolOutputArtifactRequest(
         root=root,
@@ -108,6 +109,19 @@ def _read_request_from_params(
         task_id=str(params.get("task_id") or ""),
         request_id=str(params.get("request_id") or ""),
     )
+
+
+# LLM: _config_int resolves read_artifact defaults from AgentConfig.
+# 函数用途: 读取 artifact 默认读取长度和预算窗口；调用方显式值优先，非法值回退到配置默认。
+def _config_int(key: str, value: int | None) -> int:
+    if value is not None:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            pass
+    from ..settings.config import AgentConfig
+
+    return max(0, int(getattr(AgentConfig(), key)))
 
 
 # LLM: _budget_requested_chars estimates unbounded reads from the index before loading artifact bodies.

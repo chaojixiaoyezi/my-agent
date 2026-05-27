@@ -43,6 +43,7 @@ from .registry_invoke import RegistryToolInvokeRequest, invoke_registry_tool
 from .registry_malformed_markers import malformed_tool_marker_calls
 from .registry_markers import next_tool_block_end, next_tool_block_start
 from .registry_payload_normalize import (
+    ToolPayloadNormalizeLimits,
     normalize_tool_payload,
     parse_error_payload,
     parse_tool_block_payload,
@@ -68,14 +69,45 @@ class ExecuteRegistryCallParams:
     allowed_tools: list[str] | None = None
     granted_capabilities: list[str] | None = None
     write_boundary: dict[str, object] | None = None
+    payload_limits: ToolPayloadNormalizeLimits | None = None
+
+
+# LLM: _ToolBlockParseContext bundles parser state to keep helper signatures small.
+# 类用途: 保存当前文本工具块解析的原文、输出列表和 payload 预算。
+@dataclass
+class _ToolBlockParseContext:
+    calls: list[tuple[int, dict[str, Any]]]
+    scan_text: str
+    payload_limits: ToolPayloadNormalizeLimits | None
 
 
 # LLM: parse_registry_tool_calls 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
 # 函数用途: 解析 parse_registry_tool_calls 数据结构。
-def parse_registry_tool_calls(text: str) -> list[dict[str, Any]]:
+def parse_registry_tool_calls(
+    text: str,
+    *,
+    payload_limits: ToolPayloadNormalizeLimits | None = None,
+) -> list[dict[str, Any]]:
 
     scan_text = mask_protected_control_ranges(text)
+    calls = _parse_tool_block_calls(scan_text, payload_limits=payload_limits)
+    calls.extend(malformed_tool_marker_calls(scan_text))
+    calls.extend(parse_write_file_raw_blocks(scan_text))
+    calls.extend(malformed_file_write_raw_block_calls(scan_text))
+    calls.extend(parse_xmlish_tool_calls(scan_text))
+    calls.sort(key=lambda item: item[0])
+    return [payload for _, payload in calls]
+
+
+# LLM: _parse_tool_block_calls extracts JSON tool blocks while preserving source order.
+# 函数用途: 解析 `[TOOL_CALL]...[/TOOL_CALL]` 块，并把缺结束标记、嵌套坏块转成结构化 parse error。
+def _parse_tool_block_calls(
+    scan_text: str,
+    *,
+    payload_limits: ToolPayloadNormalizeLimits | None,
+) -> list[tuple[int, dict[str, Any]]]:
     calls: list[tuple[int, dict[str, Any]]] = []
+    context = _ToolBlockParseContext(calls=calls, scan_text=scan_text, payload_limits=payload_limits)
     cursor = 0
     while True:
         start_info = next_tool_block_start(scan_text, cursor)
@@ -85,36 +117,51 @@ def parse_registry_tool_calls(text: str) -> list[dict[str, Any]]:
         body_start = start + len(marker_start)
         end_info = next_tool_block_end(scan_text, body_start)
         if end_info is None:
-            raw = scan_text[body_start:].strip().strip("`")
-            payload = parse_tool_block_payload(raw)
-            calls.append(
-                (
-                    start,
-                    parse_error_payload("工具调用缺少结束标记 [/TOOL_CALL]", raw)
-                    if payload.get("tool") == "__parse_error__"
-                    else payload,
-                )
-            )
+            _append_unclosed_tool_block(context, start, body_start)
             break
-        end, marker_end = end_info
-        raw = scan_text[body_start:end].strip().strip("`")
-        payload = parse_tool_block_payload(raw)
-        nested_start_info = next_tool_block_start(scan_text, body_start)
-        if payload.get("tool") == "__parse_error__" and nested_start_info and nested_start_info[0] < end:
-            nested_start = nested_start_info[0]
-            malformed_raw = scan_text[body_start:nested_start].strip().strip("`")
-            calls.append((start, parse_error_payload("工具调用缺少结束标记 [/TOOL_CALL]", malformed_raw)))
-            cursor = nested_start
-            continue
-        calls.append((start, payload))
-        cursor = end + len(marker_end)
+        cursor = _append_closed_tool_block(context, start, body_start, end_info)
+    return calls
 
-    calls.extend(malformed_tool_marker_calls(scan_text))
-    calls.extend(parse_write_file_raw_blocks(scan_text))
-    calls.extend(malformed_file_write_raw_block_calls(scan_text))
-    calls.extend(parse_xmlish_tool_calls(scan_text))
-    calls.sort(key=lambda item: item[0])
-    return [payload for _, payload in calls]
+
+# LLM: _append_unclosed_tool_block records a missing-end-marker parse error without aborting parsing.
+# 函数用途: 处理没有 `[/TOOL_CALL]` 的尾部工具块，并保留可解析 payload 时的兼容结果。
+def _append_unclosed_tool_block(
+    context: _ToolBlockParseContext,
+    start: int,
+    body_start: int,
+) -> None:
+    raw = context.scan_text[body_start:].strip().strip("`")
+    payload = parse_tool_block_payload(raw, limits=context.payload_limits)
+    context.calls.append((
+        start,
+        parse_error_payload("工具调用缺少结束标记 [/TOOL_CALL]", raw, limits=context.payload_limits)
+        if payload.get("tool") == "__parse_error__"
+        else payload,
+    ))
+
+
+# LLM: _append_closed_tool_block records one complete tool block and returns the next cursor.
+# 函数用途: 处理完整工具块；嵌套坏块时把坏块转成 parse error 并让外层循环从嵌套处继续。
+def _append_closed_tool_block(
+    context: _ToolBlockParseContext,
+    start: int,
+    body_start: int,
+    end_info: tuple[int, str],
+) -> int:
+    end, marker_end = end_info
+    raw = context.scan_text[body_start:end].strip().strip("`")
+    payload = parse_tool_block_payload(raw, limits=context.payload_limits)
+    nested_start_info = next_tool_block_start(context.scan_text, body_start)
+    if payload.get("tool") == "__parse_error__" and nested_start_info and nested_start_info[0] < end:
+        nested_start = nested_start_info[0]
+        malformed_raw = context.scan_text[body_start:nested_start].strip().strip("`")
+        context.calls.append((
+            start,
+            parse_error_payload("工具调用缺少结束标记 [/TOOL_CALL]", malformed_raw, limits=context.payload_limits),
+        ))
+        return nested_start
+    context.calls.append((start, payload))
+    return end + len(marker_end)
 
 
 # LLM: parse_registry_tool_call_envelopes is the typed bridge for legacy text tool calls.
@@ -147,7 +194,7 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
     if not gate_decision.allowed:
         return runtime_gate_block_result(normalized_payload, gate_decision, envelope)
     try:
-        tool_name = normalize_tool_name(normalized_payload.get("tool"))
+        tool_name = normalize_tool_name(normalized_payload.get("tool"), limits=call.payload_limits)
     except ValueError as exc:
         return attach_result_envelope(ToolExecutionResult("unknown", False, str(exc)), envelope)
     auth_error = _registry_auth_error(tool_name, call)
@@ -160,10 +207,14 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
 
 # LLM: _prepare_tool_payload 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
 # 函数用途: 整理工具调用的 prepare_tool_payload 信息，供注册表鉴权或执行使用。
-def _prepare_tool_payload(payload: object) -> dict[str, Any] | ToolExecutionResult:
+def _prepare_tool_payload(
+    payload: object,
+    *,
+    limits: ToolPayloadNormalizeLimits | None,
+) -> dict[str, Any] | ToolExecutionResult:
     if isinstance(payload, ToolCallEnvelope):
         payload = payload_from_tool_call_envelope(payload)
-    normalized_payload, payload_error = normalize_tool_payload(payload)
+    normalized_payload, payload_error = normalize_tool_payload(payload, limits=limits)
     if payload_error:
         return ToolExecutionResult("unknown", False, payload_error)
     assert normalized_payload is not None
@@ -176,7 +227,7 @@ def _normalized_payload_or_error(
     call: ExecuteRegistryCallParams,
     envelope: ToolCallEnvelope | None,
 ) -> dict[str, Any] | ToolExecutionResult:
-    prepared = _prepare_tool_payload(envelope or call.payload)
+    prepared = _prepare_tool_payload(envelope or call.payload, limits=call.payload_limits)
     if isinstance(prepared, ToolExecutionResult):
         return attach_result_envelope(prepared, envelope)
     if prepared.get("tool") == "__parse_error__":

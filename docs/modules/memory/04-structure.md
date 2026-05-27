@@ -130,7 +130,8 @@ agent_py_agent/cli/
 - `subagents/services/session_progress.py`：子代理 runner 的 task-local 工具进度层。成功写文件后会在 `agents/<run_id>/progress/` 写 `latest_tool_progress.json` 和 `tool_progress.jsonl`，让 compact/retry 能看到最近写入路径、章节标题和下一步，避免重复写已完成部分。
 - `subagents/services/subagent_session_compact.py`：子代理本地 session compact package 写入层。子代理 runner 的 compact 信号会写进当前 run workspace 的 `compactions/session/`、package refs、`latest_metadata.json` 和 `latest_summary.md`，不写主代理 `memory_archive/compact_applies`；continue packet 会引用这些 task-local refs。
 - `agent_core/finalization_compact_auto.py`：从 finalization 主文件拆出的 compact auto 字段投影层；负责 run 收尾触发 auto cycle、把 continue packet 暴露到 `AgentRunResult`，以及续跑轮跳过再次 compact 的固定字段。
-- `memory_archive/tool_output_externalizer.py`：在工具循环归档时把超过阈值的大工具输出写成 `memory_archive/artifacts/tool_outputs/<tool>-<call>-<hash>.json`，并追加 `index.jsonl`；archive/tool event 只保存 preview/hash/path/size。
+- `memory_archive/tool_output_externalizer.py`：在工具循环归档时把超过阈值的大工具输出写成 `memory_archive/artifacts/tool_outputs/<tool>-<call>-<hash>.json`，并追加 `index.jsonl`；外置阈值和 preview 长度来自 `AgentConfig`，archive/tool event 只保存 preview/hash/path/size。
+- `memory_archive/artifact_reader.py`、`memory_archive/artifact_read_modes.py` 和 `tooling/artifact.py`：`read_artifact` 只读已登记 artifact，默认读取长度和滚动读取预算来自 `AgentConfig`；调用方显式传 `max_chars=0` 才读取完整正文。
 - `agent_core/tool_output_failsafe.py`：在调用 tool output externalizer 前写 recovery snapshot，保留工具名、hash、大小、run/task/request id 和下一步建议；完整输出正文仍只在 artifact 文件里。
 - `agent_core/tool_context_reducer.py`：控制工具结果进入下一轮 live prompt 的形态；大输出只注入 preview、artifact path、hash、size 和 fail-safe checkpoint，小输出仍保留原始工具结果文本。
 - `memory_archive/snapshots/_helpers.py`：把 snapshot 中的工具调用压成恢复安全 metadata；现在会保留 output hash、size 和 externalized 状态，不保存正文。
@@ -143,7 +144,7 @@ agent_py_agent/cli/
 - `memory_archive/runtime_fact_source.py`：真实 `run --save` 会写 `memory_archive/runtime_facts/<request_id>/task.json`，记录 goal、next_actions、运行状态，以及用户 prompt 中明确标注的 acceptance/constraints/latest_tests；`memory-fact-write` 也会把用户确认的补全事实写入同类 `task.json`。普通模型回复不会被解析成验收事实。
 - `docs/modules/memory/06-runtime-memory-requirements.md`：定义 memory 作为运行时档案系统的开发要求，明确主代理长期记忆、每日账本、task workspace、agent run workspace、artifact、checkpoint、compact 和 retention 的边界。
 - `memory_archive/resume_brief.py`：把归档、LocalStore、任务事实源压成恢复简报。
-- `memory_archive/resume_context.py`：在“继续/恢复”类提示里按配置构造自动注入的恢复上下文。
+- `memory_archive/resume_context.py`：在“继续/恢复”类提示里按配置构造自动注入的恢复上下文；自动恢复条数、归档扫描条数和文件扫描条数都来自 `AgentConfig`。
 - `memory_archive/tokens.py`：为归档预算提供保守 token 估算，并维护 session 级 token 账本。
 - `memory_archive/compact.py`：构建只读 compact plan，汇总 raw/hook、权威 snapshot、token ledger、风险和建议动作。
 - `cli/memory_commands.py`：给用户和开发者看 route/doctor 结果。

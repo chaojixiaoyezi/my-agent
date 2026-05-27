@@ -25,8 +25,6 @@ from .schema import (
     runtime_memory_schema_payload,
 )
 
-DEFAULT_EXTERNALIZE_MIN_CHARS = 1200
-OUTPUT_PREVIEW_CHARS = 500
 TOOL_OUTPUT_RECORD_SCHEMA = RuntimeMemorySchemaOptions("tool_output_archive_record")
 TOOL_OUTPUT_ARTIFACT_SCHEMA = RuntimeMemorySchemaOptions("tool_output_artifact")
 TOOL_OUTPUT_INDEX_SCHEMA = RuntimeMemorySchemaOptions("tool_output_index")
@@ -44,7 +42,8 @@ class ExternalizeToolOutputRequest:
     run_id: str = ""
     task_id: str = ""
     request_id: str = ""
-    min_chars: int = DEFAULT_EXTERNALIZE_MIN_CHARS
+    min_chars: int = -1
+    preview_chars: int = -1
 
 
 # LLM: externalize_tool_output_record 是 runtime 工具输出进入 memory archive artifact 的唯一入口。
@@ -52,11 +51,12 @@ class ExternalizeToolOutputRequest:
 def externalize_tool_output_record(request: ExternalizeToolOutputRequest) -> dict[str, Any]:
     output = str(request.output or "")
     digest = _sha256_text(output)
-    record = _base_record(request, output, digest)
+    resolved = _resolved_request_limits(request)
+    record = _base_record(request, output, digest, preview_chars=resolved.preview_chars)
     if _is_bounded_read_artifact_output(request, output):
         record.update(_read_artifact_record_fields(output))
         return record
-    if len(output) >= max(0, int(request.min_chars)):
+    if len(output) >= max(0, int(resolved.min_chars)):
         path = _write_output_artifact(request, output, digest)
         record.update({
             "output_externalized": True,
@@ -68,7 +68,39 @@ def externalize_tool_output_record(request: ExternalizeToolOutputRequest) -> dic
 
 # LLM: _base_record 保持归档记录短小稳定；永远不把完整工具输出塞进返回 dict。
 # 函数用途: 生成工具输出摘要字段，包括 preview、hash、size、状态和保留扩展字段。
-def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str) -> dict[str, Any]:
+# LLM: _ResolvedOutputLimits carries output archive budgets after config resolution.
+# 类用途: 保存工具输出外置阈值和归档预览长度，确保外置链路只认一套配置。
+@dataclass(frozen=True)
+class _ResolvedOutputLimits:
+    min_chars: int
+    preview_chars: int
+
+
+# LLM: _resolved_request_limits merges per-call overrides with AgentConfig archive defaults.
+# 函数用途: 解析工具输出归档预算；调用方未显式传值时使用主配置，不在本模块写死阈值。
+def _resolved_request_limits(request: ExternalizeToolOutputRequest) -> _ResolvedOutputLimits:
+    from ..settings.config import AgentConfig
+
+    defaults = AgentConfig()
+    return _ResolvedOutputLimits(
+        min_chars=_request_limit(request.min_chars, defaults.tool_output_externalize_min_chars),
+        preview_chars=_request_limit(request.preview_chars, defaults.tool_output_preview_chars),
+    )
+
+
+# LLM: _request_limit interprets negative values as "use AgentConfig fallback" for archive budgets.
+# 函数用途: 归一化单个工具输出预算字段；0 保留为显式配置值，不自动回到默认。
+def _request_limit(value: object, fallback: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = -1
+    return int(fallback) if parsed < 0 else max(0, parsed)
+
+
+# LLM: _base_record keeps archive rows compact and uses the resolved preview budget.
+# 函数用途: 生成工具输出摘要字段，包括 preview、hash、size、状态和保留扩展字段。
+def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str, *, preview_chars: int) -> dict[str, Any]:
     return {
         "version": TOOL_OUTPUT_RECORD_SCHEMA.version,
         "schema": runtime_memory_schema_payload(TOOL_OUTPUT_RECORD_SCHEMA),
@@ -80,7 +112,7 @@ def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str
         "task_id": request.task_id,
         "scoped_call_id": _scoped_call_id(request),
         "ok": request.ok,
-        "output_preview": _preview(output),
+        "output_preview": _preview(output, preview_chars),
         "output_hash": digest,
         "output_size_bytes": len(output.encode("utf-8")),
         "output_externalized": False,
@@ -155,10 +187,12 @@ def _artifact_path(request: ExternalizeToolOutputRequest, digest: str) -> Path:
 
 # LLM: _preview 控制归档预览长度；完整内容只能去 artifact 文件读取。
 # 函数用途: 截断工具输出为可读预览，避免 raw event 和 token ledger 被大输出撑大。
-def _preview(output: str) -> str:
-    if len(output) <= OUTPUT_PREVIEW_CHARS:
+def _preview(output: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    if len(output) <= max_chars:
         return output
-    return output[:OUTPUT_PREVIEW_CHARS] + f"\n... [truncated {len(output) - OUTPUT_PREVIEW_CHARS} chars]"
+    return output[:max_chars] + f"\n... [truncated {len(output) - max_chars} chars]"
 
 
 # LLM: _sha256_text 提供内容寻址和完整性校验所需的稳定 hash。

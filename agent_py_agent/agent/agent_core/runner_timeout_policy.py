@@ -63,7 +63,11 @@ def resolve_runner_config(config: Any, job_count: int) -> tuple[float, int, int]
     runner_start_rate = _resolve_runner_start_rate(config.runner_start_rate, job_count)
     if runner_start_rate and runner_start_rate < job_count:
         job_count = runner_start_rate
-    runner_concurrency = _resolve_runner_concurrency(config.runner_concurrency, job_count)
+    runner_concurrency = _resolve_runner_concurrency(
+        config.runner_concurrency,
+        job_count,
+        auto_limit=getattr(config, "runner_auto_concurrency", job_count),
+    )
     runner_timeout_seconds = _resolve_runner_timeout_seconds(config.runner_timeout_seconds)
     return runner_timeout_seconds, runner_concurrency, runner_start_rate
 

@@ -95,6 +95,8 @@ pending/<id>.json
 
 这样 Windows 深路径、临时文件写入失败或监控层抖动不会把用户请求卡死在 processing。
 
+lease heartbeat 间隔和 processing timeout 来自 `AgentConfig`。如果配置非法，lease helper 只回退到配置 schema 默认；不要在 `gateway_parts/lease.py` 或 `gateway_parts/lease_service.py` 里再写一套隐藏数字。
+
 ### stale lease 恢复
 
 如果 worker 中断，`processing/<id>.json` 里的 `lease_heartbeat_at` 会停住。恢复逻辑按 lease 新鲜度判断下一步：

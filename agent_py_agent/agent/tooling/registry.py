@@ -11,16 +11,12 @@ from __future__ import annotations
 再按授权和写入边界把请求分发给真正的工具。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..log_analysis.capabilities import SECURITY_TOOL_NAMES
 from .artifact import ReadArtifactTool
-from .artifact_read_budget import (
-    DEFAULT_ARTIFACT_READ_BUDGET_MAX_CHARS,
-    DEFAULT_ARTIFACT_READ_BUDGET_WINDOW_SECONDS,
-)
 from .content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
     tool_content_transport_protocol,
@@ -40,10 +36,19 @@ from .registry_execution import (
     security_tools_visible,
 )
 from .registry_list_tools import ListToolsTool
+from .registry_payload_normalize import ToolPayloadNormalizeLimits
 from .registry_prompt import render_tool_catalog_section
 
 _allowed_tool_set = allowed_tool_set
 _DEFAULT_HIDDEN_TOOL_NAMES = frozenset({"controlled_exec", "fetch_url"})
+
+
+# LLM: _agent_config_int resolves ToolRegistry default budgets from AgentConfig.
+# 函数用途: 读取 artifact 读取预算等工具注册表默认值，避免注册层保留隐藏数字。
+def _agent_config_int(key: str) -> int:
+    from ..settings.config import AgentConfig
+
+    return int(getattr(AgentConfig(), key))
 
 
 # LLM: ToolRegistryParams 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
@@ -72,9 +77,16 @@ class ToolRegistryParams:
     tool_detail_max_chars: int = 0
     tool_write_inline_max_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS
     expose_security_tools: bool = False
-    artifact_read_budget_window_seconds: int = DEFAULT_ARTIFACT_READ_BUDGET_WINDOW_SECONDS
-    artifact_read_budget_max_chars: int = DEFAULT_ARTIFACT_READ_BUDGET_MAX_CHARS
-    artifact_default_read_chars: int = 4000
+    artifact_read_budget_window_seconds: int = field(
+        default_factory=lambda: _agent_config_int("tool_artifact_read_budget_window_seconds")
+    )
+    artifact_read_budget_max_chars: int = field(
+        default_factory=lambda: _agent_config_int("tool_artifact_read_budget_max_chars")
+    )
+    artifact_default_read_chars: int = field(
+        default_factory=lambda: _agent_config_int("memory_artifact_default_read_chars")
+    )
+    payload_limits: ToolPayloadNormalizeLimits | None = None
 
 # LLM: ToolRegistry 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
 # 类用途: ToolRegistry 数据模型，集中保存 工具系统 的结构化状态。
@@ -100,6 +112,7 @@ class ToolRegistry:
         self.catalog_entry_max_chars = max(0, params.catalog_entry_max_chars)
         self.catalog_show_truncated_notice = params.catalog_show_truncated_notice
         self.tool_detail_max_chars = max(0, params.tool_detail_max_chars)
+        self.payload_limits = params.payload_limits
         self.retrieval_limit = params.retrieval_limit
         self.retriever = build_tool_retriever(params)
         register_base_tools(self, params)
@@ -241,7 +254,7 @@ class ToolRegistry:
     # LLM: ToolRegistry.parse_tool_calls 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 解析 parse_tool_calls 数据结构。
     def parse_tool_calls(self, text: str) -> list[dict[str, Any]]:
-        return parse_registry_tool_calls(text)
+        return parse_registry_tool_calls(text, payload_limits=self.payload_limits)
 
     # LLM: ToolRegistry.execute_call 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 完成 工具系统 中的 execute_call 步骤，并保持调用方依赖的数据形状。
@@ -264,5 +277,6 @@ class ToolRegistry:
                 allowed_tools=allowed_tools,
                 granted_capabilities=granted_capabilities,
                 write_boundary=write_boundary,
+                payload_limits=self.payload_limits,
             )
         )

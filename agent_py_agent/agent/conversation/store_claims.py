@@ -17,7 +17,7 @@ class ConversationClaimStore(ConversationProgressStore):
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)
         current = current_time(request.get("now"))
-        lease = max(1, int(request.get("lease_seconds") or 900))
+        lease = _claim_lease_seconds(request.get("lease_seconds"))
         claim = _new_claim(thread.thread_id, str(request.get("reason") or ""), current, lease)
         claimed = False
 
@@ -37,7 +37,7 @@ class ConversationClaimStore(ConversationProgressStore):
         claim_id = str(request.get("claim_id") or "")
         self._require_thread(thread_id)
         current = current_time(request.get("now"))
-        lease = max(1, int(request.get("lease_seconds") or 900))
+        lease = _claim_lease_seconds(request.get("lease_seconds"))
         renewed = False
 
         def updater(data: dict[str, Any]) -> dict[str, Any]:
@@ -72,3 +72,18 @@ class ConversationClaimStore(ConversationProgressStore):
 
 def _new_claim(thread_id: str, reason: str, current: float, lease: int) -> dict[str, Any]:
     return {"schema_version": "background_run_claim.v1", "claim_id": new_id("bgclaim"), "thread_id": thread_id, "reason": str(reason or ""), "status": "running", "started_at": current, "heartbeat_at": current, "expires_at": current + lease}
+
+
+# LLM: _claim_lease_seconds keeps background run claim TTL sourced from AgentConfig.
+# 函数用途: 解析一次后台 claim 的租约秒数；缺失或非法时使用配置 schema 默认。
+def _claim_lease_seconds(value: object) -> int:
+    if value is None or value == "":
+        from ..settings.config import AgentConfig
+
+        value = AgentConfig().background_claim_ttl_seconds
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        from ..settings.config import AgentConfig
+
+        return max(1, int(AgentConfig().background_claim_ttl_seconds))

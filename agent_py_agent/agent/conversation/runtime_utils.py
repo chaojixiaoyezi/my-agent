@@ -30,8 +30,8 @@ def json_block(value: Any) -> str:
     return "```json\n" + json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n```"
 
 
-def pending_wake_payload(store: ConversationStore, thread_id: str) -> list[dict[str, Any]]:
-    return [item.to_dict() for item in store.pending_wake_signals(limit=20) if item.thread_id == thread_id]
+def pending_wake_payload(store: ConversationStore, thread_id: str, *, limit: int) -> list[dict[str, Any]]:
+    return [item.to_dict() for item in store.pending_wake_signals(limit=limit) if item.thread_id == thread_id]
 
 
 def wake_signal_payload(signal: WakeSignal | dict[str, Any] | None) -> dict[str, Any] | None:

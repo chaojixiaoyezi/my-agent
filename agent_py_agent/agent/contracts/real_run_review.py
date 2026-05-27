@@ -3,27 +3,27 @@
 
 from __future__ import annotations
 
-import json
-import re
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
+from .real_run_review_fact_scan import CollectedFacts, json_facts, marker_facts, review_scan_limits
 from .real_run_review_models import FailurePattern, RealRunRecord, RealRunReview
 from .real_run_review_render import render_real_run_review_markdown
 from .real_run_review_rules import P0_TAGS, P1_TAGS, STAGE_BY_TAG, TAG_RULES
 
-_MARKER_RE = re.compile(r"\[([A-Z][A-Z0-9_]+)\]")
-_REPORT_NAME_PARTS = ("report", "acceptance", "validation", "execution")
-_LOG_NAMES = {"stdout.txt", "stderr.txt", "events.jsonl"}
-_MAX_REPORT_BYTES = 5_000_000
-_MAX_LOG_BYTES = 1_000_000
 
 # LLM: review_real_run_tree scans one root for run directories and returns structured review facts.
 # 函数用途: 复盘某个真实运行根目录下的 run；只读文件，不启动模型、不调用真实工具。
-def review_real_run_tree(root: Path, *, run_glob: str = "*") -> RealRunReview:
+def review_real_run_tree(
+    root: Path,
+    *,
+    run_glob: str = "*",
+    config: object | None = None,
+) -> RealRunReview:
     run_dirs = tuple(path for path in sorted(Path(root).expanduser().glob(run_glob)) if path.is_dir())
-    records = tuple(review_real_run_directory(path, review_root=Path(root).expanduser()) for path in run_dirs)
+    records = tuple(
+        review_real_run_directory(path, review_root=Path(root).expanduser(), config=config)
+        for path in run_dirs
+    )
     return RealRunReview(
         summary=_summary(records),
         records=records,
@@ -33,14 +33,20 @@ def review_real_run_tree(root: Path, *, run_glob: str = "*") -> RealRunReview:
 
 # LLM: review_real_run_directory reads reports and logs from one run directory.
 # 函数用途: 把单个真实运行目录规整成一行复盘记录，所有结论来自结构化报告和机器标记。
-def review_real_run_directory(run_dir: Path, *, review_root: Path | None = None) -> RealRunRecord:
+def review_real_run_directory(
+    run_dir: Path,
+    *,
+    review_root: Path | None = None,
+    config: object | None = None,
+) -> RealRunRecord:
     root = Path(run_dir).expanduser()
     review_base = review_root or root.parent
-    json_facts = _json_facts(root)
-    marker_facts = _marker_facts(root)
-    codes = _ordered_unique(json_facts.codes + marker_facts.codes)
+    limits = review_scan_limits(config)
+    json_report_facts = json_facts(root, max_report_bytes=limits.max_report_bytes)
+    marker_report_facts = marker_facts(root, max_log_bytes=limits.max_log_bytes)
+    codes = _ordered_unique(json_report_facts.codes + marker_report_facts.codes)
     tags = _tags_for_codes(codes)
-    status = _final_status(json_facts)
+    status = _final_status(json_report_facts)
     task_types = _task_types(root)
     first_code = codes[0] if codes else ""
     return RealRunRecord(
@@ -53,7 +59,7 @@ def review_real_run_directory(run_dir: Path, *, review_root: Path | None = None)
         failure_stage=_failure_stage(tags),
         root_cause_tags=tags,
         priority=_priority(tags, status),
-        evidence_refs=_ordered_unique(json_facts.refs + marker_facts.refs),
+        evidence_refs=_ordered_unique(json_report_facts.refs + marker_report_facts.refs),
         has_offline_regression_test=False,
         recommended_offline_test=_recommended_test(tags, first_code),
         missing_artifact="artifact_missing" in tags,
@@ -82,169 +88,9 @@ def cluster_real_run_failures(records: tuple[RealRunRecord, ...]) -> tuple[Failu
     return tuple(sorted(patterns, key=lambda item: (_priority_rank(item.priority), -item.count, item.tag)))
 
 
-# LLM: _CollectedFacts stores structured runtime facts for the surrounding contract logic.
-# 类用途: 保存当前模块使用的结构化字段，避免后续流程从普通自然语言推断机器事实。
-@dataclass(frozen=True)
-class _CollectedFacts:
-    codes: tuple[str, ...]
-    refs: tuple[str, ...]
-    ok_values: tuple[bool, ...]
-
-
-# LLM: _json_facts extracts codes and ok flags from bounded JSON reports.
-# 函数用途: 扫描 run 目录中的报告 JSON，只读取机器字段并记录证据路径。
-def _json_facts(root: Path) -> _CollectedFacts:
-    codes: list[str] = []
-    refs: list[str] = []
-    ok_values: list[bool] = []
-    for path in _candidate_json_files(root):
-        payload = _read_json(path)
-        if payload is None:
-            continue
-        path_codes = _codes_from_payload(payload)
-        path_ok_values = _ok_values(payload)
-        if path_codes or path_ok_values:
-            refs.append(_rel(path, root))
-        codes.extend(path_codes)
-        ok_values.extend(path_ok_values)
-    return _CollectedFacts(
-        codes=_ordered_unique(codes),
-        refs=tuple(refs),
-        ok_values=tuple(ok_values),
-    )
-
-
-# LLM: _marker_facts extracts bracketed runtime markers from bounded text logs.
-# 函数用途: 从 stdout/stderr/events 中读取 `[CODE]` 机器标记，避免把普通日志正文当事实。
-def _marker_facts(root: Path) -> _CollectedFacts:
-    codes: list[str] = []
-    refs: list[str] = []
-    for path in _candidate_log_files(root):
-        if not _size_allowed(path, _MAX_LOG_BYTES):
-            continue
-        content = path.read_text(encoding="utf-8", errors="replace")
-        path_codes = [code for code in _MARKER_RE.findall(content) if _is_failure_marker(code)]
-        if path_codes:
-            refs.append(_rel(path, root))
-            codes.extend(path_codes)
-    return _CollectedFacts(codes=_ordered_unique(codes), refs=tuple(refs), ok_values=())
-
-
-# LLM: _candidate_json_files chooses bounded report-like JSON files from a run directory.
-# 函数用途: 找出可复盘 JSON 报告，避免把全部临时数据当合同事实。
-def _candidate_json_files(root: Path) -> tuple[Path, ...]:
-    paths = [
-        path
-        for path in root.rglob("*.json")
-        if any(part in path.name for part in _REPORT_NAME_PARTS) and _size_allowed(path, _MAX_REPORT_BYTES)
-    ]
-    return tuple(sorted(paths))
-
-
-# LLM: _candidate_log_files chooses stdout/stderr/events ledgers that may contain machine markers.
-# 函数用途: 找出可复盘文本日志，只用于 bracketed marker 提取。
-def _candidate_log_files(root: Path) -> tuple[Path, ...]:
-    return tuple(sorted(path for path in root.rglob("*") if path.is_file() and path.name in _LOG_NAMES))
-
-
-# LLM: _read_json returns None for malformed reports instead of crashing the whole review.
-# 函数用途: 读取单个 JSON 报告；损坏报告由缺失 evidence 体现，不让复盘中断。
-def _read_json(path: Path) -> Any | None:
-    try:
-        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except json.JSONDecodeError:
-        return None
-
-
-# LLM: _codes_from_payload recursively reads known machine-code fields only.
-# 函数用途: 从报告结构中提取 code/error_code/issues 等机器字段，不解析 message/detail 文案。
-def _codes_from_payload(payload: Any) -> tuple[str, ...]:
-    codes: list[str] = []
-    _collect_codes(payload, codes)
-    return tuple(codes)
-
-
-# LLM: _collect_codes walks JSON values looking for stable error-code fields.
-# 函数用途: 递归收集结构化错误码，保留出现顺序用于 first_failure_code。
-def _collect_codes(value: Any, codes: list[str]) -> None:
-    if isinstance(value, list):
-        _collect_codes_from_list(value, codes)
-        return
-    if not isinstance(value, dict):
-        return
-    _collect_code_fields(value, codes)
-    _collect_codes_from_list(list(value.values()), codes)
-
-
-# LLM: _collect_code_fields extracts code carriers from one JSON object.
-# 函数用途: 只读明确 code 字段，避免递归函数自身过深。
-def _collect_code_fields(value: dict[str, Any], codes: list[str]) -> None:
-    for key in ("code", "error_code"):
-        _append_code_value(value.get(key), codes)
-    for key in ("error_codes", "issues", "warning_codes", "blocker_codes"):
-        _append_code_value(value.get(key), codes)
-
-
-# LLM: _collect_codes_from_list applies code extraction to a flat sequence.
-# 函数用途: 把 list/object 递归拆成浅层 helper，降低合同检查的嵌套深度。
-def _collect_codes_from_list(values: list[Any], codes: list[str]) -> None:
-    for child in values:
-        _collect_codes(child, codes)
-
-
-# LLM: _append_code_value accepts scalar and list code carriers.
-# 函数用途: 把结构化错误码字段规整为大写 code 字符串。
-def _append_code_value(value: Any, codes: list[str]) -> None:
-    if isinstance(value, str) and _looks_like_code(value):
-        codes.append(value)
-    if isinstance(value, list):
-        for item in value:
-            _append_code_value(item, codes)
-
-
-# LLM: _looks_like_code filters out ordinary prose before a value becomes a machine fact.
-# 函数用途: 只接受稳定 code 形态，防止误把展示文案当运行事实。
-def _looks_like_code(value: str) -> bool:
-    return bool(re.fullmatch(r"[A-Z][A-Z0-9_]{2,}", value.strip()))
-
-
-# LLM: _is_failure_marker accepts only runtime markers that participate in failure clustering.
-# 函数用途: 过滤普通工具事件标记，防止 `[TOOL_CALL]` 这类进度事件变成失败事实。
-def _is_failure_marker(code: str) -> bool:
-    return any(code.startswith(prefix) for _, prefixes in TAG_RULES for prefix in prefixes)
-
-
-# LLM: _ok_values reads boolean ok fields from nested reports.
-# 函数用途: 提取验收/报告中的 ok=true/false，供 final_status 计算。
-def _ok_values(payload: Any) -> tuple[bool, ...]:
-    values: list[bool] = []
-    _collect_ok_values(payload, values)
-    return tuple(values)
-
-
-# LLM: _collect_ok_values recursively extracts boolean ok values.
-# 函数用途: 遍历报告树，记录所有布尔 ok 字段。
-def _collect_ok_values(value: Any, values: list[bool]) -> None:
-    if isinstance(value, list):
-        _collect_ok_values_from_list(value, values)
-        return
-    if not isinstance(value, dict):
-        return
-    if isinstance(value.get("ok"), bool):
-        values.append(value["ok"])
-    _collect_ok_values_from_list(list(value.values()), values)
-
-
-# LLM: _collect_ok_values_from_list applies ok extraction to a flat sequence.
-# 函数用途: 拆分递归遍历，避免状态提取 helper 自身出现深嵌套。
-def _collect_ok_values_from_list(items: list[Any], values: list[bool]) -> None:
-    for child in items:
-        _collect_ok_values(child, values)
-
-
 # LLM: _final_status derives run status from report ok booleans only.
 # 函数用途: 把报告中的 ok 字段转成 PASSED/FAILED/UNKNOWN，避免读最终聊天总结。
-def _final_status(facts: _CollectedFacts) -> str:
+def _final_status(facts: CollectedFacts) -> str:
     if any(value is False for value in facts.ok_values):
         return "FAILED"
     if facts.ok_values and all(value is True for value in facts.ok_values):
@@ -342,15 +188,6 @@ def _ordered_unique(values: list[str] | tuple[str, ...]) -> tuple[str, ...]:
         seen.add(value)
         result.append(value)
     return tuple(result)
-
-
-# LLM: _size_allowed prevents huge artifacts from being parsed as control reports.
-# 函数用途: 限制复盘读取文件大小，保护本地验收速度和内存。
-def _size_allowed(path: Path, limit: int) -> bool:
-    try:
-        return path.stat().st_size <= limit
-    except OSError:
-        return False
 
 
 # LLM: _rel emits stable relative refs when possible.

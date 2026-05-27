@@ -2,6 +2,7 @@
 
 ## 已完成
 
+- 2026-05-27 Memory 读取预算已回到主配置：artifact 默认读取长度、artifact 读取预算、工具输出外置阈值/预览长度、自动恢复上下文扫描 limit 都从 `agent_config.yaml` / `AgentConfig` 读取；memory 模块不再保留第二份隐藏默认数字。
 - 2026-05-26 Resume trigger public helper 已落地：`memory_archive.has_resume_trigger()` 现在可被 prompt/context 选择逻辑复用，只判断用户是否明确要求继续/恢复旧任务，不读取 archive 正文，也不会自动恢复。
 - 2026-05-14 Compact Continue Packet typed envelope 第一片已落地：`memory-resume --from-compact` 返回的 continue packet 仍保留旧字段，同时新增 `typed_envelope.kind=compact_continue_packet`，把 apply/plan、work_state、guard、next_actions 和 recommended_read_paths 转成机器可读恢复包；它仍不执行工具、不改任务状态。
 - 2026-05-17 Main Agent Context Bundle 与手动 compact/resume 对齐已落地：主代理保存型 run 会写 `Main Agent Context Bundle v1`；`memory-compact --apply` 会登记最近一次主代理任务卡，API 可显式传 `main_context_bundle_ref`；`memory-resume --from-compact` 会把这张任务卡放进 `main_context_bundle`、推荐读取路径、handoff/context block 和 continue packet。旧 apply 包没有该字段也可继续恢复。

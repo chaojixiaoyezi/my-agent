@@ -6,8 +6,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-DEFAULT_ARTIFACT_READ_CHARS = 4000
-
 
 # LLM: ArtifactContentReadRequest bundles mode-specific read fields without importing artifact_reader.
 # 类用途: 保存 artifact 正文窄读所需的 mode、offset、max_chars 和 query。
@@ -16,7 +14,7 @@ class ArtifactContentReadRequest:
     content: str
     mode: str = "slice"
     offset: int = 0
-    max_chars: int = DEFAULT_ARTIFACT_READ_CHARS
+    max_chars: int = -1
     query: str = ""
 
 
@@ -28,7 +26,7 @@ class ArtifactContentReadResult:
     mode: str
     content: str = ""
     offset: int = 0
-    max_chars: int = DEFAULT_ARTIFACT_READ_CHARS
+    max_chars: int = -1
     truncated: bool = False
     metadata: dict[str, Any] | None = None
     error_code: str = ""
@@ -39,7 +37,7 @@ class ArtifactContentReadResult:
 # 函数用途: 根据 slice/head/tail/search 模式返回可控正文片段，避免模型为了找线索反复读完整 artifact。
 def read_artifact_content_by_mode(request: ArtifactContentReadRequest) -> ArtifactContentReadResult:
     mode = _normalize_read_mode(request.mode)
-    max_chars = max(0, int(request.max_chars if request.max_chars is not None else DEFAULT_ARTIFACT_READ_CHARS))
+    max_chars = _read_chars_limit(request.max_chars)
     if mode == "head":
         return _slice_result(request.content, mode=mode, offset=0, max_chars=max_chars)
     if mode == "tail":
@@ -62,6 +60,20 @@ def read_artifact_content_by_mode(request: ArtifactContentReadRequest) -> Artifa
 def _normalize_read_mode(mode: str) -> str:
     value = str(mode or "slice").strip().lower()
     return value or "slice"
+
+
+# LLM: _read_chars_limit resolves artifact body length from AgentConfig when callers omit a value.
+# 函数用途: 统一 read_artifact 默认读取长度，避免 artifact 读取链路散落第二份 4000 默认值。
+def _read_chars_limit(value: object) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = -1
+    if parsed >= 0:
+        return parsed
+    from ..settings.config import AgentConfig
+
+    return max(0, int(AgentConfig().memory_artifact_default_read_chars))
 
 
 # LLM: _slice_result is the common implementation for slice and head modes.

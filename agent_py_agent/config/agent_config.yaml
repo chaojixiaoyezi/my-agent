@@ -199,6 +199,20 @@ result_check_timeout_seconds: 120
 # 这个开关不引入父代理验收、acceptance 状态或阻断门；失败只作为返工提示/状态事实交给当前代理判断。
 closeout_for_all_task_nodes: false
 
+# 合同/skill/小型真实验收的只读扫描预算：
+# - contract_status_* 只影响 `contracts status` 这类看板/汇总扫描，不会阻断任务。
+# - skill_guard_* 只影响单个 skill 目录扫描时的结构检查预算。
+# - small_real_acceptance_max_runtime_seconds 是小型真实验收 case 的最大声明运行时间；0 表示不做这个上限判断。
+# - real_run_review_* 只影响真实运行复盘时读取多大的 report/log 文件；0 表示不读取对应大文件。
+contract_status_max_scan_files: 1000
+contract_status_max_report_bytes: 2000000
+contract_status_recent_findings_limit: 20
+skill_guard_max_files: 50
+skill_guard_max_size_kb: 1024
+small_real_acceptance_max_runtime_seconds: 900
+real_run_review_max_report_bytes: 5000000
+real_run_review_max_log_bytes: 1000000
+
 # runner_failure_policy 控制 runner 临时失败后的总尝试次数：
 # - "auto": 当前等价于最多 2 次，也就是首次失败后下一轮 dispatch 再试一次
 # - "off" / "none" / "disabled": 不自动重试，总尝试次数为 1
@@ -206,6 +220,11 @@ closeout_for_all_task_nodes: false
 # 只重试 runner_error、structured_output_parse_error、tool_result_missing、provider_timeout
 # 这类“执行通道/格式/临时工具结果/模型服务临时超时”问题；能力缺口、验收失败、通道 BROKEN 不自动重跑。
 runner_failure_policy: "auto"
+
+# runner_concurrency 为 auto 时的并发上限。
+# - 这个值适用于当前 dispatch 批次里要跑的 runner：子代理、孙代理或更深层代理都走同一套 runner。
+# - 0 表示 auto 不额外设上限，直接按本批 job 数跑；一般本地机器建议 4-12。
+runner_auto_concurrency: 8
 
 # Gateway 本地控制面（第一版）：
 # - gateway 是后台常驻外壳，chat/TUI 后续会作为客户端 attach。
@@ -288,6 +307,23 @@ session_workspace: "data/sessions"
 # - 这是后台主代理恢复/定时汇报/跨渠道继续上下文的机器账本。
 # - 不保存真实飞书/微信凭证，也不要求用户按工程字段写任务 prompt。
 conversation_workspace: "data/conversations"
+
+# 长期会话读取和后台唤醒 prompt 预算：
+# - thread/pending/context/recent 这些 limit 只控制一次读取多少条账本记录，不删除原始文件。
+# - background_context_* 只裁剪注入后台主代理 prompt 的副本，不改消息、observation、case 或 agent tree 原文。
+# - background_claim_ttl_seconds 是后台主代理一次唤醒的 lease 有效期；运行中会 heartbeat 续约。
+# - background_claim_heartbeat_interval_seconds=0 表示按 TTL 自动取安全间隔。
+conversation_thread_list_limit: 100
+conversation_pending_wake_limit: 100
+conversation_context_recent_limit: 20
+conversation_unhandled_observation_limit: 20
+background_pending_wake_prompt_limit: 20
+background_context_max_string_chars: 1200
+background_context_max_list_items: 20
+background_context_max_dict_items: 80
+background_context_max_depth: 6
+background_claim_ttl_seconds: 900
+background_claim_heartbeat_interval_seconds: 0
 
 # 多代理协作控制面工作区：
 # - 保存通用 case/request/evidence/decision 账本。
@@ -411,6 +447,17 @@ stream_enabled: true
 # - 任一配置为 0 表示关闭这个 artifact 正文读取预算。
 tool_artifact_read_budget_window_seconds: 600
 tool_artifact_read_budget_max_chars: 240000
+
+# 工具输出归档和工具调用解析预算：
+# - tool_output_externalize_min_chars: 工具输出达到多少字符后外置为 artifact；0 表示所有工具输出都外置。
+# - tool_output_preview_chars: archive 记录里保留多少字符预览；完整内容走 artifact 引用读取。
+# - tool_payload_*: 只限制模型发来的单次工具调用 JSON 形状，防止坏 payload 撑爆上下文；不是业务字段枚举。
+tool_output_externalize_min_chars: 1200
+tool_output_preview_chars: 500
+tool_payload_max_fields: 64
+tool_payload_max_field_name_chars: 128
+tool_payload_max_name_chars: 128
+tool_payload_parse_error_raw_chars: 1000
 
 # read_file 工具最多返回多少字符，避免单次结果太长
 tool_read_max_chars: 50000

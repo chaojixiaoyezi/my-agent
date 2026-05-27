@@ -59,10 +59,36 @@ _LOG_LEVELS = {
     "critical": logging.CRITICAL,
 }
 
-# LLM: AgentConfig 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: 主运行配置对象，汇总模型、gateway、子代理、通知字段；工具和用户空间字段由基类承接。
+# LLM: RuntimeBudgetConfigFields groups runtime scan/prompt/budget knobs away from the main config body.
+# 类用途: 保存运行预算字段；这些字段只控制读取、扫描、裁剪和自动并发，不定义任务质量硬门。
 @dataclass
-class AgentConfig(HomeProviderConfigFields, ToolConfig):
+class RuntimeBudgetConfigFields:
+    contract_status_max_scan_files: int = 1000
+    contract_status_max_report_bytes: int = 2_000_000
+    contract_status_recent_findings_limit: int = 20
+    skill_guard_max_files: int = 50
+    skill_guard_max_size_kb: int = 1024
+    small_real_acceptance_max_runtime_seconds: int = 900
+    real_run_review_max_report_bytes: int = 5_000_000
+    real_run_review_max_log_bytes: int = 1_000_000
+    runner_auto_concurrency: int = 8
+    conversation_thread_list_limit: int = 100
+    conversation_pending_wake_limit: int = 100
+    conversation_context_recent_limit: int = 20
+    conversation_unhandled_observation_limit: int = 20
+    background_pending_wake_prompt_limit: int = 20
+    background_context_max_string_chars: int = 1200
+    background_context_max_list_items: int = 20
+    background_context_max_dict_items: int = 80
+    background_context_max_depth: int = 6
+    background_claim_ttl_seconds: int = 900
+    background_claim_heartbeat_interval_seconds: int = 0
+
+
+# LLM: AgentConfig 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: 主运行配置对象，汇总模型、gateway、子代理、通知字段；工具、用户空间和运行预算字段由基类承接。
+@dataclass
+class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigFields):
 
     agent_name: str = "myagent"
     system_prompt: str = "你是一个谨慎、可扩展、会记录记忆、会在必要时调用工具的 Python CLI 智能体。先理解任务，再给出结构化回答。"

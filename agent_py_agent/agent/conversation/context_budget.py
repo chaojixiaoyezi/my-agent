@@ -25,6 +25,20 @@ class BackgroundContextBudget:
 DEFAULT_BACKGROUND_CONTEXT_BUDGET = BackgroundContextBudget()
 
 
+# LLM: background_context_budget_from_config keeps background prompt clipping tied to AgentConfig.
+# 函数用途: 从主配置读取后台上下文裁剪预算；没有配置对象时使用 schema 默认预算。
+def background_context_budget_from_config(config: object | None) -> BackgroundContextBudget:
+    defaults = DEFAULT_BACKGROUND_CONTEXT_BUDGET
+    if config is None:
+        return defaults
+    return BackgroundContextBudget(
+        max_string_chars=_config_int(config, "background_context_max_string_chars", defaults.max_string_chars),
+        max_list_items=_config_int(config, "background_context_max_list_items", defaults.max_list_items),
+        max_dict_items=_config_int(config, "background_context_max_dict_items", defaults.max_dict_items),
+        max_depth=_config_int(config, "background_context_max_depth", defaults.max_depth),
+    )
+
+
 # LLM: bounded_background_context_payload trims only prompt copies; durable stores remain untouched.
 # 函数用途: 生成后台主代理 prompt 使用的 bounded context payload。
 def bounded_background_context_payload(
@@ -52,6 +66,8 @@ def bounded_background_context_payload(
     }
 
 
+# LLM: _bounded_message clips a single conversation message for prompt injection.
+# 函数用途: 裁剪消息 content 副本并保留原始长度标记，不修改会话账本。
 def _bounded_message(value: object, budget: BackgroundContextBudget) -> dict[str, Any]:
     row = dict(value) if isinstance(value, dict) else {}
     content = str(row.get("content") or "")
@@ -63,6 +79,8 @@ def _bounded_message(value: object, budget: BackgroundContextBudget) -> dict[str
     return _bounded_value(row, budget)
 
 
+# LLM: _bounded_observation clips observation text fields before background wake prompts.
+# 函数用途: 裁剪 observation 的 summary/reason/content 副本，避免后台 prompt 膨胀。
 def _bounded_observation(value: object, budget: BackgroundContextBudget) -> dict[str, Any]:
     row = dict(value) if isinstance(value, dict) else {}
     for key in ("summary", "reason", "content"):
@@ -70,6 +88,8 @@ def _bounded_observation(value: object, budget: BackgroundContextBudget) -> dict
     return _bounded_value(row, budget)
 
 
+# LLM: _clip_observation_field annotates one clipped observation field.
+# 函数用途: 对单个 observation 字段写 preview、truncated 和 original_chars。
 def _clip_observation_field(row: dict[str, Any], key: str, limit: int) -> None:
     if key not in row:
         return
@@ -81,6 +101,8 @@ def _clip_observation_field(row: dict[str, Any], key: str, limit: int) -> None:
         row[f"{key}_original_chars"] = len(text)
 
 
+# LLM: _bounded_value recursively bounds JSON-like context payloads.
+# 函数用途: 按字符串长度、列表数量、字典数量和深度裁剪 prompt 副本。
 def _bounded_value(value: object, budget: BackgroundContextBudget, *, depth: int = 0) -> Any:
     if isinstance(value, str):
         clipped = _clip(value, budget.max_string_chars)
@@ -123,6 +145,8 @@ def _bounded_value(value: object, budget: BackgroundContextBudget, *, depth: int
     return _bounded_value(text, budget, depth=depth)
 
 
+# LLM: _clip produces a short string preview without touching durable content.
+# 函数用途: 根据最大字符数截断字符串；0 或负数表示不截断。
 def _clip(text: str, max_chars: int) -> str:
     if max_chars <= 0 or len(text) <= max_chars:
         return text
@@ -130,12 +154,24 @@ def _clip(text: str, max_chars: int) -> str:
     return text[:keep] + f"...[truncated {len(text) - keep} chars]"
 
 
+# LLM: _list normalizes optional list-like payloads for bounded context rendering.
+# 函数用途: 非 list 值按空列表处理，避免坏账本字段打断后台 prompt 构造。
 def _list(value: object) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+# LLM: _config_int normalizes one background context budget field.
+# 函数用途: 从配置对象读取非负整数，非法值回退到调用方给出的默认值。
+def _config_int(config: object, key: str, fallback: int) -> int:
+    try:
+        return max(0, int(getattr(config, key)))
+    except (TypeError, ValueError):
+        return fallback
 
 
 __all__ = [
     "BackgroundContextBudget",
     "DEFAULT_BACKGROUND_CONTEXT_BUDGET",
+    "background_context_budget_from_config",
     "bounded_background_context_payload",
 ]

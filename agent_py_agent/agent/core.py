@@ -88,6 +88,7 @@ from .memory import JsonlMemory
 from .prompting import PromptBuilder
 from .subagent import SubAgentManager
 from .tooling.registry import ToolRegistry, ToolRegistryParams
+from .tooling.registry_payload_normalize import tool_payload_limits_from_config
 from .user_space.home_layout import ensure_my_agent_home, home_paths
 from .user_space.paths import get_user_paths
 
@@ -252,6 +253,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             artifact_read_budget_window_seconds=config.tool_artifact_read_budget_window_seconds,
             artifact_read_budget_max_chars=config.tool_artifact_read_budget_max_chars,
             artifact_default_read_chars=config.memory_artifact_default_read_chars,
+            payload_limits=tool_payload_limits_from_config(config),
         )
     )
 

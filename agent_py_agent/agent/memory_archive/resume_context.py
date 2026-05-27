@@ -113,13 +113,13 @@ def build_auto_resume_context(
 # 函数用途: 组装 build resume context 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
 
-    limit = int(getattr(agent.config, "memory_resume_auto_context_limit", 5) or 5)
+    limit = _config_int(agent, "memory_resume_auto_context_limit")
     records = collect_archive_records(
         agent.root,
         layer="all",
         date_key=None,
-        limit=int(getattr(agent.config, "memory_resume_archive_scan_limit", 0) or 0),
-        file_limit=int(getattr(agent.config, "memory_archive_search_file_limit", 30) or 0),
+        limit=_config_int(agent, "memory_resume_archive_scan_limit"),
+        file_limit=_config_int(agent, "memory_archive_search_file_limit"),
     )
     archive_matches, query = _first_archive_matches(records, user_prompt, limit=limit)
     args = _resume_args(query)
@@ -236,3 +236,14 @@ def _append(items: list[str], value: str) -> None:
     text = str(value or "").strip()
     if text and text not in items:
         items.append(text)
+
+
+# LLM: _config_int keeps auto-resume archive scan limits sourced from AgentConfig.
+# 函数用途: 读取恢复上下文扫描预算，非法值只回退到配置 schema 默认，不在 memory 模块写死数字。
+def _config_int(agent: Any, key: str) -> int:
+    try:
+        return max(0, int(getattr(agent.config, key)))
+    except (AttributeError, TypeError, ValueError):
+        from ..settings.config import AgentConfig
+
+        return max(0, int(getattr(AgentConfig(), key)))

@@ -87,17 +87,25 @@ def refresh_processing_lease(
 # LLM: _lease_interval 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
 # 函数用途: 处理租约interval相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def _lease_interval(agent: SimpleAgent) -> float:
-    try:
-        gateway_interval = float(agent.config.gateway_heartbeat_interval or 5)
-    except (TypeError, ValueError):
-        gateway_interval = 5.0
-    try:
-        processing_timeout = float(agent.config.gateway_processing_timeout_seconds or 900)
-    except (TypeError, ValueError):
-        processing_timeout = 900.0
+    gateway_interval = _config_float(agent, "gateway_heartbeat_interval")
+    processing_timeout = _config_float(agent, "gateway_processing_timeout_seconds")
     if processing_timeout > 0:
         gateway_interval = min(gateway_interval, max(0.2, processing_timeout / 3.0))
     return max(0.2, gateway_interval)
+
+
+# LLM: _config_float keeps gateway lease-service timing aligned with AgentConfig.
+# 函数用途: 读取 gateway heartbeat/processing timeout 配置，避免 lease service 内另藏默认数字。
+def _config_float(agent: SimpleAgent, key: str) -> float:
+    try:
+        value = float(getattr(agent.config, key))
+        if value > 0:
+            return value
+    except (TypeError, ValueError):
+        pass
+    from ..settings.config import AgentConfig
+
+    return float(getattr(AgentConfig(), key))
 
 
 # LLM: start_lease_heartbeat 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。

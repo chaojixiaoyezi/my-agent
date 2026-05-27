@@ -27,12 +27,16 @@ class BackgroundMainAgentScheduler:
         runtime = config["runtime"]
         store = config["store"]
         collaboration_store = config.get("collaboration_store")
-        claim_ttl_seconds = config.get("claim_ttl_seconds", 900)
-        claim_heartbeat_interval_seconds = config.get("claim_heartbeat_interval_seconds")
         self.runtime = runtime
         self.store = store
         self.collaboration_store = collaboration_store or getattr(self.runtime.agent, "collaboration_store", None)
-        self.claim_ttl_seconds = max(1, int(claim_ttl_seconds or 900))
+        agent_config = getattr(getattr(self.runtime, "agent", None), "config", None)
+        claim_ttl_seconds = config.get("claim_ttl_seconds", _agent_config_int(agent_config, "background_claim_ttl_seconds"))
+        claim_heartbeat_interval_seconds = config.get(
+            "claim_heartbeat_interval_seconds",
+            _agent_config_int(agent_config, "background_claim_heartbeat_interval_seconds"),
+        )
+        self.claim_ttl_seconds = max(1, int(claim_ttl_seconds or 1))
         self.claim_heartbeat_interval_seconds = compute_claim_heartbeat_interval_seconds(
             ttl_seconds=self.claim_ttl_seconds,
             configured_interval_seconds=claim_heartbeat_interval_seconds,
@@ -56,7 +60,7 @@ class BackgroundMainAgentScheduler:
     def _run_wake_signals(self, reports: list[BackgroundMainAgentReport], current: float) -> set[str]:
         reported: set[str] = set()
         handled: set[str] = set()
-        wake_signals = self.store.pending_wake_signals()
+        wake_signals = self.store.pending_wake_signals(limit=self._config_limit("conversation_pending_wake_limit"))
         for signal in wake_signals:
             if signal.wake_signal_id in handled:
                 continue
@@ -71,10 +75,13 @@ class BackgroundMainAgentScheduler:
         return reported
 
     def _run_observation_batches(self, reports: list[BackgroundMainAgentReport], reported: set[str], current: float) -> None:
-        for thread_id, observations in observations_by_thread(self.store.unhandled_observations_requiring_main()).items():
+        pending_observations = self.store.unhandled_observations_requiring_main(
+            limit=self._config_limit("conversation_unhandled_observation_limit")
+        )
+        for thread_id, thread_observations in observations_by_thread(pending_observations).items():
             if thread_id in reported:
                 continue
-            report = self._run_observation_batch(thread_id, observations, now=current)
+            report = self._run_observation_batch(thread_id, thread_observations, now=current)
             if report is not None:
                 reports.append(report)
                 reported.add(report.thread_id)
@@ -131,6 +138,26 @@ class BackgroundMainAgentScheduler:
         for signal in signals:
             if signal.thread_id == thread_id and signal.wake_signal_id not in handled:
                 self._mark_signal(signal, current, handled)
+
+    # LLM: _config_limit reads scheduler list limits from the current agent config.
+    # 函数用途: 读取 wake signal / observation 批量处理上限，避免 scheduler 写死读取条数。
+    def _config_limit(self, key: str) -> int:
+        return _agent_config_int(getattr(getattr(self.runtime, "agent", None), "config", None), key)
+
+
+# LLM: _agent_config_int normalizes background scheduler integer config.
+# 函数用途: 读取后台 claim 和会话扫描预算；非法值回退到 AgentConfig 默认值。
+def _agent_config_int(config: object | None, key: str) -> int:
+    if config is None:
+        from ..settings.config import AgentConfig
+
+        config = AgentConfig()
+    try:
+        return max(0, int(getattr(config, key)))
+    except (TypeError, ValueError):
+        from ..settings.config import AgentConfig
+
+        return max(0, int(getattr(AgentConfig(), key)))
 
 
 class _BackgroundClaimHeartbeat(threading.Thread):

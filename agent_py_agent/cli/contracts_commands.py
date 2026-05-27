@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..agent.contracts.contract_doctor import lint_contract, migrate_contract
-from ..agent.contracts.contract_status import summarize_contract_status
+from ..agent.contracts.contract_status import ContractStatusScanRequest, summarize_contract_status
 
 
 # LLM: cmd_contracts dispatches nested contract commands without side effects by default.
@@ -49,8 +49,10 @@ def add_contracts_subcommand(subparsers: argparse._SubParsersAction) -> None:
 def _cmd_contracts_status(args: argparse.Namespace) -> int:
     report = summarize_contract_status(
         Path(str(getattr(args, "root", ".") or ".")),
-        limit=int(getattr(args, "limit", 20) or 20),
-        max_files=int(getattr(args, "max_files", 1000) or 1000),
+        ContractStatusScanRequest(
+            limit=int(getattr(args, "limit", 20) or 20),
+            max_files=int(getattr(args, "max_files", 1000) or 1000),
+        ),
     )
     payload = report.to_dict()
     if getattr(args, "json", False):

@@ -6,9 +6,6 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-DEFAULT_ARTIFACT_READ_BUDGET_WINDOW_SECONDS = 600
-DEFAULT_ARTIFACT_READ_BUDGET_MAX_CHARS = 240_000
-
 
 # LLM: ArtifactReadBudgetRequest bundles the current read estimate and run scope for budget checks.
 # 类用途: 保存 read_artifact 的 run_id、预计读取字符数、窗口和时间戳，供预算器判断是否放行。

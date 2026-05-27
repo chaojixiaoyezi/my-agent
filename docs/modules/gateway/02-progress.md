@@ -7,6 +7,7 @@
 
 ## 已完成
 
+- 2026-05-27 Gateway lease 时间预算已回到主配置：processing lease heartbeat 间隔和 processing timeout 只从 `agent_config.yaml` / `AgentConfig` 读取，lease 模块不再写第二份 5 秒 / 900 秒本地默认。
 - 2026-05-26 Gateway JSON 文件锁已落地：`gateway_parts/io.py` 的 JSON read/write 和 read-modify-write 更新现在共用进程内锁 + 平台文件锁，新增 `update_json_file_atomic()`，用于协作/会话等并发 tick 避免 last-write-wins 覆盖。
 - `agent/gateway.py` 已作为兼容入口，真实协议实现拆到 `gateway_parts/`。
 - gateway 控制面已有 pid、state、heartbeat、stop request、log 等文件。

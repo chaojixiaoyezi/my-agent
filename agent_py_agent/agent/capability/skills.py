@@ -151,11 +151,15 @@ class SkillRegistry:
     # LLM: _evaluate_skill_gate keeps skill enablement behind the shared runtime gate.
     # 函数用途: 对一个 SKILL.md 所在目录执行 skill_guard；关闭 enforce 时仍记录裁决供审计。
     def _evaluate_skill_gate(self, skill_file: Path) -> Any:
+        from ..contracts.gates.skill_guard import SkillGuardRequest
+
         return evaluate_skill_guard_gate(
             skill_file.parent,
-            source=self.guard_source,
-            skill_name=skill_file.parent.name,
-            force=self.guard_force,
+            SkillGuardRequest(
+                source=self.guard_source,
+                skill_name=skill_file.parent.name,
+                force=self.guard_force,
+            ),
         )
 
 

@@ -67,10 +67,6 @@ _SUSPICIOUS_EXTENSIONS = frozenset({
     ".exe", ".dll", ".so", ".dylib", ".bin", ".com", ".msi", ".dmg",
 })
 
-MAX_SKILL_FILES = 50
-MAX_SKILL_SIZE_KB = 1024
-
-
 # LLM: SkillGuardFinding records one detected threat in a skill file.
 # 类用途: 承载模式ID、严重级别、类别、文件路径、行号、匹配内容和描述。
 @dataclass(frozen=True)
@@ -108,17 +104,30 @@ class SkillScanResult:
         return any(f.severity in ("critical", "high") for f in self.findings)
 
 
+# LLM: SkillGuardRequest bundles install-time policy knobs for one skill scan.
+# 类用途: 保存 skill 来源、显示名、force 开关和配置对象，避免 gate 入口散参数膨胀。
+@dataclass(frozen=True)
+class SkillGuardRequest:
+    source: str = "external"
+    skill_name: str = ""
+    force: bool = False
+    config: object | None = None
+
+
 # LLM: evaluate_skill_guard_gate scans a skill directory and returns structured allow/deny.
 # 函数用途: 在 skill install/promote 前调用，扫描目录结构和文件内容中的威胁模式。
 def evaluate_skill_guard_gate(
     skill_path: Path,
-    source: str = "external",
-    skill_name: str = "",
-    *,
-    force: bool = False,
+    request: SkillGuardRequest | None = None,
 ) -> GateDecision:
-    result = scan_skill(skill_path, source=source, skill_name=skill_name)
-    allowed, reason = install_decision(result, force=force)
+    guard_request = request or SkillGuardRequest()
+    result = scan_skill(
+        skill_path,
+        source=guard_request.source,
+        skill_name=guard_request.skill_name,
+        config=guard_request.config,
+    )
+    allowed, reason = install_decision(result, force=guard_request.force)
     gate_findings: list[GateFinding] = []
     for f in result.findings:
         gate_findings.append(GateFinding(
@@ -140,14 +149,17 @@ def scan_skill(
     skill_path: Path,
     source: str = "external",
     skill_name: str = "",
+    *,
+    config: object | None = None,
 ) -> SkillScanResult:
     if not skill_name:
         skill_name = skill_path.name
     trust_level = _resolve_trust_level(source)
     all_findings: list[SkillGuardFinding] = []
 
+    limits = _skill_guard_limits(config)
     if skill_path.is_dir():
-        all_findings.extend(_check_skill_structure(skill_path))
+        all_findings.extend(_check_skill_structure(skill_path, limits))
         files = [f for f in sorted(skill_path.rglob("*")) if f.is_file()]
         for f in files:
             rel = str(f.relative_to(skill_path))
@@ -192,9 +204,39 @@ def _resolve_trust_level(source: str) -> str:
     return "external"
 
 
+# LLM: _SkillGuardLimits carries resolved directory scan budgets for one skill guard run.
+# 类用途: 保存技能目录最大文件数和总大小上限，0 表示关闭对应预算判断。
+@dataclass(frozen=True)
+class _SkillGuardLimits:
+    max_files: int
+    max_size_kb: int
+
+
+# LLM: _skill_guard_limits resolves skill guard budgets from AgentConfig.
+# 函数用途: 从配置对象读取 skill guard 扫描预算；未传配置时只回退到 schema 默认。
+def _skill_guard_limits(config: object | None) -> _SkillGuardLimits:
+    if config is None:
+        from ...settings.config import AgentConfig
+
+        config = AgentConfig()
+    return _SkillGuardLimits(
+        max_files=_config_int(config, "skill_guard_max_files"),
+        max_size_kb=_config_int(config, "skill_guard_max_size_kb"),
+    )
+
+
+# LLM: _config_int normalizes one skill guard integer budget.
+# 函数用途: 读取单个配置字段并归一为非负整数，非法值按 0 处理。
+def _config_int(config: object, key: str) -> int:
+    try:
+        return max(0, int(getattr(config, key)))
+    except (TypeError, ValueError):
+        return 0
+
+
 # LLM: _check_skill_structure checks directory-level issues: symlinks, binaries, file count, size.
 # 函数用途: 扫描技能目录结构，检测符号链接、二进制文件、文件数超限和总大小超限。
-def _check_skill_structure(skill_dir: Path) -> list[SkillGuardFinding]:
+def _check_skill_structure(skill_dir: Path, limits: _SkillGuardLimits) -> list[SkillGuardFinding]:
     findings: list[SkillGuardFinding] = []
     file_count = 0
     total_size = 0
@@ -220,15 +262,15 @@ def _check_skill_structure(skill_dir: Path) -> list[SkillGuardFinding]:
                 "binary_file", "critical", "structural", rel, 0,
                 f"binary: {ext}", f"binary/executable file ({ext}) in skill",
             ))
-    if file_count > MAX_SKILL_FILES:
+    if limits.max_files > 0 and file_count > limits.max_files:
         findings.append(SkillGuardFinding(
             "too_many_files", "medium", "structural", "(directory)", 0,
-            f"{file_count} files", f"skill has {file_count} files (limit: {MAX_SKILL_FILES})",
+            f"{file_count} files", f"skill has {file_count} files (limit: {limits.max_files})",
         ))
-    if total_size > MAX_SKILL_SIZE_KB * 1024:
+    if limits.max_size_kb > 0 and total_size > limits.max_size_kb * 1024:
         findings.append(SkillGuardFinding(
             "oversized_skill", "high", "structural", "(directory)", 0,
-            f"{total_size // 1024}KB", f"skill total {total_size // 1024}KB (limit: {MAX_SKILL_SIZE_KB}KB)",
+            f"{total_size // 1024}KB", f"skill total {total_size // 1024}KB (limit: {limits.max_size_kb}KB)",
         ))
     return findings
 

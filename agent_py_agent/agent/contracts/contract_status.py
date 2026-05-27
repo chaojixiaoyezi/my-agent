@@ -9,9 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-MAX_SCAN_FILES = 1000
-MAX_REPORT_BYTES = 2_000_000
-
 
 # LLM: ContractStatusReport keeps this contract helper structure-first and stable.
 # 类用途: 支撑本模块的机器字段校验、转换或汇总，不读取普通自然语言作为事实。
@@ -58,22 +55,31 @@ class _StatusAccumulator:
     limit: int
 
 
+# LLM: ContractStatusScanRequest keeps optional scan budgets bundled for callers and CLI.
+# 类用途: 保存合同状态扫描的覆盖数量、单文件大小、recent finding 数量和配置来源。
+@dataclass(frozen=True)
+class ContractStatusScanRequest:
+    limit: int | None = None
+    max_files: int | None = None
+    max_file_bytes: int | None = None
+    config: object | None = None
+
+
 # LLM: summarize_contract_status reads bounded JSON reports and counts explicit findings fields.
 # 函数用途: 从 report.findings 等结构化字段统计合同失败，不解析自然语言消息。
 def summarize_contract_status(
     root: Path,
-    *,
-    limit: int = 20,
-    max_files: int = MAX_SCAN_FILES,
-    max_file_bytes: int = MAX_REPORT_BYTES,
+    request: ContractStatusScanRequest | None = None,
 ) -> ContractStatusReport:
     base = root.expanduser().resolve(strict=False)
-    accumulator = _StatusAccumulator(Counter(), Counter(), [], limit)
+    scan = request or ContractStatusScanRequest()
+    resolved = _status_scan_limits(scan)
+    accumulator = _StatusAccumulator(Counter(), Counter(), [], resolved.limit)
     scanned = 0
     skipped = 0
     files_with_findings = 0
-    for path in _json_paths(base, max_files=max_files):
-        findings, was_skipped = _findings_from_file(path, max_file_bytes)
+    for path in _json_paths(base, max_files=resolved.max_files):
+        findings, was_skipped = _findings_from_file(path, resolved.max_file_bytes)
         if was_skipped:
             skipped += 1
             continue
@@ -92,6 +98,46 @@ def summarize_contract_status(
         by_severity=dict(sorted(accumulator.by_severity.items())),
         recent_findings=tuple(accumulator.recent),
     )
+
+
+# LLM: _StatusScanLimits is the resolved immutable budget used by one status scan.
+# 类用途: 保存已解析的 recent 数量、扫描文件数和单文件字节上限。
+@dataclass(frozen=True)
+class _StatusScanLimits:
+    limit: int
+    max_files: int
+    max_file_bytes: int
+
+
+# LLM: _status_scan_limits resolves optional scan overrides against AgentConfig defaults.
+# 函数用途: 将 request 中的显式值和主配置合成最终扫描预算。
+def _status_scan_limits(request: ContractStatusScanRequest) -> _StatusScanLimits:
+    defaults = _contract_status_config_defaults(request.config)
+    return _StatusScanLimits(
+        limit=_provided_or_config_int(request.limit, defaults.contract_status_recent_findings_limit),
+        max_files=_provided_or_config_int(request.max_files, defaults.contract_status_max_scan_files),
+        max_file_bytes=_provided_or_config_int(request.max_file_bytes, defaults.contract_status_max_report_bytes),
+    )
+
+
+# LLM: _contract_status_config_defaults keeps status scans tied to AgentConfig when no explicit config is passed.
+# 函数用途: 返回合同状态扫描使用的配置对象；没有调用方配置时只回退到 schema 默认。
+def _contract_status_config_defaults(config: object | None) -> object:
+    if config is not None:
+        return config
+    from ..settings.config import AgentConfig
+
+    return AgentConfig()
+
+
+# LLM: _provided_or_config_int applies an explicit override before falling back to config.
+# 函数用途: 归一化单个合同状态扫描预算；非法值回退为 0，避免异常中断看板扫描。
+def _provided_or_config_int(value: int | None, fallback: object) -> int:
+    source = fallback if value is None else value
+    try:
+        return max(0, int(source))
+    except (TypeError, ValueError):
+        return 0
 
 
 # LLM: _json_paths keeps this contract helper structure-first and stable.
@@ -210,4 +256,4 @@ def _text(value: object) -> str:
     return str(value or "").strip()
 
 
-__all__ = ["ContractStatusReport", "summarize_contract_status"]
+__all__ = ["ContractStatusReport", "ContractStatusScanRequest", "summarize_contract_status"]

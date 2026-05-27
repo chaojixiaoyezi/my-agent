@@ -16,17 +16,15 @@ from .artifact_read_modes import (
     read_artifact_content_by_mode,
 )
 
-DEFAULT_ARTIFACT_READ_CHARS = 4000
-
 
 # LLM: ReadToolOutputArtifactRequest keeps future read policy fields on one stable bundle.
-# 类用途: 保存 artifact 显式读取的工作区、引用、偏移和读取长度；max_chars=0 表示读取全部。
+# 类用途: 保存 artifact 显式读取的工作区、引用、偏移和读取长度；max_chars=-1 表示使用 AgentConfig 默认，0 表示读取全部。
 @dataclass(frozen=True)
 class ReadToolOutputArtifactRequest:
     root: str | Path
     artifact_ref: str
     offset: int = 0
-    max_chars: int = DEFAULT_ARTIFACT_READ_CHARS
+    max_chars: int = -1
     mode: str = "slice"
     query: str = ""
     run_id: str = ""

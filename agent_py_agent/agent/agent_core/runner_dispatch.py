@@ -41,9 +41,6 @@ CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES = {
     "write_permission_blocked",
 }
 
-DEFAULT_AUTO_RUNNER_CONCURRENCY = 8
-
-
 # LLM: _runner_max_attempts returns the configured retry budget after the first failed attempt.
 # 函数用途: 解析 runner 失败后的补跑次数；0 表示不限制，旧 off/auto 字符串只做兼容入口。
 def _runner_max_attempts(policy: str) -> int:
@@ -105,24 +102,41 @@ def _retry_count_after_initial_attempt(attempts: int) -> int:
 
 # LLM: _resolve_runner_concurrency 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 读取或查询执行器concurrency需要的状态，返回调用方可继续处理的快照；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
-def _resolve_runner_concurrency(value: object, job_count: int) -> int:
+def _resolve_runner_concurrency(value: object, job_count: int, *, auto_limit: object = None) -> int:
 
     if job_count <= 0:
         return 0
+    configured_auto_limit = _runner_auto_concurrency_limit(auto_limit, job_count)
     if isinstance(value, str):
         normalized = value.strip().lower()
         if normalized in {"", "auto"}:
-            return min(job_count, DEFAULT_AUTO_RUNNER_CONCURRENCY)
+            return configured_auto_limit
         try:
             parsed = int(normalized)
         except ValueError:
-            return min(job_count, DEFAULT_AUTO_RUNNER_CONCURRENCY)
+            return configured_auto_limit
     else:
         try:
             parsed = int(value)
         except (TypeError, ValueError):
-            return min(job_count, DEFAULT_AUTO_RUNNER_CONCURRENCY)
+            return configured_auto_limit
     return max(1, min(parsed, job_count))
+
+
+# LLM: _runner_auto_concurrency_limit resolves "auto" runner width from AgentConfig.
+# 函数用途: 读取 runner_auto_concurrency；0 表示按本批 job 数执行，不在调度层另藏默认并发。
+def _runner_auto_concurrency_limit(value: object, job_count: int) -> int:
+    if value is None:
+        from ..settings.config import AgentConfig
+
+        value = AgentConfig().runner_auto_concurrency
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        limit = job_count
+    if limit <= 0:
+        return job_count
+    return min(job_count, limit)
 
 
 # LLM: _resolve_runner_start_rate 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
