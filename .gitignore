@@ -58,6 +58,7 @@ my-agent-worktrees/
 
 # Local real-run scratch outputs
 github-5week-5agents-*/
+github-year-deepseek-papers-*/
 shell_gateway_outputs/
 github_week*_trending.json
 make_excel.py

@@ -127,6 +127,7 @@ def _persist_runtime_status(agent: object, task: SubAgentTask, result: object, p
     task.current_tool = tool
     task.heartbeat_at = now
     task.updated_at = now
+    _append_recent_tool_trace(task, tool=tool, ok=ok, now=now, progress=progress)
     if ok and tool:
         task.last_progress_at = now
         task.last_progress_summary = _progress_summary(tool, progress)
@@ -137,6 +138,28 @@ def _persist_runtime_status(agent: object, task: SubAgentTask, result: object, p
         agent.subagents.save(task)
     except Exception:
         return
+
+
+# LLM: _append_recent_tool_trace is observability only; it records what just happened without changing lifecycle state.
+# 函数用途: 保存最近少量工具调用摘要，供 inspect_agent_tree 三层状态展示“是否还在干活、最近用过什么工具”。
+def _append_recent_tool_trace(task: SubAgentTask, *, tool: str, ok: bool, now: float, progress: dict[str, Any]) -> None:
+    if not tool:
+        return
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    trace = attrs.get("recent_tool_trace")
+    items = list(trace) if isinstance(trace, list) else []
+    entry = {
+        "tool": tool,
+        "ok": ok,
+        "at": now,
+        "summary": _progress_summary(tool, progress),
+    }
+    path = str(progress.get("latest_written_path") or "").strip() if isinstance(progress, dict) else ""
+    if path:
+        entry["path"] = path
+    items.append(entry)
+    attrs["recent_tool_trace"] = [item for item in items if isinstance(item, dict)][-5:]
+    task.attributes = attrs
 
 
 # LLM: _progress_summary keeps status rows concise and avoids copying full tool output.

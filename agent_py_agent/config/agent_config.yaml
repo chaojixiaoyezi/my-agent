@@ -152,9 +152,10 @@ enable_subagents: true
 # - strict: 后续用于外部用户/高风险环境。
 subagent_mode: "trusted_local_hardening"
 
-# 单个任务最多允许登记多少个子代理；默认 1000，表示用户层基本不限制。
-# 真实并发仍由调度器按机器和模型情况自动控制。
-max_subagents: 1000
+# 单个任务最多允许登记多少个子代理。
+# 这个值只限制“最多能登记多少个同级子代理”，不强制主代理一定创建这么多。
+# 真实并发仍由调度器按机器和模型情况自动控制；复杂任务可让主代理自行规划拆分方式。
+max_subagents: 50
 
 # 子任务记录输出目录。
 subagent_workspace: "data/subagents"

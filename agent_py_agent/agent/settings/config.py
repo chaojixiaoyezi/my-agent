@@ -134,7 +134,7 @@ class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigField
     prompt_files: list[str] = field(default_factory=list)
     enable_subagents: bool = True
     subagent_mode: str = "trusted_local_hardening"
-    max_subagents: int = 1000
+    max_subagents: int = 50
     subagent_board_limit: int = 5
     subagent_workspace: str = "data/subagents"
     subagent_allowed_tools: list[str] = field(default_factory=list)

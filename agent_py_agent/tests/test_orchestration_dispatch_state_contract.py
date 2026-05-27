@@ -87,12 +87,16 @@ def test_create_payload_includes_current_turn_run_state(tmp_path):
 
     state = payload["current_turn_run_state"]
     assert payload["auto_start"]["status"] == "started"
+    assert payload["auto_start"]["dispatch_mode"] == "background"
     assert payload["dispatch_run_ids"] == []
     assert state["dispatchable_run_ids"] == []
-    assert state["verified_run_ids"] == payload["created_run_ids"]
-    assert state["next_action"] == "summarize_or_report_verified_runs"
+    assert (
+        state["running_run_ids"] == payload["created_run_ids"]
+        or state["verified_run_ids"] == payload["created_run_ids"]
+    )
+    assert state["next_action"] in {"wait_or_check_subagent_board", "summarize_or_report_verified_runs"}
     envelope = decode_action_envelope(payload["typed_envelope"])
-    assert envelope.current_turn_run_state["verified_run_ids"] == payload["created_run_ids"]
+    assert envelope.current_turn_run_state["dispatchable_run_ids"] == []
     assert envelope.dispatch_run_ids == []
 
 

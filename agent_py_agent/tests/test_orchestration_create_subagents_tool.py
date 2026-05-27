@@ -99,30 +99,36 @@ class TestCreateSubagentsToolExecute:
         # 应该最多只创建 max_subagents 个
         assert mock_agent.subagents.create_run.call_count <= 2
 
-    def test_create_subagents_auto_starts_created_runs_by_default(self):
-        """create_subagents 默认创建后立刻启动子代理，避免父代理忘记再催一次。"""
-        from agent_py_agent.agent.agent_core.dispatch_params import DispatchParams
+    def test_create_subagents_auto_starts_created_runs_without_waiting_for_completion(self, monkeypatch):
+        """create_subagents 默认创建并后台启动，父代理不等子代理全部结束。"""
+        from agent_py_agent.agent.agent_core import orchestration_tools
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _mock_create_items_agent(task_count=2)
-        mock_report = MagicMock()
-        mock_report.summary = "auto-started"
-        mock_report.records = []
-        mock_report.dry_run = False
-        mock_agent.dispatch_subagents.return_value = mock_report
         mock_agent.tools.specs.return_value = []
+        launched: dict[str, object] = {}
+
+        def fake_background_start(agent, run_ids):
+            launched["agent"] = agent
+            launched["run_ids"] = list(run_ids)
+            return {
+                "status": "started",
+                "dispatch_mode": "background",
+                "run_ids": list(run_ids),
+                "agent_tree": {"schema_version": "agent_tree_status.v1"},
+            }
+
+        monkeypatch.setattr(orchestration_tools, "_start_background_dispatch", fake_background_start)
 
         result = CreateSubagentsTool(mock_agent).execute({"goal": "分别整理两份资料", "count": 2})
         payload = json.loads(result.output)
 
         assert result.ok is True
-        mock_agent.dispatch_subagents.assert_called_once()
-        params = mock_agent.dispatch_subagents.call_args.kwargs["params"]
-        assert isinstance(params, DispatchParams)
-        assert params.apply is True
-        assert params.execute_runners is True
-        assert params.include_run_ids == ["run_0", "run_1"]
+        mock_agent.dispatch_subagents.assert_not_called()
+        assert launched["run_ids"] == ["run_0", "run_1"]
         assert payload["auto_start"]["status"] == "started"
+        assert payload["auto_start"]["dispatch_mode"] == "background"
+        assert payload["auto_start"]["agent_tree"]["schema_version"] == "agent_tree_status.v1"
         assert payload["next_action"]["tool"] == "subagent_board"
 
     def test_defer_start_keeps_created_runs_unstarted(self):

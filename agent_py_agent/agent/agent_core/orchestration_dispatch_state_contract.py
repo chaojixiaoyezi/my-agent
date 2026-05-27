@@ -80,10 +80,11 @@ def _append_task_state(buckets: dict[str, object], task: object) -> None:
     run_id = _run_id(task)
     snapshot = run_state_snapshot_from_task(task)
     status = str(snapshot["status"])
+    background_running = _background_start_running(task, status)
     by_status = buckets["by_status"]
     by_status[status] = by_status.get(status, 0) + 1
-    _append_if(buckets["dispatchable"], run_id, bool(snapshot["can_dispatch"]))
-    _append_if(buckets["running"], run_id, status in _RUNNING_STATUSES)
+    _append_if(buckets["dispatchable"], run_id, bool(snapshot["can_dispatch"]) and not background_running)
+    _append_if(buckets["running"], run_id, status in _RUNNING_STATUSES or background_running)
     _append_if(buckets["blocked"], run_id, status in _BLOCKED_STATUSES)
     verified = bool(snapshot["can_closeout"])
     _append_if(buckets["verified"], run_id, verified)
@@ -171,3 +172,13 @@ def _clean_ids(values: list[object]) -> list[str]:
 # 函数用途: 安全返回 task.id。
 def _run_id(task: object) -> str:
     return str(getattr(task, "id", "") or "").strip()
+
+
+def _background_start_running(task: object, status: str) -> bool:
+    attrs = getattr(task, "attributes", {}) or {}
+    if not isinstance(attrs, dict) or status not in {"PLANNING", "PENDING"}:
+        return False
+    background = attrs.get("background_start")
+    if not isinstance(background, dict):
+        return False
+    return str(background.get("status") or "").strip().lower() in {"launching", "running"}

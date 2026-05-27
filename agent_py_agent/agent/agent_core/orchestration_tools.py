@@ -10,11 +10,14 @@ from __future__ import annotations
 """
 
 import json
+import threading
+import time
 from typing import TYPE_CHECKING
 
 from ..capabilities import CapabilityRouter
 from ..subagents.services.base import CreateRunParams
 from ..tools import BaseTool, ToolExecutionResult
+from .agent_tree_status import agent_tree_status_payload
 from .dispatch_params import DispatchParams
 from .hierarchy_tools import ScheduleChildSubagentsTool as ScheduleChildSubagentsTool
 from .orchestration_create_constraints import (
@@ -296,11 +299,101 @@ def _auto_start_tasks(agent, tasks: list, request_params: dict[str, object]) -> 
     if not callable(dispatcher):
         return {"status": "unavailable", "run_ids": run_ids, "reason": "agent has no dispatch_subagents"}
     try:
-        router, cfg, dispatch_params = _auto_start_dispatch_args(agent, run_ids)
-        report = dispatcher(router, cfg, params=dispatch_params)
+        return _start_background_dispatch(agent, run_ids)
     except Exception as exc:
         return {"status": "failed", "run_ids": run_ids, "error": f"{type(exc).__name__}: {exc}"}
-    return _auto_start_report(run_ids, report)
+
+
+# LLM: _start_background_dispatch launches children without making the parent wait for completion.
+# 函数用途: create_subagents 默认创建并后台启动 run，立即返回 run_id/tree/status；真实执行结果后续从 inspect_agent_tree 读取。
+def _start_background_dispatch(agent, run_ids: list[str]) -> dict[str, object]:
+    launch_id = f"subagent-start-{time.time_ns()}"
+    _mark_background_start(agent, run_ids, launch_id, status="launching")
+    router, cfg, dispatch_params = _auto_start_dispatch_args(agent, run_ids)
+    thread = threading.Thread(
+        target=_background_dispatch_worker,
+        name=f"my-agent-{launch_id}",
+        args=(agent, run_ids, launch_id, router, cfg, dispatch_params),
+        daemon=True,
+    )
+    _remember_background_dispatch(agent, launch_id, run_ids, thread.name)
+    thread.start()
+    return {
+        "status": "started",
+        "dispatch_mode": "background",
+        "run_ids": run_ids,
+        "launch_id": launch_id,
+        "thread_name": thread.name,
+        "summary": "subagent dispatch launched in background; parent should inspect agent tree for progress",
+        "agent_tree": _safe_agent_tree(agent),
+    }
+
+
+# LLM: _background_dispatch_worker contains the only async side effect for create-time autostart.
+# 函数用途: 后台调用原 dispatch_subagents；失败时只记录状态，不能把父代理工具调用卡死。
+def _background_dispatch_worker(agent, run_ids: list[str], launch_id: str, router, cfg, dispatch_params: DispatchParams) -> None:
+    try:
+        _mark_background_start(agent, run_ids, launch_id, status="running")
+        report = agent.dispatch_subagents(router, cfg, params=dispatch_params)
+    except Exception as exc:
+        _mark_background_start(agent, run_ids, launch_id, status="failed", error=f"{type(exc).__name__}: {exc}")
+        _remember_background_result(agent, launch_id, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+        return
+    _mark_background_start(agent, run_ids, launch_id, status="finished")
+    _remember_background_result(agent, launch_id, _auto_start_report(run_ids, report))
+
+
+def _mark_background_start(agent, run_ids: list[str], launch_id: str, *, status: str, error: str = "") -> None:
+    now = time.time()
+    manager = getattr(agent, "subagents", None)
+    for run_id in run_ids:
+        try:
+            task = manager.load(run_id)
+        except Exception:
+            continue
+        if getattr(task, "id", "") != run_id:
+            continue
+        attrs = dict(getattr(task, "attributes", {}) or {})
+        attrs["background_start"] = {
+            "launch_id": launch_id,
+            "status": status,
+            "updated_at": now,
+            "error": error,
+        }
+        task.attributes = attrs
+        try:
+            manager.save(task)
+        except Exception:
+            continue
+
+
+def _remember_background_dispatch(agent, launch_id: str, run_ids: list[str], thread_name: str) -> None:
+    registry = getattr(agent, "_background_subagent_dispatches", None)
+    if not isinstance(registry, dict):
+        registry = {}
+        agent._background_subagent_dispatches = registry
+    registry[launch_id] = {
+        "run_ids": list(run_ids),
+        "thread_name": thread_name,
+        "status": "running",
+        "started_at": time.time(),
+    }
+
+
+def _remember_background_result(agent, launch_id: str, result: dict[str, object]) -> None:
+    registry = getattr(agent, "_background_subagent_dispatches", None)
+    if not isinstance(registry, dict):
+        return
+    item = dict(registry.get(launch_id) or {})
+    item.update({"status": "finished" if result.get("ok", True) else "failed", "result": result, "finished_at": time.time()})
+    registry[launch_id] = item
+
+
+def _safe_agent_tree(agent) -> dict[str, object]:
+    try:
+        return agent_tree_status_payload(agent, {"scope": "root_tree"})
+    except Exception as exc:
+        return {"schema_version": "agent_tree_status.v1", "warnings": [f"agent_tree_unavailable:{type(exc).__name__}"]}
 
 
 # LLM: _auto_start_dispatch_args builds the dispatch call for create-time auto-start.

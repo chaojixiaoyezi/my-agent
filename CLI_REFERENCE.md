@@ -810,11 +810,12 @@ chat 和 gateway 都复用 `SimpleAgent.run()` 的恢复上下文能力。也就
 
 | 工具 | 作用 | 风险边界 |
 | --- | --- | --- |
-| `create_subagents` | 创建一个或多个子代理工单 | 默认只授予 read-only 工具；`tool_preset="coding"` 才授予文件读写工具 |
+| `create_subagents` | 创建一个或多个子代理工单，并默认后台启动 | 不同步等待子代理完成；只有 `defer_start=true` 才只登记不启动 |
+| `inspect_agent_tree` | 读取主/子/孙代理树状态 | 只读；返回 liveness、progress、evidence 三层状态，不调度、不验收 |
 | `subagent_board` | 读取当前子代理看板 | 只读 |
-| `dispatch_subagents` | 执行一轮父代理调度 | 默认 dry-run；必须同时 `apply=true` 和 `execute_runners=true` 才会真实调用 runner API |
+| `dispatch_subagents` | 给运行中的子代理追加提示、推进、补救或指定重跑 | 普通状态查看不需要它；真实执行仍需要 `apply=true` 和 `execute_runners=true` 或明确目标运行参数 |
 
-因此你可以在 chat 里说“拆给两个子代理做，并先 dry-run 看看调度计划”。如果要做真实 runner 测试，建议明确说明“使用隔离 fixture 目录、允许真实 API、最多 N 个 runner”。
+因此你可以在 chat 里说“拆给几个子代理分别做这些事”。默认创建后会后台开跑，父代理会先拿到 run_id 和状态，不会等所有子代理完成才继续说话。后续查看用 `inspect_agent_tree` / `subagent_board`；确实要催某几个、补救卡住项或追加提示时再用 `dispatch_subagents`。
 
 ## `spawn-subagents`
 
@@ -1275,7 +1276,7 @@ my-agent daemon --max-cycles 1 --interval 0 --no-planner
 # 默认只保留少量用户能理解的入口，细节由系统和 LLM 判断。
 enable_subagents: true
 subagent_mode: "trusted_local_hardening"
-max_subagents: 1000
+max_subagents: 50
 subagent_workspace: "data/subagents"
 subagent_role_template_dirs: []
 subagent_debug_trace_level: 0

@@ -232,7 +232,7 @@ def _task_to_kernel_run(
         artifact_refs=list(task.artifact_refs),
         evidence_refs=list(task.evidence_refs),
         blockers=list(task.blockers),
-        reserved={"task_dir": task.task_dir} if include_refs and task.task_dir else {},
+        reserved=_task_reserved(task) if include_refs else {},
     )
 
 
@@ -281,6 +281,22 @@ def _tool_contract(task: SubAgentTask) -> dict[str, object]:
             grant.id for grant in task.capability_grants if "controlled_exec" in list(getattr(grant, "tools", []) or [])
         ],
     }
+
+
+# LLM: _task_reserved carries observability-only facts that do not fit the stable kernel top-level schema yet.
+# 函数用途: 给父级状态树附加最近工具轨迹、后台启动标记和调试路径；这些字段只读展示，不参与调度判断。
+def _task_reserved(task: SubAgentTask) -> dict[str, object]:
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    reserved: dict[str, object] = {}
+    if task.task_dir:
+        reserved["task_dir"] = task.task_dir
+    if isinstance(attrs.get("recent_tool_trace"), list):
+        reserved["recent_tool_trace"] = list(attrs["recent_tool_trace"])[-5:]
+    if isinstance(attrs.get("needs_capability"), list):
+        reserved["needs_capability"] = list(attrs["needs_capability"])
+    if isinstance(attrs.get("background_start"), dict):
+        reserved["background_start"] = dict(attrs["background_start"])
+    return reserved
 
 
 # LLM: _open_capability_requests normalizes old and new request status fields.

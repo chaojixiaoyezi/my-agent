@@ -2,6 +2,33 @@
 
 > 2026-05-27 当前路线备注：早期条目里提到的 `orchestration_contract`、`materialize_subagent_inputs`、`subagent_dispatch_closeout`、`parent_acceptance` 专项收口、`scheduling_warnings`、领域/重复目标调度提示等，都是历史试错记录。当前生产路线是：调度工具只返回 refs/tree/status，普通协作不靠中间验收门卡住；最终质量统一回到 closeout 和任务树事实。
 
+## 2026-05-27 / create_subagents 后台启动与三层状态树
+
+状态：本地已落地，focused tests 已跑；未提交
+
+摘要：
+- `create_subagents` 仍然默认“创建即启动”，但不再同步等待所有子代理跑完。它现在写入后台启动标记，拉起 daemon thread 执行原 `dispatch_subagents`，然后立刻把 `run_ids`、`auto_start.dispatch_mode=background` 和 `agent_tree` 返回给父代理。
+- 父代理后续不需要反复“催一下才动”：想看进展就调用 `inspect_agent_tree` / `subagent_board`；想补救、换路、给运行中代理追加提示时，再用 `dispatch_subagents` 指定 run_id。`defer_start=true` 仍保留，只有明确只想登记任务时才不启动。
+- `current_turn_run_state` 会把刚后台启动但还没来得及切到 `RUNNING` 的 `PLANNING/PENDING` run 视为 running，不再建议父代理马上重复 dispatch 同一批 run。
+- 代理树节点新增三层只读状态：`liveness`（心跳、更新时间、当前生命周期）、`progress_layer`（进度、当前工具、最近进展摘要）、`evidence_layer`（产物 refs、证据 refs、阻塞、能力缺口、最近工具轨迹）。这些字段只展示事实，不调度、不验收、不阻塞。
+- 子代理每次成功/失败工具观测会把最近 5 条工具轨迹写进 task attributes，父代理可以看到“是不是还在干活、最近用过什么、有没有产物或能力缺口”，不用偷看完整模型对话正文。
+
+验证：
+- `python3 -m pytest agent_py_agent/tests/test_orchestration_create_subagents_tool.py::TestCreateSubagentsToolExecute::test_create_subagents_auto_starts_created_runs_without_waiting_for_completion -q`
+- `python3 -m pytest agent_py_agent/tests/test_agent_tree_three_layer_status.py -q`
+- `python3 -m pytest agent_py_agent/tests/test_orchestration_dispatch_state_contract.py::test_create_payload_includes_current_turn_run_state -q`
+- `python3 -m pytest agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_orchestration_create_subagents_items.py agent_py_agent/tests/test_orchestration_create_subagents_tool_workspace.py -q`
+- `python3 -m pytest agent_py_agent/tests/test_orchestration_dispatch_state_contract.py agent_py_agent/tests/test_orchestration_create_subagents_idempotency.py agent_py_agent/tests/test_agent_tree_three_layer_status.py -q`
+
+## 2026-05-27 / 子代理登记上限默认改为 50
+
+状态：本地已落地，配置读取已确认；未提交
+
+摘要：
+- 按用户要求把 `max_subagents` 从 1000 调整为 50，并同步 `agent_config.yaml`、`AgentConfig`、公开 `SubagentConfig` 和 CLI 示例。
+- 这个值只限制单个任务最多能登记多少个同级子代理，不强制主代理一定创建这么多，也不替主代理规划拆分方式。
+- 配置读取验收：`load_config("agent_py_agent/config/agent_config.yaml").max_subagents` 返回 50。
+
 ## 2026-05-27 / 运行参数继续收敛到主配置
 
 状态：本地已落地，focused tests 已跑；未提交
