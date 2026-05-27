@@ -17,6 +17,22 @@ def test_artifact_locator_finds_single_required_kind_under_allowed_root(tmp_path
     assert result.findings == []
 
 
+def test_artifact_locator_treats_spreadsheet_as_open_workbook_family(tmp_path):
+    from agent_py_agent.agent.agent_core.artifact_locator import locate_artifact
+
+    (tmp_path / "outputs").mkdir()
+    workbook = tmp_path / "outputs" / "weekly_top20_stars_2026.xlsx"
+    workbook.write_bytes(b"PK\x03\x04fake")
+
+    result = locate_artifact(
+        {"artifact_id": "github_weekly_stars_xlsx", "kind": "spreadsheet", "allowed_output_roots": ["outputs"]},
+        tmp_path,
+    )
+
+    assert result.path == workbook.resolve()
+    assert result.findings == []
+
+
 def test_artifact_locator_refuses_ambiguous_kind_without_structured_hint(tmp_path):
     from agent_py_agent.agent.agent_core.artifact_locator import locate_artifact
 
@@ -98,6 +114,38 @@ def test_delivery_closeout_uses_artifact_locator_when_path_is_not_declared(tmp_p
 
     assert report["ok"] is True
     assert report["artifacts"][0]["path"] == str(artifact_path.resolve())
+
+
+def test_delivery_closeout_locates_spreadsheet_artifact_without_declared_path(tmp_path):
+    from agent_py_agent.agent.agent_core.main_agent_delivery_closeout_artifacts import (
+        DeliveryContractValidationRequest,
+        _validate_contract_artifacts,
+    )
+
+    (tmp_path / "outputs").mkdir()
+    artifact_path = tmp_path / "outputs" / "weekly_top20_stars_2026.xlsx"
+    artifact_path.write_bytes(b"PK\x03\x04fake")
+    contract = {
+        "artifacts": [
+            {
+                "artifact_id": "github_weekly_stars_xlsx",
+                "kind": "spreadsheet",
+                "allowed_output_roots": ["outputs"],
+            }
+        ]
+    }
+
+    report = _validate_contract_artifacts(
+        DeliveryContractValidationRequest(
+            contract=contract,
+            artifacts=contract["artifacts"],
+            workspace_root=tmp_path,
+            params=_empty_tool_loop_params(),
+        )
+    )
+
+    assert report["artifacts"][0]["path"] == str(artifact_path.resolve())
+    assert report["artifacts"][0]["acceptance_report"]["artifact_ref"] == str(artifact_path.resolve())
 
 
 def _empty_tool_loop_params():

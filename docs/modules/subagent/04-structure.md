@@ -4,9 +4,19 @@
 
 `create_subagents` 的“立即启动”是后台启动：工具调用本身只负责创建 run、写入后台启动标记、拉起 runner 调度线程，然后立刻把 `run_ids`、启动状态和任务树快照返回给父代理。父代理不会同步等待所有子代理完成，因此可以继续和用户对话、继续规划，或稍后用 `inspect_agent_tree` / `subagent_board` 查看进展。
 
+后台启动使用显式运行身份加线程级兜底。每个子代理 runner 会形成自己的 `RunScope`，包含 `run_id`、`task_id`、`parent_run_id`、`root_run_id`、`root_task_id`、`depth` 和 `agent_kind`。工具调用、工具结果、归档记录和 `agent_events` 会优先写这份结构化身份；线程级 runner 上下文只作为权限上界和旧调用链的兼容兜底。这样父代理一边继续派第二个子代理时，不会被第一个正在运行的后台子代理污染身份，也不会把新子代理误挂进兄弟子树。
+
+当显式身份参数和当前 runner 上下文冲突时，系统不静默猜。`inspect_agent_tree` / `dispatch_subagents` 会把裁决写进 `scope_resolution`，例如 `source=current_runner_context`、`effective.run_id=current-child`、`ignored_explicit.parent_run_id=sibling-parent`。这表示当前 runner 仍被限制在自己的子树里，但父级或调试者能看见模型曾经请求过外部 scope。
+
+真执行子代理时始终通过独立 worker agent 跑。`runner_timeout_seconds=0` 只表示不设总时长超时，不表示把子代理模型回合放回父代理对象里执行。这样父代理、后台调度线程和子代理 runner 不会共享临时运行字段。
+
+子代理的 `latest_tool_progress` 只记录真正的产物写入进度。`web_search`、`web_fetch`、`read_artifact` 这类只读工具产生的工具归档文件只是资料来源，不会被当成用户交付产物；但这些成功的只读调用仍会更新任务树里的 `current_tool`、`last_progress_summary` 和 `latest_summary`，让父代理能看出子代理仍在推进。 如果未来某个工具确实生成用户产物，需要在工具结果里显式写 `progress_path`、`product_path`、`deliverable_path` 或 `user_artifact_path`。
+
 ## 任务树
 
-任务树是系统账本，不是子代理自己写出来的产物。`SubAgentManager.save()` 每次保存任务时都会从 `SubAgentTask` 的机器字段重建 `attributes.system_tree`，包括 `run_id`、`root_id`、`parent_id`、`child_ids`、状态、进度、artifact refs 和 evidence refs。即使模型在结果里写了一个假的 `system_tree`，保存链路也会覆盖成系统派生值。
+任务树是展示层，不是身份来源。`SubAgentManager.save()` 每次保存任务时都会从 `SubAgentTask` 的机器字段重建 `attributes.system_tree`，包括 `run_id`、`root_id`、`parent_id`、`child_ids`、状态、进度、artifact refs 和 evidence refs。即使模型在结果里写了一个假的 `system_tree`，保存链路也会覆盖成系统派生值。
+
+真正的运行事实源是显式 run 账本：`agent_runs` 记录当前状态，`agent_events` 记录每次 run 保存和工具完成。工具完成事件会带 `run_id`、`parent_run_id`、`root_run_id`、`root_task_id` 和操作号。父级看 tree 时只是在读这些事实的投影，不再靠“当前子代理是谁”猜来源。
 
 子代理应该做的是写自己的结果、证据引用和必要的工作文件；父级或主代理通过 `inspect_agent_tree`、`subagent_board`、`output_json` 和 refs 看状态，不要求子代理手动维护树。
 
@@ -32,7 +42,7 @@
 
 子代理默认继承一套能正常干活的基础工具，包括读文件、列文件、搜索、读 artifact、联网检索、写文件、打补丁、受控命令执行、只读树状态、协作和能力申请工具。角色模板只追加职责重点，不应该把基础工具拿掉。`inspect_agent_tree` 是按身份裁剪的只读工具：主代理可以看全树；子代理/孙代理只能看当前 run 的 `own_subtree`，即自己和自己的后代。
 
-层级工具分两类：顶层主代理第一次派工用 `create_subagents`；已经运行中的子代理要创建下一层，用 `schedule_child_subagents`。两者体验保持一致：默认创建后后台启动，并返回 `run_ids`、启动状态和树状态；只有显式 `defer_start=true` / `apply=false` 才只建或预览。区别只在身份边界：`schedule_child_subagents` 会从当前 runner 上下文自动绑定 `parent_id`，因此孙代理挂在当前子代理名下，而不是凭模型传一个父 id。运行中的 `dispatch_subagents` 同样默认只推进当前节点的直接孩子；即使模型显式传了别的 `parent_run_id`，runner 内也会压回当前 run，避免误催平行子代理。
+层级工具分两类：顶层主代理第一次派工用 `create_subagents`；已经运行中的子代理要创建下一层，用 `schedule_child_subagents`。两者体验保持一致：默认创建后后台启动，并返回 `run_ids`、启动状态和树状态；只有显式 `defer_start=true` / `apply=false` 才只建或预览。区别只在身份边界：`schedule_child_subagents` 会从当前 runner 上下文自动绑定 `parent_id`，因此孙代理挂在当前子代理名下，而不是凭模型传一个父 id。运行中的 `dispatch_subagents` 同样默认只推进当前节点的直接孩子；即使模型显式传了别的 `parent_run_id`，runner 内也会压回当前 run，并在 `scope_warnings` 里说明，避免误催平行子代理。
 
 shell 权限按“不能比父级更大”派生：
 

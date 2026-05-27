@@ -167,10 +167,13 @@ def _task_to_kernel_run(
 # LLM: _workspace_refs centralizes task/run workspace refs used by upper agents.
 # 函数用途: 返回任务目录、runtime task workspace 和 agent run workspace 路径引用。
 def _workspace_refs(task: SubAgentTask) -> dict[str, str]:
+    # LLM: prefer runtime task workspace while preserving legacy path for old recovery packets.
+    current_task_dir = task.task_workspace_dir or task.task_dir
     refs = {
-        "task_dir": task.task_dir,
+        "task_dir": current_task_dir,
         "task_workspace": task.task_workspace_dir,
         "agent_run_workspace": task.agent_run_workspace_dir,
+        "legacy_task_dir": task.task_dir if task.task_dir != current_task_dir else "",
         "shared_blackboard": task.task_workspace_shared_blackboard,
         "inbox": task.agent_run_inbox_dir,
         "outbox": task.agent_run_outbox_dir,

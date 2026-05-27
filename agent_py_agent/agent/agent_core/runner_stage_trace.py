@@ -14,6 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .runner_context import current_subagent_run_id
+
 
 # LLM: RunnerModelStageTraceRequest keeps backend trace inputs bundled for bundle-interface rules.
 # 类用途: 模型阶段 trace 参数包，保存当前 agent、运行参数、轮次和可选模型数据；调用方不需要传散乱参数。
@@ -144,7 +146,7 @@ def trace_runner_tool_call_finished(request: RunnerToolStageTraceRequest) -> Non
 # LLM: _trace_runner_stage resolves the active subagent task and delegates to the subagent trace writer.
 # 函数用途: 只在当前 agent 有 `_current_subagent_run_id` 时写 trace；没有 runner 上下文时静默返回。
 def _trace_runner_stage(bundle: RunnerStageTraceBundle) -> None:
-    run_id = str(getattr(bundle.agent, "_current_subagent_run_id", "") or "").strip()
+    run_id = current_subagent_run_id(bundle.agent)
     if not run_id:
         return
     try:

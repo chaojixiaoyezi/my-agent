@@ -2,6 +2,29 @@
 
 > 2026-05-27 当前路线备注：早期条目里提到的 `orchestration_contract`、`materialize_subagent_inputs`、`subagent_dispatch_closeout`、`parent_acceptance` 专项收口、`scheduling_warnings`、领域/重复目标调度提示等，都是历史试错记录。当前生产路线是：调度工具只返回 refs/tree/status，普通协作不靠中间验收门卡住；最终质量统一回到 closeout 和任务树事实。
 
+## 2026-05-28 / 通道运行时 式显式 run 身份账本
+
+状态：本地已落地，focused tests 已跑；未提交
+
+摘要：
+- 子代理并发身份从“线程级当前身份兜底”继续升级为显式 `RunScope`。`RunScope` 现在包含 `run_id`、`task_id`、`parent_run_id`、`root_run_id`、`root_task_id`、`depth` 和 `agent_kind`。
+- 普通模型工具调用在进入 registry 前会被包装成 typed `ToolCallEnvelope`，工具结果 envelope、工具归档和运行事件都携带同一份 scope。后续 tree、审计和恢复不用再从共享 current 字段猜“是谁做的”。
+- `agent_events` 现在会为工具完成追加 `tool_call_finished` 事件，事件本身带 run/parent/root 身份、工具名、结果状态和 operation id。`inspect_agent_tree` 仍是只读展示层，事实源是 run 表和事件账本。
+- 线程级 runner context 仍保留，但定位改成权限上界和兼容兜底：旧调用链缺显式 scope 时才使用，不能作为新链路的唯一身份来源。
+- `inspect_agent_tree` 和 `dispatch_subagents` 现在会输出 `scope_resolution` / `scope_warnings`。如果模型传了外部 `root_id/run_id/parent_run_id`，但当前 runner 只能看或推进自己的子树，系统按当前 runner 收窄权限，同时把被忽略的显式字段写成 `ignored_explicit`，避免静默串 scope。
+- 旧链路清理扩展到模型可见的身份写入口：`subagent_message`、`capability_request`、`open_case/request_collaboration/update_*`、`submit_evidence` 都不再允许 runner 用显式参数冒充别的 run。冲突时按当前 runner 写账，工具结果返回 `scope_resolution/scope_warnings`；这不是新硬门，而是把冒充参数降级成可见 warning。
+
+验证：
+- `python3 -m pytest agent_py_agent/tests/test_agent_tree_three_layer_status.py -q`
+- `python3 -m pytest agent_py_agent/tests/test_orchestration_dispatch_subagents_tool.py::TestDispatchSubagentsToolRunnerContext::test_runner_context_dispatch_payload_reports_scope_conflict -q`
+- `pytest agent_py_agent/tests/test_runtime_gate_ledger.py -q`
+- `pytest agent_py_agent/tests/test_tools/test_tool_loop.py agent_py_agent/tests/test_tool_output_externalizer.py agent_py_agent/tests/test_runtime_gate_integration.py agent_py_agent/tests/test_write_boundary.py -q --tb=short`
+- `pytest agent_py_agent/tests/test_action_protocol_tool_execution.py agent_py_agent/tests/test_subagent_kernel.py agent_py_agent/tests/test_local_store_control_plane.py -q`
+- `pytest agent_py_agent/tests/test_runner_dispatch.py agent_py_agent/tests/test_schedule_child_subagents_tool.py agent_py_agent/tests/test_subagent_context_bundle.py -q`
+- `python3 -m pytest agent_py_agent/tests/test_subagent_message_tool.py agent_py_agent/tests/test_subagent_capability_request_tool.py agent_py_agent/tests/test_collaboration_control_plane_identity.py -q --tb=short`
+- `ruff check agent_py_agent/agent/action_protocol_core.py agent_py_agent/agent/agent_core/_runtime_params.py agent_py_agent/agent/agent_core/runtime_loop_support.py agent_py_agent/agent/agent_core/tool_call_runtime.py agent_py_agent/agent/agent_core/tool_call_archive_record.py agent_py_agent/agent/agent_core/tool_loop_recovery.py agent_py_agent/agent/agent_core/tool_runtime_ledger.py agent_py_agent/agent/tooling/write_boundary.py agent_py_agent/tests/test_runtime_gate_ledger.py agent_py_agent/tests/test_write_boundary.py`
+- `python3 -m compileall -q agent_py_agent/agent`
+
 ## 2026-05-27 / 子代理权限、基础工具和任务级记忆
 
 状态：本地已落地，focused tests 已跑；未提交

@@ -126,6 +126,33 @@ def test_direct_message_allows_peers_under_same_parent(tmp_path):
     assert message["scope_parent_run_id"] == root.id
 
 
+# LLM: test_message_tool_uses_current_runner_when_sender_param_conflicts keeps thread-local scope from becoming spoofable.
+# 函数用途: runner 内模型传错 sender_run_id 时，消息仍以当前 run 发送，并把冲突写入 scope_warnings。
+def test_message_tool_uses_current_runner_when_sender_param_conflicts(tmp_path):
+    agent, manager = _manager_agent(tmp_path)
+    root = manager.create_run(goal="root", thought="coordinate", plan=["split"], role="coordinator")
+    peer_a, peer_b = _schedule_children(manager, root.id, [("tester", "qa-a"), ("bug_finder", "qa-b")])
+    agent._current_subagent_run_id = peer_a.id
+
+    result = SubagentMessageTool(agent).execute(
+        {
+            "sender_run_id": root.id,
+            "mode": "direct",
+            "scope": "peers",
+            "target_run_ids": [peer_b.id],
+            "topic": "scope_check",
+            "body": "这条消息应该以当前 runner 的身份发出。",
+        }
+    )
+
+    payload = json.loads(result.output)
+    message = json.loads(Path(payload["refs"]["target_inboxes"][0]).read_text(encoding="utf-8"))
+    assert result.ok is True
+    assert message["sender_run_id"] == peer_a.id
+    assert "explicit_scope_overridden_by_current_runner" in payload["scope_warnings"]
+    assert payload["scope_resolution"]["ignored_explicit"]["sender_run_id"] == root.id
+
+
 # LLM: test_broadcast_scopes_to_sender_descendants prevents child broadcasts from claiming sibling subtrees.
 # 函数用途: 子代理广播只标记自己的子树范围，不能伪装成 root 全局广播。
 def test_broadcast_scopes_to_sender_descendants(tmp_path):

@@ -9,6 +9,7 @@
 - 默认子代理工具集补齐基础读、搜、artifact、网络、写文件、打补丁、受控命令、只读树状态、协作和能力申请工具，避免“少填 tool_preset 就创建残废代理”。
 - `inspect_agent_tree` 会按当前身份裁剪：主代理可看全树；子代理/孙代理只看自己和后代，不能用 root 参数读平行子树。
 - runner 内部的 `dispatch_subagents` 会固定在当前 run 的直接孩子范围内；模型显式传入其他 `parent_run_id` 也不会跳到平行子树。
+- runner 内的消息、能力申请和协作证据入口同样按当前身份裁剪。模型如果传错 `sender_run_id`、`source_agent_id`、`requester_agent_id`、`actor_agent_id`，系统不会替别的 run 写账；工具结果会把被忽略字段放进 `scope_resolution.ignored_explicit`。
 - `schedule_child_subagents` 现在和 `create_subagents` 一样默认创建后后台启动；启动参数会保留当前 runner 作为 parent scope，不会把孙代理挂到顶层或平行子树。
 - 子代理任务级记忆命名空间改为 `subagent:{root_run_id}:{run_id}`，并把保留策略写入 `attributes.memory_scope`。新增配置 `subagent_memory_retention_policy`、`subagent_memory_delete_after_days`、`subagent_destroy_summary_required`；这些只描述归档/清理边界，不是新硬门。
 - 为保持 code-size 清零，把后台启动逻辑拆到 `orchestration_background_dispatch.py`，把 kernel 数据模型拆到 `kernel_models.py`；行为保持 refs/tree/status 路线不变。

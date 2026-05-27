@@ -43,6 +43,9 @@ class RunScope:
     owner_id: str = ""
     parent_run_id: str = ""
     root_task_id: str = ""
+    root_run_id: str = ""
+    depth: int = 0
+    agent_kind: str = ""
     reserved: dict[str, Any] = field(default_factory=dict)
 
     # LLM: to_dict gives callers JSON-safe scope data without exposing dataclass internals.
@@ -64,6 +67,9 @@ class RunScope:
             owner_id=str(data.get("owner_id") or ""),
             parent_run_id=str(data.get("parent_run_id") or ""),
             root_task_id=str(data.get("root_task_id") or ""),
+            root_run_id=str(data.get("root_run_id") or ""),
+            depth=_int_or_zero(data.get("depth")),
+            agent_kind=str(data.get("agent_kind") or ""),
             reserved=_dict_or_empty(data.get("reserved")),
         )
 
@@ -189,3 +195,12 @@ def _float_or_zero(value: object) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+# LLM: _int_or_zero tolerates loose scope JSON while keeping depth machine-readable.
+# 函数用途: 从任意值中安全解析整数，失败时返回 0。
+def _int_or_zero(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0

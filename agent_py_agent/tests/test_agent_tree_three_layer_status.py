@@ -78,3 +78,34 @@ def test_subagent_runner_can_only_inspect_own_subtree_even_with_root_params():
     assert query.root_id == ""
     assert query.scope == "own_subtree"
     assert payload["scope"] == "own_subtree"
+
+
+def test_agent_tree_reports_scope_conflict_when_runner_context_wins():
+    """当前 runner 上下文覆盖显式外部 scope 时，不能静默吞掉冲突。"""
+
+    class _Manager:
+        seen_query = None
+
+        def kernel_snapshot(self, query):
+            self.seen_query = query
+            return SubagentKernelSnapshot(
+                schema_version="subagent_kernel_snapshot.v1",
+                root_id="child-1",
+                scope=query.scope,
+                runs=[SubagentKernelRun(run_id="child-1")],
+            )
+
+    class _Agent:
+        _current_subagent_run_id = "child-1"
+        subagents = _Manager()
+
+    payload = agent_tree_status_payload(
+        _Agent(),
+        {"root_id": "foreign-root", "run_id": "foreign-child", "scope": "root_tree"},
+    )
+
+    assert _Agent.subagents.seen_query.run_id == "child-1"
+    assert "explicit_scope_overridden_by_current_runner" in payload["warnings"]
+    assert payload["policy"]["scope_resolution"]["source"] == "current_runner_context"
+    assert payload["policy"]["scope_resolution"]["effective"]["run_id"] == "child-1"
+    assert payload["policy"]["scope_resolution"]["ignored_explicit"]["run_id"] == "foreign-child"

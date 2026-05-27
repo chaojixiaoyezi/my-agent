@@ -412,6 +412,35 @@ class TestDispatchSubagentsToolRunnerContext:
         assert params.parent_run_id == "current-child"
         assert params.exclude_run_ids == ["current-child"]
 
+    def test_runner_context_dispatch_payload_reports_scope_conflict(self):
+        """runner 内显式指定外部 parent 时，payload 要暴露身份裁决而不是静默覆盖。"""
+        import json
+
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        mock_report = MagicMock()
+        mock_report.dry_run = False
+        mock_report.summary = {"runner": 0}
+        mock_report.records = []
+
+        mock_agent = MagicMock()
+        mock_agent._current_subagent_run_id = "current-child"
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent.tools.specs.return_value = []
+        mock_agent.dispatch_subagents.return_value = mock_report
+        mock_agent.subagents.workspace = Path("/tmp/workspace")
+
+        result = DispatchSubagentsTool(mock_agent).execute(
+            {"parent_run_id": "sibling-parent", "run_ids": ["sibling-child"]}
+        )
+
+        assert result.ok is True
+        payload = json.loads(result.output)
+        assert "explicit_scope_overridden_by_current_runner" in payload["scope_warnings"]
+        assert payload["scope_resolution"]["source"] == "current_runner_context"
+        assert payload["scope_resolution"]["effective"]["parent_run_id"] == "current-child"
+        assert payload["scope_resolution"]["ignored_explicit"]["parent_run_id"] == "sibling-parent"
+
     def test_execute_limit_aliases_runner_count_when_max_runners_missing(self):
         """真实执行时，模型只写 limit 也应按 runner 数量推进，避免误退回单线程。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool

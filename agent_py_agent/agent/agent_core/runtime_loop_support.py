@@ -331,6 +331,7 @@ def _tool_loop_execute_params(seed: RuntimeToolLoopSeed) -> ToolLoopExecuteParam
         request_id=params.request_id,
         run_id=params.run_id,
         task_id=params.task_id,
+        run_scope=None,
         one_shot_tool_calls=one_shot_tool_calls,
         executed_tools=executed_tools,
         archive_tool_calls=archive_tool_calls,

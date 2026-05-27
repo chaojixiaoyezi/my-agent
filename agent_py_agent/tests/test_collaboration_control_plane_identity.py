@@ -34,8 +34,62 @@ def test_open_case_uses_current_subagent_run_when_model_invents_task_id(tmp_path
     status = json.loads(agent.tools.tools["case_status"].execute({"case_id": payload["case_id"]}).output)
 
     assert payload["task_id"] == child.id
+    assert payload["scope_resolution"]["effective"]["agent_id"] == child.id
     assert thread is not None
     assert status["case"]["task_id"] == child.id
+
+
+def test_collaboration_tools_scope_actor_to_current_runner_when_explicit_id_conflicts(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    child = agent.subagents.create_run(
+        goal="发起协作并提交证据。",
+        agent_name="real-runner",
+        allowed_tools=["open_case", "request_collaboration", "submit_evidence"],
+    )
+    target = agent.subagents.create_run(goal="响应协作。", agent_name="target-runner")
+    agent._current_subagent_run_id = child.id
+    try:
+        case_payload = json.loads(
+            agent.tools.tools["open_case"].execute(
+                {
+                    "task_id": child.id,
+                    "title": "身份冲突 case",
+                    "summary": "模型传错 created_by 也不能冒充别的 run。",
+                    "created_by": "invented-agent",
+                }
+            ).output
+        )
+        request_payload = json.loads(
+            agent.tools.tools["request_collaboration"].execute(
+                {
+                    "case_id": case_payload["case_id"],
+                    "requester_agent_id": "invented-agent",
+                    "target_agent_ids": [target.id],
+                    "question": "请补充证据。",
+                }
+            ).output
+        )
+        evidence_payload = json.loads(
+            agent.tools.tools["submit_evidence"].execute(
+                {
+                    "case_id": case_payload["case_id"],
+                    "request_id": request_payload["request_id"],
+                    "source_agent_id": "invented-agent",
+                    "summary": "提交当前 runner 的证据。",
+                    "evidence_refs": ["artifact://real-runner/e1"],
+                }
+            ).output
+        )
+    finally:
+        delattr(agent, "_current_subagent_run_id")
+
+    status = json.loads(agent.tools.tools["case_status"].execute({"case_id": case_payload["case_id"]}).output)
+    assert status["case"]["created_by"] == child.id
+    assert status["requests"][0]["requester_agent_id"] == child.id
+    assert status["evidence"][0]["source_agent_id"] == child.id
+    assert "explicit_scope_overridden_by_current_runner" in request_payload["scope_warnings"]
+    assert request_payload["scope_resolution"]["ignored_explicit"]["requester_agent_id"] == "invented-agent"
+    assert evidence_payload["scope_resolution"]["ignored_explicit"]["source_agent_id"] == "invented-agent"
 
 
 def test_request_status_update_can_structurally_reroute_target_agents(tmp_path) -> None:

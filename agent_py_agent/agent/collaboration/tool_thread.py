@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ..agent_core.runner_context import current_subagent_run_id
 from ..tools import ToolExecutionResult
 from .tool_values import error
 
@@ -36,7 +37,7 @@ def thread_from_task(agent: SimpleAgent, task_id: str, *, materialize: bool = Fa
 
 
 def thread_from_current_runner(agent: SimpleAgent) -> tuple[str, str] | None:
-    run_id = str(getattr(agent, "_current_subagent_run_id", "") or "").strip()
+    run_id = current_subagent_run_id(agent)
     return thread_from_task(agent, run_id, materialize=True) if run_id else None
 
 

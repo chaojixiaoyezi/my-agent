@@ -112,10 +112,21 @@ def _path_url_command_decision(payload: dict[str, Any], call: object) -> GateDec
             workspace_root=call.workspace_root,
             workspace_roots=_path_gate_roots(call),
             allowed_private_hosts=boundary_strings(boundary, "allowed_private_hosts"),
-            allow_shell_operators=boundary_bool(boundary, "allow_shell_operators"),
+            allow_shell_operators=_allow_shell_operators(boundary),
             allowed_commands=_controlled_exec_allowed_commands(boundary),
         )
     )
+
+
+# LLM: shell operators are allowed for normal workspace/full shell access, while restricted mode stays tight.
+# 函数用途: 让 registry 入口门和 shell 工具自身策略一致，避免普通重定向/管道在执行前被误拦。
+def _allow_shell_operators(boundary: dict[str, object] | None) -> bool:
+    if boundary_bool(boundary, "allow_shell_operators"):
+        return True
+    mode = boundary_text(boundary, "shell_access_mode").strip().lower().replace("_", "-")
+    if not mode:
+        return True
+    return mode in {"workspace-write", "full-access"}
 
 
 # LLM: _controlled_exec_allowed_commands collects command_allowlist entries from every parent grant.

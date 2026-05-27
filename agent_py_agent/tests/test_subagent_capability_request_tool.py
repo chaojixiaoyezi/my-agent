@@ -69,10 +69,10 @@ def test_capability_request_tool_records_open_request(tmp_path):
     assert request.output_budget["stdout_bytes"] == 1024
 
 
-# LLM: test_capability_request_tool_blocks_cross_run_writes locks hierarchy authority.
-# 函数用途: 当前 runner 不能通过显式 run_id 替 sibling 或其他分支写能力申请。
-def test_capability_request_tool_blocks_cross_run_writes(tmp_path):
-    agent, manager, _task = _agent_with_current_run(tmp_path)
+# LLM: test_capability_request_tool_scopes_cross_run_writes_to_current_runner locks hierarchy authority without stopping the run.
+# 函数用途: 当前 runner 传错显式 run_id 时只写当前 run，并返回 scope warning，不替 sibling 写能力申请。
+def test_capability_request_tool_scopes_cross_run_writes_to_current_runner(tmp_path):
+    agent, manager, task = _agent_with_current_run(tmp_path)
     other = manager.create_run(goal="other", thought="separate", plan=["noop"])
 
     result = CapabilityRequestTool(agent).execute(
@@ -83,8 +83,12 @@ def test_capability_request_tool_blocks_cross_run_writes(tmp_path):
         }
     )
 
-    assert result.ok is False
-    assert "只能为当前 runner" in result.output
+    payload = json.loads(result.output)
+    assert result.ok is True
+    assert payload["run_id"] == task.id
+    assert "explicit_scope_overridden_by_current_runner" in payload["scope_warnings"]
+    assert payload["scope_resolution"]["ignored_explicit"]["run_id"] == other.id
+    assert len(manager.load(task.id).capability_requests) == 1
     assert manager.load(other.id).capability_requests == []
 
 

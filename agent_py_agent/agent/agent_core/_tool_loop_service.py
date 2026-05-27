@@ -15,6 +15,7 @@ from .orchestration_shared_context import (
     refresh_parent_shared_context_cache,
     refresh_parent_shared_context_from_tool_record,
 )
+from .runner_context import current_task_attributes
 from .subagent_attempt_guard import stale_subagent_attempt_message
 from .tool_call_archive_record import archive_tool_call_record
 from .tool_call_context_reducer import render_tool_payload_for_live_prompt
@@ -61,7 +62,7 @@ def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
     effective = getattr(getattr(agent, "config", None), "max_tool_rounds", None)
     if effective is None:
         effective = runtime_guard_int("max_tool_rounds", 0)
-    attrs_to_check = params.task_attributes or getattr(agent, "_current_task_attributes", None)
+    attrs_to_check = params.task_attributes or current_task_attributes(agent)
     if attrs_to_check and "max_tool_rounds" in attrs_to_check:
         effective = attrs_to_check["max_tool_rounds"]
     try:

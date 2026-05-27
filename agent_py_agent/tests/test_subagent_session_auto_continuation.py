@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from agent_py_agent.agent.backend import BaseBackend, ModelResponse
 from agent_py_agent.agent.config import AgentConfig
@@ -9,6 +10,7 @@ from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagents.model_task import SubAgentTask
 from agent_py_agent.agent.subagents.services.session_progress import (
     SubagentToolProgressRequest,
+    record_runtime_subagent_tool_progress,
     record_subagent_tool_progress,
 )
 
@@ -146,6 +148,77 @@ def test_task_local_write_progress_updates_continue_packet(tmp_path: Path) -> No
     assert packet["restore_refs"]["agent_run_latest_tool_progress"].endswith("latest_tool_progress.json")
     assert packet["restore_refs"]["agent_run_tool_progress"].endswith("tool_progress.jsonl")
     assert packet["recommended_read_paths"][1].endswith("latest_tool_progress.json")
+
+
+# LLM: read-only tool artifacts are sources, not product progress anchors.
+# 函数用途: 防止 web_search/web_fetch 的 archive JSON 被误当成交付产物，导致子代理续跑提示偏向反复读取 progress。
+def test_read_only_tool_artifact_does_not_update_task_local_product_progress(tmp_path: Path) -> None:
+    task = _progress_task(tmp_path)
+
+    snapshot = record_subagent_tool_progress(
+        SubagentToolProgressRequest(
+            task=task,
+            tool="web_search",
+            payload={"query": "DeepSeek paper 2026"},
+            output=json.dumps(
+                {
+                    "ok": True,
+                    "artifact_ref": str(tmp_path / "memory_archive" / "tool_outputs" / "web_search-1.json"),
+                    "artifact_path": str(tmp_path / "memory_archive" / "tool_outputs" / "web_search-1.json"),
+                }
+            ),
+            ok=True,
+            tool_round=1,
+            tool_index=1,
+        )
+    )
+
+    assert snapshot == {}
+    assert not (Path(task.agent_run_workspace_dir) / "progress" / "latest_tool_progress.json").exists()
+
+
+# LLM: read-only progress should remain visible in the tree without becoming product progress.
+# 函数用途: 父代理看子代理 summary/tree 时能看到 read-only 工具仍在推进，避免误判为卡住后重派。
+def test_read_only_tool_updates_observable_subagent_progress_without_product_snapshot(tmp_path: Path) -> None:
+    task = _progress_task(tmp_path)
+    saved: list[SubAgentTask] = []
+
+    class Manager:
+        def load(self, run_id: str) -> SubAgentTask:
+            assert run_id == task.id
+            return task
+
+        def save(self, item: SubAgentTask) -> None:
+            saved.append(item)
+
+    agent = SimpleNamespace(subagents=Manager())
+    record_runtime_subagent_tool_progress(
+        agent,
+        SimpleNamespace(
+            params=SimpleNamespace(context_scope="task_local", run_id=task.id),
+            payload={"query": "DeepSeek 2026 paper"},
+            result=SimpleNamespace(
+                tool="web_search",
+                ok=True,
+                output=json.dumps(
+                    {
+                        "ok": True,
+                        "artifact_ref": str(tmp_path / "memory_archive" / "web_search.json"),
+                    }
+                ),
+                result_envelope={},
+            ),
+            tool_rounds=2,
+            idx=1,
+        ),
+    )
+
+    assert saved
+    assert task.current_tool == "web_search"
+    assert task.last_progress_summary == "最近成功调用工具: web_search"
+    assert task.latest_summary == "最近成功调用工具: web_search"
+    assert task.current_step == "RUNNING"
+    assert not (Path(task.agent_run_workspace_dir) / "progress" / "latest_tool_progress.json").exists()
 
 
 # LLM: complete HTML progress should steer runners toward structured closeout instead of endless writing.

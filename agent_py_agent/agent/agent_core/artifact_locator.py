@@ -18,7 +18,9 @@ _KIND_EXTENSIONS = {
     "markdown": (".md", ".markdown"),
     "md": (".md", ".markdown"),
     "pdf": (".pdf",),
+    "spreadsheet": (".xlsx", ".xls", ".ods", ".csv", ".tsv"),
     "txt": (".txt",),
+    "workbook": (".xlsx", ".xls", ".ods"),
     "xlsx": (".xlsx",),
     "zip": (".zip",),
 }

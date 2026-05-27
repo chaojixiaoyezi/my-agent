@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .runner_context import restore_current_subagent_context, set_current_subagent_context
 from .subagent_params import (
     SubagentFinalizeParams,
     SubagentProbeParams,
@@ -95,12 +96,12 @@ def _persist_runner_prompt_before_model(agent, run_id: str, prompt: str) -> None
 def _run_and_finalize_subagent(agent, bundle: SubagentModelTurnBundle):
     options = bundle.options
     task_for_attrs = agent.subagents.load(options.run_id)
-    previous_task_attributes = getattr(agent, "_current_task_attributes", None)
-    previous_subagent_run_id = getattr(agent, "_current_subagent_run_id", "")
-    previous_subagent_attempt_id = getattr(agent, "_current_subagent_attempt_id", "")
-    agent._current_task_attributes = task_for_attrs.attributes
-    agent._current_subagent_run_id = options.run_id
-    agent._current_subagent_attempt_id = bundle.active_attempt_id
+    previous_context = set_current_subagent_context(
+        agent,
+        run_id=options.run_id,
+        attempt_id=bundle.active_attempt_id,
+        task_attributes=task_for_attrs.attributes,
+    )
 
     try:
         result = _run_subagent_model_turn(agent, bundle.prompt, bundle.context)
@@ -118,9 +119,7 @@ def _run_and_finalize_subagent(agent, bundle: SubagentModelTurnBundle):
             )
         )
     finally:
-        agent._current_task_attributes = previous_task_attributes
-        agent._current_subagent_run_id = previous_subagent_run_id
-        agent._current_subagent_attempt_id = previous_subagent_attempt_id
+        restore_current_subagent_context(agent, previous_context)
 
     return agent._finalize_subagent_run(
         SubagentFinalizeParams(

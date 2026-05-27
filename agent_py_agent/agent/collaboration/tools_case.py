@@ -15,6 +15,7 @@ from .tool_specs import (
 )
 from .tool_targets import (
     actor_agent_id,
+    collaboration_scope_payload,
     resolved_target_agent_ids,
     target_response_payload,
     target_runtime_metadata,
@@ -59,8 +60,10 @@ class OpenCaseTool(BaseTool):
         if isinstance(resolved, ToolExecutionResult):
             return resolved
         thread_id, task_id = resolved
-        case = self.agent.collaboration_store.open_case({'thread_id': thread_id, 'task_id': task_id, 'title': str(params.get("title") or "协作 case"), 'summary': str(params.get("summary") or ""), 'priority': str(params.get("priority") or "normal"), 'created_by': str(params.get("created_by") or ""), 'entities': dict_value(params.get("entities")), 'required_capabilities': string_values(params.get("required_capabilities")), 'metadata': dict_value(params.get("metadata"))})
-        return ok("open_case", _open_case_payload(case, _CasePayloadRefs(thread_id, task_id, params)))
+        case = self.agent.collaboration_store.open_case({'thread_id': thread_id, 'task_id': task_id, 'title': str(params.get("title") or "协作 case"), 'summary': str(params.get("summary") or ""), 'priority': str(params.get("priority") or "normal"), 'created_by': actor_agent_id(self.agent, params), 'entities': dict_value(params.get("entities")), 'required_capabilities': string_values(params.get("required_capabilities")), 'metadata': dict_value(params.get("metadata"))})
+        payload = _open_case_payload(case, _CasePayloadRefs(thread_id, task_id, params))
+        payload.update(collaboration_scope_payload(self.agent, params, explicit_keys=("created_by", "actor_agent_id", "agent_id", "run_id")))
+        return ok("open_case", payload)
 
 
 class RaiseCollaborationEventTool(BaseTool):
@@ -77,11 +80,13 @@ class RaiseCollaborationEventTool(BaseTool):
         case = self._open_event_case(_EventCaseInput(thread_id, task_id, actor_id, params))
         request = self._request_event(case.case_id, actor_id, params)
         runtime = target_runtime_summary(self.agent, list(request.target_agent_ids))
-        return ok("raise_collaboration_event", _raise_event_payload(
+        payload = _raise_event_payload(
             case,
             request,
             _EventPayloadRefs(thread_id, task_id, runtime),
-        ))
+        )
+        payload.update(collaboration_scope_payload(self.agent, params, explicit_keys=("created_by", "actor_agent_id", "agent_id", "run_id")))
+        return ok("raise_collaboration_event", payload)
 
     def _open_event_case(self, event: _EventCaseInput):
         params = event.params
@@ -103,11 +108,13 @@ class UpdateCaseStatusTool(BaseTool):
         if not case_id:
             return error("update_case_status", "case_id_required", "case_id is required")
         try:
-            case = self.agent.collaboration_store.record_case_status({'case_id': case_id, 'status': str(params.get("status") or ""), 'actor_agent_id': str(params.get("actor_agent_id") or ""), 'summary': str(params.get("summary") or ""), 'decision_type': str(params.get("decision_type") or ""), 'evidence_ids': string_values(params.get("evidence_ids")), 'metadata': dict_value(params.get("metadata"))})
+            case = self.agent.collaboration_store.record_case_status({'case_id': case_id, 'status': str(params.get("status") or ""), 'actor_agent_id': actor_agent_id(self.agent, params), 'summary': str(params.get("summary") or ""), 'decision_type': str(params.get("decision_type") or ""), 'evidence_ids': string_values(params.get("evidence_ids")), 'metadata': dict_value(params.get("metadata"))})
         except (KeyError, ValueError) as exc:
             return error("update_case_status", "case_status_update_failed", str(exc))
         decisions = self.agent.collaboration_store.case_decisions(case_id)
-        return ok("update_case_status", {"case": case.to_dict(), "decision": decisions[-1].to_dict() if decisions else {}})
+        payload = {"case": case.to_dict(), "decision": decisions[-1].to_dict() if decisions else {}}
+        payload.update(collaboration_scope_payload(self.agent, params, explicit_keys=("actor_agent_id", "agent_id", "run_id")))
+        return ok("update_case_status", payload)
 
 
 class CaseStatusTool(BaseTool):

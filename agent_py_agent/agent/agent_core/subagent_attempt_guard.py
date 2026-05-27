@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from ..tools import ToolExecutionResult
+from .runner_context import current_subagent_attempt_id, current_subagent_run_id
 
 
 # LLM: stale_subagent_attempt_result checks persisted attempt state before any runner tool executes.
@@ -30,8 +31,8 @@ def stale_subagent_attempt_message(agent) -> str | None:
 # LLM: _stale_attempt_reason is the shared persisted-state check for tool and model-turn guards.
 # 函数用途: 读取当前 subagent run 的 active/abandoned attempt 字段，判断当前线程是否已经过期。
 def _stale_attempt_reason(agent) -> str | None:
-    run_id = str(getattr(agent, "_current_subagent_run_id", "") or "").strip()
-    attempt_id = str(getattr(agent, "_current_subagent_attempt_id", "") or "").strip()
+    run_id = current_subagent_run_id(agent)
+    attempt_id = current_subagent_attempt_id(agent)
     if not run_id or not attempt_id:
         return None
     try:

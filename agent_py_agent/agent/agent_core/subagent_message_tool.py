@@ -11,6 +11,11 @@ from typing import TYPE_CHECKING
 
 from ..file_io import append_jsonl
 from ..tools import BaseTool, ToolExecutionResult, ToolSpec
+from .orchestration_scope_resolution import (
+    ScopeResolution,
+    identity_scope_resolution,
+    scope_resolution_payload,
+)
 from .parameters import _bool_param, _string_list
 from .runner_context import current_subagent_run_id
 
@@ -34,6 +39,7 @@ class SubagentMessageRequest:
     body: str
     urgency: str
     requires_ack: bool
+    scope_resolution: ScopeResolution
 
 
 # LLM: SubagentMessageTool is the model-callable message lane for upper-to-lower coordination.
@@ -85,7 +91,7 @@ def _send_broadcast_message(
         return target_check
     payload = _message_payload(request, sender, [])
     refs = _write_broadcast(sender, payload)
-    return _message_ok({"mode": "broadcast", "message_id": payload["message_id"], "refs": refs})
+    return _message_ok(request, {"mode": "broadcast", "message_id": payload["message_id"], "refs": refs})
 
 
 # LLM: _send_direct_message writes targeted inbox/outbox messages after relation checks.
@@ -100,7 +106,7 @@ def _send_direct_message(
         return targets
     payload = _message_payload(request, sender, [target.id for target in targets])
     refs = _write_direct_messages(sender, targets, payload)
-    return _message_ok({"mode": "direct", "message_id": payload["message_id"], "refs": refs})
+    return _message_ok(request, {"mode": "direct", "message_id": payload["message_id"], "refs": refs})
 
 
 # LLM: build_subagent_message_spec explains when to use direct messages versus shared broadcasts.
@@ -150,7 +156,12 @@ def build_subagent_message_spec() -> ToolSpec:
 # 函数用途: 校验消息参数，返回统一 bundle；缺主题、正文或 direct 目标时直接报错。
 def _message_request(agent: object, params: dict[str, object]) -> SubagentMessageRequest | ToolExecutionResult:
     params = _message_params(params)
-    sender_run_id = str(params.get("sender_run_id") or current_subagent_run_id(agent)).strip()
+    resolution = identity_scope_resolution(
+        agent,
+        params,
+        explicit_keys=("sender_run_id", "agent_id", "run_id"),
+    )
+    sender_run_id = str(resolution.effective.get("agent_id") or current_subagent_run_id(agent)).strip()
     mode = str(params.get("mode") or "direct").strip().lower()
     scope = str(params.get("scope") or "descendants").strip().lower()
     topic = str(params.get("topic") or "").strip()
@@ -175,6 +186,7 @@ def _message_request(agent: object, params: dict[str, object]) -> SubagentMessag
         body=body,
         urgency=str(params.get("urgency") or "normal").strip().lower(),
         requires_ack=_bool_param(params.get("requires_ack"), default=False),
+        scope_resolution=resolution,
     )
 
 
@@ -367,5 +379,6 @@ def _message_error(message: str) -> ToolExecutionResult:
 
 # LLM: _message_ok renders a compact refs-only success payload.
 # 函数用途: 返回消息 id 和文件引用，不把 inbox/outbox 正文重复灌进模型上下文。
-def _message_ok(payload: dict[str, object]) -> ToolExecutionResult:
+def _message_ok(request: SubagentMessageRequest, payload: dict[str, object]) -> ToolExecutionResult:
+    payload.update(scope_resolution_payload(request.scope_resolution))
     return ToolExecutionResult(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))

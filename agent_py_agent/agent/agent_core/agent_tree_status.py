@@ -8,6 +8,7 @@ from typing import Any
 
 from ..subagents.kernel import SubagentKernelQuery
 from .orchestration_run_scope import remembered_orchestration_run_ids
+from .orchestration_scope_resolution import scope_resolution_payload, tree_scope_resolution
 from .runner_context import current_subagent_run_id
 
 _SCHEMA_VERSION = "agent_tree_status.v1"
@@ -17,10 +18,18 @@ _SCHEMA_VERSION = "agent_tree_status.v1"
 # 函数用途: 返回整棵代理树状态；只读读取 manager.kernel_snapshot，不修改 pending_work 或任务文件。
 def agent_tree_status_payload(agent: object, params: dict[str, object] | None = None) -> dict[str, object]:
     params = params or {}
-    snapshot = _kernel_snapshot(agent, params)
+    query = _kernel_query(agent, params)
+    snapshot = _kernel_snapshot(agent, query)
+    resolution = tree_scope_resolution(
+        agent,
+        params,
+        effective_run_id=query.run_id,
+        effective_root_id=query.root_id or snapshot.root_id,
+        effective_scope=query.scope,
+    )
     nodes = [_node_from_kernel_run(row) for row in snapshot.runs]
     main = _main_agent_node(agent, nodes)
-    return {
+    payload = {
         "schema_version": _SCHEMA_VERSION,
         "effect": "read_only",
         "scope": snapshot.scope,
@@ -36,31 +45,38 @@ def agent_tree_status_payload(agent: object, params: dict[str, object] | None = 
             "takeover_candidates": list(snapshot.takeover_candidate_run_ids),
         },
         "source_refs": dict(snapshot.source_refs),
-        "warnings": list(snapshot.warnings),
+        "warnings": [*list(snapshot.warnings), *resolution.warnings],
         "policy": {
             "read_only": True,
             "does_not_dispatch": True,
             "does_not_clear_pending_work": True,
             "next_step": "如果只是查看状态，直接向用户汇报；只有用户要推进或恢复时才调用 dispatch_subagents。",
+            "scope_resolution": resolution.to_dict(),
         },
     }
+    payload.update(scope_resolution_payload(resolution))
+    return payload
 
 
 # LLM: _kernel_snapshot keeps query derivation structural and free of natural-language parsing.
 # 函数用途: 从显式 run/root 参数或当前轮已知 run_ids 选择状态树；缺省返回 manager 可见 run。
-def _kernel_snapshot(agent: object, params: dict[str, object]):
+def _kernel_snapshot(agent: object, query: SubagentKernelQuery):
     manager = getattr(agent, "subagents", None)
     if manager is None or not callable(getattr(type(manager), "kernel_snapshot", None)):
         return _empty_snapshot()
+    return manager.kernel_snapshot(query)
+
+
+def _kernel_query(agent: object, params: dict[str, object]) -> SubagentKernelQuery:
     current_run_id = current_subagent_run_id(agent)
     if current_run_id:
-        return manager.kernel_snapshot(SubagentKernelQuery(run_id=current_run_id, scope="own_subtree"))
+        return SubagentKernelQuery(run_id=current_run_id, scope="own_subtree")
     root_id = str(params.get("root_id") or "").strip()
     run_id = str(params.get("run_id") or "").strip()
     scope = str(params.get("scope") or "").strip() or ("own_subtree" if run_id else "root_tree")
     if not root_id and not run_id:
         run_id = _first_remembered_run_id(agent)
-    return manager.kernel_snapshot(SubagentKernelQuery(root_id=root_id, run_id=run_id, scope=scope))
+    return SubagentKernelQuery(root_id=root_id, run_id=run_id, scope=scope)
 
 
 # LLM: _main_agent_node synthesizes the foreground agent row without pretending it is a subagent task.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from agent_py_agent.agent.action_protocol import RunScope, ToolCallEnvelope
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import ToolLoopService
 from agent_py_agent.agent.agent_core.runner_stage_trace import RunnerToolStageTraceRequest
@@ -135,6 +136,83 @@ def test_tool_loop_record_persists_runtime_gate_ledger(tmp_path):
     assert records[0].parameters == {"tool": "write_file", "path": "out/report.md"}
 
 
+# LLM: Tool execution must carry explicit run scope instead of relying on shared current-agent state.
+# 函数用途: 验证普通模型工具调用进入 registry 前会包装成带 run_id/parent/root 的 typed envelope。
+def test_execute_traced_tool_call_passes_explicit_run_scope_envelope(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    tools = _CapturingTools()
+    agent = SimpleNamespace(tools=tools, local_store=store)
+    params = _loop_params(
+        run_id="run-child",
+        task_id="task-child",
+        task_attributes={
+            "parent_run_id": "run-parent",
+            "root_run_id": "run-root",
+            "root_task_id": "task-root",
+            "depth": 1,
+            "agent_kind": "child_agent",
+        },
+        write_boundary={},
+    )
+    request = ToolCallRuntimeRequest(
+        agent=agent,
+        request=SimpleNamespace(params=params),
+        payload={"tool": "write_file", "path": "out/report.md"},
+        trace_request=RunnerToolStageTraceRequest(agent=agent, params=params, tool_rounds=1, idx=1, payload={}),
+    )
+
+    execute_traced_tool_call(request)
+
+    assert isinstance(tools.captured_payload, ToolCallEnvelope)
+    assert tools.captured_payload.scope.run_id == "run-child"
+    assert tools.captured_payload.scope.parent_run_id == "run-parent"
+    assert tools.captured_payload.scope.root_run_id == "run-root"
+    assert tools.captured_payload.scope.root_task_id == "task-root"
+    assert tools.captured_payload.scope.depth == 1
+    assert tools.captured_payload.scope.agent_kind == "child_agent"
+
+
+# LLM: Tool completion events should be queryable by the same explicit run identity used by the tree.
+# 函数用途: 验证工具记录写入 agent_events，tree/审计不用再从“当前子代理是谁”推断来源。
+def test_tool_loop_record_appends_agent_event_with_explicit_scope(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    agent = SimpleNamespace(root=tmp_path, local_store=store)
+    params = _loop_params(
+        run_id="run-child",
+        task_id="task-child",
+        task_attributes={
+            "parent_run_id": "run-parent",
+            "root_run_id": "run-root",
+            "root_task_id": "task-root",
+            "depth": 1,
+            "agent_kind": "child_agent",
+        },
+        write_boundary={},
+    )
+
+    ToolLoopService(agent)._record_tool_call(
+        ToolCallRecordParams(
+            params=params,
+            tool_rounds=1,
+            idx=1,
+            payload={"tool": "write_file", "path": "out/report.md"},
+            result=_runtime_gate_result(),
+        )
+    )
+
+    events = store.list_agent_events(root_task_id="task-root", run_id="run-child")
+    tool_events = [event for event in events if event.event_type == "tool_call_finished"]
+    assert len(tool_events) == 1
+    event = tool_events[0]
+    assert event.parent_run_id == "run-parent"
+    assert event.payload["tool"] == "write_file"
+    assert event.payload["ok"] is True
+    assert event.payload["scope"]["run_id"] == "run-child"
+    assert event.payload["scope"]["parent_run_id"] == "run-parent"
+    assert event.payload["scope"]["root_run_id"] == "run-root"
+    assert event.payload["operation_id"] == "op-1"
+
+
 # LLM: Tool execution should feed persisted idempotency rows back into the runtime gate.
 # 函数用途: 验证同一 run 的历史副作用账本会注入 write_boundary.idempotency_ledger。
 def test_execute_traced_tool_call_injects_persisted_idempotency_ledger(tmp_path):
@@ -210,13 +288,22 @@ def test_write_boundary_injects_tool_rate_limit_records(tmp_path):
 class _CapturingTools:
     def __init__(self):
         self.captured_write_boundary = None
+        self.captured_payload = None
 
     def execute_call(self, payload, *, allowed_tools, granted_capabilities, write_boundary):
+        self.captured_payload = payload
         self.captured_write_boundary = write_boundary
         return ToolExecutionResult("write_file", True, "ok")
 
 
-def _loop_params(*, run_id: str = "run-1", task_id: str = "task-1", write_boundary: dict | None = None):
+def _loop_params(
+    *,
+    run_id: str = "run-1",
+    task_id: str = "task-1",
+    write_boundary: dict | None = None,
+    task_attributes: dict | None = None,
+    run_scope: RunScope | None = None,
+):
     return ToolLoopExecuteParams(
         user_prompt="",
         memories=[],
@@ -229,10 +316,11 @@ def _loop_params(*, run_id: str = "run-1", task_id: str = "task-1", write_bounda
         allowed_tools=None,
         granted_capabilities=None,
         write_boundary=write_boundary,
-        task_attributes=None,
+        task_attributes=task_attributes,
         request_id="request-1",
         run_id=run_id,
         task_id=task_id,
+        run_scope=run_scope,
         one_shot_tool_calls=set(),
         executed_tools=[],
         archive_tool_calls=[],

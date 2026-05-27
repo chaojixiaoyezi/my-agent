@@ -15,6 +15,7 @@ from .tool_call_guardrail import (
     maybe_block_repeated_tool_failure,
     maybe_block_repeated_tool_no_progress,
 )
+from .tool_loop_recovery import tool_payload_with_run_scope
 from .tool_round_execution import ToolCallExecuteParams
 from .tool_runtime_ledger import write_boundary_with_runtime_ledger
 
@@ -63,8 +64,14 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
 # 函数用途: 执行工具调用、登记一次性编排 key，并写入 finished trace。
 def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     one_shot_key = _one_shot_tool_call_key(runtime_request.payload)
-    result = runtime_request.agent.tools.execute_call(
+    executable_payload = tool_payload_with_run_scope(
+        runtime_request.agent,
+        runtime_request.request.params,
         runtime_request.payload,
+        call_id=_runtime_tool_call_id(runtime_request),
+    )
+    result = runtime_request.agent.tools.execute_call(
+        executable_payload,
         allowed_tools=runtime_request.request.params.allowed_tools,
         granted_capabilities=runtime_request.request.params.granted_capabilities,
         write_boundary=write_boundary_with_runtime_ledger(runtime_request.agent, runtime_request.request.params),
@@ -73,6 +80,10 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         runtime_request.request.params.one_shot_tool_calls.add(one_shot_key)
     trace_runner_tool_call_finished(_finished_trace_request(runtime_request, result))
     return result
+
+
+def _runtime_tool_call_id(runtime_request: ToolCallRuntimeRequest) -> str:
+    return f"round-{runtime_request.trace_request.tool_rounds}-tool-{runtime_request.trace_request.idx}"
 
 
 # LLM: _duplicate_one_shot_result gives the model a deterministic stop signal for repeated orchestration calls.

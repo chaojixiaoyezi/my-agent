@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ..backends import ModelResponse
 from ..subagents.utils import _read_json_object
+from .runner_context import current_subagent_run_id
 
 
 # LLM: subagent_progress_closeout_response turns ready task-local product progress into a final runner envelope.
@@ -25,7 +26,7 @@ def subagent_progress_closeout_response(agent, fallback: ModelResponse) -> Model
 # LLM: _current_subagent_task loads only the active runner task for progress closeout.
 # 函数用途: 只在子代理 runner 上下文里工作；主代理普通工具轮不会触发自动收口。
 def _current_subagent_task(agent) -> object | None:
-    run_id = str(getattr(agent, "_current_subagent_run_id", "") or "")
+    run_id = current_subagent_run_id(agent)
     if not run_id:
         return None
     try:

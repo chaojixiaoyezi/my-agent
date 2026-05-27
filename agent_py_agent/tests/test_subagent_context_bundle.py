@@ -99,7 +99,9 @@ def _assert_workspace_context_bundle(bundle, task, tmp_path: Path) -> None:
     assert bundle.task_packet["run_id"] == task.id
     assert bundle.task_packet["role"] == "worker"
     assert bundle.task_packet["tool_contract"]["allowed_tools"] == ["read_file", "write_file"]
-    assert bundle.task_packet["write_contract"]["allowed_write_roots"] == [str(tmp_path / task.id / "artifacts")]
+    write_roots = bundle.task_packet["write_contract"]["allowed_write_roots"]
+    assert write_roots[:2] == [bundle.workspace_refs["task_workspace"], bundle.workspace_refs["agent_run_workspace"]]
+    assert str(tmp_path / task.id / "artifacts") in write_roots
     assert "task.goal" in bundle.source_refs["goal"]
     assert "task.acceptance_checks" in bundle.source_refs["acceptance_checks"]
 

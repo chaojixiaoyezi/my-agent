@@ -35,6 +35,7 @@ from .orchestration_run_scope import (
     remember_orchestration_run_ids,
 )
 from .orchestration_runner_instruction import resolved_runner_instruction
+from .orchestration_scope_resolution import dispatch_scope_resolution, scope_resolution_payload
 from .orchestration_tool_specs import build_dispatch_subagents_spec
 from .orchestration_workflow_mode import tool_workflow_mode
 from .parameters import _bool_param, _non_negative_int, _string_list
@@ -66,17 +67,18 @@ class DispatchSubagentsTool(BaseTool):
                 "execute_runners=true 必须配合 apply=true，避免误触发真实 API runner。",
             )
 
+        dispatch_params = self._dispatch_params(params, apply, execute_runners)
         cfg, router = self._router()
         report = self.agent.dispatch_subagents(
             router,
             cfg,
-            params=self._dispatch_params(params, apply, execute_runners),
+            params=dispatch_params,
         )
         scoped_run_ids = _run_ids_for_scope(params, report, agent=self.agent)
         dispatched_run_ids = _run_ids_actually_dispatched(report)
         remember_orchestration_run_ids(self.agent, scoped_run_ids)
         remember_dispatched_orchestration_run_ids(self.agent, dispatched_run_ids)
-        payload = self._report_payload(report)
+        payload = self._report_payload(report, params=params, dispatch_params=dispatch_params)
         return ToolExecutionResult("dispatch_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
     # LLM: _router builds the non-orchestration capability router used by dispatch planning.
@@ -123,14 +125,28 @@ class DispatchSubagentsTool(BaseTool):
 
     # LLM: _report_payload keeps dispatch output compact and recovery-friendly for the parent model.
     # 函数用途: 生成 dispatch_subagents 的 JSON 响应，先给父级结果索引，再给详细记录，避免长 records 截断关键 child 摘要。
-    def _report_payload(self, report) -> dict[str, object]:
+    def _report_payload(
+        self,
+        report,
+        *,
+        params: dict[str, object] | None = None,
+        dispatch_params: DispatchParams | None = None,
+    ) -> dict[str, object]:
         record_payloads = [dispatch_record_payload(item) for item in report.records]
         result_index = related_task_result_refs(self.agent, report)
+        resolution = dispatch_scope_resolution(
+            self.agent,
+            params or {},
+            effective_parent_run_id=str(getattr(dispatch_params, "parent_run_id", "") or ""),
+            effective_root_id=str(getattr(dispatch_params, "root_id", "") or ""),
+            effective_run_ids=list(getattr(dispatch_params, "include_run_ids", None) or []),
+        )
         payload = {
             "dry_run": report.dry_run,
             "runner_selection_recovery": dispatch_recovery_payload(report.records),
             "summary": report.summary,
         }
+        payload.update(scope_resolution_payload(resolution))
         payload.update(_dispatch_top_level_guidance(self.agent, report, record_payloads))
         if terminal := dispatch_no_progress_payload(report):
             payload["dispatch_terminal"] = terminal

@@ -9,18 +9,66 @@ from typing import Any
 from ..contracts.gates.tool_effects import args_hash_for_call
 from ..contracts.tool_protocol_v2 import normalize_tool_call
 from ..local_storage import RuntimeGateLedgerRecord
+from ..local_storage.control_plane_models import AgentEventInput
 
 
 # LLM: persist_tool_runtime_ledger is a best-effort persistence hook after tool execution.
 # 函数用途: 将工具入口 runtime_gate 和参数事实写入 LocalStore；缺少 local_store 时静默跳过。
 def persist_tool_runtime_ledger(agent: object, archive_record: dict[str, object]) -> None:
     store = getattr(agent, "local_store", None)
+    _record_tool_agent_event(store, archive_record)
     if not hasattr(store, "record_runtime_gate_ledger"):
         return
     record = runtime_gate_ledger_record_from_archive(archive_record)
     if record is None:
         return
     store.record_runtime_gate_ledger(record)
+
+
+# LLM: _record_tool_agent_event appends 通道运行时 per-run tool events for tree/replay queries.
+# 函数用途: 每次工具完成都写 agent_events，事件自己带 run/parent/root 身份，不依赖当前线程。
+def _record_tool_agent_event(store: object, archive_record: dict[str, object]) -> None:
+    if not hasattr(store, "record_agent_event"):
+        return
+    run_id = _text(archive_record.get("run_id"))
+    if not run_id:
+        return
+    scope = _dict_value(archive_record.get("run_scope"))
+    root_task_id = (
+        _text(scope.get("root_task_id"))
+        or _text(archive_record.get("root_task_id"))
+        or _text(archive_record.get("task_id"))
+        or run_id
+    )
+    event = AgentEventInput(
+        root_task_id=root_task_id,
+        run_id=run_id,
+        parent_run_id=_text(scope.get("parent_run_id")) or _text(archive_record.get("parent_run_id")),
+        event_type="tool_call_finished",
+        payload=_tool_event_payload(archive_record, scope),
+    )
+    store.record_agent_event(event)
+
+
+def _tool_event_payload(
+    archive_record: dict[str, object],
+    scope: dict[str, object],
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "tool": _text(archive_record.get("tool")),
+        "ok": bool(archive_record.get("ok")),
+        "call_id": _text(archive_record.get("call_id")),
+        "operation_id": _operation_id(archive_record),
+        "scope": dict(scope),
+    }
+    for key in ("error_code", "error_category", "recommended_action", "result_ref"):
+        value = _text(archive_record.get(key))
+        if value:
+            payload[key] = value
+    refs = archive_record.get("tool_result_refs")
+    if isinstance(refs, list):
+        payload["tool_result_refs"] = [item for item in refs if isinstance(item, dict)]
+    return payload
 
 
 # LLM: write_boundary_with_runtime_ledger injects durable idempotency rows before tool execution.

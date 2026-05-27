@@ -14,6 +14,8 @@ from .tool_specs import (
     build_update_collaboration_request_spec,
 )
 from .tool_targets import (
+    actor_agent_id,
+    collaboration_scope_payload,
     request_identity,
     resolved_target_agent_ids,
     target_response_payload,
@@ -47,7 +49,9 @@ class RequestCollaborationTool(BaseTool):
         runtime = target_runtime_summary(self.agent, targets)
         request = self.agent.collaboration_store.request_collaboration({"case_id": case_id, **_request_kwargs(_RequestBuildInput(self.agent, params, targets, runtime))})
         runtime = target_runtime_summary(self.agent, list(request.target_agent_ids))
-        return ok("request_collaboration", {"case_id": case_id, "request_id": request.request_id, "target_agent_ids": list(request.target_agent_ids), **target_response_payload(runtime)})
+        payload = {"case_id": case_id, "request_id": request.request_id, "target_agent_ids": list(request.target_agent_ids), **target_response_payload(runtime)}
+        payload.update(collaboration_scope_payload(self.agent, params, explicit_keys=("requester_agent_id", "actor_agent_id", "agent_id", "run_id")))
+        return ok("request_collaboration", payload)
 
 
 class ListCollaborationRequestsTool(BaseTool):
@@ -60,7 +64,9 @@ class ListCollaborationRequestsTool(BaseTool):
         if not any(identity.values()):
             return error("list_collaboration_requests", "agent_identity_required", "agent_id, agent_name, agent_role, or current runner identity is required")
         requests = self.agent.collaboration_store.pending_requests_for_agent(agent_id=identity["agent_id"], agent_name=identity["agent_name"], agent_role=identity["agent_role"], limit=limit_param(params.get("limit"), default=10))
-        return ok("list_collaboration_requests", {**identity, "request_count": len(requests), "requests": requests})
+        payload = {**identity, "request_count": len(requests), "requests": requests}
+        payload.update(collaboration_scope_payload(self.agent, params, explicit_keys=("agent_id", "run_id")))
+        return ok("list_collaboration_requests", payload)
 
 
 class UpdateCollaborationRequestTool(BaseTool):
@@ -87,7 +93,7 @@ class RerouteCollaborationRequestTool(BaseTool):
 def _request_kwargs(request: _RequestBuildInput) -> dict[str, object]:
     params = request.params
     return {
-        "requester_agent_id": str(params.get("requester_agent_id") or ""),
+        "requester_agent_id": actor_agent_id(request.agent, params),
         "required_capabilities": string_values(params.get("required_capabilities")),
         "question": str(params.get("question") or ""),
         "entities": dict_value(params.get("entities")),
@@ -111,10 +117,12 @@ def _update_request_tool(agent: SimpleAgent, tool: str, params: dict[str, object
         return ids
     case_id, request_id = ids
     try:
-        request = agent.collaboration_store.update_request_status({'case_id': case_id, 'request_id': request_id, 'status': str(params.get("status") or "pending"), 'actor_agent_id': str(params.get("actor_agent_id") or ""), 'summary': str(params.get("summary") or ""), 'target_agent_ids': targets, 'metadata': dict_value(params.get("metadata"))})
+        request = agent.collaboration_store.update_request_status({'case_id': case_id, 'request_id': request_id, 'status': str(params.get("status") or "pending"), 'actor_agent_id': actor_agent_id(agent, params), 'summary': str(params.get("summary") or ""), 'target_agent_ids': targets, 'metadata': dict_value(params.get("metadata"))})
     except (KeyError, ValueError) as exc:
         return error(tool, "request_update_failed", str(exc))
-    return ok(tool, {"request": request.to_dict(), "overview": _request_overview(agent, case_id)})
+    payload = {"request": request.to_dict(), "overview": _request_overview(agent, case_id)}
+    payload.update(collaboration_scope_payload(agent, params, explicit_keys=("actor_agent_id", "agent_id", "run_id")))
+    return ok(tool, payload)
 
 
 def _case_and_request_ids(params: dict[str, object]) -> tuple[str, str] | ToolExecutionResult:

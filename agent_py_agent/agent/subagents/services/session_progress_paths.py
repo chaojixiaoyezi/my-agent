@@ -11,11 +11,23 @@ WRITE_TOOLS = {"write_file", "apply_patch"}
 
 
 def progress_path(request: object) -> str:
-    for value in _candidate_path_values(getattr(request, "result_envelope", {})):
+    tool = str(getattr(request, "tool", "") or "")
+    # LLM: explicit product/progress fields are trusted for any tool; generic path guesses stay write-tool only.
+    for value in _explicit_progress_path_values(getattr(request, "result_envelope", {})):
         path = path_text(value)
         if path:
             return path
     output_payload = _json_object_from_text(str(getattr(request, "output", "") or ""))
+    for value in _explicit_progress_path_values(output_payload):
+        path = path_text(value)
+        if path:
+            return path
+    if tool not in WRITE_TOOLS:
+        return ""
+    for value in _candidate_path_values(getattr(request, "result_envelope", {})):
+        path = path_text(value)
+        if path:
+            return path
     for value in _candidate_path_values(output_payload):
         path = path_text(value)
         if path:
@@ -41,6 +53,25 @@ def _candidate_path_values(payload: object) -> list[object]:
         if isinstance(nested, dict):
             values.extend(_candidate_path_values(nested))
     return values
+
+
+def _explicit_progress_path_values(payload: object) -> list[object]:
+    if not isinstance(payload, dict):
+        return []
+    values = [payload.get(key) for key in _EXPLICIT_PROGRESS_PATH_KEYS if key in payload]
+    for key in ("output", "result", "artifact"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            values.extend(_explicit_progress_path_values(nested))
+    return values
+
+
+_EXPLICIT_PROGRESS_PATH_KEYS = (
+    "progress_path",
+    "product_path",
+    "deliverable_path",
+    "user_artifact_path",
+)
 
 
 _PATH_KEYS = (

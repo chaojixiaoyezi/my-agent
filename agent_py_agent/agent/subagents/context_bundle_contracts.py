@@ -77,7 +77,7 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
             "product_write_roots": components.product_roots,
             "required_file_refs": components.required_file_refs,
             "declared_output_refs": declared_output_refs(task),
-            "allowed_write_roots": list(task.allowed_write_roots or []),
+            "allowed_write_roots": allowed_write_roots(task),
             "forbidden_write_roots": list(task.forbidden_write_roots or []),
             "locked_files": list(task.locked_files or []),
         },
@@ -95,7 +95,22 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
             "latest_continue_packet": refs.get("agent_run_latest_continue_packet", ""),
         },
         "reserved": {},
-    }
+}
+
+
+# LLM: allowed_write_roots keeps task packets aligned with the current runtime workspace.
+# 函数用途: task_packet 里的可写目录优先展示当前 task/agent workspace，再展示显式产物目录。
+def allowed_write_roots(task: SubAgentTask) -> list[str]:
+    roots: list[str] = []
+    for raw in (
+        safe_string_ref(task, "task_workspace_dir"),
+        safe_string_ref(task, "agent_run_workspace_dir"),
+        *list(task.allowed_write_roots or []),
+    ):
+        text = str(raw or "").strip()
+        if text and text not in roots:
+            roots.append(text)
+    return roots
 
 
 # LLM: task_contract_components is the single source for task_packet/output_contract shared file facts.

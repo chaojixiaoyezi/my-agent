@@ -41,8 +41,12 @@ def board_payload_item(item: object) -> dict[str, object]:
         "target_tokens": list(getattr(item, "target_tokens", []) or []),
         "artifact_refs": item_ref_preview(item, "artifact_refs"),
         "evidence_refs": item_ref_preview(item, "evidence_refs"),
+        "workspace_refs": _item_workspace_refs(item),
+        "recovery_refs": _item_recovery_refs(item),
         "task_dir": item.task_dir,
         "output_json": str(getattr(item, "output_json", "") or ""),
+        "legacy_task_dir": _text_attr(item, "legacy_task_dir"),
+        "legacy_output_json": _text_attr(item, "legacy_output_json"),
     }
 
 
@@ -60,7 +64,10 @@ def board_child_result_index(items: list[object], *, limit: int = 20) -> list[di
             "summary": clip_board_text(str(getattr(item, "latest_summary", "") or ""), limit=220),
             "artifact_refs": item_ref_preview(item, "artifact_refs", limit=3),
             "evidence_refs": item_ref_preview(item, "evidence_refs", limit=3),
+            "workspace_refs": _item_workspace_refs(item),
+            "recovery_refs": _item_recovery_refs(item),
             "output_json": str(getattr(item, "output_json", "") or ""),
+            "legacy_output_json": _text_attr(item, "legacy_output_json"),
         })
     return rows
 
@@ -106,3 +113,34 @@ def item_ref_preview(item: object, attr: str, *, limit: int = 8) -> list[str]:
         if len(refs) >= limit:
             break
     return refs
+
+
+# LLM: _item_workspace_refs makes current runtime refs explicit so parent agents stop guessing legacy paths.
+# 函数用途: 给看板条目展示当前 task workspace 和 agent run workspace；旧目录只留 legacy 字段。
+def _item_workspace_refs(item: object) -> dict[str, str]:
+    task_workspace = _text_attr(item, "task_workspace") or _text_attr(item, "task_dir")
+    refs = {
+        "task_workspace": task_workspace,
+        "agent_run_workspace": _text_attr(item, "agent_run_workspace"),
+        "legacy_task_dir": _text_attr(item, "legacy_task_dir"),
+    }
+    return {key: value for key, value in refs.items() if value}
+
+
+# LLM: _item_recovery_refs gives parents exact status/progress files before any manual path probing.
+# 函数用途: 暴露 checkpoint、summary、final_report 和 latest_tool_progress 的当前路径。
+def _item_recovery_refs(item: object) -> dict[str, str]:
+    refs = {
+        "checkpoint": _text_attr(item, "checkpoint_ref"),
+        "summary": _text_attr(item, "summary_ref"),
+        "final_report": _text_attr(item, "final_report_ref"),
+        "latest_tool_progress": _text_attr(item, "latest_tool_progress_ref"),
+    }
+    return {key: value for key, value in refs.items() if value}
+
+
+# LLM: _text_attr ignores MagicMock auto-attributes so tests and partial rows stay clean.
+# 函数用途: 只接受真实字符串属性，避免 mock 的自动属性被渲染进模型提示。
+def _text_attr(item: object, attr: str) -> str:
+    value = getattr(item, attr, "")
+    return value if isinstance(value, str) else ""

@@ -129,11 +129,16 @@ def _persist_runtime_status(agent: object, task: SubAgentTask, result: object, p
     task.updated_at = now
     _append_recent_tool_trace(task, {"tool": tool, "ok": ok, "at": now, "progress": progress})
     if ok and tool:
+        # LLM: even successful non-write tools should refresh heartbeat/progress text for tree liveness.
+        summary = _progress_summary(tool, progress)
         task.last_progress_at = now
-        task.last_progress_summary = _progress_summary(tool, progress)
+        task.last_progress_summary = summary
         if progress:
             task.latest_summary = str(progress.get("summary") or task.latest_summary or "")
             task.current_step = str(progress.get("next_action") or task.current_step or "")
+        else:
+            task.latest_summary = task.latest_summary or summary
+            task.current_step = task.current_step or "RUNNING"
     try:
         agent.subagents.save(task)
     except Exception:

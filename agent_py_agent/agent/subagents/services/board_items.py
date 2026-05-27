@@ -5,6 +5,7 @@ from __future__ import annotations
 
 """helpers for subagent board item construction."""
 
+from pathlib import Path
 from typing import Any
 
 from ..models import SubAgentBoardOptions, SubAgentTask
@@ -151,8 +152,16 @@ def _board_item_payload(
         "takeover_by": task.takeover_by,
         "locked_file_count": len(task.locked_files),
         "risk_flags": build_risk_flags(task, open_request_count, open_gap_count),
-        "task_dir": task.task_dir,
-        "output_json": task.output_json,
+        "task_dir": task.task_workspace_dir or task.task_dir,
+        "output_json": task.agent_run_final_report_md or task.output_json,
+        "task_workspace": task.task_workspace_dir,
+        "agent_run_workspace": task.agent_run_workspace_dir,
+        "legacy_task_dir": task.task_dir if task.task_dir != (task.task_workspace_dir or task.task_dir) else "",
+        "legacy_output_json": task.output_json,
+        "checkpoint_ref": task.agent_run_checkpoint_json or task.checkpoint_json or task.checkpoint_ref,
+        "summary_ref": task.agent_run_summary_md,
+        "final_report_ref": task.agent_run_final_report_md,
+        "latest_tool_progress_ref": _latest_tool_progress_ref(task),
         "target_tokens": sorted(task_actual_target_tokens(task))[:20],
         "artifact_refs": _bounded_unique_strings(task.artifact_refs, limit=12),
         "evidence_refs": _bounded_unique_strings(task.evidence_refs, limit=12),
@@ -194,3 +203,10 @@ def _bounded_unique_strings(value: object, *, limit: int) -> list[str]:
         if len(items) >= limit:
             break
     return items
+
+
+# LLM: _latest_tool_progress_ref points parents at the current run progress snapshot, not legacy reports paths.
+# 函数用途: 根据 agent_run_workspace_dir 派生 progress/latest_tool_progress.json，供看板返回可读进展入口。
+def _latest_tool_progress_ref(task: SubAgentTask) -> str:
+    workspace = str(getattr(task, "agent_run_workspace_dir", "") or "").strip()
+    return str(Path(workspace) / "progress" / "latest_tool_progress.json") if workspace else ""

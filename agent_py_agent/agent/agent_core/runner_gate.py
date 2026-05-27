@@ -77,7 +77,7 @@ def run_single_runner(params: SingleRunnerParams) -> SubAgentRunnerResult:
     from .runner_dispatch import RunSubagentWorkerParams, _run_subagent_worker
     from .subagent_params import SubagentRunParams
 
-    if params.execute_runners and params.task_timeout > 0:
+    if params.execute_runners:
         worker_params = RunSubagentWorkerParams(
             config=params.agent.config,
             root=params.agent.root,

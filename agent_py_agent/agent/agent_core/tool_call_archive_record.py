@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
-from .tool_loop_recovery import runtime_run_id
+from .tool_loop_recovery import runtime_run_id, runtime_run_scope
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 from .tool_round_execution import ToolCallRecordParams
 
@@ -28,6 +28,7 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
     output_record = externalize_tool_output_record(request)
     output_record.update(write_tool_output_fail_safe_checkpoint(request))
     output_record["parameters"] = record.payload
+    _attach_run_scope(output_record, agent, record)
     _attach_gate_and_refs(output_record, record.result)
     return output_record
 
@@ -61,6 +62,26 @@ def _attach_gate_and_refs(output_record: dict[str, object], result: object) -> N
     result_envelope = _compact_result_envelope(result)
     if result_envelope:
         output_record["tool_result_envelope"] = result_envelope
+
+
+# LLM: _attach_run_scope makes every archived tool row self-identifying.
+# 函数用途: 把 run/task/parent/root 身份写进工具归档，避免后续从线程上下文猜来源。
+def _attach_run_scope(output_record: dict[str, object], agent: object, record: ToolCallRecordParams) -> None:
+    scope = _scope_from_result(record.result) or runtime_run_scope(agent, record.params).to_dict()
+    output_record["run_scope"] = scope
+    _copy_text_fact(output_record, "parent_run_id", scope.get("parent_run_id"))
+    _copy_text_fact(output_record, "root_run_id", scope.get("root_run_id"))
+    _copy_text_fact(output_record, "root_task_id", scope.get("root_task_id"))
+    output_record["depth"] = _int_value(scope.get("depth"))
+    _copy_text_fact(output_record, "agent_kind", scope.get("agent_kind"))
+
+
+def _scope_from_result(result: object) -> dict[str, object]:
+    envelope = getattr(result, "result_envelope", None)
+    if not isinstance(envelope, dict):
+        return {}
+    scope = envelope.get("scope")
+    return dict(scope) if isinstance(scope, dict) else {}
 
 
 # LLM: _runtime_gate_from_result carries runtime gate evidence into replayable archives.
@@ -111,6 +132,13 @@ def _copy_text_fact(target: dict[str, object], key: str, value: object) -> None:
     text = str(value or "").strip()
     if text:
         target[key] = text
+
+
+def _int_value(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 # LLM: _tool_result_refs_from_result extracts artifact/path refs from structured tool envelopes.

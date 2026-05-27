@@ -13,6 +13,7 @@ from ..backends import ModelResponse
 from ..subagents.utils import _read_json_object
 from ..tools import ToolExecutionResult
 from ._runtime_params import ToolLoopExecuteParams
+from .runner_context import current_subagent_run_id
 from .tool_call_context_reducer import (
     AssistantToolRoundContextRequest,
     render_assistant_tool_round_context,
@@ -121,7 +122,7 @@ def _deferred_orchestration_result(tool_name: str) -> ToolExecutionResult:
 # LLM: subagent_output_json_response turns the just-written output.json into the final runner contract.
 # 函数用途: 读取当前子代理 output.json 并包成 SUBAGENT_RESULT，避免为了收口再发一轮模型请求。
 def subagent_output_json_response(agent, fallback: ModelResponse) -> ModelResponse:
-    run_id = str(getattr(agent, "_current_subagent_run_id", "") or "")
+    run_id = current_subagent_run_id(agent)
     try:
         task = agent.subagents.load(run_id)
     except Exception:
@@ -329,7 +330,7 @@ def _append_assistant_tool_round_context(request: ToolRoundExecutionRequest) -> 
 def _is_subagent_output_json_write(agent, payload: object, result: ToolExecutionResult) -> bool:
     if not (result.ok and result.tool == "write_file" and isinstance(payload, dict)):
         return False
-    run_id = str(getattr(agent, "_current_subagent_run_id", "") or "")
+    run_id = current_subagent_run_id(agent)
     if not run_id:
         return False
     try:

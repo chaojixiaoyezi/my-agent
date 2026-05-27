@@ -5,6 +5,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ..agent_core.orchestration_scope_resolution import (
+    ScopeResolution,
+    identity_scope_resolution,
+    scope_resolution_payload,
+)
 from .tool_values import dict_value, string_values
 
 if TYPE_CHECKING:
@@ -47,7 +52,12 @@ def target_response_payload(summary: dict[str, object]) -> dict[str, object]:
 
 
 def request_identity(agent: SimpleAgent, params: dict[str, object]) -> dict[str, str]:
-    agent_id = str(params.get("agent_id") or getattr(agent, "_current_subagent_run_id", "") or "").strip()
+    resolution = collaboration_identity_resolution(
+        agent,
+        params,
+        explicit_keys=("agent_id", "run_id"),
+    )
+    agent_id = str(resolution.effective.get("agent_id") or "").strip()
     agent_name = str(params.get("agent_name") or "").strip()
     agent_role = str(params.get("agent_role") or "").strip()
     if agent_id and not (agent_name and agent_role):
@@ -58,8 +68,32 @@ def request_identity(agent: SimpleAgent, params: dict[str, object]) -> dict[str,
 
 
 def actor_agent_id(agent: SimpleAgent, params: dict[str, object]) -> str:
-    explicit = str(params.get("created_by") or params.get("actor_agent_id") or "").strip()
-    return explicit or request_identity(agent, params)["agent_id"]
+    resolution = collaboration_identity_resolution(
+        agent,
+        params,
+        explicit_keys=("created_by", "actor_agent_id", "requester_agent_id", "source_agent_id", "agent_id", "run_id"),
+    )
+    return str(resolution.effective.get("agent_id") or request_identity(agent, params)["agent_id"]).strip()
+
+
+def collaboration_identity_resolution(
+    agent: SimpleAgent,
+    params: dict[str, object],
+    *,
+    explicit_keys: tuple[str, ...],
+) -> ScopeResolution:
+    return identity_scope_resolution(agent, params, explicit_keys=explicit_keys)
+
+
+def collaboration_scope_payload(
+    agent: SimpleAgent,
+    params: dict[str, object],
+    *,
+    explicit_keys: tuple[str, ...],
+) -> dict[str, object]:
+    return scope_resolution_payload(
+        collaboration_identity_resolution(agent, params, explicit_keys=explicit_keys)
+    )
 
 
 def subagent_tasks(agent: SimpleAgent) -> list[object]:

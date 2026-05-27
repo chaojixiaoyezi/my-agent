@@ -18,6 +18,16 @@ WRITE_TOOL_NAMES = {"write_file", "apply_patch"}
 _MAX_BOUNDARY_PATH_CHARS = 4096
 _PRODUCT_WRITE_DELEGATE_POLICY = "delegate"
 _INTERNAL_OUTPUT_JSON_NAME = "output.json"
+_WRITE_SCOPE_BOUNDARY_KEYS = frozenset(
+    {
+        "allowed_write_roots",
+        "forbidden_write_roots",
+        "locked_files",
+        "output_json",
+        "product_write_roots",
+        "task_dir",
+    }
+)
 _REPORT_ARTIFACT_SUFFIXES = (".md", ".txt", ".json", ".jsonl")
 _REPORT_ARTIFACT_NAME_MARKERS = (
     "acceptance",
@@ -72,6 +82,8 @@ def validate_write_boundary(
 
     if not isinstance(params, dict):
         return "写入被阻止: 工具参数必须是 JSON 对象。"
+    if not _boundary_enforces_write_scope(write_boundary):
+        return ""
 
     raw_paths = _tool_write_paths(tool_name, params)
     if not raw_paths:
@@ -105,6 +117,12 @@ def validate_write_boundary(
         if locked_error:
             return locked_error
     return ""
+
+
+def _boundary_enforces_write_scope(write_boundary: dict[str, object]) -> bool:
+    if not write_boundary:
+        return True
+    return any(key in write_boundary for key in _WRITE_SCOPE_BOUNDARY_KEYS)
 
 
 def _tool_write_paths(tool_name: str, params: dict[str, Any]) -> list[str]:

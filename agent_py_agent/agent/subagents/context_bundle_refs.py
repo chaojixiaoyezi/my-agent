@@ -8,12 +8,16 @@ from pathlib import Path
 from .models import SubAgentTask
 
 
-# LLM: workspace_refs gives models paths to inspect or write without loading large file bodies.
-# 函数用途: 生成旧工单目录和新 runtime workspace 的关键文件引用。
+# LLM: workspace_refs gives models current runtime paths first; legacy refs stay labeled for compatibility.
+# 函数用途: 生成当前 runtime workspace 的关键文件引用；旧工单目录只作为 legacy 字段，避免模型把旧路径当主路径。
 def workspace_refs(task: SubAgentTask) -> dict[str, str]:
+    legacy_task_dir = safe_string_ref(task, "task_dir")
+    task_workspace = safe_string_ref(task, "task_workspace_dir")
+    current_task_dir = task_workspace or legacy_task_dir
     return {
-        "task_dir": safe_string_ref(task, "task_dir"),
-        "task_workspace": safe_string_ref(task, "task_workspace_dir"),
+        "task_dir": current_task_dir,
+        "task_workspace": task_workspace,
+        "legacy_task_dir": legacy_task_dir if legacy_task_dir != current_task_dir else "",
         "agent_run_workspace": safe_string_ref(task, "agent_run_workspace_dir"),
         "agent_run_task": safe_string_ref(task, "agent_run_task_md"),
         "agent_run_checkpoint": safe_string_ref(task, "agent_run_checkpoint_json"),
@@ -58,19 +62,28 @@ def latest_continue_packet_ref(task: SubAgentTask) -> str:
 # 函数用途: 记录当前子代理在任务树中的位置，以及直接父级 context bundle 的可读路径。
 def lineage(task: SubAgentTask) -> dict[str, object]:
     parent_id = str(task.parent_id or "")
-    task_dir_ref = safe_string_ref(task, "task_dir")
+    legacy_task_dir_ref = safe_string_ref(task, "task_dir")
     task_workspace_ref = safe_string_ref(task, "task_workspace_dir")
     agent_run_ref = safe_string_ref(task, "agent_run_workspace_dir")
-    task_dir = Path(task_dir_ref) if task_dir_ref else Path("")
+    legacy_task_dir = Path(legacy_task_dir_ref) if legacy_task_dir_ref else Path("")
     task_workspace = Path(task_workspace_ref) if task_workspace_ref else Path("")
-    parent_legacy_ref = str(task_dir.parent / parent_id / "context_bundle.json") if parent_id and task_dir_ref else ""
+    parent_legacy_ref = (
+        str(legacy_task_dir.parent / parent_id / "context_bundle.json")
+        if parent_id and legacy_task_dir_ref
+        else ""
+    )
+    own_legacy_ref = (
+        str(Path(legacy_task_dir_ref) / "context_bundle.json")
+        if legacy_task_dir_ref and legacy_task_dir_ref != task_workspace_ref
+        else ""
+    )
     parent_agent_ref = str(task_workspace / "agents" / parent_id / "context_bundle.json") if parent_id and task_workspace_ref else ""
     return {
         "root_id": task.root_id or task.id,
         "parent_id": parent_id,
         "depth": int(task.depth or 0),
         "own_context_bundle_ref": str(Path(agent_run_ref) / "context_bundle.json") if agent_run_ref else "",
-        "own_legacy_context_bundle_ref": str(Path(task_dir_ref) / "context_bundle.json") if task_dir_ref else "",
+        "own_legacy_context_bundle_ref": own_legacy_ref,
         "parent_context_bundle_ref": parent_agent_ref,
         "parent_legacy_context_bundle_ref": parent_legacy_ref,
         "inheritance_manifest_ref": safe_string_ref(task, "inheritance_manifest_json"),

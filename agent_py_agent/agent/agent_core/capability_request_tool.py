@@ -10,6 +10,11 @@ from typing import TYPE_CHECKING
 from ..subagents.root_task_policy import is_self_authorized_root_task
 from ..subagents.services.lifecycle import RecordCapabilityRequestParams
 from ..tools import BaseTool, ToolExecutionResult, ToolSpec
+from .orchestration_scope_resolution import (
+    ScopeResolution,
+    identity_scope_resolution,
+    scope_resolution_payload,
+)
 from .parameters import _string_list
 from .runner_context import current_subagent_run_id
 
@@ -26,6 +31,7 @@ _TOOL_NAME = "capability_request"
 class CapabilityRequestToolInput:
     run_id: str
     params: RecordCapabilityRequestParams
+    scope_resolution: ScopeResolution
 
 
 # LLM: CapabilityRequestTool is the model-callable request lane for tools, skills, shell, MCP, and network.
@@ -48,13 +54,15 @@ class CapabilityRequestTool(BaseTool):
             record = self.agent.subagents.record_capability_request(request.run_id, request.params)
         except FileNotFoundError:
             return _capability_error(f"run_id 不存在: {request.run_id}")
-        return _capability_ok({
+        payload = {
             "request_id": record.id,
             "run_id": request.run_id,
             "status": record.status,
             "next_action": "route_capability_request",
             "message": "已记录 OPEN capability_request；请停止伪造能力结果，并在最终结果块写 status=PENDING_CAPABILITY_REQUEST 或 BLOCKED。",
-        })
+        }
+        payload.update(scope_resolution_payload(request.scope_resolution))
+        return _capability_ok(payload)
 
 
 # LLM: build_capability_request_spec explains the formal lane and rejects fake file-based requests.
@@ -93,11 +101,13 @@ def build_capability_request_spec() -> ToolSpec:
 # 函数用途: 校验 run_id、problem 和能力字段，并转换成生命周期服务参数包。
 def _capability_request_input(agent: object, params: dict[str, object]) -> CapabilityRequestToolInput | ToolExecutionResult:
     normalized = _capability_params(params)
+    resolution = identity_scope_resolution(
+        agent,
+        normalized,
+        explicit_keys=("run_id", "from_run_id", "agent_id"),
+    )
     current_run_id = current_subagent_run_id(agent)
-    explicit_run_id = str(normalized.get("run_id") or normalized.get("from_run_id") or "").strip()
-    if current_run_id and explicit_run_id and explicit_run_id != current_run_id:
-        return _capability_error("capability_request 只能为当前 runner 申请能力，不能写入其他 run_id。")
-    run_id = explicit_run_id or current_run_id
+    run_id = str(resolution.effective.get("agent_id") or current_run_id).strip()
     if not run_id:
         return _capability_error("缺少 run_id；runner 内会自动使用当前 run id。")
     if _is_root_run(agent, run_id):
@@ -105,7 +115,11 @@ def _capability_request_input(agent: object, params: dict[str, object]) -> Capab
     problem = str(normalized.get("problem") or "").strip()
     if not problem:
         return _capability_error("缺少 problem；必须说明当前被什么能力缺口阻塞。")
-    return CapabilityRequestToolInput(run_id=run_id, params=_record_params(normalized, problem))
+    return CapabilityRequestToolInput(
+        run_id=run_id,
+        params=_record_params(normalized, problem),
+        scope_resolution=resolution,
+    )
 
 
 # LLM: _is_root_run only blocks self-authorized root/coordinator seeds, not main-agent children.

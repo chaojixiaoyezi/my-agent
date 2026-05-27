@@ -11,6 +11,47 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def test_execute_runner_uses_worker_even_when_timeout_disabled(monkeypatch, tmp_path):
+    from agent_py_agent.agent.agent_core.runner_gate import SingleRunnerParams, run_single_runner
+
+    calls: list[object] = []
+
+    def fake_worker(params):
+        calls.append(params)
+        return SimpleNamespace(ok=True, run_id=params.run_id, status="DONE", verification_status="VERIFIED")
+
+    class ParentAgent:
+        config = SimpleNamespace()
+        root = tmp_path
+        local_store = None
+
+        def run_subagent(self, params):  # pragma: no cover - should not be called for execute=True
+            raise AssertionError("execute runner should not run on the parent agent object")
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.runner_dispatch._run_subagent_worker",
+        fake_worker,
+    )
+
+    result = run_single_runner(
+        SingleRunnerParams(
+            agent=ParentAgent(),
+            run_id="subagent-1",
+            task_timeout=0.0,
+            instruction="继续完成任务",
+            execute_runners=True,
+            max_cards=0,
+            probe=True,
+            retry_reason="",
+        )
+    )
+
+    assert result.ok is True
+    assert len(calls) == 1
+    assert calls[0].timeout_seconds == 0.0
+    assert calls[0].run_id == "subagent-1"
+
+
 class TestRunnerMaxAttempts:
     """测试 _runner_max_attempts() 函数。"""
 

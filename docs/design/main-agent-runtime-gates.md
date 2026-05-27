@@ -10,7 +10,9 @@
 - 不允许因为某次真实任务失败，就新增“必须先做 X 才能做 Y”的前置硬门，除非 X 是安全、权限、路径、工具 schema、审批、幂等等真实运行边界。
 - 交付质量问题优先走 closeout 验收、结构化返工单、草稿验证和最终收口，不要前置成开工阶段硬阻断。
 - 文件格式、产物类型、协议、MIME type 属于开放世界。映射表只能做优化路径，不能因为“不在表里”就拒绝。
+- 产物定位也要按开放世界处理：`spreadsheet`、`workbook` 这类通用名字要能定位 `.xlsx/.xls/.ods` 等常见表格文件；如果合同只声明 kind 和输出根目录，系统应该找候选文件并给出明确候选，而不是把 kind 当成字面后缀。
 - 每次开发必须同步更新文档；文档没有同步的代码改动视为未收尾。
+- 子代理并发身份必须走显式 `RunScope` 和 run 事件账本。`inspect_agent_tree` 只是展示和汇总，不是身份事实源；线程级上下文只能作为权限上界和兼容兜底，不能成为新链路判断“当前是谁”的唯一依据。显式 scope 与当前 runner 上下文冲突时，必须返回结构化 `scope_resolution/scope_warnings`，不能静默吞掉。
 
 ## 参考项目结论
 
@@ -19,6 +21,9 @@
 - 通道运行时 更像控制面：task/run 状态、pending tool call、stop reason 都是结构化状态；它倾向于把“没推进”转成返工/等待/阻塞状态，而不是让前置模板决定任务怎么做。
 - 长期助手 更像稳定运行器：活动追踪、工具网关、恢复边界清楚；它不会要求普通任务必须先写某个专项中间文件。
 - 会话运行时 更强调事件流和结构化工具调用；工具结果、状态、上下文恢复都应该能通过 refs 和事件解释。
+- 通道运行时 的 run/event envelope 思路要落到每次工具调用和状态记录：每条工具结果、状态事件都应该自带 `run_id`、`parent_run_id`、`root_run_id`，而不是从共享对象上的 current 字段反推。
+- 通道运行时 的 TUI 和 task registry 允许 `activeRun` 这类显示缓存存在，但状态更新按 `runId + session/runtime scope` 落账；同一个 runId 在不同 scope 下冲突时不猜。本项目对应做法是：工具响应里输出 `scope_resolution`，当前 runner 只能收窄到自己的子树，不能把外部显式 parent/root 静默当真。
+- 当前清理范围已经覆盖 tree/dispatch 之外的写账入口。`subagent_message`、`capability_request`、`open_case/request_collaboration/update_*`、`submit_evidence` 在 runner 内都以当前 run 为有效身份；模型传入的其它 sender/source/requester/actor 只会进入 `ignored_explicit` 和 `scope_warnings`，不会替别的 run 写消息、能力申请或证据。
 - 终端交互 的可借鉴点主要是路径、权限、只读/写入边界，适合放到工具入口硬门。
 
 本仓库吸收的是这些通用底座，不复制它们的业务任务模板。

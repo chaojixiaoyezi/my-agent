@@ -286,16 +286,31 @@ def _permissions(task: SubAgentTask) -> dict[str, object]:
     }
 
 
-# LLM: _constraints carries filesystem and inheritance boundaries into the handoff bundle.
-# 函数用途: 汇总写入范围、禁止范围、锁定文件和失败/接管提示引用。
+# LLM: _constraints carries current runtime write roots plus explicit user deliverable roots.
+# 函数用途: 汇总写入范围、禁止范围、锁定文件和失败/接管提示引用；当前 runtime 目录优先，旧工单目录只作兼容。
 def _constraints(task: SubAgentTask) -> dict[str, object]:
     return {
-        "allowed_write_roots": list(task.allowed_write_roots or []),
+        "allowed_write_roots": _allowed_write_roots(task),
         "forbidden_write_roots": list(task.forbidden_write_roots or []),
         "locked_files": list(task.locked_files or []),
         "failure_handoff_ref": safe_string_ref(task, "failure_handoff_json"),
         "takeover_readiness_ref": safe_string_ref(task, "takeover_readiness_json"),
     }
+
+
+# LLM: _allowed_write_roots avoids showing only the old legacy work-order directory to child runners.
+# 函数用途: 将当前 task workspace、agent run workspace 和显式授权产物目录去重后传给模型。
+def _allowed_write_roots(task: SubAgentTask) -> list[str]:
+    roots: list[str] = []
+    for raw in (
+        safe_string_ref(task, "task_workspace_dir"),
+        safe_string_ref(task, "agent_run_workspace_dir"),
+        *list(task.allowed_write_roots or []),
+    ):
+        text = str(raw or "").strip()
+        if text and text not in roots:
+            roots.append(text)
+    return roots
 
 
 # LLM: _reserved carries small future-extensible handoff hints without changing the context bundle schema.

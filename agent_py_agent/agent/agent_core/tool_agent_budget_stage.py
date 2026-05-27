@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from ..tools import ToolExecutionResult
+from .runner_context import current_subagent_run_id
 from .runner_stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_call_finished
 from .tool_agent_budget import ToolAgentBudgetRequest, check_tool_agent_budget
 from .tool_round_execution import ToolCallExecuteParams
@@ -52,7 +53,7 @@ def maybe_block_tool_agent_budget(request: ToolAgentBudgetStageRequest) -> ToolE
 # LLM: _runtime_run_id matches ToolLoopService runtime scoping without importing the service module.
 # 函数用途: 从工具循环参数或当前子代理上下文解析 run_id；为空时表示主代理普通聊天不走预算限制。
 def _runtime_run_id(agent: object, request: ToolCallExecuteParams) -> str:
-    return str(request.params.run_id or getattr(agent, "_current_subagent_run_id", "") or "")
+    return str(current_subagent_run_id(agent) or request.params.run_id or "")
 
 
 # LLM: _tool_name renders stable budget output for dict payloads and malformed payloads.

@@ -175,6 +175,25 @@ class TestValidateWriteBoundaryAllowedRoots:
         )
         assert "没有配置 allowed_write_roots" in result
 
+    def test_runtime_ledger_only_boundary_does_not_enforce_write_roots(self, tmp_path):
+        result = validate_write_boundary(
+            "write_file",
+            {"path": "file.txt"},
+            workspace_root=tmp_path,
+            write_boundary={
+                "run_id": "run-1",
+                "idempotency_ledger": [
+                    {
+                        "idempotency_key": "idem-1",
+                        "args_hash": "sha256:old",
+                        "status": "completed",
+                    }
+                ],
+                "tool_rate_limit_records": [],
+            },
+        )
+        assert result == ""
+
     def test_path_outside_allowed_roots(self, tmp_path):
         allowed = tmp_path / "allowed"
         allowed.mkdir()

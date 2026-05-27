@@ -36,6 +36,15 @@ class SubAgentBoardItem:
     risk_flags: list[str]
     task_dir: str
     output_json: str
+    # LLM: workspace refs let board/tree users inspect current paths without guessing from legacy task_dir.
+    task_workspace: str = ""
+    agent_run_workspace: str = ""
+    legacy_task_dir: str = ""
+    legacy_output_json: str = ""
+    checkpoint_ref: str = ""
+    summary_ref: str = ""
+    final_report_ref: str = ""
+    latest_tool_progress_ref: str = ""
     agent_name: str = ""
     role: str = ""
     # LLM: target_tokens expose concrete artifact ownership without reading artifact bodies.

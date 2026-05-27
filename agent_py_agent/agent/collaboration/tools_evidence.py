@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from ..tools import BaseTool, ToolExecutionResult
 from .tool_specs import build_submit_evidence_spec
+from .tool_targets import actor_agent_id, collaboration_scope_payload
 from .tool_values import dict_value, dict_values, error, float_value, ok, string_values
 
 if TYPE_CHECKING:
@@ -22,14 +23,16 @@ class SubmitEvidenceTool(BaseTool):
         case_id = str(params.get("case_id") or "").strip()
         if not case_id:
             return error("submit_evidence", "case_id_required", "case_id is required")
-        evidence = self.agent.collaboration_store.submit_evidence({"case_id": case_id, **_evidence_kwargs(params)})
-        return ok("submit_evidence", _evidence_payload(case_id, evidence.evidence_id, params))
+        evidence = self.agent.collaboration_store.submit_evidence({"case_id": case_id, **_evidence_kwargs(self.agent, params)})
+        payload = _evidence_payload(case_id, evidence.evidence_id, params)
+        payload.update(collaboration_scope_payload(self.agent, params, explicit_keys=("source_agent_id", "actor_agent_id", "agent_id", "run_id")))
+        return ok("submit_evidence", payload)
 
 
-def _evidence_kwargs(params: dict[str, object]) -> dict[str, object]:
+def _evidence_kwargs(agent: SimpleAgent, params: dict[str, object]) -> dict[str, object]:
     return {
         "request_id": str(params.get("request_id") or ""),
-        "source_agent_id": str(params.get("source_agent_id") or ""),
+        "source_agent_id": actor_agent_id(agent, params),
         "matched": bool(params.get("matched", False)),
         "summary": str(params.get("summary") or ""),
         "evidence_refs": string_values(params.get("evidence_refs")),
