@@ -22,6 +22,7 @@ from ._filesystem_helpers import (
     _text_param,
 )
 from .filesystem_artifact_guard import tool_output_artifact_typo_hint
+from .filesystem_path_recovery import MissingPathRequest, missing_path_result
 from .filesystem_read_file import execute_read_file
 from .models import BaseTool, ToolExecutionResult, ToolSpec
 
@@ -168,7 +169,15 @@ class ListFilesTool(FileSystemTool):
         except ValueError as exc:
             return ToolExecutionResult("list_files", False, str(exc))
         if not target.exists():
-            return ToolExecutionResult("list_files", False, f"路径不存在: {self.display_path(target)}")
+            return missing_path_result(MissingPathRequest(
+                tool_name="list_files",
+                raw_path=request.raw_path,
+                target=target,
+                workspace_roots=self.workspace_roots,
+                display_path=self.display_path(target),
+                expected_kind="any",
+                retry_tool="list_files",
+            ))
         if target.is_file():
             return ToolExecutionResult("list_files", True, self.display_path(target))
         return self._list_target(target, request)

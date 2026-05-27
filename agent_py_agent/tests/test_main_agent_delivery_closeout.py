@@ -243,9 +243,9 @@ def test_tool_loop_rejects_incomplete_delivery_contract_artifact():
 
 # LLM: Delivery closeout must not pass while any chunked write session remains open.
 # 函数用途: 有 open file_write_session manifest 时，即使目录已存在也不能输出完成标记。
-# LLM: Repeated identical delivery failures must terminate as blocked instead of consuming endless tool rounds.
-# 函数用途: 验证 closeout 会识别“同一失败 + 无工作进展”的通用卡死模式，并输出结构化阻塞结果。
-def test_tool_loop_blocks_after_repeated_unchanged_delivery_failure():
+# LLM: Repeated identical delivery failures must stop the current no-tool spin without pretending completion.
+# 函数用途: 验证 closeout 返工提示被模型连续忽略时，本轮停止空转，但不再输出硬 blocked 门。
+def test_tool_loop_stops_after_repeated_unchanged_delivery_failure_without_hard_block():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         backend = NoProgressDeliveryBackend()
@@ -259,11 +259,11 @@ def test_tool_loop_blocks_after_repeated_unchanged_delivery_failure():
         )
         report = _closeout_report(workspace)
 
-        assert backend.calls >= 6
-        assert "[MAIN_AGENT_DELIVERY_BLOCKED]" in result.response
+        assert backend.calls == 4
+        assert "[MAIN_AGENT_DELIVERY_REWORK_REQUIRED]" in result.response
+        assert "[MAIN_AGENT_DELIVERY_BLOCKED]" not in result.response
         assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
         assert report["ok"] is False
-        assert report["delivery_progress"]["unchanged_failure_count"] >= 3
         actions = report["delivery_progress"]["recovery_actions"]
         assert actions[0]["code"] == "ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED"
         assert "ACCEPTANCE_FAILED" in {item["code"] for item in actions}

@@ -14,7 +14,8 @@ def related_task_refs(agent: object, report: object, attr: str, *, limit: int = 
     seen: set[str] = set()
     for run_id in _related_run_ids(report):
         task = _safe_load_task(agent, run_id)
-        if _extend_unique_refs(refs, seen, _string_refs(getattr(task, attr, []), limit=limit), limit):
+        task_refs = _task_ref_values(task, attr, limit=limit)
+        if _extend_unique_refs(refs, seen, task_refs, limit):
             return refs
     return refs
 
@@ -106,11 +107,28 @@ def _has_task_identity(task: object, run_id: str) -> bool:
     return str(getattr(task, "id", "") or "").strip() == run_id
 
 
+def _task_ref_values(task: object, attr: str, *, limit: int) -> list[str]:
+    if attr != "artifact_refs":
+        return _string_refs(getattr(task, attr, []), limit=limit)
+    output_payload = _read_output_payload(task)
+    registry_records = _task_registry_records(task, output_payload, limit=limit)
+    registry_paths = _registry_paths(registry_records, limit=limit)
+    if registry_paths:
+        return registry_paths
+    refs = _string_refs(getattr(task, attr, []), limit=limit)
+    if refs:
+        return refs
+    return _output_artifact_refs(output_payload, limit=limit)
+
+
 # LLM: _task_result_ref_row keeps one child handoff self-contained and refs-only.
 # 函数用途: 给父级返回每个子代理的权威状态、摘要、output/run refs 和少量主产物路径。
 def _task_result_ref_row(task: object, *, per_run_artifact_limit: int) -> dict[str, object]:
     output_payload = _read_output_payload(task)
-    artifacts = _string_refs(getattr(task, "artifact_refs", []), limit=per_run_artifact_limit)
+    registry_records = _task_registry_records(task, output_payload, limit=per_run_artifact_limit)
+    artifacts = _registry_paths(registry_records, limit=per_run_artifact_limit)
+    if not artifacts:
+        artifacts = _string_refs(getattr(task, "artifact_refs", []), limit=per_run_artifact_limit)
     if not artifacts:
         artifacts = _output_artifact_refs(output_payload, limit=per_run_artifact_limit)
     evidence = _string_refs(getattr(task, "evidence_refs", []), limit=2)
@@ -122,7 +140,9 @@ def _task_result_ref_row(task: object, *, per_run_artifact_limit: int) -> dict[s
         "status": str(getattr(task, "status", "") or ""),
         "verification_status": str(getattr(task, "verification_status", "") or ""),
         "summary": summary,
+        "primary_artifact_ids": _registry_ids(registry_records, limit=per_run_artifact_limit),
         "primary_artifact_refs": artifacts,
+        "primary_artifact_registry_refs": registry_records,
         "primary_artifact_summaries": _output_artifact_summaries(output_payload, limit=per_run_artifact_limit),
         "evidence_refs": evidence,
         "output_json": str(getattr(task, "output_json", "") or ""),
@@ -208,6 +228,59 @@ def _output_artifact_summaries(payload: dict[str, object], *, limit: int) -> lis
         if len(rows) >= limit:
             break
     return rows
+
+
+def _task_registry_records(
+    task: object,
+    output_payload: dict[str, object],
+    *,
+    limit: int,
+) -> list[dict[str, object]]:
+    rows = _registry_records_from_attrs(getattr(task, "attributes", {}))
+    rows.extend(_registry_records_from_output(output_payload.get("artifacts")))
+    deduped: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for row in rows:
+        artifact_id = str(row.get("artifact_id") or "").strip()
+        path = str(row.get("path") or "").strip()
+        key = artifact_id or path
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
+def _registry_records_from_attrs(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, dict):
+        return []
+    records = value.get("artifact_registry_refs")
+    if not isinstance(records, list):
+        return []
+    return [dict(item) for item in records if isinstance(item, dict)]
+
+
+def _registry_records_from_output(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, object]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        ref = item.get("registry_ref")
+        if isinstance(ref, dict):
+            rows.append(dict(ref))
+    return rows
+
+
+def _registry_paths(records: list[dict[str, object]], *, limit: int) -> list[str]:
+    return _unique_strings([str(item.get("path") or "").strip() for item in records])[:limit]
+
+
+def _registry_ids(records: list[dict[str, object]], *, limit: int) -> list[str]:
+    return _unique_strings([str(item.get("artifact_id") or "").strip() for item in records])[:limit]
 
 
 # LLM: _artifact_entry_paths extracts paths from output.json artifacts without interpreting summaries.

@@ -164,6 +164,7 @@ def _board_item_payload(
         "latest_tool_progress_ref": _latest_tool_progress_ref(task),
         "target_tokens": sorted(task_actual_target_tokens(task))[:20],
         "artifact_refs": _bounded_unique_strings(task.artifact_refs, limit=12),
+        "artifact_registry_refs": _registry_records(task.attributes.get("artifact_registry_refs"), limit=12),
         "evidence_refs": _bounded_unique_strings(task.evidence_refs, limit=12),
     }
 
@@ -203,6 +204,27 @@ def _bounded_unique_strings(value: object, *, limit: int) -> list[str]:
         if len(items) >= limit:
             break
     return items
+
+
+def _registry_records(value: object, *, limit: int) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        artifact_id = str(row.get("artifact_id") or "").strip()
+        path = str(row.get("path") or "").strip()
+        key = artifact_id or path
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        rows.append(row)
+        if len(rows) >= limit:
+            break
+    return rows
 
 
 # LLM: _latest_tool_progress_ref points parents at the current run progress snapshot, not legacy reports paths.

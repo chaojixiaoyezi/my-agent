@@ -23,6 +23,9 @@ def build_delivery_requirement_materializer_prompt(user_prompt: str) -> str:
         "不是产物，不要写入 artifacts。\n"
         "产物可以只声明 artifact_id、kind、required、allowed_output_roots；只有用户明确说把结果保存到某个文件时，"
         "才写 artifacts[].preferred_path；如果只给输出目录，才写 allowed_output_roots。\n"
+        "kind 只在用户明确文件格式或后缀时写；如果用户只说 CAD图纸、文档、视频、图像这类大类，"
+        "请写 artifacts[].kind_label，并用 artifacts[].artifact_intent.acceptable_extensions 给出可接受后缀；"
+        "不要让系统去找 .cad、.document 这类假后缀。\n"
         "如果用户要求表格列，请写入 artifacts[].validation_contract.required_columns；事实型数字、排名、时间窗"
         "请写入 delivery_quality_contract.metric_contracts。\n"
         "分析型字段请放入 artifacts[].llm_generated_fields，例如解释、理由、建议、结论、判断、摘要这类需要模型撰写的列；"
@@ -142,9 +145,23 @@ def _artifact_contracts(value: object, workspace_root: Path | None) -> tuple[lis
 def _artifact_contract(item: dict[str, Any]) -> dict[str, Any]:
     allowed_keys = {
         "allowed_output_roots",
+        "acceptable_extension",
+        "acceptable_extensions",
+        "accepted_extension",
+        "accepted_extensions",
+        "artifact_intent",
         "artifact_id",
+        "content_type",
+        "extension",
+        "extensions",
+        "file_extension",
+        "file_extensions",
         "kind",
+        "kind_label",
+        "mime_type",
         "path",
+        "preferred_extension",
+        "preferred_extensions",
         "preferred_path",
         "purpose",
         "required",
@@ -154,6 +171,7 @@ def _artifact_contract(item: dict[str, Any]) -> dict[str, Any]:
         "llm_generated_fields",
     }
     result = {key: item[key] for key in allowed_keys if key in item}
+    _normalize_artifact_intent_fields(result)
     if "required" not in result:
         result["required"] = True
     if "kind" in result:
@@ -166,6 +184,72 @@ def _artifact_contract(item: dict[str, Any]) -> dict[str, Any]:
         result["allowed_output_roots"] = [str(value).strip() for value in result["allowed_output_roots"] if str(value).strip()]
         _promote_file_root_to_preferred_path(result)
     return result
+
+
+def _normalize_artifact_intent_fields(artifact: dict[str, Any]) -> None:
+    intent = artifact.get("artifact_intent")
+    if isinstance(intent, dict):
+        artifact["artifact_intent"] = _artifact_intent(intent)
+    else:
+        artifact.pop("artifact_intent", None)
+    _promote_intent_extensions(artifact)
+
+
+def _artifact_intent(intent: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "acceptable_extension",
+        "acceptable_extensions",
+        "accepted_extension",
+        "accepted_extensions",
+        "content_type",
+        "extension",
+        "extensions",
+        "file_extension",
+        "file_extensions",
+        "kind_label",
+        "mime_type",
+        "preferred_extension",
+        "preferred_extensions",
+        "role",
+    }
+    result = {key: intent[key] for key in allowed if key in intent}
+    for key in ("acceptable_extensions", "accepted_extensions", "extensions", "file_extensions", "preferred_extensions"):
+        if key in result:
+            result[key] = _string_items(result[key])
+    for key in ("acceptable_extension", "accepted_extension", "extension", "file_extension", "preferred_extension"):
+        if key in result:
+            value = str(result[key]).strip()
+            if value:
+                result[key] = value
+            else:
+                result.pop(key, None)
+    return result
+
+
+def _promote_intent_extensions(artifact: dict[str, Any]) -> None:
+    if any(key in artifact for key in ("extension", "extensions", "file_extension", "file_extensions")):
+        return
+    extensions = _extension_values_from_artifact(artifact)
+    if extensions:
+        artifact["file_extensions"] = extensions
+
+
+def _extension_values_from_artifact(artifact: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("preferred_extension", "preferred_extensions", "acceptable_extension", "acceptable_extensions", "accepted_extension", "accepted_extensions"):
+        values.extend(_string_items(artifact.get(key)))
+    intent = artifact.get("artifact_intent")
+    if isinstance(intent, dict):
+        for key in ("preferred_extension", "preferred_extensions", "acceptable_extension", "acceptable_extensions", "accepted_extension", "accepted_extensions"):
+            values.extend(_string_items(intent.get(key)))
+    return list(dict.fromkeys(value for value in values if value))
+
+
+def _string_items(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value or "").strip()
+    return [text] if text else []
 
 
 def _artifact_declares_input_role(item: dict[str, Any]) -> bool:

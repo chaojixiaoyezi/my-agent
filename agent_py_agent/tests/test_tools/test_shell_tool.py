@@ -211,6 +211,92 @@ def test_shell_tool_preserves_unicode_output(shell_tool: ShellTool) -> None:
     assert "你好" in result.output
 
 
+def test_shell_corrupting_ready_artifact_records_invalid_with_backup(tmp_path: Path) -> None:
+    """Shell overwrites of ready deliverables should keep a backup and invalidate bad output."""
+    from openpyxl import Workbook
+
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        latest_artifact_records,
+        register_artifact,
+    )
+
+    workspace = tmp_path / "workspace"
+    output_dir = workspace / "outputs"
+    output_dir.mkdir(parents=True)
+    workbook_path = output_dir / "weekly.xlsx"
+    workbook = Workbook()
+    workbook.active.append(["name", "stars"])
+    workbook.active.append(["demo", 10])
+    workbook.save(workbook_path)
+    register_artifact(
+        ArtifactRegistration(
+            workspace_root=workspace,
+            path=workbook_path,
+            artifact_id="weekly",
+            run_id="run-1",
+            task_id="task-1",
+            agent_id="agent-1",
+            kind="xlsx",
+            status="ready",
+            source="test",
+        )
+    )
+
+    tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
+    python = shlex.quote(sys.executable)
+    script = "from pathlib import Path; Path('outputs/weekly.xlsx').write_text('broken')"
+    result = tool.execute({"command": f"{python} -c {shlex.quote(script)}"})
+
+    latest = latest_artifact_records(workspace)["weekly"]
+    backup_ref = latest.metadata.get("backup_ref")
+    assert result.ok is True
+    assert latest.status == "invalid"
+    assert latest.metadata["change_status"] == "invalid_after_shell"
+    assert isinstance(backup_ref, str) and backup_ref
+    assert Path(backup_ref).is_file()
+    assert "artifact_protection_invalid=1" in result.output
+
+
+def test_shell_changing_generic_ready_artifact_keeps_ready_with_backup(tmp_path: Path) -> None:
+    """Unknown but non-empty artifacts are tracked generically instead of treated as format failures."""
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        latest_artifact_records,
+        register_artifact,
+    )
+
+    workspace = tmp_path / "workspace"
+    output_dir = workspace / "outputs"
+    output_dir.mkdir(parents=True)
+    note_path = output_dir / "notes.custom"
+    note_path.write_text("old content", encoding="utf-8")
+    register_artifact(
+        ArtifactRegistration(
+            workspace_root=workspace,
+            path=note_path,
+            artifact_id="notes",
+            run_id="run-1",
+            task_id="task-1",
+            agent_id="agent-1",
+            kind="custom",
+            status="ready",
+            source="test",
+        )
+    )
+
+    tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
+    result = tool.execute({"command": "printf 'new content' > outputs/notes.custom"})
+
+    latest = latest_artifact_records(workspace)["notes"]
+    assert result.ok is True
+    assert latest.status == "ready"
+    assert latest.metadata["change_status"] == "changed_ready"
+    assert Path(str(latest.metadata["backup_ref"])).is_file()
+    assert "artifact_protection_changed=1" in result.output
+    assert "artifact_protection_invalid=0" in result.output
+
+
 def test_shell_tool_spec_has_run_command(shell_tool: ShellTool) -> None:
     """Test that ShellTool spec has correct name."""
     assert shell_tool.spec.name == "run_command"

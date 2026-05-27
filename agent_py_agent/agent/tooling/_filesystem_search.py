@@ -31,6 +31,7 @@ from ._filesystem_search_models import (
     slice_hits,
 )
 from ._filesystem_search_spec import build_search_text_spec
+from .filesystem_path_recovery import MissingPathRequest, missing_path_result
 from .models import ToolExecutionResult
 
 
@@ -54,7 +55,15 @@ class SearchTextTool(FileSystemTool):
         except ValueError as exc:
             return ToolExecutionResult("search_text", False, str(exc))
         if not target.exists():
-            return ToolExecutionResult("search_text", False, f"路径不存在: {self.display_path(target)}")
+            return missing_path_result(MissingPathRequest(
+                tool_name="search_text",
+                raw_path=request.raw_path,
+                target=target,
+                workspace_roots=self.workspace_roots,
+                display_path=self.display_path(target),
+                expected_kind="any",
+                retry_tool="search_text",
+            ))
         return self._search_target(target, request)
 
     # LLM: SearchTextTool._search_target keeps execute short and owns candidate traversal.

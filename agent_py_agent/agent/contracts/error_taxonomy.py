@@ -34,6 +34,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action="fix_path_within_allowed_roots",
         recovery_hint="修正路径到允许工作区内；如果确实需要新目录，走能力/权限申请链路。",
     ),
+    "PATH_NOT_FOUND": ErrorContract(
+        code="PATH_NOT_FOUND",
+        category="path",
+        retryable=True,
+        recommended_action="retry_with_candidate_or_search",
+        recovery_hint="目标路径不存在；优先使用工具返回的 candidate_paths，或者用 list_files/search_text 重新定位。",
+    ),
     "WRITE_FORBIDDEN": ErrorContract(
         code="WRITE_FORBIDDEN",
         category="permission",

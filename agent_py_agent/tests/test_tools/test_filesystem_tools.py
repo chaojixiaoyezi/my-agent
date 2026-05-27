@@ -5,6 +5,7 @@
 写文件/追加文件、替换内容、搜索文本、参数校验和绝对路径隐藏。
 """
 
+import base64
 import tempfile
 import types
 from pathlib import Path
@@ -18,6 +19,7 @@ from agent_py_agent.agent.tools import (
     SearchTextTool,
     WriteFileTool,
 )
+from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
 
 from .backends import make_tool_registry
 
@@ -218,6 +220,30 @@ def test_write_and_apply_patch_tools():
         assert (workspace / "src" / "demo.py").read_text(encoding="utf-8") == "print('a')\nprint('b')\n"
 
 
+def test_write_file_rejects_invalid_xlsx_without_overwriting_previous_good_file():
+    """LLM: final binary writes should validate package integrity before replacing an existing artifact."""
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        target = write_xlsx_fixture(
+            workspace,
+            "outputs/report.xlsx",
+            sheets=[{"name": "summary", "rows": [{"name": "ok"}]}],
+        )
+        before = target.read_bytes()
+        write_tool = WriteFileTool(workspace)
+
+        result = write_tool.execute(
+            {
+                "path": "outputs/report.xlsx",
+                "data_base64": base64.b64encode(b"not a workbook").decode("ascii"),
+            }
+        )
+
+        assert result.ok is False
+        assert "XLSX_INVALID" in result.output or "XLSX_INVALID_PACKAGE" in result.output
+        assert target.read_bytes() == before
+
+
 def test_filesystem_tools_allow_configured_extra_workspace_root():
     with tempfile.TemporaryDirectory() as primary_td, tempfile.TemporaryDirectory() as extra_td:
         primary = Path(primary_td)
@@ -258,6 +284,57 @@ def test_filesystem_tool_suggests_workspace_path_typo():
         assert "suspected_path_typo=true" in result.output
         assert f"suggested_target={suggested}" in result.output
         assert "请使用 suggested_target 重试" in result.output
+
+
+def test_read_file_missing_path_returns_workspace_candidates_not_a_dead_end(tmp_path: Path):
+    """LLM: stale copied paths should return bounded workspace candidates instead of a bare miss.
+
+    新手说明:
+    模型拿到旧路径或抄错路径时，系统不应该直接让它撞墙。
+    它应该告诉模型：这个路径不存在，但工作区里有几个可能的候选路径，你自己再读。
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    actual = workspace / "data" / "subagents" / "tasks" / "root-1" / "agents" / "agent-3" / "data"
+    actual.mkdir(parents=True)
+    report = actual / "finding_report.md"
+    report.write_text("real child report", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "finding_report.md").write_text("outside secret", encoding="utf-8")
+    stale_path = "data/subagents/agent-3/data/finding_report.md"
+    read_tool = ReadFileTool(workspace, max_chars=2000)
+
+    result = read_tool.execute({"path": stale_path})
+
+    assert not result.ok
+    assert result.error_code == "PATH_NOT_FOUND"
+    assert result.result_envelope["path_not_found"] is True
+    assert str(report) in result.result_envelope["candidate_paths"]
+    assert str(outside) not in result.output
+    assert "candidate_paths" in result.output
+    assert "请用 read_file 重新读取确认" in result.output
+
+
+def test_list_and_search_missing_path_return_recovery_candidates(tmp_path: Path):
+    """LLM: list/search path misses should share the same recovery surface as read_file."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    reports = workspace / "reports"
+    reports.mkdir()
+    (reports / "weekly-summary.md").write_text("needle", encoding="utf-8")
+    list_tool = ListFilesTool(workspace, max_entries=20)
+    search_tool = SearchTextTool(workspace, max_matches=20)
+
+    listed = list_tool.execute({"path": "reports/weekly"})
+    searched = search_tool.execute({"query": "needle", "path": "reports/weekly"})
+
+    assert not listed.ok
+    assert listed.error_code == "PATH_NOT_FOUND"
+    assert str(reports / "weekly-summary.md") in listed.output
+    assert not searched.ok
+    assert searched.error_code == "PATH_NOT_FOUND"
+    assert str(reports / "weekly-summary.md") in searched.output
 
 
 def test_filesystem_tools_reject_bad_parameters_and_hide_absolute_outside_paths():

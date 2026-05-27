@@ -20,6 +20,7 @@ def artifact_items_from_payload(payload: dict[str, object]) -> list[dict[str, ob
     # LLM: top-level artifact_refs is a product-ref alias from repair/validator agents, not only evidence metadata.
     # 函数用途: 模型把产物路径直接放到 artifact_refs 时，也要进入标准 artifacts，避免最终收口漏查真实文件。
     result.extend(_artifact_items_from_string_refs(payload.get("artifact_refs", []), seen, summary="reported artifact ref"))
+    result.extend(_top_level_file_path_artifacts(payload, seen))
     result.extend(_artifact_items_from_evidence(payload.get("evidence", []), seen))
     result.extend(_artifact_items_from_evidence_packets(payload.get("evidence_packets", []), seen))
     return result
@@ -84,6 +85,19 @@ def _artifact_items_from_string_refs(
             continue
         seen.add(ref)
         items.append({"path": ref, "kind": "file", "summary": summary})
+    return items
+
+
+# LLM: _top_level_file_path_artifacts recovers legacy single-output payloads.
+# 函数用途: 子代理把最终产物放在顶层 file_path/output_path 时，也纳入标准 artifacts。
+def _top_level_file_path_artifacts(payload: dict[str, object], seen: set[str]) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for key in ("file_path", "output_path", "path"):
+        ref = str(payload.get(key) or "").strip()
+        if not ref or ref in seen:
+            continue
+        seen.add(ref)
+        items.append({"path": ref, "kind": "file", "summary": f"reported {key} artifact"})
     return items
 
 

@@ -177,9 +177,9 @@ def test_delivery_closeout_adds_generic_staging_builder_action_for_ready_source(
     assert actions["STAGING_BUILDER_READY"]["source_ref"] == "outputs/table_report/source_data.json"
 
 
-# LLM: Failed builder outputs should be regenerated from the staged source instead of manually patched.
-# 函数用途: 验证 workbook 已存在但验收失败时，恢复动作仍会给出 data_to_workbook 的 builder 调用合同。
-def test_delivery_closeout_adds_builder_action_for_failed_existing_workbook():
+# LLM: Spreadsheet content-shape issues should stay advisory once the workbook itself opens.
+# 函数用途: 验证 workbook 可打开时，列值质量问题只进入 warning，不再强制 builder 返工。
+def test_delivery_closeout_warns_for_failed_existing_workbook_content_shape():
     from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
 
     with tempfile.TemporaryDirectory() as td:
@@ -207,12 +207,13 @@ def test_delivery_closeout_adds_builder_action_for_failed_existing_workbook():
                 ],
             }
         )
-        _, actions = _enriched_report(workspace, contract)
+        report, actions = _enriched_report(workspace, contract)
 
-        assert actions["STAGING_BUILDER_READY"]["recommended_action"] == "invoke_builder_tool"
-        assert actions["STAGING_BUILDER_READY"]["builder_tool"] == "write_file"
-        assert actions["STAGING_BUILDER_READY"]["source_ref"] == "outputs/table_report/source_data.json"
-        assert actions["STAGING_BUILDER_READY"]["output_ref"] == "outputs/table_report/table_report.xlsx"
+        assert report["ok"] is True
+        assert "STAGING_BUILDER_READY" not in actions
+        findings = report["artifacts"][0]["acceptance_report"]["findings"]
+        assert "XLSX_REQUIRED_COLUMN_EMPTY_VALUES" in {finding["code"] for finding in findings}
+        assert {finding["severity"] for finding in findings} == {"warning"}
 
 
 # LLM: Invalid staged JSON should produce a repair action with parse context instead of a builder action.

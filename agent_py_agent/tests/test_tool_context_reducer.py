@@ -155,6 +155,41 @@ def test_subagent_board_externalized_result_keeps_deliverable_refs():
     assert '"goal"' not in rendered
 
 
+# LLM: Board summaries should preserve artifact IDs when registry-backed refs exist.
+# 函数用途: 大输出外置后，最终汇报提示仍能看到 artifact_id，避免只靠路径文字判断产物事实。
+def test_subagent_board_externalized_result_keeps_deliverable_artifact_ids():
+    output = json.dumps(
+        {
+            "summary": {"DONE": 1, "VERIFIED": 1},
+            "deliverable_artifact_ids": ["artifact-report-1"],
+            "deliverable_artifact_refs": ["/tmp/site/final_report.md"],
+            "items": [
+                {
+                    "id": "child-1",
+                    "status": "DONE",
+                    "artifact_ids": ["artifact-report-1"],
+                    "artifact_refs": ["/tmp/site/final_report.md"],
+                    "artifact_registry_refs": [
+                        {
+                            "artifact_id": "artifact-report-1",
+                            "path": "/tmp/site/final_report.md",
+                            "status": "ready",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    rendered = render_tool_result_for_live_prompt(
+        ToolExecutionResult("subagent_board", True, output),
+        _dispatch_externalized_archive_record(output),
+    )
+
+    assert "deliverable_artifact_ids" in rendered
+    assert "artifact-report-1" in rendered
+
+
 # LLM: Top-level dispatch completion gates must survive output externalization.
 # 函数用途: dispatch 大输出被外置时，root 仍能看到 not_complete 和修复建议，避免先报完成。
 def test_dispatch_externalized_result_keeps_top_level_completion_gate():
@@ -329,6 +364,39 @@ def test_dispatch_externalized_result_keeps_result_refs_by_run():
     assert "竞品矩阵和差异化机会" in rendered
     assert "do not guess child filenames" in rendered
     assert "records" not in rendered
+
+
+# LLM: Result refs by run should preserve artifact IDs from the registry.
+# 函数用途: dispatch 大输出外置后，每个 child 的 artifact_id 应继续留在摘要里，供最终汇报按 registry 认产物。
+def test_dispatch_externalized_result_keeps_result_ref_artifact_ids():
+    output = json.dumps(
+        {
+            "result_refs_by_run": [
+                {
+                    "run_id": "market",
+                    "status": "DONE",
+                    "verification_status": "VERIFIED",
+                    "primary_artifact_ids": ["artifact-market-1"],
+                    "primary_artifact_refs": ["/tmp/subagents/market/report.md"],
+                    "primary_artifact_registry_refs": [
+                        {
+                            "artifact_id": "artifact-market-1",
+                            "path": "/tmp/subagents/market/report.md",
+                            "status": "ready",
+                        }
+                    ],
+                },
+            ],
+        }
+    )
+
+    rendered = render_tool_result_for_live_prompt(
+        ToolExecutionResult("dispatch_subagents", True, output),
+        _dispatch_externalized_archive_record(output),
+    )
+
+    assert "primary_artifact_ids" in rendered
+    assert "artifact-market-1" in rendered
 
 
 # LLM: legacy nested read_artifact archive records must not invite models to chase artifact-of-artifact files.

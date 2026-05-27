@@ -162,11 +162,15 @@ def _result_refs_by_run_lines(value: object) -> list[str]:
             continue
         run_id = item.get("run_id", "")
         status = f"{item.get('status', '')}/{item.get('verification_status', '')}"
+        artifact_ids = _json_inline(item.get("primary_artifact_ids") or [])
         artifacts = _json_inline(item.get("primary_artifact_refs") or [])
         artifact_summaries = item.get("primary_artifact_summaries") or []
         output_json = item.get("output_json", "")
         summary = _clip(item.get("summary", ""), limit=220)
-        lines.append(f"  - run_id={run_id} status={status} primary_artifact_refs={artifacts}")
+        lines.append(
+            f"  - run_id={run_id} status={status} "
+            f"primary_artifact_ids={artifact_ids} primary_artifact_refs={artifacts}"
+        )
         if artifact_summaries:
             lines.append(f"    artifact_summaries={_json_inline(artifact_summaries)}")
         if output_json:
@@ -196,12 +200,18 @@ def _summary_lines(payload: dict[str, Any]) -> list[str]:
 # LLM: _ref_lines keeps completed child outputs visible after bulky board/dispatch payloads are archived.
 # 函数用途: 从调度 payload 顶层和 items[] 中提取 artifact/evidence refs，告诉模型直接读 refs，不要猜路径。
 def _ref_lines(payload: dict[str, Any]) -> list[str]:
+    artifact_ids = _refs_from_payload(payload, "deliverable_artifact_ids", item_key="artifact_ids")
     artifact_refs = _refs_from_payload(payload, "deliverable_artifact_refs", item_key="artifact_refs")
     evidence_refs = _refs_from_payload(payload, "deliverable_evidence_refs", item_key="evidence_refs")
     lines: list[str] = []
+    if artifact_ids:
+        lines.append(f"- deliverable_artifact_ids: {_json_inline(artifact_ids)}")
     if artifact_refs:
         lines.append(f"- deliverable_artifact_refs: {_json_inline(artifact_refs)}")
-        lines.append("- refs_policy: use deliverable_artifact_refs/read_artifact first; do not guess task_dir child paths.")
+        lines.append(
+            "- refs_policy: use deliverable_artifact_ids/artifact_refs from registry first; "
+            "do not guess task_dir child paths."
+        )
     if evidence_refs:
         lines.append(f"- deliverable_evidence_refs: {_json_inline(evidence_refs)}")
     return lines

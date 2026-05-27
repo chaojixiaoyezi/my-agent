@@ -9,6 +9,7 @@
 - 允许的做法是：把该问题上升为通用契约、通用状态、通用 validator 注册项、通用 recovery action，或者通用执行策略。
 - 代码不得依赖普通自然语言文本作为机器事实来源。
 - 中文或其他自然语言提示只允许作为软约束；真正的机器判断必须基于结构化字段、状态、refs、schema、工具记录、文件系统事实或显式配置。
+- 开放世界禁止封闭枚举。文件格式、产物类型、协议、MIME type 等持续增长的概念，不能让写死映射表成为唯一判定路径；映射表只能作为已知类型优化。格式类交付应优先读取结构化 `file_extensions` / `acceptable_extensions` / `artifact_intent` / `mime_type`，未知但明确的后缀可从 key 自身推导，大类标签如“CAD 图纸”必须先物化成可接受扩展名，底层 locator 不靠行业知识猜一万种格式。
 
 These rules keep the my-agent codebase maintainable, auditable, and safe for
 multi-agent workflows.  Every contributor (human or LLM) must check these rules
@@ -152,6 +153,13 @@ before changing code.
   deleting `/`, deleting system/home roots, writing raw disks with `dd`,
   formatting disks, or shutting down/rebooting remain hard-blocked even when
   `access_mode=full-access`.
+- `run_command` must protect already-ready deliverables generically. Before shell
+  execution, snapshot every `ready` artifact registry record that still points to
+  a file. After shell exits, compare path existence, size and hash; if a file
+  changed, re-run objective format lint when available. Valid changed files update
+  the same `artifact_id`; missing/empty/format-broken files are registered
+  `invalid` with `backup_ref`. Unknown formats are not treated as broken only
+  because the system cannot parse them.
 
 ## 7.1 Guard Boundary / 守卫边界
 
@@ -217,6 +225,28 @@ before changing code.
   parse command forms such as `cat file`, XML-ish tool markers, Python traceback
   names, path strings, file extensions, and protocol tokens because those are
   machine syntax or diagnostics, not guesses about what the user meant.
+- 读路径不存在不是权限缺口，也不是任务终止信号。`read_file`、
+  `list_files`、`search_text` 这类只读工具必须优先返回结构化
+  `path_not_found` 和工作区内 `candidate_paths`，让模型自己确认候选或继续搜索。
+  系统不能自动读取候选，也不能因为缺路径直接把任务卡死。
+- 产物交付必须先进入统一 artifact registry。工具、子代理结果、closeout
+  或后续修复链路只要确认一个用户交付物存在，就要登记为
+  `artifact_id + path + hash + run/task/agent` 的机器记录。父代理、任务树、
+  看板、closeout 和最终汇报优先读取 registry 记录；模型文本里的路径只能作为
+  搜索/恢复提示，不能成为最终产物事实。
+- 同一个产物移动、重建、修复或格式转换时，应更新同一个 `artifact_id` 的最新
+  registry 记录，而不是制造一串互相竞争的“口头路径”。旧 `artifact_refs`
+  字段只作为兼容投影存在，新增逻辑不得把它当作比 registry 更权威的事实源。
+- 最终交付物的系统硬验收只守客观事实：路径边界、存在性、非空、文件签名、
+  文件包是否能被真实 reader 打开、hash/registry 状态和工具运行错误。文档厚度、
+  覆盖比例、证据充分性、推荐理由质量、字段是否“有用”等业务质量，只能作为
+  `warning` / advisory 返给模型或人工；不能直接把任务硬挡死。
+- `write_file` 写入常见二进制交付物时必须先写临时文件并做客观格式验证，验证
+  通过后再原子替换目标文件。验证失败时保留旧文件，并返回结构化错误让模型
+  自己换方法修复；不要用坏候选覆盖上一次可打开的交付物。
+- `run_command` 和 `write_file` 的保护边界不同：`write_file` 可以在覆盖前验证候选；
+  shell 脚本可能自己原地改文件，所以必须在执行前备份 registry 里的 ready 产物，
+  执行后把变化、坏包和备份位置写回 registry，而不是相信模型口头路径。
 - If a feature needs a new hard requirement, add a structured field/schema first,
   document it, and add a regression that proves the same natural-language phrase
   alone does not trigger the hard behavior.

@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
+from ..backends import ModelResponse
 from ._runtime_params import ToolLoopExecuteParams
 from .main_agent_delivery_closeout import (
     MainAgentDeliveryCloseoutRequest,
@@ -157,6 +158,7 @@ def _implicit_delivery_closeout_decision(
     request: _NoToolCallsRequest,
 ) -> ToolLoopResponseDecision | None:
     before_context_count = len(request.params.tool_context)
+    already_had_rework_context = _has_delivery_rework_context(request.params)
     response = main_agent_delivery_closeout_response(
         MainAgentDeliveryCloseoutRequest(
             agent=request.agent,
@@ -167,8 +169,29 @@ def _implicit_delivery_closeout_decision(
     if response is not None:
         return ToolLoopResponseDecision("break", response, [], request.counters)
     if len(request.params.tool_context) > before_context_count:
+        if already_had_rework_context:
+            return ToolLoopResponseDecision(
+                "break",
+                _delivery_rework_still_required_response(request.response),
+                [],
+                request.counters,
+            )
         return ToolLoopResponseDecision("continue", None, [], request.counters)
     return None
+
+
+def _has_delivery_rework_context(params: ToolLoopExecuteParams) -> bool:
+    return any(str(item).startswith("[delivery-contract-check]") for item in params.tool_context)
+
+
+def _delivery_rework_still_required_response(response) -> ModelResponse:
+    return ModelResponse(
+        text=(
+            "[MAIN_AGENT_DELIVERY_REWORK_REQUIRED]\n"
+            "交付物仍未通过客观 closeout 检查；本轮没有新的修复工具调用，已停止继续空转。"
+        ),
+        backend=response.backend,
+    )
 
 
 # LLM: _local_progress_no_tool_call_decision gives a soft rework hint after repeated exploration without new local work.

@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from ..artifacts.registry import ArtifactRegistration, register_artifact
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
 from .tool_loop_recovery import runtime_run_id, runtime_run_scope
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
@@ -30,6 +33,7 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
     output_record["parameters"] = record.payload
     _attach_run_scope(output_record, agent, record)
     _attach_gate_and_refs(output_record, record.result)
+    _register_tool_result_artifacts(agent, output_record, record)
     return output_record
 
 
@@ -62,6 +66,55 @@ def _attach_gate_and_refs(output_record: dict[str, object], result: object) -> N
     result_envelope = _compact_result_envelope(result)
     if result_envelope:
         output_record["tool_result_envelope"] = result_envelope
+
+
+# LLM: _register_tool_result_artifacts makes tool-created files enter the run artifact registry.
+# 函数用途: write_file/apply-like 工具返回机器路径后，立即登记成 artifact_id，避免后续从文本路径猜产物。
+def _register_tool_result_artifacts(
+    agent: object,
+    output_record: dict[str, object],
+    record: ToolCallRecordParams,
+) -> None:
+    refs = output_record.get("tool_result_refs")
+    if not isinstance(refs, list):
+        return
+    scope = output_record.get("run_scope")
+    scope = scope if isinstance(scope, dict) else {}
+    workspace_root = Path(getattr(agent, "root", ".")).expanduser().resolve(strict=False)
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        path = _existing_file_ref(ref.get("path"))
+        if path is None:
+            continue
+        registered = register_artifact(
+            ArtifactRegistration(
+                workspace_root=workspace_root,
+                path=path,
+                run_id=str(scope.get("run_id") or record.params.run_id or ""),
+                task_id=str(scope.get("task_id") or record.params.task_id or ""),
+                agent_id=str(scope.get("owner_id") or scope.get("run_id") or record.params.run_id or ""),
+                kind=str(ref.get("kind") or ""),
+                source="tool_result",
+                created_by_tool=str(record.result.tool or ""),
+                metadata={"call_id": str(output_record.get("call_id") or "")},
+            )
+        )
+        ref["artifact_id"] = registered.artifact_id
+        output_record.setdefault("artifact_registry_refs", [])
+        if isinstance(output_record["artifact_registry_refs"], list):
+            output_record["artifact_registry_refs"].append(registered.to_dict())
+
+
+def _existing_file_ref(value: object) -> Path | None:
+    text = str(value or "").strip()
+    if not text or "://" in text:
+        return None
+    try:
+        path = Path(text).expanduser().resolve(strict=False)
+    except OSError:
+        return None
+    return path if path.is_file() else None
 
 
 # LLM: _attach_run_scope makes every archived tool row self-identifying.

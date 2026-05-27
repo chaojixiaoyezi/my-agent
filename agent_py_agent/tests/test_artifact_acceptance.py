@@ -3,6 +3,53 @@
 from __future__ import annotations
 
 
+def test_xlsx_acceptance_rejects_package_missing_content_types(tmp_path):
+    from zipfile import ZIP_DEFLATED, ZipFile
+
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_artifact,
+    )
+
+    path = tmp_path / "partial.xlsx"
+    with ZipFile(path, "w", ZIP_DEFLATED) as workbook:
+        workbook.writestr("xl/workbook.xml", "<workbook></workbook>")
+        workbook.writestr("xl/worksheets/sheet1.xml", "<worksheet></worksheet>")
+
+    report = validate_artifact(ArtifactAcceptanceRequest(path=path, workspace_root=tmp_path))
+
+    assert report.ok is False
+    assert {item.code for item in report.findings} == {"XLSX_INVALID_PACKAGE"}
+
+
+def test_document_quality_contract_is_advisory_not_blocking(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_artifact,
+    )
+
+    path = tmp_path / "report.md"
+    path.write_text("# Summary\n短。\n", encoding="utf-8")
+
+    report = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=path,
+            workspace_root=tmp_path,
+            validation_contract={
+                "document_quality_contract": {
+                    "required_sections": ["Summary", "Evidence"],
+                    "min_chars_per_section": 200,
+                    "min_content_units": 5,
+                }
+            },
+        )
+    )
+
+    assert report.ok is True
+    assert {item.severity for item in report.findings} == {"warning"}
+    assert "DOCUMENT_SECTION_MISSING" in {item.code for item in report.findings}
+
+
 # LLM: Generic HTML acceptance should focus on structural/resource facts, not task-specific link style rules.
 # 函数用途: 验证通用 HTML 验收不会因为 `href="#"` 这类页面实现细节直接判死，只保留通用结构和资源检查。
 def test_html_acceptance_does_not_fail_placeholder_links_by_default(tmp_path):
@@ -110,22 +157,21 @@ def test_html_acceptance_report_to_dict(tmp_path):
 # LLM: Generic artifact acceptance should route common formats through one contract.
 # 函数用途: 验证 JSON/CSV/XLSX/PDF 等常见产物不再各走各的验收入口，后续 QA 可以统一消费报告。
 def test_validate_artifact_routes_common_formats(tmp_path):
-    from zipfile import ZIP_DEFLATED, ZipFile
-
     from agent_py_agent.agent.contracts.artifact_acceptance import (
         ArtifactAcceptanceRequest,
         validate_artifact,
     )
+    from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
 
     json_path = tmp_path / "report.json"
     json_path.write_text('{"ok": true}', encoding="utf-8")
     csv_path = tmp_path / "report.csv"
     csv_path.write_text("name,value\nA,1\n", encoding="utf-8")
-    xlsx_path = tmp_path / "report.xlsx"
-    with ZipFile(xlsx_path, "w", ZIP_DEFLATED) as workbook:
-        workbook.writestr("[Content_Types].xml", "<Types></Types>")
-        workbook.writestr("xl/workbook.xml", "<workbook></workbook>")
-        workbook.writestr("xl/worksheets/sheet1.xml", "<worksheet></worksheet>")
+    xlsx_path = write_xlsx_fixture(
+        tmp_path,
+        "report.xlsx",
+        sheets=[{"name": "summary", "rows": [{"name": "A", "value": 1}]}],
+    )
     pdf_path = tmp_path / "report.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n")
 

@@ -7,7 +7,11 @@ import json
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
-from .artifact_acceptance_models import ArtifactAcceptanceReport, ArtifactFinding
+from .artifact_acceptance_models import (
+    ArtifactAcceptanceReport,
+    ArtifactFinding,
+    advisory_artifact_findings,
+)
 from .gates.document_content_quality import document_content_quality_findings
 
 
@@ -29,7 +33,7 @@ def validate_docx_artifact(
         return _report_with_finding(path, "docx", finding)
     findings = document_quality_artifact_findings(path, validation_contract, workspace_root=workspace_root or path.parent)
     return ArtifactAcceptanceReport(
-        ok=not any(item.severity == "hard" for item in findings),
+        ok=True,
         artifact_ref=str(path),
         artifact_kind="docx",
         findings=findings,
@@ -48,7 +52,7 @@ def validate_text_artifact(
         return _report_with_finding(path, "txt", ArtifactFinding("ARTIFACT_EMPTY", "hard", "Artifact is empty."))
     findings = document_quality_artifact_findings(path, validation_contract, workspace_root=workspace_root or path.parent)
     return ArtifactAcceptanceReport(
-        ok=not any(item.severity == "hard" for item in findings),
+        ok=True,
         artifact_ref=str(path),
         artifact_kind="txt",
         findings=findings,
@@ -66,7 +70,7 @@ def document_quality_artifact_findings(
     contract = _document_quality_contract(validation_contract)
     if not contract:
         return []
-    return [
+    return advisory_artifact_findings([
         ArtifactFinding(
             code=finding.code,
             severity="hard",
@@ -75,7 +79,7 @@ def document_quality_artifact_findings(
             value=json.dumps(finding.evidence, ensure_ascii=False, sort_keys=True),
         )
         for finding in document_content_quality_findings(path, workspace_root=workspace_root, contract=contract)
-    ]
+    ])
 
 
 def _document_quality_contract(validation_contract: dict[str, object] | None) -> dict[str, object]:

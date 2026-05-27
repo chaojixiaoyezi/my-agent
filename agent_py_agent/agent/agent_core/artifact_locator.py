@@ -27,6 +27,18 @@ _KIND_EXTENSIONS = {
 _DEFAULT_SEARCH_ROOTS = ("outputs", "artifacts")
 _MAX_CANDIDATES = 128
 _SAFE_EXTENSION_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]{0,63}$")
+_EXPLICIT_EXTENSION_KEYS = (
+    "preferred_extension",
+    "preferred_extensions",
+    "acceptable_extension",
+    "acceptable_extensions",
+    "accepted_extension",
+    "accepted_extensions",
+    "extension",
+    "extensions",
+    "file_extension",
+    "file_extensions",
+)
 
 
 # LLM: ArtifactLocatorResult is the structured output for locator gates.
@@ -114,7 +126,7 @@ def _candidate_paths_under_root(root_path: Path | None, extensions: tuple[str, .
 
 
 # LLM: _extensions_for_item keeps artifact types open-world.
-# 函数用途: 已知 kind 走映射优化，未知 kind/mime 可由合同扩展名或 key 本身推导。
+# 函数用途: 显式交付意图优先；已知 kind 走映射优化，未知 kind/mime 可由合同扩展名或 key 本身推导。
 def _extensions_for_item(item: dict[str, Any]) -> tuple[str, ...]:
     explicit = _explicit_extensions(item)
     if explicit:
@@ -127,7 +139,7 @@ def _extensions_for_item(item: dict[str, Any]) -> tuple[str, ...]:
 
 
 # LLM: _explicit_extensions reads caller-declared format overrides.
-# 函数用途: 允许合同/配置声明新格式扩展名，避免写死类型表成为唯一判定路径。
+# 函数用途: 允许合同/配置/LLM物化交付意图声明新格式扩展名，避免写死类型表成为唯一判定路径。
 def _explicit_extensions(item: dict[str, Any]) -> tuple[str, ...]:
     values: list[object] = []
     for holder in _extension_holders(item):
@@ -136,9 +148,12 @@ def _explicit_extensions(item: dict[str, Any]) -> tuple[str, ...]:
 
 
 # LLM: _extension_holders returns structured objects that may declare extension overrides.
-# 函数用途: 从 artifact 本身和 validation_contract 收集扩展名字段，不读取普通说明文字。
+# 函数用途: 从 artifact、artifact_intent 和 validation_contract 收集扩展名字段，不读取普通说明文字。
 def _extension_holders(item: dict[str, Any]) -> list[dict[str, Any]]:
     holders = [item]
+    intent = item.get("artifact_intent")
+    if isinstance(intent, dict):
+        holders.append(intent)
     validation = item.get("validation_contract")
     if isinstance(validation, dict):
         holders.append(validation)
@@ -146,11 +161,11 @@ def _extension_holders(item: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 # LLM: _extension_values reads every supported explicit extension key.
-# 函数用途: 支持 extension/extensions/file_extension/file_extensions 这些结构化覆盖字段。
+# 函数用途: 支持 extension/file_extensions/acceptable_extensions 等结构化覆盖字段。
 def _extension_values(holder: dict[str, Any]) -> list[object]:
     return [
         value
-        for key in ("extension", "extensions", "file_extension", "file_extensions")
+        for key in _EXPLICIT_EXTENSION_KEYS
         for value in _extension_value_items(holder.get(key))
     ]
 

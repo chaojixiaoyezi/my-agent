@@ -158,6 +158,7 @@ def _task_to_kernel_run(
         recovery_refs=_recovery_refs(task) if include_refs else {},
         tool_contract=_tool_contract(task) if include_refs else {},
         artifact_refs=list(task.artifact_refs),
+        artifact_registry_refs=_artifact_registry_refs(task),
         evidence_refs=list(task.evidence_refs),
         blockers=list(task.blockers),
         reserved=_task_reserved(task) if include_refs else {},
@@ -167,13 +168,12 @@ def _task_to_kernel_run(
 # LLM: _workspace_refs centralizes task/run workspace refs used by upper agents.
 # 函数用途: 返回任务目录、runtime task workspace 和 agent run workspace 路径引用。
 def _workspace_refs(task: SubAgentTask) -> dict[str, str]:
-    # LLM: prefer runtime task workspace while preserving legacy path for old recovery packets.
+    # LLM: prefer runtime task workspace; legacy work-order dirs stay in recovery/debug files, not model-facing status refs.
     current_task_dir = task.task_workspace_dir or task.task_dir
     refs = {
         "task_dir": current_task_dir,
         "task_workspace": task.task_workspace_dir,
         "agent_run_workspace": task.agent_run_workspace_dir,
-        "legacy_task_dir": task.task_dir if task.task_dir != current_task_dir else "",
         "shared_blackboard": task.task_workspace_shared_blackboard,
         "inbox": task.agent_run_inbox_dir,
         "outbox": task.agent_run_outbox_dir,
@@ -212,6 +212,29 @@ def _tool_contract(task: SubAgentTask) -> dict[str, object]:
             grant.id for grant in task.capability_grants if "controlled_exec" in list(getattr(grant, "tools", []) or [])
         ],
     }
+
+
+def _artifact_registry_refs(task: SubAgentTask, *, limit: int = 12) -> list[dict[str, object]]:
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    value = attrs.get("artifact_registry_refs")
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        artifact_id = str(row.get("artifact_id") or "").strip()
+        path = str(row.get("path") or "").strip()
+        key = artifact_id or path
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        rows.append(row)
+        if len(rows) >= limit:
+            break
+    return rows
 
 
 # LLM: _task_reserved carries observability-only facts that do not fit the stable kernel top-level schema yet.
@@ -288,7 +311,7 @@ def _snapshot_source_refs(tasks: list[SubAgentTask]) -> dict[str, str]:
     return {
         key: value
         for key, value in {
-            "root_task_dir": root.task_dir,
+            "root_task_dir": root.task_workspace_dir or root.task_dir,
             "root_task_workspace": root.task_workspace_dir,
             "root_agent_run_workspace": root.agent_run_workspace_dir,
         }.items()

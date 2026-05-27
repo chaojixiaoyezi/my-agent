@@ -42,6 +42,24 @@ class ArtifactFinding:
         }
 
 
+def advisory_artifact_finding(finding: ArtifactFinding) -> ArtifactFinding:
+    """Return a non-blocking copy of a quality or coverage finding."""
+
+    return ArtifactFinding(
+        code=finding.code,
+        severity="warning",
+        message=finding.message,
+        location=finding.location,
+        value=finding.value,
+    )
+
+
+def advisory_artifact_findings(findings: list[ArtifactFinding]) -> list[ArtifactFinding]:
+    """Downgrade subjective/content contract findings to closeout warnings."""
+
+    return [advisory_artifact_finding(item) for item in findings]
+
+
 # LLM: ArtifactAcceptanceReport is the refs-first outcome for one artifact validation.
 # 类用途: 保存产物验收是否通过和结构化 findings；不复制产物正文。
 @dataclass(frozen=True)
@@ -118,6 +136,8 @@ __all__ = [
     "ArtifactAcceptanceReport",
     "ArtifactAcceptanceRequest",
     "ArtifactFinding",
+    "advisory_artifact_finding",
+    "advisory_artifact_findings",
     "artifact_ref_payload",
     "kind_for_path",
 ]

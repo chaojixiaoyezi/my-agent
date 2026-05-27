@@ -83,6 +83,55 @@ def test_artifact_locator_accepts_explicit_extension_override(tmp_path):
     assert result.findings == []
 
 
+def test_artifact_locator_uses_materialized_acceptable_extensions_for_broad_kind_label(tmp_path):
+    from agent_py_agent.agent.agent_core.artifact_locator import (
+        artifact_can_be_located,
+        locate_artifact,
+    )
+
+    (tmp_path / "outputs").mkdir()
+    artifact = tmp_path / "outputs" / "bearing_mount.dxf"
+    artifact.write_text("0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n", encoding="utf-8")
+    contract = {
+        "artifact_id": "cad_drawing",
+        "kind_label": "CAD 图纸",
+        "acceptable_extensions": ["dxf", "step", "stp"],
+        "preferred_extension": "dxf",
+        "allowed_output_roots": ["outputs"],
+    }
+
+    assert artifact_can_be_located(contract) is True
+    result = locate_artifact(contract, tmp_path)
+
+    assert result.path == artifact.resolve()
+    assert result.findings == []
+
+
+def test_artifact_locator_uses_nested_artifact_intent_extensions(tmp_path):
+    from agent_py_agent.agent.agent_core.artifact_locator import locate_artifact
+
+    (tmp_path / "outputs").mkdir()
+    artifact = tmp_path / "outputs" / "assembly.step"
+    artifact.write_text("ISO-10303-21;\nEND-ISO-10303-21;\n", encoding="utf-8")
+
+    result = locate_artifact(
+        {
+            "artifact_id": "cad_model",
+            "kind": "cad",
+            "artifact_intent": {
+                "kind_label": "CAD 三维模型",
+                "acceptable_extensions": ["step", "stp", "iges"],
+                "preferred_extension": "step",
+            },
+            "allowed_output_roots": ["outputs"],
+        },
+        tmp_path,
+    )
+
+    assert result.path == artifact.resolve()
+    assert result.findings == []
+
+
 def test_delivery_closeout_uses_artifact_locator_when_path_is_not_declared(tmp_path):
     from agent_py_agent.agent.agent_core.main_agent_delivery_closeout_artifacts import (
         DeliveryContractValidationRequest,

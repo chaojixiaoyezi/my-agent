@@ -8,6 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..artifacts.registry import (
+    ArtifactRegistration,
+    ArtifactRegistryRecord,
+    register_artifact,
+    resolve_artifact_record,
+)
 from ..contracts.artifact_format_lint import lint_artifact_format
 from ..contracts.gates import artifact_provenance_from_archive
 from ..contracts.staged_checkpoint_acceptance import staged_checkpoint_findings
@@ -112,14 +118,15 @@ def _validate_artifact_item(
     run_id: str = "",
 ) -> dict[str, Any]:
     raw_path = str(item.get("preferred_path") or item.get("path") or "")
-    located = locate_artifact(item, workspace_root)
-    path = located.path
+    registry_record = _registry_record_for_item(item, workspace_root)
+    located = None if registry_record else locate_artifact(item, workspace_root)
+    path = Path(registry_record.path) if registry_record else located.path if located else None
     if path is None:
         return _path_failure(
             item,
             raw_path,
-            str(located.findings[0]["code"]) if located.findings else "ARTIFACT_PATH_INVALID",
-            locator_findings=located.findings,
+            str(located.findings[0]["code"]) if located and located.findings else "ARTIFACT_PATH_INVALID",
+            locator_findings=located.findings if located else [],
         )
     report = lint_artifact_format(
         path=path,
@@ -127,12 +134,28 @@ def _validate_artifact_item(
         validation_contract=_validation_contract(item),
     ).to_dict()
     report = _with_staged_checkpoint_findings(report, item, workspace_root)
+    registered = register_artifact(
+        ArtifactRegistration(
+            workspace_root=workspace_root,
+            path=path,
+            artifact_id=str(item.get("artifact_id") or (registry_record.artifact_id if registry_record else "")),
+            run_id=run_id,
+            task_id=str(item.get("task_id") or ""),
+            agent_id=str(item.get("agent_id") or run_id or ""),
+            kind=str(item.get("kind") or report.get("artifact_kind") or ""),
+            source="delivery_closeout",
+            created_by_tool="closeout",
+            status="ready" if bool(report.get("ok")) else "invalid",
+            metadata=_registry_validation_metadata(report),
+        )
+    )
     artifact = {
         "artifact_id": str(item.get("artifact_id") or ""),
         "kind": str(item.get("kind") or report.get("artifact_kind") or ""),
         "path": str(path),
         "ok": bool(report.get("ok")),
         "acceptance_report": report,
+        "registry_ref": registered.to_dict(),
     }
     artifact["provenance"] = artifact_provenance_from_archive(
         artifact,
@@ -141,6 +164,21 @@ def _validate_artifact_item(
         workspace_root=workspace_root,
     )
     return artifact
+
+
+def _registry_record_for_item(
+    item: dict[str, Any],
+    workspace_root: Path,
+) -> ArtifactRegistryRecord | None:
+    record = resolve_artifact_record(
+        workspace_root,
+        str(item.get("artifact_id") or ""),
+        path=str(item.get("preferred_path") or item.get("path") or ""),
+    )
+    if record is None or record.status != "ready":
+        return None
+    path = Path(record.path)
+    return record if path.is_file() else None
 
 
 # LLM: _artifact_path keeps contract paths bounded to the current workspace.
@@ -206,9 +244,7 @@ def _with_staged_checkpoint_findings(
     merged_findings.extend(_public_staged_finding(finding) for finding in staged_findings)
     updated = dict(report)
     updated["findings"] = merged_findings
-    updated["ok"] = bool(report.get("ok")) and not any(
-        str(finding.get("severity") or "hard") == "hard" for finding in staged_findings
-    )
+    updated["ok"] = bool(report.get("ok"))
     return updated
 
 
@@ -222,10 +258,24 @@ def _public_staged_finding(finding: dict[str, object]) -> dict[str, str]:
         value = json.dumps(details, ensure_ascii=False, sort_keys=True)
     return {
         "code": str(finding.get("code") or ""),
-        "severity": str(finding.get("severity") or "hard"),
+        "severity": "warning",
         "message": str(finding.get("message") or ""),
         "location": str(finding.get("location") or ""),
         "value": str(value or ""),
+    }
+
+
+def _registry_validation_metadata(report: dict[str, Any]) -> dict[str, Any]:
+    findings = report.get("findings")
+    finding_rows = [item for item in findings if isinstance(item, dict)] if isinstance(findings, list) else []
+    return {
+        "acceptance_ok": bool(report.get("ok")),
+        "finding_codes": [str(item.get("code") or "") for item in finding_rows if item.get("code")],
+        "hard_finding_codes": [
+            str(item.get("code") or "")
+            for item in finding_rows
+            if str(item.get("severity") or "") == "hard" and item.get("code")
+        ],
     }
 
 

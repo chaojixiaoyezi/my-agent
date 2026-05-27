@@ -108,6 +108,7 @@ def _main_agent_node(agent: object, nodes: list[dict[str, object]]) -> dict[str,
         "last_progress_at": last_progress_at,
         "last_progress_summary": last_progress_summary,
         "artifact_refs": [],
+        "artifact_registry_refs": [],
         "blockers": [],
         "child_run_ids": [item for item in child_run_ids if item],
         "liveness": {"status": status, "heartbeat_at": heartbeat_at, "updated_at": heartbeat_at, "has_heartbeat": bool(heartbeat_at)},
@@ -121,6 +122,7 @@ def _main_agent_node(agent: object, nodes: list[dict[str, object]]) -> dict[str,
         },
         "evidence_layer": {
             "artifact_refs": [],
+            "artifact_registry_refs": [],
             "evidence_refs": [],
             "blockers": [],
             "needs_capability": [],
@@ -149,6 +151,7 @@ def _node_ref_values(payload: dict[str, object]) -> dict[str, list[object]]:
     reserved = _dict(payload.get("reserved"))
     return {
         "artifact_refs": _list(payload.get("artifact_refs")),
+        "artifact_registry_refs": _dict_list(payload.get("artifact_registry_refs")),
         "evidence_refs": _list(payload.get("evidence_refs")),
         "blockers": _list(payload.get("blockers")),
         "needs_capability": _needs_capability(tool_contract, reserved),
@@ -191,9 +194,10 @@ def _node_identity(payload: dict[str, object]) -> dict[str, object]:
 def _node_status(payload: dict[str, object], refs: dict[str, list[object]]) -> dict[str, object]:
     return {
         "artifact_refs": refs["artifact_refs"],
+        "artifact_registry_refs": refs["artifact_registry_refs"],
         "evidence_refs": refs["evidence_refs"],
         "blockers": refs["blockers"],
-        "workspace_refs": payload.get("workspace_refs", {}),
+        "workspace_refs": _workspace_refs(payload.get("workspace_refs")),
         "recovery_refs": payload.get("recovery_refs", {}),
         "tool_contract": _dict(payload.get("tool_contract")),
         "needs_capability": refs["needs_capability"],
@@ -226,11 +230,19 @@ def _progress_layer(payload: dict[str, object]) -> dict[str, object]:
     }
 
 
+# LLM: _workspace_refs filters model-facing status refs to current runtime paths only.
+# 函数用途: inspect_agent_tree 不把旧式 task_dir 暴露给模型，避免接管时按旧布局猜路径。
+def _workspace_refs(value: object) -> dict[str, object]:
+    refs = _dict(value)
+    return {key: item for key, item in refs.items() if key not in {"legacy_task_dir", "legacy_output_json"}}
+
+
 # LLM: _evidence_layer is the read-only refs projection for one node.
 # 函数用途: 汇总产物、证据、阻塞、能力缺口和最近工具轨迹。
 def _evidence_layer(values: dict[str, list[object]]) -> dict[str, object]:
     return {
         "artifact_refs": values["artifact_refs"],
+        "artifact_registry_refs": values["artifact_registry_refs"],
         "evidence_refs": values["evidence_refs"],
         "blockers": values["blockers"],
         "needs_capability": values["needs_capability"],
@@ -286,6 +298,12 @@ def _dict(value: object) -> dict[str, object]:
 # 函数用途: 非 list 值统一视为空列表。
 def _list(value: object) -> list:
     return list(value) if isinstance(value, list) else []
+
+
+def _dict_list(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
 
 
 # LLM: _needs_capability derives capability hints from structured kernel facts.

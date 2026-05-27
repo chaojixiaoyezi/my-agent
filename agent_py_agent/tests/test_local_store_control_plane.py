@@ -310,6 +310,12 @@ def test_subagent_save_overwrites_model_written_system_tree_snapshot(tmp_path) -
     child.verification_status = "VERIFIED"
     child.artifact_refs = [str(tmp_path / "artifact.md")]
     child.evidence_refs = [str(tmp_path / "evidence.json")]
+    registry_record = {
+        "artifact_id": "artifact-child-1",
+        "path": str(tmp_path / "artifact.md"),
+        "status": "ready",
+    }
+    child.attributes["artifact_registry_refs"] = [registry_record]
     child.attributes["system_tree"] = {
         "updated_by": "model",
         "parent_id": "fake-parent",
@@ -332,6 +338,8 @@ def test_subagent_save_overwrites_model_written_system_tree_snapshot(tmp_path) -
     assert tree["status"] == "DONE"
     assert tree["verification_status"] == "VERIFIED"
     assert tree["artifact_refs"] == [str(tmp_path / "artifact.md")]
+    assert tree["artifact_registry_refs"] == [registry_record]
     assert tree["evidence_refs"] == [str(tmp_path / "evidence.json")]
     assert child_node.parent_run_id == parent.id
     assert child_node.status == "DONE"
+    assert child_node.artifact_registry_refs == [registry_record]

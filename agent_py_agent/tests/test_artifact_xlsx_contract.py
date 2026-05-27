@@ -34,9 +34,9 @@ def test_xlsx_acceptance_checks_required_columns_and_sheet_count(tmp_path: Path)
     assert report.ok, report.to_dict()
 
 
-# LLM: xlsx acceptance should reject workbook packages that lack declared schema fields.
-# 函数用途: 验证缺少必需列时返回稳定 finding，避免错表通过真实 E2E。
-def test_xlsx_acceptance_rejects_missing_required_columns(tmp_path: Path) -> None:
+# LLM: xlsx acceptance should report workbook packages that lack declared schema fields without blocking objective closeout.
+# 函数用途: 验证缺少必需列时返回稳定 warning，避免质量问题变成系统硬挡。
+def test_xlsx_acceptance_warns_missing_required_columns(tmp_path: Path) -> None:
     write_xlsx_fixture(tmp_path, 
         {
             "path": "report.xlsx",
@@ -55,14 +55,15 @@ def test_xlsx_acceptance_rejects_missing_required_columns(tmp_path: Path) -> Non
     )
     codes = {finding.code for finding in report.findings}
 
-    assert not report.ok
+    assert report.ok
     assert "XLSX_TOO_FEW_SHEETS" in codes
     assert "XLSX_MISSING_REQUIRED_COLUMNS" in codes
+    assert {finding.severity for finding in report.findings} == {"warning"}
 
 
-# LLM: Required spreadsheet columns are value contracts, not only header labels.
-# 函数用途: 验证 xlsx 里必填列存在但数据行为空时不能通过机器验收。
-def test_xlsx_acceptance_rejects_blank_required_column_values(tmp_path: Path) -> None:
+# LLM: Required spreadsheet columns are value contracts, but they should be advisory at final closeout.
+# 函数用途: 验证 xlsx 里必填列存在但数据行为空时给 warning，不粗暴终止任务。
+def test_xlsx_acceptance_warns_blank_required_column_values(tmp_path: Path) -> None:
     write_xlsx_fixture(tmp_path, 
         {
             "path": "report.xlsx",
@@ -86,13 +87,14 @@ def test_xlsx_acceptance_rejects_blank_required_column_values(tmp_path: Path) ->
     )
     codes = {finding.code for finding in report.findings}
 
-    assert not report.ok
+    assert report.ok
     assert "XLSX_REQUIRED_COLUMN_EMPTY_VALUES" in codes
+    assert {finding.severity for finding in report.findings} == {"warning"}
 
 
-# LLM: Workbook acceptance must reject fact tables whose source JSON has no machine evidence refs.
-# 函数用途: 验证 xlsx 即使生成成功，只要 staging source 缺结构化来源证据，也不能通过机器验收。
-def test_xlsx_acceptance_rejects_unsourced_staged_source_json(tmp_path: Path) -> None:
+# LLM: Workbook acceptance must surface source JSON evidence gaps without turning them into objective format failures.
+# 函数用途: 验证 xlsx 生成成功时，来源证据缺口只作为 warning 反馈给模型/人工。
+def test_xlsx_acceptance_warns_unsourced_staged_source_json(tmp_path: Path) -> None:
     source = tmp_path / "source_data.json"
     source.write_text(
         """
@@ -127,8 +129,9 @@ def test_xlsx_acceptance_rejects_unsourced_staged_source_json(tmp_path: Path) ->
     )
 
     codes = {finding.code for finding in report.findings}
-    assert not report.ok
+    assert report.ok
     assert "EVIDENCE_REQUIRED_FIELD_MISSING" in codes
+    assert {finding.severity for finding in report.findings} == {"warning"}
 
 
 # LLM: Staged source JSON should reject blank required cell values before the workbook builder runs.

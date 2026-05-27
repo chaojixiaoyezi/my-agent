@@ -11,7 +11,18 @@ SCHEMA_VERSION = "delivery_contract.v1"
 DOCTOR_SCHEMA_VERSION = "delivery_contract_doctor.v1"
 _ARTIFACT_PATH_KEYS = ("preferred_path", "path")
 _ROOT_LIST_KEYS = ("allowed_output_roots", "search_roots", "artifact_roots")
-_EXTENSION_KEYS = ("extension", "extensions", "file_extension", "file_extensions")
+_EXTENSION_KEYS = (
+    "preferred_extension",
+    "preferred_extensions",
+    "acceptable_extension",
+    "acceptable_extensions",
+    "accepted_extension",
+    "accepted_extensions",
+    "extension",
+    "extensions",
+    "file_extension",
+    "file_extensions",
+)
 
 
 # LLM: ContractFinding is the stable machine finding shape for contract doctor checks.
@@ -133,9 +144,11 @@ def _validate_artifact_contract(
     kind = str(artifact.get("kind") or "").strip().lower()
     if kind:
         normalized["kind"] = kind
-    if not _has_explicit_path(artifact) and not kind:
+    if not _has_explicit_path(artifact) and not kind and not _has_extension_intent(artifact):
         findings.append(_finding("DELIVERY_CONTRACT_ARTIFACT_TARGET_UNDECLARED", "hard", location))
     findings.extend(_validate_root_lists(artifact, location))
+    findings.extend(_validate_extension_fields(artifact, location))
+    findings.extend(_validate_artifact_intent(artifact.get("artifact_intent"), location))
     findings.extend(_validate_validation_contract(artifact.get("validation_contract"), location))
     findings.extend(_path_findings(artifact, workspace_root, location))
     return normalized, findings
@@ -170,6 +183,26 @@ def _validate_root_lists(artifact: dict[str, Any], location: str) -> list[Contra
     for key in _ROOT_LIST_KEYS:
         if key in artifact and not _string_list(artifact.get(key)):
             findings.append(_finding("DELIVERY_CONTRACT_ROOTS_INVALID", "hard", f"{location}.{key}"))
+    return findings
+
+
+def _validate_extension_fields(artifact: dict[str, Any], location: str) -> list[ContractFinding]:
+    findings: list[ContractFinding] = []
+    for key in _EXTENSION_KEYS:
+        if key in artifact and not _extension_value(artifact.get(key)):
+            findings.append(_finding("DELIVERY_CONTRACT_EXTENSION_INVALID", "hard", f"{location}.{key}"))
+    return findings
+
+
+def _validate_artifact_intent(value: object, location: str) -> list[ContractFinding]:
+    if value is None:
+        return []
+    if not isinstance(value, dict):
+        return [_finding("DELIVERY_CONTRACT_ARTIFACT_INTENT_INVALID", "hard", f"{location}.artifact_intent", value=type(value).__name__)]
+    findings: list[ContractFinding] = []
+    for key in _EXTENSION_KEYS:
+        if key in value and not _extension_value(value.get(key)):
+            findings.append(_finding("DELIVERY_CONTRACT_ARTIFACT_INTENT_EXTENSION_INVALID", "hard", f"{location}.artifact_intent.{key}"))
     return findings
 
 
@@ -232,6 +265,13 @@ def _rematerialize_action(findings: list[ContractFinding]) -> dict[str, object]:
 # 函数用途: 判断 artifact 是否声明了 path/preferred_path，开放世界 kind 可作为另一种合法定位方式。
 def _has_explicit_path(artifact: dict[str, Any]) -> bool:
     return any(str(artifact.get(key) or "").strip() for key in _ARTIFACT_PATH_KEYS)
+
+
+def _has_extension_intent(artifact: dict[str, Any]) -> bool:
+    if any(_extension_value(artifact.get(key)) for key in _EXTENSION_KEYS if key in artifact):
+        return True
+    intent = artifact.get("artifact_intent")
+    return isinstance(intent, dict) and any(_extension_value(intent.get(key)) for key in _EXTENSION_KEYS if key in intent)
 
 
 # LLM: _string_list validates schema fields without a closed enum of allowed values.

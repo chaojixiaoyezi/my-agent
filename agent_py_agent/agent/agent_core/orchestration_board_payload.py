@@ -180,6 +180,7 @@ def _kernel_row_payload(row: object) -> dict[str, object]:
         "recovery_refs": dict(row.recovery_refs),
         "tool_contract": dict(row.tool_contract),
         "artifact_refs": list(row.artifact_refs),
+        "artifact_registry_refs": list(row.artifact_registry_refs),
         "evidence_refs": list(row.evidence_refs),
         "blockers": list(row.blockers),
     }

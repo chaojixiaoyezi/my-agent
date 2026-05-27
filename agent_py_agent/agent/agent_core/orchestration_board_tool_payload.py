@@ -39,14 +39,14 @@ def board_payload_item(item: object) -> dict[str, object]:
         "latest_summary": clip_board_text(str(getattr(item, "latest_summary", "") or ""), limit=180),
         "blocker_count": int(getattr(item, "blocker_count", 0) or 0),
         "target_tokens": list(getattr(item, "target_tokens", []) or []),
-        "artifact_refs": item_ref_preview(item, "artifact_refs"),
+        "artifact_ids": item_registry_ids(item),
+        "artifact_refs": item_artifact_refs(item),
+        "artifact_registry_refs": item_registry_preview(item),
         "evidence_refs": item_ref_preview(item, "evidence_refs"),
         "workspace_refs": _item_workspace_refs(item),
         "recovery_refs": _item_recovery_refs(item),
         "task_dir": item.task_dir,
         "output_json": str(getattr(item, "output_json", "") or ""),
-        "legacy_task_dir": _text_attr(item, "legacy_task_dir"),
-        "legacy_output_json": _text_attr(item, "legacy_output_json"),
     }
 
 
@@ -62,12 +62,13 @@ def board_child_result_index(items: list[object], *, limit: int = 20) -> list[di
             "status": str(getattr(item, "status", "") or ""),
             "verification_status": str(getattr(item, "verification_status", "") or ""),
             "summary": clip_board_text(str(getattr(item, "latest_summary", "") or ""), limit=220),
-            "artifact_refs": item_ref_preview(item, "artifact_refs", limit=3),
+            "artifact_ids": item_registry_ids(item, limit=3),
+            "artifact_refs": item_artifact_refs(item, limit=3),
+            "artifact_registry_refs": item_registry_preview(item, limit=3),
             "evidence_refs": item_ref_preview(item, "evidence_refs", limit=3),
             "workspace_refs": _item_workspace_refs(item),
             "recovery_refs": _item_recovery_refs(item),
             "output_json": str(getattr(item, "output_json", "") or ""),
-            "legacy_output_json": _text_attr(item, "legacy_output_json"),
         })
     return rows
 
@@ -78,7 +79,17 @@ def board_ref_preview(items: list[object], attr: str, *, limit: int = 20) -> lis
     refs: list[str] = []
     seen: set[str] = set()
     for item in items:
-        if _append_unique_refs(refs, seen, item_ref_preview(item, attr, limit=limit), limit):
+        item_refs = item_artifact_refs(item, limit=limit) if attr == "artifact_refs" else item_ref_preview(item, attr, limit=limit)
+        if _append_unique_refs(refs, seen, item_refs, limit):
+            return refs
+    return refs
+
+
+def board_artifact_id_preview(items: list[object], *, limit: int = 20) -> list[str]:
+    refs: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if _append_unique_refs(refs, seen, item_registry_ids(item, limit=limit), limit):
             return refs
     return refs
 
@@ -115,6 +126,57 @@ def item_ref_preview(item: object, attr: str, *, limit: int = 8) -> list[str]:
     return refs
 
 
+def item_artifact_refs(item: object, *, limit: int = 8) -> list[str]:
+    registry_paths = [
+        str(row.get("path") or "").strip()
+        for row in item_registry_preview(item, limit=limit)
+        if str(row.get("path") or "").strip()
+    ]
+    if registry_paths:
+        return _unique_strings(registry_paths)[:limit]
+    return item_ref_preview(item, "artifact_refs", limit=limit)
+
+
+def item_registry_ids(item: object, *, limit: int = 8) -> list[str]:
+    ids = [
+        str(row.get("artifact_id") or "").strip()
+        for row in item_registry_preview(item, limit=limit)
+        if str(row.get("artifact_id") or "").strip()
+    ]
+    return _unique_strings(ids)[:limit]
+
+
+def item_registry_preview(item: object, *, limit: int = 8) -> list[dict[str, object]]:
+    value = getattr(item, "artifact_registry_refs", None)
+    if not isinstance(value, list | tuple):
+        return []
+    rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item_ref in value:
+        if not isinstance(item_ref, dict):
+            continue
+        row = dict(item_ref)
+        artifact_id = str(row.get("artifact_id") or "").strip()
+        path = str(row.get("path") or "").strip()
+        key = artifact_id or path
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        rows.append(row)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
 # LLM: _item_workspace_refs makes current runtime refs explicit so parent agents stop guessing legacy paths.
 # 函数用途: 给看板条目展示当前 task workspace 和 agent run workspace；旧目录只留 legacy 字段。
 def _item_workspace_refs(item: object) -> dict[str, str]:
@@ -122,7 +184,6 @@ def _item_workspace_refs(item: object) -> dict[str, str]:
     refs = {
         "task_workspace": task_workspace,
         "agent_run_workspace": _text_attr(item, "agent_run_workspace"),
-        "legacy_task_dir": _text_attr(item, "legacy_task_dir"),
     }
     return {key: value for key, value in refs.items() if value}
 

@@ -300,11 +300,17 @@
 
 阶段 3：标准合同测试套件。新增 `tests/support/delivery_contract_suite.py`，复用同一组合同用例测试 artifacts 类型错误、未知格式显式扩展、路径越界和版本漂移，避免每个入口散写一套。
 
+阶段 3 补充：交付意图与开放格式。`artifact_locator.py` 不再试图靠底层行业知识理解“CAD 图纸、视频、文档”等大类。入口物化器需要把这类大类转成结构化交付意图：`kind_label` 只保存用户可读标签，真正用于定位的是 `file_extensions`、`acceptable_extensions`、`preferred_extension`、`artifact_intent.acceptable_extensions` 或 `mime_type`。locator 的优先级是：显式路径 -> 显式扩展名/交付意图 -> 少量已知别名优化 -> MIME 或未知明确后缀的开放兜底。这样 `spreadsheet` 可以作为表格族优化，但新格式不需要改代码；同时 “CAD 图纸” 不会被底层误解成必须寻找 `.cad`。参考 通道运行时、长期助手、会话运行时、工具运行时、终端交互、轻量运行时 后，这个方向与它们一致：扩展名/MIME 表只用于媒体、二进制检测、图像 provider、UI 图标等局部工具能力，不作为通用交付产物的唯一硬判定。
+
 阶段 4：韧性层。新增 `registry_resilience.py`，只读工具失败可有限重试；大输出会归档到 `.agent_tool_outputs/` 并给模型短摘要和 artifact ref；mutating/dangerous 工具仍必须先通过幂等、审批、路径等入口门。
 
 阶段 5：入口合同门接主运行链路。`registry_execution.py` 的真实工具入口已接入韧性层；delivery closeout 已接入 Doctor，合同结构失败走返工循环，不再静默跳过或假完成。
 
 阶段 6：非真实环境补测。新增 focused tests 覆盖 Doctor、工具韧性、物化器接线、closeout 接线，并回归 bootstrap、repair、collection、staged writer 等现有入口门。当前仍坚持：真实任务只做最终收口，日常开发以离线合同、fake tool、fake model 和 replay 为主。
+
+阶段 6 补充：子代理状态面路径收敛。`subagent_board` 和 `inspect_agent_tree` 这类模型可见状态工具只暴露当前 task workspace、agent run workspace、artifact refs、recovery refs，不再把旧式 work-order 目录作为主路径字段返回。旧路径仍可留在兼容恢复文件中供系统迁移使用，但不能作为父代理接管/读取产物时的默认候选，避免模型从 `data/subagents/<run_id>/...` 这类旧布局误读到不存在路径。
+
+阶段 6 补充：路径不存在恢复。参考 工具运行时/终端交互/长期助手 的 file read / grep / glob 行为，缺失路径应返回可行动候选，而不是只抛“不存在”。`read_file`、`list_files`、`search_text` 现在共享同一层 `path_not_found` 恢复面：候选只从允许的 workspace roots 中找，结果包含 `candidate_paths` 和建议动作；系统不会自动读取候选，也不会因为路径缺失终止任务。通道运行时 的路径边界经验也保留：越界、symlink 逃逸和权限问题仍走边界错误，不能被包装成普通缺文件。
 
 ### Delivery Quality Gate 阶段 0-6
 
@@ -1047,6 +1053,13 @@ git diff --check
 - 同题结果：长期助手 用同一 MiniMax 模型完成 `lab_outputs/main-web-app` 的 4 个文件。
 - 我们的静态验收器结果：`OUR_STATIC_VALIDATOR=PASS`，artifact integrity `ok=True`。
 - 对照观察：长期助手 产物本轮通过，主要靠模型一次性写出完整文件并主动用工具检查引用；它的 `write_file` 对 HTML 显示 `lint skipped`，所以我们仍需要把 HTML 完整性放到自己的工具提交边界，而不是只学习 prompt 或最终回复。
+
+### 2026-05-28 最终产物客观验收纠偏
+
+- 真实任务里出现过 XLSX 先生成成功、后续修复脚本原地覆盖成坏 zip 包的情况。新的底线是：最终交付物必须先过客观格式验证，再进入 registry 的 `ready` 状态；坏候选只能登记为 `invalid`，不能被父代理、tree、closeout 或最终汇报当成事实。
+- `write_file` 对常见二进制交付物采用“临时文件 -> 真实 reader / 签名验证 -> 原子替换”的路径。以 XLSX 为例，必须有 `[Content_Types].xml`、workbook、worksheet，并能被 `openpyxl` 打开；失败时保留原文件。
+- closeout 只硬挡客观错误：缺文件、越界、空文件、格式打不开、工具/registry 明确失败。内容厚度、来源覆盖、证据充分性、字段质量、中文推荐理由好坏等仍会写进 finding，但统一是 `warning`，交给模型自检和返工，不再制造新硬门。
+- 这次纠偏保留开放世界原则：未知格式继续走存在性、非空和已知签名检查；不会因为没有内置枚举就拒绝用户要求的新产物类型。
 
 ### 第 6 步：真实问题沉淀为离线回归
 

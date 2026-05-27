@@ -226,6 +226,7 @@ def _refresh_system_tree_snapshot(task: SubAgentTask) -> None:
         "latest_summary": task.latest_summary,
         "child_ids": _unique_strings(list(task.child_ids)),
         "artifact_refs": _unique_strings(list(task.artifact_refs)),
+        "artifact_registry_refs": _registry_records(attrs.get("artifact_registry_refs")),
         "evidence_refs": _unique_strings(list(task.evidence_refs)),
         "blockers": _unique_strings(list(task.blockers)),
         "updated_at": _safe_float(task.updated_at or task.heartbeat_at or task.created_at),
@@ -251,3 +252,24 @@ def _safe_float(value: object, default: float = 0.0) -> float:
 # 函数用途: 合并 child_ids 时保留首次出现顺序，避免重复链接污染 board 和控制面展示。
 def _unique_strings(values: list[str]) -> list[str]:
     return list(dict.fromkeys(item for item in values if item))
+
+
+def _registry_records(value: object, *, limit: int = 12) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        artifact_id = str(row.get("artifact_id") or "").strip()
+        path = str(row.get("path") or "").strip()
+        key = artifact_id or path
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        rows.append(row)
+        if len(rows) >= limit:
+            break
+    return rows

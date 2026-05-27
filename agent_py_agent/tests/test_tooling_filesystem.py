@@ -258,7 +258,8 @@ class TestReadFileTool:
         result = tool.execute({"path": "outputs/report.html"})
 
         assert result.ok is False
-        assert result.result_envelope == {}
+        assert result.result_envelope["path_not_found"] is True
+        assert result.result_envelope["candidate_paths"] == []
         assert "文件不存在" in result.output
 
     def test_read_file_with_line_range(self, tmp_path: Path):

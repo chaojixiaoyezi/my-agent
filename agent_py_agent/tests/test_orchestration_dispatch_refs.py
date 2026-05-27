@@ -8,7 +8,10 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.orchestration_dispatch_refs import related_task_result_refs
+from agent_py_agent.agent.agent_core.orchestration_dispatch_refs import (
+    related_task_refs,
+    related_task_result_refs,
+)
 
 
 # LLM: test_related_task_result_refs_uses_direct_runs_only protects parent handoff shape.
@@ -78,6 +81,73 @@ def test_related_task_result_refs_recovers_output_artifact_summaries(tmp_path):
     }]
 
 
+# LLM: registry records are the parent-facing source of truth when they exist.
+# 函数用途: 子代理移动/重建产物后，父级 result refs 应优先拿 registry 的 artifact_id/path，而不是旧 task.artifact_refs。
+def test_related_task_result_refs_prefers_registry_over_stale_task_ref(tmp_path):
+    stale = tmp_path / "old" / "report.xlsx"
+    current = tmp_path / "current" / "report.xlsx"
+    registry_record = {
+        "artifact_id": "artifact-report-1",
+        "path": str(current),
+        "kind": "xlsx",
+        "status": "ready",
+    }
+    tasks = {
+        "child-1": SimpleNamespace(
+            id="child-1",
+            agent_name="小傻妞-周报",
+            role="worker",
+            status="DONE",
+            verification_status="VERIFIED",
+            latest_summary="汇总表已生成",
+            result="",
+            artifact_refs=[str(stale)],
+            evidence_refs=[],
+            output_json="",
+            runner_result_json="",
+            attributes={"artifact_registry_refs": [registry_record]},
+        ),
+    }
+    agent = SimpleNamespace(subagents=SimpleNamespace(load=lambda run_id: tasks[run_id]))
+    dispatch_report = SimpleNamespace(records=[SimpleNamespace(run_id="child-1", runner_created_child_ids=[])])
+
+    refs = related_task_result_refs(agent, dispatch_report, per_run_artifact_limit=2)
+
+    assert refs[0]["primary_artifact_ids"] == ["artifact-report-1"]
+    assert refs[0]["primary_artifact_refs"] == [str(current)]
+    assert refs[0]["primary_artifact_registry_refs"] == [registry_record]
+
+
+# LLM: Flat deliverable refs should also follow the registry when it exists.
+# 函数用途: dispatch 顶层 deliverable_artifact_refs 不能再把模型写过的旧路径当最终事实。
+def test_related_task_refs_prefers_registry_for_artifact_refs(tmp_path):
+    stale = tmp_path / "old" / "report.xlsx"
+    current = tmp_path / "current" / "report.xlsx"
+    tasks = {
+        "child-1": SimpleNamespace(
+            id="child-1",
+            artifact_refs=[str(stale)],
+            evidence_refs=[],
+            output_json="",
+            attributes={
+                "artifact_registry_refs": [
+                    {
+                        "artifact_id": "artifact-report-1",
+                        "path": str(current),
+                        "status": "ready",
+                    },
+                ],
+            },
+        ),
+    }
+    agent = SimpleNamespace(subagents=SimpleNamespace(load=lambda run_id: tasks[run_id]))
+    report = SimpleNamespace(records=[SimpleNamespace(run_id="child-1", runner_created_child_ids=[])])
+
+    refs = related_task_refs(agent, report, "artifact_refs", limit=2)
+
+    assert refs == [str(current)]
+
+
 # LLM: _direct_child_task keeps the direct child fixture small and readable.
 # 函数用途: 构造带 artifact/evidence/output refs 的直接子代理 task，验证父级只看直接 run。
 def _direct_child_task(artifacts: list[str]) -> SimpleNamespace:
@@ -93,6 +163,7 @@ def _direct_child_task(artifacts: list[str]) -> SimpleNamespace:
         evidence_refs=["/tmp/market/output.json"],
         output_json="/tmp/market/output.json",
         runner_result_json="/tmp/market/runner_result.json",
+        attributes={},
     )
 
 
@@ -111,6 +182,7 @@ def _grandchild_task() -> SimpleNamespace:
         evidence_refs=[],
         output_json="/tmp/grandchild/output.json",
         runner_result_json="/tmp/grandchild/runner_result.json",
+        attributes={},
     )
 
 
@@ -130,7 +202,9 @@ def _expected_child_row() -> dict[str, object]:
         "status": "DONE",
         "verification_status": "VERIFIED",
         "summary": "市场报告完成",
+        "primary_artifact_ids": [],
         "primary_artifact_refs": ["/tmp/market/final.md"],
+        "primary_artifact_registry_refs": [],
         "primary_artifact_summaries": [],
         "evidence_refs": ["/tmp/market/output.json"],
         "output_json": "/tmp/market/output.json",

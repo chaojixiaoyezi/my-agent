@@ -51,6 +51,8 @@ class SubAgentBoardItem:
     target_tokens: list[str] = field(default_factory=list)
     # LLM: artifact refs make completed work directly recoverable from board rows without path guessing.
     artifact_refs: list[str] = field(default_factory=list)
+    # LLM: artifact registry refs are the machine ledger records behind artifact_refs.
+    artifact_registry_refs: list[dict[str, object]] = field(default_factory=list)
     # LLM: evidence refs keep verification/supporting facts visible without expanding artifact bodies.
     evidence_refs: list[str] = field(default_factory=list)
     # LLM: board rows expose task-tree evidence and child state without reading logs.

@@ -6,9 +6,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ..artifacts.registry import ArtifactRegistration, register_artifact
 from .models import EvidencePacket, SubAgentTask
 from .result_artifact_roots import artifact_candidate_roots, artifact_suffix_roots
 from .utils import _merge_list, _new_id
+from .workspace_roots import derived_workspace_roots_from_subagent_path
 
 
 # LLM: artifact_ref extracts artifact pointers without expanding large files.
@@ -24,6 +26,7 @@ def normalize_artifact_items(task: SubAgentTask, artifacts: list[dict[str, objec
     for item in artifacts:
         copied = _normalized_artifact_item(task, item)
         if copied is not None:
+            copied = _with_registry_ref(task, copied)
             normalized.append(copied)
     return normalized
 
@@ -40,6 +43,61 @@ def _normalized_artifact_item(task: SubAgentTask, item: object) -> dict[str, obj
             copied[key] = resolved
             break
     return copied
+
+
+# LLM: _with_registry_ref makes parsed runner artifacts point to the unified run artifact registry.
+# 函数用途: 只登记真实存在的本地产物；模型文本路径只是候选，登记结果才是父级读取依据。
+def _with_registry_ref(task: SubAgentTask, item: dict[str, object]) -> dict[str, object]:
+    ref = artifact_ref(item)
+    path = _existing_local_path(ref)
+    root = _registry_workspace_root(task, path)
+    if path is None or root is None:
+        return item
+    registered = register_artifact(
+        ArtifactRegistration(
+            workspace_root=root,
+            path=path,
+            artifact_id=str(item.get("artifact_id") or item.get("id") or ""),
+            run_id=str(getattr(task, "id", "") or ""),
+            task_id=str(getattr(task, "root_id", "") or getattr(task, "id", "") or ""),
+            agent_id=str(getattr(task, "id", "") or ""),
+            kind=str(item.get("kind") or ""),
+            source="subagent_result",
+            created_by_tool="subagent_runner",
+        )
+    )
+    _append_task_registry_ref(task, registered.to_dict())
+    return {**item, "artifact_id": registered.artifact_id, "registry_ref": registered.to_dict()}
+
+
+def _append_task_registry_ref(task: SubAgentTask, record: dict[str, object]) -> None:
+    raw_attrs = getattr(task, "attributes", {})
+    attrs = dict(raw_attrs) if isinstance(raw_attrs, dict) else {}
+    refs = attrs.get("artifact_registry_refs")
+    rows = [item for item in refs if isinstance(item, dict)] if isinstance(refs, list) else []
+    artifact_id = str(record.get("artifact_id") or "")
+    rows = [item for item in rows if str(item.get("artifact_id") or "") != artifact_id]
+    rows.append(record)
+    attrs["artifact_registry_refs"] = rows
+    task.attributes = attrs
+
+
+def _registry_workspace_root(task: SubAgentTask, path: Path | None) -> Path | None:
+    candidates: list[Path] = []
+    for value in (
+        getattr(task, "task_dir", ""),
+        getattr(task, "agent_run_workspace_dir", ""),
+        getattr(task, "task_workspace_dir", ""),
+        path or "",
+    ):
+        candidates.extend(derived_workspace_roots_from_subagent_path(Path(str(value)).expanduser()))
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+    task_dir = _existing_local_path(getattr(task, "task_dir", ""))
+    if task_dir is not None:
+        return task_dir if task_dir.is_dir() else task_dir.parent
+    return path.parent if path is not None else None
 
 
 # LLM: normalize_artifact_ref resolves local artifact refs without reading file bodies or trusting arbitrary paths.

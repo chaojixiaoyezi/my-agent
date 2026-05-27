@@ -130,9 +130,9 @@ def test_artifact_format_lint_reuses_existing_format_validators(tmp_path: Path) 
     assert [finding.code for finding in report.findings] == ["JSON_INVALID"]
 
 
-# LLM: Closeout must consume the unified lint path so V3 gates protect real delivery, not only direct tests.
-# 函数用途: 验证交付收口入口会把 document_quality_contract 失败转成机器 finding，驱动通用返工。
-def test_closeout_artifact_validation_uses_v3_document_quality(tmp_path: Path) -> None:
+# LLM: Closeout must consume the unified lint path while keeping subjective document quality advisory.
+# 函数用途: 验证交付收口入口会保留 document_quality_contract finding，但不把内容质量变成硬失败。
+def test_closeout_artifact_validation_reports_v3_document_quality_as_warning(tmp_path: Path) -> None:
     report = tmp_path / "handoff.md"
     report.write_text("# 摘要\n很好。\n\n# 结果\n待补充\n", encoding="utf-8")
 
@@ -154,7 +154,8 @@ def test_closeout_artifact_validation_uses_v3_document_quality(tmp_path: Path) -
         run_id="run-closeout",
     )
 
-    assert artifact["ok"] is False
+    assert artifact["ok"] is True
     codes = [finding["code"] for finding in artifact["acceptance_report"]["findings"]]
     assert "DOCUMENT_SECTION_TOO_THIN" in codes
     assert "DOCUMENT_PLACEHOLDER_RATIO_EXCEEDED" in codes
+    assert {finding["severity"] for finding in artifact["acceptance_report"]["findings"]} == {"warning"}

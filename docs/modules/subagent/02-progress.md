@@ -31,3 +31,24 @@
 - runner 工具观测会把最近 5 条工具调用摘要写入任务 `attributes.recent_tool_trace`。它只记录工具名、是否成功、时间、摘要和可选路径，不保存大正文。
 - `inspect_agent_tree` 会把这些摘要放进节点的 `recent_tool_trace` 和 `evidence_layer.recent_tool_trace`。父代理可以据此判断子代理是否还在真实推进，而不用读取完整模型对话或大产物。
 - 这不是新门，也不改变任务状态；工具失败、产物缺失和返工仍由普通状态、blockers、refs 和 closeout 处理。
+
+## 2026-05-28 模型可见路径收敛
+
+- `inspect_agent_tree` 和 `subagent_board` 的模型可见输出只暴露当前 `task_workspace`、`agent_run_workspace`、artifact refs、evidence refs 和 recovery refs。
+- 旧式 work-order 目录仍留在兼容恢复文件中，但不再作为状态面主路径返回，避免父代理接管时按 `data/subagents/<run_id>/...` 猜旧路径。
+- 父级读取子代理结果时，应优先用 `agent_run_workspace`、`final_report_ref`、`artifact_refs` 和 `evidence_refs`，不要自己拼子代理目录。
+- 如果模型仍然拿旧路径或抄错路径去读，`read_file/list_files/search_text`
+  会返回 `path_not_found=true`、`candidate_paths` 和下一步建议；这只是恢复提示，
+  不会自动读取候选、不会申请新权限，也不会把任务改成失败。
+
+## 2026-05-28 Artifact Registry 收敛
+
+- 新增统一 artifact registry，产物登记后得到 `artifact_id`。同一产物移动、
+  重建或修复时更新同一个 `artifact_id` 的最新记录。
+- `write_file` 等工具结果会暴露机器路径，工具归档会把真实存在的输出文件登记进
+  registry；子代理结构化结果里的 `artifacts/file_path/output_path` 也会登记。
+- `dispatch_subagents`、`subagent_board`、`inspect_agent_tree` 和 closeout
+  都优先返回 registry 的 `artifact_id/path/registry_ref`。旧路径字段还保留，
+  但只作为兼容投影。
+- 这不是新硬门。registry 只解决“谁是最新产物事实”的问题；缺产物、坏格式和内容质量
+  仍由普通 closeout 或父级模型根据任务目标处理。

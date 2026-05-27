@@ -15,6 +15,7 @@ from .orchestration_board_payload import (
     board_kernel_snapshot_payload,
 )
 from .orchestration_board_tool_payload import (
+    board_artifact_id_preview,
     board_child_result_index,
     board_items_for_payload,
     board_payload_item,
@@ -48,6 +49,7 @@ class SubagentBoardTool(BaseTool):
             "returned": len(items),
             "actionable_run_ids": board_actionable_run_ids(items),
             "child_result_index": board_child_result_index(items),
+            "deliverable_artifact_ids": board_artifact_id_preview(items),
             "deliverable_artifact_refs": board_ref_preview(items, "artifact_refs"),
             "deliverable_evidence_refs": board_ref_preview(items, "evidence_refs"),
             "subagent_workspace": str(self.agent.subagents.workspace),

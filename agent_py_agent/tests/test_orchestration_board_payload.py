@@ -35,6 +35,7 @@ def _board_item(run_id: str, status: str):
     item.blocker_count = 0
     item.target_tokens = []
     item.artifact_refs = []
+    item.artifact_registry_refs = []
     item.evidence_refs = []
     item.task_dir = f"/tmp/{run_id}"
     item.output_json = f"/tmp/{run_id}/output.json"
@@ -124,6 +125,65 @@ def test_board_payload_includes_deliverable_refs_for_completed_children():
     assert '"deliverable_evidence_refs": [' in result.output
     assert '"/tmp/site/evidence.json"' in result.output
     assert '"artifact_refs": [' in result.output
+
+
+# LLM: Board payload should expose registry-backed artifact facts when available.
+# 函数用途: subagent_board 顶层、条目和 child_result_index 都应优先给 artifact_id/path 账本，而不是只给旧路径。
+def test_board_payload_includes_artifact_registry_refs_for_completed_children():
+    from agent_py_agent.agent.agent_core.orchestration_tools import SubagentBoardTool
+
+    registry_record = {
+        "artifact_id": "artifact-report-1",
+        "path": "/tmp/site/final_report.md",
+        "kind": "markdown",
+        "status": "ready",
+    }
+    mock_agent = MagicMock()
+    mock_agent.subagents.workspace = Path("/tmp/workspace")
+    mock_board = MagicMock()
+    mock_board.summary = {"total": 1, "DONE": 1, "VERIFIED": 1}
+    item = _board_item("run_1", "DONE")
+    item.verification_status = "VERIFIED"
+    item.artifact_refs = ["/tmp/site/old_report.md"]
+    item.artifact_registry_refs = [registry_record]
+    mock_board.items = [item]
+    mock_agent.subagents.write_board.return_value = mock_board
+
+    result = SubagentBoardTool(mock_agent).execute({"limit": 10})
+
+    assert result.ok is True
+    assert '"deliverable_artifact_ids": [' in result.output
+    assert '"artifact-report-1"' in result.output
+    assert '"deliverable_artifact_refs": [' in result.output
+    assert '"/tmp/site/final_report.md"' in result.output
+    assert '"/tmp/site/old_report.md"' not in result.output
+    assert '"artifact_registry_refs": [' in result.output
+
+
+# LLM: Board payload should not invite parent agents to guess old work-order paths.
+# 函数用途: legacy 路径只能留在兼容/调试文件中，不应出现在模型可见 subagent_board 输出。
+def test_board_payload_hides_legacy_paths_from_model_facing_output():
+    from agent_py_agent.agent.agent_core.orchestration_tools import SubagentBoardTool
+
+    mock_agent = MagicMock()
+    mock_agent.subagents.workspace = Path("/tmp/workspace")
+    mock_board = MagicMock()
+    mock_board.summary = {"total": 1}
+    item = _board_item("run_1", "RUNNING")
+    item.task_workspace = "/tmp/workspace/tasks/root-1"
+    item.agent_run_workspace = "/tmp/workspace/tasks/root-1/agents/run_1"
+    item.legacy_task_dir = "/tmp/workspace/run_1"
+    item.legacy_output_json = "/tmp/workspace/run_1/output.json"
+    mock_board.items = [item]
+    mock_agent.subagents.write_board.return_value = mock_board
+
+    result = SubagentBoardTool(mock_agent).execute({"limit": 10})
+
+    assert result.ok is True
+    assert "/tmp/workspace/tasks/root-1/agents/run_1" in result.output
+    assert "/tmp/workspace/run_1" not in result.output
+    assert "legacy_task_dir" not in result.output
+    assert "legacy_output_json" not in result.output
 
 
 # LLM: Active board scope prevents old workspace rows from steering the current root turn.

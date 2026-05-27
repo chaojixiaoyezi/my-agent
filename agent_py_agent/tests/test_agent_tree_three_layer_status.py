@@ -52,6 +52,80 @@ def test_agent_tree_node_exposes_liveness_progress_and_evidence_layers():
     assert node["recent_tool_trace"] == [{"tool": "web_search", "ok": True, "summary": "查到候选资料"}]
 
 
+# LLM: Tree status should steer parents to current run workspaces, not legacy task dirs.
+# 函数用途: inspect_agent_tree 返回给模型的 workspace_refs 不暴露旧式子代理目录，避免接管时读错路径。
+def test_agent_tree_workspace_refs_hide_legacy_task_dir():
+    class _Manager:
+        def kernel_snapshot(self, query):
+            return SubagentKernelSnapshot(
+                schema_version="subagent_kernel_snapshot.v1",
+                scope=query.scope,
+                runs=[
+                    SubagentKernelRun(
+                        run_id="child-1",
+                        task_id="child-1",
+                        status="RUNNING",
+                        workspace_refs={
+                            "task_dir": "/tmp/workspace/data/subagents/tasks/root-1",
+                            "task_workspace": "/tmp/workspace/data/subagents/tasks/root-1",
+                            "agent_run_workspace": "/tmp/workspace/data/subagents/tasks/root-1/agents/child-1",
+                            "legacy_task_dir": "/tmp/workspace/data/subagents/child-1",
+                        },
+                    )
+                ],
+                source_refs={
+                    "root_task_dir": "/tmp/workspace/data/subagents/tasks/root-1",
+                    "root_task_workspace": "/tmp/workspace/data/subagents/tasks/root-1",
+                },
+            )
+
+    class _Agent:
+        subagents = _Manager()
+
+    payload = agent_tree_status_payload(_Agent())
+    node = payload["nodes"][0]
+
+    assert node["workspace_refs"]["agent_run_workspace"].endswith("/tasks/root-1/agents/child-1")
+    assert "legacy_task_dir" not in node["workspace_refs"]
+    assert "/data/subagents/child-1" not in str(payload)
+
+
+# LLM: Tree status should expose registry records beside legacy path refs.
+# 函数用途: 父代理查看树时，应看到 artifact_id/path 的机器账本引用，而不是只依赖模型文本里的路径。
+def test_agent_tree_exposes_artifact_registry_refs():
+    registry_record = {
+        "artifact_id": "artifact-report-1",
+        "path": "/tmp/run/current/report.xlsx",
+        "kind": "xlsx",
+        "status": "ready",
+    }
+
+    class _Manager:
+        def kernel_snapshot(self, query):
+            return SubagentKernelSnapshot(
+                schema_version="subagent_kernel_snapshot.v1",
+                scope=query.scope,
+                runs=[
+                    SubagentKernelRun(
+                        run_id="child-1",
+                        task_id="child-1",
+                        status="DONE",
+                        artifact_refs=["/tmp/run/old/report.xlsx"],
+                        artifact_registry_refs=[registry_record],
+                    )
+                ],
+            )
+
+    class _Agent:
+        subagents = _Manager()
+
+    payload = agent_tree_status_payload(_Agent())
+    node = payload["nodes"][0]
+
+    assert node["artifact_registry_refs"] == [registry_record]
+    assert node["evidence_layer"]["artifact_registry_refs"] == [registry_record]
+
+
 def test_subagent_runner_can_only_inspect_own_subtree_even_with_root_params():
     """子代理只读查树时，即使传 root_id，也应被限制到自己的子树。"""
 

@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from ..contracts.artifact_format_lint import lint_artifact_format
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _required_path, _text_param
 from ._filesystem_read import FileSystemTool
 from .artifact_integrity import (
@@ -88,7 +89,17 @@ class WriteFileTool(FileSystemTool):
             return ToolExecutionResult("write_file", False, str(exc))
         target.parent.mkdir(parents=True, exist_ok=True)
         target = self.resolve_path(target)
-        _atomic_write_bytes(target, data)
+        try:
+            _atomic_write_bytes(target, data)
+        except ValueError as exc:
+            return ToolExecutionResult(
+                "write_file",
+                False,
+                str(exc),
+                error_code="ARTIFACT_VALIDATION_FAILED",
+                retryable=True,
+                recommended_action="rewrite valid artifact bytes or write a draft to a non-final extension first",
+            )
         web_decision = check_web_project_post_write(target, self.workspace_root)
         output = _write_output(self.display_path(target), target, content, content_policy)
         return _write_result("write_file", target, output, web_decision)
@@ -111,9 +122,15 @@ def _write_result(tool: str, target: Path, output: str, web_decision: Any) -> To
 
 
 def _artifact_integrity_envelope(web_decision: Any, target: Path) -> dict[str, object]:
+    base: dict[str, object] = {
+        "path": str(target),
+        "target_path": str(target),
+        "output_path": str(target),
+        "artifact_ref": str(target),
+    }
     if getattr(web_decision, "kind", "generic") == "generic":
-        return {}
-    return {"artifact_integrity": artifact_integrity_payload(web_decision, target)}
+        return base
+    return {**base, "artifact_integrity": artifact_integrity_payload(web_decision, target)}
 
 
 def _write_payload(params: dict[str, Any]) -> tuple[str | None, bytes]:
@@ -172,12 +189,13 @@ def _write_output(
 
 def _atomic_write_bytes(target: Path, data: bytes) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=_temp_suffix_for(target), dir=str(target.parent))
     try:
         with os.fdopen(fd, "wb") as file:
             file.write(data)
             file.flush()
             os.fsync(file.fileno())
+        _validate_final_artifact_candidate(Path(tmp_name), target)
         os.replace(tmp_name, target)
     except Exception:
         try:
@@ -186,3 +204,29 @@ def _atomic_write_bytes(target: Path, data: bytes) -> None:
             pass
         raise
 
+
+def _temp_suffix_for(target: Path) -> str:
+    suffix = target.suffix
+    return suffix if suffix in _PREWRITE_VALIDATED_SUFFIXES else ".tmp"
+
+
+_PREWRITE_VALIDATED_SUFFIXES = {
+    ".docx",
+    ".gz",
+    ".gzip",
+    ".pdf",
+    ".png",
+    ".xlsx",
+    ".zip",
+}
+
+
+def _validate_final_artifact_candidate(candidate: Path, target: Path) -> None:
+    if target.suffix.lower() not in _PREWRITE_VALIDATED_SUFFIXES:
+        return
+    report = lint_artifact_format(path=candidate, workspace_root=target.parent)
+    if report.ok:
+        return
+    codes = ",".join(finding.code for finding in report.findings if finding.code)
+    messages = "; ".join(finding.message for finding in report.findings if finding.message)
+    raise ValueError(f"{codes or 'ARTIFACT_INVALID'}: {messages or 'artifact candidate failed objective validation'}")

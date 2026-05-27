@@ -22,15 +22,34 @@
 
 调度层只创建和推进任务节点，不再用额外 scope/duplicate/QA 硬门替父级做流程裁决。需要流水线、去重或重试时，由父级根据树状态和任务目标显式安排下一步。
 
+## Artifact Registry
+
+产物事实统一进 `data/artifacts/registry.jsonl`。每条记录有 `artifact_id`、
+`path`、`sha256`、`size_bytes`、`run_id`、`task_id`、`agent_id`、`kind`、
+`mime_type`、`status` 和来源工具。工具写文件、子代理结构化结果、closeout
+重验收都会把已确认存在的交付物登记进去。
+
+父代理、任务树、看板和调度摘要现在都优先返回 registry 中的
+`artifact_id`、当前路径和 `registry_ref`。旧 `artifact_refs` 仍会保留一段时间，
+但只是兼容字段：如果 registry 里有记录，就以 registry 为准。模型在报告里写的
+路径、旧任务目录、搜索结果里的文件名，都只能当恢复线索；系统不能把这些文本当成
+最终产物事实。
+
+当产物被移动、重建或修复时，继续更新同一个 `artifact_id`。这样父代理汇总、tree
+展示和 closeout 都会看到最新文件，不会因为旧 `preferred_path` 或子代理口头路径
+而读错产物。
+
 ## 三层可观察状态
 
 `inspect_agent_tree` 的每个节点都提供同一套只读三层状态：
 
 - `liveness`：状态、心跳时间、更新时间，用来判断代理是否还活着。
 - `progress_layer`：进度、当前工具、当前步骤、最近进展摘要，用来判断是否真的在推进。
-- `evidence_layer`：产物 refs、证据 refs、blockers、能力缺口和最近工具轨迹，用来判断结果在哪里、哪里卡住、需要谁补能力。
+- `evidence_layer`：registry-backed 产物 refs、证据 refs、blockers、能力缺口和最近工具轨迹，用来判断结果在哪里、哪里卡住、需要谁补能力。
 
 这三层都是观察事实，不触发调度、不执行验收、不阻断任务。父代理看到异常后可以自己决定催办、补派、接手、汇报或等待。
+
+状态面只返回当前布局路径。`workspace_refs.task_workspace` 指向任务级目录，`workspace_refs.agent_run_workspace` 指向具体代理运行目录；旧式 `data/subagents/<run_id>` work-order 路径只作为系统兼容恢复材料存在，不放进模型可见的 `workspace_refs`。这样父代理接管或汇总时会按 refs 读取真实产物，而不是自己拼旧目录。
 
 ## Closeout
 

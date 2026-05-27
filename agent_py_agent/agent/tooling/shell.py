@@ -11,6 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent_py_agent.agent.artifacts.shell_protection import (
+    reconcile_shell_artifacts,
+    shell_artifact_protection_note,
+    snapshot_ready_artifacts,
+)
 from agent_py_agent.agent.contracts.gates.command_policy import (
     evaluate_command_policy,
 )
@@ -296,12 +301,38 @@ class ShellTool(BaseTool):
         if delete_error:
             return ToolExecutionResult(self.spec.name, False, delete_error, error_code="PATH_OUTSIDE_WORKSPACE")
         try:
-            result = self._run_command(command, target, timeout)
-            return ToolExecutionResult(self.spec.name, True, _format_process_result(result, self.max_output_chars))
-        except subprocess.TimeoutExpired:
-            return ToolExecutionResult(self.spec.name, False, f"命令执行超时 timeout ({timeout}s): {command[:100]}...")
+            artifact_snapshots = snapshot_ready_artifacts(self.workspace_root)
         except OSError as exc:
-            return ToolExecutionResult(self.spec.name, False, f"命令执行失败: {exc}")
+            return ToolExecutionResult(
+                self.spec.name,
+                False,
+                f"ARTIFACT_BACKUP_FAILED: shell 执行前无法备份已登记产物: {exc}",
+                error_code="ARTIFACT_BACKUP_FAILED",
+            )
+        artifact_summary: dict[str, Any] = {"snapshots": len(artifact_snapshots), "changed": [], "invalid": []}
+        try:
+            result = self._run_command(command, target, timeout)
+            output = _format_process_result(result, self.max_output_chars)
+            ok = True
+        except subprocess.TimeoutExpired:
+            output = f"命令执行超时 timeout ({timeout}s): {command[:100]}..."
+            ok = False
+        except OSError as exc:
+            output = f"命令执行失败: {exc}"
+            ok = False
+        try:
+            artifact_summary = reconcile_shell_artifacts(self.workspace_root, artifact_snapshots)
+        except OSError as exc:
+            output = f"{output}\nARTIFACT_POSTCHECK_FAILED: shell 执行后无法复核已登记产物: {exc}"
+        protection_note = shell_artifact_protection_note(artifact_summary)
+        if protection_note:
+            output = f"{output}\n{protection_note}"
+        return ToolExecutionResult(
+            self.spec.name,
+            ok,
+            output,
+            result_envelope={"artifact_protection": artifact_summary},
+        )
 
     # LLM: ShellTool._parse_command 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 解析 parse_command 数据结构。

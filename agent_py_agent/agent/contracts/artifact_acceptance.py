@@ -11,6 +11,7 @@ from .artifact_acceptance_models import (
     ArtifactAcceptanceReport,
     ArtifactAcceptanceRequest,
     ArtifactFinding,
+    advisory_artifact_findings,
     artifact_ref_payload,
     kind_for_path,
 )
@@ -247,11 +248,18 @@ def _validate_markdown(
     validation_contract: dict[str, object] | None = None,
 ) -> ArtifactAcceptanceReport:
     text = path.read_text(encoding="utf-8", errors="replace")
-    findings = text_size_findings(path, text, validation_contract or {})
-    findings.extend(markdown_section_findings(path, text, validation_contract or {}))
+    if not text:
+        finding = ArtifactFinding(code="ARTIFACT_EMPTY", severity="hard", message="Artifact is empty.")
+        return _report_with_finding(path, "md", finding)
+    findings = advisory_artifact_findings(
+        [
+            *text_size_findings(path, text, validation_contract or {}),
+            *markdown_section_findings(path, text, validation_contract or {}),
+        ]
+    )
     findings.extend(document_quality_artifact_findings(path, validation_contract, workspace_root=path.parent))
     return ArtifactAcceptanceReport(
-        ok=not any(item.severity == "hard" for item in findings),
+        ok=True,
         artifact_ref=str(path),
         artifact_kind="md",
         findings=findings,
@@ -272,20 +280,25 @@ def _validate_xlsx(
     except (BadZipFile, OSError) as exc:
         finding = ArtifactFinding(code="XLSX_INVALID", severity="hard", message=f"Invalid XLSX package: {exc}")
         return _report_with_finding(path, "xlsx", finding)
-    if "xl/workbook.xml" not in names or not any(name.startswith("xl/worksheets/") for name in names):
+    missing_parts = _missing_xlsx_parts(names)
+    if missing_parts:
         finding = ArtifactFinding(
-            code="XLSX_MISSING_WORKBOOK_PARTS",
+            code="XLSX_INVALID_PACKAGE",
             severity="hard",
-            message="XLSX lacks workbook or worksheet parts.",
+            message="XLSX package is missing required workbook parts.",
+            value=",".join(missing_parts),
         )
         return _report_with_finding(path, "xlsx", finding)
-    findings = [
+    open_finding = _xlsx_open_finding(path)
+    if open_finding is not None:
+        return _report_with_finding(path, "xlsx", open_finding)
+    findings = advisory_artifact_findings([
         *xlsx_contract_findings(path, validation_contract),
         *staged_source_evidence_findings(validation_contract or {}, workspace_root or path.parent),
         *collection_contract_findings(validation_contract or {}, workspace_root or path.parent),
-    ]
+    ])
     return ArtifactAcceptanceReport(
-        ok=not any(item.severity == "hard" for item in findings),
+        ok=True,
         artifact_ref=str(path),
         artifact_kind="xlsx",
         findings=findings,
@@ -308,16 +321,48 @@ def _validate_pdf(
             message="PDF is missing %PDF header or EOF marker.",
         )
         return _report_with_finding(path, "pdf", finding)
-    findings = [
+    findings = advisory_artifact_findings([
         *collection_contract_findings(validation_contract or {}, workspace_root or path.parent),
         *document_quality_artifact_findings(path, validation_contract, workspace_root=workspace_root or path.parent),
-    ]
+    ])
     return ArtifactAcceptanceReport(
-        ok=not any(item.severity == "hard" for item in findings),
+        ok=True,
         artifact_ref=str(path),
         artifact_kind="pdf",
         findings=findings,
     )
+
+
+def _missing_xlsx_parts(names: set[str]) -> list[str]:
+    missing: list[str] = []
+    if "[Content_Types].xml" not in names:
+        missing.append("[Content_Types].xml")
+    if "xl/workbook.xml" not in names:
+        missing.append("xl/workbook.xml")
+    if not any(name.startswith("xl/worksheets/") and name.endswith(".xml") for name in names):
+        missing.append("xl/worksheets/*.xml")
+    return missing
+
+
+def _xlsx_open_finding(path: Path) -> ArtifactFinding | None:
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        return None
+    try:
+        workbook = load_workbook(path, read_only=True, data_only=True)
+        try:
+            if not workbook.sheetnames:
+                return ArtifactFinding("XLSX_NO_VISIBLE_SHEETS", "hard", "XLSX workbook has no visible sheets.")
+        finally:
+            workbook.close()
+    except Exception as exc:
+        return ArtifactFinding(
+            code="XLSX_INVALID_PACKAGE",
+            severity="hard",
+            message=f"XLSX cannot be opened by the workbook reader: {exc}",
+        )
+    return None
 
 
 # LLM: _validate_generic keeps unknown artifact types from passing when empty or missing.

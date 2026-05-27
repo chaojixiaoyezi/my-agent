@@ -249,6 +249,34 @@ def test_materialized_workbook_contract_preserves_llm_generated_fields_without_a
     assert contract["fact_evidence_contract"]["evidence_contract"]["required_fields"] == ["本周新增 star 数"]
 
 
+def test_materialized_contract_preserves_artifact_intent_extensions_for_broad_formats():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    contract = materialized_delivery_contract(
+        {
+            "artifacts": [
+                {
+                    "artifact_id": "cad_drawing",
+                    "kind_label": "CAD 图纸",
+                    "artifact_intent": {
+                        "kind_label": "CAD 图纸",
+                        "preferred_extension": "dxf",
+                        "acceptable_extensions": ["dxf", "step", "stp"],
+                    },
+                    "allowed_output_roots": ["outputs"],
+                }
+            ]
+        }
+    )
+
+    artifact = contract["artifacts"][0]
+    assert artifact["kind_label"] == "CAD 图纸"
+    assert artifact["artifact_intent"]["acceptable_extensions"] == ["dxf", "step", "stp"]
+    assert artifact["file_extensions"] == ["dxf", "step", "stp"]
+
+
 def test_materialized_workbook_staging_infers_kind_from_output_path_and_metric_name():
     from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
         materialized_delivery_contract,

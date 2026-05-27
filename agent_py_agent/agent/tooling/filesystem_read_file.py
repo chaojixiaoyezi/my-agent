@@ -7,6 +7,7 @@ from typing import Any
 
 from ._filesystem_helpers import _bundled_filesystem_param, _int_param, _required_path
 from .filesystem_artifact_guard import tool_output_artifact_content
+from .filesystem_path_recovery import MissingPathRequest, missing_path_result
 from .filesystem_structured_read import structured_read_summary
 from .models import ToolExecutionResult
 
@@ -20,7 +21,15 @@ def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolExecu
     except ValueError as exc:
         return ToolExecutionResult("read_file", False, str(exc))
     if not target.exists():
-        return ToolExecutionResult("read_file", False, f"文件不存在: {tool.display_path(target)}")
+        return missing_path_result(MissingPathRequest(
+            tool_name="read_file",
+            raw_path=raw_path,
+            target=target,
+            workspace_roots=tool.workspace_roots,
+            display_path=tool.display_path(target),
+            expected_kind="file",
+            retry_tool="read_file",
+        ))
     if not target.is_file():
         return ToolExecutionResult("read_file", False, f"目标不是文件: {tool.display_path(target)}")
     artifact_content = tool_output_artifact_content(target, tool.workspace_roots)
