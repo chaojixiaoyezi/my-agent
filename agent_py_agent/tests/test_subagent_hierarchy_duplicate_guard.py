@@ -15,9 +15,9 @@ from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
 )
 
 
-# LLM: duplicate coordinator domains are audit warnings, not hard orchestration blockers.
-# 函数用途: 同一个父节点已有 checkout/quality coordinator 后，再创建同域 coordinator 只提示风险，不阻断 QA/修复协作。
-def test_hierarchy_schedule_warns_duplicate_coordinator_domains(tmp_path):
+# LLM: duplicate coordinator domains are left to parent planning.
+# 函数用途: 同一个父节点已有 checkout/quality coordinator 后，再创建同域 coordinator 不再产生硬卡或隐藏调度提示。
+def test_hierarchy_schedule_allows_duplicate_coordinator_domains(tmp_path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="shopping root", thought="orchestrate", plan=["plan"])
 
@@ -61,7 +61,7 @@ def test_hierarchy_schedule_warns_duplicate_coordinator_domains(tmp_path):
     assert len(first.created_run_ids) == 2
     assert duplicate.blocked is False
     assert duplicate.reason == "created"
-    assert duplicate.scheduling_warnings == ["duplicate_child_domain:checkout", "duplicate_child_domain:quality"]
+    assert not hasattr(duplicate, "scheduling_warnings")
     assert manager.load(root.id).child_ids == [*first.created_run_ids, *duplicate.created_run_ids]
 
 
@@ -170,9 +170,9 @@ def test_hierarchy_schedule_duplicate_domain_ignores_depth_markers(tmp_path):
     assert len(result.created_run_ids) == 2
 
 
-# LLM: test_hierarchy_schedule_warns_duplicate_verified_leaf_targets covers R73 audit-over-blocking.
-# 函数用途: 同父级已有 DONE/VERIFIED leaf 写过同一文件时，调度应创建新任务并给父级审计提示，而不是硬阻断修复/协作。
-def test_hierarchy_schedule_warns_duplicate_verified_leaf_targets(tmp_path):
+# LLM: duplicate verified leaf targets are left to parent planning.
+# 函数用途: 同父级已有 DONE/VERIFIED leaf 写过同一文件时，调度层仍按父级显式派工创建新任务。
+def test_hierarchy_schedule_allows_duplicate_verified_leaf_targets(tmp_path):
     manager = SubAgentManager(tmp_path)
     parent = _auth_parent_with_verified_leaf(manager)
 
@@ -206,7 +206,7 @@ def test_hierarchy_schedule_warns_duplicate_verified_leaf_targets(tmp_path):
 
     assert duplicate.blocked is False
     assert duplicate.reason == "created"
-    assert duplicate.scheduling_warnings == ["duplicate_leaf_target:login.html"]
+    assert not hasattr(duplicate, "scheduling_warnings")
     assert len(duplicate.created_run_ids) == 1
     assert sibling.blocked is False
     assert len(sibling.created_run_ids) == 1
@@ -236,16 +236,17 @@ def test_hierarchy_schedule_allows_explicit_repair_leaf_for_existing_target(tmp_
     assert len(repair.created_run_ids) == 1
 
 
-# LLM: Active QA/repair duplicates should reuse or recover the current run instead of growing the tree.
-# 函数用途: 复现真实恢复 E2E 中 root 反复创建 qa-repair-worker 的问题，要求调度层阻断无限扩容。
-def test_hierarchy_schedule_blocks_active_duplicate_repair_child(tmp_path):
+# LLM: active duplicate repair requests are not scheduler hard blockers.
+# 函数用途: 重复 repair worker 不再被 Python 调度层硬阻断，是否继续扩容交给父级模型和 tree 状态判断。
+def test_hierarchy_schedule_allows_active_duplicate_repair_child(tmp_path):
     manager = SubAgentManager(tmp_path)
     parent = _shared_parent_with_verified_leaf(manager)
     first = _schedule_repair_worker(manager, parent.id, "根据失败 QA refs 修复 app.js 按钮绑定。", "qa-repair-worker")
     duplicate = _schedule_repair_worker(manager, parent.id, "修复失败 QA ref 指出的按钮绑定和 retry 逻辑。", "qa-repair-worker")
 
     assert len(first.created_run_ids) == 1
-    _assert_duplicate_repair_blocked(manager, parent.id, duplicate, first.created_run_ids[0])
+    assert duplicate.blocked is False
+    assert len(duplicate.created_run_ids) == 1
 
     renamed_duplicate = _schedule_repair_worker(
         manager,
@@ -254,7 +255,8 @@ def test_hierarchy_schedule_blocks_active_duplicate_repair_child(tmp_path):
         "case01-final-repair-worker",
     )
 
-    _assert_duplicate_repair_blocked(manager, parent.id, renamed_duplicate, first.created_run_ids[0])
+    assert renamed_duplicate.blocked is False
+    assert len(renamed_duplicate.created_run_ids) == 1
 
 
 # LLM: _schedule_repair_worker keeps duplicate-repair tests focused on guard semantics.
@@ -267,15 +269,6 @@ def _schedule_repair_worker(manager: SubAgentManager, parent_id: str, goal: str,
             apply=True,
         )
     )
-
-
-# LLM: _assert_duplicate_repair_blocked verifies active repair dedupe without repeating assertions.
-# 函数用途: 断言重复 repair worker 被阻断，且父节点 child_ids 没有继续膨胀。
-def _assert_duplicate_repair_blocked(manager: SubAgentManager, parent_id: str, result, first_run_id: str) -> None:
-    assert result.blocked is True
-    assert result.created_run_ids == []
-    assert f"active_duplicate_child:{first_run_id}" in result.reason
-    assert len(manager.load(parent_id).child_ids) == 2
 
 
 # LLM: Referencing shared assets must not make a page worker claim ownership of those assets.

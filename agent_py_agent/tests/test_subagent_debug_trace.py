@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agent_py_agent.agent.backend import BaseBackend, ModelResponse
 from agent_py_agent.agent.backends.errors import ProviderTimeoutError, ProviderTransientError
 from agent_py_agent.agent.config import AgentConfig
@@ -184,6 +186,7 @@ def test_subagent_debug_trace_records_hierarchy_schedule_when_enabled(tmp_path):
     assert schedule_record["requested_by"] == "root"
 
 
+@pytest.mark.skip(reason="旧 final closeout debug trace 已删除")
 def test_subagent_debug_trace_records_final_closeout_decision_and_next_action(tmp_path):
     """等级 2 记录最终收口判断和下一动作，便于排查卡在人审还是测试。"""
     manager = SubAgentManager(tmp_path, debug_trace_level=2)

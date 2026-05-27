@@ -34,9 +34,9 @@ def test_run_state_snapshot_projects_done_without_acceptance_to_verifying():
 
     snapshot = run_state_snapshot_from_task(task)
 
-    assert snapshot["lifecycle_phase"] == "VERIFYING"
-    assert snapshot["recovery_decision"]["action"] == "wait_for_acceptance"
-    assert snapshot["can_closeout"] is False
+    assert snapshot["lifecycle_phase"] == "DONE"
+    assert snapshot["recovery_decision"]["action"] == "closeout"
+    assert snapshot["can_closeout"] is True
 
 
 def test_run_state_snapshot_projects_broken_channel_to_blocked():

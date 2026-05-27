@@ -12,9 +12,9 @@ from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
 )
 
 
-# LLM: test_hierarchy_schedule_blocks_forbidden_sibling_scope prevents wrong-domain leaf creation.
-# 函数用途: 当 parent 明确禁止创建 sibling 领域任务时，scheduler 必须阻断错误 child spec。
-def test_hierarchy_schedule_blocks_forbidden_sibling_scope(tmp_path):
+# LLM: scheduler no longer turns scope hints into hard blockers.
+# 函数用途: parent 里的领域提示只作为上下文，不再阻断父级显式派工。
+def test_hierarchy_schedule_allows_forbidden_sibling_scope_hint(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
     root = manager.create_run(goal="root", thought="root", plan=["root"], extra_write_roots=[str(deliverables)])
@@ -27,7 +27,6 @@ def test_hierarchy_schedule_blocks_forbidden_sibling_scope(tmp_path):
         depth=1,
         allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
         extra_write_roots=[str(deliverables)],
-        attributes={"domain_scopes": ["text"], "forbidden_child_scopes": ["arithmetic"]},
     )
 
     result = manager.schedule_child_runs(
@@ -37,16 +36,15 @@ def test_hierarchy_schedule_blocks_forbidden_sibling_scope(tmp_path):
                 HierarchyChildSpec(
                     goal="创建 arithmetic worker。",
                     agent_name="arithmetic-worker",
-                    attributes={"domain_scopes": ["arithmetic"]},
                 )
             ],
             apply=True,
         )
     )
 
-    assert result.blocked is True
-    assert "forbidden_child_scope:arithmetic" in result.reason
-    assert manager.load(parent.id).child_ids == []
+    assert result.blocked is False
+    assert len(result.created_run_ids) == 1
+    assert manager.load(parent.id).child_ids == result.created_run_ids
 
 
 # LLM: test_hierarchy_schedule_allows_depth_limit_text_without_scope_block reproduces R15's depth token bug.
@@ -121,9 +119,9 @@ def test_hierarchy_schedule_forbidden_scope_ignores_parent_thought(tmp_path):
     assert len(result.created_run_ids) == 1
 
 
-# LLM: test_hierarchy_schedule_warns_qa_only_before_implementation covers the soft QA-order warning.
-# 函数用途: 有产物根但没有 ready worker/leaf child 时，QA 只产生 warning，不再阻断父级显式派工。
-def test_hierarchy_schedule_warns_qa_before_implementation_ready(tmp_path):
+# LLM: QA order is left to the parent model, not scheduler warnings.
+# 函数用途: 有产物根但没有 ready worker/leaf child 时，scheduler 仍只执行父级显式派工。
+def test_hierarchy_schedule_allows_qa_before_implementation_ready(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
     root = manager.create_run(
@@ -158,7 +156,6 @@ def test_hierarchy_schedule_warns_qa_before_implementation_ready(tmp_path):
     )
 
     assert result.blocked is False
-    assert any(item.startswith("qa_before_implementation_ready") for item in result.scheduling_warnings)
     assert len(manager.load(parent.id).child_ids) == 2
 
 
@@ -258,9 +255,9 @@ def test_hierarchy_schedule_allows_qa_after_implementation_descendant_ready(tmp_
     assert len(result.created_run_ids) == 1
 
 
-# LLM: test_hierarchy_schedule_blocks_implicit_domain_mismatch catches coordinator sibling drift.
-# 函数用途: 即使 parent 没写“不得创建”，text-lead 也不能误创建 arithmetic leaf。
-def test_hierarchy_schedule_blocks_implicit_domain_mismatch(tmp_path):
+# LLM: scheduler does not infer hidden blockers from prose.
+# 函数用途: text/arithmetic 这类领域词不再变成 Python 层硬卡点。
+def test_hierarchy_schedule_allows_different_declared_work_topics(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
     root = manager.create_run(goal="root", thought="root", plan=["root"], extra_write_roots=[str(deliverables)])
@@ -275,17 +272,16 @@ def test_hierarchy_schedule_blocks_implicit_domain_mismatch(tmp_path):
         depth=1,
         allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
         extra_write_roots=[str(deliverables)],
-        attributes={"domain_scopes": ["text"]},
     )
 
     result = manager.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
-            child_specs=[HierarchyChildSpec(goal="创建 arithmetic worker。", attributes={"domain_scopes": ["arithmetic"]})],
+            child_specs=[HierarchyChildSpec(goal="创建 arithmetic worker。")],
             apply=True,
         )
     )
 
-    assert result.blocked is True
-    assert result.reason == "domain_mismatch:text->arithmetic"
-    assert manager.load(parent.id).child_ids == []
+    assert result.blocked is False
+    assert len(result.created_run_ids) == 1
+    assert manager.load(parent.id).child_ids == result.created_run_ids

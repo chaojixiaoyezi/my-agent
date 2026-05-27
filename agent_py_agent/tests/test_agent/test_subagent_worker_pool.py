@@ -260,7 +260,6 @@ def test_dispatch_blocks_invalid_scoped_run_id_with_valid_child_hint(monkeypatch
             include_run_ids=[wrong_id],
             max_runners=1,
             probe=False,
-            finish_dispatch=False,
         ),
     )
 

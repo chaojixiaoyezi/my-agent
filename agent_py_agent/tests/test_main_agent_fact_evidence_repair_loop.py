@@ -22,12 +22,13 @@ def test_fact_evidence_repair_loop_blocks_then_accepts_tool_backed_claims(tmp_pa
         MainAgentDeliveryCloseoutRequest(agent=agent, params=params, backend="test")
     )
     first_report = _existing_report(tmp_path)
-    first_context = json.loads(params.tool_context[-1].split("\n", 1)[1])
 
-    assert first is None
-    assert first_report["fact_evidence_gate"]["allowed"] is False
-    assert first_report["contract_recovery"]["actions"][0]["checkpoint_ref"] == "source_data.json"
-    assert first_context["failed_gates"][0]["gate"] == "fact_evidence"
+    assert first is not None
+    assert first_report["fact_evidence_gate"]["allowed"] is True
+    assert first_report["fact_evidence_gate"]["evidence"]["advisory_status"] == "NEED_REPAIR"
+    assert "FACT_SOURCE_TOOL_BACKING_MISSING" in first_report["fact_evidence_gate"]["evidence"]["warning_codes"]
+    assert first_report.get("contract_recovery") is None
+    assert params.tool_context == []
 
     _write_source_payload(tmp_path, tool_backed=True)
     params.tool_context.clear()
@@ -39,6 +40,7 @@ def test_fact_evidence_repair_loop_blocks_then_accepts_tool_backed_claims(tmp_pa
 
     assert second is not None
     assert second_report["fact_evidence_gate"]["allowed"] is True
+    assert "warning_codes" not in second_report["fact_evidence_gate"]["evidence"]
     assert second_report["final_closeout_gate"]["allowed"] is True
     assert "[MAIN_AGENT_DELIVERY_COMPLETE]" in second.text
 

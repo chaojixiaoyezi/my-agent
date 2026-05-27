@@ -26,14 +26,8 @@ from .hierarchy_scheduler_models import (
 )
 from .hierarchy_scheduler_results import (
     applied_schedule_result,
-    blocked_schedule_result,
     dry_schedule_result,
-)
-from .hierarchy_scope_guards import (
-    active_duplicate_child_reason,
-    qa_phase_block_reason,
-    schedule_block_reason,
-    schedule_warnings,
+    limit_schedule_result,
 )
 from .hierarchy_tool_policy import (
     LeafWriteIntentRequest,
@@ -69,23 +63,12 @@ class SubAgentHierarchyScheduler:
             parent=parent,
             request=request,
             quality_advice=quality_advice,
-            scheduling_warnings=schedule_warnings(self.manager, parent, request),
         )
-        # LLM: red-line guards stay hard; duplicate coordination domains are emitted as warnings.
-        reason = (
-            schedule_block_reason(parent, request)
-            or qa_phase_block_reason(
-                self.manager,
-                parent,
-                request,
-            )
-            or active_duplicate_child_reason(self.manager, parent, request)
-        )
-        if reason:
+        if reason := _explicit_limit_reason(parent, request):
             return trace_hierarchy_schedule(
                 self.manager,
                 parent,
-                blocked_schedule_result(result_build, reason),
+                limit_schedule_result(result_build, reason),
             )
         if not request.apply:
             return trace_hierarchy_schedule(
@@ -98,6 +81,18 @@ class SubAgentHierarchyScheduler:
             parent,
             _apply_result(self.manager, result_build),
         )
+
+
+# LLM: _explicit_limit_reason only honors caller-provided numeric hierarchy limits.
+# 函数用途: 0 表示不限制；正数才作为显式 max_depth/max_children 边界，避免恢复旧隐形调度门。
+def _explicit_limit_reason(parent: SubAgentTask, request: HierarchyScheduleRequest) -> str:
+    max_depth = max(0, int(request.max_depth or 0))
+    if max_depth and parent.depth + 1 > max_depth:
+        return f"max_depth_exceeded:{max_depth}"
+    max_children = max(0, int(request.max_children or 0))
+    if max_children and len(parent.child_ids) + len(request.child_specs) > max_children:
+        return f"max_children_exceeded:{max_children}"
+    return ""
 
 
 # LLM: _apply_result materializes planned specs through create_run so all persistence adapters stay in sync.

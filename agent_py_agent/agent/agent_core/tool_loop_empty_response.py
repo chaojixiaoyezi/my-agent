@@ -7,7 +7,6 @@ from collections.abc import Callable
 
 from ..backends import ModelResponse
 from ._runtime_params import ToolLoopExecuteParams
-from .subagent_dispatch_closeout import subagent_dispatch_limit_response
 
 
 # LLM: should_retry_empty_model_response gives provider blank text one structured continuation attempt.
@@ -46,10 +45,6 @@ def empty_model_response_fallback(
     if not is_empty_model_response_error(exc) or not params.executed_tools:
         return None
     backend = str(getattr(getattr(agent, "backend", None), "name", "") or "")
-    if executed_subagent_orchestration(params):
-        deterministic = subagent_dispatch_limit_response(agent, backend=backend, reason="empty_model_response")
-        if deterministic is not None:
-            return deterministic
     tools = ", ".join(str(item) for item in params.executed_tools[-6:])
     text = (
         "模型接口最终总结返回空文本；本轮真实工具调用已经完成，系统没有丢弃工具结果。\n\n"

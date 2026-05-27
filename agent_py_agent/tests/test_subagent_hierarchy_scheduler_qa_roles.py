@@ -93,7 +93,7 @@ def test_hierarchy_schedule_advice_omits_existing_qa_roles(tmp_path):
     assert result.blocked is False
     assert len(result.created_run_ids) == 1
     assert result.quality_advice is not None
-    assert result.quality_advice.suggested_roles == ["bug_finder", "bug_finder"]
+    assert result.quality_advice.suggested_roles == ["bug_finder"]
 
 
 # LLM: product delivery parents should not auto-create QA before implementation is ready.
@@ -152,8 +152,7 @@ def test_hierarchy_schedule_quality_advice_after_implementation_ready(tmp_path):
         )
     )
 
-    assert result.blocked is True
-    assert result.reason == "no_child_specs"
+    assert result.blocked is False
     assert result.created_run_ids == []
     assert result.quality_advice is not None
     assert result.quality_advice.phase == "quality_wave_ready"
@@ -198,8 +197,7 @@ def test_hierarchy_schedule_quality_advice_after_implementation_descendant_ready
         )
     )
 
-    assert result.blocked is True
-    assert result.reason == "no_child_specs"
+    assert result.blocked is False
     assert result.created_run_ids == []
     assert result.quality_advice is not None
     assert result.quality_advice.phase == "quality_wave_ready"

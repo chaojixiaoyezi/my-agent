@@ -26,19 +26,14 @@ def assert_no_subagent_state_blockers(stdout: str) -> None:
 # LLM: assert_persisted_subagent_state_clean compares final reports with task.json facts.
 # 函数用途: 读取隔离项目里的子代理持久化状态；只要还有未解决 run，就让真实 E2E 失败。
 def assert_persisted_subagent_state_clean(fixture_root) -> None:
-    from agent_py_agent.agent.agent_core.subagent_dispatch_closeout_resolution import (
-        blocking_task_ids,
-        done_verified_count,
-    )
-
     tasks = _persisted_subagent_tasks(fixture_root)
     if not tasks:
         raise RuntimeError("自然语言 E2E 没有创建任何子代理。")
-    blockers = blocking_task_ids(tasks)
+    blockers = _blocking_task_ids(tasks)
     if blockers:
         raise RuntimeError(
             "持久化子代理状态仍未完成: "
-            f"done_verified={done_verified_count(tasks)}/{len(tasks)} blockers={', '.join(blockers)}"
+            f"done_verified={_done_verified_count(tasks)}/{len(tasks)} blockers={', '.join(blockers)}"
         )
 
 
@@ -55,6 +50,30 @@ def _persisted_subagent_tasks(fixture_root) -> list[SimpleNamespace]:
         if isinstance(payload, dict):
             tasks.append(SimpleNamespace(**payload))
     return tasks
+
+
+# LLM: _blocking_task_ids replaces the removed dispatch closeout resolver for Live Lab assertions only.
+# 函数用途: 在测试脚本里做轻量 task 状态检查，不参与产品运行时收口。
+def _blocking_task_ids(tasks: list[SimpleNamespace]) -> list[str]:
+    blockers: list[str] = []
+    for task in tasks:
+        status = str(getattr(task, "status", "") or "").upper()
+        verification = str(getattr(task, "verification_status", "") or "").upper()
+        if status in {"BLOCKED", "FAILED", "TIMEOUT", "CANCELLED"} or verification in {"FAILED", "REJECTED"}:
+            blockers.append(str(getattr(task, "id", "") or "unknown"))
+    return blockers
+
+
+# LLM: _done_verified_count keeps Live Lab error messages useful without importing product closeout helpers.
+# 函数用途: 统计已完成且已验证的 task 数量，只用于测试失败提示。
+def _done_verified_count(tasks: list[SimpleNamespace]) -> int:
+    count = 0
+    for task in tasks:
+        status = str(getattr(task, "status", "") or "").upper()
+        verification = str(getattr(task, "verification_status", "") or "").upper()
+        if status in {"DONE", "VERIFIED", "SUCCEEDED"} and verification == "VERIFIED":
+            count += 1
+    return count
 
 
 # LLM: _gateway_response_text reads the response field when gateway emits JSON, with raw stdout fallback.

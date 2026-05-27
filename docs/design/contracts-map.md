@@ -28,14 +28,14 @@
 - `agent_py_agent/agent/contracts/run_trace_contract.py`：运行 trace 结构。
 - `agent_py_agent/agent/contracts/contract_status.py`：合同失败状态汇总。
 - `agent_py_agent/agent/contracts/contract_trace.py`：finding 调试链。
-- `agent_py_agent/agent/agent_core/delivery_requirement_materializer.py`：从普通用户需求物化开放世界 delivery/orchestration 合同。
-- `agent_py_agent/agent/agent_core/tool_loop_orchestration_contract_decision.py`：显式协作请求的最终回答返工门，检查真实 orchestration 工具事实。
+- `agent_py_agent/agent/agent_core/delivery_requirement_materializer.py`：从普通用户需求物化开放世界 delivery 合同；不再生成 orchestration 硬合同。
 - `agent_py_agent/agent/agent_core/orchestration_shared_context.py`：父级小型读取 brief 进入子代理 `context_packs` 的通用桥接层；工具刚成功返回时可直接缓存，归档扫描作为补充，只传摘要和 refs，不写业务专项字段。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_refs.py`：父级调度结果索引层；从本轮 touched run 和 runner-created child 汇总状态、摘要、`output_json` 和产物 refs，供 `dispatch_subagents`/`subagent_board` 在长记录前先展示关键机器事实。
 - `agent_py_agent/agent/agent_core/orchestration_sibling_roster.py`：同批子代理身份索引层；批量创建后把 peer `run_id/name/role/goal` 写入 `sibling_roster` context pack，解决同批兄弟彼此不可见的问题。它只提供索引，不发布未来产物路径，也不制造等待关系。
 - `agent_py_agent/agent/agent_core/orchestration_create_items.py`：批量子代理参数解析层；只把 `items` / `tasks` 解析成独立任务 bundle，不再拒绝 sibling 共享输出，也不再从输入/输出路径推断批次依赖。父级显式给 item 的 read refs 会原样保留为读线索；路径不存在不会卡启动。
 - `agent_py_agent/agent/agent_core/runner_ref_fields.py`：runner 路径字段解析 helper；只提取显式输入/输出 refs 供提示、写根和报告使用，不再因为 `required_read_paths` 缺失或不存在而跳过 runner。真实缺文件由子代理运行时工具结果返回给模型处理。
 - 已删除旧输入物化工具：`subagent_input_materialization.py` / `materialize_subagent_inputs` 不再存在。父代理要么在 prompt/结构化参数里给清楚路径，要么让子代理运行后自己报告缺文件；系统不再自动复制“父级可读文件”来修补启动门。
+- 已删除旧调度提示/去重 helper：`scheduling_warnings`、`hierarchy_duplicate_domains.py`、`hierarchy_leaf_targets.py` 和 `hierarchy_scope_domains.py` 不再参与生产路径。`schedule_child_subagents` 只返回创建、复用、待 dispatch、tree/status 相关事实；重复领域、共享目标、不同主题协作交给父级模型按任务语义处理。
 - `agent_py_agent/agent/agent_core/runner_prompt_context_summary.py`：runner 上下文摘要层；把 targeted collaboration request 的结构化线索包渲染给响应代理。
 - `agent_py_agent/agent/agent_core/agent_tree_status.py`：代理树只读状态模型；供 `inspect_agent_tree`、watch 和后台主代理读取 task/run/parent/depth/current tool/progress/artifacts/blockers。
 - `agent_py_agent/agent/agent_core/services/watch_service.py`：watch 观察/推进边界；默认只观察代理树，显式 `advance` 才调用 dispatch。
@@ -121,8 +121,8 @@
 
 当前关键结论：
 
-- 显式协作请求现在会物化为 `orchestration_contract.v1`，并在 root 最终回答前检查 `create_subagents` / `dispatch_subagents` 等真实工具记录；没有满足时返回结构化返工提示，而不是让 root 自己读完后口头说完成。默认 `execution_required=true`，所以“创建子代理记录”不等于“子代理已执行”；只有外部结构化 case 明确 `execution_required=false` 时才允许只规划/只建记录。
-- 已删除旧 root 控制面硬边界：当前轮 child runs 存在时，系统不再用“父级检查处理。
+- 已删除旧 orchestration_contract 最终回答门：协作请求不再被入口物化成专门硬合同，也不再因为没有执行某个协作工具而本地阻断最终回答。
+- 已删除旧 root 控制面硬边界：当前轮 child runs 存在时，系统不再用父级检查门替主代理判断是否完成；主代理通过 tree/refs/dispatch 状态继续调度或汇报。
 - `case_status` 不只展示请求和证据，也会输出 `rework/rework_targets`，把阻塞请求和缺证据请求转成通用返工目标。
 - `dispatch_subagents` 的显式目标字段接受 `run_ids/include_run_ids/subagent_ids/target_subagent_ids/target_run_ids/agent_ids/child_run_ids/children/items[].run_id`，`direct_children=true` 表示当前作用域的直接孩子；顶层给出目标 ID 时默认真实推进 runner。这是工具协议容错，不是业务任务模板。同批目标不再按 worker/coordinator 偷偷拆两波，系统按父级给定顺序和并发参数执行；真要流水线，父级应先派 A、看 A 完成、再派 B。
 - 调查/查询/监控类 leaf worker 可以只交付结构化 `evidence_refs`。父级空测试报告判定会把非内部 evidence ref 视为可 inspect 的事实源；顶层 `evidence_refs/artifact_refs` 会在 parser 层补成 refs-only evidence packet，避免证据丢失。

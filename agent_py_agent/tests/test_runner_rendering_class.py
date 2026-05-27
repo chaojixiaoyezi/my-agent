@@ -141,7 +141,6 @@ class TestExecutionContextRendering:
             quality_contract=QualityContract(
                 user_visible_goal="交付高质量代码",
                 quality_bar="代码可运行",
-                quality_note="normal_closeout",
             ),
         )
 
@@ -149,7 +148,7 @@ class TestExecutionContextRendering:
 
         assert "## Quality Contract" in result
         assert "交付高质量代码" in result
-        assert "normal_closeout" in result
+        assert "代码可运行" in result
 
     def test_render_execution_context_markdown_with_repair_contract_pack(self):
         """测试 repair context pack 会展示关键合同字段。"""

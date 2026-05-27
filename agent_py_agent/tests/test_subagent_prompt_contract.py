@@ -24,7 +24,7 @@ def test_runner_prompt_tells_leaf_to_defer_command_execution_to_parent():
 
     assert "没有 shell/command/terminal 工具" in prompt
     assert "不要因为不能自己运行 pytest 就提交 capability_request" in prompt
-    assert "最终收口器" in prompt
+    assert "最终收口认可" in prompt
     assert "不要写 cd ... &&" in prompt
     assert '"working_dir"' in prompt
     assert "逐条对照验收条件" in prompt
@@ -113,9 +113,10 @@ def test_runner_prompt_tells_coordinator_to_stay_capable_and_delegate_when_usefu
     assert "由真正需要该能力的 runner 正式申请" in prompt
     assert "不要让 worker/writer 代写 coordinator 自己的协调证据" in prompt
     assert "原样传递父级指定的文件名" in prompt
-    assert "scheduling_warnings" in prompt
     assert "可以混建" in prompt
-    assert "domain_mismatch" in prompt
+    assert "scheduling_warnings" not in prompt
+    assert "domain_mismatch" not in prompt
+    assert "forbidden_child_scope" not in prompt
     assert "可用角色模板" in prompt
     assert "bug_finder" in prompt
     assert "找茬子代理" in prompt

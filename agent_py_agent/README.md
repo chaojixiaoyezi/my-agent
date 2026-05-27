@@ -84,7 +84,7 @@ python3 -m agent_py_agent scenario-test
 这条命令会创建临时 fixture 项目，把 `workspace_root` 指过去，然后走：
 
 ```text
-gateway ask -> 主代理 create_subagents -> dispatch runner -> 父代理验收
+gateway ask -> 主代理 create_subagents -> dispatch runner -> tree/refs -> 主代理收口
 ```
 
 所有 memory、subagent、gateway 和文件工具写入都在临时目录里，不会碰当前开发仓库。

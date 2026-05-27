@@ -141,7 +141,7 @@
 ## 2026-05-15 Code-Size Zero Refactor
 
 - 中文说明：本轮不新增流程限制，主要把已经跑通的子代理硬化代码拆成更稳的长期结构，目标是“子代理像换了记忆/任务空间的主代理一样能干活”，而不是继续靠大文件和细碎参数走钢丝。
-- 已拆分：`result_structured_evidence.py` 承接 evidence / evidence_packets / findings 解析；`filesystem_read_file.py` 承接 `read_file` 执行；`registry_payload_normalize.py` 承接工具 JSON 容错归一；`runner_timeout_policy.py`、`subagent_finalize_artifact_integrity.py`、`subagent_dispatch_closeout_*`、`context_bundle_*`、`static_site_*` 小模块承接各自边界。
+- 已拆分：`result_structured_evidence.py` 承接 evidence / evidence_packets / findings 解析；`filesystem_read_file.py` 承接 `read_file` 执行；`registry_payload_normalize.py` 承接工具 JSON 容错归一；`runner_timeout_policy.py`、`context_bundle_*`、`static_site_*` 小模块承接各自边界。早期的 `subagent_finalize_artifact_integrity.py`、`subagent_dispatch_closeout_*` 已在后续协作简化中删除，避免 runner 收尾和 dispatch 本地收口变成额外卡点。
 - 已清零：strict code-size 报告达到 `hard=0 high-risk=0 soft=0`。后续新增功能不允许靠调高阈值通过；接近 high-risk 时要优先拆模块、用 bundle，或把纯数据表移出控制流文件。
 - 已复验：focused 子代理/工具/配置测试 `157 passed`；自然语言层级基线和恢复相关 focused tests `29 passed`。
 - 开发要求：后续继续少写死流程。工具、路径、执行、自毁红线由系统守；角色选择、QA 范围、修复顺序、是否继续派工尽量交给 LLM + 模板 + workflow + 验收事实决定。

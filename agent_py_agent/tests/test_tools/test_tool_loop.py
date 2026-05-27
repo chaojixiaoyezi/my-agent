@@ -480,9 +480,9 @@ def test_repeated_orchestration_tool_call_is_not_executed_twice():
         assert len(tasks) == 1
 
 
-# LLM: blocked hierarchy schedule attempts must remain retryable after the parent narrows scope.
-# 函数用途: 复现 R38 中 schedule_child_subagents 返回 blocked=true 后，被一次性调用去重挡住修正重试的问题。
-def test_blocked_schedule_result_does_not_consume_one_shot_key():
+# LLM: non-mutating hierarchy schedule attempts must remain retryable after the parent narrows scope.
+# 函数用途: schedule_child_subagents 返回 blocked=true 后，不应被一次性调用去重挡住修正重试。
+def test_non_mutating_schedule_result_does_not_consume_one_shot_key():
     params = ToolLoopExecuteParams(
         user_prompt="",
         memories=[],

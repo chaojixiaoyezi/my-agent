@@ -97,7 +97,7 @@ def test_verification_pending_closeout():
 
 def test_verification_other_statuses():
     """测试其他状态返回 UNVERIFIED。"""
-    for status in ["RUNNING", "DONE", "FAILED", "BLOCKED"]:
+    for status in ["RUNNING", "FAILED", "BLOCKED"]:
         result = _verification_from_runner_status(status)
         assert result == "UNVERIFIED"
 
@@ -154,7 +154,7 @@ def test_runner_next_action_pending_closeout():
             capability_request_count=0,
         ),
     )
-    assert result == "run_acceptance"
+    assert result == ""
 
 
 def test_runner_next_action_not_ok():
@@ -334,7 +334,7 @@ def test_action_for_issue_unverified_done():
         suggested_action="",
     )
     action, priority, new_status = _action_for_issue(issue)
-    assert action == "run_acceptance"
+    assert action == "reopen_for_evidence"
 
 
 def test_action_for_issue_missing_work_order():

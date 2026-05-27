@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 
 
+@pytest.mark.skip(reason="旧 manager_acceptance_findings 别名已删除，统一走当前 closeout/tree 状态")
 class TestAcceptanceFindingsAliases:
     """测试 acceptance_findings 公开别名的委托行为。"""
 

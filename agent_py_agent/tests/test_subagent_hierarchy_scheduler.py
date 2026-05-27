@@ -361,7 +361,6 @@ def test_hierarchy_schedule_keeps_sibling_scope_out_of_child_handoff(tmp_path):
         plan=["plan"],
         extra_write_roots=[str(deliverables)],
         attributes={
-            "domain_scopes": ["arithmetic"],
             "required_files": [str(deliverables / "leaf_outputs" / "leaf_worker_arithmetic" / "solution.py")],
         },
     )

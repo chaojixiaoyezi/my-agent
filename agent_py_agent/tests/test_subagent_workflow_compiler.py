@@ -46,7 +46,6 @@ def test_compile_single_worker_template_creates_worker_spec():
     assert spec.goal == "Add compiler coverage"
     assert spec.acceptance_checks == ["focused tests pass"]
     assert spec.depends_on == []
-    assert spec.cannot_self_accept is True
 
 
 def test_compile_multi_phase_template_preserves_depends_on():
@@ -152,6 +151,5 @@ def test_worker_instructions_include_required_constraints():
 
     assert "not the only worker" in instructions
     assert "Do not roll back or overwrite changes made by other workers" in instructions
-    assert "cannot self-accept final completion" in instructions
     assert "Leave concrete evidence" in instructions
     assert "Report residual risks" in instructions

@@ -1,5 +1,7 @@
 # 设计思路台账
 
+> 2026-05-27 当前路线备注：早期条目里提到的 `orchestration_contract`、`materialize_subagent_inputs`、`subagent_dispatch_closeout`、`parent_acceptance` 专项收口、`scheduling_warnings`、领域/重复目标调度提示等，都是历史试错记录。当前生产路线是：调度工具只返回 refs/tree/status，普通协作不靠中间验收门卡住；最终质量统一回到 closeout 和任务树事实。
+
 ## 2026-05-26 / 删除协作流程里的走钢丝硬门
 
 状态：本地已落地，focused tests 已跑一轮；不提交
@@ -21,7 +23,7 @@
 - `open_case` 相关提示从“必须继续 request”改成“需要别人回应时建议 request；只记录事件可以停在 open case”。协作工具提示只做软引导，不再把账本步骤写成验收卡点。
 - 参考项目复查结论：长期助手 的 `delegate_task`、终端交互 的 `AgentTool`、通道运行时 的 consult runtime 都以 prompt/task + 工具权限 + workspace/session/timeout 为主，没看到“启动前输入物化门”“sibling 输入输出依赖自动推断门”这类硬卡点；会话运行时 SDK 的 `Thread.run/runStreamed/resumeThread` 更强调 thread 续跑、结构化事件、sandbox/approval 配置，也没有把普通任务拆成隐藏的 worker/coordinator 阶段门。
 - 顶层 dispatch 完成态恢复确定性 closeout：所有当前 scope 子代理已经 `DONE/VERIFIED` 时，工具轮后直接返回 refs-first 状态，不再额外请求一次模型。失败/阻塞时仍只返回中文子代理状态摘要，旧 `Subagent State Notice` 文案不再出现在生产代码。
-- QA/tester/acceptor 早于实现产物的调度不再硬阻断。`qa_before_implementation_ready` 现在只是 `scheduling_warnings`，提醒父级“可能在空产物上测试”，但不替父级决定流程；最终是否合格仍交给统一 closeout/acceptance。
+- QA/tester/acceptor 早于实现产物的调度不再硬阻断，也不再通过 `scheduling_warnings` 给隐藏提示。调度层只创建/复用/返回待 dispatch 状态；父级是否先测、后测或补派，由模型根据 tree/refs 自己判断。
 
 设计结论：
 - 协作 case 的基本语义保持简单：打开、收集、到 deadline 关闭/汇总。没有回复的对象写成未回复事实，不让整个任务无限等。
@@ -175,17 +177,16 @@
 
 ## 2026-05-25 / 显式协作请求入口合同
 
-状态：已落地入口物化、运行属性注入和最终回答返工门，focused tests 通过
+状态：历史方案，已在 2026-05-27 协作简化中废弃；当前不再生成 orchestration 硬合同，也不再用最终回答返工门卡住 root。
 
 摘要：
 - 真实 MiniMax 场景暴露：用户普通语言明确要求“创建 11 个子代理/联合其他代理调查”时，主代理仍可直接读完资料并写最终报告，因为旧逻辑只在已有 `task_attributes.subagent_delegation` 或已经创建过子代理时保护派工边界。
-- 新增通用 `orchestration_contract`，由入口物化器从普通用户需求抽取结构化字段：`requires_orchestration`、`required_tools`、`minimum_subagent_count`、`rework_budget`。它不包含 IP、日志、GitHub、PDF、XLSX 等任务专项字段。
-- `runtime_mixin` 会把物化出的 `orchestration_contract` 注入 `task_attributes`，并设置 `subagent_delegation=True`，让已有派工前正文读取保护生效；root 仍可读 README、目标、rubric 和目录，但不能先吞 data/source 正文再假装完成协作任务。
-- `tool_loop_orchestration_contract_decision.py` 在模型准备无工具最终回答时检查真实工具事实：必须看到合同要求的 orchestration 工具执行记录，并满足最小创建数量。未满足时返回结构化中文返工提示，让模型按 Tool Catalog 重试 `create_subagents` 等工具；连续忽略后才返回 blocked。
+- 当时新增过通用 `orchestration_contract`，后来真实协作测试证明这会把模型卡到固定流程里，已删除。
+- 当前只保留 tree/refs/dispatch 状态事实；是否继续派工、补查或汇报，由主代理/父代理根据这些事实判断。
 - 对照参考：通道运行时 的 subagents 工具把 list/steer/yield 做成显式控制面，OpenHuman 文档强调 subagent/delegate 是可见工具决策；本仓库吸收的是“显式协作必须有工具事实和状态回路”，不是业务模板。
 
 验证：
-- `pytest agent_py_agent/tests/test_delivery_requirement_materializer.py::test_materialized_delivery_contract_preserves_orchestration_contract agent_py_agent/tests/test_runtime_delivery_materialization_entry.py::test_cli_run_reworks_final_answer_until_explicit_orchestration_runs -q`
+- 历史测试已删除；当前覆盖见 `test_materialized_delivery_contract_drops_orchestration_contract` 和 dispatch handoff 测试。
 - `pytest agent_py_agent/tests/test_delivery_requirement_materializer.py agent_py_agent/tests/test_runtime_delivery_materialization_entry.py -q`
 - `pytest agent_py_agent/tests/test_tools/test_tool_loop.py::test_tool_loop_blocks_predelegation_source_body_read agent_py_agent/tests/test_tools/test_tool_loop.py::test_agent_can_delegate_to_subagents_from_tool_call agent_py_agent/tests/test_orchestration_direct_write_guard.py -q`
 
@@ -2334,7 +2335,7 @@ def example(...):
 
 摘要：
 - R5 真实测试中 auth leaf 写出了 deliverables 产物，但 root 重复创建 checkout/quality 同域 coordinator，说明同父级需要领域去重。
-- `hierarchy_scope_guards.py` 新增同父级 coordinator-domain guard；只作用于 coordinator/checker/tester/reviewer 类角色，避免误拦多个真实 worker/leaf。
+- 当时新增过同父级 coordinator-domain guard；后续协作简化已删除这类 scheduler 硬门，重复/范围由父级根据 tree 状态判断。
 - `artifact_registry.py` 现在把 task 的 `allowed_write_roots` 纳入 artifact manifest 安全解析根；被授权写出的业务产物能记录 exists/size/hash，越界路径仍然 blocked 且不读取正文。
 - 下一步：R6 必须验证重复 coordinator 被阻断、deliverables 产物在 takeover manifest 中可解析，并继续推进 producer/quality 阶段依赖。
 
@@ -2366,7 +2367,7 @@ def example(...):
 
 摘要：
 - R8 真实测试确认 auth/catalog 可以产出页面，但 cart coordinator 把父级 `/build` 目录漂移成 sibling `/stage7_r8_build`，说明“child spec 自己写路径就授权”还缺少父级权威根锚定。
-- `hierarchy_scope_guards.py` 新增 child write-root drift guard：父级已有权威产物根时，child goal / extra_write_roots 中的本地路径必须等于或位于这些根下面；否则返回 `child_write_root_drift`，不创建 child。
+- 当时新增过 child write-root drift guard；后续已删除 scheduler 范围硬门，路径错误由工具执行/通用路径边界返回给模型处理。
 - `read_artifact` 仍不允许读取任意文件；当模型只抄错 artifact path 前缀但文件名在 index 中唯一时，reader 会修复到登记记录，然后继续做 trusted tool-output 目录检查和 sha256 校验。
 - `dispatch_subagents` 顶层 payload 新增 `runner_selection_recovery`，`subagent_board` 顶层新增 `actionable_run_ids` 并截断长 goal，降低真实 runner 在大报告/外置摘要里看不到关键 id 的概率。
 - 下一步：R9 用干净 runtime/deliverables 复测 cart 分支是否能被 drift guard 纠回 `/build`，再继续做 producer/quality 阶段依赖和完整购物站静态验收。

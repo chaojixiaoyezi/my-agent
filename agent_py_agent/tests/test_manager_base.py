@@ -22,7 +22,7 @@ class TestFieldNames:
         result = _field_names(QualityContract)
         assert isinstance(result, set)
         assert "failure_conditions" in result
-        assert "cannot_self_accept" in result
+        assert "evidence_required" in result
 
 
 class TestListValue:
@@ -95,10 +95,10 @@ class TestNormalizeQualityContract:
 
         data = {
             "failure_conditions": ["cond1", "cond2"],
-            "cannot_self_accept": False,
+            "evidence_required": ["ev1"],
         }
         result = _normalize_quality_contract(data)
-        assert result.cannot_self_accept is False
+        assert result.evidence_required == ["ev1"]
 
 
 class TestNormalizeContextManifest:

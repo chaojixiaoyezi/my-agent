@@ -21,11 +21,6 @@ from .tool_loop_exploration_decision import (
     exploration_fuse_no_tool_call_decision,
     exploration_fuse_tool_call_decision,
 )
-from .tool_loop_orchestration_contract_decision import (
-    OrchestrationContractDecision,
-    OrchestrationContractDecisionRequest,
-    orchestration_contract_no_tool_call_decision,
-)
 from .tool_loop_repair_counters import (
     ToolLoopRepairCounters,
     _inc_local_progress,
@@ -134,11 +129,6 @@ def _tool_calls_decision(
 # LLM: _no_tool_calls_decision prevents spoof-only reserved records from becoming final answers.
 # 函数用途: 无真实工具调用时，普通回复直接收口；伪造工具回执先纠偏一次，再重复就阻断。
 def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision:
-    orchestration_contract_decision = orchestration_contract_no_tool_call_decision(
-        _orchestration_contract_request(request)
-    )
-    if orchestration_contract_decision is not None:
-        return _orchestration_contract_decision(orchestration_contract_decision)
     delivery_closeout_decision = _implicit_delivery_closeout_decision(request)
     if delivery_closeout_decision is not None:
         return delivery_closeout_decision
@@ -226,20 +216,10 @@ def _unresolved_runtime_issue_decision(decision: UnresolvedRuntimeIssueDecision)
     return ToolLoopResponseDecision(decision.action, decision.response, decision.calls, decision.counters)
 
 
-def _orchestration_contract_decision(decision: OrchestrationContractDecision) -> ToolLoopResponseDecision:
-    return ToolLoopResponseDecision(decision.action, decision.response, decision.calls, decision.counters)
-
-
 def _unresolved_runtime_issue_request(
     request: _NoToolCallsRequest,
 ) -> UnresolvedRuntimeIssueDecisionRequest:
     return UnresolvedRuntimeIssueDecisionRequest(request.agent, request.params, request.response, request.counters)
-
-
-def _orchestration_contract_request(
-    request: _NoToolCallsRequest,
-) -> OrchestrationContractDecisionRequest:
-    return OrchestrationContractDecisionRequest(request.agent, request.params, request.response, request.counters)
 
 
 # LLM: _exploration_request adapts either request shape into the exploration module contract.
@@ -249,4 +229,3 @@ def _exploration_request(
     calls: list[dict[str, object]],
 ) -> ExplorationFuseDecisionRequest:
     return ExplorationFuseDecisionRequest(request.agent, request.params, request.response, request.counters, calls)
-

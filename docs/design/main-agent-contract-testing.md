@@ -248,14 +248,9 @@
 
 这不是新收口交给父级仍然要由 LLM 自己判断如何继续调度、接管、修正汇总或向用户报告阻塞。
 
-随后真实复验 `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-144053` 暴露了另一条更底层的协作合同缺口：模型创建 11 个子代理以后，尚未 `dispatch_subagents`，却尝试提交验收或让用户确认“等子代理完成”。修复方向是通用合同语义，而不是给这个场景写专项流程：
+随后真实复验 `/Users/example/my_agent/live-agent-runs/generic-ip-clue-e2e-20260525-144053` 暴露过“创建子代理记录不等于执行任务”的问题。早期曾用 `orchestration_contract.v1` 做最终回答硬门，后来证明这会把协作流程卡得太死。
 
-- `orchestration_contract.v1` 默认 `execution_required=true`。
-- 协作执行任务默认必须同时满足 `create_subagents` 和 `dispatch_subagents` 两个真实工具事实；旧合同可以保留 `required_tools` 原样，但提示层和最终回答门会按 `execution_required=true` 推导出 dispatch 缺口。
-- 旧合同如果没有显式 `execution_required=false`，运行时也会把缺少 `dispatch_subagents` 识别为返工缺口。
-- 如果用户或外部结构化 case 明确只想规划/只建记录，才允许 `execution_required=false`，此时不强制执行调度。
-
-这条规则表达的是“创建任务记录不等于执行任务”，不绑定 IP、文件数量、子代理数量或具体业务。
+当前规则改为：协作链路只保留 tree/refs/dispatch 状态事实和日志观察，系统不再用专门 orchestration 合同阻断 root 最终回答。主代理或父代理需要继续推进时，应读取代理树、dispatch 返回索引和子代理产物引用，再自行判断下一步。
 
 同轮复验还显示模型会把 dispatch 参数写成 `{"orchestration": {"run_ids": [...], "concurrency": 5, "mode": "parallel"}}`。这是通用工具协议漂移，不是业务专项问题。`dispatch_subagents` 现在会展开 `orchestration` wrapper，并把 `concurrency` 映射到 `max_runners`、把 `mode=parallel/async/execute/run/real` 映射到真实执行开关；dry-run/plan/preview 仍保留为预览语义。
 

@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from ..contracts.delivery_contract_doctor import validate_delivery_contract
-from .delivery_requirement_orchestration import _derived_evidence_contract
 
 SCHEMA_VERSION = "delivery_contract.v1"
 MATERIALIZER_SCHEMA_VERSION = "delivery_requirement_materializer.v1"
@@ -28,12 +27,6 @@ def build_delivery_requirement_materializer_prompt(user_prompt: str) -> str:
         "请写入 delivery_quality_contract.metric_contracts。\n"
         "分析型字段请放入 artifacts[].llm_generated_fields，例如解释、理由、建议、结论、判断、摘要这类需要模型撰写的列；"
         "不要把它们映射到来源 API 的普通 description 字段。\n"
-        "如果用户明确要求创建子代理、派工、多代理协作、联合其他代理/人员调查，请写入 orchestration_contract："
-        '{"schema_version":"orchestration_contract.v1","requires_orchestration":true,'
-        '"execution_required":true,"required_tools":["create_subagents","dispatch_subagents"],'
-        '"minimum_subagent_count":用户明确数量或1,"rework_budget":2}。'
-        "只有用户明确说只要规划、只要创建记录、暂不执行时，execution_required 才可以是 false。\n"
-        "没有明确协作要求时不要写 orchestration_contract。\n"
         "可选字段包括 artifacts、delivery_quality_contract、fact_evidence_contract；只有外部系统显式给出时才保留 bootstrap_contract。\n"
         "用户需求：\n"
         f"{user_prompt}"
@@ -57,7 +50,6 @@ def materialized_delivery_contract(
     for key in ("delivery_quality_contract", "fact_evidence_contract", "bootstrap_contract"):
         if isinstance(value.get(key), dict):
             contract[key] = dict(value[key])
-    _preserve_orchestration_contract(contract, value)
     _normalize_delivery_quality_contract(contract)
     _derive_fact_evidence_contract(contract)
     _preserve_explicit_bootstrap_contract(contract)
@@ -237,6 +229,25 @@ def _derive_fact_evidence_contract(contract: dict[str, Any]) -> None:
     }
 
 
+def _derived_evidence_contract(quality: dict[str, Any]) -> dict[str, Any]:
+    evidence = dict(quality.get("evidence_contract")) if isinstance(quality.get("evidence_contract"), dict) else {}
+    required_fields = _merged_required_fields(evidence.get("required_fields"), quality.get("metric_contracts"))
+    if not required_fields:
+        return {}
+    evidence["required_fields"] = required_fields
+    evidence.setdefault("require_verified", True)
+    if "allowed_value_types" not in evidence:
+        evidence["allowed_value_types"] = ["exact"]
+    return evidence
+
+
+def _merged_required_fields(raw_fields: object, metric_contracts: object) -> list[str]:
+    fields = [str(item).strip() for item in raw_fields if str(item).strip()] if isinstance(raw_fields, list) else []
+    if isinstance(metric_contracts, list):
+        fields.extend(str(item.get("field") or "").strip() for item in metric_contracts if isinstance(item, dict))
+    return sorted({item for item in fields if item})
+
+
 def _normalize_delivery_quality_contract(contract: dict[str, Any]) -> None:
     quality = contract.get("delivery_quality_contract")
     if not isinstance(quality, dict):
@@ -264,9 +275,6 @@ def _preserve_explicit_bootstrap_contract(contract: dict[str, Any]) -> None:
     if "enforcement" not in bootstrap:
         bootstrap["enforcement"] = "soft"
     contract["bootstrap_contract"] = bootstrap
-
-
-from .delivery_requirement_orchestration import _preserve_orchestration_contract
 
 
 # LLM: _path_finding validates materialized paths against the task workspace.

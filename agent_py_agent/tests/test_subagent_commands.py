@@ -258,6 +258,7 @@ class TestCmdSubagentsRouteCapabilities:
             assert result == 0
 
 
+@pytest.mark.skip(reason="旧 subagents acceptance CLI 已删除，统一看 tree/board/closeout")
 class TestCmdSubagentsAcceptance:
     """测试 cmd_subagents_acceptance 命令。"""
 

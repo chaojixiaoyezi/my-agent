@@ -5,11 +5,9 @@ from __future__ import annotations
 
 
 # LLM: refs_only_delegation_enabled distinguishes explicit delegation from ordinary acceptance wording.
-# 函数用途: 只接受 task_attributes 里的机器字段；显式协作合同也启用顶层 root 的控制面读写边界。
+# 函数用途: 只接受 task_attributes 里的显式机器字段，不再通过协作合同推导父级控制流。
 def refs_only_delegation_enabled(attributes: dict | None) -> bool:
-    return _truthy_field(attributes, ("refs_only", "delegate_only")) or _requires_orchestration_contract(
-        attributes
-    )
+    return _truthy_field(attributes, ("refs_only", "delegate_only"))
 
 
 # LLM: subagent_delegation_enabled accepts only explicit machine fields.
@@ -34,16 +32,6 @@ def parent_product_write_allowed(attributes: dict | None) -> bool:
         attributes,
         ("parent_product_write_allowed",),
     )
-
-
-# LLM: _requires_orchestration_contract reads only materialized machine contracts, not prompt prose.
-# 函数用途: 用户明确要求多代理协作后，入口物化的 orchestration_contract 让 root 保持控制面角色。
-def _requires_orchestration_contract(attributes: dict | None) -> bool:
-    attrs = attributes if isinstance(attributes, dict) else {}
-    contract = attrs.get("orchestration_contract")
-    if not isinstance(contract, dict):
-        return False
-    return _boolish(contract.get("requires_orchestration"))
 
 
 # LLM: _truthy_field reads exact bool-like protocol values without scanning prose.

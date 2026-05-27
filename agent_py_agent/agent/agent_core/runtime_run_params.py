@@ -76,7 +76,7 @@ def run_params_with_request_id(params: RunParams) -> RunParams:
 
 def run_params_with_materialized_delivery_contract(agent, user_prompt: str, params: RunParams) -> RunParams:
     if params.delivery_contract is not None:
-        return run_params_with_orchestration_attributes(params)
+        return params
     if not _should_materialize_delivery_contract(params):
         return params
     prompt = build_delivery_requirement_materializer_prompt(user_prompt)
@@ -84,19 +84,7 @@ def run_params_with_materialized_delivery_contract(agent, user_prompt: str, para
     contract = materialized_delivery_contract(response.text, workspace_root=agent.root)
     if not _has_materialized_runtime_contract(contract):
         return params
-    return run_params_with_orchestration_attributes(replace(params, delivery_contract=contract))
-
-
-def run_params_with_orchestration_attributes(params: RunParams) -> RunParams:
-    contract = params.delivery_contract if isinstance(params.delivery_contract, dict) else {}
-    orchestration = contract.get("orchestration_contract") if isinstance(contract, dict) else None
-    if not isinstance(orchestration, dict) or not orchestration.get("requires_orchestration"):
-        return params
-    attrs = dict(params.task_attributes or {})
-    attrs.setdefault("orchestration_contract", dict(orchestration))
-    attrs.setdefault("subagent_delegation", True)
-    attrs.setdefault("refs_only", True)
-    return replace(params, task_attributes=attrs)
+    return replace(params, delivery_contract=contract)
 
 
 def _should_materialize_delivery_contract(params: RunParams) -> bool:
@@ -110,6 +98,5 @@ def _has_materialized_runtime_contract(contract: dict) -> bool:
             isinstance(contract.get("delivery_quality_contract"), dict),
             isinstance(contract.get("fact_evidence_contract"), dict),
             isinstance(contract.get("bootstrap_contract"), dict),
-            isinstance(contract.get("orchestration_contract"), dict),
         )
     )

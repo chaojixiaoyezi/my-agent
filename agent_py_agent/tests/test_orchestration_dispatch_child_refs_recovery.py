@@ -49,7 +49,6 @@ def test_dispatch_payload_surfaces_qa_repair_advice_from_direct_child(tmp_path: 
     direct = payload["direct_children"]
     assert direct["needs_repair_wave"] is True
     assert direct["next_action"] == "create_repair_child_from_qa_refs"
-    assert direct["ready_for_final_closeout"] is False
     assert direct["qa_repair_advice"]["failed_or_conflicting_qa_run_ids"] == ["tester-1"]
     assert direct["qa_repair_advice"]["suggested_tool_call"]["children"][0]["role"] == "worker"
 

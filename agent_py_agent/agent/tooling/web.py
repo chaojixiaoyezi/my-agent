@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ..contracts.gates import NetworkResolver, NetworkSafetyFacts, evaluate_network_safety_gate
@@ -284,32 +285,58 @@ class FetchUrlTool(BaseTool):
 # LLM: WebFetchTool keeps the old import path while implementation lives in web_fetch_tools.py.
 # 类用途: 给旧调用方保留 agent.tooling.web.WebFetchTool，同时注入共享 URL、安全和错误格式 helper。
 class WebFetchTool(_WebFetchTool):
-    def __init__(self, *, max_chars: int, timeout: int, **kwargs: Any):
+    def __init__(
+        self,
+        *,
+        max_chars: int,
+        timeout: int,
+        resolver: NetworkResolver | None = None,
+        artifact_root: Path | None = None,
+        cache_ttl_seconds: int = 900,
+        allowed_private_hosts: Iterable[str] = (),
+        allow_private_resolution: bool | None = None,
+    ):
         super().__init__(WebRuntimeDeps(
             max_chars=max_chars,
             timeout=timeout,
-            resolver=kwargs.pop("resolver", None) or _default_network_resolver,
+            resolver=resolver or _default_network_resolver,
             normalize_url=_normalize_url,
             response_preview_chars=_response_preview_chars,
             network_safety_error=_network_safety_error,
             format_http_error=_format_http_error,
-            **kwargs,
+            artifact_root=artifact_root,
+            cache_ttl_seconds=cache_ttl_seconds,
+            allowed_private_hosts=tuple(str(item) for item in allowed_private_hosts),
+            allow_private_resolution=allow_private_resolution,
         ))
 
 
 # LLM: WebExtractTool keeps the old import path while implementation lives in web_fetch_tools.py.
 # 类用途: 给旧调用方保留 agent.tooling.web.WebExtractTool，同时注入共享 URL、安全和错误格式 helper。
 class WebExtractTool(_WebExtractTool):
-    def __init__(self, *, max_chars: int, timeout: int, **kwargs: Any):
+    def __init__(
+        self,
+        *,
+        max_chars: int,
+        timeout: int,
+        resolver: NetworkResolver | None = None,
+        artifact_root: Path | None = None,
+        cache_ttl_seconds: int = 900,
+        allowed_private_hosts: Iterable[str] = (),
+        allow_private_resolution: bool | None = None,
+    ):
         super().__init__(WebRuntimeDeps(
             max_chars=max_chars,
             timeout=timeout,
-            resolver=kwargs.pop("resolver", None) or _default_network_resolver,
+            resolver=resolver or _default_network_resolver,
             normalize_url=_normalize_url,
             response_preview_chars=_response_preview_chars,
             network_safety_error=_network_safety_error,
             format_http_error=_format_http_error,
-            **kwargs,
+            artifact_root=artifact_root,
+            cache_ttl_seconds=cache_ttl_seconds,
+            allowed_private_hosts=tuple(str(item) for item in allowed_private_hosts),
+            allow_private_resolution=allow_private_resolution,
         ))
 
 

@@ -97,12 +97,12 @@ class TestNormalizeQualityContract:
         data = {
             "failure_conditions": ["cond1", "cond2"],
             "unknown_field": "should be ignored",
-            "cannot_self_accept": False,
+            "evidence_required": ["ev1"],
         }
         result = _normalize_quality_contract(data)
 
         assert result.failure_conditions == ["cond1", "cond2"]
-        assert result.cannot_self_accept is False
+        assert result.evidence_required == ["ev1"]
 
 
 class TestNormalizeContextManifest:

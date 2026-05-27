@@ -17,7 +17,6 @@ from .orchestration_shared_context import (
 )
 from .runtime_guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
 from .subagent_attempt_guard import stale_subagent_attempt_message
-from .subagent_dispatch_closeout import subagent_dispatch_final_response_guard
 from .tool_call_archive_record import archive_tool_call_record
 from .tool_call_context_reducer import render_tool_payload_for_live_prompt
 from .tool_call_guardrail import record_tool_guard_observation
@@ -137,11 +136,6 @@ class ToolLoopService:
             if final_response:
                 break
 
-        final_response = subagent_dispatch_final_response_guard(
-            self._agent,
-            final_response,
-            executed_tools=params.executed_tools,
-        )
         return final_prompt, final_response, tool_rounds
 
     # LLM: _model_turn_or_fallback keeps model errors and fallback response generation isolated.

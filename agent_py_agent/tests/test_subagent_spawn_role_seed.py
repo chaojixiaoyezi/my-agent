@@ -43,7 +43,7 @@ def test_cmd_spawn_serializes_dataclass_task(tmp_path: Path, capsys):
     output = json.loads(capsys.readouterr().out)
     assert result == 0
     assert output["id"] == "run_001"
-    assert output["quality_contract"]["quality_note"] == "normal_closeout"
+    assert "quality_contract" in output
 
 
 # LLM: test_cmd_spawn_passes_explicit_role_bundle verifies CLI args reach the spawn bundle.

@@ -9,7 +9,7 @@ from typing import Any
 
 from ..models import SubAgentBoardOptions, SubAgentTask
 from ..reports import SubAgentBoardItem
-from .hierarchy_leaf_targets import task_actual_target_tokens
+from .task_target_tokens import task_actual_target_tokens
 
 
 # LLM: build_risk_flags derives board warnings from task state without mutating the task.

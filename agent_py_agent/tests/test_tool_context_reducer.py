@@ -185,7 +185,7 @@ def test_dispatch_externalized_result_keeps_top_level_completion_gate():
     assert "must_not_report_done" in rendered
     assert "child-bad" in rendered
     assert "repair_or_continue_blocking_run_ids" in rendered
-    assert "create_subagents" in rendered
+    assert "create_subagents" not in rendered
     assert "records" not in rendered
 
 
@@ -247,10 +247,8 @@ def test_dispatch_externalized_result_keeps_final_closeout_repair_advice():
         _dispatch_externalized_archive_record(output),
     )
 
-    assert "final_closeout_repair_advice" in rendered
-    assert "create_repair_child_from_final_closeout_refs" in rendered
-    assert "schedule_child_subagents" in rendered
-    assert "HTML语法静态检查" in rendered
+    assert "final_closeout_repair_advice" not in rendered
+    assert "schedule_child_subagents" not in rendered
     assert "records" not in rendered
 
 
@@ -281,10 +279,8 @@ def test_dispatch_externalized_result_keeps_top_level_parent_repair_tool_call():
         _dispatch_externalized_archive_record(output),
     )
 
-    assert "final_closeout_repair_next_tool: create_subagents" in rendered
-    assert "final_closeout_repair_suggested_tool_call" in rendered
-    assert "小傻妞-验收修复" in rendered
-    assert "/tmp/test_execution.json" in rendered
+    assert "final_closeout_repair_next_tool" not in rendered
+    assert "final_closeout_repair_suggested_tool_call" not in rendered
     assert "records" not in rendered
 
 

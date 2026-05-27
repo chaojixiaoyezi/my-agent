@@ -1035,34 +1035,18 @@ my-agent collaboration update-status --case-id <case-id> --status closed --summa
   不再进入专门的 collaboration closeout/acceptance 硬门。不能只靠 summary 说“我已经协作”，
   但缺协作账本事实只作为日志/观察问题暴露，由父级按任务目标继续推进。
 
-## 显式协作请求入口合同
+## 显式协作请求入口处理
 
-真实场景里还有一个更靠前的问题：用户已经用普通话明确说“创建多个子代理”“联合其他代理/人员调查”，但入口没有把这个要求变成机器事实时，root 仍可能自己直接读资料、写报告，然后口头说完成。
+真实场景里还有一个更靠前的问题：用户已经用普通话明确说“创建多个子代理”“联合其他代理/人员调查”，root 仍可能自己直接读资料、写报告，然后口头说完成。
 
-现在入口物化器会在这类需求中生成通用字段：
+旧实现曾把这类需求物化成 `orchestration_contract.v1`，并在最终回答前检查 `create_subagents` / `dispatch_subagents` 等工具事实。这个硬门后来证明太容易把协作流程卡住：模型必须踩固定步骤，否则系统会本地返工或阻断。
 
-```json
-{
-  "orchestration_contract": {
-    "schema_version": "orchestration_contract.v1",
-    "requires_orchestration": true,
-    "required_tools": ["create_subagents"],
-    "minimum_subagent_count": 1,
-    "rework_budget": 2
-  }
-}
-```
+当前运行语义：
 
-这不是专项模板。它只表达“用户明确要求协作/子代理”这个运行边界，不表达 IP、日志、论文、GitHub、Excel、PDF 等业务内容。
-
-运行语义：
-
-- 入口物化后，`runtime_mixin` 会把 `orchestration_contract` 注入 `task_attributes`，并设置 `subagent_delegation=True` 和 `refs_only=True`。
-- 这样已有的派工前正文读取保护会生效：root 可以读 README、目标、rubric、目录等 brief，但不能先把 `data/source/docs/materials` 正文吞完再创建子代理。
-- 派工之后，`orchestration_contract.requires_orchestration=true` 也会继续启用 root 控制面边界：root 有当前轮 child runs 且 checker 未完成时，不能改成自己直接读取已委派 source/product 正文。它应该读取 `subagent_board`、`dispatch_subagents` artifact、task/output/status 等控制面元数据，然后继续调度、创建 repair worker，或说明哪个子代理阻塞。
-- 当模型准备无工具最终回答时，`tool_loop_orchestration_contract_decision.py` 会检查真实工具事实：`required_tools` 是否执行、`minimum_subagent_count` 是否满足。
-- 如果没满足，系统返回 `[tool-system orchestration-contract-rework]`，明确缺哪个工具/数量，要求模型按 Tool Catalog 重试；这不是任务终止。
-- 连续忽略返工超过 `rework_budget` 后，才返回 `ORCHESTRATION_CONTRACT_BLOCKED`，并带上机器可读 missing 列表。
+- 入口物化器不再生成 `orchestration_contract`。
+- dispatch 后只把代理树、运行状态、产物 refs 和证据 refs 交还给主代理/父代理。
+- 系统不再替主代理生成“未完成/已完成”的本地结论，也不再用协作合同挡最终回答。
+- 如果任务确实需要继续协作，由主代理/父代理根据 tree/refs/dispatch 状态继续派工、查询、汇总或向用户说明阻塞。
 
 调度工具的参数容错也挂在这里：`dispatch_subagents` 的显式目标可以写 `run_ids`、`include_run_ids`、`subagent_ids`、`target_subagent_ids`、`target_run_ids`、`agent_ids`、`child_run_ids`、`children`，也可以写 `items:[{"run_id":"..."}]`。这些字段都归一成同一组 run id。`direct_children=true` 是范围意图，不是 run id；顶层会使用本轮已经创建/触碰的子代理，runner 内部会使用当前节点的直接孩子。顶层 root 如果显式给了目标 ID，省略 `apply/execute_runners` 时默认真实推进；如果只是想 dry-run，必须显式写 `apply=false`。
 

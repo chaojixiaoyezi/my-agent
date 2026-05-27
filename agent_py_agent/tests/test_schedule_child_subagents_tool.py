@@ -71,8 +71,8 @@ def test_runner_context_schedule_without_children_returns_quality_advice(tmp_pat
     payload = json.loads(result.output)
 
     assert result.ok is True
-    assert payload["blocked"] is True
-    assert payload["reason"] == "no_child_specs"
+    assert payload["blocked"] is False
+    assert payload["reason"] == "created"
     assert payload["quality_advice"]["phase"] == "quality_wave_ready"
     assert set(payload["quality_advice"]["suggested_roles"]) == {"tester", "bug_finder"}
     assert payload["quality_advice"]["ready_work_refs"][0]["run_id"] == worker.id

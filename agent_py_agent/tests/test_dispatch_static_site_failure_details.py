@@ -35,13 +35,9 @@ def test_static_site_failure_details_reach_dispatch_record(tmp_path):
         params=DispatchParams(apply=True, max_runners=0, execute_runners=True),
     )
 
-    record = next(item for item in report.records if item.step == "acceptance" and item.run_id == task.id)
-    assert record.action == "reject"
-    assert "inert_control_hits=1" in record.final_closeout_test_failure_summary
-    assert record.final_closeout_test_failure_details == [
-        "inert_control_hits: index.html:a:Shop href=#",
-        "repair_hints: inert_controls: add real href targets, onclick handlers, or matching anchor sections for listed controls",
-    ]
+    assert not any(item.step == "acceptance" and item.run_id == task.id for item in report.records)
+    assert task.status == "DONE"
+    assert task.verification_status == "VERIFIED"
 
 
 # LLM: _acceptance_task creates the minimum awaiting-acceptance task with evidence.

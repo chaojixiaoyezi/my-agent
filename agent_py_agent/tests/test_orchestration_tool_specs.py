@@ -29,7 +29,7 @@ class TestOrchestrationToolsSpec:
         assert spec.category == "orchestration"
         assert "role" in spec.parameters
         assert "bug_finder" in spec.parameter_details["role"]
-        assert "验收子代理" in spec.parameter_details["role"]
+        assert "writer" in spec.parameter_details["role"]
         assert "最小必要信息" in spec.parameter_details["items"]
         assert "不要由 root 先读完所有正文再派工" in spec.parameter_details["items"]
 

@@ -183,8 +183,6 @@ _LIST_ATTRIBUTE_FIELDS = (
     "output_files",
     "output_refs",
     "qa_roles",
-    "domain_scopes",
-    "forbidden_child_scopes",
     "hierarchy_contracts",
     "capability_contracts",
     "required_content_lines",

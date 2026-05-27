@@ -52,7 +52,7 @@ def test_hierarchy_schedule_blocks_explicit_depth_and_child_limits(tmp_path):
     assert manager.load(root.id).child_ids == [child_id]
 
 
-def test_hierarchy_schedule_allows_mixed_coordinator_and_leaf_children_with_warning(tmp_path):
+def test_hierarchy_schedule_allows_mixed_coordinator_and_leaf_children(tmp_path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="root", thought="orchestrate", plan=["plan"])
     child = manager.schedule_child_runs(
@@ -72,7 +72,7 @@ def test_hierarchy_schedule_allows_mixed_coordinator_and_leaf_children_with_warn
     )
 
     assert result.blocked is False
-    assert "mixed_coordinator_leaf_children" in result.scheduling_warnings
+    assert not hasattr(result, "scheduling_warnings")
     assert len(manager.load(parent_id).child_ids) == 2
 
 

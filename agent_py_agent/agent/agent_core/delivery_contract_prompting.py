@@ -18,7 +18,6 @@ def render_delivery_contract_section(contract: dict[str, object]) -> str:
         [
             "[tool-system delivery-contract]",
             json.dumps(contract, ensure_ascii=False, sort_keys=True),
-            *_orchestration_guidance_lines(contract),
             *_bootstrap_guidance_lines(contract),
             *_artifact_guidance_lines(contract),
             *render_recovery_guidance_lines(contract, _artifact_items(contract)),
@@ -85,45 +84,6 @@ def _preflight_finding(code: str, location: str, message: str) -> dict[str, obje
 
 
 from .delivery_contract_prompting_bootstrap import _bootstrap_guidance_lines
-
-
-def _orchestration_guidance_lines(contract: dict[str, object]) -> list[str]:
-    orchestration = contract.get("orchestration_contract")
-    if not isinstance(orchestration, dict) or orchestration.get("requires_orchestration") is not True:
-        return []
-    tools_text = ", ".join(_orchestration_required_tools(orchestration))
-    count = orchestration.get("minimum_subagent_count")
-    count_text = f"，最少数量 {count}" if count not in (None, "", 0) else ""
-    return [
-        "协作要求：",
-        f"- 用户明确要求子代理/协作；最终答复前必须先真实调用这些 orchestration 工具: {tools_text}{count_text}。",
-        "- 不要由 root 自己直接读完、写完后口头说已完成；工具参数错了就按 Tool Catalog 重试。",
-    ]
-
-
-# LLM: _orchestration_required_tools mirrors runtime execution semantics for prompt guidance only.
-# 函数用途: 合同字段可保留外部原样；提示层根据 execution_required 展示实际需要满足的协作工具事实。
-def _orchestration_required_tools(orchestration: dict[str, object]) -> list[str]:
-    tools = [
-        str(item).strip()
-        for item in orchestration.get("required_tools", [])
-        if str(item).strip()
-    ] if isinstance(orchestration.get("required_tools"), list) else ["create_subagents"]
-    if "create_subagents" not in tools:
-        tools.insert(0, "create_subagents")
-    if _execution_required(orchestration) and "dispatch_subagents" not in tools:
-        tools.append("dispatch_subagents")
-    return tools
-
-
-def _execution_required(orchestration: dict[str, object]) -> bool:
-    value = orchestration.get("execution_required")
-    if isinstance(value, bool):
-        return value is not False
-    if isinstance(value, int | float):
-        return value != 0
-    text = str(value or "").strip().casefold()
-    return text not in {"0", "false", "no", "n", "off", "disabled"}
 
 
 # LLM: _artifact_guidance_lines turns artifact machine fields into concise model guidance.

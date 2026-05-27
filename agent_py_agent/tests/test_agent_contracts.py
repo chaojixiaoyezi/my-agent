@@ -77,7 +77,6 @@ def test_run_state_machine_dispatch_closeout_and_recovery_decisions() -> None:
     assert can_dispatch(RunStateFacts(status="FAILED"), force=True) is True
     assert can_dispatch(RunStateFacts(status="DONE", verification_status="VERIFIED"), force=True) is False
     assert can_closeout(RunStateFacts(status="DONE", verification_status="VERIFIED")) is True
-    assert can_closeout(RunStateFacts(status="DONE", verification_status="VERIFIED")) is False
 
     blocked = recovery_decision(RunStateFacts(status="BLOCKED", failure_type="TOOL_UNAVAILABLE"))
     assert blocked.action == "repair_or_request_capability"
@@ -145,7 +144,7 @@ def test_run_state_snapshot_from_task_like_object() -> None:
     assert snapshot["run_id"] == "run-1"
     assert snapshot["schema_version"] == "state_machine.v1"
     assert snapshot["status"] == "TIMEOUT"
-    assert snapshot["verification_status"] == "VERIFIED"
+    assert snapshot["verification_status"] == "NEEDS_CLOSEOUT"
     assert snapshot["failure_type"] == "TOOL_TIMEOUT"
     assert snapshot["can_dispatch"] is False
     assert snapshot["can_closeout"] is False

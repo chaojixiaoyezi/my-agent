@@ -181,14 +181,8 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
     "agent_py_agent/agent/subagents/services/hierarchy_write_policy.py": [
         "_extract_write_dirs",
     ],
-    "agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py": [
-        "_extract_write_dirs",
-    ],
     "agent_py_agent/agent/agent_core/spawn_role_seed.py": [
         "_extract_write_dirs",
-    ],
-    "agent_py_agent/agent/subagents/services/hierarchy_leaf_targets.py": [
-        "_goal_target_tokens",
     ],
     "agent_py_agent/agent/subagents/services/output_ref_rebinding.py": [
         "_OUTPUT_CONTEXT_MARKERS",
@@ -197,14 +191,6 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
         "_rewrite_list_field",
         "_rewrite_field",
         "_file_refs",
-    ],
-    "agent_py_agent/agent/subagents/services/hierarchy_scope_domains.py": [
-        "_natural_forbidden_scope_terms",
-        "_is_forbidden_scope_segment",
-        "_explicit_responsibility_domains",
-        "_explicit_leaf_domain_terms",
-        "_domain_tokens",
-        "_child_scope_text",
     ],
     "agent_py_agent/agent/agent_core/orchestration_delegation_intent.py": [
         "_mentions_delegate_actor",

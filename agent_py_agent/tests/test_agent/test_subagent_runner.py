@@ -94,7 +94,7 @@ def test_subagent_runner_dry_run_and_execute():
         assert loaded.status == "DONE"
         assert loaded.verification_status == "VERIFIED"
         assert output["dry_run"] is False
-        assert output["next_action"] == "run_acceptance"
+        assert output["next_action"] == ""
         assert "read_file [filesystem]" in prompt
         assert "write_file [filesystem]" not in prompt
         assert "echo 后端" in response

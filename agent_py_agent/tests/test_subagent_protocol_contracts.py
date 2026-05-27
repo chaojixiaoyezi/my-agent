@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.models import CapabilityGrant
 
@@ -162,6 +164,7 @@ def test_recovery_strategy_exports_address_and_envelope_refs(tmp_path: Path) -> 
     assert strategy["recommended_action"] == "create_takeover_run_from_continue_packet"
 
 
+@pytest.mark.skip(reason="旧 final_closeout_controller 已删除，验收事实走统一 closeout")
 def test_final_closeout_decision_carries_task_envelope_acceptance(tmp_path: Path) -> None:
     from agent_py_agent.agent.subagents.final_closeout_controller import (
         build_final_closeout_decision,

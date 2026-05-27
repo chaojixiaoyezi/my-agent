@@ -1,5 +1,10 @@
 # Live Lab：开发推进记录
 
+## 2026-05-27 子代理收口脚本同步
+
+- Live Lab 状态检查不再导入已删除的 `subagent_dispatch_closeout_resolution`。
+- 测试脚本只读取隔离 workspace 的小型 `task.json`，用本地轻量状态规则生成失败提示；产品运行时不再依赖这套父级收口 helper。
+
 ## 2026-05-22 runtime gate / large-log helper sync
 
 - 中文说明：本轮 Live Lab 只做通用底座验证配套，不新增专项任务合同。`main-complex` 的 100MB 大日志生成、提示词和报告验收已从 `main_agent_complex_case.py` 拆到 `main_agent_complex_large_log.py`，让复杂 case 主文件继续保持编排层职责。

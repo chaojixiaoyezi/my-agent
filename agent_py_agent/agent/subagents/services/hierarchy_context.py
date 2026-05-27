@@ -17,8 +17,6 @@ _INHERITED_ATTRIBUTE_FIELDS = (
     "conversation_thread_id",
     "acceptance_required_tools",
     "controlled_exec_contract_required",
-    "domain_scopes",
-    "forbidden_child_scopes",
     "forbidden_files",
     "hierarchy_contracts",
     "required_files",
@@ -135,7 +133,7 @@ def _relevant_file_terms(parent: SubAgentTask, child_goal: str) -> list[str]:
 
 
 # LLM: inherited_hierarchy_attributes forwards parent machine contracts through the task record.
-# 函数用途: 创建 child run 时把 required_files/domain_scopes 等合同写入 attributes，后续层级不用读 goal。
+# 函数用途: 创建 child run 时把 required_files 等通用合同写入 attributes，后续层级不用读 goal。
 def inherited_hierarchy_attributes(parent: SubAgentTask, spec: HierarchyChildSpec) -> dict[str, object]:
     attrs = dict(getattr(spec, "attributes", {}) or {})
     parent_attrs = _task_attributes(parent)

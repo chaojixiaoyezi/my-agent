@@ -24,9 +24,9 @@ from .hierarchy_scheduler_models import (
 from .hierarchy_write_policy import ChildWriteRootRequest, requested_child_write_roots
 
 
-# LLM: blocked_schedule_result returns a refs-only plan without creating child runs.
-# 函数用途: 构造阻断结果，保持 dry-run 形状稳定。
-def blocked_schedule_result(build: HierarchyResultBuildRequest, reason: str) -> HierarchyScheduleResult:
+# LLM: limit_schedule_result reports only explicit user/config limits.
+# 函数用途: max_depth/max_children 是调用方显式配置的安全阈值；命中时返回 refs-only 结果，不创建 child。
+def limit_schedule_result(build: HierarchyResultBuildRequest, reason: str) -> HierarchyScheduleResult:
     parent = build.parent
     request = build.request
     return HierarchyScheduleResult(
@@ -41,7 +41,6 @@ def blocked_schedule_result(build: HierarchyResultBuildRequest, reason: str) -> 
         created_run_ids=[],
         items=planned_schedule_items(parent, request),
         quality_advice=build.quality_advice,
-        scheduling_warnings=list(build.scheduling_warnings),
     )
 
 
@@ -62,7 +61,6 @@ def dry_schedule_result(build: HierarchyResultBuildRequest) -> HierarchySchedule
         created_run_ids=[],
         items=planned_schedule_items(parent, request),
         quality_advice=build.quality_advice,
-        scheduling_warnings=list(build.scheduling_warnings),
     )
 
 
@@ -91,7 +89,6 @@ def applied_schedule_result(
         dispatch_run_ids=[item.id for item in dispatchable],
         items=[resolved_schedule_item(item) for item in resolutions],
         quality_advice=build.quality_advice,
-        scheduling_warnings=list(build.scheduling_warnings),
     )
 
 

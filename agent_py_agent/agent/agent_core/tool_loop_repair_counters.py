@@ -17,7 +17,6 @@ class ToolLoopRepairCounters:
     local_progress_redirects: int = 0
     exploration_fuse_redirects: int = 0
     unresolved_runtime_issue_redirects: int = 0
-    orchestration_contract_redirects: int = 0
 
 
 # LLM: _inc_reserved returns a new counters bundle after fake-record repair.
@@ -28,7 +27,6 @@ def _inc_reserved(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
         local_progress_redirects=counters.local_progress_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
-        orchestration_contract_redirects=counters.orchestration_contract_redirects,
     )
 
 
@@ -40,7 +38,6 @@ def _inc_local_progress(counters: ToolLoopRepairCounters) -> ToolLoopRepairCount
         local_progress_redirects=counters.local_progress_redirects + 1,
         exploration_fuse_redirects=counters.exploration_fuse_redirects,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
-        orchestration_contract_redirects=counters.orchestration_contract_redirects,
     )
 
 
@@ -52,7 +49,6 @@ def _inc_exploration_fuse(counters: ToolLoopRepairCounters) -> ToolLoopRepairCou
         local_progress_redirects=counters.local_progress_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects + 1,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
-        orchestration_contract_redirects=counters.orchestration_contract_redirects,
     )
 
 
@@ -62,17 +58,6 @@ def _inc_unresolved_runtime_issue(counters: ToolLoopRepairCounters) -> ToolLoopR
         local_progress_redirects=counters.local_progress_redirects,
         exploration_fuse_redirects=counters.exploration_fuse_redirects,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects + 1,
-        orchestration_contract_redirects=counters.orchestration_contract_redirects,
-    )
-
-
-def _inc_orchestration_contract(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return ToolLoopRepairCounters(
-        reserved_record_repairs=counters.reserved_record_repairs,
-        local_progress_redirects=counters.local_progress_redirects,
-        exploration_fuse_redirects=counters.exploration_fuse_redirects,
-        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
-        orchestration_contract_redirects=counters.orchestration_contract_redirects + 1,
     )
 
 
@@ -80,7 +65,6 @@ __all__ = [
     "ToolLoopRepairCounters",
     "_inc_exploration_fuse",
     "_inc_local_progress",
-    "_inc_orchestration_contract",
     "_inc_reserved",
     "_inc_unresolved_runtime_issue",
 ]

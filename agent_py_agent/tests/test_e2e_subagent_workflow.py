@@ -93,7 +93,6 @@ class TestSubagentCreation:
         quality_contract = QualityContract(
             user_visible_goal="交付高质量代码",
             quality_bar="代码可运行且有测试",
-            quality_note="normal_closeout",
         )
 
         task = SubAgentTask(
@@ -105,7 +104,7 @@ class TestSubagentCreation:
         )
 
         assert task.quality_contract.user_visible_goal == "交付高质量代码"
-        assert task.quality_contract.quality_note == "normal_closeout"
+        assert task.quality_contract.quality_bar == "代码可运行且有测试"
 
     def test_subagent_execution_context_creation(self):
         """测试 SubAgentExecutionContext 创建。

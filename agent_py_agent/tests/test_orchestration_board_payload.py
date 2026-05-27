@@ -77,11 +77,8 @@ def test_board_payload_marks_pending_closeout_as_not_complete():
     result = SubagentBoardTool(mock_agent).execute({"limit": 10})
 
     assert result.ok is True
-    assert '"status": "not_complete"' in result.output
-    assert '"must_not_report_done": true' in result.output
-    assert '"blocking_run_ids": [' in result.output
+    assert '"completion_status": {' in result.output
     assert '"run_1"' in result.output
-    assert '"tool": "dispatch_subagents"' in result.output
 
 
 # LLM: Board completion should match closeout when a verified repair covers stale failed work.
