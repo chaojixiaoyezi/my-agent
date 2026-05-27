@@ -9,7 +9,6 @@ from typing import ClassVar
 from .tool_loop_repair_counters import ToolLoopRepairCounters, _inc_unresolved_runtime_issue
 from .tool_unresolved_runtime_issue_guard import (
     has_unresolved_runtime_issues,
-    unresolved_runtime_issue_block_response,
     unresolved_runtime_issue_context,
 )
 
@@ -51,8 +50,7 @@ def unresolved_runtime_issue_no_tool_call_decision(
             [],
             _inc_unresolved_runtime_issue(request.counters),
         )
-    block = unresolved_runtime_issue_block_response(request.agent, request.params)
-    return UnresolvedRuntimeIssueDecision("break", block or request.response, [], request.counters)
+    return UnresolvedRuntimeIssueDecision("break", request.response, [], request.counters)
 
 
 __all__ = [

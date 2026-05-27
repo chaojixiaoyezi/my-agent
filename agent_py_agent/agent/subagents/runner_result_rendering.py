@@ -7,13 +7,12 @@ from .models import SubAgentRunnerResult
 
 
 # LLM: render_runner_result_markdown renders one persisted runner closeout report.
-# 函数用途: 把 runner 状态、结构化输出、父级下一步和关键文件 refs 渲染成 Markdown。
+# 函数用途: 把 runner 状态、结构化输出和关键文件 refs 渲染成 Markdown。
 def render_runner_result_markdown(result: SubAgentRunnerResult) -> str:
     status = "OK" if result.ok else "FAIL"
     mode = "dry-run" if result.dry_run else "execute"
     lines = _runner_result_header_lines(result, mode, status)
     lines.extend(_runner_structured_output_lines(result))
-    lines.extend(_runner_parent_next_action_lines(result))
     lines.extend(_runner_result_file_lines(result))
     return "\n".join(lines) + "\n"
 
@@ -70,22 +69,6 @@ def _runner_structured_output_lines(result: SubAgentRunnerResult) -> list[str]:
             lines.append(f"- repair_error: {result.structured_repair_error}")
         return lines
     return []
-
-
-# LLM: _runner_parent_next_action_lines turns machine blockers into clear parent-facing repair steps.
-# 函数用途: 子代理因产物结构失败阻塞时，明确告诉父级继续派修复子代理，避免 root 读完报告后亲自改业务文件。
-def _runner_parent_next_action_lines(result: SubAgentRunnerResult) -> list[str]:
-    blocked = " ".join([result.blocked_reason or "", result.structured_summary or ""]).lower()
-    if "artifact_integrity_failed" not in blocked:
-        return []
-    return [
-        "",
-        "## Parent Next Action",
-        "",
-        "- artifact_integrity_failed 表示产物还没过结构检查，不能进入最终收口。",
-        "- 父级/root 不要直接改业务产物；请派 repair worker/修复小傻妞读取 output_json 和产物路径继续修。",
-        "- 修复后重新 dispatch，并再次检查 artifact integrity 与最终收口。",
-    ]
 
 
 # LLM: _runner_result_file_lines lists refs the parent should read instead of product bodies.

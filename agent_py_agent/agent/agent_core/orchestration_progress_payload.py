@@ -8,10 +8,6 @@ from ..subagents.services.recovery_strategy import (
     SubagentRecoveryStrategyRequest,
     build_subagent_recovery_strategy,
 )
-from .orchestration_artifact_integrity_repair import (
-    artifact_integrity_blocked,
-    artifact_integrity_repair_advice_payload,
-)
 from .orchestration_quality_advice_payload import quality_advice_payload
 from .orchestration_quality_payload import quality_repair_advice_payload
 from .orchestration_recovery_batches import recovery_batches_from_strategies
@@ -28,7 +24,6 @@ def direct_children_progress_payload(agent) -> dict[str, object]:
     if direct_children is None:
         return {}
     payload = _progress_payload(parent_run_id, direct_children)
-    payload["direct_children"].update(artifact_integrity_repair_advice_payload(direct_children))
     payload["direct_children"].update(quality_repair_advice_payload(agent, parent_run_id))
     _attach_quality_advice(agent, parent_run_id, payload["direct_children"])
     _attach_recovery_strategies(agent, payload["direct_children"])
@@ -55,12 +50,6 @@ def _attach_direct_child_next_action(children: dict[str, object]) -> None:
         children.update(_recovery_dispatch_payload(children["recovery_run_ids"], children.get("recovery_strategies")))
         if children.get("needs_repair_wave"):
             children["repair_wave_deferred_by_recovery"] = True
-        if children.get("needs_artifact_integrity_repair_wave"):
-            children["artifact_integrity_repair_deferred_by_recovery"] = True
-        return
-    if children.get("needs_artifact_integrity_repair_wave"):
-        children["ready_for_closeout"] = False
-        children["next_action"] = "create_repair_child_from_artifact_integrity_refs"
         return
     if children.get("needs_repair_wave"):
         children["ready_for_closeout"] = False
@@ -276,7 +265,7 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
             planning_ids.append(item_id)
         if status == "RUNNING":
             running_ids.append(item_id)
-        if status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"} and not artifact_integrity_blocked(item):
+        if status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
             recovery_ids.append(item_id)
     unfinished_ids = [item for item in [*planning_ids, *running_ids] if item]
     recovery_ids = [item for item in recovery_ids if item]

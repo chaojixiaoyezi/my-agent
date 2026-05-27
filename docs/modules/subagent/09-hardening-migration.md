@@ -205,6 +205,6 @@
 - Artifact integrity：runner 结构化输出里的相对产物 ref 可能已经包含 product root 尾部，例如 `deliverables/furniture-home/index.html`。完整性检查会先做 root suffix 对齐，再检查真实文件，避免误拼路径后把已写成功的产物标成 `artifact_missing`。
 - Task-local progress：写 HTML 后的 `latest_tool_progress.json` 不再永远说“继续写”。它会带 `artifact_integrity` 小字段；未闭合就继续分块，已闭合就提示写 `output.json` / `SUBAGENT_RESULT` 收口，发现 `href="#"` 这类假链接就先修复再验收。这样把 runner 收口方向放进机器字段，而不是靠 prompt 猜。
 - Parser schema tolerance：runner 可以把产物 refs 写成 `deliverables` / `output_files` / `files`，也可能把产物路径放进 `evidence.kind=artifact.path` 或 `evidence_packets.artifact_refs`。解析层会把这些带 path/id 的条目统一转成 canonical `artifacts`。后续所有验收、typed envelope 和恢复逻辑继续只读 `artifacts`，不把同义词扩散到业务层。
-- Artifact repair lane：`artifact_integrity_failed` 现在有独立信号层和 repair 建议层。父级只读 output/run/artifact refs，顶层用 `create_subagents`、runner-context 用 `schedule_child_subagents` 派修复小傻妞；不再把缺闭合标签、半截 HTML 这类确定性产物错误泛化成 `classify_blocker` 让 root 自己修。
+- Artifact repair lane 已废弃：过去 `artifact_integrity_failed` 有独立信号层和 repair 建议层，会让父级优先派专门修复子代理。现在这类产物问题回到统一 closeout / 普通 runner 状态里处理，不再单独生成 `artifact_integrity_repair_advice`。
 - Real E2E baseline：`real-e2e-20260515-180300-repair-loop4` 通过自然语言 root -> worker -> closeout；产物在 `/Users/example/my-终端应用/.../deliverables/furniture-home/index.html`，状态 `DONE/VERIFIED`。
 - 迁移原则：子代理是有任务边界的小主代理。父级给了产物目录，就必须能读写；runner 超时，就必须停止；记忆隔离，就不能串旧索引。

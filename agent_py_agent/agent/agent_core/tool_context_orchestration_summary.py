@@ -127,20 +127,14 @@ def _direct_children_recovery_lines(value: dict[str, Any]) -> list[str]:
     return lines
 
 
-# LLM: _direct_children_repair_lines renders deferred repair advice separately from recovery actions.
-# 函数用途: 渲染 QA/artifact 修复建议和恢复优先级延期标记。
+# LLM: _direct_children_repair_lines renders QA repair advice separately from recovery actions.
+# 函数用途: 渲染 QA 修复建议和恢复优先级延期标记。
 def _direct_children_repair_lines(value: dict[str, Any]) -> list[str]:
     lines: list[str] = []
     if value.get("qa_repair_advice"):
         lines.append(f"- qa_repair_advice: {_json_inline(value.get('qa_repair_advice'))}")
-    if value.get("artifact_integrity_repair_advice"):
-        lines.append(
-            f"- artifact_integrity_repair_advice: {_json_inline(value.get('artifact_integrity_repair_advice'))}"
-        )
     if value.get("repair_wave_deferred_by_recovery"):
         lines.append("- repair_wave_deferred_by_recovery: true")
-    if value.get("artifact_integrity_repair_deferred_by_recovery"):
-        lines.append("- artifact_integrity_repair_deferred_by_recovery: true")
     return lines
 
 

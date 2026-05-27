@@ -92,9 +92,9 @@ def test_record_runner_result_writes_task_node_closeout_feedback_when_enabled(mo
     assert "acceptance" not in feedback
 
 
-# LLM: A runner that claims a missing artifact must not enter the parent-readable result lane.
-# 函数用途: 防止子代理只在 JSON 里声称写了报告、实际没写文件时被父级当作已完成产物读取。
-def test_record_runner_result_blocks_missing_local_artifact_ref(mock_manager, sample_task, tmp_path):
+# LLM: Missing artifact refs are not a runner-level hard stop; closeout owns delivery validation.
+# 函数用途: 验证子代理声明了不存在的产物路径时，不再由 runner 直接改成 BLOCKED。
+def test_record_runner_result_does_not_block_missing_local_artifact_ref(mock_manager, sample_task, tmp_path):
     mock_manager._tasks[sample_task.id] = sample_task
     sample_task.task_dir = str(tmp_path)
     sample_task.output_dir = str(tmp_path / "output")
@@ -128,11 +128,11 @@ def test_record_runner_result_blocks_missing_local_artifact_ref(mock_manager, sa
         structured_output=parsed,
     ))
 
-    assert result.ok is False
-    assert sample_task.status == "BLOCKED"
-    assert sample_task.verification_status == "UNVERIFIED"
-    assert sample_task.failure_type == "missing_artifact_refs"
-    assert "missing_report.md" in sample_task.runner_last_error
+    assert result.ok is True
+    assert sample_task.status == "DONE"
+    assert sample_task.verification_status == "VERIFIED"
+    assert sample_task.failure_type == ""
+    assert sample_task.runner_last_error == ""
 
 
 def test_record_runner_result_dry_run(mock_manager, sample_task):

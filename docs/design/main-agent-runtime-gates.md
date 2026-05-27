@@ -586,6 +586,41 @@ main_agent_auto_resume_attempt_limit: 3
 
 模型仍可以先读、搜、检查上下文，也可以直接写入、修复、构建；系统只在模型提交验收或最终回复时重新 closeout。连续只读由探索熔断/本地进展门提示，同一失败重复由 closeout 返工预算处理，不再额外增加一层 delivery repair 阻断。
 
+### 10.1 未解决工具失败只返工提示
+
+文件：
+
+- `agent_py_agent/agent/agent_core/tool_unresolved_runtime_issue_guard.py`
+- `agent_py_agent/agent/agent_core/tool_loop_unresolved_runtime_issue_decision.py`
+
+旧逻辑发现归档工具记录里仍有未解决的结构化失败时，会先给模型 3 次返工上下文；超过后返回 `UNRESOLVED_RUNTIME_ISSUES_BLOCKED`，把最终收口置为 `blocked`。这和 closeout 的返工循环重复，也会把“还能换工具、换路径、重写产物、重新复验”的普通问题变成硬停。
+
+现在这条只做两件事：
+
+- 从工具归档里提取失败工具、失败 target、`blocker_codes` 等机器事实。
+- 把这些事实作为 `[tool-system unresolved-runtime-issues]` 返工提示放回下一轮模型。
+
+它不再按次数封死任务，也不再返回 `runtime_status=blocked`。如果模型确实无法修复，应该说明真实阻塞原因和需要用户补充的信息；系统不因为这条 guard 自己终止任务。
+
+### 10.2 删除子代理产物完整性专用硬门
+
+删除文件：
+
+- `agent_py_agent/agent/subagents/result_artifact_integrity.py`
+- `agent_py_agent/agent/agent_core/orchestration_artifact_integrity_signals.py`
+- `agent_py_agent/agent/agent_core/orchestration_artifact_integrity_repair.py`
+
+旧逻辑有两层：
+
+- 子代理结构化结果里声明了本地产物路径，但文件不存在时，runner 直接把任务改成 `BLOCKED/missing_artifact_refs`。
+- 父级调度层看到 `artifact_integrity_failed` 时，额外生成 `artifact_integrity_repair_advice`，建议创建专门 repair worker。
+
+这两层都和统一 closeout / 普通 runner 状态重复，而且会让子代理协作和普通交付多一条特殊卡点。现在它们都被移除：
+
+- runner 不再因为声明的本地产物 ref 缺失而直接改成 `BLOCKED`。
+- dispatch/progress payload 不再生成 `artifact_integrity_repair_advice` 或 `create_repair_child_from_artifact_integrity_refs`。
+- 产物缺失、内容损坏、格式不合格等问题交给统一 closeout 或父级模型按普通任务状态处理。
+
 ### 11. 删除 bootstrap 开工物化硬门
 
 删除文件：

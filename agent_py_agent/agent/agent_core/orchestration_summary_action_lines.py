@@ -41,7 +41,6 @@ _TOP_LEVEL_ACTION_KEYS = (
     "planned_count",
     "runner_selection_recovery",
     "quality_advice",
-    "artifact_integrity_repair_advice",
     "current_turn_run_state",
     "next_action",
 )

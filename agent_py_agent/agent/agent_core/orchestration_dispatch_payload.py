@@ -5,8 +5,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .orchestration_artifact_integrity_repair import artifact_integrity_repair_record_payload
-
 
 # LLM: dispatch_record_payload exposes compact dispatch facts to coordinator runners.
 # 函数用途: 给模型工具返回每条调度记录的核心字段和 runner 结果摘要；不再注入额外验收阶段。
@@ -23,7 +21,6 @@ def dispatch_record_payload(item) -> dict[str, object]:
         "after_status": item.after_status,
     }
     payload.update(_dispatch_record_runner_payload(item))
-    payload.update(artifact_integrity_repair_record_payload(item))
     return payload
 
 

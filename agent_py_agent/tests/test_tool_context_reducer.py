@@ -331,41 +331,6 @@ def test_dispatch_externalized_result_keeps_result_refs_by_run():
     assert "records" not in rendered
 
 
-# LLM: Artifact integrity repair advice must survive orchestration output externalization.
-# 函数用途: dispatch 大输出被外置时，live prompt 仍保留产物修复建议，避免 root 去读正文自己修。
-def test_dispatch_externalized_result_keeps_artifact_integrity_repair_advice():
-    output = json.dumps(
-        {
-            "next_action": "create_repair_child_from_artifact_integrity_refs",
-            "artifact_integrity_repair_advice": {
-                "failed_run_ids": ["child-1"],
-                "failure_refs": [{
-                    "run_id": "child-1",
-                    "output_ref": "/tmp/child-1/output.json",
-                    "artifact_refs": ["/tmp/site/index.html"],
-                    "blockers": ["artifact_integrity_failed:/tmp/site/index.html:missing_html_close"],
-                }],
-                "suggested_tool_call": {
-                    "tool": "create_subagents",
-                    "goal": "修复 /tmp/site/index.html",
-                },
-            },
-            "records": [{"message": "z" * 2000}],
-        }
-    )
-
-    rendered = render_tool_result_for_live_prompt(
-        ToolExecutionResult("dispatch_subagents", True, output),
-        _dispatch_externalized_archive_record(output),
-    )
-
-    assert "artifact_integrity_repair_advice" in rendered
-    assert "create_repair_child_from_artifact_integrity_refs" in rendered
-    assert "create_subagents" in rendered
-    assert "missing_html_close" in rendered
-    assert "records" not in rendered
-
-
 # LLM: legacy nested read_artifact archive records must not invite models to chase artifact-of-artifact files.
 # 函数用途: 验证显式 read_artifact 后的 live prompt 只保留原始 artifact 引用，不暴露二次外置 wrapper 路径。
 def test_read_artifact_summary_hides_nested_wrapper_artifact_path():

@@ -244,7 +244,7 @@ def test_process_structured_output_normalizes_evidence_packet_artifact_refs(mock
 
 
 # LLM: Real hierarchy runs may write deliverables beside run metadata, not only inside artifacts/.
-# 函数用途: 覆盖子代理把报告写在 agent_run_workspace 根目录、evidence packet 只报短路径时，验收不再误判 missing_artifact_refs。
+# 函数用途: 覆盖子代理把报告写在 agent_run_workspace 根目录时，evidence packet 短路径仍能解析为真实产物引用。
 def test_process_structured_output_resolves_refs_from_agent_run_workspace(mock_task, tmp_path):
     task_dir = tmp_path / "legacy-task"
     run_workspace = tmp_path / "tasks" / "parent" / "agents" / "child"

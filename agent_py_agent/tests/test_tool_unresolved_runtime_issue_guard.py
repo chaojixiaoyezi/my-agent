@@ -40,12 +40,17 @@ def test_no_tool_final_redirects_unresolved_artifact_integrity_issue(tmp_path: P
     assert any("unresolved-runtime-issues" in item for item in params.tool_context)
 
 
-# LLM: zero unresolved-runtime redirect max means unlimited repair contexts.
-# 函数用途: 验证未解决运行问题 guard 的 0 次数预算不会让修复上下文提前消失。
-def test_unresolved_runtime_issue_zero_redirect_limit_is_unlimited(tmp_path: Path, monkeypatch):
+# LLM: unresolved runtime repairs keep returning context instead of killing the task.
+# 函数用途: 验证历史 3 次上限后仍会给返工上下文，不再把任务置为 blocked。
+def test_unresolved_runtime_issue_repair_context_does_not_hard_block(tmp_path: Path):
     from agent_py_agent.agent.agent_core import tool_unresolved_runtime_issue_guard as guard
+    from agent_py_agent.agent.agent_core.tool_loop_repair_counters import ToolLoopRepairCounters
+    from agent_py_agent.agent.agent_core.tool_loop_response_decision import (
+        ToolLoopResponseDecisionRequest,
+        tool_loop_response_decision,
+    )
+    from agent_py_agent.agent.backend import ModelResponse
 
-    monkeypatch.setattr(guard, "_MAX_REDIRECTS", 0)
     params = _params(
         archive_tool_calls=[
             _artifact_integrity_archive_record(
@@ -58,6 +63,19 @@ def test_unresolved_runtime_issue_zero_redirect_limit_is_unlimited(tmp_path: Pat
     )
 
     assert guard.unresolved_runtime_issue_context(params, redirects=99)
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=_agent(tmp_path),
+            params=params,
+            response=ModelResponse(text="已经完成了。", backend="fake"),
+            counters=ToolLoopRepairCounters(unresolved_runtime_issue_redirects=3),
+        )
+    )
+
+    assert decision.action == "continue"
+    assert decision.response is None
+    assert decision.counters.unresolved_runtime_issue_redirects == 4
+    assert any("repair_revalidate_or_report_real_blocker" in item for item in params.tool_context)
 
 
 # LLM: A later successful integrity envelope for the same target clears the earlier failure.

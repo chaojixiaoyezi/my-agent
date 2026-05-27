@@ -12,7 +12,6 @@ from ..capability_config import CapabilityConfig
 from ..tools import BaseTool, ToolExecutionResult
 from .dispatch_no_progress import dispatch_no_progress_payload
 from .dispatch_params import DispatchParams
-from .orchestration_artifact_integrity_repair import artifact_integrity_repair_advice_from_records
 from .orchestration_dispatch_payload import (
     dispatch_record_payload,
     dispatch_recovery_payload,
@@ -131,7 +130,6 @@ class DispatchSubagentsTool(BaseTool):
         payload.update(_dispatch_top_level_guidance(self.agent, report, record_payloads))
         if terminal := dispatch_no_progress_payload(report):
             payload["dispatch_terminal"] = terminal
-        payload.update(artifact_integrity_repair_advice_from_records(report.records))
         payload.update(dispatch_state_contract_payload(self.agent))
         payload.update(direct_children_progress_payload(self.agent))
         payload.update({

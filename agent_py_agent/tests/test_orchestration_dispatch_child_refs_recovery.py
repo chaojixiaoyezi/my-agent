@@ -53,52 +53,6 @@ def test_dispatch_payload_surfaces_qa_repair_advice_from_direct_child(tmp_path: 
     assert direct["qa_repair_advice"]["suggested_tool_call"]["children"][0]["role"] == "worker"
 
 
-# LLM: Artifact integrity blocks should steer parents to repair children before generic recovery.
-# 函数用途: 直接 child 的 HTML 结构检查失败时，父 runner 应拿到 refs-first 修复建议，不应先读正文或泛化接管。
-def test_dispatch_payload_surfaces_artifact_integrity_repair_from_direct_child(tmp_path: Path):
-    run_dir = tmp_path / "worker"
-    product_root = tmp_path / "deliverables" / "site-output"
-    product_root.mkdir(parents=True)
-    artifact = product_root / "index.html"
-    run_dir.mkdir()
-    artifact.write_text("<html><body>", encoding="utf-8")
-    (run_dir / "output.json").write_text(
-        json.dumps({
-            "status": "BLOCKED",
-            "blockers": [f"artifact_integrity_failed:{artifact}:missing_body_close"],
-            "artifacts": [{"path": str(artifact)}],
-        }, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-    payload = _dispatch_payload_with_direct_children([
-        SimpleNamespace(
-            id="worker-1",
-            parent_id="root",
-            role="worker",
-            agent_name="小傻妞-worker",
-            status="BLOCKED",
-            verification_status="UNVERIFIED",
-            failure_type="artifact_integrity_failed",
-            blockers=[f"artifact_integrity_failed:{artifact}:missing_body_close"],
-            task_dir=str(run_dir),
-            output_json=str(run_dir / "output.json"),
-            allowed_write_roots=[str(run_dir), str(product_root)],
-        )
-    ])
-
-    direct = payload["direct_children"]
-    assert direct["needs_artifact_integrity_repair_wave"] is True
-    assert direct["needs_recovery"] is False
-    assert direct["next_action"] == "create_repair_child_from_artifact_integrity_refs"
-    advice = direct["artifact_integrity_repair_advice"]
-    assert advice["failed_run_ids"] == ["worker-1"]
-    assert advice["failure_refs"][0]["artifact_refs"] == [str(artifact)]
-    child = advice["suggested_tool_call"]["children"][0]
-    assert child["role"] == "worker"
-    assert str(artifact) in child["goal"]
-
-
 # LLM: Recovery-ready QA blockers must prefer packet continuation before repair waves.
 # 函数用途: 当同一个 tester 既有失败信号又有 latest_continue_packet 时，父级应先复用原 run 续跑。
 def test_dispatch_payload_prefers_packet_recovery_over_qa_repair(tmp_path: Path):
