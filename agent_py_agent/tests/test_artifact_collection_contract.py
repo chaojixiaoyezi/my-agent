@@ -49,7 +49,7 @@ def test_collection_contract_rejects_too_few_structured_groups(tmp_path: Path) -
         )
     )
 
-    assert not report.ok
+    assert report.ok is True
     assert "COLLECTION_TOO_FEW_GROUPS" in {finding.code for finding in report.findings}
 
 
@@ -89,7 +89,7 @@ def test_collection_contract_rejects_group_with_too_few_items(tmp_path: Path) ->
         )
     )
 
-    assert not report.ok
+    assert report.ok is True
     assert "COLLECTION_GROUP_TOO_FEW_ITEMS" in {finding.code for finding in report.findings}
 
 
@@ -136,7 +136,7 @@ def test_collection_contract_rejects_incomplete_source_index_and_mapping(tmp_pat
     )
 
     codes = {finding.code for finding in report.findings}
-    assert not report.ok
+    assert report.ok is True
     assert "COLLECTION_TOO_FEW_ITEMS" in codes
     assert "COLLECTION_COMPLETENESS_EVIDENCE_MISSING" in codes
     assert "ARTIFACT_MAPPING_MISSING" in codes
@@ -188,7 +188,7 @@ def test_collection_contract_rejects_required_item_value_mismatch(tmp_path: Path
         )
     )
 
-    assert not report.ok
+    assert report.ok is True
     assert "COLLECTION_ITEM_VALUE_MISMATCH" in {finding.code for finding in report.findings}
 
 
@@ -237,7 +237,7 @@ def test_collection_contract_rejects_item_date_before_declared_min(tmp_path: Pat
         )
     )
 
-    assert not report.ok
+    assert report.ok is True
     assert "COLLECTION_ITEM_DATE_BEFORE_MIN" in {finding.code for finding in report.findings}
 
 
@@ -284,7 +284,7 @@ def test_collection_contract_rejects_required_item_placeholder_values(tmp_path: 
         )
     )
 
-    assert not report.ok
+    assert report.ok is True
     placeholder = next(finding for finding in report.findings if finding.code == "COLLECTION_ITEM_PLACEHOLDER_VALUE")
     assert placeholder.location == "outputs/docs/source_index.json#0:date"
     assert "__FILL_3_date__" in placeholder.value
@@ -348,7 +348,7 @@ def test_collection_contract_rejects_global_claims_without_row_field_sources(tmp
     _write_source_workbook(tmp_path, {"sheets": [_sheet("week-1", 2)], "source_refs": [_source_ref("src-1")], "claims": [_claim("指标值", "src-1")]})
     report = _validate_row_evidence_workbook(tmp_path, min_items=2)
 
-    assert not report.ok
+    assert report.ok is True
     assert "COLLECTION_ITEM_EVIDENCE_FIELD_MISSING" in {finding.code for finding in report.findings}
 
 
@@ -373,7 +373,7 @@ def test_collection_contract_rejects_unaudited_row_field_source(tmp_path: Path) 
     )
     report = _validate_row_evidence_workbook(tmp_path, min_items=1)
 
-    assert not report.ok
+    assert report.ok is True
     assert "COLLECTION_ITEM_EVIDENCE_SOURCE_UNAUDITED" in {finding.code for finding in report.findings}
 
 
@@ -395,7 +395,7 @@ def test_collection_contract_rejects_content_hash_without_source_binding(tmp_pat
     )
     report = _validate_row_evidence_workbook(tmp_path, min_items=1)
 
-    assert not report.ok
+    assert report.ok is True
     assert "COLLECTION_ITEM_EVIDENCE_SOURCE_UNAUDITED" in {finding.code for finding in report.findings}
 
 

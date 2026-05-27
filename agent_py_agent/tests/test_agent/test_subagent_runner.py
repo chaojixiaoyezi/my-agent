@@ -8,6 +8,7 @@ write-boundary enforcement, structured-output repair, and parser edge cases.
 
 import json
 import tempfile
+import time
 from pathlib import Path
 
 from agent_py_agent.agent.backend import BaseBackend, ModelResponse
@@ -280,6 +281,7 @@ def test_subagent_runner_can_schedule_children_from_current_node_context():
         )
 
         result = agent.run_subagent(task.id, dry_run=False, probe=False)
+        _wait_for_background_dispatches(agent)
         loaded = agent.subagents.load(task.id)
         child = agent.subagents.load(loaded.child_ids[0])
 
@@ -292,6 +294,19 @@ def test_subagent_runner_can_schedule_children_from_current_node_context():
         assert child.depth == 1
         assert child.agent_name == "小傻妞-child-catalog"
         assert "schedule_child_subagents" in child.allowed_tools
+
+
+# LLM: _wait_for_background_dispatches keeps async child auto-starts from racing temp cleanup.
+# 函数用途: 等待测试中由 schedule_child_subagents 启动的后台线程结束，避免临时目录删除时仍有写入。
+def _wait_for_background_dispatches(agent: SimpleAgent, *, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        registry = getattr(agent, "_background_subagent_dispatches", {})
+        if not isinstance(registry, dict):
+            return
+        if not any(str(item.get("status") or "") == "running" for item in registry.values() if isinstance(item, dict)):
+            return
+        time.sleep(0.05)
 
 
 def test_subagent_runner_repairs_missing_structured_output():

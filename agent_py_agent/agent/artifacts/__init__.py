@@ -1,3 +1,6 @@
+# LLM: Artifact package exports registry and shell-protection primitives.
+# 模块用途: 给工具、closeout 和 tree 统一导出产物登记与 shell 保护入口。
+
 """Unified artifact registry for user-visible deliverables."""
 
 from .registry import (

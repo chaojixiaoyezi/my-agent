@@ -42,6 +42,8 @@ class ArtifactFinding:
         }
 
 
+# LLM: advisory_artifact_finding downgrades quality findings without hiding them.
+# 函数用途: 将主观质量或覆盖度问题变成 warning，让 closeout 给模型返工提示而非硬停任务。
 def advisory_artifact_finding(finding: ArtifactFinding) -> ArtifactFinding:
     """Return a non-blocking copy of a quality or coverage finding."""
 
@@ -54,6 +56,8 @@ def advisory_artifact_finding(finding: ArtifactFinding) -> ArtifactFinding:
     )
 
 
+# LLM: advisory_artifact_findings applies non-blocking semantics to a finding list.
+# 函数用途: 批量把产物质量 findings 转成 warning，保留代码、位置和值给后续修复。
 def advisory_artifact_findings(findings: list[ArtifactFinding]) -> list[ArtifactFinding]:
     """Downgrade subjective/content contract findings to closeout warnings."""
 

@@ -39,6 +39,7 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
     worker = SimpleAgent(params.config, params.root)
     if params.backend_override is not None:
         worker.backend = params.backend_override
+        worker._subagent_worker_backend_override = params.backend_override
     _attach_worker_local_store(worker, params.local_store)
     if params.dry_run or params.timeout_seconds <= 0:
         return worker.run_subagent(

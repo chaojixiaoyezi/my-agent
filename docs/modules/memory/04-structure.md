@@ -83,7 +83,7 @@ agent_py_agent/cli/
 - `user_space/context_bundle_rendering.py`：只负责 context bundle 的 prompt 摘要和 Markdown 镜像渲染；完整 JSON 生成仍在 `context_bundle.py`，这样结构字段和展示格式不会互相拖大。
 - `agent_core/runtime_context_bundle.py`：把 runtime loop 的 request、memory、routing、resume 和工具规格转换成 `MainContextBundleRequest`；task-local/control-plane 会在这一层保持不注入主代理 bundle。
 - `agent_core/model_call_runtime.py` / `agent_core/model_call_monitor.py`：记录真实模型调用账本，按输入 token、首 token 观测和配置生成动态超时预算；超时会落成结构化 `ProviderTimeoutError` 路径，不让卡住的 provider call 无限占住主代理。
-- `tooling/file_write_session.py`、`tooling/file_write_session_service.py`、`tooling/file_write_session_io.py`、`tooling/file_write_session_models.py`：大文件写入 session 工具。公开工具只展示目录和入口，服务层负责 begin/append/finish/abort 状态机，IO 层负责 manifest、chunk hash 和结果 envelope；这避免长 HTML/CSS/日志内容反复塞进单次 `write_file`。
+- 大文件写入不再走 `file_write_session`。当前模型可见写入面收敛到 `write_file`、`apply_patch` 和授权命令；长正文、大表格、PDF/Word/图片等复杂产物由模型选择脚本或库生成，再通过 artifact registry / closeout 统一登记和验收。
 - `settings/memory.py`：解析配置，处理非法值回退和 warning；会原地更新 AgentConfig-like 对象。
 - `memory_routing/loader.py`：读取 route index；JSON 面向程序稳定性，Markdown 面向人工维护，并兼容常见中英文列表分隔符。
 - `memory_routing/models.py`：定义 route、match、path resolution、read receipt 等票据结构。

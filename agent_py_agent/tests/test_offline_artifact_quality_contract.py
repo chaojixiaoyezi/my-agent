@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from zipfile import ZipFile
 
 from agent_py_agent.agent.contracts.artifact_acceptance import validate_artifact
 from agent_py_agent.agent.contracts.artifact_acceptance_models import ArtifactAcceptanceRequest
+from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
 
 
 # LLM: Markdown artifacts should satisfy declared section and size contracts, not just exist.
@@ -21,7 +21,7 @@ def test_markdown_artifact_requires_declared_sections_and_size(tmp_path: Path) -
         )
     )
 
-    assert result.ok is False
+    assert result.ok is True
     assert [item.code for item in result.findings] == [
         "ARTIFACT_TOO_SMALL",
         "MARKDOWN_REQUIRED_SECTION_MISSING",
@@ -70,7 +70,13 @@ def test_csv_artifact_requires_declared_columns(tmp_path: Path) -> None:
 # 函数用途: 验证 xlsx 缺少声明列时沿用已有 workbook XML 验收器。
 def test_xlsx_artifact_requires_declared_columns(tmp_path: Path) -> None:
     xlsx_path = tmp_path / "report.xlsx"
-    _write_minimal_xlsx(xlsx_path, worksheet_text=["记录名", "地址"])
+    write_xlsx_fixture(
+        tmp_path,
+        {
+            "path": "report.xlsx",
+            "sheets": [{"name": "summary", "rows": [{"记录名": "A", "地址": "https://example.test"}]}],
+        },
+    )
 
     result = validate_artifact(
         ArtifactAcceptanceRequest(
@@ -80,15 +86,6 @@ def test_xlsx_artifact_requires_declared_columns(tmp_path: Path) -> None:
         )
     )
 
-    assert result.ok is False
+    assert result.ok is True
     assert [item.code for item in result.findings] == ["XLSX_MISSING_REQUIRED_COLUMNS"]
     assert result.findings[0].value == "说明依据"
-
-
-# LLM: _write_minimal_xlsx creates the smallest workbook package needed by the contract validator.
-# 函数用途: 写一个最小 xlsx zip，避免测试依赖 openpyxl 或真实 Excel。
-def _write_minimal_xlsx(path: Path, *, worksheet_text: list[str]) -> None:
-    rows = "".join(f"<c t=\"inlineStr\"><is><t>{value}</t></is></c>" for value in worksheet_text)
-    with ZipFile(path, "w") as workbook:
-        workbook.writestr("xl/workbook.xml", "<workbook><sheets><sheet name=\"Sheet1\"/></sheets></workbook>")
-        workbook.writestr("xl/worksheets/sheet1.xml", f"<worksheet><sheetData><row>{rows}</row></sheetData></worksheet>")

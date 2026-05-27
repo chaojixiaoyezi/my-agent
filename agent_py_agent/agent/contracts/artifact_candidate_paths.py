@@ -63,7 +63,7 @@ def _candidate_path_finding(
             validation_contract=validation_contract,
         )
     )
-    if report.ok:
+    if report.ok and not report.findings:
         return ArtifactFinding(
             code="ARTIFACT_CANDIDATE_PATH",
             severity="soft",

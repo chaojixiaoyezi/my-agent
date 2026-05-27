@@ -1,7 +1,14 @@
 {
-  "generated_at": "2026-05-23T11:00:10.024033+00:00",
-  "total_findings": 35,
+  "generated_at": "2026-05-27T23:24:44.949623+00:00",
+  "total_findings": 38,
   "findings": [
+    {
+      "identity": "file:agent_py_agent/agent/agent_core/delivery_requirement_materializer.py:delivery_requirement_materializer.py",
+      "severity": "high-risk",
+      "kind": "file",
+      "path": "agent_py_agent/agent/agent_core/delivery_requirement_materializer.py",
+      "name": "delivery_requirement_materializer.py"
+    },
     {
       "identity": "file:agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py:main_agent_delivery_closeout_artifact_repair.py",
       "severity": "soft",
@@ -10,46 +17,18 @@
       "name": "main_agent_delivery_closeout_artifact_repair.py"
     },
     {
-      "identity": "file:agent_py_agent/agent/agent_core/tool_api_collection_contract.py:tool_api_collection_contract.py",
-      "severity": "soft",
-      "kind": "file",
-      "path": "agent_py_agent/agent/agent_core/tool_api_collection_contract.py",
-      "name": "tool_api_collection_contract.py"
-    },
-    {
-      "identity": "file:agent_py_agent/agent/agent_core/tool_bootstrap_materialization_guard.py:tool_bootstrap_materialization_guard.py",
+      "identity": "file:agent_py_agent/agent/agent_core/subagent_message_tool.py:subagent_message_tool.py",
       "severity": "high-risk",
       "kind": "file",
-      "path": "agent_py_agent/agent/agent_core/tool_bootstrap_materialization_guard.py",
-      "name": "tool_bootstrap_materialization_guard.py"
+      "path": "agent_py_agent/agent/agent_core/subagent_message_tool.py",
+      "name": "subagent_message_tool.py"
     },
     {
-      "identity": "file:agent_py_agent/agent/agent_core/tool_delivery_repair_guard.py:tool_delivery_repair_guard.py",
-      "severity": "soft",
-      "kind": "file",
-      "path": "agent_py_agent/agent/agent_core/tool_delivery_repair_guard.py",
-      "name": "tool_delivery_repair_guard.py"
-    },
-    {
-      "identity": "file:agent_py_agent/agent/agent_core/tool_delivery_repair_payload.py:tool_delivery_repair_payload.py",
-      "severity": "soft",
-      "kind": "file",
-      "path": "agent_py_agent/agent/agent_core/tool_delivery_repair_payload.py",
-      "name": "tool_delivery_repair_payload.py"
-    },
-    {
-      "identity": "file:agent_py_agent/agent/agent_core/tool_delivery_repair_required_calls.py:tool_delivery_repair_required_calls.py",
+      "identity": "file:agent_py_agent/agent/contracts/artifact_acceptance.py:artifact_acceptance.py",
       "severity": "high-risk",
       "kind": "file",
-      "path": "agent_py_agent/agent/agent_core/tool_delivery_repair_required_calls.py",
-      "name": "tool_delivery_repair_required_calls.py"
-    },
-    {
-      "identity": "file:agent_py_agent/agent/agent_core/tool_loop_response_decision.py:tool_loop_response_decision.py",
-      "severity": "high-risk",
-      "kind": "file",
-      "path": "agent_py_agent/agent/agent_core/tool_loop_response_decision.py",
-      "name": "tool_loop_response_decision.py"
+      "path": "agent_py_agent/agent/contracts/artifact_acceptance.py",
+      "name": "artifact_acceptance.py"
     },
     {
       "identity": "file:agent_py_agent/agent/contracts/artifact_collection_contract.py:artifact_collection_contract.py",
@@ -66,39 +45,39 @@
       "name": "error_taxonomy.py"
     },
     {
-      "identity": "file:agent_py_agent/agent/tooling/api_json_collection_builder.py:api_json_collection_builder.py",
-      "severity": "soft",
+      "identity": "file:agent_py_agent/agent/subagents/context_bundle.py:context_bundle.py",
+      "severity": "high-risk",
       "kind": "file",
-      "path": "agent_py_agent/agent/tooling/api_json_collection_builder.py",
-      "name": "api_json_collection_builder.py"
+      "path": "agent_py_agent/agent/subagents/context_bundle.py",
+      "name": "context_bundle.py"
+    },
+    {
+      "identity": "file:agent_py_agent/agent/subagents/context_bundle_contracts.py:context_bundle_contracts.py",
+      "severity": "high-risk",
+      "kind": "file",
+      "path": "agent_py_agent/agent/subagents/context_bundle_contracts.py",
+      "name": "context_bundle_contracts.py"
+    },
+    {
+      "identity": "file:agent_py_agent/agent/tooling/shell.py:shell.py",
+      "severity": "high-risk",
+      "kind": "file",
+      "path": "agent_py_agent/agent/tooling/shell.py",
+      "name": "shell.py"
     },
     {
       "identity": "file:agent_py_agent/agent/tooling/web.py:web.py",
-      "severity": "high-risk",
+      "severity": "soft",
       "kind": "file",
       "path": "agent_py_agent/agent/tooling/web.py",
       "name": "web.py"
     },
     {
-      "identity": "file:agent_py_agent/tests/test_api_json_collection_tool.py:test_api_json_collection_tool.py",
+      "identity": "file:agent_py_agent/tests/test_tools/test_filesystem_tools.py:test_filesystem_tools.py",
       "severity": "high-risk",
       "kind": "file",
-      "path": "agent_py_agent/tests/test_api_json_collection_tool.py",
-      "name": "test_api_json_collection_tool.py"
-    },
-    {
-      "identity": "file:agent_py_agent/tests/test_staged_writer_tool_contract.py:test_staged_writer_tool_contract.py",
-      "severity": "high-risk",
-      "kind": "file",
-      "path": "agent_py_agent/tests/test_staged_writer_tool_contract.py",
-      "name": "test_staged_writer_tool_contract.py"
-    },
-    {
-      "identity": "file:agent_py_agent/tests/test_tool_delivery_repair_guard.py:test_tool_delivery_repair_guard.py",
-      "severity": "high-risk",
-      "kind": "file",
-      "path": "agent_py_agent/tests/test_tool_delivery_repair_guard.py",
-      "name": "test_tool_delivery_repair_guard.py"
+      "path": "agent_py_agent/tests/test_tools/test_filesystem_tools.py",
+      "name": "test_filesystem_tools.py"
     },
     {
       "identity": "file:scripts/check_code_size.py:check_code_size.py",
@@ -108,18 +87,39 @@
       "name": "check_code_size.py"
     },
     {
-      "identity": "function:agent_py_agent/cli/real_e2e_commands.py:add_real_e2e_subcommand",
+      "identity": "function:agent_py_agent/agent/agent_core/agent_tree_status.py:_main_agent_node",
       "severity": "high-risk",
       "kind": "function",
-      "path": "agent_py_agent/cli/real_e2e_commands.py",
-      "name": "add_real_e2e_subcommand"
+      "path": "agent_py_agent/agent/agent_core/agent_tree_status.py",
+      "name": "_main_agent_node"
     },
     {
-      "identity": "function:agent_py_agent/tests/test_api_json_collection_tool.py:test_api_json_collection_can_drop_incomplete_source_artifact_items",
+      "identity": "function:agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifacts.py:_validate_artifact_item",
       "severity": "high-risk",
       "kind": "function",
-      "path": "agent_py_agent/tests/test_api_json_collection_tool.py",
-      "name": "test_api_json_collection_can_drop_incomplete_source_artifact_items"
+      "path": "agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifacts.py",
+      "name": "_validate_artifact_item"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/artifacts/shell_protection.py:reconcile_shell_artifacts",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/agent/artifacts/shell_protection.py",
+      "name": "reconcile_shell_artifacts"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/subagents/services/board_items.py:_board_item_payload",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/agent/subagents/services/board_items.py",
+      "name": "_board_item_payload"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/tooling/write_boundary.py:validate_write_boundary",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/agent/tooling/write_boundary.py",
+      "name": "validate_write_boundary"
     },
     {
       "identity": "function:agent_py_agent/tests/test_artifact_collection_contract.py:test_collection_contract_accepts_sheets_rows_when_flat_items_path_is_missing",
@@ -129,11 +129,25 @@
       "name": "test_collection_contract_accepts_sheets_rows_when_flat_items_path_is_missing"
     },
     {
-      "identity": "function:agent_py_agent/tests/test_staged_writer_tool_contract.py:test_tool_loop_executes_api_collection_with_contract_normalized_payload",
+      "identity": "function:agent_py_agent/tests/test_collaboration_control_plane_identity.py:test_collaboration_tools_scope_actor_to_current_runner_when_explicit_id_conflicts",
       "severity": "high-risk",
       "kind": "function",
-      "path": "agent_py_agent/tests/test_staged_writer_tool_contract.py",
-      "name": "test_tool_loop_executes_api_collection_with_contract_normalized_payload"
+      "path": "agent_py_agent/tests/test_collaboration_control_plane_identity.py",
+      "name": "test_collaboration_tools_scope_actor_to_current_runner_when_explicit_id_conflicts"
+    },
+    {
+      "identity": "function:agent_py_agent/tests/test_local_store_control_plane.py:test_subagent_save_overwrites_model_written_system_tree_snapshot",
+      "severity": "high-risk",
+      "kind": "function",
+      "path": "agent_py_agent/tests/test_local_store_control_plane.py",
+      "name": "test_subagent_save_overwrites_model_written_system_tree_snapshot"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/agent_core/delivery_requirement_materializer.py:_artifact_intent",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/agent_core/delivery_requirement_materializer.py",
+      "name": "_artifact_intent"
     },
     {
       "identity": "nesting:agent_py_agent/agent/agent_core/main_agent_delivery_closeout_artifact_repair.py:_workspace_relative_candidate",
@@ -143,32 +157,25 @@
       "name": "_workspace_relative_candidate"
     },
     {
-      "identity": "nesting:agent_py_agent/agent/agent_core/tool_api_collection_contract.py:_merge_api_request_collections",
+      "identity": "nesting:agent_py_agent/agent/agent_core/orchestration_scope_resolution.py:_clean_mapping",
       "severity": "high-risk",
       "kind": "nesting",
-      "path": "agent_py_agent/agent/agent_core/tool_api_collection_contract.py",
-      "name": "_merge_api_request_collections"
+      "path": "agent_py_agent/agent/agent_core/orchestration_scope_resolution.py",
+      "name": "_clean_mapping"
     },
     {
-      "identity": "nesting:agent_py_agent/agent/agent_core/tool_bootstrap_materialization_guard.py:_pending_file_target_parent_dirs",
+      "identity": "nesting:agent_py_agent/agent/agent_core/orchestration_scope_resolution.py:_explicit_run_ids",
       "severity": "high-risk",
       "kind": "nesting",
-      "path": "agent_py_agent/agent/agent_core/tool_bootstrap_materialization_guard.py",
-      "name": "_pending_file_target_parent_dirs"
+      "path": "agent_py_agent/agent/agent_core/orchestration_scope_resolution.py",
+      "name": "_explicit_run_ids"
     },
     {
-      "identity": "nesting:agent_py_agent/agent/agent_core/tool_delivery_repair_payload.py:_markdown_from_collection_rows",
+      "identity": "nesting:agent_py_agent/agent/contracts/artifact_acceptance.py:_xlsx_open_finding",
       "severity": "high-risk",
       "kind": "nesting",
-      "path": "agent_py_agent/agent/agent_core/tool_delivery_repair_payload.py",
-      "name": "_markdown_from_collection_rows"
-    },
-    {
-      "identity": "nesting:agent_py_agent/agent/agent_core/tool_delivery_repair_required_calls.py:_mapping_requirement",
-      "severity": "soft",
-      "kind": "nesting",
-      "path": "agent_py_agent/agent/agent_core/tool_delivery_repair_required_calls.py",
-      "name": "_mapping_requirement"
+      "path": "agent_py_agent/agent/contracts/artifact_acceptance.py",
+      "name": "_xlsx_open_finding"
     },
     {
       "identity": "nesting:agent_py_agent/agent/contracts/gates/document_content_extractors.py:_sections_from_styled_paragraphs",
@@ -176,6 +183,13 @@
       "kind": "nesting",
       "path": "agent_py_agent/agent/contracts/gates/document_content_extractors.py",
       "name": "_sections_from_styled_paragraphs"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/tooling/filesystem_path_recovery.py:_walk_candidate_items",
+      "severity": "high-risk",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/tooling/filesystem_path_recovery.py",
+      "name": "_walk_candidate_items"
     },
     {
       "identity": "params:agent_py_agent/agent/contracts/artifact_collection_mapping.py:_coverage_depth_finding",
@@ -199,25 +213,11 @@
       "name": "_finding"
     },
     {
-      "identity": "params:agent_py_agent/agent/tooling/api_json_collection.py:__init__",
+      "identity": "params:agent_py_agent/agent/tooling/filesystem_path_recovery.py:suggest_missing_path_candidates",
       "severity": "high-risk",
       "kind": "params",
-      "path": "agent_py_agent/agent/tooling/api_json_collection.py",
-      "name": "__init__"
-    },
-    {
-      "identity": "params:agent_py_agent/agent/tooling/api_json_collection_builder.py:_load_json",
-      "severity": "high-risk",
-      "kind": "params",
-      "path": "agent_py_agent/agent/tooling/api_json_collection_builder.py",
-      "name": "_load_json"
-    },
-    {
-      "identity": "params:agent_py_agent/agent/tooling/api_json_collection_http.py:fetch_json",
-      "severity": "high-risk",
-      "kind": "params",
-      "path": "agent_py_agent/agent/tooling/api_json_collection_http.py",
-      "name": "fetch_json"
+      "path": "agent_py_agent/agent/tooling/filesystem_path_recovery.py",
+      "name": "suggest_missing_path_candidates"
     },
     {
       "identity": "params:agent_py_agent/agent/tooling/registry_invoke.py:_execute_with_temporary_tool_context",
@@ -235,6 +235,20 @@
     },
     {
       "identity": "params:agent_py_agent/agent/tooling/web.py:__init__",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/agent/tooling/web.py",
+      "name": "__init__"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/tooling/web.py:__init__",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/agent/tooling/web.py",
+      "name": "__init__"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/tooling/web.py:__init__",
       "severity": "high-risk",
       "kind": "params",
       "path": "agent_py_agent/agent/tooling/web.py",
@@ -246,6 +260,13 @@
       "kind": "params",
       "path": "agent_py_agent/agent/tooling/web.py",
       "name": "_network_safety_error"
+    },
+    {
+      "identity": "params:agent_py_agent/tests/test_runtime_gate_ledger.py:_loop_params",
+      "severity": "high-risk",
+      "kind": "params",
+      "path": "agent_py_agent/tests/test_runtime_gate_ledger.py",
+      "name": "_loop_params"
     }
   ]
 }

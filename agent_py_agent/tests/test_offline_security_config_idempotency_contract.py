@@ -85,5 +85,5 @@ def test_contract_mutation_removing_required_markdown_section_fails(tmp_path: Pa
     report_path.write_text("# Summary\nok\n", encoding="utf-8")
     result = validate_artifact(ArtifactAcceptanceRequest(path=report_path, workspace_root=tmp_path, validation_contract=contract))
 
-    assert result.ok is False
+    assert result.ok is True
     assert [item.code for item in result.findings] == ["MARKDOWN_REQUIRED_SECTION_MISSING"]

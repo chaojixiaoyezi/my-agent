@@ -42,7 +42,7 @@ def _inc_local_progress(counters: ToolLoopRepairCounters) -> ToolLoopRepairCount
 
 
 # LLM: _inc_exploration_fuse returns a new immutable counters bundle after one exploration redirect.
-# 函数用途: 增加探索空转纠偏次数，连续忽略后进入确定性阻断。
+# 函数用途: 增加探索空转纠偏次数；是否拦截由运行门配置决定，0 表示只提示不按次数阻断。
 def _inc_exploration_fuse(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
     return ToolLoopRepairCounters(
         reserved_record_repairs=counters.reserved_record_repairs,

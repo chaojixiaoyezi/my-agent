@@ -288,6 +288,18 @@ class ShellTool(BaseTool):
                 "TOOL_DEADLINE_EXCEEDED: 外层任务剩余时间不足，系统没有启动新的 shell 命令。",
                 error_code="TOOL_TIMEOUT",
             )
+        target = self._execution_target(params, command)
+        if isinstance(target, ToolExecutionResult):
+            return target
+        return self._execute_with_artifact_protection(command, target, timeout)
+
+    # LLM: ShellTool._execution_target resolves cwd and delete policy before subprocess launch.
+    # 函数用途: 校验 shell 工作目录、access_mode 和删除范围，返回可执行目录或结构化错误。
+    def _execution_target(
+        self,
+        params: dict[str, Any],
+        command: str,
+    ) -> Path | ToolExecutionResult:
         effective_access_mode = _effective_access_mode(self.access_mode, params.get("__access_mode"))
         target = _working_dir_from_params(
             params,
@@ -300,6 +312,16 @@ class ShellTool(BaseTool):
         delete_error = delete_target_access_error(command, target, self.workspace_roots, effective_access_mode)
         if delete_error:
             return ToolExecutionResult(self.spec.name, False, delete_error, error_code="PATH_OUTSIDE_WORKSPACE")
+        return target
+
+    # LLM: ShellTool._execute_with_artifact_protection wraps subprocess execution with registry snapshots.
+    # 函数用途: 在命令前备份 ready 产物，命令后复核并把保护摘要写回工具结果。
+    def _execute_with_artifact_protection(
+        self,
+        command: str,
+        target: Path,
+        timeout: int,
+    ) -> ToolExecutionResult:
         try:
             artifact_snapshots = snapshot_ready_artifacts(self.workspace_root)
         except OSError as exc:
@@ -310,16 +332,7 @@ class ShellTool(BaseTool):
                 error_code="ARTIFACT_BACKUP_FAILED",
             )
         artifact_summary: dict[str, Any] = {"snapshots": len(artifact_snapshots), "changed": [], "invalid": []}
-        try:
-            result = self._run_command(command, target, timeout)
-            output = _format_process_result(result, self.max_output_chars)
-            ok = True
-        except subprocess.TimeoutExpired:
-            output = f"命令执行超时 timeout ({timeout}s): {command[:100]}..."
-            ok = False
-        except OSError as exc:
-            output = f"命令执行失败: {exc}"
-            ok = False
+        output, ok = self._run_process_text(command, target, timeout)
         try:
             artifact_summary = reconcile_shell_artifacts(self.workspace_root, artifact_snapshots)
         except OSError as exc:
@@ -333,6 +346,23 @@ class ShellTool(BaseTool):
             output,
             result_envelope={"artifact_protection": artifact_summary},
         )
+
+    # LLM: ShellTool._run_process_text normalizes subprocess success, timeout, and OS errors.
+    # 函数用途: 执行命令并返回工具输出文本和 ok 标记，不处理产物登记副作用。
+    def _run_process_text(
+        self,
+        command: str,
+        target: Path,
+        timeout: int,
+    ) -> tuple[str, bool]:
+        try:
+            result = self._run_command(command, target, timeout)
+            output = _format_process_result(result, self.max_output_chars)
+            return output, True
+        except subprocess.TimeoutExpired:
+            return f"命令执行超时 timeout ({timeout}s): {command[:100]}...", False
+        except OSError as exc:
+            return f"命令执行失败: {exc}", False
 
     # LLM: ShellTool._parse_command 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 解析 parse_command 数据结构。

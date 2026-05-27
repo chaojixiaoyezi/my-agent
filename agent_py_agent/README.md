@@ -203,19 +203,24 @@ gateway request、gateway 生命周期事件、subagent 工单、runner 结果�
 
 ```text
 list_files
+find_files
 read_file
+read_artifact
 search_text
 write_file
-append_file
-replace_in_file
-file_write_session
-fetch_url
+apply_patch
+list_tools
+web_search
+web_fetch
+web_extract
 http_request
+run_command
 ```
 
-`file_write_session` 用于大文件分块写入：先 `begin`，再按 `chunk_index` 多次
-`append`，最后 `finish` 原子提交；中途失败可以重试同一个 chunk，不需要把长正文反复塞进
-`write_file` 的单次工具 JSON。
+旧的 `append_file`、`replace_in_file`、`file_write_session`、`write_structured_json`、
+`data_to_workbook`、`markdown_to_pdf` 不再作为模型可见工具。复杂文件由模型使用
+`write_file`、`apply_patch` 或授权的 `run_command` 生成，系统统一做路径边界、artifact registry
+和 closeout 验收。
 
 工具系统有两层 prompt：
 - Tool Catalog：中等详细度工具目录。
@@ -410,7 +415,7 @@ runner prompt 会要求模型最后输出：
 ```text
 [SUBAGENT_RESULT]
 {
-  "status": "AWAITING_ACCEPTANCE",
+  "status": "DONE",
   "summary": "本轮完成或卡住的摘要",
   "used_tools": [],
   "used_skills": [],

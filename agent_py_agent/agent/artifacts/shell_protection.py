@@ -1,3 +1,6 @@
+# LLM: Shell artifact protection snapshots registered deliverables around run_command.
+# 模块用途: 在 shell 执行前备份已登记产物，执行后复核格式并更新统一 artifact registry。
+
 """Snapshot registered artifacts around shell execution.
 
 Human version:
@@ -20,6 +23,8 @@ from agent_py_agent.agent.contracts.artifact_format_lint import lint_artifact_fo
 from .registry import ArtifactRegistration, latest_artifact_records, register_artifact
 
 
+# LLM: ShellArtifactSnapshot preserves a ready artifact before shell side effects.
+# 类用途: 保存 shell 执行前的产物身份、hash、大小和备份路径。
 @dataclass(frozen=True)
 class ShellArtifactSnapshot:
     """One protected artifact before run_command starts."""
@@ -35,10 +40,14 @@ class ShellArtifactSnapshot:
     size_bytes: int
     backup_ref: str
 
+    # LLM: to_dict serializes shell snapshots for tool envelopes.
+    # 函数用途: 将 snapshot 转成普通 dict，供 run_command 结果摘要使用。
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
+# LLM: snapshot_ready_artifacts protects all currently ready registered artifacts.
+# 函数用途: 复制 registry 中 ready 状态的文件，为 shell 覆盖或损坏保留备份引用。
 def snapshot_ready_artifacts(workspace_root: str | Path) -> list[ShellArtifactSnapshot]:
     """Copy current ready artifacts so shell damage has a restore reference."""
 
@@ -72,6 +81,8 @@ def snapshot_ready_artifacts(workspace_root: str | Path) -> list[ShellArtifactSn
     return snapshots
 
 
+# LLM: reconcile_shell_artifacts updates registry after shell side effects.
+# 函数用途: 比较 shell 前后的 hash，重新 lint 已变化产物并登记 ready/invalid 状态。
 def reconcile_shell_artifacts(
     workspace_root: str | Path,
     snapshots: list[ShellArtifactSnapshot],
@@ -126,6 +137,8 @@ def reconcile_shell_artifacts(
     }
 
 
+# LLM: shell_artifact_protection_note gives models concise repair facts after shell.
+# 函数用途: 把 shell 后产物变化和损坏情况压成短文本，不展开大文件内容。
 def shell_artifact_protection_note(summary: dict[str, Any]) -> str:
     """Render concise machine-readable facts for the model after shell exits."""
 
@@ -148,6 +161,8 @@ def shell_artifact_protection_note(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# LLM: _post_shell_status classifies one protected artifact after shell exits.
+# 函数用途: 判断产物是否缺失、为空、格式损坏、已变化但仍可用或未变化。
 def _post_shell_status(
     path: Path,
     workspace_root: Path,
@@ -167,6 +182,8 @@ def _post_shell_status(
     return ("changed_ready" if report.ok else "invalid_after_shell", findings)
 
 
+# LLM: _finding_to_dict normalizes linter findings for registry metadata.
+# 函数用途: 把不同 finding 对象转成可 JSON 化 dict。
 def _finding_to_dict(value: object) -> dict[str, Any]:
     if hasattr(value, "to_dict") and callable(value.to_dict):  # type: ignore[attr-defined]
         return dict(value.to_dict())
@@ -175,6 +192,8 @@ def _finding_to_dict(value: object) -> dict[str, Any]:
     return {"message": str(value)}
 
 
+# LLM: _sha256_file computes the current content hash after shell execution.
+# 函数用途: 分块读取文件计算 sha256，避免一次读入大产物。
 def _sha256_file(path: Path) -> str:
     import hashlib
 
@@ -185,6 +204,8 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+# LLM: _safe_name makes artifact ids safe as backup directory names.
+# 函数用途: 将 artifact_id 清理成文件系统安全片段，空值使用 artifact。
 def _safe_name(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in value)
     return cleaned or "artifact"

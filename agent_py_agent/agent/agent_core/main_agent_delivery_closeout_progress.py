@@ -78,7 +78,7 @@ def _initial_progress(workspace_root: Path, contract: dict[str, Any]) -> dict[st
         "unchanged_failure_count": 0,
         "recovery_actions": [],
         "pending_materialization_targets": [],
-        "no_progress_block_threshold": 2,
+        "no_progress_block_threshold": 0,
     }
 
 

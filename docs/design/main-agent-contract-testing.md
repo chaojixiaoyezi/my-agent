@@ -217,12 +217,12 @@
 最新运行门说明见 `docs/design/main-agent-runtime-gates.md`。这一轮的核心变化是把“阻止模型走歪”和“限制模型怎么开工”分开：
 
 - 保留真正硬门：工具 schema、路径/URL/command 边界、审批绑定、幂等、最终 delivery closeout。
-- open write session 是写入事务保护：关键收口、读未提交目标、覆盖未提交目标会被拉回；非冲突工具继续执行，并按模型回合周期提醒，不再由它自己按次数 blocked。
+- 旧 open write session 工具已废弃；复杂文件统一用 `write_file`、`apply_patch` 或授权命令生成，系统只保留通用路径边界、artifact registry 和 closeout。
 - 探索熔断改成配置化；本地进展门改成只提醒不阻断，默认 `0` 表示只按固定间隔给软提示。
-- closeout 返工预算只分“产物齐全但不合格”和“必交产物缺失/无法定位”两类，默认各 3 次，`0` 表示持续返工不按次数停。
+- closeout 返工预算只分“产物齐全但不合格”和“必交产物缺失/无法定位”两类，默认都是 `0`，表示持续返工不按次数停；如果显式配置成 `10`，失败报告会记录并使用 `10`。
 - delivery repair 独立运行门已删除；closeout 失败后统一通过 `[delivery-contract-check]` 的 `repair_guidance`、failed artifacts、failed gates 和 recovery actions 指导模型返工，读/搜空转由探索熔断和本地进展门统一处理。
 - 新增显式 `submit_for_acceptance`，并保留“无工具最终回复触发隐式验收”。
-- delivery contract Doctor 第一次返回结构化返工，第二次仍不可运行则 `DELIVERY_CONTRACT_DOCTOR_BLOCKED`，避免坏机器合同导致无限循环；普通产物失败仍走 closeout 返工循环。
+- delivery contract Doctor 只返回结构化诊断提示；同一坏机器合同不会再输出 `DELIVERY_CONTRACT_DOCTOR_BLOCKED`，也不会阻断普通交付。
 - 删除 bootstrap 开工物化硬门，避免普通任务被迫先写系统指定中间文件。
 
 后续真实任务测试必须按普通用户 prompt 开始：说清任务、要求、输出目录和目标产物格式即可。测试失败时先沉淀离线失败样本，再修通用底座；禁止把失败修成专项模板或新的开工前置硬门。

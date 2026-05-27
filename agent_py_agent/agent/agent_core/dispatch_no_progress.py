@@ -36,7 +36,7 @@ def dispatch_made_progress(dispatch_report) -> bool:
 
 
 # LLM: dispatch_no_progress_payload exposes no-progress diagnosis to model-facing dispatch tools.
-# 函数用途: 当 dispatch_subagents 只做重复审计/分类而没有真实推进时，返回机器可读停止提示，避免父模型继续空转调用。
+# 函数用途: 当 dispatch_subagents 只做重复审计/分类而没有真实推进时，返回机器可读提示，避免父模型继续空转调用。
 def dispatch_no_progress_payload(dispatch_report) -> dict[str, object]:
     signature = _dispatch_no_progress_signature(dispatch_report)
     if signature is None or not signature:
@@ -44,10 +44,10 @@ def dispatch_no_progress_payload(dispatch_report) -> dict[str, object]:
     records = list(getattr(dispatch_report, "records", []) or [])
     payload = {
         "no_progress_actions_only": True,
-        "recommended_next_action": "stop_dispatch_and_report_blockers",
+        "recommended_next_action": "summarize_blockers_or_change_strategy",
         "reason": (
             "本轮 dispatch 只有 due-check、inspect 或 classify 等记录类动作；"
-            "没有创建子代理、状态变化或验收执行。请停止重复 dispatch，改为汇报 blockers 和 refs。"
+            "没有创建子代理、状态变化或验收执行。请不要原样重复 dispatch，改为查看 refs、换策略或汇报 blockers。"
         ),
         "record_count": len(records),
         "blocked_run_ids": _record_run_ids(records),

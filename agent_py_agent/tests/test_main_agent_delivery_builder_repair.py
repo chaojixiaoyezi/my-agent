@@ -23,7 +23,7 @@ def test_builder_repair_waits_for_failed_source_artifact_mapping(tmp_path: Path)
     actions = _actions(tmp_path, contract)
 
     assert "STAGING_BUILDER_READY" not in actions
-    assert actions["ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED"]["recommended_action"] == "repair_artifact_against_findings"
+    assert "ACCEPTANCE_ARTIFACT_REPAIR_REQUIRED" not in actions
 
 
 def _actions(workspace: Path, contract: dict[str, object]) -> dict[str, dict[str, object]]:

@@ -90,9 +90,9 @@ def test_dispatch_payload_exposes_runner_created_children():
     assert "root 创建了 2 个直接孩子" in payload["records"][0]["runner_summary"]
 
 
-# LLM: dispatch payload should tell models when only audit/classify actions remain.
-# 函数用途: 防止父模型看到重复 due-check/classify 记录后继续无限调用 dispatch_subagents。
-def test_dispatch_payload_marks_no_progress_terminal_actions():
+# LLM: dispatch payload should hint models when only audit/classify actions remain.
+# 函数用途: 防止父模型看到重复 due-check/classify 记录后继续原样调用 dispatch_subagents。
+def test_dispatch_payload_marks_no_progress_hint_actions():
     mock_report = MagicMock()
     mock_report.dry_run = False
     mock_report.summary = {"total": 2}
@@ -126,10 +126,10 @@ def test_dispatch_payload_marks_no_progress_terminal_actions():
 
     payload = DispatchSubagentsTool(mock_agent)._report_payload(mock_report)
 
-    terminal = payload["dispatch_terminal"]
-    assert terminal["no_progress_actions_only"] is True
-    assert terminal["recommended_next_action"] == "stop_dispatch_and_report_blockers"
-    assert terminal["blocked_run_ids"] == ["blocked-run"]
+    hint = payload["dispatch_no_progress_hint"]
+    assert hint["no_progress_actions_only"] is True
+    assert hint["recommended_next_action"] == "summarize_blockers_or_change_strategy"
+    assert hint["blocked_run_ids"] == ["blocked-run"]
 
 
 # LLM: dry-run takeover previews should give parents an exact apply call instead of a terminal stop.
@@ -168,10 +168,10 @@ def test_dispatch_payload_suggests_apply_for_dry_run_recovery_actions():
 
     payload = DispatchSubagentsTool(mock_agent)._report_payload(mock_report)
 
-    terminal = payload["dispatch_terminal"]
-    assert terminal["recommended_next_action"] == "rerun_dispatch_with_apply_for_recovery"
-    assert terminal["suggested_tool_call"]["apply"] is True
-    assert terminal["suggested_tool_call"]["execute_runners"] is False
+    hint = payload["dispatch_no_progress_hint"]
+    assert hint["recommended_next_action"] == "rerun_dispatch_with_apply_for_recovery"
+    assert hint["suggested_tool_call"]["apply"] is True
+    assert hint["suggested_tool_call"]["execute_runners"] is False
 
 
 # LLM: test_dispatch_payload_exposes_recovery_valid_run_ids covers model retry ergonomics.

@@ -1,3 +1,6 @@
+# LLM: Artifact registry records user-visible deliverables as machine facts.
+# 模块用途: 统一登记任务产物的路径、hash、状态和来源，让父代理、tree 和 closeout 只认一套账本。
+
 """Run-local registry for user-visible artifacts.
 
 Human version:
@@ -20,6 +23,8 @@ SCHEMA_VERSION = "artifact_registry.v1"
 REGISTRY_RELATIVE_PATH = Path("data") / "artifacts" / "registry.jsonl"
 
 
+# LLM: ArtifactRegistration is the input contract for one artifact write.
+# 类用途: 保存登记产物所需的 workspace、路径、身份、格式和来源字段。
 @dataclass(frozen=True)
 class ArtifactRegistration:
     """Inputs for registering one concrete artifact file."""
@@ -38,6 +43,8 @@ class ArtifactRegistration:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+# LLM: ArtifactRegistryRecord is the persisted artifact ledger entry.
+# 类用途: 保存一次产物登记结果，包括 artifact_id、路径、hash、大小和状态。
 @dataclass(frozen=True)
 class ArtifactRegistryRecord:
     """One latest-or-historical artifact registry entry."""
@@ -58,16 +65,22 @@ class ArtifactRegistryRecord:
     updated_at: float
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    # LLM: to_dict serializes registry records for JSONL persistence.
+    # 函数用途: 将 dataclass 记录转成普通 dict，供 registry.jsonl 写入。
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
+# LLM: registry_path centralizes the on-disk artifact ledger location.
+# 函数用途: 返回当前 workspace 的统一产物登记文件路径。
 def registry_path(workspace_root: str | Path) -> Path:
     """Return the canonical registry path for a run workspace."""
 
     return Path(workspace_root).expanduser().resolve(strict=False) / REGISTRY_RELATIVE_PATH
 
 
+# LLM: register_artifact appends a new current artifact fact.
+# 函数用途: 计算产物 hash/大小/状态并写入 registry.jsonl。
 def register_artifact(request: ArtifactRegistration) -> ArtifactRegistryRecord:
     """Append a registry entry and return the current record."""
 
@@ -95,6 +108,8 @@ def register_artifact(request: ArtifactRegistration) -> ArtifactRegistryRecord:
     return record
 
 
+# LLM: latest_artifact_records reads current artifact facts by artifact_id.
+# 函数用途: 扫描 registry.jsonl，返回每个 artifact_id 的最新记录。
 def latest_artifact_records(workspace_root: str | Path) -> dict[str, ArtifactRegistryRecord]:
     """Read the registry and return latest record by artifact_id."""
 
@@ -117,6 +132,8 @@ def latest_artifact_records(workspace_root: str | Path) -> dict[str, ArtifactReg
     return latest
 
 
+# LLM: resolve_artifact_record resolves model-visible ids or paths against the registry.
+# 函数用途: 优先按 artifact_id 查找，必要时用精确路径匹配登记记录。
 def resolve_artifact_record(
     workspace_root: str | Path,
     artifact_id: str = "",
@@ -142,6 +159,8 @@ def resolve_artifact_record(
     return None
 
 
+# LLM: _append_record writes one registry record durably.
+# 函数用途: 追加 JSONL 并 fsync，减少 shell/进程中断造成的登记丢失。
 def _append_record(path: Path, record: ArtifactRegistryRecord) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(record.to_dict(), ensure_ascii=False, sort_keys=True) + "\n"
@@ -151,6 +170,8 @@ def _append_record(path: Path, record: ArtifactRegistryRecord) -> None:
         os.fsync(handle.fileno())
 
 
+# LLM: _record_from_payload tolerates old or corrupt registry lines.
+# 函数用途: 将 JSON 对象还原成 ArtifactRegistryRecord，坏记录返回 None。
 def _record_from_payload(payload: object) -> ArtifactRegistryRecord | None:
     if not isinstance(payload, dict):
         return None
@@ -176,6 +197,8 @@ def _record_from_payload(payload: object) -> ArtifactRegistryRecord | None:
         return None
 
 
+# LLM: _artifact_id creates a stable fallback id when the caller omits one.
+# 函数用途: 用 run/task/agent/path 派生短 artifact_id，避免只靠自然语言路径。
 def _artifact_id(request: ArtifactRegistration, path: Path) -> str:
     explicit = str(request.artifact_id or "").strip()
     if explicit:
@@ -191,11 +214,15 @@ def _artifact_id(request: ArtifactRegistration, path: Path) -> str:
     return f"art_{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:20]}"
 
 
+# LLM: _kind_from_path keeps unknown formats open-world.
+# 函数用途: 从文件后缀推导 kind；没有后缀时使用 artifact 兜底。
 def _kind_from_path(path: Path) -> str:
     suffix = path.suffix.lower().lstrip(".")
     return suffix or "artifact"
 
 
+# LLM: _status_from_request keeps explicit status authoritative.
+# 函数用途: 优先使用调用方声明状态，否则按文件存在性生成 ready/missing。
 def _status_from_request(request: ArtifactRegistration, path: Path) -> str:
     explicit = str(request.status or "").strip()
     if explicit:
@@ -203,6 +230,8 @@ def _status_from_request(request: ArtifactRegistration, path: Path) -> str:
     return "ready" if path.is_file() else "missing"
 
 
+# LLM: _sha256_file makes artifact records content-addressable.
+# 函数用途: 分块读取文件并计算 sha256，缺失文件返回空字符串。
 def _sha256_file(path: Path) -> str:
     if not path.is_file():
         return ""
@@ -213,6 +242,8 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+# LLM: _size_bytes records lightweight artifact size metadata.
+# 函数用途: 返回文件大小，无法读取时安全返回 0。
 def _size_bytes(path: Path) -> int:
     try:
         return path.stat().st_size if path.is_file() else 0

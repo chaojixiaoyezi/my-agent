@@ -262,6 +262,7 @@ def test_natural_language_root_drives_child_and_grandchild_e2e(tmp_path: Path) -
     agent = SimpleAgent(config, tmp_path)
     backend = NaturalFurnitureRootBackend(site_dir)
     agent.backend = backend
+    agent._subagent_worker_backend_override = backend.runner
 
     result = agent.run(
         "用单文件html做一个高端现代家具品牌的网站首页，风格高级、简洁、有设计感，适合真实商业品牌使用。只输出完整html，不要注释。",

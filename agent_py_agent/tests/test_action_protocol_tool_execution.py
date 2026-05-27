@@ -78,10 +78,10 @@ def test_tool_registry_error_envelope_includes_error_contract(tmp_path):
     result = registry.execute_call(envelope)
 
     assert result.ok is False
-    assert result.error_code == "PATH_INVALID"
-    assert result.result_envelope["error_code"] == "PATH_INVALID"
+    assert result.error_code == "PATH_NOT_FOUND"
+    assert result.result_envelope["error_code"] == "PATH_NOT_FOUND"
     assert result.result_envelope["error_category"] == "path"
-    assert result.result_envelope["recommended_action"] == "fix_path_or_read_refs"
-    assert "修正路径" in result.result_envelope["recovery_hint"]
-    assert result.result_envelope["tool_protocol_v2"]["error_type"] == "PATH_INVALID"
-    assert result.result_envelope["tool_protocol_v2"]["retry_hint"] == "fix_path_or_read_refs"
+    assert result.result_envelope["recommended_action"] == "retry_with_candidate_or_search"
+    assert "不存在" in result.result_envelope["recovery_hint"]
+    assert result.result_envelope["tool_protocol_v2"]["error_type"] == "PATH_NOT_FOUND"
+    assert result.result_envelope["tool_protocol_v2"]["retry_hint"] == "retry_with_candidate_or_search"
