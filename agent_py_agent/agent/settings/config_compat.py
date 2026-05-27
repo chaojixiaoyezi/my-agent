@@ -10,6 +10,7 @@ HIDDEN_COMPAT_CONFIG_FIELDS = {
     "dynamic_timeout_safety_margin",
     "max_auto_retry_attempts",
     "max_auto_split_depth",
+    "max_tool_rounds",
     "model_speed_profile_path",
     "runner_concurrency",
     "runner_start_rate",
@@ -35,4 +36,6 @@ HIDDEN_COMPAT_CONFIG_FIELDS = {
     "subagent_workflow_review_rounds",
     "task_max_grandchildren",
     "task_max_subagents",
+    "tool_agent_budget_max_calls",
+    "tool_agent_budget_window_seconds",
 }

@@ -12,13 +12,12 @@ dispatch 阶段不应该把"谁能跑、能不能重试、并发 worker 怎么�
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..settings.config_io import load_simple_yaml
+from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagent import SubAgentRunnerResult, SubAgentTask
 from ..subagents.services.dispatch_params import DispatchRecordParams
 from .runner_child_summary import runner_child_summary_fields
 from .runner_patch_review import _dispatch_patch_review_run_ids, _task_has_runner_patches
 from .runner_worker import RunSubagentWorkerParams, _run_subagent_worker
-from .runtime_guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -50,40 +49,27 @@ DEFAULT_AUTO_RUNNER_CONCURRENCY = 8
 def _runner_max_attempts(policy: str) -> int:
 
     if policy is None or str(policy).strip().lower() in {"", "auto"}:
-        return _runtime_guard_int("runner_failure_retry_limit", 2)
+        return runtime_guard_int("runner_failure_retry_limit", 2)
     value = str(policy).strip().lower()
     if value in {"", "auto"}:
-        return _runtime_guard_int("runner_failure_retry_limit", 2)
+        return runtime_guard_int("runner_failure_retry_limit", 2)
     if value in {"off", "none", "disabled", "false", "no"}:
         return 0
     try:
         return max(0, int(value))
     except ValueError:
-        return _runtime_guard_int("runner_failure_retry_limit", 2)
+        return runtime_guard_int("runner_failure_retry_limit", 2)
 
 
 # LLM: _same_run_redispatch_limit reads the same-run retry cap from shared runtime guard config.
 # 函数用途: 限制同一个 run_id 失败后被反复派发的次数；0 表示不限制。
 def _same_run_redispatch_limit(value: object = None) -> int:
     if value is None:
-        value = _runtime_guard_int("same_run_redispatch_limit", 1)
+        value = runtime_guard_int("same_run_redispatch_limit", 1)
     try:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
-        return _runtime_guard_int("same_run_redispatch_limit", 1)
-
-
-# LLM: _runtime_guard_int keeps runner defaults in runtime_guard_config.yaml without importing AgentConfig.
-# 函数用途: 读取共享运行门整数配置；坏配置回退默认值。
-def _runtime_guard_int(key: str, default: int) -> int:
-    try:
-        data = load_simple_yaml(DEFAULT_RUNTIME_GUARD_CONFIG_PATH)
-    except OSError:
-        return default
-    try:
-        return max(0, int(data.get(key, default) or 0))
-    except (TypeError, ValueError, AttributeError):
-        return default
+        return runtime_guard_int("same_run_redispatch_limit", 1)
 
 
 # LLM: _runner_failure_type 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

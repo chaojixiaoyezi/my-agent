@@ -182,7 +182,7 @@ class TestNormalizeAgentConfig:
         """验证负数 tool_rounds 回退到默认值。"""
         data = {"max_tool_rounds": -5}
         normalized, warnings = normalize_agent_config(data)
-        assert normalized["max_tool_rounds"] == 0  # 默认值，0 表示不限制
+        assert normalized["max_tool_rounds"] is None
         assert len(warnings) > 0
 
     # LLM: Tool write inline limits must be user-configurable through the standard config normalizer.
@@ -413,7 +413,7 @@ class TestAgentConfigDefaults:
         """验证默认配置值。"""
         config = AgentConfig()
         assert config.model_backend == "echo"
-        assert config.max_tool_rounds == 0
+        assert config.max_tool_rounds is None
         assert config.memory_top_k == 5
         assert config.max_subagents == 1000
         assert config.access_mode == "workspace-write"

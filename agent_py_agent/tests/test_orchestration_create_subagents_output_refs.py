@@ -209,7 +209,8 @@ def test_repair_contract_idempotency_reuses_same_scope_with_reworded_goal(tmp_pa
     assert first["created_run_ids"]
     assert second["created_run_ids"] == []
     assert second["reused_run_ids"] == first["created_run_ids"]
-    assert second["dispatch_run_ids"] == first["created_run_ids"]
+    assert second["dispatch_run_ids"] == []
+    assert second["auto_start"]["run_ids"] == first["created_run_ids"]
 
 
 def test_generic_worker_without_idempotency_contract_does_not_reuse_by_goal_text(tmp_path):

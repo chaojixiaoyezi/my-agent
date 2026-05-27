@@ -32,6 +32,7 @@ class _CreateChildBackend:
                             "tool": "create_subagents",
                             "goal": "本地子代理观察一条线索，并在需要主代理处理时上报。",
                             "count": 1,
+                            "defer_start": True,
                             "allowed_tools": ["raise_main_event", "submit_evidence", "case_status"],
                         },
                         ensure_ascii=False,
@@ -162,6 +163,7 @@ def _tool_call_response(backend: str, payload: dict[str, object]) -> ModelRespon
 def _create_collaboration_children_call() -> dict[str, object]:
     return {
         "tool": "create_subagents",
+        "defer_start": True,
         "items": [
             {
                 "goal": "观察一条线索，打开协作 case，并请求另一个代理补证据。",

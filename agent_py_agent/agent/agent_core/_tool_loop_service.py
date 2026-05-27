@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..backends import ModelResponse
-from ..settings.config_io import load_simple_yaml
+from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
 from ._runtime_params import ToolLoopExecuteParams
 from .main_agent_delivery_closeout import append_existing_failed_closeout_context
@@ -15,7 +15,6 @@ from .orchestration_shared_context import (
     refresh_parent_shared_context_cache,
     refresh_parent_shared_context_from_tool_record,
 )
-from .runtime_guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
 from .subagent_attempt_guard import stale_subagent_attempt_message
 from .tool_call_archive_record import archive_tool_call_record
 from .tool_call_context_reducer import render_tool_payload_for_live_prompt
@@ -61,7 +60,7 @@ class _ToolStepRequest:
 def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
     effective = getattr(getattr(agent, "config", None), "max_tool_rounds", None)
     if effective is None:
-        effective = _runtime_guard_int("max_tool_rounds", 0)
+        effective = runtime_guard_int("max_tool_rounds", 0)
     attrs_to_check = params.task_attributes or getattr(agent, "_current_task_attributes", None)
     if attrs_to_check and "max_tool_rounds" in attrs_to_check:
         effective = attrs_to_check["max_tool_rounds"]
@@ -69,19 +68,6 @@ def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
         return max(0, int(effective))
     except (TypeError, ValueError):
         return 0
-
-
-# LLM: _runtime_guard_int keeps tool-loop defaults in the shared runtime guard file.
-# 函数用途: 读取 runtime_guard_config.yaml 的整数配置；文件缺失或坏值时回落默认值。
-def _runtime_guard_int(key: str, default: int) -> int:
-    try:
-        data = load_simple_yaml(DEFAULT_RUNTIME_GUARD_CONFIG_PATH)
-    except OSError:
-        return default
-    try:
-        return max(0, int(data.get(key, default) or 0))
-    except (TypeError, ValueError, AttributeError):
-        return default
 
 
 # LLM: ToolLoopService 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -295,6 +281,8 @@ def _task_local_progress_context(progress: dict[str, object]) -> str:
     )
 
 
+# LLM: _terminal_tool_guard_response only stops the whole run when terminal blocking is explicitly enabled.
+# 函数用途: 检查本轮工具记录是否触发终止级 runtime gate，并生成 blocked 模型响应。
 def _terminal_tool_guard_response(request: ToolRoundExecutionRequest) -> ModelResponse | None:
     current_round_prefix = f"{request.tool_rounds}-"
     for record in reversed(list(getattr(request.params, "archive_tool_calls", []) or [])):

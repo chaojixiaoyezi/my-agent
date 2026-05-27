@@ -265,7 +265,8 @@ class DuplicateSubagentDelegationBackend(BaseBackend):
                     '"tool":"create_subagents",'
                     '"goal":"重复派工防护测试",'
                     '"count":1,'
-                    '"tool_preset":"read_only"'
+                    '"tool_preset":"read_only",'
+                    '"defer_start":true'
                     "}\n"
                     "[/TOOL_CALL]"
                 ),

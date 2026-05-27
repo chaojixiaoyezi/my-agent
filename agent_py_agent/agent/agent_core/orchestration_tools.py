@@ -12,8 +12,10 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from ..capabilities import CapabilityRouter
 from ..subagents.services.base import CreateRunParams
 from ..tools import BaseTool, ToolExecutionResult
+from .dispatch_params import DispatchParams
 from .hierarchy_tools import ScheduleChildSubagentsTool as ScheduleChildSubagentsTool
 from .orchestration_create_constraints import (
     delegation_constraint_conflict_error,
@@ -21,17 +23,19 @@ from .orchestration_create_constraints import (
 )
 from .orchestration_create_idempotency import (
     CreateTaskResolution,
+    dispatchable_tasks,
     resolve_create_run,
 )
 from .orchestration_create_items import (
     CreateSubagentItem,
     create_items_from_params,
 )
-from .orchestration_create_payload import create_subagents_payload
+from .orchestration_create_payload import CreateSubagentsPayloadInput, create_subagents_payload
 from .orchestration_create_policy import (
     create_run_params,
 )
 from .orchestration_dispatch_tool import DispatchSubagentsTool
+from .orchestration_dispatch_tool_helpers import _dispatch_capability_config
 from .orchestration_event_tools import RaiseMainEventTool as RaiseMainEventTool
 from .orchestration_event_tools import RaiseObservationTool as RaiseObservationTool
 from .orchestration_lineage_names import indexed_count_params, indexed_item_params
@@ -50,7 +54,7 @@ from .orchestration_tool_grants import (
 from .orchestration_tool_specs import build_create_subagents_spec
 from .orchestration_workflow_mode import tool_workflow_mode as _tool_workflow_mode
 from .orchestration_write_guard import ExternalWriteTargetRequest, external_write_target_error
-from .parameters import _positive_int
+from .parameters import _bool_param, _positive_int
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -86,7 +90,16 @@ class CreateSubagentsTool(BaseTool):
         attach_sibling_roster(self.agent.subagents, tasks)
         _bind_created_tasks_to_conversation(self.agent, tasks)
         remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
-        payload = create_subagents_payload(self.agent, resolutions, allowed_tools, params)
+        auto_start = _auto_start_tasks(self.agent, tasks, params)
+        payload = create_subagents_payload(
+            CreateSubagentsPayloadInput(
+                agent=self.agent,
+                resolutions=resolutions,
+                allowed_tools=allowed_tools,
+                request_params=params,
+                auto_start=auto_start,
+            )
+        )
         return ToolExecutionResult(
             "create_subagents",
             True,
@@ -100,7 +113,7 @@ class CreateSubagentsTool(BaseTool):
         if isinstance(items, str):
             return ToolExecutionResult("create_subagents", False, items)
         if items:
-            return self._execute_items(items)
+            return self._execute_items(items, params)
         return None
 
     # LLM: _prepare_count_mode validates single-goal delegation and builds run params.
@@ -124,29 +137,17 @@ class CreateSubagentsTool(BaseTool):
 
     # LLM: _execute_items is the structured batch path, equivalent to 长期助手 delegate_task tasks[].
     # 函数用途: 按 items[] 中每个独立 goal 创建子代理，避免 count 复制同一个任务目标。
-    def _execute_items(self, items: list[CreateSubagentItem]) -> ToolExecutionResult:
-        capped_raw = self._cap_items(items)
-        capped = [
-            CreateSubagentItem(
-                goal=item.goal,
-                params=append_parent_shared_context(self.agent, item.params),
-            )
-            for item in capped_raw
-        ]
+    def _execute_items(
+        self,
+        items: list[CreateSubagentItem],
+        request_params: dict[str, object],
+    ) -> ToolExecutionResult:
+        capped = self._items_with_parent_context(self._cap_items(items))
         allowed_tool_values = [subagent_allowed_tools(item.params) for item in capped]
-        for item, allowed_tools in zip(capped, allowed_tool_values, strict=True):
-            validation = self._validate_single_goal(item.params, item.goal, allowed_tools)
-            if validation:
-                return ToolExecutionResult("create_subagents", False, validation)
-        run_params_by_item: list[CreateRunParams] = []
-        for index, item in enumerate(capped, start=1):
-            run_params = create_run_params(
-                self.agent,
-                item.params,
-                item.goal,
-                subagent_allowed_tools(item.params),
-            )
-            run_params_by_item.append(indexed_item_params(run_params, index=index, total=len(capped)))
+        validation = self._validate_items(capped, allowed_tool_values)
+        if validation:
+            return ToolExecutionResult("create_subagents", False, validation)
+        run_params_by_item = self._indexed_item_run_params(capped)
         resolutions = self._resolve_task_params(run_params_by_item)
         tasks = [item.task for item in resolutions]
         attach_sibling_roster(self.agent.subagents, tasks, save=False)
@@ -154,11 +155,16 @@ class CreateSubagentsTool(BaseTool):
             self.agent.subagents.save(task)
         _bind_created_tasks_to_conversation(self.agent, tasks)
         remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
+        payload_request = self._items_payload_request(request_params, capped)
+        auto_start = _auto_start_tasks(self.agent, tasks, payload_request)
         payload = create_subagents_payload(
-            self.agent,
-            resolutions,
-            _payload_allowed_tools(allowed_tool_values),
-            {"items": [item.params for item in capped]},
+            CreateSubagentsPayloadInput(
+                agent=self.agent,
+                resolutions=resolutions,
+                allowed_tools=_payload_allowed_tools(allowed_tool_values),
+                request_params=payload_request,
+                auto_start=auto_start,
+            )
         )
         payload["batch_mode"] = "items"
         return ToolExecutionResult(
@@ -166,6 +172,47 @@ class CreateSubagentsTool(BaseTool):
             True,
             json.dumps(payload, ensure_ascii=False, indent=2),
         )
+
+    # LLM: _items_with_parent_context applies inherited context to each batch item.
+    # 函数用途: 将父级共享上下文注入每个 item，保持 _execute_items 主流程短。
+    def _items_with_parent_context(self, items: list[CreateSubagentItem]) -> list[CreateSubagentItem]:
+        return [
+            CreateSubagentItem(
+                goal=item.goal,
+                params=append_parent_shared_context(self.agent, item.params),
+            )
+            for item in items
+        ]
+
+    # LLM: _validate_items keeps batch validation separated from creation.
+    # 函数用途: 校验 items 模式下每个子任务的写入边界和委派约束，返回首个错误。
+    def _validate_items(self, items: list[CreateSubagentItem], allowed_tool_values: list[list[str] | None]) -> str:
+        for item, allowed_tools in zip(items, allowed_tool_values, strict=True):
+            validation = self._validate_single_goal(item.params, item.goal, allowed_tools)
+            if validation:
+                return validation
+        return ""
+
+    # LLM: _indexed_item_run_params builds persisted run params for each item.
+    # 函数用途: 将 item goal/params 转成带批次序号的 CreateRunParams。
+    def _indexed_item_run_params(self, items: list[CreateSubagentItem]) -> list[CreateRunParams]:
+        run_params_by_item: list[CreateRunParams] = []
+        for index, item in enumerate(items, start=1):
+            run_params = create_run_params(
+                self.agent,
+                item.params,
+                item.goal,
+                subagent_allowed_tools(item.params),
+            )
+            run_params_by_item.append(indexed_item_params(run_params, index=index, total=len(items)))
+        return run_params_by_item
+
+    # LLM: _items_payload_request records the exact item params used for payload/audit.
+    # 函数用途: 给 create_subagents payload 保存 items 参数快照，不把构造逻辑塞进执行主流程。
+    def _items_payload_request(self, request_params: dict[str, object], items: list[CreateSubagentItem]) -> dict[str, object]:
+        payload_request = dict(request_params)
+        payload_request["items"] = [item.params for item in items]
+        return payload_request
 
     # LLM: _cap_items applies the same user-configured fan-out ceiling as count mode.
     # 函数用途: 避免 items[] 绕过 max_subagents；配置为 0 或更小时表示不限制。
@@ -233,6 +280,69 @@ def _payload_allowed_tools(values: list[list[str] | None]) -> list[str] | str | 
     if all(value == first for value in values):
         return first
     return "per_item"
+
+
+# LLM: _auto_start_tasks makes create_subagents mean "create and start" unless defer_start is explicit.
+# 函数用途: 创建子代理后立即启动可运行 run；defer_start=true 时才只建记录，避免父代理忘记再调度。
+def _auto_start_tasks(agent, tasks: list, request_params: dict[str, object]) -> dict[str, object]:
+    skipped_run_ids = [_safe_task_id(task) for task in tasks if _safe_task_id(task)]
+    dispatchable = dispatchable_tasks(tasks)
+    run_ids = [_safe_task_id(task) for task in dispatchable if _safe_task_id(task)]
+    if not run_ids:
+        return {"status": "not_needed", "run_ids": [], "skipped_run_ids": skipped_run_ids}
+    if _bool_param(request_params.get("defer_start"), default=False):
+        return {"status": "deferred", "run_ids": run_ids, "reason": "defer_start=true"}
+    dispatcher = getattr(agent, "dispatch_subagents", None)
+    if not callable(dispatcher):
+        return {"status": "unavailable", "run_ids": run_ids, "reason": "agent has no dispatch_subagents"}
+    try:
+        router, cfg, dispatch_params = _auto_start_dispatch_args(agent, run_ids)
+        report = dispatcher(router, cfg, params=dispatch_params)
+    except Exception as exc:
+        return {"status": "failed", "run_ids": run_ids, "error": f"{type(exc).__name__}: {exc}"}
+    return _auto_start_report(run_ids, report)
+
+
+# LLM: _auto_start_dispatch_args builds the dispatch call for create-time auto-start.
+# 函数用途: 生成 router、capability config 和 DispatchParams，避免 _auto_start_tasks 膨胀。
+def _auto_start_dispatch_args(agent, run_ids: list[str]) -> tuple[object, object, DispatchParams]:
+    cfg = _dispatch_capability_config(agent)
+    tool_specs = [spec for spec in agent.tools.specs() if getattr(spec, "category", "") != "orchestration"]
+    router = CapabilityRouter(config=cfg, tool_specs=tool_specs)
+    params = DispatchParams(
+        apply=True,
+        execute_runners=True,
+        workflow_mode="off",
+        max_runners=len(run_ids),
+        limit=max(20, len(run_ids)),
+        reviewer="create-subagents-auto-start",
+        note="auto-start after create_subagents",
+        include_run_ids=run_ids,
+    )
+    return router, cfg, params
+
+
+# LLM: _auto_start_report normalizes dispatch reports from real agents and MagicMock tests.
+# 函数用途: 将自动启动的 dispatch 结果压成小型 JSON 字段，供 create_subagents payload 返回。
+def _auto_start_report(run_ids: list[str], report: object) -> dict[str, object]:
+    summary = getattr(report, "summary", "")
+    records = getattr(report, "records", [])
+    if not isinstance(summary, str) or not isinstance(records, list):
+        return {"status": "started", "run_ids": run_ids, "summary": "dispatch started"}
+    return {
+        "status": "started",
+        "run_ids": run_ids,
+        "summary": summary,
+        "record_count": len(records),
+        "dry_run": bool(getattr(report, "dry_run", False)),
+    }
+
+
+# LLM: _safe_task_id extracts persisted run ids without leaking MagicMock or adapter objects.
+# 函数用途: 从任务对象读取字符串 id，非法或空 id 返回空字符串供调用方过滤。
+def _safe_task_id(task: object) -> str:
+    value = getattr(task, "id", "")
+    return value.strip() if isinstance(value, str) else ""
 
 
 # LLM: _bind_created_tasks_to_conversation makes local subagents addressable by task_id in event tools.

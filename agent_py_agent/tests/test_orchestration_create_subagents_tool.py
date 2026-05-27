@@ -99,6 +99,51 @@ class TestCreateSubagentsToolExecute:
         # 应该最多只创建 max_subagents 个
         assert mock_agent.subagents.create_run.call_count <= 2
 
+    def test_create_subagents_auto_starts_created_runs_by_default(self):
+        """create_subagents 默认创建后立刻启动子代理，避免父代理忘记再催一次。"""
+        from agent_py_agent.agent.agent_core.dispatch_params import DispatchParams
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = _mock_create_items_agent(task_count=2)
+        mock_report = MagicMock()
+        mock_report.summary = "auto-started"
+        mock_report.records = []
+        mock_report.dry_run = False
+        mock_agent.dispatch_subagents.return_value = mock_report
+        mock_agent.tools.specs.return_value = []
+
+        result = CreateSubagentsTool(mock_agent).execute({"goal": "分别整理两份资料", "count": 2})
+        payload = json.loads(result.output)
+
+        assert result.ok is True
+        mock_agent.dispatch_subagents.assert_called_once()
+        params = mock_agent.dispatch_subagents.call_args.kwargs["params"]
+        assert isinstance(params, DispatchParams)
+        assert params.apply is True
+        assert params.execute_runners is True
+        assert params.include_run_ids == ["run_0", "run_1"]
+        assert payload["auto_start"]["status"] == "started"
+        assert payload["next_action"]["tool"] == "subagent_board"
+
+    def test_defer_start_keeps_created_runs_unstarted(self):
+        """只有显式 defer_start=true 时，create_subagents 才只建记录不启动。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = _mock_create_items_agent(task_count=2)
+        mock_agent.tools.specs.return_value = []
+
+        result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "先登记两个后续任务",
+            "count": 2,
+            "defer_start": True,
+        })
+        payload = json.loads(result.output)
+
+        assert result.ok is True
+        mock_agent.dispatch_subagents.assert_not_called()
+        assert payload["auto_start"]["status"] == "deferred"
+        assert payload["next_action"]["tool"] == "dispatch_subagents"
+
 class TestCreateSubagentsToolTemplatePolicy:
     """测试 create_subagents 的角色模板和工具推断策略。"""
 

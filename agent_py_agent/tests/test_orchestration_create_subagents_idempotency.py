@@ -36,8 +36,9 @@ def test_items_mode_reuses_existing_contract_children_and_returns_dispatch_contr
     assert first["created_run_ids"] == first["ids"]
     assert second["created_run_ids"] == []
     assert second["reused_run_ids"] == first["ids"]
-    assert second["dispatch_run_ids"] == first["ids"]
-    assert second["next_action"]["params"]["run_ids"] == first["ids"]
+    assert second["dispatch_run_ids"] == []
+    assert second["auto_start"]["run_ids"] == first["ids"]
+    assert second["next_action"]["tool"] == "subagent_board"
     assert len(agent.subagents.list_runs()) == 3
 
 
@@ -56,8 +57,9 @@ def test_reused_done_children_are_excluded_from_dispatch_contract(tmp_path):
     second = json.loads(tool.execute({"items": _pipeline_items("weekly_data.md")}).output)
 
     assert second["reused_run_ids"] == first["ids"]
-    assert second["dispatch_run_ids"] == first["ids"][1:]
-    assert second["next_action"]["params"]["run_ids"] == first["ids"][1:]
+    assert second["dispatch_run_ids"] == []
+    assert second["auto_start"]["run_ids"] == first["ids"][1:]
+    assert second["next_action"]["tool"] == "subagent_board"
 
 
 # LLM: count-based fanout is an explicit request for multiple sibling runs, not an idempotent retry.
@@ -135,7 +137,8 @@ def test_generic_single_worker_reuses_explicit_idempotency_contract(tmp_path):
 
     assert second["created_run_ids"] == []
     assert second["reused_run_ids"] == first["ids"]
-    assert second["dispatch_run_ids"] == first["ids"]
+    assert second["dispatch_run_ids"] == []
+    assert second["auto_start"]["run_ids"] == first["ids"]
     assert len(agent.subagents.list_runs()) == 1
 
 
@@ -199,6 +202,8 @@ def test_repeated_count_fanout_reuses_indexed_children_with_contract(tmp_path):
     assert len(first["ids"]) == 2
     assert second["created_run_ids"] == []
     assert second["reused_run_ids"] == first["ids"]
+    assert second["dispatch_run_ids"] == []
+    assert second["auto_start"]["run_ids"] == first["ids"]
     assert len(agent.subagents.list_runs()) == 2
 
 

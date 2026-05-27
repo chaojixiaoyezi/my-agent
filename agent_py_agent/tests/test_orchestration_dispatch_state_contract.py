@@ -75,8 +75,8 @@ def test_dispatch_execute_payload_includes_current_turn_run_state():
     }]
 
 
-# LLM: create_subagents should expose current-turn state immediately, before a later dispatch call.
-# 函数用途: root 创建小傻妞后，不必靠记忆猜下一步，应直接看到 dispatchable run ids 和建议调度工具。
+# LLM: create_subagents should expose current-turn state immediately after default auto-start.
+# 函数用途: root 创建小傻妞后，不必再手动催跑，应直接看到已启动/已完成状态和看板建议。
 def test_create_payload_includes_current_turn_run_state(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
 
@@ -86,12 +86,14 @@ def test_create_payload_includes_current_turn_run_state(tmp_path):
     }).output)
 
     state = payload["current_turn_run_state"]
-    assert state["dispatchable_run_ids"] == payload["created_run_ids"]
-    assert state["next_action"] == "continue_dispatch_unfinished_run_ids"
-    assert state["suggested_tool_call"]["tool"] == "dispatch_subagents"
+    assert payload["auto_start"]["status"] == "started"
+    assert payload["dispatch_run_ids"] == []
+    assert state["dispatchable_run_ids"] == []
+    assert state["verified_run_ids"] == payload["created_run_ids"]
+    assert state["next_action"] == "summarize_or_report_verified_runs"
     envelope = decode_action_envelope(payload["typed_envelope"])
-    assert envelope.current_turn_run_state["dispatchable_run_ids"] == payload["created_run_ids"]
-    assert envelope.dispatch_run_ids == payload["dispatch_run_ids"]
+    assert envelope.current_turn_run_state["verified_run_ids"] == payload["created_run_ids"]
+    assert envelope.dispatch_run_ids == []
 
 
 # LLM: create payload idempotency metadata is audit data; reuse needs an explicit child contract.

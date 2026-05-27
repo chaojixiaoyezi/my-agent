@@ -1,6 +1,6 @@
 # Subagent Structure
 
-当前结构不再包含独立父验收层。`create_subagents` 创建任务节点，`dispatch_subagents` 推进 runner 并返回索引和状态；任务完成后的产物检查统一由普通 closeout / 交付检查处理。
+当前结构不再包含独立父验收层。`create_subagents` 默认创建并立即启动任务节点；只有显式 `defer_start=true` 才只建不跑。`dispatch_subagents` 用于运行中追加提示、人工催办、推进卡住项、重跑指定 run、查状态并尝试恢复；任务完成后的产物检查统一由普通 closeout / 交付检查处理。
 
 ## 任务树
 

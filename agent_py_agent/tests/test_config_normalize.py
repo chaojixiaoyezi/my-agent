@@ -131,7 +131,7 @@ class TestNormalizeAgentConfig:
         """验证无效的 max_tool_rounds 回退。"""
         data = {"max_tool_rounds": -1}
         normalized, warnings = normalize_agent_config(data)
-        assert normalized["max_tool_rounds"] == 0  # 默认值，0 表示不限制
+        assert normalized["max_tool_rounds"] is None
         assert len(warnings) > 0
 
     def test_normalize_memory_top_k_valid(self):

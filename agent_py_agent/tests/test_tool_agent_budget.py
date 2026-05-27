@@ -5,14 +5,16 @@
 
 from types import SimpleNamespace
 
+from agent_py_agent.agent.agent_core.runtime_guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
 from agent_py_agent.agent.agent_core.tool_agent_budget import (
     ToolAgentBudgetRequest,
     check_tool_agent_budget,
 )
+from agent_py_agent.agent.settings.config_io import load_simple_yaml
 
 
 # LLM: _agent creates the minimum config surface used by the budget helper.
-# 函数用途: 生成测试用代理对象，带 10 分钟窗口和可调最大调用次数。
+# 函数用途: 生成测试用代理对象，带滚动窗口和可调最大调用次数。
 def _agent(max_calls: int = 2, window_seconds: int = 600):
     return SimpleNamespace(
         config=SimpleNamespace(
@@ -38,13 +40,16 @@ def test_tool_agent_budget_ignores_calls_without_run_id():
 # 函数用途: 验证单代理工具预算默认值集中在 runtime_guard_config.yaml，而不是必须依赖 AgentConfig 字段。
 def test_tool_agent_budget_uses_shared_runtime_config_defaults():
     agent = SimpleNamespace(config=SimpleNamespace())
+    defaults = load_simple_yaml(DEFAULT_RUNTIME_GUARD_CONFIG_PATH)
+    max_calls = int(defaults["tool_agent_budget_max_calls"])
+    window_seconds = int(defaults["tool_agent_budget_window_seconds"])
 
-    for index in range(50):
+    for index in range(max_calls):
         assert check_tool_agent_budget(ToolAgentBudgetRequest(agent, "run-1", "read_file", now=float(index))) is None
-    blocked = check_tool_agent_budget(ToolAgentBudgetRequest(agent, "run-1", "read_file", now=51.0))
+    blocked = check_tool_agent_budget(ToolAgentBudgetRequest(agent, "run-1", "read_file", now=float(max_calls + 1)))
 
     assert blocked is not None
-    assert "最近 600 秒最多 50 次工具调用" in blocked.output
+    assert f"最近 {window_seconds} 秒最多 {max_calls} 次工具调用" in blocked.output
 
 
 # LLM: a single subagent run is blocked after its rolling budget is exhausted.
@@ -64,7 +69,7 @@ def test_tool_agent_budget_blocks_after_per_agent_window_limit():
 
 
 # LLM: sibling subagents must not consume each other's rolling tool budgets.
-# 函数用途: 证明预算按 run_id 隔离，不是整个任务树共享 10 分钟 50 次。
+# 函数用途: 证明预算按 run_id 隔离，不是整个任务树共享一个全局次数池。
 def test_tool_agent_budget_is_scoped_per_run_id():
     agent = _agent(max_calls=1)
 

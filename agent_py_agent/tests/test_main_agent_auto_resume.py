@@ -8,10 +8,11 @@ from types import SimpleNamespace
 # 函数用途: 验证请求未显式传值时，自动恢复次数从统一运行门配置读取。
 def test_auto_resume_limit_reads_runtime_guard_config(tmp_path, monkeypatch):
     from agent_py_agent.agent.contracts import main_agent_auto_resume
+    from agent_py_agent.agent.settings import runtime_guard_config
 
     config = tmp_path / "runtime_guard_config.yaml"
     config.write_text("main_agent_auto_resume_attempt_limit: 7\n", encoding="utf-8")
-    monkeypatch.setattr(main_agent_auto_resume, "DEFAULT_RUNTIME_GUARD_CONFIG_PATH", config)
+    monkeypatch.setattr(runtime_guard_config, "DEFAULT_RUNTIME_GUARD_CONFIG_PATH", config)
 
     assert main_agent_auto_resume.auto_resume_limit(SimpleNamespace()) == 7
 
@@ -20,10 +21,11 @@ def test_auto_resume_limit_reads_runtime_guard_config(tmp_path, monkeypatch):
 # 函数用途: 验证 request.max_auto_recovery_attempts 是结构化覆盖值，不被默认配置覆盖。
 def test_auto_resume_limit_request_override_wins(tmp_path, monkeypatch):
     from agent_py_agent.agent.contracts import main_agent_auto_resume
+    from agent_py_agent.agent.settings import runtime_guard_config
 
     config = tmp_path / "runtime_guard_config.yaml"
     config.write_text("main_agent_auto_resume_attempt_limit: 7\n", encoding="utf-8")
-    monkeypatch.setattr(main_agent_auto_resume, "DEFAULT_RUNTIME_GUARD_CONFIG_PATH", config)
+    monkeypatch.setattr(runtime_guard_config, "DEFAULT_RUNTIME_GUARD_CONFIG_PATH", config)
 
     assert main_agent_auto_resume.auto_resume_limit(SimpleNamespace(max_auto_recovery_attempts=2)) == 2
 

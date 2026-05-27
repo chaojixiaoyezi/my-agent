@@ -6,9 +6,8 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from ..settings.config_io import load_simple_yaml
+from ..settings.runtime_guard_config import runtime_guard_int
 from ..tools import ToolExecutionResult
-from .runtime_guard_config import DEFAULT_RUNTIME_GUARD_CONFIG_PATH
 
 
 # LLM: ToolAgentBudgetRequest bundles all data needed for rolling per-agent budget checks.
@@ -53,26 +52,16 @@ def _events_by_run(agent: object) -> dict[str, list[float]]:
     return created
 
 
-# LLM: _budget_int reads legacy AgentConfig first, then the shared runtime guard file.
-# 函数用途: 兼容旧配置字段，同时把默认预算数字集中到 runtime_guard_config.yaml。
+# LLM: _budget_int reads explicit runtime config first, then the shared runtime guard file.
+# 函数用途: 显式传入的配置优先；AgentConfig 默认不再写死预算数字，缺省时集中读取 runtime_guard_config.yaml。
 def _budget_int(config: object, key: str) -> int:
     value = getattr(config, key, None)
     if value is None:
-        value = _runtime_guard_data().get(key)
+        return runtime_guard_int(key, 0)
     try:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
-
-
-# LLM: _runtime_guard_data keeps missing YAML from disabling imports.
-# 函数用途: 读取共享运行门配置；文件不存在或不可读时返回空 dict。
-def _runtime_guard_data() -> dict[str, object]:
-    try:
-        data = load_simple_yaml(DEFAULT_RUNTIME_GUARD_CONFIG_PATH)
-    except OSError:
-        return {}
-    return data if isinstance(data, dict) else {}
 
 
 # LLM: _budget_result tells the model to stop tool repetition and hand off if more tools are needed.

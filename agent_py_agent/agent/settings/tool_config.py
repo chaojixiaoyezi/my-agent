@@ -20,9 +20,9 @@ class ToolConfig:
     """Tool registry and execution limits."""
 
     enable_tools: bool = True
-    max_tool_rounds: int = 0
-    tool_agent_budget_window_seconds: int = 600
-    tool_agent_budget_max_calls: int = 50
+    max_tool_rounds: int | None = None
+    tool_agent_budget_window_seconds: int | None = None
+    tool_agent_budget_max_calls: int | None = None
     tool_artifact_read_budget_window_seconds: int = 600
     tool_artifact_read_budget_max_chars: int = 240_000
     tool_read_max_chars: int = 50_000

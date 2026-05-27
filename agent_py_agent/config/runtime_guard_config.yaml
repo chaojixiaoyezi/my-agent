@@ -71,7 +71,7 @@ tool_rate_max_records: 256
 # tool_agent_budget_max_calls:
 #   窗口内最多允许多少次工具调用。0 表示关闭这个单代理预算门。
 tool_agent_budget_window_seconds: 600
-tool_agent_budget_max_calls: 50
+tool_agent_budget_max_calls: 200
 
 ###############################################################################
 # 探索空转提醒/熔断

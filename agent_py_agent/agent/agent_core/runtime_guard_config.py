@@ -1,10 +1,20 @@
-# LLM: Runtime guard config owns the shared default YAML path for all runtime reminder/rework knobs.
-# 模块用途: 统一运行门、提醒和返工预算的默认配置文件路径，避免同类配置分散在多个 YAML 中。
+# LLM: agent_core keeps this compatibility shim; the real reader lives in settings.
+# 模块用途: 兼容旧导入路径，同时避免 tooling 反向导入 agent_core 造成循环依赖。
 
 from __future__ import annotations
 
-from pathlib import Path
+from ..settings.runtime_guard_config import (
+    DEFAULT_RUNTIME_GUARD_CONFIG_PATH,
+    runtime_guard_bool,
+    runtime_guard_data,
+    runtime_guard_float_tuple,
+    runtime_guard_int,
+)
 
-DEFAULT_RUNTIME_GUARD_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "runtime_guard_config.yaml"
-
-__all__ = ["DEFAULT_RUNTIME_GUARD_CONFIG_PATH"]
+__all__ = [
+    "DEFAULT_RUNTIME_GUARD_CONFIG_PATH",
+    "runtime_guard_bool",
+    "runtime_guard_data",
+    "runtime_guard_float_tuple",
+    "runtime_guard_int",
+]

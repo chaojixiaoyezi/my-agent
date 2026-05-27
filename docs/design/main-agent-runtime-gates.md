@@ -1091,7 +1091,7 @@ my-agent collaboration update-status --case-id <case-id> --status closed --summa
 
 这刀参考的是 通道运行时 / OpenHuman 的显式协调工具思路：协作不是自然语言承诺，而是能被控制面、工具记录和状态回路看见的事实。
 
-## 当前验收触发方式
+## 当前 create / dispatch 触发方式
 
 主代理现在支持两种交卷方式：
 
@@ -1189,34 +1189,44 @@ create_subagents 写清楚 goal / refs
 
 `pending_dispatch_redirect.v1` 曾经用于阻止 root 在已有 run 尚未 dispatch 时继续创建子代理。协作场景证明这会误伤临时加派和事件响应：发现者需要能继续找帮手，不能因为上一批 run 还没推进就被 create 阶段拦下。
 
-当前规则是：`create_subagents` 只负责创建/复用任务记录，不再插入“先推进旧 run”的硬拦截。父代理要不要继续派工、要不要先 dispatch、要不要看 tree/board，由模型根据普通状态工具判断；系统只记录事实，不在创建阶段替模型卡流程。
+当前规则是：`create_subagents` 默认创建后直接启动新 run，不再要求主代理再手动催一次。只有显式传 `defer_start=true` 时，才只创建/复用任务记录。父代理后续要看状态、追加提示、推进卡住项、重跑某几个 run 或尝试恢复时，再使用 `dispatch_subagents`。
 
 同一轮还废弃了 workflow 自动套娃：全局 `subagent_workflow_mode=auto` 不再静默作用到普通 `create_subagents` / `dispatch_subagents`。只有本次工具参数明确写 `workflow_mode=plan` 或 `workflow_mode=auto` 才会启用 workflow；未知值如 `parallel` 一律当 `off`，避免普通 worker 被拆成 implement/verify 孙代理。
 
-同一状态合同也把 `DONE` / `VERIFIED` 归为 `VERIFYING`。如果当前轮 run 已经写出结果、等待最终收口，`current_turn_run_state.pending_closeout_run_ids` 会建议：
+`dispatch_subagents` 现在更像“运行中的引导/推进工具”：它可以带 `runner_instruction`，也接受 `prompt`、`message`、`guidance` 这类别名，作为给目标子代理/孙代理的本轮补充提示。它同时保留人工催办、推进卡住项、重跑指定 run、查一轮状态并尝试恢复这些能力。
 
 ```json
 {
   "tool": "dispatch_subagents",
   "apply": true,
-  "execute_runners": false,
   "execute_runners": true,
-  "auto_apply_result_followup": true,
-  "run_ids": ["subagent-..."]
+  "run_ids": ["subagent-..."],
+  "prompt": "继续检查遗漏，查完把结果写到自己的产物里并汇报给上级。"
 }
 ```
 
-也就是继续走验收/返工循环，而不是重复创建代理或直接汇报完成。
+如果主代理只是想先登记任务，不让子代理立刻开跑，需要显式说：
 
-如果模型只传 `apply=true + run_ids=[...]`，而目标 run 已经处于 `DONE` 或 `verification_status=VERIFIED`，`dispatch_subagents` 会自动按验收-only 续推：
+```json
+{
+  "tool": "create_subagents",
+  "goal": "先登记后续资料整理任务",
+  "count": 3,
+  "defer_start": true
+}
+```
+
+如果模型只想查看状态，不需要 dispatch，可以调用 `subagent_board` / `inspect_agent_tree` 读取 tree/status。系统不再本地抢答“已完成/未完成”，也不再用额外父级验收专用门替代统一 closeout。
+
+历史上的验收-only dispatch 建议类似：
 
 ```text
 execute_runners = false
-execute_runners = true
+execute_acceptance_tests = true
 auto_apply_result_followup = true
 ```
 
-这不是新的硬门，也不会把业务任务写死成固定模板。它只是让“runner 已经产出，下一步应该验收”成为控制面默认动作，避免模型为了推进待收口任务又重复跑 runner，或者只看见状态摘要后停在人工猜测。
+这类父级验收专项收口已经降级为历史试错记录。当前路线是：子代理运行事实进入 tree/refs，最终质量统一回到普通任务 closeout；如果以后要让所有子/孙节点也走 closeout，应复用同一套 closeout 配置，而不是再造父级验收协议。
 
 ## 显式产物写入根授权
 

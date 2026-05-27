@@ -23,7 +23,11 @@ from ..contracts.gates import (
 )
 from ..contracts.gates.tool_effects import args_hash_for_call
 from ..contracts.tool_protocol_v2 import normalize_tool_call
-from ..settings.config_io import load_simple_yaml
+from ..settings.runtime_guard_config import (
+    runtime_guard_data,
+    runtime_guard_float_tuple,
+    runtime_guard_int,
+)
 from .registry_gate_policy import (
     boundary_bool,
     boundary_list,
@@ -35,8 +39,6 @@ from .registry_gate_policy import (
     tool_manifest_decision,
 )
 from .registry_payload_normalize import tool_name as normalize_tool_name
-
-_DEFAULT_RUNTIME_GUARD_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "runtime_guard_config.yaml"
 
 
 # LLM: tool_call_gate_decision evaluates the mandatory gate pipeline for one tool payload.
@@ -207,27 +209,17 @@ def _tool_rate_limit_policy(boundary: dict[str, object] | None) -> ToolRateLimit
 # LLM: _default_tool_rate_limit_policy reads the shared runtime guard file without requiring task-specific prompts.
 # 函数用途: 将工具限流/circuit 默认值集中到 runtime_guard_config.yaml，缺失或坏配置时回落安全默认。
 def _default_tool_rate_limit_policy() -> ToolRateLimitPolicy:
-    data = _runtime_guard_data()
+    data = runtime_guard_data()
     return ToolRateLimitPolicy(
-        max_calls=_int_value(data.get("tool_rate_max_calls"), 60),
+        max_calls=runtime_guard_int("tool_rate_max_calls", 60),
         window_seconds=_float_value(data.get("tool_rate_window_seconds"), 60.0),
-        failure_threshold=_int_value(data.get("tool_circuit_failure_threshold"), 3),
-        backoff_schedule_seconds=_float_tuple(
-            data.get("tool_circuit_backoff_seconds"),
+        failure_threshold=runtime_guard_int("tool_circuit_failure_threshold", 3),
+        backoff_schedule_seconds=runtime_guard_float_tuple(
+            "tool_circuit_backoff_seconds",
             (1.0, 2.0, 4.0, 8.0, 16.0, 30.0),
         ),
-        max_records=_int_value(data.get("tool_rate_max_records"), 256),
+        max_records=runtime_guard_int("tool_rate_max_records", 256),
     )
-
-
-# LLM: _runtime_guard_data keeps bad or missing config from disabling the gate pipeline.
-# 函数用途: 读取共享运行门配置；配置文件不存在或解析失败时返回空 dict 触发默认值。
-def _runtime_guard_data() -> dict[str, object]:
-    try:
-        data = load_simple_yaml(_DEFAULT_RUNTIME_GUARD_CONFIG_PATH)
-    except OSError:
-        return {}
-    return data if isinstance(data, dict) else {}
 
 
 # LLM: _payload_for_rate_limit provides a stable args object for legacy flat payloads.

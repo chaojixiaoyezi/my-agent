@@ -15,8 +15,8 @@ from agent_py_agent.tests.test_orchestration_create_subagents_tool import (
 class TestCreateSubagentsToolWorkspaceDefaults:
     """测试任务工作区默认写入根和保守调度提示。"""
 
-    def test_create_next_action_starts_conservatively(self):
-        """创建多个任务后的默认下一步先推进 1 个，避免流水线下游抢跑。"""
+    def test_create_next_action_auto_starts_by_default(self):
+        """创建多个任务后默认直接开跑，下一步只建议看状态。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -43,7 +43,10 @@ class TestCreateSubagentsToolWorkspaceDefaults:
 
         payload = json.loads(result.output)
         assert result.ok is True
-        assert payload["next_action"]["params"]["max_runners"] == 2
+        assert payload["auto_start"]["status"] == "started"
+        assert payload["auto_start"]["run_ids"] == ["run_0", "run_1"]
+        assert payload["dispatch_run_ids"] == []
+        assert payload["next_action"]["tool"] == "subagent_board"
 
     def test_items_mode_does_not_infer_sibling_output_dependencies(self):
         """items 不再根据 sibling 输出自动制造等待；显式读线索原样保留。"""

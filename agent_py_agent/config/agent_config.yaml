@@ -403,12 +403,8 @@ enable_tools: true
 # 是否启用流式模型响应；关闭后走一次性响应路径，便于排查兼容接口问题。
 stream_enabled: true
 
-# 单轮请求里，最多允许几次“模型调用工具再继续推理”；0 表示不限制
-max_tool_rounds: 0
-
-# 单个代理滚动工具预算；只按 subagent run_id 生效，普通主代理聊天默认不限制
-tool_agent_budget_window_seconds: 600
-tool_agent_budget_max_calls: 50
+# 工具轮数、runner 重试、单代理工具预算集中在 runtime_guard_config.yaml，
+# 避免同一默认值散落多处。需要单任务临时覆盖时，由任务属性显式传入。
 
 # 单个代理滚动 artifact 正文读取预算（下面两个参数必须一起看）：
 # - window_seconds=600 + max_chars=240000 表示单个 run_id 最近 10 分钟最多读取 240000 字符正文。

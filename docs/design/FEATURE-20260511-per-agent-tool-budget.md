@@ -8,7 +8,7 @@ Status: Implemented
 
 ## Goal / 目标
 
-为每个有 `run_id` 的代理运行增加默认 10 分钟 50 次工具调用预算；超过后让该代理自检、总结进展并向父级上报，而不是继续无限调用工具。
+为每个有 `run_id` 的代理运行增加可配置滚动工具调用预算；当前默认由 `agent_py_agent/config/runtime_guard_config.yaml` 决定，是 600 秒 / 200 次。超过后让该代理自检、总结进展并向父级上报，而不是继续无限调用工具。
 
 ## Non-Goals / 非目标
 
@@ -19,7 +19,7 @@ Status: Implemented
 
 ## Scenarios / 场景
 
-- 一个 leaf 在 10 分钟内重复读同一个文件超过 50 次：第 51 次工具调用被拦截，模型收到自检/上报提示。
+- 一个 leaf 在配置窗口内重复读同一个文件超过配置次数：下一次工具调用被拦截，模型收到自检/上报提示。
 - 两个兄弟 leaf 同时工作：它们的预算按各自 `run_id` 隔离，互不消耗。
 - 普通主代理聊天没有 subagent `run_id`：不受这个预算限制。
 - 长期任务超过 10 分钟：旧调用会滚出窗口，健康代理不会永久背负历史次数。
@@ -29,7 +29,7 @@ Status: Implemented
 | ID | Description | Priority |
 |----|-------------|----------|
 | FR-001 | The budget shall be keyed by agent `run_id`. | Must |
-| FR-002 | The default budget shall be 50 tool calls per 600 seconds. | Must |
+| FR-002 | The default budget shall be read from `runtime_guard_config.yaml` (`tool_agent_budget_window_seconds` / `tool_agent_budget_max_calls`). | Must |
 | FR-003 | Calls without `run_id` shall not be limited by this guard. | Must |
 | FR-004 | Sibling agents shall not share or consume each other's budget. | Must |
 | FR-005 | Budget hits shall return a bounded self-check/handoff tool result. | Must |
@@ -46,7 +46,7 @@ Status: Implemented
 
 - `agent_core/tool_agent_budget.py`：新增预算 helper。
 - `agent_core/_tool_loop_service.py`：执行工具前检查预算。
-- `settings/config.py`、`settings/tool_config.py`、配置归一化和 `agent_config.yaml`：新增配置字段。
+- `settings/runtime_guard_config.py` 和 `config/runtime_guard_config.yaml`：集中保存运行门默认值，避免 AgentConfig 和运行门 YAML 双写。
 - Subagent 文档、开发规范和代码树同步说明。
 
 ## Architecture / 架构
@@ -84,7 +84,7 @@ Status: Implemented
 
 ## Acceptance Criteria / 验收标准
 
-- [x] 默认配置为 600 秒 / 50 次。
+- [x] 默认配置从 `runtime_guard_config.yaml` 读取；当前为 600 秒 / 200 次。
 - [x] 普通主代理无 `run_id` 路径不被限制。
 - [x] 同 run 超预算时返回自检/上报提示。
 - [x] 兄弟 run 预算互不影响。

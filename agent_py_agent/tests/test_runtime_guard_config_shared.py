@@ -72,13 +72,19 @@ def test_tool_rate_limit_boundary_policy_overrides_shared_defaults():
 # LLM: Per-agent tool budget should share the same runtime guard YAML as other count gates.
 # 函数用途: 验证子代理/runner 工具预算默认值也集中在 runtime_guard_config.yaml。
 def test_runtime_guard_file_contains_tool_agent_budget_defaults():
+    from agent_py_agent.agent.agent_core.runtime_guard_config import (
+        DEFAULT_RUNTIME_GUARD_CONFIG_PATH,
+    )
     from agent_py_agent.agent.agent_core.tool_agent_budget import _budget_int
+    from agent_py_agent.agent.settings.config_io import load_simple_yaml
 
     class Config:
         pass
 
-    assert _budget_int(Config(), "tool_agent_budget_window_seconds") == 600
-    assert _budget_int(Config(), "tool_agent_budget_max_calls") == 50
+    defaults = load_simple_yaml(DEFAULT_RUNTIME_GUARD_CONFIG_PATH)
+
+    assert _budget_int(Config(), "tool_agent_budget_window_seconds") == int(defaults["tool_agent_budget_window_seconds"])
+    assert _budget_int(Config(), "tool_agent_budget_max_calls") == int(defaults["tool_agent_budget_max_calls"])
 
 
 # LLM: Tool-loop and runner retry counts should share the same runtime guard YAML.
@@ -89,6 +95,10 @@ def test_runtime_guard_file_contains_tool_loop_and_runner_defaults():
         _runner_max_attempts,
         _same_run_redispatch_limit,
     )
+    from agent_py_agent.agent.agent_core.runtime_guard_config import (
+        DEFAULT_RUNTIME_GUARD_CONFIG_PATH,
+    )
+    from agent_py_agent.agent.settings.config_io import load_simple_yaml
 
     class Agent:
         class Config:
@@ -99,6 +109,47 @@ def test_runtime_guard_file_contains_tool_loop_and_runner_defaults():
     class Params:
         task_attributes = {}
 
-    assert _effective_max_tool_rounds(Agent(), Params()) == 0
-    assert _runner_max_attempts("auto") == 2
-    assert _same_run_redispatch_limit(None) == 1
+    defaults = load_simple_yaml(DEFAULT_RUNTIME_GUARD_CONFIG_PATH)
+
+    assert _effective_max_tool_rounds(Agent(), Params()) == int(defaults["max_tool_rounds"])
+    assert _runner_max_attempts("auto") == int(defaults["runner_failure_retry_limit"])
+    assert _same_run_redispatch_limit(None) == int(defaults["same_run_redispatch_limit"])
+
+
+# LLM: runtime guard readers should honor YAML patches instead of imported hard-coded defaults.
+# 函数用途: 验证改 runtime_guard_config.yaml 后，工具轮、runner 重试和同 run 重派限制会同步生效。
+def test_runtime_guard_readers_follow_the_same_patched_yaml(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core._tool_loop_service import _effective_max_tool_rounds
+    from agent_py_agent.agent.agent_core.runner_dispatch import (
+        _runner_max_attempts,
+        _same_run_redispatch_limit,
+    )
+    from agent_py_agent.agent.agent_core.tool_agent_budget import _budget_int
+    from agent_py_agent.agent.settings import runtime_guard_config
+
+    config_path = tmp_path / "runtime_guard_config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "max_tool_rounds: 17",
+                "runner_failure_retry_limit: 5",
+                "same_run_redispatch_limit: 4",
+                "tool_agent_budget_window_seconds: 33",
+                "tool_agent_budget_max_calls: 44",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime_guard_config, "DEFAULT_RUNTIME_GUARD_CONFIG_PATH", config_path)
+
+    agent = SimpleNamespace(config=SimpleNamespace(max_tool_rounds=None))
+    params = SimpleNamespace(task_attributes={})
+    config = SimpleNamespace()
+
+    assert _effective_max_tool_rounds(agent, params) == 17
+    assert _runner_max_attempts("auto") == 5
+    assert _same_run_redispatch_limit(None) == 4
+    assert _budget_int(config, "tool_agent_budget_window_seconds") == 33
+    assert _budget_int(config, "tool_agent_budget_max_calls") == 44

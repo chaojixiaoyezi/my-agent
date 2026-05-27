@@ -3,34 +3,63 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from ..action_protocol import subagent_schedule_envelope_from_payload
 from ..contracts.idempotency import idempotency_key, operation_id
 from .orchestration_create_idempotency import created_tasks, dispatchable_tasks, reused_tasks
 from .orchestration_dispatch_state_contract import dispatch_state_contract_payload
 
 
+# LLM: CreateSubagentsPayloadInput groups create payload facts to keep the public helper small.
+# 类用途: 保存 create_subagents payload 构造需要的 agent、resolution、工具策略和自动启动结果。
+@dataclass(frozen=True)
+class CreateSubagentsPayloadInput:
+    agent: object
+    resolutions: list
+    allowed_tools: object
+    request_params: dict[str, object]
+    auto_start: dict[str, object] | None = None
+
+
 # LLM: create_subagents_payload renders create/reuse/dispatch facts for the parent model.
 # 函数用途: create_subagents 返回机器可读状态，避免父级下一轮靠自然语言记忆猜哪些 run 可调度。
-def create_subagents_payload(agent, resolutions: list, allowed_tools, request_params: dict[str, object]) -> dict[str, object]:
+def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, object]:
+    agent = request.agent
+    resolutions = request.resolutions
+    auto_start = request.auto_start
+    request_params = request.request_params
     tasks = [item.task for item in resolutions]
     created = created_tasks(resolutions)
     reused = reused_tasks(resolutions)
-    dispatch = dispatchable_tasks(tasks)
+    dispatchable = dispatchable_tasks(tasks)
+    pending_dispatch = _pending_dispatch_tasks(dispatchable, request_params, auto_start)
     payload: dict[str, object] = {
         "created": len(created),
         "ids": [task.id for task in tasks],
         "created_run_ids": [task.id for task in created],
         "reused_run_ids": [task.id for task in reused],
-        "dispatch_run_ids": [task.id for task in dispatch],
-        "next_action": _dispatch_next_action(dispatch),
-        "allowed_tools": allowed_tools or "automatic",
-        "operation_contract": _operation_contract(request_params, created, reused, dispatch),
+        "dispatch_run_ids": [task.id for task in pending_dispatch],
+        "auto_start": auto_start or {"status": "not_attempted"},
+        "next_action": _dispatch_next_action(dispatchable, request_params, auto_start),
+        "allowed_tools": request.allowed_tools or "automatic",
+        "operation_contract": _operation_contract(request_params, created, reused, pending_dispatch),
         "subagent_workspace": str(agent.subagents.workspace),
         "tasks": [_task_payload(task) for task in tasks],
     }
     payload.update(dispatch_state_contract_payload(agent))
     payload["typed_envelope"] = subagent_schedule_envelope_from_payload(payload, tool="create_subagents").to_dict()
     return payload
+
+
+# LLM: _pending_dispatch_tasks separates explicit deferred starts from already auto-started runs.
+# 函数用途: 自动开跑成功时不再把同一批 run 放进 dispatch_run_ids，避免父级重复催跑。
+def _pending_dispatch_tasks(tasks: list, request_params: dict[str, object], auto_start: dict[str, object] | None) -> list:
+    if bool(request_params.get("defer_start")):
+        return tasks
+    if (auto_start or {}).get("status") in {"started", "not_needed"}:
+        return []
+    return tasks
 
 
 # LLM: _operation_contract gives create_subagents a stable idempotency envelope without blocking repeats.
@@ -48,15 +77,31 @@ def _operation_contract(request_params: dict[str, object], created: list, reused
     }
 
 
-# LLM: _dispatch_next_action makes create-vs-run explicit for the parent model.
-# 函数用途: 告诉模型 create_subagents 只创建任务记录；是否启动、启动几个，由父代理根据 tree/board 判断。
-def _dispatch_next_action(tasks) -> dict[str, object]:
+# LLM: _dispatch_next_action keeps create/start/defer facts explicit for the parent model.
+# 函数用途: 默认创建即启动；只有 defer_start=true 才返回后续调度建议。
+def _dispatch_next_action(
+    tasks,
+    request_params: dict[str, object],
+    auto_start: dict[str, object] | None = None,
+) -> dict[str, object]:
     run_ids = [task.id for task in tasks]
     if not run_ids:
         return {"tool": "subagent_board", "reason": "create_subagents 没有可调度的新 run；请读取看板/状态后决定是否汇报或进入验收。", "params": {"limit": 20}}
+    if bool(request_params.get("defer_start")):
+        return {
+            "tool": "dispatch_subagents",
+            "reason": "defer_start=true，本次只建任务记录；需要开跑时再显式推进这些 run_id。",
+            "params": {"apply": True, "execute_runners": True, "run_ids": run_ids, "max_runners": len(run_ids)},
+        }
+    if (auto_start or {}).get("status") == "started":
+        return {
+            "tool": "subagent_board",
+            "reason": "create_subagents 已自动启动这些 run；下一步查看状态、读取产物或按需继续推进。",
+            "params": {"limit": max(20, len(run_ids))},
+        }
     return {
         "tool": "dispatch_subagents",
-        "reason": "create_subagents 只创建任务记录；要让子代理真正开始工作，请按任务需要调度这些 run_id。",
+        "reason": "create_subagents 自动启动未完成；如需继续推进、恢复或重跑，请调度这些 run_id。",
         "params": {"apply": True, "execute_runners": True, "run_ids": run_ids, "max_runners": len(run_ids)},
     }
 

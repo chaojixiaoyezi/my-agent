@@ -2,6 +2,21 @@
 
 > 2026-05-27 当前路线备注：早期条目里提到的 `orchestration_contract`、`materialize_subagent_inputs`、`subagent_dispatch_closeout`、`parent_acceptance` 专项收口、`scheduling_warnings`、领域/重复目标调度提示等，都是历史试错记录。当前生产路线是：调度工具只返回 refs/tree/status，普通协作不靠中间验收门卡住；最终质量统一回到 closeout 和任务树事实。
 
+## 2026-05-27 / 配置单一来源与 create 默认开跑
+
+状态：本地已落地，focused tests 已跑；未提交
+
+摘要：
+- 运行门默认值的读取下沉到 `agent_py_agent/agent/settings/runtime_guard_config.py`，避免 `tooling` 反向导入 `agent_core` 造成循环依赖，也避免同一数字散落在多个 reader 里。
+- `max_tool_rounds`、单代理工具预算、runner 失败补跑、同 run 重派、工具重复失败和工具限流都从 `runtime_guard_config.yaml` 读取默认值。`AgentConfig` 不再携带 `max_tool_rounds` / `tool_agent_budget_*` 的隐藏默认；旧配置仍作为兼容字段可被显式传入。
+- 单代理工具预算默认从 600 秒 / 50 次改为 600 秒 / 200 次，并且默认值只保存在 `runtime_guard_config.yaml`。以后改 YAML 会直接影响运行门，不需要再同步改 dataclass 默认值或测试里的断言数字。
+- `create_subagents` 默认创建后立即真实启动新 run；只有显式 `defer_start=true` 才只建记录不跑。返回 payload 会写 `auto_start`，让主代理知道这批 run 是已启动、已延迟还是启动失败。
+- `dispatch_subagents` 保留为运行中的提示注入/催办/恢复工具，新增 `prompt`、`message`、`guidance` 别名，统一归一成 `runner_instruction`。它仍可人工推进卡住项、重跑指定 run、查状态并尝试恢复。
+
+验证：
+- `python3 -m pytest -q agent_py_agent/tests/test_runtime_guard_config_shared.py agent_py_agent/tests/test_tool_agent_budget.py agent_py_agent/tests/test_main_agent_auto_resume.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_orchestration_create_subagents_items.py agent_py_agent/tests/test_orchestration_dispatch_subagents_tool.py --tb=short`
+- `python3 -m pytest -q agent_py_agent/tests/test_settings_config.py agent_py_agent/tests/test_config_normalize.py agent_py_agent/tests/test_runtime_guard_config_shared.py --tb=short`
+
 ## 2026-05-26 / 删除协作流程里的走钢丝硬门
 
 状态：本地已落地，focused tests 已跑一轮；不提交

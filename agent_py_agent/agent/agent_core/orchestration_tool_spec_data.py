@@ -5,7 +5,7 @@ from __future__ import annotations
 
 _CREATE_USE_CASES = [
     "用户要求拆分任务、派多个子代理、开工单或让子代理分别处理事项",
-    "需要把聊天里的计划落盘，后续由 dispatch_subagents 推进和验收",
+    "需要把聊天里的计划落盘并立即让子代理开始工作",
     "材料很多且用户要求派工时，先读 README/目标/评分/目录等最小必要信息，再用 items/tasks 派小傻妞分别读取和分析正文",
 ]
 _CREATE_KEYWORDS = ["子代理", "派工", "拆分", "工单", "任务", "subagent", "delegate", "spawn", "assign"]
@@ -27,6 +27,7 @@ _CREATE_PARAMETERS = {
     "artifact_refs": "交付物 refs 列表；适合引用已经存在或后续要验收的产物",
     "workflow_mode": "off/plan/auto；决定是否在建工单时挂 workflow 计划",
     "extra_write_roots": "额外写入目录列表；通常省略，系统会把当前任务 workspace_root 作为默认产物根；只有写到其它工作区内目录时才填",
+    "defer_start": "默认 false。只有明确想先建任务、不让子代理立刻开跑时才传 true",
 }
 _CREATE_PARAMETER_DETAILS = {
     "goal": (
@@ -42,7 +43,7 @@ _CREATE_PARAMETER_DETAILS = {
         "推荐批量入口，等价于 Hermes delegate_task 的 tasks[]："
         "[{\"goal\":\"研究市场\",\"role\":\"worker\",\"agent_name\":\"小傻妞-市场\"},"
         "{\"goal\":\"研究竞争\",\"role\":\"worker\",\"agent_name\":\"小傻妞-竞争\"}]。"
-        "create_subagents 只创建任务记录；返回后要调用 dispatch_subagents 才会真实执行。"
+        "create_subagents 默认创建后立刻启动子代理；只有传 defer_start=true 才只建任务记录。"
         "如果任务材料很多，不要由 root 先读完所有正文再派工；root 只读最小必要信息，"
         "把具体正文、数据表和长报告的读取分析写进各 item 的 goal 或 item.required_read_paths。"
         "例如“子代理1读文件1、子代理2读文件2”时，必须把文件路径分别写进各自 item，"
@@ -84,6 +85,10 @@ _CREATE_PARAMETER_DETAILS = {
         "普通任务可省略：如果 goal 写的是“目标目录/同一目录/任务目录”并且当前有真实 workspace_root，"
         "系统会自动把 workspace_root 当作本次产物根。"
         "只有用户明确给了其它工作区内产物目录、恢复 worker、重试超时 worker 时，才需要显式保留那个目录。"
+    ),
+    "defer_start": (
+        "默认不要传。传 true 表示只建任务账本，不启动 runner；适合用户明确说“先建好别运行”、"
+        "或需要人工稍后统一开跑的场景。普通派工必须省略，让子代理自动开始工作。"
     ),
 }
 _CREATE_EXAMPLES = [
@@ -148,6 +153,8 @@ _DISPATCH_PARAMETERS = {
     "limit": "每阶段最多处理多少条记录，默认 20；0 表示不限制",
     "run_ids": "精确指定本轮要推进的 run_id 列表，按给定顺序执行；也可写 include_run_ids/dispatch_run_ids/subagent_ids/dispatch_subagent_ids/target_subagent_ids/target_run_ids/agent_ids/direct_children/child_run_ids/children，或 items:[{\"run_id\":\"...\"}]；direct_children=true 表示当前作用域的直接孩子，不是 run_id 字符串。",
     "runner_instruction": "给单个 runner 的额外指令；多 run_ids 同轮执行时会被忽略以防串线",
+    "prompt": "runner_instruction 的自然语言别名，适合像给正在干活的子代理追加一句引导",
+    "message": "runner_instruction 的自然语言别名，适合人工催一下、纠偏或补充上下文",
     "take_over_by": "显式指定执行接管/重挂动作的 leader run_id；用于 coordinator 挂掉后的领导权恢复",
     "locked_files": "本轮接管或重派时需要保守锁定的文件列表，避免恢复动作和仍在运行的分支互相覆盖",
 }
@@ -168,6 +175,8 @@ _DISPATCH_PARAMETER_DETAILS = {
     "max_runners": "用来限制本轮推进数量；顶层默认 1，runner 内部默认 6，避免父节点只推进一个孩子就超时。",
     "run_ids": "适合父 runner 用 schedule_child_subagents/create_subagents 返回的 created_run_ids/dispatch_run_ids 指定本轮孩子，例如先跑 phase-a/phase-b，再跑 phase-c/review。模型误写 dispatch_run_ids/subagent_ids/dispatch_subagent_ids/target_subagent_ids/target_run_ids/agent_ids/direct_children/child_run_ids/children 或 items[].run_id 时系统会按 run_ids 处理；direct_children=true 只表示直接孩子作用域。",
     "runner_instruction": "只适合单个 run_id 的补充说明。多个不同子任务一起跑时不要写子任务专属内容；需要专属说明就拆成多次单 run_id dispatch。",
+    "prompt": "同 runner_instruction；这是注入式补充提示，不是新任务模板，也不改变原始目标。",
+    "message": "同 runner_instruction；适合“继续查这个方向”“别再重复这个接口”“把结果交给上级”这类临时引导。",
     "take_over_by": (
         "只在恢复动作需要新 leader 时填写。先用 subagent_board 或 due-check 找到可接管的已有 coordinator/leader run_id，"
         "再把它传给 dispatch_subagents；runner 内未填写时默认当前父 run 接管。不要凭空编 run_id。"

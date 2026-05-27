@@ -105,7 +105,11 @@ class DispatchSubagentsTool(BaseTool):
             note=str(params.get("note") or "triggered by dispatch_subagents tool").strip(),
             runner_instruction=resolved_runner_instruction(
                 self.agent,
-                params.get("runner_instruction") or params.get("instruction"),
+                params.get("runner_instruction")
+                or params.get("instruction")
+                or params.get("prompt")
+                or params.get("message")
+                or params.get("guidance"),
             ),
             max_cards=_non_negative_int(params.get("max_cards"), default=0),
             probe=not _bool_param(params.get("no_probe"), default=False),
