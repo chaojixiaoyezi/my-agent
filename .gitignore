@@ -56,6 +56,14 @@ agent_py_agent/MagicMock/
 validation/live_lab/
 my-agent-worktrees/
 
+# Local real-run scratch outputs
+github-5week-5agents-*/
+shell_gateway_outputs/
+github_week*_trending.json
+make_excel.py
+make_excel_v2.py
+merge_github_trending.py
+
 # 模型助手 Code memory files (stored in ~/.模型助手/projects/, not in repo)
 # These are user-specific and should not be committed to git
 # If you want to track them, copy to docs/memory/ instead
