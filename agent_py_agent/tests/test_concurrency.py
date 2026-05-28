@@ -314,6 +314,13 @@ class TestTaskLockManager(unittest.TestCase):
         manager = TaskLockManager(MockConfig())
         self.assertEqual(manager._cleanup_timeout, 1)
 
+    def test_default_lock_cleanup_timeout_comes_from_agent_config(self):
+        """没有传配置对象时，也必须使用 AgentConfig 的统一默认值。"""
+        from agent_py_agent.agent.settings import AgentConfig
+
+        manager = TaskLockManager()
+        self.assertEqual(manager._cleanup_timeout, AgentConfig().task_lock_timeout_seconds)
+
     def test_config_can_disable_task_locks(self):
         """测试 concurrency_lock_enabled=false 时锁操作变成 no-op。"""
         class MockConfig:

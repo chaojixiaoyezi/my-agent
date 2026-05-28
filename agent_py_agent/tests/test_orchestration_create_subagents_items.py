@@ -94,6 +94,21 @@ class TestCreateSubagentsItemsMode:
         assert result.ok is True
         assert mock_agent.subagents.create_run.call_count == 2
 
+    def test_items_cap_uses_agent_config_default_when_config_field_missing(self):
+        """轻量配置对象缺少 max_subagents 时，也使用 AgentConfig 默认值。"""
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.agent_core.orchestration_create_items import CreateSubagentItem
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+        from agent_py_agent.agent.settings import AgentConfig
+
+        mock_agent = MagicMock()
+        mock_agent.config = SimpleNamespace(enable_subagents=True, subagent_workflow_mode="off")
+        tool = CreateSubagentsTool(mock_agent)
+        items = [CreateSubagentItem(goal=f"任务 {index}", params={}) for index in range(60)]
+
+        assert len(tool._cap_items(items)) == AgentConfig().max_subagents
+
     def test_items_validate_before_creating_any_run(self, monkeypatch):
         """某个 item 失败时不应留下半创建的子代理记录。"""
         from agent_py_agent.agent.agent_core import orchestration_tools

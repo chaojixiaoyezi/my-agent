@@ -7,8 +7,13 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+from ..settings import AgentConfig
+
 if TYPE_CHECKING:
-    from ..settings.config import AgentConfig
+    from ..settings.config import AgentConfig as AgentConfigType
+
+
+_DEFAULT_TASK_LOCK_TIMEOUT_SECONDS = AgentConfig().task_lock_timeout_seconds
 
 
 # LLM: TaskLockManager is a 并发和冲突重试 boundary object; coordinate field or method changes with callers, docs, and focused tests.
@@ -165,13 +170,13 @@ def _lock_enabled(config: AgentConfig | None) -> bool:
 
 
 # LLM: _cleanup_timeout makes task_lock_timeout_seconds the single knob for stale lock cleanup.
-# 函数用途: 从配置读取任务锁清理超时；没有配置对象时保持旧的 300 秒默认。
-def _cleanup_timeout(config: AgentConfig | None) -> int:
-    raw_value = getattr(config, "task_lock_timeout_seconds", 300)
+# 函数用途: 从配置读取任务锁清理超时；没有配置对象时回退 AgentConfig 的统一默认值。
+def _cleanup_timeout(config: AgentConfigType | None) -> int:
+    raw_value = getattr(config, "task_lock_timeout_seconds", _DEFAULT_TASK_LOCK_TIMEOUT_SECONDS)
     try:
         timeout = int(raw_value)
     except (TypeError, ValueError):
-        return 300
+        return _DEFAULT_TASK_LOCK_TIMEOUT_SECONDS
     return max(1, timeout)
 
 

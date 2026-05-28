@@ -52,3 +52,11 @@
   但只作为兼容投影。
 - 这不是新硬门。registry 只解决“谁是最新产物事实”的问题；缺产物、坏格式和内容质量
   仍由普通 closeout 或父级模型根据任务目标处理。
+
+## 2026-05-28 旧辅助合同清理
+
+- 删除未被生产链路调用的旧 helper：`hierarchy_capability_contracts.py`、
+  `repair_goal_identity.py` 以及旧 task/real-task 兼容读取文件。
+- 当前子代理进展只认真实任务账本、refs、artifact registry、工具轨迹和 closeout
+  结果；不再通过这些旧 helper 生成额外能力继承文本或 repair 目标猜测。
+- 这次是删死代码和假信号，不改变正常子代理创建、启动、看树、写产物和汇报流程。

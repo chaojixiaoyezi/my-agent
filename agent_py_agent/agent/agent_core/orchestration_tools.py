@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from ..settings import AgentConfig
 from ..subagents.services.base import CreateRunParams
 from ..tools import BaseTool, ToolExecutionResult
 from .hierarchy_tools import ScheduleChildSubagentsTool as ScheduleChildSubagentsTool
@@ -55,6 +56,8 @@ from .parameters import _positive_int
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
+
+_DEFAULT_MAX_SUBAGENTS = AgentConfig().max_subagents
 
 
 # LLM: CreateSubagentsTool 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -214,7 +217,7 @@ class CreateSubagentsTool(BaseTool):
     # LLM: _cap_items applies the same user-configured fan-out ceiling as count mode.
     # 函数用途: 避免 items[] 绕过 max_subagents；配置为 0 或更小时表示不限制。
     def _cap_items(self, items: list[CreateSubagentItem]) -> list[CreateSubagentItem]:
-        max_subagents = int(getattr(self.agent.config, "max_subagents", 0) or 0)
+        max_subagents = _configured_max_subagents(self.agent)
         if max_subagents > 0:
             return items[:max_subagents]
         return items
@@ -247,8 +250,9 @@ class CreateSubagentsTool(BaseTool):
         count = _positive_int(params.get("count"), default=1)
         if count <= 0:
             return ToolExecutionResult("create_subagents", False, "count 必须大于 0。")
-        if self.agent.config.max_subagents > 0:
-            count = min(count, self.agent.config.max_subagents)
+        max_subagents = _configured_max_subagents(self.agent)
+        if max_subagents > 0:
+            count = min(count, max_subagents)
         return count
 
     # LLM: _create_tasks 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -277,6 +281,16 @@ def _payload_allowed_tools(values: list[list[str] | None]) -> list[str] | str | 
     if all(value == first for value in values):
         return first
     return "per_item"
+
+
+# LLM: _configured_max_subagents keeps create_subagents fan-out limits backed by AgentConfig defaults.
+# 函数用途: 读取 max_subagents；缺字段或坏类型时回退统一配置默认值，0 仍表示不限制。
+def _configured_max_subagents(agent) -> int:
+    raw_value = getattr(getattr(agent, "config", None), "max_subagents", _DEFAULT_MAX_SUBAGENTS)
+    try:
+        return max(0, int(raw_value))
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_SUBAGENTS
 
 
 # LLM: _bind_created_tasks_to_conversation makes local subagents addressable by task_id in event tools.

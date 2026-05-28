@@ -120,6 +120,29 @@ def test_materialized_delivery_contract_accepts_single_root_artifact_object():
     assert artifact["allowed_output_roots"] == ["outputs/reports"]
 
 
+def test_materialized_delivery_contract_does_not_stringify_object_kind():
+    """模型把 kind 写成对象时，系统不能把字典文本当 artifact kind。"""
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    contract = materialized_delivery_contract(
+        {
+            "artifacts": [
+                {
+                    "artifact_id": "hello",
+                    "kind": {"type": "file", "extensions": [".txt"]},
+                    "preferred_path": "outputs/hello.txt",
+                }
+            ]
+        }
+    )
+
+    artifact = contract["artifacts"][0]
+    assert artifact["kind"] == "txt"
+    assert "{" not in artifact["kind"]
+
+
 def test_materialized_delivery_contract_promotes_file_root_to_preferred_path():
     from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
         materialized_delivery_contract,

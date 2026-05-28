@@ -99,6 +99,28 @@ class TestCreateSubagentsToolExecute:
         # 应该最多只创建 max_subagents 个
         assert mock_agent.subagents.create_run.call_count <= 2
 
+    def test_count_mode_uses_agent_config_default_when_max_subagents_missing(self):
+        """轻量配置对象缺少 max_subagents 时，count 模式也使用 AgentConfig 默认值。"""
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+        from agent_py_agent.agent.settings import AgentConfig
+
+        mock_agent = MagicMock()
+        mock_agent.config = SimpleNamespace(enable_subagents=True, subagent_workflow_mode="off")
+        mock_task = MagicMock()
+        mock_task.id = "run_1"
+        mock_task.goal = ""
+        mock_task.status = "PENDING"
+        mock_task.verification_status = "PENDING"
+        mock_task.task_dir = "/tmp"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        result = CreateSubagentsTool(mock_agent).execute({"goal": "测试", "count": 60})
+
+        assert result.ok is True
+        assert mock_agent.subagents.create_run.call_count == AgentConfig().max_subagents
+
     def test_create_subagents_auto_starts_created_runs_without_waiting_for_completion(self, monkeypatch):
         """create_subagents 默认创建并后台启动，父代理不等子代理全部结束。"""
         from agent_py_agent.agent.agent_core import orchestration_background_dispatch
@@ -149,6 +171,39 @@ class TestCreateSubagentsToolExecute:
         mock_agent.dispatch_subagents.assert_not_called()
         assert payload["auto_start"]["status"] == "deferred"
         assert payload["next_action"]["tool"] == "dispatch_subagents"
+
+
+class TestCreateSubagentsToolConfigDefaults:
+    """测试 create_subagents 对轻量配置对象的默认值兜底。"""
+
+    def test_missing_access_mode_uses_agent_config_default(self):
+        """轻量配置对象缺少 access_mode 时，子代理权限仍回退统一配置默认值。"""
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+        from agent_py_agent.agent.settings import AgentConfig
+
+        mock_agent = MagicMock()
+        mock_agent.config = SimpleNamespace(
+            enable_subagents=True,
+            max_subagents=10,
+            subagent_workflow_mode="off",
+        )
+
+        mock_task = MagicMock()
+        mock_task.id = "run_default"
+        mock_task.goal = ""
+        mock_task.status = "PENDING"
+        mock_task.verification_status = "PENDING"
+        mock_task.task_dir = "/tmp"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        result = CreateSubagentsTool(mock_agent).execute({"goal": "测试"})
+        call_kwargs = mock_agent.subagents.create_run.call_args[1]
+
+        assert result.ok is True
+        assert call_kwargs["params"].parent_access_mode == AgentConfig().access_mode
+
 
 class TestCreateSubagentsToolTemplatePolicy:
     """测试 create_subagents 的角色模板和工具推断策略。"""

@@ -386,7 +386,7 @@ do_write()
   smaller local checklist appropriate to the change risk.
 - Tool-call budget is per agent run, not per task tree and not per conversation.
   Default policy is `tool_agent_budget_window_seconds=600` and
-  `tool_agent_budget_max_calls=50`, keyed by `run_id`. Calls without a `run_id`
+  `tool_agent_budget_max_calls=200`, keyed by `run_id`. Calls without a `run_id`
   are treated as ordinary main-agent chat and are not limited by this guard.
 - Artifact body reads have their own per-run character budget. Default policy is
   `tool_artifact_read_budget_window_seconds=600` and

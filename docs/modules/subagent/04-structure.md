@@ -90,3 +90,14 @@ shell 权限按“不能比父级更大”派生：
 runner 结构化结果只负责把状态、summary、artifacts、evidence packets、findings、能力申请和 next actions 合并回任务账本。它不再额外执行“声明的本地产物路径必须存在，否则改写为 BLOCKED”的专用完整性门。
 
 父级看到子代理结果后，可以按 refs 读取产物、继续调度、要求返工或提交 closeout。系统不再在 runner 层单独制造 `artifact_integrity_repair_advice`，避免和统一 closeout 形成两套验收/返工机制。
+
+## 旧兼容层清理
+
+已经确认无生产调用的 task/real-task 读取兼容文件、repair 目标辅助文件、
+capability contract 文本片段辅助文件已删除。当前结构保持一套事实源：
+
+- 创建和身份：`create_subagents` / `schedule_child_subagents` 写真实 run 账本。
+- 观察和汇总：`inspect_agent_tree` / `subagent_board` 读树、refs 和 registry。
+- 质量和返工：统一走普通 closeout，不再另造父验收、repair contract 或自然语言继承合同。
+
+以后如果确实需要恢复某类旧兼容能力，应先把它接入这三条事实源，而不是重新增加一套平行 helper。

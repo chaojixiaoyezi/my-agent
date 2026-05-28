@@ -6,14 +6,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ...settings import AgentConfig
+
 if TYPE_CHECKING:
     from ..core import SimpleAgent
+
+_DEFAULT_NOTIFICATION_ENABLED = AgentConfig().notification_enabled
 
 
 # LLM: notify_completed_tasks 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 处理notifycompletedtasks相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def notify_completed_tasks(agent: SimpleAgent, records: list) -> None:
-    if not getattr(agent.config, "notification_enabled", False):
+    if not getattr(agent.config, "notification_enabled", _DEFAULT_NOTIFICATION_ENABLED):
         return
 
     final_statuses = {"DONE", "FAILED", "TIMEOUT"}

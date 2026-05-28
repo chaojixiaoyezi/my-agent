@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 
+from ..settings.tool_config import DEFAULT_COMMAND_ACCESS_MODE
 from ..subagents.role_templates import role_template_id_for_role
 from ..subagents.services.base import CreateRunParams
 from .coordinator_seed_tools import explicit_root_allowed_tools
@@ -78,10 +79,11 @@ def _role_from_create_intent(raw_params: dict[str, object], goal: str, agent) ->
 
 
 # LLM: MagicMock or missing config values must not become persisted access modes.
-# 函数用途: 只从真实字符串配置读取 access_mode，其他情况交给子代理权限派生默认值。
+# 函数用途: 只从真实字符串配置读取 access_mode，缺失时回退统一命令权限默认值。
 def _config_access_mode(agent) -> str:
-    value = getattr(getattr(agent, "config", None), "access_mode", "")
-    return str(value).strip() if isinstance(value, str) else ""
+    value = getattr(getattr(agent, "config", None), "access_mode", DEFAULT_COMMAND_ACCESS_MODE)
+    text = str(value).strip() if isinstance(value, str) else ""
+    return text or DEFAULT_COMMAND_ACCESS_MODE
 
 
 # LLM: _config_string reads optional config strings without persisting test doubles.

@@ -129,6 +129,35 @@ class TestDispatchMixinFailureIntrospection:
         # 不应抛出异常
         mixin._handle_failure_introspection("test-task-1", sample_task, sample_result)
 
+    def test_notify_completed_tasks_defaults_to_agent_config_enabled(self, monkeypatch) -> None:
+        """缺少 notification_enabled 字段时，通知开关应回退到 AgentConfig 默认值。"""
+        from agent_py_agent.agent.agent_core.services import notification_service
+
+        task = SubAgentTask(
+            id="task-1",
+            goal="测试任务",
+            thought="",
+            plan=[],
+            status="DONE",
+        )
+        agent = SimpleNamespace(
+            config=SimpleNamespace(),
+            subagents=SimpleNamespace(load=lambda run_id: task),
+        )
+        delivered: list[str] = []
+
+        def fake_deliver(_agent, _task, run_id):
+            delivered.append(run_id)
+
+        monkeypatch.setattr(notification_service, "_deliver_task_notification", fake_deliver)
+
+        notify_completed_tasks(
+            agent,
+            [SimpleNamespace(step="runner", applied=True, run_id="task-1", after_status="DONE")],
+        )
+
+        assert delivered == ["task-1"]
+
     def test_apply_introspection_params_timeout(self, sample_task: SubAgentTask) -> None:
         """测试应用超参数调整。"""
         mixin = SimpleAgentDispatchMixin()

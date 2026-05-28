@@ -123,7 +123,7 @@ modules = ["agent_py_agent"]
 
 ```python
 # 写入边界校验流程:
-# 1. 工具名检查: 只有 write_file, append_file, replace_in_file 触发校验
+# 1. 工具名检查: write_file、apply_patch 和授权命令写入都会走写入边界
 # 2. 路径规范化: 去除控制字符、限制长度(4096字符)
 # 3. 允许目录检查: 写入必须在 workspace_root 内
 # 4. 禁止目录检查: 不能写入 .git/, config/, docs/ 等受保护目录
@@ -286,7 +286,7 @@ class DispatchMixin:
 
 ```python
 # 写入边界校验链:
-# 1. 工具白名单: write_file, append_file, replace_in_file
+# 1. 工具边界: write_file、apply_patch 和授权命令写入
 # 2. 路径校验:
 #    - 必须在 workspace_root 内
 #    - 不能包含 .. (目录遍历)

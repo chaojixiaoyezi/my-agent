@@ -171,11 +171,13 @@ def _artifact_contract(item: dict[str, Any]) -> dict[str, Any]:
         "llm_generated_fields",
     }
     result = {key: item[key] for key in allowed_keys if key in item}
+    _normalize_kind_field(result)
     _normalize_artifact_intent_fields(result)
     if "required" not in result:
         result["required"] = True
-    if "kind" in result:
-        result["kind"] = str(result["kind"]).strip().lower()
+    kind = _kind_text(result.pop("kind", ""))
+    if kind:
+        result["kind"] = kind
     else:
         kind = _kind_from_artifact_path(result)
         if kind:
@@ -184,6 +186,29 @@ def _artifact_contract(item: dict[str, Any]) -> dict[str, Any]:
         result["allowed_output_roots"] = [str(value).strip() for value in result["allowed_output_roots"] if str(value).strip()]
         _promote_file_root_to_preferred_path(result)
     return result
+
+
+# LLM: _normalize_kind_field keeps model-authored artifact kind open-world and scalar.
+# 函数用途: 处理模型把 kind 错写成对象的情况，把对象里的扩展名线索并入 artifact_intent。
+def _normalize_kind_field(artifact: dict[str, Any]) -> None:
+    raw_kind = artifact.get("kind")
+    if isinstance(raw_kind, dict):
+        intent = artifact.get("artifact_intent")
+        merged = dict(raw_kind)
+        if isinstance(intent, dict):
+            merged.update(intent)
+        artifact["artifact_intent"] = merged
+        artifact.pop("kind", None)
+    elif raw_kind is not None and not isinstance(raw_kind, str):
+        artifact.pop("kind", None)
+
+
+# LLM: _kind_text accepts only scalar kind labels and rejects object/list values.
+# 函数用途: 将 kind 字符串归一化；非字符串返回空，让调用方从路径或扩展名推导。
+def _kind_text(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip().lower().lstrip(".")
 
 
 def _normalize_artifact_intent_fields(artifact: dict[str, Any]) -> None:

@@ -11,6 +11,7 @@
 - 交付质量问题优先走 closeout 验收、结构化返工单、草稿验证和最终收口，不要前置成开工阶段硬阻断。
 - 文件格式、产物类型、协议、MIME type 属于开放世界。映射表只能做优化路径，不能因为“不在表里”就拒绝。
 - 产物定位也要按开放世界处理：`spreadsheet`、`workbook` 这类通用名字要能定位 `.xlsx/.xls/.ods` 等常见表格文件；如果合同只声明 kind 和输出根目录，系统应该找候选文件并给出明确候选，而不是把 kind 当成字面后缀。
+- `artifacts[].kind` 只接受字符串；如果模型把 kind 错写成对象，系统把其中的扩展名/MIME 当 `artifact_intent` 线索处理，再从路径或扩展名推导实际 kind，不能把对象 `str()` 后写进 registry。
 - 每次开发必须同步更新文档；文档没有同步的代码改动视为未收尾。
 - 子代理并发身份必须走显式 `RunScope` 和 run 事件账本。`inspect_agent_tree` 只是展示和汇总，不是身份事实源；线程级上下文只能作为权限上界和兼容兜底，不能成为新链路判断“当前是谁”的唯一依据。显式 scope 与当前 runner 上下文冲突时，必须返回结构化 `scope_resolution/scope_warnings`，不能静默吞掉。
 
@@ -232,7 +233,7 @@ tool_rate_max_records: 256
 
 ```yaml
 tool_agent_budget_window_seconds: 600
-tool_agent_budget_max_calls: 50
+tool_agent_budget_max_calls: 200
 ```
 
 语义：
