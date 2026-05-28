@@ -32,6 +32,18 @@
 - `inspect_agent_tree` 会把这些摘要放进节点的 `recent_tool_trace` 和 `evidence_layer.recent_tool_trace`。父代理可以据此判断子代理是否还在真实推进，而不用读取完整模型对话或大产物。
 - 这不是新门，也不改变任务状态；工具失败、产物缺失和返工仍由普通状态、blockers、refs 和 closeout 处理。
 
+## 2026-05-28 后台启动和进度投影
+
+- `create_subagents` 的真实模型后端会拉起独立 `subagents-dispatch` 后台进程，并把
+  `background_start.status` 写回任务树：`launching` 表示刚启动，`running` 表示后台
+  dispatch 已接手，`finished` 表示本轮启动执行完，`failed` 会带错误摘要。
+- 这个标记只是可观察状态，不是新硬门。父代理看到 `failed` 后可以重派、接手、问用户
+  或继续看其他子代理，不会因为这个字段自动终结整个任务。
+- 工具进度现在会同步更新 `SubAgentTask.progress`：成功只读工具给一个很小的非零进度，
+  成功写入产物给更明显的阶段进度，runner 记录 `DONE/COMPLETED` 后归一为 `1.0`。
+- 这样父代理看 `inspect_agent_tree` 时能区分“刚创建但没动”“正在调用工具”“已经完成”，
+  不需要读完整模型对话，也不会把只读工具归档误当成用户产物。
+
 ## 2026-05-28 模型可见路径收敛
 
 - `inspect_agent_tree` 和 `subagent_board` 的模型可见输出只暴露当前 `task_workspace`、`agent_run_workspace`、artifact refs、evidence refs 和 recovery refs。

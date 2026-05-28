@@ -33,7 +33,7 @@ def build_create_subagents_spec() -> ToolSpec:
         category="orchestration",
         effect="mutating",
         requires_idempotency=True,
-        description="创建一个或多个子代理并默认立刻启动。不同工作切片优先用 items/tasks；只有 defer_start=true 才只建不跑。",
+        description="创建一个或多个子代理并默认立刻启动。不同工作切片优先用 items/tasks；相对时间要沿用 Workspace Context 的 current_local_date/current_local_year；只有 defer_start=true 才只建不跑。",
         use_cases=_CREATE_USE_CASES,
         avoid_when=["只是解释思路、不需要真正创建任务时，不要调用；先直接回答即可"],
         keywords=_CREATE_KEYWORDS,

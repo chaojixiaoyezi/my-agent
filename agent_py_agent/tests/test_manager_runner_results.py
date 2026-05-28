@@ -220,6 +220,7 @@ def test_record_runner_result_updates_task_status(mock_manager, sample_task):
 
     assert sample_task.status == "DONE"
     assert sample_task.updated_at > 0
+    assert sample_task.progress == 1.0
 
 
 def test_record_runner_result_sets_ended_at_for_terminal_statuses(mock_manager, sample_task):

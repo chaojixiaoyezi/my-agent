@@ -210,6 +210,7 @@ def _workspace_context_text(builder: PromptBuilder) -> str:
     return "\n".join([
         f"- primary_workspace_root: {root}",
         f"- current_local_date: {today.isoformat()}",
+        f"- current_local_year: {today.year}",
         f"- current_local_time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}",
         f"- current_week_range: {current_week_start.isoformat()}..{current_week_end.isoformat()}",
         f"- last_7_days_range: {last_7_days_start.isoformat()}..{today.isoformat()}",

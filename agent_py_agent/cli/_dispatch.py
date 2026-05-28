@@ -20,6 +20,7 @@ from ..agent.subagent_workflows import (
     write_workflow_plan_preview,
 )
 from .common import make_agent, make_capability_router
+from .dispatch_background import BackgroundLaunchUpdate, mark_background_launch
 from .models import SubagentsDispatchOptions
 
 
@@ -46,6 +47,8 @@ def _subagents_dispatch_options(args, agent=None) -> SubagentsDispatchOptions:
         advance=getattr(args, "advance", False) is True,
         force_lock=bool(args.force_lock),
         watch=bool(args.watch),
+        run_ids=_flatten_run_ids(getattr(args, "run_id", []) or []),
+        background_launch_id=str(getattr(args, "background_launch_id", "") or "").strip(),
     )
 
 
@@ -82,6 +85,7 @@ def _dispatch_params(options: SubagentsDispatchOptions) -> DispatchParams:
         probe=options.probe,
         take_over_by=options.take_over_by,
         locked_files=options.locked_files,
+        include_run_ids=options.run_ids or None,
     )
 
 
@@ -95,6 +99,16 @@ def _watch_params(options: SubagentsDispatchOptions) -> WatchParams:
         advance=options.advance,
         force_lock=options.force_lock,
     )
+
+
+# LLM: _flatten_run_ids accepts repeated or comma-separated --run-id values from CLI callers.
+# 函数用途: 将多个 --run-id 参数归一成去重列表，保持输入顺序。
+def _flatten_run_ids(values: list[object]) -> list[str]:
+    run_ids: list[str] = []
+    for value in values:
+        items = (item.strip() for item in str(value or "").replace(",", " ").split())
+        run_ids.extend(item for item in items if item and item not in run_ids)
+    return run_ids
 
 
 # LLM: _print_watch_report 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
@@ -180,7 +194,13 @@ def cmd_subagents_dispatch(args) -> int:
         _print_watch_report(agent, report, options)
         return 0
 
-    report = agent.dispatch_subagents(router, capability_config, params=_dispatch_params(options))
+    mark_background_launch(agent, options, BackgroundLaunchUpdate("running"))
+    try:
+        report = agent.dispatch_subagents(router, capability_config, params=_dispatch_params(options))
+    except Exception as exc:
+        mark_background_launch(agent, options, BackgroundLaunchUpdate("failed", f"{type(exc).__name__}: {exc}"))
+        raise
+    mark_background_launch(agent, options, BackgroundLaunchUpdate("finished"))
     _print_dispatch_report(agent, report, options)
     return 0
 

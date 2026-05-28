@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 
@@ -153,6 +154,71 @@ class TestCreateSubagentsToolExecute:
         assert payload["auto_start"]["agent_tree"]["schema_version"] == "agent_tree_status.v1"
         assert payload["next_action"]["tool"] == "subagent_board"
 
+    def test_auto_start_process_command_targets_created_run_ids(self):
+        """真实后台进程必须显式只推进本轮创建的 run_id，不能靠全局候选猜。"""
+        from agent_py_agent.agent.agent_core.orchestration_background_dispatch import (
+            _background_dispatch_command,
+            _BackgroundDispatchRequest,
+        )
+
+        mock_agent = _mock_create_items_agent(task_count=2)
+        mock_agent.config.config_path = "/tmp/my-agent-config.yaml"
+        request = _BackgroundDispatchRequest(
+            agent=mock_agent,
+            run_ids=["run_a", "run_b"],
+            launch_id="launch-1",
+            router=object(),
+            cfg=object(),
+            params=object(),
+        )
+
+        command = _background_dispatch_command(mock_agent, request)
+
+        assert command[1:4] == ["-u", "-m", "agent_py_agent"]
+        assert command[command.index("--config") + 1] == "/tmp/my-agent-config.yaml"
+        assert "subagents-dispatch" in command
+        assert "-u" in command
+        assert "--background-launch-id" in command
+        assert command[command.index("--background-launch-id") + 1] == "launch-1"
+        assert command.count("--run-id") == 2
+        assert command[command.index("--run-id") + 1] == "run_a"
+        assert command[command.index("--run-id", command.index("--run-id") + 1) + 1] == "run_b"
+
+    def test_dispatch_cli_accepts_run_id_scope(self):
+        """subagents-dispatch CLI 入口要把 --run-id 传成 include_run_ids。"""
+        from argparse import Namespace
+
+        from agent_py_agent.cli._dispatch import _dispatch_params, _subagents_dispatch_options
+
+        args = Namespace(
+            apply=True,
+            execute_runners=True,
+            planner=False,
+            workflow_mode="off",
+            max_runners=2,
+            limit=20,
+            reviewer="test",
+            note="",
+            instruction="",
+            max_cards=0,
+            no_probe=False,
+            take_over_by="",
+            locked_file=[],
+            interval=None,
+            max_cycles=0,
+            advance=False,
+            force_lock=False,
+            watch=False,
+            run_id=["run_a", "run_b,run_c"],
+            background_launch_id="launch-1",
+        )
+
+        options = _subagents_dispatch_options(args)
+        params = _dispatch_params(options)
+
+        assert options.background_launch_id == "launch-1"
+        assert params.include_run_ids == ["run_a", "run_b", "run_c"]
+
     def test_defer_start_keeps_created_runs_unstarted(self):
         """只有显式 defer_start=true 时，create_subagents 才只建记录不启动。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
@@ -171,6 +237,51 @@ class TestCreateSubagentsToolExecute:
         mock_agent.dispatch_subagents.assert_not_called()
         assert payload["auto_start"]["status"] == "deferred"
         assert payload["next_action"]["tool"] == "dispatch_subagents"
+
+
+class TestCreateSubagentsAutoStartLifecycle:
+    """测试后台启动生命周期写回任务树。"""
+
+    def test_dispatch_cli_background_launch_marker_updates_task_tree(self):
+        """后台 dispatch 进程要把生命周期写回任务树，父代理才能查到启动状态。"""
+        from agent_py_agent.cli.dispatch_background import (
+            BackgroundLaunchUpdate,
+            mark_background_launch,
+        )
+        from agent_py_agent.cli.models import SubagentsDispatchOptions
+
+        task = SimpleNamespace(id="run_a", attributes={})
+        manager = MagicMock()
+        manager.load.return_value = task
+        agent = SimpleNamespace(subagents=manager)
+        options = SubagentsDispatchOptions(
+            apply=True,
+            execute_runners=True,
+            planner=False,
+            workflow_mode="off",
+            max_runners=1,
+            limit=20,
+            reviewer="test",
+            note="",
+            instruction="",
+            max_cards=0,
+            probe=True,
+            take_over_by="",
+            locked_files=[],
+            interval=0.0,
+            max_cycles=0,
+            advance=False,
+            force_lock=False,
+            watch=False,
+            run_ids=["run_a"],
+            background_launch_id="launch-1",
+        )
+
+        mark_background_launch(agent, options, BackgroundLaunchUpdate("running"))
+
+        assert task.attributes["background_start"]["launch_id"] == "launch-1"
+        assert task.attributes["background_start"]["status"] == "running"
+        manager.save.assert_called_once_with(task)
 
 
 class TestCreateSubagentsToolConfigDefaults:

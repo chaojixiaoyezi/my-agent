@@ -307,6 +307,7 @@ def load_config(config_path: str | Path) -> AgentConfig:
         config_warnings.append(f"unknown config key: {key!r}; ignored")
     clean = {key: value for key, value in normalized.items() if key in allowed}
     config = AgentConfig(**clean)
+    config.config_path = str(path.expanduser().resolve())
     config.config_warnings = config_warnings
 
     normalize_agent_memory_config(config)

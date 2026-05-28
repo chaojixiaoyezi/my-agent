@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..capabilities import CapabilityRouter
 from .agent_tree_status import agent_tree_status_payload
@@ -47,29 +50,131 @@ def auto_start_tasks(agent, tasks: list, request_params: dict[str, object]) -> d
 
 
 # LLM: _start_background_dispatch launches runner work without blocking the parent turn.
-# 函数用途: 写入 launching 状态、启动后台线程，并返回 run_id/tree/status。
+# 函数用途: 写入 launching 状态、启动独立 dispatch 进程，并返回 run_id/tree/status。
 def _start_background_dispatch(agent, run_ids: list[str]) -> dict[str, object]:
     launch_id = f"subagent-start-{time.time_ns()}"
     router, cfg, dispatch_params = _auto_start_dispatch_args(agent, run_ids)
     request = _BackgroundDispatchRequest(agent, run_ids, launch_id, router, cfg, dispatch_params)
     _mark_background_start(request, status="launching")
+    if _use_inprocess_autostart(agent):
+        return _start_inprocess_dispatch(agent, request)
+    process = _spawn_background_dispatch_process(agent, request)
+    _remember_background_dispatch(agent, launch_id, run_ids, f"pid:{process.pid}")
+    return {
+        "status": "started",
+        "dispatch_mode": "background",
+        "background_backend": "process",
+        "run_ids": run_ids,
+        "launch_id": launch_id,
+        "pid": process.pid,
+        "log_path": _background_log_path(agent, launch_id),
+        "summary": "subagent dispatch launched in a durable process; parent should inspect agent tree for progress",
+        "agent_tree": _safe_agent_tree(agent),
+    }
+
+
+# LLM: _use_inprocess_autostart keeps echo tests lightweight while real backends use a subprocess.
+# 函数用途: 判断是否用进程内线程启动子代理；只允许 echo 后端走这条测试快路。
+def _use_inprocess_autostart(agent) -> bool:
+    return str(getattr(getattr(agent, "config", None), "model_backend", "") or "").strip() == "echo"
+
+
+# LLM: _start_inprocess_dispatch is the echo-backend test path, not the real model runtime path.
+# 函数用途: 在 echo 后端用非 daemon 线程跑后台 dispatch，避免单测额外启动进程。
+def _start_inprocess_dispatch(agent, request: _BackgroundDispatchRequest) -> dict[str, object]:
     thread = threading.Thread(
         target=_background_dispatch_worker,
-        name=f"my-agent-{launch_id}",
+        name=f"my-agent-{request.launch_id}",
         args=(request,),
-        daemon=True,
+        daemon=False,
     )
-    _remember_background_dispatch(agent, launch_id, run_ids, thread.name)
+    _remember_background_dispatch(agent, request.launch_id, request.run_ids, thread.name)
     thread.start()
     return {
         "status": "started",
         "dispatch_mode": "background",
-        "run_ids": run_ids,
-        "launch_id": launch_id,
+        "background_backend": "thread",
+        "run_ids": request.run_ids,
+        "launch_id": request.launch_id,
         "thread_name": thread.name,
-        "summary": "subagent dispatch launched in background; parent should inspect agent tree for progress",
+        "summary": "subagent dispatch launched in-process for echo backend; parent should inspect agent tree for progress",
         "agent_tree": _safe_agent_tree(agent),
     }
+
+
+# LLM: _spawn_background_dispatch_process starts durable runner dispatch for real model backends.
+# 函数用途: 启动独立 subagents-dispatch 进程，并把日志写到任务工作区。
+def _spawn_background_dispatch_process(agent, request: _BackgroundDispatchRequest) -> subprocess.Popen:
+    log_path = Path(_background_log_path(agent, request.launch_id))
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_path.open("a", encoding="utf-8")
+    command = _background_dispatch_command(agent, request)
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=str(_project_root()),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        log_handle.close()
+        return process
+    except Exception:
+        log_handle.close()
+        raise
+
+
+# LLM: _background_dispatch_command scopes the subprocess to only the run_ids created in this tool call.
+# 函数用途: 生成后台 dispatch 命令，带 run_id、launch_id 和无缓冲输出参数。
+def _background_dispatch_command(agent, request: _BackgroundDispatchRequest) -> list[str]:
+    command = [
+        sys.executable,
+        "-u",
+        "-m",
+        "agent_py_agent",
+        "--config",
+        _config_path(agent),
+        "subagents-dispatch",
+        "--apply",
+        "--execute-runners",
+        "--max-runners",
+        str(max(1, len(request.run_ids))),
+        "--limit",
+        str(max(20, len(request.run_ids))),
+        "--reviewer",
+        "create-subagents-auto-start",
+        "--note",
+        f"auto-start after create_subagents launch_id={request.launch_id}",
+        "--background-launch-id",
+        request.launch_id,
+    ]
+    for run_id in request.run_ids:
+        command.extend(["--run-id", run_id])
+    return command
+
+
+# LLM: _config_path preserves the foreground agent config for the background dispatch subprocess.
+# 函数用途: 找到当前 agent 配置路径；没有显式路径时回退仓库默认配置。
+def _config_path(agent) -> str:
+    config = getattr(agent, "config", None)
+    configured = str(getattr(config, "config_path", "") or "").strip()
+    if configured:
+        return configured
+    return str(_project_root() / "agent_py_agent" / "config" / "agent_config.yaml")
+
+
+# LLM: _project_root anchors subprocess cwd and default config lookup.
+# 函数用途: 返回仓库根目录，供后台进程和日志路径使用。
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+# LLM: _background_log_path keeps auto-start logs near the subagent workspace.
+# 函数用途: 计算后台启动日志路径，方便父代理或人工排查启动状态。
+def _background_log_path(agent, launch_id: str) -> str:
+    workspace = Path(getattr(getattr(agent, "subagents", None), "workspace", _project_root() / "data" / "subagents"))
+    return str(workspace / "background_dispatch" / f"{launch_id}.log")
 
 
 # LLM: _background_dispatch_worker is the only async runner side effect.

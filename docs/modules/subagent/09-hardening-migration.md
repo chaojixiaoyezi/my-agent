@@ -75,6 +75,7 @@
 
 - 中文说明：`create_subagents` 和 `schedule_child_subagents` 已经有 `typed_envelope`；本轮把 `dispatch_subagents` 也补成 `subagent_dispatch` typed envelope。
 - envelope 只放稳定控制字段：`dry_run`、`summary`、`actionable_run_ids`、`recovery_run_ids`、`dispatch_json`、`dispatch_md`、`record_count` 和 scope。父级要继续推进或恢复时读这些字段，不从自然语言 `message` 里猜 run id。
+- `dry_run` 只表示本次工具调用是否真实推进 runner。`summary` 里的逐记录计数使用 `record_dry_run_count` / `record_applied_count`，避免模型把“有几条记录是预览”误读成“这次整体没有执行”。
 - 旧报告里 `summary` 可能是字符串；新桥接会把它包成 `{"text": "..."}`，保持兼容。
 - 这一步的目的不是增加流程，而是减少“模型把摘要当工具/把路径说错/把 run id 读漏”的机会。结构化字段是事实来源，自然语言只负责让人看懂。
 

@@ -1193,6 +1193,7 @@ my-agent subagents-dispatch --watch --planner --interval 30
 | `--reviewer <name>` | `parent-dispatch` | patch/acceptance 审核者标识。 |
 | `--note <text>` | - | 写入调度关联审核记录的备注。 |
 | `--instruction <text>` | - | 给本轮 runner 的额外指令。 |
+| `--background-launch-id <id>` | - | 内部字段：`create_subagents` 后台启动时写回任务树生命周期，普通用户不需要手填。 |
 | `--max-cards <n>` | `0` | runner 最多注入多少张能力卡，`0` 表示不限制。 |
 | `--no-probe` | `false` | 执行 runner 前不做通道健康检查。 |
 | `--take-over-by <name>` | - | 接管动作的接管者，apply takeover 时必填。 |

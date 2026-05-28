@@ -1209,9 +1209,13 @@ create_subagents 写清楚 goal / refs
 
 当前规则是：`create_subagents` 默认创建后直接启动新 run，不再要求主代理再手动催一次。只有显式传 `defer_start=true` 时，才只创建/复用任务记录。父代理后续要看状态、追加提示、推进卡住项、重跑某几个 run 或尝试恢复时，再使用 `dispatch_subagents`。
 
+真实模型后端下，这个“直接启动”不是短命 CLI 里的 daemon thread，而是独立 `subagents-dispatch --apply --execute-runners --run-id ... --background-launch-id ...` 进程。这样 `my-agent run` 返回后，子代理 runner 仍然能继续推进；后台进程会把 `attributes.background_start.status` 写成 `running/finished/failed`，任务树不会因为父进程退出而只剩一个假启动标记。离线 `echo` 后端保留进程内线程，方便单测和本地 smoke 不额外启动子进程。
+
 同一轮还废弃了 workflow 自动套娃：全局 `subagent_workflow_mode=auto` 不再静默作用到普通 `create_subagents` / `dispatch_subagents`。只有本次工具参数明确写 `workflow_mode=plan` 或 `workflow_mode=auto` 才会启用 workflow；未知值如 `parallel` 一律当 `off`，避免普通 worker 被拆成 implement/verify 孙代理。
 
 `dispatch_subagents` 现在更像“运行中的引导/推进工具”：它可以带 `runner_instruction`，也接受 `prompt`、`message`、`guidance` 这类别名，作为给目标子代理/孙代理的本轮补充提示。它同时保留人工催办、推进卡住项、重跑指定 run、查一轮状态并尝试恢复这些能力。
+
+模型可见的 `dispatch_subagents` 返回里，顶层 `dry_run` 才是整次调用是否真实推进的事实。逐记录统计统一叫 `record_dry_run_count` / `record_applied_count`，避免主代理看到 `summary.dry_run=1` 后误以为整次 dispatch 都只是预览。
 
 ```json
 {

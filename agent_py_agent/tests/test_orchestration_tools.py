@@ -255,6 +255,30 @@ class TestDispatchSubagentsTool:
         assert params.execute_runners is True
         assert params.max_runners == 2
 
+    def test_model_facing_summary_renames_record_dry_run_count(self, tmp_path):
+        """工具调用不是 dry-run 时，不把单条记录计数渲染成顶层 dry_run 语义。"""
+        from agent_py_agent.agent.agent_core.orchestration_dispatch_tool import (
+            DispatchSubagentsTool,
+        )
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+        report = SimpleNamespace(
+            dry_run=False,
+            summary={"total": 1, "ok": 1, "dry_run": 1, "applied": 0},
+            records=[],
+        )
+        agent.dispatch_subagents = MagicMock(return_value=report)
+
+        result = DispatchSubagentsTool(agent).execute({"run_ids": ["missing-run"]})
+        payload = json.loads(result.output)
+
+        assert payload["dry_run"] is False
+        assert "dry_run" not in payload["summary"]
+        assert payload["summary"]["record_dry_run_count"] == 1
+        assert payload["summary"]["record_applied_count"] == 0
+
 
 class TestScheduleChildSubagentsTool:
     """测试当前 runner 创建下一层子节点的安全边界。"""

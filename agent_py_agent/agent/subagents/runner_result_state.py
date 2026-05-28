@@ -184,6 +184,10 @@ def _apply_unstructured_failure(task, ok, failure_type: str) -> None:
 def _apply_runner_timestamps(task, now: float) -> None:
     if task.status in {"DONE", "FAILED", "BLOCKED", "CHANNEL_ERROR", "TIMEOUT"}:
         task.ended_at = now
+    if str(getattr(task, "status", "") or "").upper() in {"DONE", "COMPLETED"}:
+        task.progress = 1.0
+    elif str(getattr(task, "status", "") or "").upper() == "RUNNING":
+        task.progress = max(_safe_progress(getattr(task, "progress", 0.0)), 0.05)
     task.updated_at = now
     task.heartbeat_at = now
 
@@ -202,3 +206,13 @@ def _apply_runner_attempt_fields(params: RunnerAttemptParams) -> None:
         task.runner_last_error = ""
     if str(task.runner_active_attempt_id or "").strip():
         task.runner_active_attempt_id = ""
+
+
+# LLM: _safe_progress normalizes legacy task progress before terminal/runner updates.
+# 函数用途: 把旧任务或测试替身里的 progress 安全转换成 0..1 浮点数。
+def _safe_progress(value: object) -> float:
+    try:
+        progress = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return min(1.0, max(0.0, progress))

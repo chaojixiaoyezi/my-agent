@@ -186,6 +186,7 @@ def test_runtime_tool_progress_updates_agent_status_fields(tmp_path) -> None:
 
     loaded = manager.load(task.id)
     assert loaded.current_tool == "write_file"
+    assert loaded.progress > 0.0
     assert loaded.last_progress_at > 0
     assert loaded.last_progress_summary
     assert loaded.heartbeat_at == loaded.last_progress_at

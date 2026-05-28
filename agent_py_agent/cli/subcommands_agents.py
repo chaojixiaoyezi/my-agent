@@ -213,6 +213,8 @@ def _add_agents_dispatch_subcommands(sub):
     dispatch.add_argument("--reviewer", default="parent-dispatch", help="patch/acceptance 审核者标识")
     dispatch.add_argument("--note", help="写入调度关联审核记录的备注")
     dispatch.add_argument("--instruction", help="给本轮 runner 的额外指令")
+    dispatch.add_argument("--run-id", action="append", default=[], help="只推进指定子代理 run_id；可多次传入")
+    dispatch.add_argument("--background-launch-id", default="", help="内部字段：标记 create_subagents 后台启动生命周期")
     dispatch.add_argument("--max-cards", type=int, default=0, help="runner 最多注入多少张能力卡，0 表示不限制")
     dispatch.add_argument("--no-probe", action="store_true", help="执行 runner 前不做通道健康检查")
     dispatch.add_argument("--take-over-by", help="接管动作的接管者，apply takeover 时必填")

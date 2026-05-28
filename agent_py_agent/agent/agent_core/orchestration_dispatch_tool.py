@@ -144,7 +144,7 @@ class DispatchSubagentsTool(BaseTool):
         payload = {
             "dry_run": report.dry_run,
             "runner_selection_recovery": dispatch_recovery_payload(report.records),
-            "summary": report.summary,
+            "summary": _model_facing_dispatch_summary(report.summary),
         }
         payload.update(scope_resolution_payload(resolution))
         payload.update(_dispatch_top_level_guidance(self.agent, report, record_payloads))
@@ -172,3 +172,20 @@ from .orchestration_dispatch_tool_helpers import (
     _run_ids_actually_dispatched,
     _run_ids_for_scope,
 )
+
+
+# LLM: _model_facing_dispatch_summary tolerates legacy string summaries from older dispatch reports.
+# 函数用途: 把报告 summary 统一成对象，并把逐记录 dry_run/applied 计数改名，避免模型误读整次工具模式。
+def _model_facing_dispatch_summary(summary: object) -> dict[str, object]:
+    """Rename per-record dry-run counts so models do not confuse them with tool mode."""
+    if isinstance(summary, dict):
+        rendered = dict(summary)
+    elif summary:
+        rendered = {"text": str(summary)}
+    else:
+        rendered = {}
+    if "dry_run" in rendered:
+        rendered["record_dry_run_count"] = rendered.pop("dry_run")
+    if "applied" in rendered:
+        rendered["record_applied_count"] = rendered.pop("applied")
+    return rendered

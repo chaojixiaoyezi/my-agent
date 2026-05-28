@@ -133,6 +133,7 @@ def _persist_runtime_status(agent: object, task: SubAgentTask, result: object, p
         summary = _progress_summary(tool, progress)
         task.last_progress_at = now
         task.last_progress_summary = summary
+        task.progress = max(_safe_progress(getattr(task, "progress", 0.0)), 0.25 if progress else 0.05)
         if progress:
             task.latest_summary = str(progress.get("summary") or task.latest_summary or "")
             task.current_step = str(progress.get("next_action") or task.current_step or "")
@@ -167,6 +168,16 @@ def _append_recent_tool_trace(task: SubAgentTask, event: dict[str, Any]) -> None
     items.append(entry)
     attrs["recent_tool_trace"] = [item for item in items if isinstance(item, dict)][-5:]
     task.attributes = attrs
+
+
+# LLM: _safe_progress keeps tree progress numeric even when older task files carry strings or nulls.
+# 函数用途: 将历史任务里的 progress 归一到 0..1，避免状态树被坏值或空值卡住。
+def _safe_progress(value: object) -> float:
+    try:
+        progress = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return min(1.0, max(0.0, progress))
 
 
 # LLM: _progress_summary keeps status rows concise and avoids copying full tool output.

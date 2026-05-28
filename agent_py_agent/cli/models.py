@@ -160,6 +160,8 @@ class SubagentsDispatchOptions:
     advance: bool
     force_lock: bool
     watch: bool
+    run_ids: list[str]
+    background_launch_id: str = ""
 
 
 # LLM: SubagentsDueCheckOptions keeps display limit and root scope together for due-check CLI.
