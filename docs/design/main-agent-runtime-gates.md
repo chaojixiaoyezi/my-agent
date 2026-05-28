@@ -1215,7 +1215,7 @@ create_subagents 写清楚 goal / refs
 
 `dispatch_subagents` 现在更像“运行中的引导/推进工具”：它可以带 `runner_instruction`，也接受 `prompt`、`message`、`guidance` 这类别名，作为给目标子代理/孙代理的本轮补充提示。它同时保留人工催办、推进卡住项、重跑指定 run、查一轮状态并尝试恢复这些能力。
 
-模型可见的 `dispatch_subagents` 返回里，顶层 `dry_run` 才是整次调用是否真实推进的事实。逐记录统计统一叫 `record_dry_run_count` / `record_applied_count`，避免主代理看到 `summary.dry_run=1` 后误以为整次 dispatch 都只是预览。
+模型可见的 `dispatch_subagents` 返回里，顶层 `dry_run` 才是整次调用是否真实推进的事实。逐记录统计统一叫 `record_dry_run_count` / `record_applied_count`，逐条记录也统一叫 `record_dry_run` / `record_applied`，避免主代理看到嵌套 `dry_run=true` 后误以为整次 dispatch 都只是预览。
 
 ```json
 {
@@ -1239,6 +1239,12 @@ create_subagents 写清楚 goal / refs
 ```
 
 如果模型只想查看状态，不需要 dispatch，可以调用 `subagent_board` / `inspect_agent_tree` 读取 tree/status。系统不再本地抢答“已完成/未完成”，也不再用额外父级验收专用门替代统一 closeout。
+
+`subagent_board` 会额外给父级两个观察字段：`running_seconds` 表示这个子代理从最近心跳/创建到现在大概跑了多久，`seconds_since_progress` 表示距离最近一次真实进展大概过了多久。这两个字段只帮助父级判断“要不要查看、提醒、补救”，不触发自动阻断。
+
+看板还会返回 `aggregation_readiness`：子代理总数、已完成数、可读产物数、未完成 run id。它的作用是提醒父级汇总前先读已完成 refs、继续推进未完成项；不是新的验收门，也不替代统一 closeout。
+
+入口物化层支持可选 `target_coverage_contract`。它只描述“用户希望覆盖哪些目标、时间段、名单或来源范围”，closeout 报告会生成 `target_coverage_status`，列出已覆盖和缺失项。这个账本默认 `should_block=false`，用于提醒模型补齐或向用户说明缺口，不把开放世界研究任务卡成固定模板。
 
 历史上的验收-only dispatch 建议类似：
 

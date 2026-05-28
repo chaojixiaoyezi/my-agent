@@ -5,6 +5,7 @@ from __future__ import annotations
 
 """helpers for subagent board item construction."""
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -122,6 +123,7 @@ def _board_item_payload(
     child_status_counts: dict[str, int],
 ) -> dict[str, object]:
     open_request_count, open_gap_count = counts
+    timing = _task_timing(task)
     return {
         "id": task.id,
         "root_id": task.root_id,
@@ -149,6 +151,8 @@ def _board_item_payload(
         "current_step": task.current_step,
         "latest_summary": task.latest_summary,
         "blocker_count": len(task.blockers),
+        "running_seconds": timing["running_seconds"],
+        "seconds_since_progress": timing["seconds_since_progress"],
         "takeover_by": task.takeover_by,
         "locked_file_count": len(task.locked_files),
         "risk_flags": build_risk_flags(task, open_request_count, open_gap_count),
@@ -166,6 +170,17 @@ def _board_item_payload(
         "artifact_refs": _bounded_unique_strings(task.artifact_refs, limit=12),
         "artifact_registry_refs": _registry_records(task.attributes.get("artifact_registry_refs"), limit=12),
         "evidence_refs": _bounded_unique_strings(task.evidence_refs, limit=12),
+    }
+
+
+def _task_timing(task: SubAgentTask) -> dict[str, float]:
+    # LLM: Timing is a parent-facing observation only; it must not change task status.
+    now = time.time()
+    started = float(task.heartbeat_at or task.created_at or task.updated_at or 0.0)
+    progress_at = float(task.last_progress_at or task.heartbeat_at or task.updated_at or task.created_at or 0.0)
+    return {
+        "running_seconds": max(0.0, now - started) if started > 0 else 0.0,
+        "seconds_since_progress": max(0.0, now - progress_at) if progress_at > 0 else 0.0,
     }
 
 

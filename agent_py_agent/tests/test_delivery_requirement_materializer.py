@@ -272,6 +272,31 @@ def test_materialized_workbook_contract_preserves_llm_generated_fields_without_a
     assert contract["fact_evidence_contract"]["evidence_contract"]["required_fields"] == ["本周新增 star 数"]
 
 
+def test_materialized_delivery_contract_preserves_generic_target_coverage_contract():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        materialized_delivery_contract,
+    )
+
+    contract = materialized_delivery_contract(
+        {
+            "artifacts": [{"artifact_id": "final_workbook", "kind": "xlsx", "allowed_output_roots": ["outputs"]}],
+            "target_coverage_contract": {
+                "scope_label": "今年以来每周",
+                "enforcement": "advisory",
+                "target_items": [
+                    {"target_id": "2026-W01", "label": "2026 第 1 周"},
+                    {"target_id": "2026-W02", "label": "2026 第 2 周"},
+                ],
+            },
+        }
+    )
+
+    coverage = contract["target_coverage_contract"]
+    assert coverage["scope_label"] == "今年以来每周"
+    assert coverage["enforcement"] == "advisory"
+    assert [item["target_id"] for item in coverage["target_items"]] == ["2026-W01", "2026-W02"]
+
+
 def test_materialized_contract_preserves_artifact_intent_extensions_for_broad_formats():
     from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
         materialized_delivery_contract,
@@ -397,3 +422,15 @@ def test_materializer_prompt_asks_for_structured_contract_not_task_template():
     assert "metric_contracts" in prompt
     assert "代码平台" not in prompt
     assert "论文" not in prompt
+
+
+def test_materializer_prompt_mentions_target_coverage_without_task_templates():
+    from agent_py_agent.agent.agent_core.delivery_requirement_materializer import (
+        build_delivery_requirement_materializer_prompt,
+    )
+
+    prompt = build_delivery_requirement_materializer_prompt("今年以来每周都要覆盖")
+
+    assert "target_coverage_contract" in prompt
+    assert "目标清单" in prompt
+    assert "GitHub 固定列" not in prompt

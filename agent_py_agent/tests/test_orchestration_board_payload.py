@@ -33,6 +33,8 @@ def _board_item(run_id: str, status: str):
     item.open_gap_count = 0
     item.latest_summary = ""
     item.blocker_count = 0
+    item.running_seconds = 0.0
+    item.seconds_since_progress = 0.0
     item.target_tokens = []
     item.artifact_refs = []
     item.artifact_registry_refs = []
@@ -158,6 +160,50 @@ def test_board_payload_includes_artifact_registry_refs_for_completed_children():
     assert '"/tmp/site/final_report.md"' in result.output
     assert '"/tmp/site/old_report.md"' not in result.output
     assert '"artifact_registry_refs": [' in result.output
+
+
+def test_board_payload_includes_timing_observability_fields():
+    from agent_py_agent.agent.agent_core.orchestration_tools import SubagentBoardTool
+
+    mock_agent = MagicMock()
+    mock_agent.subagents.workspace = Path("/tmp/workspace")
+    mock_board = MagicMock()
+    mock_board.summary = {"total": 1}
+    item = _board_item("run_1", "RUNNING")
+    item.running_seconds = 86.2
+    item.seconds_since_progress = 12.4
+    mock_board.items = [item]
+    mock_agent.subagents.write_board.return_value = mock_board
+
+    result = SubagentBoardTool(mock_agent).execute({"limit": 10})
+
+    assert result.ok is True
+    assert '"running_seconds": 86' in result.output
+    assert '"seconds_since_progress": 12' in result.output
+
+
+def test_board_payload_includes_aggregation_readiness_without_business_templates():
+    from agent_py_agent.agent.agent_core.orchestration_tools import SubagentBoardTool
+
+    mock_agent = MagicMock()
+    mock_agent.subagents.workspace = Path("/tmp/workspace")
+    mock_board = MagicMock()
+    mock_board.summary = {"total": 2}
+    done = _board_item("done", "DONE")
+    done.verification_status = "VERIFIED"
+    done.artifact_registry_refs = [{"artifact_id": "a1", "path": "/tmp/out/a1.xlsx", "status": "ready"}]
+    running = _board_item("running", "RUNNING")
+    mock_board.items = [done, running]
+    mock_agent.subagents.write_board.return_value = mock_board
+
+    result = SubagentBoardTool(mock_agent).execute({"limit": 10})
+
+    assert result.ok is True
+    assert '"aggregation_readiness": {' in result.output
+    assert '"total_child_count": 2' in result.output
+    assert '"completed_child_count": 1' in result.output
+    assert '"missing_or_unfinished_run_ids": [' in result.output
+    assert "github" not in result.output.lower()
 
 
 # LLM: Board payload should not invite parent agents to guess old work-order paths.

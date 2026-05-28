@@ -63,6 +63,28 @@ def board_completion_status(items) -> dict[str, object]:
     }
 
 
+def board_aggregation_readiness(items) -> dict[str, object]:
+    rows = list(items or [])
+    unfinished = [
+        str(getattr(item, "id", "") or "")
+        for item in rows
+        if str(getattr(item, "status", "") or "").upper() not in {"DONE", "TAKEN_OVER"}
+    ]
+    artifact_ready_count = sum(
+        1
+        for item in rows
+        for row in _artifact_registry_rows(item)
+        if str(row.get("status") or "").lower() in {"", "ready", "valid"}
+    )
+    return {
+        "total_child_count": len(rows),
+        "completed_child_count": len(rows) - len(unfinished),
+        "artifact_ready_count": artifact_ready_count,
+        "missing_or_unfinished_run_ids": [value for value in unfinished if value][:20],
+        "recommended_next_action": "read_ready_refs_then_aggregate_or_continue_unfinished_children",
+    }
+
+
 # LLM: board_kernel_snapshot_payload exposes the new kernel read model to parent agents without reading artifacts.
 # 函数用途: 给 subagent_board 输出附加统一内核快照，父级后续按结构化状态桶和 refs 判断下一步。
 def board_kernel_snapshot_payload(agent: object, items) -> dict[str, object]:
@@ -172,6 +194,8 @@ def _kernel_row_payload(row: object) -> dict[str, object]:
         "current_tool": row.current_tool,
         "heartbeat_at": row.heartbeat_at,
         "last_progress_at": row.last_progress_at,
+        "running_seconds": int(float(getattr(row, "running_seconds", 0.0) or 0.0)),
+        "seconds_since_progress": int(float(getattr(row, "seconds_since_progress", 0.0) or 0.0)),
         "last_progress_summary": row.last_progress_summary,
         "child_ids": list(row.child_ids),
         "address": dict(row.address),
@@ -184,6 +208,13 @@ def _kernel_row_payload(row: object) -> dict[str, object]:
         "evidence_refs": list(row.evidence_refs),
         "blockers": list(row.blockers),
     }
+
+
+def _artifact_registry_rows(item: object) -> list[dict[str, object]]:
+    value = getattr(item, "artifact_registry_refs", None)
+    if not isinstance(value, list | tuple):
+        return []
+    return [dict(row) for row in value if isinstance(row, dict)]
 
 
 # LLM: board_status_filter normalizes model-friendly aliases before filtering board rows.

@@ -19,6 +19,7 @@ from ..contracts.gates import artifact_provenance_from_archive
 from ..contracts.staged_checkpoint_acceptance import staged_checkpoint_findings
 from ._runtime_params import ToolLoopExecuteParams
 from .artifact_locator import locate_artifact
+from .target_coverage_ledger import collect_target_coverage_records, target_coverage_status
 
 CLOSEOUT_DIR = ".agent_delivery"
 CLOSEOUT_REPORT = "closeout.json"
@@ -83,7 +84,7 @@ def _validate_contract_artifacts(request: DeliveryContractValidationRequest) -> 
         )
         for item in request.artifacts
     ]
-    return {
+    report = {
         "schema_version": "main_agent_delivery_closeout.v1",
         "ok": all(item["ok"] for item in results),
         "case_id": str(request.contract.get("case_id") or ""),
@@ -93,6 +94,16 @@ def _validate_contract_artifacts(request: DeliveryContractValidationRequest) -> 
         "workspace_root": str(request.workspace_root),
         "artifacts": results,
     }
+    coverage_contract = request.contract.get("target_coverage_contract")
+    if isinstance(coverage_contract, dict):
+        report["target_coverage_status"] = target_coverage_status(
+            coverage_contract,
+            coverage_records=collect_target_coverage_records([
+                *list(getattr(request.params, "archive_tool_calls", []) or []),
+                *results,
+            ]),
+        )
+    return report
 
 
 # LLM: _existing_report reuses the prior closeout snapshot so repeated failures can be detected generically.

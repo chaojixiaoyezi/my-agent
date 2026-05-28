@@ -30,7 +30,10 @@ def build_delivery_requirement_materializer_prompt(user_prompt: str) -> str:
         "请写入 delivery_quality_contract.metric_contracts。\n"
         "分析型字段请放入 artifacts[].llm_generated_fields，例如解释、理由、建议、结论、判断、摘要这类需要模型撰写的列；"
         "不要把它们映射到来源 API 的普通 description 字段。\n"
-        "可选字段包括 artifacts、delivery_quality_contract、fact_evidence_contract；只有外部系统显式给出时才保留 bootstrap_contract。\n"
+        "如果用户要求覆盖一组目标、时间段、名单、分片或来源范围，可以写 target_coverage_contract，里面只放目标清单"
+        "和覆盖口径；它是进度账本，不是执行模板。\n"
+        "可选字段包括 artifacts、delivery_quality_contract、fact_evidence_contract、target_coverage_contract；"
+        "只有外部系统显式给出时才保留 bootstrap_contract。\n"
         "用户需求：\n"
         f"{user_prompt}"
     )
@@ -50,7 +53,7 @@ def materialized_delivery_contract(
         "schema_version": SCHEMA_VERSION,
         "artifacts": artifacts,
     }
-    for key in ("delivery_quality_contract", "fact_evidence_contract", "bootstrap_contract"):
+    for key in ("delivery_quality_contract", "fact_evidence_contract", "target_coverage_contract", "bootstrap_contract"):
         if isinstance(value.get(key), dict):
             contract[key] = dict(value[key])
     _normalize_delivery_quality_contract(contract)

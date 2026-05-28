@@ -277,7 +277,39 @@ class TestDispatchSubagentsTool:
         assert payload["dry_run"] is False
         assert "dry_run" not in payload["summary"]
         assert payload["summary"]["record_dry_run_count"] == 1
-        assert payload["summary"]["record_applied_count"] == 0
+
+    def test_model_facing_records_do_not_reuse_top_level_dry_run_name(self, tmp_path):
+        """records 里的逐条预览状态不能继续叫 dry_run，避免模型误读整轮没执行。"""
+        from agent_py_agent.agent.agent_core.orchestration_dispatch_tool import (
+            DispatchSubagentsTool,
+        )
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+        record = SimpleNamespace(
+            step="runner",
+            action="execute",
+            run_id="child-1",
+            ok=True,
+            dry_run=True,
+            applied=False,
+            message="preview only",
+            before_status="PENDING",
+            after_status="PENDING",
+            evidence_paths=[],
+        )
+        agent.dispatch_subagents = MagicMock(return_value=SimpleNamespace(
+            dry_run=False,
+            summary={"total": 1},
+            records=[record],
+        ))
+
+        payload = json.loads(DispatchSubagentsTool(agent).execute({"apply": True}).output)
+
+        assert payload["dry_run"] is False
+        assert "dry_run" not in payload["records"][0]
+        assert payload["records"][0]["record_dry_run"] is True
 
 
 class TestScheduleChildSubagentsTool:

@@ -53,6 +53,10 @@
 
 状态面只返回当前布局路径。`workspace_refs.task_workspace` 指向任务级目录，`workspace_refs.agent_run_workspace` 指向具体代理运行目录；旧式 `data/subagents/<run_id>` work-order 路径只作为系统兼容恢复材料存在，不放进模型可见的 `workspace_refs`。这样父代理接管或汇总时会按 refs 读取真实产物，而不是自己拼旧目录。
 
+`subagent_board` 是树状态的轻量汇总视图。它会暴露 `running_seconds`、`seconds_since_progress`
+和 `aggregation_readiness`，让父代理知道谁还在跑、谁久未推进、汇总前还有哪些 run 没完成。
+这些字段和 `progress_layer` 一样只读，不创建新状态机，也不会把子任务卡进额外验收阶段。
+
 ## Closeout
 
 默认配置 `closeout_for_all_task_nodes: false`，表示只对主/root 交付做普通 closeout，子代理结果只更新状态、refs 和任务树。

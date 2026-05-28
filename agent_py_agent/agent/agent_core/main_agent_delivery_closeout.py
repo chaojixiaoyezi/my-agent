@@ -174,6 +174,7 @@ def _append_failed_contract_context(params: ToolLoopExecuteParams, report: dict[
                 "report_ref": report.get("report_ref", ""),
                 "failed_artifacts": [item for item in report.get("artifacts", []) if isinstance(item, dict) and not item.get("ok")],
                 "failed_gates": failed_gate_payloads(report),
+                "target_coverage_status": report.get("target_coverage_status", {}),
                 "contract_recovery": report.get("contract_recovery", {}),
                 "delivery_progress": report.get("delivery_progress", {}),
                 "repair_guidance": _repair_guidance(report),
@@ -209,6 +210,7 @@ def _closeout_text(report: dict[str, Any]) -> str:
         "case_id": report.get("case_id", ""),
         "report_ref": report.get("report_ref", ""),
         "artifacts": [_closeout_artifact_payload(item) for item in report["artifacts"]],
+        "target_coverage_status": report.get("target_coverage_status", {}),
     }
     return (
         "[MAIN_AGENT_DELIVERY_COMPLETE]\n"

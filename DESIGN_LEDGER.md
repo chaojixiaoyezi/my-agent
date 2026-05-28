@@ -2797,3 +2797,14 @@ def example(...):
 - PDF、XLSX、Word、PPT、视频、XML、未知格式等开放世界产物不再走固定 builder。模型可以用授权命令、脚本或库生成，再通过通用写入和 closeout/artifact acceptance 验收。
 - 这次也标记了之前走偏的方向：open write session、固定 workbook/pdf/json builder、builder-ready 自动推进，都容易把普通任务塞进单一路径。以后遇到产物质量问题，优先修 closeout 验收、工具错误回执、路径安全和通用返工，不再新增任务专项工具或前置硬门。
 - 验证链路：`python3 -m compileall -q agent_py_agent/agent agent_py_agent/tests` 通过；`python3 -m pytest -q agent_py_agent/tests --tb=short --maxfail=20` 全量通过；`python3 scripts/check_code_size.py --mode warn` 输出 `hard=0 high-risk=0 soft=0`。
+
+## 2026-05-28 Source refs, target coverage ledger, and subagent board observability
+
+状态：已落地，focused 验证通过
+
+摘要：
+- Prompt 构造器在工作区上下文里提醒模型：研究、汇总、对比、翻译、审计类任务要给关键结论和表格行保留 `source_ref`，搜索片段只是线索，最终依据优先来自官方页面、原始论文、仓库页面、接口返回或抓取归档。
+- `dispatch_subagents` 模型可见 payload 里，顶层 `dry_run` 仍是整次工具是否真实执行的唯一语义；逐条记录改成 `record_dry_run` / `record_applied`，避免和顶层字段撞名。
+- `subagent_board` 增加 `running_seconds`、`seconds_since_progress` 和 `aggregation_readiness`。这些字段只用于父级观察和汇总前核对，不会触发新阻断。
+- 入口物化层支持 `target_coverage_contract`，closeout 报告会附 `target_coverage_status`，列出目标清单中已覆盖和缺失项。它是通用进度账本，默认 `should_block=false`，不把普通研究任务改成硬模板。
+- 验证链路：`test_prompting_builder.py`、`test_orchestration_board_payload.py`、`TestDispatchSubagentsTool`、`test_delivery_requirement_materializer.py`、`test_target_coverage_ledger.py` 通过。

@@ -63,6 +63,9 @@ class SubAgentBoardItem:
     current_step: str = ""
     latest_summary: str = ""
     blocker_count: int = 0
+    # LLM: timing fields are observability only; they help parents judge staleness without dispatching.
+    running_seconds: float = 0.0
+    seconds_since_progress: float = 0.0
 
 
 # LLM: SubAgentBoard 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

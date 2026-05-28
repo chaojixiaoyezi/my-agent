@@ -11,6 +11,7 @@ from ..tools import BaseTool, ToolExecutionResult
 from .agent_tree_status import agent_tree_status_payload
 from .orchestration_board_payload import (
     board_actionable_run_ids,
+    board_aggregation_readiness,
     board_completion_status,
     board_kernel_snapshot_payload,
 )
@@ -45,6 +46,7 @@ class SubagentBoardTool(BaseTool):
         payload = {
             "summary": board.summary,
             "completion_status": board_completion_status(items),
+            "aggregation_readiness": board_aggregation_readiness(items),
             "kernel_snapshot": board_kernel_snapshot_payload(self.agent, items),
             "returned": len(items),
             "actionable_run_ids": board_actionable_run_ids(items),

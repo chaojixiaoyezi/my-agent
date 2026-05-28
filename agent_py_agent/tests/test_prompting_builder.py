@@ -167,6 +167,17 @@ class TestBuildBasic:
         assert "先用网页/HTTP 工具验证可访问" in result
         assert "不能靠项目名猜仓库地址" in result
 
+    def test_build_tells_model_to_keep_source_refs_for_research_outputs(self, tmp_path):
+        """研究/汇总类产物应保留来源链路，但不能把来源格式做成专项模板。"""
+        config = AgentConfig()
+        builder = PromptBuilder(config, tmp_path)
+
+        result = builder.build("搜集资料并汇总成表格", [])
+
+        assert "source_ref" in result
+        assert "搜索片段只能当线索" in result
+        assert "官方页面、原始论文、仓库页面、接口返回或抓取归档" in result
+
     def test_build_includes_refs_first_delegation_hint(self, tmp_path):
         """主代理派工时应优先传资料 refs，不要先把所有正文塞进 root 上下文。"""
         config = AgentConfig()

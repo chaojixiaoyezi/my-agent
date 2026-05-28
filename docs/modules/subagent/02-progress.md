@@ -65,6 +65,14 @@
 - 这不是新硬门。registry 只解决“谁是最新产物事实”的问题；缺产物、坏格式和内容质量
   仍由普通 closeout 或父级模型根据任务目标处理。
 
+## 2026-05-28 看板秒数和汇总准备度
+
+- `subagent_board` 行里新增 `running_seconds` 和 `seconds_since_progress`。它们只是观察字段：
+  一个表示子代理大概跑了多久，一个表示距离最近真实进展多久。
+- 父代理可以据此判断要不要查看、提醒、补派或接手，但系统不会因为秒数自动阻断任务。
+- 看板顶层新增 `aggregation_readiness`，列出子代理总数、已完成数、registry 中可读产物数量、
+  以及未完成 run id。它帮助父代理汇总前先读 refs 或继续推进缺口，不替代 closeout。
+
 ## 2026-05-28 旧辅助合同清理
 
 - 删除未被生产链路调用的旧 helper：`hierarchy_capability_contracts.py`、
