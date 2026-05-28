@@ -46,6 +46,7 @@ def bounded_background_context_payload(
     bundle: dict[str, Any],
     pending_wake_signals: list[dict[str, Any]],
     agent_tree: dict[str, Any],
+    recovery_snapshot: dict[str, Any] | None = None,
     budget: BackgroundContextBudget | None = None,
 ) -> dict[str, Any]:
     limits = budget or DEFAULT_BACKGROUND_CONTEXT_BUDGET
@@ -62,6 +63,7 @@ def bounded_background_context_payload(
         "pending_wake_signals": [
             _bounded_observation(item, limits) for item in _list(pending_wake_signals)
         ],
+        "recovery_snapshot": _bounded_value(recovery_snapshot or {}, limits),
         "agent_tree": _bounded_value(agent_tree, limits),
     }
 

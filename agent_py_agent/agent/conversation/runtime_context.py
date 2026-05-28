@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..agent_core.agent_tree_status import agent_tree_status_payload
+from ..artifacts.registry import latest_artifact_records
 from .context_budget import (
     background_context_budget_from_config,
     bounded_background_context_payload,
@@ -37,6 +38,7 @@ def context_markdown(*, agent: object, store: ConversationStore, thread: Convers
         ("Channel Bindings", bounded["channel_bindings"]),
         ("Recent Observations", bounded["observations"]),
         ("Pending Wake Signals", bounded["pending_wake_signals"]),
+        ("Recovery Snapshot", bounded["recovery_snapshot"]),
         ("Agent Tree Snapshot", bounded["agent_tree"]),
     ]
     lines = _context_header(request, thread)
@@ -56,6 +58,7 @@ def _bounded_context(agent: object, store: ConversationStore, thread_id: str) ->
             limit=_config_int(config, "background_pending_wake_prompt_limit"),
         ),
         agent_tree=agent_tree_status_payload(agent, {}),
+        recovery_snapshot=_recovery_snapshot(agent, store, thread_id),
         budget=background_context_budget_from_config(config),
     )
 
@@ -82,3 +85,35 @@ def _context_header(request, thread: ConversationThread) -> list[str]:
         f"thread_id: {thread.thread_id}",
         f"task_id: {request.task_id or ''}",
     ]
+
+
+# LLM: _recovery_snapshot is a non-blocking handoff summary for background takeover.
+# 函数用途: 对 claim、任务树和产物登记做轻量对账，只生成提示事实，不阻断后台运行。
+def _recovery_snapshot(agent: object, store: ConversationStore, thread_id: str) -> dict[str, Any]:
+    claim = store.load_background_run_claim(thread_id)
+    previous = claim.get("previous_claim") if isinstance(claim.get("previous_claim"), dict) else {}
+    tree = agent_tree_status_payload(agent, {})
+    records = latest_artifact_records(getattr(agent, "root", "."))
+    return {
+        "schema_version": "background_recovery_snapshot.v1",
+        "effect": "read_only",
+        "does_not_block": True,
+        "current_claim_status": str(claim.get("status") or ""),
+        "current_claim_id": str(claim.get("claim_id") or ""),
+        "current_claim_reason": str(claim.get("reason") or ""),
+        "previous_claim_status": str(previous.get("status") or ""),
+        "previous_claim_error": previous.get("last_error") if isinstance(previous.get("last_error"), dict) else {},
+        "takeover": claim.get("takeover") if isinstance(claim.get("takeover"), dict) else {},
+        "tree_status_buckets": tree.get("status_buckets") if isinstance(tree.get("status_buckets"), dict) else {},
+        "artifact_registry_count": len(records),
+        "artifact_registry_status_counts": _artifact_status_counts(records),
+        "takeover_advice": "接手前先核对 claim、任务树和产物登记；不要把模型文本里的完成声明当成事实。",
+    }
+
+
+def _artifact_status_counts(records: dict[str, object]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in records.values():
+        status = str(getattr(record, "status", "") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    return counts

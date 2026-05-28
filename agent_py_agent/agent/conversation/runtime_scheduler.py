@@ -6,6 +6,7 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING
 
+from ..agent_core.agent_tree_status import agent_tree_status_payload
 from .models import BackgroundMainAgentReport, ObservationEvent, ProgressPolicy, WakeSignal
 from .runtime_utils import (
     claim_heartbeat_interval_seconds as compute_claim_heartbeat_interval_seconds,
@@ -112,18 +113,38 @@ class BackgroundMainAgentScheduler:
         return report
 
     def _run_claimed(self, kwargs: dict) -> BackgroundMainAgentReport | None:
-        claim = self.store.claim_background_run({"thread_id": kwargs.get("thread_id", ""), "reason": kwargs.get("reason", ""), "lease_seconds": self.claim_ttl_seconds, "now": kwargs.get("now")})
+        claim = self.store.claim_background_run({
+            "thread_id": kwargs.get("thread_id", ""),
+            "task_id": kwargs.get("task_id", ""),
+            "reason": kwargs.get("reason", ""),
+            "lease_seconds": self.claim_ttl_seconds,
+            "now": kwargs.get("now"),
+        })
         if claim is None:
             return None
         return self._run_with_heartbeat(str(claim.get("claim_id") or ""), kwargs)
 
     def _run_with_heartbeat(self, claim_id: str, kwargs: dict) -> BackgroundMainAgentReport | None:
         heartbeat = self._start_heartbeat(claim_id, kwargs["thread_id"])
+        status = "finished"
+        error: BaseException | None = None
         try:
             return self.runtime.run_once(kwargs)
+        except BaseException as exc:
+            status = "failed"
+            error = exc
+            raise
         finally:
             heartbeat.stop()
-            self.store.finish_background_run({"thread_id": kwargs["thread_id"], "claim_id": claim_id, "now": now()})
+            self.store.finish_background_run({
+                "thread_id": kwargs["thread_id"],
+                "claim_id": claim_id,
+                "task_id": kwargs.get("task_id", ""),
+                "status": status,
+                "error": error,
+                "runtime_facts": self._runtime_facts(),
+                "now": now(),
+            })
 
     def _start_heartbeat(self, claim_id: str, thread_id: str) -> _BackgroundClaimHeartbeat:
         heartbeat = _BackgroundClaimHeartbeat({"store": self.store, "thread_id": thread_id, "claim_id": claim_id, "lease_seconds": self.claim_ttl_seconds, "interval_seconds": self.claim_heartbeat_interval_seconds})
@@ -143,6 +164,16 @@ class BackgroundMainAgentScheduler:
     # 函数用途: 读取 wake signal / observation 批量处理上限，避免 scheduler 写死读取条数。
     def _config_limit(self, key: str) -> int:
         return _agent_config_int(getattr(getattr(self.runtime, "agent", None), "config", None), key)
+
+    def _runtime_facts(self) -> dict[str, object]:
+        agent = getattr(self.runtime, "agent", None)
+        tree = agent_tree_status_payload(agent, {}) if agent is not None else {}
+        return {
+            "current_tool": str(getattr(agent, "_current_tool", "") or ""),
+            "last_progress_at": float(getattr(agent, "_last_progress_at", 0.0) or 0.0),
+            "last_progress_summary": str(getattr(agent, "_last_progress_summary", "") or ""),
+            "tree_status_buckets": tree.get("status_buckets") if isinstance(tree.get("status_buckets"), dict) else {},
+        }
 
 
 # LLM: _agent_config_int normalizes background scheduler integer config.

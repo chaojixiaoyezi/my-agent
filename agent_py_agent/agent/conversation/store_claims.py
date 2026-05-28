@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..gateway_parts.io import update_json_file_atomic
+from ..gateway_parts.io import read_json_file, update_json_file_atomic
 from .models import new_id
 from .store_common import float_value
 from .store_common import now as current_time
@@ -18,7 +18,13 @@ class ConversationClaimStore(ConversationProgressStore):
         thread = self._require_thread(thread_id)
         current = current_time(request.get("now"))
         lease = _claim_lease_seconds(request.get("lease_seconds"))
-        claim = _new_claim(thread.thread_id, str(request.get("reason") or ""), current, lease)
+        claim = _new_claim(
+            thread.thread_id,
+            str(request.get("reason") or ""),
+            current,
+            lease,
+            task_id=str(request.get("task_id") or ""),
+        )
         claimed = False
 
         def updater(data: dict[str, Any]) -> dict[str, Any]:
@@ -27,10 +33,14 @@ class ConversationClaimStore(ConversationProgressStore):
                 claimed = False
                 return data
             claimed = True
-            return claim
+            return {**claim, "previous_claim": _previous_claim_summary(data, current)}
 
         updated = update_json_file_atomic(self._background_claim_path(thread.thread_id), updater)
         return updated if claimed else None
+
+    def load_background_run_claim(self, thread_id: str) -> dict[str, Any]:
+        self._require_thread(str(thread_id or ""))
+        return read_json_file(self._background_claim_path(str(thread_id or "")))
 
     def renew_background_run_claim(self, request: dict) -> dict[str, Any] | None:
         thread_id = str(request.get("thread_id") or "")
@@ -56,6 +66,10 @@ class ConversationClaimStore(ConversationProgressStore):
         claim_id = str(request.get("claim_id") or "")
         self._require_thread(thread_id)
         current = current_time(request.get("now"))
+        status = _finish_status(request.get("status"))
+        error = _error_payload(request.get("error"))
+        task_id = str(request.get("task_id") or "")
+        runtime_facts = request.get("runtime_facts") if isinstance(request.get("runtime_facts"), dict) else {}
         finished = False
 
         def updater(data: dict[str, Any]) -> dict[str, Any]:
@@ -64,14 +78,40 @@ class ConversationClaimStore(ConversationProgressStore):
                 finished = False
                 return data
             finished = True
-            return {**data, "status": "finished", "finished_at": current, "heartbeat_at": current}
+            payload = {
+                **data,
+                "status": status,
+                "phase": status,
+                "finished_at": current,
+                "heartbeat_at": current,
+                "takeover": _takeover_payload(status),
+            }
+            if runtime_facts:
+                payload["last_runtime_facts"] = runtime_facts
+            if task_id:
+                payload["task_id"] = task_id
+            if error:
+                payload["last_error"] = error
+            return payload
 
         updated = update_json_file_atomic(self._background_claim_path(thread_id), updater)
         return updated if finished else None
 
 
-def _new_claim(thread_id: str, reason: str, current: float, lease: int) -> dict[str, Any]:
-    return {"schema_version": "background_run_claim.v1", "claim_id": new_id("bgclaim"), "thread_id": thread_id, "reason": str(reason or ""), "status": "running", "started_at": current, "heartbeat_at": current, "expires_at": current + lease}
+def _new_claim(thread_id: str, reason: str, current: float, lease: int, *, task_id: str = "") -> dict[str, Any]:
+    return {
+        "schema_version": "background_run_claim.v1",
+        "claim_id": new_id("bgclaim"),
+        "thread_id": thread_id,
+        "task_id": task_id,
+        "reason": str(reason or ""),
+        "status": "running",
+        "phase": "claimed",
+        "started_at": current,
+        "heartbeat_at": current,
+        "expires_at": current + lease,
+        "takeover": {"allowed": False, "reason": "claim_running"},
+    }
 
 
 # LLM: _claim_lease_seconds keeps background run claim TTL sourced from AgentConfig.
@@ -87,3 +127,46 @@ def _claim_lease_seconds(value: object) -> int:
         from ..settings.config import AgentConfig
 
         return max(1, int(AgentConfig().background_claim_ttl_seconds))
+
+
+def _finish_status(value: object) -> str:
+    status = str(value or "finished").strip().lower()
+    return status if status in {"finished", "failed", "cancelled"} else "finished"
+
+
+def _error_payload(value: object) -> dict[str, Any]:
+    if isinstance(value, BaseException):
+        return {"type": type(value).__name__, "message": str(value)}
+    if isinstance(value, dict):
+        return {
+            "type": str(value.get("type") or value.get("error_type") or ""),
+            "message": str(value.get("message") or value.get("error") or ""),
+        }
+    text = str(value or "").strip()
+    return {"type": "", "message": text} if text else {}
+
+
+def _takeover_payload(status: str) -> dict[str, Any]:
+    if status == "failed":
+        return {"allowed": True, "reason": "runtime_failed"}
+    if status == "cancelled":
+        return {"allowed": True, "reason": "runtime_cancelled"}
+    return {"allowed": False, "reason": "run_finished"}
+
+
+def _previous_claim_summary(data: dict[str, Any], current: float) -> dict[str, Any]:
+    if not data:
+        return {}
+    status = str(data.get("status") or "")
+    expires_at = float_value(data.get("expires_at"))
+    return {
+        "claim_id": str(data.get("claim_id") or ""),
+        "status": status,
+        "reason": str(data.get("reason") or ""),
+        "task_id": str(data.get("task_id") or ""),
+        "heartbeat_at": float_value(data.get("heartbeat_at")),
+        "expires_at": expires_at,
+        "expired": bool(expires_at and expires_at <= current),
+        "last_error": _error_payload(data.get("last_error")),
+        "takeover": data.get("takeover") if isinstance(data.get("takeover"), dict) else _takeover_payload(status),
+    }

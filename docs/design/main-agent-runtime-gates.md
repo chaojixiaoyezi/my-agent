@@ -778,6 +778,8 @@ ProgressPolicy      = 定时汇报策略
 - `BackgroundMainAgentRuntime` 负责加载线程消息、任务绑定、代理树快照，再调用同一个 `SimpleAgent.run()`。
 - 定时汇报走 `ProgressPolicy`，到期后唤醒后台主代理，回复通过 channel route 投递。
 - `BackgroundMainAgentScheduler` 对同一个 thread 使用 per-thread claim，防止同一轮或跨 tick 重复烧后台主代理。claim TTL 表示“多久没有 heartbeat 就认为运行者死了”，不是任务最长运行时间；正常运行中由 heartbeat 续约，结束时先停 heartbeat 再 finish claim。
+- background claim 是“执行权账本”，不是验收门。运行失败时 claim 会写成 `failed`，并保留 `last_error`、`task_id`、最近工具/进展和任务树状态桶；下一次同 thread 唤醒会把上一任 claim 摘要带进 `Recovery Snapshot`，让接手主代理先对账，而不是从自然语言里猜“上次做到哪”。
+- `Recovery Snapshot` 只读 claim、agent tree 和 artifact registry，给出恢复提示，不阻断任务、不替代 closeout、不把普通质量问题变成硬门。真正的事实优先级仍是 artifact registry、agent tree、claim ledger、run/tool trace；模型文本里的路径和完成声明只能当线索。
 - 默认 heartbeat 间隔按 TTL 的安全比例计算。生产默认 TTL 900 秒时约 300 秒续约一次；小 TTL 测试场景会保持间隔小于 TTL，避免第一次续约前 claim 已经过期。
 - fake Feishu / fake WeChat 只用于离线验证跨渠道恢复；真实适配器以后只需要接入同一套 `ChannelBinding` 和发送接口。
 - 后台主代理 prompt 仍是普通任务上下文 + 结构化事实，不要求用户写工程字段。
@@ -797,6 +799,7 @@ ProgressPolicy      = 定时汇报策略
 - `ProgressPolicy` 到期后唤醒后台主代理，并投递 internal/fake channel 消息。
 - 进程重启后重新创建 `SimpleAgent + ConversationStore + Scheduler`，仍能按旧 policy 继续汇报。
 - 长后台运行期间会续租 background claim；已有未过期 claim 时，同 thread 的下一次 tick 不会重复唤醒。
+- 后台 runtime 抛异常时 claim 不再伪装成 `finished`，而是记录为 `failed` 并携带可接手事实；下一次唤醒 prompt 会包含非阻断的 `Recovery Snapshot`。
 - 真实本地子代理协作链路：主代理创建两个子代理，一个通过自己的 `run_id` 打开 collaboration case 并发请求，另一个提交 refs-first 证据并更新请求状态；重启后后台主代理被 case escalation 唤醒，先读 `case_status`，再读 `inspect_agent_tree`，最后把回复投回原 thread。
 
 本地 CLI 入口：

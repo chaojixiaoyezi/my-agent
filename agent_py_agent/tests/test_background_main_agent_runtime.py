@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 
 from agent_py_agent.agent.backend import ModelResponse
@@ -118,6 +119,13 @@ class _SlowBackend:
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         time.sleep(self.sleep_seconds)
         return ModelResponse(text="后台主代理慢速检查完成。", backend=self.name)
+
+
+class _FailingBackend:
+    name = "failing"
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        raise RuntimeError("backend boom")
 
 
 def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_path) -> None:
@@ -239,3 +247,62 @@ def test_scheduler_default_heartbeat_interval_stays_below_small_ttl(tmp_path) ->
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store, 'claim_ttl_seconds': 9})
 
     assert 0 < scheduler.claim_heartbeat_interval_seconds < scheduler.claim_ttl_seconds
+
+
+def test_scheduler_marks_background_claim_failed_when_runtime_raises(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    agent.backend = _FailingBackend()
+    agent._current_tool = "web_fetch"
+    agent._last_progress_summary = "正在核对来源"
+    store = ConversationStore(tmp_path / "conversations")
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store, 'claim_ttl_seconds': 30})
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "失败时留下可接手事实", 'now': 2.0})
+    store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 1, 'now': 3.0})
+
+    try:
+        scheduler.tick(now=4.0)
+    except RuntimeError:
+        pass
+
+    claim = json.loads((store.background_claims_dir / f"{thread.thread_id}.json").read_text(encoding="utf-8"))
+    assert claim["status"] == "failed"
+    assert claim["task_id"] == "task-1"
+    assert claim["last_error"]["type"] == "RuntimeError"
+    assert "backend boom" in claim["last_error"]["message"]
+    assert claim["takeover"]["allowed"] is True
+    assert claim["takeover"]["reason"] == "runtime_failed"
+    assert claim["phase"] == "failed"
+    assert claim["last_runtime_facts"]["current_tool"] == "web_fetch"
+    assert claim["last_runtime_facts"]["last_progress_summary"] == "正在核对来源"
+    assert "tree_status_buckets" in claim["last_runtime_facts"]
+
+
+def test_background_prompt_includes_recovery_snapshot_for_previous_failed_claim(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = ConversationStore(tmp_path / "conversations")
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeChannelHub())
+    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "接手时先对账", 'now': 2.0})
+    failed = store.claim_background_run({'thread_id': thread.thread_id, 'reason': "previous_run", 'lease_seconds': 10, 'now': 3.0})
+    assert failed is not None
+    store.finish_background_run({
+        'thread_id': thread.thread_id,
+        'claim_id': failed["claim_id"],
+        'status': "failed",
+        'task_id': "task-1",
+        'error': {"type": "RuntimeError", "message": "previous run crashed"},
+        'now': 4.0,
+    })
+    store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 1, 'now': 5.0})
+
+    scheduler.tick(now=7.0)
+    prompt = backend.prompts[0]
+
+    assert "Recovery Snapshot" in prompt
+    assert '"previous_claim_status": "failed"' in prompt
+    assert '"takeover_advice": "接手前先核对 claim、任务树和产物登记；不要把模型文本里的完成声明当成事实。"' in prompt
