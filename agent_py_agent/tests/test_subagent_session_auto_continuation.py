@@ -23,6 +23,7 @@ class MultiCompactSubagentBackend(BaseBackend):
     def __init__(self):
         self.calls = 0
         self.prompts: list[str] = []
+        self.context_window_tokens = 20
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
@@ -41,6 +42,7 @@ class ToolThenCompactBackend(BaseBackend):
 
     def __init__(self):
         self.calls = 0
+        self.context_window_tokens = 20
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
@@ -411,15 +413,13 @@ def _progress_task(tmp_path: Path) -> SubAgentTask:
 
 
 # LLM: _agent_with_local_compact creates a tiny context window so fake long responses trigger compact.
-# 函数用途: 配置测试 agent：开启子代理、压低 compact 窗口、允许四次本地续跑。
+# 函数用途: 配置测试 agent：开启子代理、压低 compact 窗口；本地 compact 直到子代理提交结构化结果。
 def _agent_with_local_compact(tmp_path: Path) -> SimpleAgent:
     cfg = AgentConfig(
         enable_tools=True,
         enable_subagents=True,
         memory_path="memory.jsonl",
         subagent_workspace="subs",
-        memory_compact_context_window_tokens=20,
-        memory_compact_auto_continue_max_depth=4,
         max_tool_rounds=0,
     )
     return SimpleAgent(cfg, tmp_path)

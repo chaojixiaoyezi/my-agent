@@ -10,6 +10,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent_py_agent.agent.agent_core.runner_candidate_policy import RunnerCandidatePolicy
+
 
 class TestIsDispatchRunnerCandidate:
     """测试 _is_dispatch_runner_candidate() 函数。"""
@@ -28,7 +30,7 @@ class TestIsDispatchRunnerCandidate:
         mock_task.capability_requests = []
         mock_task.capability_gaps = []
 
-        assert _is_dispatch_runner_candidate(mock_task, runner_max_attempts=2) is False
+        assert _is_dispatch_runner_candidate(mock_task, policy=RunnerCandidatePolicy(runner_max_attempts=2)) is False
 
     def test_done_status_not_candidate(self):
         """已完成任务不是候选。"""
@@ -111,7 +113,7 @@ class TestIsDispatchRunnerCandidate:
         mock_task.capability_requests = []
         mock_task.capability_gaps = []
 
-        assert _is_dispatch_runner_candidate(mock_task, runner_max_attempts=2) is True
+        assert _is_dispatch_runner_candidate(mock_task, policy=RunnerCandidatePolicy(runner_max_attempts=2)) is True
 
     def test_non_retryable_failure_not_candidate(self):
         """不可重试失败类型的任务不是候选。"""
@@ -128,7 +130,7 @@ class TestIsDispatchRunnerCandidate:
         mock_task.capability_grants = []
 
         # capability_request 在 capability_grants 为空时不可重试
-        assert _is_dispatch_runner_candidate(mock_task, runner_max_attempts=2) is False
+        assert _is_dispatch_runner_candidate(mock_task, policy=RunnerCandidatePolicy(runner_max_attempts=2)) is False
 
     # LLM: Provider timeouts are transient model-service failures and must enter bounded runner retry.
     # 函数用途: 确认真实模型请求超时后的 BLOCKED runner 会被下一轮 dispatch 选中重试，而不是只做 classify_blocker。
@@ -146,7 +148,7 @@ class TestIsDispatchRunnerCandidate:
             runner_attempts=1,
         )
 
-        assert _is_dispatch_runner_candidate(task, runner_max_attempts=2) is True
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=2)) is True
 
 
 class TestDispatchRunnerCandidates:

@@ -19,7 +19,7 @@
 - `memory-compact --dry-run` 第一版已接入，只读扫描 raw/hook、权威 snapshot 和 token ledger。
 - `memory-compact --apply` 第二片已接入为非破坏性 apply：生成 compact context、metadata、apply bundle、restore refs、ledger、self-check 和失败阻断报告，不删除、不重写、不裁剪原始事实源。
 - runtime 工具输出外置第一片已接入：大工具输出会写入 `memory_archive/artifacts/tool_outputs/`，compact 相关记录只读 preview/hash/path/size。
-- live raw archive 已接入工具循环：工具执行中也会往既有 `memory/raw/YYYY-MM-DD.jsonl` 写 `assistant_tool_round`、`tool_call` 和周期 `run_checkpoint`，避免长任务未收尾时完全没有黑匣子线索。
+- live raw archive 已接入工具循环：工具执行中也会往既有 `memory/raw/YYYY-MM-DD.jsonl` 写 `assistant_tool_round` 和 `tool_call`，避免长任务未收尾时完全没有黑匣子线索。运行中进度白板统一写入 `runtime_fact`，不再单独写 `run_checkpoint`。
 - `local-rebuild` 已能从 memory/gateway/subagent 文件事实源重建 LocalStore。
 
 ## 核心差距
@@ -41,7 +41,7 @@
 3. task/gateway/subagent 文件事实源优先于 archive/local 摘要。
 4. 大工具输出不能直接塞进模型上下文，应先 artifact 化。
 5. tool call 和 tool result 必须成对保留或成对摘要，不能切断。
-6. live raw archive 是黑匣子和续接提示，不是新账本；compact 可用其中的 `assistant_tool_round` / `run_checkpoint` 生成下一步提示，但不能从普通助手文本里猜验收、约束或测试状态。
+6. live raw archive 是黑匣子和续接提示，不是新账本；compact 可用其中的 `assistant_tool_round` 生成下一步提示，但不能从普通助手文本里猜验收、约束或测试状态。运行中明确状态以 `runtime_fact` 为准。
 7. compact 失败、空摘要、非法摘要、自检失败都必须 abort 或 retry，不能继续丢中间上下文。
 8. 用户明确 `--no-save` 时不能偷偷写 raw archive。
 9. 任何删除、清理、重写历史的行为都必须先有 dry-run 和备份策略。
@@ -65,17 +65,16 @@ compact 后的模型上下文应该由这些层组成：
 
 ## 触发策略
 
-第一版建议使用保守阈值：
+当前触发策略只保留一个用户可理解配置：`memory_compact_auto_trigger_percent`。
 
-| 使用率 | 动作 | 说明 |
-| --- | --- | --- |
-| `< 50%` | 正常运行 | 只记录 token ledger |
-| `>= 50%` | checkpoint | 写轻量任务状态和 token 风险提示 |
-| `>= 70%` | compact | 执行正式 compact 流程 |
-| `>= 85%` | hard guard | 禁止继续内联大工具输出，强制 artifact 化 |
-| `>= 95%` | stop | 停止本轮继续膨胀，必须 compact 或人工清理 |
+| 配置值 | 行为 |
+| --- | --- |
+| 未填写 / 无效值 | 按默认 `90` 处理 |
+| `0` / 大于 `100` | 按 `100` 处理，接近模型窗口上限时自动 compact |
+| 小于 `50` 的正数 | 按 `50` 处理，避免过早频繁 compact |
+| `50-100` | 按用户填写的百分比自动 compact |
 
-阈值都必须是配置项，默认值走安全保守策略。状态行、`memory-doctor` 和未来 `/context` 都要显示 estimate，而不是假装精确 token。
+系统不再暴露 50/70/85/95 多档提示。状态行、`memory-doctor` 和未来 `/context` 可以显示 estimate，但不能假装精确 token。
 
 ## 自动化策略
 
@@ -138,10 +137,13 @@ Action Guard 之后还必须生成 Continue Packet。Continue Packet 固定继�
 用户最少动手的理想路径：
 
 ```text
-50%: 系统自动 checkpoint，不打扰用户，只在状态行提示。
-70%: 系统建议 compact；半自动阶段需用户确认，自动阶段也必须先通过 work state consistency check 和 continue packet。
-85%: 系统自动 artifact 化大输出，并提示上下文高风险。
-95%: 系统停止继续膨胀，要求 compact/retry/人工恢复三选一。
+达到 memory_compact_auto_trigger_percent:
+  -> 自动 compact
+  -> 生成 apply/resume/continue packet
+  -> 通过 work state consistency check 后受控续跑
+
+provider 报 context overflow:
+  -> 不看百分比，立即走同一套 compact 兜底
 ```
 
 这不是“永远不让用户动手”。正确目标是：低风险自动，高风险明确停下，所有恢复材料已经准备好。
@@ -153,8 +155,7 @@ Action Guard 之后还必须生成 Continue Packet。Continue Packet 固定继�
   -> 估算当前上下文和工具输出 token
   -> 运行中把助手工具轮、工具结果和周期 checkpoint 增量写入 raw archive
   -> 大工具输出先 artifact 化
-  -> 50% 以上写 checkpoint
-  -> 70% 以上进入 compact
+  -> 达到 memory_compact_auto_trigger_percent 后进入 compact
       -> 写 pre-compact snapshot
       -> 保护 head 规则和最初目标
       -> 保护最近 tail 对话和最新工具结果摘要
@@ -679,10 +680,10 @@ my-agent memory-resume --from-compact <apply_id> --context-only
 
 当前实现说明：
 
-- 新增 `compact_suggest.py`，根据累计 token、上下文窗口和 dry-run plan 生成 `compact_suggestion`。
+- 新增 `compact_suggest.py`，根据当前活跃上下文 token、上下文窗口和 dry-run plan 生成 `compact_suggestion`。
 - `run` 结果新增 `memory_compact_suggested/status/ratio/message/commands` 字段；CLI 只在达到建议阈值时打印提示。
 - 提示会给出 `memory-compact --dry-run`、`memory-compact --apply` 和 `memory-resume --from-compact <apply_id> --context-only` 命令，但 `automatic_action=none`。
-- 当前默认上下文窗口来自 `memory_compact_context_window_tokens`；为 `0` 或未设置时用 `max_tokens * 16` 且不低于 8192 的保守估计，后续接真实模型 context window 时只替换这一层。
+- 当前 compact 阈值窗口优先来自模型后端真实元数据。拿不到窗口时不再让用户配置，也不按 `max_tokens` 猜，而是按 128K 通用窗口兜底；provider 报 context overflow 时仍会触发同一套 compact/resume 兜底。
 - `owner_type/owner_id` 会继续透传给 compact resume；子代理 owner 当前只解析 refs，不触碰 subagent runner，也不自动做子代理会话压缩。
 
 ### Step 4：自动 compact/resume
@@ -711,10 +712,10 @@ my-agent memory-resume --from-compact <apply_id> --context-only
 - 如果 work state 缺 acceptance、constraints、latest_tests 等字段，自动模式会返回 `blocked_missing_work_state_fields`，CLI 退出码为 2。
 - 如果 work state 字段齐全、refs 存在、self-check 通过且 `resume_mode=auto`，action guard 会返回 `allow_automated_continue`、`allowed_to_continue=true` 和 `allowed_next_action=continue_after_guard`。
 - action guard 和 auto cycle 都显式写 `automatic_tool_execution=none`：这一步只给出 go/no-go 机器判断，本身不运行工具或修改代码。
-- 新增 `compact_auto.py`，提供 `run_memory_compact_auto_cycle()`：默认 `allow_apply=false` 时只返回 compact 建议和 `needs_user_confirmation`，不会写 apply 产物。
+- 新增 `compact_auto.py`，提供 `run_memory_compact_auto_cycle()`：配置 `allow_apply=false` 时只返回 compact 建议和 `needs_user_confirmation`，不会写 apply 产物；运行默认配置会允许非破坏性 apply。
 - 显式 `allow_apply=true` 时，auto cycle 执行非破坏性 apply 和 `resume_mode=auto` 的 action guard 检查；如果字段不完整会停在 `blocked_after_action_guard`。
-- `SimpleAgent.run()` 收尾已经接入 auto cycle 的默认 plan-only 分支；达到 compact 阈值时，CLI 会显示 `compact_suggestion` 和 `compact_auto`。当配置 `memory_compact_auto_allow_apply=true` 且 guard 放行时，主 agent 会把 `compact_continue_packet` 注入下一轮 prompt 并受控续跑。
-- 自动续跑次数由 `memory_compact_auto_continue_max_depth` 控制；默认 `1` 保守续跑一次，长任务或 E2E 可调高。每一轮都必须重新通过 work-state/self-check/refs/action guard，不会因为上一轮通过就无限继续。
+- `SimpleAgent.run()` 收尾已经接入 auto cycle 的默认 auto-apply 分支；达到 compact 阈值时，CLI 会显示 `compact_suggestion` 和 `compact_auto`。当配置 `memory_compact_auto_allow_apply=true` 且 guard 放行时，主 agent 会把 `compact_continue_packet` 注入下一轮 prompt 并受控续跑。
+- 自动续跑不再由次数参数截断；每一轮都必须重新通过 work-state/self-check/refs/action guard，能恢复就继续同一任务，恢复包不完整或保存边界不允许时才停下并报告。
 - 自动 compact 在没有显式 request id 的 CLI run 中，会使用当前真实 per-run request id 写入 scope；后续打开 shared raw/hook JSONL 时会再次按 `session_id/request_id/run_id/task_id` 过滤，避免旧任务事实污染新 compact。
 - `# Compact Auto Continuation` 注入里的显式 `Acceptance`、`Constraints`、`Latest Tests` 会被 runtime fact source 读取；这样第二轮、第三轮 compact 仍能继承已确认工作状态，而不是从恢复提示里丢字段。
 - `compact_subagent_owner.py` 已接入 `memory-resume --from-compact`：指定 `subagent_run` / `subagent_session` owner 后，会返回 `linked_run_workspace`、`legacy_only` 或 `owner_refs_not_found` 状态，以及 task-local refs；它会使用配置里的 `subagent_workspace`，并把 owner id 当作字面路径段处理。

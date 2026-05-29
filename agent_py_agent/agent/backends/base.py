@@ -13,11 +13,16 @@ from __future__ import annotations
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream_iter
-from .stream_parsers import anthropic_stream_contents, openai_stream_contents
+from .usage_metadata import (
+    collect_anthropic_stream,
+    collect_openai_stream,
+    openai_stream_payload,
+    usage_dict,
+)
 
 
 # LLM: ModelResponse 属于模型后端请求的类边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
@@ -29,6 +34,8 @@ class ModelResponse:
     backend: str
     runtime_status: str = "ok"
     runtime_reason: str = ""
+    runtime_source: str = ""
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
 # LLM: BackendOptions 属于模型后端请求的类边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
@@ -179,7 +186,7 @@ class OpenAICompatibleBackend(HttpBackend):
             text = obj["choices"][0]["message"]["content"]
         except Exception as exc:
             raise RuntimeError(f"无法解析 OpenAI-compatible 响应: {obj}") from exc
-        return ModelResponse(text=text, backend=self.name)
+        return ModelResponse(text=text, backend=self.name, usage=usage_dict(obj.get("usage")))
 
     # LLM: _generate_stream 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
     # 函数用途: 处理流式生成响应的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
@@ -190,13 +197,12 @@ class OpenAICompatibleBackend(HttpBackend):
         on_chunk: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """流式解析 OpenAI SSE：逐行拼接 delta.content。"""
-        parts: list[str] = []
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
-        for content in openai_stream_contents(lines("/chat/completions", payload, headers)):
-            parts.append(content)
-            if on_chunk is not None:
-                on_chunk(content)
-        return ModelResponse(text="".join(parts), backend=self.name)
+        text, usage = collect_openai_stream(
+            lines("/chat/completions", openai_stream_payload(payload), headers),
+            on_chunk=on_chunk,
+        )
+        return ModelResponse(text=text, backend=self.name, usage=usage)
 
 
 # LLM: AnthropicCompatibleBackend 属于模型后端请求的类边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
@@ -246,7 +252,7 @@ class AnthropicCompatibleBackend(HttpBackend):
                 break
         if not text:
             raise RuntimeError(f"Anthropic-compatible 响应没有文本内容: {obj}")
-        return ModelResponse(text=text, backend=self.name)
+        return ModelResponse(text=text, backend=self.name, usage=usage_dict(obj.get("usage")))
 
     # LLM: _generate_stream 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
     # 函数用途: 处理流式生成响应的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
@@ -260,16 +266,16 @@ class AnthropicCompatibleBackend(HttpBackend):
         # LLM: Anthropic SSE 用事件行区分类型，数据行携带 JSON 片段。
         # request_stream 已过滤 event 行，需从 data 行的 type 字段恢复事件类型。
         for attempt in range(2):
-            text = self._stream_text_once(payload, headers, on_chunk)
+            text, usage = self._stream_text_once(payload, headers, on_chunk)
             if text or attempt > 0:
                 break
         if not text:
-            text = self._fallback_non_stream_text(payload, headers)
+            text, usage = self._fallback_non_stream_text(payload, headers)
             if text and on_chunk is not None:
                 on_chunk(text)
         if not text:
             raise RuntimeError("Anthropic-compatible 流式响应没有文本内容")
-        return ModelResponse(text=text, backend=self.name)
+        return ModelResponse(text=text, backend=self.name, usage=usage)
 
     # LLM: _stream_text_once isolates one Anthropic SSE attempt so retry logic stays flat.
     # 函数用途: 执行一次流式请求并拼接文本；有 on_chunk 时同步把片段推给调用方。
@@ -278,25 +284,20 @@ class AnthropicCompatibleBackend(HttpBackend):
         payload: dict[str, Any],
         headers: dict[str, str],
         on_chunk: Callable[[str], None] | None,
-    ) -> str:
+    ) -> tuple[str, dict[str, Any]]:
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
-        parts: list[str] = []
-        for chunk in anthropic_stream_contents(lines("/v1/messages", payload, headers)):
-            parts.append(chunk)
-            if on_chunk is not None:
-                on_chunk(chunk)
-        return "".join(parts)
+        return collect_anthropic_stream(lines("/v1/messages", payload, headers), on_chunk=on_chunk)
 
     # LLM: _fallback_non_stream_text mirrors 会话运行时 provider resilience at the backend boundary.
     # 函数用途: 当 Anthropic-compatible 流式响应没有可见文本时，改走一次非流式完整响应；去掉 stream 字段避免污染兜底请求。
-    def _fallback_non_stream_text(self, payload: dict[str, Any], headers: dict[str, str]) -> str:
+    def _fallback_non_stream_text(self, payload: dict[str, Any], headers: dict[str, str]) -> tuple[str, dict[str, Any]]:
         fallback_payload = dict(payload)
         fallback_payload.pop("stream", None)
         try:
             obj = self.request_json("/v1/messages", fallback_payload, headers)
-            return _anthropic_text_from_response(obj)
+            return _anthropic_text_from_response(obj), usage_dict(obj.get("usage"))
         except Exception:
-            return ""
+            return "", {}
 
 
 # LLM: _anthropic_text_from_response extracts only assistant-visible text from messages payloads.

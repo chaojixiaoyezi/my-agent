@@ -27,18 +27,84 @@ from agent_py_agent.tests.test_memory_compact import (
 )
 
 
-def test_memory_compact_auto_cycle_defaults_to_plan_only(tmp_path: Path) -> None:
+def test_memory_compact_auto_cycle_respects_single_trigger_percent(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     _write_compact_fixture(root)
 
-    result = run_memory_compact_auto_cycle(root, _auto_cycle_options())
+    result = run_memory_compact_auto_cycle(
+        root,
+        _auto_cycle_options(current_tokens=79, max_context_tokens=100, trigger_percent=80),
+    )
 
     _assert_schema_v2(result, "compact_auto_cycle")
     assert result["ok"] is True
-    assert result["status"] == "needs_user_confirmation"
+    assert result["status"] == "skipped_below_threshold"
+    assert result["suggestion"]["status"] == "ok"
+    assert result["suggestion"]["token_budget"]["auto_trigger_percent"] == 80
+    assert result["suggestion"]["should_prompt"] is False
     assert result["allow_apply"] is False
     assert result["automatic_tool_execution"] == "none"
+    assert result["next_action"] == "continue_without_compact"
+    assert result["apply_result"] == {}
+    assert result["resume_result"] == {}
+    assert not (root / "memory_archive" / "compact_applies").exists()
+
+
+def test_memory_compact_auto_cycle_default_trigger_is_90_percent(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    _write_compact_fixture(root)
+
+    below = run_memory_compact_auto_cycle(root, _auto_cycle_options(current_tokens=89, max_context_tokens=100))
+    reached = run_memory_compact_auto_cycle(root, _auto_cycle_options(current_tokens=90, max_context_tokens=100))
+
+    assert below["suggestion"]["status"] == "ok"
+    assert below["suggestion"]["should_prompt"] is False
+    assert below["suggestion"]["token_budget"]["auto_trigger_percent"] == 90
+    assert reached["suggestion"]["status"] == "ready_to_compact"
+    assert reached["suggestion"]["should_prompt"] is True
+
+
+def test_memory_compact_auto_cycle_reaches_single_trigger_percent(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    _write_compact_fixture(root)
+
+    result = run_memory_compact_auto_cycle(
+        root,
+        _auto_cycle_options(current_tokens=80, max_context_tokens=100, trigger_percent=80),
+    )
+
+    assert result["status"] == "needs_user_confirmation"
+    assert result["suggestion"]["status"] == "ready_to_compact"
+    assert result["suggestion"]["should_prompt"] is True
+    assert result["suggestion"]["token_budget"]["auto_trigger_percent"] == 80
     assert result["next_action"] == "ask_user_before_apply"
+
+
+def test_memory_compact_auto_cycle_forced_fallback_uses_plan_only(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    _write_compact_fixture(root)
+
+    result = run_memory_compact_auto_cycle(
+        root,
+        _auto_cycle_options(
+            current_tokens=0,
+            max_context_tokens=0,
+            force_trigger=True,
+            trigger_reason="provider_context_overflow",
+            trigger_source="runtime_status",
+        ),
+    )
+
+    _assert_schema_v2(result, "compact_auto_cycle")
+    assert result["status"] == "needs_user_confirmation"
+    assert result["trigger"] == {
+        "reason": "provider_context_overflow",
+        "source": "runtime_status",
+        "forced": True,
+    }
+    assert result["suggestion"]["status"] == "forced_compact"
+    assert result["suggestion"]["should_prompt"] is True
+    assert result["suggestion"]["trigger"] == result["trigger"]
     assert result["apply_result"] == {}
     assert result["resume_result"] == {}
     assert not (root / "memory_archive" / "compact_applies").exists()
@@ -48,7 +114,7 @@ def test_memory_compact_auto_cycle_apply_stops_at_action_guard(tmp_path: Path) -
     root = tmp_path / "workspace"
     _write_compact_fixture(root)
 
-    result = run_memory_compact_auto_cycle(root, _auto_cycle_options(allow_apply=True))
+    result = run_memory_compact_auto_cycle(root, _auto_cycle_options(allow_apply=True, trigger_percent=70))
 
     _assert_schema_v2(result, "compact_auto_cycle")
     assert result["ok"] is False
@@ -60,6 +126,37 @@ def test_memory_compact_auto_cycle_apply_stops_at_action_guard(tmp_path: Path) -
     assert result["next_action"] == "stop_and_request_review"
     assert (root / "memory_archive" / "compact_applies").exists()
     _assert_apply_preserved_sources(root)
+
+
+def test_memory_compact_auto_cycle_forced_fallback_apply_reuses_resume_pipeline(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    _write_compact_fixture(root)
+    _write_work_state_fact_sources(root)
+
+    result = run_memory_compact_auto_cycle(
+        root,
+        _auto_cycle_options(
+            current_tokens=1,
+            max_context_tokens=100000,
+            allow_apply=True,
+            force_trigger=True,
+            trigger_reason="emergency_fallback",
+            trigger_source="runtime_exception",
+        ),
+    )
+
+    assert result["status"] == "ready_after_action_guard"
+    assert result["trigger"] == {
+        "reason": "emergency_fallback",
+        "source": "runtime_exception",
+        "forced": True,
+    }
+    assert result["suggestion"]["status"] == "forced_compact"
+    assert result["apply_result"]["mode"] == "apply"
+    assert result["resume_result"]["action_guard"]["allowed_to_continue"] is True
+    assert result["continue_packet"]["ready_to_continue"] is True
+    assert result["apply_id"]
+    assert (root / "memory_archive" / "compact_applies").exists()
 
 
 def test_memory_compact_work_state_reads_task_fact_sources(tmp_path: Path) -> None:
@@ -113,7 +210,7 @@ def test_memory_compact_auto_guard_allows_complete_work_state_without_running_to
     _write_work_state_fact_sources(root)
 
     resume = _auto_resume_after_apply(root)
-    cycle = run_memory_compact_auto_cycle(root, _auto_cycle_options(allow_apply=True))
+    cycle = run_memory_compact_auto_cycle(root, _auto_cycle_options(allow_apply=True, trigger_percent=70))
 
     assert resume["action_guard"]["ok"] is True
     assert resume["action_guard"]["status"] == "allow_automated_continue"
@@ -291,12 +388,26 @@ def _write_configured_continue_packet(configured_subagents: Path, run_id: str) -
     packet.write_text(json.dumps({"ready_to_continue": True}), encoding="utf-8")
 
 
-def _auto_cycle_options(*, allow_apply: bool = False) -> MemoryCompactAutoCycleOptions:
+def _auto_cycle_options(**overrides: object) -> MemoryCompactAutoCycleOptions:
+    values = {
+        "current_tokens": 8000,
+        "max_context_tokens": 10000,
+        "trigger_percent": 90,
+        "allow_apply": False,
+        "trigger_reason": "normal_threshold",
+        "trigger_source": "token_budget",
+        "force_trigger": False,
+    }
+    values.update(overrides)
     return MemoryCompactAutoCycleOptions(
-        current_tokens=8000,
-        max_context_tokens=10000,
+        current_tokens=int(values["current_tokens"]),
+        max_context_tokens=int(values["max_context_tokens"]),
+        trigger_percent=int(values["trigger_percent"]),
         plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
-        allow_apply=allow_apply,
+        allow_apply=bool(values["allow_apply"]),
+        trigger_reason=str(values["trigger_reason"]),
+        trigger_source=str(values["trigger_source"]),
+        force_trigger=bool(values["force_trigger"]),
     )
 
 

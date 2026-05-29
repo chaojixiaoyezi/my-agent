@@ -20,6 +20,7 @@ from .model_call_monitor import (
     estimate_first_token_timeout,
     is_cache_suspected,
 )
+from .model_usage import output_token_usage
 from .tool_stream_boundary import ToolBoundaryChunkFilter
 
 
@@ -109,7 +110,10 @@ def record_model_call_first_token(
 # LLM: record_model_call_finished stores completion facts after response normalization.
 # 函数用途: 模型返回或流式大写入被系统转为恢复响应后，记录输出 token 估算。
 def record_model_call_finished(ledger: ModelCallLedger, call_id: str, response: object) -> None:
-    ledger.finished(ModelCallFinishParams(call_id=call_id, output_tokens=estimate_tokens(getattr(response, "text", ""))))
+    output_tokens = output_token_usage(response)
+    if output_tokens is None:
+        output_tokens = estimate_tokens(getattr(response, "text", ""))
+    ledger.finished(ModelCallFinishParams(call_id=call_id, output_tokens=output_tokens))
 
 
 # LLM: record_model_call_timeout records timeout facts without reading provider error prose.

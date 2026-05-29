@@ -512,13 +512,14 @@ def test_memory_compact_suggestion_prompts_without_applying(tmp_path: Path) -> N
         MemoryCompactSuggestOptions(
             current_tokens=8000,
             max_context_tokens=10000,
+            trigger_percent=70,
             plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
             owner_type="subagent_session",
             owner_id="run-compact",
         ),
     )
 
-    assert suggestion["status"] == "suggest_compact"
+    assert suggestion["status"] == "ready_to_compact"
     assert suggestion["should_prompt"] is True
     assert suggestion["requires_confirmation"] is True
     assert suggestion["automatic_action"] == "none"

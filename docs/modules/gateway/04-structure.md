@@ -50,6 +50,18 @@ agent_py_agent/cli/
 7. `memory-resume` 或自动恢复命中 gateway_request 时，会把 request/response JSON 作为事实源推荐阅读。
 8. gateway/adapter CLI 在进入运行 helper 前会先构造 options/context bundle；线程启动、cleanup、watch 和 adapter loop 从 bundle 读取字段，避免新增 CLI 参数时污染内部协议。
 
+### runtime fact 恢复事实源
+
+gateway 保存型请求现在跟普通主代理 run 使用同一套恢复事实源：
+
+```text
+request_id=<id>
+  -> SimpleAgent.run(save=True, source=gateway)
+  -> memory_archive/runtime_facts/<id>/task.json
+```
+
+response JSON 只保留响应、模型、token、resume context 等运行结果，不再写 `recovery_snapshot_*` 空字段。后续 compact/resume 要恢复 gateway 请求时，先读 request/response JSON 和对应 `runtime_facts/<id>/task.json`，raw archive 仍作为黑匣子补充。
+
 ### 多 worker 抢占
 
 gateway request worker pool 通过文件 rename 抢占 pending 请求，而不是靠共享内存锁：

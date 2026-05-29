@@ -9,13 +9,17 @@ dispatch 阶段不应该把"谁能跑、能不能重试、并发 worker 怎么�
 这个文件专门处理 runner 相关的规则和小工具。
 """
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..settings.runtime_guard_config import runtime_guard_int
-from ..subagent import SubAgentRunnerResult, SubAgentTask
-from ..subagents.services.dispatch_params import DispatchRecordParams
-from .runner_child_summary import runner_child_summary_fields
+from ..subagent import SubAgentTask
+from .runner_candidate_policy import (
+    RunnerCandidatePolicy,
+    candidate_policy,
+    runner_launch_in_progress,
+)
+from .runner_dispatch_record import RunnerDispatchRecordParams
+from .runner_dispatch_record import runner_dispatch_record as _runner_dispatch_record
 from .runner_patch_review import _dispatch_patch_review_run_ids, _task_has_runner_patches
 from .runner_worker import RunSubagentWorkerParams, _run_subagent_worker
 
@@ -181,71 +185,21 @@ def _resolve_runner_timeout_seconds(value: object) -> float:
     return max(0.0, parsed)
 
 
-# LLM: RunnerDispatchRecordParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存执行器调度记录参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
-@dataclass(frozen=True)
-class RunnerDispatchRecordParams:
-    agent: SimpleAgent
-    run_id: str
-    before: SubAgentTask
-    after: SubAgentTask
-    result: SubAgentRunnerResult
-    retry_reason: str
-    execute_runners: bool
-
-
-# LLM: _runner_dispatch_record 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 推进执行器调度记录的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
-def _runner_dispatch_record(params: RunnerDispatchRecordParams):
-
-    return params.agent.subagents.make_dispatch_record(
-        params=DispatchRecordParams(
-            step="runner",
-            action=(
-                "retry_runner"
-                if params.retry_reason and params.execute_runners
-                else "execute_runner"
-                if params.execute_runners
-                else "runner_dry_run"
-            ),
-            run_id=params.run_id,
-            dry_run=params.result.dry_run,
-            applied=not params.result.dry_run,
-            ok=params.result.ok,
-            message=params.result.message,
-            before_status=params.before.status,
-            after_status=params.after.status,
-            before_verification_status=params.before.verification_status,
-            after_verification_status=params.after.verification_status,
-            evidence_paths=[
-                params.result.execution_context_json,
-                params.result.result_json,
-                params.result.output_json,
-            ],
-            **runner_child_summary_fields(params.agent, params.after, params.result),
-        ),
-    )
-
-
 # LLM: _dispatch_runner_candidates 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 推进执行器candidates的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _dispatch_runner_candidates(
     tasks: list[SubAgentTask],
     max_runners: int,
     *,
-    runner_max_attempts: int = 1,
-    same_run_redispatch_limit: int | None = None,
+    policy: RunnerCandidatePolicy | None = None,
 ) -> list[SubAgentTask]:
 
     if max_runners <= 0:
         return []
+    effective_policy = candidate_policy(policy)
     candidates: list[SubAgentTask] = []
     for task in tasks:
-        if not _is_dispatch_runner_candidate(
-            task,
-            runner_max_attempts=runner_max_attempts,
-            same_run_redispatch_limit=same_run_redispatch_limit,
-        ):
+        if not _is_dispatch_runner_candidate(task, policy=effective_policy):
             continue
         candidates.append(task)
     return candidates[:max_runners]
@@ -265,10 +219,12 @@ def _limit_items(items: list, limit: int) -> list:
 def _is_dispatch_runner_candidate(
     task: SubAgentTask,
     *,
-    runner_max_attempts: int = 1,
-    same_run_redispatch_limit: int | None = None,
+    policy: RunnerCandidatePolicy | None = None,
 ) -> bool:
 
+    effective_policy = candidate_policy(policy)
+    if runner_launch_in_progress(task, effective_policy):
+        return False
     if task.status == "RUNNING":
         return False
     if task.status in {
@@ -288,9 +244,17 @@ def _is_dispatch_runner_candidate(
     if task.status == "BLOCKED":
         if _blocked_after_capability_grant(task):
             return True
-        return _can_retry_same_run(task, runner_max_attempts, same_run_redispatch_limit)
+        return _can_retry_same_run(
+            task,
+            effective_policy.runner_max_attempts,
+            effective_policy.same_run_redispatch_limit,
+        )
     if task.status in {"FAILED", "TIMEOUT"}:
-        return _can_retry_same_run(task, runner_max_attempts, same_run_redispatch_limit)
+        return _can_retry_same_run(
+            task,
+            effective_policy.runner_max_attempts,
+            effective_policy.same_run_redispatch_limit,
+        )
     return task.status == "PLANNING"
 
 
@@ -344,12 +308,3 @@ def _float_attr(value: object, name: str) -> float:
         return float(getattr(value, name, 0.0) or 0.0)
     except (TypeError, ValueError):
         return 0.0
-
-
-# LLM: _runner_active_attempt_id keeps active-runner reentry checks concrete and MagicMock-safe.
-# 函数用途: 读取任务当前 active attempt；存在时说明该 run 已有执行器在跑，普通 dispatch 不应再次启动。
-def _runner_active_attempt_id(task: SubAgentTask) -> str:
-    value = getattr(task, "runner_active_attempt_id", "")
-    if not isinstance(value, str):
-        return ""
-    return value.strip()

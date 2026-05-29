@@ -269,13 +269,12 @@ def test_gateway_request_indexes_logs_to_local_store():
         assert hits[0].source_id == request_id
 
 
-def test_gateway_request_writes_recovery_snapshot_when_saved():
-    """LLM: Verify saved gateway request writes a recovery snapshot JSONL.
+def test_gateway_request_writes_runtime_fact_when_saved():
+    """LLM: Verify saved gateway request writes a runtime fact source.
 
     新手说明:
-    测试当 gateway 请求带 save=True 时，响应中包含
-    recovery_snapshot_path，且快照文件最后一条记录的
-    snapshot_id 和 dispatch_events 正确。
+    测试当 gateway 请求带 save=True 时，会写
+    memory_archive/runtime_facts/<request_id>/task.json 作为 compact/resume 事实源。
     """
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -291,7 +290,7 @@ def test_gateway_request_writes_recovery_snapshot_when_saved():
         request_id, request_path, _ = submit_gateway_ask(
             paths,
             params=GatewayAskParams(
-                prompt="gateway recovery snapshot 测试",
+                prompt="gateway runtime fact 测试",
                 save=True,
                 agent=agent,
             ),
@@ -300,16 +299,11 @@ def test_gateway_request_writes_recovery_snapshot_when_saved():
         response = _handle_gateway_request(agent, request_path)
 
         assert response["ok"] is True
-        assert response["recovery_snapshot_path"]
-        snapshot_path = Path(response["recovery_snapshot_path"])
-        records = [
-            json.loads(line)
-            for line in snapshot_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-        assert records[-1]["snapshot_id"] == response["recovery_snapshot_id"]
-        assert records[-1]["dispatch_events"][0]["source"] == "gateway"
-        assert records[-1]["dispatch_events"][0]["request_id"] == request_id
+        fact_path = root / "memory_archive" / "runtime_facts" / request_id / "task.json"
+        assert fact_path.exists()
+        payload = json.loads(fact_path.read_text(encoding="utf-8"))
+        assert payload["request_id"] == request_id
+        assert payload["runtime_progress"]["source"] == "gateway"
 
 
 def test_gateway_request_can_override_resume_context():

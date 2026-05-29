@@ -172,6 +172,8 @@ memory 负责存长期事实和按天流水。context bundle 不替代 memory，
 
 compact 会在上下文快满或用户手动触发时，把当前任务状态压缩成恢复包。context bundle 给 compact/resume 提供稳定 scope（范围）和 refs（引用），避免恢复时找错任务。
 
+正常阈值触发和兜底触发共用同一套 `compact_suggest -> compact_apply -> compact_resume -> continue_packet` 流水线。区别只写在 `trigger` 字段里：正常触发通常是 `reason=normal_threshold, source=token_budget`；上下文溢出等兜底触发会写 `forced=true` 和具体 `reason/source`。这样不会出现两套 compact 包、两套恢复规则，也方便排查“这次是提前保养，还是撞墙救场”。
+
 ### Artifact（外置产物）
 
 artifact 是大输出、大文件、工具结果的外置存放。context bundle 只放 artifact 根目录或引用，不把正文塞进 prompt。

@@ -26,8 +26,13 @@ class MemoryCompactSuggestOptions:
     current_tokens: int
     max_context_tokens: int
     plan_options: MemoryCompactPlanOptions
+    trigger_percent: int = 90
     owner_type: str = "main_agent"
     owner_id: str = ""
+    # 参数说明: trigger 字段只记录触发来源；正常阈值和兜底救场仍走同一个 compact suggestion。
+    trigger_reason: str = "normal_threshold"
+    trigger_source: str = "token_budget"
+    force_trigger: bool = False
 
 
 # LLM: build_memory_compact_suggestion only suggests next commands and never writes compact artifacts.
@@ -36,8 +41,10 @@ def build_memory_compact_suggestion(root: str | Path, options: MemoryCompactSugg
     workspace = Path(root)
     plan = build_memory_compact_plan(workspace, options.plan_options)
     ratio = _ratio(options.current_tokens, options.max_context_tokens)
-    status = _suggestion_status(ratio)
-    should_prompt = status in {"suggest_compact", "artifact_guard", "stop_required"}
+    trigger_ratio = _trigger_ratio(options.trigger_percent)
+    status = _suggestion_status(ratio, trigger_ratio=trigger_ratio, force_trigger=options.force_trigger)
+    should_prompt = options.force_trigger or status == "ready_to_compact"
+    trigger = _trigger_payload(options)
     return {
         "version": COMPACT_SUGGESTION_SCHEMA.version,
         "schema": runtime_memory_schema_payload(COMPACT_SUGGESTION_SCHEMA),
@@ -48,27 +55,24 @@ def build_memory_compact_suggestion(root: str | Path, options: MemoryCompactSugg
         "requires_confirmation": should_prompt,
         "automatic_action": "none",
         "owner": _owner_payload(options),
+        "trigger": trigger,
         "token_budget": _token_budget_payload(options, ratio),
         "scope": plan["scope"],
         "candidate_counts": _candidate_counts(plan),
         "risks": list(plan["risks"]),
         "recommended_commands": _recommended_commands(plan, should_prompt),
-        "message": _message(status, ratio),
+        "message": _message(status, ratio, trigger_ratio),
         "reserved": runtime_memory_reserved_fields(COMPACT_SUGGESTION_SCHEMA),
     }
 
 
-# LLM: _suggestion_status maps thresholds from the compact plan into deterministic statuses.
-# 函数用途: 根据上下文使用率给出 ok/checkpoint/suggest/artifact guard/stop 五档状态。
-def _suggestion_status(ratio: float) -> str:
-    if ratio >= 0.95:
-        return "stop_required"
-    if ratio >= 0.85:
-        return "artifact_guard"
-    if ratio >= 0.70:
-        return "suggest_compact"
-    if ratio >= 0.50:
-        return "checkpoint_recommended"
+# LLM: _suggestion_status maps one configured compact trigger into deterministic statuses.
+# 函数用途: 根据用户配置的单一百分比判断是否进入 compact；provider 兜底触发走 forced_compact。
+def _suggestion_status(ratio: float, *, trigger_ratio: float, force_trigger: bool = False) -> str:
+    if force_trigger:
+        return "forced_compact"
+    if ratio >= trigger_ratio:
+        return "ready_to_compact"
     return "ok"
 
 
@@ -97,14 +101,13 @@ def _scope_flags(scope: dict[str, Any]) -> str:
 
 # LLM: _message explains compact status in a short user-facing sentence.
 # 函数用途: 根据状态生成半自动提示文案，明确不会自动 apply。
-def _message(status: str, ratio: float) -> str:
+def _message(status: str, ratio: float, trigger_ratio: float) -> str:
     percent = f"{ratio:.0%}"
+    trigger_percent = f"{trigger_ratio:.0%}"
     messages = {
-        "ok": f"context usage is {percent}; no compact prompt needed.",
-        "checkpoint_recommended": f"context usage is {percent}; checkpoint is recommended, compact is not required yet.",
-        "suggest_compact": f"context usage is {percent}; suggest running memory-compact --dry-run before continuing long work.",
-        "artifact_guard": f"context usage is {percent}; avoid inline large outputs and ask before compact apply.",
-        "stop_required": f"context usage is {percent}; stop growing context and compact/resume before more work.",
+        "ok": f"context usage is {percent}; auto compact trigger is {trigger_percent}.",
+        "ready_to_compact": f"context usage is {percent}; reached auto compact trigger {trigger_percent}.",
+        "forced_compact": f"context usage is {percent}; provider reported context pressure, compact/resume now.",
     }
     return messages[status]
 
@@ -116,12 +119,8 @@ def _token_budget_payload(options: MemoryCompactSuggestOptions, ratio: float) ->
         "current_tokens": max(0, int(options.current_tokens)),
         "max_context_tokens": max(0, int(options.max_context_tokens)),
         "ratio": ratio,
-        "thresholds": {
-            "checkpoint": 0.50,
-            "suggest_compact": 0.70,
-            "artifact_guard": 0.85,
-            "stop_required": 0.95,
-        },
+        "auto_trigger_percent": _trigger_percent(options.trigger_percent),
+        "auto_trigger_ratio": _trigger_ratio(options.trigger_percent),
     }
 
 
@@ -141,12 +140,51 @@ def _owner_payload(options: MemoryCompactSuggestOptions) -> dict[str, str]:
     return {"owner_type": options.owner_type, "owner_id": options.owner_id}
 
 
+# LLM: _trigger_payload records why compact was suggested without changing the compact execution path.
+# 函数用途: 输出 normal/provider-overflow 等触发来源，方便恢复和排查同链路兜底。
+def _trigger_payload(options: MemoryCompactSuggestOptions) -> dict[str, Any]:
+    return {
+        "reason": _clean_token(options.trigger_reason, fallback="normal_threshold"),
+        "source": _clean_token(options.trigger_source, fallback="token_budget"),
+        "forced": bool(options.force_trigger),
+    }
+
+
+# LLM: _clean_token bounds trigger metadata before it is written to compact reports.
+# 函数用途: 清理 compact trigger 的 reason/source 字段，空值使用安全兜底。
+def _clean_token(value: object, *, fallback: str) -> str:
+    cleaned = str(value or "").strip()
+    return cleaned[:120] if cleaned else fallback
+
+
 # LLM: _ratio handles unset context windows conservatively without raising.
 # 函数用途: 计算当前 token 占窗口比例；窗口未设置时返回 0 代表不提示。
 def _ratio(current_tokens: int, max_context_tokens: int) -> float:
     if max_context_tokens <= 0:
         return 0.0
     return max(0.0, current_tokens / max_context_tokens)
+
+
+# LLM: _trigger_percent normalizes user compact thresholds to the supported 50-100 range.
+# 函数用途: 解析自动 compact 触发百分比；0 表示只在满窗/兜底时压缩，低于 50 抬到 50。
+def _trigger_percent(value: object) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 90
+    if parsed <= 0:
+        return 100
+    if parsed < 50:
+        return 50
+    if parsed > 100:
+        return 100
+    return parsed
+
+
+# LLM: _trigger_ratio turns the normalized percent into a ratio for compact budget comparisons.
+# 函数用途: 给 compact_suggest 使用 0.5-1.0 的比例值，保持百分比解析只有一个入口。
+def _trigger_ratio(value: object) -> float:
+    return _trigger_percent(value) / 100.0
 
 
 __all__ = ["MemoryCompactSuggestOptions", "build_memory_compact_suggestion"]

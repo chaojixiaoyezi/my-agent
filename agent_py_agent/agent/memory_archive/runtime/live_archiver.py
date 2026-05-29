@@ -59,26 +59,6 @@ class ArchiveLiveToolCallParams:
     preview_limits: dict[int, int] | None = None
 
 
-# LLM: ArchiveRunCheckpointParams is a compact runtime continuation note.
-# 类用途: 保存周期 checkpoint 的最小续接信息，避免崩溃后只能从大量工具事件硬拼。
-@dataclass(frozen=True)
-class ArchiveRunCheckpointParams:
-    root: str | Path
-    session_id: str
-    request_id: str = ""
-    run_id: str = ""
-    task_id: str = ""
-    tool_round: int = 0
-    user_prompt: str = ""
-    executed_tools: list[str] | None = None
-    recent_context: list[str] | None = None
-    source: str = "live_tool_loop"
-    archive_level: int = 3
-    created_at: str = ""
-    preview_limits: dict[int, int] | None = None
-    summary_chars: int = 96
-
-
 # LLM: archive_assistant_tool_round appends one visible assistant tool-round note to raw archive.
 # 函数用途: 记录模型在调用工具前说了什么、准备调用哪些工具；不记录隐藏思考链。
 def archive_assistant_tool_round(params: ArchiveAssistantToolRoundParams) -> ArchiveRunTurnResult:
@@ -142,35 +122,8 @@ def archive_live_tool_call(params: ArchiveLiveToolCallParams) -> ArchiveRunTurnR
     return _append_live_events(params.root, [event], token_payload=record)
 
 
-# LLM: archive_run_checkpoint appends a lightweight continuation checkpoint to raw archive.
-# 函数用途: 周期性记录当前轮数、已执行工具和最近上下文摘要；这是恢复提示，不是验收事实。
-def archive_run_checkpoint(params: ArchiveRunCheckpointParams) -> ArchiveRunTurnResult:
-    timestamp = params.created_at or utc_now_iso()
-    content = _checkpoint_content(params)
-    event = _message_event(
-        EventIdentity(
-            sequence=max(0, int(params.tool_round)),
-            session_id=str(params.session_id),
-            request_id=str(params.request_id),
-            run_id=str(params.run_id),
-            task_id=str(params.task_id),
-        ),
-        MessageContext(
-            speaker="system",
-            target="assistant",
-            action="run_checkpoint",
-            backend="tool_loop",
-            source=str(params.source),
-            archive_level=int(params.archive_level),
-            created_at=timestamp,
-            content=content,
-            preview_limits=params.preview_limits,
-            summary_chars=int(params.summary_chars),
-        ),
-    )
-    return _append_live_events(params.root, [event], token_payload=content)
-
-
+# LLM: _assistant_round_content keeps live assistant tool-round records compact and readable.
+# 函数用途: 合并模型可见文字和即将调用的工具名，写入 raw archive 的 content_preview。
 def _assistant_round_content(response_text: str, tool_names: list[str]) -> str:
     lines = [str(response_text or "").strip()]
     if tool_names:
@@ -178,21 +131,8 @@ def _assistant_round_content(response_text: str, tool_names: list[str]) -> str:
     return "\n".join(line for line in lines if line)
 
 
-def _checkpoint_content(params: ArchiveRunCheckpointParams) -> str:
-    recent = "\n".join(str(item) for item in (params.recent_context or [])[-3:])
-    tools = ", ".join(str(item) for item in (params.executed_tools or [])[-12:])
-    return "\n".join(
-        line
-        for line in (
-            f"tool_round: {params.tool_round}",
-            f"user_prompt: {str(params.user_prompt or '')[:500]}",
-            f"recent_executed_tools: {tools}",
-            f"recent_context:\n{recent}" if recent else "",
-        )
-        if line
-    )
-
-
+# LLM: _append_live_events appends already-built raw events and returns the same result shape as turn archiving.
+# 函数用途: 写入 live raw archive 事件并返回路径、事件 id、hash 和 token 估算。
 def _append_live_events(root: str | Path, events: list[RawMemoryEvent], *, token_payload: object) -> ArchiveRunTurnResult:
     paths: list[Path] = []
     for event in events:
@@ -212,8 +152,6 @@ def _append_live_events(root: str | Path, events: list[RawMemoryEvent], *, token
 __all__ = [
     "ArchiveAssistantToolRoundParams",
     "ArchiveLiveToolCallParams",
-    "ArchiveRunCheckpointParams",
     "archive_assistant_tool_round",
     "archive_live_tool_call",
-    "archive_run_checkpoint",
 ]

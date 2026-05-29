@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from .dispatch_params import DispatchContext
 from .dispatch_runner_selection import requested_include_ids
+from .runner_candidate_policy import RunnerCandidatePolicy
 from .runner_dispatch import (
     _dispatch_runner_candidates,
     _is_dispatch_runner_candidate,
@@ -21,12 +22,16 @@ def _runner_candidates_for_context(
     *,
     same_run_redispatch_limit: int | None = None,
 ) -> list:
+    policy = RunnerCandidatePolicy(
+        runner_max_attempts=runner_max_attempts,
+        same_run_redispatch_limit=same_run_redispatch_limit,
+        background_launch_id=ctx.background_launch_id,
+    )
     if requested_include_ids(ctx):
         candidates = _included_normal_runner_tasks(
             tasks,
             ctx,
-            runner_max_attempts,
-            same_run_redispatch_limit,
+            policy,
         )
         if candidates or not _is_explicit_recovery_dispatch(ctx):
             return candidates
@@ -34,8 +39,7 @@ def _runner_candidates_for_context(
     return _dispatch_runner_candidates(
         tasks,
         ctx.max_runners,
-        runner_max_attempts=runner_max_attempts,
-        same_run_redispatch_limit=same_run_redispatch_limit,
+        policy=policy,
     )
 
 
@@ -44,10 +48,9 @@ def _runner_candidates_for_context(
 def _included_normal_runner_tasks(
     tasks: list,
     ctx: DispatchContext,
-    runner_max_attempts: int,
-    same_run_redispatch_limit: int | None,
+    policy: RunnerCandidatePolicy,
 ) -> list:
-    selected = _requested_candidate_tasks(tasks, ctx, runner_max_attempts, same_run_redispatch_limit)
+    selected = _requested_candidate_tasks(tasks, ctx, policy)
     return selected[: max(0, int(ctx.max_runners or 0))]
 
 
@@ -56,8 +59,7 @@ def _included_normal_runner_tasks(
 def _requested_candidate_tasks(
     tasks: list,
     ctx: DispatchContext,
-    runner_max_attempts: int,
-    same_run_redispatch_limit: int | None,
+    policy: RunnerCandidatePolicy,
 ) -> list:
     requested = requested_include_ids(ctx)
     by_id = {str(getattr(task, "id", "") or ""): task for task in tasks}
@@ -66,11 +68,7 @@ def _requested_candidate_tasks(
         for run_id in requested
         if (
             (task := by_id.get(run_id)) is not None
-            and _is_dispatch_runner_candidate(
-                task,
-                runner_max_attempts=runner_max_attempts,
-                same_run_redispatch_limit=same_run_redispatch_limit,
-            )
+            and _is_dispatch_runner_candidate(task, policy=policy)
         )
     ]
 

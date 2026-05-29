@@ -36,10 +36,9 @@ def continue_subagent_session_if_needed(
 ) -> SubagentSessionContinuationResult:
     result = first_result
     active_bundle = bundle
-    max_depth = _max_depth(agent)
     depth = 0
     executed_tools = _result_executed_tools(first_result)
-    while depth < max_depth and _should_continue(result):
+    while _should_continue(result):
         depth += 1
         _write_intermediate_package(agent, active_bundle, result, depth)
         active_bundle = _rebuild_bundle(agent, active_bundle, depth)
@@ -109,7 +108,6 @@ def _run_model_turn(agent, prompt: str, context):
         task_id=context.root_id or context.run_id,
         system_prompt_override=subagent_runner_system_prompt(context),
         source="subagent_run_model_turn",
-        recovery_snapshot=False,
         context_scope="task_local",
     )
 
@@ -157,15 +155,6 @@ def _continuation_instruction(existing: str, depth: int) -> str:
         "Do not restart the task; read latest_continue_packet/checkpoint/summary refs only as needed.",
     ]
     return "\n".join(line for line in lines if line).strip()
-
-
-# LLM: _max_depth reuses the compact continuation depth config for subagent-local compact loops.
-# 函数用途: 控制单个子代理 run 内最多自动续跑几次，默认继承 memory_compact_auto_continue_max_depth。
-def _max_depth(agent) -> int:
-    try:
-        return max(0, int(getattr(agent.config, "memory_compact_auto_continue_max_depth", 1) or 0))
-    except (TypeError, ValueError):
-        return 1
 
 
 # LLM: _response_preview trims intermediate model text before storing it in task-local compact metadata.

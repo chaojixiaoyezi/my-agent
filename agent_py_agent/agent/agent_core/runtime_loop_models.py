@@ -24,14 +24,12 @@ class RunParams:
     delivery_contract: dict | None = None
     system_prompt_override: str | None = None
     source: str = "run"
-    recovery_snapshot: bool | None = None
     resume_context: bool | None = None
     recovery_task_refs: list[str] | None = None
     recovery_content_paths: list[str] | None = None
     recovery_next_actions: list[str] | None = None
     on_chunk: object = None
     compact_auto_continue_depth: int = 0
-    compact_auto_continue_max_depth: int = 1
     context_scope: str = "default"
 
 

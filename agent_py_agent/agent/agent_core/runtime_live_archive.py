@@ -3,17 +3,41 @@
 
 from __future__ import annotations
 
-import time
 from typing import Any
 
 from ..memory_archive.runtime.live_archiver import (
     ArchiveAssistantToolRoundParams,
     ArchiveLiveToolCallParams,
-    ArchiveRunCheckpointParams,
     archive_assistant_tool_round,
     archive_live_tool_call,
-    archive_run_checkpoint,
 )
+from ..memory_archive.runtime_fact_source import RuntimeFactSourceRequest, write_runtime_fact_source
+
+
+# LLM: write_runtime_fact_start_if_enabled creates the live task card before any model/tool loop grows.
+# 函数用途: run 开始就写 runtime_fact，后续工具循环持续更新；失败不阻断主流程。
+def write_runtime_fact_start_if_enabled(agent: object, params: object) -> None:
+    if not _live_archive_enabled(agent, params):
+        return
+    request_id = str(getattr(params, "request_id", "") or "")
+    if not request_id:
+        return
+    try:
+        write_runtime_fact_source(
+            RuntimeFactSourceRequest(
+                root=agent.root,
+                request_id=request_id,
+                user_prompt=str(getattr(params, "user_prompt", "") or ""),
+                status="running",
+                runtime_injections=tuple(str(item) for item in getattr(params, "runtime_injections", []) or []),
+                run_id=str(getattr(params, "run_id", "") or ""),
+                task_id=str(getattr(params, "task_id", "") or ""),
+                source=str(getattr(params, "source", "") or "run"),
+                phase="started",
+            )
+        )
+    except Exception:
+        return
 
 
 # LLM: archive_assistant_tool_round_if_enabled records visible assistant tool-round prose without blocking execution.
@@ -81,76 +105,99 @@ def archive_tool_call_if_enabled(
         archive_record["raw_archive_error"] = str(exc)
 
 
-# LLM: archive_checkpoint_if_due writes bounded continuation notes by round/time budget.
-# 函数用途: 周期性把最近运行摘要落到 raw archive；只用于恢复提示，失败不影响工具循环。
-def archive_checkpoint_if_due(agent: object, params: object, *, tool_round: int) -> None:
+# LLM: update_runtime_fact_progress_if_enabled folds the old live checkpoint role into runtime_fact.
+# 函数用途: 工具循环运行中更新 runtime_facts/<request_id>/task.json；失败不影响模型继续工作。
+def update_runtime_fact_progress_if_enabled(agent: object, params: object, *, tool_round: int) -> None:
     if not _live_archive_enabled(agent, params):
         return
-    if not _checkpoint_due(agent, params, tool_round=tool_round):
+    request_id = str(getattr(params, "request_id", "") or "")
+    if not request_id:
         return
     try:
-        archive_run_checkpoint(
-            ArchiveRunCheckpointParams(
+        write_runtime_fact_source(
+            RuntimeFactSourceRequest(
                 root=agent.root,
-                session_id=_session_id(agent),
-                request_id=str(getattr(params, "request_id", "") or ""),
+                request_id=request_id,
+                user_prompt=str(getattr(params, "user_prompt", "") or ""),
+                status="running",
+                next_actions=_runtime_next_actions(params),
+                archive_tool_calls=list(getattr(params, "archive_tool_calls", []) or []),
+                runtime_injections=tuple(str(item) for item in getattr(params, "runtime_injections", []) or []),
                 run_id=str(getattr(params, "run_id", "") or ""),
                 task_id=str(getattr(params, "task_id", "") or ""),
-                tool_round=tool_round,
-                user_prompt=str(getattr(params, "user_prompt", "") or ""),
+                source="live_tool_loop",
+                phase="tool_loop",
+                tool_rounds=tool_round,
                 executed_tools=list(getattr(params, "executed_tools", []) or []),
-                recent_context=list(getattr(params, "tool_context", []) or [])[-3:],
-                archive_level=_archive_level(agent),
-                preview_limits=_archive_preview_limits(agent),
-                summary_chars=_summary_chars(agent),
+                latest_archive_refs=_latest_archive_refs(params),
+                artifact_refs=_artifact_refs(params),
             )
         )
-        state = _live_archive_state(params)
-        state["last_checkpoint_round"] = int(tool_round)
-        state["last_checkpoint_time"] = time.time()
     except Exception:
         return
 
 
-def _checkpoint_due(agent: object, params: object, *, tool_round: int) -> bool:
-    state = _live_archive_state(params)
-    config = getattr(agent, "config", None)
-    round_interval = int(getattr(config, "memory_live_archive_checkpoint_rounds", 0) or 0)
-    second_interval = int(getattr(config, "memory_live_archive_checkpoint_seconds", 0) or 0)
-    last_round = int(state.get("last_checkpoint_round", 0) or 0)
-    if round_interval > 0 and tool_round > 0 and tool_round % round_interval == 0 and last_round != tool_round:
-        return True
-    last_time = float(state.get("last_checkpoint_time", 0) or 0)
-    return second_interval > 0 and last_time > 0 and time.time() - last_time >= second_interval
+# LLM: _runtime_next_actions keeps the runtime fact whiteboard focused on the latest model-visible hint.
+# 函数用途: 从最近工具上下文提取一条下一步提示，不把完整上下文复制进 runtime_fact。
+def _runtime_next_actions(params: object) -> list[str]:
+    context = [str(item) for item in list(getattr(params, "tool_context", []) or [])[-2:] if str(item).strip()]
+    return context[-1:] if context else []
 
 
-def _live_archive_state(params: object) -> dict[str, object]:
-    state = getattr(params, "live_archive_state", None)
-    return state if isinstance(state, dict) else {}
+# LLM: _latest_archive_refs exposes only recent archive paths for the runtime fact whiteboard.
+# 函数用途: 从工具归档记录中取最近 raw_archive_path，不读取归档正文。
+def _latest_archive_refs(params: object) -> list[str]:
+    records = list(getattr(params, "archive_tool_calls", []) or [])
+    return [
+        str(record.get("raw_archive_path") or "")
+        for record in records[-20:]
+        if isinstance(record, dict) and str(record.get("raw_archive_path") or "")
+    ]
 
 
+# LLM: _artifact_refs keeps output refs discoverable without creating a second artifact registry.
+# 函数用途: 从工具记录中提取产物和归档路径，写入 runtime_fact 的轻量进度白板。
+def _artifact_refs(params: object) -> list[str]:
+    records = list(getattr(params, "archive_tool_calls", []) or [])
+    keys = ("artifact_ref", "artifact_path", "output_artifact_ref", "raw_archive_path")
+    refs: list[str] = []
+    for record in records[-20:]:
+        if not isinstance(record, dict):
+            continue
+        refs.extend(str(record.get(key) or "") for key in keys if str(record.get(key) or ""))
+    return refs
+
+
+# LLM: _live_archive_enabled respects the same save/auto-save boundary for raw archive and runtime_fact.
+# 函数用途: 判断当前 run 是否允许写运行中归档；save=False 时不偷偷落盘。
 def _live_archive_enabled(agent: object, params: object) -> bool:
     config = getattr(agent, "config", None)
-    if not bool(getattr(config, "memory_live_archive_enabled", True)):
-        return False
     save = getattr(params, "save", None)
     auto_save = bool(getattr(config, "auto_save_memory", True))
     return auto_save if save is None else bool(save)
 
 
+# LLM: _session_id resolves the current archive session id without requiring callers to pass it around.
+# 函数用途: 从 agent/session/config 中得到稳定会话标识，兜底为 myagent。
 def _session_id(agent: object) -> str:
     config = getattr(agent, "config", None)
     return str(getattr(agent, "session_id", "") or getattr(config, "agent_name", "") or "myagent")
 
 
+# LLM: _archive_level reads the configured raw archive detail level.
+# 函数用途: 统一读取 memory_archive_level，非法或缺失时用 schema 默认值。
 def _archive_level(agent: object) -> int:
     return int(getattr(getattr(agent, "config", None), "memory_archive_level", 3) or 3)
 
 
+# LLM: _summary_chars reads the configured preview summary length for live archive events.
+# 函数用途: 统一读取 memory_archive_summary_chars，避免 live archive 写死第二份默认值。
 def _summary_chars(agent: object) -> int:
     return int(getattr(getattr(agent, "config", None), "memory_archive_summary_chars", 96) or 96)
 
 
+# LLM: _archive_preview_limits reads per-level preview budgets from AgentConfig.
+# 函数用途: 组装 raw archive 预览长度表，让 live 写入和收尾归档使用同一配置。
 def _archive_preview_limits(agent: object) -> dict[int, int]:
     config = getattr(agent, "config", None)
     return {
@@ -163,6 +210,7 @@ def _archive_preview_limits(agent: object) -> dict[int, int]:
 
 __all__ = [
     "archive_assistant_tool_round_if_enabled",
-    "archive_checkpoint_if_due",
     "archive_tool_call_if_enabled",
+    "write_runtime_fact_start_if_enabled",
+    "update_runtime_fact_progress_if_enabled",
 ]

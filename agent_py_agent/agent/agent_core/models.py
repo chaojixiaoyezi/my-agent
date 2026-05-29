@@ -48,6 +48,9 @@ class AgentRunResult:
     memory_compact_ratio: float = 0.0
     memory_compact_message: str = ""
     memory_compact_commands: list[str] | None = None
+    memory_compact_trigger_reason: str = "normal_threshold"
+    memory_compact_trigger_source: str = "token_budget"
+    memory_compact_trigger_forced: bool = False
     memory_compact_auto_status: str = "skipped_below_threshold"
     memory_compact_auto_next_action: str = "continue_without_compact"
     memory_compact_auto_allowed_to_continue: bool = False

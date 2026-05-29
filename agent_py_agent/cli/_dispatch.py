@@ -86,6 +86,7 @@ def _dispatch_params(options: SubagentsDispatchOptions) -> DispatchParams:
         take_over_by=options.take_over_by,
         locked_files=options.locked_files,
         include_run_ids=options.run_ids or None,
+        background_launch_id=options.background_launch_id,
     )
 
 

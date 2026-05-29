@@ -164,13 +164,12 @@ class SimpleAgentRuntimeMixin:
         run_id: str | None = None, task_id: str | None = None, task_attributes: dict | None = None,
         delivery_contract: dict | None = None,
         system_prompt_override: str | None = None, source: str | None = None,
-        recovery_snapshot: bool | None = None, resume_context: bool | None = None,
+        resume_context: bool | None = None,
         recovery_task_refs: list[str] | None = None, recovery_content_paths: list[str] | None = None,
         recovery_next_actions: list[str] | None = None,
         on_chunk: object = None,
         context_scope: str | None = None,
     ):
-        provided_params = params
         params = run_params_from_compat(
             params,
             RunCompatibilityFields(
@@ -187,7 +186,6 @@ class SimpleAgentRuntimeMixin:
                 delivery_contract=delivery_contract,
                 system_prompt_override=system_prompt_override,
                 source=source,
-                recovery_snapshot=recovery_snapshot,
                 resume_context=resume_context,
                 recovery_task_refs=recovery_task_refs,
                 recovery_content_paths=recovery_content_paths,
@@ -196,7 +194,6 @@ class SimpleAgentRuntimeMixin:
                 context_scope=context_scope,
             ),
         )
-        params = _apply_config_compact_auto_defaults(self.config, params, provided_params=provided_params is not None)
         return _run_with_params(self, user_prompt, params)
 
     # LLM: _build_finalize_context 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -222,13 +219,11 @@ class SimpleAgentRuntimeMixin:
             task_id=rp.task_id,
             source=rp.source,
             do_save=self.config.auto_save_memory if rp.save is None else rp.save,
-            recovery_snapshot=rp.recovery_snapshot,
             recovery_task_refs=rp.recovery_task_refs,
             recovery_content_paths=rp.recovery_content_paths,
             recovery_next_actions=rp.recovery_next_actions,
             tool_rounds=params.tool_rounds,
             compact_auto_continue_depth=rp.compact_auto_continue_depth,
-            compact_auto_continue_max_depth=rp.compact_auto_continue_max_depth,
             main_context_bundle_path=params.main_context_bundle_path,
             main_context_bundle_markdown_path=params.main_context_bundle_markdown_path,
         )
@@ -254,7 +249,6 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
         decision = compact_auto_continuation_decision(
             result,
             depth=current_params.compact_auto_continue_depth,
-            max_depth=current_params.compact_auto_continue_max_depth,
         )
         if not decision.should_continue:
             return result
@@ -302,12 +296,3 @@ def _compact_auto_continue_params(params: RunParams, injection: str) -> RunParam
         inject=[*(params.inject or []), injection],
         compact_auto_continue_depth=params.compact_auto_continue_depth + 1,
     )
-
-
-# LLM: _apply_config_compact_auto_defaults gives public run() a config-backed continuation depth.
-# 函数用途: 用户没有显式传 RunParams 时，用配置控制自动 compact/resume 最多连续续跑多少轮。
-def _apply_config_compact_auto_defaults(config, params: RunParams, *, provided_params: bool) -> RunParams:
-    if provided_params:
-        return params
-    depth = int(getattr(config, "memory_compact_auto_continue_max_depth", params.compact_auto_continue_max_depth) or 0)
-    return replace(params, compact_auto_continue_max_depth=max(0, depth))

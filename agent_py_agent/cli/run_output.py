@@ -35,13 +35,11 @@ def print_run_result(result, *, show_prompt: bool, streamed_text: str = "") -> N
         if streamed_text and not streamed_text.endswith("\n"):
             print()
         print(result.response)
-    snapshot_state = "error" if result.recovery_snapshot_error else "1" if result.recovery_snapshot_path else "0"
     print(
         f"\n[backend={result.backend}; used_memories={result.used_memories}; "
         f"tool_rounds={result.tool_rounds}; routed_rules={result.memory_route_matches}; "
         f"prompt_tokens≈{result.prompt_token_estimate}; inject_tokens≈{result.runtime_injection_token_estimate}; "
         f"archive_events={result.archive_events}; "
-        f"recovery_snapshot={snapshot_state}; "
         f"resume_context={1 if result.memory_resume_context_injected else 0}; "
         f"resume_tokens≈{result.memory_resume_context_token_estimate}]"
     )
@@ -88,4 +86,3 @@ def _print_compact_suggestion(result) -> None:
     )
     for command in result.memory_compact_commands or []:
         print(f"- {command}")
-

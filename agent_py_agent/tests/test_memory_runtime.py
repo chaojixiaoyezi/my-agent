@@ -227,26 +227,23 @@ def test_run_injects_routed_memory_authority_context(tmp_path):
 def test_run_writes_raw_archive_when_saved(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
 
-    result = agent.run("请归档这轮对话", save=True)
+    result = agent.run("请归档这轮对话", save=True, request_id="req-archive-save")
 
     raw_dir = tmp_path / "memory" / "raw"
-    hook_dir = tmp_path / "memory" / "hooks"
+    fact_path = tmp_path / "memory_archive" / "runtime_facts" / "req-archive-save" / "task.json"
     files = sorted(raw_dir.glob("*.jsonl"))
     assert result.archive_events == 2
     assert result.archive_token_estimate > 0
-    assert result.recovery_snapshot_path
-    assert result.recovery_snapshot_id.startswith("snapshot:")
+    assert result.recovery_snapshot_path == ""
+    assert fact_path.exists()
     assert len(files) == 1
     records = _read_jsonl(files[0])
     assert [record["speaker"] for record in records] == ["user", "assistant"]
     assert records[0]["content_preview"] == "请归档这轮对话"
     assert records[1]["action"] == "response"
-    hook_files = sorted(hook_dir.glob("*.jsonl"))
-    assert len(hook_files) == 1
-    snapshots = _read_jsonl(hook_files[0])
-    assert snapshots[0]["snapshot_id"] == result.recovery_snapshot_id
-    assert snapshots[0]["user_intents"] == ["请归档这轮对话"]
-    assert snapshots[0]["dispatch_events"][0]["source"] == "run"
+    facts = json.loads(fact_path.read_text(encoding="utf-8"))
+    assert facts["goal"] == "请归档这轮对话"
+    assert facts["runtime_progress"]["phase"] == "final"
 
 
 def test_run_no_save_does_not_write_raw_archive(tmp_path):
@@ -260,13 +257,12 @@ def test_run_no_save_does_not_write_raw_archive(tmp_path):
     assert not (tmp_path / "memory" / "hooks").exists()
 
 
-def test_run_can_force_recovery_snapshot_without_raw_archive(tmp_path):
+def test_run_no_save_does_not_write_runtime_fact(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
 
     result = agent.run(
         "子代理已完成，请写恢复锚点",
         save=False,
-        recovery_snapshot=True,
         request_id="req-1",
         run_id="subagent-1",
         task_id="subagent-1",
@@ -276,14 +272,10 @@ def test_run_can_force_recovery_snapshot_without_raw_archive(tmp_path):
     )
 
     assert result.archive_events == 0
-    assert result.recovery_snapshot_path
+    assert result.recovery_snapshot_path == ""
     assert not (tmp_path / "memory" / "raw").exists()
-    snapshots = _read_jsonl(Path(result.recovery_snapshot_path))
-    assert snapshots[0]["dispatch_events"][0]["request_id"] == "req-1"
-    assert snapshots[0]["dispatch_events"][0]["run_id"] == "subagent-1"
-    assert snapshots[0]["task_refs"] == ["subagent-1"]
-    assert snapshots[0]["content_paths"] == ["subagents/subagent-1/STATUS.md"]
-    assert snapshots[0]["next_actions"] == ["读取 STATUS.md 后继续验收"]
+    assert not (tmp_path / "memory" / "hooks").exists()
+    assert not (tmp_path / "memory_archive" / "runtime_facts").exists()
 
 
 def test_auto_resume_context_is_disabled_by_default(tmp_path):

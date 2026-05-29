@@ -39,11 +39,21 @@ class TestModelResponse:
         resp = ModelResponse(text="hello", backend="echo")
         assert resp.text == "hello"
         assert resp.backend == "echo"
+        assert resp.usage == {}
 
     def test_model_response_mutable(self):
         resp = ModelResponse(text="hi", backend="test")
         resp.text = "updated"
         assert resp.text == "updated"
+
+    def test_model_response_carries_provider_usage(self):
+        resp = ModelResponse(
+            text="hello",
+            backend="provider",
+            usage={"input_tokens": 11, "output_tokens": 7},
+        )
+
+        assert resp.usage == {"input_tokens": 11, "output_tokens": 7}
 
 
 class TestBaseBackend:
@@ -196,10 +206,12 @@ class TestOpenAICompatibleBackend:
         backend = OpenAICompatibleBackend(_options(api_key="test-key", model_name="gpt-4", stream_enabled=False))
         with patch.object(backend, "request_json") as mock_request_json:
             mock_request_json.return_value = {
-                "choices": [{"message": {"content": "direct response"}}]
+                "choices": [{"message": {"content": "direct response"}}],
+                "usage": {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14},
             }
             resp = backend.generate("test prompt", on_chunk=None)
             assert resp.text == "direct response"
+            assert resp.usage == {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14}
 
     @patch("urllib.request.urlopen")
     def test_generate_response_missing_content(self, mock_urlopen):
@@ -244,6 +256,7 @@ class TestOpenAICompatibleBackend:
         resp = backend.generate("test prompt", on_chunk=on_chunk)
 
         assert resp.text == "hello"
+        assert resp.usage == {}
         assert events == [
             "yield-first",
             "chunk-hel",
@@ -251,6 +264,25 @@ class TestOpenAICompatibleBackend:
             "chunk-lo",
             "after-second",
         ]
+
+    def test_generate_stream_collects_openai_usage_chunk(self):
+        backend = OpenAICompatibleBackend(_options(api_key="test-key", model_name="gpt-4"))
+        backend.request_stream = lambda path, payload, headers: [
+            json.dumps({"choices": [{"delta": {"content": "hel"}}]}),
+            json.dumps({"choices": [{"delta": {"content": "lo"}}]}),
+            json.dumps(
+                {
+                    "choices": [],
+                    "usage": {"prompt_tokens": 9, "completion_tokens": 2, "total_tokens": 11},
+                }
+            ),
+            "[DONE]",
+        ]
+
+        resp = backend.generate("test prompt", on_chunk=None)
+
+        assert resp.text == "hello"
+        assert resp.usage == {"prompt_tokens": 9, "completion_tokens": 2, "total_tokens": 11}
 
 
 class TestAnthropicCompatibleBackend:
@@ -264,7 +296,10 @@ class TestAnthropicCompatibleBackend:
     @patch("urllib.request.urlopen")
     def test_generate_without_stream(self, mock_urlopen):
         mock_response = MagicMock()
-        mock_response.read.return_value = b'{"content": [{"type": "text", "text": "hello"}]}'
+        mock_response.read.return_value = (
+            b'{"content": [{"type": "text", "text": "hello"}],'
+            b' "usage": {"input_tokens": 8, "output_tokens": 2}}'
+        )
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
@@ -272,6 +307,7 @@ class TestAnthropicCompatibleBackend:
         backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3", stream_enabled=False))
         resp = backend.generate("test prompt", on_chunk=None)
         assert resp.text == "hello"
+        assert resp.usage == {"input_tokens": 8, "output_tokens": 2}
 
     @patch("urllib.request.urlopen")
     def test_generate_with_completion_fallback(self, mock_urlopen):
@@ -321,10 +357,12 @@ class TestAnthropicCompatibleBackend:
 
         def request_stream_iter(path, payload, headers):
             events.append("yield-first")
+            yield json.dumps({"type": "message_start", "message": {"usage": {"input_tokens": 10, "output_tokens": 1}}})
             yield json.dumps({"type": "content_block_delta", "delta": {"text": "hel"}})
             events.append("after-first")
             yield json.dumps({"type": "content_block_delta", "delta": {"text": "lo"}})
             events.append("after-second")
+            yield json.dumps({"type": "message_delta", "usage": {"output_tokens": 3}})
             yield json.dumps({"type": "message_stop"})
 
         def on_chunk(content: str) -> None:
@@ -334,6 +372,7 @@ class TestAnthropicCompatibleBackend:
         resp = backend.generate("test prompt", on_chunk=on_chunk)
 
         assert resp.text == "hello"
+        assert resp.usage == {"input_tokens": 10, "output_tokens": 3}
         assert events == [
             "yield-first",
             "chunk-hel",

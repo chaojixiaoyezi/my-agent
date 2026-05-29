@@ -253,6 +253,7 @@ def _dispatch_context_from_params(
         root_id=params.root_id,
         include_run_ids=params.include_run_ids,
         exclude_run_ids=params.exclude_run_ids,
+        background_launch_id=params.background_launch_id,
         router=router,
     )
 
@@ -273,6 +274,8 @@ def _dispatch_finalize_params(params: DispatchParams, records: list) -> Dispatch
     )
 
 
+# LLM: _finalize_scoped_tasks builds the same scope view used by final patch-review records.
+# 函数用途: 用 dispatch 参数重建只读 scope，避免 finalize 阶段把无关旧子代理纳入记录。
 def _finalize_scoped_tasks(agent, params: DispatchFinalizeParams) -> list:
     ctx = DispatchContext(
         cfg=CapabilityConfig(),
@@ -290,6 +293,7 @@ def _finalize_scoped_tasks(agent, params: DispatchFinalizeParams) -> list:
         root_id=params.root_id,
         include_run_ids=params.include_run_ids,
         exclude_run_ids=params.exclude_run_ids,
+        background_launch_id="",
         router=CapabilityRouter(),
     )
     return scoped_runner_tasks(agent.subagents.list_runs(), ctx)

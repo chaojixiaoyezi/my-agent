@@ -21,9 +21,7 @@ class CompactAutoContinuationDecision:
 
 # LLM: compact_auto_continuation_decision keeps unattended continuation strictly packet-driven.
 # 函数用途: 根据 run 结果、continue packet 和续跑深度判断是否允许自动进入下一轮。
-def compact_auto_continuation_decision(result: Any, *, depth: int, max_depth: int) -> CompactAutoContinuationDecision:
-    if depth >= max(0, max_depth):
-        return CompactAutoContinuationDecision(False, "max_depth_reached")
+def compact_auto_continuation_decision(result: Any, *, depth: int = 0) -> CompactAutoContinuationDecision:
     packet = _continue_packet(result)
     if not _result_ready(result, packet):
         return CompactAutoContinuationDecision(False, "not_ready")

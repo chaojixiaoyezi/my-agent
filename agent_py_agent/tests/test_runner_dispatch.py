@@ -10,6 +10,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent_py_agent.agent.agent_core.runner_candidate_policy import RunnerCandidatePolicy
+
 
 def test_execute_runner_uses_worker_even_when_timeout_disabled(monkeypatch, tmp_path):
     from agent_py_agent.agent.agent_core.runner_gate import SingleRunnerParams, run_single_runner
@@ -110,7 +112,7 @@ class TestRunnerMaxAttempts:
             runner_attempts=99,
         )
 
-        assert _is_dispatch_runner_candidate(task, runner_max_attempts=0, same_run_redispatch_limit=0) is True
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=0, same_run_redispatch_limit=0)) is True
 
     # LLM: runner retry limits count retries after the first failed attempt, not total attempts.
     # 函数用途: 验证 runner_failure_retry_limit=2 允许第一次失败后的两次补跑机会。
@@ -127,9 +129,9 @@ class TestRunnerMaxAttempts:
             runner_attempts=2,
         )
 
-        assert _is_dispatch_runner_candidate(task, runner_max_attempts=2, same_run_redispatch_limit=0) is True
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=2, same_run_redispatch_limit=0)) is True
         task.runner_attempts = 3
-        assert _is_dispatch_runner_candidate(task, runner_max_attempts=2, same_run_redispatch_limit=0) is False
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=2, same_run_redispatch_limit=0)) is False
 
     # LLM: same-run redispatch has its own cap so a parent can choose a different recovery strategy.
     # 函数用途: 验证 same_run_redispatch_limit=1 时，同一个 run_id 只允许失败后再派一次。
@@ -146,8 +148,8 @@ class TestRunnerMaxAttempts:
             runner_attempts=2,
         )
 
-        assert _is_dispatch_runner_candidate(task, runner_max_attempts=3, same_run_redispatch_limit=1) is False
-        assert _is_dispatch_runner_candidate(task, runner_max_attempts=3, same_run_redispatch_limit=0) is True
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=3, same_run_redispatch_limit=1)) is False
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=3, same_run_redispatch_limit=0)) is True
 
 
 class TestRunnerFailureType:
@@ -203,7 +205,7 @@ class TestRunnerCandidateCapabilityGrant:
             blockers=[],
         )
 
-        assert _is_dispatch_runner_candidate(task, runner_max_attempts=1) is True
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=1)) is True
 
     # LLM: open requests remain a hard stop even if an older grant exists.
     # 函数用途: 仍有 OPEN capability_request 时不能提前重跑，避免模型在未授权状态反复失败。
@@ -224,7 +226,7 @@ class TestRunnerCandidateCapabilityGrant:
             blockers=[],
         )
 
-        assert _is_dispatch_runner_candidate(task, runner_max_attempts=2) is False
+        assert _is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy(runner_max_attempts=2)) is False
 
 
 class TestResolveRunnerConcurrency:

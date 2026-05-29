@@ -18,6 +18,11 @@ from .model_call_runtime import (
     record_model_call_timeout,
     start_model_call_record,
 )
+from .model_context_pressure import (
+    context_pressure_response,
+    is_context_window_error,
+    preflight_context_pressure_response,
+)
 from .runner_stage_trace import (
     RunnerModelStageTraceRequest,
     trace_runner_model_request_failed,
@@ -79,44 +84,67 @@ class _ModelGenerationState:
 # LLM: generate_model_response wraps backend calls with refs-only runner stage trace events.
 # 函数用途: 在模型请求前后写 runner 阶段心跳；普通主代理没有 runner id 时不会写 trace。
 def generate_model_response(request: ModelGenerateParams):
+    if preflight := preflight_context_pressure_response(request):
+        return preflight
     _trace_model_start(request)
     state = _start_model_generation(request)
+    response = _generate_or_recover_context_pressure(request, state)
+    return _finish_model_generation(request, state, response)
+
+
+# LLM: _generate_or_recover_context_pressure keeps the public model generation wrapper small.
+# 函数用途: 执行 provider 请求，并把流式中断、超时和上下文撞墙统一转成稳定响应或异常。
+def _generate_or_recover_context_pressure(request: ModelGenerateParams, state: _ModelGenerationState):
     try:
-        response = _generate_with_wall_timeout(
+        return _generate_with_wall_timeout(
             request,
             state.on_chunk,
             state.first_token_timeout_seconds,
         )
     except CompleteToolCallStreamAbort as exc:
-        response = complete_tool_call_abort_response(
+        return complete_tool_call_abort_response(
             exc,
             backend=str(getattr(request.agent.backend, "name", "") or ""),
         )
     except LongToolContentStreamAbort as exc:
-        response = long_write_abort_response(
+        return long_write_abort_response(
             exc,
             backend=str(getattr(request.agent.backend, "name", "") or ""),
         )
     except MalformedToolProtocolStreamAbort as exc:
-        response = malformed_tool_protocol_abort_response(
+        return malformed_tool_protocol_abort_response(
             exc,
             backend=str(getattr(request.agent.backend, "name", "") or ""),
         )
     except ProviderTimeoutError as exc:
-        _record_provider_timeout(
-            _ProviderTimeoutRecord(
-                request=request,
-                ledger=state.ledger,
-                call_id=state.call_id,
-                first_token_timeout_seconds=state.first_token_timeout_seconds,
-                exc=exc,
-            )
-        )
+        _record_provider_timeout(_provider_timeout_record(request, state, exc))
         raise
     except Exception as exc:
+        if is_context_window_error(exc):
+            return context_pressure_response(
+                request,
+                source="provider_error",
+                prompt_tokens=0,
+                detail=str(exc),
+            )
         _trace_model_failure(request, exc)
         raise
-    return _finish_model_generation(request, state, response)
+
+
+# LLM: _provider_timeout_record packages timeout facts for a single tracing call.
+# 函数用途: 把模型请求超时所需的 request、ledger、call_id 和异常打包，避免超时记录接口膨胀。
+def _provider_timeout_record(
+    request: ModelGenerateParams,
+    state: _ModelGenerationState,
+    exc: ProviderTimeoutError,
+) -> _ProviderTimeoutRecord:
+    return _ProviderTimeoutRecord(
+        request=request,
+        ledger=state.ledger,
+        call_id=state.call_id,
+        first_token_timeout_seconds=state.first_token_timeout_seconds,
+        exc=exc,
+    )
 
 
 # LLM: _trace_model_start isolates runner trace setup from model-call control flow.

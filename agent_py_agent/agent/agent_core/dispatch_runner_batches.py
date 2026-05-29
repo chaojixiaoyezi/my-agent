@@ -30,12 +30,11 @@ from .dispatch_runner_selection import (
 )
 from .orchestration_run_scope import remembered_orchestration_run_ids
 from .runner_dispatch import (
-    RunnerDispatchRecordParams,
-    _runner_dispatch_record,
     _runner_max_attempts,
     _runner_retry_reason,
     _same_run_redispatch_limit,
 )
+from .runner_dispatch_record import RunnerDispatchRecordParams, runner_dispatch_record
 from .runner_gate import (
     ConcurrentRunnerParams,
     RunnerFailureParams,
@@ -59,6 +58,8 @@ class RunnerRecordInput:
     retry_reason: str
 
 
+# LLM: RunnerJobsRunInput bundles selected jobs with dispatch context and accumulated records.
+# 类用途: 把批量 runner 执行所需对象放进一个请求包，避免内部函数继续扩参数。
 @dataclass(frozen=True)
 class RunnerJobsRunInput:
     agent: object
@@ -257,7 +258,7 @@ def _run_sequential_batch(agent, ctx: RunnerBatchContext) -> list:
 # 函数用途: 写入执行器记录的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _append_runner_record(agent, ctx: RunnerBatchContext, item: RunnerRecordInput) -> None:
     ctx.records.append(
-        _runner_dispatch_record(
+        runner_dispatch_record(
             RunnerDispatchRecordParams(
                 agent=agent,
                 run_id=item.run_id,

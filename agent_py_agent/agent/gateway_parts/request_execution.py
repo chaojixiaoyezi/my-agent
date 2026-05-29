@@ -109,9 +109,6 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
             "prompt": result.prompt if request.get("include_prompt") else "",
             "prompt_token_estimate": result.prompt_token_estimate,
             "runtime_injection_token_estimate": result.runtime_injection_token_estimate,
-            "recovery_snapshot_id": result.recovery_snapshot_id,
-            "recovery_snapshot_path": result.recovery_snapshot_path,
-            "recovery_snapshot_error": result.recovery_snapshot_error,
             "memory_resume_context_injected": result.memory_resume_context_injected,
             "memory_resume_context_query": result.memory_resume_context_query,
             "memory_resume_context_matches": result.memory_resume_context_matches,
@@ -149,7 +146,6 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
             save=bool(request.get("save", True)),
             request_id=context.request_id,
             source="gateway",
-            recovery_snapshot=bool(request.get("save", True)),
             resume_context=request.get("resume_context") if "resume_context" in request else None,
             recovery_next_actions=[
                 "If this gateway request must be recovered, inspect the gateway response and LocalStore gateway_request records first."

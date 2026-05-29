@@ -10,13 +10,9 @@ from dataclasses import dataclass
 from ..memory_archive import (
     archive_run_turn,
     estimate_tokens,
-    write_recovery_snapshot,
 )
 from ..memory_archive.runtime.turn_archiver import ArchiveRunTurnParams, ArchiveTurnContext
 from ..memory_archive.runtime_fact_source import RuntimeFactSourceRequest, write_runtime_fact_source
-from ..memory_archive.snapshots import (
-    RecoverySnapshotInput,
-)
 from ..memory_archive.tokens import TurnTokenUsage, append_session_token_usage
 from ..user_space.context_bundle_artifacts import (
     MainContextBundleArtifactUpdateRequest,
@@ -27,9 +23,9 @@ from ._runtime_params import (
     ArchiveRunParams,
     EstimateTokenParams,
     FinalizeContext,
-    WriteRecoverySnapshotParams,
 )
 from .finalization_compact_auto import compact_auto_cycle_fields
+from .model_usage import input_token_usage, output_token_usage
 from .models import AgentRunResult
 
 
@@ -39,7 +35,6 @@ from .models import AgentRunResult
 class BuildAgentRunResultParams:
     ctx: FinalizeContext
     archive_result: object
-    snapshot_result: object
     token_ledger: dict[str, int]
     run_request_id: str
 
@@ -70,29 +65,12 @@ class FinalizationService:
             source=ctx.source,
         )
         archive_result = self._archive_run_if_needed(archive_params)
-        runtime_fact_source = self._write_runtime_fact_source_if_needed(ctx, run_request_id)
+        self._write_runtime_fact_source_if_needed(ctx, run_request_id)
         self._update_main_context_bundle_artifacts(ctx, run_request_id)
-
-        recovery_params = WriteRecoverySnapshotParams(
-            do_save=ctx.do_save,
-            recovery_snapshot=ctx.recovery_snapshot,
-            user_prompt=ctx.user_prompt,
-            final_response=ctx.final_response,
-            archive_tool_calls=ctx.archive_tool_calls,
-            run_request_id=run_request_id,
-            run_id=ctx.run_id,
-            task_id=ctx.task_id,
-            source=ctx.source,
-            recovery_task_refs=ctx.recovery_task_refs,
-            recovery_content_paths=_recovery_content_paths(ctx, runtime_fact_source),
-            recovery_next_actions=ctx.recovery_next_actions,
-            routed_context=ctx.routed_context,
-        )
-        snapshot_result = self._write_recovery_snapshot_if_needed(recovery_params)
         token_ledger = self._estimate_token_usage(_estimate_token_params(ctx, run_request_id))
 
         return self._build_agent_run_result(
-            BuildAgentRunResultParams(ctx, archive_result, snapshot_result, token_ledger, run_request_id)
+            BuildAgentRunResultParams(ctx, archive_result, token_ledger, run_request_id)
         )
 
     # LLM: _write_runtime_fact_source_if_needed makes real run facts visible to later compact apply.
@@ -111,6 +89,14 @@ class FinalizationService:
                 next_actions=ctx.recovery_next_actions or [],
                 archive_tool_calls=ctx.archive_tool_calls or [],
                 runtime_injections=tuple(str(item) for item in ctx.runtime_injections or []),
+                run_id=ctx.run_id,
+                task_id=ctx.task_id,
+                source=ctx.source,
+                phase="final",
+                tool_rounds=ctx.tool_rounds,
+                executed_tools=list(ctx.executed_tools or []),
+                latest_archive_refs=_latest_archive_refs(ctx.archive_tool_calls or []),
+                artifact_refs=_artifact_refs(ctx.archive_tool_calls or []),
             )
         )
 
@@ -159,47 +145,19 @@ class FinalizationService:
             )
         )
 
-    # LLM: _write_recovery_snapshot_if_needed 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 写入恢复snapshotifneeded的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
-    def _write_recovery_snapshot_if_needed(self, params: WriteRecoverySnapshotParams):
-        should_write = bool(getattr(self._agent.config, "memory_hook_enabled", True)) and (
-            params.do_save if params.recovery_snapshot is None else bool(params.recovery_snapshot)
-        )
-        if not should_write:
-            return None
-        return write_recovery_snapshot(
-            self._agent.root,
-            params=RecoverySnapshotInput(
-                session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
-                user_prompt=params.user_prompt,
-                response_text=params.final_response.text,
-                backend=params.final_response.backend,
-                source=params.source,
-                request_id=params.run_request_id,
-                run_id=params.run_id,
-                task_id=params.task_id,
-                status="ok",
-                tool_calls=params.archive_tool_calls,
-                task_refs=params.recovery_task_refs or [],
-                content_paths=[
-                    *(params.recovery_content_paths or []),
-                    *(getattr(params.routed_context, "required_read_paths", None) or []),
-                    *(getattr(params.routed_context, "candidate_paths", None) or []),
-                ],
-                next_actions=params.recovery_next_actions or [],
-                archive_level=int(getattr(self._agent.config, "memory_hook_archive_level", 3)),
-            ),
-        )
-
     # LLM: _estimate_token_usage 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 计算令牌usage的预算、数量或限制，影响后续调度节奏；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def _estimate_token_usage(self, params: EstimateTokenParams):
-        input_tokens = (
-            estimate_tokens(params.user_prompt)
-            + estimate_tokens(params.runtime_injections)
-            + estimate_tokens([getattr(memory, "content", "") for memory in params.memories])
-        )
-        output_tokens = estimate_tokens(params.final_response.text)
+        input_tokens = input_token_usage(params.final_response)
+        if input_tokens is None:
+            input_tokens = (
+                estimate_tokens(params.user_prompt)
+                + estimate_tokens(params.runtime_injections)
+                + estimate_tokens([getattr(memory, "content", "") for memory in params.memories])
+            )
+        output_tokens = output_token_usage(params.final_response)
+        if output_tokens is None:
+            output_tokens = estimate_tokens(params.final_response.text)
         tool_tokens = estimate_tokens(params.archive_tool_calls)
         ledger = append_session_token_usage(
             self._agent.root,
@@ -215,6 +173,7 @@ class FinalizationService:
         return {
             "turn": int(ledger["turn_total"]),
             "cumulative": int(ledger["cumulative_tokens"]),
+            "active": int(input_tokens) + int(output_tokens) + int(tool_tokens),
         }
 
     # LLM: _build_agent_run_result 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -240,7 +199,7 @@ class FinalizationService:
             runtime_injection_token_estimate=estimate_tokens(ctx.runtime_injections)
             if ctx.runtime_injections
             else 0,
-            **_snapshot_result_fields(params.snapshot_result),
+            **_snapshot_result_fields(),
             **_resume_context_fields(ctx),
             compression_snapshot_id=ctx.compression_snapshot_id,
             compression_snapshot_path=ctx.compression_snapshot_path,
@@ -253,15 +212,6 @@ class FinalizationService:
             runtime_reason=str(getattr(ctx.final_response, "runtime_reason", "") or ""),
             **compact_auto_cycle_fields(self._agent, ctx, params.token_ledger, request_id=params.run_request_id),
         )
-
-
-# LLM: _recovery_content_paths appends runtime fact source refs without mutating FinalizeContext.
-# 函数用途: 合并调用方 recovery_content_paths 和本轮 run fact 目录，供 hook snapshot 记录恢复入口。
-def _recovery_content_paths(ctx: FinalizeContext, runtime_fact_source: str) -> list[str]:
-    paths = list(ctx.recovery_content_paths or [])
-    if runtime_fact_source:
-        paths.append(runtime_fact_source)
-    return paths
 
 
 # LLM: _estimate_token_params keeps FinalizationService.finalize focused on lifecycle ordering.
@@ -304,14 +254,36 @@ def _write_run_task_workspace_if_needed(agent, params: ArchiveRunParams) -> str:
 
 # LLM: _snapshot_result_fields 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 处理snapshot结果字段相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
-def _snapshot_result_fields(snapshot_result) -> dict:
-    # LLM: snapshot result projection is kept outside AgentRunResult assembly.
+def _snapshot_result_fields() -> dict:
+    # LLM: recovery_snapshot is legacy; runtime compact now relies on runtime_fact/raw archive/compact refs.
     return {
-        "recovery_snapshot_id": snapshot_result.snapshot_id if snapshot_result else "",
-        "recovery_snapshot_path": snapshot_result.path if snapshot_result else "",
-        "recovery_snapshot_error": snapshot_result.error if snapshot_result else "",
-        "recovery_snapshot_token_estimate": snapshot_result.token_estimate if snapshot_result else 0,
+        "recovery_snapshot_id": "",
+        "recovery_snapshot_path": "",
+        "recovery_snapshot_error": "",
+        "recovery_snapshot_token_estimate": 0,
     }
+
+
+# LLM: _latest_archive_refs extracts recent raw archive refs for runtime_fact without reading their contents.
+# 函数用途: 从工具归档记录里收集最近 raw_archive_path，供 compact/resume 做事实源定位。
+def _latest_archive_refs(records: list[object]) -> list[str]:
+    return [
+        str(record.get("raw_archive_path") or "")
+        for record in records[-20:]
+        if isinstance(record, dict) and str(record.get("raw_archive_path") or "")
+    ]
+
+
+# LLM: _artifact_refs extracts artifact-like refs from tool records for runtime_fact.
+# 函数用途: 收集工具记录里的 artifact/path 引用，帮助恢复时找到产物或大工具输出。
+def _artifact_refs(records: list[object]) -> list[str]:
+    keys = ("artifact_ref", "artifact_path", "output_artifact_ref", "raw_archive_path")
+    refs: list[str] = []
+    for record in records[-20:]:
+        if not isinstance(record, dict):
+            continue
+        refs.extend(str(record.get(key) or "") for key in keys if str(record.get(key) or ""))
+    return refs
 
 
 # LLM: _resume_context_fields 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

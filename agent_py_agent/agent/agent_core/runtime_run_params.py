@@ -30,7 +30,6 @@ class RunCompatibilityFields:
     delivery_contract: dict | None = None
     system_prompt_override: str | None = None
     source: str | None = None
-    recovery_snapshot: bool | None = None
     resume_context: bool | None = None
     recovery_task_refs: list[str] | None = None
     recovery_content_paths: list[str] | None = None
@@ -39,6 +38,8 @@ class RunCompatibilityFields:
     context_scope: str | None = None
 
 
+# LLM: run_params_from_compat preserves old keyword compatibility while RunParams remains the canonical bundle.
+# 函数用途: 把 public run() 的兼容关键字合并进 RunParams，避免运行链路继续散传参数。
 def run_params_from_compat(params: RunParams, fields: RunCompatibilityFields) -> RunParams:
     return run_params_from_values(
         params,
@@ -55,7 +56,6 @@ def run_params_from_compat(params: RunParams, fields: RunCompatibilityFields) ->
         delivery_contract=fields.delivery_contract,
         system_prompt_override=fields.system_prompt_override,
         source=fields.source,
-        recovery_snapshot=fields.recovery_snapshot,
         resume_context=fields.resume_context,
         recovery_task_refs=fields.recovery_task_refs,
         recovery_content_paths=fields.recovery_content_paths,
@@ -65,6 +65,8 @@ def run_params_from_compat(params: RunParams, fields: RunCompatibilityFields) ->
     )
 
 
+# LLM: run_params_with_request_id materializes stable request/run/task ids before runtime side effects.
+# 函数用途: 为本轮 run 生成缺失的 request_id/run_id/task_id，确保 archive 和 runtime_fact 能按同一 scope 记录。
 def run_params_with_request_id(params: RunParams) -> RunParams:
     request_id = params.request_id or f"run-{time_module.time_ns()}"
     run_id = params.run_id or request_id
@@ -74,6 +76,8 @@ def run_params_with_request_id(params: RunParams) -> RunParams:
     return replace(params, request_id=request_id, run_id=run_id, task_id=task_id)
 
 
+# LLM: run_params_with_materialized_delivery_contract asks the model for a generic delivery contract when needed.
+# 函数用途: 对 chat/cli/gateway 入口物化开放世界交付要求，不使用专项模板或写死产物类型。
 def run_params_with_materialized_delivery_contract(agent, user_prompt: str, params: RunParams) -> RunParams:
     if params.delivery_contract is not None:
         return params
@@ -87,10 +91,14 @@ def run_params_with_materialized_delivery_contract(agent, user_prompt: str, para
     return replace(params, delivery_contract=contract)
 
 
+# LLM: _should_materialize_delivery_contract limits automatic materialization to user-facing main-agent entries.
+# 函数用途: 判断当前 source 是否需要入口交付合同，避免子代理/内部续跑重复物化。
 def _should_materialize_delivery_contract(params: RunParams) -> bool:
     return str(params.source or "").strip() in _AUTO_MATERIALIZE_SOURCES
 
 
+# LLM: _has_materialized_runtime_contract keeps empty materializer output from polluting RunParams.
+# 函数用途: 只有物化结果真的包含交付、证据或启动合同字段时才接入运行链路。
 def _has_materialized_runtime_contract(contract: dict) -> bool:
     return any(
         (

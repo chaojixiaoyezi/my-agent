@@ -9,6 +9,7 @@ from ..memory_archive import build_auto_resume_context, has_resume_trigger
 from ..memory_routing import RouteContextOptions, build_routed_memory_context
 from .runtime_capabilities import resolve_runtime_capabilities
 from .runtime_context_bundle import build_runtime_main_context_bundle
+from .runtime_live_archive import write_runtime_fact_start_if_enabled
 from .runtime_loop_models import (
     CompressionLoopResult,
     FinalizeParams,
@@ -42,7 +43,6 @@ def run_params_from_values(
     delivery_contract: dict | None = None,
     system_prompt_override: str | None = None,
     source: str | None = None,
-    recovery_snapshot: bool | None = None,
     resume_context: bool | None = None,
     recovery_task_refs: list[str] | None = None,
     recovery_content_paths: list[str] | None = None,
@@ -230,6 +230,7 @@ def _runtime_injections_with_bundle(
 # LLM: _execute_runtime_loop 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 推进运行时循环的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _execute_runtime_loop(agent, params: RuntimeLoopParams):
+    write_runtime_fact_start_if_enabled(agent, params)
     tool_catalog_section, tool_recommendations_section = _resolve_tool_sections(
         agent, params.allowed_tools, params.granted_capabilities,
     )
@@ -301,6 +302,8 @@ def _dialogue_memory_allowed(request: RuntimeContextRequest) -> bool:
     return has_resume_trigger(request.user_prompt)
 
 
+# LLM: _is_dialogue_memory identifies old chat turns that should not leak into one-shot CLI tasks.
+# 函数用途: 根据 memory.kind 判断是否是普通对话记忆，供本轮记忆隔离过滤。
 def _is_dialogue_memory(memory: object) -> bool:
     return str(getattr(memory, "kind", "") or "").strip().lower() == "dialogue"
 

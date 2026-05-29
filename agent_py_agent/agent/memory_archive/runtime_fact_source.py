@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -18,13 +19,21 @@ from typing import Any
 class RuntimeFactSourceRequest:
     root: Path
     request_id: str
-    user_prompt: str
-    response_text: str
-    backend: str
-    status: str
-    next_actions: list[str]
-    archive_tool_calls: list[Any]
+    user_prompt: str = ""
+    response_text: str = ""
+    backend: str = ""
+    status: str = "running"
+    next_actions: list[str] = field(default_factory=list)
+    archive_tool_calls: list[Any] = field(default_factory=list)
     runtime_injections: tuple[str, ...] = ()
+    run_id: str = ""
+    task_id: str = ""
+    source: str = "run"
+    phase: str = ""
+    tool_rounds: int = 0
+    executed_tools: list[str] = field(default_factory=list)
+    latest_archive_refs: list[str] = field(default_factory=list)
+    artifact_refs: list[str] = field(default_factory=list)
 
 
 # LLM: ApprovedRuntimeFactSourceRequest carries user-approved compact completion facts without parsing prose.
@@ -49,7 +58,7 @@ def write_runtime_fact_source(request: RuntimeFactSourceRequest) -> str:
     root = request.root / "memory_archive" / "runtime_facts" / _safe_id(request.request_id)
     root.mkdir(parents=True, exist_ok=True)
     payload = _runtime_fact_payload(request)
-    (root / "task.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    _write_json_atomic(root / "task.json", payload)
     return str(root)
 
 
@@ -74,17 +83,45 @@ def _runtime_fact_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
         "version": 1,
         "source": "runtime_fact_source",
         "request_id": request.request_id,
+        "run_id": request.run_id,
+        "task_id": request.task_id,
         "goal": request.user_prompt.strip(),
         "next_actions": list(request.next_actions),
         "acceptance": sections.acceptance,
         "constraints": sections.constraints,
         "latest_tests": latest_tests,
+        "runtime_progress": _runtime_progress_payload(request),
         "run_status": {
             "status": request.status,
             "backend": request.backend,
             "response_present": bool(request.response_text.strip()),
         },
     }
+
+
+# LLM: _runtime_progress_payload is the live whiteboard for compact/resume, not a second raw archive.
+# 函数用途: 保存运行中当前轮次、最近工具和引用；原始细节仍以 raw archive / artifact registry 为准。
+def _runtime_progress_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
+    return {
+        "phase": request.phase or _phase_from_status(request.status),
+        "source": request.source,
+        "tool_rounds": max(0, int(request.tool_rounds or 0)),
+        "executed_tools": _dedupe([str(item) for item in request.executed_tools if str(item).strip()])[-20:],
+        "latest_archive_refs": _dedupe(request.latest_archive_refs)[-20:],
+        "artifact_refs": _dedupe(request.artifact_refs)[-20:],
+        "updated_at": _utc_timestamp(),
+    }
+
+
+# LLM: _phase_from_status maps run status into a small runtime_fact progress phase.
+# 函数用途: 把 ok/failed/timeout 等状态规整成 runtime_progress.phase。
+def _phase_from_status(status: str) -> str:
+    lowered = str(status or "").strip().lower()
+    if lowered in {"ok", "succeeded", "done"}:
+        return "final"
+    if lowered in {"failed", "timeout", "interrupted"}:
+        return lowered
+    return "running"
 
 
 # LLM: _fact_source_text includes compact auto continuation facts without parsing unrelated home prompts.
@@ -104,6 +141,20 @@ def _runtime_injection_texts(value: tuple[str, ...] | list[str] | str) -> list[s
     if isinstance(value, (list, tuple)):
         return [str(item) for item in value if str(item)]
     return []
+
+
+# LLM: _write_json_atomic prevents partially-written runtime_fact files from becoming recovery facts.
+# 函数用途: 先写临时 JSON 再原子替换目标 task.json。
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    tmp = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(path)
+
+
+# LLM: _utc_timestamp records runtime_fact update times in a stable UTC format.
+# 函数用途: 生成 runtime_progress.updated_at，避免依赖本地时区字符串。
+def _utc_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 # LLM: _approved_fact_payload keeps manual completion facts auditable and schema-compatible with task.json readers.

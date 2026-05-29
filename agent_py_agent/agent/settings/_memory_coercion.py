@@ -72,11 +72,7 @@ _FIELDS = (
     _FieldSpec("memory_resume_auto_context_mode", "choice", choices={"off", "trigger", "always"}),
     _FieldSpec("memory_resume_auto_context_limit", "int", 1, 50),
     _FieldSpec("memory_compact_auto_allow_apply", "bool"),
-    _FieldSpec("memory_compact_context_window_tokens", "int", 0, None),
-    _FieldSpec("memory_compact_auto_continue_max_depth", "int", 0, 100),
-    _FieldSpec("memory_live_archive_enabled", "bool"),
-    _FieldSpec("memory_live_archive_checkpoint_rounds", "int", 0, None),
-    _FieldSpec("memory_live_archive_checkpoint_seconds", "int", 0, None),
+    _FieldSpec("memory_compact_auto_trigger_percent", "compact_trigger_percent"),
 )
 
 
@@ -109,6 +105,8 @@ def _coerce_field(
         return _coerce_bool(spec.field_name, raw_value, default=default, warnings=warnings)
     if spec.kind == "choice":
         return _coerce_choice(_ChoiceCoercion(spec.field_name, raw_value, default, spec.choices or set(), warnings))
+    if spec.kind == "compact_trigger_percent":
+        return _coerce_compact_trigger_percent(spec.field_name, raw_value, default=default, warnings=warnings)
     return _coerce_int(
         _IntCoercion(
             field_name=spec.field_name,
@@ -119,6 +117,33 @@ def _coerce_field(
         ),
         warnings=warnings,
     )
+
+
+# LLM: _coerce_compact_trigger_percent keeps the only user-facing compact threshold simple and bounded.
+# 函数用途: 归一化 memory_compact_auto_trigger_percent；缺省用默认值，0 表示 100，小于 50 抬到 50。
+def _coerce_compact_trigger_percent(
+    field_name: str,
+    raw_value: Any,
+    *,
+    default: int,
+    warnings: list[MemoryConfigWarning],
+) -> int:
+    if raw_value is _MISSING:
+        return default
+    number = _memory_int_number(raw_value)
+    if number is None:
+        reason = "expected an integer, not a boolean" if isinstance(raw_value, bool) else "expected an integer"
+        _warn(warnings, _WarningDraft(field_name, raw_value, default, reason))
+        return default
+    if number <= 0:
+        return 100
+    if number < 50:
+        _warn(warnings, _WarningDraft(field_name, raw_value, 50, "expected 0 or value between 50 and 100"))
+        return 50
+    if number > 100:
+        _warn(warnings, _WarningDraft(field_name, raw_value, 100, "expected value <= 100"))
+        return 100
+    return number
 
 
 # LLM: _lookup 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。

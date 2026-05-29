@@ -68,7 +68,11 @@ def auto_start_tasks(agent, tasks: list, request_params: dict[str, object]) -> d
 # 函数用途: 写入 launching 状态、启动独立 dispatch 进程，并返回 run_id/tree/status。
 def _start_background_dispatch(agent, run_ids: list[str]) -> dict[str, object]:
     launch_id = f"subagent-start-{time.time_ns()}"
-    router, cfg, dispatch_params = _auto_start_dispatch_args(agent, run_ids)
+    router, cfg, dispatch_params = _auto_start_dispatch_args(
+        agent,
+        run_ids,
+        background_launch_id=launch_id,
+    )
     request = _BackgroundDispatchRequest(agent, run_ids, launch_id, router, cfg, dispatch_params)
     _mark_background_start(request, status="launching")
     if _use_inprocess_autostart(agent):
@@ -271,7 +275,12 @@ def _safe_agent_tree(agent) -> dict[str, object]:
 
 # LLM: _auto_start_dispatch_args builds the existing dispatch_subagents call.
 # 函数用途: 复用原调度器参数，只把调用放到后台执行。
-def _auto_start_dispatch_args(agent, run_ids: list[str]) -> tuple[object, object, DispatchParams]:
+def _auto_start_dispatch_args(
+    agent,
+    run_ids: list[str],
+    *,
+    background_launch_id: str = "",
+) -> tuple[object, object, DispatchParams]:
     cfg = _dispatch_capability_config(agent)
     tool_specs = [spec for spec in agent.tools.specs() if getattr(spec, "category", "") != "orchestration"]
     router = CapabilityRouter(config=cfg, tool_specs=tool_specs)
@@ -285,6 +294,7 @@ def _auto_start_dispatch_args(agent, run_ids: list[str]) -> tuple[object, object
         note="auto-start after create_subagents",
         parent_run_id=current_subagent_run_id(agent),
         include_run_ids=run_ids,
+        background_launch_id=background_launch_id,
     )
     return router, cfg, params
 
@@ -312,6 +322,8 @@ def _safe_task_id(task: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+# LLM: _task_defer_start reads the model-requested defer_start flag from persisted task attributes.
+# 函数用途: 判断单个子代理是否只建不跑；坏 attributes 形态按不延迟处理。
 def _task_defer_start(task: object) -> bool:
     attrs = getattr(task, "attributes", {}) or {}
     if not isinstance(attrs, dict):

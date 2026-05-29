@@ -16,7 +16,10 @@ from .orchestration_shared_context import (
     refresh_parent_shared_context_from_tool_record,
 )
 from .runner_context import current_task_attributes
-from .runtime_live_archive import archive_checkpoint_if_due, archive_tool_call_if_enabled
+from .runtime_live_archive import (
+    archive_tool_call_if_enabled,
+    update_runtime_fact_progress_if_enabled,
+)
 from .subagent_attempt_guard import stale_subagent_attempt_message
 from .tool_call_archive_record import archive_tool_call_record
 from .tool_call_context_reducer import render_tool_payload_for_live_prompt
@@ -207,7 +210,7 @@ class ToolLoopService:
     def _run_tool_round(self, request: ToolRoundExecutionRequest):
         before_executed_count = len(request.params.executed_tools)
         subagent_output_written = execute_tool_round(request)
-        archive_checkpoint_if_due(self._agent, request.params, tool_round=request.tool_rounds)
+        update_runtime_fact_progress_if_enabled(self._agent, request.params, tool_round=request.tool_rounds)
         if terminal_response := _terminal_tool_guard_response(request):
             return request.tool_rounds, terminal_response
         final_response = completion_response_after_tool_round(
@@ -253,6 +256,7 @@ class ToolLoopService:
         )
         persist_tool_runtime_ledger(self._agent, archive_record)
         record.params.archive_tool_calls.append(archive_record)
+        update_runtime_fact_progress_if_enabled(self._agent, record.params, tool_round=record.tool_rounds)
         refresh_parent_shared_context_cache(self._agent, record.params.archive_tool_calls)
         refresh_parent_shared_context_from_tool_record(self._agent, record)
         record.params.tool_context.append(

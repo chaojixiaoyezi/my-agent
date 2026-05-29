@@ -5,15 +5,15 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.runtime_live_archive import archive_checkpoint_if_due
+from agent_py_agent.agent.agent_core.runtime_live_archive import (
+    update_runtime_fact_progress_if_enabled,
+)
 from agent_py_agent.agent.memory_archive import archive_run_turn
 from agent_py_agent.agent.memory_archive.runtime.live_archiver import (
     ArchiveAssistantToolRoundParams,
     ArchiveLiveToolCallParams,
-    ArchiveRunCheckpointParams,
     archive_assistant_tool_round,
     archive_live_tool_call,
-    archive_run_checkpoint,
 )
 from agent_py_agent.agent.memory_archive.runtime.turn_archiver import (
     ArchiveRunTurnParams,
@@ -251,48 +251,31 @@ def test_archive_run_turn_skips_tool_records_already_written_live():
         assert [record["speaker"] for record in records] == ["user", "assistant"]
 
 
-def test_archive_run_checkpoint_writes_minimal_continuation_note():
-    with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
-
-        result = archive_run_checkpoint(
-            ArchiveRunCheckpointParams(
-                root=root,
-                session_id="session-live",
-                request_id="req-live",
-                run_id="run-live",
-                task_id="task-live",
-                tool_round=20,
-                user_prompt="做长期研究任务。",
-                executed_tools=["web_search", "write_file"],
-                recent_context=["已经写入 draft.md", "下一步检查来源。"],
-                created_at="2026-04-30T10:02:00+08:00",
-            )
-        )
-
-        records = _read_jsonl(root / "memory" / "raw" / "2026-04-30.jsonl")
-        assert result.event_count == 1
-        assert records[0]["speaker"] == "system"
-        assert records[0]["action"] == "run_checkpoint"
-        assert "tool_round: 20" in records[0]["content_preview"]
-
-
-def test_runtime_checkpoint_seconds_waits_for_existing_checkpoint(tmp_path: Path) -> None:
-    config = AgentConfig(
-        memory_live_archive_checkpoint_rounds=0,
-        memory_live_archive_checkpoint_seconds=120,
-    )
+def test_runtime_fact_progress_updates_without_raw_checkpoint(tmp_path: Path) -> None:
+    config = AgentConfig()
     agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
     params = SimpleNamespace(
         request_id="req-live",
         run_id="run-live",
         task_id="task-live",
         user_prompt="继续长期任务",
-        executed_tools=[],
-        tool_context=[],
+        executed_tools=["web_search"],
+        tool_context=["下一步写入最终报告。"],
+        archive_tool_calls=[
+            {
+                "tool": "web_search",
+                "raw_archive_path": str(tmp_path / "memory" / "raw" / "2026-04-30.jsonl"),
+                "artifact_path": str(tmp_path / "outputs" / "report.md"),
+            }
+        ],
         live_archive_state={},
     )
 
-    archive_checkpoint_if_due(agent, params, tool_round=1)
+    update_runtime_fact_progress_if_enabled(agent, params, tool_round=7)
 
+    fact_path = tmp_path / "memory_archive" / "runtime_facts" / "req-live" / "task.json"
+    payload = json.loads(fact_path.read_text(encoding="utf-8"))
+    assert payload["runtime_progress"]["tool_rounds"] == 7
+    assert payload["runtime_progress"]["executed_tools"] == ["web_search"]
+    assert any(ref.endswith("outputs/report.md") for ref in payload["runtime_progress"]["artifact_refs"])
     assert not (tmp_path / "memory" / "raw").exists()

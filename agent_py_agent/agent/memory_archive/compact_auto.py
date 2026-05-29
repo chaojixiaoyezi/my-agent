@@ -29,9 +29,14 @@ class MemoryCompactAutoCycleOptions:
     current_tokens: int
     max_context_tokens: int
     plan_options: MemoryCompactPlanOptions
+    trigger_percent: int = 90
     allow_apply: bool = False
     owner_type: str = "main_agent"
     owner_id: str = ""
+    # 参数说明: 只用 trigger 标记为什么进入 compact；不为兜底触发另建第二套 apply/resume 流程。
+    trigger_reason: str = "normal_threshold"
+    trigger_source: str = "token_budget"
+    force_trigger: bool = False
 
 
 # LLM: _AutoCyclePayloadOptions keeps internal payload assembly extensible without widening helper signatures.
@@ -80,8 +85,12 @@ def _suggestion(workspace: Path, options: MemoryCompactAutoCycleOptions) -> dict
             current_tokens=options.current_tokens,
             max_context_tokens=options.max_context_tokens,
             plan_options=options.plan_options,
+            trigger_percent=options.trigger_percent,
             owner_type=options.owner_type,
             owner_id=options.owner_id,
+            trigger_reason=options.trigger_reason,
+            trigger_source=options.trigger_source,
+            force_trigger=options.force_trigger,
         ),
     )
 
@@ -101,6 +110,7 @@ def _cycle_payload(request: _AutoCyclePayloadOptions) -> dict[str, Any]:
         "allow_apply": request.options.allow_apply,
         "automatic_tool_execution": "none",
         "owner": {"owner_type": request.options.owner_type, "owner_id": request.options.owner_id},
+        "trigger": dict(request.suggestion.get("trigger", {})),
         "suggestion": request.suggestion,
         "apply_result": request.apply_result or {},
         "resume_result": resume or {},

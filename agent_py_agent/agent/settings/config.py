@@ -59,6 +59,7 @@ _LOG_LEVELS = {
     "critical": logging.CRITICAL,
 }
 
+
 # LLM: RuntimeBudgetConfigFields groups runtime scan/prompt/budget knobs away from the main config body.
 # 类用途: 保存运行预算字段；这些字段只控制读取、扫描、裁剪和自动并发，不定义任务质量硬门。
 @dataclass
@@ -109,9 +110,8 @@ class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigField
     memory_resume_auto_context_enabled: bool = False
     memory_resume_auto_context_mode: str = "trigger"
     memory_resume_auto_context_limit: int = 5
-    memory_compact_auto_allow_apply: bool = False
-    memory_compact_context_window_tokens: int = 0
-    memory_compact_auto_continue_max_depth: int = 1
+    memory_compact_auto_allow_apply: bool = True
+    memory_compact_auto_trigger_percent: int = 90
     memory_artifact_default_read_chars: int = 4000
     memory_archive_preview_level_0_chars: int = 2048
     memory_archive_preview_level_1_chars: int = 1024
@@ -119,9 +119,6 @@ class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigField
     memory_archive_preview_level_3_chars: int = 160
     memory_archive_summary_chars: int = 96
     memory_archive_search_file_limit: int = 30
-    memory_live_archive_enabled: bool = True
-    memory_live_archive_checkpoint_rounds: int = 20
-    memory_live_archive_checkpoint_seconds: int = 120
     memory_query_default_limit: int = 100
     memory_query_default_page_size: int = 100
     memory_query_content_preview_chars: int = 500

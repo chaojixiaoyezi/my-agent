@@ -52,12 +52,64 @@ class CaptureBackend:
     # 函数用途: 初始化 prompt 记录列表，供断言自动续跑是否真的发起第二轮模型调用。
     def __init__(self):
         self.prompts: list[str] = []
+        self.usages: list[dict[str, int]] = []
 
     # LLM: CaptureBackend.generate records prompt text and returns deterministic model output.
     # 函数用途: 模拟模型响应，不调用外部 API；响应文本带轮次，方便区分原始轮和续跑轮。
     def generate(self, prompt: str, on_chunk=None):
         self.prompts.append(prompt)
-        return ModelResponse(text=f"capture response {len(self.prompts)}", backend=self.name)
+        usage = self.usages[min(len(self.prompts) - 1, len(self.usages) - 1)] if self.usages else {}
+        return ModelResponse(text=f"capture response {len(self.prompts)}", backend=self.name, usage=usage)
+
+
+class RuntimeOverflowBackend:
+    name = "runtime-overflow"
+
+    def generate(self, prompt: str, on_chunk=None):
+        return ModelResponse(
+            text="context overflow fallback response",
+            backend=self.name,
+            runtime_status="blocked",
+            runtime_reason="context_overflow",
+        )
+
+
+class SequenceUsageBackend:
+    name = "sequence-usage"
+    context_window_tokens = 20_000
+
+    def __init__(self, usages: list[dict[str, int]]):
+        self.usages = usages
+        self.prompts: list[str] = []
+
+    def generate(self, prompt: str, on_chunk=None):
+        self.prompts.append(prompt)
+        usage = self.usages[min(len(self.prompts) - 1, len(self.usages) - 1)]
+        return ModelResponse(text=f"usage response {len(self.prompts)}", backend=self.name, usage=usage)
+
+
+class RaisingContextBackend:
+    name = "raising-context"
+    context_window_tokens = 100_000
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None):
+        self.calls += 1
+        raise RuntimeError("maximum context length exceeded")
+
+
+class NeverCalledBackend:
+    name = "never-called"
+    context_window_tokens = 20
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None):
+        self.calls += 1
+        raise AssertionError("backend should not be called after preflight overflow")
 
 
 def test_run_injects_routed_memory_authority_context(tmp_path):
@@ -86,37 +138,35 @@ def test_run_writes_raw_archive_when_saved(tmp_path):
     """LLM: Tests that agent.run() writes raw archive events when save=True."""
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
 
-    result = agent.run("请归档这轮对话", save=True)
+    result = agent.run("请归档这轮对话", save=True, request_id="req-archive-save")
 
     raw_dir = tmp_path / "memory" / "raw"
-    hook_dir = tmp_path / "memory" / "hooks"
+    fact_path = tmp_path / "memory_archive" / "runtime_facts" / "req-archive-save" / "task.json"
     files = sorted(raw_dir.glob("*.jsonl"))
     assert result.archive_events == 2
     assert result.archive_token_estimate > 0
-    assert result.recovery_snapshot_path
-    assert result.recovery_snapshot_id.startswith("snapshot:")
+    assert result.recovery_snapshot_path == ""
+    assert fact_path.exists()
     assert len(files) == 1
     records = _read_jsonl(files[0])
     assert [record["speaker"] for record in records] == ["user", "assistant"]
     assert records[0]["content_preview"] == "请归档这轮对话"
     assert records[1]["action"] == "response"
-    hook_files = sorted(hook_dir.glob("*.jsonl"))
-    assert len(hook_files) == 1
-    snapshots = _read_jsonl(hook_files[0])
-    assert snapshots[0]["snapshot_id"] == result.recovery_snapshot_id
-    assert snapshots[0]["user_intents"] == ["请归档这轮对话"]
-    assert snapshots[0]["dispatch_events"][0]["source"] == "run"
+    facts = json.loads(fact_path.read_text(encoding="utf-8"))
+    assert facts["goal"] == "请归档这轮对话"
+    assert facts["runtime_progress"]["phase"] == "final"
 
 
 def test_run_surfaces_compact_suggestion_without_auto_apply(tmp_path):
     """LLM: Tests that agent.run() can suggest compact without running apply automatically."""
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
-    agent.config.memory_compact_context_window_tokens = 20
+    agent.backend.context_window_tokens = 20
 
     result = agent.run("请生成足够长的 compact 提示触发内容", save=False)
 
     assert result.memory_compact_suggested is True
-    assert result.memory_compact_status in {"suggest_compact", "artifact_guard", "stop_required"}
+    assert result.memory_compact_status == "forced_compact"
+    assert result.memory_compact_trigger_source == "preflight"
     assert result.memory_compact_commands
     assert "memory-compact" in result.memory_compact_commands[0]
     assert result.memory_compact_auto_status == "needs_user_confirmation"
@@ -128,10 +178,72 @@ def test_run_surfaces_compact_suggestion_without_auto_apply(tmp_path):
     assert not (tmp_path / "memory_archive" / "compact_applies").exists()
 
 
+def test_run_context_overflow_uses_same_compact_cycle_even_below_threshold(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent.backend = RuntimeOverflowBackend()
+
+    result = agent.run("普通短任务，但后端报告上下文溢出", save=False)
+
+    assert result.runtime_reason == "context_overflow"
+    assert result.memory_compact_suggested is True
+    assert result.memory_compact_status == "forced_compact"
+    assert result.memory_compact_trigger_reason == "provider_context_overflow"
+    assert result.memory_compact_trigger_source == "runtime_status"
+    assert result.memory_compact_trigger_forced is True
+    assert result.memory_compact_auto_status == "needs_user_confirmation"
+    assert result.memory_compact_auto_apply_id == ""
+
+
+def test_run_context_error_uses_same_compact_cycle(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    backend = RaisingContextBackend()
+    agent.backend = backend
+
+    result = agent.run("普通短任务，但 provider 抛上下文过长错误", save=False)
+
+    assert backend.calls == 1
+    assert result.runtime_reason == "context_overflow"
+    assert result.memory_compact_status == "forced_compact"
+    assert result.memory_compact_trigger_reason == "provider_context_overflow"
+
+
+def test_run_preflights_prompt_over_context_before_provider_call(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    backend = NeverCalledBackend()
+    agent.backend = backend
+
+    result = agent.run("请处理这段很长的内容：" + ("长内容" * 500), save=False)
+
+    assert backend.calls == 0
+    assert result.runtime_reason == "context_overflow"
+    assert result.memory_compact_status == "forced_compact"
+    assert result.memory_compact_trigger_source == "preflight"
+
+
+def test_run_uses_provider_usage_for_active_compact_budget_not_cumulative(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    backend = SequenceUsageBackend(
+        [
+            {"input_tokens": 19_000, "output_tokens": 200},
+            {"input_tokens": 500, "output_tokens": 200},
+        ]
+    )
+    agent.backend = backend
+
+    first = agent.run("第一轮很大，但这里由 provider usage 表示真实输入。", save=True)
+    second = agent.run("第二轮很小，不应因为历史累计 token 再次触发 compact。", save=True)
+
+    assert 19_200 <= first.turn_token_estimate < 19_300
+    assert first.memory_compact_suggested is True
+    assert 700 <= second.turn_token_estimate < 800
+    assert second.cumulative_token_estimate >= first.turn_token_estimate + second.turn_token_estimate
+    assert second.memory_compact_suggested is False
+
+
 def test_run_auto_compact_apply_continues_once_after_continue_packet(tmp_path):
     """LLM: Tests opt-in auto compact apply performs one guarded continuation turn."""
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
-    agent.config.memory_compact_context_window_tokens = 20
+    agent.backend.context_window_tokens = 20
     agent.config.memory_compact_auto_allow_apply = True
 
     result = agent.run(
@@ -143,8 +255,8 @@ def test_run_auto_compact_apply_continues_once_after_continue_packet(tmp_path):
         recovery_next_actions=["continue only after reading continue packet"],
     )
 
-    assert result.memory_compact_auto_status == "skipped_after_guarded_continuation"
-    assert result.memory_compact_auto_next_action == "continue_without_compact"
+    assert result.memory_compact_auto_status == "returned_after_continuation"
+    assert result.memory_compact_auto_next_action == "return_result"
     assert result.memory_compact_auto_allowed_to_continue is False
     assert result.memory_compact_auto_continue_ready is False
     assert result.memory_compact_auto_tool_execution == "none"
@@ -161,7 +273,11 @@ def test_run_auto_compact_apply_continues_with_home_entries_and_packet(tmp_path)
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(home)), tmp_path)
     backend = CaptureBackend()
     agent.backend = backend
-    agent.config.memory_compact_context_window_tokens = 20
+    agent.backend.context_window_tokens = 20_000
+    backend.usages = [
+        {"input_tokens": 19_000, "output_tokens": 100},
+        {"input_tokens": 500, "output_tokens": 100},
+    ]
     agent.config.memory_compact_auto_allow_apply = True
     agent.home_paths.agents_md.write_text("执行制度：每轮先读 AGENTS。\n", encoding="utf-8")
     agent.home_paths.soul_md.write_text("人格：稳住状态继续干。\n", encoding="utf-8")
@@ -191,28 +307,31 @@ def test_run_auto_compact_apply_continues_with_home_entries_and_packet(tmp_path)
     assert "Do not redo completed work" in second_prompt
 
 
-# LLM: Long unattended runs need bounded multi-hop compact continuation, not only a single resumed turn.
-# 函数用途: 验证配置允许时主代理可以连续多次 compact/apply/resume，并由 max depth 防止死循环。
-def test_run_auto_compact_apply_can_continue_multiple_guarded_turns(tmp_path):
+# LLM: Auto continuation must not recursively compact its own recovery prompt when no tool progress happened.
+# 函数用途: 验证去掉最大深度后，普通阈值不会让无工具续跑轮无限自我 compact。
+def test_run_auto_compact_apply_returns_after_no_tool_continuation(tmp_path):
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
             memory_compact_auto_allow_apply=True,
-            memory_compact_auto_continue_max_depth=3,
         ),
         tmp_path,
     )
     backend = CaptureBackend()
     agent.backend = backend
-    agent.config.memory_compact_context_window_tokens = 20
+    agent.backend.context_window_tokens = 20_000
+    backend.usages = [
+        {"input_tokens": 19_000, "output_tokens": 100},
+        {"input_tokens": 500, "output_tokens": 100},
+    ]
 
     result = agent.run(
-        "验收: multi-hop compact packet exists\n约束: do not redo completed work\n测试: focused multi compact",
+        "验收: compact packet exists\n约束: do not redo completed work\n测试: focused compact",
         save=True,
-        request_id="req-auto-multi-compact",
-        run_id="run-auto-multi-compact",
-        task_id="run-auto-multi-compact",
-        recovery_next_actions=["continue from compact packet until max depth"],
+        request_id="req-auto-return-compact",
+        run_id="run-auto-return-compact",
+        task_id="run-auto-return-compact",
+        recovery_next_actions=["continue from compact packet"],
     )
 
     apply_dir = tmp_path / "memory_archive" / "compact_applies"
@@ -221,11 +340,11 @@ def test_run_auto_compact_apply_can_continue_multiple_guarded_turns(tmp_path):
         for path in apply_dir.glob("apply-*.json")
         if not any(marker in path.name for marker in (".apply_bundle.", ".restore_refs.", ".work_state_snapshot.", ".self_check"))
     ]
-    assert len(backend.prompts) == 4
-    assert len(metadata_files) >= 3
+    assert len(backend.prompts) == 2
+    assert len(metadata_files) >= 1
     assert result.memory_compact_auto_continued is True
-    assert result.memory_compact_auto_continuation_depth == 3
-    assert result.memory_compact_auto_status == "skipped_after_guarded_continuation"
+    assert result.memory_compact_auto_continuation_depth == 1
+    assert result.memory_compact_auto_status == "returned_after_continuation"
 
 
 # LLM: blocked compact resumes must not trigger an automated second model turn.
@@ -234,7 +353,8 @@ def test_run_auto_compact_apply_does_not_continue_when_guard_blocks(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
     backend = CaptureBackend()
     agent.backend = backend
-    agent.config.memory_compact_context_window_tokens = 20
+    agent.backend.context_window_tokens = 20_000
+    backend.usages = [{"input_tokens": 19_000, "output_tokens": 100}]
     agent.config.memory_compact_auto_allow_apply = True
 
     result = agent.run("请生成足够长的 compact 提示触发内容", save=True, request_id="req-blocked-continuation")
@@ -247,7 +367,7 @@ def test_run_auto_compact_apply_does_not_continue_when_guard_blocks(tmp_path):
 def test_run_no_save_blocks_opt_in_auto_compact_apply(tmp_path):
     """LLM: Tests that save=False remains a hard persistence boundary for auto compact apply."""
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
-    agent.config.memory_compact_context_window_tokens = 20
+    agent.backend.context_window_tokens = 20
     agent.config.memory_compact_auto_allow_apply = True
 
     result = agent.run(
@@ -278,14 +398,13 @@ def test_run_no_save_does_not_write_raw_archive(tmp_path):
     assert not (tmp_path / "memory" / "hooks").exists()
 
 
-def test_run_can_force_recovery_snapshot_without_raw_archive(tmp_path):
-    """LLM: Tests that recovery_snapshot=True forces a snapshot without writing raw archive events."""
+def test_run_no_save_does_not_write_runtime_fact(tmp_path):
+    """LLM: Tests that save=False does not write runtime fact sources."""
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
 
     result = agent.run(
         "子代理已完成，请写恢复锚点",
         save=False,
-        recovery_snapshot=True,
         request_id="req-1",
         run_id="subagent-1",
         task_id="subagent-1",
@@ -295,14 +414,10 @@ def test_run_can_force_recovery_snapshot_without_raw_archive(tmp_path):
     )
 
     assert result.archive_events == 0
-    assert result.recovery_snapshot_path
+    assert result.recovery_snapshot_path == ""
     assert not (tmp_path / "memory" / "raw").exists()
-    snapshots = _read_jsonl(Path(result.recovery_snapshot_path))
-    assert snapshots[0]["dispatch_events"][0]["request_id"] == "req-1"
-    assert snapshots[0]["dispatch_events"][0]["run_id"] == "subagent-1"
-    assert snapshots[0]["task_refs"] == ["subagent-1"]
-    assert snapshots[0]["content_paths"] == ["subagents/subagent-1/STATUS.md"]
-    assert snapshots[0]["next_actions"] == ["读取 STATUS.md 后继续验收"]
+    assert not (tmp_path / "memory" / "hooks").exists()
+    assert not (tmp_path / "memory_archive" / "runtime_facts").exists()
 
 
 def test_auto_resume_context_is_disabled_by_default(tmp_path):

@@ -49,8 +49,6 @@ _TIMEOUT_INT_FIELDS = (
     ("memory_archive_preview_level_3_chars", 0, None),
     ("memory_archive_summary_chars", 0, None),
     ("memory_archive_search_file_limit", 0, None),
-    ("memory_live_archive_checkpoint_rounds", 0, None),
-    ("memory_live_archive_checkpoint_seconds", 0, None),
     ("memory_query_default_limit", 0, None),
     ("memory_query_default_page_size", 1, None),
     ("memory_query_content_preview_chars", 0, None),

@@ -147,6 +147,5 @@ def _run_subagent_model_turn(agent, prompt: str, context):
         task_id=context.root_id or context.run_id,
         system_prompt_override=subagent_runner_system_prompt(context),
         source="subagent_run_model_turn",
-        recovery_snapshot=False,
         context_scope="task_local",
     )
