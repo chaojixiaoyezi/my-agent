@@ -15,7 +15,7 @@ from .orchestration_create_constraints import (
 )
 from .orchestration_create_context import create_context_manifest, create_context_packs
 from .orchestration_workflow_mode import tool_workflow_mode as _tool_workflow_mode
-from .parameters import _positive_int, _string_list
+from .parameters import _bool_param, _positive_int, _string_list
 from .runner_ref_fields import params_input_refs, params_output_refs
 from .spawn_role_seed import is_explicit_root_role
 
@@ -169,6 +169,9 @@ def _create_attributes(raw_params: dict[str, object], agent=None) -> dict[str, o
         value = raw_params.get(key)
         if isinstance(value, dict) and key not in attrs:
             attrs[key] = dict(value)
+    for key in _BOOL_ATTRIBUTE_FIELDS:
+        if key in raw_params and key not in attrs:
+            attrs[key] = _bool_param(raw_params.get(key), default=False)
     _add_derived_output_refs(attrs, raw_params)
     _add_current_conversation_attrs(attrs, agent)
     return attrs
@@ -241,11 +244,15 @@ _LIST_ATTRIBUTE_FIELDS = (
     "required_files",
     "required_qa_roles",
     "required_read_paths",
+    "replacement_for_run_ids",
+    "replaces_run_ids",
+    "supersedes_run_ids",
     "workflow_risk_tags",
 )
 _OUTPUT_REF_ATTRIBUTE_FIELDS = frozenset({"artifact_refs", "output_files", "output_refs"})
 _INPUT_REF_ATTRIBUTE_FIELDS = frozenset({"input_files", "input_refs", "required_read_paths"})
 _MAPPING_ATTRIBUTE_FIELDS = ("required_content_files",)
+_BOOL_ATTRIBUTE_FIELDS = ("defer_start",)
 _SCALAR_ATTRIBUTE_FIELDS = (
     "preferred_workflow_template",
     "subagent_workflow_template",

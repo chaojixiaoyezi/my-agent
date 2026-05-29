@@ -140,8 +140,11 @@ before changing code.
 - All file writes must go through a repository or the write-boundary utility
   (`tooling/filesystem.py`).  Business code must **not** call `Path.write_text()` or
   `open(..., "w")` directly.
-- The write boundary enforces: workspace root containment, no path traversal, no
-  system path writes.  See `FILE_WRITING_RULES.md` for the full policy.
+- The write boundary no longer treats `workspace_root` as the only valid output
+  location.  `workspace_root` is the default cwd and relative-path base; ordinary
+  absolute user output paths are allowed unless they fall under
+  `path_dangerous_roots` while `path_access_mode=normal`.  See
+  `FILE_WRITING_RULES.md` for the full policy.
 - Agent shell access should use the single model-facing `run_command` tool.
   Command permissions come from the runtime `access_mode` config, not from
   model-authored `grant_id`, `command_allowlist`, `path_scope`, `apply`, or output
@@ -237,6 +240,15 @@ before changing code.
 - 同一个产物移动、重建、修复或格式转换时，应更新同一个 `artifact_id` 的最新
   registry 记录，而不是制造一串互相竞争的“口头路径”。旧 `artifact_refs`
   字段只作为兼容投影存在，新增逻辑不得把它当作比 registry 更权威的事实源。
+- 一个逻辑产物可以是一组文件。比如静态网站可以由 `index.html`、CSS、JS 和本地数据组成；
+  这类产物要登记为同一个 `artifact_id` 的 file group。closeout 只读取
+  `data/artifacts/registry.jsonl` 里的结构化文件组，不允许再靠扩展名扫描后
+  把“多文件产物”误判成“候选太多”，也不允许新增第二套 artifact manifest 账本。
+- `.agent_delivery/closeout.json` 是系统验收报告，不是产物账本；模型手写的
+  `closeout.json`、`.artifact_manifest.json`、`artifacts_manifest.json` 都不能成为交付事实源。
+- 如果任务明确不需要落盘产物，应使用 `requires_artifact: false` 或
+  `delivery_mode: message`。这类任务可以通过 closeout 结束，但不能把“无产物”
+  误报成 `ARTIFACT_REF_MISSING`。
 - 最终交付物的系统硬验收只守客观事实：路径边界、存在性、非空、文件签名、
   文件包是否能被真实 reader 打开、hash/registry 状态和工具运行错误。文档厚度、
   覆盖比例、证据充分性、推荐理由质量、字段是否“有用”等业务质量，只能作为

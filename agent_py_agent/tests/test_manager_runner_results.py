@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import time
 
+from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.subagents.models import CapabilityRequest, SubAgentParsedOutput
 from agent_py_agent.tests.support.manager_runner_results import _rrr, mock_manager, sample_task
 
@@ -66,6 +67,49 @@ def test_record_runner_result_with_parsed_output(mock_manager, sample_task):
 
     assert result.ok is True
     assert result.structured_output_found is True
+
+
+def test_record_runner_result_wakes_bound_parent_thread(mock_manager, sample_task, tmp_path):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    store.bind_task({'thread_id': thread.thread_id, 'task_id': sample_task.id, 'goal': sample_task.goal, 'now': 2.0})
+    mock_manager.conversation_store = store
+    mock_manager._tasks[sample_task.id] = sample_task
+
+    mock_manager.record_runner_result(_rrr(
+        run_id=sample_task.id,
+        dry_run=False,
+        ok=True,
+        message="完成",
+        status="DONE",
+        verification_status="VERIFIED",
+    ))
+
+    signals = store.pending_wake_signals()
+    links = store.task_links(thread.thread_id)
+    assert links[0].status == "DONE"
+    assert len(signals) == 1
+    assert signals[0].reason == "subagent_runner_finished"
+    assert signals[0].root_task_id == sample_task.id
+    assert sample_task.id in signals[0].summary
+
+
+def test_record_runner_result_dry_run_does_not_wake_parent_thread(mock_manager, sample_task, tmp_path):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    store.bind_task({'thread_id': thread.thread_id, 'task_id': sample_task.id, 'goal': sample_task.goal, 'now': 2.0})
+    mock_manager.conversation_store = store
+    mock_manager._tasks[sample_task.id] = sample_task
+
+    mock_manager.record_runner_result(_rrr(
+        run_id=sample_task.id,
+        dry_run=True,
+        ok=True,
+        message="预览",
+        status="DONE",
+    ))
+
+    assert store.pending_wake_signals() == []
 
 
 # LLM: closeout_for_all_task_nodes writes feedback only; it must not revive parent acceptance states.

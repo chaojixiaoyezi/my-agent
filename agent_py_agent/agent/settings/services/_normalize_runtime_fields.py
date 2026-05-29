@@ -5,8 +5,7 @@
 
 from __future__ import annotations
 
-import os
-
+from ...path_access_policy import normalize_path_access_mode
 from ._coercion import CoercionService
 from .runtime_tool_field_specs import TOOL_INT_FIELDS
 
@@ -67,6 +66,7 @@ class ToolFieldsService:
         warnings = _normalize_tool_int_fields(out, defaults)
         warnings.extend(_normalize_tool_bool_fields(out, defaults))
         warnings.extend(_normalize_tool_catalog_fields(out, defaults))
+        warnings.extend(_normalize_path_access_fields(out, defaults))
         warnings.extend(_normalize_command_access_mode(out, defaults))
         warnings.extend(_normalize_dispatch_watch_interval(out, defaults))
         return out, warnings
@@ -103,6 +103,24 @@ def _normalize_tool_catalog_fields(out: dict[str, object], defaults: object) -> 
     out["tool_catalog_categories"] = _normalize_string_list(
         out.get("tool_catalog_categories", defaults.tool_catalog_categories)
     )
+    return warnings
+
+
+# LLM: path_access_mode is shared by main agents, subagents, and filesystem/shell tools.
+# 函数用途: 归一化路径访问策略；normal 只挡危险目录，full 表示路径全开。
+def _normalize_path_access_fields(out: dict[str, object], defaults: object) -> list[str]:
+    raw_mode = out.get("path_access_mode", defaults.path_access_mode)
+    mode = normalize_path_access_mode(raw_mode)
+    warnings: list[str] = []
+    normalized_raw = str(raw_mode or "").strip().lower().replace("_", "-")
+    known_values = {"normal", "restricted", "workspace-write", "full", "full-access", "all", "open", ""}
+    if normalized_raw not in known_values:
+        warnings.append(
+            f"path_access_mode: unknown value {raw_mode!r}; using {mode!r}"
+        )
+    out["path_access_mode"] = mode
+    roots = _normalize_string_list(out.get("path_dangerous_roots", defaults.path_dangerous_roots))
+    out["path_dangerous_roots"] = roots or list(defaults.path_dangerous_roots)
     return warnings
 
 
@@ -185,48 +203,6 @@ class SubagentBasicFieldsService:
         return out, warnings
 
 
-# LLM: AdapterFieldsService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: AdapterFieldsService 封装 配置系统 的一组相关操作，供上层组合调用。
-class AdapterFieldsService:
-    """Normalize adapter-related config fields (feishu, qq, etc.)."""
-
-    # LLM: AdapterFieldsService.normalize 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 归一化 AdapterFieldsService 负责的配置字段并追加告警。
-    @staticmethod
-    def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
-        """Normalize adapter-related config fields."""
-        warnings: list[str] = []
-        out = dict(data)
-
-        # LLM: AdapterFieldsService.apply 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-        # 函数用途: 把 AdapterFieldsService 的归一化结果写回配置对象。
-        def apply(key: str, coerced: object, warn: str | None) -> None:
-            out[key] = coerced
-            if warn:
-                warnings.append(warn)
-
-        for key in ("feishu_app_id", "feishu_app_secret", "feishu_verification_token", "feishu_encrypt_key"):
-            out[key] = _string_config_value(out.get(key, defaults.feishu_app_id if key == "feishu_app_id" else ""))
-
-        # feishu_callback_port
-        v, w = CoercionService.coerce_int(
-            "feishu_callback_port", out.get("feishu_callback_port"),
-            defaults.feishu_callback_port, min_val=1024, max_val=65535,
-        )
-        apply("feishu_callback_port", v, w)
-
-        # QQ fields (support env var override)
-        for key in ("qq_app_id", "qq_app_secret"):
-            env_key = key.upper()
-            env_val = os.environ.get(env_key, "")
-            if env_val:
-                out[key] = env_val
-            else:
-                out[key] = _string_config_value(out.get(key, defaults.qq_app_id if key == "qq_app_id" else ""))
-
-        return out, warnings
-
-
 # LLM: _string_config_value 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
 # 函数用途: 完成 配置系统 中的 string_config_value 步骤，并保持调用方依赖的数据形状。
 def _string_config_value(value: object) -> str:
@@ -243,56 +219,6 @@ def _normalize_string_list(value: object) -> list[str]:
     else:
         return []
     return [str(item).strip() for item in raw_items if item is not None and str(item).strip()]
-
-
-# LLM: UserFieldsService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
-# 类用途: UserFieldsService 封装 配置系统 的一组相关操作，供上层组合调用。
-class UserFieldsService:
-    """Normalize user-related config fields."""
-
-    # LLM: UserFieldsService.normalize 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 归一化 UserFieldsService 负责的配置字段并追加告警。
-    @staticmethod
-    def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
-        """Normalize user-related config fields."""
-        warnings: list[str] = []
-        out = dict(data)
-
-        # LLM: UserFieldsService.apply 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
-        # 函数用途: 把 UserFieldsService 的归一化结果写回配置对象。
-        def apply(key: str, coerced: object, warn: str | None) -> None:
-            out[key] = coerced
-            if warn:
-                warnings.append(warn)
-
-        # user_id - validate non-empty string
-        raw_user_id = out.get("user_id", defaults.user_id)
-        if isinstance(raw_user_id, str) and raw_user_id.strip():
-            out["user_id"] = raw_user_id.strip()
-        else:
-            out["user_id"] = defaults.user_id
-            warnings.append(f"user_id: expected a non-empty string, got {raw_user_id!r}; using default")
-
-        # user_data_root - validate non-empty string
-        raw_user_data_root = out.get("user_data_root", defaults.user_data_root)
-        if isinstance(raw_user_data_root, str) and raw_user_data_root.strip():
-            out["user_data_root"] = raw_user_data_root.strip()
-        else:
-            out["user_data_root"] = defaults.user_data_root
-            warnings.append(f"user_data_root: expected a non-empty string, got {raw_user_data_root!r}; using default")
-
-        # auth_enabled
-        v, w = CoercionService.coerce_bool("auth_enabled", out.get("auth_enabled"), defaults.auth_enabled)
-        apply("auth_enabled", v, w)
-
-        # admin_user_id
-        raw_admin = out.get("admin_user_id", defaults.admin_user_id)
-        if isinstance(raw_admin, str) and raw_admin.strip():
-            out["admin_user_id"] = raw_admin.strip()
-        else:
-            out["admin_user_id"] = defaults.admin_user_id
-
-        return out, warnings
 
 
 # LLM: SubagentAdvancedFieldsService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。

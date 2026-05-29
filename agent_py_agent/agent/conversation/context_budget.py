@@ -25,6 +25,17 @@ class BackgroundContextBudget:
 DEFAULT_BACKGROUND_CONTEXT_BUDGET = BackgroundContextBudget()
 
 
+# LLM: BackgroundContextPayloadRequest keeps prompt-copy inputs together for future budget fields.
+# 类用途: 保存后台 prompt 裁剪所需账本、唤醒、代理树、恢复快照和预算。
+@dataclass(frozen=True)
+class BackgroundContextPayloadRequest:
+    bundle: dict[str, Any]
+    pending_wake_signals: list[dict[str, Any]]
+    agent_tree: dict[str, Any]
+    recovery_snapshot: dict[str, Any] | None = None
+    budget: BackgroundContextBudget | None = None
+
+
 # LLM: background_context_budget_from_config keeps background prompt clipping tied to AgentConfig.
 # 函数用途: 从主配置读取后台上下文裁剪预算；没有配置对象时使用 schema 默认预算。
 def background_context_budget_from_config(config: object | None) -> BackgroundContextBudget:
@@ -41,30 +52,23 @@ def background_context_budget_from_config(config: object | None) -> BackgroundCo
 
 # LLM: bounded_background_context_payload trims only prompt copies; durable stores remain untouched.
 # 函数用途: 生成后台主代理 prompt 使用的 bounded context payload。
-def bounded_background_context_payload(
-    *,
-    bundle: dict[str, Any],
-    pending_wake_signals: list[dict[str, Any]],
-    agent_tree: dict[str, Any],
-    recovery_snapshot: dict[str, Any] | None = None,
-    budget: BackgroundContextBudget | None = None,
-) -> dict[str, Any]:
-    limits = budget or DEFAULT_BACKGROUND_CONTEXT_BUDGET
+def bounded_background_context_payload(request: BackgroundContextPayloadRequest) -> dict[str, Any]:
+    limits = request.budget or DEFAULT_BACKGROUND_CONTEXT_BUDGET
     return {
-        "thread": _bounded_value(bundle.get("thread"), limits),
-        "messages": [_bounded_message(item, limits) for item in _list(bundle.get("messages"))],
-        "tasks": [_bounded_value(item, limits) for item in _list(bundle.get("tasks"))],
+        "thread": _bounded_value(request.bundle.get("thread"), limits),
+        "messages": [_bounded_message(item, limits) for item in _list(request.bundle.get("messages"))],
+        "tasks": [_bounded_value(item, limits) for item in _list(request.bundle.get("tasks"))],
         "channel_bindings": [
-            _bounded_value(item, limits) for item in _list(bundle.get("channel_bindings"))
+            _bounded_value(item, limits) for item in _list(request.bundle.get("channel_bindings"))
         ],
         "observations": [
-            _bounded_observation(item, limits) for item in _list(bundle.get("observations"))
+            _bounded_observation(item, limits) for item in _list(request.bundle.get("observations"))
         ],
         "pending_wake_signals": [
-            _bounded_observation(item, limits) for item in _list(pending_wake_signals)
+            _bounded_observation(item, limits) for item in _list(request.pending_wake_signals)
         ],
-        "recovery_snapshot": _bounded_value(recovery_snapshot or {}, limits),
-        "agent_tree": _bounded_value(agent_tree, limits),
+        "recovery_snapshot": _bounded_value(request.recovery_snapshot or {}, limits),
+        "agent_tree": _bounded_value(request.agent_tree, limits),
     }
 
 
@@ -173,6 +177,7 @@ def _config_int(config: object, key: str, fallback: int) -> int:
 
 __all__ = [
     "BackgroundContextBudget",
+    "BackgroundContextPayloadRequest",
     "DEFAULT_BACKGROUND_CONTEXT_BUDGET",
     "background_context_budget_from_config",
     "bounded_background_context_payload",

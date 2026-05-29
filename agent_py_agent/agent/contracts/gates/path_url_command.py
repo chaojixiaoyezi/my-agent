@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from ...path_access_policy import PathAccessPolicy
 from .command_policy import evaluate_command_policy
 from .models import GateDecision, GateFinding
 
@@ -24,9 +25,20 @@ class PathUrlCommandFacts:
     payload: object
     workspace_root: Path
     workspace_roots: list[Path] | None = None
+    path_access_mode: str = "normal"
+    path_dangerous_roots: Iterable[str] = ()
     allowed_private_hosts: Iterable[str] = ()
     allow_shell_operators: bool = False
     allowed_commands: Iterable[str] = ()
+
+
+@dataclass(frozen=True)
+class PathFindingRequest:
+    field: str
+    raw_path: object
+    roots: list[Path]
+    path_policy: PathAccessPolicy
+    tool_name: str = ""
 
 
 # LLM: evaluate_path_url_command_gate checks structured path, URL, and command fields without reading prose.
@@ -34,8 +46,12 @@ class PathUrlCommandFacts:
 def evaluate_path_url_command_gate(facts: PathUrlCommandFacts) -> GateDecision:
     data = facts.payload if isinstance(facts.payload, Mapping) else {}
     roots = _normalized_roots(facts.workspace_root, facts.workspace_roots)
+    path_policy = PathAccessPolicy.from_values(
+        mode=facts.path_access_mode,
+        dangerous_roots=facts.path_dangerous_roots,
+    )
     findings: list[GateFinding] = []
-    _collect_path_findings(data, roots, findings)
+    _collect_path_findings(data, roots, path_policy, findings)
     _collect_url_findings(data, {_normalize_host(item) for item in facts.allowed_private_hosts}, findings)
     _collect_command_findings(data, facts.allow_shell_operators, facts.allowed_commands, findings)
     if findings:
@@ -45,10 +61,15 @@ def evaluate_path_url_command_gate(facts: PathUrlCommandFacts) -> GateDecision:
 
 # LLM: _collect_path_findings validates only known path fields and follows symlinks via Path.resolve.
 # 函数用途: 把路径字段归一到 workspace roots 内；解析后出界说明 symlink 或路径越权。
-def _collect_path_findings(data: Mapping[object, object], roots: list[Path], findings: list[GateFinding]) -> None:
-    allow_missing_escape = str(data.get("tool") or "").strip() in {"read_file", "list_files", "search_text"}
+def _collect_path_findings(
+    data: Mapping[object, object],
+    roots: list[Path],
+    path_policy: PathAccessPolicy,
+    findings: list[GateFinding],
+) -> None:
+    tool_name = _text(data.get("tool")).strip()
     for key, raw_path in _matching_values(data, _PATH_KEYS):
-        finding = _path_finding(key, raw_path, roots, allow_missing_escape=allow_missing_escape)
+        finding = _path_finding(PathFindingRequest(key, raw_path, roots, path_policy, tool_name))
         if finding:
             findings.append(finding)
 
@@ -80,27 +101,29 @@ def _collect_command_findings(
 
 # LLM: _path_finding checks one path-like field value.
 # 函数用途: 把路径解析、symlink 判断和 workspace 边界判断封装成单值校验。
-def _path_finding(
-    field: str,
-    raw_path: object,
-    roots: list[Path],
-    *,
-    allow_missing_escape: bool = False,
-) -> GateFinding | None:
-    text = _text(raw_path)
+def _path_finding(request: PathFindingRequest) -> GateFinding | None:
+    text = _text(request.raw_path)
     if not text:
         return None
     target = Path(text)
-    candidate = target if target.is_absolute() else roots[0] / target
+    candidate = target if target.is_absolute() else request.roots[0] / target
     resolved = _resolve_path(candidate)
     if resolved is None:
-        return GateFinding("PATH_RESOLUTION_FAILED", evidence={"field": field})
-    if _under_any_root(resolved, roots):
-        return None
-    if allow_missing_escape and not resolved.exists():
-        return None
-    code = "PATH_SYMLINK_ESCAPE_BLOCKED" if _under_any_root_lexical(candidate.absolute(), roots) else "PATH_WORKSPACE_ESCAPE_BLOCKED"
-    return GateFinding(code, evidence={"field": field, "resolved_path": str(resolved)})
+        return GateFinding("PATH_RESOLUTION_FAILED", evidence={"field": request.field})
+    decision = request.path_policy.check(resolved)
+    if not decision.allowed:
+        return GateFinding(decision.code or "PATH_ACCESS_DENIED", evidence={
+            "field": request.field,
+            "resolved_path": str(resolved),
+            "dangerous_root": decision.dangerous_root,
+        })
+    if (
+        request.tool_name not in {"write_file", "apply_patch"}
+        and not _under_any_root(resolved, request.roots)
+        and _lexically_under_any_root(candidate, request.roots)
+    ):
+        return GateFinding("PATH_SYMLINK_ESCAPE_BLOCKED", evidence={"field": request.field, "resolved_path": str(resolved)})
+    return None
 
 
 # LLM: _url_finding checks one URL-like field value.
@@ -157,6 +180,27 @@ def _resolve_path(path: Path) -> Path | None:
         return path.resolve(strict=False)
     except (OSError, RuntimeError):
         return None
+
+
+def _under_any_root(path: Path, roots: list[Path]) -> bool:
+    candidate = path.resolve(strict=False)
+    for root in roots:
+        try:
+            candidate.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _lexically_under_any_root(path: Path, roots: list[Path]) -> bool:
+    for root in roots:
+        try:
+            path.absolute().relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 # LLM: _is_private_host handles localhost, IPv4 shorthand, IPv6, private, loopback, and link-local hosts.

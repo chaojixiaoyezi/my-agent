@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _text_param
-from ._filesystem_read import FileSystemTool
+from ._filesystem_read import FileSystemAccessOptions, FileSystemTool
 from ._filesystem_write import _atomic_write_bytes
 from .models import ToolExecutionResult, ToolSpec
 
@@ -15,8 +15,17 @@ from .models import ToolExecutionResult, ToolSpec
 class ApplyPatchTool(FileSystemTool):
     # LLM: ApplyPatchTool provides one generic edit surface instead of many special file mutation tools.
     # 函数用途: 用 会话运行时 风格补丁安全地新增、删除、更新或移动文本文件。
-    def __init__(self, workspace_root: Path, workspace_roots: list[Path] | None = None):
-        super().__init__(workspace_root, workspace_roots)
+    def __init__(
+        self,
+        workspace_root: Path,
+        workspace_roots: list[Path] | None = None,
+        access_options: FileSystemAccessOptions | None = None,
+    ):
+        super().__init__(
+            workspace_root,
+            workspace_roots,
+            access_options,
+        )
         self.spec = ToolSpec(
             name="apply_patch",
             category="filesystem",

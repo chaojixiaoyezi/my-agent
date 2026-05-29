@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import time as time_module
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..action_protocol import RunScope
@@ -80,6 +80,8 @@ class ToolLoopExecuteParams:
     executed_tools: list
     archive_tool_calls: list
     tool_rounds: int = 0
+    save: bool | None = None
+    live_archive_state: dict[str, object] = field(default_factory=dict)
     system_prompt_override: str | None = None
     context_scope: str = "default"
     delivery_contract: dict | None = None

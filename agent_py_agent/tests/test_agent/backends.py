@@ -239,8 +239,9 @@ class BoundaryWriteSubagentBackend(BaseBackend):
 
     name = "boundary_write_subagent_backend"
 
-    def __init__(self):
+    def __init__(self, target_path: str = "README.md"):
         self.prompts: list[str] = []
+        self.target_path = target_path
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.prompts.append(prompt)
@@ -249,13 +250,13 @@ class BoundaryWriteSubagentBackend(BaseBackend):
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
-                    '{"tool": "write_file", "path": "README.md", "content": "bad"}\n'
+                    f'{{"tool": "write_file", "path": "{self.target_path}", "content": "bad"}}\n'
                     "[/TOOL_CALL]"
                 ),
                 backend=self.name,
             )
 
-        assert "写入被阻止" in prompt
+        assert "PATH_DANGEROUS_ROOT_BLOCKED" in prompt or "runtime gate denied" in prompt
         return ModelResponse(
             text=(
                 "[SUBAGENT_RESULT]\n"

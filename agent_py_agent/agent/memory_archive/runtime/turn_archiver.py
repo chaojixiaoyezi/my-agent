@@ -161,6 +161,8 @@ def _tool_events(session_id: str, turn: TurnData, ctx: RunContext) -> list[RawMe
     """Build tool events for one turn."""
     events: list[RawMemoryEvent] = []
     for index, tool_call in enumerate(turn.tool_calls, start=1):
+        if _already_live_archived(tool_call):
+            continue
         events.append(
             _tool_event(
                 EventIdentity(
@@ -182,6 +184,10 @@ def _tool_events(session_id: str, turn: TurnData, ctx: RunContext) -> list[RawMe
         )
 
     return events
+
+
+def _already_live_archived(tool_call: dict[str, Any]) -> bool:
+    return bool(tool_call.get("raw_archive_event_id") or tool_call.get("raw_archive_path"))
 
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 ArchiveTurnContext 前先核对字段语义、序列化形态和调用方假设。

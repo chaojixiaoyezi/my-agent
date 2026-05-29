@@ -19,9 +19,10 @@ from agent_py_agent.agent.artifacts.shell_protection import (
 from agent_py_agent.agent.contracts.gates.command_policy import (
     evaluate_command_policy,
 )
+from agent_py_agent.agent.path_access_policy import PathAccessPolicy
 
 from .models import BaseTool, ToolExecutionResult, ToolSpec
-from .shell_delete_policy import delete_target_access_error
+from .shell_delete_policy import DeleteAccessRequest, delete_target_access_error
 
 _MAX_COMMAND_CHARS = 2000
 _DEFAULT_MAX_OUTPUT_CHARS = 12_000
@@ -36,6 +37,8 @@ _TOOL_DEADLINE_MARGIN_SECONDS_ENV = "MY_AGENT_TOOL_DEADLINE_MARGIN_SECONDS"
 @dataclass(frozen=True)
 class ShellToolOptions:
     workspace_roots: list[Path] | None = None
+    path_access_mode: str = "normal"
+    path_dangerous_roots: list[str] | None = None
     access_mode: str = _DEFAULT_ACCESS_MODE
     default_timeout: int = 30
     max_output_chars: int = _DEFAULT_MAX_OUTPUT_CHARS
@@ -142,6 +145,7 @@ def _working_dir_from_params(
     workspace_root: Path,
     *,
     workspace_roots: list[Path] | None = None,
+    path_access_policy: PathAccessPolicy | None = None,
     access_mode: str = _DEFAULT_ACCESS_MODE,
 ) -> Path | ToolExecutionResult:
     working_dir = str(params.get("working_dir", "")).strip()
@@ -154,6 +158,17 @@ def _working_dir_from_params(
     roots = workspace_roots or [workspace_root]
     if _path_inside_any_root(target, roots):
         return target.resolve()
+    if mode == "workspace-write":
+        policy = path_access_policy or PathAccessPolicy.from_values()
+        decision = policy.check(target)
+        if decision.allowed:
+            return target.resolve()
+        return ToolExecutionResult(
+            "run_command",
+            False,
+            f"COMMAND_ACCESS_DENIED: {decision.message}",
+            error_code=decision.code or "PATH_ACCESS_DENIED",
+        )
     return ToolExecutionResult(
         "run_command",
         False,
@@ -256,6 +271,10 @@ class ShellTool(BaseTool):
         options = options or ShellToolOptions()
         self.workspace_root = workspace_root.resolve()
         self.workspace_roots = [root.resolve() for root in (options.workspace_roots or [self.workspace_root])]
+        self.path_access_policy = PathAccessPolicy.from_values(
+            mode=options.path_access_mode,
+            dangerous_roots=options.path_dangerous_roots,
+        )
         self.access_mode = _normalize_access_mode(options.access_mode)
         self.default_timeout = options.default_timeout
         self.max_output_chars = max(0, int(options.max_output_chars))
@@ -305,11 +324,20 @@ class ShellTool(BaseTool):
             params,
             self.workspace_root,
             workspace_roots=self.workspace_roots,
+            path_access_policy=self.path_access_policy,
             access_mode=effective_access_mode,
         )
         if isinstance(target, ToolExecutionResult):
             return target
-        delete_error = delete_target_access_error(command, target, self.workspace_roots, effective_access_mode)
+        delete_error = delete_target_access_error(
+            DeleteAccessRequest(
+                command=command,
+                cwd=target,
+                roots=self.workspace_roots,
+                access_mode=effective_access_mode,
+                path_access_policy=self.path_access_policy,
+            )
+        )
         if delete_error:
             return ToolExecutionResult(self.spec.name, False, delete_error, error_code="PATH_OUTSIDE_WORKSPACE")
         return target

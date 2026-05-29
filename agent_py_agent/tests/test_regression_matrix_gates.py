@@ -307,20 +307,23 @@ class TestScenario9EquivalentActionBypass:
 # Scenario 10: scope creep
 # ============================================================
 class TestScenario10ScopeCreep:
-    def test_path_outside_workspace_blocked(self, tmp_path):
+    def test_dangerous_path_blocked(self, tmp_path):
         from agent_py_agent.agent.contracts.gates.path_url_command import (
             PathUrlCommandFacts,
             evaluate_path_url_command_gate,
         )
-        payload = {"path": "/etc/passwd"}
+        danger = tmp_path / "danger"
+        danger.mkdir()
+        payload = {"path": str(danger / "passwd")}
         facts = PathUrlCommandFacts(
             payload=payload,
             workspace_root=tmp_path,
             workspace_roots=[tmp_path],
+            path_dangerous_roots=[str(danger)],
         )
         decision = evaluate_path_url_command_gate(facts)
         assert not decision.allowed
-        assert any("PATH_WORKSPACE_ESCAPE" in f.code for f in decision.findings)
+        assert any("PATH_DANGEROUS_ROOT_BLOCKED" in f.code for f in decision.findings)
 
     def test_private_network_blocked(self):
         facts = NetworkSafetyFacts(

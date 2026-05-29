@@ -428,8 +428,8 @@ def test_agent_can_delegate_to_subagents_from_tool_call():
         assert "必须配合 apply=true" in blocked_dispatch.output
 
 
-def test_create_subagents_rejects_external_write_target_before_task_creation():
-    """LLM: write-capable subagents should fail early for absolute paths outside workspace."""
+def test_create_subagents_accepts_explicit_external_write_target_without_starting():
+    """LLM: explicit user output dirs are allowed unless they hit the dangerous-root policy."""
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         external_dir = workspace.parent / "external-target"
@@ -447,12 +447,13 @@ def test_create_subagents_rejects_external_write_target_before_task_creation():
                 "goal": "创建一个 txt 文件",
                 "allowed_tools": ["read_file", "write_file"],
                 "extra_write_roots": [str(external_dir)],
+                "defer_start": True,
             }
         )
 
-        assert not result.ok
-        assert "工作区外" in result.output
-        assert agent.subagents.list_runs() == []
+        assert result.ok
+        assert "工作区外" not in result.output
+        assert len(agent.subagents.list_runs()) == 1
 
 
 def test_repeated_orchestration_tool_call_is_not_executed_twice():

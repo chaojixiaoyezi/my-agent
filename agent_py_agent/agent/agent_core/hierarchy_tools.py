@@ -103,7 +103,7 @@ def _schedule_validation_error_message(exc: Exception) -> str:
     return (
         f"schedule_child_subagents 参数无效: {exc.__class__.__name__}。"
         "请检查 agent_name 是否带可识别后缀、children 是否为对象列表、"
-        "role/goal/allowed_tools/extra_write_roots 是否放在每个 child 对象里。"
+        "role/goal/allowed_tools/output_files 是否放在每个 child 对象里。"
     )
 
 

@@ -33,6 +33,8 @@ class RegistryToolInvokeRequest:
     workspace_roots: list[Path] | None
     allowed_tools: list[str] | None
     write_boundary: dict[str, object] | None
+    path_access_mode: str = "normal"
+    path_dangerous_roots: list[str] | None = None
 
 
 # LLM: invoke_registry_tool is the only place that dispatches a normalized registry payload.
@@ -53,6 +55,8 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolExecutionRes
         tool_params,
         workspace_root=request.workspace_root,
         workspace_roots=workspace_roots,
+        path_access_mode=request.path_access_mode,
+        path_dangerous_roots=request.path_dangerous_roots,
         write_boundary=request.write_boundary,
     )
     if boundary_error:

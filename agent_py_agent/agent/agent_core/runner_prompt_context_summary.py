@@ -36,14 +36,14 @@ def runner_context_summary_payload(context: SubAgentExecutionContext) -> dict[st
         "output_contract": _dict_prompt_subset(
             bundle.get("output_contract"),
             [
-                "product_write_roots",
+                "output_files",
+                "output_refs",
                 "required_files",
                 "required_file_refs",
                 "final_report_ref",
                 "agent_run_final_report_ref",
                 "output_json_ref",
                 "file_contract",
-                "write_contract",
             ],
         ),
         "pending_requests": list(context.pending_requests or [])[:3],
@@ -203,7 +203,7 @@ def _task_envelope_prompt_payload(envelope: object) -> dict[str, object]:
         ),
         "write_contract": _dict_prompt_subset(
             envelope.get("write_contract"),
-            ["product_write_roots", "allowed_write_roots", "forbidden_write_roots", "locked_files"],
+            ["output_files", "output_refs", "forbidden_write_roots", "locked_files"],
         ),
         "acceptance": _dict_prompt_subset(envelope.get("acceptance"), ["checks"]),
         "context_refs": _dict_prompt_subset(envelope.get("context_refs"), ["context_bundle", "execution_context"]),

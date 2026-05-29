@@ -18,7 +18,9 @@ subagent 的工单里会写清楚 `allowed_write_roots`、`forbidden_write_roots
 
 本轮处理：
 
-工具执行前新增了写入边界检查。只要是 subagent runner 带着 `write_boundary` 调用写文件工具，目标路径必须在 `allowed_write_roots` 里面，不能落在 `forbidden_write_roots` 里面，也不能碰 `locked_files`。如果越界，工具直接返回“写入被阻止”，不会真的写磁盘。
+后续调整：
+
+这条后来被证明太硬。用户明确要求写到某个目录时，`allowed_write_roots` 不能变成普通产物的白名单牢笼。现在改成主代理和子代理共用 `path_access_mode/path_dangerous_roots`：normal 模式只挡系统/密钥这类危险目录，普通外部输出目录允许；`allowed_write_roots` 只为旧任务记录兼容存在，新提示和新工具说明不再把它当权限来源，`forbidden_write_roots` 和 `locked_files` 仍可作为显式保护。
 
 ### 4. JSONL 追加写入要加锁
 

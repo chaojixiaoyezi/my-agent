@@ -160,7 +160,7 @@
 
 - 中文说明：真实复测 `20260518-main-foundation-natural-02` 没有超时，也生成了页面，但失败在“主代理没有真的派小傻妞”。根因不是模型懒，而是写入守卫把用户说的“链接不要写成 `/collections`”误判成“子代理要写到系统根目录 `/collections`”，于是 `create_subagents` 被拒绝，root 才绕回自己写文件。
 - 已实现：`orchestration_write_guard.py` 只把局部语境像“保存到/写到/在 X 创建”的路径当写入目标；`不要写 /collections`、`do not use /route` 这类否定示例不再触发越权写入拦截。
-- 已实现：仍保留真实越权保护；例如“保存到 `/tmp/outside/index.html`” 这类工作区外真实产物目标仍会被拒绝。
+- 后续调整：工作区外普通产物目录不再默认拒绝；用户明确要求保存到某个外部目录时，normal 模式只拒绝 `path_dangerous_roots` 下的系统/密钥目录。
 - 已测试：`python3 -m pytest -q agent_py_agent/tests/test_orchestration_write_guard.py agent_py_agent/tests/test_orchestration_create_subagents_guardrails.py agent_py_agent/tests/test_live_lab_natural_case.py --tb=short` -> `41 passed`。
 - 真实复测：`python3 scripts/live_agent_lab.py --suite natural --real-llm --runs-dir /Users/example/my_agent/live-lab-runs --run-id 20260518-main-foundation-natural-03 --timeout 360 --max-cycles 6 --max-runners 2` -> `LIVE_LAB_PASS`。主代理创建并 dispatch 了 `subagent-1779062763-f27692ec`，最终 `DONE/VERIFIED`，产物为 `lab_outputs/furniture-home/index.html`。
 

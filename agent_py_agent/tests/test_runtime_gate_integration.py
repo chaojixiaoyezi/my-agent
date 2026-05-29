@@ -163,8 +163,10 @@ def test_registry_execution_blocks_tool_with_incomplete_manifest(tmp_path):
 
 def test_registry_execution_blocks_path_gate_before_tool_execute(tmp_path):
     workspace = tmp_path / "workspace"
+    danger = tmp_path / "danger"
     workspace.mkdir()
-    outside = tmp_path / "outside.txt"
+    danger.mkdir()
+    outside = danger / "outside.txt"
     outside.write_text("secret", encoding="utf-8")
     (workspace / "link").symlink_to(outside)
 
@@ -174,6 +176,7 @@ def test_registry_execution_blocks_path_gate_before_tool_execute(tmp_path):
             tools={"echo": EchoTool()},
             workspace_root=workspace,
             workspace_roots=[workspace],
+            path_dangerous_roots=[str(danger)],
             expose_security_tools=False,
             security_tool_names=set(),
         )
@@ -181,7 +184,7 @@ def test_registry_execution_blocks_path_gate_before_tool_execute(tmp_path):
 
     assert result.ok is False
     assert result.result_envelope["runtime_gate"]["gate"] == "path_url_command"
-    assert result.result_envelope["runtime_gate"]["findings"][0]["code"] == "PATH_SYMLINK_ESCAPE_BLOCKED"
+    assert result.result_envelope["runtime_gate"]["findings"][0]["code"] == "PATH_DANGEROUS_ROOT_BLOCKED"
 
 
 def test_registry_execution_blocks_dangerous_real_tool_without_approval(tmp_path):

@@ -138,6 +138,8 @@ def _consistency_checks(
         {"name": "apply_bundle_loaded", "ok": bool(artifacts["apply_bundle"]), "severity": "hard"},
         {"name": "restore_refs_loaded", "ok": bool(artifacts["restore_refs"]), "severity": "hard"},
         {"name": "work_state_snapshot_loaded", "ok": bool(work_state), "severity": "hard"},
+        {"name": "compaction_state_loaded", "ok": bool(artifacts.get("compaction_state")), "severity": "soft"},
+        {"name": "handoff_summary_loaded", "ok": bool(artifacts.get("handoff_summary")), "severity": "soft"},
         {"name": "self_check_loaded", "ok": bool(artifacts["self_check"]), "severity": "hard"},
         {"name": "self_check_ok", "ok": bool(artifacts["self_check"].get("ok")), "severity": "hard"},
         {"name": "apply_ids_consistent", "ok": _artifact_ids_match(metadata, artifacts), "severity": "hard"},
@@ -171,6 +173,8 @@ def _resume_payload(request: _ResumePayloadBuildRequest) -> dict[str, Any]:
         "owner": _owner_payload(request.options),
         "refs": metadata.get("refs", {}),
         "work_state": artifacts["work_state"],
+        "compaction_state": artifacts.get("compaction_state", {}),
+        "handoff_summary": _handoff_summary_payload(artifacts),
         "consistency_report": consistency,
         "action_guard": action_guard,
         "compaction_gate": consistency.get("compaction_gate", {}),
@@ -212,6 +216,8 @@ def _resume_payload_parts(request: _ResumePayloadBuildRequest) -> dict[str, Any]
             subagent_refs=subagent_refs,
             fail_safe_checkpoints=fail_safe_checkpoints,
             main_context_bundle=main_context_bundle,
+            compaction_state=artifacts.get("compaction_state", {}),
+            handoff_summary=str(artifacts.get("handoff_summary", "") or ""),
         )
     )
     return {
@@ -224,6 +230,18 @@ def _resume_payload_parts(request: _ResumePayloadBuildRequest) -> dict[str, Any]
         "completion_prompt": payload_parts.completion_prompt,
         "context_block": payload_parts.context_block,
         "continue_packet": payload_parts.continue_packet,
+    }
+
+
+# LLM: _handoff_summary_payload keeps resume output refs-first while exposing the readable handoff.
+# 函数用途: 摘要 compact handoff markdown 的路径和正文，供 runtime 续接时直接注入。
+def _handoff_summary_payload(artifacts: dict[str, Any]) -> dict[str, Any]:
+    state = artifacts.get("compaction_state", {})
+    state = state if isinstance(state, dict) else {}
+    return {
+        "ref": str(state.get("handoff_summary_ref") or ""),
+        "previous_ref": str(state.get("previous_handoff_summary_ref") or ""),
+        "text": str(artifacts.get("handoff_summary", "") or ""),
     }
 
 

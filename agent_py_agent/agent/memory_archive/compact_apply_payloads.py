@@ -28,6 +28,8 @@ COMPACT_RESTORE_REFS_SCHEMA = RuntimeMemorySchemaOptions("compact_apply_restore_
 def compact_apply_refs(paths: dict[str, Path]) -> dict[str, str]:
     return {
         "compact_context": str(paths["context_md"]),
+        "compaction_state": str(paths["compaction_state_json"]),
+        "handoff_summary": str(paths["handoff_summary_md"]),
         "metadata": str(paths["metadata_json"]),
         "apply_bundle": str(paths["apply_bundle_json"]),
         "restore_refs": str(paths["restore_refs_json"]),
@@ -78,6 +80,7 @@ def apply_bundle_payload(
         "refs": dict(payload.get("refs", compact_apply_refs(paths))),
         "lineage": dict(payload.get("lineage", {})),
         "main_context_bundle_match": dict(payload.get("main_context_bundle_match", {})),
+        "compaction_state": _compaction_state_summary(payload.get("compaction_state", {})),
         "restore_refs_summary": restore_refs_summary(restore_refs),
         "work_state_summary": work_state_summary(work_state),
         "main_context_bundle": compact_context_bundle_summary(payload.get("main_context_bundle", {})),
@@ -102,6 +105,7 @@ def ledger_record(payload: dict[str, Any]) -> dict[str, Any]:
         "scope": payload["scope"],
         "refs": payload["refs"],
         "lineage": dict(payload.get("lineage", {})),
+        "compaction_state": _compaction_state_summary(payload.get("compaction_state", {})),
         "main_context_bundle_match": dict(payload.get("main_context_bundle_match", {})),
         "created_at": payload["created_at"],
         "content_preserved": payload["content_preserved"],
@@ -118,6 +122,22 @@ def _source_refs(plan: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
         "snapshot_files": _file_refs(plan["snapshots"].get("latest", [])),
         "token_ledgers": _file_refs(plan["tokens"].get("latest", [])),
         "tool_outputs": tool_output_source_refs(plan["workspace_root"], plan["scope"]),
+    }
+
+
+# LLM: _compaction_state_summary keeps bundle and ledger rows small but chain-aware.
+# 函数用途: 提取 compact state 的核心 id、摘要路径和下一步，避免 JSONL 复制完整状态。
+def _compaction_state_summary(value: Any) -> dict[str, Any]:
+    state = value if isinstance(value, dict) else {}
+    work = state.get("work", {}) if isinstance(state.get("work"), dict) else {}
+    return {
+        "compact_id": str(state.get("compact_id") or ""),
+        "compact_index": int(state.get("compact_index", 0) or 0),
+        "previous_compact_id": str(state.get("previous_compact_id") or ""),
+        "handoff_summary_ref": str(state.get("handoff_summary_ref") or ""),
+        "previous_handoff_summary_ref": str(state.get("previous_handoff_summary_ref") or ""),
+        "goal": str(work.get("goal") or ""),
+        "next_step": str(work.get("next_step") or ""),
     }
 
 

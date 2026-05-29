@@ -16,7 +16,11 @@ from ._filesystem_helpers import (
     _optional_path,
     _text_param,
 )
-from ._filesystem_read import _COMMON_FILE_DISCOVERY_IGNORES, FileSystemTool
+from ._filesystem_read import (
+    _COMMON_FILE_DISCOVERY_IGNORES,
+    FileSystemAccessOptions,
+    FileSystemTool,
+)
 from .models import ToolExecutionResult, ToolSpec
 
 
@@ -26,8 +30,18 @@ class FindFilesTool(FileSystemTool):
 
     # LLM: FindFilesTool.__init__ builds the model-facing tool metadata.
     # 函数用途: 初始化 find_files 的工作区范围、最大结果数和 ToolSpec。
-    def __init__(self, workspace_root: Path, max_matches: int, workspace_roots: list[Path] | None = None):
-        super().__init__(workspace_root, workspace_roots)
+    def __init__(
+        self,
+        workspace_root: Path,
+        max_matches: int,
+        workspace_roots: list[Path] | None = None,
+        access_options: FileSystemAccessOptions | None = None,
+    ):
+        super().__init__(
+            workspace_root,
+            workspace_roots,
+            access_options,
+        )
         self.max_matches = max_matches
         self.spec = ToolSpec(
             name="find_files",

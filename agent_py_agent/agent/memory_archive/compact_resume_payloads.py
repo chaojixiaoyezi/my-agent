@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .compact_continue_packet import (
@@ -34,6 +34,8 @@ class CompactResumePayloadPartsRequest:
     subagent_refs: dict[str, Any]
     fail_safe_checkpoints: list[dict[str, Any]]
     main_context_bundle: dict[str, Any]
+    compaction_state: dict[str, Any] = field(default_factory=dict)
+    handoff_summary: str = ""
 
 
 # LLM: CompactResumePayloadParts is the stable bridge back to compact_resume schema assembly.
@@ -67,6 +69,8 @@ def build_compact_resume_payload_parts(request: CompactResumePayloadPartsRequest
             fail_safe_checkpoints=request.fail_safe_checkpoints,
             completion_prompt=completion_prompt,
             main_context_bundle=request.main_context_bundle,
+            compaction_state=request.compaction_state,
+            handoff_summary=request.handoff_summary,
         )
     )
     return CompactResumePayloadParts(
@@ -91,6 +95,8 @@ def _continue_packet(request: CompactResumePayloadPartsRequest, handoff: dict[st
             next_actions=request.next_actions,
             subagent_owner_refs=request.subagent_refs,
             main_context_bundle=request.main_context_bundle,
+            compaction_state=request.compaction_state,
+            handoff_summary=request.handoff_summary,
         )
     )
 

@@ -111,6 +111,8 @@ def _path_url_command_decision(payload: dict[str, Any], call: object) -> GateDec
             payload=payload,
             workspace_root=call.workspace_root,
             workspace_roots=_path_gate_roots(call),
+            path_access_mode=getattr(call, "path_access_mode", "normal"),
+            path_dangerous_roots=getattr(call, "path_dangerous_roots", None) or (),
             allowed_private_hosts=boundary_strings(boundary, "allowed_private_hosts"),
             allow_shell_operators=_allow_shell_operators(boundary),
             allowed_commands=_controlled_exec_allowed_commands(boundary),

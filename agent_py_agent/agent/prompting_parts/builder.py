@@ -77,15 +77,15 @@ class PromptBuilder:
         self.home_paths = home_paths
 
     # LLM: PromptBuilder.read_prompt_files belongs to Prompt 构造; keep caller-visible returns, errors, and side effects aligned with focused tests.
-    # 函数用途: 读取动态 prompt 文件并拼接内容。 大白话解释： 这些文件相当于'额外行为规则'，只要被读进来，这一轮模型就真的能看到。。
-    def read_prompt_files(self, extra_files: list[str] | None = None, *, include_config: bool = True) -> list[str]:
+    # 函数用途: 读取动态 prompt 文件并拼接内容。 scope="isolated" 时跳过项目级 prompt 文件，只读取 caller 显式传入的 extra_files。
+    def read_prompt_files(self, extra_files: list[str] | None = None, *, include_config: bool = True, scope: str = "default") -> list[str]:
         """读取动态 prompt 文件并拼接内容。
 
-        大白话解释：
-        这些文件相当于'额外行为规则'，只要被读进来，这一轮模型就真的能看到。"""
+        scope="isolated" 时跳过项目级 prompt 文件，只读取 caller 显式传入的 extra_files。"""
 
         chunks: list[str] = []
-        configured = self.config.prompt_files if include_config else []
+        skip_project_files = _is_isolated_scope(scope)
+        configured = [] if (not include_config or skip_project_files) else self.config.prompt_files
         for name in [*configured, *(extra_files or [])]:
             path = Path(name)
             if not path.is_absolute():
@@ -250,6 +250,10 @@ def _task_and_transcript_section(user_prompt: str, tool_context: list[str]) -> s
 # 函数用途: 判断本轮 prompt 是否只允许隔离上下文，避免子代理或控制面调用看到主代理长期记忆和家目录制度。
 def _is_task_local_context(value: object) -> bool:
     return str(value or "").strip().lower() in {"task_local", "control_plane"}
+
+
+def _is_isolated_scope(value: object) -> bool:
+    return str(value or "").strip().lower() in {"isolated", "task_local", "control_plane"}
 
 
 # LLM: _home_entry_context_chunks loads stable owner entry files with AGENTS.md first as the boot contract.

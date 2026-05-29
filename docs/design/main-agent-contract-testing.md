@@ -279,7 +279,7 @@
 2026-05-22 继续把四个高风险缺口前移到 `execute_registry_call`，作为真实工具执行前的统一硬门：
 
 1. Tool Manifest Gate：工具注册必须带 effect、参数 schema、幂等策略、审批策略和输出 ref 声明。read_only / mutating / dangerous 是机器枚举，不从说明文本推断。
-2. Path / URL / Command Gate：所有工具 payload 里的 path/url/command 字段统一过边界检查。路径必须落在 workspace_roots 内；symlink 解析后越界要拒绝；file URL、私网 URL 和未显式允许的 shell 操作符默认拒绝。
+2. Path / URL / Command Gate：所有工具 payload 里的 path/url/command 字段统一过边界检查。路径不再必须落在 workspace_roots 内；normal 模式只拒绝 `path_dangerous_roots`，full 模式路径全开。file URL、私网 URL 和未显式允许的 shell 操作符默认拒绝。
 3. Approval Binding Gate：dangerous + real action 必须匹配可信 approved_actions，绑定 tool、run_id、operation_id、idempotency_key 和 args_hash。
 4. Idempotency Ledger Gate：mutating / dangerous 调用必须带 idempotency_key；同 key 同 args 的完成记录只能复用，不重新执行；同 key 不同 args 拒绝。
 

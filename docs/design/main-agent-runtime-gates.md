@@ -1031,6 +1031,7 @@ my-agent collaboration update-status --case-id <case-id> --status closed --summa
 - 主代理在带 `RunParams.task_id` 的长期 thread 内调用 `create_subagents` 时，创建出的子代理会自动继承 `conversation_thread_id` 和 `conversation_task_id`。
 - 继承字段会通过 hierarchy context 继续传给孙代理；孙代理不需要知道飞书/微信/internal 通道细节，只需要带自己的 `run_id/task_id` 上报。
 - `raise_main_event`、`raise_observation`、`open_case` 支持用子/孙代理自己的 `task_id/run_id` 反查 thread。系统先查 conversation task binding，再查 subagent attributes；`open_case` 在本地任务无外部绑定时可创建 internal thread，不从自然语言里猜线程。
+- 子代理 runner 写出终态结果时，也会通过 task binding 给父 thread 写 observation 和 wake signal。父代理下一轮醒来后仍自己决定是否派测试、找茬、补派或汇报；系统不因为 DONE/VERIFIED 自动替父代理收口。
 - 子/孙代理 context bundle 和 runner prompt summary 会带上最小 conversation refs：`thread_id`、`root_task_id`。这些是机器 refs，不是要求用户在 prompt 里填写工程字段。
 - `background-main-agent status` 提供只读控制面体检：会话数、绑定任务数、待处理 wake、未处理 observation、progress policy、协作 case 和代理树 schema 都能一次看到。
 
@@ -1213,6 +1214,10 @@ create_subagents 写清楚 goal / refs
 当前规则是：`create_subagents` 默认创建后直接启动新 run，不再要求主代理再手动催一次。只有显式传 `defer_start=true` 时，才只创建/复用任务记录。父代理后续要看状态、追加提示、推进卡住项、重跑某几个 run 或尝试恢复时，再使用 `dispatch_subagents`。
 
 真实模型后端下，这个“直接启动”不是短命 CLI 里的 daemon thread，而是独立 `subagents-dispatch --apply --execute-runners --run-id ... --background-launch-id ...` 进程。这样 `my-agent run` 返回后，子代理 runner 仍然能继续推进；后台进程会把 `attributes.background_start.status` 写成 `running/finished/failed`，任务树不会因为父进程退出而只剩一个假启动标记。离线 `echo` 后端保留进程内线程，方便单测和本地 smoke 不额外启动子进程。
+
+`defer_start` 也可以写在单个 `items[]` 子任务上：例如同批创建“开发 worker + 测试 tester + 找错 bug_finder”时，开发可以默认启动，测试/找错可以 `defer_start=true`，等开发产物 refs 出现后再启动。系统会在 `create_subagents` 返回里给 `scheduling_advice` 软提醒，但不会因为测试提前启动而硬拦；父代理仍按任务目标自己决定调度节奏。
+
+如果父代理派了新的修复/接管子代理来替换旧 run，应在 `create_subagents` 参数里写 `replacement_for_run_ids`（兼容 `replaces_run_ids` / `supersedes_run_ids`）。系统会把旧 run 结构化标记为 `TAKEN_OVER` 并写 `takeover_by`，后续状态树和普通 dispatch 不再把旧 run 当成活跃候选。这学习的是 通道运行时/长期助手 一类项目的共同模式：接管是机器状态，不靠父代理自然语言记住“旧的不用管了”。
 
 同一轮还废弃了 workflow 自动套娃：全局 `subagent_workflow_mode=auto` 不再静默作用到普通 `create_subagents` / `dispatch_subagents`。只有本次工具参数明确写 `workflow_mode=plan` 或 `workflow_mode=auto` 才会启用 workflow；未知值如 `parallel` 一律当 `off`，避免普通 worker 被拆成 implement/verify 孙代理。
 

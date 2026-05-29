@@ -88,6 +88,8 @@ auto_save_memory: true
 # - memory_compact_auto_allow_apply 默认关闭；开启后也只允许非破坏性 apply + auto resume + guard，不自动跑工具。
 # - memory_compact_context_window_tokens 为 0 时自动按模型输出预算估算；测试或小上下文模型可以显式填窗口大小。
 # - memory_compact_auto_continue_max_depth 表示一次 run 里自动 compact 后最多续跑几轮；1 是保守默认，长任务测试可调高。
+# - memory_live_archive_enabled 控制运行中是否把工具轮和工具结果增量写进 raw archive；关闭后只保留收尾归档。
+# - memory_live_archive_checkpoint_rounds / seconds 是后续运行中 checkpoint 的节奏参数；0 表示关闭该维度。
 memory_archive_level: 3
 memory_hook_enabled: true
 memory_hook_archive_level: 3
@@ -102,6 +104,9 @@ memory_resume_auto_context_limit: 5
 memory_compact_auto_allow_apply: false
 memory_compact_context_window_tokens: 0
 memory_compact_auto_continue_max_depth: 1
+memory_live_archive_enabled: true
+memory_live_archive_checkpoint_rounds: 20
+memory_live_archive_checkpoint_seconds: 120
 
 # Memory / compact / artifact 默认预算：
 # - 这些值只控制“默认读取多少、预览多少、扫描多少”，不是数据保留上限。
@@ -490,11 +495,37 @@ tool_web_max_chars: 100000
 # web_search / web_fetch / web_extract / http_request 工具默认超时秒数
 tool_http_timeout: 30
 
+# 路径访问策略，主代理和所有子代理共用：
+# - normal：默认模式。不再要求所有文件都在 workspace_root 里，只拒绝下面 path_dangerous_roots 里的危险目录。
+#   用户在 prompt 里明确说“写到某个目录”时，只要不落入危险目录，文件工具和子代理都可以使用。
+# - full：路径全开，不按危险目录拒绝。只建议在完全信任本机任务时使用。
+# 说明：workspace_root 仍是默认工作目录和相对路径基准，不再是普通产物写入的唯一白名单。
+path_access_mode: normal
+
+# normal 模式下默认拒绝访问/写入的危险目录。可以按机器环境调整。
+# 这里放的是系统目录和常见密钥目录，不包含用户项目目录、桌面、下载目录或 live-agent-runs。
+path_dangerous_roots:
+  - /etc
+  - /private/etc
+  - /System
+  - /bin
+  - /sbin
+  - /usr/bin
+  - /usr/sbin
+  - /var/db
+  - /var/root
+  - /root
+  - ~/.ssh
+  - ~/.gnupg
+  - ~/.aws
+  - ~/.kube
+  - ~/.docker
+
 # 命令运行权限档位。这里只暴露一个总开关，其他命令安全策略由运行时派生：
 # - restricted：保守模式，命令只能在配置工作区内执行，适合不信任任务。
 # - workspace-write：默认开发模式，命令可以在当前工作区内跑测试、构建、脚本和普通清理。
 # - full-access：完全访问模式，允许显式切到系统其他目录；rm -rf /、删除系统/家目录、格式化磁盘、关机等最后保护仍会拒绝。
-# 普通 rm/rmdir/chmod/sudo 不因名字本身被拒绝；真正的边界来自 access_mode、工作区范围和灾难命令保护。
+# 普通 rm/rmdir/chmod/sudo 不因名字本身被拒绝；真正的边界来自 access_mode、path_access_mode 和灾难命令保护。
 # 模型不需要知道 grant/path_scope/apply 之类内部字段；它只调用 run_command。
 access_mode: workspace-write
 

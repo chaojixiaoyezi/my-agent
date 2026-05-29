@@ -65,6 +65,8 @@ class ToolRegistryParams:
     retrieval_limit: int
     vector_search_enabled: bool
     workspace_roots: list[Path] | None = None
+    path_access_mode: str = "normal"
+    path_dangerous_roots: list[str] | None = None
     access_mode: str = "workspace-write"
     shell_tool_timeout: int = 30
     shell_tool_output_max_chars: int = 12_000
@@ -100,6 +102,8 @@ class ToolRegistry:
     ):
         self.workspace_root = params.workspace_root.resolve()
         self.workspace_roots = params.workspace_roots or [self.workspace_root]
+        self.path_access_mode = params.path_access_mode
+        self.path_dangerous_roots = params.path_dangerous_roots or []
         self.tools: dict[str, BaseTool] = {}
         self.default_hidden_tool_names = set(_DEFAULT_HIDDEN_TOOL_NAMES)
         self.expose_security_tools = params.expose_security_tools
@@ -272,6 +276,8 @@ class ToolRegistry:
                 tools=self.tools,
                 workspace_root=self.workspace_root,
                 workspace_roots=self.workspace_roots,
+                path_access_mode=self.path_access_mode,
+                path_dangerous_roots=self.path_dangerous_roots,
                 expose_security_tools=self.expose_security_tools,
                 security_tool_names=self.security_tool_names,
                 allowed_tools=allowed_tools,

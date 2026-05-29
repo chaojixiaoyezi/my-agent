@@ -5,8 +5,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..path_recovery_hints import suggest_workspace_typo_target
 from ._filesystem_helpers import _bundled_filesystem_param, _int_param, _required_path
-from .filesystem_artifact_guard import tool_output_artifact_content
+from .filesystem_artifact_guard import tool_output_artifact_content, tool_output_artifact_typo_hint
 from .filesystem_path_recovery import MissingPathRequest, missing_path_result
 from .filesystem_structured_read import structured_read_summary
 from .models import ToolExecutionResult
@@ -21,6 +22,9 @@ def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolExecu
     except ValueError as exc:
         return ToolExecutionResult("read_file", False, str(exc))
     if not target.exists():
+        typo_hint = _missing_tool_artifact_typo_hint(tool, raw_path)
+        if typo_hint:
+            return ToolExecutionResult("read_file", False, typo_hint, error_code="PATH_NOT_FOUND")
         return missing_path_result(MissingPathRequest(
             tool_name="read_file",
             raw_path=raw_path,
@@ -77,6 +81,13 @@ def _numbered_text_result(content: str, params: dict[str, Any], max_chars: int) 
         max_chars=max_chars,
     )
     return ToolExecutionResult("read_file", True, result or "(空文件)")
+
+
+def _missing_tool_artifact_typo_hint(tool, raw_path: str) -> str:
+    suggested = suggest_workspace_typo_target(raw_path, tool.workspace_roots)
+    if not suggested:
+        return ""
+    return tool_output_artifact_typo_hint(raw_path, tool.workspace_root, suggested)
 
 
 # LLM: _line_range_error returns actionable range errors without reading more text.

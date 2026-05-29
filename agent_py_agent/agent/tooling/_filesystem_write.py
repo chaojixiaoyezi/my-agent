@@ -12,7 +12,7 @@ from typing import Any
 
 from ..contracts.artifact_format_lint import lint_artifact_format
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _required_path, _text_param
-from ._filesystem_read import FileSystemTool
+from ._filesystem_read import FileSystemAccessOptions, FileSystemTool
 from .artifact_integrity import (
     artifact_integrity_payload,
     check_web_project_post_write,
@@ -41,8 +41,13 @@ class WriteFileTool(FileSystemTool):
         workspace_roots: list[Path] | None = None,
         *,
         max_inline_content_chars: int | None = None,
+        access_options: FileSystemAccessOptions | None = None,
     ):
-        super().__init__(workspace_root, workspace_roots)
+        super().__init__(
+            workspace_root,
+            workspace_roots,
+            access_options,
+        )
         self.max_inline_content_chars = inline_write_content_limit(max_inline_content_chars)
         self.spec = ToolSpec(
             name="write_file",

@@ -6,7 +6,7 @@ from __future__ import annotations
 """handoff package for memory-resume --from-compact."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .compact_artifact_read_hints import (
@@ -35,6 +35,8 @@ class CompactResumeHandoffRequest:
     fail_safe_checkpoints: list[dict[str, Any]]
     completion_prompt: dict[str, Any]
     main_context_bundle: dict[str, Any]
+    compaction_state: dict[str, Any] = field(default_factory=dict)
+    handoff_summary: str = ""
 
 
 # LLM: build_compact_resume_handoff is read-only and makes resume output easy for humans and agents.
@@ -59,6 +61,8 @@ def build_compact_resume_handoff(request: CompactResumeHandoffRequest) -> dict[s
         "artifact_read_hints": artifact_read_hints_from_work_state(work_state),
         "recommended_read_paths": list(request.recommended_read_paths),
         "main_context_bundle": dict(request.main_context_bundle),
+        "compaction_state": _compaction_state_payload(request.compaction_state),
+        "handoff_summary": _handoff_summary_payload(request.compaction_state, request.handoff_summary),
         "fail_safe_checkpoints": _fail_safe_checkpoint_payloads(request.fail_safe_checkpoints),
         "missing_fields": _string_list(work_state.get("missing_fields")),
         "completion_prompt": dict(request.completion_prompt),
@@ -90,6 +94,7 @@ def render_compact_resume_context_block(handoff: dict[str, Any]) -> str:
     _extend_section(lines, "Constraints", handoff["constraints"]["items"])
     _extend_section(lines, "Latest Tests", handoff["latest_tests"]["items"])
     _extend_section(lines, "Changed Files", handoff["changed_files"])
+    _extend_handoff_summary(lines, handoff.get("handoff_summary", {}))
     _extend_main_context_bundle(lines, handoff.get("main_context_bundle", {}))
     _extend_section(lines, "Fail Safe Checkpoints", _fail_safe_checkpoint_lines(handoff["fail_safe_checkpoints"]))
     _extend_section(lines, "Artifact Read Hints", artifact_read_hint_lines(handoff["artifact_read_hints"]))
@@ -131,6 +136,34 @@ def _action_guard_payload(action_guard: dict[str, Any]) -> dict[str, Any]:
         "allowed_next_action": str(action_guard.get("allowed_next_action", "")),
         "automatic_tool_execution": str(action_guard.get("automatic_tool_execution", "none")),
         "missing_fields": _string_list(action_guard.get("missing_fields")),
+    }
+
+
+# LLM: _compaction_state_payload keeps handoff chain-aware without copying source refs bodies.
+# 函数用途: 摘要 compact state 的链路、摘要路径和下一步，供上层恢复显示。
+def _compaction_state_payload(value: Any) -> dict[str, Any]:
+    state = value if isinstance(value, dict) else {}
+    work = state.get("work", {}) if isinstance(state.get("work"), dict) else {}
+    return {
+        "compact_id": str(state.get("compact_id") or ""),
+        "compact_index": int(state.get("compact_index", 0) or 0),
+        "previous_compact_id": str(state.get("previous_compact_id") or ""),
+        "handoff_summary_ref": str(state.get("handoff_summary_ref") or ""),
+        "previous_handoff_summary_ref": str(state.get("previous_handoff_summary_ref") or ""),
+        "goal": str(work.get("goal") or ""),
+        "next_step": str(work.get("next_step") or ""),
+    }
+
+
+# LLM: _handoff_summary_payload exposes the model-facing summary separately from machine facts.
+# 函数用途: 为 handoff 和 context block 提供压缩摘要引用和正文，明确 summary 不是事实账本。
+def _handoff_summary_payload(state_value: Any, summary: str) -> dict[str, Any]:
+    state = state_value if isinstance(state_value, dict) else {}
+    return {
+        "ref": str(state.get("handoff_summary_ref") or ""),
+        "previous_ref": str(state.get("previous_handoff_summary_ref") or ""),
+        "text": str(summary or ""),
+        "authoritative": False,
     }
 
 
@@ -203,6 +236,22 @@ def _extend_completion_prompt(lines: list[str], completion: dict[str, Any]) -> N
     if completion.get("status") != "needs_user_input":
         return
     lines.extend(["## Completion Prompt", "", completion.get("prompt_template", ""), ""])
+
+
+# LLM: _extend_handoff_summary renders the compact handoff before long source refs.
+# 函数用途: 把模型续接摘要注入恢复上下文；没有摘要时保持兼容旧 compact 包。
+def _extend_handoff_summary(lines: list[str], payload: dict[str, Any]) -> None:
+    if not isinstance(payload, dict) or not payload.get("text"):
+        return
+    lines.extend([
+        "## Compaction Handoff Summary",
+        "",
+        f"- ref: {payload.get('ref', '')}",
+        f"- previous_ref: {payload.get('previous_ref', '')}",
+        "",
+        str(payload.get("text") or "").strip(),
+        "",
+    ])
 
 
 # LLM: _extend_main_context_bundle renders the root run card as refs, not as large task bodies.

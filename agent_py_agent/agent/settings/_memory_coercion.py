@@ -74,6 +74,9 @@ _FIELDS = (
     _FieldSpec("memory_compact_auto_allow_apply", "bool"),
     _FieldSpec("memory_compact_context_window_tokens", "int", 0, None),
     _FieldSpec("memory_compact_auto_continue_max_depth", "int", 0, 100),
+    _FieldSpec("memory_live_archive_enabled", "bool"),
+    _FieldSpec("memory_live_archive_checkpoint_rounds", "int", 0, None),
+    _FieldSpec("memory_live_archive_checkpoint_seconds", "int", 0, None),
 )
 
 

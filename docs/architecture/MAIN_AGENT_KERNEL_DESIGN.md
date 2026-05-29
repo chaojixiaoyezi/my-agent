@@ -284,6 +284,7 @@ agent_py_agent/agent/contracts/
 4. 用户执行 `memory-resume --from-compact <apply_id>`。
 5. resume 输出会优先推荐读取这张 context bundle，再读 compact context、work state、restore refs、自检和源事实文件。
 6. 如果这是同一任务的第 2 次、第 3 次或更多次 compact，resume 会同时带出 lineage（压缩链路），让调用方能沿着上一包继续审计，不覆盖旧包。
+7. 每轮 apply 还会写 `compaction_state` 和 `handoff_summary`：前者是机器字段，后者是模型续接说明。后续运行时自动压缩只能信机器字段和 refs，不能把 summary 当作最终事实。
 
 这一步解决的是：恢复时不能只看一段摘要，也不能让模型重新猜任务范围。恢复链路必须先知道“这是谁的任务、在哪个工作区、哪一轮 run、有哪些恢复入口”。
 

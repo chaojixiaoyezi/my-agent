@@ -234,16 +234,19 @@ def test_subagent_runner_parse_ignores_empty_pending_capability_request():
 
 
 def test_subagent_runner_enforces_write_boundary_at_tool_layer():
-    """LLM: Verifies the tool layer blocks writes outside allowed_write_roots."""
+    """LLM: Verifies the tool layer blocks writes to configured dangerous roots."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        danger = root / "dangerous-target"
+        danger.mkdir()
+        target_path = str(danger / "README.md")
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs", path_dangerous_roots=[str(danger)])
         agent = SimpleAgent(cfg, root)
-        backend = BoundaryWriteSubagentBackend()
+        backend = BoundaryWriteSubagentBackend(target_path)
         agent.backend = backend
         task = agent.subagents.create_run(
-            goal="确认 subagent 不能写出自己的工单目录",
-            thought="模型即使要求写 README，也应该被工具层挡住。",
+            goal="确认 subagent 不能写危险目录",
+            thought="模型即使要求写危险目录，也应该被工具层挡住。",
             plan=["尝试写文件", "检查工具结果", "输出结构化证据"],
             allowed_tools=["write_file"],
         )
@@ -253,8 +256,8 @@ def test_subagent_runner_enforces_write_boundary_at_tool_layer():
         assert result.structured_output_found
         assert result.structured_output_ok
         assert len(backend.prompts) == 2
-        assert not (root / "README.md").exists()
-        assert "写入被阻止" in backend.prompts[1]
+        assert not Path(target_path).exists()
+        assert "PATH_DANGEROUS_ROOT_BLOCKED" in backend.prompts[1]
 
 
 def test_subagent_runner_can_schedule_children_from_current_node_context():

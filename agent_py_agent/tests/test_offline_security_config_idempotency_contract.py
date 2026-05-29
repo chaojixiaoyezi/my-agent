@@ -41,9 +41,9 @@ def test_runtime_config_rejects_artifact_dir_outside_workspace(tmp_path: Path) -
     assert result.error_codes == ("CONFIG_ARTIFACT_DIR_OUTSIDE_WORKSPACE",)
 
 
-# LLM: Runtime config should reject broad write roots even when workspace_root itself is valid.
-# 函数用途: 验证 allowed_write_roots 显式包含 / 时会被配置合同拒绝。
-def test_runtime_config_rejects_dangerous_allowed_write_root(tmp_path: Path) -> None:
+# LLM: Legacy allowed_write_roots no longer acts as the runtime path authority.
+# 函数用途: 验证 allowed_write_roots 旧字段不会覆盖 path_access_mode/path_dangerous_roots 策略。
+def test_runtime_config_treats_allowed_write_roots_as_legacy_context(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
 
     result = validate_runtime_config(
@@ -56,8 +56,8 @@ def test_runtime_config_rejects_dangerous_allowed_write_root(tmp_path: Path) -> 
         }
     )
 
-    assert result.ok is False
-    assert result.error_codes == ("CONFIG_ALLOWED_WRITE_ROOT_DANGEROUS",)
+    assert result.ok is True
+    assert "CONFIG_ALLOWED_WRITE_ROOT_DANGEROUS" not in result.error_codes
 
 
 # LLM: Idempotency keys must be stable across dict ordering and return reuse decisions when ids exist.

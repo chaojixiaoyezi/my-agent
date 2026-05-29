@@ -92,7 +92,7 @@ scripts/
 - `agent_py_agent/tests/test_live_lab_natural_case.py`：锁住三个合同：提示词不含内部调度术语、suite 注册为 real opt-in、HTML artifact gate 不信口头总结。
 - `agent_py_agent/agent/agent_core/subagent_run_flow.py`：runner prompt 会在模型调用前预写到 `runner_prompt.md`；真实 Live Lab 超时、断网或 runner 被杀时，仍能看到下发给小傻妞的任务包。
 - 产品侧依赖：runner 收尾不再做 artifact 完整性硬改写；产物质量问题由通用 closeout、tree/refs 和后续验收事实暴露。`runner_input_dependencies.py` 必须把 `输出路径/保存路径/产物文件` 识别为写目标，不当成输入依赖。
-- 产品侧依赖：`orchestration_write_guard.py` 只拦截真实写入目标的工作区外绝对路径；否定示例里的路由路径（例如“不要写成 `/collections`”）不能被当成文件系统写目标，否则 root 会被迫绕过子代理。
+- 产品侧依赖：`orchestration_write_guard.py` 只拦截真实写入目标落入 `path_dangerous_roots` 的情况；普通工作区外输出目录不再默认拒绝。否定示例里的路由路径（例如“不要写成 `/collections`”）不能被当成文件系统写目标，否则 root 会被迫绕过子代理。
 - 当前验收只做轻量结构检查、离线资源检查和子代理状态一致性检查。表单行为、视觉布局、可访问性和图片实际内容质量应作为后续更强 Live Lab case，而不是塞进这个最小 canary。
 
 ## 2026-05-17 shop-suite structure

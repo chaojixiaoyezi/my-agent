@@ -219,6 +219,10 @@ class TestCreateSubagentsToolExecute:
         assert options.background_launch_id == "launch-1"
         assert params.include_run_ids == ["run_a", "run_b", "run_c"]
 
+
+class TestCreateSubagentsToolStartControls:
+    """测试 create_subagents 的启动和接管控制。"""
+
     def test_defer_start_keeps_created_runs_unstarted(self):
         """只有显式 defer_start=true 时，create_subagents 才只建记录不启动。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
@@ -237,6 +241,61 @@ class TestCreateSubagentsToolExecute:
         mock_agent.dispatch_subagents.assert_not_called()
         assert payload["auto_start"]["status"] == "deferred"
         assert payload["next_action"]["tool"] == "dispatch_subagents"
+
+    def test_item_defer_start_only_holds_that_child(self, monkeypatch):
+        """单个 item.defer_start=true 只挂起该 child，不拖住同批生产 worker。"""
+        from types import SimpleNamespace
+
+        import agent_py_agent.agent.agent_core.orchestration_background_dispatch as background_dispatch
+
+        captured: dict[str, object] = {}
+
+        def fake_start(agent, run_ids):
+            del agent
+            captured["run_ids"] = list(run_ids)
+            return {"status": "started", "run_ids": list(run_ids)}
+
+        monkeypatch.setattr(background_dispatch, "_start_background_dispatch", fake_start)
+        tasks = [
+            SimpleNamespace(id="developer", status="PLANNING", verification_status="UNVERIFIED", attributes={}),
+            SimpleNamespace(id="tester", status="PLANNING", verification_status="UNVERIFIED", attributes={"defer_start": True}),
+        ]
+
+        payload = background_dispatch.auto_start_tasks(SimpleNamespace(dispatch_subagents=lambda: None), tasks, {})
+
+        assert captured["run_ids"] == ["developer"]
+        assert payload["run_ids"] == ["developer"]
+        assert payload["deferred_run_ids"] == ["tester"]
+
+    def test_create_subagents_records_explicit_replacement(self, tmp_path):
+        """新 child 显式替换旧 run 时，旧 run 进入 TAKEN_OVER，不再被当作活跃任务。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+        from agent_py_agent.agent.subagents.manager import SubAgentManager
+
+        manager = SubAgentManager(tmp_path, workspace_root=tmp_path)
+        source = manager.create_run(goal="旧开发代理", thought="卡住了", plan=["写页面"], role="worker")
+        agent = SimpleNamespace(
+            config=SimpleNamespace(enable_subagents=True, max_subagents=10, subagent_workflow_mode="off", access_mode="workspace-write"),
+            subagents=manager,
+            tools=SimpleNamespace(specs=lambda: []),
+        )
+
+        result = CreateSubagentsTool(agent).execute({
+            "goal": "接管旧开发代理继续完成页面",
+            "role": "worker",
+            "replacement_for_run_ids": [source.id],
+            "defer_start": True,
+        })
+        payload = json.loads(result.output)
+        replacement_id = payload["created_run_ids"][0]
+        reloaded = manager.load(source.id)
+
+        assert result.ok is True
+        assert reloaded.status == "TAKEN_OVER"
+        assert reloaded.takeover_by == replacement_id
+        assert payload["replacement_records"] == [
+            {"source_run_id": source.id, "replacement_run_id": replacement_id, "status": "recorded"}
+        ]
 
 
 class TestCreateSubagentsAutoStartLifecycle:
@@ -460,8 +519,8 @@ class TestCreateSubagentsToolTemplatePolicy:
         assert "apply_patch" in params.allowed_tools
         assert "read_artifact" in params.allowed_tools
 
-    def test_vague_deliverable_worker_requires_extra_write_root_without_workspace(self):
-        """没有真实 workspace_root 时仍拒绝模糊目标目录，避免 worker 写进自己的任务目录。"""
+    def test_vague_deliverable_worker_uses_output_files_without_extra_write_root(self):
+        """output_files 是目标事实；即使没有额外写根，也不应阻止普通子代理开工。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -483,10 +542,10 @@ class TestCreateSubagentsToolTemplatePolicy:
             "output_files": ["index.html"],
         })
 
-        assert result.ok is False
-        assert "extra_write_roots" in result.output
-        assert "目标目录" in result.output
-        mock_agent.subagents.create_run.assert_not_called()
+        assert result.ok is True
+        mock_agent.subagents.create_run.assert_called_once()
+        created_params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert created_params.extra_write_roots == []
 
     def test_no_comment_constraint_can_be_preserved_in_child_goal(self):
         """用户要求不要注释时，子任务保留“不要写注释”不应被误判为要求写注释。"""

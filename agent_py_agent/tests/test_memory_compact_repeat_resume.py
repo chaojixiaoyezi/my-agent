@@ -117,6 +117,29 @@ def _write_repeat_tool_output(root: Path) -> str:
     return str(record["artifact_ref"])
 
 
+# LLM: _append_live_raw_message creates scoped raw records for compact live-hint tests.
+# 函数用途: 写入同一 request/run/task 下的用户或 live 工具轮事件，避免测试函数堆满样板字段。
+def _append_live_raw_message(root: Path, *, speaker: str, action: str, content: str) -> None:
+    append_raw_event(
+        root,
+        RawMemoryEvent(
+            event_id=f"raw-live-{action}",
+            session_id="session-live",
+            request_id="request-live",
+            run_id="run-live",
+            task_id="task-live",
+            speaker=speaker,
+            target="tool_loop" if action == "assistant_tool_round" else "assistant",
+            action=action,
+            status="ok",
+            content_preview=content,
+            source="live_tool_loop" if action == "assistant_tool_round" else "run",
+            archive_level=2,
+            created_at="2026-05-17T08:00:00+00:00",
+        ),
+    )
+
+
 # LLM: Repeated compact cycles must form an auditable lineage and keep recovery facts intact.
 # 函数用途: 连续执行五次 compact apply/resume，验证不会覆盖旧包、不会丢上下文包、产物引用和下一步。
 def test_repeated_compact_apply_resume_preserves_lineage_and_state(tmp_path: Path) -> None:
@@ -157,3 +180,98 @@ def test_repeated_compact_apply_resume_preserves_lineage_and_state(tmp_path: Pat
     assert len({item["apply_id"] for item in ledger_rows}) == 5
     assert [item["lineage"]["cycle_index"] for item in ledger_rows] == [1, 2, 3, 4, 5]
     assert ledger_rows[-1]["lineage"]["previous_apply_id"] == apply_ids[-2]
+
+
+# LLM: Compact apply must produce a machine state and a readable handoff before runtime auto-compact uses it.
+# 函数用途: 验证 compact 本体产物同时包含机器可读状态和给模型续接用的交接摘要，而不是只写零散 refs。
+def test_compact_apply_writes_machine_state_and_handoff_summary(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    bundle_ref, artifact_ref = _write_repeat_compact_fixture(root, tmp_path / "home")
+
+    apply_result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(
+                session_id="session-repeat",
+                request_id="request-repeat",
+                run_id="run-repeat",
+                task_id="task-repeat",
+            ),
+            main_context_bundle_ref=bundle_ref,
+        ),
+    )
+    resume = build_memory_compact_resume(root, MemoryCompactResumeOptions(apply_ref=apply_result["apply_id"]))
+
+    state = apply_result["compaction_state"]
+    assert state["compact_id"] == apply_result["apply_id"]
+    assert state["previous_compact_id"] == ""
+    assert state["compact_index"] == 1
+    assert state["source_refs"]["tool_outputs"][0]["artifact_ref"] == artifact_ref
+    assert state["work"]["goal"] == "用单文件 HTML 做高端现代家具品牌首页。"
+    assert state["work"]["next_actions"] == ["继续读取 context bundle 和 artifact read hints，再做 QA/验收。"]
+    assert state["handoff_summary_ref"].endswith(".handoff.md")
+    assert "## 当前任务" in apply_result["handoff_summary"]
+    assert "高端现代家具品牌首页" in apply_result["handoff_summary"]
+    assert resume["compaction_state"]["compact_id"] == apply_result["apply_id"]
+    assert resume["continue_packet"]["compaction_state"]["compact_id"] == apply_result["apply_id"]
+    assert resume["continue_packet"]["handoff_summary"]["ref"] == state["handoff_summary_ref"]
+    assert "## Compaction Handoff Summary" in resume["context_block"]
+
+
+# LLM: Repeated compacts should roll forward the previous handoff instead of creating isolated summaries.
+# 函数用途: 验证第二轮 compact 显式引用上一轮交接包，便于多轮压缩后继续同一任务。
+def test_repeated_compact_rolls_forward_previous_handoff_summary(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    bundle_ref, _artifact_ref = _write_repeat_compact_fixture(root, tmp_path / "home")
+    options = MemoryCompactApplyOptions(
+        plan_options=MemoryCompactPlanOptions(
+            session_id="session-repeat",
+            request_id="request-repeat",
+            run_id="run-repeat",
+            task_id="task-repeat",
+        ),
+        main_context_bundle_ref=bundle_ref,
+    )
+
+    first = apply_memory_compact(root, options)
+    second = apply_memory_compact(root, options)
+    resume = build_memory_compact_resume(root, MemoryCompactResumeOptions(apply_ref=second["apply_id"]))
+
+    assert second["compaction_state"]["compact_index"] == 2
+    assert second["compaction_state"]["previous_compact_id"] == first["apply_id"]
+    assert second["compaction_state"]["previous_handoff_summary_ref"] == first["compaction_state"]["handoff_summary_ref"]
+    assert first["apply_id"] in second["handoff_summary"]
+    assert "上一轮压缩" in second["handoff_summary"]
+    assert resume["handoff"]["compaction_state"]["previous_compact_id"] == first["apply_id"]
+
+
+def test_compact_apply_uses_live_raw_assistant_round_as_continuation_hint(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    _append_live_raw_message(
+        root,
+        speaker="user",
+        action="message",
+        content="找最近几周 GitHub 项目并生成表格。",
+    )
+    _append_live_raw_message(
+        root,
+        speaker="assistant",
+        action="assistant_tool_round",
+        content="已查到前三周，下一步继续查剩余周并汇总 workbook。",
+    )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(
+                session_id="session-live",
+                request_id="request-live",
+                run_id="run-live",
+                task_id="task-live",
+            )
+        ),
+    )
+
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+    assert work_state["goal"] == "找最近几周 GitHub 项目并生成表格。"
+    assert work_state["next_actions"] == ["已查到前三周，下一步继续查剩余周并汇总 workbook。"]

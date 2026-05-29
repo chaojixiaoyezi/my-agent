@@ -2,6 +2,7 @@
 
 ## 已完成
 
+- 2026-05-29 Live Raw Archive 已接入工具循环：运行中会把助手工具轮可见文字、完成后的工具结果和周期 `run_checkpoint` 增量写入既有 `memory/raw/YYYY-MM-DD.jsonl`；收尾归档会跳过已 live 写入的工具事件，避免重复记录。`compact_apply_work_state` 在缺少权威 snapshot 时，可从这些 live `assistant_tool_round` / `run_checkpoint` 事件提取下一步续接提示；这只是恢复提示，不把助手回复升级成验收事实。
 - 2026-05-27 Memory 读取预算已回到主配置：artifact 默认读取长度、artifact 读取预算、工具输出外置阈值/预览长度、自动恢复上下文扫描 limit 都从 `agent_config.yaml` / `AgentConfig` 读取；memory 模块不再保留第二份隐藏默认数字。
 - 2026-05-26 Resume trigger public helper 已落地：`memory_archive.has_resume_trigger()` 现在可被 prompt/context 选择逻辑复用，只判断用户是否明确要求继续/恢复旧任务，不读取 archive 正文，也不会自动恢复。
 - 2026-05-14 Compact Continue Packet typed envelope 第一片已落地：`memory-resume --from-compact` 返回的 continue packet 仍保留旧字段，同时新增 `typed_envelope.kind=compact_continue_packet`，把 apply/plan、work_state、guard、next_actions 和 recommended_read_paths 转成机器可读恢复包；它仍不执行工具、不改任务状态。
@@ -339,6 +340,9 @@
 - `memory-resume --from-compact` 和 `compact_continue_packet` 会带出同一份 lineage，让手动恢复、半自动恢复和后续自动恢复都能知道“这是第几次压缩、上一轮恢复包在哪里”，不用靠自然语言猜。
 - 行为边界不变：lineage 只读 ledger、只追加新 apply 记录，不删除、不重写、不裁剪 raw/hook/snapshot/token/task/run 文件；旧 apply 包没有 lineage 也能继续恢复。
 - 新增 focused 验收：连续 5 次 apply/resume 同一任务 scope，验证 apply id 不覆盖、cycle 连续递增、previous_apply_id 指向上一包、主代理 context bundle、tool-output artifact read hints、work_state 目标和下一步持续保留。
+- 2026-05-29 补齐 compact 本体交接包：每次 apply 现在会额外写 `*.compaction_state.json` 和 `*.handoff.md`。`compaction_state` 是机器事实包，记录 compact id、上一轮 compact id、source refs、artifact refs、work state、next actions 和 handoff summary 路径；`handoff.md` 只给模型续接阅读，明确不是事实账本。
+- 多轮 compact 会把上一轮 handoff summary ref 带进新一轮 `compaction_state`、resume handoff 和 continue packet。这样后续接运行时压缩时，可以按机器字段续接同一任务，而不是只靠自然语言摘要猜“上一轮做到哪”。
+- 行为边界：新增 summary 不调用 LLM、不删除原始文件、不自动执行工具；旧 compact 包缺少 `compaction_state` 时只作为 soft 缺口展示，不破坏旧 resume。
 
 ## 2026-05-18 main-agent foundation and artifact acceptance
 - 中文说明：主代理基础测试新增固定入口 `main_agent_foundation_runner.py`。默认只跑不调用模型的确定性测试：工具失败分类、大输出 artifact refs、确定性 E2E matrix；真实模型用例明确 `SKIPPED`，不把未测试说成通过。

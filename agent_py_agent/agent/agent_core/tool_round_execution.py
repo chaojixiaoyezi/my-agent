@@ -14,10 +14,7 @@ from ..subagents.utils import _read_json_object
 from ..tools import ToolExecutionResult
 from ._runtime_params import ToolLoopExecuteParams
 from .runner_context import current_subagent_run_id
-from .tool_call_context_reducer import (
-    AssistantToolRoundContextRequest,
-    render_assistant_tool_round_context,
-)
+from .tool_round_context_archive import append_assistant_tool_round_context
 
 _STATEFUL_ORCHESTRATION_TOOLS = {
     "capability_config_patch",
@@ -78,7 +75,7 @@ class ToolRoundExecutionRequest:
 # LLM: execute_tool_round runs all calls in one assistant round and returns whether the runner completed.
 # 函数用途: 回写本轮工具上下文、逐个执行和记录工具调用，并检测当前子代理是否写出自己的 output.json。
 def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
-    _append_assistant_tool_round_context(request)
+    append_assistant_tool_round_context(request)
     subagent_output_written = False
     stateful_orchestration_seen = False
     for idx, payload in enumerate(request.calls, start=1):
@@ -312,17 +309,6 @@ def _unique_strings(values: list[str]) -> list[str]:
         if value and value not in unique:
             unique.append(value)
     return unique
-
-
-# LLM: _append_assistant_tool_round_context protects the next live prompt from large tool payloads.
-# 函数用途: 把模型刚生成的工具调用摘要写回 tool_context；大正文只保留长度/hash/预览，不反复塞进后续提示词。
-def _append_assistant_tool_round_context(request: ToolRoundExecutionRequest) -> None:
-    rendered = render_assistant_tool_round_context(
-        AssistantToolRoundContextRequest(request.response.text, request.calls)
-    )
-    request.params.tool_context.append(
-        f"[assistant-tool-round-{request.tool_rounds}]\n{rendered}"
-    )
 
 
 # LLM: _is_subagent_output_json_write detects the runner's own structured completion artifact.

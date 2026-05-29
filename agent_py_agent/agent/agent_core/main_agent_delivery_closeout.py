@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..artifacts.registry import registry_path
 from ..backends import ModelResponse
 from ..contracts.delivery_contract_doctor import ContractDoctorReport, validate_delivery_contract
 from ._runtime_params import ToolLoopExecuteParams
@@ -57,7 +58,7 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     contract = dict(doctor.normalized_contract or contract)
     artifacts = _required_artifacts(contract)
     if not artifacts:
-        return None
+        return _no_artifact_closeout_response(request, contract, workspace_root)
     report = _delivery_report(request, contract, artifacts, workspace_root)
     report_ref = _write_report(workspace_root, report)
     report["report_ref"] = _relative_report_ref(report_ref, workspace_root)
@@ -66,6 +67,26 @@ def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequ
     gates_allowed = _all_gates_allowed(decisions)
     append_delivery_progress_event(workspace_root, report, blocked=not gates_allowed)
     if not gates_allowed:
+        return _failed_delivery_response(request, report, contract, workspace_root)
+    reset_local_progress_guard(request.agent, request.params)
+    return ModelResponse(text=_closeout_text(report), backend=request.backend)
+
+
+# LLM: _no_artifact_closeout_response handles explicit message-only delivery without nesting main flow.
+# 函数用途: 合同声明无需磁盘产物时验收消息型交付；否则继续让模型工作。
+def _no_artifact_closeout_response(
+    request: MainAgentDeliveryCloseoutRequest,
+    contract: dict[str, Any],
+    workspace_root: Path,
+) -> ModelResponse | None:
+    if not _allows_no_artifact_delivery(contract):
+        return None
+    report = _message_delivery_report(request, contract, workspace_root)
+    report_ref = _write_report(workspace_root, report)
+    report["report_ref"] = _relative_report_ref(report_ref, workspace_root)
+    decisions = attach_closeout_gates(CloseoutGateRequest(request, report, contract, workspace_root))
+    _write_report(workspace_root, report)
+    if not _all_gates_allowed(decisions):
         return _failed_delivery_response(request, report, contract, workspace_root)
     reset_local_progress_guard(request.agent, request.params)
     return ModelResponse(text=_closeout_text(report), backend=request.backend)
@@ -142,6 +163,39 @@ def _delivery_contract(params: ToolLoopExecuteParams) -> dict[str, Any]:
     attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
     value = attrs.get("delivery_contract")
     return dict(value) if isinstance(value, dict) else {}
+
+
+# LLM: _allows_no_artifact_delivery handles legitimate answer/channel-only tasks without weakening file tasks.
+# 函数用途: 只有合同显式声明无需落盘时，才允许 artifacts 为空也进入 closeout。
+def _allows_no_artifact_delivery(contract: dict[str, Any]) -> bool:
+    for key in ("requires_artifact", "artifact_required", "requires_disk_artifact", "disk_artifact_required"):
+        if contract.get(key) is False:
+            return True
+    mode = str(contract.get("delivery_mode") or contract.get("output_mode") or "").strip().lower()
+    return mode in {"message", "answer", "summary", "no_artifact", "no-artifact", "none"}
+
+
+def _message_delivery_report(
+    closeout: MainAgentDeliveryCloseoutRequest,
+    contract: dict[str, Any],
+    workspace_root: Path,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "main_agent_delivery_closeout.v1",
+        "ok": True,
+        "case_id": str(contract.get("case_id") or ""),
+        "request_id": closeout.params.request_id,
+        "run_id": closeout.params.run_id,
+        "task_id": closeout.params.task_id,
+        "workspace_root": str(workspace_root),
+        "delivery_mode": str(contract.get("delivery_mode") or "message"),
+        "canonical_artifact_registry_ref": _relative_report_ref(registry_path(workspace_root), workspace_root),
+        "artifacts": [],
+        "message_delivery": {
+            "ok": True,
+            "reason": "contract_explicitly_allows_no_disk_artifact",
+        },
+    }
 
 
 # LLM: _append_contract_doctor_context feeds malformed contract facts into the next model turn.

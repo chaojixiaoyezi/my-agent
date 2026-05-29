@@ -28,6 +28,8 @@ def read_compact_apply_artifacts(metadata: dict[str, Any]) -> dict[str, Any]:
         "apply_bundle": _read_json_path(refs.get("apply_bundle")),
         "restore_refs": _read_json_path(refs.get("restore_refs")),
         "work_state": _read_json_path(refs.get("work_state_snapshot")),
+        "compaction_state": _read_json_path(refs.get("compaction_state")),
+        "handoff_summary": _read_text_path(refs.get("handoff_summary")),
         "self_check": _read_json_path(refs.get("post_compact_self_check")),
         "compact_context": _read_text_path(refs.get("compact_context")),
         "main_context_bundle": _read_json_path(refs.get("main_context_bundle")),

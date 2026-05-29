@@ -76,6 +76,7 @@ class RuntimeLoopParams:
     task_id: str = ""
     source: str = "run"
     context_scope: str = "default"
+    save: bool | None = None
 
 
 # LLM: FinalizeParams carries finalization facts after a run loop completes.

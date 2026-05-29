@@ -31,14 +31,22 @@ Every write in the system falls into exactly one of these categories:
 
 ## 2. The Write Boundary / 写入边界
 
-All writes from business logic must go through the write-boundary utility defined
-in `agent_py_agent/tooling/filesystem.py`.  This utility enforces:
+All writes from business logic must go through the file tools or write-boundary
+utility.  The current runtime policy is:
 
-1. **Workspace root containment** — the resolved path must be under the project root.
-2. **No path traversal** — `..` segments are rejected after resolution.
-3. **No system paths** — writes to `/etc`, `/usr`, `/bin`, `/var`, `/tmp` (system),
-   or any absolute path outside the workspace are blocked.
-4. **No symlink escapes** — the final resolved path is checked, not the raw string.
+1. **Shared path policy** — main agents and subagents use the same
+   `path_access_mode` and `path_dangerous_roots`.
+2. **Normal mode** — `path_access_mode=normal` allows ordinary absolute output
+   paths, including user-specified directories outside `workspace_root`, but
+   blocks configured dangerous roots such as system and credential directories.
+3. **Full mode** — `path_access_mode=full` disables the dangerous-root path
+   block.  Catastrophic shell commands are still protected by command policy.
+4. **No hidden path whitelist** — `workspace_root` is only the relative path base
+   and default cwd.  Legacy `allowed_write_roots` may exist in old task records,
+   but new prompts and tools must treat it as compatibility context only, not as
+   the authority for ordinary output paths.
+5. **Resolved path check** — symlinks and `..` are resolved before applying the
+   dangerous-directory policy.
 
 ```python
 # CORRECT — go through the write boundary

@@ -33,9 +33,9 @@ def test_ui_symbols_and_html_tags_do_not_trip_external_write_guard(tmp_path):
     assert result == ""
 
 
-# LLM: A near-miss absolute path should teach the coordinator to retry, not ask for wider permissions.
-# 函数用途: 验证用户名拼错但工作区尾部一致时，派工守卫会给出可直接重试的修正路径提示。
-def test_external_write_guard_suggests_workspace_typo_retry():
+# LLM: A near-miss absolute path is no longer blocked by a workspace allowlist.
+# 函数用途: 验证普通外部目标不会被派工守卫误当成权限问题。
+def test_external_write_guard_allows_non_dangerous_external_targets():
     workspace_root = "/Users/example/my-claude-code"
     wrong_target = "/Users/other-user/my-claude-code/deliverables/shop/build"
     suggested_target = "/Users/example/my-claude-code/deliverables/shop/build"
@@ -45,11 +45,8 @@ def test_external_write_guard_suggests_workspace_typo_retry():
 
     result = _write_target_error(mock_agent, ["write_file"], {"extra_write_roots": [wrong_target]})
 
-    assert "suspected_path_typo=true" in result
-    assert f"target={wrong_target}" in result
-    assert f"suggested_target={suggested_target}" in result
-    assert "请使用 suggested_target 重新调用 schedule_child_subagents" in result
-    assert "不要写 capability_request" in result
+    assert suggested_target
+    assert result == ""
 
 
 # LLM: URL image sources are content references, not write targets.
@@ -90,13 +87,19 @@ def test_external_write_guard_ignores_negated_root_route_examples(tmp_path):
     assert result == ""
 
 
-# LLM: Real external output targets should still be blocked after route-example filtering.
-# 函数用途: 确认写入守卫仍会拒绝 `保存到 /tmp/out.html` 这类工作区外真实目标。
-def test_external_write_guard_still_blocks_real_external_targets(tmp_path):
+# LLM: Dangerous external output targets are still blocked after route-example filtering.
+# 函数用途: 确认写入守卫只拒绝危险目录，不再把普通外部目录当权限问题。
+def test_external_write_guard_blocks_configured_dangerous_targets(tmp_path):
     mock_agent = MagicMock()
     mock_agent.subagents.workspace_root = tmp_path
     mock_agent.subagents.workspace_roots = [tmp_path]
+    mock_agent.config.path_access_mode = "normal"
+    mock_agent.config.path_dangerous_roots = [str(tmp_path / "danger")]
 
-    result = _write_target_error(mock_agent, ["write_file"], {"output_refs": ["/tmp/outside/index.html"]})
+    result = _write_target_error(
+        mock_agent,
+        ["write_file"],
+        {"output_refs": [str(tmp_path / "danger" / "index.html")]},
+    )
 
-    assert "子代理写入目标在当前工作区外" in result
+    assert "危险目录" in result

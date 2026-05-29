@@ -19,6 +19,7 @@
 - `memory-compact --dry-run` 第一版已接入，只读扫描 raw/hook、权威 snapshot 和 token ledger。
 - `memory-compact --apply` 第二片已接入为非破坏性 apply：生成 compact context、metadata、apply bundle、restore refs、ledger、self-check 和失败阻断报告，不删除、不重写、不裁剪原始事实源。
 - runtime 工具输出外置第一片已接入：大工具输出会写入 `memory_archive/artifacts/tool_outputs/`，compact 相关记录只读 preview/hash/path/size。
+- live raw archive 已接入工具循环：工具执行中也会往既有 `memory/raw/YYYY-MM-DD.jsonl` 写 `assistant_tool_round`、`tool_call` 和周期 `run_checkpoint`，避免长任务未收尾时完全没有黑匣子线索。
 - `local-rebuild` 已能从 memory/gateway/subagent 文件事实源重建 LocalStore。
 
 ## 核心差距
@@ -40,13 +41,14 @@
 3. task/gateway/subagent 文件事实源优先于 archive/local 摘要。
 4. 大工具输出不能直接塞进模型上下文，应先 artifact 化。
 5. tool call 和 tool result 必须成对保留或成对摘要，不能切断。
-6. compact 失败、空摘要、非法摘要、自检失败都必须 abort 或 retry，不能继续丢中间上下文。
-7. 用户明确 `--no-save` 时不能偷偷写 raw archive。
-8. 任何删除、清理、重写历史的行为都必须先有 dry-run 和备份策略。
-9. memory entry 必须区分事实、决策、约束、偏好和假设，不能把猜测写成事实。
-10. compact 最终服务于“继续把任务做完”，不是服务于“存很多文本”。
-11. 自动 compact 应该默认尽量少打扰用户，但所有关键动作都必须能在日志和 timeline 中追溯。
-12. 自动 compact 不能以“完美压缩”为前提，必须按“可失败、可回滚、可恢复、可重建”设计。
+6. live raw archive 是黑匣子和续接提示，不是新账本；compact 可用其中的 `assistant_tool_round` / `run_checkpoint` 生成下一步提示，但不能从普通助手文本里猜验收、约束或测试状态。
+7. compact 失败、空摘要、非法摘要、自检失败都必须 abort 或 retry，不能继续丢中间上下文。
+8. 用户明确 `--no-save` 时不能偷偷写 raw archive。
+9. 任何删除、清理、重写历史的行为都必须先有 dry-run 和备份策略。
+10. memory entry 必须区分事实、决策、约束、偏好和假设，不能把猜测写成事实。
+11. compact 最终服务于“继续把任务做完”，不是服务于“存很多文本”。
+12. 自动 compact 应该默认尽量少打扰用户，但所有关键动作都必须能在日志和 timeline 中追溯。
+13. 自动 compact 不能以“完美压缩”为前提，必须按“可失败、可回滚、可恢复、可重建”设计。
 
 ## 上下文分层
 
@@ -149,6 +151,7 @@ Action Guard 之后还必须生成 Continue Packet。Continue Packet 固定继�
 ```text
 用户消息或工具结果进入系统
   -> 估算当前上下文和工具输出 token
+  -> 运行中把助手工具轮、工具结果和周期 checkpoint 增量写入 raw archive
   -> 大工具输出先 artifact 化
   -> 50% 以上写 checkpoint
   -> 70% 以上进入 compact
@@ -613,6 +616,8 @@ compact、resume 和 memory runtime 应该同步推进，但要分清职责，�
 - `apply_id` 使用 `plan_id + 时间` 生成；同一秒重复 apply 会自动追加后缀，避免覆盖旧产物。
 - `plan_id`、`apply_id` 会同时写入 metadata、apply bundle、restore refs、work state snapshot、self-check、失败报告和 ledger。
 - 新增 `*.work_state_snapshot.json`，记录 goal、phase、next step、acceptance、constraints、changed/read files、artifact refs、restore refs、latest tests、git state、missing fields 和 source quality。
+- 新增 `*.compaction_state.json` 和 `*.handoff.md`。前者是机器交接包，记录 compact 链路、上一轮 compact、source refs、artifact refs、work state、next actions 和 summary 引用；后者是给模型看的续接说明，明确“summary 不是事实账本，事实以 refs/work_state/registry/tree 为准”。
+- 多轮 compact 时，新一轮 `compaction_state` 会引用上一轮 `previous_compact_id` 和 `previous_handoff_summary_ref`。这一步借鉴 工具运行时/长期助手 的滚动 summary 思路，但不让 LLM 摘要成为唯一事实源。
 - work state 优先从 `memory_archive/snapshots/*.json` 权威 snapshot 读取 goal/next action；如果真实 `run --save` 只留下 hook recovery snapshot 和 raw archive，apply 会从本次 `restore_refs` 指向的 hook/raw JSONL 回填 goal/next_step，仍不从普通对话里猜验收、约束或测试状态。
 - 真实 `run --save` 会额外写 `memory_archive/runtime_facts/<request_id>/task.json`，并通过 hook snapshot `content_paths` 暴露给 compact apply；其中 acceptance/constraints/latest_tests 只来自用户 prompt 的显式标签或真实测试工具命令。
 - `memory-fact-write` 可把用户确认后的补全事实写入 `memory_archive/runtime_facts/<fact_id>/task.json`；后续用同一 request/session/task/run scope 重新 `memory-compact --apply` 时，work state 会只读扫描这个 fact source。

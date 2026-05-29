@@ -94,9 +94,9 @@ def test_run_command_output_is_bounded_by_gateway_budget(tmp_path: Path):
     assert "A" * 80 not in result.output
 
 
-# LLM: Subagent shell boundary should keep run_command inside runtime workspace checks.
-# 函数用途: 验证子代理 write_boundary 下的 run_command 不会绕过工具网关的工作区边界。
-def test_run_command_honors_shell_access_mode_from_write_boundary(tmp_path: Path):
+# LLM: Subagent shell boundary narrows command mode without restoring workspace-only path gates.
+# 函数用途: 验证子代理 write_boundary 降级 shell 后仍共用 normal 路径策略。
+def test_run_command_shell_access_override_uses_normal_path_policy(tmp_path: Path):
     workspace = tmp_path / "workspace"
     external = tmp_path / "external"
     workspace.mkdir()
@@ -112,8 +112,8 @@ def test_run_command_honors_shell_access_mode_from_write_boundary(tmp_path: Path
         write_boundary={"shell_access_mode": "workspace-write"},
     )
 
-    assert result.ok is False
-    assert "PATH_WORKSPACE_ESCAPE_BLOCKED" in result.output
+    assert result.ok is True
+    assert "return_code=0" in result.output
 
 
 # LLM: read_artifact aliases keep artifact refs machine-shaped when models say ref/path/call_id.

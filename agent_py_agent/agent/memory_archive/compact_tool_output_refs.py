@@ -66,6 +66,7 @@ def _source_ref(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "kind": "tool_output",
         "path": str(path),
+        "artifact_ref": str(path),
         "exists": path.exists(),
         "tool": str(row.get("tool", "") or ""),
         "call_id": str(row.get("call_id", "") or ""),

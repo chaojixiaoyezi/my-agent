@@ -66,6 +66,8 @@ class ExecuteRegistryCallParams:
     workspace_roots: list[Path] | None
     expose_security_tools: bool
     security_tool_names: set[str]
+    path_access_mode: str = "normal"
+    path_dangerous_roots: list[str] | None = None
     allowed_tools: list[str] | None = None
     granted_capabilities: list[str] | None = None
     write_boundary: dict[str, object] | None = None
@@ -266,6 +268,8 @@ def _invoke_registry_with_envelope(
         workspace_roots=call.workspace_roots,
         allowed_tools=call.allowed_tools,
         write_boundary=call.write_boundary,
+        path_access_mode=call.path_access_mode,
+        path_dangerous_roots=call.path_dangerous_roots,
     )
     return attach_result_envelope(
         resilient_tool_invoke(

@@ -65,6 +65,7 @@ def test_runner_auto_concurrency_uses_configured_limit() -> None:
 # 函数用途: 验证长期会话上下文预算能从配置对象生成并影响 prompt 副本裁剪。
 def test_background_context_budget_uses_configured_values() -> None:
     from agent_py_agent.agent.conversation.context_budget import (
+        BackgroundContextPayloadRequest,
         background_context_budget_from_config,
         bounded_background_context_payload,
     )
@@ -78,10 +79,12 @@ def test_background_context_budget_uses_configured_values() -> None:
         )
     )
     payload = bounded_background_context_payload(
-        bundle={"thread": {"long": "abcdef", "other": "ok", "third": "hidden"}, "messages": [{"content": "abcdef"}]},
-        pending_wake_signals=[],
-        agent_tree={"nodes": [{"a": 1}, {"b": 2}]},
-        budget=budget,
+        BackgroundContextPayloadRequest(
+            bundle={"thread": {"long": "abcdef", "other": "ok", "third": "hidden"}, "messages": [{"content": "abcdef"}]},
+            pending_wake_signals=[],
+            agent_tree={"nodes": [{"a": 1}, {"b": 2}]},
+            budget=budget,
+        )
     )
 
     assert payload["messages"][0]["content"]["preview"].startswith("abcde")

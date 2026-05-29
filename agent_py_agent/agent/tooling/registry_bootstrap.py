@@ -15,6 +15,7 @@ from .filesystem import (
     ReadFileTool,
     SearchTextTool,
     WriteFileTool,
+    filesystem_access_options,
 )
 from .models import HybridToolRetriever, KeywordToolSearchProvider, VectorToolSearchProvider
 from .shell import ShellTool, ShellToolOptions
@@ -46,10 +47,14 @@ def register_base_tools(registry: Any, params: Any) -> None:
 # 函数用途: 注册文件系统工具，并把用户配置的读取/写入上限传给对应工具。
 def _register_filesystem_tools(registry: Any, params: Any) -> None:
     workspace_roots = registry.workspace_roots
-    registry.register(ListFilesTool(registry.workspace_root, params.max_entries, workspace_roots))
-    registry.register(FindFilesTool(registry.workspace_root, params.max_matches, workspace_roots))
-    registry.register(ReadFileTool(registry.workspace_root, params.max_chars, workspace_roots))
-    registry.register(SearchTextTool(registry.workspace_root, params.max_matches, workspace_roots))
+    access_options = filesystem_access_options(
+        path_access_mode=params.path_access_mode,
+        path_dangerous_roots=params.path_dangerous_roots,
+    )
+    registry.register(ListFilesTool(registry.workspace_root, params.max_entries, workspace_roots, access_options))
+    registry.register(FindFilesTool(registry.workspace_root, params.max_matches, workspace_roots, access_options))
+    registry.register(ReadFileTool(registry.workspace_root, params.max_chars, workspace_roots, access_options))
+    registry.register(SearchTextTool(registry.workspace_root, params.max_matches, workspace_roots, access_options))
     registry.register(
         ReadArtifactTool(
             registry.workspace_root,
@@ -63,9 +68,10 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
             registry.workspace_root,
             workspace_roots,
             max_inline_content_chars=params.tool_write_inline_max_chars,
+            access_options=access_options,
         )
     )
-    registry.register(ApplyPatchTool(registry.workspace_root, workspace_roots))
+    registry.register(ApplyPatchTool(registry.workspace_root, workspace_roots, access_options))
 
 
 # LLM: _register_network_tools isolates non-filesystem tool setup from constructor policy.
@@ -81,6 +87,8 @@ def _register_network_tools(registry: Any, params: Any) -> None:
             registry.workspace_root,
             options=ShellToolOptions(
                 workspace_roots=registry.workspace_roots,
+                path_access_mode=params.path_access_mode,
+                path_dangerous_roots=params.path_dangerous_roots,
                 access_mode=params.access_mode,
                 default_timeout=params.shell_tool_timeout,
                 max_output_chars=params.shell_tool_output_max_chars,

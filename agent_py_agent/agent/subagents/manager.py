@@ -70,6 +70,7 @@ class SubAgentManager(
         params: SubAgentManagerInitParams | None = None,
         local_store=None,
         collaboration_store=None,
+        conversation_store=None,
         workspace_root=None,
         workspace_roots=None,
         role_template_dirs=None,
@@ -85,6 +86,7 @@ class SubAgentManager(
         params = params or SubAgentManagerInitParams(
             local_store=local_store,
             collaboration_store=collaboration_store,
+            conversation_store=conversation_store,
             workspace_root=workspace_root,
             workspace_roots=workspace_roots,
             role_template_dirs=role_template_dirs,

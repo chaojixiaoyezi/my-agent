@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from ..gateway_parts.io import read_json_file, update_json_file_atomic
@@ -12,19 +13,28 @@ from .store_common import now as current_time
 from .store_progress import ConversationProgressStore
 
 
+@dataclass(frozen=True)
+class BackgroundClaimPayload:
+    thread_id: str
+    reason: str
+    current: float
+    lease: int
+    task_id: str = ""
+
+
 class ConversationClaimStore(ConversationProgressStore):
     def claim_background_run(self, request: dict) -> dict[str, Any] | None:
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)
         current = current_time(request.get("now"))
         lease = _claim_lease_seconds(request.get("lease_seconds"))
-        claim = _new_claim(
-            thread.thread_id,
-            str(request.get("reason") or ""),
-            current,
-            lease,
+        claim = _new_claim(BackgroundClaimPayload(
+            thread_id=thread.thread_id,
+            reason=str(request.get("reason") or ""),
+            current=current,
+            lease=lease,
             task_id=str(request.get("task_id") or ""),
-        )
+        ))
         claimed = False
 
         def updater(data: dict[str, Any]) -> dict[str, Any]:
@@ -98,18 +108,18 @@ class ConversationClaimStore(ConversationProgressStore):
         return updated if finished else None
 
 
-def _new_claim(thread_id: str, reason: str, current: float, lease: int, *, task_id: str = "") -> dict[str, Any]:
+def _new_claim(payload: BackgroundClaimPayload) -> dict[str, Any]:
     return {
         "schema_version": "background_run_claim.v1",
         "claim_id": new_id("bgclaim"),
-        "thread_id": thread_id,
-        "task_id": task_id,
-        "reason": str(reason or ""),
+        "thread_id": payload.thread_id,
+        "task_id": payload.task_id,
+        "reason": str(payload.reason or ""),
         "status": "running",
         "phase": "claimed",
-        "started_at": current,
-        "heartbeat_at": current,
-        "expires_at": current + lease,
+        "started_at": payload.current,
+        "heartbeat_at": payload.current,
+        "expires_at": payload.current + payload.lease,
         "takeover": {"allowed": False, "reason": "claim_running"},
     }
 

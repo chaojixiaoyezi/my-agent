@@ -125,9 +125,9 @@ modules = ["agent_py_agent"]
 # 写入边界校验流程:
 # 1. 工具名检查: write_file、apply_patch 和授权命令写入都会走写入边界
 # 2. 路径规范化: 去除控制字符、限制长度(4096字符)
-# 3. 允许目录检查: 写入必须在 workspace_root 内
-# 4. 禁止目录检查: 不能写入 .git/, config/, docs/ 等受保护目录
-# 5. 锁定文件检查: 不能修改被锁定的文件
+# 3. 统一路径策略: normal 模式只拒绝 path_dangerous_roots，full 模式路径全开
+# 4. 显式禁止目录检查: 仍尊重 forbidden_write_roots
+# 5. 锁定文件检查: 不能修改被 locked_files 标记的文件
 ```
 
 ### 2.3 Write Rules by Module / 各模块写入规则
@@ -288,8 +288,9 @@ class DispatchMixin:
 # 写入边界校验链:
 # 1. 工具边界: write_file、apply_patch 和授权命令写入
 # 2. 路径校验:
-#    - 必须在 workspace_root 内
-#    - 不能包含 .. (目录遍历)
+#    - normal 模式只拒绝 path_dangerous_roots
+#    - full 模式不做危险目录路径拒绝
+#    - workspace_root 是相对路径基准，不是普通产物唯一白名单
 #    - 不能包含控制字符
 #    - 长度不超过 4096 字符
 # 3. 目录黑名单:

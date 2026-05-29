@@ -7,13 +7,12 @@ from __future__ import annotations
 
 from ._normalize_core_fields import DaemonFieldsService, GatewayFieldsService, ModelFieldsService
 from ._normalize_home_fields import HomeLayoutFieldsService
+from ._normalize_identity_fields import AdapterFieldsService, UserFieldsService
 from ._normalize_operational_fields import RuntimeBoolFieldsService
 from ._normalize_runtime_fields import (
-    AdapterFieldsService,
     SubagentAdvancedFieldsService,
     SubagentBasicFieldsService,
     ToolFieldsService,
-    UserFieldsService,
 )
 from ._normalize_timeout_fields import TimeoutFieldsService
 

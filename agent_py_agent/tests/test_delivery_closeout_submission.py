@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -147,6 +148,48 @@ def test_no_tool_final_answer_implicitly_submits_and_closes_when_valid(tmp_path:
     assert "交付验收通过" in decision.response.text
 
 
+# LLM: Some legitimate tasks finish in the answer/channel rather than a file.
+# 函数用途: 验证显式 message delivery 不会被产物 ref 门误判成缺文件。
+def test_message_delivery_contract_closes_without_artifact_ref_failure(tmp_path: Path):
+    params = _message_delivery_params(archive_tool_calls=[])
+    agent = _agent(tmp_path)
+
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="已经检查完，结论直接回复给你。", backend="test"),
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+
+    assert decision.action == "break"
+    assert "交付验收通过" in decision.response.text
+    report = json.loads((tmp_path / ".agent_delivery" / "closeout.json").read_text(encoding="utf-8"))
+    assert report["delivery_mode"] == "message"
+    assert report["artifacts"] == []
+    assert report["runtime_gate"]["allowed"] is True
+
+
+# LLM: Boolean no-artifact declarations are the preferred open-ended shape.
+# 函数用途: 验证无需落盘任务即使没有 artifacts 字段，也不会被合同 doctor 误杀。
+def test_requires_artifact_false_contract_closes_without_artifacts_field(tmp_path: Path):
+    params = _message_delivery_params(archive_tool_calls=[], contract={"case_id": "answer-only", "requires_artifact": False})
+    agent = _agent(tmp_path)
+
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="检查完成，不需要生成文件。", backend="test"),
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+
+    assert decision.action == "break"
+    assert "交付验收通过" in decision.response.text
+
+
 def _agent(root: Path):
     return SimpleNamespace(
         root=root,
@@ -222,6 +265,25 @@ def _delivery_params(*, archive_tool_calls: list[dict[str, object]]) -> ToolLoop
             "case_id": "generic-artifact",
             "artifacts": [{"artifact_id": "out", "path": "out.txt", "kind": "txt"}],
         },
+    )
+
+
+def _message_delivery_params(
+    *,
+    archive_tool_calls: list[dict[str, object]],
+    contract: dict[str, object] | None = None,
+) -> ToolLoopExecuteParams:
+    params = _delivery_params(archive_tool_calls=archive_tool_calls)
+    return replace(
+        params,
+        delivery_contract=dict(
+            contract
+            or {
+                "case_id": "message-only",
+                "delivery_mode": "message",
+                "artifacts": [],
+            }
+        ),
     )
 
 

@@ -89,7 +89,6 @@ def _validate_dangerous_combinations(config: dict[str, Any], findings: list[dict
     if root and Path(root).expanduser() == Path("/"):
         findings.append(_finding("CONFIG_WORKSPACE_ROOT_DANGEROUS", "workspace_root", "root_workspace_forbidden"))
     _validate_artifact_dir_boundary(config, findings)
-    _validate_allowed_write_roots(config, findings)
     if bool(config.get("allow_shell")):
         findings.append(_finding("CONFIG_ALLOW_SHELL_ENABLED", "allow_shell", "shell_requires_explicit_review"))
     if bool(config.get("allow_dangerous_actions")) and config.get("approval_required") is False:
@@ -113,31 +112,6 @@ def _validate_artifact_dir_boundary(config: dict[str, Any], findings: list[dict[
     if _path_inside(resolved, workspace):
         return
     findings.append(_finding("CONFIG_ARTIFACT_DIR_OUTSIDE_WORKSPACE", "artifact_dir", "artifact_dir_must_stay_in_workspace"))
-
-
-# LLM: _validate_allowed_write_roots rejects broad or escaping write roots.
-# 函数用途: allowed_write_roots 不能包含 /，也不能指向 workspace_root 外部。
-def _validate_allowed_write_roots(config: dict[str, Any], findings: list[dict[str, str]]) -> None:
-    workspace = _path_or_none(config.get("workspace_root"))
-    roots = config.get("allowed_write_roots")
-    if workspace is None or not isinstance(roots, list):
-        return
-    for index, root in enumerate(roots):
-        path = _path_or_none(root)
-        if path is None:
-            continue
-        if path.expanduser() == Path("/"):
-            findings.append(_finding("CONFIG_ALLOWED_WRITE_ROOT_DANGEROUS", f"allowed_write_roots[{index}]", "root_write_forbidden"))
-            continue
-        resolved = path if path.is_absolute() else workspace / path
-        if not _path_inside(resolved, workspace):
-            findings.append(
-                _finding(
-                    "CONFIG_ALLOWED_WRITE_ROOT_OUTSIDE_WORKSPACE",
-                    f"allowed_write_roots[{index}]",
-                    "write_root_must_stay_in_workspace",
-                )
-            )
 
 
 # LLM: _path_inside checks resolved path containment without requiring paths to exist.

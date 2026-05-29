@@ -67,15 +67,30 @@ def test_write_file_requires_exactly_one_payload(tmp_path: Path) -> None:
     assert "二选一" in duplicate.output
 
 
-def test_write_file_path_traversal_blocked(tmp_path: Path) -> None:
+def test_write_file_allows_non_dangerous_external_path(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     tool = WriteFileTool(workspace)
 
     result = tool.execute({"path": "../outside.txt", "content": "bad"})
 
+    assert result.ok
+    assert (tmp_path / "outside.txt").read_text(encoding="utf-8") == "bad"
+
+
+def test_write_file_blocks_configured_dangerous_root(tmp_path: Path) -> None:
+    from agent_py_agent.agent.tooling.filesystem import filesystem_access_options
+
+    workspace = tmp_path / "workspace"
+    danger = tmp_path / "danger"
+    workspace.mkdir()
+    danger.mkdir()
+    tool = WriteFileTool(workspace, access_options=filesystem_access_options(path_dangerous_roots=[str(danger)]))
+
+    result = tool.execute({"path": str(danger / "secret.txt"), "content": "bad"})
+
     assert not result.ok
-    assert "工作区范围" in result.output
+    assert "危险目录" in result.output
 
 
 def test_write_file_content_detail_uses_transport_policy(tmp_path: Path) -> None:

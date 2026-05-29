@@ -25,9 +25,9 @@ _CREATE_PARAMETERS = {
     "output_files": "子代理必须写出的目标文件路径列表；知道文件名时必须填，系统会把它写入机器合同",
     "output_refs": "output_files 的语义别名，用于引用交付物路径或产物 ref",
     "artifact_refs": "交付物 refs 列表；适合引用已经存在或后续要验收的产物",
+    "replacement_for_run_ids": "可选：新子代理要接管/替换哪些旧 run_id；系统会把旧 run 标记为已被接管，避免父代理继续把旧 run 当活跃任务推进",
     "workflow_mode": "off/plan/auto；决定是否在建工单时挂 workflow 计划",
-    "extra_write_roots": "额外写入目录列表；通常省略，系统会把当前任务 workspace_root 作为默认产物根；只有写到其它工作区内目录时才填",
-    "defer_start": "默认 false。只有明确想先建任务、不让子代理立刻开跑时才传 true",
+    "defer_start": "默认 false。可写在顶层或单个 item 上；顶层 true 表示整批只建不跑，item true 表示只挂起这个子代理",
 }
 _CREATE_PARAMETER_DETAILS = {
     "goal": (
@@ -79,16 +79,16 @@ _CREATE_PARAMETER_DETAILS = {
     ),
     "output_refs": "同 output_files；当上游系统已经叫它 refs 时可用这个字段，系统会统一归入 task.attributes。",
     "artifact_refs": "用于交付物已经有 ref 或需要跨任务传递的情况；普通写新文件优先用 output_files。",
-    "workflow_mode": "默认建议省略或写 off。只有用户明确要求 workflow/工作流时才写 plan/auto；明确文件交付 worker 会强制 off。",
-    "extra_write_roots": (
-        "JSON 数组，例如 [\"C:/Users/you/Desktop/work\"]；只给本次子代理任务增加写入边界。"
-        "普通任务可省略：如果 goal 写的是“目标目录/同一目录/任务目录”并且当前有真实 workspace_root，"
-        "系统会自动把 workspace_root 当作本次产物根。"
-        "只有用户明确给了其它工作区内产物目录、恢复 worker、重试超时 worker 时，才需要显式保留那个目录。"
+    "replacement_for_run_ids": (
+        "当旧子代理卡住、超时或已经被新策略接管时使用。"
+        "例如新建一个修复/接管 worker，并写 replacement_for_run_ids:[\"旧run_id\"]；"
+        "系统只记录结构化替换关系和旧 run 状态，不会靠自然语言猜谁替谁。"
     ),
+    "workflow_mode": "默认建议省略或写 off。只有用户明确要求 workflow/工作流时才写 plan/auto；明确文件交付 worker 会强制 off。",
     "defer_start": (
-        "默认不要传。传 true 表示只建任务账本，不启动 runner；适合用户明确说“先建好别运行”、"
-        "或需要人工稍后统一开跑的场景。普通派工必须省略，让子代理自动开始工作。"
+        "普通生产任务默认不要传，让子代理创建后自动开始工作。"
+        "测试、找错、验收、汇总这类依赖前置产物的 item 可以传 true；"
+        "等产物 refs 出现后，父代理再用 dispatch_subagents 显式启动这些 run_id。"
     ),
 }
 _CREATE_EXAMPLES = [
@@ -112,8 +112,8 @@ _CREATE_EXAMPLES = [
         '"agent_name":"小傻妞-资料B","required_read_paths":["data/b.md","rubric.md"]}]}'
     ),
     '{"tool":"create_subagents","goal":"在隔离 fixture 项目里实现三个小功能并写报告","count":3,"role":"worker","workflow_mode":"off","acceptance_checks":["必须有文件证据","必须说明测试结果"]}',
-    '{"tool":"create_subagents","goal":"在 /workspace/deliverables/app/build 实现用户指定项目的 HTML 骨架和 data.json","count":1,"role":"worker","agent_name":"小傻妞-基础结构","extra_write_roots":["/workspace/deliverables/app/build"]}',
-    '{"tool":"create_subagents","goal":"在 /workspace/deliverables/app/build 实现用户指定项目的 styles.css 和 app.js 交互","count":1,"role":"worker","agent_name":"小傻妞-样式交互","extra_write_roots":["/workspace/deliverables/app/build"]}',
+    '{"tool":"create_subagents","goal":"实现用户指定项目的 HTML 骨架和 data.json","count":1,"role":"worker","agent_name":"小傻妞-基础结构","output_files":["/workspace/deliverables/app/build/index.html","/workspace/deliverables/app/build/data.json"]}',
+    '{"tool":"create_subagents","goal":"实现用户指定项目的 styles.css 和 app.js 交互","count":1,"role":"worker","agent_name":"小傻妞-样式交互","output_files":["/workspace/deliverables/app/build/styles.css","/workspace/deliverables/app/build/app.js"]}',
     '{"tool":"create_subagents","goal":"检查多个 worker 的项目实现","count":1,"role":"bug_finder"}',
 ]
 
@@ -206,7 +206,7 @@ _SCHEDULE_CHILD_PARAMETERS = {
 _SCHEDULE_CHILD_PARAMETER_DETAILS = {
     "children": (
         "JSON 数组。每项可含 role、agent_name、goal、plan、allowed_tools、allowed_skills、"
-    "acceptance_checks、extra_write_roots。参数必须在 tool JSON 顶层，不要包在 orchestration/filesystem 等二级字段里；"
+        "acceptance_checks、output_files。参数必须在 tool JSON 顶层，不要包在 orchestration/filesystem 等二级字段里；"
         "长目标请分多次调用，每次 1-2 个 child。多层领导节点可用 role=coordinator/child_coordinator/grandchild_coordinator。"
         "优先从这些角色模板索引里选 role：\n{role_template_index}"
     ),

@@ -198,13 +198,19 @@ def _first_nonempty(values: list[str]) -> str:
     return next((value for value in values if value), "")
 
 
-# LLM: _archive_next_actions uses hook recovery next_actions without parsing assistant prose.
-# 函数用途: 从 hook recovery snapshot 回填下一步；没有结构化 next_actions 时保持未知。
+# LLM: _archive_next_actions prefers structured hook next_actions, then live assistant/checkpoint hints.
+# 函数用途: 从 hook recovery snapshot 或运行中 raw 事件回填下一步；不把普通助手最终回复当任务事实。
 def _archive_next_actions(records: list[dict[str, Any]]) -> list[str]:
     for record in records:
         items = _text_list(record.get("next_actions"))
         if items:
             return items
+    for record in reversed(records):
+        if str(record.get("action") or "") not in {"assistant_tool_round", "run_checkpoint"}:
+            continue
+        hint = str(record.get("content") or record.get("content_preview") or "").strip()
+        if hint:
+            return [hint]
     return []
 
 

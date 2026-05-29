@@ -4,10 +4,12 @@
 """Unified artifact registry for user-visible deliverables."""
 
 from .registry import (
+    ArtifactGroupRegistration,
     ArtifactRegistration,
     ArtifactRegistryRecord,
     latest_artifact_records,
     register_artifact,
+    register_artifact_group,
     registry_path,
     resolve_artifact_record,
 )
@@ -20,11 +22,13 @@ from .shell_protection import (
 
 __all__ = [
     "ArtifactRegistration",
+    "ArtifactGroupRegistration",
     "ArtifactRegistryRecord",
     "ShellArtifactSnapshot",
     "latest_artifact_records",
     "reconcile_shell_artifacts",
     "register_artifact",
+    "register_artifact_group",
     "registry_path",
     "resolve_artifact_record",
     "shell_artifact_protection_note",

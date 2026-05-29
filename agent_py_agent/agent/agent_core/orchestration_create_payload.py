@@ -20,6 +20,7 @@ class CreateSubagentsPayloadInput:
     allowed_tools: object
     request_params: dict[str, object]
     auto_start: dict[str, object] | None = None
+    replacement_records: list[dict[str, object]] | None = None
 
 
 # LLM: create_subagents_payload renders create/reuse/dispatch facts for the parent model.
@@ -44,6 +45,8 @@ def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, 
         "next_action": _dispatch_next_action(dispatchable, request_params, auto_start),
         "allowed_tools": request.allowed_tools or "automatic",
         "operation_contract": _operation_contract(request_params, created, reused, pending_dispatch),
+        "replacement_records": request.replacement_records or [],
+        "scheduling_advice": _scheduling_advice(tasks, request_params, auto_start),
         "subagent_workspace": str(agent.subagents.workspace),
         "tasks": [_task_payload(task) for task in tasks],
     }
@@ -57,6 +60,9 @@ def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, 
 def _pending_dispatch_tasks(tasks: list, request_params: dict[str, object], auto_start: dict[str, object] | None) -> list:
     if bool(request_params.get("defer_start")):
         return tasks
+    deferred = set(_string_items((auto_start or {}).get("deferred_run_ids")))
+    if deferred:
+        return [task for task in tasks if _task_text(task, "id") in deferred]
     if (auto_start or {}).get("status") in {"started", "not_needed"}:
         return []
     return tasks
@@ -92,6 +98,13 @@ def _dispatch_next_action(
             "tool": "dispatch_subagents",
             "reason": "defer_start=true，本次只建任务记录；需要开跑时再显式推进这些 run_id。",
             "params": {"apply": True, "execute_runners": True, "run_ids": run_ids, "max_runners": len(run_ids)},
+        }
+    deferred = _string_items((auto_start or {}).get("deferred_run_ids"))
+    if deferred:
+        return {
+            "tool": "subagent_board",
+            "reason": "部分子代理已自动启动；defer_start=true 的子代理会留在 dispatch_run_ids，等前置产物出现后再显式启动。",
+            "params": {"limit": max(20, len(run_ids))},
         }
     if (auto_start or {}).get("status") == "started":
         return {
@@ -131,3 +144,31 @@ def _task_text(task: object, field: str) -> str:
 def _task_attributes(task: object) -> dict[str, object]:
     attrs = getattr(task, "attributes", {}) or {}
     return dict(attrs) if isinstance(attrs, dict) else {}
+
+
+def _scheduling_advice(tasks: list, request_params: dict[str, object], auto_start: dict[str, object] | None) -> list[dict[str, object]]:
+    del request_params
+    advice: list[dict[str, object]] = []
+    quality_tasks = [task for task in tasks if _is_dependent_quality_role(task) and _task_text(task, "id")]
+    deferred = set(_string_items((auto_start or {}).get("deferred_run_ids")))
+    early = [task for task in quality_tasks if _task_text(task, "id") not in deferred]
+    if early:
+        advice.append(
+            {
+                "code": "dependent_quality_task_started_early",
+                "run_ids": [_task_text(task, "id") for task in early],
+                "message": "测试、找错、验收、汇总这类任务通常依赖前置产物；如果产物还没出来，建议下次创建时给这些 item 设置 defer_start=true，等产物 refs 出现后再启动。",
+            }
+        )
+    return advice
+
+
+def _is_dependent_quality_role(task: object) -> bool:
+    role = f"{_task_text(task, 'role')} {_task_text(task, 'agent_name')}".casefold().replace("-", "_")
+    return any(token in role for token in ("tester", "bug_finder", "reviewer", "verifier", "qa", "summary", "汇总", "测试", "找错", "验收"))
+
+
+def _string_items(value: object) -> list[str]:
+    if not isinstance(value, list | tuple | set):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]

@@ -43,6 +43,16 @@
   成功写入产物给更明显的阶段进度，runner 记录 `DONE/COMPLETED` 后归一为 `1.0`。
 - 这样父代理看 `inspect_agent_tree` 时能区分“刚创建但没动”“正在调用工具”“已经完成”，
   不需要读完整模型对话，也不会把只读工具归档误当成用户产物。
+- `defer_start` 可以写在单个 `items[]` 子任务上。生产 worker 仍默认创建即启动；
+  测试、找错、验收、汇总这类依赖前置产物的子代理可以单独挂起，等产物 refs 出现后
+  再由父代理显式启动。系统只给调度建议，不用硬门替模型判断。
+- `create_subagents` 支持 `replacement_for_run_ids` / `replaces_run_ids` /
+  `supersedes_run_ids`。父代理派接管/修复子代理时，把被替换的旧 run 写进去；
+  系统会把旧 run 标记为 `TAKEN_OVER` 并记录 `takeover_by`，后续 tree/board/dispatch
+  默认不再把旧 run 当成活跃任务。旧 run 的记录和证据仍保留，方便审计和恢复。
+- 子代理 runner 完成或失败后，会把状态更新写入绑定的长期会话，并投递一条普通
+  wake signal。这个信号只负责叫醒父代理继续看树、派测试、找茬、补派或汇报；
+  不做本地验收、不替父代理抢答，也不把任务卡进新的等待态。
 
 ## 2026-05-28 模型可见路径收敛
 
@@ -62,6 +72,13 @@
 - `dispatch_subagents`、`subagent_board`、`inspect_agent_tree` 和 closeout
   都优先返回 registry 的 `artifact_id/path/registry_ref`。旧路径字段还保留，
   但只作为兼容投影。
+- closeout 支持 file group，但 file group 必须先进入统一 artifact registry。
+  `.agent_delivery/artifacts_manifest.json` 不再是权威账本，避免模型或子代理写出第二套账导致
+  父代理、tree、closeout 和人工排查看到不同事实。
+- `.agent_delivery/closeout.json` 只是系统验收报告快照，用来解释本轮通过/返工原因；
+  它不能替代 `data/artifacts/registry.jsonl`，也不应该由模型在产物目录里手写。
+- 显式声明 `delivery_mode: message` 或 `requires_artifact: false` 的任务可以没有落盘产物。
+  这类任务仍会写 closeout 报告，但不会触发 `ARTIFACT_REF_MISSING`。
 - 这不是新硬门。registry 只解决“谁是最新产物事实”的问题；缺产物、坏格式和内容质量
   仍由普通 closeout 或父级模型根据任务目标处理。
 

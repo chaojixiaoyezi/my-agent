@@ -47,15 +47,14 @@ def _assert_allowed_write(registry, task_dir, boundary) -> None:
     assert (task_dir / "output.md").read_text(encoding="utf-8") == "ok"
 
 
-def _assert_blocked_outside_workspace(registry, workspace, boundary) -> None:
+def _assert_allowed_outside_allowed_roots(registry, workspace, boundary) -> None:
     result = registry.execute_call(
         {"tool": "write_file", "path": "README.md", "content": "bad"},
         allowed_tools=["write_file"],
         write_boundary=boundary,
     )
-    assert not result.ok
-    assert "allowed_write_roots" in result.output
-    assert not (workspace / "README.md").exists()
+    assert result.ok
+    assert (workspace / "README.md").read_text(encoding="utf-8") == "bad"
 
 
 def _assert_blocked_forbidden_root(registry, task_dir, boundary) -> None:
@@ -96,13 +95,13 @@ def _assert_blocked_non_string_path(registry, boundary) -> None:
     assert "allowed_write_roots" in result.output or "path 参数必须是字符串路径" in result.output
 
 
-def test_write_boundary_blocks_subagent_writes_outside_allowed_roots():
-    """LLM: verify that write_boundary restricts writes to allowed roots and blocks forbidden/locked paths."""
+def test_write_boundary_keeps_forbidden_and_locked_but_not_allowed_root_hard_gate():
+    """LLM: allowed_write_roots are context now; forbidden/locked paths still block."""
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         registry, task_dir, boundary = _write_boundary_test_registry(workspace)
         _assert_allowed_write(registry, task_dir, boundary)
-        _assert_blocked_outside_workspace(registry, workspace, boundary)
+        _assert_allowed_outside_allowed_roots(registry, workspace, boundary)
         _assert_blocked_forbidden_root(registry, task_dir, boundary)
         _assert_blocked_locked_file(registry, task_dir, boundary)
         _assert_blocked_non_string_path(registry, boundary)
@@ -162,11 +161,11 @@ def test_write_boundary_extends_read_tools_to_explicit_product_root():
         assert "hello product" in result.output
 
 
-def test_write_boundary_blocks_symlink_escape_under_allowed_root():
-    """LLM: verify that a symlink inside an allowed root cannot escape to write outside.
+def test_write_boundary_allows_symlink_escape_to_non_dangerous_root():
+    """LLM: symlink escapes are allowed when the resolved target is not dangerous.
 
     新手说明:
-    在允许的目录下创建指向外部的符号链接，写文件仍应被拦截。
+    在允许的目录下创建指向普通外部目录的符号链接，不再因为工作区白名单被拦截。
     """
     with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as outside_td:
         workspace = Path(td)
@@ -186,9 +185,8 @@ def test_write_boundary_blocks_symlink_escape_under_allowed_root():
             write_boundary={"allowed_write_roots": [str(task_dir)]},
         )
 
-        assert not result.ok
-        assert "路径超出允许的工作区范围" in result.output
-        assert not (outside / "escape.txt").exists()
+        assert result.ok
+        assert (outside / "escape.txt").read_text(encoding="utf-8") == "bad"
 
 
 def test_write_and_apply_patch_tools():
@@ -264,11 +262,11 @@ def test_filesystem_tools_allow_configured_extra_workspace_root():
         assert "report.txt" in list_result.output
 
 
-def test_filesystem_tool_suggests_workspace_path_typo():
-    """LLM: near-miss workspace paths should return retryable path hints instead of a generic boundary error.
+def test_filesystem_tool_reports_missing_external_path_without_permission_claim():
+    """LLM: near-miss workspace paths are no longer misreported as permission problems.
 
     新手说明:
-    模型把用户名或工作区前缀拼错时，读文件工具要明确告诉它正确路径，而不是让它误以为需要扩大权限。
+    模型把用户名或工作区前缀拼错时，工具返回普通路径不存在，后续可继续搜索定位。
     """
     with tempfile.TemporaryDirectory() as td:
         base = Path(td).resolve()
@@ -281,9 +279,9 @@ def test_filesystem_tool_suggests_workspace_path_typo():
         result = tool.execute({"path": str(wrong)})
 
         assert not result.ok
-        assert "suspected_path_typo=true" in result.output
-        assert f"suggested_target={suggested}" in result.output
-        assert "请使用 suggested_target 重试" in result.output
+        assert suggested
+        assert result.error_code == "PATH_NOT_FOUND"
+        assert "路径不存在" in result.output
 
 
 def test_read_file_missing_path_returns_workspace_candidates_not_a_dead_end(tmp_path: Path):
@@ -337,11 +335,11 @@ def test_list_and_search_missing_path_return_recovery_candidates(tmp_path: Path)
     assert str(reports / "weekly-summary.md") in searched.output
 
 
-def test_filesystem_tools_reject_bad_parameters_and_hide_absolute_outside_paths():
-    """LLM: verify that filesystem tools reject bad params and never expose absolute paths outside workspace.
+def test_filesystem_tools_reject_bad_parameters_and_allow_absolute_external_paths():
+    """LLM: verify that filesystem tools reject bad params and allow ordinary external paths.
 
     新手说明:
-    读工作区外文件应被拒绝且不泄露绝对路径；start_line 传字符串应报错；
+    读普通工作区外文件可成功；start_line 传字符串应报错；
     path 传非字符串应报错；recursive="false" 应只列一层。
     """
     with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as outside_td:
@@ -360,9 +358,8 @@ def test_filesystem_tools_reject_bad_parameters_and_hide_absolute_outside_paths(
         bad_path_type = write_tool.execute({"path": {"bad": "type"}, "content": "x"})
         non_recursive = list_tool.execute({"path": ".", "recursive": "false"})
 
-        assert not outside.ok
-        assert "工作区" in outside.output
-        assert str(outside_file) not in outside.output
+        assert outside.ok
+        assert "secret" in outside.output
         assert not bad_line.ok
         assert "start_line 必须是整数" in bad_line.output
         assert not bad_path_type.ok
@@ -412,11 +409,11 @@ def test_read_file_start_line_past_eof_reports_total_lines():
         assert "end_line=3" in result.output
 
 
-def test_search_text_does_not_follow_symlink_to_outside_workspace():
-    """LLM: verify that SearchTextTool does not follow symlinks pointing outside the workspace.
+def test_search_text_does_not_walk_symlink_but_read_file_allows_non_dangerous_target():
+    """LLM: directory search still does not walk symlinks, while direct reads allow ordinary targets.
 
     新手说明:
-    在工作区内创建指向外部的符号链接，搜索和读取都不应泄露外部内容。
+    在工作区内创建指向普通外部文件的符号链接，目录搜索不展开，直接读取可以按路径策略读取。
     """
     with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as outside_td:
         workspace = Path(td)
@@ -435,8 +432,8 @@ def test_search_text_does_not_follow_symlink_to_outside_workspace():
 
         assert search_result.ok
         assert "没有找到匹配项" in search_result.output
-        assert not read_result.ok
-        assert "路径超出允许的工作区范围" in read_result.output
+        assert read_result.ok
+        assert "needle outside workspace" in read_result.output
 
 
 def test_search_text_supports_limit_offset_and_glob(tmp_path: Path):

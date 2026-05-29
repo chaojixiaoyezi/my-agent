@@ -102,8 +102,8 @@ class TestShellToolDangerousCommands:
         assert "return_code=0" in result.output
         assert not build.exists()
 
-    def test_workspace_write_blocks_external_delete_target(self, tmp_path: Path):
-        """workspace-write 下删除目标也不能越出工作区。"""
+    def test_workspace_write_allows_external_delete_target_when_not_dangerous(self, tmp_path: Path):
+        """workspace-write 下普通外部目录不再因为不在工作区而拒绝。"""
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
         workspace = tmp_path / "workspace"
@@ -114,9 +114,29 @@ class TestShellToolDangerousCommands:
         tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
         result = tool.execute({"command": "rm ../external.txt"})
 
+        assert result.ok is True
+        assert not external.exists()
+
+    def test_workspace_write_blocks_dangerous_delete_target(self, tmp_path: Path):
+        """normal 路径策略下，配置的危险目录仍会拒绝删除。"""
+        from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
+
+        workspace = tmp_path / "workspace"
+        danger = tmp_path / "danger"
+        workspace.mkdir()
+        danger.mkdir()
+        target = danger / "external.txt"
+        target.write_text("keep", encoding="utf-8")
+
+        tool = ShellTool(
+            workspace,
+            options=ShellToolOptions(default_timeout=30, path_dangerous_roots=[str(danger)]),
+        )
+        result = tool.execute({"command": "rm ../danger/external.txt"})
+
         assert result.ok is False
-        assert "delete target outside workspace roots" in result.output
-        assert external.exists()
+        assert "危险目录" in result.output
+        assert target.exists()
 
     def test_block_rm_rf_root(self, tmp_path: Path):
         """拦截 rm -rf / 危险命令。"""
@@ -361,8 +381,8 @@ class TestShellToolEdgeCases:
         assert result.ok is False
         assert "命令执行失败" in result.output
 
-    def test_workspace_write_rejects_external_working_dir(self, tmp_path: Path):
-        """默认 workspace-write 不允许把命令工作目录切到工作区外。"""
+    def test_workspace_write_allows_external_working_dir_when_not_dangerous(self, tmp_path: Path):
+        """默认 workspace-write 允许切到普通外部目录。"""
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
         workspace = tmp_path / "workspace"
@@ -373,9 +393,8 @@ class TestShellToolEdgeCases:
         tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
         result = tool.execute({"command": "pwd", "working_dir": str(external)})
 
-        assert result.ok is False
-        assert result.error_code == "PATH_OUTSIDE_WORKSPACE"
-        assert "access_mode=workspace-write" in result.output
+        assert result.ok is True
+        assert str(external) in result.output
 
     @patch("subprocess.run")
     def test_full_access_allows_external_working_dir(self, mock_run, tmp_path: Path):
@@ -407,8 +426,8 @@ class TestShellToolEdgeCases:
         assert result.ok is False
         assert "危险命令" in result.output
 
-    def test_child_shell_access_override_can_narrow_full_access(self, tmp_path: Path):
-        """父级 full-access 的 shell 工具被子代理边界降级后，不能跑到工作区外。"""
+    def test_child_shell_access_override_can_narrow_full_access_to_normal_path_policy(self, tmp_path: Path):
+        """父级 full-access 被降级后仍共用 normal 路径策略，而不是回到工作区白名单。"""
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
         workspace = tmp_path / "workspace"
@@ -423,6 +442,5 @@ class TestShellToolEdgeCases:
             "__access_mode": "workspace-write",
         })
 
-        assert result.ok is False
-        assert result.error_code == "PATH_OUTSIDE_WORKSPACE"
-        assert "access_mode=workspace-write" in result.output
+        assert result.ok is True
+        assert str(external) in result.output

@@ -23,15 +23,17 @@ from ._filesystem_helpers import (
     _required_path,
     _text_param,
 )
+from ._filesystem_list import ListFilesTool
 
 # Re-export write tools
 from ._filesystem_patch import ApplyPatchTool
 
 # Re-export base class and read tools
 from ._filesystem_read import (
+    FileSystemAccessOptions,
     FileSystemTool,
-    ListFilesTool,
     ReadFileTool,
+    filesystem_access_options,
 )
 from ._filesystem_search import SearchTextTool
 from ._filesystem_write import WriteFileTool
@@ -42,7 +44,9 @@ __all__ = [
     "BaseTool",
     "ToolExecutionResult",
     "ToolSpec",
+    "FileSystemAccessOptions",
     "FileSystemTool",
+    "filesystem_access_options",
     "FindFilesTool",
     # Helpers
     "_bool_param",

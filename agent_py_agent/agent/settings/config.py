@@ -119,6 +119,9 @@ class AgentConfig(HomeProviderConfigFields, ToolConfig, RuntimeBudgetConfigField
     memory_archive_preview_level_3_chars: int = 160
     memory_archive_summary_chars: int = 96
     memory_archive_search_file_limit: int = 30
+    memory_live_archive_enabled: bool = True
+    memory_live_archive_checkpoint_rounds: int = 20
+    memory_live_archive_checkpoint_seconds: int = 120
     memory_query_default_limit: int = 100
     memory_query_default_page_size: int = 100
     memory_query_content_preview_chars: int = 500

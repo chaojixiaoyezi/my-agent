@@ -29,6 +29,18 @@ class ConversationTaskStore(ConversationMessageStore):
         data = read_json_file(self._task_path(task_id))
         return self.load_thread(ThreadTaskLink.from_dict(data).thread_id) if data else None
 
+    def update_task_status(self, request: dict) -> ThreadTaskLink | None:
+        task_id = str(request.get("task_id") or "")
+        data = read_json_file(self._task_path(task_id))
+        if not data:
+            return None
+        current = current_time(request.get("now"))
+        link = replace(ThreadTaskLink.from_dict(data), status=str(request.get("status") or "active"))
+        write_json_file_atomic(self._task_path(task_id), link.to_dict())
+        if thread := self.load_thread(link.thread_id):
+            self._write_thread(replace(thread, updated_at=current))
+        return link
+
 
 def _thread_with_task(thread: ConversationThread, task_id: str, updated_at: float) -> ConversationThread:
     task_ids = tuple(dict.fromkeys((*thread.active_task_ids, task_id)))

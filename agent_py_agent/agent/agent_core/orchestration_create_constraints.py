@@ -62,8 +62,8 @@ def role_allows_direct_product_work(role: str) -> bool:
     return not any(part in normalized for part in _NON_WORKER_ROLES)
 
 
-# LLM: merged_extra_write_roots combines explicit structured roots only.
-# 函数用途: 汇总本次子任务允许写入的产物目录，保持顺序并去重。
+# LLM: merged_extra_write_roots accepts legacy explicit roots as output target hints.
+# 函数用途: 兼容旧参数；这些目录只用于子任务产物上下文，不再作为普通写入权限白名单。
 def merged_extra_write_roots(params: dict[str, object], goal: str) -> list[str]:
     roots: list[str] = []
     del goal
@@ -74,8 +74,8 @@ def merged_extra_write_roots(params: dict[str, object], goal: str) -> list[str]:
     return roots
 
 
-# LLM: resolved_extra_write_roots resolves write roots from explicit fields, refs, and real workspace defaults.
-# 函数用途: 合并显式写入根、结构化 target/read refs 和安全 workspace_root 默认值，避免用户必须填写底层 extra_write_roots。
+# LLM: resolved_extra_write_roots resolves legacy output root hints from explicit fields, refs, and workspace defaults.
+# 函数用途: 给旧 SubAgentTask.allowed_write_roots 字段提供兼容上下文；真实路径权限由 path_access_policy 决定。
 def resolved_extra_write_roots(agent: object, params: dict[str, object], goal: str) -> list[str]:
     explicit = merged_extra_write_roots(params, goal)
     if explicit:
@@ -92,27 +92,11 @@ def resolved_extra_write_roots(agent: object, params: dict[str, object], goal: s
     return [default_root] if default_root else []
 
 
-# LLM: explicit_root_missing_write_root_error prevents product paths from drifting into agent workspaces.
-# 函数用途: 显式 root/coordinator 要交付文件但没带产物写入根时拒绝创建，要求模型带 extra_write_roots 重试。
+# LLM: explicit_root_missing_write_root_error is a retired compatibility hook.
+# 函数用途: 旧版本曾要求模型补 extra_write_roots；现在 output_files/output_refs 就是目标事实，不再阻断派工。
 def explicit_root_missing_write_root_error(agent: object, params: dict[str, object], goal: str) -> str:
-    if resolved_extra_write_roots(agent, params, goal):
-        return ""
-    if not _structured_output_refs(params):
-        return ""
-    role = str(params.get("role") or "worker").strip().casefold().replace("-", "_")
-    if not (
-        _manager_has_real_workspace(agent)
-        or _structured_output_refs(params)
-        or not role_allows_direct_product_work(role)
-    ):
-        return ""
-    return (
-        "要交付文件或网站时，必须提供真实产物写入根，"
-        "否则下级会误把 agent-run workspace 当成 build 目录。"
-        "请重新调用 create_subagents，并在顶层传入 extra_write_roots，"
-        "例如 extra_write_roots=[\"/Users/.../deliverables/.../build\"]；"
-        "不要只在 goal 里写“目标目录”“同一目录”或“build 目录”。"
-    )
+    del agent, params, goal
+    return ""
 
 
 # LLM: delegation_constraint_conflict_error keeps child params from weakening machine constraints.

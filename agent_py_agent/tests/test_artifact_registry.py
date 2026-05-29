@@ -48,6 +48,40 @@ def test_artifact_registry_updates_same_artifact_id_path(tmp_path: Path):
     assert latest_artifact_records(tmp_path)["github_weekly"].path == str(second.resolve())
 
 
+def test_artifact_registry_records_logical_file_group(tmp_path: Path):
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactGroupRegistration,
+        latest_artifact_records,
+        register_artifact_group,
+    )
+
+    site = tmp_path / "outputs" / "site"
+    site.mkdir(parents=True)
+    html = site / "index.html"
+    css = site / "styles.css"
+    html.write_text("<!doctype html><html><head></head><body>ok</body></html>", encoding="utf-8")
+    css.write_text("body { color: black; }", encoding="utf-8")
+
+    registered = register_artifact_group(
+        ArtifactGroupRegistration(
+            workspace_root=tmp_path,
+            paths=[html, css],
+            artifact_id="site_bundle",
+            run_id="run-1",
+            source="test",
+        )
+    )
+
+    record = latest_artifact_records(tmp_path)["site_bundle"]
+    assert registered.status == "ready"
+    assert record.path == str(site.resolve())
+    assert record.metadata["artifact_type"] == "file_group"
+    assert [row["relative_path"] for row in record.metadata["members"]] == [
+        "outputs/site/index.html",
+        "outputs/site/styles.css",
+    ]
+
+
 def test_closeout_prefers_registry_record_for_artifact_id_over_stale_contract_path(tmp_path: Path):
     from agent_py_agent.agent.agent_core.main_agent_delivery_closeout_artifacts import (
         DeliveryContractValidationRequest,
@@ -124,6 +158,123 @@ def test_closeout_does_not_mark_invalid_artifact_ready(tmp_path: Path):
     record = latest_artifact_records(tmp_path)["final_workbook"]
     assert report["ok"] is False
     assert record.status == "invalid"
+
+
+def test_closeout_ignores_legacy_manifest_and_requires_canonical_registry_for_group(tmp_path: Path):
+    _write_site_files(tmp_path)
+    _write_legacy_group_manifest(tmp_path)
+
+    report = _validate_group_contract(tmp_path)
+
+    artifact = report["artifacts"][0]
+    assert report["ok"] is False
+    assert artifact["artifact_id"] == "shopping_site_ui"
+    finding = artifact["acceptance_report"]["findings"][0]
+    assert finding["code"] in {"ARTIFACT_LOCATOR_NO_MATCH", "ARTIFACT_LOCATOR_AMBIGUOUS"}
+    assert "data/artifacts/registry.jsonl" in finding["registry_ref"]
+
+
+def test_closeout_accepts_registry_declared_file_group(tmp_path: Path):
+    from agent_py_agent.agent.artifacts.registry import latest_artifact_records
+
+    site = _write_site_files(tmp_path)
+    _register_site_group(tmp_path, site)
+    report = _validate_group_contract(tmp_path)
+    artifact = report["artifacts"][0]
+    records = latest_artifact_records(tmp_path)
+    assert report["ok"] is True
+    assert artifact["artifact_id"] == "shopping_site_ui"
+    assert artifact["kind"] == "group"
+    assert artifact["paths"] == [
+        str((site / "index.html").resolve()),
+        str((site / "styles.css").resolve()),
+        str((site / "app.js").resolve()),
+    ]
+    assert records["shopping_site_ui"].metadata["artifact_type"] == "file_group"
+    assert len(records["shopping_site_ui"].metadata["members"]) == 3
+
+
+def _write_site_files(tmp_path: Path) -> Path:
+    site = tmp_path / "outputs" / "shopping_site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text(
+        "<!doctype html><html><head><script src='app.js'></script></head><body>ok</body></html>",
+        encoding="utf-8",
+    )
+    (site / "styles.css").write_text("body { color: #111; }", encoding="utf-8")
+    (site / "app.js").write_text("console.log('ok')", encoding="utf-8")
+    return site
+
+
+def _file_group_contract() -> dict:
+    return {
+        "artifacts": [
+            {
+                "artifact_id": "shopping_site_ui",
+                "artifact_intent": {"acceptable_extensions": [".html", ".css", ".js"]},
+                "allowed_output_roots": ["outputs"],
+            }
+        ]
+    }
+
+
+def _validate_group_contract(tmp_path: Path) -> dict:
+    from agent_py_agent.agent.agent_core.main_agent_delivery_closeout_artifacts import (
+        DeliveryContractValidationRequest,
+        _validate_contract_artifacts,
+    )
+
+    contract = _file_group_contract()
+    return _validate_contract_artifacts(
+        DeliveryContractValidationRequest(
+            contract=contract,
+            artifacts=contract["artifacts"],
+            workspace_root=tmp_path,
+            params=_empty_tool_loop_params(),
+        )
+    )
+
+
+def _write_legacy_group_manifest(tmp_path: Path) -> None:
+    manifest_dir = tmp_path / ".agent_delivery"
+    manifest_dir.mkdir()
+    (manifest_dir / "artifacts_manifest.json").write_text(_legacy_group_manifest_json(), encoding="utf-8")
+
+
+def _legacy_group_manifest_json() -> str:
+    return """
+    {
+      "schema_version": "delivery_contract.v1",
+      "artifacts": [
+        {
+          "artifact_id": "shopping_site_ui",
+          "required": true,
+          "files": [
+            {"path": "outputs/shopping_site/index.html", "kind": "html"},
+            {"path": "outputs/shopping_site/styles.css", "kind": "css"},
+            {"path": "outputs/shopping_site/app.js", "kind": "js"}
+          ]
+        }
+      ]
+    }
+    """
+
+
+def _register_site_group(tmp_path: Path, site: Path) -> None:
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactGroupRegistration,
+        register_artifact_group,
+    )
+
+    register_artifact_group(
+        ArtifactGroupRegistration(
+            workspace_root=tmp_path,
+            paths=[site / "index.html", site / "styles.css", site / "app.js"],
+            artifact_id="shopping_site_ui",
+            run_id="run-1",
+            source="test",
+        )
+    )
 
 
 def test_subagent_file_path_alias_is_recovered_as_artifact_item():

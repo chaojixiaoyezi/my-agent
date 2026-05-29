@@ -88,6 +88,7 @@ def _runtime_loop_params(
         task_id=params.task_id,
         source=params.source,
         context_scope=params.context_scope,
+        save=params.save,
     )
 
 
@@ -336,5 +337,6 @@ def _tool_loop_execute_params(seed: RuntimeToolLoopSeed) -> ToolLoopExecuteParam
         executed_tools=executed_tools,
         archive_tool_calls=archive_tool_calls,
         tool_rounds=tool_rounds,
+        save=params.save,
         context_scope=params.context_scope,
     )

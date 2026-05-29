@@ -5,7 +5,7 @@ from __future__ import annotations
 
 """machine-readable continuation packet for manual, semi-auto, and auto compact resume."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..action_protocol import CompactContinuePacketEnvelope, PathRef, RunScope
@@ -32,6 +32,8 @@ class CompactContinuePacketRequest:
     next_actions: list[str]
     subagent_owner_refs: dict[str, Any]
     main_context_bundle: dict[str, Any]
+    compaction_state: dict[str, Any] = field(default_factory=dict)
+    handoff_summary: str = ""
 
 
 # LLM: build_compact_continue_packet is pure packaging; it does not read files or run tools.
@@ -56,6 +58,8 @@ def build_compact_continue_packet(request: CompactContinuePacketRequest) -> dict
         "artifact_read_hints": artifact_read_hints_from_work_state(request.work_state),
         "next_actions": list(request.next_actions),
         "main_context_bundle": _main_context_bundle_payload(request.main_context_bundle),
+        "compaction_state": _compaction_state_payload(request.compaction_state),
+        "handoff_summary": _handoff_summary_payload(request.compaction_state, request.handoff_summary),
         "semi_auto": _semi_auto_payload(request.handoff, missing),
         "subagent": _subagent_payload(request.subagent_owner_refs),
         "consistency_status": str(request.consistency.get("status", "")),
@@ -184,6 +188,34 @@ def _main_context_bundle_payload(payload: dict[str, Any]) -> dict[str, Any]:
             payload.get("workspace_refs", {}) if isinstance(payload.get("workspace_refs"), dict) else {}
         ),
         "error": str(payload.get("error", "") or ""),
+    }
+
+
+# LLM: _compaction_state_payload carries compact chain identity through automatic continuation.
+# 函数用途: 给继续包提供 compact id、上一轮 id、摘要路径和任务下一步，不复制大正文。
+def _compaction_state_payload(value: dict[str, Any]) -> dict[str, Any]:
+    state = value if isinstance(value, dict) else {}
+    work = state.get("work", {}) if isinstance(state.get("work"), dict) else {}
+    return {
+        "compact_id": str(state.get("compact_id") or ""),
+        "compact_index": _positive_int(state.get("compact_index")),
+        "previous_compact_id": str(state.get("previous_compact_id") or ""),
+        "handoff_summary_ref": str(state.get("handoff_summary_ref") or ""),
+        "previous_handoff_summary_ref": str(state.get("previous_handoff_summary_ref") or ""),
+        "goal": str(work.get("goal") or ""),
+        "next_step": str(work.get("next_step") or ""),
+    }
+
+
+# LLM: _handoff_summary_payload separates model-readable context from machine continuation fields.
+# 函数用途: 把交接摘要和引用放入继续包，明确它不是事实来源。
+def _handoff_summary_payload(state_value: dict[str, Any], summary: str) -> dict[str, Any]:
+    state = state_value if isinstance(state_value, dict) else {}
+    return {
+        "ref": str(state.get("handoff_summary_ref") or ""),
+        "previous_ref": str(state.get("previous_handoff_summary_ref") or ""),
+        "text": str(summary or ""),
+        "authoritative": False,
     }
 
 

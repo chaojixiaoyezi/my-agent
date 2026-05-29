@@ -94,7 +94,8 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "页面内跳转必须指向真实存在的元素 id，按钮必须有真实交互或真实本地目标。",
         "- 生成长 CSS/JS/HTML、大段代码或长报告时，优先用 WRITE_FILE_RAW 一次提交完整文本文件；"
         "局部修改已有文件用 apply_patch。PDF、XLSX、图片等二进制产物可用授权命令/脚本生成，再用 write_file.data_base64 写入。",
-        "- write_file 会在授权 allowed_write_roots 内自动创建父目录；不要因为目标目录尚未创建就标记 BLOCKED。",
+        "- write_file 会自动创建父目录；不要因为目标目录尚未创建就标记 BLOCKED。"
+        "普通输出路径按 workspace_root/path_access_mode 解析，只有危险目录或显式禁止路径才会被拒绝。",
         *read_ref_context_lines(context),
         *required_product_contract_lines(context),
         "- 如果最终结果需要列很多 artifacts 或证据，优先用 write_file 写 execution_context.output_json 的短 JSON；"

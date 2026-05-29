@@ -37,6 +37,7 @@ from .orchestration_dispatch_tool import DispatchSubagentsTool
 from .orchestration_event_tools import RaiseMainEventTool as RaiseMainEventTool
 from .orchestration_event_tools import RaiseObservationTool as RaiseObservationTool
 from .orchestration_lineage_names import indexed_count_params, indexed_item_params
+from .orchestration_replacements import record_create_replacements
 from .orchestration_run_scope import (
     remember_orchestration_run_ids,
 )
@@ -50,7 +51,7 @@ from .orchestration_tool_grants import (
     subagent_allowed_tools,
 )
 from .orchestration_tool_specs import build_create_subagents_spec
-from .orchestration_workflow_mode import tool_workflow_mode as _tool_workflow_mode
+from .orchestration_workflow_mode import tool_workflow_mode as _tool_workflow_mode  # noqa: F401
 from .orchestration_write_guard import ExternalWriteTargetRequest, external_write_target_error
 from .parameters import _positive_int
 
@@ -90,6 +91,7 @@ class CreateSubagentsTool(BaseTool):
         attach_sibling_roster(self.agent.subagents, tasks)
         _bind_created_tasks_to_conversation(self.agent, tasks)
         remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
+        replacement_records = record_create_replacements(self.agent, tasks)
         auto_start = auto_start_tasks(self.agent, tasks, params)
         payload = create_subagents_payload(
             CreateSubagentsPayloadInput(
@@ -98,6 +100,7 @@ class CreateSubagentsTool(BaseTool):
                 allowed_tools=allowed_tools,
                 request_params=params,
                 auto_start=auto_start,
+                replacement_records=replacement_records,
             )
         )
         return ToolExecutionResult(
@@ -155,6 +158,7 @@ class CreateSubagentsTool(BaseTool):
             self.agent.subagents.save(task)
         _bind_created_tasks_to_conversation(self.agent, tasks)
         remember_orchestration_run_ids(self.agent, [task.id for task in tasks])
+        replacement_records = record_create_replacements(self.agent, tasks)
         payload_request = self._items_payload_request(request_params, capped)
         auto_start = auto_start_tasks(self.agent, tasks, payload_request)
         payload = create_subagents_payload(
@@ -164,6 +168,7 @@ class CreateSubagentsTool(BaseTool):
                 allowed_tools=_payload_allowed_tools(allowed_tool_values),
                 request_params=payload_request,
                 auto_start=auto_start,
+                replacement_records=replacement_records,
             )
         )
         payload["batch_mode"] = "items"

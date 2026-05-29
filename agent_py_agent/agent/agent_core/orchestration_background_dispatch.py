@@ -36,15 +36,30 @@ class _BackgroundDispatchRequest:
 def auto_start_tasks(agent, tasks: list, request_params: dict[str, object]) -> dict[str, object]:
     skipped_run_ids = [_safe_task_id(task) for task in tasks if _safe_task_id(task)]
     dispatchable = dispatchable_tasks(tasks)
-    run_ids = [_safe_task_id(task) for task in dispatchable if _safe_task_id(task)]
-    if not run_ids:
-        return {"status": "not_needed", "run_ids": [], "skipped_run_ids": skipped_run_ids}
     if _bool_param(request_params.get("defer_start"), default=False):
+        run_ids = [_safe_task_id(task) for task in dispatchable if _safe_task_id(task)]
         return {"status": "deferred", "run_ids": run_ids, "reason": "defer_start=true"}
+    startable = [task for task in dispatchable if not _task_defer_start(task)]
+    deferred_run_ids = [_safe_task_id(task) for task in dispatchable if _task_defer_start(task) and _safe_task_id(task)]
+    run_ids = [_safe_task_id(task) for task in startable if _safe_task_id(task)]
+    if not run_ids:
+        status = "deferred" if deferred_run_ids else "not_needed"
+        reason = "item.defer_start=true" if deferred_run_ids else ""
+        return {
+            "status": status,
+            "run_ids": [],
+            "deferred_run_ids": deferred_run_ids,
+            "skipped_run_ids": skipped_run_ids,
+            "reason": reason,
+        }
     if not callable(getattr(agent, "dispatch_subagents", None)):
         return {"status": "unavailable", "run_ids": run_ids, "reason": "agent has no dispatch_subagents"}
     try:
-        return _start_background_dispatch(agent, run_ids)
+        result = _start_background_dispatch(agent, run_ids)
+        if deferred_run_ids:
+            result["deferred_run_ids"] = deferred_run_ids
+            result["deferred_reason"] = "item.defer_start=true"
+        return result
     except Exception as exc:
         return {"status": "failed", "run_ids": run_ids, "error": f"{type(exc).__name__}: {exc}"}
 
@@ -295,6 +310,13 @@ def _auto_start_report(run_ids: list[str], report: object) -> dict[str, object]:
 def _safe_task_id(task: object) -> str:
     value = getattr(task, "id", "")
     return value.strip() if isinstance(value, str) else ""
+
+
+def _task_defer_start(task: object) -> bool:
+    attrs = getattr(task, "attributes", {}) or {}
+    if not isinstance(attrs, dict):
+        return False
+    return _bool_param(attrs.get("defer_start"), default=False)
 
 
 __all__ = ["auto_start_tasks"]

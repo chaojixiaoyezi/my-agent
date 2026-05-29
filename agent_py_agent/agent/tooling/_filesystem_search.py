@@ -15,7 +15,11 @@ from ._filesystem_helpers import (
     _MAX_SEARCH_LINE_CHARS,
     _read_text_safe,
 )
-from ._filesystem_read import _COMMON_FILE_DISCOVERY_IGNORES, FileSystemTool
+from ._filesystem_read import (
+    _COMMON_FILE_DISCOVERY_IGNORES,
+    FileSystemAccessOptions,
+    FileSystemTool,
+)
 from ._filesystem_search_models import (
     SearchHit,
     SearchMatch,
@@ -41,8 +45,18 @@ class SearchTextTool(FileSystemTool):
 
     # LLM: SearchTextTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 初始化 SearchTextTool 的依赖、配置和运行期字段。
-    def __init__(self, workspace_root: Path, max_matches: int, workspace_roots: list[Path] | None = None):
-        super().__init__(workspace_root, workspace_roots)
+    def __init__(
+        self,
+        workspace_root: Path,
+        max_matches: int,
+        workspace_roots: list[Path] | None = None,
+        access_options: FileSystemAccessOptions | None = None,
+    ):
+        super().__init__(
+            workspace_root,
+            workspace_roots,
+            access_options,
+        )
         self.max_matches = max_matches
         self.spec = build_search_text_spec()
 
@@ -144,7 +158,7 @@ class SearchTextTool(FileSystemTool):
         text = _read_text_safe(safe_item)
         lines = text.splitlines() if text is not None else [line_text]
         return SearchHit(
-            rel=self._item_relative_path(raw_path, safe_item),
+            rel=_item_relative_path(self, raw_path, safe_item),
             line_number=line_number,
             line=line_text,
             lines=lines,
@@ -197,7 +211,7 @@ class SearchTextTool(FileSystemTool):
         text = _read_text_safe(safe_item)
         if text is None:
             return []
-        rel = self._item_relative_path(item, safe_item)
+        rel = _item_relative_path(self, item, safe_item)
         lines = text.splitlines()
         return [
             SearchHit(rel=rel, line_number=idx, line=line, lines=lines)
@@ -210,7 +224,7 @@ class SearchTextTool(FileSystemTool):
     def _render_content_hits(self, hits: list[SearchHit], request: SearchRequest) -> str:
         matches: list[str] = []
         for hit in slice_hits(hits, request):
-            self._append_search_match(
+            _append_search_match(
                 SearchMatch(
                     rel=hit.rel,
                     line_number=hit.line_number,
@@ -230,33 +244,32 @@ class SearchTextTool(FileSystemTool):
         display = self.display_path(item)
         return fnmatch.fnmatch(item.name, file_glob) or fnmatch.fnmatch(display, file_glob)
 
-    # LLM: SearchTextTool._append_search_match 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 向结果或告警集合加入 append_search_match，同时保留调用方依赖的顺序。
-    def _append_search_match(
-        self,
-        match: SearchMatch,
-        matches: list[str],
-    ) -> None:
-        snippet = self._make_snippet(match.line)
-        matches.append(f"{match.rel}:{match.line_number}: {snippet}")
-        if not match.lines or match.context <= 0:
-            return
-        start = max(1, match.line_number - match.context)
-        end = min(len(match.lines), match.line_number + match.context)
-        for idx in range(start, end + 1):
-            if idx == match.line_number:
-                continue
-            matches.append(f"{match.rel}:{idx}: {self._make_snippet(match.lines[idx - 1])}")
 
-    # LLM: SearchTextTool._make_snippet 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 工具系统 中的 make_snippet 步骤，并保持调用方依赖的数据形状。
-    def _make_snippet(self, line: str) -> str:
-        snippet = line.strip()
-        if len(snippet) > _MAX_SEARCH_LINE_CHARS:
-            snippet = snippet[:_MAX_SEARCH_LINE_CHARS] + "... 已截断"
-        return snippet
+# LLM: _append_search_match renders one content-mode hit plus optional context lines.
+# 函数用途: 向结果集合加入 search_text 命中行，保持 grep-like 输出形状。
+def _append_search_match(match: SearchMatch, matches: list[str]) -> None:
+    snippet = _make_snippet(match.line)
+    matches.append(f"{match.rel}:{match.line_number}: {snippet}")
+    if not match.lines or match.context <= 0:
+        return
+    start = max(1, match.line_number - match.context)
+    end = min(len(match.lines), match.line_number + match.context)
+    for idx in range(start, end + 1):
+        if idx == match.line_number:
+            continue
+        matches.append(f"{match.rel}:{idx}: {_make_snippet(match.lines[idx - 1])}")
 
-    # LLM: SearchTextTool._item_relative_path 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
-    # 函数用途: 完成 工具系统 中的 item_relative_path 步骤，并保持调用方依赖的数据形状。
-    def _item_relative_path(self, item: Path, safe_item: Path) -> str:
-        return self.display_path(safe_item if safe_item.is_absolute() else item)
+
+# LLM: _make_snippet clips one matching line without changing search semantics.
+# 函数用途: 给 search_text 命中行生成短预览。
+def _make_snippet(line: str) -> str:
+    snippet = line.strip()
+    if len(snippet) > _MAX_SEARCH_LINE_CHARS:
+        snippet = snippet[:_MAX_SEARCH_LINE_CHARS] + "... 已截断"
+    return snippet
+
+
+# LLM: _item_relative_path keeps output paths display-only after workspace safety checks.
+# 函数用途: 生成 search_text 的相对展示路径，不参与权限判断。
+def _item_relative_path(tool: SearchTextTool, item: Path, safe_item: Path) -> str:
+    return tool.display_path(safe_item if safe_item.is_absolute() else item)

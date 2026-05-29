@@ -48,6 +48,20 @@ def test_progress_policy_due_and_mark_reported(tmp_path) -> None:
     assert updated.next_due_at == 132.0
 
 
+def test_update_task_status_keeps_thread_binding(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "开发网站", 'now': 2.0})
+
+    link = store.update_task_status({'task_id': "task-1", 'status': "DONE", 'now': 3.0})
+    links = store.task_links(thread.thread_id)
+
+    assert link is not None
+    assert link.status == "DONE"
+    assert links[0].task_id == "task-1"
+    assert links[0].status == "DONE"
+
+
 def test_update_json_file_atomic_updates_under_single_file_transaction(tmp_path) -> None:
     path = tmp_path / "state.json"
 

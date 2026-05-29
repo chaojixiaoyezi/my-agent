@@ -2,6 +2,16 @@
 
 当前结构不再包含独立父验收层。`create_subagents` 默认创建并立即启动任务节点；只有显式 `defer_start=true` 才只建不跑。`dispatch_subagents` 用于运行中追加提示、人工催办、推进卡住项、重跑指定 run、查状态并尝试恢复；任务完成后的产物检查统一由普通 closeout / 交付检查处理。
 
+`defer_start` 支持单个 `items[]` 子任务。开发、研究、写作这类生产 worker 可以默认开跑；
+测试、找错、验收、汇总这类依赖前置产物的子代理，可以在自己的 item 上写
+`defer_start=true`，等产物 refs 出现后再启动。系统只给软提醒，不把“先开发还是先测”
+做成硬门。
+
+当父代理派新的修复/接管子代理替换旧 run 时，`create_subagents` 可以传
+`replacement_for_run_ids`（兼容 `replaces_run_ids` / `supersedes_run_ids`）。
+旧 run 会进入 `TAKEN_OVER`，并写 `takeover_by` 指向新 run；后续普通调度不再把旧 run
+当活跃候选，但旧记录、证据和日志仍保留给审计和恢复。
+
 `create_subagents` 的“立即启动”是后台启动：工具调用本身只负责创建 run、写入 `background_start` 标记、拉起 runner 调度后台进程，然后立刻把 `run_ids`、启动状态和任务树快照返回给父代理。父代理不会同步等待所有子代理完成，因此可以继续和用户对话、继续规划，或稍后用 `inspect_agent_tree` / `subagent_board` 查看进展。
 
 真实模型后端的后台启动会调用独立 `subagents-dispatch --apply --execute-runners --run-id ... --background-launch-id ...` 进程。这个进程启动时把任务树里的 `background_start.status` 更新为 `running`，结束时更新为 `finished`，异常时更新为 `failed` 并写错误摘要；日志用无缓冲 Python 进程输出，方便父代理或人工快速看到后台 runner 是否真的启动。

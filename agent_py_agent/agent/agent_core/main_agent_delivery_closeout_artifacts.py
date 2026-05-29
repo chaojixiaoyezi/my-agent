@@ -9,9 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from ..artifacts.registry import (
+    REGISTRY_RELATIVE_PATH,
     ArtifactRegistration,
     ArtifactRegistryRecord,
     register_artifact,
+    registry_path,
     resolve_artifact_record,
 )
 from ..contracts.artifact_format_lint import lint_artifact_format
@@ -19,6 +21,11 @@ from ..contracts.gates import artifact_provenance_from_archive
 from ..contracts.staged_checkpoint_acceptance import staged_checkpoint_findings
 from ._runtime_params import ToolLoopExecuteParams
 from .artifact_locator import locate_artifact
+from .main_agent_delivery_closeout_groups import (
+    ArtifactGroupValidationRequest,
+    _artifact_path,
+    validate_artifact_group_record,
+)
 from .target_coverage_ledger import collect_target_coverage_records, target_coverage_status
 
 CLOSEOUT_DIR = ".agent_delivery"
@@ -33,6 +40,17 @@ class DeliveryContractValidationRequest:
     artifacts: list[dict[str, Any]]
     workspace_root: Path
     params: ToolLoopExecuteParams
+
+
+# LLM: ArtifactPathFailureRequest bundles missing-artifact report inputs.
+# 类用途: 保存路径无效或找不到产物时生成 closeout finding 所需字段。
+@dataclass(frozen=True)
+class ArtifactPathFailureRequest:
+    item: dict[str, Any]
+    raw_path: str
+    code: str
+    workspace_root: Path | None = None
+    locator_findings: list[dict[str, object]] | None = None
 
 
 # LLM: _required_artifacts keeps optional outputs from forcing deterministic closeout.
@@ -92,6 +110,10 @@ def _validate_contract_artifacts(request: DeliveryContractValidationRequest) -> 
         "run_id": request.params.run_id,
         "task_id": request.params.task_id,
         "workspace_root": str(request.workspace_root),
+        "canonical_artifact_registry_ref": _relative_report_ref(
+            registry_path(request.workspace_root),
+            request.workspace_root,
+        ),
         "artifacts": results,
     }
     coverage_contract = request.contract.get("target_coverage_contract")
@@ -130,14 +152,27 @@ def _validate_artifact_item(
 ) -> dict[str, Any]:
     raw_path = str(item.get("preferred_path") or item.get("path") or "")
     registry_record = _registry_record_for_item(item, workspace_root)
+    if registry_record and _is_registry_group(registry_record):
+        return validate_artifact_group_record(
+            ArtifactGroupValidationRequest(
+                item=item,
+                record=registry_record,
+                workspace_root=workspace_root,
+                archive_tool_calls=archive_tool_calls,
+                run_id=run_id,
+            )
+        )
     located = None if registry_record else locate_artifact(item, workspace_root)
     path = Path(registry_record.path) if registry_record else located.path if located else None
     if path is None:
         return _path_failure(
-            item,
-            raw_path,
-            str(located.findings[0]["code"]) if located and located.findings else "ARTIFACT_PATH_INVALID",
-            locator_findings=located.findings if located else [],
+            ArtifactPathFailureRequest(
+                item=item,
+                raw_path=raw_path,
+                code=str(located.findings[0]["code"]) if located and located.findings else "ARTIFACT_PATH_INVALID",
+                workspace_root=workspace_root,
+                locator_findings=located.findings if located else [],
+            )
         )
     report = lint_artifact_format(
         path=path,
@@ -189,47 +224,47 @@ def _registry_record_for_item(
     if record is None or record.status != "ready":
         return None
     path = Path(record.path)
-    return record if path.is_file() else None
+    return record if path.is_file() or _is_registry_group(record) else None
 
 
-# LLM: _artifact_path keeps contract paths bounded to the current workspace.
-# 函数用途: 把相对路径落到 workspace_root 下；绝对路径必须仍位于 workspace_root 内。
-def _artifact_path(raw_path: str, workspace_root: Path) -> Path | None:
-    if not raw_path:
-        return None
-    candidate = Path(raw_path).expanduser()
-    path = candidate.resolve(strict=False) if candidate.is_absolute() else (workspace_root / candidate).resolve()
-    try:
-        path.relative_to(workspace_root)
-    except ValueError:
-        return None
-    return path
+def _is_registry_group(record: ArtifactRegistryRecord) -> bool:
+    return str(record.metadata.get("artifact_type") or "") == "file_group"
 
 
 # LLM: _path_failure gives missing or escaped artifact refs the same report shape as validator failures.
 # 函数用途: 生成路径无效时的结构化产物验收结果，方便后续修复流程统一消费。
-def _path_failure(
-    item: dict[str, Any],
-    raw_path: str,
-    code: str,
-    *,
-    locator_findings: list[dict[str, object]] | None = None,
-) -> dict[str, Any]:
+def _path_failure(request: ArtifactPathFailureRequest) -> dict[str, Any]:
+    registry_ref = (
+        _relative_report_ref(registry_path(request.workspace_root), request.workspace_root)
+        if request.workspace_root is not None
+        else str(REGISTRY_RELATIVE_PATH)
+    )
     finding = {
-        "code": code,
+        "code": request.code,
         "severity": "hard",
-        "message": "Artifact path is missing or outside the workspace.",
-        "location": raw_path,
-        "value": raw_path,
+        "message": (
+            "Artifact was not found in the canonical artifact registry or declared output roots. "
+            "Do not create a separate artifact manifest; register or write the real deliverable."
+        ),
+        "location": request.raw_path,
+        "value": request.raw_path,
+        "registry_ref": registry_ref,
+        "artifact_id": str(request.item.get("artifact_id") or ""),
+        "declared_kind": str(request.item.get("kind") or ""),
+        "action_zh": (
+            "只认统一产物账本 data/artifacts/registry.jsonl。请写入真实交付物，"
+            "让写入/生成工具登记到这本账；不要在产物目录或 .agent_delivery 里另写 closeout.json/"
+            "artifacts_manifest.json 来冒充完成。如果这个任务本来不需要文件，请使用 message/no_artifact 交付模式。"
+        ),
     }
-    if locator_findings:
-        finding["locator_findings"] = locator_findings
+    if request.locator_findings:
+        finding["locator_findings"] = request.locator_findings
     return {
-        "artifact_id": str(item.get("artifact_id") or ""),
-        "kind": str(item.get("kind") or ""),
-        "path": raw_path,
+        "artifact_id": str(request.item.get("artifact_id") or ""),
+        "kind": str(request.item.get("kind") or ""),
+        "path": request.raw_path,
         "ok": False,
-        "acceptance_report": {"ok": False, "artifact_ref": raw_path, "artifact_kind": "", "findings": [finding]},
+        "acceptance_report": {"ok": False, "artifact_ref": request.raw_path, "artifact_kind": "", "findings": [finding]},
     }
 
 

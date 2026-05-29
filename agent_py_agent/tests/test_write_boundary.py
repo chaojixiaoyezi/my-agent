@@ -129,9 +129,9 @@ class TestResolveBoundaryPath:
         assert result is not None
         assert "nonexistent_subdir" in str(result)
 
-    def test_resolve_outside_workspace_raises(self, tmp_path):
-        with pytest.raises(ValueError, match="超出允许的工作区"):
-            _resolve_boundary_path(str(Path.home()), tmp_path)
+    def test_resolve_outside_workspace_allowed(self, tmp_path):
+        result = _resolve_boundary_path(str(Path.home()), tmp_path)
+        assert result == Path.home().resolve(strict=False)
 
 
 class TestValidateWriteBoundaryNonWriteTools:
@@ -166,14 +166,14 @@ class TestValidateWriteBoundaryInvalidParams:
 
 
 class TestValidateWriteBoundaryAllowedRoots:
-    def test_missing_allowed_write_roots(self, tmp_path):
+    def test_missing_allowed_write_roots_no_longer_blocks(self, tmp_path):
         result = validate_write_boundary(
             "write_file",
             {"path": "file.txt"},
             workspace_root=tmp_path,
             write_boundary={},
         )
-        assert "没有配置 allowed_write_roots" in result
+        assert result == ""
 
     def test_runtime_ledger_only_boundary_does_not_enforce_write_roots(self, tmp_path):
         result = validate_write_boundary(
@@ -194,7 +194,7 @@ class TestValidateWriteBoundaryAllowedRoots:
         )
         assert result == ""
 
-    def test_path_outside_allowed_roots(self, tmp_path):
+    def test_path_outside_allowed_roots_no_longer_blocks(self, tmp_path):
         allowed = tmp_path / "allowed"
         allowed.mkdir()
         result = validate_write_boundary(
@@ -203,7 +203,7 @@ class TestValidateWriteBoundaryAllowedRoots:
             workspace_root=tmp_path,
             write_boundary={"allowed_write_roots": [str(allowed)]},
         )
-        assert "超出" in result or "不在" in result
+        assert result == ""
 
     def test_path_inside_allowed_roots(self, tmp_path):
         allowed = tmp_path / "allowed"
@@ -217,7 +217,7 @@ class TestValidateWriteBoundaryAllowedRoots:
         )
         assert result == ""
 
-    def test_delegate_policy_blocks_coordinator_product_write(self, tmp_path):
+    def test_delegate_policy_no_longer_blocks_coordinator_product_write(self, tmp_path):
         task_dir = tmp_path / "task"
         product = tmp_path / "deliverables"
         task_dir.mkdir()
@@ -233,8 +233,19 @@ class TestValidateWriteBoundaryAllowedRoots:
                 "product_write_policy": "delegate",
             },
         )
-        assert "业务产物写入被阻止" in result
-        assert "创建或调度 worker/writer/leaf_worker" in result
+        assert result == ""
+
+    def test_path_in_dangerous_root_blocked(self, tmp_path):
+        danger = tmp_path / "danger"
+        danger.mkdir()
+        result = validate_write_boundary(
+            "write_file",
+            {"path": str(danger / "file.txt")},
+            workspace_root=tmp_path,
+            path_dangerous_roots=[str(danger)],
+            write_boundary={},
+        )
+        assert "危险目录" in result
 
     def test_delegate_policy_allows_task_dir_reports(self, tmp_path):
         task_dir = tmp_path / "task"

@@ -8,6 +8,7 @@ from typing import Any
 from ..agent_core.agent_tree_status import agent_tree_status_payload
 from ..artifacts.registry import latest_artifact_records
 from .context_budget import (
+    BackgroundContextPayloadRequest,
     background_context_budget_from_config,
     bounded_background_context_payload,
 )
@@ -51,15 +52,17 @@ def context_markdown(*, agent: object, store: ConversationStore, thread: Convers
 def _bounded_context(agent: object, store: ConversationStore, thread_id: str) -> dict[str, Any]:
     config = getattr(agent, "config", None)
     return bounded_background_context_payload(
-        bundle=store.context_bundle(thread_id, recent_limit=_config_int(config, "conversation_context_recent_limit")),
-        pending_wake_signals=pending_wake_payload(
-            store,
-            thread_id,
-            limit=_config_int(config, "background_pending_wake_prompt_limit"),
-        ),
-        agent_tree=agent_tree_status_payload(agent, {}),
-        recovery_snapshot=_recovery_snapshot(agent, store, thread_id),
-        budget=background_context_budget_from_config(config),
+        BackgroundContextPayloadRequest(
+            bundle=store.context_bundle(thread_id, recent_limit=_config_int(config, "conversation_context_recent_limit")),
+            pending_wake_signals=pending_wake_payload(
+                store,
+                thread_id,
+                limit=_config_int(config, "background_pending_wake_prompt_limit"),
+            ),
+            agent_tree=agent_tree_status_payload(agent, {}),
+            recovery_snapshot=_recovery_snapshot(agent, store, thread_id),
+            budget=background_context_budget_from_config(config),
+        )
     )
 
 

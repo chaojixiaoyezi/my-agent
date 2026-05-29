@@ -65,6 +65,11 @@ from .compact_context_bundle_refs import (
     load_main_context_bundle_ref,
 )
 from .compact_gate_bridge import evaluate_pre_compaction_state
+from .compact_state import (
+    CompactionStateRequest,
+    build_compaction_state,
+    render_compaction_handoff_summary,
+)
 from .schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_reserved_fields,
@@ -137,6 +142,12 @@ def apply_memory_compact(root: str | Path, options: MemoryCompactApplyOptions) -
         WorkStateSnapshotRequest(plan, restore_refs, paths, now, payload["apply_id"], payload["plan_id"])
     )
     _write_json(paths["work_state_snapshot_json"], work_state)
+    compaction_state = build_compaction_state(CompactionStateRequest(payload, restore_refs, work_state, paths))
+    handoff_summary = render_compaction_handoff_summary(compaction_state)
+    _write_json(paths["compaction_state_json"], compaction_state)
+    _write_text(paths["handoff_summary_md"], handoff_summary)
+    payload["compaction_state"] = compaction_state
+    payload["handoff_summary"] = handoff_summary
     apply_bundle = _apply_bundle_payload(payload, restore_refs, work_state, paths)
     _write_json(paths["apply_bundle_json"], apply_bundle)
     _attach_compaction_gate(payload, restore_refs, work_state)
@@ -184,6 +195,8 @@ def _apply_paths(workspace: Path, event_id: str) -> dict[str, Path]:
     return {
         "directory": directory,
         "context_md": directory / f"{event_id}.md",
+        "compaction_state_json": directory / f"{event_id}.compaction_state.json",
+        "handoff_summary_md": directory / f"{event_id}.handoff.md",
         "metadata_json": directory / f"{event_id}.json",
         "apply_bundle_json": directory / f"{event_id}.apply_bundle.json",
         "restore_refs_json": directory / f"{event_id}.restore_refs.json",

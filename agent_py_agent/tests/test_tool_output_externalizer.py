@@ -28,6 +28,7 @@ from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
     ExternalizeToolOutputRequest,
     externalize_tool_output_record,
 )
+from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.tooling.content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
     RECOVERY_WRITE_CHUNK_CHARS,
@@ -82,6 +83,32 @@ def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) ->
     assert '"run_id": "run-tool"' in params.tool_context[-1]
     assert "完整工具输出已外置" in params.tool_context[-1]
     assert record["fail_safe_checkpoint_path"] in params.tool_context[-1]
+
+
+def test_tool_loop_records_live_raw_archive_for_each_tool_result(tmp_path: Path) -> None:
+    agent = SimpleNamespace(root=tmp_path, config=AgentConfig(), session_id="session-live")
+    service = ToolLoopService(agent)
+    params = _tool_loop_params(request_id="req-live", run_id="run-live", task_id="task-live")
+
+    service._record_tool_call(
+        ToolCallRecordParams(
+            params=params,
+            tool_rounds=3,
+            idx=2,
+            payload={"tool": "read_file", "path": "notes.txt"},
+            result=ToolExecutionResult("read_file", True, "文件内容"),
+        )
+    )
+
+    record = params.archive_tool_calls[0]
+    raw_path = Path(record["raw_archive_path"])
+    raw_records = [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines()]
+
+    assert record["raw_archive_event_id"]
+    assert raw_records[-1]["action"] == "tool_call"
+    assert raw_records[-1]["tool_name"] == "read_file"
+    assert raw_records[-1]["tool_call_id"] == "3-2"
+    assert raw_records[-1]["request_id"] == "req-live"
 
 
 # LLM: subagent runner scope must reach artifacts even when run(save=False) did not pass run_id.

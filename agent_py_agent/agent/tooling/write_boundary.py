@@ -14,6 +14,8 @@ prompt 里说'只能写这个目录'只是提醒，真正防止越界写文件�
 from pathlib import Path
 from typing import Any
 
+from ..path_access_policy import PathAccessPolicy
+
 WRITE_TOOL_NAMES = {"write_file", "apply_patch"}
 _MAX_BOUNDARY_PATH_CHARS = 4096
 _PRODUCT_WRITE_DELEGATE_POLICY = "delegate"
@@ -74,6 +76,8 @@ def validate_write_boundary(
     *,
     workspace_root: Path,
     workspace_roots: list[Path] | None = None,
+    path_access_mode: str = "normal",
+    path_dangerous_roots: list[str] | None = None,
     write_boundary: dict[str, object] | None,
 ) -> str:
 
@@ -90,26 +94,22 @@ def validate_write_boundary(
         return ""
 
     roots = _normalized_workspace_roots(workspace_root, workspace_roots)
+    path_policy = PathAccessPolicy.from_values(
+        mode=path_access_mode,
+        dangerous_roots=path_dangerous_roots,
+    )
     allowed_roots = _boundary_paths(write_boundary.get("allowed_write_roots"), workspace_root, roots)
-    if not allowed_roots:
-        return "写入被阻止: 当前 subagent 没有配置 allowed_write_roots，不能执行写文件工具。"
     for raw_path in raw_paths:
         try:
             target = _resolve_boundary_path(raw_path, workspace_root, roots)
         except ValueError as exc:
             return f"写入被阻止: {exc}"
-        if not any(_is_relative_to(target, root) for root in allowed_roots):
-            allowed = ", ".join(_display_path(root, workspace_root) for root in allowed_roots)
-            return (
-                "写入被阻止: 目标路径不在 allowed_write_roots 内。"
-                f" target={_display_path(target, workspace_root)} allowed={allowed}"
-            )
+        access_decision = path_policy.check(target)
+        if not access_decision.allowed:
+            return f"写入被阻止: {access_decision.message}"
         internal_output_error = _internal_output_json_error(target, write_boundary, workspace_root, roots)
         if internal_output_error:
             return internal_output_error
-        product_policy_error = _product_write_policy_error(target, write_boundary, workspace_root, roots)
-        if product_policy_error:
-            return product_policy_error
         forbidden_error = _forbidden_boundary_error(target, allowed_roots, write_boundary, workspace_root)
         if forbidden_error:
             return forbidden_error
@@ -289,7 +289,6 @@ def _resolve_boundary_path(
 ) -> Path:
     text = _path_text(raw_path)
     root = workspace_root.resolve(strict=False)
-    roots = _normalized_workspace_roots(root, workspace_roots)
     candidate = Path(text)
     if not candidate.is_absolute():
         candidate = root / candidate
@@ -297,12 +296,6 @@ def _resolve_boundary_path(
         resolved = candidate.resolve(strict=False)
     except (OSError, RuntimeError) as exc:
         raise ValueError("路径解析失败，请检查路径是否有效。") from exc
-    if any(_is_relative_to(resolved, item) for item in roots):
-        return resolved
-    try:
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise ValueError("路径超出允许的工作区范围，请使用工作区内路径。") from exc
     return resolved
 
 

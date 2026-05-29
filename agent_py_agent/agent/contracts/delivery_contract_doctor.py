@@ -82,8 +82,12 @@ def validate_delivery_contract(payload: object, *, workspace_root: Path | None =
     _check_schema_version(payload, findings)
     artifacts = payload.get("artifacts")
     if artifacts is None:
-        findings.append(_finding("DELIVERY_CONTRACT_ARTIFACTS_MISSING", "hard", "artifacts"))
-        return _report(normalized, findings)
+        if _allows_no_artifact_delivery(payload):
+            artifacts = []
+            normalized["artifacts"] = []
+        else:
+            findings.append(_finding("DELIVERY_CONTRACT_ARTIFACTS_MISSING", "hard", "artifacts"))
+            return _report(normalized, findings)
     if not isinstance(artifacts, list):
         findings.append(_finding("DELIVERY_CONTRACT_ARTIFACTS_NOT_LIST", "hard", "artifacts", value=type(artifacts).__name__))
         return _report(normalized, findings)
@@ -101,6 +105,14 @@ def validate_delivery_contract(payload: object, *, workspace_root: Path | None =
     findings.extend(_validate_optional_dict(payload, "target_coverage_contract"))
     findings.extend(_validate_optional_dict(payload, "bootstrap_contract"))
     return _report(normalized, findings)
+
+
+def _allows_no_artifact_delivery(payload: dict[str, Any]) -> bool:
+    for key in ("requires_artifact", "artifact_required", "requires_disk_artifact", "disk_artifact_required"):
+        if payload.get(key) is False:
+            return True
+    mode = str(payload.get("delivery_mode") or payload.get("output_mode") or "").strip().lower()
+    return mode in {"message", "answer", "summary", "no_artifact", "no-artifact", "none"}
 
 
 # LLM: validate_recovery_action checks repair actions before they re-enter the tool loop.

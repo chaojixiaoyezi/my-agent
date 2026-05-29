@@ -43,6 +43,23 @@ class ArtifactRegistration:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ArtifactGroupRegistration:
+    """Inputs for registering one logical deliverable made of multiple files."""
+
+    workspace_root: Path
+    paths: list[str | Path]
+    artifact_id: str
+    run_id: str = ""
+    task_id: str = ""
+    agent_id: str = ""
+    kind: str = "group"
+    source: str = ""
+    created_by_tool: str = ""
+    status: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 # LLM: ArtifactRegistryRecord is the persisted artifact ledger entry.
 # 类用途: 保存一次产物登记结果，包括 artifact_id、路径、hash、大小和状态。
 @dataclass(frozen=True)
@@ -103,6 +120,40 @@ def register_artifact(request: ArtifactRegistration) -> ArtifactRegistryRecord:
         created_by_tool=str(request.created_by_tool or ""),
         updated_at=time.time(),
         metadata=dict(request.metadata or {}),
+    )
+    _append_record(registry_path(root), record)
+    return record
+
+
+def register_artifact_group(request: ArtifactGroupRegistration) -> ArtifactRegistryRecord:
+    """Append a registry entry for a logical artifact group."""
+
+    root = Path(request.workspace_root).expanduser().resolve(strict=False)
+    member_paths = [_resolve_member_path(root, path) for path in request.paths]
+    common_path = _group_common_path(root, member_paths)
+    member_rows = [_member_metadata(root, path) for path in member_paths]
+    status = str(request.status or "").strip() or ("ready" if all(Path(row["path"]).is_file() for row in member_rows) else "missing")
+    metadata = {
+        **dict(request.metadata or {}),
+        "artifact_type": "file_group",
+        "members": member_rows,
+    }
+    record = ArtifactRegistryRecord(
+        schema_version=SCHEMA_VERSION,
+        artifact_id=str(request.artifact_id or "").strip() or _group_artifact_id(request, member_paths),
+        run_id=str(request.run_id or ""),
+        task_id=str(request.task_id or ""),
+        agent_id=str(request.agent_id or ""),
+        kind=str(request.kind or "group"),
+        mime_type="",
+        path=str(common_path),
+        sha256=_sha256_group(member_rows),
+        size_bytes=sum(int(row.get("size_bytes") or 0) for row in member_rows),
+        status=status,
+        source=str(request.source or ""),
+        created_by_tool=str(request.created_by_tool or ""),
+        updated_at=time.time(),
+        metadata=metadata,
     )
     _append_record(registry_path(root), record)
     return record
@@ -214,6 +265,11 @@ def _artifact_id(request: ArtifactRegistration, path: Path) -> str:
     return f"art_{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:20]}"
 
 
+def _group_artifact_id(request: ArtifactGroupRegistration, paths: list[Path]) -> str:
+    seed = "|".join([str(request.run_id or ""), str(request.task_id or ""), *[str(path) for path in paths]])
+    return f"artgrp_{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:20]}"
+
+
 # LLM: _kind_from_path keeps unknown formats open-world.
 # 函数用途: 从文件后缀推导 kind；没有后缀时使用 artifact 兜底。
 def _kind_from_path(path: Path) -> str:
@@ -249,3 +305,45 @@ def _size_bytes(path: Path) -> int:
         return path.stat().st_size if path.is_file() else 0
     except OSError:
         return 0
+
+
+def _resolve_member_path(root: Path, path: str | Path) -> Path:
+    candidate = Path(path).expanduser()
+    return candidate.resolve(strict=False) if candidate.is_absolute() else (root / candidate).resolve(strict=False)
+
+
+def _group_common_path(root: Path, paths: list[Path]) -> Path:
+    if not paths:
+        return root
+    try:
+        common = Path(os.path.commonpath([str(path) for path in paths]))
+    except ValueError:
+        return root
+    return common if common.is_dir() else common.parent
+
+
+def _member_metadata(root: Path, path: Path) -> dict[str, Any]:
+    return {
+        "path": str(path),
+        "relative_path": _relative_path(root, path),
+        "kind": _kind_from_path(path),
+        "sha256": _sha256_file(path),
+        "size_bytes": _size_bytes(path),
+        "exists": path.is_file(),
+    }
+
+
+def _relative_path(root: Path, path: Path) -> str:
+    try:
+        return str(path.relative_to(root)).replace("\\", "/")
+    except ValueError:
+        return str(path)
+
+
+def _sha256_group(member_rows: list[dict[str, Any]]) -> str:
+    digest = hashlib.sha256()
+    for row in sorted(member_rows, key=lambda item: str(item.get("relative_path") or item.get("path") or "")):
+        digest.update(str(row.get("relative_path") or row.get("path") or "").encode("utf-8"))
+        digest.update(str(row.get("sha256") or "").encode("utf-8"))
+        digest.update(str(row.get("size_bytes") or 0).encode("utf-8"))
+    return digest.hexdigest()

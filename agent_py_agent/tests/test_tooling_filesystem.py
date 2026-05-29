@@ -12,7 +12,10 @@ class TestFileSystemToolBase:
 
     def test_resolve_path_within_workspace(self, tmp_path: Path):
         """路径在工作区内时应正确解析。"""
-        from agent_py_agent.agent.tooling.filesystem import FileSystemTool
+        from agent_py_agent.agent.tooling.filesystem import (
+            FileSystemTool,
+            filesystem_access_options,
+        )
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()
@@ -28,7 +31,7 @@ class TestFileSystemToolBase:
         assert str(result).startswith(str(workspace))
 
     def test_resolve_path_outside_workspace(self, tmp_path: Path):
-        """路径超出工作区时应拒绝。"""
+        """普通工作区外路径不再默认拒绝。"""
         from agent_py_agent.agent.tooling.filesystem import FileSystemTool
 
         workspace = tmp_path / "workspace"
@@ -37,12 +40,11 @@ class TestFileSystemToolBase:
 
         tool = FileSystemTool(workspace)
 
-        # 尝试访问工作区外的路径
-        with pytest.raises(ValueError, match="超出允许的工作区范围"):
-            tool.resolve_path(str(outside / "secret.txt"))
+        result = tool.resolve_path(str(outside / "secret.txt"))
+        assert result == (outside / "secret.txt").resolve(strict=False)
 
     def test_resolve_path_with_parent_traversal(self, tmp_path: Path):
-        """防止路径穿越攻击（../）。"""
+        """../ 现在按真实目标走危险目录策略，不按工作区硬拦。"""
         from agent_py_agent.agent.tooling.filesystem import FileSystemTool
 
         workspace = tmp_path / "workspace"
@@ -50,15 +52,12 @@ class TestFileSystemToolBase:
 
         tool = FileSystemTool(workspace)
 
-        # 尝试 ../ 穿越
-        with pytest.raises(ValueError, match="超出允许的工作区范围"):
-            tool.resolve_path("../secret.txt")
+        assert tool.resolve_path("../secret.txt") == (tmp_path / "secret.txt").resolve(strict=False)
 
-        with pytest.raises(ValueError, match="超出允许的工作区范围"):
-            tool.resolve_path("subdir/../../etc/passwd")
+        assert tool.resolve_path("subdir/../../etc/passwd") == (tmp_path / "etc/passwd").resolve(strict=False)
 
     def test_resolve_path_with_symlink_outside(self, tmp_path: Path):
-        """符号链接指向工作区外时应被阻止。"""
+        """符号链接指向普通外部目录时不再默认拒绝。"""
         import sys
 
         from agent_py_agent.agent.tooling.filesystem import FileSystemTool
@@ -82,9 +81,23 @@ class TestFileSystemToolBase:
                 pytest.skip("Symbolic links require admin privileges on Windows")
             raise
 
-        # 解析符号链接时应该被拒绝，因为实际路径在工作区外
-        with pytest.raises(ValueError, match="超出允许的工作区范围"):
-            tool.resolve_path("link_to_outside")
+        assert tool.resolve_path("link_to_outside") == secret_file.resolve(strict=False)
+
+    def test_resolve_path_blocks_configured_dangerous_root(self, tmp_path: Path):
+        """危险目录仍会被统一策略拒绝。"""
+        from agent_py_agent.agent.tooling.filesystem import (
+            FileSystemTool,
+            filesystem_access_options,
+        )
+
+        workspace = tmp_path / "workspace"
+        danger = tmp_path / "danger"
+        workspace.mkdir()
+        danger.mkdir()
+        tool = FileSystemTool(workspace, access_options=filesystem_access_options(path_dangerous_roots=[str(danger)]))
+
+        with pytest.raises(ValueError, match="危险目录"):
+            tool.resolve_path(str(danger / "secret.txt"))
 
     def test_display_path_within_workspace(self, tmp_path: Path):
         """工作区内的路径应显示相对路径。"""
@@ -101,7 +114,7 @@ class TestFileSystemToolBase:
         assert result.replace("\\", "/") == "subdir/file.txt"
 
     def test_display_path_outside_workspace(self, tmp_path: Path):
-        """工作区外的路径应显示占位符。"""
+        """工作区外路径显示绝对路径，方便模型按真实路径继续修。"""
         from agent_py_agent.agent.tooling.filesystem import FileSystemTool
 
         workspace = tmp_path / "workspace"
@@ -110,7 +123,7 @@ class TestFileSystemToolBase:
 
         outside_path = tmp_path / "outside" / "file.txt"
         result = tool.display_path(outside_path)
-        assert result == "<outside-workspace>"
+        assert result == str(outside_path).replace("\\", "/")
 
 
 class TestListFilesTool:
