@@ -121,6 +121,24 @@ def test_tool_loop_reports_malformed_delivery_contract_without_blocking():
         }
 
 
+def test_submit_for_acceptance_without_contract_persists_non_terminal_closeout_report():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        backend = NoContractAcceptanceBackend()
+        result = _agent(workspace, backend, max_tool_rounds=2).run(
+            "我已经完成了，请记录验收尝试。",
+            params=RunParams(save=False),
+        )
+        report = _closeout_report(workspace)
+
+        assert backend.calls == 2
+        assert "[MAIN_AGENT_DELIVERY_COMPLETE]" not in result.response
+        assert report["ok"] is False
+        assert report["non_terminal"] is True
+        assert report["reason"] == "delivery_contract_missing"
+        assert report["artifacts"] == []
+
+
 # LLM: Malformed validation details should not terminally block a task that still has an artifact target.
 # 函数用途: 验证内部 validation_contract 字段写坏时只返还 doctor 上下文，不直接用 BLOCKED 否定已有产物目标。
 def test_tool_loop_does_not_block_immediately_on_malformed_validation_contract_with_artifact_target():
@@ -379,6 +397,22 @@ class UncontractedFollowupBackend:
                 backend=self.name,
             )
         return ModelResponse(text="当前任务已完成。", backend=self.name)
+
+
+class NoContractAcceptanceBackend:
+    name = "fake_no_contract_acceptance_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None):
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"submit_for_acceptance","note":"提交验收。"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        return ModelResponse(text="我会继续按用户目标处理。", backend=self.name)
 
 
 # LLM: MalformedDeliveryContractBackend proves contract Doctor findings reach the next turn.

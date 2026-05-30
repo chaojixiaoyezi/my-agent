@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from ..action_protocol import subagent_schedule_envelope_from_payload
 from ..contracts.idempotency import idempotency_key, operation_id
+from .orchestration_child_result_index import child_result_index
 from .orchestration_create_idempotency import created_tasks, dispatchable_tasks, reused_tasks
 from .orchestration_dispatch_state_contract import dispatch_state_contract_payload
 
@@ -47,6 +48,7 @@ def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, 
         "operation_contract": _operation_contract(request_params, created, reused, pending_dispatch),
         "replacement_records": request.replacement_records or [],
         "scheduling_advice": _scheduling_advice(tasks, request_params, auto_start),
+        "child_result_index": child_result_index(agent, tasks),
         "subagent_workspace": str(agent.subagents.workspace),
         "tasks": [_task_payload(task) for task in tasks],
     }

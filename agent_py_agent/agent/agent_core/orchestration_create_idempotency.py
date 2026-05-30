@@ -67,11 +67,23 @@ def find_reusable_named_child(manager: Any, params: CreateRunParams):
     idempotency_identity = idempotency_contract_identity_from_context_packs(params.context_packs)
     if idempotency_identity:
         return find_reusable_idempotency_child(manager, params, idempotency_identity)
+    work_scope_key = _work_scope_key(params)
+    if work_scope_key:
+        return find_reusable_work_scope_child(manager, params, work_scope_key)
     name = _normalized_name(params.agent_name)
     if _is_generic_agent_name(name):
         return None
     if _is_indexed_generic_agent_name(name):
         return None
+    return None
+
+
+# LLM: find_reusable_work_scope_child reuses only explicit output/input scope contracts.
+# 函数用途: 同一父级重复派“同一产物范围”的 worker 时复用已有 run；普通 goal 文本仍不参与。
+def find_reusable_work_scope_child(manager: Any, params: CreateRunParams, work_scope_key: str):
+    for task in reversed(_safe_list_runs(manager)):
+        if _same_work_scope(task, params, work_scope_key):
+            return task
     return None
 
 
@@ -147,6 +159,26 @@ def _same_idempotency_scope(task: Any, params: CreateRunParams, idempotency_iden
     if _external_write_roots(task) != _params_extra_write_roots(params):
         return False
     return idempotency_contract_identity_from_context_packs(getattr(task, "context_packs", [])) == idempotency_identity
+
+
+def _same_work_scope(task: Any, params: CreateRunParams, work_scope_key: str) -> bool:
+    if _status(task) not in _REUSABLE_STATUSES:
+        return False
+    if _text(getattr(task, "parent_id", "")) != _text(params.parent_id):
+        return False
+    if _requested_root_id(params) and _text(getattr(task, "root_id", "")) != _requested_root_id(params):
+        return False
+    if not _compatible_role(getattr(task, "role", ""), params.role):
+        return False
+    if _external_write_roots(task) != _params_extra_write_roots(params):
+        return False
+    attrs = getattr(task, "attributes", {}) or {}
+    return isinstance(attrs, dict) and _text(attrs.get("work_scope_key")) == work_scope_key
+
+
+def _work_scope_key(params: CreateRunParams) -> str:
+    attrs = params.attributes if isinstance(params.attributes, dict) else {}
+    return _text(attrs.get("work_scope_key"))
 
 
 # LLM: _requested_root_id treats an omitted root as top-level create scope, not a literal empty root_id.

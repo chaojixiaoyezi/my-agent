@@ -8,7 +8,7 @@ from typing import Any
 
 from ..subagents.kernel import SubagentKernelQuery
 from .agent_tree_progress import attach_task_progress
-from .orchestration_run_scope import remembered_orchestration_run_ids
+from .orchestration_child_result_index import child_result_index_from_nodes
 from .orchestration_scope_resolution import scope_resolution_payload, tree_scope_resolution
 from .runner_context import current_subagent_run_id
 
@@ -21,6 +21,10 @@ def agent_tree_status_payload(agent: object, params: dict[str, object] | None = 
     params = params or {}
     query = _kernel_query(agent, params)
     snapshot = _kernel_snapshot(agent, query)
+    warnings = list(snapshot.warnings)
+    if not snapshot.runs and _is_main_run_query(agent, query):
+        snapshot = _kernel_snapshot(agent, SubagentKernelQuery(scope="root_tree"))
+        warnings.extend(["main_run_scope_had_no_subagent_rows_returned_visible_tree", *list(snapshot.warnings)])
     resolution = tree_scope_resolution(
         agent,
         params,
@@ -38,6 +42,7 @@ def agent_tree_status_payload(agent: object, params: dict[str, object] | None = 
         "main": main,
         "nodes": nodes,
         "edges": _tree_edges(nodes),
+        "child_result_index": child_result_index_from_nodes(nodes),
         "status_buckets": {
             "running": list(snapshot.running_run_ids),
             "blocked": list(snapshot.blocked_run_ids),
@@ -46,7 +51,7 @@ def agent_tree_status_payload(agent: object, params: dict[str, object] | None = 
             "takeover_candidates": list(snapshot.takeover_candidate_run_ids),
         },
         "source_refs": dict(snapshot.source_refs),
-        "warnings": [*list(snapshot.warnings), *resolution.warnings],
+        "warnings": [*warnings, *resolution.warnings],
         "policy": {
             "read_only": True,
             "does_not_dispatch": True,
@@ -75,9 +80,14 @@ def _kernel_query(agent: object, params: dict[str, object]) -> SubagentKernelQue
     root_id = str(params.get("root_id") or "").strip()
     run_id = str(params.get("run_id") or "").strip()
     scope = str(params.get("scope") or "").strip() or ("own_subtree" if run_id else "root_tree")
-    if not root_id and not run_id:
-        run_id = _first_remembered_run_id(agent)
     return SubagentKernelQuery(root_id=root_id, run_id=run_id, scope=scope)
+
+
+def _is_main_run_query(agent: object, query: SubagentKernelQuery) -> bool:
+    main_run_id = str(getattr(agent, "_main_agent_run_id", "") or "").strip()
+    if not main_run_id:
+        return False
+    return query.run_id == main_run_id or query.root_id == main_run_id
 
 
 # LLM: _main_agent_node synthesizes the foreground agent row without pretending it is a subagent task.
@@ -266,16 +276,6 @@ def _tree_edges(nodes: list[dict[str, object]]) -> list[dict[str, str]]:
             continue
         edges.append({"from": parent or "main", "to": run_id})
     return edges
-
-
-# LLM: _first_remembered_run_id keeps implicit tree scope tied to current orchestration facts.
-# 函数用途: 从当前轮已记住的 run_id 中取第一个有效值。
-def _first_remembered_run_id(agent: object) -> str:
-    for run_id in remembered_orchestration_run_ids(agent):
-        text = str(run_id or "").strip()
-        if text:
-            return text
-    return ""
 
 
 # LLM: _empty_snapshot returns a safe read-only kernel response when no manager exists.

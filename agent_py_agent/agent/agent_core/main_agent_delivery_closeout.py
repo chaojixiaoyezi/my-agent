@@ -22,6 +22,7 @@ from .main_agent_delivery_closeout_artifacts import (
 )
 from .main_agent_delivery_closeout_gate_recovery import failed_gate_payloads
 from .main_agent_delivery_closeout_gates import CloseoutGateRequest, attach_closeout_gates
+from .main_agent_delivery_closeout_nonterminal import write_non_terminal_closeout_report
 from .main_agent_delivery_closeout_progress import (
     DeliveryProgressContext,
     _enrich_delivery_progress,
@@ -45,9 +46,10 @@ class MainAgentDeliveryCloseoutRequest:
 # 函数用途: 根据结构化 delivery_contract 验收必交产物；通过则停止工具循环，失败则写结构化反馈让模型修复。
 def main_agent_delivery_closeout_response(request: MainAgentDeliveryCloseoutRequest) -> ModelResponse | None:
     contract = _delivery_contract(request.params)
-    if not contract:
-        return None
     workspace_root = _workspace_root(request.agent)
+    if not contract:
+        write_non_terminal_closeout_report(request, workspace_root, reason="delivery_contract_missing")
+        return None
     doctor = validate_delivery_contract(contract, workspace_root=workspace_root)
     _write_contract_doctor_report(workspace_root, doctor)
     if not doctor.ok:
@@ -80,6 +82,7 @@ def _no_artifact_closeout_response(
     workspace_root: Path,
 ) -> ModelResponse | None:
     if not _allows_no_artifact_delivery(contract):
+        write_non_terminal_closeout_report(request, workspace_root, contract=contract, reason="required_artifacts_missing")
         return None
     report = _message_delivery_report(request, contract, workspace_root)
     report_ref = _write_report(workspace_root, report)

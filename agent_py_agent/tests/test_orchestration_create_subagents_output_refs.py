@@ -258,6 +258,31 @@ def test_generic_worker_reuses_structured_idempotency_contract_despite_reworded_
     assert second["reused_run_ids"] == first["created_run_ids"]
 
 
+def test_generic_worker_reuses_same_structured_output_scope_without_goal_text_key(tmp_path):
+    """同一父级同一 output_files 范围复用已有 child；这不是按 goal 文案合并。"""
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _mock_workspace_agent(tmp_path)
+    tool = CreateSubagentsTool(agent)
+
+    first = json.loads(tool.execute({
+        "goal": "整理第一批项目。",
+        "role": "worker",
+        "output_files": [str(tmp_path / "outputs" / "batch4.md")],
+    }).output)
+    second = json.loads(tool.execute({
+        "goal": "继续处理那一批资料并写报告。",
+        "role": "worker",
+        "output_files": [str(tmp_path / "outputs" / "batch4.md")],
+    }).output)
+
+    assert first["created_run_ids"]
+    assert second["created_run_ids"] == []
+    assert second["reused_run_ids"] == first["created_run_ids"]
+    assert second["child_result_index"][0]["expected_outputs"] == [str(tmp_path / "outputs" / "batch4.md")]
+    assert second["tasks"][0]["attributes"]["work_scope_key"]
+
+
 # LLM: repair identity no longer guesses scope from natural goals without repair_contract.
 # 函数用途: 没有 repair_contract 时，即使自然语言看起来是同一文件修复，也不靠代码词表复用。
 def test_repair_goal_without_contract_does_not_guess_same_target(tmp_path):

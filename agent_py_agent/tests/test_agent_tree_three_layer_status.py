@@ -183,3 +183,58 @@ def test_agent_tree_reports_scope_conflict_when_runner_context_wins():
     assert payload["policy"]["scope_resolution"]["source"] == "current_runner_context"
     assert payload["policy"]["scope_resolution"]["effective"]["run_id"] == "child-1"
     assert payload["policy"]["scope_resolution"]["ignored_explicit"]["run_id"] == "foreign-child"
+
+
+def test_main_agent_tree_defaults_to_visible_children_instead_of_first_remembered_run():
+    """主代理查树时不应只收窄到第一个 remembered child，避免看板空树/漏子代理。"""
+
+    class _Manager:
+        seen_query = None
+
+        def kernel_snapshot(self, query):
+            self.seen_query = query
+            return SubagentKernelSnapshot(
+                schema_version="subagent_kernel_snapshot.v1",
+                scope=query.scope,
+                runs=[
+                    SubagentKernelRun(run_id="child-1", status="RUNNING", artifact_refs=["a.md"]),
+                    SubagentKernelRun(run_id="child-2", status="DONE", artifact_refs=["b.md"]),
+                ],
+            )
+
+    class _Agent:
+        _remembered_orchestration_run_ids = ["child-1"]
+        subagents = _Manager()
+
+    payload = agent_tree_status_payload(_Agent())
+
+    assert _Agent.subagents.seen_query.run_id == ""
+    assert [node["run_id"] for node in payload["nodes"]] == ["child-1", "child-2"]
+    assert payload["child_result_index"][1]["primary_artifact_refs"] == ["b.md"]
+
+
+def test_main_run_root_query_falls_back_to_visible_tree_when_no_subagent_root_matches():
+    """显式传主代理 run_id 时，如果它不是子代理 root，也要返回可见子代理树。"""
+
+    class _Manager:
+        queries = []
+
+        def kernel_snapshot(self, query):
+            self.queries.append(query)
+            if query.root_id == "main-run-1":
+                return SubagentKernelSnapshot(schema_version="subagent_kernel_snapshot.v1", scope=query.scope, runs=[])
+            return SubagentKernelSnapshot(
+                schema_version="subagent_kernel_snapshot.v1",
+                scope=query.scope,
+                runs=[SubagentKernelRun(run_id="child-1", status="DONE", artifact_refs=["done.md"])],
+            )
+
+    class _Agent:
+        _main_agent_run_id = "main-run-1"
+        subagents = _Manager()
+
+    payload = agent_tree_status_payload(_Agent(), {"root_id": "main-run-1"})
+
+    assert len(_Agent.subagents.queries) == 2
+    assert payload["nodes"][0]["run_id"] == "child-1"
+    assert "main_run_scope_had_no_subagent_rows_returned_visible_tree" in payload["warnings"]

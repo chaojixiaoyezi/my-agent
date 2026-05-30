@@ -14,6 +14,7 @@ from .orchestration_create_constraints import (
     role_allows_direct_product_work,
 )
 from .orchestration_create_context import create_context_manifest, create_context_packs
+from .orchestration_work_scope import add_work_scope_key
 from .orchestration_workflow_mode import tool_workflow_mode as _tool_workflow_mode
 from .parameters import _bool_param, _positive_int, _string_list
 from .runner_ref_fields import params_input_refs, params_output_refs
@@ -173,6 +174,7 @@ def _create_attributes(raw_params: dict[str, object], agent=None) -> dict[str, o
         if key in raw_params and key not in attrs:
             attrs[key] = _bool_param(raw_params.get(key), default=False)
     _add_derived_output_refs(attrs, raw_params)
+    add_work_scope_key(attrs)
     _add_current_conversation_attrs(attrs, agent)
     return attrs
 
