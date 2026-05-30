@@ -85,9 +85,10 @@ def _kernel_query(agent: object, params: dict[str, object]) -> SubagentKernelQue
 
 def _is_main_run_query(agent: object, query: SubagentKernelQuery) -> bool:
     main_run_id = str(getattr(agent, "_main_agent_run_id", "") or "").strip()
-    if not main_run_id:
-        return False
-    return query.run_id == main_run_id or query.root_id == main_run_id
+    query_id = query.run_id or query.root_id
+    if main_run_id and query_id == main_run_id:
+        return True
+    return query_id.startswith("run-")
 
 
 # LLM: _main_agent_node synthesizes the foreground agent row without pretending it is a subagent task.

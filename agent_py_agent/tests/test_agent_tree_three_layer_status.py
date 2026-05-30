@@ -238,3 +238,29 @@ def test_main_run_root_query_falls_back_to_visible_tree_when_no_subagent_root_ma
     assert len(_Agent.subagents.queries) == 2
     assert payload["nodes"][0]["run_id"] == "child-1"
     assert "main_run_scope_had_no_subagent_rows_returned_visible_tree" in payload["warnings"]
+
+
+def test_cli_style_main_run_id_falls_back_to_visible_tree_without_agent_attribute():
+    """CLI run_id 是 run-*，即使 agent 没挂 _main_agent_run_id，也应能查到子代理树。"""
+
+    class _Manager:
+        queries = []
+
+        def kernel_snapshot(self, query):
+            self.queries.append(query)
+            if query.root_id == "run-1780171761499764000":
+                return SubagentKernelSnapshot(schema_version="subagent_kernel_snapshot.v1", scope=query.scope, runs=[])
+            return SubagentKernelSnapshot(
+                schema_version="subagent_kernel_snapshot.v1",
+                scope=query.scope,
+                runs=[SubagentKernelRun(run_id="subagent-1", status="DONE", artifact_refs=["result.md"])],
+            )
+
+    class _Agent:
+        subagents = _Manager()
+
+    payload = agent_tree_status_payload(_Agent(), {"root_id": "run-1780171761499764000"})
+
+    assert len(_Agent.subagents.queries) == 2
+    assert payload["child_result_index"][0]["run_id"] == "subagent-1"
+    assert payload["child_result_index"][0]["primary_artifact_refs"] == ["result.md"]
