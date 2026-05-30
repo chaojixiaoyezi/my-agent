@@ -8,9 +8,9 @@ from agent_py_agent.agent.memory_archive.compact_apply import (
     MemoryCompactApplyOptions,
     apply_memory_compact,
 )
-from agent_py_agent.tests.test_memory_compact import (
-    _append_compact_token_usage,
-    _compact_raw_event,
+from agent_py_agent.tests.memory_compact_support import (
+    append_compact_token_usage,
+    compact_raw_event,
 )
 
 
@@ -40,9 +40,9 @@ def _scoped_plan_options() -> MemoryCompactPlanOptions:
 # LLM: _write_scoped_and_leaking_archives creates same-file archive rows for positive and negative cases.
 # 函数用途: 写入一条当前 scope raw 事件和一条无关事件，模拟同日 shared JSONL。
 def _write_scoped_and_leaking_archives(root: Path) -> None:
-    append_raw_event(root, _compact_raw_event())
+    append_raw_event(root, compact_raw_event())
     append_raw_event(root, _leaking_raw_event())
-    _append_compact_token_usage(root)
+    append_compact_token_usage(root)
 
 
 # LLM: _leaking_raw_event is intentionally close to the real event shape but outside the active scope.

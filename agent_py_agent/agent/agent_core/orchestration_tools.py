@@ -53,6 +53,7 @@ from .orchestration_workflow_mode import tool_workflow_mode as _tool_workflow_mo
 from .orchestration_write_guard import ExternalWriteTargetRequest, external_write_target_error
 from .parameters import _positive_int
 from .runtime_guidance_tool import SendGuidanceTool as SendGuidanceTool
+from .task_progress_tool import TaskProgressTool as TaskProgressTool
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent

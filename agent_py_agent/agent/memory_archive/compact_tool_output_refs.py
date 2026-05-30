@@ -27,6 +27,8 @@ def tool_output_artifact_refs(restore_refs: dict[str, Any]) -> list[dict[str, An
             "tool": str(item.get("tool", "") or ""),
             "call_id": str(item.get("call_id", "") or ""),
             "scoped_call_id": str(item.get("scoped_call_id", "") or ""),
+            "source_path": str(item.get("source_input") or ""),
+            "parameters": dict(item.get("parameters", {}) if isinstance(item.get("parameters"), dict) else {}),
             "sha256": str(item.get("sha256", "") or ""),
             "size_bytes": int(item.get("size_bytes", 0) or 0),
             "reserved": {},
@@ -60,7 +62,7 @@ def _matches_scope(row: dict[str, Any], scope: dict[str, Any]) -> bool:
 
 
 # LLM: _source_ref normalizes the public restore-ref shape for one tool-output index row.
-# 函数用途: 生成 tool output 恢复引用条目，保留路径、hash、scope 和 call id。
+# 函数用途: 生成 tool output 恢复引用条目，保留路径、hash、scope、call id 和原始输入线索，方便 compact 后接着做而不重扫。
 def _source_ref(row: dict[str, Any]) -> dict[str, Any]:
     path = Path(str(row.get("path") or ""))
     return {
@@ -71,6 +73,9 @@ def _source_ref(row: dict[str, Any]) -> dict[str, Any]:
         "tool": str(row.get("tool", "") or ""),
         "call_id": str(row.get("call_id", "") or ""),
         "scoped_call_id": str(row.get("scoped_call_id", "") or ""),
+        "source_input": str(row.get("source_input") or ""),
+        "source_path": str(row.get("source_input") or ""),
+        "parameters": dict(row.get("parameters", {}) if isinstance(row.get("parameters"), dict) else {}),
         "request_id": str(row.get("request_id", "") or ""),
         "run_id": str(row.get("run_id", "") or ""),
         "task_id": str(row.get("task_id", "") or ""),

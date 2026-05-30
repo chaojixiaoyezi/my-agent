@@ -260,6 +260,7 @@ def _invoke_registry_with_envelope(
     tool_name: str,
     payload: dict[str, Any],
 ) -> ToolExecutionResult:
+    payload = _with_execution_scope(payload, envelope)
     request = RegistryToolInvokeRequest(
         tool_name=tool_name,
         payload=payload,
@@ -280,6 +281,18 @@ def _invoke_registry_with_envelope(
         ),
         envelope,
     )
+
+
+# LLM: _with_execution_scope carries runtime identity to tools that need self-scoped ledgers.
+# 函数用途: 把 envelope 的 run scope 作为内部字段传给工具，避免进度/账本工具落到 main 兜底。
+def _with_execution_scope(payload: dict[str, Any], envelope: ToolCallEnvelope | None) -> dict[str, Any]:
+    if envelope is None or not envelope.scope.run_id:
+        return payload
+    return {
+        **payload,
+        "__run_scope": envelope.scope.to_dict(),
+        "__tool_call_id": envelope.call_id,
+    }
 
 
 # LLM: _registry_auth_error 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。

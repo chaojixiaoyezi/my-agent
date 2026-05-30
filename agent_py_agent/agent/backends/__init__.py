@@ -25,6 +25,7 @@ from .errors import (
     is_provider_timeout_error,
     is_provider_transient_error,
     provider_timeout_report,
+    provider_transient_report,
 )
 
 __all__ = [
@@ -41,4 +42,5 @@ __all__ = [
     "is_provider_timeout_error",
     "is_provider_transient_error",
     "provider_timeout_report",
+    "provider_transient_report",
 ]

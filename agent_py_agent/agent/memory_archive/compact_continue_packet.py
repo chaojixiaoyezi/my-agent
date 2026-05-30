@@ -10,6 +10,12 @@ from typing import Any
 
 from ..action_protocol import CompactContinuePacketEnvelope, PathRef, RunScope
 from .compact_artifact_read_hints import artifact_read_hints_from_work_state
+from .compact_resume_focus import (
+    action_first_actions,
+    captured_refs_payload,
+    resume_focus_payload,
+    string_list,
+)
 from .schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_reserved_fields,
@@ -40,7 +46,7 @@ class CompactContinuePacketRequest:
 # 函数用途: 生成 compact resume 后的继续工作包，供手动恢复、半自动恢复和未来自动恢复共用。
 def build_compact_continue_packet(request: CompactContinuePacketRequest) -> dict[str, Any]:
     guard = request.action_guard
-    missing = _string_list(guard.get("missing_fields") or request.work_state.get("missing_fields"))
+    missing = string_list(guard.get("missing_fields") or request.work_state.get("missing_fields"))
     payload = {
         "version": COMPACT_CONTINUE_PACKET_SCHEMA.version,
         "schema": runtime_memory_schema_payload(COMPACT_CONTINUE_PACKET_SCHEMA),
@@ -56,7 +62,8 @@ def build_compact_continue_packet(request: CompactContinuePacketRequest) -> dict
         "guard": _guard_payload(guard),
         "recommended_read_paths": list(request.recommended_read_paths),
         "artifact_read_hints": artifact_read_hints_from_work_state(request.work_state),
-        "next_actions": list(request.next_actions),
+        "next_actions": action_first_actions(request.next_actions, request.work_state),
+        "resume_focus": resume_focus_payload(request.work_state, request.next_actions),
         "main_context_bundle": _main_context_bundle_payload(request.main_context_bundle),
         "compaction_state": _compaction_state_payload(request.compaction_state),
         "handoff_summary": _handoff_summary_payload(request.compaction_state, request.handoff_summary),
@@ -86,7 +93,7 @@ def _typed_continue_packet_envelope(payload: dict[str, Any]) -> CompactContinueP
         work_state=dict(payload.get("work_state_snapshot", {})),
         guard=dict(payload.get("guard", {})),
         path_refs=_path_refs_from_recommended(payload.get("recommended_read_paths"), owner_id=owner_id),
-        next_actions=_string_list(payload.get("next_actions")),
+        next_actions=string_list(payload.get("next_actions")),
         scope=RunScope(owner_type=owner_type, owner_id=owner_id),
         reserved={"source": "compact_continue_packet"},
     )
@@ -114,7 +121,7 @@ def _path_refs_from_recommended(value: Any, *, owner_id: str = "") -> list[PathR
             owner_run_id=owner_id,
             source="compact_continue_packet.recommended_read_paths",
         )
-        for path in _string_list(value)
+        for path in string_list(value)
     ]
 
 
@@ -128,8 +135,9 @@ def _work_state_payload(work_state: dict[str, Any], missing: list[str]) -> dict[
         "acceptance": _items_payload(work_state.get("acceptance")),
         "constraints": _items_payload(work_state.get("constraints")),
         "latest_tests": _tests_payload(work_state.get("latest_tests")),
-        "changed_files": _string_list(work_state.get("changed_files")),
-        "read_files": _string_list(work_state.get("read_files")),
+        "changed_files": string_list(work_state.get("changed_files")),
+        "read_files": string_list(work_state.get("read_files")),
+        "captured_refs": captured_refs_payload(work_state),
         "missing_fields": missing,
     }
 
@@ -143,7 +151,7 @@ def _guard_payload(guard: dict[str, Any]) -> dict[str, Any]:
         "allowed_to_continue": bool(guard.get("allowed_to_continue")),
         "allowed_next_action": str(guard.get("allowed_next_action", "")),
         "automatic_tool_execution": str(guard.get("automatic_tool_execution", "none")),
-        "missing_fields": _string_list(guard.get("missing_fields")),
+        "missing_fields": string_list(guard.get("missing_fields")),
     }
 
 
@@ -173,7 +181,7 @@ def _subagent_payload(owner_refs: dict[str, Any]) -> dict[str, Any]:
         "automatic_tool_execution": str(owner_refs.get("automatic_tool_execution", "none")),
         "refs": dict(owner_refs.get("refs", {})),
         # LLM: subagent owner packets expose task-local read hints without copying main memory.
-        "recommended_read_paths": _string_list(owner_refs.get("recommended_read_paths")),
+        "recommended_read_paths": string_list(owner_refs.get("recommended_read_paths")),
         "reserved_hooks": dict(owner_refs.get("reserved_hooks", {})),
     }
 
@@ -242,8 +250,9 @@ def _lineage_payload(value: Any) -> dict[str, Any]:
 def _resume_instructions(guard: dict[str, Any]) -> list[str]:
     if guard.get("allowed_to_continue"):
         return [
-            "Read the recommended refs before continuing.",
-            "Continue within the captured goal and any recorded constraints, acceptance, and latest test state.",
+            "Continue from resume_focus.next_action first.",
+            "Use captured_refs to avoid repeating finished reads, writes, and dispatches.",
+            "Read recommended refs only when the next action lacks facts or needs verification.",
             "If optional notes are missing, continue from the goal instead of stopping.",
             "Do not run tools automatically unless a higher-level policy explicitly allows it.",
         ]
@@ -269,9 +278,9 @@ def _continue_mode(guard: dict[str, Any]) -> str:
 def _items_payload(value: Any) -> dict[str, Any]:
     payload = value if isinstance(value, dict) else {}
     return {
-        "items": _string_list(payload.get("items")),
+        "items": string_list(payload.get("items")),
         "source_status": str(payload.get("source_status") or "not_recorded"),
-        "source_paths": _string_list(payload.get("source_paths")),
+        "source_paths": string_list(payload.get("source_paths")),
     }
 
 
@@ -281,17 +290,9 @@ def _tests_payload(value: Any) -> dict[str, Any]:
     payload = value if isinstance(value, dict) else {}
     return {
         "status": str(payload.get("status") or "not_recorded"),
-        "items": _string_list(payload.get("items")),
-        "source_paths": _string_list(payload.get("source_paths")),
+        "items": string_list(payload.get("items")),
+        "source_paths": string_list(payload.get("source_paths")),
     }
-
-
-# LLM: _string_list makes unknown JSON list fields safe for packet rendering.
-# 函数用途: 把 list-like 值规整成去空白字符串列表。
-def _string_list(value: Any) -> list[str]:
-    if not isinstance(value, list | tuple):
-        return []
-    return [text for item in value if (text := str(item).strip())]
 
 
 # LLM: _positive_int normalizes compact lineage counters for packet payloads.

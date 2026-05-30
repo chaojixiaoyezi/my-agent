@@ -15,12 +15,12 @@ from agent_py_agent.agent.memory_archive.compact_resume import (
     MemoryCompactResumeOptions,
     build_memory_compact_resume,
 )
-from agent_py_agent.tests.test_memory_compact import _write_compact_fixture
+from agent_py_agent.tests.memory_compact_support import write_compact_fixture
 
 
 def test_apply_memory_compact_records_compaction_gate(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
 
     result = _apply_compact(root)
 
@@ -33,7 +33,7 @@ def test_apply_memory_compact_records_compaction_gate(tmp_path: Path) -> None:
 
 def test_memory_compact_resume_checks_compaction_gate_state_loss(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
 
     result = _apply_compact(root)
     work_state_path = Path(result["refs"]["work_state_snapshot"])

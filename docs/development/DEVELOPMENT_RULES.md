@@ -396,6 +396,10 @@ do_write()
   focused tests for touched areas, full pytest when feasible, ruff, doc sync,
   strict code-size, and `git diff --check`. If not pushing remote, use the
   smaller local checklist appropriate to the change risk.
+- Runtime, memory, compact, tool, orchestration, contract, or subagent behavior
+  changes must update the matching project docs in the same patch. Do not leave
+  behavior changes only in code or tests; future agents use the docs to avoid
+  repeating old wrong designs.
 - Tool-call budget is per agent run, not per task tree and not per conversation.
   Default policy is `tool_agent_budget_window_seconds=600` and
   `tool_agent_budget_max_calls=200`, keyed by `run_id`. Calls without a `run_id`
@@ -444,6 +448,11 @@ do_write()
   raise `ProviderTimeoutError` for request/stream timeouts, runners should record
   `failure_type=provider_timeout`, and CLI entry points should print a compact
   recovery handoff rather than exposing a raw traceback or staying silent.
+- Provider rate limits or temporary overloads must also be typed and recoverable.
+  HTTP 429/529/503 should retry with bounded backoff first; if exhausted, surface
+  `ProviderTransientError` and a readable recovery hint. Do not treat these as
+  delivery-quality failures, and do not let raw provider JSON tracebacks become
+  the final user-facing answer.
 - New write-like tools must reuse `content_transport_policy.py` or document a
   reviewed exception. Do not create a second hardcoded chunk-size or parse-error
   hint in a separate module.

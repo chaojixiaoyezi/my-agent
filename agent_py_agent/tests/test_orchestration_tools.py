@@ -25,6 +25,408 @@ def test_create_subagents_tool_spec_uses_template_index_not_full_prompt():
     assert "你是执行子代理" not in role_detail
     assert "不同工作切片不要用 count" in spec.parameter_details["count"]
 
+
+class TestTaskProgressTool:
+    """测试通用任务进度账本。"""
+
+    def test_updates_and_reads_current_agent_progress(self, tmp_path):
+        """模型可以用一个工具记录长期任务小块进度，后续读取不会丢。"""
+        from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent._main_agent_run_id = "run-main"
+        tool = TaskProgressTool(agent)
+
+        update = tool.execute(
+            {
+                "action": "update",
+                "summary": "已读完项目 A，准备读项目 B。",
+                "next_action": "继续阅读项目 B 的核心模块。",
+                "items": [
+                    {"id": "project-a", "title": "阅读项目 A", "status": "done", "evidence": ["A/README.md"]},
+                    {"id": "project-b", "title": "阅读项目 B", "status": "in_progress"},
+                ],
+            }
+        )
+        read = tool.execute({"action": "read"})
+        payload = json.loads(read.output)
+
+        assert update.ok is True
+        assert read.ok is True
+        assert payload["run_id"] == "run-main"
+        assert payload["summary"] == "已读完项目 A，准备读项目 B。"
+        assert payload["next_action"] == "继续阅读项目 B 的核心模块。"
+        assert payload["counts"]["done"] == 1
+        assert payload["counts"]["in_progress"] == 1
+        assert payload["items"][0]["evidence"] == ["A/README.md"]
+
+
+class TestTaskProgressCoverageTool:
+    """测试 task_progress 的通用覆盖账本。"""
+
+    def test_updates_and_summarizes_open_coverage_ledger(self, tmp_path):
+        """覆盖账本应复用 task_progress，不把“项目/论文/API”等对象写死。"""
+        from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent._main_agent_run_id = "run-main"
+        tool = TaskProgressTool(agent)
+
+        tool.execute(
+            {
+                "action": "update",
+                "summary": "正在覆盖多个对象。",
+                "coverage": {
+                    "goal": "每个对象都要读基础信息、分析结构、写进报告。",
+                    "dimensions": ["读基础信息", "分析结构", "写进报告"],
+                    "targets": [
+                        {
+                            "id": "agentscope-main",
+                            "title": "AgentScope",
+                            "status": "done",
+                            "checks": {"读基础信息": "done", "分析结构": "done", "写进报告": "done"},
+                            "evidence": ["agentscope-main/README.md"],
+                        },
+                        {
+                            "id": "codex-main",
+                            "title": "Codex",
+                            "status": "in_progress",
+                            "checks": {"读基础信息": "done", "分析结构": "pending", "写进报告": "pending"},
+                            "next": "继续看核心目录",
+                        },
+                    ],
+                },
+            }
+        )
+        payload = json.loads(tool.execute({"action": "read"}).output)
+
+        assert payload["coverage"]["goal"] == "每个对象都要读基础信息、分析结构、写进报告。"
+        assert payload["coverage"]["counts"]["targets_total"] == 2
+        assert payload["coverage"]["counts"]["targets_done"] == 1
+        assert payload["coverage"]["counts"]["checks_done"] == 4
+        assert payload["coverage"]["targets"][1]["checks"]["分析结构"] == "pending"
+        assert payload["coverage"]["targets"][1]["next"] == "继续看核心目录"
+
+    def test_coverage_ledger_merges_by_target_and_check(self, tmp_path):
+        """覆盖账本跨轮更新同一对象时，只补新状态，不丢已有证据。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "coverage_targets": [
+                    {
+                        "id": "codex-main",
+                        "title": "Codex",
+                        "checks": {"读基础信息": "done", "分析结构": "pending"},
+                        "evidence": ["codex-main/README.md"],
+                    }
+                ]
+            },
+        )
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "coverage_targets": [
+                    {
+                        "id": "codex-main",
+                        "checks": {"分析结构": "done", "写进报告": "done"},
+                        "evidence": ["codex-main/README.md", "codex-main/core"],
+                    }
+                ]
+            },
+        )
+
+        payload = read_task_progress(tmp_path, "run-main")
+
+        target = payload["coverage"]["targets"][0]
+        assert target["checks"] == {"读基础信息": "done", "分析结构": "done", "写进报告": "done"}
+        assert target["evidence"] == ["codex-main/README.md", "codex-main/core"]
+        assert payload["coverage"]["counts"]["targets_done"] == 1
+
+    def test_coverage_targets_accept_expected_fields_as_pending_checks(self, tmp_path):
+        """模型用 expected_fields 表达覆盖项时，也应归一成 checks。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "coverage_targets": [
+                    {
+                        "id": "codex-main",
+                        "expected_fields": ["做什么的", "主要模块", "优点", "缺点", "值得借鉴的地方"],
+                    }
+                ]
+            },
+        )
+
+        target = read_task_progress(tmp_path, "run-main")["coverage"]["targets"][0]
+
+        assert target["checks"] == {
+            "做什么的": "pending",
+            "主要模块": "pending",
+            "优点": "pending",
+            "缺点": "pending",
+            "值得借鉴的地方": "pending",
+        }
+
+    def test_task_progress_accepts_create_action_and_fields_alias(self, tmp_path):
+        """真实模型常写 action=create 和 fields，工具应宽容成 update + checks。"""
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent._main_agent_run_id = "run-main"
+
+        result = agent.tools.execute_call(
+            {
+                "tool": "task_progress",
+                "action": "create",
+                "summary": "开始覆盖五个项目。",
+                "items": [
+                    {
+                        "id": "agentscope",
+                        "title": "agentscope-main分析",
+                        "status": "in_progress",
+                        "fields": ["功能", "主要模块", "优点", "缺点", "借鉴点"],
+                    }
+                ],
+            }
+        )
+        payload = json.loads(result.output)
+
+        assert result.ok is True
+        assert payload["summary"] == "开始覆盖五个项目。"
+        assert payload["coverage"]["targets"][0]["checks"]["功能"] == "pending"
+
+    def test_task_progress_accepts_fields_dict_as_checks(self, tmp_path):
+        """模型把 fields 写成字段到状态的字典时，应直接当 checks。"""
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent._main_agent_run_id = "run-main"
+
+        result = agent.tools.execute_call(
+            {
+                "tool": "task_progress",
+                "action": "update",
+                "items": [
+                    {
+                        "id": "agentscope",
+                        "fields": {"功能描述": "pending", "主要模块": "pending", "优点": "done"},
+                    }
+                ],
+            }
+        )
+        payload = json.loads(result.output)
+
+        assert result.ok is True
+        assert payload["coverage"]["targets"][0]["checks"] == {
+            "功能描述": "pending",
+            "主要模块": "pending",
+            "优点": "done",
+        }
+
+    def test_task_progress_accepts_init_and_string_coverage_targets(self, tmp_path):
+        """模型用 init 和字符串覆盖清单时，也应写成结构化 coverage。"""
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent._main_agent_run_id = "run-main"
+
+        result = agent.tools.execute_call(
+            {
+                "tool": "task_progress",
+                "action": "init",
+                "summary": "开始分析五个项目。",
+                "coverage_targets": [
+                    "agentscope-main:功能定位,主要模块,优点,缺点,借鉴点",
+                    "codex-main:功能定位,主要模块,优点,缺点,借鉴点",
+                ],
+            }
+        )
+        payload = json.loads(result.output)
+
+        assert result.ok is True
+        assert payload["summary"] == "开始分析五个项目。"
+        assert payload["coverage"]["targets"][0]["id"] == "agentscope-main"
+        assert payload["coverage"]["targets"][0]["checks"]["主要模块"] == "pending"
+        assert payload["coverage"]["counts"]["targets_total"] == 2
+
+    def test_task_progress_accepts_fields_needed_and_chinese_target_text(self, tmp_path):
+        """模型用 fields_needed 或中文冒号写覆盖项时，也应归一成 checks。"""
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent._main_agent_run_id = "run-main"
+
+        result = agent.tools.execute_call(
+            {
+                "tool": "task_progress",
+                "action": "begin",
+                "summary": "开始覆盖多个对象。",
+                "items": [
+                    {
+                        "id": "free-code-main",
+                        "title": "free-code-main",
+                        "fields_needed": ["功能定位", "主要模块", "借鉴点"],
+                    }
+                ],
+                "coverage_targets": [
+                    "hermes-agent-main：功能定位，主要模块，优点，缺点，借鉴点",
+                ],
+            }
+        )
+        payload = json.loads(result.output)
+
+        assert result.ok is True
+        by_id = {target["id"]: target for target in payload["coverage"]["targets"]}
+        assert by_id["free-code-main"]["checks"]["借鉴点"] == "pending"
+        assert by_id["hermes-agent-main"]["checks"]["主要模块"] == "pending"
+        assert payload["coverage"]["counts"]["targets_total"] == 2
+
+    def test_task_progress_derives_checks_from_note_text(self, tmp_path):
+        """模型把覆盖要求写在 note/notes 里时，也应保留下来做覆盖清单。"""
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent._main_agent_run_id = "run-main"
+
+        result = agent.tools.execute_call(
+            {
+                "tool": "task_progress",
+                "action": "update",
+                "items": [
+                    {
+                        "id": "agentscope-main",
+                        "title": "分析 agentscope-main",
+                        "status": "in_progress",
+                        "note": "待分析：做什么、主要模块、优点、缺点、借鉴点",
+                    }
+                ],
+            }
+        )
+        payload = json.loads(result.output)
+
+        assert result.ok is True
+        item = payload["items"][0]
+        assert item["notes"] == "待分析：做什么、主要模块、优点、缺点、借鉴点"
+        target = payload["coverage"]["targets"][0]
+        assert target["id"] == "agentscope-main"
+        assert target["checks"]["主要模块"] == "pending"
+
+    def test_task_progress_accepts_name_and_missing_fields_aliases(self, tmp_path):
+        """模型用 name/missing_fields 和字符串 coverage 时，不应把多个对象合成一个 target。"""
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent._main_agent_run_id = "run-main"
+
+        result = agent.tools.execute_call(
+            {
+                "tool": "task_progress",
+                "action": "create",
+                "coverage": "0/2 项目已分析",
+                "coverage_targets": [
+                    {"name": "agentscope-main", "status": "pending", "missing_fields": ["主要模块", "借鉴点"]},
+                    {"name": "codex-main", "status": "pending", "missing_fields": []},
+                ],
+            }
+        )
+        payload = json.loads(result.output)
+
+        assert result.ok is True
+        assert payload["coverage"]["goal"] == "0/2 项目已分析"
+        assert [target["id"] for target in payload["coverage"]["targets"]] == [
+            "agentscope-main",
+            "codex-main",
+        ]
+        assert payload["coverage"]["targets"][0]["checks"]["借鉴点"] == "pending"
+
+
+class TestTaskProgressRegistryTool:
+    """测试 task_progress 经过真实工具注册表时的行为。"""
+
+    def test_registry_gate_allows_task_progress_updates(self, tmp_path):
+        """task_progress 的工具声明必须完整，否则真实工具入口会在执行前拦掉。"""
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent._main_agent_run_id = "run-main"
+
+        result = agent.tools.execute_call(
+            {
+                "tool": "task_progress",
+                "action": "update",
+                "summary": "已完成第一块。",
+                "items": [{"id": "block-1", "title": "第一块", "status": "done"}],
+            }
+        )
+
+        assert result.ok is True
+        assert (tmp_path / "memory_archive" / "task_progress" / "run-main" / "progress.json").exists()
+
+    def test_registry_accepts_tool_name_wrapped_payload(self, tmp_path):
+        """模型常把参数包放进同名字段，注册表应统一拆包后再执行。"""
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent._main_agent_run_id = "run-main"
+
+        result = agent.tools.execute_call(
+            {
+                "tool": "task_progress",
+                "task_progress": {
+                    "action": "update",
+                    "summary": "已读目录。",
+                    "items": [{"id": "list", "status": "done"}],
+                },
+            }
+        )
+
+        assert result.ok is True
+        payload = json.loads(result.output)
+        assert payload["summary"] == "已读目录。"
+
+    def test_registry_scope_drives_task_progress_run_id(self, tmp_path):
+        """真实工具循环注入的 run_scope 应决定进度账本归属，不能落到 main。"""
+        from agent_py_agent.agent.action_protocol import RunScope, ToolCallEnvelope
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        envelope = ToolCallEnvelope(
+            call_id="call-1",
+            source="test",
+            tool="task_progress",
+            args={
+                "action": "update",
+                "summary": "读完第一批项目。",
+                "items": [{"id": "batch-1", "title": "第一批", "status": "done"}],
+            },
+            scope=RunScope(run_id="run-scoped", task_id="task-scoped", request_id="request-scoped"),
+        )
+
+        result = agent.tools.execute_call(envelope.to_dict())
+
+        assert result.ok is True
+        assert (tmp_path / "memory_archive" / "task_progress" / "run-scoped" / "progress.json").exists()
+        assert not (tmp_path / "memory_archive" / "task_progress" / "main" / "progress.json").exists()
+
 class TestInspectAgentTreeTool:
     """测试只读代理树查看工具。"""
 
@@ -73,6 +475,75 @@ class TestInspectAgentTreeTool:
         assert payload["nodes"][1]["blockers"] == ["等待收口"]
         assert mock_agent.dispatch_subagents.call_count == 0
         assert mock_agent._has_pending_work is True
+
+    def test_tree_includes_child_progress_ledger_summary(self, tmp_path):
+        """父代理查看 tree 时，应能看到子代理自己的进度摘要。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import InspectAgentTreeTool
+        from agent_py_agent.agent.subagents.manager import SubAgentManager
+        from agent_py_agent.agent.task_progress import write_task_progress
+
+        manager = SubAgentManager(tmp_path)
+        child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
+        write_task_progress(
+            tmp_path,
+            child.id,
+            {
+                "summary": "已检查 3 个来源，剩 2 个。",
+                "next_action": "继续检查剩余来源。",
+                "items": [
+                    {"id": "source-1", "title": "来源 1", "status": "done"},
+                    {"id": "source-2", "title": "来源 2", "status": "in_progress"},
+                ],
+            },
+        )
+
+        mock_agent = MagicMock()
+        mock_agent.subagents = manager
+        mock_agent.root = tmp_path
+        mock_agent._main_agent_run_id = "main"
+
+        payload = json.loads(InspectAgentTreeTool(mock_agent).execute({"root_id": child.id}).output)
+        progress = payload["nodes"][0]["progress_layer"]["task_progress"]
+
+        assert progress["summary"] == "已检查 3 个来源，剩 2 个。"
+        assert progress["counts"]["done"] == 1
+        assert progress["counts"]["in_progress"] == 1
+        assert progress["next_action"] == "继续检查剩余来源。"
+
+    def test_tree_includes_child_coverage_summary(self, tmp_path):
+        """父代理查看 tree 时，应能看到子代理覆盖了哪些对象。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import InspectAgentTreeTool
+        from agent_py_agent.agent.subagents.manager import SubAgentManager
+        from agent_py_agent.agent.task_progress import write_task_progress
+
+        manager = SubAgentManager(tmp_path)
+        child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
+        write_task_progress(
+            tmp_path,
+            child.id,
+            {
+                "summary": "正在对比多个来源。",
+                "coverage": {
+                    "dimensions": ["查询", "写证据"],
+                    "targets": [
+                        {"id": "source-a", "checks": {"查询": "done", "写证据": "done"}},
+                        {"id": "source-b", "checks": {"查询": "done", "写证据": "pending"}},
+                    ],
+                },
+            },
+        )
+
+        mock_agent = MagicMock()
+        mock_agent.subagents = manager
+        mock_agent.root = tmp_path
+        mock_agent._main_agent_run_id = "main"
+
+        payload = json.loads(InspectAgentTreeTool(mock_agent).execute({"root_id": child.id}).output)
+        coverage = payload["nodes"][0]["progress_layer"]["task_progress"]["coverage"]
+
+        assert coverage["counts"]["targets_total"] == 2
+        assert coverage["active_targets"][0]["id"] == "source-b"
+        assert coverage["active_targets"][0]["checks"]["写证据"] == "pending"
 
 
 class TestRaiseEventTool:

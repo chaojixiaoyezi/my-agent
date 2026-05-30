@@ -38,6 +38,7 @@ def compact_auto_continuation_decision(result: Any, *, depth: int = 0) -> Compac
 def build_compact_auto_continue_injection(packet: dict[str, Any]) -> str:
     work_state = packet.get("work_state_snapshot", {}) if isinstance(packet.get("work_state_snapshot"), dict) else {}
     guard = packet.get("guard", {}) if isinstance(packet.get("guard"), dict) else {}
+    resume_focus = _resume_focus(packet, work_state)
     sections = [
         "# Compact Auto Continuation",
         "Status: allowed_to_continue",
@@ -45,6 +46,8 @@ def build_compact_auto_continue_injection(packet: dict[str, Any]) -> str:
         f"Continue mode: {packet.get('continue_mode', '')}",
         f"Guard status: {guard.get('status', '')}",
         "",
+        _resume_focus_section(resume_focus),
+        _captured_refs_section(resume_focus.get("captured_refs")),
         "## Goal",
         str(work_state.get("goal") or ""),
         "",
@@ -52,18 +55,17 @@ def build_compact_auto_continue_injection(packet: dict[str, Any]) -> str:
         str(work_state.get("current_phase") or ""),
         "",
         "## Next Step",
-        str(work_state.get("next_step") or "继续当前任务目标；先核对推荐引用和最近产物，再从未完成部分推进。"),
+        str(resume_focus.get("next_action") or work_state.get("next_step") or "继续当前任务目标，从未完成部分推进。"),
         "",
         _items_section("## Acceptance", work_state.get("acceptance")),
         _items_section("## Constraints", work_state.get("constraints")),
         _tests_section(work_state.get("latest_tests")),
         _list_section("## Changed Files", work_state.get("changed_files")),
-        _list_section("## Recommended Read Paths", packet.get("recommended_read_paths")),
         "## Continuation Rules",
         "- Continue only from the Next Step above.",
         "- Do not redo completed work.",
-        "- Read recommended refs only when needed for the next action.",
-        "- If optional notes are missing, continue from the captured goal and refs; only stop when source refs are broken.",
+        "- 不要先重读 compact 文件；只有下一步缺事实、需要校验或引用损坏时才读取恢复引用。",
+        "- 如果可选备注缺失，继续从目标、已捕获引用和工作区事实推进；只有关键源引用完全无法定位时才报告阻塞。",
     ]
     return "\n".join(section for section in sections if section is not None).strip()
 
@@ -72,8 +74,8 @@ def build_compact_auto_continue_injection(packet: dict[str, Any]) -> str:
 # 函数用途: 生成续跑轮的用户任务文本，避免模型把恢复包当成普通参考资料后重做任务。
 def compact_auto_continue_user_prompt() -> str:
     return (
-        "继续执行 Compact Auto Continuation 包里的 Next Step。"
-        "不要重做已完成内容；如果恢复字段、自检或引用不完整，就停车并报告。"
+        "继续当前任务的未完成部分。"
+        "不要重做已完成内容；优先推进未完成部分，必要时才读取恢复引用。"
     )
 
 
@@ -117,6 +119,111 @@ def _tests_section(payload: Any) -> str:
     tests = _items(payload.get("items")) if isinstance(payload, dict) else []
     status = str(payload.get("status") or "not_recorded") if isinstance(payload, dict) else "not_recorded"
     return "\n".join(["## Latest Tests", f"Status: {status}", *_bullet_lines(tests or ["<not recorded>"])])
+
+
+# LLM: _resume_focus builds an action-first view even for older continue packets.
+# 函数用途: 新包优先使用 resume_focus；旧包从 next_actions/next_step 和 work_state refs 回填，保持兼容。
+def _resume_focus(packet: dict[str, Any], work_state: dict[str, Any]) -> dict[str, Any]:
+    focus = packet.get("resume_focus")
+    if isinstance(focus, dict):
+        return dict(focus)
+    next_actions = _action_first_items(_items(packet.get("next_actions")) or _items(work_state.get("next_actions")))
+    next_step = str(work_state.get("next_step") or "").strip()
+    if _looks_like_reader_first_recovery_hint(next_step):
+        next_step = ""
+    return {
+        "next_action": next_actions[0] if next_actions else next_step,
+        "next_actions": next_actions,
+        "captured_refs": {
+            "changed_files": _items(work_state.get("changed_files")),
+            "read_files": _items(work_state.get("read_files")),
+            "artifact_refs": _artifact_ref_items(packet.get("artifact_read_hints")),
+        },
+        "do_not_repeat": [
+            "不要把 compact/恢复文件当成新任务从头阅读；优先按 next_action 推进。",
+            "不要重复已经登记的读取、写入或派工；只有验证、修补或缺事实时才重读。",
+        ],
+    }
+
+
+# LLM: _resume_focus_section tells the resumed model what to do before reading backup files.
+# 函数用途: 渲染 compact 续接的行动焦点，避免恢复后先重读 compact 文件。
+def _resume_focus_section(focus: dict[str, Any]) -> str:
+    next_action = str(focus.get("next_action") or "").strip() or "继续当前任务的未完成部分。"
+    return "\n".join(
+        [
+            "## Resume Focus",
+            f"- next_action: {next_action}",
+            *_bullet_lines(_items(focus.get("next_actions"))),
+            *_bullet_lines(_items(focus.get("do_not_repeat"))),
+        ]
+    )
+
+
+# LLM: _captured_refs_section shows already captured refs without embedding large content.
+# 函数用途: 渲染已读、已写和归档产物引用，让续接模型知道哪些事实已有记录。
+def _captured_refs_section(payload: Any) -> str:
+    refs = payload if isinstance(payload, dict) else {}
+    lines = ["## Already Captured Refs"]
+    lines.extend(_prefixed_lines("changed_files", _items(refs.get("changed_files"))))
+    lines.extend(_prefixed_lines("read_files", _items(refs.get("read_files"))))
+    artifact_refs = refs.get("artifact_refs") if isinstance(refs.get("artifact_refs"), list) else []
+    rendered_artifacts = [
+        _render_artifact_ref(item) if isinstance(item, dict) else str(item).strip()
+        for item in artifact_refs
+        if (isinstance(item, dict) or str(item).strip())
+    ]
+    lines.extend(_prefixed_lines("artifact_refs", rendered_artifacts))
+    if len(lines) == 1:
+        lines.append("- <none>")
+    return "\n".join(lines)
+
+
+# LLM: _artifact_ref_items normalizes mixed artifact hint rows into readable refs.
+# 函数用途: 从 compact artifact hints 中提取可展示的 artifact_ref 或 fallback_path。
+def _artifact_ref_items(value: Any) -> list[str]:
+    if not isinstance(value, list | tuple):
+        return []
+    refs: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            text = str(item.get("artifact_ref") or item.get("fallback_path") or "").strip()
+        else:
+            text = str(item).strip()
+        if text:
+            refs.append(text)
+    return refs
+
+
+# LLM: _render_artifact_ref preserves both archive id and original source path when available.
+# 函数用途: 把单条产物引用渲染成紧凑文本，保留 source_path 帮助模型判断来源。
+def _render_artifact_ref(item: dict[str, Any]) -> str:
+    ref = str(item.get("artifact_ref") or item.get("fallback_path") or "").strip()
+    source = str(item.get("source_path") or "").strip()
+    if source and ref:
+        return f"{ref} (source: {source})"
+    return ref or source
+
+
+# LLM: _prefixed_lines keeps captured-ref labels stable for compact continuation prompts.
+# 函数用途: 给引用列表加统一标签，便于模型扫描已捕获事实。
+def _prefixed_lines(label: str, values: list[str]) -> list[str]:
+    return [f"- {label}: {item}" for item in values if item]
+
+
+# LLM: _action_first_items filters out reader-first legacy recovery hints.
+# 函数用途: 只保留真正推进任务的下一步动作，避免续跑先翻恢复包。
+def _action_first_items(items: list[str]) -> list[str]:
+    return [item for item in items if not _looks_like_reader_first_recovery_hint(item)]
+
+
+# LLM: _looks_like_reader_first_recovery_hint recognizes stale compact-read instructions.
+# 函数用途: 判断一句提示是否只是要求读取 compact/localstore 恢复材料。
+def _looks_like_reader_first_recovery_hint(value: str) -> bool:
+    text = value.strip().lower()
+    recovery_markers = ("memory-resume", "localstore", "compact_context", "work_state_snapshot", "restore_refs")
+    reader_markers = ("先查看", "先读取", "read ", "inspect ", "查看", "读取")
+    return any(marker in text for marker in recovery_markers) and any(marker in text for marker in reader_markers)
 
 
 # LLM: _list_section renders short string lists with a stable heading.

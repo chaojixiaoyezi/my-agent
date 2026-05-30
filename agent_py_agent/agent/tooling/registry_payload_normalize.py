@@ -242,7 +242,8 @@ def _unwrap_param_name_bundle(
     limits: ToolPayloadNormalizeLimits,
 ) -> tuple[dict[str, Any], str]:
     wrapper_keys = [key for key in payload if key != "tool"]
-    if len(wrapper_keys) != 1 or wrapper_keys[0] not in MODEL_WRAPPER_PARAM_KEYS:
+    tool = str(payload.get("tool") or "").strip()
+    if len(wrapper_keys) != 1 or (wrapper_keys[0] not in MODEL_WRAPPER_PARAM_KEYS and wrapper_keys[0] != tool):
         return payload, ""
     wrapper_key = wrapper_keys[0]
     wrapper_value = payload.get(wrapper_key)

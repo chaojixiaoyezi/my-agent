@@ -107,6 +107,7 @@ def _write_large_tool_output_artifact(root: Path) -> str:
             request_id="request-tool-ref",
             run_id="run-tool-ref",
             task_id="task-tool-ref",
+            parameters={"path": "/workspace/projects/alpha/README.md"},
         )
     )
     return str(record["artifact_ref"])
@@ -135,7 +136,9 @@ def test_compact_apply_and_resume_include_scoped_tool_output_artifact_refs(tmp_p
     assert tool_refs[0]["path"] == artifact_ref
     assert tool_refs[0]["tool"] == "read_file"
     assert tool_refs[0]["scoped_call_id"] == "run-tool-ref:1-1"
+    assert tool_refs[0]["source_path"] == "/workspace/projects/alpha/README.md"
     assert apply_result["work_state_snapshot"]["artifact_refs"][0]["path"] == artifact_ref
+    assert apply_result["work_state_snapshot"]["artifact_refs"][0]["source_path"] == "/workspace/projects/alpha/README.md"
     assert apply_result["work_state_snapshot"]["artifact_refs"][0]["kind"] == "tool_output"
     assert artifact_ref in resume["recommended_read_paths"]
     assert resume["artifact_read_hints"][0]["tool"] == "read_artifact"

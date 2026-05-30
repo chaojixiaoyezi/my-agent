@@ -5,12 +5,12 @@ from __future__ import annotations
 
 """work-state snapshot helpers for compact apply."""
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .compact_tool_output_refs import tool_output_artifact_refs
+from .compact_work_state_archive import source_work_state
 from .compact_work_state_sources import WorkStateFieldSourceRequest, build_work_state_field_sources
 from .schema import (
     RuntimeMemorySchemaOptions,
@@ -36,7 +36,7 @@ class WorkStateSnapshotRequest:
 # LLM: build_work_state_snapshot captures state signals for future manual resume consistency checks.
 # 函数用途: 生成 compact apply 的工作状态快照，固定目标、下一步、约束、引用和测试状态的可恢复字段。
 def build_work_state_snapshot(request: WorkStateSnapshotRequest) -> dict[str, Any]:
-    source_state = _source_work_state(request.restore_refs, request.plan["scope"])
+    source_state = source_work_state(request.restore_refs, request.plan["scope"])
     snapshot = _base_snapshot(request, source_state)
     snapshot["completeness"] = _work_state_completeness(snapshot, request.restore_refs)
     snapshot["missing_fields"] = _missing_fields(snapshot["completeness"])
@@ -71,7 +71,8 @@ def restore_refs_summary(restore_refs: dict[str, Any]) -> dict[str, int]:
 def _base_snapshot(request: WorkStateSnapshotRequest, source_state: dict[str, Any]) -> dict[str, Any]:
     field_sources = build_work_state_field_sources(WorkStateFieldSourceRequest(request.plan, source_state))
     goal = source_state["goal"] or field_sources.goal
-    next_actions = source_state["next_actions"] or field_sources.next_actions
+    progress_next = _task_progress_next_action(field_sources.task_progress)
+    next_actions = ([progress_next] if progress_next else []) or source_state["next_actions"] or field_sources.next_actions
     return {
         "version": COMPACT_WORK_STATE_SNAPSHOT_SCHEMA.version,
         "schema": runtime_memory_schema_payload(COMPACT_WORK_STATE_SNAPSHOT_SCHEMA),
@@ -94,166 +95,13 @@ def _base_snapshot(request: WorkStateSnapshotRequest, source_state: dict[str, An
         "refs": _work_state_refs(request.paths, request.restore_refs),
         "git_state": {"status": "not_captured", "changed_files": []},
         "latest_tests": field_sources.latest_tests,
+        "task_progress": field_sources.task_progress,
         "reserved": runtime_memory_reserved_fields(COMPACT_WORK_STATE_SNAPSHOT_SCHEMA),
     }
 
 
-# LLM: _source_work_state prefers authoritative snapshot files, then falls back to bounded run archives.
-# 函数用途: 从 restore refs 指向的 snapshot/hook/raw 文件提取目标和下一步，不猜测未记录的验收或约束。
-def _source_work_state(restore_refs: dict[str, Any], scope: dict[str, Any]) -> dict[str, Any]:
-    for ref in restore_refs["source_refs"]["snapshot_files"]:
-        payload = _read_json_dict(Path(ref["path"]))
-        candidate = _snapshot_work_state_candidate(payload)
-        if candidate:
-            return candidate
-    archive_state = _archive_work_state(restore_refs, scope)
-    if archive_state["goal"] or archive_state["next_actions"]:
-        return archive_state
-    return {"goal": "", "next_actions": [], "content_paths": [], "task_refs": []}
-
-
-# LLM: _snapshot_work_state_candidate ignores empty/generated snapshots before archive fallback.
-# 函数用途: 从权威 snapshot JSON 中提取目标、下一步和引用；没有有效工作状态时返回空字典。
-def _snapshot_work_state_candidate(payload: dict[str, Any]) -> dict[str, Any]:
-    if not payload:
-        return {}
-    candidate = {
-        "goal": _first_text(payload.get("user_intents")),
-        "next_actions": _text_list(payload.get("next_actions")),
-        "content_paths": _text_list(payload.get("content_paths")),
-        "task_refs": _text_list(payload.get("task_refs")),
-    }
-    if candidate["goal"] or candidate["content_paths"] or candidate["task_refs"]:
-        return candidate
-    return {}
-
-
-# LLM: _archive_work_state reads only restore_refs archive files to recover real-run goal and next action.
-# 函数用途: 当没有 snapshot JSON 文件时，从 hook recovery snapshot 或 raw 用户事件回填最小工作状态。
-def _archive_work_state(restore_refs: dict[str, Any], scope: dict[str, Any]) -> dict[str, Any]:
-    records = _archive_records(restore_refs, scope)
-    return {
-        "goal": _archive_goal(records),
-        "next_actions": _archive_next_actions(records),
-        "content_paths": _archive_texts(records, "content_paths"),
-        "task_refs": _archive_task_refs(records),
-    }
-
-
-# LLM: _archive_records keeps fallback reads scoped to compact restore refs instead of scanning workspace.
-# 函数用途: 读取 restore_refs 已登记的 raw/hook JSONL 文件，跳过损坏行并保持文件顺序。
-def _archive_records(restore_refs: dict[str, Any], scope: dict[str, Any]) -> list[dict[str, Any]]:
-    refs = restore_refs.get("source_refs", {}) if isinstance(restore_refs.get("source_refs"), dict) else {}
-    archive_refs = refs.get("archive_files", []) if isinstance(refs.get("archive_files"), list) else []
-    return [
-        record
-        for ref in archive_refs
-        for record in _read_jsonl_dicts(Path(str(ref.get("path", ""))))
-        if _record_matches_scope(record, scope)
-    ]
-
-
-# LLM: _record_matches_scope re-applies compact filters after opening shared raw/hook JSONL files.
-# 函数用途: restore refs 保存的是文件路径；读取文件内容时仍要按 session/request/run/task 过滤，防止串台。
-def _record_matches_scope(record: dict[str, Any], scope: dict[str, Any]) -> bool:
-    for key in ("session_id", "request_id", "run_id", "task_id"):
-        expected = str(scope.get(key) or "")
-        if expected and expected not in _record_scope_values(record, key):
-            return False
-    return True
-
-
-# LLM: _record_scope_values supports raw events and hook snapshots with nested turn_range ids.
-# 函数用途: 提取归档记录里可用于 scope 匹配的 id；raw 用顶层字段，snapshot 用 turn_range/dispatch_events。
-def _record_scope_values(record: dict[str, Any], key: str) -> set[str]:
-    values = {str(record.get(key) or "").strip()}
-    turn_range = record.get("turn_range")
-    if isinstance(turn_range, dict):
-        values.add(str(turn_range.get(key) or "").strip())
-    dispatch_events = record.get("dispatch_events")
-    if isinstance(dispatch_events, list):
-        values.update(str(item.get(key) or "").strip() for item in dispatch_events if isinstance(item, dict))
-    return {value for value in values if value}
-
-
-# LLM: _archive_goal prefers recovery hook user_intents, then raw user message previews.
-# 函数用途: 从真实 run 归档里提取用户目标，让 compact resume 不因缺 snapshot 文件丢失目标。
-def _archive_goal(records: list[dict[str, Any]]) -> str:
-    return _first_nonempty([_first_text(record.get("user_intents")) for record in records]) or _first_nonempty(
-        [_raw_user_text(record) for record in records]
-    )
-
-
-# LLM: _raw_user_text returns raw user message text without interpreting assistant output as task facts.
-# 函数用途: 从 raw archive 用户事件提取目标文本，非用户事件返回空字符串。
-def _raw_user_text(record: dict[str, Any]) -> str:
-    if str(record.get("speaker") or "") != "user":
-        return ""
-    return str(record.get("content") or record.get("content_preview") or "").strip()
-
-
-# LLM: _first_nonempty keeps archive fallback selectors flat enough for guardrail limits.
-# 函数用途: 返回字符串列表中的第一条非空值，避免字段提取函数出现深层嵌套。
-def _first_nonempty(values: list[str]) -> str:
-    return next((value for value in values if value), "")
-
-
-# LLM: _archive_next_actions prefers structured hook next_actions, then live assistant tool-round hints.
-# 函数用途: 从 hook recovery snapshot 或运行中 raw 事件回填下一步；不把普通助手最终回复当任务事实。
-def _archive_next_actions(records: list[dict[str, Any]]) -> list[str]:
-    for record in records:
-        items = _text_list(record.get("next_actions"))
-        if items:
-            return items
-    for record in reversed(records):
-        if str(record.get("action") or "") != "assistant_tool_round":
-            continue
-        hint = str(record.get("content") or record.get("content_preview") or "").strip()
-        if hint and not _looks_like_raw_tool_step(hint):
-            return [hint]
-    return []
-
-
-# LLM: _looks_like_raw_tool_step prevents a single tool call from becoming the task-level next step.
-# 函数用途: 压缩交接的下一步应是工作意图，不应把 `[TOOL_CALL] read_file...` 这种低层动作当路线图。
-def _looks_like_raw_tool_step(value: str) -> bool:
-    text = value.strip()
-    return text.startswith("[TOOL_CALL]") or "[/TOOL_CALL]" in text
-
-
-# LLM: _archive_texts collects list-like fields from archive records for bounded fact-source roots.
-# 函数用途: 提取 content_paths 等列表字段，供 work_state 后续扫描任务事实源使用。
-def _archive_texts(records: list[dict[str, Any]], key: str) -> list[str]:
-    return _dedupe([item for record in records for item in _text_list(record.get(key))])
-
-
-# LLM: _archive_task_refs combines hook task_refs with raw task/run ids for workspace fact-source lookup.
-# 函数用途: 收集真实 run 相关 task/run 标识，帮助后续查找 task/subagent fact files。
-def _archive_task_refs(records: list[dict[str, Any]]) -> list[str]:
-    values = [item for record in records for item in _text_list(record.get("task_refs"))]
-    for record in records:
-        values.extend(str(record.get(key) or "").strip() for key in ("task_id", "run_id") if record.get(key))
-    return _dedupe(values)
-
-
-# LLM: _read_jsonl_dicts is a tolerant reader for append-only raw/hook archive files.
-# 函数用途: 逐行读取 JSONL 对象，坏行按缺失处理，避免 compact apply 被旧归档中断。
-def _read_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    records: list[dict[str, Any]] = []
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    for line in lines:
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            records.append(payload)
-    return records
+def _task_progress_next_action(progress: dict[str, Any]) -> str:
+    return str(progress.get("next_action") or "").strip() if isinstance(progress, dict) else ""
 
 
 # LLM: _work_state_restore_refs keeps source path existence checks close to work-state capture.
@@ -321,41 +169,6 @@ def _source_quality(snapshot: dict[str, Any], restore_refs: dict[str, Any]) -> d
 def _all_source_paths_exist(restore_refs: dict[str, Any]) -> bool:
     paths = [item["path"] for group in restore_refs["source_refs"].values() for item in group]
     return all(Path(path).exists() for path in paths if path)
-
-
-# LLM: _read_json_dict is a best-effort reader for existing fact-source snapshots.
-# 函数用途: 读取 JSON 对象，失败时返回空 dict，避免 compact apply 因单个旧文件损坏而崩溃。
-def _read_json_dict(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-# LLM: _first_text extracts the first useful text field from a list-like snapshot field.
-# 函数用途: 从 snapshot 的 user_intents 等字段中提取第一条非空文本。
-def _first_text(value: Any) -> str:
-    items = _text_list(value)
-    return items[0] if items else ""
-
-
-# LLM: _text_list normalizes old snapshot list fields into short strings.
-# 函数用途: 将任意列表字段转成去空白字符串列表，避免 work_state 写入非文本对象。
-def _text_list(value: Any) -> list[str]:
-    if not isinstance(value, list | tuple):
-        return []
-    return [text for item in value if (text := str(item).strip())]
-
-
-# LLM: _dedupe preserves source order for recovered archive fields.
-# 函数用途: 对 hook/raw 回填字段去重，避免同一 task/run id 多次进入事实源扫描。
-def _dedupe(values: list[str]) -> list[str]:
-    result: list[str] = []
-    for value in values:
-        if value and value not in result:
-            result.append(value)
-    return result
 
 
 __all__ = [

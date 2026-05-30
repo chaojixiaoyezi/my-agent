@@ -6,8 +6,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from test_memory_compact import _workspace, _write_compact_fixture, _write_config
-
 from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.memory_archive.compact import MemoryCompactPlanOptions
 from agent_py_agent.agent.memory_archive.compact_apply import (
@@ -18,14 +16,19 @@ from agent_py_agent.agent.memory_archive.compact_resume import (
     MemoryCompactResumeOptions,
     build_memory_compact_resume,
 )
+from agent_py_agent.tests.memory_compact_support import (
+    workspace,
+    write_compact_fixture,
+    write_config,
+)
 
 
 # LLM: test_memory_fact_write_closes_compact_missing_fields verifies the semi-auto manual fact loop.
 # 函数用途: 先确认 compact resume 暴露缺失备注，再写入用户确认事实并重新 apply，确认 auto guard 继续放行。
 def test_memory_fact_write_closes_compact_missing_fields(tmp_path: Path, capsys) -> None:
-    config_path = _write_config(tmp_path)
-    root = _workspace(config_path)
-    _write_compact_fixture(root)
+    config_path = write_config(tmp_path)
+    root = workspace(config_path)
+    write_compact_fixture(root)
     first_apply = _apply_scoped_compact(root)
     parser = build_parser()
 

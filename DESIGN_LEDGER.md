@@ -2808,3 +2808,16 @@ def example(...):
 - `subagent_board` 增加 `running_seconds`、`seconds_since_progress` 和 `aggregation_readiness`。这些字段只用于父级观察和汇总前核对，不会触发新阻断。
 - 入口物化层支持 `target_coverage_contract`，closeout 报告会附 `target_coverage_status`，列出目标清单中已覆盖和缺失项。它是通用进度账本，默认 `should_block=false`，不把普通研究任务改成硬模板。
 - 验证链路：`test_prompting_builder.py`、`test_orchestration_board_payload.py`、`TestDispatchSubagentsTool`、`test_delivery_requirement_materializer.py`、`test_target_coverage_ledger.py` 通过。
+
+## 2026-05-30 Compact resume-focus and captured refs
+
+状态：已落地，focused 验证通过；真实长任务复验遇到 provider 429，需要按限流恢复继续
+
+摘要：
+- 真实长任务 compact 压力测试暴露：自动续接包虽然能触发多轮 compact/resume，但恢复提示过于“先读 compact 文件”，模型容易重新列目录、重新读恢复文件、重复派工，而不是接着做未完成部分。
+- 修复后，`compact_continue_packet` 新增 `resume_focus` 和 `work_state_snapshot.captured_refs`。`resume_focus.next_action` 是续接后优先做的下一步；`captured_refs` 汇总已读文件、已写文件和外置 artifact refs。
+- `Compact Auto Continuation` 注入块现在先展示 `Resume Focus` 和 `Already Captured Refs`，再展示 goal/phase/refs。规则从“先读推荐恢复文件”改为“先按 next_action 推进；缺事实、需要验证或引用坏了才读 recommended refs”。
+- tool-output artifact 索引新增 `parameters/source_input/source_path`，compact refs 会带出原始读写目标，避免模型只看见旧 artifact 编号后重新扫目录。
+- 真实复验 `compact-resume-focus-v4-20260530-165527` 已证明模型不再优先重读 handoff/work_state，而是继续派工和写 study_notes；但并发子代理触发 provider HTTP 429。网关短退避耗尽后现在归类为 `ProviderTransientError`，CLI 输出 `provider_transient` 可恢复提示，不再暴露裸 traceback。
+- 这不是新硬门。它不阻止模型继续，也不新增任务模板；只是把恢复包从“恢复资料清单”改成“接着干活的交接单”，减少长任务多次压缩后的重复劳动。
+- 验证链路：新增并通过 `test_compact_auto_continue_injection_prioritizes_resume_focus_and_captured_refs`、`test_compact_continue_packet_carries_task_state_refs_for_repeat_resume`、`test_compact_apply_and_resume_include_scoped_tool_output_artifact_refs`、`test_retryable_http_exhaustion_is_transient_error`、`test_cmd_run_reports_provider_transient`；复跑 compact/gateway/CLI focused tests 通过。

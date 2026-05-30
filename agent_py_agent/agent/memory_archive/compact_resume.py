@@ -247,13 +247,14 @@ def _handoff_summary_payload(artifacts: dict[str, Any]) -> dict[str, Any]:
 
 # LLM: _next_actions keeps manual resume from silently executing tools after context recovery.
 # 函数用途: 根据一致性结果给出下一步动作；这一步只建议，不自动运行命令或修改代码。
+# 新手说明: 这里要先让模型按 continue_packet.resume_focus 接着干活；compact 文件是备用证据，不是每次恢复都先重读的清单。
 def _next_actions(consistency: dict[str, Any]) -> list[str]:
     if not consistency["ok"]:
         return ["Stop automated work and inspect consistency_report before continuing."]
     return [
-        "Read compact_context, work_state_snapshot, restore_refs, and self_check before answering.",
-        "Compare goal, next_step, missing_fields, refs, and latest tests against the current task.",
-        "Continue manually only after the restored state matches the intended task.",
+        "Continue from continue_packet.resume_focus.next_action first.",
+        "Use continue_packet.work_state_snapshot.captured_refs to avoid repeating finished reads, writes, and dispatches.",
+        "Read compact refs only when the next action lacks facts, needs verification, or source refs look broken.",
     ]
 
 

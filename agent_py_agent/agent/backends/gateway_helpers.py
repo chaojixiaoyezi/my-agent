@@ -196,6 +196,8 @@ def _require_api_key(api_key: str) -> None:
 # 函数用途: 推进运行时HTTPerror的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
     detail = exc.read().decode("utf-8", "replace")
+    if int(getattr(exc, "code", 0) or 0) in _RETRYABLE_HTTP_STATUS_CODES:
+        return ProviderTransientError(f"HTTP {exc.code}: {detail}")
     return RuntimeError(f"HTTP {exc.code}: {detail}")
 
 

@@ -27,6 +27,7 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
         task_id=record.params.task_id,
         min_chars=_config_int(agent, "tool_output_externalize_min_chars"),
         preview_chars=_config_int(agent, "tool_output_preview_chars"),
+        parameters=record.payload,
     )
     output_record = externalize_tool_output_record(request)
     output_record.update(write_tool_output_fail_safe_checkpoint(request))
@@ -106,6 +107,8 @@ def _register_tool_result_artifacts(
             output_record["artifact_registry_refs"].append(registered.to_dict())
 
 
+# LLM: _existing_file_ref accepts only concrete local files for artifact registry hints.
+# 函数用途: 从工具结构化 ref 中提取已经存在的本地文件路径，URL 和空值不登记。
 def _existing_file_ref(value: object) -> Path | None:
     text = str(value or "").strip()
     if not text or "://" in text:
@@ -129,6 +132,8 @@ def _attach_run_scope(output_record: dict[str, object], agent: object, record: T
     _copy_text_fact(output_record, "agent_kind", scope.get("agent_kind"))
 
 
+# LLM: _scope_from_result prefers explicit result scope over thread-local guessing.
+# 函数用途: 从工具结果 envelope 中读取 run/task/depth 身份字段。
 def _scope_from_result(result: object) -> dict[str, object]:
     envelope = getattr(result, "result_envelope", None)
     if not isinstance(envelope, dict):
@@ -187,6 +192,8 @@ def _copy_text_fact(target: dict[str, object], key: str, value: object) -> None:
         target[key] = text
 
 
+# LLM: _int_value keeps archive depth parsing total and non-throwing.
+# 函数用途: 把可选数字字段转成 int，坏值按 0 处理。
 def _int_value(value: object) -> int:
     try:
         return int(value or 0)

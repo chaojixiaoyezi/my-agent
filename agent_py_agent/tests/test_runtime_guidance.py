@@ -95,6 +95,36 @@ def test_send_guidance_tool_writes_run_guidance(tmp_path) -> None:
     assert pending[0].priority == "high"
 
 
+def test_cli_guidance_send_writes_same_guidance_inbox(tmp_path, capsys) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from agent_py_agent.cli.guidance_commands import cmd_guidance_send
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    args = SimpleNamespace(
+        run_id="child-1",
+        thread_id="",
+        task_id="",
+        case_id="",
+        target_type="",
+        target_id="",
+        message="用户补充：先写草稿，不要一直只读。",
+        sender="cli_user",
+        priority="normal",
+        delivery="next_turn",
+        json=False,
+    )
+
+    with patch("agent_py_agent.cli.guidance_commands.make_agent", return_value=agent):
+        code = cmd_guidance_send(args)
+
+    assert code == 0
+    assert "已追加提示" in capsys.readouterr().out
+    pending = agent.conversation_store.pending_guidance("agent_run", "child-1")
+    assert pending[0].message == "用户补充：先写草稿，不要一直只读。"
+
+
 def test_tool_loop_injects_pending_guidance_and_marks_delivered(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     agent.conversation_store.append_guidance(

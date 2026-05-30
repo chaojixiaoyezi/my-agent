@@ -83,6 +83,7 @@ def apply_bundle_payload(
         "compaction_state": _compaction_state_summary(payload.get("compaction_state", {})),
         "restore_refs_summary": restore_refs_summary(restore_refs),
         "work_state_summary": work_state_summary(work_state),
+        "resume_focus": _resume_focus_summary(work_state),
         "main_context_bundle": compact_context_bundle_summary(payload.get("main_context_bundle", {})),
         "restore_steps": _restore_steps(),
         "content_preserved": True,
@@ -159,12 +160,30 @@ def _file_refs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # 函数用途: 返回使用 apply bundle 恢复上下文时必须遵守的核验顺序。
 def _restore_steps() -> list[str]:
     return [
-        "read post_compact_self_check and stop if ok is false",
-        "read work_state_snapshot and compare goal, next action, refs, and tests before continuing",
-        "read compact_context as the compact entrypoint",
-        "use restore_refs to verify raw/hook archives, snapshots, token ledgers, and task/run workspaces",
+        "continue from resume_focus.next_action or work_state_summary first",
+        "use compact_context, work_state_snapshot, restore_refs, or post_compact_self_check only when facts are missing, refs look broken, or verification is needed",
+        "use restore_refs to verify raw/hook archives, snapshots, token ledgers, and task/run workspaces when rebuilding context",
         "trust restored answers only after source refs still exist and match the requested scope",
     ]
+
+
+# LLM: _resume_focus_summary keeps apply bundles action-first for automatic continuation.
+# 函数用途: 从 work_state 提取续接优先动作，避免 apply bundle 指导模型先重读 compact 文件。
+def _resume_focus_summary(work_state: dict[str, Any]) -> dict[str, Any]:
+    actions = _string_list(work_state.get("next_actions"))
+    next_step = str(work_state.get("next_step") or "").strip()
+    return {
+        "next_action": actions[0] if actions else next_step,
+        "next_actions": actions,
+    }
+
+
+# LLM: _string_list normalizes optional work-state arrays for compact payloads.
+# 函数用途: 把 next_actions 等字段转成去空字符串列表，坏类型按空列表处理。
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list | tuple):
+        return []
+    return [text for item in value if (text := str(item).strip())]
 
 
 __all__ = ["apply_bundle_payload", "compact_apply_refs", "ledger_record", "restore_refs_payload"]

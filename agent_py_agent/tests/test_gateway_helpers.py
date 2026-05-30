@@ -143,6 +143,29 @@ class TestPostJson:
 
     @patch("agent_py_agent.agent.backends.gateway_helpers.time.sleep")
     @patch("urllib.request.urlopen")
+    def test_retryable_http_exhaustion_is_transient_error(self, mock_urlopen, mock_sleep):
+        """验证 429/529 重试耗尽后仍是 provider 临时错误，避免真实 run 只暴露 HTTP traceback。"""
+        from agent_py_agent.agent.backends.errors import ProviderTransientError
+        from agent_py_agent.agent.backends.gateway_helpers import post_json
+
+        def _rate_limit_error() -> urllib.error.HTTPError:
+            return urllib.error.HTTPError(
+                "https://api.example.com",
+                429,
+                "Too Many Requests",
+                {"Content-Type": "application/json"},
+                BytesIO(b'{"error":{"type":"rate_limit_error","message":"plan limited"}}'),
+            )
+
+        mock_urlopen.side_effect = [_rate_limit_error() for _ in range(4)]
+
+        with pytest.raises(ProviderTransientError, match="HTTP 429.*plan limited"):
+            post_json(_request())
+        assert mock_urlopen.call_count == 4
+        assert mock_sleep.call_count == 3
+
+    @patch("agent_py_agent.agent.backends.gateway_helpers.time.sleep")
+    @patch("urllib.request.urlopen")
     def test_timeout_does_not_retry_as_transient_disconnect(self, mock_urlopen, mock_sleep):
         """验证超时仍走 provider_timeout，不和断线重试混在一起。"""
         from agent_py_agent.agent.backends.errors import ProviderTimeoutError

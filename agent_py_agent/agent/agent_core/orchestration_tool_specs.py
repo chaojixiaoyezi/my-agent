@@ -86,6 +86,42 @@ def build_raise_event_spec() -> ToolSpec:
     )
 
 
+def build_task_progress_spec() -> ToolSpec:
+    return ToolSpec(
+        name="task_progress",
+        category="orchestration",
+        effect="mutating",
+        requires_idempotency=True,
+        description="记录或读取当前任务的进度清单，帮助长任务和 compact 后续接；它只是软账本，不代表验收通过。",
+        use_cases=[
+            "任务很长，需要记下哪些小块已完成、正在做、下一步是什么",
+            "任务要求覆盖多个对象，例如每个项目、每篇论文、每周数据、每个 API 或每个文件",
+            "compact 后要恢复当前代理自己的工作进度",
+            "父代理查看 tree 前，希望子代理有简短进度摘要",
+        ],
+        avoid_when=["只做一句普通回复、不需要跨轮保存进度时可以不用"],
+        keywords=["进度", "清单", "todo", "checkpoint", "继续做", "compact", "任务账本"],
+        parameters={
+            "action": "read 或 update；create/init/start/begin/set/save/record/write 会按 update 处理；不填默认 read",
+            "run_id": "可选。读取指定代理 run 的进度；更新默认写当前代理自己的 run",
+            "summary": "可选。当前整体进展一句话",
+            "next_action": "可选。下一步最应该做什么",
+            "items": "可选。进度项列表，每项可含 id/title/status/evidence/notes/next",
+            "coverage": "可选。覆盖账本，含 goal/dimensions/targets；用于记录哪些对象已覆盖到哪些检查点；也可先写一句当前覆盖进度。",
+            "coverage_targets": "可选。coverage.targets 的简写列表，每项可含 id/name/title/status/checks/expected_fields/fields/fields_needed/missing_fields/evidence/notes/next；也可写成“对象名: 字段A,字段B”。",
+        },
+        parameter_details={
+            "items": "这是开放清单，不是业务模板。status 可写 pending/in_progress/done/skipped/blocked，也可写更适合当前任务的短状态。",
+            "coverage": "这是开放世界覆盖清单，不限定对象类型。targets 可以是项目、论文、API、日志源、文件、模块或任何当前任务对象；checks 的键由当前任务自己定义；如果你只知道要覆盖哪些字段，也可先填 expected_fields/fields_needed。",
+        },
+        examples=[
+            '{"tool":"task_progress","action":"update","summary":"已读完两个项目","next_action":"继续读第三个项目","items":[{"id":"project-a","title":"阅读项目A","status":"done"}]}',
+            '{"tool":"task_progress","action":"update","coverage":{"goal":"每个项目都要读 README、分析模块、写进报告","dimensions":["读 README","分析模块","写进报告"],"targets":[{"id":"project-a","checks":{"读 README":"done","分析模块":"pending"}}]}}',
+            '{"tool":"task_progress","action":"read"}',
+        ],
+    )
+
+
 # LLM: build_dispatch_subagents_spec 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 构建子代理spec所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def build_dispatch_subagents_spec() -> ToolSpec:

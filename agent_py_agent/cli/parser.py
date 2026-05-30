@@ -28,6 +28,7 @@ from .commands.gateway import (
     add_logs_subcommands,
     add_scenario_subcommand,
 )
+from .commands.guidance import add_guidance_subcommand
 from .commands.learning import add_learning_subcommand
 from .commands.operations import add_operations_subcommands
 from .commands.subagents import add_subagents_subcommands
@@ -70,6 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_local_store_subcommands(subparsers)
     add_logs_subcommands(subparsers)
     add_learning_subcommand(subparsers)
+    add_guidance_subcommand(subparsers)
     add_subagents_subcommands(subparsers)
     add_daemon_subcommand(subparsers)
     add_scenario_subcommand(subparsers)

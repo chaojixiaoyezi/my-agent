@@ -4,12 +4,20 @@
 from __future__ import annotations
 
 from agent_py_agent.agent.agent_core._runtime_params import FinalizeContext
+from agent_py_agent.agent.agent_core.compact_auto_continuation import (
+    build_compact_auto_continue_injection,
+)
 from agent_py_agent.agent.agent_core.finalization_compact_auto import (
     _should_return_after_continuation,
 )
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.memory_archive.compact_continue_packet import (
+    CompactContinuePacketRequest,
+    build_compact_continue_packet,
+)
+from agent_py_agent.cli.local_commands import _default_run_recovery_next_actions
 
 
 class CaptureBackend:
@@ -181,7 +189,7 @@ def test_run_auto_compact_apply_continues_with_home_entries_and_packet(tmp_path)
     assert "# Home Entry: USER.md" in second_prompt
     assert "# Home Entry: memory.md" in second_prompt
     assert second_prompt.index("# Home Entry: AGENTS.md") < second_prompt.index("# Compact Auto Continuation")
-    assert "continue from compact next_step" in second_prompt
+    assert "继续当前任务的未完成部分" in second_prompt
     assert "Do not redo completed work" in second_prompt
 
 
@@ -236,6 +244,113 @@ def test_run_auto_compact_apply_can_repeat_when_continuation_makes_tool_progress
     assert result.memory_compact_auto_continued is True
     assert result.memory_compact_auto_continuation_depth == 2
     assert (tmp_path / "outputs" / "compact-repeat.txt").read_text(encoding="utf-8") == "继续后写入一次进展。"
+
+
+def test_compact_auto_continue_injection_prioritizes_resume_focus_and_captured_refs() -> None:
+    packet = {
+        "apply_id": "apply-1",
+        "continue_mode": "automated_guarded",
+        "guard": {"status": "allowed"},
+        "next_actions": ["把已有研究笔记合并进最终报告，不要重新派相同调研子代理。"],
+        "work_state_snapshot": {
+            "goal": "整理多个项目架构报告",
+            "current_phase": "compact_apply",
+            "next_step": "合并已有研究笔记",
+            "changed_files": ["outputs/final-report.md"],
+            "read_files": ["notes/openclaw.md", "notes/hermes.md"],
+        },
+        "artifact_read_hints": [
+            {"artifact_ref": "run-1:tool-2", "fallback_path": "artifacts/search-result.json"}
+        ],
+        "recommended_read_paths": ["memory_archive/compact_applies/apply-1.work_state_snapshot.json"],
+    }
+
+    rendered = build_compact_auto_continue_injection(packet)
+
+    assert "## Resume Focus" in rendered
+    assert "把已有研究笔记合并进最终报告" in rendered
+    assert "## Already Captured Refs" in rendered
+    assert "outputs/final-report.md" in rendered
+    assert "notes/openclaw.md" in rendered
+    assert "run-1:tool-2" in rendered
+    assert "不要先重读 compact 文件" in rendered
+    assert "## Recommended Read Paths" not in rendered
+    assert "memory_archive/compact_applies/apply-1.work_state_snapshot.json" not in rendered
+
+
+def test_compact_continue_packet_carries_task_state_refs_for_repeat_resume() -> None:
+    packet = build_compact_continue_packet(
+        CompactContinuePacketRequest(
+            metadata={"apply_id": "apply-refs", "plan_id": "plan-refs"},
+            work_state={
+                "goal": "整理多个项目架构报告",
+                "phase": "compact_apply",
+                "next_step": "合并已有研究笔记",
+                "next_actions": ["先合并已有笔记，再补缺口。"],
+                "changed_files": ["outputs/final-report.md"],
+                "read_files": ["notes/openclaw.md"],
+                "artifact_refs": [
+                    {
+                        "kind": "tool_output",
+                        "path": "artifacts/search-result.json",
+                        "tool": "web_search",
+                        "scoped_call_id": "run-1:tool-2",
+                    }
+                ],
+            },
+            consistency={"status": "ok"},
+            action_guard={"allowed_to_continue": True, "status": "allowed"},
+            handoff={},
+            recommended_read_paths=["memory_archive/compact_applies/apply-refs.work_state_snapshot.json"],
+            next_actions=["先合并已有笔记，再补缺口。"],
+            subagent_owner_refs={},
+            main_context_bundle={},
+        )
+    )
+
+    focus = packet["resume_focus"]
+    refs = packet["work_state_snapshot"]["captured_refs"]
+
+    assert focus["next_action"] == "先合并已有笔记，再补缺口。"
+    assert "outputs/final-report.md" in refs["changed_files"]
+    assert "notes/openclaw.md" in refs["read_files"]
+    assert refs["artifact_refs"][0]["artifact_ref"] == "run-1:tool-2"
+
+
+def test_compact_continue_packet_ignores_reader_first_recovery_actions() -> None:
+    packet = build_compact_continue_packet(
+        CompactContinuePacketRequest(
+            metadata={"apply_id": "apply-reader-first", "plan_id": "plan-reader-first"},
+            work_state={
+                "goal": "整理多个项目架构报告",
+                "phase": "compact_apply",
+                "next_step": "合并已有研究笔记",
+                "next_actions": ["如需恢复本次单轮 run，先查看 memory-resume 和 LocalStore 记录。"],
+                "changed_files": [],
+                "read_files": ["notes/openclaw.md"],
+                "artifact_refs": [],
+            },
+            consistency={"status": "ok"},
+            action_guard={"allowed_to_continue": True, "status": "allowed"},
+            handoff={},
+            recommended_read_paths=["memory_archive/compact_applies/apply.work_state_snapshot.json"],
+            next_actions=["如需恢复本次单轮 run，先查看 memory-resume 和 LocalStore 记录。"],
+            subagent_owner_refs={},
+            main_context_bundle={},
+        )
+    )
+
+    assert packet["resume_focus"]["next_action"] == "合并已有研究笔记"
+    assert all("memory-resume" not in item for item in packet["resume_focus"]["next_actions"])
+
+
+def test_default_run_recovery_next_actions_are_action_first() -> None:
+    actions = _default_run_recovery_next_actions()
+
+    assert actions
+    assert "继续当前用户请求" in actions[0]
+    assert all("memory-resume" not in action for action in actions)
+    assert all("LocalStore" not in action for action in actions)
 
 
 def test_run_auto_compact_apply_continues_with_optional_work_notes_missing(tmp_path):

@@ -5,16 +5,6 @@ from pathlib import Path
 
 import agent_py_agent.agent.memory_archive.compact_apply as compact_apply_module
 from agent_py_agent.__main__ import build_parser
-from agent_py_agent.agent.memory_archive import (
-    RUNTIME_MEMORY_SCHEMA_VERSION,
-    CompressionSnapshot,
-    RawMemoryEvent,
-    TurnTokenUsage,
-    append_raw_event,
-    append_session_token_usage,
-    append_snapshot,
-    write_compression_snapshot_file,
-)
 from agent_py_agent.agent.memory_archive.compact import (
     MemoryCompactPlanOptions,
     build_memory_compact_plan,
@@ -23,6 +13,7 @@ from agent_py_agent.agent.memory_archive.compact_apply import (
     MemoryCompactApplyOptions,
     apply_memory_compact,
 )
+from agent_py_agent.agent.memory_archive.compact_apply_payloads import apply_bundle_payload
 from agent_py_agent.agent.memory_archive.compact_resume import (
     MemoryCompactResumeOptions,
     build_memory_compact_resume,
@@ -31,107 +22,23 @@ from agent_py_agent.agent.memory_archive.compact_suggest import (
     MemoryCompactSuggestOptions,
     build_memory_compact_suggestion,
 )
-
-
-def _write_config(tmp_path: Path) -> Path:
-    config_path = tmp_path / "agent_config.yaml"
-    config_path.write_text(
-        'workspace_root: "workspace"\n'
-        'model_backend: "echo"\n'
-        'subagent_workspace: "subagents"\n'
-        'local_store_path: "local_store/local.db"\n'
-        'local_store_files_dir: "local_store/files"\n'
-        'local_store_events_path: "local_store/events.jsonl"\n',
-        encoding="utf-8",
-    )
-    return config_path
-
-
-def _workspace(config_path: Path) -> Path:
-    return config_path.parent / "workspace"
-
-
-def _write_compact_fixture(root: Path) -> None:
-    append_raw_event(root, _compact_raw_event())
-    snapshot = _compact_snapshot()
-    append_snapshot(root, snapshot)
-    write_compression_snapshot_file(root, snapshot)
-    _append_compact_token_usage(root)
-
-
-# LLM: _write_real_run_archive_fixture simulates run --save archives without authoritative snapshot files.
-# 函数用途: 写入真实 run 风格的 raw/hook/token 数据，验证 compact apply 能从 hook recovery 回填状态。
-def _write_real_run_archive_fixture(root: Path) -> None:
-    append_raw_event(root, _compact_raw_event())
-    append_snapshot(root, _compact_snapshot())
-    _append_compact_token_usage(root)
-
-
-def _compact_raw_event() -> RawMemoryEvent:
-    return RawMemoryEvent(
-        event_id="raw-compact-1",
-        session_id="session-compact",
-        request_id="request-compact",
-        run_id="run-compact",
-        task_id="run-compact",
-        speaker="user",
-        target="assistant",
-        action="message",
-        status="ok",
-        content_preview="需要自动 compact dry-run 计划",
-        source="run",
-        archive_level=2,
-        created_at="2026-05-06T08:00:00+00:00",
-    )
-
-
-def _compact_snapshot() -> CompressionSnapshot:
-    return CompressionSnapshot(
-        snapshot_id="snapshot-compact-1",
-        session_id="session-compact",
-        compression_id="compression-compact",
-        turn_range={
-            "start": 1,
-            "end": 1,
-            "request_id": "request-compact",
-            "run_id": "run-compact",
-            "task_id": "run-compact",
-        },
-        user_intents=["需要自动 compact dry-run 计划"],
-        assistant_actions=["准备扫描归档、snapshot 和 token ledger。"],
-        dispatch_events=[
-            {
-                "source": "run",
-                "request_id": "request-compact",
-                "run_id": "run-compact",
-                "task_id": "run-compact",
-                "status": "ok",
-            }
-        ],
-        task_refs=["run-compact"],
-        next_actions=["先看 dry-run，再决定是否启用 apply。"],
-        archive_level=2,
-        created_at="2026-05-06T08:01:00+00:00",
-    )
-
-
-def _append_compact_token_usage(root: Path) -> None:
-    append_session_token_usage(
-        root,
-        usage=TurnTokenUsage(
-            session_id="session-compact",
-            turn_id="turn-1",
-            input_tokens=100,
-            output_tokens=20,
-            tool_tokens=5,
-            created_at="2026-05-06T08:02:00+00:00",
-        ),
-    )
+from agent_py_agent.tests.memory_compact_support import (
+    assert_apply_ids_match,
+    assert_apply_preserved_sources,
+    assert_schema_v2,
+    check_names,
+    failed_self_check,
+    load_apply_artifacts,
+    workspace,
+    write_compact_fixture,
+    write_config,
+    write_real_run_archive_fixture,
+)
 
 
 def test_build_memory_compact_plan_is_read_only_summary(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
 
     plan = build_memory_compact_plan(
         root,
@@ -150,9 +57,48 @@ def test_build_memory_compact_plan_is_read_only_summary(tmp_path: Path) -> None:
     assert plan["estimated_compactable_bytes"] == plan["archive"]["total_bytes"] + plan["tokens"]["total_bytes"]
 
 
+def test_apply_bundle_restore_steps_are_action_first(tmp_path: Path) -> None:
+    refs = {
+        "context_md": tmp_path / "apply.md",
+        "compaction_state_json": tmp_path / "state.json",
+        "handoff_summary_md": tmp_path / "handoff.md",
+        "metadata_json": tmp_path / "metadata.json",
+        "apply_bundle_json": tmp_path / "bundle.json",
+        "restore_refs_json": tmp_path / "restore.json",
+        "work_state_snapshot_json": tmp_path / "work.json",
+        "self_check_json": tmp_path / "self_check.json",
+        "failed_self_check_json": tmp_path / "self_check_failed.json",
+        "ledger_jsonl": tmp_path / "ledger.jsonl",
+    }
+    payload = {
+        "event_id": "event-action-first",
+        "apply_id": "apply-action-first",
+        "plan_id": "plan-action-first",
+        "compact_status": "applied_non_destructive",
+        "workspace_root": str(tmp_path),
+        "scope": {},
+        "lineage": {},
+        "refs": {},
+    }
+    restore_refs = {"source_refs": {"archive_files": [], "snapshot_files": [], "token_ledgers": []}}
+    work_state = {
+        "goal": "整理多个项目架构报告",
+        "next_step": "继续补齐未看项目并写报告",
+        "next_actions": ["继续补齐未看项目并写报告"],
+        "missing_fields": [],
+        "source_quality": {},
+    }
+
+    bundle = apply_bundle_payload(payload, restore_refs, work_state, refs)
+
+    assert bundle["restore_steps"]
+    assert "continue" in bundle["restore_steps"][0].lower() or "继续" in bundle["restore_steps"][0]
+    assert "read compact_context as the compact entrypoint" not in bundle["restore_steps"]
+
+
 def test_memory_compact_cli_outputs_json_plan(tmp_path: Path, capsys) -> None:
-    config_path = _write_config(tmp_path)
-    _write_compact_fixture(_workspace(config_path))
+    config_path = write_config(tmp_path)
+    write_compact_fixture(workspace(config_path))
     parser = build_parser()
 
     args = parser.parse_args(
@@ -180,7 +126,7 @@ def test_memory_compact_cli_outputs_json_plan(tmp_path: Path, capsys) -> None:
 
 def test_memory_compact_plan_reports_invalid_manifests(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
     (root / "memory_archive" / "snapshots" / "bad.json").write_text("{bad", encoding="utf-8")
     (root / "memory_archive" / "tokens" / "bad.json").write_text("{bad", encoding="utf-8")
 
@@ -194,7 +140,7 @@ def test_memory_compact_plan_reports_invalid_manifests(tmp_path: Path) -> None:
 
 def test_apply_memory_compact_writes_non_destructive_artifacts(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
 
     result = apply_memory_compact(
         root,
@@ -203,16 +149,16 @@ def test_apply_memory_compact_writes_non_destructive_artifacts(tmp_path: Path) -
         ),
     )
 
-    artifacts = _load_apply_artifacts(result)
+    artifacts = load_apply_artifacts(result)
     assert result["mode"] == "apply"
     _assert_apply_artifact_schemas(result, artifacts)
     _assert_successful_apply_payload(result, artifacts)
-    _assert_apply_preserved_sources(root)
+    assert_apply_preserved_sources(root)
 
 
 def test_memory_compact_apply_reads_hook_recovery_state_without_snapshot_file(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_real_run_archive_fixture(root)
+    write_real_run_archive_fixture(root)
 
     result = apply_memory_compact(
         root,
@@ -248,21 +194,6 @@ def test_memory_compact_apply_reads_hook_recovery_state_without_snapshot_file(tm
     assert auto_resume["action_guard"]["missing_fields"] == ["acceptance", "constraints", "latest_tests"]
 
 
-# LLM: _load_apply_artifacts keeps compact apply tests focused on behavior instead of path-reading boilerplate.
-# 函数用途: 按 result refs 读取 apply bundle、restore refs、work state、self-check 和最后一条 ledger。
-def _load_apply_artifacts(result: dict[str, object]) -> dict[str, object]:
-    refs = result["refs"]
-    assert isinstance(refs, dict)
-    ledger_lines = Path(str(refs["apply_ledger"])).read_text(encoding="utf-8").splitlines()
-    return {
-        "apply_bundle": json.loads(Path(str(refs["apply_bundle"])).read_text(encoding="utf-8")),
-        "restore_refs": json.loads(Path(str(refs["restore_refs"])).read_text(encoding="utf-8")),
-        "work_state": json.loads(Path(str(refs["work_state_snapshot"])).read_text(encoding="utf-8")),
-        "self_check": json.loads(Path(str(refs["post_compact_self_check"])).read_text(encoding="utf-8")),
-        "ledger_record": json.loads(ledger_lines[-1]),
-    }
-
-
 # LLM: _assert_apply_artifact_schemas verifies all manual compact apply files share schema v2 and IDs.
 # 函数用途: 校验 apply 相关 JSON 产物的 schema、apply_id 和 plan_id 一致。
 def _assert_apply_artifact_schemas(result: dict[str, object], artifacts: dict[str, object]) -> None:
@@ -270,12 +201,12 @@ def _assert_apply_artifact_schemas(result: dict[str, object], artifacts: dict[st
     restore_refs = artifacts["restore_refs"]
     work_state = artifacts["work_state"]
     self_check = artifacts["self_check"]
-    _assert_schema_v2(result, "compact_apply")
-    _assert_schema_v2(apply_bundle, "compact_apply_bundle")
-    _assert_schema_v2(restore_refs, "compact_apply_restore_refs")
-    _assert_schema_v2(work_state, "compact_work_state_snapshot")
-    _assert_schema_v2(self_check, "compact_apply_self_check")
-    _assert_apply_ids_match(result, apply_bundle, restore_refs, work_state, self_check)
+    assert_schema_v2(result, "compact_apply")
+    assert_schema_v2(apply_bundle, "compact_apply_bundle")
+    assert_schema_v2(restore_refs, "compact_apply_restore_refs")
+    assert_schema_v2(work_state, "compact_work_state_snapshot")
+    assert_schema_v2(self_check, "compact_apply_self_check")
+    assert_apply_ids_match(result, apply_bundle, restore_refs, work_state, self_check)
 
 
 # LLM: _assert_successful_apply_payload captures the Step 1 manual apply contract in one readable place.
@@ -305,28 +236,21 @@ def _assert_successful_apply_payload(result: dict[str, object], artifacts: dict[
     assert work_state["next_step"] == "先看 dry-run，再决定是否启用 apply。"
     assert work_state["missing_fields"] == ["acceptance", "constraints", "latest_tests"]
     assert work_state["restore_refs"]["all_source_paths_exist"] is True
-    assert "work_state_snapshot_written" in _check_names(self_check)
-    assert "restore_refs_exist" in _check_names(self_check)
-    assert "apply_ids_consistent" in _check_names(self_check)
-    assert "artifact_refs_valid" in _check_names(self_check)
-    assert "latest_tests_recorded" in _check_names(self_check)
+    assert "work_state_snapshot_written" in check_names(self_check)
+    assert "restore_refs_exist" in check_names(self_check)
+    assert "apply_ids_consistent" in check_names(self_check)
+    assert "artifact_refs_valid" in check_names(self_check)
+    assert "latest_tests_recorded" in check_names(self_check)
     assert self_check["ok"] is True
-    _assert_schema_v2(ledger_record, "compact_apply_ledger")
+    assert_schema_v2(ledger_record, "compact_apply_ledger")
     assert ledger_record["event_id"] == result["event_id"]
     assert ledger_record["apply_id"] == result["apply_id"]
     assert ledger_record["plan_id"] == result["plan_id"]
 
 
-# LLM: _assert_apply_preserved_sources proves manual compact apply did not delete or rewrite source families.
-# 函数用途: 校验 raw memory 和 snapshot 源文件仍然存在，保证 apply 仍是非破坏性第一片。
-def _assert_apply_preserved_sources(root: Path) -> None:
-    assert (root / "memory" / "raw" / "2026-05-06.jsonl").exists()
-    assert (root / "memory_archive" / "snapshots" / "2026-05-06--snapshot-compact-1.json").exists()
-
-
 def test_apply_memory_compact_uses_stable_plan_id_and_unique_apply_id(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
     monkeypatch.setattr(compact_apply_module, "_utc_now", lambda: "2026-05-07T08:00:00+00:00")
 
     first = apply_memory_compact(
@@ -357,8 +281,8 @@ def test_apply_memory_compact_uses_stable_plan_id_and_unique_apply_id(tmp_path: 
 
 def test_apply_memory_compact_records_self_check_failure_without_rewriting_sources(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
-    monkeypatch.setattr(compact_apply_module, "_self_check_payload", _failed_self_check)
+    write_compact_fixture(root)
+    monkeypatch.setattr(compact_apply_module, "_self_check_payload", failed_self_check)
 
     result = apply_memory_compact(
         root,
@@ -372,7 +296,7 @@ def test_apply_memory_compact_records_self_check_failure_without_rewriting_sourc
 
     assert result["ok"] is False
     assert result["compact_status"] == "blocked_self_check_failed"
-    _assert_schema_v2(failure, "compact_apply_self_check_failure")
+    assert_schema_v2(failure, "compact_apply_self_check_failure")
     assert failure["apply_id"] == result["apply_id"]
     assert failure["plan_id"] == result["plan_id"]
     assert failure["failed_checks"][0]["name"] == "forced_failure"
@@ -383,8 +307,8 @@ def test_apply_memory_compact_records_self_check_failure_without_rewriting_sourc
 
 
 def test_memory_compact_cli_apply_outputs_json_result(tmp_path: Path, capsys) -> None:
-    config_path = _write_config(tmp_path)
-    _write_compact_fixture(_workspace(config_path))
+    config_path = write_config(tmp_path)
+    write_compact_fixture(workspace(config_path))
     parser = build_parser()
 
     args = parser.parse_args(
@@ -414,7 +338,7 @@ def test_memory_compact_cli_apply_outputs_json_result(tmp_path: Path, capsys) ->
 
 def test_memory_resume_from_compact_builds_manual_context(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
     apply_result = apply_memory_compact(
         root,
         MemoryCompactApplyOptions(
@@ -433,12 +357,12 @@ def test_memory_resume_from_compact_builds_manual_context(tmp_path: Path) -> Non
 
     assert resume["ok"] is True
     assert resume["mode"] == "resume_from_compact"
-    _assert_schema_v2(resume, "compact_resume")
-    _assert_schema_v2(resume["consistency_report"], "compact_resume_consistency_report")
+    assert_schema_v2(resume, "compact_resume")
+    assert_schema_v2(resume["consistency_report"], "compact_resume_consistency_report")
     assert resume["apply_id"] == apply_result["apply_id"]
     assert resume["work_state"]["goal"] == "需要自动 compact dry-run 计划"
     assert resume["consistency_report"]["status"] == "ok"
-    _assert_schema_v2(resume["action_guard"], "compact_action_guard")
+    assert_schema_v2(resume["action_guard"], "compact_action_guard")
     assert resume["action_guard"]["status"] == "requires_user_confirmation"
     assert resume["action_guard"]["allowed_to_continue"] is False
     assert resume["owner"] == {"owner_type": "subagent_session", "owner_id": "run-compact"}
@@ -450,7 +374,7 @@ def test_memory_resume_from_compact_builds_manual_context(tmp_path: Path) -> Non
 
 def test_memory_resume_from_compact_auto_guard_allows_optional_notes_missing(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
     apply_result = apply_memory_compact(
         root,
         MemoryCompactApplyOptions(
@@ -471,9 +395,9 @@ def test_memory_resume_from_compact_auto_guard_allows_optional_notes_missing(tmp
 
 
 def test_memory_resume_from_compact_cli_outputs_context_only(tmp_path: Path, capsys) -> None:
-    config_path = _write_config(tmp_path)
-    root = _workspace(config_path)
-    _write_compact_fixture(root)
+    config_path = write_config(tmp_path)
+    root = workspace(config_path)
+    write_compact_fixture(root)
     apply_result = apply_memory_compact(
         root,
         MemoryCompactApplyOptions(
@@ -506,7 +430,7 @@ def test_memory_resume_from_compact_cli_outputs_context_only(tmp_path: Path, cap
 # 函数用途: 先确认 compact resume 会暴露缺失备注，再写入用户确认事实并重新 apply，确认 auto guard 仍放行。
 def test_memory_compact_suggestion_prompts_without_applying(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
 
     suggestion = build_memory_compact_suggestion(
         root,
@@ -528,46 +452,3 @@ def test_memory_compact_suggestion_prompts_without_applying(tmp_path: Path) -> N
     assert suggestion["token_budget"]["ratio"] == 0.8
     assert suggestion["candidate_counts"]["archive_records"] == 2
     assert suggestion["recommended_commands"][0].startswith("my-agent memory-compact --session-id session-compact")
-
-
-# LLM: _assert_schema_v2 keeps compact apply metadata, ledger, and self-check on the shared v2 contract.
-# 函数用途: 校验 compact apply 相关记录的 schema 名称、版本和 reserved 扩展槽。
-def _assert_schema_v2(record: dict[str, object], name: str) -> None:
-    assert record["version"] == RUNTIME_MEMORY_SCHEMA_VERSION
-    assert record["schema"]["name"] == name
-    assert record["reserved"]["schema_name"] == name
-    assert record["reserved"]["schema_version"] == RUNTIME_MEMORY_SCHEMA_VERSION
-    assert set(record["reserved"]) >= {"extensions", "compat", "future"}
-
-
-# LLM: _assert_apply_ids_match keeps compact apply artifacts tied to one concrete apply attempt.
-# 函数用途: 校验 metadata、apply bundle、restore refs、work state 和 self-check 的 apply_id/plan_id 一致。
-def _assert_apply_ids_match(result: dict[str, object], *records: dict[str, object]) -> None:
-    for record in records:
-        assert record["apply_id"] == result["apply_id"]
-        assert record["plan_id"] == result["plan_id"]
-
-
-# LLM: _check_names extracts self-check names for focused assertions.
-# 函数用途: 从 self-check payload 中提取检查名集合。
-def _check_names(self_check: dict[str, object]) -> set[str]:
-    return {str(item["name"]) for item in self_check["checks"]}
-
-
-# LLM: _failed_self_check simulates a hard post-apply validation failure without touching production files.
-# 函数用途: 为 self-check failure 测试返回一个 v2 自检失败 payload，验证 apply 会阻断而不是改写事实源。
-def _failed_self_check(
-    plan: dict[str, object], paths: dict[str, Path], now: str, work_state: dict[str, object]
-) -> dict[str, object]:
-    schema = compact_apply_module.COMPACT_SELF_CHECK_SCHEMA
-    return {
-        "version": RUNTIME_MEMORY_SCHEMA_VERSION,
-        "schema": compact_apply_module.runtime_memory_schema_payload(schema),
-        "ok": False,
-        "apply_id": work_state["apply_id"],
-        "plan_id": work_state["plan_id"],
-        "event_type": "post_compact_self_check",
-        "checks": [{"name": "forced_failure", "ok": False, "severity": "hard"}],
-        "created_at": now,
-        "reserved": compact_apply_module.runtime_memory_reserved_fields(schema),
-    }

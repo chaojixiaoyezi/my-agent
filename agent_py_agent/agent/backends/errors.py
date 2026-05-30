@@ -41,6 +41,18 @@ def provider_timeout_report(exc: BaseException, *, timeout_seconds: object = "")
     )
 
 
+# LLM: provider_transient_report renders model-provider flakes as recoverable runtime state.
+# 函数用途: 给 CLI 或父级恢复报告生成统一临时失败说明，尤其是 429/529/断线，不让用户只看到 Python 堆栈。
+def provider_transient_report(exc: BaseException) -> str:
+    return (
+        "[provider_transient]\n"
+        "模型接口临时不可用或被限流，本次 run 已停止当前请求。\n"
+        f"error={exc}\n"
+        "建议下一步：稍后重试，或先查看已写入的子代理状态、产物和 memory archive；"
+        "已完成的工作不要重跑，继续未完成部分即可。"
+    )
+
+
 # LLM: _timeout_text keeps optional timeout metadata readable without forcing every caller to pass it.
 # 函数用途: 把 request_timeout 配置渲染成短文本；缺失时保持文案简洁。
 def _timeout_text(timeout_seconds: object) -> str:

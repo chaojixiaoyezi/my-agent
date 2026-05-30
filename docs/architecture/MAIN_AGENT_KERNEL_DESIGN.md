@@ -64,6 +64,12 @@
 
    `ToolLoopService`（工具循环服务）把 prompt 发给模型。如果模型要调用工具，就执行工具，再把工具结果放回模型上下文，直到模型给最终回答或达到工具循环边界。
 
+   长任务可以调用 `task_progress` 记录自己的软进度账本。这个账本不是验收器，也不会卡住任务；它只保存当前 run 的清单、摘要和下一步。父代理看 `inspect_agent_tree` 时会看到每个子/孙代理的进度摘要，compact 后当前代理也会优先看到自己的进度账本。
+
+   如果任务要求覆盖多个对象，例如“每个项目”“每篇论文”“每周数据”“每个 API”“每个文件”，同一个 `task_progress` 也可以写 `coverage` 覆盖账本。它记录目标对象、当前任务自定义的检查点、证据和缺口；主代理、子代理、孙代理都复用同一结构。coverage 不是专项模板，也不参与硬验收，只是让长任务和多轮 compact 后还能知道哪些对象没覆盖完整。
+
+   运行中人类或父代理可以通过 `send_guidance` 或 CLI `guidance-send` 给某个 run/thread/task/case 追加自然语言提示。提示只进入下一轮 prompt，不会直接 dispatch、closeout 或修改任务状态。
+
 6. 收尾保存。
 
    `FinalizationService`（收尾服务）负责：
@@ -235,7 +241,7 @@ agent_py_agent/agent/contracts/
 - 显式命名的小傻妞现在把名字当作结构化身份；默认泛名仍用 goal/write-root 等字段区分。这避免“同一个小傻妞目标文字稍微变了就重复创建”，也避免默认 worker 把不同任务误合并。
 - `ToolExecutionResult` 现在会在失败时自动带 `error_code`、`error_category`、`retryable`、`recommended_action`、`recovery_hint`。typed tool result envelope 也同步这些字段；这只是恢复事实，不改变工具是否允许执行。
 - `tool_protocol_v2` 已接入 registry result envelope：每次工具执行会同步一份 `schema=tool_protocol.v2` 的结构化结果，包含 operation id、idempotency key、error taxonomy、artifact refs 和 output preview。机器事实读这个 envelope，不再从工具输出自然语言里猜。
-- `model_call_ledger` 已接入公共模型调用路径：每次 `backend.generate` 会记录 started、first_token、finished 或 timeout。动态超时预算由结构化输入 token 和首 token 观测生成；provider wall timeout 会抛 `ProviderTimeoutError`，让恢复层知道这是模型上游/请求超时，不是工具失败或验收失败。
+- `model_call_ledger` 已接入公共模型调用路径：每次 `backend.generate` 会记录 started、first_token、finished 或 timeout。动态超时预算由结构化输入 token 和首 token 观测生成；provider wall timeout 会抛 `ProviderTimeoutError`，让恢复层知道这是模型上游/请求超时，不是工具失败或验收失败。429/529/503 等临时限流或服务拥塞在短暂退避耗尽后归类为 `ProviderTransientError`，CLI 输出可恢复提示，不把裸 HTTP traceback 当成任务事实。
 - `file_write_session` 已作为大文件写入工具注册：长 HTML/CSS/JS、长报告或大文本可以走 `begin -> append -> finish`，chunk 写入有 manifest、sha256、幂等重复提交和原子提交。公开工具类只保留模型目录和入口，具体状态机在 service/IO/model 三层里，避免再次长成一个难维护大类。
 - `e2e_matrix_runner.py` 提供 deterministic runner 第一片：当前可跑中文路径写读、大工具输出 artifact 元数据、工具失败分类；真实模型用例会明确 `SKIPPED`，避免单测假装覆盖真实链路。
 - `main_agent_foundation_runner.py` 把主代理基础 1-6 类测试收成一个 refs-first 报告：工具失败合同、真实单代理任务占位、compact/resume 占位、大输出 artifact refs、真实错误恢复占位和确定性 E2E matrix。真实模型项没有跑时必须显示 `SKIPPED`。
@@ -270,6 +276,7 @@ agent_py_agent/agent/contracts/
 - `memory-resume --from-compact` 会把主代理 context bundle 放进 `main_context_bundle`、`recommended_read_paths`、handoff（交接包）、context block（可粘贴恢复上下文）和 continue packet（继续工作包）。
 - `memory-compact --apply` 会从 tool-output index（工具输出索引）读取同 scope（同任务范围）的外置工具输出 artifact refs；`memory-resume --from-compact` 会把这些 artifact 路径放进推荐读取路径，恢复时不需要重新扫长日志或把大输出塞回 prompt。
 - `memory-resume --from-compact` 会为 tool-output artifacts 生成 `artifact_read_hints`，给出可直接用于 `read_artifact` 的 `artifact_ref/offset/max_chars`；优先使用 scoped call id（带 run 作用域的调用编号），长路径只作为 fallback。
+- `continue_packet` 现在包含 `resume_focus` 和 `captured_refs`：`resume_focus.next_action` 是续接后优先做的下一步；`captured_refs` 记录已经读过、写过、外置过的引用。运行时自动续接会先看这两个字段，不再默认先重读 compact 文件。大白话：压缩后继续干活时，先接着做，不从头翻旧账；只有缺事实、要验证或引用坏了，才去读恢复文件。
 - 同一个任务范围多次执行 `memory-compact --apply` 时，每个 apply 包会带 `lineage`：第几次压缩、上一包 apply id、上一包 metadata/apply bundle 引用、当前包引用。这样长任务经历多次 compact 后，resume 不需要靠自然语言猜“刚刚那次压缩是哪一包”。
 - `memory-compact --apply` 自动取最近任务卡时会做 scope match；如果用户 compact 老任务而最新任务卡属于另一个任务，系统会记录 mismatch 并跳过自动绑定，避免串任务。
 - `Context Bundle v1` 已补齐 RunScope、ToolManifest、Acceptance Contract、ArtifactRef、自检、schema migration policy、prompt budget 和 owner model；这些字段都走结构化 JSON，给后续 compact/resume/subagent 复用。
@@ -285,8 +292,9 @@ agent_py_agent/agent/contracts/
 3. compact apply 会把最近的 context bundle 路径登记到 metadata、restore refs 和 apply bundle。
 4. 用户执行 `memory-resume --from-compact <apply_id>`。
 5. resume 输出会优先推荐读取这张 context bundle，再读 compact context、work state、restore refs、自检和源事实文件。
-6. 如果这是同一任务的第 2 次、第 3 次或更多次 compact，resume 会同时带出 lineage（压缩链路），让调用方能沿着上一包继续审计，不覆盖旧包。
-7. 每轮 apply 还会写 `compaction_state` 和 `handoff_summary`：前者是机器字段，后者是模型续接说明。后续运行时自动压缩只能信机器字段和 refs，不能把 summary 当作最终事实。
+6. 自动续接时，运行时注入 `Compact Auto Continuation`：它优先展示 `Resume Focus` 和 `Already Captured Refs`，告诉模型“下一步做什么、哪些读写和派工已经发生过”。`recommended_read_paths` 只是备用恢复引用，不是每次续接必须先读的清单。
+7. 如果这是同一任务的第 2 次、第 3 次或更多次 compact，resume 会同时带出 lineage（压缩链路），让调用方能沿着上一包继续审计，不覆盖旧包。
+8. 每轮 apply 还会写 `compaction_state` 和 `handoff_summary`：前者是机器字段，后者是模型续接说明。后续运行时自动压缩只能信机器字段和 refs，不能把 summary 当作最终事实。
 
 这一步解决的是：恢复时不能只看一段摘要，也不能让模型重新猜任务范围。恢复链路必须先知道“这是谁的任务、在哪个工作区、哪一轮 run、有哪些恢复入口”。
 

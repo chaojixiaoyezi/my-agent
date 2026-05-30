@@ -20,23 +20,23 @@ from agent_py_agent.agent.memory_archive.compact_work_state_sources import (
     WorkStateFieldSourceRequest,
     build_work_state_field_sources,
 )
-from agent_py_agent.tests.test_memory_compact import (
-    _assert_apply_preserved_sources,
-    _assert_schema_v2,
-    _write_compact_fixture,
+from agent_py_agent.tests.memory_compact_support import (
+    assert_apply_preserved_sources,
+    assert_schema_v2,
+    write_compact_fixture,
 )
 
 
 def test_memory_compact_auto_cycle_respects_single_trigger_percent(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
 
     result = run_memory_compact_auto_cycle(
         root,
         _auto_cycle_options(current_tokens=79, max_context_tokens=100, trigger_percent=80),
     )
 
-    _assert_schema_v2(result, "compact_auto_cycle")
+    assert_schema_v2(result, "compact_auto_cycle")
     assert result["ok"] is True
     assert result["status"] == "skipped_below_threshold"
     assert result["suggestion"]["status"] == "ok"
@@ -52,7 +52,7 @@ def test_memory_compact_auto_cycle_respects_single_trigger_percent(tmp_path: Pat
 
 def test_memory_compact_auto_cycle_default_trigger_is_90_percent(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
 
     below = run_memory_compact_auto_cycle(root, _auto_cycle_options(current_tokens=89, max_context_tokens=100))
     reached = run_memory_compact_auto_cycle(root, _auto_cycle_options(current_tokens=90, max_context_tokens=100))
@@ -66,7 +66,7 @@ def test_memory_compact_auto_cycle_default_trigger_is_90_percent(tmp_path: Path)
 
 def test_memory_compact_auto_cycle_reaches_single_trigger_percent(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
 
     result = run_memory_compact_auto_cycle(
         root,
@@ -82,7 +82,7 @@ def test_memory_compact_auto_cycle_reaches_single_trigger_percent(tmp_path: Path
 
 def test_memory_compact_auto_cycle_forced_fallback_uses_plan_only(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
 
     result = run_memory_compact_auto_cycle(
         root,
@@ -95,7 +95,7 @@ def test_memory_compact_auto_cycle_forced_fallback_uses_plan_only(tmp_path: Path
         ),
     )
 
-    _assert_schema_v2(result, "compact_auto_cycle")
+    assert_schema_v2(result, "compact_auto_cycle")
     assert result["status"] == "needs_user_confirmation"
     assert result["trigger"] == {
         "reason": "provider_context_overflow",
@@ -112,11 +112,11 @@ def test_memory_compact_auto_cycle_forced_fallback_uses_plan_only(tmp_path: Path
 
 def test_memory_compact_auto_cycle_apply_allows_optional_notes_missing(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
 
     result = run_memory_compact_auto_cycle(root, _auto_cycle_options(allow_apply=True, trigger_percent=70))
 
-    _assert_schema_v2(result, "compact_auto_cycle")
+    assert_schema_v2(result, "compact_auto_cycle")
     assert result["ok"] is True
     assert result["status"] == "ready_after_action_guard"
     assert result["automatic_tool_execution"] == "none"
@@ -130,12 +130,12 @@ def test_memory_compact_auto_cycle_apply_allows_optional_notes_missing(tmp_path:
     assert result["allowed_to_continue"] is True
     assert result["next_action"] == "continue_after_guard"
     assert (root / "memory_archive" / "compact_applies").exists()
-    _assert_apply_preserved_sources(root)
+    assert_apply_preserved_sources(root)
 
 
 def test_memory_compact_auto_cycle_forced_fallback_apply_reuses_resume_pipeline(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
     _write_work_state_fact_sources(root)
 
     result = run_memory_compact_auto_cycle(
@@ -166,7 +166,7 @@ def test_memory_compact_auto_cycle_forced_fallback_apply_reuses_resume_pipeline(
 
 def test_memory_compact_work_state_reads_task_fact_sources(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
     _write_work_state_fact_sources(root)
 
     result = apply_memory_compact(
@@ -183,13 +183,93 @@ def test_memory_compact_work_state_reads_task_fact_sources(tmp_path: Path) -> No
     assert work_state["latest_tests"]["items"] == ["python3 -m pytest -q agent_py_agent/tests/test_memory_compact.py"]
     assert work_state["source_quality"]["status"] == "complete"
     resume = build_memory_compact_resume(root, MemoryCompactResumeOptions(apply_ref=result["apply_id"]))
-    _assert_schema_v2(resume["handoff"], "compact_resume_handoff")
+    assert_schema_v2(resume["handoff"], "compact_resume_handoff")
     assert resume["handoff"]["acceptance"]["items"] == work_state["acceptance"]["items"]
     assert resume["handoff"]["constraints"]["items"] == work_state["constraints"]["items"]
     assert resume["handoff"]["latest_tests"]["items"] == work_state["latest_tests"]["items"]
     assert resume["handoff"]["action_guard"]["status"] == "requires_user_confirmation"
     assert "## Acceptance" in resume["context_block"]
     assert "focused compact resume tests pass" in resume["context_block"]
+
+
+def test_memory_compact_work_state_reads_task_progress_ledger(tmp_path: Path) -> None:
+    """compact 应携带当前 run 的进度账本，让子代理压缩后知道自己做到哪。"""
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    write_task_progress(
+        root,
+        "run-compact",
+        {
+            "summary": "已完成项目 A/B，对项目 C 只读了 README。",
+            "next_action": "继续阅读项目 C 的核心模块。",
+            "items": [
+                {"id": "project-a", "title": "项目 A", "status": "done"},
+                {"id": "project-c", "title": "项目 C", "status": "in_progress"},
+            ],
+        },
+    )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        ),
+    )
+
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+    progress = work_state["task_progress"]
+
+    assert progress["summary"] == "已完成项目 A/B，对项目 C 只读了 README。"
+    assert progress["counts"]["done"] == 1
+    assert progress["counts"]["in_progress"] == 1
+    assert work_state["next_actions"] == ["继续阅读项目 C 的核心模块。"]
+
+
+def test_memory_compact_work_state_reads_task_coverage_ledger(tmp_path: Path) -> None:
+    """compact 应携带覆盖账本摘要，避免长任务压缩后忘记哪些对象没覆盖。"""
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    write_task_progress(
+        root,
+        "run-compact",
+        {
+            "summary": "正在覆盖多个项目。",
+            "coverage": {
+                "goal": "每个项目都要读 README、分析模块、写入报告。",
+                "dimensions": ["读 README", "分析模块", "写入报告"],
+                "targets": [
+                    {
+                        "id": "agentscope-main",
+                        "checks": {"读 README": "done", "分析模块": "done", "写入报告": "done"},
+                    },
+                    {
+                        "id": "codex-main",
+                        "checks": {"读 README": "done", "分析模块": "pending", "写入报告": "pending"},
+                    },
+                ],
+            },
+        },
+    )
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        ),
+    )
+
+    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
+    coverage = work_state["task_progress"]["coverage"]
+
+    assert coverage["goal"] == "每个项目都要读 README、分析模块、写入报告。"
+    assert coverage["counts"]["targets_total"] == 2
+    assert coverage["counts"]["targets_done"] == 1
+    assert coverage["active_targets"][0]["id"] == "codex-main"
+    assert coverage["active_targets"][0]["checks"]["分析模块"] == "pending"
 
 
 def test_memory_compact_work_state_treats_scope_ids_as_literal_paths(tmp_path: Path) -> None:
@@ -211,7 +291,7 @@ def test_memory_compact_work_state_treats_scope_ids_as_literal_paths(tmp_path: P
 
 def test_memory_compact_auto_guard_allows_complete_work_state_without_running_tools(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
     _write_work_state_fact_sources(root)
 
     resume = _auto_resume_after_apply(root)
@@ -236,7 +316,7 @@ def test_memory_compact_auto_guard_allows_complete_work_state_without_running_to
 
 def test_memory_compact_resume_links_subagent_run_workspace_refs(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
     _write_work_state_fact_sources(root)
     _write_subagent_run_workspace(root)
 
@@ -279,7 +359,7 @@ def test_memory_compact_resume_links_subagent_run_workspace_refs(tmp_path: Path)
 # 函数用途: 验证 compact resume 会把子代理 run workspace 的 latest_continue_packet 作为只读引用暴露给父级。
 def test_memory_compact_resume_exposes_subagent_latest_continue_packet(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
     _write_work_state_fact_sources(root)
     _write_subagent_run_workspace(root)
     packet = (
@@ -326,7 +406,7 @@ def test_memory_compact_resume_exposes_subagent_latest_continue_packet(tmp_path:
 def test_memory_compact_resume_uses_configured_subagent_workspace_refs(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     configured_subagents = root / "_runtime" / "subagents"
-    _write_compact_fixture(root)
+    write_compact_fixture(root)
     _write_work_state_fact_sources(root)
     _write_subagent_run_workspace_in_configured_root(configured_subagents, "run-configured")
     _write_configured_continue_packet(configured_subagents, "run-configured")

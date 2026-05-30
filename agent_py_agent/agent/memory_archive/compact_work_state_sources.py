@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..task_progress import read_task_progress, task_progress_summary
+
 _ACCEPTANCE_FILES = ("ACCEPTANCE.md", "acceptance.md")
 _CONSTRAINT_FILES = ("CONSTRAINTS.md", "constraints.md")
 _TEST_FILES = ("TEST_CHECKLIST.md", "test_checklist.md", "failing_tests.json", "next_actions.json")
@@ -34,12 +36,15 @@ class WorkStateFieldSources:
     constraints: dict[str, Any]
     latest_tests: dict[str, Any]
     read_files: list[str]
+    task_progress: dict[str, Any]
 
 
 # LLM: build_work_state_field_sources only reads bounded workspace fact files and never invents missing state.
 # 函数用途: 从 task/run 事实源提取验收、约束和最近测试；找不到时保持 not_recorded。
 def build_work_state_field_sources(request: WorkStateFieldSourceRequest) -> WorkStateFieldSources:
     roots = _candidate_fact_roots(request)
+    ids = _scoped_ids(request)
+    workspace = Path(str(request.plan["workspace_root"]))
     goal = _first_item(_field_items(roots, ("task.json",), json_keys=("goal",)))
     next_actions = _field_items(roots, ("task.json", "next_actions.json"), json_keys=("next_actions",))
     acceptance = _field_payload(_field_items(roots, _ACCEPTANCE_FILES, json_keys=("acceptance_checks", "acceptance")))
@@ -48,25 +53,38 @@ def build_work_state_field_sources(request: WorkStateFieldSourceRequest) -> Work
         _field_items(roots, _TEST_FILES, json_keys=("latest_tests", "tests", "failing_tests", "test_status"))
     )
     read_files = _dedupe([*acceptance["source_paths"], *constraints["source_paths"], *latest_tests["source_paths"]])
-    return WorkStateFieldSources(goal, list(next_actions["items"]), acceptance, constraints, latest_tests, read_files)
+    task_progress = _first_task_progress(workspace, ids)
+    return WorkStateFieldSources(goal, list(next_actions["items"]), acceptance, constraints, latest_tests, read_files, task_progress)
 
 
 # LLM: _candidate_fact_roots scopes work-state reads to current workspace and compact task/run ids.
 # 函数用途: 计算可读取的 task/run 事实源目录，支持旧 subagents 目录和新 tasks/*/agents 目录。
 def _candidate_fact_roots(request: WorkStateFieldSourceRequest) -> list[Path]:
     workspace = Path(str(request.plan["workspace_root"]))
+    ids = _scoped_ids(request)
+    roots = [_path_root(workspace, item) for item in request.source_state["content_paths"]]
+    for item_id in ids:
+        roots.extend(_id_roots(workspace, item_id))
+    return _existing_dirs(_dedupe_paths(roots), workspace)
+
+
+def _scoped_ids(request: WorkStateFieldSourceRequest) -> list[str]:
     scope = request.plan.get("scope", {}) if isinstance(request.plan.get("scope"), dict) else {}
-    ids = _dedupe([
+    return _dedupe([
         str(scope.get("request_id") or ""),
         str(scope.get("session_id") or ""),
         str(scope.get("task_id") or ""),
         str(scope.get("run_id") or ""),
         *request.source_state["task_refs"],
     ])
-    roots = [_path_root(workspace, item) for item in request.source_state["content_paths"]]
+
+
+def _first_task_progress(workspace: Path, ids: list[str]) -> dict[str, Any]:
     for item_id in ids:
-        roots.extend(_id_roots(workspace, item_id))
-    return _existing_dirs(_dedupe_paths(roots), workspace)
+        progress = read_task_progress(workspace, item_id)
+        if progress["summary"] or progress["next_action"] or progress["counts"].get("total", 0):
+            return task_progress_summary(progress)
+    return {}
 
 
 # LLM: _id_roots maps a task/run id to legacy and task-workspace candidate directories.

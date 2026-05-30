@@ -24,6 +24,7 @@ from .agent_core import (
     SimpleAgentDispatchMixin,
     SimpleAgentRuntimeMixin,
     SimpleAgentSubagentMixin,
+    TaskProgressTool,
 )
 from .agent_core.dispatch_lock import _DispatchWatchLock
 from .agent_core.orchestration_tools import CODING_SUBAGENT_TOOLS, READ_ONLY_SUBAGENT_TOOLS
@@ -260,6 +261,7 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CapabilityRequestTool(agent))
     agent.tools.register(InspectAgentTreeTool(agent))
     agent.tools.register(RaiseEventTool(agent))
+    agent.tools.register(TaskProgressTool(agent))
     agent.tools.register(SendGuidanceTool(agent))
     agent.tools.register(RaiseCollaborationTool(agent))
     agent.tools.register(InspectCollaborationTool(agent))
@@ -285,6 +287,7 @@ __all__ = [
     "ScheduleChildSubagentsTool",
     "SendGuidanceTool",
     "SimpleAgent",
+    "TaskProgressTool",
     "SubmitCollaborationResultTool",
     "UpdateCollaborationTool",
 ]

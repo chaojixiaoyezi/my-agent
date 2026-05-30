@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import time
 
-from ..agent.backends import ProviderTimeoutError
+from ..agent.backends import ProviderTimeoutError, ProviderTransientError
 from ..agent.gateway import (
     gateway_paths,
     gateway_request_counts,
@@ -43,6 +43,7 @@ from .run_output import (
     make_run_chunk_writer,
     print_run_result,
     provider_timeout_cli_report,
+    provider_transient_cli_report,
     run_exit_code,
 )
 from .thinking_spinner import ThinkingSpinner
@@ -150,16 +151,27 @@ def cmd_run(args) -> int:
             source="cli_run",
             delivery_contract=delivery_contract_from_file(getattr(args, "delivery_contract_file", "")),
             resume_context=resume_context_override(args),
-            recovery_next_actions=["如需恢复本次单轮 run，先查看 memory-resume 和 LocalStore 记录。"],
+            recovery_next_actions=_default_run_recovery_next_actions(),
             on_chunk=on_chunk,
         )
     except ProviderTimeoutError as exc:
         print(provider_timeout_cli_report(agent, exc))
         return 2
+    except ProviderTransientError as exc:
+        print(provider_transient_cli_report(exc))
+        return 2
     finally:
         spinner.stop()
     print_run_result(result, show_prompt=args.show_prompt, streamed_text=str(stream_state["text"]))
     return run_exit_code(result)
+
+
+# LLM: CLI run recovery hints must be action-first; compact files are backup evidence, not the first task.
+# 函数用途: 给单轮 run 的 compact/resume 写默认下一步，避免恢复后模型先翻恢复文件而不推进用户任务。
+def _default_run_recovery_next_actions() -> list[str]:
+    return [
+        "继续当前用户请求的未完成部分；优先推进下一步工作，只有缺事实、引用损坏或需要核验时才读取恢复记录。",
+    ]
 
 
 # LLM: cmd_remember 属于CLI 命令层；改行为前先对齐调用方和快照/单测。

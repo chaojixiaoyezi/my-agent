@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from agent_py_agent.agent.backends.errors import ProviderTimeoutError
+from agent_py_agent.agent.backends.errors import ProviderTimeoutError, ProviderTransientError
 from agent_py_agent.cli.local_commands import cmd_run
 
 
@@ -45,3 +45,33 @@ def test_cmd_run_reports_provider_timeout(capsys) -> None:
     assert "provider_timeout" in output
     assert "request_timeout=23s" in output
     assert "memory-resume" in output
+
+
+# LLM: Provider rate-limit errors should leave a readable resume handoff instead of a traceback.
+# 函数用途: 顶层 CLI 遇到 provider transient/429 时，输出可恢复说明并返回非零。
+def test_cmd_run_reports_provider_transient(capsys) -> None:
+    agent = SimpleNamespace(
+        config=SimpleNamespace(request_timeout=23),
+        run=MagicMock(side_effect=ProviderTransientError("HTTP 429: plan limited")),
+    )
+    args = SimpleNamespace(
+        config="config.yaml",
+        prompt="run a task",
+        inject=[],
+        prompt_file=[],
+        save=False,
+        show_prompt=False,
+        resume_context=None,
+    )
+
+    with (
+        patch("agent_py_agent.cli.local_commands.make_agent", return_value=agent),
+        patch("agent_py_agent.cli.local_commands.ThinkingSpinner", return_value=_NoopSpinner()),
+    ):
+        code = cmd_run(args)
+
+    output = capsys.readouterr().out
+    assert code == 2
+    assert "provider_transient" in output
+    assert "HTTP 429" in output
+    assert "稍后重试" in output

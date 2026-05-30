@@ -5,7 +5,12 @@ from __future__ import annotations
 
 import sys
 
-from ..agent.backends import ProviderTimeoutError, provider_timeout_report
+from ..agent.backends import (
+    ProviderTimeoutError,
+    ProviderTransientError,
+    provider_timeout_report,
+    provider_transient_report,
+)
 from .thinking_spinner import ThinkingSpinner
 
 
@@ -61,6 +66,12 @@ def provider_timeout_cli_report(agent, exc: ProviderTimeoutError) -> str:
         exc,
         timeout_seconds=getattr(getattr(agent, "config", None), "request_timeout", ""),
     )
+
+
+# LLM: provider_transient_cli_report keeps rate-limit/network flake messages readable at the CLI boundary.
+# 函数用途: 顶层 run 遇到 provider 临时失败时，输出可恢复说明而不是 Python 堆栈。
+def provider_transient_cli_report(exc: ProviderTransientError) -> str:
+    return provider_transient_report(exc)
 
 
 # LLM: _should_print_final_response separates streamed-visible text from hidden post-tool final responses.

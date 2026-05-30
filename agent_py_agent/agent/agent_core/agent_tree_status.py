@@ -7,6 +7,7 @@ from dataclasses import asdict
 from typing import Any
 
 from ..subagents.kernel import SubagentKernelQuery
+from .agent_tree_progress import attach_task_progress
 from .orchestration_run_scope import remembered_orchestration_run_ids
 from .orchestration_scope_resolution import scope_resolution_payload, tree_scope_resolution
 from .runner_context import current_subagent_run_id
@@ -27,7 +28,7 @@ def agent_tree_status_payload(agent: object, params: dict[str, object] | None = 
         effective_root_id=query.root_id or snapshot.root_id,
         effective_scope=query.scope,
     )
-    nodes = [_node_from_kernel_run(row) for row in snapshot.runs]
+    nodes = [_node_from_kernel_run(agent, row) for row in snapshot.runs]
     main = _main_agent_node(agent, nodes)
     payload = {
         "schema_version": _SCHEMA_VERSION,
@@ -93,6 +94,15 @@ def _main_agent_node(agent: object, nodes: list[dict[str, object]]) -> dict[str,
         for item in nodes
         if not str(item.get("parent_run_id") or "")
     ]
+    progress_layer = {
+        "progress": 0.0,
+        "current_step": "",
+        "current_tool": current_tool,
+        "last_progress_at": last_progress_at,
+        "last_progress_summary": last_progress_summary,
+        "latest_summary": "",
+    }
+    attach_task_progress(agent, run_id, progress_layer)
     return {
         "task_id": run_id,
         "run_id": run_id,
@@ -112,14 +122,7 @@ def _main_agent_node(agent: object, nodes: list[dict[str, object]]) -> dict[str,
         "blockers": [],
         "child_run_ids": [item for item in child_run_ids if item],
         "liveness": {"status": status, "heartbeat_at": heartbeat_at, "updated_at": heartbeat_at, "has_heartbeat": bool(heartbeat_at)},
-        "progress_layer": {
-            "progress": 0.0,
-            "current_step": "",
-            "current_tool": current_tool,
-            "last_progress_at": last_progress_at,
-            "last_progress_summary": last_progress_summary,
-            "latest_summary": "",
-        },
+        "progress_layer": progress_layer,
         "evidence_layer": {
             "artifact_refs": [],
             "artifact_registry_refs": [],
@@ -133,13 +136,13 @@ def _main_agent_node(agent: object, nodes: list[dict[str, object]]) -> dict[str,
 
 # LLM: _node_from_kernel_run exposes small status facts and refs only.
 # 函数用途: 将 kernel run 行转成模型可读状态节点，不读取产物正文。
-def _node_from_kernel_run(row: object) -> dict[str, object]:
+def _node_from_kernel_run(agent: object, row: object) -> dict[str, object]:
     payload = asdict(row)
     refs = _node_ref_values(payload)
     node = _node_identity(payload)
     node.update(_node_status(payload, refs))
     node["liveness"] = _liveness_layer(payload)
-    node["progress_layer"] = _progress_layer(payload)
+    node["progress_layer"] = _progress_layer(agent, payload)
     node["evidence_layer"] = _evidence_layer(refs)
     return node
 
@@ -219,8 +222,8 @@ def _liveness_layer(payload: dict[str, object]) -> dict[str, object]:
 
 # LLM: _progress_layer is the read-only work-progress projection for one node.
 # 函数用途: 把进度、当前步骤、当前工具和摘要投影成 progress 层。
-def _progress_layer(payload: dict[str, object]) -> dict[str, object]:
-    return {
+def _progress_layer(agent: object, payload: dict[str, object]) -> dict[str, object]:
+    layer = {
         "progress": payload.get("progress", 0.0),
         "current_step": payload.get("current_step", ""),
         "current_tool": payload.get("current_tool", ""),
@@ -228,6 +231,8 @@ def _progress_layer(payload: dict[str, object]) -> dict[str, object]:
         "last_progress_summary": payload.get("last_progress_summary", ""),
         "latest_summary": payload.get("latest_summary", ""),
     }
+    attach_task_progress(agent, str(payload.get("run_id") or ""), layer)
+    return layer
 
 
 # LLM: _workspace_refs filters model-facing status refs to current runtime paths only.

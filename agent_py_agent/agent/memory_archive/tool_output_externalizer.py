@@ -44,6 +44,7 @@ class ExternalizeToolOutputRequest:
     request_id: str = ""
     min_chars: int = -1
     preview_chars: int = -1
+    parameters: dict[str, Any] | None = None
 
 
 # LLM: externalize_tool_output_record 是 runtime 工具输出进入 memory archive artifact 的唯一入口。
@@ -137,6 +138,8 @@ def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, d
         "request_id": request.request_id,
         "run_id": request.run_id,
         "task_id": request.task_id,
+        "parameters": _safe_parameters(request.parameters),
+        "source_input": _source_input(request.parameters),
         "sha256": digest,
         "size_bytes": len(output.encode("utf-8")),
         "created_at": created_at,
@@ -162,6 +165,8 @@ def _append_index(path: Path, payload: dict[str, Any]) -> None:
         "request_id": payload["request_id"],
         "run_id": payload["run_id"],
         "task_id": payload["task_id"],
+        "parameters": _safe_parameters(payload.get("parameters")),
+        "source_input": str(payload.get("source_input") or ""),
         "path": str(path),
         "sha256": payload["sha256"],
         "size_bytes": payload["size_bytes"],
@@ -220,6 +225,54 @@ def _read_artifact_record_fields(output: str) -> dict[str, Any]:
         "source_tool": str(payload.get("tool") or ""),
         "source_call_id": str(payload.get("call_id") or ""),
     }
+
+
+# LLM: _safe_parameters stores only small scalar tool args in the artifact index.
+# 函数用途: 记录源路径/URL/查询等定位线索，避免把大参数、嵌套对象或敏感复杂结构塞进 compact refs。
+def _safe_parameters(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key, item in value.items():
+        text_key = str(key).strip()
+        if not text_key:
+            continue
+        if (safe_item := _safe_parameter_item(item)) is not _UNSAFE_PARAMETER:
+            result[text_key] = safe_item
+    return result
+
+
+_UNSAFE_PARAMETER = object()
+
+
+# LLM: _safe_parameter_item keeps parameter metadata shallow and scalar-only.
+# 函数用途: 裁剪单个工具参数值；复杂对象返回哨兵，不进入 artifact index。
+def _safe_parameter_item(item: Any) -> object:
+    if isinstance(item, str | int | float | bool) or item is None:
+        return item
+    if isinstance(item, list | tuple):
+        return [entry for entry in item if isinstance(entry, str | int | float | bool) or entry is None][:20]
+    if isinstance(item, dict):
+        return {
+            str(child_key): child_value
+            for child_key, child_value in list(item.items())[:20]
+            if isinstance(child_value, str | int | float | bool) or child_value is None
+        }
+    return _UNSAFE_PARAMETER
+
+
+# LLM: _source_input gives compact continuation a human-readable origin for each tool artifact.
+# 函数用途: 从通用参数中提取 path/url/artifact_ref/query/command 等源输入；未知工具退到首个字符串参数。
+def _source_input(value: Any) -> str:
+    params = _safe_parameters(value)
+    for key in ("path", "url", "artifact_ref", "query", "command"):
+        candidate = str(params.get(key) or "").strip()
+        if candidate:
+            return candidate
+    for item in params.values():
+        if isinstance(item, str) and item.strip():
+            return item.strip()
+    return ""
 
 
 # LLM: _json_object parses only dict payloads and lets malformed tool text fall back to normal externalization.

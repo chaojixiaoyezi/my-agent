@@ -22,6 +22,7 @@ from .orchestration_tools import (
 from .runtime_guidance_tool import SendGuidanceTool
 from .runtime_mixin import SimpleAgentRuntimeMixin
 from .subagent_mixin import SimpleAgentSubagentMixin
+from .task_progress_tool import TaskProgressTool
 
 __all__ = [
     "AgentRunResult",
@@ -35,4 +36,5 @@ __all__ = [
     "SimpleAgentDispatchMixin",
     "SimpleAgentRuntimeMixin",
     "SimpleAgentSubagentMixin",
+    "TaskProgressTool",
 ]
