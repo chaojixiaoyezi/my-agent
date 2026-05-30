@@ -300,3 +300,111 @@ class TestTaskProgressCoverageAliases:
             "codex-main",
         ]
         assert payload["coverage"]["targets"][0]["checks"]["借鉴点"] == "pending"
+
+
+class TestTaskProgressQualityHints:
+    """测试 task_progress 的软提示，不让提示变成验收门。"""
+
+    def test_result_like_progress_without_evidence_is_a_soft_hint(self, tmp_path):
+        """模型写了结果类字段但没 evidence 时才软提醒，不判断 ok/pass/完成 的语义。"""
+        from agent_py_agent.agent.task_progress import (
+            read_task_progress,
+            task_progress_summary,
+            write_task_progress,
+        )
+
+        payload = write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "summary": "已经写完两个对象的初稿。",
+                "items": [
+                    {"id": "a", "title": "对象 A", "status": "ok"},
+                    {"id": "b", "title": "对象 B", "result": "已经分析完"},
+                    {"id": "c", "title": "对象 C", "conclusion": "可作为工具层参考", "evidence": ["notes.md"]},
+                    {"id": "d", "title": "对象 D"},
+                ],
+            },
+        )
+        readback = read_task_progress(tmp_path, "run-main")
+        summary = task_progress_summary(readback)
+
+        assert readback["quality_hints"]["severity"] == "soft"
+        assert readback["quality_hints"]["result_without_evidence_count"] == 2
+        assert "建议补上" in readback["quality_hints"]["messages"][0]
+        assert summary["quality_hints"]["result_without_evidence_ids"] == ["a", "b"]
+        assert payload["items"][1]["result"] == "已经分析完"
+        assert readback["quality_hints"]["next_suggestions"]
+        assert "不要只打勾" in readback["quality_hints"]["soft_prompt"]
+
+    def test_update_returns_immediate_soft_feedback_when_evidence_is_missing(self, tmp_path):
+        """写入进度当场返回软提醒，避免模型到下一轮 read 才看到问题。"""
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+        agent._main_agent_run_id = "run-main"
+
+        result = agent.tools.execute_call(
+            {
+                "tool": "task_progress",
+                "action": "update",
+                "items": [{"id": "a", "title": "对象 A", "status": "done"}],
+            }
+        )
+        payload = json.loads(result.output)
+
+        assert result.ok is True
+        assert payload["soft_feedback"]["severity"] == "soft"
+        assert payload["soft_feedback"]["blocking"] is False
+        assert "不要只打勾" in payload["soft_feedback"]["message"]
+
+    def test_plain_progress_item_without_result_signal_does_not_hint(self, tmp_path):
+        """只写标题/待办项时不提醒，避免把普通进度表变成噪声。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {"items": [{"id": "a", "title": "对象 A"}, {"id": "b", "title": "对象 B", "notes": "待分析"}]},
+        )
+
+        payload = read_task_progress(tmp_path, "run-main")
+
+        assert "quality_hints" not in payload
+
+    def test_incomplete_coverage_gets_natural_next_step_hints(self, tmp_path):
+        """覆盖账本没逐项推进时，应给模型自然语言软提示而不是验收硬卡。"""
+        from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+        write_task_progress(
+            tmp_path,
+            "run-main",
+            {
+                "summary": "开始分析多个项目。",
+                "coverage": {
+                    "goal": "每个项目都要读源码、分析模块、写进报告。",
+                    "dimensions": ["读源码", "分析模块", "写进报告"],
+                    "targets": [
+                        {
+                            "id": "agentscope-main",
+                            "checks": {"读源码": "done", "分析模块": "pending", "写进报告": "pending"},
+                            "evidence": ["agentscope-main/README.md"],
+                        },
+                        {
+                            "id": "codex-main",
+                            "checks": {"读源码": "pending", "分析模块": "pending", "写进报告": "pending"},
+                        },
+                    ],
+                },
+            },
+        )
+
+        payload = read_task_progress(tmp_path, "run-main")
+        hints = payload["quality_hints"]
+
+        assert hints["severity"] == "soft"
+        assert hints["coverage_incomplete_count"] == 2
+        assert hints["coverage_incomplete_ids"] == ["agentscope-main", "codex-main"]
+        assert any("继续补未完成对象" in item for item in hints["next_suggestions"])
+        assert "先选一个未完成对象" in hints["soft_prompt"]

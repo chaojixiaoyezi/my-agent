@@ -29,6 +29,7 @@ class TaskProgressTool(BaseTool):
         root = Path(getattr(self.agent, "root", "."))
         if action == "update":
             payload = write_task_progress(root, run_id, params)
+            payload = _with_write_feedback(payload)
         else:
             payload = read_task_progress(root, run_id)
         return ToolExecutionResult("task_progress", True, json.dumps(payload, ensure_ascii=False, indent=2))
@@ -71,6 +72,18 @@ def _scope_run_id(value: object) -> str:
     if not isinstance(value, dict):
         return ""
     return str(value.get("run_id") or value.get("task_id") or value.get("request_id") or "").strip()
+
+
+def _with_write_feedback(payload: dict[str, object]) -> dict[str, object]:
+    hints = payload.get("quality_hints")
+    if not isinstance(hints, dict) or not hints.get("messages"):
+        return payload
+    feedback = {
+        "severity": "soft",
+        "blocking": False,
+        "message": str(hints.get("soft_prompt") or "软提醒：有些进度项缺少证据，建议补上文件、来源或产物引用。"),
+    }
+    return {**payload, "soft_feedback": feedback}
 
 
 __all__ = ["TaskProgressTool"]

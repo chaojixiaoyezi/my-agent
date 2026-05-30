@@ -16,6 +16,13 @@ from pathlib import Path
 from typing import Any
 
 from .compact_apply_work_state import restore_refs_summary
+from .compact_runtime_handoff import render_runtime_handoff_lines, runtime_handoff_payload
+from .compact_state_run_intent import (
+    desired_outputs_line,
+    desired_outputs_payload,
+    run_intent_line,
+    run_intent_payload,
+)
 from .schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_reserved_fields,
@@ -77,7 +84,28 @@ def render_compaction_handoff_summary(state: dict[str, Any]) -> str:
     continuation = state.get("continuation", {}) if isinstance(state.get("continuation"), dict) else {}
     previous_id = str(state.get("previous_compact_id") or "")
     previous_ref = str(state.get("previous_handoff_summary_ref") or "")
-    lines = [
+    lines = _handoff_base_lines(work, source_refs, state, continuation)
+    lines.extend(render_runtime_handoff_lines(work.get("runtime_handoff"), title="运行交接"))
+    if previous_id or previous_ref:
+        lines.extend([
+            "## 上一轮压缩",
+            "",
+            f"- previous_compact_id: {previous_id or 'unknown'}",
+            f"- previous_handoff_summary_ref: {previous_ref or 'unknown'}",
+            "",
+        ])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+# LLM: _handoff_base_lines keeps the public renderer short and section-oriented.
+# 函数用途: 渲染 compact handoff 的固定小节，运行交接和 lineage 由入口函数追加。
+def _handoff_base_lines(
+    work: dict[str, Any],
+    source_refs: dict[str, Any],
+    state: dict[str, Any],
+    continuation: dict[str, Any],
+) -> list[str]:
+    return [
         "# Compact Handoff Summary",
         "",
         "这是一份压缩后的交接记录，只帮助模型续接；事实以 source refs、work_state、artifact registry 和 agent tree 为准。",
@@ -88,6 +116,8 @@ def render_compaction_handoff_summary(state: dict[str, Any]) -> str:
         f"- 当前阶段: {work.get('phase') or 'unknown'}",
         f"- 下一步: {work.get('next_step') or 'unknown'}",
         f"- 进度账本: {_progress_line(work.get('task_progress'))}",
+        f"- 目标产物: {desired_outputs_line(work.get('desired_outputs'))}",
+        f"- 路径意图: {run_intent_line(work.get('run_intent'))}",
         "",
         "## 用户要求和验收",
         "",
@@ -108,15 +138,6 @@ def render_compaction_handoff_summary(state: dict[str, Any]) -> str:
         *_bullet_items(continuation.get("next_actions")),
         "",
     ]
-    if previous_id or previous_ref:
-        lines.extend([
-            "## 上一轮压缩",
-            "",
-            f"- previous_compact_id: {previous_id or 'unknown'}",
-            f"- previous_handoff_summary_ref: {previous_ref or 'unknown'}",
-            "",
-        ])
-    return "\n".join(lines).rstrip() + "\n"
 
 
 def _previous_compaction_state(lineage: dict[str, Any]) -> dict[str, Any]:
@@ -183,6 +204,9 @@ def _work_payload(work_state: dict[str, Any]) -> dict[str, Any]:
         "constraints": _items(work_state.get("constraints")),
         "latest_tests": _items(work_state.get("latest_tests"), key="items"),
         "task_progress": _task_progress_payload(work_state.get("task_progress")),
+        "desired_outputs": desired_outputs_payload(work_state.get("desired_outputs")),
+        "run_intent": run_intent_payload(work_state.get("run_intent")),
+        "runtime_handoff": runtime_handoff_payload(work_state.get("runtime_handoff")),
         "read_files": _string_list(work_state.get("read_files")),
         "changed_files": _string_list(work_state.get("changed_files")),
         "missing_fields": _string_list(work_state.get("missing_fields")),
@@ -212,6 +236,8 @@ def _task_progress_payload(value: Any) -> dict[str, Any]:
         "summary": str(payload.get("summary") or ""),
         "next_action": str(payload.get("next_action") or ""),
         "counts": dict(payload.get("counts", {}) if isinstance(payload.get("counts"), dict) else {}),
+        "quality_hints": dict(payload.get("quality_hints", {}) if isinstance(payload.get("quality_hints"), dict) else {}),
+        "coverage": dict(payload.get("coverage", {}) if isinstance(payload.get("coverage"), dict) else {}),
         "active_items": [dict(item) for item in payload.get("active_items", []) if isinstance(item, dict)]
         if isinstance(payload.get("active_items"), list)
         else [],
@@ -223,9 +249,11 @@ def _progress_line(value: Any) -> str:
     progress = _task_progress_payload(value)
     summary = progress.get("summary") or ""
     next_action = progress.get("next_action") or ""
+    hint_count = int(progress.get("quality_hints", {}).get("done_without_evidence_count", 0) or 0)
+    hint = f"；soft_hint: {hint_count} 个 done 条目缺 evidence" if hint_count else ""
     if summary and next_action:
-        return f"{summary}；下一步：{next_action}"
-    return summary or next_action or "未记录"
+        return f"{summary}；下一步：{next_action}{hint}"
+    return (summary or next_action or "未记录") + hint
 
 
 # LLM: _items reads compact payload list fields without trusting arbitrary shapes.

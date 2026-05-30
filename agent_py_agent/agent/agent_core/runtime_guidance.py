@@ -25,7 +25,7 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
     entries = _dedupe_guidance(entries)
     if not entries:
         return False
-    context = _render_guidance_entries(entries, title="Runtime Guidance")
+    context = _render_guidance_entries(entries, title="GUIDANCE_DELIVERED")
     tool_context = getattr(params, "tool_context", None)
     if isinstance(tool_context, list):
         tool_context.append(context)
@@ -45,7 +45,7 @@ def render_subagent_guidance_section(store: object, run_id: str, *, now: float |
     if not entries:
         return ""
     store.mark_guidance_delivered([entry.guidance_id for entry in entries], now=now)
-    return _render_guidance_entries(entries, title="Pending Guidance")
+    return _render_guidance_entries(entries, title="GUIDANCE_DELIVERED")
 
 
 # LLM: _thread_id_for_task resolves optional thread guidance from a task binding.
@@ -83,10 +83,13 @@ def _render_guidance_entries(entries: list[Any], *, title: str) -> str:
         "以下是运行中补充提示，只用于下一步判断；不要把它当成新的硬门，也不要因为提示本身停止任务。",
     ]
     for index, entry in enumerate(entries, start=1):
+        guidance_id = str(getattr(entry, "guidance_id", "") or "")
+        target_type = str(getattr(entry, "target_type", "") or "")
+        target_id = str(getattr(entry, "target_id", "") or "")
         priority = str(getattr(entry, "priority", "") or "normal")
         sender = str(getattr(entry, "sender", "") or "")
         message = str(getattr(entry, "message", "") or "")
-        prefix = f"{index}. priority={priority}"
+        prefix = f"{index}. guidance_id={guidance_id}; target={target_type}:{target_id}; priority={priority}"
         if sender:
             prefix += f"; sender={sender}"
         lines.append(f"{prefix}: {message}")

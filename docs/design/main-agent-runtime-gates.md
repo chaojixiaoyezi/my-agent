@@ -59,7 +59,7 @@
 ```text
 用户运行中补一句话
   -> send_guidance 写 guidance 账本
-  -> 目标 agent 下一轮 prompt 看到 Runtime Guidance
+  -> 目标 agent 下一轮 prompt 看到 GUIDANCE_DELIVERED
   -> 模型自己决定怎么调整，不被系统硬卡
 ```
 

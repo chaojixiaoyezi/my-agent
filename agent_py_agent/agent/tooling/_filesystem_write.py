@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ..contracts.artifact_format_lint import lint_artifact_format
+from ..run_intent import reference_write_feedback
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _required_path, _text_param
 from ._filesystem_read import FileSystemAccessOptions, FileSystemTool
 from .artifact_integrity import (
@@ -107,7 +108,11 @@ class WriteFileTool(FileSystemTool):
             )
         web_decision = check_web_project_post_write(target, self.workspace_root)
         output = _write_output(self.display_path(target), target, content, content_policy)
-        return _write_result("write_file", target, output, web_decision)
+        output, feedback = _attach_reference_write_feedback(self.workspace_root, target, output)
+        result = _write_result("write_file", target, output, web_decision)
+        if feedback:
+            result.result_envelope["soft_feedback"] = feedback
+        return result
 
 
 # LLM: _write_result keeps web-project validation attached to every mutating file write.
@@ -124,6 +129,13 @@ def _write_result(tool: str, target: Path, output: str, web_decision: Any) -> To
         result_envelope=envelope,
         error_code="ACCEPTANCE_FAILED",
     )
+
+
+def _attach_reference_write_feedback(workspace_root: Path, target: Path, output: str) -> tuple[str, dict[str, Any]]:
+    feedback = reference_write_feedback(workspace_root=workspace_root, target=target)
+    if not feedback:
+        return output, {}
+    return f"{output}\n{feedback['message']}", feedback
 
 
 def _artifact_integrity_envelope(web_decision: Any, target: Path) -> dict[str, object]:

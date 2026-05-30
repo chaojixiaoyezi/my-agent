@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..run_intent import build_run_intent
+
 
 # LLM: RuntimeFactSourceRequest bundles the real run facts that are safe to persist for compact.
 # 类用途: 描述一次真实 run 可写入事实源的目标、下一步、工具记录和运行状态。
@@ -34,6 +36,7 @@ class RuntimeFactSourceRequest:
     executed_tools: list[str] = field(default_factory=list)
     latest_archive_refs: list[str] = field(default_factory=list)
     artifact_refs: list[str] = field(default_factory=list)
+    delivery_contract: dict[str, Any] | None = None
 
 
 # LLM: ApprovedRuntimeFactSourceRequest carries user-approved compact completion facts without parsing prose.
@@ -90,6 +93,12 @@ def _runtime_fact_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
         "acceptance": sections.acceptance,
         "constraints": sections.constraints,
         "latest_tests": latest_tests,
+        "desired_outputs": _desired_outputs(request.delivery_contract),
+        "run_intent": build_run_intent(
+            user_prompt=request.user_prompt,
+            delivery_contract=request.delivery_contract,
+            workspace_root=request.root,
+        ),
         "runtime_progress": _runtime_progress_payload(request),
         "run_status": {
             "status": request.status,
@@ -97,6 +106,32 @@ def _runtime_fact_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
             "response_present": bool(request.response_text.strip()),
         },
     }
+
+
+# LLM: _desired_outputs keeps user-visible target paths in runtime facts for compact/resume reminders.
+# 函数用途: 从 delivery_contract.artifacts 提取目标产物，不做业务验收；模型写错目录时可用它提示回目标路径。
+def _desired_outputs(contract: dict[str, Any] | None) -> list[dict[str, str]]:
+    if not isinstance(contract, dict):
+        return []
+    artifacts = contract.get("artifacts")
+    if not isinstance(artifacts, list | tuple):
+        return []
+    outputs: list[dict[str, str]] = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        path = str(
+            artifact.get("path")
+            or artifact.get("preferred_path")
+            or artifact.get("target_path")
+            or artifact.get("output_path")
+            or ""
+        ).strip()
+        artifact_id = str(artifact.get("artifact_id") or artifact.get("id") or path).strip()
+        kind = str(artifact.get("kind") or artifact.get("type") or "").strip()
+        if path or artifact_id or kind:
+            outputs.append({"artifact_id": artifact_id, "kind": kind, "target_path": path})
+    return outputs
 
 
 # LLM: _runtime_progress_payload is the live whiteboard for compact/resume, not a second raw archive.

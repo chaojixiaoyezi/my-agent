@@ -140,6 +140,8 @@ def test_tool_loop_injects_pending_guidance_and_marks_delivered(tmp_path) -> Non
     updated = inject_pending_guidance(agent, params, now=11.0)
 
     assert updated is True
+    assert any("GUIDANCE_DELIVERED" in str(item) for item in params.tool_context)
+    assert any("guidance_id=" in str(item) for item in params.tool_context)
     assert any("先写一个可打开的草稿" in str(item) for item in params.tool_context)
     assert agent.conversation_store.pending_guidance("agent_run", "main-run-1") == []
 
@@ -174,7 +176,7 @@ def test_real_subagent_runner_prompt_includes_guidance(tmp_path) -> None:
 
     _, prompt = agent._build_subagent_prompt(child.id, 0, "")
 
-    assert "Runtime Guidance" in prompt
+    assert "GUIDANCE_DELIVERED" in prompt
     assert "先写阶段文件，再继续扩展。" in prompt
     assert agent.conversation_store.pending_guidance("agent_run", child.id) == []
 

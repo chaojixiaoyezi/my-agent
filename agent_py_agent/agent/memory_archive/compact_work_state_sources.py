@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..run_intent import run_intent_payload
 from ..task_progress import read_task_progress, task_progress_summary
+from .compact_runtime_handoff import build_runtime_handoff
 
 _ACCEPTANCE_FILES = ("ACCEPTANCE.md", "acceptance.md")
 _CONSTRAINT_FILES = ("CONSTRAINTS.md", "constraints.md")
@@ -37,6 +39,9 @@ class WorkStateFieldSources:
     latest_tests: dict[str, Any]
     read_files: list[str]
     task_progress: dict[str, Any]
+    runtime_handoff: dict[str, Any]
+    desired_outputs: dict[str, Any]
+    run_intent: dict[str, Any]
 
 
 # LLM: build_work_state_field_sources only reads bounded workspace fact files and never invents missing state.
@@ -54,7 +59,45 @@ def build_work_state_field_sources(request: WorkStateFieldSourceRequest) -> Work
     )
     read_files = _dedupe([*acceptance["source_paths"], *constraints["source_paths"], *latest_tests["source_paths"]])
     task_progress = _first_task_progress(workspace, ids)
-    return WorkStateFieldSources(goal, list(next_actions["items"]), acceptance, constraints, latest_tests, read_files, task_progress)
+    runtime_handoff = build_runtime_handoff(workspace, ids)
+    desired_outputs = _field_payload(_field_items(roots, ("task.json",), json_keys=("desired_outputs",)))
+    run_intent = _run_intent_payload(roots)
+    return WorkStateFieldSources(
+        goal,
+        list(next_actions["items"]),
+        acceptance,
+        constraints,
+        latest_tests,
+        read_files,
+        task_progress,
+        runtime_handoff,
+        desired_outputs,
+        run_intent,
+    )
+
+
+def _run_intent_payload(roots: list[Path]) -> dict[str, Any]:
+    reference_roots: list[str] = []
+    desired_outputs: list[str] = []
+    for root in roots:
+        intent = _run_intent_from_task_json(root / "task.json")
+        reference_roots.extend(_payload_items(intent.get("reference_roots")))
+        desired_outputs.extend(_payload_items(intent.get("desired_outputs")))
+    return run_intent_payload(reference_roots=_dedupe(reference_roots), desired_outputs=_dedupe(desired_outputs))
+
+
+def _run_intent_from_task_json(path: Path) -> dict[str, Any]:
+    payload = _read_json_dict(path)
+    intent = payload.get("run_intent") if isinstance(payload, dict) else None
+    return intent if isinstance(intent, dict) else {}
+
+
+def _payload_items(value: Any) -> list[str]:
+    payload = value if isinstance(value, dict) else {}
+    items = payload.get("items")
+    if not isinstance(items, list | tuple):
+        return []
+    return [text for item in items if (text := str(item).strip())]
 
 
 # LLM: _candidate_fact_roots scopes work-state reads to current workspace and compact task/run ids.

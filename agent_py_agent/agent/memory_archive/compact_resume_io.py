@@ -16,6 +16,9 @@ def resolve_compact_metadata_path(workspace: Path, apply_ref: str) -> Path:
         candidate = workspace / candidate
     if candidate.exists():
         return _metadata_path_from_existing(candidate)
+    indexed = _metadata_path_from_global_ledger(workspace, apply_ref)
+    if indexed is not None and indexed.exists():
+        return indexed
     return workspace / "memory_archive" / "compact_applies" / f"{apply_ref}.json"
 
 
@@ -60,6 +63,41 @@ def _metadata_path_from_existing(path: Path) -> Path:
         if name.endswith(suffix):
             return path.with_name(name[: -len(suffix)] + ".json")
     return path
+
+
+# LLM: _metadata_path_from_global_ledger lets compact resume find run-local apply files by apply_id.
+# 函数用途: compact 产物已按 run 分目录存放；这里用全局索引把短 apply_id 解析回 metadata 路径。
+def _metadata_path_from_global_ledger(workspace: Path, apply_ref: str) -> Path | None:
+    target = str(apply_ref or "").strip()
+    if not target:
+        return None
+    ledger = workspace / "memory_archive" / "compact_applies" / "ledger.jsonl"
+    for record in _read_jsonl_dicts(ledger):
+        if str(record.get("apply_id") or record.get("event_id") or "") != target:
+            continue
+        refs = record.get("refs", {}) if isinstance(record.get("refs"), dict) else {}
+        path = Path(str(refs.get("metadata") or ""))
+        if path.exists():
+            return path
+    return None
+
+
+def _read_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            rows.append(value)
+    return rows
 
 
 # LLM: _read_json_path reads optional JSON refs and returns an empty object on missing/invalid files.

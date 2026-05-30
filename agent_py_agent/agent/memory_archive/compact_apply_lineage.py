@@ -21,13 +21,15 @@ class CompactApplyLineageRequest:
 
 
 # LLM: build_compact_apply_lineage gives every repeated compact a machine-readable previous pointer.
-# 函数用途: 读取同 plan_id 的上一条 ledger，生成 cycle_index 和 previous refs；不写文件、不读取正文。
+# 函数用途: 读取当前 run 专属 ledger 的上一条记录，生成 cycle_index 和 previous refs；plan_id 只做审计，不再决定压缩轮次。
 def build_compact_apply_lineage(request: CompactApplyLineageRequest) -> dict[str, Any]:
-    previous = _latest_record_for_plan(request.ledger_path, request.plan_id)
+    previous = _latest_record(request.ledger_path)
+    if not previous:
+        previous = _latest_record_for_plan(request.ledger_path, request.plan_id)
     previous_lineage = previous.get("lineage", {}) if isinstance(previous.get("lineage"), dict) else {}
     previous_cycle = _positive_int(previous_lineage.get("cycle_index"))
     if previous and previous_cycle == 0:
-        previous_cycle = _count_records_for_plan(request.ledger_path, request.plan_id)
+        previous_cycle = _count_records(request.ledger_path)
     refs = previous.get("refs", {}) if isinstance(previous.get("refs"), dict) else {}
     previous_apply_id = str(previous.get("apply_id") or "")
     return {
@@ -43,6 +45,17 @@ def build_compact_apply_lineage(request: CompactApplyLineageRequest) -> dict[str
         "previous_apply_bundle_ref": str(refs.get("apply_bundle") or ""),
         "content_preserved": True,
     }
+
+
+def _latest_record(path: Path) -> dict[str, Any]:
+    latest: dict[str, Any] = {}
+    for record in _iter_jsonl_records(path):
+        latest = record
+    return latest
+
+
+def _count_records(path: Path) -> int:
+    return len(_iter_jsonl_records(path))
 
 
 # LLM: _latest_record_for_plan scans the compact ledger as an append-only event stream.

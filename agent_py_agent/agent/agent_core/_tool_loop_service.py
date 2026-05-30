@@ -10,7 +10,6 @@ from ..backends import ModelResponse
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
 from ._runtime_params import ToolLoopExecuteParams
-from .main_agent_delivery_closeout import append_existing_failed_closeout_context
 from .orchestration_shared_context import (
     refresh_parent_shared_context_cache,
     refresh_parent_shared_context_from_tool_record,
@@ -92,7 +91,6 @@ class ToolLoopService:
         tool_rounds = params.tool_rounds
         repair_counters = ToolLoopRepairCounters()
         empty_response_repairs = 0
-        append_existing_failed_closeout_context(self._agent, params)
 
         while True:
             (

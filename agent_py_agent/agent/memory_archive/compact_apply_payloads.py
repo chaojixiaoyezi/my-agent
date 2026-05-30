@@ -37,6 +37,7 @@ def compact_apply_refs(paths: dict[str, Path]) -> dict[str, str]:
         "post_compact_self_check": str(paths["self_check_json"]),
         "self_check_failure": str(paths["failed_self_check_json"]),
         "apply_ledger": str(paths["ledger_jsonl"]),
+        "global_apply_ledger": str(paths.get("global_ledger_jsonl", paths["ledger_jsonl"])),
     }
 
 

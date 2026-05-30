@@ -25,7 +25,6 @@ from .compact_apply_ids import (
     compact_risk_level,
     compact_scope_hash,
 )
-from .compact_apply_io import append_jsonl as _append_jsonl
 from .compact_apply_io import write_json as _write_json
 from .compact_apply_io import write_text as _write_text
 from .compact_apply_lineage import CompactApplyLineageRequest, build_compact_apply_lineage
@@ -36,21 +35,12 @@ from .compact_apply_payloads import (
     compact_apply_refs as _refs,
 )
 from .compact_apply_payloads import (
-    ledger_record as _ledger_record,
-)
-from .compact_apply_payloads import (
     restore_refs_payload as _restore_refs_payload,
 )
 from .compact_apply_rendering import render_compact_context_markdown
-from .compact_apply_self_check import (
-    COMPACT_SELF_CHECK_FAILURE_SCHEMA,
-    COMPACT_SELF_CHECK_SCHEMA,
-)
-from .compact_apply_self_check import (
-    build_self_check_failure_payload as _self_check_failure_payload,
-)
-from .compact_apply_self_check import (
-    build_self_check_payload as _self_check_payload,
+from .compact_apply_validation import (
+    CompactApplyFinalizeRequest,
+    finalize_apply_payload,
 )
 from .compact_apply_work_state import (
     WorkStateSnapshotRequest,
@@ -64,7 +54,6 @@ from .compact_context_bundle_refs import (
     compact_context_bundle_summary,
     load_main_context_bundle_ref,
 )
-from .compact_gate_bridge import evaluate_pre_compaction_state
 from .compact_state import (
     CompactionStateRequest,
     build_compaction_state,
@@ -102,15 +91,15 @@ class _ApplyMetadataBuildRequest:
     now: str
     paths: dict[str, Path]
     lineage: dict[str, Any]
+    run_scope_id: str
 
 
 @dataclass(frozen=True)
-class _SelfCheckRequest:
-    payload: dict[str, Any]
+class _PrepareApplyMetadataRequest:
+    workspace: Path
     plan: dict[str, Any]
-    paths: dict[str, Path]
+    options: MemoryCompactApplyOptions
     now: str
-    work_state: dict[str, Any]
 
 
 # LLM: apply_memory_compact 是 memory compact 的显式 apply 边界；保持非破坏性和可审计输出。
@@ -119,9 +108,28 @@ def apply_memory_compact(root: str | Path, options: MemoryCompactApplyOptions) -
     workspace = Path(root)
     plan = build_memory_compact_plan(workspace, options.plan_options)
     now = _utc_now()
+    paths, payload = _prepare_apply_metadata(_PrepareApplyMetadataRequest(workspace, plan, options, now))
+    context = render_compact_context_markdown(payload, plan)
+    _write_text(paths["context_md"], context)
+    restore_refs, work_state, _, _ = _write_apply_state_documents(plan, payload, paths, now)
+    apply_bundle = _apply_bundle_payload(payload, restore_refs, work_state, paths)
+    _write_json(paths["apply_bundle_json"], apply_bundle)
+    finalize_apply_payload(
+        CompactApplyFinalizeRequest(payload, plan, paths, now, restore_refs, work_state, apply_bundle)
+    )
+    return payload
+
+
+# LLM: _prepare_apply_metadata computes ids, paths, lineage, and context bundle once.
+# 函数用途: 生成 compact apply 的初始 metadata，主入口随后只负责编排写文件顺序。
+def _prepare_apply_metadata(request: _PrepareApplyMetadataRequest) -> tuple[dict[str, Path], dict[str, Any]]:
+    plan = request.plan
+    workspace = request.workspace
+    options = request.options
     plan_id = compact_apply_plan_id(plan)
-    apply_id = _unique_apply_id(workspace, plan_id, now)
-    paths = _apply_paths(workspace, apply_id)
+    run_scope_id = _compact_run_scope_id(plan)
+    apply_id = _unique_apply_id(workspace, plan, plan_id, request.now)
+    paths = _apply_paths(workspace, apply_id, plan)
     lineage = build_compact_apply_lineage(
         CompactApplyLineageRequest(
             ledger_path=paths["ledger_jsonl"],
@@ -132,10 +140,19 @@ def apply_memory_compact(root: str | Path, options: MemoryCompactApplyOptions) -
         )
     )
     main_context_bundle = load_main_context_bundle_ref(workspace, options.main_context_bundle_ref)
-    payload = _metadata_payload(_ApplyMetadataBuildRequest(plan, options, apply_id, now, paths, lineage))
+    payload = _metadata_payload(_ApplyMetadataBuildRequest(plan, options, apply_id, request.now, paths, lineage, run_scope_id))
     _attach_main_context_bundle(payload, main_context_bundle, plan)
-    context = render_compact_context_markdown(payload, plan)
-    _write_text(paths["context_md"], context)
+    return paths, payload
+
+
+# LLM: _write_apply_state_documents persists restore/work/compaction state before final metadata.
+# 函数用途: 写恢复引用、工作状态、压缩状态和交接摘要，返回主入口后续需要打包的对象。
+def _write_apply_state_documents(
+    plan: dict[str, Any],
+    payload: dict[str, Any],
+    paths: dict[str, Path],
+    now: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
     restore_refs = _restore_refs_payload(payload, plan, paths, now)
     _write_json(paths["restore_refs_json"], restore_refs)
     work_state = build_work_state_snapshot(
@@ -148,50 +165,14 @@ def apply_memory_compact(root: str | Path, options: MemoryCompactApplyOptions) -
     _write_text(paths["handoff_summary_md"], handoff_summary)
     payload["compaction_state"] = compaction_state
     payload["handoff_summary"] = handoff_summary
-    apply_bundle = _apply_bundle_payload(payload, restore_refs, work_state, paths)
-    _write_json(paths["apply_bundle_json"], apply_bundle)
-    _attach_compaction_gate(payload, restore_refs, work_state)
-    self_check = _attach_self_check(_SelfCheckRequest(payload, plan, paths, now, work_state))
-    payload["post_compact_self_check"] = self_check
-    payload["restore_refs"] = restore_refs
-    payload["work_state_snapshot"] = work_state
-    payload["apply_bundle"] = apply_bundle
-    _write_json(paths["self_check_json"], self_check)
-    _write_json(paths["metadata_json"], payload)
-    _append_jsonl(paths["ledger_jsonl"], _ledger_record(payload))
-    return payload
-
-
-# LLM: _attach_compaction_gate stores the shared compaction gate decision on apply metadata.
-# 函数用途: 把 compact 前状态快照写成机器字段，供 memory-resume 做 post_compact 对比。
-def _attach_compaction_gate(
-    payload: dict[str, Any], restore_refs: dict[str, Any], work_state: dict[str, Any]
-) -> None:
-    compaction_gate = evaluate_pre_compaction_state(payload, restore_refs, work_state)
-    payload["compaction_gate"] = compaction_gate
-    if not compaction_gate["pre"]["allowed"]:
-        payload["ok"] = False
-        payload["compact_status"] = "blocked_compaction_gate_failed"
-
-
-# LLM: _attach_self_check finalizes compact apply validation without expanding the entrypoint.
-# 函数用途: 执行原有 self-check，失败时写结构化 failure payload 并更新 compact_status。
-def _attach_self_check(request: _SelfCheckRequest) -> dict[str, Any]:
-    self_check = _self_check_payload(request.plan, request.paths, request.now, request.work_state)
-    if not self_check["ok"]:
-        request.payload["ok"] = False
-        request.payload["compact_status"] = "blocked_self_check_failed"
-        request.payload["self_check_failure"] = _self_check_failure_payload(
-            request.payload, self_check, _refs(request.paths), request.now
-        )
-        _write_json(request.paths["failed_self_check_json"], request.payload["self_check_failure"])
-    return self_check
+    return restore_refs, work_state, compaction_state, handoff_summary
 
 
 # LLM: _apply_paths 统一 compact apply 产物路径；避免 CLI、测试和后续 resume 各自拼路径。
 # 函数用途: 根据 workspace 和 event_id 计算 apply metadata、context、自检和 ledger 文件位置。
-def _apply_paths(workspace: Path, event_id: str) -> dict[str, Path]:
-    directory = workspace / "memory_archive" / "compact_applies"
+def _apply_paths(workspace: Path, event_id: str, plan: dict[str, Any]) -> dict[str, Path]:
+    directory = _compact_apply_directory(workspace, plan)
+    global_directory = workspace / "memory_archive" / "compact_applies"
     return {
         "directory": directory,
         "context_md": directory / f"{event_id}.md",
@@ -204,6 +185,7 @@ def _apply_paths(workspace: Path, event_id: str) -> dict[str, Path]:
         "self_check_json": directory / f"{event_id}.self_check.json",
         "failed_self_check_json": directory / f"{event_id}.self_check_failed.json",
         "ledger_jsonl": directory / "ledger.jsonl",
+        "global_ledger_jsonl": global_directory / "ledger.jsonl",
     }
 
 
@@ -224,6 +206,7 @@ def _metadata_payload(request: _ApplyMetadataBuildRequest) -> dict[str, Any]:
         "compact_status": "applied_non_destructive",
         "workspace_root": plan["workspace_root"],
         "scope": plan["scope"],
+        "run_scope_id": request.run_scope_id,
         "source_plan": _source_plan(plan),
         "refs": _refs(request.paths),
         "lineage": dict(request.lineage),
@@ -274,14 +257,36 @@ def _attach_main_context_bundle(payload: dict[str, Any], main_context_bundle: di
 
 # LLM: _unique_apply_id prevents same-second manual apply attempts from overwriting artifacts.
 # 函数用途: 如果同一 plan 同一秒重复 apply，追加数字后缀并保持所有产物使用同一个 apply_id。
-def _unique_apply_id(workspace: Path, plan_id: str, now: str) -> str:
+def _unique_apply_id(workspace: Path, plan: dict[str, Any], plan_id: str, now: str) -> str:
     base = compact_apply_id(plan_id, now)
     candidate = base
     suffix = 2
-    while _apply_paths(workspace, candidate)["metadata_json"].exists():
+    while _apply_paths(workspace, candidate, plan)["metadata_json"].exists():
         candidate = f"{base}-{suffix}"
         suffix += 1
     return candidate
+
+
+# LLM: _compact_apply_directory makes compact artifacts run-local while keeping a global ledger index.
+# 函数用途: 优先按 run_id/request_id/task_id 建专属 compact 目录，避免多个主/子代理并发压缩时混在一起。
+def _compact_apply_directory(workspace: Path, plan: dict[str, Any]) -> Path:
+    scope_id = _compact_run_scope_id(plan)
+    if not scope_id:
+        return workspace / "memory_archive" / "compact_applies" / "unscoped"
+    return workspace / "memory_archive" / "runs" / _safe_scope_id(scope_id) / "compact_applies"
+
+
+def _compact_run_scope_id(plan: dict[str, Any]) -> str:
+    scope = plan.get("scope", {}) if isinstance(plan.get("scope"), dict) else {}
+    for key in ("run_id", "request_id", "task_id", "session_id"):
+        value = str(scope.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _safe_scope_id(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in str(value or "")).strip("-") or "unscoped"
 
 
 # LLM: _utc_now 集中时间来源，测试需要稳定事件时可 monkeypatch 这一层。

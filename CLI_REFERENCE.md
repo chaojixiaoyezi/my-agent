@@ -150,6 +150,7 @@ Ctrl+C
 | `home-status` | 查看 `~/.my-agent` 入口文件、关键目录和轻量计数 | 否 | 否 |
 | `memory-daily-list` | 直接查看 home daily memory 按天流水 | 否 | 否 |
 | `memory-route` | 按长期规则索引预览 memory 路由命中 | 否 | 否 |
+| `guidance-send` | 给运行中的主代理、子代理、任务或协作 case 追加一条软提示 | 是，只写 guidance 账本 | 否 |
 | `memory-doctor` | 诊断 memory 配置、路由索引和归档目录 | 否 | 否 |
 | `memory-archive-list` | 列出 raw/hook 归档记录 | 否 | 否 |
 | `memory-archive-search` | 按字段搜索 raw/hook 归档 | 否 | 否 |
@@ -373,6 +374,29 @@ my-agent memory-route "任务恢复规则" --json
 | `--limit <n>` | `5` | 最多显示多少条命中 route；`0` 表示不截断。 |
 | `--auto-read-limit <n>` | 配置 `memory_rule_auto_read_limit` | 最多升级多少条规则路径到 required/candidate。 |
 | `--json` | `false` | 输出机器可读 JSON，包含 `matches`、`required_read_paths`、`candidate_paths` 和诊断信息。 |
+
+## `guidance-send`
+
+```powershell
+my-agent guidance-send --run-id <run_id> "这里补一句自然语言提醒"
+my-agent guidance-send --thread-id <thread_id> "下次回复时注意用户刚补充的要求"
+```
+
+`guidance-send` 是运行中补充提示的 CLI 入口。它只把一句自然语言写进 guidance 账本，让目标代理下一轮读取；不会直接推进、验收、改状态或调用模型。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `message` | - | 必填，要追加的自然语言提示。 |
+| `--run-id <id>` | 空 | 目标代理 run_id，常用于点名主代理、子代理或孙代理。 |
+| `--thread-id <id>` | 空 | 目标长期会话 thread_id。 |
+| `--task-id <id>` | 空 | 目标任务 id。 |
+| `--case-id <id>` | 空 | 目标协作 case id。 |
+| `--target-type <type>` | 空 | 开放目标类型，常见 `agent_run`、`thread`、`task`、`case`。 |
+| `--target-id <id>` | 空 | 与 `--target-type` 配套的目标 id。 |
+| `--sender <name>` | `cli_user` | 发送者标记。 |
+| `--priority <level>` | `normal` | 软优先级，只用于提示排序或展示。 |
+| `--delivery <mode>` | `next_turn` | 投递提示，默认下一轮读取。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
 
 ## `memory-doctor`
 

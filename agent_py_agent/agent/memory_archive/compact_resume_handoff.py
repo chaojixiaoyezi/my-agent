@@ -13,6 +13,7 @@ from .compact_artifact_read_hints import (
     artifact_read_hint_lines,
     artifact_read_hints_from_work_state,
 )
+from .compact_runtime_handoff import render_runtime_handoff_lines, runtime_handoff_payload
 from .schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_reserved_fields,
@@ -61,6 +62,7 @@ def build_compact_resume_handoff(request: CompactResumeHandoffRequest) -> dict[s
         "artifact_read_hints": artifact_read_hints_from_work_state(work_state),
         "recommended_read_paths": list(request.recommended_read_paths),
         "main_context_bundle": dict(request.main_context_bundle),
+        "runtime_handoff": runtime_handoff_payload(work_state.get("runtime_handoff")),
         "compaction_state": _compaction_state_payload(request.compaction_state),
         "handoff_summary": _handoff_summary_payload(request.compaction_state, request.handoff_summary),
         "fail_safe_checkpoints": _fail_safe_checkpoint_payloads(request.fail_safe_checkpoints),
@@ -96,6 +98,7 @@ def render_compact_resume_context_block(handoff: dict[str, Any]) -> str:
     _extend_section(lines, "Changed Files", handoff["changed_files"])
     _extend_handoff_summary(lines, handoff.get("handoff_summary", {}))
     _extend_main_context_bundle(lines, handoff.get("main_context_bundle", {}))
+    lines.extend(render_runtime_handoff_lines(handoff.get("runtime_handoff", {})))
     _extend_section(lines, "Fail Safe Checkpoints", _fail_safe_checkpoint_lines(handoff["fail_safe_checkpoints"]))
     _extend_section(lines, "Artifact Read Hints", artifact_read_hint_lines(handoff["artifact_read_hints"]))
     _extend_section(lines, "Must Read", handoff["recommended_read_paths"][:12])

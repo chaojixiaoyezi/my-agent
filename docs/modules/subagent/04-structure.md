@@ -125,7 +125,8 @@ capability contract 文本片段辅助文件已删除。当前结构保持一套
 - `send_guidance` 是新入口，目标可以是 `agent_run`、`thread`、`task` 或 `case`。
 - 主代理工具循环会读取自己 run/task/thread 的未投递 guidance。
 - 子代理执行上下文会把点名给当前 run 的 guidance 放进 `context_bundle.reserved.runtime_guidance`，
-  runner prompt 再渲染成 `Runtime Guidance`。
+  runner prompt 再渲染成醒目的 `GUIDANCE_DELIVERED` 块，包含 guidance id、目标、
+  优先级、发送者和正文，方便 tail 日志时确认哪一轮吃到了提示。
 - 旧 `subagent_message` 工具已移除；纯补充提示统一用 `send_guidance`。
   `dispatch_subagents.runner_instruction` 只表示“补一句并立刻推进该 run”，会同时写入 guidance 账本。
 

@@ -2,12 +2,16 @@
 
 ## 已完成
 
+- 2026-05-30 `task_progress` 增加软质量提示：如果模型把条目标成 `done` 但没有 evidence，系统只在 `quality_hints` 里提醒补文件、产物或工具结果引用；这不会影响 closeout，不会阻断任务。compact / tree 会带着这个提示，帮助长任务压缩后继续把证据补扎实。
+- 2026-05-31 `task_progress` 的软提示进一步细化：覆盖账本里还有对象或检查点没完成时，会给 `next_suggestions` 和 `soft_prompt`，提醒模型继续选一个未完成对象、读核心文件或可靠来源、补 evidence、再写进报告。它仍然只是提示，不改状态、不触发 closeout、不阻断任务。
+- 2026-05-30 compact work state 增加通用 `runtime_handoff`：压缩前会收集同 scope 下最近 guidance 和可见下级 agent 状态，写入 `work_state_snapshot`、handoff context 和 continue packet。它不是聊天专项，也不是子代理专项，只是一份“运行中交接摘要”；API 监控、长报告、多人协作和普通聊天续接都复用同一字段。
 - 2026-05-29 Live Raw Archive 已接入工具循环：运行中会把助手工具轮可见文字和完成后的工具结果增量写入既有 `memory/raw/YYYY-MM-DD.jsonl`；收尾归档会跳过已 live 写入的工具事件，避免重复记录。运行中进度白板已合并到 `runtime_facts/<request_id>/task.json`，不再维护单独 `run_checkpoint`。`compact_apply_work_state` 在缺少权威 snapshot 时，可从 live `assistant_tool_round` 提取下一步续接提示；这只是恢复提示，不把助手回复升级成验收事实。
 - 2026-05-30 Compact Continue Packet 已改成 action-first 续接：`continue_packet.resume_focus.next_action` 表示压缩后优先继续的动作，`work_state_snapshot.captured_refs` 记录已读、已写和外置 artifact refs。自动续接 prompt 会先展示这些字段，避免模型每次 compact 后重新读 compact 文件或重复派工；推荐恢复文件只在缺事实、要验证或引用损坏时读取。
 - 2026-05-30 工具输出外置索引补充 `parameters/source_input/source_path`：compact 后展示的 artifact refs 会带出原始读写目标，帮助模型知道“这个 artifact 是哪个源文件/URL/查询的结果”，避免压缩后只看到旧 artifact 编号而重新扫目录。
 - 2026-05-30 通用 `task_progress` 进度账本已落地：主代理、子代理、孙代理都可用同一个工具记录“哪些小块完成、正在做、下一步是什么”。账本写在 `memory_archive/task_progress/<run_id>/progress.json`，是软进度，不参与硬验收；`inspect_agent_tree` 只展示摘要，compact 会按当前 run_id 把该账本带进 `work_state_snapshot`，让子代理压缩后也能先续接自己的工作清单。
 - 2026-05-30 `task_progress` 增加通用 coverage 覆盖账本：同一个工具可记录“哪些对象需要覆盖、每个对象有哪些检查点、哪些已写证据”。对象类型完全开放，可以是项目、论文、API、日志源、文件、模块或子代理；coverage 只帮助 compact/tree/父代理看清缺口，不触发验收或阻断。
 - 2026-05-30 外部运行中提示入口已接入同一 guidance inbox：`my-agent guidance-send --run-id <id> "自然语言提示"` 会写入 `ConversationStore` guidance 账本，目标代理下一轮读取；它不推进、不验收、不阻断，只相当于人在运行中补一句话。
+- 2026-05-31 runtime fact 增加通用 `run_intent`：当用户明确要求目标产物路径时，系统会把目标产物和其它显式参考目录带进 compact handoff。`write_file` 写到参考目录时只返回软提醒，不阻断；没有明确落盘目标时不会凭空制造“必须写文件”的要求。
 - 2026-05-30 真实 compact 压力测试命中 provider 429。网关已保持短退避重试；重试耗尽后现在抛 `ProviderTransientError`，CLI 输出 `provider_transient` 可恢复提示，不再把裸 HTTP traceback 当成任务失败正文。
 - 2026-05-29 Compact Action Guard 已按普通任务放宽：`acceptance`、`constraints`、`latest_tests` 缺失时只写入 `missing_fields` 提醒，不再阻断自动续接；只有 consistency/self-check/refs/goal/next_step 这类恢复包硬完整性失败时才停车。
 - 2026-05-29 Compact 触发入口已统一：正常 token 阈值触发和上下文溢出兜底触发都走 `compact_suggest -> compact_auto -> compact_apply -> compact_resume -> continue_packet` 同一套链路，只通过 `trigger.reason/source/forced` 区分原因；`runtime_reason=context_overflow` 即使低于普通阈值，也会进入同一个 auto-apply / apply-resume 流程，`save=False` 或 guard 不通过时才退回确认建议。

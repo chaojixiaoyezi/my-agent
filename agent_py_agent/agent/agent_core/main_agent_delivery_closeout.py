@@ -92,20 +92,6 @@ def _no_artifact_closeout_response(
     return ModelResponse(text=_closeout_text(report), backend=request.backend)
 
 
-# LLM: append_existing_failed_closeout_context reuses closeout rework feedback on resumed runs.
-# 函数用途: 续跑时若已有失败 closeout，就用同一套 delivery-contract-check 返工上下文提示模型，而不是启用独立 repair gate。
-def append_existing_failed_closeout_context(agent: object, params: ToolLoopExecuteParams) -> None:
-    if not _delivery_contract(params):
-        return
-    workspace_root = _workspace_root(agent)
-    report = _existing_report(workspace_root)
-    if report.get("ok") is not False:
-        return
-    if any(str(item).startswith("[delivery-contract-check]") for item in params.tool_context):
-        return
-    _append_failed_contract_context(params, report)
-
-
 # LLM: _all_gates_allowed keeps final closeout branching tied to gate decisions.
 # 函数用途: 汇总 GateDecision.allowed 字段，不读取 findings/message 文本。
 def _all_gates_allowed(decisions: list[Any]) -> bool:

@@ -34,6 +34,7 @@ def write_runtime_fact_start_if_enabled(agent: object, params: object) -> None:
                 task_id=str(getattr(params, "task_id", "") or ""),
                 source=str(getattr(params, "source", "") or "run"),
                 phase="started",
+                delivery_contract=_delivery_contract(params),
             )
         )
     except Exception:
@@ -131,6 +132,7 @@ def update_runtime_fact_progress_if_enabled(agent: object, params: object, *, to
                 executed_tools=list(getattr(params, "executed_tools", []) or []),
                 latest_archive_refs=_latest_archive_refs(params),
                 artifact_refs=_artifact_refs(params),
+                delivery_contract=_delivery_contract(params),
             )
         )
     except Exception:
@@ -172,6 +174,11 @@ def _artifact_refs(params: object) -> list[str]:
             continue
         refs.extend(str(record.get(key) or "") for key in keys if str(record.get(key) or ""))
     return refs
+
+
+def _delivery_contract(params: object) -> dict[str, object] | None:
+    value = getattr(params, "delivery_contract", None)
+    return value if isinstance(value, dict) else None
 
 
 # LLM: _live_archive_enabled respects the same save/auto-save boundary for raw archive and runtime_fact.

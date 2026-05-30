@@ -16,6 +16,7 @@ from .compact_resume_focus import (
     resume_focus_payload,
     string_list,
 )
+from .compact_runtime_handoff import runtime_handoff_payload
 from .schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_reserved_fields,
@@ -137,6 +138,7 @@ def _work_state_payload(work_state: dict[str, Any], missing: list[str]) -> dict[
         "latest_tests": _tests_payload(work_state.get("latest_tests")),
         "changed_files": string_list(work_state.get("changed_files")),
         "read_files": string_list(work_state.get("read_files")),
+        "runtime_handoff": runtime_handoff_payload(work_state.get("runtime_handoff")),
         "captured_refs": captured_refs_payload(work_state),
         "missing_fields": missing,
     }

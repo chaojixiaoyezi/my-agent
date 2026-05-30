@@ -68,6 +68,8 @@
 
    如果任务要求覆盖多个对象，例如“每个项目”“每篇论文”“每周数据”“每个 API”“每个文件”，同一个 `task_progress` 也可以写 `coverage` 覆盖账本。它记录目标对象、当前任务自定义的检查点、证据和缺口；主代理、子代理、孙代理都复用同一结构。coverage 不是专项模板，也不参与硬验收，只是让长任务和多轮 compact 后还能知道哪些对象没覆盖完整。
 
+   如果模型把多个条目标成 `done` 但没有 evidence，`task_progress` 会给 `quality_hints` 软提示，提醒补上看过的文件、产物路径或工具结果引用。这个提示不会改变任务状态，也不会阻断 closeout；它只是帮助模型不要最后一次性随便打勾。
+
    运行中人类或父代理可以通过 `send_guidance` 或 CLI `guidance-send` 给某个 run/thread/task/case 追加自然语言提示。提示只进入下一轮 prompt，不会直接 dispatch、closeout 或修改任务状态。
 
 6. 收尾保存。
@@ -179,6 +181,8 @@ memory 负责存长期事实和按天流水。context bundle 不替代 memory，
 compact 会在上下文快满或用户手动触发时，把当前任务状态压缩成恢复包。context bundle 给 compact/resume 提供稳定 scope（范围）和 refs（引用），避免恢复时找错任务。
 
 正常阈值触发和兜底触发共用同一套 `compact_suggest -> compact_apply -> compact_resume -> continue_packet` 流水线。区别只写在 `trigger` 字段里：正常触发通常是 `reason=normal_threshold, source=token_budget`；上下文溢出等兜底触发会写 `forced=true` 和具体 `reason/source`。这样不会出现两套 compact 包、两套恢复规则，也方便排查“这次是提前保养，还是撞墙救场”。
+
+compact 的 `work_state_snapshot` 现在还会带 `runtime_handoff`。这是一份通用运行交接摘要，内容包括最近追加的 guidance、可见下级 agent 状态和下一步建议。它不绑定聊天，也不绑定子代理；聊天续接、长期 API 监控、多项目报告和多代理协作都可以用同一字段恢复“我刚刚在和谁说什么、哪些下级还在做、下一轮该先看哪里”。
 
 ### Artifact（外置产物）
 

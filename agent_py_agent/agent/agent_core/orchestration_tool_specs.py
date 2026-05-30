@@ -111,12 +111,12 @@ def build_task_progress_spec() -> ToolSpec:
             "coverage_targets": "可选。coverage.targets 的简写列表，每项可含 id/name/title/status/checks/expected_fields/fields/fields_needed/missing_fields/evidence/notes/next；也可写成“对象名: 字段A,字段B”。",
         },
         parameter_details={
-            "items": "这是开放清单，不是业务模板。status 可写 pending/in_progress/done/skipped/blocked，也可写更适合当前任务的短状态。",
-            "coverage": "这是开放世界覆盖清单，不限定对象类型。targets 可以是项目、论文、API、日志源、文件、模块或任何当前任务对象；checks 的键由当前任务自己定义；如果你只知道要覆盖哪些字段，也可先填 expected_fields/fields_needed。",
+            "items": "这是开放清单，不是业务模板。status 可写 pending/in_progress/done/skipped/blocked，也可写更适合当前任务的短状态。把条目标成 done 时，建议顺手写 evidence，例如读过的文件、来源、产物路径或工具结果引用；这是软建议，不是硬门。",
+            "coverage": "这是开放世界覆盖清单，不限定对象类型。targets 可以是项目、论文、API、日志源、文件、模块或任何当前任务对象；checks 的键由当前任务自己定义；如果你只知道要覆盖哪些字段，也可先填 expected_fields/fields_needed。长任务里建议边读、边分析、边写报告时更新，不要最后一次性随便打钩。",
         },
         examples=[
-            '{"tool":"task_progress","action":"update","summary":"已读完两个项目","next_action":"继续读第三个项目","items":[{"id":"project-a","title":"阅读项目A","status":"done"}]}',
-            '{"tool":"task_progress","action":"update","coverage":{"goal":"每个项目都要读 README、分析模块、写进报告","dimensions":["读 README","分析模块","写进报告"],"targets":[{"id":"project-a","checks":{"读 README":"done","分析模块":"pending"}}]}}',
+            '{"tool":"task_progress","action":"update","summary":"已读完两个项目","next_action":"继续读第三个项目","items":[{"id":"project-a","title":"阅读项目A","status":"done","evidence":["project-a/README.md","project-a/src/core.py"]}]}',
+            '{"tool":"task_progress","action":"update","coverage":{"goal":"每个项目都要读 README、分析模块、写进报告","dimensions":["读 README","分析模块","写进报告"],"targets":[{"id":"project-a","checks":{"读 README":"done","分析模块":"pending"},"evidence":["project-a/README.md"]}]}}',
             '{"tool":"task_progress","action":"read"}',
         ],
     )

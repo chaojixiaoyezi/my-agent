@@ -109,6 +109,16 @@ def test_failed_closeout_context_includes_unified_repair_guidance(tmp_path: Path
     assert "如果还需要读取或搜索" in payload["repair_guidance"]["message_zh"]
 
 
+# LLM: failed closeout feedback is only injected by the explicit closeout attempt that failed.
+# 函数用途: 防止工具循环重新接入旧的 closeout 失败复读入口，避免长任务每轮都被验收噪音带偏。
+def test_tool_loop_service_does_not_replay_existing_failed_closeout_context():
+    source = Path("agent_py_agent/agent/agent_core/_tool_loop_service.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "append_existing_failed_closeout_context" not in source
+
+
 # LLM: Work-in-progress narration is indistinguishable from final prose for delivery purposes.
 # 函数用途: 覆盖长任务中任何无工具文本都不会触发 closeout，避免系统从字面意思猜验收时机。
 def test_no_tool_working_text_does_not_submit_delivery(tmp_path: Path):

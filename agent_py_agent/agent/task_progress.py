@@ -16,6 +16,7 @@ from .task_progress_coverage import (
     merge_coverage,
     normalize_coverage,
 )
+from .task_progress_hints import quality_hints
 
 _SCHEMA_VERSION = "task_progress.v1"
 _KNOWN_STATUSES = ("pending", "in_progress", "done", "skipped", "blocked")
@@ -56,6 +57,8 @@ def task_progress_summary(progress: dict[str, Any]) -> dict[str, Any]:
         "updated_at": normalized["updated_at"],
         "ref": str(normalized.get("ref") or ""),
     }
+    if normalized.get("quality_hints"):
+        summary["quality_hints"] = normalized["quality_hints"]
     if normalized.get("coverage"):
         summary["coverage"] = coverage_summary(normalized["coverage"])
     return summary
@@ -73,6 +76,9 @@ def normalize_task_progress(payload: dict[str, Any], *, run_id: str) -> dict[str
         "counts": _counts(items),
         "updated_at": float(payload.get("updated_at") or 0.0),
     }
+    hints = quality_hints(items, coverage=coverage)
+    if hints["messages"]:
+        normalized["quality_hints"] = hints
     if coverage["targets"] or coverage["goal"] or coverage["dimensions"]:
         normalized["coverage"] = coverage
     ref = str(payload.get("ref") or "").strip()
@@ -94,6 +100,13 @@ def merge_task_progress(existing: dict[str, Any], update: dict[str, Any], *, run
         "updated_at": time.time(),
     }
     payload["counts"] = _counts(merged_items)
+    hints = quality_hints(
+        merged_items,
+        incoming=[_normalize_item(item) for item in _list(update.get("items"))],
+        coverage=coverage,
+    )
+    if hints["messages"]:
+        payload["quality_hints"] = hints
     if coverage["targets"] or coverage["goal"] or coverage["dimensions"]:
         payload["coverage"] = coverage
     return payload
@@ -124,6 +137,10 @@ def _normalize_item(value: object) -> dict[str, Any]:
         "next": str(item.get("next") or "").strip(),
         "evidence": _string_list(item.get("evidence")),
     }
+    for key in ("result", "outcome", "conclusion", "decision", "summary"):
+        text = str(item.get(key) or "").strip()
+        if text:
+            result[key] = text
     for key in ("updated_at", "owner", "priority"):
         if key in item:
             result[key] = item[key]

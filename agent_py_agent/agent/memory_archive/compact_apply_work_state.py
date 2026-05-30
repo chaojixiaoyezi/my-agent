@@ -96,6 +96,10 @@ def _base_snapshot(request: WorkStateSnapshotRequest, source_state: dict[str, An
         "git_state": {"status": "not_captured", "changed_files": []},
         "latest_tests": field_sources.latest_tests,
         "task_progress": field_sources.task_progress,
+        "desired_outputs": field_sources.desired_outputs,
+        "run_intent": field_sources.run_intent,
+        # LLM: runtime_handoff is soft resume context, not an acceptance gate.
+        "runtime_handoff": field_sources.runtime_handoff,
         "reserved": runtime_memory_reserved_fields(COMPACT_WORK_STATE_SNAPSHOT_SCHEMA),
     }
 

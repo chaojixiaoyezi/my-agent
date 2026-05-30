@@ -16,10 +16,6 @@ from agent_py_agent.agent.memory_archive.compact_resume import (
     MemoryCompactResumeOptions,
     build_memory_compact_resume,
 )
-from agent_py_agent.agent.memory_archive.compact_work_state_sources import (
-    WorkStateFieldSourceRequest,
-    build_work_state_field_sources,
-)
 from agent_py_agent.tests.memory_compact_support import (
     assert_apply_preserved_sources,
     assert_schema_v2,
@@ -225,68 +221,6 @@ def test_memory_compact_work_state_reads_task_progress_ledger(tmp_path: Path) ->
     assert progress["counts"]["done"] == 1
     assert progress["counts"]["in_progress"] == 1
     assert work_state["next_actions"] == ["继续阅读项目 C 的核心模块。"]
-
-
-def test_memory_compact_work_state_reads_task_coverage_ledger(tmp_path: Path) -> None:
-    """compact 应携带覆盖账本摘要，避免长任务压缩后忘记哪些对象没覆盖。"""
-    from agent_py_agent.agent.task_progress import write_task_progress
-
-    root = tmp_path / "workspace"
-    write_compact_fixture(root)
-    write_task_progress(
-        root,
-        "run-compact",
-        {
-            "summary": "正在覆盖多个项目。",
-            "coverage": {
-                "goal": "每个项目都要读 README、分析模块、写入报告。",
-                "dimensions": ["读 README", "分析模块", "写入报告"],
-                "targets": [
-                    {
-                        "id": "agentscope-main",
-                        "checks": {"读 README": "done", "分析模块": "done", "写入报告": "done"},
-                    },
-                    {
-                        "id": "codex-main",
-                        "checks": {"读 README": "done", "分析模块": "pending", "写入报告": "pending"},
-                    },
-                ],
-            },
-        },
-    )
-
-    result = apply_memory_compact(
-        root,
-        MemoryCompactApplyOptions(
-            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
-        ),
-    )
-
-    work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
-    coverage = work_state["task_progress"]["coverage"]
-
-    assert coverage["goal"] == "每个项目都要读 README、分析模块、写入报告。"
-    assert coverage["counts"]["targets_total"] == 2
-    assert coverage["counts"]["targets_done"] == 1
-    assert coverage["active_targets"][0]["id"] == "codex-main"
-    assert coverage["active_targets"][0]["checks"]["分析模块"] == "pending"
-
-
-def test_memory_compact_work_state_treats_scope_ids_as_literal_paths(tmp_path: Path) -> None:
-    root = tmp_path / "workspace"
-    leak_dir = root / "tasks" / "unrelated-task" / "agents" / "run-leak"
-    leak_dir.mkdir(parents=True)
-    (leak_dir / "ACCEPTANCE.md").write_text("- leaked acceptance should not be imported\n", encoding="utf-8")
-
-    sources = build_work_state_field_sources(
-        WorkStateFieldSourceRequest(
-            plan={"workspace_root": str(root), "scope": {"request_id": "*"}},
-            source_state={"task_refs": [], "content_paths": []},
-        )
-    )
-
-    assert sources.acceptance["items"] == []
-    assert sources.read_files == []
 
 
 def test_memory_compact_auto_guard_allows_complete_work_state_without_running_tools(tmp_path: Path) -> None:

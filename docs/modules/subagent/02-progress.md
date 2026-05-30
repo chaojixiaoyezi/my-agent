@@ -100,7 +100,8 @@
 ## 2026-05-29 运行中补充提示
 
 - 新增统一 `send_guidance` 账本入口。父代理、用户或兼容工具给某个 run 补一句话时，
-  子代理下一轮 runner prompt 会在 `Runtime Guidance` 中看到。
+  子代理下一轮 runner prompt 会在 `GUIDANCE_DELIVERED` 中看到，并带 guidance id、
+  目标、优先级和发送者。
 - 旧 `subagent_message` 工具已移除；纯补充提示统一用 `send_guidance`。
   `dispatch_subagents.runner_instruction` 只用于“补一句并立刻推进该 run”，并同步写入同一份 guidance 账本。
 - guidance 是软提示，不是验收条件：不会阻断、不会替父代理做结论、不会改变原任务目标。

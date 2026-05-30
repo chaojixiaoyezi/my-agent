@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from pathlib import Path
 
 from agent_py_agent.agent.tooling.content_transport_policy import (
@@ -119,6 +120,64 @@ def test_write_file_accepts_long_inline_content_with_transport_hint(tmp_path: Pa
     assert "inline content 超过推荐值" in result.output
     assert "WRITE_FILE_RAW" in result.output
     assert target.read_text(encoding="utf-8") == "A" * (MAX_INLINE_WRITE_CONTENT_CHARS + 1)
+
+
+def test_write_file_soft_warns_when_writing_final_text_into_reference_root(tmp_path: Path) -> None:
+    """有明确目标产物时，写进参考目录应当场软提醒，但不能阻断写入。"""
+    workspace = tmp_path / "workspace"
+    reference = tmp_path / "reference"
+    workspace.mkdir()
+    reference.mkdir()
+    fact_dir = workspace / "memory_archive/runtime_facts/req-1"
+    fact_dir.mkdir(parents=True)
+    (fact_dir / "task.json").write_text(
+        json.dumps(
+            {
+                "run_intent": {
+                    "reference_roots": {"items": [str(reference)]},
+                    "desired_outputs": {"items": ["outputs/final-report.md"]},
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    tool = WriteFileTool(workspace, workspace_roots=[workspace, reference])
+
+    result = tool.execute({"path": str(reference / "notes/report.md"), "content": "hello"})
+
+    assert result.ok
+    assert (reference / "notes/report.md").read_text(encoding="utf-8") == "hello"
+    assert "软提醒" in result.output
+    assert "outputs/final-report.md" in result.output
+
+
+def test_write_file_does_not_warn_without_desired_output(tmp_path: Path) -> None:
+    """没有明确目标产物时，系统不能凭参考路径猜测并提示模型写错位置。"""
+    workspace = tmp_path / "workspace"
+    reference = tmp_path / "reference"
+    workspace.mkdir()
+    reference.mkdir()
+    fact_dir = workspace / "memory_archive/runtime_facts/req-1"
+    fact_dir.mkdir(parents=True)
+    (fact_dir / "task.json").write_text(
+        json.dumps(
+            {
+                "run_intent": {
+                    "reference_roots": {"items": [str(reference)]},
+                    "desired_outputs": {"items": []},
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    tool = WriteFileTool(workspace, workspace_roots=[workspace, reference])
+
+    result = tool.execute({"path": str(reference / "notes/report.md"), "content": "hello"})
+
+    assert result.ok
+    assert "软提醒" not in result.output
 
 
 def test_apply_patch_add_update_delete_and_move(tmp_path: Path) -> None:
